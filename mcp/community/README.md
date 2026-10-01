@@ -1,4 +1,4 @@
-# Community
+# Community v0.14.0
 
 Community provides a branded member portal, discussions, direct messages, courses, a public storefront, and one-time or recurring course access. The native dashboard panel manages communities, members, content, offers, instructors, and branding.
 
@@ -7,6 +7,8 @@ Community provides a branded member portal, discussions, direct messages, course
 This release fixes resource-based delegated authorization, global-install HTTP project scoping, default member listing, same-second DM unread counts, lesson-bundle progress identity, empty conversations, and thread activity after post removal. It preserves the storefront, payments, memberships, instructor profiles, previews, and custom domains from 0.12.3.
 
 The member portal now renders safe Markdown, plays storage-backed lesson videos, opens protected resources, grades and saves multiple-choice quizzes, saves editable text assignment submissions, displays printable earned certificates, and edits member profiles. Directories and conversations support additional pages. Load failures have visible errors and retry controls; mobile navigation is hidden from keyboard focus when closed.
+
+This release adds track-aware roadmaps, instructor assignment review, and student milestones. Lessons with no track assignment are shared; assigning a lesson to one or more tracks limits it to members who selected one of those tracks. Switching tracks preserves the member's saved lesson progress. Assignment submissions accept text, links, and Storage file IDs, retain versions, and move through `submitted`, `needs_changes`, and `approved` with instructor feedback. Milestones support evidence and optional instructor approval and emit `milestone.achieved` and `milestone.reviewed` events. Instructors can use `assignment_reviews_list`, `assignment_review`, and the portal review queue.
 
 ## Quiz authoring
 

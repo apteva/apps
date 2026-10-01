@@ -173,6 +173,11 @@ export interface Assignment {
   updated_at: string;
 }
 
+export interface CourseTrack { id: string; space_id: string; slug: string; name: string; description: string; position: number; active: boolean; selected?: boolean }
+export interface MilestoneDefinition { id: string; space_id: string; track_id?: string; title: string; description: string; position: number; requires_approval: boolean; evidence_type: "text" | "link" | "file" | "any"; active: boolean }
+export interface MemberMilestone extends MilestoneDefinition { member_id: string; status: "not_started" | "submitted" | "needs_changes" | "approved"; evidence_text: string; evidence_links: string[]; evidence_files: string[]; feedback: string; submitted_at?: string; approved_at?: string }
+export interface AssignmentReviewItem { assignment_id: string; assignment_title: string; lesson_id: string; member_id: string; body: string; links: string[]; files: string[]; status: "submitted" | "needs_changes" | "approved"; feedback: string; version: number; updated_at: string; reviewed_at?: string }
+
 export interface LessonComment {
   id: string;
   lesson_id: string;
@@ -460,6 +465,6 @@ export interface CourseAnalytics {
 
 export interface QuizQuestion { prompt: string; options: string[] }
 export interface QuizAttempt { id: number; quiz_id: string; member_id: string; score: number; passed: boolean; created_at: string }
-export interface AssignmentSubmission { assignment_id: string; member_id: string; body: string; updated_at: string }
+export interface AssignmentSubmission { assignment_id: string; member_id: string; body: string; links: string[]; files: string[]; status: "submitted" | "needs_changes" | "approved"; feedback: string; version: number; updated_at: string }
 export interface LearningStatus { attempts: QuizAttempt[]; submissions: AssignmentSubmission[] }
 export interface IssuedCertificate { id: string; space_id: string; member_id: string; title: string; body: string; issued_at: string }

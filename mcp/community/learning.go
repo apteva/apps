@@ -117,10 +117,15 @@ type QuizAttempt struct {
 }
 
 type AssignmentSubmission struct {
-	AssignmentID string `json:"assignment_id"`
-	MemberID     string `json:"member_id"`
-	Body         string `json:"body"`
-	UpdatedAt    string `json:"updated_at"`
+	AssignmentID string   `json:"assignment_id"`
+	MemberID     string   `json:"member_id"`
+	Body         string   `json:"body"`
+	Links        []string `json:"links"`
+	Files        []string `json:"files"`
+	Status       string   `json:"status"`
+	Feedback     string   `json:"feedback"`
+	Version      int64    `json:"version"`
+	UpdatedAt    string   `json:"updated_at"`
 }
 
 type IssuedCertificate struct {
@@ -136,7 +141,7 @@ func learningTools() []sdk.Tool {
 	str := map[string]any{"type": "string"}
 	return []sdk.Tool{
 		{Name: "quiz_submit", Description: "Grade and persist a quiz attempt. Answers are zero-based option indices in question order.", InputSchema: schemaObject(map[string]any{"quiz_id": str, "member_id": str, "answers": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}}, []string{"quiz_id", "member_id", "answers"}), Handler: toolQuizSubmit},
-		{Name: "assignment_submit", Description: "Save a member's text assignment submission.", InputSchema: schemaObject(map[string]any{"assignment_id": str, "member_id": str, "body": str}, []string{"assignment_id", "member_id", "body"}), Handler: toolAssignmentSubmit},
+		{Name: "assignment_submit", Description: "Submit text, links, or Storage file ids for an assignment. Resubmission returns the item to submitted.", InputSchema: schemaObject(map[string]any{"assignment_id": str, "member_id": str, "body": str, "links": map[string]any{"type": "array", "items": str}, "files": map[string]any{"type": "array", "items": str}}, []string{"assignment_id", "member_id"}), Handler: toolAssignmentSubmit},
 		{Name: "learning_status", Description: "Fetch the member's latest quiz attempts and assignment submissions for a lesson.", InputSchema: schemaObject(map[string]any{"lesson_id": str, "member_id": str}, []string{"lesson_id", "member_id"}), Handler: toolLearningStatus},
 		{Name: "issued_certificate_get", Description: "Fetch a member's earned course certificate.", InputSchema: schemaObject(map[string]any{"space_id": str, "member_id": str}, []string{"space_id", "member_id"}), Handler: toolIssuedCertificateGet},
 		{Name: "lesson_file_url", Description: "Mint a short-lived URL for a lesson video, resource, or assignment attachment. The file must belong to the lesson.", InputSchema: schemaObject(map[string]any{"lesson_id": str, "file_id": str}, []string{"lesson_id", "file_id"}), Handler: toolLessonFileURL},
@@ -257,11 +262,29 @@ func toolAssignmentSubmit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := validateLearningMember(ctx, assignment.LessonID, memberID); err != nil {
 		return nil, err
 	}
-	if _, err := ctx.AppDB().Exec(`INSERT INTO assignment_submissions (assignment_id,member_id,body) VALUES (?,?,?) ON CONFLICT(assignment_id,member_id) DO UPDATE SET body=excluded.body, updated_at=CURRENT_TIMESTAMP`, id, memberID, body); err != nil {
+	links, _ := stringArrayArg(args, "links")
+	files, _ := stringArrayArg(args, "files")
+	if len(links) > 20 || len(files) > 20 {
+		return nil, errors.New("an assignment may include at most 20 links and 20 files")
+	}
+	linksJSON, _ := json.Marshal(links)
+	filesJSON, _ := json.Marshal(files)
+	var version int64
+	_ = ctx.AppDB().QueryRow(`SELECT COALESCE(version,0)+1 FROM assignment_submissions WHERE assignment_id=? AND member_id=?`, id, memberID).Scan(&version)
+	if version == 0 {
+		version = 1
+	}
+	if _, err := ctx.AppDB().Exec(`INSERT INTO assignment_submission_versions(id,assignment_id,member_id,version,body,links_json,files_json) VALUES(?,?,?,?,?,?,?)`, newID("asv"), id, memberID, version, body, string(linksJSON), string(filesJSON)); err != nil {
+		return nil, err
+	}
+	if _, err := ctx.AppDB().Exec(`INSERT INTO assignment_submissions (assignment_id,member_id,body,links_json,files_json,status,feedback,reviewed_by,reviewed_at,version) VALUES (?,?,?,?,?,'submitted','',NULL,NULL,?) ON CONFLICT(assignment_id,member_id) DO UPDATE SET body=excluded.body,links_json=excluded.links_json,files_json=excluded.files_json,status='submitted',feedback='',reviewed_by=NULL,reviewed_at=NULL,version=excluded.version,updated_at=CURRENT_TIMESTAMP`, id, memberID, body, string(linksJSON), string(filesJSON), version); err != nil {
 		return nil, err
 	}
 	var submission AssignmentSubmission
-	err = ctx.AppDB().QueryRow(`SELECT assignment_id, member_id, body, updated_at FROM assignment_submissions WHERE assignment_id=? AND member_id=?`, id, memberID).Scan(&submission.AssignmentID, &submission.MemberID, &submission.Body, &submission.UpdatedAt)
+	var linksRaw, filesRaw string
+	err = ctx.AppDB().QueryRow(`SELECT assignment_id, member_id, body, links_json, files_json, status, feedback, version, updated_at FROM assignment_submissions WHERE assignment_id=? AND member_id=?`, id, memberID).Scan(&submission.AssignmentID, &submission.MemberID, &submission.Body, &linksRaw, &filesRaw, &submission.Status, &submission.Feedback, &submission.Version, &submission.UpdatedAt)
+	_ = json.Unmarshal([]byte(linksRaw), &submission.Links)
+	_ = json.Unmarshal([]byte(filesRaw), &submission.Files)
 	if err != nil {
 		return nil, err
 	}
@@ -303,16 +326,19 @@ func toolLearningStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	submissions := []AssignmentSubmission{}
-	rows, err = ctx.AppDB().Query(`SELECT s.assignment_id,s.member_id,s.body,s.updated_at FROM assignment_submissions s JOIN assignments a ON a.id=s.assignment_id WHERE a.lesson_id=? AND s.member_id=?`, id, memberID)
+	rows, err = ctx.AppDB().Query(`SELECT s.assignment_id,s.member_id,s.body,s.links_json,s.files_json,s.status,s.feedback,s.version,s.updated_at FROM assignment_submissions s JOIN assignments a ON a.id=s.assignment_id WHERE a.lesson_id=? AND s.member_id=?`, id, memberID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var s AssignmentSubmission
-		if err := rows.Scan(&s.AssignmentID, &s.MemberID, &s.Body, &s.UpdatedAt); err != nil {
+		var links, files string
+		if err := rows.Scan(&s.AssignmentID, &s.MemberID, &s.Body, &links, &files, &s.Status, &s.Feedback, &s.Version, &s.UpdatedAt); err != nil {
 			return nil, err
 		}
+		_ = json.Unmarshal([]byte(links), &s.Links)
+		_ = json.Unmarshal([]byte(files), &s.Files)
 		submissions = append(submissions, s)
 	}
 	if err := rows.Err(); err != nil {
@@ -370,7 +396,7 @@ func toolLessonFileURL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	allowed := lesson.VideoStorageKey != nil && *lesson.VideoStorageKey == fileID
 	if !allowed {
 		var count int
-		err = ctx.AppDB().QueryRow(`SELECT (SELECT COUNT(*) FROM lesson_resources WHERE lesson_id=? AND storage_file_id=?) + (SELECT COUNT(*) FROM assignments WHERE lesson_id=? AND attachment_storage_file_id=?)`, lessonID, fileID, lessonID, fileID).Scan(&count)
+		err = ctx.AppDB().QueryRow(`SELECT (SELECT COUNT(*) FROM lesson_resources WHERE lesson_id=? AND storage_file_id=?) + (SELECT COUNT(*) FROM assignments WHERE lesson_id=? AND attachment_storage_file_id=?) + (SELECT COUNT(*) FROM assignment_submissions s JOIN assignments a ON a.id=s.assignment_id WHERE a.lesson_id=? AND EXISTS (SELECT 1 FROM json_each(s.files_json) WHERE json_each.value=?))`, lessonID, fileID, lessonID, fileID, lessonID, fileID).Scan(&count)
 		if err != nil {
 			return nil, err
 		}

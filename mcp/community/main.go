@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.13.0
+version: 0.14.0
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   spaces (feed/forum/chat/course), members, threads, posts, reactions,
@@ -208,6 +208,18 @@ provides:
     - { name: lesson_resources_list, description: "List storage-backed resources for a lesson." }
     - { name: quiz_submit, description: "Grade and save a member quiz attempt." }
     - { name: assignment_submit, description: "Save a member assignment submission." }
+    - { name: course_tracks_list, description: "List a course's learning tracks and the member's selected track." }
+    - { name: course_track_select, description: "Select or switch a learning track without losing lesson progress." }
+    - { name: course_tracks_create, description: "Create a course learning track." }
+    - { name: course_tracks_update, description: "Update a course learning track." }
+    - { name: course_track_lessons_set, description: "Assign a lesson to one or more learning tracks; empty means shared." }
+    - { name: assignment_reviews_list, description: "List assignment submissions awaiting instructor review." }
+    - { name: assignment_review, description: "Approve an assignment or request changes with feedback." }
+    - { name: milestones_create, description: "Create a student milestone." }
+    - { name: milestones_update, description: "Update a student milestone." }
+    - { name: milestones_list, description: "List milestones and member next action." }
+    - { name: milestone_submit, description: "Submit milestone evidence." }
+    - { name: milestone_review, description: "Approve milestone evidence or request changes." }
     - { name: learning_status, description: "Fetch member quiz and assignment results." }
     - { name: issued_certificate_get, description: "Fetch an earned course certificate." }
     - { name: lesson_file_url, description: "Mint a protected lesson file URL." }
@@ -277,7 +289,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: community/v0.13.0
+    ref: community/v0.14.0
     entry: mcp/community
   port: 8080
   health_check: /health
@@ -399,6 +411,8 @@ func (a *App) MCPTools() []sdk.Tool {
 	tools = append(tools, dmsTools()...)
 	tools = append(tools, coursesTools()...)
 	tools = append(tools, learningTools()...)
+	tools = append(tools, trackTools()...)
+	tools = append(tools, reviewMilestoneTools()...)
 	tools = append(tools, instructorTools()...)
 	tools = append(tools, productTestimonialTools()...)
 	tools = append(tools, courseSalesTools()...)
