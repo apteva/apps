@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.6
+version: 0.14.7
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -19,7 +19,7 @@ description: |
   by default, Cloudinary when bound. A wedged encode releases its
   slot without disturbing the indexer.
 
-  v0.14.6 makes safe catalog discovery the default: compact, planning, and
+  v0.14.7 makes safe catalog discovery the default: compact, planning, and
   bounded full detail levels; field projection; explicit large expansions;
   stable filter-bound cursors; unmistakable completion metadata; planning
   sorts and normalized release readiness; and media_inventory counts grouped
@@ -124,6 +124,8 @@ provides:
       description: Analyze an existing image, video, or audio source without modifying it. Returns encoding metadata, decode integrity, visual measurements and black/frozen segments, plus LUFS/peak/RMS/silence audio measurements where applicable. When render_host_id is configured, analysis runs on that remote host without silent local fallback and reports the effective executor. depth=standard analyzes at most 60 seconds; depth=full analyzes the requested/full duration. Creates no render, derivation, or Storage object. Args — file_id, depth? (standard|full), start_ms?, end_ms?, silence_threshold_db?, silence_min_ms?.
     - name: media_ask
       description: Ask a grounded question using the configured descriptions vision/chat integration and only artifacts that already exist. Images use an existing thumbnail or source object; videos use the canonical thumbnail and cached storyboard keyframes; at_ms selects the nearest existing keyframe and reports the actual timestamp; audio uses an existing completed transcript. Never runs ffmpeg, generates frames/derivations, or writes files. Args — file_id, question, at_ms?, frame_count? (1-8), include_transcript?.
+    - name: media_get_batch
+      description: Read descriptions, status, rating and duration for up to 100 explicit file_ids without scanning or signing URLs.
     - name: media_search
       description: Safe catalog search with compact (default), planning, and full detail levels. Full searches default to 5 and reject limits above 10; raw probes and keyframes require explicit expand values. Supports field projection, planning-oriented sorting, exact totals, and stable filter-bound next_cursor pagination. Responses include complete, incomplete, must_continue, returned, and estimated_remaining. Use media_inventory for counts and media_get for selected full records.
     - name: media_inventory
@@ -518,7 +520,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.5
+    ref: media/v0.14.7
     entry: mcp/media
   port: 8080
   health_check: /health
