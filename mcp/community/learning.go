@@ -230,7 +230,7 @@ func toolQuizSubmit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	emit(ctx, "quiz.submitted", map[string]any{"lesson_id": quiz.LessonID, "member_id": memberID, "score": score})
+	emit(ctx, "quiz.submitted", map[string]any{"lesson_id": quiz.LessonID, "member_id": memberID, "quiz_id": quiz.ID})
 	return attempt, nil
 }
 
