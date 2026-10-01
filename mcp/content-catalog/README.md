@@ -12,6 +12,10 @@ The session page can filter its linked files by name or Storage ID, content type
 
 Session and search file cards show cloud hosting badges such as **Bunny · Ready**, **Bunny · Processing**, or **Bunny · Failed**. They read the recorded hosting state in Catalog; displaying a badge does not upload a file or contact the host. Hovering a badge shows its connection and last check time when available.
 
+The session length filter has two slider handles and exact minimum/maximum inputs in seconds. Both endpoints are included. Range filtering only includes videos and audio with known Media durations; **Unknown only** shows videos and audio whose length is unavailable. **Any length** resets the range.
+
+Clicking a file card opens a wide modal with its preview or player, metadata, review controls, cloud hosting, and platform posts. Close it with **Close**, Escape, or a click outside the dialog to return to the file grid. Review and hosting updates keep the file dialog open; post editing returns to the file dialog when finished.
+
 ## Platform posts
 
 A post records one destination outcome and may include several assets of the same brand, including assets from different sessions through the MCP tool. The session page shows each shared post once and shows its platform status icon on every member asset. Users can create or edit posts from the session or an asset. A post stores destination, account or tier, title, planned and actual times, external ID or URL, status, and evidence source. Status changes append an event. Verified live requires an external URL or ID, an actual time, and evidence. Once a post has verified publication history, its asset membership cannot change.
