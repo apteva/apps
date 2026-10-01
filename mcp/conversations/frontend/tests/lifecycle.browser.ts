@@ -1,5 +1,46 @@
 import { test, expect } from "@playwright/test";
 
+for (const host of ["dashboard", "panel", "external", "package"]) {
+ test(`${host}: active responses never go blank after acknowledgements or progress, including refresh and later rounds`, async ({page,request}) => {
+  await request.post("/reset");
+  if(host==="panel") await request.post("/seed-panel",{data:[{id:"chat-operator",project_id:"project",lead_agent_id:41,title:"Support chat",kind:"direct",audience:"operator",origin:"web",created_at:"",updated_at:""}]});
+  await page.goto(host==="panel"?"/?host=dashboard&surface=panel":`/?host=${host}`);
+  await expect(page.getByTitle("Live")).toBeVisible();
+  const chat=host==="dashboard"||host==="panel"?"chat-operator":"chat-visitor-a";
+  const thinking=page.getByRole("status",{name:"Thinking",exact:true});
+  const pulsing=page.locator(".chat-tool-copy-running");
+  let revision=0;
+  for(let round=0;round<3;round++) {
+   const id=round*10+1,start=new Date().toISOString(),run_id=`turn-${round}`;
+   const frame=(extra:object)=>request.post("/emit",{data:{chat_id:chat,agent_id:41,thread_id:chat,...extra}});
+   const progress=(phase:string,extra={})=>frame({response_progress:{phase,run_id,revision:++revision,after_message_id:id,started_at:start,...extra}});
+   const message=(offset:number,role:string,phase:string,content:string)=>request.post("/append-message",{data:{id:id+offset,conversation_id:chat,role,agent_id:role==="agent"?41:0,phase,content,components:[],created_at:new Date().toISOString()}});
+   const animatedThinking=async()=>{
+    await expect(thinking).toHaveCount(1); await expect(thinking).toBeVisible();
+    expect(await thinking.locator(".chat-thinking-dots > span").first().evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-thinking-dot");
+   };
+   await message(0,"user","final",`Request ${round}`); await progress("thinking"); await animatedThinking();
+   await message(1,"agent","acknowledgement",`I will check request ${round}.`); await animatedThinking();
+   await page.reload(); await expect(page.getByTitle("Live")).toBeVisible(); await animatedThinking();
+   await progress("preparing_tool",{tool_name:"search_tools",call_id:`hidden-${round}`}); await animatedThinking();
+   await expect(page.getByRole("status",{name:"Working",exact:true})).toHaveCount(0);
+   await progress("preparing_tool",{tool_name:"todo_todos_list",call_id:run_id,tool_started_at:new Date().toISOString()});
+   await expect(pulsing).toHaveCount(1); await expect(thinking).toHaveCount(0);
+   const tool={id:100+round,chat_id:chat,agent_id:41,thread_id:chat,call_id:run_id,name:"todo_todos_list",reason:`Lookup ${round}`,status:"running",started_at:new Date().toISOString(),revision:1};
+   await frame({tool_activity:tool}); await progress("running",{tool_name:tool.name,call_id:run_id});
+   await expect(pulsing).toHaveCount(1); await expect(thinking).toHaveCount(0);
+   await frame({tool_activity:{...tool,status:"completed",ended_at:new Date().toISOString(),revision:2}}); await progress("continuing");
+   await expect(pulsing).toHaveCount(1); await expect(thinking).toHaveCount(0);
+   await page.reload(); await expect(page.getByTitle("Live")).toBeVisible(); await expect(pulsing).toHaveCount(1);
+   await message(2,"agent","progress",`Checking the next step ${round}.`); await progress("thinking"); await animatedThinking();
+   await expect(pulsing).toHaveCount(0);
+   // The final message settles the UI even if its idle frame is delayed.
+   await message(3,"agent","final",`Finished ${round}.`); await expect(thinking).toHaveCount(0);
+   await progress("idle"); await expect(thinking).toHaveCount(0); await expect(pulsing).toHaveCount(0);
+  }
+ });
+}
+
 for (const host of ["dashboard", "external", "package"]) {
  test(`${host}: ordered streamed acknowledgement, tool stack, thinking and final reply`, async ({page,request}) => {
   await request.post("/reset"); await page.goto(`/?host=${host}`);
@@ -33,7 +74,7 @@ for (const host of ["dashboard", "external", "package"]) {
     return Boolean(acknowledgement && tools && acknowledgement.y < tools.y);
    }).toBe(true);
    await emit({tool_activity:{...tool,status:"completed",ended_at:at(when+18),revision:2}}); await progress("continuing");
-   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0); await expect(thinking).toBeVisible();
+   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1); await expect(thinking).toHaveCount(0);
   }
   await message(2,"I will check the processes.",at(6270));
   await expect(page.getByText("I will check the processes.",{exact:true})).toHaveCount(1);
@@ -68,7 +109,7 @@ for (const host of ["dashboard", "panel", "external", "package"]) {
   };
   const animatedTool=async()=>{
    await expect(page.locator(".chat-tool-copy-running")).toHaveCount(1);
-   expect(await page.locator(".chat-tool-copy-running").evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-tool-copy-breathe");
+   await expect.poll(()=>page.locator(".chat-tool-copy-running").evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-tool-copy-breathe");
   };
   for(let response=0;response<3;response++) {
    const id=response*2+1, start=new Date().toISOString(), call=`request-${response}`;
@@ -83,8 +124,8 @@ for (const host of ["dashboard", "panel", "external", "package"]) {
    await request.post("/emit",{data:{...base,tool_activity:tool}}); await progress("running"); await animatedTool();
    await page.reload(); await expect(page.getByTitle("Live")).toBeVisible(); await animatedTool();
    await request.post("/emit",{data:{...base,tool_activity:{...tool,status:"completed",ended_at:new Date().toISOString(),revision:2}}});
-   await progress("continuing"); await animatedThinking();
-   await page.reload(); await expect(page.getByTitle("Live")).toBeVisible(); await animatedThinking();
+   await progress("continuing"); await animatedTool(); await expect(thinking).toHaveCount(0);
+   await page.reload(); await expect(page.getByTitle("Live")).toBeVisible(); await animatedTool(); await expect(thinking).toHaveCount(0);
    await request.post("/append-message",{data:{id:id+1,conversation_id:chat,role:"agent",agent_id:41,content:`Reply ${response+1}`,created_at:new Date().toISOString()}});
    await progress("idle"); await expect(thinking).toHaveCount(0);
    await expect(page.locator(".chat-tool-copy-running")).toHaveCount(0);

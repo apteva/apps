@@ -4,7 +4,7 @@ import { splitActivityPaint } from "./toolActivityPaint";
 import type { ResponseProgress } from "./types";
 import { pendingResponsePhase, responseToolGroup } from "./responseActivity";
 import { ChatToolActivity } from "./ToolActivity";
-import { buildChatTimeline, isApprovalRequestTool, isVisibleChatTool, type ToolActivity as TimelineTool } from "./toolActivityModel";
+import { buildChatTimeline, isVisibleChatTool, type ToolActivity as TimelineTool } from "./toolActivityModel";
 import { toChatToolActivity, useToolVisualRegistry } from "./toolActivityAdapter";
 import { useConversationLocalization, type ConversationLocalization, type ConversationMessageKey, type ConversationMessageParams } from "./i18n";
 import { AttachmentContent, GenericComponents, reportSectionsText } from "./messageContent";
@@ -1613,25 +1613,47 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
   };
 
   const nearBottomRef = useRef(true);
+  const scrollToBottom = () => {
+    const scroller = bottomRef.current?.parentElement;
+    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+  };
+
+  // Keep the transcript pinned only when the user was already near its end.
+  // Scrolling the sentinel with scrollIntoView can also move an outer host
+  // pane, which is what made late tool/progress frames feel like a jump.
+  useLayoutEffect(() => {
+    if (!nearBottomRef.current) return;
+    scrollToBottom();
+    // A progress row can settle its measured height one frame after React
+    // commits (especially inside a constrained embed). Re-apply the anchor
+    // after that layout pass without touching a transcript the user left.
+    const frame = window.requestAnimationFrame(() => {
+      if (nearBottomRef.current) scrollToBottom();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [messages, activities, bubbles, progresses]);
+
   useEffect(() => {
-    if (nearBottomRef.current) bottomRef.current?.scrollIntoView({block:"end"});
-  }, [activities, bubbles, progresses]);
-  useEffect(() => {
-    const bottom=bottomRef.current, scroller=bottom?.parentElement;
+    const bottom = bottomRef.current;
+    const scroller = bottom?.parentElement;
     if (!bottom || !scroller) return;
-    let lastMarked=0;
-    const update=() => {
-      nearBottomRef.current=scroller.scrollHeight-scroller.scrollTop-scroller.clientHeight<80;
-      const latest=messages.at(-1)?.id ?? 0;
-      if (!archived && scroller.clientHeight>0 && bottom.getClientRects().length>0 && bottom.getBoundingClientRect().top>=0 && bottom.getBoundingClientRect().bottom<=window.innerHeight && nearBottomRef.current && document.visibilityState === "visible" && bottom.getBoundingClientRect().bottom <= scroller.getBoundingClientRect().bottom+5 && latest>lastMarked) {
-        lastMarked=latest;
-        void conversationsClient.markSeen(conversation.id, latest).then(onActed,() => {lastMarked=0;});
+    let lastMarked = 0;
+    const update = () => {
+      nearBottomRef.current = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
+      const latest = messages.at(-1)?.id ?? 0;
+      if (!archived && scroller.clientHeight > 0 && bottom.getClientRects().length > 0 && bottom.getBoundingClientRect().top >= 0 && bottom.getBoundingClientRect().bottom <= window.innerHeight && nearBottomRef.current && document.visibilityState === "visible" && bottom.getBoundingClientRect().bottom <= scroller.getBoundingClientRect().bottom + 5 && latest > lastMarked) {
+        lastMarked = latest;
+        void conversationsClient.markSeen(conversation.id, latest).then(onActed, () => { lastMarked = 0; });
       }
     };
-    if (nearBottomRef.current) bottom.scrollIntoView({block:"end"});
-    update(); scroller.addEventListener("scroll",update);document.addEventListener("visibilitychange",update);
-    return () => {scroller.removeEventListener("scroll",update);document.removeEventListener("visibilitychange",update);};
-  },[messages, conversation.id, conversation.project_id, archived]);
+    update();
+    scroller.addEventListener("scroll", update, { passive: true });
+    document.addEventListener("visibilitychange", update);
+    return () => {
+      scroller.removeEventListener("scroll", update);
+      document.removeEventListener("visibilitychange", update);
+    };
+  }, [messages, conversation.id, conversation.project_id, archived]);
 
   const send = async () => {
     const content=draft.trim(); if (voiceActive || (!content && !attachments.items.length) || sending || attachments.items.some(i=>!i.attachment || i.busy || i.error)) return;
@@ -1731,18 +1753,13 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
           // rendered. Old cards and verdict edits cannot settle a later turn.
           const approvalDelivered = messages.some(m => m.role === "agent" && m.component_kind === "approval"
             && m.agent_id === p.agent_id && m.id > p.after_message_id);
-          // An acknowledgement is the user-facing status for this turn. A
-          // second model pass may spend time preparing an internal tool such
-          // as `pace`; keep that hidden interval empty until a visible tool,
-          // stream, card, or final reply arrives instead of adding a second
-          // generic Thinking row underneath the acknowledgement.
-          const acknowledgementVisible = p.phase === "thinking" && messages.some(m =>
-            m.role === "agent" && m.phase === "acknowledgement" && m.agent_id === p.agent_id && m.id > p.after_message_id,
-          );
-          if (acknowledgementVisible) return null;
+          // An acknowledgement or progress message is not completion. Keep
+          // Thinking until a live text stream or pulsing tool owns feedback.
+          const finalDelivered = messages.some(m => m.role === "agent" && !m.component_kind
+            && m.phase === "final" && m.agent_id === p.agent_id && m.id > p.after_message_id);
+          if (finalDelivered) return null;
           if (awaitingProgressMessage(p)) return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`}/>;
-          const hiddenTool = p.tool_name && !isVisibleChatTool(p.tool_name) && !isApprovalRequestTool(p.tool_name);
-          if (p.phase === "idle" || approvalDelivered || hiddenTool || (continuingKey && continuingToolKeys.has(continuingKey)) || ownsToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)}) || bubbles.some(b=>b.agentId===p.agent_id && b.text && !b.done)) return null;
+          if (p.phase === "idle" || approvalDelivered || (continuingKey && continuingToolKeys.has(continuingKey)) || ownsToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)}) || bubbles.some(b=>b.agentId===p.agent_id && b.text && !b.done)) return null;
           return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`}/>;
         })}
       </> : null}
