@@ -301,13 +301,17 @@ func (a *App) syncTrigger(t *Trigger) error {
 	if e != nil {
 		t.SyncError = e.Error()
 	}
-	_, save := a.db.Exec(`UPDATE process_triggers SET sync_pending=?,sync_error=? WHERE id=?`, t.SyncPending, t.SyncError, t.ID)
+	_, save := a.db.Exec(`UPDATE process_triggers SET sync_pending=?,sync_error=? WHERE id=? AND (sync_pending<>? OR sync_error<>?)`, t.SyncPending, t.SyncError, t.ID, t.SyncPending, t.SyncError)
 	return errors.Join(e, save)
 }
-func (a *App) tickTriggers(ctx context.Context) error {
+func (a *App) tickTriggers(ctx context.Context, scope ...string) error {
+	project := a.workerProject(scope)
+	if project == "" {
+		return nil
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	rows, e := a.db.Query(`SELECT ` + triggerColumns + ` FROM process_triggers`)
+	rows, e := a.db.Query(`SELECT `+triggerColumns+` FROM process_triggers WHERE project_id=?`, project)
 	if e != nil {
 		return e
 	}

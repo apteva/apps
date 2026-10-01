@@ -219,7 +219,12 @@ Migration 004 adds `process_step_runs`, append-only `process_step_events`, and a
 workflow flag on runs. Migration 010 replaces legacy task event names and
 normalizes future execution to the native runtime. Existing historical rows
 remain readable.
-Step deliveries retry stable IDs after restarts without changing their executor.
+Migration 013 freezes the complete delivery envelope and worker provisioning
+request before network calls. Retries replay exactly the same agent, thread,
+event identity, message, and provisioning request after a lost acknowledgement
+or restart, even if deadlines, dependencies, or app-generated context changed.
+Unchanged reconciliation produces no row mutations or WAL writes. Global worker
+callbacks only process the SDK-dispatched project, not all projects per call.
 
 ## HTTP
 
@@ -257,7 +262,18 @@ original owners, procedure versions, and idempotency keys. Migration 010 adopts
 legacy assignments into native execution without creating a new run.
 
 Direct delivery uses stable tracked agent event IDs and pinned threads. Retries
-back off from 30 seconds to 15 minutes. Direct recurring deadlines advance in the
+back off from 30 seconds to 15 minutes for transient errors, including unavailable
+agents, and recover at the next due retry once the agent is running. Warnings stay
+visible throughout backoff. HTTP 409 conflicts suspend automatic delivery and
+remain visible as **repair required**, including known conflicts migrated from
+older releases. They are not automatically reassigned or given new event IDs:
+the original delivery may already have executed. An operator must compare the
+original platform event with the persisted envelope and establish what executed
+before repairing the record; do not clear suspension or create a replacement
+identity blindly. A valid lifecycle acknowledgement can confirm the original
+delivery and resolve its warning without redelivery.
+
+Direct recurring deadlines advance in the
 same transaction that creates the occurrence. Missed intervals are skipped and
 overlap is prevented per assignment; independent assignments can run together.
 Core settling is diagnostic information, not business completion.
@@ -267,7 +283,7 @@ checked every 5 seconds. Processes has one native execution path.
 
 ## Installation and limits
 
-Apteva >=0.52.0; app-sdk v0.85.0. Evals >=0.5.9 is optional. Source manifest pins
+Apteva >=0.52.0; app-sdk v0.90.0. Evals >=0.5.9 is optional. Source manifest pins
 `processes/v0.15.0`. Event triggers retain the durable app subscription requirement
 introduced in v0.5.0; see [platform requirements](docs-release-0.5.0.md#platform-requirement).
 Evaluation requires the optional Evals app and isolated Environments support.

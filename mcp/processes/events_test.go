@@ -124,7 +124,7 @@ func TestEventsProjectFailureDoesNotStarveOtherProjects(t *testing.T) {
 	f := &eventPlatform{failProject: "project-a"}
 	p := publisher(t, a, f)
 	_ = p.drainEvents(context.Background())
-	if e := p.drainEvents(context.Background()); e != nil {
+	if e := p.drainEvents(context.Background(), "project-b"); e != nil {
 		t.Fatal(e)
 	}
 	if len(f.accepted) != 1 || f.accepted[0].project != "project-b" {

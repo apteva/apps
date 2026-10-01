@@ -336,6 +336,6 @@ func (a *App) synchronizeProcess(p *Process) error {
 	if e != nil {
 		message = e.Error()
 	}
-	_, saveErr := a.db.Exec(`UPDATE processes SET sync_pending=?,sync_error=? WHERE id=?`, e != nil, message, p.ID)
+	_, saveErr := a.db.Exec(`UPDATE processes SET sync_pending=?,sync_error=? WHERE id=? AND (sync_pending<>? OR sync_error<>?)`, e != nil, message, p.ID, e != nil, message)
 	return errors.Join(e, saveErr)
 }

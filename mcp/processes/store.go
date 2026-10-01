@@ -94,9 +94,10 @@ type Run struct {
 	Inputs     string `json:"inputs"`
 	// TaskID is retained only for reading pre-0.14 history. New runs never
 	// populate it and it is intentionally omitted from the public contract.
-	TaskID          string `json:"-"`
-	DeliveryWarning string `json:"delivery_warning"`
-	CreatedAt       string `json:"created_at"`
+	TaskID            string `json:"-"`
+	DeliveryWarning   string `json:"delivery_warning"`
+	DeliverySuspended bool   `json:"delivery_suspended,omitempty"`
+	CreatedAt         string `json:"created_at"`
 }
 
 func timestamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
@@ -446,14 +447,14 @@ func insertProcessRun(db runWriter, r Run) error {
 	return e
 }
 
-const runColumns = `id,process_id,version,kind,request_key,inputs,task_id,delivery_warning,created_at,backend,state,progress,current_step,result,error,execution_id,target_thread_id,delivered_at,delivery_attempts,next_attempt_at,scheduled_for,schedule_paused,lifecycle_sequence,execution_state,assignment_id,assignment_revision,assignment_json,overrides_json,workflow,trigger_event_id`
+const runColumns = `id,process_id,version,kind,request_key,inputs,task_id,delivery_warning,created_at,backend,state,progress,current_step,result,error,execution_id,target_thread_id,delivered_at,delivery_attempts,next_attempt_at,scheduled_for,schedule_paused,lifecycle_sequence,execution_state,assignment_id,assignment_revision,assignment_json,overrides_json,workflow,trigger_event_id,delivery_suspended`
 
 type scanner interface{ Scan(...any) error }
 
 func scanRun(row scanner) (Run, error) {
 	var r Run
 	var binding, overrides string
-	err := row.Scan(&r.ID, &r.ProcessID, &r.Version, &r.Kind, &r.RequestKey, &r.Inputs, &r.TaskID, &r.DeliveryWarning, &r.CreatedAt, &r.Backend, &r.State, &r.Progress, &r.CurrentStep, &r.Result, &r.Error, &r.ExecutionID, &r.TargetThreadID, &r.DeliveredAt, &r.DeliveryAttempts, &r.NextAttemptAt, &r.ScheduledFor, &r.SchedulePaused, &r.LifecycleSequence, &r.ExecutionState, &r.AssignmentID, &r.AssignmentRevision, &binding, &overrides, &r.Workflow, &r.TriggerEventID)
+	err := row.Scan(&r.ID, &r.ProcessID, &r.Version, &r.Kind, &r.RequestKey, &r.Inputs, &r.TaskID, &r.DeliveryWarning, &r.CreatedAt, &r.Backend, &r.State, &r.Progress, &r.CurrentStep, &r.Result, &r.Error, &r.ExecutionID, &r.TargetThreadID, &r.DeliveredAt, &r.DeliveryAttempts, &r.NextAttemptAt, &r.ScheduledFor, &r.SchedulePaused, &r.LifecycleSequence, &r.ExecutionState, &r.AssignmentID, &r.AssignmentRevision, &binding, &overrides, &r.Workflow, &r.TriggerEventID, &r.DeliverySuspended)
 	if err == nil {
 		err = json.Unmarshal([]byte(binding), &r.Binding)
 	}

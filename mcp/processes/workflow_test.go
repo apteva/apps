@@ -287,7 +287,9 @@ func TestWorkflowLostDeliveryAndFrozenRoles(t *testing.T) {
 	if e := restarted.tickDirect(context.Background(), time.Now()); e != nil {
 		t.Fatal(e)
 	}
-	if len(f.threads) != 1 || len(f.events) != 1 || f.events[0].ThreadID != f.threads[0].ThreadID || f.events[0].SourceEventID != s.DeliveryEventID {
+	// A lost spawn acknowledgement must retry the same provisioning request,
+	// not treat the merely planned worker as successfully created.
+	if len(f.threads) != 2 || jsonText(f.threads[0]) != jsonText(f.threads[1]) || len(f.events) != 1 || f.events[0].ThreadID != f.threads[0].ThreadID || f.events[0].SourceEventID != s.DeliveryEventID {
 		t.Fatalf("retry identity changed: threads=%+v events=%+v step=%+v", f.threads, f.events, s)
 	}
 	x, e := a.assignmentStatus(p.ProjectID, p.ID, r.AssignmentID, "paused")

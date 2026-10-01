@@ -47,6 +47,18 @@ func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 
 func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{{Name: "publish-events", Schedule: "@every 1s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.drainEvents(ctx) }}, {Name: "event-triggers", Schedule: "@every 5s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.tickTriggers(ctx) }}, {Name: "process-runs", Schedule: "@every 5s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.tickDirect(ctx, time.Now().UTC()) }}, {Name: "process-reconciliation", Schedule: "@every 30s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.retryPending(ctx) }}}
+	return []sdk.Worker{{Name: "publish-events", Schedule: "@every 1s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.drainEvents(ctx, app.CurrentProject()) }}, {Name: "event-triggers", Schedule: "@every 5s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.tickTriggers(ctx, app.CurrentProject()) }}, {Name: "process-runs", Schedule: "@every 5s", Run: func(ctx context.Context, app *sdk.AppCtx) error {
+		return a.tickDirect(ctx, time.Now().UTC(), app.CurrentProject())
+	}}, {Name: "process-reconciliation", Schedule: "@every 30s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.retryPending(ctx, app.CurrentProject()) }}}
+}
+
+// The SDK dispatches global workers once per visible project. Never turn an
+// empty scope into an installation-wide scan. Optional scope is for internal
+// callers on project installations, not a bypass of project isolation.
+func (a *App) workerProject(scope []string) string {
+	if len(scope) > 0 {
+		return scope[0]
+	}
+	return a.ctx.CurrentProject()
 }
 func main() { sdk.Run(&App{}) }

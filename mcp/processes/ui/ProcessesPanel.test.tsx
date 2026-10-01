@@ -114,6 +114,19 @@ test("run history renders native evidence without external task links", async ()
   expect(document.querySelectorAll('a[href*="/apps/tasks/"]').length).toBe(0);
 });
 
+test("permanent delivery conflict is shown as repair required, not retry pending", async () => {
+  await mount({ direct_runs: [{
+    id: "suspended", version: 1, state: "blocked", delivery_suspended: true,
+    delivery_warning: "HTTP 409: source event id already exists with different content",
+    created_at: "2026-10-01T10:00:00Z",
+  }] });
+  await click("Weekly review");
+  await click("Runs");
+  await clickContaining("Direct agent run");
+  expect(document.body.textContent).toContain("Delivery suspended—repair required");
+  expect(document.body.textContent).not.toContain("Delivery retry pending");
+});
+
 const assignment = {
   id: "photo",
   process_id: "p",

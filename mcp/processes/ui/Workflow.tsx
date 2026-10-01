@@ -30,6 +30,7 @@ export type StepRun = {
   updated_by: string;
   updated_at: string;
   delivery_warning?: string;
+  delivery_suspended?: boolean;
   target_thread_id?: string;
   execution_id?: string;
 };
@@ -275,7 +276,9 @@ export function RunSteps({
             <TimingDetails step={s} />
             {s.delivery_warning && (
               <div className="notice">
-                Delivery retry pending: {s.delivery_warning}
+                {s.delivery_suspended
+                  ? "Delivery suspended—repair required"
+                  : "Delivery retry pending"}: {s.delivery_warning}
               </div>
             )}
             {s.output && <div className="prose">{s.output}</div>}
