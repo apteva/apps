@@ -1,3 +1,9 @@
+## 0.14.7 — explicit metadata batches
+
+- Add read-only `media_get_batch` for up to 100 explicit Storage file IDs, returning current descriptions, provenance/timestamps, probe status, audience rating and duration in one project-scoped query.
+- Report missing records separately. No folder enumeration, processing, Storage enrichment or URL signing.
+- Upgrade the app SDK to 0.90.0. Preserve the 0.14.6 planning/search and indexing behavior.
+
 # Media 0.14.6
 
 Media 0.14.6 makes safe, planning-oriented catalog discovery the default.

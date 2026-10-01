@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.14.6
+version: 0.14.7
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -31,7 +31,7 @@ description: |
   Cloudinary when bound, auto-transcribes audio + video via Deepgram,
   and auto-generates descriptions via OpenCode Go, OpenAI API, or
   OpenAI Codex when integrations are bound. Outputs all flow
-  through storage. v0.14.6 adds compact/planning/bounded-full search,
+  through storage. v0.14.7 adds compact/planning/bounded-full search,
   projections, explicit expansions, stable cursors, release-readiness fields,
   planning sorts, and record-free media_inventory counts. v0.14.5 fixes a
   Media indexing queue defect that could leave
@@ -118,6 +118,7 @@ provides:
     - { name: media_get,             description: "Fetch one media record by storage file_id, including arbitrary metadata and metadata_version. External ingestion URL delivery defaults to apteva/inline; callers can explicitly request proxy, direct, or attachment disposition. Returned delivery, disposition, and expires_at are Storage-confirmed." }
     - { name: media_analyze,         description: "Read-only technical and quality analysis for an image, video, or audio file. Follows render_host_id when configured, reports the effective executor, and never silently falls back to local execution. Returns encoding metadata, decode integrity, visual measurements and timeline anomalies, and audio loudness/peak/silence measurements where applicable. Creates no artifacts." }
     - { name: media_ask,             description: "Ask a grounded question using only existing source images, cached thumbnails/keyframes, and completed transcripts. Never runs ffmpeg, creates derivations, or writes files." }
+    - { name: media_get_batch, description: "Read descriptions, status, rating and duration for up to 100 explicit file_ids without scanning or signing URLs." }
     - { name: media_search,          description: "Safe compact/planning/bounded-full catalog discovery with field projection, explicit expansions, stable cursors, planning sorts, totals, and unmistakable completion metadata." }
     - { name: media_inventory,       description: "Count matching media by bounded editorial dimensions without returning records." }
     - { name: media_list_folders,    description: "List immediate child folders of parent that contain media." }
@@ -293,7 +294,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.6
+    ref: media/v0.14.7
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -497,6 +498,12 @@ func (a *App) MCPTools() []sdk.Tool {
 				"include_transcript": map[string]any{"type": "boolean", "default": true},
 			}, []string{"file_id", "question"}),
 			Handler: a.toolAsk,
+		},
+		{
+			Name:        "media_get_batch",
+			Description: "Read current descriptions, probe status, rating and duration for up to 100 explicit Storage file IDs in one database query. No Storage scan, URL signing or processing. Missing IDs are reported separately.",
+			InputSchema: schemaObject(map[string]any{"file_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "maxItems": 100}}, []string{"file_ids"}),
+			Handler:     a.toolGetBatch,
 		},
 		{
 			Name:        "media_search",
