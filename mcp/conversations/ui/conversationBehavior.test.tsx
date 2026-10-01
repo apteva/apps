@@ -327,7 +327,7 @@ test("soft break copy describes an advisory request and existing send failures f
 });
 
 test("stored Conversations work tools remain visible and approval actions use host theme",async()=>{
- const approval={...message(2),role:"agent",component_kind:"approval",components:[{app:"conversations",name:"approval-card",props:{title:"Approve deletion",body:"Delete repository?",status:"pending",actions:[{id:"approve",label:"Approve",style:"primary"},{id:"deny",label:"Deny",style:"secondary"}]}}]};
+ const approval={...message(2),role:"agent",agent_id:41,component_kind:"approval",components:[{app:"conversations",name:"approval-card",props:{title:"Approve deletion",body:"Delete repository?",status:"pending",actions:[{id:"approve",label:"Approve",style:"primary"},{id:"deny",label:"Deny",style:"secondary"}]}}]};
  fetcher=url=> url.includes("/activity") ? json([{id:1,chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"legacy",name:"conversations_request_approval",reason:"Requesting deletion approval",status:"running",started_at:message(1).created_at,ended_at:"",revision:1}]) : url.includes("/deliveries") ? json([]) : json({messages:[approval],cursor:2,before:2,has_more:false});
  await render();
  expect(element.textContent).toContain("Approve deletion");
@@ -345,7 +345,7 @@ test("stored Conversations work tools remain visible and approval actions use ho
 
 
 for (const style of ["danger", undefined]) test(`approval choices stay distinct with style=${style ?? "omitted"}`, async () => {
- const approval={...message(2),role:"agent",component_kind:"approval",components:[{app:"conversations",name:"approval-card",props:{title:"Confirm deleting RepeatList",status:"pending",actions:[{id:"approve",label:"Delete RepeatList",style},{id:"deny",label:"Keep RepeatList"}]}}]};
+ const approval={...message(2),role:"agent",agent_id:41,component_kind:"approval",components:[{app:"conversations",name:"approval-card",props:{title:"Confirm deleting RepeatList",status:"pending",actions:[{id:"approve",label:"Delete RepeatList",style},{id:"deny",label:"Keep RepeatList"}]}}]};
  fetcher=url=>url.includes("/activity")||url.includes("/deliveries")?json([]):json({messages:[approval],cursor:2,before:2,has_more:false});
  await render();
  const buttons=[...element.querySelectorAll("button")];
@@ -356,6 +356,34 @@ for (const style of ["danger", undefined]) test(`approval choices stay distinct 
  expect(keep.className).toContain("border-border");
  expect(keep.className).not.toContain("text-accent");
  expect(remove.className+keep.className).not.toMatch(/bg-success|bg-error/);
+});
+
+test("approval decisions show the chosen label live and after reopening the chat", async () => {
+ const approval={...message(301),role:"agent",agent_id:41,component_kind:"approval",components:[{app:"conversations",name:"approval-card",props:{title:"Delete Orbit Plans and todos",status:"pending",actions:[{id:"delete",label:"Delete list and todos"},{id:"keep",label:"Keep list and todos"}]}}]};
+ let saved=approval;
+ fetcher=url=>url.includes("/activity")||url.includes("/deliveries")?json([]):json({messages:[saved],cursor:301,before:301,has_more:false});
+ await render();
+ expect(element.textContent).not.toContain("Decision:");
+ expect([...element.querySelectorAll("button")].some(button=>button.textContent==="Delete list and todos")).toBe(true);
+ saved={...approval,components:[{...approval.components[0],props:{...approval.components[0].props,status:"delete",note:"Remove the seeded data"}}]} as typeof approval;
+ await act(async()=>FakeEvents.instances[0].emit({...saved,revision:2}));
+ expect(element.textContent).toContain("Decision: Delete list and todos");
+ expect(element.textContent).toContain("Note: Remove the seeded data");
+ expect([...element.querySelectorAll("button")].some(button=>button.textContent==="Delete list and todos")).toBe(false);
+ await act(async()=>root.render(null));
+ await render();
+ expect(element.textContent).toContain("Decision: Delete list and todos");
+ expect(element.textContent).toContain("Note: Remove the seeded data");
+ expect(element.textContent).not.toContain("Keep list and todos");
+});
+
+test("legacy approval decisions fall back to localized statuses", async () => {
+ const approvals=["approve","deny"].map((status,index)=>({...message(301+index),role:"agent",agent_id:41,component_kind:"approval",components:[{app:"conversations",name:"approval-card",props:{title:"Legacy approval",status}}]}));
+ fetcher=url=>url.includes("/activity")||url.includes("/deliveries")?json([]):json({messages:approvals,cursor:302,before:301,has_more:false});
+ await act(async()=>root.render(<ConversationChat conversation={conv("a")} locale="es" archived={false} onActed={()=>{}} onRemoved={()=>{}}/>));
+ await settle();
+ expect(element.textContent).toContain("Decisión: aprobado");
+ expect(element.textContent).toContain("Decisión: denegado");
 });
 
 test("new approval clears its agent's thinking while historical cards and other agents remain isolated", async () => {
@@ -524,4 +552,38 @@ test("reconnect restores authoritative progress/text and ignores snapshot overla
  await frame({snapshot:true,frames:[]});
  expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
  expect(element.textContent).toContain("A complete reply");
+});
+
+for (const order of ["card-first", "completion-first", "reconnect"] as const) test(`approval preparation keeps Thinking until its card arrives (${order})`, async () => {
+ await render();
+ const events=FakeEvents.instances[0];
+ const frame=async(value:any)=>act(async()=>events.listeners.get("stream")!({data:JSON.stringify({chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"",text:"",done:false,...value})}));
+ const progress={run_id:"approval-turn",revision:1,after_message_id:300,started_at:message(300).created_at};
+ const card=(id:number,agent_id=41)=>({...message(id),role:"agent",agent_id,component_kind:"approval",components:[{app:"conversations",name:"approval-card",props:{title:`Decision ${id}`,status:"pending",actions:[{id:"approve",label:"Approve"}]}}]});
+ const thinking=()=>expect(element.querySelectorAll('[aria-label="Thinking"]').length).toBe(1);
+ const noThinking=()=>expect(element.querySelectorAll('[aria-label="Thinking"]').length).toBe(0);
+ await frame({response_progress:{...progress,phase:"thinking"}}); thinking();
+ await act(async()=>events.emit(card(200))); thinking(); // Historical card.
+ await act(async()=>events.emit(card(301,42))); thinking(); // Other room participant.
+ const preparing={chat_id:"a",agent_id:41,thread_id:"chat-a",response_progress:{...progress,phase:"preparing_tool",revision:2,tool_name:"conversations_conversations_request_approval",call_id:"approval-call"}};
+ await frame(preparing); thinking();
+ if(order==="reconnect") { await frame({snapshot:true,frames:[preparing]}); thinking(); }
+ await frame({response_progress:{...preparing.response_progress,phase:"running",revision:3}}); thinking();
+ expect(element.querySelectorAll('.chat-tool-activity').length).toBe(0);
+ const complete={response_progress:{...progress,phase:"idle",revision:4,completion_message_id:302}};
+ if(order==="card-first") {
+   await act(async()=>events.emit(card(302))); noThinking();
+   await frame(complete); noThinking();
+ } else {
+   await frame(complete); thinking();
+   await settle(); thinking();
+   await act(async()=>events.emit(card(302))); noThinking();
+ }
+ expect(element.textContent).toContain("Decision 302");
+ expect(element.querySelectorAll('.chat-tool-activity').length).toBe(0);
+ // Approval verdict belongs to a fresh response. Updating that existing card
+ // must not dismiss the next response's Thinking indicator.
+ await frame({response_progress:{...progress,phase:"thinking",run_id:"verdict-turn",revision:5,after_message_id:302}}); thinking();
+ await act(async()=>events.emit({...card(302),revision:2})); thinking();
+ await frame({response_progress:{...progress,phase:"idle",revision:6,after_message_id:302}}); noThinking();
 });

@@ -44,6 +44,7 @@ export interface ToolActivity {
   started_at: string; ended_at: string; duration_ms?: number; revision: number;
 }
 export interface ResponseProgress {
+ completion_message_id?: number;
  phase: "thinking" | "preparing" | "preparing_tool" | "running" | "continuing" | "idle";
  run_id: string; revision: number; after_message_id: number; started_at: string;
  tool_name?: string; call_id?: string; tool_started_at?: string;

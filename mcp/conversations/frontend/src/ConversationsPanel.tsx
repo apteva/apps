@@ -4,7 +4,7 @@ import { splitActivityPaint } from "./toolActivityPaint";
 import type { ResponseProgress } from "./types";
 import { pendingResponsePhase, responseToolGroup } from "./responseActivity";
 import { ChatToolActivity } from "./ToolActivity";
-import { buildChatTimeline, isVisibleChatTool, type ToolActivity as TimelineTool } from "./toolActivityModel";
+import { buildChatTimeline, isApprovalRequestTool, isVisibleChatTool, type ToolActivity as TimelineTool } from "./toolActivityModel";
 import { toChatToolActivity, useToolVisualRegistry } from "./toolActivityAdapter";
 import { useConversationLocalization, type ConversationLocalization, type ConversationMessageKey, type ConversationMessageParams } from "./i18n";
 import { AttachmentContent, GenericComponents, reportSectionsText } from "./messageContent";
@@ -307,18 +307,16 @@ export function ApprovalCard({
           <Glyph d={GLYPH_ALERT} size={14} />
         </span>
         <span className="font-semibold uppercase tracking-wide">{t("card.approval")}</span>
-        {status !== "pending" && (
-          <span
-            className="ml-auto px-1.5 py-0.5 rounded border border-border text-text-muted"
-          >
-            {statusLabel(status)}
-          </span>
-        )}
       </div>
       <p className="mt-1.5 text-sm font-medium text-text">{String(card.props.title ?? "")}</p>
       {card.props.body ? (
         <p className="mt-1 text-sm text-text-muted whitespace-pre-wrap">{String(card.props.body)}</p>
       ) : null}
+      {status !== "pending" && (
+        <p className="mt-2 text-sm font-medium text-text whitespace-pre-wrap break-words">
+          {t("approval.decision", { decision: actions.find(action => action.id === status)?.label || statusLabel(status) })}
+        </p>
+      )}
       {status === "pending" && (
         <div className="mt-2.5 flex flex-col gap-2">
           <input
@@ -1474,7 +1472,8 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
     ? agentNames[id] || (id === conversation.lead_agent_id ? conversation.lead_agent_name : undefined) || t("common.agent")
     : undefined;
   const runningActivity = activities.find(item => item.status === "running");
-  const responseProgress = progresses.find(p=>p.phase!=="idle");
+  const awaitingProgressMessage = (p: ResponseProgress) => Boolean(p.completion_message_id && !messages.some(m => m.id === p.completion_message_id));
+  const responseProgress = progresses.find(p=>p.phase!=="idle" || awaitingProgressMessage(p));
   const activeResponse = bubble ?? (runningActivity ? {callId:runningActivity.call_id,agentId:runningActivity.agent_id} : responseProgress ? {callId:responseProgress.call_id || responseProgress.run_id,agentId:responseProgress.agent_id} : null);
   const preparingTools: TimelineTool[] = progresses.flatMap(p => (p.phase === "preparing_tool" || p.phase === "running") && p.tool_name && isVisibleChatTool(p.tool_name)
     && !activities.some(tool=>tool.agent_id===p.agent_id && tool.thread_id===p.thread_id && tool.call_id===p.call_id)
@@ -1703,7 +1702,7 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
  </div>;})())}
       </>}
       hasMessages={timeline.length > 0}
-      streamNode={bubbles.length || progresses.some(p=>p.phase!=="idle") ? <>{bubbles.map(b => { const phase = pendingResponsePhase(b, activities, messages); if (b.text || phase === null || ownsToolGroup(b) || progresses.some(p=>p.agent_id===b.agentId)) return null; return <ThinkingMessagePlaceholder key={`${b.agentId}:${b.callId}:${b.runId}`} preparing={b.optimistic}/>; })}
+      streamNode={bubbles.length || progresses.some(p=>p.phase!=="idle" || awaitingProgressMessage(p)) ? <>{bubbles.map(b => { const phase = pendingResponsePhase(b, activities, messages); if (b.text || phase === null || ownsToolGroup(b) || progresses.some(p=>p.agent_id===b.agentId)) return null; return <ThinkingMessagePlaceholder key={`${b.agentId}:${b.callId}:${b.runId}`} preparing={b.optimistic}/>; })}
         {progresses.map(p => {
           const continuingKey = p.phase === "continuing" ? responseToolGroup({
             continuing: true,
@@ -1712,10 +1711,13 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
             afterMessageId: p.after_message_id,
             createdAt: Date.parse(p.started_at),
           }, timeline, messages) : undefined;
-          // Internal phases such as approval requests are represented by a
-          // durable card (or another surface), so they must not fall back to
-          // a generic Thinking row while the response is waiting on them.
-          if (p.phase === "idle" || (p.tool_name && !isVisibleChatTool(p.tool_name)) || (continuingKey && continuingToolKeys.has(continuingKey)) || ownsToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)}) || bubbles.some(b=>b.agentId===p.agent_id && b.text && !b.done)) return null;
+          // Hidden approval calls still own a response until their card is
+          // rendered. Old cards and verdict edits cannot settle a later turn.
+          const approvalDelivered = messages.some(m => m.role === "agent" && m.component_kind === "approval"
+            && m.agent_id === p.agent_id && m.id > p.after_message_id);
+          if (awaitingProgressMessage(p)) return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`}/>;
+          const hiddenTool = p.tool_name && !isVisibleChatTool(p.tool_name) && !isApprovalRequestTool(p.tool_name);
+          if (p.phase === "idle" || approvalDelivered || hiddenTool || (continuingKey && continuingToolKeys.has(continuingKey)) || ownsToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)}) || bubbles.some(b=>b.agentId===p.agent_id && b.text && !b.done)) return null;
           return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`}/>;
         })}
       </> : null}

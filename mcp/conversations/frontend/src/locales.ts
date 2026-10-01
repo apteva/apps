@@ -112,6 +112,7 @@ export const catalog = {
   "inbox.emptyHint": ["Approvals, alerts, and new reports will appear here.", "Les approbations, alertes et nouveaux rapports apparaîtront ici.", "Las aprobaciones, alertas y nuevos informes aparecerán aquí."],
   "inbox.showMore": ["Show more items", "Afficher plus d’éléments", "Mostrar más elementos"],
   "approval.note": ["Note:", "Note :", "Nota:"],
+  "approval.decision": ["Decision: {decision}", "Décision : {decision}", "Decisión: {decision}"],
   "chat.thinkingLabel": ["Thinking", "Réflexion en cours", "Pensando"],
   "chat.thinking": ["Thinking…", "Réflexion en cours…", "Pensando…"],
   "chat.working": ["Working", "En cours", "Trabajando"],

@@ -492,7 +492,7 @@ func (a *App) toolRequestApproval(ctx context.Context, app *sdk.AppCtx, args map
 	// The approval card is the response: the next step belongs to the user.
 	if inserted {
 		a.streamer.settleAck(conv.ID, from.AgentID)
-		a.streamer.finishResponse(conv.ID, from.AgentID)
+		a.streamer.finishResponseWithMessage(conv.ID, from.AgentID, msg.ID)
 	}
 	return map[string]any{"message_id": msg.ID, "status": "pending", "inserted": inserted, "duplicate_suppressed": !inserted}, nil
 }
