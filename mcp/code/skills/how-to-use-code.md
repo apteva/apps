@@ -71,6 +71,15 @@ SHA with `expected_sha256` when replacing a file you previously read; use
 `create_only: true` when it must be new. `code_edit_file` performs an exact
 unique replacement; `code_multi_edit` groups replacements within one file.
 
+For a simple one-file request in a native repository, the complete flow is:
+`code_write_file` (with `create_only: true` for a new file), then
+`code_read_file` or `code_list_files` to verify it. Stop there. A working-tree
+write is already saved; do not call or narrate `repos_git_commit`, and do not
+create `repos_checkpoint` unless the user specifically asks for a named native
+revision. Never retry a Git commit after a `repository is not Git-backed`
+error. If Git history is requested, call `repos_git_status` first and proceed
+only when its `git_backed` field is true.
+
 For changes across files, `code_apply_patch` supports both unified diffs and
 Codex `*** Begin Patch` envelopes. Preview with `dry_run: true`, inspect the
 result, then call it with the returned `patch_id` and the same `slug`. This
@@ -118,7 +127,10 @@ history. `repos_restore` normally makes a new revert revision; use its
 `working_tree_only` option only when an uncommitted restore is intended.
 
 External Git remains optional. The `repos_git_*` tools connect, fetch, commit,
-pull and push provider history; they are separate from native checkpoints.
+pull and push provider history; they are separate from native checkpoints. Do
+not infer Git support from the word “repository”: use `repos_git_status` and
+its `git_backed` field. A native-only repository can be edited and run fully
+without any Git commit or branch operation.
 Do not push or publish just because tests pass when the requested task only
 covers local editing. `repos_export` captures a working-tree source snapshot;
 use `repos_snapshot_read` for bounded chunks when it is too large to inline.

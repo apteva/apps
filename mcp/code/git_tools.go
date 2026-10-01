@@ -33,7 +33,8 @@ func (a *App) gitMCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "repos_git_status",
-			Description: "Get branch, HEAD, upstream, ahead/behind counts, and changed or conflicted paths. Args: slug.",
+			Description: "Get whether a repository is externally Git-backed plus branch, HEAD, upstream, ahead/behind counts, and changed or conflicted paths. " +
+				"Call this before any repos_git_* mutation. If git_backed is false, external Git is not configured; use ordinary Code editing or optional native repos_checkpoint instead. Args: slug.",
 			InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}}, []string{"slug"}),
 			HandlerCtx:  a.toolGitStatus,
 		},
@@ -51,7 +52,9 @@ func (a *App) gitMCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "repos_git_commit",
-			Description: "Commit selected or all visible Code changes locally. Args: slug, message, paths? (all changes when omitted), author_name?, author_email?, actor?.",
+			Description: "Commit selected or all visible Code changes locally, but only for a repository whose repos_git_status response has git_backed=true and when the user asked for an external Git commit. " +
+				"Native-only repositories return an error; do not retry and do not describe a working-tree write as a commit. For ordinary edits, use code_write_file/code_edit_file and stop after verification. " +
+				"Args: slug, message, paths? (all changes when omitted), author_name?, author_email?, actor?.",
 			InputSchema: schemaObject(map[string]any{
 				"slug": map[string]any{"type": "string"}, "message": map[string]any{"type": "string"},
 				"paths":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}},

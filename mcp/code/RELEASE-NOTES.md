@@ -1,3 +1,13 @@
+# Apteva Code 0.14.7
+
+Clarifies the native-only editing flow in MCP tool descriptions and the `/code`
+skill. A simple file write is already saved and does not require a Git commit or
+native checkpoint. Agents are directed to verify `repos_git_status.git_backed`
+before using Git mutation tools and not to retry Git commits for native-only
+repositories.
+
+---
+
 # Apteva Code 0.14.6
 
 Exports `how-to-use-code` through `provides.skills` with the `/code` command.

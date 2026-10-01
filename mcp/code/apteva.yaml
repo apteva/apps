@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.14.6
+version: 0.14.7
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -11,6 +11,9 @@ description: |
   ZIP import for repository initialization or overlay updates. Native
   repo issues track bugs, feature requests, tasks, comments, and code
   links for agents and humans.
+  v0.14.7 clarifies that ordinary native working-tree edits do not require
+  external Git commits or native checkpoints, and teaches agents to verify
+  Git support before using Git mutation tools.
   v0.14.6 exports the /code agent skill for repository workflows and building
   connected web apps with the Apteva Web SDK, including CRM reads and writes.
   v0.14.5 pins installation builds to the matching Code release, including
@@ -360,7 +363,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: code/v0.14.6
+    ref: code/v0.14.7
     entry: mcp/code
   port: 8080
   health_check: /health

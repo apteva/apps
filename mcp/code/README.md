@@ -7,7 +7,19 @@ at `skills/how-to-use-code.md`. It covers source import and editing, reviewed
 ZIPs/patches, workspace execution and apply-back, optional native revisions, and
 building applications with the published `@apteva/web-sdk`, including Auth,
 scoped app HTTP/MCP calls, CRM search/create/update and shared app frontend
-components. This exported skill ships in Code 0.14.6.
+components. This exported skill ships in Code 0.14.7.
+
+The skill and MCP descriptions explicitly distinguish ordinary native working-
+tree edits from optional external Git commits and native checkpoints. Agents
+should verify `repos_git_status.git_backed` before using Git mutation tools;
+writing one new file normally ends after the write and a read/list verification.
+
+## v0.14.7
+
+Clarifies the native-only editing flow in MCP tool descriptions and the `/code`
+skill. A simple file write is already saved and does not require a Git commit or
+native checkpoint; external Git mutations are only for Git-backed repositories
+and explicit Git workflows.
 
 ## v0.14.5
 

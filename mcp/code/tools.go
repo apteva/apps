@@ -28,8 +28,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "repos_create",
-			Description: "Create a repository. Args: name (required), framework? (blank | nextjs | static | go | python), " +
-				"description?, slug?, workspace_image?. Walks the template tree into the new repo's storage_root.",
+			Description: "Create a repository. New repositories are native Code working trees; they do not require or initialize external Git. " +
+				"Args: name (required), framework? (blank | nextjs | static | go | python), description?, slug?, workspace_image?. " +
+				"Walks the template tree into the new repo's storage_root. After creation, edit files directly with code_write_file/code_edit_file; " +
+				"do not call repos_git_commit unless the repository is explicitly Git-backed.",
 			InputSchema: schemaObject(map[string]any{
 				"name":            map[string]any{"type": "string"},
 				"framework":       map[string]any{"type": "string"},
@@ -182,7 +184,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "code_write_file",
 			Description: "Write or overwrite a file with full content. Best for new files or simple overwrites; use " +
-				"code_apply_patch for large existing-file rewrites. Args: slug, path, content.",
+				"code_apply_patch for large existing-file rewrites. Writes are saved directly to Code's working tree and do not create a Git commit or require a native checkpoint. " +
+				"For a simple new file, stop after this tool and verify with code_read_file/code_list_files. Args: slug, path, content.",
 			InputSchema: schemaObject(map[string]any{
 				"slug":            map[string]any{"type": "string"},
 				"path":            map[string]any{"type": "string"},
