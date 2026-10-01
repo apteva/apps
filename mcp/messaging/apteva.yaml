@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.13.53
+version: 0.13.54
 description: |
   Send and receive email through AWS SES or Gmail and SMS/WhatsApp through
   Twilio. Tracks
@@ -177,6 +177,9 @@ provides:
 
 runtime:
   kind: source
+  # Legacy databases rebuild the message-search index during their first
+  # upgrade. Allow that one-time work to finish before declaring boot failed.
+  startup_timeout_seconds: 600
   source:
     repo: github.com/apteva/apps
     ref: main
