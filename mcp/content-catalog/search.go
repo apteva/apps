@@ -349,6 +349,13 @@ func (a *App) searchAssets(db *sql.DB, o searchOptions, cursor searchCursor) (se
 	if err := loadSearchUses(db, o.ProjectID, page.Items); err != nil {
 		return page, err
 	}
+	assetRefs := make([]*Asset, len(page.Items))
+	for i := range page.Items {
+		assetRefs[i] = &page.Items[i].Asset
+	}
+	if err := loadAssetHostings(db, o.ProjectID, assetRefs); err != nil {
+		return page, err
+	}
 	for i := range page.Items {
 		h := &page.Items[i]
 		switch o.Availability {
