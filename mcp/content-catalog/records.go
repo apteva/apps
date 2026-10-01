@@ -12,19 +12,20 @@ import (
 )
 
 type Asset struct {
-	ID               string        `json:"id"`
-	SessionID        string        `json:"session_id"`
-	StorageInstallID int64         `json:"storage_install_id"`
-	StorageFileID    string        `json:"storage_file_id"`
-	Name             string        `json:"name"`
-	Kind             string        `json:"kind"`
-	ContentType      string        `json:"content_type"`
-	SHA256           string        `json:"sha256"`
-	SizeBytes        int64         `json:"size_bytes"`
-	ReviewStatus     string        `json:"review_status"`
-	MediaStatus      string        `json:"media_status"`
-	MediaRating      string        `json:"media_rating"`
-	Publications     []Publication `json:"publications"`
+	ID               string           `json:"id"`
+	SessionID        string           `json:"session_id"`
+	StorageInstallID int64            `json:"storage_install_id"`
+	StorageFileID    string           `json:"storage_file_id"`
+	Name             string           `json:"name"`
+	Kind             string           `json:"kind"`
+	ContentType      string           `json:"content_type"`
+	SHA256           string           `json:"sha256"`
+	SizeBytes        int64            `json:"size_bytes"`
+	ReviewStatus     string           `json:"review_status"`
+	MediaStatus      string           `json:"media_status"`
+	MediaRating      string           `json:"media_rating"`
+	Publications     []Publication    `json:"publications"`
+	Hostings         []HostingSummary `json:"hostings"`
 }
 
 func assetByID(db *sql.DB, pid, id string) (*Asset, error) {
@@ -194,6 +195,13 @@ func (a *App) assetsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			return nil, err
 		}
 	}
+	assetRefs := make([]*Asset, len(out))
+	for i := range out {
+		assetRefs[i] = &out[i]
+	}
+	if err = loadAssetHostings(ctx.AppDB(), pid, assetRefs); err != nil {
+		return nil, err
+	}
 	return map[string]any{"assets": out}, nil
 }
 func (a *App) assetGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -230,6 +238,9 @@ func (a *App) assetGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	asset.Publications, err = publicationsForAsset(ctx.AppDB(), pid, asset.ID)
 	if err != nil {
+		return nil, err
+	}
+	if err = loadAssetHostings(ctx.AppDB(), pid, []*Asset{asset}); err != nil {
 		return nil, err
 	}
 	out := map[string]any{"asset": asset, "sources": sources, "hostings": hostingsAny.(map[string]any)["hostings"], "publications": asset.Publications}
