@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.24.30 — 2026-10-01
+
+- Use the native app icon when a legacy integration shares its tool namespace, including Torrent.
+- Match tool icons by the actual namespace while preserving exact tool ownership and more specific integration matches.
+
 ## 0.24.29 — 2026-10-01
 
 - Keep animated Thinking or a pulsing tool card visible throughout active responses, including after acknowledgements, hidden tool preparation, refreshes, and later turns.
