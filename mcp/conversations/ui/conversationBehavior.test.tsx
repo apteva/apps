@@ -358,6 +358,34 @@ for (const style of ["danger", undefined]) test(`approval choices stay distinct 
  expect(remove.className+keep.className).not.toMatch(/bg-success|bg-error/);
 });
 
+test("approval decisions show the chosen label live and after reopening the chat", async () => {
+ const approval={...message(301),role:"agent",agent_id:41,component_kind:"approval",components:[{app:"conversations",name:"approval-card",props:{title:"Delete Orbit Plans and todos",status:"pending",actions:[{id:"delete",label:"Delete list and todos"},{id:"keep",label:"Keep list and todos"}]}}]};
+ let saved=approval;
+ fetcher=url=>url.includes("/activity")||url.includes("/deliveries")?json([]):json({messages:[saved],cursor:301,before:301,has_more:false});
+ await render();
+ expect(element.textContent).not.toContain("Decision:");
+ expect([...element.querySelectorAll("button")].some(button=>button.textContent==="Delete list and todos")).toBe(true);
+ saved={...approval,components:[{...approval.components[0],props:{...approval.components[0].props,status:"delete",note:"Remove the seeded data"}}]} as typeof approval;
+ await act(async()=>FakeEvents.instances[0].emit({...saved,revision:2}));
+ expect(element.textContent).toContain("Decision: Delete list and todos");
+ expect(element.textContent).toContain("Note: Remove the seeded data");
+ expect([...element.querySelectorAll("button")].some(button=>button.textContent==="Delete list and todos")).toBe(false);
+ await act(async()=>root.render(null));
+ await render();
+ expect(element.textContent).toContain("Decision: Delete list and todos");
+ expect(element.textContent).toContain("Note: Remove the seeded data");
+ expect(element.textContent).not.toContain("Keep list and todos");
+});
+
+test("legacy approval decisions fall back to localized statuses", async () => {
+ const approvals=["approve","deny"].map((status,index)=>({...message(301+index),role:"agent",agent_id:41,component_kind:"approval",components:[{app:"conversations",name:"approval-card",props:{title:"Legacy approval",status}}]}));
+ fetcher=url=>url.includes("/activity")||url.includes("/deliveries")?json([]):json({messages:approvals,cursor:302,before:301,has_more:false});
+ await act(async()=>root.render(<ConversationChat conversation={conv("a")} locale="es" archived={false} onActed={()=>{}} onRemoved={()=>{}}/>));
+ await settle();
+ expect(element.textContent).toContain("Decisión: aprobado");
+ expect(element.textContent).toContain("Decisión: denegado");
+});
+
 test("new approval clears its agent's thinking while historical cards and other agents remain isolated", async () => {
  await render();
  const events=FakeEvents.instances[0];

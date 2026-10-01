@@ -307,18 +307,16 @@ export function ApprovalCard({
           <Glyph d={GLYPH_ALERT} size={14} />
         </span>
         <span className="font-semibold uppercase tracking-wide">{t("card.approval")}</span>
-        {status !== "pending" && (
-          <span
-            className="ml-auto px-1.5 py-0.5 rounded border border-border text-text-muted"
-          >
-            {statusLabel(status)}
-          </span>
-        )}
       </div>
       <p className="mt-1.5 text-sm font-medium text-text">{String(card.props.title ?? "")}</p>
       {card.props.body ? (
         <p className="mt-1 text-sm text-text-muted whitespace-pre-wrap">{String(card.props.body)}</p>
       ) : null}
+      {status !== "pending" && (
+        <p className="mt-2 text-sm font-medium text-text whitespace-pre-wrap break-words">
+          {t("approval.decision", { decision: actions.find(action => action.id === status)?.label || statusLabel(status) })}
+        </p>
+      )}
       {status === "pending" && (
         <div className="mt-2.5 flex flex-col gap-2">
           <input
