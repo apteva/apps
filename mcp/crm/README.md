@@ -1,17 +1,16 @@
-# CRM v0.9.6
+# CRM v0.9.7
 
 Apteva's contact, inbox, audience and opportunity sidecar. The supported dashboard
 is `ui/CrmPanel.tsx`, bundled as `CrmPanel.mjs`. `apteva.yaml` is embedded directly
 into the binary and is the single manifest source. `MCPTools()` supplies the
 executable input contracts, checked against the manifest by tests.
 
-Release `crm/v0.9.6` fixes email reply threading with Messaging. Outbound
-activities use the RFC `message_id_header` when available and retain the
-provider ID separately. Inbound matching recognizes legacy SES provider IDs
-only when the reference has an `amazonses.com` domain and belongs to the same
-project and contact. A matched legacy root is corrected to the delivered RFC
-header. The Customer inbox component introduced in `crm/v0.9.5` remains
-available.
+Release `crm/v0.9.7` makes Messaging suppression reconciliation cheaper: a
+five-minute worker checks only pending soft-bounce retries, while an
+unconditional full safety sweep runs every 30 minutes and applies a Messaging
+snapshot with set-based SQL. The sweep leaves unchanged routes untouched and
+preserves newer event updates. Email reply threading from `crm/v0.9.6` and the
+Customer inbox component from `crm/v0.9.5` remain available.
 
 ## Capabilities
 

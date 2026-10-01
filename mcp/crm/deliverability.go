@@ -105,13 +105,22 @@ func loadChannelDeliverability(db *sql.DB, pid string, channelID int64) ([]Chann
 }
 
 func (a *App) deliverabilityWorkers() []sdk.Worker {
-	return []sdk.Worker{{
-		Name:     "messaging-suppression-reconcile",
-		Schedule: "@every 5m",
-		Run: func(_ context.Context, ctx *sdk.AppCtx) error {
-			return a.reconcileMessagingSuppressions(ctx)
+	return []sdk.Worker{
+		{
+			Name:     "messaging-suppression-retry",
+			Schedule: "@every 5m",
+			Run: func(_ context.Context, ctx *sdk.AppCtx) error {
+				return a.retryMessagingSuppressions(ctx)
+			},
 		},
-	}}
+		{
+			Name:     "messaging-suppression-reconcile",
+			Schedule: "@every 30m",
+			Run: func(_ context.Context, ctx *sdk.AppCtx) error {
+				return a.reconcileMessagingSuppressions(ctx)
+			},
+		},
+	}
 }
 
 func eventProjectID(ctx *sdk.AppCtx, event sdk.Event) (string, error) {
@@ -644,34 +653,6 @@ func crmProjectIDs(db *sql.DB) ([]string, error) {
 	return out, rows.Err()
 }
 
-type reconcileRoute struct {
-	ChannelID int64
-	Transport string
-	Address   string
-}
-
-func allDeliveryRoutes(db *sql.DB, pid string) ([]reconcileRoute, error) {
-	rows, err := db.Query(
-		`SELECT c.id, s.transport, c.value
-		 FROM contact_channels c
-		 JOIN contact_channel_delivery_state s
-		   ON s.project_id = c.project_id AND s.channel_id = c.id
-		 WHERE c.project_id = ? AND c.kind IN ('email','phone')`, pid)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []reconcileRoute{}
-	for rows.Next() {
-		var route reconcileRoute
-		if err := rows.Scan(&route.ChannelID, &route.Transport, &route.Address); err != nil {
-			return nil, err
-		}
-		out = append(out, route)
-	}
-	return out, rows.Err()
-}
-
 type suppressionIndex map[string]*messagingSuppression
 
 func indexSuppressions(items []messagingSuppression) suppressionIndex {
@@ -744,78 +725,45 @@ func (a *App) reconcileMessagingSuppressions(ctx *sdk.AppCtx) error {
 func (a *App) reconcileProjectSuppressions(ctx *sdk.AppCtx, pid string) error {
 	started := time.Now()
 	snapshotStarted := started.UTC().Format(time.RFC3339Nano)
-	changed := int64(0)
 	items, err := listMessagingSuppressions(ctx, pid)
 	if err != nil {
 		return err
 	}
-	routes, err := allDeliveryRoutes(ctx.AppDB(), pid)
+	routes, changed, err := reconcileProjectSuppressionState(ctx.AppDB(), pid, items, snapshotStarted)
 	if err != nil {
 		return err
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	tx, err := ctx.AppDB().Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	index := indexSuppressions(items)
-	for i, route := range routes {
-		if i > 0 && i%100 == 0 {
-			if err := tx.Commit(); err != nil {
-				return err
-			}
-			tx, err = ctx.AppDB().Begin()
-			if err != nil {
-				return err
-			}
-			defer tx.Rollback()
-		}
-		var result sql.Result
-		match := index.match(route.Transport, route.Address)
-		if match != nil {
-			status := statusForSuppression(match.Reason)
-			result, err = tx.Exec(
-				`UPDATE contact_channel_delivery_state
-				 SET suppressed = 1, suppression_kind = ?, suppression_match = ?,
-					 suppression_reason = ?, suppression_source = ?, suppressed_at = ?,
-					 suppression_checked_at = ?,
-					 status = CASE WHEN delivery_evidence IS NOT NULL THEN delivery_evidence WHEN ? <> '' THEN ? ELSE status END,
-					 status_reason = CASE WHEN delivery_evidence IS NOT NULL THEN status_reason WHEN ? <> '' THEN ? ELSE status_reason END,
-					 status_updated_at = CASE WHEN ? <> '' THEN ? ELSE status_updated_at END,
-					 updated_at = CURRENT_TIMESTAMP
-				 WHERE project_id = ? AND channel_id = ? AND transport = ? AND (suppression_checked_at IS NULL OR julianday(suppression_checked_at)<=julianday(?)) AND (suppression_checked_at IS NULL OR suppressed<>1 OR COALESCE(suppression_kind,'')<>? OR COALESCE(suppression_match,'')<>? OR COALESCE(suppression_reason,'')<>? OR COALESCE(suppression_source,'')<>?)`,
-				match.Kind, match.Address, match.Reason, match.Source, nullStr(match.FirstSeen), now,
-				status, status, status, match.Reason, status, now, pid, route.ChannelID, route.Transport, snapshotStarted, match.Kind, match.Address, match.Reason, match.Source,
-			)
-		} else {
-			result, err = tx.Exec(
-				`UPDATE contact_channel_delivery_state
-				 SET suppressed = 0, suppression_kind = NULL, suppression_match = NULL,
-					 suppression_reason = NULL, suppression_source = NULL, suppressed_at = NULL,
-					 suppression_checked_at = ?,
-					 status = CASE WHEN delivery_evidence IS NOT NULL THEN delivery_evidence WHEN status IN ('hard_bounced','complained','unsubscribed') THEN 'active' ELSE status END,
-					 status_reason = CASE WHEN delivery_evidence IS NOT NULL THEN status_reason WHEN status IN ('hard_bounced','complained','unsubscribed') THEN NULL ELSE status_reason END,
-					 updated_at = CURRENT_TIMESTAMP
-				 WHERE project_id = ? AND channel_id = ? AND transport = ? AND (suppression_checked_at IS NULL OR julianday(suppression_checked_at)<=julianday(?)) AND (suppressed<>0 OR suppression_checked_at IS NULL)`,
-				now, pid, route.ChannelID, route.Transport, snapshotStarted,
-			)
-		}
-		if err != nil {
-			return err
-		}
-		n, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		changed += n
-	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
+	ctx.Logger().Info("crm suppression reconciliation", "project_id", pid, "duration_ms", time.Since(started).Milliseconds(), "routes", routes, "suppressions", len(items), "changed", changed)
+	return nil
+}
 
-	// These calls are intentionally outside the transaction. The state row is
-	// the retry marker, so a temporary Messaging failure needs no outbox table.
+func (a *App) retryMessagingSuppressions(ctx *sdk.AppCtx) error {
+	if messagingBound(ctx) == nil {
+		return nil
+	}
+	pids, err := crmProjectIDs(ctx.AppDB())
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	totalRetries := 0
+	for _, pid := range pids {
+		retries, retryErr := a.retryProjectSuppressions(ctx, pid)
+		totalRetries += retries
+		if retryErr != nil && firstErr == nil {
+			firstErr = retryErr
+		}
+	}
+	if totalRetries > 0 {
+		ctx.Logger().Info("crm suppression retries", "projects", len(pids), "retries", totalRetries)
+	}
+	return firstErr
+}
+
+// The state row is the retry marker, so a temporary Messaging failure needs
+// no additional outbox table. This query is small when there is no pending
+// soft-bounce work and never loads the full suppression list or all routes.
+func (a *App) retryProjectSuppressions(ctx *sdk.AppCtx, pid string) (int, error) {
 	rows, err := ctx.AppDB().Query(
 		`SELECT c.value, s.transport, COALESCE(s.suppression_kind,''), COALESCE(s.suppression_match,''),
 			s.quarantined, s.suppressed, s.consecutive_soft_bounces,
@@ -828,7 +776,7 @@ func (a *App) reconcileProjectSuppressions(ctx *sdk.AppCtx, pid string) error {
 			 AND s.suppression_source = 'crm' AND s.suppression_reason = 'soft-bounce-threshold')
 		 )`, pid)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	type retryRoute struct {
 		address, transport, kind, match, source, reason string
@@ -840,12 +788,12 @@ func (a *App) reconcileProjectSuppressions(ctx *sdk.AppCtx, pid string) error {
 		if err := rows.Scan(&route.address, &route.transport, &route.kind, &route.match,
 			&route.quarantined, &route.suppressed, &route.count, &route.source, &route.reason); err != nil {
 			rows.Close()
-			return err
+			return 0, err
 		}
 		retries = append(retries, route)
 	}
 	if err := rows.Close(); err != nil {
-		return err
+		return 0, err
 	}
 	for _, route := range retries {
 		if route.quarantined != 0 && route.suppressed == 0 {
@@ -854,8 +802,7 @@ func (a *App) reconcileProjectSuppressions(ctx *sdk.AppCtx, pid string) error {
 			a.removeSoftBounceSuppression(ctx, pid, route.transport, route.kind, route.match)
 		}
 	}
-	ctx.Logger().Info("crm suppression reconciliation", "project_id", pid, "duration_ms", time.Since(started).Milliseconds(), "routes", len(routes), "suppressions", len(items), "changed", changed, "retries", len(retries))
-	return nil
+	return len(retries), nil
 }
 
 // syncUncheckedContactSuppressions performs the proposal's one-time
