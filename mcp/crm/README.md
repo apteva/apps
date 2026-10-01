@@ -1,11 +1,20 @@
-# CRM v0.9.7
+# CRM v0.9.8
 
 Apteva's contact, inbox, audience and opportunity sidecar. The supported dashboard
 is `ui/CrmPanel.tsx`, bundled as `CrmPanel.mjs`. `apteva.yaml` is embedded directly
 into the binary and is the single manifest source. `MCPTools()` supplies the
 executable input contracts, checked against the manifest by tests.
 
-Release `crm/v0.9.7` makes Messaging suppression reconciliation cheaper: a
+Release `crm/v0.9.8` restores missing inbound email bodies safely. HTML-only
+mail is converted to readable text even when the plain-text part contains only
+whitespace. Re-delivery can fill an empty or subject-only activity body without
+creating another activity, changing thread state, or replaying business events.
+`contacts_refresh_message_body` previews recovery from the original in Messaging
+by default; pass `id`, `activity_id`, and `dry_run: false` to repair a verified
+missing body. It checks the project, source install, and RFC Message-ID and
+preserves existing complete content.
+
+Release `crm/v0.9.7` made Messaging suppression reconciliation cheaper: a
 five-minute worker checks only pending soft-bounce retries, while an
 unconditional full safety sweep runs every 30 minutes and applies a Messaging
 snapshot with set-based SQL. The sweep leaves unchanged routes untouched and
