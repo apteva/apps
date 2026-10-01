@@ -1,0 +1,77 @@
+schema: apteva-app/v1
+name: sportsbook
+display_name: Sportsbook
+version: 0.1.0
+description: Dedicated sports research and paper betting desk with normalized providers, experimental predictions, bet proposals and bankroll risk controls.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/sportsbook
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [sports, betting, predictions, odds, research]
+scopes: [project]
+min_apteva_version: "0.11.0"
+requires:
+  permissions: [db.write.app, platform.connections.read, platform.connections.execute]
+  integrations:
+    - role: sports_data
+      kind: integration
+      mode: multiple
+      required: false
+      label: "Sports data"
+      compatible_slugs: [the-sports-db, api-sports, api-tennis]
+    - role: odds
+      kind: integration
+      mode: multiple
+      required: false
+      label: "Odds"
+      compatible_slugs: [the-odds-api, api-tennis]
+    - role: llm
+      kind: integration
+      mode: multiple
+      required: false
+      label: "LLM"
+      compatible_slugs: [openai-api, anthropic-api]
+    - role: execution
+      kind: app
+      mode: multiple
+      required: false
+      label: Execution
+      compatible_app_names: [sportsbook-executor]
+      hint: Paper execution is built in. Connected wagering requires a compatible execution app and a later release.
+provides:
+  http_routes: [{ prefix: / }]
+  permissions:
+    - { name: sportsbook.read, description: "Read the sports research workspace." }
+    - { name: sportsbook.configure, description: "Manage routes, examples and paper bankrolls." }
+    - { name: sportsbook.sync, description: "Fetch data using bound providers." }
+    - { name: sportsbook.propose, description: "Run predictions and create bet proposals." }
+    - { name: sportsbook.paper_execute, description: "Accept paper bets and reserve virtual funds." }
+    - { name: sportsbook.paper_settle, description: "Settle virtual bets." }
+    - { name: sportsbook.live_execute, description: "Reserved for connected execution; unavailable in v0.1." }
+  mcp_tools:
+    - { name: workspace_get, requires: sportsbook.read, description: "Browse events, markets, predictions, proposals and paper bankrolls." }
+    - { name: integrations_list, requires: sportsbook.read, description: "Inspect selected providers, defaults, capabilities and routes." }
+    - { name: provider_route_set, requires: sportsbook.configure, description: "Choose a bound default provider for a role and sport." }
+    - { name: sports_sync, requires: sportsbook.sync, description: "Import normalized events or completed results from selected sports data providers." }
+    - { name: odds_sync, requires: sportsbook.sync, description: "Import pre-match match-winner quotes from selected odds providers." }
+    - { name: demo_load, requires: sportsbook.configure, description: "Explicitly load fictional example events and history; no live data is changed." }
+    - { name: prediction_run, requires: sportsbook.propose, description: "Create an immutable experimental Elo prediction, or a clearly labeled bookmaker baseline when history is insufficient." }
+    - { name: prediction_explain, requires: sportsbook.propose, description: "Generate a supplemental explanation through a selected LLM; never change probabilities or stakes." }
+    - { name: bet_propose, requires: sportsbook.propose, description: "Create a single-bet paper proposal pinned to a fresh quote and prediction." }
+    - { name: proposal_accept, requires: sportsbook.paper_execute, description: "Accept a proposal into a paper bankroll with atomic stake and exposure checks." }
+    - { name: bet_settle, requires: sportsbook.paper_settle, description: "Record an auditable manual paper settlement: won, lost, or void." }
+    - { name: odds_history, requires: sportsbook.read, description: "Read timestamped price observations for an event." }
+    - { name: bankroll_create, requires: sportsbook.configure, description: "Create a paper bankroll and its risk policy." }
+    - { name: bet_submit, requires: sportsbook.live_execute, description: "Live execution is unavailable in v0.1; never sends a wager." }
+  ui_panels:
+    - { slot: project.page, label: Sportsbook, icon: trophy, entry: /ui/SportsbookPanel.mjs }
+runtime:
+  kind: source
+  source: { repo: github.com/apteva/apps, ref: sportsbook/v0.1.0, entry: mcp/sportsbook }
+  port: 8080
+  health_check: /health
+db:
+  driver: sqlite
+  path: /data/sportsbook.db
+  migrations: migrations/
+upgrade_policy: auto-patch

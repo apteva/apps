@@ -1,0 +1,237 @@
+/* Preview-only token contract copied from @apteva/ui-kit/src/theme.css. */
+/* @apteva/ui-kit — token contract.
+ *
+ * MIRRORS dashboard/src/index.css's theme system 1:1 so a card
+ * rendered in the dashboard and the same card rendered in the
+ * standalone explorer / demo look identical.
+ *
+ * Two HTML attributes drive everything:
+ *   <html data-theme="terminal|clean" data-mode="dark|light">
+ *
+ * Theme owns identity (font, radii, shadow). Mode owns the palette.
+ * Switching themes = one attribute toggle on <html> — no rebuild,
+ * no re-render, the cascade re-styles every surface.
+ *
+ * Token vocabulary:
+ *   bg / bg-card / bg-hover / bg-input / bg-overlay   surfaces
+ *   text / text-muted / text-dim                       type tones
+ *   border / border-subtle / border-strong             separators
+ *   accent / accent-hover / accent-muted               brand
+ *   success / warn / error / info                      statuses
+ *
+ * The @theme block at the bottom maps these onto Tailwind utility
+ * classes (bg-bg-card, text-text, border-border, …) so component
+ * code never touches the raw vars.
+ *
+ * Consumers @import "tailwindcss" first, then this file. The
+ * dashboard provides its own copy of these tokens directly in
+ * dashboard/src/index.css; ui-kit standalone consumers (explorer,
+ * demo) get them from here.
+ */
+
+@variant dark (.dark &);
+
+@source "./**/*.{ts,tsx}";
+
+* { box-sizing: border-box; }
+
+/* ─── Identity (font + geometry) ─────────────────────────────────── */
+
+[data-theme="terminal"] {
+  --font-base: "JetBrains Mono", "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 6px;
+  --shadow-card: none;
+  --shadow-popover: 0 0 0 1px rgb(0 0 0 / 0.4);
+}
+[data-theme="clean"] {
+  --font-base: "Inter", "system-ui", -apple-system, sans-serif;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.04), 0 1px 3px rgb(0 0 0 / 0.06);
+  --shadow-popover: 0 4px 6px rgb(0 0 0 / 0.05), 0 10px 20px rgb(0 0 0 / 0.10);
+}
+
+/* Always-mono token, for code / inline IDs / log lines. Never themed. */
+:root {
+  --font-mono-fixed: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+/* ─── Palettes (4 = theme × mode) ─────────────────────────────────
+ *
+ * Default (no data-theme set) = terminal-dark. Same default the
+ * dashboard ships so first-paint without the bootstrap script
+ * still looks coherent.
+ */
+
+:root,
+[data-theme="terminal"][data-mode="dark"] {
+  --bg: #0a0a0a;
+  --bg-card: #141414;
+  --bg-hover: #1c1c1c;
+  --bg-input: #111111;
+  --bg-overlay: rgb(0 0 0 / 0.6);
+  --text: #e8e8e8;
+  --text-muted: #aaaaaa;
+  --text-dim: #888888;
+  --border: #2a2a2a;
+  --border-subtle: #333333;
+  --border-strong: #4a4a4a;
+  --accent: #f97316;
+  --accent-hover: #fb923c;
+  --accent-muted: #c2410c;
+  --success: #22c55e;
+  --warn: #eab308;
+  --error: #ef4444;
+  --info: #3b82f6;
+}
+
+[data-theme="terminal"][data-mode="light"] {
+  --bg: #faf8f3;
+  --bg-card: #f1ede4;
+  --bg-hover: #e8e3d6;
+  --bg-input: #f6f2e9;
+  --bg-overlay: rgb(0 0 0 / 0.5);
+  --text: #1a1a1a;
+  --text-muted: #555555;
+  --text-dim: #777777;
+  --border: #d4ccb8;
+  --border-subtle: #e2dcca;
+  --border-strong: #b9b09a;
+  --accent: #c2410c;
+  --accent-hover: #9a3412;
+  --accent-muted: #fdba74;
+  --success: #15803d;
+  --warn: #a16207;
+  --error: #b91c1c;
+  --info: #1d4ed8;
+}
+
+[data-theme="clean"][data-mode="dark"] {
+  --bg: #0f1419;
+  --bg-card: #1a2128;
+  --bg-hover: #232b34;
+  --bg-input: #131920;
+  --bg-overlay: rgb(0 0 0 / 0.6);
+  --text: #e6e8eb;
+  --text-muted: #a3aab3;
+  --text-dim: #7d848e;
+  --border: #2a3340;
+  --border-subtle: #1f2630;
+  --border-strong: #3d4759;
+  --accent: #6e8aff;
+  --accent-hover: #8aa1ff;
+  --accent-muted: #4255a5;
+  --success: #4ade80;
+  --warn: #fbbf24;
+  --error: #f87171;
+  --info: #60a5fa;
+}
+
+[data-theme="clean"][data-mode="light"] {
+  --bg: #ffffff;
+  --bg-card: #f7f8fa;
+  --bg-hover: #eef0f4;
+  --bg-input: #ffffff;
+  --bg-overlay: rgb(0 0 0 / 0.4);
+  --text: #15171a;
+  --text-muted: #4b5563;
+  --text-dim: #6b7280;
+  --border: #e5e7eb;
+  --border-subtle: #f1f3f5;
+  --border-strong: #cbd1d8;
+  --accent: #4f5fdb;
+  --accent-hover: #4150c4;
+  --accent-muted: #c1c8f0;
+  --success: #047857;
+  --warn: #b45309;
+  --error: #b91c1c;
+  --info: #1d4ed8;
+}
+
+/* ─── Tailwind theme tokens ───────────────────────────────────────
+ *
+ * Map the runtime CSS vars onto Tailwind's design system so every
+ * utility class (bg-bg-card, text-text-muted, border-border-strong,
+ * accent, success/warn/error/info, rounded-md, font-sans/font-mono)
+ * reads from the active palette. Switching themes flips `data-*` on
+ * <html> and the cascade does the rest — no JS, no rebuild.
+ */
+@theme {
+  --color-bg: var(--bg);
+  --color-bg-card: var(--bg-card);
+  --color-bg-hover: var(--bg-hover);
+  --color-bg-input: var(--bg-input);
+  --color-bg-overlay: var(--bg-overlay);
+
+  --color-text: var(--text);
+  --color-text-muted: var(--text-muted);
+  --color-text-dim: var(--text-dim);
+
+  --color-border: var(--border);
+  --color-border-subtle: var(--border-subtle);
+  --color-border-strong: var(--border-strong);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-muted: var(--accent-muted);
+
+  --color-success: var(--success);
+  --color-warn: var(--warn);
+  --color-error: var(--error);
+  --color-info: var(--info);
+
+  --font-sans: var(--font-base);
+  --font-mono: var(--font-mono-fixed);
+
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+}
+
+/* ─── Body + chrome ───────────────────────────────────────────── */
+
+body {
+  font-family: var(--font-base);
+  font-size: 15px;
+  background: var(--bg);
+  color: var(--text);
+  margin: 0;
+  min-height: 100dvh;
+  color-scheme: dark;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+[data-mode="light"] body { color-scheme: light; }
+
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 12px;
+  padding-right: 30px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border-subtle); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+/* Focus ring — accessible without ugly */
+*:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Hidden scrollbar utility */
+.no-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; width: 0; height: 0; }
