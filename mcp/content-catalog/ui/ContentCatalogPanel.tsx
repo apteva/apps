@@ -44,15 +44,15 @@ function DurationFilter({ mode, minimum, maximum, limit, loading, onMode, onRang
       <div className="flex flex-wrap items-center gap-2"><strong>Video / audio length</strong><span className="text-text-muted" role="status">{mode === "range" ? `${durationLabel(minimum * 1000)} – ${durationLabel(maximum * 1000)}` : mode === "unknown" ? "Length unknown" : "Any length"}</span></div>
       <div className="flex gap-2">{([["any", "Any length"], ["range", "Select range"], ["unknown", "Unknown only"]] as const).map(([value, label]) => <button key={value} type="button" aria-pressed={mode === value} className={`rounded-full border px-2 py-1 ${mode === value ? "border-accent text-accent bg-accent/10" : "border-border text-text-muted"}`} onClick={() => onMode(value)}>{label}</button>)}</div>
     </div>
-    <style>{`.catalog-duration-slider { position:absolute; inset:0; width:100%; height:32px; margin:0; background:transparent; appearance:none; -webkit-appearance:none; pointer-events:none; }
-.catalog-duration-slider::-webkit-slider-runnable-track { height:4px; background:transparent; }
-.catalog-duration-slider::-moz-range-track { height:4px; background:transparent; }
-.catalog-duration-slider::-webkit-slider-thumb { appearance:none; -webkit-appearance:none; width:18px; height:18px; margin-top:-7px; border-radius:50%; border:2px solid var(--color-bg, #12141c); background:var(--color-accent, #93b3ff); pointer-events:auto; cursor:ew-resize; }
-.catalog-duration-slider::-moz-range-thumb { width:14px; height:14px; border-radius:50%; border:2px solid var(--color-bg, #12141c); background:var(--color-accent, #93b3ff); pointer-events:auto; cursor:ew-resize; }
-.catalog-duration-slider:focus-visible { outline:2px solid var(--color-accent, #93b3ff); outline-offset:2px; border-radius:4px; }
-.catalog-duration-slider:disabled { opacity:.4; }
-.catalog-duration-slider:disabled::-webkit-slider-thumb { cursor:default; }
-.catalog-duration-slider:disabled::-moz-range-thumb { cursor:default; }`}</style>
+    <style>{`input.catalog-duration-slider[type="range"] { position:absolute; inset:0; width:100%; height:32px; margin:0; background:transparent; appearance:none; -webkit-appearance:none; pointer-events:none; }
+input.catalog-duration-slider[type="range"]::-webkit-slider-runnable-track { height:4px; background:transparent; }
+input.catalog-duration-slider[type="range"]::-moz-range-track { height:4px; background:transparent; }
+input.catalog-duration-slider[type="range"]::-webkit-slider-thumb { appearance:none; -webkit-appearance:none; width:18px; height:18px; margin-top:-7px; border-radius:50%; border:2px solid var(--bg, var(--color-bg, #12141c)); background:var(--accent, var(--color-accent, #93b3ff)); pointer-events:auto; cursor:ew-resize; }
+input.catalog-duration-slider[type="range"]::-moz-range-thumb { width:14px; height:14px; border-radius:50%; border:2px solid var(--bg, var(--color-bg, #12141c)); background:var(--accent, var(--color-accent, #93b3ff)); pointer-events:auto; cursor:ew-resize; }
+input.catalog-duration-slider[type="range"]:focus-visible { outline:2px solid var(--accent, var(--color-accent, #93b3ff)); outline-offset:2px; border-radius:4px; }
+input.catalog-duration-slider[type="range"]:disabled { opacity:.4; }
+input.catalog-duration-slider[type="range"]:disabled::-webkit-slider-thumb { cursor:default; }
+input.catalog-duration-slider[type="range"]:disabled::-moz-range-thumb { cursor:default; }`}</style>
     <div className="flex flex-wrap items-center gap-4">
       <div className="min-w-0" style={{ flex: "1 1 260px" }}>
         <div style={{ position: "relative", height: 32, marginInline: 9 }}>
@@ -408,7 +408,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
         <div className="rounded-xl border border-border bg-bg-input/30 p-3 space-y-3" aria-label="Filter session assets">
           <div className="flex flex-wrap gap-2" aria-label="Quick publication filters">{([[
             "any", "All files"], ["none", "No post recorded"], ["not_verified", "No verified live post"], ["verified", "Verified live"]] as const).map(([state, label]) => <button key={state} type="button" onClick={() => setAssetSharing(state)} className={`rounded-full border px-3 py-1 text-xs ${assetSharing === state ? "border-accent bg-accent/10 text-accent" : "border-border text-text-muted hover:text-text"}`}>{label} <strong>{sharingCount(state)}</strong></button>)}</div>
-          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 8 }}>
             <input className={inputClass} type="search" value={assetQuery} onChange={e => setAssetQuery(e.target.value)} placeholder="Find file name or ID" aria-label="Find session file" />
             <select className={inputClass} value={assetKind} onChange={e => setAssetKind(e.target.value)} aria-label="Content type"><option value="any">All content types</option><option value="video">Videos</option><option value="image">Images</option><option value="audio">Audio</option><option value="other">Other files</option></select>
             <select className={inputClass} value={assetSharing} onChange={e => setAssetSharing(e.target.value)} aria-label="Publication status"><option value="any">Any sharing status</option><option value="none">No post recorded</option><option value="not_verified">No verified live post</option><option value="verified">Verified live</option><option value="reported">Reported live, unverified</option><option value="scheduled">Scheduled or submitted</option><option value="failed">Failed</option></select>
