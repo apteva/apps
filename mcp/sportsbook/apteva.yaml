@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: sportsbook
 display_name: Sportsbook
-version: 0.1.0
+version: 0.2.0
 description: Dedicated sports research and paper betting desk with normalized providers, experimental predictions, bet proposals and bankroll risk controls.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/sportsbook
@@ -18,7 +18,7 @@ requires:
       mode: multiple
       required: false
       label: "Sports data"
-      compatible_slugs: [the-sports-db, api-sports, api-tennis]
+      compatible_slugs: [the-sports-db, api-sports, api-tennis, the-odds-api]
     - role: odds
       kind: integration
       mode: multiple
@@ -47,8 +47,14 @@ provides:
     - { name: sportsbook.propose, description: "Run predictions and create bet proposals." }
     - { name: sportsbook.paper_execute, description: "Accept paper bets and reserve virtual funds." }
     - { name: sportsbook.paper_settle, description: "Settle virtual bets." }
-    - { name: sportsbook.live_execute, description: "Reserved for connected execution; unavailable in v0.1." }
+    - { name: sportsbook.live_execute, description: "Reserved for connected execution; unavailable in v0.2." }
   mcp_tools:
+    - { name: catalog_get, requires: sportsbook.read, description: "List project sports, competitions, market configurations and provider mappings." }
+    - { name: sport_upsert, requires: sportsbook.configure, description: "Create or update a sport's name and enabled status." }
+    - { name: competition_upsert, requires: sportsbook.configure, description: "Create or update a competition within a sport." }
+    - { name: sport_market_set, requires: sportsbook.configure, description: "Configure match-winner outcomes, rules, model and history scope for new markets." }
+    - { name: provider_sport_mapping_set, requires: sportsbook.configure, description: "Map a provider's sport or competition key to the project catalog." }
+    - { name: provider_sports_list, requires: sportsbook.sync, description: "Discover sport and competition keys from a bound The Odds API connection." }
     - { name: workspace_get, requires: sportsbook.read, description: "Browse events, markets, predictions, proposals and paper bankrolls." }
     - { name: integrations_list, requires: sportsbook.read, description: "Inspect selected providers, defaults, capabilities and routes." }
     - { name: provider_route_set, requires: sportsbook.configure, description: "Choose a bound default provider for a role and sport." }
@@ -62,12 +68,12 @@ provides:
     - { name: bet_settle, requires: sportsbook.paper_settle, description: "Record an auditable manual paper settlement: won, lost, or void." }
     - { name: odds_history, requires: sportsbook.read, description: "Read timestamped price observations for an event." }
     - { name: bankroll_create, requires: sportsbook.configure, description: "Create a paper bankroll and its risk policy." }
-    - { name: bet_submit, requires: sportsbook.live_execute, description: "Live execution is unavailable in v0.1; never sends a wager." }
+    - { name: bet_submit, requires: sportsbook.live_execute, description: "Live execution is unavailable in v0.2; never sends a wager." }
   ui_panels:
     - { slot: project.page, label: Sportsbook, icon: trophy, entry: /ui/SportsbookPanel.mjs }
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: sportsbook/v0.1.0, entry: mcp/sportsbook }
+  source: { repo: github.com/apteva/apps, ref: sportsbook/v0.2.0, entry: mcp/sportsbook }
   port: 8080
   health_check: /health
 db:

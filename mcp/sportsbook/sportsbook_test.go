@@ -22,9 +22,11 @@ func testApp(t *testing.T) *App {
 	}
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
-	raw, _ := embedded.ReadFile("migrations/001_init.sql")
-	if _, err = db.Exec(string(raw)); err != nil {
-		t.Fatal(err)
+	for _, file := range []string{"migrations/001_init.sql", "migrations/002_catalog.sql"} {
+		raw, _ := embedded.ReadFile(file)
+		if _, err = db.Exec(string(raw)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return &App{db: db, now: func() time.Time { return time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC) }}
 }
@@ -300,7 +302,7 @@ func TestExperimentalModelSnapshotsAndNoFutureLeak(t *testing.T) {
 	if err := a.db.QueryRow("SELECT model,features FROM predictions WHERE project_id='p1' AND id=?", p).Scan(&model, &raw); err != nil {
 		t.Fatal(err)
 	}
-	if model != "elo-v1-experimental" {
+	if model != "elo-v2-experimental" {
 		t.Fatalf("model=%s", model)
 	}
 	var features map[string]any

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -67,7 +68,7 @@ func (a *App) bound(app *sdk.AppCtx, role string) ([]Provider, error) {
 func (a *App) integrationStatus(app *sdk.AppCtx, project string) (any, error) {
 	out := map[string]any{}
 	for _, role := range roles {
-		ps, err := a.bound(app, role)
+		ps, err := a.availableProviders(app, project, role)
 		if err != nil {
 			return nil, err
 		}
@@ -80,7 +81,7 @@ func (a *App) integrationStatus(app *sdk.AppCtx, project string) (any, error) {
 	return map[string]any{"roles": out, "routes": routes, "live_execution_available": false}, nil
 }
 func (a *App) choose(app *sdk.AppCtx, project, role, sport string, explicit int64, all bool) ([]Provider, error) {
-	ps, err := a.bound(app, role)
+	ps, err := a.availableProviders(app, project, role)
 	if err != nil {
 		return nil, err
 	}
@@ -166,14 +167,22 @@ func (a *App) setRoute(app *sdk.AppCtx, project, actor string, args map[string]a
 			valid = true
 		}
 	}
-	if !valid || !(sport == "*" || sport == "football" || sport == "tennis") {
+	if !valid {
 		return nil, fail("invalid_route", 400, "Invalid role or sport")
+	}
+	if sport != "*" {
+		if err := a.initCatalog(project); err != nil {
+			return nil, err
+		}
+		if err := sportEnabled(a.db, project, sport); err != nil {
+			return nil, err
+		}
 	}
 	id := intArg(args, "connection_id")
 	if id <= 0 {
 		return nil, fail("invalid_route", 400, "Positive provider ID required")
 	}
-	ps, err := a.bound(app, role)
+	ps, err := a.availableProviders(app, project, role)
 	if err != nil {
 		return nil, err
 	}
@@ -235,8 +244,26 @@ func (a *App) execute(ctx context.Context, app *sdk.AppCtx, p Provider, tool str
 }
 func (a *App) sync(ctx context.Context, app *sdk.AppCtx, project, actor, operation string, args map[string]any) (any, error) {
 	sport := textArg(args, "sport")
-	if sport != "football" && sport != "tennis" {
-		return nil, fail("unsupported_sport", 400, "v0.1 supports football and tennis")
+	if err := a.initCatalog(project); err != nil {
+		return nil, err
+	}
+	if err := sportEnabled(a.db, project, sport); err != nil {
+		return nil, err
+	}
+	cfg, err := marketConfig(a.db, project, sport)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Enabled == 0 {
+		return nil, fail("market_disabled", 409, "Enable the sport's market configuration")
+	}
+	comp := textArg(args, "competition_id")
+	if comp != "" {
+		var selectedSport string
+		var enabled int
+		if e := a.db.QueryRow("SELECT sport,enabled FROM competitions WHERE project_id=? AND id=?", project, comp).Scan(&selectedSport, &enabled); e != nil || selectedSport != sport || enabled == 0 {
+			return nil, fail("competition_unavailable", 409, "Select an enabled competition from this sport")
+		}
 	}
 	date, err := time.Parse("2006-01-02", textArg(args, "date"))
 	if err != nil {
@@ -255,43 +282,89 @@ func (a *App) sync(ctx context.Context, app *sdk.AppCtx, project, actor, operati
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		events, fetchErr := a.fetch(ctx, app, p, role, sport, date, textArg(args, "sport_key"))
+		key := textArg(args, "sport_key")
+		var fetchErr error
+		needsMapping := p.Slug == "the-sports-db" || p.Slug == "the-odds-api" || comp != ""
+		if key == "" && needsMapping {
+			key, fetchErr = a.mapping(project, sport, comp, role, p.Slug)
+		}
+		if p.Slug == "the-sports-db" && comp != "" {
+			key, fetchErr = a.mapping(project, sport, "", role, p.Slug)
+		}
+		var events []FeedEvent
+		if fetchErr == nil {
+			events, fetchErr = a.fetch(ctx, app, p, role, sport, date, key, cfg)
+		}
+		if fetchErr == nil && comp != "" {
+			var name string
+			_ = a.db.QueryRow("SELECT name FROM competitions WHERE project_id=? AND id=?", project, comp).Scan(&name)
+			filtered := []FeedEvent{}
+			for _, e := range events {
+				if p.Slug == "the-sports-db" && identity(e.Competition) != identity(name) {
+					continue
+				}
+				e.CompetitionID = comp
+				e.Competition = name
+				filtered = append(filtered, e)
+			}
+			events = filtered
+		}
 		imported := 0
 		if fetchErr == nil {
-			imported, fetchErr = a.importBatch(project, actor, p, role, sport, date, events)
+			imported, fetchErr = a.importBatch(project, actor, p, role, sport, date, events, key+":"+comp)
 		}
 		row := map[string]any{"connection_id": p.ID, "provider": p.Slug, "events": imported, "success": fetchErr == nil}
 		if fetchErr != nil {
 			row["error"] = "Provider import failed; check connection, coverage and response format"
+			if e, ok := fetchErr.(*appError); ok {
+				row["error"] = e.Message
+				row["code"] = e.Code
+			}
 		}
 		report = append(report, row)
 	}
 	return map[string]any{"sources": report}, nil
 }
-func (a *App) fetch(ctx context.Context, app *sdk.AppCtx, p Provider, role, sport string, date time.Time, sportKey string) ([]FeedEvent, error) {
+func (a *App) fetch(ctx context.Context, app *sdk.AppCtx, p Provider, role, sport string, date time.Time, sportKey string, cfg MarketConfig) ([]FeedEvent, error) {
 	day := date.Format("2006-01-02")
 	args := map[string]any{}
 	tool := ""
 	switch role + ":" + p.Slug {
 	case "sports_data:the-sports-db":
 		tool = "events_day"
-		args = map[string]any{"d": day, "s": "Soccer"}
+		args = map[string]any{"d": day, "s": sportKey}
 	case "sports_data:api-sports":
 		tool = "fixtures"
 		args = map[string]any{"date": day}
+		if sportKey != "" {
+			args["league"] = sportKey
+		}
 	case "sports_data:api-tennis":
 		tool = "list_fixtures"
 		args = map[string]any{"date_start": day, "date_stop": day, "timezone": "UTC"}
-	case "odds:the-odds-api":
-		if sportKey == "" {
-			if sport == "football" {
-				sportKey = "soccer_epl"
-			} else {
-				return nil, fail("sport_key_required", 400, "Choose an active The Odds API tennis sport key")
+		if sportKey != "" {
+			n, e := strconv.ParseInt(sportKey, 10, 64)
+			if e != nil || n <= 0 {
+				return nil, fail("invalid_mapping", 400, "Use a positive tournament ID")
 			}
+			args["tournament_key"] = n
 		}
-		if (sport == "football" && !strings.HasPrefix(sportKey, "soccer_")) || (sport == "tennis" && !strings.HasPrefix(sportKey, "tennis_")) {
-			return nil, fail("invalid_sport_key", 400, "Sport key does not match the selected sport")
+	case "sports_data:the-odds-api":
+		if sportKey == "" {
+			return nil, fail("mapping_required", 409, "Configure a provider sport key")
+		}
+		tool = "get_events"
+		args = map[string]any{"sport": sportKey, "dateFormat": "iso"}
+		if date.Unix() < time.Unix(a.clock(), 0).UTC().Truncate(24*time.Hour).Unix() {
+			if date.Unix() < time.Unix(a.clock(), 0).UTC().Truncate(24*time.Hour).AddDate(0, 0, -3).Unix() {
+				return nil, fail("history_unavailable", 409, "The Odds API scores endpoint only covers the last three days")
+			}
+			tool = "get_scores"
+			args["daysFrom"] = 3
+		}
+	case "odds:the-odds-api":
+		if sportKey == "" || !catalogID.MatchString(sportKey) {
+			return nil, fail("mapping_required", 409, "Configure a valid provider sport key")
 		}
 		tool = "get_odds"
 		args = map[string]any{"sport": sportKey, "markets": "h2h", "regions": "eu", "oddsFormat": "decimal"}
@@ -306,7 +379,15 @@ func (a *App) fetch(ctx context.Context, app *sdk.AppCtx, p Provider, role, spor
 		return nil, err
 	}
 	if role == "odds" && p.Slug == "api-tennis" {
-		fixtures, err := a.execute(ctx, app, p, "list_fixtures", map[string]any{"date_start": day, "date_stop": day, "timezone": "UTC"})
+		fixtureArgs := map[string]any{"date_start": day, "date_stop": day, "timezone": "UTC"}
+		if sportKey != "" {
+			n, e := strconv.ParseInt(sportKey, 10, 64)
+			if e != nil || n <= 0 {
+				return nil, fail("invalid_mapping", 400, "Use a positive tournament ID")
+			}
+			fixtureArgs["tournament_key"] = n
+		}
+		fixtures, err := a.execute(ctx, app, p, "list_fixtures", fixtureArgs)
 		if err != nil {
 			return nil, err
 		}
@@ -325,13 +406,41 @@ func (a *App) fetch(ctx context.Context, app *sdk.AppCtx, p Provider, role, spor
 	case "api-tennis":
 		events, err = parseTennis(raw)
 	case "the-odds-api":
-		events, err = parseOddsAPI(raw, sport)
+		events, err = parseOddsAPIProfile(raw, sport, cfg.Profile)
+		if role == "sports_data" && tool == "get_scores" {
+			events, err = parseOddsScores(raw, sport, cfg.Rules)
+		}
 	}
 	if err != nil {
 		return nil, err
 	}
+	if p.Slug == "the-odds-api" {
+		var rows []struct {
+			Key string `json:"sport_key"`
+		}
+		if err = json.Unmarshal(raw, &rows); err != nil {
+			return nil, err
+		}
+		for _, r := range rows {
+			if r.Key != "" && r.Key != sportKey {
+				return nil, fail("provider_sport_mismatch", 502, "Provider response does not match requested sport key")
+			}
+		}
+	}
 	filtered := []FeedEvent{}
 	for _, e := range events {
+		e.Sport = sport
+		switch p.Slug {
+		case "api-sports":
+			e.ScoreRules = "regulation"
+		case "api-tennis", "the-odds-api":
+			e.ScoreRules = "match_completed"
+		case "the-sports-db":
+			e.ScoreRules = "match_completed"
+			if sport == "football" {
+				e.ScoreRules = "regulation"
+			}
+		}
 		if e.Start >= date.Unix() && e.Start < date.AddDate(0, 0, 1).Unix() {
 			filtered = append(filtered, e)
 		}
@@ -404,3 +513,36 @@ func (a *App) explain(ctx context.Context, app *sdk.AppCtx, project string, args
 	return map[string]any{"id": id, "text": answer, "model": model, "connection_id": p.ID}, nil
 }
 func malformed() error { return fmt.Errorf("unexpected provider response") }
+
+func (a *App) discoverSports(ctx context.Context, app *sdk.AppCtx, project string, id int64) (any, error) {
+	ps, err := a.bound(app, "odds")
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range ps {
+		if p.ID == id && p.Slug == "the-odds-api" {
+			raw, err := a.execute(ctx, app, p, "list_sports", map[string]any{"all": true})
+			if err != nil {
+				return nil, err
+			}
+			var rows []struct {
+				Key    string `json:"key"`
+				Title  string `json:"title"`
+				Group  string `json:"group"`
+				Active bool   `json:"active"`
+			}
+			if err = json.Unmarshal(raw, &rows); err != nil || len(rows) > 2000 {
+				return nil, fail("invalid_provider_catalog", 502, "Provider returned an invalid sports catalog")
+			}
+			out := []map[string]any{}
+			for _, r := range rows {
+				if !catalogID.MatchString(r.Key) || len(r.Title) > 200 || len(r.Group) > 200 {
+					return nil, fail("invalid_provider_catalog", 502, "Provider returned an invalid sport key")
+				}
+				out = append(out, map[string]any{"key": r.Key, "title": r.Title, "group": r.Group, "active": r.Active})
+			}
+			return out, nil
+		}
+	}
+	return nil, fail("unbound_provider", 403, "Select a bound The Odds API connection")
+}

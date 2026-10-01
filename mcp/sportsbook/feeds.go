@@ -16,11 +16,11 @@ type Quote struct {
 	Observed  int64
 }
 type FeedEvent struct {
-	ExternalID, Sport, Competition, Home, Away, Status string
-	Start                                              int64
-	HomeScore, AwayScore                               *int
-	Quotes                                             []Quote
-	Example                                            bool
+	ExternalID, Sport, Competition, CompetitionID, Home, Away, Status, ScoreRules string
+	Start                                                                         int64
+	HomeScore, AwayScore                                                          *int
+	Quotes                                                                        []Quote
+	Example                                                                       bool
 }
 
 func parseTime(s string) (int64, error) {
@@ -204,6 +204,13 @@ func parseTennis(raw json.RawMessage) ([]FeedEvent, error) {
 	return out, nil
 }
 func parseOddsAPI(raw json.RawMessage, sport string) ([]FeedEvent, error) {
+	profile := "two_way"
+	if sport == "football" {
+		profile = "three_way"
+	}
+	return parseOddsAPIProfile(raw, sport, profile)
+}
+func parseOddsAPIProfile(raw json.RawMessage, sport, profile string) ([]FeedEvent, error) {
 	var body []struct {
 		ID         string `json:"id"`
 		SportTitle string `json:"sport_title"`
@@ -247,6 +254,7 @@ func parseOddsAPI(raw json.RawMessage, sport string) ([]FeedEvent, error) {
 					continue
 				}
 				batch := []Quote{}
+				validBatch := true
 				for _, o := range m.Outcomes {
 					selection := ""
 					switch o.Name {
@@ -255,17 +263,18 @@ func parseOddsAPI(raw json.RawMessage, sport string) ([]FeedEvent, error) {
 					case r.Away:
 						selection = "away"
 					case "Draw":
-						if sport == "football" {
+						if profile == "three_way" {
 							selection = "draw"
 						}
 					}
 					odds, err := parseOdds(strconv.FormatFloat(o.Price, 'f', 6, 64))
 					if err != nil || selection == "" {
-						continue
+						validBatch = false
+						break
 					}
 					batch = append(batch, Quote{selection, b.Key, odds, observed})
 				}
-				if completeQuotes(batch, sport) {
+				if validBatch && completeProfileQuotes(batch, profile) {
 					e.Quotes = append(e.Quotes, batch...)
 				}
 			}
@@ -312,6 +321,13 @@ func addTennisOdds(events []FeedEvent, raw json.RawMessage, received int64) ([]F
 	return events, nil
 }
 func completeQuotes(qs []Quote, sport string) bool {
+	profile := "two_way"
+	if sport == "football" {
+		profile = "three_way"
+	}
+	return completeProfileQuotes(qs, profile)
+}
+func completeProfileQuotes(qs []Quote, profile string) bool {
 	seen := map[string]bool{}
 	for _, q := range qs {
 		if seen[q.Selection] {
@@ -319,7 +335,7 @@ func completeQuotes(qs []Quote, sport string) bool {
 		}
 		seen[q.Selection] = true
 	}
-	return seen["home"] && seen["away"] && (sport != "football" || seen["draw"])
+	return seen["home"] && seen["away"] && ((profile == "three_way" && seen["draw"] && len(seen) == 3) || (profile == "two_way" && !seen["draw"] && len(seen) == 2))
 }
 func identity(s string) string { return strings.ToLower(strings.Join(strings.Fields(s), " ")) }
 func upsertEvent(tx *sql.Tx, project string, p Provider, e FeedEvent, now int64) (string, string, error) {
@@ -329,19 +345,47 @@ func upsertEvent(tx *sql.Tx, project string, p Provider, e FeedEvent, now int64)
 	if e.Status != "scheduled" && e.Status != "live" && e.Status != "finished" && e.Status != "cancelled" {
 		return "", "", fmt.Errorf("invalid event status")
 	}
+	if err := ensureCatalog(tx, project); err != nil {
+		return "", "", err
+	}
+	if err := sportEnabled(tx, project, e.Sport); err != nil {
+		return "", "", err
+	}
+	cfg, err := marketConfig(tx, project, e.Sport)
+	if err != nil {
+		return "", "", err
+	}
+	if cfg.Enabled == 0 {
+		return "", "", fail("market_disabled", 409, "Market is disabled")
+	}
+	comp := e.CompetitionID
+	if comp == "" {
+		comp, err = ensureCompetition(tx, project, e.Sport, e.Competition)
+		if err != nil {
+			return "", "", err
+		}
+	}
+	var compSport string
+	var compEnabled int
+	if err = tx.QueryRow(`SELECT sport,enabled FROM competitions WHERE project_id=? AND id=?`, project, comp).Scan(&compSport, &compEnabled); err != nil || compSport != e.Sport || compEnabled == 0 {
+		return "", "", fail("competition_unavailable", 409, "Competition is disabled or belongs to another sport")
+	}
+	if e.ScoreRules == "" {
+		e.ScoreRules = cfg.Rules
+	}
 	ex := 0
 	if e.Example {
 		ex = 1
 	}
 	id := ""
-	err := tx.QueryRow(`SELECT event_id FROM event_aliases WHERE project_id=? AND source=? AND connection_id=? AND external_id=?`, project, p.Slug, p.ID, e.ExternalID).Scan(&id)
+	err = tx.QueryRow(`SELECT event_id FROM event_aliases WHERE project_id=? AND source=? AND connection_id=? AND external_id=?`, project, p.Slug, p.ID, e.ExternalID).Scan(&id)
 	if err != nil && err != sql.ErrNoRows {
 		return "", "", err
 	}
 	if id == "" {
 		// Conservative identity matching: exact normalized participants, same
 		// sport, same minute, unique candidate. Ambiguity stays separate.
-		candidates, err := objects(tx, `SELECT id,home,away FROM events WHERE project_id=? AND example=? AND sport=? AND starts_at BETWEEN ? AND ?`, project, ex, e.Sport, e.Start-60, e.Start+60)
+		candidates, err := objects(tx, `SELECT id,home,away FROM events WHERE project_id=? AND example=? AND sport=? AND competition_id=? AND starts_at BETWEEN ? AND ?`, project, ex, e.Sport, comp, e.Start-60, e.Start+60)
 		if err != nil {
 			return "", "", err
 		}
@@ -357,7 +401,15 @@ func upsertEvent(tx *sql.Tx, project string, p Provider, e FeedEvent, now int64)
 			id = newID()
 		}
 	}
-	_, err = tx.Exec(`INSERT INTO events(project_id,id,sport,competition,home,away,starts_at,status,home_score,away_score,source,external_id,connection_id,received_at,example) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id,id) DO UPDATE SET starts_at=excluded.starts_at,status=CASE WHEN events.status IN ('finished','cancelled') AND excluded.status IN ('scheduled','live') THEN events.status ELSE excluded.status END,home_score=CASE WHEN events.status IN ('finished','cancelled') AND excluded.status IN ('scheduled','live') THEN events.home_score WHEN excluded.status='finished' THEN excluded.home_score ELSE COALESCE(excluded.home_score,events.home_score) END,away_score=CASE WHEN events.status IN ('finished','cancelled') AND excluded.status IN ('scheduled','live') THEN events.away_score WHEN excluded.status='finished' THEN excluded.away_score ELSE COALESCE(excluded.away_score,events.away_score) END,received_at=excluded.received_at`, project, id, e.Sport, e.Competition, e.Home, e.Away, e.Start, e.Status, e.HomeScore, e.AwayScore, p.Slug, e.ExternalID, p.ID, now, ex)
+	var oldSport, oldComp string
+	oldErr := tx.QueryRow(`SELECT sport,competition_id FROM events WHERE project_id=? AND id=?`, project, id).Scan(&oldSport, &oldComp)
+	if oldErr != nil && oldErr != sql.ErrNoRows {
+		return "", "", oldErr
+	}
+	if oldErr == nil && (oldSport != e.Sport || (oldComp != "" && oldComp != comp)) {
+		return "", "", fail("event_identity_conflict", 409, "An existing provider event cannot move to another sport or competition")
+	}
+	_, err = tx.Exec(`INSERT INTO events(project_id,id,sport,competition,home,away,starts_at,status,home_score,away_score,source,external_id,connection_id,received_at,example,score_rules) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id,id) DO UPDATE SET starts_at=excluded.starts_at,status=CASE WHEN events.status IN ('finished','cancelled') AND excluded.status IN ('scheduled','live') THEN events.status ELSE excluded.status END,home_score=CASE WHEN events.status IN ('finished','cancelled') AND excluded.status IN ('scheduled','live') THEN events.home_score WHEN excluded.status='finished' THEN excluded.home_score ELSE COALESCE(excluded.home_score,events.home_score) END,away_score=CASE WHEN events.status IN ('finished','cancelled') AND excluded.status IN ('scheduled','live') THEN events.away_score WHEN excluded.status='finished' THEN excluded.away_score ELSE COALESCE(excluded.away_score,events.away_score) END,received_at=excluded.received_at,score_rules=CASE WHEN events.status IN ('finished','cancelled') AND excluded.status IN ('scheduled','live') THEN events.score_rules WHEN excluded.status='finished' THEN excluded.score_rules ELSE events.score_rules END`, project, id, e.Sport, e.Competition, e.Home, e.Away, e.Start, e.Status, e.HomeScore, e.AwayScore, p.Slug, e.ExternalID, p.ID, now, ex, e.ScoreRules)
 	if err != nil {
 		return "", "", err
 	}
@@ -365,19 +417,19 @@ func upsertEvent(tx *sql.Tx, project string, p Provider, e FeedEvent, now int64)
 	if err != nil {
 		return "", "", err
 	}
-	rules := "regulation"
-	if e.Sport == "tennis" {
-		rules = "match_completed"
+	if _, err = tx.Exec(`UPDATE events SET competition_id=? WHERE project_id=? AND id=? AND competition_id=''`, comp, project, id); err != nil {
+		return "", "", err
 	}
+	rules := cfg.Rules
 	market := ""
-	err = tx.QueryRow(`SELECT id FROM markets WHERE project_id=? AND event_id=? AND type='match_winner' AND rules=?`, project, id, rules).Scan(&market)
+	err = tx.QueryRow(`SELECT id FROM markets WHERE project_id=? AND event_id=? AND type='match_winner' ORDER BY rowid LIMIT 1`, project, id).Scan(&market)
 	if err == sql.ErrNoRows {
 		market = newID()
-		_, err = tx.Exec(`INSERT INTO markets VALUES(?,?,?,?,?)`, project, market, id, "match_winner", rules)
+		_, err = tx.Exec(`INSERT INTO markets(project_id,id,event_id,type,rules,outcome_profile,prediction_model,history_scope,home_advantage) VALUES(?,?,?,?,?,?,?,?,?)`, project, market, id, "match_winner", rules, cfg.Profile, cfg.Model, cfg.Scope, cfg.Advantage)
 	}
 	return id, market, err
 }
-func (a *App) importBatch(project, actor string, p Provider, role, sport string, date time.Time, events []FeedEvent) (int, error) {
+func (a *App) importBatch(project, actor string, p Provider, role, sport string, date time.Time, events []FeedEvent, feedScopes ...string) (int, error) {
 	if len(events) > 2000 {
 		return 0, fmt.Errorf("too many events")
 	}
@@ -387,19 +439,42 @@ func (a *App) importBatch(project, actor string, p Provider, role, sport string,
 		return 0, err
 	}
 	defer tx.Rollback()
+	if err = ensureCatalog(tx, project); err != nil {
+		return 0, err
+	}
+	scope := ""
+	if len(feedScopes) > 0 {
+		scope = feedScopes[0]
+	}
 	if role == "odds" {
 		// A successful complete date snapshot invalidates omitted bookmaker quotes.
-		_, err = tx.Exec(`UPDATE quote_heads SET snapshot_id='' WHERE project_id=? AND source=? AND connection_id=? AND market_id IN (SELECT m.id FROM markets m JOIN events e ON e.project_id=m.project_id AND e.id=m.event_id WHERE m.project_id=? AND e.example=0 AND e.sport=? AND e.starts_at>=? AND e.starts_at<?)`, project, p.Slug, p.ID, project, sport, date.Unix(), date.AddDate(0, 0, 1).Unix())
+		_, err = tx.Exec(`UPDATE quote_heads SET snapshot_id='' WHERE project_id=? AND source=? AND connection_id=? AND feed_scope=? AND market_id IN (SELECT m.id FROM markets m JOIN events e ON e.project_id=m.project_id AND e.id=m.event_id WHERE m.project_id=? AND e.example=0 AND e.sport=? AND e.starts_at>=? AND e.starts_at<?)`, project, p.Slug, p.ID, scope, project, sport, date.Unix(), date.AddDate(0, 0, 1).Unix())
 		if err != nil {
 			return 0, err
 		}
 	}
 	for _, e := range events {
+		if sport != "" && e.Sport != sport {
+			return 0, fail("sport_mismatch", 400, "Provider event does not match selected sport")
+		}
 		_, market, err := upsertEvent(tx, project, p, e, now)
 		if err != nil {
 			return 0, err
 		}
 		if role == "odds" || e.Example {
+			var profile string
+			if err = tx.QueryRow("SELECT outcome_profile FROM markets WHERE project_id=? AND id=?", project, market).Scan(&profile); err != nil {
+				return 0, err
+			}
+			groups := map[string][]Quote{}
+			for _, q := range e.Quotes {
+				groups[q.Bookmaker] = append(groups[q.Bookmaker], q)
+			}
+			for _, qs := range groups {
+				if !completeProfileQuotes(qs, profile) {
+					return 0, fail("market_outcomes_mismatch", 409, "Quotes do not match the market's frozen outcome profile")
+				}
+			}
 			snapshot := newID()
 			for _, q := range e.Quotes {
 				if q.Observed > now+30 || q.Observed <= 0 {
@@ -410,7 +485,7 @@ func (a *App) importBatch(project, actor string, p Provider, role, sport string,
 					return 0, err
 				}
 			}
-			_, err = tx.Exec(`INSERT INTO quote_heads VALUES(?,?,?,?,?) ON CONFLICT(project_id,market_id,source,connection_id) DO UPDATE SET snapshot_id=excluded.snapshot_id`, project, market, p.Slug, p.ID, snapshot)
+			_, err = tx.Exec(`INSERT INTO quote_heads(project_id,market_id,source,connection_id,snapshot_id,feed_scope) VALUES(?,?,?,?,?,?) ON CONFLICT(project_id,market_id,source,connection_id) DO UPDATE SET snapshot_id=excluded.snapshot_id,feed_scope=excluded.feed_scope`, project, market, p.Slug, p.ID, snapshot, scope)
 			if err != nil {
 				return 0, err
 			}
@@ -420,4 +495,48 @@ func (a *App) importBatch(project, actor string, p Provider, role, sport string,
 		return 0, err
 	}
 	return len(events), tx.Commit()
+}
+
+// The Odds API exposes final totals, not regulation-only scores. Only train
+// completed-match markets from this endpoint; regulation scores remain absent.
+func parseOddsScores(raw json.RawMessage, sport, rules string) ([]FeedEvent, error) {
+	events, err := parseOddsAPIProfile(raw, sport, "two_way")
+	if err != nil {
+		return nil, err
+	}
+	var rows []struct {
+		ID        string `json:"id"`
+		Completed bool   `json:"completed"`
+		Scores    []struct {
+			Name  string `json:"name"`
+			Score string `json:"score"`
+		} `json:"scores"`
+	}
+	if err = json.Unmarshal(raw, &rows); err != nil {
+		return nil, err
+	}
+	byID := map[string]int{}
+	for i, e := range events {
+		byID[e.ExternalID] = i
+	}
+	for _, r := range rows {
+		i, ok := byID[r.ID]
+		if !ok {
+			continue
+		}
+		if r.Completed {
+			events[i].Status = "finished"
+			if rules == "match_completed" {
+				for _, s := range r.Scores {
+					if s.Name == events[i].Home {
+						events[i].HomeScore = score(s.Score)
+					}
+					if s.Name == events[i].Away {
+						events[i].AwayScore = score(s.Score)
+					}
+				}
+			}
+		}
+	}
+	return events, nil
 }
