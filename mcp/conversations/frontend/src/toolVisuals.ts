@@ -147,9 +147,21 @@ export function resolveToolVisual(name: string, registry: ToolVisualRegistry): T
   const normalized = normalizeToolToken(name);
   const exact = registry.exact.get(normalized);
   if (exact) return exact;
-  const source = registry.sources.find((candidate) =>
-    candidate.aliases.some((alias) => normalized === alias || normalized.startsWith(`${alias}_`)),
-  );
+  // Rank the alias that actually matches this call, not another (longer)
+  // display-name alias. Native apps own a shared namespace over legacy
+  // integrations, whose artwork may no longer match the installed app.
+  let source: ToolVisualSource | undefined;
+  let matchedLength = -1;
+  for (const candidate of registry.sources) {
+    const length = Math.max(-1, ...candidate.aliases
+      .filter(alias => normalized === alias || normalized.startsWith(`${alias}_`))
+      .map(alias => alias.length));
+    if (length < 0) continue;
+    if (length > matchedLength || (length === matchedLength && candidate.key.startsWith("app:") && !source?.key.startsWith("app:"))) {
+      source = candidate;
+      matchedLength = length;
+    }
+  }
   if (source) return source;
   return {
     key: `native:${normalized || "tool"}`,
@@ -157,4 +169,3 @@ export function resolveToolVisual(name: string, registry: ToolVisualRegistry): T
     glyph: visualGlyphForName(normalized),
   };
 }
-
