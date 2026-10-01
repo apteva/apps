@@ -163,8 +163,12 @@ func (s *store) InboxPageAcrossProjects(projectIDs []string, userID, agentID int
  WHERE c.project_id IN (` + strings.Join(projectMarks, ",") + `) AND c.archived_at IS NULL
  AND ((c.owner_user_id=0 AND ?>0) OR c.owner_user_id=? OR EXISTS(SELECT 1 FROM participants p WHERE p.conversation_id=c.id AND p.user_id=?))
  AND (?=0 OR EXISTS(SELECT 1 FROM participants p WHERE p.conversation_id=c.id AND p.agent_id=?))
- AND m.component_kind IN('approval','alert','report') AND (m.component_kind!='approval' OR m.action_status='pending') AND m.dismissed=0` + allowedConversationSQL(allowedAgents)
-	args = append(args, userID, userID, userID, agentID, agentID)
+ AND m.component_kind IN('approval','alert','report') AND (m.component_kind!='approval' OR m.action_status='pending') AND m.dismissed=0
+ AND (m.component_kind!='alert' OR m.inbox_only=1 OR m.id>COALESCE((SELECT r.last_seen_id FROM read_marks r WHERE r.user_id=? AND r.conversation_id=c.id),0))` + allowedConversationSQL(allowedAgents)
+	// Reading an alert clears this reader's notification, not the durable card
+	// or another reader's inbox. Inbox-only alerts cannot be read in a chat;
+	// they retain explicit dismissal, as do reports. Approvals require a decision.
+	args = append(args, userID, userID, userID, agentID, agentID, userID)
 	tx, err := s.db.Begin()
 	if err != nil {
 		return out, err

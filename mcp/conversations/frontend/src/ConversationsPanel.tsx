@@ -2258,14 +2258,14 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
     if (isMobile && mobileDetail && !selected && !newOpen) setMobileDetail(false);
   }, [isMobile, mobileDetail, selected, newOpen]);
 
-  // Pending inbox items become attention markers: a severity dot on
+  // Pending inbox items become attention markers: a typed icon on
   // the conversation row and a count badge on the Inbox tab. Ranks:
   // error alert > warn alert > approval > info alert; reports count
-  // in the badge but never earn a dot.
+  // in the badge but never earn an attention icon.
   const attentionByConv = useMemo(() => new Map(Object.entries(inboxAttention)), [inboxAttention]);
   const inboxHasError = Object.values(inboxAttention).some(rank => rank === 4);
-  const attentionDotClass = (r: number) =>
-    r >= 4 ? "bg-error" : r === 3 ? "bg-warn" : r === 2 ? "bg-accent" : "bg-info";
+  const attentionIconClass = (r: number) =>
+    r >= 4 ? "text-error" : r === 3 ? "text-warn" : r === 2 ? "text-warn" : "text-info";
 
   // Selection moved on — close the details dialog so its state can
   // never be reused against the next conversation (the dashboard's
@@ -2444,6 +2444,8 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
               <ul className="m-0 list-none divide-y divide-border p-0">
                 {conversations.map((c) => {
                   const unreadCount = unread.get(c.id)?.unread ?? 0;
+                  const attentionRank = attentionByConv.get(c.id) ?? 0;
+                  const attentionLabel = t(attentionRank === 2 ? "approval.review" : "inbox.unreadAlert");
                   return (
                     <li key={c.id}>
                       <button
@@ -2457,11 +2459,15 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                         }`}
                       >
                         <div className="flex items-center gap-2">
-                          {(attentionByConv.get(c.id) ?? 0) > 0 && (
+                          {attentionRank > 0 && (
                             <span
-                              className={`w-2 h-2 rounded-full shrink-0 ${attentionDotClass(attentionByConv.get(c.id) ?? 0)}`}
-                              title={t("inbox.pendingItem")}
-                            />
+                              className={`inline-flex shrink-0 ${attentionIconClass(attentionRank)}`}
+                              role="img"
+                              aria-label={attentionLabel}
+                              title={attentionLabel}
+                            >
+                              <Glyph d={GLYPH_ALERT} size={14} />
+                            </span>
                           )}
                           <span className="min-w-0 flex-1 truncate text-sm font-medium text-text">{c.title}</span>
                           <ConversationActivityIndicator active={activeConversations.has(c.id)} />
