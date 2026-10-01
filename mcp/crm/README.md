@@ -1,11 +1,12 @@
-# CRM v0.9.8
+# CRM v0.9.9
 
 Apteva's contact, inbox, audience and opportunity sidecar. The supported dashboard
 is `ui/CrmPanel.tsx`, bundled as `CrmPanel.mjs`. `apteva.yaml` is embedded directly
 into the binary and is the single manifest source. `MCPTools()` supplies the
 executable input contracts, checked against the manifest by tests.
 
-Release `crm/v0.9.8` restores missing inbound email bodies safely. HTML-only
+Release `crm/v0.9.9` restores missing inbound email bodies safely, including
+on installations with legacy numeric Messaging bindings. HTML-only
 mail is converted to readable text even when the plain-text part contains only
 whitespace. Re-delivery can fill an empty or subject-only activity body without
 creating another activity, changing thread state, or replaying business events.

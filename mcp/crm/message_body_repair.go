@@ -80,7 +80,7 @@ func (a *App) toolRefreshMessageBody(ctx *sdk.AppCtx, args map[string]any) (any,
 			MessageIDHeader string `json:"message_id_header"`
 		} `json:"message"`
 	}
-	if err = ctx.WithProject(pid).PlatformAPI().CallAppResult(bound.AppSlug, "message_get", map[string]any{"id": messageID}, &original); err != nil {
+	if err = ctx.WithProject(pid).PlatformAPI().CallAppResult("messaging", "message_get", map[string]any{"id": messageID}, &original); err != nil {
 		return nil, err
 	}
 	m := original.Message

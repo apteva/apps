@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -69,6 +70,9 @@ type bodyRecoveryPlatform struct {
 func (p *bodyRecoveryPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
 	if tool != "message_get" {
 		return p.idempotentMessagingPlatform.CallAppResult(app, tool, input, out)
+	}
+	if app != "messaging" || int64Arg(input, "id") != 31414 {
+		return errors.New("original lookup must target messaging.message_get with the stored message ID")
 	}
 	if p.onRead != nil {
 		p.onRead()
