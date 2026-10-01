@@ -13,6 +13,7 @@ import {
 interface ToolActivityProps {
   tools: ToolActivity[];
   parallel?: boolean;
+  continuing?: boolean;
   expanded?: boolean;
   onToggle?: () => void;
   registry: ToolVisualRegistry;
@@ -92,6 +93,7 @@ function summaryFocusTool(tools: ToolActivity[]): ToolActivity {
 export function ChatToolActivity({
   tools,
   parallel = false,
+  continuing = false,
   expanded = false,
   onToggle,
   registry,
@@ -122,21 +124,21 @@ export function ChatToolActivity({
     : reasonLabel(tools[0]!, t);
   const focusTool = summaryFocusTool(tools);
   const focusReason = reasonLabel(focusTool, t);
-  const copyIsActive = status.state === "preparing" || status.state === "running";
+  const copyIsActive = continuing || status.state === "preparing" || status.state === "running";
   const failedCount = tools.filter((tool) => visualState(tool) === "failed").length;
   const visibleFailure = failedCount > 0
     ? grouped
       ? t("chat.panel.toolsFailedCount", { count: failedCount })
       : stateLabel(tools[0]!, t)
     : "";
-  const allSucceeded = tools.every((tool) => visualState(tool) === "done");
+  const allSucceeded = !continuing && tools.every((tool) => visualState(tool) === "done");
   const remainingCount = tools.length - 1;
   const resolvedDetailsId = detailsId || `chat-tool-details-${tools[0]!.id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
   const accessibleSummary = `${title}, ${focusReason}, ${status.text}`;
 
   return (
     <section
-      className="chat-tool-activity min-w-0 py-0.5"
+      className={`chat-tool-activity min-w-0 py-0.5 ${continuing ? "chat-tool-activity-continuing" : ""}`}
       aria-label={accessibleSummary}
     >
       <button
@@ -154,7 +156,7 @@ export function ChatToolActivity({
         onClick={grouped ? onToggle : undefined}
         title={grouped ? `${title} · ${expanded ? t("chat.panel.hideToolCalls") : t("chat.panel.showToolCalls")}` : focusReason}
       >
-        <ToolIconStack tools={tools} focusTool={focusTool} registry={registry} />
+        <ToolIconStack tools={tools} focusTool={focusTool} registry={registry} continuing={continuing} />
         <span className="flex min-w-0 flex-col gap-0.5 sm:flex-row sm:items-center sm:gap-2">
           <span className="flex min-w-0 items-center gap-1.5">
             <span
@@ -202,10 +204,12 @@ function ToolIconStack({
   tools,
   focusTool,
   registry,
+  continuing = false,
 }: {
   tools: ToolActivity[];
   focusTool: ToolActivity;
   registry: ToolVisualRegistry;
+  continuing?: boolean;
 }) {
   const primary = resolveToolVisual(focusTool.name, registry);
   const otherTools = tools.filter((tool) => resolveToolVisual(tool.name, registry).key !== primary.key);
@@ -213,7 +217,7 @@ function ToolIconStack({
   const secondary = secondaryTool ? resolveToolVisual(secondaryTool.name, registry) : null;
   return (
     <span
-      className="relative inline-flex h-8 shrink-0 items-center pl-0.5"
+      className={`relative inline-flex h-8 shrink-0 items-center pl-0.5 ${continuing ? "chat-tool-icon-stack-running" : ""}`}
       aria-hidden="true"
     >
       {secondaryTool && secondary && (

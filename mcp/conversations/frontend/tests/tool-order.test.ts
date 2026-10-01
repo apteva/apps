@@ -37,6 +37,13 @@ test("only an executing tool owns the response indicator",()=>{
  expect(responseToolGroup({...response,optimistic:true,createdAt:3000},timeline,[user])).toBeUndefined();
 });
 
+test("continuing responses keep the last completed tool group active",()=>{
+ const completed={...base,state:"done" as const};
+ const timeline=[{kind:"toolGroup",key:"group",tools:[completed]}] as any;
+ const response={agentId:41,threadId:"chat-1",afterMessageId:7,createdAt:1200,continuing:true};
+ expect(responseToolGroup(response,timeline,[{id:7,role:"user",created_at:new Date(900).toISOString()} as any])).toBe("group");
+});
+
 test("consecutive tools keep one stable group across long gaps until a message",()=>{
  const later={...base,id:"2",callId:"c2",startedAt:120000,finishedAt:120100,durationMs:100};
  const first=buildChatTimeline([], [base]).find(item=>item.kind==="toolGroup")!;
@@ -64,6 +71,6 @@ test("only the exact internal search_tools lookup is hidden",()=>{
 });
 
 test("conversation work tools appear in panels and widgets while reply sends stay in bubbles",()=>{
- for(const name of ["conversations_read_attachment", "conversations_conversations_read_attachment", "conversations_history", "conversations_request_approval", "conversations_report", " CODE_REPOS_LIST ", "sms_send", "slack_send"]) expect(isVisibleChatTool(name)).toBe(true);
- for(const name of ["", "pace", "done", "wait", "think", "send", " SEND ", "conversations_send", "conversations_conversations_send", "channels_send", "channels_channels_respond"]) expect(isVisibleChatTool(name)).toBe(false);
+ for(const name of ["conversations_read_attachment", "conversations_conversations_read_attachment", "conversations_history", "conversations_report", " CODE_REPOS_LIST ", "sms_send", "slack_send"]) expect(isVisibleChatTool(name)).toBe(true);
+ for(const name of ["", "pace", "done", "wait", "think", "send", " SEND ", "conversations_send", "conversations_conversations_send", "conversations_request_approval", "conversations_conversations_request_approval", "channels_send", "channels_channels_respond"]) expect(isVisibleChatTool(name)).toBe(false);
 });
