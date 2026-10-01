@@ -1,4 +1,4 @@
-# Sportsbook 0.3
+# Sportsbook 0.3.1
 
 A dedicated Apteva sports research and **paper betting** app. Go/app-sdk sidecar, project-scoped SQLite, native React dashboard panel following the CRM layout, and an isolated panel preview. It does not submit real wagers.
 
@@ -115,7 +115,7 @@ Open `http://127.0.0.1:8079/ui/index.html`. Choose **Examples** in the workspace
 
 The preview loads the actual `SportsbookPanel.mjs` through a shared React import map, uses a preview-only copy of the ui-kit token stylesheet, builds the Go binary, creates an isolated temporary database and random local app token, and exposes a loopback-only app proxy. It does not read existing Apteva API keys or connect provider accounts. Ports can be changed with `SPORTSBOOK_BACKEND_PORT` and `SPORTSBOOK_PREVIEW_PORT`. Ctrl-C stops both processes.
 
-For platform installation, use `apteva.yaml` as a source app manifest. The SDK serves `ui/` and applies migrations; build the UI before packaging. The app is project-scoped. The module is pinned to the published app-sdk `v0.90.0`. Release `sportsbook/v0.3.0` pins the source manifest and marketplace entry to this version. Use `GOWORK=off` to verify the published SDK dependency independently of any local workspace overlay.
+For platform installation, use `apteva.yaml` as a source app manifest. The SDK serves `ui/` and applies migrations; build the UI before packaging. The app is project-scoped. The module is pinned to the published app-sdk `v0.90.0`. Release `sportsbook/v0.3.1` pins the source manifest and marketplace entry to this version. Use `GOWORK=off` to verify the published SDK dependency independently of any local workspace overlay.
 
 ## Verify
 

@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: sportsbook
 display_name: Sportsbook
-version: 0.3.0
+version: 0.3.1
 description: Dedicated sports research and paper betting desk with normalized providers, experimental predictions, bet proposals and bankroll risk controls.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/sportsbook
@@ -83,7 +83,7 @@ provides:
     - { slot: project.page, label: Sportsbook, icon: trophy, entry: /ui/SportsbookPanel.mjs }
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: sportsbook/v0.3.0, entry: mcp/sportsbook }
+  source: { repo: github.com/apteva/apps, ref: sportsbook/v0.3.1, entry: mcp/sportsbook }
   port: 8080
   health_check: /health
 db:
