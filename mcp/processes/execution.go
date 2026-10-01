@@ -30,7 +30,7 @@ func (a *App) synchronize(p *Process) (err error) {
 		if err != nil {
 			message = err.Error()
 		}
-		_, saveErr := a.db.Exec(`UPDATE process_assignments SET sync_pending=?,sync_error=? WHERE id=?`, err != nil, message, p.Assignment.ID)
+		_, saveErr := a.db.Exec(`UPDATE process_assignments SET sync_pending=?,sync_error=? WHERE id=? AND (sync_pending<>? OR sync_error<>?)`, err != nil, message, p.Assignment.ID, err != nil, message)
 		if saveErr != nil {
 			err = errors.Join(err, saveErr)
 		}
@@ -182,10 +182,14 @@ func (a *App) projectRuns(project string) (any, error) {
 	return map[string]any{"runs": out, "has_more": false}, nil
 }
 
-func (a *App) retryPending(ctx context.Context) error {
+func (a *App) retryPending(ctx context.Context, scope ...string) error {
+	project := a.workerProject(scope)
+	if project == "" {
+		return nil
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	rows, err := a.db.Query(`SELECT DISTINCT p.project_id,p.id FROM processes p WHERE p.sync_pending=1 OR EXISTS(SELECT 1 FROM process_assignments x WHERE x.process_id=p.id AND x.sync_pending=1) LIMIT 100`)
+	rows, err := a.db.Query(`SELECT p.project_id,p.id FROM processes p WHERE p.project_id=? AND (p.sync_pending=1 OR EXISTS(SELECT 1 FROM process_assignments x WHERE x.process_id=p.id AND x.sync_pending=1)) LIMIT 100`, project)
 	if err != nil {
 		return err
 	}
@@ -214,17 +218,9 @@ func (a *App) retryPending(ctx context.Context) error {
 			failures = append(failures, e)
 			continue
 		}
-		if p.SyncPending {
-			if e = a.synchronize(p); e != nil {
-				failures = append(failures, e)
-			}
-		}
-		records, e := a.dispatches(p.ID)
-		if e != nil {
+		if e = a.synchronize(p); e != nil {
 			failures = append(failures, e)
-			continue
 		}
-		_ = records
 	}
 	return errors.Join(failures...)
 }

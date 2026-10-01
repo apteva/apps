@@ -53,12 +53,18 @@ func (a *App) syncDirectSchedule(p *Process) error {
 			}
 		}
 	}
+	if next == p.NextRunAt && p.ScheduledVersion == p.Version {
+		return nil
+	}
 	_, err = a.db.Exec(`UPDATE process_assignments SET next_run_at=?,scheduled_version=? WHERE id=?`, next, p.Version, p.Assignment.ID)
 	return err
 }
 func (a *App) dispatchAgent(p *Process, r *Run) (err error) {
 	if r.DeliveredAt != "" || terminal(r.State) {
 		return nil
+	}
+	if r.DeliverySuspended {
+		return errors.New("delivery suspended; explicit repair required: " + r.DeliveryWarning)
 	}
 	if r.NextAttemptAt != "" {
 		next, e := time.Parse(time.RFC3339Nano, r.NextAttemptAt)
@@ -72,14 +78,8 @@ func (a *App) dispatchAgent(p *Process, r *Run) (err error) {
 	}
 	defer func() {
 		if err != nil {
-			delay := 30 * time.Second
-			for i := 0; i < r.DeliveryAttempts && delay < 15*time.Minute; i++ {
-				delay *= 2
-			}
-			if delay > 15*time.Minute {
-				delay = 15 * time.Minute
-			}
-			_, saveErr := a.db.Exec(`UPDATE process_runs SET delivery_warning=?,delivery_attempts=delivery_attempts+1,next_attempt_at=? WHERE id=?`, err.Error(), time.Now().Add(delay).UTC().Format(time.RFC3339Nano), r.ID)
+			suspended, next := deliveryRetry(err, r.DeliveryAttempts)
+			_, saveErr := a.db.Exec(`UPDATE process_runs SET delivery_warning=?,delivery_attempts=delivery_attempts+1,next_attempt_at=?,delivery_suspended=? WHERE id=?`, err.Error(), next, suspended, r.ID)
 			err = errors.Join(err, saveErr)
 		}
 	}()
@@ -100,17 +100,21 @@ func (a *App) dispatchAgent(p *Process, r *Run) (err error) {
 	if events == nil {
 		return errors.New("tracked agent delivery unavailable")
 	}
-	receipt, err := events.SendTrackedAgentEvent(sdk.AgentEventRequest{AgentID: d.OwnerAgentID, ThreadID: r.TargetThreadID, SourceEventID: "processes:" + r.ID, Message: snapshot(p, d, *r)})
+	request, err := a.immutableDelivery(p.ProjectID, sdk.AgentEventRequest{AgentID: d.OwnerAgentID, ThreadID: r.TargetThreadID, SourceEventID: "processes:" + r.ID, Message: snapshot(p, d, *r)})
 	if err != nil {
 		return err
 	}
-	if !receipt.Accepted && !receipt.Duplicate {
+	receipt, err := events.SendTrackedAgentEvent(request)
+	if err != nil {
+		return err
+	}
+	if receipt == nil || (!receipt.Accepted && !receipt.Duplicate) {
 		return errors.New("agent did not accept the run")
 	}
 	r.DeliveredAt = timestamp()
 	r.ExecutionID = receipt.ExecutionID
 	r.DeliveryWarning = ""
-	_, err = a.db.Exec(`UPDATE process_runs SET delivered_at=?,execution_id=?,delivery_warning='',next_attempt_at='',delivery_attempts=delivery_attempts+1 WHERE id=?`, r.DeliveredAt, r.ExecutionID, r.ID)
+	_, err = a.db.Exec(`UPDATE process_runs SET delivered_at=?,execution_id=?,delivery_warning='',next_attempt_at='',delivery_suspended=0,delivery_attempts=delivery_attempts+1 WHERE id=?`, r.DeliveredAt, r.ExecutionID, r.ID)
 	return err
 }
 func (a *App) directRun(project, actor, process, id, action string, args map[string]any) (any, error) {
@@ -257,10 +261,14 @@ func (a *App) dueDirect(p *Process, now time.Time) error {
 	}
 	return tx.Commit()
 }
-func (a *App) tickDirect(ctx context.Context, now time.Time) error {
+func (a *App) tickDirect(ctx context.Context, now time.Time, scope ...string) error {
+	project := a.workerProject(scope)
+	if project == "" {
+		return nil
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	rows, err := a.db.Query(`SELECT id,project_id FROM processes`)
+	rows, err := a.db.Query(`SELECT id,project_id FROM processes p WHERE project_id=? AND (EXISTS(SELECT 1 FROM process_runs r WHERE r.process_id=p.id AND r.state NOT IN ('completed','failed','cancelled')) OR EXISTS(SELECT 1 FROM process_assignments x WHERE x.process_id=p.id AND x.status='active' AND x.next_run_at<>'' AND x.next_run_at<=?))`, project, now.Format(time.RFC3339Nano))
 	if err != nil {
 		return err
 	}
@@ -298,7 +306,7 @@ func (a *App) tickDirect(ctx context.Context, now time.Time) error {
 				failures = append(failures, e)
 			}
 		}
-		runs, e := a.dispatches(p.ID)
+		runs, e := a.pendingRuns(p.ID, now)
 		if e != nil {
 			failures = append(failures, e)
 			continue
@@ -360,12 +368,15 @@ func (a *App) lifecycleHandlers() []sdk.EventHandler {
 		if event.SourceApp != "apteva-server" || event.InstanceID != d.OwnerAgentID {
 			return errors.New("run lifecycle source mismatch")
 		}
+		if r.TargetThreadID != "" && lifecycle.ThreadID != "" && r.TargetThreadID != lifecycle.ThreadID {
+			return errors.New("run lifecycle target mismatch; delivery requires explicit repair")
+		}
 		if int64(lifecycle.Sequence) <= r.LifecycleSequence {
 			return nil
 		}
 		// Transport settlement does not prove the business outcome. Only run_update
 		// completes a process; lifecycle is diagnostic execution information.
-		_, err = a.db.Exec(`UPDATE process_runs SET execution_state=?,lifecycle_sequence=?,execution_id=?,delivered_at=CASE WHEN delivered_at='' THEN ? ELSE delivered_at END,delivery_warning='',next_attempt_at='' WHERE id=?`, lifecycle.Type, lifecycle.Sequence, lifecycle.ExecutionID, timestamp(), id)
+		_, err = a.db.Exec(`UPDATE process_runs SET execution_state=?,lifecycle_sequence=?,execution_id=?,delivered_at=CASE WHEN delivered_at='' THEN ? ELSE delivered_at END,delivery_warning='',next_attempt_at='',delivery_suspended=0 WHERE id=?`, lifecycle.Type, lifecycle.Sequence, lifecycle.ExecutionID, timestamp(), id)
 		return err
 	}}}
 }

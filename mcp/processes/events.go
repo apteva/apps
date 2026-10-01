@@ -11,14 +11,18 @@ import (
 // drainEvents publishes committed changes in sequence, retrying the same ID
 // after a lost acknowledgement. Delivery is at least once; subscribers must
 // deduplicate by event_id. One project's outage does not stall other projects.
-func (a *App) drainEvents(ctx context.Context) error {
+func (a *App) drainEvents(ctx context.Context, scope ...string) error {
+	project := a.workerProject(scope)
+	if project == "" {
+		return nil
+	}
 	a.eventMu.Lock()
 	defer a.eventMu.Unlock()
 	api := a.ctx.EventBusAPI()
 	if api == nil {
 		return errors.New("app event publisher unavailable")
 	}
-	rows, err := a.db.QueryContext(ctx, `SELECT sequence,event_id,project_id,topic,payload_json,occurred_at,attempts,next_attempt_at FROM process_event_outbox e WHERE NOT EXISTS (SELECT 1 FROM process_event_outbox earlier WHERE earlier.project_id=e.project_id AND earlier.sequence<=e.sequence AND earlier.next_attempt_at>?) ORDER BY sequence LIMIT 200`, time.Now().UTC().Format(time.RFC3339Nano))
+	rows, err := a.db.QueryContext(ctx, `SELECT sequence,event_id,project_id,topic,payload_json,occurred_at,attempts,next_attempt_at FROM process_event_outbox e WHERE e.project_id=? AND NOT EXISTS (SELECT 1 FROM process_event_outbox earlier WHERE earlier.project_id=e.project_id AND earlier.sequence<=e.sequence AND earlier.next_attempt_at>?) ORDER BY sequence LIMIT 200`, project, time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return err
 	}

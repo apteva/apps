@@ -114,7 +114,11 @@ function StepCard({ data, selected }: NodeProps<FlowNode>) {
                   {data.executorNames?.[index] || data.executorName}
                 </span>
                 {execution.delivery_warning && (
-                  <span>Delivery retry pending</span>
+                  <span>
+                    {execution.delivery_suspended
+                      ? "Delivery suspended—repair required"
+                      : "Delivery retry pending"}
+                  </span>
                 )}
               </div>
             ),

@@ -72,6 +72,7 @@ type Entry = {
     next_run_at?: string;
     scheduled_for?: string;
     delivery_warning?: string;
+    delivery_suspended?: boolean;
     progress?: number;
     current_step?: string;
     result?: string;
@@ -273,7 +274,11 @@ function RunDetailCard({
       )}
       <div className="prose">
         {run.delivery_warning && (
-          <p className="notice">Delivery retry pending: {run.delivery_warning}</p>
+          <p className="notice">
+            {run.delivery_suspended
+              ? "Delivery suspended—repair required"
+              : "Delivery retry pending"}: {run.delivery_warning}
+          </p>
         )}
         {run.result || run.error || run.current_step ||
           (run.state === "scheduled"
