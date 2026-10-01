@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.29 — 2026-10-01
+
+- Keep animated Thinking or a pulsing tool card visible throughout active responses, including after acknowledgements, hidden tool preparation, refreshes, and later turns.
+- Settle response indicators when the final reply arrives and clear stale thread activity on idle snapshots.
+- Stabilize transcript scrolling during tool updates and preserve the position when reading earlier messages.
+
 ## 0.24.28 — 2026-10-01
 
 - Suppress the duplicate generic Thinking row after an acknowledgement while a hidden pacing tool is prepared.

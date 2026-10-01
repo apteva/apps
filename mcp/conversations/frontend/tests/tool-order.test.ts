@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { pendingResponsePhase, responseToolGroup } from "../src/responseActivity";
 import { isVisibleChatTool, buildChatTimeline, toolDurationMs, toolGroupDurationMs, type ToolActivity } from "../src/toolActivityModel";
+import { applyConversationActivityFrame } from "../src/conversationActivity";
 
 const base: ToolActivity = { id:"1", callId:"c1", agentId:41, threadId:"chat-1", name:"repos", reason:"Checking repositories", state:"done", startedAt:1000, finishedAt:2500, durationMs:1500 };
 test("tool activity owns progress while a response is calling tools", () => {
@@ -73,4 +74,10 @@ test("only the exact internal search_tools lookup is hidden",()=>{
 test("conversation work tools appear in panels and widgets while reply sends stay in bubbles",()=>{
  for(const name of ["conversations_read_attachment", "conversations_conversations_read_attachment", "conversations_history", "conversations_report", " CODE_REPOS_LIST ", "sms_send", "slack_send", "monitoring_alert", "conversations_alert_history"]) expect(isVisibleChatTool(name)).toBe(true);
  for(const name of ["", "pace", "done", "wait", "think", "send", " SEND ", "conversations_send", "conversations_conversations_send", "conversations_request_approval", "conversations_conversations_request_approval", "conversations_alert", " CONVERSATIONS_CONVERSATIONS_ALERT ", "channels_send", "channels_channels_respond"]) expect(isVisibleChatTool(name)).toBe(false);
+});
+
+test("conversation activity clears on idle progress frames and authoritative empty snapshots",()=>{
+ const active = new Set(["chat-1", "chat-2"]);
+ expect([...applyConversationActivityFrame(active, {chat_id:"chat-1",response_progress:{phase:"idle"}} as any)]).toEqual(["chat-2"]);
+ expect([...applyConversationActivityFrame(new Set(["chat-1"]), {snapshot:true,chat_id:"",frames:[]} as any)]).toEqual([]);
 });

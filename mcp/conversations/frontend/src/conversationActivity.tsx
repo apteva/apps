@@ -4,8 +4,19 @@ import { useConversationLocalization } from "./i18n";
 import type { StreamFrame } from "./types";
 
 export function applyConversationActivityFrame(current: ReadonlySet<string>, frame: StreamFrame): ReadonlySet<string> {
-  if (!frame.snapshot) return current;
   const active = new Set(current);
+  // User-scoped list feeds normally send authoritative snapshots, but keep
+  // accepting individual progress frames as well. This matters during a
+  // reconnect or a host that forwards the shared stream without wrapping it
+  // in a snapshot: an idle frame must be able to clear a stale dot.
+  if (!frame.snapshot) {
+    if (frame.chat_id && frame.response_progress) {
+      if (frame.response_progress.phase === "idle") active.delete(frame.chat_id);
+      else active.add(frame.chat_id);
+      return active;
+    }
+    return current;
+  }
   const frames = Array.isArray(frame.frames) ? frame.frames : [];
   if (!frame.chat_id) {
     return new Set(frames.filter(item => item.response_progress?.phase !== "idle" && item.response_progress).map(item => item.chat_id));
@@ -42,6 +53,10 @@ export function useConversationActivity(projectId: string, agentId?: number, ena
         onOpen: () => { clearStaleTimer(); onListChangedRef.current?.(); },
         onError: () => {
           clearStaleTimer();
+          // An errored stream is no longer authoritative. Clear immediately
+          // so a dropped completion cannot leave a working dot behind while
+          // the SDK reconnects; the next snapshot restores real activity.
+          setActive(new Set());
           staleTimer = setTimeout(() => setActive(new Set()), 10_000);
         },
       });

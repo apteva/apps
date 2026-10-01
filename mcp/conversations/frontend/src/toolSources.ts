@@ -553,6 +553,12 @@ export const toolSources = [
     "icon_style": "monochrome"
   },
   {
+    "name": "sportsbook",
+    "display_name": "Sportsbook",
+    "icon": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22currentColor%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M8%203h8v5a4%204%200%200%201-8%200zM8%205H4v2a4%204%200%200%200%204%204m8-6h4v2a4%204%200%200%201-4%204M12%2012v6m-5%203h10m-9-3h8%22%2F%3E%3C%2Fsvg%3E",
+    "icon_style": "monochrome"
+  },
+  {
     "name": "status",
     "display_name": "Status",
     "icon": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22currentColor%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%0A%20%20%3C!--%20Apteva%20adaptive%20app%20icon.%20Geometry%20based%20on%20Lucide%20Icons%20(ISC).%20--%3E%0A%20%20%3Cpath%20d%3D%22M22%2012h-2.48a2%202%200%200%200-1.93%201.46l-2.35%208.36a.25.25%200%200%201-.48%200L9.24%202.18a.25.25%200%200%200-.48%200l-2.35%208.36A2%202%200%200%201%204.49%2012H2%22%2F%3E%0A%3C%2Fsvg%3E%0A",

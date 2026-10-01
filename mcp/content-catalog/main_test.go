@@ -48,7 +48,7 @@ func (p *catalogPlatform) CallAppResult(app, tool string, input map[string]any, 
 	case "gigs/gigs_status":
 		data = map[string]any{"gig": map[string]any{"id": input["id"]}}
 	case "media/media_get":
-		data = map[string]any{"found": true, "media": map[string]any{"file_id": input["file_id"], "source_sha256": "sha-1", "probe_status": "ok", "audience_rating": "general", "derivations": []map[string]any{{"kind": "thumbnail", "status": "ok", "storage_file_id": "901"}}}}
+		data = map[string]any{"found": true, "media": map[string]any{"file_id": input["file_id"], "duration_ms": 94000, "source_sha256": "sha-1", "probe_status": "ok", "audience_rating": "general", "derivations": []map[string]any{{"kind": "thumbnail", "status": "ok", "storage_file_id": "901"}}}}
 	default:
 		return fmt.Errorf("unexpected app call %s/%s", app, tool)
 	}
@@ -104,6 +104,9 @@ func attach(t *testing.T, a *App, ctx *sdk.AppCtx, session string, file int64) s
 func TestManifestToolsAndMigrations(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"))
 	m := (&App{}).Manifest()
+	if m.Runtime.Source == nil || m.Runtime.Source.Ref != "content-catalog/v"+m.Version {
+		t.Fatalf("release source ref must match version %s", m.Version)
+	}
 	declared := map[string]bool{}
 	for _, spec := range m.Provides.MCPTools {
 		declared[spec.Name] = true
@@ -119,6 +122,34 @@ func TestManifestToolsAndMigrations(t *testing.T) {
 	}
 	if _, err := ctx.AppDB().Exec(`INSERT INTO brands(id,project_id,slug,name,storage_root) VALUES('test','p','test','Test','/')`); err != nil {
 		t.Fatalf("migration not applied: %v", err)
+	}
+}
+
+func TestSessionDurationsOnlyReadsLinkedVideoAndAudio(t *testing.T) {
+	a, ctx, _, _, session := setupCatalog(t)
+	video := attach(t, a, ctx, session, 1)
+	image := attach(t, a, ctx, session, 2)
+	result, err := a.sessionDurations(ctx, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Durations[video] != 94000 || result.Unavailable != 0 {
+		t.Fatalf("unexpected duration result: %+v", result)
+	}
+	if _, ok := result.Durations[image]; ok {
+		t.Fatal("image was included in duration lookup")
+	}
+	if _, err := a.sessionDurations(ctx, "missing-session"); err == nil {
+		t.Fatal("missing session should be rejected")
+	}
+	previous := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previous })
+	t.Setenv("APTEVA_PROJECT_ID", "")
+	response := httptest.NewRecorder()
+	a.handleSession(response, httptest.NewRequest(http.MethodGet, "/sessions/"+session+"/durations?project_id=project-a", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"`+video+`":94000`) {
+		t.Fatalf("duration HTTP response: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

@@ -243,6 +243,25 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 		a.servePreview(w, r, "session", strings.TrimSuffix(id, "/preview"))
 		return
 	}
+	if strings.HasSuffix(id, "/durations") {
+		pid, err := requestProject(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if globalCtx == nil {
+			http.Error(w, "app not mounted", http.StatusServiceUnavailable)
+			return
+		}
+		out, err := a.sessionDurations(globalCtx.WithProject(pid), strings.TrimSuffix(id, "/durations"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(out)
+		return
+	}
 	a.callHTTP(w, r, "content_catalog_sessions_get", map[string]any{"id": id})
 }
 func (a *App) handleAsset(w http.ResponseWriter, r *http.Request) {

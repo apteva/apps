@@ -5,7 +5,8 @@ const API = "/api/apps/content-catalog";
 type Brand = { id: string; slug: string; name: string; storage_root: string; host_provider: string; host_connection_id: number; host_library_id: string; host_collection_id: string };
 type Session = { id: string; brand_id: string; title: string; session_date: string; status: string; notes: string };
 type Publication = { id: string; asset_id: string; asset_ids: string[]; title: string; destination: string; account_ref: string; audience: string; status: string; planned_at: string; actual_at: string; external_post_id: string; external_url: string; evidence_source: string; failure_details: string; legacy_target_id: string };
-type Asset = { id: string; session_id: string; storage_install_id: number; storage_file_id: string; name: string; kind: string; content_type: string; size_bytes: number; review_status: string; media_status: string; media_rating: string; publications: Publication[] };
+type HostingSummary = { id: string; provider: string; connection_id: number; status: string; remote_id: string; last_checked_at: string };
+type Asset = { id: string; session_id: string; storage_install_id: number; storage_file_id: string; name: string; kind: string; content_type: string; size_bytes: number; review_status: string; media_status: string; media_rating: string; publications: Publication[]; hostings?: HostingSummary[] };
 type Hosting = { id: string; provider: string; remote_id: string; status: string; embed_url: string; error: string };
 type AssetSource = { asset_id: string; relation: string; source_order: number; media_render_id: number };
 type GigLink = { gigs_install_id: number; gig_id: number; role: string };
@@ -27,6 +28,25 @@ function storageContentURL(projectId: string, asset: Asset): string { return sto
 function previewURL(projectId: string, kind: "sessions" | "assets", id: string): string { return `${API}/${kind}/${encodeURIComponent(id)}/preview?${new URLSearchParams({ project_id: projectId })}`; }
 function mediaGlyph(kind: string): string { return kind === "video" ? "▶" : kind === "audio" ? "♫" : kind === "image" ? "▣" : "▤"; }
 function assetMediaKind(asset: Asset): string { return asset.content_type.startsWith("image/") ? "image" : asset.content_type.startsWith("video/") ? "video" : asset.content_type.startsWith("audio/") ? "audio" : asset.kind; }
+function durationLabel(ms: number): string { const seconds = Math.round(ms / 1000); const minutes = Math.floor(seconds / 60); return minutes >= 60 ? `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}` : `${minutes}:${String(seconds % 60).padStart(2, "0")}`; }
+function matchesDuration(ms: number | undefined, range: string): boolean {
+  if (range === "any") return true;
+  if (range === "unknown") return !ms;
+  if (!ms) return false;
+  if (range === "under_1") return ms < 60_000;
+  if (range === "1_to_5") return ms >= 60_000 && ms < 300_000;
+  if (range === "5_to_15") return ms >= 300_000 && ms < 900_000;
+  return ms >= 900_000;
+}
+function matchesSharing(posts: Publication[], state: string): boolean {
+  if (state === "any") return true;
+  if (state === "none") return posts.length === 0;
+  if (state === "not_verified") return !posts.some(post => post.status === "verified_published");
+  if (state === "verified") return posts.some(post => post.status === "verified_published");
+  if (state === "reported") return posts.some(post => post.status === "provider_reported_published");
+  if (state === "scheduled") return posts.some(post => ["scheduled", "submitted"].includes(post.status));
+  return posts.some(post => post.status === "failed");
+}
 function publicationLabel(status: string): string {
   return ({ verified_published: "Verified live", provider_reported_published: "Reported live", scheduled: "Scheduled", submitted: "Submitted", failed: "Failed", removed: "Removed", unknown: "Unverified", planned: "Planned" } as Record<string, string>)[status] || status.replaceAll("_", " ");
 }
@@ -72,6 +92,20 @@ function PreviewImage({ src, alt, fallback, className = "", style }: { src: stri
 
 const previewCardStyle: CSSProperties = { display: "flex", flexDirection: "column", height: "100%", minWidth: 0 };
 
+function AssetCardPreview({ asset, projectId }: { asset: Asset; projectId: string }) {
+  return <div style={{ position: "relative", width: "100%", flexShrink: 0 }}>
+    <PreviewImage src={previewURL(projectId, "assets", asset.id)} alt={`Preview of ${asset.name}`} fallback={mediaGlyph(assetMediaKind(asset))} />
+    {!!asset.hostings?.length && <div className="flex flex-wrap gap-1" style={{ position: "absolute", top: 8, left: 8, right: 8 }} aria-label="Cloud hosting status">{asset.hostings.map(hosting => {
+      const status = hosting.status === "ready" && !hosting.remote_id ? "uncertain" : hosting.status;
+      const label = ({ ready: "Ready", processing: "Processing", reserved: "Queued", uncertain: "Unverified", failed: "Failed" } as Record<string, string>)[status] || "Unverified";
+      const provider = hosting.provider === "bunny" ? "Bunny" : hosting.provider;
+      const color = status === "ready" ? "#bbf7d0" : status === "failed" ? "#fecaca" : "#fde68a";
+      const background = status === "ready" ? "rgba(5, 46, 22, .94)" : status === "failed" ? "rgba(69, 10, 10, .94)" : "rgba(66, 32, 6, .94)";
+      return <span key={hosting.id} className="rounded-md px-2 py-1 text-xs font-medium" style={{ color, background, border: "1px solid currentColor", boxShadow: "0 1px 4px rgba(0,0,0,.35)" }} title={`${provider} hosting: ${label.toLowerCase()} · connection ${hosting.connection_id}${hosting.last_checked_at ? ` · last checked ${hosting.last_checked_at}` : ""}`} aria-label={`${provider} hosting: ${label}`}>{provider} · {label}</span>;
+    })}</div>}
+  </div>;
+}
+
 function AssetViewer({ asset, projectId }: { asset: Asset; projectId: string }) {
   const src = storageContentURL(projectId, asset);
   const poster = previewURL(projectId, "assets", asset.id);
@@ -116,6 +150,19 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const [hosts, setHosts] = useState<Host[]>([]);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [assets, setAssets] = useState<Asset[]>([]);
+  const [assetQuery, setAssetQuery] = useState("");
+  const [assetKind, setAssetKind] = useState("any");
+  const [assetLength, setAssetLength] = useState("any");
+  const [assetSharing, setAssetSharing] = useState("any");
+  const [assetDestination, setAssetDestination] = useState("");
+  const [assetSort, setAssetSort] = useState("newest");
+  const [assetDurations, setAssetDurations] = useState<Record<string, number>>({});
+  const [durationsLoading, setDurationsLoading] = useState(false);
+  const [durationsUnavailable, setDurationsUnavailable] = useState(0);
+  const [durationsFailed, setDurationsFailed] = useState(0);
+  const [durationsError, setDurationsError] = useState("");
+  const durationRequest = useRef(0);
+  const sessionRequest = useRef(0);
   const [gigs, setGigs] = useState<GigLink[]>([]);
   const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
   const [assetSources, setAssetSources] = useState<AssetSource[]>([]);
@@ -153,28 +200,43 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     setBusy(true); setError(""); setNotice("");
     try { await task(); await refresh(); setNotice(message); } catch (e) { setError(errorText(e)); } finally { setBusy(false); }
   }, [refresh]);
-  const openSession = useCallback(async (s: Session) => {
-    setSelectedSession(s); setSelectedAsset(null); setCandidates([]); setError("");
-    try { const result = await get<{ assets: Asset[]; gigs: GigLink[] }>(`/sessions/${s.id}`); setAssets(result.assets || []); setGigs(result.gigs || []); } catch (e) { setError(errorText(e)); }
+  const loadDurations = useCallback((s: Session) => {
+    const request = ++durationRequest.current;
+    setDurationsLoading(true); setDurationsError(""); setDurationsFailed(0);
+    get<{ durations: Record<string, number>; unavailable: number; failed: number }>(`/sessions/${s.id}/durations`).then(result => {
+      if (request !== durationRequest.current) return;
+      setAssetDurations(result.durations || {}); setDurationsUnavailable(result.unavailable || 0); setDurationsFailed(result.failed || 0);
+    }).catch(err => { if (request === durationRequest.current) setDurationsError(errorText(err)); }).finally(() => {
+      if (request === durationRequest.current) setDurationsLoading(false);
+    });
   }, [get]);
+  const openSession = useCallback(async (s: Session) => {
+    const request = ++sessionRequest.current;
+    ++durationRequest.current;
+    setSelectedSession(s); setSelectedAsset(null); setCandidates([]); setError("");
+    setAssets([]); setAssetDurations({}); setDurationsUnavailable(0); setDurationsFailed(0); setDurationsError(""); setDurationsLoading(false);
+    try { const result = await get<{ assets: Asset[]; gigs: GigLink[] }>(`/sessions/${s.id}`); if (request !== sessionRequest.current) return; setAssets(result.assets || []); setGigs(result.gigs || []); if ((result.assets || []).some(a => ["video", "audio"].includes(assetMediaKind(a)))) loadDurations(s); } catch (e) { if (request === sessionRequest.current) setError(errorText(e)); }
+  }, [get, loadDurations]);
   const showSession = useCallback(async (s: Session, origin: "sessions" | "search" = "sessions") => {
     const url = new URL(window.location.href);
     url.searchParams.set("catalog_session", s.id);
     window.history.pushState(null, "", url);
     setReturnTab(origin); setTab("sessions");
     setModal(null);
+    setAssetQuery(""); setAssetKind("any"); setAssetLength("any"); setAssetSharing("any"); setAssetDestination(""); setAssetSort("newest");
     await openSession(s);
   }, [openSession]);
   const backToSessions = useCallback(() => {
     const url = new URL(window.location.href);
     url.searchParams.delete("catalog_session");
     window.history.replaceState(null, "", url);
+    ++durationRequest.current; ++sessionRequest.current;
     setSelectedSession(null); setSelectedAsset(null); setModal(null); setTab(returnTab);
   }, [returnTab]);
   useEffect(() => {
     const syncFromURL = () => {
       const id = new URLSearchParams(window.location.search).get("catalog_session");
-      if (!id) { setSelectedSession(null); setSelectedAsset(null); return; }
+      if (!id) { ++durationRequest.current; ++sessionRequest.current; setSelectedSession(null); setSelectedAsset(null); return; }
       const session = sessions.find(s => s.id === id);
       if (session) openSession(session);
     };
@@ -187,7 +249,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   }, [get]);
   const openAsset = useCallback(async (asset: Asset) => {
     setSelectedAsset(asset); setAssetMedia(null); setAssetSources([]); setHostings([]); setError("");
-    try { const result = await get<{ asset: Asset; hostings: Hosting[]; sources: AssetSource[]; publications: Publication[]; media?: MediaDetails; media_error?: string }>(`/assets/${asset.id}`); setSelectedAsset({ ...result.asset, publications: result.publications || [] }); setHostings(result.hostings || []); setAssetSources(result.sources || []); setAssetMedia(result.media || null); if (result.media_error) setError(`Media unavailable: ${result.media_error}`); } catch (e) { setError(errorText(e)); }
+    try { const result = await get<{ asset: Asset; hostings: Hosting[]; sources: AssetSource[]; publications: Publication[]; media?: MediaDetails; media_error?: string }>(`/assets/${asset.id}`); setSelectedAsset({ ...result.asset, publications: result.publications || [] }); setHostings(result.hostings || []); setAssets(current => current.map(item => item.id === asset.id ? { ...item, hostings: result.asset.hostings || [] } : item)); setAssetSources(result.sources || []); setAssetMedia(result.media || null); if (result.media_error) setError(`Media unavailable: ${result.media_error}`); } catch (e) { setError(errorText(e)); }
   }, [get]);
   const brandName = (id: string) => brands.find(b => b.id === id)?.name || short(id);
   const searchParams = useCallback(() => ({ entity_type: searchType, query: searchText, brand_id: searchBrand, date_from: searchDateFrom, date_to: searchDateTo, kind: searchKind, lineage: searchLineage, sort: searchSort, review_status: searchReview, destination: searchDestination, account_ref: searchAccount, availability: searchAvailability, limit: "24" }), [searchType, searchText, searchBrand, searchDateFrom, searchDateTo, searchKind, searchLineage, searchSort, searchReview, searchDestination, searchAccount, searchAvailability]);
@@ -213,6 +275,29 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     await openAsset(hit);
   }, [get, showSession, openAsset]);
   const assetSearchOnly = !!searchKind || !!searchLineage || !!searchReview || searchAvailability !== "any";
+  const assetDestinations = Array.from(new Set(assets.flatMap(asset => (asset.publications || []).map(post => post.destination.trim())).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const assetFiltersActive = !!assetQuery || assetKind !== "any" || assetLength !== "any" || assetSharing !== "any" || !!assetDestination || assetSort !== "newest";
+  const sharingCount = (state: string) => assets.filter(asset => {
+    const posts = (asset.publications || []).filter(post => !assetDestination || post.destination.toLowerCase() === assetDestination.toLowerCase());
+    return (!assetDestination || state !== "any" || posts.length > 0) && matchesSharing(posts, state);
+  }).length;
+  const filteredAssets = assets.filter(asset => {
+    if (assetQuery && !`${asset.name} ${asset.storage_file_id}`.toLowerCase().includes(assetQuery.trim().toLowerCase())) return false;
+    if (assetKind !== "any" && assetMediaKind(asset) !== assetKind) return false;
+    if (assetLength !== "any" && !["video", "audio"].includes(assetMediaKind(asset))) return false;
+    if (assetLength !== "any" && (durationsLoading || !matchesDuration(assetDurations[asset.id], assetLength))) return false;
+    const posts = (asset.publications || []).filter(post => !assetDestination || post.destination.toLowerCase() === assetDestination.toLowerCase());
+    return (!assetDestination || assetSharing !== "any" || posts.length > 0) && matchesSharing(posts, assetSharing);
+  }).sort((a, b) => {
+    if (assetSort === "name") return a.name.localeCompare(b.name);
+    if (assetSort === "shortest" || assetSort === "longest") {
+      const aDuration = assetDurations[a.id]; const bDuration = assetDurations[b.id];
+      if (!aDuration) return bDuration ? 1 : 0;
+      if (!bDuration) return -1;
+      return assetSort === "shortest" ? aDuration - bDuration : bDuration - aDuration;
+    }
+    return 0;
+  });
 
   return <div className="h-full overflow-y-auto bg-bg text-text p-5 space-y-5">
     <header className="flex flex-wrap justify-between gap-3 items-center">
@@ -243,7 +328,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
       <p className="text-xs text-text-muted">Ready to publish means approved and no active plan or observed post for the selected destination{searchAccount ? " and account" : ""}. Results reflect evidence recorded in Catalog.</p>
       {searchError && <p className="rounded border border-red-500/50 bg-red-500/10 p-3 text-sm text-red-400">{searchError}</p>}
       {searchLoading && <p className="text-sm text-text-muted">Searching…</p>}
-      {(searchType === "all" || searchType === "assets") && <div className="space-y-2"><h3 className="font-semibold">Files <span className="text-text-muted font-normal">{searchResults.assets.items.length}</span></h3>{searchResults.assets.items.length === 0 && !searchLoading && <p className="text-sm text-text-muted">No matching linked files.</p>}<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 12, alignItems: "stretch" }}>{searchResults.assets.items.map(hit => <button key={hit.id} type="button" style={previewCardStyle} className="overflow-hidden rounded-xl border border-border text-left hover:border-accent/60" onClick={() => openSearchAsset(hit).catch(e => setSearchError(errorText(e)))}><PreviewImage src={previewURL(projectId, "assets", hit.id)} alt={`Preview of ${hit.name}`} fallback={mediaGlyph(assetMediaKind(hit))} /><div className="p-3 text-sm" style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}><div className="truncate font-medium" style={{ height: 24, flexShrink: 0 }} title={hit.name}>{hit.name}</div><div className="text-xs text-text-muted truncate" style={{ height: 20, flexShrink: 0 }}>{hit.session_title} · {recordingDate(hit.session_date)}</div><div className="text-xs text-text-muted truncate" style={{ height: 20, flexShrink: 0 }}>{brandName(hit.brand_id)} · {hit.review_status} · {hit.is_derivative ? "derivative" : "source"}</div><div className="border-t border-border pt-2" style={{ marginTop: 8, flex: 1 }}><PublicationIcons items={hit.uses} /></div><p className="text-xs text-text-muted line-clamp-2" style={{ marginTop: 8 }}>{hit.match_reason}</p></div></button>)}</div>{searchResults.assets.next_cursor && <button disabled={searchLoading} className="text-sm text-accent underline" onClick={() => loadMore("assets", searchResults.assets.next_cursor!)}>More files</button>}</div>}
+      {(searchType === "all" || searchType === "assets") && <div className="space-y-2"><h3 className="font-semibold">Files <span className="text-text-muted font-normal">{searchResults.assets.items.length}</span></h3>{searchResults.assets.items.length === 0 && !searchLoading && <p className="text-sm text-text-muted">No matching linked files.</p>}<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 12, alignItems: "stretch" }}>{searchResults.assets.items.map(hit => <button key={hit.id} type="button" style={previewCardStyle} className="overflow-hidden rounded-xl border border-border text-left hover:border-accent/60" onClick={() => openSearchAsset(hit).catch(e => setSearchError(errorText(e)))}><AssetCardPreview asset={hit} projectId={projectId} /><div className="p-3 text-sm" style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}><div className="truncate font-medium" style={{ height: 24, flexShrink: 0 }} title={hit.name}>{hit.name}</div><div className="text-xs text-text-muted truncate" style={{ height: 20, flexShrink: 0 }}>{hit.session_title} · {recordingDate(hit.session_date)}</div><div className="text-xs text-text-muted truncate" style={{ height: 20, flexShrink: 0 }}>{brandName(hit.brand_id)} · {hit.review_status} · {hit.is_derivative ? "derivative" : "source"}</div><div className="border-t border-border pt-2" style={{ marginTop: 8, flex: 1 }}><PublicationIcons items={hit.uses} /></div><p className="text-xs text-text-muted line-clamp-2" style={{ marginTop: 8 }}>{hit.match_reason}</p></div></button>)}</div>{searchResults.assets.next_cursor && <button disabled={searchLoading} className="text-sm text-accent underline" onClick={() => loadMore("assets", searchResults.assets.next_cursor!)}>More files</button>}</div>}
       {!assetSearchOnly && !searchDestination && (searchType === "all" || searchType === "sessions") && <div className="space-y-2"><h3 className="font-semibold">Sessions <span className="text-text-muted font-normal">{searchResults.sessions.items.length}</span></h3>{searchResults.sessions.items.length === 0 && !searchLoading && <p className="text-sm text-text-muted">No matching sessions.</p>}<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 12, alignItems: "stretch" }}>{searchResults.sessions.items.map(hit => <button key={hit.id} type="button" style={previewCardStyle} className="overflow-hidden rounded-xl border border-border text-left hover:border-accent/60" onClick={() => showSession(hit, "search")}><PreviewImage src={previewURL(projectId, "sessions", hit.id)} alt={`Preview of ${hit.title}`} fallback="▣" /><div className="p-3 text-sm" style={{ flex: 1 }}><div className="font-medium line-clamp-2" style={{ minHeight: 40 }}>{hit.title}</div><div className="mt-1 text-xs text-text-muted">{hit.brand_name} · {recordingDate(hit.session_date)} · {hit.asset_count} files</div></div></button>)}</div>{searchResults.sessions.next_cursor && <button disabled={searchLoading} className="text-sm text-accent underline" onClick={() => loadMore("sessions", searchResults.sessions.next_cursor!)}>More sessions</button>}</div>}
 
     </section>}
@@ -264,14 +349,29 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
         <button type="button" className="mb-3 text-sm text-accent underline" onClick={backToSessions}>← All sessions</button>
         <div className="flex flex-wrap items-start justify-between gap-4"><div className="min-w-0"><h2 className="text-2xl font-semibold">{selectedSession.title}</h2><p className="mt-1 text-sm text-text-muted">{brandName(selectedSession.brand_id)} · {recordingDate(selectedSession.session_date)} · {selectedSession.status}</p></div><div className="flex flex-wrap gap-2"><button type="button" className="rounded border border-border px-3 py-1.5 text-sm" onClick={() => setModal("edit-session")}>Edit session</button><button type="button" className={buttonClass} onClick={() => setModal("add-file")}>+ Add file</button><button type="button" className="rounded border border-border px-3 py-1.5 text-sm" disabled={!assets.length} onClick={() => { setSelectedAsset(null); setEditingPublication(null); setModal("publication"); }}>+ Record post</button><button type="button" className="rounded border border-border px-3 py-1.5 text-sm" onClick={() => setModal("link-gig")}>Link Gig</button></div></div>
       </div>
-      <section className="space-y-3"><div className="flex items-center justify-between gap-3"><h3 className="text-lg font-semibold">Assets</h3><span className="text-xs text-text-muted">{assets.length} file{assets.length === 1 ? "" : "s"}</span></div><p className="text-xs text-text-muted">Each file shows its platforms. A green check means verified live; a hollow circle means reported live but unverified.</p>
+      <section className="space-y-3"><div className="flex items-center justify-between gap-3"><h3 className="text-lg font-semibold">Assets</h3><span className="text-xs text-text-muted">Showing {filteredAssets.length} of {assets.length} files</span></div>
+        <div className="rounded-xl border border-border bg-bg-input/30 p-3 space-y-3" aria-label="Filter session assets">
+          <div className="flex flex-wrap gap-2" aria-label="Quick publication filters">{([[
+            "any", "All files"], ["none", "No post recorded"], ["not_verified", "No verified live post"], ["verified", "Verified live"]] as const).map(([state, label]) => <button key={state} type="button" onClick={() => setAssetSharing(state)} className={`rounded-full border px-3 py-1 text-xs ${assetSharing === state ? "border-accent bg-accent/10 text-accent" : "border-border text-text-muted hover:text-text"}`}>{label} <strong>{sharingCount(state)}</strong></button>)}</div>
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
+            <input className={inputClass} type="search" value={assetQuery} onChange={e => setAssetQuery(e.target.value)} placeholder="Find file name or ID" aria-label="Find session file" />
+            <select className={inputClass} value={assetKind} onChange={e => setAssetKind(e.target.value)} aria-label="Content type"><option value="any">All content types</option><option value="video">Videos</option><option value="image">Images</option><option value="audio">Audio</option><option value="other">Other files</option></select>
+            <select className={inputClass} value={assetLength} onChange={e => setAssetLength(e.target.value)} aria-label="Video or audio length"><option value="any">Any length</option><option value="under_1">Under 1 minute</option><option value="1_to_5">1–5 minutes</option><option value="5_to_15">5–15 minutes</option><option value="over_15">15 minutes or longer</option><option value="unknown">Length unknown</option></select>
+            <select className={inputClass} value={assetSharing} onChange={e => setAssetSharing(e.target.value)} aria-label="Publication status"><option value="any">Any sharing status</option><option value="none">No post recorded</option><option value="not_verified">No verified live post</option><option value="verified">Verified live</option><option value="reported">Reported live, unverified</option><option value="scheduled">Scheduled or submitted</option><option value="failed">Failed</option></select>
+            <select className={inputClass} value={assetDestination} onChange={e => setAssetDestination(e.target.value)} aria-label="Platform"><option value="">All platforms</option>{assetDestinations.map(destination => <option key={destination} value={destination}>{destination}</option>)}</select>
+            <select className={inputClass} value={assetSort} onChange={e => setAssetSort(e.target.value)} aria-label="Sort files"><option value="newest">Recently added</option><option value="name">Name A–Z</option><option value="shortest">Shortest first</option><option value="longest">Longest first</option></select>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-text-muted"><span>Sharing filters use posts recorded in Catalog. Only “Verified live” confirms publication.{durationsLoading ? " Loading video and audio lengths from Media…" : durationsUnavailable ? ` ${durationsUnavailable} file length${durationsUnavailable === 1 ? " is" : "s are"} unknown.` : ""}</span>{assetFiltersActive && <button type="button" className="text-accent underline" onClick={() => { setAssetQuery(""); setAssetKind("any"); setAssetLength("any"); setAssetSharing("any"); setAssetDestination(""); setAssetSort("newest"); }}>Clear filters</button>}</div>
+          {(durationsError || durationsFailed > 0) && <div className="flex flex-wrap items-center gap-2 text-xs text-yellow-400">Could not read {durationsFailed || "some"} file length{durationsFailed === 1 ? "" : "s"} from Media. <button type="button" className="underline" onClick={() => loadDurations(selectedSession)}>Retry</button></div>}
+        </div>
         {assets.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">No files linked yet. Use Add file to upload into this session or link one from Storage.</p>}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12, alignItems: "stretch" }}>{assets.map(asset =>
+        {assets.length > 0 && filteredAssets.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">{durationsLoading && assetLength !== "any" ? "Loading file lengths…" : "No files match these filters."}</p>}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12, alignItems: "stretch" }}>{filteredAssets.map(asset =>
           <button key={asset.id} onClick={() => openAsset(asset)} style={previewCardStyle} className={`overflow-hidden rounded-xl border text-left text-sm transition-colors hover:border-accent/60 ${selectedAsset?.id === asset.id ? "border-accent" : "border-border"}`}>
-            <PreviewImage src={previewURL(projectId, "assets", asset.id)} alt={`Preview of ${asset.name}`} fallback={mediaGlyph(assetMediaKind(asset))} />
+            <AssetCardPreview asset={asset} projectId={projectId} />
             <div className="p-3" style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>
               <div className="font-medium truncate" style={{ height: 24, flexShrink: 0 }} title={asset.name}>{asset.name}</div>
-              <div className="text-xs text-text-muted truncate" style={{ height: 20, flexShrink: 0 }}>{asset.kind} · #{asset.storage_file_id} · {asset.review_status}</div>
+              <div className="text-xs text-text-muted truncate" style={{ height: 20, flexShrink: 0 }}>{assetMediaKind(asset)}{assetDurations[asset.id] ? ` · ${durationLabel(assetDurations[asset.id])}` : ""} · #{asset.storage_file_id} · {asset.review_status}</div>
               <div className="border-t border-border pt-2" style={{ marginTop: 8, flex: 1 }}><PublicationIcons items={asset.publications || []} /></div>
             </div>
           </button>)}</div>

@@ -389,6 +389,30 @@ for (const host of ["dashboard", "external", "package"]) {
  });
 }
 
+for (const host of ["external","package"]) {
+ test(`${host}: late progress frames do not move a transcript the user scrolled away from`, async ({page,request}) => {
+  await request.post("/reset"); await request.post("/seed", {data:{}});
+  await page.setViewportSize({width:390,height:500});
+  await page.goto(`/?host=${host}`);
+  const transcript = page.locator(".chat-transcript");
+  await expect(transcript).toBeVisible();
+  const chat = host === "dashboard" ? "chat-operator" : "chat-visitor-a";
+  for (let index = 0; index < 12; index++) await request.post("/append-message", {data:{id:100 + index,conversation_id:chat,role:"agent",agent_id:41,content:`Scroll fixture ${index} — ${"content ".repeat(18)}`,components:[],created_at:new Date().toISOString()}});
+  await expect(page.getByText("Scroll fixture 11")).toBeVisible();
+  const before = await transcript.evaluate(element => {
+   element.scrollTop = Math.max(1, Math.floor((element.scrollHeight - element.clientHeight) / 2));
+   element.dispatchEvent(new Event("scroll"));
+   return element.scrollTop;
+  });
+  expect(before).toBeGreaterThan(0);
+  await request.post("/emit", {data:{chat_id:chat,agent_id:41,thread_id:chat,response_progress:{phase:"thinking",run_id:"scroll-test",revision:1,started_at:new Date().toISOString()}}});
+  await expect.poll(() => transcript.evaluate(element => element.scrollTop)).toBe(before);
+  await transcript.evaluate(element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event("scroll")); });
+  await request.post("/emit", {data:{chat_id:chat,agent_id:41,thread_id:chat,response_progress:{phase:"continuing",run_id:"scroll-test",revision:2,started_at:new Date().toISOString()}}});
+  await expect.poll(() => transcript.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(80);
+ });
+}
+
 for (const host of ["dashboard","external","package"]) {
  test(`${host}: preparation pulses, tools finish, continuation resumes and approval waiting stops activity`,async({page,request})=>{
   await request.post("/reset");await page.goto(`/?host=${host}`);
@@ -418,9 +442,9 @@ for (const host of ["dashboard","external","package"]) {
   await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
   await phase("continuing",4);
   await expect(row.getByText("Listing repositories",{exact:true})).toBeVisible();
-  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1);
   await expect(row.getByText("42ms",{exact:true})).toHaveCount(0);
-  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toHaveCount(0);
   await page.screenshot({path:test.info().outputPath("continuing-tool.png")});
   await phase("idle",5);
   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
@@ -469,7 +493,8 @@ for (const host of ["dashboard","external","package"]) {
   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
   // A durable intermediate reply moves the tail away from the tool group.
   await request.post("/emit",{data:{...frame,response_progress:{phase:"continuing",run_id:"ack-1",revision:1,started_at:start,after_message_id:0}}});
-  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1);
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toHaveCount(0);
   await request.post("/append-message",{data:{id:900,conversation_id:chat,role:"agent",agent_id:41,phase:"intermediate",content:"I am checking the next step.",components:[],created_at:new Date().toISOString()}});
   await expect(page.getByText("I am checking the next step.")).toBeVisible();
   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
