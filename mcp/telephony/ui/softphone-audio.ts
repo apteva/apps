@@ -371,6 +371,7 @@ export class SoftphoneSession {
   private opened = false;
   private cancelWorkerStart?: () => void;
   private microphoneTransportReady = false;
+  private mediaSocketConnected = false;
   private ringback: (() => void) | null = null;
   private transportTiming: Record<string, unknown> = {};
   private playbackTiming: Record<string, unknown> = {};
@@ -526,16 +527,19 @@ export class SoftphoneSession {
         const message = event.data;
         if (message?.type === "socket.open") {
           this.opened = true;
+          this.mediaSocketConnected = true;
           this.startRTTProbe();
           finish();
         } else if (message?.type === "socket.message") {
           this.handleControl(message.data);
         } else if (message?.type === "socket.close") {
           this.stopRTTProbe();
+          this.mediaSocketConnected = false;
           this.microphoneTransportReady = false;
           if (this.opened && !this.closed) this.callbacks.onState?.("reconnecting", "Connection interrupted; retrying…");
           else finish(new Error("audio connection closed before it was ready"));
         } else if (message?.type === "socket.failed") {
+          this.mediaSocketConnected = false;
           finish(new Error(message.detail || "audio connection lost"));
           this.fail(message.detail || "audio connection lost");
         } else if (message?.type === "transport.drop" && message.event) {
@@ -552,6 +556,8 @@ export class SoftphoneSession {
       }, [captureChannel.port2, playbackChannel.port2]);
     });
   }
+
+  private carrierDeliveryStalled = false;
 
   private handleControl(data: string): void {
     if (this.closed) return;
@@ -573,6 +579,11 @@ export class SoftphoneSession {
         this.callbacks.onCallStatus?.(parsed as unknown as SoftphoneCallStatus);
       } else if (parsed.type === "call.error") {
         this.fail(parsed.detail || "The call could not be connected.");
+      } else if (parsed.type === "media.delivery") {
+        const state = (parsed as unknown as {state?:string}).state;
+        if (state === "stalled") this.callbacks.onNotice?.("Caller audio delivery interrupted. Your microphone remains connected.");
+        else if (state === "flowing" && this.carrierDeliveryStalled) this.callbacks.onNotice?.("Caller audio delivery restored.");
+        this.carrierDeliveryStalled = state === "stalled";
       } else if (parsed.type === "peer.disconnected") {
         this.microphoneTransportReady = false;
         this.worker?.postMessage({ type: "microphone.ready", value: false });
@@ -602,6 +613,12 @@ export class SoftphoneSession {
     const value = this.diagnostics;
     this.sendText(JSON.stringify({ type: "diagnostics", diagnostics: {
       timing: {transport:this.transportTiming, playback:this.playbackTiming},
+      connection_state: this.mediaSocketConnected ? "connected" : this.closed ? "closed" : "reconnecting",
+      carrier_peer_connected: this.microphoneTransportReady,
+      audio_context_state: this.ctx?.state ?? "closed",
+      microphone_muted: this.muted,
+      microphone_track_state: this.stream?.getAudioTracks()[0]?.readyState ?? "ended",
+      microphone_device_muted: this.stream?.getAudioTracks()[0]?.muted ?? false,
       rtt_ms: value.rttMs, playback_queue_ms: value.queueMs, playback_target_ms: value.targetMs,
       playback_max_queue_ms: value.maxQueueMs, playback_underruns: value.underruns,
       playback_dropped_ms: value.droppedMs, websocket_buffered_bytes: value.websocketBufferedBytes,

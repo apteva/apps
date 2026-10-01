@@ -18,3 +18,15 @@ describe("local microphone WAV", () => {
     expect(Array.from({ length: samples.length }, (_, index) => view.getInt16(44 + index * 2, true))).toEqual(Array.from(samples));
   });
 });
+
+test('carrier delivery notices preserve the healthy microphone and report recovery once', async()=>{
+ const {SoftphoneSession}=await import('./softphone-audio');
+ const notices:string[]=[];const states:unknown[]=[];
+ const session:any=new SoftphoneSession({onNotice:n=>notices.push(n),onState:s=>states.push(s)});
+ session.microphoneTransportReady=true;
+ session.handleControl(JSON.stringify({type:'media.delivery',direction:'carrier_to_operator',state:'stalled'}));
+ expect(session.microphoneTransportReady).toBe(true);
+ session.handleControl(JSON.stringify({type:'media.delivery',state:'flowing'}));
+ session.handleControl(JSON.stringify({type:'media.delivery',state:'flowing'}));
+ expect(notices).toHaveLength(2);expect(states).toHaveLength(0);
+});

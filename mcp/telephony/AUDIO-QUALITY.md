@@ -157,3 +157,12 @@ rejected by the Go integer diagnostics schema, discarding entire snapshots.
 Drop-event decoding now accepts fractional milliseconds, rounds and bounds them,
 and preserves the existing integer public API. Wire-format regression tests and
 browser benchmark protocol checks cover this; it does not alter audio samples.
+
+## 1 October carrier delivery follow-up
+
+[Source timing and bounded recovery](docs/carrier-media-delivery.md) extends
+APT2 with negotiated APT3 human playback metadata, source-aware stale filtering,
+directional carrier reception notices and a clock-independent growing-delay
+guard. Human carrier-peer traffic may now be framed internally; AI peers retain
+raw PCM. The benchmark matrix now also shapes carrier input and tests a ten-second
+catch-up, absent frames, intentional mute and forced browser reconnect.

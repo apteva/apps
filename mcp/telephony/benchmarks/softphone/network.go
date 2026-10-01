@@ -23,12 +23,16 @@ type Link struct {
 	OutageMS            float64 `json:"outage_ms"`
 }
 type Profile struct {
-	Name          string  `json:"name"`
-	Expectation   string  `json:"expectation"`
-	Down          Link    `json:"down"`
-	Up            Link    `json:"up"`
-	MaxP95MS      float64 `json:"max_p95_ms"`
-	MaxMissingPct float64 `json:"max_missing_pct"`
+	CarrierDown      *Link   `json:"carrier_down,omitempty"`
+	CarrierMissing   bool    `json:"carrier_missing,omitempty"`
+	MuteMicrophone   bool    `json:"mute_microphone,omitempty"`
+	ReconnectBrowser bool    `json:"reconnect_browser,omitempty"`
+	Name             string  `json:"name"`
+	Expectation      string  `json:"expectation"`
+	Down             Link    `json:"down"`
+	Up               Link    `json:"up"`
+	MaxP95MS         float64 `json:"max_p95_ms"`
+	MaxMissingPct    float64 `json:"max_missing_pct"`
 }
 
 func Profiles(path string) ([]Profile, error) {
@@ -41,7 +45,11 @@ func Profiles(path string) ([]Profile, error) {
 		return nil, err
 	}
 	for _, p := range profiles {
-		for _, l := range []Link{p.Down, p.Up} {
+		links := []Link{p.Down, p.Up}
+		if p.CarrierDown != nil {
+			links = append(links, *p.CarrierDown)
+		}
+		for _, l := range links {
 			if l.Kbps <= 0 || l.LatencyMS < 0 || l.JitterMS < 0 || l.RecoveryProbability < 0 || l.RecoveryProbability > 1 || l.RecoveryMS < 0 || l.OutageMS < 0 {
 				return nil, fmt.Errorf("invalid profile %s", p.Name)
 			}
@@ -168,6 +176,16 @@ func (p *Proxy) Stats() map[string]LinkStats {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return map[string]LinkStats{"up": p.up, "down": p.down}
+}
+
+// Disconnect interrupts existing fixture sockets while leaving the listener
+// available for the production worker's reconnect path.
+func (p *Proxy) Disconnect() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for c := range p.connections {
+		_ = c.Close()
+	}
 }
 func (p *Proxy) Close() {
 	p.cancel()

@@ -168,3 +168,58 @@ test('expired clock estimates do not cause false network-age drops',()=>{
  w.setNow(30000);w.socket.onmessage({data:timedPlayback(110)});
  expect(w.received).toHaveLength(1);
 });
+
+function sourcePlayback(sourceClock:number,sourceTime:number,sequence:number,sent:number,epoch=1) {
+ const f=new ArrayBuffer(64+960),v=new DataView(f);
+ v.setUint32(0,0x33545041,true);v.setUint32(4,sequence,true);
+ v.setFloat64(8,sent,true);v.setFloat64(16,sent,true);v.setFloat64(32,sourceTime,true);
+ v.setBigUint64(40,BigInt(sequence),true);v.setFloat64(48,sourceClock,true);
+ v.setUint32(56,epoch,true);v.setUint32(60,1,true);
+ for(let i=64;i<f.byteLength;i+=2)v.setInt16(i,1234,true);
+ return f;
+}
+test('APT3 drops ten-second-old carrier batches even when the server sent them now',()=>{
+ const w=worker();w.socket.onmessage({data:JSON.stringify({type:'media.capabilities',version:3})});
+ w.setNow(20020);w.socket.onmessage({data:JSON.stringify({type:'media.clock',nonce:20000,received_ms:10100,sent_ms:10100})});
+ for(let i=1;i<=500;i++)w.socket.onmessage({data:sourcePlayback(100+i*20,i*20,i,10110)});
+ expect(w.received.length).toBeLessThanOrEqual(18);
+ w.intervals[0]();const timing=w.messages.findLast((m:any)=>m.type==='transport.stats').timing;
+ expect(timing.playback_source_dropped_ms).toBeGreaterThanOrEqual(9600);
+ expect(timing.playback_transport_dropped_ms).toBe(0);
+ expect(timing.playback_source_dropped_ms+timing.playback_received_ms).toBe(10000);
+ expect(timing.playback_max_source_age_ms).toBeGreaterThan(9900);
+ expect(timing.playback_source_timestamp_ms).toBe(10000);
+ // Accepted source age continues into the render clock; worklet buffering
+ // cannot grant every stage another full 320ms budget.
+ const {clock,p}=playback(24000);
+ clock.currentTime=10.1;
+ for(const frame of w.received)p.handleMessage(frame);
+ clock.currentTime=10.45;p.process([],[[new Float32Array(128)]]);
+ expect(p.queued).toBe(0);
+ expect(p.dropTotals.playback_age_limit).toBeGreaterThan(0);
+});
+test('APT3 keeps steady samples and rebased stream epochs with uncertain clocks',()=>{
+ const w=worker();w.socket.onmessage({data:JSON.stringify({type:'media.capabilities',version:3})});
+ w.setNow(10020);w.socket.onmessage({data:JSON.stringify({type:'media.clock',nonce:10000,received_ms:100,sent_ms:100})});
+ for(let i=0;i<100;i++) {w.setNow(10020+i*20);w.socket.onmessage({data:sourcePlayback(110+i*20,i*20,i,110+i*20)});}
+ expect(w.received).toHaveLength(100);expect(w.received.every((m:any)=>Math.abs(m.frame[0]-1234/32768)<1e-6)).toBe(true);
+ w.socket.onmessage({data:sourcePlayback(2090,0,100,2090,2)});
+ expect(w.received).toHaveLength(101);
+ w.intervals[0]();expect(w.messages.findLast((m:any)=>m.type==='transport.stats').timing.playback_source_epoch).toBe(2);
+ const uncertain=worker();uncertain.socket.onmessage({data:JSON.stringify({type:'media.capabilities',version:3})});
+ uncertain.setNow(10800);uncertain.socket.onmessage({data:JSON.stringify({type:'media.clock',nonce:10000,received_ms:100,sent_ms:100})});
+ uncertain.setNow(11000);uncertain.socket.onmessage({data:sourcePlayback(200,0,1,700)});
+ expect(uncertain.received).toHaveLength(1); // Cannot prove age beyond uncertainty.
+});
+
+test('undersized download cannot accumulate seconds of playback even without a clock probe',()=>{
+ const w=worker();w.socket.onmessage({data:JSON.stringify({type:'media.capabilities',version:3})});
+ for(let i=0;i<300;i++) {
+  // A source frame every 20ms takes 30ms across the undersized TCP link.
+  w.setNow(10000+i*30);w.socket.onmessage({data:sourcePlayback(100+i*20,i*20,i,100+i*20)});
+ }
+ expect(w.received.length).toBeLessThanOrEqual(33);
+ w.intervals[0]();const stats=w.messages.findLast((m:any)=>m.type==='transport.stats').timing;
+ expect(stats.drop_totals_ms.playback_delivery_excess).toBeGreaterThan(5000);
+ expect(stats.clock_uncertainty_ms).toBe(null);
+});

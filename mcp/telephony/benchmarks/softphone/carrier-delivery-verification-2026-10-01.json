@@ -1,0 +1,2006 @@
+{
+  "schema": "telephony-carrier-delivery-verification/v1",
+  "date": "2026-10-01",
+  "scope": "Local only; no staging/production, real carrier calls or credentialed carrier requests. Synthetic acoustic markers through production audio code in Chromium.",
+  "source": {
+    "arch": "arm64",
+    "go_version": "go1.25.1",
+    "logical_cpus": 10,
+    "manifest_sha256": "88c21b1042aba392d4f80ffa5c469494292387d858b20a8abec11c2e5f7d7afd",
+    "os": "darwin",
+    "working_tree_dirty": true
+  },
+  "source_files_sha256": {
+    "carrier_media_timing.go": "5768ec1e8f435f060f965be69c61016965962c51358ad689e1f429e89e04c7ba",
+    "carrier_media_timing_test.go": "79581661e747ccd5cdb0d8dcbf149c4830d4b2fe0d9ded73d52ba066057f3dbd",
+    "twilio_source_timing_test.go": "1798befab5feeae83b17a09739d3f6c4c35ecf5c500c0e63a847a93045f7716d",
+    "bridge_twilio.go": "9153147dc3cd4076ad2f5921f205f00a5cee3c9301f2bfe1482712e173fd7d9d",
+    "bridge_carriers.go": "51dde842c45e43e895d02e5ef80d91ee1ae9ff2b4c59bef25e15a6a6c5a73081",
+    "softphone.go": "fe2858277427cc290e91eefbfe3cabf6f998f0b24de9bf665fffc5b95d67dabb",
+    "websocket_close.go": "6f1fea0fab434f49a862f82f40ddad50f170b221e8fc4dc6a6741e911cd031e1",
+    "ui/softphone-worker.js": "7abe5f9011217d352a47bd3d7b5ff51e9435d6a2d8892566ba571ac7f55fffb9",
+    "ui/softphone-audio.ts": "eebcb4683da4befec1d14304fb788176b990895d55720569be105218a59dd487",
+    "ui/softphone-worklet.js": "f944e36a256b099a36332d41592101f71f63f7a403c1663c744466a7e2a2eb1c",
+    "ui/frontend.json": "94bc0370479890401bd5cf93c28bfad6d660a686007684c2a06468fb08c15ecb",
+    "go.mod": "6a813a4bcb16619524a28185be163b2bb0104102a44b7a0d9c322798bf9e6779",
+    "go.sum": "afe836593bb79b1dd2acd3487f80ed73835778dbec438d6daa267dec2a20fb8b",
+    "network_benchmark_integration_test.go": "b58b324e31b98442ea690642392b010e280b679c46b93f05b5d4c3962f7be1af",
+    "benchmarks/softphone/profiles.json": "d2adf74c8c13b70a96f69d783adc48f1e643de0da3c845658307ddc7124ead80"
+  },
+  "tests": {
+    "go": {
+      "pass": 625,
+      "skip": 2
+    },
+    "frontend": [
+      {
+        "pass": 61,
+        "fail": 0
+      },
+      {
+        "pass": 54,
+        "fail": 0
+      }
+    ],
+    "focused_race": {
+      "pass": 10
+    },
+    "harness_race": {
+      "pass": 5
+    },
+    "build": "pass",
+    "vet": "pass",
+    "typecheck": "pass",
+    "benchmark_typecheck": "pass",
+    "harness_gate_tests": "pass",
+    "packaged_asset_hashes": "pass"
+  },
+  "runs": [
+    {
+      "command": "bun run benchmark:softphone --profiles all --seconds 20 --seed 20261001 --output /Users/marcoschwartz/Documents/code/.codex-worktrees/apps-telephony-082/mcp/telephony/benchmarks/softphone/results/2026-10-01-carrier-delivery-verified",
+      "raw_report_sha256": "63635ec95c662de509c3cbf4095f335ed79859cc05ed57dd58a806ffd1580a67",
+      "raw_report": "benchmarks/softphone/results/2026-10-01-carrier-delivery-verified/results.json",
+      "created_at": "2026-10-01T14:46:18Z",
+      "revision": "dc5a2082c5922a3d0651d24997cfbf8b6cf6a626",
+      "source_manifest_sha256": "88c21b1042aba392d4f80ffa5c469494292387d858b20a8abec11c2e5f7d7afd",
+      "duration_ms": 20000,
+      "seed": 20261001,
+      "clock_uncertainty_ms": 20,
+      "command_exit_code": 1,
+      "results": [
+        {
+          "profile": {
+            "name": "local-baseline",
+            "expectation": "usable",
+            "down": {
+              "kbps": 10000,
+              "latency_ms": 0,
+              "jitter_ms": 0,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "kbps": 10000,
+              "latency_ms": 0,
+              "jitter_ms": 0,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 250,
+            "max_missing_pct": 5
+          },
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 99.778076171875,
+            "p95_ms": 106.406005859375,
+            "p99_ms": 106.80810546875,
+            "max_ms": 106.80810546875,
+            "median_level_dbfs": -15.145155588581991,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 20,
+            "p95_ms": 20,
+            "p99_ms": 20,
+            "max_ms": 20,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "network": {
+            "down": {
+              "bytes_read": 1160059,
+              "bytes_delivered": 1160059,
+              "chunks": 1156,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 1.613341
+            },
+            "up": {
+              "bytes_read": 1185295,
+              "bytes_delivered": 1185295,
+              "chunks": 1196,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 1.710116
+            }
+          },
+          "carrier_reception": {
+            "continuous_expected": true,
+            "duplicate_dropped_ms": 0,
+            "epoch": 2,
+            "frames": 1128,
+            "last_receipt_ms": 26343.399958,
+            "max_batch_ms": 40,
+            "max_excess_age_ms": 28.762416000001394,
+            "max_gap_ms": 47.18329100000119,
+            "received_ms": 22560,
+            "recoveries": 0,
+            "source_sequence": 1128,
+            "source_timestamp_ms": 22540,
+            "stale_dropped_ms": 0,
+            "stalled": false,
+            "stalls": 0
+          },
+          "browser_notices": [],
+          "browser_final_timing": {
+            "transport": {
+              "capture_frames": 1146,
+              "capture_sent_ms": 22920,
+              "capture_dropped_ms": 0,
+              "capture_max_age_ms": 82.283447265625,
+              "playback_received_ms": 21978.958333333332,
+              "playback_sequence_gaps": 0,
+              "playback_max_transit_ms": 8.602027343749796,
+              "playback_max_server_queue_ms": 0.667958,
+              "playback_transport_dropped_ms": 0,
+              "playback_source_dropped_ms": 0,
+              "playback_max_source_age_ms": 30.639915031249984,
+              "playback_max_delivery_excess_ms": 29.39990234375,
+              "playback_source_timestamp_ms": 21960,
+              "playback_source_sequence": 1099,
+              "playback_source_epoch": 2,
+              "worker_max_tick_gap_ms": 1001.800048828125,
+              "drop_totals_ms": {},
+              "clock_uncertainty_ms": 0.7494580000002316,
+              "clock_sample_age_ms": 4997.300048828125
+            },
+            "playback": {
+              "played_ms": 21984,
+              "max_residence_ms": 85.33333333333576,
+              "drop_totals_ms": {}
+            }
+          },
+          "browser_report_sha256": "9e0c5a97b112fd7c6f71fda46a0777397a54ecd919e59060b12fb6c5766598b8"
+        },
+        {
+          "profile": {
+            "name": "broadband",
+            "expectation": "usable",
+            "down": {
+              "kbps": 5000,
+              "latency_ms": 20,
+              "jitter_ms": 5,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "kbps": 1000,
+              "latency_ms": 20,
+              "jitter_ms": 5,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 350,
+            "max_missing_pct": 5
+          },
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 80.7451171875,
+            "p95_ms": 84.0009765625,
+            "p99_ms": 84.594970703125,
+            "max_ms": 84.594970703125,
+            "median_level_dbfs": -15.14514839907581,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 81,
+            "p95_ms": 81,
+            "p99_ms": 81,
+            "max_ms": 81,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "network": {
+            "down": {
+              "bytes_read": 1161217,
+              "bytes_delivered": 1159161,
+              "chunks": 1152,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 26.639585
+            },
+            "up": {
+              "bytes_read": 1187518,
+              "bytes_delivered": 1184041,
+              "chunks": 1198,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 52.44256
+            }
+          },
+          "carrier_reception": {
+            "continuous_expected": true,
+            "duplicate_dropped_ms": 0,
+            "epoch": 2,
+            "frames": 1128,
+            "last_receipt_ms": 24919.593791,
+            "max_batch_ms": 20,
+            "max_excess_age_ms": 11.736291999999594,
+            "max_gap_ms": 30.908916999999747,
+            "received_ms": 22560,
+            "recoveries": 0,
+            "source_sequence": 1128,
+            "source_timestamp_ms": 22540,
+            "stale_dropped_ms": 0,
+            "stalled": false,
+            "stalls": 0
+          },
+          "browser_notices": [],
+          "browser_final_timing": {
+            "transport": {
+              "capture_frames": 1147,
+              "capture_sent_ms": 22920,
+              "capture_dropped_ms": 20,
+              "capture_max_age_ms": 43.783203125,
+              "playback_received_ms": 21898.958333333332,
+              "playback_sequence_gaps": 0,
+              "playback_max_transit_ms": 33.913724624999304,
+              "playback_max_server_queue_ms": 0.596542,
+              "playback_transport_dropped_ms": 0,
+              "playback_source_dropped_ms": 0,
+              "playback_max_source_age_ms": 38.1973349687496,
+              "playback_max_delivery_excess_ms": 14.520263671875,
+              "playback_source_timestamp_ms": 21880,
+              "playback_source_sequence": 1095,
+              "playback_source_epoch": 2,
+              "worker_max_tick_gap_ms": 1002.199951171875,
+              "drop_totals_ms": {
+                "capture_age_limit": 20
+              },
+              "clock_uncertainty_ms": 26.998999999999796,
+              "clock_sample_age_ms": 4946.199951171875
+            },
+            "playback": {
+              "played_ms": 21877.333333333332,
+              "max_residence_ms": 80.00000000000364,
+              "drop_totals_ms": {}
+            }
+          },
+          "browser_report_sha256": "751205a2a044a23af39f67458880378f1820cf01e58b9d1f83a28ebe054ad07a"
+        },
+        {
+          "profile": {
+            "name": "wifi-jitter",
+            "expectation": "usable",
+            "down": {
+              "kbps": 2000,
+              "latency_ms": 35,
+              "jitter_ms": 40,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "kbps": 1000,
+              "latency_ms": 35,
+              "jitter_ms": 40,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 450,
+            "max_missing_pct": 10
+          },
+          "outcome": "failed",
+          "errors": [
+            "usable-profile audio thresholds exceeded"
+          ],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 34,
+            "missing_markers_pct": 10.526315789473685,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 184.757080078125,
+            "p95_ms": 202.22509765625,
+            "p99_ms": 204.614013671875,
+            "max_ms": 204.614013671875,
+            "median_level_dbfs": -15.145185149331294,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 35,
+            "missing_markers_pct": 7.894736842105263,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 270,
+            "p95_ms": 270,
+            "p99_ms": 270,
+            "max_ms": 270,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "network": {
+            "down": {
+              "bytes_read": 1148881,
+              "bytes_delivered": 1144769,
+              "chunks": 1138,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 96.719293
+            },
+            "up": {
+              "bytes_read": 1201289,
+              "bytes_delivered": 1191986,
+              "chunks": 1192,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 139.373032
+            }
+          },
+          "carrier_reception": {
+            "continuous_expected": true,
+            "duplicate_dropped_ms": 0,
+            "epoch": 2,
+            "frames": 1132,
+            "last_receipt_ms": 24472.216666,
+            "max_batch_ms": 240,
+            "max_excess_age_ms": 224.99829200000022,
+            "max_gap_ms": 237.61212499999874,
+            "received_ms": 22640,
+            "recoveries": 0,
+            "source_sequence": 1132,
+            "source_timestamp_ms": 22620,
+            "stale_dropped_ms": 0,
+            "stalled": false,
+            "stalls": 0
+          },
+          "browser_notices": [],
+          "browser_final_timing": {
+            "transport": {
+              "capture_frames": 1142,
+              "capture_sent_ms": 22780,
+              "capture_dropped_ms": 60,
+              "capture_max_age_ms": 184.85009765625,
+              "playback_received_ms": 21278.958333333332,
+              "playback_sequence_gaps": 6,
+              "playback_max_transit_ms": 275.81449415624957,
+              "playback_max_server_queue_ms": 30.608208,
+              "playback_transport_dropped_ms": 200,
+              "playback_source_dropped_ms": 0,
+              "playback_max_source_age_ms": 358.50754981250066,
+              "playback_max_delivery_excess_ms": 506.12939453125,
+              "playback_source_timestamp_ms": 21780,
+              "playback_source_sequence": 1090,
+              "playback_source_epoch": 2,
+              "worker_max_tick_gap_ms": 1003.5,
+              "drop_totals_ms": {
+                "websocket_backpressure": 60,
+                "playback_delivery_excess": 200
+              },
+              "clock_uncertainty_ms": 56.499541500001214,
+              "clock_sample_age_ms": 4887.400146484375
+            },
+            "playback": {
+              "played_ms": 20717.625,
+              "max_residence_ms": 319.57926432291606,
+              "drop_totals_ms": {
+                "playback_hard_limit": 172,
+                "playback_age_limit": 189.33333333333334
+              }
+            }
+          },
+          "browser_report_sha256": "bd716c3e000998afc9411bc98e8039cbb5828ad1dc5288fb95d16f5d6b2d55f7"
+        },
+        {
+          "profile": {
+            "name": "mobile-latency",
+            "expectation": "usable",
+            "down": {
+              "kbps": 2000,
+              "latency_ms": 100,
+              "jitter_ms": 30,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "kbps": 1000,
+              "latency_ms": 100,
+              "jitter_ms": 30,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 10
+          },
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 181.052978515625,
+            "p95_ms": 191.06689453125,
+            "p99_ms": 193.118896484375,
+            "max_ms": 193.118896484375,
+            "median_level_dbfs": -15.145147308004404,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 174.66650390625,
+            "p95_ms": 174.66650390625,
+            "p99_ms": 174.66650390625,
+            "max_ms": 174.66650390625,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "network": {
+            "down": {
+              "bytes_read": 1161197,
+              "bytes_delivered": 1155029,
+              "chunks": 1158,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 134.080715
+            },
+            "up": {
+              "bytes_read": 1188264,
+              "bytes_delivered": 1180803,
+              "chunks": 1201,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 147.842319
+            }
+          },
+          "carrier_reception": {
+            "continuous_expected": true,
+            "duplicate_dropped_ms": 0,
+            "epoch": 2,
+            "frames": 956,
+            "last_receipt_ms": 21080.772833,
+            "max_batch_ms": 20,
+            "max_excess_age_ms": 11.290916999998444,
+            "max_gap_ms": 30.719833000000108,
+            "received_ms": 19120,
+            "recoveries": 0,
+            "source_sequence": 956,
+            "source_timestamp_ms": 19100,
+            "stale_dropped_ms": 0,
+            "stalled": false,
+            "stalls": 0
+          },
+          "browser_notices": [],
+          "browser_final_timing": {
+            "transport": {
+              "capture_frames": 1137,
+              "capture_sent_ms": 22720,
+              "capture_dropped_ms": 20,
+              "capture_max_age_ms": 31.583251953125,
+              "playback_received_ms": 21598.958333333332,
+              "playback_sequence_gaps": 0,
+              "playback_max_transit_ms": 143.53345606249968,
+              "playback_max_server_queue_ms": 0.103792,
+              "playback_transport_dropped_ms": 0,
+              "playback_source_dropped_ms": 0,
+              "playback_max_source_age_ms": 146.81785057812522,
+              "playback_max_delivery_excess_ms": 37.518310546875,
+              "playback_source_timestamp_ms": 21580,
+              "playback_source_sequence": 1080,
+              "playback_source_epoch": 2,
+              "worker_max_tick_gap_ms": 1004,
+              "drop_totals_ms": {
+                "capture_age_limit": 20
+              },
+              "clock_uncertainty_ms": 121.49981250000019,
+              "clock_sample_age_ms": 5754.199951171875
+            },
+            "playback": {
+              "played_ms": 21578.666666666668,
+              "max_residence_ms": 90.66666666666788,
+              "drop_totals_ms": {}
+            }
+          },
+          "browser_report_sha256": "b9e5fda43f2889456971e16e0a19e4c1fd1cbdac52b5eadd42219fb04accd128"
+        },
+        {
+          "profile": {
+            "name": "512k-symmetric",
+            "expectation": "usable",
+            "down": {
+              "kbps": 512,
+              "latency_ms": 30,
+              "jitter_ms": 10,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "kbps": 512,
+              "latency_ms": 30,
+              "jitter_ms": 10,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 450,
+            "max_missing_pct": 10
+          },
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 96.98193359375,
+            "p95_ms": 104.708984375,
+            "p99_ms": 104.73388671875,
+            "max_ms": 104.73388671875,
+            "median_level_dbfs": -15.145147308004404,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 110,
+            "p95_ms": 110,
+            "p99_ms": 110,
+            "max_ms": 110,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "network": {
+            "down": {
+              "bytes_read": 1161071,
+              "bytes_delivered": 1157987,
+              "chunks": 1163,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 69.894878
+            },
+            "up": {
+              "bytes_read": 1188379,
+              "bytes_delivered": 1183940,
+              "chunks": 1198,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 93.27187
+            }
+          },
+          "carrier_reception": {
+            "continuous_expected": true,
+            "duplicate_dropped_ms": 0,
+            "epoch": 2,
+            "frames": 1128,
+            "last_receipt_ms": 24391.88525,
+            "max_batch_ms": 40,
+            "max_excess_age_ms": 24.14191700000083,
+            "max_gap_ms": 44.05945900000006,
+            "received_ms": 22560,
+            "recoveries": 0,
+            "source_sequence": 1128,
+            "source_timestamp_ms": 22540,
+            "stale_dropped_ms": 0,
+            "stalled": false,
+            "stalls": 0
+          },
+          "browser_notices": [],
+          "browser_final_timing": {
+            "transport": {
+              "capture_frames": 1146,
+              "capture_sent_ms": 22900,
+              "capture_dropped_ms": 20,
+              "capture_max_age_ms": 24.050048828125,
+              "playback_received_ms": 21838.958333333332,
+              "playback_sequence_gaps": 0,
+              "playback_max_transit_ms": 76.90130664062599,
+              "playback_max_server_queue_ms": 2.437,
+              "playback_transport_dropped_ms": 0,
+              "playback_source_dropped_ms": 0,
+              "playback_max_source_age_ms": 93.27812598437595,
+              "playback_max_delivery_excess_ms": 41.849609375,
+              "playback_source_timestamp_ms": 21820,
+              "playback_source_sequence": 1092,
+              "playback_source_epoch": 2,
+              "worker_max_tick_gap_ms": 1002.10009765625,
+              "drop_totals_ms": {
+                "capture_age_limit": 20
+              },
+              "clock_uncertainty_ms": 47.29981982812387,
+              "clock_sample_age_ms": 4904.099853515625
+            },
+            "playback": {
+              "played_ms": 21797.333333333332,
+              "max_residence_ms": 80.00000000000364,
+              "drop_totals_ms": {}
+            }
+          },
+          "browser_report_sha256": "e9a2621c97c5d5d1020c89c126670e20ed6ebe8798210a3564d9a235b9994bc1"
+        },
+        {
+          "profile": {
+            "name": "tcp-recovery-1pct",
+            "expectation": "degradation",
+            "down": {
+              "kbps": 2000,
+              "latency_ms": 30,
+              "jitter_ms": 15,
+              "recovery_probability": 0.01,
+              "recovery_ms": 180,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "kbps": 1000,
+              "latency_ms": 30,
+              "jitter_ms": 15,
+              "recovery_probability": 0.01,
+              "recovery_ms": 180,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 700,
+            "max_missing_pct": 25
+          },
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 33,
+            "missing_markers_pct": 13.157894736842104,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 186.76708984375,
+            "p95_ms": 252.635986328125,
+            "p99_ms": 255.18408203125,
+            "max_ms": 255.18408203125,
+            "median_level_dbfs": -15.145156206856935,
+            "final_two_seconds_markers": 3
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 37,
+            "missing_markers_pct": 2.6315789473684212,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 231,
+            "p95_ms": 301,
+            "p99_ms": 301,
+            "max_ms": 301,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "network": {
+            "down": {
+              "bytes_read": 1162236,
+              "bytes_delivered": 1159152,
+              "chunks": 1151,
+              "recovery_events": 12,
+              "max_scheduled_delay_ms": 387.169904
+            },
+            "up": {
+              "bytes_read": 1189413,
+              "bytes_delivered": 1186950,
+              "chunks": 1204,
+              "recovery_events": 17,
+              "max_scheduled_delay_ms": 347.00549
+            }
+          },
+          "carrier_reception": {
+            "continuous_expected": true,
+            "duplicate_dropped_ms": 0,
+            "epoch": 2,
+            "frames": 1129,
+            "last_receipt_ms": 24552.599042,
+            "max_batch_ms": 40,
+            "max_excess_age_ms": 19.314915999999812,
+            "max_gap_ms": 39.034165999999914,
+            "received_ms": 22580,
+            "recoveries": 0,
+            "source_sequence": 1129,
+            "source_timestamp_ms": 22560,
+            "stale_dropped_ms": 0,
+            "stalled": false,
+            "stalls": 0
+          },
+          "browser_notices": [],
+          "browser_final_timing": {
+            "transport": {
+              "capture_frames": 1144,
+              "capture_sent_ms": 22860,
+              "capture_dropped_ms": 20,
+              "capture_max_age_ms": 35.86669921875,
+              "playback_received_ms": 21798.958333333332,
+              "playback_sequence_gaps": 0,
+              "playback_max_transit_ms": 343.0915185468748,
+              "playback_max_server_queue_ms": 0.354959,
+              "playback_transport_dropped_ms": 40,
+              "playback_source_dropped_ms": 0,
+              "playback_max_source_age_ms": 349.15426854687394,
+              "playback_max_delivery_excess_ms": 354.10009765625,
+              "playback_source_timestamp_ms": 21820,
+              "playback_source_sequence": 1092,
+              "playback_source_epoch": 2,
+              "worker_max_tick_gap_ms": 1003.800048828125,
+              "drop_totals_ms": {
+                "capture_age_limit": 20,
+                "playback_delivery_excess": 40
+              },
+              "clock_uncertainty_ms": 42.99983299999985,
+              "clock_sample_age_ms": 5912
+            },
+            "playback": {
+              "played_ms": 21465.625,
+              "max_residence_ms": 305.01668294270894,
+              "drop_totals_ms": {
+                "playback_hard_limit": 164
+              }
+            }
+          },
+          "browser_report_sha256": "27802919c43b8b241d2d7fc9850d1f4490f566aaa9b9fe5561b5202bade715e1"
+        },
+        {
+          "profile": {
+            "name": "upload-256k",
+            "expectation": "degradation",
+            "down": {
+              "kbps": 2000,
+              "latency_ms": 20,
+              "jitter_ms": 0,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "kbps": 256,
+              "latency_ms": 20,
+              "jitter_ms": 0,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 700,
+            "max_missing_pct": 25
+          },
+          "outcome": "degraded",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 0,
+            "missing_markers_pct": 100,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 0,
+            "p95_ms": 0,
+            "p99_ms": 0,
+            "max_ms": 0,
+            "median_level_dbfs": 0,
+            "final_two_seconds_markers": 0
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 80,
+            "p95_ms": 80,
+            "p99_ms": 80,
+            "max_ms": 80,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "network": {
+            "down": {
+              "bytes_read": 1161815,
+              "bytes_delivered": 1159759,
+              "chunks": 1148,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 24.112
+            },
+            "up": {
+              "bytes_read": 1189323,
+              "bytes_delivered": 753909,
+              "chunks": 1203,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 13612.703459
+            }
+          },
+          "carrier_reception": {
+            "continuous_expected": true,
+            "duplicate_dropped_ms": 0,
+            "epoch": 2,
+            "frames": 1129,
+            "last_receipt_ms": 24478.843666,
+            "max_batch_ms": 40,
+            "max_excess_age_ms": 15.54212500000176,
+            "max_gap_ms": 31.338167000001704,
+            "received_ms": 22580,
+            "recoveries": 0,
+            "source_sequence": 1129,
+            "source_timestamp_ms": 22560,
+            "stale_dropped_ms": 0,
+            "stalled": false,
+            "stalls": 0
+          },
+          "browser_notices": [],
+          "browser_final_timing": {
+            "transport": {
+              "capture_frames": 1147,
+              "capture_sent_ms": 22940,
+              "capture_dropped_ms": 0,
+              "capture_max_age_ms": 20.983154296875,
+              "playback_received_ms": 21898.958333333332,
+              "playback_sequence_gaps": 0,
+              "playback_max_transit_ms": 322.83817285937585,
+              "playback_max_server_queue_ms": 3.046917,
+              "playback_transport_dropped_ms": 0,
+              "playback_source_dropped_ms": 0,
+              "playback_max_source_age_ms": 323.4451728593758,
+              "playback_max_delivery_excess_ms": 17.0517578125,
+              "playback_source_timestamp_ms": 21880,
+              "playback_source_sequence": 1095,
+              "playback_source_epoch": 2,
+              "worker_max_tick_gap_ms": 1001.400146484375,
+              "drop_totals_ms": {},
+              "clock_uncertainty_ms": 303.9998335,
+              "clock_sample_age_ms": 21391.400146484375
+            },
+            "playback": {
+              "played_ms": 21845.333333333332,
+              "max_residence_ms": 74.66666666667152,
+              "drop_totals_ms": {}
+            }
+          },
+          "browser_report_sha256": "ce74b7af15500161cfd5ab459e62d0f152ff45d75d17aa9232694150bcd20770"
+        },
+        {
+          "profile": {
+            "name": "download-256k",
+            "expectation": "degradation",
+            "down": {
+              "kbps": 256,
+              "latency_ms": 20,
+              "jitter_ms": 0,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "kbps": 2000,
+              "latency_ms": 20,
+              "jitter_ms": 0,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 700,
+            "max_missing_pct": 25
+          },
+          "outcome": "degraded",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 63.22412109375,
+            "p95_ms": 67.0810546875,
+            "p99_ms": 68.969970703125,
+            "max_ms": 68.969970703125,
+            "median_level_dbfs": -15.145301324537602,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 0,
+            "missing_markers_pct": 100,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 0,
+            "p95_ms": 0,
+            "p99_ms": 0,
+            "max_ms": 0,
+            "median_level_dbfs": 0,
+            "final_two_seconds_markers": 0
+          },
+          "network": {
+            "down": {
+              "bytes_read": 1162258,
+              "bytes_delivered": 721901,
+              "chunks": 1162,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 13755.695833
+            },
+            "up": {
+              "bytes_read": 1193385,
+              "bytes_delivered": 1193385,
+              "chunks": 1200,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 40.021
+            }
+          },
+          "carrier_reception": {
+            "continuous_expected": true,
+            "duplicate_dropped_ms": 0,
+            "epoch": 2,
+            "frames": 1129,
+            "last_receipt_ms": 24337.3115,
+            "max_batch_ms": 20,
+            "max_excess_age_ms": 12.969458999999915,
+            "max_gap_ms": 32.66320800000176,
+            "received_ms": 22580,
+            "recoveries": 0,
+            "source_sequence": 1129,
+            "source_timestamp_ms": 22560,
+            "stale_dropped_ms": 0,
+            "stalled": false,
+            "stalls": 0
+          },
+          "browser_notices": [],
+          "browser_final_timing": {
+            "transport": {
+              "capture_frames": 1148,
+              "capture_sent_ms": 22940,
+              "capture_dropped_ms": 20,
+              "capture_max_age_ms": 25.4833984375,
+              "playback_received_ms": 498.9583333333333,
+              "playback_sequence_gaps": 0,
+              "playback_max_transit_ms": 366.86725682812494,
+              "playback_max_server_queue_ms": 3.562875,
+              "playback_transport_dropped_ms": 13080,
+              "playback_source_dropped_ms": 40,
+              "playback_max_source_age_ms": 367.7195898281252,
+              "playback_max_delivery_excess_ms": 8259.140380859375,
+              "playback_source_timestamp_ms": 13600,
+              "playback_source_sequence": 681,
+              "playback_source_epoch": 2,
+              "worker_max_tick_gap_ms": 1005.10009765625,
+              "drop_totals_ms": {
+                "capture_age_limit": 20,
+                "playback_source_age": 40,
+                "playback_delivery_excess": 13080
+              },
+              "clock_uncertainty_ms": 24.69984424218751,
+              "clock_sample_age_ms": 21951.39990234375
+            },
+            "playback": {
+              "played_ms": 424.2916666666667,
+              "max_residence_ms": 319.40334586197923,
+              "drop_totals_ms": {
+                "playback_age_limit": 74.66666666666667
+              }
+            }
+          },
+          "browser_report_sha256": "abde874d0b65c9ab5956ad97614d60fc36b14d04babbc6bcbbc577fa7ee95be5"
+        },
+        {
+          "profile": {
+            "name": "two-second-outage",
+            "expectation": "recovery",
+            "down": {
+              "kbps": 2000,
+              "latency_ms": 20,
+              "jitter_ms": 0,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 4000,
+              "outage_ms": 2000
+            },
+            "up": {
+              "kbps": 1000,
+              "latency_ms": 20,
+              "jitter_ms": 0,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 4000,
+              "outage_ms": 2000
+            },
+            "max_p95_ms": 700,
+            "max_missing_pct": 40
+          },
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 33,
+            "missing_markers_pct": 13.157894736842104,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 150.0791015625,
+            "p95_ms": 231.55810546875,
+            "p99_ms": 231.60009765625,
+            "max_ms": 231.60009765625,
+            "median_level_dbfs": -15.14514839907581,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 34,
+            "missing_markers_pct": 10.526315789473685,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 171,
+            "p95_ms": 171,
+            "p99_ms": 171,
+            "max_ms": 171,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "network": {
+            "down": {
+              "bytes_read": 1162248,
+              "bytes_delivered": 1160192,
+              "chunks": 1174,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 2019.603
+            },
+            "up": {
+              "bytes_read": 1190823,
+              "bytes_delivered": 1186834,
+              "chunks": 1203,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 2027.089
+            }
+          },
+          "carrier_reception": {
+            "continuous_expected": true,
+            "duplicate_dropped_ms": 0,
+            "epoch": 2,
+            "frames": 1129,
+            "last_receipt_ms": 24384.924416,
+            "max_batch_ms": 60,
+            "max_excess_age_ms": 40.6473330000008,
+            "max_gap_ms": 60.32695799999965,
+            "received_ms": 22580,
+            "recoveries": 0,
+            "source_sequence": 1129,
+            "source_timestamp_ms": 22560,
+            "stale_dropped_ms": 0,
+            "stalled": false,
+            "stalls": 0
+          },
+          "browser_notices": [],
+          "browser_final_timing": {
+            "transport": {
+              "capture_frames": 1147,
+              "capture_sent_ms": 22920,
+              "capture_dropped_ms": 20,
+              "capture_max_age_ms": 26.183349609375,
+              "playback_received_ms": 20218.958333333332,
+              "playback_sequence_gaps": 0,
+              "playback_max_transit_ms": 327.40816114062545,
+              "playback_max_server_queue_ms": 3.190292,
+              "playback_transport_dropped_ms": 1700,
+              "playback_source_dropped_ms": 0,
+              "playback_max_source_age_ms": 328.9267441406246,
+              "playback_max_delivery_excess_ms": 1996.2001953125,
+              "playback_source_timestamp_ms": 21900,
+              "playback_source_sequence": 1096,
+              "playback_source_epoch": 2,
+              "worker_max_tick_gap_ms": 1002.099853515625,
+              "drop_totals_ms": {
+                "capture_age_limit": 20,
+                "playback_delivery_excess": 1700
+              },
+              "clock_uncertainty_ms": 25.099764656250045,
+              "clock_sample_age_ms": 5949.2998046875
+            },
+            "playback": {
+              "played_ms": 19925.625,
+              "max_residence_ms": 298.64399218749986,
+              "drop_totals_ms": {
+                "playback_hard_limit": 162.66666666666666
+              }
+            }
+          },
+          "browser_report_sha256": "2815832daff57e017b14114959e6b2a838d5d017279e10acdb4c03496f5252ef"
+        },
+        {
+          "profile": {
+            "carrier_down": {
+              "kbps": 10000,
+              "latency_ms": 0,
+              "jitter_ms": 0,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 3000,
+              "outage_ms": 10000
+            },
+            "name": "carrier-ten-second-catchup",
+            "expectation": "recovery",
+            "down": {
+              "kbps": 10000,
+              "latency_ms": 0,
+              "jitter_ms": 0,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "kbps": 10000,
+              "latency_ms": 0,
+              "jitter_ms": 0,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 65
+          },
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 45.617919921875,
+            "p95_ms": 50.833984375,
+            "p99_ms": 59.10791015625,
+            "max_ms": 59.10791015625,
+            "median_level_dbfs": -15.145145882172859,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 18,
+            "missing_markers_pct": 52.63157894736842,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 161,
+            "p95_ms": 161,
+            "p99_ms": 161,
+            "max_ms": 161,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "network": {
+            "carrier_down": {
+              "bytes_read": 1058529,
+              "bytes_delivered": 1058529,
+              "chunks": 1185,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 1.427209
+            },
+            "carrier_up": {
+              "bytes_read": 1081157,
+              "bytes_delivered": 1081157,
+              "chunks": 1149,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 9998.871
+            },
+            "down": {
+              "bytes_read": 662851,
+              "bytes_delivered": 662851,
+              "chunks": 674,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 12.725633
+            },
+            "up": {
+              "bytes_read": 1189072,
+              "bytes_delivered": 1189072,
+              "chunks": 1198,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 1.586041
+            }
+          },
+          "carrier_reception": {
+            "continuous_expected": true,
+            "duplicate_dropped_ms": 0,
+            "epoch": 2,
+            "events": [
+              {
+                "at": "2026-10-01T14:44:49.304196Z",
+                "excess_age_ms": 0,
+                "gap_ms": 2998.545916,
+                "reason": "reception_stalled",
+                "receipt_ms": 7699.078333,
+                "source_sequence": 0,
+                "source_timestamp_ms": 0
+              },
+              {
+                "at": "2026-10-01T14:44:56.333289Z",
+                "excess_age_ms": 10008.118666,
+                "gap_ms": 10027.501666,
+                "reason": "delivery_after_gap",
+                "receipt_ms": 14728.034083,
+                "source_sequence": 151,
+                "source_timestamp_ms": 3000
+              },
+              {
+                "at": "2026-10-01T14:44:56.343657Z",
+                "excess_age_ms": 338.5999580000007,
+                "gap_ms": 0.01691700000083074,
+                "reason": "reception_recovered",
+                "receipt_ms": 14738.515375,
+                "source_sequence": 635,
+                "source_timestamp_ms": 12680
+              }
+            ],
+            "frames": 1128,
+            "last_receipt_ms": 24260.527167,
+            "max_batch_ms": 10040,
+            "max_excess_age_ms": 10008.118666,
+            "max_gap_ms": 10027.501666,
+            "received_ms": 22560,
+            "recoveries": 1,
+            "source_sequence": 1128,
+            "source_timestamp_ms": 22540,
+            "stale_dropped_ms": 9680,
+            "stalled": false,
+            "stalls": 1
+          },
+          "browser_notices": [
+            {
+              "at": 1790865889305,
+              "detail": "Caller audio delivery interrupted. Your microphone remains connected."
+            },
+            {
+              "at": 1790865897304,
+              "detail": "Caller audio delivery restored."
+            }
+          ],
+          "browser_final_timing": {
+            "transport": {
+              "capture_frames": 1148,
+              "capture_sent_ms": 22960,
+              "capture_dropped_ms": 0,
+              "capture_max_age_ms": 27.383056640625,
+              "playback_received_ms": 12278.958333333332,
+              "playback_sequence_gaps": 0,
+              "playback_max_transit_ms": 14.081626953124214,
+              "playback_max_server_queue_ms": 0.143542,
+              "playback_transport_dropped_ms": 0,
+              "playback_source_dropped_ms": 0,
+              "playback_max_source_age_ms": 321.41466112499984,
+              "playback_max_delivery_excess_ms": 319.099853515625,
+              "playback_source_timestamp_ms": 21960,
+              "playback_source_sequence": 1099,
+              "playback_source_epoch": 2,
+              "worker_max_tick_gap_ms": 1004.2001953125,
+              "drop_totals_ms": {},
+              "clock_uncertainty_ms": 0.5995351562505675,
+              "clock_sample_age_ms": 5000.89990234375
+            },
+            "playback": {
+              "played_ms": 11969.625,
+              "max_residence_ms": 308.73163948176807,
+              "drop_totals_ms": {
+                "playback_hard_limit": 169.33333333333334
+              }
+            }
+          },
+          "browser_report_sha256": "a048f78bac67efadf9d83a840c2ea55a07cb9d1699d50605ab7b075abb7e4bbe"
+        },
+        {
+          "profile": {
+            "carrier_down": {
+              "kbps": 10000,
+              "latency_ms": 0,
+              "jitter_ms": 0,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 3000,
+              "outage_ms": 10000
+            },
+            "carrier_missing": true,
+            "name": "carrier-ten-second-missing",
+            "expectation": "recovery",
+            "down": {
+              "kbps": 10000,
+              "latency_ms": 0,
+              "jitter_ms": 0,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "kbps": 10000,
+              "latency_ms": 0,
+              "jitter_ms": 0,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 65
+          },
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 48.844970703125,
+            "p95_ms": 51.175048828125,
+            "p99_ms": 52.868896484375,
+            "max_ms": 52.868896484375,
+            "median_level_dbfs": -15.145145882172859,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 18,
+            "missing_markers_pct": 52.63157894736842,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 151,
+            "p95_ms": 151,
+            "p99_ms": 151,
+            "max_ms": 151,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "network": {
+            "down": {
+              "bytes_read": 646398,
+              "bytes_delivered": 646398,
+              "chunks": 647,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 0.8224
+            },
+            "up": {
+              "bytes_read": 1188373,
+              "bytes_delivered": 1188373,
+              "chunks": 1202,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 2.186283
+            }
+          },
+          "carrier_reception": {
+            "continuous_expected": true,
+            "duplicate_dropped_ms": 0,
+            "epoch": 2,
+            "events": [
+              {
+                "at": "2026-10-01T14:45:12.675229Z",
+                "excess_age_ms": 0,
+                "gap_ms": 2007.7844169999998,
+                "reason": "reception_stalled",
+                "receipt_ms": 6723.7215,
+                "source_sequence": 0,
+                "source_timestamp_ms": 0
+              },
+              {
+                "at": "2026-10-01T14:45:20.690825Z",
+                "excess_age_ms": 3.188333000000057,
+                "gap_ms": 10022.847917,
+                "reason": "delivery_after_gap",
+                "receipt_ms": 14738.785,
+                "source_sequence": 651,
+                "source_timestamp_ms": 13000
+              },
+              {
+                "at": "2026-10-01T14:45:20.690827Z",
+                "excess_age_ms": 3.188333000000057,
+                "gap_ms": 10022.847917,
+                "reason": "reception_recovered",
+                "receipt_ms": 14738.785,
+                "source_sequence": 651,
+                "source_timestamp_ms": 13000
+              }
+            ],
+            "frames": 628,
+            "last_receipt_ms": 24275.673,
+            "max_batch_ms": 20,
+            "max_excess_age_ms": 10.360375000000204,
+            "max_gap_ms": 10022.847917,
+            "received_ms": 12560,
+            "recoveries": 1,
+            "source_sequence": 1128,
+            "source_timestamp_ms": 22540,
+            "stale_dropped_ms": 0,
+            "stalled": false,
+            "stalls": 1
+          },
+          "browser_notices": [
+            {
+              "at": 1790865912678,
+              "detail": "Caller audio delivery interrupted. Your microphone remains connected."
+            },
+            {
+              "at": 1790865921673,
+              "detail": "Caller audio delivery restored."
+            }
+          ],
+          "browser_final_timing": {
+            "transport": {
+              "capture_frames": 1148,
+              "capture_sent_ms": 22960,
+              "capture_dropped_ms": 0,
+              "capture_max_age_ms": 27.7001953125,
+              "playback_received_ms": 11978.958333333332,
+              "playback_sequence_gaps": 0,
+              "playback_max_transit_ms": 9.628731453125056,
+              "playback_max_server_queue_ms": 0.063791,
+              "playback_transport_dropped_ms": 0,
+              "playback_source_dropped_ms": 0,
+              "playback_max_source_age_ms": 12.578870109377021,
+              "playback_max_delivery_excess_ms": 10.900146484375,
+              "playback_source_timestamp_ms": 21960,
+              "playback_source_sequence": 1099,
+              "playback_source_epoch": 2,
+              "worker_max_tick_gap_ms": 1003.89990234375,
+              "drop_totals_ms": {},
+              "clock_uncertainty_ms": 0.6995942421872314,
+              "clock_sample_age_ms": 996.599853515625
+            },
+            "playback": {
+              "played_ms": 11857.625,
+              "max_residence_ms": 160.00000000000364,
+              "drop_totals_ms": {}
+            }
+          },
+          "browser_report_sha256": "1fe45b0727ee83f5fd1fc5d2a54841b239c255cafb9472692f22d7a8ff19b512"
+        },
+        {
+          "profile": {
+            "mute_microphone": true,
+            "name": "intentional-microphone-mute",
+            "expectation": "recovery",
+            "down": {
+              "kbps": 10000,
+              "latency_ms": 0,
+              "jitter_ms": 0,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "kbps": 10000,
+              "latency_ms": 0,
+              "jitter_ms": 0,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 20
+          },
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 34,
+            "missing_markers_pct": 10.526315789473685,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 24.7529296875,
+            "p95_ms": 53.47412109375,
+            "p99_ms": 55.47998046875,
+            "max_ms": 55.47998046875,
+            "median_level_dbfs": -15.14524363413454,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 61,
+            "p95_ms": 61,
+            "p99_ms": 61,
+            "max_ms": 61,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "network": {
+            "down": {
+              "bytes_read": 1161230,
+              "bytes_delivered": 1161230,
+              "chunks": 1154,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 0.8784
+            },
+            "up": {
+              "bytes_read": 1091437,
+              "bytes_delivered": 1091437,
+              "chunks": 1104,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 2.245
+            }
+          },
+          "carrier_reception": {
+            "continuous_expected": true,
+            "duplicate_dropped_ms": 0,
+            "epoch": 2,
+            "frames": 1128,
+            "last_receipt_ms": 24245.537084,
+            "max_batch_ms": 20,
+            "max_excess_age_ms": 10.450791999999637,
+            "max_gap_ms": 29.963999999999942,
+            "received_ms": 22560,
+            "recoveries": 0,
+            "source_sequence": 1128,
+            "source_timestamp_ms": 22540,
+            "stale_dropped_ms": 0,
+            "stalled": false,
+            "stalls": 0
+          },
+          "browser_notices": [],
+          "browser_final_timing": {
+            "transport": {
+              "capture_frames": 1051,
+              "capture_sent_ms": 21020,
+              "capture_dropped_ms": 0,
+              "capture_max_age_ms": 30.733154296875,
+              "playback_received_ms": 21978.958333333332,
+              "playback_sequence_gaps": 0,
+              "playback_max_transit_ms": 8.390064453124978,
+              "playback_max_server_queue_ms": 0.136584,
+              "playback_transport_dropped_ms": 0,
+              "playback_source_dropped_ms": 0,
+              "playback_max_source_age_ms": 17.470352531250683,
+              "playback_max_delivery_excess_ms": 16.312255859375,
+              "playback_source_timestamp_ms": 21960,
+              "playback_source_sequence": 1099,
+              "playback_source_epoch": 2,
+              "worker_max_tick_gap_ms": 1002.89990234375,
+              "drop_totals_ms": {},
+              "clock_uncertainty_ms": 0.3998574140623532,
+              "clock_sample_age_ms": 1002.10009765625
+            },
+            "playback": {
+              "played_ms": 21941.333333333332,
+              "max_residence_ms": 74.66666666667152,
+              "drop_totals_ms": {}
+            }
+          },
+          "browser_report_sha256": "4a66edc44a5b2f484e2bdd2ba65da16cef444d82712cfc0d0b60a52b14f7159a"
+        },
+        {
+          "profile": {
+            "reconnect_browser": true,
+            "name": "browser-reconnect",
+            "expectation": "recovery",
+            "down": {
+              "kbps": 10000,
+              "latency_ms": 0,
+              "jitter_ms": 0,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "kbps": 10000,
+              "latency_ms": 0,
+              "jitter_ms": 0,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 500,
+            "max_missing_pct": 20
+          },
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 37,
+            "missing_markers_pct": 2.6315789473684212,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 43.072021484375,
+            "p95_ms": 61.092041015625,
+            "p99_ms": 61.9599609375,
+            "max_ms": 61.9599609375,
+            "median_level_dbfs": -15.145145882172859,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 37,
+            "missing_markers_pct": 2.6315789473684212,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 45.666748046875,
+            "p95_ms": 65.666748046875,
+            "p99_ms": 65.666748046875,
+            "max_ms": 65.666748046875,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "network": {
+            "down": {
+              "bytes_read": 1148561,
+              "bytes_delivered": 1147533,
+              "chunks": 1148,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 1.626842
+            },
+            "up": {
+              "bytes_read": 1177693,
+              "bytes_delivered": 1177693,
+              "chunks": 1192,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 2.724675
+            }
+          },
+          "carrier_reception": {
+            "continuous_expected": true,
+            "duplicate_dropped_ms": 0,
+            "epoch": 2,
+            "frames": 1127,
+            "last_receipt_ms": 24290.406583,
+            "max_batch_ms": 40,
+            "max_excess_age_ms": 27.79641700000002,
+            "max_gap_ms": 47.411834,
+            "received_ms": 22540,
+            "recoveries": 0,
+            "source_sequence": 1127,
+            "source_timestamp_ms": 22520,
+            "stale_dropped_ms": 0,
+            "stalled": false,
+            "stalls": 0
+          },
+          "browser_notices": [],
+          "browser_final_timing": {
+            "transport": {
+              "capture_frames": 1154,
+              "capture_sent_ms": 23080,
+              "capture_dropped_ms": 0,
+              "capture_max_age_ms": 23.33349609375,
+              "playback_received_ms": 22078.958333333332,
+              "playback_sequence_gaps": 0,
+              "playback_max_transit_ms": 16.401871093749833,
+              "playback_max_server_queue_ms": 4.11275,
+              "playback_transport_dropped_ms": 0,
+              "playback_source_dropped_ms": 0,
+              "playback_max_source_age_ms": 29.628773437500058,
+              "playback_max_delivery_excess_ms": 28.39990234375,
+              "playback_source_timestamp_ms": 22320,
+              "playback_source_sequence": 1117,
+              "playback_source_epoch": 2,
+              "worker_max_tick_gap_ms": 1001.599853515625,
+              "drop_totals_ms": {},
+              "clock_uncertainty_ms": 0.3997148437501892,
+              "clock_sample_age_ms": 999
+            },
+            "playback": {
+              "played_ms": 21632,
+              "max_residence_ms": 80.00000000000045,
+              "drop_totals_ms": {
+                "playback_flush": 57.625
+              }
+            }
+          },
+          "browser_report_sha256": "370aefa5f5a00ba4bc805ae3394d307c2be376c06b5454f6f45be9818eba9dc2"
+        }
+      ]
+    },
+    {
+      "command": "bun run benchmark:softphone --profiles wifi-jitter --seconds 60 --seed 20261001 --output /Users/marcoschwartz/Documents/code/.codex-worktrees/apps-telephony-082/mcp/telephony/benchmarks/softphone/results/2026-10-01-wifi-60s",
+      "raw_report_sha256": "06cb89589872cc81f0d9e8c54dd90b44ed1632c00dd62161ca004491508bd478",
+      "raw_report": "benchmarks/softphone/results/2026-10-01-wifi-60s/results.json",
+      "created_at": "2026-10-01T14:53:34Z",
+      "revision": "dc5a2082c5922a3d0651d24997cfbf8b6cf6a626",
+      "source_manifest_sha256": "88c21b1042aba392d4f80ffa5c469494292387d858b20a8abec11c2e5f7d7afd",
+      "duration_ms": 60000,
+      "seed": 20261001,
+      "clock_uncertainty_ms": 20,
+      "command_exit_code": 0,
+      "results": [
+        {
+          "profile": {
+            "name": "wifi-jitter",
+            "expectation": "usable",
+            "down": {
+              "kbps": 2000,
+              "latency_ms": 35,
+              "jitter_ms": 40,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "kbps": 1000,
+              "latency_ms": 35,
+              "jitter_ms": 40,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 450,
+            "max_missing_pct": 10
+          },
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 118,
+            "received_markers": 118,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 123.568115234375,
+            "p95_ms": 175.1650390625,
+            "p99_ms": 181.282958984375,
+            "max_ms": 183.625,
+            "median_level_dbfs": -15.14515701441672,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 118,
+            "received_markers": 118,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 115.666748046875,
+            "p95_ms": 225.666748046875,
+            "p99_ms": 225.666748046875,
+            "max_ms": 225.666748046875,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "network": {
+            "down": {
+              "bytes_read": 3219833,
+              "bytes_delivered": 3215721,
+              "chunks": 3181,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 81.381052
+            },
+            "up": {
+              "bytes_read": 3212422,
+              "bytes_delivered": 3206929,
+              "chunks": 3226,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 111.151397
+            }
+          },
+          "carrier_reception": {
+            "continuous_expected": true,
+            "duplicate_dropped_ms": 0,
+            "epoch": 2,
+            "frames": 3129,
+            "last_receipt_ms": 64925.228583,
+            "max_batch_ms": 100,
+            "max_excess_age_ms": 83.0191249999989,
+            "max_gap_ms": 100.6192499999961,
+            "received_ms": 62580,
+            "recoveries": 0,
+            "source_sequence": 3129,
+            "source_timestamp_ms": 62560,
+            "stale_dropped_ms": 0,
+            "stalled": false,
+            "stalls": 0
+          },
+          "browser_notices": [],
+          "browser_final_timing": {
+            "transport": {
+              "capture_frames": 3143,
+              "capture_sent_ms": 62720,
+              "capture_dropped_ms": 140,
+              "capture_max_age_ms": 136.4501953125,
+              "playback_received_ms": 61758.95833333333,
+              "playback_sequence_gaps": 0,
+              "playback_max_transit_ms": 106.5889619218724,
+              "playback_max_server_queue_ms": 0.442375,
+              "playback_transport_dropped_ms": 0,
+              "playback_source_dropped_ms": 0,
+              "playback_max_source_age_ms": 166.6225449218764,
+              "playback_max_delivery_excess_ms": 117.381103515625,
+              "playback_source_timestamp_ms": 61740,
+              "playback_source_sequence": 3088,
+              "playback_source_epoch": 2,
+              "worker_max_tick_gap_ms": 1002.900146484375,
+              "drop_totals_ms": {
+                "capture_age_limit": 140
+              },
+              "clock_uncertainty_ms": 58.44980517187287,
+              "clock_sample_age_ms": 1883.400146484375
+            },
+            "playback": {
+              "played_ms": 61737.625,
+              "max_residence_ms": 208.00000000000728,
+              "drop_totals_ms": {}
+            }
+          },
+          "browser_report_sha256": "cdc071e9db9b0d3592d2e082ae0684655e1255d1a43de821f0a734a07c78e4e3"
+        }
+      ]
+    },
+    {
+      "command": "bun run benchmark:softphone --profiles wifi-jitter --seconds 60 --seed 20261002 --output /Users/marcoschwartz/Documents/code/.codex-worktrees/apps-telephony-082/mcp/telephony/benchmarks/softphone/results/2026-10-01-wifi-60s-seed2",
+      "raw_report_sha256": "6256e3f2df4f338021e2e7246a0c66cb52dd08b81a30adaed5467daf03796188",
+      "raw_report": "benchmarks/softphone/results/2026-10-01-wifi-60s-seed2/results.json",
+      "created_at": "2026-10-01T14:54:59Z",
+      "revision": "dc5a2082c5922a3d0651d24997cfbf8b6cf6a626",
+      "source_manifest_sha256": "88c21b1042aba392d4f80ffa5c469494292387d858b20a8abec11c2e5f7d7afd",
+      "duration_ms": 60000,
+      "seed": 20261002,
+      "clock_uncertainty_ms": 20,
+      "command_exit_code": 0,
+      "results": [
+        {
+          "profile": {
+            "name": "wifi-jitter",
+            "expectation": "usable",
+            "down": {
+              "kbps": 2000,
+              "latency_ms": 35,
+              "jitter_ms": 40,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "up": {
+              "kbps": 1000,
+              "latency_ms": 35,
+              "jitter_ms": 40,
+              "recovery_probability": 0,
+              "recovery_ms": 0,
+              "outage_at_ms": 0,
+              "outage_ms": 0
+            },
+            "max_p95_ms": 450,
+            "max_missing_pct": 10
+          },
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 118,
+            "received_markers": 118,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 120.154052734375,
+            "p95_ms": 181.153076171875,
+            "p99_ms": 184.303955078125,
+            "max_ms": 185.89892578125,
+            "median_level_dbfs": -15.145143582658863,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 118,
+            "received_markers": 118,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 104.666748046875,
+            "p95_ms": 244.666748046875,
+            "p99_ms": 244.666748046875,
+            "max_ms": 244.666748046875,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "network": {
+            "down": {
+              "bytes_read": 3220871,
+              "bytes_delivered": 3216759,
+              "chunks": 3198,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 82.088283
+            },
+            "up": {
+              "bytes_read": 3205083,
+              "bytes_delivered": 3199646,
+              "chunks": 3228,
+              "recovery_events": 0,
+              "max_scheduled_delay_ms": 102.73008
+            }
+          },
+          "carrier_reception": {
+            "continuous_expected": true,
+            "duplicate_dropped_ms": 0,
+            "epoch": 2,
+            "frames": 3130,
+            "last_receipt_ms": 64765.872292,
+            "max_batch_ms": 80,
+            "max_excess_age_ms": 62.41633300000103,
+            "max_gap_ms": 81.419624999995,
+            "received_ms": 62600,
+            "recoveries": 0,
+            "source_sequence": 3130,
+            "source_timestamp_ms": 62580,
+            "stale_dropped_ms": 0,
+            "stalled": false,
+            "stalls": 0
+          },
+          "browser_notices": [],
+          "browser_final_timing": {
+            "transport": {
+              "capture_frames": 3143,
+              "capture_sent_ms": 62840,
+              "capture_dropped_ms": 20,
+              "capture_max_age_ms": 30.483154296875,
+              "playback_received_ms": 61818.95833333333,
+              "playback_sequence_gaps": 0,
+              "playback_max_transit_ms": 137.7759599531273,
+              "playback_max_server_queue_ms": 0.838917,
+              "playback_transport_dropped_ms": 0,
+              "playback_source_dropped_ms": 0,
+              "playback_max_source_age_ms": 169.27561229687853,
+              "playback_max_delivery_excess_ms": 122.352783203125,
+              "playback_source_timestamp_ms": 61800,
+              "playback_source_sequence": 3091,
+              "playback_source_epoch": 2,
+              "worker_max_tick_gap_ms": 1004.5,
+              "drop_totals_ms": {
+                "capture_age_limit": 20
+              },
+              "clock_uncertainty_ms": 74.44907617187346,
+              "clock_sample_age_ms": 848.89990234375
+            },
+            "playback": {
+              "played_ms": 61630.958333333336,
+              "max_residence_ms": 224,
+              "drop_totals_ms": {}
+            }
+          },
+          "browser_report_sha256": "3d9afd1621b6fbd55f91fb841857fed289a658a96dfea102b673a329b6c1461a"
+        }
+      ]
+    }
+  ]
+}
