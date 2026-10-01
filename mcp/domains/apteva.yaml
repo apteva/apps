@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: domains
 display_name: Domains
-version: 0.8.0
+version: 0.9.0
 description: |
   DNS + domain inventory and registrar workflows for Apteva projects.
   Other apps that need to write DNS records (messaging for SES
@@ -48,7 +48,7 @@ requires:
     - role: dns_provider
       kind: integration
       mode: multiple
-      compatible_slugs: [porkbun, namecheap, ionos, spaceship, dynadot]
+      compatible_slugs: [porkbun, namecheap, ionos, spaceship, dynadot, cloudflare]
       capabilities:
         - dns.list_records
         - dns.create_record
@@ -60,7 +60,7 @@ requires:
         dns.edit_records_by_type: edit_dns_records_by_type
         dns.delete_records_by_type: delete_dns_records_by_type
       required: true
-      label: "DNS providers (Porkbun, Namecheap, IONOS, Spaceship, Dynadot)"
+      label: "DNS providers (Porkbun, Namecheap, IONOS, Spaceship, Dynadot, Cloudflare)"
       hint: "Connect every DNS account used by this project and choose a default. Each domain is pinned to its selected connection."
     - role: registrar_provider
       kind: integration
