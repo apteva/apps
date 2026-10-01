@@ -94,6 +94,7 @@ func (d *liveAudioTimeline) snapshot() (string, map[string]mediaStageSnapshot) {
 }
 
 type serverAudioDiagnostics struct {
+	Reception              carrierReceptionSnapshot      `json:"carrier_reception"`
 	CarrierPacer           livePacerSnapshot             `json:"carrier_pacer"`
 	Process                mediaProcessSnapshot          `json:"process"`
 	CaptureStaleBytes      int64                         `json:"capture_stale_bytes"`
@@ -113,7 +114,7 @@ func (h *softphoneHub) serverAudioSnapshot() serverAudioDiagnostics {
 	epoch, stages := h.timeline.snapshot()
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return serverAudioDiagnostics{CarrierPacer: h.pacerStats.snapshot(), Process: sampleMediaProcess(), CaptureStaleBytes: h.captureStaleBytes, Epoch: epoch, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Stages: stages,
+	return serverAudioDiagnostics{Reception: h.reception.snapshot(mediaClockMS(), h.carrierForward != nil && !h.held && (h.status == "answered" || h.status == "in-progress")), CarrierPacer: h.pacerStats.snapshot(), Process: sampleMediaProcess(), CaptureStaleBytes: h.captureStaleBytes, Epoch: epoch, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Stages: stages,
 		CarrierForward: mergeLiveAudioSnapshots(h.completedCarrierForward, h.carrierForward.audioSnapshot()),
 		ToBrowser:      mergeLiveAudioSnapshots(h.completedBrowser, h.browser.audioSnapshot()), ToCarrierBridge: mergeLiveAudioSnapshots(h.completedPeer, h.peer.audioSnapshot()),
 		CaptureTimestampMS: h.captureTimestampMS, CaptureWorkerAgeMS: h.captureWorkerAgeMS, CaptureSequenceGaps: h.captureSequenceGaps, CaptureTransitExcessMS: h.captureTransitExcessMS}
@@ -127,6 +128,7 @@ func mergeLiveAudioSnapshots(a, b liveAudioQueueSnapshot) liveAudioQueueSnapshot
 	a.SentBytes += b.SentBytes
 	a.OverflowBytes += b.OverflowBytes
 	a.StaleBytes += b.StaleBytes
+	a.SourceStaleBytes += b.SourceStaleBytes
 	a.FlushedBytes += b.FlushedBytes
 	a.FailedBytes += b.FailedBytes
 	a.WriteErrors += b.WriteErrors
@@ -185,6 +187,7 @@ func (h *softphoneHub) setCarrierForward(w *websocketWriterPump) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.carrierForward = w
+	h.reception.begin(false)
 }
 func (h *softphoneHub) finishCarrierForward(w *websocketWriterPump) {
 	h.mu.Lock()

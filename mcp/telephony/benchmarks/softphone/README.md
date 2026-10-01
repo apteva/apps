@@ -14,6 +14,9 @@ bun run benchmark:softphone --seconds 30 --seed 20260929
 bun run benchmark:softphone --profiles broadband,wifi-jitter --seconds 60
 ```
 
+The default measurement is 20 seconds per profile. The ten-second carrier
+profiles require at least 17 seconds, including four seconds for recovery.
+
 Each run writes `REPORT.md`, machine-readable `results.json`, and browser
 measurements under the ignored `benchmarks/softphone/results/<timestamp>/`.
 Use `--output /absolute/path` to select a different directory. Keep reports
@@ -40,6 +43,10 @@ Latency is one-way; random positive jitter is added up to the stated maximum.
 | upload-256k | 2000 / 256 | 20 ms | 0 ms | Insufficient microphone bandwidth |
 | download-256k | 256 / 2000 | 20 ms | 0 ms | Insufficient playback bandwidth |
 | two-second-outage | 2000 / 1000 | 20 ms | 0 ms | Blackout at 4–6 seconds, then recovery |
+| carrier-ten-second-catchup | 10000 / 10000 | 0 ms | 0 ms | Carrier input delivery pauses at 3–13 seconds, then queued bytes arrive rapidly |
+| carrier-ten-second-missing | 10000 / 10000 | 0 ms | 0 ms | Carrier skips source frames at 3–13 seconds, without catch-up |
+| intentional-microphone-mute | 10000 / 10000 | 0 ms | 0 ms | Mute at 4–6 seconds; caller delivery must remain healthy |
+| browser-reconnect | 10000 / 10000 | 0 ms | 0 ms | Close browser fixture sockets at 4 seconds; worker reconnects |
 
 The browser connection carries raw 24 kHz, 16-bit mono PCM: **384 kbit/s per
 direction before framing**. A 256 kbit/s link cannot sustain it. The benchmark
@@ -65,16 +72,26 @@ received markers means no timing measurement, never instantaneous delivery.
 
 Usable profiles enforce the explicit p95 and missing-marker thresholds in
 `profiles.json`, plus nonzero delivery, ordering, and no duplicate markers.
-The outage profile must deliver at least two valid markers each way in the
-final measurement window. Missing markers reflect damaged/missing tone
+The outage/recovery profiles must deliver at least two valid markers each way in the
+final measurement window. Carrier-interruption gates additionally require stall/recovery counters and
+notices, no received-stale discard for missing frames, at least nine seconds of
+stale discard for catch-up, no disruption of the adviser direction, and bounded
+replayed-marker delay. Intentional mute must not raise a caller-delivery incident.
+The reconnect profile must actually enter reconnecting and recover.
+
+Missing markers reflect damaged/missing tone
 sequences, not a percentage of missing speech samples. Signal level is recorded
 for comparison; there is no perceptual MOS, PESQ or POLQA quality claim.
 
 ## Model boundaries and reproducibility
 
-- This is a real application benchmark with a **modeled browser network**.
-  The carrier connection is unimpaired loopback. It does not identify the
-  origin of the production 6.7-second carrier ingress gaps.
+- This is a real application benchmark with **modeled browser and optional
+  carrier links**. Carrier input has its own independently shaped TCP proxy.
+  It does not identify the origin of production carrier ingress gaps.
+- Source timestamps follow absolute deadlines. Scheduling pauses produce a
+  catch-up batch rather than silently losing ticker ticks and drifting tone
+  timestamps. Silent PCM continues during the drain period, so the harness
+  does not manufacture a false delivery incident when markers stop.
 - WebSockets use TCP. The proxy preserves ordered bytes and models stalls
   during retransmission. Its 1% value is per proxy read chunk (up to 1460
   bytes), **not IP packet loss**. It does not simulate kernel congestion

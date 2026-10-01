@@ -61,7 +61,10 @@ type twilioFrame struct {
 		} `json:"mediaFormat"`
 	} `json:"start,omitempty"`
 	Media *struct {
-		Payload string `json:"payload"`
+		Payload   string `json:"payload"`
+		Timestamp string `json:"timestamp,omitempty"`
+		Chunk     string `json:"chunk,omitempty"`
+		Track     string `json:"track,omitempty"`
 	} `json:"media,omitempty"`
 	Mark *struct {
 		Name string `json:"name"`
@@ -299,6 +302,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 	if row.PeerKind == peerKindHuman {
 		humanHub = a.softphones.hubFor(callID)
 		humanHub.setCarrierForward(coreWriter)
+		humanHub.reception.begin(true)
 		defer humanHub.finishCarrierForward(coreWriter)
 	}
 	defer func() {
@@ -326,9 +330,16 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 			if op != ws.OpText || len(data) == 0 {
 				continue
 			}
+			readAt, receiptClock := time.Now(), mediaClockMS()
+			if humanHub != nil {
+				humanHub.timeline.observe("carrier_socket_read", len(data), time.Time{}, "", "")
+			}
 			var f twilioFrame
 			if err := json.Unmarshal(data, &f); err != nil {
 				continue
+			}
+			if humanHub != nil {
+				humanHub.timeline.observe("carrier_json_decoded", len(data), readAt, "", "")
 			}
 
 			if sequence, err := strconv.ParseUint(f.SequenceNumber, 10, 64); err == nil {
@@ -360,9 +371,12 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			case "media":
+				if f.Media != nil && f.Media.Track != "" && f.Media.Track != "inbound" {
+					continue
+				}
 				decodeStarted := time.Now()
 				if humanHub != nil {
-					humanHub.timeline.observe("carrier_media_read", len(data), time.Time{}, "", "")
+					humanHub.timeline.observe("carrier_media_read", len(data), time.Time{}, "", f.SequenceNumber)
 				}
 				if f.Media == nil || f.Media.Payload == "" {
 					continue
@@ -370,6 +384,17 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 				mu, err := base64.StdEncoding.DecodeString(f.Media.Payload)
 				if err != nil {
 					continue
+				}
+				src := carrierSource{}
+				mapped, receipt := 0.0, receiptClock
+				if humanHub != nil {
+					src = sourceMedia(f.StreamSID, f.Media.Timestamp, f.Media.Chunk)
+					var drop bool
+					mapped, drop = humanHub.reception.observe(src, float64(len(mu))*1000/8000, receipt)
+					if drop {
+						inputResampler = newPCMResampler(8000, 24000)
+						continue
+					}
 				}
 				processed := processCarrierInput(row, audioFrontend, ulawToPCM16(mu))
 				localSpeechStarted := processed.SpeechStarted && playback.hasPending()
@@ -382,8 +407,8 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 				}
 				tap.publishPCM(0, pcm24)
 				if humanHub != nil {
-					humanHub.timeline.observe("carrier_decoded", len(pcm24)*2, decodeStarted, "", "")
-					coreWriter.QueueAudio(pcm16ToBytes(pcm24))
+					humanHub.timeline.observe("carrier_decoded", len(pcm24)*2, decodeStarted, f.Media.Timestamp, f.Media.Chunk)
+					coreWriter.queueAudio(encodeSourceAudio(pcm16ToBytes(pcm24), src, mapped, receipt, humanHub.reception.snapshot(receipt, false).Epoch), sourceAudioHeaderBytes)
 				} else {
 					err = coreWriter.Write(ws.OpBinary, pcm16ToBytes(pcm24))
 				}
@@ -475,6 +500,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 			dropEvents = append(dropEvents, captureDrops...)
 		}
 		_ = a.db().updateCarrierAudioDiagnostics(callID, carrierAudioDiagnostics{
+			OperatorInterrupts: audioFrontend.snapshot().OperatorInterrupts, LocalInterrupts: audioFrontend.snapshot().LocalInterrupts, ProviderCoreInterrupts: audioFrontend.snapshot().ProviderCoreInterrupts,
 			InputAudio: audioFrontend.transportSnapshot(),
 			Provider:   "twilio", Codec: carrierCodecPCMU8, SampleRate: twilioMediaSampleRate,
 			SendAheadMS: pacerPolicy.bufferMS, PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: max(droppedStaleMS, int(pacer.diagnostics.snapshot().DroppedMS)),

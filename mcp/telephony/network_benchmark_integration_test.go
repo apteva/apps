@@ -49,6 +49,7 @@ type benchmarkDirection struct {
 type benchmarkBrowserResult struct {
 	WireDiagnostics []json.RawMessage `json:"wire_diagnostics"`
 	Markers         []bench.Marker    `json:"markers"`
+	Notices         []map[string]any  `json:"notices"`
 	States          []map[string]any  `json:"states"`
 	Diagnostics     []map[string]any  `json:"diagnostics"`
 	PageErrors      []string          `json:"page_errors"`
@@ -143,6 +144,11 @@ func TestSoftphoneNetworkBenchmark(t *testing.T) {
 			}
 		}
 	}
+	for _, p := range profiles {
+		if (selection == "all" || selected[p.Name]) && p.CarrierDown != nil && float64(seconds*1000) < p.CarrierDown.OutageAtMS+p.CarrierDown.OutageMS+4000 {
+			t.Fatal("carrier interruption profiles require at least 17 seconds; use --seconds 20")
+		}
+	}
 	metadata := benchmarkSourceMetadata(t)
 	var results []benchmarkResult
 	for _, profile := range profiles {
@@ -158,14 +164,14 @@ func TestSoftphoneNetworkBenchmark(t *testing.T) {
 	}
 	git := exec.Command("git", "rev-parse", "HEAD")
 	revision, _ := git.Output()
-	report := map[string]any{"schema": "telephony-softphone-network-benchmark/v1", "created_at": time.Now().UTC().Format(time.RFC3339), "revision": strings.TrimSpace(string(revision)), "source": metadata, "seed": seed, "duration_ms": seconds * 1000, "clock_uncertainty_ms": 20, "scope": "real Chromium + production SoftphoneSession/worklets + compiled Telephony + local Telnyx L16 carrier substitute; shaped browser TCP link; synthetic acoustic markers; no live provider", "results": results}
+	report := map[string]any{"schema": "telephony-softphone-network-benchmark/v1", "created_at": time.Now().UTC().Format(time.RFC3339), "revision": strings.TrimSpace(string(revision)), "source": metadata, "seed": seed, "duration_ms": seconds * 1000, "clock_uncertainty_ms": 20, "scope": "real Chromium + production SoftphoneSession/worklets + compiled Telephony + local Telnyx L16 carrier substitute; shaped browser and optional carrier TCP links; synthetic acoustic markers; no live provider", "results": results}
 	raw, _ := json.MarshalIndent(report, "", "  ")
 	if err = os.WriteFile(filepath.Join(output, "results.json"), append(raw, '\n'), 0600); err != nil {
 		t.Fatal(err)
 	}
 	var md strings.Builder
 	fmt.Fprintf(&md, "# Softphone network benchmark\n\nLocal run: %s. Source revision: `%s` plus local changes. Seed: %d. Measurement: %ds/profile, plus warmup/drain.\n\n", time.Now().Format(time.RFC3339), strings.TrimSpace(string(revision)), seed, seconds)
-	md.WriteString("Actual Chromium, production audio pipeline, compiled Telephony and a local Telnyx L16 substitute. Only the browser TCP link is impaired. No production/staging traffic or real calls. Timing uncertainty is approximately ±20ms.\n\n| Profile | Outcome | Adviser → carrier p95 | Missing markers | Carrier → adviser p95 | Missing markers |\n|---|---|---:|---:|---:|---:|\n")
+	md.WriteString("Actual Chromium, production audio pipeline, compiled Telephony and a local Telnyx L16 substitute. Browser TCP links and carrier links are impaired as specified per profile. Carrier catch-up, missing media, intentional microphone mute and browser reconnect scenarios are included. No production/staging traffic or real calls. Timing uncertainty is approximately ±20ms.\n\n| Profile | Outcome | Adviser → carrier p95 | Missing markers | Carrier → adviser p95 | Missing markers |\n|---|---|---:|---:|---:|---:|\n")
 	for _, r := range results {
 		fmt.Fprintf(&md, "| %s | %s | %.0f ms | %.1f%% | %.0f ms | %.1f%% |\n", r.Profile.Name, r.Outcome, r.Up.P95, r.Up.MissingPct, r.Down.P95, r.Down.MissingPct)
 	}
@@ -211,6 +217,14 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 		t.Fatal(err)
 	}
 	defer proxy.Close()
+	var carrierProxy *bench.Proxy
+	if profile.CarrierDown != nil && !profile.CarrierMissing {
+		carrierProxy, err = bench.NewProxy(target.Host, bench.Profile{Up: *profile.CarrierDown, Down: bench.Link{Kbps: 10000}}, seed+10000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer carrierProxy.Close()
+	}
 	var epoch atomic.Int64
 	var markerMu sync.Mutex
 	decoder := bench.NewDecoder(16000)
@@ -219,7 +233,14 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 		case "/":
 			io.WriteString(w, `<!doctype html><title>Local Telephony network benchmark</title><script type="module" src="/entry.js"></script>`)
 		case "/config":
-			writeTier2JSON(w, map[string]any{"media_url": "ws://" + proxy.Addr() + "/softphone/media/" + id + "/" + session.SessionToken, "duration_ms": duration, "drain_ms": 2500})
+			writeTier2JSON(w, map[string]any{"media_url": "ws://" + proxy.Addr() + "/softphone/media/" + id + "/" + session.SessionToken, "duration_ms": duration, "drain_ms": 2500, "mute_microphone": profile.MuteMicrophone, "reconnect_browser": profile.ReconnectBrowser})
+		case "/disconnect-browser":
+			if r.Method != "POST" {
+				w.WriteHeader(405)
+				return
+			}
+			proxy.Disconnect()
+			w.WriteHeader(204)
 		case "/arm":
 			if r.Method != "POST" {
 				w.WriteHeader(405)
@@ -228,6 +249,9 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 			at := time.Now().Add(time.Second).Truncate(time.Millisecond)
 			if epoch.CompareAndSwap(0, at.UnixMilli()) {
 				proxy.Arm(at)
+				if carrierProxy != nil {
+					carrierProxy.Arm(at)
+				}
 			}
 			writeTier2JSON(w, map[string]any{"start_at": epoch.Load()})
 		default:
@@ -264,6 +288,15 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 			}
 		}
 		carrierURL := strings.Replace(rawSidecarMediaURL(t, sc, command.Input["stream_url"].(string)), "http://", "ws://", 1)
+		if carrierProxy != nil {
+			u, parseErr := url.Parse(carrierURL)
+			if parseErr != nil {
+				carrierErrors <- parseErr
+				return
+			}
+			u.Host = carrierProxy.Addr()
+			carrierURL = u.String()
+		}
 		carrier, buffered, _, err := (ws.Dialer{}).Dial(ctx, carrierURL)
 		if err != nil {
 			carrierErrors <- err
@@ -299,22 +332,27 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 				return
 			case <-timer.C:
 			}
-			cadence := time.NewTicker(20 * time.Millisecond)
-			defer cadence.Stop()
-			for frame := 0; frame < duration/20; frame++ {
+			// Absolute source deadlines preserve timestamp/sample alignment after
+			// host scheduling pauses; Ticker drops ticks and silently drifts markers.
+			for frame := 0; frame < (duration+3000)/20; frame++ {
 				pcm := make([]int16, 320)
 				for i := range pcm {
-					pcm[i] = bench.Sample(frame*320+i, 16000, 128)
+					if frame*20 < duration {
+						pcm[i] = bench.Sample(frame*320+i, 16000, 128)
+					}
 				}
 				payload := base64.StdEncoding.EncodeToString(pcm16ToBytes(pcm))
 				raw, _ := json.Marshal(map[string]any{"event": "media", "sequence_number": frame + 2, "media": map[string]any{"payload": payload, "timestamp": frame * 20, "chunk": frame + 1}})
-				if wsutil.WriteClientText(carrier, raw) != nil {
+				skip := profile.CarrierMissing && profile.CarrierDown != nil && float64(frame*20) >= profile.CarrierDown.OutageAtMS && float64(frame*20) < profile.CarrierDown.OutageAtMS+profile.CarrierDown.OutageMS
+				if !skip && wsutil.WriteClientText(carrier, raw) != nil {
 					return
 				}
+				next := time.NewTimer(max(0, time.Until(startAt.Add(time.Duration(frame+1)*20*time.Millisecond))))
 				select {
 				case <-ctx.Done():
+					next.Stop()
 					return
-				case <-cadence.C:
+				case <-next.C:
 				}
 			}
 		}()
@@ -379,6 +417,11 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 	default:
 	}
 	result.Network = proxy.Stats()
+	if carrierProxy != nil {
+		for key, value := range carrierProxy.Stats() {
+			result.Network["carrier_"+key] = value
+		}
+	}
 	markerMu.Lock()
 	result.CarrierMarkers = append([]bench.Marker(nil), decoder.Markers...)
 	markerMu.Unlock()
@@ -395,6 +438,10 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 	}
 	result.Errors = append(result.Errors, result.Browser.PageErrors...)
 	result.Outcome, result.Errors = benchmarkEvaluate(profile, result.Up, result.Down, result.Errors)
+	if failures := benchmarkInterruptionChecks(result); len(failures) > 0 {
+		result.Outcome = "failed"
+		result.Errors = append(result.Errors, failures...)
+	}
 
 	t.Logf("%s: %s up p95 %.0fms missing %.1f%%; down p95 %.0fms missing %.1f%%", profile.Name, result.Outcome, result.Up.P95, result.Up.MissingPct, result.Down.P95, result.Down.MissingPct)
 	return result
@@ -448,6 +495,59 @@ func benchmarkSourceMetadata(t *testing.T) map[string]any {
 		"go_version":         runtime.Version(), "os": runtime.GOOS,
 		"arch": runtime.GOARCH, "logical_cpus": runtime.NumCPU(),
 	}
+}
+
+// These gates assert the incident behavior, rather than accepting any result
+// simply because an outage profile is allowed to lose expected audio.
+func benchmarkInterruptionChecks(r benchmarkResult) []string {
+	if r.Profile.CarrierDown == nil && !r.Profile.MuteMicrophone && !r.Profile.ReconnectBrowser {
+		return nil
+	}
+	var errors []string
+	var d browserAudioDiagnostics
+	raw, _ := json.Marshal(r.ServerDiagnostics["browser"])
+	if json.Unmarshal(raw, &d) != nil || d.Server == nil {
+		return []string{"missing server timing diagnostics"}
+	}
+	s := d.Server.Reception
+	interrupted, recovered := false, false
+	for _, notice := range r.Browser.Notices {
+		detail, _ := notice["detail"].(string)
+		interrupted = interrupted || strings.Contains(detail, "Caller audio delivery interrupted")
+		recovered = recovered || strings.Contains(detail, "Caller audio delivery restored")
+	}
+	if r.Profile.CarrierDown != nil {
+		if s.Stalls < 1 || s.Recoveries < 1 || !interrupted || !recovered {
+			errors = append(errors, "carrier interruption/recovery not diagnosed and notified")
+		}
+		if r.Profile.CarrierMissing && s.StaleDroppedMS != 0 {
+			errors = append(errors, "absent carrier frames incorrectly counted as received stale audio")
+		}
+		if !r.Profile.CarrierMissing && s.StaleDroppedMS < 9000 {
+			errors = append(errors, "ten-second catchup bypassed carrier age guard")
+		}
+		if r.Up.MissingPct > 5 || r.Up.P95 > 350 {
+			errors = append(errors, "caller stall disrupted healthy adviser direction")
+		}
+		if r.Down.Max > 700 {
+			errors = append(errors, "stale caller speech replayed outside latency budget")
+		}
+	}
+	if r.Profile.MuteMicrophone && (s.Stalls != 0 || interrupted) {
+		errors = append(errors, "intentional microphone mute raised caller transport incident")
+	}
+	if r.Profile.ReconnectBrowser {
+		reconnected := false
+		for _, state := range r.Browser.States {
+			if state["state"] == "reconnecting" {
+				reconnected = true
+			}
+		}
+		if !reconnected {
+			errors = append(errors, "browser reconnect not exercised")
+		}
+	}
+	return errors
 }
 
 func benchmarkEvaluate(profile bench.Profile, up, down benchmarkDirection, errors []string) (string, []string) {

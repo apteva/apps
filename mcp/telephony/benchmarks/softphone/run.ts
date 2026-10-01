@@ -4,7 +4,7 @@ import {mkdir} from 'node:fs/promises';
 const root = resolve(import.meta.dir, '../..');
 const args = process.argv.slice(2);
 if (args.includes('--help')) {
-  console.log('bun run benchmark:softphone [--profiles all|name,name] [--seconds 12] [--seed 20260929] [--output /absolute/path]');
+  console.log('bun run benchmark:softphone [--profiles all|name,name] [--seconds 20] [--seed 20260929] [--output /absolute/path]');
   process.exit(0);
 }
 const options = new Map<string, string>();
@@ -15,7 +15,7 @@ for (let i = 0; i < args.length; i += 2) {
   if (options.has(key)) throw new Error(`Duplicate option: ${key}`);
   options.set(key, args[i + 1]);
 }
-const seconds = Number(options.get('--seconds') ?? '12');
+const seconds = Number(options.get('--seconds') ?? '20');
 if (!Number.isInteger(seconds) || seconds < 8 || seconds > 60) throw new Error('--seconds must be an integer from 8 to 60');
 const seed = options.get('--seed') ?? '20260929';
 if (!/^-?\d+$/.test(seed) || !Number.isSafeInteger(Number(seed))) throw new Error('--seed must be a safe integer');

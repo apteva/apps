@@ -8,14 +8,14 @@ function tone(frame:Float32Array,rate:number):[number,number]{
  return best<energy*frame.length*.3?[-1,-120]:[symbol,20*Math.log10(Math.sqrt(energy/frame.length))];
 }
 (window as any).runBenchmark=async(config:any)=>{
- const errors:string[]=[],states:any[]=[],diagnostics:any[]=[];
+ const errors:string[]=[],states:any[]=[],diagnostics:any[]=[],notices:any[]=[];
  const sourceContext=new AudioContext({sampleRate:24000});await sourceContext.audioWorklet.addModule('/probe.js');await sourceContext.resume();
  const source=new AudioWorkletNode(sourceContext,'benchmark-source'),destination=sourceContext.createMediaStreamDestination();source.connect(destination);
  const original=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
  // Controlled signal replaces the hardware microphone only. Capture DSP,
  // framing, worker, WebSockets, Go bridge and carrier codec still execute.
  navigator.mediaDevices.getUserMedia=async()=>destination.stream;
- const session:any=new SoftphoneSession({onState:(state,detail)=>states.push({state,detail,at:Date.now()}),onDiagnostics:d=>diagnostics.push({at:Date.now(),...d})});
+ const session:any=new SoftphoneSession({onNotice:detail=>notices.push({detail,at:Date.now()}),onState:(state,detail)=>states.push({state,detail,at:Date.now()}),onDiagnostics:d=>diagnostics.push({at:Date.now(),...d})});
  const wireDiagnostics:unknown[]=[];
  const sendText=session.sendText.bind(session);
  session.sendText=(data:string)=>{
@@ -47,8 +47,15 @@ function tone(frame:Float32Array,rate:number):[number,number]{
    }}
   };
   const finish=arm.start_at+config.duration_ms+config.drain_ms;
-  while(Date.now()<finish)await new Promise(r=>setTimeout(r,100));
-  const result={wire_diagnostics:wireDiagnostics,markers,states,diagnostics:diagnostics.slice(-8),audio_context_rate:ctx.sampleRate,source_context_rate:sourceContext.sampleRate,start_at:arm.start_at,output_clock_mapping_uncertainty_ms:20,errors};
+  let muted=false,unmuted=false,reconnected=false;
+  while(Date.now()<finish) {
+    const elapsed=Date.now()-arm.start_at;
+    if(config.mute_microphone && elapsed>=4000 && !muted) {session.setMuted(true);muted=true;}
+    if(config.mute_microphone && elapsed>=6000 && !unmuted) {session.setMuted(false);unmuted=true;}
+    if(config.reconnect_browser && elapsed>=4000 && !reconnected) {reconnected=true;await fetch('/disconnect-browser',{method:'POST'});}
+    await new Promise(r=>setTimeout(r,100));
+  }
+  const result={wire_diagnostics:wireDiagnostics,markers,states,notices,diagnostics:diagnostics.slice(-8),audio_context_rate:ctx.sampleRate,source_context_rate:sourceContext.sampleRate,start_at:arm.start_at,output_clock_mapping_uncertainty_ms:20,errors};
   session.sendDiagnostics();return result;
  }finally{navigator.mediaDevices.getUserMedia=original;probe?.disconnect();session.stop();source.disconnect();await sourceContext.close();}
 };

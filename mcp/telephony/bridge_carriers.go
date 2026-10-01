@@ -22,6 +22,7 @@ const (
 )
 
 type jsonMediaBridgeConfig struct {
+	ContinuousInput  bool
 	Provider         string
 	PathPrefix       string
 	InputCodec       string
@@ -89,7 +90,7 @@ func (a *App) handleSignalWireMediaStream(w http.ResponseWriter, r *http.Request
 func (a *App) handleTelnyxMediaStream(w http.ResponseWriter, r *http.Request) {
 	profile := mediaProfileForCarrier("telnyx")
 	a.handleJSONMediaStream(w, r, jsonMediaBridgeConfig{
-		Provider: "telnyx", PathPrefix: "/media/telnyx/", InputCodec: profile.Codec, OutputCodec: profile.Codec,
+		ContinuousInput: true, Provider: "telnyx", PathPrefix: "/media/telnyx/", InputCodec: profile.Codec, OutputCodec: profile.Codec,
 		RequireStreamSID: true, OutboundShape: "telnyx", PlaybackMarks: true,
 	})
 }
@@ -223,6 +224,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 	if row.PeerKind == peerKindHuman {
 		humanHub = a.softphones.hubFor(callID)
 		humanHub.setCarrierForward(coreWriter)
+		humanHub.reception.begin(cfg.ContinuousInput)
 		defer humanHub.finishCarrierForward(coreWriter)
 	}
 
@@ -243,9 +245,16 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			if op != ws.OpText || len(data) == 0 {
 				continue
 			}
+			readAt, receiptClock := time.Now(), mediaClockMS()
+			if humanHub != nil {
+				humanHub.timeline.observe("carrier_socket_read", len(data), time.Time{}, "", "")
+			}
 			var f carrierMediaFrame
 			if err := json.Unmarshal(data, &f); err != nil {
 				continue
+			}
+			if humanHub != nil {
+				humanHub.timeline.observe("carrier_json_decoded", len(data), readAt, "", "")
 			}
 			if cfg.Provider == "bandwidth" {
 				f.Event = f.EventType
@@ -303,6 +312,19 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 				if err != nil {
 					continue
 				}
+				src := carrierSource{}
+				mapped, receipt := 0.0, receiptClock
+				if humanHub != nil {
+					// These JSON protocols use stream-relative millisecond timestamps.
+					// Bandwidth's binary/un-timed protocol retains receipt timing only.
+					src = sourceMedia(frameStreamID(f), f.Media.Timestamp, f.Media.Chunk)
+					var drop bool
+					mapped, drop = humanHub.reception.observe(src, float64(len(pcm))*1000/float64(carrierCodecSampleRate(cfg.InputCodec)), receipt)
+					if drop {
+						inputResampler = carrierInputResampler(cfg.InputCodec)
+						continue
+					}
+				}
 				processed := processCarrierInput(row, audioFrontend, pcm)
 				localSpeechStarted := processed.SpeechStarted && playback.hasPending()
 				if localSpeechStarted {
@@ -318,7 +340,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 				tap.publishPCM(0, pcm24)
 				if humanHub != nil {
 					humanHub.timeline.observe("carrier_decoded", len(pcm24)*2, decodeStarted, fmt.Sprint(f.Media.Timestamp), fmt.Sprint(f.Media.Chunk))
-					coreWriter.QueueAudio(pcm16ToBytes(pcm24))
+					coreWriter.queueAudio(encodeSourceAudio(pcm16ToBytes(pcm24), src, mapped, receipt, humanHub.reception.snapshot(receipt, false).Epoch), sourceAudioHeaderBytes)
 				} else {
 					err = coreWriter.Write(ws.OpBinary, pcm16ToBytes(pcm24))
 				}
@@ -425,6 +447,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			dropEvents = append(dropEvents, captureDrops...)
 		}
 		if err := a.db().updateCarrierAudioDiagnostics(callID, carrierAudioDiagnostics{
+			OperatorInterrupts: audioFrontend.snapshot().OperatorInterrupts, LocalInterrupts: audioFrontend.snapshot().LocalInterrupts, ProviderCoreInterrupts: audioFrontend.snapshot().ProviderCoreInterrupts,
 			InputAudio: audioFrontend.transportSnapshot(),
 			Provider:   cfg.Provider, Codec: cfg.OutputCodec, SampleRate: sampleRate,
 			SendAheadMS: pacerPolicy.bufferMS, PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: max(droppedStaleMS, int(pacer.diagnostics.snapshot().DroppedMS)),
@@ -734,6 +757,7 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 			preAnswerDroppedMS = hub.preAnswerDroppedMS()
 		}
 		_ = a.db().updateCarrierAudioDiagnostics(callID, carrierAudioDiagnostics{
+			OperatorInterrupts: audioFrontend.snapshot().OperatorInterrupts, LocalInterrupts: audioFrontend.snapshot().LocalInterrupts, ProviderCoreInterrupts: audioFrontend.snapshot().ProviderCoreInterrupts,
 			InputAudio: audioFrontend.transportSnapshot(),
 			Provider:   provider, Codec: carrierCodecL16_16, SampleRate: 16000,
 			PacerMode: "direct_live", PreAnswerMicrophoneDroppedMS: preAnswerDroppedMS,

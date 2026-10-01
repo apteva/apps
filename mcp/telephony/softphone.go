@@ -57,6 +57,9 @@ type softphoneHub struct {
 	callID                  string
 	timeline                liveAudioTimeline
 	playbackSequence        uint32
+	framedVersion           int
+	reception               carrierReception
+	deliveryNotice          string
 	framedBrowser           *websocketWriterPump
 	captureTimestampMS      float64
 	captureWorkerAgeMS      float64
@@ -123,11 +126,13 @@ func (h *softphoneHub) setCallState(direction, status string) {
 	if status != "" {
 		h.status = status
 	}
+	h.reception.pause(h.held || (h.status != "answered" && h.status != "in-progress"))
 }
 
 func (h *softphoneHub) setHeld(held bool) {
 	h.mu.Lock()
 	h.held = held
+	h.reception.pause(held || (h.status != "answered" && h.status != "in-progress"))
 	if held && h.browser != nil {
 		h.browser.FlushAudio()
 	}
@@ -169,6 +174,8 @@ func (h *softphoneHub) setBrowser(w *websocketWriterPump) (replaced *websocketWr
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	replaced, h.browser = h.browser, w
+	h.deliveryNotice = ""
+	h.framedVersion = 0
 	h.captureSequenceSet = false
 	h.captureTransitSet = false
 	return replaced
@@ -235,10 +242,15 @@ func (h *softphoneHub) toBrowser(op ws.OpCode, data []byte) {
 		if !h.held && h.browser != nil {
 			sequence := h.playbackSequence
 			h.playbackSequence++
-			if h.framedBrowser == h.browser {
-				h.browser.queueAudio(encodePlaybackFrame(data, sequence), 32)
+			header := sourceAudioHeader(data)
+			if header == sourceAudioHeaderBytes && h.framedBrowser == h.browser && h.framedVersion == 3 {
+				frame := append([]byte(nil), data...)
+				binary.LittleEndian.PutUint32(frame[4:], sequence)
+				h.browser.queueAudio(frame, header)
+			} else if h.framedBrowser == h.browser {
+				h.browser.queueAudio(encodePlaybackFrame(data[header:], sequence), 32)
 			} else {
-				h.browser.QueueAudio(data)
+				h.browser.QueueAudio(data[header:])
 			}
 		}
 		return
@@ -604,6 +616,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 				return
 			case <-ticker.C:
 				ticks++
+				hub.carrierDeliveryNotice()
 				if ticks%5 == 0 {
 					_ = a.db().updateServerAudioDiagnostics(callID, hub.serverAudioSnapshot())
 				}
@@ -644,6 +657,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 				Type        string                   `json:"type"`
 				Nonce       float64                  `json:"nonce,omitempty"`
 				Version     int                      `json:"version,omitempty"`
+				Versions    []int                    `json:"versions,omitempty"`
 				Digits      string                   `json:"digits,omitempty"`
 				Diagnostics *browserAudioDiagnostics `json:"diagnostics,omitempty"`
 			}
@@ -653,11 +667,19 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			switch control.Type {
 			case "media.capabilities":
 				if control.Version == 2 {
-					// Ack precedes enabling framed playback on the sole writer.
-					_ = writer.Write(ws.OpText, []byte(`{"type":"media.capabilities","version":2}`))
+					// Old clients negotiate APT2; new clients advertise APT3 as well.
+					version := 2
+					for _, supported := range control.Versions {
+						if supported == 3 {
+							version = 3
+						}
+					}
+					ack, _ := json.Marshal(map[string]any{"type": "media.capabilities", "version": version})
+					_ = writer.Write(ws.OpText, ack)
 					hub.mu.Lock()
 					if hub.browser == writer {
 						hub.framedBrowser = writer
+						hub.framedVersion = version
 					}
 					hub.mu.Unlock()
 				}
