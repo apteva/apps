@@ -180,6 +180,9 @@ func courseSalesTools() []sdk.Tool {
 }
 
 func toolCourseOfferGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -195,6 +198,9 @@ func toolCourseOfferGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolCourseOfferUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -255,6 +261,9 @@ func toolCourseOfferUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolCourseOfferArchive(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -282,6 +291,9 @@ func toolCourseOfferArchive(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolCoursePurchaseStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -422,6 +434,9 @@ func toolCoursePurchaseStart(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 }
 
 func toolCoursePurchaseStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	purchase, err := purchaseForArgs(ctx.AppDB(), args)
 	if err != nil {
 		return nil, err
@@ -442,6 +457,9 @@ func toolCoursePurchaseStatus(ctx *sdk.AppCtx, args map[string]any) (any, error)
 }
 
 func toolCoursePurchaseCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	purchase, err := purchaseForArgs(ctx.AppDB(), args)
 	if err != nil {
 		return nil, err
@@ -490,6 +508,9 @@ func toolCoursePurchaseCancel(ctx *sdk.AppCtx, args map[string]any) (any, error)
 }
 
 func toolCoursePurchasesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	purchases, err := listCoursePurchases(ctx.AppDB(), scopeProject(ctx), args)
 	if err != nil {
 		return nil, err
@@ -498,6 +519,9 @@ func toolCoursePurchasesList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 }
 
 func toolCoursePurchaseGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -514,6 +538,9 @@ func toolCoursePurchaseGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolCoursePurchaseReconcile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -530,6 +557,9 @@ func toolCoursePurchaseReconcile(ctx *sdk.AppCtx, args map[string]any) (any, err
 }
 
 func toolCoursePurchaseRefund(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err

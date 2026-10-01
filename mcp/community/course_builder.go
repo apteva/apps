@@ -191,7 +191,7 @@ func courseBuilderTools() []sdk.Tool {
 		},
 		{
 			Name:        "quizzes_create",
-			Description: "Create a quiz for a lesson. Args: lesson_id, title, questions? (JSON array), passing_score?, position?.",
+			Description: "Create a quiz for a lesson. Args: lesson_id, title, questions? (array of {prompt, options, correct_index}; zero-based answer index), passing_score?, position?.",
 			InputSchema: schemaObject(map[string]any{"lesson_id": map[string]any{"type": "string"}, "title": map[string]any{"type": "string"}, "questions": map[string]any{"type": "array"}, "passing_score": map[string]any{"type": "integer"}, "position": map[string]any{"type": "integer"}}, []string{"lesson_id", "title"}),
 			Handler:     toolQuizzesCreate,
 		},
@@ -305,6 +305,9 @@ func courseBuilderTools() []sdk.Tool {
 }
 
 func toolCoursesGetDetails(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -328,6 +331,9 @@ func toolCoursesGetDetails(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolCoursesUpdateDetails(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -431,6 +437,9 @@ func toolCoursesUpdateDetails(ctx *sdk.AppCtx, args map[string]any) (any, error)
 }
 
 func toolSectionsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -463,6 +472,9 @@ func toolSectionsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolSectionsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -482,6 +494,9 @@ func toolSectionsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolLessonsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -498,6 +513,9 @@ func toolLessonsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolLessonResourcesAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	lessonID, err := mustStr(args, "lesson_id")
 	if err != nil {
 		return nil, err
@@ -543,6 +561,9 @@ func toolLessonResourcesAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolLessonResourcesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	lessonID, err := mustStr(args, "lesson_id")
 	if err != nil {
 		return nil, err
@@ -550,7 +571,11 @@ func toolLessonResourcesList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if _, _, err := ensureLessonVisible(ctx, ctx.AppDB(), lessonID); err != nil {
 		return nil, err
 	}
-	rows, err := ctx.AppDB().Query(`SELECT id, lesson_id, storage_file_id, name, kind, content_type, size_bytes, position, created_at FROM lesson_resources WHERE lesson_id = ? ORDER BY position, created_at`, lessonID)
+	return listLessonResources(ctx.AppDB(), lessonID)
+}
+
+func listLessonResources(db *sql.DB, lessonID string) (any, error) {
+	rows, err := db.Query(`SELECT id, lesson_id, storage_file_id, name, kind, content_type, size_bytes, position, created_at FROM lesson_resources WHERE lesson_id = ? ORDER BY position, created_at`, lessonID)
 	if err != nil {
 		return nil, err
 	}
@@ -570,6 +595,9 @@ func toolLessonResourcesList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 }
 
 func toolLessonBundleGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -578,32 +606,50 @@ func toolLessonBundleGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	resources, err := toolLessonResourcesList(ctx, map[string]any{"lesson_id": id})
-	if err != nil {
-		return nil, err
+	type bundlePart struct {
+		key    string
+		result any
+		err    error
 	}
-	quizzes, err := toolQuizzesList(ctx, map[string]any{"lesson_id": id})
-	if err != nil {
-		return nil, err
+	db := ctx.AppDB()
+	tasks := []struct {
+		key  string
+		load func() (any, error)
+	}{
+		{"resources", func() (any, error) { return listLessonResources(db, id) }},
+		{"quizzes", func() (any, error) { return listQuizzes(db, id) }},
+		{"assignments", func() (any, error) { return listAssignments(db, id) }},
+		{"comments", func() (any, error) { return listLessonComments(db, id, 200) }},
 	}
-	assignments, err := toolAssignmentsList(ctx, map[string]any{"lesson_id": id})
-	if err != nil {
-		return nil, err
+	results := make(chan bundlePart, len(tasks))
+	for _, task := range tasks {
+		go func(key string, load func() (any, error)) {
+			result, err := load()
+			results <- bundlePart{key, result, err}
+		}(task.key, task.load)
 	}
-	comments, err := toolLessonCommentsList(ctx, map[string]any{"lesson_id": id, "limit": int64(200)})
-	if err != nil {
-		return nil, err
+	out := map[string]any{"lesson": lesson}
+	var firstErr error
+	for range tasks {
+		part := <-results
+		if part.err != nil {
+			if firstErr == nil {
+				firstErr = part.err
+			}
+			continue
+		}
+		out[part.key] = part.result.(map[string]any)[part.key]
 	}
-	return map[string]any{
-		"lesson":      lesson,
-		"resources":   resources.(map[string]any)["resources"],
-		"quizzes":     quizzes.(map[string]any)["quizzes"],
-		"assignments": assignments.(map[string]any)["assignments"],
-		"comments":    comments.(map[string]any)["comments"],
-	}, nil
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return out, nil
 }
 
 func toolLessonResourcesDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -622,6 +668,9 @@ func toolLessonResourcesDelete(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 func toolQuizzesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	lessonID, err := mustStr(args, "lesson_id")
 	if err != nil {
 		return nil, err
@@ -632,6 +681,14 @@ func toolQuizzesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	if _, _, err := ensureLessonVisible(ctx, ctx.AppDB(), lessonID); err != nil {
 		return nil, err
+	}
+	if value, ok := args["questions"]; ok {
+		normalized, err := quizQuestions(value)
+		if err != nil {
+			return nil, err
+		}
+		args = cloneArgs(args)
+		args["questions"] = normalized
 	}
 	questions, err := jsonArg(args, "questions", []any{})
 	if err != nil {
@@ -656,6 +713,9 @@ func toolQuizzesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolQuizzesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -672,7 +732,13 @@ func toolQuizzesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		sets = append(sets, "title = ?")
 		vals = append(vals, v)
 	}
-	if _, ok := args["questions"]; ok {
+	if value, ok := args["questions"]; ok {
+		normalized, err := quizQuestions(value)
+		if err != nil {
+			return nil, err
+		}
+		args = cloneArgs(args)
+		args["questions"] = normalized
 		j, err := jsonArg(args, "questions", []any{})
 		if err != nil {
 			return nil, err
@@ -703,6 +769,9 @@ func toolQuizzesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolQuizzesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	lessonID, err := mustStr(args, "lesson_id")
 	if err != nil {
 		return nil, err
@@ -710,7 +779,11 @@ func toolQuizzesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if _, _, err := ensureLessonVisible(ctx, ctx.AppDB(), lessonID); err != nil {
 		return nil, err
 	}
-	rows, err := ctx.AppDB().Query(`SELECT id, lesson_id, title, questions_json, passing_score, position, created_at, updated_at FROM quizzes WHERE lesson_id = ? ORDER BY position, created_at`, lessonID)
+	return listQuizzes(ctx.AppDB(), lessonID)
+}
+
+func listQuizzes(db *sql.DB, lessonID string) (any, error) {
+	rows, err := db.Query(`SELECT id, lesson_id, title, questions_json, passing_score, position, created_at, updated_at FROM quizzes WHERE lesson_id = ? ORDER BY position, created_at`, lessonID)
 	if err != nil {
 		return nil, err
 	}
@@ -730,10 +803,16 @@ func toolQuizzesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolQuizzesDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	return deleteByIDAfterLessonCheck(ctx, args, "quizzes", "quiz")
 }
 
 func toolAssignmentsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	lessonID, err := mustStr(args, "lesson_id")
 	if err != nil {
 		return nil, err
@@ -767,6 +846,9 @@ func toolAssignmentsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolAssignmentsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -817,6 +899,9 @@ func toolAssignmentsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolAssignmentsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	lessonID, err := mustStr(args, "lesson_id")
 	if err != nil {
 		return nil, err
@@ -824,7 +909,11 @@ func toolAssignmentsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if _, _, err := ensureLessonVisible(ctx, ctx.AppDB(), lessonID); err != nil {
 		return nil, err
 	}
-	rows, err := ctx.AppDB().Query(`SELECT id, lesson_id, title, instructions, due_after_days, attachment_storage_file_id, created_at, updated_at FROM assignments WHERE lesson_id = ? ORDER BY created_at`, lessonID)
+	return listAssignments(ctx.AppDB(), lessonID)
+}
+
+func listAssignments(db *sql.DB, lessonID string) (any, error) {
+	rows, err := db.Query(`SELECT id, lesson_id, title, instructions, due_after_days, attachment_storage_file_id, created_at, updated_at FROM assignments WHERE lesson_id = ? ORDER BY created_at`, lessonID)
 	if err != nil {
 		return nil, err
 	}
@@ -844,10 +933,16 @@ func toolAssignmentsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolAssignmentsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	return deleteByIDAfterLessonCheck(ctx, args, "assignments", "assignment")
 }
 
 func toolCertificatesGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -863,6 +958,9 @@ func toolCertificatesGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolCertificatesConfigure(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -914,6 +1012,9 @@ func toolCertificatesConfigure(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 func toolDripScheduleSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	lessonID, err := mustStr(args, "lesson_id")
 	if err != nil {
 		return nil, err
@@ -956,6 +1057,9 @@ func toolDripScheduleSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolDripScheduleList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -983,6 +1087,9 @@ func toolDripScheduleList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolEnrollmentRulesGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -994,6 +1101,9 @@ func toolEnrollmentRulesGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolEnrollmentRulesSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -1066,6 +1176,9 @@ func toolEnrollmentRulesSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolCourseEnroll(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -1152,6 +1265,9 @@ func toolCourseEnroll(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolCourseEnrollmentUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -1195,6 +1311,9 @@ func toolCourseEnrollmentUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 func toolCourseEnrollmentsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -1232,6 +1351,9 @@ func toolCourseEnrollmentsList(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 func toolCourseAnalytics(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err

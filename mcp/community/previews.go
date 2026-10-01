@@ -64,7 +64,7 @@ func (a *App) httpPortalLessonPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if videoStorageKey != "" {
-		preview.Video = mintPublicLessonPreviewVideo(globalCtx, videoStorageKey, duration)
+		preview.Video = mintPublicLessonPreviewVideo(requestAppCtx(r), videoStorageKey, duration)
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, map[string]any{"preview": preview})

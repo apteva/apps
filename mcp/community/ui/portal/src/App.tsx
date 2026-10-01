@@ -18,9 +18,11 @@ import {
   X,
 } from "lucide-react";
 import { loadStripe, type Stripe, type StripeElements, type StripePaymentElement } from "@stripe/stripe-js";
-import { type CSSProperties, FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, Children, FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CertificateCard, LearningContent, Markdown, ProfileForm } from "./LearningContent";
 import { api, apteva, COMMUNITY_APP, currentProjectId, type AuthResponse, type LessonBundle, type PortalBootstrap, type StorefrontCheckoutSession, useDelegatedToken } from "./api";
 import type {
+  IssuedCertificate,
   Community,
   CourseOffer,
   CoursePurchase,
@@ -109,6 +111,9 @@ function initialAuthSession(): AuthResponse | null {
   try {
     const stored = JSON.parse(window.sessionStorage.getItem(authSessionKey()) || "null") as AuthResponse | null;
     if (!stored?.apteva_access_token || !stored.user) return null;
+    if (!stored.refresh_token && (!stored.stored_at || Date.now() >= stored.stored_at + (stored.apteva_expires_in || 3600) * 1000)) {
+      window.sessionStorage.removeItem(authSessionKey()); return null;
+    }
     useDelegatedToken(stored.apteva_access_token);
     return stored;
   } catch {
@@ -231,6 +236,8 @@ export default function App() {
   const [lessons, setLessons] = useState<Lesson[]>([]);
   const [lessonId, setLessonId] = useState("");
   const [bundle, setBundle] = useState<LessonBundle | null>(null);
+ const [certificate, setCertificate] = useState<IssuedCertificate | null>(null);
+ const [more, setMore] = useState({ members: false, threads: false, posts: false, dms: false, messages: false });
   const [courseSummary, setCourseSummary] = useState("");
   const [courseLocked, setCourseLocked] = useState(false);
   const [courseAccessMode, setCourseAccessMode] = useState<EnrollmentRule["access_mode"]>("free");
@@ -239,6 +246,7 @@ export default function App() {
   const [membershipPlans, setMembershipPlans] = useState<MembershipPlan[]>([]);
   const [memberSubscription, setMemberSubscription] = useState<MemberSubscription | null>(null);
   const [comment, setComment] = useState("");
+ const [lessonLoadError, setLessonLoadError] = useState("");
 
   const [dmId, setDMId] = useState("");
   const [dm, setDM] = useState<DMThreadView | null>(null);
@@ -344,6 +352,26 @@ export default function App() {
     });
   }, [portal]);
 
+  const expireSession = useCallback(() => {
+    useDelegatedToken(undefined); window.sessionStorage.removeItem(authSessionKey()); setAuth(null);
+    for (const key of Object.keys(requestVersion.current)) requestVersion.current[key]++;
+    setCommunityId(""); setCommunities([]); setMemberships([]); setMembers([]); setSpaces([]); setDMThreads([]); setDM(null); setBundle(null); setCertificate(null);
+    setNotice(""); setError("Your session expired. Please sign in again.");
+  }, []);
+
+  useEffect(() => {
+    if (!auth) return;
+    window.addEventListener("community:session-expired", expireSession);
+    return () => window.removeEventListener("community:session-expired", expireSession);
+  }, [auth, expireSession]);
+
+  useEffect(() => {
+    if (!auth || auth.refresh_token) return;
+    const remaining = (auth.stored_at || Date.now()) + (auth.apteva_expires_in || 3600) * 1000 - Date.now();
+    const timer = window.setTimeout(expireSession, Math.max(0, remaining));
+    return () => window.clearTimeout(timer);
+  }, [auth, expireSession]);
+
   const run = useCallback(async <T,>(
     task: () => Promise<T>,
     options: { quiet?: boolean; preserveNotice?: boolean } = {},
@@ -356,19 +384,37 @@ export default function App() {
     try {
       return await task();
     } catch (caught) {
-      if (!options.quiet) setError(friendlyError(caught));
+      const status = (caught as { status?: number })?.status;
+      if (status === 401 || /HTTP 401|unauthorized|token expired/i.test(String(caught))) {
+        expireSession();
+      } else setError(friendlyError(caught));
       return undefined;
     } finally {
       setPending((value) => Math.max(0, value - 1));
     }
-  }, []);
+  }, [expireSession]);
 
   const latest = useCallback(async <T,>(key: string, task: () => Promise<T>, apply: (value: T) => void) => {
     const version = (requestVersion.current[key] || 0) + 1;
     requestVersion.current[key] = version;
-    const value = await task();
-    if (requestVersion.current[key] === version) apply(value);
+    try {
+      const value = await task();
+      if (requestVersion.current[key] === version) apply(value);
+    } catch (caught) {
+      if (requestVersion.current[key] === version) throw caught;
+    }
   }, []);
+
+  useEffect(() => {
+    for (const key of ["community", "threads", "posts", "course", "lesson", "dm"]) requestVersion.current[key] = (requestVersion.current[key] || 0) + 1;
+    setMembers([]); setSpaces([]); setDMThreads([]); setThreads([]); setPosts([]); setBundle(null); setDM(null); setCertificate(null);
+    setSpaceId(""); setThreadId(""); setCourseId(""); setLessonId(""); setDMId("");
+    setCourseSummary(""); setCourseLocked(false);
+  }, [communityId]);
+  useEffect(() => { requestVersion.current.posts = (requestVersion.current.posts || 0) + 1; setPosts([]); setReply(""); }, [threadId]);
+  useEffect(() => { requestVersion.current.threads = (requestVersion.current.threads || 0) + 1; setThreads([]); setThreadId(""); }, [spaceId]);
+  useEffect(() => { requestVersion.current.lesson = (requestVersion.current.lesson || 0) + 1; setBundle(null); setLessonId(""); setSections([]); setLessons([]); setCourseSummary(""); setCourseLocked(false); setCertificate(null); }, [courseId]);
+  useEffect(() => { requestVersion.current.dm = (requestVersion.current.dm || 0) + 1; setDM(null); setDMBody(""); }, [dmId]);
 
   const loadSession = useCallback(async () => {
     await latest("session", api.session, (session) => {
@@ -409,6 +455,7 @@ export default function App() {
         };
       },
       (result) => {
+        setMore((current) => ({ ...current, members: result.members.length === 100, dms: result.dms.length === 100 }));
         setMembers(result.members);
         setSpaces(result.spaces);
         setDMThreads(result.dms);
@@ -438,6 +485,7 @@ export default function App() {
     }
     await latest("threads", () => api.threads.list(spaceId), (result) => {
       const next = result.threads || [];
+      setMore((current) => ({ ...current, threads: next.length === 100 }));
       setThreads(next);
       setThreadId((current) => next.some((item) => item.id === current) ? current : next[0]?.id || "");
     });
@@ -448,7 +496,7 @@ export default function App() {
       setPosts([]);
       return;
     }
-    await latest("posts", () => api.posts.list(threadId), (result) => setPosts(result.posts || []));
+    await latest("posts", () => api.posts.list(threadId), (result) => { setPosts(result.posts || []); setMore((current) => ({ ...current, posts: result.posts.length === 100 })); });
   }, [latest, threadId]);
 
   const loadCourse = useCallback(async () => {
@@ -464,11 +512,12 @@ export default function App() {
     await latest(
       "course",
       async () => {
-        const [details, sectionOut, offerOut, purchaseOut] = await Promise.all([
+        const [details, sectionOut, offerOut, purchaseOut, certificateOut] = await Promise.all([
           api.courses.details(courseId),
           api.courses.sections(courseId),
           api.courses.offer(courseId),
           api.courses.purchase(courseId),
+          api.courses.certificate(courseId),
         ]);
         let lessonOut: { lessons: Lesson[] } | undefined;
         let locked = false;
@@ -481,6 +530,7 @@ export default function App() {
         }
         return {
           details,
+          certificate: certificateOut.certificate,
           sections: sectionOut.sections || [],
           lessons: lessonOut?.lessons || [],
           offer: offerOut.offer,
@@ -489,6 +539,7 @@ export default function App() {
         };
       },
       (result) => {
+        setCertificate(result.certificate);
         setSections(result.sections);
         setLessons(result.lessons);
         setCourseLocked(result.locked);
@@ -508,7 +559,9 @@ export default function App() {
       setBundle(null);
       return;
     }
-    await latest("lesson", () => api.courses.bundle(lessonId), setBundle);
+    setBundle(null); setLessonLoadError("");
+    try { await latest("lesson", () => api.courses.bundle(lessonId), setBundle); }
+    catch (caught) { setLessonLoadError(friendlyError(caught)); throw caught; }
   }, [latest, lessonId]);
 
   const loadDM = useCallback(async () => {
@@ -518,7 +571,9 @@ export default function App() {
     }
     await latest("dm", () => api.dms.get(dmId), (result) => {
       setDM(result);
-      void api.dms.markRead(dmId).catch(() => undefined);
+      setMore((current) => ({ ...current, messages: (result.messages || []).length === 100 }));
+      const last = result.messages?.at(-1);
+      if (last) void api.dms.markRead(dmId, last.id).then(() => setDMThreads((current) => current.map((thread) => thread.id === dmId ? { ...thread, unread_count: 0 } : thread))).catch(() => undefined);
     });
   }, [dmId, latest]);
 
@@ -542,8 +597,10 @@ export default function App() {
           refresh_token: auth.refresh_token!,
         });
         if (!cancelled) finishAuthentication(response);
-      } catch {
-        if (!cancelled) timer = window.setTimeout(refreshSession, 30_000);
+      } catch (caught) {
+        if (!cancelled && ((caught as { status?: number })?.status === 401 || /HTTP 401|unauthorized|token expired/i.test(String(caught)))) {
+          expireSession();
+        } else if (!cancelled) timer = window.setTimeout(refreshSession, 30_000);
       }
     };
     const ttl = Math.max(60, auth.apteva_expires_in || 3600) * 1000;
@@ -553,7 +610,7 @@ export default function App() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [auth?.refresh_token, auth?.stored_at, portal]);
+  }, [auth?.refresh_token, auth?.stored_at, portal, expireSession]);
 
   useEffect(() => {
     if (!auth) return;
@@ -572,20 +629,20 @@ export default function App() {
   }, [auth, loadCommunity, run]);
 
   useEffect(() => {
-    if (view === "spaces") void run(loadThreads, { quiet: true });
-  }, [loadThreads, run, view]);
+    if (auth && view === "spaces") void run(loadThreads, { quiet: true });
+  }, [auth, loadThreads, run, view]);
 
   useEffect(() => {
-    if (view === "spaces") void run(loadPosts, { quiet: true });
-  }, [loadPosts, run, view]);
+    if (auth && view === "spaces") void run(loadPosts, { quiet: true });
+  }, [auth, loadPosts, run, view]);
 
   useEffect(() => {
-    if (view === "courses") void run(loadCourse, { preserveNotice: true });
-  }, [loadCourse, run, view]);
+    if (auth && view === "courses") void run(loadCourse, { preserveNotice: true });
+  }, [auth, loadCourse, run, view]);
 
   useEffect(() => {
-    if (view === "courses") void run(loadBundle, { quiet: true });
-  }, [loadBundle, run, view]);
+    if (auth && view === "courses") void run(loadBundle, { quiet: true });
+  }, [auth, loadBundle, run, view]);
 
   useEffect(() => {
     if (!auth || !portal || !wantsCourseCheckout() || automaticCheckoutStarted.current) return;
@@ -656,8 +713,8 @@ export default function App() {
   }, [auth, courseId, coursePurchase?.status, loadCourse, run]);
 
   useEffect(() => {
-    if (view === "messages") void run(loadDM, { quiet: true });
-  }, [loadDM, run, view]);
+    if (auth && view === "messages") void run(loadDM, { quiet: true });
+  }, [auth, loadDM, run, view]);
 
   useEffect(() => {
     if (!auth || !currentProjectId()) return;
@@ -798,7 +855,9 @@ export default function App() {
     const refreshToken = auth?.refresh_token;
     useDelegatedToken(undefined);
     window.sessionStorage.removeItem(authSessionKey());
-    setAuth(null);
+    setAuth(null); setCommunityId("");
+    for (const key of Object.keys(requestVersion.current)) requestVersion.current[key]++;
+    setDM(null); setDMThreads([]); setBundle(null); setCertificate(null); setPosts([]); setThreads([]);
     setCommunities([]);
     setMemberships([]);
     setMembers([]);
@@ -808,6 +867,16 @@ export default function App() {
     setError("");
     setNotice("Signed out.");
     if (refreshToken) void api.auth.logout(refreshToken).catch(() => undefined);
+  }
+
+  async function loadMore(kind: "members" | "threads" | "posts" | "dms" | "messages") {
+    await run(async () => {
+      if (kind === "members") await latest("community", () => api.members.list(communityId, members.length), (out) => { setMembers((items) => mergeItems(items, out.members)); setMore((current) => ({ ...current, members: out.members.length === 100 })); });
+      if (kind === "threads") await latest("threads", () => api.threads.list(spaceId, threads.length), (out) => { setThreads((items) => mergeItems(items, out.threads)); setMore((current) => ({ ...current, threads: out.threads.length === 100 })); });
+      if (kind === "posts") await latest("posts", () => api.posts.list(threadId, posts.length), (out) => { setPosts((items) => mergeItems(items, out.posts)); setMore((current) => ({ ...current, posts: out.posts.length === 100 })); });
+      if (kind === "dms") await latest("community", () => api.dms.list(communityId, dmThreads.length), (out) => { setDMThreads((items) => mergeItems(items, out.threads)); setMore((current) => ({ ...current, dms: out.threads.length === 100 })); });
+      if (kind === "messages") await latest("dm", () => api.dms.get(dmId, dm?.messages.length || 0), (out) => { setDM((current) => current ? { ...current, messages: mergeItems(out.messages, current.messages) } : out); setMore((current) => ({ ...current, messages: out.messages.length === 100 })); });
+    });
   }
 
   async function createThread(event: FormEvent) {
@@ -1243,7 +1312,7 @@ export default function App() {
       <main className="content">
         <header className="topbar">
           <div><p className="eyebrow">{selectedCommunity?.slug}</p><h1>{nav.find((item) => item.id === view)?.label}</h1></div>
-          <button className="secondary" onClick={() => void run(loadCommunity)} disabled={busy}><RefreshCcw size={16} className={busy ? "spin" : ""} /> Refresh</button>
+          <button className="secondary" onClick={() => void run(async () => { await loadCommunity(); if (view === "spaces") await Promise.all([loadThreads(), loadPosts()]); if (view === "courses") await Promise.all([loadCourse(), loadBundle()]); if (view === "messages") await loadDM(); })} disabled={busy}><RefreshCcw size={16} className={busy ? "spin" : ""} /> Refresh</button>
         </header>
         {error && <div className="alert error" role="alert">{error}</div>}
         {notice && <div className="alert success" role="status">{notice}</div>}
@@ -1276,6 +1345,7 @@ export default function App() {
               <ItemList empty="Start the first conversation.">
                 {threads.map((thread) => <button key={thread.id} className={thread.id === threadId ? "selected" : ""} onClick={() => setThreadId(thread.id)}><strong>{thread.title || "Conversation"}</strong><span>{thread.post_count} posts</span></button>)}
               </ItemList>
+              {more.threads && <button className="secondary" disabled={busy} onClick={() => loadMore("threads")}>Load more threads</button>}
               {spaceId && <form className="composer" onSubmit={createThread}>
                 <Field label="Thread title" id="thread-title"><input id="thread-title" value={threadForm.title} onChange={(event) => setThreadForm({ ...threadForm, title: event.target.value })} /></Field>
                 <Field label="Opening message" id="thread-body"><textarea id="thread-body" value={threadForm.body} onChange={(event) => setThreadForm({ ...threadForm, body: event.target.value })} required /></Field>
@@ -1287,7 +1357,7 @@ export default function App() {
               <div className="messages">
                 {posts.map((post) => <article className={`message ${post.author_id === me?.id ? "mine" : ""}`} key={post.id}>
                   <header><strong>{displayName(memberMap.get(post.author_id))}</strong><time>{new Date(post.created_at).toLocaleString()}</time></header>
-                  <p>{post.body}</p>
+                  <Markdown body={post.body} />
                   <div className="message-actions">
                     {["👍", "❤️", "🎉"].map((emoji) => <button key={emoji} aria-label={`React ${emoji}`} onClick={() => void run(async () => { await api.posts.react(post.id, emoji); await loadPosts(); }, { quiet: true })}>{emoji} {post.reactions?.find((item) => item.emoji === emoji)?.count || ""}</button>)}
                     {post.author_id === me?.id && <button onClick={() => {
@@ -1299,9 +1369,11 @@ export default function App() {
                     }}>Remove</button>}
                   </div>
                 </article>)}
+                {more.posts && <button className="secondary" disabled={busy} onClick={() => loadMore("posts")}>Load more posts</button>}
                 {!threadId && <Empty>Select a thread to read the conversation.</Empty>}
               </div>
-              {threadId && <form className="reply" onSubmit={createPost}><Field label="Reply" id="reply"><textarea id="reply" value={reply} onChange={(event) => setReply(event.target.value)} required /></Field><button className="primary" disabled={busy}><Send size={16} /> Send</button></form>}
+              {selectedThread?.locked && <p role="status">This conversation is locked.</p>}
+              {threadId && !selectedThread?.locked && <form className="reply" onSubmit={createPost}><Field label="Reply" id="reply"><textarea id="reply" value={reply} onChange={(event) => setReply(event.target.value)} required /></Field><button className="primary" disabled={busy}><Send size={16} /> Send</button></form>}
             </section>
           </div>
         )}
@@ -1362,6 +1434,7 @@ export default function App() {
                   </div>
                 )}
               </div>
+              {certificate && <CertificateCard certificate={certificate} />}
               {courseLocked ? (
                 <div className="purchase-card">
                   {courseAccessMode === "paid" && !courseOffer && <Empty>This course is not currently for sale.</Empty>}
@@ -1386,12 +1459,9 @@ export default function App() {
                   <article className="lesson-reader">
                     {bundle ? <>
                       <div className="lesson-title"><div><p className="eyebrow">Lesson</p><h2>{bundle.lesson.title}</h2></div><button className="secondary" onClick={completeLesson} disabled={bundle.lesson.progress?.status === "complete"}><CheckCircle2 size={16} />{bundle.lesson.progress?.status === "complete" ? "Completed" : "Mark complete"}</button></div>
-                      <div className="lesson-body">{bundle.lesson.body}</div>
-                      {bundle.resources.length > 0 && <section><h3>Resources</h3><ul>{bundle.resources.map((resource) => <li key={resource.id}>{resource.name || resource.storage_file_id}</li>)}</ul></section>}
-                      {bundle.assignments.length > 0 && <section><h3>Assignments</h3>{bundle.assignments.map((assignment) => <article className="card" key={assignment.id}><strong>{assignment.title}</strong><p>{assignment.instructions}</p></article>)}</section>}
-                      {bundle.quizzes.length > 0 && <section><h3>Quizzes</h3>{bundle.quizzes.map((quiz) => <article className="card" key={quiz.id}><strong>{quiz.title}</strong><span>Pass mark {quiz.passing_score}%</span></article>)}</section>}
+                      <LearningContent key={bundle.lesson.id} bundle={bundle} />
                       <section><h3>Discussion</h3><div className="comment-list">{bundle.comments.map((item) => <article key={item.id}><strong>{displayName(memberMap.get(item.member_id))}</strong><p>{item.body}</p></article>)}</div><form className="reply" onSubmit={postComment}><Field label="Add a comment" id="lesson-comment"><textarea id="lesson-comment" value={comment} onChange={(event) => setComment(event.target.value)} required /></Field><button className="primary" disabled={busy}>Comment</button></form></section>
-                    </> : <Empty>{lessonId ? "Loading lesson…" : "Choose a lesson."}</Empty>}
+                    </> : <Empty>{lessonLoadError ? <>{lessonLoadError} <button className="secondary" onClick={() => void run(loadBundle)}>Retry lesson</button></> : lessonId ? "Loading lesson…" : "Choose a lesson."}</Empty>}
                   </article>
                 </div>
               )}
@@ -1399,7 +1469,7 @@ export default function App() {
           </div>
         )}
 
-        {view === "members" && <section className="member-grid" aria-label="Member directory">{members.map((member) => <article className="member-card" key={member.id}><span className="avatar large">{displayName(member).slice(0, 1).toUpperCase()}</span><div><h2>{displayName(member)}</h2><p>@{member.handle}</p><p>{member.bio}</p></div>{member.id !== me?.id && <button className="secondary" onClick={() => { setDMRecipient(member.id); setView("messages"); }}>Message</button>}</article>)}</section>}
+        {view === "members" && <section className="member-grid" aria-label="Member directory">{members.map((member) => <article className="member-card" key={member.id}><span className="avatar large">{displayName(member).slice(0, 1).toUpperCase()}</span><div><h2>{displayName(member)}</h2><p>@{member.handle}</p><p>{member.bio}</p></div>{member.id !== me?.id && <button className="secondary" onClick={() => { setDMRecipient(member.id); setView("messages"); }}>Message</button>}</article>)}{more.members && <button className="secondary" disabled={busy} onClick={() => loadMore("members")}>Load more members</button>}</section>}
 
         {view === "messages" && (
           <div className="message-layout">
@@ -1410,16 +1480,18 @@ export default function App() {
                 const other = thread.participants.find((id) => id !== me?.id);
                 return <button key={thread.id} className={thread.id === dmId ? "selected" : ""} onClick={() => setDMId(thread.id)}><strong>{displayName(memberMap.get(other || ""))}</strong><span>{thread.unread_count ? `${thread.unread_count} unread` : "Up to date"}</span></button>;
               })}</ItemList>
+              {more.dms && <button className="secondary" disabled={busy} onClick={() => loadMore("dms")}>Load more conversations</button>}
             </section>
             <section className="pane conversation-pane">
               <h2>{dm ? displayName(memberMap.get(dm.participants.find((id) => id !== me?.id) || "")) : "Conversation"}</h2>
+              {more.messages && <button className="secondary" disabled={busy} onClick={() => loadMore("messages")}>Load older messages</button>}
               <div className="messages">{dm?.messages.map((message) => <article key={message.id} className={`message ${message.author_id === me?.id ? "mine" : ""}`}><header><strong>{displayName(memberMap.get(message.author_id))}</strong><time>{new Date(message.created_at).toLocaleString()}</time></header><p>{message.body}</p></article>)}{!dm && <Empty>Choose a conversation.</Empty>}</div>
               {dm && <form className="reply" onSubmit={sendDM}><Field label="Message" id="dm-body"><textarea id="dm-body" value={dmBody} onChange={(event) => setDMBody(event.target.value)} required /></Field><button className="primary" disabled={busy}><Send size={16} /> Send</button></form>}
             </section>
           </div>
         )}
 
-        {view === "profile" && <section className="profile-card"><span className="avatar xlarge">{displayName(me).slice(0, 1).toUpperCase()}</span><div><p className="eyebrow">Member profile</p><h2>{displayName(me)}</h2><p className="muted">@{me?.handle}</p><p>{me?.bio || "No bio yet."}</p><p className="muted">Signed in as {auth?.user.email}</p></div><button className="secondary" onClick={logout}><LogOut size={16} /> Sign out</button></section>}
+        {view === "profile" && <section className="profile-card"><span className="avatar xlarge">{displayName(me).slice(0, 1).toUpperCase()}</span><div><p className="eyebrow">Member profile</p><h2>{displayName(me)}</h2><p className="muted">@{me?.handle}</p>{me && <ProfileForm key={me.id} member={me} onSaved={() => void run(async () => { await loadSession(); await loadCommunity(); })} />}<p className="muted">Signed in as {auth?.user.email}</p></div><button className="secondary" onClick={logout}><LogOut size={16} /> Sign out</button></section>}
       </main>
     </div>
   );
@@ -1836,7 +1908,7 @@ function Field({ label, id, children }: { label: string; id: string; children: R
 }
 
 function ItemList({ children, empty }: { children: ReactNode; empty: string }) {
-  return <div className="item-list">{children || <Empty>{empty}</Empty>}</div>;
+  return <div className="item-list">{Children.toArray(children).length > 0 ? children : <Empty>{empty}</Empty>}</div>;
 }
 
 function Empty({ children }: { children: ReactNode }) {
@@ -1846,3 +1918,5 @@ function Empty({ children }: { children: ReactNode }) {
 function Metric({ label, value }: { label: string; value: number }) {
   return <article className="metric"><strong>{value}</strong><span>{label}</span></article>;
 }
+
+function mergeItems<T extends { id: string }>(items: T[], incoming: T[]): T[] { return Array.from(new Map([...items, ...incoming].map((item) => [item.id, item])).values()); }

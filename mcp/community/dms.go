@@ -74,25 +74,28 @@ func dmsTools() []sdk.Tool {
 				"community_id": map[string]any{"type": "string"},
 				"member_id":    map[string]any{"type": "string"},
 				"limit":        map[string]any{"type": "integer"},
+				"offset":       map[string]any{"type": "integer", "minimum": 0},
 			}, []string{"member_id"}),
 			Handler: toolDMsListThreads,
 		},
 		{
 			Name:        "dms_get_thread",
-			Description: "Fetch a DM thread by id with its messages (oldest first). Args: id (required), caller_member_id (required), limit? (default 200).",
+			Description: "Fetch a DM thread by id with its latest message page (oldest first within the page). Offset loads older messages. Args: id, caller_member_id, limit? (default 200), offset?.",
 			InputSchema: schemaObject(map[string]any{
 				"id":               map[string]any{"type": "string"},
 				"caller_member_id": map[string]any{"type": "string"},
 				"limit":            map[string]any{"type": "integer"},
+				"offset":           map[string]any{"type": "integer", "minimum": 0},
 			}, []string{"id", "caller_member_id"}),
 			Handler: toolDMsGetThread,
 		},
 		{
 			Name:        "dms_mark_read",
-			Description: "Move a member's read cursor in a DM thread to now. Idempotent. Args: dm_thread_id (required), member_id (required).",
+			Description: "Move a member's read cursor through an observed message, or through the latest message when omitted. Idempotent. Args: dm_thread_id, member_id, through_message_id?.",
 			InputSchema: schemaObject(map[string]any{
-				"dm_thread_id": map[string]any{"type": "string"},
-				"member_id":    map[string]any{"type": "string"},
+				"dm_thread_id":       map[string]any{"type": "string"},
+				"member_id":          map[string]any{"type": "string"},
+				"through_message_id": map[string]any{"type": "string"},
 			}, []string{"dm_thread_id", "member_id"}),
 			Handler: toolDMsMarkRead,
 		},
@@ -109,6 +112,9 @@ func dmsTools() []sdk.Tool {
 }
 
 func toolDMsMarkRead(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	threadID, err := mustStr(args, "dm_thread_id")
 	if err != nil {
 		return nil, err
@@ -125,10 +131,20 @@ func toolDMsMarkRead(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := ensureCommunityVisible(ctx, db, t.CommunityID); err != nil {
 		return nil, err
 	}
+	var through int64
+	if messageID := strArg(args, "through_message_id", ""); messageID != "" {
+		if err := db.QueryRow(`SELECT seq FROM dm_messages WHERE id = ? AND dm_thread_id = ?`, messageID, threadID).Scan(&through); err != nil {
+			return nil, notFound(err, "dm message")
+		}
+	} else {
+		if err := db.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM dm_messages WHERE dm_thread_id = ?`, threadID).Scan(&through); err != nil {
+			return nil, err
+		}
+	}
 	res, err := db.Exec(
-		`UPDATE dm_participants SET last_read_at = CURRENT_TIMESTAMP
+		`UPDATE dm_participants SET last_read_seq = MAX(last_read_seq, ?), last_read_at = CURRENT_TIMESTAMP
 		 WHERE dm_thread_id = ? AND member_id = ?`,
-		threadID, memberID,
+		through, threadID, memberID,
 	)
 	if err != nil {
 		return nil, err
@@ -145,6 +161,9 @@ func toolDMsMarkRead(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolDMsUnreadCount(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	memberID, err := mustStr(args, "member_id")
 	if err != nil {
 		return nil, err
@@ -161,7 +180,7 @@ func toolDMsUnreadCount(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		`SELECT COUNT(*) FROM dm_messages m
 		 JOIN dm_participants p ON p.dm_thread_id = m.dm_thread_id AND p.member_id = ?
 		 WHERE m.author_id <> ?
-		   AND (p.last_read_at IS NULL OR m.created_at > p.last_read_at)`,
+		   AND m.seq > p.last_read_seq`,
 		memberID, memberID,
 	).Scan(&total)
 	if err != nil {
@@ -173,9 +192,12 @@ func toolDMsUnreadCount(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 // ─── handlers ────────────────────────────────────────────────────
 
 func toolDMsOpen(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	rawParts, ok := args["participants"].([]any)
-	if !ok || len(rawParts) < 2 {
-		return nil, errors.New("participants must be an array of >=2 member ids")
+	if !ok || len(rawParts) < 2 || len(rawParts) > 100 {
+		return nil, errors.New("participants must be an array of 2 to 100 member ids")
 	}
 	parts := make([]string, 0, len(rawParts))
 	seen := map[string]bool{}
@@ -255,6 +277,9 @@ func toolDMsOpen(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolDMsSend(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	threadID, err := mustStr(args, "dm_thread_id")
 	if err != nil {
 		return nil, err
@@ -321,6 +346,9 @@ func toolDMsSend(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolDMsListThreads(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	memberID, err := mustStr(args, "member_id")
 	if err != nil {
 		return nil, err
@@ -335,17 +363,15 @@ func toolDMsListThreads(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	limit := boundedLimit(args, "limit", 50, 200)
 	db := ctx.AppDB()
 	rows, err := db.Query(
-		`SELECT t.id, t.community_id, t.created_at, t.last_message_at,
-		        COUNT(CASE
-		          WHEN msg.author_id <> ? AND (p.last_read_at IS NULL OR msg.created_at > p.last_read_at)
-		          THEN 1 END) AS unread_count
-		 FROM dm_threads t
-		 JOIN dm_participants p ON p.dm_thread_id = t.id
-		 LEFT JOIN dm_messages msg ON msg.dm_thread_id = t.id
-		 WHERE p.member_id = ?
-		 GROUP BY t.id, t.community_id, t.created_at, t.last_message_at
-		 ORDER BY t.last_message_at DESC, t.id DESC LIMIT ?`,
-		memberID, memberID, limit,
+		`WITH page AS (
+ SELECT t.id, t.community_id, t.created_at, t.last_message_at, p.last_read_seq
+ FROM dm_threads t JOIN dm_participants p ON p.dm_thread_id = t.id
+ WHERE p.member_id = ? ORDER BY t.last_message_at DESC, t.id DESC LIMIT ? OFFSET ?
+ ) SELECT page.id, page.community_id, page.created_at, page.last_message_at,
+ (SELECT COUNT(*) FROM dm_messages msg WHERE msg.dm_thread_id = page.id
+  AND msg.author_id <> ? AND msg.seq > page.last_read_seq)
+ FROM page ORDER BY page.last_message_at DESC, page.id DESC`,
+		memberID, limit, boundedOffset(args), memberID,
 	)
 	if err != nil {
 		return nil, err
@@ -371,6 +397,9 @@ func toolDMsListThreads(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolDMsGetThread(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -392,14 +421,14 @@ func toolDMsGetThread(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	rows, err := db.Query(
-		`SELECT `+dmMessageCols+` FROM dm_messages WHERE dm_thread_id = ? ORDER BY created_at, id LIMIT ?`,
-		id, limit,
+		`SELECT `+dmMessageCols+` FROM (SELECT * FROM dm_messages WHERE dm_thread_id = ? ORDER BY seq DESC LIMIT ? OFFSET ?) ORDER BY seq`,
+		id, limit, boundedOffset(args),
 	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	view := DMThreadView{DMThread: t}
+	view := DMThreadView{DMThread: t, Messages: []DMMessage{}}
 	for rows.Next() {
 		var m DMMessage
 		if err := rows.Scan(&m.ID, &m.CommunityID, &m.DMThreadID, &m.AuthorID, &m.Body, &m.CreatedAt); err != nil {
@@ -557,7 +586,7 @@ func (a *App) httpDMs(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "member_id required")
 		return
 	}
-	out, err := toolDMsListThreads(globalCtx, map[string]any{"member_id": memberID})
+	out, err := toolDMsListThreads(requestAppCtx(r), map[string]any{"member_id": memberID})
 	if err != nil {
 		writeDomainErr(w, err)
 		return

@@ -141,6 +141,7 @@ func threadsTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{
 				"space_id": map[string]any{"type": "string"},
 				"limit":    map[string]any{"type": "integer"},
+				"offset":   map[string]any{"type": "integer", "minimum": 0},
 			}, []string{"space_id"}),
 			Handler: toolThreadsList,
 		},
@@ -166,6 +167,9 @@ func threadsTools() []sdk.Tool {
 }
 
 func toolSpacesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -213,6 +217,9 @@ func toolSpacesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolSpacesArchive(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -235,6 +242,9 @@ func toolSpacesArchive(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolThreadsPin(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -265,6 +275,9 @@ func toolThreadsPin(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolThreadsLock(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -313,6 +326,7 @@ func postsTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{
 				"thread_id":       map[string]any{"type": "string"},
 				"limit":           map[string]any{"type": "integer"},
+				"offset":          map[string]any{"type": "integer", "minimum": 0},
 				"include_removed": map[string]any{"type": "boolean"},
 			}, []string{"thread_id"}),
 			Handler: toolPostsList,
@@ -355,6 +369,9 @@ var spaceKinds = map[string]bool{"feed": true, "forum": true, "chat": true, "cou
 var spaceVisibilities = map[string]bool{"public": true, "members": true}
 
 func toolSpacesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	communityID, err := mustStr(args, "community_id")
 	if err != nil {
 		return nil, err
@@ -416,6 +433,9 @@ func toolSpacesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolSpacesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	communityID, err := mustStr(args, "community_id")
 	if err != nil {
 		return nil, err
@@ -451,6 +471,9 @@ func toolSpacesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 var rolesValid = map[string]bool{"member": true, "moderator": true}
 
 func toolSpacesAddMember(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -501,6 +524,9 @@ func toolSpacesAddMember(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 // ─── thread handlers ─────────────────────────────────────────────
 
 func toolThreadsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -566,6 +592,9 @@ func toolThreadsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolThreadsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -576,8 +605,8 @@ func toolThreadsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	rows, err := ctx.AppDB().Query(
 		`SELECT `+threadCols+` FROM threads WHERE space_id = ?
-		 ORDER BY pinned DESC, last_post_at DESC, id DESC LIMIT ?`,
-		spaceID, limit,
+		 ORDER BY pinned DESC, last_post_at DESC, id DESC LIMIT ? OFFSET ?`,
+		spaceID, limit, boundedOffset(args),
 	)
 	if err != nil {
 		return nil, err
@@ -600,6 +629,9 @@ func toolThreadsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 // ─── post handlers ───────────────────────────────────────────────
 
 func toolPostsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	threadID, err := mustStr(args, "thread_id")
 	if err != nil {
 		return nil, err
@@ -649,6 +681,9 @@ func toolPostsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolPostsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	threadID, err := mustStr(args, "thread_id")
 	if err != nil {
 		return nil, err
@@ -659,11 +694,11 @@ func toolPostsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if !includeRemoved {
 		q += ` AND removed_at IS NULL`
 	}
-	q += ` ORDER BY created_at, rowid LIMIT ?`
+	q += ` ORDER BY created_at, rowid LIMIT ? OFFSET ?`
 	if _, _, err := ensureThreadInVisibleSpace(ctx, ctx.AppDB(), threadID); err != nil {
 		return nil, err
 	}
-	rows, err := ctx.AppDB().Query(q, threadID, limit)
+	rows, err := ctx.AppDB().Query(q, threadID, limit, boundedOffset(args))
 	if err != nil {
 		return nil, err
 	}
@@ -695,6 +730,9 @@ func toolPostsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolPostsEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -744,6 +782,9 @@ func toolPostsEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolPostsReact(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	postID, err := mustStr(args, "post_id")
 	if err != nil {
 		return nil, err
@@ -817,6 +858,9 @@ func toolPostsReact(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolPostsRemove(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -868,8 +912,9 @@ func toolPostsRemove(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	changed, _ := res.RowsAffected()
 	if changed > 0 {
 		if _, err := tx.Exec(
-			`UPDATE threads SET post_count = CASE WHEN post_count > 0 THEN post_count - 1 ELSE 0 END WHERE id = ?`,
-			threadID,
+			`UPDATE threads SET post_count = CASE WHEN post_count > 0 THEN post_count - 1 ELSE 0 END,
+ last_post_at = COALESCE((SELECT MAX(created_at) FROM posts WHERE thread_id = ? AND removed_at IS NULL), created_at)
+ WHERE id = ?`, threadID, threadID,
 		); err != nil {
 			return nil, err
 		}
@@ -1103,7 +1148,7 @@ func (a *App) httpSpaces(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "community_id required")
 		return
 	}
-	out, err := toolSpacesList(globalCtx, map[string]any{
+	out, err := toolSpacesList(requestAppCtx(r), map[string]any{
 		"community_id":     communityID,
 		"include_archived": r.URL.Query().Get("include_archived") == "true",
 	})
@@ -1124,7 +1169,7 @@ func (a *App) httpThreads(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "space_id required")
 		return
 	}
-	out, err := toolThreadsList(globalCtx, map[string]any{"space_id": spaceID})
+	out, err := toolThreadsList(requestAppCtx(r), map[string]any{"space_id": spaceID})
 	if err != nil {
 		writeDomainErr(w, err)
 		return
@@ -1142,7 +1187,7 @@ func (a *App) httpPosts(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "thread_id required")
 		return
 	}
-	out, err := toolPostsList(globalCtx, map[string]any{"thread_id": threadID})
+	out, err := toolPostsList(requestAppCtx(r), map[string]any{"thread_id": threadID})
 	if err != nil {
 		writeDomainErr(w, err)
 		return
