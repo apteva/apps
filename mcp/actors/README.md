@@ -14,7 +14,7 @@ Actors is a standalone Apteva app for reusable browser workflows. It depends dir
 - Saved tasks pinned to actor revision/operation/input.
 - Page-by-page dataset persistence and cursor reads, including partial output after failure; private JSONL/CSV exports on success.
 - Jobs schedules pinned to actor revisions, deterministic preset rotation and occurrence deduplication.
-- Project-scoped MCP tools, HTTP routes and an Actors panel.
+- Project-scoped MCP tools, HTTP routes and a self-contained Actors panel mounted by the dashboard, with project and installation IDs on every Actors request.
 
 This is the working foundation for the platform described in `PLATFORM_PROPOSAL.md`, not completion of the entire roadmap. Durable distributed queues, checkpoint resume, full JSON Schema contracts, isolated code actors, public API publication, webhooks and a shared catalog remain future work.
 
@@ -76,7 +76,9 @@ Click, key and pagination steps are not automatically retried because an uncerta
 GOWORK=off go test ./...
 GOWORK=off go test -race ./...
 GOWORK=off go build -o /tmp/apteva-actors .
-bun build ui/ActorsPanel.mjs --target browser --external react --external react-dom/client --outfile /tmp/ActorsPanel.mjs
+cd ../..
+bun run scripts/build-panels.ts --app actors
+bun test mcp/actors/ui/ActorsPanel.test.ts
 ```
 
 The app-sdk pin was derived from local SDK HEAD and fetched tags: `950b91d` / `v0.82.0`. `GOWORK=off` verifies the app against its published dependency rather than the workspace overlay.
