@@ -408,6 +408,18 @@ test("alerts show their card without duplicate tool activity live or after reloa
  expect(element.querySelector(".chat-tool-activity")).toBeNull();
 });
 
+test("an acknowledgement does not gain a second Thinking row during hidden pacing", async () => {
+ const ack={...message(301,"a","I’ll send a test alert in 37 seconds in this conversation."),role:"agent",agent_id:41,phase:"acknowledgement"};
+ fetcher=url=>url.includes("/activity")||url.includes("/deliveries")?json([]):json({messages:[ack],cursor:301,before:301,has_more:false});
+ await render();
+ const events=FakeEvents.instances[0];
+ await act(async()=>events.listeners.get("stream")?.({data:JSON.stringify({chat_id:"a",agent_id:41,thread_id:"chat-a",response_progress:{phase:"thinking",run_id:"pace-run",revision:1,after_message_id:300,started_at:message(300).created_at}})}));
+ expect(element.textContent).toContain("I’ll send a test alert in 37 seconds in this conversation.");
+ expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+ await act(async()=>events.listeners.get("stream")?.({data:JSON.stringify({chat_id:"a",agent_id:41,thread_id:"chat-a",response_progress:{phase:"preparing_tool",run_id:"pace-run",revision:2,after_message_id:300,started_at:message(300).created_at,tool_name:"pace",call_id:"pace-call"}})}));
+ expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+});
+
 test("new approval clears its agent's thinking while historical cards and other agents remain isolated", async () => {
  await render();
  const events=FakeEvents.instances[0];
