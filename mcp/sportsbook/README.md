@@ -1,4 +1,4 @@
-# Sportsbook 0.1
+# Sportsbook 0.3
 
 A dedicated Apteva sports research and **paper betting** app. Go/app-sdk sidecar, project-scoped SQLite, native React dashboard panel following the CRM layout, and an isolated panel preview. It does not submit real wagers.
 
@@ -13,24 +13,42 @@ A dedicated Apteva sports research and **paper betting** app. Go/app-sdk sidecar
 - Single-bet proposals, expected value, integer monetary stakes, paper bankrolls, per-bet and total-exposure limits.
 - Atomic paper acceptance, stake reservation, manual win/loss/void settlement and balanced double-entry ledger transactions.
 - Idempotent acceptance and settlement; audit records; isolated example fixtures and bankrolls.
-- Four native panel tabs: Events, Predictions, Bets, Integrations. The panel uses the same compact list/detail layout, Tailwind theme tokens and shared React ESM contract as CRM; it supports narrow screens.
+- Five native panel tabs: Events, Predictions, Bets, Sports, Integrations. The panel uses the same compact list/detail layout, Tailwind theme tokens and shared React ESM contract as CRM; it supports narrow screens.
 
 ## Integration roles
 
-All four roles declare `mode: multiple`. Connections are selected in the platform's app integration settings. Sportsbook never stores credentials or discovers unrelated connections.
+All five roles declare `mode: multiple`. Connections are selected in the platform's app integration settings. Sportsbook never stores credentials or discovers unrelated connections.
 
 | Role | Available adapters | Normalized capability |
 | --- | --- | --- |
 | `sports_data` | TheSportsDB, The Odds API, API-Sports Football, API Tennis | Import a UTC date's fixtures and completed results |
 | `odds` | The Odds API, API Tennis | Complete match-winner bookmaker markets |
+| `sports_scraper` | Actors app | Read-only arbitrary datasets normalized into sports events through an explicit field map |
 | `llm` | OpenAI API, Anthropic API | Explain the supplied prediction evidence using an explicitly selected model |
-| `execution` | Optional app binding for `sportsbook-executor` | Extension point; live execution is disabled in 0.2 |
+| `execution` | Optional app binding for `sportsbook-executor` | Extension point; live execution is disabled in 0.3 |
 
 Paper execution is built in. The execution role uses the SDK's app-binding path because an eventual executor owns the commercial venue's ticket/reconciliation contract. Binding an app does not enable live submission: `bet_submit` consistently returns `live_execution_unavailable` without a provider call.
 
 `IntegrationFor(role)` supplies the platform default; `IntegrationsFor(role)` supplies all selected targets. Sportsbook validates adapter coverage itself. `provider_routes` can override the default by sport. Sports imports use one compatible provider; `all_sources=true` fans odds imports out to all selected providers that support the requested sport. An explicit `connection_id` must belong to the requested role. Removed routes fail clearly rather than silently selecting another account.
 
 A provider may be selected in more than one role, for example API Tennis for fixtures and odds. Routing is independent in each role. An all-sports preference applies only within that provider's coverage; other sports use a compatible default. Provider-specific tool names and response shapes are confined to `providers.go` and `feeds.go`.
+
+Actors is deliberately a separate `sports_scraper` app role rather than another fixed-shape `sports_data` adapter. Configure a source in **Integrations** or with `sports_scrape_source_set`, selecting an Actors actor ID, named operation, optional JSON input template and canonical field map. Input templates support `${date}`, `${sport}` and `${competition}`. A typical map is:
+
+```json
+{
+  "external_id": ["event_id", "id"],
+  "competition": ["league.name", "league"],
+  "home": ["teams.home.name", "home_team"],
+  "away": ["teams.away.name", "away_team"],
+  "starts_at": ["fixture.date", "commence_time"],
+  "status": "fixture.status.short",
+  "home_score": "goals.home",
+  "away_score": "goals.away"
+}
+```
+
+`sports_scrape_sync` queues `actors_run`, polls `actors_run_get`, reads every `actors_dataset_read` page and imports only rows that normalize to the configured sport and UTC date. Malformed or incomplete rows are skipped and reported. The Sportsbook boundary never calls Actors mutation tools; the resulting source is marked read-only and can only create or update normalized Sportsbook events.
 
 The Odds API uses saved sport or competition mappings such as `basketball_nba`, `soccer_epl` or an active tennis key. A sport-level football default of `soccer_epl` is seeded for compatibility. TheSportsDB uses mapped sport names (such as `Basketball`); API-Sports Football and API Tennis remain fixed-sport adapters, with optional numeric league/tournament mappings. The Odds API also imports upcoming events and up to three days of completed scores through the sports data role. Its final totals never train regulation-only markets. Odds are filtered to the requested UTC event date. API Tennis prices have no provider update timestamp in this adapter, so their observation time is the successful retrieval time. Account coverage, quotas and endpoint access depend on the provider subscription. Provider contracts and the Basketball mapping → import → baseline → proposal → acceptance → settlement flow are tested with fixtures; paid accounts have not been used for live verification.
 
@@ -97,7 +115,7 @@ Open `http://127.0.0.1:8079/ui/index.html`. Choose **Examples** in the workspace
 
 The preview loads the actual `SportsbookPanel.mjs` through a shared React import map, uses a preview-only copy of the ui-kit token stylesheet, builds the Go binary, creates an isolated temporary database and random local app token, and exposes a loopback-only app proxy. It does not read existing Apteva API keys or connect provider accounts. Ports can be changed with `SPORTSBOOK_BACKEND_PORT` and `SPORTSBOOK_PREVIEW_PORT`. Ctrl-C stops both processes.
 
-For platform installation, use `apteva.yaml` as a source app manifest. The SDK serves `ui/` and applies migrations; build the UI before packaging. The app is project-scoped. The module is pinned to the published app-sdk `v0.90.0`. Release `sportsbook/v0.2.0` pins the source manifest and marketplace entry to this version. Use `GOWORK=off` to verify the published SDK dependency independently of any local workspace overlay.
+For platform installation, use `apteva.yaml` as a source app manifest. The SDK serves `ui/` and applies migrations; build the UI before packaging. The app is project-scoped. The module is pinned to the published app-sdk `v0.90.0`. Release `sportsbook/v0.3.0` pins the source manifest and marketplace entry to this version. Use `GOWORK=off` to verify the published SDK dependency independently of any local workspace overlay.
 
 ## Verify
 

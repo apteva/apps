@@ -21,7 +21,7 @@ type Provider struct {
 	Capabilities []string `json:"capabilities"`
 }
 
-var roles = []string{"sports_data", "odds", "execution", "llm"}
+var roles = []string{"sports_data", "sports_scraper", "odds", "execution", "llm"}
 
 func capabilities(role, slug string) ([]string, []string) {
 	switch role {
@@ -38,6 +38,10 @@ func capabilities(role, slug string) ([]string, []string) {
 			return []string{"football", "tennis"}, []string{"match_winner", "price_history"}
 		case "api-tennis":
 			return []string{"tennis"}, []string{"match_winner"}
+		}
+	case "sports_scraper":
+		if slug == "actors" {
+			return []string{"*"}, []string{"read_only_dataset"}
 		}
 	case "llm":
 		if slug == "openai-api" || slug == "anthropic-api" {
