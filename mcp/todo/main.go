@@ -23,6 +23,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,6 +33,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -40,7 +42,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: todo
 display_name: Todo
-version: 0.4.12
+version: 0.4.13
 description: Personal todo list — human-first, agent-helpful.
 author: Apteva
 icon: /ui/icon.svg
@@ -55,18 +57,18 @@ provides:
   mcp_tools:
     - { name: todos_quick_add,  description: "Create a todo from one NL line." }
     - { name: todos_create,     description: "Create a todo with structured fields." }
-    - { name: todos_list,       description: "List todos with view/list/tag filters." }
+    - { name: todos_list,       description: "List or search todos. Add q/format=compact for bounded discovery results." }
     - { name: todos_get,        description: "Read one todo." }
     - { name: todos_update,     description: "Update a todo." }
     - { name: todos_complete,   description: "Complete (or roll-forward, if recurring)." }
     - { name: todos_uncomplete, description: "Re-open a completed todo." }
     - { name: todos_snooze,     description: "Push due_at out." }
     - { name: todos_delete,     description: "Delete a todo." }
-    - { name: lists_list,       description: "List the user-facing buckets." }
+    - { name: lists_list,       description: "List or search user-facing buckets. Add q/format=compact for bounded discovery results." }
     - { name: lists_create,     description: "Create a list." }
     - { name: lists_update,     description: "Update a list." }
     - { name: lists_delete,     description: "Delete a list (todos move to inbox)." }
-    - { name: list_groups_list,   description: "List list-groups (containers above lists)." }
+    - { name: list_groups_list,   description: "List or search list-groups. Add q/format=compact for bounded discovery results." }
     - { name: list_groups_create, description: "Create a list-group." }
     - { name: list_groups_update, description: "Update a list-group." }
     - { name: list_groups_delete, description: "Delete a list-group (member lists become ungrouped)." }
@@ -243,13 +245,19 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"title"}),
 			Handler: a.toolTodosCreate},
 		{Name: "todos_list",
-			Description: "List todos. Args: view? (inbox|today|upcoming|overdue|all|done; default 'today'), list_id? (numeric), tag? (name), limit? (default 200), tz_offset? (operator's UTC offset in minutes east, e.g. 120 for CEST; decides where 'today' ends, default UTC). A todo snoozed to later today stays in the today view.",
+			Description: "List todos. Args: view? (inbox|today|upcoming|overdue|all|done; default 'today'), q? (search title and notes), status? (open|done|cancelled|any), list_id?, group_id?, tag?, limit?, cursor?, format? ('compact' for bounded discovery results), include_total?, tz_offset?. Supplying q or format=compact returns {items,has_more,next_cursor,total?}; legacy calls still return an array.",
 			InputSchema: schemaObject(map[string]any{
-				"view":      map[string]any{"type": "string"},
-				"list_id":   map[string]any{"type": "integer"},
-				"tag":       map[string]any{"type": "string"},
-				"limit":     map[string]any{"type": "integer"},
-				"tz_offset": map[string]any{"type": "integer"},
+				"view":          map[string]any{"type": "string"},
+				"q":             map[string]any{"type": "string"},
+				"status":        map[string]any{"type": "string"},
+				"list_id":       map[string]any{"type": "integer"},
+				"group_id":      map[string]any{"type": "integer"},
+				"tag":           map[string]any{"type": "string"},
+				"limit":         map[string]any{"type": "integer"},
+				"cursor":        map[string]any{"type": "string"},
+				"format":        map[string]any{"type": "string", "enum": []string{"compact"}},
+				"include_total": map[string]any{"type": "boolean"},
+				"tz_offset":     map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolTodosList},
 		{Name: "todos_get",
@@ -290,9 +298,18 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
 			Handler:     a.toolTodosDelete},
 		{Name: "lists_list",
-			Description: "List the user-facing buckets in this scope (archived included; filter client-side).",
-			InputSchema: schemaObject(map[string]any{}, nil),
-			Handler:     a.toolListsList},
+			Description: "List user-facing buckets. Add q, id, group_id, include_archived, limit, cursor, or format=compact for bounded discovery results; legacy calls return an array.",
+			InputSchema: schemaObject(map[string]any{
+				"q":                map[string]any{"type": "string"},
+				"id":               map[string]any{"type": "integer"},
+				"group_id":         map[string]any{"type": "integer"},
+				"include_archived": map[string]any{"type": "boolean"},
+				"limit":            map[string]any{"type": "integer"},
+				"cursor":           map[string]any{"type": "string"},
+				"format":           map[string]any{"type": "string", "enum": []string{"compact"}},
+				"include_total":    map[string]any{"type": "boolean"},
+			}, nil),
+			Handler: a.toolListsList},
 		{Name: "lists_create",
 			Description: "Create a list. Args: name (required), color? (#hex).",
 			InputSchema: schemaObject(map[string]any{
@@ -315,9 +332,17 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
 			Handler:     a.toolListsDelete},
 		{Name: "list_groups_list",
-			Description: "List the list-groups in this scope (containers above lists). Lists with no group are 'ungrouped'.",
-			InputSchema: schemaObject(map[string]any{}, nil),
-			Handler:     a.toolListGroupsList},
+			Description: "List list-groups. Add q, id, include_archived, limit, cursor, or format=compact for bounded discovery results; legacy calls return an array.",
+			InputSchema: schemaObject(map[string]any{
+				"q":                map[string]any{"type": "string"},
+				"id":               map[string]any{"type": "integer"},
+				"include_archived": map[string]any{"type": "boolean"},
+				"limit":            map[string]any{"type": "integer"},
+				"cursor":           map[string]any{"type": "string"},
+				"format":           map[string]any{"type": "string", "enum": []string{"compact"}},
+				"include_total":    map[string]any{"type": "boolean"},
+			}, nil),
+			Handler: a.toolListGroupsList},
 		{Name: "list_groups_create",
 			Description: "Create a list-group. Args: name (required), color? (#hex, default #6b7280).",
 			InputSchema: schemaObject(map[string]any{
@@ -615,6 +640,123 @@ func getListGroup(db *sql.DB, pid string, id int64) (*ListGroup, error) {
 		return nil, err
 	}
 	return &g, nil
+}
+
+// Compact discovery responses deliberately omit bookkeeping fields and are
+// bounded by a cursor. The legacy list tools continue to return their old
+// arrays when none of the discovery arguments are supplied.
+type searchCursor struct {
+	Rank int   `json:"rank"`
+	ID   int64 `json:"id"`
+}
+
+type searchRef struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
+
+type todoSearchItem struct {
+	ID       int64      `json:"id"`
+	Title    string     `json:"title"`
+	Status   string     `json:"status"`
+	Priority int        `json:"priority"`
+	DueAt    string     `json:"due_at,omitempty"`
+	List     *searchRef `json:"list,omitempty"`
+	Group    *searchRef `json:"group,omitempty"`
+	Tags     []string   `json:"tags"`
+}
+
+type listSearchItem struct {
+	ID       int64      `json:"id"`
+	Name     string     `json:"name"`
+	Color    string     `json:"color"`
+	GroupID  *int64     `json:"group_id,omitempty"`
+	Group    *searchRef `json:"group,omitempty"`
+	Archived bool       `json:"archived"`
+}
+
+type listGroupSearchItem struct {
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	Color    string `json:"color"`
+	Archived bool   `json:"archived"`
+}
+
+type todoSearchPage struct {
+	Items      []todoSearchItem `json:"items"`
+	HasMore    bool             `json:"has_more"`
+	NextCursor string           `json:"next_cursor"`
+	Total      *int64           `json:"total,omitempty"`
+}
+
+type listSearchPage struct {
+	Items      []listSearchItem `json:"items"`
+	HasMore    bool             `json:"has_more"`
+	NextCursor string           `json:"next_cursor"`
+	Total      *int64           `json:"total,omitempty"`
+}
+
+type listGroupSearchPage struct {
+	Items      []listGroupSearchItem `json:"items"`
+	HasMore    bool                  `json:"has_more"`
+	NextCursor string                `json:"next_cursor"`
+	Total      *int64                `json:"total,omitempty"`
+}
+
+func encodeSearchCursor(c searchCursor) string {
+	raw, _ := json.Marshal(c)
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func decodeSearchCursor(raw string) (searchCursor, error) {
+	var c searchCursor
+	if strings.TrimSpace(raw) == "" {
+		return c, nil
+	}
+	b, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return c, errors.New("invalid cursor")
+	}
+	if err := json.Unmarshal(b, &c); err != nil || c.ID <= 0 || c.Rank < 0 {
+		return c, errors.New("invalid cursor")
+	}
+	return c, nil
+}
+
+func compactLimit(v int64) int {
+	if v <= 0 {
+		return 20
+	}
+	if v > 100 {
+		return 100
+	}
+	return int(v)
+}
+
+func searchTerms(q string) string {
+	parts := strings.FieldsFunc(strings.TrimSpace(q), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	terms := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(strings.ReplaceAll(part, `"`, ""))
+		if part != "" {
+			terms = append(terms, part+"*")
+		}
+	}
+	return strings.Join(terms, " AND ")
+}
+
+func compactRequested(args map[string]any, q string) bool {
+	if strings.EqualFold(strArg(args, "format", ""), "compact") || strings.TrimSpace(q) != "" {
+		return true
+	}
+	for _, key := range []string{"cursor", "group_id", "include_total", "include_archived", "status"} {
+		if _, ok := args[key]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func insertListGroup(db *sql.DB, pid, name, color string) (*ListGroup, error) {
@@ -960,6 +1102,362 @@ func listTodos(db *sql.DB, pid, view string, listID *int64, tag string, limit, t
 		return nil, err
 	}
 	return out, nil
+}
+
+func searchTodosCompact(db *sql.DB, pid, view, status, q string, listID, groupID *int64, tag, cursorRaw string, limit int, tzOffsetMin int, includeTotal bool) (*todoSearchPage, error) {
+	page := &todoSearchPage{Items: []todoSearchItem{}, NextCursor: ""}
+	q = strings.TrimSpace(q)
+	terms := searchTerms(q)
+	if q != "" && terms == "" {
+		return page, nil
+	}
+	cursor, err := decodeSearchCursor(cursorRaw)
+	if err != nil {
+		return nil, err
+	}
+	limit = compactLimit(int64(limit))
+
+	joins := ` LEFT JOIN lists l ON l.id = t.list_id AND l.project_id = t.project_id
+	           LEFT JOIN list_groups g ON g.id = l.group_id AND g.project_id = t.project_id`
+	where := []string{"t.project_id = ?"}
+	whereArgs := []any{pid}
+	if terms != "" {
+		joins += ` JOIN todo_search ON todo_search.rowid = t.id AND todo_search.project_id = t.project_id`
+		where = append(where, "todo_search MATCH ?")
+		whereArgs = append(whereArgs, terms)
+	}
+	if view != "" {
+		nowS, dayEnd := dayBounds(time.Now(), tzOffsetMin)
+		clause, clauseArgs, err := viewFilter(view, nowS, dayEnd)
+		if err != nil {
+			return nil, err
+		}
+		where = append(where, strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(clause), "AND")))
+		whereArgs = append(whereArgs, clauseArgs...)
+	} else {
+		if status == "" {
+			status = "open"
+		}
+		switch status {
+		case "open", "done", "cancelled":
+			where = append(where, "t.status = ?")
+			whereArgs = append(whereArgs, status)
+		case "any":
+		default:
+			return nil, fmt.Errorf("unknown status: %s", status)
+		}
+	}
+	if listID != nil {
+		where = append(where, "t.list_id = ?")
+		whereArgs = append(whereArgs, *listID)
+	}
+	if groupID != nil {
+		where = append(where, "l.group_id = ?")
+		whereArgs = append(whereArgs, *groupID)
+	}
+	if tag != "" {
+		where = append(where, `t.id IN (SELECT tt.todo_id FROM todo_tags tt
+		                   JOIN tags tg ON tg.id = tt.tag_id
+		                  WHERE tg.project_id = ? AND lower(tg.name) = lower(?))`)
+		whereArgs = append(whereArgs, pid, tag)
+	}
+
+	rankExpr := "0"
+	selectRankArgs := []any{}
+	if q != "" {
+		rankExpr = `CASE WHEN lower(t.title) = lower(?) THEN 0
+		                  WHEN lower(t.title) LIKE lower(?) || '%' THEN 1
+		                  ELSE 2 END`
+		selectRankArgs = []any{q, q}
+	}
+	baseWhere := strings.Join(where, " AND ")
+	query := `SELECT t.id, t.title, t.status, t.priority, t.due_at,
+	                 t.list_id, l.name, l.group_id, g.name, ` + rankExpr + ` AS search_rank
+	            FROM todos t` + joins + ` WHERE ` + baseWhere
+	queryArgs := append(append([]any{}, selectRankArgs...), whereArgs...)
+	if cursorRaw != "" {
+		if q != "" {
+			query += ` AND (` + rankExpr + ` > ? OR (` + rankExpr + ` = ? AND t.id < ?))`
+			queryArgs = append(queryArgs, q, q, cursor.Rank, q, q, cursor.Rank, cursor.ID)
+		} else {
+			query += ` AND t.id < ?`
+			queryArgs = append(queryArgs, cursor.ID)
+		}
+	}
+	query += ` ORDER BY search_rank, t.id DESC LIMIT ?`
+	queryArgs = append(queryArgs, limit+1)
+
+	rows, err := db.Query(query, queryArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type todoRow struct {
+		todo      Todo
+		rank      int
+		listName  string
+		groupID   sql.NullInt64
+		groupName string
+	}
+	got := []todoRow{}
+	for rows.Next() {
+		var t Todo
+		var due sql.NullString
+		var ref, groupRef sql.NullInt64
+		var listName, groupName sql.NullString
+		var rank int
+		if err := rows.Scan(&t.ID, &t.Title, &t.Status, &t.Priority, &due, &ref, &listName, &groupRef, &groupName, &rank); err != nil {
+			return nil, err
+		}
+		t.ProjectID, t.DueAt, t.Tags = pid, due.String, []string{}
+		if ref.Valid {
+			v := ref.Int64
+			t.ListID = &v
+		}
+		got = append(got, todoRow{todo: t, rank: rank, listName: listName.String, groupID: groupRef, groupName: groupName.String})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(got) > limit {
+		page.HasMore = true
+		got = got[:limit]
+	}
+	todos := make([]Todo, len(got))
+	for i := range got {
+		todos[i] = got[i].todo
+	}
+	if err := hydrateTodoTags(db, pid, todos); err != nil {
+		return nil, err
+	}
+	for i, t := range todos {
+		item := todoSearchItem{ID: t.ID, Title: t.Title, Status: t.Status, Priority: t.Priority, DueAt: t.DueAt, Tags: t.Tags}
+		if t.ListID != nil {
+			item.List = &searchRef{ID: *t.ListID, Name: got[i].listName}
+		}
+		if got[i].groupID.Valid {
+			v := got[i].groupID.Int64
+			item.Group = &searchRef{ID: v, Name: got[i].groupName}
+		}
+		page.Items = append(page.Items, item)
+		if i == len(todos)-1 {
+			page.NextCursor = encodeSearchCursor(searchCursor{Rank: got[i].rank, ID: t.ID})
+		}
+	}
+	if !page.HasMore {
+		page.NextCursor = ""
+	}
+	if includeTotal {
+		countQuery := `SELECT COUNT(*) FROM todos t` + joins + ` WHERE ` + baseWhere
+		var total int64
+		if err := db.QueryRow(countQuery, whereArgs...).Scan(&total); err != nil {
+			return nil, err
+		}
+		page.Total = &total
+	}
+	return page, nil
+}
+
+func searchListsCompact(db *sql.DB, pid, q string, id, groupID *int64, includeArchived bool, cursorRaw string, limit int, includeTotal bool) (*listSearchPage, error) {
+	page := &listSearchPage{Items: []listSearchItem{}}
+	q = strings.TrimSpace(q)
+	terms := searchTerms(q)
+	if q != "" && terms == "" {
+		return page, nil
+	}
+	cursor, err := decodeSearchCursor(cursorRaw)
+	if err != nil {
+		return nil, err
+	}
+	limit = compactLimit(int64(limit))
+	joins := ` LEFT JOIN list_groups g ON g.id = l.group_id AND g.project_id = l.project_id`
+	where := []string{"l.project_id = ?"}
+	whereArgs := []any{pid}
+	if terms != "" {
+		joins += ` JOIN list_search ON list_search.rowid = l.id AND list_search.project_id = l.project_id`
+		where = append(where, "list_search MATCH ?")
+		whereArgs = append(whereArgs, terms)
+	}
+	if !includeArchived {
+		where = append(where, "l.archived = 0")
+	}
+	if id != nil {
+		where = append(where, "l.id = ?")
+		whereArgs = append(whereArgs, *id)
+	}
+	if groupID != nil {
+		where = append(where, "l.group_id = ?")
+		whereArgs = append(whereArgs, *groupID)
+	}
+	rankExpr := "0"
+	selectRankArgs := []any{}
+	if q != "" {
+		rankExpr = `CASE WHEN lower(l.name) = lower(?) THEN 0
+		                  WHEN lower(l.name) LIKE lower(?) || '%' THEN 1
+		                  ELSE 2 END`
+		selectRankArgs = []any{q, q}
+	}
+	baseWhere := strings.Join(where, " AND ")
+	query := `SELECT l.id, l.name, l.color, l.group_id, g.name, l.archived, ` + rankExpr + ` AS search_rank
+	            FROM lists l` + joins + ` WHERE ` + baseWhere
+	queryArgs := append(append([]any{}, selectRankArgs...), whereArgs...)
+	if cursorRaw != "" {
+		if q != "" {
+			query += ` AND (` + rankExpr + ` > ? OR (` + rankExpr + ` = ? AND l.id < ?))`
+			queryArgs = append(queryArgs, q, q, cursor.Rank, q, q, cursor.Rank, cursor.ID)
+		} else {
+			query += ` AND l.id < ?`
+			queryArgs = append(queryArgs, cursor.ID)
+		}
+	}
+	query += ` ORDER BY search_rank, l.id DESC LIMIT ?`
+	queryArgs = append(queryArgs, limit+1)
+	rows, err := db.Query(query, queryArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type row struct {
+		item listSearchItem
+		rank int
+	}
+	got := []row{}
+	for rows.Next() {
+		var item listSearchItem
+		var groupID sql.NullInt64
+		var groupName sql.NullString
+		var archived int
+		var rank int
+		if err := rows.Scan(&item.ID, &item.Name, &item.Color, &groupID, &groupName, &archived, &rank); err != nil {
+			return nil, err
+		}
+		if groupID.Valid {
+			v := groupID.Int64
+			item.GroupID = &v
+			item.Group = &searchRef{ID: v, Name: groupName.String}
+		}
+		item.Archived = archived == 1
+		got = append(got, row{item: item, rank: rank})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(got) > limit {
+		page.HasMore = true
+		got = got[:limit]
+	}
+	for i, r := range got {
+		page.Items = append(page.Items, r.item)
+		if i == len(got)-1 {
+			page.NextCursor = encodeSearchCursor(searchCursor{Rank: r.rank, ID: r.item.ID})
+		}
+	}
+	if !page.HasMore {
+		page.NextCursor = ""
+	}
+	if includeTotal {
+		var total int64
+		if err := db.QueryRow(`SELECT COUNT(*) FROM lists l`+joins+` WHERE `+baseWhere, whereArgs...).Scan(&total); err != nil {
+			return nil, err
+		}
+		page.Total = &total
+	}
+	return page, nil
+}
+
+func searchListGroupsCompact(db *sql.DB, pid, q string, id *int64, includeArchived bool, cursorRaw string, limit int, includeTotal bool) (*listGroupSearchPage, error) {
+	page := &listGroupSearchPage{Items: []listGroupSearchItem{}}
+	q = strings.TrimSpace(q)
+	terms := searchTerms(q)
+	if q != "" && terms == "" {
+		return page, nil
+	}
+	cursor, err := decodeSearchCursor(cursorRaw)
+	if err != nil {
+		return nil, err
+	}
+	limit = compactLimit(int64(limit))
+	joins := ""
+	where := []string{"g.project_id = ?"}
+	whereArgs := []any{pid}
+	if terms != "" {
+		joins = ` JOIN list_group_search ON list_group_search.rowid = g.id AND list_group_search.project_id = g.project_id`
+		where = append(where, "list_group_search MATCH ?")
+		whereArgs = append(whereArgs, terms)
+	}
+	if !includeArchived {
+		where = append(where, "g.archived = 0")
+	}
+	if id != nil {
+		where = append(where, "g.id = ?")
+		whereArgs = append(whereArgs, *id)
+	}
+	rankExpr := "0"
+	selectRankArgs := []any{}
+	if q != "" {
+		rankExpr = `CASE WHEN lower(g.name) = lower(?) THEN 0
+		                  WHEN lower(g.name) LIKE lower(?) || '%' THEN 1
+		                  ELSE 2 END`
+		selectRankArgs = []any{q, q}
+	}
+	baseWhere := strings.Join(where, " AND ")
+	query := `SELECT g.id, g.name, g.color, g.archived, ` + rankExpr + ` AS search_rank
+	            FROM list_groups g` + joins + ` WHERE ` + baseWhere
+	queryArgs := append(append([]any{}, selectRankArgs...), whereArgs...)
+	if cursorRaw != "" {
+		if q != "" {
+			query += ` AND (` + rankExpr + ` > ? OR (` + rankExpr + ` = ? AND g.id < ?))`
+			queryArgs = append(queryArgs, q, q, cursor.Rank, q, q, cursor.Rank, cursor.ID)
+		} else {
+			query += ` AND g.id < ?`
+			queryArgs = append(queryArgs, cursor.ID)
+		}
+	}
+	query += ` ORDER BY search_rank, g.id DESC LIMIT ?`
+	queryArgs = append(queryArgs, limit+1)
+	rows, err := db.Query(query, queryArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type row struct {
+		item listGroupSearchItem
+		rank int
+	}
+	got := []row{}
+	for rows.Next() {
+		var item listGroupSearchItem
+		var archived, rank int
+		if err := rows.Scan(&item.ID, &item.Name, &item.Color, &archived, &rank); err != nil {
+			return nil, err
+		}
+		item.Archived = archived == 1
+		got = append(got, row{item: item, rank: rank})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(got) > limit {
+		page.HasMore = true
+		got = got[:limit]
+	}
+	for i, r := range got {
+		page.Items = append(page.Items, r.item)
+		if i == len(got)-1 {
+			page.NextCursor = encodeSearchCursor(searchCursor{Rank: r.rank, ID: r.item.ID})
+		}
+	}
+	if !page.HasMore {
+		page.NextCursor = ""
+	}
+	if includeTotal {
+		var total int64
+		if err := db.QueryRow(`SELECT COUNT(*) FROM list_groups g`+joins+` WHERE `+baseWhere, whereArgs...).Scan(&total); err != nil {
+			return nil, err
+		}
+		page.Total = &total
+	}
+	return page, nil
 }
 
 // WorkSummary is the pill row above the list: how much is late, how
@@ -1774,11 +2272,20 @@ func (a *App) toolTodosCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 
 func (a *App) toolTodosList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	view := strArg(args, "view", "today")
+	q := strArg(args, "q", "")
 	tag := strArg(args, "tag", "")
 	limit := int(toInt64(args["limit"]))
 	var ref *int64
 	if v := toInt64(args["list_id"]); v != 0 {
 		ref = &v
+	}
+	var groupRef *int64
+	if v := toInt64(args["group_id"]); v != 0 {
+		groupRef = &v
+	}
+	if compactRequested(args, q) {
+		includeTotal, _ := args["include_total"].(bool)
+		return searchTodosCompact(ctx.AppDB(), projectScope(ctx), strArg(args, "view", ""), strArg(args, "status", ""), q, ref, groupRef, tag, strArg(args, "cursor", ""), limit, int(toInt64(args["tz_offset"])), includeTotal)
 	}
 	return listTodos(ctx.AppDB(), projectScope(ctx), view, ref, tag, limit, int(toInt64(args["tz_offset"])))
 }
@@ -1887,7 +2394,27 @@ func (a *App) toolTodosDelete(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	return map[string]any{"status": "deleted", "id": id}, nil
 }
 
-func (a *App) toolListsList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
+func (a *App) toolListsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	q := strArg(args, "q", "")
+	var id, groupID *int64
+	if v := toInt64(args["id"]); v != 0 {
+		id = &v
+	}
+	if v := toInt64(args["group_id"]); v != 0 {
+		groupID = &v
+	}
+	compact := compactRequested(args, q)
+	if _, ok := args["id"]; ok {
+		compact = true
+	}
+	if _, ok := args["limit"]; ok {
+		compact = true
+	}
+	if compact {
+		includeArchived, _ := args["include_archived"].(bool)
+		includeTotal, _ := args["include_total"].(bool)
+		return searchListsCompact(ctx.AppDB(), projectScope(ctx), q, id, groupID, includeArchived, strArg(args, "cursor", ""), int(toInt64(args["limit"])), includeTotal)
+	}
 	return listLists(ctx.AppDB(), projectScope(ctx))
 }
 
@@ -2047,7 +2574,24 @@ func (a *App) handleListGroupsItem(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *App) toolListGroupsList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
+func (a *App) toolListGroupsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	q := strArg(args, "q", "")
+	var id *int64
+	if v := toInt64(args["id"]); v != 0 {
+		id = &v
+	}
+	compact := compactRequested(args, q)
+	if _, ok := args["id"]; ok {
+		compact = true
+	}
+	if _, ok := args["limit"]; ok {
+		compact = true
+	}
+	if compact {
+		includeArchived, _ := args["include_archived"].(bool)
+		includeTotal, _ := args["include_total"].(bool)
+		return searchListGroupsCompact(ctx.AppDB(), projectScope(ctx), q, id, includeArchived, strArg(args, "cursor", ""), int(toInt64(args["limit"])), includeTotal)
+	}
 	return listGroups(ctx.AppDB(), projectScope(ctx))
 }
 
