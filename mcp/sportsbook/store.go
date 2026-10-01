@@ -216,6 +216,12 @@ func (a *App) perform(ctx context.Context, app *sdk.AppCtx, project, actor, tool
 		return a.workspace(project, boolArg(args, "example"), textArg(args, "sport"))
 	case "integrations_list":
 		return a.integrationStatus(app, project)
+	case "sports_sources_list":
+		return a.actorSourceList(project)
+	case "sports_scrape_source_set":
+		return a.actorSourceSet(app, project, textArg(args, "source_id"), args)
+	case "sports_scrape_sync":
+		return a.actorSync(ctx, app, project, actor, args)
 	case "provider_route_set":
 		return a.setRoute(app, project, actor, args)
 	case "sports_sync", "odds_sync":
@@ -246,10 +252,10 @@ func toolSchema(name string) map[string]any {
 	required := []string{}
 	str := func(key string) { props[key] = map[string]any{"type": "string", "maxLength": 500} }
 	integer := func(key string) { props[key] = map[string]any{"type": "integer", "minimum": 1} }
-	for _, key := range []string{"sport", "sport_key", "competition_id", "provider_slug", "external_key", "outcome_profile", "rules", "prediction_model", "history_scope", "market_id", "prediction_id", "bankroll_id", "proposal_id", "bet_id", "event_id", "role", "date", "name", "currency", "rationale", "outcome", "note", "model"} {
+	for _, key := range []string{"sport", "sport_key", "competition_id", "provider_slug", "external_key", "outcome_profile", "rules", "prediction_model", "history_scope", "market_id", "prediction_id", "bankroll_id", "proposal_id", "bet_id", "event_id", "role", "date", "name", "currency", "rationale", "outcome", "note", "model", "source_id", "operation"} {
 		str(key)
 	}
-	for _, key := range []string{"connection_id", "quote_id", "stake_minor", "initial_minor", "max_stake_bps", "max_exposure_bps", "home_advantage"} {
+	for _, key := range []string{"connection_id", "quote_id", "stake_minor", "initial_minor", "max_stake_bps", "max_exposure_bps", "home_advantage", "actor_id"} {
 		integer(key)
 	}
 	props["home_advantage"] = map[string]any{"type": "integer", "minimum": 0, "maximum": 200}
@@ -257,6 +263,8 @@ func toolSchema(name string) map[string]any {
 	props["enabled"] = map[string]any{"type": "boolean"}
 	props["example"] = map[string]any{"type": "boolean"}
 	props["all_sources"] = map[string]any{"type": "boolean"}
+	props["input"] = map[string]any{"type": "object", "additionalProperties": true}
+	props["field_map"] = map[string]any{"type": "object", "additionalProperties": true}
 	switch name {
 	case "sport_upsert":
 		required = []string{"sport", "name", "enabled"}
@@ -286,6 +294,10 @@ func toolSchema(name string) map[string]any {
 		required = []string{"event_id"}
 	case "sports_sync", "odds_sync":
 		required = []string{"sport", "date"}
+	case "sports_scrape_source_set":
+		required = []string{"name", "sport", "actor_id", "operation", "field_map", "enabled"}
+	case "sports_scrape_sync":
+		required = []string{"source_id", "date"}
 	}
 	return map[string]any{"type": "object", "properties": props, "required": required, "additionalProperties": false}
 }

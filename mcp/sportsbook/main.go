@@ -73,11 +73,11 @@ func (a *App) HTTPRoutes() []sdk.Route {
 }
 func permission(tool string) string {
 	switch tool {
-	case "workspace_get", "integrations_list", "odds_history", "catalog_get":
+	case "workspace_get", "integrations_list", "odds_history", "catalog_get", "sports_sources_list":
 		return "read"
-	case "provider_route_set", "demo_load", "bankroll_create", "sport_upsert", "competition_upsert", "sport_market_set", "provider_sport_mapping_set":
+	case "provider_route_set", "demo_load", "bankroll_create", "sport_upsert", "competition_upsert", "sport_market_set", "provider_sport_mapping_set", "sports_scrape_source_set":
 		return "configure"
-	case "sports_sync", "odds_sync", "provider_sports_list":
+	case "sports_sync", "odds_sync", "provider_sports_list", "sports_scrape_sync":
 		return "sync"
 	case "prediction_run", "prediction_explain", "bet_propose":
 		return "propose"

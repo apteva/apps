@@ -22,7 +22,7 @@ func testApp(t *testing.T) *App {
 	}
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
-	for _, file := range []string{"migrations/001_init.sql", "migrations/002_catalog.sql"} {
+	for _, file := range []string{"migrations/001_init.sql", "migrations/002_catalog.sql", "migrations/003_actor_sources.sql"} {
 		raw, _ := embedded.ReadFile(file)
 		if _, err = db.Exec(string(raw)); err != nil {
 			t.Fatal(err)
@@ -80,8 +80,8 @@ func TestManifestAndToolParity(t *testing.T) {
 	if err := sdk.ValidateManifest(&m); err != nil {
 		t.Fatal(err)
 	}
-	if len(m.Requires.Integrations) != 4 {
-		t.Fatal("four roles required")
+	if len(m.Requires.Integrations) != 5 {
+		t.Fatal("five roles required")
 	}
 	for _, d := range m.Requires.Integrations {
 		if d.Mode != "multiple" {

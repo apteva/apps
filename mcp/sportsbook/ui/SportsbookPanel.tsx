@@ -18,6 +18,7 @@ type Sport = {id:string;name:string;enabled:number};
 type Competition = {id:string;sport:string;name:string;enabled:number};
 type MarketSettings = {sport:string;type:string;outcome_profile:string;rules:string;prediction_model:string;history_scope:string;home_advantage:number;enabled:number};
 type Mapping = {sport:string;competition_id:string;role:string;provider_slug:string;external_key:string;enabled:number};
+type ActorSource = {id:string;name:string;sport:string;competition_id:string;actor_id:number;operation:string;input:Record<string,unknown>;field_map:Record<string,unknown>;enabled:number;read_only:number;created_at:number};
 type Catalog = {sports:Sport[];competitions:Competition[];sport_market_types:MarketSettings[];provider_sport_mappings:Mapping[]};
 const emptyCatalog:Catalog={sports:[],competitions:[],sport_market_types:[],provider_sport_mappings:[]};
 const marketOutcomes=(m?:Market)=>m?.outcome_profile==='three_way'?['home','draw','away']:['home','away'];
@@ -30,7 +31,7 @@ export interface NativePanelProps {
   eventRevision?: number;
 }
 const empty:Workspace={events:[],markets:[],quotes:[],predictions:[],bankrolls:[],proposals:[],bets:[],explanations:[],server_time:0};
-const labels:Record<string,string>={sports_data:'Sports data',odds:'Odds',execution:'Execution',llm:'LLM'};
+const labels:Record<string,string>={sports_data:'Sports data',sports_scraper:'Read-only scrape sources',odds:'Odds',execution:'Execution',llm:'LLM'};
 const pct=(n:number)=>`${(n*100).toFixed(1)}%`;
 const odds=(q:Quote|Proposal|Bet)=> (q.odds_micros/1e6).toFixed(2);
 const money=(n:number,currency='EUR')=>new Intl.NumberFormat(undefined,{style:'currency',currency}).format(n/100);
@@ -66,7 +67,7 @@ function Probabilities({prediction}:{prediction:Prediction}) {
 function Empty({children}:{children:ReactNode}) { return <div className="p-6 text-sm text-text-muted text-center">{children}</div>; }
 
 export default function SportsbookPanel({appName='sportsbook',projectId,installId,eventRevision=0}:NativePanelProps) {
- const [catalog,setCatalog]=useState<Catalog>(emptyCatalog);
+ const [catalog,setCatalog]=useState<Catalog>(emptyCatalog),[scrapeSources,setScrapeSources]=useState<ActorSource[]>([]);
  const [data,setData]=useState<Workspace>(empty),[integrations,setIntegrations]=useState<Integrations>({roles:{},routes:[]});
  const [tab,setTab]=useState('events'),[sport,setSport]=useState(''),[example,setExample]=useState(false),[selected,setSelected]=useState(''),[search,setSearch]=useState('');
  const [error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[loading,setLoading]=useState(true);
@@ -82,7 +83,7 @@ export default function SportsbookPanel({appName='sportsbook',projectId,installI
   const res=await fetch(`/api/apps/${encodeURIComponent(appName)}/rpc?${params}`,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool,args})});
   const body=await res.json();if(!res.ok)throw Error(body.error||`Request failed (${res.status})`);return body;
  },[projectId,installId,appName]);
- const refresh=useCallback(async()=>{const id=++requestID.current;const startedScope=scope;const [workspace,connections,sportsCatalog]=await Promise.all([rpc('workspace_get',{example}),rpc('integrations_list'),rpc('catalog_get')]);if(mounted.current&&id===requestID.current&&scopeRef.current===startedScope){setData(workspace);setIntegrations(connections);setCatalog(sportsCatalog);setClock(workspace.server_time);setError('');}},[rpc,example,scope]);
+ const refresh=useCallback(async()=>{const id=++requestID.current;const startedScope=scope;const [workspace,connections,sportsCatalog,sources]=await Promise.all([rpc('workspace_get',{example}),rpc('integrations_list'),rpc('catalog_get'),rpc('sports_sources_list')]);if(mounted.current&&id===requestID.current&&scopeRef.current===startedScope){setData(workspace);setIntegrations(connections);setCatalog(sportsCatalog);setScrapeSources(sources.sources||[]);setClock(workspace.server_time);setError('');}},[rpc,example,scope]);
  useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;requestID.current++;};},[]);
  useEffect(()=>{let cancelled=false;setLoading(true);setData(empty);setCatalog(emptyCatalog);setSelected('');setQuoteID(0);setBankrollID('');setSettlement(null);setError('');setNotice('');refresh().catch(e=>{if(mounted.current&&!cancelled)setError(e.message);}).finally(()=>{if(mounted.current&&!cancelled)setLoading(false);});return()=>{cancelled=true;requestID.current++;};},[refresh]);
  useEffect(()=>{const t=window.setInterval(()=>setClock(v=>v+5),5000);return()=>window.clearInterval(t);},[]);
@@ -256,13 +257,14 @@ export default function SportsbookPanel({appName='sportsbook',projectId,installI
      <p className={mutedClass}>Bind connections in this app's platform settings. Choose a default for each role, with optional sport-specific routing.</p>
      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">{Object.entries(labels).map(([role,label])=>
       <Section key={role} title={label} action={<Pill>Multiple providers</Pill>}>
-       <p className={mutedClass}>{({sports_data:'Fixtures and results from selected sports data providers.',odds:'Complete bookmaker markets, price comparison and history.',execution:'Paper execution is built in. Connected wagering is reserved for a compatible executor app.',llm:'Supplemental explanations through selected language models.'} as Record<string,string>)[role]}</p>
+       <p className={mutedClass}>{({sports_data:'Fixtures and results from selected sports data providers.',sports_scraper:'Read-only Actors datasets mapped into normalized sports events. Configure sources below; Sportsbook never writes back to Actors.',odds:'Complete bookmaker markets, price comparison and history.',execution:'Paper execution is built in. Connected wagering is reserved for a compatible executor app.',llm:'Supplemental explanations through selected language models.'} as Record<string,string>)[role]}</p>
        {integrations.roles[role]?.length?<div className="divide-y divide-border">{integrations.roles[role].map(p=><div key={p.id} className="flex justify-between gap-2 py-2">
         <div><span className="text-sm">{p.slug||'Execution app'}</span><div className={mutedClass}>{p.sports?.join(' · ')||p.capabilities?.join(' · ')||'Live execution disabled'}</div></div><Pill accent={p.default}>{p.default?'Default':'Selected'}</Pill>
        </div>)}</div>:<p className={mutedClass}>{role==='execution'?'Paper engine available. No connected executor.':'No providers selected.'}</p>}
        {!!integrations.roles[role]?.length&&<RoutePicker sports={catalog.sports} role={role} providers={integrations.roles[role]} routes={integrations.routes} busy={busy} save={(sport,id,model)=>run(()=>rpc('provider_route_set',{role,sport,connection_id:id,model}),'Provider route saved.')}/>}
       </Section>
      )}</div>
+     <ActorSources sources={scrapeSources} sports={catalog.sports} competitions={catalog.competitions} busy={busy} rpc={rpc} run={run} date={date}/>
      <Section title="Import sports & odds">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
        <div><label htmlFor="sb-sync-sport" className="block text-xs text-text-muted mb-1">Sport</label><select id="sb-sync-sport" className={inputClass} value={syncSport} onChange={e=>{setSyncSport(e.target.value);setSyncCompetition('');setSportKey('');}}>{catalog.sports.filter(s=>s.enabled).map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></div>
@@ -288,6 +290,30 @@ export default function SportsbookPanel({appName='sportsbook',projectId,installI
    </section>
   </div>}
  </div>;
+}
+
+function ActorSources({sources,sports,competitions,busy,rpc,run,date}:{sources:ActorSource[];sports:Sport[];competitions:Competition[];busy:boolean;rpc:(tool:string,args?:Record<string,unknown>)=>Promise<any>;run:(operation:()=>Promise<unknown>,message?:string)=>Promise<void>;date:string}) {
+ const [selected,setSelected]=useState(''),[sourceID,setSourceID]=useState(''),[name,setName]=useState(''),[sport,setSport]=useState(''),[competition,setCompetition]=useState(''),[actorID,setActorID]=useState(''),[operation,setOperation]=useState(''),[input,setInput]=useState('{}'),[fieldMap,setFieldMap]=useState('{\n  "external_id": ["event_id", "id"],\n  "competition": ["league.name", "league"],\n  "home": ["teams.home.name", "home_team"],\n  "away": ["teams.away.name", "away_team"],\n  "starts_at": ["fixture.date", "commence_time"],\n  "status": "fixture.status.short",\n  "home_score": "goals.home",\n  "away_score": "goals.away"\n}'),[enabled,setEnabled]=useState(true);
+ const current=sources.find(s=>s.id===selected);
+ useEffect(()=>{if(current){setSourceID(current.id);setName(current.name);setSport(current.sport);setCompetition(current.competition_id);setActorID(String(current.actor_id));setOperation(current.operation);setInput(JSON.stringify(current.input||{},null,2));setFieldMap(JSON.stringify(current.field_map||{},null,2));setEnabled(!!current.enabled);}else{setSourceID('');setName('');setSport(sports.find(s=>s.enabled)?.id||'');setCompetition('');setActorID('');setOperation('');setInput('{}');setEnabled(true);}},[selected,sources,sports,current]);
+ const save=()=>run(async()=>{let inputJSON:unknown,fieldJSON:unknown;try{inputJSON=JSON.parse(input);fieldJSON=JSON.parse(fieldMap);}catch{throw Error('Input and field map must be valid JSON.');}await rpc('sports_scrape_source_set',{source_id:sourceID||undefined,name,sport,competition_id:competition,actor_id:Number(actorID),operation,input:inputJSON,field_map:fieldJSON,enabled});setSelected(sourceID);},'Read-only scrape source saved.');
+ const sync=()=>run(()=>rpc('sports_scrape_sync',{source_id:sourceID,date}),'Actors dataset imported into sports events.');
+ return <Section title="Read-only Actors sources" action={<Pill>Dataset → events</Pill>}>
+  <p className={mutedClass}>Actors can return arbitrary JSON. Give each source an explicit canonical field map; malformed rows are skipped. Sportsbook only queues Actors runs and reads datasets.</p>
+  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+   <div><label className="block text-xs text-text-muted mb-1">Configured source</label><select className={inputClass} value={selected} onChange={e=>setSelected(e.target.value)}><option value="">+ New source</option>{sources.map(s=><option key={s.id} value={s.id}>{s.name} · {s.sport}</option>)}</select></div>
+   <div><label className="block text-xs text-text-muted mb-1">Source ID (optional for new)</label><input className={inputClass} value={sourceID} onChange={e=>setSourceID(e.target.value)} placeholder="generated automatically"/></div>
+   <div><label className="block text-xs text-text-muted mb-1">Name</label><input className={inputClass} value={name} onChange={e=>setName(e.target.value)} placeholder="Football fixtures scrape"/></div>
+   <div><label className="block text-xs text-text-muted mb-1">Sport</label><select className={inputClass} value={sport} onChange={e=>{setSport(e.target.value);setCompetition('')}}>{sports.filter(s=>s.enabled).map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></div>
+   <div><label className="block text-xs text-text-muted mb-1">Competition (optional)</label><select className={inputClass} value={competition} onChange={e=>setCompetition(e.target.value)}><option value="">Any mapped competition</option>{competitions.filter(c=>c.sport===sport&&c.enabled).map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
+   <div><label className="block text-xs text-text-muted mb-1">Actors actor ID</label><input className={inputClass} type="number" min="1" value={actorID} onChange={e=>setActorID(e.target.value)}/></div>
+   <div><label className="block text-xs text-text-muted mb-1">Named operation</label><input className={inputClass} value={operation} onChange={e=>setOperation(e.target.value)} placeholder="fixtures"/></div>
+   <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={enabled} onChange={e=>setEnabled(e.target.checked)}/> Source enabled</label>
+  </div>
+  <div className="grid grid-cols-1 lg:grid-cols-2 gap-3"><div><label className="block text-xs text-text-muted mb-1">Run input template (JSON)</label><textarea className={`${inputClass} font-mono`} rows={5} value={input} onChange={e=>setInput(e.target.value)}/><p className={mutedClass}>Use ${'{date}'}, ${'{sport}'} and ${'{competition}'} placeholders.</p></div><div><label className="block text-xs text-text-muted mb-1">Canonical field map (JSON)</label><textarea className={`${inputClass} font-mono`} rows={9} value={fieldMap} onChange={e=>setFieldMap(e.target.value)}/></div></div>
+  <div className="flex gap-2 flex-wrap"><Button primary disabled={busy||!name||!sport||!actorID||!operation} onClick={()=>void save()}>Save source</Button><Button disabled={busy||!sourceID||!current||!enabled} onClick={()=>void sync()}>Run read-only scrape for {date}</Button></div>
+  {sources.length===0&&<p className={mutedClass}>No scrape sources configured yet. Bind Actors to the Read-only scrape sources role, then add one here.</p>}
+ </Section>;
 }
 
 function RoutePicker({sports,role,providers,routes,busy,save}:{sports:Sport[];role:string;providers:Provider[];routes:Route[];busy:boolean;save:(sport:string,id:number,model:string)=>Promise<void>}) {

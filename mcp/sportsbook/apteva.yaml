@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: sportsbook
 display_name: Sportsbook
-version: 0.2.0
+version: 0.3.0
 description: Dedicated sports research and paper betting desk with normalized providers, experimental predictions, bet proposals and bankroll risk controls.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/sportsbook
@@ -11,7 +11,7 @@ tags: [sports, betting, predictions, odds, research]
 scopes: [project]
 min_apteva_version: "0.11.0"
 requires:
-  permissions: [db.write.app, platform.connections.read, platform.connections.execute]
+  permissions: [db.write.app, platform.connections.read, platform.connections.execute, platform.apps.call]
   integrations:
     - role: sports_data
       kind: integration
@@ -25,6 +25,13 @@ requires:
       required: false
       label: "Odds"
       compatible_slugs: [the-odds-api, api-tennis]
+    - role: sports_scraper
+      kind: app
+      mode: multiple
+      required: false
+      label: "Read-only scrape sources"
+      compatible_app_names: [actors]
+      hint: Actors runs are read-only from Sportsbook and require a canonical field map before import.
     - role: llm
       kind: integration
       mode: multiple
@@ -57,6 +64,9 @@ provides:
     - { name: provider_sports_list, requires: sportsbook.sync, description: "Discover sport and competition keys from a bound The Odds API connection." }
     - { name: workspace_get, requires: sportsbook.read, description: "Browse events, markets, predictions, proposals and paper bankrolls." }
     - { name: integrations_list, requires: sportsbook.read, description: "Inspect selected providers, defaults, capabilities and routes." }
+    - { name: sports_sources_list, requires: sportsbook.read, description: "List configured read-only Actors scrape sources and their canonical field maps." }
+    - { name: sports_scrape_source_set, requires: sportsbook.configure, description: "Configure a read-only Actors scrape source with an explicit field map." }
+    - { name: sports_scrape_sync, requires: sportsbook.sync, description: "Run a bound Actors source, read its dataset and import normalized events without writing back to Actors." }
     - { name: provider_route_set, requires: sportsbook.configure, description: "Choose a bound default provider for a role and sport." }
     - { name: sports_sync, requires: sportsbook.sync, description: "Import normalized events or completed results from selected sports data providers." }
     - { name: odds_sync, requires: sportsbook.sync, description: "Import pre-match match-winner quotes from selected odds providers." }
@@ -73,7 +83,7 @@ provides:
     - { slot: project.page, label: Sportsbook, icon: trophy, entry: /ui/SportsbookPanel.mjs }
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: sportsbook/v0.2.0, entry: mcp/sportsbook }
+  source: { repo: github.com/apteva/apps, ref: sportsbook/v0.3.0, entry: mcp/sportsbook }
   port: 8080
   health_check: /health
 db:
