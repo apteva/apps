@@ -5,7 +5,8 @@ const API = "/api/apps/content-catalog";
 type Brand = { id: string; slug: string; name: string; storage_root: string; host_provider: string; host_connection_id: number; host_library_id: string; host_collection_id: string };
 type Session = { id: string; brand_id: string; title: string; session_date: string; status: string; notes: string };
 type Publication = { id: string; asset_id: string; asset_ids: string[]; title: string; destination: string; account_ref: string; audience: string; status: string; planned_at: string; actual_at: string; external_post_id: string; external_url: string; evidence_source: string; failure_details: string; legacy_target_id: string };
-type Asset = { id: string; session_id: string; storage_install_id: number; storage_file_id: string; name: string; kind: string; content_type: string; size_bytes: number; review_status: string; media_status: string; media_rating: string; publications: Publication[] };
+type HostingSummary = { id: string; provider: string; connection_id: number; status: string; remote_id: string; last_checked_at: string };
+type Asset = { id: string; session_id: string; storage_install_id: number; storage_file_id: string; name: string; kind: string; content_type: string; size_bytes: number; review_status: string; media_status: string; media_rating: string; description?: string; description_source?: string; description_updated_at?: string; duration_ms?: number; media_error?: string; publications: Publication[]; hostings?: HostingSummary[] };
 type Hosting = { id: string; provider: string; remote_id: string; status: string; embed_url: string; error: string };
 type AssetSource = { asset_id: string; relation: string; source_order: number; media_render_id: number };
 type GigLink = { gigs_install_id: number; gig_id: number; role: string };
@@ -26,7 +27,59 @@ function storageFileURL(projectId: string, installId: number, fileId: string): s
 function storageContentURL(projectId: string, asset: Asset): string { return storageFileURL(projectId, asset.storage_install_id, asset.storage_file_id); }
 function previewURL(projectId: string, kind: "sessions" | "assets", id: string): string { return `${API}/${kind}/${encodeURIComponent(id)}/preview?${new URLSearchParams({ project_id: projectId })}`; }
 function mediaGlyph(kind: string): string { return kind === "video" ? "▶" : kind === "audio" ? "♫" : kind === "image" ? "▣" : "▤"; }
+function AssetDescription({ asset }: { asset: Asset }) {
+  return <div style={{ flexShrink: 0 }}><p className="text-xs text-text-muted line-clamp-2" style={{ height: 32, lineHeight: "16px", marginTop: 6 }} title={asset.description || ""}>{asset.description || "No Media description available"}</p><p className="text-xs text-text-muted truncate" style={{ height: 20 }}>{asset.media_status === "completed" ? "Media ready" : `Media ${asset.media_status || "unavailable"}`}{asset.media_rating ? ` · ${asset.media_rating}` : ""}</p></div>;
+}
 function assetMediaKind(asset: Asset): string { return asset.content_type.startsWith("image/") ? "image" : asset.content_type.startsWith("video/") ? "video" : asset.content_type.startsWith("audio/") ? "audio" : asset.kind; }
+function durationLabel(ms: number): string { const seconds = Math.round(ms / 1000); const minutes = Math.floor(seconds / 60); return minutes >= 60 ? `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}` : `${minutes}:${String(seconds % 60).padStart(2, "0")}`; }
+type LengthMode = "any" | "range" | "unknown";
+function matchesDuration(ms: number | undefined, mode: LengthMode, minimum: number, maximum: number): boolean {
+  if (mode === "any") return true;
+  if (mode === "unknown") return !ms;
+  return !!ms && ms >= minimum * 1000 && ms <= maximum * 1000;
+}
+function DurationFilter({ mode, minimum, maximum, limit, loading, onMode, onRange }: { mode: LengthMode; minimum: number; maximum: number; limit: number; loading: boolean; onMode: (mode: LengthMode) => void; onRange: (minimum: number, maximum: number) => void }) {
+  const percent = (seconds: number) => 100 * seconds / limit;
+  const setMinimum = (value: number) => { if (Number.isFinite(value)) { const seconds = Math.max(0, Math.round(value)); onRange(seconds, Math.max(seconds, maximum)); } };
+  const setMaximum = (value: number) => { if (Number.isFinite(value)) { const seconds = Math.max(0, Math.round(value)); onRange(Math.min(minimum, seconds), seconds); } };
+  return <div className="rounded-lg border border-border p-3 space-y-2" aria-label="Video or audio length filter">
+    <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+      <div className="flex flex-wrap items-center gap-2"><strong>Video / audio length</strong><span className="text-text-muted" role="status">{mode === "range" ? `${durationLabel(minimum * 1000)} – ${durationLabel(maximum * 1000)}` : mode === "unknown" ? "Length unknown" : "Any length"}</span></div>
+      <div className="flex gap-2">{([["any", "Any length"], ["range", "Select range"], ["unknown", "Unknown only"]] as const).map(([value, label]) => <button key={value} type="button" aria-pressed={mode === value} className={`rounded-full border px-2 py-1 ${mode === value ? "border-accent text-accent bg-accent/10" : "border-border text-text-muted"}`} onClick={() => onMode(value)}>{label}</button>)}</div>
+    </div>
+    <style>{`input.catalog-duration-slider[type="range"] { position:absolute; inset:0; width:100%; height:32px; margin:0; background:transparent; appearance:none; -webkit-appearance:none; pointer-events:none; }
+input.catalog-duration-slider[type="range"]::-webkit-slider-runnable-track { height:4px; background:transparent; }
+input.catalog-duration-slider[type="range"]::-moz-range-track { height:4px; background:transparent; }
+input.catalog-duration-slider[type="range"]::-webkit-slider-thumb { appearance:none; -webkit-appearance:none; width:18px; height:18px; margin-top:-7px; border-radius:50%; border:2px solid var(--bg, var(--color-bg, #12141c)); background:var(--accent, var(--color-accent, #93b3ff)); pointer-events:auto; cursor:ew-resize; }
+input.catalog-duration-slider[type="range"]::-moz-range-thumb { width:14px; height:14px; border-radius:50%; border:2px solid var(--bg, var(--color-bg, #12141c)); background:var(--accent, var(--color-accent, #93b3ff)); pointer-events:auto; cursor:ew-resize; }
+input.catalog-duration-slider[type="range"]:focus-visible { outline:2px solid var(--accent, var(--color-accent, #93b3ff)); outline-offset:2px; border-radius:4px; }
+input.catalog-duration-slider[type="range"]:disabled { opacity:.4; }
+input.catalog-duration-slider[type="range"]:disabled::-webkit-slider-thumb { cursor:default; }
+input.catalog-duration-slider[type="range"]:disabled::-moz-range-thumb { cursor:default; }`}</style>
+    <div className="flex flex-wrap items-center gap-4">
+      <div className="min-w-0" style={{ flex: "1 1 260px" }}>
+        <div style={{ position: "relative", height: 32, marginInline: 9 }}>
+          <div className="bg-border rounded-full" style={{ position: "absolute", top: 14, left: 0, right: 0, height: 4 }} />
+          <div className="bg-accent rounded-full" style={{ position: "absolute", top: 14, left: `${percent(minimum)}%`, width: `${percent(maximum) - percent(minimum)}%`, height: 4, opacity: mode === "range" ? 1 : .35 }} />
+          <input className="catalog-duration-slider" type="range" min={0} max={limit} step={1} value={minimum} disabled={loading} style={{ zIndex: minimum > limit / 2 ? 3 : 2 }} aria-label="Minimum length slider" aria-valuetext={durationLabel(minimum * 1000)} onChange={e => onRange(Math.min(Number(e.target.value), maximum), maximum)} />
+          <input className="catalog-duration-slider" type="range" min={0} max={limit} step={1} value={maximum} disabled={loading} style={{ zIndex: 2 }} aria-label="Maximum length slider" aria-valuetext={durationLabel(maximum * 1000)} onChange={e => onRange(minimum, Math.max(minimum, Number(e.target.value)))} />
+        </div>
+        <div className="flex justify-between text-xs text-text-muted"><span>0:00</span><span>{durationLabel(limit * 1000)}</span></div>
+      </div>
+      <div className="flex gap-3 text-xs"><label>From (seconds)<input className={inputClass} style={{ width: 100, marginTop: 4 }} type="number" min={0} step={1} value={minimum} disabled={loading} onChange={e => setMinimum(e.target.valueAsNumber)} /></label><label>To (seconds)<input className={inputClass} style={{ width: 100, marginTop: 4 }} type="number" min={0} step={1} value={maximum} disabled={loading} onChange={e => setMaximum(e.target.valueAsNumber)} /></label></div>
+    </div>
+    <p className="text-xs text-text-muted">{loading ? "Loading lengths from Media…" : "Drag either handle or enter exact seconds. Range includes both endpoints; files with unknown length are excluded."}</p>
+  </div>;
+}
+function matchesSharing(posts: Publication[], state: string): boolean {
+  if (state === "any") return true;
+  if (state === "none") return posts.length === 0;
+  if (state === "not_verified") return !posts.some(post => post.status === "verified_published");
+  if (state === "verified") return posts.some(post => post.status === "verified_published");
+  if (state === "reported") return posts.some(post => post.status === "provider_reported_published");
+  if (state === "scheduled") return posts.some(post => ["scheduled", "submitted"].includes(post.status));
+  return posts.some(post => post.status === "failed");
+}
 function publicationLabel(status: string): string {
   return ({ verified_published: "Verified live", provider_reported_published: "Reported live", scheduled: "Scheduled", submitted: "Submitted", failed: "Failed", removed: "Removed", unknown: "Unverified", planned: "Planned" } as Record<string, string>)[status] || status.replaceAll("_", " ");
 }
@@ -50,15 +103,29 @@ function PublicationIcons({ items }: { items: Array<{ destination: string; statu
   return <div className="flex flex-wrap gap-1.5" aria-label="Platform publication status">{items.map((item, i) => <span key={`${item.destination}:${item.account_ref || ""}:${i}`} className="inline-flex items-center gap-1 rounded-md border border-border px-1.5 py-0.5 text-xs" style={{ color: publicationColor(item.status) }} title={`${item.destination}${item.account_ref ? ` · ${item.account_ref}` : ""}: ${publicationLabel(item.status)}`} aria-label={`${item.destination}: ${publicationLabel(item.status)}`}><span aria-hidden="true" className="font-bold">{platformGlyph(item.destination)}</span><span aria-hidden="true">{statusGlyph(item.status)}</span></span>)}</div>;
 }
 
-function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+function Modal({ title, onClose, children, wide = false }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
+  const dialog = useRef<HTMLElement>(null);
   useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    dialog.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    return () => { if (previousFocus?.isConnected) previousFocus.focus(); };
+  }, []);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); onClose(); }
+      if (event.key !== "Tab" || !dialog.current) return;
+      const controls = Array.from(dialog.current.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), video[controls], audio[controls], [tabindex="0"]')).filter(element => element.getClientRects().length > 0);
+      const first = controls[0]; const last = controls[controls.length - 1];
+      if (!first || !last) return;
+      if (!dialog.current.contains(document.activeElement) || (!event.shiftKey && document.activeElement === last)) { event.preventDefault(); first.focus(); }
+      else if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
   return <div role="presentation" style={{ position: "fixed", inset: 0, zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20, background: "rgba(0, 0, 0, .72)" }} onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
-    <section role="dialog" aria-modal="true" aria-label={title} className="rounded-xl border border-border bg-bg p-4 shadow-2xl" style={{ width: "min(100%, 560px)", maxHeight: "90vh", overflowY: "auto" }}>
-      <div className="mb-2 flex justify-end"><button type="button" className="rounded border border-border px-2 py-1 text-sm" onClick={onClose} aria-label="Close dialog">Close</button></div>
+    <section ref={dialog} role="dialog" aria-modal="true" aria-label={title} className="rounded-xl border border-border bg-bg p-4 shadow-2xl" style={{ width: wide ? "min(100%, 1120px)" : "min(100%, 560px)", maxHeight: "90vh", overflowY: "auto", overscrollBehavior: "contain" }}>
+      <div className="mb-3 flex items-start justify-between gap-4 bg-bg" style={wide ? { position: "sticky", top: -16, zIndex: 1, paddingTop: 16, paddingBottom: 12 } : undefined}>{wide && <h3 className="min-w-0 break-all text-lg font-semibold">{title}</h3>}<button type="button" className="ml-auto shrink-0 rounded border border-border px-2 py-1 text-sm" onClick={onClose} aria-label="Close dialog">Close</button></div>
       {children}
     </section>
   </div>;
@@ -71,6 +138,20 @@ function PreviewImage({ src, alt, fallback, className = "", style }: { src: stri
 }
 
 const previewCardStyle: CSSProperties = { display: "flex", flexDirection: "column", height: "100%", minWidth: 0 };
+
+function AssetCardPreview({ asset, projectId }: { asset: Asset; projectId: string }) {
+  return <div style={{ position: "relative", width: "100%", flexShrink: 0 }}>
+    <PreviewImage src={previewURL(projectId, "assets", asset.id)} alt={`Preview of ${asset.name}`} fallback={mediaGlyph(assetMediaKind(asset))} />
+    {!!asset.hostings?.length && <div className="flex flex-wrap gap-1" style={{ position: "absolute", top: 8, left: 8, right: 8 }} aria-label="Cloud hosting status">{asset.hostings.map(hosting => {
+      const status = hosting.status === "ready" && !hosting.remote_id ? "uncertain" : hosting.status;
+      const label = ({ ready: "Ready", processing: "Processing", reserved: "Queued", uncertain: "Unverified", failed: "Failed" } as Record<string, string>)[status] || "Unverified";
+      const provider = hosting.provider === "bunny" ? "Bunny" : hosting.provider;
+      const color = status === "ready" ? "#bbf7d0" : status === "failed" ? "#fecaca" : "#fde68a";
+      const background = status === "ready" ? "rgba(5, 46, 22, .94)" : status === "failed" ? "rgba(69, 10, 10, .94)" : "rgba(66, 32, 6, .94)";
+      return <span key={hosting.id} className="rounded-md px-2 py-1 text-xs font-medium" style={{ color, background, border: "1px solid currentColor", boxShadow: "0 1px 4px rgba(0,0,0,.35)" }} title={`${provider} hosting: ${label.toLowerCase()} · connection ${hosting.connection_id}${hosting.last_checked_at ? ` · last checked ${hosting.last_checked_at}` : ""}`} aria-label={`${provider} hosting: ${label}`}>{provider} · {label}</span>;
+    })}</div>}
+  </div>;
+}
 
 function AssetViewer({ asset, projectId }: { asset: Asset; projectId: string }) {
   const src = storageContentURL(projectId, asset);
@@ -116,15 +197,33 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const [hosts, setHosts] = useState<Host[]>([]);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [assets, setAssets] = useState<Asset[]>([]);
+  const [assetQuery, setAssetQuery] = useState("");
+  const [assetKind, setAssetKind] = useState("any");
+  const [assetLength, setAssetLength] = useState<LengthMode>("any");
+  const [assetLengthMin, setAssetLengthMin] = useState(0);
+  const [assetLengthMax, setAssetLengthMax] = useState<number | null>(null);
+  const [assetSharing, setAssetSharing] = useState("any");
+  const [assetDestination, setAssetDestination] = useState("");
+  const [assetSort, setAssetSort] = useState("newest");
+  const [assetDurations, setAssetDurations] = useState<Record<string, number>>({});
+  const [durationsLoading, setDurationsLoading] = useState(false);
+  const [durationsUnavailable, setDurationsUnavailable] = useState(0);
+  const [durationsFailed, setDurationsFailed] = useState(0);
+  const [durationsError, setDurationsError] = useState("");
+  const durationRequest = useRef(0);
+  const sessionRequest = useRef(0);
   const [gigs, setGigs] = useState<GigLink[]>([]);
   const [selectedAsset, setSelectedAsset] = useState<Asset | null>(null);
+  const [assetLoading, setAssetLoading] = useState(false);
+  const assetRequest = useRef(0);
+  const activeSessionId = useRef("");
   const [assetSources, setAssetSources] = useState<AssetSource[]>([]);
   const [hostings, setHostings] = useState<Hosting[]>([]);
   const [assetMedia, setAssetMedia] = useState<MediaDetails | null>(null);
   const [candidates, setCandidates] = useState<ImportCandidate[]>([]);
   const [importLimitReached, setImportLimitReached] = useState(false);
   const [editingPublication, setEditingPublication] = useState<Publication | null>(null);
-  const [modal, setModal] = useState<"new-session" | "edit-session" | "add-file" | "link-gig" | "publication" | null>(null);
+  const [modal, setModal] = useState<"new-session" | "edit-session" | "add-file" | "link-gig" | "publication" | "filters" | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -153,30 +252,46 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     setBusy(true); setError(""); setNotice("");
     try { await task(); await refresh(); setNotice(message); } catch (e) { setError(errorText(e)); } finally { setBusy(false); }
   }, [refresh]);
-  const openSession = useCallback(async (s: Session) => {
-    setSelectedSession(s); setSelectedAsset(null); setCandidates([]); setError("");
-    try { const result = await get<{ assets: Asset[]; gigs: GigLink[] }>(`/sessions/${s.id}`); setAssets(result.assets || []); setGigs(result.gigs || []); } catch (e) { setError(errorText(e)); }
+  const loadDurations = useCallback((s: Session) => {
+    const request = ++durationRequest.current;
+    setDurationsLoading(true); setDurationsError(""); setDurationsFailed(0);
+    get<{ durations: Record<string, number>; unavailable: number; failed: number }>(`/sessions/${s.id}/durations`).then(result => {
+      if (request !== durationRequest.current) return;
+      setAssetDurations(result.durations || {}); setDurationsUnavailable(result.unavailable || 0); setDurationsFailed(result.failed || 0);
+    }).catch(err => { if (request === durationRequest.current) setDurationsError(errorText(err)); }).finally(() => {
+      if (request === durationRequest.current) setDurationsLoading(false);
+    });
   }, [get]);
+  const openSession = useCallback(async (s: Session) => {
+    const request = ++sessionRequest.current;
+    ++durationRequest.current;
+    ++assetRequest.current; activeSessionId.current = s.id;
+    setSelectedSession(s); setSelectedAsset(null); setCandidates([]); setError("");
+    setAssets([]); setAssetDurations({}); setDurationsUnavailable(0); setDurationsFailed(0); setDurationsError(""); setDurationsLoading(false);
+    try { const result = await get<{ assets: Asset[]; gigs: GigLink[] }>(`/sessions/${s.id}`); if (request !== sessionRequest.current) return; setAssets(result.assets || []); setGigs(result.gigs || []); setAssetDurations(Object.fromEntries((result.assets || []).filter(a => a.duration_ms && a.duration_ms > 0).map(a => [a.id, a.duration_ms!]))); setDurationsFailed((result.assets || []).filter(a => ["video", "audio"].includes(assetMediaKind(a)) && a.media_error).length); setDurationsUnavailable((result.assets || []).filter(a => ["video", "audio"].includes(assetMediaKind(a)) && !a.media_error && !a.duration_ms).length); } catch (e) { if (request === sessionRequest.current) setError(errorText(e)); }
+  }, [get, loadDurations]);
   const showSession = useCallback(async (s: Session, origin: "sessions" | "search" = "sessions") => {
     const url = new URL(window.location.href);
     url.searchParams.set("catalog_session", s.id);
     window.history.pushState(null, "", url);
     setReturnTab(origin); setTab("sessions");
     setModal(null);
+    setAssetQuery(""); setAssetKind("any"); setAssetLength("any"); setAssetLengthMin(0); setAssetLengthMax(null); setAssetSharing("any"); setAssetDestination(""); setAssetSort("newest");
     await openSession(s);
   }, [openSession]);
   const backToSessions = useCallback(() => {
     const url = new URL(window.location.href);
     url.searchParams.delete("catalog_session");
     window.history.replaceState(null, "", url);
+    ++durationRequest.current; ++sessionRequest.current; ++assetRequest.current; activeSessionId.current = "";
     setSelectedSession(null); setSelectedAsset(null); setModal(null); setTab(returnTab);
   }, [returnTab]);
   useEffect(() => {
     const syncFromURL = () => {
       const id = new URLSearchParams(window.location.search).get("catalog_session");
-      if (!id) { setSelectedSession(null); setSelectedAsset(null); return; }
+      if (!id) { ++durationRequest.current; ++sessionRequest.current; ++assetRequest.current; activeSessionId.current = ""; setSelectedSession(null); setSelectedAsset(null); return; }
       const session = sessions.find(s => s.id === id);
-      if (session) openSession(session);
+      if (session) { if (activeSessionId.current !== id) openSession(session); else setSelectedSession(session); }
     };
     window.addEventListener("popstate", syncFromURL);
     syncFromURL();
@@ -186,9 +301,11 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     try { const result = await get<{ candidates: ImportCandidate[]; limit_reached: boolean }>("/import-preview", { session_id: s.id }); setCandidates(result.candidates || []); setImportLimitReached(result.limit_reached); setError(""); } catch (e) { setError(errorText(e)); }
   }, [get]);
   const openAsset = useCallback(async (asset: Asset) => {
-    setSelectedAsset(asset); setAssetMedia(null); setAssetSources([]); setHostings([]); setError("");
-    try { const result = await get<{ asset: Asset; hostings: Hosting[]; sources: AssetSource[]; publications: Publication[]; media?: MediaDetails; media_error?: string }>(`/assets/${asset.id}`); setSelectedAsset({ ...result.asset, publications: result.publications || [] }); setHostings(result.hostings || []); setAssetSources(result.sources || []); setAssetMedia(result.media || null); if (result.media_error) setError(`Media unavailable: ${result.media_error}`); } catch (e) { setError(errorText(e)); }
+    const request = ++assetRequest.current;
+    setSelectedAsset(asset); setAssetLoading(true); setAssetMedia(null); setAssetSources([]); setHostings([]); setError(""); setNotice("");
+    try { const result = await get<{ asset: Asset; hostings: Hosting[]; sources: AssetSource[]; publications: Publication[]; media?: MediaDetails; media_error?: string }>(`/assets/${asset.id}`); if (request !== assetRequest.current) return; const loaded = { ...result.asset, publications: result.publications || [] }; setSelectedAsset(loaded); setHostings(result.hostings || []); setAssets(current => current.map(item => item.id === asset.id ? loaded : item)); setAssetSources(result.sources || []); setAssetMedia(result.media || null); if (result.media_error) setError(`Media unavailable: ${result.media_error}`); } catch (e) { if (request === assetRequest.current) setError(errorText(e)); } finally { if (request === assetRequest.current) setAssetLoading(false); }
   }, [get]);
+  const closeAsset = useCallback(() => { ++assetRequest.current; setSelectedAsset(null); setAssetLoading(false); }, []);
   const brandName = (id: string) => brands.find(b => b.id === id)?.name || short(id);
   const searchParams = useCallback(() => ({ entity_type: searchType, query: searchText, brand_id: searchBrand, date_from: searchDateFrom, date_to: searchDateTo, kind: searchKind, lineage: searchLineage, sort: searchSort, review_status: searchReview, destination: searchDestination, account_ref: searchAccount, availability: searchAvailability, limit: "24" }), [searchType, searchText, searchBrand, searchDateFrom, searchDateTo, searchKind, searchLineage, searchSort, searchReview, searchDestination, searchAccount, searchAvailability]);
   useEffect(() => {
@@ -213,16 +330,51 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     await openAsset(hit);
   }, [get, showSession, openAsset]);
   const assetSearchOnly = !!searchKind || !!searchLineage || !!searchReview || searchAvailability !== "any";
+  const assetDestinations = Array.from(new Set(assets.flatMap(asset => (asset.publications || []).map(post => post.destination.trim())).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const longestDurationSeconds = Math.max(1, ...Object.values(assetDurations).map(ms => Math.ceil(ms / 1000)));
+  const lengthMaximum = assetLengthMax ?? longestDurationSeconds;
+  const lengthSliderLimit = Math.max(longestDurationSeconds, assetLengthMin, lengthMaximum);
+  const activeAssetFilterCount = [assetKind !== "any", assetLength !== "any", assetSharing !== "any", !!assetDestination, assetSort !== "newest"].filter(Boolean).length;
+  const assetFiltersActive = !!assetQuery || activeAssetFilterCount > 0;
+  const assetFilterSummary = [
+    assetKind !== "any" ? ({ video: "Videos", image: "Images", audio: "Audio", other: "Other files" } as Record<string, string>)[assetKind] : "",
+    assetLength === "range" ? `${durationLabel(assetLengthMin * 1000)}–${durationLabel(lengthMaximum * 1000)}` : assetLength === "unknown" ? "Length unknown" : "",
+    assetSharing !== "any" ? ({ none: "No post recorded", not_verified: "No verified live post", verified: "Verified live", reported: "Reported live", scheduled: "Scheduled or submitted", failed: "Failed" } as Record<string, string>)[assetSharing] : "",
+    assetDestination,
+    assetSort !== "newest" ? ({ name: "Name A–Z", shortest: "Shortest first", longest: "Longest first" } as Record<string, string>)[assetSort] : "",
+  ].filter(Boolean).join(" · ");
+  const resetAssetFilters = (clearSearch = false) => { if (clearSearch) setAssetQuery(""); setAssetKind("any"); setAssetLength("any"); setAssetLengthMin(0); setAssetLengthMax(null); setAssetSharing("any"); setAssetDestination(""); setAssetSort("newest"); };
+  const sharingCount = (state: string) => assets.filter(asset => {
+    const posts = (asset.publications || []).filter(post => !assetDestination || post.destination.toLowerCase() === assetDestination.toLowerCase());
+    return (!assetDestination || state !== "any" || posts.length > 0) && matchesSharing(posts, state);
+  }).length;
+  const filteredAssets = assets.filter(asset => {
+    if (assetQuery && !`${asset.name} ${asset.storage_file_id} ${asset.description || ""}`.toLowerCase().includes(assetQuery.trim().toLowerCase())) return false;
+    if (assetKind !== "any" && assetMediaKind(asset) !== assetKind) return false;
+    if (assetLength !== "any" && !["video", "audio"].includes(assetMediaKind(asset))) return false;
+    if (assetLength !== "any" && (durationsLoading || !matchesDuration(assetDurations[asset.id], assetLength, assetLengthMin, lengthMaximum))) return false;
+    const posts = (asset.publications || []).filter(post => !assetDestination || post.destination.toLowerCase() === assetDestination.toLowerCase());
+    return (!assetDestination || assetSharing !== "any" || posts.length > 0) && matchesSharing(posts, assetSharing);
+  }).sort((a, b) => {
+    if (assetSort === "name") return a.name.localeCompare(b.name);
+    if (assetSort === "shortest" || assetSort === "longest") {
+      const aDuration = assetDurations[a.id]; const bDuration = assetDurations[b.id];
+      if (!aDuration) return bDuration ? 1 : 0;
+      if (!bDuration) return -1;
+      return assetSort === "shortest" ? aDuration - bDuration : bDuration - aDuration;
+    }
+    return 0;
+  });
 
   return <div className="h-full overflow-y-auto bg-bg text-text p-5 space-y-5">
     <header className="flex flex-wrap justify-between gap-3 items-center">
       <div><h1 className="text-xl font-semibold">Content Catalog</h1><p className="text-sm text-text-muted">Production relationships and verified publication evidence</p></div>
-      <button className="border border-border rounded px-3 py-1.5 text-sm hover:bg-bg-hover" onClick={() => refresh().catch(e => setError(errorText(e)))}>Refresh</button>
+      <button className="border border-border rounded px-3 py-1.5 text-sm hover:bg-bg-hover" onClick={() => (async () => { await refresh(); if (selectedSession) { const asset = selectedAsset; await openSession(selectedSession); if (asset) await openAsset(asset); } })().catch(e => setError(errorText(e)))}>Refresh</button>
     </header>
     <div className="flex flex-wrap gap-2">{["brands", "sessions", "assets", "publications", "hostings"].map(k => <span key={k} className="rounded border border-border px-3 py-1 text-sm"><strong>{overview[k] ?? 0}</strong> {k}</span>)}</div>
     {error && <div className="rounded border border-red-500/50 bg-red-500/10 p-3 text-sm text-red-400">{error}</div>}
     {notice && <div className="rounded border border-green-500/50 bg-green-500/10 p-3 text-sm">{notice}</div>}
-    <nav className="flex gap-1 border-b border-border">{(["sessions", "search", "brands"] as const).map(t => <button key={t} onClick={() => { setSelectedSession(null); setTab(t); }} className={`px-3 py-2 text-sm capitalize ${tab === t ? "border-b-2 border-accent text-accent" : "text-text-muted"}`}>{t}</button>)}</nav>
+    <nav className="flex gap-1 border-b border-border">{(["sessions", "search", "brands"] as const).map(t => <button key={t} onClick={() => { const url = new URL(window.location.href); url.searchParams.delete("catalog_session"); window.history.replaceState(null, "", url); ++sessionRequest.current; ++durationRequest.current; activeSessionId.current = ""; closeAsset(); setSelectedSession(null); setModal(null); setTab(t); }} className={`px-3 py-2 text-sm capitalize ${tab === t ? "border-b-2 border-accent text-accent" : "text-text-muted"}`}>{t}</button>)}</nav>
 
     {tab === "search" && <section className="space-y-4">
       <div><h2 className="text-lg font-semibold">Search Catalog</h2><p className="text-sm text-text-muted">Searches sessions and linked files. Storage folders are never scanned automatically.</p></div>
@@ -243,7 +395,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
       <p className="text-xs text-text-muted">Ready to publish means approved and no active plan or observed post for the selected destination{searchAccount ? " and account" : ""}. Results reflect evidence recorded in Catalog.</p>
       {searchError && <p className="rounded border border-red-500/50 bg-red-500/10 p-3 text-sm text-red-400">{searchError}</p>}
       {searchLoading && <p className="text-sm text-text-muted">Searching…</p>}
-      {(searchType === "all" || searchType === "assets") && <div className="space-y-2"><h3 className="font-semibold">Files <span className="text-text-muted font-normal">{searchResults.assets.items.length}</span></h3>{searchResults.assets.items.length === 0 && !searchLoading && <p className="text-sm text-text-muted">No matching linked files.</p>}<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 12, alignItems: "stretch" }}>{searchResults.assets.items.map(hit => <button key={hit.id} type="button" style={previewCardStyle} className="overflow-hidden rounded-xl border border-border text-left hover:border-accent/60" onClick={() => openSearchAsset(hit).catch(e => setSearchError(errorText(e)))}><PreviewImage src={previewURL(projectId, "assets", hit.id)} alt={`Preview of ${hit.name}`} fallback={mediaGlyph(assetMediaKind(hit))} /><div className="p-3 text-sm" style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}><div className="truncate font-medium" style={{ height: 24, flexShrink: 0 }} title={hit.name}>{hit.name}</div><div className="text-xs text-text-muted truncate" style={{ height: 20, flexShrink: 0 }}>{hit.session_title} · {recordingDate(hit.session_date)}</div><div className="text-xs text-text-muted truncate" style={{ height: 20, flexShrink: 0 }}>{brandName(hit.brand_id)} · {hit.review_status} · {hit.is_derivative ? "derivative" : "source"}</div><div className="border-t border-border pt-2" style={{ marginTop: 8, flex: 1 }}><PublicationIcons items={hit.uses} /></div><p className="text-xs text-text-muted line-clamp-2" style={{ marginTop: 8 }}>{hit.match_reason}</p></div></button>)}</div>{searchResults.assets.next_cursor && <button disabled={searchLoading} className="text-sm text-accent underline" onClick={() => loadMore("assets", searchResults.assets.next_cursor!)}>More files</button>}</div>}
+      {(searchType === "all" || searchType === "assets") && <div className="space-y-2"><h3 className="font-semibold">Files <span className="text-text-muted font-normal">{searchResults.assets.items.length}</span></h3>{searchResults.assets.items.length === 0 && !searchLoading && <p className="text-sm text-text-muted">No matching linked files.</p>}<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 12, alignItems: "stretch" }}>{searchResults.assets.items.map(hit => <button key={hit.id} type="button" style={previewCardStyle} className="overflow-hidden rounded-xl border border-border text-left hover:border-accent/60" onClick={() => openSearchAsset(hit).catch(e => setSearchError(errorText(e)))}><AssetCardPreview asset={hit} projectId={projectId} /><div className="p-3 text-sm" style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}><div className="truncate font-medium" style={{ height: 24, flexShrink: 0 }} title={hit.name}>{hit.name}</div><div className="text-xs text-text-muted truncate" style={{ height: 20, flexShrink: 0 }}>{hit.session_title} · {recordingDate(hit.session_date)}</div><div className="text-xs text-text-muted truncate" style={{ height: 20, flexShrink: 0 }}>{brandName(hit.brand_id)} · {hit.review_status} · {hit.is_derivative ? "derivative" : "source"}</div><AssetDescription asset={hit} /><div className="border-t border-border pt-2" style={{ marginTop: 8, flex: 1 }}><PublicationIcons items={hit.uses} /></div><p className="text-xs text-text-muted line-clamp-2" style={{ marginTop: 8 }}>{hit.match_reason}</p></div></button>)}</div>{searchResults.assets.next_cursor && <button disabled={searchLoading} className="text-sm text-accent underline" onClick={() => loadMore("assets", searchResults.assets.next_cursor!)}>More files</button>}</div>}
       {!assetSearchOnly && !searchDestination && (searchType === "all" || searchType === "sessions") && <div className="space-y-2"><h3 className="font-semibold">Sessions <span className="text-text-muted font-normal">{searchResults.sessions.items.length}</span></h3>{searchResults.sessions.items.length === 0 && !searchLoading && <p className="text-sm text-text-muted">No matching sessions.</p>}<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 12, alignItems: "stretch" }}>{searchResults.sessions.items.map(hit => <button key={hit.id} type="button" style={previewCardStyle} className="overflow-hidden rounded-xl border border-border text-left hover:border-accent/60" onClick={() => showSession(hit, "search")}><PreviewImage src={previewURL(projectId, "sessions", hit.id)} alt={`Preview of ${hit.title}`} fallback="▣" /><div className="p-3 text-sm" style={{ flex: 1 }}><div className="font-medium line-clamp-2" style={{ minHeight: 40 }}>{hit.title}</div><div className="mt-1 text-xs text-text-muted">{hit.brand_name} · {recordingDate(hit.session_date)} · {hit.asset_count} files</div></div></button>)}</div>{searchResults.sessions.next_cursor && <button disabled={searchLoading} className="text-sm text-accent underline" onClick={() => loadMore("sessions", searchResults.sessions.next_cursor!)}>More sessions</button>}</div>}
 
     </section>}
@@ -264,29 +416,67 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
         <button type="button" className="mb-3 text-sm text-accent underline" onClick={backToSessions}>← All sessions</button>
         <div className="flex flex-wrap items-start justify-between gap-4"><div className="min-w-0"><h2 className="text-2xl font-semibold">{selectedSession.title}</h2><p className="mt-1 text-sm text-text-muted">{brandName(selectedSession.brand_id)} · {recordingDate(selectedSession.session_date)} · {selectedSession.status}</p></div><div className="flex flex-wrap gap-2"><button type="button" className="rounded border border-border px-3 py-1.5 text-sm" onClick={() => setModal("edit-session")}>Edit session</button><button type="button" className={buttonClass} onClick={() => setModal("add-file")}>+ Add file</button><button type="button" className="rounded border border-border px-3 py-1.5 text-sm" disabled={!assets.length} onClick={() => { setSelectedAsset(null); setEditingPublication(null); setModal("publication"); }}>+ Record post</button><button type="button" className="rounded border border-border px-3 py-1.5 text-sm" onClick={() => setModal("link-gig")}>Link Gig</button></div></div>
       </div>
-      <section className="space-y-3"><div className="flex items-center justify-between gap-3"><h3 className="text-lg font-semibold">Assets</h3><span className="text-xs text-text-muted">{assets.length} file{assets.length === 1 ? "" : "s"}</span></div><p className="text-xs text-text-muted">Each file shows its platforms. A green check means verified live; a hollow circle means reported live but unverified.</p>
+      <section className="space-y-3"><div className="flex items-center justify-between gap-3"><h3 className="text-lg font-semibold">Assets</h3><span className="text-xs text-text-muted">Showing {filteredAssets.length} of {assets.length} files</span></div>
+        <div className="flex flex-wrap items-center gap-2" aria-label="Asset toolbar">
+          <input className={inputClass} style={{ flex: "1 1 180px", maxWidth: 360 }} type="search" value={assetQuery} onChange={e => setAssetQuery(e.target.value)} placeholder="Find file name or ID" aria-label="Find session file" />
+          <button type="button" aria-haspopup="dialog" className={`rounded border px-3 py-1.5 text-sm ${activeAssetFilterCount ? "border-accent text-accent" : "border-border"}`} onClick={() => setModal("filters")}>Filters{activeAssetFilterCount > 0 ? ` (${activeAssetFilterCount})` : ""}</button>
+          {assetFilterSummary && <span className="truncate text-xs text-text-muted" style={{ flex: "1 1 120px", minWidth: 0 }} title={assetFilterSummary}>{assetFilterSummary}</span>}
+          {assetFiltersActive && <button type="button" className="text-xs text-accent underline" onClick={() => resetAssetFilters(true)}>Clear filters</button>}
+        </div>
         {assets.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">No files linked yet. Use Add file to upload into this session or link one from Storage.</p>}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12, alignItems: "stretch" }}>{assets.map(asset =>
+        {assets.length > 0 && filteredAssets.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">{durationsLoading && assetLength !== "any" ? "Loading file lengths…" : "No files match these filters."}</p>}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12, alignItems: "stretch" }}>{filteredAssets.map(asset =>
           <button key={asset.id} onClick={() => openAsset(asset)} style={previewCardStyle} className={`overflow-hidden rounded-xl border text-left text-sm transition-colors hover:border-accent/60 ${selectedAsset?.id === asset.id ? "border-accent" : "border-border"}`}>
-            <PreviewImage src={previewURL(projectId, "assets", asset.id)} alt={`Preview of ${asset.name}`} fallback={mediaGlyph(assetMediaKind(asset))} />
+            <AssetCardPreview asset={asset} projectId={projectId} />
             <div className="p-3" style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>
               <div className="font-medium truncate" style={{ height: 24, flexShrink: 0 }} title={asset.name}>{asset.name}</div>
-              <div className="text-xs text-text-muted truncate" style={{ height: 20, flexShrink: 0 }}>{asset.kind} · #{asset.storage_file_id} · {asset.review_status}</div>
-              <div className="border-t border-border pt-2" style={{ marginTop: 8, flex: 1 }}><PublicationIcons items={asset.publications || []} /></div>
+              <div className="text-xs text-text-muted truncate" style={{ height: 20, flexShrink: 0 }}>{assetMediaKind(asset)}{assetDurations[asset.id] ? ` · ${durationLabel(assetDurations[asset.id])}` : ""} · #{asset.storage_file_id} · {asset.review_status}</div>
+              <AssetDescription asset={asset} /><div className="border-t border-border pt-2" style={{ marginTop: 8, flex: 1 }}><PublicationIcons items={asset.publications || []} /></div>
             </div>
           </button>)}</div>
       </section>
       {assets.some(a => a.publications?.length) && <section className="rounded-xl border border-border p-4 space-y-2 text-sm"><h3 className="font-semibold">Posts for this session</h3>{Array.from(new Map(assets.flatMap(a => a.publications || []).map(p => [p.id, p])).values()).map(p => <div key={p.id} className="flex flex-wrap items-center gap-2 border-t border-border pt-2 text-xs"><PublicationIcons items={[p]} /><strong>{p.title || p.destination}</strong><span>{publicationLabel(p.status)}</span><span className="text-text-muted">{p.asset_ids?.length || 1} files</span>{p.external_url && <a href={p.external_url} target="_blank" rel="noreferrer" className="text-accent underline">View post</a>}<button type="button" className="ml-auto text-accent underline" onClick={() => { setEditingPublication(p); setSelectedAsset(null); setModal("publication"); }}>Edit post</button></div>)}</section>}
-      {selectedAsset && <section className="rounded-xl border border-border p-4 space-y-3"><div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-semibold break-all">{selectedAsset.name}</h3><button type="button" className="text-sm text-accent underline" onClick={() => setSelectedAsset(null)}>Close file</button></div><AssetViewer asset={selectedAsset} projectId={projectId} />
-        {assetMedia && <div className="text-sm space-y-1"><div>{assetMedia.title || "Media metadata"} · {assetMedia.probe_status || "unknown"} · {assetMedia.audience_rating || "unrated"}</div>{assetMedia.description && <p className="text-text-muted">{assetMedia.description}</p>}<div className="text-xs text-text-muted">{assetMedia.duration_ms ? `${Math.round(assetMedia.duration_ms / 1000)}s · ` : ""}{assetMedia.width && assetMedia.height ? `${assetMedia.width} × ${assetMedia.height} · ` : ""}Transcript: {assetMedia.transcript_status || "not available"}</div></div>}
-        <div className="text-xs text-text-muted">Sources: {assetSources.length ? assetSources.map(s => `${short(s.asset_id)} (${s.relation})`).join(", ") : "original / none linked"}</div>
-        <div className="flex flex-wrap gap-2 text-sm">{(["pending", "approved", "rejected"] as const).map(state => <button disabled={busy || selectedAsset.review_status === state} key={state} className="border border-border rounded px-2 py-1 disabled:opacity-40" onClick={() => run(async () => { await action("content_catalog_assets_review", { asset_id: selectedAsset.id, review_status: state }); await openSession(selectedSession); setSelectedAsset({ ...selectedAsset, review_status: state }); }, `Review set to ${state}`)}>{state}</button>)}</div>
-        <button disabled={busy || selectedAsset.review_status !== "approved"} className="rounded border border-accent px-3 py-1.5 text-sm disabled:opacity-40" onClick={() => run(async () => { await action("content_catalog_hosting_request", { asset_id: selectedAsset.id }); await openAsset(selectedAsset); }, "Hosting request recorded")}>Host approved asset</button>
-        <div className="space-y-2">{hostings.map(h => <div key={h.id} className="rounded border border-border p-2 text-sm"><span className="font-medium">{h.provider}: {h.status}</span>{h.remote_id && <span className="ml-2 text-text-muted">{short(h.remote_id)}</span>}{h.embed_url && <a className="ml-2 text-accent underline" href={h.embed_url} target="_blank" rel="noreferrer">Open host</a>}{h.error && <p className="text-red-400">{h.error}</p>}{h.remote_id && h.status !== "ready" && <button className="text-accent underline" onClick={() => run(async () => { await action("content_catalog_hosting_check", { id: h.id }); await openAsset(selectedAsset); }, "Host checked")}>Check readiness</button>}</div>)}</div>
-        <div className="space-y-2 text-sm"><div className="flex items-center justify-between gap-2"><h4 className="font-medium">Platforms and posts</h4><button type="button" className="rounded border border-accent px-2 py-1 text-xs text-accent" onClick={() => { setEditingPublication(null); setModal("publication"); }}>+ Add platform</button></div>{!selectedAsset.publications?.length && <p className="text-xs text-text-muted">Nothing recorded for this file yet.</p>}{(selectedAsset.publications || []).map(p => <div key={p.id} className="flex flex-wrap items-center gap-2 rounded border border-border p-2 text-xs"><PublicationIcons items={[p]} /><span className="font-medium">{publicationLabel(p.status)}</span><span className="text-text-muted">{p.asset_ids?.length || 1} file{p.asset_ids?.length === 1 ? "" : "s"}</span>{p.account_ref && <span className="text-text-muted">{p.account_ref}</span>}{p.audience && <span className="text-text-muted">{p.audience}</span>}{p.actual_at && <span className="text-text-muted">{p.actual_at.slice(0, 10)}</span>}{p.planned_at && !p.actual_at && <span className="text-text-muted">Planned {p.planned_at.slice(0, 10)}</span>}{p.external_url && <a className="text-accent underline" href={p.external_url} target="_blank" rel="noreferrer">View post</a>}{p.external_post_id && <span className="text-text-muted">ID {p.external_post_id}</span>}{p.evidence_source && <span className="text-text-muted">via {p.evidence_source}</span>}{p.failure_details && <span className="text-red-400">{p.failure_details}</span>}<button type="button" className="ml-auto text-accent underline" onClick={() => { setEditingPublication(p); setModal("publication"); }}>Update status</button></div>)}</div>
-      </section>}
       <section className="rounded-xl border border-border p-4 space-y-2 text-sm"><h3 className="font-semibold">Session info</h3>{selectedSession.notes && <p className="text-text-muted">{selectedSession.notes}</p>}<p className="text-text-muted">Gigs: {gigs.length ? gigs.map(g => `#${g.gig_id}${g.role ? ` (${g.role})` : ""}`).join(", ") : "none linked"}</p></section>
     </div>}
+
+    {modal === "filters" && selectedSession && <Modal title="Filter assets" onClose={() => setModal(null)}>
+      <div className="space-y-4">
+        <div><h3 className="text-lg font-semibold">Filter assets</h3><p className="text-xs text-text-muted">Showing {filteredAssets.length} of {assets.length} files</p></div>
+        <div className="flex flex-wrap gap-2" aria-label="Quick publication filters">{([[
+            "any", "All files"], ["none", "No post recorded"], ["not_verified", "No verified live post"], ["verified", "Verified live"]] as const).map(([state, label]) => <button key={state} type="button" onClick={() => setAssetSharing(state)} className={`rounded-full border px-3 py-1 text-xs ${assetSharing === state ? "border-accent bg-accent/10 text-accent" : "border-border text-text-muted hover:text-text"}`}>{label} <strong>{sharingCount(state)}</strong></button>)}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 12 }}>
+          <label className="block text-xs space-y-1"><span>Content type</span><select className={inputClass} value={assetKind} onChange={e => setAssetKind(e.target.value)} aria-label="Content type"><option value="any">All content types</option><option value="video">Videos</option><option value="image">Images</option><option value="audio">Audio</option><option value="other">Other files</option></select></label>
+          <label className="block text-xs space-y-1"><span>Publication status</span><select className={inputClass} value={assetSharing} onChange={e => setAssetSharing(e.target.value)} aria-label="Publication status"><option value="any">Any sharing status</option><option value="none">No post recorded</option><option value="not_verified">No verified live post</option><option value="verified">Verified live</option><option value="reported">Reported live, unverified</option><option value="scheduled">Scheduled or submitted</option><option value="failed">Failed</option></select></label>
+          <label className="block text-xs space-y-1"><span>Platform</span><select className={inputClass} value={assetDestination} onChange={e => setAssetDestination(e.target.value)} aria-label="Platform"><option value="">All platforms</option>{assetDestinations.map(destination => <option key={destination} value={destination}>{destination}</option>)}</select></label>
+          <label className="block text-xs space-y-1"><span>Sort files</span><select className={inputClass} value={assetSort} onChange={e => setAssetSort(e.target.value)} aria-label="Sort files"><option value="newest">Recently added</option><option value="name">Name A–Z</option><option value="shortest">Shortest first</option><option value="longest">Longest first</option></select></label>
+        </div>
+        <DurationFilter mode={assetLength} minimum={assetLengthMin} maximum={lengthMaximum} limit={lengthSliderLimit} loading={durationsLoading} onMode={mode => { setAssetLength(mode); if (mode === "any") { setAssetLengthMin(0); setAssetLengthMax(null); } }} onRange={(minimum, maximum) => { setAssetLengthMin(minimum); setAssetLengthMax(maximum); setAssetLength("range"); }} />
+        <p className="text-xs text-text-muted">Sharing filters use recorded posts; only “Verified live” confirms publication.{durationsUnavailable > 0 ? ` ${durationsUnavailable} file length${durationsUnavailable === 1 ? " is" : "s are"} unknown.` : ""}</p>
+        {(durationsError || durationsFailed > 0) && <div className="flex flex-wrap items-center gap-2 text-xs text-yellow-400">Could not read {durationsFailed || "some"} file length{durationsFailed === 1 ? "" : "s"} from Media. <button type="button" className="underline" onClick={() => loadDurations(selectedSession)}>Retry</button></div>}
+        <div className="flex items-center justify-between gap-3 border-t border-border pt-3"><button type="button" className="text-sm text-accent underline" onClick={() => resetAssetFilters()}>Reset filters</button><button type="button" className={buttonClass} onClick={() => setModal(null)}>Show {filteredAssets.length} file{filteredAssets.length === 1 ? "" : "s"}</button></div>
+      </div>
+    </Modal>}
+
+    {selectedAsset && !modal && <Modal title={selectedAsset.name} wide onClose={closeAsset}>
+      {error && <p className="mb-3 rounded border border-red-500/50 p-3 text-sm text-red-400">{error}</p>}
+      {notice && <p className="mb-3 rounded border border-green-500/50 p-3 text-sm">{notice}</p>}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 360px), 1fr))", gap: 20 }}>
+        <div className="min-w-0 space-y-3">
+          <AssetViewer asset={selectedAsset} projectId={projectId} />
+          <div className="text-sm space-y-1"><h4 className="font-medium">Description</h4><p className="text-text-muted whitespace-pre-wrap">{selectedAsset.description || "No Media description available"}</p>{selectedAsset.description && <p className="text-xs text-text-muted">From Media{selectedAsset.description_source ? ` · ${selectedAsset.description_source}` : ""}{selectedAsset.description_updated_at ? ` · Updated ${new Date(selectedAsset.description_updated_at).toLocaleString()}` : ""}</p>}<p className="text-xs text-text-muted">Media: {selectedAsset.media_status === "completed" ? "ready" : selectedAsset.media_status}{selectedAsset.media_rating ? ` · ${selectedAsset.media_rating}` : ""}</p>{selectedAsset.media_error && <p className="text-xs text-yellow-400">Media metadata could not be refreshed.</p>}</div>
+          {assetMedia && <div className="text-sm space-y-1"><div>{assetMedia.title || "Media metadata"} · {assetMedia.probe_status || "unknown"} · {assetMedia.audience_rating || "unrated"}</div><div className="text-xs text-text-muted">{assetMedia.duration_ms ? `${Math.round(assetMedia.duration_ms / 1000)}s · ` : ""}{assetMedia.width && assetMedia.height ? `${assetMedia.width} × ${assetMedia.height} · ` : ""}Transcript: {assetMedia.transcript_status || "not available"}</div></div>}
+          <div className="text-xs text-text-muted">Sources: {assetSources.length ? assetSources.map(s => `${short(s.asset_id)} (${s.relation})`).join(", ") : "original / none linked"}</div>
+          <div className="flex flex-wrap gap-2 text-sm">{(["pending", "approved", "rejected"] as const).map(state => <button disabled={busy || selectedAsset.review_status === state} key={state} className="border border-border rounded px-2 py-1 disabled:opacity-40" onClick={() => run(async () => { await action("content_catalog_assets_review", { asset_id: selectedAsset.id, review_status: state }); await openAsset(selectedAsset); }, `Review set to ${state}`)}>{state}</button>)}</div>
+        </div>
+        <div className="min-w-0 space-y-3">
+          <h4 className="font-medium">Cloud hosting</h4>
+          <button disabled={busy || selectedAsset.review_status !== "approved"} className="rounded border border-accent px-3 py-1.5 text-sm disabled:opacity-40" onClick={() => run(async () => { await action("content_catalog_hosting_request", { asset_id: selectedAsset.id }); await openAsset(selectedAsset); }, "Hosting request recorded")}>Host approved asset</button>
+          <div className="space-y-2">{hostings.map(h => <div key={h.id} className="rounded border border-border p-2 text-sm"><span className="font-medium">{h.provider}: {h.status}</span>{h.remote_id && <span className="ml-2 text-text-muted">{short(h.remote_id)}</span>}{h.embed_url && <a className="ml-2 text-accent underline" href={h.embed_url} target="_blank" rel="noreferrer">Open host</a>}{h.error && <p className="text-red-400">{h.error}</p>}{h.remote_id && h.status !== "ready" && <button className="text-accent underline" onClick={() => run(async () => { await action("content_catalog_hosting_check", { id: h.id }); await openAsset(selectedAsset); }, "Host checked")}>Check readiness</button>}</div>)}</div>
+          <div className="space-y-2 text-sm"><div className="flex items-center justify-between gap-2"><h4 className="font-medium">Platforms and posts</h4><button type="button" className="rounded border border-accent px-2 py-1 text-xs text-accent" onClick={() => { setEditingPublication(null); setModal("publication"); }}>+ Add platform</button></div>{!selectedAsset.publications?.length && <p className="text-xs text-text-muted">Nothing recorded for this file yet.</p>}{(selectedAsset.publications || []).map(p => <div key={p.id} className="flex flex-wrap items-center gap-2 rounded border border-border p-2 text-xs"><PublicationIcons items={[p]} /><span className="font-medium">{publicationLabel(p.status)}</span><span className="text-text-muted">{p.asset_ids?.length || 1} file{p.asset_ids?.length === 1 ? "" : "s"}</span>{p.account_ref && <span className="text-text-muted">{p.account_ref}</span>}{p.audience && <span className="text-text-muted">{p.audience}</span>}{p.actual_at && <span className="text-text-muted">{p.actual_at.slice(0, 10)}</span>}{p.planned_at && !p.actual_at && <span className="text-text-muted">Planned {p.planned_at.slice(0, 10)}</span>}{p.external_url && <a className="text-accent underline" href={p.external_url} target="_blank" rel="noreferrer">View post</a>}{p.external_post_id && <span className="text-text-muted">ID {p.external_post_id}</span>}{p.evidence_source && <span className="text-text-muted">via {p.evidence_source}</span>}{p.failure_details && <span className="text-red-400">{p.failure_details}</span>}<button type="button" className="ml-auto text-accent underline" onClick={() => { setEditingPublication(p); setModal("publication"); }}>Update status</button></div>)}</div>
+        </div>
+      </div>
+      {assetLoading && <p className="mt-3 text-xs text-text-muted" role="status">Loading file details…</p>}
+    </Modal>}
 
     {modal === "new-session" && <Modal title="New session" onClose={() => setModal(null)}><CreateSession busy={busy} brands={brands} onSubmit={input => run(async () => { const result = await action<{ session: Session }>("content_catalog_sessions_create", input); setModal(null); await showSession(result.session); }, "Session created")} />{error && <p className="mt-2 text-sm text-red-400">{error}</p>}</Modal>}
     {modal === "edit-session" && selectedSession && <Modal title="Edit session" onClose={() => setModal(null)}><EditSession key={selectedSession.id} session={selectedSession} busy={busy} onSubmit={input => run(async () => { const result = await action<{ session: Session }>("content_catalog_sessions_update", { id: selectedSession.id, ...input }); setModal(null); await openSession(result.session); }, "Session updated")} />{error && <p className="mt-2 text-sm text-red-400">{error}</p>}</Modal>}

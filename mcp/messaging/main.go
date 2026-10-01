@@ -214,7 +214,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Cross-channel attachment fields: attachments, attachment_storage_ids. SMS/WhatsApp-only fields: media_url, content_sid, content_variables. WhatsApp accepts one media attachment; ContentSid cannot be combined with Body or media. " +
 				"Common: template_id, vars, idempotency_key. " +
 				"Addresses are plain — emails (alice@x.com) and E.164 phone numbers (+15551234567), no scheme prefix. " +
-				"Returns {id, channel, status, recipients:[{address, status}], provider_message_id?, attachments:[normalized metadata]}. " +
+				"Returns {id, channel, status, recipients:[{address, status}], provider_message_id?, message_id_header?, attachments:[normalized metadata]}. provider_message_id is the provider's opaque ID; message_id_header is the RFC email Message-ID when known and is the value to use for threading. " +
 				"Suppressed recipients return a JSON error with code=recipient_suppressed plus address, matched, kind, reason, source, and recipients.",
 			InputSchema: schemaObject(map[string]any{
 				"channel":                map[string]any{"type": "string", "enum": []string{"email", "sms", "whatsapp"}},
@@ -1144,9 +1144,15 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return sendResponse(m), nil
 	}
 
+	messageIDHeader := ""
+	if channel == channelEmail && emailBound.AppSlug == "aws-ses" {
+		messageIDHeader = sesMessageIDHeader(providerMessageID, lookupConnectionCredential(ctx, emailBound.ConnectionID, "region"))
+	}
 	_, saveErr := ctx.AppDB().Exec(
-		`UPDATE messages SET status='sent', provider_message_id=?, provider_thread_id=?, sent_at=?, last_event_at=? WHERE id=?`,
-		providerMessageID, providerThreadID, now, now, id,
+		`UPDATE messages SET status='sent', provider_message_id=?, provider_thread_id=?,
+		 message_id_header=CASE WHEN ?<>'' THEN ? ELSE message_id_header END,
+		 sent_at=?, last_event_at=? WHERE id=?`,
+		providerMessageID, providerThreadID, messageIDHeader, messageIDHeader, now, now, id,
 	)
 	if saveErr != nil {
 		return nil, fmt.Errorf("provider accepted message %s but local persistence failed; do not resend blindly: %w", providerMessageID, saveErr)
@@ -1205,6 +1211,7 @@ func sendResponse(m *Message) map[string]any {
 		"status":              m.Status,
 		"recipients":          recips,
 		"provider_message_id": m.ProviderMessageID,
+		"message_id_header":   m.MessageIDHeader,
 		"status_reason":       m.StatusReason,
 		"attachments":         consumerAttachmentMetadata(m.Attachments),
 	}
@@ -3883,6 +3890,18 @@ func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 	if m == nil {
 		return errors.New("nil message")
 	}
+	if m.Channel == channelEmail && strings.TrimSpace(m.BodyText) == "" {
+		if text := inboundEmailText(m.BodyText, m.BodyHTML); text != "" {
+			// Also covers old HTML-only records when an operator retries them.
+			// Never overwrite text another process has filled in meanwhile.
+			if _, err := ctx.AppDB().Exec(`UPDATE messages SET body_text=? WHERE id=? AND project_id=? AND direction='in' AND COALESCE(body_text,'')=?`, text, m.ID, pid, m.BodyText); err != nil {
+				return err
+			}
+			if err := ctx.AppDB().QueryRow(`SELECT COALESCE(body_text,'') FROM messages WHERE id=? AND project_id=? AND direction='in'`, m.ID, pid).Scan(&m.BodyText); err != nil {
+				return err
+			}
+		}
+	}
 	sender := canonicalAddrForChannel(m.Channel, m.From)
 	if sender != "" {
 		match, err := dbSuppressionMatch(ctx.AppDB(), pid, m.Channel, sender)
@@ -4998,7 +5017,7 @@ func parseRawEml(rawBytes []byte, fallbackMessageID string) (*parsedInbound, err
 		To:          splitAddrList(hdrs["To"]),
 		Cc:          splitAddrList(hdrs["Cc"]),
 		Subject:     decodeMIMEHeader(hdrs["Subject"]),
-		BodyText:    bodyText,
+		BodyText:    inboundEmailText(bodyText, bodyHTML),
 		BodyHTML:    bodyHTML,
 		MessageID:   hdrs["Message-Id"],
 		InReplyTo:   hdrs["In-Reply-To"],

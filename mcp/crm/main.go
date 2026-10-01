@@ -537,6 +537,16 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolMessagingWhatsAppSessionCheck,
 		},
 		{
+			Name:        "contacts_refresh_message_body",
+			Description: "Recover missing content for one existing inbound email activity from its original in the bound Messaging app. Args: id (contact id), activity_id, dry_run? (default true; pass false to repair). Only fills an empty or subject-only body after matching project, source install, and RFC Message-ID. Preserves complete bodies, activity/conversation IDs, status, timestamps, attachments, and workflows; does not send or redispatch mail. Returns recoverable and body_repaired.",
+			InputSchema: schemaObject(map[string]any{
+				"id":          map[string]any{"type": "integer"},
+				"activity_id": map[string]any{"type": "integer"},
+				"dry_run":     map[string]any{"type": "boolean", "default": true},
+			}, []string{"id", "activity_id"}),
+			Handler: a.toolRefreshMessageBody,
+		},
+		{
 			Name:        "messaging_inbound_receive",
 			Description: "Receive an inbound message dispatched by Messaging and attach it to the CRM contact timeline. Internal plumbing; agents normally should not call this directly.",
 			InputSchema: schemaObject(map[string]any{
@@ -623,6 +633,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name:        "conversations_inbox",
 			Description: "Cross-contact triage queue: conversations across all contacts, newest activity first, with contact summary + last-message snippet + automated/priority flags. Args: status? (open [default] | pending | closed | all), limit? (default 50, max 200), offset? (for paging), filters? array of {field, op, value}. Filter fields: channel, from, to, cc, bcc, contact, list, tag, priority. Ops: is, is_not, contains, domain, in.",
+			Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false},
 			InputSchema: schemaObject(map[string]any{
 				"status":   map[string]any{"type": "string"},
 				"limit":    map[string]any{"type": "integer"},
@@ -882,7 +893,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "segments_create",
 			Description: "Create a segment. Args: name, kind (dynamic|static, default dynamic), description?, list_id? (optional list scope), definition. " + segmentDefinitionContract,
 			InputSchema: segmentCreateInputSchema(),
-			Handler: a.toolSegmentsCreate,
+			Handler:     a.toolSegmentsCreate,
 		},
 		{
 			Name:        "segments_list",
@@ -904,7 +915,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "segments_update",
 			Description: "Partial-patch a segment (name, description, kind, list_id, definition). Mutating definition busts the cached count. " + segmentDefinitionContract,
 			InputSchema: segmentUpdateInputSchema(),
-			Handler: a.toolSegmentsUpdate,
+			Handler:     a.toolSegmentsUpdate,
 		},
 		{
 			Name:        "segments_delete",

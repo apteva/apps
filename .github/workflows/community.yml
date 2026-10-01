@@ -1,0 +1,44 @@
+name: Community validation
+on:
+  pull_request:
+    paths: ['mcp/community/**', 'scripts/build-panels.ts', 'scripts/verify-panels.ts', '.github/workflows/community.yml']
+  push:
+    paths: ['mcp/community/**', 'scripts/build-panels.ts', 'scripts/verify-panels.ts', '.github/workflows/community.yml']
+permissions:
+  contents: read
+jobs:
+  community:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/community/go.mod
+          cache-dependency-path: mcp/community/go.sum
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.13'
+      - run: bun install --frozen-lockfile
+      - run: go vet ./...
+        working-directory: mcp/community
+      - run: go test -race ./...
+        working-directory: mcp/community
+      - run: go build -o /tmp/community .
+        working-directory: mcp/community
+      - run: bun install --frozen-lockfile
+        working-directory: mcp/community/ui/portal
+      - run: bunx tsc --noEmit
+        working-directory: mcp/community/ui/portal
+      - run: bunx --no-install playwright install --with-deps chromium
+        working-directory: mcp/community/ui/portal
+      - run: bun run test:browser
+        working-directory: mcp/community/ui/portal
+      - run: bun run scripts/build-panels.ts --app community
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: community-browser-failures
+          path: mcp/community/ui/portal/test-results

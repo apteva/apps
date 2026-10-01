@@ -106,19 +106,51 @@ func TestExternalScopeCannotBecomeOperator(t *testing.T) {
 	}
 }
 
-func TestExternalIdentityBoundaryRejectsPartialHeaders(t *testing.T) {
+func TestFirstPartySubjectPrincipalDoesNotBecomeDelegated(t *testing.T) {
 	a, _, _ := newTestEnv(t)
-	for _, header := range []string{"X-Apteva-Subject-ID", "X-Apteva-Subject-Type", "X-Apteva-Issuer-App", "X-Apteva-Issuer-Install-ID"} {
+	for _, headers := range []map[string]string{
+		{"X-Apteva-Subject-ID": "1", "X-Apteva-Subject-Type": "user"},
+		{"X-Apteva-Subject-ID": "1"},
+		{"X-Apteva-Subject-Type": "user"},
+	} {
 		r := httptest.NewRequest("GET", "/chats", nil)
 		r.Header.Set("X-User-ID", "1")
 		r.Header.Set("X-Apteva-Project-ID", testProject)
-		r.Header.Set(header, "incomplete")
+		for key, value := range headers {
+			r.Header.Set(key, value)
+		}
+		rec := httptest.NewRecorder()
+		called := false
+		a.delegatedHTTP(func(_ http.ResponseWriter, _ *http.Request) {
+			called = true
+		})(rec, r)
+		if !called || rec.Code != http.StatusOK {
+			t.Fatalf("first-party headers=%v called=%t status=%d body=%s", headers, called, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestExternalIdentityBoundaryRejectsPartialDelegatedHeaders(t *testing.T) {
+	a, _, _ := newTestEnv(t)
+	for _, headers := range []map[string]string{
+		{"X-Apteva-Issuer-App": "auth"},
+		{"X-Apteva-Issuer-Install-ID": "11"},
+		{"X-Apteva-Issuer-App": "auth", "X-Apteva-Issuer-Install-ID": "11"},
+		{"X-Apteva-Issuer-App": "auth", "X-Apteva-Issuer-Install-ID": "11", "X-Apteva-Subject-ID": "person"},
+		{"X-Apteva-Issuer-App": "auth", "X-Apteva-Issuer-Install-ID": "11", "X-Apteva-Subject-Type": "user"},
+	} {
+		r := httptest.NewRequest("GET", "/chats", nil)
+		r.Header.Set("X-User-ID", "1")
+		r.Header.Set("X-Apteva-Project-ID", testProject)
+		for key, value := range headers {
+			r.Header.Set(key, value)
+		}
 		rec := httptest.NewRecorder()
 		a.delegatedHTTP(func(_ http.ResponseWriter, _ *http.Request) {
-			t.Fatal("partial visitor identity fell through to operator access")
+			t.Fatal("partial delegated identity fell through to operator access")
 		})(rec, r)
-		if rec.Code != 401 {
-			t.Fatalf("%s returned %d", header, rec.Code)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("headers=%v returned %d body=%s", headers, rec.Code, rec.Body.String())
 		}
 	}
 }

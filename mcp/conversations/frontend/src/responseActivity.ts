@@ -3,6 +3,7 @@ import type { ChatTimelineItem } from "./toolActivityModel";
 
 export interface PendingResponse {
   optimistic?: boolean;
+  continuing?: boolean;
   agentId?: number;
   threadId?: string;
   afterMessageId?: number;
@@ -16,19 +17,24 @@ export function pendingResponsePhase(bubble: PendingResponse, activities: ToolAc
   const since = userMessage?.role === "user" ? Date.parse(userMessage.created_at) : bubble.createdAt ?? Infinity;
   const relevant = activities.filter(activity => activity.agent_id === bubble.agentId
     && (!bubble.threadId || activity.thread_id === bubble.threadId));
-  if (relevant.some(activity => activity.status === "running")) return null;
+  if (relevant.some(activity => activity.status === "running" && Date.parse(activity.started_at) >= since)) return null;
   return relevant.some(activity => Date.parse(activity.started_at) >= since) ? "preparing" : "thinking";
 }
 
-// The latest group belonging to this response owns its indicator even when
-// an intermediate reply or another participant follows it in the transcript.
+// Only an executing call owns the response indicator. Once its result lands,
+// the next model step gets a Thinking row instead of a pulsing completed call.
 export function responseToolGroup(response: PendingResponse, timeline: ChatTimelineItem[], messages: Message[]): string | undefined {
   const anchor = messages.find(message => message.id === response.afterMessageId);
   const since = !response.optimistic && anchor?.role === "user" ? Date.parse(anchor.created_at) : response.createdAt ?? Infinity;
   for (let i = timeline.length - 1; i >= 0; i--) {
     const item = timeline[i]!;
+    // A durable message or streaming acknowledgement ends the tool burst.
+    // A continuing phase after that message belongs to a new response step,
+    // so do not resurrect an older group as the active handoff.
+    if (response.continuing && (item.kind === "message" || item.kind === "stream")) break;
     const tools = item.kind === "toolGroup" ? item.tools : item.kind === "tool" ? [item.tool] : [];
-    if (tools.some(tool => tool.agentId === response.agentId
+    if (tools.some(tool => (response.continuing || tool.state === "running" || tool.state === "preparing")
+      && tool.agentId === response.agentId
       && (!response.threadId || tool.threadId === response.threadId) && tool.startedAt >= since)) return item.key;
   }
 }

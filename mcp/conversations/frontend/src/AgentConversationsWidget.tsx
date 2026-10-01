@@ -1,7 +1,9 @@
 import type { ComposerOptions } from "./composer";
+import type { ConversationComposerHandle } from "./composerHost";
 import { useConversationLocalization, type ConversationLocalization } from "./i18n";
 import { useConversationAPI } from "./context";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type Ref } from "react";
+import { ConversationActivityIndicator, useConversationActivity } from "./conversationActivity";
 import {
   ConversationChat,
   MoreConversations,
@@ -17,6 +19,8 @@ import {
   selectedConversationSeenInput,
   showNewConversation,
   showPageContext,
+  showToolCompletion,
+  showToolDuration,
   singleConversationListPath,
   type AgentConversationWidgetSettings,
 } from "./agentConversations";
@@ -28,8 +32,13 @@ export interface AgentConversationsWidgetProps extends ConversationLocalization 
   installId: number;
   projectId: string;
   instanceId: number;
+  slot?: string;
+  widgetSize?: "half" | "full";
   eventRevision?: number;
   widgetSettings?: AgentConversationWidgetSettings;
+  /** Internal/public typed host bridge; never sends automatically. */
+  composerRef?: Ref<ConversationComposerHandle>;
+  onContextCleared?: (context: import("./pageContext").PageContext) => void;
 }
 
 interface UnreadEntry {
@@ -40,18 +49,19 @@ interface UnreadEntry {
 
 const EMPTY_CONVERSATION_REFRESH_MS = 8_000;
 
-function useWideWidgetLayout(): boolean {
+function useWideWidgetLayout(allowWide: boolean): boolean {
   const query = "(min-width: 768px)";
   const [wide, setWide] = useState(() =>
-    typeof window !== "undefined" && window.matchMedia(query).matches,
+    allowWide && typeof window !== "undefined" && window.matchMedia(query).matches,
   );
   useEffect(() => {
+    if (!allowWide) { setWide(false); return; }
     const media = window.matchMedia(query);
     const update = () => setWide(media.matches);
     media.addEventListener("change", update);
     update();
     return () => media.removeEventListener("change", update);
-  }, []);
+  }, [allowWide]);
   return wide;
 }
 
@@ -60,6 +70,9 @@ function ConversationBrowser({
   instanceId,
   eventRevision,
   widgetSettings,
+  widgetSize,
+  composerRef,
+  onContextCleared,
 }: AgentConversationsWidgetProps) {
   const { t, relativeTime } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
@@ -69,11 +82,13 @@ function ConversationBrowser({
   const [unread, setUnread] = useState<Map<string, UnreadEntry>>(new Map());
   const [selectedId, setSelectedId] = useState("");
   const [archived, setArchived] = useState(false);
+  const [listEventRevision, setListEventRevision] = useState(0);
+  const activeConversations = useConversationActivity(projectId, instanceId, !archived && validAgent, () => setListEventRevision(value => value + 1));
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const wideLayout = useWideWidgetLayout();
+  const wideLayout = useWideWidgetLayout(widgetSize !== "half");
   const layout = agentConversationWidgetLayout(wideLayout);
 
   useEffect(()=>{setConversations([]);setSelectedId("");},[projectId,instanceId,archived]);
@@ -108,6 +123,7 @@ function ConversationBrowser({
     const timer = window.setInterval(load, 8_000);
     return () => window.clearInterval(timer);
   }, [load, eventRevision]);
+  useEffect(() => { if (listEventRevision) void load(); }, [listEventRevision, load]);
 
   const selected = useMemo(
     () => conversations.find((conversation) => conversation.id === selectedId) ?? null,
@@ -222,6 +238,7 @@ function ConversationBrowser({
                     >
                       <div className="flex items-center gap-2">
                         <span className="min-w-0 flex-1 truncate text-sm font-medium text-text">{conversation.title}</span>
+                        <ConversationActivityIndicator active={activeConversations.has(conversation.id)} />
                         {unreadCount > 0 && conversation.id !== selectedId && (
                           <span className="rounded-full bg-accent px-1.5 py-0.5 text-xs text-bg">{unreadCount}</span>
                         )}
@@ -240,7 +257,7 @@ function ConversationBrowser({
       </aside>
 
       {selected ? (
-        <ConversationChat key={`${selected.project_id}:${selected.id}`}
+        <ConversationChat ref={composerRef} key={`${selected.project_id}:${selected.id}`}
           conversation={selected}
           archived={archived}
           onActed={load}
@@ -250,7 +267,13 @@ function ConversationBrowser({
             void load();
           }}
           emptyMessage={widgetSettings?.empty_message}
+          welcomeText={widgetSettings?.welcome_text}
+          suggestions={widgetSettings?.suggestions}
+          contextLabel={widgetSettings?.context_label}
+          onContextCleared={onContextCleared}
           showPageContext={showPageContext(widgetSettings)}
+          showToolCompletion={showToolCompletion(widgetSettings)}
+          showToolDuration={showToolDuration(widgetSettings)}
         />
       ) : (
         <section className="grid min-h-0 place-items-center p-6 text-center text-sm text-text-muted">
@@ -271,6 +294,8 @@ function SingleConversation({
   instanceId,
   eventRevision,
   widgetSettings,
+  composerRef,
+  onContextCleared,
 }: AgentConversationsWidgetProps) {
   const { t, relativeTime } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
@@ -285,6 +310,7 @@ function SingleConversation({
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const activeHistory = useConversationActivity(projectId, instanceId, historyOpen && validAgent);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [history, setHistory] = useState<Conversation[]>([]);
   const [error, setError] = useState("");
@@ -427,11 +453,17 @@ function SingleConversation({
           {t("chat.loading")}
         </section>
       ) : selected ? (
-        <ConversationChat key={`${selected.project_id}:${selected.id}`}
+        <ConversationChat ref={composerRef} key={`${selected.project_id}:${selected.id}`}
           conversation={selected}
           archived={false}
           emptyMessage={widgetSettings?.empty_message}
+          welcomeText={widgetSettings?.welcome_text}
+          suggestions={widgetSettings?.suggestions}
+          contextLabel={widgetSettings?.context_label}
+          onContextCleared={onContextCleared}
           showPageContext={showPageContext(widgetSettings)}
+          showToolCompletion={showToolCompletion(widgetSettings)}
+          showToolDuration={showToolDuration(widgetSettings)}
           headerActions={(
             <>
               {showCreate && (
@@ -529,7 +561,10 @@ function SingleConversation({
                         }}
                         className={`w-full px-4 py-3 text-left hover:bg-bg-hover ${conversation.id === selected?.id ? "bg-bg-hover" : ""}`}
                       >
-                        <span className="block truncate text-sm font-medium text-text">{conversation.title}</span>
+                        <span className="flex items-center gap-2 text-sm font-medium text-text">
+                          <span className="min-w-0 flex-1 truncate">{conversation.title}</span>
+                          <ConversationActivityIndicator active={activeHistory.has(conversation.id)} />
+                        </span>
                         <span className="mt-1 block text-xs text-text-dim">{relativeTime(conversation.updated_at)}</span>
                       </button>
                     </li>
@@ -545,7 +580,8 @@ function SingleConversation({
 }
 
 export default function AgentConversationsWidget(props: AgentConversationsWidgetProps) {
-  return conversationDisplayMode(props.widgetSettings) === "single"
-    ? <SingleConversation key={`${props.projectId}:${props.instanceId}`} {...props} />
-    : <ConversationBrowser {...props} />;
+  const scopedProps = props;
+  return conversationDisplayMode(props.widgetSettings, props.slot) === "single"
+    ? <SingleConversation key={`${props.projectId}:${props.instanceId}`} {...scopedProps} />
+    : <ConversationBrowser {...scopedProps} />;
 }

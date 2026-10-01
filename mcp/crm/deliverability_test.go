@@ -2,9 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -12,7 +15,9 @@ import (
 
 type suppressionListPlatform struct {
 	tk.BasePlatformClient
-	items []messagingSuppression
+	items     []messagingSuppression
+	listCalls int
+	addCalls  int
 }
 
 func (p *suppressionListPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
@@ -29,15 +34,141 @@ func (p *suppressionListPlatform) GetInstance(id int64) (*sdk.PlatformInstance, 
 func (p *suppressionListPlatform) CallAppResult(_ string, tool string, _ map[string]any, out any) error {
 	payload := map[string]any{"ok": true}
 	if tool == "suppression_list" {
+		p.listCalls++
 		payload = map[string]any{
 			"suppressions": p.items,
 			"count":        len(p.items),
 			"total":        len(p.items),
 			"has_more":     false,
 		}
+	} else if tool == "suppression_add" {
+		p.addCalls++
 	}
 	body, _ := json.Marshal(payload)
 	return json.Unmarshal(body, out)
+}
+
+func TestSuppressionWorkersKeepRetryFastAndFullSweepPeriodic(t *testing.T) {
+	platform := &suppressionListPlatform{}
+	ctx := newTestCtx(t, tk.WithPlatform(platform))
+	workers := (&App{}).deliverabilityWorkers()
+	if len(workers) != 2 || workers[0].Name != "messaging-suppression-retry" || workers[0].Schedule != "@every 5m" ||
+		workers[1].Name != "messaging-suppression-reconcile" || workers[1].Schedule != "@every 30m" {
+		t.Fatalf("suppression workers=%+v", workers)
+	}
+	contact := mustCreate(t, ctx, map[string]any{
+		"channels": []any{map[string]any{"kind": "email", "value": "retry@example.test", "is_primary": true}},
+	})
+	if _, err := ctx.AppDB().Exec(`UPDATE contact_channel_delivery_state
+		SET quarantined=1, suppressed=0 WHERE project_id='test-proj' AND channel_id=?`, contact.Channels[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := workers[0].Run(nil, ctx); err != nil {
+		t.Fatal(err)
+	}
+	if platform.listCalls != 0 || platform.addCalls != 1 {
+		t.Fatalf("lightweight retry fetched full list %d times and made %d retry calls", platform.listCalls, platform.addCalls)
+	}
+}
+
+func TestSuppressionBulkReconcileExactPrecedenceAndUnchangedScale(t *testing.T) {
+	const bulkRouteCount = 12000
+	platform := &suppressionListPlatform{items: []messagingSuppression{
+		{Channel: "email", Kind: "domain", Address: "example.test", Reason: "manual", Source: "operator"},
+		{Channel: "email", Kind: "address", Address: "alice@example.test", Reason: "unsubscribe", Source: "operator"},
+	}}
+	ctx := newTestCtx(t, tk.WithPlatform(platform))
+	contact := mustCreate(t, ctx, map[string]any{
+		"channels": []any{map[string]any{"kind": "email", "value": "alice@example.test", "is_primary": true}},
+	})
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	insert, err := tx.Prepare(`INSERT INTO contact_channels(project_id,contact_id,kind,value) VALUES ('test-proj',?,'email',?)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < bulkRouteCount; i++ {
+		if _, err := insert.Exec(contact.ID, fmt.Sprintf("bulk-%d@other.test", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := insert.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	routes, changed, err := reconcileProjectSuppressionState(ctx.AppDB(), "test-proj", platform.items, stamp)
+	if err != nil || routes != bulkRouteCount+1 || changed != bulkRouteCount+1 {
+		t.Fatalf("first bulk sweep routes=%d changed=%d err=%v", routes, changed, err)
+	}
+	state := emailDeliveryState(t, ctx, contact.Channels[0].ID)
+	if !state.Suppressed || state.SuppressionKind != "address" || state.Status != "unsubscribed" {
+		t.Fatalf("exact suppression did not override domain: %+v", state)
+	}
+	if _, err := ctx.AppDB().Exec(`CREATE TRIGGER reject_reconcile_rewrite BEFORE UPDATE ON contact_channel_delivery_state
+		BEGIN SELECT RAISE(ABORT,'unchanged state rewritten'); END`); err != nil {
+		t.Fatal(err)
+	}
+	routes, changed, err = reconcileProjectSuppressionState(ctx.AppDB(), "test-proj", platform.items, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil || routes != bulkRouteCount+1 || changed != 0 {
+		t.Fatalf("unchanged bulk sweep routes=%d changed=%d err=%v", routes, changed, err)
+	}
+}
+
+func TestSuppressionBulkReconcilePreservesNewerEventState(t *testing.T) {
+	ctx := newTestCtx(t, tk.WithPlatform(&suppressionListPlatform{}))
+	contact := mustCreate(t, ctx, map[string]any{
+		"channels": []any{map[string]any{"kind": "email", "value": "fresh@example.test", "is_primary": true}},
+	})
+	if _, err := ctx.AppDB().Exec(`UPDATE contact_channel_delivery_state
+		SET suppressed=1, suppression_kind='address', suppression_match='fresh@example.test',
+			suppression_reason='newer-event', suppression_source='messaging',
+			suppression_checked_at='2099-01-01T00:00:00Z'
+		WHERE project_id='test-proj' AND channel_id=?`, contact.Channels[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	_, changed, err := reconcileProjectSuppressionState(ctx.AppDB(), "test-proj", nil, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil || changed != 0 {
+		t.Fatalf("older snapshot changed newer event state: changed=%d err=%v", changed, err)
+	}
+	state := emailDeliveryState(t, ctx, contact.Channels[0].ID)
+	if !state.Suppressed || state.SuppressionReason != "newer-event" {
+		t.Fatalf("newer event lost: %+v", state)
+	}
+}
+
+func TestSuppressionRetryUsesPendingIndex(t *testing.T) {
+	ctx := newTestCtx(t)
+	rows, err := ctx.AppDB().Query(`EXPLAIN QUERY PLAN
+		SELECT c.value FROM contact_channel_delivery_state s
+		JOIN contact_channels c ON c.project_id=s.project_id AND c.id=s.channel_id
+		WHERE s.project_id=? AND (
+			(s.quarantined=1 AND s.suppressed=0) OR
+			(s.quarantined=0 AND s.consecutive_soft_bounces=0 AND s.suppressed=1
+			 AND s.suppression_source='crm' AND s.suppression_reason='soft-bounce-threshold'))`, "test-proj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan += detail + "\n"
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plan, "ix_channel_delivery_pending_suppression") {
+		t.Fatalf("retry query does not use the pending-work index:\n%s", plan)
+	}
 }
 
 func deliveryEvent(id, kind, recipient, occurred string, permanent bool) sdk.Event {

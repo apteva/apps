@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.27.0
+version: 0.27.1
 description: |
   Build and release services, mobile apps, and arbitrary artifacts from Code
   or local sources using local and external build backends. Generic command
@@ -11,6 +11,9 @@ description: |
 
   Supports source kinds {code, local} and frameworks
   {go, node, bun, static, blank, android, ios, macos, command}.
+  v0.27.1 relocates source-internal Bun and Node symlinks into staged build
+  artifacts before integrity checks, fixing static site builds with Bun cache
+  links while keeping artifact attestation and external-link rejection.
   v0.27.0 adds native macOS builds, signing, and App Store releases while one
   universal iOS deployment continues to cover iPhone and iPad. Apple build
   lookup and version allocation are platform-specific. Pinned Code repository
@@ -179,7 +182,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: deploy/v0.27.0
+    ref: deploy/v0.27.1
     entry: mcp/deploy
   port: 8080
   health_check: /health

@@ -457,3 +457,9 @@ export interface CourseAnalytics {
   completed_progress_rows: number;
   progress_completion_percent: number;
 }
+
+export interface QuizQuestion { prompt: string; options: string[] }
+export interface QuizAttempt { id: number; quiz_id: string; member_id: string; score: number; passed: boolean; created_at: string }
+export interface AssignmentSubmission { assignment_id: string; member_id: string; body: string; updated_at: string }
+export interface LearningStatus { attempts: QuizAttempt[]; submissions: AssignmentSubmission[] }
+export interface IssuedCertificate { id: string; space_id: string; member_id: string; title: string; body: string; issued_at: string }

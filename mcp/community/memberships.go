@@ -110,6 +110,9 @@ func membershipTools() []sdk.Tool {
 }
 
 func toolMembershipPlansList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	communityID, err := mustStr(args, "community_id")
 	if err != nil {
 		return nil, err
@@ -119,6 +122,9 @@ func toolMembershipPlansList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 }
 
 func toolMembershipPlansGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -128,6 +134,9 @@ func toolMembershipPlansGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolMembershipPlansUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	communityID, err := mustStr(args, "community_id")
 	if err != nil {
 		return nil, err
@@ -200,6 +209,9 @@ func toolMembershipPlansUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 func toolMembershipPlansArchive(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -217,6 +229,9 @@ func toolMembershipPlansArchive(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 func toolMembershipPlanCoursesSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -256,6 +271,9 @@ func toolMembershipPlanCoursesSet(ctx *sdk.AppCtx, args map[string]any) (any, er
 }
 
 func toolMembershipPlanTagsSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -291,6 +309,9 @@ func toolMembershipPlanTagsSet(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 func toolMembershipCheckoutStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	planID, err := mustStr(args, "plan_id")
 	if err != nil {
 		return nil, err
@@ -417,6 +438,9 @@ func toolMembershipCheckoutStart(ctx *sdk.AppCtx, args map[string]any) (any, err
 }
 
 func toolMembershipStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	communityID, err := mustStr(args, "community_id")
 	if err != nil {
 		return nil, err
@@ -433,6 +457,9 @@ func toolMembershipStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolMembershipCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -476,6 +503,9 @@ func toolMembershipCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolMembershipResume(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -502,6 +532,9 @@ func toolMembershipResume(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolMembershipSubscriptionsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	communityID, err := mustStr(args, "community_id")
 	if err != nil {
 		return nil, err
@@ -551,6 +584,9 @@ func toolMembershipSubscriptionsList(ctx *sdk.AppCtx, args map[string]any) (any,
 }
 
 func toolMembershipSubscriptionGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -560,6 +596,9 @@ func toolMembershipSubscriptionGet(ctx *sdk.AppCtx, args map[string]any) (any, e
 }
 
 func toolMembershipSubscriptionReconcile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -569,6 +608,9 @@ func toolMembershipSubscriptionReconcile(ctx *sdk.AppCtx, args map[string]any) (
 }
 
 func toolCourseAccessExplain(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err

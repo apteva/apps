@@ -13,20 +13,20 @@ export interface PageContext {
   thread_id?: string;
   tab?: string;
 }
-export function useMessagePageContext(context?: PageContext) {
+export function useMessagePageContext(context?: PageContext, onDismiss?: (context: PageContext) => void) {
   const signature = JSON.stringify(context);
   const [dismissed, setDismissed] = useState<string>();
   const active = context && dismissed !== signature ? context : undefined;
-  return { context: active, dismiss: () => setDismissed(signature) };
+  return { context: active, dismiss: () => { setDismissed(signature); if (context) onDismiss?.(context); } };
 }
-export function PageContextChip({ context, onRemove }: { context?: PageContext; onRemove: () => void }) {
+export function PageContextChip({ context, onRemove, prefix = "Using context" }: { context?: PageContext; onRemove: () => void; prefix?: string }) {
   if (!context) return null;
   const label = context.page === "app" ? `${context.app} app`
     : context.page === "agent" ? context.viewed_agent_name || `Agent #${context.viewed_agent_id}`
     : context.page === "settings" ? `Settings${context.tab ? ` · ${context.tab}` : ""}`
     : context.page === "apps" ? `Apps${context.app ? ` · ${context.app}` : ""}` : "Dashboard";
   return <div className="mb-2 flex min-w-0 items-center gap-1 text-xs text-text-muted">
-    <span className="truncate" title="Only page identifiers are shared, not page contents or form values.">Using context: {label}</span>
+    <span className="truncate" title="Only page identifiers are shared, not page contents or form values.">{prefix}: {label}</span>
     <button type="button" aria-label="Remove page context" onClick={onRemove} className="flex h-8 w-8 shrink-0 items-center justify-center rounded hover:bg-bg-hover">×</button>
   </div>;
 }

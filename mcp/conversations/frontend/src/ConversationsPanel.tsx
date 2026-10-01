@@ -4,7 +4,7 @@ import { splitActivityPaint } from "./toolActivityPaint";
 import type { ResponseProgress } from "./types";
 import { pendingResponsePhase, responseToolGroup } from "./responseActivity";
 import { ChatToolActivity } from "./ToolActivity";
-import { buildChatTimeline, isVisibleChatTool } from "./toolActivityModel";
+import { buildChatTimeline, isVisibleChatTool, type ToolActivity as TimelineTool } from "./toolActivityModel";
 import { toChatToolActivity, useToolVisualRegistry } from "./toolActivityAdapter";
 import { useConversationLocalization, type ConversationLocalization, type ConversationMessageKey, type ConversationMessageParams } from "./i18n";
 import { AttachmentContent, GenericComponents, reportSectionsText } from "./messageContent";
@@ -27,13 +27,15 @@ import { AttachmentContent, GenericComponents, reportSectionsText } from "./mess
 // no arbitrary Tailwind values. Built by
 // `bun run scripts/build-panels.ts --app conversations`.
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
 import createDOMPurify from "dompurify";
 import { marked } from "marked";
 import ConversationChatView from "./ConversationChatView";
+import { VoiceControls } from "./voiceControls";
 import { useHostPageContext } from "./context";
 import { PageContextChip, useMessagePageContext } from "./pageContext";
 import { isSoftBreakMetadata, softBreakMessageInput } from "./softBreak";
+import { composerRequestId, type ComposerInsertOptions, type ComposerInsertResult, type ComposerSuggestion, type ConversationComposerHandle } from "./composerHost";
 
 import { useConversationAPI } from "./context";
 import type { ConversationsClient } from "./client";
@@ -83,9 +85,27 @@ export interface NativePanelProps extends ConversationLocalization {
   installId: number;
   projectId: string;
   instanceId?: number;
+  workspaceRail?: ComponentType<WorkspaceRailProps>;
+  welcomeText?: string;
+  suggestions?: ComposerSuggestion[];
+  contextLabel?: string;
+  onContextCleared?: (context: import("./pageContext").PageContext) => void;
+}
+
+export interface WorkspaceRailProps {
+  projectId: string;
+  agentId?: number;
+  threadId?: string;
+  context?: {
+    app: string;
+    kind: string;
+    id: string;
+  };
+  children: ReactNode;
 }
 
 import type { Conversation, Message, StreamFrame, InboxPage, InboxItem, UnreadEntry, AgentInfo, ChangePage, MessageDelivery, ToolActivity } from "./types";
+import { ConversationActivityIndicator, useConversationActivity } from "./conversationActivity";
 export type { Conversation, Message } from "./types";
 
 // Pickers only offer agents that hold this app's MCP — an unattached
@@ -234,6 +254,7 @@ const GLYPH_ARCHIVE = "M21 8v13H3V8 M1 3h22v5H1z M10 12h4";
 const GLYPH_TRASH =
   "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2";
 const GLYPH_RESTORE = "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8 M3 3v5h5";
+const GLYPH_BACK = "M15 18l-6-6 6-6";
 
 // PublicTag marks conversations whose human side is a product's end
 // users (site chatbot visitors behind a gateway) rather than
@@ -248,6 +269,12 @@ function PublicTag() {
 }
 
 // ─── typed cards ─────────────────────────────────────────────────────
+
+function approvalActionColors(style: string | undefined, index: number) {
+  if (style === "primary") return "border border-accent bg-accent text-bg";
+  if (style === "danger" || (!style && index === 0)) return "border border-accent text-accent";
+  return "border border-border text-text";
+}
 
 export function ApprovalCard({
   message,
@@ -266,6 +293,8 @@ export function ApprovalCard({
   const actions = Array.isArray(card.props.actions)
     ? (card.props.actions as Array<{ id: string; label: string; style?: string }>)
     : [];
+  const selectedIndex = actions.findIndex(action => action.id === status);
+  const selectedAction = actions[selectedIndex];
 
   const act = async (actionId: string) => {
     setBusy(true);
@@ -286,18 +315,24 @@ export function ApprovalCard({
           <Glyph d={GLYPH_ALERT} size={14} />
         </span>
         <span className="font-semibold uppercase tracking-wide">{t("card.approval")}</span>
-        {status !== "pending" && (
-          <span
-            className="ml-auto px-1.5 py-0.5 rounded border border-border text-text-muted"
-          >
-            {statusLabel(status)}
-          </span>
-        )}
       </div>
       <p className="mt-1.5 text-sm font-medium text-text">{String(card.props.title ?? "")}</p>
       {card.props.body ? (
         <p className="mt-1 text-sm text-text-muted whitespace-pre-wrap">{String(card.props.body)}</p>
       ) : null}
+      {status !== "pending" && (
+        <div className="mt-2.5">
+          <span className={`inline-flex max-w-full items-start gap-1.5 rounded px-2.5 py-1.5 text-xs font-semibold ${approvalActionColors(selectedAction?.style, selectedIndex)}`}>
+            <svg className="shrink-0 mt-0.5" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" />
+              <path d="m8 12 3 3 5-6" />
+            </svg>
+            <span className="min-w-0 whitespace-pre-wrap break-words">
+              {t("approval.decision", { decision: selectedAction?.label || statusLabel(status) })}
+            </span>
+          </span>
+        </div>
+      )}
       {status === "pending" && (
         <div className="mt-2.5 flex flex-col gap-2">
           <input
@@ -314,12 +349,12 @@ export function ApprovalCard({
                 type="button"
                 disabled={busy}
                 onClick={() => act(a.id)}
-                className={`px-3 py-1.5 rounded text-xs font-semibold disabled:opacity-50 ${
+                className={`px-3 py-1.5 rounded text-xs font-semibold disabled:opacity-50 ${approvalActionColors(a.style, index)} ${
                   a.style === "primary"
-                    ? "border border-accent bg-accent text-bg hover:opacity-90"
+                    ? "hover:opacity-90"
                     : a.style === "danger" || (!a.style && index === 0)
-                      ? "border border-accent text-accent hover:bg-accent/10"
-                      : "border border-border text-text hover:bg-bg-input"
+                      ? "hover:bg-accent/10"
+                      : "hover:bg-bg-input"
                 }`}
               >
                 {a.label}
@@ -403,7 +438,7 @@ function MessageCards({
 function StreamingBubble({ text }: { text: string }) {
   const html = useMemo(() => renderSafeMarkdown(closeOpenMarkdown(text)), [text]);
   return (
-    <div className="flex min-h-[42px] min-w-0 flex-col justify-center shrink-0">
+    <div className="min-w-0 shrink-0">
       <div
         className="chat-md text-text text-[15px] sm:text-sm break-words leading-relaxed"
         dangerouslySetInnerHTML={{ __html: html }}
@@ -502,7 +537,6 @@ function NewConversationDialog({
   const [selected, setSelected] = useState<number[]>([]);
   const [leadId, setLeadId] = useState<number | null>(null);
   const [title, setTitle] = useState("");
-  const [audience, setAudience] = useState<"operator" | "public">("operator");
   const [filter, setFilter] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -517,7 +551,6 @@ function NewConversationDialog({
     setSelected([]);
     setLeadId(null);
     setTitle("");
-    setAudience("operator");
     setFilter("");
     setError("");
   };
@@ -547,7 +580,7 @@ function NewConversationDialog({
         agent_ids: selected,
         lead_agent_id: leadId ?? selected[0],
         title: title.trim() || undefined,
-        audience,
+        audience: "operator",
         project_id: projectId,
       }, projectId);
       reset();
@@ -581,17 +614,6 @@ function NewConversationDialog({
             placeholder={t("common.optional")}
             className="w-full rounded border border-border bg-bg-input px-3 py-2 text-sm text-text focus:border-accent focus:outline-none"
           />
-        </label>
-        <label className="block">
-          <span className="mb-1 block text-xs uppercase text-text-muted">{t("chat.audience")}</span>
-          <select
-            value={audience}
-            onChange={(e) => setAudience(e.target.value as "operator" | "public")}
-            className="w-full rounded border border-border bg-bg-input px-3 py-2 text-sm text-text focus:border-accent focus:outline-none"
-          >
-            <option value="operator">{t("chat.operatorOption")}</option>
-            <option value="public">{t("chat.publicOption")}</option>
-          </select>
         </label>
         <div>
           <div className="mb-1 text-xs uppercase text-text-muted">{t("common.agents")}</div>
@@ -971,6 +993,7 @@ function ContextColumn({
   onEnsureAgents,
   onManage,
   refreshHold,
+  embedded = false,
 }: {
   conversation: Conversation;
   agents: AgentInfo[] | null;
@@ -979,6 +1002,7 @@ function ContextColumn({
   // While the details dialog is open we hold refreshes; when it closes
   // the roster refetches so its edits show up immediately.
   refreshHold: boolean;
+  embedded?: boolean;
 }) {
   const { t, relativeTime, statusLabel } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
@@ -1013,9 +1037,11 @@ function ContextColumn({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg">
-      <div className="flex h-10 shrink-0 items-center border-b border-border px-4">
-        <span className="text-xs font-semibold uppercase text-text-muted">{t("common.details")}</span>
-      </div>
+      {!embedded && (
+        <div className="flex h-10 shrink-0 items-center border-b border-border px-4">
+          <span className="text-xs font-semibold uppercase text-text-muted">{t("common.details")}</span>
+        </div>
+      )}
       <div className="flex-1 min-h-0 overflow-auto p-4 space-y-5">
         <div>
           <div className="mb-2 text-xs uppercase text-text-dim">{t("chat.conversation")}</div>
@@ -1066,9 +1092,12 @@ function ContextColumn({
 //   system — centered status line
 function MessageRow(props: {message:Message;agentName?:string;onAction:(id:number,action:string,note:string)=>Promise<void>}) {
  const user=props.message.role==="user";
+ const voice=props.message.metadata?.source==="voice";
+ const { t } = useConversationLocalization();
  const attachments=<AttachmentContent attachments={props.message.attachments} chatID={props.message.conversation_id}/>;
  return <div className={`min-w-0 shrink-0 flex flex-col gap-2 ${user?"chat-message-user":""}`}>
  {props.agentName ? <p className="text-[10px] font-semibold uppercase text-text-muted">{props.agentName}</p> : null}
+ {voice ? <span className={`inline-flex items-center gap-1 text-[10px] text-text-muted ${user?"self-end":"self-start"}`} title={t("voice.transcriptWarning")}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3ZM5 10v2a7 7 0 0 0 14 0v-2M12 19v3"/></svg>{t("voice.turn")}</span> : null}
  {user&&attachments}
  {(props.message.content?.trim() || props.message.component_kind) ? <MessageBody {...props}/> : null}
  {!user&&attachments}<GenericComponents components={props.message.components}/>
@@ -1130,7 +1159,7 @@ function MessageBody({
     );
   }
   return (
-    <div className="flex min-h-[42px] min-w-0 flex-col justify-center shrink-0" title={relativeTime(message.created_at)}>
+    <div className="min-w-0 shrink-0" title={relativeTime(message.created_at)}>
       <div
         className="chat-md text-text text-[15px] sm:text-sm break-words leading-relaxed"
         dangerouslySetInnerHTML={{ __html: html }}
@@ -1140,6 +1169,7 @@ function MessageBody({
 }
 
 interface StreamBubbleState {
+ done?: boolean;
  optimistic?: boolean;
  threadId?: string;
  createdAt?: number;
@@ -1162,7 +1192,7 @@ function normalizeStreamText(value: string): string {
   return value.replace(/\r\n/g, "\n").trim();
 }
 
-type LiveResponseProgress = ResponseProgress & {agent_id?: number; thread_id?: string; updatedAt: number};
+type LiveResponseProgress = ResponseProgress & {agent_id?: number; thread_id?: string; updatedAt: number; sourceAt: number};
 
 function useConversationTransport(conversationID: string, projectId: string) {
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
@@ -1185,6 +1215,7 @@ function useConversationTransport(conversationID: string, projectId: string) {
   const generationRef = useRef(0);
   const loadingOlderRef = useRef(false);
   const lastUserIdRef=useRef(0);
+  const messagesRef = useRef<Message[]>([]);
   const streamRef = useRef(new Map<string, StreamBubbleState & { updatedAt: number }>());
   const settledRef = useRef(new Map<string, number>());
   const publishBubbles = useCallback(() => setBubbles([...streamRef.current.values()]), []);
@@ -1200,6 +1231,9 @@ function useConversationTransport(conversationID: string, projectId: string) {
   const mergeMessages = useCallback((incoming: Message[]) => {
     const valid = incoming.filter(m => m.conversation_id === conversationID);
     if (!valid.length) return;
+    const known = new Map(messagesRef.current.map(m=>[m.id,m]));
+    for (const m of valid) if ((m.revision ?? 0) >= (known.get(m.id)?.revision ?? 0)) known.set(m.id,m);
+    messagesRef.current = [...known.values()];
     for(const m of valid)if(m.role==="user")lastUserIdRef.current=Math.max(lastUserIdRef.current,m.id);
     for (const m of valid) {
       // A new approval card also fulfils the pending response. Other cards
@@ -1235,6 +1269,7 @@ function useConversationTransport(conversationID: string, projectId: string) {
     let cancelled = false, loading = false, initialized = false, cursor = 0;
     setMessages([]); setActivities([]); setProgresses([]); setBubbles([]); setConnected(false); setHistoryError(""); setHasOlder(false);
     streamRef.current.clear(); settledRef.current.clear(); beforeRef.current = 0;lastUserIdRef.current=0;
+    messagesRef.current=[];
     let paintHandle: number | undefined;
     let queuedActivities: ToolActivity[] = [];
     const flushActivities = () => {
@@ -1247,16 +1282,38 @@ function useConversationTransport(conversationID: string, projectId: string) {
     };
     const applyFrame = (frame: StreamFrame) => {
       if (cancelled || frame.chat_id !== conversationID) return;
+      if (frame.snapshot) {
+        // A snapshot cannot cancel a send still in flight or remove completed
+        // text waiting on the separate durable-message queue.
+        for (const [key,value] of streamRef.current) if (!value.optimistic && !(value.done && value.text)) streamRef.current.delete(key);
+        setProgresses([]);
+        for (const current of frame.frames ?? []) applyFrame(current);
+        publishBubbles();
+        return;
+      }
       if (frame.response_progress || (!frame.tool_activity && !frame.done)) {
         for (const [key,value] of streamRef.current) if (value.optimistic && value.agentId === frame.agent_id) streamRef.current.delete(key);
         publishBubbles();
       }
       if (frame.response_progress) {
-        const progress = {...frame.response_progress,agent_id:frame.agent_id,thread_id:frame.thread_id,updatedAt:Date.now()};
+        const progress = {...frame.response_progress,agent_id:frame.agent_id,thread_id:frame.thread_id,updatedAt:Date.now(),sourceAt:Date.parse(frame.created_at ?? "") || Date.now()};
         setProgresses(current => {
           const existing = current.find(p=>p.agent_id===progress.agent_id && p.thread_id===progress.thread_id);
           if (existing && existing.revision >= progress.revision) return current;
-          return [...current.filter(p=>p!==existing),progress];
+          // The server clears tool_name/call_id when a prepared call enters
+          // execution. Keep the preparation identity through that tiny
+          // handoff so the UI can keep rendering the pulsing tool row until
+          // the durable tool_activity frame arrives. Without this, the
+          // transient `running` progress frame falls through to generic
+          // Thinking and fast calls can appear to skip their tool entirely.
+          const carriedTool = progress.phase === "running" && existing?.phase === "preparing_tool"
+            ? {
+                tool_name: progress.tool_name || existing.tool_name,
+                call_id: progress.call_id || existing.call_id,
+                tool_started_at: progress.tool_started_at || existing.tool_started_at,
+              }
+            : {};
+          return [...current.filter(p=>p!==existing), {...progress, ...carriedTool}];
         });
         if (progress.phase === "idle") {
           for (const [key,value] of streamRef.current) if (value.agentId===frame.agent_id && !value.text) {
@@ -1273,16 +1330,26 @@ function useConversationTransport(conversationID: string, projectId: string) {
       }
       const key = `${frame.agent_id ?? 0}:${frame.thread_id ?? ""}:${frame.call_id}:${frame.run_id ?? ""}`;
       if (frame.done) {
+        settledRef.current.set(key, Date.now());
         for (const [k,v] of streamRef.current) if ((frame.run_id ? k === key : v.callId === frame.call_id) && (!frame.agent_id || v.agentId === frame.agent_id)) {
-          streamRef.current.delete(k); settledRef.current.set(k, Date.now());
+          // Completion and durable messages use independent SSE queues. Keep
+          // the text until its replacement arrives, without hiding Thinking.
+          if (v.text) streamRef.current.set(k,{...v,done:true});
+          else streamRef.current.delete(k);
+          settledRef.current.set(k, Date.now());
         }
       } else if (!settledRef.current.has(key)) {
         if (frame.phase === "acknowledgement") setProgresses(current=>current.filter(p=>p.agent_id!==frame.agent_id || p.run_id===frame.call_id));
         const afterMessageId=frame.after_message_id ?? Math.max(lastUserIdRef.current,...[...streamRef.current.values()].filter(v=>v.agentId===frame.agent_id).map(v=>v.afterMessageId ?? 0));
+        if (frame.text && messagesRef.current.some(m=>m.role==="agent" && m.agent_id===frame.agent_id && m.id>afterMessageId && !m.component_kind && normalizeStreamText(m.content)===normalizeStreamText(frame.text))) {
+          streamRef.current.delete(key); settledRef.current.set(key,Date.now()); publishBubbles(); return;
+        }
         if (frame.phase !== "acknowledgement") for (const [k,v] of streamRef.current) {
           if (v.agentId === frame.agent_id && v.phase === "acknowledgement") streamRef.current.delete(k);
         }
-        streamRef.current.set(key, {threadId:frame.thread_id,createdAt:streamRef.current.get(key)?.createdAt ?? (Date.parse(frame.created_at ?? "") || Date.now()),afterMessageId,runId:frame.run_id,callId: frame.call_id, agentId: frame.agent_id, text:frame.text, phase:frame.phase, updatedAt:Date.now()});
+        const previous = streamRef.current.get(key);
+        if (previous?.text && previous.text.length > frame.text.length) return; // cumulative snapshot/live overlap
+        streamRef.current.set(key, {threadId:frame.thread_id,createdAt:previous?.createdAt ?? (Date.parse(frame.created_at ?? "") || Date.now()),afterMessageId,runId:frame.run_id,callId: frame.call_id, agentId: frame.agent_id, text:frame.text, phase:frame.phase, updatedAt:Date.now()});
       }
       publishBubbles();
     };
@@ -1313,7 +1380,7 @@ function useConversationTransport(conversationID: string, projectId: string) {
       onFrame: applyFrame,
       onResync: () => { void load(); },
       onOpen: () => { if (!cancelled) { setConnected(true); void load(); } },
-      onError: () => { if (!cancelled) { setConnected(false); setProgresses([]); streamRef.current.clear(); publishBubbles(); } },
+      onError: () => { if (!cancelled) setConnected(false); },
     });
     void load();
     const poll = window.setInterval(() => {
@@ -1325,66 +1392,84 @@ function useConversationTransport(conversationID: string, projectId: string) {
     }, 5000);
     return () => { cancelled=true; generationRef.current++; window.clearInterval(poll); if (paintHandle!==undefined) window.cancelAnimationFrame(paintHandle); es.close(); };
   }, [conversationID, projectId, mergeMessages, publishBubbles]);
-  return { messages, activities, progresses, beginResponse, bubbles, bubble:bubbles[0] ?? null, connected, mergeMessages, hasOlder, loadOlder, historyError };
+  return { messages, activities, progresses, beginResponse, bubbles, bubble:bubbles.find(b=>!b.done) ?? null, connected, mergeMessages, hasOlder, loadOlder, historyError };
 }
 
 // Refresh every loaded page so deleted/archived rows cannot linger behind page one.
-export async function refreshConversationList(path:string, conversations:ConversationsClient, count=100, selectedId="") {
+async function refreshConversationPage(path:string, conversations:ConversationsClient, count=100, selectedId="") {
  const { apiGet } = conversations; const projectId=conversations.projectId;
- const out:Conversation[]=[];let cursor="";
+ const out:Conversation[]=[];let cursor="",nextCursor="";
  do {
   const page=await apiGet<{conversations:Conversation[];next_cursor:string}>(`${path}${path.includes("?")?"&":"?"}page=1&limit=100&cursor=${encodeURIComponent(cursor)}`,projectId);
   for(const row of page.conversations)if(!out.some(old=>old.id===row.id))out.push(row);
-  if(!page.next_cursor||page.next_cursor===cursor)break;cursor=page.next_cursor;
+  if(!page.next_cursor||page.next_cursor===cursor){nextCursor="";break;}cursor=page.next_cursor;nextCursor=cursor;
  }while(out.length<Math.max(100,count));
  if(selectedId&&!out.some(row=>row.id===selectedId)) {
   try {const row=await apiGet<Conversation>(`/chats?id=${encodeURIComponent(selectedId)}`,projectId);if(Boolean(row.archived_at)===path.includes("archived=1"))out.unshift(row);}catch{}
  }
- return out;
+ return {rows:out,nextCursor};
 }
 
-export function MoreConversations({path,projectId,rows,onRows}: {path:string;projectId:string;rows:Conversation[];onRows:(rows:Conversation[])=>void}) {
-  const { t } = useConversationLocalization();
-  const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
+export async function refreshConversationList(path:string, conversations:ConversationsClient, count=100, selectedId="") {
+ return (await refreshConversationPage(path,conversations,count,selectedId)).rows;
+}
+
+export function MoreConversations({path,projectId,rows,cursor,onRows,onCursor}: {path:string;projectId:string;rows:Conversation[];cursor?:string;onRows:(rows:Conversation[])=>void;onCursor?:(cursor:string)=>void}) {
+ const { t } = useConversationLocalization();
+ const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
  const [busy,setBusy]=useState(false),[error,setError]=useState("");
  const [exhausted,setExhausted]=useState(false);
  const scopeRef=useRef("");scopeRef.current=projectId+":"+path;
  const more=async()=>{if(busy||!rows.length)return;const scope=scopeRef.current;setBusy(true);setExhausted(false);try{
   const last=rows.at(-1)!;
-  const cursor=btoa(JSON.stringify({updated:last.updated_at,id:last.id})).replace(/=+$/g,"").replace(/\+/g,"-").replace(/\//g,"_");
-  const page=await apiGet<{conversations:Conversation[];next_cursor:string}>(`${path}${path.includes("?")?"&":"?"}page=1&cursor=${encodeURIComponent(cursor)}`,projectId);
+  const requestCursor=cursor ?? btoa(JSON.stringify({updated:last.updated_at,id:last.id})).replace(/=+$/g,"").replace(/\+/g,"-").replace(/\//g,"_");
+  const page=await apiGet<{conversations:Conversation[];next_cursor:string}>(`${path}${path.includes("?")?"&":"?"}page=1&cursor=${encodeURIComponent(requestCursor)}`,projectId);
   if(scope!==scopeRef.current)return;
-  if(!page.conversations.length){setExhausted(true);setError("");return}
-  onRows([...rows,...page.conversations.filter(c=>!rows.some(old=>old.id===c.id))]);setError("");
+  if(!page.conversations.length && !onCursor){setExhausted(true);setError("");return;}
+  onRows([...rows,...page.conversations.filter(c=>!rows.some(old=>old.id===c.id))]);onCursor?.(page.next_cursor && page.next_cursor!==requestCursor ? page.next_cursor : "");setError("");
  }catch(err){setError(String(err));}finally{setBusy(false)}};
  return <div className="p-2 text-center text-xs"><button type="button" disabled={busy||!rows.length} className="text-accent" onClick={more}>{busy?t("common.loading"):t("chat.loadEarlier")}</button>{(error||exhausted)&&<p role="status">{error || t("chat.noEarlierStatus")}</p>}</div>;
 }
 
-export function ConversationChat({
-  conversation,
-  archived,
-  emptyMessage,
-  showPageContext = true,
-  onOpenDetails,
-  headerActions,
-  onActed,
-  onRemoved,
-}: {
+export const ConversationChat = forwardRef<ConversationComposerHandle, {
   conversation: Conversation;
   archived: boolean;
   emptyMessage?: string;
+  welcomeText?: string;
+  suggestions?: ComposerSuggestion[];
   showPageContext?: boolean;
+  contextLabel?: string;
+  onContextCleared?: (context: import("./pageContext").PageContext) => void;
+  showToolCompletion?: boolean;
+  showToolDuration?: boolean;
   onOpenDetails?: () => void;
+  leadingAction?: ReactNode;
   headerActions?: ReactNode;
   onActed: () => void;
   onRemoved: () => void;
-}) {
+}>(({
+  conversation,
+  archived,
+  emptyMessage,
+  welcomeText,
+  suggestions,
+  showPageContext = true,
+  contextLabel,
+  onContextCleared,
+  showToolCompletion = false,
+  showToolDuration = false,
+  onOpenDetails,
+  leadingAction,
+  headerActions,
+  onActed,
+  onRemoved,
+}, ref) => {
   const { t } = useConversationLocalization();
   const toolVisualRegistry = useToolVisualRegistry();
   const { conversationsClient, legacyDrafts, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const { messages, activities: storedActivities, progresses, beginResponse, bubble, bubbles, connected, mergeMessages, hasOlder, loadOlder, historyError } = useConversationTransport(conversation.id, conversation.project_id);
   const hostPage = useHostPageContext();
-  const sharedPage = useMessagePageContext(hostPage?.project_id === conversation.project_id && conversation.audience !== "public" ? hostPage : undefined);
+  const sharedPage = useMessagePageContext(hostPage?.project_id === conversation.project_id && conversation.audience !== "public" ? hostPage : undefined, onContextCleared);
   // Resolve display names only for a room or a transcript with multiple speakers.
   const activities = useMemo(() => storedActivities.filter(activity => isVisibleChatTool(activity.name)), [storedActivities]);
   const speakerIds = new Set([conversation.lead_agent_id, ...messages.filter(m => m.role === "agent").map(m => m.agent_id), ...bubbles.map(b => b.agentId), ...activities.map(a => a.agent_id)].filter((id): id is number => Boolean(id)));
@@ -1403,15 +1488,30 @@ export function ConversationChat({
     ? agentNames[id] || (id === conversation.lead_agent_id ? conversation.lead_agent_name : undefined) || t("common.agent")
     : undefined;
   const runningActivity = activities.find(item => item.status === "running");
-  const responseProgress = progresses.find(p=>p.phase!=="idle");
+  const awaitingProgressMessage = (p: ResponseProgress) => Boolean(p.completion_message_id && !messages.some(m => m.id === p.completion_message_id));
+  const responseProgress = progresses.find(p=>p.phase!=="idle" || awaitingProgressMessage(p));
   const activeResponse = bubble ?? (runningActivity ? {callId:runningActivity.call_id,agentId:runningActivity.agent_id} : responseProgress ? {callId:responseProgress.call_id || responseProgress.run_id,agentId:responseProgress.agent_id} : null);
-  const timeline = buildChatTimeline(messages,activities.map(toChatToolActivity)).filter(item => item.kind !== "day" && item.kind !== "time");
-  const progressResponses = progresses.filter(p=>p.phase!=="idle").map(p=>({
-    agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at),
-  }));
-  const pendingResponses = [...progressResponses, ...bubbles.filter(b=>!b.text && !progresses.some(p=>p.agent_id===b.agentId))];
-  const continuingToolKeys = new Set(pendingResponses.map(response=>responseToolGroup(response,timeline,messages)).filter(Boolean));
+  const preparingTools: TimelineTool[] = progresses.flatMap(p => (p.phase === "preparing_tool" || p.phase === "running") && p.tool_name && isVisibleChatTool(p.tool_name)
+    && !activities.some(tool=>tool.agent_id===p.agent_id && tool.thread_id===p.thread_id && tool.call_id===p.call_id)
+    ? [{id:`preparing-${p.run_id}-${p.call_id}`,callId:p.call_id,agentId:p.agent_id ?? 0,threadId:p.thread_id ?? "",name:p.tool_name,reason:"",state:"preparing" as const,startedAt:Date.parse(p.tool_started_at ?? "") || p.sourceAt}]
+    : []);
+  const timeline = buildChatTimeline(messages,[...activities.map(toChatToolActivity),...preparingTools],Date.now(),bubbles.filter(b=>b.text).map(b=>({id:`${b.agentId}:${b.callId}:${b.runId}`,text:b.text,agentId:b.agentId,startedAt:b.createdAt ?? Date.now()}))).filter(item => item.kind !== "day" && item.kind !== "time");
   const ownsToolGroup = (response: Parameters<typeof responseToolGroup>[0]) => Boolean(responseToolGroup(response,timeline,messages));
+  // Keep the last completed tool burst visually active while the model is
+  // continuing its response. The next preparation frame will replace this
+  // handoff in place; without it, the progress row briefly falls back to
+  // Thinking between the result and the next tool call.
+  const continuingToolKeys = new Set(progresses.flatMap(progress => {
+    if (progress.phase !== "continuing") return [];
+    const key = responseToolGroup({
+      continuing: true,
+      agentId: progress.agent_id,
+      threadId: progress.thread_id,
+      afterMessageId: progress.after_message_id,
+      createdAt: Date.parse(progress.started_at),
+    }, timeline, messages);
+    return key ? [key] : [];
+  }));
   const [expandedToolGroups,setExpandedToolGroups]=useState<Set<string>>(()=>new Set());
   const toggleToolGroup=(key:string)=>setExpandedToolGroups(current=>{
     const next=new Set(current);if(next.has(key))next.delete(key);else next.add(key);return next;
@@ -1433,6 +1533,7 @@ export function ConversationChat({
   useEffect(() => { mountedRef.current=true; return () => {mountedRef.current=false;}; }, []);
   useEffect(() => {try {sessionStorage.setItem(storageKey,draft);} catch {}},[storageKey,draft]);
   const [sending, setSending] = useState(false);
+  const [voiceActive, setVoiceActive] = useState(false);
   const [deliveries,setDeliveries]=useState<MessageDelivery[]>([]);
   const refreshDeliveries=useCallback(async()=>{try{setDeliveries(await conversationsClient.deliveries(conversation.id));}catch{}},[conversation.id,conversation.project_id]);
   useEffect(()=>{void refreshDeliveries();const timer=window.setInterval(refreshDeliveries,5000);return ()=>window.clearInterval(timer);},[refreshDeliveries]);
@@ -1447,6 +1548,29 @@ export function ConversationChat({
   const [archiveBusy, setArchiveBusy] = useState(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const appliedComposerRequests = useRef<Set<string>>(new Set());
+
+  const insertText = useCallback(async (text: string, options: ComposerInsertOptions = {}): Promise<ComposerInsertResult> => {
+    const requestId = options.requestId || composerRequestId();
+    const result = (status: ComposerInsertResult["status"]): ComposerInsertResult => ({ requestId, status, conversationId: conversation.id });
+    const clean = text.trim();
+    if (!clean) return result("empty_text");
+    if (options.projectId && options.projectId !== conversation.project_id) return result("wrong_project");
+    if (options.agentId && options.agentId !== conversation.lead_agent_id) return result("wrong_agent");
+    if (options.conversationId && options.conversationId !== conversation.id) return result("conversation_not_open");
+    if (appliedComposerRequests.current.has(requestId)) return result("already_applied");
+    if (archived) return result("archived");
+    if (voiceActive) return result("voice_active");
+    appliedComposerRequests.current.add(requestId);
+    setDraft(current => current.trim() ? `${current.trimEnd()} ${clean}` : clean);
+    if (options.focus !== false) {
+      const focus = () => inputRef.current?.focus();
+      if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(focus);
+      else focus();
+    }
+    return result("applied");
+  }, [archived, conversation.id, conversation.lead_agent_id, conversation.project_id, voiceActive]);
+  useImperativeHandle(ref, () => ({ insertText }), [insertText]);
 
   useEffect(() => {
     setConfirmDelete(false);
@@ -1489,28 +1613,50 @@ export function ConversationChat({
   };
 
   const nearBottomRef = useRef(true);
+  const scrollToBottom = () => {
+    const scroller = bottomRef.current?.parentElement;
+    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+  };
+
+  // Keep the transcript pinned only when the user was already near its end.
+  // Scrolling the sentinel with scrollIntoView can also move an outer host
+  // pane, which is what made late tool/progress frames feel like a jump.
+  useLayoutEffect(() => {
+    if (!nearBottomRef.current) return;
+    scrollToBottom();
+    // A progress row can settle its measured height one frame after React
+    // commits (especially inside a constrained embed). Re-apply the anchor
+    // after that layout pass without touching a transcript the user left.
+    const frame = window.requestAnimationFrame(() => {
+      if (nearBottomRef.current) scrollToBottom();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [messages, activities, bubbles, progresses]);
+
   useEffect(() => {
-    if (nearBottomRef.current) bottomRef.current?.scrollIntoView({block:"end"});
-  }, [activities, bubbles, progresses]);
-  useEffect(() => {
-    const bottom=bottomRef.current, scroller=bottom?.parentElement;
+    const bottom = bottomRef.current;
+    const scroller = bottom?.parentElement;
     if (!bottom || !scroller) return;
-    let lastMarked=0;
-    const update=() => {
-      nearBottomRef.current=scroller.scrollHeight-scroller.scrollTop-scroller.clientHeight<80;
-      const latest=messages.at(-1)?.id ?? 0;
-      if (!archived && scroller.clientHeight>0 && bottom.getClientRects().length>0 && bottom.getBoundingClientRect().top>=0 && bottom.getBoundingClientRect().bottom<=window.innerHeight && nearBottomRef.current && document.visibilityState === "visible" && bottom.getBoundingClientRect().bottom <= scroller.getBoundingClientRect().bottom+5 && latest>lastMarked) {
-        lastMarked=latest;
-        void conversationsClient.markSeen(conversation.id, latest).then(onActed,() => {lastMarked=0;});
+    let lastMarked = 0;
+    const update = () => {
+      nearBottomRef.current = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
+      const latest = messages.at(-1)?.id ?? 0;
+      if (!archived && scroller.clientHeight > 0 && bottom.getClientRects().length > 0 && bottom.getBoundingClientRect().top >= 0 && bottom.getBoundingClientRect().bottom <= window.innerHeight && nearBottomRef.current && document.visibilityState === "visible" && bottom.getBoundingClientRect().bottom <= scroller.getBoundingClientRect().bottom + 5 && latest > lastMarked) {
+        lastMarked = latest;
+        void conversationsClient.markSeen(conversation.id, latest).then(onActed, () => { lastMarked = 0; });
       }
     };
-    if (nearBottomRef.current) bottom.scrollIntoView({block:"end"});
-    update(); scroller.addEventListener("scroll",update);document.addEventListener("visibilitychange",update);
-    return () => {scroller.removeEventListener("scroll",update);document.removeEventListener("visibilitychange",update);};
-  },[messages, conversation.id, conversation.project_id, archived]);
+    update();
+    scroller.addEventListener("scroll", update, { passive: true });
+    document.addEventListener("visibilitychange", update);
+    return () => {
+      scroller.removeEventListener("scroll", update);
+      document.removeEventListener("visibilitychange", update);
+    };
+  }, [messages, conversation.id, conversation.project_id, archived]);
 
   const send = async () => {
-    const content=draft.trim(); if ((!content && !attachments.items.length) || sending || attachments.items.some(i=>!i.attachment || i.busy || i.error)) return;
+    const content=draft.trim(); if (voiceActive || (!content && !attachments.items.length) || sending || attachments.items.some(i=>!i.attachment || i.busy || i.error)) return;
     let request=pendingSendRef.current;
     if (!request) { try { request=JSON.parse(sessionStorage.getItem(storageKey+":pending") ?? "null"); } catch {} }
     if (!request) request={content,client_message_id:newClientMessageId(),page_context:sharedPage.context,...(attachments.items.length?{attachments:attachments.items.map(i=>({id:i.attachment!.id,type:i.attachment!.type}))}:{})};
@@ -1568,7 +1714,9 @@ export function ConversationChat({
 
   return (
     <ConversationChatView
-      contextChip={showPageContext ? <PageContextChip context={sharedPage.context} onRemove={sharedPage.dismiss} /> : undefined}
+      voiceControl={!archived && conversation.audience !== "public" && conversation.kind === "direct" ? <VoiceControls client={conversationsClient} chatId={conversation.id} disabled={Boolean(activeResponse) || sending} onActiveChange={setVoiceActive} onTranscript={text => setDraft(current => [current.trimEnd(), text].filter(Boolean).join(" "))}/> : undefined}
+      voiceActive={voiceActive}
+      contextChip={showPageContext ? <PageContextChip context={sharedPage.context} prefix={contextLabel || "Using context"} onRemove={sharedPage.dismiss} /> : undefined}
       attachments={attachments}
       title={conversation.title}
       subtitle={`${conversation.lead_agent_name || t("chat.agentName", { id: String(conversation.lead_agent_id) })}${conversation.origin !== "web" ? t("chat.via", { origin: conversation.origin }) : ""}`}
@@ -1583,7 +1731,8 @@ export function ConversationChat({
           continuing={continuingToolKeys.has(item.key)}
           expanded={expandedToolGroups.has(item.key)} onToggle={()=>toggleToolGroup(item.key)}
           registry={toolVisualRegistry} detailsId={`tools-${conversation.id}-${item.key.replace(/[^a-zA-Z0-9_-]/g,"-")}`}
-        /> : (() => {const message=item.message;return <div key={message.id}><fieldset disabled={archived} className="min-w-0"><MessageRow message={message} agentName={message.role === "agent" ? agentName(message.agent_id) : undefined} onAction={onAction}/></fieldset>
+          showCompletion={showToolCompletion} showDuration={showToolDuration}
+        /> : item.kind === "stream" ? <div key={item.key}>{agentName(item.stream.agentId) && <p className="mb-2 text-[10px] font-semibold uppercase text-text-muted">{agentName(item.stream.agentId)}</p>}<StreamingBubble text={item.stream.text}/></div> : (() => {const message=item.message;return <div key={message.id}><fieldset disabled={archived} className="min-w-0"><MessageRow message={message} agentName={message.role === "agent" ? agentName(message.agent_id) : undefined} onAction={onAction}/></fieldset>
  {deliveries.filter(d => d.message_id === message.id && ["failed", "ambiguous"].includes(d.status)).map(d => <div key={d.id} role="status" className={`mt-2 text-xs text-error ${message.role === "user" ? "text-right" : ""}`}>
    <span>{t(d.status === "ambiguous" ? "chat.deliveryUnconfirmed" : "chat.deliveryFailed")}</span>
    <button type="button" disabled={archived} className="ml-2 text-accent disabled:opacity-40" onClick={() => retryDelivery(d)}>{t(d.status === "ambiguous" ? "chat.retryDuplicate" : "chat.retryDelivery")}</button>
@@ -1591,18 +1740,34 @@ export function ConversationChat({
  </div>;})())}
       </>}
       hasMessages={timeline.length > 0}
-      streamNode={bubbles.length || progresses.some(p=>p.phase!=="idle") ? <>{bubbles.map(b => { const phase = pendingResponsePhase(b, activities, messages); if (!b.text && (phase === null || ownsToolGroup(b) || progresses.some(p=>p.agent_id===b.agentId))) return null; return <div key={`${b.agentId}:${b.callId}:${b.runId}`}>{agentName(b.agentId) && <p className="mb-2 text-[10px] font-semibold uppercase text-text-muted">{agentName(b.agentId)}</p>}{b.text ? <StreamingBubble text={b.text} /> : <ThinkingMessagePlaceholder preparing={b.optimistic || phase === "preparing"} />}</div>; })}
+      streamNode={bubbles.length || progresses.some(p=>p.phase!=="idle" || awaitingProgressMessage(p)) ? <>{bubbles.map(b => { const phase = pendingResponsePhase(b, activities, messages); if (b.text || phase === null || ownsToolGroup(b) || progresses.some(p=>p.agent_id===b.agentId)) return null; return <ThinkingMessagePlaceholder key={`${b.agentId}:${b.callId}:${b.runId}`} preparing={b.optimistic}/>; })}
         {progresses.map(p => {
-          if (p.phase === "idle" || ownsToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)}) || bubbles.some(b=>b.agentId===p.agent_id && b.text)
-            || activities.some(tool=>tool.agent_id===p.agent_id && tool.status==="running")) return null;
-          if (p.phase === "preparing_tool" && p.tool_name) {
-            if (!isVisibleChatTool(p.tool_name) || activities.some(tool=>tool.agent_id===p.agent_id && tool.call_id===p.call_id)) return null;
-            return <ChatToolActivity key={`preparing-${p.agent_id}`} tools={[{id:`preparing-${p.run_id}-${p.call_id}`,callId:p.call_id,agentId:p.agent_id ?? 0,threadId:p.thread_id ?? "",name:p.tool_name,reason:"",state:"preparing",startedAt:Date.parse(p.started_at)}]} registry={toolVisualRegistry}/>;
-          }
-          return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`} preparing={p.phase!=="thinking"}/>;
+          const continuingKey = p.phase === "continuing" ? responseToolGroup({
+            continuing: true,
+            agentId: p.agent_id,
+            threadId: p.thread_id,
+            afterMessageId: p.after_message_id,
+            createdAt: Date.parse(p.started_at),
+          }, timeline, messages) : undefined;
+          // Hidden approval calls still own a response until their card is
+          // rendered. Old cards and verdict edits cannot settle a later turn.
+          const approvalDelivered = messages.some(m => m.role === "agent" && m.component_kind === "approval"
+            && m.agent_id === p.agent_id && m.id > p.after_message_id);
+          // An acknowledgement or progress message is not completion. Keep
+          // Thinking until a live text stream or pulsing tool owns feedback.
+          const finalDelivered = messages.some(m => m.role === "agent" && !m.component_kind
+            && m.phase === "final" && m.agent_id === p.agent_id && m.id > p.after_message_id);
+          if (finalDelivered) return null;
+          if (awaitingProgressMessage(p)) return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`}/>;
+          if (p.phase === "idle" || approvalDelivered || (continuingKey && continuingToolKeys.has(continuingKey)) || ownsToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)}) || bubbles.some(b=>b.agentId===p.agent_id && b.text && !b.done)) return null;
+          return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`}/>;
         })}
       </> : null}
       emptyMessage={emptyMessage}
+      welcomeText={welcomeText}
+      suggestions={suggestions}
+      onSuggestion={(suggestion) => { void insertText(suggestion.text); }}
+      leadingAction={leadingAction}
       headerActions={headerActions}
       bottomRef={bottomRef}
       inputRef={inputRef}
@@ -1630,7 +1795,7 @@ export function ConversationChat({
       onDelete={deleteConversation}
     />
   );
-}
+});
 
 // ─── inbox tab ───────────────────────────────────────────────────────
 
@@ -1648,18 +1813,23 @@ function InboxTab({
   onOpenConversation,
   projectId,
   instanceId,
+  visible = true,
 }: {
   onOpenConversation: (conversationID: string) => void;
   projectId: string;
   instanceId?: number;
+  visible?: boolean;
 }) {
   const { t, relativeTime, statusLabel } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const [items, setItems] = useState<InboxItem[]>([]);
   const [note, setNote] = useState("");
  const [total, setTotal] = useState<number | null>(null);
- const [cursor,setCursor]=useState("");
- const expandedRef=useRef(false);
+  const [cursor,setCursor]=useState("");
+  const expandedRef=useRef(false);
+  const scrollRef=useRef<HTMLDivElement|null>(null);
+  const scrollPositionRef=useRef(0);
+  useLayoutEffect(() => {if(visible && scrollRef.current)scrollRef.current.scrollTop=scrollPositionRef.current;},[visible,items.length]);
 
   const load = useCallback(async () => {
     try {
@@ -1697,7 +1867,7 @@ function InboxTab({
 
   return (
     <div className="flex-1 min-h-0 flex flex-col">
-      <div className="flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-3">
+      <div ref={scrollRef} onScroll={event=>{scrollPositionRef.current=event.currentTarget.scrollTop;}} className="flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-3">
  <div className="flex gap-3 text-xs"><button className="text-accent" onClick={load}>{t("inbox.refresh")}</button>{cursor&&<button className="text-accent" onClick={loadMore}>{t("inbox.loadMore")}</button>}</div>
         {items.length === 0 ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-text-muted">
@@ -1999,16 +2169,44 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
 
 // ─── root panel ──────────────────────────────────────────────────────
 
-export default function ConversationsPanel({ projectId, instanceId }: NativePanelProps) {
+const TOOL_DISPLAY_STORAGE_KEY = "conversations:tool-display:v1";
+interface ToolDisplayPreferences {
+  showCompletion: boolean;
+  showDuration: boolean;
+}
+function readToolDisplayPreferences(): ToolDisplayPreferences {
+  const defaults = { showCompletion: false, showDuration: false };
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(TOOL_DISPLAY_STORAGE_KEY) || "null");
+    if (!saved || typeof saved !== "object") return defaults;
+    return { showCompletion: saved.showCompletion === true, showDuration: saved.showDuration === true };
+  } catch { return defaults; }
+}
+
+export default function ConversationsPanel({ projectId, instanceId, workspaceRail: WorkspaceRail }: NativePanelProps) {
   const { t, relativeTime } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const [tab, setTab] = useState<"chats" | "inbox" | "telegram">("chats");
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [nextConversationCursor, setNextConversationCursor] = useState("");
   const [unread, setUnread] = useState<Map<string, UnreadEntry>>(new Map());
   const [selectedId, setSelectedId] = useState("");
+  const [mobileDetail, setMobileDetail] = useState(false);
+  const listScrollRef = useRef<HTMLDivElement | null>(null);
+  const listScrollPositionRef = useRef(0);
+  const mobileBackRef = useRef<HTMLButtonElement | null>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  const wasMobileDetailRef = useRef(false);
   const [showArchived, setShowArchived] = useState(false);
+  const [listEventRevision, setListEventRevision] = useState(0);
+  const activeConversations = useConversationActivity(projectId, instanceId, !showArchived, () => setListEventRevision(value => value + 1));
   const [newOpen, setNewOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [toolDisplay, setToolDisplay] = useState<ToolDisplayPreferences>(readToolDisplayPreferences);
+  useEffect(() => {
+    try { window.localStorage.setItem(TOOL_DISPLAY_STORAGE_KEY, JSON.stringify(toolDisplay)); } catch {}
+  }, [toolDisplay]);
   const [agents, setAgents] = useState<AgentInfo[] | null>(null);
   const [agentsError, setAgentsError] = useState("");
   const [inboxItems, setInboxItems] = useState<InboxItem[]>([]);
@@ -2017,39 +2215,54 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
   // Same breakpoint the dashboard chat page uses for its right-hand
   // context column.
   const hasContextColumn = useMediaQuery("(min-width: 1024px)");
+  const isMobile = useMediaQuery("(max-width: 767px)");
+  useEffect(() => { if (!isMobile) setMobileDetail(false); }, [isMobile]);
+  useLayoutEffect(() => {
+    if (isMobile && !mobileDetail && tab === "chats" && listScrollRef.current) listScrollRef.current.scrollTop = listScrollPositionRef.current;
+  }, [isMobile, mobileDetail, tab, conversations.length]);
+  useLayoutEffect(() => {
+    if (!isMobile) { wasMobileDetailRef.current = false; return; }
+    if (mobileDetail) mobileBackRef.current?.focus();
+    else if (wasMobileDetailRef.current) {
+      const row = Array.from(listScrollRef.current?.querySelectorAll<HTMLButtonElement>("button[data-conversation-id]") ?? []).find(button => button.dataset.conversationId === selectedId);
+      (returnFocusRef.current?.isConnected ? returnFocusRef.current : row)?.focus();
+    }
+    wasMobileDetailRef.current = mobileDetail;
+  }, [isMobile, mobileDetail, selectedId, tab]);
 
-  useEffect(()=>{setConversations([]);setSelectedId("");},[projectId,instanceId,showArchived]);
+  useEffect(()=>{setConversations([]);setNextConversationCursor("");setSelectedId("");setMobileDetail(false);},[projectId,instanceId,showArchived]);
   const listStateRef=useRef({scope:"",count:0,selected:""});
   const listScope=`${projectId}:${instanceId}:${showArchived}`;
   listStateRef.current=listStateRef.current.scope===listScope ? {scope:listScope,count:conversations.length,selected:selectedId} : {scope:listScope,count:0,selected:""};
   const loadConversations = useCallback(async () => {
     const snapshot={...listStateRef.current};
     try {
-      const [chats, unreadEntries, inbox] = await Promise.all([
-        refreshConversationList(agentScopedPath(`/chats${showArchived ? "?archived=1" : ""}`, instanceId),conversationsClient,snapshot.count,snapshot.selected),
+      const [page, unreadEntries, inbox] = await Promise.all([
+        refreshConversationPage(agentScopedPath(`/chats${showArchived ? "?archived=1" : ""}`, instanceId),conversationsClient,snapshot.count,snapshot.selected),
         apiGet<UnreadEntry[]>(agentScopedPath("/unread-summary", instanceId), projectId),
         apiGet<InboxPage>(agentScopedPath("/inbox?page=1&limit=100", instanceId), projectId),
       ]);
       if(snapshot.scope!==listStateRef.current.scope)return;
       const scoped = projectId
-        ? chats.filter((c) => !c.project_id || c.project_id === projectId)
-        : chats;
-      if(listStateRef.current.count<=Math.max(100,snapshot.count))setConversations(scoped);
+        ? page.rows.filter((c) => !c.project_id || c.project_id === projectId)
+        : page.rows;
+      if(listStateRef.current.count<=Math.max(100,snapshot.count)){setConversations(scoped);setNextConversationCursor(page.nextCursor);}
       setUnread(new Map(unreadEntries.map((e) => [e.conversation_id, e])));
       setInboxItems(inbox.items);setInboxTotal(inbox.total);setInboxAttention(inbox.attention ?? {});
       setSelectedId((current) =>
-        (scoped.some(row=>row.id===current) ? current : scoped[0]?.id) || "",
+        (scoped.some(row=>row.id===current) ? current : isMobile ? "" : scoped[0]?.id) || "",
       );
     } catch {
       /* transient */
     }
-  }, [projectId, instanceId, showArchived]);
+  }, [projectId, instanceId, showArchived, isMobile]);
 
   useEffect(() => {
     loadConversations();
     const interval = window.setInterval(loadConversations, 8000);
     return () => window.clearInterval(interval);
   }, [loadConversations]);
+  useEffect(() => { if (listEventRevision) void loadConversations(); }, [listEventRevision, loadConversations]);
 
   // Agent directory, fetched lazily the first time a dialog needs it.
   const ensureAgents = useCallback(() => {
@@ -2067,44 +2280,79 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
     () => conversations.find((c) => c.id === selectedId) ?? null,
     [conversations, selectedId],
   );
+  useEffect(() => {
+    if (isMobile && mobileDetail && !selected && !newOpen) setMobileDetail(false);
+  }, [isMobile, mobileDetail, selected, newOpen]);
 
-  // Pending inbox items become attention markers: a severity dot on
+  // Pending inbox items become attention markers: a typed icon on
   // the conversation row and a count badge on the Inbox tab. Ranks:
   // error alert > warn alert > approval > info alert; reports count
-  // in the badge but never earn a dot.
+  // in the badge but never earn an attention icon.
   const attentionByConv = useMemo(() => new Map(Object.entries(inboxAttention)), [inboxAttention]);
   const inboxHasError = Object.values(inboxAttention).some(rank => rank === 4);
-  const attentionDotClass = (r: number) =>
-    r >= 4 ? "bg-error" : r === 3 ? "bg-warn" : r === 2 ? "bg-accent" : "bg-info";
+  const attentionIconClass = (r: number) =>
+    r >= 4 ? "text-error" : r === 3 ? "text-warn" : r === 2 ? "text-warn" : "text-info";
 
   // Selection moved on — close the details dialog so its state can
   // never be reused against the next conversation (the dashboard's
   // ChatMain guards the same way).
   useEffect(() => {
     setDetailsOpen(false);
+    setWorkspaceOpen(false);
   }, [selectedId]);
 
   const openDetails = () => {
+    ensureAgents();
+    if (WorkspaceRail && !hasContextColumn) {
+      setWorkspaceOpen(true);
+      return;
+    }
+    setDetailsOpen(true);
+  };
+
+  const openManage = () => {
     ensureAgents();
     setDetailsOpen(true);
   };
 
   const openConversation = async (conversationID: string) => {
     try {
+      if (isMobile) returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       const conv=await apiGet<Conversation>(`/chats?id=${encodeURIComponent(conversationID)}`,projectId);
       setConversations(current => current.some(c=>c.id===conv.id) ? current : [conv,...current]);
-      setTab("chats");setSelectedId(conversationID);
+      if (!isMobile) setTab("chats");
+      setSelectedId(conversationID);
+      if (isMobile) setMobileDetail(true);
     } catch(err) {setAgentsError(String(err));}
   };
 
   return (
     <div className="h-full min-h-0 flex flex-col bg-bg text-text">
-      <header className="shrink-0 border-b border-border px-4 py-3 flex items-center gap-3">
-        <div>
-          <h1 className="text-sm font-semibold">{t("panel.title")}</h1>
-          <p className="text-xs text-text-muted">{t("panel.description")}</p>
+      <header className={`${isMobile && mobileDetail ? "hidden" : "flex"} shrink-0 border-b border-border px-3 py-2 md:px-4 md:py-3 items-center gap-2 md:gap-3`}>
+        {isMobile && tab === "telegram" && (
+          <button type="button" onClick={() => setTab("chats")} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded text-text-muted hover:bg-bg-input hover:text-text" aria-label={t("panel.backToChats")}>
+            <Glyph d={GLYPH_BACK} size={18} />
+          </button>
+        )}
+        <div className="min-w-0">
+          <h1 className="text-sm font-semibold">{isMobile && tab === "telegram" ? t("panel.telegram") : t("panel.title")}</h1>
+          <p className="hidden md:block text-xs text-text-muted">{t("panel.description")}</p>
         </div>
-        <nav className="ml-auto flex items-center gap-1">
+        {isMobile && tab === "chats" && !showArchived && (
+          <button type="button" onClick={() => { ensureAgents(); setNewOpen(true); }} className="ml-auto inline-flex h-11 w-11 shrink-0 items-center justify-center rounded bg-accent text-bg" aria-label={t("chat.new")}>
+            <Glyph d={GLYPH_PLUS} size={18} />
+          </button>
+        )}
+        {isMobile && (
+          <details className={`relative ${tab === "chats" ? "" : "ml-auto"}`}>
+            <summary role="button" className="flex h-11 w-11 cursor-pointer list-none items-center justify-center rounded text-text-muted hover:bg-bg-input hover:text-text" aria-label={t("panel.moreOptions")}><Glyph d={GLYPH_MORE} size={18} /></summary>
+            <div className="absolute right-0 top-full z-40 mt-2 min-w-52 rounded-md border border-border bg-bg-card p-1 shadow-lg">
+              {tab !== "telegram" && <button type="button" onClick={event => { event.currentTarget.closest("details")!.open = false; setTab("telegram"); }} className="block w-full rounded px-3 py-2 text-left text-sm text-text hover:bg-bg-input">{t("panel.telegram")}</button>}
+              <button type="button" onClick={event => { event.currentTarget.closest("details")!.open = false; setTab("chats"); setMobileDetail(false); setShowArchived(value => !value); }} className="block w-full rounded px-3 py-2 text-left text-sm text-text hover:bg-bg-input">{t(showArchived ? "chat.backToActive" : "chat.archivedTitle")}</button>
+            </div>
+          </details>
+        )}
+        <nav className="ml-auto hidden md:flex items-center gap-1">
           {(
             [
               { id: "chats", label: t("panel.chats"), glyph: GLYPH_CHAT },
@@ -2136,22 +2384,42 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
         </nav>
       </header>
 
-      {tab === "inbox" ? (
-        <InboxTab
+      {isMobile && tab !== "telegram" && !mobileDetail && (
+        <nav className="flex shrink-0 border-b border-border" aria-label={t("panel.title")}>
+          {(["chats", "inbox"] as const).map(entry => (
+            <button key={entry} type="button" onClick={() => setTab(entry)} aria-current={tab === entry ? "page" : undefined} className={`flex min-h-11 flex-1 items-center justify-center gap-2 border-b-2 px-3 text-sm ${tab === entry ? "border-accent text-text" : "border-transparent text-text-muted"}`}>
+              {entry === "chats" ? t("panel.chats") : t("inbox.title")}
+              {entry === "inbox" && inboxTotal > 0 && <span className={`rounded-full px-1.5 py-0.5 text-xs text-bg ${inboxHasError ? "bg-error" : "bg-accent"}`}>{inboxTotal}</span>}
+            </button>
+          ))}
+        </nav>
+      )}
+
+      {tab === "inbox" && (
+        <div className={`${isMobile && mobileDetail ? "hidden" : "flex"} flex-1 min-h-0 flex-col`} aria-hidden={isMobile && mobileDetail}>
+          <InboxTab
           onOpenConversation={openConversation}
           projectId={projectId}
           instanceId={instanceId}
+          visible={!(isMobile && mobileDetail)}
         />
-      ) : tab === "telegram" ? (
+        </div>
+      )}
+      {tab === "telegram" && !mobileDetail && (
         <TelegramTab projectId={projectId} conversations={conversations.filter((item) => !item.project_id || item.project_id === projectId)} />
-      ) : (
+      )}
+      {(tab === "chats" || (isMobile && mobileDetail)) && (
         <main
           className={`flex-1 min-h-0 grid grid-cols-1 md:grid-cols-[260px_minmax(0,1fr)] md:divide-x md:divide-border ${
-            hasContextColumn && selected ? "lg:grid-cols-[260px_minmax(0,1fr)_280px]" : ""
+            hasContextColumn && selected
+              ? WorkspaceRail
+                ? "lg:grid-cols-[260px_minmax(0,1fr)_320px]"
+                : "lg:grid-cols-[260px_minmax(0,1fr)_280px]"
+              : ""
           }`}
         >
-          <aside className="min-h-0 flex flex-col">
-            <div className="shrink-0 border-b border-border p-3 flex items-center gap-2">
+          <aside className={`${isMobile && mobileDetail ? "hidden" : "flex"} min-h-0 flex-col`} aria-hidden={isMobile && mobileDetail}>
+            <div className="hidden md:flex shrink-0 border-b border-border p-3 items-center gap-2">
               <button
                 type="button"
                 onClick={() => {
@@ -2185,7 +2453,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                 {t("common.archived")}
               </div>
             )}
-            <div className="flex-1 min-h-0 overflow-auto">
+            <div ref={listScrollRef} onScroll={event=>{listScrollPositionRef.current=event.currentTarget.scrollTop;}} className="flex-1 min-h-0 overflow-auto">
             {conversations.length === 0 ? (
               <div className="p-6 text-sm text-text-muted flex flex-col items-center gap-3 text-center">
                 <span className="text-text-dim">
@@ -2199,15 +2467,17 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                 )}
               </div>
             ) : (
-              <ul className="divide-y divide-border">
-                <li><MoreConversations path={agentScopedPath(`/chats${showArchived?"?archived=1":""}`,instanceId)} projectId={projectId} rows={conversations} onRows={setConversations}/></li>
+              <ul className="m-0 list-none divide-y divide-border p-0">
                 {conversations.map((c) => {
                   const unreadCount = unread.get(c.id)?.unread ?? 0;
+                  const attentionRank = attentionByConv.get(c.id) ?? 0;
+                  const attentionLabel = t(attentionRank === 2 ? "approval.review" : "inbox.unreadAlert");
                   return (
                     <li key={c.id}>
                       <button
                         type="button"
-                        onClick={() => setSelectedId(c.id)}
+                        data-conversation-id={c.id}
+                        onClick={event => { listScrollPositionRef.current=listScrollRef.current?.scrollTop ?? 0; returnFocusRef.current=event.currentTarget; setSelectedId(c.id); if (isMobile) setMobileDetail(true); }}
                         className={`w-full text-left px-4 py-3 border-l-2 transition-colors ${
                           c.id === selectedId
                             ? "border-accent bg-bg-hover"
@@ -2215,14 +2485,19 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                         }`}
                       >
                         <div className="flex items-center gap-2">
-                          {(attentionByConv.get(c.id) ?? 0) > 0 && (
+                          {attentionRank > 0 && (
                             <span
-                              className={`w-2 h-2 rounded-full shrink-0 ${attentionDotClass(attentionByConv.get(c.id) ?? 0)}`}
-                              title={t("inbox.pendingItem")}
-                            />
+                              className={`inline-flex shrink-0 ${attentionIconClass(attentionRank)}`}
+                              role="img"
+                              aria-label={attentionLabel}
+                              title={attentionLabel}
+                            >
+                              <Glyph d={GLYPH_ALERT} size={14} />
+                            </span>
                           )}
-                          <span className="text-sm font-medium text-text truncate">{c.title}</span>
-                          {unreadCount > 0 && c.id !== selectedId && (
+                          <span className="min-w-0 flex-1 truncate text-sm font-medium text-text">{c.title}</span>
+                          <ConversationActivityIndicator active={activeConversations.has(c.id)} />
+                          {unreadCount > 0 && !(c.id === selectedId && (!isMobile || mobileDetail) && tab === "chats") && (
                             <span className="ml-auto shrink-0 text-xs px-1.5 py-0.5 rounded-full bg-accent text-bg">
                               {unreadCount}
                             </span>
@@ -2247,41 +2522,125 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                     </li>
                   );
                 })}
+                {nextConversationCursor && <li><MoreConversations path={agentScopedPath(`/chats${showArchived?"?archived=1":""}`,instanceId)} projectId={projectId} rows={conversations} cursor={nextConversationCursor} onRows={setConversations} onCursor={setNextConversationCursor}/></li>}
               </ul>
             )}
             </div>
           </aside>
-          {selected ? (
+          {selected && (!isMobile || mobileDetail) ? (
             <ConversationChat key={`${selected.project_id}:${selected.id}`}
               conversation={selected}
               archived={showArchived}
-              onOpenDetails={openDetails}
+              showToolCompletion={toolDisplay.showCompletion}
+              showToolDuration={toolDisplay.showDuration}
+              leadingAction={isMobile && <button ref={mobileBackRef} type="button" onClick={() => setMobileDetail(false)} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded text-text-muted hover:bg-bg-input hover:text-text" aria-label={t(tab === "inbox" ? "panel.backToInbox" : "panel.backToChats")}><Glyph d={GLYPH_BACK} size={18} /></button>}
+              headerActions={<details className="relative">
+                <summary role="button" className={`flex cursor-pointer list-none items-center rounded text-xs text-text-muted hover:bg-bg-input hover:text-text ${isMobile ? "h-11 w-11 justify-center border border-border" : "border border-border px-2 py-1.5"}`} aria-label={isMobile ? t("panel.conversationOptions") : undefined}>{isMobile ? <Glyph d={GLYPH_MORE} size={16} /> : t("chat.toolDisplay")}</summary>
+                <div className="absolute right-0 top-full z-40 mt-1 min-w-52 rounded-md border border-border bg-bg-card p-3 shadow-lg">
+                  {isMobile && <button type="button" onClick={event => { event.currentTarget.closest("details")!.open = false; openDetails(); }} className="mb-3 block w-full rounded py-1 text-left text-xs text-text hover:bg-bg-input">{WorkspaceRail ? t("panel.workspace") : t("common.details")}</button>}
+                  {isMobile && <p className="mb-2 text-xs font-medium text-text-muted">{t("chat.toolDisplay")}</p>}
+                  <label className="flex cursor-pointer items-center gap-2 text-xs text-text">
+                    <input type="checkbox" checked={toolDisplay.showCompletion} onChange={event => setToolDisplay(current => ({...current, showCompletion: event.target.checked}))} />
+                    {t("chat.showToolCompletion")}
+                  </label>
+                  <label className="mt-3 flex cursor-pointer items-center gap-2 text-xs text-text">
+                    <input type="checkbox" checked={toolDisplay.showDuration} onChange={event => setToolDisplay(current => ({...current, showDuration: event.target.checked}))} />
+                    {t("chat.showToolDuration")}
+                  </label>
+                </div>
+              </details>}
+              onOpenDetails={isMobile ? undefined : openDetails}
               onActed={loadConversations}
               onRemoved={() => {
                 setConversations(current=>current.filter(c=>c.id!==selectedId));
                 setSelectedId("");
+                setMobileDetail(false);
               }}
             />
-          ) : (
+          ) : !isMobile ? (
             <section className="flex-1 flex flex-col items-center justify-center gap-3 text-text-muted">
               <span className="text-text-dim">
                 <Glyph d={GLYPH_CHECK} size={32} />
               </span>
               <p className="text-sm">{t("chat.select")}</p>
             </section>
-          )}
+          ) : null}
           {hasContextColumn && selected && (
             <div className="h-full min-h-0 overflow-hidden">
-              <ContextColumn
-                conversation={selected}
-                agents={agents}
-                onEnsureAgents={ensureAgents}
-                onManage={openDetails}
-                refreshHold={detailsOpen}
-              />
+              {WorkspaceRail ? (
+                <WorkspaceRail
+                  projectId={selected.project_id || projectId}
+                  agentId={selected.lead_agent_id}
+                  threadId={selected.thread_id}
+                  context={{ app: "conversations", kind: "conversation", id: selected.id }}
+                >
+                  <ContextColumn
+                    conversation={selected}
+                    agents={agents}
+                    onEnsureAgents={ensureAgents}
+                    onManage={openManage}
+                    refreshHold={detailsOpen}
+                    embedded
+                  />
+                </WorkspaceRail>
+              ) : (
+                <ContextColumn
+                  conversation={selected}
+                  agents={agents}
+                  onEnsureAgents={ensureAgents}
+                  onManage={openManage}
+                  refreshHold={detailsOpen}
+                />
+              )}
             </div>
           )}
         </main>
+      )}
+
+      {WorkspaceRail && !hasContextColumn && selected && workspaceOpen && (
+        <div className="fixed inset-0 z-[90] lg:hidden">
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/65"
+            onClick={() => setWorkspaceOpen(false)}
+            aria-label={t("common.close")}
+          />
+          <aside
+            className="absolute inset-y-0 right-0 flex w-[min(92vw,360px)] flex-col border-l border-border bg-bg shadow-2xl"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t("panel.workspace")}
+          >
+            <div className="flex h-10 shrink-0 items-center border-b border-border px-4">
+              <span className="text-xs font-semibold uppercase text-text-muted">{t("panel.workspace")}</span>
+              <button
+                type="button"
+                onClick={() => setWorkspaceOpen(false)}
+                className="ml-auto inline-flex h-8 w-8 items-center justify-center rounded text-lg text-text-muted hover:bg-bg-input hover:text-text"
+                aria-label={t("common.close")}
+              >
+                ×
+              </button>
+            </div>
+            <div className="min-h-0 flex-1">
+              <WorkspaceRail
+                projectId={selected.project_id || projectId}
+                agentId={selected.lead_agent_id}
+                threadId={selected.thread_id}
+                context={{ app: "conversations", kind: "conversation", id: selected.id }}
+              >
+                <ContextColumn
+                  conversation={selected}
+                  agents={agents}
+                  onEnsureAgents={ensureAgents}
+                  onManage={openManage}
+                  refreshHold={detailsOpen}
+                  embedded
+                />
+              </WorkspaceRail>
+            </div>
+          </aside>
+        </div>
       )}
 
       <NewConversationDialog
@@ -2292,12 +2651,15 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
         onClose={() => setNewOpen(false)}
         onCreated={(conversation) => {
           setNewOpen(false);
+          returnFocusRef.current = null;
+          setConversations(current => [conversation, ...current.filter(item => item.id !== conversation.id)]);
           setSelectedId(conversation.id);
+          if (isMobile) setMobileDetail(true);
           // Leaving archived view retriggers the load via the effect;
           // calling loadConversations here too would race the stale
           // archived query against the fresh one.
           if (showArchived) setShowArchived(false);
-          else loadConversations();
+          else if (!isMobile) loadConversations();
         }}
       />
 

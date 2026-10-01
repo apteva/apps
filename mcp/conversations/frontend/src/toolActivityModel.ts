@@ -24,7 +24,9 @@ export interface ToolActivity {
 
 export const MESSAGE_GROUP_GAP_MS = 5 * 60_000;
 export const TIME_MARKER_GAP_MS = 15 * 60_000;
+export interface TimelineStream { id: string; text: string; agentId?: number; startedAt: number }
 export type ChatTimelineItem =
+  | { kind: "stream"; key: string; ts: number; endTs: number; stream: TimelineStream }
   | { kind: "message"; key: string; ts: number; endTs: number; message: ChatMessageRow; compactBefore: boolean }
   | { kind: "tool"; key: string; ts: number; endTs: number; tool: ToolActivity }
   | { kind: "toolGroup"; key: string; ts: number; endTs: number; tools: ToolActivity[]; parallel: boolean }
@@ -54,11 +56,14 @@ export function buildChatTimeline(
   messages: ChatMessageRow[],
   tools: Iterable<ToolActivity>,
   now = Date.now(),
+  streams: TimelineStream[] = [],
 ): ChatTimelineItem[] {
   type RawItem =
+    | { kind: "stream"; ts: number; stream: TimelineStream }
     | { kind: "message"; ts: number; message: ChatMessageRow }
     | { kind: "tool"; ts: number; tool: ToolActivity };
   const raw: RawItem[] = [
+    ...streams.map(stream => ({kind: "stream" as const, ts: stream.startedAt, stream})),
     ...messages.map((message) => ({
       kind: "message" as const,
       ts: Date.parse(message.created_at) || 0,
@@ -91,6 +96,11 @@ export function buildChatTimeline(
   };
 
   for (const item of raw) {
+    if (item.kind === "stream") {
+      flushTools();
+      content.push({kind:"stream", key:`stream:${item.stream.id}`, ts:item.ts, endTs:item.ts, stream:item.stream});
+      continue;
+    }
     if (item.kind === "message") {
       flushTools();
       const previous = content[content.length - 1];
@@ -158,9 +168,22 @@ export function toolGroupDurationMs(tools: ToolActivity[], now: number): number 
   return total;
 }
 
+export function isApprovalRequestTool(name: string): boolean {
+  const normalized = name.trim().toLowerCase();
+  return normalized === "conversations_request_approval" || normalized.endsWith("_conversations_request_approval");
+}
+
 // Also filter stored rows from older app versions that recorded internal tools.
 export function isVisibleChatTool(name: string): boolean {
   const normalized = name.trim().toLowerCase();
-  return Boolean(normalized) && normalized !== "search_tools" && !normalized.startsWith("conversations_")
-    && !normalized.includes("_conversations_");
+  if (["", "search_tools", "send", "pace", "done", "wait", "think"].includes(normalized)) return false;
+  // Approval requests are represented by the durable approval card. Showing
+  // their internal tool activity as a second transcript row duplicates the
+  // decision UI and exposes an implementation detail to the operator.
+  if (isApprovalRequestTool(normalized)) return false;
+  // Core send reports between threads; reply sends and alerts already produce
+  // a message or card. Other Conversations tools
+  // (including attachment reads) belong in the shared activity timeline.
+  return !["conversations_send", "conversations_alert", "channels_send", "channels_respond"].some(base =>
+    normalized === base || normalized.endsWith(`_${base}`));
 }

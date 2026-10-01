@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.13.51
+version: 0.13.54
 description: |
   Send and receive email through AWS SES or Gmail and SMS/WhatsApp through
   Twilio. Tracks
@@ -105,7 +105,7 @@ provides:
     - { prefix: /webhooks/twilio-status, method: POST, no_auth: true }
   mcp_tools:
     # outbound
-    - { name: send_message,           description: "Send a message. Email routes through its registered sender's SES or Gmail connection; optional connection_id must match. Args: channel (email|sms|whatsapp), to (address or address[]), body?, subject?, body_html?, from?, reply_to?, in_reply_to?, references?, headers?, attachments? [{exactly one of storage_id|url|content_base64, filename?, content_type?, size_bytes?, disposition?, content_id?}], attachment_storage_ids?, media_url?, template_id?, vars?, prefer_channel?, idempotency_key?. Attachment-only messages are supported. WhatsApp accepts one media attachment; provider ContentSid templates cannot be combined with body or direct media. Returns normalized attachment metadata and never returns base64. Channel is explicit. Email addresses and E.164 numbers may be bare or use mailto:/tel:/whatsapp: prefixes; from defaults to the configured channel sender. Suppressed recipients return code=recipient_suppressed with address, matched address/domain, reason, source, and kind." }
+    - { name: send_message,           description: "Send a message. Email routes through its registered sender's SES or Gmail connection; optional connection_id must match. Args: channel (email|sms|whatsapp), to (address or address[]), body?, subject?, body_html?, from?, reply_to?, in_reply_to?, references?, headers?, attachments? [{exactly one of storage_id|url|content_base64, filename?, content_type?, size_bytes?, disposition?, content_id?}], attachment_storage_ids?, media_url?, template_id?, vars?, prefer_channel?, idempotency_key?. Attachment-only messages are supported. WhatsApp accepts one media attachment; provider ContentSid templates cannot be combined with body or direct media. Returns provider_message_id (opaque provider ID) separately from message_id_header (RFC email Message-ID when known; use this for threading), plus normalized attachment metadata and never base64. Channel is explicit. Email addresses and E.164 numbers may be bare or use mailto:/tel:/whatsapp: prefixes; from defaults to the configured channel sender. Suppressed recipients return code=recipient_suppressed with address, matched address/domain, reason, source, and kind." }
     - { name: send_message_template,  description: "Render a saved template + send. Args: template_id, to, vars?, attachments?, attachment_storage_ids?, idempotency_key?. Convenience over send_message with template_id." }
     - { name: message_get,            description: "Fetch one message by id — headers, status, channel, direction, delivery events, and normalized attachment metadata without raw bytes." }
     - { name: message_list,           description: "List messages with normalized attachment metadata. Filters: q? (sender, recipients, subject, and body), direction? (in|out), channel?, status?, since?, address? (canonical URI), limit?, offset?. Returns total for pagination." }
@@ -177,6 +177,9 @@ provides:
 
 runtime:
   kind: source
+  # Legacy databases rebuild the message-search index during their first
+  # upgrade. Allow that one-time work to finish before declaring boot failed.
+  startup_timeout_seconds: 600
   source:
     repo: github.com/apteva/apps
     ref: main

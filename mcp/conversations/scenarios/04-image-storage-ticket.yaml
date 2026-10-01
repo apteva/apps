@@ -26,6 +26,11 @@ budget:
   total_tokens: 500000
 trajectory_assert:
   - tool_called_with:
+      tool: conversations_send
+      args:
+        phase: acknowledgement
+      before: tickets_create
+  - tool_called_with:
       tool: tickets_create
       count: 1
       before: tickets_add_attachment

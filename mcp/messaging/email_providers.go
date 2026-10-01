@@ -93,6 +93,29 @@ func emailProviderConnection(bound *sdk.BoundIntegration) int64 {
 	return bound.ConnectionID
 }
 
+// SES replaces Message-ID on delivery. Its send API returns only the opaque
+// local part; the sending region supplies the domain used in the delivered
+// RFC header. If either component is unavailable, leave the header unknown
+// rather than confusing the provider ID with an RFC Message-ID.
+func sesMessageIDHeader(providerID, region string) string {
+	providerID = strings.TrimSpace(providerID)
+	region = strings.ToLower(strings.TrimSpace(region))
+	if providerID == "" || region == "" {
+		return ""
+	}
+	for _, c := range providerID {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_') {
+			return ""
+		}
+	}
+	for _, c := range region {
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+			return ""
+		}
+	}
+	return "<" + providerID + "@" + region + ".amazonses.com>"
+}
+
 func sendViaGmail(ctx *sdk.AppCtx, connectionID int64, in providerSendInput) (string, string, error) {
 	// Gmail has no separate recipient envelope: Bcc must be in the raw
 	// message handed to its send endpoint. The SES path intentionally omits it.

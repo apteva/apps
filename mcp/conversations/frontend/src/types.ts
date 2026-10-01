@@ -9,6 +9,7 @@ export interface Conversation {
   origin: string;
   audience?: string;
   directive?: string;
+  thread_id?: string;
   created_at: string;
   updated_at: string;
   archived_at?: string | null;
@@ -21,6 +22,7 @@ export interface CardComponent {
 }
 
 export interface Message {
+ phase?: string;
  revision?: number;
   id: number;
   conversation_id: string;
@@ -42,11 +44,14 @@ export interface ToolActivity {
   started_at: string; ended_at: string; duration_ms?: number; revision: number;
 }
 export interface ResponseProgress {
+ completion_message_id?: number;
  phase: "thinking" | "preparing" | "preparing_tool" | "running" | "continuing" | "idle";
  run_id: string; revision: number; after_message_id: number; started_at: string;
- tool_name?: string; call_id?: string;
+ tool_name?: string; call_id?: string; tool_started_at?: string;
 }
 export interface StreamFrame {
+ snapshot?: boolean;
+ frames?: StreamFrame[];
  response_progress?: ResponseProgress;
 
   created_at?: string;
@@ -62,11 +67,15 @@ export interface StreamFrame {
   done: boolean;
 }
 
-export interface InboxPage {items:InboxItem[];total:number;next_cursor:string;attention:Record<string,number>}
+export interface InboxProject {id:string;name:string}
+export interface InboxPage {items:InboxItem[];total:number;next_cursor:string;attention:Record<string,number>;projects?:InboxProject[];selected_project_id?:string}
 
 export interface InboxItem {
   message: Message;
   priority: number;
+  project_id?: string;
+  project_name?: string;
+  agent_name?: string;
 }
 
 export interface UnreadEntry {

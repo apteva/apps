@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -27,7 +28,11 @@ type recordingPlatform struct {
 	trackedEvents          []sdk.AgentEventRequest
 	appCalls               []capturedAppCall
 	spawns                 []sdk.ThreadSpawnRequest
+	realtimeSpawns         []sdk.RealtimeSpawnRequest
+	realtimeRenewals       []sdk.ThreadRef
+	realtimeSpawnHook      func(sdk.RealtimeSpawnRequest)
 	ensures                []sdk.ThreadEnsureRequest
+	ensureHook             func(sdk.ThreadEnsureRequest)
 	identity               *sdk.InstallIdentity
 	connections            map[int64]*sdk.PlatformConnection
 	integrationMu          sync.Mutex
@@ -41,6 +46,7 @@ type recordingPlatform struct {
 	duplicateSpawnReceipt  bool
 	omitSpawnReceipt       bool
 	killed                 []sdk.ThreadRef
+	projects               []sdk.PlatformProject
 }
 
 type capturedEvent struct {
@@ -70,6 +76,10 @@ func (p *recordingPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
 		return &sdk.InstallIdentity{AppName: appName, Version: "test", ProjectID: testProject, Bindings: map[string]any{}}, nil
 	}
 	return p.identity, nil
+}
+
+func (p *recordingPlatform) ListProjects() ([]sdk.PlatformProject, error) {
+	return append([]sdk.PlatformProject(nil), p.projects...), nil
 }
 
 func (p *recordingPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
@@ -138,6 +148,9 @@ func (p *recordingPlatform) SpawnThread(req sdk.ThreadSpawnRequest) (*sdk.Thread
 
 func (p *recordingPlatform) EnsureThread(req sdk.ThreadEnsureRequest) (*sdk.ThreadEnsureResult, error) {
 	p.ensures = append(p.ensures, req)
+	if p.ensureHook != nil {
+		p.ensureHook(req)
+	}
 	if p.ensureErr != nil {
 		return nil, p.ensureErr
 	}
@@ -160,6 +173,22 @@ func (p *recordingPlatform) KillThread(agentID int64, threadID string) error {
 	return nil
 }
 
+func (p *recordingPlatform) SpawnRealtimeThread(req sdk.RealtimeSpawnRequest) (*sdk.RealtimeSpawnResult, error) {
+	p.realtimeSpawns = append(p.realtimeSpawns, req)
+	if p.realtimeSpawnHook != nil {
+		p.realtimeSpawnHook(req)
+	}
+	if p.failSpawn {
+		return nil, fmt.Errorf("realtime unavailable")
+	}
+	return &sdk.RealtimeSpawnResult{Status: "created", ThreadID: req.ThreadID, AudioBridgeURL: "wss://example.test/audio?token=secret"}, nil
+}
+
+func (p *recordingPlatform) RenewRealtimeAudioBridge(agentID int64, threadID string) (*sdk.RealtimeSpawnResult, error) {
+	p.realtimeRenewals = append(p.realtimeRenewals, sdk.ThreadRef{AgentID: agentID, ThreadID: threadID})
+	return &sdk.RealtimeSpawnResult{Status: "exists", ThreadID: threadID, AudioBridgeURL: "wss://example.test/audio?token=renewed"}, nil
+}
+
 func (p *recordingPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
 	p.appCalls = append(p.appCalls, capturedAppCall{App: app, Tool: tool, Input: input})
 	return nil
@@ -169,7 +198,7 @@ const testProject = "proj-1"
 
 func newTestEnv(t *testing.T) (*App, *sdk.AppCtx, *recordingPlatform) {
 	t.Helper()
-	platform := &recordingPlatform{}
+	platform := &recordingPlatform{projects: []sdk.PlatformProject{{ID: testProject, Name: "Project One"}}}
 	spawnedThreads = sync.Map{}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProject), tk.WithPlatform(platform))
 	app := &App{}
@@ -1970,5 +1999,34 @@ func TestCreateChatWithKeyIsPublicFindOrCreate(t *testing.T) {
 	conv, _ := app.store.GetConversation(created.(map[string]any)["conversation_id"].(string))
 	if conv.Audience != "operator" {
 		t.Fatalf("agent-created audience = %q, want operator", conv.Audience)
+	}
+}
+
+func TestInboundResponseCanCompleteBeforeEnsureReceipt(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	mountedCtx = ctx
+	conv := mkConversation(t, app, 41)
+	app.streamer.telemetryConnected = true
+	called := false
+	platform.ensureHook = func(req sdk.ThreadEnsureRequest) {
+		if len(req.Events) == 0 {
+			return
+		}
+		called = true
+		snapshot := app.streamer.snapshot(conv.ID)
+		if len(snapshot.Frames) != 1 || snapshot.Frames[0].Progress == nil {
+			t.Fatal("progress not registered before Core started")
+		}
+		raw, _ := json.Marshal(map[string]string{"message": req.Events[0].Message.(string)})
+		app.streamer.Ingest("event.received", 41, req.ThreadID, string(raw), time.Now())
+		app.streamer.Ingest("llm.start", 41, req.ThreadID, `{}`, time.Now())
+		app.streamer.finishResponse(conv.ID, 41)
+	}
+	postUserMessage(t, app, conv, "Fast reply")
+	if !called {
+		t.Fatal("event not delivered")
+	}
+	if snapshot := app.streamer.snapshot(conv.ID); len(snapshot.Frames) != 0 {
+		t.Fatal("late receipt restarted finished Thinking")
 	}
 }

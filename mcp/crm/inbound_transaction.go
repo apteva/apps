@@ -91,6 +91,10 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 		var aid, cid, convoID int64
 		err = tx.QueryRow(`SELECT id,contact_id,COALESCE(conversation_id,0) FROM contact_activities WHERE project_id=? AND messaging_install_id=? AND messaging_id=?`, pid, sourceID, body.MessageID).Scan(&aid, &cid, &convoID)
 		if err == nil {
+			repaired, err := repairMissingInboundBodyTx(tx, pid, cid, aid, body)
+			if err != nil {
+				return nil, err
+			}
 			if err = insertActivityAttachmentsTx(tx, pid, aid, body.Attachments); err != nil {
 				return nil, err
 			}
@@ -100,7 +104,7 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 			if err = deliverQueuedCRMEvents(ctx); err != nil {
 				ctx.Logger().Warn("inbound events pending", "err", err)
 			}
-			return map[string]any{"ok": true, "deduped": true, "contact_id": cid, "activity_id": aid, "conversation_id": convoID}, nil
+			return map[string]any{"ok": true, "deduped": true, "body_repaired": repaired, "contact_id": cid, "activity_id": aid, "conversation_id": convoID}, nil
 		}
 		if err != sql.ErrNoRows {
 			return nil, err
@@ -180,15 +184,31 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 	} else {
 		refs := append([]string{body.InReplyTo}, body.References...)
 		for _, ref := range refs {
-			if ref == "" {
-				continue
-			}
-			err = tx.QueryRow(`SELECT id FROM contact_conversations WHERE project_id=? AND contact_id=? AND channel='email' AND (root_message_id=? OR id IN (SELECT conversation_id FROM contact_activities WHERE project_id=? AND contact_id=? AND message_id_header=?)) ORDER BY id LIMIT 1`, pid, cid, ref, pid, cid, ref).Scan(&convoID)
-			if err == nil {
-				break
-			}
-			if err != sql.ErrNoRows {
+			var sesFallback bool
+			convoID, sesFallback, err = emailConversationByReferenceTx(tx, pid, cid, ref)
+			if err != nil {
 				return nil, err
+			}
+			if convoID != 0 {
+				// Repair the root of a legacy SES conversation as its first
+				// matching reply arrives. Also correct an SES header whose
+				// delivered domain differs from the sending region's usual form.
+				if sesFallback {
+					var root string
+					if err = tx.QueryRow(`SELECT COALESCE(root_message_id,'') FROM contact_conversations WHERE project_id=? AND contact_id=? AND id=?`, pid, cid, convoID).Scan(&root); err != nil {
+						return nil, err
+					}
+					providerID := sesProviderIDFromReference(ref)
+					if root == "" || root == providerID || sesProviderIDFromReference(root) == providerID {
+						_, err = tx.Exec(`UPDATE contact_conversations SET root_message_id=?
+							WHERE project_id=? AND contact_id=? AND id=? AND COALESCE(root_message_id,'')=?`,
+							strings.TrimSpace(ref), pid, cid, convoID, root)
+						if err != nil {
+							return nil, err
+						}
+					}
+				}
+				break
 			}
 		}
 	}
@@ -218,13 +238,7 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 			return nil, err
 		}
 	}
-	text := body.BodyText
-	if text == "" && body.BodyHTML != "" {
-		text = plainTextFromHTML(body.BodyHTML)
-	}
-	if body.Channel == "email" && body.Subject != "" {
-		text = body.Subject + "\n\n" + text
-	}
+	text := inboundActivityBody(body)
 	replyTo := ""
 	for key, value := range body.Headers {
 		if strings.EqualFold(key, "Reply-To") {

@@ -463,7 +463,8 @@ textarea { min-height: 92px; resize: vertical; }
     transition: transform .2s ease;
     box-shadow: 18px 0 50px rgba(0,0,0,.18);
   }
-  .sidebar.open { transform: translateX(0); }
+  .sidebar:not(.open) { visibility: hidden; }
+  .sidebar.open { visibility: visible; transform: translateX(0); }
   .mobile-close { display: inline-flex; }
   .nav-scrim { position: fixed; inset: 0; display: block; border: 0; background: rgba(5, 24, 21, .5); z-index: 29; }
   .content { padding: 20px 16px; }
@@ -504,4 +505,25 @@ textarea { min-height: 92px; resize: vertical; }
   .checkout-heading { align-items: flex-start; flex-direction: column; gap: 7px; }
   .offer-option { grid-template-columns: auto minmax(0, 1fr); }
   .offer-price { grid-column: 2; text-align: left; }
+}
+
+.markdown { overflow-wrap: anywhere; white-space: normal; line-height: 1.65; }
+.markdown pre { padding: 1rem; overflow-x: auto; background: var(--surface, #f3f4f6); border-radius: .5rem; }
+.markdown table { display: block; overflow-x: auto; border-collapse: collapse; }
+.markdown td, .markdown th { border: 1px solid #d1d5db; padding: .5rem; }
+.markdown img, .lesson-reader video { max-width: 100%; }
+.lesson-reader video { width: 100%; border-radius: .6rem; background: #111; }
+.quiz-option { display: flex; align-items: center; gap: .65rem; padding: .5rem; }
+.quiz-option input { width: auto; }
+fieldset { border: 1px solid #d1d5db; border-radius: .5rem; padding: .75rem; min-width: 0; }
+legend { padding: 0 .3rem; font-weight: 600; }
+.profile-form { min-width: 0; width: min(100%, 32rem); }
+.certificate { border: 2px solid var(--accent, #059669); padding: 1.5rem; border-radius: .75rem; margin: 1rem 0; text-align: center; }
+:focus-visible { outline: 3px solid var(--accent, #059669); outline-offset: 3px; }
+@media print {
+  .mobile-header, .sidebar, .nav-scrim, .topbar, .alert,
+  .course-layout > .pane, .course-heading, .purchase-card, .lesson-layout { display: none !important; }
+  .app-shell, .content, .course-layout, .course-content { display: block; min-height: 0; padding: 0; margin: 0; border: 0; background: white; }
+  .certificate { margin: 1cm; padding: 1cm; break-inside: avoid; }
+  .certificate button { display: none; }
 }

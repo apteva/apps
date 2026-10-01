@@ -39,6 +39,7 @@ type assetSearchHit struct {
 	SessionTitle string      `json:"session_title"`
 	SessionDate  string      `json:"session_date"`
 	AttachedAt   string      `json:"attached_at"`
+	SessionNotes string      `json:"-"`
 	IsDerivative bool        `json:"is_derivative"`
 	Uses         []searchUse `json:"uses"`
 	MatchReason  string      `json:"match_reason"`
@@ -197,7 +198,7 @@ func (a *App) search(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		page, err := a.searchAssets(ctx.AppDB(), o, cursor)
+		page, err := a.searchAssetsLive(ctx, o, cursor)
 		if err != nil {
 			return nil, err
 		}
@@ -237,7 +238,7 @@ func (a *App) search(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 func (a *App) searchAssets(db *sql.DB, o searchOptions, cursor searchCursor) (searchPage[assetSearchHit], error) {
 	page := searchPage[assetSearchHit]{Items: []assetSearchHit{}}
-	q := `SELECT a.id,a.session_id,a.storage_install_id,a.storage_file_id,a.name,a.kind,a.content_type,a.sha256,a.size_bytes,a.review_status,a.media_status,a.media_rating,s.brand_id,s.title,s.session_date,a.created_at,EXISTS(SELECT 1 FROM asset_sources src WHERE src.project_id=a.project_id AND src.child_asset_id=a.id)
+	q := `SELECT a.id,a.session_id,a.storage_install_id,a.storage_file_id,a.name,a.kind,a.content_type,a.sha256,a.size_bytes,a.review_status,a.media_status,a.media_rating,s.brand_id,s.title,s.session_date,a.created_at,s.notes,EXISTS(SELECT 1 FROM asset_sources src WHERE src.project_id=a.project_id AND src.child_asset_id=a.id)
 		FROM assets a JOIN sessions s ON s.id=a.session_id AND s.project_id=a.project_id WHERE a.project_id=?`
 	values := []any{o.ProjectID}
 	if o.BrandID != "" {
@@ -328,7 +329,7 @@ func (a *App) searchAssets(db *sql.DB, o searchOptions, cursor searchCursor) (se
 	defer rows.Close()
 	for rows.Next() {
 		var h assetSearchHit
-		if err := rows.Scan(&h.ID, &h.SessionID, &h.StorageInstallID, &h.StorageFileID, &h.Name, &h.Kind, &h.ContentType, &h.SHA256, &h.SizeBytes, &h.ReviewStatus, &h.MediaStatus, &h.MediaRating, &h.BrandID, &h.SessionTitle, &h.SessionDate, &h.AttachedAt, &h.IsDerivative); err != nil {
+		if err := rows.Scan(&h.ID, &h.SessionID, &h.StorageInstallID, &h.StorageFileID, &h.Name, &h.Kind, &h.ContentType, &h.SHA256, &h.SizeBytes, &h.ReviewStatus, &h.MediaStatus, &h.MediaRating, &h.BrandID, &h.SessionTitle, &h.SessionDate, &h.AttachedAt, &h.SessionNotes, &h.IsDerivative); err != nil {
 			return page, err
 		}
 		h.Uses = []searchUse{}
@@ -347,6 +348,13 @@ func (a *App) searchAssets(db *sql.DB, o searchOptions, cursor searchCursor) (se
 		page.NextCursor = encodeSearchCursor(date, last.AttachedAt, last.ID)
 	}
 	if err := loadSearchUses(db, o.ProjectID, page.Items); err != nil {
+		return page, err
+	}
+	assetRefs := make([]*Asset, len(page.Items))
+	for i := range page.Items {
+		assetRefs[i] = &page.Items[i].Asset
+	}
+	if err := loadAssetHostings(db, o.ProjectID, assetRefs); err != nil {
 		return page, err
 	}
 	for i := range page.Items {

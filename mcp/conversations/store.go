@@ -415,6 +415,16 @@ func (s *store) ConversationForAgentThread(projectID string, agentID int64, thre
 	if err != sql.ErrNoRows {
 		return nil, err
 	}
+	conv, err = scanConversation(s.db.QueryRow(`SELECT `+prefixCols("c.", conversationCols)+`
+		FROM conversation_voice_sessions v JOIN conversations c ON c.id=v.conversation_id
+		WHERE c.project_id=? AND v.agent_id=? AND v.thread_id=? AND v.status IN ('starting','active')
+		LIMIT 1`, projectID, agentID, threadID))
+	if err == nil {
+		return conv, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, err
+	}
 	conv, err = scanConversation(s.db.QueryRow(`
 		SELECT `+conversationCols+`
 		FROM conversations
@@ -611,6 +621,7 @@ func (s *store) DeleteConversation(id string) error {
 		return err
 	}
 	for _, q := range []string{
+		`DELETE FROM conversation_voice_sessions WHERE conversation_id = ?`,
 		`DELETE FROM messages WHERE conversation_id = ?`,
 		`DELETE FROM participants WHERE conversation_id = ?`,
 		`DELETE FROM read_marks WHERE conversation_id = ?`,
@@ -735,11 +746,12 @@ func (s *store) AppendMessageWithDeliveries(m *Message, targets []string) (*Mess
 	res, err := tx.Exec(`
 		INSERT INTO messages (conversation_id, role, content, agent_id, user_id, external_sender,
 			thread_id, status, phase, action_status, component_kind, severity, inbox_only, components_json,
-			attachments_json, metadata_json, client_message_id, source_app, callback_tool)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			attachments_json, metadata_json, client_message_id, source_app, callback_tool, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.ConversationID, m.Role, m.Content, m.AgentID, m.UserID, m.ExternalSender,
 		m.ThreadID, m.Status, m.Phase, m.ActionStatus, m.ComponentKind, m.Severity, boolToInt(m.InboxOnly),
-		string(componentsJSON), string(attachmentsJSON), string(metadataJSON), m.ClientID, m.SourceApp, m.CallbackTool)
+		string(componentsJSON), string(attachmentsJSON), string(metadataJSON), m.ClientID, m.SourceApp, m.CallbackTool,
+		time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		if m.ClientID != "" && strings.Contains(err.Error(), "UNIQUE") {
 			_ = tx.Rollback()
@@ -899,10 +911,14 @@ func (s *store) ResolveApproval(id int64, components []Component, verdict, resul
 func (s *store) MarkSeen(userID int64, conversationID string, lastSeenID int64) error {
 	_, err := s.db.Exec(`
 		INSERT INTO read_marks (user_id, conversation_id, last_seen_id)
-		SELECT ?, ?, MIN(?, COALESCE(MAX(id), 0)) FROM messages WHERE conversation_id = ?
+		SELECT ?, ?, CASE
+			WHEN ? <= 0 THEN COALESCE(MAX(id), 0)
+			ELSE MIN(?, COALESCE(MAX(id), 0))
+		END
+		FROM messages WHERE conversation_id = ? AND inbox_only = 0
 		ON CONFLICT (user_id, conversation_id) DO UPDATE SET
 			last_seen_id = MAX(read_marks.last_seen_id, excluded.last_seen_id)`,
-		userID, conversationID, lastSeenID, conversationID)
+		userID, conversationID, lastSeenID, lastSeenID, conversationID)
 	return err
 }
 

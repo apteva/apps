@@ -18,13 +18,50 @@ type hub struct {
 	// are never persisted, never backfilled, and a slow subscriber
 	// drops them without consequence.
 	frames map[string]map[uint64]chan StreamFrame
+	// One project-scoped frame feed drives all visible thread-list activity.
+	// The SSE handler rechecks conversation and optional agent visibility.
+	projectFrames map[string]map[uint64]chan StreamFrame
 }
 
 func newHub() *hub {
 	return &hub{
-		byConv: map[string]map[uint64]chan Message{},
-		byUser: map[string]map[uint64]chan Message{},
-		frames: map[string]map[uint64]chan StreamFrame{},
+		byConv:        map[string]map[uint64]chan Message{},
+		byUser:        map[string]map[uint64]chan Message{},
+		frames:        map[string]map[uint64]chan StreamFrame{},
+		projectFrames: map[string]map[uint64]chan StreamFrame{},
+	}
+}
+
+func (h *hub) subscribeProjectFrames(projectID string) (<-chan StreamFrame, func()) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.nextID++
+	id := h.nextID
+	ch := make(chan StreamFrame, 64)
+	if h.projectFrames[projectID] == nil {
+		h.projectFrames[projectID] = map[uint64]chan StreamFrame{}
+	}
+	h.projectFrames[projectID][id] = ch
+	return ch, func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if subs, ok := h.projectFrames[projectID]; ok {
+			delete(subs, id)
+			if len(subs) == 0 {
+				delete(h.projectFrames, projectID)
+			}
+		}
+	}
+}
+
+func (h *hub) publishProjectFrame(projectID string, frame StreamFrame) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, ch := range h.projectFrames[projectID] {
+		select {
+		case ch <- frame:
+		default: // Ephemeral progress: the SSE heartbeat repairs a dropped frame.
+		}
 	}
 }
 

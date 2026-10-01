@@ -40,8 +40,12 @@ func TestGmailSenderSendAndMailboxSync(t *testing.T) {
 	if err != nil || sender == nil || sender.Provider != "gmail" || sender.ProviderConnectionID != 3 {
 		t.Fatalf("sender: %+v, %v", sender, err)
 	}
-	if _, err := app.toolSendMessage(ctx, map[string]any{"channel": "email", "from": "support@example.com", "to": "customer@example.org", "bcc": "audit@example.com", "body": "Hello"}); err != nil {
+	sent, err := app.toolSendMessage(ctx, map[string]any{"channel": "email", "from": "support@example.com", "to": "customer@example.org", "bcc": "audit@example.com", "body": "Hello"})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if got := sent.(map[string]any)["message_id_header"]; got != "<apteva-message-1@apteva.local>" {
+		t.Fatalf("Gmail RFC Message-ID=%v", got)
 	}
 	var sentRaw string
 	for _, call := range platform.executeCalls {

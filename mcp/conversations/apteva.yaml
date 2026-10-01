@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.23.22
+version: 0.24.30
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts). Inbox items are messages — an
@@ -34,6 +34,7 @@ requires:
     - platform.instances.read
     - platform.instances.write
     - platform.threads.write
+    - platform.realtime.spawn
     - platform.telemetry.read
     - platform.connections.read
     - platform.connections.execute
@@ -65,13 +66,20 @@ config_schema:
     description: Comma-separated backend app install IDs. Empty denies all resolution. These apps must derive agent/thread from trusted caller context, never model arguments.
 
 provides:
+  ui_surfaces:
+    - id: conversations
+      label: Conversations
+      icon: message-circle
+      schema: apteva-native-surface/v1
+      entry: /ui/surfaces/conversations.json
+      slots: [mobile.project_app]
   http_routes:
     - prefix: /
     - prefix: /telegram-webhook/
       no_auth: true
   mcp_tools:
     - { name: resolve_thread_identity, exposure: app_only, description: "Resolve the external principal bound to an agent thread. Restricted to configured trusted sibling app installations and the authenticated project." }
-    - { name: send,             description: "Reply from the originating conversation thread to that exact conversation. Args: conversation_id, text, phase? (acknowledgement|progress|final), components?, attachments?. Main routes requested outcomes back to the originating thread; generic workers report to their parent and are never granted Conversations tools. Use short paragraphs and simple lists; avoid Markdown tables, raw HTML, and transport-specific syntax. Basic formatting is adapted per bound surface." }
+    - { name: send,             description: "Reply from the originating conversation thread to that exact conversation. Args: conversation_id, text, phase? (acknowledgement|progress|final), components?, attachments?. Main routes requested outcomes back to the originating thread; generic workers report to their parent and are never granted Conversations tools. Acknowledge before work; for two or more distinct stages or batches, send at least one concise progress update between stages, even when the first batch finishes quickly. Combine milestones instead of narrating individual tools or retries. Use short paragraphs and simple lists; avoid Markdown tables, raw HTML, and transport-specific syntax. Basic formatting is adapted per bound surface." }
     - { name: request_approval, description: "Ask the operator to approve gated work owned by main or by the originating conversation thread, using that conversation's exact id. Generic workers report the blocked decision to their parent instead. Refused in public conversations. Args: conversation_id, title, body?, actions? (default Approve/Deny; custom entries require id, label, optional style primary/secondary/danger). The card itself explains the decision; request it directly without a separate send announcing approval. The verdict returns to the asking thread as approval.result." }
     - { name: report,           description: "Main-thread global output only: file a substantive report into an operator conversation. Conversation threads and generic workers report results to their parent/main instead. Refused in public conversations. Args: conversation_id, title, summary, period?, sections?." }
     - { name: alert,            description: "Raise a global alert from main, or a conversation-local urgent alert from the originating conversation thread using its exact id. Generic workers report problems to their parent. Refused in public conversations. Args: conversation_id, text, severity? (info|warn|error)." }
@@ -91,10 +99,10 @@ provides:
       label: Agent conversations
       description: Chat with one agent through its durable conversations.
       entry: /ui/AgentConversationsWidget.mjs
-      slots: [dashboard.build]
+      slots: [dashboard.build, dashboard.agent_detail]
       suggested: true
       visibility: attached
-      supported_sizes: [full]
+      supported_sizes: [half, full]
       default_size: full
       settings_schema:
         type: object
@@ -103,7 +111,6 @@ provides:
             type: string
             title: Conversation layout
             enum: [browser, single]
-            default: browser
           composer_layout:
             type: string
             title: Composer layout
@@ -117,11 +124,44 @@ provides:
             type: boolean
             title: Show shared page context
             default: true
+          show_tool_completion:
+            type: boolean
+            title: Show completed tool checkmarks
+            default: false
+          show_tool_duration:
+            type: boolean
+            title: Show tool execution time
+            default: false
+          empty_message:
+            type: string
+            title: Empty conversation text
+            required: false
+          welcome_text:
+            type: string
+            title: Welcome text
+            required: false
+          context_label:
+            type: string
+            title: Context label
+            description: Prefix for the optional context indicator, for example Discussing
+            required: false
+          suggestions:
+            type: array
+            title: Composer suggestions
+            required: false
+            items:
+              type: object
+              properties:
+                id: { type: string }
+                label: { type: string }
+                text: { type: string }
+              required: [id, label, text]
     - name: inbox-overview
       label: Inbox
       description: Pending approvals, alerts, and reports from agents.
       entry: /ui/InboxWidget.mjs
       slots: [dashboard.home]
+      dashboard_scopes: [project, global]
       suggested: true
       visibility: project
       supported_sizes: [half, full]
@@ -138,7 +178,7 @@ provides:
       command: /conversations
       body_file: skills/using-conversations.md
       description: |
-        Reply discipline (acknowledge, work, one final outcome), where
+        Reply discipline (acknowledge, staged progress, one final outcome), where
         inbox items live (list, reuse, create with stable topic
         titles), alert/report cadence, main-thread output ownership,
         the approval round-trip, Telegram onboarding and routing, and room etiquette. Load before
@@ -149,7 +189,7 @@ provides:
 
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: main, entry: mcp/conversations }
+  source: { repo: github.com/apteva/apps, ref: conversations/v0.24.30, entry: mcp/conversations }
   port: 8080
   health_check: /health
 
