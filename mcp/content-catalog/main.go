@@ -80,7 +80,7 @@ func searchSchema() map[string]any {
 		"type": "object", "additionalProperties": false,
 		"properties": map[string]any{
 			"entity_type":   map[string]any{"type": "string", "enum": []string{"all", "assets", "sessions"}, "description": "Result type; default all."},
-			"query":         field("Text in Catalog file names and session notes or titles."),
+			"query":         field("Text in file names, session notes/titles and current Media descriptions."),
 			"brand_id":      field("Limit results to one explicit Catalog brand ID."),
 			"session_id":    field("Limit asset results to one session ID."),
 			"date_from":     field("Inclusive YYYY-MM-DD session date."),

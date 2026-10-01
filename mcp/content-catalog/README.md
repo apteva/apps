@@ -8,7 +8,7 @@ A brand has an explicit Storage root. Each session has an explicit brand and sta
 
 Catalog never automatically scans Storage folders. Upload happens only after a user selects files and clicks **Upload selected**. Session cards and asset details show available image or Media previews, with original file playback for supported formats. `media.completed` updates cached state only for already linked assets.
 
-The session page can filter its linked files by name or Storage ID, content type, Media duration, platform, and recorded post status. Lengths are read from Media only for the session's linked video and audio files when that page opens; missing lengths remain unknown. The filters do not scan Storage or change publication records.
+The session page can filter its linked files by name, Storage ID or Media description, content type, Media duration, platform, and recorded post status. Lengths are read from Media only for the session's linked video and audio files when that page opens; missing lengths remain unknown. The filters do not scan Storage or change publication records.
 
 Session and search file cards show cloud hosting badges such as **Bunny · Ready**, **Bunny · Processing**, or **Bunny · Failed**. They read the recorded hosting state in Catalog; displaying a badge does not upload a file or contact the host. Hovering a badge shows its connection and last check time when available.
 
@@ -17,6 +17,12 @@ The session page keeps a compact file-search field and **Filters** button above 
 The session length filter has two slider handles and exact minimum/maximum inputs in seconds. Both endpoints are included. Range filtering only includes videos and audio with known Media durations; **Unknown only** shows videos and audio whose length is unavailable. **Any length** resets the range.
 
 Clicking a file card opens a wide modal with its preview or player, metadata, review controls, cloud hosting, and platform posts. Close it with **Close**, Escape, or a click outside the dialog to return to the file grid. Review and hosting updates keep the file dialog open; post editing returns to the file dialog when finished.
+
+## Current Media metadata
+
+Asset detail, session asset lists and search return `description`, `description_source`, `description_updated_at`, `media_status`, `media_rating` and `duration_ms` directly on each asset. Media is authoritative; descriptions are read live and never persisted in Catalog. `probe_status: ok` maps to Catalog's existing `completed` status. Missing Media records return `missing`; read failures return `unavailable` with `media_error`, clearing stale response metadata.
+
+Media 0.14.7 adds `media_get_batch`. Catalog reads only explicitly linked file IDs, deduplicated in batches of up to 100, without Storage enumeration, processing or URL signing. Global text search checks Media descriptions before pagination while retaining brand/session, publication and date filters. If Media fails during description search, the request reports that failure instead of silently returning incomplete matches. Lists still return linked assets when Media is unavailable. Cards display a compact description and Media status/rating; details show the full description and its provenance.
 
 ## Platform posts
 
