@@ -181,9 +181,9 @@ export function isVisibleChatTool(name: string): boolean {
   // their internal tool activity as a second transcript row duplicates the
   // decision UI and exposes an implementation detail to the operator.
   if (isApprovalRequestTool(normalized)) return false;
-  // Core send reports between threads; reply sends already produce a message.
-  // Other Conversations tools
+  // Core send reports between threads; reply sends and alerts already produce
+  // a message or card. Other Conversations tools
   // (including attachment reads) belong in the shared activity timeline.
-  return !["conversations_send", "channels_send", "channels_respond"].some(base =>
+  return !["conversations_send", "conversations_alert", "channels_send", "channels_respond"].some(base =>
     normalized === base || normalized.endsWith(`_${base}`));
 }

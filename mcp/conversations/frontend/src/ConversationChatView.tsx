@@ -133,7 +133,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
         )}
       </div>
 
-      <div className="flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-4">
+      <div className="chat-transcript flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-4">
         {!props.hasMessages && !props.streamNode ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-text-muted">
             <span className="text-text-dim">

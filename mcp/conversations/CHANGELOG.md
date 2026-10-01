@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.24.27 — 2026-10-01
+
+- Normalize spacing around text, lists, tool groups, and cards across panels, widgets, and embedded chats.
+- Hide duplicate alert tool activity while retaining the alert card, including after refresh.
+- Clear read alert notifications per reader while preserving chat history, newer alerts, pending approvals, and inbox-only items.
+- Replace sidebar attention dots with the matching card icon and severity color.
+
 ## 0.24.26 — 2026-10-01
 
 - Show resolved approval decisions as compact badges with a check icon and the selected action’s original theme colors.

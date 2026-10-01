@@ -113,7 +113,7 @@ describe("AgentConversationsWidget scope", () => {
     expect(entry).not.toContain("<header");
     expect(entry).not.toContain("<h2");
     const chat = readFileSync(new URL("../frontend/src/ConversationChatView.tsx", import.meta.url), "utf8");
-    expect(chat).toContain('className="flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-4"');
+    expect(chat).toContain('className="chat-transcript flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-4"');
     expect(chat).toContain('className="chat-composer-safe shrink-0');
     expect(chat).toContain("data-chat-header-actions");
     const styles = readFileSync(new URL("../frontend/styles.css", import.meta.url), "utf8");
