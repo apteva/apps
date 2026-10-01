@@ -37,6 +37,9 @@ async function fixture(page: Page, options: { empty?: boolean; lessonFailure?: b
       case "course_offer_get": out = { offer: null }; break;
       case "course_purchase_status": out = { purchase: null }; break;
       case "issued_certificate_get": out = { certificate: { id: "cert-1", title: "Community Graduate", body: "Awarded to Alice", issued_at: "2026-01-01" } }; break;
+      case "course_tracks_list": out = { tracks: [], selected_track_id: null }; break;
+      case "milestones_list": out = { milestones: [], next_action: "" }; break;
+      case "assignment_reviews_list": out = { submissions: [] }; break;
       case "lessons_list":
         if (options.lessonFailure) return json({ jsonrpc: "2.0", error: { code: -32000, message: "Server temporarily unavailable" } });
         out = { lessons: [lesson] }; break;
@@ -44,7 +47,7 @@ async function fixture(page: Page, options: { empty?: boolean; lessonFailure?: b
       case "learning_status": out = { attempts, submissions }; break;
       case "lesson_file_url": out = { url: "https://files.example.test/video.mp4", expires_at: 4102444800 }; break;
       case "quiz_submit": attempts = [{ id: 1, quiz_id: "quiz", member_id: "alice", score: args.answers[0] === 0 ? 100 : 0, passed: args.answers[0] === 0 }]; out = attempts[0]; break;
-      case "assignment_submit": submissions = [{ assignment_id: args.assignment_id, body: args.body, member_id: "alice" }]; out = submissions[0]; break;
+      case "assignment_submit": submissions = [{ assignment_id: args.assignment_id, body: args.body, links: args.links || [], files: args.files || [], status: "submitted", feedback: "", version: 1, member_id: "alice" }]; out = submissions[0]; break;
       default: throw new Error(`Unmocked tool ${name}`);
     }
     return json({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: JSON.stringify(out) }] } });

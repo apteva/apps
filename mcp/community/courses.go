@@ -683,7 +683,11 @@ func toolLessonsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		       AND (d.release_after_days IS NULL OR
 		            datetime(e.enrolled_at, '+' || d.release_after_days || ' days') <= CURRENT_TIMESTAMP)`
 	}
-	q += ` ORDER BY s.position, l.position`
+	if memberID != "" {
+		q += ` AND ` + lessonTrackClause("l")
+		queryArgs = append(queryArgs, spaceID, memberID)
+	}
+	q += ` ORDER BY s.position, l.position, l.id`
 	rows, err := ctx.AppDB().Query(q, queryArgs...)
 	if err != nil {
 		return nil, err
@@ -975,6 +979,7 @@ func toolLessonsProgress(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		 LEFT JOIN drip_schedules d ON d.lesson_id = l.id
 		 LEFT JOIN lesson_progress lp ON lp.lesson_id = l.id AND lp.member_id = ?
 		 WHERE s.space_id = ? AND l.published_at IS NOT NULL
+		   AND `+lessonTrackClause("l")+`
 		   AND (? = '' OR (
 		     e.status IN ('active','completed')
 		     AND e.access_revoked_at IS NULL
@@ -984,7 +989,7 @@ func toolLessonsProgress(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		          datetime(e.enrolled_at, '+' || d.release_after_days || ' days') <= CURRENT_TIMESTAMP)
 		   ))
 		 ORDER BY s.position, l.position`,
-		memberID, memberID, spaceID, strArg(args, "_viewer_member_id", ""),
+		memberID, memberID, spaceID, spaceID, memberID, strArg(args, "_viewer_member_id", ""),
 	)
 	if err != nil {
 		return nil, err
@@ -1312,6 +1317,10 @@ func syncCourseCompletion(db *sql.DB, lessonID, memberID string) error {
 	).Scan(&spaceID); err != nil {
 		return err
 	}
+	return syncCourseCompletionForSpace(db, spaceID, memberID)
+}
+
+func syncCourseCompletionForSpace(db *sql.DB, spaceID, memberID string) error {
 	var total, completed int
 	if err := db.QueryRow(
 		`SELECT COUNT(*), COUNT(lp.lesson_id)
@@ -1319,12 +1328,20 @@ func syncCourseCompletion(db *sql.DB, lessonID, memberID string) error {
 		   JOIN sections s ON s.id = l.section_id
 		   LEFT JOIN lesson_progress lp
 		     ON lp.lesson_id = l.id AND lp.member_id = ? AND lp.status = 'complete'
-		  WHERE s.space_id = ? AND l.published_at IS NOT NULL`,
-		memberID, spaceID,
+		  WHERE s.space_id = ? AND l.published_at IS NOT NULL AND `+lessonTrackClause("l"),
+		memberID, spaceID, spaceID, memberID,
 	).Scan(&total, &completed); err != nil {
 		return err
 	}
-	if total > 0 && total == completed {
+	var trackCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM course_tracks WHERE space_id=? AND active=1`, spaceID).Scan(&trackCount); err != nil {
+		return err
+	}
+	selected, err := selectedTrackID(db, spaceID, memberID)
+	if err != nil {
+		return err
+	}
+	if total > 0 && total == completed && (trackCount == 0 || selected != "") {
 		result, err := db.Exec(
 			`UPDATE course_enrollments
 			    SET status = 'completed', completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)
@@ -1359,7 +1376,7 @@ func syncCourseCompletion(db *sql.DB, lessonID, memberID string) error {
 		}
 		return nil
 	}
-	_, err := db.Exec(
+	_, err = db.Exec(
 		`UPDATE course_enrollments SET status = 'active', completed_at = NULL
 		  WHERE space_id = ? AND member_id = ? AND status = 'completed'`,
 		spaceID, memberID,

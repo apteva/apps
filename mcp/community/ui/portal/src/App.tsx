@@ -19,19 +19,22 @@ import {
 } from "lucide-react";
 import { loadStripe, type Stripe, type StripeElements, type StripePaymentElement } from "@stripe/stripe-js";
 import { type CSSProperties, Children, FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CertificateCard, LearningContent, Markdown, ProfileForm } from "./LearningContent";
+import { CertificateCard, InstructorReviewQueue, LearningContent, Markdown, ProfileForm } from "./LearningContent";
 import { api, apteva, COMMUNITY_APP, currentProjectId, type AuthResponse, type LessonBundle, type PortalBootstrap, type StorefrontCheckoutSession, useDelegatedToken } from "./api";
 import type {
   IssuedCertificate,
   Community,
   CourseOffer,
   CoursePurchase,
+  CourseTrack,
+  AssignmentReviewItem,
   DMThread,
   DMThreadView,
   EnrollmentRule,
   Lesson,
   Member,
   MemberSubscription,
+  MemberMilestone,
   MembershipPlan,
   Post,
   PublicOffer,
@@ -243,6 +246,11 @@ export default function App() {
   const [courseAccessMode, setCourseAccessMode] = useState<EnrollmentRule["access_mode"]>("free");
   const [courseOffer, setCourseOffer] = useState<CourseOffer | null>(null);
   const [coursePurchase, setCoursePurchase] = useState<CoursePurchase | null>(null);
+  const [courseTracks, setCourseTracks] = useState<CourseTrack[]>([]);
+  const [selectedTrackId, setSelectedTrackId] = useState("");
+  const [milestones, setMilestones] = useState<MemberMilestone[]>([]);
+  const [nextMilestone, setNextMilestone] = useState("");
+  const [reviewQueue, setReviewQueue] = useState<AssignmentReviewItem[]>([]);
   const [membershipPlans, setMembershipPlans] = useState<MembershipPlan[]>([]);
   const [memberSubscription, setMemberSubscription] = useState<MemberSubscription | null>(null);
   const [comment, setComment] = useState("");
@@ -528,6 +536,16 @@ export default function App() {
           if (!message.includes("active course enrollment required")) throw caught;
           locked = true;
         }
+        let trackOut: { tracks: CourseTrack[]; selected_track_id?: string } = { tracks: [] };
+        let milestoneOut: { milestones: MemberMilestone[]; next_action: string } = { milestones: [], next_action: "" };
+        let reviewOut: { submissions: AssignmentReviewItem[] } = { submissions: [] };
+        if (!locked) {
+          [trackOut, milestoneOut] = await Promise.all([
+            api.courses.tracks(courseId),
+            api.courses.milestones(courseId),
+          ]);
+        }
+        try { reviewOut = await api.courses.reviewQueue(courseId); } catch { /* students are not instructors */ }
         return {
           details,
           certificate: certificateOut.certificate,
@@ -536,6 +554,11 @@ export default function App() {
           offer: offerOut.offer,
           purchase: purchaseOut.purchase,
           locked,
+          tracks: trackOut.tracks || [],
+          selectedTrackId: trackOut.selected_track_id || "",
+          milestones: milestoneOut.milestones || [],
+          nextMilestone: milestoneOut.next_action || "",
+          reviewQueue: reviewOut.submissions || [],
         };
       },
       (result) => {
@@ -545,14 +568,26 @@ export default function App() {
         setCourseLocked(result.locked);
         setCourseOffer(result.offer);
         setCoursePurchase(result.purchase);
+        setCourseTracks(result.tracks);
+        setSelectedTrackId(result.selectedTrackId);
+        setMilestones(result.milestones);
+        setNextMilestone(result.nextMilestone);
+        setReviewQueue(result.reviewQueue);
         setCourseAccessMode(result.details.enrollment_rules?.access_mode || "free");
         setCourseSummary(result.details.details?.summary || result.details.details?.description || "");
         setLessonId((current) =>
-          result.lessons.some((item) => item.id === current) ? current : result.lessons[0]?.id || "",
+          result.lessons.some((item) => item.id === current) ? current : result.lessons.find((item) => item.progress?.status === "in_progress")?.id || result.lessons[0]?.id || "",
         );
       },
     );
   }, [courseId, latest]);
+
+  const selectTrack = useCallback(async (trackId: string) => {
+    if (!courseId || !trackId || trackId === selectedTrackId) return;
+    await run(async () => api.courses.selectTrack(courseId, trackId));
+    setSelectedTrackId(trackId);
+    await loadCourse();
+  }, [courseId, loadCourse, run, selectedTrackId]);
 
   const loadBundle = useCallback(async () => {
     if (!lessonId) {
@@ -1435,6 +1470,15 @@ export default function App() {
                 )}
               </div>
               {certificate && <CertificateCard certificate={certificate} />}
+              {milestones.length > 0 && !courseLocked && (
+                <section className="milestone-panel" aria-label="Student milestones">
+                  <div className="section-heading"><div><p className="eyebrow">Milestones</p><h3>Apply what you learn</h3></div>{nextMilestone && <span className="muted">Next: {nextMilestone}</span>}</div>
+                  <div className="milestone-list">
+                    {milestones.map((milestone) => <article className="milestone-card" key={milestone.id}><div><strong>{milestone.title}</strong><p className="muted">{milestone.description}</p></div><span className={`status-pill status-${milestone.status}`}>{milestone.status.replace("_", " ")}</span></article>)}
+                  </div>
+                </section>
+              )}
+              {reviewQueue.length > 0 && <InstructorReviewQueue items={reviewQueue} onReviewed={() => void loadCourse()} />}
               {courseLocked ? (
                 <div className="purchase-card">
                   {courseAccessMode === "paid" && !courseOffer && <Empty>This course is not currently for sale.</Empty>}
@@ -1454,6 +1498,7 @@ export default function App() {
               ) : (
                 <div className="lesson-layout">
                   <aside className="lesson-list">
+                    {courseTracks.length > 0 && <section className="track-picker"><label htmlFor="course-track"><strong>Your roadmap</strong></label><select id="course-track" value={selectedTrackId} onChange={(event) => void selectTrack(event.target.value)} disabled={busy}><option value="" disabled>Select a track</option>{courseTracks.map((track) => <option key={track.id} value={track.id}>{track.name}</option>)}</select><p className="muted">Switching tracks keeps your shared lesson progress.</p></section>}
                     {sections.map((section) => <div key={section.id}><h3>{section.title}</h3>{lessons.filter((lesson) => lesson.section_id === section.id).map((lesson) => <button key={lesson.id} className={lesson.id === lessonId ? "selected" : ""} onClick={() => setLessonId(lesson.id)}><span>{lesson.title}</span>{lesson.progress?.status === "complete" && <CheckCircle2 size={16} aria-label="Completed" />}</button>)}</div>)}
                   </aside>
                   <article className="lesson-reader">
