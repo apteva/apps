@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.24.26 — 2026-10-01
+
+- Show resolved approval decisions as compact badges with a check icon and the selected action’s original theme colors.
+- Preserve full decision labels, notes, and narrow-pane wrapping across the shared panel and widget.
+
 ## 0.24.25 — 2026-10-01
 
 - Keep approval preparation visibly active until its card arrives, including reconnects and either stream event order.
