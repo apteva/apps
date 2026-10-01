@@ -138,7 +138,7 @@ export function ChatToolActivity({
 
   return (
     <section
-      className={`chat-tool-activity min-w-0 py-0.5 ${continuing ? "chat-tool-activity-continuing" : ""}`}
+      className={`chat-tool-activity min-w-0 shrink-0 ${continuing ? "chat-tool-activity-continuing" : ""}`}
       aria-label={accessibleSummary}
     >
       <button

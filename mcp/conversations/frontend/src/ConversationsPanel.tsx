@@ -438,7 +438,7 @@ function MessageCards({
 function StreamingBubble({ text }: { text: string }) {
   const html = useMemo(() => renderSafeMarkdown(closeOpenMarkdown(text)), [text]);
   return (
-    <div className="flex min-h-[42px] min-w-0 flex-col justify-center shrink-0">
+    <div className="min-w-0 shrink-0">
       <div
         className="chat-md text-text text-[15px] sm:text-sm break-words leading-relaxed"
         dangerouslySetInnerHTML={{ __html: html }}
@@ -1159,7 +1159,7 @@ function MessageBody({
     );
   }
   return (
-    <div className="flex min-h-[42px] min-w-0 flex-col justify-center shrink-0" title={relativeTime(message.created_at)}>
+    <div className="min-w-0 shrink-0" title={relativeTime(message.created_at)}>
       <div
         className="chat-md text-text text-[15px] sm:text-sm break-words leading-relaxed"
         dangerouslySetInnerHTML={{ __html: html }}
