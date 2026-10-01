@@ -249,6 +249,7 @@ func coursesTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{
 				"lesson_id": map[string]any{"type": "string"},
 				"limit":     map[string]any{"type": "integer"},
+				"offset":    map[string]any{"type": "integer", "minimum": 0},
 			}, []string{"lesson_id"}),
 			Handler: toolLessonCommentsList,
 		},
@@ -259,6 +260,9 @@ func coursesTools() []sdk.Tool {
 // ─── courses_create (sugar) ──────────────────────────────────────
 
 func toolCoursesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	clone := map[string]any{
 		"community_id": args["community_id"],
 		"slug":         args["slug"],
@@ -274,6 +278,9 @@ func toolCoursesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 // ─── Sections ────────────────────────────────────────────────────
 
 func toolSectionsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -321,6 +328,9 @@ func toolSectionsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolSectionsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -352,6 +362,9 @@ func toolSectionsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolSectionsReorder(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -416,6 +429,9 @@ func toolSectionsReorder(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 // ─── Lessons ─────────────────────────────────────────────────────
 
 func toolLessonsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	sectionID, err := mustStr(args, "section_id")
 	if err != nil {
 		return nil, err
@@ -476,6 +492,9 @@ func toolLessonsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolLessonsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -522,6 +541,9 @@ func toolLessonsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolLessonsPublish(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -558,6 +580,9 @@ func toolLessonsPublish(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolLessonsReorder(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	sectionID, err := mustStr(args, "section_id")
 	if err != nil {
 		return nil, err
@@ -623,6 +648,9 @@ func toolLessonsReorder(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolLessonsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -687,6 +715,9 @@ func toolLessonsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolLessonsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -722,6 +753,9 @@ func toolLessonsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 // (when ffmpeg is bound) auto-probes the duration via the storage
 // app's signed URL.
 func toolLessonsAttachVideo(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -833,6 +867,9 @@ var lessonStatuses = map[string]bool{
 }
 
 func toolLessonsMarkComplete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	lessonID, err := mustStr(args, "lesson_id")
 	if err != nil {
 		return nil, err
@@ -913,6 +950,9 @@ func toolLessonsMarkComplete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 }
 
 func toolLessonsProgress(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -997,6 +1037,9 @@ func toolLessonsProgress(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolCourseProgress(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -1037,6 +1080,9 @@ func toolCourseProgress(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 // ─── Lesson comments ─────────────────────────────────────────────
 
 func toolLessonCommentsPost(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	lessonID, err := mustStr(args, "lesson_id")
 	if err != nil {
 		return nil, err
@@ -1080,6 +1126,9 @@ func toolLessonCommentsPost(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolLessonCommentsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	lessonID, err := mustStr(args, "lesson_id")
 	if err != nil {
 		return nil, err
@@ -1088,7 +1137,11 @@ func toolLessonCommentsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if _, _, err := ensureLessonVisible(ctx, ctx.AppDB(), lessonID); err != nil {
 		return nil, err
 	}
-	rows, err := ctx.AppDB().Query(
+	return listLessonComments(ctx.AppDB(), lessonID, limit)
+}
+
+func listLessonComments(db *sql.DB, lessonID string, limit int) (any, error) {
+	rows, err := db.Query(
 		`SELECT id, lesson_id, member_id, body, created_at FROM lesson_comments
 		 WHERE lesson_id = ? ORDER BY created_at, id LIMIT ?`,
 		lessonID, limit,
@@ -1368,7 +1421,7 @@ func (a *App) httpSections(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "space_id required")
 		return
 	}
-	out, err := toolSectionsList(globalCtx, map[string]any{"space_id": spaceID})
+	out, err := toolSectionsList(requestAppCtx(r), map[string]any{"space_id": spaceID})
 	if err != nil {
 		writeDomainErr(w, err)
 		return
@@ -1393,7 +1446,7 @@ func (a *App) httpLessons(w http.ResponseWriter, r *http.Request) {
 	if mid := r.URL.Query().Get("member_id"); mid != "" {
 		args["member_id"] = mid
 	}
-	out, err := toolLessonsList(globalCtx, args)
+	out, err := toolLessonsList(requestAppCtx(r), args)
 	if err != nil {
 		writeDomainErr(w, err)
 		return
@@ -1415,7 +1468,7 @@ func (a *App) httpLesson(w http.ResponseWriter, r *http.Request) {
 	if mid := r.URL.Query().Get("member_id"); mid != "" {
 		args["member_id"] = mid
 	}
-	out, err := toolLessonsGet(globalCtx, args)
+	out, err := toolLessonsGet(requestAppCtx(r), args)
 	if err != nil {
 		writeDomainErr(w, err)
 		return

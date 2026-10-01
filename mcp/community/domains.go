@@ -82,6 +82,9 @@ func communityDomainTools() []sdk.Tool {
 }
 
 func toolCommunityDomainOptions(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "community_id")
 	if err != nil {
 		return nil, err
@@ -100,6 +103,9 @@ func toolCommunityDomainOptions(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 func toolCommunityDomainStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "community_id")
 	if err != nil {
 		return nil, err
@@ -130,6 +136,9 @@ func toolCommunityDomainStatus(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 func toolCommunityDomainAttach(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "community_id")
 	if err != nil {
 		return nil, err
@@ -265,6 +274,9 @@ func toolCommunityDomainAttach(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 func toolCommunityDomainDetach(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "community_id")
 	if err != nil {
 		return nil, err

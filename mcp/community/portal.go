@@ -15,7 +15,7 @@ func (a *App) httpPortalBootstrap(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	projectID := scopeProject(globalCtx)
+	projectID := scopeProject(requestAppCtx(r))
 	if projectID == "" {
 		writeErr(w, http.StatusBadRequest, "project context is unavailable")
 		return
