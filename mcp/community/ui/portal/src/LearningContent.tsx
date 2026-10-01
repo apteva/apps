@@ -37,7 +37,7 @@ function LessonVideo({ lessonId, fileId }: { lessonId: string; fileId: string })
 
 export function QuizForm({ quiz, previous, onSaved }: { quiz: Quiz; previous?: QuizAttempt; onSaved: () => void }) {
   const questions = Array.isArray(quiz.questions) ? quiz.questions as QuizQuestion[] : [];
-  const valid = questions.length > 0 && questions.every((q) => typeof q.prompt === "string" && Array.isArray(q.options) && q.options.length >= 2);
+  const valid = questions.length > 0 && questions.every((q) => q != null && typeof q.prompt === "string" && Array.isArray(q.options) && q.options.length >= 2 && q.options.every((option) => typeof option === "string"));
   const [answers, setAnswers] = useState<Record<number, number>>({});
   const [result, setResult] = useState(previous);
   const [busy, setBusy] = useState(false);
