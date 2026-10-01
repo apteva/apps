@@ -172,6 +172,10 @@ export function toolGroupDurationMs(tools: ToolActivity[], now: number): number 
 export function isVisibleChatTool(name: string): boolean {
   const normalized = name.trim().toLowerCase();
   if (["", "search_tools", "send", "pace", "done", "wait", "think"].includes(normalized)) return false;
+  // Approval requests are represented by the durable approval card. Showing
+  // their internal tool activity as a second transcript row duplicates the
+  // decision UI and exposes an implementation detail to the operator.
+  if (["conversations_request_approval", "conversations_conversations_request_approval"].includes(normalized)) return false;
   // Core send reports between threads; reply sends already produce a message.
   // Other Conversations tools
   // (including attachment reads) belong in the shared activity timeline.

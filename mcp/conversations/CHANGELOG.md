@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.24.24 — 2026-10-01
+
+- Keep approval requests represented by their approval card instead of duplicating the internal approval tool activity.
+- Keep completed tool groups visibly active while a multi-step response continues into its next tool call.
+
 ## 0.24.23 — 2026-09-30
 
 - Require at least one concise progress message between distinct stages or batches of a multi-step request, including when the first batch completes quickly.
