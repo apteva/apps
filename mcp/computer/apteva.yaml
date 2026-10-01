@@ -2,11 +2,12 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.91
+version: 0.7.92
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.91 shows live sessions
-  first, loads past sessions on demand in pages, and folds browser settings
-  away from the session list.
+  Watch, steer, and replay hosted browser sessions. v0.7.92 shows live sessions
+  first, loads past sessions on demand in pages, folds browser settings away
+  from the session list, and supports bounded rendered DOM responses up to 1 MB
+  for large structured crawls.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -521,7 +522,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: computer/v0.7.92
     entry: mcp/computer
   port: 8080
   health_check: /health

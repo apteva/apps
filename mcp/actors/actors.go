@@ -39,6 +39,7 @@ const (
 type actorDefinition struct {
 	Operations    map[string]actorOperation `json:"operations,omitempty"`
 	SchemaVersion int                       `json:"schema_version"`
+	Crawl         *crawlDefinition          `json:"crawl,omitempty"`
 	Defaults      map[string]any            `json:"defaults,omitempty"`
 	Presets       map[string]map[string]any `json:"presets,omitempty"`
 	Browser       actorBrowser              `json:"browser"`
@@ -120,8 +121,8 @@ type actorQueuedRun struct {
 }
 
 func (a *App) actorTools() []sdk.Tool {
-	definitionSchema := map[string]any{"type": "object", "description": "Version 1 actor definition: defaults, presets, browser (including saved context_id), allowed_hosts, limits, and either steps plus output_schema or named operations each containing steps and output_schema. See /actors skill for an example."}
-	return []sdk.Tool{
+	definitionSchema := map[string]any{"type": "object", "description": "Version 1 actor definition uses browser steps. Version 2 uses crawl.seeds, crawl.routes, crawl.datasets, and a durable frontier. Both use browser, allowed_hosts, and limits."}
+	return append([]sdk.Tool{
 		{
 			Name: "actors_save", Description: "Create or update a reusable browser actor. Updating increments its revision; expected_revision prevents lost updates.",
 			InputSchema: schemaObject(map[string]any{
@@ -184,7 +185,7 @@ func (a *App) actorTools() []sdk.Tool {
 			Name: "actors_unschedule", Description: "Cancel a Jobs-owned actor schedule.",
 			InputSchema: schemaObject(map[string]any{"job_id": map[string]any{"type": "integer"}}, []string{"job_id"}), Handler: a.toolActorUnschedule,
 		},
-	}
+	}, a.crawlTools()...)
 }
 
 func decodeActorDefinition(raw any) (actorDefinition, string, error) {
@@ -207,6 +208,32 @@ func decodeActorDefinition(raw any) (actorDefinition, string, error) {
 }
 
 func validateActorDefinition(def actorDefinition) error {
+	if def.SchemaVersion == 2 {
+		if len(def.Operations) > 0 || len(def.Steps) > 0 {
+			return errors.New("schema version 2 uses crawl and does not support steps or operations")
+		}
+		if def.Crawl == nil {
+			return errors.New("definition.crawl is required for schema version 2")
+		}
+		if err := validateCrawlDefinition(*def.Crawl); err != nil {
+			return err
+		}
+		// Reuse the same browser/host validation for both schema versions.
+		common := def
+		common.SchemaVersion = 1
+		common.Crawl = nil
+		common.Steps = []actorStep{{Action: "wait"}}
+		common.OutputSchema = nil
+		if err := validateActorDefinition(common); err != nil {
+			return err
+		}
+		for _, seed := range def.Crawl.Seeds {
+			if !strings.Contains(seed, "{{") && !hostAllowed(seed, def.AllowedHosts) {
+				return errors.New("crawl seed is outside allowed_hosts")
+			}
+		}
+		return nil
+	}
 	if len(def.Operations) > 0 {
 		if len(def.Steps) > 0 || len(def.Operations) > 50 {
 			return errors.New("use either steps or up to 50 named operations")

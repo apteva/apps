@@ -51,6 +51,7 @@ type actorExecution struct {
 	datasetBytes   int
 	datasetFull    bool
 	selectedPreset string
+	crawl          *crawlDefinition
 }
 
 func (a *App) toolActorRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -341,6 +342,9 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 	runCtx, cancel := context.WithDeadline(workerCtx, exec.deadline)
 	defer cancel()
 	exec.workerCtx = runCtx
+	if exec.crawl != nil {
+		return a.executeCrawlRun(exec)
+	}
 	// Cancel in-flight Computer calls as well as checking between workflow steps.
 	watchDone := make(chan struct{})
 	defer close(watchDone)
@@ -483,12 +487,22 @@ func newActorExecution(workerCtx context.Context, app *App, ctx *sdk.AppCtx, run
 	maxPages := boundedInt(templateInt(rendered.Limits.MaxPages), defaultActorMaxPages, 1, maxActorPages)
 	maxItems := boundedInt(templateInt(rendered.Limits.MaxItems), defaultActorMaxItems, 1, maxActorItems)
 	maxSeconds := boundedInt(templateInt(rendered.Limits.MaxDurationSeconds), defaultActorMaxSeconds, 1, maxActorSeconds)
+	if rendered.Crawl != nil {
+		maxPages = boundedInt(rendered.Crawl.Frontier.MaxPages, maxCrawlFrontierSize, 1, maxCrawlFrontierSize)
+		maxItems = boundedInt(rendered.Crawl.Frontier.MaxItems, maxActorItems, 1, maxActorItems)
+		if rendered.Limits.MaxPages != nil {
+			maxPages = minInt(maxPages, boundedInt(templateInt(rendered.Limits.MaxPages), defaultActorMaxPages, 1, maxActorPages))
+		}
+		if rendered.Limits.MaxItems != nil {
+			maxItems = minInt(maxItems, boundedInt(templateInt(rendered.Limits.MaxItems), defaultActorMaxItems, 1, maxActorItems))
+		}
+	}
 	retries := defaultActorRetries
 	if rendered.Limits.StepRetries != nil {
 		retries = clampInt(templateInt(rendered.Limits.StepRetries), 0, 10)
 	}
 	now := time.Now().UTC()
-	return &actorExecution{app: app, ctx: ctx, run: run, definition: rendered, variables: vars, deadline: now.Add(time.Duration(maxSeconds) * time.Second), maxPages: maxPages, maxItems: maxItems, retries: retries, startedAt: now, workerCtx: workerCtx, items: []map[string]any{}, trace: []map[string]any{}, selectedPreset: runInput.Preset}, nil
+	return &actorExecution{app: app, ctx: ctx, run: run, definition: rendered, deadline: now.Add(time.Duration(maxSeconds) * time.Second), maxPages: maxPages, maxItems: maxItems, retries: retries, startedAt: now, workerCtx: workerCtx, items: []map[string]any{}, trace: []map[string]any{}, selectedPreset: runInput.Preset, crawl: rendered.Crawl}, nil
 }
 
 func actorBrowserAudit(browser actorBrowser) map[string]any {
@@ -506,6 +520,9 @@ func actorBrowserAudit(browser actorBrowser) map[string]any {
 }
 
 func (e *actorExecution) runSteps() (map[string]any, error) {
+	if e.crawl != nil {
+		return e.runCrawl()
+	}
 	for index := range e.definition.Steps {
 		if err := e.checkpoint(); err != nil {
 			return nil, err
@@ -820,10 +837,29 @@ func findLocatorRegion(locator actorLocator, regions []browserRegion) *browserRe
 }
 
 func (e *actorExecution) extractDOM() (*browserExtractResult, error) {
+	return e.extractDOMOptions(map[string]any{"formats": []string{"html", "regions", "metadata"}, "max_chars": 200000, "wait_ms": 250})
+}
+
+// Crawl extraction needs complete HTML; other representations share Computer's
+// response budget and are unnecessary for CSS-based dataset extraction.
+func (e *actorExecution) extractCrawlDOM() (*browserExtractResult, error) {
+	for _, limit := range []int{200000, 400000, 800000, 1000000} {
+		doc, err := e.extractDOMOptions(map[string]any{"formats": []string{"html"}, "max_chars": limit, "wait_ms": 250})
+		if err != nil {
+			return nil, err
+		}
+		if !doc.Truncated {
+			return doc, nil
+		}
+	}
+	return nil, errors.New("rendered HTML still truncated at the 1 MB response limit; narrow the extraction or update Computer to v0.7.92 or later")
+}
+
+func (e *actorExecution) extractDOMOptions(options map[string]any) (*browserExtractResult, error) {
 	if e.session == nil {
 		return nil, errors.New("extract requires an open browser")
 	}
-	doc, err := e.app.extractBrowserDOM(e.workerCtx, e.ctx, e.session.SessionID, map[string]any{"formats": []string{"html", "regions", "metadata"}, "max_chars": 200000, "wait_ms": 250}, false)
+	doc, err := e.app.extractBrowserDOM(e.workerCtx, e.ctx, e.session.SessionID, options, false)
 	if err != nil {
 		return nil, err
 	}

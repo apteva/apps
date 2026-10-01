@@ -24,6 +24,8 @@ type fakeCall struct {
 }
 
 type fakePlatform struct {
+	crawlHTMLMinimumLimit    int
+	crawlHTMLAlwaysTruncated bool
 	tk.BasePlatformClient
 	failAction            string
 	blockExtract          chan struct{}
@@ -129,6 +131,9 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 			"proxy":       proxy,
 		}
 	case "computer.browser_extract":
+		if p.crawlHTMLMinimumLimit > 0 || p.crawlHTMLAlwaysTruncated {
+			return map[string]any{"html": "<body><h2>Complete profile</h2></body>", "rendered": true, "current_url": "https://example.com/profile", "truncated": p.crawlHTMLAlwaysTruncated || intArg(in, "max_chars") < p.crawlHTMLMinimumLimit}
+		}
 		if strings.Contains(p.openURL, "google.com/search") {
 			p.searchExtractCount++
 			if p.searchBlocked {
