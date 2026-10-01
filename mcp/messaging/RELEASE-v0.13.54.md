@@ -5,7 +5,7 @@ for initialization when upgrading a legacy Messaging database.
 
 Production databases with a large email history can exceed the default
 60-second startup budget while building the message-search index introduced
-in v0.13.48. The longer explicit budget lets the existing transactional
+in v0.13.47. The longer explicit budget lets the existing transactional
 migration finish before SDK and server health checks declare initialization
 failed. The previous instance continues serving during activation.
 
