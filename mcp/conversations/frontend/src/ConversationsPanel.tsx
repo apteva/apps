@@ -270,6 +270,12 @@ function PublicTag() {
 
 // ─── typed cards ─────────────────────────────────────────────────────
 
+function approvalActionColors(style: string | undefined, index: number) {
+  if (style === "primary") return "border border-accent bg-accent text-bg";
+  if (style === "danger" || (!style && index === 0)) return "border border-accent text-accent";
+  return "border border-border text-text";
+}
+
 export function ApprovalCard({
   message,
   onAction,
@@ -287,6 +293,8 @@ export function ApprovalCard({
   const actions = Array.isArray(card.props.actions)
     ? (card.props.actions as Array<{ id: string; label: string; style?: string }>)
     : [];
+  const selectedIndex = actions.findIndex(action => action.id === status);
+  const selectedAction = actions[selectedIndex];
 
   const act = async (actionId: string) => {
     setBusy(true);
@@ -313,9 +321,17 @@ export function ApprovalCard({
         <p className="mt-1 text-sm text-text-muted whitespace-pre-wrap">{String(card.props.body)}</p>
       ) : null}
       {status !== "pending" && (
-        <p className="mt-2 text-sm font-medium text-text whitespace-pre-wrap break-words">
-          {t("approval.decision", { decision: actions.find(action => action.id === status)?.label || statusLabel(status) })}
-        </p>
+        <div className="mt-2.5">
+          <span className={`inline-flex max-w-full items-start gap-1.5 rounded px-2.5 py-1.5 text-xs font-semibold ${approvalActionColors(selectedAction?.style, selectedIndex)}`}>
+            <svg className="shrink-0 mt-0.5" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" />
+              <path d="m8 12 3 3 5-6" />
+            </svg>
+            <span className="min-w-0 whitespace-pre-wrap break-words">
+              {t("approval.decision", { decision: selectedAction?.label || statusLabel(status) })}
+            </span>
+          </span>
+        </div>
       )}
       {status === "pending" && (
         <div className="mt-2.5 flex flex-col gap-2">
@@ -333,12 +349,12 @@ export function ApprovalCard({
                 type="button"
                 disabled={busy}
                 onClick={() => act(a.id)}
-                className={`px-3 py-1.5 rounded text-xs font-semibold disabled:opacity-50 ${
+                className={`px-3 py-1.5 rounded text-xs font-semibold disabled:opacity-50 ${approvalActionColors(a.style, index)} ${
                   a.style === "primary"
-                    ? "border border-accent bg-accent text-bg hover:opacity-90"
+                    ? "hover:opacity-90"
                     : a.style === "danger" || (!a.style && index === 0)
-                      ? "border border-accent text-accent hover:bg-accent/10"
-                      : "border border-border text-text hover:bg-bg-input"
+                      ? "hover:bg-accent/10"
+                      : "hover:bg-bg-input"
                 }`}
               >
                 {a.label}
