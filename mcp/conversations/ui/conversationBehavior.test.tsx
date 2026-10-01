@@ -386,6 +386,28 @@ test("legacy approval decisions fall back to localized statuses", async () => {
  expect(element.textContent).toContain("Decisión: denegado");
 });
 
+test("alerts show their card without duplicate tool activity live or after reload", async () => {
+ const alert={...message(301),role:"agent",agent_id:41,component_kind:"alert",components:[{app:"conversations",name:"alert-card",props:{text:"Test alert: 30 seconds have elapsed.",severity:"info"}}]};
+ const activity={id:71,chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"alert-call",name:"conversations_conversations_alert",reason:"Sending scheduled test alert",status:"completed",started_at:message(300).created_at,ended_at:message(301).created_at,revision:2};
+ await render();
+ const events=FakeEvents.instances[0];
+ await act(async()=>events.listeners.get("stream")?.({data:JSON.stringify({chat_id:"a",agent_id:41,thread_id:"chat-a",response_progress:{phase:"preparing_tool",run_id:"alert-run",revision:1,after_message_id:300,started_at:message(300).created_at,tool_name:activity.name,call_id:activity.call_id}})}));
+ expect(element.querySelector(".chat-tool-activity")).toBeNull();
+ await act(async()=>{
+  events.listeners.get("stream")?.({data:JSON.stringify({chat_id:"a",agent_id:41,tool_activity:activity})});
+  events.emit(alert);
+ });
+ await settle();
+ expect(element.textContent).toContain("Test alert: 30 seconds have elapsed.");
+ expect(element.textContent).not.toContain(activity.reason);
+ expect(element.querySelector(".chat-tool-activity")).toBeNull();
+ fetcher=url=>url.includes("/activity")?json([activity]):url.includes("/deliveries")?json([]):json({messages:[alert],cursor:301,before:301,has_more:false});
+ await act(async()=>root.render(null));
+ await render();
+ expect(element.textContent).toContain("Test alert: 30 seconds have elapsed.");
+ expect(element.querySelector(".chat-tool-activity")).toBeNull();
+});
+
 test("new approval clears its agent's thinking while historical cards and other agents remain isolated", async () => {
  await render();
  const events=FakeEvents.instances[0];
