@@ -220,7 +220,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const [candidates, setCandidates] = useState<ImportCandidate[]>([]);
   const [importLimitReached, setImportLimitReached] = useState(false);
   const [editingPublication, setEditingPublication] = useState<Publication | null>(null);
-  const [modal, setModal] = useState<"new-session" | "edit-session" | "add-file" | "link-gig" | "publication" | null>(null);
+  const [modal, setModal] = useState<"new-session" | "edit-session" | "add-file" | "link-gig" | "publication" | "filters" | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -331,7 +331,16 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const longestDurationSeconds = Math.max(1, ...Object.values(assetDurations).map(ms => Math.ceil(ms / 1000)));
   const lengthMaximum = assetLengthMax ?? longestDurationSeconds;
   const lengthSliderLimit = Math.max(longestDurationSeconds, assetLengthMin, lengthMaximum);
-  const assetFiltersActive = !!assetQuery || assetKind !== "any" || assetLength !== "any" || assetSharing !== "any" || !!assetDestination || assetSort !== "newest";
+  const activeAssetFilterCount = [assetKind !== "any", assetLength !== "any", assetSharing !== "any", !!assetDestination, assetSort !== "newest"].filter(Boolean).length;
+  const assetFiltersActive = !!assetQuery || activeAssetFilterCount > 0;
+  const assetFilterSummary = [
+    assetKind !== "any" ? ({ video: "Videos", image: "Images", audio: "Audio", other: "Other files" } as Record<string, string>)[assetKind] : "",
+    assetLength === "range" ? `${durationLabel(assetLengthMin * 1000)}–${durationLabel(lengthMaximum * 1000)}` : assetLength === "unknown" ? "Length unknown" : "",
+    assetSharing !== "any" ? ({ none: "No post recorded", not_verified: "No verified live post", verified: "Verified live", reported: "Reported live", scheduled: "Scheduled or submitted", failed: "Failed" } as Record<string, string>)[assetSharing] : "",
+    assetDestination,
+    assetSort !== "newest" ? ({ name: "Name A–Z", shortest: "Shortest first", longest: "Longest first" } as Record<string, string>)[assetSort] : "",
+  ].filter(Boolean).join(" · ");
+  const resetAssetFilters = (clearSearch = false) => { if (clearSearch) setAssetQuery(""); setAssetKind("any"); setAssetLength("any"); setAssetLengthMin(0); setAssetLengthMax(null); setAssetSharing("any"); setAssetDestination(""); setAssetSort("newest"); };
   const sharingCount = (state: string) => assets.filter(asset => {
     const posts = (asset.publications || []).filter(post => !assetDestination || post.destination.toLowerCase() === assetDestination.toLowerCase());
     return (!assetDestination || state !== "any" || posts.length > 0) && matchesSharing(posts, state);
@@ -405,19 +414,11 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
         <div className="flex flex-wrap items-start justify-between gap-4"><div className="min-w-0"><h2 className="text-2xl font-semibold">{selectedSession.title}</h2><p className="mt-1 text-sm text-text-muted">{brandName(selectedSession.brand_id)} · {recordingDate(selectedSession.session_date)} · {selectedSession.status}</p></div><div className="flex flex-wrap gap-2"><button type="button" className="rounded border border-border px-3 py-1.5 text-sm" onClick={() => setModal("edit-session")}>Edit session</button><button type="button" className={buttonClass} onClick={() => setModal("add-file")}>+ Add file</button><button type="button" className="rounded border border-border px-3 py-1.5 text-sm" disabled={!assets.length} onClick={() => { setSelectedAsset(null); setEditingPublication(null); setModal("publication"); }}>+ Record post</button><button type="button" className="rounded border border-border px-3 py-1.5 text-sm" onClick={() => setModal("link-gig")}>Link Gig</button></div></div>
       </div>
       <section className="space-y-3"><div className="flex items-center justify-between gap-3"><h3 className="text-lg font-semibold">Assets</h3><span className="text-xs text-text-muted">Showing {filteredAssets.length} of {assets.length} files</span></div>
-        <div className="rounded-xl border border-border bg-bg-input/30 p-3 space-y-3" aria-label="Filter session assets">
-          <div className="flex flex-wrap gap-2" aria-label="Quick publication filters">{([[
-            "any", "All files"], ["none", "No post recorded"], ["not_verified", "No verified live post"], ["verified", "Verified live"]] as const).map(([state, label]) => <button key={state} type="button" onClick={() => setAssetSharing(state)} className={`rounded-full border px-3 py-1 text-xs ${assetSharing === state ? "border-accent bg-accent/10 text-accent" : "border-border text-text-muted hover:text-text"}`}>{label} <strong>{sharingCount(state)}</strong></button>)}</div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 8 }}>
-            <input className={inputClass} type="search" value={assetQuery} onChange={e => setAssetQuery(e.target.value)} placeholder="Find file name or ID" aria-label="Find session file" />
-            <select className={inputClass} value={assetKind} onChange={e => setAssetKind(e.target.value)} aria-label="Content type"><option value="any">All content types</option><option value="video">Videos</option><option value="image">Images</option><option value="audio">Audio</option><option value="other">Other files</option></select>
-            <select className={inputClass} value={assetSharing} onChange={e => setAssetSharing(e.target.value)} aria-label="Publication status"><option value="any">Any sharing status</option><option value="none">No post recorded</option><option value="not_verified">No verified live post</option><option value="verified">Verified live</option><option value="reported">Reported live, unverified</option><option value="scheduled">Scheduled or submitted</option><option value="failed">Failed</option></select>
-            <select className={inputClass} value={assetDestination} onChange={e => setAssetDestination(e.target.value)} aria-label="Platform"><option value="">All platforms</option>{assetDestinations.map(destination => <option key={destination} value={destination}>{destination}</option>)}</select>
-            <select className={inputClass} value={assetSort} onChange={e => setAssetSort(e.target.value)} aria-label="Sort files"><option value="newest">Recently added</option><option value="name">Name A–Z</option><option value="shortest">Shortest first</option><option value="longest">Longest first</option></select>
-          </div>
-          <DurationFilter mode={assetLength} minimum={assetLengthMin} maximum={lengthMaximum} limit={lengthSliderLimit} loading={durationsLoading} onMode={mode => { setAssetLength(mode); if (mode === "any") { setAssetLengthMin(0); setAssetLengthMax(null); } }} onRange={(minimum, maximum) => { setAssetLengthMin(minimum); setAssetLengthMax(maximum); setAssetLength("range"); }} />
-          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-text-muted"><span>Sharing filters use posts recorded in Catalog. Only “Verified live” confirms publication.{durationsLoading ? " Loading video and audio lengths from Media…" : durationsUnavailable ? ` ${durationsUnavailable} file length${durationsUnavailable === 1 ? " is" : "s are"} unknown.` : ""}</span>{assetFiltersActive && <button type="button" className="text-accent underline" onClick={() => { setAssetQuery(""); setAssetKind("any"); setAssetLength("any"); setAssetLengthMin(0); setAssetLengthMax(null); setAssetSharing("any"); setAssetDestination(""); setAssetSort("newest"); }}>Clear filters</button>}</div>
-          {(durationsError || durationsFailed > 0) && <div className="flex flex-wrap items-center gap-2 text-xs text-yellow-400">Could not read {durationsFailed || "some"} file length{durationsFailed === 1 ? "" : "s"} from Media. <button type="button" className="underline" onClick={() => loadDurations(selectedSession)}>Retry</button></div>}
+        <div className="flex flex-wrap items-center gap-2" aria-label="Asset toolbar">
+          <input className={inputClass} style={{ flex: "1 1 180px", maxWidth: 360 }} type="search" value={assetQuery} onChange={e => setAssetQuery(e.target.value)} placeholder="Find file name or ID" aria-label="Find session file" />
+          <button type="button" aria-haspopup="dialog" className={`rounded border px-3 py-1.5 text-sm ${activeAssetFilterCount ? "border-accent text-accent" : "border-border"}`} onClick={() => setModal("filters")}>Filters{activeAssetFilterCount > 0 ? ` (${activeAssetFilterCount})` : ""}</button>
+          {assetFilterSummary && <span className="truncate text-xs text-text-muted" style={{ flex: "1 1 120px", minWidth: 0 }} title={assetFilterSummary}>{assetFilterSummary}</span>}
+          {assetFiltersActive && <button type="button" className="text-xs text-accent underline" onClick={() => resetAssetFilters(true)}>Clear filters</button>}
         </div>
         {assets.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">No files linked yet. Use Add file to upload into this session or link one from Storage.</p>}
         {assets.length > 0 && filteredAssets.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">{durationsLoading && assetLength !== "any" ? "Loading file lengths…" : "No files match these filters."}</p>}
@@ -434,6 +435,24 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
       {assets.some(a => a.publications?.length) && <section className="rounded-xl border border-border p-4 space-y-2 text-sm"><h3 className="font-semibold">Posts for this session</h3>{Array.from(new Map(assets.flatMap(a => a.publications || []).map(p => [p.id, p])).values()).map(p => <div key={p.id} className="flex flex-wrap items-center gap-2 border-t border-border pt-2 text-xs"><PublicationIcons items={[p]} /><strong>{p.title || p.destination}</strong><span>{publicationLabel(p.status)}</span><span className="text-text-muted">{p.asset_ids?.length || 1} files</span>{p.external_url && <a href={p.external_url} target="_blank" rel="noreferrer" className="text-accent underline">View post</a>}<button type="button" className="ml-auto text-accent underline" onClick={() => { setEditingPublication(p); setSelectedAsset(null); setModal("publication"); }}>Edit post</button></div>)}</section>}
       <section className="rounded-xl border border-border p-4 space-y-2 text-sm"><h3 className="font-semibold">Session info</h3>{selectedSession.notes && <p className="text-text-muted">{selectedSession.notes}</p>}<p className="text-text-muted">Gigs: {gigs.length ? gigs.map(g => `#${g.gig_id}${g.role ? ` (${g.role})` : ""}`).join(", ") : "none linked"}</p></section>
     </div>}
+
+    {modal === "filters" && selectedSession && <Modal title="Filter assets" onClose={() => setModal(null)}>
+      <div className="space-y-4">
+        <div><h3 className="text-lg font-semibold">Filter assets</h3><p className="text-xs text-text-muted">Showing {filteredAssets.length} of {assets.length} files</p></div>
+        <div className="flex flex-wrap gap-2" aria-label="Quick publication filters">{([[
+            "any", "All files"], ["none", "No post recorded"], ["not_verified", "No verified live post"], ["verified", "Verified live"]] as const).map(([state, label]) => <button key={state} type="button" onClick={() => setAssetSharing(state)} className={`rounded-full border px-3 py-1 text-xs ${assetSharing === state ? "border-accent bg-accent/10 text-accent" : "border-border text-text-muted hover:text-text"}`}>{label} <strong>{sharingCount(state)}</strong></button>)}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 12 }}>
+          <label className="block text-xs space-y-1"><span>Content type</span><select className={inputClass} value={assetKind} onChange={e => setAssetKind(e.target.value)} aria-label="Content type"><option value="any">All content types</option><option value="video">Videos</option><option value="image">Images</option><option value="audio">Audio</option><option value="other">Other files</option></select></label>
+          <label className="block text-xs space-y-1"><span>Publication status</span><select className={inputClass} value={assetSharing} onChange={e => setAssetSharing(e.target.value)} aria-label="Publication status"><option value="any">Any sharing status</option><option value="none">No post recorded</option><option value="not_verified">No verified live post</option><option value="verified">Verified live</option><option value="reported">Reported live, unverified</option><option value="scheduled">Scheduled or submitted</option><option value="failed">Failed</option></select></label>
+          <label className="block text-xs space-y-1"><span>Platform</span><select className={inputClass} value={assetDestination} onChange={e => setAssetDestination(e.target.value)} aria-label="Platform"><option value="">All platforms</option>{assetDestinations.map(destination => <option key={destination} value={destination}>{destination}</option>)}</select></label>
+          <label className="block text-xs space-y-1"><span>Sort files</span><select className={inputClass} value={assetSort} onChange={e => setAssetSort(e.target.value)} aria-label="Sort files"><option value="newest">Recently added</option><option value="name">Name A–Z</option><option value="shortest">Shortest first</option><option value="longest">Longest first</option></select></label>
+        </div>
+        <DurationFilter mode={assetLength} minimum={assetLengthMin} maximum={lengthMaximum} limit={lengthSliderLimit} loading={durationsLoading} onMode={mode => { setAssetLength(mode); if (mode === "any") { setAssetLengthMin(0); setAssetLengthMax(null); } }} onRange={(minimum, maximum) => { setAssetLengthMin(minimum); setAssetLengthMax(maximum); setAssetLength("range"); }} />
+        <p className="text-xs text-text-muted">Sharing filters use recorded posts; only “Verified live” confirms publication.{durationsUnavailable > 0 ? ` ${durationsUnavailable} file length${durationsUnavailable === 1 ? " is" : "s are"} unknown.` : ""}</p>
+        {(durationsError || durationsFailed > 0) && <div className="flex flex-wrap items-center gap-2 text-xs text-yellow-400">Could not read {durationsFailed || "some"} file length{durationsFailed === 1 ? "" : "s"} from Media. <button type="button" className="underline" onClick={() => loadDurations(selectedSession)}>Retry</button></div>}
+        <div className="flex items-center justify-between gap-3 border-t border-border pt-3"><button type="button" className="text-sm text-accent underline" onClick={() => resetAssetFilters()}>Reset filters</button><button type="button" className={buttonClass} onClick={() => setModal(null)}>Show {filteredAssets.length} file{filteredAssets.length === 1 ? "" : "s"}</button></div>
+      </div>
+    </Modal>}
 
     {selectedAsset && !modal && <Modal title={selectedAsset.name} wide onClose={closeAsset}>
       {error && <p className="mb-3 rounded border border-red-500/50 p-3 text-sm text-red-400">{error}</p>}
