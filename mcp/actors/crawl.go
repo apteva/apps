@@ -36,11 +36,12 @@ type crawlFrontier struct {
 }
 
 type crawlRoute struct {
-	Match    string           `json:"match"`
-	Steps    []actorStep      `json:"steps,omitempty"`
-	Extract  []crawlExtract   `json:"extract"`
-	Follow   []crawlFollow    `json:"follow,omitempty"`
-	Paginate *crawlPagination `json:"paginate,omitempty"`
+	Match          string           `json:"match"`
+	Steps          []actorStep      `json:"steps,omitempty"`
+	Extract        []crawlExtract   `json:"extract"`
+	Follow         []crawlFollow    `json:"follow,omitempty"`
+	Paginate       *crawlPagination `json:"paginate,omitempty"`
+	AllowTruncated bool             `json:"allow_truncated,omitempty"`
 }
 
 type crawlPagination struct {

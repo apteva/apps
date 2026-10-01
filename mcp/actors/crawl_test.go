@@ -74,6 +74,31 @@ func TestCrawlExtractionFanoutAndTransforms(t *testing.T) {
 	}
 }
 
+func TestCrawlExtractionAllowsTruncatedHTMLWhenRouteOptsIn(t *testing.T) {
+	crawl := crawlDefinition{
+		Datasets: map[string]crawlDataset{"profiles": {Key: "id", Schema: map[string]string{"id": "string", "name": "string"}}},
+		Routes: map[string]crawlRoute{"profile": {
+			Match:          "/fighter-details/",
+			AllowTruncated: true,
+			Extract: []crawlExtract{{Dataset: "profiles", Items: "body", Required: true, Fields: map[string]crawlField{
+				"id":   {actorField: actorField{Type: "text"}, Source: "url"},
+				"name": {actorField: actorField{Type: "text", Selector: "h2"}},
+			}}},
+		}},
+	}
+	page, err := extractCrawlPage(crawl, crawl.Routes["profile"], &crawlQueueItem{URL: "https://www.ufcstats.com/fighter-details/abc"}, &browserExtractResult{
+		URL:       "https://www.ufcstats.com/fighter-details/abc",
+		HTML:      `<html><body><h2>Example Fighter</h2><table><tbody><tr><td>truncated later</td></tr></tbody></table></body></html>`,
+		Truncated: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Records) != 1 || page.Records[0].Item["name"] != "Example Fighter" {
+		t.Fatalf("unexpected truncated extraction: %+v", page.Records)
+	}
+}
+
 func TestCrawlURLCanonicalization(t *testing.T) {
 	a := canonicalCrawlURL("HTTP://WWW.UFCSTATS.COM:80/event-details/abc#row")
 	b := canonicalCrawlURL("http://www.ufcstats.com/event-details/abc")
