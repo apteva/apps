@@ -190,7 +190,7 @@ func (a *App) handleRPC(w http.ResponseWriter, r *http.Request) {
 	ctx := a.ctx.WithUserSession(r)
 	actor := "dashboard"
 	if r.Header.Get("X-Apteva-Trusted-Principal") != "" || r.Header.Get("X-Apteva-Trusted-Principal-Signature") != "" {
-		principal, err := principalFromRequest(r)
+		principal, err := sdk.PrincipalFromRequest(r)
 		if err != nil || principal == nil {
 			writeError(w, fail("invalid_principal", 403, "Invalid user identity"))
 			return

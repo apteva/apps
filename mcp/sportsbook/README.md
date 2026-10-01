@@ -84,7 +84,7 @@ Open `http://127.0.0.1:8079/ui/index.html`. Choose **Examples** in the workspace
 
 The preview loads the actual `SportsbookPanel.mjs` through a shared React import map, uses a preview-only copy of the ui-kit token stylesheet, builds the Go binary, creates an isolated temporary database and random local app token, and exposes a loopback-only app proxy. It does not read existing Apteva API keys or connect provider accounts. Ports can be changed with `SPORTSBOOK_BACKEND_PORT` and `SPORTSBOOK_PREVIEW_PORT`. Ctrl-C stops both processes.
 
-For platform installation, use `apteva.yaml` as a source app manifest. The SDK serves `ui/` and applies migrations; build the UI before packaging. The app is project-scoped. The module is pinned to app-sdk `v0.82.0`, the latest tag at the SDK HEAD inspected during implementation. It also builds against the local SDK overlay. Publishing a release tag and adding a marketplace registry entry are separate release work.
+For platform installation, use `apteva.yaml` as a source app manifest. The SDK serves `ui/` and applies migrations; build the UI before packaging. The app is project-scoped. The module is pinned to the published app-sdk `v0.90.0`. Release `sportsbook/v0.1.0` pins the source manifest and marketplace entry to this version. Use `GOWORK=off` to verify the published SDK dependency independently of any local workspace overlay.
 
 ## Verify
 
@@ -106,7 +106,6 @@ Tests cover real SQLite transactions, acceptance races, duplicate settlement, ri
 - `predictions.go`: versioned Elo and bookmaker baseline snapshots.
 - `betting.go`: proposal, reservation, risk and settlement transactions.
 - `demo.go`: explicit fictional fixtures and history.
-- `principal.go`: signed-principal compatibility with the published SDK.
 - `ui/SportsbookPanel.tsx`: native dashboard panel; default export with the same app/project/install props as CRM.
 - `ui/preview.tsx`: local ESM panel-mount harness; no separate product shell.
 - `ui/dev.ts`: isolated local preview launcher.

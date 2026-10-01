@@ -9,6 +9,7 @@ icon: /ui/icon.svg
 icon_style: monochrome
 tags: [sports, betting, predictions, odds, research]
 scopes: [project]
+min_apteva_version: "0.11.0"
 requires:
   permissions: [db.write.app, platform.connections.read, platform.connections.execute]
   integrations:
@@ -66,7 +67,7 @@ provides:
     - { slot: project.page, label: Sportsbook, icon: trophy, entry: /ui/SportsbookPanel.mjs }
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: main, entry: mcp/sportsbook }
+  source: { repo: github.com/apteva/apps, ref: sportsbook/v0.1.0, entry: mcp/sportsbook }
   port: 8080
   health_check: /health
 db:

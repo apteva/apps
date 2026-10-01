@@ -50,19 +50,19 @@ func TestHTTPProjectAndCallerGates(t *testing.T) {
 }
 func TestSignedUserScopeAndSignature(t *testing.T) {
 	t.Setenv("APTEVA_APP_TOKEN", "test-install-token")
-	raw, _ := json.Marshal(principal{Version: 1, UserID: 12, ProjectID: "p1", ExpiresAt: time.Now().Unix() + 60})
+	raw, _ := json.Marshal(sdk.TrustedPrincipal{Version: 1, UserID: 12, ProjectID: "p1", ExpiresAt: time.Now().Unix() + 60})
 	encoded := base64.RawURLEncoding.EncodeToString(raw)
 	mac := hmac.New(sha256.New, []byte("test-install-token"))
 	mac.Write([]byte(encoded))
 	r := httptest.NewRequest("POST", "/rpc", nil)
 	r.Header.Set("X-Apteva-Trusted-Principal", encoded)
 	r.Header.Set("X-Apteva-Trusted-Principal-Signature", hex.EncodeToString(mac.Sum(nil)))
-	p, err := principalFromRequest(r)
+	p, err := sdk.PrincipalFromRequest(r)
 	if err != nil || p.UserID != 12 {
 		t.Fatal(err)
 	}
 	r.Header.Set("X-Apteva-Trusted-Principal-Signature", "00")
-	if _, err = principalFromRequest(r); err == nil {
+	if _, err = sdk.PrincipalFromRequest(r); err == nil {
 		t.Fatal("forged signature accepted")
 	}
 }
