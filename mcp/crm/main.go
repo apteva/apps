@@ -633,6 +633,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name:        "conversations_inbox",
 			Description: "Cross-contact triage queue: conversations across all contacts, newest activity first, with contact summary + last-message snippet + automated/priority flags. Args: status? (open [default] | pending | closed | all), limit? (default 50, max 200), offset? (for paging), filters? array of {field, op, value}. Filter fields: channel, from, to, cc, bcc, contact, list, tag, priority. Ops: is, is_not, contains, domain, in.",
+			Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false},
 			InputSchema: schemaObject(map[string]any{
 				"status":   map[string]any{"type": "string"},
 				"limit":    map[string]any{"type": "integer"},
