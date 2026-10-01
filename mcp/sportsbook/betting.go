@@ -63,6 +63,9 @@ func (a *App) propose(project, actor string, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err = marketEnabled(tx, project, market); err != nil {
+		return nil, err
+	}
 	if eventStatus != "scheduled" || start <= now {
 		return nil, fail("event_closed", 409, "Event is no longer eligible for pre-match betting")
 	}
@@ -139,9 +142,9 @@ func (a *App) accept(project, actor, proposal string) (any, error) {
 	if err != sql.ErrNoRows {
 		return nil, err
 	}
-	var bankroll, status, eventStatus string
+	var bankroll, status, eventStatus, market string
 	var stake, expiry, odds, quote, starts int64
-	err = tx.QueryRow(`SELECT p.bankroll_id,p.stake_minor,p.expires_at,p.status,p.quote_id,q.odds_micros,e.status,e.starts_at FROM proposals p JOIN odds_observations q ON q.id=p.quote_id AND q.project_id=p.project_id JOIN markets m ON m.project_id=q.project_id AND m.id=q.market_id JOIN events e ON e.project_id=m.project_id AND e.id=m.event_id WHERE p.project_id=? AND p.id=?`, project, proposal).Scan(&bankroll, &stake, &expiry, &status, &quote, &odds, &eventStatus, &starts)
+	err = tx.QueryRow(`SELECT p.bankroll_id,p.stake_minor,p.expires_at,p.status,p.quote_id,q.odds_micros,e.status,e.starts_at,m.id FROM proposals p JOIN odds_observations q ON q.id=p.quote_id AND q.project_id=p.project_id JOIN markets m ON m.project_id=q.project_id AND m.id=q.market_id JOIN events e ON e.project_id=m.project_id AND e.id=m.event_id WHERE p.project_id=? AND p.id=?`, project, proposal).Scan(&bankroll, &stake, &expiry, &status, &quote, &odds, &eventStatus, &starts, &market)
 	if err == sql.ErrNoRows {
 		return nil, fail("not_found", 404, "Proposal not found")
 	}
@@ -149,6 +152,9 @@ func (a *App) accept(project, actor, proposal string) (any, error) {
 		return nil, err
 	}
 	now := a.clock()
+	if err = marketEnabled(tx, project, market); err != nil {
+		return nil, err
+	}
 	if status != "proposed" || expiry <= now {
 		return nil, fail("proposal_expired", 409, "Proposal expired; refresh quotes and create a new proposal")
 	}

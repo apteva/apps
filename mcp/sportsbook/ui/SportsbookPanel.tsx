@@ -4,8 +4,8 @@
 import {useCallback, useEffect, useRef, useState} from "react";
 import type {ButtonHTMLAttributes, ReactNode} from "react";
 
-type Event = {id:string;sport:string;competition:string;home:string;away:string;starts_at:number;status:string;home_score:number|null;away_score:number|null;source:string;example:number};
-type Market = {id:string;event_id:string;rules:string};
+type Event = {id:string;sport:string;competition:string;competition_id:string;home:string;away:string;starts_at:number;status:string;home_score:number|null;away_score:number|null;source:string;example:number};
+type Market = {id:string;event_id:string;rules:string;outcome_profile:string};
 type Quote = {id:number;market_id:string;selection:string;bookmaker:string;odds_micros:number;observed_at:number;source:string;connection_id:number};
 type Prediction = {id:string;market_id:string;model:string;probabilities:Record<string,number>;features:{home_samples?:number;away_samples?:number;note?:string;calibrated?:boolean};expires_at:number;created_at:number};
 type Bankroll = {id:string;name:string;currency:string;cash_minor:number;locked_minor:number;pnl_minor:number;max_stake_bps:number;max_exposure_bps:number};
@@ -14,6 +14,14 @@ type Bet = {id:string;event_id:string;bankroll_id:string;selection:string;bookma
 type Provider = {id:number;slug:string;default:boolean;kind:string;sports:string[];capabilities:string[]};
 type Route = {role:string;sport:string;connection_id:number;model:string};
 type Integrations = {roles:Record<string,Provider[]>;routes:Route[]};
+type Sport = {id:string;name:string;enabled:number};
+type Competition = {id:string;sport:string;name:string;enabled:number};
+type MarketSettings = {sport:string;type:string;outcome_profile:string;rules:string;prediction_model:string;history_scope:string;home_advantage:number;enabled:number};
+type Mapping = {sport:string;competition_id:string;role:string;provider_slug:string;external_key:string;enabled:number};
+type ActorSource = {id:string;name:string;sport:string;competition_id:string;actor_id:number;operation:string;input:Record<string,unknown>;field_map:Record<string,unknown>;enabled:number;read_only:number;created_at:number};
+type Catalog = {sports:Sport[];competitions:Competition[];sport_market_types:MarketSettings[];provider_sport_mappings:Mapping[]};
+const emptyCatalog:Catalog={sports:[],competitions:[],sport_market_types:[],provider_sport_mappings:[]};
+const marketOutcomes=(m?:Market)=>m?.outcome_profile==='three_way'?['home','draw','away']:['home','away'];
 type Workspace = {events:Event[];markets:Market[];quotes:Quote[];predictions:Prediction[];bankrolls:Bankroll[];proposals:Proposal[];bets:Bet[];explanations:{prediction_id:string;text:string;model:string}[];server_time:number};
 export interface NativePanelProps {
   appName: string;
@@ -23,7 +31,7 @@ export interface NativePanelProps {
   eventRevision?: number;
 }
 const empty:Workspace={events:[],markets:[],quotes:[],predictions:[],bankrolls:[],proposals:[],bets:[],explanations:[],server_time:0};
-const labels:Record<string,string>={sports_data:'Sports data',odds:'Odds',execution:'Execution',llm:'LLM'};
+const labels:Record<string,string>={sports_data:'Sports data',sports_scraper:'Read-only scrape sources',odds:'Odds',execution:'Execution',llm:'LLM'};
 const pct=(n:number)=>`${(n*100).toFixed(1)}%`;
 const odds=(q:Quote|Proposal|Bet)=> (q.odds_micros/1e6).toFixed(2);
 const money=(n:number,currency='EUR')=>new Intl.NumberFormat(undefined,{style:'currency',currency}).format(n/100);
@@ -59,11 +67,12 @@ function Probabilities({prediction}:{prediction:Prediction}) {
 function Empty({children}:{children:ReactNode}) { return <div className="p-6 text-sm text-text-muted text-center">{children}</div>; }
 
 export default function SportsbookPanel({appName='sportsbook',projectId,installId,eventRevision=0}:NativePanelProps) {
+ const [catalog,setCatalog]=useState<Catalog>(emptyCatalog),[scrapeSources,setScrapeSources]=useState<ActorSource[]>([]);
  const [data,setData]=useState<Workspace>(empty),[integrations,setIntegrations]=useState<Integrations>({roles:{},routes:[]});
  const [tab,setTab]=useState('events'),[sport,setSport]=useState(''),[example,setExample]=useState(false),[selected,setSelected]=useState(''),[search,setSearch]=useState('');
  const [error,setError]=useState(''),[notice,setNotice]=useState(''),[busy,setBusy]=useState(false),[loading,setLoading]=useState(true);
  const [quoteID,setQuoteID]=useState(0),[bankrollID,setBankrollID]=useState(''),[stake,setStake]=useState('10.00'),[rationale,setRationale]=useState('');
- const [date,setDate]=useState(new Date().toISOString().slice(0,10)),[sportKey,setSportKey]=useState('soccer_epl'),[syncSport,setSyncSport]=useState('football'),[model,setModel]=useState('');
+ const [date,setDate]=useState(new Date().toISOString().slice(0,10)),[sportKey,setSportKey]=useState(''),[syncCompetition,setSyncCompetition]=useState(''),[syncSport,setSyncSport]=useState('football'),[model,setModel]=useState('');
  const [settlement,setSettlement]=useState<{bet:Bet;outcome:string}|null>(null),[settlementNote,setSettlementNote]=useState('Manual paper settlement for simulation');
  const [newBankroll,setNewBankroll]=useState(false),[bankrollName,setBankrollName]=useState('My paper bankroll'),[initial,setInitial]=useState('1000.00'),[currency,setCurrency]=useState('EUR');
  const [clock,setClock]=useState(Date.now()/1000);const mounted=useRef(true),requestID=useRef(0),mutation=useRef(false);
@@ -74,9 +83,9 @@ export default function SportsbookPanel({appName='sportsbook',projectId,installI
   const res=await fetch(`/api/apps/${encodeURIComponent(appName)}/rpc?${params}`,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool,args})});
   const body=await res.json();if(!res.ok)throw Error(body.error||`Request failed (${res.status})`);return body;
  },[projectId,installId,appName]);
- const refresh=useCallback(async()=>{const id=++requestID.current;const startedScope=scope;const [workspace,connections]=await Promise.all([rpc('workspace_get',{example}),rpc('integrations_list')]);if(mounted.current&&id===requestID.current&&scopeRef.current===startedScope){setData(workspace);setIntegrations(connections);setClock(workspace.server_time);setError('');}},[rpc,example,scope]);
+ const refresh=useCallback(async()=>{const id=++requestID.current;const startedScope=scope;const [workspace,connections,sportsCatalog,sources]=await Promise.all([rpc('workspace_get',{example}),rpc('integrations_list'),rpc('catalog_get'),rpc('sports_sources_list')]);if(mounted.current&&id===requestID.current&&scopeRef.current===startedScope){setData(workspace);setIntegrations(connections);setCatalog(sportsCatalog);setScrapeSources(sources.sources||[]);setClock(workspace.server_time);setError('');}},[rpc,example,scope]);
  useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;requestID.current++;};},[]);
- useEffect(()=>{let cancelled=false;setLoading(true);setData(empty);setSelected('');setQuoteID(0);setBankrollID('');setSettlement(null);setError('');setNotice('');refresh().catch(e=>{if(mounted.current&&!cancelled)setError(e.message);}).finally(()=>{if(mounted.current&&!cancelled)setLoading(false);});return()=>{cancelled=true;requestID.current++;};},[refresh]);
+ useEffect(()=>{let cancelled=false;setLoading(true);setData(empty);setCatalog(emptyCatalog);setSelected('');setQuoteID(0);setBankrollID('');setSettlement(null);setError('');setNotice('');refresh().catch(e=>{if(mounted.current&&!cancelled)setError(e.message);}).finally(()=>{if(mounted.current&&!cancelled)setLoading(false);});return()=>{cancelled=true;requestID.current++;};},[refresh]);
  useEffect(()=>{const t=window.setInterval(()=>setClock(v=>v+5),5000);return()=>window.clearInterval(t);},[]);
  const run=async(operation:()=>Promise<unknown>,message='')=>{if(mutation.current)return;const startedScope=scopeRef.current;mutation.current=true;setBusy(true);setError('');setNotice('');try{await operation();if(mounted.current&&scopeRef.current===startedScope){await refresh();if(message&&scopeRef.current===startedScope)setNotice(message);}}catch(e){if(mounted.current&&scopeRef.current===startedScope)setError(e instanceof Error?e.message:String(e));}finally{mutation.current=false;if(mounted.current)setBusy(false);}};
  const upcoming=data.events.filter(e=>e.status==='scheduled'&&e.starts_at>clock).sort((a,b)=>a.starts_at-b.starts_at);
@@ -88,9 +97,10 @@ export default function SportsbookPanel({appName='sportsbook',projectId,installI
  const cash=data.bankrolls.reduce((s,b)=>s+b.cash_minor,0),locked=data.bankrolls.reduce((s,b)=>s+b.locked_minor,0);const currencies=new Set(data.bankrolls.map(b=>b.currency));const totalCurrency=currencies.size===1?data.bankrolls[0]?.currency:'EUR';
  const name=(id:string)=>{const e=data.events.find(e=>e.id===id);return e?`${e.home} vs ${e.away}`:'Event'};
  const selectionName=(selection:string,e=event)=>selection==='draw'?'Draw':selection==='home'?e?.home||'Home':e?.away||'Away';
- const bookmakers=[...new Set(quotes.map(q=>q.bookmaker))];const outcomes=event?.sport==='football'?['home','draw','away']:['home','away'];
+ const bookmakers=[...new Set(quotes.map(q=>q.bookmaker))];const outcomes=marketOutcomes(market);
  const latestExplanation=data.explanations.find(x=>x.prediction_id===prediction?.id);
- const syncData=(role:'sports_data'|'odds')=>run(async()=>{const out=await rpc(role==='odds'?'odds_sync':'sports_sync',{sport:syncSport,date,sport_key:sportKey,all_sources:role==='odds'});const failed=out.sources.filter((s:{success:boolean})=>!s.success);setNotice(out.sources.map((s:{provider:string;events:number;success:boolean})=>`${s.provider}: ${s.success?`${s.events} events`:'import failed'}`).join(' · '));if(failed.length)throw Error('One or more imports failed. Successful sources were saved. Check provider coverage, connection and quota.');});
+ useEffect(()=>{if(catalog.sports.length&&!catalog.sports.some(s=>s.id===syncSport&&s.enabled)){setSyncSport(catalog.sports.find(s=>s.enabled)?.id||'');setSyncCompetition('');setSportKey('');}},[catalog,syncSport]);
+ const syncData=(role:'sports_data'|'odds')=>run(async()=>{const out=await rpc(role==='odds'?'odds_sync':'sports_sync',{sport:syncSport,date,sport_key:sportKey,competition_id:syncCompetition,all_sources:role==='odds'});const failed=out.sources.filter((s:{success:boolean})=>!s.success);setNotice(out.sources.map((s:{provider:string;events:number;success:boolean})=>`${s.provider}: ${s.success?`${s.events} events`:'import failed'}`).join(' · '));if(failed.length)throw Error(failed.map((s:{provider:string;error?:string})=>`${s.provider}: ${s.error||'Import failed'}`).join(' · '));});
  const setEvent=(e:Event)=>{setSelected(e.id);setQuoteID(0);setRationale('');};
  const predict=()=>run(()=>rpc('prediction_run',{market_id:market?.id}),'Prediction saved with its source evidence.');
  const proposal=()=>run(()=>rpc('bet_propose',{bankroll_id:bankroll?.id,prediction_id:freshPrediction?.id,quote_id:quote?.id,stake_minor:minor(stake),rationale}),'Paper proposal created. Review it in Bets.');
@@ -98,7 +108,7 @@ export default function SportsbookPanel({appName='sportsbook',projectId,installI
  useEffect(()=>{if(eventRevision>0)void refresh().catch(e=>{if(mounted.current)setError(e.message);});},[eventRevision,refresh]);
  return <div className="h-full min-h-0 flex flex-col bg-bg text-text">
   <nav aria-label="Sportsbook views" role="tablist" className="flex gap-1 border-b border-border px-3 pt-2 text-xs overflow-x-auto shrink-0">
-   {([['events','Events'],['predictions','Predictions'],['bets','Bets'],['integrations','Integrations']] as const).map(([id,label])=>
+   {([['events','Events'],['predictions','Predictions'],['bets','Bets'],['sports','Sports'],['integrations','Integrations']] as const).map(([id,label])=>
     <button key={id} type="button" role="tab" id={`sportsbook-tab-${id}`} aria-selected={tab===id} aria-controls={`sportsbook-view-${id}`}
      onClick={()=>setTab(id)} className={`px-3 py-2 border-b-2 whitespace-nowrap ${tab===id?'border-accent text-accent':'border-transparent text-text-muted hover:text-text'}`}>{label}</button>
    )}
@@ -126,7 +136,7 @@ export default function SportsbookPanel({appName='sportsbook',projectId,installI
       <div className="p-3 border-b border-border space-y-2">
        <input aria-label="Search events" className={inputClass} placeholder="Search teams, players or competitions…" value={search} onChange={e=>setSearch(e.target.value)}/>
        <select aria-label="Filter sport" className={inputClass} value={sport} onChange={e=>setSport(e.target.value)}>
-        <option value="">All sports</option><option value="football">Football</option><option value="tennis">Tennis</option>
+        <option value="">All sports</option>{catalog.sports.map(s=><option key={s.id} value={s.id}>{s.name}{s.enabled?'':' (disabled)'}</option>)}
        </select>
       </div>
       <div className="flex-1 overflow-auto">
@@ -141,7 +151,7 @@ export default function SportsbookPanel({appName='sportsbook',projectId,installI
          <div className="text-sm font-medium mt-1">{e.home} vs {e.away}</div>
          <div className="text-xs text-text-muted mt-1">{datetime(e.starts_at)} · {e.source}</div>
          <div className="flex gap-2 mt-2">
-          {(e.sport==='football'?['home','draw','away']:['home','away']).map((s,i)=>{
+          {marketOutcomes(data.markets.find(m=>m.event_id===e.id)).map((s,i)=>{
            const best=qs.filter(q=>q.selection===s).sort((a,b)=>b.odds_micros-a.odds_micros)[0];
            return <span key={s} className="px-2 py-1 text-xs rounded border border-border tabular-nums"><span className="text-text-dim mr-2">{s==='draw'?'X':i===0?'1':'2'}</span>{best?odds(best):'—'}</span>;
           })}
@@ -154,7 +164,7 @@ export default function SportsbookPanel({appName='sportsbook',projectId,installI
      <main className="flex-1 min-w-0 min-h-0 overflow-auto p-4 md:p-5">
       {!event?<Empty>Select an event to view prices, predictions and bet proposals.</Empty>:<div className="space-y-5">
        <header>
-        <div className="flex items-center gap-2 mb-2"><Pill>{event.sport}</Pill><Pill>{market?.rules==='regulation'?'Regulation time':'Completed match'}</Pill></div>
+        <div className="flex items-center gap-2 mb-2"><Pill>{catalog.sports.find(s=>s.id===event.sport)?.name||event.sport}</Pill><Pill>{market?.rules==='regulation'?'Regulation time':'Completed match'}</Pill></div>
         <h1 className="text-lg font-medium">{event.home} vs {event.away}</h1>
         <p className="text-xs text-text-muted mt-1">{event.competition} · {datetime(event.starts_at)} · {event.source}</p>
        </header>
@@ -167,7 +177,7 @@ export default function SportsbookPanel({appName='sportsbook',projectId,installI
            <p className={mutedClass}>{prediction.features.note}</p>
           </>:<p className={mutedClass}>Use imported results to estimate probabilities. Insufficient history produces a labeled bookmaker baseline.</p>}
          </Section>
-         <Section title="Match-winner prices" action={<span className={mutedClass}>{event.sport==='football'?'1 / X / 2':'1 / 2'}</span>}>
+         <Section title="Match-winner prices" action={<span className={mutedClass}>{outcomes.includes('draw')?'1 / X / 2':'1 / 2'}</span>}>
           {bookmakers.length?<div className="divide-y divide-border">{bookmakers.map(book=><div key={book} className="flex items-center justify-between gap-2 py-2">
            <div className="min-w-0"><div className="text-xs font-medium truncate">{book}</div><div className="text-xs text-text-dim">{quotes.find(q=>q.bookmaker===book)?.source}</div></div>
            <div className="flex gap-1 shrink-0">{outcomes.map(s=>{
@@ -242,25 +252,28 @@ export default function SportsbookPanel({appName='sportsbook',projectId,installI
       </Section>
      </div>
     </div>}
+    {tab==='sports'&&<CatalogEditor catalog={catalog} integrations={integrations} busy={busy} rpc={rpc} run={run}/>}
     {tab==='integrations'&&<div className="p-4 space-y-4">
      <p className={mutedClass}>Bind connections in this app's platform settings. Choose a default for each role, with optional sport-specific routing.</p>
      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">{Object.entries(labels).map(([role,label])=>
       <Section key={role} title={label} action={<Pill>Multiple providers</Pill>}>
-       <p className={mutedClass}>{({sports_data:'Fixtures and results from selected sports data providers.',odds:'Complete bookmaker markets, price comparison and history.',execution:'Paper execution is built in. Connected wagering is reserved for a compatible executor app.',llm:'Supplemental explanations through selected language models.'} as Record<string,string>)[role]}</p>
+       <p className={mutedClass}>{({sports_data:'Fixtures and results from selected sports data providers.',sports_scraper:'Read-only Actors datasets mapped into normalized sports events. Configure sources below; Sportsbook never writes back to Actors.',odds:'Complete bookmaker markets, price comparison and history.',execution:'Paper execution is built in. Connected wagering is reserved for a compatible executor app.',llm:'Supplemental explanations through selected language models.'} as Record<string,string>)[role]}</p>
        {integrations.roles[role]?.length?<div className="divide-y divide-border">{integrations.roles[role].map(p=><div key={p.id} className="flex justify-between gap-2 py-2">
         <div><span className="text-sm">{p.slug||'Execution app'}</span><div className={mutedClass}>{p.sports?.join(' · ')||p.capabilities?.join(' · ')||'Live execution disabled'}</div></div><Pill accent={p.default}>{p.default?'Default':'Selected'}</Pill>
        </div>)}</div>:<p className={mutedClass}>{role==='execution'?'Paper engine available. No connected executor.':'No providers selected.'}</p>}
-       {!!integrations.roles[role]?.length&&<RoutePicker role={role} providers={integrations.roles[role]} routes={integrations.routes} busy={busy} save={(sport,id,model)=>run(()=>rpc('provider_route_set',{role,sport,connection_id:id,model}),'Provider route saved.')}/>}
+       {!!integrations.roles[role]?.length&&<RoutePicker sports={catalog.sports} role={role} providers={integrations.roles[role]} routes={integrations.routes} busy={busy} save={(sport,id,model)=>run(()=>rpc('provider_route_set',{role,sport,connection_id:id,model}),'Provider route saved.')}/>}
       </Section>
      )}</div>
+     <ActorSources sources={scrapeSources} sports={catalog.sports} competitions={catalog.competitions} busy={busy} rpc={rpc} run={run} date={date}/>
      <Section title="Import sports & odds">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-       <div><label htmlFor="sb-sync-sport" className="block text-xs text-text-muted mb-1">Sport</label><select id="sb-sync-sport" className={inputClass} value={syncSport} onChange={e=>{setSyncSport(e.target.value);setSportKey(e.target.value==='football'?'soccer_epl':'');}}><option value="football">Football</option><option value="tennis">Tennis</option></select></div>
+       <div><label htmlFor="sb-sync-sport" className="block text-xs text-text-muted mb-1">Sport</label><select id="sb-sync-sport" className={inputClass} value={syncSport} onChange={e=>{setSyncSport(e.target.value);setSyncCompetition('');setSportKey('');}}>{catalog.sports.filter(s=>s.enabled).map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></div>
        <div><label htmlFor="sb-sync-date" className="block text-xs text-text-muted mb-1">Event date (UTC)</label><input id="sb-sync-date" className={inputClass} type="date" value={date} onChange={e=>setDate(e.target.value)}/></div>
-       <div><label htmlFor="sb-sport-key" className="block text-xs text-text-muted mb-1">The Odds API competition key</label><input id="sb-sport-key" className={inputClass} value={sportKey} onChange={e=>setSportKey(e.target.value)} placeholder={syncSport==='football'?'soccer_epl':'Active tennis competition key'}/></div>
-       <div className="flex items-end gap-2 flex-wrap"><Button disabled={busy} onClick={()=>void syncData('sports_data')}>Import sports data</Button><Button primary disabled={busy} onClick={()=>void syncData('odds')}>Import odds</Button></div>
+       <div><label htmlFor="sb-sync-competition" className="block text-xs text-text-muted mb-1">Competition</label><select id="sb-sync-competition" className={inputClass} value={syncCompetition} onChange={e=>{setSyncCompetition(e.target.value);setSportKey('');}}><option value="">Sport default mapping</option>{catalog.competitions.filter(c=>c.sport===syncSport&&c.enabled).map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
+       <div><label htmlFor="sb-sport-key" className="block text-xs text-text-muted mb-1">Provider key override (optional)</label><input id="sb-sport-key" className={inputClass} value={sportKey} onChange={e=>setSportKey(e.target.value)} placeholder="Use saved provider mappings"/></div>
+       <div className="flex items-end gap-2 flex-wrap"><Button disabled={busy||!syncSport} onClick={()=>void syncData('sports_data')}>Import sports data</Button><Button primary disabled={busy||!syncSport} onClick={()=>void syncData('odds')}>Import odds</Button></div>
       </div>
-      <p className={mutedClass}>Sports data uses the routed provider. Odds compares all selected compatible providers.</p>
+      <p className={mutedClass}>Configure sport and competition mappings in Sports. Sports data uses the routed provider; odds compares all compatible providers. A key override applies to every selected provider, so prefer saved mappings.</p>
       {example&&<p className="text-xs text-text-dim">Imports appear in Connected data. Switch workspace to view them.</p>}
      </Section>
     </div>}
@@ -279,7 +292,31 @@ export default function SportsbookPanel({appName='sportsbook',projectId,installI
  </div>;
 }
 
-function RoutePicker({role,providers,routes,busy,save}:{role:string;providers:Provider[];routes:Route[];busy:boolean;save:(sport:string,id:number,model:string)=>Promise<void>}) {
+function ActorSources({sources,sports,competitions,busy,rpc,run,date}:{sources:ActorSource[];sports:Sport[];competitions:Competition[];busy:boolean;rpc:(tool:string,args?:Record<string,unknown>)=>Promise<any>;run:(operation:()=>Promise<unknown>,message?:string)=>Promise<void>;date:string}) {
+ const [selected,setSelected]=useState(''),[sourceID,setSourceID]=useState(''),[name,setName]=useState(''),[sport,setSport]=useState(''),[competition,setCompetition]=useState(''),[actorID,setActorID]=useState(''),[operation,setOperation]=useState(''),[input,setInput]=useState('{}'),[fieldMap,setFieldMap]=useState('{\n  "external_id": ["event_id", "id"],\n  "competition": ["league.name", "league"],\n  "home": ["teams.home.name", "home_team"],\n  "away": ["teams.away.name", "away_team"],\n  "starts_at": ["fixture.date", "commence_time"],\n  "status": "fixture.status.short",\n  "home_score": "goals.home",\n  "away_score": "goals.away"\n}'),[enabled,setEnabled]=useState(true);
+ const current=sources.find(s=>s.id===selected);
+ useEffect(()=>{if(current){setSourceID(current.id);setName(current.name);setSport(current.sport);setCompetition(current.competition_id);setActorID(String(current.actor_id));setOperation(current.operation);setInput(JSON.stringify(current.input||{},null,2));setFieldMap(JSON.stringify(current.field_map||{},null,2));setEnabled(!!current.enabled);}else{setSourceID('');setName('');setSport(sports.find(s=>s.enabled)?.id||'');setCompetition('');setActorID('');setOperation('');setInput('{}');setEnabled(true);}},[selected,sources,sports,current]);
+ const save=()=>run(async()=>{let inputJSON:unknown,fieldJSON:unknown;try{inputJSON=JSON.parse(input);fieldJSON=JSON.parse(fieldMap);}catch{throw Error('Input and field map must be valid JSON.');}await rpc('sports_scrape_source_set',{source_id:sourceID||undefined,name,sport,competition_id:competition,actor_id:Number(actorID),operation,input:inputJSON,field_map:fieldJSON,enabled});setSelected(sourceID);},'Read-only scrape source saved.');
+ const sync=()=>run(()=>rpc('sports_scrape_sync',{source_id:sourceID,date}),'Actors dataset imported into sports events.');
+ return <Section title="Read-only Actors sources" action={<Pill>Dataset → events</Pill>}>
+  <p className={mutedClass}>Actors can return arbitrary JSON. Give each source an explicit canonical field map; malformed rows are skipped. Sportsbook only queues Actors runs and reads datasets.</p>
+  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+   <div><label className="block text-xs text-text-muted mb-1">Configured source</label><select className={inputClass} value={selected} onChange={e=>setSelected(e.target.value)}><option value="">+ New source</option>{sources.map(s=><option key={s.id} value={s.id}>{s.name} · {s.sport}</option>)}</select></div>
+   <div><label className="block text-xs text-text-muted mb-1">Source ID (optional for new)</label><input className={inputClass} value={sourceID} onChange={e=>setSourceID(e.target.value)} placeholder="generated automatically"/></div>
+   <div><label className="block text-xs text-text-muted mb-1">Name</label><input className={inputClass} value={name} onChange={e=>setName(e.target.value)} placeholder="Football fixtures scrape"/></div>
+   <div><label className="block text-xs text-text-muted mb-1">Sport</label><select className={inputClass} value={sport} onChange={e=>{setSport(e.target.value);setCompetition('')}}>{sports.filter(s=>s.enabled).map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></div>
+   <div><label className="block text-xs text-text-muted mb-1">Competition (optional)</label><select className={inputClass} value={competition} onChange={e=>setCompetition(e.target.value)}><option value="">Any mapped competition</option>{competitions.filter(c=>c.sport===sport&&c.enabled).map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
+   <div><label className="block text-xs text-text-muted mb-1">Actors actor ID</label><input className={inputClass} type="number" min="1" value={actorID} onChange={e=>setActorID(e.target.value)}/></div>
+   <div><label className="block text-xs text-text-muted mb-1">Named operation</label><input className={inputClass} value={operation} onChange={e=>setOperation(e.target.value)} placeholder="fixtures"/></div>
+   <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={enabled} onChange={e=>setEnabled(e.target.checked)}/> Source enabled</label>
+  </div>
+  <div className="grid grid-cols-1 lg:grid-cols-2 gap-3"><div><label className="block text-xs text-text-muted mb-1">Run input template (JSON)</label><textarea className={`${inputClass} font-mono`} rows={5} value={input} onChange={e=>setInput(e.target.value)}/><p className={mutedClass}>Use ${'{date}'}, ${'{sport}'} and ${'{competition}'} placeholders.</p></div><div><label className="block text-xs text-text-muted mb-1">Canonical field map (JSON)</label><textarea className={`${inputClass} font-mono`} rows={9} value={fieldMap} onChange={e=>setFieldMap(e.target.value)}/></div></div>
+  <div className="flex gap-2 flex-wrap"><Button primary disabled={busy||!name||!sport||!actorID||!operation} onClick={()=>void save()}>Save source</Button><Button disabled={busy||!sourceID||!current||!enabled} onClick={()=>void sync()}>Run read-only scrape for {date}</Button></div>
+  {sources.length===0&&<p className={mutedClass}>No scrape sources configured yet. Bind Actors to the Read-only scrape sources role, then add one here.</p>}
+ </Section>;
+}
+
+function RoutePicker({sports,role,providers,routes,busy,save}:{sports:Sport[];role:string;providers:Provider[];routes:Route[];busy:boolean;save:(sport:string,id:number,model:string)=>Promise<void>}) {
  const [sport,setSport]=useState('*'),[id,setID]=useState(0),[model,setModel]=useState('');
  const eligible=providers.filter(p=>sport==='*'||p.sports.includes(sport));
  useEffect(()=>{
@@ -290,10 +327,80 @@ function RoutePicker({role,providers,routes,busy,save}:{role:string;providers:Pr
  },[role,sport,routes,providers]);
  return <div className="space-y-2 pt-2 border-t border-border">
   <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-   <div><label className="block text-xs text-text-muted mb-1">Apply route to</label><select aria-label={`${labels[role]} route sport`} className={inputClass} value={sport} onChange={e=>setSport(e.target.value)}><option value="*">All supported sports</option>{role!=='llm'&&role!=='execution'&&<><option value="football">Football</option><option value="tennis">Tennis</option></>}</select></div>
+   <div><label className="block text-xs text-text-muted mb-1">Apply route to</label><select aria-label={`${labels[role]} route sport`} className={inputClass} value={sport} onChange={e=>setSport(e.target.value)}><option value="*">All supported sports</option>{role!=='llm'&&role!=='execution'&&sports.filter(s=>s.enabled).map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></div>
    <div><label className="block text-xs text-text-muted mb-1">Preferred provider</label><select aria-label={`${labels[role]} preferred provider`} className={inputClass} value={id} onChange={e=>setID(Number(e.target.value))}>{eligible.length?eligible.map(p=><option key={p.id} value={p.id}>{p.slug||`Execution app ${p.id}`}</option>):<option value={0}>No compatible provider</option>}</select></div>
   </div>
   {role==='llm'&&<input aria-label="Default LLM model" className={inputClass} value={model} placeholder="Model available on this account" onChange={e=>setModel(e.target.value)}/>}
   <Button disabled={busy||!eligible.some(p=>p.id===id)} onClick={()=>void save(sport,id,model)}>Save route</Button>
+ </div>;
+}
+
+function CatalogEditor({catalog,integrations,busy,rpc,run}:{catalog:Catalog;integrations:Integrations;busy:boolean;rpc:(tool:string,args?:Record<string,unknown>)=>Promise<any>;run:(operation:()=>Promise<unknown>,message?:string)=>Promise<void>}) {
+ const [selected,setSelected]=useState('football'),[id,setID]=useState('football'),[name,setName]=useState('Football'),[enabled,setEnabled]=useState(true);
+ const [profile,setProfile]=useState('three_way'),[rules,setRules]=useState('regulation'),[predictionModel,setPredictionModel]=useState('elo'),[historyScope,setHistoryScope]=useState('competition'),[advantage,setAdvantage]=useState('60'),[marketEnabled,setMarketEnabled]=useState(true);
+ const [competition,setCompetition]=useState(''),[competitionID,setCompetitionID]=useState(''),[competitionName,setCompetitionName]=useState(''),[competitionEnabled,setCompetitionEnabled]=useState(true);
+ const [mappingCompetition,setMappingCompetition]=useState(''),[role,setRole]=useState('odds'),[slug,setSlug]=useState('the-odds-api'),[key,setKey]=useState(''),[mappingEnabled,setMappingEnabled]=useState(true);
+ const [discoveryConnection,setDiscoveryConnection]=useState(0),[discovered,setDiscovered]=useState<{key:string;title:string;group:string;active:boolean}[]>([]);
+ const resetSport=()=>{const s=catalog.sports.find(s=>s.id===selected),m=catalog.sport_market_types.find(m=>m.sport===selected);
+  setID(s?.id||'');setName(s?.name||'');setEnabled(s?!!s.enabled:true);setProfile(m?.outcome_profile||'two_way');setRules(m?.rules||'match_completed');setPredictionModel(m?.prediction_model||'baseline');setHistoryScope(m?.history_scope||'competition');setAdvantage(String(m?.home_advantage||0));setMarketEnabled(m?!!m.enabled:true);
+ };
+ useEffect(()=>{resetSport();},[selected,catalog]);
+ useEffect(()=>{setCompetition('');setMappingCompetition('');},[selected]);
+ useEffect(()=>{const c=catalog.competitions.find(c=>c.id===competition);setCompetitionID(c?.id||'');setCompetitionName(c?.name||'');setCompetitionEnabled(c?!!c.enabled:true);},[competition,catalog]);
+ useEffect(()=>{const m=catalog.provider_sport_mappings.find(m=>m.sport===selected&&m.role===role&&m.provider_slug===slug&&m.competition_id===mappingCompetition);setKey(m?.external_key||'');setMappingEnabled(m?!!m.enabled:true);},[selected,role,slug,mappingCompetition,catalog]);
+ const competitions=catalog.competitions.filter(c=>c.sport===selected);
+ const field=(label:string,value:string,set:(value:string)=>void,options?:[string,string][],disabled=false)=><div><label className="block text-xs text-text-muted mb-1">{label}{options?<select aria-label={label} disabled={disabled||busy} className={inputClass} value={value} onChange={e=>set(e.target.value)}>{options.map(([v,t])=><option key={v} value={v}>{t}</option>)}</select>:<input aria-label={label} disabled={disabled||busy} className={inputClass} value={value} onChange={e=>set(e.target.value)}/>}</label></div>;
+ const check=(label:string,value:boolean,set:(value:boolean)=>void)=><label className="flex items-center gap-2 text-xs"><input type="checkbox" disabled={busy} checked={value} onChange={e=>set(e.target.checked)}/>{label}</label>;
+ const providers=[['the-odds-api','The Odds API'],...(role==='sports_data'?[['the-sports-db','TheSportsDB'],...(selected==='football'?[['api-sports','API-Sports Football']]:[])]:[]),...(selected==='tennis'?[['api-tennis','API Tennis']]:[])] as [string,string][];
+ const oddsConnections=integrations.roles.odds?.filter(p=>p.slug==='the-odds-api')||[];
+ return <div className="p-4 space-y-4">
+  <p className={mutedClass}>Define sports and competitions here, then map them to your providers. Import and prediction support follow the configured adapters and market rules.</p>
+  <Section title="Sport & market settings">
+   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+    {field('Edit sport',selected,setSelected,[['','+ New sport'],...catalog.sports.map(s=>[s.id,`${s.name}${s.enabled?'':' (disabled)'}`] as [string,string])])}
+    {field('Sport ID',id,setID,undefined,!!selected)}{field('Sport name',name,setName)}
+    {field('Match-winner outcomes',profile,setProfile,[['two_way','Two outcomes: home / away'],['three_way','Three outcomes: home / draw / away']])}
+    {field('Settlement rules',rules,setRules,[['regulation','Regulation time'],['match_completed','Completed match (including extra time)']])}
+    {field('Prediction model',predictionModel,setPredictionModel,[['baseline','Bookmaker baseline'],['elo','Experimental Elo with baseline fallback'],['none','Disabled']])}
+    {field('Historical scope',historyScope,setHistoryScope,[['competition','Same competition'],['sport','Across the sport']])}
+    {field('Elo home advantage (0–200)',advantage,setAdvantage)}
+   </div>
+   <div className="flex gap-4 flex-wrap">{check('Sport enabled',enabled,setEnabled)}{check('Match-winner market enabled',marketEnabled,setMarketEnabled)}</div>
+   <p className={mutedClass}>Market settings apply to new events; existing markets retain their original rules and model configuration. Disabling an entry blocks imports, predictions and new bets; open bets can still be settled. Additional market types such as totals, spreads and outrights require engine adapters.</p>
+   <Button primary disabled={busy||!id||!name} onClick={()=>void run(async()=>{
+    await rpc('sport_upsert',{sport:id,name,enabled,outcome_profile:profile,rules,prediction_model:predictionModel,history_scope:historyScope,home_advantage:Number(advantage),market_enabled:marketEnabled});setSelected(id);
+   },'Sport and market settings saved.')}>Save sport</Button>
+  </Section>
+  {!!selected&&<>
+   <Section title="Competitions">
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+     {field('Edit competition',competition,setCompetition,[['','+ New competition'],...competitions.map(c=>[c.id,`${c.name}${c.enabled?'':' (disabled)'}`] as [string,string])])}
+     {field('Competition ID',competitionID,setCompetitionID,undefined,!!competition)}{field('Competition name',competitionName,setCompetitionName)}
+    </div>
+    {check('Competition enabled',competitionEnabled,setCompetitionEnabled)}
+    <Button disabled={busy||!competitionID||!competitionName} onClick={()=>void run(async()=>{await rpc('competition_upsert',{sport:selected,competition_id:competitionID,name:competitionName,enabled:competitionEnabled});setCompetition(competitionID);},'Competition saved.')}>Save competition</Button>
+    <p className={mutedClass}>Unmapped provider competition names are registered on import. Add a competition and mapping first to unify names across providers.</p>
+   </Section>
+   <Section title="Provider mappings">
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+     {field('Mapping role',role,v=>{setRole(v);setSlug('the-odds-api');},[['odds','Odds'],['sports_data','Sports data']])}
+     {field('Mapping provider',slug,setSlug,providers)}
+     {field('Mapping competition',mappingCompetition,setMappingCompetition,[['','Sport default'],...competitions.map(c=>[c.id,c.name] as [string,string])])}
+     {field('Provider sport / competition key',key,setKey)}
+    </div>
+    {check('Mapping enabled',mappingEnabled,setMappingEnabled)}
+    <p className={mutedClass}>The Odds API uses keys such as basketball_nba. TheSportsDB uses a sport name such as Basketball at sport level; selected competitions are filtered by name. API-Sports and API Tennis use numeric league/tournament IDs at competition level.</p>
+    <Button disabled={busy||!key} onClick={()=>void run(()=>rpc('provider_sport_mapping_set',{sport:selected,competition_id:mappingCompetition,role,provider_slug:slug,external_key:key,enabled:mappingEnabled}),'Provider mapping saved.')}>Save mapping</Button>
+    <div className="divide-y divide-border">{catalog.provider_sport_mappings.filter(m=>m.sport===selected).map(m=><button type="button" key={`${m.role}:${m.provider_slug}:${m.competition_id}`} className="block w-full text-left text-xs py-2 hover:text-accent" style={{overflowWrap:'anywhere'}} onClick={()=>{setRole(m.role);setSlug(m.provider_slug);setMappingCompetition(m.competition_id);}}>{m.provider_slug} · {m.role} · {competitions.find(c=>c.id===m.competition_id)?.name||'Sport default'} → {m.external_key} {m.enabled?'':'(disabled)'}</button>)}</div>
+   </Section>
+  </>}
+  <Section title="Discover provider coverage">
+   <p className={mutedClass}>List active and out-of-season keys from a bound The Odds API account. Choose a sport and competition above, choose The Odds API as the mapping provider, then select a key to fill its mapping.</p>
+   <div className="flex gap-2 flex-wrap">
+    <select aria-label="Discovery connection" className={inputClass} style={{maxWidth:300}} value={discoveryConnection||oddsConnections[0]?.id||0} onChange={e=>setDiscoveryConnection(Number(e.target.value))}>{oddsConnections.length?oddsConnections.map(p=><option key={p.id} value={p.id}>{p.slug} · Connection {p.id}</option>):<option value={0}>Bind The Odds API to discover keys</option>}</select>
+    <Button disabled={busy||!oddsConnections.length} onClick={()=>void run(async()=>{setDiscovered(await rpc('provider_sports_list',{connection_id:discoveryConnection||oddsConnections[0]?.id}));})}>Discover sports</Button>
+   </div>
+   {!!discovered.length&&<div className="max-h-60 overflow-auto divide-y divide-border">{discovered.map(s=><button type="button" key={s.key} className="block w-full text-left text-xs py-2 hover:text-accent" style={{overflowWrap:'anywhere'}} disabled={!selected||slug!=='the-odds-api'} onClick={()=>{setKey(s.key);setMappingEnabled(true);}}>{s.group} · {s.title} · {s.key} · {s.active?'Active':'Out of season'}</button>)}</div>}
+  </Section>
  </div>;
 }

@@ -91,6 +91,10 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 		var aid, cid, convoID int64
 		err = tx.QueryRow(`SELECT id,contact_id,COALESCE(conversation_id,0) FROM contact_activities WHERE project_id=? AND messaging_install_id=? AND messaging_id=?`, pid, sourceID, body.MessageID).Scan(&aid, &cid, &convoID)
 		if err == nil {
+			repaired, err := repairMissingInboundBodyTx(tx, pid, cid, aid, body)
+			if err != nil {
+				return nil, err
+			}
 			if err = insertActivityAttachmentsTx(tx, pid, aid, body.Attachments); err != nil {
 				return nil, err
 			}
@@ -100,7 +104,7 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 			if err = deliverQueuedCRMEvents(ctx); err != nil {
 				ctx.Logger().Warn("inbound events pending", "err", err)
 			}
-			return map[string]any{"ok": true, "deduped": true, "contact_id": cid, "activity_id": aid, "conversation_id": convoID}, nil
+			return map[string]any{"ok": true, "deduped": true, "body_repaired": repaired, "contact_id": cid, "activity_id": aid, "conversation_id": convoID}, nil
 		}
 		if err != sql.ErrNoRows {
 			return nil, err
@@ -234,13 +238,7 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 			return nil, err
 		}
 	}
-	text := body.BodyText
-	if text == "" && body.BodyHTML != "" {
-		text = plainTextFromHTML(body.BodyHTML)
-	}
-	if body.Channel == "email" && body.Subject != "" {
-		text = body.Subject + "\n\n" + text
-	}
+	text := inboundActivityBody(body)
 	replyTo := ""
 	for key, value := range body.Headers {
 		if strings.EqualFold(key, "Reply-To") {

@@ -61,7 +61,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil } // v0.1 refreshes explicitly to protect provider quotas.
+func (a *App) Workers() []sdk.Worker             { return nil } // Refreshes explicitly to protect provider quotas.
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{{Pattern: "/rpc", Handler: a.handleRPC}, {Pattern: "/", Handler: func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -73,11 +73,11 @@ func (a *App) HTTPRoutes() []sdk.Route {
 }
 func permission(tool string) string {
 	switch tool {
-	case "workspace_get", "integrations_list", "odds_history":
+	case "workspace_get", "integrations_list", "odds_history", "catalog_get", "sports_sources_list":
 		return "read"
-	case "provider_route_set", "demo_load", "bankroll_create":
+	case "provider_route_set", "demo_load", "bankroll_create", "sport_upsert", "competition_upsert", "sport_market_set", "provider_sport_mapping_set", "sports_scrape_source_set":
 		return "configure"
-	case "sports_sync", "odds_sync":
+	case "sports_sync", "odds_sync", "provider_sports_list", "sports_scrape_sync":
 		return "sync"
 	case "prediction_run", "prediction_explain", "bet_propose":
 		return "propose"

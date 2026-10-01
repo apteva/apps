@@ -80,7 +80,7 @@ func searchSchema() map[string]any {
 		"type": "object", "additionalProperties": false,
 		"properties": map[string]any{
 			"entity_type":   map[string]any{"type": "string", "enum": []string{"all", "assets", "sessions"}, "description": "Result type; default all."},
-			"query":         field("Text in Catalog file names and session notes or titles."),
+			"query":         field("Text in file names, session notes/titles and current Media descriptions."),
 			"brand_id":      field("Limit results to one explicit Catalog brand ID."),
 			"session_id":    field("Limit asset results to one session ID."),
 			"date_from":     field("Inclusive YYYY-MM-DD session date."),
@@ -241,6 +241,25 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/sessions/")
 	if strings.HasSuffix(id, "/preview") {
 		a.servePreview(w, r, "session", strings.TrimSuffix(id, "/preview"))
+		return
+	}
+	if strings.HasSuffix(id, "/durations") {
+		pid, err := requestProject(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if globalCtx == nil {
+			http.Error(w, "app not mounted", http.StatusServiceUnavailable)
+			return
+		}
+		out, err := a.sessionDurations(globalCtx.WithProject(pid), strings.TrimSuffix(id, "/durations"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(out)
 		return
 	}
 	a.callHTTP(w, r, "content_catalog_sessions_get", map[string]any{"id": id})

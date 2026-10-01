@@ -6,16 +6,20 @@
   "private": true,
   "scripts": {
     "build": "bun run build.ts",
-    "dev": "bun run --watch build.ts"
+    "dev": "bun run --watch build.ts",
+    "test:browser": "bun run build.ts && bunx --no-install playwright test"
   },
   "dependencies": {
     "@apteva/web-sdk": "^0.5.2",
     "@stripe/stripe-js": "^7.9.0",
     "lucide-react": "^0.468.0",
     "react": "^19.2.4",
-    "react-dom": "^19.2.4"
+    "react-dom": "^19.2.4",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/bun": "latest",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",

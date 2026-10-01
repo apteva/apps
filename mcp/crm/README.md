@@ -1,17 +1,32 @@
-# CRM v0.9.6
+# CRM v0.9.10
 
 Apteva's contact, inbox, audience and opportunity sidecar. The supported dashboard
 is `ui/CrmPanel.tsx`, bundled as `CrmPanel.mjs`. `apteva.yaml` is embedded directly
 into the binary and is the single manifest source. `MCPTools()` supplies the
 executable input contracts, checked against the manifest by tests.
 
-Release `crm/v0.9.6` fixes email reply threading with Messaging. Outbound
-activities use the RFC `message_id_header` when available and retain the
-provider ID separately. Inbound matching recognizes legacy SES provider IDs
-only when the reference has an `amazonses.com` domain and belongs to the same
-project and contact. A matched legacy root is corrected to the delivered RFC
-header. The Customer inbox component introduced in `crm/v0.9.5` remains
-available.
+Release `crm/v0.9.10` marks `conversations_inbox` with standard MCP
+`readOnlyHint: true` and `destructiveHint: false` annotations, so it is eligible
+for Core's strict `access: "read_only"` tool discovery. The SDK dependency emits
+these hints in `tools/list`; no Core heuristics, schema changes, or record
+updates are needed.
+
+Release `crm/v0.9.9` restores missing inbound email bodies safely, including
+on installations with legacy numeric Messaging bindings. HTML-only
+mail is converted to readable text even when the plain-text part contains only
+whitespace. Re-delivery can fill an empty or subject-only activity body without
+creating another activity, changing thread state, or replaying business events.
+`contacts_refresh_message_body` previews recovery from the original in Messaging
+by default; pass `id`, `activity_id`, and `dry_run: false` to repair a verified
+missing body. It checks the project, source install, and RFC Message-ID and
+preserves existing complete content.
+
+Release `crm/v0.9.7` made Messaging suppression reconciliation cheaper: a
+five-minute worker checks only pending soft-bounce retries, while an
+unconditional full safety sweep runs every 30 minutes and applies a Messaging
+snapshot with set-based SQL. The sweep leaves unchanged routes untouched and
+preserves newer event updates. Email reply threading from `crm/v0.9.6` and the
+Customer inbox component from `crm/v0.9.5` remain available.
 
 ## Capabilities
 

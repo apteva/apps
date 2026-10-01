@@ -121,6 +121,9 @@ func balances(q queryer, project, bankroll string) (cash, locked int64, err erro
 const currentQuotesSQL = `SELECT o.* FROM odds_observations o JOIN quote_heads h ON h.project_id=o.project_id AND h.market_id=o.market_id AND h.source=o.source AND h.connection_id=o.connection_id AND h.snapshot_id=o.snapshot_id`
 
 func (a *App) workspace(project string, example bool, sport string) (any, error) {
+	if err := a.initCatalog(project); err != nil {
+		return nil, err
+	}
 	now := a.clock()
 	ex := 0
 	if example {
@@ -203,10 +206,22 @@ func (a *App) createBankroll(project, actor string, args map[string]any) (any, e
 }
 func (a *App) perform(ctx context.Context, app *sdk.AppCtx, project, actor, tool string, args map[string]any) (any, error) {
 	switch tool {
+	case "catalog_get":
+		return a.catalog(project)
+	case "sport_upsert", "competition_upsert", "sport_market_set", "provider_sport_mapping_set":
+		return a.catalogWrite(app, project, actor, tool, args)
+	case "provider_sports_list":
+		return a.discoverSports(ctx, app, project, intArg(args, "connection_id"))
 	case "workspace_get":
 		return a.workspace(project, boolArg(args, "example"), textArg(args, "sport"))
 	case "integrations_list":
 		return a.integrationStatus(app, project)
+	case "sports_sources_list":
+		return a.actorSourceList(project)
+	case "sports_scrape_source_set":
+		return a.actorSourceSet(app, project, textArg(args, "source_id"), args)
+	case "sports_scrape_sync":
+		return a.actorSync(ctx, app, project, actor, args)
 	case "provider_route_set":
 		return a.setRoute(app, project, actor, args)
 	case "sports_sync", "odds_sync":
@@ -228,7 +243,7 @@ func (a *App) perform(ctx context.Context, app *sdk.AppCtx, project, actor, tool
 	case "odds_history":
 		return objects(a.db, `SELECT o.* FROM odds_observations o JOIN markets m ON m.project_id=o.project_id AND m.id=o.market_id WHERE o.project_id=? AND m.event_id=? ORDER BY o.observed_at DESC,o.id DESC LIMIT 500`, project, textArg(args, "event_id"))
 	case "bet_submit":
-		return nil, fail("live_execution_unavailable", 409, "Connected execution is unavailable in v0.1. Use proposal_accept for paper bets.")
+		return nil, fail("live_execution_unavailable", 409, "Connected execution is unavailable in v0.2. Use proposal_accept for paper bets.")
 	}
 	return nil, fail("unknown_tool", 404, "Unknown operation")
 }
@@ -237,15 +252,30 @@ func toolSchema(name string) map[string]any {
 	required := []string{}
 	str := func(key string) { props[key] = map[string]any{"type": "string", "maxLength": 500} }
 	integer := func(key string) { props[key] = map[string]any{"type": "integer", "minimum": 1} }
-	for _, key := range []string{"sport", "sport_key", "market_id", "prediction_id", "bankroll_id", "proposal_id", "bet_id", "event_id", "role", "date", "name", "currency", "rationale", "outcome", "note", "model"} {
+	for _, key := range []string{"sport", "sport_key", "competition_id", "provider_slug", "external_key", "outcome_profile", "rules", "prediction_model", "history_scope", "market_id", "prediction_id", "bankroll_id", "proposal_id", "bet_id", "event_id", "role", "date", "name", "currency", "rationale", "outcome", "note", "model", "source_id", "operation"} {
 		str(key)
 	}
-	for _, key := range []string{"connection_id", "quote_id", "stake_minor", "initial_minor", "max_stake_bps", "max_exposure_bps"} {
+	for _, key := range []string{"connection_id", "quote_id", "stake_minor", "initial_minor", "max_stake_bps", "max_exposure_bps", "home_advantage", "actor_id"} {
 		integer(key)
 	}
+	props["home_advantage"] = map[string]any{"type": "integer", "minimum": 0, "maximum": 200}
+	props["market_enabled"] = map[string]any{"type": "boolean"}
+	props["enabled"] = map[string]any{"type": "boolean"}
 	props["example"] = map[string]any{"type": "boolean"}
 	props["all_sources"] = map[string]any{"type": "boolean"}
+	props["input"] = map[string]any{"type": "object", "additionalProperties": true}
+	props["field_map"] = map[string]any{"type": "object", "additionalProperties": true}
 	switch name {
+	case "sport_upsert":
+		required = []string{"sport", "name", "enabled"}
+	case "competition_upsert":
+		required = []string{"sport", "competition_id", "name", "enabled"}
+	case "sport_market_set":
+		required = []string{"sport", "outcome_profile", "rules", "prediction_model", "history_scope", "enabled"}
+	case "provider_sport_mapping_set":
+		required = []string{"sport", "role", "provider_slug", "external_key", "enabled"}
+	case "provider_sports_list":
+		required = []string{"connection_id"}
 	case "provider_route_set":
 		required = []string{"role", "connection_id"}
 	case "prediction_run":
@@ -264,6 +294,10 @@ func toolSchema(name string) map[string]any {
 		required = []string{"event_id"}
 	case "sports_sync", "odds_sync":
 		required = []string{"sport", "date"}
+	case "sports_scrape_source_set":
+		required = []string{"name", "sport", "actor_id", "operation", "field_map", "enabled"}
+	case "sports_scrape_sync":
+		required = []string{"source_id", "date"}
 	}
 	return map[string]any{"type": "object", "properties": props, "required": required, "additionalProperties": false}
 }

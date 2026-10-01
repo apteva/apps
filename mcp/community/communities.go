@@ -112,6 +112,9 @@ func communitiesTools() []sdk.Tool {
 }
 
 func toolCommunitiesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -194,6 +197,9 @@ func toolCommunitiesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolCommunitiesArchive(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -214,6 +220,9 @@ func toolCommunitiesArchive(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 var slugRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
 
 func toolCommunitiesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	slug, err := mustStr(args, "slug")
 	if err != nil {
 		return nil, err
@@ -253,6 +262,9 @@ func toolCommunitiesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolCommunitiesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	includeArchived, _ := args["include_archived"].(bool)
 	projectID := scopeProject(ctx)
 	if projectID == "" {
@@ -284,6 +296,9 @@ func toolCommunitiesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolCommunitiesGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id := strArg(args, "id", "")
 	slug := strArg(args, "slug", "")
 	if id == "" && slug == "" {
@@ -366,7 +381,7 @@ func (a *App) httpCommunities(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 405, "method not allowed")
 		return
 	}
-	out, err := toolCommunitiesList(globalCtx, map[string]any{
+	out, err := toolCommunitiesList(requestAppCtx(r), map[string]any{
 		"include_archived": r.URL.Query().Get("include_archived") == "true",
 	})
 	if err != nil {

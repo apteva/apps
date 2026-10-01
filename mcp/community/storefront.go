@@ -127,7 +127,7 @@ func (a *App) httpPortalProducts(w http.ResponseWriter, r *http.Request) {
 		writeDomainErr(w, err)
 		return
 	}
-	products, err := buildPublicProducts(globalCtx, community.ID)
+	products, err := buildPublicProducts(requestAppCtx(r), community.ID)
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "storefront is temporarily unavailable")
 		return
@@ -151,7 +151,7 @@ func (a *App) httpPortalProduct(w http.ResponseWriter, r *http.Request) {
 		writeDomainErr(w, err)
 		return
 	}
-	products, err := buildPublicProducts(globalCtx, community.ID)
+	products, err := buildPublicProducts(requestAppCtx(r), community.ID)
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "storefront is temporarily unavailable")
 		return
@@ -191,7 +191,7 @@ func (a *App) httpStorefrontRoute(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if query.Get("project_id") == "" && globalCtx != nil {
-		query.Set("project_id", scopeProject(globalCtx))
+		query.Set("project_id", scopeProject(requestAppCtx(r)))
 	}
 	uiPath := "/ui/portal/dist/index.html"
 	if installID := strings.TrimSpace(r.Header.Get("X-Apteva-App-Install-ID")); installID != "" {
@@ -211,7 +211,7 @@ func publicPortalCommunity(r *http.Request) (Community, error) {
 	if globalCtx == nil || globalCtx.AppDB() == nil {
 		return Community{}, errors.New("community app is unavailable")
 	}
-	projectID := scopeProject(globalCtx)
+	projectID := scopeProject(requestAppCtx(r))
 	if projectID == "" {
 		return Community{}, errors.New("project context is unavailable")
 	}
@@ -460,6 +460,9 @@ func storefrontTools() []sdk.Tool {
 }
 
 func toolStorefrontCheckoutStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	communityID, err := mustStr(args, "community_id")
 	if err != nil {
 		return nil, err

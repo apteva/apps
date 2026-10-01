@@ -91,6 +91,9 @@ func instructorTools() []sdk.Tool {
 }
 
 func toolInstructorProfilesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	communityID, err := mustStr(args, "community_id")
 	if err != nil {
 		return nil, err
@@ -127,6 +130,9 @@ func toolInstructorProfilesCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 }
 
 func toolInstructorProfilesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -161,6 +167,9 @@ func toolInstructorProfilesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, er
 }
 
 func toolInstructorProfilesGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -178,6 +187,9 @@ func toolInstructorProfilesGet(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 func toolInstructorProfilesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	communityID, err := mustStr(args, "community_id")
 	if err != nil {
 		return nil, err
@@ -222,6 +234,9 @@ func toolInstructorProfilesList(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 func toolInstructorProfilesArchive(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -271,6 +286,9 @@ func toolInstructorProfilesArchive(ctx *sdk.AppCtx, args map[string]any) (any, e
 }
 
 func toolCourseInstructorsSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -324,6 +342,9 @@ func toolCourseInstructorsSet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 }
 
 func toolCourseInstructorsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err

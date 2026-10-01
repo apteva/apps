@@ -31,6 +31,39 @@ func TestSidecar_BootsAndHealthOK(t *testing.T) {
 	}
 }
 
+func TestSidecar_InboxReadOnlyAnnotations(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	out, err := sc.MCPRaw("tools/list", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, ok := out["tools"].([]any)
+	if !ok {
+		t.Fatalf("tools/list missing tools array: %#v", out)
+	}
+	found := false
+	for _, raw := range tools {
+		tool := raw.(map[string]any)
+		annotations, _ := tool["annotations"].(map[string]any)
+		if tool["name"] == "conversations_inbox" {
+			found = true
+			if annotations["readOnlyHint"] != true || annotations["destructiveHint"] != false {
+				t.Fatalf("inbox annotations absent or incorrect in tools/list: %#v", tool)
+			}
+		} else if annotations["readOnlyHint"] == true {
+			t.Errorf("unexpected read-only annotation on %v", tool["name"])
+		}
+	}
+	if !found {
+		t.Fatal("conversations_inbox missing from tools/list")
+	}
+	// Discovery must not rename the tool or alter its query behavior.
+	inbox := sc.MCP("conversations_inbox", map[string]any{"limit": 1})
+	if inbox["count"] != float64(0) || inbox["total"] != float64(0) {
+		t.Fatalf("unexpected empty inbox response: %#v", inbox)
+	}
+}
+
 func TestSidecar_FullToolFlow(t *testing.T) {
 	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
 

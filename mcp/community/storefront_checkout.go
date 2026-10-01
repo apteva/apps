@@ -152,7 +152,7 @@ func (a *App) httpPortalCheckoutPrepare(w http.ResponseWriter, r *http.Request) 
 			urls[name] = value
 		}
 	}
-	prepared, err := prepareCheckoutWithCheckoutApp(globalCtx, community.ID, target, email, strings.TrimSpace(input.CustomerName), strings.TrimSpace(input.RecoveryToken), urls)
+	prepared, err := prepareCheckoutWithCheckoutApp(requestAppCtx(r), community.ID, target, email, strings.TrimSpace(input.CustomerName), strings.TrimSpace(input.RecoveryToken), urls)
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "secure checkout could not be prepared")
 		return
@@ -285,6 +285,9 @@ func validatePreparedCheckout(communityID string, target storefrontOfferTarget, 
 }
 
 func toolStorefrontCheckoutClaim(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	communityID, err := mustStr(args, "community_id")
 	if err != nil {
 		return nil, err

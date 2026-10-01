@@ -54,6 +54,7 @@ func membersTools() []sdk.Tool {
 				"community_id": map[string]any{"type": "string"},
 				"status":       map[string]any{"type": "string"},
 				"limit":        map[string]any{"type": "integer"},
+				"offset":       map[string]any{"type": "integer", "minimum": 0},
 			}, []string{"community_id"}),
 			Handler: toolMembersList,
 		},
@@ -237,6 +238,9 @@ func memberNameFromEmail(email string) string {
 var memberStatuses = map[string]bool{"active": true, "suspended": true, "left": true}
 
 func toolMembersUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -316,6 +320,9 @@ func toolMembersUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 var handleRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{1,30}$`)
 
 func toolMembersCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	communityID, err := mustStr(args, "community_id")
 	if err != nil {
 		return nil, err
@@ -367,6 +374,9 @@ func toolMembersCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolMembersList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	communityID, err := mustStr(args, "community_id")
 	if err != nil {
 		return nil, err
@@ -375,12 +385,15 @@ func toolMembersList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	status := strArg(args, "status", "active")
+	if status == "" {
+		status = "active"
+	}
 	limit := boundedLimit(args, "limit", 200, 500)
 	rows, err := ctx.AppDB().Query(
 		`SELECT `+memberCols+` FROM members
 		 WHERE community_id = ? AND status = ?
-		 ORDER BY joined_at DESC LIMIT ?`,
-		communityID, status, limit,
+		 ORDER BY joined_at DESC, id DESC LIMIT ? OFFSET ?`,
+		communityID, status, limit, boundedOffset(args),
 	)
 	if err != nil {
 		return nil, err
@@ -401,6 +414,9 @@ func toolMembersList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolMembersGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id := strArg(args, "id", "")
 	communityID := strArg(args, "community_id", "")
 	handle := strArg(args, "handle", "")
@@ -482,7 +498,7 @@ func (a *App) httpMembers(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "community_id required")
 		return
 	}
-	out, err := toolMembersList(globalCtx, map[string]any{
+	out, err := toolMembersList(requestAppCtx(r), map[string]any{
 		"community_id": communityID,
 		"status":       r.URL.Query().Get("status"),
 	})

@@ -6,15 +6,16 @@ import (
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
+	tk "github.com/apteva/app-sdk/testkit"
 )
 
 // ─── shared course-setup ────────────────────────────────────────
 
 // setupCourse creates a community, one member, one course-kind space,
 // one section, two published lessons. Returns the ids the test needs.
-func setupCourse(t *testing.T) (ctx *sdk.AppCtx, communityID, memberID, courseID, sectionID, lessonAID, lessonBID string) {
+func setupCourse(t *testing.T, options ...tk.Option) (ctx *sdk.AppCtx, communityID, memberID, courseID, sectionID, lessonAID, lessonBID string) {
 	t.Helper()
-	ctx, _ = newTestCtx(t)
+	ctx, _ = newTestCtx(t, options...)
 	c := mustCreateCommunity(t, ctx, "main", "Main")
 	communityID = c.ID
 	m := mustCreateMember(t, ctx, c.ID, "alice")
@@ -356,7 +357,7 @@ func TestCourseBuilder_LessonAdjunctsAndAnalytics(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := toolQuizzesCreate(ctx, map[string]any{
-		"lesson_id": lessonAID, "title": "Check", "questions": []any{map[string]any{"prompt": "Ready?"}},
+		"lesson_id": lessonAID, "title": "Check", "questions": []any{map[string]any{"prompt": "Ready?", "options": []string{"Yes", "No"}, "correct_index": 0}},
 	}); err != nil {
 		t.Fatal(err)
 	}
