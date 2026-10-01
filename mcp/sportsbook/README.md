@@ -1,6 +1,6 @@
 # Sportsbook 0.1
 
-A dedicated Apteva sports research and **paper betting** app. Go/app-sdk sidecar, project-scoped SQLite, React dashboard panel, and a standalone browser interface. It does not submit real wagers.
+A dedicated Apteva sports research and **paper betting** app. Go/app-sdk sidecar, project-scoped SQLite, native React dashboard panel following the CRM layout, and an isolated panel preview. It does not submit real wagers.
 
 ## What works
 
@@ -13,7 +13,7 @@ A dedicated Apteva sports research and **paper betting** app. Go/app-sdk sidecar
 - Single-bet proposals, expected value, integer monetary stakes, paper bankrolls, per-bet and total-exposure limits.
 - Atomic paper acceptance, stake reservation, manual win/loss/void settlement and balanced double-entry ledger transactions.
 - Idempotent acceptance and settlement; audit records; isolated example fixtures and bankrolls.
-- Four UI areas: Sports & events, Predictions, Bet desk, Integrations. Styles inherit dashboard theme tokens and support narrow screens.
+- Four native panel tabs: Events, Predictions, Bets, Integrations. The panel uses the same compact list/detail layout, Tailwind theme tokens and shared React ESM contract as CRM; it supports narrow screens.
 
 ## Integration roles
 
@@ -80,9 +80,9 @@ bun install --cwd ui
 bun run --cwd ui dev
 ```
 
-Open `http://127.0.0.1:8079/ui/index.html`. Choose **Explore examples → Load examples**. Select an event, run a prediction, choose a price, add a rationale and create a proposal. Review it in **Bet desk**, accept it, then record a paper settlement.
+Open `http://127.0.0.1:8079/ui/index.html`. Choose **Examples** in the workspace selector, then **Load examples**. Select an event, run a prediction, choose a price, add a rationale and create a proposal. Review it in **Bets**, accept it, then record a paper settlement.
 
-The preview builds the Go binary, creates an isolated temporary database and random local app token, and exposes a loopback-only browser proxy. It does not read existing Apteva API keys or connect provider accounts. Ports can be changed with `SPORTSBOOK_BACKEND_PORT` and `SPORTSBOOK_PREVIEW_PORT`. Ctrl-C stops both processes.
+The preview loads the actual `SportsbookPanel.mjs` through a shared React import map, uses a preview-only copy of the ui-kit token stylesheet, builds the Go binary, creates an isolated temporary database and random local app token, and exposes a loopback-only app proxy. It does not read existing Apteva API keys or connect provider accounts. Ports can be changed with `SPORTSBOOK_BACKEND_PORT` and `SPORTSBOOK_PREVIEW_PORT`. Ctrl-C stops both processes.
 
 For platform installation, use `apteva.yaml` as a source app manifest. The SDK serves `ui/` and applies migrations; build the UI before packaging. The app is project-scoped. The module is pinned to app-sdk `v0.82.0`, the latest tag at the SDK HEAD inspected during implementation. It also builds against the local SDK overlay. Publishing a release tag and adding a marketplace registry entry are separate release work.
 
@@ -107,5 +107,6 @@ Tests cover real SQLite transactions, acceptance races, duplicate settlement, ri
 - `betting.go`: proposal, reservation, risk and settlement transactions.
 - `demo.go`: explicit fictional fixtures and history.
 - `principal.go`: signed-principal compatibility with the published SDK.
-- `ui/src/Sportsbook.tsx`: shared dashboard and standalone interface.
+- `ui/SportsbookPanel.tsx`: native dashboard panel; default export with the same app/project/install props as CRM.
+- `ui/preview.tsx`: local ESM panel-mount harness; no separate product shell.
 - `ui/dev.ts`: isolated local preview launcher.

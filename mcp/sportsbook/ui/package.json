@@ -12,9 +12,11 @@
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "@tailwindcss/cli": "^4.2.2",
+    "@types/bun": "latest",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
-    "typescript": "^5.9.0",
-    "@types/bun": "latest"
+    "tailwindcss": "^4.2.2",
+    "typescript": "^5.9.0"
   }
 }

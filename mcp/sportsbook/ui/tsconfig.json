@@ -15,9 +15,8 @@
     ]
   },
   "include": [
-    "src/**/*.tsx",
     "*.tsx",
-    "build.ts",
-    "dev.ts"
+    "*.ts",
+    "*.d.mts"
   ]
 }
