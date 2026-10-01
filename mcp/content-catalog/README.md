@@ -12,6 +12,8 @@ The session page can filter its linked files by name or Storage ID, content type
 
 Session and search file cards show cloud hosting badges such as **Bunny · Ready**, **Bunny · Processing**, or **Bunny · Failed**. They read the recorded hosting state in Catalog; displaying a badge does not upload a file or contact the host. Hovering a badge shows its connection and last check time when available.
 
+The session page keeps a compact file-search field and **Filters** button above the asset grid. Content type, sharing status, platform, sort order, quick publication choices, and the duration range live in the filter modal. Active filters are summarized beside the button, with a count and **Clear filters** action. **Show files** returns to the grid; closing and reopening preserves the selected filters. **Reset filters** preserves the separate file-search text.
+
 The session length filter has two slider handles and exact minimum/maximum inputs in seconds. Both endpoints are included. Range filtering only includes videos and audio with known Media durations; **Unknown only** shows videos and audio whose length is unavailable. **Any length** resets the range.
 
 Clicking a file card opens a wide modal with its preview or player, metadata, review controls, cloud hosting, and platform posts. Close it with **Close**, Escape, or a click outside the dialog to return to the file grid. Review and hosting updates keep the file dialog open; post editing returns to the file dialog when finished.
