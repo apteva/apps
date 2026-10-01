@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.24.25 — 2026-10-01
+
+- Keep approval preparation visibly active until its card arrives, including reconnects and either stream event order.
+- Show the selected approval option’s full label and note in the chat, including after refresh, with localized fallback for older cards.
+
 ## 0.24.24 — 2026-10-01
 
 - Keep approval requests represented by their approval card instead of duplicating the internal approval tool activity.
