@@ -139,13 +139,13 @@ type IssuedCertificate struct {
 
 func learningTools() []sdk.Tool {
 	str := map[string]any{"type": "string"}
-	return []sdk.Tool{
+	return append([]sdk.Tool{
 		{Name: "quiz_submit", Description: "Grade and persist a quiz attempt. Answers are zero-based option indices in question order.", InputSchema: schemaObject(map[string]any{"quiz_id": str, "member_id": str, "answers": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}}, []string{"quiz_id", "member_id", "answers"}), Handler: toolQuizSubmit},
 		{Name: "assignment_submit", Description: "Submit text, links, or Storage file ids for an assignment. Resubmission returns the item to submitted.", InputSchema: schemaObject(map[string]any{"assignment_id": str, "member_id": str, "body": str, "links": map[string]any{"type": "array", "items": str}, "files": map[string]any{"type": "array", "items": str}}, []string{"assignment_id", "member_id"}), Handler: toolAssignmentSubmit},
 		{Name: "learning_status", Description: "Fetch the member's latest quiz attempts and assignment submissions for a lesson.", InputSchema: schemaObject(map[string]any{"lesson_id": str, "member_id": str}, []string{"lesson_id", "member_id"}), Handler: toolLearningStatus},
 		{Name: "issued_certificate_get", Description: "Fetch a member's earned course certificate.", InputSchema: schemaObject(map[string]any{"space_id": str, "member_id": str}, []string{"space_id", "member_id"}), Handler: toolIssuedCertificateGet},
 		{Name: "lesson_file_url", Description: "Mint a short-lived URL for a lesson video, resource, or assignment attachment. The file must belong to the lesson.", InputSchema: schemaObject(map[string]any{"lesson_id": str, "file_id": str}, []string{"lesson_id", "file_id"}), Handler: toolLessonFileURL},
-	}
+	}, courseFileTools()...)
 }
 
 func validateLearningMember(ctx *sdk.AppCtx, lessonID, memberID string) error {
@@ -267,6 +267,13 @@ func toolAssignmentSubmit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if len(links) > 20 || len(files) > 20 {
 		return nil, errors.New("an assignment may include at most 20 links and 20 files")
 	}
+	spaceID, err := spaceByLesson(ctx.AppDB(), assignment.LessonID)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateCourseFiles(ctx.AppDB(), spaceID, memberID, files); err != nil {
+		return nil, err
+	}
 	linksJSON, _ := json.Marshal(links)
 	filesJSON, _ := json.Marshal(files)
 	var version int64
@@ -286,6 +293,9 @@ func toolAssignmentSubmit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	_ = json.Unmarshal([]byte(linksRaw), &submission.Links)
 	_ = json.Unmarshal([]byte(filesRaw), &submission.Files)
 	if err != nil {
+		return nil, err
+	}
+	if err := syncCourseCompletionForSpace(ctx.AppDB(), spaceID, memberID); err != nil {
 		return nil, err
 	}
 	emit(ctx, "assignment.submitted", map[string]any{"lesson_id": assignment.LessonID, "member_id": memberID})

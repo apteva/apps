@@ -28,6 +28,8 @@ var delegatedMemberTools = map[string]bool{
 	"quiz_submit": true, "assignment_submit": true, "learning_status": true, "issued_certificate_get": true,
 	"course_tracks_list": true, "course_track_select": true, "milestones_list": true, "milestone_submit": true, "lesson_file_url": true,
 	"assignment_reviews_list": true, "assignment_review": true, "milestone_review": true,
+	"milestone_reviews_list": true,
+	"course_file_upload":     true, "course_file_url": true,
 	"course_offer_get": true, "course_purchase_start": true,
 	"course_purchase_status": true, "course_purchase_cancel": true,
 	"membership_plans_list": true, "membership_plans_get": true,
@@ -43,7 +45,7 @@ var enrollmentRequiredTools = map[string]bool{
 	"lessons_progress": true, "lesson_resources_list": true, "lesson_bundle_get": true, "quizzes_list": true,
 	"assignments_list": true, "lesson_comments_list": true,
 	"course_tracks_list": true, "course_track_select": true, "milestones_list": true, "milestone_submit": true, "lesson_comments_post": true,
-	"quiz_submit": true, "assignment_submit": true, "learning_status": true, "lesson_file_url": true,
+	"quiz_submit": true, "assignment_submit": true, "learning_status": true, "lesson_file_url": true, "course_file_upload": true, "course_file_url": true,
 }
 
 func secureTools(tools []sdk.Tool) []sdk.Tool {
@@ -91,7 +93,7 @@ func secureTools(tools []sdk.Tool) []sdk.Tool {
 			if err != nil {
 				return nil, err
 			}
-			if tool.Name == "assignment_reviews_list" || tool.Name == "assignment_review" || tool.Name == "milestone_review" {
+			if tool.Name == "assignment_reviews_list" || tool.Name == "assignment_review" || tool.Name == "milestone_review" || tool.Name == "milestone_reviews_list" {
 				spaceID, err := courseSpaceForTool(app.AppDB(), tool.Name, safeArgs)
 				if err != nil {
 					return nil, err
@@ -217,7 +219,7 @@ func applyMemberIdentity(tool string, args map[string]any, memberID string) {
 		"lessons_mark_complete", "lessons_progress", "course_enroll", "lesson_comments_post",
 		"course_purchase_start", "course_purchase_status", "course_purchase_cancel",
 		"membership_checkout_start", "membership_status", "membership_cancel",
-		"membership_resume", "course_access_explain", "storefront_checkout_start", "storefront_checkout_claim", "quiz_submit", "assignment_submit", "learning_status", "issued_certificate_get", "course_track_select", "milestone_submit":
+		"membership_resume", "course_access_explain", "storefront_checkout_start", "storefront_checkout_claim", "quiz_submit", "assignment_submit", "learning_status", "issued_certificate_get", "course_track_select", "milestone_submit", "course_file_upload":
 		args["member_id"] = memberID
 	case "course_tracks_list", "milestones_list":
 		args["member_id"] = memberID
@@ -459,7 +461,7 @@ func resolveCommunityForTool(ctx *sdk.AppCtx, tool string, args map[string]any) 
 			return "", notFound(err, "milestone")
 		}
 		return communityBySpace(db, spaceID)
-	case "assignment_reviews_list":
+	case "assignment_reviews_list", "milestone_reviews_list":
 		return communityBySpace(db, strArg(args, "space_id", ""))
 	case "assignment_review":
 		a, err := loadAssignment(db, strArg(args, "assignment_id", ""))
@@ -471,6 +473,8 @@ func resolveCommunityForTool(ctx *sdk.AppCtx, tool string, args map[string]any) 
 		var spaceID string
 		err := db.QueryRow(`SELECT space_id FROM milestone_definitions WHERE id=?`, strArg(args, "definition_id", "")).Scan(&spaceID)
 		return spaceID, notFound(err, "milestone")
+	case "course_file_upload", "course_file_url":
+		return courseFileSpace(db, args)
 	case "quiz_submit":
 		q, err := loadQuiz(db, strArg(args, "quiz_id", ""))
 		if err != nil {

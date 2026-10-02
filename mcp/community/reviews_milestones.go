@@ -61,7 +61,43 @@ func reviewMilestoneTools() []sdk.Tool {
 		{Name: "milestones_list", Description: "List active course milestones with the member's status and next action. Args: space_id, member_id?.", InputSchema: schemaObject(map[string]any{"space_id": str, "member_id": str}, []string{"space_id"}), Handler: toolMilestonesList},
 		{Name: "milestone_submit", Description: "Submit or update milestone evidence. Args: definition_id, member_id, evidence_text?, evidence_links?, evidence_files?.", InputSchema: schemaObject(map[string]any{"definition_id": str, "member_id": str, "evidence_text": str, "evidence_links": arr, "evidence_files": arr}, []string{"definition_id", "member_id"}), Handler: toolMilestoneSubmit},
 		{Name: "milestone_review", Description: "Approve or request changes on milestone evidence. Args: definition_id, member_id, status, feedback?, reviewer_id?.", InputSchema: schemaObject(map[string]any{"definition_id": str, "member_id": str, "status": str, "feedback": str, "reviewer_id": str}, []string{"definition_id", "member_id", "status"}), Handler: toolMilestoneReview},
+		{Name: "milestone_reviews_list", Description: "List submitted milestone evidence for instructor review. Args: space_id, status?.", InputSchema: schemaObject(map[string]any{"space_id": str, "status": str}, []string{"space_id"}), Handler: toolMilestoneReviewsList},
 	}
+}
+
+func toolMilestoneReviewsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	space, err := mustStr(args, "space_id")
+	if err != nil {
+		return nil, err
+	}
+	status := strArg(args, "status", "submitted")
+	rows, err := ctx.AppDB().Query(`SELECT m.definition_id,m.member_id,m.status,m.evidence_text,m.evidence_links_json,m.evidence_files_json,m.feedback,d.title FROM member_milestones m JOIN milestone_definitions d ON d.id=m.definition_id WHERE d.space_id=? AND m.status=? ORDER BY m.updated_at`, space, status)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type item struct {
+		DefinitionID  string   `json:"definition_id"`
+		MemberID      string   `json:"member_id"`
+		Status        string   `json:"status"`
+		EvidenceText  string   `json:"evidence_text"`
+		EvidenceLinks []string `json:"evidence_links"`
+		EvidenceFiles []string `json:"evidence_files"`
+		Feedback      string   `json:"feedback"`
+		Title         string   `json:"title"`
+	}
+	out := []item{}
+	for rows.Next() {
+		var x item
+		var links, files string
+		if err := rows.Scan(&x.DefinitionID, &x.MemberID, &x.Status, &x.EvidenceText, &links, &files, &x.Feedback, &x.Title); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(links), &x.EvidenceLinks)
+		_ = json.Unmarshal([]byte(files), &x.EvidenceFiles)
+		out = append(out, x)
+	}
+	return map[string]any{"submissions": out}, rows.Err()
 }
 
 func toolAssignmentReviewsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -148,6 +184,9 @@ func toolAssignmentReview(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	var version int64
 	_ = db.QueryRow(`SELECT version FROM assignment_submissions WHERE assignment_id=? AND member_id=?`, aid, memberID).Scan(&version)
 	if _, err = db.Exec(`INSERT INTO assignment_reviews(id,assignment_id,member_id,version,status,feedback,reviewer_id) VALUES(?,?,?,?,?,?,?)`, newID("review"), aid, memberID, version, status, strArg(args, "feedback", ""), nullableValue(reviewer)); err != nil {
+		return nil, err
+	}
+	if err := syncCourseCompletionForSpace(db, spaceID, memberID); err != nil {
 		return nil, err
 	}
 	communityID, _ := communityBySpace(db, spaceID)
@@ -276,7 +315,10 @@ func toolMilestonesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		defs = append(defs, d)
 	}
-	if err := rows.Err(); err != nil { rows.Close(); return nil, err }
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
 	rows.Close()
 	out := []MemberMilestone{}
 	for _, d := range defs {
@@ -314,6 +356,9 @@ func toolMilestoneSubmit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	links, _ := stringArrayArg(args, "evidence_links")
 	files, _ := stringArrayArg(args, "evidence_files")
+	if err := validateCourseFiles(db, d.SpaceID, member, files); err != nil {
+		return nil, err
+	}
 	lj, _ := json.Marshal(links)
 	fj, _ := json.Marshal(files)
 	status := "submitted"
@@ -322,6 +367,9 @@ func toolMilestoneSubmit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	_, err = db.Exec(`INSERT INTO member_milestones(definition_id,member_id,status,evidence_text,evidence_links_json,evidence_files_json,feedback,submitted_at,approved_at) VALUES(?,?,?,?,?,?,'',CURRENT_TIMESTAMP,CASE WHEN ?='approved' THEN CURRENT_TIMESTAMP ELSE NULL END) ON CONFLICT(definition_id,member_id) DO UPDATE SET status=excluded.status,evidence_text=excluded.evidence_text,evidence_links_json=excluded.evidence_links_json,evidence_files_json=excluded.evidence_files_json,feedback='',submitted_at=CURRENT_TIMESTAMP,approved_at=CASE WHEN excluded.status='approved' THEN CURRENT_TIMESTAMP ELSE NULL END,updated_at=CURRENT_TIMESTAMP`, id, member, status, strArg(args, "evidence_text", ""), string(lj), string(fj), status)
 	if err != nil {
+		return nil, err
+	}
+	if err := syncCourseCompletionForSpace(db, d.SpaceID, member); err != nil {
 		return nil, err
 	}
 	communityID, _ := communityBySpace(db, d.SpaceID)
@@ -355,6 +403,9 @@ func toolMilestoneReview(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	changed, _ := res.RowsAffected()
 	if changed == 0 {
 		return nil, errors.New("milestone evidence not found")
+	}
+	if err := syncCourseCompletionForSpace(db, d.SpaceID, member); err != nil {
+		return nil, err
 	}
 	communityID, _ := communityBySpace(db, d.SpaceID)
 	emit(ctx, "milestone.reviewed", map[string]any{"community_id": communityID, "space_id": d.SpaceID, "member_id": member, "milestone_id": id, "status": status})

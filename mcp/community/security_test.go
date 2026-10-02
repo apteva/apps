@@ -352,8 +352,13 @@ func TestCourseCompletionAndProgressReopenStayConsistent(t *testing.T) {
 	if _, err := toolCourseEnroll(ctx, map[string]any{"space_id": courseID, "member_id": memberID}); err != nil {
 		t.Fatal(err)
 	}
+	assignmentOut, err := toolAssignmentsCreate(ctx, map[string]any{"lesson_id": lessonAID, "title": "Proof"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment := assignmentOut.(Assignment)
 	if _, err := toolCertificatesConfigure(ctx, map[string]any{
-		"space_id": courseID, "enabled": true, "issue_on_completion": true, "title": "Graduate",
+		"space_id": courseID, "enabled": true, "issue_on_completion": true, "title": "Graduate", "require_assignments_approved": true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -368,8 +373,18 @@ func TestCourseCompletionAndProgressReopenStayConsistent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if enrollment.Status != "completed" || enrollment.CompletedAt == nil {
-		t.Fatalf("course not completed: %+v", enrollment)
+	if enrollment.Status != "active" || enrollment.CompletedAt != nil {
+		t.Fatalf("course completed before assignment approval: %+v", enrollment)
+	}
+	if _, err := toolAssignmentSubmit(ctx, map[string]any{"assignment_id": assignment.ID, "member_id": memberID, "body": "proof"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := toolAssignmentReview(ctx, map[string]any{"assignment_id": assignment.ID, "member_id": memberID, "status": "approved"}); err != nil {
+		t.Fatal(err)
+	}
+	enrollment, err = loadCourseEnrollment(ctx.AppDB(), courseID, memberID)
+	if err != nil || enrollment.Status != "completed" {
+		t.Fatalf("course did not complete after approval: %+v %v", enrollment, err)
 	}
 	var certificates int
 	if err := ctx.AppDB().QueryRow(
