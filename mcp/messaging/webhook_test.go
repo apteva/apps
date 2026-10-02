@@ -652,6 +652,7 @@ const sampleEml = "From: customer@example.com\r\n" +
 func TestInboundWebhook_PersistsAndDispatches(t *testing.T) {
 	plat := &stubPlatform{}
 	ctx := newTestCtx(t, plat)
+	preseedIdentity(t, ctx, identityUpsert{Kind: "email_domain", Address: "acme.com", Provider: "aws-ses", Verified: true})
 	app := &App{}
 
 	// Register an inbound route so dispatch has a target.
@@ -667,6 +668,7 @@ func TestInboundWebhook_PersistsAndDispatches(t *testing.T) {
 		"notificationType": "Received",
 		"content":          sampleEml,
 		"mail":             map[string]any{"messageId": "ses-inbound-1"},
+		"receipt":          map[string]any{"recipients": []string{"support+t-1234@acme.com"}},
 	}
 	innerJSON, _ := json.Marshal(innerSES)
 	envelope := map[string]any{
@@ -732,11 +734,13 @@ func TestInboundWebhook_PersistsAndDispatches(t *testing.T) {
 func TestInboundWebhook_NoMatchSetsNoMatch(t *testing.T) {
 	plat := &stubPlatform{}
 	ctx := newTestCtx(t, plat)
+	preseedIdentity(t, ctx, identityUpsert{Kind: "email_domain", Address: "acme.com", Provider: "aws-ses", Verified: true})
 	app := &App{}
 
 	innerSES := map[string]any{
 		"notificationType": "Received",
 		"content":          sampleEml,
+		"receipt":          map[string]any{"recipients": []string{"support+t-1234@acme.com"}},
 	}
 	innerJSON, _ := json.Marshal(innerSES)
 	envelope := map[string]any{
