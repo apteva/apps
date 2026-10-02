@@ -9,6 +9,7 @@
 // cookies.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { PerformanceView } from "./PerformanceView";
 
 // Inlined SDK app-event subscription. Each app ships its own copy
 // because panels are bundled standalone and apps install independently.
@@ -311,7 +312,6 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
     const generation = ++listGeneration.current;
     try {
       const extra: Record<string, string> = {};
-      if (statusFilter) extra.status = statusFilter;
       const rows: FunctionRow[] = [];
       let cursor = "";
       do {
@@ -324,7 +324,7 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
     } catch (e) {
       setError((e as Error).message);
     }
-  }, [api, statusFilter]);
+  }, [api]);
 
   const loadDetail = useCallback(
     async (id: number) => {
@@ -402,17 +402,19 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
     return v ? `v${v.version}` : f.active_version_id ? "…" : "—";
   };
 
+  const visibleFunctions = functions.filter(f => !statusFilter || f.status === statusFilter);
+
   return (
     <div className="h-full flex flex-col">
-      <header className="px-6 py-3 border-b border-border flex items-center gap-3">
+      <header className="px-6 py-3 border-b border-border flex flex-wrap items-center gap-3">
         <h1 className="text-text font-medium">Functions</h1>
         <span className="text-text-dim text-xs">
-          {functions.length} function{functions.length !== 1 ? "s" : ""}
+          {visibleFunctions.length} function{visibleFunctions.length !== 1 ? "s" : ""}
         </span>
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value as Status | "")}
-          className="bg-bg-input border border-border rounded px-2 py-1 text-sm ml-4"
+          className="bg-bg-input border border-border rounded px-2 py-1 text-sm sm:ml-4"
         >
           <option value="">all statuses</option>
           <option value="active">active</option>
@@ -431,10 +433,11 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
       </header>
 
       <main className="flex-1 overflow-auto">
+        <PerformanceView key={`${projectId}:${installId}`} api={api} functions={functions} onSelect={select} renderInvocation={id => <LoadedInvocation id={id} api={api} />} />
  <CapacityView api={api}/>
         {error ? (
           <div className="p-6 text-red text-sm">{error}</div>
-        ) : functions.length === 0 ? (
+        ) : visibleFunctions.length === 0 ? (
           <div className="py-12 px-6 text-center text-text-muted text-sm">
             No functions yet.{" "}
             <button type="button" onClick={() => setCreating(true)} className="text-accent">
@@ -454,7 +457,7 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
               </tr>
             </thead>
             <tbody>
-              {functions.map((f) => (
+              {visibleFunctions.map((f) => (
                 <tr
                   key={f.id}
                   onClick={() => select(f.id)}
@@ -1415,10 +1418,11 @@ function SettingsEditor({fn,api,onChanged}:{fn:FunctionRow;api:ApiFn;onChanged:(
  return <details className="text-sm border border-border rounded p-3"><summary>Environment, limits and access</summary><div className="grid gap-2 mt-2"><label>Environment (KEY=value)<textarea value={env} onChange={e=>setEnv(e.target.value)} className={inputCls}/></label><label>Timeout (ms)<input type="number" min={1} max={300000} value={timeout} onChange={e=>setTimeoutValue(Number(e.target.value))} className={inputCls}/></label><label>Hard worker memory limit (MiB)<input type="number" min={16} max={65536} value={memory} onChange={e=>setMemory(Number(e.target.value))} className={inputCls}/></label><label>Capacity class<select value={limits.class||"interactive"} onChange={e=>setLimits({...limits,class:e.target.value})} className={inputCls}><option value="interactive">Interactive</option><option value="background">Background</option></select></label>{[["concurrency","Concurrent workers",1024],["max_idle_workers","Maximum idle workers",1024],["idle_timeout_ms","Idle lifetime (ms)",600000],["queue_timeout_ms","Capacity wait (ms)",600000],["app_timeout_ms","App call timeout (ms)",600000],["integration_timeout_ms","Integration timeout (ms)",600000]].map(([key,label,max])=><label key={String(key)}>{label}<input type="number" min={0} max={Number(max)} placeholder="Default" value={limits[String(key)]??""} onChange={e=>setLimits({...limits,[String(key)]:e.target.value===""?undefined:Number(e.target.value)})} className={inputCls}/></label>)}<label>Access policy (null inherits installation grants)<textarea value={access} onChange={e=>setAccess(e.target.value)} placeholder='{"apps":["tables.*"],"integrations":[]}' className={inputCls}/></label><button disabled={saving} onClick={save}>Save settings</button>{error&&<p role="alert" className="text-red">{error}</p>}</div></details>;
 }
 
-function LoadedInvocation({inv,api}:{inv:Invocation;api:ApiFn}) {
- const [detail,setDetail]=useState(inv),[error,setError]=useState("");
- useEffect(()=>{let active=true;api<{invocation:Invocation}>("GET",`/invocations/${inv.id}`).then(r=>{if(active)setDetail(r.invocation)}).catch(e=>{if(active)setError(e.message)});return()=>{active=false};},[inv.id,api]);
- return error?<p className="text-red">{error}</p>:<InvocationDetail inv={detail}/>;
+function LoadedInvocation({inv,id,api}:{inv?:Invocation;id?:number;api:ApiFn}) {
+ const invocationId = id ?? inv!.id;
+ const [detail,setDetail]=useState<Invocation|null>(inv ?? null),[error,setError]=useState("");
+ useEffect(()=>{let active=true;setError("");setDetail(inv ?? null);api<{invocation:Invocation}>("GET",`/invocations/${invocationId}`).then(r=>{if(active)setDetail(r.invocation)}).catch(e=>{if(active)setError(e.message)});return()=>{active=false};},[invocationId,api]);
+ return error?<p role="alert" className="text-red">{error}</p>:detail?<InvocationDetail inv={detail}/>:<p role="status" className="text-text-muted">Loading invocation details…</p>;
 }
 
 function InvocationTimings({inv}:{inv:Invocation}) {
