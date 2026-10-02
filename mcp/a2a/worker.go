@@ -17,6 +17,9 @@ func (a *App) syncRemoteTasks(ctx context.Context, app *sdk.AppCtx) error {
 	if app.CurrentProject() == "" {
 		return nil
 	}
+	if err := expireStaleTasks(ctx, app); err != nil {
+		return err
+	}
 	if err := flushDeliveries(ctx, app); err != nil {
 		return err
 	}

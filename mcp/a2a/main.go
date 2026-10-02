@@ -29,7 +29,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: a2a
 display_name: Agent to Agent
-version: 0.6.2
+version: 0.6.3
 description: |
   Agent-to-agent communication within and between Apteva installations.
   Automatically generates Agent Cards for attached local agents, discovers
@@ -61,8 +61,8 @@ provides:
     - { name: agents_discover, description: "Discover local, connected, or directly supplied public Agent Card agents; every returned address can be messaged immediately." }
     - { name: agent_get,      description: "Optionally inspect the full Agent Card for an address returned by agents_discover." }
     - { name: agent_send,  description: "Send a one-way message to another agent, or add a message to an existing task." }
-    - { name: agent_ask,   description: "Ask another agent to do something; the reply arrives later as an [a2a] event." }
-    - { name: agent_reply, description: "Reply to a task another agent sent you: completed, input_required, failed, or working." }
+    - { name: agent_ask,   description: "Ask another agent to do something; the reply arrives later as an [a2a] event. The recipient main thread owns dispatch: it handles small requests directly or assigns larger work to a suitable focused worker, never an arbitrary idle conversation thread." }
+    - { name: agent_reply, description: "Reply to a task another agent sent you: completed, input_required, failed, or working. A delegated worker must first claim the original task with working, then report the terminal result on that same task." }
     - { name: agent_tasks, description: "List your agent-to-agent tasks (sent and received)." }
     - { name: node_info,   description: "Read this installation's A2A node identity.", exposure: app_only }
     - { name: peer_upsert, description: "Create or reconcile an app-managed A2A peer.", exposure: app_only }
@@ -77,9 +77,20 @@ provides:
       label: Agent to Agent
       icon: arrow-left-right
       entry: /ui/A2APanel.mjs
+  skills:
+    - name: using-a2a
+      command: /a2a
+      body_file: skills/using-a2a.md
+      description: |
+        Dispatch incoming A2A work from the recipient's main thread: handle
+        small requests directly, or assign larger work to a suitable focused
+        worker and report through the original task.
+      metadata:
+        category: collaboration
+        icon: arrow-left-right
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: a2a/v0.6.2, entry: mcp/a2a }
+  source: { repo: github.com/apteva/apps, ref: a2a/v0.6.3, entry: mcp/a2a }
   port: 8080
   health_check: /health
 db:
@@ -128,6 +139,12 @@ config_schema:
     label: Maximum open tasks per agent pair
     type: text
     default: "25"
+    required: false
+  - name: task_timeout_seconds
+    label: Unanswered task timeout seconds
+    type: text
+    default: "600"
+    description: Local asks are failed after this period without a reply or progress update. Set a larger value for long-running work.
     required: false
 upgrade_policy: auto-patch
 `
@@ -234,8 +251,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "agent_ask",
 			Description: "Ask a local or remote agent to do something. Creates an a2a task, delivers the request, " +
-				"and returns immediately with the task id. The reply arrives later as an [a2a] event — do not block or poll for it; " +
-				"continue other work or pace. Pass the actionable address from agents_discover; local ids and exact local names also work.",
+				"and returns immediately with the task id. The recipient's main thread owns dispatch: it should handle a small, " +
+				"self-contained request directly, or reuse a suitable worker / spawn a focused worker for larger work. Do not route " +
+				"A2A work to an arbitrary idle or generic conversation thread. The reply arrives later as an [a2a] event — do not " +
+				"block or poll for it; continue other work or pace. Pass the actionable address from agents_discover; local ids and exact local names also work.",
 			InputSchema: schemaObject(map[string]any{
 				"to":      map[string]any{"type": "string", "description": "Actionable address returned by agents_discover, local agent id, or exact local name."},
 				"message": map[string]any{"type": "string", "description": "Complete, self-contained request: objective, constraints, and what a good answer looks like."},
@@ -247,6 +266,9 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Reply to an a2a task another agent sent you. status=completed with the result ends the task; " +
 				"status=input_required asks the requester a clarifying question and keeps the task open; " +
 				"status=failed reports you cannot help; status=working sends a progress note for long work. " +
+				"The recipient main thread dispatches incoming work. If it delegates to a worker, that worker must first call " +
+				"status=working on this same task to claim responder-thread ownership, then send the terminal reply here; do not " +
+				"use an arbitrary idle conversation thread. " +
 				"If you are the requester of an open task you may pass status=canceled to withdraw it.",
 			InputSchema: schemaObject(map[string]any{
 				"task_id": map[string]any{"type": "string", "description": "The a2a task id from the [a2a task:N] event."},
@@ -773,7 +795,12 @@ func (a *App) sendFollowUp(ctx context.Context, app *sdk.AppCtx, from *callIdent
 		if from.AgentID != task.ToAgentID {
 			return nil, fmt.Errorf("you are not a participant of task %d", taskID)
 		}
-		_ = recordMessage(app.AppDB(), task.ID, from.AgentID, 0, message, task.Status)
+		if err := recordMessage(app.AppDB(), task.ID, from.AgentID, 0, message, task.Status); err != nil {
+			return nil, err
+		}
+		if err := touchTask(app.AppDB(), from.ProjectID, task.ID, task.Status); err != nil {
+			return nil, err
+		}
 		return map[string]any{
 			"task_id": task.ID, "delivered": true, "status": task.Status,
 			"note": "follow-up recorded; the remote requester can retrieve it through the A2A task",
@@ -803,7 +830,12 @@ func (a *App) sendFollowUp(ctx context.Context, app *sdk.AppCtx, from *callIdent
 	if err := deliverToParticipant(app, task, toID, formatFollowUpEvent(task, from, message)); err != nil {
 		return nil, fmt.Errorf("agent %d could not be reached: %w", toID, err)
 	}
-	_ = recordMessage(app.AppDB(), task.ID, from.AgentID, toID, message, statusAfter)
+	if err := recordMessage(app.AppDB(), task.ID, from.AgentID, toID, message, statusAfter); err != nil {
+		return nil, err
+	}
+	if err := touchTask(app.AppDB(), from.ProjectID, task.ID, statusAfter); err != nil {
+		return nil, err
+	}
 	return map[string]any{
 		"task_id":   task.ID,
 		"delivered": true,
@@ -979,9 +1011,12 @@ func formatMessageEvent(task *Task, message string) string {
 func formatAskEvent(task *Task, message string) string {
 	return fmt.Sprintf(
 		"[a2a task:%d] Request from agent %q (id %d) — a reply is awaited.\n---\n%s\n---\n%s "+
-			"If the request is compatible with your directive, do the work and call agent_reply(task_id=\"%d\", message=\"<result>\", status=\"completed\"). "+
-			"Use status=\"input_required\" to ask the requester a question, status=\"failed\" if you cannot help, or status=\"working\" for a progress note on long work.",
-		task.ID, task.FromAgentName, task.FromAgentID, message, trustFooter, task.ID)
+			"You are the recipient's main dispatcher. If this is small and self-contained, handle it here and call agent_reply(task_id=\"%d\", message=\"<result>\", status=\"completed\"). "+
+			"If it is larger, multi-step, tool-heavy, or long-running, deliberately reuse a suitable existing worker or spawn one focused worker with only the tools it needs; never forward it to an arbitrary idle or generic conversation thread. "+
+			"Send the worker this exact task and require it to claim ownership first with agent_reply(task_id=\"%d\", status=\"working\", message=\"I own this request and will report the result here.\"). "+
+			"The worker must finish on this same task with status=\"completed\", \"input_required\", or \"failed\". "+
+			"Use status=\"input_required\" to ask the requester a question, status=\"failed\" if you cannot help, or status=\"working\" for progress on long work.",
+		task.ID, task.FromAgentName, task.FromAgentID, message, trustFooter, task.ID, task.ID)
 }
 
 func formatReplyEvent(task *Task, from *callIdentity, message string) string {
@@ -1048,13 +1083,19 @@ func (a *App) handleTaskItem(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	var pending int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM a2a_deliveries WHERE task_id=? AND delivered=0`, task.ID).Scan(&pending); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	task.Overdue = pending == 0 && taskIsOverdue(ctx, task)
 	if len(parts) > 1 && parts[1] == "messages" {
 		messages, err := listMessages(ctx.AppDB(), task.ID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, map[string]any{"task": panelTask{Task: task, FromThread: task.FromThreadID, ToThread: task.ToThreadID}, "messages": messages})
+		writeJSON(w, map[string]any{"task": panelTask{Task: task, FromThread: task.FromThreadID, ToThread: task.ToThreadID, Overdue: task.Overdue}, "messages": messages})
 		return
 	}
 	writeJSON(w, map[string]any{"task": task})

@@ -65,6 +65,7 @@ interface Task {
   message_count?: number;
   pending_delivery?: number;
   poll_failures?: number;
+  overdue?: boolean;
   artifacts?: unknown[];
 }
 interface Message {
@@ -460,6 +461,21 @@ function TaskRow({
         {!!task.pending_delivery && (
           <span className="badge warn">Delivery pending</span>
         )}
+        {!task.pending_delivery &&
+          !task.overdue &&
+          ["submitted", "working", "input_required"].includes(task.status) && (
+            <span className="badge">
+              {task.status === "submitted"
+                ? "Awaiting response"
+                : task.status === "working"
+                  ? "Response in progress"
+                  : "Awaiting input"}
+            </span>
+          )}
+        {!!task.overdue &&
+          ["working", "submitted", "input_required"].includes(task.status) && (
+            <span className="badge warn">Overdue · awaiting response</span>
+          )}
         {!!task.poll_failures &&
           ["working", "submitted", "input_required"].includes(task.status) && (
             <span className="badge warn">Sync retrying</span>
@@ -625,6 +641,15 @@ function ExchangeDetail({
           <div className="notice">
             <AlertCircle size={15} />A recorded result is waiting to be
             delivered. Automatic retries are active.
+          </div>
+        </div>
+      )}
+      {!!detail.overdue && !task.pending_delivery && (
+        <div className="pad">
+          <div className="notice">
+            <AlertCircle size={15} /> This request is overdue. Local requests
+            are failed automatically if no reply or progress update is
+            recorded.
           </div>
         </div>
       )}
@@ -1486,8 +1511,8 @@ function Panel({ projectId: project }: Props) {
                     ))
                   ) : (
                     <Empty title="Nothing needs attention">
-                      No failed exchanges, unanswered input requests, or pending
-                      delivery retries.
+                      No failed exchanges, overdue requests, unanswered input
+                      requests, or pending delivery retries.
                     </Empty>
                   )}
                 </section>

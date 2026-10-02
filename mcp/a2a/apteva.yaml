@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: a2a
 display_name: Agent to Agent
-version: 0.6.2
+version: 0.6.3
 description: |
   Agent-to-agent communication within and between Apteva installations.
   Automatically generates Agent Cards for attached local agents, discovers
@@ -37,8 +37,8 @@ provides:
     - { name: agents_discover, description: "Discover local, connected, or directly supplied public Agent Card agents; every returned address can be messaged immediately." }
     - { name: agent_get,      description: "Optionally inspect the full Agent Card for an address returned by agents_discover." }
     - { name: agent_send,  description: "Send a one-way message to another agent, or add a message to an existing task." }
-    - { name: agent_ask,   description: "Ask another agent to do something; the reply arrives later as an [a2a] event." }
-    - { name: agent_reply, description: "Reply to a task another agent sent you: completed, input_required, failed, or working." }
+    - { name: agent_ask,   description: "Ask another agent to do something; the reply arrives later as an [a2a] event. The recipient main thread owns dispatch: it handles small requests directly or assigns larger work to a suitable focused worker, never an arbitrary idle conversation thread." }
+    - { name: agent_reply, description: "Reply to a task another agent sent you: completed, input_required, failed, or working. A delegated worker must first claim the original task with working, then report the terminal result on that same task." }
     - { name: agent_tasks, description: "List your agent-to-agent tasks (sent and received)." }
     - { name: node_info,   description: "Read this installation's A2A node identity.", exposure: app_only }
     - { name: peer_upsert, description: "Create or reconcile an app-managed A2A peer.", exposure: app_only }
@@ -53,10 +53,21 @@ provides:
       label: Agent to Agent
       icon: arrow-left-right
       entry: /ui/A2APanel.mjs
+  skills:
+    - name: using-a2a
+      command: /a2a
+      body_file: skills/using-a2a.md
+      description: |
+        Dispatch incoming A2A work from the recipient's main thread: handle
+        small requests directly, or assign larger work to a suitable focused
+        worker and report through the original task.
+      metadata:
+        category: collaboration
+        icon: arrow-left-right
 
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: a2a/v0.6.2, entry: mcp/a2a }
+  source: { repo: github.com/apteva/apps, ref: a2a/v0.6.3, entry: mcp/a2a }
   port: 8080
   health_check: /health
 
@@ -107,6 +118,12 @@ config_schema:
     label: Maximum open tasks per agent pair
     type: text
     default: "25"
+    required: false
+  - name: task_timeout_seconds
+    label: Unanswered task timeout seconds
+    type: text
+    default: "600"
+    description: Local asks are failed after this period without a reply or progress update. Set a larger value for long-running work.
     required: false
 
 upgrade_policy: auto-patch

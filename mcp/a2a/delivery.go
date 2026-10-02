@@ -29,7 +29,8 @@ func saveReply(db *sql.DB, task *Task, fromID, toID int64, body, event string, a
 	if len(raw) == 0 {
 		raw = json.RawMessage(`[]`)
 	}
-	res, err := tx.Exec(`UPDATE a2a_tasks SET status=?, updated_at=?, artifacts_json=? WHERE id=? AND project_id=?`, task.Status, nowUTC(), string(raw), task.ID, task.ProjectID)
+	res, err := tx.Exec(`UPDATE a2a_tasks SET status=?, updated_at=?, artifacts_json=?
+		WHERE id=? AND project_id=? AND status IN ('submitted','working','input_required')`, task.Status, nowUTC(), string(raw), task.ID, task.ProjectID)
 	if err != nil {
 		return 0, err
 	}

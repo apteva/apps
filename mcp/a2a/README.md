@@ -45,6 +45,21 @@ Connections start as "Not checked" each time the panel is opened. Failed checks
 keep the last cached directory available. Successful checks hide agents no
 longer advertised while preserving the routing records used by existing tasks.
 
+## Unanswered local asks
+
+Local asks default to a 10-minute response lease, configured with
+`task_timeout_seconds`. A `working` reply refreshes the lease, so an agent can
+keep a long-running request alive with progress updates. Once the lease
+expires, the worker atomically records a `failed` timeout reply and sends it to
+the original requester; if that notification cannot be delivered, it remains
+in the normal pending-delivery retry queue. The panel marks open requests as
+**Overdue · awaiting response** before the worker closes them.
+
+This timeout applies only to local tasks. Remote tasks remain open for their
+remote A2A lifecycle and expose polling failures or pending delivery state for
+operator action. A saved reply with failed delivery is never treated as an
+unanswered request.
+
 No dashboard rebuild is needed: the panel bundles its own scoped CSS and uses
 the dashboard's theme variables. Migration 007 adds directory visibility while
 preserving existing tasks, messages, peers, and routing records.
@@ -76,6 +91,14 @@ pagination. Directory and message failures are visible and retryable.
 4. Remote replies are synchronized into the originating local thread.
 
 Agents never receive peer credentials or raw routing configuration.
+
+Incoming asks are dispatched by the recipient's main thread. Small,
+self-contained requests can be completed there. Larger or long-running work
+should be assigned to a suitable existing worker or a newly spawned focused
+worker; an arbitrary idle conversation thread is not an owner. A delegated
+worker claims the original task with a `working` reply before doing domain work
+and sends its terminal result with the same task ID, so the responder thread
+and delivery path remain traceable.
 
 ## Connections and peer registry
 
@@ -200,10 +223,12 @@ Build the shipped bundle with `bun run scripts/build-panels.ts --app a2a`.
 with the topology-capable CLI from this app directory:
 
 ```sh
-apteva test ./scenarios
+apteva test --tier 3 --provider openai-codex --model gpt-6.1-sol ./scenarios
 ```
 
 The suite covers same-project communication, global-install project isolation,
 two-node request/reply and follow-up flows, peer grants, a hub connected to two
 independent tenant nodes, a Fleet-style tenant agent contacting a main-node
-agent, and an Apteva agent talking to a live public third-party A2A agent.
+agent, direct recipient-main handling, focused-worker dispatch that avoids an
+unrelated idle conversation worker, and an Apteva agent talking to a live
+public third-party A2A agent.

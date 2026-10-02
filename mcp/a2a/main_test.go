@@ -197,6 +197,35 @@ func TestAskDeliversAndReplyRoutesToAskingThread(t *testing.T) {
 	}
 }
 
+func TestAskContractExplainsRecipientDispatch(t *testing.T) {
+	app := &App{}
+	var ask, reply string
+	for _, tool := range app.MCPTools() {
+		switch tool.Name {
+		case "agent_ask":
+			ask = tool.Description
+		case "agent_reply":
+			reply = tool.Description
+		}
+	}
+	for _, want := range []string{"recipient's main thread owns dispatch", "focused worker", "arbitrary idle"} {
+		if !strings.Contains(ask, want) {
+			t.Fatalf("agent_ask description missing %q: %s", want, ask)
+		}
+	}
+	for _, want := range []string{"claim responder-thread ownership", "same task"} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("agent_reply description missing %q: %s", want, reply)
+		}
+	}
+	event := formatAskEvent(&Task{ID: 7, FromAgentID: 41, FromAgentName: "Requester"}, "Do the bounded check")
+	for _, want := range []string{"recipient's main dispatcher", "spawn one focused worker", "arbitrary idle", "agent_reply(task_id=\"7\", status=\"working\"", "same task"} {
+		if !strings.Contains(event, want) {
+			t.Fatalf("A2A request event missing %q: %s", want, event)
+		}
+	}
+}
+
 func TestReplyFallsBackToMainThread(t *testing.T) {
 	ctx, platform := newTestEnv(t)
 	app := &App{}

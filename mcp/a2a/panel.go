@@ -28,7 +28,9 @@ func panelContext(w http.ResponseWriter, r *http.Request) *sdk.AppCtx {
 	return app
 }
 
-const attentionSQL = `(t.status IN ('input_required','failed') OR (t.status IN ('submitted','working','input_required') AND t.poll_failures > 0) OR EXISTS (SELECT 1 FROM a2a_deliveries d WHERE d.task_id=t.id AND d.delivered=0))`
+func attentionCondition(cutoff string) (string, []any) {
+	return `(t.status IN ('input_required','failed') OR (t.status IN ('submitted','working','input_required') AND t.poll_failures > 0) OR EXISTS (SELECT 1 FROM a2a_deliveries d WHERE d.task_id=t.id AND d.delivered=0) OR (t.status IN ('submitted','working','input_required') AND t.updated_at < ?))`, []any{cutoff}
+}
 
 type panelTask struct {
 	*Task
@@ -38,11 +40,12 @@ type panelTask struct {
 	MessageCount    int    `json:"message_count"`
 	PendingDelivery int    `json:"pending_delivery"`
 	PollFailures    int    `json:"poll_failures"`
+	Overdue         bool   `json:"overdue,omitempty"`
 }
 
 // Query the full ledger before pagination; search includes message text and
 // remote participants, and date bounds use UTC calendar days.
-func panelTaskWhere(r *http.Request, project string) (string, []any, error) {
+func panelTaskWhere(r *http.Request, project string, timeout time.Duration) (string, []any, error) {
 	q := r.URL.Query()
 	where, args := []string{"t.project_id = ?"}, []any{project}
 	if v := q.Get("status"); v != "" {
@@ -52,7 +55,9 @@ func panelTaskWhere(r *http.Request, project string) (string, []any, error) {
 		case "open":
 			where = append(where, "t.status IN ('submitted','working','input_required')")
 		case "attention":
-			where = append(where, attentionSQL)
+			condition, conditionArgs := attentionCondition(time.Now().UTC().Add(-timeout).Format(time.RFC3339Nano))
+			where = append(where, condition)
+			args = append(args, conditionArgs...)
 		default:
 			where = append(where, "t.status = ?")
 			args = append(args, v)
@@ -124,7 +129,8 @@ func (a *App) handlePanelTasks(w http.ResponseWriter, r *http.Request) {
 	if app == nil {
 		return
 	}
-	where, args, err := panelTaskWhere(r, app.CurrentProject())
+	timeout := taskTimeout(app)
+	where, args, err := panelTaskWhere(r, app.CurrentProject(), timeout)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
@@ -181,7 +187,8 @@ func (a *App) handlePanelTasks(w http.ResponseWriter, r *http.Request) {
 		if t != nil {
 			// Artifact payloads are loaded only when opening the exchange.
 			t.Artifacts = nil
-			tasks = append(tasks, panelTask{t, t.FromThreadID, t.ToThreadID, e.preview, e.messages, e.pending, e.failures})
+			t.Overdue = e.pending == 0 && taskOverdueAt(t, time.Now().UTC(), timeout)
+			tasks = append(tasks, panelTask{t, t.FromThreadID, t.ToThreadID, e.preview, e.messages, e.pending, e.failures, t.Overdue})
 		}
 	}
 	writeJSON(w, map[string]any{"tasks": tasks, "total": total, "limit": limit, "offset": offset})
@@ -197,9 +204,10 @@ func (a *App) handleOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var total, active, input, failed, completed, attention, pending int
+	attentionExpr, attentionArgs := attentionCondition(time.Now().UTC().Add(-taskTimeout(app)).Format(time.RFC3339Nano))
 	err := app.AppDB().QueryRow(`SELECT COUNT(*),COALESCE(SUM(t.status IN ('submitted','working')),0),
  COALESCE(SUM(t.status='input_required'),0),COALESCE(SUM(t.status='failed'),0),COALESCE(SUM(t.status='completed'),0),
- COALESCE(SUM(`+attentionSQL+`),0) FROM a2a_tasks t WHERE t.project_id=?`, app.CurrentProject()).Scan(&total, &active, &input, &failed, &completed, &attention)
+	 COALESCE(SUM(`+attentionExpr+`),0) FROM a2a_tasks t WHERE t.project_id=?`, append(attentionArgs, app.CurrentProject())...).Scan(&total, &active, &input, &failed, &completed, &attention)
 	if err == nil {
 		err = app.AppDB().QueryRow(`SELECT COUNT(*) FROM a2a_deliveries WHERE project_id=? AND delivered=0`, app.CurrentProject()).Scan(&pending)
 	}

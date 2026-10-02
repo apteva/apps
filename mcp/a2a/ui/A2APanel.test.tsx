@@ -82,6 +82,18 @@ test("overview, directory, network map and connections navigate without losing s
   expect(container.textContent).toContain("Recent exchanges");
 });
 
+test("overdue exchanges are visible in the overview", async () => {
+  const previous = (tasks[0] as any).overdue;
+  (tasks[0] as any).overdue = true;
+  try {
+    await render();
+    expect(container.textContent).toContain("Overdue · awaiting response");
+  } finally {
+    if (previous === undefined) delete (tasks[0] as any).overdue;
+    else (tasks[0] as any).overdue = previous;
+  }
+});
+
 test("an older message request cannot overwrite the newly selected exchange", async () => {
   let resolveOld!: (response: Response) => void;
   globalThis.fetch = (async (input: any) =>

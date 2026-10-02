@@ -30,6 +30,7 @@ type Task struct {
 	RemoteTaskID      string     `json:"remote_task_id,omitempty"`
 	RemoteContextID   string     `json:"remote_context_id,omitempty"`
 	LastSyncedAt      string     `json:"last_synced_at,omitempty"`
+	Overdue           bool       `json:"overdue,omitempty"`
 	CreatedAt         string     `json:"created_at"`
 	UpdatedAt         string     `json:"updated_at"`
 }
@@ -109,6 +110,19 @@ func setTaskStatus(db *sql.DB, projectID string, id int64, status string) error 
 	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func touchTask(db *sql.DB, projectID string, id int64, status string) error {
+	res, err := db.Exec(
+		`UPDATE a2a_tasks SET updated_at = ? WHERE id = ? AND project_id = ? AND status = ?`,
+		nowUTC(), id, projectID, status)
+	if err != nil {
+		return err
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
 		return sql.ErrNoRows
 	}
 	return nil
