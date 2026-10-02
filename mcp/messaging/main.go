@@ -105,7 +105,8 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 // this window.
 const pollVerifyMaxAge = 7 * 24 * time.Hour
 
-// Workers runs the background SES verification poller. It self-heals
+// Workers uses the SDK scheduler for Gmail mailbox sync, durable recovery,
+// SES subscription reconciliation and verification polling. The SES poller self-heals
 // NOT_STARTED / PENDING / TEMPORARY_FAILURE statuses that the cached
 // local row would otherwise hold stale until someone called
 // senders_list/get. The worker enumerates the projects with pending
@@ -3874,6 +3875,9 @@ const crmInboundReceiveTool = "messaging_inbound_receive"
 func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 	if m == nil {
 		return errors.New("nil message")
+	}
+	if m.Direction != "in" {
+		return errors.New("outbound messages cannot enter inbound routing")
 	}
 	if eligible, err := ensureInboundEmailOwnership(ctx, pid, m); err != nil || !eligible {
 		return err

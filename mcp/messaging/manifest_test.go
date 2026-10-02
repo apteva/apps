@@ -56,6 +56,21 @@ func TestMCPTools_DeclaredMatchHandlers(t *testing.T) {
 	}
 }
 
+func TestManifestWorkerSchedulesMatchRuntime(t *testing.T) {
+	app := &App{}
+	declared := map[string]string{}
+	for _, worker := range app.Manifest().Provides.Workers {
+		declared[worker.Name] = worker.Schedule
+	}
+	implemented := map[string]string{}
+	for _, worker := range app.Workers() {
+		implemented[worker.Name] = worker.Schedule
+	}
+	if !reflect.DeepEqual(declared, implemented) {
+		t.Fatalf("SDK worker manifest/runtime drift: declared=%v implemented=%v", declared, implemented)
+	}
+}
+
 func TestManifestAndYAMLAgree(t *testing.T) {
 	diskBytes, err := os.ReadFile("apteva.yaml")
 	if err != nil {
