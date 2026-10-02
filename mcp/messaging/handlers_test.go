@@ -100,6 +100,8 @@ func (s *stubPlatform) ExecuteIntegrationTool(connID int64, tool string, input m
 		return s.executeReply, nil
 	}
 	switch tool {
+	case "list_subscriptions_by_topic":
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"ListSubscriptionsByTopicResponse":{"ListSubscriptionsByTopicResult":{"Subscriptions":{}}}}`)}, nil
 	case "get_bucket_policy":
 		return &sdk.ExecuteResult{Success: false, Status: 404, Data: json.RawMessage(`{"Code":"NoSuchBucketPolicy"}`)}, nil
 	case "send_email":
@@ -147,13 +149,14 @@ func (s *stubPlatform) CallAppResult(app, tool string, input map[string]any, out
 func TestDispatchInbound_MCPToolErrorMarksTargetFailed(t *testing.T) {
 	plat := &stubPlatform{callAppResultErr: errors.New("crm.messaging_inbound_receive: project_id required")}
 	ctx := newTestCtx(t, plat)
+	seedSESRecipient(t, ctx, "contact@example.com")
 	if _, err := dbInboundRouteUpsert(ctx.AppDB(), "test-proj", channelEmail, "*", "crm", "/inbound", 0); err != nil {
 		t.Fatal(err)
 	}
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO messages
-			(project_id, channel, direction, from_addr, to_addrs, status, route_status, received_at)
-		 VALUES ('test-proj', 'email', 'in', 'sender@example.com', '["contact@example.com"]', 'received', 'pending', '2026-07-17T14:00:00Z')`,
+			(project_id, channel, direction, from_addr, to_addrs, envelope_recipients, status, route_status, received_at)
+		 VALUES ('test-proj', 'email', 'in', 'sender@example.com', '["contact@example.com"]', '["contact@example.com"]', 'received', 'pending', '2026-07-17T14:00:00Z')`,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -222,13 +225,14 @@ func TestDispatchInbound_CRMLegacyRouteCallsInboundToolWithProject(t *testing.T)
 func TestDispatchInbound_GenericRouteIncludesStableAttachmentMetadata(t *testing.T) {
 	plat := &stubPlatform{callAppReply: json.RawMessage(`{"ok":true}`)}
 	ctx := newTestCtx(t, plat)
+	seedSESRecipient(t, ctx, "support@example.com")
 	if _, err := dbInboundRouteUpsert(ctx.AppDB(), "test-proj", channelEmail, "*", "support", "/receive", 0); err != nil {
 		t.Fatal(err)
 	}
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO messages
-			(project_id, channel, direction, from_addr, to_addrs, status, route_status, received_at)
-		 VALUES ('test-proj', 'email', 'in', 'sender@example.com', '["support@example.com"]', 'received', 'pending', '2026-08-23T10:00:00Z')`,
+			(project_id, channel, direction, from_addr, to_addrs, envelope_recipients, status, route_status, received_at)
+		 VALUES ('test-proj', 'email', 'in', 'sender@example.com', '["support@example.com"]', '["support@example.com"]', 'received', 'pending', '2026-08-23T10:00:00Z')`,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -290,6 +294,7 @@ func TestDispatchInbound_GenericRouteIncludesStableAttachmentMetadata(t *testing
 func TestDispatchInbound_SuppressedSenderSkipsRoute(t *testing.T) {
 	plat := &stubPlatform{callAppReply: json.RawMessage(`{"ok":true}`)}
 	ctx := newTestCtx(t, plat)
+	seedSESRecipient(t, ctx, "support@our.test")
 	if _, err := dbInboundRouteUpsert(ctx.AppDB(), "test-proj", channelEmail, "*", "crm", "/inbound", 0); err != nil {
 		t.Fatal(err)
 	}
@@ -298,8 +303,8 @@ func TestDispatchInbound_SuppressedSenderSkipsRoute(t *testing.T) {
 	}
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO messages
-			(project_id, channel, direction, from_addr, to_addrs, status, route_status)
-		 VALUES ('test-proj', 'email', 'in', 'pitch@spammer.test', '["support@our.test"]', 'received', 'pending')`,
+			(project_id, channel, direction, from_addr, to_addrs, envelope_recipients, status, route_status)
+		 VALUES ('test-proj', 'email', 'in', 'pitch@spammer.test', '["support@our.test"]', '["support@our.test"]', 'received', 'pending')`,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -710,7 +715,7 @@ func TestInboundEmailRejectsRecipientsAcrossProjects(t *testing.T) {
 		}
 	}
 	projectID := resolveProjectFromInboundEmail(ctx, &parsedInbound{
-		To: []string{"one@alpha.example", "two@beta.example"},
+		EnvelopeRecipients: []string{"one@alpha.example", "two@beta.example"},
 	}, nil)
 	if projectID != "" {
 		t.Fatalf("cross-project recipients resolved to %q", projectID)
@@ -2607,19 +2612,19 @@ func TestResolveProjectFromInboundEmail_NoMatchReturnsEmpty(t *testing.T) {
 	}
 }
 
-func TestResolveProjectFromInboundEmail_FallsBackToParsedTo(t *testing.T) {
+func TestResolveProjectFromInboundEmail_VisibleToIsNotDeliveryEvidence(t *testing.T) {
 	ctx := newTestCtx(t, &stubPlatform{})
 	preseedIdentity(t, ctx, identityUpsert{
 		Kind: "email_domain", Address: "hypnofans.com",
 		Provider: "aws-ses", Verified: true, VerificationStatus: "verified",
 	})
 
-	// SES envelope without Receipt.Recipients (e.g., legacy/odd
-	// shape); parsed.To should still resolve us correctly.
+	// Visible To can name the original addressee of forwarded email.
+	// It is never evidence of SMTP delivery to this project.
 	parsed := &parsedInbound{To: []string{"info@hypnofans.com"}}
 	got := resolveProjectFromInboundEmail(ctx, parsed, &sesInboundEnvelope{})
-	if got != "test-proj" {
-		t.Errorf("expected fallback to parsed.To, got %q", got)
+	if got != "" {
+		t.Errorf("visible To must not establish ownership, got %q", got)
 	}
 }
 
@@ -2712,7 +2717,7 @@ func TestSendersCreate_Domain_InboundRuleNameIsInstallScoped(t *testing.T) {
 	}
 }
 
-func TestSendersCreate_Domain_SubscribeWebhookURLsAreProjectScoped(t *testing.T) {
+func TestSendersCreate_Domain_InboundWebhookIsGlobal(t *testing.T) {
 	plat := &stubPlatform{
 		bindingsOverride: map[string]any{
 			"email_provider":        float64(1),
@@ -2760,6 +2765,11 @@ func TestSendersCreate_Domain_SubscribeWebhookURLsAreProjectScoped(t *testing.T)
 		t.Fatalf("subscribe calls=%d endpoints=%v, want events + inbound", len(endpoints), endpoints)
 	}
 	joined := strings.Join(endpoints, "\n")
+	for _, endpoint := range endpoints {
+		if strings.Contains(endpoint, "/ses-inbound?") && strings.Contains(endpoint, "project_id=") {
+			t.Fatalf("inbound subscription must not fan out by project: %s", endpoint)
+		}
+	}
 	for _, want := range []string{
 		"/api/apps/messaging/webhooks/ses-bounces?",
 		"/api/apps/messaging/webhooks/ses-inbound?",
@@ -2848,6 +2858,7 @@ func TestCleanupStaleMessagingSNSSubscriptionsPaginatesAndScopes(t *testing.T) {
 		"ListSubscriptionsByTopicResponse":{"ListSubscriptionsByTopicResult":{
 			"Subscriptions":{"member":[
 				{"Endpoint":"https://mail.example.com/api/apps/messaging/webhooks/ses-bounces?api_key=dev-47&project_id=test-proj","SubscriptionArn":"arn:keep"},
+				{"Endpoint":"https://mail.example.com/api/apps/messaging/webhooks/ses-inbound?install_id=47","SubscriptionArn":"arn:inbound"},
 				{"Endpoint":"https://old.example.com/api/apps/messaging/webhooks/ses-inbound?api_key=other&project_id=test-proj","SubscriptionArn":"arn:other-install"}
 			]},"NextToken":"page-2"
 		}}
@@ -2875,12 +2886,12 @@ func TestCleanupStaleMessagingSNSSubscriptionsPaginatesAndScopes(t *testing.T) {
 		},
 	}
 	ctx := newTestCtx(t, plat)
-	expected := []string{"https://mail.example.com/api/apps/messaging/webhooks/ses-bounces?api_key=dev-47&project_id=test-proj"}
+	expected := []string{"https://mail.example.com/api/apps/messaging/webhooks/ses-bounces?api_key=dev-47&project_id=test-proj", "https://mail.example.com/api/apps/messaging/webhooks/ses-inbound?install_id=47"}
 	removed, err := cleanupStaleMessagingSNSSubscriptions(ctx, 3, "arn:topic", expected, "test-proj", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(removed) != 1 || !strings.Contains(removed[0], "old.example.com") {
+	if len(removed) != 2 || !strings.Contains(removed[0], "old.example.com") {
 		t.Fatalf("removed=%v", removed)
 	}
 	var listCalls, unsubscribeCalls []executeCall
@@ -2895,7 +2906,7 @@ func TestCleanupStaleMessagingSNSSubscriptionsPaginatesAndScopes(t *testing.T) {
 	if len(listCalls) != 2 || listCalls[1].Input["NextToken"] != "page-2" {
 		t.Fatalf("pagination calls=%+v", listCalls)
 	}
-	if len(unsubscribeCalls) != 1 || unsubscribeCalls[0].Input["SubscriptionArn"] != "arn:old" {
+	if len(unsubscribeCalls) != 2 || unsubscribeCalls[0].Input["SubscriptionArn"] != "arn:old" || unsubscribeCalls[1].Input["SubscriptionArn"] != "arn:other-project" {
 		t.Fatalf("unsubscribe calls=%+v", unsubscribeCalls)
 	}
 }
@@ -5059,6 +5070,7 @@ func TestTwilioStatusWebhook_VerifiesAppProxyPublicURL(t *testing.T) {
 func TestSESInbound_PersistsVerdicts(t *testing.T) {
 	plat := &stubPlatform{}
 	ctx := newTestCtx(t, plat)
+	preseedIdentity(t, ctx, identityUpsert{Kind: "email_domain", Address: "acme.com", Provider: "aws-ses", Verified: true})
 	app := &App{}
 
 	// SES Received notification with a verdicts block.
@@ -5067,6 +5079,7 @@ func TestSESInbound_PersistsVerdicts(t *testing.T) {
 		"content":          sampleEml,
 		"mail":             map[string]any{"messageId": "ses-verdicts"},
 		"receipt": map[string]any{
+			"recipients":   []string{"support+t-1234@acme.com"},
 			"spamVerdict":  map[string]any{"status": "PASS"},
 			"virusVerdict": map[string]any{"status": "PASS"},
 			"dkimVerdict":  map[string]any{"status": "FAIL"},

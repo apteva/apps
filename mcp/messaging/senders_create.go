@@ -2103,7 +2103,7 @@ func bootstrapActivateRuleSet(ctx *sdk.AppCtx, connID int64, name string) error 
 
 func messagingWebhookURL(publicURL, webhookPath, projectID string, includeProjectID bool) string {
 	q := webhookRoutingQuery(globalCtx)
-	if includeProjectID && projectID != "" {
+	if includeProjectID && projectID != "" && webhookPath != "/webhooks/ses-inbound" {
 		q.Set("project_id", projectID)
 	}
 	return strings.TrimSuffix(publicURL, "/") + "/api/apps/messaging" + webhookPath + "?" + q.Encode()
@@ -2142,12 +2142,16 @@ func normaliseWebhookPublicURL(raw string) (string, error) {
 }
 
 func bootstrapSubscribeWebhook(ctx *sdk.AppCtx, connID int64, topicArn, endpoint string) (string, bool, error) {
+	snsSubscriptionMu.Lock()
+	defer snsSubscriptionMu.Unlock()
 	subscriptions, listErr := listSNSSubscriptions(ctx, connID, topicArn)
-	if listErr == nil {
-		for _, sub := range subscriptions {
-			if sub.Endpoint == endpoint {
-				return sub.SubscriptionARN, true, nil
-			}
+	if listErr != nil {
+		// Never create another subscription when inventory is unavailable.
+		return "", false, listErr
+	}
+	for _, sub := range subscriptions {
+		if sub.Endpoint == endpoint && sub.SubscriptionARN != "" && sub.SubscriptionARN != "Deleted" {
+			return sub.SubscriptionARN, true, nil
 		}
 	}
 	subRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "subscribe", map[string]any{
@@ -2171,18 +2175,39 @@ type snsSubscription struct {
 }
 
 func cleanupStaleMessagingSNSSubscriptions(ctx *sdk.AppCtx, connID int64, topicARN string, expected []string, projectID string, includeProjectID bool) ([]string, error) {
+	snsSubscriptionMu.Lock()
+	defer snsSubscriptionMu.Unlock()
 	subscriptions, err := listSNSSubscriptions(ctx, connID, topicARN)
 	if err != nil {
 		return nil, err
 	}
 	expectedSet := map[string]bool{}
+	confirmed := map[string]bool{}
 	for _, endpoint := range expected {
 		expectedSet[endpoint] = true
 	}
-	removed := []string{}
 	for _, sub := range subscriptions {
-		if sub.Endpoint == "" || sub.SubscriptionARN == "" || expectedSet[sub.Endpoint] ||
-			!isStaleMessagingWebhookEndpoint(sub.Endpoint, os.Getenv("APTEVA_APP_TOKEN"), projectID, includeProjectID) {
+		if expectedSet[sub.Endpoint] && confirmedSNSSubscription(sub.SubscriptionARN) {
+			confirmed[sub.Endpoint] = true
+		}
+	}
+	for endpoint := range expectedSet {
+		if !confirmed[endpoint] {
+			return nil, errors.New("canonical Messaging subscription is not confirmed; existing callbacks retained")
+		}
+	}
+	removed := []string{}
+	kept := map[string]string{}
+	for _, sub := range subscriptions {
+		if !confirmedSNSSubscription(sub.SubscriptionARN) {
+			continue
+		}
+		if expectedSet[sub.Endpoint] {
+			if arn := kept[sub.Endpoint]; arn == "" || arn == sub.SubscriptionARN {
+				kept[sub.Endpoint] = sub.SubscriptionARN
+				continue
+			}
+		} else if !ownedMessagingSubscription(sub.Endpoint, expected, os.Getenv("APTEVA_APP_TOKEN"), projectID, includeProjectID) {
 			continue
 		}
 		result, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "unsubscribe", map[string]any{"SubscriptionArn": sub.SubscriptionARN})
@@ -2213,7 +2238,11 @@ func listSNSSubscriptions(ctx *sdk.AppCtx, connID int64, topicARN string) ([]sns
 		if res == nil || !res.Success {
 			return nil, fmt.Errorf("list subscriptions non-2xx: %s", truncateResData(res))
 		}
-		all = append(all, parseSNSSubscriptions(res.Data)...)
+		subscriptions, err := parseSNSSubscriptions(res.Data)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, subscriptions...)
 		nextToken = parseSNSNextToken(res.Data)
 		if nextToken == "" {
 			return all, nil
@@ -2240,40 +2269,37 @@ func parseSNSNextToken(data []byte) string {
 	return ""
 }
 
-func isStaleMessagingWebhookEndpoint(endpoint, token, projectID string, includeProjectID bool) bool {
-	u, err := url.Parse(endpoint)
-	if err != nil || (u.Path != "/api/apps/messaging/webhooks/ses-bounces" && u.Path != "/api/apps/messaging/webhooks/ses-inbound") {
-		return false
-	}
-	query := u.Query()
-	if token == "" || query.Get("api_key") != token {
-		return false
-	}
-	return !includeProjectID || projectID == "" || query.Get("project_id") == projectID
-}
-
-func parseSNSSubscriptions(data []byte) []snsSubscription {
+func parseSNSSubscriptions(data []byte) ([]snsSubscription, error) {
 	var root any
 	out := []snsSubscription{}
 	if json.Unmarshal(data, &root) == nil {
+		if !hasSNSInventoryResult(root) {
+			return nil, errors.New("unrecognized SNS subscription inventory")
+		}
 		walkSNSSubscriptions(root, &out)
 	} else {
 		var envelope struct {
-			Members []struct {
-				Endpoint        string `xml:"Endpoint"`
-				SubscriptionARN string `xml:"SubscriptionArn"`
-			} `xml:"ListSubscriptionsByTopicResult>Subscriptions>member"`
+			XMLName xml.Name `xml:"ListSubscriptionsByTopicResponse"`
+			Result  *struct {
+				Members []struct {
+					Endpoint        string `xml:"Endpoint"`
+					SubscriptionARN string `xml:"SubscriptionArn"`
+				} `xml:"Subscriptions>member"`
+			} `xml:"ListSubscriptionsByTopicResult"`
 		}
-		if xml.Unmarshal(data, &envelope) != nil {
-			return nil
+		if xml.Unmarshal(data, &envelope) != nil || envelope.Result == nil {
+			return nil, errors.New("invalid SNS subscription inventory")
 		}
-		for _, member := range envelope.Members {
+		for _, member := range envelope.Result.Members {
 			out = append(out, snsSubscription{Endpoint: member.Endpoint, SubscriptionARN: member.SubscriptionARN})
 		}
 	}
 	seen := map[string]bool{}
 	unique := out[:0]
 	for _, sub := range out {
+		if sub.Endpoint == "" || sub.SubscriptionARN == "" {
+			return nil, errors.New("incomplete SNS subscription inventory")
+		}
 		key := sub.Endpoint + "\x00" + sub.SubscriptionARN
 		if key == "\x00" || seen[key] {
 			continue
@@ -2281,7 +2307,27 @@ func parseSNSSubscriptions(data []byte) []snsSubscription {
 		seen[key] = true
 		unique = append(unique, sub)
 	}
-	return unique
+	return unique, nil
+}
+
+func hasSNSInventoryResult(v any) bool {
+	switch node := v.(type) {
+	case map[string]any:
+		if result, ok := node["ListSubscriptionsByTopicResult"].(map[string]any); ok {
+			_, present := result["Subscriptions"]
+			return present
+		}
+		if node["_name"] == "ListSubscriptionsByTopicResult" {
+			_, present := node["Subscriptions"]
+			return present
+		}
+		for _, child := range node {
+			if hasSNSInventoryResult(child) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func walkSNSSubscriptions(value any, out *[]snsSubscription) {

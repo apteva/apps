@@ -89,7 +89,22 @@ func processInboundJob(ctx *sdk.AppCtx, pid string, id int64, force bool) error 
 		return err
 	}
 	if finishErr == nil {
-		emitMessagingEvent(ctx, pid, "message.processed", map[string]any{"id": id, "channel": "inbound"})
+		message, readErr := dbMessageGet(ctx.AppDB(), pid, id)
+		if readErr != nil {
+			return readErr
+		}
+		if message != nil && message.RouteStatus == "ok" && message.MatchedRecipient != "" {
+			payload := map[string]any{"id": id, "message_id": id, "channel": message.Channel, "direction": "in",
+				"route_status": "ok", "matched_recipient": message.MatchedRecipient, "receiving_identity": message.ReceivingIdentity,
+				"envelope_recipients": message.EnvelopeRecipients, "from": message.From,
+				"idempotency_key": fmt.Sprintf("messaging:%s:%d", pid, id), "attachment_count": messageAttachmentCount(message)}
+			if message.Channel == channelEmail {
+				payload["to"], payload["cc"] = []string{message.MatchedRecipient}, []string{}
+				payload["header_to"], payload["header_cc"] = message.To, message.CC
+			}
+			emitMessagingEvent(ctx, pid, "message.received", payload)
+			emitMessagingEvent(ctx, pid, "message.processed", payload)
+		}
 	}
 	return finishErr
 }
@@ -101,6 +116,9 @@ func runInboundJob(ctx *sdk.AppCtx, pid string, id int64, kind, source string) e
 	}
 	if m == nil {
 		return errors.New("message missing")
+	}
+	if eligible, err := ensureInboundEmailOwnership(ctx, pid, m); err != nil || !eligible {
+		return err
 	}
 	// STOP is applied on every attempt, including retries after a failed write.
 	if m.Channel != channelEmail && isStopKeyword(m.BodyText) {
@@ -119,8 +137,7 @@ func runInboundJob(ctx *sdk.AppCtx, pid string, id int64, kind, source string) e
 	var verdicts map[string]string
 	_ = json.Unmarshal(m.Verdicts, &verdicts)
 	if verdicts["virus"] == "FAIL" {
-		_, err := ctx.AppDB().Exec(`UPDATE messages SET route_status='quarantined',route_error='SES virus verdict failed' WHERE id=? AND project_id=?`, id, pid)
-		return err
+		return quarantineInbound(ctx, pid, id, "SES virus verdict failed")
 	}
 	var inputs []providerAttachment
 	switch kind {

@@ -92,6 +92,18 @@ func gmailProfile(ctx *sdk.AppCtx, connectionID int64) (string, string, error) {
 	return strings.ToLower(profile.EmailAddress), profile.HistoryID, nil
 }
 
+func gmailMailboxRecipients(ctx *sdk.AppCtx, pid string, connectionID int64) ([]string, error) {
+	var mailbox string
+	err := ctx.AppDB().QueryRow(`SELECT mailbox FROM gmail_sync_state WHERE project_id=? AND connection_id=?`, pid, connectionID).Scan(&mailbox)
+	if err == sql.ErrNoRows {
+		mailbox, _, err = gmailProfile(ctx, connectionID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return canonicalSMTPRecipients([]string{mailbox})
+}
+
 func (a *App) syncGmailMailbox(ctx *sdk.AppCtx, pid string, connectionID int64) error {
 	var cursor, mailbox string
 	err := ctx.AppDB().QueryRow(`SELECT history_id,mailbox FROM gmail_sync_state WHERE project_id=? AND connection_id=?`, pid, connectionID).Scan(&cursor, &mailbox)
@@ -242,22 +254,17 @@ func (a *App) ingestGmailMessage(ctx *sdk.AppCtx, pid string, connectionID int64
 	if err != nil {
 		return err
 	}
-	addresses := normaliseEmailListPlain(append(append([]string{}, parsed.To...), parsed.Cc...))
-	if delivered := parsed.Headers["Delivered-To"]; delivered != "" {
-		addresses = append(addresses, normaliseEmailListPlain([]string{delivered})...)
+	// Gmail's authenticated mailbox is delivery evidence; sender-controlled
+	// To/Cc/Delivered-To headers are not. This also handles forwarded/BCC mail.
+	addresses, err := gmailMailboxRecipients(ctx, pid, connectionID)
+	if err != nil {
+		return err
 	}
-	matched := false
-	for _, address := range addresses {
-		var count int
-		if err := ctx.AppDB().QueryRow(`SELECT count(*) FROM senders WHERE project_id=? AND provider='gmail' AND provider_connection_id=? AND address=? AND deleted_at IS NULL`, pid, connectionID, strings.ToLower(address)).Scan(&count); err != nil {
-			return err
-		}
-		if count > 0 {
-			matched = true
-			break
-		}
+	owner, _, err := inboundEmailOwnership(ctx, addresses, "gmail", connectionID)
+	if err != nil && !errors.Is(err, errInboundOwnership) {
+		return err
 	}
-	if !matched {
+	if err != nil || owner != pid {
 		return nil
 	}
 	from := normaliseEmailFromHeader(parsed.From)

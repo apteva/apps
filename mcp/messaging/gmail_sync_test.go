@@ -157,3 +157,51 @@ func TestGmailTransportErrorKeepsOutcomePending(t *testing.T) {
 		t.Fatalf("ambiguous send result: %v", result)
 	}
 }
+
+func TestGmailForwardedMailUsesAuthenticatedMailboxNotVisibleRecipients(t *testing.T) {
+	platform := gmailTestPlatform()
+	ctx := newTestCtx(t, platform)
+	app := &App{}
+	if _, err := app.toolSendersCreate(ctx, map[string]any{"address": "support@example.com", "connection_id": int64(3)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbInboundRouteUpsert(ctx.AppDB(), "test-proj", "email", "*", "crm", "/inbound", 0); err != nil {
+		t.Fatal(err)
+	}
+	platform.replyByTool["get_raw_message"] = gmailTestReply(map[string]any{"raw": base64.RawURLEncoding.EncodeToString([]byte("From: customer@example.net\r\nTo: original@elsewhere.example\r\nDelivered-To: forged@elsewhere.example\r\n\r\nForwarded")), "labelIds": []string{"INBOX"}})
+	if err := app.ingestGmailMessage(ctx, "test-proj", 3, gmailMessageRef{ID: "gmail-forwarded"}); err != nil {
+		t.Fatal(err)
+	}
+	var identity, envelope string
+	if err := ctx.AppDB().QueryRow(`SELECT receiving_identity,envelope_recipients FROM messages WHERE provider_message_id='gmail-forwarded'`).Scan(&identity, &envelope); err != nil || identity != "support@example.com" || envelope != `["support@example.com"]` {
+		t.Fatalf("Gmail delivery=%s %s %v", identity, envelope, err)
+	}
+	if len(platform.callAppCalls) != 1 || platform.callAppCalls[0].Input["receiving_identity"] != identity {
+		t.Fatalf("Gmail consumer=%+v", platform.callAppCalls)
+	}
+}
+
+func TestLegacyGmailJobCannotUseVisibleAliasToClaimAnotherProject(t *testing.T) {
+	platform := gmailTestPlatform()
+	ctx := newTestCtx(t, platform)
+	t.Setenv("APTEVA_PROJECT_ID", "")
+	preseedSender(t, ctx, senderUpsert{Channel: "email", Address: "support@example.com", Kind: "email_mailbox", Provider: "gmail", ProviderConnectionID: 3, Verified: true})
+	if _, err := dbUpsertSender(ctx.AppDB(), &senderUpsert{ProjectID: "other-project", Channel: "email", Address: "alias@other.example", Kind: "email_mailbox", Provider: "gmail", ProviderConnectionID: 3, Verified: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbInboundRouteUpsert(ctx.AppDB(), "other-project", "email", "*", "crm", "/inbound", 0); err != nil {
+		t.Fatal(err)
+	}
+	res, err := persistInbound(ctx, "other-project", "email", nil, `INSERT INTO messages(project_id,channel,direction,from_addr,to_addrs,envelope_recipients,provider_slug,provider_connection_id,status,route_status) VALUES('other-project','email','in','customer@example.net','["alias@other.example"]','["alias@other.example"]','gmail',3,'received','pending')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := res.LastInsertId()
+	if err := processInboundJob(ctx, "other-project", id, false); err != nil {
+		t.Fatal(err)
+	}
+	m, err := dbMessageGet(ctx.AppDB(), "other-project", id)
+	if err != nil || m.RouteStatus != "quarantined" || len(platform.callAppCalls) != 0 {
+		t.Fatalf("legacy Gmail escaped quarantine: %+v %v", m, err)
+	}
+}

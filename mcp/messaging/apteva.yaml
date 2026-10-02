@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.13.55
+version: 0.13.56
 description: |
   Send and receive email through AWS SES or Gmail and SMS/WhatsApp through
   Twilio. Tracks
@@ -170,6 +170,8 @@ provides:
             minimum: 4
             maximum: 20
   workers:
+    - name: ses-inbound-subscriptions
+      schedule: "@every 5m"
     - name: messaging-recovery
       schedule: "@every 30s"
     - name: ses-verify-poller
