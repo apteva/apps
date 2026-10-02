@@ -4,7 +4,7 @@ import vm from "node:vm";
 
 function playback(rate:number) {
  const ctors:Record<string,any>={};
- const clock=vm.createContext({sampleRate:rate,currentTime:0,AudioWorkletProcessor:class{port={postMessage(){}}},registerProcessor(n:string,c:any){ctors[n]=c;}});
+ const clock=vm.createContext({Float32Array,sampleRate:rate,currentTime:0,AudioWorkletProcessor:class{port={postMessage(){}}},registerProcessor(n:string,c:any){ctors[n]=c;}});
  vm.runInContext(readFileSync(new URL('./softphone-worklet.js',import.meta.url),'utf8'),clock);
  return {clock,p:new ctors['softphone-playback']({processorOptions:{}})};
 }
@@ -108,7 +108,7 @@ function worker() {
  vm.runInContext(readFileSync(new URL('./softphone-worker.js',import.meta.url),'utf8'),context);
  const command=(x:any)=>context.self.onmessage({data:x});
  command({type:'init',mediaURL:'ws://local',capturePort,playbackPort,contextRate:24000,audioClockMS:0,monotonicEpochMS:now});
- sockets[0].onopen();command({type:'microphone.ready',value:true});
+ sockets[0].onopen();received.length=0;command({type:'microphone.ready',value:true});
  const frame=(timestamp:number,sequence=1)=>capturePort.onmessage({data:{type:'capture',frame:new Float32Array(480).fill(.2),timestamp_ms:timestamp,sequence,sample_rate:24000}});
  return {context,command,frame,socket:sockets[0],messages,received,intervals,setNow:(n:number)=>{now=n;}};
 }
@@ -222,4 +222,34 @@ test('undersized download cannot accumulate seconds of playback even without a c
  w.intervals[0]();const stats=w.messages.findLast((m:any)=>m.type==='transport.stats').timing;
  expect(stats.drop_totals_ms.playback_delivery_excess).toBeGreaterThan(5000);
  expect(stats.clock_uncertainty_ms).toBe(null);
+});
+
+for(const rate of [24000,44100,48000]) {
+ test(`private coaching at ${rate}Hz plays during caller silence, caps backlog and preserves caller adaptation`,()=>{
+  const {clock,p}=playback(rate),out=new Float32Array(128);
+  p.handleMessage({type:'whisper',frame:new Float32Array(Math.round(rate/50)).fill(.4)});
+  p.process([],[[out]]);expect(out.every(v=>Math.abs(v-.2)<1e-6)).toBe(true);
+  expect(p.queued).toBe(0);expect(p.targetMs).toBe(60);expect(p.underruns).toBe(0);expect(p.playedSamples).toBe(0);
+  for(let n=0;n<1000;n++)p.handleMessage({type:'whisper',frame:new Float32Array(Math.round(rate/50)).fill(.8)});
+  expect(p.whisperQueued).toBeLessThanOrEqual(Math.round(rate*.12));expect(p.whisperDropped).toBeGreaterThan(0);
+  clock.currentTime=1;p.process([],[[out]]);expect(out.every(v=>v===0)).toBe(true);expect(p.whisperQueued).toBe(0);
+  expect(p.droppedSamples).toBe(0);expect(p.targetMs).toBe(60);
+ });
+ test(`private coaching at ${rate}Hz never clips or contaminates caller crossfade`,()=>{
+  const {p}=playback(rate),out=new Float32Array(128);
+  for(let i=0;i<3;i++)p.handleMessage({frame:new Float32Array(Math.round(rate/50)).fill(.9)});
+  p.handleMessage({type:'whisper',frame:new Float32Array(Math.round(rate/50)).fill(.8)});
+  p.process([],[[out]]);expect(out.every(v=>v<=1&&v>=.9)).toBe(true);
+  expect(Array.from(p.lastOutputTail.slice(-Math.min(128,p.lastOutputTail.length))).every((v:number)=>Math.abs(v-.9)<1e-6)).toBe(true);
+  p.handleMessage({type:'whisper.clear'});p.process([],[[out]]);
+  expect(out.every(v=>Math.abs(v-.9)<1e-6)).toBe(true);expect(p.whisperQueued).toBe(0);
+ });
+}
+test('worker isolates coaching epoch and resampler from caller playback and capture',()=>{
+ const w=worker();const f=(epoch:number)=>{const b=new ArrayBuffer(176),v=new DataView(b);v.setUint32(0,0x31575041,true);v.setUint32(4,epoch,true);v.setFloat64(8,10000,true);new Uint8Array(b,16).fill(0xaf);return b;};
+ const deliver=(data:any)=>w.socket.onmessage({data});
+ deliver(JSON.stringify({type:'coach.state',talking:true,epoch:7}));deliver(f(6));expect(w.received.filter(x=>x.type==='whisper')).toHaveLength(0);
+ deliver(f(7));expect(w.received.filter(x=>x.type==='whisper')).toHaveLength(1);
+ const before=w.socket.sent.length;deliver(JSON.stringify({type:'coach.state',talking:false}));deliver(f(7));
+ expect(w.received.filter(x=>x.type==='whisper')).toHaveLength(1);expect(w.socket.sent.length).toBe(before);
 });

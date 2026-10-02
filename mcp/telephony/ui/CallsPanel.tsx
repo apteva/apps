@@ -26,6 +26,7 @@ interface NativePanelProps {
 }
 
 interface RawCall {
+  coachable?: boolean;
   listenable?: boolean;
   listen_supported?: boolean;
   ID?: string;
@@ -145,6 +146,7 @@ interface CarrierAudioDiagnostics {
 interface RingOffer {id:string;destination_id:string;name:string;kind:string;agent_id?:number;expires_at:string}
 
 interface Call {
+  coachable: boolean;
   listenable: boolean;
   ringOffers: RingOffer[];
   id: string;
@@ -252,6 +254,7 @@ function usePanelWidth() {
 function normalizeCall(row: RawCall): Call {
   return {
     listenable: row.listenable === true,
+    coachable: row.coachable === true,
     id: row.id ?? row.ID ?? "",
     threadId: row.thread_id ?? row.ThreadID ?? "",
     carrierSid: row.carrier_sid ?? row.CarrierSID ?? "",
@@ -1007,11 +1010,14 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
   const [callListener, setCallListener] = useState<HeadlessCallListener>();
   const [listenerState, setListenerState] = useState<ListenerSnapshot>({ state: "idle" });
   useEffect(() => {
-    const listener = telephony.createCallListener();
+    const listener = telephony.createCallListener({inputDeviceId:audioOptions.inputDeviceId});
     setCallListener(listener);
+    setListenerState(listener.getSnapshot());
     const unsubscribe = listener.subscribe(setListenerState);
     return () => { unsubscribe(); void listener.dispose(); };
-  }, [telephony]);
+  }, [telephony,audioOptions.inputDeviceId]);
+  useEffect(() => { if (!visible) callListener?.stopTalking(); },[visible,callListener]);
+  useEffect(() => { callListener?.stopTalking(); },[selectedId,callListener]);
   const softphoneCallId = phoneState.callId ?? "";
   const softphoneState = phoneState.audioState;
   const softphoneDetail = phoneState.detail ?? "";
@@ -1531,6 +1537,21 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                 </div>
                 {selected.listenable && listenerState.callId !== selected.id ? (
                   <button type="button" disabled={!callListener || Boolean(softphoneCallId)} onClick={() => void callListener?.listen(selected.id).catch(error => setStatus(String(error)))} className="h-8 px-3 rounded border border-border text-xs">Listen</button>
+                ) : null}
+                {selected.coachable && listenerState.callId !== selected.id ? (
+                  <button type="button" disabled={!callListener || Boolean(softphoneCallId)} onClick={() => void callListener?.coach(selected.id).catch(error => setStatus(String(error)))} className="h-8 px-3 rounded border border-border text-xs">Private coaching</button>
+                ) : null}
+                {listenerState.coaching && listenerState.state === "listening" && listenerState.callId === selected.id ? (
+                  <div className="text-xs">
+                    <button type="button" aria-pressed={listenerState.talking===true}
+                      onPointerDown={e => { if(e.button!==0)return; e.currentTarget.setPointerCapture(e.pointerId); void callListener?.startTalking().catch(error=>setStatus(String(error))); }}
+                      onPointerUp={()=>callListener?.stopTalking()} onPointerCancel={()=>callListener?.stopTalking()} onLostPointerCapture={()=>callListener?.stopTalking()}
+                      onKeyDown={e=>{if((e.key===" " || e.key==="Enter") && !e.repeat){e.preventDefault();void callListener?.startTalking().catch(error=>setStatus(String(error)));}}}
+                      onKeyUp={e=>{if(e.key===" " || e.key==="Enter"){e.preventDefault();callListener?.stopTalking();}}}
+                      onBlur={()=>callListener?.stopTalking()}
+                      className={`h-8 px-3 rounded border border-border touch-none ${listenerState.talking ? "bg-accent text-bg" : ""}`}>Hold to talk to adviser</button>
+                    <span className="ml-2">Only the adviser hears you. Use a headset.</span>
+                  </div>
                 ) : null}
                 {listenerState.callId ? (
                   <div className="text-xs"><span>{listenerState.state.replaceAll("_", " ")}</span><button type="button" onClick={() => void callListener?.stop()} className="ml-2 h-8 px-3 rounded border border-border">Stop listening</button><label className="ml-2">Volume <input aria-label="Listener volume" type="range" min="0" max="1" step="0.05" defaultValue="1" onChange={e => callListener?.setOutputVolume(Number(e.target.value))} /></label></div>

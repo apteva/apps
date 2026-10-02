@@ -37,22 +37,28 @@ type websocketWriteRequest struct {
 	complete chan error
 	enqueued time.Time
 	pcmBytes int
+	whisper  bool
+	valid    func() bool
 }
 
 // websocketWriterPump is the sole writer for a WebSocket connection. Data,
 // control, and close frames all pass through the same queue.
 type websocketWriterPump struct {
-	audioDropped atomic.Int64
-	audioMu      sync.Mutex
-	audioBytes   int
-	audioStats   liveAudioQueueSnapshot
-	conn         net.Conn
-	state        ws.State
-	requests     chan websocketWriteRequest
-	audio        chan websocketWriteRequest
-	stop         chan struct{}
-	done         chan struct{}
-	stopOnce     sync.Once
+	whisperDropped atomic.Int64
+	whisperSent    atomic.Int64
+	whisperMu      sync.Mutex
+	whisper        chan websocketWriteRequest
+	audioDropped   atomic.Int64
+	audioMu        sync.Mutex
+	audioBytes     int
+	audioStats     liveAudioQueueSnapshot
+	conn           net.Conn
+	state          ws.State
+	requests       chan websocketWriteRequest
+	audio          chan websocketWriteRequest
+	stop           chan struct{}
+	done           chan struct{}
+	stopOnce       sync.Once
 
 	enqueueMu sync.Mutex
 	stateMu   sync.Mutex
@@ -123,6 +129,7 @@ func newWebSocketWriterPump(conn net.Conn, state ws.State) *websocketWriterPump 
 		state:    state,
 		requests: make(chan websocketWriteRequest, websocketWriteQueueSize),
 		audio:    make(chan websocketWriteRequest, 128),
+		whisper:  make(chan websocketWriteRequest, 3),
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
 	}
@@ -140,12 +147,22 @@ func (p *websocketWriterPump) run() {
 			return
 		case request = <-p.requests:
 		default:
+			// Caller playback wins over optional coaching when both are queued.
 			select {
-			case <-p.stop:
-				return
-			case request = <-p.requests:
 			case request = <-p.audio:
+			default:
+				select {
+				case <-p.stop:
+					return
+				case request = <-p.requests:
+				case request = <-p.audio:
+				case request = <-p.whisper:
+				}
 			}
+		}
+		if request.whisper && (time.Since(request.enqueued) >= coachAudioMaxAge || request.valid == nil || !request.valid()) {
+			p.whisperDropped.Add(1)
+			continue
 		}
 		if request.pcmBytes > 0 {
 			p.audioMu.Lock()
@@ -201,6 +218,9 @@ func (p *websocketWriterPump) run() {
 			p.audioStats.LastWriteAt = time.Now().UTC().Format(time.RFC3339Nano)
 			p.audioMu.Unlock()
 		}
+		if request.whisper && err == nil {
+			p.whisperSent.Add(1)
+		}
 		if request.complete != nil {
 			request.complete <- err
 		}
@@ -218,19 +238,21 @@ const liveAudioMaxBytes = 24000 * 2 * 120 / 1000
 const liveAudioMaxAge = 250 * time.Millisecond
 
 type liveAudioQueueSnapshot struct {
-	QueuedMS         int    `json:"queued_ms"`
-	MaxQueuedMS      int    `json:"max_queued_ms"`
-	MaxResidenceMS   int64  `json:"max_residence_ms"`
-	MaxWriteMS       int64  `json:"max_write_ms"`
-	EnqueuedBytes    int64  `json:"enqueued_bytes"`
-	SentBytes        int64  `json:"sent_bytes"`
-	OverflowBytes    int64  `json:"overflow_bytes"`
-	SourceStaleBytes int64  `json:"source_stale_bytes"`
-	StaleBytes       int64  `json:"stale_bytes"`
-	FlushedBytes     int64  `json:"flushed_bytes"`
-	FailedBytes      int64  `json:"failed_bytes"`
-	WriteErrors      int64  `json:"write_errors"`
-	LastWriteAt      string `json:"last_write_at,omitempty"`
+	QueuedMS             int    `json:"queued_ms"`
+	MaxQueuedMS          int    `json:"max_queued_ms"`
+	MaxResidenceMS       int64  `json:"max_residence_ms"`
+	MaxWriteMS           int64  `json:"max_write_ms"`
+	EnqueuedBytes        int64  `json:"enqueued_bytes"`
+	WhisperSentFrames    int64  `json:"coaching_sent_frames"`
+	WhisperDroppedFrames int64  `json:"coaching_dropped_frames"`
+	SentBytes            int64  `json:"sent_bytes"`
+	OverflowBytes        int64  `json:"overflow_bytes"`
+	SourceStaleBytes     int64  `json:"source_stale_bytes"`
+	StaleBytes           int64  `json:"stale_bytes"`
+	FlushedBytes         int64  `json:"flushed_bytes"`
+	FailedBytes          int64  `json:"failed_bytes"`
+	WriteErrors          int64  `json:"write_errors"`
+	LastWriteAt          string `json:"last_write_at,omitempty"`
 }
 
 func (p *websocketWriterPump) audioSnapshot() liveAudioQueueSnapshot {
@@ -240,6 +262,8 @@ func (p *websocketWriterPump) audioSnapshot() liveAudioQueueSnapshot {
 	p.audioMu.Lock()
 	defer p.audioMu.Unlock()
 	s := p.audioStats
+	s.WhisperSentFrames = p.whisperSent.Load()
+	s.WhisperDroppedFrames = p.whisperDropped.Load()
 	s.QueuedMS = p.audioBytes * 1000 / 48000
 	return s
 }
@@ -514,4 +538,47 @@ func readWebSocketData(conn net.Conn, state ws.State, writer *websocketWriterPum
 func closeWebSocketProtocolError(writer *websocketWriterPump, reason string) error {
 	_ = writer.Write(ws.OpClose, ws.NewCloseFrameBody(ws.StatusProtocolError, reason))
 	return fmt.Errorf("websocket protocol error: %s", reason)
+}
+
+// Coaching has its own small, lower-priority queue; it cannot evict caller PCM.
+func (p *websocketWriterPump) queueWhisper(data []byte, valid func() bool) bool {
+	p.whisperMu.Lock()
+	defer p.whisperMu.Unlock()
+	select {
+	case <-p.done:
+		return false
+	case <-p.stop:
+		return false
+	default:
+	}
+	request := websocketWriteRequest{op: ws.OpBinary, payload: append([]byte(nil), data...), enqueued: time.Now(), timeout: liveAudioMaxAge, whisper: true, valid: valid}
+	select {
+	case p.whisper <- request:
+		return true
+	default:
+	}
+	select {
+	case <-p.whisper:
+		p.whisperDropped.Add(1)
+	default:
+	}
+	select {
+	case p.whisper <- request:
+		return true
+	default:
+		p.whisperDropped.Add(1)
+		return false
+	}
+}
+func (p *websocketWriterPump) clearWhisper() {
+	p.whisperMu.Lock()
+	defer p.whisperMu.Unlock()
+	for {
+		select {
+		case <-p.whisper:
+			p.whisperDropped.Add(1)
+		default:
+			return
+		}
+	}
 }

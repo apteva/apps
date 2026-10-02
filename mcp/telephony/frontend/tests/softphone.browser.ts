@@ -67,7 +67,7 @@ test("installed headless client talks through real Telephony with host-owned UI"
     const observer = await context.newPage();
     const observerErrors: string[] = [];
     observer.on("pageerror", error => observerErrors.push(error.message));
-    await observer.goto("/listener");
+    await observer.goto("/listener?strict");
     await observer.waitForFunction(() => typeof (window as any).loadListener === "function");
     await observer.evaluate(async () => {
       const w = window as any;
@@ -81,6 +81,51 @@ test("installed headless client talks through real Telephony with host-owned UI"
     expect(await observer.evaluate(() => (window as any).listenerDiagnostics.max_queue_ms)).toBeLessThanOrEqual(160);
     await observer.evaluate(() => (window as any).callListener.stop());
     expect(await observer.evaluate(() => (window as any).callListener.getSnapshot().state)).toBe("idle");
+    expect(observerErrors).toEqual([]);
+    // The general SDK module loader requires script-src blob:, as documented
+    // by the SDK. The strict page above tests bundled host integration separately.
+    await observer.goto('/listener');
+    await observer.waitForFunction(()=>typeof(window as any).loadListener==='function');
+    await observer.evaluate(async()=>{navigator.mediaDevices.getUserMedia=async()=>{throw new Error('Join requested a microphone');};await (window as any).loadListener();});
+    expect(await observer.evaluate(()=>typeof(window as any).client.createCallListener)).toBe('function');
+    // Real packaged headless client, capture, worker and adviser overlay.
+    await observer.evaluate(()=>{
+      const w=window as any;
+      w.micRequests=0;w.coachTracks=[];
+      navigator.mediaDevices.getUserMedia=async()=>{
+        w.micRequests++;
+        const ctx=new AudioContext(),tone=ctx.createOscillator(),dest=ctx.createMediaStreamDestination();
+        tone.frequency.value=1700;tone.connect(dest);tone.start();
+        w.coachContext=ctx;w.coachTone=tone;w.coachTracks.push(...dest.stream.getTracks());
+        return dest.stream;
+      };
+    });
+    await observer.click('#coach');await observer.evaluate(()=>(window as any).coachPromise);
+    expect(await observer.evaluate(()=>(window as any).micRequests)).toBe(0);
+    // Release during a delayed microphone permission prompt must stop late tracks.
+    await observer.evaluate(()=>{
+      const w=window as any;w.realMic=navigator.mediaDevices.getUserMedia;
+      navigator.mediaDevices.getUserMedia=()=>new Promise(resolve=>{w.resolveMic=resolve;});
+      w.cancelledTalk=w.callListener.startTalking();
+    });
+    await observer.evaluate(async()=>{
+      const w=window as any;w.callListener.stopTalking();const stream=await w.realMic();w.resolveMic(stream);await w.cancelledTalk;
+      w.lateTrackStopped=stream.getTracks().every((t:MediaStreamTrack)=>t.readyState==='ended');
+      await w.coachContext.close();navigator.mediaDevices.getUserMedia=w.realMic;
+    });
+    expect(await observer.evaluate(()=>(window as any).lateTrackStopped)).toBe(true);
+    await observer.locator('#talk').dispatchEvent('pointerdown');await observer.evaluate(()=>(window as any).talkPromise);
+    await expect.poll(()=>observer.evaluate(()=>(window as any).callListener.getSnapshot().talking)).toBe(true);
+    await expect.poll(()=>page.evaluate(()=>(window as any).diagnostics?.coachingPlayedMs),{timeout:15000}).toBeGreaterThan(100);
+    expect(await page.evaluate(()=>(window as any).diagnostics.coachingMaxQueueMs)).toBeLessThanOrEqual(120);
+    await observer.locator('#talk').dispatchEvent('pointerup');
+    expect(await observer.evaluate(()=>(window as any).callListener.getSnapshot().talking)).toBe(false);
+    expect(await observer.evaluate(()=>(window as any).coachTracks.every((t:MediaStreamTrack)=>t.readyState==='ended'))).toBe(true);
+    // Blur/background cannot leave the microphone active.
+    await observer.locator('#talk').dispatchEvent('pointerdown');await observer.evaluate(()=>(window as any).talkPromise);
+    await observer.evaluate(()=>window.dispatchEvent(new Event('blur')));
+    expect(await observer.evaluate(()=>(window as any).callListener.getSnapshot().talking)).toBe(false);
+    await observer.evaluate(async()=>{const w=window as any;await w.callListener.stop();await w.coachContext.close();});
     expect(observerErrors).toEqual([]);
     await observer.close();
     expect(await page.evaluate(() => (window as any).phone.getSnapshot().audioState)).toBe("live");

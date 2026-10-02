@@ -27,6 +27,9 @@ export interface Call {
   answerable?: boolean;
   listen_supported?: boolean;
   listenable?: boolean;
+  coach_supported?: boolean;
+  coachable?: boolean;
+  coach_unavailable_reason?: string;
   listen_unavailable_reason?: string;
   from_number: string;
   to_number: string;
@@ -52,6 +55,7 @@ export interface CallSession {
   media_url: string;
   session_token?: string;
   lease_seconds?: number;
+  coaching?: boolean;
 }
 export interface DialRequest {
   to: string;
@@ -246,9 +250,10 @@ export class TelephonyClient {
   createCallListener(options: CallListenerOptions = {}): HeadlessCallListener { return new HeadlessCallListener(this, options); }
 
   async listenSession(id: string): Promise<CallSession> { return this.session(await this.app.post(this.path(`/softphone/listen/${callID(id)}`), {}), id, "listen-media"); }
-  async renewListening(session: CallSession): Promise<void> { await this.app.post(this.path(`/softphone/listen-renew/${callID(session.call_id)}`), { session_token: session.session_token }); }
-  async stopListening(session: CallSession): Promise<void> { await this.app.post(this.path(`/softphone/listen-stop/${callID(session.call_id)}`), { session_token: session.session_token }); }
-  async listenerAudit(id: string): Promise<{ listeners: Array<{ id: string; principal: unknown; joined_at: string; left_at: string; reason: string; diagnostics: unknown }> }> { return this.app.get(this.path(`/softphone/listen-audit/${callID(id)}`)); }
+  async coachSession(id: string): Promise<CallSession> { const s=this.session(await this.app.post(this.path(`/softphone/coach/${callID(id)}`), {}),id,"listen-media"); if(s.coaching!==true) throw new Error("Invalid coaching session");return s; }
+  async renewListening(session: CallSession): Promise<void> { await this.app.post(this.path(`/softphone/${session.coaching ? "coach-renew" : "listen-renew"}/${callID(session.call_id)}`), { session_token: session.session_token }); }
+  async stopListening(session: CallSession): Promise<void> { await this.app.post(this.path(`/softphone/${session.coaching ? "coach-stop" : "listen-stop"}/${callID(session.call_id)}`), { session_token: session.session_token }); }
+  async listenerAudit(id: string): Promise<{ listeners: Array<{ id: string; principal: unknown; joined_at: string; left_at: string; reason: string; diagnostics: unknown; mode: "listen"|"coach" }>; coaching: Array<{id:string;listener_audit_id:string;principal:unknown;started_at:string;ended_at:string;reason:string}> }> { return this.app.get(this.path(`/softphone/listen-audit/${callID(id)}`)); }
 
   async renew(session: CallSession): Promise<void> {
     await this.app.post(this.path(`/softphone/renew/${callID(session.call_id)}`), { session_token: session.session_token });
