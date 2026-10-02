@@ -27,6 +27,7 @@ type recordingPlatform struct {
 	threadEvents           []capturedThreadEvent
 	trackedEvents          []sdk.AgentEventRequest
 	appCalls               []capturedAppCall
+	appEvents              []capturedAppEvent
 	spawns                 []sdk.ThreadSpawnRequest
 	realtimeSpawns         []sdk.RealtimeSpawnRequest
 	realtimeRenewals       []sdk.ThreadRef
@@ -63,6 +64,13 @@ type capturedAppCall struct {
 	App   string
 	Tool  string
 	Input map[string]any
+}
+
+type capturedAppEvent struct {
+	ProjectID string
+	EventID   string
+	Topic     string
+	Data      map[string]any
 }
 
 type capturedIntegrationCall struct {
@@ -192,6 +200,22 @@ func (p *recordingPlatform) RenewRealtimeAudioBridge(agentID int64, threadID str
 func (p *recordingPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
 	p.appCalls = append(p.appCalls, capturedAppCall{App: app, Tool: tool, Input: input})
 	return nil
+}
+
+func (p *recordingPlatform) PublishAppEvent(projectID, eventID, topic string, data any) error {
+	decoded, _ := json.Marshal(data)
+	var payload map[string]any
+	_ = json.Unmarshal(decoded, &payload)
+	p.appEvents = append(p.appEvents, capturedAppEvent{ProjectID: projectID, EventID: eventID, Topic: topic, Data: payload})
+	return nil
+}
+
+func (p *recordingPlatform) PutAppEventSubscription(s sdk.AppEventSubscription) error { return nil }
+
+func (p *recordingPlatform) DeleteAppEventSubscription(projectID, key string) error { return nil }
+
+func (p *recordingPlatform) ListAppEventSources(projectID string) ([]sdk.AppEventSource, error) {
+	return nil, nil
 }
 
 const testProject = "proj-1"

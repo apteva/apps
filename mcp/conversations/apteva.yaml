@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.24.31
+version: 0.24.32
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts). Inbox items are messages — an
@@ -66,6 +66,71 @@ config_schema:
     description: Comma-separated backend app install IDs. Empty denies all resolution. These apps must derive agent/thread from trusted caller context, never model arguments.
 
 provides:
+  publishes:
+    - name: conversation.message.created
+      description: A durable message was added to a Conversations transcript.
+      notification:
+        id: conversation-message-created
+        name: New conversation message
+        description: A new message was added to a conversation you follow.
+        audience: recipients
+        recipients_field: recipient_user_ids
+        title: "New message in {conversation_title}"
+        body: "{preview}"
+        link: "?chat={conversation_id}"
+        group_by: conversation_id
+        defaults: { in_app: true, tab: true, desktop: false, mobile: false }
+        filters:
+          - { field: conversation_id, label: Conversation ID }
+          - { field: agent_id, label: Agent ID }
+    - name: conversation.approval.created
+      description: An approval card was added to a Conversations transcript.
+      notification:
+        id: conversation-approval-created
+        name: Approval requested
+        description: An agent is waiting for an approval decision.
+        audience: recipients
+        recipients_field: recipient_user_ids
+        title: "Approval needed in {conversation_title}"
+        body: "{preview}"
+        link: "?chat={conversation_id}"
+        group_by: conversation_id
+        defaults: { in_app: true, tab: true, desktop: false, mobile: false }
+        filters:
+          - { field: conversation_id, label: Conversation ID }
+          - { field: agent_id, label: Agent ID }
+    - name: conversation.alert.created
+      description: An alert card was added to a Conversations transcript.
+      notification:
+        id: conversation-alert-created
+        name: Conversation alert
+        description: An agent raised an alert in a conversation you follow.
+        audience: recipients
+        recipients_field: recipient_user_ids
+        title: "Alert in {conversation_title}"
+        body: "{preview}"
+        link: "?chat={conversation_id}"
+        group_by: conversation_id
+        defaults: { in_app: true, tab: true, desktop: false, mobile: false }
+        filters:
+          - { field: conversation_id, label: Conversation ID }
+          - { field: agent_id, label: Agent ID }
+    - name: conversation.report.created
+      description: A report card was added to a Conversations transcript.
+      notification:
+        id: conversation-report-created
+        name: Conversation report
+        description: An agent filed a report in a conversation you follow.
+        audience: recipients
+        recipients_field: recipient_user_ids
+        title: "Report in {conversation_title}"
+        body: "{preview}"
+        link: "?chat={conversation_id}"
+        group_by: conversation_id
+        defaults: { in_app: true, tab: true, desktop: false, mobile: false }
+        filters:
+          - { field: conversation_id, label: Conversation ID }
+          - { field: agent_id, label: Agent ID }
   ui_surfaces:
     - id: conversations
       label: Conversations
@@ -189,7 +254,7 @@ provides:
 
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: conversations/v0.24.31, entry: mcp/conversations }
+  source: { repo: github.com/apteva/apps, ref: conversations/v0.24.32, entry: mcp/conversations }
   port: 8080
   health_check: /health
 
