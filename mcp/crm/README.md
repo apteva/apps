@@ -1,4 +1,11 @@
-# CRM v0.9.12
+# CRM v0.9.14
+
+Release `crm/v0.9.14`: HTML-only emails no longer inherit huge blank gaps from nested email layouts.
+The inbox also guards older inbound email display against repeated blank lines.
+`contacts_refresh_message_body` can explicitly normalize formatting when the stored body exactly matches
+CRM's former HTML conversion, and fill missing sender metadata from the verified Messaging original.
+Both options default off; dry runs default on. Existing content, audit metadata, and workflow state are preserved.
+All v0.9.13 inbound recipient ownership safeguards remain included.
 
 Apteva's contact, inbox, audience and opportunity sidecar. The supported dashboard
 is `ui/CrmPanel.tsx`, bundled as `CrmPanel.mjs`. `apteva.yaml` is embedded directly

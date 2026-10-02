@@ -6,6 +6,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { crmPanelInitialRoute, type InboxItem, type InboxResponse } from "./inbox";
 import { messageAddressLines, messageRecipientSummary, type MessageAddresses } from "./message_addresses";
+import { messageDisplayBody } from "./message_body";
 
 // Inlined SDK app-event subscription. Each app ships its own copy
 // because panels are bundled standalone and apps are independently
@@ -2169,7 +2170,7 @@ function ActivityRow({ activity, onReply, compact }: { activity: Activity; onRep
           ))}
         </dl>
       )}
-      {activity.body && <div className="text-sm text-text whitespace-pre-wrap">{activity.body}</div>}
+      {activity.body && <div className="text-sm text-text whitespace-pre-wrap">{messageDisplayBody(activity.kind, activity.body)}</div>}
       {activity.attachments && activity.attachments.length > 0 && (
         <ActivityAttachments attachments={activity.attachments} />
       )}
