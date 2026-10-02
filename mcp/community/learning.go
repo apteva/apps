@@ -235,6 +235,9 @@ func toolQuizSubmit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := syncCourseCompletion(ctx.AppDB(), quiz.LessonID, memberID); err != nil {
+		return nil, err
+	}
 	emit(ctx, "quiz.submitted", map[string]any{"lesson_id": quiz.LessonID, "member_id": memberID, "quiz_id": quiz.ID})
 	return attempt, nil
 }
@@ -251,10 +254,7 @@ func toolAssignmentSubmit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	body, err := mustStr(args, "body")
-	if err != nil {
-		return nil, err
-	}
+	body := strArg(args, "body", "")
 	assignment, err := loadAssignment(ctx.AppDB(), id)
 	if err != nil {
 		return nil, err
@@ -264,6 +264,11 @@ func toolAssignmentSubmit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	links, _ := stringArrayArg(args, "links")
 	files, _ := stringArrayArg(args, "files")
+	links = nonEmptyEvidence(links)
+	files = nonEmptyEvidence(files)
+	if strings.TrimSpace(body) == "" && len(links) == 0 && len(files) == 0 {
+		return nil, errors.New("a submission requires text, a link, or a file")
+	}
 	if len(links) > 20 || len(files) > 20 {
 		return nil, errors.New("an assignment may include at most 20 links and 20 files")
 	}
@@ -300,6 +305,16 @@ func toolAssignmentSubmit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	emit(ctx, "assignment.submitted", map[string]any{"lesson_id": assignment.LessonID, "member_id": memberID})
 	return submission, nil
+}
+
+func nonEmptyEvidence(values []string) []string {
+	out := []string{}
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func toolLearningStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
