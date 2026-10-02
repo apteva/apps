@@ -390,7 +390,7 @@ func (a *App) toolSendersSetDefault(ctx *sdk.AppCtx, args map[string]any) (any, 
 // toolSendersUpdate patches local-mutable fields on a sender row
 // (display_name, notes). No provider round-trip — pure DB write.
 // Mirror of the panel-side POST /senders/edit route, exposed via MCP
-// so agents can rename a sender ("Marco at Socialcast") without
+// so agents can rename a sender ("Example Team") without
 // going through the panel.
 func (a *App) toolSendersUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
