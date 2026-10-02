@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.9.12
+version: 0.9.13
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -110,7 +110,7 @@ provides:
     - name: contacts_refresh_message_body
       description: Preview or recover missing inbound email content from the original Messaging record while preserving the existing activity and conversation.
     - name: messaging_inbound_receive
-      description: Receive an inbound message and normalized attachment metadata dispatched by Messaging and attach it to CRM contact activity.
+      description: Receive inbound Messaging deliveries and normalized attachments; require a canonical receiving identity and ignore suppressed, unmatched, or foreign-project email deliveries before creating CRM data.
     - name: contacts_list_messageable
       description: List contacts with at least one non-suppressed, non-quarantined route for the requested email, SMS, or WhatsApp transport.
     - name: contacts_resolve_audience
@@ -484,7 +484,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: crm/v0.9.13
     entry: mcp/crm
   port: 8080
   health_check: /health

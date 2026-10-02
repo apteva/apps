@@ -13,7 +13,7 @@ const testInboundHTML = `<!DOCTYPE html><html><head><title>Hidden title</title><
 
 func TestInboundHTMLBodyRetryRepairsOnlyMissingContent(t *testing.T) {
 	ctx := newTestCtx(t)
-	body := inboundPayload{MessageID: 31898, Channel: channelEmail, From: "sender@example.test",
+	body := inboundPayload{MatchedRecipient: "inbox@example.test", MessageID: 31898, Channel: channelEmail, From: "sender@example.test",
 		Subject: "RE: Example", BodyText: " \r\n\t", BodyHTML: testInboundHTML, MessageIDHeader: "<original@example.test>"}
 	first, err := ingestInbound(ctx, "test-proj", body)
 	if err != nil {
@@ -92,7 +92,7 @@ func TestRefreshMessageBodyValidatesOriginalAndPreservesExistingData(t *testing.
 				"subject": "RE: Example", "body_html": testInboundHTML, "message_id_header": "<original@example.test>",
 			}}
 			ctx := newTestCtx(t, tk.WithPlatform(platform))
-			first, err := ingestInbound(ctx, "test-proj", inboundPayload{MessageID: 31414, Channel: channelEmail,
+			first, err := ingestInbound(ctx, "test-proj", inboundPayload{MatchedRecipient: "inbox@example.test", MessageID: 31414, Channel: channelEmail,
 				From: "sender@example.test", Subject: "RE: Example", MessageIDHeader: "<original@example.test>"})
 			if err != nil {
 				t.Fatal(err)

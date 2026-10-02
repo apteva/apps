@@ -156,7 +156,7 @@ func TestInboundActivityAndMessageCarryRoutingAttribution(t *testing.T) {
 	listID := out.(map[string]any)["list"].(*List).ID
 	rec.Reset()
 
-	if _, err := ingestInbound(ctx, "test-proj", inboundPayload{
+	if _, err := ingestInbound(ctx, "test-proj", inboundPayload{MatchedRecipient: "sales@example.test",
 		MessageID:       88001,
 		Channel:         channelEmail,
 		From:            "lead@example.test",

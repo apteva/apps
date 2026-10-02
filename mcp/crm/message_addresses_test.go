@@ -56,7 +56,7 @@ func TestInboxRecipientsUseLatestMessageNotContactOrThreadUnion(t *testing.T) {
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("inbox: %v %v", rows, err)
 	}
-	want := &MessageAddresses{From: "customer@example.test", To: []string{"original@example.test"}, ReceivedAt: "inbound-alias@example.test"}
+	want := &MessageAddresses{From: "customer@example.test", To: []string{"inbound-alias@example.test"}, ReceivedAt: "inbound-alias@example.test"}
 	if !reflect.DeepEqual(rows[0].LastMessageAddresses, want) {
 		t.Fatalf("inbox=%+v", rows[0].LastMessageAddresses)
 	}
