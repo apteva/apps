@@ -41,6 +41,22 @@ activity. Select a metric or exchange to inspect the underlying work.
 Connections are installation-wide; local agents, totals, and exchanges are
 project-scoped. Remote entries are labeled cached, and checks are timestamped.
 A successful discovery check does not assert that task execution works.
+
+## Local access organigram (v0.6.4)
+
+The **Access** view composes a project communication organigram. It shows which
+attached local agents may start work with one another and lets an operator edit
+target-owned rules for discovery, new work, one-way messages, and task
+continuation. The editor offers a compatibility default, all attached agents,
+a selected allowlist, or nobody. A missing local rule preserves the trusted
+project behavior from earlier releases; a saved rule opts that target into
+explicit access control. Existing accepted tasks can still finish after new
+work is revoked.
+
+Remote node connections continue to use their installation-wide discovery and
+invocation grants. Both local rules and remote grants are evaluated before
+delivery, and remote task inspection/cancellation also requires the current
+invocation grant.
 Connections start as "Not checked" each time the panel is opened. Failed checks
 keep the last cached directory available. Successful checks hide agents no
 longer advertised while preserving the routing records used by existing tasks.
@@ -70,6 +86,8 @@ Authenticated operator endpoints added or expanded:
 GET   /overview?project_id=...
 GET   /network?project_id=...
 GET   /network/card?project_id=...&address=a2a:...
+GET   /access?project_id=...
+PATCH /access?project_id=...  {"target_agent_id":42,"action":"invoke","mode":"selected","subject_ids":[41]}
 GET   /tasks?project_id=...&q=...&status=...&peer=...&agent_address=agent:41&from=YYYY-MM-DD&to=YYYY-MM-DD&limit=30&offset=0
 POST  /connections/{id}/check?project_id=...
 PATCH /connections/{id}?project_id=...  {"discover_agents":[],"invoke_agents":[]}

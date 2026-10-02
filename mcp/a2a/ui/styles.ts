@@ -689,6 +689,135 @@ export const styles = `
   align-items: center;
   gap: 12px;
 }
+.a2a .organigram {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.a2a .organigram-root {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid var(--a-accent);
+  border-radius: var(--radius-md, 4px);
+  padding: 9px 14px;
+  background: color-mix(in srgb, var(--a-accent) 7%, var(--a-card));
+}
+.a2a .organigram-root span,
+.a2a .organigram-node span:not(.avatar) {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.a2a .organigram-root small,
+.a2a .organigram-node small {
+  color: var(--a-muted);
+  font-size: 10px;
+  font-weight: 400;
+}
+.a2a .organigram-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 10px;
+  position: relative;
+  padding-top: 18px;
+}
+.a2a .organigram-grid:before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 10%;
+  right: 10%;
+  border-top: 1px solid var(--a-border);
+}
+.a2a .organigram-node {
+  color: inherit;
+  text-align: left;
+  padding: 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.a2a .organigram-node:hover,
+.a2a .organigram-node.selected {
+  border-color: var(--a-accent);
+}
+.a2a .org-relations {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  border-top: 1px solid var(--a-border);
+  padding-top: 8px;
+}
+.a2a .org-relations > small {
+  text-transform: uppercase;
+  letter-spacing: .35px;
+  font-size: 9px;
+}
+.a2a .access-editor {
+  align-items: flex-end;
+}
+.a2a .access-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 200px;
+  flex: 1;
+}
+.a2a .access-field > span {
+  color: var(--a-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .35px;
+}
+.a2a .access-modes {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+.a2a .access-mode {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+  padding: 10px;
+  border: 1px solid var(--a-border);
+  border-radius: var(--radius-sm, 2px);
+  color: inherit;
+  background: var(--a-card);
+}
+.a2a .access-mode:hover,
+.a2a .access-mode.selected {
+  border-color: var(--a-accent);
+  background: color-mix(in srgb, var(--a-accent) 7%, var(--a-card));
+}
+.a2a .access-mode small {
+  color: var(--a-muted);
+  font-size: 10px;
+}
+.a2a .access-subjects {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 7px;
+}
+.a2a .access-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px;
+  border: 1px solid var(--a-border);
+  border-radius: var(--radius-sm, 2px);
+}
+.a2a .access-check span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.a2a .access-check small {
+  color: var(--a-muted);
+  font-size: 10px;
+}
 .a2a .spin {
   animation: a2a-spin 1s linear infinite;
 }
@@ -759,6 +888,12 @@ export const styles = `
   .a2a .map-peer:before {
     left: -15px;
     width: 15px;
+  }
+  .a2a .access-modes {
+    grid-template-columns: 1fr 1fr;
+  }
+  .a2a .organigram-grid {
+    grid-template-columns: 1fr;
   }
   .a2a .sheet {
     padding: 20px;

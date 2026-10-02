@@ -82,6 +82,17 @@ test("overview, directory, network map and connections navigate without losing s
   expect(container.textContent).toContain("Recent exchanges");
 });
 
+test("access view presents an organigram and target access editor", async () => {
+  await render();
+  await click("Access");
+  expect(container.textContent).toContain("Communication organigram");
+  expect(container.textContent).toContain("Can reach");
+  expect(container.textContent).toContain("Edit target access");
+  expect(container.textContent).toContain("Compatibility default");
+  await click("Selected agents");
+  expect(container.textContent).toContain("Save access");
+});
+
 test("overdue exchanges are visible in the overview", async () => {
   const previous = (tasks[0] as any).overdue;
   (tasks[0] as any).overdue = true;

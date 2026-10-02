@@ -229,6 +229,31 @@ export function fixture(path: string) {
       node: { node_id: "node_studio", display_name: "Northstar studio" },
       warnings: [],
     };
+  if (u.pathname.endsWith("/access"))
+    return {
+      agents: agents
+        .filter((agent) => agent.kind === "local")
+        .map((agent) => ({
+          id: agent.id,
+          name: agent.name,
+          status: agent.status,
+          attached: true,
+        })),
+      policies: [],
+      edges: agents
+        .filter((from) => from.kind === "local")
+        .flatMap((from) =>
+          agents
+            .filter((to) => to.kind === "local" && to.id !== from.id)
+            .map((to) => ({
+              from_agent_id: from.id,
+              to_agent_id: to.id,
+              action: "invoke",
+              allowed: true,
+            })),
+        ),
+      default: "all_attached",
+    };
   if (u.pathname.endsWith("/connections")) return { connections };
   if (u.pathname.endsWith("/check"))
     return {

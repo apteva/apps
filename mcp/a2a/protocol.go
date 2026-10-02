@@ -318,6 +318,10 @@ func (a *App) handleAgentProtocol(w http.ResponseWriter, r *http.Request) {
 	case "tasks/get", "GetTask":
 		var params taskIDParams
 		_ = json.Unmarshal(request.Params, &params)
+		if !peerAllows(peer, "invoke", profile, agent) {
+			writeRPCError(w, request.ID, http.StatusForbidden, -32050, "peer may not inspect tasks for this agent")
+			return
+		}
 		task, getErr := getTaskByProtocolID(app.AppDB(), params.ID)
 		if getErr != nil || task == nil || task.PeerID != peer.ID || task.RemoteCardID != profile.CardID {
 			writeRPCError(w, request.ID, http.StatusNotFound, -32001, "task not found")
@@ -328,6 +332,10 @@ func (a *App) handleAgentProtocol(w http.ResponseWriter, r *http.Request) {
 	case "tasks/cancel", "CancelTask":
 		var params taskIDParams
 		_ = json.Unmarshal(request.Params, &params)
+		if !peerAllows(peer, "invoke", profile, agent) {
+			writeRPCError(w, request.ID, http.StatusForbidden, -32050, "peer may not cancel tasks for this agent")
+			return
+		}
 		task, getErr := getTaskByProtocolID(app.AppDB(), params.ID)
 		if getErr != nil || task == nil || task.PeerID != peer.ID || task.RemoteCardID != profile.CardID {
 			writeRPCError(w, request.ID, http.StatusNotFound, -32001, "task not found")

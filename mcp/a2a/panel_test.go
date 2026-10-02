@@ -76,6 +76,54 @@ func TestPanelLedgerFiltersAndProjectIsolation(t *testing.T) {
 	}
 }
 
+func TestLocalAccessOrganigramAndTargetPolicy(t *testing.T) {
+	app, platform := newTestEnv(t)
+	previous := globalCtx
+	globalCtx = app
+	t.Cleanup(func() { globalCtx = previous })
+	a := &App{}
+
+	get := func() map[string]any {
+		t.Helper()
+		w := httptest.NewRecorder()
+		a.handleAccess(w, httptest.NewRequest("GET", "/access?project_id="+testProject, nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("access GET: %d %s", w.Code, w.Body.String())
+		}
+		var data map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &data); err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+
+	initial := get()
+	if initial["default"] != "all_attached" || len(initial["edges"].([]any)) != 6 {
+		t.Fatalf("compatibility access = %+v", initial)
+	}
+	body := strings.NewReader(`{"target_agent_id":42,"action":"invoke","mode":"selected","subject_ids":[41]}`)
+	w := httptest.NewRecorder()
+	a.handleAccess(w, httptest.NewRequest("PATCH", "/access?project_id="+testProject, body))
+	if w.Code != http.StatusOK {
+		t.Fatalf("access PATCH: %d %s", w.Code, w.Body.String())
+	}
+	if allowed, err := localAccessAllowed(app, testProject, 41, 42, "invoke"); err != nil || !allowed {
+		t.Fatalf("selected caller should be allowed: %v %v", allowed, err)
+	}
+	if allowed, err := localAccessAllowed(app, testProject, 43, 42, "invoke"); err != nil || allowed {
+		t.Fatalf("unselected caller should be denied: %v %v", allowed, err)
+	}
+	if _, err := (&App{}).toolAsk(callerCtx(43, "blocked"), app, map[string]any{"to": "42", "message": "blocked"}); err == nil {
+		t.Fatal("denied local ask unexpectedly succeeded")
+	}
+	if _, err := (&App{}).toolAsk(callerCtx(41, "allowed"), app, map[string]any{"to": "42", "message": "allowed"}); err != nil {
+		t.Fatalf("allowed local ask failed: %v", err)
+	}
+	if len(platform.events) != 1 || platform.events[0].AgentID != 42 {
+		t.Fatalf("unexpected deliveries: %+v", platform.events)
+	}
+}
+
 func TestPanelAttentionIncludesDeliveryAndSyncRecovery(t *testing.T) {
 	app, _ := newTestEnv(t)
 	previous := globalCtx

@@ -29,7 +29,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: a2a
 display_name: Agent to Agent
-version: 0.6.3
+version: 0.6.4
 description: |
   Agent-to-agent communication within and between Apteva installations.
   Automatically generates Agent Cards for attached local agents, discovers
@@ -53,6 +53,7 @@ provides:
     - { prefix: /tasks }
     - { prefix: /overview }
     - { prefix: /network }
+    - { prefix: /access }
     - { prefix: /connections }
     - { prefix: /directory, no_auth: true }
     - { prefix: /agent-cards, no_auth: true }
@@ -90,7 +91,7 @@ provides:
         icon: arrow-left-right
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: a2a/v0.6.3, entry: mcp/a2a }
+  source: { repo: github.com/apteva/apps, ref: a2a/v0.6.4, entry: mcp/a2a }
   port: 8080
   health_check: /health
 db:
@@ -202,6 +203,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/overview", Handler: a.handleOverview},
 		{Pattern: "/network", Handler: a.handleNetwork},
 		{Pattern: "/network/card", Handler: a.handleNetworkCard},
+		{Pattern: "/access", Handler: a.handleAccess},
 		{Pattern: "/connections", Handler: a.handleConnections},
 		{Pattern: "/connections/", Handler: a.handleConnectionItem},
 		{Pattern: "/directory/agents", Handler: a.handleDirectory, NoAuth: true},
@@ -524,6 +526,14 @@ func (a *App) toolDiscover(ctx context.Context, app *sdk.AppCtx, args map[string
 				hidden++
 				continue
 			}
+			allowed, accessErr := localAccessAllowed(app, from.ProjectID, from.AgentID, peer.ID, "discover")
+			if accessErr != nil {
+				return nil, accessErr
+			}
+			if !allowed {
+				hidden++
+				continue
+			}
 			profile, profileErr := ensureAgentProfile(app.AppDB(), peer)
 			if profileErr != nil {
 				warnings = append(warnings, fmt.Sprintf("could not prepare card for %s: %v", peer.Name, profileErr))
@@ -682,6 +692,13 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 	if err != nil {
 		return nil, err
 	}
+	allowed, err := localAccessAllowed(app, from.ProjectID, from.AgentID, target.ID, "message")
+	if err != nil {
+		return nil, err
+	}
+	if !allowed {
+		return nil, fmt.Errorf("agent %d (%s) is not accepting one-way messages from %s", target.ID, target.Name, from.AgentName)
+	}
 	if err := checkLimits(app, from, target.ID, false); err != nil {
 		return nil, err
 	}
@@ -740,6 +757,13 @@ func (a *App) toolAsk(ctx context.Context, app *sdk.AppCtx, args map[string]any)
 	}
 	if !peerReachable(app, from, target.ID) {
 		return nil, fmt.Errorf("agent %d (%s) does not have Agent to Agent attached, so it can never reply to this request — use agent_send for a one-way message, or ask the operator to attach the app to that agent", target.ID, target.Name)
+	}
+	allowed, err := localAccessAllowed(app, from.ProjectID, from.AgentID, target.ID, "invoke")
+	if err != nil {
+		return nil, err
+	}
+	if !allowed {
+		return nil, fmt.Errorf("agent %d (%s) is not accepting new work from %s", target.ID, target.Name, from.AgentName)
 	}
 	if err := checkLimits(app, from, target.ID, true); err != nil {
 		return nil, err
@@ -817,6 +841,15 @@ func (a *App) sendFollowUp(ctx context.Context, app *sdk.AppCtx, from *callIdent
 	}
 	if err := checkLimits(app, from, toID, false); err != nil {
 		return nil, err
+	}
+	if task.Direction == "local" {
+		allowed, err := localAccessAllowed(app, from.ProjectID, from.AgentID, toID, "continue")
+		if err != nil {
+			return nil, err
+		}
+		if !allowed {
+			return nil, fmt.Errorf("agent %d is not accepting task follow-ups from %s", toID, from.AgentName)
+		}
 	}
 	statusAfter := task.Status
 	if from.AgentID == task.FromAgentID && task.Status == "input_required" {

@@ -20,6 +20,7 @@ import {
   Copy,
   ExternalLink,
   FileText,
+  GitBranch,
   Globe2,
   LayoutGrid,
   Link2,
@@ -45,7 +46,7 @@ interface Props {
   projectId: string;
   instanceId?: number;
 }
-type View = "Overview" | "Agents" | "Exchanges" | "Connections";
+type View = "Overview" | "Agents" | "Access" | "Exchanges" | "Connections";
 interface Task {
   id: number;
   kind: string;
@@ -127,6 +128,30 @@ interface NetworkData {
   node: { node_id: string; display_name: string };
   warnings?: string[];
 }
+interface AccessAgent {
+  id: number;
+  name: string;
+  status: string;
+  attached: boolean;
+}
+interface AccessPolicy {
+  target_agent_id: number;
+  action: string;
+  mode: "compatibility" | "all" | "selected" | "none";
+  subject_ids?: number[];
+}
+interface AccessEdge {
+  from_agent_id: number;
+  to_agent_id: number;
+  action: string;
+  allowed: boolean;
+}
+interface AccessData {
+  agents: AccessAgent[];
+  policies: AccessPolicy[];
+  edges: AccessEdge[];
+  default: string;
+}
 interface OverviewData {
   total: number;
   active: number;
@@ -169,6 +194,7 @@ const clearFilters: Filters = {
 const tabs = [
   { name: "Overview", icon: LayoutGrid },
   { name: "Agents", icon: Bot },
+  { name: "Access", icon: GitBranch },
   { name: "Exchanges", icon: MessageSquare },
   { name: "Connections", icon: Link2 },
 ] as const;
@@ -1171,6 +1197,201 @@ function ConnectionWizard({
   );
 }
 
+function AccessView({
+  project,
+  data,
+  reload,
+}: {
+  project: string;
+  data: AccessData | null;
+  reload: () => void;
+}) {
+  const agents = (data?.agents || []).filter((agent) => agent.attached);
+  const [targetID, setTargetID] = useState<number>(agents[0]?.id || 0);
+  const [action, setAction] = useState("invoke");
+  const [mode, setMode] = useState<AccessPolicy["mode"]>("compatibility");
+  const [selected, setSelected] = useState<number[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const policy = data?.policies.find(
+    (item) => item.target_agent_id === targetID && item.action === action,
+  );
+  useEffect(() => {
+    if (!agents.some((agent) => agent.id === targetID)) {
+      setTargetID(agents[0]?.id || 0);
+    }
+  }, [agents, targetID]);
+  useEffect(() => {
+    setMode(policy?.mode || "compatibility");
+    setSelected(policy?.subject_ids || []);
+  }, [policy?.mode, JSON.stringify(policy?.subject_ids || []), targetID, action]);
+  const name = (id: number) => agents.find((agent) => agent.id === id)?.name || `Agent ${id}`;
+  const save = async () => {
+    if (!targetID) return;
+    setSaving(true);
+    setError("");
+    try {
+      await request(project, "/access", {
+        method: "PATCH",
+        body: JSON.stringify({
+          target_agent_id: targetID,
+          action,
+          mode,
+          subject_ids: mode === "selected" ? selected : [],
+        }),
+      });
+      reload();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const edgeFor = (from: number, to: number) =>
+    data?.edges.find(
+      (edge) => edge.from_agent_id === from && edge.to_agent_id === to,
+    )?.allowed;
+  return (
+    <>
+      <div className="row between wrap">
+        <div>
+          <h2>Access map</h2>
+          <p className="subtitle">
+            Compose the communication organigram for this project. Rules answer
+            who may reach each target agent.
+          </p>
+        </div>
+        <span className="badge">
+          {agents.length} attached local agent{agents.length === 1 ? "" : "s"}
+        </span>
+      </div>
+      <section className="panel pad stack">
+        <div className="section-head row between" style={{ margin: "-12px -16px 0" }}>
+          <div>
+            <h2>Communication organigram</h2>
+            <p className="subtitle">
+              Arrows show allowed new work. Select a target below to edit its
+              access.
+            </p>
+          </div>
+          <GitBranch size={18} className="muted" />
+        </div>
+        {agents.length ? (
+          <div className="organigram">
+            <div className="organigram-root">
+              <Server size={17} />
+              <span>
+                <strong>Project communication</strong>
+                <small>Target-owned access rules</small>
+              </span>
+            </div>
+            <div className="organigram-grid">
+              {agents.map((agent) => {
+                const outgoing = agents.filter(
+                  (other) => other.id !== agent.id && edgeFor(agent.id, other.id),
+                );
+                const incoming = agents.filter(
+                  (other) => other.id !== agent.id && edgeFor(other.id, agent.id),
+                );
+                return (
+                  <button
+                    type="button"
+                    className={`panel organigram-node ${targetID === agent.id ? "selected" : ""}`}
+                    key={agent.id}
+                    onClick={() => setTargetID(agent.id)}
+                  >
+                    <div className="row">
+                      <span className="avatar"><Bot size={18} /></span>
+                      <span className="grow">
+                        <strong>{agent.name}</strong>
+                        <small className="muted">{agent.status || "unknown"}</small>
+                      </span>
+                      <ChevronRight size={14} className="muted" />
+                    </div>
+                    <div className="org-relations">
+                      <small>Can reach</small>
+                      <div className="chips">
+                        {outgoing.length ? outgoing.map((other) => (
+                          <span className="badge good" key={other.id}>{other.name}</span>
+                        )) : <span className="muted">Nobody</span>}
+                      </div>
+                      <small>Reachable from</small>
+                      <div className="chips">
+                        {incoming.length ? incoming.map((other) => (
+                          <span className="badge active" key={other.id}>{other.name}</span>
+                        )) : <span className="muted">Nobody</span>}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : (
+          <Empty title="No attached local agents">
+            Attach A2A to agents before composing the communication organigram.
+          </Empty>
+        )}
+      </section>
+      {agents.length > 0 && (
+        <section className="panel pad stack">
+          <div>
+            <h2>Edit target access</h2>
+            <p className="subtitle">
+              The target owns this decision. Existing tasks can still finish
+              after new work is revoked.
+            </p>
+          </div>
+          <div className="toolbar access-editor">
+            <label className="access-field">
+              <span>Target agent</span>
+              <select className="input" value={targetID} onChange={(event) => setTargetID(Number(event.target.value))}>
+                {agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}
+              </select>
+            </label>
+            <label className="access-field">
+              <span>Action</span>
+              <select className="input" value={action} onChange={(event) => setAction(event.target.value)}>
+                <option value="discover">Discover</option>
+                <option value="invoke">Start new work</option>
+                <option value="message">One-way message</option>
+                <option value="continue">Continue a task</option>
+              </select>
+            </label>
+          </div>
+          <div className="access-modes" role="group" aria-label="Access mode">
+            {([
+              ["compatibility", "Compatibility default", "All attached agents until you set a rule"],
+              ["all", "All attached agents", "Explicitly allow every attached agent"],
+              ["selected", "Selected agents", "Choose exactly who may use this action"],
+              ["none", "Nobody", "Close this action for the target"],
+            ] as const).map(([value, label, detail]) => (
+              <button type="button" className={`access-mode ${mode === value ? "selected" : ""}`} aria-pressed={mode === value} key={value} onClick={() => setMode(value)}>
+                <strong>{label}</strong><small>{detail}</small>
+              </button>
+            ))}
+          </div>
+          {mode === "selected" && (
+            <div className="access-subjects">
+              {agents.filter((agent) => agent.id !== targetID).map((agent) => (
+                <label className="access-check" key={agent.id}>
+                  <input type="checkbox" checked={selected.includes(agent.id)} onChange={(event) => setSelected((current) => event.target.checked ? [...new Set([...current, agent.id])] : current.filter((id) => id !== agent.id))} />
+                  <span><strong>{agent.name}</strong><small>{name(agent.id)} may use {action}</small></span>
+                </label>
+              ))}
+            </div>
+          )}
+          {error && <div className="notice"><AlertCircle size={15} />{error}</div>}
+          <div className="row between wrap">
+            <small className="muted">Current rule: {policy?.mode || "compatibility default"}</small>
+            <button type="button" className="btn primary" disabled={saving} onClick={save}>{saving ? "Saving…" : "Save access"}</button>
+          </div>
+        </section>
+      )}
+    </>
+  );
+}
+
 export default function A2APanel(props: Props) {
   return <Panel key={`${props.projectId}:${props.installId}`} {...props} />;
 }
@@ -1201,6 +1422,7 @@ function Panel({ projectId: project }: Props) {
     "/connections",
     revision,
   );
+  const access = useResource<AccessData>(project, "/access", revision);
   const overview = useResource<OverviewData>(project, "/overview", revision);
   const recent = useResource<TaskPage>(project, "/tasks?limit=5", revision);
   const attention = useResource<TaskPage>(
@@ -1388,6 +1610,9 @@ function Panel({ projectId: project }: Props) {
             message={`Connections: ${connections.error}`}
             retry={connections.reload}
           />
+        )}
+        {access.error && view === "Access" && (
+          <ErrorNotice message={`Access policy: ${access.error}`} retry={access.reload} />
         )}
         {network.data?.warnings?.map((w) => (
           <div className="notice" key={w}>
@@ -1775,6 +2000,9 @@ function Panel({ projectId: project }: Props) {
               </>
             )}
           </>
+        )}
+        {view === "Access" && (
+          access.loading && !access.data ? <Loading /> : <AccessView project={project} data={access.data} reload={access.reload} />
         )}
         {view === "Exchanges" && (
           <>
