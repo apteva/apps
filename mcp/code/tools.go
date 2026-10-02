@@ -184,6 +184,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "code_write_file",
 			Description: "Write or overwrite a file with full content. Best for new files or simple overwrites; use " +
+				"code_import_file for blob handles or binary payloads, not the content argument. Use " +
 				"code_apply_patch for large existing-file rewrites. Writes are saved directly to Code's working tree and do not create a Git commit or require a native checkpoint. " +
 				"For a simple new file, stop after this tool and verify with code_read_file/code_list_files. Args: slug, path, content.",
 			InputSchema: schemaObject(map[string]any{
@@ -547,6 +548,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	}
 	tools = append(tools, a.gitMCPTools()...)
 	tools = append(tools, a.zipImportTools()...)
+	tools = append(tools, a.fileImportTools()...)
 	tools = append(tools, a.nativeMCPTools()...)
 	tools = append(tools, a.executionTools()...)
 	return authenticatedTools(append(tools, a.autoSyncTools()...))

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.14.7
+version: 0.14.8
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -11,6 +11,8 @@ description: |
   ZIP import for repository initialization or overlay updates. Native
   repo issues track bugs, feature requests, tasks, comments, and code
   links for agents and humans.
+  v0.14.8 adds code_import_file for exact-byte single-file blob imports,
+  with create-only defaults, SHA-256-guarded overwrites, and no Git requirement.
   v0.14.7 clarifies that ordinary native working-tree edits do not require
   external Git commits or native checkpoints, and teaches agents to verify
   Git support before using Git mutation tools.
@@ -295,7 +297,9 @@ provides:
     - name: code_file_outline
       description: Return a compact outline of Markdown headings and common code declarations with line numbers.
     - name: code_write_file
-      description: Write or overwrite a file with full content; prefer code_apply_patch for large existing-file rewrites.
+      description: Write or overwrite a text file with full content; use code_import_file for blob handles or binary payloads and code_apply_patch for large existing-file rewrites.
+    - name: code_import_file
+      description: Import one file from a Core-rehydrated blob handle or base64, preserving exact bytes. Creates by default; overwrites require the destination SHA-256. No Git commit or checkpoint required.
     - name: code_apply_patch
       description: |
         Apply a unified diff or Codex-style patch across files, with dry_run preview support.
@@ -363,7 +367,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: code/v0.14.7
+    ref: code/v0.14.8
     entry: mcp/code
   port: 8080
   health_check: /health

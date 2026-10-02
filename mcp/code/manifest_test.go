@@ -24,8 +24,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Runtime.Source == nil || m.Runtime.Source.Ref != "code/v"+m.Version {
 		t.Fatalf("runtime source must point to code/v%s; installing another ref builds a different release", m.Version)
 	}
-	if len(m.Provides.MCPTools) != 72 {
-		t.Errorf("expected 72 MCP tools in manifest, got %d", len(m.Provides.MCPTools))
+	if len(m.Provides.MCPTools) != 73 {
+		t.Errorf("expected 73 MCP tools in manifest, got %d", len(m.Provides.MCPTools))
 	}
 	if len(m.Provides.UIComponents) != 3 {
 		t.Errorf("expected 3 UI components in manifest, got %d", len(m.Provides.UIComponents))
@@ -181,7 +181,7 @@ func TestMCPTools_EditingSurfaceComplete(t *testing.T) {
 		"repos_run_command", "repos_workspace_changes", "repos_workspace_apply", "repos_workspace_destroy",
 		"code_list_files", "code_glob", "code_grep",
 		"code_read_file", "code_read_excerpt", "code_file_outline",
-		"code_write_file", "code_apply_patch", "code_edit_file", "code_multi_edit",
+		"code_write_file", "code_import_file", "code_apply_patch", "code_edit_file", "code_multi_edit",
 		"code_rename_path", "code_delete_file",
 		"issues_list", "issues_search", "issues_get", "issues_create", "issues_update",
 		"issues_claim", "issues_release", "issues_comment", "issues_close", "issues_reopen", "issues_link_path",

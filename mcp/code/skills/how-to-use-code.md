@@ -9,6 +9,7 @@ triggers:
   - code_list_files
   - code_read_file
   - code_write_file
+  - code_import_file
   - code_edit_file
   - code_apply_patch
   - repos_run_command
@@ -60,6 +61,24 @@ failed import must be resolved before proceeding; do not report success from
 the preview alone.
 
 ## Read, edit, and review
+
+For a single uploaded/downloaded file, use `code_import_file` rather than
+`repos_import_zip`. Pass the file's `blobref://` reference directly through Core;
+Core rehydrates it into a binary envelope. The tool preserves exact bytes for
+text, images, and other binary files; it does not unpack archives. Supply the
+destination `path` explicitly, not a URL or a guessed upload path:
+
+```json
+{"slug":"hello-lab","path":"assets/logo.png","file":"blobref://<uploaded-file>","create_only":true}
+```
+
+Imports are create-only by default. To replace an existing file, obtain its
+current SHA-256 from Code's file metadata and supply `expected_sha256`, omitting
+`create_only` or setting it false. `create_only: true` always forbids overwrites.
+An outdated hash, unresolved handle, invalid envelope/base64, or size-limit
+failure leaves the destination unchanged. The result includes the file's size
+and SHA-256. Verify those against the source when available; a binary file is
+not verified by reading it as text. No commit or checkpoint is required.
 
 Inspect file names with `code_list_files` or `code_glob`, locate code with
 `code_grep`, then use `code_read_file`, `code_read_excerpt`, or

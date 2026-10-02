@@ -1,3 +1,23 @@
+# Apteva Code 0.14.8
+
+Adds `code_import_file` to import one text or binary file into an existing
+repository from a Core-rehydrated blob handle, binary envelope, or base64.
+Exact bytes are preserved, including empty files. The destination path is
+explicit; upload filenames are never used as paths.
+
+Imports are create-only by default. Overwrites require the current destination
+SHA-256; `create_only: true` always rejects an existing destination. Validation,
+size limits, path protection, project isolation, and conditional atomic writes
+keep failures non-destructive. Imports do not create Git commits or native
+checkpoints. The exported `/code` skill and tool descriptions document the flow.
+
+Unit and live MCP regression tests cover byte fidelity, empty files, malformed
+inputs, unresolved handles, stale hashes, limits, traversal/symlinks, project
+isolation, and concurrent creation. Manifest tests enforce the 73-tool surface
+and the matching `code/v0.14.8` runtime source pin.
+
+---
+
 # Apteva Code 0.14.7
 
 Clarifies the native-only editing flow in MCP tool descriptions and the `/code`

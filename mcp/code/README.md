@@ -1,5 +1,20 @@
 # Apteva Code
 
+## Single-file blob import — v0.14.8
+
+`code_import_file` imports exact bytes into an existing repository. Pass
+`slug`, destination `path`, and `file` as a `blobref://` handle through Core,
+a binary envelope, or base64. Unlike `repos_import_zip`, it writes just one
+file without archive extraction. New destinations are create-only by default;
+overwrites require the current `expected_sha256`. `create_only: true` always
+forbids overwrites. File size/import limits and the existing safe path, atomic
+write, repository lock, and project-isolation checks apply. Imports do not
+create Git commits or native checkpoints.
+
+```json
+{"slug":"demo","path":"assets/logo.png","file":"blobref://<uploaded-file>","create_only":true}
+```
+
 ## Agent skill
 
 Code declares `how-to-use-code` (`/code`) in `provides.skills`, with its playbook
@@ -7,7 +22,7 @@ at `skills/how-to-use-code.md`. It covers source import and editing, reviewed
 ZIPs/patches, workspace execution and apply-back, optional native revisions, and
 building applications with the published `@apteva/web-sdk`, including Auth,
 scoped app HTTP/MCP calls, CRM search/create/update and shared app frontend
-components. This exported skill ships in Code 0.14.7.
+components. The updated skill ships in Code 0.14.8, including single-file imports.
 
 The skill and MCP descriptions explicitly distinguish ordinary native working-
 tree edits from optional external Git commits and native checkpoints. Agents
