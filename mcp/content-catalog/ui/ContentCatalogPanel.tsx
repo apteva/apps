@@ -418,7 +418,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const lineageFilterKey = [assetQuery, assetKind, assetLength, assetLengthMin, lengthMaximum, assetSharing, assetDestination, assetSort, assetLineage].join("|");
   const openLinkedAsset = async (id: string) => {
     const linked = assets.find(asset => asset.id === id);
-    if (linked) { await openAsset(linked); return; }
+    if (linked && selectedSession?.id === linked.session_id) { await openAsset(linked); return; }
     try { const result = await get<{ asset: Asset }>(`/assets/${encodeURIComponent(id)}`); if (selectedSession?.id !== result.asset.session_id) { const parentSession = await get<{ session: Session }>(`/sessions/${result.asset.session_id}`); await showSession(parentSession.session, tab === "search" ? "search" : returnTab); } await openAsset(result.asset); } catch (err) { setError(errorText(err)); }
   };
 
