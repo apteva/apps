@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: community
 display_name: Community
-version: 0.14.3
+version: 0.14.4
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   each with spaces (feed/forum/chat/course), member directory, posts +
@@ -292,7 +292,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: community/v0.14.3
+    ref: community/v0.14.4
     entry: mcp/community
   port: 8080
   health_check: /health
