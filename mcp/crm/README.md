@@ -1,11 +1,11 @@
-# CRM v0.9.11
+# CRM v0.9.12
 
 Apteva's contact, inbox, audience and opportunity sidecar. The supported dashboard
 is `ui/CrmPanel.tsx`, bundled as `CrmPanel.mjs`. `apteva.yaml` is embedded directly
 into the binary and is the single manifest source. `MCPTools()` supplies the
 executable input contracts, checked against the manifest by tests.
 
-Inbox rows show the latest message's recorded destination. Individual messages
+Release `crm/v0.9.12`: inbox rows show the latest message's recorded destination. Individual messages
 show From, To, optional CC/BCC, and the receiving address when recorded. These
 are message-specific headers, not inferred contact addresses or a union of
 thread participants. Missing historical metadata is displayed as Unknown; no
