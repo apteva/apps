@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: graphql
 display_name: GraphQL
-version: 0.7.7
+version: 0.7.8
 description: |
   Standalone multi-API GraphQL and realtime runtime. Define multiple named
   endpoints with independent schemas, resolver bindings, environments,
@@ -113,7 +113,7 @@ provides:
     - name: graphql_deploy
       description: Promote an environment schema and resolver set to active.
     - name: graphql_logs
-      description: List recent GraphQL request logs.
+      description: List GraphQL request logs with server-side filters for slow, heavy, failed, or named operations.
   ui_panels:
     - slot: project.page
       label: GraphQL
@@ -124,7 +124,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: graphql/v0.7.7
+    ref: graphql/v0.7.8
     entry: mcp/graphql
   port: 8080
   health_check: /health

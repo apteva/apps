@@ -635,8 +635,12 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if path == "logs" && r.Method == http.MethodGet {
-		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		rows, err := publicLogs(a.ctx.AppReadDB(), storageProject(project, api.Slug), limit)
+		filter, filterErr := parseLogFiltersQuery(r.URL.Query())
+		if filterErr != nil {
+			writeJSONError(w, http.StatusBadRequest, filterErr.Error(), errorCode(filterErr))
+			return
+		}
+		rows, err := publicLogsFiltered(a.ctx.AppReadDB(), storageProject(project, api.Slug), filter)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error(), "storage_error")
 			return

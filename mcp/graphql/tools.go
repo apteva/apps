@@ -52,7 +52,26 @@ func graphqlTools(a *App) []sdk.Tool {
 		{Name: "graphql_resolver_set", Description: "Bind a typed GraphQL field to a source operation. Tables aggregate_pipeline runs one immutable, parameterized multi-table query.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "parent_type": stringType("GraphQL parent type"), "field_name": stringType("GraphQL field"), "source_id": map[string]any{"type": "integer"}, "source": stringType("Source name"), "operation": stringType("find, search, get, count, aggregate, aggregate_pipeline, function, request, or resolve"), "config": map[string]any{"type": "object"}}, "parent_type", "field_name", "operation"), HandlerCtx: a.toolResolverSet},
 		{Name: "graphql_resolver_list", Description: "List GraphQL resolver bindings for an API.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api}), HandlerCtx: a.toolResolverList},
 		{Name: "graphql_deploy", Description: "Promote a schema version to active in an environment.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "environment": environment, "version": map[string]any{"type": "integer"}}, "version"), HandlerCtx: a.toolSchemaPublish},
-		{Name: "graphql_logs", Description: "List recent GraphQL request logs.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "limit": map[string]any{"type": "integer"}}), HandlerCtx: a.toolLogs},
+		{Name: "graphql_logs", Description: "List GraphQL request logs with server-side filters for slow, heavy, failed, or named operations.", InputSchema: object(map[string]any{
+			"project_id":         project,
+			"api_slug":           api,
+			"limit":              map[string]any{"type": "integer", "description": "Maximum rows to return (1-500; default 100)."},
+			"min_duration_ms":    map[string]any{"type": "integer", "description": "Only requests at or above this total duration."},
+			"max_duration_ms":    map[string]any{"type": "integer", "description": "Only requests at or below this total duration."},
+			"min_response_bytes": map[string]any{"type": "integer", "description": "Only requests with at least this response size."},
+			"max_response_bytes": map[string]any{"type": "integer", "description": "Only requests with at most this response size."},
+			"min_rows":           map[string]any{"type": "integer", "description": "Only requests returning at least this many rows."},
+			"max_rows":           map[string]any{"type": "integer", "description": "Only requests returning at most this many rows."},
+			"min_resolvers":      map[string]any{"type": "integer", "description": "Only requests using at least this many resolvers."},
+			"max_resolvers":      map[string]any{"type": "integer", "description": "Only requests using at most this many resolvers."},
+			"status_code":        map[string]any{"type": "integer", "description": "Only requests with this HTTP status code."},
+			"operation_name":     stringType("Exact operation name to match."),
+			"operation_type":     map[string]any{"type": "string", "enum": []string{"query", "mutation", "subscription"}},
+			"since":              stringType("Only requests at or after this RFC3339 timestamp."),
+			"until":              stringType("Only requests at or before this RFC3339 timestamp."),
+			"sort_by":            map[string]any{"type": "string", "enum": []string{"created_at", "duration_ms", "response_bytes", "row_count", "resolver_count", "status_code", "operation_name"}, "description": "Sort field; duration_ms finds slow requests and response_bytes, row_count, or resolver_count find heavy requests."},
+			"sort_order":         map[string]any{"type": "string", "enum": []string{"asc", "desc"}},
+		}), HandlerCtx: a.toolLogs},
 		{Name: "graphql_event_publish", Description: "Publish a source event to connected GraphQL subscriptions for an API.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "topic": stringType("Event topic"), "payload": map[string]any{"type": "object"}}, "topic"), HandlerCtx: a.toolEventPublish},
 	}
 }
@@ -520,7 +539,11 @@ func (a *App) toolLogs(callCtx context.Context, ctx *sdk.AppCtx, args map[string
 	if err != nil {
 		return nil, err
 	}
-	rows, err := publicLogs(ctx.AppReadDB(), storageProject(project, apiSlugArg(args)), intArg(args, "limit", 100))
+	filter, err := parseLogFiltersArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := publicLogsFiltered(ctx.AppReadDB(), storageProject(project, apiSlugArg(args)), filter)
 	if err != nil {
 		return nil, err
 	}
