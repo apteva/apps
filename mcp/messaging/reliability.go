@@ -93,7 +93,14 @@ func processInboundJob(ctx *sdk.AppCtx, pid string, id int64, force bool) error 
 		if readErr != nil {
 			return readErr
 		}
-		if message != nil && message.RouteStatus == "ok" && message.MatchedRecipient != "" {
+		if message != nil && message.Direction == "out" && kind == "gmail-sent" && message.RouteStatus == "not_applicable" {
+			// Refresh Messaging without replaying a historical send into
+			// automations or pretending it was an inbound CRM delivery.
+			emitMessagingEvent(ctx, pid, "message.event", map[string]any{"id": id, "message_id": id,
+				"channel": message.Channel, "direction": "out", "status": message.Status,
+				"kind": "synced", "provider": "gmail", "attachment_count": messageAttachmentCount(message)})
+		}
+		if message != nil && message.Direction == "in" && message.RouteStatus == "ok" && message.MatchedRecipient != "" {
 			payload := map[string]any{"id": id, "message_id": id, "channel": message.Channel, "direction": "in",
 				"route_status": "ok", "matched_recipient": message.MatchedRecipient, "receiving_identity": message.ReceivingIdentity,
 				"envelope_recipients": message.EnvelopeRecipients, "from": message.From,
@@ -117,8 +124,24 @@ func runInboundJob(ctx *sdk.AppCtx, pid string, id int64, kind, source string) e
 	if m == nil {
 		return errors.New("message missing")
 	}
-	if eligible, err := ensureInboundEmailOwnership(ctx, pid, m); err != nil || !eligible {
-		return err
+	if kind == "gmail-sent" {
+		if m.Direction != "out" || m.ProviderSlug != "gmail" {
+			return errors.New("invalid Gmail sent import job")
+		}
+		if _, owned, err := gmailOwnedMailbox(ctx, pid, m.ProviderConnectionID); err != nil || !owned {
+			if err != nil {
+				return err
+			}
+			_, err = ctx.AppDB().Exec(`UPDATE messages SET route_status='quarantined',route_error='Gmail mailbox/project ownership mismatch' WHERE id=? AND project_id=?`, id, pid)
+			return err
+		}
+	} else {
+		if m.Direction != "in" {
+			return errors.New("outbound messages cannot enter inbound routing")
+		}
+		if eligible, err := ensureInboundEmailOwnership(ctx, pid, m); err != nil || !eligible {
+			return err
+		}
 	}
 	// STOP is applied on every attempt, including retries after a failed write.
 	if m.Channel != channelEmail && isStopKeyword(m.BodyText) {
@@ -141,7 +164,7 @@ func runInboundJob(ctx *sdk.AppCtx, pid string, id int64, kind, source string) e
 	}
 	var inputs []providerAttachment
 	switch kind {
-	case "email":
+	case "email", "gmail-sent":
 		if source != "{}" {
 			if err := json.Unmarshal([]byte(source), &inputs); err != nil {
 				return err
@@ -189,6 +212,10 @@ func runInboundJob(ctx *sdk.AppCtx, pid string, id int64, kind, source string) e
 	if err != nil {
 		return err
 	}
+	if kind == "gmail-sent" {
+		_, err = ctx.AppDB().Exec(`UPDATE messages SET route_status='not_applicable',route_error='' WHERE id=? AND project_id=?`, id, pid)
+		return err
+	}
 	return dispatchInbound(ctx, pid, m)
 }
 
@@ -216,7 +243,7 @@ func (a *App) retryMessagingWork(ctx *sdk.AppCtx) error {
 		return err
 	}
 	for _, j := range jobs {
-		if err := processInboundJob(ctx, j.pid, j.id, false); err != nil {
+		if err := processInboundJob(ctx.WithProject(j.pid), j.pid, j.id, false); err != nil {
 			ctx.Logger().Warn("inbound retry", "message_id", j.id, "err", err)
 		}
 	}
