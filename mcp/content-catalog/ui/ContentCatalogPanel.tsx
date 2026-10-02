@@ -183,16 +183,16 @@ function SessionAssetCard({ asset, projectId, duration, context = false, compact
     </div>
   </article>;
 }
-function AssetFamilyCard({ node, projectId, durations, filterKey, filtering, compact = false, onOpen }: { node: AssetFamily<Asset>; projectId: string; durations: Record<string, number>; filterKey: string; filtering: boolean; compact?: boolean; onOpen: (id: string) => void }) {
-  const [expanded, setExpanded] = useState(false);
-  useEffect(() => { setExpanded(filtering); }, [filterKey, filtering]);
+function AssetFamilyCard({ node, projectId, durations, filtering, onOpen, onDerived }: { node: AssetFamily<Asset>; projectId: string; durations: Record<string, number>; filtering: boolean; onOpen: (id: string) => void; onDerived: (id: string) => void }) {
   const matchingDerived = node.matchingCount - Number(node.matches);
-  return <div className="min-w-0 space-y-2" data-family-id={node.asset.id}>
-    <SessionAssetCard asset={node.asset} projectId={projectId} duration={durations[node.asset.id]} context={!node.matches} compact={compact} onOpen={onOpen} />
-    {node.children.length > 0 && <><button type="button" className="flex w-full items-center justify-between rounded-lg border border-border px-3 py-2 text-xs hover:border-accent/60" aria-expanded={expanded} aria-controls={`derived-${node.asset.id}`} onClick={() => setExpanded(value => !value)}><span>Derived assets · {filtering ? `${matchingDerived} matching` : node.derivedCount}</span><span aria-hidden="true">{expanded ? "−" : "+"}</span></button>
-      {expanded && <div id={`derived-${node.asset.id}`} className="space-y-3 border-l border-accent/30 pl-3" aria-label={`Derived assets of ${node.asset.name}`}>{node.children.map(child => <AssetFamilyCard key={child.asset.id} node={child} projectId={projectId} durations={durations} filterKey={filterKey} filtering={filtering} compact onOpen={onOpen} />)}</div>}
-    </>}
+  return <div className="min-w-0 flex flex-col gap-2" data-family-id={node.asset.id}>
+    <SessionAssetCard asset={node.asset} projectId={projectId} duration={durations[node.asset.id]} context={!node.matches} onOpen={onOpen} />
+    <button type="button" className="flex w-full items-center justify-between rounded-lg border border-border px-3 py-2 text-xs hover:border-accent/60 disabled:opacity-40" style={{ flexShrink: 0 }} aria-haspopup="dialog" disabled={!matchingDerived} onClick={() => onDerived(node.asset.id)}><span>{node.derivedCount ? `Derived assets · ${filtering ? `${matchingDerived} matching` : node.derivedCount}` : "No derived assets"}</span>{matchingDerived > 0 && <span aria-hidden="true">↗</span>}</button>
   </div>;
+}
+
+function matchingDescendants(node: AssetFamily<Asset>): AssetFamily<Asset>[] {
+  return node.children.flatMap(child => [...(child.matches ? [child] : []), ...matchingDescendants(child)]).sort((a, b) => a.rank - b.rank);
 }
 
 function AssetViewer({ asset, projectId }: { asset: Asset; projectId: string }) {
@@ -250,6 +250,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const [assetLineage, setAssetLineage] = useState("any");
   const [assetView, setAssetView] = useState<"grid" | "grouped">(() => { try { return localStorage.getItem("catalog-asset-view") === "grouped" ? "grouped" : "grid"; } catch { return "grid"; } });
   useEffect(() => { try { localStorage.setItem("catalog-asset-view", assetView); } catch {} }, [assetView]);
+  const [derivedFamilyId, setDerivedFamilyId] = useState<string | null>(null);
   const [assetDurations, setAssetDurations] = useState<Record<string, number>>({});
   const [durationsLoading, setDurationsLoading] = useState(false);
   const [durationsUnavailable, setDurationsUnavailable] = useState(0);
@@ -310,7 +311,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const openSession = useCallback(async (s: Session) => {
     const request = ++sessionRequest.current;
     ++durationRequest.current;
-    ++assetRequest.current; activeSessionId.current = s.id;
+    ++assetRequest.current; if (activeSessionId.current !== s.id) setDerivedFamilyId(null); activeSessionId.current = s.id;
     setSelectedSession(s); setSelectedAsset(null); setCandidates([]); setError("");
     setAssets([]); setAssetDurations({}); setDurationsUnavailable(0); setDurationsFailed(0); setDurationsError(""); setDurationsLoading(false);
     try { const result = await get<{ assets: Asset[]; gigs: GigLink[] }>(`/sessions/${s.id}`); if (request !== sessionRequest.current) return; setAssets(result.assets || []); setGigs(result.gigs || []); setAssetDurations(Object.fromEntries((result.assets || []).filter(a => a.duration_ms && a.duration_ms > 0).map(a => [a.id, a.duration_ms!]))); setDurationsFailed((result.assets || []).filter(a => ["video", "audio"].includes(assetMediaKind(a)) && a.media_error).length); setDurationsUnavailable((result.assets || []).filter(a => ["video", "audio"].includes(assetMediaKind(a)) && !a.media_error && !a.duration_ms).length); } catch (e) { if (request === sessionRequest.current) setError(errorText(e)); }
@@ -329,12 +330,12 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     url.searchParams.delete("catalog_session");
     window.history.replaceState(null, "", url);
     ++durationRequest.current; ++sessionRequest.current; ++assetRequest.current; activeSessionId.current = "";
-    setSelectedSession(null); setSelectedAsset(null); setModal(null); setTab(returnTab);
+    setDerivedFamilyId(null); setSelectedSession(null); setSelectedAsset(null); setModal(null); setTab(returnTab);
   }, [returnTab]);
   useEffect(() => {
     const syncFromURL = () => {
       const id = new URLSearchParams(window.location.search).get("catalog_session");
-      if (!id) { ++durationRequest.current; ++sessionRequest.current; ++assetRequest.current; activeSessionId.current = ""; setSelectedSession(null); setSelectedAsset(null); return; }
+      if (!id) { ++durationRequest.current; ++sessionRequest.current; ++assetRequest.current; activeSessionId.current = ""; setDerivedFamilyId(null); setSelectedSession(null); setSelectedAsset(null); return; }
       const session = sessions.find(s => s.id === id);
       if (session) { if (activeSessionId.current !== id) openSession(session); else setSelectedSession(session); }
     };
@@ -415,7 +416,8 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   });
 
   const families = buildAssetFamilies(assets, filteredAssets);
-  const lineageFilterKey = [assetQuery, assetKind, assetLength, assetLengthMin, lengthMaximum, assetSharing, assetDestination, assetSort, assetLineage].join("|");
+  const derivedFamily = families.find(node => node.asset.id === derivedFamilyId);
+  const derivedAssets = derivedFamily ? matchingDescendants(derivedFamily) : [];
   const openLinkedAsset = async (id: string) => {
     const linked = assets.find(asset => asset.id === id);
     if (linked && selectedSession?.id === linked.session_id) { await openAsset(linked); return; }
@@ -430,7 +432,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     <div className="flex flex-wrap gap-2">{["brands", "sessions", "assets", "publications", "hostings"].map(k => <span key={k} className="rounded border border-border px-3 py-1 text-sm"><strong>{overview[k] ?? 0}</strong> {k}</span>)}</div>
     {error && <div className="rounded border border-red-500/50 bg-red-500/10 p-3 text-sm text-red-400">{error}</div>}
     {notice && <div className="rounded border border-green-500/50 bg-green-500/10 p-3 text-sm">{notice}</div>}
-    <nav className="flex gap-1 border-b border-border">{(["sessions", "search", "brands"] as const).map(t => <button key={t} onClick={() => { const url = new URL(window.location.href); url.searchParams.delete("catalog_session"); window.history.replaceState(null, "", url); ++sessionRequest.current; ++durationRequest.current; activeSessionId.current = ""; closeAsset(); setSelectedSession(null); setModal(null); setTab(t); }} className={`px-3 py-2 text-sm capitalize ${tab === t ? "border-b-2 border-accent text-accent" : "text-text-muted"}`}>{t}</button>)}</nav>
+    <nav className="flex gap-1 border-b border-border">{(["sessions", "search", "brands"] as const).map(t => <button key={t} onClick={() => { const url = new URL(window.location.href); url.searchParams.delete("catalog_session"); window.history.replaceState(null, "", url); ++sessionRequest.current; ++durationRequest.current; activeSessionId.current = ""; closeAsset(); setDerivedFamilyId(null); setSelectedSession(null); setModal(null); setTab(t); }} className={`px-3 py-2 text-sm capitalize ${tab === t ? "border-b-2 border-accent text-accent" : "text-text-muted"}`}>{t}</button>)}</nav>
 
     {tab === "search" && <section className="space-y-4">
       <div><h2 className="text-lg font-semibold">Search Catalog</h2><p className="text-sm text-text-muted">Searches sessions and linked files. Storage folders are never scanned automatically.</p></div>
@@ -483,7 +485,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
         {assets.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">No files linked yet. Use Add file to upload into this session or link one from Storage.</p>}
         {assets.length > 0 && filteredAssets.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">{durationsLoading && assetLength !== "any" ? "Loading file lengths…" : "No files match these filters."}</p>}
         {assetView === "grid" ? <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12, alignItems: "stretch" }}>{filteredAssets.map(asset => <SessionAssetCard key={asset.id} asset={asset} projectId={projectId} duration={assetDurations[asset.id]} onOpen={openLinkedAsset} />)}</div>
-          : <><p className="text-xs text-text-muted">Grouped using recorded source links. Files with several sources appear once, under their first linked source in this session.{assetFiltersActive ? " Parent context stays visible for matching derivatives." : ""}</p><div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 16, alignItems: "start" }}>{families.map(node => <AssetFamilyCard key={node.asset.id} node={node} projectId={projectId} durations={assetDurations} filterKey={lineageFilterKey} filtering={assetFiltersActive} onOpen={openLinkedAsset} />)}</div></>}
+          : <><p className="text-xs text-text-muted">Grouped using recorded source links. Files with several sources appear once, under their first linked source in this session.{assetFiltersActive ? " Parent context stays visible for matching derivatives." : ""}</p><div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12, alignItems: "stretch" }}>{families.map(node => <AssetFamilyCard key={node.asset.id} node={node} projectId={projectId} durations={assetDurations} filtering={assetFiltersActive} onOpen={openLinkedAsset} onDerived={setDerivedFamilyId} />)}</div></>}
 
       </section>
       {assets.some(a => a.publications?.length) && <section className="rounded-xl border border-border p-4 space-y-2 text-sm"><h3 className="font-semibold">Posts for this session</h3>{Array.from(new Map(assets.flatMap(a => a.publications || []).map(p => [p.id, p])).values()).map(p => <div key={p.id} className="flex flex-wrap items-center gap-2 border-t border-border pt-2 text-xs"><PublicationIcons items={[p]} /><strong>{p.title || p.destination}</strong><span>{publicationLabel(p.status)}</span><span className="text-text-muted">{p.asset_ids?.length || 1} files</span>{p.external_url && <a href={p.external_url} target="_blank" rel="noreferrer" className="text-accent underline">View post</a>}<button type="button" className="ml-auto text-accent underline" onClick={() => { setEditingPublication(p); setSelectedAsset(null); setModal("publication"); }}>Edit post</button></div>)}</section>}
@@ -509,7 +511,19 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
       </div>
     </Modal>}
 
+    {derivedFamily && selectedSession && !selectedAsset && !modal && <Modal title={`Derived assets · ${derivedFamily.asset.name}`} wide onClose={() => setDerivedFamilyId(null)}>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2 text-sm">
+        <button type="button" className="text-accent underline" onClick={() => openLinkedAsset(derivedFamily.asset.id)}>Open original</button>
+        <span className="text-xs text-text-muted">{assetFiltersActive ? `${derivedAssets.length} matching of ${derivedFamily.derivedCount}` : derivedAssets.length} derived assets</span>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 220px), 1fr))", gap: 12, alignItems: "stretch" }} aria-label="Derived asset grid">
+        {derivedAssets.map(node => <SessionAssetCard key={node.asset.id} asset={node.asset} projectId={projectId} duration={assetDurations[node.asset.id]} onOpen={openLinkedAsset} />)}
+      </div>
+      {!derivedAssets.length && <p className="text-sm text-text-muted">No derived assets match the current filters.</p>}
+    </Modal>}
+
     {selectedAsset && !modal && <Modal title={selectedAsset.name} wide onClose={closeAsset}>
+      {derivedFamily && <button type="button" className="mb-3 text-sm text-accent underline" onClick={closeAsset}>← Derived assets</button>}
       {error && <p className="mb-3 rounded border border-red-500/50 p-3 text-sm text-red-400">{error}</p>}
       {notice && <p className="mb-3 rounded border border-green-500/50 p-3 text-sm">{notice}</p>}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 360px), 1fr))", gap: 20 }}>
