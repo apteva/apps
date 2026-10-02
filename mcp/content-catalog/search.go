@@ -357,6 +357,9 @@ func (a *App) searchAssets(db *sql.DB, o searchOptions, cursor searchCursor) (se
 	if err := loadAssetHostings(db, o.ProjectID, assetRefs); err != nil {
 		return page, err
 	}
+	if err := loadAssetSources(db, o.ProjectID, assetRefs); err != nil {
+		return page, err
+	}
 	for i := range page.Items {
 		h := &page.Items[i]
 		switch o.Availability {

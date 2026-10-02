@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { buildAssetFamilies, lineageBadge, type AssetFamily } from "./lineage";
 import { uploadResumable } from "../../storage/ui/uploadResumable";
 
 const API = "/api/apps/content-catalog";
@@ -6,9 +7,9 @@ type Brand = { id: string; slug: string; name: string; storage_root: string; hos
 type Session = { id: string; brand_id: string; title: string; session_date: string; status: string; notes: string };
 type Publication = { id: string; asset_id: string; asset_ids: string[]; title: string; destination: string; account_ref: string; audience: string; status: string; planned_at: string; actual_at: string; external_post_id: string; external_url: string; evidence_source: string; failure_details: string; legacy_target_id: string };
 type HostingSummary = { id: string; provider: string; connection_id: number; status: string; remote_id: string; last_checked_at: string };
-type Asset = { id: string; session_id: string; storage_install_id: number; storage_file_id: string; name: string; kind: string; content_type: string; size_bytes: number; review_status: string; media_status: string; media_rating: string; description?: string; description_source?: string; description_updated_at?: string; duration_ms?: number; media_error?: string; publications: Publication[]; hostings?: HostingSummary[] };
+type Asset = { id: string; session_id: string; storage_install_id: number; storage_file_id: string; name: string; kind: string; content_type: string; size_bytes: number; review_status: string; media_status: string; media_rating: string; description?: string; description_source?: string; description_updated_at?: string; duration_ms?: number; media_error?: string; publications: Publication[]; hostings?: HostingSummary[]; sources?: AssetSource[] };
 type Hosting = { id: string; provider: string; remote_id: string; status: string; embed_url: string; error: string };
-type AssetSource = { asset_id: string; relation: string; source_order: number; media_render_id: number };
+type AssetSource = { asset_id: string; relation: string; source_order: number; media_render_id: number; name?: string; session_id?: string; kind?: string; content_type?: string };
 type GigLink = { gigs_install_id: number; gig_id: number; role: string };
 type MediaDetails = { title?: string; description?: string; duration_ms?: number; width?: number; height?: number; audience_rating?: string; transcript_status?: string; probe_status?: string };
 type Host = { connection_id: number; provider: string; default: boolean };
@@ -153,6 +154,47 @@ function AssetCardPreview({ asset, projectId }: { asset: Asset; projectId: strin
   </div>;
 }
 
+function ParentLinks({ asset, projectId, onOpen, compact = false }: { asset: Asset; projectId: string; onOpen: (id: string) => void; compact?: boolean }) {
+  const sources = asset.sources || [];
+  return <div style={compact ? { height: 32, display: "flex", alignItems: "center", minWidth: 0, gap: 4 } : undefined} className={compact ? "" : "space-y-2"}>
+    {(compact ? sources.slice(0, 1) : sources).map(source => <button type="button" key={source.asset_id} className="flex items-center gap-2 text-xs text-accent min-w-0" style={compact ? { flex: 1 } : undefined} onClick={() => onOpen(source.asset_id)} title={`Open ${source.name || short(source.asset_id)} · ${source.relation}`} aria-label={`Open original: ${source.name || short(source.asset_id)}`}>
+      <img loading="lazy" src={previewURL(projectId, "assets", source.asset_id)} alt="" style={{ width: 30, height: 24, objectFit: "cover", borderRadius: 4, flexShrink: 0 }} />
+      <span className="truncate">{compact ? source.name || short(source.asset_id) : `Open original · ${source.name || short(source.asset_id)}`}</span>
+    </button>)}
+    {compact && sources.length > 1 && <button type="button" className="shrink-0 text-xs text-accent" title="View all sources" onClick={() => onOpen(asset.id)}>+{sources.length - 1}</button>}
+  </div>;
+}
+function SessionAssetCard({ asset, projectId, duration, context = false, compact = false, onOpen }: { asset: Asset; projectId: string; duration?: number; context?: boolean; compact?: boolean; onOpen: (id: string) => void }) {
+  return <article data-asset-id={asset.id} style={previewCardStyle} className="overflow-hidden rounded-xl border border-border text-sm">
+    <div style={{ display: "flex", flexDirection: compact ? "row" : "column", alignItems: compact ? "center" : undefined }}>
+      <button type="button" style={{ display: "block", width: compact ? 92 : "100%", flexShrink: 0, textAlign: "left" }} onClick={() => onOpen(asset.id)} aria-label={`Open asset: ${asset.name}`}>
+        <AssetCardPreview asset={asset} projectId={projectId} />
+      </button>
+      <div className="px-3 pt-2" style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>
+        <button type="button" className="font-medium truncate text-left hover:text-accent" style={{ height: 24, flexShrink: 0 }} title={asset.name} onClick={() => onOpen(asset.id)}>{asset.name}</button>
+        <div className="text-xs text-text-muted truncate" style={{ height: 20, flexShrink: 0 }} title={`${assetMediaKind(asset)} · #${asset.storage_file_id} · ${asset.review_status}`}>{assetMediaKind(asset)}{duration ? ` · ${durationLabel(duration)}` : ""} · #{asset.storage_file_id} · {asset.review_status}</div>
+        <div className="flex items-center gap-1.5 text-xs" style={{ height: 24, flexShrink: 0 }}><span className="rounded bg-accent/10 px-1.5 py-0.5 text-accent">{lineageBadge(asset)}</span>{context && <span className="text-text-muted" title="Shown to explain a matching derivative; this asset does not match the filters">Context</span>}</div>
+      </div>
+    </div>
+    <div className="px-3 pb-3" style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>
+      <ParentLinks asset={asset} projectId={projectId} onOpen={onOpen} compact />
+      <AssetDescription asset={asset} />
+      <div className="border-t border-border pt-2" style={{ marginTop: 8, flex: 1 }}><PublicationIcons items={asset.publications || []} /></div>
+    </div>
+  </article>;
+}
+function AssetFamilyCard({ node, projectId, durations, filterKey, filtering, compact = false, onOpen }: { node: AssetFamily<Asset>; projectId: string; durations: Record<string, number>; filterKey: string; filtering: boolean; compact?: boolean; onOpen: (id: string) => void }) {
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => { setExpanded(filtering); }, [filterKey, filtering]);
+  const matchingDerived = node.matchingCount - Number(node.matches);
+  return <div className="min-w-0 space-y-2" data-family-id={node.asset.id}>
+    <SessionAssetCard asset={node.asset} projectId={projectId} duration={durations[node.asset.id]} context={!node.matches} compact={compact} onOpen={onOpen} />
+    {node.children.length > 0 && <><button type="button" className="flex w-full items-center justify-between rounded-lg border border-border px-3 py-2 text-xs hover:border-accent/60" aria-expanded={expanded} aria-controls={`derived-${node.asset.id}`} onClick={() => setExpanded(value => !value)}><span>Derived assets · {filtering ? `${matchingDerived} matching` : node.derivedCount}</span><span aria-hidden="true">{expanded ? "−" : "+"}</span></button>
+      {expanded && <div id={`derived-${node.asset.id}`} className="space-y-3 border-l border-accent/30 pl-3" aria-label={`Derived assets of ${node.asset.name}`}>{node.children.map(child => <AssetFamilyCard key={child.asset.id} node={child} projectId={projectId} durations={durations} filterKey={filterKey} filtering={filtering} compact onOpen={onOpen} />)}</div>}
+    </>}
+  </div>;
+}
+
 function AssetViewer({ asset, projectId }: { asset: Asset; projectId: string }) {
   const src = storageContentURL(projectId, asset);
   const poster = previewURL(projectId, "assets", asset.id);
@@ -205,6 +247,9 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const [assetSharing, setAssetSharing] = useState("any");
   const [assetDestination, setAssetDestination] = useState("");
   const [assetSort, setAssetSort] = useState("newest");
+  const [assetLineage, setAssetLineage] = useState("any");
+  const [assetView, setAssetView] = useState<"grid" | "grouped">(() => { try { return localStorage.getItem("catalog-asset-view") === "grouped" ? "grouped" : "grid"; } catch { return "grid"; } });
+  useEffect(() => { try { localStorage.setItem("catalog-asset-view", assetView); } catch {} }, [assetView]);
   const [assetDurations, setAssetDurations] = useState<Record<string, number>>({});
   const [durationsLoading, setDurationsLoading] = useState(false);
   const [durationsUnavailable, setDurationsUnavailable] = useState(0);
@@ -276,7 +321,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     window.history.pushState(null, "", url);
     setReturnTab(origin); setTab("sessions");
     setModal(null);
-    setAssetQuery(""); setAssetKind("any"); setAssetLength("any"); setAssetLengthMin(0); setAssetLengthMax(null); setAssetSharing("any"); setAssetDestination(""); setAssetSort("newest");
+    setAssetQuery(""); setAssetKind("any"); setAssetLength("any"); setAssetLengthMin(0); setAssetLengthMax(null); setAssetSharing("any"); setAssetDestination(""); setAssetSort("newest"); setAssetLineage("any");
     await openSession(s);
   }, [openSession]);
   const backToSessions = useCallback(() => {
@@ -303,7 +348,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const openAsset = useCallback(async (asset: Asset) => {
     const request = ++assetRequest.current;
     setSelectedAsset(asset); setAssetLoading(true); setAssetMedia(null); setAssetSources([]); setHostings([]); setError(""); setNotice("");
-    try { const result = await get<{ asset: Asset; hostings: Hosting[]; sources: AssetSource[]; publications: Publication[]; media?: MediaDetails; media_error?: string }>(`/assets/${asset.id}`); if (request !== assetRequest.current) return; const loaded = { ...result.asset, publications: result.publications || [] }; setSelectedAsset(loaded); setHostings(result.hostings || []); setAssets(current => current.map(item => item.id === asset.id ? loaded : item)); setAssetSources(result.sources || []); setAssetMedia(result.media || null); if (result.media_error) setError(`Media unavailable: ${result.media_error}`); } catch (e) { if (request === assetRequest.current) setError(errorText(e)); } finally { if (request === assetRequest.current) setAssetLoading(false); }
+    try { const result = await get<{ asset: Asset; hostings: Hosting[]; sources: AssetSource[]; publications: Publication[]; media?: MediaDetails; media_error?: string }>(`/assets/${asset.id}`); if (request !== assetRequest.current) return; const loaded = { ...result.asset, sources: result.sources || result.asset.sources || [], publications: result.publications || [] }; setSelectedAsset(loaded); setHostings(result.hostings || []); setAssets(current => current.map(item => item.id === asset.id ? loaded : item)); setAssetSources(result.sources || []); setAssetMedia(result.media || null); if (result.media_error) setError(`Media unavailable: ${result.media_error}`); } catch (e) { if (request === assetRequest.current) setError(errorText(e)); } finally { if (request === assetRequest.current) setAssetLoading(false); }
   }, [get]);
   const closeAsset = useCallback(() => { ++assetRequest.current; setSelectedAsset(null); setAssetLoading(false); }, []);
   const brandName = (id: string) => brands.find(b => b.id === id)?.name || short(id);
@@ -334,22 +379,25 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const longestDurationSeconds = Math.max(1, ...Object.values(assetDurations).map(ms => Math.ceil(ms / 1000)));
   const lengthMaximum = assetLengthMax ?? longestDurationSeconds;
   const lengthSliderLimit = Math.max(longestDurationSeconds, assetLengthMin, lengthMaximum);
-  const activeAssetFilterCount = [assetKind !== "any", assetLength !== "any", assetSharing !== "any", !!assetDestination, assetSort !== "newest"].filter(Boolean).length;
+  const activeAssetFilterCount = [assetKind !== "any", assetLength !== "any", assetSharing !== "any", !!assetDestination, assetSort !== "newest", assetLineage !== "any"].filter(Boolean).length;
   const assetFiltersActive = !!assetQuery || activeAssetFilterCount > 0;
   const assetFilterSummary = [
+    assetLineage === "source" ? "Sources / no parent linked" : assetLineage === "derivative" ? "Derivatives" : "",
     assetKind !== "any" ? ({ video: "Videos", image: "Images", audio: "Audio", other: "Other files" } as Record<string, string>)[assetKind] : "",
     assetLength === "range" ? `${durationLabel(assetLengthMin * 1000)}–${durationLabel(lengthMaximum * 1000)}` : assetLength === "unknown" ? "Length unknown" : "",
     assetSharing !== "any" ? ({ none: "No post recorded", not_verified: "No verified live post", verified: "Verified live", reported: "Reported live", scheduled: "Scheduled or submitted", failed: "Failed" } as Record<string, string>)[assetSharing] : "",
     assetDestination,
     assetSort !== "newest" ? ({ name: "Name A–Z", shortest: "Shortest first", longest: "Longest first" } as Record<string, string>)[assetSort] : "",
   ].filter(Boolean).join(" · ");
-  const resetAssetFilters = (clearSearch = false) => { if (clearSearch) setAssetQuery(""); setAssetKind("any"); setAssetLength("any"); setAssetLengthMin(0); setAssetLengthMax(null); setAssetSharing("any"); setAssetDestination(""); setAssetSort("newest"); };
+  const resetAssetFilters = (clearSearch = false) => { if (clearSearch) setAssetQuery(""); setAssetKind("any"); setAssetLength("any"); setAssetLengthMin(0); setAssetLengthMax(null); setAssetSharing("any"); setAssetDestination(""); setAssetSort("newest"); setAssetLineage("any"); };
   const sharingCount = (state: string) => assets.filter(asset => {
     const posts = (asset.publications || []).filter(post => !assetDestination || post.destination.toLowerCase() === assetDestination.toLowerCase());
     return (!assetDestination || state !== "any" || posts.length > 0) && matchesSharing(posts, state);
   }).length;
   const filteredAssets = assets.filter(asset => {
     if (assetQuery && !`${asset.name} ${asset.storage_file_id} ${asset.description || ""}`.toLowerCase().includes(assetQuery.trim().toLowerCase())) return false;
+    if (assetLineage === "source" && asset.sources?.length) return false;
+    if (assetLineage === "derivative" && !asset.sources?.length) return false;
     if (assetKind !== "any" && assetMediaKind(asset) !== assetKind) return false;
     if (assetLength !== "any" && !["video", "audio"].includes(assetMediaKind(asset))) return false;
     if (assetLength !== "any" && (durationsLoading || !matchesDuration(assetDurations[asset.id], assetLength, assetLengthMin, lengthMaximum))) return false;
@@ -365,6 +413,14 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     }
     return 0;
   });
+
+  const families = buildAssetFamilies(assets, filteredAssets);
+  const lineageFilterKey = [assetQuery, assetKind, assetLength, assetLengthMin, lengthMaximum, assetSharing, assetDestination, assetSort, assetLineage].join("|");
+  const openLinkedAsset = async (id: string) => {
+    const linked = assets.find(asset => asset.id === id);
+    if (linked) { await openAsset(linked); return; }
+    try { const result = await get<{ asset: Asset }>(`/assets/${encodeURIComponent(id)}`); if (selectedSession?.id !== result.asset.session_id) { const parentSession = await get<{ session: Session }>(`/sessions/${result.asset.session_id}`); await showSession(parentSession.session, tab === "search" ? "search" : returnTab); } await openAsset(result.asset); } catch (err) { setError(errorText(err)); }
+  };
 
   return <div className="h-full overflow-y-auto bg-bg text-text p-5 space-y-5">
     <header className="flex flex-wrap justify-between gap-3 items-center">
@@ -395,7 +451,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
       <p className="text-xs text-text-muted">Ready to publish means approved and no active plan or observed post for the selected destination{searchAccount ? " and account" : ""}. Results reflect evidence recorded in Catalog.</p>
       {searchError && <p className="rounded border border-red-500/50 bg-red-500/10 p-3 text-sm text-red-400">{searchError}</p>}
       {searchLoading && <p className="text-sm text-text-muted">Searching…</p>}
-      {(searchType === "all" || searchType === "assets") && <div className="space-y-2"><h3 className="font-semibold">Files <span className="text-text-muted font-normal">{searchResults.assets.items.length}</span></h3>{searchResults.assets.items.length === 0 && !searchLoading && <p className="text-sm text-text-muted">No matching linked files.</p>}<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 12, alignItems: "stretch" }}>{searchResults.assets.items.map(hit => <button key={hit.id} type="button" style={previewCardStyle} className="overflow-hidden rounded-xl border border-border text-left hover:border-accent/60" onClick={() => openSearchAsset(hit).catch(e => setSearchError(errorText(e)))}><AssetCardPreview asset={hit} projectId={projectId} /><div className="p-3 text-sm" style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}><div className="truncate font-medium" style={{ height: 24, flexShrink: 0 }} title={hit.name}>{hit.name}</div><div className="text-xs text-text-muted truncate" style={{ height: 20, flexShrink: 0 }}>{hit.session_title} · {recordingDate(hit.session_date)}</div><div className="text-xs text-text-muted truncate" style={{ height: 20, flexShrink: 0 }}>{brandName(hit.brand_id)} · {hit.review_status} · {hit.is_derivative ? "derivative" : "source"}</div><AssetDescription asset={hit} /><div className="border-t border-border pt-2" style={{ marginTop: 8, flex: 1 }}><PublicationIcons items={hit.uses} /></div><p className="text-xs text-text-muted line-clamp-2" style={{ marginTop: 8 }}>{hit.match_reason}</p></div></button>)}</div>{searchResults.assets.next_cursor && <button disabled={searchLoading} className="text-sm text-accent underline" onClick={() => loadMore("assets", searchResults.assets.next_cursor!)}>More files</button>}</div>}
+      {(searchType === "all" || searchType === "assets") && <div className="space-y-2"><h3 className="font-semibold">Files <span className="text-text-muted font-normal">{searchResults.assets.items.length}</span></h3>{searchResults.assets.items.length === 0 && !searchLoading && <p className="text-sm text-text-muted">No matching linked files.</p>}<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 12, alignItems: "stretch" }}>{searchResults.assets.items.map(hit => <div key={hit.id} className="min-w-0 space-y-2"><SessionAssetCard asset={hit} projectId={projectId} duration={hit.duration_ms} onOpen={id => { const found = searchResults.assets.items.find(item => item.id === id); (found ? openSearchAsset(found) : openLinkedAsset(id)).catch(e => setSearchError(errorText(e))); }} /><div className="text-xs text-text-muted px-1"><p className="truncate">{hit.session_title} · {recordingDate(hit.session_date)} · {brandName(hit.brand_id)}</p><p className="line-clamp-2">{hit.match_reason}</p></div></div>)}</div>{searchResults.assets.next_cursor && <button disabled={searchLoading} className="text-sm text-accent underline" onClick={() => loadMore("assets", searchResults.assets.next_cursor!)}>More files</button>}</div>}
       {!assetSearchOnly && !searchDestination && (searchType === "all" || searchType === "sessions") && <div className="space-y-2"><h3 className="font-semibold">Sessions <span className="text-text-muted font-normal">{searchResults.sessions.items.length}</span></h3>{searchResults.sessions.items.length === 0 && !searchLoading && <p className="text-sm text-text-muted">No matching sessions.</p>}<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 12, alignItems: "stretch" }}>{searchResults.sessions.items.map(hit => <button key={hit.id} type="button" style={previewCardStyle} className="overflow-hidden rounded-xl border border-border text-left hover:border-accent/60" onClick={() => showSession(hit, "search")}><PreviewImage src={previewURL(projectId, "sessions", hit.id)} alt={`Preview of ${hit.title}`} fallback="▣" /><div className="p-3 text-sm" style={{ flex: 1 }}><div className="font-medium line-clamp-2" style={{ minHeight: 40 }}>{hit.title}</div><div className="mt-1 text-xs text-text-muted">{hit.brand_name} · {recordingDate(hit.session_date)} · {hit.asset_count} files</div></div></button>)}</div>{searchResults.sessions.next_cursor && <button disabled={searchLoading} className="text-sm text-accent underline" onClick={() => loadMore("sessions", searchResults.sessions.next_cursor!)}>More sessions</button>}</div>}
 
     </section>}
@@ -418,22 +474,17 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
       </div>
       <section className="space-y-3"><div className="flex items-center justify-between gap-3"><h3 className="text-lg font-semibold">Assets</h3><span className="text-xs text-text-muted">Showing {filteredAssets.length} of {assets.length} files</span></div>
         <div className="flex flex-wrap items-center gap-2" aria-label="Asset toolbar">
-          <input className={inputClass} style={{ flex: "1 1 180px", maxWidth: 360 }} type="search" value={assetQuery} onChange={e => setAssetQuery(e.target.value)} placeholder="Find file name or ID" aria-label="Find session file" />
+          <div className="inline-flex rounded-lg border border-border p-0.5" role="group" aria-label="Asset display">{([["grid", "Grid"], ["grouped", "Grouped by original"]] as const).map(([view, label]) => <button key={view} type="button" aria-pressed={assetView === view} className={`rounded px-2 py-1 text-xs ${assetView === view ? "bg-accent/15 text-accent" : "text-text-muted"}`} onClick={() => setAssetView(view)}>{label}</button>)}</div>
+          <input className={inputClass} style={{ flex: "1 1 180px", maxWidth: 360 }} type="search" value={assetQuery} onChange={e => setAssetQuery(e.target.value)} placeholder="Find name, ID or description" aria-label="Find session file" />
           <button type="button" aria-haspopup="dialog" className={`rounded border px-3 py-1.5 text-sm ${activeAssetFilterCount ? "border-accent text-accent" : "border-border"}`} onClick={() => setModal("filters")}>Filters{activeAssetFilterCount > 0 ? ` (${activeAssetFilterCount})` : ""}</button>
           {assetFilterSummary && <span className="truncate text-xs text-text-muted" style={{ flex: "1 1 120px", minWidth: 0 }} title={assetFilterSummary}>{assetFilterSummary}</span>}
           {assetFiltersActive && <button type="button" className="text-xs text-accent underline" onClick={() => resetAssetFilters(true)}>Clear filters</button>}
         </div>
         {assets.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">No files linked yet. Use Add file to upload into this session or link one from Storage.</p>}
         {assets.length > 0 && filteredAssets.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">{durationsLoading && assetLength !== "any" ? "Loading file lengths…" : "No files match these filters."}</p>}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12, alignItems: "stretch" }}>{filteredAssets.map(asset =>
-          <button key={asset.id} onClick={() => openAsset(asset)} style={previewCardStyle} className={`overflow-hidden rounded-xl border text-left text-sm transition-colors hover:border-accent/60 ${selectedAsset?.id === asset.id ? "border-accent" : "border-border"}`}>
-            <AssetCardPreview asset={asset} projectId={projectId} />
-            <div className="p-3" style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>
-              <div className="font-medium truncate" style={{ height: 24, flexShrink: 0 }} title={asset.name}>{asset.name}</div>
-              <div className="text-xs text-text-muted truncate" style={{ height: 20, flexShrink: 0 }}>{assetMediaKind(asset)}{assetDurations[asset.id] ? ` · ${durationLabel(assetDurations[asset.id])}` : ""} · #{asset.storage_file_id} · {asset.review_status}</div>
-              <AssetDescription asset={asset} /><div className="border-t border-border pt-2" style={{ marginTop: 8, flex: 1 }}><PublicationIcons items={asset.publications || []} /></div>
-            </div>
-          </button>)}</div>
+        {assetView === "grid" ? <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12, alignItems: "stretch" }}>{filteredAssets.map(asset => <SessionAssetCard key={asset.id} asset={asset} projectId={projectId} duration={assetDurations[asset.id]} onOpen={openLinkedAsset} />)}</div>
+          : <><p className="text-xs text-text-muted">Grouped using recorded source links. Files with several sources appear once, under their first linked source in this session.{assetFiltersActive ? " Parent context stays visible for matching derivatives." : ""}</p><div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 16, alignItems: "start" }}>{families.map(node => <AssetFamilyCard key={node.asset.id} node={node} projectId={projectId} durations={assetDurations} filterKey={lineageFilterKey} filtering={assetFiltersActive} onOpen={openLinkedAsset} />)}</div></>}
+
       </section>
       {assets.some(a => a.publications?.length) && <section className="rounded-xl border border-border p-4 space-y-2 text-sm"><h3 className="font-semibold">Posts for this session</h3>{Array.from(new Map(assets.flatMap(a => a.publications || []).map(p => [p.id, p])).values()).map(p => <div key={p.id} className="flex flex-wrap items-center gap-2 border-t border-border pt-2 text-xs"><PublicationIcons items={[p]} /><strong>{p.title || p.destination}</strong><span>{publicationLabel(p.status)}</span><span className="text-text-muted">{p.asset_ids?.length || 1} files</span>{p.external_url && <a href={p.external_url} target="_blank" rel="noreferrer" className="text-accent underline">View post</a>}<button type="button" className="ml-auto text-accent underline" onClick={() => { setEditingPublication(p); setSelectedAsset(null); setModal("publication"); }}>Edit post</button></div>)}</section>}
       <section className="rounded-xl border border-border p-4 space-y-2 text-sm"><h3 className="font-semibold">Session info</h3>{selectedSession.notes && <p className="text-text-muted">{selectedSession.notes}</p>}<p className="text-text-muted">Gigs: {gigs.length ? gigs.map(g => `#${g.gig_id}${g.role ? ` (${g.role})` : ""}`).join(", ") : "none linked"}</p></section>
@@ -445,6 +496,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
         <div className="flex flex-wrap gap-2" aria-label="Quick publication filters">{([[
             "any", "All files"], ["none", "No post recorded"], ["not_verified", "No verified live post"], ["verified", "Verified live"]] as const).map(([state, label]) => <button key={state} type="button" onClick={() => setAssetSharing(state)} className={`rounded-full border px-3 py-1 text-xs ${assetSharing === state ? "border-accent bg-accent/10 text-accent" : "border-border text-text-muted hover:text-text"}`}>{label} <strong>{sharingCount(state)}</strong></button>)}</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 12 }}>
+          <label className="block text-xs space-y-1"><span>Source links</span><select className={inputClass} value={assetLineage} onChange={e => setAssetLineage(e.target.value)} aria-label="Source links"><option value="any">All assets</option><option value="source">Sources / no parent linked</option><option value="derivative">Derivatives only</option></select></label>
           <label className="block text-xs space-y-1"><span>Content type</span><select className={inputClass} value={assetKind} onChange={e => setAssetKind(e.target.value)} aria-label="Content type"><option value="any">All content types</option><option value="video">Videos</option><option value="image">Images</option><option value="audio">Audio</option><option value="other">Other files</option></select></label>
           <label className="block text-xs space-y-1"><span>Publication status</span><select className={inputClass} value={assetSharing} onChange={e => setAssetSharing(e.target.value)} aria-label="Publication status"><option value="any">Any sharing status</option><option value="none">No post recorded</option><option value="not_verified">No verified live post</option><option value="verified">Verified live</option><option value="reported">Reported live, unverified</option><option value="scheduled">Scheduled or submitted</option><option value="failed">Failed</option></select></label>
           <label className="block text-xs space-y-1"><span>Platform</span><select className={inputClass} value={assetDestination} onChange={e => setAssetDestination(e.target.value)} aria-label="Platform"><option value="">All platforms</option>{assetDestinations.map(destination => <option key={destination} value={destination}>{destination}</option>)}</select></label>
@@ -465,7 +517,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
           <AssetViewer asset={selectedAsset} projectId={projectId} />
           <div className="text-sm space-y-1"><h4 className="font-medium">Description</h4><p className="text-text-muted whitespace-pre-wrap">{selectedAsset.description || "No Media description available"}</p>{selectedAsset.description && <p className="text-xs text-text-muted">From Media{selectedAsset.description_source ? ` · ${selectedAsset.description_source}` : ""}{selectedAsset.description_updated_at ? ` · Updated ${new Date(selectedAsset.description_updated_at).toLocaleString()}` : ""}</p>}<p className="text-xs text-text-muted">Media: {selectedAsset.media_status === "completed" ? "ready" : selectedAsset.media_status}{selectedAsset.media_rating ? ` · ${selectedAsset.media_rating}` : ""}</p>{selectedAsset.media_error && <p className="text-xs text-yellow-400">Media metadata could not be refreshed.</p>}</div>
           {assetMedia && <div className="text-sm space-y-1"><div>{assetMedia.title || "Media metadata"} · {assetMedia.probe_status || "unknown"} · {assetMedia.audience_rating || "unrated"}</div><div className="text-xs text-text-muted">{assetMedia.duration_ms ? `${Math.round(assetMedia.duration_ms / 1000)}s · ` : ""}{assetMedia.width && assetMedia.height ? `${assetMedia.width} × ${assetMedia.height} · ` : ""}Transcript: {assetMedia.transcript_status || "not available"}</div></div>}
-          <div className="text-xs text-text-muted">Sources: {assetSources.length ? assetSources.map(s => `${short(s.asset_id)} (${s.relation})`).join(", ") : "original / none linked"}</div>
+          <div className="space-y-2"><h4 className="text-sm font-medium">{lineageBadge(selectedAsset)}</h4>{assetSources.length ? <ParentLinks asset={{ ...selectedAsset, sources: assetSources }} projectId={projectId} onOpen={openLinkedAsset} /> : <p className="text-xs text-text-muted">No source linked. This does not confirm the file is an original.</p>}</div>
           <div className="flex flex-wrap gap-2 text-sm">{(["pending", "approved", "rejected"] as const).map(state => <button disabled={busy || selectedAsset.review_status === state} key={state} className="border border-border rounded px-2 py-1 disabled:opacity-40" onClick={() => run(async () => { await action("content_catalog_assets_review", { asset_id: selectedAsset.id, review_status: state }); await openAsset(selectedAsset); }, `Review set to ${state}`)}>{state}</button>)}</div>
         </div>
         <div className="min-w-0 space-y-3">

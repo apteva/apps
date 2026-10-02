@@ -13,6 +13,7 @@ import (
 )
 
 type Asset struct {
+	Sources              []AssetSource    `json:"sources"`
 	ID                   string           `json:"id"`
 	SessionID            string           `json:"session_id"`
 	StorageInstallID     int64            `json:"storage_install_id"`
@@ -208,6 +209,9 @@ func (a *App) assetsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err = loadAssetHostings(ctx.AppDB(), pid, assetRefs); err != nil {
 		return nil, err
 	}
+	if err = loadAssetSources(ctx.AppDB(), pid, assetRefs); err != nil {
+		return nil, err
+	}
 	a.loadAssetMedia(ctx, assetRefs)
 	return map[string]any{"assets": out}, nil
 }
@@ -220,23 +224,7 @@ func (a *App) assetGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := ctx.AppDB().Query(`SELECT source_asset_id,relation,source_order,media_render_id FROM asset_sources WHERE project_id=? AND child_asset_id=? ORDER BY source_order`, pid, asset.ID)
-	if err != nil {
-		return nil, err
-	}
-	sources := []map[string]any{}
-	for rows.Next() {
-		var id, relation string
-		var order, renderID int64
-		if err = rows.Scan(&id, &relation, &order, &renderID); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		sources = append(sources, map[string]any{"asset_id": id, "relation": relation, "source_order": order, "media_render_id": renderID})
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
+	if err = loadAssetSources(ctx.AppDB(), pid, []*Asset{asset}); err != nil {
 		return nil, err
 	}
 	hostingsAny, err := a.hostingsList(ctx, map[string]any{"asset_id": asset.ID})
@@ -250,7 +238,7 @@ func (a *App) assetGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err = loadAssetHostings(ctx.AppDB(), pid, []*Asset{asset}); err != nil {
 		return nil, err
 	}
-	out := map[string]any{"asset": asset, "sources": sources, "hostings": hostingsAny.(map[string]any)["hostings"], "publications": asset.Publications}
+	out := map[string]any{"asset": asset, "sources": asset.Sources, "hostings": hostingsAny.(map[string]any)["hostings"], "publications": asset.Publications}
 	asset.MediaStatus, asset.MediaRating = "unavailable", ""
 	if ctx.IntegrationFor("media") != nil {
 		var media struct {
