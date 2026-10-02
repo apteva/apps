@@ -558,7 +558,7 @@ func courseSpaceForTool(db *sql.DB, tool string, args map[string]any) (string, e
 		var spaceID string
 		err := db.QueryRow(`SELECT space_id FROM milestone_definitions WHERE id=?`, strArg(args, "definition_id", "")).Scan(&spaceID)
 		return spaceID, notFound(err, "milestone")
-	case "assignment_reviews_list":
+	case "assignment_reviews_list", "milestone_reviews_list":
 		return mustStr(args, "space_id")
 	case "assignment_review":
 		a, err := loadAssignment(db, strArg(args, "assignment_id", ""))
