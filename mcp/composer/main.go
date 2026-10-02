@@ -30,8 +30,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.9.2
+version: 0.9.3
 description: |
+  v0.9.3 fixes procedure_create and procedure_get asset examples to use the
+  selected procedure revision's actual target instead of hardcoding clip.
+  Composition, audio, and still procedure examples now pass target validation.
   v0.9.2 fixes V1 text rendering for straight apostrophes and actual line
   breaks in both clip text and timed text tracks, locally and remotely.
   Text is escaped across both FFmpeg parsers, with expansion disabled to
