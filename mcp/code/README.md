@@ -1,5 +1,15 @@
 # Apteva Code
 
+## v0.14.9 — static preview runtime
+
+An `index.html` in a repository created as `blank` is detected as static HTML
+and now runs in the Bun workspace profile required by the preview server,
+instead of the generic Go fallback. Preview runtime selection follows the
+resolved framework without changing the repository label. Custom image
+preferences remain explicit overrides and must provide the needed runtime.
+
+Optional Docker regression: `CODE_TEST_DOCKER=1 GOWORK=off go test -run TestStaticWorkspacePreviewDocker`.
+
 ## Single-file blob import — v0.14.8
 
 `code_import_file` imports exact bytes into an existing repository. Pass

@@ -1,3 +1,21 @@
+# Apteva Code 0.14.9
+
+Fixes static HTML previews in repositories created as `blank`: the detected
+preview framework now selects the workspace runtime as well as its command.
+Static, Node, and Next.js previews use the Bun profile; Go previews use Go.
+Custom/blank commands retain source-based profile selection, and explicit
+repository workspace image preferences are still forwarded unchanged.
+
+Adds regression coverage for a blank repository containing only `index.html`,
+framework/metadata mismatches, and a disposable Docker static preview that
+serves HTML and relative assets with the default Bun profile image. The latter
+runs with `CODE_TEST_DOCKER=1 go test -run TestStaticWorkspacePreviewDocker`.
+
+Pins the Go app SDK to the current published `v0.92.0`. The separate Workspaces
+exit-code formatting defect is not changed in this Code release.
+
+---
+
 # Apteva Code 0.14.8
 
 Adds `code_import_file` to import one text or binary file into an existing

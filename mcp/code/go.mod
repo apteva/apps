@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/code
 go 1.25.12
 
 require (
-	github.com/apteva/app-sdk v0.91.0
+	github.com/apteva/app-sdk v0.92.0
 	github.com/bmatcuk/doublestar/v4 v4.6.1
 	golang.org/x/sys v0.42.0
 	gopkg.in/yaml.v3 v3.0.1

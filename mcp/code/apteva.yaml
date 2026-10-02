@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.14.8
+version: 0.14.9
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -11,6 +11,8 @@ description: |
   ZIP import for repository initialization or overlay updates. Native
   repo issues track bugs, feature requests, tasks, comments, and code
   links for agents and humans.
+  v0.14.9 selects preview workspace profiles from the detected framework,
+  so index.html in a blank repository uses Bun rather than a Go-only image.
   v0.14.8 adds code_import_file for exact-byte single-file blob imports,
   with create-only defaults, SHA-256-guarded overwrites, and no Git requirement.
   v0.14.7 clarifies that ordinary native working-tree edits do not require
@@ -367,7 +369,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: code/v0.14.8
+    ref: code/v0.14.9
     entry: mcp/code
   port: 8080
   health_check: /health

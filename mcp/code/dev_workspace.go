@@ -79,6 +79,22 @@ func workspacePreviewCommand(srcDir, framework, override string) ([]string, erro
 		return nil, fmt.Errorf("framework %q needs run_cmd for a workspace preview; listen on 0.0.0.0:$PORT", framework)
 	}
 }
+
+// The resolved preview framework chooses the command, so it must also choose
+// the runtime. Repository metadata can still say blank after HTML/JS is added,
+// or disagree with an explicit framework override. Keep source-based selection
+// for custom/blank commands, whose runtime cannot be inferred from the command.
+func workspacePreviewProfile(repo *Repo, snapshot *sourceSnapshot, framework string) string {
+	switch framework {
+	case "static", "node", "nextjs":
+		return "bun"
+	case "go":
+		return "go"
+	default:
+		return sourceProfile(repo, snapshot)
+	}
+}
+
 func (s *devSupervisor) startWorkspacePreview(callCtx context.Context, app *sdk.AppCtx, in startDevInput, srcDir, framework string) (dr *DevRun, err error) {
 	if app.PlatformAPI() == nil || s.app == nil {
 		return nil, errors.New("Workspaces is connected but its platform API is unavailable")
@@ -120,7 +136,7 @@ func (s *devSupervisor) startWorkspacePreview(callCtx context.Context, app *sdk.
 	var created struct {
 		Workspace workspaceWire `json:"workspace"`
 	}
-	input := map[string]any{"name": workspacePreviewName(in.Repo), "purpose": "Live preview for Code repository " + in.Repo.Slug, "profile": sourceProfile(in.Repo, snapshot), "resource_kind": "code.preview", "resource_id": fmt.Sprint(in.Repo.ID), "repo_label": in.Repo.Slug, "preview_port": workspacePreviewPort, "source_archive_base64": snapshot.Archive, "source_digest": snapshot.Digest, "source_paths": snapshot.Paths}
+	input := map[string]any{"name": workspacePreviewName(in.Repo), "purpose": "Live preview for Code repository " + in.Repo.Slug, "profile": workspacePreviewProfile(in.Repo, snapshot, framework), "resource_kind": "code.preview", "resource_id": fmt.Sprint(in.Repo.ID), "repo_label": in.Repo.Slug, "preview_port": workspacePreviewPort, "source_archive_base64": snapshot.Archive, "source_digest": snapshot.Digest, "source_paths": snapshot.Paths}
 	if in.Repo.WorkspaceImage != "" {
 		input["image"] = in.Repo.WorkspaceImage
 	}
