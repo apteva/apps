@@ -1,4 +1,10 @@
-# Functions 1.14.1
+# Functions 1.16.0
+
+**New in 1.16.0:** performance rankings and slow-call diagnostics in the panel
+and MCP. Compare call volume, total execution time, average/p95 latency,
+queue waits and errors over a selected period, then inspect individual calls.
+`functions_performance`, `functions_slow_invocations` and the expanded
+`functions_logs` response provide the same diagnostics to agents.
 
 **Fixed in 1.14.1:** business event fields such as a new user’s `password` pass through unchanged. Credential validation applies to identity claims; authenticated request bodies remain excluded from invocation history. Trusted admission and nested propagation remain enforced.
 
