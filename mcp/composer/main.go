@@ -30,8 +30,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.9.0
+version: 0.9.1
 description: |
+  v0.9.1 fixes remote rendering through Instances by invoking Bash explicitly.
+  Bash arrays and pipefail now work when Instances executes commands with sh,
+  while quoted scripts preserve literal values and propagate failures.
   v0.9.0 adds trusted local procedural clips. Immutable Python,
   Bun/TypeScript, and Go procedures consume named Storage or AI-generated
   inputs, produce validated media artifacts, and become ordinary cached clips.
