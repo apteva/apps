@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 )
 
@@ -26,6 +28,28 @@ func (p *streamGatePlatform) CallAppResult(_ string, _ string, _ map[string]any,
 	p.once.Do(func() { close(p.entered) })
 	<-p.release
 	return json.Unmarshal([]byte(`{"released":true}`), out)
+}
+
+// HTTP project wrappers use the SDK's full optional context interface. Keep
+// the legacy fixture above for tests of detached, non-cancellable SDK calls.
+type contextStreamGatePlatform struct{ *streamGatePlatform }
+
+func (p *contextStreamGatePlatform) CallAppResultContext(ctx context.Context, _ string, _ string, _ map[string]any, out any) error {
+	p.once.Do(func() { close(p.entered) })
+	select {
+	case <-p.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return json.Unmarshal([]byte(`{"released":true}`), out)
+}
+
+func (p *contextStreamGatePlatform) CallAppContext(ctx context.Context, app, tool string, input map[string]any) (json.RawMessage, error) {
+	return contextPlatformFixture{}.CallAppContext(ctx, app, tool, input)
+}
+
+func (p *contextStreamGatePlatform) CallAppBatchContext(ctx context.Context, app string, calls []sdk.AppCall, options sdk.AppBatchOptions) ([]sdk.AppCallResult, error) {
+	return contextPlatformFixture{}.CallAppBatchContext(ctx, app, calls, options)
 }
 
 func (p *streamGatePlatform) unblock() {
@@ -69,7 +93,7 @@ func Handle(_ json.RawMessage, ctx *Context) (any, error) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gate := &streamGatePlatform{entered: make(chan struct{}), release: make(chan struct{})}
+			gate := &contextStreamGatePlatform{&streamGatePlatform{entered: make(chan struct{}), release: make(chan struct{})}}
 			t.Cleanup(gate.unblock)
 			ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithPlatform(gate))
 			app := mountApp(t, ctx)
