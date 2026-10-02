@@ -538,11 +538,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_refresh_message_body",
-			Description: "Recover missing content for one existing inbound email activity from its original in the bound Messaging app. Args: id (contact id), activity_id, dry_run? (default true; pass false to repair). Only fills an empty or subject-only body after matching project, source install, and RFC Message-ID. Preserves complete bodies, activity/conversation IDs, status, timestamps, attachments, and workflows; does not send or redispatch mail. Returns recoverable and body_repaired.",
+			Description: "Recover one existing inbound email activity from its original in the bound Messaging app. Args: id (contact id), activity_id, dry_run? (default true; pass false to repair), normalize_formatting? (default false; repairs excessive blank lines only when the stored body exactly matches CRM's former HTML conversion), recover_sender? (default false; fills missing From metadata from the verified original). Matches project, source install, and RFC Message-ID. Preserves edited/complete bodies, existing sender metadata, IDs, status, timestamps, attachments, and workflows; never sends or redispatches mail. Returns recoverable, body_repaired, formatting_recoverable/formatting_repaired, and sender_recoverable/sender_repaired.",
 			InputSchema: schemaObject(map[string]any{
-				"id":          map[string]any{"type": "integer"},
-				"activity_id": map[string]any{"type": "integer"},
-				"dry_run":     map[string]any{"type": "boolean", "default": true},
+				"id":                   map[string]any{"type": "integer"},
+				"activity_id":          map[string]any{"type": "integer"},
+				"dry_run":              map[string]any{"type": "boolean", "default": true},
+				"normalize_formatting": map[string]any{"type": "boolean", "default": false},
+				"recover_sender":       map[string]any{"type": "boolean", "default": false},
 			}, []string{"id", "activity_id"}),
 			Handler: a.toolRefreshMessageBody,
 		},
