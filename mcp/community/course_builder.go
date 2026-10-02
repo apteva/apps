@@ -66,13 +66,16 @@ type Assignment struct {
 }
 
 type CourseCertificate struct {
-	SpaceID               string  `json:"space_id"`
-	Enabled               bool    `json:"enabled"`
-	Title                 string  `json:"title"`
-	Body                  string  `json:"body"`
-	TemplateStorageFileID *string `json:"template_storage_file_id,omitempty"`
-	IssueOnCompletion     bool    `json:"issue_on_completion"`
-	UpdatedAt             string  `json:"updated_at"`
+	SpaceID                    string  `json:"space_id"`
+	Enabled                    bool    `json:"enabled"`
+	Title                      string  `json:"title"`
+	Body                       string  `json:"body"`
+	TemplateStorageFileID      *string `json:"template_storage_file_id,omitempty"`
+	IssueOnCompletion          bool    `json:"issue_on_completion"`
+	RequireQuizzesPassed       bool    `json:"require_quizzes_passed"`
+	RequireAssignmentsApproved bool    `json:"require_assignments_approved"`
+	RequireMilestonesApproved  bool    `json:"require_milestones_approved"`
+	UpdatedAt                  string  `json:"updated_at"`
 }
 
 type DripSchedule struct {
@@ -245,8 +248,8 @@ func courseBuilderTools() []sdk.Tool {
 		},
 		{
 			Name:        "certificates_configure",
-			Description: "Configure course certificates. Args: space_id, enabled?, title?, body?, template_storage_file_id?, issue_on_completion?. Template id is a storage app file id.",
-			InputSchema: schemaObject(map[string]any{"space_id": map[string]any{"type": "string"}, "enabled": map[string]any{"type": "boolean"}, "title": map[string]any{"type": "string"}, "body": map[string]any{"type": "string"}, "template_storage_file_id": map[string]any{"type": "string"}, "issue_on_completion": map[string]any{"type": "boolean"}}, []string{"space_id"}),
+			Description: "Configure course certificates. Args: space_id, enabled?, title?, body?, template_storage_file_id?, issue_on_completion?, require_quizzes_passed?, require_assignments_approved?, require_milestones_approved?.",
+			InputSchema: schemaObject(map[string]any{"space_id": map[string]any{"type": "string"}, "enabled": map[string]any{"type": "boolean"}, "title": map[string]any{"type": "string"}, "body": map[string]any{"type": "string"}, "template_storage_file_id": map[string]any{"type": "string"}, "issue_on_completion": map[string]any{"type": "boolean"}, "require_quizzes_passed": map[string]any{"type": "boolean"}, "require_assignments_approved": map[string]any{"type": "boolean"}, "require_milestones_approved": map[string]any{"type": "boolean"}}, []string{"space_id"}),
 			Handler:     toolCertificatesConfigure,
 		},
 		{
@@ -984,6 +987,15 @@ func toolCertificatesConfigure(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if v, ok := args["issue_on_completion"].(bool); ok {
 		cur.IssueOnCompletion = v
 	}
+	if v, ok := args["require_quizzes_passed"].(bool); ok {
+		cur.RequireQuizzesPassed = v
+	}
+	if v, ok := args["require_assignments_approved"].(bool); ok {
+		cur.RequireAssignmentsApproved = v
+	}
+	if v, ok := args["require_milestones_approved"].(bool); ok {
+		cur.RequireMilestonesApproved = v
+	}
 	if v, ok := storageFileArg(args, "template_storage_file_id"); ok {
 		if v == "" {
 			cur.TemplateStorageFileID = nil
@@ -995,16 +1007,19 @@ func toolCertificatesConfigure(ctx *sdk.AppCtx, args map[string]any) (any, error
 		}
 	}
 	if _, err := ctx.AppDB().Exec(
-		`INSERT INTO course_certificates (space_id, enabled, title, body, template_storage_file_id, issue_on_completion, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		`INSERT INTO course_certificates (space_id, enabled, title, body, template_storage_file_id, issue_on_completion, require_quizzes_passed, require_assignments_approved, require_milestones_approved, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		 ON CONFLICT(space_id) DO UPDATE SET
 		   enabled = excluded.enabled,
 		   title = excluded.title,
 		   body = excluded.body,
 		   template_storage_file_id = excluded.template_storage_file_id,
 		   issue_on_completion = excluded.issue_on_completion,
+		   require_quizzes_passed = excluded.require_quizzes_passed,
+		   require_assignments_approved = excluded.require_assignments_approved,
+		   require_milestones_approved = excluded.require_milestones_approved,
 		   updated_at = CURRENT_TIMESTAMP`,
-		spaceID, boolToInt(cur.Enabled), cur.Title, cur.Body, cur.TemplateStorageFileID, boolToInt(cur.IssueOnCompletion),
+		spaceID, boolToInt(cur.Enabled), cur.Title, cur.Body, cur.TemplateStorageFileID, boolToInt(cur.IssueOnCompletion), boolToInt(cur.RequireQuizzesPassed), boolToInt(cur.RequireAssignmentsApproved), boolToInt(cur.RequireMilestonesApproved),
 	); err != nil {
 		return nil, err
 	}
@@ -1651,8 +1666,9 @@ func loadCertificate(db *sql.DB, spaceID string) (CourseCertificate, error) {
 	c := CourseCertificate{SpaceID: spaceID, IssueOnCompletion: true}
 	var enabled, issue int
 	var template sql.NullString
-	err := db.QueryRow(`SELECT space_id, enabled, title, body, template_storage_file_id, issue_on_completion, updated_at FROM course_certificates WHERE space_id = ?`, spaceID).
-		Scan(&c.SpaceID, &enabled, &c.Title, &c.Body, &template, &issue, &c.UpdatedAt)
+	var quizzes, assignments, milestones int
+	err := db.QueryRow(`SELECT space_id, enabled, title, body, template_storage_file_id, issue_on_completion, require_quizzes_passed, require_assignments_approved, require_milestones_approved, updated_at FROM course_certificates WHERE space_id = ?`, spaceID).
+		Scan(&c.SpaceID, &enabled, &c.Title, &c.Body, &template, &issue, &quizzes, &assignments, &milestones, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return c, nil
 	}
@@ -1661,6 +1677,9 @@ func loadCertificate(db *sql.DB, spaceID string) (CourseCertificate, error) {
 	}
 	c.Enabled = enabled != 0
 	c.IssueOnCompletion = issue != 0
+	c.RequireQuizzesPassed = quizzes != 0
+	c.RequireAssignmentsApproved = assignments != 0
+	c.RequireMilestonesApproved = milestones != 0
 	if template.Valid {
 		c.TemplateStorageFileID = &template.String
 	}

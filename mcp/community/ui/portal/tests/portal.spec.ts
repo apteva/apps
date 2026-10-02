@@ -40,6 +40,7 @@ async function fixture(page: Page, options: { empty?: boolean; lessonFailure?: b
       case "course_tracks_list": out = { tracks: [], selected_track_id: null }; break;
       case "milestones_list": out = { milestones: [], next_action: "" }; break;
       case "assignment_reviews_list": out = { submissions: [] }; break;
+      case "milestone_reviews_list": out = { submissions: [] }; break;
       case "lessons_list":
         if (options.lessonFailure) return json({ jsonrpc: "2.0", error: { code: -32000, message: "Server temporarily unavailable" } });
         out = { lessons: [lesson] }; break;

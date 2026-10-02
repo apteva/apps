@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api, type LessonBundle } from "./api";
@@ -9,6 +9,7 @@ import type {
   IssuedCertificate,
   LearningStatus,
   Member,
+  MemberMilestone,
   Quiz,
   QuizAttempt,
   QuizQuestion,
@@ -73,6 +74,18 @@ function FileLink({
       )}
     </div>
   );
+}
+
+export function SubmissionFileLink({ fileId, target, memberId }: { fileId: string; target: { assignment_id?: string; definition_id?: string }; memberId?: string }) {
+  const [url, setURL] = useState(""); const [error, setError] = useState("");
+  async function open() { try { setURL((await api.courses.submissionFileURL(fileId, target, memberId)).url); } catch (e) { setError(message(e)); } }
+  return <span className="file-chip">{url ? <a href={url} target="_blank" rel="noopener noreferrer">Download file</a> : <button type="button" className="text-button" onClick={() => void open()}>Open file</button>}{error && <small role="alert">{error}</small>}</span>;
+}
+
+async function encodeFile(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer()); let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(binary);
 }
 
 function LessonVideo({
@@ -236,6 +249,7 @@ function AssignmentForm({
   const [body, setBody] = useState(previous?.body || "");
   const [links, setLinks] = useState((previous?.links || []).join("\n"));
   const [files, setFiles] = useState((previous?.files || []).join("\n"));
+  const [fileNames, setFileNames] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(!!previous);
@@ -266,6 +280,13 @@ function AssignmentForm({
       setBusy(false);
     }
   }
+  async function upload(event: ChangeEvent<HTMLInputElement>) {
+    const picked = event.target.files?.[0]; if (!picked) return; setError("");
+    if (picked.size > 25 * 1024 * 1024) { setError("Files must be 25 MB or smaller."); return; }
+    try { const uploaded = await api.courses.uploadFile(picked.name, await encodeFile(picked), picked.type || "application/octet-stream", { assignment_id: assignment.id }); setFiles((value) => [...value.split(/\n|,/).map((v) => v.trim()).filter(Boolean), uploaded.file_id].join("\n")); setFileNames((value) => [...value, picked.name]); setSaved(false); }
+    catch (caught) { setError(message(caught)); }
+    event.target.value = "";
+  }
   return (
     <form className="card stack" onSubmit={submit}>
       <h4>{assignment.title}</h4>
@@ -294,13 +315,9 @@ function AssignmentForm({
         onChange={(e) => { setLinks(e.target.value); setSaved(false); }}
         maxLength={4000}
       />
-      <label htmlFor={`files-${assignment.id}`}>Storage file IDs (one per line)</label>
-      <textarea
-        id={`files-${assignment.id}`}
-        value={files}
-        onChange={(e) => { setFiles(e.target.value); setSaved(false); }}
-        maxLength={2000}
-      />
+      <label htmlFor={`upload-${assignment.id}`}>Attachments</label>
+      <input id={`upload-${assignment.id}`} type="file" onChange={(e) => void upload(e)} />
+      <div className="file-list">{files.split(/\n|,/).map((id) => id.trim()).filter(Boolean).map((id, i) => <SubmissionFileLink key={id} fileId={id} target={{ assignment_id: assignment.id }} />)}{fileNames.map((name) => <span key={name} className="muted">{name}</span>)}</div>
       <button className="primary" disabled={busy || (!body.trim() && !links.trim() && !files.trim())}>
         {busy ? "Submitting…" : previous?.status === "needs_changes" ? "Resubmit for review" : "Save submission"}
       </button>
@@ -429,7 +446,14 @@ export function InstructorReviewQueue({ items, onReviewed }: { items: Assignment
     catch (caught) { setError(message(caught)); }
     finally { setBusy(""); }
   }
-  return <section className="review-queue" aria-label="Instructor review queue"><div className="section-heading"><div><p className="eyebrow">Instructor workspace</p><h3>Assignment review queue</h3></div><span className="muted">{items.length} awaiting review</span></div>{items.map((item) => { const key = `${item.assignment_id}:${item.member_id}`; return <article className="review-card" key={key}><div><strong>{item.assignment_title}</strong><p className="muted">Student {item.member_id} · submission v{item.version}</p><Markdown body={item.body} />{item.links.length > 0 && <p>{item.links.map((link) => <a key={link} href={link} target="_blank" rel="noopener noreferrer">Evidence link</a>)}</p>}</div><textarea aria-label={`Feedback for ${item.assignment_title}`} value={feedback[key] || ""} onChange={(event) => setFeedback((current) => ({ ...current, [key]: event.target.value }))} placeholder="Feedback" maxLength={4000} /><div className="review-actions"><button className="secondary" disabled={busy === key} onClick={() => void review(item, "needs_changes")}>Request changes</button><button className="primary" disabled={busy === key} onClick={() => void review(item, "approved")}>Approve</button></div></article>})}{error && <p role="alert">{error}</p>}</section>;
+  return <section className="review-queue" aria-label="Instructor review queue"><div className="section-heading"><div><p className="eyebrow">Instructor workspace</p><h3>Assignment review queue</h3></div><span className="muted">{items.length} awaiting review</span></div>{items.map((item) => { const key = `${item.assignment_id}:${item.member_id}`; return <article className="review-card" key={key}><div><strong>{item.assignment_title}</strong><p className="muted">Student {item.member_id} · submission v{item.version}</p><Markdown body={item.body} />{item.links.length > 0 && <p>{item.links.map((link) => <a key={link} href={link} target="_blank" rel="noopener noreferrer">Evidence link</a>)}</p>}{item.files.map((file) => <SubmissionFileLink key={file} fileId={file} target={{ assignment_id: item.assignment_id }} memberId={item.member_id} />)}</div><textarea aria-label={`Feedback for ${item.assignment_title}`} value={feedback[key] || ""} onChange={(event) => setFeedback((current) => ({ ...current, [key]: event.target.value }))} placeholder="Feedback" maxLength={4000} /><div className="review-actions"><button className="secondary" disabled={busy === key} onClick={() => void review(item, "needs_changes")}>Request changes</button><button className="primary" disabled={busy === key} onClick={() => void review(item, "approved")}>Approve</button></div></article>})}{error && <p role="alert">{error}</p>}</section>;
+}
+
+export function MilestoneForm({ milestone, onSaved }: { milestone: MemberMilestone; onSaved: () => void }) {
+  const [text, setText] = useState(milestone.evidence_text || ""); const [links, setLinks] = useState((milestone.evidence_links || []).join("\n")); const [files, setFiles] = useState(milestone.evidence_files || []); const [busy, setBusy] = useState(false); const [error, setError] = useState("");
+  async function upload(event: ChangeEvent<HTMLInputElement>) { const file = event.target.files?.[0]; if (!file) return; try { const f = await api.courses.uploadFile(file.name, await encodeFile(file), file.type || "application/octet-stream", { definition_id: milestone.definition.id }); setFiles((v) => [...v, f.file_id]); } catch (e) { setError(message(e)); } event.target.value = ""; }
+  async function submit(event: FormEvent) { event.preventDefault(); setBusy(true); setError(""); try { await api.courses.submitMilestone(milestone.definition.id, text, links.split(/\n|,/).map((v) => v.trim()).filter(Boolean), files); onSaved(); } catch (e) { setError(message(e)); } finally { setBusy(false); } }
+  return <form className="card stack milestone-form" onSubmit={submit}><h4>{milestone.definition.title}</h4><p className="muted">{milestone.definition.description}</p>{milestone.feedback && <p role="alert">Feedback: {milestone.feedback}</p>}<label>Evidence</label><textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="Describe what you achieved" /><label>Evidence links</label><textarea value={links} onChange={(e) => setLinks(e.target.value)} placeholder="One link per line" /><label>Attachments</label><input type="file" onChange={(e) => void upload(e)} />{files.map((file) => <SubmissionFileLink key={file} fileId={file} target={{ definition_id: milestone.definition.id }} />)}<button className="primary" disabled={busy || (!text.trim() && !links.trim() && files.length === 0)}>{busy ? "Submitting…" : milestone.status === "needs_changes" ? "Resubmit evidence" : "Submit evidence"}</button>{error && <p role="alert">{error}</p>}</form>;
 }
 
 export function ProfileForm({

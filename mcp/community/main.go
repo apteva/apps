@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.14.0
+version: 0.14.1
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   spaces (feed/forum/chat/course), members, threads, posts, reactions,
@@ -220,9 +220,12 @@ provides:
     - { name: milestones_list, description: "List milestones and member next action." }
     - { name: milestone_submit, description: "Submit milestone evidence." }
     - { name: milestone_review, description: "Approve milestone evidence or request changes." }
+    - { name: milestone_reviews_list, description: "List milestone evidence awaiting instructor review." }
     - { name: learning_status, description: "Fetch member quiz and assignment results." }
     - { name: issued_certificate_get, description: "Fetch an earned course certificate." }
     - { name: lesson_file_url, description: "Mint a protected lesson file URL." }
+    - { name: course_file_upload, description: "Upload private course evidence through Storage." }
+    - { name: course_file_url, description: "Mint a protected course evidence file URL." }
     - { name: lesson_bundle_get,  description: "Fetch an available lesson with all member-facing extras." }
     - { name: lesson_resources_delete, description: "Unlink a lesson resource." }
     - { name: quizzes_create,      description: "Create a lesson quiz." }
@@ -289,7 +292,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: community/v0.14.0
+    ref: community/v0.14.1
     entry: mcp/community
   port: 8080
   health_check: /health

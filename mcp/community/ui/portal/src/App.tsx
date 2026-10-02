@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import { loadStripe, type Stripe, type StripeElements, type StripePaymentElement } from "@stripe/stripe-js";
 import { type CSSProperties, Children, FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CertificateCard, InstructorReviewQueue, LearningContent, Markdown, ProfileForm } from "./LearningContent";
+import { CertificateCard, InstructorReviewQueue, LearningContent, Markdown, MilestoneForm, ProfileForm, SubmissionFileLink } from "./LearningContent";
 import { api, apteva, COMMUNITY_APP, currentProjectId, type AuthResponse, type LessonBundle, type PortalBootstrap, type StorefrontCheckoutSession, useDelegatedToken } from "./api";
 import type {
   IssuedCertificate,
@@ -34,7 +34,7 @@ import type {
   Lesson,
   Member,
   MemberSubscription,
-  MemberMilestone,
+  MemberMilestone, MilestoneReviewItem,
   MembershipPlan,
   Post,
   PublicOffer,
@@ -239,7 +239,8 @@ export default function App() {
   const [lessons, setLessons] = useState<Lesson[]>([]);
   const [lessonId, setLessonId] = useState("");
   const [bundle, setBundle] = useState<LessonBundle | null>(null);
- const [certificate, setCertificate] = useState<IssuedCertificate | null>(null);
+  const [certificate, setCertificate] = useState<IssuedCertificate | null>(null);
+  const [certificateRequirements, setCertificateRequirements] = useState({ quizzes: false, assignments: false, milestones: false });
  const [more, setMore] = useState({ members: false, threads: false, posts: false, dms: false, messages: false });
   const [courseSummary, setCourseSummary] = useState("");
   const [courseLocked, setCourseLocked] = useState(false);
@@ -251,6 +252,7 @@ export default function App() {
   const [milestones, setMilestones] = useState<MemberMilestone[]>([]);
   const [nextMilestone, setNextMilestone] = useState("");
   const [reviewQueue, setReviewQueue] = useState<AssignmentReviewItem[]>([]);
+  const [milestoneReviewQueue, setMilestoneReviewQueue] = useState<MilestoneReviewItem[]>([]);
   const [membershipPlans, setMembershipPlans] = useState<MembershipPlan[]>([]);
   const [memberSubscription, setMemberSubscription] = useState<MemberSubscription | null>(null);
   const [comment, setComment] = useState("");
@@ -539,13 +541,14 @@ export default function App() {
         let trackOut: { tracks: CourseTrack[]; selected_track_id?: string } = { tracks: [] };
         let milestoneOut: { milestones: MemberMilestone[]; next_action: string } = { milestones: [], next_action: "" };
         let reviewOut: { submissions: AssignmentReviewItem[] } = { submissions: [] };
+        let milestoneReviewOut: { submissions: MilestoneReviewItem[] } = { submissions: [] };
         if (!locked) {
           [trackOut, milestoneOut] = await Promise.all([
             api.courses.tracks(courseId),
             api.courses.milestones(courseId),
           ]);
         }
-        try { reviewOut = await api.courses.reviewQueue(courseId); } catch { /* students are not instructors */ }
+        try { [reviewOut, milestoneReviewOut] = await Promise.all([api.courses.reviewQueue(courseId), api.courses.milestoneReviewQueue(courseId)]); } catch { /* students are not instructors */ }
         return {
           details,
           certificate: certificateOut.certificate,
@@ -559,10 +562,12 @@ export default function App() {
           milestones: milestoneOut.milestones || [],
           nextMilestone: milestoneOut.next_action || "",
           reviewQueue: reviewOut.submissions || [],
+          milestoneReviewQueue: milestoneReviewOut.submissions || [],
         };
       },
       (result) => {
         setCertificate(result.certificate);
+        setCertificateRequirements({ quizzes: !!result.details.certificate?.require_quizzes_passed, assignments: !!result.details.certificate?.require_assignments_approved, milestones: !!result.details.certificate?.require_milestones_approved });
         setSections(result.sections);
         setLessons(result.lessons);
         setCourseLocked(result.locked);
@@ -573,6 +578,7 @@ export default function App() {
         setMilestones(result.milestones);
         setNextMilestone(result.nextMilestone);
         setReviewQueue(result.reviewQueue);
+        setMilestoneReviewQueue(result.milestoneReviewQueue);
         setCourseAccessMode(result.details.enrollment_rules?.access_mode || "free");
         setCourseSummary(result.details.details?.summary || result.details.details?.description || "");
         setLessonId((current) =>
@@ -1470,15 +1476,17 @@ export default function App() {
                 )}
               </div>
               {certificate && <CertificateCard certificate={certificate} />}
+              {!certificate && (certificateRequirements.quizzes || certificateRequirements.assignments || certificateRequirements.milestones) && !courseLocked && <section className="card graduation-status" aria-label="Certificate requirements"><h3>Certificate requirements</h3><p className="muted">Finish the lessons and complete these requirements:</p><ul>{certificateRequirements.quizzes && <li>Pass every quiz</li>}{certificateRequirements.assignments && <li>Get every assignment approved</li>}{certificateRequirements.milestones && <li>Get every milestone approved</li>}</ul></section>}
               {milestones.length > 0 && !courseLocked && (
                 <section className="milestone-panel" aria-label="Student milestones">
                   <div className="section-heading"><div><p className="eyebrow">Milestones</p><h3>Apply what you learn</h3></div>{nextMilestone && <span className="muted">Next: {nextMilestone}</span>}</div>
                   <div className="milestone-list">
-                    {milestones.map((milestone) => <article className="milestone-card" key={milestone.id}><div><strong>{milestone.title}</strong><p className="muted">{milestone.description}</p></div><span className={`status-pill status-${milestone.status}`}>{milestone.status.replace("_", " ")}</span></article>)}
+                    {milestones.map((milestone) => <article className="milestone-card" key={milestone.definition.id}><div><strong>{milestone.definition.title}</strong><p className="muted">{milestone.definition.description}</p><span className={`status-pill status-${milestone.status}`}>{milestone.status.replace("_", " ")}</span></div>{milestone.status !== "approved" && <MilestoneForm milestone={milestone} onSaved={() => void loadCourse()} />}</article>)}
                   </div>
                 </section>
               )}
               {reviewQueue.length > 0 && <InstructorReviewQueue items={reviewQueue} onReviewed={() => void loadCourse()} />}
+              {milestoneReviewQueue.length > 0 && <section className="review-queue" aria-label="Milestone review queue"><div className="section-heading"><h3>Milestone review queue</h3><span className="muted">{milestoneReviewQueue.length} awaiting review</span></div>{milestoneReviewQueue.map((item) => <article className="review-card" key={`${item.definition_id}:${item.member_id}`}><strong>{item.title}</strong><p className="muted">Student {item.member_id}</p><Markdown body={item.evidence_text} />{item.evidence_links.map((link) => <a key={link} href={link} target="_blank" rel="noopener noreferrer">Evidence link</a>)}{item.evidence_files.map((file) => <SubmissionFileLink key={file} fileId={file} target={{ definition_id: item.definition_id }} memberId={item.member_id} />)}<button className="secondary" onClick={() => void api.courses.reviewMilestone(item.definition_id, item.member_id, "needs_changes", "Please add more evidence.").then(() => loadCourse())}>Request changes</button><button className="primary" onClick={() => void api.courses.reviewMilestone(item.definition_id, item.member_id, "approved", "").then(() => loadCourse())}>Approve</button></article>)}</section>}
               {courseLocked ? (
                 <div className="purchase-card">
                   {courseAccessMode === "paid" && !courseOffer && <Empty>This course is not currently for sale.</Empty>}

@@ -1342,6 +1342,35 @@ func syncCourseCompletionForSpace(db *sql.DB, spaceID, memberID string) error {
 		return err
 	}
 	if total > 0 && total == completed && (trackCount == 0 || selected != "") {
+		var requireQuizzes, requireAssignments, requireMilestones int
+		_ = db.QueryRow(`SELECT require_quizzes_passed, require_assignments_approved, require_milestones_approved FROM course_certificates WHERE space_id=?`, spaceID).Scan(&requireQuizzes, &requireAssignments, &requireMilestones)
+		if requireQuizzes != 0 {
+			var totalQ, passedQ int
+			if err := db.QueryRow(`SELECT COUNT(*), COUNT(DISTINCT q.id) FILTER (WHERE EXISTS (SELECT 1 FROM quiz_attempts qa WHERE qa.quiz_id=q.id AND qa.member_id=? AND qa.passed=1)) FROM quizzes q JOIN lessons l ON l.id=q.lesson_id JOIN sections s ON s.id=l.section_id WHERE s.space_id=? AND l.published_at IS NOT NULL AND `+lessonTrackClause("l"), memberID, spaceID, spaceID, memberID).Scan(&totalQ, &passedQ); err != nil {
+				return err
+			}
+			if totalQ != passedQ {
+				return resetCourseCompletion(db, spaceID, memberID)
+			}
+		}
+		if requireAssignments != 0 {
+			var pending int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM assignments a JOIN lessons l ON l.id=a.lesson_id JOIN sections s ON s.id=l.section_id LEFT JOIN assignment_submissions sub ON sub.assignment_id=a.id AND sub.member_id=? WHERE s.space_id=? AND l.published_at IS NOT NULL AND `+lessonTrackClause("l")+` AND COALESCE(sub.status,'') <> 'approved'`, memberID, spaceID, spaceID, memberID).Scan(&pending); err != nil {
+				return err
+			}
+			if pending > 0 {
+				return resetCourseCompletion(db, spaceID, memberID)
+			}
+		}
+		if requireMilestones != 0 {
+			var pending int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM milestone_definitions d LEFT JOIN member_milestones m ON m.definition_id=d.id AND m.member_id=? WHERE d.space_id=? AND d.active=1 AND (d.track_id IS NULL OR d.track_id=?) AND COALESCE(m.status,'') <> 'approved'`, memberID, spaceID, nullableValue(selected)).Scan(&pending); err != nil {
+				return err
+			}
+			if pending > 0 {
+				return resetCourseCompletion(db, spaceID, memberID)
+			}
+		}
 		result, err := db.Exec(
 			`UPDATE course_enrollments
 			    SET status = 'completed', completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)
@@ -1376,7 +1405,11 @@ func syncCourseCompletionForSpace(db *sql.DB, spaceID, memberID string) error {
 		}
 		return nil
 	}
-	_, err = db.Exec(
+	return resetCourseCompletion(db, spaceID, memberID)
+}
+
+func resetCourseCompletion(db *sql.DB, spaceID, memberID string) error {
+	_, err := db.Exec(
 		`UPDATE course_enrollments SET status = 'active', completed_at = NULL
 		  WHERE space_id = ? AND member_id = ? AND status = 'completed'`,
 		spaceID, memberID,
