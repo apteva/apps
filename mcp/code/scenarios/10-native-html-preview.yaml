@@ -1,0 +1,128 @@
+name: native-html-preview
+description: |
+  A real agent creates and edits one HTML file in a blank native repository,
+  then starts and verifies a live Docker workspace preview. Git tools remain
+  available, but no Git commit, auto-sync configuration, remote connection,
+  or native checkpoint may be used. Saved state verifies the preview, file,
+  unchanged native revision count, and disabled external Git sync.
+
+timeout: 300s
+max_iterations: 16
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+    bindings:
+      workspaces: app
+  cleanup_mcp_calls:
+    - app: code
+      tool: repos_dev_stop
+      thread_id: tier3-cleanup
+      args:
+        slug: tier3-native-html-preview
+    - app: code
+      tool: repos_workspace_destroy
+      thread_id: tier3-cleanup
+      args:
+        slug: tier3-native-html-preview
+        confirm: true
+    - app: code
+      tool: repos_archive
+      thread_id: tier3-cleanup
+      args:
+        slug: tier3-native-html-preview
+        force: true
+
+directive: |
+  Use the Code app for this task. Create a blank repository named "HTML Test"
+  with slug "tier3-native-html-preview". Add only index.html containing a valid
+  simple HTML page with the heading "Hello from Code". Read it back, then edit
+  that heading to "Updated HTML preview" and verify the saved file.
+
+  Now try running the updated page in a workspace and check whether the preview
+  stays ready. Leave the preview running and give me its verified local URL.
+  This is just a local coding experiment, not a request to publish anything.
+  Complete the task yourself in this thread.
+
+assert:
+  - tool_called_with:
+      tool: repos_create
+      args:
+        slug: tier3-native-html-preview
+        framework: blank
+      count: 1
+      success: true
+  - tool_called_with:
+      tool: code_write_file
+      args:
+        slug: tier3-native-html-preview
+        path: index.html
+      success: true
+  - tool_called_with:
+      tool: code_read_file
+      args:
+        slug: tier3-native-html-preview
+        path: index.html
+      success: true
+  - tool_called_with:
+      tool: code_write_file | code_edit_file | code_multi_edit | code_apply_patch
+      args:
+        slug: tier3-native-html-preview
+      min_count: 2
+      success: true
+      before: repos_dev_start
+  - tool_called_with:
+      tool: repos_dev_start
+      args:
+        slug: tier3-native-html-preview
+      count: 1
+      success: true
+      result_contains: workspaces
+      before: repos_dev_status
+  - tool_called_with:
+      tool: repos_dev_status
+      args:
+        slug: tier3-native-html-preview
+      success: true
+      result_contains: live
+      min_count: 2
+  - tool_not_called: repos_git_sync_configure | repos_git_sync_now | repos_git_connect | repos_git_import | repos_git_commit | repos_git_push | repos_git_pull | repos_git_fetch | repos_git_branch_create | repos_git_switch | repos_checkpoint
+  - tool_not_called: workspaces_create | workspace_create_for_resource | workspace_preview_start | containers_run | containers_exec_start
+  - tool_not_called_with:
+      tool: repos_create | code_write_file | code_read_file | code_edit_file | code_multi_edit | code_apply_patch | repos_dev_start | repos_dev_status
+      success: false
+  - http: GET /api/apps/code/api/repos/tier3-native-html-preview/files/index.html?annotated=1
+    expect_field_at: content
+    expect_field_contains: Updated HTML preview
+  - http: GET /api/apps/code/api/repos/tier3-native-html-preview/tree
+    expect_count_at: files
+    expect_count: 1
+  - http: GET /api/apps/code/api/repos/tier3-native-html-preview/git/status
+    expect_field_at: git_backed
+    expect_field_eq: false
+  - http: GET /api/apps/code/api/repos/tier3-native-html-preview/git/sync
+    expect_field_at: enabled
+    expect_field_eq: false
+  - http: GET /api/apps/code/api/repos/tier3-native-html-preview/version/status
+    expect_field_at: revision_count
+    expect_field_eq: 1
+  - http: GET /api/apps/code/api/repos/tier3-native-html-preview/version/status
+    expect_field_at: dirty
+    expect_field_eq: true
+  - http: GET /api/apps/code/api/repos/tier3-native-html-preview/dev/status
+    expect_field_at: dev_run.status
+    expect_field_eq: live
+  - http: GET /api/apps/code/api/repos/tier3-native-html-preview/dev/status
+    expect_field_at: dev_run.runner
+    expect_field_eq: workspaces
+  - http: GET /api/apps/code/api/repos/tier3-native-html-preview/dev/status
+    expect_field_at: dev_run.framework
+    expect_field_eq: static
+  - agent_response_contains: "http://127.0.0.1:"
+  - iterations_at_most: 16
+
+budget:
+  # Includes cumulative prompt tokens for the full app catalog + exported skill.
+  total_tokens: 400000
+  cost_usd: 1.00

@@ -31,7 +31,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Create a repository. New repositories are native Code working trees; they do not require or initialize external Git. " +
 				"Args: name (required), framework? (blank | nextjs | static | go | python), description?, slug?, workspace_image?. " +
 				"Walks the template tree into the new repo's storage_root. After creation, edit files directly with code_write_file/code_edit_file; " +
-				"do not call repos_git_commit unless the repository is explicitly Git-backed.",
+				"No commit, checkpoint, Git remote, or Git auto-sync is needed to save or preview files. Use repos_dev_start to run a preview; do not configure Git to make it run.",
 			InputSchema: schemaObject(map[string]any{
 				"name":            map[string]any{"type": "string"},
 				"framework":       map[string]any{"type": "string"},
@@ -465,8 +465,9 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "repos_dev_start",
-			Description: "Start a dev/test preview process for a repo. This is for testing while editing; use the Deploy app for production builds, releases, domains, and hosting. Auto-detects framework " +
-				"(nextjs / node / go / static) from the file tree, or accepts framework='blank' with run_cmd. " +
+			Description: "Start a dev/test preview process for a repo. This is for testing while editing; use the Deploy app for production builds, releases, domains, and hosting. " +
+				"Git, Git auto-sync, commits, and checkpoints are NOT prerequisites. Code handles source transfer to connected Workspaces; do not call repos_git_sync_configure or repos_git_sync_now for preview startup or recovery. Verify readiness with repos_dev_status and diagnose failures with repos_dev_logs. " +
+				"Auto-detects framework (nextjs / node / go / static) from current working-tree files, including index.html in a blank native repository, or accepts framework='blank' with run_cmd. " +
 				"For JS/Bun/Node repos with package.json, bootstraps dependencies before the command when node_modules is missing or dependency files changed. " +
 				"Spawns the framework's dev command (next dev / <pm> run dev / go run . / in-process FileServer) " +
 				"with cwd set to the repo's storage_root, so edits via code_edit_file land directly where the " +
@@ -532,7 +533,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "repos_dev_status",
-			Description: "Get the current dev run state for a repo (status, port, pid, framework, last error).",
+			Description: "Read preview readiness for a repo without changing Git settings (status, port, pid, framework, runner, URL, last error). After repos_dev_start, check until live or failed; use repos_dev_logs for startup errors. repos_git_sync_configure is a mutation and is never a preview status check.",
 			InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}}, []string{"slug"}),
 			Handler:     a.toolDevStatus,
 		},

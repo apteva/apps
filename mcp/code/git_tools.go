@@ -16,7 +16,7 @@ func (a *App) gitMCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{
 				"remote_url": map[string]any{"type": "string"},
 				"ref":        map[string]any{"type": "string", "description": "Optional remote branch, tag, or reachable commit SHA."},
-				"name": map[string]any{"type": "string"}, "slug": map[string]any{"type": "string"},
+				"name":       map[string]any{"type": "string"}, "slug": map[string]any{"type": "string"},
 				"description": map[string]any{"type": "string"}, "framework": map[string]any{"type": "string"},
 				"connection_id": map[string]any{"type": "integer"},
 			}, []string{"remote_url"}),
@@ -24,7 +24,7 @@ func (a *App) gitMCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "repos_git_connect",
-			Description: "Connect an existing Code repository to a standard HTTPS Git remote without overwriting local files. Matching trees attach directly; differing trees are preserved on apteva/local-before-connect and return reconciliation_required. Args: slug, remote_url, branch?, connection_id?.",
+			Description: "Connect an existing Code repository to a standard HTTPS Git remote only when the user requests external Git integration. Git is optional: this is not needed to save edits, run HTML, or start/repair workspace previews. Does not overwrite local files. Matching trees attach directly; differing trees are preserved on apteva/local-before-connect and return reconciliation_required. Args: slug, remote_url, branch?, connection_id?.",
 			InputSchema: schemaObject(map[string]any{
 				"slug": map[string]any{"type": "string"}, "remote_url": map[string]any{"type": "string"},
 				"branch": map[string]any{"type": "string"}, "connection_id": map[string]any{"type": "integer"},
@@ -32,9 +32,9 @@ func (a *App) gitMCPTools() []sdk.Tool {
 			HandlerCtx: a.toolGitConnect,
 		},
 		{
-			Name:        "repos_git_status",
+			Name: "repos_git_status",
 			Description: "Get whether a repository is externally Git-backed plus branch, HEAD, upstream, ahead/behind counts, and changed or conflicted paths. " +
-				"Call this before any repos_git_* mutation. If git_backed is false, external Git is not configured; use ordinary Code editing or optional native repos_checkpoint instead. Args: slug.",
+				"Use this to check prerequisites for requested Git commits or sync, not ordinary edits/previews. If git_backed is false, external Git is not configured; do not commit or enable Git auto-sync. Ordinary Code editing and repos_dev_start work without Git or checkpoints. Args: slug.",
 			InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}}, []string{"slug"}),
 			HandlerCtx:  a.toolGitStatus,
 		},
@@ -51,7 +51,7 @@ func (a *App) gitMCPTools() []sdk.Tool {
 			HandlerCtx:  a.toolGitPull,
 		},
 		{
-			Name:        "repos_git_commit",
+			Name: "repos_git_commit",
 			Description: "Commit selected or all visible Code changes locally, but only for a repository whose repos_git_status response has git_backed=true and when the user asked for an external Git commit. " +
 				"Native-only repositories return an error; do not retry and do not describe a working-tree write as a commit. For ordinary edits, use code_write_file/code_edit_file and stop after verification. " +
 				"Args: slug, message, paths? (all changes when omitted), author_name?, author_email?, actor?.",

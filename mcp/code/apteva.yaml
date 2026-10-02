@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.14.9
+version: 0.14.10
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -11,6 +11,10 @@ description: |
   ZIP import for repository initialization or overlay updates. Native
   repo issues track bugs, feature requests, tasks, comments, and code
   links for agents and humans.
+  v0.14.10 distinguishes preview readiness and workspace source transfer
+  from optional external Git auto-sync in MCP descriptions and the /code skill.
+  A live-agent regression verifies native HTML editing and a workspace preview
+  without Git mutations, failed editing/preview calls, or checkpoints.
   v0.14.9 selects preview workspace profiles from the detected framework,
   so index.html in a blank repository uses Bun rather than a Go-only image.
   v0.14.8 adds code_import_file for exact-byte single-file blob imports,
@@ -175,11 +179,11 @@ provides:
     - name: repos_execution_configure
       description: Allow or revoke local execution for a repository after explicit confirmation.
     - name: repos_git_sync_configure
-      description: Enable or pause automatic commits and origin synchronization.
+      description: Mutate optional external Git auto-sync settings only for a requested Git workflow; enabling requires git_backed=true and an origin-tracking branch. Not a status check, workspace source sync, or preview start/repair. Use repos_dev_start and repos_dev_status for previews.
     - name: repos_git_sync_status
-      description: Read automatic sync state, retry time and required action.
+      description: Read external Git auto-sync settings without changing them; not workspace synchronization or preview readiness. Use repos_dev_status for previews.
     - name: repos_git_sync_now
-      description: Checkpoint and synchronize an enabled repository now.
+      description: Automatically Git-commit and push/pull an enabled external Git repository for a requested Git workflow; not needed for edits or workspace previews.
     - { name: repos_mark_template, description: "Mark a repository as a reusable template." }
     - { name: repos_unmark_template, description: "Clear the template flag." }
     - { name: templates_list, description: "List accessible user and embedded templates." }
@@ -187,7 +191,7 @@ provides:
     - name: repos_list
       description: List repositories in this Apteva project.
     - name: repos_create
-      description: Create a repository from a template (blank | nextjs | static | go | python).
+      description: Create a native repository from a template (blank | nextjs | static | go | python). Saving edits and running previews need no Git, commit, checkpoint, or Git auto-sync.
     - name: repos_get
       description: Repository metadata and tree summary.
     - name: repos_archive
@@ -207,15 +211,15 @@ provides:
     - name: repos_git_import
       description: Clone a standard HTTPS Git remote at a branch, tag, or reachable commit SHA; branches retain upstream tracking and pinned refs use detached HEAD.
     - name: repos_git_connect
-      description: Safely connect an existing Code repository to a Git remote without overwriting differing local files.
+      description: Connect to an optional external Git remote when requested, without overwriting differing local files; not a prerequisite for editing or running previews.
     - name: repos_git_status
-      description: Get branch, HEAD, upstream, ahead/behind, and working-tree changes.
+      description: Read git_backed and external Git branch, HEAD, upstream and changes for a requested Git workflow. If git_backed=false, do not commit or enable Git sync; edits and previews still work.
     - name: repos_git_fetch
       description: Fetch and prune origin tracking refs without changing checked-out files.
     - name: repos_git_pull
       description: Fetch and fast-forward the current clean branch.
     - name: repos_git_commit
-      description: Commit selected or all visible Code changes locally.
+      description: Commit selected or all changes only when external Git is configured and the user requested a Git commit. Working-tree writes are already saved; no commit is needed for ordinary edits or previews.
     - name: repos_git_push
       description: Push the current branch without force.
     - name: repos_git_diff
@@ -249,7 +253,7 @@ provides:
     - name: repos_export_ref
       description: Export the exact source tree at a native Code revision.
     - name: repos_dev_start
-      description: Start a dev/test preview process for a repo; production deploys belong in the Deploy app. Auto-installs JS dependencies when needed, auto-detects nextjs / node / go / static, and accepts run_cmd override.
+      description: Start a working-tree preview without Git, commits, checkpoints, or Git auto-sync. Auto-detects static index.html even in a blank repo, nextjs / node / go, installs JS dependencies when needed, and accepts run_cmd override. Code transfers source to connected Workspaces. Verify with repos_dev_status; diagnose with repos_dev_logs. Production deploys belong in Deploy.
     - name: repos_run_command
       description: Run a finite repo command locally or in an optional isolated Workspaces environment, optionally selecting an image plus editable workspace_paths and read-only support_paths, and return exit-code semantics.
     - name: repos_workspace_changes
@@ -261,7 +265,7 @@ provides:
     - name: repos_dev_stop
       description: Stop the dev process for a repo. Idempotent.
     - name: repos_dev_status
-      description: Current dev run state (port, pid, status, framework, last error).
+      description: Read preview readiness (status, runner, URL, port, pid, framework, last error) after repos_dev_start without changing Git settings. Git sync configuration is never a preview status check.
     - name: repos_dev_logs
       description: Tail the dev run's stdout/stderr log file.
     - name: issues_list
@@ -369,7 +373,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: code/v0.14.9
+    ref: code/v0.14.10
     entry: mcp/code
   port: 8080
   health_check: /health

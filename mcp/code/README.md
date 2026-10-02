@@ -1,5 +1,18 @@
 # Apteva Code
 
+## v0.14.10 — preview and Git tool routing
+
+The live MCP descriptions, marketplace manifest, and `/code` skill now
+distinguish preview start/status/logs, workspace source transfer/apply-back,
+and optional external Git auto-sync. Git sync configuration changes settings;
+it is not a preview status check or startup repair. Ordinary edits and HTML
+previews need no Git remote, Git commit, native checkpoint, or Git auto-sync.
+
+The native HTML tier 3 regression creates and edits one file in a blank repo,
+verifies a real workspace preview live twice, and checks that no editing or
+preview tool failed, no Git mutation occurred, and no checkpoint was created.
+Validated with `openai-codex` / `gpt-6.1-sol` in 11 iterations.
+
 ## v0.14.9 — static preview runtime
 
 An `index.html` in a repository created as `blank` is detected as static HTML
@@ -32,7 +45,8 @@ at `skills/how-to-use-code.md`. It covers source import and editing, reviewed
 ZIPs/patches, workspace execution and apply-back, optional native revisions, and
 building applications with the published `@apteva/web-sdk`, including Auth,
 scoped app HTTP/MCP calls, CRM search/create/update and shared app frontend
-components. The updated skill ships in Code 0.14.8, including single-file imports.
+components. Code 0.14.10 includes single-file imports and explicit preview/Git
+auto-sync routing guidance.
 
 The skill and MCP descriptions explicitly distinguish ordinary native working-
 tree edits from optional external Git commits and native checkpoints. Agents

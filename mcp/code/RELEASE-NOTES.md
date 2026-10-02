@@ -1,3 +1,26 @@
+# Apteva Code 0.14.10
+
+Clarifies the live MCP tool descriptions, published manifest, and `/code`
+skill so agents distinguish preview start/status/logs from workspace source
+transfer and optional external Git auto-sync. Both enable and pause operations
+change Git settings; neither starts, repairs, or verifies a preview. Enabling
+Git auto-sync is only for a requested Git workflow with a Git-backed repository
+and an origin-tracking branch. Saving or previewing native files needs no Git
+remote, commit, native checkpoint, or auto-sync configuration.
+
+Adds `scenarios/10-native-html-preview.yaml`: a real agent creates and edits
+one HTML file in a blank repository, checks a real workspace preview live
+twice, and verifies the saved source, disabled Git sync, unchanged initial
+revision count, and dirty working tree. Git tools remain available and the
+directive does not tell the agent which tools to choose. All assertions passed
+with `openai-codex` / `gpt-6.1-sol` in 11 iterations, with no failed tools or Git
+mutations. The temporary test preview and repository are removed afterward.
+
+The manifest and runtime source pin match `code/v0.14.10`; the published app
+SDK pin remains `v0.92.0`. No runtime handler behavior changes in this release.
+
+---
+
 # Apteva Code 0.14.9
 
 Fixes static HTML previews in repositories created as `blank`: the detected

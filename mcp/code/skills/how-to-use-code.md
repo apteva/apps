@@ -135,6 +135,32 @@ Docker host; use an authorized preview route when the browser is elsewhere.
 Local execution requires the repository's explicit execution permission; do
 not silently select it after a workspace failure.
 
+For a plain HTML page, write `index.html` and call `repos_dev_start` with the
+repository's slug (optionally `framework: "static"`), then check
+`repos_dev_status` until `live` or `failed`. This also works in a repository
+created as `blank`. No package.json, Git remote, commit, native checkpoint, or
+Git auto-sync is needed. Do not report a preview as ready based only on the
+start response; if it fails, inspect `repos_dev_logs` before choosing a repair.
+
+### Do not confuse Git sync, workspace source transfer, and previews
+
+- `repos_dev_start`, `repos_dev_status`, and `repos_dev_logs` start/check/debug
+  a preview. Code handles source transfer to its connected Workspaces runtime.
+- `repos_workspace_changes` previews workspace-generated file changes;
+  `repos_workspace_apply` explicitly brings reviewed changes back to Code.
+- `repos_git_sync_configure` changes optional external Git auto-commit and
+  origin push/pull settings. Both `enabled: true` and `enabled: false` mutate
+  settings; neither checks readiness nor starts, repairs, or syncs a workspace
+  preview. Use `repos_git_sync_status` only to read Git auto-sync settings.
+
+Only configure Git auto-sync when the user asks for that Git workflow and
+`repos_git_status` confirms `git_backed: true` with an origin-tracking branch.
+Do not enable, pause, or "restore" Git sync during ordinary file editing or
+preview troubleshooting, even on a Git-backed repository. After `repository
+is not Git-backed`, stop that Git path; do not retry enable/disable or attach a
+remote to make a native preview run. If a tool was selected incorrectly,
+discover the actual tool by its name and schema before calling it again.
+
 ## Revisions are optional during ordinary work
 
 Editing and running use the working tree without requiring a checkpoint or Git
