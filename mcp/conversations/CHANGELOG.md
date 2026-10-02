@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.24.32 — 2026-10-02
+
+- Publish durable, recipient-scoped notification events for messages, approvals, alerts, and reports after committed transcript writes.
+- Preserve live delivery paths and add duplicate-safe retry, private-recipient isolation, and streaming-fragment coverage.
+
 ## 0.24.31 — 2026-10-02
 
 - Use neutral user-message bubbles in light mode while retaining the existing dark-mode styling.

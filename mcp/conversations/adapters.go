@@ -279,13 +279,115 @@ func (a *App) appendAndDeliver(app *sdk.AppCtx, conv *Conversation, msg *Message
 		return nil, false, err
 	}
 	stored, inserted, err := a.store.AppendMessageWithDeliveries(msg, targets)
-	if err != nil || !inserted {
+	if err != nil {
 		return stored, inserted, err
 	}
-	for _, target := range targets {
-		a.dispatchOrQueue(app, target, conv, stored)
+	if inserted {
+		for _, target := range targets {
+			a.dispatchOrQueue(app, target, conv, stored)
+		}
 	}
-	return stored, true, nil
+	// Publish after the message and its delivery ledger are durable. Calling
+	// this for duplicate appends is intentional: the stable event ID lets the
+	// server acknowledge a retry without creating a second notification. The
+	// existing Conversations hub and transports are dispatched first so a slow
+	// notification gateway cannot delay live chat updates.
+	a.publishConversationEvent(app, conv, stored)
+	return stored, inserted, nil
+}
+
+func conversationEventTopic(msg *Message) string {
+	if msg == nil {
+		return ""
+	}
+	switch msg.ComponentKind {
+	case kindApproval:
+		return "conversation.approval.created"
+	case kindAlert:
+		return "conversation.alert.created"
+	case kindReport:
+		return "conversation.report.created"
+	default:
+		return "conversation.message.created"
+	}
+}
+
+func conversationPreview(content string) string {
+	content = strings.Join(strings.Fields(strings.TrimSpace(content)), " ")
+	const maxPreviewRunes = 240
+	runes := []rune(content)
+	if len(runes) <= maxPreviewRunes {
+		return content
+	}
+	return string(runes[:maxPreviewRunes-1]) + "…"
+}
+
+func (a *App) notificationRecipients(conv *Conversation) ([]int64, error) {
+	if conv == nil {
+		return nil, errors.New("conversation required")
+	}
+	seen := map[int64]bool{}
+	ids := make([]int64, 0, 2)
+	appendUser := func(id int64) {
+		if id > 0 && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	appendUser(conv.OwnerUserID)
+	rows, err := a.store.db.Query(`SELECT DISTINCT user_id FROM participants WHERE conversation_id=? AND user_id>0 ORDER BY user_id`, conv.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		appendUser(id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+func (a *App) publishConversationEvent(app *sdk.AppCtx, conv *Conversation, msg *Message) {
+	if app == nil || conv == nil || msg == nil {
+		return
+	}
+	topic := conversationEventTopic(msg)
+	if topic == "" {
+		return
+	}
+	bus := app.EventBusAPI()
+	if bus == nil {
+		return
+	}
+	recipients, err := a.notificationRecipients(conv)
+	if err != nil {
+		app.Logger().Warn("conversation notification recipients unavailable", "message", msg.ID, "err", err)
+		return
+	}
+	data := map[string]any{
+		"conversation_id":    conv.ID,
+		"conversation_title": conv.Title,
+		"message_id":         msg.ID,
+		"project_id":         conv.ProjectID,
+		"role":               msg.Role,
+		"preview":            conversationPreview(msg.Content),
+		"recipient_user_ids": recipients,
+		"agent_id":           msg.AgentID,
+		"component_kind":     msg.ComponentKind,
+		"severity":           msg.Severity,
+	}
+	eventID := fmt.Sprintf("conversation:%s:message:%d:%s", conv.ID, msg.ID, topic)
+	if err := bus.PublishAppEvent(conv.ProjectID, eventID, topic, data); err != nil {
+		// The transcript remains authoritative. A later retry with the same
+		// durable message ID is safe because the server deduplicates eventID.
+		app.Logger().Warn("conversation notification publication failed", "message", msg.ID, "topic", topic, "err", err)
+	}
 }
 
 // deliveryTargets uses resource scopes: private rows go only to their owner
