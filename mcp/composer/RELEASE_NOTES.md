@@ -1,3 +1,18 @@
+# Composer v0.9.1
+
+Remote rendering now explicitly invokes Bash when sending generated scripts to
+Instances. Previously, Instances executed the Bash script through `sh`, causing
+upload arrays or `pipefail` to fail before rendering could complete. The script
+is quoted as one argument so literal values survive the outer shell and failed
+pipelines retain their exit status.
+
+Remote render hosts require Bash. No configuration or database migration is
+needed. The full Composer Go suite, build, and `go vet` pass. A transport regression
+executes the generated render/upload script through a POSIX shell and covers
+literal quotes, substitutions, multiline values, and pipeline failures.
+
+---
+
 # Composer v0.9.0
 
 Composer now supports procedural clips as an additive source alongside image,
