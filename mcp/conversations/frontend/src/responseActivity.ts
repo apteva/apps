@@ -3,7 +3,6 @@ import type { ChatTimelineItem } from "./toolActivityModel";
 
 export interface PendingResponse {
   optimistic?: boolean;
-  continuing?: boolean;
   agentId?: number;
   threadId?: string;
   afterMessageId?: number;
@@ -28,12 +27,8 @@ export function responseToolGroup(response: PendingResponse, timeline: ChatTimel
   const since = !response.optimistic && anchor?.role === "user" ? Date.parse(anchor.created_at) : response.createdAt ?? Infinity;
   for (let i = timeline.length - 1; i >= 0; i--) {
     const item = timeline[i]!;
-    // A durable message or streaming acknowledgement ends the tool burst.
-    // A continuing phase after that message belongs to a new response step,
-    // so do not resurrect an older group as the active handoff.
-    if (response.continuing && (item.kind === "message" || item.kind === "stream")) break;
     const tools = item.kind === "toolGroup" ? item.tools : item.kind === "tool" ? [item.tool] : [];
-    if (tools.some(tool => (response.continuing || tool.state === "running" || tool.state === "preparing")
+    if (tools.some(tool => (tool.state === "running" || tool.state === "preparing")
       && tool.agentId === response.agentId
       && (!response.threadId || tool.threadId === response.threadId) && tool.startedAt >= since)) return item.key;
   }

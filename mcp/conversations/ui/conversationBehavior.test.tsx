@@ -472,7 +472,7 @@ test("optimistic response survives send completion and hands off once to the ser
  expect(element.querySelectorAll('[role="status"]')).toHaveLength(0);
 });
 
-test("completed tool hands progress to the continuing tool group", async () => {
+test("completed tool hands progress to Thinking while the model continues", async () => {
  const user={...message(826,"a","Locate the client onboarding process"),created_at:"2026-09-23T12:12:34.761Z"};
  fetcher=(url)=>(url.includes("/deliveries")||url.includes("/activity"))?json([]):json({messages:url.includes("/messages")?[user]:[],cursor:826,before:826,has_more:false});
  await render();
@@ -491,9 +491,9 @@ test("completed tool hands progress to the continuing tool group", async () => {
    stream({data:JSON.stringify(progress("continuing",2))});
  });
  await settle();
- expect(element.querySelector(".chat-tool-copy-running")).not.toBeNull();
- expect(element.querySelector(".chat-tool-activity-continuing")).not.toBeNull();
- expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+ expect(element.querySelector(".chat-tool-copy-running")).toBeNull();
+ expect(element.querySelector(".chat-tool-activity button")?.getAttribute("aria-busy")).toBeNull();
+ expect(element.querySelector('[aria-label="Thinking"]')).not.toBeNull();
 });
 
 test("tool preparation stays visible while the running frame waits for activity", async () => {
@@ -513,7 +513,7 @@ test("tool preparation stays visible while the running frame waits for activity"
  expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
 });
 
-test("Processes trace: acknowledgement precedes grouped tools, handoffs stay in the tool group, final text survives done-before-message", async () => {
+test("Processes trace: acknowledgement precedes grouped tools, model waits show Thinking between tools, final text survives done-before-message", async () => {
  await render();
  const events=FakeEvents.instances[0];
  const frame=async(value:any)=>act(async()=>events.listeners.get("stream")!({data:JSON.stringify({chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"",text:"",done:false,...value})}));
@@ -544,9 +544,9 @@ test("Processes trace: acknowledgement precedes grouped tools, handoffs stay in 
    expect(element.textContent!.indexOf("I will check")).toBeLessThan(element.textContent!.indexOf(`Lookup ${i+1}`));
    await frame({tool_activity:{...tool,status:"completed",ended_at:at(seconds+.018),revision:2}});
    await progress("continuing",seconds+.02); await settle();
-   expect(element.querySelector(".chat-tool-copy-running")).not.toBeNull();
-   expect(element.querySelector(".chat-tool-activity-continuing")).not.toBeNull();
-   expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+   expect(element.querySelector(".chat-tool-copy-running")).toBeNull();
+   expect(element.querySelector(".chat-tool-activity button")?.getAttribute("aria-busy")).toBeNull();
+   expect(element.querySelector('[aria-label="Thinking"]')).not.toBeNull();
    // A delayed preparation for the same completed call must not revive it.
    await progress("preparing_tool",seconds-.1,call_id,tool.name);
    expect(element.querySelector('[aria-label="Thinking"]')).not.toBeNull();

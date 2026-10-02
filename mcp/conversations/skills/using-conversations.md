@@ -18,10 +18,14 @@ Inspect them in that request; they may not be available on later model turns.
 For a multi-step image task, identify the relevant visual fact before your first
 acknowledgement and include it there, then use tools. For a simple question such as "What do you see?",
 answer directly with `conversations_send`, `phase=final`. Do not send a separate
-"I'll take a look" acknowledgement and do not call `conversations_read_attachment`
-to inspect an image already supplied. Use the file-reading tool for non-image
-files or older attachment references when necessary. Describe only details you
-can actually see; the filename or byte count is not evidence of image quality.
+"I'll take a look" acknowledgement. Do not call an attachment-reading tool for
+an image already supplied. Non-image attachments include a Conversations-scoped
+attachment reference and may include a Storage file ID. When a receiving app's
+file, document, or ZIP-import tool needs the original bytes, call
+`conversations_attachment_to_blob` and pass its returned `blobref://` handle to
+that tool. Treat attachment IDs as scoped references, not generic blob readers.
+Describe only details you can actually see; the filename or byte count is not
+evidence of image quality.
 
 Before calling any work tool for a user request, including a single quick
 lookup, call `conversations_send` with `phase=acknowledgement` alone. The

@@ -17,7 +17,7 @@ for (const host of ["dashboard", "panel", "external", "package"]) {
    const message=(offset:number,role:string,phase:string,content:string)=>request.post("/append-message",{data:{id:id+offset,conversation_id:chat,role,agent_id:role==="agent"?41:0,phase,content,components:[],created_at:new Date().toISOString()}});
    const animatedThinking=async()=>{
     await expect(thinking).toHaveCount(1); await expect(thinking).toBeVisible();
-    expect(await thinking.locator(".chat-thinking-dots > span").first().evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-thinking-dot");
+    await expect.poll(()=>thinking.locator(".chat-thinking-dots > span").first().evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-thinking-dot");
    };
    await message(0,"user","final",`Request ${round}`); await progress("thinking"); await animatedThinking();
    await message(1,"agent","acknowledgement",`I will check request ${round}.`); await animatedThinking();
@@ -30,8 +30,8 @@ for (const host of ["dashboard", "panel", "external", "package"]) {
    await frame({tool_activity:tool}); await progress("running",{tool_name:tool.name,call_id:run_id});
    await expect(pulsing).toHaveCount(1); await expect(thinking).toHaveCount(0);
    await frame({tool_activity:{...tool,status:"completed",ended_at:new Date().toISOString(),revision:2}}); await progress("continuing");
-   await expect(pulsing).toHaveCount(1); await expect(thinking).toHaveCount(0);
-   await page.reload(); await expect(page.getByTitle("Live")).toBeVisible(); await expect(pulsing).toHaveCount(1);
+   await expect(pulsing).toHaveCount(0); await animatedThinking();
+   await page.reload(); await expect(page.getByTitle("Live")).toBeVisible(); await expect(pulsing).toHaveCount(0); await animatedThinking();
    await message(2,"agent","progress",`Checking the next step ${round}.`); await progress("thinking"); await animatedThinking();
    await expect(pulsing).toHaveCount(0);
    // The final message settles the UI even if its idle frame is delayed.
@@ -74,7 +74,7 @@ for (const host of ["dashboard", "external", "package"]) {
     return Boolean(acknowledgement && tools && acknowledgement.y < tools.y);
    }).toBe(true);
    await emit({tool_activity:{...tool,status:"completed",ended_at:at(when+18),revision:2}}); await progress("continuing");
-   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1); await expect(thinking).toHaveCount(0);
+   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0); await expect(thinking).toBeVisible();
   }
   await message(2,"I will check the processes.",at(6270));
   await expect(page.getByText("I will check the processes.",{exact:true})).toHaveCount(1);
@@ -105,7 +105,7 @@ for (const host of ["dashboard", "panel", "external", "package"]) {
   const thinking=page.getByRole("status",{name:"Thinking",exact:true});
   const animatedThinking=async()=>{
    await expect(thinking).toBeVisible();
-   expect(await thinking.locator(".chat-thinking-dots > span").first().evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-thinking-dot");
+   await expect.poll(()=>thinking.locator(".chat-thinking-dots > span").first().evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-thinking-dot");
   };
   const animatedTool=async()=>{
    await expect(page.locator(".chat-tool-copy-running")).toHaveCount(1);
@@ -124,8 +124,8 @@ for (const host of ["dashboard", "panel", "external", "package"]) {
    await request.post("/emit",{data:{...base,tool_activity:tool}}); await progress("running"); await animatedTool();
    await page.reload(); await expect(page.getByTitle("Live")).toBeVisible(); await animatedTool();
    await request.post("/emit",{data:{...base,tool_activity:{...tool,status:"completed",ended_at:new Date().toISOString(),revision:2}}});
-   await progress("continuing"); await animatedTool(); await expect(thinking).toHaveCount(0);
-   await page.reload(); await expect(page.getByTitle("Live")).toBeVisible(); await animatedTool(); await expect(thinking).toHaveCount(0);
+   await progress("continuing"); await animatedThinking(); await expect(page.locator(".chat-tool-copy-running")).toHaveCount(0);
+   await page.reload(); await expect(page.getByTitle("Live")).toBeVisible(); await animatedThinking(); await expect(page.locator(".chat-tool-copy-running")).toHaveCount(0);
    await request.post("/append-message",{data:{id:id+1,conversation_id:chat,role:"agent",agent_id:41,content:`Reply ${response+1}`,created_at:new Date().toISOString()}});
    await progress("idle"); await expect(thinking).toHaveCount(0);
    await expect(page.locator(".chat-tool-copy-running")).toHaveCount(0);

@@ -1069,6 +1069,162 @@ func TestScenario_RoomFanoutAndRetry(t *testing.T) {
 	t.Fatal("both Codex room participants did not reply within 120s")
 }
 
+// Exercise the same text routing used by the composer, with real model replies
+// and a quiet window after each round to catch unintended fan-out or duplicates.
+func TestScenario_RoomMessagesAndMentions(t *testing.T) {
+	c := newScenarioClient(t)
+	first, _ := c.ensureAgent()
+	second, _ := c.ensureAgent()
+	if first == second {
+		t.Fatal("room scenario requires two distinct agents")
+	}
+	names := map[int64]string{}
+	for _, id := range []int64{first, second} {
+		var agent struct {
+			Name string `json:"name"`
+		}
+		if status := c.do("GET", fmt.Sprintf("/api/agents/%d", id), nil, &agent); status != 200 || agent.Name == "" {
+			t.Fatalf("get participant %d: status=%d name=%q", id, status, agent.Name)
+		}
+		names[id] = agent.Name
+	}
+	var conv Conversation
+	if status := c.do("POST", "/api/apps/conversations/chats", map[string]any{
+		"agent_ids": []int64{first, second}, "lead_agent_id": first, "title": "Room messages and mentions",
+	}, &conv); status != 200 || conv.ID == "" || conv.Kind != "room" {
+		t.Fatalf("create room: status=%d conversation=%+v", status, conv)
+	}
+	defer c.deleteConversation(conv.ID)
+	path := "/api/apps/conversations/messages?chat_id=" + conv.ID
+	type round struct {
+		name, content, contains string
+		targets                 []int64
+		explicit                []int64
+		retry                   bool
+		messageID               int64
+	}
+	rounds := []round{
+		{name: "ordinary greeting", content: "Hi! I'm planning a picnic at Cedar Park. Please remember the location and briefly confirm it.", contains: "cedar park", targets: []int64{first}},
+		{name: "ordinary follow-up", content: "Which park did I just choose?", contains: "cedar park", targets: []int64{first}},
+		{name: "mention second agent", content: "@" + names[second] + " could you suggest a drink for our picnic? I'd prefer lemonade.", contains: "lemonade", targets: []int64{second}},
+		{name: "shared history", content: "@" + names[second] + " please read the shared conversation history and tell me which park I chose before you joined in.", contains: "cedar park", targets: []int64{second}},
+		{name: "mention lead agent", content: "@" + names[first] + " let's bring apples as a snack. Can you confirm that?", contains: "apples", targets: []int64{first}},
+		{name: "mention everyone", content: "@all let's meet at 10:30. Please each confirm that time briefly.", contains: "10:30", targets: []int64{first, second}},
+		{name: "ordinary message after broadcast", content: "What meeting time did we agree on?", contains: "10:30", targets: []int64{first}},
+		{name: "explicit recipient overrides mention and retry", content: "@all let's also bring a blanket. Please confirm briefly.", contains: "blanket", targets: []int64{second}, explicit: []int64{second}, retry: true},
+	}
+	// Audit all prior rounds on every poll, so delayed replies cannot hide behind
+	// the next message. A final answer is required; acknowledgement alone fails.
+	audit := func(last int) bool {
+		t.Helper()
+		var rows []Message
+		if status := c.do("GET", path, nil, &rows); status != 200 {
+			t.Fatalf("read transcript: %d", status)
+		}
+		ready := true
+		for i := 0; i <= last; i++ {
+			step := rounds[i]
+			users := 0
+			finals := map[int64]int{}
+			matches := map[int64]bool{}
+			allowed := map[int64]bool{}
+			for _, id := range step.targets {
+				allowed[id] = true
+			}
+			for _, row := range rows {
+				if row.ClientID == fmt.Sprintf("room-mentions-%d", i) && row.Role == "user" {
+					users++
+				}
+				if row.Role != "agent" || row.ID <= step.messageID || i < last && row.ID >= rounds[i+1].messageID {
+					continue
+				}
+				if !allowed[row.AgentID] {
+					t.Fatalf("%s: untargeted agent %d replied: %q", step.name, row.AgentID, row.Content)
+				}
+				if row.ThreadID != conversationThreadID(conv.ID) {
+					t.Fatalf("%s: reply escaped bound thread: %q", step.name, row.ThreadID)
+				}
+				if row.Phase == "final" {
+					finals[row.AgentID]++
+					matches[row.AgentID] = strings.Contains(strings.ToLower(row.Content), step.contains)
+				}
+			}
+			if users != 1 {
+				t.Fatalf("%s: expected one durable user row, got %d", step.name, users)
+			}
+			for _, id := range step.targets {
+				if finals[id] > 1 {
+					t.Fatalf("%s: agent %d sent %d final replies", step.name, id, finals[id])
+				}
+				if finals[id] == 1 && !matches[id] {
+					t.Fatalf("%s: agent %d final did not contain %q: %+v", step.name, id, step.contains, rows)
+				}
+				ready = ready && finals[id] == 1 && matches[id]
+			}
+		}
+		return ready
+	}
+	for i := range rounds {
+		step := &rounds[i]
+		t.Logf("starting %s; expected recipients %v", step.name, step.targets)
+		payload := map[string]any{"content": step.content, "client_message_id": fmt.Sprintf("room-mentions-%d", i)}
+		if len(step.explicit) > 0 {
+			payload["target_agent_ids"] = step.explicit
+		}
+		var sent Message
+		if status := c.do("POST", path, payload, &sent); status != 200 || sent.ID == 0 {
+			t.Fatalf("%s: send status=%d", step.name, status)
+		}
+		step.messageID = sent.ID
+		var actual []int64
+		raw, _ := json.Marshal(sent.Metadata["target_agent_ids"])
+		if err := json.Unmarshal(raw, &actual); err != nil || len(actual) != len(step.targets) {
+			t.Fatalf("%s: wrong persisted routing: %s", step.name, raw)
+		}
+		for _, id := range actual {
+			found := false
+			for _, want := range step.targets {
+				found = found || id == want
+			}
+			if !found {
+				t.Fatalf("%s: unexpected persisted recipient %d", step.name, id)
+			}
+		}
+		if step.retry {
+			var retry Message
+			if status := c.do("POST", path, payload, &retry); status != 200 || retry.ID != sent.ID {
+				t.Fatalf("retry did not reuse original message: status=%d original=%d retry=%d", status, sent.ID, retry.ID)
+			}
+		}
+		deadline := time.Now().Add(150 * time.Second)
+		var readyAt time.Time
+		passed := false
+		for time.Now().Before(deadline) {
+			if audit(i) {
+				if readyAt.IsZero() {
+					readyAt = time.Now()
+				}
+				if time.Since(readyAt) >= 12*time.Second {
+					passed = true
+					break
+				}
+			}
+			time.Sleep(2 * time.Second)
+		}
+		if !passed {
+			t.Fatalf("%s: missing expected final replies within 150s", step.name)
+		}
+		t.Logf("PASS %s: correct recipients, one final each, no extra replies during 12s settle", step.name)
+	}
+	foundHistory := false
+	for _, event := range c.ownershipToolEvents(second) {
+		foundHistory = foundHistory || event.ThreadID == conversationThreadID(conv.ID) && event.Data.Name == "conversations_history"
+	}
+	if !foundHistory {
+		t.Fatal("second participant never fetched the shared conversation history")
+	}
+}
+
 func TestScenario_ConversationApprovalDestination(t *testing.T) {
 	c := newScenarioClient(t)
 	agent, cleanup := c.ensureAgent()
