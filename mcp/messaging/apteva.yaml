@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.13.54
+version: 0.13.55
 description: |
   Send and receive email through AWS SES or Gmail and SMS/WhatsApp through
   Twilio. Tracks

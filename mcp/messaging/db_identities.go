@@ -12,7 +12,7 @@ package main
 //                   tokens, inbound bootstrap config) that has no
 //                   analog on the sendable side. Never a From value.
 //
-// The cross-app lookup ("is alice@socialcast.dev's parent domain
+// The cross-app lookup ("is alice@example.org's parent domain
 // verified?") used to walk the senders table via string-suffix match;
 // now it's a single indexed FK on senders.parent_identity_id.
 
