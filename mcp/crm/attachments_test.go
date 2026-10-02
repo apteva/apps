@@ -84,7 +84,7 @@ func TestAttachmentOnlySendForwardsAndPersistsNormalizedMetadata(t *testing.T) {
 
 func TestInboundAttachmentRetryReconcilesMetadataWithoutDuplicateActivity(t *testing.T) {
 	ctx := newTestCtx(t)
-	payload := inboundPayload{
+	payload := inboundPayload{MatchedRecipient: "inbox@example.test",
 		MessageID:       12345,
 		Channel:         channelEmail,
 		From:            "sender@example.test",

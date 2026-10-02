@@ -61,7 +61,7 @@ func TestInbound_IgnoresAutomatedSenderBeforeContactCreate(t *testing.T) {
 		return out
 	}
 
-	auto := post(`{"channel":"email","from":"010001904fd6d83f-12345678@email.amazonses.com","to":["support@acme.com"],"body_text":"delivery failure"}`)
+	auto := post(`{"channel":"email","from":"010001904fd6d83f-12345678@email.amazonses.com","to":["support@acme.com"],"matched_recipient":"support@acme.com","body_text":"delivery failure"}`)
 	if auto["ignored"] != true {
 		t.Fatalf("expected SES inbound to be ignored, got %v", auto)
 	}
@@ -69,7 +69,7 @@ func TestInbound_IgnoresAutomatedSenderBeforeContactCreate(t *testing.T) {
 		t.Fatalf("automated inbound created %d contacts, want 0", got)
 	}
 
-	human := post(`{"channel":"email","from":"jane@startup.com","to":["support@acme.com"],"body_text":"hi, question about pricing"}`)
+	human := post(`{"channel":"email","from":"jane@startup.com","to":["support@acme.com"],"matched_recipient":"support@acme.com","body_text":"hi, question about pricing"}`)
 	if human["ignored"] == true || human["contact_id"] == nil {
 		t.Fatalf("expected human inbound to create a contact, got %v", human)
 	}

@@ -34,12 +34,20 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 	if ctx == nil {
 		return nil, errors.New("crm context not initialized")
 	}
+	body.Channel = strings.ToLower(strings.TrimSpace(body.Channel))
 	if body.Channel != "email" && body.Channel != "sms" && body.Channel != "whatsapp" {
 		return nil, errors.New("invalid inbound channel")
 	}
 	body.From = canonicalAddress(body.Channel, body.From)
 	if body.From == "" {
 		return nil, errors.New("from required")
+	}
+	recipient, ignoredReason, err := validateInboundDelivery(ctx, pid, &body)
+	if err != nil {
+		return nil, err
+	}
+	if ignoredReason != "" {
+		return map[string]any{"ok": true, "ignored": true, "reason": ignoredReason, "matched_recipient": recipient}, nil
 	}
 	if body.ReceivedAt == "" {
 		body.ReceivedAt = time.Now().UTC().Format(time.RFC3339Nano)
@@ -143,7 +151,10 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 			return nil, err
 		}
 	}
-	recipients := append([]string{body.MatchedRecipient}, body.To...)
+	recipients := []string{body.MatchedRecipient}
+	if body.Channel != channelEmail {
+		recipients = append(recipients, body.To...)
+	}
 	attributedListIDs := []int64{}
 	for _, rule := range rules {
 		if !rule.Enabled || !ruleRecipientMatches(rule, recipients) || !ruleSenderMatches(rule, body.From) {
@@ -245,12 +256,20 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 			replyTo = anyString(value)
 		}
 	}
-	act, err := logMessageActivityTx(tx, logMessageActivityInput{ProjectID: pid, ContactID: cid, Kind: receivedKindForChannel(body.Channel), Body: text, OccurredAt: body.ReceivedAt, Source: "messaging", ConversationID: convoID, MessagingID: body.MessageID, MessagingInstallID: sourceID, MessageIDHeader: body.MessageIDHeader, Attachments: body.Attachments, SourceDetail: map[string]any{"messaging_id": body.MessageID, "source_install_id": sourceID, "message_id_header": body.MessageIDHeader, "in_reply_to": body.InReplyTo, "matched_pattern": body.MatchedPattern, "from": body.From, "reply_to": replyTo, "receiving_identity": body.MatchedRecipient, "to": body.To, "cc": body.CC, "sender_automated": automated, "sender_class": reason}})
+	deliveryTo := body.To
+	if body.Channel == channelEmail {
+		deliveryTo = []string{body.MatchedRecipient}
+	}
+	act, err := logMessageActivityTx(tx, logMessageActivityInput{ProjectID: pid, ContactID: cid, Kind: receivedKindForChannel(body.Channel), Body: text, OccurredAt: body.ReceivedAt, Source: "messaging", ConversationID: convoID, MessagingID: body.MessageID, MessagingInstallID: sourceID, MessageIDHeader: body.MessageIDHeader, Attachments: body.Attachments, SourceDetail: map[string]any{"messaging_id": body.MessageID, "source_install_id": sourceID, "message_id_header": body.MessageIDHeader, "in_reply_to": body.InReplyTo, "matched_pattern": body.MatchedPattern, "from": body.From, "reply_to": replyTo, "receiving_identity": body.MatchedRecipient, "to": deliveryTo, "header_to": body.To, "cc": body.CC, "sender_automated": automated, "sender_class": reason}})
 	if err != nil {
 		return nil, err
 	}
 	parts := []conversationParticipant{{Role: "from", Address: body.From, ContactID: cid}}
-	for _, address := range append(body.To, body.MatchedRecipient) {
+	toParticipants := []string{body.MatchedRecipient}
+	if body.Channel != channelEmail {
+		toParticipants = append(toParticipants, body.To...)
+	}
+	for _, address := range toParticipants {
 		parts = append(parts, conversationParticipant{Role: "to", Address: address})
 	}
 	for _, address := range body.CC {

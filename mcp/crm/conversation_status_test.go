@@ -48,6 +48,8 @@ func (p *crmRecordingPlatform) CallAppResult(appName, tool string, input map[str
 	if out != nil {
 		payload := map[string]any{"ok": true}
 		switch tool {
+		case "identities_list":
+			payload = map[string]any{"identities": []map[string]any{{"kind": "email_domain", "address": "example.test"}}}
 		case "send_message":
 			payload = map[string]any{
 				"id":                  1000 + len(p.calls),
@@ -493,7 +495,7 @@ func TestInbound_FromSpamContactStaysSpam(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	payload := `{"channel":"email","from":"spammer@bad.test","to":["inbox@example.com"],"subject":"buy now","body_text":"no thanks"}`
+	payload := `{"channel":"email","from":"spammer@bad.test","to":["inbox@example.com"],"matched_recipient":"inbox@example.com","subject":"buy now","body_text":"no thanks"}`
 	r := httptest.NewRequest("POST", "/inbound?project_id=test-proj", bytes.NewBufferString(payload))
 	w := httptest.NewRecorder()
 	app.handleInbound(w, r)

@@ -2809,23 +2809,25 @@ func (a *App) toolRoutingRulesDelete(ctx *sdk.AppCtx, args map[string]any) (any,
 // inboundPayload mirrors what messaging.dispatchInbound POSTs to us.
 // Field names match messaging/main.go:2466-2483.
 type inboundPayload struct {
-	MessageID        int64                 `json:"message_id"`
-	Channel          string                `json:"channel"`
-	From             string                `json:"from"`
-	To               []string              `json:"to"`
-	CC               []string              `json:"cc"`
-	Subject          string                `json:"subject"`
-	BodyText         string                `json:"body_text"`
-	BodyHTML         string                `json:"body_html"`
-	MessageIDHeader  string                `json:"message_id_header"`
-	InReplyTo        string                `json:"in_reply_to"`
-	References       []string              `json:"references"`
-	Headers          map[string]any        `json:"headers"`
-	ReceivedAt       string                `json:"received_at"`
-	MatchedRecipient string                `json:"matched_recipient"`
-	MatchedPattern   string                `json:"matched_pattern"`
-	ToSubaddress     string                `json:"to_subaddress"`
-	Attachments      []messagingAttachment `json:"attachments"`
+	MessageID          int64                 `json:"message_id"`
+	Channel            string                `json:"channel"`
+	From               string                `json:"from"`
+	To                 []string              `json:"to"`
+	CC                 []string              `json:"cc"`
+	Subject            string                `json:"subject"`
+	BodyText           string                `json:"body_text"`
+	BodyHTML           string                `json:"body_html"`
+	MessageIDHeader    string                `json:"message_id_header"`
+	InReplyTo          string                `json:"in_reply_to"`
+	References         []string              `json:"references"`
+	Headers            map[string]any        `json:"headers"`
+	ReceivedAt         string                `json:"received_at"`
+	RouteStatus        string                `json:"route_status"`
+	EnvelopeRecipients []string              `json:"envelope_recipients"`
+	MatchedRecipient   string                `json:"matched_recipient"`
+	MatchedPattern     string                `json:"matched_pattern"`
+	ToSubaddress       string                `json:"to_subaddress"`
+	Attachments        []messagingAttachment `json:"attachments"`
 }
 
 func (a *App) handleInbound(w http.ResponseWriter, r *http.Request) {
@@ -2861,21 +2863,23 @@ func (a *App) toolMessagingInboundReceive(ctx *sdk.AppCtx, args map[string]any) 
 		return nil, err
 	}
 	body := inboundPayload{
-		MessageID:        int64Arg(args, "message_id"),
-		Channel:          strArg(args, "channel"),
-		From:             strArg(args, "from"),
-		To:               stringSliceArg(args, "to"),
-		CC:               stringSliceArg(args, "cc"),
-		Subject:          strArg(args, "subject"),
-		BodyText:         strArg(args, "body_text"),
-		BodyHTML:         strArg(args, "body_html"),
-		MessageIDHeader:  strArg(args, "message_id_header"),
-		InReplyTo:        strArg(args, "in_reply_to"),
-		References:       stringSliceArg(args, "references"),
-		ReceivedAt:       strArg(args, "received_at"),
-		MatchedRecipient: strArg(args, "matched_recipient"),
-		MatchedPattern:   strArg(args, "matched_pattern"),
-		ToSubaddress:     strArg(args, "to_subaddress"),
+		MessageID:          int64Arg(args, "message_id"),
+		Channel:            strArg(args, "channel"),
+		From:               strArg(args, "from"),
+		To:                 stringSliceArg(args, "to"),
+		CC:                 stringSliceArg(args, "cc"),
+		Subject:            strArg(args, "subject"),
+		BodyText:           strArg(args, "body_text"),
+		BodyHTML:           strArg(args, "body_html"),
+		MessageIDHeader:    strArg(args, "message_id_header"),
+		InReplyTo:          strArg(args, "in_reply_to"),
+		References:         stringSliceArg(args, "references"),
+		ReceivedAt:         strArg(args, "received_at"),
+		RouteStatus:        strArg(args, "route_status"),
+		EnvelopeRecipients: stringSliceArg(args, "envelope_recipients"),
+		MatchedRecipient:   strArg(args, "matched_recipient"),
+		MatchedPattern:     strArg(args, "matched_pattern"),
+		ToSubaddress:       strArg(args, "to_subaddress"),
 	}
 	if headers, ok := args["headers"].(map[string]any); ok {
 		body.Headers = headers

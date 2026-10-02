@@ -36,7 +36,7 @@ func TestEmailReplyMatchesOutboundRFCMessageID(t *testing.T) {
 	if deduped.(map[string]any)["provider_message_id"] != "ses-maclear" || deduped.(map[string]any)["message_id_header"] != activity.MessageIDHeader {
 		t.Fatalf("deduped send conflated provider and RFC IDs: %#v", deduped)
 	}
-	reply, err := ingestInbound(ctx, "test-proj", inboundPayload{
+	reply, err := ingestInbound(ctx, "test-proj", inboundPayload{MatchedRecipient: "inbox@example.test",
 		Channel: "email", From: "maclear@example.test", MessageID: 1369,
 		MessageIDHeader: "<maclear-reply@example.test>", InReplyTo: "<ses-maclear@eu-west-1.amazonses.com>", BodyText: "Yes",
 	})
@@ -46,7 +46,7 @@ func TestEmailReplyMatchesOutboundRFCMessageID(t *testing.T) {
 	if reply["conversation_id"] != conversationID {
 		t.Fatalf("reply split from original conversation: sent=%v reply=%v", conversationID, reply)
 	}
-	regionalVariant, err := ingestInbound(ctx, "test-proj", inboundPayload{
+	regionalVariant, err := ingestInbound(ctx, "test-proj", inboundPayload{MatchedRecipient: "inbox@example.test",
 		Channel: "email", From: "maclear@example.test", MessageID: 1370,
 		MessageIDHeader: "<maclear-reply-2@example.test>", InReplyTo: "<ses-maclear@email.amazonses.com>", BodyText: "Following up",
 	})
@@ -90,7 +90,7 @@ func TestLegacySESProviderIDMatchesOnlySameContactAndSESReference(t *testing.T) 
 		{"SES reference", "ventus@example.test", 1392, "<ses-ventus@eu-west-1.amazonses.com>", true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			reply, err := ingestInbound(ctx, "test-proj", inboundPayload{
+			reply, err := ingestInbound(ctx, "test-proj", inboundPayload{MatchedRecipient: "inbox@example.test",
 				Channel: "email", From: test.from, MessageID: test.id,
 				MessageIDHeader: "<reply-" + test.name + "@example.test>", InReplyTo: test.ref, BodyText: "Reply",
 			})
