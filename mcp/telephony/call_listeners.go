@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -24,6 +25,8 @@ type listenerAudioFrame struct {
 	at   time.Time
 }
 type callListener struct {
+	coaching   coachingState
+	coachStops chan coachingStop
 	hash       string
 	audio      chan listenerAudioFrame
 	done       chan struct{}
@@ -42,7 +45,7 @@ func (l *callListener) close(reason string) {
 }
 func (l *callListener) closeReason() string { l.mu.Lock(); defer l.mu.Unlock(); return l.reason }
 func (l *callListener) diagnostics() map[string]any {
-	return map[string]any{"sent_frames": []int64{l.sent[0].Load(), l.sent[1].Load()}, "overflow_frames": []int64{l.dropped[0].Load(), l.dropped[1].Load()}, "stale_frames": []int64{l.stale[0].Load(), l.stale[1].Load()}, "source_trimmed_frames": []int64{l.trimmed[0].Load(), l.trimmed[1].Load()}, "max_write_ms": l.maxWriteMS.Load()}
+	return map[string]any{"sent_frames": []int64{l.sent[0].Load(), l.sent[1].Load()}, "overflow_frames": []int64{l.dropped[0].Load(), l.dropped[1].Load()}, "stale_frames": []int64{l.stale[0].Load(), l.stale[1].Load()}, "source_trimmed_frames": []int64{l.trimmed[0].Load(), l.trimmed[1].Load()}, "max_write_ms": l.maxWriteMS.Load(), "coaching": l.coaching.grant.Enabled, "coach_starts": l.coaching.starts.Load(), "coach_received_frames": l.coaching.received.Load(), "coach_dropped_frames": l.coaching.dropped.Load()}
 }
 
 type callAudioTap struct {
@@ -58,6 +61,9 @@ func (t *callAudioTap) hasListeners() bool {
 	return !t.closed && len(t.listeners) > 0
 }
 func (t *callAudioTap) add(hash string, maximum int) (*callListener, error) {
+	return t.addWithCoaching(hash, maximum, coachingGrant{})
+}
+func (t *callAudioTap) addWithCoaching(hash string, maximum int, g coachingGrant) (*callListener, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.closed {
@@ -69,7 +75,9 @@ func (t *callAudioTap) add(hash string, maximum int) (*callListener, error) {
 	if len(t.listeners) >= maximum {
 		return nil, errors.New("listener limit reached")
 	}
-	l := &callListener{hash: hash, audio: make(chan listenerAudioFrame, listenerQueueFrames), done: make(chan struct{})}
+	l := &callListener{coachStops: make(chan coachingStop, 8), hash: hash, audio: make(chan listenerAudioFrame, listenerQueueFrames), done: make(chan struct{})}
+	l.coaching.grant = g
+	l.coaching.expires.Store(g.Expires)
 	if t.listeners == nil {
 		t.listeners = map[string]*callListener{}
 	}
@@ -224,9 +232,16 @@ func (a *App) listenerSessionValid(row *callRow, token string) bool {
 	}
 	var principal, providerJSON string
 	var expires int64
-	err := a.db().db.QueryRow(`SELECT principal,provider_json,expires_at FROM telephony_listener_sessions WHERE token_hash=? AND call_id=? AND project_id=?`, phoneHash(token), row.ID, row.ProjectID).Scan(&principal, &providerJSON, &expires)
+	var coaching bool
+	err := a.db().db.QueryRow(`SELECT principal,provider_json,expires_at,coaching FROM telephony_listener_sessions WHERE token_hash=? AND call_id=? AND project_id=?`, phoneHash(token), row.ID, row.ProjectID).Scan(&principal, &providerJSON, &expires, &coaching)
 	if err != nil || expires <= time.Now().Unix() {
 		return false
+	}
+	if coaching {
+		g, e := a.coachingGrant(row, token)
+		if e != nil || !a.coachingTargetValid(row, g) {
+			return false
+		}
 	}
 	if principal == "" {
 		return true
@@ -240,26 +255,31 @@ func (a *App) listenerSessionValid(row *callRow, token string) bool {
 		return false
 	}
 	p, err := phonePrincipalFromPolicy(row.ProjectID, identity, policy)
-	if err != nil || !a.phoneCanListen(p, row) {
+	if err != nil || !a.phoneCanListen(p, row) || (coaching && !p.Coach) {
 		return false
 	}
 	if providerJSON != "" {
 		var provider phoneAuthProvider
-		if json.Unmarshal([]byte(providerJSON), &provider) != nil || !phoneProviderStillAllows(policy, provider, "call.listen") {
+		if json.Unmarshal([]byte(providerJSON), &provider) != nil || (!phoneProviderStillAllows(policy, provider, "call.listen") || (coaching && !phoneProviderStillAllows(policy, provider, "call.coach"))) {
 			return false
 		}
 	}
 	return true
 }
 func (a *App) handleListenAction(w http.ResponseWriter, r *http.Request, project, action, id string) {
+	coaching := strings.HasPrefix(action, "coach")
+	if coaching {
+		unlock := a.softphones.lockClaim(id)
+		defer unlock()
+	}
 	row, err := a.db().findCall(id)
 	p := phoneUserFrom(r)
-	if err != nil || row == nil || row.ProjectID != project || !a.phoneCanListen(p, row) {
+	if err != nil || row == nil || row.ProjectID != project || !a.phoneCanListen(p, row) || (coaching && !a.phoneCanCoach(p, row)) {
 		http.Error(w, "call not found", 404)
 		return
 	}
 	if action == "listen-audit" {
-		rows, err := a.db().db.Query(`SELECT id,principal,joined_at,left_at,reason,diagnostics_json FROM telephony_listener_audit WHERE call_id=? AND project_id=? ORDER BY joined_at DESC LIMIT 100`, id, project)
+		rows, err := a.db().db.Query(`SELECT id,principal,joined_at,left_at,reason,diagnostics_json,mode FROM telephony_listener_audit WHERE call_id=? AND project_id=? ORDER BY joined_at DESC LIMIT 100`, id, project)
 		if err != nil {
 			http.Error(w, "audit unavailable", 503)
 			return
@@ -267,21 +287,41 @@ func (a *App) handleListenAction(w http.ResponseWriter, r *http.Request, project
 		defer rows.Close()
 		out := make([]map[string]any, 0)
 		for rows.Next() {
-			var auditID, principal, joined, left, reason, diagnostics string
-			if rows.Scan(&auditID, &principal, &joined, &left, &reason, &diagnostics) != nil {
+			var auditID, principal, joined, left, reason, diagnostics, mode string
+			if rows.Scan(&auditID, &principal, &joined, &left, &reason, &diagnostics, &mode) != nil {
 				http.Error(w, "audit unavailable", 503)
 				return
 			}
-			out = append(out, map[string]any{"id": auditID, "principal": json.RawMessage(firstNonEmpty(principal, "null")), "joined_at": joined, "left_at": left, "reason": reason, "diagnostics": json.RawMessage(diagnostics)})
+			out = append(out, map[string]any{"id": auditID, "principal": json.RawMessage(firstNonEmpty(principal, "null")), "joined_at": joined, "left_at": left, "reason": reason, "diagnostics": json.RawMessage(diagnostics), "mode": mode})
 		}
 		if rows.Err() != nil {
 			http.Error(w, "audit unavailable", 503)
 			return
 		}
-		writeJSON(w, map[string]any{"listeners": out})
+		rows.Close()
+		talks, err := a.db().db.Query(`SELECT id,listener_audit_id,principal,started_at,ended_at,reason FROM telephony_coaching_audit WHERE call_id=? AND project_id=? ORDER BY started_at DESC LIMIT 100`, id, project)
+		if err != nil {
+			http.Error(w, "audit unavailable", 503)
+			return
+		}
+		defer talks.Close()
+		spurts := make([]map[string]any, 0)
+		for talks.Next() {
+			var aid, lid, who, start, end, reason string
+			if talks.Scan(&aid, &lid, &who, &start, &end, &reason) != nil {
+				http.Error(w, "audit unavailable", 503)
+				return
+			}
+			spurts = append(spurts, map[string]any{"id": aid, "listener_audit_id": lid, "principal": json.RawMessage(firstNonEmpty(who, "null")), "started_at": start, "ended_at": end, "reason": reason})
+		}
+		if talks.Err() != nil {
+			http.Error(w, "audit unavailable", 503)
+			return
+		}
+		writeJSON(w, map[string]any{"listeners": out, "coaching": spurts})
 		return
 	}
-	if action != "listen" {
+	if action != "listen" && action != "coach" {
 		var body struct {
 			SessionToken string `json:"session_token"`
 		}
@@ -289,11 +329,16 @@ func (a *App) handleListenAction(w http.ResponseWriter, r *http.Request, project
 			http.Error(w, "listener credential required", 400)
 			return
 		}
+		grant, grantErr := a.coachingGrant(row, body.SessionToken)
+		if grantErr != nil || grant.Enabled != coaching {
+			http.Error(w, "session mode mismatch", 403)
+			return
+		}
 		principal := ""
 		if p != nil {
 			principal = p.Identity.key()
 		}
-		if action == "listen-stop" {
+		if action == "listen-stop" || action == "coach-stop" {
 			res, err := a.db().db.Exec(`DELETE FROM telephony_listener_sessions WHERE token_hash=? AND call_id=? AND project_id=? AND principal=?`, phoneHash(body.SessionToken), id, project, principal)
 			if err != nil {
 				http.Error(w, "session unavailable", 503)
@@ -320,12 +365,36 @@ func (a *App) handleListenAction(w http.ResponseWriter, r *http.Request, project
 			http.Error(w, "session not owned", 403)
 			return
 		}
+		if tap := a.listeners.lookup(id); tap != nil {
+			tap.mu.Lock()
+			if l := tap.listeners[phoneHash(body.SessionToken)]; l != nil {
+				l.coaching.expires.Store(time.Now().Unix() + phoneLeaseSeconds)
+			}
+			tap.mu.Unlock()
+		}
 		writeJSON(w, map[string]any{"lease_seconds": phoneLeaseSeconds})
 		return
 	}
 	if supported, reason := a.listenerCapability(row); !supported {
 		writeJSONStatus(w, 409, map[string]any{"code": reason})
 		return
+	}
+	grant := coachingGrant{Enabled: coaching}
+	if coaching {
+		if ok, reason := a.coachCapability(row); !ok {
+			writeJSONStatus(w, 409, map[string]any{"code": reason})
+			return
+		}
+		owner, _, e := a.phoneOwner(id)
+		if e != nil {
+			http.Error(w, "ownership unavailable", 503)
+			return
+		}
+		grant.PeerHash, grant.OwnerHash = phoneHash(row.PeerToken), phoneHash(owner)
+		h := a.softphones.lookup(id)
+		h.mu.Lock()
+		grant.BrowserEpoch = h.browserEpoch
+		h.mu.Unlock()
 	}
 	principal, providerJSON := "", ""
 	if p != nil {
@@ -356,12 +425,12 @@ func (a *App) handleListenAction(w http.ResponseWriter, r *http.Request, project
 		writeJSONStatus(w, 409, map[string]any{"code": "listener_limit"})
 		return
 	}
-	_, err = tx.Exec(`INSERT INTO telephony_listener_sessions(token_hash,call_id,project_id,principal,provider_json,expires_at) VALUES(?,?,?,?,?,?)`, phoneHash(token), id, project, principal, providerJSON, time.Now().Unix()+phoneLeaseSeconds)
+	_, err = tx.Exec(`INSERT INTO telephony_listener_sessions(token_hash,call_id,project_id,principal,provider_json,expires_at,coaching,target_peer_hash,target_owner_hash,target_browser_epoch) VALUES(?,?,?,?,?,?,?,?,?,?)`, phoneHash(token), id, project, principal, providerJSON, time.Now().Unix()+phoneLeaseSeconds, coaching, grant.PeerHash, grant.OwnerHash, grant.BrowserEpoch)
 	if err != nil || tx.Commit() != nil {
 		http.Error(w, "session unavailable", 503)
 		return
 	}
-	writeJSON(w, map[string]any{"call_id": id, "media_url": a.listenerMediaURL(id, token), "session_token": token, "lease_seconds": phoneLeaseSeconds})
+	writeJSON(w, map[string]any{"call_id": id, "media_url": a.listenerMediaURL(id, token), "session_token": token, "lease_seconds": phoneLeaseSeconds, "coaching": coaching})
 }
 
 func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
@@ -380,12 +449,24 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "media disconnected", 409)
 		return
 	}
-	l, err := tap.add(phoneHash(token), a.maxCallListeners())
+	grant, err := a.coachingGrant(row, token)
+	if err != nil {
+		http.Error(w, "session unavailable", 403)
+		return
+	}
+	l, err := tap.addWithCoaching(phoneHash(token), a.maxCallListeners(), grant)
 	if err != nil {
 		http.Error(w, "listener unavailable", 409)
 		return
 	}
 	defer tap.remove(l)
+	if l.coaching.grant.Enabled {
+		defer func() {
+			if h := a.softphones.lookup(id); h != nil {
+				h.stopCoach(l)
+			}
+		}()
+	}
 	conn, readConn, err := upgradeBuffered(w, r)
 	if err != nil {
 		return
@@ -395,7 +476,7 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 	auditID := newSecret()
 	var principal string
 	_ = a.db().db.QueryRow(`SELECT principal FROM telephony_listener_sessions WHERE token_hash=?`, l.hash).Scan(&principal)
-	_, err = a.db().db.Exec(`INSERT INTO telephony_listener_audit(id,call_id,project_id,principal,joined_at) VALUES(?,?,?,?,?)`, auditID, id, row.ProjectID, principal, ringTime(time.Now()))
+	_, err = a.db().db.Exec(`INSERT INTO telephony_listener_audit(id,call_id,project_id,principal,joined_at,mode) VALUES(?,?,?,?,?,?)`, auditID, id, row.ProjectID, principal, ringTime(time.Now()), map[bool]string{true: "coach", false: "listen"}[l.coaching.grant.Enabled])
 	if err != nil {
 		closer.Close(ws.StatusInternalServerError, "audit_unavailable")
 		return
@@ -406,7 +487,21 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 		_, _ = a.db().db.Exec(`UPDATE telephony_listener_audit SET left_at=?,reason=?,diagnostics_json=? WHERE id=?`, ringTime(time.Now()), l.closeReason(), string(b), auditID)
 		_, _ = a.db().db.Exec(`DELETE FROM telephony_listener_sessions WHERE token_hash=?`, l.hash)
 	}()
-	_ = writer.Write(ws.OpText, []byte(`{"type":"listener.ready","sample_rate":24000,"channels":2}`))
+	ready, _ := json.Marshal(map[string]any{"type": "listener.ready", "sample_rate": 24000, "channels": 2, "coaching": l.coaching.grant.Enabled})
+	_ = writer.Write(ws.OpText, ready)
+	var auditMu sync.Mutex
+	spurt := ""
+	var spurtGeneration uint32
+	finishSpurtFor := func(generation uint32, reason string) {
+		auditMu.Lock()
+		defer auditMu.Unlock()
+		if spurt != "" && (generation == 0 || generation == spurtGeneration) {
+			_, _ = a.db().db.Exec(`UPDATE telephony_coaching_audit SET ended_at=?,reason=? WHERE id=? AND ended_at=''`, ringTime(time.Now()), reason, spurt)
+			spurt = ""
+		}
+	}
+	finishSpurt := func(reason string) { finishSpurtFor(0, reason) }
+	defer func() { finishSpurt(l.closeReason()) }()
 	done := make(chan struct{})
 	watcherDone := make(chan struct{})
 	defer func() { close(done); <-watcherDone }()
@@ -419,6 +514,10 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 			case <-done:
 				return
 			case <-l.done:
+				if h := a.softphones.lookup(id); h != nil {
+					h.stopCoach(l)
+				}
+				finishSpurt(l.closeReason())
 				code := ws.StatusGoingAway
 				if l.closeReason() == "call_ended" {
 					code = ws.StatusNormalClosure
@@ -428,6 +527,10 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 				}
 				closer.Close(code, l.closeReason())
 				return
+			case stopped := <-l.coachStops:
+				finishSpurtFor(stopped.generation, stopped.reason)
+				event, _ := json.Marshal(map[string]any{"type": "coach.stopped", "generation": stopped.generation, "reason": stopped.reason})
+				writer.queueControl(event)
 			case <-ticker.C:
 				current, e := a.db().findCall(id)
 				if e != nil || current == nil {
@@ -437,6 +540,17 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 				if isTerminalStatus(current.Status) {
 					l.close("call_ended")
 					continue
+				}
+				if l.coaching.grant.Enabled && !a.coachingTargetValid(current, l.coaching.grant) {
+					l.close("coach_target_changed")
+					continue
+				}
+				if l.coaching.talking.Load() && time.Now().UnixMilli() >= l.coaching.deadline.Load() {
+					if h := a.softphones.lookup(id); h != nil {
+						h.stopCoach(l, "talk_timeout")
+					}
+					finishSpurt("talk_timeout")
+
 				}
 				if !a.listenerSessionValid(current, token) {
 					l.close("access_revoked")
@@ -467,13 +581,112 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}()
+	var sourceBase float64
+	var sourceSet, sequenceSet bool
+	var sequence uint32
+	resampler := newPCMResampler(24000, 8000)
 	for {
 		data, op, err := readWebSocketData(readConn, ws.StateServerSide, writer)
 		if err != nil {
 			l.close("listener_disconnected")
 			return
 		}
-		// Listen sockets are strictly receive-only. No microphone, DTMF, ownership or carrier controls.
+		if l.coaching.grant.Enabled {
+			if op == ws.OpText {
+				var c struct {
+					Type       string `json:"type"`
+					Generation uint32 `json:"generation"`
+				}
+				if json.Unmarshal(data, &c) == nil && c.Generation > 0 {
+					if c.Type == "coach.stop" {
+						if c.Generation >= l.coaching.generation.Load() {
+							if h := a.softphones.lookup(id); h != nil {
+								h.stopCoach(l)
+							}
+							finishSpurt("operator_stop")
+							l.coaching.generation.Store(c.Generation)
+						}
+						continue
+					}
+					if c.Type == "coach.start" || c.Type == "coach.keepalive" {
+						unlock := a.softphones.lockClaim(id)
+						current, e := a.db().findCall(id)
+						valid := e == nil && current != nil && a.listenerSessionValid(current, token)
+						if !valid {
+							unlock()
+							l.close("access_revoked")
+							return
+						}
+						h := a.softphones.lookup(id)
+						if c.Type == "coach.keepalive" {
+							if l.coaching.talking.Load() && time.Now().UnixMilli() < l.coaching.deadline.Load() && c.Generation == l.coaching.generation.Load() {
+								l.coaching.deadline.Store(time.Now().Add(2 * time.Second).UnixMilli())
+							}
+							unlock()
+							continue
+						}
+						if c.Generation <= l.coaching.generation.Load() {
+							unlock()
+							continue
+						}
+						finishSpurt("next_talk")
+						auditMu.Lock()
+						if h == nil || !h.startCoach(l, c.Generation) {
+							auditMu.Unlock()
+							unlock()
+							writer.queueControl([]byte(`{"type":"coach.rejected","detail":"Adviser unavailable or already being coached"}`))
+							continue
+						}
+						unlock()
+						spurt = newSecret()
+						spurtGeneration = c.Generation
+						_, e = a.db().db.Exec(`INSERT INTO telephony_coaching_audit(id,call_id,listener_audit_id,project_id,principal,started_at) VALUES(?,?,?,?,?,?)`, spurt, id, auditID, row.ProjectID, principal, ringTime(time.Now()))
+						auditMu.Unlock()
+						if e != nil {
+							h.stopCoach(l)
+							l.close("audit_unavailable")
+							return
+						}
+						sourceSet = false
+						sequenceSet = false
+						resampler = newPCMResampler(24000, 8000)
+						ack, _ := json.Marshal(map[string]any{"type": "coach.started", "generation": c.Generation})
+						writer.queueControl(ack)
+						continue
+					}
+				}
+			}
+			if op == ws.OpBinary && len(data) >= 26 && len(data) <= 984 && len(data)%2 == 0 && binary.LittleEndian.Uint32(data) == coachCaptureMagic {
+				generation := binary.LittleEndian.Uint32(data[4:])
+				seq := binary.LittleEndian.Uint32(data[8:])
+				clock := math.Float64frombits(binary.LittleEndian.Uint64(data[16:]))
+				now := mediaClockMS()
+				l.coaching.received.Add(1)
+				if !l.coaching.talking.Load() || generation != l.coaching.generation.Load() || l.coaching.expires.Load() <= time.Now().Unix() || math.IsNaN(clock) || math.IsInf(clock, 0) || clock < 0 || (sequenceSet && seq <= sequence) {
+					l.coaching.dropped.Add(1)
+					continue
+				}
+				sequence = seq
+				sequenceSet = true
+				offset := now - clock
+				if !sourceSet {
+					sourceBase = offset
+					sourceSet = true
+				} else {
+					sourceBase = math.Min(sourceBase, offset)
+				}
+				if now-(clock+sourceBase) > float64(coachAudioMaxAge/time.Millisecond) {
+					l.coaching.dropped.Add(1)
+					resampler = newPCMResampler(24000, 8000)
+					continue
+				}
+				if !a.forwardCoachFrame(id, l, generation, pcm16ToUlaw(resampler.Process(bytesToPCM16(data[24:]))), clock+sourceBase) {
+					l.coaching.dropped.Add(1)
+				}
+				continue
+			}
+		}
+		// Passive credentials remain receive-only; coaching accepts no call controls.
 		if op == ws.OpBinary || (op == ws.OpText && strings.TrimSpace(string(data)) != "") {
 			l.close("listener_protocol_violation")
 			closer.Close(ws.StatusPolicyViolation, l.closeReason())
@@ -516,15 +729,18 @@ func writeJSONStatus(w http.ResponseWriter, status int, value any) {
 
 // Policy writes revoke only affected listeners. No main-call sockets are touched.
 func (a *App) revokeCallListeners(project string) {
-	rows, err := a.db().db.Query(`SELECT s.call_id,s.token_hash,s.principal,s.provider_json FROM telephony_listener_sessions s WHERE s.project_id=?`, project)
+	rows, err := a.db().db.Query(`SELECT s.call_id,s.token_hash,s.principal,s.provider_json,s.coaching FROM telephony_listener_sessions s WHERE s.project_id=?`, project)
 	if err != nil {
 		return
 	}
-	type grant struct{ id, hash, principal, provider string }
+	type grant struct {
+		id, hash, principal, provider string
+		coaching                      bool
+	}
 	var grants []grant
 	for rows.Next() {
 		var g grant
-		if rows.Scan(&g.id, &g.hash, &g.principal, &g.provider) == nil {
+		if rows.Scan(&g.id, &g.hash, &g.principal, &g.provider, &g.coaching) == nil {
 			grants = append(grants, g)
 		}
 	}
@@ -544,10 +760,10 @@ func (a *App) revokeCallListeners(project string) {
 		var identity phoneIdentity
 		_ = json.Unmarshal([]byte(g.principal), &identity)
 		p, e := phonePrincipalFromPolicy(project, identity, policy)
-		allowed := e == nil && a.phoneCanListen(p, row)
+		allowed := e == nil && a.phoneCanListen(p, row) && (!g.coaching || p.Coach)
 		if allowed && g.provider != "" {
 			var provider phoneAuthProvider
-			allowed = json.Unmarshal([]byte(g.provider), &provider) == nil && phoneProviderStillAllows(policy, provider, "call.listen")
+			allowed = json.Unmarshal([]byte(g.provider), &provider) == nil && phoneProviderStillAllows(policy, provider, "call.listen") && (!g.coaching || phoneProviderStillAllows(policy, provider, "call.coach"))
 		}
 		if !allowed {
 			_, _ = a.db().db.Exec(`DELETE FROM telephony_listener_sessions WHERE token_hash=?`, g.hash)

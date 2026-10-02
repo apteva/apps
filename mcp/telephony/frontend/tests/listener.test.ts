@@ -78,3 +78,22 @@ describe("passive Telephony listener", () => {
     expect(() => decodeListenerFrame(new ArrayBuffer(24))).toThrow();
   });
 });
+
+describe('private coaching SDK',()=>{
+ test('requires coaching mode, uses separate endpoints and never retargets on reconnect',async()=>{
+  const f=fixture();f.setResponse(url=>url.pathname.endsWith('/coach/call')?{call_id:'call',media_url:'/api/apps/telephony/_install/42/softphone/listen-media/call/secret',session_token:'secret',lease_seconds:60,coaching:true}:{ok:true});
+  const listener=f.client.createCallListener({runtime:f.runtime});
+  await listener.listen('call').catch(()=>{});await expect(listener.startTalking()).rejects.toThrow();await listener.stop();
+  await listener.coach('call');expect(listener.getSnapshot().coaching).toBe(true);expect(listener.getSnapshot().talking).toBe(false);
+  f.callbacks.onClose('media_disconnected');expect(listener.getSnapshot().state).toBe('disconnected');
+  await Bun.sleep(550);expect(f.requests.filter(r=>r.url.pathname.endsWith('/coach/call'))).toHaveLength(1);
+  expect(f.requests.filter(r=>r.url.pathname.endsWith('/coach-stop/call'))).toHaveLength(1);await listener.dispose();
+ });
+ test('late coaching authorization is cancelled and its credential released',async()=>{
+  const f=fixture();let resolve!:(v:any)=>void;
+  f.setResponse(url=>url.pathname.endsWith('/coach/call')?new Promise(r=>{resolve=r}):{ok:true});
+  const listener=f.client.createCallListener({runtime:f.runtime});const start=listener.coach('call');while(!resolve)await Bun.sleep(1);
+  await listener.stop();resolve({call_id:'call',media_url:'/api/apps/telephony/_install/42/softphone/listen-media/call/secret',session_token:'secret',lease_seconds:60,coaching:true});await start;
+  expect(f.stopped).toBe(0);expect(f.requests.some(r=>r.url.pathname.endsWith('/coach-stop/call'))).toBe(true);await listener.dispose();
+ });
+});

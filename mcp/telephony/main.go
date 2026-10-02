@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.9.1
+version: 0.10.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -306,7 +306,7 @@ config_schema:
   - { name: sip_rtp_port_min, type: text, default: "20000", label: "First RTP UDP port" }
   - { name: sip_rtp_port_max, type: text, default: "20199", label: "Last RTP UDP port" }
   - { name: sip_srtp, type: select, default: "preferred", label: "Media encryption", options: [required, preferred, disabled] }
-  - { name: max_call_listeners, type: text, default: "4", label: "Maximum listeners per call", description: "Independent passive listeners, limited to 1–16. Requires explicit listening access." }
+  - { name: max_call_listeners, type: text, default: "4", label: "Maximum listeners per call", description: "Independent listening/coaching sessions, limited to 1–16. Requires explicit listening/coaching access." }
   - { name: sip_max_sessions, type: text, default: "100", label: "Maximum SIP sessions" }
   - { name: sip_allow_insecure_signaling, type: toggle, default: "false", label: "Allow UDP or TCP signaling" }
 upgrade_policy: auto-patch
@@ -3735,6 +3735,10 @@ func (a *App) callsPanelForRequest(r *http.Request, rows []callRow, diagnostics 
 		out[i]["listen_unavailable_reason"] = reason
 		p := phoneUserFrom(r)
 		out[i]["listenable"] = supported && a.phoneCanListen(p, &rows[i]) && (p == nil || p.ListenScope)
+		coachSupported, coachReason := a.coachCapability(&rows[i])
+		out[i]["coach_supported"] = coachSupported
+		out[i]["coach_unavailable_reason"] = coachReason
+		out[i]["coachable"] = coachSupported && a.phoneCanCoach(p, &rows[i])
 	}
 	if principal := phoneUserFrom(r); principal != nil {
 		for i := range rows {

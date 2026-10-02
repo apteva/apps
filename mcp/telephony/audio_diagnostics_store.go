@@ -39,6 +39,12 @@ func (t *audioSequenceTracker) snapshot() (int, []audioDropEvent) {
 	return t.gaps, append([]audioDropEvent(nil), t.events...)
 }
 
+type coachingPlaybackTiming struct {
+	PlayedMS   float64 `json:"played_ms"`
+	DroppedMS  float64 `json:"dropped_ms"`
+	MaxQueueMS float64 `json:"max_queue_ms"`
+}
+
 type browserAudioTiming struct {
 	Transport struct {
 		CaptureFrames               float64            `json:"capture_frames"`
@@ -62,9 +68,10 @@ type browserAudioTiming struct {
 		DropTotalsMS                map[string]float64 `json:"drop_totals_ms,omitempty"`
 	} `json:"transport"`
 	Playback struct {
-		PlayedMS       float64            `json:"played_ms"`
-		MaxResidenceMS float64            `json:"max_residence_ms"`
-		DropTotalsMS   map[string]float64 `json:"drop_totals_ms,omitempty"`
+		Coaching       *coachingPlaybackTiming `json:"coaching,omitempty"`
+		PlayedMS       float64                 `json:"played_ms"`
+		MaxResidenceMS float64                 `json:"max_residence_ms"`
+		DropTotalsMS   map[string]float64      `json:"drop_totals_ms,omitempty"`
 	} `json:"playback"`
 }
 

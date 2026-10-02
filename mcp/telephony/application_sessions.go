@@ -172,8 +172,9 @@ func (a *App) authenticateApplicationSession(r *http.Request) (*http.Request, in
 	p.AuthProvider = provider
 	for _, v := range provider.Actions {
 		p.ListenScope = p.ListenScope || v == "call.listen"
+		p.CoachScope = p.CoachScope || v == "call.coach"
 	}
-	if (action == "call.takeover" || action == "call.listen") && !p.Supervisor {
+	if (action == "call.takeover" || action == "call.listen" || action == "call.coach") && !p.Supervisor {
 		return nil, 403, errors.New("supervisor permission required")
 	}
 	clone = clone.WithContext(context.WithValue(clone.Context(), phonePrincipalKey{}, p))

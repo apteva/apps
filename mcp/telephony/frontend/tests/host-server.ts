@@ -38,7 +38,7 @@ Bun.serve({
       const headers = new Headers(request.headers); headers.set("Authorization", "Bearer headless-browser-fixture"); headers.delete("host");
       return fetch(target, { method: request.method, headers, body: request.method === "GET" ? undefined : await request.arrayBuffer() });
     }
-    if (path === "/listener") return new Response('<html><button id="listen">Listen</button><script type="module" src="/listener-host.js"></script></html>', { headers: { "Content-Type": "text/html", "Content-Security-Policy": "default-src 'self'; script-src 'self'; connect-src 'self' ws:; object-src 'none'" } });
+    if (path === "/listener") return new Response('<html><button id="listen">Listen</button><button id="coach">Coach</button><button id="talk">Hold to talk</button><script type="module" src="/listener-host.js"></script></html>', { headers: { "Content-Type": "text/html", "Content-Security-Policy": url.searchParams.has("strict") ? "default-src 'self'; script-src 'self'; connect-src 'self' ws:; object-src 'none'" : "default-src 'self'; script-src 'self' blob:; connect-src 'self' ws:; object-src 'none'" } });
     if (path === "/health") return new Response("ok");
     return new Response('<!doctype html><title>Headless Telephony test host</title><button id="answer">Answer</button><script type="module" src="/host.js"></script>', { headers: { "Content-Type": "text/html" } });
   },

@@ -115,6 +115,9 @@ export interface AudioDropEvent {
 }
 
 export interface SoftphoneDiagnostics {
+  coachingPlayedMs?: number;
+  coachingDroppedMs?: number;
+  coachingMaxQueueMs?: number;
   rttMs: number | null;
   queueMs: number;
   targetMs: number;
@@ -489,10 +492,10 @@ export class SoftphoneSession {
     this.playback.port.onmessage = (event: MessageEvent) => {
       const stats = event.data;
       if (stats?.type !== "stats") return;
-      this.playbackTiming = {played_ms:stats.played_ms,max_residence_ms:stats.max_residence_ms,drop_totals_ms:stats.drop_totals_ms};
+      this.playbackTiming = {played_ms:stats.played_ms,max_residence_ms:stats.max_residence_ms,drop_totals_ms:stats.drop_totals_ms,coaching:{played_ms:stats.whisper_played_ms,dropped_ms:stats.whisper_dropped_ms,max_queue_ms:stats.whisper_max_queue_ms}};
       this.speakerLevel = Math.max(this.speakerLevel, stats.speaker_level ?? 0);
       this.diagnostics = {
-        ...this.diagnostics, queueMs: stats.queue_ms ?? 0, targetMs: stats.target_ms ?? JITTER_TARGET_MS,
+        ...this.diagnostics, coachingPlayedMs:stats.whisper_played_ms ?? 0, coachingDroppedMs:stats.whisper_dropped_ms ?? 0, coachingMaxQueueMs:stats.whisper_max_queue_ms ?? 0, queueMs: stats.queue_ms ?? 0, targetMs: stats.target_ms ?? JITTER_TARGET_MS,
         underruns: stats.underruns ?? 0, droppedMs: stats.dropped_ms ?? 0,
         maxQueueMs: stats.max_queue_ms ?? 0, playbackSequenceGaps: stats.playback_sequence_gaps ?? 0,
         dropEvents: [...this.diagnostics.dropEvents.filter((item) => item.direction !== "carrier_to_operator"), ...(stats.drop_events ?? [])].slice(-100),
@@ -579,6 +582,8 @@ export class SoftphoneSession {
         this.callbacks.onCallStatus?.(parsed as unknown as SoftphoneCallStatus);
       } else if (parsed.type === "call.error") {
         this.fail(parsed.detail || "The call could not be connected.");
+      } else if (parsed.type === "coach.state") {
+        this.callbacks.onNotice?.((parsed as unknown as {talking?:boolean}).talking ? "Private coaching connected. Only you hear the supervisor." : "Private coaching stopped.");
       } else if (parsed.type === "media.delivery") {
         const state = (parsed as unknown as {state?:string}).state;
         if (state === "stalled") this.callbacks.onNotice?.("Caller audio delivery interrupted. Your microphone remains connected.");

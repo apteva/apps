@@ -32,6 +32,7 @@ func (p phoneIdentity) valid() bool {
 }
 
 type phoneGrant struct {
+	Coach           bool     `json:"coach,omitempty"`  // separate private coaching grant
 	Listen          bool     `json:"listen,omitempty"` // explicit passive listening grant; visibility alone is insufficient
 	Role            string   `json:"role"`             // user or supervisor; supervisors still have resource bounds
 	Destinations    []string `json:"destinations"`
@@ -59,6 +60,8 @@ type phonePrincipal struct {
 	Revision     int64
 	Listen       bool
 	ListenScope  bool
+	Coach        bool
+	CoachScope   bool
 	AuthProvider *phoneAuthProvider
 	Supervisor   bool
 	Destinations map[string]bool
@@ -100,6 +103,7 @@ func phonePrincipalFromPolicy(project string, identity phoneIdentity, policy pho
 	add := func(g phoneGrant) {
 		p.Supervisor = p.Supervisor || g.Role == "supervisor"
 		p.Listen = p.Listen || g.Listen
+		p.Coach = p.Coach || g.Coach
 		for _, v := range g.Destinations {
 			p.Destinations[v] = true
 		}
@@ -144,6 +148,8 @@ func phoneAction(r *http.Request) string {
 		return ""
 	}
 	switch {
+	case strings.HasPrefix(path, "/softphone/coach/"), strings.HasPrefix(path, "/softphone/coach-renew/"), strings.HasPrefix(path, "/softphone/coach-stop/"):
+		return "call.coach"
 	case strings.HasPrefix(path, "/softphone/listen/"), strings.HasPrefix(path, "/softphone/listen-renew/"), strings.HasPrefix(path, "/softphone/listen-stop/"):
 		return "call.listen"
 	case path == "/softphone/place":
@@ -216,10 +222,11 @@ func (a *App) applicationUserHTTP(next http.HandlerFunc) http.HandlerFunc {
 			if scope.Type == "app_user" && scope.App == "telephony" {
 				for _, v := range scope.Actions {
 					p.ListenScope = p.ListenScope || v == "call.listen"
+					p.CoachScope = p.CoachScope || v == "call.coach"
 				}
 			}
 		}
-		if (action == "call.takeover" || action == "call.listen") && !p.Supervisor {
+		if (action == "call.takeover" || action == "call.listen" || action == "call.coach") && !p.Supervisor {
 			http.Error(w, "supervisor permission required", 403)
 			return
 		}
@@ -287,6 +294,9 @@ func (a *App) setPhoneOwner(row *callRow, p *phonePrincipal, dest string) error 
 	_, err = tx.Exec(`INSERT INTO telephony_call_owners(call_id,project_id,principal,destination_id) VALUES(?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET principal=excluded.principal,destination_id=excluded.destination_id`, row.ID, row.ProjectID, p.Identity.key(), dest)
 	if err != nil {
 		return err
+	}
+	if h := a.softphones.lookup(row.ID); h != nil {
+		h.invalidateCoaching()
 	}
 	return a.db().commitCall(tx, row.ID)
 }
@@ -460,6 +470,9 @@ func (a *App) issuePhoneSession(row *callRow, p *phonePrincipal) (*softphoneSess
 	_, err := a.db().db.Exec(`INSERT INTO telephony_media_sessions(call_id,project_id,token_hash,principal,policy_revision,expires_at) VALUES(?,?,?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET token_hash=excluded.token_hash,principal=excluded.principal,policy_revision=excluded.policy_revision,expires_at=excluded.expires_at`, row.ID, row.ProjectID, phoneHash(token), principal, revision, time.Now().Unix()+phoneLeaseSeconds)
 	if err != nil {
 		return nil, err
+	}
+	if h := a.softphones.lookup(row.ID); h != nil {
+		h.invalidateCoaching()
 	}
 	return &softphoneSession{CallID: row.ID, MediaURL: a.softphoneMediaURL(row.ID, token), SessionToken: token, To: row.ToNumber, From: row.FromNumber, LeaseSeconds: phoneLeaseSeconds}, nil
 }

@@ -79,6 +79,10 @@ type softphoneHub struct {
 	captureExpected     uint32
 	captureSequenceGaps int
 	captureDropEvents   []audioDropEvent
+	whisperBrowser      *websocketWriterPump
+	browserEpoch        string
+	coach               *callListener
+	coachEpoch          uint32
 	closed              bool
 	held                bool
 }
@@ -126,12 +130,18 @@ func (h *softphoneHub) setCallState(direction, status string) {
 	if status != "" {
 		h.status = status
 	}
+	if h.status != "answered" && h.status != "in-progress" {
+		h.stopCoachLocked(nil, "call_state_changed")
+	}
 	h.reception.pause(h.held || (h.status != "answered" && h.status != "in-progress"))
 }
 
 func (h *softphoneHub) setHeld(held bool) {
 	h.mu.Lock()
 	h.held = held
+	if held {
+		h.stopCoachLocked(nil, "call_held")
+	}
 	h.reception.pause(held || (h.status != "answered" && h.status != "in-progress"))
 	if held && h.browser != nil {
 		h.browser.FlushAudio()
@@ -166,6 +176,9 @@ func (h *softphoneHub) preAnswerDroppedMS() int64 {
 func (h *softphoneHub) setPeer(w *websocketWriterPump) (replaced *websocketWriterPump) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.peer != nil && h.peer != w {
+		h.stopCoachLocked(nil, "carrier_reconnected")
+	}
 	replaced, h.peer = h.peer, w
 	return replaced
 }
@@ -173,7 +186,10 @@ func (h *softphoneHub) setPeer(w *websocketWriterPump) (replaced *websocketWrite
 func (h *softphoneHub) setBrowser(w *websocketWriterPump) (replaced *websocketWriterPump) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.stopCoachLocked(nil, "adviser_reconnected")
 	replaced, h.browser = h.browser, w
+	h.browserEpoch = newSecret()
+	h.whisperBrowser = nil
 	h.deliveryNotice = ""
 	h.framedVersion = 0
 	h.captureSequenceSet = false
@@ -189,6 +205,7 @@ func (h *softphoneHub) clearPeer(w *websocketWriterPump) bool {
 	defer h.mu.Unlock()
 	h.completedPeer = mergeLiveAudioSnapshots(h.completedPeer, w.audioSnapshot())
 	if h.peer == w {
+		h.stopCoachLocked(nil, "carrier_disconnected")
 		h.peer = nil
 		return true
 	}
@@ -200,6 +217,8 @@ func (h *softphoneHub) clearBrowser(w *websocketWriterPump) {
 	defer h.mu.Unlock()
 	h.completedBrowser = mergeLiveAudioSnapshots(h.completedBrowser, w.audioSnapshot())
 	if h.browser == w {
+		h.stopCoachLocked(nil, "adviser_disconnected")
+		h.browserEpoch = newSecret()
 		h.browser = nil
 	}
 }
@@ -657,6 +676,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 				Type        string                   `json:"type"`
 				Nonce       float64                  `json:"nonce,omitempty"`
 				Version     int                      `json:"version,omitempty"`
+				Whisper     bool                     `json:"whisper,omitempty"`
 				Versions    []int                    `json:"versions,omitempty"`
 				Digits      string                   `json:"digits,omitempty"`
 				Diagnostics *browserAudioDiagnostics `json:"diagnostics,omitempty"`
@@ -674,12 +694,15 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 							version = 3
 						}
 					}
-					ack, _ := json.Marshal(map[string]any{"type": "media.capabilities", "version": version})
+					ack, _ := json.Marshal(map[string]any{"type": "media.capabilities", "version": version, "whisper": control.Whisper})
 					_ = writer.Write(ws.OpText, ack)
 					hub.mu.Lock()
 					if hub.browser == writer {
 						hub.framedBrowser = writer
 						hub.framedVersion = version
+						if control.Whisper {
+							hub.whisperBrowser = writer
+						}
 					}
 					hub.mu.Unlock()
 				}
@@ -820,7 +843,7 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	action := strings.Trim(strings.TrimPrefix(r.URL.Path, "/softphone/"), "/")
-	for _, name := range []string{"listen", "listen-renew", "listen-stop", "listen-audit"} {
+	for _, name := range []string{"listen", "listen-renew", "listen-stop", "listen-audit", "coach", "coach-renew", "coach-stop"} {
 		if strings.HasPrefix(action, name+"/") {
 			a.handleListenAction(w, r, project, name, strings.TrimPrefix(action, name+"/"))
 			return

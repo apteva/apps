@@ -24,18 +24,28 @@ import (
 	"time"
 
 	tk "github.com/apteva/app-sdk/testkit"
+	bench "github.com/apteva/apps/mcp/telephony/benchmarks/softphone"
 	"github.com/gobwas/ws/wsutil"
 )
 
 // Chromium executes the actual app-served SDK bundle, AudioWorklet and Worker.
 // Only the platform gateway and carrier are fixtures; HTTP/WS and Telephony are real.
 func TestTier2HeadlessBrowser(t *testing.T) {
-	for _, surface := range []string{"headless", "panel", "application-user"} {
+	for _, surface := range []string{"headless", "headless-coaching-512k", "headless-coaching-jitter", "panel", "application-user"} {
 		t.Run(surface, func(t *testing.T) { runHeadlessBrowser(t, surface) })
 	}
 }
 
 func runHeadlessBrowser(t *testing.T, surface string) {
+	var coachingLink *bench.Link
+	if surface == "headless-coaching-512k" {
+		coachingLink = &bench.Link{Kbps: 512, LatencyMS: 30, JitterMS: 10}
+		surface = "headless"
+	}
+	if surface == "headless-coaching-jitter" {
+		coachingLink = &bench.Link{Kbps: 2000, LatencyMS: 35, JitterMS: 40}
+		surface = "headless"
+	}
 	platform := newTier2PlatformGateway(t)
 	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID(tier2Project), tk.WithEnv("APTEVA_GATEWAY_URL", platform.server.URL))
 	created := tier2MCPAs(t, sc, "telephony_routes_create", map[string]any{"phone_number": tier2Number, "answer_mode": "human_browser"})
@@ -114,10 +124,23 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 	}
 
 	target, _ := url.Parse(sc.URL())
+	adviserTarget := target.Host
+	if coachingLink != nil {
+		shaped, err := bench.NewProxy(target.Host, bench.Profile{Up: *coachingLink, Down: *coachingLink}, 20261002)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer shaped.Close()
+		shaped.Arm(time.Now())
+		adviserTarget = shaped.Addr()
+	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.Director = func(r *http.Request) {
 		r.URL.Scheme, r.URL.Host = target.Scheme, target.Host
-		r.Host = target.Host
+		if coachingLink != nil && strings.HasPrefix(r.URL.Path, "/softphone/media/") {
+			r.URL.Host = adviserTarget
+		}
+		r.Host = r.URL.Host
 		// Match the production proxy: manifest-public frontend downloads keep
 		// the user's bearer. The installation token travels separately.
 		publicRoute := strings.HasPrefix(r.URL.Path, "/user/") || r.URL.Path == "/ui/frontend.json" || strings.HasPrefix(r.URL.Path, "/ui/frontend/")

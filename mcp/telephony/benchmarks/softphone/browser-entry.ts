@@ -1,3 +1,4 @@
+import {outputWallTimeMS} from './audio-clock';
 import {SoftphoneSession, DEFAULT_SOFTPHONE_AUDIO_OPTIONS} from '../../ui/softphone-audio';
 
 function tone(frame:Float32Array,rate:number):[number,number]{
@@ -35,10 +36,9 @@ function tone(frame:Float32Array,rate:number):[number,number]{
   const markers:any[]=[];let last=-2,stable=0,segment=false,symbols:number[]=[],start=-1000,level=-120;
   const arm=await(await fetch('/arm',{method:'POST'})).json();
   const sourceStart=sourceContext.currentTime+(arm.start_at-Date.now())/1000;
-  const outputEpoch=Date.now()-ctx.currentTime*1000;
   source.port.postMessage({start:sourceStart});
   probe.port.onmessage=event=>{
-   const [symbol,db]=tone(event.data.frame,ctx.sampleRate),end=outputEpoch+event.data.end*1000;
+   const [symbol,db]=tone(event.data.frame,ctx.sampleRate),end=outputWallTimeMS(ctx,event.data.end,performance.timeOrigin,performance.now());
    if(symbol<0){segment=false;stable=0;last=-2;return;}
    stable=symbol===last?stable+1:1;last=symbol;
    if(stable<2||segment)return;segment=true;

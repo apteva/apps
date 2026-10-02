@@ -126,6 +126,8 @@ func mergeLiveAudioSnapshots(a, b liveAudioQueueSnapshot) liveAudioQueueSnapshot
 	a.MaxWriteMS = max(a.MaxWriteMS, b.MaxWriteMS)
 	a.EnqueuedBytes += b.EnqueuedBytes
 	a.SentBytes += b.SentBytes
+	a.WhisperSentFrames += b.WhisperSentFrames
+	a.WhisperDroppedFrames += b.WhisperDroppedFrames
 	a.OverflowBytes += b.OverflowBytes
 	a.StaleBytes += b.StaleBytes
 	a.SourceStaleBytes += b.SourceStaleBytes
