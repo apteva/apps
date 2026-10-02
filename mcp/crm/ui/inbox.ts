@@ -1,3 +1,5 @@
+import type { MessageAddresses } from "./message_addresses";
+
 export type CRMInboxStatus = "open" | "pending" | "closed" | "spam" | "all";
 export type CRMInboxChannel = "all" | "email" | "sms" | "whatsapp";
 
@@ -14,6 +16,7 @@ export interface InboxItem {
   last_activity_at: string;
   snippet?: string;
   automated?: boolean;
+  last_message_addresses?: MessageAddresses;
 }
 
 export interface InboxResponse {

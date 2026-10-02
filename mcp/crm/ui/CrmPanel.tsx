@@ -5,6 +5,7 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { crmPanelInitialRoute, type InboxItem, type InboxResponse } from "./inbox";
+import { messageAddressLines, messageRecipientSummary, type MessageAddresses } from "./message_addresses";
 
 // Inlined SDK app-event subscription. Each app ships its own copy
 // because panels are bundled standalone and apps are independently
@@ -163,6 +164,7 @@ interface Activity {
   message_id_header?: string;
   messaging_id?: number | string;
   message_status?: MessageStatus;
+  message_addresses?: MessageAddresses;
   attachments?: ActivityAttachment[];
 }
 interface ActivityAttachment {
@@ -2157,6 +2159,16 @@ function ActivityRow({ activity, onReply, compact }: { activity: Activity; onRep
           >Reply</button>
         )}
       </div>
+      {/^(email|sms|whatsapp)_(sent|received|send_failed|test_sent)$/.test(activity.kind) && (
+        <dl className="mb-2 space-y-0.5 text-xs" aria-label="Message addresses">
+          {messageAddressLines(activity.message_addresses).map(([label, value]) => (
+            <div key={label} className="flex items-baseline gap-2">
+              <dt className="w-20 shrink-0 text-text-dim">{label}</dt>
+              <dd className="min-w-0 break-all text-text-muted select-text">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
       {activity.body && <div className="text-sm text-text whitespace-pre-wrap">{activity.body}</div>}
       {activity.attachments && activity.attachments.length > 0 && (
         <ActivityAttachments attachments={activity.attachments} />
@@ -3620,6 +3632,9 @@ function InboxTab({ api, projectId, lists, initialConversationId, initialStatus,
                   </div>
                   {it.automated && <span className="text-[10px] px-1.5 py-0.5 rounded bg-border text-text-muted">automated</span>}
                   {it.subject && <div className="text-xs text-text-muted truncate mt-1">{it.subject}</div>}
+                  <div className="text-[10px] text-text-muted truncate" title={`Latest message · ${messageRecipientSummary(it.last_message_addresses)}`}>
+                    Latest · {messageRecipientSummary(it.last_message_addresses)}
+                  </div>
                   {it.snippet && <div className="text-xs text-text-dim truncate">{it.snippet}</div>}
                   <div className="text-[10px] text-text-dim mt-0.5">{formatTime(it.last_activity_at)}</div>
                 </li>
@@ -3664,6 +3679,9 @@ function InboxTab({ api, projectId, lists, initialConversationId, initialStatus,
                   </div>
                   <p className="text-xs text-text-muted truncate">
                     {threadConversation.subject || selected.snippet || "Conversation"}
+                  </p>
+                  <p className="mt-1 text-xs text-text-dim break-all">
+                    Latest message · {messageRecipientSummary(threadActivities.at(-1)?.message_addresses)}
                   </p>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
