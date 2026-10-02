@@ -30,8 +30,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.9.1
+version: 0.9.2
 description: |
+  v0.9.2 fixes V1 text rendering for straight apostrophes and actual line
+  breaks in both clip text and timed text tracks, locally and remotely.
+  Text is escaped across both FFmpeg parsers, with expansion disabled to
+  preserve literal percent expressions and backslashes.
   v0.9.1 fixes remote rendering through Instances by invoking Bash explicitly.
   Bash arrays and pipefail now work when Instances executes commands with sh,
   while quoted scripts preserve literal values and propagate failures.
