@@ -1,3 +1,22 @@
+# Composer v0.9.2
+
+V1 clip text and timed text tracks now render straight apostrophes without
+breaking the FFmpeg filter graph, and actual line breaks remain new lines
+instead of printing literal `n` characters. Text escaping handles both the
+filtergraph and drawtext option parsers. Disabling text expansion also preserves
+literal percent expressions and backslashes.
+
+The fixes apply to local rendering and remote rendering through Instances.
+Existing compositions and generated assets remain reusable; no configuration
+change, migration, or media regeneration is required.
+
+Validation: the full Composer Go suite, build, and `go vet` pass. Pixel-level
+regressions compare inline text with FFmpeg text-file rendering across both
+text paths and local/remote commands, including apostrophes, filter delimiters,
+LF/CRLF line breaks, blank lines, literal backslash-n, Unicode, and percent text.
+
+---
+
 # Composer v0.9.1
 
 Remote rendering now explicitly invokes Bash when sending generated scripts to
