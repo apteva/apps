@@ -582,7 +582,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_resolve_audience",
-			Description: "Resolve exactly one segment, list, or contact into currently messageable recipients for a channel. Returns exact raw/eligible/excluded counts, exclusion reasons, healthy addresses, and cursor pagination. Args: channel (email|sms|whatsapp), exactly one of segment_id/list_id/contact_id, limit? (default 1000, max 5000), after_contact_id?, include_automated? (default false).",
+			Description: "Resolve exactly one segment, list, or contact into currently messageable recipients for a channel. Returns exact raw/eligible/excluded counts, exclusion reasons, healthy addresses, and cursor pagination. Args: channel (email|sms|whatsapp), exactly one of segment_id/list_id/contact_id, limit? (default 1000, max 5000), after_contact_id?, include_automated? (default false), include_counts? (default true; false skips full-audience counts and returns zero count fields).",
 			InputSchema: schemaObject(map[string]any{
 				"channel":           map[string]any{"type": "string", "enum": []string{"email", "sms", "whatsapp"}},
 				"segment_id":        map[string]any{"type": "integer"},
@@ -593,7 +593,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"include_automated": map[string]any{"type": "boolean"},
 				"include_counts":    map[string]any{"type": "boolean"},
 			}, []string{"channel"}),
-			Handler: a.toolResolveAudience,
+			HandlerCtx: a.toolResolveAudience,
 		},
 		{
 			Name:        "contacts_list_conversations",

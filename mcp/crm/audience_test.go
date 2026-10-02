@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestResolveAudienceCountsReasonsPaginationAndHealthyAlternate(t *testing.T) {
 	ctx := newTestCtx(t)
@@ -56,7 +59,7 @@ func TestResolveAudienceCountsReasonsPaginationAndHealthyAlternate(t *testing.T)
 	seenExclusions := map[int64]string{}
 	var first *AudienceResolution
 	for {
-		out, err := app.toolResolveAudience(ctx, args)
+		out, err := app.toolResolveAudience(context.Background(), ctx, args)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -105,7 +108,7 @@ func TestResolveAudienceSupportsSingleContactAndTransportSpecificHealth(t *testi
 		t.Fatal(err)
 	}
 	app := &App{}
-	smsOut, err := app.toolResolveAudience(ctx, map[string]any{"channel": "sms", "contact_id": contact.ID})
+	smsOut, err := app.toolResolveAudience(context.Background(), ctx, map[string]any{"channel": "sms", "contact_id": contact.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +116,7 @@ func TestResolveAudienceSupportsSingleContactAndTransportSpecificHealth(t *testi
 	if sms.EligibleCount != 0 || sms.ExcludedByReason["unsubscribed"] != 1 {
 		t.Fatalf("sms result=%+v", sms)
 	}
-	waOut, err := app.toolResolveAudience(ctx, map[string]any{"channel": "whatsapp", "contact_id": contact.ID})
+	waOut, err := app.toolResolveAudience(context.Background(), ctx, map[string]any{"channel": "whatsapp", "contact_id": contact.ID})
 	if err != nil {
 		t.Fatal(err)
 	}

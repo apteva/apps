@@ -281,7 +281,7 @@ func TestDoNotContactBlocksSendAndAudience(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	audience, err := resolveAudience(ctx.AppDB(), source, "test-proj", "email", 0, 100, false, true)
+	audience, err := resolveAudience(context.Background(), ctx.AppDB(), source, "test-proj", "email", 0, 100, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}

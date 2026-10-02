@@ -1,9 +1,16 @@
-# CRM v0.9.10
+# CRM v0.9.11
 
 Apteva's contact, inbox, audience and opportunity sidecar. The supported dashboard
 is `ui/CrmPanel.tsx`, bundled as `CrmPanel.mjs`. `apteva.yaml` is embedded directly
 into the binary and is the single manifest source. `MCPTools()` supplies the
 executable input contracts, checked against the manifest by tests.
+
+Release `crm/v0.9.11` makes `contacts_resolve_audience` delivery-health lookups
+contact-first using existing indexes. Full counts, pages, and source metadata
+use the read-only pool with request cancellation. Eligibility, exclusion
+precedence, address selection, and pagination remain unchanged. Use
+`include_counts: false` for count-free paging (count fields are then zero).
+No database migration or record updates are required.
 
 Release `crm/v0.9.10` marks `conversations_inbox` with standard MCP
 `readOnlyHint: true` and `destructiveHint: false` annotations, so it is eligible

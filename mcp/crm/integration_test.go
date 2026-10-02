@@ -31,6 +31,30 @@ func TestSidecar_BootsAndHealthOK(t *testing.T) {
 	}
 }
 
+func TestSidecar_ResolveAudienceContextHandler(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	created := sc.MCP("contacts_upsert_by_channel", map[string]any{
+		"kind": "email", "value": "audience@example.test",
+	})
+	contact := created["contact"].(map[string]any)
+	for _, counts := range []bool{false, true} {
+		r := sc.MCP("contacts_resolve_audience", map[string]any{
+			"channel": "email", "contact_id": contact["id"], "include_counts": counts,
+		})
+		recipients, ok := r["recipients"].([]any)
+		if !ok || len(recipients) != 1 || recipients[0].(map[string]any)["address"] != "audience@example.test" {
+			t.Fatalf("unexpected audience result: %#v", r)
+		}
+		want := float64(0)
+		if counts {
+			want = 1
+		}
+		if r["raw_count"] != want || r["eligible_count"] != want {
+			t.Fatalf("counts=%v: unexpected count fields: %#v", counts, r)
+		}
+	}
+}
+
 func TestSidecar_InboxReadOnlyAnnotations(t *testing.T) {
 	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
 	out, err := sc.MCPRaw("tools/list", map[string]any{})
