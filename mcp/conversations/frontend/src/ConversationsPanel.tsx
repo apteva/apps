@@ -1148,7 +1148,7 @@ function MessageBody({
     return (
       <div className="flex justify-end min-w-0 shrink-0">
         <div
-          className="bg-accent/15 border border-accent/30 rounded-xl rounded-br-sm px-3 py-2 max-w-[92%] sm:max-w-[80%] min-w-0"
+          className="chat-message-user-bubble bg-accent/15 border border-accent/30 rounded-xl rounded-br-sm px-3 py-2 max-w-[92%] sm:max-w-[80%] min-w-0"
           title={relativeTime(message.created_at)}
         >
           <p className="text-text text-[15px] sm:text-sm leading-relaxed whitespace-pre-wrap break-words">
@@ -1497,21 +1497,6 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
     : []);
   const timeline = buildChatTimeline(messages,[...activities.map(toChatToolActivity),...preparingTools],Date.now(),bubbles.filter(b=>b.text).map(b=>({id:`${b.agentId}:${b.callId}:${b.runId}`,text:b.text,agentId:b.agentId,startedAt:b.createdAt ?? Date.now()}))).filter(item => item.kind !== "day" && item.kind !== "time");
   const ownsToolGroup = (response: Parameters<typeof responseToolGroup>[0]) => Boolean(responseToolGroup(response,timeline,messages));
-  // Keep the last completed tool burst visually active while the model is
-  // continuing its response. The next preparation frame will replace this
-  // handoff in place; without it, the progress row briefly falls back to
-  // Thinking between the result and the next tool call.
-  const continuingToolKeys = new Set(progresses.flatMap(progress => {
-    if (progress.phase !== "continuing") return [];
-    const key = responseToolGroup({
-      continuing: true,
-      agentId: progress.agent_id,
-      threadId: progress.thread_id,
-      afterMessageId: progress.after_message_id,
-      createdAt: Date.parse(progress.started_at),
-    }, timeline, messages);
-    return key ? [key] : [];
-  }));
   const [expandedToolGroups,setExpandedToolGroups]=useState<Set<string>>(()=>new Set());
   const toggleToolGroup=(key:string)=>setExpandedToolGroups(current=>{
     const next=new Set(current);if(next.has(key))next.delete(key);else next.add(key);return next;
@@ -1728,7 +1713,6 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
         {timeline.map(item => item.kind === "toolGroup" || item.kind === "tool" ? <ChatToolActivity
           key={item.key} tools={item.kind === "toolGroup" ? item.tools : [item.tool]}
           parallel={item.kind === "toolGroup" && item.parallel}
-          continuing={continuingToolKeys.has(item.key)}
           expanded={expandedToolGroups.has(item.key)} onToggle={()=>toggleToolGroup(item.key)}
           registry={toolVisualRegistry} detailsId={`tools-${conversation.id}-${item.key.replace(/[^a-zA-Z0-9_-]/g,"-")}`}
           showCompletion={showToolCompletion} showDuration={showToolDuration}
@@ -1742,13 +1726,6 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
       hasMessages={timeline.length > 0}
       streamNode={bubbles.length || progresses.some(p=>p.phase!=="idle" || awaitingProgressMessage(p)) ? <>{bubbles.map(b => { const phase = pendingResponsePhase(b, activities, messages); if (b.text || phase === null || ownsToolGroup(b) || progresses.some(p=>p.agent_id===b.agentId)) return null; return <ThinkingMessagePlaceholder key={`${b.agentId}:${b.callId}:${b.runId}`} preparing={b.optimistic}/>; })}
         {progresses.map(p => {
-          const continuingKey = p.phase === "continuing" ? responseToolGroup({
-            continuing: true,
-            agentId: p.agent_id,
-            threadId: p.thread_id,
-            afterMessageId: p.after_message_id,
-            createdAt: Date.parse(p.started_at),
-          }, timeline, messages) : undefined;
           // Hidden approval calls still own a response until their card is
           // rendered. Old cards and verdict edits cannot settle a later turn.
           const approvalDelivered = messages.some(m => m.role === "agent" && m.component_kind === "approval"
@@ -1759,7 +1736,9 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
             && m.phase === "final" && m.agent_id === p.agent_id && m.id > p.after_message_id);
           if (finalDelivered) return null;
           if (awaitingProgressMessage(p)) return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`}/>;
-          if (p.phase === "idle" || approvalDelivered || (continuingKey && continuingToolKeys.has(continuingKey)) || ownsToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)}) || bubbles.some(b=>b.agentId===p.agent_id && b.text && !b.done)) return null;
+          // Continuing is model work after a result, not an executing tool.
+          // Only an actual preparation/execution owns the pulsing tool card.
+          if (p.phase === "idle" || approvalDelivered || ownsToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)}) || bubbles.some(b=>b.agentId===p.agent_id && b.text && !b.done)) return null;
           return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`}/>;
         })}
       </> : null}

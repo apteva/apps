@@ -54,6 +54,7 @@ Do not invoke the `scenario` Go build tag directly.
 | Public self-service | Reply without escalating during a settle period |
 | Public refusal | Reply without escalating during a settle period |
 | Room fan-out | Two runner-owned agents reply; duplicate submission reuses one row |
+| Room messages and mentions | Normal messages/follow-ups reach the lead; named mentions reach only that participant; shared history is readable; `@all` reaches both; explicit recipients override mentions; retry deduplicates; each round checks final replies and a 12-second quiet window |
 | Bound approval | Approval/verdict remain in the originating chat |
 | Ownership | Unchanged main/chat profiles, no mutation/delegation attempts, history recall and restart/resume |
 
@@ -74,6 +75,26 @@ LLM evaluations, set `runs` and `required_pass_rate` in that scenario. Results
 include driver output, actual tool calls, iterations and token totals with
 `--json`; failures also retain artifacts under `--artifacts-dir`. A zero cost
 reported for Codex subscription usage does not mean zero model usage.
+
+For a two-agent conversation with ordinary follow-ups and typed mentions:
+
+```sh
+GOWORK=off apteva test --tier 3 --provider openai-codex --model gpt-6.1-sol --json scenarios/16-room-messages-and-mentions.yaml
+```
+
+This checks durable messages, routing, thread ownership, shared history, and
+duplicate replies. It does not exercise browser rendering, the mention picker,
+or simultaneous approvals. The runner verifies the requested model against
+actual `llm.start` telemetry.
+
+Latest local validation (2026-10-02): one run passed all eight rounds with two
+`openai-codex` / `gpt-6.1-sol` agents. Runtime telemetry confirmed the provider
+and model. Elapsed time was 179.3 seconds, with 23 iterations and 232,143 total
+tokens. Each intended recipient produced exactly one final reply per round;
+no untargeted replies or duplicate finals appeared during the 12-second settle
+windows. The test used a disposable local server/project and the current local
+Conversations source. The Go unit suite also passed. This is one successful
+live run, not a measured reliability rate across repeated runs.
 
 Old `go test -tags live` commands and manual install/agent bootstrap scripts are
 superseded. Historical release validation documents retain their original run

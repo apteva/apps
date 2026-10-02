@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.24.31 — 2026-10-02
+
+- Use neutral user-message bubbles in light mode while retaining the existing dark-mode styling.
+- Add a real-model two-agent Tier 3 scenario covering normal messages, mentions, shared history, recipient overrides, and retry deduplication; validated with GPT-6.1 Sol.
+- Stop pulsing completed tool cards while the model processes their results. Show Thinking during that wait, and pulse the group again only when another tool is preparing or running. Cover refreshes and subsequent turns across shared chat surfaces.
+- Remove the agent-facing `read_attachment` tool from the Conversations catalog while retaining its implementation for compatibility and direct access tests. Non-image events keep scoped attachment references and optional Storage file IDs for downstream apps.
+- Add the narrow `attachment_to_blob` handoff for non-image files; Core converts its binary result into a temporary `blobref://` handle for tools such as Code ZIP import. Images continue through direct vision content.
+
 ## 0.24.30 — 2026-10-01
 
 - Use the native app icon when a legacy integration shares its tool namespace, including Torrent.

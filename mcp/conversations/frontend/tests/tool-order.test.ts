@@ -38,11 +38,15 @@ test("only an executing tool owns the response indicator",()=>{
  expect(responseToolGroup({...response,optimistic:true,createdAt:3000},timeline,[user])).toBeUndefined();
 });
 
-test("continuing responses keep the last completed tool group active",()=>{
+test("completed tools stay settled during model continuation; only the next live tool owns progress",()=>{
  const completed={...base,state:"done" as const};
  const timeline=[{kind:"toolGroup",key:"group",tools:[completed]}] as any;
- const response={agentId:41,threadId:"chat-1",afterMessageId:7,createdAt:1200,continuing:true};
- expect(responseToolGroup(response,timeline,[{id:7,role:"user",created_at:new Date(900).toISOString()} as any])).toBe("group");
+ const response={agentId:41,threadId:"chat-1",afterMessageId:7,createdAt:1200};
+ const messages=[{id:7,role:"user",created_at:new Date(900).toISOString()} as any];
+ expect(responseToolGroup(response,timeline,messages)).toBeUndefined();
+ for (const state of ["preparing","running"] as const) {
+  expect(responseToolGroup(response,[{...timeline[0],tools:[completed,{...base,id:"2",state}]}],messages)).toBe("group");
+ }
 });
 
 test("consecutive tools keep one stable group across long gaps until a message",()=>{

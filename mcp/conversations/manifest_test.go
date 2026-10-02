@@ -66,6 +66,27 @@ func TestManifestToolsMatchCode(t *testing.T) {
 	}
 }
 
+func TestAttachmentReaderCatalog(t *testing.T) {
+	app := &App{}
+	foundBlobHandoff := false
+	for _, tool := range app.MCPTools() {
+		if tool.Name == "read_attachment" || tool.Name == "conversations_read_attachment" {
+			t.Fatalf("retired attachment reader is still agent-facing: %q", tool.Name)
+		}
+		if tool.Name == "attachment_to_blob" {
+			foundBlobHandoff = true
+		}
+	}
+	if !foundBlobHandoff {
+		t.Fatal("attachment_to_blob is not registered")
+	}
+	for _, tool := range app.Manifest().Provides.MCPTools {
+		if tool.Name == "read_attachment" || tool.Name == "conversations_read_attachment" {
+			t.Fatalf("retired attachment reader is still in the manifest: %q", tool.Name)
+		}
+	}
+}
+
 func TestManifestDeclaresScopedAgentConversationWidget(t *testing.T) {
 	manifest := (&App{}).Manifest()
 	for _, component := range manifest.Provides.UIComponents {
@@ -198,7 +219,7 @@ func TestManifestDeclaresConversationsMobileSurface(t *testing.T) {
 }
 
 func TestReleaseVersionArtifactsAgree(t *testing.T) {
-	const releaseVersion = "0.24.30"
+	const releaseVersion = "0.24.31"
 	manifest := (&App{}).Manifest()
 	if manifest.Version != releaseVersion {
 		t.Fatalf("manifest version=%q want=%q", manifest.Version, releaseVersion)

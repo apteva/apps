@@ -159,7 +159,10 @@ func (a *App) EventHandlers() []sdk.EventHandler {
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
-		{Name: "read_attachment", Description: "Read an attachment in this conversation. Text is bounded; images include vision data; binary files return metadata and optional Storage file_id for document tools.", InputSchema: schemaObject(map[string]any{"conversation_id": map[string]any{"type": "string"}, "attachment_id": map[string]any{"type": "string"}, "offset": map[string]any{"type": "integer", "minimum": 0}}, []string{"conversation_id", "attachment_id"}), HandlerCtx: a.toolReadAttachment},
+		// toolReadAttachment remains implemented for compatibility and direct
+		// tests, but is deliberately not exposed to agents. The narrow blob
+		// handoff below is the supported path for non-image file consumers.
+		{Name: "attachment_to_blob", Description: "Pass a non-image attachment into Core's blob pipeline. Returns a temporary blobref:// handle for a downstream file, document, or ZIP-import tool. Images are already supplied directly and must not be fetched. Args: conversation_id, attachment_id.", InputSchema: schemaObject(map[string]any{"conversation_id": map[string]any{"type": "string"}, "attachment_id": map[string]any{"type": "string"}}, []string{"conversation_id", "attachment_id"}), HandlerCtx: a.toolAttachmentToBlob},
 		{Name: "resolve_thread_identity", Description: "Internal trusted backend identity resolution; never accepts a user identity from an agent.", InputSchema: schemaObject(map[string]any{"agent_id": map[string]any{"type": "integer"}, "thread_id": map[string]any{"type": "string"}}, []string{"agent_id", "thread_id"}), HandlerCtx: a.toolResolveThreadIdentity},
 		{
 			Name: "send",

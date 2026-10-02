@@ -414,7 +414,7 @@ for (const host of ["external","package"]) {
 }
 
 for (const host of ["dashboard","external","package"]) {
- test(`${host}: preparation pulses, tools finish, continuation resumes and approval waiting stops activity`,async({page,request})=>{
+ test(`${host}: preparation pulses, a 50ms tool settles through a long model wait, and approval waiting stops activity`,async({page,request})=>{
   await request.post("/reset");await page.goto(`/?host=${host}`);
   await expect(page.getByTitle("Live")).toBeVisible();
   const chat=host==="dashboard"?"chat-operator":"chat-visitor-a";
@@ -435,16 +435,23 @@ for (const host of ["dashboard","external","package"]) {
   await request.post("/emit",{data:{...frame,tool_activity:activity}});await phase("running",3);
   await expect(row).toHaveCount(1);await expect(row).toHaveAttribute("aria-label",/Running/);
   expect(await row.locator(".chat-tool-copy").first().evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-tool-copy-breathe");
-  await request.post("/emit",{data:{...frame,tool_activity:{...activity,status:"completed",ended_at:new Date().toISOString(),duration_ms:42,revision:2}}});
+  await request.post("/emit",{data:{...frame,tool_activity:{...activity,status:"completed",ended_at:new Date().toISOString(),duration_ms:50,revision:2}}});
   await expect(row).toHaveAttribute("aria-label",/Done/);
   // A completed call settles; the next model step owns the indicator.
   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
   await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
   await phase("continuing",4);
   await expect(row.getByText("Listing repositories",{exact:true})).toBeVisible();
-  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1);
-  await expect(row.getByText("42ms",{exact:true})).toHaveCount(0);
-  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toHaveCount(0);
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(row).toHaveAttribute("aria-label",/Done/);
+  await expect(row.getByText("50ms",{exact:true})).toHaveCount(0);
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
+  // Reproduce the production gap after the 50ms result without spending
+  // another 28 seconds executing (or animating) an already completed tool.
+  await page.clock.install(); await page.clock.fastForward(28_400);
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(row).toHaveAttribute("aria-label",/Done/);
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
   await page.screenshot({path:test.info().outputPath("continuing-tool.png")});
   await phase("idle",5);
   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
@@ -486,15 +493,16 @@ for (const host of ["dashboard","external","package"]) {
   const activity={id:601,chat_id:chat,agent_id:41,thread_id:chat,call_id:"parallel-1",name:"code_repos_list",reason:"Listing repositories",status:"running",started_at:new Date().toISOString(),ended_at:"",revision:1};
   await request.post("/emit",{data:{...frame,tool_activity:activity}});
   await request.post("/emit",{data:{...frame,tool_activity:{...activity,id:602,call_id:"parallel-2",reason:"Checking repository"}}});
-  await request.post("/emit",{data:{...frame,tool_activity:{...activity,status:"completed",ended_at:new Date().toISOString(),duration_ms:42,revision:2}}});
+  await request.post("/emit",{data:{...frame,tool_activity:{...activity,status:"completed",ended_at:new Date().toISOString(),duration_ms:50,revision:2}}});
   const row=page.locator(".chat-tool-activity");
   await expect(row).toHaveCount(1);await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1);
   await request.post("/emit",{data:{...frame,tool_activity:{...activity,id:602,call_id:"parallel-2",reason:"Checking repository",status:"completed",ended_at:new Date().toISOString(),duration_ms:64,revision:2}}});
   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
-  // A durable intermediate reply moves the tail away from the tool group.
+  // Once every parallel call finishes, model work owns Thinking even before
+  // an intermediate reply moves the transcript tail away from the tool group.
   await request.post("/emit",{data:{...frame,response_progress:{phase:"continuing",run_id:"ack-1",revision:1,started_at:start,after_message_id:0}}});
-  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1);
-  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toHaveCount(0);
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
   await request.post("/append-message",{data:{id:900,conversation_id:chat,role:"agent",agent_id:41,phase:"intermediate",content:"I am checking the next step.",components:[],created_at:new Date().toISOString()}});
   await expect(page.getByText("I am checking the next step.")).toBeVisible();
   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
