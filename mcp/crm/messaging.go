@@ -2624,18 +2624,19 @@ func stringValuesFromAny(v any) []string {
 // ─── Inbox (cross-contact triage queue) ───────────────────────────
 
 type inboxRow struct {
-	ID             int64  `json:"id"`
-	ContactID      int64  `json:"contact_id"`
-	ContactName    string `json:"contact_name,omitempty"`
-	ContactEmail   string `json:"contact_email,omitempty"`
-	ContactPhone   string `json:"contact_phone,omitempty"`
-	Channel        string `json:"channel"`
-	Subject        string `json:"subject,omitempty"`
-	Status         string `json:"status"`
-	Priority       string `json:"priority"`
-	LastActivityAt string `json:"last_activity_at"`
-	Snippet        string `json:"snippet,omitempty"`
-	Automated      bool   `json:"automated,omitempty"`
+	ID                   int64             `json:"id"`
+	ContactID            int64             `json:"contact_id"`
+	ContactName          string            `json:"contact_name,omitempty"`
+	ContactEmail         string            `json:"contact_email,omitempty"`
+	ContactPhone         string            `json:"contact_phone,omitempty"`
+	Channel              string            `json:"channel"`
+	Subject              string            `json:"subject,omitempty"`
+	Status               string            `json:"status"`
+	Priority             string            `json:"priority"`
+	LastActivityAt       string            `json:"last_activity_at"`
+	Snippet              string            `json:"snippet,omitempty"`
+	Automated            bool              `json:"automated,omitempty"`
+	LastMessageAddresses *MessageAddresses `json:"last_message_addresses,omitempty"`
 }
 
 // dbInboxConversations returns conversations across all contacts for the
@@ -2688,7 +2689,10 @@ func dbInboxConversations(db *sql.DB, pid, status string, limit, offset int, fil
 						  WHERE a.project_id = cc.project_id AND a.conversation_id = cc.id
 						  ORDER BY julianday(a.occurred_at) DESC, a.id DESC LIMIT 1), ''),
 				EXISTS (SELECT 1 FROM contact_tags t
-						WHERE t.contact_id = cc.contact_id AND t.tag_name = ?)
+						WHERE t.contact_id = cc.contact_id AND t.tag_name = ?),
+				COALESCE((SELECT json_object('kind', a.kind, 'source_detail', a.source_detail)
+					FROM contact_activities a WHERE a.project_id = cc.project_id AND a.conversation_id = cc.id
+					ORDER BY julianday(a.occurred_at) DESC, a.id DESC LIMIT 1), '')
 		 FROM contact_conversations cc
 		 JOIN contacts c ON c.id = cc.contact_id AND c.project_id = cc.project_id
 		 WHERE `+where+`
@@ -2703,12 +2707,20 @@ func dbInboxConversations(db *sql.DB, pid, status string, limit, offset int, fil
 	for rows.Next() {
 		r := &inboxRow{}
 		var autom int
+		var latest string
 		if err := rows.Scan(&r.ID, &r.ContactID, &r.ContactName, &r.ContactEmail,
 			&r.ContactPhone, &r.Channel, &r.Subject, &r.Status, &r.Priority, &r.LastActivityAt,
-			&r.Snippet, &autom); err != nil {
+			&r.Snippet, &autom, &latest); err != nil {
 			return nil, 0, err
 		}
 		r.Automated = autom != 0
+		var recorded struct {
+			Kind   string `json:"kind"`
+			Detail string `json:"source_detail"`
+		}
+		if json.Unmarshal([]byte(latest), &recorded) == nil {
+			r.LastMessageAddresses = messageAddresses(recorded.Kind, recorded.Detail)
+		}
 		r.Snippet = truncate(r.Snippet, 160)
 		out = append(out, r)
 	}

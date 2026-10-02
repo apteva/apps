@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { messageRecipientSummary } from "./message_addresses";
 import {
   crmInboxAPIURL,
   crmInboxContactLabel,
@@ -151,6 +152,9 @@ export default function CrmInboxWidget(props: CRMInboxHostProps) {
                   {item.subject ? `${item.subject} · ` : ""}{crmInboxPreview(item)}
                 </p>
               </div>
+              <p className="mt-1 truncate text-[10px] text-text-dim" title={`Latest message · ${messageRecipientSummary(item.last_message_addresses)}`}>
+                Latest · {messageRecipientSummary(item.last_message_addresses)}
+              </p>
             </a>
           ))}
           {total > items.length && (
