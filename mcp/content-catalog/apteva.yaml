@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: content-catalog
 display_name: Content Catalog
-version: 0.4.8
+version: 0.4.9
 description: |
   Coordinate brands, production sessions, Storage assets, Media derivatives,
   optional Gigs, cloud hosting, and shared platform posts.
@@ -67,7 +67,7 @@ provides:
     - { name: content_catalog_session_upload_target, description: "Get the session's exact Storage upload folder and bound Storage install ID. Does not scan or upload." }
     - { name: content_catalog_assets_attach_uploaded, description: "Attach an explicitly uploaded Storage file after verifying its exact session folder. Idempotent." }
     - { name: content_catalog_import_preview, description: "List reviewable Storage candidates under a brand root without changing any app data." }
-    - { name: content_catalog_assets_list, description: "List session assets with current Media descriptions, status and rating." }
+    - { name: content_catalog_assets_list, description: "List session assets with current Media metadata and recorded source links, including parent names and session IDs." }
     - { name: content_catalog_assets_get, description: "Get an asset with source lineage, hosting, and publication records." }
     - { name: content_catalog_assets_link_source, description: "Record a derivative's source asset. Supports multiple source assets." }
     - { name: content_catalog_assets_review, description: "Set editorial review state on a Catalog asset." }
@@ -95,7 +95,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: content-catalog/v0.4.8
+    ref: content-catalog/v0.4.9
     entry: mcp/content-catalog
   port: 8080
   health_check: /health

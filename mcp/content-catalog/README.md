@@ -18,6 +18,14 @@ The session length filter has two slider handles and exact minimum/maximum input
 
 Clicking a file card opens a wide modal with its preview or player, metadata, review controls, cloud hosting, and platform posts. Close it with **Close**, Escape, or a click outside the dialog to return to the file grid. Review and hosting updates keep the file dialog open; post editing returns to the file dialog when finished.
 
+## Asset display and source links
+
+Session pages offer **Grid** and **Grouped by original**. The choice is remembered in this browser. Grouped view uses only recorded source relationships, with several source cards across a row and expandable, compact derivative cards below them. Nested derivatives keep their immediate parent, previews, descriptions, hosting badges and per-asset platform status. Shared derivatives appear once under their first linked in-session source; all source links remain available in the asset modal. Sources from another session can be opened from the same parent controls.
+
+The filter modal offers **All assets**, **Sources / no parent linked**, and **Derivatives only**. Grouped filtering retains nonmatching parents as clearly marked **Context** and expands paths to matching derivatives. The displayed match count excludes context cards; Grid shows only matches. Source filters mean recorded parent presence, not proof that a file is an original. Badges use explicit `kind`/`relation` values for Original, Clip and Reel; missing parents are labeled **No source linked** rather than inferred from file names.
+
+Asset detail, session lists and search return `sources` directly on each asset, including parent name, session ID, kind and recorded relation/order. One project-scoped SQL query enriches the whole page, including cross-session source metadata. Display changes do not write relationships, generate derivatives, scan folders or modify publication records.
+
 ## Current Media metadata
 
 Asset detail, session asset lists and search return `description`, `description_source`, `description_updated_at`, `media_status`, `media_rating` and `duration_ms` directly on each asset. Media is authoritative; descriptions are read live and never persisted in Catalog. `probe_status: ok` maps to Catalog's existing `completed` status. Missing Media records return `missing`; read failures return `unavailable` with `media_error`, clearing stale response metadata.
