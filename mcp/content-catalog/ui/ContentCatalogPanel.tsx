@@ -236,6 +236,10 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const [overview, setOverview] = useState<Record<string, number>>({});
   const [brands, setBrands] = useState<Brand[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [sessionBrand, setSessionBrand] = useState("");
+  const [brandSessions, setBrandSessions] = useState<Session[] | null>(null);
+  const [brandSessionsLoading, setBrandSessionsLoading] = useState(false);
+  const [brandSessionsError, setBrandSessionsError] = useState("");
   const [hosts, setHosts] = useState<Host[]>([]);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [assets, setAssets] = useState<Asset[]>([]);
@@ -280,6 +284,14 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     if (!res.ok) throw new Error(await res.text());
     return res.json();
   }, [query]);
+  useEffect(() => {
+    let active = true;
+    setBrandSessions(null); setBrandSessionsError(""); setBrandSessionsLoading(!!sessionBrand);
+    if (sessionBrand) get<{ sessions: Session[] }>("/sessions", { brand_id: sessionBrand }).then(result => {
+      if (active) setBrandSessions(result.sessions || []);
+    }).catch(err => { if (active) setBrandSessionsError(errorText(err)); }).finally(() => { if (active) setBrandSessionsLoading(false); });
+    return () => { active = false; };
+  }, [get, sessionBrand, sessions]);
   const action = useCallback(async <T,>(tool: string, args: Record<string, unknown>): Promise<T> => {
     const res = await fetch(`${API}/action?${query()}`, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tool, args }) });
     if (!res.ok) throw new Error(await res.text());
@@ -352,6 +364,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     try { const result = await get<{ asset: Asset; hostings: Hosting[]; sources: AssetSource[]; publications: Publication[]; media?: MediaDetails; media_error?: string }>(`/assets/${asset.id}`); if (request !== assetRequest.current) return; const loaded = { ...result.asset, sources: result.sources || result.asset.sources || [], publications: result.publications || [] }; setSelectedAsset(loaded); setHostings(result.hostings || []); setAssets(current => current.map(item => item.id === asset.id ? loaded : item)); setAssetSources(result.sources || []); setAssetMedia(result.media || null); if (result.media_error) setError(`Media unavailable: ${result.media_error}`); } catch (e) { if (request === assetRequest.current) setError(errorText(e)); } finally { if (request === assetRequest.current) setAssetLoading(false); }
   }, [get]);
   const closeAsset = useCallback(() => { ++assetRequest.current; setSelectedAsset(null); setAssetLoading(false); }, []);
+  const filteredSessions = (sessionBrand && brandSessions !== null ? brandSessions : sessions).filter(session => !sessionBrand || session.brand_id === sessionBrand);
   const brandName = (id: string) => brands.find(b => b.id === id)?.name || short(id);
   const searchParams = useCallback(() => ({ entity_type: searchType, query: searchText, brand_id: searchBrand, date_from: searchDateFrom, date_to: searchDateTo, kind: searchKind, lineage: searchLineage, sort: searchSort, review_status: searchReview, destination: searchDestination, account_ref: searchAccount, availability: searchAvailability, limit: "24" }), [searchType, searchText, searchBrand, searchDateFrom, searchDateTo, searchKind, searchLineage, searchSort, searchReview, searchDestination, searchAccount, searchAvailability]);
   useEffect(() => {
@@ -465,8 +478,15 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
 
     {tab === "sessions" && !selectedSession && <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-lg font-semibold">Sessions</h2><p className="text-sm text-text-muted">Select a session to see its files and publication status.</p></div><button type="button" className={buttonClass} onClick={() => setModal("new-session")}>+ New session</button></div>
+      <div className="flex flex-wrap items-center gap-3" aria-label="Session filters">
+        <label className="flex items-center gap-2 text-sm"><span>Brand</span><select className={inputClass} style={{ width: "auto", minWidth: 180, maxWidth: "100%" }} value={sessionBrand} onChange={e => setSessionBrand(e.target.value)} aria-label="Session brand"><option value="">All brands</option>{brands.map(brand => <option key={brand.id} value={brand.id}>{brand.name}</option>)}</select></label>
+        <span className="text-xs text-text-muted" role="status">{brandSessionsLoading ? "Loading sessions…" : `Showing ${filteredSessions.length} of ${overview.sessions ?? sessions.length} sessions`}</span>
+        {sessionBrand && <button type="button" className="text-xs text-accent underline" onClick={() => setSessionBrand("")}>Clear brand filter</button>}
+      </div>
+      {brandSessionsError && <p className="text-sm text-red-400">Could not load sessions for this brand: {brandSessionsError}</p>}
       {sessions.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">No sessions yet.</p>}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 12, alignItems: "stretch" }}>{sessions.map(s => <button key={s.id} style={previewCardStyle} className="overflow-hidden rounded-xl border border-border text-left text-sm transition-colors hover:border-accent/60" onClick={() => showSession(s)}><PreviewImage src={previewURL(projectId, "sessions", s.id)} alt={`Preview of ${s.title}`} fallback="▣" /><div className="p-3" style={{ flex: 1 }}><div className="font-medium line-clamp-2" style={{ minHeight: 40 }}>{s.title}</div><div className="mt-1 text-xs text-text-muted">{brandName(s.brand_id)} · {recordingDate(s.session_date)}</div></div></button>)}</div>
+      {!brandSessionsLoading && !brandSessionsError && sessions.length > 0 && filteredSessions.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">No sessions for this brand yet.</p>}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 12, alignItems: "stretch" }}>{filteredSessions.map(s => <button key={s.id} data-session-id={s.id} style={previewCardStyle} className="overflow-hidden rounded-xl border border-border text-left text-sm transition-colors hover:border-accent/60" onClick={() => showSession(s)}><PreviewImage src={previewURL(projectId, "sessions", s.id)} alt={`Preview of ${s.title}`} fallback="▣" /><div className="p-3" style={{ flex: 1 }}><div className="font-medium line-clamp-2" style={{ minHeight: 40 }}>{s.title}</div><div className="mt-1 text-xs text-text-muted">{brandName(s.brand_id)} · {recordingDate(s.session_date)}</div></div></button>)}</div>
     </div>}
 
     {tab === "sessions" && selectedSession && <div className="space-y-5">
