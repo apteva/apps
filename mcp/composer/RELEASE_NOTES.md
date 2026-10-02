@@ -1,3 +1,18 @@
+# Composer v0.9.3
+
+`procedure_create` and `procedure_get` now return example assets with the
+procedure revision's actual target instead of hardcoding `clip`. Examples for
+`composition`, `audio`, and `still` can be copied into bindings without a target
+mismatch. Fetching an older revision continues to use that revision's target
+even when a newer revision changes it.
+
+No migration or media regeneration is required. Validation: full Composer Go
+suite, build, and `go vet`; regressions create each supported target, copy the
+returned examples into composition validation, and check pinned/latest revision
+lookups after changing the target.
+
+---
+
 # Composer v0.9.2
 
 V1 clip text and timed text tracks now render straight apostrophes without
