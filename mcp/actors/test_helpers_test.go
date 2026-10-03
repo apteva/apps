@@ -53,6 +53,7 @@ type fakePlatform struct {
 	proxyCountryOverride  string
 	mediaSOM              bool
 	waitOutput            map[string]any
+	formSOM               bool
 }
 
 func newFakePlatform() *fakePlatform {
@@ -341,6 +342,14 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 		if in["action"] == "screenshot" && in["include_som"] == true && p.mediaSOM {
 			out["som"] = []map[string]any{{"id": "media-target", "label": 11, "tag": "button", "role": "button", "text": "Add image"}}
 			out["som_revision"] = "som-1"
+		}
+		if in["action"] == "screenshot" && in["include_som"] == true && p.formSOM {
+			out["som"] = []map[string]any{
+				{"id": "check-target", "label": 1, "role": "checkbox", "accessible_name": "Notifications"},
+				{"id": "select-target", "label": 2, "role": "combobox", "accessible_name": "Tier"},
+				{"id": "date-target", "label": 3, "role": "textbox", "accessible_name": "Schedule date"},
+			}
+			out["som_revision"] = "form-1"
 		}
 		if in["action"] == "screenshot" && in["include_som"] == true && !p.cookieDismissed {
 			targets := []map[string]any{}

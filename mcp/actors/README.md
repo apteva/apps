@@ -95,3 +95,9 @@ The release manifest pins source to the matching immutable Actors tag. The regis
 ## Web compatibility
 
 Web's search, extraction, crawl, map, research and snapshot tools remain independent. Its existing extractor endpoints and data have not been deleted or silently rerouted. New reusable workflows should use Actors. A later explicit migration can import definitions and replace old endpoints with compatibility forwarding; it must account for app-local IDs, saved Jobs targets and historical run ownership.
+
+## Form and consequential actions
+
+Semantic `set_checked`, `select_option`, and `set_temporal` support access toggles, dropdowns and schedule fields. Use `readability: false` on extract/assert steps when controls live outside the primary content. An extracted field may supply `pattern` to capture a labelled value before type conversion.
+
+For sends, payments or deletions, add `once_key: "{{request_id}}"` to the acknowledged consequential click. Reservations persist across run retries, restarts and actor revisions. The same actor operation cannot attempt that key again, even if its prior outcome is uncertain. Inspect the referenced original run before deliberately issuing a new key. This guards duplicate attempts; it does not provide exactly-once execution on an external site.

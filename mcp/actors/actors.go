@@ -99,6 +99,11 @@ type actorStep struct {
 	Conditions  []actorWaitCondition `json:"conditions,omitempty"`
 	Match       string               `json:"match,omitempty"`
 	TimeoutMS   any                  `json:"timeout_ms,omitempty"`
+	Checked     any                  `json:"checked,omitempty"`
+	Value       string               `json:"value,omitempty"`
+	Values      []string             `json:"values,omitempty"`
+	Readability *bool                `json:"readability,omitempty"`
+	OnceKey     string               `json:"once_key,omitempty"`
 }
 
 type actorWaitCondition struct {
@@ -123,6 +128,7 @@ type actorField struct {
 	Type      string `json:"type,omitempty"`
 	Attribute string `json:"attribute,omitempty"`
 	Required  bool   `json:"required,omitempty"`
+	Pattern   string `json:"pattern,omitempty"`
 }
 
 type actorRecord struct {
@@ -354,6 +360,17 @@ func validateActorDefinition(def actorDefinition) error {
 			if !locatorHasTarget(step.Locator) {
 				return fmt.Errorf("steps[%d].locator is required for set_text", i)
 			}
+		case "set_checked", "select_option", "set_temporal":
+			if !locatorHasTarget(step.Locator) {
+				return fmt.Errorf("steps[%d].locator is required for %s", i, step.Action)
+			}
+			if step.Action == "set_checked" {
+				if _, ok := step.Checked.(bool); !ok && !actorTemplateValue(stringFromAny(step.Checked)) {
+					return fmt.Errorf("steps[%d].checked must be a boolean or template", i)
+				}
+			} else if step.Value == "" && (step.Action != "select_option" || len(step.Values) == 0) {
+				return fmt.Errorf("steps[%d].value is required for %s", i, step.Action)
+			}
 		case "upload_file":
 			if !locatorHasTarget(step.Locator) {
 				return fmt.Errorf("steps[%d].locator is required for upload_file", i)
@@ -392,6 +409,9 @@ func validateActorDefinition(def actorDefinition) error {
 		case "click", "paginate":
 			if step.Locator.Text == "" && step.Locator.Role == "" && step.Locator.Selector == "" {
 				return fmt.Errorf("steps[%d].locator is required", i)
+			}
+			if step.OnceKey != "" && (step.Action != "click" || step.ExpectedEffect == "" || step.ConfirmConsequence != step.ExpectedEffect) {
+				return fmt.Errorf("steps[%d].once_key requires a click with an acknowledged expected_effect", i)
 			}
 		case "extract":
 			if strings.TrimSpace(step.Items) == "" || len(step.Fields) == 0 {

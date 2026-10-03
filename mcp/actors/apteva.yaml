@@ -1,11 +1,11 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.2.7
+version: 0.2.8
 description: |
   Reusable browser actors with named operations, crawl queues, URL fan-out,
   revisioned definitions, structured datasets, durable run history, Jobs schedules,
-  and generic semantic media uploads and verified video URL embeds.
+  semantic media, form controls, verified waits, and guarded consequential actions.
   Uses Computer directly for browser sessions and saved contexts.
   Web is independent and is not required. Site workflows are user definitions.
 icon: /ui/icon.svg
@@ -91,7 +91,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.2.7
+    ref: actors/v0.2.8
     entry: mcp/actors
   port: 8080
   health_check: /health

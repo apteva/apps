@@ -239,6 +239,9 @@ func (a *App) extractBrowserDOM(callCtx context.Context, ctx *sdk.AppCtx, sessio
 		"max_chars":   boundedInt(intArg(args, "max_chars"), defaultMaxChars, 1000, 1000000),
 		"readability": true,
 	})
+	if value, ok := args["readability"].(bool); ok {
+		extractArgs["readability"] = value
+	}
 	if waitMS := intArg(args, "wait_ms"); waitMS > 0 {
 		extractArgs["wait_ms"] = waitMS
 	}
