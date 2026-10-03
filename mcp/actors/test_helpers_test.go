@@ -24,6 +24,8 @@ type fakeCall struct {
 }
 
 type fakePlatform struct {
+	crawlHTMLMinimumLimit    int
+	crawlHTMLAlwaysTruncated bool
 	tk.BasePlatformClient
 	failAction            string
 	blockExtract          chan struct{}
@@ -49,6 +51,7 @@ type fakePlatform struct {
 	openBackendOverride   string
 	proxyModeOverride     string
 	proxyCountryOverride  string
+	mediaSOM              bool
 }
 
 func newFakePlatform() *fakePlatform {
@@ -129,6 +132,9 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 			"proxy":       proxy,
 		}
 	case "computer.browser_extract":
+		if p.crawlHTMLMinimumLimit > 0 || p.crawlHTMLAlwaysTruncated {
+			return map[string]any{"html": "<body><h2>Complete profile</h2></body>", "rendered": true, "current_url": "https://example.com/profile", "truncated": p.crawlHTMLAlwaysTruncated || intArg(in, "max_chars") < p.crawlHTMLMinimumLimit}
+		}
 		if strings.Contains(p.openURL, "google.com/search") {
 			p.searchExtractCount++
 			if p.searchBlocked {
@@ -319,6 +325,17 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 			p.openURL = p.selectorRedirectURL
 		}
 		out := map[string]any{"current_url": p.openURL, "width": 1280, "height": 720}
+		if in["action"] == "upload_file" {
+			out["uploaded"] = true
+			out["filename"] = in["filename"]
+			out["size_bytes"] = 5
+			out["mime_type"] = in["mime_type"]
+			out["file_source"] = "base64"
+		}
+		if in["action"] == "screenshot" && in["include_som"] == true && p.mediaSOM {
+			out["som"] = []map[string]any{{"id": "media-target", "label": 11, "tag": "button", "role": "button", "text": "Add image"}}
+			out["som_revision"] = "som-1"
+		}
 		if in["action"] == "screenshot" && in["include_som"] == true && !p.cookieDismissed {
 			targets := []map[string]any{}
 			if p.cookieBannerSOM && p.cookieBanner {

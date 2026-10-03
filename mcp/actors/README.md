@@ -1,6 +1,8 @@
 # Actors
 
-Actors v0.1.0 is a standalone Apteva app for reusable browser workflows. It depends directly on **Computer**, **Storage** and **Jobs**. It does not call, import or require Web.
+Actors v0.2.0 adds durable schema version 2 crawls with URL fan-out, route matching, bounded retries, resumable frontier state, keyed materialized datasets, and declarative normalization transforms. Computer remains the browser and JavaScript runtime.
+
+Actors is a standalone Apteva app for reusable browser workflows. It depends directly on **Computer**, **Storage** and **Jobs**. It does not call, import or require Web.
 
 ## Implemented
 
@@ -12,13 +14,14 @@ Actors v0.1.0 is a standalone Apteva app for reusable browser workflows. It depe
 - Saved tasks pinned to actor revision/operation/input.
 - Page-by-page dataset persistence and cursor reads, including partial output after failure; private JSONL/CSV exports on success.
 - Jobs schedules pinned to actor revisions, deterministic preset rotation and occurrence deduplication.
-- Project-scoped MCP tools, HTTP routes and an Actors panel.
+- Project-scoped MCP tools, HTTP routes and a self-contained Actors panel mounted by the dashboard, with project and installation IDs on every Actors request.
+- Data explorer: choose a run and named dataset, browse typed rows with cursor pagination, search loaded rows, inspect full records, and export shown rows as JSON or CSV. Crawl reads use immutable run results, including partial results, rather than the latest materialized dataset.
 
 This is the working foundation for the platform described in `PLATFORM_PROPOSAL.md`, not completion of the entire roadmap. Durable distributed queues, checkpoint resume, full JSON Schema contracts, isolated code actors, public API publication, webhooks and a shared catalog remain future work.
 
 ## Create and run an actor
 
-`examples/page-reader.json` is a complete `actors_save` input. It defines a `read` operation for example.com. Examples are files only; the app does not seed any definitions.
+`examples/page-reader.json` is a complete `actors_save` input. It defines a `read` operation for example.com. `examples/crawl-template.json` is a generic schema version 2 crawl starting point; replace its host, selectors, fields, routes and datasets for the site you own or are authorized to collect. Examples are files only; the app does not seed or install any definitions.
 
 After saving it:
 
@@ -29,6 +32,10 @@ After saving it:
 Pass this to `actors_run`. Optional `idempotency_key` deduplicates retries with identical revision and inputs; reusing it for different work returns a conflict. Poll `actors_run_get` with `{"id": <run_id>}`. Read output with `actors_dataset_read` using `{"run_id": <run_id>, "limit": 50}` and pass `next_cursor` as `after` for subsequent pages. While a run is active, poll again at the last cursor for new committed rows.
 
 For a saved login, add `browser.context_id` using a context created through Computer. Omit `backend` to defer to Computer; the saved context can determine its backend. The context remains owned by Computer, and Actors requests `persist: true`. Do not store credentials in inputs: input/definition snapshots are intentionally retained.
+
+## Crawl a site
+
+For a concrete test fixture, `examples/ufcstats.json` shows how a site-specific definition can model events, fights and fighters. It is optional example data only. Save a definition's `definition` with `actors_crawl_save`, then pass the returned actor ID to `actors_crawl_run`. The run creates a durable URL frontier, follows configured URL fields into their routes, upserts keyed records into named datasets, and can be inspected with `actors_crawl_status`, `actors_frontier_list`, and `actors_dataset_query`. `actors_crawl_resume` continues pending work after a budget limit or restart.
 
 `actors_task_save` accepts `name`, `actor_id`, `operation`, `input`, optional `preset` and optional `revision`. It pins the current revision when omitted. Later actor edits do not change that task. Use `actors_task_list`, `actors_task_run` and `actors_task_delete` to manage it.
 
@@ -70,12 +77,14 @@ Click, key and pagination steps are not automatically retried because an uncerta
 GOWORK=off go test ./...
 GOWORK=off go test -race ./...
 GOWORK=off go build -o /tmp/apteva-actors .
-bun build ui/ActorsPanel.mjs --target browser --external react --external react-dom/client --outfile /tmp/ActorsPanel.mjs
+cd ../..
+bun run scripts/build-panels.ts --app actors
+bun test mcp/actors/ui/ActorsPanel.test.ts
 ```
 
 The app-sdk pin was derived from local SDK HEAD and fetched tags: `950b91d` / `v0.82.0`. `GOWORK=off` verifies the app against its published dependency rather than the workspace overlay.
 
-The release manifest pins source to `actors/v0.1.0`. The registry references the same immutable tag for the manifest and icon. Publishing a release makes Actors available for installation; it does not install the app into existing projects.
+The release manifest pins source to the matching immutable Actors tag. The registry references the same tag for the manifest and icon. Publishing a release makes Actors available for installation; it does not install the app into existing projects.
 
 ## Web compatibility
 

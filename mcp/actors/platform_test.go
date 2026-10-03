@@ -55,10 +55,21 @@ func TestStandaloneManifestAndAssets(t *testing.T) {
 			t.Fatalf("undeclared/foreign tool %s", tool.Name)
 		}
 	}
-	for _, file := range []string{"ui/ActorsPanel.mjs", "ui/icon.svg", "skills/how-to-use-actors.md", "examples/page-reader.json"} {
+	for _, file := range []string{"ui/ActorsPanel.mjs", "ui/icon.svg", "skills/how-to-use-actors.md", "examples/page-reader.json", "examples/crawl-template.json"} {
 		if _, err := os.Stat(file); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestFreshInstallHasNoSiteDefinitions(t *testing.T) {
+	ctx, _ := newTestCtx(t, newFakePlatform())
+	var count int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM actors_definitions`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("fresh install contains %d actor definitions", count)
 	}
 }
 
@@ -156,6 +167,52 @@ func TestSavedContextAndFillUseComputerDirectly(t *testing.T) {
 	var locks int
 	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM actors_context_locks`).Scan(&locks); err != nil || locks != 0 {
 		t.Fatalf("locks=%d err=%v", locks, err)
+	}
+}
+
+func TestActorUploadFileUsesSemanticTarget(t *testing.T) {
+	plat := newFakePlatform()
+	plat.mediaSOM = true
+	ctx, app := newTestCtx(t, plat)
+	definition := map[string]any{
+		"schema_version": 1,
+		"browser":        map[string]any{"backend": "local"},
+		"allowed_hosts":  []any{"example.com"},
+		"limits":         map[string]any{"max_duration_seconds": 60, "step_retries": 0},
+		"steps": []any{
+			map[string]any{"action": "goto", "url": "https://example.com/new"},
+			map[string]any{"action": "upload_file", "locator": map[string]any{"text": "Add image", "role": "button", "exact": true, "som_only": true}, "base64": "aGVsbG8=", "filename": "image.png", "mime_type": "image/png"},
+		},
+		"output_schema": map[string]any{},
+	}
+	rec := saveFixtureActor(t, ctx, app, definition)
+	if _, err := app.toolActorRun(ctx, map[string]any{"actor_id": rec.ID}); err != nil {
+		t.Fatal(err)
+	}
+	queued, _ := claimActorRun(ctx)
+	if err := app.executeActorRun(context.Background(), ctx, queued); err != nil {
+		t.Fatal(err)
+	}
+	run, err := getActorRun(ctx, queued.ID)
+	if err != nil || run["status"] != "completed" {
+		t.Fatalf("run=%#v err=%v", run, err)
+	}
+	var upload map[string]any
+	for _, call := range plat.callsSnapshot() {
+		if call.app == "computer" && call.tool == "computer_use" && call.args["action"] == "upload_file" {
+			upload = call.args
+		}
+	}
+	if upload == nil || upload["target_id"] != "media-target" || upload["som_revision"] != "som-1" {
+		t.Fatalf("upload call=%#v", upload)
+	}
+	if upload["coordinate"] != nil {
+		t.Fatalf("upload unexpectedly used coordinates: %#v", upload)
+	}
+	out := run["output"].(map[string]any)
+	media, ok := out["media"].([]any)
+	if !ok || len(media) != 1 {
+		t.Fatalf("media output=%#v", out["media"])
 	}
 }
 

@@ -1,1 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none"><rect width="64" height="64" rx="16" fill="#312e81"/><path d="M20 20h24M20 44h24M20 20v24M44 20v24" stroke="#a5b4fc" stroke-width="3"/><rect x="12" y="12" width="16" height="16" rx="5" fill="#c7d2fe"/><rect x="36" y="36" width="16" height="16" rx="5" fill="#c7d2fe"/><path d="m40 14 10 6-10 6zM16 39l9 5-9 5z" fill="#fff"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Apteva adaptive app icon. A reusable actor connects a trigger to an action. -->
+  <rect x="3" y="4" width="6" height="6" rx="1.5"/>
+  <rect x="15" y="4" width="6" height="6" rx="1.5"/>
+  <rect x="9" y="15" width="6" height="6" rx="1.5"/>
+  <path d="M9 7h6M6 10v2.5a2.5 2.5 0 0 0 2.5 2.5H12M18 10v2.5a2.5 2.5 0 0 1-2.5 2.5H12"/>
+  <path d="m10.5 13.5 1.5 1.5 1.5-1.5"/>
+</svg>
