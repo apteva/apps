@@ -188,7 +188,13 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 	}
 	var convoID int64
 	if body.Channel != "email" {
-		err = tx.QueryRow(`SELECT id FROM contact_conversations WHERE project_id=? AND contact_id=? AND channel=?`, pid, cid, body.Channel).Scan(&convoID)
+		convoID, err = switchedPhoneConversationTx(tx, pid, cid, sourceID, body.Channel, body.From, canonicalParticipantAddress(body.Channel, body.MatchedRecipient), body.ReceivedAt)
+		if err != nil {
+			return nil, err
+		}
+		if convoID == 0 {
+			err = tx.QueryRow(`SELECT id FROM contact_conversations WHERE project_id=? AND contact_id=? AND channel=?`, pid, cid, body.Channel).Scan(&convoID)
+		}
 		if err != nil && err != sql.ErrNoRows {
 			return nil, err
 		}

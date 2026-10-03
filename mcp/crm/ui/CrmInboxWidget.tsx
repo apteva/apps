@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { messageRecipientSummary } from "./message_addresses";
+import { channelPresentation, channelThemeCSS } from "./channels";
 import {
   crmInboxAPIURL,
   crmInboxContactLabel,
@@ -17,12 +18,6 @@ const priorityStyles: Record<string, string> = {
   high: "bg-yellow/15 text-yellow border-yellow/30",
   normal: "bg-bg-input text-text-muted border-border",
   low: "bg-bg-input text-text-dim border-border",
-};
-
-const channelStyles: Record<string, string> = {
-  email: "bg-blue/10 text-blue",
-  sms: "bg-accent/10 text-accent",
-  whatsapp: "bg-green/10 text-green",
 };
 
 function channelLabel(channel: string): string {
@@ -95,6 +90,7 @@ export default function CrmInboxWidget(props: CRMInboxHostProps) {
 
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-bg-card">
+      <style>{channelThemeCSS}</style>
       <header className="flex shrink-0 items-start justify-between gap-3 border-b border-border px-4 py-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
@@ -134,9 +130,9 @@ export default function CrmInboxWidget(props: CRMInboxHostProps) {
             >
               <div className="flex min-w-0 items-center gap-2">
                 <span className="truncate text-xs font-semibold text-text">{crmInboxContactLabel(item)}</span>
-                <span className={`shrink-0 rounded px-1.5 py-0.5 text-[8px] font-bold uppercase ${channelStyles[item.channel] || "bg-bg-input text-text-muted"}`}>
-                  {channelLabel(item.channel)}
-                </span>
+                {(item.channels || [item.channel]).map(channel => <span key={channel} className="shrink-0 rounded px-1.5 py-0.5 text-[8px] font-bold" style={channelPresentation[channel] ? {color: channelPresentation[channel].color, backgroundColor: channelPresentation[channel].backgroundColor} : undefined}>
+                  {channelPresentation[channel]?.icon} {channelPresentation[channel]?.label || channelLabel(channel)}
+                </span>)}
                 <span className="ml-auto shrink-0 text-[10px] tabular-nums text-text-dim">{crmInboxRelativeTime(item.last_activity_at)}</span>
               </div>
               <div className="mt-1 flex min-w-0 items-center gap-2">

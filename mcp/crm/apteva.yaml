@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.9.14
+version: 0.9.15
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -98,7 +98,7 @@ provides:
     - name: contacts_send_message
       description: "REAL EXTERNAL SEND. Supports body/template content plus up to 20 attachments / 25 MB from Storage IDs, HTTPS URLs, or base64. Never use for sender/config testing; use messaging_senders_list. New standalone emails require a subject. Identical sends are automatically deduplicated for five minutes."
     - name: contacts_reply
-      description: "REAL EXTERNAL SEND. Supports body/template content plus up to 20 attachments / 25 MB from Storage IDs, HTTPS URLs, or base64. Reply on the contact's most-recent inbound conversation, preserve email threading, and deduplicate identical replies for five minutes."
+      description: "REAL EXTERNAL SEND. Supports body/template content plus attachments. Reply on the contact's most-recent inbound conversation, preserve email threading, and deduplicate identical replies for five minutes. Explicit channel=sms/whatsapp switches stay in the same phone conversation and require a verified sender for that channel; email threads cannot switch."
     - name: contacts_send_test
       description: "REAL EXTERNAL SEND for an explicitly requested delivery test; not a configuration check. Pass body and omit unused template/optional fields. Logged as *_test_sent and deduplicated for five minutes."
     - name: messaging_senders_list
@@ -106,7 +106,7 @@ provides:
     - name: messaging_templates_list
       description: List templates from the bound Messaging app, especially approved WhatsApp templates.
     - name: messaging_whatsapp_session_check
-      description: Check whether a WhatsApp contact is inside the 24-hour free-form reply window.
+      description: Check the WhatsApp 24-hour free-form reply window; returns active, last_inbound, expires_at and checked_at for the exact phone/sender pair.
     - name: contacts_refresh_message_body
       description: Preview or recover missing inbound email content from the original Messaging record while preserving the existing activity and conversation.
     - name: messaging_inbound_receive
@@ -484,7 +484,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: crm/v0.9.14
+    ref: crm/v0.9.15
     entry: mcp/crm
   port: 8080
   health_check: /health
