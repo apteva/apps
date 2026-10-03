@@ -14,11 +14,12 @@ import {
 
 export default function TaskOverviewWidget(props: HostProps) {
   const operational = useTasks(props, { limit: "100", view: "operational" });
+  const drafts = useTasks(props, { limit: "100", view: "drafts" });
   const recent = useTasks(props, { limit: "12", view: "recent", include_runs: "true" });
-  const tasks = useMemo(() => [...operational.tasks, ...recent.tasks.filter(task => !operational.tasks.some(existing => existing.id === task.id))], [operational.tasks, recent.tasks]);
-  const loading = operational.loading || recent.loading;
-  const error = operational.error || recent.error;
-  const reload = () => { void operational.reload(); void recent.reload(); };
+  const tasks = useMemo(() => [...drafts.tasks, ...operational.tasks, ...recent.tasks.filter(task => !operational.tasks.some(existing => existing.id === task.id))], [drafts.tasks, operational.tasks, recent.tasks]);
+  const loading = operational.loading || drafts.loading || recent.loading;
+  const error = operational.error || drafts.error || recent.error;
+  const reload = () => { void operational.reload(); void drafts.reload(); void recent.reload(); };
   const names = useAgentNames(props.projectId);
   const preferences = taskOverviewPreferences(props.widgetSettings);
   const filterStorageKey = `apteva:tasks:overview-filters:${props.widgetId || `${props.projectId || "global"}:${props.installId || 0}`}`;
@@ -70,11 +71,11 @@ export default function TaskOverviewWidget(props: HostProps) {
           active={filters.length === 0}
           onClick={() => setFilters([])}
         />
-        {(["active", "scheduled", "recurring", "recent"] as TaskQueueFilter[]).map(
+        {(["drafts", "active", "scheduled", "recurring", "recent"] as TaskQueueFilter[]).map(
           (filter) => (
             <FilterButton
               key={filter}
-              label={filter[0].toUpperCase() + filter.slice(1)}
+              label={filter === "drafts" ? "Drafts" : filter[0].toUpperCase() + filter.slice(1)}
               active={filters.includes(filter)}
               onClick={() =>
                 setFilters((current) =>

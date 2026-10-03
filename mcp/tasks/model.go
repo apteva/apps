@@ -1,12 +1,16 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
+	"strings"
 	"time"
 )
 
 const (
+	stateDraft     = "draft"
 	stateQueued    = "queued"
 	stateRunning   = "running"
 	stateWaiting   = "waiting"
@@ -29,58 +33,72 @@ type ThreadRef struct {
 }
 
 type Task struct {
-	ID                     string     `json:"id"`
-	AgentID                int64      `json:"agent_id"`
-	ProjectID              string     `json:"project_id"`
-	Title                  string     `json:"title"`
-	Description            string     `json:"description,omitempty"`
-	State                  string     `json:"state"`
-	Progress               *int       `json:"progress,omitempty"`
-	CurrentStep            string     `json:"current_step,omitempty"`
-	CreatedByThreadID      string     `json:"created_by_thread_id,omitempty"`
-	AssignedThreadID       string     `json:"assigned_thread_id"`
-	ExecutionThreadID      string     `json:"execution_thread_id,omitempty"`
-	ParentTaskID           string     `json:"parent_task_id,omitempty"`
-	IdempotencyKey         string     `json:"idempotency_key,omitempty"`
-	RecoveryOfTaskID       string     `json:"recovery_of_task_id,omitempty"`
-	OriginalOccurrenceKey  string     `json:"original_occurrence_key,omitempty"`
-	RecoveryAttempt        int        `json:"recovery_attempt,omitempty"`
-	RecoveryReason         string     `json:"recovery_reason,omitempty"`
-	OperationKey           string     `json:"operation_key,omitempty"`
-	ScheduleKind           string     `json:"schedule_kind,omitempty"`
-	ScheduleExpression     string     `json:"schedule_expression,omitempty"`
-	ScheduleTimezone       string     `json:"schedule_timezone,omitempty"`
-	ScheduleEnabled        bool       `json:"schedule_enabled"`
-	ScheduleOverlapPolicy  string     `json:"schedule_overlap_policy,omitempty"`
-	ScheduleCatchupPolicy  string     `json:"schedule_catchup_policy,omitempty"`
-	NextRunAt              *time.Time `json:"next_run_at,omitempty"`
-	LastRunAt              *time.Time `json:"last_run_at,omitempty"`
-	LastDispatchedAt       *time.Time `json:"last_dispatched_at,omitempty"`
-	LastOccurrenceID       string     `json:"last_occurrence_id,omitempty"`
-	LastOccurrenceStatus   string     `json:"last_occurrence_status,omitempty"`
-	LastError              string     `json:"last_error,omitempty"`
-	LastResultReference    string     `json:"last_result_reference,omitempty"`
-	ScheduledFor           *time.Time `json:"scheduled_for,omitempty"`
-	ScheduleOccurrenceKey  string     `json:"schedule_occurrence_key,omitempty"`
-	DispatchedAt           *time.Time `json:"dispatched_at,omitempty"`
-	DispatchAttempts       int        `json:"dispatch_attempts,omitempty"`
-	LastDispatchAttemptAt  *time.Time `json:"last_dispatch_attempt_at,omitempty"`
-	AcceptedAt             *time.Time `json:"accepted_at,omitempty"`
-	TelemetryReference     string     `json:"telemetry_reference,omitempty"`
-	AgentEventSourceID     string     `json:"agent_event_source_id,omitempty"`
-	AgentExecutionID       string     `json:"agent_execution_id,omitempty"`
-	AgentExecutionState    string     `json:"agent_execution_state,omitempty"`
-	AgentExecutionUpdated  *time.Time `json:"agent_execution_updated_at,omitempty"`
-	AgentExecutionReason   string     `json:"agent_execution_reason,omitempty"`
-	AgentSettleDeadline    *time.Time `json:"agent_settle_deadline_at,omitempty"`
-	AgentLifecycleSequence uint64     `json:"agent_lifecycle_sequence,omitempty"`
-	Result                 string     `json:"result,omitempty"`
-	ResultReference        string     `json:"result_reference,omitempty"`
-	Error                  string     `json:"error,omitempty"`
-	CreatedAt              time.Time  `json:"created_at"`
-	UpdatedAt              time.Time  `json:"updated_at"`
-	StartedAt              *time.Time `json:"started_at,omitempty"`
-	CompletedAt            *time.Time `json:"completed_at,omitempty"`
+	ID                     string      `json:"id"`
+	AgentID                int64       `json:"agent_id"`
+	ProjectID              string      `json:"project_id"`
+	Title                  string      `json:"title"`
+	Description            string      `json:"description,omitempty"`
+	ExpectedOutcome        string      `json:"expected_outcome,omitempty"`
+	Inputs                 []TaskInput `json:"inputs,omitempty"`
+	SuggestedAgentID       int64       `json:"suggested_agent_id,omitempty"`
+	CreatedByOperatorID    string      `json:"created_by_operator_id,omitempty"`
+	State                  string      `json:"state"`
+	Progress               *int        `json:"progress,omitempty"`
+	CurrentStep            string      `json:"current_step,omitempty"`
+	CreatedByThreadID      string      `json:"created_by_thread_id,omitempty"`
+	AssignedThreadID       string      `json:"assigned_thread_id"`
+	ExecutionThreadID      string      `json:"execution_thread_id,omitempty"`
+	ParentTaskID           string      `json:"parent_task_id,omitempty"`
+	IdempotencyKey         string      `json:"idempotency_key,omitempty"`
+	RecoveryOfTaskID       string      `json:"recovery_of_task_id,omitempty"`
+	OriginalOccurrenceKey  string      `json:"original_occurrence_key,omitempty"`
+	RecoveryAttempt        int         `json:"recovery_attempt,omitempty"`
+	RecoveryReason         string      `json:"recovery_reason,omitempty"`
+	OperationKey           string      `json:"operation_key,omitempty"`
+	ScheduleKind           string      `json:"schedule_kind,omitempty"`
+	ScheduleExpression     string      `json:"schedule_expression,omitempty"`
+	ScheduleTimezone       string      `json:"schedule_timezone,omitempty"`
+	ScheduleEnabled        bool        `json:"schedule_enabled"`
+	ScheduleOverlapPolicy  string      `json:"schedule_overlap_policy,omitempty"`
+	ScheduleCatchupPolicy  string      `json:"schedule_catchup_policy,omitempty"`
+	NextRunAt              *time.Time  `json:"next_run_at,omitempty"`
+	LastRunAt              *time.Time  `json:"last_run_at,omitempty"`
+	LastDispatchedAt       *time.Time  `json:"last_dispatched_at,omitempty"`
+	LastOccurrenceID       string      `json:"last_occurrence_id,omitempty"`
+	LastOccurrenceStatus   string      `json:"last_occurrence_status,omitempty"`
+	LastError              string      `json:"last_error,omitempty"`
+	LastResultReference    string      `json:"last_result_reference,omitempty"`
+	ScheduledFor           *time.Time  `json:"scheduled_for,omitempty"`
+	ScheduleOccurrenceKey  string      `json:"schedule_occurrence_key,omitempty"`
+	DispatchedAt           *time.Time  `json:"dispatched_at,omitempty"`
+	DispatchAttempts       int         `json:"dispatch_attempts,omitempty"`
+	LastDispatchAttemptAt  *time.Time  `json:"last_dispatch_attempt_at,omitempty"`
+	AcceptedAt             *time.Time  `json:"accepted_at,omitempty"`
+	TelemetryReference     string      `json:"telemetry_reference,omitempty"`
+	AgentEventSourceID     string      `json:"agent_event_source_id,omitempty"`
+	AgentExecutionID       string      `json:"agent_execution_id,omitempty"`
+	AgentExecutionState    string      `json:"agent_execution_state,omitempty"`
+	AgentExecutionUpdated  *time.Time  `json:"agent_execution_updated_at,omitempty"`
+	AgentExecutionReason   string      `json:"agent_execution_reason,omitempty"`
+	AgentSettleDeadline    *time.Time  `json:"agent_settle_deadline_at,omitempty"`
+	AgentLifecycleSequence uint64      `json:"agent_lifecycle_sequence,omitempty"`
+	Result                 string      `json:"result,omitempty"`
+	ResultReference        string      `json:"result_reference,omitempty"`
+	Error                  string      `json:"error,omitempty"`
+	CreatedAt              time.Time   `json:"created_at"`
+	UpdatedAt              time.Time   `json:"updated_at"`
+	StartedAt              *time.Time  `json:"started_at,omitempty"`
+	CompletedAt            *time.Time  `json:"completed_at,omitempty"`
+}
+
+// TaskInput is intentionally generic: presets can request a repository,
+// document, account, ticket, date range, or any other project-specific value.
+type TaskInput struct {
+	Key         string `json:"key"`
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+	Value       any    `json:"value,omitempty"`
 }
 
 type TaskEvent struct {
@@ -101,6 +119,10 @@ type CreateTaskInput struct {
 	ProjectID               string
 	Title                   string
 	Description             string
+	ExpectedOutcome         string
+	Inputs                  []TaskInput
+	SuggestedAgentID        int64
+	CreatedByOperatorID     string
 	State                   string
 	Progress                *int
 	CurrentStep             string
@@ -135,6 +157,9 @@ type TaskAgentExecution struct {
 type UpdateTaskInput struct {
 	Title             *string
 	Description       *string
+	ExpectedOutcome   *string
+	Inputs            *[]TaskInput
+	SuggestedAgentID  *int64
 	State             *string
 	Progress          *int
 	ClearProgress     bool
@@ -159,6 +184,7 @@ type TaskFilter struct {
 }
 
 type TaskCounts struct {
+	Draft     int `json:"draft"`
 	Active    int `json:"active"`
 	Queued    int `json:"queued"`
 	Running   int `json:"running"`
@@ -173,7 +199,7 @@ type TaskCounts struct {
 
 func validState(state string) bool {
 	switch state {
-	case stateQueued, stateRunning, stateWaiting, stateBlocked, stateCompleted, stateFailed, stateCancelled:
+	case stateDraft, stateQueued, stateRunning, stateWaiting, stateBlocked, stateCompleted, stateFailed, stateCancelled:
 		return true
 	default:
 		return false
@@ -192,9 +218,64 @@ func validTransition(from, to string) bool {
 		return false
 	}
 	if to == stateQueued {
-		return from == stateWaiting || from == stateBlocked
+		return from == stateDraft || from == stateWaiting || from == stateBlocked
+	}
+	if from == stateDraft {
+		return to == stateCancelled
+	}
+	if to == stateDraft {
+		return false
 	}
 	return validState(to)
+}
+
+func draftState(state string) bool { return state == stateDraft }
+
+func validateTaskInputs(inputs []TaskInput) error {
+	if len(inputs) > 32 {
+		return validationError("at most 32 inputs are allowed")
+	}
+	seen := map[string]bool{}
+	for _, input := range inputs {
+		key := strings.TrimSpace(input.Key)
+		label := strings.TrimSpace(input.Label)
+		if key == "" || len(key) > 120 || seen[key] || label == "" || len(label) > 200 {
+			return validationError("each input needs a unique key and label")
+		}
+		if len(input.Description) > 1000 {
+			return validationError("input description is too long")
+		}
+		if raw, err := json.Marshal(input.Value); err != nil || len(raw) > 64<<10 {
+			return validationError("input value is invalid or too large")
+		}
+		seen[key] = true
+	}
+	return nil
+}
+
+func requiredInputsMissing(inputs []TaskInput) []string {
+	missing := []string{}
+	for _, input := range inputs {
+		if !input.Required {
+			continue
+		}
+		empty := input.Value == nil
+		if text, ok := input.Value.(string); ok {
+			empty = strings.TrimSpace(text) == ""
+		}
+		value := reflect.ValueOf(input.Value)
+		if value.IsValid() && (value.Kind() == reflect.Array || value.Kind() == reflect.Map || value.Kind() == reflect.Slice) {
+			empty = value.Len() == 0
+		}
+		if empty {
+			missing = append(missing, input.Key)
+		}
+	}
+	return missing
+}
+
+func equalTaskInputs(left, right []TaskInput) bool {
+	return reflect.DeepEqual(left, right)
 }
 
 // Definition identity does not change when an occurrence waits for a callback.
