@@ -20,7 +20,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.17.1
+version: 0.17.2
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -247,6 +247,22 @@ provides:
           filter_value:
             type: string
             title: Filter value
+          filter_label:
+            type: string
+            title: Filter label
+            description: Label shown for the filter selector, for example Site.
+          filter_options:
+            type: string
+            title: Allowed filter values
+            description: Comma-separated values; All stays within this list.
+          event_options:
+            type: string
+            title: Allowed event topics
+            description: Comma-separated event topics shown in the selector.
+          show_event_selector:
+            type: boolean
+            title: Show event selector
+            default: true
           window:
             type: string
             title: Window
@@ -303,6 +319,22 @@ provides:
           filter_value:
             type: string
             title: Filter value
+          filter_label:
+            type: string
+            title: Filter label
+            description: Label shown for the filter selector, for example Site.
+          filter_options:
+            type: string
+            title: Allowed filter values
+            description: Comma-separated values; All stays within this list.
+          event_options:
+            type: string
+            title: Allowed event topics
+            description: Comma-separated event topics shown in the selector.
+          show_event_selector:
+            type: boolean
+            title: Show event selector
+            default: true
           window:
             type: string
             title: Window
@@ -357,7 +389,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: analytics/v0.17.1
+    ref: analytics/v0.17.2
     entry: mcp/analytics
   port: 8080
   health_check: /health

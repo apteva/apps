@@ -26,7 +26,17 @@ export function widgetConfig(settings: Settings, kind: "trend" | "ranking", sele
     where = { ...parsed };
   } catch { throw new Error("Property filters must be a JSON object."); }
   const field = settingString(settings, "filter_field");
-  if (field && selections.filter !== "") where[field] = selections.filter;
+  if (field) {
+    if (selections.filter !== "") {
+      where[field] = selections.filter;
+    } else {
+      // An explicitly configured option list is also the scope for “All”.
+      // This keeps a widget's aggregate inside the values its author chose
+      // instead of silently including unrelated hosts or test data.
+      const allowed = allowedValues(settings.filter_options);
+      if (allowed.length) where[field] = allowed;
+    }
+  }
   const config: WidgetConfig = {
     app: settingString(settings, "app"), topic: selections.topic,
     aggregation: settingString(settings, "aggregation", "count"),
