@@ -80,6 +80,16 @@ customer conversations, lists, segments, opportunities, and pipelines.
 - Replies use the inbound message's Reply-To/From and receiving identity. Use
   `reply_to_activity_id` for a specific inbound message; do not work around a
   blocked reply route by silently sending to a different address.
+- For an explicitly requested SMS fallback to WhatsApp, call `contacts_reply`
+  with `channel: "sms"`, `conversation_id`, and a verified SMS `from` from
+  `messaging_senders_list`. It keeps the exact inbound phone and conversation;
+  subsequent SMS received at that sender returns to this conversation. No old
+  SMS history is merged. Email conversations cannot change transport. Omit
+  `channel` to reply on the selected/latest inbound phone message's transport.
+- `messaging_whatsapp_session_check` returns `active`, `last_inbound`,
+  `expires_at`, and `checked_at`. The 24-hour window starts at the customer's
+  latest inbound WhatsApp message to the chosen sender. Outside it, use an
+  approved template or explicitly requested SMS; never silently switch channels.
 - `do_not_contact` blocks sending and audience eligibility. Delivery recovery
   does not remove Messaging suppressions. Legacy messages with unknown source
   installation retain local history but omit remote status enrichment.

@@ -10,6 +10,7 @@ export interface InboxItem {
   contact_email?: string;
   contact_phone?: string;
   channel: string;
+  channels?: string[];
   subject?: string;
   status: string;
   priority: string;

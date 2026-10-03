@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -15,6 +16,7 @@ import (
 type waStubPlatform struct {
 	tk.BasePlatformClient
 	messages []map[string]any
+	pages    [][]map[string]any
 	calls    []map[string]any
 	tools    []string
 }
@@ -45,6 +47,15 @@ func (p *waStubPlatform) CallAppResult(appName, tool string, input map[string]an
 			msgs = []map[string]any{}
 		}
 		payload = map[string]any{"messages": msgs, "count": len(msgs)}
+		if p.pages != nil {
+			page := intArg(input, "offset", 0) / 200
+			if page < len(p.pages) {
+				msgs = p.pages[page]
+			} else {
+				msgs = nil
+			}
+			payload = map[string]any{"messages": msgs, "has_more": page+1 < len(p.pages)}
+		}
 	}
 	b, _ := json.Marshal(payload)
 	return json.Unmarshal(b, out)
@@ -107,11 +118,12 @@ func TestWhatsAppAddress_ErrorNamesFieldAndFormat(t *testing.T) {
 // The regression this whole change exists for: a correct number in a
 // different notation used to compare unequal and report active:false.
 func TestCheckWhatsAppSession_MatchesAcrossNotation(t *testing.T) {
+	lastInbound := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
 	pf := &waStubPlatform{messages: []map[string]any{{
 		"from":              "whatsapp:+1 555-123-4567",
 		"to":                []any{"+1 (555) 000-1111"},
 		"matched_recipient": "",
-		"received_at":       "2026-08-18T10:00:00Z",
+		"received_at":       lastInbound,
 	}}}
 	ctx := newTestCtx(t, tk.WithPlatform(pf))
 	app := &App{}
@@ -123,7 +135,7 @@ func TestCheckWhatsAppSession_MatchesAcrossNotation(t *testing.T) {
 	if active, _ := out["active"].(bool); !active {
 		t.Fatalf("active=false for a matching number in a different notation: %#v", out)
 	}
-	if out["last_inbound"] != "2026-08-18T10:00:00Z" {
+	if out["last_inbound"] != lastInbound {
 		t.Fatalf("last_inbound=%v", out["last_inbound"])
 	}
 	// Both sides of the response are reported canonically.
@@ -137,6 +149,62 @@ func TestCheckWhatsAppSession_MatchesAcrossNotation(t *testing.T) {
 	}
 	if got := pf.calls[0]["address"]; got != "+15551234567" {
 		t.Fatalf("message_list address=%v, want canonical +15551234567", got)
+	}
+}
+
+func TestWhatsAppSessionExpiryAndTimestampValidation(t *testing.T) {
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		name, timestamp string
+		active          bool
+	}{
+		{"recent", now.Add(-2 * time.Hour).Format(time.RFC3339), true},
+		{"expired", now.Add(-25 * time.Hour).Format(time.RFC3339), false},
+		{"future", now.Add(time.Hour).Format(time.RFC3339), false},
+		{"invalid", "not-a-time", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pf := &waStubPlatform{messages: []map[string]any{{"from": "+15551234567", "matched_recipient": "+15550001111", "received_at": tc.timestamp}}}
+			out, err := (&App{}).checkWhatsAppSession(newTestCtx(t, tk.WithPlatform(pf)), "test-proj", "+15550001111", "+15551234567")
+			if err != nil || out["active"] != tc.active {
+				t.Fatalf("result=%v err=%v", out, err)
+			}
+			if tc.active {
+				last, _ := time.Parse(time.RFC3339, tc.timestamp)
+				if out["expires_at"] != last.Add(24*time.Hour).Format(time.RFC3339) {
+					t.Fatalf("wrong expiry: %v", out)
+				}
+				if _, err := time.Parse(time.RFC3339Nano, out["checked_at"].(string)); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func TestWhatsAppSessionUsesLatestReceivedTimeAndExactSender(t *testing.T) {
+	now := time.Now().UTC()
+	latest := now.Add(-time.Hour).Format(time.RFC3339)
+	pf := &waStubPlatform{messages: []map[string]any{
+		{"from": "+15551234567", "matched_recipient": "+15550009999", "received_at": now.Format(time.RFC3339)},
+		{"from": "+15551234567", "matched_recipient": "+15550001111", "received_at": now.Add(-20 * time.Hour).Format(time.RFC3339)},
+		{"from": "+15551234567", "matched_recipient": "+15550001111", "created_at": latest},
+	}}
+	out, err := (&App{}).checkWhatsAppSession(newTestCtx(t, tk.WithPlatform(pf)), "test-proj", "+15550001111", "+15551234567")
+	if err != nil || out["last_inbound"] != latest || out["active"] != true {
+		t.Fatalf("result=%v err=%v", out, err)
+	}
+}
+
+func TestWhatsAppWindowPagesPastOtherReceivingIdentities(t *testing.T) {
+	first := make([]map[string]any, 200)
+	for i := range first {
+		first[i] = map[string]any{"from": "+15551234567", "matched_recipient": "+15550009999", "received_at": time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)}
+	}
+	pf := &waStubPlatform{pages: [][]map[string]any{first, {{"from": "+15551234567", "matched_recipient": "+15550001111", "received_at": time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)}}}}
+	out, err := (&App{}).checkWhatsAppSession(newTestCtx(t, tk.WithPlatform(pf)), "test-proj", "+15550001111", "+15551234567")
+	if err != nil || out["active"] != true || len(pf.calls) != 2 || pf.calls[1]["offset"] != 200 {
+		t.Fatalf("paginated check: %v calls=%v err=%v", out, pf.calls, err)
 	}
 }
 

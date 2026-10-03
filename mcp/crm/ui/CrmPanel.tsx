@@ -7,6 +7,56 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { crmPanelInitialRoute, type InboxItem, type InboxResponse } from "./inbox";
 import { messageAddressLines, messageRecipientSummary, type MessageAddresses } from "./message_addresses";
 import { messageDisplayBody } from "./message_body";
+import { channelPresentation, channelThemeCSS, conversationChannels, sessionFromResponse, whatsappWindowLabel, whatsappSessionRequiresTemplate, type WhatsAppSessionState, type WhatsAppSessionResponse } from "./channels";
+
+function ChannelBadge({ channel }: { channel: string }) {
+  const presentation = channelPresentation[channel];
+  return <span className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium" style={presentation ? { color: presentation.color, backgroundColor: presentation.backgroundColor } : undefined}>
+    {presentation ? `${presentation.icon} ${presentation.label}` : channel}
+  </span>;
+}
+
+type CRMAPI = <T,>(method: string, path: string, body?: any, params?: Record<string, string>, signal?: AbortSignal) => Promise<T>;
+
+function useWhatsAppWindow(api: CRMAPI, from: string, to: string, revision?: string) {
+  const [session, setSession] = useState<WhatsAppSessionState>({ state: "idle" });
+  useEffect(() => {
+    if (!from || !to || to.startsWith("(no ")) { setSession({ state: "idle" }); return; }
+    const controller = new AbortController();
+    let pending = false;
+    setSession({ state: "checking" });
+    const check = async () => {
+      if (pending) return;
+      pending = true;
+      try {
+        const result = await api<WhatsAppSessionResponse>("GET", "/messaging/whatsapp-session", undefined, { from, to }, controller.signal);
+        if (!controller.signal.aborted) setSession(sessionFromResponse(result));
+      } catch (cause) {
+        if (!controller.signal.aborted) setSession({ state: "error", error: (cause as Error).message });
+      } finally { pending = false; }
+    };
+    void check();
+    const timer = setInterval(check, 60000);
+    return () => { controller.abort(); clearInterval(timer); };
+  }, [api, from, to, revision]);
+  useEffect(() => {
+    if (session.state !== "active" || !session.deadline) return;
+    const timer = setTimeout(() => setSession(current => current.state === "active" ? { ...current, state: "closed" } : current), Math.max(0, session.deadline - Date.now()));
+    return () => clearTimeout(timer);
+  }, [session]);
+  return session;
+}
+
+function WhatsAppWindowNotice({ session }: { session: WhatsAppSessionState }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 30000); return () => clearInterval(timer); }, []);
+  const tone = session.state === "active" && !whatsappSessionRequiresTemplate(session, now) ? "text-green border-green/30" : session.state === "error" ? "text-red border-red/30" : "text-yellow border-yellow/30";
+  return <div role="status" className={`rounded border bg-bg-input/40 px-3 py-2 text-xs ${tone}`}>
+    {whatsappWindowLabel(session, now)}
+    {session.state === "active" && session.deadline && <span className="block mt-1 text-text-dim">Expires {formatTime(new Date(session.deadline).toISOString())} · 24 hours after the customer's last inbound WhatsApp message</span>}
+    {session.state === "error" && session.error && <div className="mt-1">{session.error}</div>}
+  </div>;
+}
 
 // Inlined SDK app-event subscription. Each app ships its own copy
 // because panels are bundled standalone and apps are independently
@@ -1148,44 +1198,33 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
       attachments: [],
       whatsAppSession: { state: "idle" },
       conversationId: preset.conversationId,
+      conversationChannel: preset.conversationChannel || channel,
       replyToActivityId: preset.replyToActivityId,
+      routeBusy: preset.mode === "reply",
       busy: false,
       error: null,
     });
-    if (preset.mode === "reply" && preset.conversationId) {
-      api<{to:string;from:string}>("GET","/messaging/reply-route",undefined,{contact_id:String(target.id),conversation_id:String(preset.conversationId),activity_id:String(preset.replyToActivityId || 0)})
-        .then(route => setComposer(current => current?.conversationId === preset.conversationId ? {...current,to:route.to,from:route.from} : current))
-        .catch(e => setComposer(current => current?.conversationId === preset.conversationId ? {...current,error:(e as Error).message} : current));
-    }
   };
 
   useEffect(() => {
-    if (!composer || !composerContact || composer.channel !== "whatsapp") return;
-    const to = composer.to || addressForChannel(composerContact, "whatsapp");
-    const from = composer.from;
-    if (!from || !to || to.startsWith("(no ")) {
-      setComposer((prev) => prev ? { ...prev, whatsAppSession: { state: "idle" } } : prev);
-      return;
-    }
-    let cancelled = false;
-    setComposer((prev) => prev ? { ...prev, whatsAppSession: { state: "checking" } } : prev);
-    api<{ active: boolean; last_inbound?: string }>("GET", "/messaging/whatsapp-session", undefined, { from, to })
-      .then((r) => {
-        if (cancelled) return;
-        setComposer((prev) => prev ? {
-          ...prev,
-          whatsAppSession: { state: r.active ? "active" : "closed", lastInbound: r.last_inbound },
-        } : prev);
+    if (composer?.mode !== "reply" || !composer.conversationId || !composerContact) return;
+    const controller = new AbortController();
+    const channel = composer.channel;
+    setComposer(current => current ? { ...current, routeBusy: true, routeError: false, to: "", error: null } : current);
+    api<{to:string;from:string}>("GET", "/messaging/reply-route", undefined, {contact_id:String(composerContact.id), conversation_id:String(composer.conversationId), activity_id:String(composer.replyToActivityId || 0), channel}, controller.signal)
+      .then(route => {
+        if (!controller.signal.aborted) setComposer(current => current ? { ...current, to: route.to, from: route.from || preferredSenderForChannel(verifiedSenders, channel)?.address || "", routeBusy: false } : current);
       })
-      .catch((e) => {
-        if (cancelled) return;
-        setComposer((prev) => prev ? {
-          ...prev,
-          whatsAppSession: { state: "error", error: (e as Error).message },
-        } : prev);
-    });
-    return () => { cancelled = true; };
-  }, [api, composer?.channel, composer?.from, composerContact?.id, composerContact?.primary_phone]);
+      .catch(cause => {
+        if (!controller.signal.aborted) setComposer(current => current ? { ...current, routeBusy: false, routeError: true, error: (cause as Error).message } : current);
+      });
+    return () => controller.abort();
+  }, [api, composer?.mode, composer?.conversationId, composer?.replyToActivityId, composer?.channel, composerContact?.id]);
+
+  const composerSession = useWhatsAppWindow(api,
+    composer?.channel === "whatsapp" && !composer.routeBusy ? composer.from : "",
+    composer?.channel === "whatsapp" && composerContact ? composer.to || addressForChannel(composerContact, "whatsapp") : "");
+  useEffect(() => { setComposer(current => current ? { ...current, whatsAppSession: composerSession } : current); }, [composerSession]);
 
   useEffect(() => {
     if (!composer || composer.from) return;
@@ -1339,6 +1378,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
 
   return (
     <div className="h-full flex flex-col">
+      <style>{channelThemeCSS}</style>
       {/* Tabs */}
       <nav className="flex gap-1 border-b border-border px-3 pt-2 text-xs">
         <TabButton active={tab === "contacts"} onClick={() => setTab("contacts")}>Contacts</TabButton>
@@ -1546,6 +1586,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
                               mode: "reply",
                               channel: channelOfKind(act.kind) || undefined,
                               conversationId: act.conversation_id,
+                              conversationChannel: group.kind === "conversation" ? group.channel : undefined,
                               subject: group.kind === "conversation" ? group.subject : undefined,
                               replyToActivityId: act.id,
                             })}
@@ -1582,13 +1623,15 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
             api={api}
             projectId={projectId}
             lists={lists}
+            senders={verifiedSenders}
             initialConversationId={initialRoute.conversationId}
             initialStatus={initialRoute.status}
             onOpenContact={(id) => { setTab("contacts"); selectContact(String(id)); }}
-            onReply={(contact, activity, conversation, afterSend) => openCompose({
+            onReply={(contact, activity, conversation, afterSend, channel) => openCompose({
               mode: "reply",
-              channel: channelOfKind(activity.kind) || conversation.channel || undefined,
+              channel: channel || channelOfKind(activity.kind) || conversation.channel || undefined,
               conversationId: conversation.id,
+              conversationChannel: conversation.channel,
               subject: conversation.subject,
               replyToActivityId: activity.id,
             }, contact, afterSend)}
@@ -2046,7 +2089,7 @@ function ActivityGroup({
           className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${PRIORITY_DOT[group.priority] || PRIORITY_DOT.normal}`}
           title={`priority: ${group.priority}`}
         />
-        <span className="text-[10px] uppercase text-text-dim">{group.channel}</span>
+        {conversationChannels(group.channel, group.activities.map(a => a.kind)).map(channel => <ChannelBadge key={channel} channel={channel} />)}
         <span className="text-text font-medium truncate flex-1">{group.subject || "(no subject)"}</span>
         <span className="text-text-dim">{group.activities.length} msg{group.activities.length === 1 ? "" : "s"}</span>
         <ConversationStatusControl group={group} onSetStatus={onSetStatus} busy={busy} />
@@ -2147,7 +2190,7 @@ function ActivityRow({ activity, onReply, compact }: { activity: Activity; onRep
     <li className={`${compact ? "p-2" : "border border-border rounded p-2"}`}>
       <div className="flex items-center gap-2 text-xs text-text-dim mb-1">
         <span className="text-base leading-none">{iconForKind(activity.kind)}</span>
-        <span className={`text-[10px] px-1.5 py-0.5 rounded ${isFailed ? "bg-red/15 text-red" : "bg-accent/10 text-accent"}`}>
+        <span style={!isFailed && channelOfKind(activity.kind) ? { color: channelPresentation[channelOfKind(activity.kind)!].color, backgroundColor: channelPresentation[channelOfKind(activity.kind)!].backgroundColor } : undefined} className={`text-[10px] px-1.5 py-0.5 rounded ${isFailed ? "bg-red/15 text-red" : "bg-accent/10 text-accent"}`}>
           {activity.kind}
         </span>
         {activity.message_status && <MessageStatusPill status={activity.message_status} />}
@@ -2239,6 +2282,9 @@ interface ComposerState {
   attachments: ComposeAttachment[];
   whatsAppSession: WhatsAppSessionState;
   conversationId?: number | string;
+  conversationChannel?: string;
+  routeBusy?: boolean;
+  routeError?: boolean;
   replyToActivityId?: string;
   busy: boolean;
   error: string | null;
@@ -2264,13 +2310,6 @@ interface TemplateOption {
   provider_status?: string;
 }
 
-type WhatsAppSessionState =
-  | { state: "idle" }
-  | { state: "checking" }
-  | { state: "active"; lastInbound?: string }
-  | { state: "closed"; lastInbound?: string }
-  | { state: "error"; error?: string };
-
 function preferredChannel(c: Contact, senders: SenderOption[] = []): string {
   const channels = availableChannels(c);
   if (channels.includes("email")) return "email";
@@ -2281,10 +2320,6 @@ function preferredChannel(c: Contact, senders: SenderOption[] = []): string {
 function preferredSenderForChannel(senders: SenderOption[], channel: string): SenderOption | undefined {
   return senders.find((s) => s.channel === channel && s.isDefault) ||
     senders.find((s) => s.channel === channel);
-}
-
-function whatsappSessionRequiresTemplate(session: WhatsAppSessionState): boolean {
-  return session.state === "closed" || session.state === "error" || session.state === "idle";
 }
 
 function ComposerModal({
@@ -2310,7 +2345,7 @@ function ComposerModal({
   const [storageFiles, setStorageFiles] = useState<StorageFile[]>([]);
   const [storageSearch, setStorageSearch] = useState("");
   const [storageStatus, setStorageStatus] = useState("");
-  const channels = availableChannels(contact);
+  const channels = availableChannels(contact).filter(channel => composer.mode !== "reply" || channel === composer.conversationChannel || (["sms", "whatsapp"].includes(composer.conversationChannel || composer.channel) && ["sms", "whatsapp"].includes(channel)));
   const isEmail = composer.channel === "email";
   const isWhatsApp = composer.channel === "whatsapp";
   const toAddr = composer.to || addressForChannel(contact, composer.channel);
@@ -2325,6 +2360,7 @@ function ComposerModal({
   const bodyRequired = !whatsappClosed;
   const hasFreeformContent = !!composer.body.trim() || composer.attachments.length > 0;
   const canSend = !composer.busy && !!toAddr && !toAddr.startsWith("(no ") &&
+    !composer.routeBusy && !composer.routeError && !!composer.from &&
     !whatsappChecking &&
     sendersForChannel.length > 0 &&
     (bodyRequired ? hasFreeformContent : canSendTemplate);
@@ -2446,13 +2482,15 @@ function ComposerModal({
                     const def = preferredSenderForChannel(senders, newCh);
                     onChange({
                       channel: newCh,
+                      to: "",
+                      routeBusy: composer.mode === "reply",
                       from: def?.address || "",
                       templateId: "",
                       templateVars: {},
                       whatsAppSession: { state: "idle" },
                     });
                   }}
-                  disabled={composer.mode === "reply"}
+                  disabled={composer.busy}
                   className="bg-bg-input border border-border rounded px-2 py-0.5 text-xs disabled:opacity-50"
                   title="Switch channel"
                 >
@@ -2475,21 +2513,11 @@ function ComposerModal({
             </div>
           )}
 
-          {isWhatsApp && (
-            <div className="rounded border border-border bg-bg-input/40 px-3 py-2 text-xs text-text-dim">
-              {composer.whatsAppSession.state === "checking" ? (
-                "Checking the WhatsApp 24-hour window..."
-              ) : composer.whatsAppSession.state === "active" ? (
-                "Recent inbound WhatsApp message found. Free-form reply is allowed."
-              ) : (
-                <>
-                  No recent inbound WhatsApp message was found. Use an approved template outside the 24-hour window.
-                  {composer.whatsAppSession.state === "error" && composer.whatsAppSession.error && (
-                    <div className="mt-1 text-red">{composer.whatsAppSession.error}</div>
-                  )}
-                </>
-              )}
-            </div>
+          <div className="flex items-center gap-2 text-xs"><ChannelBadge channel={composer.channel} />{composer.mode === "reply" && <span className="text-text-dim">Reply stays in this conversation</span>}</div>
+          {composer.routeBusy && <p className="text-xs text-text-dim">Checking reply recipient…</p>}
+          {isWhatsApp && <WhatsAppWindowNotice session={composer.whatsAppSession} />}
+          {isWhatsApp && channels.includes("sms") && senders.some(sender => sender.channel === "sms") && (
+            <button type="button" disabled={composer.busy} className="px-3 py-1 text-xs border border-border rounded" onClick={() => onChange({channel: "sms", to: "", from: preferredSenderForChannel(senders, "sms")?.address || "", routeBusy: composer.mode === "reply", templateId: "", templateVars: {}, whatsAppSession: {state: "idle"}})}>Reply via SMS{composer.mode === "reply" ? " in this conversation" : ""}</button>
           )}
 
           {whatsappClosed && (
@@ -3320,14 +3348,15 @@ function stripDomainPrefix(value: string): string {
   return value.trim().replace(/^@+/, "");
 }
 
-function InboxTab({ api, projectId, lists, initialConversationId, initialStatus, onOpenContact, onReply }: {
+function InboxTab({ api, projectId, lists, senders, initialConversationId, initialStatus, onOpenContact, onReply }: {
   api: <T,>(method: string, path: string, body?: any, params?: Record<string, string>, signal?: AbortSignal) => Promise<T>;
   projectId: string;
   lists: List[];
+  senders: SenderOption[];
   initialConversationId?: number;
   initialStatus?: string;
   onOpenContact: (contactId: number) => void;
-  onReply: (contact: Contact, activity: Activity, conversation: Conversation, afterSend: () => void | Promise<void>) => void;
+  onReply: (contact: Contact, activity: Activity, conversation: Conversation, afterSend: () => void | Promise<void>, channel?: string) => void;
 }) {
   const [items, setItems] = useState<InboxItem[] | null>(null);
   const [total, setTotal] = useState(0);
@@ -3335,6 +3364,7 @@ function InboxTab({ api, projectId, lists, initialConversationId, initialStatus,
   const [selected, setSelected] = useState<InboxItem | null>(null);
   const [threadContact, setThreadContact] = useState<Contact | null>(null);
   const [threadConversation, setThreadConversation] = useState<Conversation | null>(null);
+  const [waRoute, setWaRoute] = useState<{from: string; to: string; error?: string}>({from: "", to: ""});
   const [threadActivities, setThreadActivities] = useState<Activity[]>([]);
   const [threadActivityTotal, setThreadActivityTotal] = useState(0);
   const [threadLoading, setThreadLoading] = useState(false);
@@ -3547,6 +3577,21 @@ function InboxTab({ api, projectId, lists, initialConversationId, initialStatus,
     activities: threadActivities,
   } : null;
   const lastReceived = [...threadActivities].reverse().find((a) => RECEIVED_KINDS.has(a.kind)) || null;
+  const latestWhatsApp = [...threadActivities].reverse().find(a => a.kind === "whatsapp_received");
+  const threadChannels = [...new Set([...(selected?.channels || []), ...conversationChannels(threadConversation?.channel || "", threadActivities.map(a => a.kind))])];
+  const hasWhatsApp = threadChannels.includes("whatsapp");
+  useEffect(() => {
+    setWaRoute({from: "", to: ""});
+    if (!hasWhatsApp || !threadConversation || !threadContact) return;
+    const controller = new AbortController();
+    api<{from:string;to:string}>("GET", "/messaging/reply-route", undefined, {contact_id: String(threadContact.id), conversation_id: String(threadConversation.id), channel: "whatsapp"}, controller.signal)
+      .then(route => { if (!controller.signal.aborted) setWaRoute({to: route.to, from: route.from || preferredSenderForChannel(senders, "whatsapp")?.address || ""}); })
+      .catch(cause => { if (!controller.signal.aborted) setWaRoute({from:"", to:"", error: (cause as Error).message}); });
+    return () => controller.abort();
+  }, [api, hasWhatsApp, threadConversation?.id, threadContact?.id, threadActivityTotal, latestWhatsApp?.id, senders]);
+  const checkedThreadSession = useWhatsAppWindow(api, waRoute.from, waRoute.to, String(threadConversation?.id || "") + ":" + threadActivityTotal);
+  const threadSession: WhatsAppSessionState = waRoute.error ? {state: "error", error: waRoute.error} : checkedThreadSession;
+  const canReplySMS = !!threadContact && !!lastReceived && threadChannels.includes("whatsapp") && availableChannels(threadContact).includes("sms") && senders.some(sender => sender.channel === "sms");
 
   return (
     <div className="h-full flex flex-col">
@@ -3628,7 +3673,7 @@ function InboxTab({ api, projectId, lists, initialConversationId, initialStatus,
                     <span className="text-sm text-text font-medium truncate flex-1">
                       {it.contact_name || it.contact_email || it.contact_phone || `contact #${it.contact_id}`}
                     </span>
-                    <span className="text-[10px] uppercase text-text-dim">{it.channel}</span>
+                    {(it.channels || [it.channel]).map(channel => <ChannelBadge key={channel} channel={channel} />)}
                     <span className={`text-[10px] px-1.5 py-0.5 rounded ${STATUS_STYLES[it.status] || STATUS_STYLES.open}`}>{it.status}</span>
                   </div>
                   {it.automated && <span className="text-[10px] px-1.5 py-0.5 rounded bg-border text-text-muted">automated</span>}
@@ -3667,13 +3712,13 @@ function InboxTab({ api, projectId, lists, initialConversationId, initialStatus,
             <div className="text-text-muted text-sm text-center mt-12">Thread not found.</div>
           ) : (
             <div className="space-y-3">
-              <header className="flex items-start justify-between gap-3 border-b border-border pb-3">
+              <header className="flex flex-col gap-2 border-b border-border pb-3">
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <h2 className="text-lg text-text font-semibold truncate">
                       {threadContact ? displayName(threadContact) : selected.contact_name || `contact #${selected.contact_id}`}
                     </h2>
-                    <span className="text-[10px] uppercase text-text-dim">{threadConversation.channel}</span>
+                    {threadChannels.map(channel => <ChannelBadge key={channel} channel={channel} />)}
                     <span className={`text-[10px] px-1.5 py-0.5 rounded ${STATUS_STYLES[threadConversation.status || "open"] || STATUS_STYLES.open}`}>
                       {threadConversation.status || "open"}
                     </span>
@@ -3685,7 +3730,7 @@ function InboxTab({ api, projectId, lists, initialConversationId, initialStatus,
                     Latest message · {messageRecipientSummary(threadActivities.at(-1)?.message_addresses)}
                   </p>
                 </div>
-                <div className="flex items-center gap-2 shrink-0">
+                <div className="flex items-center gap-2 flex-wrap">
                   {threadContact && lastReceived && (
                     <button
                       type="button"
@@ -3693,6 +3738,7 @@ function InboxTab({ api, projectId, lists, initialConversationId, initialStatus,
                       className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg"
                     >Reply</button>
                   )}
+                  {canReplySMS && threadContact && lastReceived && <button type="button" onClick={() => onReply(threadContact, lastReceived, threadConversation, reloadSelectedThread, "sms")} className="px-3 py-1 text-sm border border-border rounded" style={{color: channelPresentation.sms.color}}>Reply via SMS</button>}
                   <button
                     type="button"
                     onClick={() => loadThreadFor(selected)}
@@ -3700,6 +3746,7 @@ function InboxTab({ api, projectId, lists, initialConversationId, initialStatus,
                   >Refresh</button>
                 </div>
               </header>
+              {hasWhatsApp && <WhatsAppWindowNotice session={threadSession} />}
               {threadActivities.length < threadActivityTotal && (
                 <button
                   type="button"
