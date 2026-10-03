@@ -78,6 +78,21 @@ func (e *actorExecution) interact(step actorStep) error {
 		}
 		return e.dispatchSemantic(step, args)
 	}
+	if step.Action == "set_checked" || step.Action == "select_option" || step.Action == "set_temporal" {
+		args := map[string]any{"session_id": e.session.SessionID, "action": step.Action}
+		if step.Action == "set_checked" {
+			checked, ok := step.Checked.(bool)
+			if !ok {
+				return errors.New("set_checked requires a boolean checked value")
+			}
+			args["checked"] = checked
+		} else if len(step.Values) > 0 && step.Action == "select_option" {
+			args["values"] = step.Values
+		} else {
+			args["value"] = step.Value
+		}
+		return e.dispatchSemantic(step, args)
+	}
 	args := map[string]any{"session_id": e.session.SessionID, "action": step.Action}
 	switch step.Action {
 	case "key":
@@ -238,6 +253,11 @@ func (e *actorExecution) waitFor(step actorStep) error {
 		for from, to := range map[string]string{"media_provider": "provider", "media_iframe_src": "iframe_url", "media_thumbnail_url": "thumbnail_url"} {
 			if value := stringFromAny(out[from]); value != "" {
 				media[to] = value
+			}
+		}
+		for _, existing := range e.media {
+			if existing["kind"] == "embed" && existing["iframe_url"] == media["iframe_url"] {
+				return nil
 			}
 		}
 		e.media = append(e.media, media)

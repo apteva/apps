@@ -41,6 +41,7 @@ type actorExecution struct {
 	pageCount      int
 	trace          []map[string]any
 	media          []map[string]any
+	effects        []map[string]any
 	lastExtract    *actorStep
 	currentURL     string
 	startedAt      time.Time
@@ -415,6 +416,9 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 	if len(exec.media) > 0 {
 		out["media"] = exec.media
 	}
+	if len(exec.effects) > 0 {
+		out["effects"] = exec.effects
+	}
 	if exec.session != nil {
 		out["proxy"] = exec.session.Proxy
 	}
@@ -596,15 +600,15 @@ func (e *actorExecution) runStep(step actorStep) error {
 	case "goto":
 		return e.gotoURL(step.URL)
 	case "click":
-		return e.click(step)
-	case "fill", "set_text", "key", "scroll":
+		return e.clickOnce(step)
+	case "fill", "set_text", "set_checked", "select_option", "set_temporal", "key", "scroll":
 		return e.interact(step)
 	case "upload_file":
 		return e.upload(step)
 	case "wait_for":
 		return e.waitFor(step)
 	case "assert_element":
-		doc, err := e.extractDOM()
+		doc, err := e.extractStepDOM(step)
 		if err != nil {
 			return err
 		}
@@ -896,6 +900,14 @@ func (e *actorExecution) extractDOM() (*browserExtractResult, error) {
 	return e.extractDOMOptions(map[string]any{"formats": []string{"html", "regions", "metadata"}, "max_chars": 200000, "wait_ms": 250})
 }
 
+func (e *actorExecution) extractStepDOM(step actorStep) (*browserExtractResult, error) {
+	options := map[string]any{"formats": []string{"html", "regions", "metadata"}, "max_chars": 200000, "wait_ms": 250}
+	if step.Readability != nil {
+		options["readability"] = *step.Readability
+	}
+	return e.extractDOMOptions(options)
+}
+
 // Crawl extraction needs complete HTML; other representations share Computer's
 // response budget and are unnecessary for CSS-based dataset extraction.
 func (e *actorExecution) extractCrawlDOM() (*browserExtractResult, error) {
@@ -930,7 +942,7 @@ func (e *actorExecution) extractDOMOptions(options map[string]any) (*browserExtr
 }
 
 func (e *actorExecution) extractPage(step actorStep) error {
-	doc, err := e.extractDOM()
+	doc, err := e.extractStepDOM(step)
 	if err != nil {
 		return err
 	}
@@ -1087,6 +1099,23 @@ func extractNodeItem(node *html.Node, fields map[string]actorField, baseURL stri
 			raw = htmlNodeText(target)
 		}
 		raw = strings.TrimSpace(raw)
+		if field.Pattern != "" {
+			pattern, err := regexp.Compile(field.Pattern)
+			if err != nil {
+				return nil, fmt.Errorf("field %s pattern: %w", name, err)
+			}
+			match := pattern.FindStringSubmatch(raw)
+			if len(match) == 0 {
+				if field.Required {
+					return nil, fmt.Errorf("required field %s pattern did not match", name)
+				}
+				continue
+			}
+			raw = match[0]
+			if len(match) > 1 {
+				raw = match[1]
+			}
+		}
 		if raw == "" && field.Required {
 			return nil, fmt.Errorf("required field %s is empty", name)
 		}
