@@ -601,6 +601,8 @@ func (e *actorExecution) runStep(step actorStep) error {
 		return e.interact(step)
 	case "upload_file":
 		return e.upload(step)
+	case "wait_for":
+		return e.waitFor(step)
 	case "assert_element":
 		doc, err := e.extractDOM()
 		if err != nil {

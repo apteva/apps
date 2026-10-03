@@ -173,6 +173,78 @@ func (e *actorExecution) recordMediaResult(out map[string]any) {
 	e.media = append(e.media, media)
 }
 
+func validateWaitStep(step actorStep) error {
+	if len(step.Conditions) < 1 || len(step.Conditions) > 8 {
+		return errors.New("wait_for requires between 1 and 8 conditions")
+	}
+	if step.Match != "" && step.Match != "any" && step.Match != "all" {
+		return errors.New("wait_for match must be any or all")
+	}
+	for _, condition := range step.Conditions {
+		switch condition.Type {
+		case "url_changed", "url_equals", "url_contains", "text_present", "text_absent":
+			if strings.TrimSpace(condition.Value) == "" {
+				return fmt.Errorf("wait_for %s requires value", condition.Type)
+			}
+		case "selector_present", "selector_absent":
+			if strings.TrimSpace(condition.Selector) == "" {
+				return fmt.Errorf("wait_for %s requires selector", condition.Type)
+			}
+		case "target_present", "target_absent", "target_state":
+			if strings.TrimSpace(condition.TargetID) == "" {
+				return fmt.Errorf("wait_for %s requires target_id", condition.Type)
+			}
+			if condition.Type == "target_state" {
+				switch condition.State {
+				case "ready", "loading", "enabled", "disabled", "checked", "unchecked":
+				default:
+					return errors.New("wait_for target_state requires a valid state")
+				}
+			}
+		case "media_present", "media_error":
+		default:
+			return fmt.Errorf("unsupported wait_for condition %q", condition.Type)
+		}
+	}
+	return nil
+}
+
+// A structured Computer timeout is a failed actor assertion. Do not continue
+// into a publish step when the required player or page state did not appear.
+func (e *actorExecution) waitFor(step actorStep) error {
+	if e.session == nil {
+		return errors.New("wait_for requires an open browser")
+	}
+	var out map[string]any
+	args := map[string]any{
+		"session_id": e.session.SessionID, "action": "wait_for",
+		"conditions": step.Conditions, "match": firstNonEmpty(step.Match, "any"),
+		"timeout_ms": boundedInt(templateInt(step.TimeoutMS), 10000, 500, 30000),
+	}
+	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, args), &out); err != nil {
+		return err
+	}
+	e.currentURL = firstNonEmpty(stringFromAny(out["current_url"]), e.currentURL)
+	if !hostAllowed(e.currentURL, e.definition.AllowedHosts) {
+		return fmt.Errorf("browser navigated outside allowed_hosts: %s", e.currentURL)
+	}
+	matched, _ := out["matched"].(bool)
+	timedOut, _ := out["timed_out"].(bool)
+	if !matched || timedOut {
+		return fmt.Errorf("wait_for required conditions not met (timed_out=%t, media_embed_status=%q)", timedOut, stringFromAny(out["media_embed_status"]))
+	}
+	if out["media_embed_status"] == "loaded" {
+		media := map[string]any{"kind": "embed", "status": "loaded"}
+		for from, to := range map[string]string{"media_provider": "provider", "media_iframe_src": "iframe_url", "media_thumbnail_url": "thumbnail_url"} {
+			if value := stringFromAny(out[from]); value != "" {
+				media[to] = value
+			}
+		}
+		e.media = append(e.media, media)
+	}
+	return nil
+}
+
 func (a *App) platformTools() []sdk.Tool {
 	integer := map[string]any{"type": "integer", "minimum": 1}
 	return []sdk.Tool{
