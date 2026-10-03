@@ -448,7 +448,22 @@ func groupedCalculatedMetricRows(db sqlRunner, project string, metric MetricDefi
 	if !ok {
 		return nil, errors.New("invalid metric table group")
 	}
-	where, args, err := f.buildWhere()
+	// For a calculated ranking such as outbound clicks / page views, use the
+	// first event source as the candidate set. This avoids evaluating a metric
+	// separately for every historical page with no numerator events.
+	candidate := f
+	if source, found := firstMetricSource(metric.Expression); found {
+		if value, ok := source["app"].(string); ok && value != "" {
+			candidate.App = value
+		}
+		if value, ok := source["topic"].(string); ok && value != "" {
+			candidate.Topic = value
+		}
+		if value, ok := source["source"].(string); ok && value != "" {
+			candidate.Source = value
+		}
+	}
+	where, args, err := candidate.buildWhere()
 	if err != nil {
 		return nil, err
 	}
@@ -510,4 +525,21 @@ func groupedCalculatedMetricRows(db sqlRunner, project string, metric MetricDefi
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+func firstMetricSource(expr map[string]any) (map[string]any, bool) {
+	if source, ok := expr["source"].(map[string]any); ok {
+		return source, true
+	}
+	if left, ok := expr["left"].(map[string]any); ok {
+		if source, found := firstMetricSource(left); found {
+			return source, true
+		}
+	}
+	if right, ok := expr["right"].(map[string]any); ok {
+		if source, found := firstMetricSource(right); found {
+			return source, true
+		}
+	}
+	return nil, false
 }
