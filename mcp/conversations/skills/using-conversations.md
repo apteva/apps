@@ -20,10 +20,16 @@ acknowledgement and include it there, then use tools. For a simple question such
 answer directly with `conversations_send`, `phase=final`. Do not send a separate
 "I'll take a look" acknowledgement. Do not call an attachment-reading tool for
 an image already supplied. Non-image attachments include a Conversations-scoped
-attachment reference and may include a Storage file ID. When a receiving app's
-file, document, or ZIP-import tool needs the original bytes, call
-`conversations_attachment_to_blob` and pass its returned `blobref://` handle to
-that tool. Treat attachment IDs as scoped references, not generic blob readers.
+attachment reference and may include a Storage file ID. Non-image attachments
+also arrive as a server-backed file handle. When a receiving app's file,
+document, or ZIP-import tool needs the original bytes, pass that handle
+unchanged to its declared file input; the platform supplies the bytes. Do not
+decode or inline the handle. Treat attachment IDs as scoped references, not
+generic blob readers.
+When an image-generation or other compatible tool returns a `blobref://` image
+handle, pass the complete handle in `conversations_send`'s `attachments` array
+to publish it in the conversation. Conversations persists the reference and
+authorized viewers can render it; do not download or base64-encode it first.
 Describe only details you can actually see; the filename or byte count is not
 evidence of image quality.
 

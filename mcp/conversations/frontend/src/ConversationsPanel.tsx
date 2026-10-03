@@ -1094,7 +1094,7 @@ function MessageRow(props: {message:Message;agentName?:string;onAction:(id:numbe
  const user=props.message.role==="user";
  const voice=props.message.metadata?.source==="voice";
  const { t } = useConversationLocalization();
- const attachments=<AttachmentContent attachments={props.message.attachments} chatID={props.message.conversation_id}/>;
+ const attachments=<AttachmentContent attachments={props.message.attachments} chatID={props.message.conversation_id} messageID={props.message.id}/>;
  return <div className={`min-w-0 shrink-0 flex flex-col gap-2 ${user?"chat-message-user":""}`}>
  {props.agentName ? <p className="text-[10px] font-semibold uppercase text-text-muted">{props.agentName}</p> : null}
  {voice ? <span className={`inline-flex items-center gap-1 text-[10px] text-text-muted ${user?"self-end":"self-start"}`} title={t("voice.transcriptWarning")}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3ZM5 10v2a7 7 0 0 0 14 0v-2M12 19v3"/></svg>{t("voice.turn")}</span> : null}

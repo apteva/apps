@@ -534,6 +534,143 @@ func TestScenario_ImageStorageTicket(t *testing.T) {
 	t.Fatal("real agent did not complete image-to-ticket flow within 300s")
 }
 
+// TestScenario_NativeImageToConversation proves the complete generated-file
+// handoff with a real Codex agent: Core's native image tool returns a durable
+// blobref, the agent passes that unchanged to conversations_send, and the
+// conversation can still authorize the same image after a history reload.
+func TestScenario_NativeImageToConversation(t *testing.T) {
+	c := newScenarioClient(t)
+	agent, cleanup := c.ensureAgent()
+	defer cleanup()
+
+	var conv Conversation
+	if status := c.do("POST", "/api/apps/conversations/chats", map[string]any{
+		"agent_id": agent, "title": "Live native image handoff",
+	}, &conv); status != http.StatusOK || conv.ID == "" {
+		t.Fatalf("create conversation: status=%d conv=%+v", status, conv)
+	}
+	defer c.deleteConversation(conv.ID)
+
+	prompt := fmt.Sprintf("Use the native image_generation capability exactly once to make a simple blue circle on a white background. After generation completes, call conversations_send exactly once in conversation %s. Pass the complete _file handle returned by image_generation unchanged in the attachments array (including ref, filename, mimeType, and size); do not download it, read it, base64 encode it, or call any attachment-reading tool. The conversations_send text must contain NATIVE_IMAGE_CONVERSATION_DONE. Do not send any other conversation message.", conv.ID)
+	if status := c.do("POST", "/api/apps/conversations/messages?chat_id="+conv.ID, map[string]any{
+		"content": prompt, "client_message_id": "native-image-handoff-1",
+	}, nil); status != http.StatusOK {
+		t.Fatalf("post native image prompt: status=%d", status)
+	}
+
+	deadline := time.Now().Add(360 * time.Second)
+	for time.Now().Before(deadline) {
+		var transcript []Message
+		if status := c.do("GET", "/api/apps/conversations/messages?chat_id="+conv.ID, nil, &transcript); status != http.StatusOK {
+			t.Fatalf("history: %d", status)
+		}
+		var sent *Message
+		for i := range transcript {
+			m := &transcript[i]
+			if m.Role == "agent" && strings.Contains(m.Content, "NATIVE_IMAGE_CONVERSATION_DONE") && len(m.Attachments) == 1 {
+				sent = m
+				break
+			}
+		}
+		if sent == nil {
+			time.Sleep(3 * time.Second)
+			continue
+		}
+		attachment := sent.Attachments[0]
+		if !attachment.File || !strings.HasPrefix(attachment.Ref, "blobref://") || attachment.Type != "image" || !strings.HasPrefix(attachment.MimeType, "image/") || attachment.Name == "" || attachment.Size <= 0 {
+			t.Fatalf("agent message has invalid generated attachment: %+v", attachment)
+		}
+
+		// A fresh history response must retain the opaque handle and metadata.
+		var reloaded []Message
+		if status := c.do("GET", "/api/apps/conversations/messages?chat_id="+conv.ID, nil, &reloaded); status != http.StatusOK {
+			t.Fatalf("reload history: %d", status)
+		}
+		var reloadedAttachment *Attachment
+		for i := range reloaded {
+			for j := range reloaded[i].Attachments {
+				if reloaded[i].Attachments[j].Ref == attachment.Ref {
+					reloadedAttachment = &reloaded[i].Attachments[j]
+				}
+			}
+		}
+		if reloadedAttachment == nil || reloadedAttachment.Size != attachment.Size || reloadedAttachment.MimeType != attachment.MimeType {
+			t.Fatalf("generated reference was not durable across history reload: original=%+v reloaded=%+v", attachment, reloadedAttachment)
+		}
+
+		var presented struct {
+			Attachment    Attachment `json:"attachment"`
+			ContentBase64 string     `json:"content_base64"`
+		}
+		path := fmt.Sprintf("/api/apps/conversations/attachment-reference?chat_id=%s&message_id=%d&ref=%s", url.QueryEscape(conv.ID), sent.ID, url.QueryEscape(attachment.Ref))
+		if status := c.do("GET", path, nil, &presented); status != http.StatusOK {
+			t.Fatalf("authorized generated image presentation: status=%d", status)
+		}
+		imageBytes, err := base64.StdEncoding.DecodeString(presented.ContentBase64)
+		if err != nil || len(imageBytes) != int(attachment.Size) || !bytes.HasPrefix(imageBytes, []byte("\x89PNG\r\n\x1a\n")) {
+			t.Fatalf("authorized presentation was not the generated PNG: bytes=%d want=%d err=%v", len(imageBytes), attachment.Size, err)
+		}
+		if presented.Attachment.Ref != attachment.Ref || presented.Attachment.MimeType != attachment.MimeType {
+			t.Fatalf("presentation metadata changed: %+v", presented.Attachment)
+		}
+
+		// The message-bound route must not expose the image through another chat.
+		wrongPath := fmt.Sprintf("/api/apps/conversations/attachment-reference?chat_id=missing-chat&message_id=%d&ref=%s", sent.ID, url.QueryEscape(attachment.Ref))
+		if status := c.do("GET", wrongPath, nil, nil); status != http.StatusNotFound {
+			t.Fatalf("cross-conversation presentation status=%d, want 404", status)
+		}
+
+		var events []struct {
+			Type string `json:"type"`
+			Data struct {
+				Name  string                     `json:"name"`
+				Args  map[string]json.RawMessage `json:"args"`
+				Files []Attachment               `json:"files"`
+			} `json:"data"`
+		}
+		if status := c.do("GET", fmt.Sprintf("/api/telemetry?agent_id=%d&limit=1000", agent), nil, &events); status != http.StatusOK {
+			t.Fatalf("telemetry: %d", status)
+		}
+		hasGeneration := false
+		hasSend := false
+		for _, event := range events {
+			if event.Type == "image.generated" {
+				for _, file := range event.Data.Files {
+					hasGeneration = hasGeneration || file.Ref == attachment.Ref
+				}
+			}
+			if event.Type != "tool.call" || event.Data.Name != "conversations_send" {
+				continue
+			}
+			// Tool telemetry can preserve an MCP argument either as its native
+			// JSON value or as a JSON-encoded string (the latter is what the
+			// runner emits for array arguments). Accept both encodings so this
+			// assertion checks the handoff rather than the telemetry serializer.
+			if raw := event.Data.Args["attachments"]; len(raw) > 0 {
+				var attachments []Attachment
+				if err := json.Unmarshal(raw, &attachments); err != nil {
+					var encoded string
+					if json.Unmarshal(raw, &encoded) == nil {
+						_ = json.Unmarshal([]byte(encoded), &attachments)
+					}
+				}
+				for _, file := range attachments {
+					hasSend = hasSend || file.Ref == attachment.Ref && file.File
+				}
+			}
+		}
+		if !hasGeneration {
+			t.Fatalf("missing image.generated telemetry for %s", attachment.Ref)
+		}
+		if !hasSend {
+			t.Fatalf("conversations_send telemetry did not carry generated handle %s", attachment.Ref)
+		}
+		t.Logf("native image generation handed %s to conversations_send; %d-byte PNG survived reload and authorized presentation", attachment.Ref, len(imageBytes))
+		return
+	}
+	t.Fatal("Codex did not generate and publish a native image within 360s")
+}
+
 // TestScenario_TwoConversationIsolation proves that one agent can hold two
 // simultaneous Conversations threads without replies crossing between them.
 func TestScenario_TwoConversationIsolation(t *testing.T) {

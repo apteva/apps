@@ -87,6 +87,23 @@ duplicate replies. It does not exercise browser rendering, the mention picker,
 or simultaneous approvals. The runner verifies the requested model against
 actual `llm.start` telemetry.
 
+For the native image handoff regression, run the dedicated opt-in scenario with
+the real Codex provider and GPT-6.1 Sol:
+
+```sh
+APTEVA_RUN_CONVERSATIONS_NATIVE_IMAGE_TIER3=1 \
+  GOWORK=off apteva test --tier 3 --provider openai-codex --model gpt-6.1-sol \
+  --json scenarios/17-native-image-to-conversation.yaml
+```
+
+The scenario enables Core's provider-level `image_generation` capability for
+that disposable agent. It verifies that the generated `blobref://` survives the
+native image turn, is passed unchanged to `conversations_send`, remains in a
+reloaded transcript, resolves through the authenticated conversation attachment
+route as the original PNG, and cannot be fetched through another conversation.
+It is intentionally separate because it consumes hosted image-generation
+usage; ordinary Tier 3 runs do not enable the capability.
+
 Latest local validation (2026-10-02): one run passed all eight rounds with two
 `openai-codex` / `gpt-6.1-sol` agents. Runtime telemetry confirmed the provider
 and model. Elapsed time was 179.3 seconds, with 23 iterations and 232,143 total

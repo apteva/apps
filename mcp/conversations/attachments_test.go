@@ -266,8 +266,11 @@ func TestMixedAttachmentEventPreservesVisionAndFileAccess(t *testing.T) {
 			text.WriteString(part["text"].(string))
 		}
 	}
-	if images != 1 || !strings.Contains(text.String(), "attachment_id=notes") || !strings.Contains(text.String(), "conversations_attachment_to_blob") || !strings.Contains(text.String(), "file_id=42") {
+	if images != 1 || !strings.Contains(text.String(), "attachment_id=notes") || !strings.Contains(text.String(), "file_id=42") {
 		t.Fatal("mixed attachment routing lost image or file access")
+	}
+	if strings.Contains(text.String(), "conversations_attachment_to_blob") {
+		t.Fatal("legacy attachment handoff was advertised")
 	}
 	if strings.Contains(text.String(), "conversations_read_attachment") {
 		t.Fatal("retired attachment reader was advertised to the agent")

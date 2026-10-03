@@ -8,6 +8,7 @@ package main
 // transport through a platform-managed integration connection.
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"errors"
@@ -196,7 +197,26 @@ func (d *agentInboundAdapter) Deliver(app *sdk.AppCtx, target string, conv *Conv
 	if ack {
 		d.app.streamer.emitInboundAck(conv.ID, threadID, agentID, msg)
 	}
-	_, delivered, err := d.app.ensureConversationThreadForAgent(app, conv, agentID, &event)
+	if hasTransferableAttachments(msg) {
+		var files sdk.FileReferencesClient
+		files, err = sharedFileReferences(app, conv.ProjectID)
+		if err == nil {
+			// Establish the server-owned scope before granting file access.
+			// Bypass the eventless cache so a recreated thread is scoped again.
+			threadID, _, err = d.app.ensureConversationThreadForAgent(app, conv, agentID, nil, true)
+		}
+		if err == nil {
+			var refs map[string]sdk.FileHandle
+			refs, err = d.app.registerAgentFileReferences(context.Background(), files, conv, msg, agentID, threadID)
+			if err == nil {
+				event.Message = d.app.agentEventPayloadWithFileRefs(conv, msg, agentID, targets, refs)
+			}
+		}
+	}
+	var delivered bool
+	if err == nil {
+		_, delivered, err = d.app.ensureConversationThreadForAgent(app, conv, agentID, &event)
+	}
 	if err != nil || !delivered {
 		if ack {
 			d.app.streamer.finishResponse(conv.ID, agentID, msg.ID)

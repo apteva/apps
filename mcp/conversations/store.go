@@ -91,6 +91,8 @@ type Attachment struct {
 	MimeType   string `json:"mime_type,omitempty"`
 	Size       int64  `json:"size,omitempty"`
 	Ephemeral  bool   `json:"ephemeral,omitempty"`
+	File       bool   `json:"_file,omitempty"`
+	Ref        string `json:"ref,omitempty"`
 }
 
 type store struct{ db *sql.DB }

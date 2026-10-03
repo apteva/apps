@@ -77,8 +77,8 @@ func TestAttachmentReaderCatalog(t *testing.T) {
 			foundBlobHandoff = true
 		}
 	}
-	if !foundBlobHandoff {
-		t.Fatal("attachment_to_blob is not registered")
+	if foundBlobHandoff {
+		t.Fatal("attachment_to_blob must not be agent-facing once shared file references are enabled")
 	}
 	for _, tool := range app.Manifest().Provides.MCPTools {
 		if tool.Name == "read_attachment" || tool.Name == "conversations_read_attachment" {
@@ -219,7 +219,7 @@ func TestManifestDeclaresConversationsMobileSurface(t *testing.T) {
 }
 
 func TestReleaseVersionArtifactsAgree(t *testing.T) {
-	const releaseVersion = "0.24.32"
+	const releaseVersion = "0.24.33"
 	manifest := (&App{}).Manifest()
 	if manifest.Version != releaseVersion {
 		t.Fatalf("manifest version=%q want=%q", manifest.Version, releaseVersion)
@@ -247,8 +247,8 @@ func TestReleaseVersionArtifactsAgree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(module), "github.com/apteva/app-sdk v0.92.0") {
-		t.Fatal("go.mod must pin app-sdk v0.92.0, the latest SDK release by commit ancestry")
+	if !strings.Contains(string(module), "github.com/apteva/app-sdk v0.93.0") {
+		t.Fatal("go.mod must pin app-sdk v0.93.0, the release containing shared file references")
 	}
 }
 

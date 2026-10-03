@@ -102,6 +102,7 @@ export class ConversationsClient {
   };
   upload = (chat:string,id:string,name:string,content_base64:string) => this.app.post<Attachment>(query("/attachments",{chat_id:chat}),{id,name,content_base64});
   attachment = (chat:string,id:string) => this.app.get<{attachment:Attachment;content_base64:string}>(query("/attachments",{chat_id:chat,id}));
+  attachmentReference = (chat:string,messageID:number,ref:string) => this.app.get<{attachment:Attachment;content_base64:string}>(query("/attachment-reference",{chat_id:chat,message_id:messageID,ref}));
   markSeen = (id: string, lastSeenId: number, init?: RequestInit) =>
     this.app.post("/seen", { chat_id: id, last_seen_id: lastSeenId }, init);
   unread = (agentId?: number, init?: RequestInit) =>

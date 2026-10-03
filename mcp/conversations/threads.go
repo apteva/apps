@@ -80,7 +80,7 @@ var legacyThreadPlatforms sync.Map
 var conversationThreadTools = []string{
 	"send", "spawn", "pace",
 	"conversations_send", "conversations_history",
-	"conversations_request_approval", "conversations_alert", "conversations_attachment_to_blob",
+	"conversations_request_approval", "conversations_alert",
 }
 
 // conversationThreadDirective is the suffix core appends to the agent's
@@ -105,7 +105,7 @@ func conversationThreadDirective(conv *Conversation) string {
 		" For a simple image question, send the answer directly with phase=final, without an acknowledgement or attachment-reading tool." +
 		" For a multi-step task involving an attached image, inspect it before your first acknowledgement and include the relevant visual finding in that acknowledgement; the image may not be available on later model turns." +
 		" Before calling any work tool for a user request, including a single quick lookup, call conversations_send phase=acknowledgement alone and briefly say what you are about to do. Wait for its result before calling a work tool. Do not batch that acknowledgement with a work tool or call them in parallel. For work with two or more distinct stages or batches, send at least one concise phase=progress update between stages, even when the first batch finishes quickly. For longer work, add progress after meaningful milestones, plan changes, blockers, or requests for input; combine nearby milestones and do not narrate individual tool calls or routine retries. Then work and send one final outcome. The only exception is a response you can give without a tool, or a simple image question answered from the image already supplied." +
-		" Non-image attachments include a Conversations-scoped attachment reference and may include a Storage file ID. When a downstream file, document, or ZIP-import tool needs the original bytes, call conversations_attachment_to_blob and pass its returned blobref:// handle to that tool; do not use it for images already supplied directly." +
+		" Non-image attachments include a server-backed file handle with filename, MIME type and size. Pass that handle unchanged to a compatible downstream file, document, or ZIP-import tool; the platform supplies the bytes. Do not decode, inline, or treat the handle as a path. Images are already supplied directly and must not be fetched." +
 		" Reply in this same conversation using conversations_send" +
 		" (conversation_id=" + conv.ID + "); never send, read, approve, or alert against another conversation id." +
 		" Do not call conversations_create, conversations_list, or conversations_report from this thread;" +
@@ -157,6 +157,7 @@ func (a *App) ensureConversationThreadForAgent(
 	conv *Conversation,
 	agentID int64,
 	initialEvent *sdk.ThreadEvent,
+	forceEnsure ...bool,
 ) (threadID string, initialDelivered bool, err error) {
 	if app == nil {
 		return "", false, fmt.Errorf("platform unavailable")
@@ -185,7 +186,7 @@ func (a *App) ensureConversationThreadForAgent(
 	// Eventless callers may use the process cache. Every inbound delivery goes
 	// through EnsureThread so the desired profile and stable event are one
 	// atomic operation with an accepted-or-duplicate receipt.
-	if initialEvent == nil {
+	if initialEvent == nil && (len(forceEnsure) == 0 || !forceEnsure[0]) {
 		if prev, ok := spawnedThreads.Load(cacheKey); ok && prev.(cachedThreadProfile).hash == wantHash && prev.(cachedThreadProfile).expires.After(time.Now()) {
 			return threadID, false, nil
 		}
