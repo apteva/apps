@@ -12,7 +12,7 @@ import {
   useTaskDialog,
 } from "./taskShared";
 
-type View = "active" | "attention" | "scheduled" | "completed" | "all";
+type View = "drafts" | "active" | "attention" | "scheduled" | "completed" | "all";
 
 export default function TasksPanel(props: HostProps) {
   const names = useAgentNames(props.projectId);
@@ -92,7 +92,7 @@ export default function TasksPanel(props: HostProps) {
         <div className="overflow-hidden rounded border border-border">
           <nav className="flex flex-wrap gap-1 border-b border-border p-2">
             {(
-              ["all", "active", "scheduled", "attention", "completed"] as View[]
+              ["drafts", "all", "active", "scheduled", "attention", "completed"] as View[]
             ).map((item) => (
               <button
                 key={item}
@@ -100,7 +100,7 @@ export default function TasksPanel(props: HostProps) {
                 aria-pressed={view === item}
                 className={`rounded px-3 py-2 text-[10px] font-bold capitalize ${view === item ? "bg-accent/15 text-accent" : "text-text-dim hover:bg-bg-hover hover:text-text"}`}
               >
-                {item === "attention" ? "Needs attention" : item === "all" ? "All tasks" : item}
+                {item === "attention" ? "Needs attention" : item === "drafts" ? "Drafts" : item === "all" ? "All tasks" : item}
               </button>
             ))}
             <span className="ml-auto self-center px-2 text-[9px] text-text-dim">

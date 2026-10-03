@@ -56,7 +56,7 @@ const definitionPredicate = `(schedule_kind<>'' AND scheduled_for IS NULL AND pa
 const queueRankExpression = `CASE WHEN state='failed' OR last_occurrence_status='failed' THEN 0 WHEN state='blocked' OR last_occurrence_status='blocked' THEN 1 WHEN state='running' THEN 2 WHEN state='queued' THEN 3 WHEN schedule_kind='' OR scheduled_for IS NOT NULL THEN 4 ELSE 5 END`
 
 // All-task inventory keeps live work and schedule definitions ahead of history.
-const inventoryRankExpression = `CASE WHEN state='running' THEN 0 WHEN state='queued' THEN 1 WHEN state='blocked' THEN 2 WHEN state='waiting' AND NOT ` + definitionPredicate + ` THEN 3 WHEN state='waiting' AND ` + definitionPredicate + ` THEN 4 WHEN state='failed' THEN 5 WHEN state IN ('completed','cancelled') THEN 6 ELSE 7 END`
+const inventoryRankExpression = `CASE WHEN state='draft' THEN 0 WHEN state='running' THEN 1 WHEN state='queued' THEN 2 WHEN state='blocked' THEN 3 WHEN state='waiting' AND NOT ` + definitionPredicate + ` THEN 4 WHEN state='waiting' AND ` + definitionPredicate + ` THEN 5 WHEN state='failed' THEN 6 WHEN state IN ('completed','cancelled') THEN 7 ELSE 8 END`
 
 const attentionPredicate = `(state IN ('blocked','failed') OR (schedule_kind<>'' AND last_occurrence_status IN ('blocked','failed')))`
 
@@ -89,6 +89,8 @@ func (s *taskStore) ListPage(filter TaskFilter) (TaskPage, error) {
 	}
 	switch filter.View {
 	case "", "all":
+	case "drafts":
+		where += ` AND state='draft'`
 	case "operational":
 		where += ` AND state NOT IN ('completed','cancelled')`
 	case "active":
@@ -239,22 +241,24 @@ func taskQueueRank(task Task) int {
 
 func taskInventoryRank(task Task) int {
 	switch task.State {
-	case stateRunning:
+	case stateDraft:
 		return 0
-	case stateQueued:
+	case stateRunning:
 		return 1
-	case stateBlocked:
+	case stateQueued:
 		return 2
+	case stateBlocked:
+		return 3
 	case stateWaiting:
 		if task.ScheduleKind != "" && task.ScheduledFor == nil && task.ParentTaskID == "" {
-			return 4
+			return 5
 		}
-		return 3
+		return 4
 	case stateFailed:
-		return 5
-	case stateCompleted, stateCancelled:
 		return 6
-	default:
+	case stateCompleted, stateCancelled:
 		return 7
+	default:
+		return 8
 	}
 }

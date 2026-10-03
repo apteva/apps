@@ -25,6 +25,7 @@ export interface TaskOverviewPreferences {
 }
 
 export type TaskQueueFilter =
+  | "drafts"
   | "active"
   | "scheduled"
   | "recurring"
@@ -51,6 +52,7 @@ export interface Task {
   title: string;
   description?: string;
   state:
+    | "draft"
     | "queued"
     | "running"
     | "waiting"
@@ -59,6 +61,9 @@ export interface Task {
     | "failed"
     | "cancelled";
   progress?: number;
+  expected_outcome?: string;
+  inputs?: Array<{ key: string; label: string; description?: string; required?: boolean; value?: unknown }>;
+  suggested_agent_id?: number;
   current_step?: string;
   created_by_thread_id?: string;
   assigned_thread_id: string;
@@ -197,6 +202,11 @@ export const taskAPI = {
       endpoint(props, `${encodeURIComponent(id)}/${action}`),
       { method: "POST" },
     ),
+  start: (props: HostProps, id: string, agentId?: number) =>
+    json<{ task: Task; started: boolean }>(endpoint(props, `${encodeURIComponent(id)}/start`), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(agentId ? { agent_id: agentId } : {}),
+    }),
 };
 
 export function useTasks(
@@ -327,6 +337,7 @@ export function scheduleLabel(task: Task) {
 }
 
 const stateTone: Record<Task["state"], string> = {
+  draft: "border-yellow/35 bg-yellow/10 text-yellow",
   queued: "border-blue/35 bg-blue/10 text-blue",
   running: "border-accent/35 bg-accent/10 text-accent",
   waiting: "border-purple-400/35 bg-purple-400/10 text-purple-300",
@@ -337,6 +348,10 @@ const stateTone: Record<Task["state"], string> = {
 };
 
 export function taskStateLabel(task: Task) {
+  if (task.state === "draft") {
+    const missing = (task.inputs || []).some((input) => input.required && (input.value === undefined || input.value === null || String(input.value).trim() === ""));
+    return missing ? "needs input" : "ready to configure";
+  }
   if (task.parent_task_id && task.state === "queued" && task.accepted_at)
     return "accepted";
   if (task.parent_task_id && task.state === "queued" && task.dispatched_at)
@@ -459,7 +474,9 @@ export function TaskDetails({
   const [runs, setRuns] = useState<Task[]>([]);
   const [runsCursor, setRunsCursor] = useState("");
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState({ title: "", description: "", expression: "", timezone: "UTC" });
+  const [draft, setDraft] = useState({ title: "", description: "", expectedOutcome: "", expression: "", timezone: "UTC" });
+  const [inputValues, setInputValues] = useState<Record<string, string>>({});
+  const [agents, setAgents] = useState<Agent[]>([]);
   const [recoveryReason, setRecoveryReason] = useState("");
   const [recoveryKey] = useState(() => crypto.randomUUID());
   const dialogRef = useTaskDialog(onClose);
@@ -493,6 +510,12 @@ export function TaskDetails({
     void refresh();
     return () => { request.current++; };
   }, [refresh]);
+  useEffect(() => {
+    if (!props.projectId) return;
+    fetch(`/api/agents?project_id=${encodeURIComponent(props.projectId)}`, { credentials: "same-origin" })
+      .then((response) => response.ok ? response.json() : [])
+      .then((value: Agent[]) => setAgents(value)).catch(() => setAgents([]));
+  }, [props.projectId]);
   useTaskEvents(props, refresh);
   const current = detail?.task || task;
   const processReference = current.description?.match(/^Process ID: (process-[a-f0-9]+)\nProcedure version: ([0-9]+)$/m);
@@ -511,7 +534,8 @@ export function TaskDetails({
     }
   };
   const edit = () => {
-    setDraft({ title: current.title, description: current.description || "", expression: current.schedule_expression || "", timezone: current.schedule_timezone || "UTC" });
+    setDraft({ title: current.title, description: current.description || "", expectedOutcome: current.expected_outcome || "", expression: current.schedule_expression || "", timezone: current.schedule_timezone || "UTC" });
+    setInputValues(Object.fromEntries((current.inputs || []).map((input) => [input.key, typeof input.value === "string" ? input.value : input.value == null ? "" : JSON.stringify(input.value)])));
     setEditing(true);
   };
   const runOperation = async (operation: () => Promise<void>) => {
@@ -527,7 +551,8 @@ export function TaskDetails({
       if (draft.expression !== (current.schedule_expression || "")) patch[current.schedule_kind === "once" ? "at" : current.schedule_kind === "interval" ? "every" : "cron"] = draft.expression;
       if (Object.keys(patch).length) schedule = patch;
     }
-    await taskAPI.update(props, current.id, { title: draft.title, description: draft.description, ...(schedule ? { schedule } : {}) });
+    const inputs = (current.inputs || []).map((input) => ({ ...input, value: inputValues[input.key] ?? input.value ?? "" }));
+    await taskAPI.update(props, current.id, { title: draft.title, description: draft.description, expected_outcome: draft.expectedOutcome, ...(current.state === "draft" ? { inputs, suggested_agent_id: current.suggested_agent_id || undefined } : {}), ...(schedule ? { schedule } : {}) });
     onChanged(); onClose();
   });
   const loadEvents = () => runOperation(async () => {
@@ -580,9 +605,18 @@ export function TaskDetails({
         </header>
         <div className="flex-1 space-y-5 overflow-auto p-5">
           {error && <p role="alert" className="text-xs text-red">{error}</p>}
+          {current.state === "draft" && <section className="space-y-3 rounded border border-yellow/30 bg-yellow/5 p-3">
+            <div className="flex items-center gap-2"><h3 className="text-xs font-bold text-text">Draft configuration</h3><span className="text-[10px] text-yellow">{taskStateLabel(current)}</span></div>
+            <p className="whitespace-pre-wrap text-xs text-text-muted">{current.description || "Add instructions before starting this task."}</p>
+            {current.expected_outcome && <p className="text-xs text-text-muted"><strong>Expected outcome:</strong> {current.expected_outcome}</p>}
+            {(current.inputs || []).map((input) => <label key={input.key} className="block text-xs"><span className="text-text-muted">{input.label}{input.required ? " *" : ""}</span><input value={inputValues[input.key] ?? (typeof input.value === "string" ? input.value : "")} onChange={(event) => setInputValues((values) => ({ ...values, [input.key]: event.target.value }))} className="mt-1 w-full rounded bg-bg-input p-2" placeholder={input.description || "Enter value"} /></label>)}
+            <label className="block text-xs"><span className="text-text-muted">Suggested agent</span><select value={current.suggested_agent_id || 0} onChange={(event) => { const id = Number(event.target.value); setDetail((value) => value ? { ...value, task: { ...value.task, suggested_agent_id: id || undefined } } : value); }} className="mt-1 w-full rounded bg-bg-input p-2"><option value={0}>Choose when starting</option>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>
+            <div className="flex gap-2"><button disabled={busy} onClick={() => void runOperation(async () => { await taskAPI.update(props, current.id, { inputs: (current.inputs || []).map((input) => ({ ...input, value: inputValues[input.key] ?? input.value ?? "" })), suggested_agent_id: current.suggested_agent_id || 0 }); onChanged(); })} className="rounded border border-border px-3 py-2 text-xs text-text">Save inputs</button><button disabled={busy || (current.inputs || []).some((input) => input.required && !String(inputValues[input.key] ?? input.value ?? "").trim()) || !(current.suggested_agent_id || 0)} onClick={() => void runOperation(async () => { await taskAPI.start(props, current.id, current.suggested_agent_id); onChanged(); onClose(); })} className="rounded border border-accent bg-accent/10 px-3 py-2 text-xs font-bold text-accent">Start task</button></div>
+          </section>}
           {editing && <section className="space-y-3 rounded border border-border p-3">
             <label className="block text-xs">Title<input value={draft.title} onChange={e => setDraft({ ...draft, title: e.target.value })} className="mt-1 w-full rounded bg-bg-input p-2" /></label>
             <label className="block text-xs">Instructions<textarea value={draft.description} onChange={e => setDraft({ ...draft, description: e.target.value })} className="mt-1 w-full rounded bg-bg-input p-2" /></label>
+            <label className="block text-xs">Expected outcome<textarea value={draft.expectedOutcome} onChange={e => setDraft({ ...draft, expectedOutcome: e.target.value })} className="mt-1 w-full rounded bg-bg-input p-2" /></label>
             {isScheduleDefinition(current) && <>
               <label className="block text-xs">{current.schedule_kind === "once" ? "Run at (RFC3339 timestamp with offset)" : current.schedule_kind === "interval" ? "Repeat every (for example 1h)" : "Five-field cron"}<input value={draft.expression} onChange={e => setDraft({ ...draft, expression: e.target.value })} className="mt-1 w-full rounded bg-bg-input p-2" /></label>
               <label className="block text-xs">Timezone<input value={draft.timezone} onChange={e => setDraft({ ...draft, timezone: e.target.value })} className="mt-1 w-full rounded bg-bg-input p-2" /></label>
@@ -788,6 +822,7 @@ export function needsAttention(task: Task) {
 }
 
 export function taskQueueRank(task: Task) {
+  if (task.state === "draft") return 0;
   if (needsAttention(task)) return task.state === "blocked" || task.last_occurrence_status === "blocked" ? 1 : 0;
   if (task.state === "failed") return 0;
   if (task.state === "blocked") return 1;

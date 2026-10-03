@@ -235,3 +235,8 @@ Terminal records are immutable. Completion requires a concrete result, failure
 requires a concrete error, and retrying the identical terminal write is safe.
 Only one open recovery is allowed for an original occurrence. A completed
 recovery prevents further recovery attempts for that original occurrence.
+
+
+## Draft tasks
+
+Presets and authenticated operators can create a `draft` with instructions, an expected outcome, generic required inputs, and an optional suggested agent. Drafts have no thread, schedule, or execution event. Configure the input values and agent in the Tasks UI, then use Start task. Starting validates every required input and dispatches exactly once; retrying start is safe. Agents must verify supplied references (such as ticket IDs or URLs) are real and accessible before acting.

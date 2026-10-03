@@ -13,6 +13,13 @@ func objectSchema(required []string, properties map[string]any) map[string]any {
 	return map[string]any{"type": "object", "required": required, "properties": properties, "additionalProperties": false}
 }
 
+func inputSchema() map[string]any {
+	return map[string]any{"type": "array", "items": objectSchema([]string{"key", "label"}, map[string]any{
+		"key": map[string]any{"type": "string"}, "label": map[string]any{"type": "string"},
+		"description": map[string]any{"type": "string"}, "required": map[string]any{"type": "boolean"}, "value": map[string]any{},
+	})}
+}
+
 func scheduleSchema(requireKind bool) map[string]any {
 	schema := map[string]any{"type": "object", "properties": map[string]any{
 		"kind":           map[string]any{"type": "string", "enum": []string{"once", "interval", "cron"}},
@@ -34,7 +41,7 @@ func (a *App) tools() []sdk.Tool {
 	wakeAlways := map[string]any{"io.apteva/wakeOnResult": "always"}
 	return []sdk.Tool{
 		{Name: "create", Description: "Create tasks only for concrete work outcomes. Bare waiting, idling, or changing your own cadence is not work: use Core pace (for example sleep=1h), without a task or schedule. For 'wait for one hour', do not invent a resume action, reminder, report, or worker. An explicitly requested future action or reminder does need a scheduled task. Create exactly one durable task before substantive work begins when an outcome is multi-step, combines multiple sources or independent checks, is scheduled, delegated, or must survive the current exchange. A multi-area review or synthesis is task work even when calls run in parallel or finish in one turn. A quick lookup means one bounded read or action with no multi-source synthesis. Creating a task does not imply delegation: the current opaque thread may create, execute, update, and complete its own task. For immediate work, omit schedule entirely; never invent schedule placeholders. For scheduled work, provide exactly one of at, after, every, or cron with its matching kind. The current thread becomes creator; immediate work defaults to that creator, while scheduled work defaults to the agent's configured default thread. assigned_thread_id overrides either default.", InputSchema: objectSchema([]string{"title"}, map[string]any{
-			"title": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}, "assigned_thread_id": map[string]any{"type": "string"}, "idempotency_key": map[string]any{"type": "string"}, "operation_key": map[string]any{"type": "string", "description": "Stable external-operation idempotency context, when the domain API provides one."}, "schedule": scheduleSchema(true),
+			"title": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}, "expected_outcome": map[string]any{"type": "string"}, "inputs": inputSchema(), "suggested_agent_id": map[string]any{"type": "integer"}, "state": map[string]any{"type": "string", "enum": []string{stateQueued, stateDraft}}, "assigned_thread_id": map[string]any{"type": "string"}, "idempotency_key": map[string]any{"type": "string"}, "operation_key": map[string]any{"type": "string", "description": "Stable external-operation idempotency context, when the domain API provides one."}, "schedule": scheduleSchema(true),
 		}), Meta: wakeAlways, HandlerCtx: a.toolCreate},
 		{Name: "list", Description: "List this agent's durable task inventory across all of its threads. Caller, creator, assignee, and executor thread IDs are provenance only and never limit visibility. Use this directly for task and schedule questions instead of asking another thread. Use next_cursor to request the next page when has_more is true; do not repeat a page.", InputSchema: objectSchema(nil, map[string]any{
 			"states": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "include_runs": map[string]any{"type": "boolean"}, "limit": map[string]any{"type": "integer"}, "cursor": map[string]any{"type": "string"}, "view": map[string]any{"type": "string", "enum": []string{"all", "active", "attention", "scheduled", "recent"}}, "query": map[string]any{"type": "string"},
@@ -50,8 +57,9 @@ func (a *App) tools() []sdk.Tool {
 			"task_id": map[string]any{"type": "string"}, "error": map[string]any{"type": "string"}, "result_reference": map[string]any{"type": "string"},
 		}), Meta: wakeAlways, HandlerCtx: a.toolFail},
 		{Name: "update", Description: "Legacy compatibility tool combining definition edits, progress, and failure state. Do not use for new work. Use tasks_set_progress for milestones, tasks_edit for definitions, tasks_fail for failures, and tasks_complete for success.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{
-			"task_id": map[string]any{"type": "string"}, "title": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}, "state": map[string]any{"type": "string", "enum": []string{"queued", "running", "waiting", "blocked", "failed"}}, "progress": map[string]any{"type": "integer", "minimum": 0, "maximum": 100}, "current_step": map[string]any{"type": "string"}, "error": map[string]any{"type": "string"}, "result_reference": map[string]any{"type": "string"}, "schedule": scheduleSchema(false),
+			"task_id": map[string]any{"type": "string"}, "title": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}, "expected_outcome": map[string]any{"type": "string"}, "inputs": inputSchema(), "suggested_agent_id": map[string]any{"type": "integer"}, "state": map[string]any{"type": "string", "enum": []string{stateDraft, "queued", "running", "waiting", "blocked", "failed"}}, "progress": map[string]any{"type": "integer", "minimum": 0, "maximum": 100}, "current_step": map[string]any{"type": "string"}, "error": map[string]any{"type": "string"}, "result_reference": map[string]any{"type": "string"}, "schedule": scheduleSchema(false),
 		}), Meta: wakeAlways, HandlerCtx: a.toolUpdate},
+		{Name: "start", Description: "Start a draft after required inputs and an execution agent have been selected. Repeated starts are idempotent.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{"task_id": map[string]any{"type": "string"}, "agent_id": map[string]any{"type": "integer"}}), Meta: wakeAlways, HandlerCtx: a.toolStart},
 		{Name: "assign", Description: "Assign a task to an existing opaque thread id belonging to the same agent. This records ownership and sends an event containing the authoritative task ID, which wakes a paused worker; it never creates a thread. Main must use the platform spawn tool first, grant the worker tasks_get plus only required domain tools, and retain all Tasks mutation tools. The worker must call tasks_get before any domain action.", InputSchema: objectSchema([]string{"task_id", "thread_id"}, map[string]any{"task_id": map[string]any{"type": "string"}, "thread_id": map[string]any{"type": "string"}}), Meta: wakeAlways, HandlerCtx: a.toolAssign},
 		{Name: "complete", Description: "Required final write after successful task work. Call tasks_complete exactly once with the concrete result before pace, idle, stopping, or sending the final response. Neither progress 100 nor a final-looking current_step completes the task. Completion sets progress to 100 and current_step to Completed. When a worker reports success, main must record the result here before it stops. Include result_reference when a durable output ID or URL exists. Tasks sends a structured terminal receipt to its creator thread when different; do not duplicate that delivery.", InputSchema: objectSchema([]string{"task_id", "result"}, map[string]any{"task_id": map[string]any{"type": "string"}, "result": map[string]any{"type": "string"}, "result_reference": map[string]any{"type": "string"}}), Meta: wakeAlways, HandlerCtx: a.toolComplete},
 		{Name: "cancel", Description: "Cancel an active task or scheduled series.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{"task_id": map[string]any{"type": "string"}, "reason": map[string]any{"type": "string"}}), Meta: wakeAlways, HandlerCtx: a.toolCancel},
@@ -77,6 +85,22 @@ func callIdentity(ctx context.Context, app *sdk.AppCtx) (*sdk.Caller, string, er
 		return nil, "", validationError("trusted project context required")
 	}
 	return caller, projectID, nil
+}
+
+func operatorIdentity(ctx context.Context, app *sdk.AppCtx) (*sdk.Caller, string, bool) {
+	c := sdk.CallerFrom(ctx)
+	if c == nil || strings.TrimSpace(c.SubjectID) == "" {
+		return nil, "", false
+	}
+	typ := strings.ToLower(strings.TrimSpace(c.SubjectType))
+	if typ != "operator" && typ != "preset_operator" {
+		return nil, "", false
+	}
+	project := strings.TrimSpace(c.ProjectID)
+	if project == "" && app != nil {
+		project = strings.TrimSpace(app.CurrentProject())
+	}
+	return c, project, project != ""
 }
 
 func decodeSchedule(v any) (*ScheduleInput, error) {
@@ -139,6 +163,16 @@ func decodeSchedulePatch(v any) (*ScheduleInput, error) {
 }
 
 func (a *App) taskForCaller(ctx context.Context, app *sdk.AppCtx, args map[string]any) (*sdk.Caller, *Task, error) {
+	if operator, projectID, ok := operatorIdentity(ctx, app); ok {
+		task, err := a.store.Get(stringArg(args, "task_id"))
+		if err != nil {
+			return nil, nil, err
+		}
+		if task.ProjectID != projectID || task.State != stateDraft {
+			return nil, nil, validationError("task is outside the operator project or is no longer a draft")
+		}
+		return operator, task, nil
+	}
 	caller, projectID, err := callIdentity(ctx, app)
 	if err != nil {
 		return nil, nil, err
@@ -147,16 +181,32 @@ func (a *App) taskForCaller(ctx context.Context, app *sdk.AppCtx, args map[strin
 	if err != nil {
 		return nil, nil, err
 	}
-	if task.AgentID != caller.AgentID || task.ProjectID != projectID {
+	if task.State == stateDraft || task.AgentID != caller.AgentID || task.ProjectID != projectID {
 		return nil, nil, validationError("task is outside the calling agent and project")
 	}
 	return caller, task, nil
 }
 
 func (a *App) toolCreate(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
-	caller, projectID, err := callIdentity(ctx, app)
-	if err != nil {
-		return nil, err
+	state := strings.ToLower(strings.TrimSpace(stringArg(args, "state")))
+	if state == "" {
+		state = stateQueued
+	}
+	operator, projectID, isOperator := operatorIdentity(ctx, app)
+	var caller *sdk.Caller
+	if !isOperator {
+		var err error
+		caller, projectID, err = callIdentity(ctx, app)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if state != stateDraft && isOperator {
+		return nil, validationError("operators may only create drafts")
+	}
+	if state == stateDraft && !isOperator {
+		return nil, validationError("draft creation requires an authenticated operator")
 	}
 	title := stringArg(args, "title")
 	if strings.TrimSpace(title) == "" {
@@ -166,27 +216,118 @@ func (a *App) toolCreate(ctx context.Context, app *sdk.AppCtx, args map[string]a
 	if err != nil {
 		return nil, err
 	}
+	inputs, err := decodeTaskInputs(args["inputs"])
+	if err != nil {
+		return nil, err
+	}
 	assigned := strings.TrimSpace(stringArg(args, "assigned_thread_id"))
-	if assigned == "" && schedule != nil {
+	agentID := int64(0)
+	createdByThread := ""
+	if caller != nil {
+		agentID, createdByThread = caller.AgentID, caller.ThreadID
+	}
+	if state == stateDraft {
+		if assigned != "" || schedule != nil {
+			return nil, validationError("drafts cannot have threads or schedules")
+		}
+		assigned = ""
+	} else if assigned == "" && schedule != nil {
 		agent, agentErr := app.GetAgent(caller.AgentID)
 		if agentErr != nil {
 			return nil, fmt.Errorf("resolve scheduled assignee: %w", agentErr)
 		}
 		assigned = strings.TrimSpace(agent.DefaultThreadID)
 	}
-	if assigned == "" {
+	if state != stateDraft && assigned == "" {
 		assigned = caller.ThreadID
 	}
-	task, created, err := a.store.Create(CreateTaskInput{AgentID: caller.AgentID, ProjectID: projectID, Title: title, Description: stringArg(args, "description"), State: stateQueued, CreatedByThreadID: caller.ThreadID, AssignedThreadID: assigned, IdempotencyKey: stringArg(args, "idempotency_key"), OperationKey: stringArg(args, "operation_key"), Schedule: schedule})
+	suggestedID := int64Arg(args, "suggested_agent_id")
+	if state == stateDraft && suggestedID == 0 && caller != nil {
+		suggestedID = caller.AgentID
+	}
+	if err := validateSuggestedAgent(app, projectID, suggestedID); err != nil {
+		return nil, err
+	}
+	operatorID := ""
+	if isOperator {
+		operatorID = operator.SubjectID
+	}
+	task, created, err := a.store.Create(CreateTaskInput{AgentID: agentID, ProjectID: projectID, Title: title, Description: stringArg(args, "description"), ExpectedOutcome: stringArg(args, "expected_outcome"), Inputs: inputs, SuggestedAgentID: suggestedID, CreatedByOperatorID: operatorID, State: state, CreatedByThreadID: createdByThread, AssignedThreadID: assigned, IdempotencyKey: stringArg(args, "idempotency_key"), OperationKey: stringArg(args, "operation_key"), Schedule: schedule})
 	if err != nil {
 		return nil, err
 	}
-	if created && schedule == nil && assigned != caller.ThreadID {
+	if created && state != stateDraft && schedule == nil && assigned != caller.ThreadID {
 		if err := a.notifyAssigned(task, assigned, "task.assigned"); err != nil {
 			return nil, err
 		}
 	}
 	return map[string]any{"task": task, "created": created}, nil
+}
+
+func decodeTaskInputs(v any) ([]TaskInput, error) {
+	if v == nil {
+		return nil, nil
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var out []TaskInput
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, validationError("inputs must be an array of input definitions")
+	}
+	if err := validateTaskInputs(out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func int64Arg(args map[string]any, key string) int64 {
+	if v, ok := optionalIntArg(args, key); ok {
+		return int64(v)
+	}
+	return 0
+}
+
+func (a *App) toolStart(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	operator, projectID, ok := operatorIdentity(ctx, app)
+	if !ok {
+		return nil, validationError("starting drafts requires an authenticated operator")
+	}
+	task, err := a.store.Get(stringArg(args, "task_id"))
+	if err != nil {
+		return nil, err
+	}
+	if task.ProjectID != projectID {
+		return nil, validationError("task is outside this project")
+	}
+	if task.State != stateDraft {
+		return map[string]any{"task": task, "started": false}, nil
+	}
+	agentID := int64Arg(args, "agent_id")
+	if agentID <= 0 {
+		agentID = task.SuggestedAgentID
+	}
+	if agentID <= 0 {
+		return nil, validationError("agent_id is required")
+	}
+	agent, err := app.GetAgent(agentID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve agent: %w", err)
+	}
+	if agent.ProjectID != projectID || strings.TrimSpace(agent.DefaultThreadID) == "" {
+		return nil, validationError("selected agent is unavailable in this project")
+	}
+	started, changed, err := a.store.Start(task.ID, operator.SubjectID, agentID, agent.DefaultThreadID)
+	if err != nil {
+		return nil, err
+	}
+	if changed {
+		if err := a.drainDeliveries(started.ID, started.ProjectID, a.store.now()); err != nil {
+			return nil, err
+		}
+	}
+	return map[string]any{"task": started, "started": changed}, nil
 }
 
 func (a *App) toolList(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
@@ -351,10 +492,26 @@ func (a *App) toolUpdate(ctx context.Context, app *sdk.AppCtx, args map[string]a
 	if v, ok := args["description"].(string); ok && v != "" {
 		input.Description = &v
 	}
-	if v, ok := args["state"].(string); ok && v != "" {
+	if v, ok := args["expected_outcome"].(string); ok && v != "" {
+		input.ExpectedOutcome = &v
+	}
+	if raw, ok := args["inputs"]; ok && raw != nil {
+		values, decodeErr := decodeTaskInputs(raw)
+		if decodeErr != nil {
+			return nil, decodeErr
+		}
+		input.Inputs = &values
+	}
+	if v := int64Arg(args, "suggested_agent_id"); v > 0 {
+		if err := validateSuggestedAgent(app, task.ProjectID, v); err != nil {
+			return nil, err
+		}
+		input.SuggestedAgentID = &v
+	}
+	if v, ok := args["state"].(string); ok && v != "" && task.State != stateDraft {
 		input.State = &v
 	}
-	if v, ok := optionalIntArg(args, "progress"); ok {
+	if v, ok := optionalIntArg(args, "progress"); ok && task.State != stateDraft {
 		input.Progress = &v
 	}
 	if v, ok := args["current_step"].(string); ok && v != "" {
@@ -547,4 +704,21 @@ func stringSliceArg(args map[string]any, key string) []string {
 		return direct
 	}
 	return out
+}
+
+func validateSuggestedAgent(app *sdk.AppCtx, projectID string, id int64) error {
+	if id < 0 {
+		return validationError("suggested_agent_id must be positive or zero")
+	}
+	if id == 0 {
+		return nil
+	}
+	agent, err := app.GetAgent(id)
+	if err != nil || agent == nil {
+		return validationError("suggested agent not found")
+	}
+	if agent.ProjectID != projectID {
+		return validationError("suggested agent is outside this project")
+	}
+	return nil
 }
