@@ -20,7 +20,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.17.5
+version: 0.17.6
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -73,6 +73,9 @@ description: |
   v0.16 adds persisted calculated metrics with validated arithmetic,
   weighted sources, period context, grouped metric tables, and read-only
   global evaluation over projects visible to a global install.
+  v0.17.6 adds GA-style automatic outbound-link measurement to the hosted
+  tag.js. External anchor clicks emit outbound_click with destination and
+  page context, so sites do not need a handler on every link.
 author: Apteva
 tags: [analytics, events, observability]
 scopes: [project, global]

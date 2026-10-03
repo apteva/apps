@@ -1,10 +1,11 @@
-/* Apteva Analytics — static-site tag (v0.8.7).
+/* Apteva Analytics — static-site tag (v0.8.8).
  *
  * Drop on any website:
  *   <script async src="https://YOUR-APTEVA/api/apps/analytics/ui/tag.js"
  *           data-key="wk_live_..."></script>
  *
- * Auto-fires a page_view on load and on SPA route changes. Custom events:
+ * Auto-fires a page_view on load and on SPA route changes. It also records
+ * outbound clicks on external links, like GA4 Enhanced Measurement. Custom events:
  *   apa("signup", { plan: "pro" });
  *
  * Sends GET /collect (no-cors, keepalive) so it works cross-origin with
@@ -94,6 +95,20 @@
     }
   }
 
+  function anchorFromTarget(target) {
+    var node = target;
+    while (node && node !== document) {
+      if (node.tagName && String(node.tagName).toLowerCase() === "a") return node;
+      node = node.parentNode;
+    }
+    return null;
+  }
+
+  function textOf(anchor) {
+    var text = anchor && (anchor.textContent || anchor.innerText || "");
+    return String(text).replace(/\s+/g, " ").trim().slice(0, 200);
+  }
+
   function send(event, props) {
     if (!key) return;
     var params = {
@@ -178,4 +193,34 @@
       maybePV();
     };
   window.addEventListener("popstate", maybePV);
+
+  // GA4-style Enhanced Measurement for outbound links. Delegation means
+  // dynamically rendered links are covered too, and capture phase lets us
+  // observe a click even when another handler stops propagation. The event
+  // is deliberately generic; callers can filter by link_domain or link_url
+  // (for example, go.example.com for affiliate redirects).
+  function outboundClick(event) {
+    var anchor = anchorFromTarget(event.target);
+    if (!anchor || anchor.hasAttribute("data-apa-ignore")) return;
+
+    var href = anchor.href || anchor.getAttribute("href") || "";
+    var destination;
+    try {
+      destination = new URL(href, location.href);
+    } catch (e) {
+      return;
+    }
+    if (destination.protocol !== "http:" && destination.protocol !== "https:") return;
+    if (destination.origin === location.origin) return;
+
+    send("outbound_click", {
+      link_url: destination.href,
+      link_domain: destination.hostname,
+      link_path: destination.pathname,
+      link_text: textOf(anchor),
+      link_target: anchor.getAttribute("target") || "",
+      link_download: anchor.hasAttribute("download"),
+    });
+  }
+  if (document && document.addEventListener) document.addEventListener("click", outboundClick, true);
 })();
