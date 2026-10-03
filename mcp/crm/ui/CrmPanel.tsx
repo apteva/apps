@@ -8,7 +8,7 @@ import { crmPanelInitialRoute, type InboxItem, type InboxResponse } from "./inbo
 import { messageAddressLines, messageRecipientSummary, type MessageAddresses } from "./message_addresses";
 import { messageDisplayBody } from "./message_body";
 import { channelPresentation, channelThemeCSS, conversationChannels, sessionFromResponse, whatsappWindowLabel, whatsappSessionRequiresTemplate, type WhatsAppSessionState, type WhatsAppSessionResponse } from "./channels";
-import { composerDraftContent, replyDraftEditable, replyDraftFingerprint, type SavedReplyDraft, type ReplyDraftSummary } from "./drafts";
+import { composerDraftContent, replyDraftCanSend, replyDraftEditable, replyDraftFingerprint, type SavedReplyDraft, type ReplyDraftSummary } from "./drafts";
 
 function ChannelBadge({ channel }: { channel: string }) {
   const presentation = channelPresentation[channel];
@@ -2500,6 +2500,12 @@ function ComposerModal({
 }) {
   const [storageOpen, setStorageOpen] = useState(false);
   const [htmlOpen,setHtmlOpen]=useState(!!composer.bodyHTML);
+  const [retryClock,setRetryClock]=useState(Date.now());
+  useEffect(()=>{
+    if (composer.draft?.status!=="sending") return;
+    const timer=setInterval(()=>setRetryClock(Date.now()),1000);
+    return ()=>clearInterval(timer);
+  },[composer.draft?.status,composer.draft?.revision]);
   const [storageFiles, setStorageFiles] = useState<StorageFile[]>([]);
   const [storageSearch, setStorageSearch] = useState("");
   const [storageStatus, setStorageStatus] = useState("");
@@ -2519,11 +2525,11 @@ function ComposerModal({
   const hasFreeformContent = !!composer.body.trim() || !!composer.bodyHTML?.trim() || composer.attachments.length > 0;
   const locked = !replyDraftEditable(composer.draft);
   const fieldsLocked = locked || composer.busy || !!composer.attachmentBusy;
-  const canSend = !composer.busy && !composer.saveBusy && !composer.attachmentBusy && !composer.saveConflict && composer.draft?.status !== "sending" && composer.draft?.status !== "sent" && !!toAddr && !toAddr.startsWith("(no ") &&
+  const canSend = !composer.busy && !composer.saveBusy && !composer.attachmentBusy && !composer.saveConflict && replyDraftCanSend(composer.draft,retryClock) && (locked || (!!toAddr && !toAddr.startsWith("(no ") &&
     !composer.routeBusy && !composer.routeError && !!composer.from &&
     !whatsappChecking &&
     sendersForChannel.length > 0 &&
-    (useTemplate ? canSendTemplate : !whatsappClosed && hasFreeformContent);
+    (useTemplate ? canSendTemplate : !whatsappClosed && hasFreeformContent)));
   const labelW = "w-20 shrink-0 text-text-muted text-xs uppercase tracking-wide";
   const fieldCls = "flex-1 bg-bg-input border border-border rounded px-2 py-1 text-sm";
 
@@ -2842,7 +2848,7 @@ function ComposerModal({
             onClick={onSend}
             disabled={!canSend}
             className="px-4 py-1.5 text-sm bg-accent text-bg rounded hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
-          >{composer.busy ? "Sending…" : composer.draft?.status === "send_failed" ? "Retry send" : "Send"}</button>
+          >{composer.busy ? "Sending…" : composer.draft?.status === "send_failed" || composer.draft?.status === "sending" ? "Retry send" : "Send"}</button>
           {composer.mode === "reply" && !locked && <><button type="button" onClick={onSaveDraft} disabled={composer.busy || composer.saveBusy || composer.attachmentBusy || composer.routeBusy} className="px-3 py-1.5 text-sm border border-border rounded">{composer.saveBusy ? "Saving…" : composer.saveConflict ? "Save as new draft" : "Save draft"}</button><button type="button" onClick={onDiscardDraft} disabled={composer.busy || composer.saveBusy || composer.attachmentBusy || composer.saveConflict || composer.routeBusy} className="px-3 py-1.5 text-sm border border-border rounded">Discard</button></>}
           <button
             type="button"

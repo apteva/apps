@@ -9,6 +9,7 @@ export interface SavedReplyDraft {
   content: ReplyDraftContent; revision: number;
   status: "draft" | "sending" | "send_failed" | "sent" | "discarded";
   created_by: string; updated_by: string; created_at: string; updated_at: string; last_error?: string;
+  send_retry_at?: string;
 }
 export interface ReplyDraftSummary {
   id: number; contact_id: number; conversation_id: number; channel: string; from: string; to: string;
@@ -16,6 +17,12 @@ export interface ReplyDraftSummary {
   created_by: string; updated_by: string; updated_at: string; last_error?: string;
 }
 export function replyDraftEditable(draft?: SavedReplyDraft): boolean { return !draft || draft.status === "draft"; }
+export function replyDraftCanSend(draft?: SavedReplyDraft,now=Date.now()): boolean {
+  if (!draft || draft.status === "draft" || draft.status === "send_failed") return true;
+  if (draft.status !== "sending") return false;
+  const retryAt=Date.parse(draft.send_retry_at || "");
+  return Number.isFinite(retryAt) && now>=retryAt;
+}
 export function replyDraftFingerprint(content: ReplyDraftContent): string {
   return JSON.stringify(stable([content.channel, content.to, content.from, content.subject, content.body, content.body_html || "", content.template_id || 0, content.content_sid || "", content.template_vars || {}, content.attachments || []]));
 }

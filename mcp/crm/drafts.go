@@ -43,7 +43,7 @@ type conversationDraft struct {
 	Result             json.RawMessage `json:"sent_result,omitempty"`
 	MessagingInstallID int64           `json:"-"`
 	AttemptKey         string          `json:"-"`
-	LeaseUntil         string          `json:"-"`
+	LeaseUntil         string          `json:"send_retry_at,omitempty"`
 	Dispatched         bool            `json:"-"`
 }
 

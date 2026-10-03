@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { composerDraftContent, replyDraftEditable, replyDraftFingerprint, type SavedReplyDraft } from "./drafts";
+import { composerDraftContent, replyDraftCanSend, replyDraftEditable, replyDraftFingerprint, type SavedReplyDraft } from "./drafts";
 
 const composer = {
   channel:"email",to:"private@example.test",from:"support@example.test",subject:"Re: Question",
@@ -30,4 +30,14 @@ test("closed WhatsApp window never drops freeform draft text or silently selects
 test("sent, discarded, sending and uncertain drafts cannot be edited",()=>{
   expect(replyDraftEditable()).toBe(true);
   for (const status of ["draft","sending","send_failed","sent","discarded"] as const) expect(replyDraftEditable({status} as SavedReplyDraft)).toBe(status==="draft");
+});
+test("crashed send can be retried only after its lease expires, without unlocking edits",()=>{
+  const retry=Date.parse("2026-10-03T12:00:00Z");
+  const draft={status:"sending",send_retry_at:"2026-10-03T12:00:00Z"} as SavedReplyDraft;
+  expect(replyDraftCanSend(draft,retry-1)).toBe(false);expect(replyDraftCanSend(draft,retry)).toBe(true);
+  expect(replyDraftEditable(draft)).toBe(false);
+  expect(replyDraftCanSend({...draft,send_retry_at:undefined},retry)).toBe(false);
+  expect(replyDraftCanSend({...draft,status:"sent"},retry)).toBe(false);
+  expect(replyDraftCanSend({...draft,status:"discarded"},retry)).toBe(false);
+  expect(replyDraftCanSend({...draft,status:"send_failed"},retry)).toBe(true);
 });
