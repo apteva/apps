@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -205,7 +206,7 @@ func listMetricDefinitions(db sqlRunner, project string) ([]MetricDefinition, er
 		}
 		out = append(out, m)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func getMetricDefinition(db sqlRunner, project, key string) (MetricDefinition, error) {
@@ -488,5 +489,20 @@ func groupedCalculatedMetricRows(db sqlRunner, project string, metric MetricDefi
 		}
 		out = append(out, row)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Calculated metric tables are used for rankings such as conversion rate
+	// by page. Sort by the evaluated value so the useful rows are visible
+	// within the widget's compact first-page rendering; keep labels stable for
+	// equal values.
+	sort.SliceStable(out, func(i, j int) bool {
+		left, _ := numericMapValue(out[i]["value"])
+		right, _ := numericMapValue(out[j]["value"])
+		if left != right {
+			return left > right
+		}
+		return fmt.Sprint(out[i]["group"]) < fmt.Sprint(out[j]["group"])
+	})
+	return out, nil
 }
