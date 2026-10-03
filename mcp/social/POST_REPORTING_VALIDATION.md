@@ -1,6 +1,6 @@
 # Post reporting validation
 
-Validated locally on 2026-10-03, starting from apps `origin/main`
+Validated Social v0.16.6 locally on 2026-10-03, starting from apps `origin/main`
 `23582284fda72d595a9f22b729920fd8de12a061` (Social v0.16.5).
 Environment: Go 1.26.8, darwin/arm64; Bun 1.3.13. Go checks used `GOWORK=off`
 and the published app-sdk v0.93.0 dependency, without a local SDK overlay.
@@ -18,6 +18,8 @@ and the published app-sdk v0.93.0 dependency, without a local SDK overlay.
 | `bun run scripts/build-panels.ts --app social` | PASS: all five UI entry points; all 11 bundle modules import against the host React surface |
 | `bun run scripts/verify-social-artifacts.ts` | PASS: all 11 generated bundles match committed source inputs and behavior |
 | `git diff --check` | PASS |
+| Go source and binary vulnerability scans (`govulncheck@v1.7.0`) | PASS: no affected code or binary vulnerabilities; source analysis identified one module advisory outside called code |
+| Social bundle dependency coverage against `bun audit --json` | PASS: none of the 24 bundled dependency packages is named in the workspace audit advisories |
 
 Go commands run from `mcp/social`; Bun commands run from the apps repo.
 The TypeScript command was:
@@ -66,6 +68,12 @@ Changes are confined to the Social app. No server or integrations source was
 changed. No running instance or production data was accessed or modified.
 The numbers above are synthetic regression fixtures, not a verification of
 the reported live HGV records.
+
+The full apps workspace `bun audit` returned a nonzero exit code for existing
+DOMPurify (`GHSA-p98j-92pf-mc4p`) and braces (`GHSA-vfj7-8cjw-p6xm`) advisories.
+Neither dependency appears in Social sources or the source-map inputs of its
+11 rebuilt, verified bundles. The shared workspace audit is not claimed clean;
+no shared dependency files were changed for this Social-only release.
 
 These are local checks. The repository's Social GitHub workflow was found in
 `disabled_manually` state and its setting was preserved.
