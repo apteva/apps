@@ -29,6 +29,13 @@ test("trend tooltips show each bucket, zero and missing values at any width", as
   for (const width of [1400, 360]) {
     await page.setViewportSize({ width, height: 800 });
     await expect(chart).toBeVisible();
+    await page.evaluate(() => { document.getElementById("root")!.style.height = "500px"; });
+    const shortHeight = (await chart.boundingBox())!.height;
+    await page.evaluate(() => { document.getElementById("root")!.style.height = "740px"; });
+    await expect.poll(async () => (await chart.boundingBox())!.height).toBeCloseTo(shortHeight + 240, 0);
+    const card = (await page.locator("section").boundingBox())!;
+    const footer = (await page.getByText("Hover for details").boundingBox())!;
+    expect(card.y + card.height - footer.y - footer.height).toBeLessThanOrEqual(24);
     const box = (await chart.boundingBox())!;
     for (const [i, expected] of [[0, "0"], [1, "120"], [2, "99"], [3, "No observation"]] as const) {
       await page.mouse.move(box.x + box.width * (8 + i / 3 * 284) / 300, box.y + box.height / 2);

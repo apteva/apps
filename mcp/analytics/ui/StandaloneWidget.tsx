@@ -83,7 +83,7 @@ function WidgetContent(props: WidgetHostProps & {kind: "trend" | "ranking"}) {
       {field && <Selector label={settingString(settings, "filter_label", "Filter")} value={filter} options={filterOptions} onChange={setFilter}/>}
       <Selector label="Window" value={window} options={["7d","30d","90d","all"].map(value => ({value, label: value === "all" ? "All time" : value}))} all={false} onChange={setWindow}/>
     </nav>
-    <div className="min-h-0 flex-1 overflow-auto p-4">
+    <div className="flex min-h-0 flex-1 flex-col overflow-auto p-4">
       {problem ? <p className="text-xs text-error" role="alert">{problem}</p> : loading ? <p className="text-xs text-text-dim">Loading…</p> : config && (props.kind === "trend" ? rows.length ? <TrendChart rows={rows} config={config} gradientId={`analytics-trend-${(props.widgetId || "preview").replace(/[^\w-]/g,"-")}`}/> : <p className="text-xs text-text-dim">No values in this window.</p> : ranked.length ? <div className="space-y-3">{ranked.map((row, index) => <div key={`${row.label}:${index}`}><div className="flex items-center gap-2 text-xs"><span className="text-text-dim">{index + 1}.</span><span className="min-w-0 flex-1 truncate text-text-muted" title={row.label}>{row.label}</span><span className="tabular-nums text-text">{formatMetric(row.value, config)}</span></div><div className="mt-1 h-1 rounded bg-bg-input"><div className="h-full rounded bg-success" style={{width: `${Math.abs(row.value) / max * 100}%`}}/></div></div>)}</div> : <p className="text-xs text-text-dim">No values in this window.</p>)}
     </div>
   </section>;

@@ -30,14 +30,14 @@ export default function TrendChart({ rows, config, gradientId }: {
   const point = points.find(point => point.index === index);
   const tooltipID = `${gradientId}-tooltip`;
 
-  return <div className="mt-3">
-    <div className="flex gap-2">
-      <div className="relative shrink-0 text-right text-[10px] tabular-nums text-text-dim" style={{ width: 48, height: 176 }} aria-hidden="true">
+  return <div className="flex min-h-0 flex-1 flex-col">
+    <div className="flex flex-1 gap-2" style={{ minHeight: 176 }}>
+      <div className="relative shrink-0 text-right text-[10px] tabular-nums text-text-dim" style={{ width: 48 }} aria-hidden="true">
         {[0, 1, 2, 3].map(step => <span key={step} className="absolute right-0" style={{ top: `${(8 + step * 26) / 92 * 100}%`, transform: "translateY(-50%)" }}>
           {formatMetric(max - (max - min) * step / 3, { ...config, compact: true, decimals: 0 })}
         </span>)}
       </div>
-      <div className="relative min-w-0 flex-1" style={{ height: 176 }}>
+      <div className="relative min-w-0 flex-1">
         {/* CSS lines stay one physical CSS pixel thick at every widget width. */}
         {[0, 1, 2, 3].map(step => <div key={step} className="pointer-events-none absolute left-0 right-0 bg-border" style={{ top: `${(8 + step * 26) / 92 * 100}%`, height: 1, opacity: 0.6 }} />)}
         <svg viewBox="0 0 300 92" className="absolute inset-0 h-full w-full text-accent outline-none focus-visible:ring-1 focus-visible:ring-accent" preserveAspectRatio="none"
@@ -73,7 +73,7 @@ export default function TrendChart({ rows, config, gradientId }: {
         </>}
       </div>
     </div>
-    <div className="mt-1 flex justify-between text-[10px] text-text-dim" style={{ marginLeft: 56 }}><span>{date(0)}</span><span>{date(rows.length - 1)}</span></div>
-    <div className="mt-3 flex items-center justify-between gap-2 text-xs text-text-muted"><span>Latest: <span className="tabular-nums text-text">{formatMetric(values.at(-1) ?? null, config)}</span></span><span className="text-[10px] text-text-dim">Hover for details</span></div>
+    <div className="mt-1 flex shrink-0 justify-between text-[10px] text-text-dim" style={{ marginLeft: 56 }}><span>{date(0)}</span><span>{date(rows.length - 1)}</span></div>
+    <div className="mt-3 flex shrink-0 items-center justify-between gap-2 text-xs text-text-muted"><span>Latest: <span className="tabular-nums text-text">{formatMetric(values.at(-1) ?? null, config)}</span></span><span className="text-[10px] text-text-dim">Hover for details</span></div>
   </div>;
 }
