@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.9.15
+version: 0.9.16
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -123,6 +123,18 @@ provides:
       description: Set a conversation's workflow status (open/pending/closed/spam) and/or priority (low/normal/high/urgent). Spam marks the contact and best-effort adds a Messaging suppression for the sender or email domain.
     - name: conversations_inbox
       description: Cross-contact triage queue — open conversations across all contacts, newest first; supports channel/from/to/list/tag filters and paging.
+    - name: conversation_drafts_create
+      description: Save a reply draft without sending; pins recipient and conversation, supports incomplete content, HTML, attachments and templates.
+    - name: conversation_drafts_get
+      description: Read full saved draft content and current revision. Never sends.
+    - name: conversation_drafts_list
+      description: Read paged draft summaries for one conversation. Never sends.
+    - name: conversation_drafts_update
+      description: Save changes with expected_revision; concurrent edits return conflicts. Never sends.
+    - name: conversation_drafts_discard
+      description: Soft-discard an editable draft with expected_revision, retaining its content for audit. Never sends.
+    - name: conversation_drafts_send
+      description: Explicit real external send of a saved reply draft with expected_revision; revalidates eligibility and uses durable idempotent retries.
     - name: pipelines_list
       description: List CRM sales pipelines and allowed stages.
     - name: pipeline_create
@@ -222,6 +234,15 @@ provides:
             minimum: 4
             maximum: 20
   publishes:
+    - name: conversation.draft.changed
+      description: A reply draft was saved, updated, discarded or its send outcome recorded. Not a sent-message event; inspect status. Contains no draft body or attachments.
+      payload:
+        event_id: string
+        draft_id: integer
+        conversation_id: integer
+        contact_id: integer
+        revision: integer
+        status: string
     - name: contact.added
       description: A contact was created or first materialised from inbound messaging; list_ids contains its active list memberships after creation routing completes.
       payload:
@@ -484,7 +505,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: crm/v0.9.15
+    ref: crm/v0.9.16
     entry: mcp/crm
   port: 8080
   health_check: /health

@@ -92,6 +92,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/inbound", Handler: a.handleInbound},
 		// Cross-contact triage queue.
 		{Pattern: "/inbox", Handler: a.handleHTTPInbox},
+		{Pattern: "/drafts", Handler: a.handleHTTPDrafts},
+		{Pattern: "/drafts/", Handler: a.handleHTTPDrafts},
 		// Messaging dependency read surface for the CRM panel. These
 		// route through CRM's bound messaging install instead of having
 		// the browser guess a messaging install_id.
@@ -303,7 +305,7 @@ func (a *App) handleHTTPPostActivity(w http.ResponseWriter, r *http.Request) {
 // ─── MCP tools (the agent's surface) ───────────────────────────────
 
 func (a *App) MCPTools() []sdk.Tool {
-	return []sdk.Tool{
+	return append([]sdk.Tool{
 		{
 			Name:        "contacts_search",
 			Description: "Filtered contact search. Args: q (free text over name/email/phone/company), filters [], limit (default 50, max 200), offset (for paging). Returns {contacts, count, total, offset} — use total + offset to page. Each filter is either a core-field filter {field, op, value} (field ∈ first_name,last_name,display_name,company,job_title,primary_email,primary_phone,status,owner_user_id,source,first_contact_at,last_contact_at,created_at,updated_at), a custom-field filter {attribute: \"<key>\", op, value}, or a list predicate {predicate: \"in_list\"|\"not_in_list\", list_id}. ops: eq,neq,gt,gte,lt,lte,contains,starts_with,is_null,in. Timestamp fields support ISO-8601 values.",
@@ -956,7 +958,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"id"}),
 			Handler: a.toolSegmentsMaterialise,
 		},
-	}
+	}, a.draftTools()...)
 }
 
 func main() { sdk.Run(&App{}) }
@@ -2940,6 +2942,13 @@ func dbMerge(db *sql.DB, pid string, loserID, winnerID int64, notes, source stri
 	defer tx.Rollback()
 
 	// Verify both contacts belong to this project.
+	var busyDrafts int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM conversation_drafts WHERE project_id=? AND contact_id IN (?,?) AND status IN ('sending','send_failed')`, pid, loserID, winnerID).Scan(&busyDrafts); err != nil {
+		return err
+	}
+	if busyDrafts > 0 {
+		return errors.New("resolve in-progress or uncertain draft sends before merging contacts")
+	}
 	var n int
 	if err := tx.QueryRow(
 		`SELECT COUNT(*) FROM contacts WHERE id IN (?, ?) AND project_id = ? AND deleted_at IS NULL AND status != 'merged'`,
@@ -2970,6 +2979,9 @@ func dbMerge(db *sql.DB, pid string, loserID, winnerID int64, notes, source stri
 			return err
 		}
 		if err := exec(`UPDATE contact_activities SET conversation_id=? WHERE project_id=? AND conversation_id=?`, winning, pid, losing); err != nil {
+			return err
+		}
+		if err := exec(`UPDATE conversation_drafts SET conversation_id=?,contact_id=?,revision=revision+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE project_id=? AND conversation_id=?`, winning, winnerID, pid, losing); err != nil {
 			return err
 		}
 		if err := exec(`UPDATE OR IGNORE conversation_participants SET conversation_id=? WHERE project_id=? AND conversation_id=?`, winning, pid, losing); err != nil {
@@ -3019,6 +3031,9 @@ func dbMerge(db *sql.DB, pid string, loserID, winnerID int64, notes, source stri
 	}
 
 	// Move every contact-owned relation, not only the visible timeline.
+	if err := exec(`UPDATE conversation_drafts SET contact_id=?,revision=revision+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE project_id=? AND contact_id=?`, winnerID, pid, loserID); err != nil {
+		return err
+	}
 	if err := exec(
 		`UPDATE contact_activities SET contact_id = ? WHERE contact_id = ? AND project_id = ?`,
 		winnerID, loserID, pid); err != nil {
