@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: analytics
 display_name: Analytics
-version: 0.16.2
+version: 0.16.3
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -237,6 +237,119 @@ provides:
       icon: trending-up
       entry: /ui/AnalyticsPanel.mjs
   ui_components:
+    - name: analytics-trend
+      label: Analytics Trend
+      description: A configurable metric trend over time.
+      entry: /ui/AnalyticsTrendWidget.mjs
+      slots: [dashboard.home]
+      dashboard_scopes: [project]
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [event.recorded]
+      settings_schema:
+        type: object
+        properties:
+          title:
+            type: string
+            title: Title
+            default: Trend
+          app:
+            type: string
+            title: App
+            description: Optional event app, for example content.
+            default: content
+          topic:
+            type: string
+            title: Event topic
+            default: page_view
+          aggregation:
+            type: string
+            title: Metric
+            enum: [count, distinct, sum, average]
+            default: count
+          value:
+            type: string
+            title: Value field
+            description: Numeric field for sum/average, for example props.amount.
+          group_by:
+            type: string
+            title: Distinct field
+            description: Field for distinct aggregation.
+          filter_field:
+            type: string
+            title: Filter field
+            default: props.host
+          filter_value:
+            type: string
+            title: Filter value
+          window:
+            type: string
+            title: Window
+            enum: [7d, 30d, 90d, all]
+            default: 30d
+          interval:
+            type: string
+            title: Interval
+            enum: [hour, day, week]
+            default: day
+    - name: analytics-ranking
+      label: Analytics Ranking
+      description: A configurable ranking of grouped event values.
+      entry: /ui/AnalyticsRankingWidget.mjs
+      slots: [dashboard.home]
+      dashboard_scopes: [project]
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [event.recorded]
+      settings_schema:
+        type: object
+        properties:
+          title:
+            type: string
+            title: Title
+            default: Ranking
+          app:
+            type: string
+            title: App
+            description: Optional event app, for example content.
+            default: content
+          topic:
+            type: string
+            title: Event topic
+            default: page_view
+          group_by:
+            type: string
+            title: Group by field
+            default: props.path
+          aggregation:
+            type: string
+            title: Metric
+            enum: [count, sum, average]
+            default: count
+          value:
+            type: string
+            title: Value field
+            description: Numeric field for sum/average, for example props.amount.
+          filter_field:
+            type: string
+            title: Filter field
+            default: props.host
+          filter_value:
+            type: string
+            title: Filter value
+          window:
+            type: string
+            title: Window
+            enum: [7d, 30d, 90d, all]
+            default: 30d
+          limit:
+            type: integer
+            title: Result limit
+            default: 10
+            minimum: 1
+            maximum: 100
     - name: analytics-dashboard
       label: Analytics
       description: Live saved metrics, trends, and project activity from any Analytics dashboard.
@@ -281,7 +394,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: analytics/v0.16.2
+    ref: analytics/v0.16.3
     entry: mcp/analytics
   port: 8080
   health_check: /health

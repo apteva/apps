@@ -1,6 +1,6 @@
 // Standalone Analytics build for CI. The repository build-panels script also
 // verifies these bundles against the sibling dashboard's actual React exports.
-for (const entry of ["AnalyticsPanel", "AnalyticsDashboardWidget"]) {
+for (const entry of ["AnalyticsPanel", "AnalyticsDashboardWidget", "AnalyticsTrendWidget", "AnalyticsRankingWidget"]) {
   const result = await Bun.build({
     entrypoints: [`ui/${entry}.tsx`], outdir: "ui", target: "browser",
     format: "esm", minify: true, sourcemap: "external",
