@@ -74,6 +74,26 @@ customer conversations, lists, segments, opportunities, and pipelines.
 
 ## Messaging safety
 
+- To draft a reply, use `conversation_drafts_create` with `conversation_id`,
+  optional `reply_to_activity_id`, and proposed `body`/`body_html`/attachments.
+  Saving never sends, creates message activities, or changes thread status.
+  Multiple CRM-local drafts are supported; they are not synchronized to Gmail.
+- Inspect full content with `conversation_drafts_get`; `conversation_drafts_list`
+  returns paged summaries only. Use the returned `revision` as
+  `expected_revision` for update/discard/send. Conflicts require reloading and
+  reviewing the newer content, never blindly overwriting it.
+- `conversation_drafts_send` is a real external send, only after explicit user
+  approval. A draft's recipient and inbound reply anchor are pinned. Sending
+  rechecks verified sender, Messaging binding, ownership, contact eligibility,
+  suppression and WhatsApp reply window. Never silently redirect or switch
+  transport. Freeform WhatsApp text can be drafted outside the 24-hour window
+  but cannot be sent until eligible; use a template or SMS only explicitly.
+- Failure responses preserve content and return the latest draft/revision.
+  `status:send_failed` means delivery is uncertain: content/discard are locked.
+  Retry that SAME saved draft with its new revision, not a new draft or ordinary
+  reply tool. `status:sending` is leased; wait/reload before retrying. `sent`
+  retries return the original result without a new send. Discard is soft/audited.
+
 - `contacts_send_message`, `contacts_reply`, and `contacts_send_test` create
   real external messages. Call them only when the user explicitly requests a
   send or a previously approved workflow requires it.

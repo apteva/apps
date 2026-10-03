@@ -32,7 +32,7 @@ export function whatsappWindowLabel(session: WhatsAppSessionState, now = Date.no
   if (session.state === "error") return "Unable to check WhatsApp window · use an approved template";
   if (session.state === "idle") return "Choose a WhatsApp sender to check the reply window";
   if (whatsappSessionRequiresTemplate(session, now)) return "WhatsApp window closed · approved template required";
-  const minutes = Math.max(1, Math.ceil(((session.deadline || now) - now) / 60000));
+  const minutes = Math.max(1, Math.ceil(((("deadline" in session ? session.deadline : undefined) || now) - now) / 60000));
   const duration = minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m`;
   return `WhatsApp free-form reply available · expires in ${duration}`;
 }

@@ -1599,6 +1599,9 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 			return nil, err
 		}
 	}
+	if expected := strArg(args, "_draft_expected_to"); expected != "" && addr.Address != expected {
+		return nil, errors.New("draft reply recipient changed; refusing to send")
+	}
 
 	if err := validateStandaloneEmailArgs(args, addr.Channel, templateID); err != nil {
 		return nil, err
@@ -1797,7 +1800,15 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 		sendArgs["from"] = from
 	}
 
+	if before, ok := args["_draft_before_dispatch"].(func() error); ok {
+		if err := before(); err != nil {
+			return nil, err
+		}
+	}
 	resp, sendErr := callMessagingSend(ctx, sendArgs)
+	if outcome, ok := args["_draft_dispatch_outcome"].(func(map[string]any, error)); ok {
+		outcome(resp, sendErr)
+	}
 	if sendErr == nil {
 		sendErr = messagingSendResponseError(resp)
 	}
@@ -2123,6 +2134,11 @@ func (a *App) toolReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	if idem := strArg(args, "idempotency_key"); idem != "" {
 		sendArgs["idempotency_key"] = idem
+	}
+	for _, key := range []string{"_draft_before_dispatch", "_draft_dispatch_outcome", "_draft_expected_to"} {
+		if value, ok := args[key]; ok {
+			sendArgs[key] = value
+		}
 	}
 	if pidArg := strArg(args, "_project_id"); pidArg != "" {
 		sendArgs["_project_id"] = pidArg
