@@ -456,8 +456,10 @@ func groupedCalculatedMetricRows(db sqlRunner, project string, metric MetricDefi
 	if where != "" {
 		q += " WHERE " + where
 	}
-	q += " ORDER BY " + groupExpr + " LIMIT ?"
-	args = append(args, limit)
+	// Fetch the candidate groups before applying the requested display limit.
+	// Sorting only the alphabetic SQL prefix can hide the pages with the
+	// highest calculated rate (for example, a page whose path sorts later).
+	q += " ORDER BY " + groupExpr
 	rows, err := db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -504,5 +506,8 @@ func groupedCalculatedMetricRows(db sqlRunner, project string, metric MetricDefi
 		}
 		return fmt.Sprint(out[i]["group"]) < fmt.Sprint(out[j]["group"])
 	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
 	return out, nil
 }
