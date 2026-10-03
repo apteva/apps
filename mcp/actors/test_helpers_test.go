@@ -52,6 +52,7 @@ type fakePlatform struct {
 	proxyModeOverride     string
 	proxyCountryOverride  string
 	mediaSOM              bool
+	waitOutput            map[string]any
 }
 
 func newFakePlatform() *fakePlatform {
@@ -325,6 +326,11 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 			p.openURL = p.selectorRedirectURL
 		}
 		out := map[string]any{"current_url": p.openURL, "width": 1280, "height": 720}
+		if in["action"] == "wait_for" {
+			for key, value := range p.waitOutput {
+				out[key] = value
+			}
+		}
 		if in["action"] == "upload_file" {
 			out["uploaded"] = true
 			out["filename"] = in["filename"]

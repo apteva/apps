@@ -89,13 +89,25 @@ type actorStep struct {
 	PathPrefix         string                `json:"path_prefix,omitempty"`
 	// Media inputs are generic; Computer resolves the source and attaches it
 	// to the semantic target selected by locator.
-	SourceURL   string `json:"source_url,omitempty"`
-	Base64      string `json:"base64,omitempty"`
-	FilePath    string `json:"file_path,omitempty"`
-	Filename    string `json:"filename,omitempty"`
-	MIMEType    string `json:"mime_type,omitempty"`
-	Mode        string `json:"mode,omitempty"`
-	NewlineMode string `json:"newline_mode,omitempty"`
+	SourceURL   string               `json:"source_url,omitempty"`
+	Base64      string               `json:"base64,omitempty"`
+	FilePath    string               `json:"file_path,omitempty"`
+	Filename    string               `json:"filename,omitempty"`
+	MIMEType    string               `json:"mime_type,omitempty"`
+	Mode        string               `json:"mode,omitempty"`
+	NewlineMode string               `json:"newline_mode,omitempty"`
+	Conditions  []actorWaitCondition `json:"conditions,omitempty"`
+	Match       string               `json:"match,omitempty"`
+	TimeoutMS   any                  `json:"timeout_ms,omitempty"`
+}
+
+type actorWaitCondition struct {
+	Type          string `json:"type"`
+	Value         string `json:"value,omitempty"`
+	Selector      string `json:"selector,omitempty"`
+	TargetID      string `json:"target_id,omitempty"`
+	State         string `json:"state,omitempty"`
+	CaseSensitive bool   `json:"case_sensitive,omitempty"`
 }
 
 type actorLocator struct {
@@ -394,6 +406,10 @@ func validateActorDefinition(def actorDefinition) error {
 			}
 			if step.PathPrefix != "" && !strings.HasPrefix(step.PathPrefix, "/") {
 				return fmt.Errorf("steps[%d].path_prefix must start with /", i)
+			}
+		case "wait_for":
+			if err := validateWaitStep(step); err != nil {
+				return fmt.Errorf("steps[%d]: %w", i, err)
 			}
 		case "wait", "screenshot":
 		default:
