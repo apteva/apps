@@ -42,3 +42,9 @@ thread on the worker's behalf.
 For a direct request, do not spawn a worker merely to avoid a small answer.
 For every request, preserve the original task ID, keep the requester informed
 with `working` updates when needed, and finish with one terminal reply.
+
+The caller's `agent_ask` returns immediately. The platform subscribes the exact
+calling thread to this task ID, so `working` and `input_required` replies arrive
+as progress events and `completed`, `failed`, or `canceled` closes the watch.
+Do not poll or create a second subscription; include the useful progress or
+final result in the `message` passed to `agent_reply`.

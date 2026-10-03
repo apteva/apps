@@ -19,6 +19,8 @@ func saveReply(db *sql.DB, task *Task, fromID, toID int64, body, event string, a
 		return 0, err
 	}
 	defer tx.Rollback()
+	updatedAt := nowUTC()
+	task.UpdatedAt = updatedAt
 	raw := json.RawMessage(task.Artifacts)
 	if artifacts != nil {
 		raw, err = json.Marshal(artifacts)
@@ -30,7 +32,7 @@ func saveReply(db *sql.DB, task *Task, fromID, toID int64, body, event string, a
 		raw = json.RawMessage(`[]`)
 	}
 	res, err := tx.Exec(`UPDATE a2a_tasks SET status=?, updated_at=?, artifacts_json=?
-		WHERE id=? AND project_id=? AND status IN ('submitted','working','input_required')`, task.Status, nowUTC(), string(raw), task.ID, task.ProjectID)
+		WHERE id=? AND project_id=? AND status IN ('submitted','working','input_required')`, task.Status, updatedAt, string(raw), task.ID, task.ProjectID)
 	if err != nil {
 		return 0, err
 	}
@@ -50,6 +52,9 @@ func saveReply(db *sql.DB, task *Task, fromID, toID int64, body, event string, a
 		if err != nil {
 			return 0, err
 		}
+	}
+	if err := queueTaskEventsTx(tx, task, body); err != nil {
+		return 0, err
 	}
 	return id, tx.Commit()
 }

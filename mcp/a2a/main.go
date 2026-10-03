@@ -29,7 +29,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: a2a
 display_name: Agent to Agent
-version: 0.6.4
+version: 0.6.5
 description: |
   Agent-to-agent communication within and between Apteva installations.
   Automatically generates Agent Cards for attached local agents, discovers
@@ -62,7 +62,17 @@ provides:
     - { name: agents_discover, description: "Discover local, connected, or directly supplied public Agent Card agents; every returned address can be messaged immediately." }
     - { name: agent_get,      description: "Optionally inspect the full Agent Card for an address returned by agents_discover." }
     - { name: agent_send,  description: "Send a one-way message to another agent, or add a message to an existing task." }
-    - { name: agent_ask,   description: "Ask another agent to do something; the reply arrives later as an [a2a] event. The recipient main thread owns dispatch: it handles small requests directly or assigns larger work to a suitable focused worker, never an arbitrary idle conversation thread." }
+    - name: agent_ask
+      description: "Ask another agent to do something; progress and the final reply arrive later as [a2a] events. The recipient main thread owns dispatch: it handles small requests directly or assigns larger work to a suitable focused worker, never an arbitrary idle conversation thread."
+      async_result:
+        id_field: task_id
+        notify:
+          target: caller
+          mode: stream
+          events: [task.updated, task.completed, task.failed, task.canceled]
+          terminal_events: [task.completed, task.failed, task.canceled]
+          match: { task_id: "$result.task_id" }
+          expires_after: 24h
     - { name: agent_reply, description: "Reply to a task another agent sent you: completed, input_required, failed, or working. A delegated worker must first claim the original task with working, then report the terminal result on that same task." }
     - { name: agent_tasks, description: "List your agent-to-agent tasks (sent and received)." }
     - { name: node_info,   description: "Read this installation's A2A node identity.", exposure: app_only }
@@ -71,6 +81,9 @@ provides:
   publishes:
     - { name: task.created, description: "An agent-to-agent task was created." }
     - { name: task.updated, description: "An agent-to-agent task changed status." }
+    - { name: task.completed, description: "An agent-to-agent task completed." }
+    - { name: task.failed, description: "An agent-to-agent task failed." }
+    - { name: task.canceled, description: "An agent-to-agent task was canceled." }
   workers:
     - { name: remote-task-sync, schedule: "@every 5s" }
   ui_panels:
@@ -91,7 +104,7 @@ provides:
         icon: arrow-left-right
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: a2a/v0.6.4, entry: mcp/a2a }
+  source: { repo: github.com/apteva/apps, ref: a2a/v0.6.5, entry: mcp/a2a }
   port: 8080
   health_check: /health
 db:
@@ -858,7 +871,7 @@ func (a *App) sendFollowUp(ctx context.Context, app *sdk.AppCtx, from *callIdent
 			return nil, err
 		}
 		task.Status = statusAfter
-		emitTask(app, "task.updated", task)
+		emitTask(app, "task.updated", task, message)
 	}
 	if err := deliverToParticipant(app, task, toID, formatFollowUpEvent(task, from, message)); err != nil {
 		return nil, fmt.Errorf("agent %d could not be reached: %w", toID, err)
@@ -919,7 +932,7 @@ func (a *App) toolReply(ctx context.Context, app *sdk.AppCtx, args map[string]an
 		if _, err := saveReply(app.AppDB(), task, from.AgentID, 0, message, "", nil); err != nil {
 			return nil, err
 		}
-		emitTask(app, "task.updated", task)
+		emitTask(app, "task.updated", task, message)
 		return map[string]any{
 			"task_id": task.ID, "status": status, "delivered": true,
 			"note": "reply recorded; the remote requester can retrieve it through the A2A task",
@@ -964,12 +977,16 @@ func (a *App) toolReply(ctx context.Context, app *sdk.AppCtx, args map[string]an
 		}
 	}
 	task.Status = status
-	deliveryID, err := saveReply(app.AppDB(), task, from.AgentID, deliverTo, message, formatReplyEvent(task, from, message), nil)
+	replyEvent := requesterReplyEvent(app, task, deliverTo, formatReplyEvent(task, from, message))
+	deliveryID, err := saveReply(app.AppDB(), task, from.AgentID, deliverTo, message, replyEvent, nil)
 	if err != nil {
 		return nil, err
 	}
-	delivered := deliverPending(app, deliveryID) == nil
-	emitTask(app, "task.updated", task)
+	delivered := true
+	if deliveryID > 0 {
+		delivered = deliverPending(app, deliveryID) == nil
+	}
+	emitTask(app, "task.updated", task, message)
 	if !delivered {
 		return map[string]any{"task_id": task.ID, "status": status, "delivered": false, "pending_delivery": true, "note": "reply saved; delivery will retry automatically"}, nil
 	}
@@ -1063,19 +1080,6 @@ func formatFollowUpEvent(task *Task, from *callIdentity, message string) string 
 	return fmt.Sprintf(
 		"[a2a task:%d status:%s] Follow-up from agent %q (id %d).\n---\n%s\n---\n%s",
 		task.ID, task.Status, from.AgentName, from.AgentID, message, trustFooter)
-}
-
-func emitTask(app *sdk.AppCtx, topic string, task *Task) {
-	if app == nil || task == nil {
-		return
-	}
-	app.EmitWithProject(topic, task.ProjectID, map[string]any{
-		"id":     task.ID,
-		"kind":   task.Kind,
-		"status": task.Status,
-		"from":   task.FromAgentID,
-		"to":     task.ToAgentID,
-	})
 }
 
 // --- HTTP -------------------------------------------------------------------

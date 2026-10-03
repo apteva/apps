@@ -23,6 +23,9 @@ func (a *App) syncRemoteTasks(ctx context.Context, app *sdk.AppCtx) error {
 	if err := flushDeliveries(ctx, app); err != nil {
 		return err
 	}
+	if err := flushTaskEvents(ctx, app); err != nil {
+		return err
+	}
 	tasks, err := listOpenOutboundTasks(app.AppDB(), app.CurrentProject(), 100)
 	if err != nil || len(tasks) == 0 {
 		return err
@@ -175,13 +178,16 @@ func applyRemoteResult(app *sdk.AppCtx, task *Task, name string, response a2aTas
 	}
 	task.Status = status
 	identity := &callIdentity{AgentName: name, ProjectID: task.ProjectID}
-	id, err := saveReply(app.AppDB(), task, 0, task.FromAgentID, message, formatReplyEvent(task, identity, message), response.Artifacts)
+	replyEvent := requesterReplyEvent(app, task, task.FromAgentID, formatReplyEvent(task, identity, message))
+	id, err := saveReply(app.AppDB(), task, 0, task.FromAgentID, message, replyEvent, response.Artifacts)
 	if err != nil {
 		return fmt.Errorf("persist remote reply: %w", err)
 	}
-	if err := deliverPending(app, id); err != nil {
-		app.Logger().Warn("remote reply queued for retry", "task", task.ID, "err", err)
+	if id > 0 {
+		if err := deliverPending(app, id); err != nil {
+			app.Logger().Warn("remote reply queued for retry", "task", task.ID, "err", err)
+		}
 	}
-	emitTask(app, "task.updated", task)
+	emitTask(app, "task.updated", task, message)
 	return nil
 }

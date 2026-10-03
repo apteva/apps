@@ -576,7 +576,7 @@ func (a *App) startRemoteTaskInContext(ctx context.Context, app *sdk.AppCtx, fro
 			return nil, err
 		}
 		emitTask(app, "task.created", task)
-		emitTask(app, "task.updated", task)
+		emitTask(app, "task.updated", task, reply)
 		return map[string]any{
 			"task_id": task.ID, "delivered": true, "status": "completed", "reply": reply,
 			"to":   map[string]any{"address": "a2a:" + remote.Ref, "name": remote.Name, "peer": peer.Name},
@@ -681,7 +681,7 @@ func (a *App) continueRemoteTask(ctx context.Context, app *sdk.AppCtx, task *Tas
 		if err := setTaskSyncState(app.AppDB(), task.ProjectID, task.ID, task.Status); err != nil {
 			return nil, err
 		}
-		emitTask(app, "task.updated", task)
+		emitTask(app, "task.updated", task, message)
 	} else if err := applyRemoteResult(app, task, remote.Name, response); err != nil {
 		return nil, err
 	}
@@ -709,7 +709,7 @@ func (a *App) cancelRemoteTask(ctx context.Context, app *sdk.AppCtx, task *Task,
 	_ = setTaskSyncState(app.AppDB(), task.ProjectID, task.ID, "canceled")
 	_ = recordMessage(app.AppDB(), task.ID, task.FromAgentID, 0, message, "canceled")
 	task.Status = "canceled"
-	emitTask(app, "task.updated", task)
+	emitTask(app, "task.updated", task, message)
 	return map[string]any{"task_id": task.ID, "status": "canceled", "delivered": true}, nil
 }
 

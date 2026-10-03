@@ -84,7 +84,8 @@ func expireStaleTasks(ctx context.Context, app *sdk.AppCtx) error {
 		message := fmt.Sprintf("A2A request timed out after %s without a response. The request was delivered, but no reply was recorded.", timeout.Round(time.Second))
 		task.Status = "failed"
 		identity := &callIdentity{AgentName: "A2A timeout", ProjectID: task.ProjectID}
-		deliveryID, err := saveReply(app.AppDB(), task, 0, task.FromAgentID, message, formatReplyEvent(task, identity, message), nil)
+		replyEvent := requesterReplyEvent(app, task, task.FromAgentID, formatReplyEvent(task, identity, message))
+		deliveryID, err := saveReply(app.AppDB(), task, 0, task.FromAgentID, message, replyEvent, nil)
 		if err == sql.ErrNoRows {
 			// A real responder won the race between the SELECT and this timeout.
 			continue
@@ -92,10 +93,12 @@ func expireStaleTasks(ctx context.Context, app *sdk.AppCtx) error {
 		if err != nil {
 			return err
 		}
-		if err := deliverPending(app, deliveryID); err != nil {
-			app.Logger().Warn("A2A timeout reply remains pending", "task", task.ID, "err", err)
+		if deliveryID > 0 {
+			if err := deliverPending(app, deliveryID); err != nil {
+				app.Logger().Warn("A2A timeout reply remains pending", "task", task.ID, "err", err)
+			}
 		}
-		emitTask(app, "task.updated", task)
+		emitTask(app, "task.updated", task, message)
 	}
 	return nil
 }

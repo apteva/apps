@@ -466,6 +466,29 @@ func TestManifestMatchesYAML(t *testing.T) {
 	}
 }
 
+func TestAgentAskDeclaresAsyncTaskNotifications(t *testing.T) {
+	manifest := (&App{}).Manifest()
+	var ask *sdk.MCPToolSpec
+	for i := range manifest.Provides.MCPTools {
+		if manifest.Provides.MCPTools[i].Name == "agent_ask" {
+			ask = &manifest.Provides.MCPTools[i]
+			break
+		}
+	}
+	if ask == nil || ask.AsyncResult == nil || ask.AsyncResult.Notify == nil {
+		t.Fatal("agent_ask is missing async result metadata")
+	}
+	if ask.AsyncResult.IDField != "task_id" {
+		t.Fatalf("async id field = %q, want task_id", ask.AsyncResult.IDField)
+	}
+	if err := sdk.ValidateAsyncResultSpec(ask.AsyncResult); err != nil {
+		t.Fatalf("async result metadata is invalid: %v", err)
+	}
+	if ask.AsyncResult.Notify.Mode != "stream" {
+		t.Fatalf("async mode = %q, want stream", ask.AsyncResult.Notify.Mode)
+	}
+}
+
 func TestDiscoverListsProjectPeers(t *testing.T) {
 	ctx, _ := newTestEnv(t)
 	app := &App{}
