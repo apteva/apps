@@ -29,7 +29,7 @@ function WidgetContent(props: WidgetHostProps & {kind: "trend" | "ranking"}) {
   const [eventOptions, setEventOptions] = useState<Option[]>([]), [filterOptions, setFilterOptions] = useState<Option[]>([]);
   const [data, setData] = useState<Record<string, any> | null>(null), [error, setError] = useState("");
   const [loading, setLoading] = useState(!props.preview);
-  const sequence = useRef(0), controller = useRef<AbortController | null>(null);
+  const sequence = useRef(0), controller = useRef<AbortController | null>(null), hasData = useRef(false);
   const field = settingString(settings, "filter_field"), app = settingString(settings, "app");
   const title = settingString(settings, "title", props.kind === "trend" ? "Trend" : "Ranking");
   const query = useMemo(() => {
@@ -56,18 +56,20 @@ function WidgetContent(props: WidgetHostProps & {kind: "trend" | "ranking"}) {
     controller.current?.abort();
     if (props.preview || !project || !query.config) { setLoading(false); return; }
     const abort = new AbortController(); controller.current = abort;
-    setLoading(true);
+    // Event-driven refreshes (the dashboard's shared SSE path) update the
+    // existing result in place. Only the first request needs a loading view.
+    if (!hasData.current) setLoading(true);
     try {
       const queryType = props.kind === "trend" ? "timeseries" : query.config.aggregation === "count" ? "top" : "table";
       const res = await fetch(scopedAppURL(`${api}/query-widget`, project), { method: "POST", credentials: "same-origin", signal: abort.signal, headers: {"Content-Type": "application/json"}, body: JSON.stringify({ widget: {type: queryType, config: query.config} }) });
       if (!res.ok) throw new Error((await res.text()).trim() || res.statusText);
       const next = await res.json();
-      if (id === sequence.current) { setData(next); setError(""); }
+      if (id === sequence.current) { setData(next); hasData.current = true; setError(""); }
     } catch (reason) {
       if (id === sequence.current && !abort.signal.aborted) setError(reason instanceof Error ? reason.message : String(reason));
     } finally { if (id === sequence.current) setLoading(false); }
   }, [api, project, props.kind, props.preview, query]);
-  useEffect(() => { setData(null); void refresh(); return () => { sequence.current++; controller.current?.abort(); }; }, [refresh]);
+  useEffect(() => { setData(null); hasData.current = false; setError(""); setLoading(!props.preview); void refresh(); return () => { sequence.current++; controller.current?.abort(); }; }, [refresh, props.preview]);
   const queued = useLiveRefresh(refresh);
   useEffect(() => { queued(); }, [props.eventRevision, queued]);
   useEffect(() => { if (props.preview) return; const timer = globalThis.setInterval(() => { if (document.visibilityState !== "hidden") void refresh(); }, 30000); return () => globalThis.clearInterval(timer); }, [refresh, props.preview]);
