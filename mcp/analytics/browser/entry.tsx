@@ -2,6 +2,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import Panel from "../ui/AnalyticsPanel";
 import Widget from "../ui/AnalyticsDashboardWidget";
+import TrendWidget from "../ui/AnalyticsTrendWidget";
 const callbacks = new Set<(ev: unknown) => void>();
 (window as any).__aptevaAppEvents = {
   subscribe(_app: string, _project: string, fn: (ev: unknown) => void) {
@@ -16,7 +17,9 @@ const callbacks = new Set<(ev: unknown) => void>();
 const root = createRoot(document.getElementById("root")!);
 (window as any).renderAnalytics = (props: any = {}) =>
   root.render(
-    props.widget ? (
+    props.trend ? (
+      <TrendWidget projectId={props.projectId || "p1"} {...props} />
+    ) : props.widget ? (
       <Widget projectId={props.projectId || "p1"} {...props} />
     ) : (
       <Panel projectId={props.projectId || "p1"} />

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { areaChartEndMarkerPath, areaChartGeometry, formatMetric, scopedAppURL } from "./dashboard-ui";
+import { formatMetric, scopedAppURL } from "./dashboard-ui";
+import TrendChart from "./TrendChart";
 import { allowedValues, rankingRows, settingString, widgetConfig, WidgetConfig } from "./standalone-config";
 import { useLiveRefresh } from "./use-live-refresh";
 
@@ -14,20 +15,6 @@ function Selector({label, value, options, onChange, all = true}: {label: string;
   return <label className="flex items-center gap-1.5 text-[10px] text-text-dim"><span>{label}</span><select className={fieldClass} aria-label={label} value={value} onChange={event => onChange(event.target.value)}>
     {all && <option value="">All</option>}{choices.map(x => <option key={x.value} value={x.value}>{x.label}</option>)}
   </select></label>;
-}
-function TrendChart({rows, config, gradientId}: { rows: Array<Record<string, any>>; config: WidgetConfig; gradientId: string }) {
-  const values = rows.map(row => Object.prototype.hasOwnProperty.call(row, "value") ? row.value == null ? null : Number(row.value) : Number(row.count ?? 0));
-  const timestamps = rows.map((row, i) => Number(row.ts) || Date.parse(String(row.bucket)) || i);
-  const {points, linePath, areaPath, baseline} = areaChartGeometry(values, 300, 92, timestamps);
-  const date = (row: Record<string, any>) => Number.isFinite(Date.parse(row.bucket)) ? new Date(row.bucket).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : String(row.bucket);
-  return <div className="mt-3"><svg viewBox="0 0 300 92" className="h-36 w-full text-accent" preserveAspectRatio="none" role="img" aria-label="Analytics trend">
-    <defs><linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="currentColor" stopOpacity="0.38"/><stop offset="100%" stopColor="currentColor" stopOpacity="0.02"/></linearGradient></defs>
-    {[10,35,60,85].map(y => <line key={y} x1="0" x2="300" y1={y} y2={y} stroke="currentColor" strokeOpacity="0.12" />)}
-    <path d={areaPath} fill={`url(#${gradientId})`}/><path d={linePath} fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke"/>
-    <path d={areaChartEndMarkerPath(points, baseline)} fill="none" stroke="currentColor" strokeWidth="5.5" strokeLinecap="round" vectorEffect="non-scaling-stroke"/>
-    {points.map(point => <circle key={point.index} cx={point.x} cy={point.y} r="3" fill="transparent"><title>{date(rows[point.index!])}: {formatMetric(values[point.index!] ?? null, config)}</title></circle>)}
-  </svg><div className="flex justify-between text-[10px] text-text-dim"><span>{date(rows[0])}</span><span>{date(rows.at(-1)!)}</span></div>
-  <div className="mt-2 text-xs text-text-muted">Latest: <span className="tabular-nums text-text">{formatMetric(values.at(-1) ?? null, config)}</span></div></div>;
 }
 export default function StandaloneWidget(props: WidgetHostProps & { kind: "trend" | "ranking" }) {
   return <WidgetContent key={`${props.projectId}:${JSON.stringify(props.widgetSettings || {})}`} {...props}/>;
