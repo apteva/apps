@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/analytics
 go 1.26.6
 
 require (
-	github.com/apteva/app-sdk v0.84.0
+	github.com/apteva/app-sdk v0.93.0
 	github.com/google/uuid v1.6.0
 	modernc.org/sqlite v1.50.0
 )
