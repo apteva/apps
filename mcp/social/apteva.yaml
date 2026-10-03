@@ -89,7 +89,7 @@ provides:
     - { name: post_draft_approve,          description: "Approve the exact revision currently in review." }
     - { name: post_draft_reject,           description: "Reject the exact revision currently in review with a reason." }
     - { name: post_draft_publish,          description: "Publish now or schedule a stored draft using explicit mode=publish|schedule and expected_revision." }
-    - { name: post_list,                   description: "List recent posts with per-target status. Args: limit?, status?." }
+    - { name: post_list,                   description: "List stored posts with profile filters, pagination, and separate post/target totals." }
     - { name: post_retry,                  description: "Re-attempt retryable failures only. Deterministic duplicate/content errors fail once and return failure_code plus existing_post_id instead of being retried." }
     - { name: post_publish_scheduled,      description: "Internal Jobs callback that publishes one scheduled post and reports the final downstream result. Args: post_id." }
     - { name: inbox_list,                  description: "List inbox items (comments, DMs, mentions, reviews) across connected social accounts. Filters: kinds, status, social_account_ids, since, limit." }
