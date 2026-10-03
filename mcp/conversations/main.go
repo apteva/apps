@@ -159,10 +159,9 @@ func (a *App) EventHandlers() []sdk.EventHandler {
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
-		// toolReadAttachment remains implemented for compatibility and direct
-		// tests, but is deliberately not exposed to agents. The narrow blob
-		// handoff below is the supported path for non-image file consumers.
-		{Name: "attachment_to_blob", Description: "Pass a non-image attachment into Core's blob pipeline. Returns a temporary blobref:// handle for a downstream file, document, or ZIP-import tool. Images are already supplied directly and must not be fetched. Args: conversation_id, attachment_id.", InputSchema: schemaObject(map[string]any{"conversation_id": map[string]any{"type": "string"}, "attachment_id": map[string]any{"type": "string"}}, []string{"conversation_id", "attachment_id"}), HandlerCtx: a.toolAttachmentToBlob},
+		// Attachment readers remain implemented for compatibility and direct
+		// tests, but are no longer agent-facing. Non-image files arrive in the
+		// thread event as shared file references.
 		{Name: "resolve_thread_identity", Description: "Internal trusted backend identity resolution; never accepts a user identity from an agent.", InputSchema: schemaObject(map[string]any{"agent_id": map[string]any{"type": "integer"}, "thread_id": map[string]any{"type": "string"}}, []string{"agent_id", "thread_id"}), HandlerCtx: a.toolResolveThreadIdentity},
 		{
 			Name: "send",
@@ -179,7 +178,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"phase":               map[string]any{"type": "string", "enum": []string{"acknowledgement", "progress", "final"}},
 				"approval_message_id": map[string]any{"type": "integer", "minimum": 1, "description": "Resolved approval being acknowledged by its originating main thread."},
 				"components":          map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
-				"attachments":         map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+				"attachments":         map[string]any{"type": "array", "items": sdk.FileReferencePassthroughSchema("Optional image or file handles produced by the platform. Pass the complete _file handle unchanged; Conversations stores it and presents it to authorized viewers.")},
 			}, []string{"conversation_id"}),
 			HandlerCtx: a.toolSend,
 		},
@@ -432,6 +431,9 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 	}
 	attachments, err := attachmentsArg(args, "attachments")
 	if err != nil {
+		return nil, err
+	}
+	if err := a.authorizeAgentReferenceAttachments(ctx, app, conv, attachments); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(text) == "" && len(attachments) == 0 {
@@ -734,6 +736,12 @@ func attachmentsArg(args map[string]any, key string) ([]Attachment, error) {
 		return nil, errors.New("attachments supports at most 10 entries")
 	}
 	for _, attachment := range out {
+		if attachment.Ref != "" {
+			if err := attachment.validateReferenceMetadata(); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		if attachment.Type != "image" || strings.TrimSpace(attachment.DataURL) == "" {
 			return nil, fmt.Errorf("unsupported attachment type %q", attachment.Type)
 		}

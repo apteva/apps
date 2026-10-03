@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.33 — 2026-10-03
+
+- Preserve opaque `blobref://` attachments from native image generation through Conversations messages, history reloads, and authorized image presentation.
+- Remove the agent-facing attachment-to-blob bridge now that Core handles shared file references directly; retain scoped reference resolution for delivery and display.
+- Add an opt-in real Codex Tier 3 regression covering native image generation, unchanged handoff, telemetry, reload durability, and cross-conversation isolation.
+
 ## 0.24.32 — 2026-10-02
 
 - Publish durable, recipient-scoped notification events for messages, approvals, alerts, and reports after committed transcript writes.

@@ -27,6 +27,12 @@ func validateMessageSize(m *Message) error {
 		return errors.New("at most 10 attachments allowed")
 	}
 	for _, a := range m.Attachments {
+		if a.Ref != "" {
+			if err := a.validateReferenceMetadata(); err != nil {
+				return err
+			}
+			continue
+		}
 		if a.ID != "" && a.Type == "file" && a.DataURL == "" {
 			continue
 		}

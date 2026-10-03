@@ -1,4 +1,4 @@
-export interface Attachment {id?:string;type:string;data_url?:string;name?:string;mime_type?:string;size?:number;file_id?:number;storage_app?:string}
+export interface Attachment {id?:string;type:string;data_url?:string;name?:string;mime_type?:string;size?:number;file_id?:number;storage_app?:string;_file?:boolean;ref?:string}
 export interface Conversation {
   id: string;
   project_id: string;

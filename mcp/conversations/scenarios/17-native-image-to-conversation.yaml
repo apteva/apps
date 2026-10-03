@@ -1,0 +1,34 @@
+name: conversations-native-image-to-conversation
+description: Opt-in live Codex regression for native image generation and blobref-backed conversations_send attachments.
+timeout: 8m
+max_iterations: 120
+setup:
+  app:
+    path: .
+  agents: 1
+  # This is deliberately opt-in: it invokes a hosted image model and is
+  # intended to run by itself with APTEVA_RUN_CONVERSATIONS_NATIVE_IMAGE_TIER3=1.
+  required_env:
+    - APTEVA_RUN_CONVERSATIONS_NATIVE_IMAGE_TIER3
+  agent_config:
+    providers:
+      - name: openai-codex
+        builtins:
+          image_generation:
+            enabled: true
+            options:
+              model: gpt-image-2.5-flare
+              quality: low
+              size: 1024x1024
+              output_format: png
+  driver: ["go", "-C", "..", "test", "-tags=scenario", "-run", "^TestScenario_NativeImageToConversation$", "-v", "-count=1", "-timeout=7m", "."]
+directive: |
+  You are a helpful assistant. Follow the Conversations skill and complete the
+  user's requested workflow exactly. Native image generation is enabled for this
+  test. Do not use attachment-reading tools or encode file bytes yourself.
+budget:
+  total_tokens: 700000
+trajectory_assert:
+  - tool_called: conversations_send
+  - tool_not_called: conversations_read_attachment
+  - tool_not_called: conversations_attachment_to_blob
