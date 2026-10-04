@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.24.42 — 2026-10-04
+
+- Recognize proactive `llm.start` events on both mapped chat threads and subscription, webhook, or timer threads when no inbound acknowledgement exists.
+
 ## 0.24.41 — 2026-10-04
 
 - Start visible Thinking progress when a proactive subscription, webhook, timer, or agent-created turn emits `llm.start` before any Conversations acknowledgement exists.

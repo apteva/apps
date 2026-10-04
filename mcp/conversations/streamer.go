@@ -209,7 +209,7 @@ func (s *streamer) Ingest(eventType string, agentID int64, threadID, dataJSON st
 	// owner that an inbound acknowledgement would have created. Without this
 	// state the first model pass is invisible until a tool call or durable
 	// conversations_send row arrives.
-	if eventType == "llm.start" && s.resolve != nil && !strings.HasPrefix(threadID, "chat-") {
+	if eventType == "llm.start" && s.resolve != nil {
 		if s.startProactiveResponse(conversationID, threadID, agentID, ts) {
 			return
 		}
