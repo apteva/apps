@@ -5,7 +5,13 @@ import { createRoot } from "react-dom/client";
 import { AptevaClient } from "@apteva/web-sdk";
 import { conversationsExtension } from "../frontend/src/client";
 import { ConversationsProvider } from "../frontend/src/context";
-import { applyConversationActivityFrame, ConversationActivityIndicator, useConversationActivity } from "../frontend/src/conversationActivity";
+import { applyConversationActivityFrame, ConversationActivityIndicator, shouldShowConversationUnreadIndicator, useConversationActivity } from "../frontend/src/conversationActivity";
+
+test("active work takes precedence over the unread dot", () => {
+  expect(shouldShowConversationUnreadIndicator(true, true)).toBe(false);
+  expect(shouldShowConversationUnreadIndicator(true, false)).toBe(true);
+  expect(shouldShowConversationUnreadIndicator(false, true)).toBe(false);
+});
 
 test("thread activity follows the existing scoped SSE stream and settles without polling", async () => {
   const requests: URL[] = [];

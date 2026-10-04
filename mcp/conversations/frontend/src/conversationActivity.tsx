@@ -89,6 +89,12 @@ export function ConversationActivityIndicator({ active }: { active: boolean }) {
   return <span role="img" aria-label={label} title={label} className="chat-thread-working-dot inline-block h-2 w-2 shrink-0 rounded-full bg-accent" />;
 }
 
+// A row has one status slot: active work takes precedence over unread state.
+// This prevents an active, unread conversation from rendering two dots.
+export function shouldShowConversationUnreadIndicator(unread: boolean, active: boolean): boolean {
+  return unread && !active;
+}
+
 export function ConversationUnreadIndicator({ unread }: { unread: boolean }) {
   const { t } = useConversationLocalization();
   if (!unread) return null;

@@ -105,7 +105,7 @@ export interface WorkspaceRailProps {
 }
 
 import type { Conversation, Message, StreamFrame, InboxPage, InboxItem, UnreadEntry, AgentInfo, ChangePage, MessageDelivery, ToolActivity } from "./types";
-import { ConversationActivityIndicator, ConversationUnreadIndicator, useConversationActivity } from "./conversationActivity";
+import { ConversationActivityIndicator, ConversationUnreadIndicator, shouldShowConversationUnreadIndicator, useConversationActivity } from "./conversationActivity";
 export type { Conversation, Message } from "./types";
 
 // Pickers only offer agents that hold this app's MCP — an unattached
@@ -2507,7 +2507,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                           )}
                           <span className="min-w-0 flex-1 truncate text-sm font-medium text-text">{c.title}</span>
                           <ConversationActivityIndicator active={activeConversations.has(c.id)} />
-                          {!(c.id === selectedId && (!isMobile || mobileDetail) && tab === "chats") && <ConversationUnreadIndicator unread={unreadCount > 0} />}
+                          {!(c.id === selectedId && (!isMobile || mobileDetail) && tab === "chats") && <ConversationUnreadIndicator unread={shouldShowConversationUnreadIndicator(unreadCount > 0, activeConversations.has(c.id))} />}
                         </div>
                         <div className="mt-1 flex items-center gap-2 text-xs text-text-dim">
                           <span className="truncate">
