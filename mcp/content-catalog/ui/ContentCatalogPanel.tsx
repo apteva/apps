@@ -8,7 +8,7 @@ type Lifecycle = { lifecycle?: "active" | "archived"; revision?: number; archive
 type Session = Lifecycle & { id: string; brand_id: string; title: string; session_date: string; status: string; notes: string };
 type Publication = { id: string; asset_id: string; asset_ids: string[]; title: string; destination: string; account_ref: string; audience: string; status: string; planned_at: string; actual_at: string; external_post_id: string; external_url: string; evidence_source: string; failure_details: string; legacy_target_id: string };
 type HostingSummary = { id: string; provider: string; connection_id: number; status: string; remote_id: string; last_checked_at: string };
-type Asset = Lifecycle & { original_session_id?: string; session_lifecycle?: string; session_revision?: number; eligible?: boolean; id: string; session_id: string; storage_install_id: number; storage_file_id: string; name: string; kind: string; content_type: string; size_bytes: number; review_status: string; media_status: string; media_rating: string; description?: string; description_source?: string; description_updated_at?: string; duration_ms?: number; media_error?: string; publications: Publication[]; hostings?: HostingSummary[]; sources?: AssetSource[] };
+type Asset = Lifecycle & { original_session_id?: string; session_lifecycle?: string; session_revision?: number; eligible?: boolean; id: string; session_id: string; storage_install_id: number; storage_file_id: string; name: string; kind: string; content_type: string; size_bytes: number; review_status: string; media_status: string; media_rating: string; favorite?: boolean; patreon_intent?: "unset" | "free" | "paid"; tags?: string[]; description?: string; description_source?: string; description_updated_at?: string; duration_ms?: number; media_error?: string; publications: Publication[]; hostings?: HostingSummary[]; sources?: AssetSource[] };
 type Hosting = { id: string; provider: string; remote_id: string; status: string; embed_url: string; error: string };
 type AssetSource = { asset_id: string; relation: string; source_order: number; media_render_id: number; name?: string; session_id?: string; kind?: string; content_type?: string };
 type GigLink = { gigs_install_id: number; gig_id: number; role: string };
@@ -100,6 +100,15 @@ function platformGlyph(destination: string): string {
 function statusGlyph(status: string): string {
   return ({ verified_published: "✓", provider_reported_published: "◌", scheduled: "◷", submitted: "↗", failed: "!", removed: "×", planned: "·", unknown: "?" } as Record<string, string>)[status] || "?";
 }
+function AssetLabels({ asset, compact = false }: { asset: Asset; compact?: boolean }) {
+  const max = compact ? 3 : 8;
+  return <div className="flex flex-wrap items-center gap-1" aria-label="Catalog labels">
+    {asset.favorite && <span className="rounded bg-yellow-400/15 px-1.5 py-0.5 text-xs text-yellow-300" title="Favorite">⭐ Favorite</span>}
+    {asset.patreon_intent && asset.patreon_intent !== "unset" && <span className={`rounded px-1.5 py-0.5 text-xs ${asset.patreon_intent === "paid" ? "bg-fuchsia-400/15 text-fuchsia-300" : "bg-sky-400/15 text-sky-300"}`}>Patreon {asset.patreon_intent}</span>}
+    {(asset.tags || []).slice(0, max).map(tag => <span key={tag} className="rounded bg-accent/10 px-1.5 py-0.5 text-xs text-accent">{tag}</span>)}
+    {(asset.tags || []).length > max && <span className="text-xs text-text-muted">+{asset.tags!.length - max}</span>}
+  </div>;
+}
 function PublicationIcons({ items }: { items: Array<{ destination: string; status: string; account_ref?: string }> }) {
   if (!items.length) return <span className="text-xs text-text-muted">No platforms recorded</span>;
   return <div className="flex flex-wrap gap-1.5" aria-label="Platform publication status">{items.map((item, i) => <span key={`${item.destination}:${item.account_ref || ""}:${i}`} className="inline-flex items-center gap-1 rounded-md border border-border px-1.5 py-0.5 text-xs" style={{ color: publicationColor(item.status) }} title={`${item.destination}${item.account_ref ? ` · ${item.account_ref}` : ""}: ${publicationLabel(item.status)}`} aria-label={`${item.destination}: ${publicationLabel(item.status)}`}><span aria-hidden="true" className="font-bold">{platformGlyph(item.destination)}</span><span aria-hidden="true">{statusGlyph(item.status)}</span></span>)}</div>;
@@ -165,8 +174,9 @@ function ParentLinks({ asset, projectId, onOpen, compact = false }: { asset: Ass
     {compact && sources.length > 1 && <button type="button" className="shrink-0 text-xs text-accent" title="View all sources" onClick={() => onOpen(asset.id)}>+{sources.length - 1}</button>}
   </div>;
 }
-function SessionAssetCard({ asset, projectId, duration, context = false, compact = false, onOpen }: { asset: Asset; projectId: string; duration?: number; context?: boolean; compact?: boolean; onOpen: (id: string) => void }) {
-  return <article data-asset-id={asset.id} style={previewCardStyle} className="overflow-hidden rounded-xl border border-border text-sm">
+function SessionAssetCard({ asset, projectId, duration, context = false, compact = false, onOpen, onToggleFavorite }: { asset: Asset; projectId: string; duration?: number; context?: boolean; compact?: boolean; onOpen: (id: string) => void; onToggleFavorite?: (asset: Asset) => void }) {
+  return <article data-asset-id={asset.id} style={{ ...previewCardStyle, position: "relative" }} className="overflow-hidden rounded-xl border border-border text-sm">
+    {onToggleFavorite && <button type="button" className="absolute right-2 top-2 z-10 rounded-md border border-border bg-bg/90 px-1.5 py-1 text-sm shadow" aria-label={asset.favorite ? `Remove ${asset.name} from favorites` : `Favorite ${asset.name}`} aria-pressed={!!asset.favorite} title={asset.favorite ? "Remove favorite" : "Favorite"} onClick={event => { event.stopPropagation(); onToggleFavorite(asset); }}>{asset.favorite ? "⭐" : "☆"}</button>}
     <div style={{ display: "flex", flexDirection: compact ? "row" : "column", alignItems: compact ? "center" : undefined }}>
       <button type="button" style={{ display: "block", width: compact ? 92 : "100%", flexShrink: 0, textAlign: "left" }} onClick={() => onOpen(asset.id)} aria-label={`Open asset: ${asset.name}`}>
         <AssetCardPreview asset={asset} projectId={projectId} />
@@ -175,6 +185,7 @@ function SessionAssetCard({ asset, projectId, duration, context = false, compact
         <button type="button" className="font-medium truncate text-left hover:text-accent" style={{ height: 24, flexShrink: 0 }} title={asset.name} onClick={() => onOpen(asset.id)}>{asset.name}</button>
         <div className="text-xs text-text-muted truncate" style={{ height: 20, flexShrink: 0 }} title={`${assetMediaKind(asset)} · #${asset.storage_file_id} · ${asset.review_status}`}>{assetMediaKind(asset)}{duration ? ` · ${durationLabel(duration)}` : ""} · #{asset.storage_file_id} · {asset.review_status}</div>
         <div className="flex items-center gap-1.5 text-xs" style={{ height: 24, flexShrink: 0 }}><span className="rounded bg-accent/10 px-1.5 py-0.5 text-accent">{lineageBadge(asset)}</span>{(asset.lifecycle === "archived" || asset.session_lifecycle === "archived") && <span className="rounded bg-yellow-500/10 px-1.5 text-yellow-400">Archived</span>}{context && <span className="text-text-muted" title="Shown to explain a matching derivative; this asset does not match the filters">Context</span>}</div>
+        <AssetLabels asset={asset} compact />
       </div>
     </div>
     <div className="px-3 pb-3" style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>
@@ -184,10 +195,10 @@ function SessionAssetCard({ asset, projectId, duration, context = false, compact
     </div>
   </article>;
 }
-function AssetFamilyCard({ node, projectId, durations, filtering, onOpen, onDerived }: { node: AssetFamily<Asset>; projectId: string; durations: Record<string, number>; filtering: boolean; onOpen: (id: string) => void; onDerived: (id: string) => void }) {
+function AssetFamilyCard({ node, projectId, durations, filtering, onOpen, onDerived, onToggleFavorite }: { node: AssetFamily<Asset>; projectId: string; durations: Record<string, number>; filtering: boolean; onOpen: (id: string) => void; onDerived: (id: string) => void; onToggleFavorite?: (asset: Asset) => void }) {
   const matchingDerived = node.matchingCount - Number(node.matches);
   return <div className="min-w-0 flex flex-col gap-2" data-family-id={node.asset.id}>
-    <SessionAssetCard asset={node.asset} projectId={projectId} duration={durations[node.asset.id]} context={!node.matches} onOpen={onOpen} />
+    <SessionAssetCard asset={node.asset} projectId={projectId} duration={durations[node.asset.id]} context={!node.matches} onOpen={onOpen} onToggleFavorite={onToggleFavorite} />
     <button type="button" className="flex w-full items-center justify-between rounded-lg border border-border px-3 py-2 text-xs hover:border-accent/60 disabled:opacity-40" style={{ flexShrink: 0 }} aria-haspopup="dialog" disabled={!matchingDerived} onClick={() => onDerived(node.asset.id)}><span>{node.derivedCount ? `Derived assets · ${filtering ? `${matchingDerived} matching` : node.derivedCount}` : "No derived assets"}</span>{matchingDerived > 0 && <span aria-hidden="true">↗</span>}</button>
   </div>;
 }
@@ -227,6 +238,9 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const [searchLineage, setSearchLineage] = useState("");
   const [searchSort, setSearchSort] = useState("session_newest");
   const [searchReview, setSearchReview] = useState("");
+  const [searchFavorite, setSearchFavorite] = useState("");
+  const [searchPatreon, setSearchPatreon] = useState("");
+  const [searchTag, setSearchTag] = useState("");
   const [searchDestination, setSearchDestination] = useState("");
   const [searchAccount, setSearchAccount] = useState("");
   const [searchAvailability, setSearchAvailability] = useState("any");
@@ -257,6 +271,9 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const [assetDestination, setAssetDestination] = useState("");
   const [assetSort, setAssetSort] = useState("newest");
   const [assetLineage, setAssetLineage] = useState("any");
+  const [assetFavorite, setAssetFavorite] = useState("any");
+  const [assetPatreon, setAssetPatreon] = useState("any");
+  const [assetTag, setAssetTag] = useState("");
   const [assetView, setAssetView] = useState<"grid" | "grouped">(() => { try { return localStorage.getItem("catalog-asset-view") === "grouped" ? "grouped" : "grid"; } catch { return "grid"; } });
   useEffect(() => { try { localStorage.setItem("catalog-asset-view", assetView); } catch {} }, [assetView]);
   const [derivedFamilyId, setDerivedFamilyId] = useState<string | null>(null);
@@ -278,7 +295,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const [candidates, setCandidates] = useState<ImportCandidate[]>([]);
   const [importLimitReached, setImportLimitReached] = useState(false);
   const [editingPublication, setEditingPublication] = useState<Publication | null>(null);
-  const [modal, setModal] = useState<"new-session" | "edit-session" | "add-file" | "link-gig" | "publication" | "filters" | "lifecycle" | null>(null);
+  const [modal, setModal] = useState<"new-session" | "edit-session" | "add-file" | "link-gig" | "publication" | "filters" | "lifecycle" | "labels" | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -351,7 +368,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     window.history.pushState(null, "", url);
     setReturnTab(origin); setTab("sessions");
     setModal(null);
-    setAssetQuery(""); setAssetKind("any"); setAssetLength("any"); setAssetLengthMin(0); setAssetLengthMax(null); setAssetSharing("any"); setAssetDestination(""); setAssetSort("newest"); setAssetLineage("any");
+    setAssetQuery(""); setAssetKind("any"); setAssetLength("any"); setAssetLengthMin(0); setAssetLengthMax(null); setAssetSharing("any"); setAssetDestination(""); setAssetSort("newest"); setAssetLineage("any"); setAssetFavorite("any"); setAssetPatreon("any"); setAssetTag("");
     await openSession(s);
   }, [openSession]);
   const backToSessions = useCallback(() => {
@@ -381,9 +398,16 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     try { const result = await get<{ asset: Asset; hostings: Hosting[]; sources: AssetSource[]; publications: Publication[]; media?: MediaDetails; media_error?: string }>(`/assets/${asset.id}`); if (request !== assetRequest.current) return; const loaded = { ...result.asset, sources: result.sources || result.asset.sources || [], publications: result.publications || [] }; setSelectedAsset(loaded); setHostings(result.hostings || []); setAssets(current => current.map(item => item.id === asset.id ? loaded : item)); setAssetSources(result.sources || []); setAssetMedia(result.media || null); if (result.media_error) setError(`Media unavailable: ${result.media_error}`); } catch (e) { if (request === assetRequest.current) setError(errorText(e)); } finally { if (request === assetRequest.current) setAssetLoading(false); }
   }, [get]);
   const closeAsset = useCallback(() => { ++assetRequest.current; setSelectedAsset(null); setAssetLoading(false); }, []);
+  const toggleFavorite = useCallback(async (asset: Asset) => {
+    try {
+      await action("content_catalog_assets_labels_update", { asset_ids: [asset.id], favorite: !asset.favorite, expected_revisions: { [asset.id]: asset.revision } });
+      if (selectedSession) await openSession(selectedSession);
+      if (selectedAsset?.id === asset.id) await openAsset({ ...asset, favorite: !asset.favorite });
+    } catch (e) { setError(errorText(e)); }
+  }, [action, openSession, openAsset, selectedSession, selectedAsset]);
   const filteredSessions = (sessionBrand && brandSessions !== null ? brandSessions : sessions).filter(session => !sessionBrand || session.brand_id === sessionBrand);
   const brandName = (id: string) => brands.find(b => b.id === id)?.name || short(id);
-  const searchParams = useCallback(() => ({ entity_type: searchType, query: searchText, brand_id: searchBrand, date_from: searchDateFrom, date_to: searchDateTo, kind: searchKind, lineage: searchLineage, sort: searchSort, review_status: searchReview, destination: searchDestination, account_ref: searchAccount, availability: searchAvailability, limit: "24" }), [searchType, searchText, searchBrand, searchDateFrom, searchDateTo, searchKind, searchLineage, searchSort, searchReview, searchDestination, searchAccount, searchAvailability]);
+  const searchParams = useCallback(() => ({ entity_type: searchType, query: searchText, brand_id: searchBrand, date_from: searchDateFrom, date_to: searchDateTo, kind: searchKind, lineage: searchLineage, sort: searchSort, review_status: searchReview, tag: searchTag, favorite: searchFavorite, patreon_intent: searchPatreon, destination: searchDestination, account_ref: searchAccount, availability: searchAvailability, limit: "24" }), [searchType, searchText, searchBrand, searchDateFrom, searchDateTo, searchKind, searchLineage, searchSort, searchReview, searchTag, searchFavorite, searchPatreon, searchDestination, searchAccount, searchAvailability]);
   useEffect(() => {
     if (tab !== "search") return;
     let active = true;
@@ -405,12 +429,12 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     await showSession(result.session, "search");
     await openAsset(hit);
   }, [get, showSession, openAsset]);
-  const assetSearchOnly = !!searchKind || !!searchLineage || !!searchReview || searchAvailability !== "any";
+  const assetSearchOnly = !!searchKind || !!searchLineage || !!searchReview || !!searchTag || !!searchFavorite || !!searchPatreon || searchAvailability !== "any";
   const assetDestinations = Array.from(new Set(assets.flatMap(asset => (asset.publications || []).map(post => post.destination.trim())).filter(Boolean))).sort((a, b) => a.localeCompare(b));
   const longestDurationSeconds = Math.max(1, ...Object.values(assetDurations).map(ms => Math.ceil(ms / 1000)));
   const lengthMaximum = assetLengthMax ?? longestDurationSeconds;
   const lengthSliderLimit = Math.max(longestDurationSeconds, assetLengthMin, lengthMaximum);
-  const activeAssetFilterCount = [assetKind !== "any", assetLength !== "any", assetSharing !== "any", !!assetDestination, assetSort !== "newest", assetLineage !== "any"].filter(Boolean).length;
+  const activeAssetFilterCount = [assetKind !== "any", assetLength !== "any", assetSharing !== "any", !!assetDestination, assetSort !== "newest", assetLineage !== "any", assetFavorite !== "any", assetPatreon !== "any", !!assetTag].filter(Boolean).length;
   const assetFiltersActive = !!assetQuery || activeAssetFilterCount > 0;
   const assetFilterSummary = [
     assetLineage === "source" ? "Sources / no parent linked" : assetLineage === "derivative" ? "Derivatives" : "",
@@ -418,9 +442,12 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     assetLength === "range" ? `${durationLabel(assetLengthMin * 1000)}–${durationLabel(lengthMaximum * 1000)}` : assetLength === "unknown" ? "Length unknown" : "",
     assetSharing !== "any" ? ({ none: "No post recorded", not_verified: "No verified live post", verified: "Verified live", reported: "Reported live", scheduled: "Scheduled or submitted", failed: "Failed" } as Record<string, string>)[assetSharing] : "",
     assetDestination,
+    assetFavorite !== "any" ? (assetFavorite === "favorite" ? "Favorites" : "Not favorite") : "",
+    assetPatreon !== "any" ? `Patreon ${assetPatreon}` : "",
+    assetTag ? `#${assetTag}` : "",
     assetSort !== "newest" ? ({ name: "Name A–Z", shortest: "Shortest first", longest: "Longest first" } as Record<string, string>)[assetSort] : "",
   ].filter(Boolean).join(" · ");
-  const resetAssetFilters = (clearSearch = false) => { if (clearSearch) setAssetQuery(""); setAssetKind("any"); setAssetLength("any"); setAssetLengthMin(0); setAssetLengthMax(null); setAssetSharing("any"); setAssetDestination(""); setAssetSort("newest"); setAssetLineage("any"); };
+  const resetAssetFilters = (clearSearch = false) => { if (clearSearch) setAssetQuery(""); setAssetKind("any"); setAssetLength("any"); setAssetLengthMin(0); setAssetLengthMax(null); setAssetSharing("any"); setAssetDestination(""); setAssetSort("newest"); setAssetLineage("any"); setAssetFavorite("any"); setAssetPatreon("any"); setAssetTag(""); };
   const sharingCount = (state: string) => assets.filter(asset => {
     const posts = (asset.publications || []).filter(post => !assetDestination || post.destination.toLowerCase() === assetDestination.toLowerCase());
     return (!assetDestination || state !== "any" || posts.length > 0) && matchesSharing(posts, state);
@@ -429,6 +456,10 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     if (assetQuery && !`${asset.name} ${asset.storage_file_id} ${asset.description || ""}`.toLowerCase().includes(assetQuery.trim().toLowerCase())) return false;
     if (assetLineage === "source" && asset.sources?.length) return false;
     if (assetLineage === "derivative" && !asset.sources?.length) return false;
+    if (assetFavorite === "favorite" && !asset.favorite) return false;
+    if (assetFavorite === "not_favorite" && asset.favorite) return false;
+    if (assetPatreon !== "any" && (asset.patreon_intent || "unset") !== assetPatreon) return false;
+    if (assetTag && !(asset.tags || []).includes(assetTag.trim().toLowerCase())) return false;
     if (assetKind !== "any" && assetMediaKind(asset) !== assetKind) return false;
     if (assetLength !== "any" && !["video", "audio"].includes(assetMediaKind(asset))) return false;
     if (assetLength !== "any" && (durationsLoading || !matchesDuration(assetDurations[asset.id], assetLength, assetLengthMin, lengthMaximum))) return false;
@@ -473,6 +504,9 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
         <select className={inputClass} value={searchKind} disabled={searchType === "sessions"} onChange={e => setSearchKind(e.target.value)} aria-label="File type"><option value="">All file types</option>{["video", "image", "audio", "other"].map(kind => <option key={kind} value={kind}>{kind}</option>)}</select>
         <select className={inputClass} value={searchLineage} disabled={searchType === "sessions"} onChange={e => setSearchLineage(e.target.value)} aria-label="File lineage"><option value="">Sources and derivatives</option><option value="source">Source files</option><option value="derivative">Derivatives</option></select>
         <select className={inputClass} value={searchReview} disabled={searchType === "sessions"} onChange={e => setSearchReview(e.target.value)} aria-label="Review status"><option value="">Any review state</option>{["pending", "approved", "rejected"].map(state => <option key={state} value={state}>{state}</option>)}</select>
+        <select className={inputClass} value={searchFavorite} disabled={searchType === "sessions"} onChange={e => setSearchFavorite(e.target.value)} aria-label="Favorite"><option value="">Any favorite state</option><option value="true">⭐ Favorites</option><option value="false">Not favorite</option></select>
+        <select className={inputClass} value={searchPatreon} disabled={searchType === "sessions"} onChange={e => setSearchPatreon(e.target.value)} aria-label="Patreon intent"><option value="">Any Patreon intent</option><option value="unset">Patreon unset</option><option value="free">Patreon free</option><option value="paid">Patreon paid</option></select>
+        <input className={inputClass} value={searchTag} disabled={searchType === "sessions"} onChange={e => setSearchTag(e.target.value)} placeholder="Exact tag, e.g. share-next" aria-label="Asset tag" />
         <select className={inputClass} value={searchSort} disabled={searchType === "sessions"} onChange={e => setSearchSort(e.target.value)} aria-label="Sort files"><option value="session_newest">Newest session first</option><option value="asset_newest">Recently linked first</option></select>
         <label className="text-xs text-text-muted">From session date<input className={inputClass} type="date" value={searchDateFrom} onChange={e => setSearchDateFrom(e.target.value)} /></label>
         <label className="text-xs text-text-muted">Through session date<input className={inputClass} type="date" value={searchDateTo} onChange={e => setSearchDateTo(e.target.value)} /></label>
@@ -483,7 +517,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
       <p className="text-xs text-text-muted">Ready to publish means approved and no active plan or observed post for the selected destination{searchAccount ? " and account" : ""}. Results reflect evidence recorded in Catalog.</p>
       {searchError && <p className="rounded border border-red-500/50 bg-red-500/10 p-3 text-sm text-red-400">{searchError}</p>}
       {searchLoading && <p className="text-sm text-text-muted">Searching…</p>}
-      {(searchType === "all" || searchType === "assets") && <div className="space-y-2"><h3 className="font-semibold">Files <span className="text-text-muted font-normal">{searchResults.assets.items.length}</span></h3>{searchResults.assets.items.length === 0 && !searchLoading && <p className="text-sm text-text-muted">No matching linked files.</p>}<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 12, alignItems: "stretch" }}>{searchResults.assets.items.map(hit => <div key={hit.id} className="min-w-0 space-y-2"><SessionAssetCard asset={hit} projectId={projectId} duration={hit.duration_ms} onOpen={id => { const found = searchResults.assets.items.find(item => item.id === id); (found ? openSearchAsset(found) : openLinkedAsset(id)).catch(e => setSearchError(errorText(e))); }} /><div className="text-xs text-text-muted px-1"><p className="truncate">{hit.session_title} · {recordingDate(hit.session_date)} · {brandName(hit.brand_id)}</p><p className="line-clamp-2">{hit.match_reason}</p></div></div>)}</div>{searchResults.assets.next_cursor && <button disabled={searchLoading} className="text-sm text-accent underline" onClick={() => loadMore("assets", searchResults.assets.next_cursor!)}>More files</button>}</div>}
+      {(searchType === "all" || searchType === "assets") && <div className="space-y-2"><h3 className="font-semibold">Files <span className="text-text-muted font-normal">{searchResults.assets.items.length}</span></h3>{searchResults.assets.items.length === 0 && !searchLoading && <p className="text-sm text-text-muted">No matching linked files.</p>}<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 12, alignItems: "stretch" }}>{searchResults.assets.items.map(hit => <div key={hit.id} className="min-w-0 space-y-2"><SessionAssetCard asset={hit} projectId={projectId} duration={hit.duration_ms} onToggleFavorite={toggleFavorite} onOpen={id => { const found = searchResults.assets.items.find(item => item.id === id); (found ? openSearchAsset(found) : openLinkedAsset(id)).catch(e => setSearchError(errorText(e))); }} /><div className="text-xs text-text-muted px-1"><p className="truncate">{hit.session_title} · {recordingDate(hit.session_date)} · {brandName(hit.brand_id)}</p><p className="line-clamp-2">{hit.match_reason}</p></div></div>)}</div>{searchResults.assets.next_cursor && <button disabled={searchLoading} className="text-sm text-accent underline" onClick={() => loadMore("assets", searchResults.assets.next_cursor!)}>More files</button>}</div>}
       {!assetSearchOnly && !searchDestination && (searchType === "all" || searchType === "sessions") && <div className="space-y-2"><h3 className="font-semibold">Sessions <span className="text-text-muted font-normal">{searchResults.sessions.items.length}</span></h3>{searchResults.sessions.items.length === 0 && !searchLoading && <p className="text-sm text-text-muted">No matching sessions.</p>}<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 12, alignItems: "stretch" }}>{searchResults.sessions.items.map(hit => <button key={hit.id} type="button" style={previewCardStyle} className="overflow-hidden rounded-xl border border-border text-left hover:border-accent/60" onClick={() => showSession(hit, "search")}><PreviewImage src={previewURL(projectId, "sessions", hit.id)} alt={`Preview of ${hit.title}`} fallback="▣" /><div className="p-3 text-sm" style={{ flex: 1 }}><div className="font-medium line-clamp-2" style={{ minHeight: 40 }}>{hit.title}</div><div className="mt-1 text-xs text-text-muted">{hit.brand_name} · {recordingDate(hit.session_date)} · {hit.asset_count} files</div></div></button>)}</div>{searchResults.sessions.next_cursor && <button disabled={searchLoading} className="text-sm text-accent underline" onClick={() => loadMore("sessions", searchResults.sessions.next_cursor!)}>More sessions</button>}</div>}
 
     </section>}
@@ -515,7 +549,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
       <section className="space-y-3"><div className="flex items-center justify-between gap-3"><h3 className="text-lg font-semibold">Assets</h3><span className="text-xs text-text-muted">Showing {filteredAssets.length} of {assets.length} files</span></div>
         <div className="flex flex-wrap items-center gap-2" aria-label="Asset toolbar">
  <LifecycleSelect value={lifecycleScope} onChange={setLifecycleScope} />
- {checkedAssets.length > 0 && <><span className="text-xs">{checkedAssets.length} selected</span>{(["archive","move","restore"] as const).map(operation => <button key={operation} type="button" className="text-xs text-accent underline" onClick={() => manageLifecycle("asset",operation,assets.filter(asset => checkedAssets.includes(asset.id)))}>{operation}</button>)}</>}
+ {checkedAssets.length > 0 && <><span className="text-xs">{checkedAssets.length} selected</span><button type="button" className="text-xs text-accent underline" onClick={() => setModal("labels")}>Edit labels</button>{(["archive","move","restore"] as const).map(operation => <button key={operation} type="button" className="text-xs text-accent underline" onClick={() => manageLifecycle("asset",operation,assets.filter(asset => checkedAssets.includes(asset.id)))}>{operation}</button>)}</>}
           <div className="inline-flex rounded-lg border border-border p-0.5" role="group" aria-label="Asset display">{([["grid", "Grid"], ["grouped", "Grouped by original"]] as const).map(([view, label]) => <button key={view} type="button" aria-pressed={assetView === view} className={`rounded px-2 py-1 text-xs ${assetView === view ? "bg-accent/15 text-accent" : "text-text-muted"}`} onClick={() => setAssetView(view)}>{label}</button>)}</div>
           <input className={inputClass} style={{ flex: "1 1 180px", maxWidth: 360 }} type="search" value={assetQuery} onChange={e => setAssetQuery(e.target.value)} placeholder="Find name, ID or description" aria-label="Find session file" />
           <button type="button" aria-haspopup="dialog" className={`rounded border px-3 py-1.5 text-sm ${activeAssetFilterCount ? "border-accent text-accent" : "border-border"}`} onClick={() => setModal("filters")}>Filters{activeAssetFilterCount > 0 ? ` (${activeAssetFilterCount})` : ""}</button>
@@ -524,8 +558,8 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
         </div>
         {assets.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">No assets in this lifecycle view. Choose All to inspect other linked files.</p>}
         {assets.length > 0 && filteredAssets.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">{durationsLoading && assetLength !== "any" ? "Loading file lengths…" : "No files match these filters."}</p>}
-        {assetView === "grid" ? <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12, alignItems: "stretch" }}>{filteredAssets.map(asset => <div key={asset.id} className="min-w-0 flex flex-col gap-1"><label className="text-xs flex items-center gap-2"><input type="checkbox" aria-label={`Select ${asset.name}`} checked={checkedAssets.includes(asset.id)} onChange={e => setCheckedAssets(current => e.target.checked ? [...current,asset.id] : current.filter(id => id !== asset.id))} />Select</label><SessionAssetCard asset={asset} projectId={projectId} duration={assetDurations[asset.id]} onOpen={openLinkedAsset} /></div>)}</div>
-          : <><p className="text-xs text-text-muted">Grouped using recorded source links. Files with several sources appear once, under their first linked source in this session.{assetFiltersActive ? " Parent context stays visible for matching derivatives." : ""}</p><div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12, alignItems: "stretch" }}>{families.map(node => <AssetFamilyCard key={node.asset.id} node={node} projectId={projectId} durations={assetDurations} filtering={assetFiltersActive} onOpen={openLinkedAsset} onDerived={setDerivedFamilyId} />)}</div></>}
+        {assetView === "grid" ? <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12, alignItems: "stretch" }}>{filteredAssets.map(asset => <div key={asset.id} className="min-w-0 flex flex-col gap-1"><label className="text-xs flex items-center gap-2"><input type="checkbox" aria-label={`Select ${asset.name}`} checked={checkedAssets.includes(asset.id)} onChange={e => setCheckedAssets(current => e.target.checked ? [...current,asset.id] : current.filter(id => id !== asset.id))} />Select</label><SessionAssetCard asset={asset} projectId={projectId} duration={assetDurations[asset.id]} onToggleFavorite={toggleFavorite} onOpen={openLinkedAsset} /></div>)}</div>
+          : <><p className="text-xs text-text-muted">Grouped using recorded source links. Files with several sources appear once, under their first linked source in this session.{assetFiltersActive ? " Parent context stays visible for matching derivatives." : ""}</p><div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12, alignItems: "stretch" }}>{families.map(node => <AssetFamilyCard key={node.asset.id} node={node} projectId={projectId} durations={assetDurations} filtering={assetFiltersActive} onOpen={openLinkedAsset} onDerived={setDerivedFamilyId} onToggleFavorite={toggleFavorite} />)}</div></>}
 
       </section>
       {assets.some(a => a.publications?.length) && <section className="rounded-xl border border-border p-4 space-y-2 text-sm"><h3 className="font-semibold">Posts for this session</h3>{Array.from(new Map(assets.flatMap(a => a.publications || []).map(p => [p.id, p])).values()).map(p => <div key={p.id} className="flex flex-wrap items-center gap-2 border-t border-border pt-2 text-xs"><PublicationIcons items={[p]} /><strong>{p.title || p.destination}</strong><span>{publicationLabel(p.status)}</span><span className="text-text-muted">{p.asset_ids?.length || 1} files</span>{p.external_url && <a href={p.external_url} target="_blank" rel="noreferrer" className="text-accent underline">View post</a>}<button type="button" className="ml-auto text-accent underline" onClick={() => { setEditingPublication(p); setSelectedAsset(null); setModal("publication"); }}>Edit post</button></div>)}</section>}
@@ -542,6 +576,9 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
           <label className="block text-xs space-y-1"><span>Content type</span><select className={inputClass} value={assetKind} onChange={e => setAssetKind(e.target.value)} aria-label="Content type"><option value="any">All content types</option><option value="video">Videos</option><option value="image">Images</option><option value="audio">Audio</option><option value="other">Other files</option></select></label>
           <label className="block text-xs space-y-1"><span>Publication status</span><select className={inputClass} value={assetSharing} onChange={e => setAssetSharing(e.target.value)} aria-label="Publication status"><option value="any">Any sharing status</option><option value="none">No post recorded</option><option value="not_verified">No verified live post</option><option value="verified">Verified live</option><option value="reported">Reported live, unverified</option><option value="scheduled">Scheduled or submitted</option><option value="failed">Failed</option></select></label>
           <label className="block text-xs space-y-1"><span>Platform</span><select className={inputClass} value={assetDestination} onChange={e => setAssetDestination(e.target.value)} aria-label="Platform"><option value="">All platforms</option>{assetDestinations.map(destination => <option key={destination} value={destination}>{destination}</option>)}</select></label>
+          <label className="block text-xs space-y-1"><span>Favorite</span><select className={inputClass} value={assetFavorite} onChange={e => setAssetFavorite(e.target.value)} aria-label="Favorite filter"><option value="any">Any</option><option value="favorite">⭐ Favorites</option><option value="not_favorite">Not favorite</option></select></label>
+          <label className="block text-xs space-y-1"><span>Patreon intent</span><select className={inputClass} value={assetPatreon} onChange={e => setAssetPatreon(e.target.value)} aria-label="Patreon intent filter"><option value="any">Any</option><option value="unset">Unset</option><option value="free">Free</option><option value="paid">Paid</option></select></label>
+          <label className="block text-xs space-y-1"><span>Exact tag</span><input className={inputClass} value={assetTag} onChange={e => setAssetTag(e.target.value)} placeholder="share-next" aria-label="Exact tag filter" /></label>
           <label className="block text-xs space-y-1"><span>Sort files</span><select className={inputClass} value={assetSort} onChange={e => setAssetSort(e.target.value)} aria-label="Sort files"><option value="newest">Recently added</option><option value="name">Name A–Z</option><option value="shortest">Shortest first</option><option value="longest">Longest first</option></select></label>
         </div>
         <DurationFilter mode={assetLength} minimum={assetLengthMin} maximum={lengthMaximum} limit={lengthSliderLimit} loading={durationsLoading} onMode={mode => { setAssetLength(mode); if (mode === "any") { setAssetLengthMin(0); setAssetLengthMax(null); } }} onRange={(minimum, maximum) => { setAssetLengthMin(minimum); setAssetLengthMax(maximum); setAssetLength("range"); }} />
@@ -557,7 +594,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
         <span className="text-xs text-text-muted">{assetFiltersActive ? `${derivedAssets.length} matching of ${derivedFamily.derivedCount}` : derivedAssets.length} derived assets</span>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 220px), 1fr))", gap: 12, alignItems: "stretch" }} aria-label="Derived asset grid">
-        {derivedAssets.map(node => <SessionAssetCard key={node.asset.id} asset={node.asset} projectId={projectId} duration={assetDurations[node.asset.id]} onOpen={openLinkedAsset} />)}
+        {derivedAssets.map(node => <SessionAssetCard key={node.asset.id} asset={node.asset} projectId={projectId} duration={assetDurations[node.asset.id]} onToggleFavorite={toggleFavorite} onOpen={openLinkedAsset} />)}
       </div>
       {!derivedAssets.length && <p className="text-sm text-text-muted">No derived assets match the current filters.</p>}
     </Modal>}
@@ -565,6 +602,8 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     {selectedAsset && !modal && <Modal title={selectedAsset.name} wide onClose={closeAsset}>
       <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
         <span className={selectedAsset.eligible === false ? "text-yellow-400" : "text-text-muted"}>{selectedAsset.eligible === false ? "Archived / unavailable for processing or new publication" : "Active"}</span>
+        <AssetLabels asset={selectedAsset} />
+        <button type="button" className="rounded border border-border px-2 py-1" onClick={() => setModal("labels")}>Edit labels</button>
         {(["archive", "move", "restore"] as const).filter(operation => operation === "move" || (operation === "restore" ? selectedAsset.eligible === false : selectedAsset.lifecycle !== "archived")).map(operation => <button key={operation} type="button" className="rounded border border-border px-2 py-1 capitalize" onClick={() => manageLifecycle("asset",operation)}>{operation}</button>)}
       </div>
       {selectedAsset.archive_reason && <p className="mb-3 text-xs text-text-muted">{selectedAsset.archive_reason} · {selectedAsset.archived_at}{selectedAsset.original_session_id ? ` · Original session ${short(selectedAsset.original_session_id)}` : ""}</p>}
@@ -598,6 +637,14 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
         if (selectedSession) { const result = await get<{ session: Session }>(`/sessions/${selectedSession.id}`); await openSession(result.session); }
         if (savedAsset) await openAsset(savedAsset);
       }, "Catalog lifecycle updated")} />
+      {error && <p className="mt-3 text-sm text-red-400">{error}</p>}
+    </Modal>}
+
+    {modal === "labels" && (selectedAsset || checkedAssets.length > 0) && <Modal title="Edit Catalog labels" onClose={() => setModal(null)}>
+      <AssetLabelsForm assets={selectedAsset ? [selectedAsset] : assets.filter(asset => checkedAssets.includes(asset.id))} busy={busy} onSubmit={input => run(async () => {
+        await action("content_catalog_assets_labels_update", input); setModal(null); setCheckedAssets([]);
+        if (selectedSession) { const current = selectedAsset; await openSession(selectedSession); if (current) await openAsset(current); }
+      }, "Catalog labels updated")} />
       {error && <p className="mt-3 text-sm text-red-400">{error}</p>}
     </Modal>}
 
@@ -698,6 +745,19 @@ function PublicationForm({ busy, initial, assets, initialAssetId, onSubmit }: { 
 
 function LifecycleSelect({value,onChange}:{value:string;onChange:(value:string)=>void}) {
  return <label className="text-xs flex items-center gap-2"><span>Lifecycle</span><select className={inputClass} style={{width:"auto"}} aria-label="Lifecycle view" value={value} onChange={e=>onChange(e.target.value)}><option value="active">Active</option><option value="archived">Archive</option><option value="all">All</option></select></label>;
+}
+function AssetLabelsForm({ assets, busy, onSubmit }: { assets: Asset[]; busy: boolean; onSubmit: (input: Record<string, unknown>) => void }) {
+ const single=assets.length===1; const first=assets[0];
+ const [tags,setTags]=useState((first?.tags||[]).join(", ")); const [replaceTags,setReplaceTags]=useState(single);
+ const [favorite,setFavorite]=useState(single ? (first?.favorite ? "on" : "off") : ""); const [intent,setIntent]=useState(single ? (first?.patreon_intent || "unset") : "");
+ return <form className="space-y-3" onSubmit={e=>{e.preventDefault();const input:Record<string,unknown>={asset_ids:assets.map(a=>a.id),expected_revisions:Object.fromEntries(assets.map(a=>[a.id,a.revision]))};if(replaceTags)input.tags=tags.split(",").map(x=>x.trim()).filter(Boolean);if(favorite)input.favorite=favorite==="on";if(intent)input.patreon_intent=intent;onSubmit(input);}}>
+   <div><h3 className="font-semibold">{single ? "Edit Catalog labels" : `Edit labels on ${assets.length} assets`}</h3><p className="text-xs text-text-muted">These labels live in Catalog. They do not alter Media or publish anything.</p></div>
+   <label className="block text-xs">Tags, comma separated<input className={inputClass} value={tags} onChange={e=>setTags(e.target.value)} placeholder="share-next, teaser, best-take" /></label>
+   <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={replaceTags} onChange={e=>setReplaceTags(e.target.checked)} />Replace the current tag set{!single && <span className="text-text-muted">(leave off to keep each asset’s tags)</span>}</label>
+   <label className="block text-xs">Favorite<select className={inputClass} value={favorite} onChange={e=>setFavorite(e.target.value)}><option value="">{single ? "Leave unchanged" : "Leave each as-is"}</option><option value="on">⭐ Favorite</option><option value="off">Not favorite</option></select></label>
+   <label className="block text-xs">Patreon intent<select className={inputClass} value={intent} onChange={e=>setIntent(e.target.value)}><option value="">{single ? "Leave unchanged" : "Leave each as-is"}</option><option value="unset">Unset</option><option value="free">Free</option><option value="paid">Paid</option></select></label>
+   <button className={buttonClass} disabled={busy || (!replaceTags && !favorite && !intent)}>{busy ? "Saving…" : "Save labels"}</button>
+ </form>;
 }
 function LifecycleForm({target,sessions,busy,onSubmit}:{target:{entity:"asset"|"session";operation:"archive"|"move"|"restore";assets?:Asset[];session?:Session};sessions:Session[];busy:boolean;onSubmit:(input:Record<string,unknown>)=>void}) {
  const [reason,setReason]=useState("");const [destination,setDestination]=useState("");const [status,setStatus]=useState("active");

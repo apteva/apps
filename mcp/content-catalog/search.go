@@ -62,11 +62,14 @@ type searchOptions struct {
 	ProjectID, EntityType, Query, BrandID, SessionID, DateFrom, DateTo       string
 	Kind, Lineage, Sort, ReviewStatus, Destination, AccountRef, Availability string
 	Lifecycle                                                                string
+	Tag                                                                      string
+	Favorite                                                                 *bool
+	PatreonIntent                                                            string
 	Limit                                                                    int
 }
 
 func parseSearchOptions(pid string, args map[string]any) (searchOptions, error) {
-	o := searchOptions{ProjectID: pid, EntityType: str(args, "entity_type"), Query: strings.TrimSpace(str(args, "query")), BrandID: str(args, "brand_id"), SessionID: str(args, "session_id"), DateFrom: str(args, "date_from"), DateTo: str(args, "date_to"), Kind: str(args, "kind"), Lineage: str(args, "lineage"), Sort: str(args, "sort"), ReviewStatus: str(args, "review_status"), Destination: str(args, "destination"), AccountRef: str(args, "account_ref"), Availability: str(args, "availability"), Limit: 30}
+	o := searchOptions{ProjectID: pid, EntityType: str(args, "entity_type"), Query: strings.TrimSpace(str(args, "query")), BrandID: str(args, "brand_id"), SessionID: str(args, "session_id"), DateFrom: str(args, "date_from"), DateTo: str(args, "date_to"), Kind: str(args, "kind"), Lineage: str(args, "lineage"), Sort: str(args, "sort"), ReviewStatus: str(args, "review_status"), Destination: str(args, "destination"), AccountRef: str(args, "account_ref"), Availability: str(args, "availability"), Tag: strings.ToLower(strings.TrimSpace(str(args, "tag"))), PatreonIntent: str(args, "patreon_intent"), Limit: 30}
 	var err error
 	o.Lifecycle, err = lifecycleScope(args)
 	if err != nil {
@@ -77,6 +80,19 @@ func parseSearchOptions(pid string, args map[string]any) (searchOptions, error) 
 	}
 	if o.Availability == "" {
 		o.Availability = "any"
+	}
+	if o.PatreonIntent != "" && !oneOf(o.PatreonIntent, "unset", "free", "paid") {
+		return o, errors.New("patreon_intent must be unset, free, or paid")
+	}
+	if o.Tag != "" && (len(o.Tag) > 64 || strings.ContainsAny(o.Tag, " ,\t\r\n")) {
+		return o, errors.New("invalid tag")
+	}
+	if raw, ok := args["favorite"]; ok {
+		v, ok := raw.(bool)
+		if !ok {
+			return o, errors.New("favorite must be boolean")
+		}
+		o.Favorite = &v
 	}
 	if o.Sort == "" {
 		o.Sort = "session_newest"
@@ -211,7 +227,7 @@ func (a *App) search(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		out["assets"] = page
 	}
 	// Asset-only filters do not silently change the meaning of a session or release result.
-	assetOnly := o.Kind != "" || o.Lineage != "" || o.ReviewStatus != "" || o.Availability != "any" || o.SessionID != ""
+	assetOnly := o.Kind != "" || o.Lineage != "" || o.ReviewStatus != "" || o.Availability != "any" || o.SessionID != "" || o.Tag != "" || o.Favorite != nil || o.PatreonIntent != ""
 	if assetOnly && (o.EntityType == "sessions" || o.EntityType == "releases") {
 		return nil, errors.New("file filters require entity_type assets or all")
 	}
@@ -244,7 +260,7 @@ func (a *App) search(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 func (a *App) searchAssets(db *sql.DB, o searchOptions, cursor searchCursor) (searchPage[assetSearchHit], error) {
 	page := searchPage[assetSearchHit]{Items: []assetSearchHit{}}
-	q := `SELECT a.id,a.session_id,a.storage_install_id,a.storage_file_id,a.name,a.kind,a.content_type,a.sha256,a.size_bytes,a.review_status,a.media_status,a.media_rating,s.brand_id,s.title,s.session_date,a.created_at,s.notes,EXISTS(SELECT 1 FROM asset_sources src WHERE src.project_id=a.project_id AND src.child_asset_id=a.id)
+	q := `SELECT a.id,a.session_id,a.storage_install_id,a.storage_file_id,a.name,a.kind,a.content_type,a.sha256,a.size_bytes,a.review_status,a.media_status,a.media_rating,a.favorite,a.patreon_intent,s.brand_id,s.title,s.session_date,a.created_at,s.notes,EXISTS(SELECT 1 FROM asset_sources src WHERE src.project_id=a.project_id AND src.child_asset_id=a.id)
 		FROM assets a JOIN sessions s ON s.id=a.session_id AND s.project_id=a.project_id WHERE a.project_id=?`
 	q += lifecyclePredicate(o.Lifecycle, "a", "s")
 	values := []any{o.ProjectID}
@@ -282,6 +298,22 @@ func (a *App) searchAssets(db *sql.DB, o searchOptions, cursor searchCursor) (se
 	if o.ReviewStatus != "" {
 		q += ` AND a.review_status=?`
 		values = append(values, o.ReviewStatus)
+	}
+	if o.Tag != "" {
+		q += ` AND EXISTS (SELECT 1 FROM asset_tags at WHERE at.project_id=a.project_id AND at.asset_id=a.id AND at.tag=?)`
+		values = append(values, o.Tag)
+	}
+	if o.Favorite != nil {
+		q += ` AND a.favorite=?`
+		if *o.Favorite {
+			values = append(values, 1)
+		} else {
+			values = append(values, 0)
+		}
+	}
+	if o.PatreonIntent != "" {
+		q += ` AND a.patreon_intent=?`
+		values = append(values, o.PatreonIntent)
 	}
 	sortDate := "s.session_date"
 	if o.Sort == "asset_newest" {
@@ -336,7 +368,7 @@ func (a *App) searchAssets(db *sql.DB, o searchOptions, cursor searchCursor) (se
 	defer rows.Close()
 	for rows.Next() {
 		var h assetSearchHit
-		if err := rows.Scan(&h.ID, &h.SessionID, &h.StorageInstallID, &h.StorageFileID, &h.Name, &h.Kind, &h.ContentType, &h.SHA256, &h.SizeBytes, &h.ReviewStatus, &h.MediaStatus, &h.MediaRating, &h.BrandID, &h.SessionTitle, &h.SessionDate, &h.AttachedAt, &h.SessionNotes, &h.IsDerivative); err != nil {
+		if err := rows.Scan(&h.ID, &h.SessionID, &h.StorageInstallID, &h.StorageFileID, &h.Name, &h.Kind, &h.ContentType, &h.SHA256, &h.SizeBytes, &h.ReviewStatus, &h.MediaStatus, &h.MediaRating, &h.Favorite, &h.PatreonIntent, &h.BrandID, &h.SessionTitle, &h.SessionDate, &h.AttachedAt, &h.SessionNotes, &h.IsDerivative); err != nil {
 			return page, err
 		}
 		h.Uses = []searchUse{}
@@ -362,6 +394,9 @@ func (a *App) searchAssets(db *sql.DB, o searchOptions, cursor searchCursor) (se
 		assetRefs[i] = &page.Items[i].Asset
 	}
 	if err := loadAssetLifecycle(db, o.ProjectID, assetRefs); err != nil {
+		return page, err
+	}
+	if err := loadAssetLabels(db, o.ProjectID, assetRefs); err != nil {
 		return page, err
 	}
 	if err := loadAssetHostings(db, o.ProjectID, assetRefs); err != nil {
