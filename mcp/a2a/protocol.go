@@ -577,11 +577,7 @@ func (a *App) startRemoteTaskInContext(ctx context.Context, app *sdk.AppCtx, fro
 		}
 		emitTask(app, "task.created", task)
 		emitTask(app, "task.updated", task, reply)
-		return map[string]any{
-			"task_id": task.ID, "delivered": true, "status": "completed", "reply": reply,
-			"to":   map[string]any{"address": "a2a:" + remote.Ref, "name": remote.Name, "peer": peer.Name},
-			"note": "the public agent replied synchronously; the exchange is complete",
-		}, nil
+		return asyncAskResult(app, task, map[string]any{"address": "a2a:" + remote.Ref, "name": remote.Name, "peer": peer.Name}, reply), nil
 	}
 	if response.ID == "" {
 		_ = setTaskStatus(app.AppDB(), from.ProjectID, task.ID, "failed")
@@ -596,19 +592,14 @@ func (a *App) startRemoteTaskInContext(ctx context.Context, app *sdk.AppCtx, fro
 		}
 	}
 	emitTask(app, "task.created", task)
-	note := "message accepted by remote agent; no reply is expected"
-	if !oneWay {
-		if openStatuses[task.Status] {
-			note = fmt.Sprintf("request accepted as task %d; further replies arrive asynchronously", task.ID)
-		} else {
-			note = "remote task finished; the result is recorded in the task ledger"
-		}
+	if oneWay {
+		return map[string]any{
+			"task_id": task.ID, "delivered": true, "status": task.Status,
+			"to":   map[string]any{"address": "a2a:" + remote.Ref, "name": remote.Name, "peer": peer.Name},
+			"note": "message accepted by remote agent; no reply is expected",
+		}, nil
 	}
-	return map[string]any{
-		"task_id": task.ID, "delivered": true, "status": task.Status,
-		"to":   map[string]any{"address": "a2a:" + remote.Ref, "name": remote.Name, "peer": peer.Name},
-		"note": note,
-	}, nil
+	return asyncAskResult(app, task, map[string]any{"address": "a2a:" + remote.Ref, "name": remote.Name, "peer": peer.Name}, ""), nil
 }
 
 func resolveRemoteAddress(app *sdk.AppCtx, raw string) (*remoteAgent, error) {

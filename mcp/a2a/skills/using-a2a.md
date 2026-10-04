@@ -15,9 +15,9 @@ First classify the request against your own directive and the work required.
   its directive and current ownership clearly match this request. Otherwise
   create one focused worker with the platform `spawn` tool and only the tools
   it needs.
-- Never hand A2A work to an arbitrary idle or generic conversation worker just
-  because it is available. A conversation thread that has no responsibility
-  for this request is not a valid owner.
+- Never hand A2A work to an arbitrary idle or generic worker just because it is
+  available. A worker that has no responsibility for this request is not a
+  valid owner.
 
 ## Delegate without losing the task
 

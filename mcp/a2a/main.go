@@ -29,7 +29,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: a2a
 display_name: Agent to Agent
-version: 0.6.5
+version: 0.6.6
 description: |
   Agent-to-agent communication within and between Apteva installations.
   Automatically generates Agent Cards for attached local agents, discovers
@@ -63,7 +63,7 @@ provides:
     - { name: agent_get,      description: "Optionally inspect the full Agent Card for an address returned by agents_discover." }
     - { name: agent_send,  description: "Send a one-way message to another agent, or add a message to an existing task." }
     - name: agent_ask
-      description: "Ask another agent to do something; progress and the final reply arrive later as [a2a] events. The recipient main thread owns dispatch: it handles small requests directly or assigns larger work to a suitable focused worker, never an arbitrary idle conversation thread."
+      description: "Ask another agent to do something. Returns a normal result immediately with accepted=true, task_id, status, pending, and reply_expected; accepted/delivered means the request was handed off, not that the work is complete. A pending task later produces correlated progress or terminal task events through the platform. The recipient main thread owns dispatch: it handles small requests directly or assigns larger work to a suitable focused worker, never an arbitrary idle thread."
       async_result:
         id_field: task_id
         notify:
@@ -104,7 +104,7 @@ provides:
         icon: arrow-left-right
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: a2a/v0.6.5, entry: mcp/a2a }
+  source: { repo: github.com/apteva/apps, ref: a2a/v0.6.6, entry: mcp/a2a }
   port: 8080
   health_check: /health
 db:
@@ -265,11 +265,12 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "agent_ask",
-			Description: "Ask a local or remote agent to do something. Creates an a2a task, delivers the request, " +
-				"and returns immediately with the task id. The recipient's main thread owns dispatch: it should handle a small, " +
-				"self-contained request directly, or reuse a suitable worker / spawn a focused worker for larger work. Do not route " +
-				"A2A work to an arbitrary idle or generic conversation thread. The reply arrives later as an [a2a] event — do not " +
-				"block or poll for it; continue other work or pace. Pass the actionable address from agents_discover; local ids and exact local names also work.",
+			Description: "Ask a local or remote agent to do something. Returns a normal result immediately with accepted=true, " +
+				"task_id, status, pending, reply_expected, and generic event-correlation metadata. accepted/delivered means the " +
+				"request was handed off, not that the work is complete; later progress or terminal task events use task_id. The " +
+				"recipient's main thread owns dispatch: it should handle a small, self-contained request directly, or reuse a suitable " +
+				"worker / spawn a focused worker for larger work. Do not route A2A work to an arbitrary idle thread. Pass the actionable " +
+				"address from agents_discover; local ids and exact local names also work.",
 			InputSchema: schemaObject(map[string]any{
 				"to":      map[string]any{"type": "string", "description": "Actionable address returned by agents_discover, local agent id, or exact local name."},
 				"message": map[string]any{"type": "string", "description": "Complete, self-contained request: objective, constraints, and what a good answer looks like."},
@@ -283,7 +284,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"status=failed reports you cannot help; status=working sends a progress note for long work. " +
 				"The recipient main thread dispatches incoming work. If it delegates to a worker, that worker must first call " +
 				"status=working on this same task to claim responder-thread ownership, then send the terminal reply here; do not " +
-				"use an arbitrary idle conversation thread. " +
+				"use an arbitrary idle thread. " +
 				"If you are the requester of an open task you may pass status=canceled to withdraw it.",
 			InputSchema: schemaObject(map[string]any{
 				"task_id": map[string]any{"type": "string", "description": "The a2a task id from the [a2a task:N] event."},
@@ -800,12 +801,7 @@ func (a *App) toolAsk(ctx context.Context, app *sdk.AppCtx, args map[string]any)
 	}
 	_ = recordMessage(app.AppDB(), task.ID, from.AgentID, target.ID, message, "submitted")
 	emitTask(app, "task.created", task)
-	return map[string]any{
-		"task_id":   task.ID,
-		"delivered": true,
-		"to":        map[string]any{"id": target.ID, "name": target.Name},
-		"note":      fmt.Sprintf("request delivered as task %d; the reply arrives later as an [a2a] event — continue other work, do not poll", task.ID),
-	}, nil
+	return asyncAskResult(app, task, map[string]any{"id": target.ID, "name": target.Name}, ""), nil
 }
 
 // sendFollowUp appends a message to an existing task and delivers it
@@ -1062,7 +1058,7 @@ func formatAskEvent(task *Task, message string) string {
 	return fmt.Sprintf(
 		"[a2a task:%d] Request from agent %q (id %d) — a reply is awaited.\n---\n%s\n---\n%s "+
 			"You are the recipient's main dispatcher. If this is small and self-contained, handle it here and call agent_reply(task_id=\"%d\", message=\"<result>\", status=\"completed\"). "+
-			"If it is larger, multi-step, tool-heavy, or long-running, deliberately reuse a suitable existing worker or spawn one focused worker with only the tools it needs; never forward it to an arbitrary idle or generic conversation thread. "+
+			"If it is larger, multi-step, tool-heavy, or long-running, deliberately reuse a suitable existing worker or spawn one focused worker with only the tools it needs; never forward it to an arbitrary idle or generic worker. "+
 			"Send the worker this exact task and require it to claim ownership first with agent_reply(task_id=\"%d\", status=\"working\", message=\"I own this request and will report the result here.\"). "+
 			"The worker must finish on this same task with status=\"completed\", \"input_required\", or \"failed\". "+
 			"Use status=\"input_required\" to ask the requester a question, status=\"failed\" if you cannot help, or status=\"working\" for progress on long work.",

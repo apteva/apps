@@ -153,6 +153,16 @@ func TestAskDeliversAndReplyRoutesToAskingThread(t *testing.T) {
 	res := resultMap(t)(app.toolAsk(callerCtx(41, "th-9"), ctx, map[string]any{
 		"to": "42", "message": "Summarize this week's leads.",
 	}))
+	if res["accepted"] != true || res["pending"] != true || res["reply_expected"] != true {
+		t.Fatalf("ask handoff result = %#v, want accepted pending reply_expected", res)
+	}
+	if res["status"] != "submitted" || res["delivery_status"] != "delivered" {
+		t.Fatalf("ask handoff state = %#v", res)
+	}
+	updates, ok := res["updates"].(map[string]any)
+	if !ok || updates["id_field"] != "task_id" {
+		t.Fatalf("ask update correlation = %#v", res["updates"])
+	}
 	taskID := res["task_id"].(int64)
 	ev := platform.lastEvent(t)
 	if ev.AgentID != 42 {
@@ -197,6 +207,19 @@ func TestAskDeliversAndReplyRoutesToAskingThread(t *testing.T) {
 	}
 }
 
+func TestAsyncAskResultCompletedIsNormalGenericResult(t *testing.T) {
+	result := asyncAskResult(nil, &Task{ID: 12, Kind: "ask", Status: "completed"}, map[string]any{"id": int64(42)}, "done")
+	if result["accepted"] != true || result["pending"] != false || result["reply_expected"] != false {
+		t.Fatalf("completed result = %#v", result)
+	}
+	if result["reply"] != "done" || result["delivery_status"] != "delivered" {
+		t.Fatalf("completed result fields = %#v", result)
+	}
+	if strings.Contains(strings.ToLower(fmt.Sprint(result)), "conversation") {
+		t.Fatalf("completed result contains conversation-specific wording: %#v", result)
+	}
+}
+
 func TestAskContractExplainsRecipientDispatch(t *testing.T) {
 	app := &App{}
 	var ask, reply string
@@ -208,7 +231,7 @@ func TestAskContractExplainsRecipientDispatch(t *testing.T) {
 			reply = tool.Description
 		}
 	}
-	for _, want := range []string{"recipient's main thread owns dispatch", "focused worker", "arbitrary idle"} {
+	for _, want := range []string{"normal result immediately", "accepted=true", "reply_expected", "recipient's main thread owns dispatch", "focused worker", "arbitrary idle"} {
 		if !strings.Contains(ask, want) {
 			t.Fatalf("agent_ask description missing %q: %s", want, ask)
 		}
