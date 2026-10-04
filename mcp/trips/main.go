@@ -656,6 +656,9 @@ type TripDashboard struct {
 // ─── Trips ───────────────────────────────────────────────────────
 
 func (a *App) toolTripsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	pid := projectID()
 	includeArchived, _ := args["include_archived"].(bool)
 	q := `SELECT id, project_id, name, purpose, status, start_at, end_at,
@@ -696,6 +699,9 @@ func (a *App) toolTripsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolTripsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		return nil, errors.New("id required")
@@ -704,6 +710,9 @@ func (a *App) toolTripsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolTripsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	name := strings.TrimSpace(strArg(args, "name", ""))
 	startAt := strArg(args, "start_at", "")
 	endAt := strArg(args, "end_at", "")
@@ -784,6 +793,9 @@ func (a *App) toolTripsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 }
 
 func (a *App) toolTripsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		return nil, errors.New("id required")
@@ -951,6 +963,9 @@ func (a *App) toolTripsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 }
 
 func (a *App) toolTripsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		return nil, errors.New("id required")
@@ -1007,7 +1022,7 @@ func readTrip(ctx *sdk.AppCtx, id int64) (Trip, error) {
 		`SELECT id, project_id, name, purpose, status, start_at, end_at,
 		        home_currency, total_budget, participants, notes, color,
 		        calendar_id, calendar_event_id, sync_calendar, archived, created_at, updated_at
-		 FROM trips WHERE id=?`, id,
+		 FROM trips WHERE id=? AND project_id=?`, id, projectID(),
 	)
 	return scanTrip(row)
 }
@@ -1017,6 +1032,9 @@ type rowScanner interface{ Scan(...any) error }
 // ─── Destinations ────────────────────────────────────────────────
 
 func (a *App) toolDestinationsAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	tripID := int64(intArg(args, "trip_id", 0))
 	name := strings.TrimSpace(strArg(args, "place_name", ""))
 	arriveAt := strArg(args, "arrive_at", "")
@@ -1070,6 +1088,9 @@ func (a *App) toolDestinationsAdd(ctx *sdk.AppCtx, args map[string]any) (any, er
 }
 
 func (a *App) toolDestinationsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		return nil, errors.New("id required")
@@ -1152,6 +1173,7 @@ func (a *App) toolDestinationsUpdate(ctx *sdk.AppCtx, args map[string]any) (any,
 	}
 	dest, _ := readDestination(ctx, id)
 	if trip, err := readTrip(ctx, dest.TripID); err == nil {
+		_ = ensureSharedCalendar(ctx, &trip)
 		mirrorDestinationEvent(ctx, trip, &dest)
 	}
 	emitTripEvent(ctx, "destination.updated", dest.TripID, "destination", id, nil)
@@ -1159,6 +1181,9 @@ func (a *App) toolDestinationsUpdate(ctx *sdk.AppCtx, args map[string]any) (any,
 }
 
 func (a *App) toolDestinationsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		return nil, errors.New("id required")
@@ -1179,39 +1204,71 @@ func (a *App) toolDestinationsDelete(ctx *sdk.AppCtx, args map[string]any) (any,
 }
 
 func (a *App) toolDestinationsReorder(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	tripID := int64(intArg(args, "trip_id", 0))
+	if _, err := readTrip(ctx, tripID); err != nil {
+		return nil, err
+	}
 	order, ok := args["order"].([]any)
-	if tripID == 0 || !ok {
-		return nil, errors.New("trip_id and order (array of ids) required")
+	if !ok {
+		return nil, errors.New("order must contain every destination ID exactly once")
 	}
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-	for i, v := range order {
-		destID := int64(intArgFromAny(v, 0))
-		if destID == 0 {
-			continue
+	rows, err := tx.Query(`SELECT id FROM destinations WHERE trip_id=?`, tripID)
+	if err != nil {
+		return nil, err
+	}
+	expected := map[int64]bool{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
 		}
-		if _, err := tx.Exec(
-			`UPDATE destinations SET order_idx=? WHERE id=? AND trip_id=?`,
-			i, destID, tripID,
-		); err != nil {
+		expected[id] = true
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	if len(order) != len(expected) {
+		return nil, errors.New("order must contain every destination ID exactly once")
+	}
+	ids := make([]int64, len(order))
+	for i, value := range order {
+		id, err := favoriteInteger(value, "destination ID")
+		if err != nil {
+			return nil, err
+		}
+		if !expected[id] {
+			return nil, errors.New("order contains a duplicate or a destination from another trip")
+		}
+		delete(expected, id)
+		ids[i] = id
+	}
+	for i, id := range ids {
+		if _, err := tx.Exec(`UPDATE destinations SET order_idx=? WHERE id=? AND trip_id=?`, i, id, tripID); err != nil {
 			return nil, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	emitTripEvent(ctx, "destination.reordered", tripID, "destination", 0, map[string]any{"count": len(order)})
-	return map[string]any{"reordered": len(order)}, nil
+	emitTripEvent(ctx, "destination.reordered", tripID, "destination", 0, map[string]any{"count": len(ids)})
+	return map[string]any{"reordered": len(ids)}, nil
 }
 
 func readDestination(ctx *sdk.AppCtx, id int64) (Destination, error) {
 	row := ctx.AppDB().QueryRow(
 		`SELECT id, trip_id, place_name, country, lat, lng, arrive_at, depart_at, order_idx, notes, calendar_event_id, created_at
-		 FROM destinations WHERE id=?`, id,
+		 FROM destinations WHERE id=? AND trip_id IN (SELECT id FROM trips WHERE project_id=?)`, id, projectID(),
 	)
 	return scanDestination(row)
 }
@@ -1265,6 +1322,9 @@ func listDestinationsByTrip(ctx *sdk.AppCtx, tripID int64) ([]Destination, error
 // ─── Transport ───────────────────────────────────────────────────
 
 func (a *App) toolTransportLegsAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	tripID := int64(intArg(args, "trip_id", 0))
 	if tripID == 0 {
 		return nil, errors.New("trip_id required")
@@ -1344,6 +1404,9 @@ func (a *App) toolTransportLegsAdd(ctx *sdk.AppCtx, args map[string]any) (any, e
 }
 
 func (a *App) toolTransportLegsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		return nil, errors.New("id required")
@@ -1457,6 +1520,9 @@ func (a *App) toolTransportLegsUpdate(ctx *sdk.AppCtx, args map[string]any) (any
 }
 
 func (a *App) toolTransportLegsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		return nil, errors.New("id required")
@@ -1476,9 +1542,15 @@ func (a *App) toolTransportLegsDelete(ctx *sdk.AppCtx, args map[string]any) (any
 }
 
 func (a *App) toolTransportLegsMarkBooked(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		return nil, errors.New("id required")
+	}
+	if _, err := readTransport(ctx, id); err != nil {
+		return nil, err
 	}
 	cols := []string{"booked=1"}
 	vals := []any{}
@@ -1514,7 +1586,7 @@ func readTransport(ctx *sdk.AppCtx, id int64) (TransportLeg, error) {
 		        kind, provider, reference, depart_at, arrive_at, depart_location, arrive_location,
 		        cost_estimated, cost_actual, currency, confirmation_number, booked, notes,
 		        calendar_event_id, created_at, updated_at
-		 FROM transport_legs WHERE id=?`, id,
+		 FROM transport_legs WHERE id=? AND trip_id IN (SELECT id FROM trips WHERE project_id=?)`, id, projectID(),
 	)
 	return scanTransport(row)
 }
@@ -1689,6 +1761,9 @@ func (a *App) toolAccommodationsAdd(ctx *sdk.AppCtx, args map[string]any) (any, 
 }
 
 func (a *App) addAccommodation(ctx *sdk.AppCtx, args map[string]any, favoriteID int64) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	tripID := int64(intArg(args, "trip_id", 0))
 	if tripID == 0 {
 		return nil, errors.New("trip_id required")
@@ -1768,6 +1843,9 @@ func (a *App) addAccommodation(ctx *sdk.AppCtx, args map[string]any, favoriteID 
 }
 
 func (a *App) toolAccommodationsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		return nil, errors.New("id required")
@@ -1888,6 +1966,9 @@ func (a *App) toolAccommodationsUpdate(ctx *sdk.AppCtx, args map[string]any) (an
 }
 
 func (a *App) toolAccommodationsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		return nil, errors.New("id required")
@@ -1907,9 +1988,15 @@ func (a *App) toolAccommodationsDelete(ctx *sdk.AppCtx, args map[string]any) (an
 }
 
 func (a *App) toolAccommodationsMarkBooked(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		return nil, errors.New("id required")
+	}
+	if _, err := readAccommodation(ctx, id); err != nil {
+		return nil, err
 	}
 	cols := []string{"booked=1"}
 	vals := []any{}
@@ -1944,7 +2031,7 @@ func readAccommodation(ctx *sdk.AppCtx, id int64) (Accommodation, error) {
 		`SELECT id, trip_id, COALESCE(destination_id,0), name, kind, address, check_in_at,
 		        check_out_at, cost_estimated, cost_actual, currency, confirmation_number,
 		        booked, notes, calendar_event_id, created_at, updated_at
-		 FROM accommodations WHERE id=?`, id,
+		 FROM accommodations WHERE id=? AND trip_id IN (SELECT id FROM trips WHERE project_id=?)`, id, projectID(),
 	)
 	return scanAccommodation(row)
 }
@@ -2003,6 +2090,9 @@ func listAccommodationsByTrip(ctx *sdk.AppCtx, tripID int64) ([]Accommodation, e
 // ─── Activities ──────────────────────────────────────────────────
 
 func (a *App) toolActivitiesAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	tripID := int64(intArg(args, "trip_id", 0))
 	if tripID == 0 {
 		return nil, errors.New("trip_id required")
@@ -2077,6 +2167,9 @@ func (a *App) toolActivitiesAdd(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 func (a *App) toolActivitiesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		return nil, errors.New("id required")
@@ -2198,6 +2291,9 @@ func (a *App) toolActivitiesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, e
 }
 
 func (a *App) toolActivitiesDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		return nil, errors.New("id required")
@@ -2217,9 +2313,15 @@ func (a *App) toolActivitiesDelete(ctx *sdk.AppCtx, args map[string]any) (any, e
 }
 
 func (a *App) toolActivitiesMarkBooked(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		return nil, errors.New("id required")
+	}
+	if _, err := readActivity(ctx, id); err != nil {
+		return nil, err
 	}
 	cols := []string{"booked=1"}
 	vals := []any{}
@@ -2251,7 +2353,7 @@ func readActivity(ctx *sdk.AppCtx, id int64) (Activity, error) {
 		        COALESCE(start_at,''), COALESCE(end_at,''), location,
 		        cost_estimated, cost_actual, currency, booked, notes,
 		        calendar_event_id, created_at, updated_at
-		 FROM activities WHERE id=?`, id,
+		 FROM activities WHERE id=? AND trip_id IN (SELECT id FROM trips WHERE project_id=?)`, id, projectID(),
 	)
 	return scanActivity(row)
 }
@@ -2307,9 +2409,15 @@ func listActivitiesByTrip(ctx *sdk.AppCtx, tripID int64) ([]Activity, error) {
 // ─── Todos ───────────────────────────────────────────────────────
 
 func (a *App) toolTodosList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	tripID := int64(intArg(args, "trip_id", 0))
 	if tripID == 0 {
 		return nil, errors.New("trip_id required")
+	}
+	if _, err := readTrip(ctx, tripID); err != nil {
+		return nil, err
 	}
 	includeDone, _ := args["include_done"].(bool)
 	q := `SELECT id, trip_id, label, COALESCE(due_at,''), done, COALESCE(done_at,''), created_at
@@ -2335,6 +2443,9 @@ func (a *App) toolTodosList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolTodosAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	tripID := int64(intArg(args, "trip_id", 0))
 	label := strings.TrimSpace(strArg(args, "label", ""))
 	if tripID == 0 || label == "" {
@@ -2368,6 +2479,9 @@ func (a *App) toolTodosAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolTodosToggle(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		return nil, errors.New("id required")
@@ -2396,6 +2510,9 @@ func (a *App) toolTodosToggle(ctx *sdk.AppCtx, args map[string]any) (any, error)
 }
 
 func (a *App) toolTodosDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		return nil, errors.New("id required")
@@ -2414,7 +2531,7 @@ func (a *App) toolTodosDelete(ctx *sdk.AppCtx, args map[string]any) (any, error)
 func readTodo(ctx *sdk.AppCtx, id int64) (Todo, error) {
 	row := ctx.AppDB().QueryRow(
 		`SELECT id, trip_id, label, COALESCE(due_at,''), done, COALESCE(done_at,''), created_at
-		 FROM todos WHERE id=?`, id,
+		 FROM todos WHERE id=? AND trip_id IN (SELECT id FROM trips WHERE project_id=?)`, id, projectID(),
 	)
 	return scanTodo(row)
 }
@@ -2452,6 +2569,9 @@ func listTodosByTrip(ctx *sdk.AppCtx, tripID int64) ([]Todo, error) {
 // ─── Budget ──────────────────────────────────────────────────────
 
 func (a *App) toolBudgetSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	tripID := int64(intArg(args, "trip_id", 0))
 	category := strArg(args, "category", "")
 	amount := int64(intArg(args, "amount", 0))
@@ -2492,6 +2612,9 @@ func (a *App) toolBudgetSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolBudgetSummary(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	tripID := int64(intArg(args, "trip_id", 0))
 	if tripID == 0 {
 		return nil, errors.New("trip_id required")
@@ -2653,6 +2776,9 @@ func computeBudgetSummaryFromItems(ctx *sdk.AppCtx, trip Trip, legs []TransportL
 // ─── Dashboard ───────────────────────────────────────────────────
 
 func (a *App) toolDashboard(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	tripID := int64(intArg(args, "trip_id", 0))
 	if tripID == 0 {
 		return nil, errors.New("trip_id required")
@@ -2661,11 +2787,26 @@ func (a *App) toolDashboard(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	dests, _ := listDestinationsByTrip(ctx, tripID)
-	legs, _ := listTransportByTrip(ctx, tripID)
-	accs, _ := listAccommodationsByTrip(ctx, tripID)
-	acts, _ := listActivitiesByTrip(ctx, tripID)
-	todos, _ := listTodosByTrip(ctx, tripID)
+	dests, err := listDestinationsByTrip(ctx, tripID)
+	if err != nil {
+		return nil, err
+	}
+	legs, err := listTransportByTrip(ctx, tripID)
+	if err != nil {
+		return nil, err
+	}
+	accs, err := listAccommodationsByTrip(ctx, tripID)
+	if err != nil {
+		return nil, err
+	}
+	acts, err := listActivitiesByTrip(ctx, tripID)
+	if err != nil {
+		return nil, err
+	}
+	todos, err := listTodosByTrip(ctx, tripID)
+	if err != nil {
+		return nil, err
+	}
 	budget, err := computeBudgetSummaryFromItems(ctx, trip, legs, accs, acts)
 	if err != nil {
 		return nil, err
@@ -3007,7 +3148,9 @@ func (a *App) handleTrips(w http.ResponseWriter, r *http.Request) {
 		writeOrErr(w, out, err)
 	case http.MethodPost:
 		body := map[string]any{}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if !decodeRequestBody(w, r, &body) {
+			return
+		}
 		out, err := a.toolTripsCreate(globalCtx, body)
 		writeOrErr(w, out, err)
 	default:
@@ -3033,7 +3176,9 @@ func (a *App) handleTripsItem(w http.ResponseWriter, r *http.Request) {
 		writeOrErr(w, out, err)
 	case http.MethodPatch, http.MethodPut:
 		body := map[string]any{}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if !decodeRequestBody(w, r, &body) {
+			return
+		}
 		body["id"] = id
 		out, err := a.toolTripsUpdate(globalCtx, body)
 		writeOrErr(w, out, err)
@@ -3052,7 +3197,9 @@ func (a *App) handleDestinations(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
 		body := map[string]any{}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if !decodeRequestBody(w, r, &body) {
+			return
+		}
 		out, err := a.toolDestinationsAdd(globalCtx, body)
 		writeOrErr(w, out, err)
 	default:
@@ -3074,7 +3221,9 @@ func (a *App) handleDestinationsItem(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPatch, http.MethodPut:
 		body := map[string]any{}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if !decodeRequestBody(w, r, &body) {
+			return
+		}
 		body["id"] = id
 		out, err := a.toolDestinationsUpdate(globalCtx, body)
 		writeOrErr(w, out, err)
@@ -3099,13 +3248,19 @@ func (a *App) handleTransportLegs(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleTransportLegsItem(w http.ResponseWriter, r *http.Request) {
 	if strings.HasSuffix(r.URL.Path, "/booked") {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST", http.StatusMethodNotAllowed)
+			return
+		}
 		id, ok := pathID(strings.TrimSuffix(r.URL.Path, "/booked"), "/transport-legs/")
 		if !ok {
 			http.Error(w, "id required", http.StatusBadRequest)
 			return
 		}
 		body := map[string]any{"id": id}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if !decodeRequestBody(w, r, &body) {
+			return
+		}
 		body["id"] = id
 		out, err := a.toolTransportLegsMarkBooked(globalCtx, body)
 		writeOrErr(w, out, err)
@@ -3119,7 +3274,9 @@ func (a *App) handleTransportLegsItem(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPatch, http.MethodPut:
 		body := map[string]any{}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if !decodeRequestBody(w, r, &body) {
+			return
+		}
 		body["id"] = id
 		out, err := a.toolTransportLegsUpdate(globalCtx, body)
 		writeOrErr(w, out, err)
@@ -3140,13 +3297,19 @@ func (a *App) handleAccommodations(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleAccommodationsItem(w http.ResponseWriter, r *http.Request) {
 	if strings.HasSuffix(r.URL.Path, "/booked") {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST", http.StatusMethodNotAllowed)
+			return
+		}
 		id, ok := pathID(strings.TrimSuffix(r.URL.Path, "/booked"), "/accommodations/")
 		if !ok {
 			http.Error(w, "id required", http.StatusBadRequest)
 			return
 		}
 		body := map[string]any{"id": id}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if !decodeRequestBody(w, r, &body) {
+			return
+		}
 		body["id"] = id
 		out, err := a.toolAccommodationsMarkBooked(globalCtx, body)
 		writeOrErr(w, out, err)
@@ -3160,7 +3323,9 @@ func (a *App) handleAccommodationsItem(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPatch, http.MethodPut:
 		body := map[string]any{}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if !decodeRequestBody(w, r, &body) {
+			return
+		}
 		body["id"] = id
 		out, err := a.toolAccommodationsUpdate(globalCtx, body)
 		writeOrErr(w, out, err)
@@ -3181,13 +3346,19 @@ func (a *App) handleActivities(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleActivitiesItem(w http.ResponseWriter, r *http.Request) {
 	if strings.HasSuffix(r.URL.Path, "/booked") {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST", http.StatusMethodNotAllowed)
+			return
+		}
 		id, ok := pathID(strings.TrimSuffix(r.URL.Path, "/booked"), "/activities/")
 		if !ok {
 			http.Error(w, "id required", http.StatusBadRequest)
 			return
 		}
 		body := map[string]any{"id": id}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if !decodeRequestBody(w, r, &body) {
+			return
+		}
 		body["id"] = id
 		out, err := a.toolActivitiesMarkBooked(globalCtx, body)
 		writeOrErr(w, out, err)
@@ -3201,7 +3372,9 @@ func (a *App) handleActivitiesItem(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPatch, http.MethodPut:
 		body := map[string]any{}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if !decodeRequestBody(w, r, &body) {
+			return
+		}
 		body["id"] = id
 		out, err := a.toolActivitiesUpdate(globalCtx, body)
 		writeOrErr(w, out, err)
@@ -3235,7 +3408,9 @@ func (a *App) handleTodos(w http.ResponseWriter, r *http.Request) {
 		writeOrErr(w, out, err)
 	case http.MethodPost:
 		body := map[string]any{}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if !decodeRequestBody(w, r, &body) {
+			return
+		}
 		out, err := a.toolTodosAdd(globalCtx, body)
 		writeOrErr(w, out, err)
 	default:
@@ -3245,6 +3420,10 @@ func (a *App) handleTodos(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleTodosItem(w http.ResponseWriter, r *http.Request) {
 	if strings.HasSuffix(r.URL.Path, "/toggle") {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST", http.StatusMethodNotAllowed)
+			return
+		}
 		id, ok := pathID(strings.TrimSuffix(r.URL.Path, "/toggle"), "/todos/")
 		if !ok {
 			http.Error(w, "id required", http.StatusBadRequest)
@@ -3343,6 +3522,9 @@ func (a *App) toolSettingsGet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 }
 
 func (a *App) toolSettingsSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
 	pid := projectID()
 	cols, vals := []string{}, []any{}
 	if v, ok := args["home_airport"].(string); ok {
@@ -3601,6 +3783,20 @@ func kindToPlacesType(kind string) string {
 }
 
 func (a *App) toolSearchPlaces(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validatePlanningArgs(args); err != nil {
+		return nil, err
+	}
+	for _, field := range []string{"limit", "radius"} {
+		if value, ok := args[field]; ok && value != nil {
+			n, err := favoriteInteger(value, field)
+			if err != nil {
+				return nil, err
+			}
+			if field == "radius" && n <= 0 {
+				return nil, errors.New("radius must be positive")
+			}
+		}
+	}
 	settings, _ := loadSettings(ctx)
 	if settings.PlacesConnectionID == 0 {
 		return nil, errors.New("no Google Places connection — set places_connection_id in trips settings (settings_set) or pick one in the panel's Settings dialog")
@@ -3793,19 +3989,25 @@ func (a *App) toolSearchAirports(ctx *sdk.AppCtx, args map[string]any) (any, err
 // ─── Search: flights ─────────────────────────────────────────────
 
 type FlightOffer struct {
-	OfferID          string `json:"offer_id"`
-	Carrier          string `json:"carrier"`
-	CarrierCode      string `json:"carrier_code"`
-	Number           string `json:"number"`
-	DepartAt         string `json:"depart_at"`
-	ArriveAt         string `json:"arrive_at"`
-	Duration         string `json:"duration,omitempty"`
-	DepartLocation   string `json:"depart_location"`
-	ArriveLocation   string `json:"arrive_location"`
-	Stops            int    `json:"stops"`
-	Cabin            string `json:"cabin,omitempty"`
-	TotalAmountCents int64  `json:"total_amount_cents"`
-	Currency         string `json:"currency"`
+	OfferID              string `json:"offer_id"`
+	Carrier              string `json:"carrier"`
+	CarrierCode          string `json:"carrier_code"`
+	Number               string `json:"number"`
+	DepartAt             string `json:"depart_at"`
+	ArriveAt             string `json:"arrive_at"`
+	Duration             string `json:"duration,omitempty"`
+	DepartLocation       string `json:"depart_location"`
+	ArriveLocation       string `json:"arrive_location"`
+	Stops                int    `json:"stops"`
+	Cabin                string `json:"cabin,omitempty"`
+	ReturnDepartAt       string `json:"return_depart_at,omitempty"`
+	ReturnArriveAt       string `json:"return_arrive_at,omitempty"`
+	ReturnDepartLocation string `json:"return_depart_location,omitempty"`
+	ReturnArriveLocation string `json:"return_arrive_location,omitempty"`
+	ReturnDuration       string `json:"return_duration,omitempty"`
+	ReturnStops          int    `json:"return_stops,omitempty"`
+	TotalAmountCents     int64  `json:"total_amount_cents"`
+	Currency             string `json:"currency"`
 }
 
 type TravelPriceObservation struct {
@@ -3873,12 +4075,30 @@ type TravelPriceRouteDate struct {
 }
 
 func (a *App) toolSearchFlights(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	// trip_id=0 means that the search is not attached to a trip, so validate
+	// its type without applying the mutation tools' positive-ID rule.
+	if value, ok := args["trip_id"]; ok && value != nil {
+		tripID, err := favoriteInteger(value, "trip_id")
+		if err != nil || tripID < 0 {
+			if err != nil {
+				return nil, err
+			}
+			return nil, errors.New("trip_id must be nonnegative")
+		}
+	}
+	for _, field := range []string{"passengers", "max_connections"} {
+		if value, ok := args[field]; ok && value != nil {
+			if _, err := favoriteInteger(value, field); err != nil {
+				return nil, err
+			}
+		}
+	}
 	settings, _ := loadSettings(ctx)
 	if settings.DuffelConnectionID == 0 {
 		return nil, errors.New("no Duffel connection — set duffel_connection_id in trips settings")
 	}
-	from := strings.ToUpper(strArg(args, "from", settings.HomeAirport))
-	to := strings.ToUpper(strArg(args, "to", ""))
+	from := strings.ToUpper(strings.TrimSpace(strArg(args, "from", settings.HomeAirport)))
+	to := strings.ToUpper(strings.TrimSpace(strArg(args, "to", "")))
 	depart := strArg(args, "depart_date", "")
 	returnDate := strArg(args, "return_date", "")
 	if from == "" || to == "" || depart == "" {
@@ -3887,11 +4107,41 @@ func (a *App) toolSearchFlights(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if !validIATA(from) || !validIATA(to) {
 		return nil, errors.New("from and to must be 3-letter IATA airport codes")
 	}
+	departDate, err := parseYMDDate(depart)
+	if err != nil {
+		return nil, fmt.Errorf("depart_date: %w", err)
+	}
+	if returnDate != "" {
+		date, err := parseYMDDate(returnDate)
+		if err != nil {
+			return nil, fmt.Errorf("return_date: %w", err)
+		}
+		if date.Before(departDate) {
+			return nil, errors.New("return_date cannot precede depart_date")
+		}
+	}
+	if from == to {
+		return nil, errors.New("origin and destination must differ")
+	}
+	if value, ok := args["trip_id"]; ok && value != nil && intArgFromAny(value, 0) != 0 {
+		if _, err := readTrip(ctx, int64(intArgFromAny(value, 0))); err != nil {
+			return nil, err
+		}
+	}
+	if value, ok := args["passengers"]; ok {
+		n, err := favoriteInteger(value, "passengers")
+		if err != nil || n < 1 || n > 20 {
+			return nil, errors.New("passengers must be an integer from 1 to 20")
+		}
+	}
 	passengers := intArg(args, "passengers", settings.DefaultPassengers)
-	if passengers < 1 {
-		passengers = 1
+	if passengers < 1 || passengers > 20 {
+		return nil, errors.New("passengers must be from 1 to 20")
 	}
 	cabin := strArg(args, "cabin", "economy")
+	if !contains([]string{"economy", "premium_economy", "business", "first"}, cabin) {
+		return nil, errors.New("invalid cabin")
+	}
 	maxConnections := intArg(args, "max_connections", 0)
 	if maxConnections < 0 {
 		maxConnections = 0
@@ -3921,12 +4171,21 @@ func (a *App) toolSearchFlights(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		"supplier_timeout": 10000,
 		"view":             "offers",
 	}
-	key := cacheKey("duffel", settings.DuffelConnectionID, "search_flights", input)
+	key := cacheKey("duffel", settings.DuffelConnectionID, "search_flights_currency_v2", input)
 	if raw, ok := cacheGet(ctx, key); ok {
 		var cached map[string]any
 		if err := json.Unmarshal(raw, &cached); err == nil {
-			cached["cached"] = true
-			return cached, nil
+			var offers []FlightOffer
+			encoded, _ := json.Marshal(cached["offers"])
+			if err := json.Unmarshal(encoded, &offers); err == nil {
+				cached["offers"] = offers
+				cached["cached"] = true
+				tripID := int64(intArg(args, "trip_id", 0))
+				inserted := recordFlightPriceObservations(ctx, tripID, key, input, offers)
+				cached["recorded_observations"] = inserted
+				emitFlightObservationEvent(ctx, args, tripID, inserted, from, to)
+				return cached, nil
+			}
 		}
 	}
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(settings.DuffelConnectionID, "search_flights", input)
@@ -3945,23 +4204,29 @@ func (a *App) toolSearchFlights(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if offers, ok := out["offers"].([]FlightOffer); ok {
 		inserted := recordFlightPriceObservations(ctx, tripID, key, input, offers)
 		out["recorded_observations"] = inserted
-		if inserted > 0 {
-			if suppress, _ := args["_suppress_price_event"].(bool); !suppress {
-				extra := map[string]any{"kind": "flight", "provider": "duffel", "count": inserted, "origin": from, "destination": to}
-				if tripID > 0 {
-					emitTripEvent(ctx, "price_observations.created", tripID, "price_observation", 0, extra)
-				} else {
-					ctx.Emit("price_observations.created", map[string]any{
-						"action": "created", "entity": "price_observation", "kind": "flight",
-						"provider": "duffel", "count": inserted, "origin": from, "destination": to,
-					})
-				}
-			}
-		}
+		emitFlightObservationEvent(ctx, args, tripID, inserted, from, to)
 	}
 	// Duffel offers expire fast — 10-minute cache is plenty.
 	cacheSet(ctx, key, out, 10*time.Minute)
 	return out, nil
+}
+
+func emitFlightObservationEvent(ctx *sdk.AppCtx, args map[string]any, tripID int64, inserted int, origin, destination string) {
+	if inserted <= 0 {
+		return
+	}
+	if suppress, _ := args["_suppress_price_event"].(bool); suppress {
+		return
+	}
+	extra := map[string]any{"kind": "flight", "provider": "duffel", "count": inserted, "origin": origin, "destination": destination}
+	if tripID > 0 {
+		emitTripEvent(ctx, "price_observations.created", tripID, "price_observation", 0, extra)
+		return
+	}
+	ctx.Emit("price_observations.created", map[string]any{
+		"action": "created", "entity": "price_observation", "kind": "flight",
+		"provider": "duffel", "count": inserted, "origin": origin, "destination": destination,
+	})
 }
 
 func recordFlightPriceObservations(ctx *sdk.AppCtx, tripID int64, signature string, input map[string]any, offers []FlightOffer) int {
@@ -4026,12 +4291,12 @@ func recordFlightPriceObservations(ctx *sdk.AppCtx, tripID int64, signature stri
 			 SELECT ?, ?, 'flight', 'duffel', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 			 WHERE NOT EXISTS (
 			   SELECT 1 FROM travel_price_observations
-			   WHERE project_id=? AND search_signature=? AND bookable_ref=? AND observed_at>=?
+			   WHERE project_id=? AND COALESCE(trip_id,0)=? AND search_signature=? AND bookable_ref=? AND observed_at>=?
 			 )`,
 			project, trip, signature, o, d, departDate, returnDate, partySize, cc,
 			offer.Carrier, itemName, offer.Stops, offer.Duration, offer.TotalAmountCents,
 			offer.Currency, observedAt.Format(time.RFC3339), liveUntil, offer.OfferID, string(meta),
-			project, signature, offer.OfferID, dedupeSince,
+			project, tripID, signature, offer.OfferID, dedupeSince,
 		)
 		if err == nil {
 			if n, _ := res.RowsAffected(); n > 0 {
@@ -4349,16 +4614,21 @@ func summarizePriceObservations(observations []TravelPriceObservation) []TravelP
 		s := byKey[key]
 		if s == nil {
 			s = &TravelPriceRouteSummary{
-				Kind:              o.Kind,
-				OriginCode:        o.OriginCode,
-				DestinationCode:   o.DestinationCode,
-				Currency:          o.Currency,
-				PartySize:         o.PartySize,
-				CabinOrClass:      o.CabinOrClass,
-				LowestAmountCents: o.AmountCents,
-				LatestAmountCents: o.AmountCents,
-				FirstObservedAt:   o.ObservedAt,
-				LatestObservedAt:  o.ObservedAt,
+				Kind:                 o.Kind,
+				OriginCode:           o.OriginCode,
+				DestinationCode:      o.DestinationCode,
+				Currency:             o.Currency,
+				PartySize:            o.PartySize,
+				CabinOrClass:         o.CabinOrClass,
+				LowestAmountCents:    o.AmountCents,
+				LatestAmountCents:    o.AmountCents,
+				CheapestDepartDate:   o.DepartDate,
+				CheapestReturnDate:   o.ReturnDate,
+				CheapestProviderName: o.ProviderName,
+				CheapestItemName:     o.ItemName,
+				CheapestObservedAt:   o.ObservedAt,
+				FirstObservedAt:      o.ObservedAt,
+				LatestObservedAt:     o.ObservedAt,
 			}
 			byKey[key] = s
 		}
@@ -4406,16 +4676,19 @@ func summarizeRouteDates(routeDates []TravelPriceRouteDate) []TravelPriceRouteSu
 		s := byKey[key]
 		if s == nil {
 			s = &TravelPriceRouteSummary{
-				Kind:              r.Kind,
-				OriginCode:        r.OriginCode,
-				DestinationCode:   r.DestinationCode,
-				Currency:          r.Currency,
-				PartySize:         r.PartySize,
-				CabinOrClass:      r.CabinOrClass,
-				LowestAmountCents: r.LowestAmountCents,
-				LatestAmountCents: r.LowestAmountCents,
-				FirstObservedAt:   r.LatestObservedAt,
-				LatestObservedAt:  r.LatestObservedAt,
+				Kind:               r.Kind,
+				OriginCode:         r.OriginCode,
+				DestinationCode:    r.DestinationCode,
+				Currency:           r.Currency,
+				PartySize:          r.PartySize,
+				CabinOrClass:       r.CabinOrClass,
+				LowestAmountCents:  r.LowestAmountCents,
+				LatestAmountCents:  r.LowestAmountCents,
+				CheapestDepartDate: r.DepartDate,
+				CheapestReturnDate: r.ReturnDate,
+				CheapestObservedAt: r.LatestObservedAt,
+				FirstObservedAt:    r.LatestObservedAt,
+				LatestObservedAt:   r.LatestObservedAt,
 			}
 			byKey[key] = s
 		}
@@ -4675,9 +4948,8 @@ func filterAirports(raw any, query string, limit int) []AirportResult {
 }
 
 // normalizeFlightsResponse flattens Duffel's offers array into our
-// FlightOffer shape — one row per offer's first slice's first segment
-// (good enough for direct + ranked-by-price display; multi-leg detail
-// stays in the raw offer for v0.5).
+// FlightOffer shape. The first slice drives the itinerary fields and a
+// second slice is retained for round-trip display and notes.
 func normalizeFlightsResponse(data json.RawMessage) map[string]any {
 	var raw map[string]any
 	_ = json.Unmarshal(data, &raw)
@@ -4720,62 +4992,36 @@ func normalizeFlightsResponse(data json.RawMessage) map[string]any {
 			ArriveLocation: jsonString(jsonGet(lastSeg, "destination", "iata_code")),
 			Cabin:          jsonString(firstSeg["cabin_class"]),
 		}
-		if amt := jsonString(m["total_amount"]); amt != "" {
-			if cents, err := parseMoneyDecimal(amt); err == nil {
-				f.TotalAmountCents = cents
+		if len(slicesRaw) > 1 {
+			returnSlice, _ := slicesRaw[1].(map[string]any)
+			returnSegs, _ := returnSlice["segments"].([]any)
+			if len(returnSegs) > 0 {
+				returnFirst, _ := returnSegs[0].(map[string]any)
+				returnLast, _ := returnSegs[len(returnSegs)-1].(map[string]any)
+				f.ReturnDepartAt = jsonString(returnFirst["departing_at"])
+				f.ReturnArriveAt = jsonString(returnLast["arriving_at"])
+				f.ReturnDepartLocation = jsonString(jsonGet(returnFirst, "origin", "iata_code"))
+				f.ReturnArriveLocation = jsonString(jsonGet(returnLast, "destination", "iata_code"))
+				f.ReturnDuration = jsonString(returnSlice["duration"])
+				f.ReturnStops = len(returnSegs) - 1
 			}
+		}
+		if amt := jsonString(m["total_amount"]); amt != "" {
+			if cents, err := parseMoneyDecimal(amt, f.Currency); err == nil {
+				if cents < 0 {
+					continue
+				}
+				f.TotalAmountCents = cents
+			} else {
+				continue
+			}
+		} else {
+			continue
 		}
 		offers = append(offers, f)
 	}
 	sort.Slice(offers, func(i, j int) bool { return offers[i].TotalAmountCents < offers[j].TotalAmountCents })
 	return map[string]any{"offers": offers, "cached": false}
-}
-
-// parseMoneyDecimal turns a decimal money string ("234.50") into
-// integer minor units (23450). No currency conversion.
-func parseMoneyDecimal(s string) (int64, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return 0, errors.New("empty")
-	}
-	neg := false
-	if strings.HasPrefix(s, "-") {
-		neg = true
-		s = s[1:]
-	}
-	dot := strings.Index(s, ".")
-	if dot < 0 {
-		v, err := strconv.ParseInt(s, 10, 64)
-		if err != nil {
-			return 0, err
-		}
-		v *= 100
-		if neg {
-			v = -v
-		}
-		return v, nil
-	}
-	integer := s[:dot]
-	fraction := s[dot+1:]
-	if len(fraction) > 2 {
-		fraction = fraction[:2]
-	}
-	for len(fraction) < 2 {
-		fraction += "0"
-	}
-	ip, err := strconv.ParseInt(integer, 10, 64)
-	if err != nil {
-		return 0, err
-	}
-	fp, err := strconv.ParseInt(fraction, 10, 64)
-	if err != nil {
-		return 0, err
-	}
-	v := ip*100 + fp
-	if neg {
-		v = -v
-	}
-	return v, nil
 }
 
 func parseYMDDate(s string) (time.Time, error) {
@@ -4892,7 +5138,9 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 		writeOrErr(w, out, err)
 	case http.MethodPatch, http.MethodPut, http.MethodPost:
 		body := map[string]any{}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if !decodeRequestBody(w, r, &body) {
+			return
+		}
 		out, err := a.toolSettingsSet(globalCtx, body)
 		writeOrErr(w, out, err)
 	default:
@@ -5032,7 +5280,9 @@ func postBody(w http.ResponseWriter, r *http.Request, fn func(*sdk.AppCtx, map[s
 		return
 	}
 	body := map[string]any{}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if !decodeRequestBody(w, r, &body) {
+		return
+	}
 	out, err := fn(globalCtx, body)
 	writeOrErr(w, out, err)
 }
@@ -5117,7 +5367,7 @@ func nullableInt64(m map[string]any, key string) any {
 		return nil
 	}
 	n := int64(intArgFromAny(v, 0))
-	if n == 0 {
+	if n == 0 && !strings.HasPrefix(key, "cost_") {
 		return nil
 	}
 	return n
@@ -5246,15 +5496,15 @@ func normalizeCurrency(raw string) (string, error) {
 }
 
 func pathID(path, prefix string) (int64, bool) {
-	rest := strings.TrimPrefix(path, prefix)
-	if i := strings.Index(rest, "/"); i >= 0 {
-		rest = rest[:i]
-	}
-	id, err := strconv.ParseInt(rest, 10, 64)
-	if err != nil || id == 0 {
+	if !strings.HasPrefix(path, prefix) {
 		return 0, false
 	}
-	return id, true
+	rest := strings.TrimPrefix(path, prefix)
+	if rest == "" || strings.Contains(rest, "/") {
+		return 0, false
+	}
+	id, err := strconv.ParseInt(rest, 10, 64)
+	return id, err == nil && id > 0
 }
 
 func parseFlexibleTime(s string) (time.Time, error) {
