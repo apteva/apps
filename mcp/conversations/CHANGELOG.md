@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.24.41 — 2026-10-04
+
+- Start visible Thinking progress when a proactive subscription, webhook, timer, or agent-created turn emits `llm.start` before any Conversations acknowledgement exists.
+- Settle that progress on terminal pacing events so thread activity cannot remain active after the turn ends.
+
 ## 0.24.40 — 2026-10-04
 
 - Settle Thinking after a progress update when the agent enters a long pacing sleep without another model-start event.

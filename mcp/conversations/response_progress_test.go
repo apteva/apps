@@ -176,6 +176,24 @@ func TestResponseProgressLifecycle(t *testing.T) {
 	phase("idle")
 }
 
+func TestProactiveStartCreatesVisibleProgress(t *testing.T) {
+	s := newStreamer(newHub())
+	s.resolve = func(int64, string) string { return "conv-proactive" }
+	var frames []StreamFrame
+	s.onFrame = func(f StreamFrame) { frames = append(frames, f) }
+	start := time.Now()
+	s.Ingest("llm.start", 41, "subscription-42", `{}`, start)
+	if len(frames) != 1 || frames[0].Progress == nil || frames[0].Progress.Phase != "thinking" {
+		t.Fatalf("proactive model start did not create Thinking progress: %+v", frames)
+	}
+	// A terminal pacing event must settle the synthetic response as well, so
+	// the indicator cannot remain active after the event-driven turn ends.
+	s.Ingest("tool.call", 41, "subscription-42", `{"name":"pace"}`, start.Add(time.Second))
+	if got := s.snapshot("conv-proactive"); len(got.Frames) != 0 {
+		t.Fatalf("proactive response remained active after pace: %+v", got.Frames)
+	}
+}
+
 func TestQueuedResponseSurvivesPreviousPaceAndReconnect(t *testing.T) {
 	s := newStreamer(newHub())
 	s.telemetryConnected = true

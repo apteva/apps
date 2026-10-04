@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.24.40
+version: 0.24.41
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts). Inbox items are messages — an
@@ -17,7 +17,9 @@ description: |
   agent owns every route, the bot can use that agent's display name;
   shared routing automatically restores the original bot identity.
   Telegram response feedback supports native live drafts in private
-  chats, typing-only feedback, or an operator-controlled off mode.
+  chats, typing-only feedback, or an operator-controlled off mode. v0.24.41
+  starts visible Thinking progress for proactive subscription, webhook, timer,
+  and agent-created turns.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/conversations
 icon: /ui/icon.svg
@@ -254,7 +256,7 @@ provides:
 
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: conversations/v0.24.40, entry: mcp/conversations }
+  source: { repo: github.com/apteva/apps, ref: conversations/v0.24.41, entry: mcp/conversations }
   port: 8080
   health_check: /health
 

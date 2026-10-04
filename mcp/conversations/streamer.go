@@ -203,6 +203,17 @@ func (s *streamer) Ingest(eventType string, agentID int64, threadID, dataJSON st
 	if conversationID == "" {
 		return
 	}
+	// Proactive turns (subscription, webhook, timer, or an agent-created
+	// conversation) have no inbound user message to seed response progress.
+	// llm.start is their first reliable signal, so create the same response
+	// owner that an inbound acknowledgement would have created. Without this
+	// state the first model pass is invisible until a tool call or durable
+	// conversations_send row arrives.
+	if eventType == "llm.start" && s.resolve != nil && !strings.HasPrefix(threadID, "chat-") {
+		if s.startProactiveResponse(conversationID, threadID, agentID, ts) {
+			return
+		}
+	}
 	s.mu.Lock()
 	p := s.responses[responseProgressKey(conversationID, agentID)]
 	queued := p != nil && p.inboundPreview != "" && !p.inboundReceived
@@ -219,6 +230,38 @@ func (s *streamer) Ingest(eventType string, agentID int64, threadID, dataJSON st
 	case "tool.result":
 		s.onToolEnd(agentID, threadID, conversationID, dataJSON, ts)
 	}
+}
+
+// startProactiveResponse claims a response for a turn that did not originate
+// from an inbound Conversations message. It returns true when it created the
+// state, allowing the caller to avoid emitting a duplicate llm.start frame.
+func (s *streamer) startProactiveResponse(chat, thread string, agent int64, ts time.Time) bool {
+	s.mu.Lock()
+	s.pruneLocked()
+	key := responseProgressKey(chat, agent)
+	if p := s.responses[key]; p != nil && p.Phase != "idle" {
+		s.mu.Unlock()
+		return false
+	}
+	s.ackSeq++
+	id := "ack-" + chat + "-" + strconv.FormatUint(s.ackSeq, 10)
+	p := &responseProgressState{
+		ResponseProgress: ResponseProgress{Phase: "thinking", RunID: id, StartedAt: ts},
+		agentID: agent, threadID: thread, chatID: chat,
+		modelStarted: true, touched: ts, lastEvent: ts,
+	}
+	s.responses[key] = p
+	s.pendingAcks[chat+":"+strconv.FormatInt(agent, 10)] = id
+	s.ackTimes[chat+":"+strconv.FormatInt(agent, 10)] = ts
+	s.progressSeq++
+	p.Revision = s.progressSeq
+	frame := s.progressFrame(p)
+	s.mu.Unlock()
+	s.publish(frame)
+	if s.onActivityChange != nil {
+		s.onActivityChange(chat)
+	}
+	return true
 }
 
 func (s *streamer) onChunk(agentID int64, threadID, conversationID, dataJSON string, ts time.Time) {
