@@ -50,6 +50,8 @@ interface Destination {
   depart_at: string;
   order_idx: number;
   notes: string;
+  lat?: number;
+  lng?: number;
 }
 
 interface TransportLeg {
@@ -83,6 +85,7 @@ interface Accommodation {
   cost_actual?: number;
   currency: string;
   booked: boolean;
+  confirmation_number: string;
   notes: string;
 }
 
@@ -178,6 +181,12 @@ interface FlightOffer {
   arrive_location: string;
   stops: number;
   cabin?: string;
+  return_depart_at?: string;
+  return_arrive_at?: string;
+  return_depart_location?: string;
+  return_arrive_location?: string;
+  return_duration?: string;
+  return_stops?: number;
   total_amount_cents: number;
   currency: string;
 }
@@ -663,13 +672,17 @@ function TripsPanelInner({ projectId }: NativePanelProps) {
   const [showNew, setShowNew] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [error, setError] = useState("");
+  const refreshSequence = useRef(0);
 
   const refresh = useCallback(async () => {
+    const sequence = ++refreshSequence.current;
     try {
       const r = await api<{ trips: Trip[] }>("/trips");
+      if (sequence !== refreshSequence.current) return;
       setTrips(r.trips ?? []);
       setError("");
     } catch (e: unknown) {
+      if (sequence !== refreshSequence.current) return;
       setError(e instanceof Error ? e.message : String(e));
     }
   }, []);
@@ -1235,13 +1248,17 @@ function TripDetail({ tripID, projectId, onBack, onChanged }: { tripID: number; 
   const [tab, setTab] = useState<Tab>("overview");
   const [error, setError] = useState("");
   const [showEdit, setShowEdit] = useState(false);
+  const refreshSequence = useRef(0);
 
   const refresh = useCallback(async () => {
+    const sequence = ++refreshSequence.current;
     try {
       const d = await api<TripDashboard>(`/dashboard?trip_id=${tripID}`);
+      if (sequence !== refreshSequence.current) return;
       setData(d);
       setError("");
     } catch (e: unknown) {
+      if (sequence !== refreshSequence.current) return;
       setError(e instanceof Error ? e.message : String(e));
     }
   }, [tripID]);
@@ -1344,6 +1361,9 @@ function TripDetail({ tripID, projectId, onBack, onChanged }: { tripID: number; 
         </div>
       </section>
 
+      {error && <div role="alert" className="rounded-md border border-error/30 bg-error/10 p-3 text-sm text-error">
+        Could not refresh this trip: {error} <button onClick={refresh} className="underline">Retry</button>
+      </div>}
       <div className="flex-1 overflow-auto">
         {tab === "overview" && <OverviewTab data={data} onChanged={() => { refresh(); onChanged(); }} />}
         {tab === "itinerary" && <ItineraryTab data={data} onChanged={() => { refresh(); onChanged(); }} />}
@@ -1420,7 +1440,7 @@ function UpcomingList({ data }: { data: TripDashboard }) {
             <div className="truncate font-medium">{i.title}</div>
             <div className="truncate text-xs text-text-muted">{i.subtitle}</div>
           </div>
-          <div className="text-xs text-text-muted">{fmtDateShort(i.when)} {fmtTime(i.when)}</div>
+          <div className="text-xs text-text-muted">{fmtDateShort(i.kind === "accommodation" ? i.when.slice(0,10) : i.when)} {i.kind !== "accommodation" && fmtTime(i.when)}</div>
         </li>
       ))}
     </ul>
@@ -1752,7 +1772,7 @@ function ItineraryRow({
     icon = "bed";
     title = a.name;
     subtitle = a.address;
-    when2 = a.check_in_at && a.check_out_at ? `${fmtDateShort(a.check_in_at)} – ${fmtDateShort(a.check_out_at)}` : "Idea";
+    when2 = a.check_in_at && a.check_out_at ? `${fmtDateShort(a.check_in_at.slice(0,10))} – ${fmtDateShort(a.check_out_at.slice(0,10))}` : "Idea";
   } else {
     const a = item.data as Activity;
     icon = "compass";
@@ -1796,6 +1816,7 @@ function ItineraryRow({
       </div>
       <div className="flex flex-col items-end gap-1 text-right text-sm">
         <div className="tabular-nums">{cost != null ? fmtMoney(cost, costCcy) : "—"}</div>
+        <span className="text-xs text-text-dim">{item.data.cost_actual != null ? "Actual" : item.data.booked ? "Estimate · actual unknown" : "Estimate"}</span>
         <button onClick={remove} disabled={busy} aria-label={`Delete ${title}`} className="text-text-dim hover:text-error" title="Delete">
           <Icon name="trash" size={12} />
         </button>
@@ -2086,6 +2107,7 @@ function SelectStayFavoriteDialog({ favorite, destination, onClose, onSaved }: {
 function BudgetTab({ data, onChanged }: { data: TripDashboard; onChanged: () => void }) {
   const trip = data.trip;
   const [editing, setEditing] = useState(false);
+  const totalCap = trip.total_budget ?? (data.budget.total_cap > 0 ? data.budget.total_cap : null);
   return (
     <div className="space-y-3">
       <div className="overflow-hidden rounded-lg border border-border bg-bg-card">
@@ -2111,11 +2133,11 @@ function BudgetTab({ data, onChanged }: { data: TripDashboard; onChanged: () => 
               <BudgetRow key={c.category} row={c} currency={trip.home_currency} tripID={trip.id} editing={editing} onChanged={onChanged} />
             ))}
             <tr className="border-t border-border font-medium border-border">
-              <td className="px-3 py-2">Total</td>
-              <td className="px-3 py-2 text-right tabular-nums">{fmtMoney(data.budget.total_cap, trip.home_currency)}</td>
+              <td className="px-3 py-2">Total{trip.total_budget != null ? " · overall cap" : ""}</td>
+              <td className="px-3 py-2 text-right tabular-nums">{totalCap != null ? fmtMoney(totalCap, trip.home_currency) : <span className="text-text-dim">—</span>}</td>
               <td className="px-3 py-2 text-right tabular-nums">{fmtMoney(data.budget.total_planned, trip.home_currency)}</td>
               <td className="px-3 py-2 text-right tabular-nums">{fmtMoney(data.budget.total_actual, trip.home_currency)}</td>
-              <td className="px-3 py-2 text-right tabular-nums">{fmtMoney(data.budget.total_planned - data.budget.total_actual, trip.home_currency, { signed: true })}</td>
+              <td className={`px-3 py-2 text-right tabular-nums ${totalCap != null && data.budget.total_actual > totalCap ? "text-error" : ""}`}>{totalCap != null ? fmtMoney(totalCap - data.budget.total_actual, trip.home_currency, { signed: true }) : fmtMoney(data.budget.total_planned - data.budget.total_actual, trip.home_currency, { signed: true })}</td>
             </tr>
           </tbody>
         </table>
@@ -2352,12 +2374,14 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
 
   const [name, setName] = useState(a?.name ?? c?.name ?? "");
   const [cost, setCost] = useState(() => {
-    const v = existing?.cost_actual ?? existing?.cost_estimated;
+    const v = existing?.cost_estimated;
     if (v == null) return "";
     const digits = currencyFractionDigits(existing?.currency ?? trip.home_currency);
     return (v / (10 ** digits)).toFixed(digits);
   });
   const [currency, setCurrency] = useState(existing?.currency ?? trip.home_currency);
+  const [actualCost, setActualCost] = useState(existing?.cost_actual != null ? moneyInput(existing.cost_actual, existing.currency) : "");
+  const [confirmation, setConfirmation] = useState(t?.confirmation_number ?? a?.confirmation_number ?? "");
   const [notes, setNotes] = useState(existing?.notes ?? "");
 
   const [tKind, setTKind] = useState<TransportLeg["kind"]>(t?.kind ?? "flight");
@@ -2371,7 +2395,7 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
 
   const [aKind, setAKind] = useState<Accommodation["kind"]>(a?.kind ?? "hotel");
   const [address, setAddress] = useState(a?.address ?? "");
-  const [destinationID, setDestinationID] = useState(a?.destination_id ? String(a.destination_id) : "");
+  const [destinationID, setDestinationID] = useState(a?.destination_id || c?.destination_id ? String(a?.destination_id || c?.destination_id) : "");
   const [stayDatesKnown, setStayDatesKnown] = useState(a ? hasDateRange(a.check_in_at, a.check_out_at) : hasDateRange(trip.start_at, trip.end_at));
   const [checkIn, setCheckIn] = useState(a?.check_in_at ? a.check_in_at.slice(0, 10) : (trip.start_at ? trip.start_at.slice(0, 10) : todayPlus(0)));
   const [checkOut, setCheckOut] = useState(a?.check_out_at ? a.check_out_at.slice(0, 10) : (trip.end_at ? trip.end_at.slice(0, 10) : todayPlus(1)));
@@ -2382,21 +2406,18 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
   const [actLocation, setActLocation] = useState(c?.location ?? "");
 
   const submit = async () => {
+    if (busy) return;
     setBusy(true); setErr("");
     try {
       const cents = cost.trim() ? parseMoneyDecimal(cost, currency) : null;
-      // Field name for the cost field switches based on edit mode:
-      // when we already have a cost_actual we update it; otherwise we
-      // edit cost_estimated. The mark-booked button is the dedicated
-      // path for the planned→actual transition.
-      const costField = isEdit && existing?.cost_actual != null ? "cost_actual" : "cost_estimated";
+      const costs = {cost_estimated: cents, ...(isEdit ? {cost_actual: actualCost.trim() ? parseMoneyDecimal(actualCost, currency) : null} : {})};
       if (kind === "transport") {
         const body = {
           trip_id: trip.id, kind: tKind,
           depart_at: transportDatesKnown && departAt ? ensureRfc3339(departAt) : null,
           arrive_at: transportDatesKnown && arriveAt ? ensureRfc3339(arriveAt) : null,
-          provider, reference, depart_location: departLoc, arrive_location: arriveLoc,
-          [costField]: cents, currency, notes,
+          provider, reference, depart_location: departLoc, arrive_location: arriveLoc, confirmation_number: confirmation,
+          ...costs, currency, notes,
         };
         if (isEdit) {
           await api<TransportLeg>(`/transport-legs/${existing!.id}`, { method: "PATCH", body: JSON.stringify(body) });
@@ -2405,10 +2426,10 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
         }
       } else if (kind === "accommodation") {
         const body = {
-          trip_id: trip.id, name, kind: aKind, address, destination_id: destinationID ? Number(destinationID) : null,
+          trip_id: trip.id, name, kind: aKind, address, confirmation_number: confirmation, destination_id: destinationID ? Number(destinationID) : null,
           check_in_at: stayDatesKnown && checkIn ? checkIn + "T15:00:00Z" : null,
           check_out_at: stayDatesKnown && checkOut ? checkOut + "T11:00:00Z" : null,
-          [costField]: cents, currency, notes,
+          ...costs, currency, notes,
         };
         if (isEdit) {
           await api<Accommodation>(`/accommodations/${existing!.id}`, { method: "PATCH", body: JSON.stringify(body) });
@@ -2417,10 +2438,10 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
         }
       } else {
         const body = {
-          trip_id: trip.id, name, category: actCategory,
+          trip_id: trip.id, name, category: actCategory, destination_id: destinationID ? Number(destinationID) : null,
           start_at: actStart ? ensureRfc3339(actStart) : null,
           end_at: actEnd ? ensureRfc3339(actEnd) : null,
-          location: actLocation, [costField]: cents, currency, notes,
+          location: actLocation, ...costs, currency, notes,
         };
         if (isEdit) {
           await api<Activity>(`/activities/${existing!.id}`, { method: "PATCH", body: JSON.stringify(body) });
@@ -2448,9 +2469,17 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
     setDepartLoc(offer.depart_location);
     setArriveLoc(offer.arrive_location);
     if (offer.total_amount_cents > 0) {
-      setCost((offer.total_amount_cents / 100).toFixed(2));
+      setCost(moneyInput(offer.total_amount_cents, offer.currency || "EUR"));
     }
     if (offer.currency) setCurrency(offer.currency);
+    if (offer.return_depart_at) {
+      const returnSummary = [
+        `Round-trip total; return ${offer.return_depart_location || ""} → ${offer.return_arrive_location || ""}`.trim(),
+        offer.return_depart_at ? `${fmtDateShort(offer.return_depart_at)} ${fmtTime(offer.return_depart_at)}` : "",
+        offer.return_arrive_at ? `– ${fmtTime(offer.return_arrive_at)}` : "",
+      ].filter(Boolean).join(" ");
+      setNotes(prev => prev ? `${prev}\n${returnSummary}` : returnSummary);
+    }
     setShowFlightSearch(false);
   };
 
@@ -2554,6 +2583,9 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
       )}
       {kind === "activity" && (
         <>
+          <Field label="Destination"><select className="input" value={destinationID} onChange={e => setDestinationID(e.target.value)}>
+            <option value="">No destination</option>{(destinations ?? []).map(d => <option key={d.id} value={d.id}>{d.place_name}</option>)}
+          </select></Field>
           <Field label="Name"><input value={name} onChange={e => setName(e.target.value)} className="input" autoFocus placeholder="Louvre" /></Field>
           <Field label="Category">
             <select value={actCategory} onChange={e => setActCategory(e.target.value as Activity["category"])} className="input">
@@ -2570,9 +2602,11 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
         </>
       )}
       <div className="grid grid-cols-2 gap-3">
-        <Field label={`Cost (${currency})`}><input value={cost} onChange={e => setCost(e.target.value)} className="input" placeholder="0.00" /></Field>
+        <Field label={`Estimated cost (${currency})`}><input value={cost} onChange={e => setCost(e.target.value)} className="input" placeholder="0.00" /></Field>
         <Field label="Currency"><input value={currency} onChange={e => setCurrency(e.target.value.toUpperCase())} className="input uppercase" maxLength={3} /></Field>
       </div>
+      {isEdit && <Field label={`Actual cost (${currency}, optional)`}><input className="input" inputMode="decimal" value={actualCost} onChange={e => setActualCost(e.target.value)} placeholder="Unknown" /></Field>}
+      {kind !== "activity" && <Field label="Confirmation number (optional)"><input className="input" value={confirmation} onChange={e => setConfirmation(e.target.value)} /></Field>}
       <Field label="Notes"><input value={notes} onChange={e => setNotes(e.target.value)} className="input" /></Field>
       {err && <p className="text-sm text-error">{err}</p>}
       <DialogActions>
@@ -2591,7 +2625,7 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
       {showPlaceSearch && (
         <SearchPlacesModal
           trip={trip}
-          destinations={destinations ?? []}
+          destinations={destinationID ? (destinations ?? []).filter(d => d.id === Number(destinationID)) : destinations ?? []}
           defaultKind={kind === "accommodation" ? "lodging" : "attraction"}
           onPick={onPlacePicked}
           onClose={() => setShowPlaceSearch(false)}
@@ -2616,6 +2650,26 @@ function DestinationDialog({ trip, existing, onClose, onSaved }: {
   const [arriveAt, setArriveAt] = useState(existing?.arrive_at ? existing.arrive_at.slice(0, 10) : (trip.start_at ? trip.start_at.slice(0, 10) : todayPlus(0)));
   const [departAt, setDepartAt] = useState(existing?.depart_at ? existing.depart_at.slice(0, 10) : (trip.end_at ? trip.end_at.slice(0, 10) : todayPlus(1)));
   const [notes, setNotes] = useState(existing?.notes ?? "");
+  const [coordinates, setCoordinates] = useState<{lat: number; lng: number} | null>(existing?.lat != null && existing?.lng != null ? {lat: existing.lat, lng: existing.lng} : null);
+  const [resolvingPlace, setResolvingPlace] = useState(false);
+  const placeRequest = useRef(0);
+  const [placeWarning, setPlaceWarning] = useState("");
+  const pickPlace = async (p: PlaceResult) => {
+    const request = ++placeRequest.current;
+    setPlaceName(p.name); setCoordinates(null); setPlaceWarning("");
+    if (p.country?.length === 2) setCountry(p.country.toUpperCase());
+    if (p.lat != null && p.lng != null) {setCoordinates({lat:p.lat,lng:p.lng});setResolvingPlace(false);return;}
+    if (!p.place_id) return;
+    setResolvingPlace(true);
+    try {
+      const details = await api<PlaceResult>(`/search/place?place_id=${encodeURIComponent(p.place_id)}`);
+      if (placeRequest.current !== request) return;
+      if (details.lat != null && details.lng != null) setCoordinates({lat:details.lat,lng:details.lng});
+      else setPlaceWarning("Location unavailable. Nearby search will need a place name.");
+      if (details.country?.length === 2) setCountry(details.country.toUpperCase());
+    } catch {if (placeRequest.current === request) setPlaceWarning("Could not resolve this location. You can still save it and search hotels by name.");}
+    finally {if (placeRequest.current === request) setResolvingPlace(false);}
+  };
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -2625,7 +2679,7 @@ function DestinationDialog({ trip, existing, onClose, onSaved }: {
       const body: Record<string, unknown> = {
         trip_id: trip.id,
         place_name: placeName,
-        country,
+        country, lat: coordinates?.lat ?? null, lng: coordinates?.lng ?? null,
         arrive_at: datesKnown ? arriveAt + "T00:00:00Z" : null,
         depart_at: datesKnown ? departAt + "T23:59:59Z" : null,
         notes,
@@ -2647,18 +2701,12 @@ function DestinationDialog({ trip, existing, onClose, onSaved }: {
       <Field label="Place">
         <PlaceAutocomplete
           value={placeName}
-          onChange={setPlaceName}
-          onPick={(p) => {
-            setPlaceName(p.name);
-            // Try to extract a 2-letter country code from the
-            // secondary text Google returns ("France" etc.). If it
-            // isn't a clean 2-letter code we leave it for the user.
-            if (p.country && p.country.length === 2) {
-              setCountry(p.country.toUpperCase());
-            }
-          }}
+          onChange={value => {++placeRequest.current; setPlaceName(value); setCoordinates(null); setResolvingPlace(false); setPlaceWarning("");}}
+          onPick={pickPlace}
         />
       </Field>
+      {resolvingPlace && <p className="text-xs text-text-muted">Resolving location…</p>}
+      {placeWarning && <p className="text-xs text-warn">{placeWarning}</p>}
       <Field label="Country (ISO-2)"><input value={country} onChange={e => setCountry(e.target.value.toUpperCase())} className="input uppercase" maxLength={2} placeholder="FR" /></Field>
       <label className="flex items-center gap-2 text-sm">
         <input type="checkbox" checked={datesKnown} onChange={e => setDatesKnown(e.target.checked)} />
@@ -2677,7 +2725,7 @@ function DestinationDialog({ trip, existing, onClose, onSaved }: {
       {err && <p className="text-sm text-error">{err}</p>}
       <DialogActions>
         <button onClick={onClose} className="btn-dialog-secondary">Cancel</button>
-        <button onClick={submit} disabled={busy || !placeName} className="btn-dialog-primary">{busy ? "Saving…" : isEdit ? "Update" : "Save"}</button>
+        <button onClick={submit} disabled={busy || resolvingPlace || !placeName.trim()} className="btn-dialog-primary">{busy ? "Saving…" : isEdit ? "Update" : "Save"}</button>
       </DialogActions>
     </Dialog>
   );
@@ -2692,6 +2740,7 @@ function TripEditDialog({ trip, onClose, onSaved }: { trip: Trip; onClose: () =>
   const [color, setColor] = useState(trip.color);
   const [syncCalendar, setSyncCalendar] = useState(trip.sync_calendar);
   const [notes, setNotes] = useState(trip.notes);
+  const [totalBudget, setTotalBudget] = useState(trip.total_budget != null ? moneyInput(trip.total_budget, trip.home_currency) : "");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -2708,6 +2757,7 @@ function TripEditDialog({ trip, onClose, onSaved }: { trip: Trip; onClose: () =>
           color,
           sync_calendar: syncCalendar,
           notes,
+          total_budget: totalBudget.trim() ? parseMoneyDecimal(totalBudget, trip.home_currency) : null,
         }),
       });
       onSaved();
@@ -2751,6 +2801,9 @@ function TripEditDialog({ trip, onClose, onSaved }: { trip: Trip; onClose: () =>
           <input type="checkbox" checked={syncCalendar} onChange={e => setSyncCalendar(e.target.checked)} />
           Mirror itinerary into a dedicated calendar
         </label>
+      </Field>
+      <Field label={`Overall budget (${trip.home_currency})`}>
+        <input className="input" inputMode="decimal" value={totalBudget} onChange={e => setTotalBudget(e.target.value)} placeholder="Optional" />
       </Field>
       <Field label="Notes"><input value={notes} onChange={e => setNotes(e.target.value)} className="input" /></Field>
       {err && <p className="text-sm text-error">{err}</p>}
@@ -3023,9 +3076,15 @@ function SearchFlightsModal({ trip, defaultTo, defaultDepartAt, onPick, onClose 
                   <div className="text-xs text-text-dim">
                     {fmtDateShort(o.depart_at)} {fmtTime(o.depart_at)} – {fmtTime(o.arrive_at)}
                   </div>
+                  {o.return_depart_at && (
+                    <div className="text-xs text-text-dim">
+                      Return: {o.return_depart_location} → {o.return_arrive_location} · {fmtDateShort(o.return_depart_at)} {fmtTime(o.return_depart_at)}{o.return_arrive_at ? ` – ${fmtTime(o.return_arrive_at)}` : ""}
+                    </div>
+                  )}
                 </div>
                 <div className="text-right tabular-nums text-sm font-medium">
                   {fmtMoney(o.total_amount_cents, o.currency || "EUR")}
+                  {o.return_depart_at && <div className="text-[0.65rem] font-normal text-text-dim">round-trip total</div>}
                 </div>
               </button>
             </li>
@@ -3057,7 +3116,9 @@ function SearchPlacesModal({ trip, destinations, defaultKind, onPick, onClose }:
     setBusy(true);
     try {
       const params = new URLSearchParams({ kind });
-      if (query.trim()) params.set("query", query.trim());
+      const destination = destinations.find(d => d.id === destID);
+      const text = query.trim() || (destination && (destination.lat == null || destination.lng == null) ? `${kindLabel(kind)} in ${destination.place_name}` : "");
+      if (text) params.set("query", text);
       if (destID) params.set("destination_id", String(destID));
       params.set("limit", "12");
       const r = await api<{ places: PlaceResult[] }>(`/search/places?${params}`);
@@ -3300,8 +3361,19 @@ function trapDialogTab(e: React.KeyboardEvent<HTMLElement>) {
 
 function Dialog({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
   const titleID = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    const dialog = dialogRef.current;
+    if (dialog && !dialog.contains(document.activeElement)) {
+      const first = dialog.querySelector<HTMLElement>('input:not([disabled]),textarea:not([disabled]),select:not([disabled]),button:not([disabled])');
+      first?.focus();
+    }
+    return () => {if (previous?.isConnected) previous.focus({preventScroll:true});};
+  }, []);
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-labelledby={titleID}

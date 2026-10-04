@@ -2,7 +2,6 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -520,8 +519,7 @@ func (a *App) handleStayFavoritesItem(w http.ResponseWriter, r *http.Request) {
 
 func favoriteBody(w http.ResponseWriter, r *http.Request, handler func(*sdk.AppCtx, map[string]any) (any, error), id int64) {
 	args := map[string]any{}
-	if err := json.NewDecoder(r.Body).Decode(&args); err != nil || args == nil {
-		http.Error(w, "JSON object required", http.StatusBadRequest)
+	if !decodeRequestBody(w, r, &args) {
 		return
 	}
 	if id != 0 {
