@@ -26,6 +26,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: "GET", Pattern: "/agents", Handler: a.handleAgents},
 		{Method: "GET", Pattern: "/tool-visuals", Handler: a.handleToolVisuals},
 		{Pattern: "/messages", Handler: a.handleMessages},
+		{Method: "POST", Pattern: "/message-queue", Handler: a.handleMessageQueue},
 		{Pattern: "/voice", Handler: a.handleVoice},
 		{Pattern: "/attachments", Handler: a.handleAttachments},
 		{Method: "GET", Pattern: "/attachment-reference", Handler: a.handleAttachmentReference},
@@ -750,8 +751,12 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, messages)
 	case http.MethodPost:
 		a.handlePostMessage(w, r)
+	case http.MethodPatch:
+		a.handleEditQueuedMessage(w, r)
+	case http.MethodDelete:
+		a.handleRemoveQueuedMessage(w, r)
 	default:
-		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
+		http.Error(w, "GET, POST, PATCH or DELETE", http.StatusMethodNotAllowed)
 	}
 }
 
@@ -763,14 +768,15 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	conversationID := r.URL.Query().Get("chat_id")
 	var body struct {
-		ChatID         string          `json:"chat_id"`
-		Content        string          `json:"content"`
-		ClientID       string          `json:"client_message_id"`
-		Intent         string          `json:"intent"`
-		TargetCallID   string          `json:"target_call_id"`
-		Attachments    []Attachment    `json:"attachments"`
-		TargetAgentIDs []int64         `json:"target_agent_ids"`
-		PageContext    json.RawMessage `json:"page_context"`
+		ChatID              string          `json:"chat_id"`
+		Content             string          `json:"content"`
+		ClientID            string          `json:"client_message_id"`
+		Intent              string          `json:"intent"`
+		NextMessageBehavior string          `json:"next_message_behavior"`
+		TargetCallID        string          `json:"target_call_id"`
+		Attachments         []Attachment    `json:"attachments"`
+		TargetAgentIDs      []int64         `json:"target_agent_ids"`
+		PageContext         json.RawMessage `json:"page_context"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 6<<20)).Decode(&body); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -850,7 +856,24 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "page context requires an operator conversation", http.StatusForbidden)
 		return
 	}
-	metadata := map[string]any{"target_agent_ids": targets, "page_context": pageContext}
+	behavior := strings.TrimSpace(body.NextMessageBehavior)
+	if behavior == "" {
+		behavior = "queue"
+	}
+	if behavior != "queue" && behavior != "steer" && behavior != "legacy" {
+		http.Error(w, "unsupported next_message_behavior", http.StatusBadRequest)
+		return
+	}
+	queueState := "released"
+	if behavior == "queue" {
+		for _, agentID := range targets {
+			if a.streamer != nil && a.streamer.responseActive(conv.ID, agentID) {
+				queueState = "queued"
+				break
+			}
+		}
+	}
+	metadata := map[string]any{"target_agent_ids": targets, "page_context": pageContext, "next_message_behavior": behavior}
 	if body.Intent != "" {
 		metadata["intent"] = body.Intent
 	}
@@ -860,13 +883,112 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	msg, inserted, err := a.appendAndDeliver(a.appCtx(r), conv, &Message{
 		ConversationID: conv.ID, Role: "user", Content: body.Content,
 		UserID: requestUser(r), ClientID: body.ClientID, Attachments: body.Attachments,
-		Metadata: metadata,
+		Metadata: metadata, QueueBehavior: behavior, QueueState: queueState,
 	})
 	if err != nil {
 		http.Error(w, "insert failed", http.StatusInternalServerError)
 		return
 	}
 	_ = inserted // duplicate posts reuse the durable row and delivery ledger
+	writeJSON(w, msg)
+}
+
+func (a *App) handleEditQueuedMessage(w http.ResponseWriter, r *http.Request) {
+	chat := r.URL.Query().Get("chat_id")
+	conv, err := a.authorizeConversation(r, chat)
+	if err != nil {
+		http.Error(w, "conversation not found", http.StatusNotFound)
+		return
+	}
+	id, err := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "id required", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		http.Error(w, "invalid json", 400)
+		return
+	}
+	msg, err := a.store.GetMessage(id)
+	if err != nil || msg.ConversationID != conv.ID || msg.Role != "user" || msg.UserID != requestUser(r) || msg.QueueState != "queued" {
+		http.Error(w, "message is no longer queued", http.StatusConflict)
+		return
+	}
+	msg, err = a.store.updateQueuedMessage(id, conv.ID, body.Content)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	a.hub.publish(conv.ID, *msg)
+	writeJSON(w, msg)
+}
+
+func (a *App) handleRemoveQueuedMessage(w http.ResponseWriter, r *http.Request) {
+	chat := r.URL.Query().Get("chat_id")
+	conv, err := a.authorizeConversation(r, chat)
+	if err != nil {
+		http.Error(w, "conversation not found", http.StatusNotFound)
+		return
+	}
+	id, err := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "id required", http.StatusBadRequest)
+		return
+	}
+	msg, err := a.store.GetMessage(id)
+	if err != nil || msg.ConversationID != conv.ID || msg.Role != "user" || msg.UserID != requestUser(r) || msg.QueueState != "queued" {
+		http.Error(w, "message is no longer queued", http.StatusConflict)
+		return
+	}
+	if err := a.store.cancelQueuedMessage(id, conv.ID); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	msg, _ = a.store.GetMessage(id)
+	a.hub.publish(conv.ID, *msg)
+	writeJSON(w, msg)
+}
+
+func (a *App) handleMessageQueue(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		ChatID    string `json:"chat_id"`
+		MessageID int64  `json:"message_id"`
+		Action    string `json:"action"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		http.Error(w, "invalid json", 400)
+		return
+	}
+	conv, err := a.authorizeConversation(r, body.ChatID)
+	if err != nil {
+		http.Error(w, "conversation not found", 404)
+		return
+	}
+	msg, err := a.store.GetMessage(body.MessageID)
+	if err != nil || msg.ConversationID != conv.ID || msg.Role != "user" || msg.UserID != requestUser(r) || msg.QueueState != "queued" {
+		http.Error(w, "message is no longer queued", http.StatusConflict)
+		return
+	}
+	if body.Action != "steer" {
+		http.Error(w, "unsupported queue action", 400)
+		return
+	}
+	msg, err = a.store.markQueueState(msg.ID, "steered")
+	if err != nil {
+		http.Error(w, err.Error(), 409)
+		return
+	}
+	for _, agentID := range messageTargetAgentIDs(msg) {
+		a.dispatchOrQueue(a.appCtx(r), "agent-inbound:"+strconv.FormatInt(agentID, 10), conv, msg)
+	}
+	a.hub.publish(conv.ID, *msg)
 	writeJSON(w, msg)
 }
 

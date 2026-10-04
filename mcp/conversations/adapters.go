@@ -304,6 +304,13 @@ func (a *App) appendAndDeliver(app *sdk.AppCtx, conv *Conversation, msg *Message
 	}
 	if inserted {
 		for _, target := range targets {
+			if strings.HasPrefix(target, "agent-inbound:") && stored.QueueBehavior == "queue" && stored.QueueState == "queued" {
+				raw := strings.TrimPrefix(target, "agent-inbound:")
+				agentID, _ := strconv.ParseInt(raw, 10, 64)
+				if a.streamer != nil && a.streamer.responseActive(conv.ID, agentID) {
+					continue
+				}
+			}
 			a.dispatchOrQueue(app, target, conv, stored)
 		}
 	}
@@ -314,6 +321,60 @@ func (a *App) appendAndDeliver(app *sdk.AppCtx, conv *Conversation, msg *Message
 	// notification gateway cannot delay live chat updates.
 	a.publishConversationEvent(app, conv, stored)
 	return stored, inserted, nil
+}
+
+// releaseQueuedMessages is called after a response settles. One message per
+// agent is released at a time; the next response settlement releases the next
+// FIFO row. This keeps queued turns from racing the active Core iteration.
+func (a *App) releaseQueuedMessages(chat string) {
+	if a.store == nil {
+		return
+	}
+	conv, err := a.store.GetConversation(chat)
+	if err != nil {
+		return
+	}
+	agents, err := a.store.AgentParticipants(chat)
+	if err != nil {
+		agents = []int64{conv.LeadAgentID}
+	}
+	for _, agentID := range agents {
+		if a.streamer != nil && a.streamer.responseActive(chat, agentID) {
+			continue
+		}
+		rows, err := a.store.queuedMessages(chat, agentID)
+		if err != nil || len(rows) == 0 {
+			continue
+		}
+		for _, msg := range rows {
+			ids := messageTargetAgentIDs(msg)
+			matched := false
+			for _, id := range ids {
+				if id == agentID {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+			stillActive := false
+			for _, id := range ids {
+				if id != agentID && a.streamer != nil && a.streamer.responseActive(chat, id) {
+					stillActive = true
+					break
+				}
+			}
+			if !stillActive {
+				msg, err = a.store.markQueueState(msg.ID, "released")
+				if err != nil {
+					continue
+				}
+			}
+			a.dispatchOrQueue(mountedCtx, "agent-inbound:"+strconv.FormatInt(agentID, 10), conv, msg)
+			break
+		}
+	}
 }
 
 func conversationEventTopic(msg *Message) string {
@@ -564,6 +625,13 @@ func (a *App) redeliverPending(app *sdk.AppCtx) (int, error) {
 				if cancelErr != nil {
 					return redelivered, cancelErr
 				}
+				continue
+			}
+			if strings.HasPrefix(d.Target, "agent-inbound:") && msg.QueueBehavior == "queue" && msg.QueueState == "queued" {
+				// The active-response check and FIFO release happen through the
+				// same durable queue path; never let generic outbox recovery
+				// bypass it while a response is still running.
+				a.releaseQueuedMessages(conv.ID)
 				continue
 			}
 			a.attemptDelivery(app, d.Target, conv, msg)

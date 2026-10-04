@@ -17,6 +17,9 @@ export interface SendMessage {
   intent?: "soft_break";
   target_agent_ids?: number[];
   target_call_id?: string;
+  /** Queue is the default: while a response is active the row waits server-side.
+   * Use steer for an explicit immediate dispatch or legacy for old behavior. */
+  next_message_behavior?: "queue" | "steer" | "legacy";
 }
 export interface ListConversations {
   agent_id?: number;
@@ -91,6 +94,12 @@ export class ConversationsClient {
     this.app.get<ChangePage>(query("/changes", { chat_id: id, cursor }), init);
   send = (id: string, input: SendMessage, init?: RequestInit) =>
     this.app.post<Message>(query("/messages", { chat_id: id }), input, init);
+  editQueued = (id: string, messageID: number, content: string) =>
+    this.app.patch<Message>(query("/messages", { chat_id: id, id: messageID }), { content });
+  removeQueued = (id: string, messageID: number) =>
+    this.app.del<Message>(query("/messages", { chat_id: id, id: messageID }));
+  steerQueued = (id: string, messageID: number) =>
+    this.app.post<Message>("/message-queue", { chat_id: id, message_id: messageID, action: "steer" });
   voiceStatus = (id: string) => this.app.get<VoiceSession>(query("/voice", { chat_id: id }));
   startVoice = (id: string) => this.app.post<VoiceSession>(query("/voice", { chat_id: id }));
   renewVoice = (id: string) => this.app.patch<VoiceSession>(query("/voice", { chat_id: id }));

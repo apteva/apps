@@ -229,6 +229,78 @@ func TestScenario_LongMultiStepProgress(t *testing.T) {
 	t.Fatal("no final long multi-step Codex reply within 180s")
 }
 
+// TestScenario_ShortMultiStepQuiet uses a natural request with no cadence hints.
+// The shipped instructions must keep the list lookup and todo lookup together.
+func TestScenario_ShortMultiStepQuiet(t *testing.T) {
+	c := newScenarioClient(t)
+	agentID, cleanupAgent := c.ensureAgent()
+	defer cleanupAgent()
+
+	var list struct {
+		ID int64 `json:"id"`
+	}
+	if status := c.do("POST", "/api/apps/todo/lists", map[string]any{
+		"name": "Progress fixture",
+	}, &list); status != http.StatusOK || list.ID == 0 {
+		t.Fatalf("seed todo list: status=%d list=%+v", status, list)
+	}
+	for _, title := range []string{"First fixture todo", "Second fixture todo"} {
+		if status := c.do("POST", "/api/apps/todo/todos", map[string]any{
+			"title": title, "list_id": list.ID, "source": "human",
+		}, nil); status != http.StatusOK {
+			t.Fatalf("seed todo %q: status=%d", title, status)
+		}
+	}
+
+	var conv struct {
+		ID string `json:"id"`
+	}
+	status := c.do("POST", "/api/apps/conversations/chats", map[string]any{
+		"agent_id": agentID, "title": "Live short multi-step cadence (codex)",
+	}, &conv)
+	if status != http.StatusOK || conv.ID == "" {
+		t.Fatalf("create conversation: status=%d conv=%+v", status, conv)
+	}
+	defer c.do("DELETE", "/api/apps/conversations/chats?id="+conv.ID, nil, nil)
+
+	content := "Find the Progress fixture todo list and tell me its todos. Include SHORT_FLOW_DONE in your answer."
+	if status := c.do("POST", "/api/apps/conversations/messages?chat_id="+conv.ID, map[string]any{
+		"content": content, "client_message_id": "live-short-cadence-1",
+	}, nil); status != http.StatusOK {
+		t.Fatalf("post long multi-step message: status=%d", status)
+	}
+
+	deadline := time.Now().Add(180 * time.Second)
+	var finalSeen time.Time
+	for time.Now().Before(deadline) {
+		var transcript []Message
+		c.do("GET", "/api/apps/conversations/messages?chat_id="+conv.ID, nil, &transcript)
+		var replies []Message
+		for _, message := range transcript {
+			if message.Role == "agent" {
+				replies = append(replies, message)
+				if message.Phase == "final" && strings.Contains(message.Content, "SHORT_FLOW_DONE") && finalSeen.IsZero() {
+					finalSeen = time.Now()
+				}
+			}
+		}
+		if !finalSeen.IsZero() && time.Since(finalSeen) >= 8*time.Second {
+			if len(replies) != 2 || replies[0].Phase != "acknowledgement" || replies[1].Phase != "final" {
+				t.Fatalf("short multi-call flow should have only acknowledgement and final: %+v", replies)
+			}
+			for _, title := range []string{"First fixture todo", "Second fixture todo"} {
+				if !strings.Contains(replies[1].Content, title) {
+					t.Fatalf("final answer missing %q: %s", title, replies[1].Content)
+				}
+			}
+			t.Logf("short multi-call flow: acknowledgement=%q final=%q; no intermediate or duplicate messages", replies[0].Content, replies[1].Content)
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Fatal("no final short multi-step reply within 180s")
+}
+
 // TestScenario_SingleConversationRoundTrip proves the focused widget's
 // server-selected conversation is the same durable chat used for a real Codex
 // turn. It covers the lead-agent projection without introducing a second chat

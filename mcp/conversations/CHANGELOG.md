@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.34 — 2026-10-04
+
+- Queue follow-up messages by default while an agent is responding, with edit, remove, and steer controls for queued turns.
+- Block sends to offline agents and replace unread count badges with the shared unread indicator.
+- Reduce progress narration for short multi-step work and add Tier 3 coverage for the quieter flow.
+
 ## 0.24.33 — 2026-10-03
 
 - Preserve opaque `blobref://` attachments from native image generation through Conversations messages, history reloads, and authorized image presentation.

@@ -3,7 +3,7 @@ import type { ConversationComposerHandle } from "./composerHost";
 import { useConversationLocalization, type ConversationLocalization } from "./i18n";
 import { useConversationAPI } from "./context";
 import { useCallback, useEffect, useMemo, useRef, useState, type Ref } from "react";
-import { ConversationActivityIndicator, useConversationActivity } from "./conversationActivity";
+import { ConversationActivityIndicator, ConversationUnreadIndicator, useConversationActivity } from "./conversationActivity";
 import {
   ConversationChat,
   MoreConversations,
@@ -239,9 +239,7 @@ function ConversationBrowser({
                       <div className="flex items-center gap-2">
                         <span className="min-w-0 flex-1 truncate text-sm font-medium text-text">{conversation.title}</span>
                         <ConversationActivityIndicator active={activeConversations.has(conversation.id)} />
-                        {unreadCount > 0 && conversation.id !== selectedId && (
-                          <span className="rounded-full bg-accent px-1.5 py-0.5 text-xs text-bg">{unreadCount}</span>
-                        )}
+                        {conversation.id !== selectedId && <ConversationUnreadIndicator unread={unreadCount > 0} />}
                       </div>
                       <div className="mt-1 flex items-center gap-2 text-xs text-text-dim">
                         {conversation.kind === "room" && <span>{t("chat.room")}</span>}

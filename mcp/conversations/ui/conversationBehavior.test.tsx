@@ -15,6 +15,7 @@ import type { PageContext } from "../frontend/src/pageContext";
 import { showPageContext, type AgentConversationWidgetSettings } from "../frontend/src/agentConversations";
 import type { ConversationComposerHandle } from "../frontend/src/composerHost";
 import type { ComponentProps } from "react";
+import { ConversationUnreadIndicator } from "../frontend/src/conversationActivity";
 let conversations: ConversationsClient;
 function ConversationChat(props: ComponentProps<typeof ChatSource> & ConversationLocalization & { pageContext?: PageContext; widgetSettings?: AgentConversationWidgetSettings }) {
  const { pageContext, widgetSettings, ...chatProps } = props;
@@ -54,6 +55,24 @@ beforeEach(()=>{
 });
 afterEach(async()=>{await act(async()=>root.unmount());await win.happyDOM.abort();});
 
+test("unread conversations use the shared dot indicator without a numeric badge", async () => {
+  await act(async () => root.render(
+    <ConversationLocalizationProvider>
+      <ConversationUnreadIndicator unread />
+    </ConversationLocalizationProvider>,
+  ));
+  const indicator = element.querySelector('[aria-label="Unread messages"]');
+  expect(indicator).not.toBeNull();
+  expect(indicator?.className).toContain("chat-thread-working-dot");
+  expect(element.textContent).toBe("");
+  await act(async () => root.render(
+    <ConversationLocalizationProvider>
+      <ConversationUnreadIndicator unread={false} />
+    </ConversationLocalizationProvider>,
+  ));
+  expect(element.querySelector('[aria-label="Unread messages"]')).toBeNull();
+});
+
 test("voice mic appears only in active direct operator chats",async()=>{
  await render();
  expect(element.querySelector('[aria-label="Start voice in this chat"]')).not.toBeNull();
@@ -63,6 +82,27 @@ test("voice mic appears only in active direct operator chats",async()=>{
  expect(element.querySelector('[aria-label="Start voice in this chat"]')).toBeNull();
  await act(async()=>root.render(<ConversationChat conversation={conv("a")} archived={true} onActed={()=>{}} onRemoved={()=>{}}/>));
  expect(element.querySelector('[aria-label="Start voice in this chat"]')).toBeNull();
+});
+
+test("offline agents keep the draft but block sending", async () => {
+  const posted: string[] = [];
+  fetcher = (url, init) => {
+    if (init?.method === "POST" && url.includes("/messages")) {
+      posted.push(String(init.body));
+      return json(message(1, "a", "should not send"));
+    }
+    return (url.includes("/deliveries") || url.includes("/activity"))
+      ? json([])
+      : json({ messages: [], cursor: 0, has_more: false, before: 0 });
+  };
+  await act(async () => root.render(<ConversationChat conversation={conv("a")} agentOnline={false} archived={false} onActed={() => {}} onRemoved={() => {}} />));
+  await settle();
+  await type("keep this draft");
+  expect(element.textContent).toContain("Agent offline");
+  expect((element.querySelector("button[type=submit]") as HTMLButtonElement).disabled).toBe(true);
+  await send();
+  expect(posted).toHaveLength(0);
+  expect((element.querySelector("textarea") as HTMLTextAreaElement).value).toBe("keep this draft");
 });
 
 test("saved spoken turns are marked as voice in the existing transcript",async()=>{

@@ -92,6 +92,19 @@ type streamer struct {
 	onActivityChange func(string)
 }
 
+// responseActive reports whether the mapped agent currently owns a live
+// response. It is intentionally a snapshot: the durable queue remains the
+// source of truth if a response settles between this check and the insert.
+func (s *streamer) responseActive(chat string, agent int64) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.responses[responseProgressKey(chat, agent)]
+	return p != nil && p.Phase != "idle"
+}
+
 func (s *streamer) publish(frame StreamFrame) {
 	s.hub.publishStream(frame)
 	if s.onFrame != nil {

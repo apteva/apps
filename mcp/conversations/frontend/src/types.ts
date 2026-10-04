@@ -35,6 +35,9 @@ export interface Message {
   attachments?: Attachment[];
   client_message_id?: string;
   metadata?: Record<string, unknown>;
+  queue_behavior?: "queue" | "steer" | "legacy";
+  queue_state?: "queued" | "released" | "steered" | "cancelled" | string;
+  queue_position?: number;
   created_at: string;
 }
 

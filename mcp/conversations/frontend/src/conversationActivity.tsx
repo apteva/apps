@@ -88,3 +88,10 @@ export function ConversationActivityIndicator({ active }: { active: boolean }) {
   const label = t("chat.working");
   return <span role="img" aria-label={label} title={label} className="chat-thread-working-dot inline-block h-2 w-2 shrink-0 rounded-full bg-accent" />;
 }
+
+export function ConversationUnreadIndicator({ unread }: { unread: boolean }) {
+  const { t } = useConversationLocalization();
+  if (!unread) return null;
+  const label = t("chat.unread");
+  return <span role="img" aria-label={label} title={label} className="chat-thread-working-dot inline-block h-2 w-2 shrink-0 rounded-full bg-accent" />;
+}
