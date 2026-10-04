@@ -46,5 +46,8 @@ with `working` updates when needed, and finish with one terminal reply.
 The caller's `agent_ask` returns immediately. The platform subscribes the exact
 calling thread to this task ID, so `working` and `input_required` replies arrive
 as progress events and `completed`, `failed`, or `canceled` closes the watch.
-Do not poll or create a second subscription; include the useful progress or
-final result in the `message` passed to `agent_reply`.
+When the result has `pending=true`, the task has started. Immediately send one
+concise progress update to the requester saying that the task started and include
+the task ID; then wait for the correlated events. Do not poll or create a second
+subscription. Include useful progress or the final result in the `message` passed
+to `agent_reply`.

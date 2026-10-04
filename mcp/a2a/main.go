@@ -29,7 +29,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: a2a
 display_name: Agent to Agent
-version: 0.6.8
+version: 0.6.9
 description: |
   Agent-to-agent communication within and between Apteva installations.
   Automatically generates Agent Cards for attached local agents, discovers
@@ -63,7 +63,7 @@ provides:
     - { name: agent_get,      description: "Optionally inspect the full Agent Card for an address returned by agents_discover." }
     - { name: agent_send,  description: "Send a one-way message to another agent, or add a message to an existing task." }
     - name: agent_ask
-      description: "Ask another agent to do something. Returns a normal result immediately with accepted=true, task_id, status, pending, and reply_expected; accepted/delivered means the request was handed off, not that the work is complete. A pending task later produces correlated progress or terminal task events through the platform. The recipient main thread owns dispatch: it handles small requests directly or assigns larger work to a suitable focused worker, never an arbitrary idle thread."
+      description: "Ask another agent to do something. Returns a normal result immediately with accepted=true, task_id, status, pending, started, and reply_expected. When pending=true, the task has started: immediately report that handoff and task_id to the requester, then wait for correlated progress or terminal task events; do not poll. accepted/delivered means the request was handed off, not that the work is complete. The recipient main thread owns dispatch: it handles small requests directly or assigns larger work to a suitable focused worker, never an arbitrary idle thread."
       async_result:
         id_field: task_id
         notify:
@@ -104,7 +104,7 @@ provides:
         icon: arrow-left-right
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: a2a/v0.6.8, entry: mcp/a2a }
+  source: { repo: github.com/apteva/apps, ref: a2a/v0.6.9, entry: mcp/a2a }
   port: 8080
   health_check: /health
 db:
@@ -266,7 +266,9 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "agent_ask",
 			Description: "Ask a local or remote agent to do something. Returns a normal result immediately with accepted=true, " +
-				"task_id, status, pending, reply_expected, and generic event-correlation metadata. accepted/delivered means the " +
+				"task_id, status, pending, started, reply_expected, and generic event-correlation metadata. When pending=true, " +
+				"the task has started: immediately report that handoff and task_id to the requester, then wait for correlated " +
+				"progress or terminal task events; do not poll. accepted/delivered means the " +
 				"request was handed off, not that the work is complete; later progress or terminal task events use task_id. The " +
 				"recipient's main thread owns dispatch: it should handle a small, self-contained request directly, or reuse a suitable " +
 				"worker / spawn a focused worker for larger work. Do not route A2A work to an arbitrary idle thread. Pass the actionable " +

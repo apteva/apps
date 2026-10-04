@@ -153,8 +153,15 @@ func TestAskDeliversAndReplyRoutesToAskingThread(t *testing.T) {
 	res := resultMap(t)(app.toolAsk(callerCtx(41, "th-9"), ctx, map[string]any{
 		"to": "42", "message": "Summarize this week's leads.",
 	}))
-	if res["accepted"] != true || res["pending"] != true || res["reply_expected"] != true {
+	if res["accepted"] != true || res["pending"] != true || res["started"] != true || res["reply_expected"] != true {
 		t.Fatalf("ask handoff result = %#v, want accepted pending reply_expected", res)
+	}
+	if res["next_action"] != "report_started_then_wait_for_events" {
+		t.Fatalf("ask next action = %#v", res["next_action"])
+	}
+	handoff, ok := res["handoff"].(map[string]any)
+	if !ok || handoff["state"] != "started" || !strings.Contains(fmt.Sprint(handoff["instruction"]), "requester") {
+		t.Fatalf("ask handoff guidance = %#v", res["handoff"])
 	}
 	if res["status"] != "submitted" || res["delivery_status"] != "delivered" {
 		t.Fatalf("ask handoff state = %#v", res)
@@ -209,7 +216,7 @@ func TestAskDeliversAndReplyRoutesToAskingThread(t *testing.T) {
 
 func TestAsyncAskResultCompletedIsNormalGenericResult(t *testing.T) {
 	result := asyncAskResult(nil, &Task{ID: 12, Kind: "ask", Status: "completed"}, map[string]any{"id": int64(42)}, "done")
-	if result["accepted"] != true || result["pending"] != false || result["reply_expected"] != false {
+	if result["accepted"] != true || result["pending"] != false || result["started"] != false || result["reply_expected"] != false {
 		t.Fatalf("completed result = %#v", result)
 	}
 	if result["reply"] != "done" || result["delivery_status"] != "delivered" {
@@ -231,7 +238,7 @@ func TestAskContractExplainsRecipientDispatch(t *testing.T) {
 			reply = tool.Description
 		}
 	}
-	for _, want := range []string{"normal result immediately", "accepted=true", "reply_expected", "recipient's main thread owns dispatch", "focused worker", "arbitrary idle"} {
+	for _, want := range []string{"normal result immediately", "accepted=true", "reply_expected", "started", "pending=true", "report that handoff", "do not poll", "recipient's main thread owns dispatch", "focused worker", "arbitrary idle"} {
 		if !strings.Contains(ask, want) {
 			t.Fatalf("agent_ask description missing %q: %s", want, ask)
 		}

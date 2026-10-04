@@ -22,6 +22,7 @@ func asyncAskResult(app *sdk.AppCtx, task *Task, to map[string]any, reply string
 		"task_id":         task.ID,
 		"status":          task.Status,
 		"pending":         pending,
+		"started":         pending,
 		"reply_expected":  pending,
 		"delivery_status": "delivered",
 		"updates": map[string]any{
@@ -38,7 +39,13 @@ func asyncAskResult(app *sdk.AppCtx, task *Task, to map[string]any, reply string
 		result["reply"] = reply
 	}
 	if pending {
-		result["note"] = fmt.Sprintf("request accepted as task %d; later progress and terminal events are correlated by task_id", task.ID)
+		result["note"] = fmt.Sprintf("task %d started; report this handoff to the requester now, then wait for correlated task events", task.ID)
+		result["next_action"] = "report_started_then_wait_for_events"
+		result["handoff"] = map[string]any{
+			"state":       "started",
+			"task_id":     task.ID,
+			"instruction": "Tell the requester this task has started and include the task_id. Wait for task events; do not poll.",
+		}
 	} else if reply != "" {
 		result["note"] = "request completed; the reply is included in this result"
 	} else {
