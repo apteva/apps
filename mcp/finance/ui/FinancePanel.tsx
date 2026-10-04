@@ -459,8 +459,12 @@ function FinancePanelContent({ projectId, installId }: NativePanelProps) {
   const [showNewBudget, setShowNewBudget] = useState(false);
   const [syncingBroker, setSyncingBroker] = useState(false);
   const [error, setError] = useState<string>("");
+  const syncInProgress = useRef(false);
+  const eventRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refreshGeneration = useRef(0);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (commitDuringSync = false) => {
+    const generation = ++refreshGeneration.current;
     try {
       const [s, a, h, t, alloc, bs, cats] = await Promise.all([
         api<Settings>("/settings"),
@@ -471,6 +475,7 @@ function FinancePanelContent({ projectId, installId }: NativePanelProps) {
         api<{ budgets: BudgetStatus[]; period_start: string; period_end: string }>("/budgets/status?period=monthly"),
         api<{ categories: Category[] }>("/categories"),
       ]);
+      if (generation !== refreshGeneration.current || (syncInProgress.current && !commitDuringSync)) return;
       setSettings(s);
       setAccounts(a.accounts ?? []);
       setHoldings((h.holdings ?? []).filter(x => !x.closed_at));
@@ -481,22 +486,43 @@ function FinancePanelContent({ projectId, installId }: NativePanelProps) {
       setCategories(cats.categories ?? []);
       setError("");
     } catch (e: unknown) {
+      if (generation !== refreshGeneration.current || (syncInProgress.current && !commitDuringSync)) return;
       setError(e instanceof Error ? e.message : String(e));
     }
   }, [api]);
 
   useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => () => {
+    if (eventRefreshTimer.current) clearTimeout(eventRefreshTimer.current);
+  }, []);
 
-  useAppEvents("finance", projectId, () => { refresh(); });
+  useAppEvents("finance", projectId, (ev) => {
+    if (ev.install_id !== installId || syncInProgress.current) return;
+    if (eventRefreshTimer.current) clearTimeout(eventRefreshTimer.current);
+    // A broker import emits one event per transaction. Wait for the burst to
+    // settle instead of reloading every report for each imported row.
+    eventRefreshTimer.current = setTimeout(() => {
+      eventRefreshTimer.current = null;
+      void refresh();
+    }, ev.topic.endsWith("brokerage.synced") ? 0 : 1500);
+  });
 
   const syncBrokerage = async () => {
+    if (syncInProgress.current) return;
+    syncInProgress.current = true;
+    refreshGeneration.current++;
+    if (eventRefreshTimer.current) clearTimeout(eventRefreshTimer.current);
+    eventRefreshTimer.current = null;
     setSyncingBroker(true);
     try {
       await api("/brokerage/sync", { method: "POST", body: JSON.stringify({}) });
-      await refresh();
+      await refresh(true);
     } catch (e: unknown) {
+      // Some rows may already have been imported when a later page fails.
+      await refresh(true);
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      syncInProgress.current = false;
       setSyncingBroker(false);
     }
   };
@@ -541,6 +567,9 @@ function FinancePanelContent({ projectId, installId }: NativePanelProps) {
           {error}
         </div>
       )}
+      {syncingBroker && <div role="status" className="rounded-md border border-border bg-bg-card px-3 py-2 text-sm text-text-muted">
+        Syncing broker data… Showing the last loaded values until the import finishes.
+      </div>}
 
       <div className="flex-1 overflow-auto">
         {tab === "overview" && (
@@ -648,7 +677,6 @@ function OverviewTab({
     let cancelled = false;
     setHistoryLoading(true);
     setHistoryError("");
-    setNetWorth(null);
     const query = new URLSearchParams({ series: resolution, from, to });
     api<NetWorthSeries>(`/reports/net-worth?${query.toString()}`)
       .then(result => { if (!cancelled) setNetWorth(result); })
@@ -714,10 +742,11 @@ function OverviewTab({
             className="ml-1 rounded-md border border-border bg-bg-card px-2 py-1 text-text" /></label>
         </div>}
         {historyError ? <div role="alert" className="mt-6 rounded-md border border-error/30 bg-error/10 p-3 text-sm text-error">{historyError}</div>
-          : historyLoading || !netWorth ? <div className="grid h-64 place-items-center text-sm text-text-muted">Loading history…</div>
-          : <NetWorthChart points={netWorth.points} currency={base} />}
-        {netWorth && !historyLoading && !historyError && <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-xs text-text-muted">
-          <span>{fmtHistoryDate(netWorth.from)} – {fmtHistoryDate(netWorth.to)} · {netWorth.points.length} {resolution} values</span>
+          : netWorth ? <div aria-busy={historyLoading}><NetWorthChart points={netWorth.points} currency={base} /></div>
+          : <div className="grid h-64 place-items-center text-sm text-text-muted">Loading history…</div>}
+        {netWorth && !historyError && <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-xs text-text-muted">
+          <span>{fmtHistoryDate(netWorth.from)} – {fmtHistoryDate(netWorth.to)} · {netWorth.points.length} {netWorth.series} values</span>
+          {historyLoading && <span role="status">Updating history…</span>}
           <span>Historical values are estimates where market prices are missing.</span>
         </div>}
         {netWorth && netWorth.points.length > 0 && <details className="mt-3 border-t border-border pt-2 text-xs">
