@@ -101,6 +101,7 @@ function providerLabel(slug: string): string {
   if (slug === "ionos") return "IONOS";
   if (slug === "spaceship") return "Spaceship";
   if (slug === "cloudflare") return "Cloudflare";
+  if (slug === "hostinger") return "Hostinger";
   if (slug === "rdap") return "Public RDAP";
   return slug;
 }
