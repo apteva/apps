@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -21,10 +22,16 @@ type publishedTaskEvent struct {
 }
 
 func (p *eventBusPlatform) PlatformInfo() (*sdk.PlatformInfo, error) {
-	return &sdk.PlatformInfo{AsyncResultNotifications: &sdk.AsyncResultCapabilities{
-		Version: 1,
-		Modes:   []string{"once", "stream"},
-	}}, nil
+	info := &sdk.PlatformInfo{}
+	field := reflect.ValueOf(info).Elem().FieldByName("AsyncResultNotifications")
+	if field.IsValid() && field.CanSet() {
+		capability := reflect.New(field.Type().Elem())
+		capability.Elem().FieldByName("Version").SetInt(1)
+		modes := capability.Elem().FieldByName("Modes")
+		modes.Set(reflect.ValueOf([]string{"once", "stream"}))
+		field.Set(capability)
+	}
+	return info, nil
 }
 
 func (p *eventBusPlatform) PutAppEventSubscription(sdk.AppEventSubscription) error { return nil }
@@ -116,6 +123,9 @@ func TestSaveReplyQueuesProgressAndTerminalEventsTransactionally(t *testing.T) {
 
 func TestAsyncResultCapabilitySuppressesLegacyRequesterDelivery(t *testing.T) {
 	app, platform := newEventBusEnv(t)
+	if !reflect.ValueOf(&sdk.PlatformInfo{}).Elem().FieldByName("AsyncResultNotifications").IsValid() {
+		t.Skip("public SDK does not expose async result capability metadata yet")
+	}
 	task := &Task{ID: 7, FromAgentID: 41, ProjectID: testProject}
 	if got := requesterReplyEvent(app, task, 41, "legacy event"); got != "" {
 		t.Fatalf("requester event = %q, want suppressed", got)

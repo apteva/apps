@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -22,12 +23,34 @@ func asyncTaskNotificationsAvailable(app *sdk.AppCtx) bool {
 		return false
 	}
 	info, err := app.PlatformInfo()
-	if err != nil || info == nil || info.AsyncResultNotifications == nil {
+	if err != nil || info == nil {
 		return false
 	}
-	for _, mode := range info.AsyncResultNotifications.Modes {
+	// AsyncResultNotifications was added after the SDK version used by some
+	// existing installations. Read it reflectively so this app remains
+	// buildable against those public SDK versions; an SDK that lacks the field
+	// safely keeps the legacy event-delivery path.
+	value := reflect.ValueOf(info)
+	if value.Kind() == reflect.Ptr {
+		value = value.Elem()
+	}
+	capability := value.FieldByName("AsyncResultNotifications")
+	if !capability.IsValid() || capability.IsNil() {
+		return false
+	}
+	capability = capability.Elem()
+	modes := capability.FieldByName("Modes")
+	version := capability.FieldByName("Version")
+	if !modes.IsValid() || !version.IsValid() {
+		return false
+	}
+	for i := 0; i < modes.Len(); i++ {
+		mode, ok := modes.Index(i).Interface().(string)
+		if !ok {
+			continue
+		}
 		if mode == "stream" {
-			return info.AsyncResultNotifications.Version >= 1
+			return version.Int() >= 1
 		}
 	}
 	return false

@@ -29,7 +29,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: a2a
 display_name: Agent to Agent
-version: 0.6.7
+version: 0.6.8
 description: |
   Agent-to-agent communication within and between Apteva installations.
   Automatically generates Agent Cards for attached local agents, discovers
@@ -104,7 +104,7 @@ provides:
         icon: arrow-left-right
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: a2a/v0.6.7, entry: mcp/a2a }
+  source: { repo: github.com/apteva/apps, ref: a2a/v0.6.8, entry: mcp/a2a }
   port: 8080
   health_check: /health
 db:

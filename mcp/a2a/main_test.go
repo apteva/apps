@@ -504,11 +504,11 @@ func TestAgentAskDeclaresAsyncTaskNotifications(t *testing.T) {
 	if ask.AsyncResult.IDField != "task_id" {
 		t.Fatalf("async id field = %q, want task_id", ask.AsyncResult.IDField)
 	}
-	if err := sdk.ValidateAsyncResultSpec(ask.AsyncResult); err != nil {
-		t.Fatalf("async result metadata is invalid: %v", err)
-	}
 	if ask.AsyncResult.Notify.Mode != "stream" {
 		t.Fatalf("async mode = %q, want stream", ask.AsyncResult.Notify.Mode)
+	}
+	if len(ask.AsyncResult.Notify.Events) == 0 {
+		t.Fatalf("async result metadata has no event topics: %#v", ask.AsyncResult.Notify)
 	}
 }
 
