@@ -55,6 +55,8 @@ Do not invoke the `scenario` Go build tag directly.
 | Public refusal | Reply without escalating during a settle period |
 | Room fan-out | Two runner-owned agents reply; duplicate submission reuses one row |
 | Room messages and mentions | Normal messages/follow-ups reach the lead; named mentions reach only that participant; shared history is readable; `@all` reaches both; explicit recipients override mentions; retry deduplicates; each round checks final replies and a 12-second quiet window |
+| Short multi-step cadence | Related list and todo lookups complete with one acknowledgement and one final reply, without an unnecessary progress message |
+| Long multi-step progress | A meaningful stage boundary produces one intermediate progress update before the final outcome |
 | Bound approval | Approval/verdict remain in the originating chat |
 | Ownership | Unchanged main/chat profiles, no mutation/delegation attempts, history recall and restart/resume |
 

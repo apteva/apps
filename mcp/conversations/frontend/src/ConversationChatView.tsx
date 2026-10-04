@@ -12,6 +12,7 @@ export interface ConversationChatViewProps {
   subtitle: string;
   publicAudience: boolean;
   connected: boolean;
+  agentOnline?: boolean;
   archived: boolean;
   messageNodes: ReactNode;
   hasMessages: boolean;
@@ -97,6 +98,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
   const hasDraft = Boolean(props.draft.trim()) || props.attachments.items.length>0;
   const showSuggestions = !props.hasMessages && !props.streamNode && !hasDraft && !props.archived && Boolean(props.suggestions?.length);
   const showBreak = props.responseActive && !hasDraft;
+  const agentOffline = props.agentOnline === false;
   const breakLabel = t(props.breakRequested ? "chat.breakRequested" : props.breakBusy ? "chat.breakRequesting" : "chat.breakLabel");
   return (
     <section className="min-h-0 flex-1 flex flex-col">
@@ -115,7 +117,8 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
           title={props.connected ? t("chat.live") : t("chat.reconnectingHistory")}
         />
           </div>
-          <p className="text-xs text-text-muted truncate">{props.subtitle}</p>
+            <p className="text-xs text-text-muted truncate">{props.subtitle}</p>
+            {agentOffline && <p className="text-[10px] text-error">{t("chat.agentOffline")}</p>}
         </div>
         {props.headerActions && (
           <div data-chat-header-actions className="ml-auto flex shrink-0 items-center gap-1">{props.headerActions}</div>
@@ -233,7 +236,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
               onChange={(event) => props.onDraftChange(event.target.value, event.target)}
               onKeyDown={props.onComposerKeyDown}
               rows={1}
-              placeholder={props.voiceActive ? t("voice.endToType") : props.connected ? t("chat.placeholder") : t("chat.reconnectingPlaceholder")}
+              placeholder={props.voiceActive ? t("voice.endToType") : agentOffline ? t("chat.agentOfflinePlaceholder") : props.connected ? t("chat.placeholder") : t("chat.reconnectingPlaceholder")}
               className="chat-composer-input"
               autoFocus={
                 typeof window !== "undefined" &&
@@ -244,7 +247,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
             <button
               type={showBreak ? "button" : "submit"}
               onClick={showBreak ? props.onSoftBreak : undefined}
-              disabled={props.voiceActive || (showBreak ? props.breakBusy || props.breakRequested : props.sending || !hasDraft || props.attachments.items.some(i=>!i.attachment || i.busy || i.error))}
+              disabled={agentOffline || props.voiceActive || (showBreak ? props.breakBusy || props.breakRequested : props.sending || !hasDraft || props.attachments.items.some(i=>!i.attachment || i.busy || i.error))}
               className="chat-composer-send"
               aria-label={showBreak ? breakLabel : t("chat.send")}
               aria-busy={showBreak && props.breakBusy ? true : undefined}

@@ -1,0 +1,37 @@
+name: conversations-short-multi-step-quiet
+timeout: 12m
+max_iterations: 100
+setup:
+  app:
+    path: .
+  apps:
+    - path: ../todo
+      spawnable: true
+  agents: 1
+  driver: ["go", "-C", "..", "test", "-tags=scenario", "-run", "^TestScenario_ShortMultiStepQuiet$", "-v", "-count=1", "-timeout=11m", "."]
+directive: |
+  You are an operations and customer-support agent. Answer chat messages briefly
+  and directly. When monitor or scheduler events arrive, act on them per your
+  conversations skill. All operations here use isolated test data.
+budget:
+  total_tokens: 500000
+trajectory_assert:
+  - tool_called_with:
+      tool: conversations_send
+      args:
+        phase: acknowledgement
+      before: todo_lists_list
+  - tool_called_with:
+      tool: todo_lists_list
+      count: 1
+  - tool_called_with:
+      tool: todo_todos_list
+      count: 1
+  - tool_called_with:
+      tool: conversations_send
+      args:
+        phase: final
+      count: 1
+  - tool_called_with:
+      tool: conversations_send
+      count: 2

@@ -78,6 +78,9 @@ type Message struct {
 	ClientID       string         `json:"client_message_id,omitempty"`
 	SourceApp      string         `json:"source_app,omitempty"`
 	CallbackTool   string         `json:"callback_tool,omitempty"`
+	QueueBehavior  string         `json:"queue_behavior,omitempty"`
+	QueueState     string         `json:"queue_state,omitempty"`
+	QueuePosition  int64          `json:"queue_position,omitempty"`
 	CreatedAt      time.Time      `json:"created_at"`
 }
 
@@ -676,6 +679,12 @@ func normalizeMessage(m *Message) {
 	if m.Metadata == nil {
 		m.Metadata = map[string]any{}
 	}
+	if m.QueueBehavior == "" {
+		m.QueueBehavior = "legacy"
+	}
+	if m.QueueState == "" {
+		m.QueueState = "released"
+	}
 }
 
 // AppendMessageWithDeliveries commits the durable message and every initial
@@ -705,6 +714,11 @@ func (s *store) AppendMessageWithDeliveries(m *Message, targets []string) (*Mess
 	request.ID = 0
 	request.CreatedAt = time.Time{}
 	request.Revision = 0
+	// Queue placement is runtime state. A retry with the same client key may
+	// arrive after the response has started, so it must hash the requested
+	// behavior rather than the transient queued/released state or FIFO slot.
+	request.QueueState = ""
+	request.QueuePosition = 0
 	fingerprint, _ := json.Marshal(&request)
 	requestHash := fmt.Sprintf("%x", sha256.Sum256(fingerprint))
 	componentsJSON, err := json.Marshal(m.Components)
@@ -745,14 +759,20 @@ func (s *store) AppendMessageWithDeliveries(m *Message, targets []string) (*Mess
 	if err := tx.QueryRow(`SELECT 1 FROM conversations WHERE id=? AND archived_at IS NULL`, m.ConversationID).Scan(&active); err != nil {
 		return nil, false, fmt.Errorf("conversation is archived or unavailable")
 	}
+	if m.Role == "user" && m.QueueBehavior == "queue" && m.QueueState == "queued" && m.QueuePosition == 0 {
+		if err := tx.QueryRow(`SELECT COALESCE(MAX(queue_position),0)+1 FROM messages WHERE conversation_id=?`, m.ConversationID).Scan(&m.QueuePosition); err != nil {
+			return nil, false, err
+		}
+	}
 	res, err := tx.Exec(`
 		INSERT INTO messages (conversation_id, role, content, agent_id, user_id, external_sender,
 			thread_id, status, phase, action_status, component_kind, severity, inbox_only, components_json,
-			attachments_json, metadata_json, client_message_id, source_app, callback_tool, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		attachments_json, metadata_json, client_message_id, source_app, callback_tool, queue_behavior, queue_state, queue_position, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.ConversationID, m.Role, m.Content, m.AgentID, m.UserID, m.ExternalSender,
 		m.ThreadID, m.Status, m.Phase, m.ActionStatus, m.ComponentKind, m.Severity, boolToInt(m.InboxOnly),
 		string(componentsJSON), string(attachmentsJSON), string(metadataJSON), m.ClientID, m.SourceApp, m.CallbackTool,
+		m.QueueBehavior, m.QueueState, m.QueuePosition,
 		time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		if m.ClientID != "" && strings.Contains(err.Error(), "UNIQUE") {
@@ -800,7 +820,7 @@ func (s *store) AppendMessageWithDeliveries(m *Message, targets []string) (*Mess
 
 const messageCols = `id, conversation_id, role, content, agent_id, user_id, external_sender, thread_id,
 	status, phase, action_status, component_kind, severity, inbox_only, components_json, attachments_json,
-	metadata_json, client_message_id, source_app, callback_tool, created_at, revision`
+	metadata_json, client_message_id, source_app, callback_tool, queue_behavior, queue_state, queue_position, created_at, revision`
 
 func scanMessage(row interface{ Scan(...any) error }) (*Message, error) {
 	var m Message
@@ -808,7 +828,7 @@ func scanMessage(row interface{ Scan(...any) error }) (*Message, error) {
 	var componentsJSON, attachmentsJSON, metadataJSON, created string
 	if err := row.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.UserID,
 		&m.ExternalSender, &m.ThreadID, &m.Status, &m.Phase, &m.ActionStatus, &m.ComponentKind, &m.Severity, &inboxOnly,
-		&componentsJSON, &attachmentsJSON, &metadataJSON, &m.ClientID, &m.SourceApp, &m.CallbackTool, &created, &m.Revision); err != nil {
+		&componentsJSON, &attachmentsJSON, &metadataJSON, &m.ClientID, &m.SourceApp, &m.CallbackTool, &m.QueueBehavior, &m.QueueState, &m.QueuePosition, &created, &m.Revision); err != nil {
 		return nil, err
 	}
 	m.InboxOnly = inboxOnly != 0
@@ -818,8 +838,83 @@ func scanMessage(row interface{ Scan(...any) error }) (*Message, error) {
 	_ = json.Unmarshal([]byte(attachmentsJSON), &m.Attachments)
 	m.Metadata = map[string]any{}
 	_ = json.Unmarshal([]byte(metadataJSON), &m.Metadata)
+	// Keep the wire format quiet for ordinary messages; only queued or
+	// explicitly steered rows need queue controls in clients.
+	if m.QueueBehavior == "legacy" {
+		m.QueueBehavior = ""
+	}
+	if m.QueueState == "released" {
+		m.QueueState = ""
+	}
 	m.CreatedAt, _ = parseSQLiteTime(created)
 	return &m, nil
+}
+
+func (s *store) nextQueuePosition(conversationID string) (int64, error) {
+	var position int64
+	err := s.db.QueryRow(`SELECT COALESCE(MAX(queue_position),0)+1 FROM messages WHERE conversation_id=?`, conversationID).Scan(&position)
+	return position, err
+}
+
+func (s *store) markQueueState(messageID int64, state string) (*Message, error) {
+	if state != "queued" && state != "released" && state != "steered" && state != "cancelled" {
+		return nil, fmt.Errorf("invalid queue state")
+	}
+	if _, err := s.db.Exec(`UPDATE messages SET queue_state=? WHERE id=? AND role='user'`, state, messageID); err != nil {
+		return nil, err
+	}
+	return s.GetMessage(messageID)
+}
+
+func (s *store) queuedMessages(conversationID string, agentID int64) ([]*Message, error) {
+	rows, err := s.db.Query(`SELECT `+messageCols+` FROM messages WHERE conversation_id=? AND role='user' AND queue_state='queued' AND (metadata_json LIKE ? OR metadata_json LIKE ?) ORDER BY queue_position,id`, conversationID, `%"`+fmt.Sprint(agentID)+`"%`, `%`+fmt.Sprint(agentID)+`%`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Message
+	for rows.Next() {
+		m, e := scanMessage(rows)
+		if e != nil {
+			return nil, e
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+func (s *store) updateQueuedMessage(id int64, conversationID, content string) (*Message, error) {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return nil, fmt.Errorf("content required")
+	}
+	res, err := s.db.Exec(`UPDATE messages SET content=? WHERE id=? AND conversation_id=? AND role='user' AND queue_state='queued'`, content, id, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, fmt.Errorf("message is no longer queued")
+	}
+	return s.GetMessage(id)
+}
+
+func (s *store) cancelQueuedMessage(id int64, conversationID string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE messages SET queue_state='cancelled' WHERE id=? AND conversation_id=? AND role='user' AND queue_state='queued'`, id, conversationID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("message is no longer queued")
+	}
+	if _, err := tx.Exec(`UPDATE deliveries SET status='cancelled', last_error='Message removed from queue', updated_at=CURRENT_TIMESTAMP WHERE message_id=? AND target LIKE 'agent-inbound:%' AND status IN ('pending','failed')`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *store) GetMessage(id int64) (*Message, error) {

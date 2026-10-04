@@ -82,8 +82,22 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	a.telegramFeedback = newTelegramFeedbackManager(a)
 	a.streamer.onFrame = a.telegramFeedback.OnFrame
-	a.streamer.onActivityChange = a.publishListProgress
+	a.streamer.onActivityChange = func(chat string) {
+		a.publishListProgress(chat)
+		a.releaseQueuedMessages(chat)
+	}
 	mountedCtx = ctx
+	// Recover queue rows that were created while the process was down and no
+	// response owns the conversation anymore.
+	if rows, err := a.store.db.Query(`SELECT id FROM conversations WHERE archived_at IS NULL`); err == nil {
+		for rows.Next() {
+			var id string
+			if rows.Scan(&id) == nil {
+				a.releaseQueuedMessages(id)
+			}
+		}
+		_ = rows.Close()
+	}
 	// Token-level streaming when the platform grants it; Stage-1 phase
 	// frames otherwise. The bridge connects asynchronously because the
 	// platform may still be registering this install during startup.
@@ -169,7 +183,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"work stays there; never rewrite an app-owned chat with Core update/evolve or delegate its identity-dependent calls. " +
 				"Main returns escalated decisions/results to the originating thread; generic workers report to their parent and are " +
 				"never granted Conversations tools. Delivery updates every bound surface. Set phase to " +
-				"acknowledgement, progress, or final. If sending a pre-work acknowledgement, call this tool alone and wait for its result before calling work tools; do not batch them. For work with two or more distinct stages or batches, send at least one concise progress update between stages, even when the first batch finishes quickly. For long multi-step work, send concise progress updates after meaningful milestones, plan changes, blockers, or requests for input; combine nearby milestones. Do not send one update per tool call, and do not narrate individual tool calls, routine retries, or unchanged waits. Exception: main may acknowledge its own resolved approval " +
+				"acknowledgement, progress, or final. If sending a pre-work acknowledgement, call this tool alone and wait for its result before calling work tools; do not batch them. For short flows, including several related tool calls, keep working through to the final outcome without a progress update. Tool count or a routine stage boundary alone is not a reason to send an update. For longer work, complete a substantial batch before sending a concise progress update, and only when meaningful work remains. Combine nearby milestones; normally leave about a minute between updates unless the user needs to know about a blocker, material plan change, or decision sooner. Do not narrate individual tool calls, routine retries, or unchanged waits. If completion is near, finish and send the final outcome instead. Exception: main may acknowledge its own resolved approval " +
 				"with phase=acknowledgement and approval_message_id from approval.result.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id":     map[string]any{"type": "string"},

@@ -105,7 +105,7 @@ export interface WorkspaceRailProps {
 }
 
 import type { Conversation, Message, StreamFrame, InboxPage, InboxItem, UnreadEntry, AgentInfo, ChangePage, MessageDelivery, ToolActivity } from "./types";
-import { ConversationActivityIndicator, useConversationActivity } from "./conversationActivity";
+import { ConversationActivityIndicator, ConversationUnreadIndicator, useConversationActivity } from "./conversationActivity";
 export type { Conversation, Message } from "./types";
 
 // Pickers only offer agents that hold this app's MCP — an unattached
@@ -1090,7 +1090,7 @@ function ContextColumn({
 //   user   — right-aligned accent-tinted bubble, plain text
 //   agent  — full-width markdown (chat-md, the dashboard's own styles)
 //   system — centered status line
-function MessageRow(props: {message:Message;agentName?:string;onAction:(id:number,action:string,note:string)=>Promise<void>}) {
+function MessageRow(props: {message:Message;agentName?:string;onAction:(id:number,action:string,note:string)=>Promise<void>;onQueueEdit?:(message:Message)=>void;onQueueRemove?:(message:Message)=>void;onQueueSteer?:(message:Message)=>void}) {
  const user=props.message.role==="user";
  const voice=props.message.metadata?.source==="voice";
  const { t } = useConversationLocalization();
@@ -1100,6 +1100,12 @@ function MessageRow(props: {message:Message;agentName?:string;onAction:(id:numbe
  {voice ? <span className={`inline-flex items-center gap-1 text-[10px] text-text-muted ${user?"self-end":"self-start"}`} title={t("voice.transcriptWarning")}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3ZM5 10v2a7 7 0 0 0 14 0v-2M12 19v3"/></svg>{t("voice.turn")}</span> : null}
  {user&&attachments}
  {(props.message.content?.trim() || props.message.component_kind) ? <MessageBody {...props}/> : null}
+ {user && props.message.queue_state === "queued" && <div className="flex justify-end gap-2 text-xs text-text-muted">
+   <span className="rounded-full bg-accent/10 px-2 py-1 text-accent">Queued</span>
+   <button type="button" className="hover:text-text" onClick={() => props.onQueueEdit?.(props.message)}>Edit</button>
+   <button type="button" className="hover:text-error" onClick={() => props.onQueueRemove?.(props.message)}>Remove</button>
+   <button type="button" className="font-medium text-accent hover:text-text" onClick={() => props.onQueueSteer?.(props.message)}>Steer</button>
+ </div>}
  {!user&&attachments}<GenericComponents components={props.message.components}/>
  </div>;
 }
@@ -1434,6 +1440,7 @@ export function MoreConversations({path,projectId,rows,cursor,onRows,onCursor}: 
 export const ConversationChat = forwardRef<ConversationComposerHandle, {
   conversation: Conversation;
   archived: boolean;
+  agentOnline?: boolean;
   emptyMessage?: string;
   welcomeText?: string;
   suggestions?: ComposerSuggestion[];
@@ -1450,6 +1457,7 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
 }>(({
   conversation,
   archived,
+  agentOnline,
   emptyMessage,
   welcomeText,
   suggestions,
@@ -1475,15 +1483,25 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
   const speakerIds = new Set([conversation.lead_agent_id, ...messages.filter(m => m.role === "agent").map(m => m.agent_id), ...bubbles.map(b => b.agentId), ...activities.map(a => a.agent_id)].filter((id): id is number => Boolean(id)));
   const showAgentNames = conversation.kind === "room" || speakerIds.size > 1;
   const [agentNames, setAgentNames] = useState<Record<number, string>>({});
+  const [agentDirectory, setAgentDirectory] = useState<AgentInfo[]>([]);
   useEffect(() => {
     setAgentNames({});
-    if (!showAgentNames) return;
+    setAgentDirectory([]);
     const abort = new AbortController();
-    void conversationsClient.agents({ signal: abort.signal }).then(agents => {
-      if (!abort.signal.aborted) setAgentNames(Object.fromEntries(agents.map(a => [a.id, a.name])));
-    }).catch(() => {});
-    return () => abort.abort();
+    const loadAgents = () => {
+      void conversationsClient.agents({ signal: abort.signal }).then(agents => {
+        if (abort.signal.aborted) return;
+        if (!Array.isArray(agents)) return;
+        setAgentDirectory(agents);
+        if (showAgentNames) setAgentNames(Object.fromEntries(agents.map(a => [a.id, a.name])));
+      }).catch(() => {});
+    };
+    loadAgents();
+    const timer = window.setInterval(loadAgents, 8000);
+    return () => { abort.abort(); window.clearInterval(timer); };
   }, [conversationsClient, conversation.id, showAgentNames]);
+  const directoryAgent = agentDirectory.find(agent => agent.id === conversation.lead_agent_id);
+  const resolvedAgentOnline = agentOnline ?? (directoryAgent ? directoryAgent.status === "running" : undefined);
   const agentName = (id?: number) => showAgentNames && id
     ? agentNames[id] || (id === conversation.lead_agent_id ? conversation.lead_agent_name : undefined) || t("common.agent")
     : undefined;
@@ -1495,7 +1513,8 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
     && !activities.some(tool=>tool.agent_id===p.agent_id && tool.thread_id===p.thread_id && tool.call_id===p.call_id)
     ? [{id:`preparing-${p.run_id}-${p.call_id}`,callId:p.call_id,agentId:p.agent_id ?? 0,threadId:p.thread_id ?? "",name:p.tool_name,reason:"",state:"preparing" as const,startedAt:Date.parse(p.tool_started_at ?? "") || p.sourceAt}]
     : []);
-  const timeline = buildChatTimeline(messages,[...activities.map(toChatToolActivity),...preparingTools],Date.now(),bubbles.filter(b=>b.text).map(b=>({id:`${b.agentId}:${b.callId}:${b.runId}`,text:b.text,agentId:b.agentId,startedAt:b.createdAt ?? Date.now()}))).filter(item => item.kind !== "day" && item.kind !== "time");
+  const visibleMessages = messages.filter(message => message.queue_state !== "cancelled");
+  const timeline = buildChatTimeline(visibleMessages,[...activities.map(toChatToolActivity),...preparingTools],Date.now(),bubbles.filter(b=>b.text).map(b=>({id:`${b.agentId}:${b.callId}:${b.runId}`,text:b.text,agentId:b.agentId,startedAt:b.createdAt ?? Date.now()}))).filter(item => item.kind !== "day" && item.kind !== "time");
   const ownsToolGroup = (response: Parameters<typeof responseToolGroup>[0]) => Boolean(responseToolGroup(response,timeline,messages));
   const [expandedToolGroups,setExpandedToolGroups]=useState<Set<string>>(()=>new Set());
   const toggleToolGroup=(key:string)=>setExpandedToolGroups(current=>{
@@ -1641,10 +1660,10 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
   }, [messages, conversation.id, conversation.project_id, archived]);
 
   const send = async () => {
-    const content=draft.trim(); if (voiceActive || (!content && !attachments.items.length) || sending || attachments.items.some(i=>!i.attachment || i.busy || i.error)) return;
+    const content=draft.trim(); if (voiceActive || resolvedAgentOnline === false || (!content && !attachments.items.length) || sending || attachments.items.some(i=>!i.attachment || i.busy || i.error)) return;
     let request=pendingSendRef.current;
     if (!request) { try { request=JSON.parse(sessionStorage.getItem(storageKey+":pending") ?? "null"); } catch {} }
-    if (!request) request={content,client_message_id:newClientMessageId(),page_context:sharedPage.context,...(attachments.items.length?{attachments:attachments.items.map(i=>({id:i.attachment!.id,type:i.attachment!.type}))}:{})};
+    if (!request) request={content,client_message_id:newClientMessageId(),next_message_behavior:"queue",page_context:sharedPage.context,...(attachments.items.length?{attachments:attachments.items.map(i=>({id:i.attachment!.id,type:i.attachment!.type}))}:{})};
     pendingSendRef.current=request;
     try {sessionStorage.setItem(storageKey+":pending",JSON.stringify(request));} catch {}
     const cancelOptimistic = activeResponse ? () => {} : beginResponse(conversation.lead_agent_id, Math.max(0,...messages.map(m=>m.id)));
@@ -1696,6 +1715,17 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
     mergeMessages([result.message]);
     onActed();
   };
+  const onQueueEdit = async (message: Message) => {
+    const content = window.prompt("Edit queued message", message.content);
+    if (content == null || !content.trim()) return;
+    try { mergeMessages([await conversationsClient.editQueued(conversation.id, message.id, content)]); } catch (err) { setSendError(String(err)); }
+  };
+  const onQueueRemove = async (message: Message) => {
+    try { mergeMessages([await conversationsClient.removeQueued(conversation.id, message.id)]); } catch (err) { setSendError(String(err)); }
+  };
+  const onQueueSteer = async (message: Message) => {
+    try { mergeMessages([await conversationsClient.steerQueued(conversation.id, message.id)]); } catch (err) { setSendError(String(err)); }
+  };
 
   return (
     <ConversationChatView
@@ -1708,6 +1738,7 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
       publicAudience={conversation.audience === "public"}
       connected={connected}
       archived={archived}
+      agentOnline={resolvedAgentOnline}
       messageNodes={<>
         {hasOlder && <button type="button" className="text-sm text-accent" onClick={loadOlder}>{t("chat.loadEarlierMessages")}</button>}
         {timeline.map(item => item.kind === "toolGroup" || item.kind === "tool" ? <ChatToolActivity
@@ -1716,7 +1747,7 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
           expanded={expandedToolGroups.has(item.key)} onToggle={()=>toggleToolGroup(item.key)}
           registry={toolVisualRegistry} detailsId={`tools-${conversation.id}-${item.key.replace(/[^a-zA-Z0-9_-]/g,"-")}`}
           showCompletion={showToolCompletion} showDuration={showToolDuration}
-        /> : item.kind === "stream" ? <div key={item.key}>{agentName(item.stream.agentId) && <p className="mb-2 text-[10px] font-semibold uppercase text-text-muted">{agentName(item.stream.agentId)}</p>}<StreamingBubble text={item.stream.text}/></div> : (() => {const message=item.message;return <div key={message.id}><fieldset disabled={archived} className="min-w-0"><MessageRow message={message} agentName={message.role === "agent" ? agentName(message.agent_id) : undefined} onAction={onAction}/></fieldset>
+        /> : item.kind === "stream" ? <div key={item.key}>{agentName(item.stream.agentId) && <p className="mb-2 text-[10px] font-semibold uppercase text-text-muted">{agentName(item.stream.agentId)}</p>}<StreamingBubble text={item.stream.text}/></div> : (() => {const message=item.message;return <div key={message.id}><fieldset disabled={archived} className="min-w-0"><MessageRow message={message} agentName={message.role === "agent" ? agentName(message.agent_id) : undefined} onAction={onAction} onQueueEdit={onQueueEdit} onQueueRemove={onQueueRemove} onQueueSteer={onQueueSteer}/></fieldset>
  {deliveries.filter(d => d.message_id === message.id && ["failed", "ambiguous"].includes(d.status)).map(d => <div key={d.id} role="status" className={`mt-2 text-xs text-error ${message.role === "user" ? "text-right" : ""}`}>
    <span>{t(d.status === "ambiguous" ? "chat.deliveryUnconfirmed" : "chat.deliveryFailed")}</span>
    <button type="button" disabled={archived} className="ml-2 text-accent disabled:opacity-40" onClick={() => retryDelivery(d)}>{t(d.status === "ambiguous" ? "chat.retryDuplicate" : "chat.retryDelivery")}</button>
@@ -2476,11 +2507,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                           )}
                           <span className="min-w-0 flex-1 truncate text-sm font-medium text-text">{c.title}</span>
                           <ConversationActivityIndicator active={activeConversations.has(c.id)} />
-                          {unreadCount > 0 && !(c.id === selectedId && (!isMobile || mobileDetail) && tab === "chats") && (
-                            <span className="ml-auto shrink-0 text-xs px-1.5 py-0.5 rounded-full bg-accent text-bg">
-                              {unreadCount}
-                            </span>
-                          )}
+                          {!(c.id === selectedId && (!isMobile || mobileDetail) && tab === "chats") && <ConversationUnreadIndicator unread={unreadCount > 0} />}
                         </div>
                         <div className="mt-1 flex items-center gap-2 text-xs text-text-dim">
                           <span className="truncate">

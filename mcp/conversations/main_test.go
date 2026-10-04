@@ -908,7 +908,7 @@ func TestSoftBreakDoesNotLeakToBoundExternalTransport(t *testing.T) {
 func postUserMessage(t *testing.T, app *App, conv *Conversation, content string) {
 	t.Helper()
 	req := httptest.NewRequest("POST", "/messages?chat_id="+conv.ID,
-		strings.NewReader(`{"content":"`+content+`"}`))
+		strings.NewReader(`{"content":"`+content+`","next_message_behavior":"legacy"}`))
 	authorizeTestRequest(req)
 	rec := httptest.NewRecorder()
 	app.handleMessages(rec, req)
