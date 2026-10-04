@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.24.36 — 2026-10-04
+
+- Fix startup deadlock with the released App SDK by closing the conversation cursor before recovering queued turns.
+
 ## 0.24.35 — 2026-10-04
 
 - Pin the released App SDK support for opaque file-reference passthrough and authorized presentation reads so source installs compile outside the workspace overlay.
