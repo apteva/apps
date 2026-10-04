@@ -15,8 +15,8 @@ export const toolSources = [
   {
     "name": "actors",
     "display_name": "Actors",
-    "icon": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%20fill%3D%22none%22%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2216%22%20fill%3D%22%23312e81%22%2F%3E%3Cpath%20d%3D%22M20%2020h24M20%2044h24M20%2020v24M44%2020v24%22%20stroke%3D%22%23a5b4fc%22%20stroke-width%3D%223%22%2F%3E%3Crect%20x%3D%2212%22%20y%3D%2212%22%20width%3D%2216%22%20height%3D%2216%22%20rx%3D%225%22%20fill%3D%22%23c7d2fe%22%2F%3E%3Crect%20x%3D%2236%22%20y%3D%2236%22%20width%3D%2216%22%20height%3D%2216%22%20rx%3D%225%22%20fill%3D%22%23c7d2fe%22%2F%3E%3Cpath%20d%3D%22m40%2014%2010%206-10%206zM16%2039l9%205-9%205z%22%20fill%3D%22%23fff%22%2F%3E%3C%2Fsvg%3E%0A",
-    "icon_style": "image"
+    "icon": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22currentColor%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%0A%20%20%3C!--%20Apteva%20adaptive%20app%20icon.%20A%20reusable%20actor%20connects%20a%20trigger%20to%20an%20action.%20--%3E%0A%20%20%3Crect%20x%3D%223%22%20y%3D%224%22%20width%3D%226%22%20height%3D%226%22%20rx%3D%221.5%22%2F%3E%0A%20%20%3Crect%20x%3D%2215%22%20y%3D%224%22%20width%3D%226%22%20height%3D%226%22%20rx%3D%221.5%22%2F%3E%0A%20%20%3Crect%20x%3D%229%22%20y%3D%2215%22%20width%3D%226%22%20height%3D%226%22%20rx%3D%221.5%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M9%207h6M6%2010v2.5a2.5%202.5%200%200%200%202.5%202.5H12M18%2010v2.5a2.5%202.5%200%200%201-2.5%202.5H12%22%2F%3E%0A%20%20%3Cpath%20d%3D%22m10.5%2013.5%201.5%201.5%201.5-1.5%22%2F%3E%0A%3C%2Fsvg%3E%0A",
+    "icon_style": "monochrome"
   },
   {
     "name": "ads",
