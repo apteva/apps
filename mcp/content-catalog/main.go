@@ -81,22 +81,25 @@ func searchSchema() map[string]any {
 	return map[string]any{
 		"type": "object", "additionalProperties": false,
 		"properties": map[string]any{
-			"lifecycle":     map[string]any{"type": "string", "enum": []string{"active", "archived", "all"}, "description": "Default active; archived includes assets in archived sessions. Explicit inspection only."},
-			"entity_type":   map[string]any{"type": "string", "enum": []string{"all", "assets", "sessions"}, "description": "Result type; default all."},
-			"query":         field("Text in file names, session notes/titles and current Media descriptions."),
-			"brand_id":      field("Limit results to one explicit Catalog brand ID."),
-			"session_id":    field("Limit asset results to one session ID."),
-			"date_from":     field("Inclusive YYYY-MM-DD session date."),
-			"date_to":       field("Inclusive YYYY-MM-DD session date."),
-			"kind":          field("Asset kind, such as video, image, or audio."),
-			"lineage":       map[string]any{"type": "string", "enum": []string{"source", "derivative"}, "description": "Asset without or with linked parent sources."},
-			"sort":          map[string]any{"type": "string", "enum": []string{"session_newest", "asset_newest"}, "description": "Asset order; default session_newest. Other result types sort by their own date."},
-			"review_status": map[string]any{"type": "string", "enum": []string{"pending", "approved", "rejected"}},
-			"destination":   field("Network or channel, such as instagram. Required for destination availability filters."),
-			"account_ref":   field("Specific destination account or tier reference; requires destination."),
-			"availability":  map[string]any{"type": "string", "enum": []string{"any", "never_used", "not_published", "ready_to_publish", "scheduled", "published", "failed"}, "description": "Asset publication state. published means verified live; ready_to_publish requires approved review and no active publication for the destination/account."},
-			"limit":         map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum items per result type; default 30."},
-			"cursors":       map[string]any{"type": "object", "properties": map[string]any{"assets": field("next_cursor for assets"), "sessions": field("next_cursor for sessions")}, "additionalProperties": false},
+			"lifecycle":      map[string]any{"type": "string", "enum": []string{"active", "archived", "all"}, "description": "Default active; archived includes assets in archived sessions. Explicit inspection only."},
+			"entity_type":    map[string]any{"type": "string", "enum": []string{"all", "assets", "sessions"}, "description": "Result type; default all."},
+			"query":          field("Text in file names, session notes/titles and current Media descriptions."),
+			"brand_id":       field("Limit results to one explicit Catalog brand ID."),
+			"session_id":     field("Limit asset results to one session ID."),
+			"date_from":      field("Inclusive YYYY-MM-DD session date."),
+			"date_to":        field("Inclusive YYYY-MM-DD session date."),
+			"kind":           field("Asset kind, such as video, image, or audio."),
+			"lineage":        map[string]any{"type": "string", "enum": []string{"source", "derivative"}, "description": "Asset without or with linked parent sources."},
+			"sort":           map[string]any{"type": "string", "enum": []string{"session_newest", "asset_newest"}, "description": "Asset order; default session_newest. Other result types sort by their own date."},
+			"review_status":  map[string]any{"type": "string", "enum": []string{"pending", "approved", "rejected"}},
+			"tag":            field("One exact generic asset tag, such as share-next or best-take."),
+			"favorite":       map[string]any{"type": "boolean", "description": "Limit assets to favorites."},
+			"patreon_intent": map[string]any{"type": "string", "enum": []string{"unset", "free", "paid"}, "description": "Catalog intent only; does not publish to Patreon."},
+			"destination":    field("Network or channel, such as instagram. Required for destination availability filters."),
+			"account_ref":    field("Specific destination account or tier reference; requires destination."),
+			"availability":   map[string]any{"type": "string", "enum": []string{"any", "never_used", "not_published", "ready_to_publish", "scheduled", "published", "failed"}, "description": "Asset publication state. published means verified live; ready_to_publish requires approved review and no active publication for the destination/account."},
+			"limit":          map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum items per result type; default 30."},
+			"cursors":        map[string]any{"type": "object", "properties": map[string]any{"assets": field("next_cursor for assets"), "sessions": field("next_cursor for sessions")}, "additionalProperties": false},
 		},
 	}
 }
@@ -121,6 +124,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "content_catalog_assets_get", Description: "Get an asset with lifecycle, eligibility, revision, original session, source lineage, hosting, and publication history. Archived identities remain readable. Args: id.", InputSchema: schema("id"), Handler: a.assetGet},
 		{Name: "content_catalog_assets_link_source", Description: "Record one source relationship, supporting multi-input derivatives. Args: child_asset_id, source_asset_id, relation?, source_order?, media_render_id?.", InputSchema: schema("child_asset_id", "source_asset_id"), Handler: a.assetLinkSource},
 		{Name: "content_catalog_assets_review", Description: "Set a Catalog asset's editorial review_status to pending, approved, or rejected. Args: asset_id, review_status.", InputSchema: schema("asset_id", "review_status"), Handler: a.assetReview},
+		{Name: "content_catalog_assets_labels_update", Description: "Set generic Catalog labels on 1–100 assets. Replace tags, favorite, and Patreon intent (unset/free/paid); does not publish or modify Media. Use expected_revisions for safe bulk edits.", InputSchema: assetLabelsSchema(), Handler: a.assetLabelsUpdate},
 		{Name: "content_catalog_asset_publications_list", Description: "List the platforms and observed post details for one asset. Args: asset_id.", InputSchema: schema("asset_id"), Handler: a.assetPublicationsList},
 		{Name: "content_catalog_asset_publications_record", Description: "Create or update a publication record on one asset. Args: asset_id, destination (new record), status, publication_id? (update), account_ref?, audience?, planned_at?, actual_at?, external_post_id?, external_url?, evidence_source?, failure_details?. Verified live requires evidence and URL or post ID. Writes only Catalog; never publishes externally.", InputSchema: schema("asset_id", "status"), Handler: a.assetPublicationRecord},
 		{Name: "content_catalog_posts_list", Description: "List shared platform posts; optional session_id, asset_id, brand_id, lifecycle. Defaults to posts with only active assets/sessions; archived/all explicitly includes historical archive references. Each post contains its asset IDs and one observed outcome.", InputSchema: lifecycleListSchema(), Handler: a.postsList},
@@ -197,9 +201,18 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	args := map[string]any{}
-	for _, key := range []string{"entity_type", "query", "brand_id", "session_id", "date_from", "date_to", "kind", "lineage", "sort", "review_status", "destination", "account_ref", "availability", "limit", "assets_cursor", "sessions_cursor", "releases_cursor"} {
+	for _, key := range []string{"entity_type", "query", "brand_id", "session_id", "date_from", "date_to", "kind", "lineage", "sort", "review_status", "destination", "account_ref", "availability", "tag", "favorite", "patreon_intent", "limit", "assets_cursor", "sessions_cursor", "releases_cursor"} {
 		if v := r.URL.Query().Get(key); v != "" {
-			args[key] = v
+			if key == "favorite" {
+				parsed, err := strconv.ParseBool(v)
+				if err != nil {
+					http.Error(w, "favorite must be boolean", http.StatusBadRequest)
+					return
+				}
+				args[key] = parsed
+			} else {
+				args[key] = v
+			}
 		}
 	}
 	a.callHTTP(w, r, "content_catalog_search", args)

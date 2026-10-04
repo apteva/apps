@@ -1,10 +1,13 @@
 schema: apteva-app/v1
 name: content-catalog
 display_name: Content Catalog
-version: 0.5.0
+version: 0.6.0
 description: |
   Coordinate brands, production sessions, Storage assets, Media derivatives,
   optional Gigs, cloud hosting, and shared platform posts.
+  Catalog assets can also carry generic favorites, tags, and one Patreon intent
+  (unset, free, or paid) for filtering and coordination; labels never publish
+  externally or modify Media.
   Storage owns bytes, Media owns processing, Gigs owns assignments, and Social
   owns posts. Hosting providers share one contract; Bunny Stream is the first.
 author: Apteva
@@ -71,6 +74,7 @@ provides:
     - { name: content_catalog_assets_get, description: "Get an asset with source lineage, hosting, and publication records." }
     - { name: content_catalog_assets_link_source, description: "Record a derivative's source asset. Supports multiple source assets." }
     - { name: content_catalog_assets_review, description: "Set editorial review state on a Catalog asset." }
+    - { name: content_catalog_assets_labels_update, description: "Set generic asset tags, Favorite, and Patreon intent (unset/free/paid) on up to 100 Catalog assets. Does not modify Media or publish externally." }
     - { name: content_catalog_asset_publications_list, description: "List the platform publication records on one asset." }
     - { name: content_catalog_asset_publications_record, description: "Create or update one asset's platform status with explicit evidence. Does not publish externally." }
     - { name: content_catalog_posts_list, description: "List posts shared by one or more assets, optionally filtered by session, asset, or brand." }
@@ -103,7 +107,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: content-catalog/v0.5.0
+    ref: content-catalog/v0.6.0
     entry: mcp/content-catalog
   port: 8080
   health_check: /health

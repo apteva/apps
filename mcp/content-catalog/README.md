@@ -24,6 +24,10 @@ Session pages offer **Grid** and **Grouped by original**. The choice is remember
 
 The filter modal offers **All assets**, **Sources / no parent linked**, and **Derivatives only**. Grouped filtering retains nonmatching parents as clearly marked **Context** and expands paths to matching derivatives. The displayed match count excludes context cards; Grid shows only matches. Source filters mean recorded parent presence, not proof that a file is an original. Badges use explicit `kind`/`relation` values for Original, Clip and Reel; missing parents are labeled **No source linked** rather than inferred from file names.
 
+### Generic asset labels (0.6.0)
+
+Every asset can carry a Catalog-owned **Favorite** flag, up to 25 normalized generic tags (for example `share-next`, `teaser`, or `best-take`), and one Patreon intent: **Unset**, **Free**, or **Paid**. The intent is a planning label and does not publish or change Patreon. Cards show the star and compact badges; the asset modal edits one asset, while the selection toolbar applies the same changes transactionally to up to 100 assets. Session filters and global Catalog search support favorites, exact tags, and Patreon intent alongside publication state. `content_catalog_assets_labels_update` accepts expected revisions so stale bulk edits fail without a partial update.
+
 Asset detail, session lists and search return `sources` directly on each asset, including parent name, session ID, kind and recorded relation/order. One project-scoped SQL query enriches the whole page, including cross-session source metadata. Display changes do not write relationships, generate derivatives, scan folders or modify publication records.
 
 ## Current Media metadata
