@@ -119,6 +119,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/destinations/reorder", Handler: a.handleDestinationsReorder},
 		{Pattern: "/transport-legs", Handler: a.handleTransportLegs},
 		{Pattern: "/transport-legs/", Handler: a.handleTransportLegsItem},
+		{Pattern: "/stay-favorites", Handler: a.handleStayFavorites},
+		{Pattern: "/stay-favorites/", Handler: a.handleStayFavoritesItem},
 		{Pattern: "/accommodations", Handler: a.handleAccommodations},
 		{Pattern: "/accommodations/", Handler: a.handleAccommodationsItem},
 		{Pattern: "/activities", Handler: a.handleActivities},
@@ -142,6 +144,10 @@ func (a *App) HTTPRoutes() []sdk.Route {
 // ─── MCP tools ───────────────────────────────────────────────────
 
 func (a *App) MCPTools() []sdk.Tool {
+	return append(a.favoriteTools(), a.itineraryTools()...)
+}
+
+func (a *App) itineraryTools() []sdk.Tool {
 	return []sdk.Tool{
 		// Trips
 		{Name: "trips_list", Description: "List trips with derived planned/actual totals + days-until.",
@@ -644,6 +650,7 @@ type TripDashboard struct {
 	Activities     []Activity      `json:"activities"`
 	Todos          []Todo          `json:"todos"`
 	Budget         BudgetSummary   `json:"budget"`
+	StayFavorites  []StayFavorite  `json:"stay_favorites"`
 }
 
 // ─── Trips ───────────────────────────────────────────────────────
@@ -1678,6 +1685,10 @@ func updateEventTitlesForTrip(ctx *sdk.AppCtx, trip Trip) {
 // ─── Accommodations ──────────────────────────────────────────────
 
 func (a *App) toolAccommodationsAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.addAccommodation(ctx, args, 0)
+}
+
+func (a *App) addAccommodation(ctx *sdk.AppCtx, args map[string]any, favoriteID int64) (any, error) {
 	tripID := int64(intArg(args, "trip_id", 0))
 	if tripID == 0 {
 		return nil, errors.New("trip_id required")
@@ -1719,16 +1730,21 @@ func (a *App) toolAccommodationsAdd(ctx *sdk.AppCtx, args map[string]any) (any, 
 	address := strArg(args, "address", "")
 	confirm := strArg(args, "confirmation_number", "")
 	notes := strArg(args, "notes", "")
+	estimated, _ := nullableUpdateInt(args, "cost_estimated")
+	actual, _ := nullableUpdateInt(args, "cost_actual")
+	var sourceFavorite any
+	if favoriteID != 0 {
+		sourceFavorite = favoriteID
+	}
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO accommodations (trip_id, destination_id, name, kind, address, check_in_at,
-		   check_out_at, cost_estimated, cost_actual, currency, confirmation_number, notes)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		   check_out_at, cost_estimated, cost_actual, currency, confirmation_number, notes, stay_favorite_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		tripID,
 		nullableInt64(args, "destination_id"),
 		name, kind, address, nullIfEmpty(checkIn), nullIfEmpty(checkOut),
-		nullableInt64(args, "cost_estimated"),
-		nullableInt64(args, "cost_actual"),
-		currency, confirm, notes,
+		estimated, actual,
+		currency, confirm, notes, sourceFavorite,
 	)
 	if err != nil {
 		return nil, err
@@ -2654,8 +2670,12 @@ func (a *App) toolDashboard(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	favorites, err := listFavorites(ctx, tripID, 0)
+	if err != nil {
+		return nil, err
+	}
 	return TripDashboard{
-		Trip: trip, Destinations: dests, TransportLegs: legs,
+		StayFavorites: favorites, Trip: trip, Destinations: dests, TransportLegs: legs,
 		Accommodations: accs, Activities: acts, Todos: todos, Budget: budget,
 	}, nil
 }
