@@ -72,6 +72,11 @@ func (s *streamer) finishResponseWithMessage(chat string, agent, messageID int64
 func (s *streamer) intermediateReply(chat string, agent int64) {
 	s.mu.Lock()
 	if p := s.responses[responseProgressKey(chat, agent)]; p != nil && (!s.telemetryConnected || p.inboundPreview == "" || p.inboundReceived) {
+		// A progress message is part of the current response, so subsequent
+		// pacing belongs to this response even when Core does not emit another
+		// llm.start before sleeping. Acknowledgements do not call this method,
+		// so stale housekeeping pacing cannot settle a new response.
+		p.modelStarted = true
 		p.Phase = "thinking"
 		p.ToolName, p.CallID = "", ""
 		s.progressSeq++

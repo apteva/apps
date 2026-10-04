@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.24.40 — 2026-10-04
+
+- Settle Thinking after a progress update when the agent enters a long pacing sleep without another model-start event.
+- Show one thread indicator when active work and unread state overlap.
+
 ## 0.24.36 — 2026-10-04
 
 - Fix startup deadlock with the released App SDK by closing the conversation cursor before recovering queued turns.

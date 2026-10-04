@@ -165,6 +165,15 @@ func TestResponseProgressLifecycle(t *testing.T) {
 	phase("thinking")
 	ingest("tool.call", `{"name":"pace"}`)
 	phase("idle")
+
+	// A progress message can be followed directly by a long pace without a
+	// second llm.start. The pace settles this response instead of leaving a
+	// stale Thinking row visible for the whole sleep.
+	s.emitAck("conv-progress", "chat-conv-progress", 41, 72)
+	s.intermediateReply("conv-progress", 41)
+	phase("thinking")
+	ingest("tool.call", `{"name":"pace"}`)
+	phase("idle")
 }
 
 func TestQueuedResponseSurvivesPreviousPaceAndReconnect(t *testing.T) {
