@@ -10,6 +10,8 @@
 
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from "react";
 
+import { stayNightCount, stayPriceTotal } from "./stay-favorite-prices";
+
 const API = "/api/apps/trips";
 
 interface NativePanelProps {
@@ -82,6 +84,23 @@ interface Accommodation {
   currency: string;
   booked: boolean;
   notes: string;
+}
+
+interface StayFavorite {
+  id: number;
+  trip_id: number;
+  destination_id: number;
+  name: string;
+  kind: string;
+  listing_url: string;
+  photo_url: string;
+  address: string;
+  price_amount: number | null;
+  price_basis: "total" | "per_night";
+  currency: string;
+  notes: string;
+  top_choice: boolean;
+  accommodation_id?: number;
 }
 
 interface Activity {
@@ -272,6 +291,7 @@ interface TripDashboard {
   activities: Activity[];
   todos: Todo[];
   budget: BudgetSummary;
+  stay_favorites: StayFavorite[];
 }
 
 type Tab = "overview" | "itinerary" | "deals" | "budget" | "todos";
@@ -1819,7 +1839,7 @@ function DestinationsSection({ data, onChanged }: { data: TripDashboard; onChang
   const remove = async (dest: Destination) => {
     if (!await ui.confirm({
       title: "Delete destination?",
-      message: `"${dest.place_name}" will be removed from this trip.`,
+      message: `"${dest.place_name}" and its saved stay options will be removed from this trip. Any itinerary stays are kept.`,
       confirmLabel: "Delete",
     })) return;
     setBusy(true);
@@ -1846,7 +1866,8 @@ function DestinationsSection({ data, onChanged }: { data: TripDashboard; onChang
       ) : (
         <ul className="divide-y divide-border-subtle text-sm">
           {dests.map((d, i) => (
-            <li key={d.id} className="flex items-center gap-2 px-4 py-2">
+            <li key={d.id} className="px-4 py-3">
+              <div className="flex items-center gap-2">
               <div className="flex-1 min-w-0">
                 <div className="truncate font-medium">
                   {d.place_name}
@@ -1860,6 +1881,8 @@ function DestinationsSection({ data, onChanged }: { data: TripDashboard; onChang
               <button onClick={() => move(d, 1)} disabled={busy || i === dests.length - 1} aria-label={`Move ${d.place_name} down`} className="p-1 text-text-dim hover:text-text disabled:opacity-30" title="Move down"><Icon name="chevron-right" size={12} /></button>
               <button onClick={() => setEditing(d)} aria-label={`Edit ${d.place_name}`} className="p-1 text-text-dim hover:text-text" title="Edit"><Icon name="edit" size={12} /></button>
               <button onClick={() => remove(d)} disabled={busy} aria-label={`Delete ${d.place_name}`} className="p-1 text-text-dim hover:text-error" title="Delete"><Icon name="trash" size={12} /></button>
+              </div>
+              <StayFavoritesSection destination={d} data={data} onChanged={onChanged} />
             </li>
           ))}
         </ul>
@@ -1880,6 +1903,181 @@ function DestinationsSection({ data, onChanged }: { data: TripDashboard; onChang
         />
       )}
     </section>
+  );
+}
+
+// ─── Destination stay shortlists ─────────────────────────────────
+
+function StayFavoritesSection({ destination, data, onChanged }: {
+  destination: Destination; data: TripDashboard; onChanged: () => void;
+}) {
+  const ui = useUI();
+  const [editing, setEditing] = useState<StayFavorite | "new" | null>(null);
+  const [selecting, setSelecting] = useState<StayFavorite | null>(null);
+  const [viewing, setViewing] = useState<Accommodation | null>(null);
+  const [busy, setBusy] = useState(false);
+  const favorites = (data.stay_favorites ?? []).filter(f => f.destination_id === destination.id);
+  const mutate = async (path: string, method: string, body?: unknown) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await api<unknown>(path, { method, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+      onChanged();
+    } catch (e: unknown) { ui.notify(e instanceof Error ? e.message : String(e)); }
+    finally { setBusy(false); }
+  };
+  const remove = async (f: StayFavorite) => {
+    if (await ui.confirm({ title: "Remove stay option?", message: `Remove “${f.name}” from the shortlist? Any stay already in your itinerary is kept.`, confirmLabel: "Remove" })) {
+      await mutate(`/stay-favorites/${f.id}`, "DELETE");
+    }
+  };
+  return (
+    <div className="mt-3 border-t border-border-subtle pt-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-medium text-text-muted">Stay options · {favorites.length}</span>
+        <button onClick={() => setEditing("new")} className="btn-secondary text-xs"><Icon name="plus" size={12} /> Save a stay</button>
+      </div>
+      {!favorites.length ? <p className="mt-2 text-xs text-text-dim">Save hotels and Airbnbs for {destination.place_name}, then choose a stay when you’re ready.</p> : (
+        <div className="stay-favorites-grid mt-3">
+          {favorites.map(f => (
+            <article key={f.id} className="flex flex-col gap-2 rounded-lg border border-border bg-bg p-3">
+              {f.photo_url && <img src={f.photo_url} alt="" loading="lazy" referrerPolicy="no-referrer" className="stay-favorite-photo" />}
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="font-medium break-words">{f.name}</div>
+                  <div className="text-xs capitalize text-text-dim">{f.kind}</div>
+                </div>
+                <button disabled={busy} onClick={() => mutate(`/stay-favorites/${f.id}`, "PATCH", { top_choice: !f.top_choice })}
+                  aria-label={`${f.top_choice ? "Clear" : "Make"} ${f.name} top choice`} aria-pressed={f.top_choice}
+                  className={`shrink-0 flex items-center gap-1 text-xs ${f.top_choice ? "text-accent" : "text-text-muted"}`}>
+                  <Icon name="star" size={14} />{f.top_choice ? "Top choice" : "Prefer"}
+                </button>
+              </div>
+              {f.address && <div className="text-xs text-text-muted break-words">{f.address}</div>}
+              <div className="text-sm font-medium">{f.price_amount != null ? <>{fmtMoney(f.price_amount, f.currency)} <span className="text-xs font-normal text-text-muted">{f.price_basis === "per_night" ? "per night" : "total estimate"}</span></> : <span className="text-xs font-normal text-text-dim">Price unknown</span>}</div>
+              {f.notes && <p className="text-xs text-text-muted whitespace-pre-wrap break-words">{f.notes}</p>}
+              {f.listing_url && <a href={f.listing_url} target="_blank" rel="noopener noreferrer" className="text-xs text-accent">View listing ↗</a>}
+              <div className="mt-auto flex flex-wrap items-center gap-2 pt-2">
+                <button disabled={busy} className="btn-secondary" onClick={() => {
+                  const stay = data.accommodations.find(a => a.id === f.accommodation_id);
+                  if (stay) setViewing(stay); else setSelecting(f);
+                }}>{f.accommodation_id ? "View itinerary stay" : "Use this stay"}</button>
+                <button disabled={busy} onClick={() => setEditing(f)} className="p-1 text-text-muted" aria-label={`Edit ${f.name}`}><Icon name="edit" size={14} /></button>
+                <button disabled={busy} onClick={() => remove(f)} className="p-1 text-text-muted hover:text-error" aria-label={`Remove ${f.name}`}><Icon name="trash" size={14} /></button>
+              </div>
+              {f.accommodation_id && <span className="text-xs text-success">Added to itinerary</span>}
+            </article>
+          ))}
+        </div>
+      )}
+      <p className="mt-2 text-xs text-text-dim">Options enter your budget and calendar when added to the itinerary.</p>
+      {editing && <StayFavoriteDialog trip={data.trip} destination={destination} existing={editing === "new" ? undefined : editing}
+        onClose={() => setEditing(null)} onSaved={() => { setEditing(null); onChanged(); }} />}
+      {selecting && <SelectStayFavoriteDialog favorite={selecting} destination={destination} onClose={() => setSelecting(null)}
+        onSaved={() => { setSelecting(null); onChanged(); }} />}
+      {viewing && <ItemDialog kind="accommodation" trip={data.trip} destinations={data.destinations} existing={viewing}
+        onClose={() => setViewing(null)} onSaved={() => { setViewing(null); onChanged(); }} />}
+      <style>{`.stay-favorites-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr));gap:12px}.stay-favorite-photo{width:100%;height:128px;object-fit:cover;border-radius:6px}`}</style>
+    </div>
+  );
+}
+
+function StayFavoriteDialog({ trip, destination, existing, onClose, onSaved }: {
+  trip: Trip; destination: Destination; existing?: StayFavorite; onClose: () => void; onSaved: () => void;
+}) {
+  const [name, setName] = useState(existing?.name ?? "");
+  const [kind, setKind] = useState(existing?.kind ?? "hotel");
+  const [listing, setListing] = useState(existing?.listing_url ?? "");
+  const [photo, setPhoto] = useState(existing?.photo_url ?? "");
+  const [address, setAddress] = useState(existing?.address ?? "");
+  const [currency, setCurrency] = useState(existing?.currency ?? trip.home_currency);
+  const [price, setPrice] = useState(existing?.price_amount != null ? moneyInput(existing.price_amount, currency) : "");
+  const [basis, setBasis] = useState(existing?.price_basis ?? "per_night");
+  const [notes, setNotes] = useState(existing?.notes ?? "");
+  const [top, setTop] = useState(existing?.top_choice ?? false);
+  const [searching, setSearching] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const submit = async () => {
+    if (busy) return;
+    setBusy(true); setErr("");
+    try {
+      const body = { ...(existing ? {} : { destination_id: destination.id }), name, kind, listing_url: listing,
+        photo_url: photo, address, price_amount: price.trim() ? parseMoneyDecimal(price, currency) : null,
+        price_basis: basis, currency, notes, top_choice: top };
+      await api<StayFavorite>(existing ? `/stay-favorites/${existing.id}` : "/stay-favorites", { method: existing ? "PATCH" : "POST", body: JSON.stringify(body) });
+      onSaved();
+    } catch (e: unknown) { setErr(e instanceof Error ? e.message : String(e)); setBusy(false); }
+  };
+  return (
+    <Dialog title={`${existing ? "Edit" : "Save"} stay option · ${destination.place_name}`} onClose={onClose}>
+      <p className="text-sm text-text-muted">Keep this as an option while planning. You can add it to the itinerary later.</p>
+      {!existing && <button onClick={() => setSearching(true)} className="btn-secondary"><Icon name="search" size={14} /> Search hotels nearby</button>}
+      <Field label="Name"><input className="input" value={name} onChange={e => setName(e.target.value)} autoFocus placeholder="Hotel or Airbnb name" /></Field>
+      <Field label="Kind"><select className="input" value={kind} onChange={e => setKind(e.target.value)}>
+        <option value="hotel">Hotel</option><option value="airbnb">Airbnb</option><option value="hostel">Hostel</option><option value="rental">Rental</option><option value="friend">Friend</option><option value="other">Other</option>
+      </select></Field>
+      <Field label="Listing URL"><input className="input" type="url" value={listing} onChange={e => setListing(e.target.value)} placeholder="https://…" /></Field>
+      <Field label="Address"><input className="input" value={address} onChange={e => setAddress(e.target.value)} /></Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Estimated price"><input className="input" inputMode="decimal" value={price} onChange={e => setPrice(e.target.value)} placeholder="Unknown" /></Field>
+        <Field label="Price basis"><select className="input" value={basis} onChange={e => setBasis(e.target.value as StayFavorite["price_basis"])}><option value="per_night">Per night</option><option value="total">Total stay</option></select></Field>
+      </div>
+      <Field label="Currency"><input className="input uppercase" maxLength={3} value={currency} onChange={e => setCurrency(e.target.value.toUpperCase())} /></Field>
+      <Field label="Photo URL (optional)"><input className="input" type="url" value={photo} onChange={e => setPhoto(e.target.value)} placeholder="https://…" /></Field>
+      <Field label="Notes"><textarea className="input" rows={3} value={notes} onChange={e => setNotes(e.target.value)} placeholder="Why you like it, amenities, cancellation policy…" /></Field>
+      <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={top} onChange={e => setTop(e.target.checked)} /> Top choice for this destination</label>
+      {existing?.accommodation_id && <p className="text-xs text-text-muted">These edits change the saved option. Edit the itinerary stay separately to change its dates or budget.</p>}
+      {err && <p role="alert" className="text-sm text-error">{err}</p>}
+      <DialogActions><button onClick={onClose} className="btn-dialog-secondary">Cancel</button><button disabled={busy || !name.trim()} onClick={submit} className="btn-dialog-primary">{busy ? "Saving…" : "Save option"}</button></DialogActions>
+      {searching && <SearchPlacesModal trip={trip} destinations={[destination]} defaultKind="lodging" onClose={() => setSearching(false)}
+        onPick={p => { setName(p.name); setKind("hotel"); setAddress(p.formatted_address ?? ""); if (p.google_maps_uri) setListing(p.google_maps_uri); setSearching(false); }} />}
+    </Dialog>
+  );
+}
+
+function moneyInput(minor: number, currency: string): string {
+  const digits = currencyFractionDigits(currency);
+  return (minor / 10 ** digits).toFixed(digits);
+}
+
+function SelectStayFavoriteDialog({ favorite, destination, onClose, onSaved }: {
+  favorite: StayFavorite; destination: Destination; onClose: () => void; onSaved: () => void;
+}) {
+  const defaultStart = destination.arrive_at?.slice(0, 10) || "";
+  const defaultEnd = destination.depart_at?.slice(0, 10) || "";
+  const [datesKnown, setDatesKnown] = useState(stayNightCount(defaultStart, defaultEnd) > 0);
+  const [start, setStart] = useState(defaultStart);
+  const [end, setEnd] = useState(defaultEnd);
+  const [manualPrice, setManualPrice] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const calculated = stayPriceTotal(favorite.price_amount, favorite.price_basis, datesKnown ? start : "", datesKnown ? end : "");
+  const price = manualPrice ?? (calculated != null ? moneyInput(calculated, favorite.currency) : "");
+  const submit = async () => {
+    if (busy) return;
+    setBusy(true); setErr("");
+    try {
+      if (datesKnown && (!start || !end || stayNightCount(start, end) <= 0)) throw new Error("Choose check-in and check-out dates with at least one night.");
+      await api<Accommodation>(`/stay-favorites/${favorite.id}/select`, { method: "POST", body: JSON.stringify({
+        check_in_at: datesKnown ? `${start}T15:00:00Z` : null,
+        check_out_at: datesKnown ? `${end}T11:00:00Z` : null,
+        cost_estimated: price.trim() ? parseMoneyDecimal(price, favorite.currency) : null,
+      }) });
+      onSaved();
+    } catch (e: unknown) { setErr(e instanceof Error ? e.message : String(e)); setBusy(false); }
+  };
+  return (
+    <Dialog title={`Use ${favorite.name}`} onClose={onClose}>
+      <p className="text-sm text-text-muted">Add this stay to {destination.place_name} in your itinerary. Your other options stay saved.</p>
+      <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={datesKnown} onChange={e => setDatesKnown(e.target.checked)} /> Dates known</label>
+      {datesKnown && <DateRangeField startLabel="Check-in" endLabel="Check-out" start={start} end={end} onChange={(s,e) => { setStart(s); setEnd(e); }} />}
+      <Field label={`Total estimated cost (${favorite.currency})`}><input className="input" inputMode="decimal" value={price} onChange={e => setManualPrice(e.target.value)} placeholder="Unknown" /></Field>
+      {favorite.price_amount != null && <p className="text-xs text-text-muted">Saved estimate: {fmtMoney(favorite.price_amount, favorite.currency)} {favorite.price_basis === "per_night" ? "per night" : "total"}{datesKnown && favorite.price_basis === "per_night" ? ` · ${stayNightCount(start, end)} nights` : ""}. Confirm the total, including any fees.</p>}
+      <p className="text-xs text-text-muted">This adds an unbooked stay to your budget{datesKnown ? " and calendar" : " as an idea"}. Mark it booked after arranging the booking.</p>
+      {err && <p role="alert" className="text-sm text-error">{err}</p>}
+      <DialogActions><button className="btn-dialog-secondary" onClick={onClose}>Cancel</button><button className="btn-dialog-primary" disabled={busy} onClick={submit}>{busy ? "Adding…" : "Add to itinerary"}</button></DialogActions>
+    </Dialog>
   );
 }
 
@@ -2173,6 +2371,7 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
 
   const [aKind, setAKind] = useState<Accommodation["kind"]>(a?.kind ?? "hotel");
   const [address, setAddress] = useState(a?.address ?? "");
+  const [destinationID, setDestinationID] = useState(a?.destination_id ? String(a.destination_id) : "");
   const [stayDatesKnown, setStayDatesKnown] = useState(a ? hasDateRange(a.check_in_at, a.check_out_at) : hasDateRange(trip.start_at, trip.end_at));
   const [checkIn, setCheckIn] = useState(a?.check_in_at ? a.check_in_at.slice(0, 10) : (trip.start_at ? trip.start_at.slice(0, 10) : todayPlus(0)));
   const [checkOut, setCheckOut] = useState(a?.check_out_at ? a.check_out_at.slice(0, 10) : (trip.end_at ? trip.end_at.slice(0, 10) : todayPlus(1)));
@@ -2206,7 +2405,7 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
         }
       } else if (kind === "accommodation") {
         const body = {
-          trip_id: trip.id, name, kind: aKind, address,
+          trip_id: trip.id, name, kind: aKind, address, destination_id: destinationID ? Number(destinationID) : null,
           check_in_at: stayDatesKnown && checkIn ? checkIn + "T15:00:00Z" : null,
           check_out_at: stayDatesKnown && checkOut ? checkOut + "T11:00:00Z" : null,
           [costField]: cents, currency, notes,
@@ -2325,6 +2524,10 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
       )}
       {kind === "accommodation" && (
         <>
+          <Field label="Destination"><select className="input" value={destinationID} onChange={e => setDestinationID(e.target.value)}>
+            <option value="">No destination</option>
+            {(destinations ?? []).map(d => <option key={d.id} value={d.id}>{d.place_name}</option>)}
+          </select></Field>
           <Field label="Name"><input value={name} onChange={e => setName(e.target.value)} className="input" autoFocus placeholder="Hotel des Saints" /></Field>
           <Field label="Kind">
             <select value={aKind} onChange={e => setAKind(e.target.value)} className="input">
