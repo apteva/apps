@@ -61,11 +61,17 @@ type releaseSearchHit struct {
 type searchOptions struct {
 	ProjectID, EntityType, Query, BrandID, SessionID, DateFrom, DateTo       string
 	Kind, Lineage, Sort, ReviewStatus, Destination, AccountRef, Availability string
+	Lifecycle                                                                string
 	Limit                                                                    int
 }
 
 func parseSearchOptions(pid string, args map[string]any) (searchOptions, error) {
 	o := searchOptions{ProjectID: pid, EntityType: str(args, "entity_type"), Query: strings.TrimSpace(str(args, "query")), BrandID: str(args, "brand_id"), SessionID: str(args, "session_id"), DateFrom: str(args, "date_from"), DateTo: str(args, "date_to"), Kind: str(args, "kind"), Lineage: str(args, "lineage"), Sort: str(args, "sort"), ReviewStatus: str(args, "review_status"), Destination: str(args, "destination"), AccountRef: str(args, "account_ref"), Availability: str(args, "availability"), Limit: 30}
+	var err error
+	o.Lifecycle, err = lifecycleScope(args)
+	if err != nil {
+		return o, err
+	}
 	if o.EntityType == "" {
 		o.EntityType = "all"
 	}
@@ -240,6 +246,7 @@ func (a *App) searchAssets(db *sql.DB, o searchOptions, cursor searchCursor) (se
 	page := searchPage[assetSearchHit]{Items: []assetSearchHit{}}
 	q := `SELECT a.id,a.session_id,a.storage_install_id,a.storage_file_id,a.name,a.kind,a.content_type,a.sha256,a.size_bytes,a.review_status,a.media_status,a.media_rating,s.brand_id,s.title,s.session_date,a.created_at,s.notes,EXISTS(SELECT 1 FROM asset_sources src WHERE src.project_id=a.project_id AND src.child_asset_id=a.id)
 		FROM assets a JOIN sessions s ON s.id=a.session_id AND s.project_id=a.project_id WHERE a.project_id=?`
+	q += lifecyclePredicate(o.Lifecycle, "a", "s")
 	values := []any{o.ProjectID}
 	if o.BrandID != "" {
 		q += ` AND s.brand_id=?`
@@ -354,6 +361,9 @@ func (a *App) searchAssets(db *sql.DB, o searchOptions, cursor searchCursor) (se
 	for i := range page.Items {
 		assetRefs[i] = &page.Items[i].Asset
 	}
+	if err := loadAssetLifecycle(db, o.ProjectID, assetRefs); err != nil {
+		return page, err
+	}
 	if err := loadAssetHostings(db, o.ProjectID, assetRefs); err != nil {
 		return page, err
 	}
@@ -409,7 +419,8 @@ func loadSearchUses(db *sql.DB, pid string, hits []assetSearchHit) error {
 
 func (a *App) searchSessions(db *sql.DB, o searchOptions, cursor searchCursor) (searchPage[sessionSearchHit], error) {
 	page := searchPage[sessionSearchHit]{Items: []sessionSearchHit{}}
-	q := `SELECT s.id,s.brand_id,s.title,s.session_date,s.status,s.notes,b.name,(SELECT COUNT(*) FROM assets a WHERE a.project_id=s.project_id AND a.session_id=s.id) FROM sessions s JOIN brands b ON b.id=s.brand_id AND b.project_id=s.project_id WHERE s.project_id=?`
+	q := `SELECT s.id,s.brand_id,s.title,s.session_date,s.status,s.notes,s.lifecycle,s.archive_reason,s.archived_at,s.revision,b.name,(SELECT COUNT(*) FROM assets a WHERE a.project_id=s.project_id AND a.session_id=s.id` + lifecyclePredicate(o.Lifecycle, "a", "s") + `) FROM sessions s JOIN brands b ON b.id=s.brand_id AND b.project_id=s.project_id WHERE s.project_id=?`
+	q += lifecyclePredicate(o.Lifecycle, "", "s")
 	values := []any{o.ProjectID}
 	if o.BrandID != "" {
 		q += ` AND s.brand_id=?`
@@ -441,7 +452,7 @@ func (a *App) searchSessions(db *sql.DB, o searchOptions, cursor searchCursor) (
 	defer rows.Close()
 	for rows.Next() {
 		var h sessionSearchHit
-		if err := rows.Scan(&h.ID, &h.BrandID, &h.Title, &h.Date, &h.Status, &h.Notes, &h.BrandName, &h.AssetCount); err != nil {
+		if err := rows.Scan(&h.ID, &h.BrandID, &h.Title, &h.Date, &h.Status, &h.Notes, &h.Lifecycle, &h.ArchiveReason, &h.ArchivedAt, &h.Revision, &h.BrandName, &h.AssetCount); err != nil {
 			return page, err
 		}
 		page.Items = append(page.Items, h)

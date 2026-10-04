@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -24,7 +25,7 @@ var manifestBytes []byte
 
 var globalCtx *sdk.AppCtx
 
-type App struct{}
+type App struct{ lifecycleMu sync.RWMutex }
 
 func main() { sdk.Run(&App{}) }
 
@@ -52,6 +53,7 @@ func (a *App) EventHandlers() []sdk.EventHandler {
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
+		{Pattern: "/lifecycle-history", Handler: a.handleList("content_catalog_lifecycle_history")},
 		{Pattern: "/overview", Handler: a.handleOverview},
 		{Pattern: "/search", Handler: a.handleSearch},
 		{Pattern: "/brands", Handler: a.handleList("content_catalog_brands_list")},
@@ -79,6 +81,7 @@ func searchSchema() map[string]any {
 	return map[string]any{
 		"type": "object", "additionalProperties": false,
 		"properties": map[string]any{
+			"lifecycle":     map[string]any{"type": "string", "enum": []string{"active", "archived", "all"}, "description": "Default active; archived includes assets in archived sessions. Explicit inspection only."},
 			"entity_type":   map[string]any{"type": "string", "enum": []string{"all", "assets", "sessions"}, "description": "Result type; default all."},
 			"query":         field("Text in file names, session notes/titles and current Media descriptions."),
 			"brand_id":      field("Limit results to one explicit Catalog brand ID."),
@@ -106,27 +109,34 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "content_catalog_brands_list", Description: "List brands.", InputSchema: schema(), Handler: a.brandsList},
 		{Name: "content_catalog_brands_update", Description: "Update a brand's name, storage_root, or host settings. Args: id and fields to change. Writes only Catalog.", InputSchema: schema("id"), Handler: a.brandUpdate},
 		{Name: "content_catalog_sessions_create", Description: "Create a stable production session. Args: brand_id, title; optional session_date (YYYY-MM-DD, empty means unknown), notes, host_collection_id. Writes only Catalog.", InputSchema: schema("brand_id", "title"), Handler: a.sessionCreate},
-		{Name: "content_catalog_sessions_list", Description: "List sessions; brand_id optional.", InputSchema: schema(), Handler: a.sessionsList},
-		{Name: "content_catalog_sessions_get", Description: "Get one session with assets and linked Gigs. Args: id.", InputSchema: schema("id"), Handler: a.sessionGet},
+		{Name: "content_catalog_sessions_list", Description: "List sessions; brand_id optional. Defaults to active lifecycle; archived/all are explicit inspection views.", InputSchema: lifecycleListSchema(), Handler: a.sessionsList},
+		{Name: "content_catalog_sessions_get", Description: "Get one session with assets and linked Gigs. Args: id.", InputSchema: lifecycleListSchema("id"), Handler: a.sessionGet},
 		{Name: "content_catalog_sessions_update", Description: "Edit an existing session's title, notes, recording date, or optional host_collection_id override. Args: id and fields to change. Empty session_date means unknown. Storage folder remains stable.", InputSchema: schema("id"), Handler: a.sessionUpdate},
 		{Name: "content_catalog_sessions_link_gig", Description: "Read an existing Gig, then link it to a Catalog session. Args: session_id, gig_id, role?. Does not change Gigs.", InputSchema: schema("session_id", "gig_id"), Handler: a.sessionLinkGig},
 		{Name: "content_catalog_assets_attach", Description: "Read an existing Storage file, then link it to a session. Args: session_id, storage_file_id, kind?. Does not upload or change Storage.", InputSchema: schema("session_id", "storage_file_id"), Handler: a.assetAttach},
 		{Name: "content_catalog_session_upload_target", Description: "Return the exact Storage folder and install ID for explicit uploads into a session. Does not scan or upload. Args: session_id.", InputSchema: schema("session_id"), Handler: a.sessionUploadTarget},
 		{Name: "content_catalog_assets_attach_uploaded", Description: "Attach a file uploaded to the session's exact Storage folder after verifying its Storage metadata. Idempotent. Args: session_id, storage_file_id.", InputSchema: schema("session_id", "storage_file_id"), Handler: a.assetAttachUploaded},
 		{Name: "content_catalog_import_preview", Description: "Read up to 200 Storage files under a session brand root. Return candidates needing human review; no files or Catalog records are changed. Args: session_id.", InputSchema: schema("session_id"), Handler: a.importPreview},
-		{Name: "content_catalog_assets_list", Description: "List assets; session_id required.", InputSchema: schema("session_id"), Handler: a.assetsList},
-		{Name: "content_catalog_assets_get", Description: "Get an asset with source lineage, hosting, and per-asset publication records. Args: id.", InputSchema: schema("id"), Handler: a.assetGet},
+		{Name: "content_catalog_assets_list", Description: "List session assets, active by default. lifecycle=archived/all enables inspection; archived parent sessions also make assets ineligible.", InputSchema: lifecycleListSchema("session_id"), Handler: a.assetsList},
+		{Name: "content_catalog_assets_get", Description: "Get an asset with lifecycle, eligibility, revision, original session, source lineage, hosting, and publication history. Archived identities remain readable. Args: id.", InputSchema: schema("id"), Handler: a.assetGet},
 		{Name: "content_catalog_assets_link_source", Description: "Record one source relationship, supporting multi-input derivatives. Args: child_asset_id, source_asset_id, relation?, source_order?, media_render_id?.", InputSchema: schema("child_asset_id", "source_asset_id"), Handler: a.assetLinkSource},
 		{Name: "content_catalog_assets_review", Description: "Set a Catalog asset's editorial review_status to pending, approved, or rejected. Args: asset_id, review_status.", InputSchema: schema("asset_id", "review_status"), Handler: a.assetReview},
 		{Name: "content_catalog_asset_publications_list", Description: "List the platforms and observed post details for one asset. Args: asset_id.", InputSchema: schema("asset_id"), Handler: a.assetPublicationsList},
 		{Name: "content_catalog_asset_publications_record", Description: "Create or update a publication record on one asset. Args: asset_id, destination (new record), status, publication_id? (update), account_ref?, audience?, planned_at?, actual_at?, external_post_id?, external_url?, evidence_source?, failure_details?. Verified live requires evidence and URL or post ID. Writes only Catalog; never publishes externally.", InputSchema: schema("asset_id", "status"), Handler: a.assetPublicationRecord},
-		{Name: "content_catalog_posts_list", Description: "List shared platform posts; optional session_id, asset_id, brand_id. Each post contains its asset IDs and one observed outcome.", InputSchema: schema(), Handler: a.postsList},
+		{Name: "content_catalog_posts_list", Description: "List shared platform posts; optional session_id, asset_id, brand_id, lifecycle. Defaults to posts with only active assets/sessions; archived/all explicitly includes historical archive references. Each post contains its asset IDs and one observed outcome.", InputSchema: lifecycleListSchema(), Handler: a.postsList},
 		{Name: "content_catalog_posts_get", Description: "Get one shared platform post and its asset IDs. Args: id.", InputSchema: schema("id"), Handler: a.postsGet},
 		{Name: "content_catalog_posts_record", Description: "Create or update a shared platform post. Args: asset_ids (one or more same-brand Catalog assets), destination and status for new posts; post_id for updates. Supports title, account_ref, audience, planned_at, actual_at, external_post_id, external_url, evidence_source, failure_details. Writes Catalog evidence only; does not publish externally.", InputSchema: schema("status"), Handler: a.postsRecord},
 		{Name: "content_catalog_hosting_request", Description: "REAL EXTERNAL HOSTING: request an approved asset's video upload to the brand's video host. Bunny Stream is supported. Does not publish to a channel.", InputSchema: schema("asset_id"), Handler: a.hostingRequest},
 		{Name: "content_catalog_hosting_check", Description: "Fetch provider readiness for one hosting id and update Catalog's observation. Args: id.", InputSchema: schema("id"), Handler: a.hostingCheck},
 		{Name: "content_catalog_hosting_link_existing", Description: "Backfill a video asset with an existing Bunny GUID using only get_video. Args: asset_id, remote_id, connection_id. Confirms library, collection, duration, and readiness; never calls fetch_video. Media checksum is supporting Storage evidence, not a Bunny source-file match.", InputSchema: schema("asset_id", "remote_id", "connection_id"), Handler: a.hostingLinkExisting},
 		{Name: "content_catalog_hosting_list", Description: "List hosting records for an asset. Args: asset_id.", InputSchema: schema("asset_id"), Handler: a.hostingsList},
+		{Name: "content_catalog_assets_archive", Description: "Archive assets transactionally; operation_id and expected revisions required. Changes Catalog only; preserves IDs and external history.", InputSchema: lifecycleMutationSchema("asset", "archive"), Handler: a.lifecycleMutation("asset", "archive")},
+		{Name: "content_catalog_assets_move", Description: "Move assets transactionally; operation_id and expected revisions required. Changes Catalog only; preserves IDs and external history.", InputSchema: lifecycleMutationSchema("asset", "move"), Handler: a.lifecycleMutation("asset", "move")},
+		{Name: "content_catalog_assets_restore", Description: "Restore assets transactionally; operation_id and expected revisions required. Changes Catalog only; preserves IDs and external history.", InputSchema: lifecycleMutationSchema("asset", "restore"), Handler: a.lifecycleMutation("asset", "restore")},
+		{Name: "content_catalog_sessions_archive", Description: "Archive sessions transactionally; operation_id and expected revisions required. Changes Catalog only; preserves IDs and external history.", InputSchema: lifecycleMutationSchema("session", "archive"), Handler: a.lifecycleMutation("session", "archive")},
+		{Name: "content_catalog_sessions_restore", Description: "Restore sessions transactionally; operation_id and expected revisions required. Changes Catalog only; preserves IDs and external history.", InputSchema: lifecycleMutationSchema("session", "restore"), Handler: a.lifecycleMutation("session", "restore")},
+		{Name: "content_catalog_assets_eligibility", Description: "Check explicit asset_ids or file_ids/storage_install_id for lifecycle eligibility. Read-only; archived sessions block their assets. Mixed file links require explicit asset context.", InputSchema: eligibilitySchema(), Handler: a.assetsEligibility},
+		{Name: "content_catalog_lifecycle_history", Description: "Read archive/move/restore audit history for entity_type asset or session, id.", InputSchema: schema("entity_type", "id"), Handler: a.lifecycleHistory},
 	}
 }
 
@@ -225,7 +235,7 @@ func (a *App) handleList(name string) http.HandlerFunc {
 			return
 		}
 		args := map[string]any{}
-		for _, key := range []string{"brand_id", "session_id", "asset_id"} {
+		for _, key := range []string{"brand_id", "session_id", "asset_id", "lifecycle", "id", "entity_type"} {
 			if v := r.URL.Query().Get(key); v != "" {
 				args[key] = v
 			}
@@ -253,7 +263,7 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "app not mounted", http.StatusServiceUnavailable)
 			return
 		}
-		out, err := a.sessionDurations(globalCtx.WithProject(pid), strings.TrimSuffix(id, "/durations"))
+		out, err := a.sessionDurations(globalCtx.WithProject(pid), strings.TrimSuffix(id, "/durations"), r.URL.Query().Get("lifecycle"))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -262,7 +272,7 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(out)
 		return
 	}
-	a.callHTTP(w, r, "content_catalog_sessions_get", map[string]any{"id": id})
+	a.callHTTP(w, r, "content_catalog_sessions_get", map[string]any{"id": id, "lifecycle": r.URL.Query().Get("lifecycle")})
 }
 func (a *App) handleAsset(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -499,6 +509,7 @@ func (a *App) brandUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 type Session struct {
+	LifecycleFields
 	ID               string `json:"id"`
 	BrandID          string `json:"brand_id"`
 	Title            string `json:"title"`
@@ -514,6 +525,9 @@ func sessionByID(db *sql.DB, pid, id string) (*Session, error) {
 	err := db.QueryRow(`SELECT id,brand_id,title,session_date,status,notes,storage_folder,host_collection_id FROM sessions WHERE project_id=? AND id=?`, pid, id).Scan(&s.ID, &s.BrandID, &s.Title, &s.Date, &s.Status, &s.Notes, &s.StorageFolder, &s.HostCollectionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("session not found")
+	}
+	if err == nil {
+		err = loadSessionLifecycle(db, pid, s)
 	}
 	return s, err
 }
@@ -538,7 +552,7 @@ func (a *App) sessionCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	id := newID()
-	s := Session{ID: id, BrandID: brand.ID, Title: str(args, "title"), Date: date, Status: "planned", Notes: str(args, "notes"), HostCollectionID: collection}
+	s := Session{ID: id, BrandID: brand.ID, Title: str(args, "title"), Date: date, LifecycleFields: LifecycleFields{Lifecycle: "active", Revision: 1}, Status: "planned", Notes: str(args, "notes"), HostCollectionID: collection}
 	s.StorageFolder = sessionStorageFolder(brand.StorageRoot, &s)
 	_, err = ctx.AppDB().Exec(`INSERT INTO sessions(id,project_id,brand_id,title,session_date,notes,storage_folder,host_collection_id) VALUES(?,?,?,?,?,?,?,?)`, id, pid, brand.ID, s.Title, date, s.Notes, s.StorageFolder, collection)
 	if err != nil {
@@ -603,10 +617,11 @@ func (a *App) sessionUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			return nil, e
 		}
 	}
-	_, err = ctx.AppDB().Exec(`UPDATE sessions SET title=?,notes=?,session_date=?,host_collection_id=?,updated_at=? WHERE project_id=? AND id=?`, s.Title, s.Notes, s.Date, s.HostCollectionID, now(), pid, s.ID)
+	_, err = ctx.AppDB().Exec(`UPDATE sessions SET title=?,notes=?,session_date=?,host_collection_id=?,revision=revision+1,updated_at=? WHERE project_id=? AND id=?`, s.Title, s.Notes, s.Date, s.HostCollectionID, now(), pid, s.ID)
 	if err != nil {
 		return nil, err
 	}
+	s.Revision++
 	return map[string]any{"session": s}, nil
 }
 func (a *App) sessionsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -614,7 +629,11 @@ func (a *App) sessionsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	q := `SELECT id,brand_id,title,session_date,status,notes,storage_folder,host_collection_id FROM sessions WHERE project_id=?`
+	scope, err := lifecycleScope(args)
+	if err != nil {
+		return nil, err
+	}
+	q := `SELECT id,brand_id,title,session_date,status,notes,storage_folder,host_collection_id,lifecycle,archive_reason,archived_at,revision FROM sessions s WHERE project_id=?` + lifecyclePredicate(scope, "", "s")
 	params := []any{pid}
 	if v := str(args, "brand_id"); v != "" {
 		q += " AND brand_id=?"
@@ -629,7 +648,7 @@ func (a *App) sessionsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	out := []Session{}
 	for rows.Next() {
 		var s Session
-		if err = rows.Scan(&s.ID, &s.BrandID, &s.Title, &s.Date, &s.Status, &s.Notes, &s.StorageFolder, &s.HostCollectionID); err != nil {
+		if err = rows.Scan(&s.ID, &s.BrandID, &s.Title, &s.Date, &s.Status, &s.Notes, &s.StorageFolder, &s.HostCollectionID, &s.Lifecycle, &s.ArchiveReason, &s.ArchivedAt, &s.Revision); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
@@ -645,7 +664,7 @@ func (a *App) sessionGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	assetsAny, err := a.assetsList(ctx, map[string]any{"session_id": s.ID})
+	assetsAny, err := a.assetsList(ctx, map[string]any{"session_id": s.ID, "lifecycle": args["lifecycle"]})
 	if err != nil {
 		return nil, err
 	}

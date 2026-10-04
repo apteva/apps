@@ -222,6 +222,8 @@ func (a *App) hostingsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return map[string]any{"hostings": out}, nil
 }
 func (a *App) hostingRequest(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.lifecycleMu.RLock()
+	defer a.lifecycleMu.RUnlock()
 	pid, err := project(ctx)
 	if err != nil {
 		return nil, err
@@ -231,6 +233,9 @@ func (a *App) hostingRequest(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	asset, err := assetByID(ctx.AppDB(), pid, str(args, "asset_id"))
 	if err != nil {
+		return nil, err
+	}
+	if err = requireActiveAsset(ctx.AppDB(), pid, asset.ID); err != nil {
 		return nil, err
 	}
 	if asset.ReviewStatus != "approved" {

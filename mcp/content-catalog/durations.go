@@ -12,7 +12,7 @@ type sessionDurationResult struct {
 
 // Read Media metadata only for video/audio files explicitly linked to this
 // session. This does not scan Storage or create Catalog records.
-func (a *App) sessionDurations(ctx *sdk.AppCtx, sessionID string) (sessionDurationResult, error) {
+func (a *App) sessionDurations(ctx *sdk.AppCtx, sessionID string, scopes ...string) (sessionDurationResult, error) {
 	out := sessionDurationResult{Durations: map[string]int64{}}
 	pid, err := project(ctx)
 	if err != nil {
@@ -21,7 +21,14 @@ func (a *App) sessionDurations(ctx *sdk.AppCtx, sessionID string) (sessionDurati
 	if _, err := sessionByID(ctx.AppDB(), pid, sessionID); err != nil {
 		return out, err
 	}
-	rows, err := ctx.AppDB().Query(`SELECT id,storage_file_id FROM assets WHERE project_id=? AND session_id=? AND (kind IN ('video','audio') OR content_type LIKE 'video/%' OR content_type LIKE 'audio/%')`, pid, sessionID)
+	scope := "active"
+	if len(scopes) > 0 && scopes[0] != "" {
+		scope = scopes[0]
+	}
+	if _, err := lifecycleScope(map[string]any{"lifecycle": scope}); err != nil {
+		return out, err
+	}
+	rows, err := ctx.AppDB().Query(`SELECT a.id,a.storage_file_id FROM assets a JOIN sessions s ON s.id=a.session_id AND s.project_id=a.project_id WHERE a.project_id=? AND a.session_id=?`+lifecyclePredicate(scope, "a", "s")+` AND (a.kind IN ('video','audio') OR a.content_type LIKE 'video/%' OR a.content_type LIKE 'audio/%')`, pid, sessionID)
 	if err != nil {
 		return out, err
 	}
