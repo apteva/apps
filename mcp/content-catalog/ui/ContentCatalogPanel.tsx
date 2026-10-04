@@ -4,10 +4,11 @@ import { uploadResumable } from "../../storage/ui/uploadResumable";
 
 const API = "/api/apps/content-catalog";
 type Brand = { id: string; slug: string; name: string; storage_root: string; host_provider: string; host_connection_id: number; host_library_id: string; host_collection_id: string };
-type Session = { id: string; brand_id: string; title: string; session_date: string; status: string; notes: string };
+type Lifecycle = { lifecycle?: "active" | "archived"; revision?: number; archive_reason?: string; archived_at?: string };
+type Session = Lifecycle & { id: string; brand_id: string; title: string; session_date: string; status: string; notes: string };
 type Publication = { id: string; asset_id: string; asset_ids: string[]; title: string; destination: string; account_ref: string; audience: string; status: string; planned_at: string; actual_at: string; external_post_id: string; external_url: string; evidence_source: string; failure_details: string; legacy_target_id: string };
 type HostingSummary = { id: string; provider: string; connection_id: number; status: string; remote_id: string; last_checked_at: string };
-type Asset = { id: string; session_id: string; storage_install_id: number; storage_file_id: string; name: string; kind: string; content_type: string; size_bytes: number; review_status: string; media_status: string; media_rating: string; description?: string; description_source?: string; description_updated_at?: string; duration_ms?: number; media_error?: string; publications: Publication[]; hostings?: HostingSummary[]; sources?: AssetSource[] };
+type Asset = Lifecycle & { original_session_id?: string; session_lifecycle?: string; session_revision?: number; eligible?: boolean; id: string; session_id: string; storage_install_id: number; storage_file_id: string; name: string; kind: string; content_type: string; size_bytes: number; review_status: string; media_status: string; media_rating: string; description?: string; description_source?: string; description_updated_at?: string; duration_ms?: number; media_error?: string; publications: Publication[]; hostings?: HostingSummary[]; sources?: AssetSource[] };
 type Hosting = { id: string; provider: string; remote_id: string; status: string; embed_url: string; error: string };
 type AssetSource = { asset_id: string; relation: string; source_order: number; media_render_id: number; name?: string; session_id?: string; kind?: string; content_type?: string };
 type GigLink = { gigs_install_id: number; gig_id: number; role: string };
@@ -173,7 +174,7 @@ function SessionAssetCard({ asset, projectId, duration, context = false, compact
       <div className="px-3 pt-2" style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>
         <button type="button" className="font-medium truncate text-left hover:text-accent" style={{ height: 24, flexShrink: 0 }} title={asset.name} onClick={() => onOpen(asset.id)}>{asset.name}</button>
         <div className="text-xs text-text-muted truncate" style={{ height: 20, flexShrink: 0 }} title={`${assetMediaKind(asset)} · #${asset.storage_file_id} · ${asset.review_status}`}>{assetMediaKind(asset)}{duration ? ` · ${durationLabel(duration)}` : ""} · #{asset.storage_file_id} · {asset.review_status}</div>
-        <div className="flex items-center gap-1.5 text-xs" style={{ height: 24, flexShrink: 0 }}><span className="rounded bg-accent/10 px-1.5 py-0.5 text-accent">{lineageBadge(asset)}</span>{context && <span className="text-text-muted" title="Shown to explain a matching derivative; this asset does not match the filters">Context</span>}</div>
+        <div className="flex items-center gap-1.5 text-xs" style={{ height: 24, flexShrink: 0 }}><span className="rounded bg-accent/10 px-1.5 py-0.5 text-accent">{lineageBadge(asset)}</span>{(asset.lifecycle === "archived" || asset.session_lifecycle === "archived") && <span className="rounded bg-yellow-500/10 px-1.5 text-yellow-400">Archived</span>}{context && <span className="text-text-muted" title="Shown to explain a matching derivative; this asset does not match the filters">Context</span>}</div>
       </div>
     </div>
     <div className="px-3 pb-3" style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 0 }}>
@@ -236,6 +237,10 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const [overview, setOverview] = useState<Record<string, number>>({});
   const [brands, setBrands] = useState<Brand[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [lifecycleScope, setLifecycleScope] = useState("active");
+  const [lifecycleTarget, setLifecycleTarget] = useState<{entity:"asset"|"session";operation:"archive"|"move"|"restore";assets?:Asset[];session?:Session}|null>(null);
+  const [destinationSessions, setDestinationSessions] = useState<Session[]>([]);
+  const [checkedAssets, setCheckedAssets] = useState<string[]>([]);
   const [sessionBrand, setSessionBrand] = useState("");
   const [brandSessions, setBrandSessions] = useState<Session[] | null>(null);
   const [brandSessionsLoading, setBrandSessionsLoading] = useState(false);
@@ -273,12 +278,12 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const [candidates, setCandidates] = useState<ImportCandidate[]>([]);
   const [importLimitReached, setImportLimitReached] = useState(false);
   const [editingPublication, setEditingPublication] = useState<Publication | null>(null);
-  const [modal, setModal] = useState<"new-session" | "edit-session" | "add-file" | "link-gig" | "publication" | "filters" | null>(null);
+  const [modal, setModal] = useState<"new-session" | "edit-session" | "add-file" | "link-gig" | "publication" | "filters" | "lifecycle" | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
-  const query = useCallback((extra: Record<string, string> = {}) => new URLSearchParams({ project_id: projectId, install_id: String(installId), ...extra }).toString(), [projectId, installId]);
+  const query = useCallback((extra: Record<string, string> = {}) => new URLSearchParams({ project_id: projectId, install_id: String(installId), lifecycle: lifecycleScope, ...extra }).toString(), [projectId, installId, lifecycleScope]);
   const get = useCallback(async <T,>(path: string, extra: Record<string, string> = {}): Promise<T> => {
     const res = await fetch(`${API}${path}?${query(extra)}`, { credentials: "same-origin" });
     if (!res.ok) throw new Error(await res.text());
@@ -324,10 +329,22 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     const request = ++sessionRequest.current;
     ++durationRequest.current;
     ++assetRequest.current; if (activeSessionId.current !== s.id) setDerivedFamilyId(null); activeSessionId.current = s.id;
-    setSelectedSession(s); setSelectedAsset(null); setCandidates([]); setError("");
+    setCheckedAssets([]); setSelectedSession(s); setSelectedAsset(null); setCandidates([]); setError("");
     setAssets([]); setAssetDurations({}); setDurationsUnavailable(0); setDurationsFailed(0); setDurationsError(""); setDurationsLoading(false);
-    try { const result = await get<{ assets: Asset[]; gigs: GigLink[] }>(`/sessions/${s.id}`); if (request !== sessionRequest.current) return; setAssets(result.assets || []); setGigs(result.gigs || []); setAssetDurations(Object.fromEntries((result.assets || []).filter(a => a.duration_ms && a.duration_ms > 0).map(a => [a.id, a.duration_ms!]))); setDurationsFailed((result.assets || []).filter(a => ["video", "audio"].includes(assetMediaKind(a)) && a.media_error).length); setDurationsUnavailable((result.assets || []).filter(a => ["video", "audio"].includes(assetMediaKind(a)) && !a.media_error && !a.duration_ms).length); } catch (e) { if (request === sessionRequest.current) setError(errorText(e)); }
+    try { const result = await get<{ session: Session; assets: Asset[]; gigs: GigLink[] }>(`/sessions/${s.id}`); if (request !== sessionRequest.current) return; setSelectedSession(result.session || s); setAssets(result.assets || []); setGigs(result.gigs || []); setAssetDurations(Object.fromEntries((result.assets || []).filter(a => a.duration_ms && a.duration_ms > 0).map(a => [a.id, a.duration_ms!]))); setDurationsFailed((result.assets || []).filter(a => ["video", "audio"].includes(assetMediaKind(a)) && a.media_error).length); setDurationsUnavailable((result.assets || []).filter(a => ["video", "audio"].includes(assetMediaKind(a)) && !a.media_error && !a.duration_ms).length); } catch (e) { if (request === sessionRequest.current) setError(errorText(e)); }
   }, [get, loadDurations]);
+  const lastScope = useRef(lifecycleScope);
+  useEffect(() => { if (lastScope.current !== lifecycleScope) { lastScope.current = lifecycleScope; if (selectedSession) openSession(selectedSession); } }, [lifecycleScope, selectedSession, openSession]);
+  const manageLifecycle = async (entity: "asset" | "session", operation: "archive" | "move" | "restore", files?: Asset[]) => {
+    setError("");
+    try {
+      const sourceSessionId = files?.[0]?.session_id || selectedAsset?.session_id;
+      const sourceSession = entity === "session" || !sourceSessionId || sourceSessionId === selectedSession?.id
+        ? selectedSession : (await get<{session: Session}>(`/sessions/${sourceSessionId}`)).session;
+      const result = await get<{ sessions: Session[] }>("/sessions", { lifecycle: "all", brand_id: sourceSession?.brand_id || "" });
+      setDestinationSessions(result.sessions || []); setLifecycleTarget({ entity, operation, assets: files || (selectedAsset ? [selectedAsset] : []), session: selectedSession || undefined }); setModal("lifecycle");
+    } catch (err) { setError(errorText(err)); }
+  };
   const showSession = useCallback(async (s: Session, origin: "sessions" | "search" = "sessions") => {
     const url = new URL(window.location.href);
     url.searchParams.set("catalog_session", s.id);
@@ -448,7 +465,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     <nav className="flex gap-1 border-b border-border">{(["sessions", "search", "brands"] as const).map(t => <button key={t} onClick={() => { const url = new URL(window.location.href); url.searchParams.delete("catalog_session"); window.history.replaceState(null, "", url); ++sessionRequest.current; ++durationRequest.current; activeSessionId.current = ""; closeAsset(); setDerivedFamilyId(null); setSelectedSession(null); setModal(null); setTab(t); }} className={`px-3 py-2 text-sm capitalize ${tab === t ? "border-b-2 border-accent text-accent" : "text-text-muted"}`}>{t}</button>)}</nav>
 
     {tab === "search" && <section className="space-y-4">
-      <div><h2 className="text-lg font-semibold">Search Catalog</h2><p className="text-sm text-text-muted">Searches sessions and linked files. Storage folders are never scanned automatically.</p></div>
+      <div><h2 className="text-lg font-semibold">Search Catalog</h2><LifecycleSelect value={lifecycleScope} onChange={setLifecycleScope} /><p className="text-sm text-text-muted">Searches sessions and linked files. Storage folders are never scanned automatically.</p></div>
       <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
         <input className={`${inputClass} md:col-span-2`} type="search" value={searchText} onChange={e => setSearchText(e.target.value)} placeholder="Search titles, file names, notes…" aria-label="Search Catalog" />
         <select className={inputClass} value={searchType} onChange={e => { setSearchType(e.target.value); if (e.target.value === "sessions") { setSearchKind(""); setSearchLineage(""); setSearchReview(""); setSearchAvailability("any"); } }} aria-label="Result type"><option value="all">All records</option><option value="assets">Files</option><option value="sessions">Sessions</option></select>
@@ -480,31 +497,34 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
       <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-lg font-semibold">Sessions</h2><p className="text-sm text-text-muted">Select a session to see its files and publication status.</p></div><button type="button" className={buttonClass} onClick={() => setModal("new-session")}>+ New session</button></div>
       <div className="flex flex-wrap items-center gap-3" aria-label="Session filters">
         <label className="flex items-center gap-2 text-sm"><span>Brand</span><select className={inputClass} style={{ width: "auto", minWidth: 180, maxWidth: "100%" }} value={sessionBrand} onChange={e => setSessionBrand(e.target.value)} aria-label="Session brand"><option value="">All brands</option>{brands.map(brand => <option key={brand.id} value={brand.id}>{brand.name}</option>)}</select></label>
+        <LifecycleSelect value={lifecycleScope} onChange={setLifecycleScope} />
         <span className="text-xs text-text-muted" role="status">{brandSessionsLoading ? "Loading sessions…" : `Showing ${filteredSessions.length} of ${overview.sessions ?? sessions.length} sessions`}</span>
         {sessionBrand && <button type="button" className="text-xs text-accent underline" onClick={() => setSessionBrand("")}>Clear brand filter</button>}
       </div>
       {brandSessionsError && <p className="text-sm text-red-400">Could not load sessions for this brand: {brandSessionsError}</p>}
-      {sessions.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">No sessions yet.</p>}
-      {!brandSessionsLoading && !brandSessionsError && sessions.length > 0 && filteredSessions.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">No sessions for this brand yet.</p>}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 12, alignItems: "stretch" }}>{filteredSessions.map(s => <button key={s.id} data-session-id={s.id} style={previewCardStyle} className="overflow-hidden rounded-xl border border-border text-left text-sm transition-colors hover:border-accent/60" onClick={() => showSession(s)}><PreviewImage src={previewURL(projectId, "sessions", s.id)} alt={`Preview of ${s.title}`} fallback="▣" /><div className="p-3" style={{ flex: 1 }}><div className="font-medium line-clamp-2" style={{ minHeight: 40 }}>{s.title}</div><div className="mt-1 text-xs text-text-muted">{brandName(s.brand_id)} · {recordingDate(s.session_date)}</div></div></button>)}</div>
+      {sessions.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">No sessions in this lifecycle view.</p>}
+      {!brandSessionsLoading && !brandSessionsError && sessions.length > 0 && filteredSessions.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">No sessions for this brand in this lifecycle view.</p>}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 12, alignItems: "stretch" }}>{filteredSessions.map(s => <button key={s.id} data-session-id={s.id} style={previewCardStyle} className="overflow-hidden rounded-xl border border-border text-left text-sm transition-colors hover:border-accent/60" onClick={() => showSession(s)}><PreviewImage src={previewURL(projectId, "sessions", s.id)} alt={`Preview of ${s.title}`} fallback="▣" /><div className="p-3" style={{ flex: 1 }}><div className="font-medium line-clamp-2" style={{ minHeight: 40 }}>{s.title}{s.lifecycle === "archived" && <span className="ml-2 text-xs text-yellow-400">Archived</span>}</div><div className="mt-1 text-xs text-text-muted">{brandName(s.brand_id)} · {recordingDate(s.session_date)}</div></div></button>)}</div>
     </div>}
 
     {tab === "sessions" && selectedSession && <div className="space-y-5">
       <div className="border-b border-border pb-4">
         <button type="button" className="mb-3 text-sm text-accent underline" onClick={backToSessions}>← All sessions</button>
-        <div className="flex flex-wrap items-start justify-between gap-4"><div className="min-w-0"><h2 className="text-2xl font-semibold">{selectedSession.title}</h2><p className="mt-1 text-sm text-text-muted">{brandName(selectedSession.brand_id)} · {recordingDate(selectedSession.session_date)} · {selectedSession.status}</p></div><div className="flex flex-wrap gap-2"><button type="button" className="rounded border border-border px-3 py-1.5 text-sm" onClick={() => setModal("edit-session")}>Edit session</button><button type="button" className={buttonClass} onClick={() => setModal("add-file")}>+ Add file</button><button type="button" className="rounded border border-border px-3 py-1.5 text-sm" disabled={!assets.length} onClick={() => { setSelectedAsset(null); setEditingPublication(null); setModal("publication"); }}>+ Record post</button><button type="button" className="rounded border border-border px-3 py-1.5 text-sm" onClick={() => setModal("link-gig")}>Link Gig</button></div></div>
+        <div className="flex flex-wrap items-start justify-between gap-4"><div className="min-w-0"><h2 className="text-2xl font-semibold">{selectedSession.title}</h2>{selectedSession.lifecycle === "archived" && <p className="text-sm text-yellow-400">Archived session · {selectedSession.archive_reason}</p>}<p className="mt-1 text-sm text-text-muted">{brandName(selectedSession.brand_id)} · {recordingDate(selectedSession.session_date)} · {selectedSession.status}</p></div><div className="flex flex-wrap gap-2"><button type="button" className="rounded border border-border px-3 py-1.5 text-sm" onClick={() => manageLifecycle("session", selectedSession.lifecycle === "archived" ? "restore" : "archive")}>{selectedSession.lifecycle === "archived" ? "Restore session" : "Archive session"}</button><button type="button" className="rounded border border-border px-3 py-1.5 text-sm" onClick={() => setModal("edit-session")}>Edit session</button><button type="button" className={buttonClass} disabled={selectedSession.lifecycle === "archived"} onClick={() => setModal("add-file")}>+ Add file</button><button type="button" className="rounded border border-border px-3 py-1.5 text-sm" disabled={!assets.length} onClick={() => { setSelectedAsset(null); setEditingPublication(null); setModal("publication"); }}>+ Record post</button><button type="button" className="rounded border border-border px-3 py-1.5 text-sm" onClick={() => setModal("link-gig")}>Link Gig</button></div></div>
       </div>
       <section className="space-y-3"><div className="flex items-center justify-between gap-3"><h3 className="text-lg font-semibold">Assets</h3><span className="text-xs text-text-muted">Showing {filteredAssets.length} of {assets.length} files</span></div>
         <div className="flex flex-wrap items-center gap-2" aria-label="Asset toolbar">
+ <LifecycleSelect value={lifecycleScope} onChange={setLifecycleScope} />
+ {checkedAssets.length > 0 && <><span className="text-xs">{checkedAssets.length} selected</span>{(["archive","move","restore"] as const).map(operation => <button key={operation} type="button" className="text-xs text-accent underline" onClick={() => manageLifecycle("asset",operation,assets.filter(asset => checkedAssets.includes(asset.id)))}>{operation}</button>)}</>}
           <div className="inline-flex rounded-lg border border-border p-0.5" role="group" aria-label="Asset display">{([["grid", "Grid"], ["grouped", "Grouped by original"]] as const).map(([view, label]) => <button key={view} type="button" aria-pressed={assetView === view} className={`rounded px-2 py-1 text-xs ${assetView === view ? "bg-accent/15 text-accent" : "text-text-muted"}`} onClick={() => setAssetView(view)}>{label}</button>)}</div>
           <input className={inputClass} style={{ flex: "1 1 180px", maxWidth: 360 }} type="search" value={assetQuery} onChange={e => setAssetQuery(e.target.value)} placeholder="Find name, ID or description" aria-label="Find session file" />
           <button type="button" aria-haspopup="dialog" className={`rounded border px-3 py-1.5 text-sm ${activeAssetFilterCount ? "border-accent text-accent" : "border-border"}`} onClick={() => setModal("filters")}>Filters{activeAssetFilterCount > 0 ? ` (${activeAssetFilterCount})` : ""}</button>
           {assetFilterSummary && <span className="truncate text-xs text-text-muted" style={{ flex: "1 1 120px", minWidth: 0 }} title={assetFilterSummary}>{assetFilterSummary}</span>}
           {assetFiltersActive && <button type="button" className="text-xs text-accent underline" onClick={() => resetAssetFilters(true)}>Clear filters</button>}
         </div>
-        {assets.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">No files linked yet. Use Add file to upload into this session or link one from Storage.</p>}
+        {assets.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">No assets in this lifecycle view. Choose All to inspect other linked files.</p>}
         {assets.length > 0 && filteredAssets.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">{durationsLoading && assetLength !== "any" ? "Loading file lengths…" : "No files match these filters."}</p>}
-        {assetView === "grid" ? <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12, alignItems: "stretch" }}>{filteredAssets.map(asset => <SessionAssetCard key={asset.id} asset={asset} projectId={projectId} duration={assetDurations[asset.id]} onOpen={openLinkedAsset} />)}</div>
+        {assetView === "grid" ? <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12, alignItems: "stretch" }}>{filteredAssets.map(asset => <div key={asset.id} className="min-w-0 flex flex-col gap-1"><label className="text-xs flex items-center gap-2"><input type="checkbox" aria-label={`Select ${asset.name}`} checked={checkedAssets.includes(asset.id)} onChange={e => setCheckedAssets(current => e.target.checked ? [...current,asset.id] : current.filter(id => id !== asset.id))} />Select</label><SessionAssetCard asset={asset} projectId={projectId} duration={assetDurations[asset.id]} onOpen={openLinkedAsset} /></div>)}</div>
           : <><p className="text-xs text-text-muted">Grouped using recorded source links. Files with several sources appear once, under their first linked source in this session.{assetFiltersActive ? " Parent context stays visible for matching derivatives." : ""}</p><div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12, alignItems: "stretch" }}>{families.map(node => <AssetFamilyCard key={node.asset.id} node={node} projectId={projectId} durations={assetDurations} filtering={assetFiltersActive} onOpen={openLinkedAsset} onDerived={setDerivedFamilyId} />)}</div></>}
 
       </section>
@@ -543,6 +563,11 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     </Modal>}
 
     {selectedAsset && !modal && <Modal title={selectedAsset.name} wide onClose={closeAsset}>
+      <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
+        <span className={selectedAsset.eligible === false ? "text-yellow-400" : "text-text-muted"}>{selectedAsset.eligible === false ? "Archived / unavailable for processing or new publication" : "Active"}</span>
+        {(["archive", "move", "restore"] as const).filter(operation => operation === "move" || (operation === "restore" ? selectedAsset.eligible === false : selectedAsset.lifecycle !== "archived")).map(operation => <button key={operation} type="button" className="rounded border border-border px-2 py-1 capitalize" onClick={() => manageLifecycle("asset",operation)}>{operation}</button>)}
+      </div>
+      {selectedAsset.archive_reason && <p className="mb-3 text-xs text-text-muted">{selectedAsset.archive_reason} · {selectedAsset.archived_at}{selectedAsset.original_session_id ? ` · Original session ${short(selectedAsset.original_session_id)}` : ""}</p>}
       {derivedFamily && <button type="button" className="mb-3 text-sm text-accent underline" onClick={closeAsset}>← Derived assets</button>}
       {error && <p className="mb-3 rounded border border-red-500/50 p-3 text-sm text-red-400">{error}</p>}
       {notice && <p className="mb-3 rounded border border-green-500/50 p-3 text-sm">{notice}</p>}
@@ -555,13 +580,25 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
           <div className="flex flex-wrap gap-2 text-sm">{(["pending", "approved", "rejected"] as const).map(state => <button disabled={busy || selectedAsset.review_status === state} key={state} className="border border-border rounded px-2 py-1 disabled:opacity-40" onClick={() => run(async () => { await action("content_catalog_assets_review", { asset_id: selectedAsset.id, review_status: state }); await openAsset(selectedAsset); }, `Review set to ${state}`)}>{state}</button>)}</div>
         </div>
         <div className="min-w-0 space-y-3">
-          <h4 className="font-medium">Cloud hosting</h4>
-          <button disabled={busy || selectedAsset.review_status !== "approved"} className="rounded border border-accent px-3 py-1.5 text-sm disabled:opacity-40" onClick={() => run(async () => { await action("content_catalog_hosting_request", { asset_id: selectedAsset.id }); await openAsset(selectedAsset); }, "Hosting request recorded")}>Host approved asset</button>
+          <LifecycleHistory entity="asset" id={selectedAsset.id} get={get} />
+ <h4 className="font-medium">Cloud hosting</h4>
+          <button disabled={busy || selectedAsset.review_status !== "approved" || selectedAsset.eligible === false} className="rounded border border-accent px-3 py-1.5 text-sm disabled:opacity-40" onClick={() => run(async () => { await action("content_catalog_hosting_request", { asset_id: selectedAsset.id }); await openAsset(selectedAsset); }, "Hosting request recorded")}>Host approved asset</button>
           <div className="space-y-2">{hostings.map(h => <div key={h.id} className="rounded border border-border p-2 text-sm"><span className="font-medium">{h.provider}: {h.status}</span>{h.remote_id && <span className="ml-2 text-text-muted">{short(h.remote_id)}</span>}{h.embed_url && <a className="ml-2 text-accent underline" href={h.embed_url} target="_blank" rel="noreferrer">Open host</a>}{h.error && <p className="text-red-400">{h.error}</p>}{h.remote_id && h.status !== "ready" && <button className="text-accent underline" onClick={() => run(async () => { await action("content_catalog_hosting_check", { id: h.id }); await openAsset(selectedAsset); }, "Host checked")}>Check readiness</button>}</div>)}</div>
           <div className="space-y-2 text-sm"><div className="flex items-center justify-between gap-2"><h4 className="font-medium">Platforms and posts</h4><button type="button" className="rounded border border-accent px-2 py-1 text-xs text-accent" onClick={() => { setEditingPublication(null); setModal("publication"); }}>+ Add platform</button></div>{!selectedAsset.publications?.length && <p className="text-xs text-text-muted">Nothing recorded for this file yet.</p>}{(selectedAsset.publications || []).map(p => <div key={p.id} className="flex flex-wrap items-center gap-2 rounded border border-border p-2 text-xs"><PublicationIcons items={[p]} /><span className="font-medium">{publicationLabel(p.status)}</span><span className="text-text-muted">{p.asset_ids?.length || 1} file{p.asset_ids?.length === 1 ? "" : "s"}</span>{p.account_ref && <span className="text-text-muted">{p.account_ref}</span>}{p.audience && <span className="text-text-muted">{p.audience}</span>}{p.actual_at && <span className="text-text-muted">{p.actual_at.slice(0, 10)}</span>}{p.planned_at && !p.actual_at && <span className="text-text-muted">Planned {p.planned_at.slice(0, 10)}</span>}{p.external_url && <a className="text-accent underline" href={p.external_url} target="_blank" rel="noreferrer">View post</a>}{p.external_post_id && <span className="text-text-muted">ID {p.external_post_id}</span>}{p.evidence_source && <span className="text-text-muted">via {p.evidence_source}</span>}{p.failure_details && <span className="text-red-400">{p.failure_details}</span>}<button type="button" className="ml-auto text-accent underline" onClick={() => { setEditingPublication(p); setModal("publication"); }}>Update status</button></div>)}</div>
         </div>
       </div>
       {assetLoading && <p className="mt-3 text-xs text-text-muted" role="status">Loading file details…</p>}
+    </Modal>}
+
+    {modal === "lifecycle" && lifecycleTarget && <Modal title={`${lifecycleTarget.operation} ${lifecycleTarget.entity === "asset" ? `${lifecycleTarget.assets?.length || 0} asset(s)` : "session"}`} onClose={() => setModal(null)}>
+      <LifecycleForm key={`${lifecycleTarget.entity}:${lifecycleTarget.operation}`} target={lifecycleTarget} sessions={destinationSessions} busy={busy} onSubmit={input => run(async () => {
+        const savedAsset = selectedAsset;
+        await action(`content_catalog_${lifecycleTarget.entity === "asset" ? "assets" : "sessions"}_${lifecycleTarget.operation}`, input);
+        setModal(null); setCheckedAssets([]);
+        if (selectedSession) { const result = await get<{ session: Session }>(`/sessions/${selectedSession.id}`); await openSession(result.session); }
+        if (savedAsset) await openAsset(savedAsset);
+      }, "Catalog lifecycle updated")} />
+      {error && <p className="mt-3 text-sm text-red-400">{error}</p>}
     </Modal>}
 
     {modal === "new-session" && <Modal title="New session" onClose={() => setModal(null)}><CreateSession busy={busy} brands={brands} onSubmit={input => run(async () => { const result = await action<{ session: Session }>("content_catalog_sessions_create", input); setModal(null); await showSession(result.session); }, "Session created")} />{error && <p className="mt-2 text-sm text-red-400">{error}</p>}</Modal>}
@@ -657,4 +694,37 @@ function PublicationForm({ busy, initial, assets, initialAssetId, onSubmit }: { 
     {status === "failed" && <label className="block text-xs">Failure details<input className={inputClass} value={failure} onChange={e => setFailure(e.target.value)} /></label>}
     <button className={buttonClass} disabled={busy || !selected.length}>Save post</button>
   </form>;
+}
+
+function LifecycleSelect({value,onChange}:{value:string;onChange:(value:string)=>void}) {
+ return <label className="text-xs flex items-center gap-2"><span>Lifecycle</span><select className={inputClass} style={{width:"auto"}} aria-label="Lifecycle view" value={value} onChange={e=>onChange(e.target.value)}><option value="active">Active</option><option value="archived">Archive</option><option value="all">All</option></select></label>;
+}
+function LifecycleForm({target,sessions,busy,onSubmit}:{target:{entity:"asset"|"session";operation:"archive"|"move"|"restore";assets?:Asset[];session?:Session};sessions:Session[];busy:boolean;onSubmit:(input:Record<string,unknown>)=>void}) {
+ const [reason,setReason]=useState("");const [destination,setDestination]=useState("");const [status,setStatus]=useState("active");
+ const [operationId,setOperationId]=useState(()=>crypto.randomUUID());
+ const change=()=>setOperationId(crypto.randomUUID());
+ const files=target.assets || [];
+ const defaultDestination=target.operation === "restore" ? files[0]?.original_session_id || files[0]?.session_id : "";
+ const destinations=sessions.filter(session=>target.operation!=="restore" || session.lifecycle!=="archived");
+ const mixedOrigins=target.operation === "restore" && new Set(files.map(asset=>asset.original_session_id||asset.session_id)).size>1;
+ return <form className="space-y-3" onSubmit={e=>{e.preventDefault();const selected=sessions.find(session=>session.id===(destination||defaultDestination));
+ const input:Record<string,unknown>={operation_id:operationId,reason};
+ if(target.entity==="session") Object.assign(input,{session_id:target.session?.id,expected_revision:target.session?.revision,status});
+ else Object.assign(input,{asset_ids:files.map(asset=>asset.id),expected_revisions:Object.fromEntries(files.map(asset=>[asset.id,asset.revision])),...(destination?{destination_session_id:destination}:{}),...(selected?{destination_revision:selected.revision}:{}),destination_revisions:Object.fromEntries(sessions.map(session=>[session.id,session.revision]))});
+ onSubmit(input);}}>
+ <h3 className="font-semibold capitalize">{target.operation} {target.entity === "asset" ? `${files.length} asset(s)` : target.session?.title}</h3>
+ <p className="text-xs text-text-muted">Updates Catalog membership and lifecycle. Asset IDs, Storage files, source links, hosting and publication history are preserved.</p>
+ {target.entity === "asset" && <ul className="max-h-32 overflow-auto text-xs">{files.map(asset=><li key={asset.id}>{asset.name}</li>)}</ul>}
+ {target.operation === "archive" && <label className="block text-xs">Archive reason<textarea className={inputClass} required value={reason} onChange={e=>{setReason(e.target.value);change();}} /></label>}
+ {target.entity === "asset" && <label className="block text-xs">{target.operation === "archive" ? "Move to session (optional)" : "Destination session"}<select className={inputClass} aria-label="Destination session" required={target.operation==="move"} value={destination} onChange={e=>{setDestination(e.target.value);change();}}><option value="">{target.operation === "restore" ? mixedOrigins ? "Each asset’s original session" : "Original session" : target.operation === "archive" ? "Keep current session" : "Choose session"}</option>{destinations.map(session=><option key={session.id} value={session.id}>{session.title}{session.lifecycle==="archived" ? " · Archived" : ""}</option>)}</select></label>}
+ {target.entity === "session" && target.operation === "restore" && target.session?.status === "archived" && <label className="block text-xs">Production status<select className={inputClass} value={status} onChange={e=>{setStatus(e.target.value);change();}}>{["planned","active","completed"].map(value=><option key={value}>{value}</option>)}</select></label>}
+ {target.operation === "restore" && <p className="text-xs text-text-muted">The destination session must be active. Restore an archived parent session first, or choose another destination.</p>}
+ <button type="submit" className={buttonClass} disabled={busy || !files.length && target.entity === "asset"}>{busy ? "Saving…" : `${target.operation === "archive" ? "Archive" : target.operation === "restore" ? "Restore" : "Move"} ${target.entity === "asset" ? "assets" : "session"}`}</button>
+ </form>;
+}
+
+function LifecycleHistory({entity,id,get}:{entity:string;id:string;get:<T>(path:string,extra?:Record<string,string>)=>Promise<T>}) {
+ const [events,setEvents]=useState<Array<{action:string;reason:string;created_at:string}>>([]);const [error,setError]=useState("");
+ useEffect(()=>{let active=true;setEvents([]);setError("");get<{events:typeof events}>("/lifecycle-history",{entity_type:entity,id}).then(result=>{if(active)setEvents(result.events||[]);}).catch(err=>{if(active)setError(errorText(err));});return()=>{active=false;};},[get,entity,id]);
+ return <details className="rounded border border-border p-2 text-xs"><summary>Lifecycle history ({events.length})</summary>{error&&<p className="text-yellow-400">{error}</p>}{events.map((event,index)=><p key={index} className="mt-2">{event.action} · {event.created_at} · {event.reason}</p>)}{!events.length&&!error&&<p className="mt-2 text-text-muted">No archive or move history recorded.</p>}</details>;
 }
