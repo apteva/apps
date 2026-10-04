@@ -99,6 +99,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
   const showSuggestions = !props.hasMessages && !props.streamNode && !hasDraft && !props.archived && Boolean(props.suggestions?.length);
   const showBreak = props.responseActive && !hasDraft;
   const agentOffline = props.agentOnline === false;
+  const statusLabel = t(agentOffline ? "chat.agentOffline" : props.connected ? "chat.live" : "chat.reconnectingHistory");
   const breakLabel = t(props.breakRequested ? "chat.breakRequested" : props.breakBusy ? "chat.breakRequesting" : "chat.breakLabel");
   return (
     <section className="min-h-0 flex-1 flex flex-col">
@@ -113,12 +114,13 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
               </span>
             )}
         <span
-          className={`shrink-0 w-2 h-2 rounded-full ${props.connected ? "bg-success" : "bg-border"}`}
-          title={props.connected ? t("chat.live") : t("chat.reconnectingHistory")}
+          className={`shrink-0 w-2 h-2 rounded-full ${agentOffline ? "bg-error" : props.connected ? "bg-success" : "bg-border"}`}
+          role="img"
+          aria-label={statusLabel}
+          title={statusLabel}
         />
           </div>
             <p className="text-xs text-text-muted truncate">{props.subtitle}</p>
-            {agentOffline && <p className="text-[10px] text-error">{t("chat.agentOffline")}</p>}
         </div>
         {props.headerActions && (
           <div data-chat-header-actions className="ml-auto flex shrink-0 items-center gap-1">{props.headerActions}</div>

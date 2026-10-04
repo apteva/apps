@@ -63,7 +63,8 @@ test("unread conversations use the shared dot indicator without a numeric badge"
   ));
   const indicator = element.querySelector('[aria-label="Unread messages"]');
   expect(indicator).not.toBeNull();
-  expect(indicator?.className).toContain("chat-thread-working-dot");
+  expect(indicator?.className).toContain("chat-thread-unread-dot");
+  expect(indicator?.className).not.toContain("chat-thread-working-dot");
   expect(element.textContent).toBe("");
   await act(async () => root.render(
     <ConversationLocalizationProvider>
@@ -98,7 +99,10 @@ test("offline agents keep the draft but block sending", async () => {
   await act(async () => root.render(<ConversationChat conversation={conv("a")} agentOnline={false} archived={false} onActed={() => {}} onRemoved={() => {}} />));
   await settle();
   await type("keep this draft");
-  expect(element.textContent).toContain("Agent offline");
+  const status = element.querySelector('[role="img"][aria-label="Agent offline — sending is unavailable"]');
+  expect(status?.className).toContain("bg-error");
+  expect(status?.className).not.toContain("bg-success");
+  expect(element.textContent).not.toContain("Agent offline");
   expect((element.querySelector("button[type=submit]") as HTMLButtonElement).disabled).toBe(true);
   await send();
   expect(posted).toHaveLength(0);

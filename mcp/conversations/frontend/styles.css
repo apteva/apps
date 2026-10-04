@@ -209,6 +209,11 @@
   animation: chat-thread-working 1.4s ease-in-out infinite;
 }
 
+/* Unread is a persistent state, so its indicator stays still. */
+.chat-thread-unread-dot {
+  animation: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .chat-thread-working-dot { animation: none; }
   .chat-tool-icon-running {

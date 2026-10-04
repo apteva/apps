@@ -93,5 +93,5 @@ export function ConversationUnreadIndicator({ unread }: { unread: boolean }) {
   const { t } = useConversationLocalization();
   if (!unread) return null;
   const label = t("chat.unread");
-  return <span role="img" aria-label={label} title={label} className="chat-thread-working-dot inline-block h-2 w-2 shrink-0 rounded-full bg-accent" />;
+  return <span role="img" aria-label={label} title={label} className="chat-thread-unread-dot inline-block h-2 w-2 shrink-0 rounded-full bg-accent" />;
 }
