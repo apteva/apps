@@ -125,6 +125,34 @@ unless the user said "void", "void it", "cancel that invoice", or
 
 ## Customer first, then invoice
 
+For **finding or reviewing an existing customer**, start with
+`customers_search(q="customer name", include_context=true)`. This returns
+customer records and their compact billing contexts together: invoice counts
+by status (open/paid/uncollectible), recent payments (default 3), and lifetime
+totals by currency. These totals and status counts are authoritative; do not
+fetch invoices or call `customers_get_context` again just to verify them. Fetch
+individual invoices only when their details are requested. Use one search per named
+customer; do not search invoice text for customer names or create a customer
+just to answer a read-only question. Use `customers_get_context` when you
+already know the customer ID or email.
+
+All monetary `*_cents` fields use integer cents. Divide by 100 for a human
+currency amount: `10000` cents is EUR 100.00, **not** EUR 10,000.00.
+
+Search ranks exact name/email matches first. If the full phrase has no match,
+it can return broader token candidates, e.g. `Google Ads` may suggest
+`Google Ireland Limited`. `match_mode=token_candidates` and
+`requires_confirmation=true` mean **possible matches**, not a verified alias.
+Identify the legal name in the answer and ask for confirmation if needed;
+never claim these are the same entity merely because a token matched, and never
+select a candidate for a write without resolving its identity. Multiple matches
+also require disambiguation. Do not retry progressively shorter searches when
+the tool already returned candidates.
+
+`invoices_search.q` matches invoice number, notes, or exact invoice ID only.
+For invoice details belonging to a customer, resolve them first and filter by
+`customer_id`. Empty invoice results do not establish that a customer is absent.
+
 Always look up or create the customer **before** drafting an
 invoice. The right primitive is `customers_upsert_by_email` —
 returns `{customer, was_created}`. Don't loop `customers_get` then

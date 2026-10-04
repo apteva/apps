@@ -1,0 +1,121 @@
+name: efficient-customer-lookup
+description: |
+  Replays the production Circlewise / Google Ads account lookup using the
+  existing customers_search tool. Setup is seeded outside the agent context.
+  Two searches must supply balances and payments without invoice searches,
+  shortened-query retries, redundant context fetches, or customer writes.
+  Google Ireland Limited must be identified as a candidate, not a verified alias.
+timeout: 120s
+max_iterations: 5
+runs: 3
+required_pass_rate: 1.0
+
+setup:
+  mode: autonomous
+  interaction: thread
+  thread:
+    id: customer-review
+    directive: Review existing billing records read-only. Report accurate account information and preserve uncertainty about identity. Return your final answer to main with send, then call done.
+    tools: [search_tools, send, done, pace]
+    mcp: [billing]
+  app:
+    path: ./
+  seed_mcp_calls:
+    - app: billing
+      tool: customers_upsert_by_email
+      thread_id: fixture-setup
+      args:
+        email: circlewise@example.test
+        defaults: {name: Circlewise, currency: EUR}
+    - app: billing
+      tool: customers_upsert_by_email
+      thread_id: fixture-setup
+      args:
+        email: google@example.test
+        defaults: {name: Google Ireland Limited, currency: EUR}
+    - app: billing
+      tool: invoices_create
+      thread_id: fixture-setup
+      args:
+        customer_id: 1
+        currency: EUR
+        line_items:
+          - {description: Consulting, quantity: 1, unit_price_cents: 10000}
+    - app: billing
+      tool: invoices_finalize
+      thread_id: fixture-setup
+      args: {invoice_id: 1}
+    - app: billing
+      tool: payments_record
+      thread_id: fixture-setup
+      args: {invoice_id: 1, amount_cents: 10000, method: wire, received_at: '2026-04-29T00:00:00Z'}
+    - app: billing
+      tool: invoices_create
+      thread_id: fixture-setup
+      args:
+        customer_id: 2
+        currency: EUR
+        line_items:
+          - {description: Services, quantity: 1, unit_price_cents: 25000}
+    - app: billing
+      tool: invoices_finalize
+      thread_id: fixture-setup
+      args: {invoice_id: 2}
+
+directive: |
+  You coordinate request threads. The customer-review request thread owns
+  this read-only lookup. Wait for its answer and do not duplicate its work or
+  investigate worker lifecycle notifications. After it sends its final answer,
+  stop. Do not create or change billing records.
+
+prompt: |
+  Now check the Circlewise and also Google Ads customers. Show invoiced totals,
+  outstanding balances, and latest payments. If a name only has a possible
+  match, identify that candidate clearly rather than claiming a verified match.
+
+trajectory_assert:
+  - tool_called_with:
+      tool: customers_search
+      args: {q: Circlewise, include_context: true}
+      count: 1
+      success: true
+  - tool_called_with:
+      tool: customers_search
+      args: {q: Google Ads, include_context: true}
+      count: 1
+      success: true
+      result_contains: Google Ireland Limited
+  - tool_called_with:
+      tool: customers_search
+      count: 2
+  - tool_not_called: invoices_search | customers_get_context | customers_get | payments_list
+  - tool_not_called: customers_upsert_by_email | customers_update | invoices_create | payments_record
+  - iterations_at_most: 5
+
+outcome_assert:
+  - agent_response_contains: Circlewise
+    thread_id: customer-review
+  - agent_response_contains: Google Ireland Limited
+    thread_id: customer-review
+  - agent_response_contains: candidate | possible | potential
+    thread_id: customer-review
+  - agent_response_matches: '100[.,]00'
+    thread_id: customer-review
+  - agent_response_matches: '250[.,]00'
+    thread_id: customer-review
+  - agent_response_contains: wire
+    thread_id: customer-review
+  - agent_response_contains: "2026-04-29 | April 29 | 29 April | Apr 29 | 29 Apr"
+    thread_id: customer-review
+  - http: GET /api/apps/billing/invoices?status=paid
+    expect_status: 200
+    expect_count_at: invoices
+    expect_count: 1
+  - http: GET /api/apps/billing/invoices?status=open
+    expect_status: 200
+    expect_count_at: invoices
+    expect_count: 1
+
+budget:
+  total_tokens: 100000
+  cost_usd: 1.00

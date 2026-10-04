@@ -19,7 +19,11 @@ func (a *App) toolCustomersSearch(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	rows, err := dbCustomerSearch(ctx.AppReadDB(), pid,
+	includeContext, _ := args["include_context"].(bool)
+	if includeContext {
+		limit = min(limit, 20)
+	}
+	rows, mode, err := dbCustomerSearchMatches(ctx.AppReadDB(), pid,
 		strArg(args, "q"), strArg(args, "email"), limit+1, intArg(args, "offset", 0))
 	if err != nil {
 		return nil, err
@@ -28,7 +32,20 @@ func (a *App) toolCustomersSearch(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if more {
 		rows = rows[:limit]
 	}
-	return map[string]any{"customers": rows, "count": len(rows), "has_more": more}, nil
+	out := map[string]any{"customers": rows, "count": len(rows), "has_more": more,
+		"match_mode": mode, "requires_confirmation": len(rows) > 0 && (mode == "token_candidates" || len(rows) > 1 || more || intArg(args, "offset", 0) > 0)}
+	if includeContext {
+		contexts := []map[string]any{}
+		for _, c := range rows {
+			context, err := customerBillingSummary(ctx, pid, c, intArg(args, "payments_limit", 3))
+			if err != nil {
+				return nil, err
+			}
+			contexts = append(contexts, context)
+		}
+		out["contexts"] = contexts
+	}
+	return out, nil
 }
 
 func (a *App) toolCustomersGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -58,15 +75,27 @@ func (a *App) toolCustomersGetContext(ctx *sdk.AppCtx, args map[string]any) (any
 	if c == nil {
 		return map[string]any{"customer": nil, "found": false}, nil
 	}
-	plimit := intArg(args, "payments_limit", 10)
-	if plimit <= 0 || plimit > 100 {
-		plimit = 10
+	return customerBillingContext(ctx, pid, c, intArg(args, "payments_limit", 10))
+}
+
+func customerBillingContext(ctx *sdk.AppCtx, pid string, c *Customer, plimit int) (map[string]any, error) {
+	out, err := customerBillingSummary(ctx, pid, c, plimit)
+	if err != nil {
+		return nil, err
 	}
 	openInvs, err := dbInvoiceSearch(ctx.AppReadDB(), pid, invoiceFilters{
 		customerID: c.ID, status: "open", limit: 50,
 	})
 	if err != nil {
 		return nil, err
+	}
+	out["open_invoices"] = openInvs
+	return out, nil
+}
+
+func customerBillingSummary(ctx *sdk.AppCtx, pid string, c *Customer, plimit int) (map[string]any, error) {
+	if plimit <= 0 || plimit > 100 {
+		plimit = 10
 	}
 	pays, err := dbPaymentList(ctx.AppReadDB(), pid, paymentFilters{
 		customerID: c.ID, limit: plimit,
@@ -80,7 +109,7 @@ func (a *App) toolCustomersGetContext(ctx *sdk.AppCtx, args map[string]any) (any
 	}
 	return map[string]any{
 		"customer":        c,
-		"open_invoices":   openInvs,
+		"money_unit":      "cents (100 cents = 1 currency unit)",
 		"recent_payments": pays,
 		"lifetime":        totals,
 		"found":           true,

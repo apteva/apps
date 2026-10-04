@@ -1,10 +1,14 @@
-# Billing (v0.13.0)
+# Billing (v0.13.1)
 
 Customers, invoices, and payments for Apteva agents and human teams.
 
 ## Current capabilities
 
 - **Customers** with billing address, tax IDs, soft-delete + merge.
+- **Customer account lookup** through the existing `customers_search` tool:
+  exact name/email matches rank first; unmatched multiword queries return
+  labelled token candidates. `include_context=true` includes balances and
+  recent payments in the same response, capped at 20 customers per page.
 - **Invoices** with line items and an explicit lifecycle
   (draft → open → paid / void / uncollectible). The invoice issuer remains
   local; Stripe can process its outstanding balance through Checkout. An

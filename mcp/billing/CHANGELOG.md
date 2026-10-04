@@ -1,5 +1,22 @@
 # Billing release notes
 
+## 0.13.1
+
+- Improve the existing `customers_search` tool with exact-match ranking,
+  literal phrase matching, and labelled broader token candidates when no phrase
+  matches. Preserve project isolation, deleted-customer filtering, and pagination.
+- Add optional `include_context=true` for invoice totals and balances by currency,
+  invoice status counts, and recent payments in the same call. Context pages are
+  capped at 20 customers; broader candidates require identity confirmation.
+- Clarify customer-first account reviews and invoice text-search semantics.
+  Make integer-cent units explicit to prevent incorrect currency amounts.
+- Pin app-sdk v0.93.0. No new tools or database migrations.
+
+Validated with the complete Tier 1 suite using the published SDK without the
+workspace overlay, plus three live-agent OpenCode Go scenario runs. Each review
+used exactly two customer searches, no invoice/context follow-up calls, and no
+billing writes; amounts and candidate identity were checked.
+
 ## 0.13.0
 
 - Recover ambiguous Stripe operations with durable idempotent requests, a verified
