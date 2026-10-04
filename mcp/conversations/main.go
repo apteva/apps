@@ -89,14 +89,22 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	mountedCtx = ctx
 	// Recover queue rows that were created while the process was down and no
 	// response owns the conversation anymore.
+	// The SDK serializes the app writer DB through one connection. Read the
+	// conversation IDs and close that cursor before releaseQueuedMessages does
+	// its per-conversation queries; querying while rows is still open deadlocks
+	// startup on a fresh SDK build.
+	var queuedConversationIDs []string
 	if rows, err := a.store.db.Query(`SELECT id FROM conversations WHERE archived_at IS NULL`); err == nil {
 		for rows.Next() {
 			var id string
 			if rows.Scan(&id) == nil {
-				a.releaseQueuedMessages(id)
+				queuedConversationIDs = append(queuedConversationIDs, id)
 			}
 		}
 		_ = rows.Close()
+	}
+	for _, id := range queuedConversationIDs {
+		a.releaseQueuedMessages(id)
 	}
 	// Token-level streaming when the platform grants it; Stage-1 phase
 	// frames otherwise. The bridge connects asynchronously because the
