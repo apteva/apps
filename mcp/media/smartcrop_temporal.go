@@ -1139,6 +1139,14 @@ func correctSmartCropStationaryRuns(samples []smartCropV2Sample, srcW, cropW int
 		// lies down or reverses direction can be held at the previous position
 		// for the rest of the reel.
 		result, resultOK := bestSmartCropTemporalConsensus(samples[i:end], srcW, cropW)
+		if resultOK && result.StaticAnchored && !result.AnchorAligned &&
+			!smartCropStaticCandidateTouchesSceneSubject(result, samples[i:end], cropW) {
+			// Apply the same containment gate as stills and scene-wide outlier
+			// correction. A recurring warm room feature cannot establish a new
+			// subject inside a stationary sub-run. Keep motion continuity available
+			// below even when this static candidate is rejected.
+			resultOK = false
+		}
 		if resultOK && result.Concentration >= smartCropTemporalDenseMinConcentration &&
 			result.MeanActivity >= smartCropTemporalDenseMinMeanActivity &&
 			result.ActiveFraction >= smartCropTemporalDenseMinActiveFraction {

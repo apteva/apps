@@ -16,3 +16,36 @@ the detector's test resolution with FFmpeg.
 The test suite shifts, rotates, and changes the exposure of these fixtures to
 exercise the embedded CPU face detector and edge-containment logic without
 shipping or depending on private reference media.
+
+## Regression and performance benchmarks
+
+From `mcp/media`, run the deterministic scenario matrix, photographic fixtures,
+adversarial sweeps, and rendering checks with the release's pinned dependencies:
+
+```sh
+GOWORK=off go test -short ./...
+GOWORK=off go test -race -short ./...
+GOWORK=off go test -run '^$' -bench 'Benchmark(AnalyzeSmartCrop|TemporalSubject|CorrectSmartCrop)' -benchmem -count=3
+```
+
+Private footage remains external and opt-in. Set `MONIKA_9215_VIDEO`,
+`MONIKA_DECEMBER_PLAYING_VIDEO`, and `MONIKA_DECEMBER_RESIST_VIDEO` to the retained
+original files to include their existing regression cases. Record an unchanged
+release baseline before evaluating a crop change; historical
+failures must be distinguished from new failures.
+
+`TestHollySmartCropOpeningLocalRegression` replays render 7486 (source 85686,
+480705–520705 ms) through the complete production planner. Set
+`HOLLY_SMARTCROP_FIXTURE_DIR` to the external `holly-85686` fixture directory:
+
+- `derivations.json`: the source's relevant keyframe rows;
+- `storyboard/<position_ms>.jpg`: the actual stored production storyboard;
+- `tracking/<position_ms>.analysis.jpg` and `.detail.jpg`: source frames extracted
+  at the candidate tracking positions with the production 320px/q3 and 640px/q7
+  filters. Both views come from one decode.
+
+The test substitutes only frame extraction and Storage transport. All identity
+checks, sampling selection, evidence passes, smoothing and path constraints run
+the production code. It checks the opening every 250 ms and can save the resolved
+path with `HOLLY_SMARTCROP_OUTPUT_PATH`. No credentials, signed URLs or private
+image/video bytes belong in this repository.

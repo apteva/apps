@@ -19,6 +19,12 @@ type renderSourceMetadataKey struct{}
 
 const renderAlgorithmVersion = "media-audit-1"
 
+// Crop decisions have their own revision so a tracking fix cannot reuse an old
+// path, while unrelated render-result caches remain useful. Both decision and
+// pre-analysis request caches need it; resolved local plans already include the
+// changed coordinates in their result-cache key.
+const smartCropAlgorithmVersion = "media-smartcrop-static-containment-2"
+
 // Remote binaries/provider settings are not immutable. Restrict reuse to this
 // process lifetime as well as host/connection identity until they expose a
 // trustworthy revision. Local binaries additionally use their file identity.
@@ -110,7 +116,7 @@ func preprocessSmartCrop(ctx context.Context, app *sdk.AppCtx, sc *storageClient
 	if mode == "" {
 		mode = "smart"
 	}
-	raw, _ := json.Marshal([]any{renderAlgorithmVersion, sc.base, project, op, sources, row.SourceSHA256, row.Width, row.Height, row.Rotation, row.Derivations, target, ratio, mode, parsed["fit_mode"], app.Config().Get("render_host_id")})
+	raw, _ := json.Marshal([]any{smartCropAlgorithmVersion, sc.base, project, op, sources, row.SourceSHA256, row.Width, row.Height, row.Rotation, row.Derivations, target, ratio, mode, parsed["fit_mode"], app.Config().Get("render_host_id")})
 	key := fmt.Sprintf("%x", sha256.Sum256(raw))
 	var cached string
 	if app.AppDB().QueryRow(`SELECT params FROM smartcrop_cache WHERE cache_key=?`, key).Scan(&cached) == nil {
@@ -191,6 +197,13 @@ func requestRenderCacheKey(ctx context.Context, app *sdk.AppCtx, sc *storageClie
 	if folder == "" {
 		folder = "/renders/"
 	}
-	raw, _ := json.Marshal([]any{renderAlgorithmVersion, sc.base, row.ProjectID, executor.Name(), identity, row.Operation, row.Params, sources, folder, plan.Filename})
+	revision := renderAlgorithmVersion
+	switch row.Operation {
+	case "crop", "extract_frame", "extract_reel":
+		// Request-cache hits skip analysis entirely. Invalidating only the
+		// decision cache would still return an earlier incorrectly cropped file.
+		revision += ":" + smartCropAlgorithmVersion
+	}
+	raw, _ := json.Marshal([]any{revision, sc.base, row.ProjectID, executor.Name(), identity, row.Operation, row.Params, sources, folder, plan.Filename})
 	return fmt.Sprintf("%x", sha256.Sum256(raw)), folder, plan.Filename
 }
