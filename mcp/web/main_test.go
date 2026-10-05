@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"image/draw"
 	"image/jpeg"
 	"image/png"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -199,6 +201,40 @@ func TestParseGoogleSearchResults(t *testing.T) {
 	}
 }
 
+func TestParseGoogleSearchResolvesOpaqueRedirectsAndReportsFailures(t *testing.T) {
+	extracted := &browserExtractResult{Links: []linkInfo{
+		{URL: "https://www.google.com/goto?url=CAESopaque-one", Text: "Elite Staffing"},
+		{URL: "https://www.google.com/goto?url=CAESopaque-two", Text: "Randstad"},
+		{URL: "https://www.google.com/search?q=staffing", Text: "Web"},
+		{URL: "https://www.googleadservices.com/pagead/aclk?x=ad", Text: "Sponsored"},
+	}}
+	resolved, report := resolveGoogleSearchResultsWith(extracted, 8, func(rawURL string) (string, error) {
+		switch rawURL {
+		case "https://www.google.com/goto?url=CAESopaque-one":
+			return "https://elite.example.com/", nil
+		case "https://www.google.com/goto?url=CAESopaque-two":
+			return "", fmt.Errorf("redirect timeout")
+		default:
+			return "", fmt.Errorf("unexpected redirect %q", rawURL)
+		}
+	})
+	if len(resolved) != 1 || resolved[0].URL != "https://elite.example.com/" || resolved[0].Title != "Elite Staffing" {
+		t.Fatalf("resolved=%#v, want one organic result", resolved)
+	}
+	if report.Attempted != 2 || report.Resolved != 1 || report.Failed != 1 || len(report.Failures) != 1 {
+		t.Fatalf("resolution report=%#v", report)
+	}
+}
+
+func TestGoogleOpaqueRedirectDetection(t *testing.T) {
+	if !isOpaqueGoogleRedirect("https://www.google.com/goto?url=CAESopaque") {
+		t.Fatal("opaque Google goto URL was not detected")
+	}
+	if isOpaqueGoogleRedirect("https://www.google.com/goto?url=https%3A%2F%2Fexample.com") {
+		t.Fatal("direct Google redirect URL was classified as opaque")
+	}
+}
+
 func TestSearchUsesComputerDOMParser(t *testing.T) {
 	plat := newFakePlatform()
 	ctx, app := newTestCtx(t, plat)
@@ -225,18 +261,18 @@ func TestSearchUsesComputerDOMParser(t *testing.T) {
 		t.Fatalf("engine=%v, want google", out["engine"])
 	}
 	calls := plat.callLog()
-	want := []string{"computer.browser_open", "computer.browser_extract", "computer.browser_close"}
+	want := []string{"computer.browser_open", "computer.browser_extract", "computer.browser_extract", "computer.browser_close"}
 	if !sameOrderedPrefix(calls, want) {
 		t.Fatalf("calls=%v want prefix %v", calls, want)
 	}
 	extractArgs := plat.lastCall("computer", "browser_extract")
 	formats, _ := extractArgs["formats"].([]string)
-	if !sameStrings(formats, []string{"links", "text", "metadata"}) {
+	if !sameStrings(formats, []string{"html"}) {
 		t.Fatalf("formats=%#v", formats)
 	}
 }
 
-func TestSearchRetriesLinksOnlyAfterTruncatedExtraction(t *testing.T) {
+func TestSearchRetriesHeadingHTMLAfterTruncatedExtraction(t *testing.T) {
 	plat := newFakePlatform()
 	plat.searchTruncatedFirst = true
 	ctx, app := newTestCtx(t, plat)
@@ -258,15 +294,15 @@ func TestSearchRetriesLinksOnlyAfterTruncatedExtraction(t *testing.T) {
 	if len(extractCalls) != 2 {
 		t.Fatalf("extract calls=%d, want 2", len(extractCalls))
 	}
-	if formats, _ := extractCalls[0].args["formats"].([]string); !sameStrings(formats, []string{"links", "text", "metadata"}) {
+	if formats, _ := extractCalls[0].args["formats"].([]string); !sameStrings(formats, []string{"text", "metadata"}) {
 		t.Fatalf("initial formats=%#v", formats)
 	}
-	if formats, _ := extractCalls[1].args["formats"].([]string); !sameStrings(formats, []string{"links"}) {
+	if formats, _ := extractCalls[1].args["formats"].([]string); !sameStrings(formats, []string{"html"}) {
 		t.Fatalf("retry formats=%#v", formats)
 	}
 }
 
-func TestSearchFailsWhenVisibleTruncatedResultsStillHaveNoLinks(t *testing.T) {
+func TestSearchFailsWhenVisibleResultsStillHaveNoOrganicHeadings(t *testing.T) {
 	plat := newFakePlatform()
 	plat.searchTruncatedAlways = true
 	ctx, app := newTestCtx(t, plat)
@@ -275,8 +311,8 @@ func TestSearchFailsWhenVisibleTruncatedResultsStillHaveNoLinks(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "search_extraction_incomplete") {
 		t.Fatalf("error=%v, want search_extraction_incomplete", err)
 	}
-	if got := countCalls(plat, "computer", "browser_extract"); got != 2 {
-		t.Fatalf("browser_extract calls=%d, want one links-only retry", got)
+	if got := countCalls(plat, "computer", "browser_extract"); got != 4 {
+		t.Fatalf("browser_extract calls=%d, want three bounded DOM retries", got)
 	}
 }
 
@@ -1234,28 +1270,29 @@ type fakeCall struct {
 
 type fakePlatform struct {
 	tk.BasePlatformClient
-	mu                    sync.Mutex
-	calls                 []fakeCall
-	storageID             int64
-	storageURL            string
-	openURL               string
-	searchBlocked         bool
-	searchTruncatedFirst  bool
-	searchTruncatedAlways bool
-	searchExtractCount    int
-	cookieBanner          bool
-	cookieBannerSOM       bool
-	cookieTextBanner      bool
-	cookiePolicyText      bool
-	cookieDismissed       bool
-	duplicateCrawlLinks   bool
-	extractorPagination   bool
-	extractorPage         int
-	scrollY               int
-	selectorRedirectURL   string
-	openBackendOverride   string
-	proxyModeOverride     string
-	proxyCountryOverride  string
+	mu                     sync.Mutex
+	calls                  []fakeCall
+	storageID              int64
+	storageURL             string
+	openURL                string
+	searchBlocked          bool
+	searchTruncatedFirst   bool
+	searchTruncatedAlways  bool
+	searchExtractCount     int
+	searchExtractResponses []map[string]any
+	cookieBanner           bool
+	cookieBannerSOM        bool
+	cookieTextBanner       bool
+	cookiePolicyText       bool
+	cookieDismissed        bool
+	duplicateCrawlLinks    bool
+	extractorPagination    bool
+	extractorPage          int
+	scrollY                int
+	selectorRedirectURL    string
+	openBackendOverride    string
+	proxyModeOverride      string
+	proxyCountryOverride   string
 }
 
 func newFakePlatform() *fakePlatform {
@@ -1308,6 +1345,9 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 	case "computer.browser_extract":
 		if strings.Contains(p.openURL, "google.com/search") {
 			p.searchExtractCount++
+			if p.searchExtractCount <= len(p.searchExtractResponses) {
+				return p.searchExtractResponses[p.searchExtractCount-1]
+			}
 			if p.searchBlocked {
 				return map[string]any{
 					"session_id":         in["session_id"],
@@ -1330,6 +1370,9 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 					"truncated":          true,
 					"extraction_backend": "browser_dom",
 				}
+			}
+			if formats, _ := in["formats"].([]string); sameStrings(formats, []string{"html"}) {
+				return map[string]any{"current_url": p.openURL, "html": `<div id="rso"><a href="https://www.flexoffers.com/affiliate-programs/financial-services/peer-to-peer-lending/"><h3>Peer-To-Peer Lending Affiliate Programs</h3></a><a href="https://www.kuflink.com/affiliates/"><h3>Affiliate Partnerships</h3></a></div>`}
 			}
 			return map[string]any{
 				"session_id":  in["session_id"],
@@ -1635,4 +1678,126 @@ func sameOrderedPrefix(calls, want []string) bool {
 		}
 	}
 	return true
+}
+
+func TestGoogleHTMLOnlySelectsOrganicHeadingAnchors(t *testing.T) {
+	extracted := &browserExtractResult{CurrentURL: "https://www.google.com/search?q=staffing", HTML: `
+ <div id="tads"><a href="/goto?url=opaque-ad"><h3>Global staffing</h3></a></div>
+ <div data-text-ad="1"><a href="https://sponsored.example/"><h3>Staffing services</h3></a></div>
+ <div data-ta-slot="1"><a href="https://sponsored2.example/"><h3>Hire today</h3></a></div>
+ <div id="rso">
+ <a href="/goto?url=organic-token"><h3>Remote Staffing Services</h3><cite>elite.example</cite></a>
+ <a href="https://example.org/about"><h3>About Our Staffing Company</h3></a>
+ <a href="https://example.org/careers"><h3>Careers at Staffing Company</h3></a>
+ <a href="https://example.org/about#:~:text=foo">Citation</a>
+ <a href="/aclk?q=https://ad.example/"><h3>Ad disguised as redirect</h3></a>
+ <a href="/search?q=https://navigation.example/"><h3>Search query is not a destination</h3></a>
+ </div>`, Links: []linkInfo{{URL: "https://sponsored.example/", Text: "Sponsored title without a label"}}}
+	results, report := resolveGoogleSearchResultsWith(extracted, 8, func(raw string) (string, error) {
+		if raw != "https://www.google.com/goto?url=organic-token" {
+			t.Errorf("nonorganic redirect: %s", raw)
+		}
+		return "https://elite.example/", nil
+	})
+	if len(results) != 3 || results[0].Title != "Remote Staffing Services" || report.Attempted != 1 {
+		t.Fatalf("results=%#v report=%#v", results, report)
+	}
+}
+
+func TestGoogleResolutionDeadlineAndConcurrency(t *testing.T) {
+	extracted := &browserExtractResult{}
+	for i := 0; i < 20; i++ {
+		extracted.Links = append(extracted.Links, linkInfo{URL: fmt.Sprintf("https://www.google.com/goto?url=token%d", i), Text: "Staffing"})
+	}
+	var mu sync.Mutex
+	active, peak := 0, 0
+	parent, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, report := resolveGoogleSearchResultsWithContext(parent, extracted, 8, func(ctx context.Context, _ string) (string, error) {
+		mu.Lock()
+		active++
+		if active > peak {
+			peak = active
+		}
+		mu.Unlock()
+		<-ctx.Done()
+		mu.Lock()
+		active--
+		mu.Unlock()
+		return "", ctx.Err()
+	})
+	if peak > googleResolutionConcurrency || report.Attempted != 20 || report.Failed != 20 || time.Since(started) > time.Second {
+		t.Fatalf("peak=%d report=%#v elapsed=%s", peak, report, time.Since(started))
+	}
+}
+
+type googleRedirectTransport struct {
+	destination string
+	calls       int
+}
+
+func (tr *googleRedirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	tr.calls++
+	if req.URL.Hostname() != "www.google.com" {
+		return nil, fmt.Errorf("destination should not be fetched: %s", req.URL)
+	}
+	return &http.Response{StatusCode: http.StatusFound, Header: http.Header{"Location": []string{tr.destination}}, Body: io.NopCloser(strings.NewReader("")), Request: req}, nil
+}
+
+func TestGoogleRedirectStopsBeforeDestinationAndRejectsPrivateURL(t *testing.T) {
+	for _, test := range []struct {
+		name, destination string
+		private           bool
+	}{
+		{"unreachable destination", "https://company.example/blocked", false},
+		{"private redirect", "http://127.0.0.1/internal", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, _ := newTestCtx(t, newFakePlatform(), tk.WithConfig(map[string]string{"allow_private_networks": fmt.Sprint(!test.private)}))
+			client := outboundHTTPClient(ctx)
+			tr := &googleRedirectTransport{destination: test.destination}
+			client.Transport = tr
+			got, err := resolveGoogleRedirectWithClient(context.Background(), ctx, "https://www.google.com/goto?url=opaque", client)
+			if test.private {
+				if err == nil || !strings.Contains(err.Error(), "private network") {
+					t.Fatalf("got=%s err=%v", got, err)
+				}
+			} else if err != nil || got != test.destination {
+				t.Fatalf("got=%s err=%v", got, err)
+			}
+			if tr.calls != 1 {
+				t.Fatalf("requests=%d", tr.calls)
+			}
+		})
+	}
+}
+
+func TestSearchRetriesPartialAndNavigationOnlyDOM(t *testing.T) {
+	for _, partial := range []string{
+		`<div id="rso"><a href="https://organic.example/one"><h3>First company</h3></a></div>`,
+		`<div id="tads"><a href="https://sponsored.example/"><h3>Sponsored company</h3></a></div>`,
+	} {
+		t.Run(partial, func(t *testing.T) {
+			plat := newFakePlatform()
+			plat.searchExtractResponses = []map[string]any{
+				{"text": "Real companies are visible here", "links": []linkInfo{{URL: "https://sponsored.example/", Text: "Unlabelled ad"}}},
+				{"html": partial, "truncated": true},
+				{"html": `<div id="rso"><a href="https://organic.example/one"><h3>First company</h3></a><a href="https://another.example/two"><h3>Second company</h3></a></div>`},
+			}
+			ctx, app := newTestCtx(t, plat)
+			result, err := app.toolSearch(ctx, map[string]any{"query": "staffing", "limit": 2, "cache": "bypass", "store": false, "max_chars": 1000})
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := result.(map[string]any)
+			results := out["results"].([]searchResult)
+			if len(results) != 2 || results[0].URL != "https://organic.example/one" || countCalls(plat, "computer", "browser_extract") != 3 {
+				t.Fatalf("out=%#v", out)
+			}
+			if got := plat.lastCall("computer", "browser_extract")["max_chars"]; got != 200000 {
+				t.Fatalf("search HTML budget=%v", got)
+			}
+		})
+	}
 }
