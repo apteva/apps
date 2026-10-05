@@ -2,8 +2,9 @@
 
 Local changes based on Telephony 0.10.0. All prior app changes remain included.
 Only Telephony was edited; production, staging and carrier configuration were
-untouched. No live calls or installation activations occurred. No release was
-published. Dependency tests use standalone app SDK v0.95.0 (`GOWORK=off`).
+untouched. No live calls or installation activations occurred. The tested implementation was subsequently packaged as Telephony 0.10.1.
+The evidence hashes identify the pre-release runtime assets; packaging updates
+only version metadata and release documentation. Dependency tests use standalone app SDK v0.95.0 (`GOWORK=off`).
 
 ## Final gates
 
