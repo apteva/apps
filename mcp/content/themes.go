@@ -368,6 +368,24 @@ func (a *App) handleThemeAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rs, ok := f.(io.ReadSeeker); ok {
+		// A public app URL is selected by project_id in the query string.
+		// Relative URLs inside a stylesheet do not inherit that query, so a
+		// browser loading a font or image from CSS would fall back to the
+		// authenticated app proxy and receive a 401. Rewrite local CSS asset
+		// URLs with the same routing query while leaving direct sidecar and
+		// external URLs untouched.
+		if strings.HasSuffix(strings.ToLower(assetPath), ".css") && r.URL.RawQuery != "" {
+			body, readErr := io.ReadAll(rs)
+			if readErr != nil {
+				http.Error(w, readErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			body = rewriteCSSAssetURLs(body, r.URL.Query().Encode())
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			w.Header().Set("Content-Type", mimeForPath(assetPath))
+			_, _ = w.Write(body)
+			return
+		}
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		w.Header().Set("Content-Type", mimeForPath(assetPath))
 		http.ServeContent(w, r, assetPath, stat.ModTime(), rs)
@@ -382,6 +400,57 @@ func (a *App) handleThemeAsset(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	w.Header().Set("Content-Type", mimeForPath(assetPath))
 	_, _ = w.Write(buf)
+}
+
+// rewriteCSSAssetURLs carries the public routing query into relative CSS
+// assets. The app gateway needs project_id to select a project-scoped install,
+// but CSS url(...) references are resolved against the stylesheet URL without
+// inheriting its query string.
+func rewriteCSSAssetURLs(src []byte, query string) []byte {
+	if query == "" {
+		return src
+	}
+	s := string(src)
+	suffix := "?" + query
+	var out strings.Builder
+	out.Grow(len(s) + strings.Count(s, "url(")*len(suffix))
+	for pos := 0; pos < len(s); {
+		i := strings.Index(strings.ToLower(s[pos:]), "url(")
+		if i < 0 {
+			out.WriteString(s[pos:])
+			break
+		}
+		i += pos
+		out.WriteString(s[pos:i])
+		end := strings.IndexByte(s[i+4:], ')')
+		if end < 0 {
+			out.WriteString(s[i:])
+			break
+		}
+		end += i + 4
+		inner := s[i+4 : end]
+		trimmed := strings.TrimSpace(inner)
+		if len(trimmed) >= 2 && (trimmed[0] == '\'' || trimmed[0] == '"') && trimmed[len(trimmed)-1] == trimmed[0] {
+			urlValue := trimmed[1 : len(trimmed)-1]
+			if isRelativeCSSAsset(urlValue) {
+				trimmed = trimmed[:1] + urlValue + suffix + trimmed[len(trimmed)-1:]
+				inner = strings.Replace(inner, strings.TrimSpace(inner), trimmed, 1)
+			}
+		} else if isRelativeCSSAsset(trimmed) {
+			inner = strings.Replace(inner, trimmed, trimmed+suffix, 1)
+		}
+		out.WriteString("url(")
+		out.WriteString(inner)
+		out.WriteByte(')')
+		pos = end + 1
+	}
+	return []byte(out.String())
+}
+
+func isRelativeCSSAsset(v string) bool {
+	return v != "" && !strings.HasPrefix(v, "/") && !strings.HasPrefix(v, "#") &&
+		!strings.Contains(v, "://") && !strings.HasPrefix(v, "data:") &&
+		!strings.ContainsAny(v, "?#")
 }
 
 func mimeForPath(p string) string {

@@ -50,6 +50,11 @@ func TestThemeAssetRequiresSlugAndExactVersion(t *testing.T) {
 	if good.Code != http.StatusOK || !strings.Contains(good.Header().Get("Content-Type"), "text/css") {
 		t.Fatalf("valid asset status/type = %d/%q", good.Code, good.Header().Get("Content-Type"))
 	}
+	withQuery := httptest.NewRecorder()
+	a.handleThemeAsset(withQuery, httptest.NewRequest(http.MethodGet, "/_theme/default/2/style.css?project_id=p1&site=one", nil))
+	if withQuery.Code != http.StatusOK || !strings.Contains(withQuery.Body.String(), "fonts/InterVariable.woff2?project_id=p1&site=one") {
+		t.Fatalf("stylesheet did not propagate public routing query: status=%d body contains=%v", withQuery.Code, strings.Contains(withQuery.Body.String(), "fonts/InterVariable.woff2?project_id=p1&site=one"))
+	}
 	bad := httptest.NewRecorder()
 	a.handleThemeAsset(bad, httptest.NewRequest(http.MethodGet, "/_theme/default/999/style.css", nil))
 	if bad.Code != http.StatusNotFound {
