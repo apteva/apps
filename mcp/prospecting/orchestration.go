@@ -334,10 +334,10 @@ func scoreCandidate(profile *TargetProfile, candidate *Candidate, evidenceCount 
 	if len(profile.TargetTitles) == 0 {
 		fit += 10
 		reasons = append(reasons, "+10 no target-title constraint")
-	} else if containsAny(strings.ToLower(candidate.JobTitle), profile.TargetTitles) {
+	} else if looksPersonName(candidate.PersonDisplayName) && matchesTargetRole(candidate.JobTitle, profile.TargetTitles) {
 		fit += 15
 		reasons = append(reasons, "+15 target decision-maker role matches")
-	} else if candidate.PersonDisplayName != "" {
+	} else if looksPersonName(candidate.PersonDisplayName) {
 		fit += 5
 		reasons = append(reasons, "+5 person identified; target role not confirmed")
 	}
@@ -372,11 +372,11 @@ func qualificationConfidence(candidate *Candidate, evidenceCount int) int {
 	if candidate.EmployeeEstimate != nil {
 		confidence += 5
 	}
-	if candidate.PersonDisplayName != "" {
+	if looksPersonName(candidate.PersonDisplayName) {
 		confidence += 6
-	}
-	if candidate.JobTitle != "" {
-		confidence += 4
+		if candidate.JobTitle != "" {
+			confidence += 4
+		}
 	}
 	if candidate.Email != "" {
 		confidence += 7
@@ -585,4 +585,13 @@ func sortCandidatesByFit(candidates []Candidate) {
 		}
 		return candidates[i].FitScore > candidates[j].FitScore
 	})
+}
+
+func matchesTargetRole(title string, targets []string) bool {
+	for _, target := range targets {
+		if strings.TrimSpace(target) != "" && rolePhrasePattern(target).MatchString(title) {
+			return true
+		}
+	}
+	return false
 }

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: prospecting
 display_name: Prospecting
-version: 0.3.0
+version: 0.3.2
 description: |
   A standalone lead workspace for Apteva. Seed companies manually or in bulk,
   organize them with target profiles, explore and update the catalog, record
@@ -14,6 +14,12 @@ description: |
   one-to-one email, SMS, and WhatsApp outreach through CRM's Messaging binding.
   Prospecting never runs campaigns, makes calls, creates opportunities, or
   calls paid lead-data providers.
+
+  v0.3.2 requires name/role evidence for decision-makers, rejects navigation
+  labels and role substrings, and commits candidate edits and scores atomically.
+
+  v0.3.1 falls back to the configured alternate search engine when Web reports
+  incomplete rendered search extraction.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/prospecting
@@ -98,7 +104,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: prospecting/v0.3.0
+    ref: prospecting/v0.3.2
     entry: mcp/prospecting
   port: 8080
   health_check: /health
