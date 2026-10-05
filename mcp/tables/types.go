@@ -19,6 +19,7 @@ import (
 // ─── domain types ──────────────────────────────────────────────────
 
 type Table struct {
+	ProjectionID  int64    `json:"-"`
 	LegacyStorage bool     `json:"-"`
 	ID            int64    `json:"id"`
 	Name          string   `json:"name"`

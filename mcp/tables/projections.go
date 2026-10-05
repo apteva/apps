@@ -1,228 +1,230 @@
 package main
 
-// Persistent SQL projections. A projection is a read-only logical table whose
-// rows are rebuilt asynchronously from one or more Tables-owned source tables.
-// Source writes only append a compact change record through SQLite triggers;
-// the worker coalesces those records by projection scope before executing SQL.
-
+// Projection definitions, durable invalidations and publication are owned by
+// Tables. Heavy SQL never runs in a source-write transaction.
 import (
-	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	sdk "github.com/apteva/app-sdk"
 	"strings"
 	"time"
-
-	sdk "github.com/apteva/app-sdk"
 )
 
 const (
-	projectionAllScope      = "__all__"
-	projectionChangeBatch   = 512
-	projectionQueueBatch    = 8
-	projectionLeaseSeconds  = 60
-	projectionWorkerEvery   = "@every 1s"
-	projectionResultNameMax = 64
+	projectionAllScope    = "__all__"
+	projectionChangeBatch = 512
+	projectionQueueBatch  = 8
+	projectionWorkerEvery = "@every 1s"
 )
 
 type projectionDefinition struct {
-	ID           int64
-	ProjectID    string
-	Name         string
-	Version      int
-	Status       string
-	SQL          string
-	SourceTables []string
-	SourceIDs    []int64
-	ResultTable  string
-	ResultCols   []Column
-	ScopeCols    []string
+	ID                                        int64
+	ProjectID, Name, Status, SQL, ResultTable string
+	Version                                   int
+	SourceTables                              []string
+	SourceIDs                                 []int64
+	ResultCols                                []Column
+	ScopeCols                                 []string
+	Options                                   projectionOptions
+	Current, Built                            bool
+	Latest, Published                         int64
+	PublishedAt                               sql.NullInt64
+	LastFailure                               sql.NullString
+	Format                                    int
 }
-
+type projectionQueuedRevision struct{ Revision, Pending int64 }
 type projectionQueueItem struct {
-	ProjectionID int64
-	ProjectID    string
-	ScopeKey     string
-	PendingID    int64
-	Attempts     int
-	LeaseToken   string
+	CoveredScopes       map[string]projectionQueuedRevision
+	ProjectionID        int64
+	ProjectID, ScopeKey string
+	PendingID, Revision int64
+	Attempts            int
+	LeaseToken          string
 }
 
 func projectionLeaseToken() (string, error) {
 	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
+	_, err := rand.Read(b)
+	return hex.EncodeToString(b), err
+}
+func (a *App) projectionTime() time.Time {
+	if a.projectionNow != nil {
+		return a.projectionNow()
 	}
-	return hex.EncodeToString(b), nil
+	return time.Now()
 }
 
-// loadQueryTable resolves ordinary user tables and read-only projection tables
-// for the shared tables_query path. Projections intentionally do not enter the
-// user-table metadata cache or row-write handlers.
-func (a *App) loadQueryTable(ctx *sdk.AppCtx, projectID, name string) (*Table, error) {
-	a.projectionMu.RLock()
-	if cached := a.projectionCache[schemaCacheKey{projectID: projectID, tableName: name}]; cached != nil {
-		t := cloneTable(cached)
-		a.projectionMu.RUnlock()
-		return t, nil
-	}
-	a.projectionMu.RUnlock()
-	t, err := a.loadTableSchema(ctx, projectID, name)
-	if err == nil {
-		return t, nil
-	}
-	var status *statusError
-	if !errors.As(err, &status) || status.status != 404 {
+const projectionSelect = `SELECT id,project_id,name,version,status,sql_text,source_tables,result_columns,scope_columns,result_table,options,is_current,built,latest_relevant_change,published_change,published_at_ms,last_failure,storage_format FROM projection_definitions `
+
+func decodeProjection(ctx *sdk.AppCtx, row interface{ Scan(...any) error }) (*projectionDefinition, error) {
+	p := &projectionDefinition{Options: defaultProjectionOptions(ctx)}
+	var sources, cols, scopes, opts string
+	if err := row.Scan(&p.ID, &p.ProjectID, &p.Name, &p.Version, &p.Status, &p.SQL, &sources, &cols, &scopes, &p.ResultTable, &opts, &p.Current, &p.Built, &p.Latest, &p.Published, &p.PublishedAt, &p.LastFailure, &p.Format); err != nil {
 		return nil, err
 	}
-	p, err := a.loadProjection(ctx, projectID, name)
+	for _, v := range []struct {
+		raw string
+		out any
+	}{{sources, &p.SourceTables}, {cols, &p.ResultCols}, {scopes, &p.ScopeCols}, {opts, &p.Options}} {
+		if err := projectionDecode(v.raw, v.out); err != nil {
+			return nil, err
+		}
+	}
+	return p, nil
+}
+func loadProjectionWhere(ctx *sdk.AppCtx, clause string, args ...any) (*projectionDefinition, error) {
+	rows, err := metadataReaderFor(ctx).QueryContext(requestContext(ctx), projectionSelect+clause, args...)
 	if err != nil {
 		return nil, err
 	}
-	t = &Table{ID: -p.ID, Name: p.Name, Scope: "project", PhysicalName: p.ResultTable, Columns: p.ResultCols}
-	a.projectionMu.Lock()
-	if a.projectionCache == nil {
-		a.projectionCache = map[schemaCacheKey]*Table{}
+	if !rows.Next() {
+		err := rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+		return nil, notFound("projection not found")
 	}
-	a.projectionCache[schemaCacheKey{projectID: projectID, tableName: name}] = cloneTable(t)
-	a.projectionMu.Unlock()
-	return t, nil
-}
-
-func (a *App) projectionTools() []sdk.Tool {
-	projectionColumnSchema := map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"name":     map[string]any{"type": "string"},
-			"type":     map[string]any{"type": "string", "enum": []string{"text", "number", "bool", "datetime", "json", "file_id"}},
-			"nullable": map[string]any{"type": "boolean"},
-		},
-		"required": []string{"name", "type"},
-	}
-	return []sdk.Tool{
-		{
-			Name:        "projections_create",
-			Description: "Create a versioned read-only SQL projection. SQL must be SELECT/WITH only, source tables are explicit, and scope columns must be returned by the query.",
-			InputSchema: schemaObject(map[string]any{
-				"name":           map[string]any{"type": "string"},
-				"version":        map[string]any{"type": "integer", "minimum": 1},
-				"sql":            map[string]any{"type": "string"},
-				"source_tables":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-				"result_columns": map[string]any{"type": "array", "items": projectionColumnSchema},
-				"scope_columns":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-				"activate":       map[string]any{"type": "boolean", "description": "Activate immediately; set false to build alongside the current version."},
-			}, []string{"name", "version", "sql", "source_tables", "result_columns"}),
-			Handler: a.toolProjectionsCreate,
-		},
-		{
-			Name:        "projections_list",
-			Description: "List project-scoped SQL projections and refresh status.",
-			InputSchema: schemaObject(map[string]any{}, nil),
-			Handler:     a.toolProjectionsList,
-		},
-		{
-			Name:        "projections_describe",
-			Description: "Describe one projection definition, dependencies, result schema, and status. Args: name.",
-			InputSchema: schemaObject(map[string]any{"name": map[string]any{"type": "string"}}, []string{"name"}),
-			Handler:     a.toolProjectionsDescribe,
-		},
-		{
-			Name:        "projections_refresh",
-			Description: "Queue a projection rebuild or one affected scope. Args: name, scope? keyed by scope_columns, rebuild?.",
-			InputSchema: schemaObject(map[string]any{
-				"name":    map[string]any{"type": "string"},
-				"scope":   map[string]any{"type": "object"},
-				"rebuild": map[string]any{"type": "boolean"},
-			}, []string{"name"}),
-			Handler: a.toolProjectionsRefresh,
-		},
-		{
-			Name:        "projections_status",
-			Description: "Inspect projection backlog, freshness, watermarks, retries, and errors. Args: name.",
-			InputSchema: schemaObject(map[string]any{"name": map[string]any{"type": "string"}}, []string{"name"}),
-			Handler:     a.toolProjectionsStatus,
-		},
-		{
-			Name:        "projections_pause",
-			Description: "Pause or resume projection processing. Args: name, paused.",
-			InputSchema: schemaObject(map[string]any{
-				"name":   map[string]any{"type": "string"},
-				"paused": map[string]any{"type": "boolean"},
-			}, []string{"name", "paused"}),
-			Handler: a.toolProjectionsPause,
-		},
-		{
-			Name:        "projections_activate",
-			Description: "Atomically switch readers to a built projection version. Args: name, version.",
-			InputSchema: schemaObject(map[string]any{"name": map[string]any{"type": "string"}, "version": map[string]any{"type": "integer", "minimum": 1}}, []string{"name", "version"}),
-			Handler:     a.toolProjectionsActivate,
-		},
-		{
-			Name:        "projections_delete",
-			Description: "Delete a projection definition and its stored result rows. Args: name, confirm=true.",
-			InputSchema: schemaObject(map[string]any{
-				"name":    map[string]any{"type": "string"},
-				"confirm": map[string]any{"type": "boolean"},
-			}, []string{"name", "confirm"}),
-			Handler: a.toolProjectionsDelete,
-		},
-	}
-}
-
-func (a *App) loadProjection(ctx *sdk.AppCtx, projectID, name string) (*projectionDefinition, error) {
-	if err := validateIdentifier("projection", name); err != nil {
-		return nil, err
-	}
-	var p projectionDefinition
-	var sourceRaw, colsRaw, scopeRaw string
-	err := ctx.AppReadDB().QueryRowContext(requestContext(ctx), `
-		SELECT id, project_id, name, version, status, sql_text, source_tables,
-		       result_columns, scope_columns, result_table
-		FROM projection_definitions WHERE project_id=? AND name=? AND status='active'`, projectID, name).
-		Scan(&p.ID, &p.ProjectID, &p.Name, &p.Version, &p.Status, &p.SQL, &sourceRaw, &colsRaw, &scopeRaw, &p.ResultTable)
-	if err == sql.ErrNoRows {
-		return nil, notFound("projection %q not found", name)
-	}
+	p, err := decodeProjection(ctx, rows)
+	rows.Close()
 	if err != nil {
 		return nil, err
 	}
-	if err := json.Unmarshal([]byte(sourceRaw), &p.SourceTables); err != nil {
-		return nil, fmt.Errorf("projection %q source metadata: %w", name, err)
-	}
-	if err := json.Unmarshal([]byte(colsRaw), &p.ResultCols); err != nil {
-		return nil, fmt.Errorf("projection %q result schema: %w", name, err)
-	}
-	if err := json.Unmarshal([]byte(scopeRaw), &p.ScopeCols); err != nil {
-		return nil, fmt.Errorf("projection %q scope schema: %w", name, err)
-	}
-	rows, err := ctx.AppReadDB().QueryContext(requestContext(ctx), `SELECT table_id FROM projection_sources WHERE projection_id=? ORDER BY table_id`, p.ID)
+	deps, err := metadataReaderFor(ctx).QueryContext(requestContext(ctx), `SELECT table_id FROM projection_sources WHERE projection_id=?`, p.ID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
+	defer deps.Close()
+	for deps.Next() {
 		var id int64
-		if err := rows.Scan(&id); err != nil {
+		if err := deps.Scan(&id); err != nil {
 			return nil, err
 		}
 		p.SourceIDs = append(p.SourceIDs, id)
 	}
-	return &p, rows.Err()
+	return p, deps.Err()
 }
-
-func projectionColumnsJSON(cols []Column) (string, error) {
-	b, err := json.Marshal(cols)
-	return string(b), err
+func (a *App) loadProjection(ctx *sdk.AppCtx, pid, name string) (*projectionDefinition, error) {
+	return loadProjectionWhere(ctx, `WHERE project_id=? AND name=? AND is_current=1`, pid, name)
 }
-
-func projectionStringSliceJSON(values []string) (string, error) {
-	b, err := json.Marshal(values)
-	return string(b), err
+func projectionFromArgs(ctx *sdk.AppCtx, pid string, args map[string]any) (*projectionDefinition, error) {
+	name := strArg(args, "name")
+	if name == "" {
+		name = strArg(args, "table")
+	}
+	if err := validateIdentifier("projection", name); err != nil {
+		return nil, err
+	}
+	if v := intArg(args, "version", 0); v > 0 {
+		return loadProjectionWhere(ctx, `WHERE project_id=? AND name=? AND version=?`, pid, name, v)
+	}
+	return loadProjectionWhere(ctx, `WHERE project_id=? AND name=? AND is_current=1`, pid, name)
 }
-
+func projectionTable(p *projectionDefinition) *Table {
+	return &Table{ID: -p.ID, Name: p.Name, Scope: "project", PhysicalName: p.ResultTable, Columns: p.ResultCols, ProjectionID: p.ID}
+}
+func (a *App) loadQueryTable(ctx *sdk.AppCtx, pid, name string) (*Table, error) {
+	key := schemaCacheKey{pid, name}
+	if schemas, ok := requestContext(ctx).Value(batchSchemaCacheKey{}).(map[schemaCacheKey]*Table); ok {
+		if t := schemas[key]; t != nil {
+			if t.ProjectionID != 0 && !sdk.CallerFrom(requestContext(ctx)).Allows("projections.read", name) {
+				return nil, &statusError{403, "projection permission denied"}
+			}
+			return cloneTable(t), nil
+		}
+	}
+	a.projectionMu.Lock()
+	if a.projectionGeneration != ctx.AppDBGeneration() {
+		a.projectionCache = nil
+		a.projectionGeneration = ctx.AppDBGeneration()
+	}
+	cached := cloneTable(a.projectionCache[key])
+	a.projectionMu.Unlock()
+	if cached != nil {
+		if !sdk.CallerFrom(requestContext(ctx)).Allows("projections.read", name) {
+			return nil, &statusError{403, "projection permission denied"}
+		}
+		return cached, nil
+	}
+	table, err := a.loadTableSchema(ctx, pid, name)
+	if err == nil {
+		return table, nil
+	}
+	var e *statusError
+	if !errors.As(err, &e) || e.status != 404 {
+		return nil, err
+	}
+	p, err := a.loadProjection(ctx, pid, name)
+	if err != nil {
+		return nil, err
+	}
+	if err := projectionIndexPermission(ctx, p, false); err != nil {
+		return nil, err
+	}
+	table = projectionTable(p)
+	a.projectionMu.Lock()
+	if a.projectionCache == nil || len(a.projectionCache) >= maxSchemaCacheEntries {
+		a.projectionCache = map[schemaCacheKey]*Table{}
+	}
+	a.projectionCache[key] = cloneTable(table)
+	a.projectionMu.Unlock()
+	return table, nil
+}
+func (a *App) invalidateProjection(pid, name string) {
+	a.projectionMu.Lock()
+	delete(a.projectionCache, schemaCacheKey{pid, name})
+	a.projectionMu.Unlock()
+	a.plans.invalidateTable(0)
+}
+func projectionNameSchema() map[string]any {
+	return map[string]any{"name": map[string]any{"type": "string"}, "version": map[string]any{"type": "integer", "minimum": 1}}
+}
+func (a *App) projectionTools() []sdk.Tool {
+	columns := map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{"name": map[string]any{"type": "string"}, "type": map[string]any{"type": "string", "enum": []string{"text", "number", "bool", "datetime", "json", "file_id"}}, "nullable": map[string]any{"type": "boolean"}}, "required": []string{"name", "type"}}}
+	create := projectionNameSchema()
+	create["sql"] = map[string]any{"type": "string"}
+	create["source_tables"] = map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
+	create["result_columns"] = columns
+	create["scope_columns"] = map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
+	create["activate"] = map[string]any{"type": "boolean", "description": "First version becomes readable; replacements require projections_activate after building."}
+	for k, v := range projectionOptionSchema() {
+		create[k] = v
+	}
+	refresh := projectionNameSchema()
+	refresh["scope"] = map[string]any{"type": "object"}
+	refresh["rebuild"] = map[string]any{"type": "boolean"}
+	refresh["force"] = map[string]any{"type": "boolean"}
+	status := projectionNameSchema()
+	status["scope"] = map[string]any{"type": "object"}
+	pause := projectionNameSchema()
+	pause["paused"] = map[string]any{"type": "boolean"}
+	remove := projectionNameSchema()
+	remove["confirm"] = map[string]any{"type": "boolean"}
+	update := projectionNameSchema()
+	update["min_refresh_interval_seconds"] = map[string]any{"type": "integer", "minimum": 0, "maximum": 86400}
+	return []sdk.Tool{
+		{Name: "projections_create", Description: "Create an immutable SQL projection version. Replacements build alongside current readers. Supports scoped SQL parameters, generic source mappings, coverage and limits.", InputSchema: schemaObject(create, []string{"name", "version", "sql", "source_tables", "result_columns"}), Handler: a.toolProjectionsCreate},
+		{Name: "projections_list", Description: "List project projection versions and readiness.", InputSchema: schemaObject(map[string]any{}, nil), Handler: a.toolProjectionsList},
+		{Name: "projections_describe", Description: "Describe a current or specified version and options.", InputSchema: schemaObject(projectionNameSchema(), []string{"name"}), Handler: a.toolProjectionsDescribe},
+		{Name: "projections_refresh", Description: "Queue a scope or full rebuild. force=true bypasses the persisted interval, without bypassing pause or resource limits.", InputSchema: schemaObject(refresh, []string{"name"}), Handler: a.toolProjectionsRefresh},
+		{Name: "projections_status", Description: "Inspect relevant changes, published watermarks, readiness, running work and next refresh; scope optional.", InputSchema: schemaObject(status, []string{"name"}), Handler: a.toolProjectionsStatus},
+		{Name: "projections_pause", Description: "Pause or resume processing for a selected version; change capture continues.", InputSchema: schemaObject(pause, []string{"name", "paused"}), Handler: a.toolProjectionsPause},
+		{Name: "projections_activate", Description: "Atomically switch to a fully built and current replacement version.", InputSchema: schemaObject(projectionNameSchema(), []string{"name", "version"}), Handler: a.toolProjectionsActivate},
+		{Name: "projections_update", Description: "Persist a selected projection's minimum refresh interval and reschedule dirty scopes.", InputSchema: schemaObject(update, []string{"name", "min_refresh_interval_seconds"}), Handler: a.toolProjectionsUpdate},
+		{Name: "projections_delete", Description: "Delete a selected version and its results.", InputSchema: schemaObject(remove, []string{"name", "confirm"}), Handler: a.toolProjectionsDelete},
+	}
+}
+func projectionOptionSchema() map[string]any {
+	out := map[string]any{"params": map[string]any{"type": "array"}, "scope_sql": map[string]any{"type": "string"}, "scope_params": map[string]any{"type": "array", "items": map[string]any{"oneOf": []any{map[string]any{"type": "string"}, map[string]any{"type": "object", "properties": map[string]any{"scope_column": map[string]any{"type": "string"}, "boundary": map[string]any{"type": "string", "enum": []string{"start", "end"}}, "timezone": map[string]any{"type": "string"}}, "required": []string{"scope_column", "boundary", "timezone"}}}}}, "scope_rules": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}, "coverage_from": map[string]any{"type": "string"}, "coverage_to": map[string]any{"type": "string"}}
+	for _, k := range []string{"min_refresh_interval_seconds", "max_refresh_ms", "max_result_rows", "max_result_bytes", "max_publication_ms", "publication_batch_rows", "publication_batch_bytes"} {
+		out[k] = map[string]any{"type": "integer", "minimum": 0}
+	}
+	return out
+}
 func (a *App) toolProjectionsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	ctx, finish, err := a.beginOperation(ctx, args, "projections_create", true)
 	if err != nil {
@@ -237,160 +239,41 @@ func (a *App) toolProjectionsCreate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if err := validateIdentifier("projection", name); err != nil {
 		return nil, err
 	}
-	if len(name) > projectionResultNameMax {
-		return nil, errf("projection name too long")
-	}
 	version := intArg(args, "version", 0)
 	if version < 1 {
 		return nil, errf("version must be positive")
 	}
-	sqlText := strings.TrimSpace(strArg(args, "sql"))
-	if err := validateReadOnlySQL(sqlText); err != nil {
-		return nil, fmt.Errorf("projection sql: %w", err)
-	}
-	if projectionHasUnboundParameter(sqlText) {
-		return nil, errf("projection sql cannot contain unbound parameters")
-	}
-	sourceNames, err := strictStringSliceArg(args, "source_tables")
+	text := strings.TrimSpace(strArg(args, "sql"))
+	opts, err := parseProjectionOptions(ctx, args, text)
 	if err != nil {
 		return nil, err
 	}
-	if len(sourceNames) == 0 || len(sourceNames) > 64 {
-		return nil, errf("source_tables must contain 1..64 tables")
+	if text == "" {
+		return nil, errf("sql is required")
 	}
-	placeholders, err := placeholderNames(sqlText)
+	sources, err := strictStringSliceArg(args, "source_tables")
 	if err != nil {
 		return nil, err
 	}
-	seenSources := map[string]bool{}
-	for _, source := range sourceNames {
-		if err := validateIdentifier("source table", source); err != nil {
-			return nil, err
-		}
-		if seenSources[source] {
-			return nil, errf("duplicate source table %q", source)
-		}
-		seenSources[source] = true
+	if len(sources) == 0 || len(sources) > 64 {
+		return nil, errf("source_tables requires 1..64 tables")
 	}
-	for _, ph := range placeholders {
-		if !seenSources[ph] {
-			return nil, errf("sql references %q but it is not in source_tables", ph)
-		}
-	}
-	resultCols, err := parseColumnDefs(sliceArg(args, "result_columns"))
-	if err != nil {
-		return nil, fmt.Errorf("result_columns: %w", err)
-	}
-	scopeCols, err := strictStringSliceArg(args, "scope_columns")
+	cols, err := parseColumnDefs(sliceArg(args, "result_columns"))
 	if err != nil {
 		return nil, err
 	}
-	if len(scopeCols) == 0 {
-		scopeCols = nil
+	if len(cols) == 0 {
+		return nil, errf("result_columns is required")
 	}
-	resultByName := map[string]bool{}
-	for _, c := range resultCols {
-		resultByName[c.Name] = true
-	}
-	seenScope := map[string]bool{}
-	for _, c := range scopeCols {
-		if err := validateIdentifier("scope column", c); err != nil {
-			return nil, err
-		}
-		if seenScope[c] {
-			return nil, errf("duplicate scope column %q", c)
-		}
-		seenScope[c] = true
-		if !resultByName[c] {
-			return nil, errf("scope column %q must be present in result_columns", c)
-		}
-	}
-	if len(scopeCols) > 32 {
-		return nil, errf("scope_columns exceeds 32 columns")
-	}
-	if len(resultCols) == 0 {
-		return nil, errf("result_columns must contain at least one column")
-	}
-	for _, source := range sourceNames {
-		table, err := a.loadTableSchema(ctx, pid, source)
-		if err != nil {
-			return nil, fmt.Errorf("source table %q: %w", source, err)
-		}
-		for _, scopeCol := range scopeCols {
-			if columnIndex(table.Columns, scopeCol) < 0 {
-				return nil, fmt.Errorf("source table %q does not contain scope column %q", source, scopeCol)
-			}
-		}
-	}
-	resolvedSQL, err := a.substitutePlaceholders(ctx, pid, sqlText)
-	if err != nil {
-		return nil, fmt.Errorf("projection sql: %w", err)
-	}
-	read, err := acquireReadConn(ctx, "projection")
+	scopes, err := strictStringSliceArg(args, "scope_columns")
 	if err != nil {
 		return nil, err
 	}
-	qctx, cancel := queryTimeoutContext(ctx)
-	if _, err := read.conn.ExecContext(qctx, "PRAGMA query_only = ON"); err != nil {
-		cancel()
-		read.close()
-		return nil, fmt.Errorf("projection read-only setup: %w", err)
+	if len(scopes) > 32 {
+		return nil, errf("scope_columns exceeds 32")
 	}
-	authErr := authorizeQuery(qctx, read.conn, ctx, a, pid, sqlText, resolvedSQL, nil)
-	if authErr == nil {
-		probeSQL := `SELECT * FROM (` + strings.TrimSuffix(strings.TrimSpace(resolvedSQL), ";") + `) AS __projection_schema LIMIT 0`
-		rows, probeErr := read.conn.QueryContext(qctx, probeSQL)
-		if probeErr != nil {
-			authErr = fmt.Errorf("projection SQL cannot be prepared: %w", probeErr)
-		} else {
-			outCols, colErr := rows.Columns()
-			rows.Close()
-			if colErr != nil {
-				authErr = colErr
-			} else {
-				seen := map[string]bool{}
-				if len(outCols) != len(resultCols) {
-					authErr = fmt.Errorf("projection SQL returns %d columns but result_columns declares %d", len(outCols), len(resultCols))
-				}
-				for _, c := range outCols {
-					if seen[c] {
-						authErr = fmt.Errorf("projection SQL returns duplicate column %q", c)
-						break
-					}
-					seen[c] = true
-				}
-				if authErr == nil {
-					for _, c := range resultCols {
-						if !seen[c.Name] {
-							authErr = fmt.Errorf("projection SQL does not return result column %q", c.Name)
-							break
-						}
-					}
-				}
-			}
-		}
-	}
-	_, _ = read.conn.ExecContext(context.Background(), "PRAGMA query_only = OFF")
-	cancel()
-	read.close()
-	if authErr != nil {
-		return nil, fmt.Errorf("projection sql authorization: %w", authErr)
-	}
-	if _, err := a.loadTableSchema(ctx, pid, name); err == nil {
-		return nil, errf("a user table named %q already exists", name)
-	} else if e, ok := err.(*statusError); !ok || e.status != 404 {
-		return nil, err
-	}
-	sourcesJSON, err := projectionStringSliceJSON(sourceNames)
-	if err != nil {
-		return nil, err
-	}
-	colsJSON, err := projectionColumnsJSON(resultCols)
-	if err != nil {
-		return nil, err
-	}
-	scopeJSON, err := projectionStringSliceJSON(scopeCols)
-	if err != nil {
+	p := &projectionDefinition{ProjectID: pid, Name: name, Version: version, SQL: text, SourceTables: sources, ResultCols: cols, ScopeCols: scopes, Options: opts, Format: 1}
+	if err := a.validateProjection(ctx, p); err != nil {
 		return nil, err
 	}
 	tx, err := beginWrite(ctx)
@@ -398,84 +281,87 @@ func (a *App) toolProjectionsCreate(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return nil, err
 	}
 	defer tx.Rollback()
-	var existsVersion int
-	if err := tx.QueryRow(`SELECT 1 FROM projection_definitions WHERE project_id=? AND name=? AND version=?`, pid, name, version).Scan(&existsVersion); err == nil {
-		return nil, errf("projection %q version %d already exists", name, version)
-	} else if err != sql.ErrNoRows {
+	// Acquire the writer before checking both namespaces and creating triggers.
+	if _, err := tx.Exec(`UPDATE table_identity SET last_id=last_id`); err != nil {
 		return nil, err
 	}
-	status := "active"
-	if raw, present := args["activate"]; present {
-		if b, ok := raw.(bool); !ok {
-			return nil, errf("activate must be boolean")
-		} else if !b {
-			status = "building"
-		}
+	var count int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM tables_meta WHERE project_id=? AND name=?`, pid, name).Scan(&count); err != nil {
+		return nil, err
 	}
-	if status == "active" {
-		if _, err := tx.Exec(`UPDATE projection_definitions SET status='retired',updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND name=? AND status='active'`, pid, name); err != nil {
-			return nil, err
-		}
+	if count > 0 {
+		return nil, errf("user table %q already exists", name)
 	}
-	res, err := tx.Exec(`INSERT INTO projection_definitions(project_id,name,version,status,sql_text,source_tables,result_columns,scope_columns,result_table) VALUES(?,?,?,?,?,?,?,?,?)`, pid, name, version, status, sqlText, sourcesJSON, colsJSON, scopeJSON, "pending")
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM projection_definitions WHERE project_id=? AND name=? AND is_current=1`, pid, name).Scan(&count); err != nil {
+		return nil, err
+	}
+	p.Current = count == 0
+	if v, ok := args["activate"]; ok && !v.(bool) {
+		p.Current = false
+	}
+	p.Status = "building"
+	if p.Current {
+		p.Status = "active"
+	}
+	rawSources, _ := json.Marshal(sources)
+	rawCols, _ := json.Marshal(cols)
+	rawScopes, _ := json.Marshal(scopes)
+	rawOpts, _ := json.Marshal(opts)
+	token, err := projectionLeaseToken()
 	if err != nil {
 		return nil, err
 	}
-	id, err := res.LastInsertId()
+	res, err := tx.Exec(`INSERT INTO projection_definitions(project_id,name,version,status,sql_text,source_tables,result_columns,scope_columns,result_table,is_current,options,storage_format) VALUES(?,?,?,?,?,?,?,?,?,?,?,1)`, pid, name, version, p.Status, text, string(rawSources), string(rawCols), string(rawScopes), "pending_"+token, p.Current, string(rawOpts))
 	if err != nil {
 		return nil, err
 	}
-	physical := fmt.Sprintf("p_%d", id)
-	if _, err := tx.Exec(`UPDATE projection_definitions SET result_table=? WHERE id=?`, physical, id); err != nil {
-		return nil, err
-	}
-	createSQL, err := buildCreateTableSQL(physical, resultCols)
+	p.ID, err = res.LastInsertId()
 	if err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(createSQL); err != nil {
+	p.ResultTable = fmt.Sprintf("p_%d", p.ID)
+	if _, err := tx.Exec(`UPDATE projection_definitions SET result_table=? WHERE id=?`, p.ResultTable, p.ID); err != nil {
 		return nil, err
 	}
-	for _, source := range sourceNames {
-		var tableID int64
-		if err := tx.QueryRow(`SELECT id FROM tables_meta WHERE project_id=? AND name=?`, pid, source).Scan(&tableID); err != nil {
+	if err := createProjectionStorage(tx, p); err != nil {
+		return nil, err
+	}
+	for _, id := range p.SourceIDs {
+		if _, err := tx.Exec(`INSERT INTO projection_sources(projection_id,table_id) VALUES(?,?)`, p.ID, id); err != nil {
 			return nil, err
 		}
-		if _, err := tx.Exec(`INSERT INTO projection_sources(projection_id,table_id) VALUES(?,?)`, id, tableID); err != nil {
-			return nil, err
-		}
 	}
-	var currentChange int64
-	if err := tx.QueryRow(`SELECT COALESCE(MAX(change_id),0) FROM projection_changes WHERE project_id=?`, pid).Scan(&currentChange); err != nil {
+	var watermark int64
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(change_id),0) FROM projection_changes WHERE project_id=?`, pid).Scan(&watermark); err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(`INSERT INTO projection_cursors(projection_id,project_id,last_change_id) VALUES(?,?,?)`, id, pid, currentChange); err != nil {
+	if _, err := tx.Exec(`INSERT INTO projection_cursors(projection_id,project_id,last_change_id) VALUES(?,?,?)`, p.ID, pid, watermark); err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(`INSERT INTO projection_queue(projection_id,project_id,scope_key,pending_change_id) VALUES(?,?,?,?)`, id, pid, projectionAllScope, currentChange); err != nil {
+	if err := enqueueProjectionTx(requestContext(ctx), tx.Tx, p, projectionAllScope, 0, a.projectionTime().UnixMilli(), false); err != nil {
 		return nil, err
 	}
-	for _, source := range sourceNames {
-		var tableID int64
-		if err := tx.QueryRow(`SELECT id FROM tables_meta WHERE project_id=? AND name=?`, pid, source).Scan(&tableID); err != nil {
-			return nil, err
-		}
-		if err := rebuildProjectionTriggersTx(tx, tableID); err != nil {
+	for _, id := range p.SourceIDs {
+		if err := rebuildProjectionTriggersTx(tx, id); err != nil {
 			return nil, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	// A version switch can retire dependencies that are not in the new
-	// definition. Reconcile every source trigger so retired versions stop
-	// accumulating invalidations immediately.
-	if err := a.rebuildAllProjectionTriggers(ctx); err != nil {
-		return nil, err
-	}
-	return map[string]any{"id": id, "name": name, "version": version, "result_table": name, "status": status, "queued": status == "active"}, nil
+	a.invalidateProjection(pid, name)
+	return map[string]any{"id": p.ID, "name": name, "version": version, "status": p.Status, "ready": false, "queued": true}, nil
 }
-
+func projectionDefinitionMap(p *projectionDefinition) map[string]any {
+	out := map[string]any{"id": p.ID, "name": p.Name, "version": p.Version, "status": p.Status, "is_current": p.Current, "sql": p.SQL, "source_tables": p.SourceTables, "result_columns": p.ResultCols, "scope_columns": p.ScopeCols, "result_table": p.Name}
+	raw, _ := json.Marshal(p.Options)
+	var opts map[string]any
+	_ = projectionDecode(string(raw), &opts)
+	for k, v := range opts {
+		out[k] = v
+	}
+	return out
+}
 func (a *App) toolProjectionsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	ctx, finish, err := a.beginOperation(ctx, args, "projections_list", false)
 	if err != nil {
@@ -486,50 +372,42 @@ func (a *App) toolProjectionsList(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
-	rows, err := ctx.AppReadDB().QueryContext(requestContext(ctx), `SELECT id,name,version,status,created_at,updated_at FROM projection_definitions WHERE project_id=? ORDER BY name`, pid)
+	rows, err := ctx.AppReadDB().QueryContext(requestContext(ctx), projectionSelect+`WHERE project_id=? ORDER BY name,version`, pid)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	type projectionListItem struct {
-		id      int64
-		name    string
-		version int64
-		status  string
-		created string
-		updated string
-	}
-	var items []projectionListItem
+	var defs []*projectionDefinition
 	for rows.Next() {
-		var id, version int64
-		var name, status, created, updated string
-		if err := rows.Scan(&id, &name, &version, &status, &created, &updated); err != nil {
+		p, err := decodeProjection(ctx, rows)
+		if err != nil {
+			rows.Close()
 			return nil, err
 		}
-		items = append(items, projectionListItem{id: id, name: name, version: version, status: status, created: created, updated: updated})
+		defs = append(defs, p)
 	}
-	if err := rows.Close(); err != nil {
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
 		return nil, err
 	}
-	out := make([]map[string]any, 0, len(items))
-	for _, item := range items {
-		var queued int64
-		_ = ctx.AppReadDB().QueryRowContext(requestContext(ctx), `SELECT COUNT(*) FROM projection_queue WHERE projection_id=? AND project_id=?`, item.id, pid).Scan(&queued)
-		out = append(out, map[string]any{"id": item.id, "name": item.name, "version": item.version, "status": item.status, "queued": queued, "created_at": item.created, "updated_at": item.updated})
+	out := []map[string]any{}
+	for _, p := range defs {
+		s, err := a.projectionStatus(ctx, p, "")
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, s)
 	}
-	return map[string]any{"projections": out}, rows.Err()
+	return map[string]any{"projections": out}, nil
 }
-
-func projectionDefinitionMap(p *projectionDefinition) map[string]any {
-	return map[string]any{
-		"id": p.ID, "name": p.Name, "version": p.Version, "status": p.Status,
-		"sql": p.SQL, "source_tables": p.SourceTables, "result_columns": p.ResultCols,
-		"scope_columns": p.ScopeCols, "result_table": p.Name,
-	}
-}
-
 func (a *App) toolProjectionsDescribe(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	ctx, finish, err := a.beginOperation(ctx, args, "projections_describe", false)
+	return a.describeProjection(ctx, args, true)
+}
+func (a *App) toolProjectionsStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.describeProjection(ctx, args, false)
+}
+func (a *App) describeProjection(ctx *sdk.AppCtx, args map[string]any, definition bool) (any, error) {
+	ctx, finish, err := a.beginOperation(ctx, args, "projections_status", false)
 	if err != nil {
 		return nil, err
 	}
@@ -538,23 +416,30 @@ func (a *App) toolProjectionsDescribe(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
-	p, err := a.loadProjection(ctx, pid, strArg(args, "name"))
+	p, err := projectionFromArgs(ctx, pid, args)
 	if err != nil {
 		return nil, err
 	}
-	out := projectionDefinitionMap(p)
-	status, err := a.projectionStatus(ctx, p)
+	key := ""
+	if scope := mapArg(args, "scope"); scope != nil {
+		key, err = projectionScopeKey(p, scope)
+		if err != nil {
+			return nil, err
+		}
+	}
+	out, err := a.projectionStatus(ctx, p, key)
 	if err != nil {
 		return nil, err
 	}
-	for k, v := range status {
-		out[k] = v
+	if definition {
+		for k, v := range projectionDefinitionMap(p) {
+			out[k] = v
+		}
 	}
 	return out, nil
 }
-
 func (a *App) toolProjectionsRefresh(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	ctx, finish, err := a.beginOperation(ctx, args, "projections_refresh", true)
+	ctx, finish, err := a.beginOperation(ctx, args, "projections_refresh", false)
 	if err != nil {
 		return nil, err
 	}
@@ -563,27 +448,26 @@ func (a *App) toolProjectionsRefresh(ctx *sdk.AppCtx, args map[string]any) (any,
 	if err != nil {
 		return nil, err
 	}
-	p, err := a.loadProjection(ctx, pid, strArg(args, "name"))
+	p, err := projectionFromArgs(ctx, pid, args)
 	if err != nil {
 		return nil, err
 	}
-	scopeKey := projectionAllScope
+	key := projectionAllScope
 	if !boolArg(args, "rebuild") {
-		if scope := mapArg(args, "scope"); len(scope) > 0 {
-			scopeKey, err = makeScopeKey(scope, p.ScopeCols)
+		if scope := mapArg(args, "scope"); scope != nil {
+			key, err = projectionScopeKey(p, scope)
 			if err != nil {
 				return nil, err
 			}
 		}
 	}
-	if err := queueProjectionScope(ctx, p, scopeKey, 0); err != nil {
+	if err := a.queueProjectionScope(ctx, p, key, p.Latest, boolArg(args, "force")); err != nil {
 		return nil, err
 	}
-	return map[string]any{"queued": true, "name": p.Name, "scope": scopeKey}, nil
+	return map[string]any{"queued": true, "name": p.Name, "version": p.Version, "scope": key}, nil
 }
-
 func (a *App) toolProjectionsPause(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	ctx, finish, err := a.beginOperation(ctx, args, "projections_pause", true)
+	ctx, finish, err := a.beginOperation(ctx, args, "projections_pause", false)
 	if err != nil {
 		return nil, err
 	}
@@ -592,25 +476,62 @@ func (a *App) toolProjectionsPause(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if err != nil {
 		return nil, err
 	}
-	name := strArg(args, "name")
-	paused := boolArg(args, "paused")
-	from := "active"
-	if paused {
-		from = "active"
-	} else {
-		from = "paused"
-	}
-	res, err := ctx.AppDB().ExecContext(requestContext(ctx), `UPDATE projection_definitions SET status=?,updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND name=? AND status=?`, map[bool]string{true: "paused", false: "active"}[paused], pid, name, from)
+	p, err := projectionFromArgs(ctx, pid, args)
 	if err != nil {
 		return nil, err
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return nil, notFound("projection %q not found", name)
+	if p.Status == "retired" {
+		return nil, errf("retired versions must be rebuilt before resuming")
 	}
-	return map[string]any{"name": name, "status": map[bool]string{true: "paused", false: "active"}[paused]}, nil
+	status := "paused"
+	if !boolArg(args, "paused") {
+		status = "building"
+		if p.Current {
+			status = "active"
+		}
+	}
+	_, err = ctx.AppDB().ExecContext(requestContext(ctx), `UPDATE projection_definitions SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, status, p.ID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"name": p.Name, "version": p.Version, "status": status}, nil
 }
-
+func (a *App) toolProjectionsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx, finish, err := a.beginOperation(ctx, args, "projections_update", false)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	p, err := projectionFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	interval, err := exactInteger(args["min_refresh_interval_seconds"])
+	if err != nil || interval < 0 || interval > 86400 {
+		return nil, errf("min_refresh_interval_seconds must be 0..86400")
+	}
+	p.Options.Interval = interval
+	raw, _ := json.Marshal(p.Options)
+	tx, err := beginWrite(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE projection_definitions SET options=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, string(raw), p.ID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`UPDATE projection_queue SET due_at_ms=MAX(?,COALESCE((SELECT computed_at_ms FROM `+quote(projectionHeads(p))+` h WHERE h.scope_key=projection_queue.scope_key),(SELECT published_at_ms FROM projection_definitions WHERE id=?),0)+?) WHERE projection_id=? AND claimed_until IS NULL AND forced=0`, a.projectionTime().UnixMilli(), p.ID, interval*1000, p.ID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return projectionDefinitionMap(p), nil
+}
 func (a *App) toolProjectionsActivate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	ctx, finish, err := a.beginOperation(ctx, args, "projections_activate", true)
 	if err != nil {
@@ -621,63 +542,41 @@ func (a *App) toolProjectionsActivate(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
-	name := strArg(args, "name")
-	version := intArg(args, "version", 0)
-	if version < 1 {
-		return nil, errf("version must be positive")
+	p, err := projectionFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
 	}
 	tx, err := beginWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-	var id int64
-	if err := tx.QueryRow(`SELECT id FROM projection_definitions WHERE project_id=? AND name=? AND version=?`, pid, name, version).Scan(&id); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, notFound("projection %q version %d not found", name, version)
-		}
+	if _, err := tx.Exec(`UPDATE projection_definitions SET id=id WHERE id=?`, p.ID); err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(`UPDATE projection_definitions SET status=CASE WHEN id=? THEN 'active' ELSE 'retired' END,updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND name=?`, id, pid, name); err != nil {
+	var built, queued int
+	var latest, published int64
+	if err := tx.QueryRow(`SELECT built,latest_relevant_change,published_change FROM projection_definitions WHERE id=?`, p.ID).Scan(&built, &latest, &published); err != nil {
 		return nil, err
 	}
-	var current int64
-	if err := tx.QueryRow(`SELECT COALESCE(MAX(change_id),0) FROM projection_changes WHERE project_id=?`, pid).Scan(&current); err != nil {
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM projection_queue WHERE projection_id=?`, p.ID).Scan(&queued); err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(`INSERT INTO projection_queue(projection_id,project_id,scope_key,pending_change_id) VALUES(?,?,?,?) ON CONFLICT(projection_id,project_id,scope_key) DO UPDATE SET pending_change_id=MAX(pending_change_id,excluded.pending_change_id),claimed_until=NULL,last_error=NULL,queued_at=CURRENT_TIMESTAMP`, id, pid, projectionAllScope, current); err != nil {
+	if built == 0 || queued > 0 || latest > published || p.Status == "retired" {
+		return nil, errf("projection version is not ready; wait for a successful build and all relevant changes")
+	}
+	if _, err := tx.Exec(`UPDATE projection_definitions SET is_current=0,status='retired',updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND name=? AND id<>? AND is_current=1`, pid, p.Name, p.ID); err != nil {
 		return nil, err
 	}
-	rows, err := tx.Query(`SELECT DISTINCT table_id FROM projection_sources WHERE projection_id IN (SELECT id FROM projection_definitions WHERE project_id=? AND name=?)`, pid, name)
-	if err != nil {
+	if _, err := tx.Exec(`UPDATE projection_definitions SET is_current=1,status='active',updated_at=CURRENT_TIMESTAMP WHERE id=?`, p.ID); err != nil {
 		return nil, err
-	}
-	var tableIDs []int64
-	for rows.Next() {
-		var tableID int64
-		if err := rows.Scan(&tableID); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		tableIDs = append(tableIDs, tableID)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	for _, tableID := range tableIDs {
-		if err := rebuildProjectionTriggersTx(tx, tableID); err != nil {
-			return nil, err
-		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	a.projectionMu.Lock()
-	delete(a.projectionCache, schemaCacheKey{projectID: pid, tableName: name})
-	a.projectionMu.Unlock()
-	return map[string]any{"name": name, "version": version, "status": "active", "queued": true}, nil
+	a.invalidateProjection(pid, p.Name)
+	return map[string]any{"name": p.Name, "version": p.Version, "ready": true}, nil
 }
-
 func (a *App) toolProjectionsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	ctx, finish, err := a.beginOperation(ctx, args, "projections_delete", true)
 	if err != nil {
@@ -691,7 +590,7 @@ func (a *App) toolProjectionsDelete(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if err != nil {
 		return nil, err
 	}
-	p, err := a.loadProjection(ctx, pid, strArg(args, "name"))
+	p, err := projectionFromArgs(ctx, pid, args)
 	if err != nil {
 		return nil, err
 	}
@@ -700,717 +599,107 @@ func (a *App) toolProjectionsDelete(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return nil, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`DROP TABLE IF EXISTS ` + quote(p.ResultTable)); err != nil {
-		return nil, err
+	for _, q := range []string{`DROP VIEW IF EXISTS ` + quote(p.ResultTable), `DROP TABLE IF EXISTS ` + quote(projectionData(p)), `DROP TABLE IF EXISTS ` + quote(projectionHeads(p)), `DELETE FROM projection_definitions WHERE id=?`} {
+		var vals []any
+		if strings.Contains(q, "?") {
+			vals = []any{p.ID}
+		}
+		if _, err := tx.Exec(q, vals...); err != nil {
+			return nil, err
+		}
 	}
-	if _, err := tx.Exec(`DELETE FROM projection_definitions WHERE id=?`, p.ID); err != nil {
-		return nil, err
-	}
-	for _, tableID := range p.SourceIDs {
-		if err := rebuildProjectionTriggersTx(tx, tableID); err != nil {
+	for _, id := range p.SourceIDs {
+		if err := rebuildProjectionTriggersTx(tx, id); err != nil {
 			return nil, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	a.projectionMu.Lock()
-	delete(a.projectionCache, schemaCacheKey{projectID: pid, tableName: p.Name})
-	a.projectionMu.Unlock()
-	return map[string]any{"deleted": p.Name}, nil
+	a.invalidateProjection(pid, p.Name)
+	return map[string]any{"deleted": p.Name, "version": p.Version}, nil
 }
-
-func (a *App) toolProjectionsStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	ctx, finish, err := a.beginOperation(ctx, args, "projections_status", false)
-	if err != nil {
-		return nil, err
-	}
-	defer finish()
-	pid, err := resolveProjectFromArgs(args)
-	if err != nil {
-		return nil, err
-	}
-	p, err := a.loadProjection(ctx, pid, strArg(args, "name"))
-	if err != nil {
-		return nil, err
-	}
-	return a.projectionStatus(ctx, p)
-}
-
-func (a *App) projectionStatus(ctx *sdk.AppCtx, p *projectionDefinition) (map[string]any, error) {
-	var queued, failed int64
-	if err := ctx.AppReadDB().QueryRowContext(requestContext(ctx), `SELECT COUNT(*),COALESCE(SUM(CASE WHEN last_error IS NOT NULL THEN 1 ELSE 0 END),0) FROM projection_queue WHERE projection_id=? AND project_id=?`, p.ID, p.ProjectID).Scan(&queued, &failed); err != nil {
-		return nil, err
-	}
-	var cursor int64
-	if err := ctx.AppReadDB().QueryRowContext(requestContext(ctx), `SELECT last_change_id FROM projection_cursors WHERE projection_id=? AND project_id=?`, p.ID, p.ProjectID).Scan(&cursor); err != nil {
-		return nil, err
-	}
-	var latest int64
-	if err := ctx.AppReadDB().QueryRowContext(requestContext(ctx), `SELECT COALESCE(MAX(change_id),0) FROM projection_changes WHERE project_id=?`, p.ProjectID).Scan(&latest); err != nil {
-		return nil, err
-	}
-	var computed sql.NullString
-	if err := ctx.AppReadDB().QueryRowContext(requestContext(ctx), `SELECT MAX(computed_at) FROM projection_scopes WHERE projection_id=? AND project_id=?`, p.ID, p.ProjectID).Scan(&computed); err != nil {
-		return nil, err
-	}
-	out := map[string]any{"name": p.Name, "status": p.Status, "queued": queued, "failed": failed, "change_cursor": cursor, "latest_change": latest, "lag": latest - cursor}
-	if computed.Valid {
-		out["computed_at"] = computed.String
-	}
-	return out, nil
-}
-
 func stringSliceArg(args map[string]any, key string) []string {
-	raw := sliceArg(args, key)
-	out := make([]string, 0, len(raw))
-	for _, v := range raw {
-		if s, ok := v.(string); ok {
-			out = append(out, s)
-		}
-	}
+	out, _ := strictStringSliceArg(args, key)
 	return out
 }
-
 func strictStringSliceArg(args map[string]any, key string) ([]string, error) {
-	raw := sliceArg(args, key)
-	if len(raw) == 0 {
+	raw, exists := args[key]
+	if !exists || raw == nil {
 		return nil, nil
 	}
-	out := make([]string, len(raw))
-	for i, v := range raw {
+	values, ok := raw.([]any)
+	if !ok {
+		return nil, errf("%s must be an array", key)
+	}
+	out := make([]string, len(values))
+	for i, v := range values {
 		s, ok := v.(string)
-		if !ok || strings.TrimSpace(s) == "" {
-			return nil, errf("%s[%d] must be a non-empty string", key, i)
+		if !ok || s == "" {
+			return nil, errf("%s[%d] must be a nonempty string", key, i)
 		}
 		out[i] = s
 	}
 	return out, nil
 }
-
-func projectionHasUnboundParameter(sqlText string) bool {
-	tokens, err := sqlTokens(sqlText)
-	if err != nil {
-		return true
-	}
-	for _, token := range tokens {
-		if token.kind == "symbol" && (token.value == "?" || token.value == ":" || token.value == "$" || token.value == "@") {
-			return true
-		}
-	}
-	return false
-}
-
 func makeScopeKey(scope map[string]any, columns []string) (string, error) {
 	if len(columns) == 0 {
 		return projectionAllScope, nil
 	}
 	ordered := map[string]any{}
-	for _, col := range columns {
-		v, ok := scope[col]
+	for _, c := range columns {
+		v, ok := scope[c]
 		if !ok {
-			return "", errf("scope column %q is required", col)
+			return "", errf("scope column %q is required", c)
 		}
-		ordered[col] = v
+		ordered[c] = v
 	}
 	b, err := json.Marshal(ordered)
 	return string(b), err
 }
-
-func scopeKeyFromPayload(raw sql.NullString, columns []string) (string, bool) {
-	if len(columns) == 0 || !raw.Valid || raw.String == "" {
-		if len(columns) == 0 {
-			return projectionAllScope, true
-		}
-		return "", false
-	}
-	var values map[string]any
-	if json.Unmarshal([]byte(raw.String), &values) != nil {
-		return "", false
-	}
-	for _, col := range columns {
-		if _, ok := values[col]; !ok {
-			return "", false
-		}
-	}
-	key, err := makeScopeKey(values, columns)
+func makeScopeKeyFromRow(row map[string]any, cols []string) (string, bool) {
+	key, err := makeScopeKey(row, cols)
 	return key, err == nil
 }
-
-func scopeValues(scopeKey string, columns []string) ([]any, error) {
+func scopeValues(key string, cols []string) ([]any, error) {
 	var values map[string]any
-	if err := json.Unmarshal([]byte(scopeKey), &values); err != nil {
+	if err := projectionDecode(key, &values); err != nil {
 		return nil, err
 	}
-	out := make([]any, len(columns))
-	for i, c := range columns {
-		v, ok := values[c]
+	out := make([]any, len(cols))
+	for i, col := range cols {
+		v, ok := values[col]
 		if !ok {
-			return nil, errf("scope key missing %q", c)
+			return nil, errf("scope key missing %q", col)
 		}
 		out[i] = v
 	}
-	return out, nil
+	return projectionBoundValues(out)
 }
-
-func queueProjectionScope(ctx *sdk.AppCtx, p *projectionDefinition, scopeKey string, changeID int64) error {
-	_, err := ctx.AppDB().ExecContext(requestContext(ctx), `INSERT INTO projection_queue(projection_id,project_id,scope_key,pending_change_id) VALUES(?,?,?,?) ON CONFLICT(projection_id,project_id,scope_key) DO UPDATE SET pending_change_id=MAX(pending_change_id,excluded.pending_change_id),claimed_until=CASE WHEN last_error IS NOT NULL THEN NULL ELSE claimed_until END,last_error=NULL,queued_at=CURRENT_TIMESTAMP`, p.ID, p.ProjectID, scopeKey, changeID)
-	return err
-}
-
-func rebuildProjectionTriggersTx(tx *writeTx, tableID int64) error {
-	var physical string
-	if err := tx.QueryRow(`SELECT physical_name FROM tables_meta WHERE id=?`, tableID).Scan(&physical); err != nil {
-		return err
-	}
-	for _, suffix := range []string{"insert", "update", "delete"} {
-		if _, err := tx.Exec(`DROP TRIGGER IF EXISTS ` + quote(fmt.Sprintf("projection_change_%d_%s", tableID, suffix))); err != nil {
-			return err
-		}
-	}
-	rows, err := tx.Query(`SELECT DISTINCT c.name FROM projection_definitions p JOIN projection_sources s ON s.projection_id=p.id JOIN json_each(p.scope_columns) j JOIN columns_meta c ON c.table_id=? AND c.name=j.value WHERE s.table_id=? AND p.status IN ('active','paused','building') ORDER BY c.name`, tableID, tableID)
-	if err != nil {
-		return err
-	}
-	var cols []string
-	for rows.Next() {
-		var col string
-		if err := rows.Scan(&col); err != nil {
-			rows.Close()
-			return err
-		}
-		cols = append(cols, col)
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if len(cols) == 0 {
-		var dependent int
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM projection_sources s JOIN projection_definitions p ON p.id=s.projection_id WHERE s.table_id=? AND p.status IN ('active','paused','building')`, tableID).Scan(&dependent); err != nil {
-			return err
-		}
-		if dependent == 0 {
-			return nil
-		}
-	}
-	jsonExpr := func(prefix string) string {
-		parts := make([]string, 0, len(cols)*2)
-		for _, col := range cols {
-			parts = append(parts, fmt.Sprintf("'%s'", strings.ReplaceAll(col, "'", "''")), prefix+"."+quote(col))
-		}
-		return "json_object(" + strings.Join(parts, ",") + ")"
-	}
-	base := `INSERT INTO projection_changes(project_id,table_id,row_id,operation,old_values,new_values) SELECT project_id,%d,%s,%s,%s,%s FROM tables_meta WHERE id=%d`
-	insertSQL := fmt.Sprintf("CREATE TRIGGER %s AFTER INSERT ON %s BEGIN "+base+"; END", quote(fmt.Sprintf("projection_change_%d_insert", tableID)), quote(physical), tableID, "NEW.id", "'insert'", "NULL", jsonExpr("NEW"), tableID)
-	updateSQL := fmt.Sprintf("CREATE TRIGGER %s AFTER UPDATE ON %s BEGIN "+base+"; END", quote(fmt.Sprintf("projection_change_%d_update", tableID)), quote(physical), tableID, "NEW.id", "'update'", jsonExpr("OLD"), jsonExpr("NEW"), tableID)
-	deleteSQL := fmt.Sprintf("CREATE TRIGGER %s AFTER DELETE ON %s BEGIN "+base+"; END", quote(fmt.Sprintf("projection_change_%d_delete", tableID)), quote(physical), tableID, "OLD.id", "'delete'", jsonExpr("OLD"), "NULL", tableID)
-	for _, statement := range []string{insertSQL, updateSQL, deleteSQL} {
-		if _, err := tx.Exec(statement); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (a *App) rebuildAllProjectionTriggers(ctx *sdk.AppCtx) error {
-	tx, err := beginWrite(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	rows, err := tx.Query(`SELECT id FROM tables_meta WHERE project_id<>'' ORDER BY id`)
-	if err != nil {
-		return err
-	}
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return err
-		}
-		ids = append(ids, id)
-	}
-	rows.Close()
-	for _, id := range ids {
-		if err := rebuildProjectionTriggersTx(tx, id); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
-func (a *App) projectionWorker(ctx context.Context, app *sdk.AppCtx) error {
-	pid := app.CurrentProject()
-	if pid == "" {
-		return nil
-	}
-	if err := a.consumeProjectionChanges(ctx, app, pid); err != nil {
-		return err
-	}
-	for i := 0; i < projectionQueueBatch; i++ {
-		item, ok, err := claimProjectionQueue(ctx, app, pid)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			break
-		}
-		if err := a.refreshProjectionScope(ctx, app, item); err != nil {
-			_ = failProjectionQueue(app, item, err)
-		}
-	}
-	return nil
-}
-
-func (a *App) consumeProjectionChanges(ctx context.Context, app *sdk.AppCtx, pid string) error {
-	defs, err := loadActiveProjections(app, pid)
-	if err != nil {
-		return err
-	}
-	for _, p := range defs {
-		var cursor int64
-		if err := app.AppReadDB().QueryRowContext(ctx, `SELECT last_change_id FROM projection_cursors WHERE projection_id=? AND project_id=?`, p.ID, pid).Scan(&cursor); err != nil {
-			continue
-		}
-		rows, err := app.AppReadDB().QueryContext(ctx, `SELECT c.change_id,c.old_values,c.new_values FROM projection_changes c JOIN projection_sources s ON s.table_id=c.table_id WHERE s.projection_id=? AND c.project_id=? AND c.change_id>? ORDER BY c.change_id LIMIT ?`, p.ID, pid, cursor, projectionChangeBatch)
-		if err != nil {
-			return err
-		}
-		type change struct {
-			id        int64
-			old, next sql.NullString
-		}
-		changes := []change{}
-		for rows.Next() {
-			var c change
-			if err := rows.Scan(&c.id, &c.old, &c.next); err != nil {
-				rows.Close()
-				return err
-			}
-			changes = append(changes, c)
-		}
-		rows.Close()
-		if len(changes) == 0 {
-			continue
-		}
-		tx, err := app.AppDB().BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		pending := map[string]int64{}
-		for _, c := range changes {
-			keys := map[string]bool{}
-			if key, ok := scopeKeyFromPayload(c.old, p.ScopeCols); ok {
-				keys[key] = true
-			}
-			if key, ok := scopeKeyFromPayload(c.next, p.ScopeCols); ok {
-				keys[key] = true
-			}
-			if len(keys) == 0 {
-				keys[projectionAllScope] = true
-			}
-			for key := range keys {
-				if c.id > pending[key] {
-					pending[key] = c.id
-				}
-			}
-		}
-		for key, changeID := range pending {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO projection_queue(projection_id,project_id,scope_key,pending_change_id) VALUES(?,?,?,?) ON CONFLICT(projection_id,project_id,scope_key) DO UPDATE SET pending_change_id=MAX(pending_change_id,excluded.pending_change_id),claimed_until=CASE WHEN last_error IS NOT NULL THEN NULL ELSE claimed_until END,last_error=NULL,queued_at=CURRENT_TIMESTAMP`, p.ID, pid, key, changeID); err != nil {
-				tx.Rollback()
-				return err
-			}
-		}
-		last := changes[len(changes)-1].id
-		if _, err := tx.ExecContext(ctx, `UPDATE projection_cursors SET last_change_id=? WHERE projection_id=? AND project_id=?`, last, p.ID, pid); err != nil {
-			tx.Rollback()
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-	}
-	// Once every non-retired definition has advanced past a change, the
-	// durable invalidation record is no longer needed. This keeps high-volume
-	// event streams bounded without deleting work a paused/building version
-	// still needs.
-	_, err = app.AppDB().ExecContext(ctx, `DELETE FROM projection_changes WHERE project_id=? AND change_id <= (SELECT MIN(c.last_change_id) FROM projection_cursors c JOIN projection_definitions p ON p.id=c.projection_id WHERE c.project_id=? AND p.status IN ('active','paused','building'))`, pid, pid)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func loadActiveProjections(ctx *sdk.AppCtx, pid string) ([]*projectionDefinition, error) {
-	rows, err := ctx.AppReadDB().QueryContext(requestContext(ctx), `SELECT name FROM projection_definitions WHERE project_id=? AND status='active' ORDER BY id`, pid)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var names []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, err
-		}
-		names = append(names, name)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	var out []*projectionDefinition
-	for _, name := range names {
-		// The caller only needs the definition; loading by name keeps all JSON
-		// decoding and source metadata in one place.
-		p, err := loadProjectionFromDB(ctx, pid, name)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, p)
-	}
-	return out, nil
-}
-
-func loadProjectionFromDB(ctx *sdk.AppCtx, pid, name string) (*projectionDefinition, error) {
-	var p projectionDefinition
-	var sourceRaw, colsRaw, scopeRaw string
-	err := ctx.AppReadDB().QueryRowContext(requestContext(ctx), `SELECT id,project_id,name,version,status,sql_text,source_tables,result_columns,scope_columns,result_table FROM projection_definitions WHERE project_id=? AND name=? AND status='active'`, pid, name).Scan(&p.ID, &p.ProjectID, &p.Name, &p.Version, &p.Status, &p.SQL, &sourceRaw, &colsRaw, &scopeRaw, &p.ResultTable)
-	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal([]byte(sourceRaw), &p.SourceTables); err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal([]byte(colsRaw), &p.ResultCols); err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal([]byte(scopeRaw), &p.ScopeCols); err != nil {
-		return nil, err
-	}
-	return &p, nil
-}
-
-func claimProjectionQueue(ctx context.Context, app *sdk.AppCtx, pid string) (projectionQueueItem, bool, error) {
-	tx, err := app.AppDB().BeginTx(ctx, nil)
-	if err != nil {
-		return projectionQueueItem{}, false, err
-	}
-	defer tx.Rollback()
-	var item projectionQueueItem
-	err = tx.QueryRowContext(ctx, `SELECT q.projection_id,q.project_id,q.scope_key,q.pending_change_id,q.attempts FROM projection_queue q JOIN projection_definitions p ON p.id=q.projection_id WHERE q.project_id=? AND p.status='active' AND (q.claimed_until IS NULL OR q.claimed_until<CURRENT_TIMESTAMP) ORDER BY q.queued_at LIMIT 1`, pid).Scan(&item.ProjectionID, &item.ProjectID, &item.ScopeKey, &item.PendingID, &item.Attempts)
-	if err == sql.ErrNoRows {
-		return projectionQueueItem{}, false, nil
-	}
-	if err != nil {
-		return projectionQueueItem{}, false, err
-	}
-	token, err := projectionLeaseToken()
-	if err != nil {
-		return projectionQueueItem{}, false, err
-	}
-	res, err := tx.ExecContext(ctx, `UPDATE projection_queue SET claimed_until=datetime('now',?),lease_token=?,attempts=attempts+1 WHERE projection_id=? AND project_id=? AND scope_key=? AND (claimed_until IS NULL OR claimed_until<CURRENT_TIMESTAMP)`, fmt.Sprintf("+%d seconds", projectionLeaseSeconds), token, item.ProjectionID, item.ProjectID, item.ScopeKey)
-	if err != nil {
-		return projectionQueueItem{}, false, err
-	}
-	n, _ := res.RowsAffected()
-	if n != 1 {
-		return projectionQueueItem{}, false, nil
-	}
-	if err := tx.Commit(); err != nil {
-		return projectionQueueItem{}, false, err
-	}
-	item.Attempts++
-	item.LeaseToken = token
-	return item, true, nil
-}
-
-func failProjectionQueue(app *sdk.AppCtx, item projectionQueueItem, refreshErr error) error {
-	delay := 5 * (1 << minInt(item.Attempts-1, 5))
-	_, err := app.AppDB().ExecContext(requestContext(app), `UPDATE projection_queue SET claimed_until=datetime('now',?),last_error=? WHERE projection_id=? AND project_id=? AND scope_key=? AND lease_token=?`, fmt.Sprintf("+%d seconds", delay), refreshErr.Error(), item.ProjectionID, item.ProjectID, item.ScopeKey, item.LeaseToken)
-	return err
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func projectionResultValues(row map[string]any, cols []Column) ([]any, error) {
-	values := make([]any, len(cols))
+	out := make([]any, len(cols))
 	for i, col := range cols {
 		v, ok := row[col.Name]
 		if !ok {
-			if col.Nullable {
-				values[i] = nil
-				continue
-			}
-			return nil, errf("projection result missing column %q", col.Name)
+			return nil, errf("projection missing %q", col.Name)
 		}
-		coerced, err := coerceForStorage(col, v)
+		value, err := coerceForStorage(col, v)
 		if err != nil {
 			return nil, err
 		}
-		values[i] = coerced
+		out[i] = value
 	}
-	return values, nil
+	return out, nil
 }
-
-func (a *App) refreshProjectionScope(parent context.Context, app *sdk.AppCtx, item projectionQueueItem) error {
-	p, err := loadProjectionFromDB(app, item.ProjectID, projectionNameByID(app, item.ProjectionID))
-	if err != nil {
-		return err
-	}
-	if p.Status != "active" {
-		return nil
-	}
-	resolved, err := a.substitutePlaceholders(app, item.ProjectID, p.SQL)
-	if err != nil {
-		return err
-	}
-	query := resolved
-	params := []any{}
-	if item.ScopeKey != projectionAllScope && len(p.ScopeCols) > 0 {
-		values, err := scopeValues(item.ScopeKey, p.ScopeCols)
-		if err != nil {
-			return err
-		}
-		parts := make([]string, 0, len(p.ScopeCols))
-		for i, c := range p.ScopeCols {
-			if values[i] == nil {
-				parts = append(parts, quote(c)+" IS NULL")
-				continue
-			}
-			parts = append(parts, quote(c)+" = ?")
-			params = append(params, values[i])
-		}
-		query = `SELECT * FROM (` + resolved + `) AS __projection_scope WHERE ` + strings.Join(parts, " AND ")
-	}
-	qctx, cancel := context.WithTimeout(parent, time.Duration(maxProjectionMs(app))*time.Millisecond)
-	defer cancel()
-	read, err := acquireReadConn(app, p.Name)
-	if err != nil {
-		return err
-	}
-	released := false
-	release := func() {
-		if released {
-			return
-		}
-		released = true
-		_, _ = read.conn.ExecContext(context.Background(), "PRAGMA query_only = OFF")
-		_ = read.close()
-	}
-	defer release()
-	if _, err := read.conn.ExecContext(qctx, "PRAGMA query_only = ON"); err != nil {
-		release()
-		return fmt.Errorf("projection read-only setup: %w", err)
-	}
-	if err := authorizeQuery(qctx, read.conn, app, a, item.ProjectID, p.SQL, query, params); err != nil {
-		release()
-		return fmt.Errorf("projection authorization: %w", err)
-	}
-	rows, err := read.queryer().QueryContext(qctx, query, params...)
-	if err != nil {
-		release()
-		return err
-	}
-	columns, err := rows.Columns()
-	if err != nil {
-		rows.Close()
-		release()
-		return err
-	}
-	colIndex := map[string]int{}
-	for i, name := range columns {
-		colIndex[name] = i
-	}
-	for _, c := range p.ResultCols {
-		if _, ok := colIndex[c.Name]; !ok {
-			return errf("projection query did not return result column %q", c.Name)
-		}
-	}
-	grouped := map[string][]map[string]any{}
-	totalRows := 0
-	var totalBytes int64
-	for rows.Next() {
-		dest := make([]any, len(columns))
-		ptrs := make([]any, len(columns))
-		for i := range dest {
-			ptrs[i] = &dest[i]
-		}
-		if err := rows.Scan(ptrs...); err != nil {
-			rows.Close()
-			release()
-			return err
-		}
-		row := map[string]any{}
-		for _, c := range p.ResultCols {
-			row[c.Name] = hydrateForResult(c, dest[colIndex[c.Name]])
-		}
-		values, err := projectionResultValues(row, p.ResultCols)
-		if err != nil {
-			rows.Close()
-			release()
-			return err
-		}
-		for i, c := range p.ResultCols {
-			row[c.Name] = values[i]
-		}
-		key := item.ScopeKey
-		if item.ScopeKey == projectionAllScope {
-			var ok bool
-			key, ok = makeScopeKeyFromRow(row, p.ScopeCols)
-			if !ok {
-				return errf("projection row is missing scope columns")
-			}
-		}
-		grouped[key] = append(grouped[key], row)
-		totalRows++
-		rowBytes, err := jsonSize(row, int64(maxProjectionBytes(app)))
-		if err != nil {
-			return err
-		}
-		totalBytes += rowBytes
-		if totalBytes > int64(maxProjectionBytes(app)) {
-			return errf("projection result exceeds max_projection_bytes")
-		}
-		if totalRows > maxProjectionTotalRows(app) {
-			return errf("projection result exceeds max_projection_total_rows")
-		}
-		if len(grouped[key]) > maxProjectionRows(app) {
-			return errf("projection scope exceeds max_projection_rows")
-		}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		release()
-		return err
-	}
-	if err := rows.Close(); err != nil {
-		release()
-		return err
-	}
-	release()
-	if item.ScopeKey != projectionAllScope {
-		if _, ok := grouped[item.ScopeKey]; !ok {
-			grouped[item.ScopeKey] = []map[string]any{}
-		}
-	}
-	return publishProjectionRows(app, p, item, grouped)
-}
-
-func makeScopeKeyFromRow(row map[string]any, columns []string) (string, bool) {
-	if len(columns) == 0 {
-		return projectionAllScope, true
-	}
-	values := map[string]any{}
-	for _, c := range columns {
-		v, ok := row[c]
-		if !ok {
-			return "", false
-		}
-		values[c] = v
-	}
-	key, err := makeScopeKey(values, columns)
-	return key, err == nil
-}
-
-func publishProjectionRows(app *sdk.AppCtx, p *projectionDefinition, item projectionQueueItem, grouped map[string][]map[string]any) error {
-	tx, err := app.AppDB().BeginTx(requestContext(app), nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var currentToken string
-	var currentPending int64
-	var status string
-	if err := tx.QueryRow(`SELECT lease_token,pending_change_id,(SELECT status FROM projection_definitions WHERE id=?) FROM projection_queue WHERE projection_id=? AND project_id=? AND scope_key=?`, p.ID, p.ID, p.ProjectID, item.ScopeKey).Scan(&currentToken, &currentPending, &status); err != nil {
-		if err == sql.ErrNoRows {
-			return errf("projection lease lost")
-		}
-		return err
-	}
-	if status != "active" || currentToken != item.LeaseToken || currentPending < item.PendingID {
-		return errf("projection lease lost")
-	}
-	if item.ScopeKey == projectionAllScope {
-		if _, err := tx.Exec(`DELETE FROM `+quote(p.ResultTable)+` WHERE id IN (SELECT result_id FROM projection_result_index WHERE projection_id=? AND project_id=?)`, p.ID, p.ProjectID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`DELETE FROM projection_result_index WHERE projection_id=? AND project_id=?`, p.ID, p.ProjectID); err != nil {
-			return err
-		}
-	}
-	for scopeKey, rows := range grouped {
-		if _, err := tx.Exec(`DELETE FROM `+quote(p.ResultTable)+` WHERE id IN (SELECT result_id FROM projection_result_index WHERE projection_id=? AND project_id=? AND scope_key=?)`, p.ID, p.ProjectID, scopeKey); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(`DELETE FROM projection_result_index WHERE projection_id=? AND project_id=? AND scope_key=?`, p.ID, p.ProjectID, scopeKey); err != nil {
-			return err
-		}
-		for _, row := range rows {
-			values := make([]any, len(p.ResultCols))
-			for i, c := range p.ResultCols {
-				v, ok := row[c.Name]
-				if !ok {
-					return errf("projection result missing column %q", c.Name)
-				}
-				values[i] = v
-			}
-			quoted := make([]string, len(p.ResultCols))
-			for i, c := range p.ResultCols {
-				quoted[i] = quote(c.Name)
-			}
-			marks := strings.TrimRight(strings.Repeat("?,", len(values)), ",")
-			res, err := tx.Exec(`INSERT INTO `+quote(p.ResultTable)+` (`+strings.Join(quoted, ",")+") VALUES ("+marks+")", values...)
-			if err != nil {
-				return err
-			}
-			id, err := res.LastInsertId()
-			if err != nil {
-				return err
-			}
-			if _, err := tx.Exec(`INSERT INTO projection_result_index(projection_id,project_id,scope_key,result_id) VALUES(?,?,?,?)`, p.ID, p.ProjectID, scopeKey, id); err != nil {
-				return err
-			}
-		}
-	}
-	if _, err := tx.Exec(`INSERT INTO projection_scopes(projection_id,project_id,scope_key,processed_change_id,computed_at,status,last_error) VALUES(?,?,?, ?,CURRENT_TIMESTAMP,'ready',NULL) ON CONFLICT(projection_id,project_id,scope_key) DO UPDATE SET processed_change_id=excluded.processed_change_id,computed_at=excluded.computed_at,status='ready',last_error=NULL`, p.ID, p.ProjectID, item.ScopeKey, item.PendingID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM projection_queue WHERE projection_id=? AND project_id=? AND scope_key=? AND pending_change_id<=?`, p.ID, p.ProjectID, item.ScopeKey, item.PendingID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`UPDATE projection_queue SET claimed_until=NULL,last_error=NULL WHERE projection_id=? AND project_id=? AND scope_key=? AND pending_change_id>?`, p.ID, p.ProjectID, item.ScopeKey, item.PendingID); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-func projectionNameByID(app *sdk.AppCtx, id int64) string {
-	var name string
-	_ = app.AppReadDB().QueryRowContext(requestContext(app), `SELECT name FROM projection_definitions WHERE id=?`, id).Scan(&name)
-	return name
-}
-
 func maxProjectionMs(ctx *sdk.AppCtx) int {
 	return int(cfgInt64Range(ctx, "max_projection_ms", 30000, 100, 300000))
 }
-
 func maxProjectionRows(ctx *sdk.AppCtx) int {
 	return int(cfgInt64Range(ctx, "max_projection_rows", 100000, 1, 1000000))
 }
-
 func maxProjectionTotalRows(ctx *sdk.AppCtx) int {
 	return int(cfgInt64Range(ctx, "max_projection_total_rows", 1000000, 1, 5000000))
 }
-
 func maxProjectionBytes(ctx *sdk.AppCtx) int {
 	return int(cfgInt64Range(ctx, "max_projection_bytes", 64<<20, 1<<20, 512<<20))
 }

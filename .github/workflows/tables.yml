@@ -1,0 +1,30 @@
+name: Tables checks
+on:
+  push:
+    branches: [main]
+    tags: ['tables/v*']
+    paths: ['mcp/tables/**', '.github/workflows/tables.yml']
+  pull_request:
+    paths: ['mcp/tables/**', '.github/workflows/tables.yml']
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: 'off'
+    defaults:
+      run:
+        working-directory: mcp/tables
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/tables/go.mod
+          cache-dependency-path: mcp/tables/go.sum
+      - run: go test -race ./...
+      - run: go vet ./...
+      - name: Build standalone Linux and Darwin binaries
+        run: |
+          go build -o /tmp/tables-linux .
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o /tmp/tables-darwin-arm64 .

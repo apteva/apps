@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.1.27
+version: 0.2.0
 description: |
+  v0.2.0 Adds inner SQL scopes, generic dependency mappings, persistent refresh
+  intervals, result indexes, accurate readiness and bounded atomic generation
+  publication. The result-storage migration requires restore for downgrade.
   v0.1.27 Adds durable, coalesced SQL projections with transactional change
   capture, scoped refreshes, retries, watermarks, and read-only projection
   tables for efficient analytics workloads.
@@ -124,6 +127,9 @@ provides:
     - name: projections_activate
       description: 'Atomically switch readers to a built projection version. Args: name, version.'
       requires: projections.manage
+    - name: projections_update
+      description: Persist a projection minimum refresh interval.
+      requires: projections.manage
     - name: projections_delete
       description: 'Delete a projection definition and its stored result rows. Args: name, confirm=true.'
       requires: projections.manage
@@ -185,11 +191,11 @@ provides:
 
 runtime:
   startup_timeout_seconds: 600
-  database_upgrade: backward_compatible
+  database_upgrade: requires_restore
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.1.27
+    ref: tables/v0.2.0
     entry: mcp/tables
   port: 8080
   health_check: /health
