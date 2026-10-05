@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.24.44 — 2026-10-05
+
+- Identify attached files from their metadata without asking for an unavailable reader or entering a waiting state.
+- Correct composer autosizing after drafts wrap in narrow panes.
+
 ## 0.24.43 — 2026-10-05
 
 - Settle the hidden terminal pacing placeholder when its result arrives, so Thinking clears while the agent waits without hiding internal tool lookups or later response work.
