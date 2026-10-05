@@ -376,3 +376,18 @@ test("the projections workspace exposes readiness and forced refresh", async () 
   expect(refresh?.method).toBe("POST");
   expect(refresh?.body).toEqual({ rebuild: true, force: true });
 });
+
+test("summary table entries without columns do not crash the workspace", async () => {
+  (window as any).__aptevaAppEvents = { subscribe: () => () => {} };
+  globalThis.fetch = (async (input: any) => {
+    const url = new URL(String(input), "http://localhost");
+    if (url.pathname.endsWith("/tables")) {
+      return response({ tables: [{ ...table, columns: undefined }], has_more: false });
+    }
+    return response(table);
+  }) as typeof fetch;
+  const ui = render(<TablesPanel appName="tables" projectId="p" installId={9} />);
+  await flush();
+  await flush();
+  expect(ui.getAllByText("books").length).toBeGreaterThan(0);
+});

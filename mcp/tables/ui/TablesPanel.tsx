@@ -262,7 +262,15 @@ export default function TablesPanel({
           undefined,
           signal,
         );
-        tables.push(...result.tables);
+        // Summary/list responses from older sidecars may omit the schema
+        // payload. Keep the workspace renderable while the selected table's
+        // full description is loaded below.
+        tables.push(
+          ...(result.tables ?? []).map((table) => ({
+            ...table,
+            columns: Array.isArray(table.columns) ? table.columns : [],
+          })),
+        );
         if (!result.has_more) break;
         offset = result.next_offset;
       } while (!signal.aborted);
@@ -589,7 +597,7 @@ export default function TablesPanel({
                 className={`w-full rounded-md px-3 py-2.5 text-left transition-colors ${selected === t.name ? "bg-accent/10 text-text" : "text-text-muted hover:bg-bg-input/60 hover:text-text"}`}
               >
                 <span className="block truncate font-mono text-xs">{t.name}</span>
-                <span className="mt-1 block text-[11px] text-text-dim">{formatRowCount(t.row_count)} rows · {t.columns.length} columns</span>
+                <span className="mt-1 block text-[11px] text-text-dim">{formatRowCount(t.row_count)} rows · {(t.columns ?? []).length} columns</span>
               </button>
             </li>
           ))}

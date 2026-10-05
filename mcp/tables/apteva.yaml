@@ -2,8 +2,9 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.2.2
+version: 0.2.3
 description: |
+  v0.2.3 Fixes the Tables workspace when summary table listings omit column metadata.
   v0.2.2 Adds a dedicated projections workspace with readiness, freshness,
   coverage, pending scopes, interval, pause/resume and forced refresh controls.
   v0.2.1 Redesigns the Tables workspace with searchable navigation, typed
@@ -200,7 +201,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.2.2
+    ref: tables/v0.2.3
     entry: mcp/tables
   port: 8080
   health_check: /health
