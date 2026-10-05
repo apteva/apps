@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -130,5 +131,69 @@ func BenchmarkRowsUpsert500Of20000(b *testing.B) {
 		benchmarkCall(b, app, ctx, "rows_upsert", map[string]any{
 			"table": "upsert_rows", "key": []any{"external_key"}, "rows": batch,
 		})
+	}
+}
+
+func BenchmarkProjectionAggregateRefresh10k(b *testing.B) {
+	ctx := benchmarkCtx(b).WithProject("bench")
+	app := &App{}
+	benchmarkCall(b, app, ctx, "tables_create", map[string]any{
+		"name": "projection_events",
+		"columns": []any{
+			map[string]any{"name": "centre_id", "type": "text", "nullable": false},
+			map[string]any{"name": "caller_id", "type": "text", "nullable": false},
+			map[string]any{"name": "converted", "type": "bool", "nullable": false},
+			map[string]any{"name": "value", "type": "number", "nullable": false},
+		},
+	})
+	seed := func(start, count int) {
+		for offset := 0; offset < count; offset += 1000 {
+			end := offset + 1000
+			if end > count {
+				end = count
+			}
+			rows := make([]any, 0, end-offset)
+			for j := offset; j < end; j++ {
+				i := start + j
+				rows = append(rows, map[string]any{
+					"centre_id": fmt.Sprintf("centre-%02d", i%10),
+					"caller_id": fmt.Sprintf("caller-%04d", i%10000),
+					"converted": i%4 == 0,
+					"value":     float64(i % 97),
+				})
+			}
+			benchmarkCall(b, app, ctx, "rows_insert", map[string]any{"table": "projection_events", "rows": rows})
+		}
+	}
+	seed(0, 10000)
+	benchmarkCall(b, app, ctx, "projections_create", map[string]any{
+		"name": "projection_summary", "version": 1,
+		"sql": `SELECT centre_id, COUNT(*) AS event_count,
+  COUNT(DISTINCT caller_id) AS unique_callers,
+  SUM(CASE WHEN converted = 1 THEN 1 ELSE 0 END) AS conversions,
+  AVG(value) AS average_value
+FROM {projection_events} GROUP BY centre_id`,
+		"source_tables": []any{"projection_events"},
+		"result_columns": []any{
+			map[string]any{"name": "centre_id", "type": "text", "nullable": false},
+			map[string]any{"name": "event_count", "type": "number", "nullable": false},
+			map[string]any{"name": "unique_callers", "type": "number", "nullable": false},
+			map[string]any{"name": "conversions", "type": "number", "nullable": false},
+			map[string]any{"name": "average_value", "type": "number", "nullable": false},
+		},
+		"scope_columns": []any{"centre_id"},
+	})
+	if err := app.projectionWorker(context.Background(), ctx); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		seed(10000+i*1000, 1000)
+		if err := app.projectionWorker(context.Background(), ctx); err != nil {
+			b.Fatal(err)
+		}
+		if err := app.projectionWorker(context.Background(), ctx); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
