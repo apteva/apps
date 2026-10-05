@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.2.1
+version: 0.2.2
 description: |
+  v0.2.2 Adds a dedicated projections workspace with readiness, freshness,
+  coverage, pending scopes, interval, pause/resume and forced refresh controls.
   v0.2.1 Redesigns the Tables workspace with searchable navigation, typed
   filters, server-backed sorting, readable values, sticky headers, and a
   row-detail editor drawer.
@@ -198,7 +200,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.2.1
+    ref: tables/v0.2.2
     entry: mcp/tables
   port: 8080
   health_check: /health

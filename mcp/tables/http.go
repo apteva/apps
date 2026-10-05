@@ -28,6 +28,9 @@ import (
 //   PATCH  /tables/{name}/rows/{id}    → rows_update
 //   DELETE /tables/{name}/rows/{id}    → rows_delete
 //   POST   /tables/{name}/query        → tables_query
+//   GET    /projections                → projections_list
+//   GET    /projections/{name}/status  → projections_status
+//   POST   /projections/{name}/refresh → projections_refresh
 
 // globalCtx is set in OnMount; HTTP handlers reach for it because the
 // SDK's Route.Handler signature is the bare http.HandlerFunc with no
@@ -134,6 +137,142 @@ func (a *App) handleTablesItem(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httpErr(w, http.StatusNotFound, "unknown path")
+}
+
+func (a *App) handleProjectionsCollection(w http.ResponseWriter, r *http.Request) {
+	if globalCtx == nil {
+		httpErr(w, http.StatusServiceUnavailable, "app not yet mounted")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		out, err := a.toolProjectionsList(requestAppCtx(r), injectProject(r, nil))
+		writeToolResult(w, out, err)
+	case http.MethodPost:
+		body, err := readJSONBody(r)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		out, err := a.toolProjectionsCreate(requestAppCtx(r), injectProject(r, body))
+		writeToolResult(w, out, err)
+	default:
+		httpErr(w, http.StatusMethodNotAllowed, "GET or POST")
+	}
+}
+
+func (a *App) handleProjectionsItem(w http.ResponseWriter, r *http.Request) {
+	if globalCtx == nil {
+		httpErr(w, http.StatusServiceUnavailable, "app not yet mounted")
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/projections/")
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		httpErr(w, http.StatusNotFound, "projection name required")
+		return
+	}
+	args := map[string]any{"name": parts[0]}
+	if version := r.URL.Query().Get("version"); version != "" {
+		args["version"] = version
+	}
+	if len(parts) == 1 && r.Method == http.MethodGet {
+		out, err := a.toolProjectionsDescribe(requestAppCtx(r), injectProject(r, args))
+		writeToolResult(w, out, err)
+		return
+	}
+	if len(parts) != 2 {
+		httpErr(w, http.StatusNotFound, "unknown projection path")
+		return
+	}
+	action := parts[1]
+	switch action {
+	case "status":
+		if r.Method != http.MethodGet {
+			httpErr(w, http.StatusMethodNotAllowed, "GET only")
+			return
+		}
+		if scope := r.URL.Query().Get("scope"); scope != "" {
+			var decoded map[string]any
+			if err := json.Unmarshal([]byte(scope), &decoded); err != nil {
+				httpErr(w, http.StatusBadRequest, "scope must be JSON")
+				return
+			}
+			args["scope"] = decoded
+		}
+		out, err := a.toolProjectionsStatus(requestAppCtx(r), injectProject(r, args))
+		writeToolResult(w, out, err)
+	case "refresh":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		body, err := readJSONBody(r)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		for key, value := range body {
+			args[key] = value
+		}
+		out, err := a.toolProjectionsRefresh(requestAppCtx(r), injectProject(r, args))
+		writeToolResult(w, out, err)
+	case "pause":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		body, err := readJSONBody(r)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		for key, value := range body {
+			args[key] = value
+		}
+		out, err := a.toolProjectionsPause(requestAppCtx(r), injectProject(r, args))
+		writeToolResult(w, out, err)
+	case "update":
+		if r.Method != http.MethodPatch {
+			httpErr(w, http.StatusMethodNotAllowed, "PATCH only")
+			return
+		}
+		body, err := readJSONBody(r)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		for key, value := range body {
+			args[key] = value
+		}
+		out, err := a.toolProjectionsUpdate(requestAppCtx(r), injectProject(r, args))
+		writeToolResult(w, out, err)
+	case "activate":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		body, err := readJSONBody(r)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		for key, value := range body {
+			args[key] = value
+		}
+		out, err := a.toolProjectionsActivate(requestAppCtx(r), injectProject(r, args))
+		writeToolResult(w, out, err)
+	case "delete":
+		if r.Method != http.MethodDelete {
+			httpErr(w, http.StatusMethodNotAllowed, "DELETE only")
+			return
+		}
+		args["confirm"] = r.URL.Query().Get("confirm") == "true"
+		out, err := a.toolProjectionsDelete(requestAppCtx(r), injectProject(r, args))
+		writeToolResult(w, out, err)
+	default:
+		httpErr(w, http.StatusNotFound, "unknown projection action")
+	}
 }
 
 func (a *App) handleRowsCollection(w http.ResponseWriter, r *http.Request, tableName string) {

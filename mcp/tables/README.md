@@ -1,4 +1,4 @@
-# Tables (v0.2.1)
+# Tables (v0.2.2)
 
 Typed-row database for Apteva agents and human teams. The row-shaped
 sibling to the `storage` app.
@@ -13,6 +13,11 @@ navigation, typed filtering, server-backed sorting, readable date/boolean/JSON
 values, sticky headers, and a row-detail drawer for safe edits and deletes. The
 SQL editor, schema editor, API examples, and projection controls remain available
 as secondary tools so the data grid stays focused.
+
+The **Projections** workspace gives analytics users a dedicated view of published
+projection versions, readiness, freshness watermarks, coverage, pending scopes,
+pause/resume state, and forced refreshes. It complements the projection MCP tools
+and keeps operational refresh work separate from ordinary row editing.
 
 - **28 MCP tools** — `tables_create`, `tables_list`, `tables_describe`,
   `tables_alter`, `tables_drop`, `indexes_create`, `indexes_list`,
