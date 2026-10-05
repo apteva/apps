@@ -16,6 +16,17 @@ export interface ComposerOptions {
 }
 export interface DraftAttachment {key:string;name:string;file?:File;attachment?:Attachment;error?:string;busy?:boolean}
 const randomID=()=>Array.from(crypto.getRandomValues(new Uint8Array(16)),n=>n.toString(16).padStart(2,"0")).join("");
+
+/**
+ * Measure a textarea from its content rather than its current box. Clearing
+ * the inline height first matters in embedded widgets: when a narrow pane
+ * causes a draft to wrap, reading scrollHeight while the old height is still
+ * applied can retain the previous tall value even after the draft is empty.
+ */
+export function resizeComposerInput(input: HTMLTextAreaElement): void {
+ input.style.height="0px";
+ input.style.height=Math.min(input.scrollHeight,144)+"px";
+}
 export async function fileBase64(file:Blob):Promise<string>{
  return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onerror=()=>reject(new Error("Cannot read file"));reader.onload=()=>resolve(String(reader.result).split(",")[1]);reader.readAsDataURL(file);});
 }

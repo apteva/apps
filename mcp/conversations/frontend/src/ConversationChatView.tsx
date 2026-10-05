@@ -1,4 +1,4 @@
-import { ComposerAttachments, ComposerMenu, type ComposerController } from "./composer";
+import { ComposerAttachments, ComposerMenu, resizeComposerInput, type ComposerController } from "./composer";
 import type { ComposerSuggestion } from "./composerHost";
 import { useConversationLocalization } from "./i18n";
 import { useLayoutEffect, type KeyboardEvent, type ReactNode, type RefObject } from "react";
@@ -87,7 +87,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
     const input = props.inputRef.current;
     if (!input) return;
     if (layout === "single-line") { input.style.height = ""; return; }
-    const resize = () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 144) + "px"; };
+    const resize = () => resizeComposerInput(input);
     resize();
     if (typeof ResizeObserver === "undefined") return;
     let width = input.getBoundingClientRect().width;

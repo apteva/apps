@@ -14,6 +14,7 @@ import { ConversationsProvider, PageContextProvider } from "../frontend/src/cont
 import type { PageContext } from "../frontend/src/pageContext";
 import { showPageContext, type AgentConversationWidgetSettings } from "../frontend/src/agentConversations";
 import type { ConversationComposerHandle } from "../frontend/src/composerHost";
+import { resizeComposerInput } from "../frontend/src/composer";
 import type { ComponentProps } from "react";
 import { ConversationUnreadIndicator } from "../frontend/src/conversationActivity";
 let conversations: ConversationsClient;
@@ -72,6 +73,21 @@ test("unread conversations use the shared dot indicator without a numeric badge"
     </ConversationLocalizationProvider>,
   ));
   expect(element.querySelector('[aria-label="Unread messages"]')).toBeNull();
+});
+
+test("composer autosize remeasures after a narrow wrapped draft is cleared", () => {
+  const input = win.document.createElement("textarea");
+  let contentHeight = 48;
+  Object.defineProperty(input, "scrollHeight", {
+    configurable: true,
+    get: () => input.style.height === "0px" ? contentHeight : 144,
+  });
+  resizeComposerInput(input);
+  expect(input.style.height).toBe("48px");
+  contentHeight = 48;
+  input.style.height = "144px";
+  resizeComposerInput(input);
+  expect(input.style.height).toBe("48px");
 });
 
 test("voice mic appears only in active direct operator chats",async()=>{
