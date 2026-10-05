@@ -26,10 +26,7 @@ func (a *App) projectionStatus(app *sdk.AppCtx, p *projectionDefinition, key str
 		return nil, err
 	}
 	unconsumed := p.Latest > cursor
-	ready := p.Built && pending == 0 && !unconsumed
-	if key == "" {
-		ready = ready && p.Latest <= p.Published
-	}
+	ready := p.Built && pending == 0 && p.Latest <= p.Published
 	out := map[string]any{"name": p.Name, "version": p.Version, "status": p.Status, "is_current": p.Current, "built": p.Built, "ready": ready, "stale": p.Built && !ready, "latest_relevant_change": p.Latest, "latest_change_id": p.Latest, "consumed_change_id": cursor, "published_change_id": p.Published, "pending_scopes": pending, "refresh_running": running > 0, "lag": max(int64(0), p.Latest-p.Published), "unconsumed_relevant_changes": unconsumed, "min_refresh_interval_seconds": p.Options.Interval, "last_failure": nil, "last_successful_publication_at": nil, "next_scheduled_refresh": nil, "coverage_from": nil, "coverage_to": nil}
 	out["queued"] = pending
 	out["failed"] = failed
@@ -103,6 +100,12 @@ func (a *App) projectionStatus(app *sdk.AppCtx, p *projectionDefinition, key str
 		if to.Valid && to.String != "" {
 			out["coverage_to"] = to.String
 		}
+	}
+	if key != "" {
+		// Unmapped changes make a scope conservatively stale only when they are
+		// newer than both its published snapshot and the complete result watermark.
+		out["ready"] = p.Built && pending == 0 && p.Latest <= max(cursor, p.Published, published)
+		out["stale"] = p.Built && out["ready"] != true
 	}
 	return out, nil
 }
