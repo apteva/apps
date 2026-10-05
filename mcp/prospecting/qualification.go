@@ -157,7 +157,7 @@ func executeWebSearch(ctx *sdk.AppCtx, query string, limit int, engine, fallback
 		return out, err
 	}
 	out, err := call(engine)
-	blocked := err != nil && strings.Contains(strings.ToLower(err.Error()), "search_blocked")
+	blocked := searchShouldFallback(err)
 	blocked = blocked || out.Blocked
 	if !blocked || fallbackEngine == "" || fallbackEngine == engine {
 		if err != nil {
@@ -176,6 +176,14 @@ func executeWebSearch(ctx *sdk.AppCtx, query string, limit int, engine, fallback
 		return fallback, fallbackEngine, true, errors.New(defaultString(fallback.Error, "fallback search provider blocked the request"))
 	}
 	return fallback, fallbackEngine, true, nil
+}
+
+func searchShouldFallback(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "search_blocked") || strings.Contains(lower, "search_extraction_incomplete")
 }
 
 func qualifyCandidate(ctx *sdk.AppCtx, id int64, maxPages int) (map[string]any, error) {

@@ -199,6 +199,40 @@ func TestParseGoogleSearchResults(t *testing.T) {
 	}
 }
 
+func TestParseGoogleSearchResolvesOpaqueRedirectsAndReportsFailures(t *testing.T) {
+	extracted := &browserExtractResult{Links: []linkInfo{
+		{URL: "https://www.google.com/goto?url=CAESopaque-one", Text: "Elite Staffing"},
+		{URL: "https://www.google.com/goto?url=CAESopaque-two", Text: "Randstad"},
+		{URL: "https://www.google.com/search?q=staffing", Text: "Web"},
+		{URL: "https://www.googleadservices.com/pagead/aclk?x=ad", Text: "Sponsored"},
+	}}
+	resolved, report := resolveGoogleSearchResultsWith(extracted, 8, func(rawURL string) (string, error) {
+		switch rawURL {
+		case "https://www.google.com/goto?url=CAESopaque-one":
+			return "https://elite.example.com/", nil
+		case "https://www.google.com/goto?url=CAESopaque-two":
+			return "", fmt.Errorf("redirect timeout")
+		default:
+			return "", fmt.Errorf("unexpected redirect %q", rawURL)
+		}
+	})
+	if len(resolved) != 1 || resolved[0].URL != "https://elite.example.com/" || resolved[0].Title != "Elite Staffing" {
+		t.Fatalf("resolved=%#v, want one organic result", resolved)
+	}
+	if report.Attempted != 2 || report.Resolved != 1 || report.Failed != 1 || len(report.Failures) != 1 {
+		t.Fatalf("resolution report=%#v", report)
+	}
+}
+
+func TestGoogleOpaqueRedirectDetection(t *testing.T) {
+	if !isOpaqueGoogleRedirect("https://www.google.com/goto?url=CAESopaque") {
+		t.Fatal("opaque Google goto URL was not detected")
+	}
+	if isOpaqueGoogleRedirect("https://www.google.com/goto?url=https%3A%2F%2Fexample.com") {
+		t.Fatal("direct Google redirect URL was classified as opaque")
+	}
+}
+
 func TestSearchUsesComputerDOMParser(t *testing.T) {
 	plat := newFakePlatform()
 	ctx, app := newTestCtx(t, plat)

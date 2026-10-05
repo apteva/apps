@@ -2,11 +2,14 @@ schema: apteva-app/v1
 
 name: web
 display_name: Web
-version: 0.2.7
+version: 0.2.8
 description: |
   Browser-native web intelligence and reusable Apify-style extractors for
   agents. Provides JSON-first search, extraction, crawl, map, research,
   snapshots, durable extractor runs, and Jobs-backed schedules.
+
+  v0.2.8 resolves opaque Google result redirects, filters non-organic links,
+  reports partial redirect failures, and falls back on extraction errors.
 
   v0.2.7 prioritizes search-result links during rendered extraction, retries
   truncated linkless responses once with a links-only request, and fails
@@ -233,7 +236,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: web/v0.2.6
+    ref: web/v0.2.8
     entry: mcp/web
   port: 8080
   health_check: /health
