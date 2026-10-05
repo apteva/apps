@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -305,5 +307,97 @@ func TestProjectionBoolResultsPublishOnce(t *testing.T) {
 	rows := out["rows"].([]map[string]any)
 	if len(rows) != 1 || rows[0]["enabled"] != int64(1) || rows[0]["total"] != float64(1) {
 		t.Fatalf("bool projection result: %#v", rows)
+	}
+}
+
+func TestProjectionHighVolumeAggregateCoalescesAndRefreshes(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	mustCall(t, app, ctx, "tables_create", map[string]any{
+		"name": "sales_events",
+		"columns": []any{
+			map[string]any{"name": "centre_id", "type": "text", "nullable": false},
+			map[string]any{"name": "caller_id", "type": "text", "nullable": false},
+			map[string]any{"name": "converted", "type": "bool", "nullable": false},
+			map[string]any{"name": "value", "type": "number", "nullable": false},
+		},
+	})
+	seed := func(start, count int) {
+		rows := make([]any, 0, count)
+		for i := start; i < start+count; i++ {
+			centre := i % 10
+			caller := i % 1000
+			if i >= 10000 {
+				caller += 1000
+			}
+			rows = append(rows, map[string]any{
+				"centre_id": fmt.Sprintf("centre-%02d", centre),
+				"caller_id": fmt.Sprintf("caller-%04d", caller),
+				"converted": i%4 == 0,
+				"value":     float64(i % 97),
+			})
+		}
+		for offset := 0; offset < len(rows); offset += 1000 {
+			end := offset + 1000
+			if end > len(rows) {
+				end = len(rows)
+			}
+			mustCall(t, app, ctx, "rows_insert", map[string]any{"table": "sales_events", "rows": rows[offset:end]})
+		}
+	}
+	seed(0, 10000)
+	mustCall(t, app, ctx, "projections_create", map[string]any{
+		"name": "centre_conversion_summary", "version": 1,
+		"sql": `SELECT centre_id,
+  COUNT(*) AS event_count,
+  COUNT(DISTINCT caller_id) AS unique_callers,
+  SUM(CASE WHEN converted = 1 THEN 1 ELSE 0 END) AS conversions,
+  AVG(value) AS average_value
+FROM {sales_events} GROUP BY centre_id`,
+		"source_tables": []any{"sales_events"},
+		"result_columns": []any{
+			map[string]any{"name": "centre_id", "type": "text", "nullable": false},
+			map[string]any{"name": "event_count", "type": "number", "nullable": false},
+			map[string]any{"name": "unique_callers", "type": "number", "nullable": false},
+			map[string]any{"name": "conversions", "type": "number", "nullable": false},
+			map[string]any{"name": "average_value", "type": "number", "nullable": false},
+		},
+		"scope_columns": []any{"centre_id"},
+	})
+	started := time.Now()
+	runProjectionWorker(t, app, ctx)
+	t.Logf("initial 10k-row aggregate refresh: %s", time.Since(started))
+	seed(10000, 1000)
+	if err := app.consumeProjectionChanges(context.Background(), ctx, "test-proj"); err != nil {
+		t.Fatal(err)
+	}
+	var queued int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM projection_queue WHERE projection_id=(SELECT id FROM projection_definitions WHERE name='centre_conversion_summary')`).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if queued != 10 {
+		t.Fatalf("expected one queued refresh per affected centre, got %d", queued)
+	}
+	started = time.Now()
+	for i := 0; i < 3; i++ {
+		runProjectionWorker(t, app, ctx)
+	}
+	t.Logf("coalesced 1k-event aggregate refresh: %s", time.Since(started))
+	var remaining int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM projection_queue WHERE projection_id=(SELECT id FROM projection_definitions WHERE name='centre_conversion_summary')`).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 0 {
+		t.Fatalf("aggregate refresh left %d queued scopes", remaining)
+	}
+	out := mustCall(t, app, ctx, "tables_query", map[string]any{"sql": "SELECT centre_id,event_count,unique_callers,conversions FROM {centre_conversion_summary} ORDER BY centre_id"})
+	rows := out["rows"].([]map[string]any)
+	if len(rows) != 10 {
+		t.Fatalf("expected ten centre summaries, got %d", len(rows))
+	}
+	for _, row := range rows {
+		if row["event_count"] != float64(1100) || row["unique_callers"] != float64(200) {
+			t.Fatalf("aggregate did not reflect high-volume update: %#v", row)
+		}
 	}
 }
