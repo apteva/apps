@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.14.8
+version: 0.14.9
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -31,7 +31,10 @@ description: |
   Cloudinary when bound, auto-transcribes audio + video via Deepgram,
   and auto-generates descriptions via OpenCode Go, OpenAI API, or
   OpenAI Codex when integrations are bound. Outputs all flow
-  through storage. v0.14.8 preserves subjects during stationary Smart Crop
+  through storage. v0.14.9 normalizes render filenames before queuing,
+  validates output formats, separates remote cache telemetry from failures,
+  and persists description rate-limit backoff with upstream retry/reset hints.
+  v0.14.8 preserves subjects during stationary Smart Crop
   tracking and invalidates old crop decisions and outputs while retaining
   unrelated render caches. Uses app-sdk v0.95.0. v0.14.7 adds compact/planning/bounded-full search,
   projections, explicit expansions, stable cursors, release-readiness fields,
@@ -296,7 +299,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.8
+    ref: media/v0.14.9
     entry: mcp/media
   port: 8080
   health_check: /health

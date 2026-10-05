@@ -1,10 +1,12 @@
-## Unreleased — output format validation and description retries
+## 0.14.9 — output format validation and description retries
 
 - Normalize output filenames before queuing through both MCP and HTTP. Extensionless names receive the operation/source extension; PNG crops receive `.png`. Preserve supported explicit names and reject unsupported extensions and format conflicts with `invalid_output_format`.
 - Keep the queued/effective filename, image/video encoder flags, content type and Storage upload consistent across local FFmpeg, remote FFmpeg and Cloudinary. Submission responses expose the effective name and content type; execution persists effective names for older queued jobs.
 - Separate normal remote source-cache hit/miss diagnostics into metrics so FFmpeg failures remain the primary error. Render rows and failure events expose an additive `error_code` for output-format failures.
 - Persist description rate-limit backoff by connection, tool and model. Retain forwarded Retry-After/reset headers and upstream reset metadata, defer later files in the batch, double the fallback cooldown up to one hour, honor longer upstream windows, and clear the backoff after success. Changing models does not inherit the previous model's cooldown.
 - Migration `023_description_backoff.sql` adds only a provider retry-state table. Existing media, renders, descriptions and configuration are preserved. No immediate provider retries or worker sleeps are added.
+
+Validation: 549 top-level tests passed under race detection, including the captured Holly regression; five real Media–Storage integration tests passed, including PNG filename/upload consistency. The complete remote Bash rendering/upload script passed with real FFmpeg in an isolated test. Targeted description retry race checks, macOS/Linux builds and vet passed. SDK remains v0.95.0.
 
 ## 0.14.8 — stationary Smart Crop subject preservation
 
