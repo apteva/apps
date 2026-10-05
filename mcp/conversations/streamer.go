@@ -172,6 +172,15 @@ func visibleConversationTool(name string) bool {
 	return false
 }
 
+func hiddenTerminalTool(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "pace", "done":
+		return true
+	default:
+		return false
+	}
+}
+
 // conversationForThread maps "chat-conv-<hex>" → "conv-<hex>". Empty
 // means the thread is not a conversation thread and the event is
 // ignored — main and worker threads must never leak partial text into
@@ -385,7 +394,19 @@ func (s *streamer) onToolEnd(agentID int64, threadID, conversationID, dataJSON s
 	}
 	name := firstNonEmptyString(d.Name, d.Tool)
 	callID := firstNonEmptyString(d.ID, d.CallID, d.ToolCallID)
-	if !visibleConversationTool(name) || callID == "" {
+	if callID == "" {
+		return
+	}
+	// Terminal hidden tools such as pace do not render a tool card, but their
+	// result still ends the model pass represented by the Thinking
+	// acknowledgement. Internal lookups (for example search_tools) also have
+	// hidden results, but the model continues immediately after them and must
+	// keep its visible progress.
+	if hiddenTerminalTool(name) {
+		s.settleAck(conversationID, agentID)
+		return
+	}
+	if !visibleConversationTool(name) {
 		return
 	}
 	key := streamCallKey(agentID, threadID, callID)

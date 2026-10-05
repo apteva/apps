@@ -159,6 +159,43 @@ func TestAckLifecycle(t *testing.T) {
 	}
 }
 
+// Hidden terminal tools such as pace are not rendered as tool cards. Their
+// result must still complete the visible Thinking placeholder; otherwise the
+// panel shows Thinking while the agent is asleep waiting for an event.
+func TestHiddenToolResultSettlesThinking(t *testing.T) {
+	h := newHub()
+	s := newStreamer(h)
+	ch, cancel := h.subscribeFrames("conv-1")
+	defer cancel()
+
+	s.emitAck("conv-1", "chat-conv-1", 41)
+	select {
+	case frame := <-ch:
+		if frame.Done || frame.Phase != "acknowledgement" {
+			t.Fatalf("ack frame = %+v, want active acknowledgement", frame)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ack frame not published")
+	}
+
+	s.Ingest("tool.result", 41, "chat-conv-1",
+		`{"name":"pace","id":"pace-1","result":"set sleep=10m"}`, time.Now())
+	select {
+	case frame := <-ch:
+		if !frame.Done || frame.AgentID != 41 {
+			t.Fatalf("pace settlement = %+v, want done for the pending ack", frame)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pace result did not settle Thinking")
+	}
+
+	select {
+	case frame := <-ch:
+		t.Fatalf("unexpected frame after pace settlement: %+v", frame)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 // Two agents reusing a provider call id must not clobber each other.
 func TestStreamerScopesCallIDsByAgentAndThread(t *testing.T) {
 	h := newHub()
