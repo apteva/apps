@@ -1,4 +1,4 @@
-# Billing (v0.13.1)
+# Billing (v0.13.2)
 
 Customers, invoices, and payments for Apteva agents and human teams.
 
@@ -30,7 +30,9 @@ Customers, invoices, and payments for Apteva agents and human teams.
   `GET /invoices/{id}/print` (self-contained HTML for browser-driven
   Save-as-PDF). Agents call `invoices_render_pdf` to get bytes back
   as base64, or with `save_to_storage=true` to push the file into
-  the storage app via cross-app SDK call.
+  the linked Storage app via cross-app SDK calls. New files are private;
+  the response includes an expiring signed `url` and `expires_at`. Check
+  `saved` / `shareable`; upload failures preserve the PDF bytes for delivery.
 - **REST surface** at `/api/apps/billing/*` for the dashboard panel.
 - **Billing panel** (React + Tailwind) at `slot: project.page`,
   plus inline `invoice-card` and `customer-card` components for

@@ -197,7 +197,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "invoices_render_pdf",
-			Description: "Render an invoice as a PDF. Default returns {pdf_base64, filename, size_bytes}. With save_to_storage=true, writes the PDF to the storage app (must be installed) and returns {file_id, url, filename, size_bytes} so the agent can attach it to chat / email. Args: invoice_id, save_to_storage (default false), folder (storage path, default '/invoices/').",
+			Description: "Render an invoice as a PDF. Default returns {pdf_base64, filename, size_bytes, saved:false}. With save_to_storage=true, uploads new PDFs privately to the Storage install linked in Billing's App dependencies and returns {file_id, url, expires_at, filename, size_bytes, saved:true, shareable:true}; url is an expiring signed link. Check saved and shareable: upload failure returns PDF bytes plus storage_error; signed-link failure returns saved:true, shareable:false plus storage_error. Never claim a hosted/shareable URL when shareable=false. Args: invoice_id, save_to_storage (default false), folder (default '/.billing/invoices/').",
 			InputSchema: schemaObject(map[string]any{
 				"invoice_id":      map[string]any{"type": "integer"},
 				"save_to_storage": map[string]any{"type": "boolean"},

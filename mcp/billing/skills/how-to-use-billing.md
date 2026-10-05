@@ -172,12 +172,12 @@ It is optional and can be corrected later with `invoices_update`.
 ## Sending the invoice — PDF + print view
 
 Once an invoice is **open** (finalized, has a number), the agent has
-three ways to share it:
+four ways to share it:
 
 | Surface | When to use | Returns |
 |---|---|---|
 | `invoices_render_pdf(invoice_id=…)` | Default. Get the PDF bytes back as base64 — useful when the agent is sending the file via another tool (email, messaging). | `{pdf_base64, filename, size_bytes}` |
-| `invoices_render_pdf(invoice_id=…, save_to_storage=true)` | Storage app is installed and you want a re-shareable URL or to attach a `file-card` to chat. | `{file_id, url, filename, size_bytes}` |
+| `invoices_render_pdf(invoice_id=…, save_to_storage=true)` | Storage is linked in Billing’s App dependencies and you want an expiring signed link or a `file-card`. New uploads are private. | `{file_id, url, expires_at, filename, size_bytes, saved, shareable}` |
 | `GET /api/apps/billing/invoices/{id}/print` | A human is in the loop and wants to print or save-as-PDF themselves. | HTML page with browser-driven Print/Save action |
 | `GET /api/apps/billing/invoices/{id}/pdf` | The dashboard's "Download PDF" button — same bytes as `invoices_render_pdf` but streamed direct. | `application/pdf` |
 
@@ -186,11 +186,26 @@ finalized-at date, and no commitment behind them. Finalize first;
 then render. The tool will technically work on a draft (the renderer
 shows "Draft #N") but the customer sees a confusing artifact.
 
-When `save_to_storage=true` and the storage app isn't installed,
-the tool errors with a clear "install storage or retry without
-save_to_storage" message. Default to `save_to_storage=false` and
-attach the bytes inline unless you specifically need the file to
-live in storage (e.g. to compose `respond(components=[file-card])`).
+When `save_to_storage=true`, always check `saved` and `shareable`:
+
+- `saved=true, shareable=true`: use the returned `url` exactly as supplied.
+  It is signed and expires at `expires_at` (Unix seconds), using Storage's
+  configured TTL (24 hours by default). Tell the user it expires.
+- `saved=false`: rendering succeeded but uploading failed. The response
+  includes `pdf_base64` and `storage_error`; attach the bytes if the delivery
+  channel supports file attachments. Do not invent a hosted URL or repeat
+  the render just to obtain the same bytes. If Storage is not linked, select
+  its installation in Billing's App dependencies; installation alone is
+  insufficient.
+- `saved=true, shareable=false`: the PDF exists in Storage, but signing failed.
+  Retry Storage's existing `files_get_url(id=file_id)` instead of uploading
+  again. Any `url` in this result is an authenticated content URL, not an
+  anonymous sharing link.
+
+Direct Billing `/pdf` and `/print` routes require authentication. For a global
+install include `?project_id=<project-id>`; preserve `install_id` when supplied
+by the platform. These routes are useful in the dashboard, but do not replace
+signed Storage links for external recipients.
 
 ## Recording manual payments
 

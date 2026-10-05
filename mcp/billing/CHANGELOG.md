@@ -1,5 +1,24 @@
 # Billing release notes
 
+## 0.13.2
+
+- Return Storage’s signed invoice PDF URL and expiry instead of constructing an
+  authenticated relative path. Preserve Storage’s URL and project routing.
+- Upload new invoice PDFs privately through the existing `invoices_render_pdf`
+  tool; the linked Storage install supplies the signed-link TTL.
+- Preserve PDF bytes when upload fails and distinguish a missing Storage
+  binding from other failures. If signing fails after upload, retain the saved
+  file ID and report `shareable=false` so callers can retry `files_get_url`.
+- Clarify linking, expiry, partial failures, and authenticated direct PDF routes.
+- Correct the startup version log and pin app-sdk v0.95.0. No new tools or
+  database migrations.
+
+Validation: race-enabled Tier 1 tests, real Billing/Storage integration tests
+(including missing, tampered, and expired signatures), go vet, and two live-agent
+Tier 3 scenarios covering signed delivery and missing bindings, three runs each,
+plus three customer-search regression runs. All checks use the clean release
+checkout and published SDK modules without the workspace overlay.
+
 ## 0.13.1
 
 - Improve the existing `customers_search` tool with exact-match ranking,

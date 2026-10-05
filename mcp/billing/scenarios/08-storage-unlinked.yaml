@@ -1,0 +1,59 @@
+name: storage-unlinked
+description: Missing optional Storage binding preserves PDF bytes and the agent explains the actual problem without retries or invented URLs.
+timeout: 120s
+max_iterations: 8
+runs: 3
+required_pass_rate: 1.0
+setup:
+  mode: autonomous
+  interaction: thread
+  thread:
+    id: invoice-delivery
+    directive: Deliver an existing invoice PDF using Billing. Report tool outcomes accurately. Send the final answer to main with send, including the exact returned URL and expiry or the specific storage_error. Only call done after sending this answer to main.
+    tools: [search_tools, send, done, pace]
+    mcp: [billing]
+  app:
+    path: ./
+  seed_mcp_calls:
+    - app: billing
+      tool: customers_upsert_by_email
+      thread_id: fixture-setup
+      args: {email: pdf@example.test, defaults: {name: PDF Customer}}
+    - app: billing
+      tool: invoices_create
+      thread_id: fixture-setup
+      args:
+        customer_id: 1
+        line_items:
+          - {description: Service, quantity: 1, unit_price_cents: 1000}
+    - app: billing
+      tool: invoices_finalize
+      thread_id: fixture-setup
+      args: {invoice_id: 1}
+directive: |
+  The invoice-delivery request thread owns the invoice PDF request. Wait for
+  its final answer, then stop. Do not duplicate its work or change invoices.
+prompt: |
+  Give me a hosted PDF link for existing invoice 1 if available. If hosting
+  cannot work, explain why and whether the PDF was rendered. Do not paste
+  PDF base64 and do not invent a URL or repeat rendering.
+trajectory_assert:
+  - tool_called_with:
+      tool: invoices_render_pdf
+      args: {invoice_id: 1, save_to_storage: true}
+      count: 1
+      success: true
+      result_contains: .pdf
+  - tool_not_called: invoices_create | invoices_finalize | files_upload | files_set_visibility
+  - iterations_at_most: 8
+outcome_assert:
+  - agent_response_contains: linked | bound | binding
+    thread_id: invoice-delivery
+  - agent_response_contains: PDF
+    thread_id: invoice-delivery
+  - http: GET /api/apps/billing/invoices?status=open
+    expect_count_at: invoices
+    expect_count: 1
+budget:
+  total_tokens: 650000
+  cost_usd: 0.50
