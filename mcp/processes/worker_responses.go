@@ -1,6 +1,9 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // WorkerStep contains the assigned instructions and recoverable checkpoint,
 // without delivery diagnostics, audit metadata, or unrelated procedure steps.
@@ -48,6 +51,13 @@ func workerAction(r Run, s StepRun, actor, worker string, all []StepRun) (bool, 
 	if controlMode(r) == "step_by_step" && !stepReleased(r, s) {
 		return false, "This step is held. Await explicit controller advancement; do not execute it or advance downstream work."
 	}
+	if persistent && (terminal(s.State) || aiParallel(r)) {
+		for _, candidate := range all {
+			if candidate.Executor.Kind == "agent" && candidate.Executor.AgentID == s.Executor.AgentID && candidate.ThreadID == worker && candidate.State == "ready" && candidate.DeliveredAt != "" && !candidate.DeliverySuspended && stepReleased(r, candidate) && stepTimeReady(candidate, time.Now()) && dependenciesReady(candidate, all) {
+				return false, "Claim delivered ready_steps with processes_step_claim before waiting. New ready-step events take precedence over earlier completion responses. Wait without polling only when no delivered ready work remains."
+			}
+		}
+	}
 	if aiParallel(r) && persistent {
 		return false, "Continue your claimed work and assess ready_steps for useful parallel delegation within max_parallel_steps. Await Processes events or child results when no eligible work remains; do not poll."
 	}
@@ -57,7 +67,7 @@ func workerAction(r Run, s StepRun, actor, worker string, all []StepRun) (bool, 
 	if !terminal(s.State) {
 		return false, "Continue only this assigned step; use step_get if you need to recover its context or saved checkpoint."
 	}
-	return false, "Wait for the next Processes event without polling."
+	return false, "Wait for the next Processes event without polling only when no delivered ready work remains; a new ready-step event takes precedence over this completion response."
 }
 
 // Acknowledgements never echo instructions or output receipts. They confirm

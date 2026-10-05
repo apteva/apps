@@ -39,6 +39,10 @@ type Executor struct {
 // The Task alias is kept privately for decoding legacy pre-0.14 rows; it is
 // not exposed by the Processes manifest or API.
 type StepRun struct {
+	ClaimedAt         string   `json:"claimed_at,omitempty"`
+	ClaimAttempts     int      `json:"claim_recovery_attempts,omitempty"`
+	ClaimNextAt       string   `json:"claim_next_at,omitempty"`
+	ClaimEventID      string   `json:"-"`
 	ReleasedAt        string   `json:"released_at,omitempty"`
 	StartAt           string   `json:"start_at,omitempty"`
 	CompletedAt       string   `json:"completed_at,omitempty"`
@@ -179,12 +183,12 @@ func (a *App) validateRoles(project string, d Definition, c AssignmentConfig) er
 	return nil
 }
 
-const stepColumns = `id,COALESCE(run_id,''),step_key,position,definition_json,executor_json,state,progress,output,error,decision,updated_by,updated_at,task_id,delivered_at,target_thread_id,execution_id,delivery_event_id,delivery_warning,delivery_attempts,next_attempt_at,lifecycle_sequence,execution_state,project_id,origin,required,due_at,created_at,created_by,revision,start_at,completed_at,delivery_suspended,released_at`
+const stepColumns = `id,COALESCE(run_id,''),step_key,position,definition_json,executor_json,state,progress,output,error,decision,updated_by,updated_at,task_id,delivered_at,target_thread_id,execution_id,delivery_event_id,delivery_warning,delivery_attempts,next_attempt_at,lifecycle_sequence,execution_state,project_id,origin,required,due_at,created_at,created_by,revision,start_at,completed_at,delivery_suspended,released_at,claimed_at,claim_attempts,claim_next_at,claim_event_id`
 
 func scanStep(row scanner) (StepRun, error) {
 	var s StepRun
 	var def, executor, legacyDecision, legacyTaskID string
-	e := row.Scan(&s.ID, &s.RunID, &s.Key, &s.Position, &def, &executor, &s.State, &s.Progress, &s.Output, &s.Error, &legacyDecision, &s.UpdatedBy, &s.UpdatedAt, &legacyTaskID, &s.DeliveredAt, &s.ThreadID, &s.ExecutionID, &s.DeliveryEventID, &s.DeliveryWarning, &s.Attempts, &s.NextAttemptAt, &s.LifecycleSequence, &s.ExecutionState, &s.ProjectID, &s.Origin, &s.Required, &s.DueAt, &s.CreatedAt, &s.CreatedBy, &s.Revision, &s.StartAt, &s.CompletedAt, &s.DeliverySuspended, &s.ReleasedAt)
+	e := row.Scan(&s.ID, &s.RunID, &s.Key, &s.Position, &def, &executor, &s.State, &s.Progress, &s.Output, &s.Error, &legacyDecision, &s.UpdatedBy, &s.UpdatedAt, &legacyTaskID, &s.DeliveredAt, &s.ThreadID, &s.ExecutionID, &s.DeliveryEventID, &s.DeliveryWarning, &s.Attempts, &s.NextAttemptAt, &s.LifecycleSequence, &s.ExecutionState, &s.ProjectID, &s.Origin, &s.Required, &s.DueAt, &s.CreatedAt, &s.CreatedBy, &s.Revision, &s.StartAt, &s.CompletedAt, &s.DeliverySuspended, &s.ReleasedAt, &s.ClaimedAt, &s.ClaimAttempts, &s.ClaimNextAt, &s.ClaimEventID)
 	if e == nil {
 		e = json.Unmarshal([]byte(def), &s.Definition)
 	}
@@ -356,7 +360,7 @@ func (a *App) stepContext(p *Process, r Run, s StepRun, all []StepRun) (message 
 					break
 				}
 			}
-			return "Next assigned step ready: " + ids + contextHint + ". Call processes_step_claim to read and claim this step. Execute only ready work; dependencies remain enforced. Keep this worker alive between steps. After step_update, inspect its top-level done field: if true, immediately call done before any text; otherwise follow next_action; after a terminal step wait for the next Processes event without polling."
+			return "Next assigned step ready: " + ids + contextHint + ". Call processes_step_claim to read and claim this step. Execute only ready work; dependencies remain enforced. Keep this worker alive between steps. After step_update, inspect its top-level done field: if true, immediately call done before any text; otherwise follow next_action; claim delivered ready_steps before waiting. A new ready-step event takes precedence over an earlier completion response. Wait without polling only when no delivered ready work remains."
 		}
 		return fmt.Sprintf("Sequential same-agent run. Main: spawn ONE persistent worker for this entire run (suggested ID process-run-%s), granting tools=\"%s\" plus any domain tools needed across all its steps. Pass these IDs: %s. Worker: call step_claim before domain action; its result contains the frozen step, shared instructions, parameters and dependency evidence. Complete each step with step_update. Processes delivers subsequent ready steps directly to this worker; do not spawn a new worker, forward steps, or poll. Keep the worker alive while done=false. Call done once after done=true, with the final outcome. Main should not rewrite the procedure or request per-step reports. If workers cannot access Processes, main may execute steps directly using step_get/step_update. Procedure: %s\n%s", r.ID, processSequentialWorkerTools, ids, p.Name, jsonText(p.Definition))
 	}
@@ -583,7 +587,7 @@ func (a *App) spawnSequentialWorker(p *Process, r *Run, s *StepRun, all []StepRu
 	if s.DeliveryEventID != "" {
 		eventID = s.DeliveryEventID
 	}
-	directive := fmt.Sprintf("You are the persistent Processes worker for run %s. Keep this thread alive across your assigned steps, including timed waits and approval gates. For each authoritative ready step, call processes_step_claim before any domain action, use the returned frozen instructions and dependency evidence, then record milestones and the terminal outcome with processes_step_update. Do not execute unassigned work or create another worker. Inspect every step_update result: when its top-level done field is true, immediately call done before any text; when false, follow next_action: continue the current step for progress acknowledgements, or await the next Processes event after completion without polling.", r.ID)
+	directive := fmt.Sprintf("You are the persistent Processes worker for run %s. Keep this thread alive across your assigned steps, including timed waits and approval gates. For each authoritative ready step, call processes_step_claim before any domain action, use the returned frozen instructions and dependency evidence, then record milestones and the terminal outcome with processes_step_update. Do not execute unassigned work or create another worker. Inspect every step_update result: when its top-level done field is true, immediately call done before any text; when false, follow next_action: continue the current step for progress acknowledgements, or claim delivered ready_steps after completion. New ready-step events take precedence over earlier completion responses. Wait without polling only when no delivered ready work remains.", r.ID)
 	if aiParallel(*r) {
 		directive = parallelWorkerDirective(*r)
 	}
@@ -713,12 +717,21 @@ func validWorkerThreadID(id string) bool {
 	return true
 }
 func (a *App) writeStep(s StepRun, state string, progress int, output, reason, actor string) error {
+	return a.writeStepClaim(s, state, progress, output, reason, actor, false)
+}
+func (a *App) writeStepClaim(s StepRun, state string, progress int, output, reason, actor string, claim bool) error {
 	tx, e := a.db.Begin()
 	if e != nil {
 		return e
 	}
-	defer tx.Rollback()
 	now := timestamp()
+	defer tx.Rollback()
+	if claim {
+		_, e = tx.Exec(`UPDATE process_step_runs SET claimed_at=CASE WHEN claimed_at='' THEN ? ELSE claimed_at END,claim_next_at='',claim_event_id='',delivery_warning=CASE WHEN claim_attempts>0 THEN '' ELSE delivery_warning END,delivery_suspended=CASE WHEN claim_attempts>0 THEN 0 ELSE delivery_suspended END WHERE id=?`, now, s.ID)
+		if e != nil {
+			return e
+		}
+	}
 	_, e = tx.Exec(`UPDATE process_step_runs SET state=?,progress=?,output=?,error=?,decision='',updated_by=?,updated_at=?,revision=revision+1,completed_at=CASE WHEN ?='completed' AND completed_at='' THEN ? ELSE completed_at END WHERE id=?`, state, progress, output, reason, actor, now, state, now, s.ID)
 	if e != nil {
 		return e
@@ -793,6 +806,11 @@ func (a *App) reconcileWorkflowAt(p *Process, r *Run, now time.Time) error {
 		}
 		if !stepReleased(*r, *s) {
 			continue
+		}
+		if s.State == "ready" {
+			if e = a.recoverUnclaimedStep(p, *r, *s, all, now); e != nil {
+				failures = append(failures, e)
+			}
 		}
 		if s.Executor.Kind == "human" && s.State == "ready" {
 			s.State = "waiting"
@@ -915,6 +933,7 @@ func (a *App) stepAction(project, actor, process, run, id, action string, args m
 		return nil, errNotFound
 	}
 	if action == "step_claim" {
+		recoveryClaim := s.ClaimAttempts > 0
 		if e = a.claimStep(r, s, all, actor); e != nil {
 			return nil, e
 		}
@@ -925,6 +944,25 @@ func (a *App) stepAction(project, actor, process, run, id, action string, args m
 		for _, item := range all {
 			if item.ID == id {
 				s = item
+			}
+		}
+		if recoveryClaim {
+			p, e := a.get(project, process)
+			if e != nil {
+				return nil, e
+			}
+			if e = a.reconcileWorkflow(p, &r); e != nil {
+				return nil, e
+			}
+			all, e = a.steps(run)
+			if e != nil {
+				return nil, e
+			}
+			for _, item := range all {
+				if item.ID == id {
+					s = item
+					break
+				}
 			}
 		}
 	}
@@ -1029,7 +1067,7 @@ func (a *App) stepLifecycle(event sdk.Event, l *sdk.AgentEventLifecycle) error {
 	if int64(l.Sequence) <= s.LifecycleSequence {
 		return nil
 	}
-	_, e = a.db.Exec(`UPDATE process_step_runs SET lifecycle_sequence=?,execution_state=?,execution_id=?,delivered_at=CASE WHEN delivered_at='' THEN ? ELSE delivered_at END,delivery_warning='',next_attempt_at='',delivery_suspended=0 WHERE id=?`, l.Sequence, l.Type, l.ExecutionID, timestamp(), id)
+	_, e = a.db.Exec(`UPDATE process_step_runs SET lifecycle_sequence=?,execution_state=?,execution_id=?,delivered_at=CASE WHEN delivered_at='' THEN ? ELSE delivered_at END,delivery_warning=CASE WHEN claim_attempts>0 AND state='ready' THEN delivery_warning ELSE '' END,next_attempt_at='',delivery_suspended=CASE WHEN claim_attempts>0 AND state='ready' THEN delivery_suspended ELSE 0 END WHERE id=?`, l.Sequence, l.Type, l.ExecutionID, timestamp(), id)
 	return e
 }
 

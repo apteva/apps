@@ -149,6 +149,7 @@ func (a *App) pendingRuns(process string, now time.Time) ([]Run, error) {
 	  EXISTS(SELECT 1 FROM process_step_runs s WHERE s.run_id=r.id AND s.required=1 AND s.state IN ('failed','cancelled')) OR
 	  NOT EXISTS(SELECT 1 FROM process_step_runs s WHERE s.run_id=r.id AND s.required=1 AND s.state<>'completed') OR
 	  EXISTS(SELECT 1 FROM process_step_runs s WHERE s.run_id=r.id AND (
+	   (s.state='ready' AND s.delivered_at<>'' AND s.claimed_at='' AND s.delivery_suspended=0 AND s.delivered_at<=? AND (s.claim_next_at='' OR s.claim_next_at<=?) AND EXISTS(SELECT 1 FROM process_run_workers w WHERE w.run_id=r.id AND w.thread_id=s.target_thread_id) AND NOT EXISTS(SELECT 1 FROM process_step_runs active WHERE active.run_id=r.id AND active.target_thread_id=s.target_thread_id AND active.state IN ('running','waiting','blocked'))) OR
 	   (s.state IN ('pending','scheduled') AND (s.state='pending' OR s.start_at='' OR s.start_at<=?) AND NOT EXISTS(SELECT 1 FROM json_each(s.definition_json,'$.depends_on') dep WHERE NOT EXISTS(SELECT 1 FROM process_step_runs ancestor WHERE ancestor.run_id=r.id AND ancestor.step_key=dep.value AND ancestor.state='completed'))) OR
 	   (s.state IN ('ready','running','waiting','blocked') AND s.delivered_at='' AND s.delivery_suspended=0 AND json_extract(s.executor_json,'$.kind')='agent' AND (s.next_attempt_at='' OR s.next_attempt_at<=?)) OR
 	   (s.state='running' AND s.delivered_at<>'' AND s.delivery_suspended=0 AND s.updated_at<=? AND (s.next_attempt_at='' OR s.next_attempt_at<=?) AND EXISTS(SELECT 1 FROM process_run_workers w WHERE w.run_id=r.id AND w.thread_id=s.target_thread_id))
@@ -156,7 +157,7 @@ func (a *App) pendingRuns(process string, now time.Time) ([]Run, error) {
 	  (delivery_warning='' AND EXISTS(SELECT 1 FROM process_step_runs s WHERE s.run_id=r.id AND s.state NOT IN ('completed','failed','cancelled') AND s.delivery_warning<>'')) OR
 	  (delivery_warning<>'' AND NOT EXISTS(SELECT 1 FROM process_step_runs s WHERE s.run_id=r.id AND s.state NOT IN ('completed','failed','cancelled') AND s.delivery_warning<>''))
 	 ))
-	) ORDER BY created_at,id`, process, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(-staleStepReminderAfter).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	) ORDER BY created_at,id`, process, now.Format(time.RFC3339Nano), now.Add(-unclaimedStepAfter).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Add(-staleStepReminderAfter).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	if err != nil {
 		return nil, err
 	}

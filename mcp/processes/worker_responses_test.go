@@ -171,7 +171,11 @@ func TestWorkerAcknowledgementKeepsApprovalGateAndFinalDone(t *testing.T) {
 			t.Fatal(err)
 		}
 		ack := raw.(map[string]any)
-		if ack["done"] != false || !strings.Contains(ack["next_action"].(string), "Wait for the next Processes event") {
+		expected := "Wait for the next Processes event"
+		if ready, ok := ack["ready_steps"].([]WorkerWorkItem); ok && len(ready) > 0 {
+			expected = "Claim delivered ready_steps"
+		}
+		if ack["done"] != false || !strings.Contains(ack["next_action"].(string), expected) {
 			t.Fatal("worker stopped before approval", ack)
 		}
 		if key == "validate" && ack["run_state"] != "waiting" {

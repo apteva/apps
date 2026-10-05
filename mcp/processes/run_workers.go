@@ -95,7 +95,7 @@ func (a *App) claimStep(r Run, s StepRun, all []StepRun, actor string) error {
 		return err
 	}
 	if s.State == "ready" {
-		return a.writeStep(s, "running", s.Progress, s.Output, s.Error, actor)
+		return a.writeStepClaim(s, "running", s.Progress, s.Output, s.Error, actor, true)
 	}
 	return nil
 }

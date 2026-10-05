@@ -43,7 +43,7 @@ type WorkerWorkItem struct {
 // Hints include only this owner's ready work and durable in-flight checkpoints.
 // They do not resend instructions or receipts. Claim/read is authoritative.
 func parallelWorkHints(result map[string]any, r Run, agent int64, worker string, all []StepRun) {
-	if !aiParallel(r) || worker == "" {
+	if worker == "" {
 		return
 	}
 	ready, active := []WorkerWorkItem{}, []WorkerWorkItem{}
@@ -53,7 +53,7 @@ func parallelWorkHints(result map[string]any, r Run, agent int64, worker string,
 				continue
 			}
 			item := WorkerWorkItem{ID: s.ID, Key: s.Key, State: s.State, Revision: s.Revision}
-			if s.State == "ready" && !s.DeliverySuspended && stepTimeReady(s, time.Now()) && dependenciesReady(s, all) {
+			if s.State == "ready" && stepReleased(r, s) && s.DeliveredAt != "" && !s.DeliverySuspended && stepTimeReady(s, time.Now()) && dependenciesReady(s, all) {
 				ready = append(ready, item)
 			} else if s.State == "running" || s.State == "waiting" || s.State == "blocked" {
 				active = append(active, item)
@@ -61,7 +61,9 @@ func parallelWorkHints(result map[string]any, r Run, agent int64, worker string,
 		}
 	}
 	result["ready_steps"], result["active_steps"] = ready, active
-	result["parallel_execution"], result["max_parallel_steps"] = "auto", parallelLimit(r)
+	if aiParallel(r) {
+		result["parallel_execution"], result["max_parallel_steps"] = "auto", parallelLimit(r)
+	}
 }
 
 func parallelWorkerDirective(r Run) string {
