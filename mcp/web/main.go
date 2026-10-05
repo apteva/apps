@@ -1,4 +1,4 @@
-// Web v0.2.7 - browser-backed web intelligence and reusable extractors.
+// Web v0.2.9 - browser-backed web intelligence and reusable extractors.
 //
 // The app requires computer for session lifecycle, rendered extraction, and
 // screenshots. It opens a browser before search/extract/crawl/map/research page
@@ -287,6 +287,7 @@ type browserProxyState struct {
 }
 
 type browserExtractResult struct {
+	googleOrganicOnly bool
 	SessionID         string          `json:"session_id"`
 	Backend           string          `json:"backend"`
 	CurrentURL        string          `json:"current_url"`
@@ -484,24 +485,67 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	defer a.closeBrowser(ctx, browser.SessionID)
 
 	extracted, err := a.extractBrowserDOM(ctx, browser.SessionID, mapMerge(args, map[string]any{
-		"formats": searchExtractFormats(engine),
+		"formats": searchExtractFormats(engine), "max_chars": 60000, "wait_ms": 800,
 	}), true)
 	if err != nil {
 		completeRun(ctx, runID, "failed", nil, err)
 		return nil, err
 	}
-	if extracted.Truncated && len(extracted.Links) == 0 {
-		linksOnly, retryErr := a.extractBrowserDOM(ctx, browser.SessionID, mapMerge(args, map[string]any{
-			"formats": []string{"links"},
-		}), false)
-		if retryErr == nil && len(linksOnly.Links) > 0 {
-			extracted.Links = linksOnly.Links
-		}
-	}
-	results := parseSearchResults(engine, extracted, limit)
 	searchBlocked := detectSearchBlocked(engine, extracted)
-	if searchBlocked == "" && len(results) == 0 && hasVisibleSearchResultContent(extracted) {
-		err := errors.New("search_extraction_incomplete: visible search results were rendered but result links could not be extracted")
+	resolution := googleResolutionReport{}
+	extractionAttempts := 0
+	var results []searchResult
+	if engine == "google" && searchBlocked == "" {
+		// HTML preserves heading and ad-container identity. Fetch it separately
+		// so navigation URLs cannot consume the organic extraction budget.
+		// Never classify the context-free link list as organic results.
+		extracted.googleOrganicOnly = true
+		for attempt := 0; attempt < 3; attempt++ {
+			extractionAttempts++
+			dom, domErr := a.extractBrowserDOM(ctx, browser.SessionID, mapMerge(args, map[string]any{
+				"formats": []string{"html"}, "max_chars": 200000, "wait_ms": 800 + attempt*1000,
+			}), false)
+			if domErr != nil {
+				continue
+			}
+			if blocked := detectSearchBlocked(engine, dom); blocked != "" {
+				searchBlocked = blocked
+				break
+			}
+			if dom.HTML == "" {
+				continue
+			}
+			extracted.HTML = dom.HTML
+			extracted.Links = googleOrganicHTMLLinks(dom.HTML, firstNonEmpty(dom.CurrentURL, extracted.CurrentURL))
+			extracted.Truncated = dom.Truncated
+			attemptResults, report := resolveGoogleSearchResults(ctx, extracted, limit)
+			resolution.Attempted += report.Attempted
+			resolution.Resolved += report.Resolved
+			resolution.Failed += report.Failed
+			resolution.Failures = append(resolution.Failures, report.Failures...)
+			if len(resolution.Failures) > 8 {
+				resolution.Failures = resolution.Failures[:8]
+			}
+			if len(attemptResults) > len(results) {
+				results = attemptResults
+			}
+			if len(results) >= limit || (len(results) > 0 && !dom.Truncated) {
+				break
+			}
+		}
+	} else {
+		if extracted.Truncated && len(extracted.Links) == 0 {
+			linksOnly, retryErr := a.extractBrowserDOM(ctx, browser.SessionID, mapMerge(args, map[string]any{
+				"formats": []string{"links"}, "max_chars": 200000, "wait_ms": 1800,
+			}), false)
+			if retryErr == nil {
+				extracted.Links = linksOnly.Links
+			}
+		}
+		results = parseSearchResults(engine, extracted, limit)
+	}
+	if searchBlocked == "" && len(results) == 0 && (hasVisibleSearchResultContent(extracted) || len(collectGoogleSearchCandidates(extracted)) > 0) {
+		err := fmt.Errorf("search_extraction_incomplete: visible search results were rendered but organic result links could not be extracted (DOM attempts=%d, redirects resolved=%d, failed=%d)", extractionAttempts, resolution.Resolved, resolution.Failed)
 		completeRun(ctx, runID, "failed", nil, err)
 		return nil, err
 	}
@@ -524,6 +568,12 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			"text":        truncateString(extracted.Text, 1200),
 			"links_count": len(extracted.Links),
 		},
+	}
+	if resolution.Attempted > 0 {
+		out["redirect_resolution"] = resolution
+	}
+	if engine == "google" {
+		out["search_extraction"] = map[string]any{"attempts": extractionAttempts, "organic_candidates": len(collectGoogleSearchCandidates(extracted)), "truncated": extracted.Truncated, "method": "result_headings"}
 	}
 	if searchBlocked != "" {
 		out["blocked"] = true
@@ -551,7 +601,7 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 func searchExtractFormats(engine string) []string {
 	if engine == "google" {
-		return []string{"links", "text", "metadata"}
+		return []string{"text", "metadata"}
 	}
 	return []string{"links", "html", "text", "metadata"}
 }
@@ -2323,6 +2373,9 @@ func cacheKey(kind string, args map[string]any) (string, string, error) {
 	// Keep cached responses aligned with the browser audit schema and backend
 	// ownership rules introduced in Web v0.2.6.
 	cleaned := map[string]any{"kind": kind, "response_schema": "web-v0.2.6"}
+	if kind == "search" || kind == "research" {
+		cleaned["search_parser"] = "google-organic-v0.2.9"
+	}
 	for k, v := range args {
 		if strings.HasPrefix(k, "_") {
 			continue
@@ -2861,19 +2914,110 @@ func parseSearchResults(engine string, extracted *browserExtractResult, limit in
 	}
 }
 
-func parseGoogleSearch(extracted *browserExtractResult, limit int) []searchResult {
-	if extracted == nil {
-		return []searchResult{}
+type googleSearchCandidate struct {
+	rawURL    string
+	targetURL string
+	title     string
+	opaque    bool
+}
+
+type googleResolutionReport struct {
+	Attempted int      `json:"attempted"`
+	Resolved  int      `json:"resolved"`
+	Failed    int      `json:"failed"`
+	Failures  []string `json:"failures,omitempty"`
+}
+
+const (
+	maxGoogleResolutionCandidates = 40
+	googleResolutionConcurrency   = 4
+	googleResolutionTimeout       = 8 * time.Second
+	googleRedirectTimeout         = 4 * time.Second
+)
+
+// Preserve DOM identity: only result headings qualify, not citations or sitelinks.
+func googleOrganicHTMLLinks(body, base string) []linkInfo {
+	root, err := html.Parse(strings.NewReader(body))
+	if err != nil {
+		return nil
 	}
+	var links []linkInfo
+	seen := map[string]bool{}
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == "h3" {
+			var anchor *html.Node
+			ad := false
+			for parent := n.Parent; parent != nil; parent = parent.Parent {
+				if parent.Data == "a" && anchor == nil {
+					anchor = parent
+				}
+				id := strings.ToLower(attr(parent, "id"))
+				if attr(parent, "data-text-ad") != "" || attr(parent, "data-ta-slot") != "" || id == "tads" || id == "tadsb" || strings.HasPrefix(id, "google_ads") || attr(parent, "aria-hidden") == "true" {
+					ad = true
+				}
+			}
+			if anchor != nil && !ad {
+				href := absoluteURL(base, attr(anchor, "href"))
+				title := cleanText(nodeText(n))
+				if href != "" && title != "" && !seen[href] && !isGoogleNavigationOrAdLink(title, href) {
+					seen[href] = true
+					links = append(links, linkInfo{URL: href, Text: title})
+				}
+			}
+		}
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(root)
+	return links
+}
+
+func collectGoogleSearchCandidates(extracted *browserExtractResult) []googleSearchCandidate {
+	if extracted == nil {
+		return nil
+	}
+	links := extracted.Links
+	if extracted.googleOrganicOnly || extracted.HTML != "" {
+		links = googleOrganicHTMLLinks(extracted.HTML, firstNonEmpty(extracted.CurrentURL, extracted.URL, "https://www.google.com/"))
+	}
+	candidates := make([]googleSearchCandidate, 0, len(links))
+	for _, link := range links {
+		decoded := decodeGoogleURL(link.URL)
+		if isGoogleNavigationOrAdLink(link.Text, link.URL) || isGoogleNavigationOrAdLink(link.Text, decoded) {
+			continue
+		}
+		if isLikelyGoogleResultURL(decoded) {
+			candidates = append(candidates, googleSearchCandidate{
+				rawURL: link.URL, targetURL: canonicalResultURL(decoded),
+				title: cleanGoogleResultTitle(link.Text, decoded),
+			})
+			continue
+		}
+		if isOpaqueGoogleRedirect(link.URL) {
+			candidates = append(candidates, googleSearchCandidate{
+				rawURL: link.URL, title: cleanText(link.Text), opaque: true,
+			})
+		}
+	}
+	return candidates
+}
+
+func parseGoogleSearch(extracted *browserExtractResult, limit int) []searchResult {
+	candidates := collectGoogleSearchCandidates(extracted)
 	results := make([]searchResult, 0, limit)
 	seen := map[string]bool{}
-	for _, l := range extracted.Links {
+	for _, candidate := range candidates {
 		if len(results) >= limit {
 			break
 		}
-		href := decodeGoogleURL(l.URL)
-		title := cleanGoogleResultTitle(l.Text, href)
-		if href == "" || title == "" || seen[href] || !isLikelyGoogleResultURL(href) {
+		if candidate.opaque {
+			continue
+		}
+		href := candidate.targetURL
+		title := candidate.title
+		if href == "" || title == "" || seen[href] {
 			continue
 		}
 		seen[href] = true
@@ -2889,6 +3033,217 @@ func parseGoogleSearch(extracted *browserExtractResult, limit int) []searchResul
 		return []searchResult{}
 	}
 	return results
+}
+
+func resolveGoogleSearchResults(appCtx *sdk.AppCtx, extracted *browserExtractResult, limit int) ([]searchResult, googleResolutionReport) {
+	return resolveGoogleSearchResultsContext(extracted, limit, func(ctx context.Context, rawURL string) (string, error) {
+		return resolveGoogleRedirectURLContext(ctx, appCtx, rawURL)
+	})
+}
+
+func resolveGoogleSearchResultsWith(extracted *browserExtractResult, limit int, resolver func(string) (string, error)) ([]searchResult, googleResolutionReport) {
+	return resolveGoogleSearchResultsContext(extracted, limit, func(_ context.Context, raw string) (string, error) { return resolver(raw) })
+}
+
+func resolveGoogleSearchResultsContext(extracted *browserExtractResult, limit int, resolver func(context.Context, string) (string, error)) ([]searchResult, googleResolutionReport) {
+	return resolveGoogleSearchResultsWithContext(context.Background(), extracted, limit, resolver)
+}
+
+func resolveGoogleSearchResultsWithContext(parent context.Context, extracted *browserExtractResult, limit int, resolver func(context.Context, string) (string, error)) ([]searchResult, googleResolutionReport) {
+	resolveCtx, cancel := context.WithTimeout(parent, googleResolutionTimeout)
+	defer cancel()
+	candidates := collectGoogleSearchCandidates(extracted)
+	if len(candidates) > maxGoogleResolutionCandidates {
+		candidates = candidates[:maxGoogleResolutionCandidates]
+	}
+	report := googleResolutionReport{}
+	resolved := make(map[int]string)
+	type resolution struct {
+		index int
+		url   string
+		err   error
+	}
+	jobs := make(chan int)
+	results := make(chan resolution, len(candidates))
+	workerCount := minInt(googleResolutionConcurrency, len(candidates))
+	var wg sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				candidate := candidates[index]
+				target, err := resolver(resolveCtx, candidate.rawURL)
+				results <- resolution{index: index, url: target, err: err}
+			}
+		}()
+	}
+	go func() {
+		defer close(results)
+		defer wg.Wait()
+		defer close(jobs)
+		for index, candidate := range candidates {
+			if !candidate.opaque {
+				continue
+			}
+			select {
+			case jobs <- index:
+			case <-resolveCtx.Done():
+				results <- resolution{index: index, err: resolveCtx.Err()}
+			}
+		}
+	}()
+	for item := range results {
+		report.Attempted++
+		if item.err != nil {
+			report.Failed++
+			if len(report.Failures) < 8 {
+				report.Failures = append(report.Failures, item.err.Error())
+			}
+			continue
+		}
+		report.Resolved++
+		resolved[item.index] = item.url
+	}
+
+	out := make([]searchResult, 0, limit)
+	seen := make(map[string]bool)
+	for index, candidate := range candidates {
+		if len(out) >= limit {
+			break
+		}
+		href := candidate.targetURL
+		if candidate.opaque {
+			href = resolved[index]
+		}
+		if href == "" || !isLikelyGoogleResultURL(href) || seen[href] {
+			continue
+		}
+		title := cleanGoogleResultTitle(candidate.title, href)
+		if title == "" {
+			continue
+		}
+		seen[href] = true
+		out = append(out, searchResult{
+			Title: truncateString(title, 240), URL: href, Source: "google",
+			Rank: len(out) + 1, Confidence: "medium",
+		})
+	}
+	return out, report
+}
+
+func resolveGoogleRedirectURL(appCtx *sdk.AppCtx, rawURL string) (string, error) {
+	return resolveGoogleRedirectURLContext(context.Background(), appCtx, rawURL)
+}
+func resolveGoogleRedirectURLContext(parent context.Context, appCtx *sdk.AppCtx, rawURL string) (string, error) {
+	return resolveGoogleRedirectWithClient(parent, appCtx, rawURL, outboundHTTPClient(appCtx))
+}
+
+func resolveGoogleRedirectWithClient(parent context.Context, appCtx *sdk.AppCtx, rawURL string, client *http.Client) (string, error) {
+	defer client.CloseIdleConnections()
+	if !isOpaqueGoogleRedirect(rawURL) {
+		return "", errors.New("google redirect is not an opaque Google result")
+	}
+	if err := validateBrowserTarget(appCtx, rawURL); err != nil {
+		return "", fmt.Errorf("google redirect target rejected: %w", err)
+	}
+	requestCtx, cancel := context.WithTimeout(parent, googleRedirectTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("create Google redirect request: %w", err)
+	}
+	req.Header.Set("User-Agent", "Apteva-Web/0.2")
+	var destination string
+	validateRedirect := client.CheckRedirect
+	client.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+		if err := validateRedirect(next, via); err != nil {
+			return err
+		}
+		if isLikelyGoogleResultURL(next.URL.String()) {
+			if !allowPrivateNetworks(appCtx) {
+				if _, err := publicAddresses(next.Context(), next.URL.Hostname()); err != nil {
+					return err
+				}
+			}
+			destination = canonicalResultURL(next.URL.String())
+			return http.ErrUseLastResponse
+		}
+		return nil
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("resolve Google redirect: %w", err)
+	}
+	defer resp.Body.Close()
+	if destination != "" {
+		return destination, nil
+	}
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("resolve Google redirect: HTTP %d", resp.StatusCode)
+	}
+	finalURL := canonicalResultURL(resp.Request.URL.String())
+	if !isLikelyGoogleResultURL(finalURL) {
+		return "", errors.New("Google redirect did not resolve to an organic result URL")
+	}
+	return finalURL, nil
+}
+
+func isOpaqueGoogleRedirect(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || !isGoogleOwnedHost(u.Hostname()) {
+		return false
+	}
+	path := strings.TrimSuffix(strings.ToLower(u.EscapedPath()), "/")
+	if path != "/goto" && path != "/url" {
+		return false
+	}
+	raw := u.Query().Get("url")
+	if raw == "" {
+		return false
+	}
+	return !isLikelyGoogleResultURL(raw)
+}
+
+func canonicalResultURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	u.Fragment = ""
+	return u.String()
+}
+
+func isGoogleNavigationOrAdLink(text, rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err == nil {
+		host := strings.ToLower(u.Hostname())
+		if isGoogleAdHost(host) || hostIsOrSubdomain(host, "googleusercontent.com") || (isGoogleOwnedHost(host) && (strings.Contains(u.Path, "/aclk") || u.Query().Has("adurl") || u.Query().Has("gclid"))) {
+			return true
+		}
+	}
+	lower := strings.ToLower(cleanText(text))
+	for _, label := range []string{
+		"sign in", "settings", "tools", "feedback", "images", "maps", "news", "shopping", "videos", "more",
+		"open now", "top rated", "remote", "no degree", "yesterday", "last 3 days", "last week",
+		"contact us", "request a proposal", "register for a free demo", "global hr experts", "find out more",
+		"learn more", "read more", "view all", "website", "about", "careers", "home",
+		"book a consultation", "client case studies", "case studies", "get started", "apply now",
+	} {
+		if lower == label {
+			return true
+		}
+	}
+	return strings.HasPrefix(lower, "sponsored") || lower == "ad"
+}
+
+func isGoogleAdHost(host string) bool {
+	for _, domain := range []string{"googleadservices.com", "doubleclick.net", "googlesyndication.com"} {
+		if hostIsOrSubdomain(host, domain) {
+			return true
+		}
+	}
+	return false
 }
 
 func detectSearchBlocked(engine string, extracted *browserExtractResult) string {
@@ -3317,6 +3672,10 @@ func decodeGoogleURL(href string) string {
 	}
 	host := strings.ToLower(u.Hostname())
 	if isGoogleOwnedHost(host) {
+		path := strings.TrimSuffix(strings.ToLower(u.Path), "/")
+		if path != "/url" && path != "/goto" {
+			return ""
+		}
 		for _, key := range []string{"q", "url"} {
 			if raw := u.Query().Get(key); raw != "" {
 				return raw
@@ -3345,7 +3704,7 @@ func isLikelyGoogleResultURL(raw string) bool {
 	if host == "" {
 		return false
 	}
-	return !isGoogleOwnedHost(host)
+	return !isGoogleOwnedHost(host) && !isGoogleAdHost(host)
 }
 
 func hostIsOrSubdomain(host, domain string) bool {
