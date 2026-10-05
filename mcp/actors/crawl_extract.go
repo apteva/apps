@@ -42,7 +42,7 @@ type crawlPage struct {
 }
 
 func extractCrawlPage(c crawlDefinition, route crawlRoute, item *crawlQueueItem, doc *browserExtractResult) (*crawlPage, error) {
-	if doc.Truncated && !route.AllowTruncated {
+	if doc.Truncated {
 		return nil, errors.New("Computer returned truncated HTML; reduce page size rather than committing incomplete data")
 	}
 	root, err := html.Parse(strings.NewReader(doc.HTML))

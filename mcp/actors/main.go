@@ -131,22 +131,26 @@ type browserScreenshot struct {
 }
 
 type computerSOMScreenshot struct {
-	CurrentURL string            `json:"current_url"`
-	Width      int               `json:"width"`
-	Height     int               `json:"height"`
-	SOM        []setOfMarkTarget `json:"som"`
+	CurrentURL  string            `json:"current_url"`
+	Width       int               `json:"width"`
+	Height      int               `json:"height"`
+	SOM         []setOfMarkTarget `json:"som"`
+	SOMRevision any               `json:"som_revision"`
 }
 
 type setOfMarkTarget struct {
-	Label int    `json:"label"`
-	X     int    `json:"x"`
-	Y     int    `json:"y"`
-	W     int    `json:"w"`
-	H     int    `json:"h"`
-	Tag   string `json:"tag"`
-	Role  string `json:"role"`
-	Text  string `json:"text"`
-	Type  string `json:"type"`
+	ID             string `json:"id"`
+	AccessibleName string `json:"accessible_name"`
+	Disabled       bool   `json:"disabled"`
+	Label          int    `json:"label"`
+	X              int    `json:"x"`
+	Y              int    `json:"y"`
+	W              int    `json:"w"`
+	H              int    `json:"h"`
+	Tag            string `json:"tag"`
+	Role           string `json:"role"`
+	Text           string `json:"text"`
+	Type           string `json:"type"`
 }
 
 type linkInfo struct {
@@ -232,9 +236,12 @@ func (a *App) extractBrowserDOM(callCtx context.Context, ctx *sdk.AppCtx, sessio
 	extractArgs := withProjectID(ctx, map[string]any{
 		"session_id":  sessionID,
 		"formats":     formats,
-		"max_chars":   boundedInt(intArg(args, "max_chars"), defaultMaxChars, 1000, 200000),
+		"max_chars":   boundedInt(intArg(args, "max_chars"), defaultMaxChars, 1000, 1000000),
 		"readability": true,
 	})
+	if value, ok := args["readability"].(bool); ok {
+		extractArgs["readability"] = value
+	}
 	if waitMS := intArg(args, "wait_ms"); waitMS > 0 {
 		extractArgs["wait_ms"] = waitMS
 	}

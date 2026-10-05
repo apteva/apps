@@ -66,13 +66,35 @@ func (e *actorExecution) interact(step actorStep) error {
 	if e.session == nil {
 		return errors.New("interaction requires an open browser")
 	}
+	if step.Action == "fill" || step.Action == "set_text" {
+		args := map[string]any{
+			"session_id": e.session.SessionID,
+			"action":     "set_text",
+			"text":       step.Text,
+			"mode":       firstNonEmpty(step.Mode, "replace"),
+		}
+		if step.NewlineMode != "" {
+			args["newline_mode"] = step.NewlineMode
+		}
+		return e.dispatchSemantic(step, args)
+	}
+	if step.Action == "set_checked" || step.Action == "select_option" || step.Action == "set_temporal" {
+		args := map[string]any{"session_id": e.session.SessionID, "action": step.Action}
+		if step.Action == "set_checked" {
+			checked, ok := step.Checked.(bool)
+			if !ok {
+				return errors.New("set_checked requires a boolean checked value")
+			}
+			args["checked"] = checked
+		} else if len(step.Values) > 0 && step.Action == "select_option" {
+			args["values"] = step.Values
+		} else {
+			args["value"] = step.Value
+		}
+		return e.dispatchSemantic(step, args)
+	}
 	args := map[string]any{"session_id": e.session.SessionID, "action": step.Action}
 	switch step.Action {
-	case "fill":
-		args["action"] = "set_text"
-		args["selector"] = step.Locator.Selector
-		args["text"] = step.Text
-		args["mode"] = "replace"
 	case "key":
 		args["key"] = step.Key
 	case "scroll":
@@ -84,6 +106,163 @@ func (e *actorExecution) interact(step actorStep) error {
 		return err
 	}
 	return e.finishInteraction(out)
+}
+
+// dispatchSemantic sends a DOM-targeted Computer action using the current
+// semantic observation. It deliberately avoids coordinate fallbacks: media
+// controls and composers must be tied to the live SOM target.
+func (e *actorExecution) dispatchSemantic(step actorStep, args map[string]any) error {
+	locator := step.Locator
+	if selector := strings.TrimSpace(locator.Selector); selector != "" && !locator.SOMOnly {
+		args["selector"] = selector
+		var out map[string]any
+		if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, args), &out); err != nil {
+			return err
+		}
+		e.recordMediaResult(out)
+		return e.finishInteraction(out)
+	}
+	var shot computerSOMScreenshot
+	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, map[string]any{
+		"session_id": e.session.SessionID, "action": "screenshot", "annotate": true, "include_som": true,
+	}), &shot); err != nil {
+		return fmt.Errorf("observe SOM: %w", err)
+	}
+	var match *setOfMarkTarget
+	for i := range shot.SOM {
+		target := &shot.SOM[i]
+		if target.Disabled || !somTargetMatches(locator, *target) {
+			continue
+		}
+		if match != nil {
+			return fmt.Errorf("ambiguous SOM locator: multiple targets match text=%q role=%q", locator.Text, locator.Role)
+		}
+		match = target
+	}
+	if match == nil {
+		return fmt.Errorf("locator not found in SOM: text=%q role=%q", locator.Text, locator.Role)
+	}
+	if match.ID != "" {
+		args["target_id"] = match.ID
+	} else {
+		args["label"] = match.Label
+	}
+	if shot.SOMRevision != nil {
+		args["som_revision"] = shot.SOMRevision
+	}
+	var out map[string]any
+	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, args), &out); err != nil {
+		return err
+	}
+	e.recordMediaResult(out)
+	return e.finishInteraction(out)
+}
+
+func (e *actorExecution) upload(step actorStep) error {
+	if e.session == nil {
+		return errors.New("upload_file requires an open browser")
+	}
+	args := map[string]any{"session_id": e.session.SessionID, "action": "upload_file"}
+	for key, value := range map[string]string{
+		"source_url": step.SourceURL, "base64": step.Base64, "file_path": step.FilePath,
+		"filename": step.Filename, "mime_type": step.MIMEType,
+	} {
+		if strings.TrimSpace(value) != "" {
+			args[key] = value
+		}
+	}
+	return e.dispatchSemantic(step, args)
+}
+
+func (e *actorExecution) recordMediaResult(out map[string]any) {
+	uploaded, _ := out["uploaded"].(bool)
+	if !uploaded {
+		return
+	}
+	media := map[string]any{"uploaded": true}
+	for _, key := range []string{"filename", "size_bytes", "mime_type", "file_source"} {
+		if value, ok := out[key]; ok {
+			media[key] = value
+		}
+	}
+	e.media = append(e.media, media)
+}
+
+func validateWaitStep(step actorStep) error {
+	if len(step.Conditions) < 1 || len(step.Conditions) > 8 {
+		return errors.New("wait_for requires between 1 and 8 conditions")
+	}
+	if step.Match != "" && step.Match != "any" && step.Match != "all" {
+		return errors.New("wait_for match must be any or all")
+	}
+	for _, condition := range step.Conditions {
+		switch condition.Type {
+		case "url_changed", "url_equals", "url_contains", "text_present", "text_absent":
+			if strings.TrimSpace(condition.Value) == "" {
+				return fmt.Errorf("wait_for %s requires value", condition.Type)
+			}
+		case "selector_present", "selector_absent":
+			if strings.TrimSpace(condition.Selector) == "" {
+				return fmt.Errorf("wait_for %s requires selector", condition.Type)
+			}
+		case "target_present", "target_absent", "target_state":
+			if strings.TrimSpace(condition.TargetID) == "" {
+				return fmt.Errorf("wait_for %s requires target_id", condition.Type)
+			}
+			if condition.Type == "target_state" {
+				switch condition.State {
+				case "ready", "loading", "enabled", "disabled", "checked", "unchecked":
+				default:
+					return errors.New("wait_for target_state requires a valid state")
+				}
+			}
+		case "media_present", "media_error":
+		default:
+			return fmt.Errorf("unsupported wait_for condition %q", condition.Type)
+		}
+	}
+	return nil
+}
+
+// A structured Computer timeout is a failed actor assertion. Do not continue
+// into a publish step when the required player or page state did not appear.
+func (e *actorExecution) waitFor(step actorStep) error {
+	if e.session == nil {
+		return errors.New("wait_for requires an open browser")
+	}
+	var out map[string]any
+	args := map[string]any{
+		"session_id": e.session.SessionID, "action": "wait_for",
+		"conditions": step.Conditions, "match": firstNonEmpty(step.Match, "any"),
+		"timeout_ms": boundedInt(templateInt(step.TimeoutMS), 10000, 500, 30000),
+	}
+	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, args), &out); err != nil {
+		return err
+	}
+	e.currentURL = firstNonEmpty(stringFromAny(out["current_url"]), e.currentURL)
+	if !hostAllowed(e.currentURL, e.definition.AllowedHosts) {
+		return fmt.Errorf("browser navigated outside allowed_hosts: %s", e.currentURL)
+	}
+	matched, _ := out["matched"].(bool)
+	timedOut, _ := out["timed_out"].(bool)
+	if !matched || timedOut {
+		return fmt.Errorf("wait_for required conditions not met (timed_out=%t, media_embed_status=%q)", timedOut, stringFromAny(out["media_embed_status"]))
+	}
+	if out["media_embed_status"] == "loaded" {
+		media := map[string]any{"kind": "embed", "status": "loaded"}
+		for from, to := range map[string]string{"media_provider": "provider", "media_iframe_src": "iframe_url", "media_thumbnail_url": "thumbnail_url"} {
+			if value := stringFromAny(out[from]); value != "" {
+				media[to] = value
+			}
+		}
+		for _, existing := range e.media {
+			if existing["kind"] == "embed" && existing["iframe_url"] == media["iframe_url"] {
+				return nil
+			}
+		}
+		e.media = append(e.media, media)
+	}
+	return nil
 }
 
 func (a *App) platformTools() []sdk.Tool {

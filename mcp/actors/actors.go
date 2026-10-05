@@ -69,27 +69,77 @@ type actorLimits struct {
 }
 
 type actorStep struct {
-	Text       string                `json:"text,omitempty"`
-	Key        string                `json:"key,omitempty"`
-	Direction  string                `json:"direction,omitempty"`
-	Amount     int                   `json:"amount,omitempty"`
-	Action     string                `json:"action"`
-	URL        string                `json:"url,omitempty"`
-	Locator    actorLocator          `json:"locator,omitempty"`
-	Optional   bool                  `json:"optional,omitempty"`
-	Items      string                `json:"items,omitempty"`
-	Fields     map[string]actorField `json:"fields,omitempty"`
-	MaxPages   any                   `json:"max_pages,omitempty"`
-	Duration   any                   `json:"duration_ms,omitempty"`
-	Label      string                `json:"label,omitempty"`
-	Host       string                `json:"host,omitempty"`
-	PathPrefix string                `json:"path_prefix,omitempty"`
+	Text               string                `json:"text,omitempty"`
+	Key                string                `json:"key,omitempty"`
+	Direction          string                `json:"direction,omitempty"`
+	Amount             int                   `json:"amount,omitempty"`
+	Action             string                `json:"action"`
+	URL                string                `json:"url,omitempty"`
+	Locator            actorLocator          `json:"locator,omitempty"`
+	ExpectedText       string                `json:"expected_text,omitempty"`
+	ExpectedEffect     string                `json:"expected_effect,omitempty"`
+	ConfirmConsequence string                `json:"confirm_consequence,omitempty"`
+	Optional           bool                  `json:"optional,omitempty"`
+	Items              string                `json:"items,omitempty"`
+	Fields             map[string]actorField `json:"fields,omitempty"`
+	MaxPages           any                   `json:"max_pages,omitempty"`
+	Duration           any                   `json:"duration_ms,omitempty"`
+	Label              string                `json:"label,omitempty"`
+	Host               string                `json:"host,omitempty"`
+	PathPrefix         string                `json:"path_prefix,omitempty"`
+	// Media inputs are generic; Computer resolves the source and attaches it
+	// to the semantic target selected by locator.
+	SourceURL   string               `json:"source_url,omitempty"`
+	Base64      string               `json:"base64,omitempty"`
+	FilePath    string               `json:"file_path,omitempty"`
+	Filename    string               `json:"filename,omitempty"`
+	MIMEType    string               `json:"mime_type,omitempty"`
+	Mode        string               `json:"mode,omitempty"`
+	NewlineMode string               `json:"newline_mode,omitempty"`
+	Conditions  []actorWaitCondition `json:"conditions,omitempty"`
+	Match       string               `json:"match,omitempty"`
+	TimeoutMS   any                  `json:"timeout_ms,omitempty"`
+	Checked     any                  `json:"checked,omitempty"`
+	Value       string               `json:"value,omitempty"`
+	Values      []string             `json:"values,omitempty"`
+	Readability *bool                `json:"readability,omitempty"`
+	OnceKey     string               `json:"once_key,omitempty"`
+	// MinItems/MaxItems turn an extraction into a cardinality gate. They are
+	// especially useful before a consequential click: a missing or ambiguous
+	// target must fail closed instead of producing an empty successful extract.
+	MinItems      int                       `json:"min_items,omitempty"`
+	MaxItems      int                       `json:"max_items,omitempty"`
+	Assertions    map[string]actorAssertion `json:"assertions,omitempty"`
+	VerifiedField string                    `json:"verified_field,omitempty"`
+}
+
+// actorAssertion is evaluated against the most recent extraction. It keeps
+// validation declarative and site-neutral: values may be compared directly,
+// checked for containment, or reconciled arithmetically before a click.
+type actorAssertion struct {
+	Equals       any      `json:"equals,omitempty"`
+	EqualsField  string   `json:"equals_field,omitempty"`
+	Contains     string   `json:"contains,omitempty"`
+	SumOf        []string `json:"sum_of,omitempty"`
+	DifferenceOf []string `json:"difference_of,omitempty"`
+	Tolerance    float64  `json:"tolerance,omitempty"`
+}
+
+type actorWaitCondition struct {
+	Type          string `json:"type"`
+	Value         string `json:"value,omitempty"`
+	Selector      string `json:"selector,omitempty"`
+	TargetID      string `json:"target_id,omitempty"`
+	State         string `json:"state,omitempty"`
+	CaseSensitive bool   `json:"case_sensitive,omitempty"`
 }
 
 type actorLocator struct {
 	Text     string `json:"text,omitempty"`
 	Role     string `json:"role,omitempty"`
 	Selector string `json:"selector,omitempty"`
+	Exact    bool   `json:"exact,omitempty"`
+	SOMOnly  bool   `json:"som_only,omitempty"`
 }
 
 type actorField struct {
@@ -97,6 +147,7 @@ type actorField struct {
 	Type      string `json:"type,omitempty"`
 	Attribute string `json:"attribute,omitempty"`
 	Required  bool   `json:"required,omitempty"`
+	Pattern   string `json:"pattern,omitempty"`
 }
 
 type actorRecord struct {
@@ -321,8 +372,42 @@ func validateActorDefinition(def actorDefinition) error {
 	for i, step := range def.Steps {
 		switch step.Action {
 		case "fill":
-			if step.Locator.Selector == "" {
-				return fmt.Errorf("steps[%d].locator.selector is required for fill", i)
+			if !locatorHasTarget(step.Locator) {
+				return fmt.Errorf("steps[%d].locator is required for fill", i)
+			}
+		case "set_text":
+			if !locatorHasTarget(step.Locator) {
+				return fmt.Errorf("steps[%d].locator is required for set_text", i)
+			}
+		case "set_checked", "select_option", "set_temporal":
+			if !locatorHasTarget(step.Locator) {
+				return fmt.Errorf("steps[%d].locator is required for %s", i, step.Action)
+			}
+			if step.Action == "set_checked" {
+				if _, ok := step.Checked.(bool); !ok && !actorTemplateValue(stringFromAny(step.Checked)) {
+					return fmt.Errorf("steps[%d].checked must be a boolean or template", i)
+				}
+			} else if step.Value == "" && (step.Action != "select_option" || len(step.Values) == 0) {
+				return fmt.Errorf("steps[%d].value is required for %s", i, step.Action)
+			}
+		case "upload_file":
+			if !locatorHasTarget(step.Locator) {
+				return fmt.Errorf("steps[%d].locator is required for upload_file", i)
+			}
+			sources := 0
+			for _, source := range []string{step.SourceURL, step.Base64, step.FilePath} {
+				if strings.TrimSpace(source) != "" {
+					sources++
+				}
+			}
+			if sources != 1 {
+				return fmt.Errorf("steps[%d] upload_file requires exactly one of source_url, base64, or file_path", i)
+			}
+			if step.SourceURL != "" && !actorTemplateValue(step.SourceURL) {
+				u, err := url.Parse(step.SourceURL)
+				if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+					return fmt.Errorf("steps[%d].source_url must be http or https", i)
+				}
 			}
 		case "key":
 			if step.Key == "" {
@@ -344,6 +429,9 @@ func validateActorDefinition(def actorDefinition) error {
 			if step.Locator.Text == "" && step.Locator.Role == "" && step.Locator.Selector == "" {
 				return fmt.Errorf("steps[%d].locator is required", i)
 			}
+			if step.OnceKey != "" && (step.Action != "click" || step.ExpectedEffect == "" || step.ConfirmConsequence != step.ExpectedEffect) {
+				return fmt.Errorf("steps[%d].once_key requires a click with an acknowledged expected_effect", i)
+			}
 		case "extract":
 			if strings.TrimSpace(step.Items) == "" || len(step.Fields) == 0 {
 				return fmt.Errorf("steps[%d] requires items and fields", i)
@@ -351,12 +439,38 @@ func validateActorDefinition(def actorDefinition) error {
 			if len(step.Fields) > maxActorFields {
 				return fmt.Errorf("steps[%d].fields exceeds the %d field limit", i, maxActorFields)
 			}
+			if step.MinItems < 0 || step.MaxItems < 0 || (step.MaxItems > 0 && step.MinItems > step.MaxItems) {
+				return fmt.Errorf("steps[%d] has invalid min_items/max_items", i)
+			}
+		case "assert_values":
+			if len(step.Assertions) == 0 {
+				return fmt.Errorf("steps[%d].assertions is required", i)
+			}
+			for field, assertion := range step.Assertions {
+				if strings.TrimSpace(field) == "" || (assertion.Equals == nil && assertion.EqualsField == "" && assertion.Contains == "" && len(assertion.SumOf) == 0 && len(assertion.DifferenceOf) == 0) {
+					return fmt.Errorf("steps[%d].assertions[%q] has no comparison", i, field)
+				}
+				if len(assertion.SumOf) > 0 && len(assertion.DifferenceOf) > 0 {
+					return fmt.Errorf("steps[%d].assertions[%q] cannot combine sum_of and difference_of", i, field)
+				}
+			}
+		case "click_verified":
+			if strings.TrimSpace(step.VerifiedField) == "" {
+				return fmt.Errorf("steps[%d].verified_field is required for click_verified", i)
+			}
+			if step.OnceKey != "" && (step.ExpectedEffect == "" || step.ConfirmConsequence != step.ExpectedEffect) {
+				return fmt.Errorf("steps[%d].once_key requires an acknowledged expected_effect", i)
+			}
 		case "assert_url":
 			if normalizeAllowedHost(step.Host) == "" {
 				return fmt.Errorf("steps[%d].host is required and must be a valid host", i)
 			}
 			if step.PathPrefix != "" && !strings.HasPrefix(step.PathPrefix, "/") {
 				return fmt.Errorf("steps[%d].path_prefix must start with /", i)
+			}
+		case "wait_for":
+			if err := validateWaitStep(step); err != nil {
+				return fmt.Errorf("steps[%d]: %w", i, err)
 			}
 		case "wait", "screenshot":
 		default:

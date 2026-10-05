@@ -196,7 +196,7 @@ func (e *actorExecution) crawlLoop(limiter *crawlLimiter) error {
 		}
 		if err == nil {
 			var doc *browserExtractResult
-			doc, err = pageWorker.extractDOM()
+			doc, err = pageWorker.extractCrawlDOM()
 			if err == nil {
 				page, err = extractCrawlPage(*e.crawl, route, item, doc)
 			}

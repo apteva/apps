@@ -33,6 +33,12 @@ Pass this to `actors_run`. Optional `idempotency_key` deduplicates retries with 
 
 For a saved login, add `browser.context_id` using a context created through Computer. Omit `backend` to defer to Computer; the saved context can determine its backend. The context remains owned by Computer, and Actors requests `persist: true`. Do not store credentials in inputs: input/definition snapshots are intentionally retained.
 
+## Publish media
+
+`upload_file` attaches an image or file using a semantic locator and exactly one of `source_url`, `base64`, or `file_path`. See `examples/media-publisher.json`. For a hosted video, use ordinary `fill`/`set_text` to enter `{{video_url}}` in the site's video URL field; no upload or provider-specific code is needed. `examples/video-url-publisher.json` is a generic starting point. Replace the host and controls for your site. The saved Patreon actor can accept a Bunny Stream player URL such as `https://iframe.mediadelivery.net/embed/{videoLibraryId}/{guid}`, constructed from the integration's video metadata.
+
+Use `wait_for` with Computer's declarative `conditions`, `match: any|all`, and a bounded `timeout_ms` (500–30000). A timeout or unmatched result fails the actor before subsequent actions. `media_present` verifies a rendered audio/video player; combine it with a saved-draft text condition when needed. Successful embeds return provider, iframe and thumbnail URLs under run output `media`. This confirms the rendered embed, not continuous video playback. The same action supports URL, text, selector and semantic-target conditions for other sites.
+
 ## Crawl a site
 
 For a concrete test fixture, `examples/ufcstats.json` shows how a site-specific definition can model events, fights and fighters. It is optional example data only. Save a definition's `definition` with `actors_crawl_save`, then pass the returned actor ID to `actors_crawl_run`. The run creates a durable URL frontier, follows configured URL fields into their routes, upserts keyed records into named datasets, and can be inspected with `actors_crawl_status`, `actors_frontier_list`, and `actors_dataset_query`. `actors_crawl_resume` continues pending work after a budget limit or restart.
@@ -89,3 +95,9 @@ The release manifest pins source to the matching immutable Actors tag. The regis
 ## Web compatibility
 
 Web's search, extraction, crawl, map, research and snapshot tools remain independent. Its existing extractor endpoints and data have not been deleted or silently rerouted. New reusable workflows should use Actors. A later explicit migration can import definitions and replace old endpoints with compatibility forwarding; it must account for app-local IDs, saved Jobs targets and historical run ownership.
+
+## Form and consequential actions
+
+Semantic `set_checked`, `select_option`, and `set_temporal` support access toggles, dropdowns and schedule fields. Use `readability: false` on extract/assert steps when controls live outside the primary content. An extracted field may supply `pattern` to capture a labelled value before type conversion.
+
+For sends, payments or deletions, add `once_key: "{{request_id}}"` to the acknowledged consequential click. Reservations persist across run retries, restarts and actor revisions. The same actor operation cannot attempt that key again, even if its prior outcome is uncertain. Inspect the referenced original run before deliberately issuing a new key. This guards duplicate attempts; it does not provide exactly-once execution on an external site.

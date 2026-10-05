@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -74,31 +76,6 @@ func TestCrawlExtractionFanoutAndTransforms(t *testing.T) {
 	}
 }
 
-func TestCrawlExtractionAllowsTruncatedHTMLWhenRouteOptsIn(t *testing.T) {
-	crawl := crawlDefinition{
-		Datasets: map[string]crawlDataset{"profiles": {Key: "id", Schema: map[string]string{"id": "string", "name": "string"}}},
-		Routes: map[string]crawlRoute{"profile": {
-			Match:          "/fighter-details/",
-			AllowTruncated: true,
-			Extract: []crawlExtract{{Dataset: "profiles", Items: "body", Required: true, Fields: map[string]crawlField{
-				"id":   {actorField: actorField{Type: "text"}, Source: "url"},
-				"name": {actorField: actorField{Type: "text", Selector: "h2"}},
-			}}},
-		}},
-	}
-	page, err := extractCrawlPage(crawl, crawl.Routes["profile"], &crawlQueueItem{URL: "https://www.ufcstats.com/fighter-details/abc"}, &browserExtractResult{
-		URL:       "https://www.ufcstats.com/fighter-details/abc",
-		HTML:      `<html><body><h2>Example Fighter</h2><table><tbody><tr><td>truncated later</td></tr></tbody></table></body></html>`,
-		Truncated: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(page.Records) != 1 || page.Records[0].Item["name"] != "Example Fighter" {
-		t.Fatalf("unexpected truncated extraction: %+v", page.Records)
-	}
-}
-
 func TestCrawlURLCanonicalization(t *testing.T) {
 	a := canonicalCrawlURL("HTTP://WWW.UFCSTATS.COM:80/event-details/abc#row")
 	b := canonicalCrawlURL("http://www.ufcstats.com/event-details/abc")
@@ -140,5 +117,34 @@ func TestCommitCrawlPageMaterializesKeyedRecords(t *testing.T) {
 	}
 	if item != `{"id":"event-1","name":"Example"}` {
 		t.Fatalf("item=%s", item)
+	}
+}
+
+func TestCrawlDOMRetriesWithLargerBoundedHTML(t *testing.T) {
+	for _, alwaysTruncated := range []bool{false, true} {
+		plat := newFakePlatform()
+		plat.crawlHTMLMinimumLimit = 300000
+		plat.crawlHTMLAlwaysTruncated = alwaysTruncated
+		ctx, app := newTestCtx(t, plat)
+		e := &actorExecution{app: app, ctx: ctx, workerCtx: context.Background(), session: &browserSession{SessionID: "test"}, definition: actorDefinition{AllowedHosts: []string{"example.com"}}}
+		doc, err := e.extractCrawlDOM()
+		wantCalls := 2
+		if alwaysTruncated {
+			wantCalls = 4
+			if err == nil || !strings.Contains(err.Error(), "still truncated") || doc != nil {
+				t.Fatalf("incomplete HTML accepted: doc=%+v err=%v", doc, err)
+			}
+		} else if err != nil || doc == nil || doc.Truncated {
+			t.Fatalf("complete HTML not recovered: doc=%+v err=%v", doc, err)
+		}
+		if len(plat.calls) != wantCalls {
+			t.Fatalf("calls=%d want=%d", len(plat.calls), wantCalls)
+		}
+		for _, call := range plat.calls {
+			formats := stringSliceFromAny(call.args["formats"])
+			if len(formats) != 1 || formats[0] != "html" || intArg(call.args, "max_chars") > 1000000 {
+				t.Fatalf("unexpected extraction options: %+v", call.args)
+			}
+		}
 	}
 }
