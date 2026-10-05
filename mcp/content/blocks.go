@@ -28,10 +28,11 @@ type Document struct {
 
 // Block is one node in the body tree.
 type Block struct {
-	ID    string         `json:"id"`
-	Type  string         `json:"type"`
-	Attrs map[string]any `json:"attrs,omitempty"`
-	Inner []Block        `json:"inner,omitempty"`
+	ID            string         `json:"id"`
+	Type          string         `json:"type"`
+	Attrs         map[string]any `json:"attrs,omitempty"`
+	Inner         []Block        `json:"inner,omitempty"`
+	ResourceQuery string         `json:"-"`
 }
 
 const documentVersion = 1

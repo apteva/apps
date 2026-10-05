@@ -6,7 +6,7 @@
    is keyed by block id alone — the server resolves the parent post
    on submit, so the partial doesn't need PostID threaded in.
 */ -}}
-<form class="block-form" method="post" action="_forms/submit/{{ .ID }}" data-cp-form="{{ .ID }}">
+<form class="block-form" method="post" action="_forms/submit/{{ .ID }}{{ .ResourceQuery }}" data-cp-form="{{ .ID }}">
   {{ range .Attrs.fields }}
   <div class="block-form__field">
     {{ if .label }}

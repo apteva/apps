@@ -1,5 +1,5 @@
 {{- /* core/form — magazine theme (same markup, different CSS hooks via class) */ -}}
-<form class="block-form" method="post" action="_forms/submit/{{ .ID }}" data-cp-form="{{ .ID }}">
+<form class="block-form" method="post" action="_forms/submit/{{ .ID }}{{ .ResourceQuery }}" data-cp-form="{{ .ID }}">
   {{ range .Attrs.fields }}
   <div class="block-form__field">
     {{ if .label }}

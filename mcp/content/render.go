@@ -280,6 +280,7 @@ func executeMain(set *template.Template, data PageData) (template.HTML, error) {
 	if set == nil {
 		return "", fmt.Errorf("layout template set missing")
 	}
+	applyBlockResourceQuery(&data)
 	var buf bytes.Buffer
 	if err := set.ExecuteTemplate(&buf, "main", data); err != nil {
 		return "", err
@@ -298,11 +299,35 @@ func executeBase(set *template.Template, data PageData) (string, error) {
 	if set == nil {
 		return "", fmt.Errorf("layout template set missing")
 	}
+	applyBlockResourceQuery(&data)
 	var buf bytes.Buffer
 	if err := set.ExecuteTemplate(&buf, "layouts/base.html", data); err != nil {
 		return "", err
 	}
 	return buf.String(), nil
+}
+
+// applyBlockResourceQuery threads the proxy's project/site query through
+// block templates. Blocks are rendered from their own value, so without
+// this context a form action (and any future block URL) would lose the
+// query required by global installs behind /api/apps/content/public/.
+func applyBlockResourceQuery(data *PageData) {
+	if data == nil || data.ResourceQuery == "" {
+		return
+	}
+	var walk func([]Block)
+	walk = func(blocks []Block) {
+		for i := range blocks {
+			blocks[i].ResourceQuery = data.ResourceQuery
+			walk(blocks[i].Inner)
+		}
+	}
+	if data.Post != nil {
+		walk(data.Post.BodyBlocks.Blocks)
+	}
+	for i := range data.Posts {
+		walk(data.Posts[i].BodyBlocks.Blocks)
+	}
 }
 
 // renderFeed builds the RSS XML in Go rather than via html/template,

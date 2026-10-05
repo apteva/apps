@@ -16,7 +16,7 @@
 {{ if .BrandCSS }}<style>{{ .BrandCSS }}</style>{{ end }}
 {{ if .MetaDescription }}<meta name="description" content="{{ .MetaDescription }}">{{ end }}
 {{ if .Canonical }}<link rel="canonical" href="{{ .Canonical }}">{{ end }}
-<link rel="alternate" type="application/rss+xml" title="{{ .SiteTitle }}" href="feed.xml">
+<link rel="alternate" type="application/rss+xml" title="{{ .SiteTitle }}" href="feed.xml{{ .ResourceQuery }}">
 <link rel="preload" as="font" type="font/woff2" crossorigin href="{{ asset "fonts/InterVariable.woff2" }}{{ .ResourceQuery }}">
 <link rel="stylesheet" href="{{ asset "style.css" }}{{ .ResourceQuery }}">
 {{ if .CustomCSS }}<style data-content-custom-css>{{ .CustomCSS }}</style>{{ end }}
