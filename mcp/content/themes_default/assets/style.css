@@ -341,9 +341,11 @@ a:hover { opacity: 0.8; }
 .page-body > .block-quote,
 .page-body > .block-code,
 .page-body > .block-markdown,
-.page-body > .block-html,
 .page-body > .block-table {
   max-width: 720px;
+}
+.page-body > .block-html {
+  max-width: var(--container);
 }
 .align-center { text-align: center; }
 .align-right  { text-align: right; }
