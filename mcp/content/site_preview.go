@@ -102,7 +102,11 @@ func (a *App) handleSitePreview(w http.ResponseWriter, r *http.Request) {
 	}
 	data := basePageData(ctx, pid, siteID, settings, r)
 	previewPrefix := strings.TrimSuffix(computeURLPrefix(r), "/") + "/preview-site/" + parts[0] + "/"
-	data.URLPrefix = previewPrefix
+	// Keep assets and form actions rooted at the public gateway, while
+	// navigation stays inside the noindex preview namespace. Using the
+	// preview prefix as <base> makes CSS/fonts resolve to HTML preview
+	// routes instead of the public asset handlers.
+	data.HomeURL = previewPrefix + data.ResourceQuery
 	if menu, err := dbGetMenuBySlug(ctx.AppDB(), pid, siteID, "primary"); err == nil && menu != nil {
 		data.PrimaryMenu = renderMenuItems(menu.Items, previewPrefix, data.ResourceQuery)
 	}

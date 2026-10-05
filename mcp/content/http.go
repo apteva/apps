@@ -711,6 +711,7 @@ func basePageData(ctx *sdk.AppCtx, pid string, siteID int64, settings map[string
 		Locale:          selectedPublicLocale(ctx, pid, siteID, r),
 		PublicBaseURL:   settings["public_base_url"],
 		URLPrefix:       prefix,
+		HomeURL:         prefix + publicResourceQuery(r),
 		ResourceQuery:   publicResourceQuery(r),
 		SiteID:          siteID,
 		PrimaryMenu:     rendered,

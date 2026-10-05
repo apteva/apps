@@ -200,6 +200,7 @@ type PageData struct {
 	// every page; every in-template URL is relative (no leading slash)
 	// so the base resolution does the right thing in both modes.
 	URLPrefix        string
+	HomeURL          string
 	ResourceQuery    string
 	PageTitle        string
 	MetaDescription  string
