@@ -143,7 +143,8 @@ It exposes:
 - `latest_relevant_change`, `consumed_change_id`, `published_change_id` and `lag`.
 - `pending_scopes`, up to 256 `pending_scope_keys`, `refresh_running`, and
   `next_scheduled_refresh` (null while paused).
-- `last_successful_publication_at`, `published_generation` and `last_failure`.
+- `last_successful_publication_at`, `last_failure`, and a requested scope's
+  `published_generation` (or `last_full_generation` for overall status).
 - Published `coverage_from` and `coverage_to`.
 
 Change IDs are watermarks, not counts; unrelated source tables do not increase a

@@ -87,7 +87,11 @@ func (a *App) projectionStatus(app *sdk.AppCtx, p *projectionDefinition, key str
 		return nil, err
 	}
 	if err == nil {
-		out["published_generation"] = generation
+		if key != "" {
+			out["published_generation"] = generation
+		} else {
+			out["last_full_generation"] = generation
+		}
 		if key != "" {
 			out["published_change_id"] = published
 			out["last_successful_publication_at"] = projectionTimestamp(computed)

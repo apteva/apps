@@ -209,15 +209,15 @@ func rebuildProjectionTriggersTx(tx *writeTx, tableID int64) error {
 			return err
 		}
 	}
-	rows, err := tx.Query(`SELECT p.scope_columns,p.options,t.name FROM projection_definitions p JOIN projection_sources s ON s.projection_id=p.id JOIN tables_meta t ON t.id=s.table_id WHERE s.table_id=? AND p.status IN ('active','paused','building')`, tableID)
+	rows, err := tx.Query(`SELECT p.scope_columns,p.options,t.name,p.sql_text FROM projection_definitions p JOIN projection_sources s ON s.projection_id=p.id JOIN tables_meta t ON t.id=s.table_id WHERE s.table_id=? AND p.status IN ('active','paused','building')`, tableID)
 	if err != nil {
 		return err
 	}
 	fields := map[string]bool{"id": true}
 	dependent := false
 	for rows.Next() {
-		var raw, opts, name string
-		if err := rows.Scan(&raw, &opts, &name); err != nil {
+		var raw, opts, name, sqlText string
+		if err := rows.Scan(&raw, &opts, &name, &sqlText); err != nil {
 			rows.Close()
 			return err
 		}
@@ -232,6 +232,22 @@ func rebuildProjectionTriggersTx(tx *writeTx, tableID int64) error {
 			return err
 		}
 		dependent = true
+		queries := []string{sqlText, options.ScopeSQL}
+		for _, r := range options.ScopeRules {
+			queries = append(queries, r.SQL)
+		}
+		for _, query := range queries {
+			tokens, err := sqlTokens(query)
+			if err != nil {
+				rows.Close()
+				return err
+			}
+			for _, token := range tokens {
+				if token.kind == "identifier" && strings.EqualFold(token.value, "_revision") {
+					fields["_revision"] = true
+				}
+			}
+		}
 		mapped := false
 		for _, rule := range options.ScopeRules {
 			if rule.Source != name {
@@ -268,13 +284,16 @@ func rebuildProjectionTriggersTx(tx *writeTx, tableID int64) error {
 		}
 		return "json_object(" + strings.Join(parts, ",") + ")"
 	}
-	// Only semantic user-column changes generate updates; bookkeeping triggers
-	// that increment _revision do not duplicate the durable event.
+	// Capture user fields and updated_at changes. Revision-only bookkeeping
+	// is relevant only when a definition or mapping actually reads _revision.
 	cols, err := tx.Query(`SELECT name FROM columns_meta WHERE table_id=?`, tableID)
 	if err != nil {
 		return err
 	}
-	parts := []string{}
+	parts := []string{`OLD.updated_at IS NOT NEW.updated_at`, `OLD.created_at IS NOT NEW.created_at`}
+	if fields["_revision"] {
+		parts = append(parts, `OLD._revision IS NOT NEW._revision`)
+	}
 	for cols.Next() {
 		var name string
 		if err := cols.Scan(&name); err != nil {

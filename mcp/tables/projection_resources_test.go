@@ -436,3 +436,33 @@ func TestProjectionInvalidationFailureQueuesBoundedRebuild(t *testing.T) {
 		t.Fatal("fallback did not restore correctness", out)
 	}
 }
+
+func TestProjectionReservedRevisionChangesRemainRelevant(t *testing.T) {
+	ctx := newTestCtx(t)
+	a := &App{}
+	projectionSourceTable(t, a, ctx)
+	mustCall(t, a, ctx, "rows_insert", map[string]any{"table": "events", "rows": []any{map[string]any{"centre_id": "a", "value": 1}}})
+	mustCall(t, a, ctx, "projections_create", map[string]any{"name": "revision_max", "version": 1, "sql": "SELECT MAX(_revision) AS total FROM {events}", "source_tables": []any{"events"}, "result_columns": []any{map[string]any{"name": "total", "type": "number"}}})
+	runProjectionWorker(t, a, ctx)
+	// A same-value patch still changes the reserved revision, which this query
+	// explicitly reads. It must not be discarded as irrelevant bookkeeping.
+	mustCall(t, a, ctx, "rows_update", map[string]any{"table": "events", "id": int64(1), "fields": map[string]any{"value": 1}})
+	runProjectionWorker(t, a, ctx)
+	out := mustCall(t, a, ctx, "tables_query", map[string]any{"sql": "SELECT total FROM {revision_max}"})["rows"].([]map[string]any)
+	if out[0]["total"] != float64(2) {
+		t.Fatal("revision-only patch was not captured", out)
+	}
+	table, _ := loadTable(ctx.AppDB(), "test-proj", "events")
+	// Reproduce the revision-only trigger installed on upgraded legacy tables.
+	if _, err := ctx.AppDB().Exec(`CREATE TRIGGER ` + quote(table.PhysicalName+"_revision_update") + ` AFTER UPDATE ON ` + quote(table.PhysicalName) + ` WHEN NEW._revision=OLD._revision BEGIN UPDATE ` + quote(table.PhysicalName) + ` SET _revision=OLD._revision+1 WHERE id=NEW.id; END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE ` + quote(table.PhysicalName) + ` SET value=4 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	runProjectionWorker(t, a, ctx)
+	out = mustCall(t, a, ctx, "tables_query", map[string]any{"sql": "SELECT total FROM {revision_max}"})["rows"].([]map[string]any)
+	if out[0]["total"] != float64(3) {
+		t.Fatal("automatic revision trigger was not captured", out)
+	}
+}

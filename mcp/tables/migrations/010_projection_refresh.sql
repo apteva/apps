@@ -29,3 +29,7 @@ CREATE TABLE projection_generations (
  created_at_ms INTEGER NOT NULL,
  PRIMARY KEY(projection_id,generation)
 );
+
+-- Keep per-event dependency capture and eligible-scope claiming indexed.
+CREATE INDEX projection_sources_table_idx ON projection_sources(table_id,projection_id);
+CREATE INDEX projection_queue_due_idx ON projection_queue(project_id,due_at_ms,projection_id);
