@@ -316,7 +316,7 @@ test("the panel forwards cursor continuation and exact optimistic edit tokens", 
   fireEvent.click(ui.getByText("before"));
   await flush();
   fireEvent.change(ui.getByLabelText("title"), { target: { value: "after" } });
-  fireEvent.click(ui.getByText("save"));
+  fireEvent.click(ui.getByText("Save changes"));
   await flush();
   const patch = calls.find((call) => call.method === "PATCH")!;
   expect(patch.url.pathname).toEndWith(row.id);
@@ -328,4 +328,28 @@ test("the panel forwards cursor continuation and exact optimistic edit tokens", 
       .filter((call) => call.url.pathname.endsWith("/rows"))
       .every((call) => call.url.searchParams.get("include_total") === "false"),
   ).toBe(true);
+});
+
+test("the workspace sends typed row filters to the search endpoint", async () => {
+  const calls: { url: URL; body: any; method: string }[] = [];
+  (window as any).__aptevaAppEvents = { subscribe: () => () => {} };
+  globalThis.fetch = (async (input: any, options: any) => {
+    const url = new URL(String(input), "http://localhost");
+    calls.push({ url, body: options.body ? parseJSON(options.body) : null, method: options.method });
+    const path = url.pathname;
+    if (path.endsWith("/tables")) return response({ tables: [{ ...table, id: 41 }], has_more: false });
+    if (path.endsWith("/rows/search")) return response({ rows: [], has_more: false, next_offset: 0 });
+    if (path.endsWith("/rows")) return response({ rows: [{ id: 1, _revision: 1, title: "Acme", note: "" }], has_more: false, next_offset: 1 });
+    return response({ ...table, id: 41 });
+  }) as typeof fetch;
+  const ui = render(<TablesPanel appName="tables" projectId="p" installId={9} />);
+  await flush();
+  await flush();
+  fireEvent.change(ui.getByPlaceholderText("Search title…"), { target: { value: "Acme" } });
+  fireEvent.click(ui.getByText("Search"));
+  await flush();
+  const search = calls.find((call) => call.url.pathname.endsWith("/rows/search"));
+  expect(search?.method).toBe("POST");
+  expect(search?.body).toEqual({ where: [{ col: "title", op: "contains", value: "Acme" }] });
+  expect(search?.url.searchParams.get("include_total")).toBe("false");
 });

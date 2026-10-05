@@ -1,4 +1,4 @@
-# Tables (v0.2)
+# Tables (v0.2.1)
 
 Typed-row database for Apteva agents and human teams. The row-shaped
 sibling to the `storage` app.
@@ -7,6 +7,12 @@ The app may be installed globally, but its data is never global: every
 table and row is resolved against the calling project_id.
 
 ## Surfaces
+
+The Tables workspace is designed for day-to-day data work: searchable table
+navigation, typed filtering, server-backed sorting, readable date/boolean/JSON
+values, sticky headers, and a row-detail drawer for safe edits and deletes. The
+SQL editor, schema editor, API examples, and projection controls remain available
+as secondary tools so the data grid stays focused.
 
 - **28 MCP tools** — `tables_create`, `tables_list`, `tables_describe`,
   `tables_alter`, `tables_drop`, `indexes_create`, `indexes_list`,
