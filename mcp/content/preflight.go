@@ -93,6 +93,15 @@ func runSitePreflight(db *sql.DB, projectID string, siteID int64) (map[string]an
 	if err != nil {
 		return nil, err
 	}
+	// AppDB is intentionally configured with a single SQLite connection. Do
+	// not run the per-item existence query while menuRows is still open: the
+	// nested QueryRow would wait forever for that same connection.
+	type menuLink struct {
+		kind   string
+		target sql.NullInt64
+		label  string
+	}
+	var menuLinks []menuLink
 	for menuRows.Next() {
 		var kind, label string
 		var target sql.NullInt64
@@ -100,6 +109,15 @@ func runSitePreflight(db *sql.DB, projectID string, siteID int64) (map[string]an
 			menuRows.Close()
 			return nil, err
 		}
+		menuLinks = append(menuLinks, menuLink{kind: kind, target: target, label: label})
+	}
+	if err := menuRows.Err(); err != nil {
+		menuRows.Close()
+		return nil, err
+	}
+	menuRows.Close()
+	for _, link := range menuLinks {
+		kind, target, label := link.kind, link.target, link.label
 		if !target.Valid {
 			issues = append(issues, PreflightIssue{"error", "menu_missing_target", "Menu item has no target.", 0, label})
 			continue
@@ -113,7 +131,6 @@ func runSitePreflight(db *sql.DB, projectID string, siteID int64) (map[string]an
 			issues = append(issues, PreflightIssue{"error", "broken_menu_link", "Menu item points to missing content.", 0, label})
 		}
 	}
-	menuRows.Close()
 	errors, warnings := 0, 0
 	for _, issue := range issues {
 		if issue.Severity == "error" {

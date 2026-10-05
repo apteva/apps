@@ -77,6 +77,35 @@ func TestPreviewLinksCanBeRevoked(t *testing.T) {
 	}
 }
 
+func TestSitePreflightChecksMenuLinksWithoutNestedRowsQuery(t *testing.T) {
+	db := hardeningTestDB(t)
+	site, err := dbCreateSite(db, "preflight-project", "main", "Main", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := db.Exec(`INSERT INTO posts(project_id,site_id,kind,slug,status,title,body_blocks) VALUES(?,?,?,?,?,?,?)`,
+		"preflight-project", site.ID, "page", "home", "published", "Home", `{"version":1,"blocks":[]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageID, _ := res.LastInsertId()
+	res, err = db.Exec(`INSERT INTO menus(project_id,site_id,slug,name) VALUES(?,?,?,?)`, "preflight-project", site.ID, "primary", "Primary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	menuID, _ := res.LastInsertId()
+	if _, err := db.Exec(`INSERT INTO menu_items(menu_id,label,target_kind,target_id,target_url,position) VALUES(?,?,?,?,?,?)`, menuID, "Home", "page", pageID, "", 0); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runSitePreflight(db, "preflight-project", site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := out["ok"].(bool); !ok {
+		t.Fatalf("preflight failed: %#v", out)
+	}
+}
+
 func TestTemplateExportDropsSiteLocalMediaIDs(t *testing.T) {
 	blocks := []Block{{Type: "core/image", Attrs: map[string]any{"media_id": int64(4), "alt": "hero"}, Inner: []Block{{Type: "core/gallery", Attrs: map[string]any{"media_ids": []any{int64(4)}}}}}}
 	stripTemplateMediaIDs(blocks)
