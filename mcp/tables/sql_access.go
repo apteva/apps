@@ -136,7 +136,7 @@ func authorizeQuery(qctx context.Context, conn *sql.Conn, ctx *sdk.AppCtx, a *Ap
 	}
 	allowed := map[int64]bool{}
 	for _, name := range names {
-		table, err := a.loadTableSchema(ctx, pid, name)
+		table, err := a.loadQueryTable(ctx, pid, name)
 		if err != nil {
 			return err
 		}

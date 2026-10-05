@@ -182,7 +182,7 @@ func (a *App) beginOperation(ctx *sdk.AppCtx, args map[string]any, operation str
 }
 
 func validateArguments(args map[string]any) error {
-	for _, key := range []string{"where", "params", "select", "columns", "key", "rows", "metrics", "group_by"} {
+	for _, key := range []string{"where", "params", "select", "columns", "key", "rows", "metrics", "group_by", "source_tables", "result_columns", "scope_columns"} {
 		if v, ok := args[key]; ok && v != nil {
 			if _, ok := v.([]any); !ok {
 				return errf("%s must be an array", key)
@@ -197,7 +197,7 @@ func validateArguments(args map[string]any) error {
 			}
 		}
 	}
-	for _, key := range []string{"confirm", "include_total", "hydrate_files", "unique", "summary", "release_managed"} {
+	for _, key := range []string{"confirm", "include_total", "hydrate_files", "unique", "summary", "release_managed", "rebuild", "paused"} {
 		if v, ok := args[key]; ok {
 			if _, ok := v.(bool); !ok {
 				return errf("%s must be boolean", key)

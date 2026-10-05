@@ -29,11 +29,13 @@ import (
 var manifestYAML string
 
 type App struct {
-	schemaMu   contextRWMutex
-	locksMu    sync.Mutex
-	tableLocks map[schemaCacheKey]*tableLockRef
-	cache      schemaCache
-	plans      queryPlanCache
+	schemaMu        contextRWMutex
+	locksMu         sync.Mutex
+	tableLocks      map[schemaCacheKey]*tableLockRef
+	cache           schemaCache
+	plans           queryPlanCache
+	projectionMu    sync.RWMutex
+	projectionCache map[schemaCacheKey]*Table
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -49,6 +51,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("tables requires a db block")
 	}
 	if err := a.upgradeAll(ctx); err != nil {
+		return err
+	}
+	if err := a.rebuildAllProjectionTriggers(ctx); err != nil {
 		return err
 	}
 	globalCtx = ctx
@@ -72,9 +77,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return a.plans.close() }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return a.plans.close() }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{Name: "tables-projections", Schedule: projectionWorkerEvery, Run: a.projectionWorker}}
+}
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
@@ -354,6 +361,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler:     a.toolTablesCapabilities,
 		},
 	}
+	tools = append(tools, a.projectionTools()...)
 	for i := range tools {
 		switch tools[i].Name {
 		case "tables_query", "rows_get", "rows_search", "rows_count", "rows_aggregate", "tables_list", "tables_describe", "indexes_list":
