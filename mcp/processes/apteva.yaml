@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: processes
 display_name: Processes
-version: 0.16.2
+version: 0.16.3
 description: Visual company procedures with generic connected steps, independent assignments, multi-agent execution, recurring runs, event triggers, and durable native run history.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/processes
@@ -52,8 +52,8 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: list, description: Find company procedures. }
-    - { name: get, description: Read a procedure and its version history. }
+    - { name: list, description: "Find procedure discovery metadata; follow reread references for full instructions." }
+    - { name: get, description: "Read current content and version metadata, or one requested immutable definition." }
     - { name: validate_definition, description: Validate and normalize a semantic procedure without saving it. }
     - { name: create, description: Create an unassigned draft company procedure. }
     - { name: update, description: Create an immutable procedure revision while paused or draft. }
@@ -62,8 +62,8 @@ provides:
     - { name: archive, description: Retire a procedure and stop future scheduled runs. }
     - { name: start, description: Start one execution of an active assignment. }
     - { name: runs, description: Inspect native process execution history. }
-    - { name: run_get, description: "Read a run, its immutable instructions, and workflow steps before acting." }
-    - { name: run_update, description: Record progress or an explicit outcome for a direct run owned by this agent. }
+    - { name: run_get, description: "Read the immutable procedure once and exact run and step evidence; includes reread references." }
+    - { name: run_update, description: "Save direct run progress or outcome; receive a compact receipt and exact reread reference." }
     - { name: assignments, description: List saved process assignments. }
     - { name: assignment_get, description: Read assignment settings. }
     - { name: assignment_create, description: "Configure a new assignment with agents, parameter values, and schedule." }
@@ -124,7 +124,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: processes/v0.16.2
+    ref: processes/v0.16.3
     entry: mcp/processes
   port: 8080
   health_check: /health

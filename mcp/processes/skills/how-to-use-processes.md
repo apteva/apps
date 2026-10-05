@@ -84,3 +84,23 @@ run state, `done`, `next_action`, and a blocker reason when present. It does not
 echo instructions or receipts. Use `step_get` to recover saved output and
 `run_get` for explicit full inspection. Retrying an accepted completion with
 the same evidence does not repeat writes or downstream dispatch.
+
+## Discovery and full-state recovery
+
+MCP `list` returns discovery metadata and a `reread` reference for each procedure,
+not execution instructions. MCP `get` returns current content once with historical
+version metadata. To retrieve a specific immutable revision, follow that version's
+reference or supply `version`; the result contains the selected `definition` and
+procedure metadata, without also returning another revision's instructions.
+
+MCP `run_get` returns the immutable definition once and exact run/step states and
+evidence, including human approval receipts and attribution. It omits the duplicate
+text snapshot and repeated step definitions; step references recover assigned
+frozen instructions. MCP `run_update` returns IDs, frozen procedure version, saved
+state/progress, `done`, a blocker reason when present, and a `reread` reference.
+Exact results remain stored and recoverable with `run_get`. Step reads and updates
+also include a reference to `processes_step_get` with full shared context enabled.
+
+A reference has `{tool, args}` naming an existing Processes tool and exact arguments.
+Use it when recovery or verification is needed; do not poll or replace saved receipts
+with memory. HTTP/UI responses and stored procedure definitions are unchanged.

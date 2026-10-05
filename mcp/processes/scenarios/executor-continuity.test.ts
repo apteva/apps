@@ -12,7 +12,7 @@ function fixture() {
     {source_id,context_id,validated:["portrait-3.png","portrait-4.png"]}, null,
     {source_id,context_id,receipt:"accepted",artifact_ids:["portrait-3.png","portrait-4.png"]},
   ];
-  const run = {id:"r",workflow:true,state:"completed",assignment:{owner_agent_id:7,worker_continuity:"per_executor"},steps:keys.map((key,i) => ({
+  const run = {id:"r",process_id:"p",workflow:true,state:"completed",assignment:{owner_agent_id:7,worker_continuity:"per_executor"},steps:keys.map((key,i) => ({
     id:key,key,state:"completed",definition:{depends_on:deps[i]},
     executor:i===4?{kind:"human"}:{kind:"agent",agent_id:7},
     updated_by:i===4?"operator":`agent:7:${thread}`,target_thread_id:i===4?"":thread,
@@ -30,7 +30,7 @@ function fixture() {
     call(`test-continuity_${names[i]}`,{context_id});
     operations.push({context_id,name:names[i],artifact_id:i===1?"portrait-3.png":i===2?"portrait-4.png":"",digest:i===1?"digest-3":i===2?"digest-4":"",receipt_json:JSON.stringify(outputs[i]),tool_call_id:`call-${i}`});
     call("processes_step_update",{step_id:keys[i],state:"completed"});
-    const ack = JSON.stringify({step_id:keys[i],run_id:"r",state:"completed",revision:3,progress:100,next_action:"Follow saved state",done:i===5});
+    const ack = JSON.stringify({step_id:keys[i],run_id:"r",state:"completed",revision:3,progress:100,next_action:"Follow saved state",done:i===5,reread:{tool:"processes_step_get",args:{process_id:"p",run_id:"r",step_id:keys[i],include_context:true}}});
     Object.assign(calls.at(-1), {result:ack,result_original_bytes:ack.length,result_truncated:false});
   }
   call("done", { message: "all assigned steps complete" });
@@ -55,6 +55,7 @@ const mutations: Record<string, (f: any) => unknown> = {
   "oversized completion response":(f:any)=>f.calls.find((c:any)=>c.name==="processes_step_update").result_original_bytes=5000,
   "receipt echoed in acknowledgement":(f:any)=>{const c=f.calls.find((c:any)=>c.name==="processes_step_update");c.result=JSON.stringify({...JSON.parse(c.result),output:"repeated receipt"});},
   "premature done acknowledgement":(f:any)=>{const c=f.calls.find((c:any)=>c.name==="processes_step_update");c.result=JSON.stringify({...JSON.parse(c.result),done:true});},
+  "wrong recovery reference":(f:any)=>{const c=f.calls.find((c:any)=>c.name==="processes_step_update");const a=JSON.parse(c.result);a.reread.args.step_id="wrong";c.result=JSON.stringify(a);},
   "missing claim":(f:any)=>f.calls=f.calls.filter((c:any)=>!(c.name==="processes_step_claim"&&c.args.step_id==="portrait_4")),
   "fabricated fixture receipt":(f:any)=>f.domain.operations[2].receipt_json=JSON.stringify({source_id:"fabricated",context_id:"context-one",artifact_id:"portrait-4.png",digest:"digest-4"}),
   "parallelism disguised as continuity":(f:any)=>f.runs[0].assignment.worker_continuity="isolated",

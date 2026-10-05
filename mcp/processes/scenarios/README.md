@@ -18,6 +18,8 @@ No Tasks integration is installed and no external publishing service is used.
 
 | `10-executor-continuity.yaml` | Same-agent branches and a validation join reuse one worker, prepared context and tools; save exact source/artifact/digest receipts; and publish once after HTTP operator approval. |
 
+| `11-mcp-response-recovery.yaml` | Discovery metadata and immutable version rereads lead to one direct occurrence, a compact receipt, and exact saved-state recovery. |
+
 Run from the Processes app directory:
 
 ```sh
@@ -320,3 +322,39 @@ UI/verifier tests, 19 Playwright tests, fixture tests, TypeScript checks and pan
 import validation passed on this release checkout. The first packaging attempt
 was rejected before any model iteration due to an unquoted comma in a tool
 manifest description; it was corrected before this successful run.
+
+## MCP discovery and receipt recovery
+
+```sh
+APTEVA_TEST_MODEL=gpt-6.1-sol bun run scenarios/run.ts scenarios/11-mcp-response-recovery.yaml
+```
+
+This case creates two immutable draft revisions with different facts and outcomes.
+The agent discovers the procedure through `list`, follows exact version references,
+reads current content and historical metadata, executes only revision 2, and follows
+the direct update receipt's `run_get` reference to recover its saved outcome. The
+independent verifier checks persisted version content and run identity/state/output,
+actual version reads, the compact receipt, exact recovery arguments and tool order.
+Negative tests reject wrong versions/results, repeated occurrences, oversized
+receipts, echoed definitions, invalid references and missing recovery reads.
+
+Go regressions use registered MCP callbacks and compare HTTP objects, exercise
+large-context payload reductions, preserve numeric IDs beyond JavaScript's safe
+integer range without a JSON round trip, and recover exact historical and frozen
+run instructions, checkpoints, approval receipts and output identities. The existing
+continuity case also checks exact recovery references on step acknowledgements.
+
+Processes 0.16.3 verification recorded on 2026-10-05 with `openai-codex` /
+`gpt-6.1-sol`: the recovery scenario and independent verifier passed in 14
+iterations, 92.436 seconds, with 250,220 reported tokens. Live `list` was 790
+bytes and the completion receipt was 325 bytes. Report:
+`/private/tmp/processes-release-0.16.3-tier3/run-u1HXYM`.
+
+The continuity regression and independent verifier also passed in 26 iterations,
+216.428 seconds, with 526,529 reported tokens. All six steps completed with one
+worker/context/discovery, exact distinct portrait receipts, validation, real
+operator HTTP approval and publication. Report:
+`/private/tmp/processes-release-0.16.3-tier3/run-pfrIpr`.
+The release checkout passed the full Go race suite, 86 Bun UI/verifier tests, 19
+Playwright tests, fixture tests, TypeScript checks and manifest validation.
+These live tests verify correctness and payload size, not a latency benchmark.

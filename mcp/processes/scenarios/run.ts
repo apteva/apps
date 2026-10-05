@@ -1,4 +1,5 @@
 /** Real Codex/Terra scenarios with independent checks of the sidecar's saved state. */
+import { MCP_RESPONSE_RECOVERY, verifyMCPResponseRecovery } from "./mcp-response-recovery";
 import { EXECUTOR_CONTINUITY, CONTINUITY_APPROVAL, verifyExecutorContinuity } from "./executor-continuity";
 import { resolve, basename } from "node:path";
 import { mkdir, mkdtemp, readdir, cp } from "node:fs/promises";
@@ -196,6 +197,13 @@ for (const scenario of report.results) {
       verifyExecutorContinuity(scenario.tool_calls, runs, workers, fixture, continuityConfirmed as ConfirmationReport);
       observed[scenario.scenario] = { ...history, workers, fixture, operator_confirmation: continuityConfirmed };
       console.log(`PASS ${scenario.scenario}: one worker, retained context/tools, exact receipts, validation join and HTTP approval verified (${scenario.iterations} iterations, ${scenario.tokens.total} tokens)`);
+      continue;
+    }
+    if (scenario.scenario === MCP_RESPONSE_RECOVERY) {
+      const versions = db.query("SELECT version,body_json FROM process_versions WHERE process_id=? ORDER BY version").all(processes[0].id) as any[];
+      verifyMCPResponseRecovery(scenario.tool_calls, runs, versions);
+      observed[scenario.scenario] = {...history, versions};
+      console.log(`PASS ${scenario.scenario}: immutable revisions, compact receipts and real rereads verified (${scenario.iterations} iterations, ${scenario.tokens.total} tokens)`);
       continue;
     }
     verifyHistory(scenario.scenario, history);

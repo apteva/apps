@@ -450,3 +450,22 @@ Live flows, the project map, and the overview widget show scheduled timing
 and deadlines. Procedure-relative deadlines cannot be overridden on an individual
 task. Date-parameter anchors, business calendars, reminders and escalation rules
 are not part of this release. No Server or Core changes are required.
+
+## MCP response recovery
+
+`list` returns procedure discovery metadata with exact owner IDs and reread references.
+`get` returns current procedure content once and historical version metadata;
+`get(version=...)` returns the selected immutable definition and procedure metadata.
+Historical definitions are loaded only when requested.
+
+`run_get` retains the immutable definition and exact run/step state, outputs and
+human approval attribution. MCP responses omit the duplicate textual snapshot and
+step definitions already present in the procedure. `run_update` returns a compact
+receipt with saved IDs, procedure version, state/progress, completion and blockers.
+It does not echo the saved result. Step reads/updates, procedure metadata/version
+entries and run reads/updates include `reread: {tool, args}` references to existing
+tools with exact recovery arguments. Step recovery includes shared context.
+
+These projections apply at the MCP boundary. HTTP/UI objects, stored definitions
+and receipt evidence retain their existing behavior; no model summaries or
+arbitrary truncation are used.

@@ -911,7 +911,7 @@ func (a *App) stepAction(project, actor, process, run, id, action string, args m
 			"process_id": process, "run_id": r.ID, "step_id": s.ID,
 			"run":  map[string]any{"id": r.ID, "process_id": process, "state": r.State, "version": r.Version},
 			"step": workerStep(s), "dependencies": dependencyEvidence(s, all),
-			"done": done, "next_action": next,
+			"done": done, "next_action": next, "reread": stepReread(process, r.ID, s.ID),
 			"context_ref": map[string]any{"procedure_version": r.Version, "assignment_id": r.AssignmentID, "assignment_revision": r.AssignmentRevision},
 		}
 		if worker != "" && actor == fmt.Sprintf("agent:%d:%s", s.Executor.AgentID, worker) {
