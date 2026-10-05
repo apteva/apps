@@ -293,7 +293,7 @@ func (a *App) resolveWorkerProcess(project, supplied, runID, stepID string) (str
 }
 
 func (a *App) staleStepReminder(p *Process, r Run, s StepRun, all []StepRun, now time.Time) (err error) {
-	if sequentialAgent(r, all) == 0 || s.State != "running" || s.Executor.Kind != "agent" || s.ThreadID == "" || s.DeliveredAt == "" || s.DeliverySuspended {
+	if persistentWorkerAgent(r, s, all) == 0 || s.State != "running" || s.Executor.Kind != "agent" || s.ThreadID == "" || s.DeliveredAt == "" || s.DeliverySuspended {
 		return nil
 	}
 	updated, err := time.Parse(time.RFC3339Nano, s.UpdatedAt)
@@ -312,7 +312,7 @@ func (a *App) staleStepReminder(p *Process, r Run, s StepRun, all []StepRun, now
 	if err != nil || worker == "" || worker != s.ThreadID {
 		return err
 	}
-	message := fmt.Sprintf("Processes reminder: this sequential step appears stale. Re-read processes_step_get using process_id=%s, run_id=%s, step_id=%s and inspect existing external records before repeating any writes. Then call processes_step_update with the current milestone or terminal outcome before sleeping or finishing. Keep using this same worker thread.", p.ID, r.ID, s.ID)
+	message := fmt.Sprintf("Processes reminder: this persistent-worker step appears stale. Re-read processes_step_get using process_id=%s, run_id=%s, step_id=%s and inspect existing external records before repeating any writes. Then call processes_step_update with the current milestone or terminal outcome before sleeping or finishing. Keep using this same worker thread.", p.ID, r.ID, s.ID)
 	eventID := fmt.Sprintf("process-step:%s:reminder:%d", s.ID, now.UnixNano())
 	api := a.ctx.WithProject(s.ProjectID).AgentEventsAPI()
 	if api == nil {
@@ -333,13 +333,20 @@ func (a *App) stepContext(p *Process, r Run, s StepRun, all []StepRun) string {
 	if s.Origin != "process_step" {
 		return a.nativeTaskContext(p, r, s, all)
 	}
-	if sequentialAgent(r, all) != 0 && s.Executor.Kind == "agent" {
+	if persistentWorkerAgent(r, s, all) != 0 {
 		worker, _ := a.runWorker(r.ID, s.Executor.AgentID)
 		ids := fmt.Sprintf("process_id=%s, run_id=%s, step_id=%s", p.ID, r.ID, s.ID)
 		if worker != "" {
-			return "Next sequential step ready: " + ids + ". Call processes_step_claim to read and claim this step. Execute only ready work; dependencies remain enforced. Keep this worker alive between steps. After step_update, inspect its top-level done field: if true, immediately call done before any text; otherwise wait for the next Processes event without polling."
+			contextHint := ""
+			for _, previous := range all {
+				if previous.ID != s.ID && previous.ThreadID == worker && previous.DeliveredAt != "" {
+					contextHint = ". Shared policy is unchanged: use include_context=false if you retained it; omit this option to recover the full shared policy when needed"
+					break
+				}
+			}
+			return "Next assigned step ready: " + ids + contextHint + ". Call processes_step_claim to read and claim this step. Execute only ready work; dependencies remain enforced. Keep this worker alive between steps. After step_update, inspect its top-level done field: if true, immediately call done before any text; otherwise follow next_action; after a terminal step wait for the next Processes event without polling."
 		}
-		return fmt.Sprintf("Sequential same-agent run. Main: spawn ONE persistent worker for this entire run (suggested ID process-run-%s), granting tools=\"%s\" plus any domain tools needed across all its steps. Pass these IDs: %s. Worker: call step_claim before domain action; its result contains the frozen step, shared instructions, parameters and dependency evidence. Complete each step with step_update. Processes delivers subsequent ready steps directly to this worker; do not spawn a new worker, forward steps, or poll. Keep the worker alive while worker.done=false. Call done once after worker.done=true, with the final outcome. Main should not rewrite the procedure or request per-step reports. If workers cannot access Processes, main may execute steps directly using step_get/step_update. Procedure: %s\n%s", r.ID, processSequentialWorkerTools, ids, p.Name, jsonText(p.Definition))
+		return fmt.Sprintf("Sequential same-agent run. Main: spawn ONE persistent worker for this entire run (suggested ID process-run-%s), granting tools=\"%s\" plus any domain tools needed across all its steps. Pass these IDs: %s. Worker: call step_claim before domain action; its result contains the frozen step, shared instructions, parameters and dependency evidence. Complete each step with step_update. Processes delivers subsequent ready steps directly to this worker; do not spawn a new worker, forward steps, or poll. Keep the worker alive while done=false. Call done once after done=true, with the final outcome. Main should not rewrite the procedure or request per-step reports. If workers cannot access Processes, main may execute steps directly using step_get/step_update. Procedure: %s\n%s", r.ID, processSequentialWorkerTools, ids, p.Name, jsonText(p.Definition))
 	}
 	inputs := dependencyOutputs(s, all)
 	contract := fmt.Sprintf("Worker: read Processes step_get(process_id=%s, run_id=%s, step_id=%s) before domain action. Check readiness, assignment and terminal state. Use dependencies for ancestor IDs, states, and outputs; this is authoritative evidence, with no separate run_get or parent confirmation needed when complete. Follow the frozen instructions and procedure policy. Use step_update for meaningful milestones and the terminal outcome, then report once to main. Do not execute downstream steps.", p.ID, r.ID, s.ID)
@@ -368,6 +375,15 @@ func (a *App) deliverStep(p *Process, r Run, s *StepRun, all []StepRun) (err err
 			err = a.recordStepDeliveryError(*s, err)
 		}
 	}()
+	if s.Origin == "process_step" && s.Executor.Kind == "agent" {
+		available, e := a.workerStepAvailable(r, *s)
+		if e != nil {
+			return e
+		}
+		if !available {
+			return nil
+		}
+	}
 	// Processes owns execution-worker provisioning. The worker is created
 	// through the platform thread API, which inherits the executor agent's
 	// spawnable MCP-server scopes when MCP is omitted from the request. This is
@@ -379,13 +395,13 @@ func (a *App) deliverStep(p *Process, r Run, s *StepRun, all []StepRun) (err err
 		if s.DeliveryEventID != "" && !strings.Contains(s.DeliveryEventID, ":assignment:") && s.ThreadID != "" {
 			return a.deliverStepToThread(p, r, s, all)
 		}
-		if sequentialAgent(r, all) != 0 {
+		if persistentWorkerAgent(r, *s, all) != 0 {
 			worker, e := a.runWorker(r.ID, s.Executor.AgentID)
 			if e != nil {
 				return e
 			}
 			if worker != "" {
-				provisioned, e := a.sequentialThreadProvisioned(worker, all)
+				provisioned, e := a.persistentThreadProvisioned(worker, s.Executor.AgentID, all)
 				if e != nil {
 					return e
 				}
@@ -410,7 +426,7 @@ func (a *App) deliverStep(p *Process, r Run, s *StepRun, all []StepRun) (err err
 
 func (a *App) deliverStepToThread(p *Process, r Run, s *StepRun, all []StepRun) (err error) {
 	message := stepDeliveryMessage(a.stepContext(p, r, *s, all), s.DueAt)
-	if s.ThreadID == "" && sequentialAgent(r, all) != 0 {
+	if s.ThreadID == "" && persistentWorkerAgent(r, *s, all) != 0 {
 		worker, e := a.runWorker(r.ID, s.Executor.AgentID)
 		if e != nil {
 			return e
@@ -470,6 +486,9 @@ func processWorkerToolList(sequential bool) []string {
 
 func processWorkerID(r Run, s StepRun, sequential bool) string {
 	if sequential {
+		if r.Binding.WorkerContinuity == "per_executor" {
+			return fmt.Sprintf("process-run-%s-agent-%d-worker", r.ID, s.Executor.AgentID)
+		}
 		return "process-run-" + r.ID + "-worker"
 	}
 	return "process-run-" + r.ID + "-step-" + s.Key
@@ -534,7 +553,7 @@ func (a *App) spawnSequentialWorker(p *Process, r *Run, s *StepRun, all []StepRu
 	worker := s.ThreadID
 	if worker == "" {
 		worker = processWorkerID(*r, *s, true)
-		if _, err := a.db.Exec(`INSERT INTO process_run_workers(run_id,agent_id,thread_id,created_at) VALUES(?,?,?,?) ON CONFLICT(run_id) DO NOTHING`, r.ID, s.Executor.AgentID, worker, timestamp()); err != nil {
+		if _, err := a.db.Exec(`INSERT INTO process_run_workers(run_id,agent_id,thread_id,created_at) VALUES(?,?,?,?) ON CONFLICT(run_id,agent_id) DO NOTHING`, r.ID, s.Executor.AgentID, worker, timestamp()); err != nil {
 			return err
 		}
 	}
@@ -542,7 +561,7 @@ func (a *App) spawnSequentialWorker(p *Process, r *Run, s *StepRun, all []StepRu
 	if s.DeliveryEventID != "" {
 		eventID = s.DeliveryEventID
 	}
-	directive := fmt.Sprintf("You are the persistent Processes worker for run %s. Keep this thread alive across the run. For each authoritative ready step, call processes_step_claim before any domain action, use the returned frozen instructions and dependency evidence, then record milestones and the terminal outcome with processes_step_update. Do not execute unassigned work or create another worker. Inspect every step_update result: when its top-level done field is true, immediately call done before any text; when false, wait for the next Processes event without polling.", r.ID)
+	directive := fmt.Sprintf("You are the persistent Processes worker for run %s. Keep this thread alive across your assigned steps, including timed waits and approval gates. For each authoritative ready step, call processes_step_claim before any domain action, use the returned frozen instructions and dependency evidence, then record milestones and the terminal outcome with processes_step_update. Do not execute unassigned work or create another worker. Inspect every step_update result: when its top-level done field is true, immediately call done before any text; when false, follow next_action: continue the current step for progress acknowledgements, or await the next Processes event after completion without polling.", r.ID)
 	if s.ThreadID != worker || s.DeliveryEventID != eventID {
 		if _, err := a.db.Exec(`UPDATE process_step_runs SET target_thread_id=?,delivery_event_id=? WHERE id=?`, worker, eventID, s.ID); err != nil {
 			return err
@@ -599,8 +618,8 @@ func (a *App) assignStep(project, actor, process, run, id, thread string) (any, 
 	if step.Executor.Kind != "agent" || !strings.HasPrefix(actor, fmt.Sprintf("agent:%d:", step.Executor.AgentID)) {
 		return nil, errors.New("only this step's assigned agent can delegate it")
 	}
-	if sequentialAgent(r, all) != 0 {
-		return nil, errors.New("sequential runs bind their persistent worker through step_claim")
+	if persistentWorkerAgent(r, *step, all) != 0 {
+		return nil, errors.New("persistent runs bind their worker through step_claim")
 	}
 	switch step.State {
 	case "ready", "running", "waiting", "blocked":
@@ -879,33 +898,51 @@ func (a *App) stepAction(project, actor, process, run, id, action string, args m
 			}
 		}
 	}
-	d, e := a.runDefinition(r)
-	if e != nil {
-		return nil, e
-	}
 	worker, e := a.runWorker(r.ID, s.Executor.AgentID)
 	if e != nil {
 		return nil, e
 	}
-	if worker != "" && actor == fmt.Sprintf("agent:%d:%s", s.Executor.AgentID, worker) {
-		done := terminal(r.State)
-		next := "Wait for the next Processes event without polling."
-		if done {
-			next = "Call the native done tool immediately before writing any text."
+	if strings.HasPrefix(actor, "agent:") {
+		done, next := workerAction(r, s, actor, worker, all)
+		if action == "step_update" {
+			return workerAcknowledgement(process, r, s, done, next), nil
 		}
-		result := map[string]any{"done": done, "next_action": next, "process_id": process, "run_id": r.ID, "step_id": s.ID, "run": map[string]any{"id": r.ID, "process_id": process, "state": r.State, "version": r.Version}, "step": s, "dependencies": dependencyEvidence(s, all), "dependency_outputs": dependencyOutputs(s, all), "parameters": r.Binding.Parameters, "worker": map[string]any{"thread_id": worker, "done": done}}
-		if action == "step_claim" {
-			result["instructions"] = d.Instructions
-			result["required_inputs"] = d.RequiredInputs
-			result["default_inputs"] = d.DefaultInputs
-			result["completion_criteria"] = d.CompletionCriteria
-			result["approval_requirements"] = d.ApprovalRequirements
-			result["inputs"] = r.Inputs
-			result["assignment"] = r.Binding
+		result := map[string]any{
+			"process_id": process, "run_id": r.ID, "step_id": s.ID,
+			"run":  map[string]any{"id": r.ID, "process_id": process, "state": r.State, "version": r.Version},
+			"step": workerStep(s), "dependencies": dependencyEvidence(s, all),
+			"done": done, "next_action": next,
+			"context_ref": map[string]any{"procedure_version": r.Version, "assignment_id": r.AssignmentID, "assignment_revision": r.AssignmentRevision},
+		}
+		if worker != "" && actor == fmt.Sprintf("agent:%d:%s", s.Executor.AgentID, worker) {
+			result["worker"] = map[string]any{"thread_id": worker, "done": done}
+		}
+		// Explicit opt-out is safe across lost replies/restarts: callers can
+		// always request the full shared context again when memory is missing.
+		includeContext, valid := args["include_context"].(bool)
+		if !valid {
+			includeContext = true
+		}
+		if includeContext {
+			d, err := a.runDefinition(r)
+			if err != nil {
+				return nil, err
+			}
+			result["instructions"], result["required_inputs"], result["default_inputs"] = d.Instructions, d.RequiredInputs, d.DefaultInputs
+			result["completion_criteria"], result["approval_requirements"], result["inputs"] = d.CompletionCriteria, d.ApprovalRequirements, r.Inputs
+			result["parameters"] = r.Binding.Parameters
+			result["assignment"] = WorkerAssignment{ID: r.AssignmentID, Revision: r.AssignmentRevision, Name: r.Binding.Name, Target: r.Binding.Target, OwnerAgentID: r.Binding.OwnerAgentID}
 		}
 		return result, nil
 	}
+	d, e := a.runDefinition(r)
+	if e != nil {
+		return nil, e
+	}
+	// Operator HTTP reads retain their inspection snapshot. MCP worker paths
+	// above never return unrelated steps or two copies of ancestor receipts.
 	return map[string]any{"process_id": process, "run_id": r.ID, "step_id": s.ID, "run": r, "step": s, "dependency_outputs": dependencyOutputs(s, all), "dependencies": dependencyEvidence(s, all), "parameters": r.Binding.Parameters, "definition": d}, nil
+
 }
 
 func (a *App) stepLifecycle(event sdk.Event, l *sdk.AgentEventLifecycle) error {
@@ -1040,6 +1077,26 @@ func (a *App) updateTaskState(s Task, r Run, all []Task, actor string, args map[
 	allowed := s.Executor.Kind == "human" && actor == "operator" || s.Executor.Kind == "agent" && strings.HasPrefix(actor, fmt.Sprintf("agent:%d:", s.Executor.AgentID))
 	if !allowed {
 		return errors.New("only this step's assigned executor can update it")
+	}
+	if r.Binding.WorkerContinuity == "per_executor" && s.Origin == "process_step" && s.Executor.Kind == "agent" {
+		worker, err := a.runWorker(r.ID, s.Executor.AgentID)
+		if err != nil {
+			return err
+		}
+		if worker == "" || s.ThreadID != worker || actor != fmt.Sprintf("agent:%d:%s", s.Executor.AgentID, worker) {
+			return errors.New("only the assigned persistent worker can update this step")
+		}
+		// A lost completion response may be retried after the next step was
+		// dispatched. Preserve terminal idempotency without releasing its owner.
+		if !terminal(s.State) {
+			available, err := a.workerStepAvailable(r, s)
+			if err != nil {
+				return err
+			}
+			if !available {
+				return errors.New("this worker already owns another unfinished step")
+			}
+		}
 	}
 	// Independent workflow steps are handed off by the assigned agent's main
 	// thread to a focused worker. The main thread may inspect the authoritative

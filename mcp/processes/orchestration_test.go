@@ -59,8 +59,8 @@ func TestStepReadIncludesDependencyEvidenceAndAncestors(t *testing.T) {
 	if deps["write"].Direct || deps["write"].Output != "Draft v1" || deps["research"].Output != "Research evidence" {
 		t.Fatalf("missing ancestor evidence: %#v", deps)
 	}
-	if got["dependency_outputs"].(map[string]string)["write"] != "Draft v1" {
-		t.Fatal("legacy outputs changed")
+	if _, duplicated := got["dependency_outputs"]; duplicated {
+		t.Fatal("worker received duplicate dependency outputs")
 	}
 }
 

@@ -82,17 +82,24 @@ func (a *App) ensureProcessThread(project, eventID string, candidate sdk.ThreadS
 	return err
 }
 
-func (a *App) sequentialThreadProvisioned(worker string, all []StepRun) (bool, error) {
+func (a *App) persistentThreadProvisioned(worker string, agent int64, all []StepRun) (bool, error) {
+	// A DAG's stored order need not match dispatch order. Use known delivery
+	// identities rather than scanning the installation's complete outbox history.
 	for _, step := range all {
-		if step.Executor.Kind != "agent" {
+		if step.Origin != "process_step" || step.Executor.Kind != "agent" || step.Executor.AgentID != agent || step.ThreadID != worker || step.DeliveryEventID == "" {
 			continue
 		}
 		var provisioned bool
-		err := a.db.QueryRow(`SELECT spawned FROM process_delivery_envelopes WHERE event_id=?`, deliveryEventID(step, worker)).Scan(&provisioned)
+		err := a.db.QueryRow(`SELECT spawned FROM process_delivery_envelopes WHERE event_id=?`, step.DeliveryEventID).Scan(&provisioned)
 		if errors.Is(err, sql.ErrNoRows) {
-			return false, nil
+			continue
 		}
-		return provisioned, err
+		if err != nil {
+			return false, err
+		}
+		if provisioned {
+			return true, nil
+		}
 	}
 	return false, nil
 }

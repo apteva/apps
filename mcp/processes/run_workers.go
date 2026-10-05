@@ -5,12 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Reuse only a sequential procedure with one agent. Parallel branches,
 // Tasks runs, and different agents retain independent step deliveries.
 func sequentialAgent(r Run, all []StepRun) int64 {
-	if !r.Workflow || r.Backend != "agent" {
+	if !r.Workflow || r.Backend != "agent" || r.Binding.WorkerContinuity == "isolated" {
 		return 0
 	}
 	var agent int64
@@ -54,17 +55,29 @@ func (a *App) runWorker(run string, agent int64) (string, error) {
 }
 
 func (a *App) claimStep(r Run, s StepRun, all []StepRun, actor string) error {
-	agent := sequentialAgent(r, all)
+	agent := persistentWorkerAgent(r, s, all)
 	parts := strings.SplitN(actor, ":", 3)
 	if agent == 0 || s.Executor.Kind != "agent" || s.Executor.AgentID != agent || len(parts) != 3 || parts[0] != "agent" || parts[1] != fmt.Sprint(agent) || parts[2] == "" || parts[2] == "main" {
-		return errors.New("step_claim requires the assigned agent's worker in a sequential run")
+		return errors.New("step_claim requires the assigned agent's persistent run worker")
 	}
-	if s.State == "pending" || !dependenciesReady(s, all) {
+	if s.State == "pending" || s.State == "scheduled" || !stepTimeReady(s, time.Now()) || !dependenciesReady(s, all) {
 		return errors.New("step dependencies are not complete")
+	}
+	if !terminal(s.State) && !terminal(r.State) {
+		available, err := a.workerStepAvailable(r, s)
+		if err != nil {
+			return err
+		}
+		if !available {
+			return errors.New("this worker already owns another unfinished step")
+		}
 	}
 	thread, err := a.runWorker(r.ID, agent)
 	if err != nil {
 		return err
+	}
+	if r.Binding.WorkerContinuity == "per_executor" && (thread == "" || s.ThreadID != parts[2]) {
+		return errors.New("claim requires the app-provisioned worker assigned to this step")
 	}
 	if thread != "" && thread != parts[2] {
 		return errors.New("this run already belongs to another worker")
@@ -72,11 +85,49 @@ func (a *App) claimStep(r Run, s StepRun, all []StepRun, actor string) error {
 	if terminal(s.State) || terminal(r.State) {
 		return nil
 	}
-	if _, err = a.db.Exec(`INSERT INTO process_run_workers(run_id,agent_id,thread_id,created_at) VALUES(?,?,?,?) ON CONFLICT(run_id) DO NOTHING`, r.ID, agent, parts[2], timestamp()); err != nil {
+	if _, err = a.db.Exec(`INSERT INTO process_run_workers(run_id,agent_id,thread_id,created_at) VALUES(?,?,?,?) ON CONFLICT(run_id,agent_id) DO NOTHING`, r.ID, agent, parts[2], timestamp()); err != nil {
 		return err
 	}
 	if s.State == "ready" {
 		return a.writeStep(s, "running", s.Progress, s.Output, s.Error, actor)
 	}
 	return nil
+}
+
+// Worker thread ownership is independent of dependency topology when explicitly
+// selected on the frozen assignment. Automatic mode retains legacy scheduling.
+func persistentWorkerAgent(r Run, s StepRun, all []StepRun) int64 {
+	if !r.Workflow || r.Backend != "agent" || s.Origin != "process_step" || s.Executor.Kind != "agent" {
+		return 0
+	}
+	if r.Binding.WorkerContinuity == "per_executor" {
+		return s.Executor.AgentID
+	}
+	return sequentialAgent(r, all)
+}
+
+// Reserve a worker at provisioning, before even an ambiguous delivery attempt.
+// Query fresh storage: reconciliation's step slice predates earlier dispatches.
+func (a *App) workerStepAvailable(r Run, s StepRun) (bool, error) {
+	if r.Binding.WorkerContinuity != "per_executor" {
+		return true, nil
+	}
+	var count int
+	err := a.db.QueryRow(`SELECT count(*) FROM process_step_runs WHERE run_id=? AND id<>? AND origin='process_step' AND json_extract(executor_json,'$.kind')='agent' AND json_extract(executor_json,'$.agent_id')=? AND target_thread_id<>'' AND state IN ('ready','running','waiting','blocked')`, r.ID, s.ID, s.Executor.AgentID).Scan(&count)
+	return count == 0, err
+}
+
+func persistentWorkerDone(r Run, agent int64, all []StepRun) bool {
+	if terminal(r.State) {
+		return true
+	}
+	if r.Binding.WorkerContinuity != "per_executor" {
+		return false
+	}
+	for _, s := range all {
+		if s.Origin == "process_step" && s.Executor.Kind == "agent" && s.Executor.AgentID == agent && !terminal(s.State) {
+			return false
+		}
+	}
+	return true
 }

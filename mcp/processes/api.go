@@ -37,9 +37,9 @@ func (a *App) MCPTools() []sdk.Tool {
 	descriptions["assignment_create"] = "After creating a procedure, configure an executor, target, parameters, and optional schedule. The assignment is always created paused and does not run. Activate it only with explicit user authorization after the process is active."
 	descriptions["assignment_activate"] = "Enable a paused assignment only with explicit user authorization and only after the reviewed process is active."
 	descriptions["run_cancel"] = "Coordinator or operator: cancel a structured run and stop future handoffs. Already dispatched external work may continue."
-	descriptions["step_claim"] = "Claim and read a ready step as the persistent worker for a sequential same-agent run. Marks ready work running. Reuse this worker for later steps; finish only when worker.done is true."
-	descriptions["step_get"] = "Read a step, frozen executor, parameters, and completed dependency outputs before acting."
-	descriptions["step_update"] = "Assigned executor only: report step progress or output. A persistent worker must inspect the returned done field: call done immediately when true, otherwise wait for the next Processes event."
+	descriptions["step_claim"] = "Claim and read an assigned ready step as the persistent run worker, including per-executor branches and joins. Marks ready work running. Reuse this worker for later steps; finish only when the top-level done field is true."
+	descriptions["step_get"] = "Read the assigned step, frozen context and one dependencies manifest with exact ancestor receipts. No full procedure snapshot. After retaining shared policy, include_context=false omits it; omit this flag for recovery."
+	descriptions["step_update"] = "Assigned executor only: save progress or output; returns only a compact saved-state acknowledgement, not instructions or receipts. A persistent worker must inspect the returned done field: call done immediately when true, otherwise follow next_action: continue after progress, or await the next event after completion without polling."
 	out := []sdk.Tool{}
 	for _, name := range []string{"list", "get", "validate_definition", "create", "update", "activate", "pause", "archive", "start", "runs", "run_get", "run_update", "assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive", "step_get", "step_claim", "step_update", "run_cancel"} {
 		name := name
@@ -84,6 +84,9 @@ func (a *App) MCPTools() []sdk.Tool {
 			props["reason"] = textField("Cancellation reason")
 			required = append(required, "run_id", "reason")
 		case "step_get", "step_claim", "step_update":
+			if name != "step_update" {
+				props["include_context"] = map[string]any{"type": "boolean", "description": "Default true: include shared procedure policy, resolved parameters and assignment context. Use false only after retaining that context; the assigned step and complete dependencies are always returned."}
+			}
 			props["run_id"] = textField("Run ID")
 			props["step_id"] = textField("Step execution ID")
 			required = append(required, "run_id", "step_id")
@@ -500,7 +503,7 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 func assignmentSchema() map[string]any {
 	return object([]string{"name", "owner_agent_id"}, map[string]any{
-		"name": textField("Assignment name, for example Photography Patreon"), "target": textField("Page, client, business or other target; never credentials"), "owner_agent_id": map[string]any{"type": "integer", "minimum": 1}, "schedule": object([]string{"kind"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"interval", "cron"}}, "every": textField("Duration, e.g. 24h; minimum 1m"), "cron": textField("Five-field cron expression"), "timezone": textField("IANA timezone; default UTC")}), "procedure_version": map[string]any{"type": "integer", "minimum": 1}, "roles": map[string]any{"type": "object", "additionalProperties": executorSchema()}, "follow_latest": map[string]any{"type": "boolean", "description": "Adopt future procedure revisions; otherwise pin procedure_version"}, "parameters": map[string]any{"type": "object", "description": "Values for the procedure's declared parameters; use authorized connection references, not credentials"}})
+		"worker_continuity": map[string]any{"type": "string", "enum": []string{"auto", "per_executor", "isolated"}, "description": "auto (default): reuse strict sequential runs; per_executor: reuse one worker thread per run and agent, serializing that agent's ready steps across branches, joins and timers; isolated: separate worker per step. Frozen for each run."}, "name": textField("Assignment name, for example Photography Patreon"), "target": textField("Page, client, business or other target; never credentials"), "owner_agent_id": map[string]any{"type": "integer", "minimum": 1}, "schedule": object([]string{"kind"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"interval", "cron"}}, "every": textField("Duration, e.g. 24h; minimum 1m"), "cron": textField("Five-field cron expression"), "timezone": textField("IANA timezone; default UTC")}), "procedure_version": map[string]any{"type": "integer", "minimum": 1}, "roles": map[string]any{"type": "object", "additionalProperties": executorSchema()}, "follow_latest": map[string]any{"type": "boolean", "description": "Adopt future procedure revisions; otherwise pin procedure_version"}, "parameters": map[string]any{"type": "object", "description": "Values for the procedure's declared parameters; use authorized connection references, not credentials"}})
 }
 
 func executorSchema() map[string]any {

@@ -143,7 +143,7 @@ func TestIndependentStepAssignmentWakesExistingWorker(t *testing.T) {
 		}
 	}
 	read, err := a.stepAction(p.ProjectID, "agent:8:"+step.ThreadID, p.ID, r.ID, step.ID, "step_get", nil)
-	if err != nil || read.(map[string]any)["step"].(StepRun).ID != step.ID {
+	if err != nil || read.(map[string]any)["step"].(WorkerStep).ID != step.ID {
 		t.Fatalf("assigned worker could not read authoritative step: result=%+v err=%v", read, err)
 	}
 	if _, err = a.stepAction(p.ProjectID, "agent:8:"+step.ThreadID, p.ID, r.ID, step.ID, "step_update", map[string]any{"state": "completed", "output": "worker evidence"}); err != nil {

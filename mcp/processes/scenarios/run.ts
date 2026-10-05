@@ -1,4 +1,5 @@
 /** Real Codex/Terra scenarios with independent checks of the sidecar's saved state. */
+import { EXECUTOR_CONTINUITY, CONTINUITY_APPROVAL, verifyExecutorContinuity } from "./executor-continuity";
 import { resolve, basename } from "node:path";
 import { mkdir, mkdtemp, readdir, cp } from "node:fs/promises";
 import { Database } from "bun:sqlite";
@@ -69,6 +70,20 @@ for (const file of files) {
     scenario.setup.app.path = processCopy;
   }
 
+  if (scenario.name === EXECUTOR_CONTINUITY) {
+    const fixtureRoot = resolve(outputDir, "continuity-fixture");
+    const processCopy = resolve(fixtureRoot, "processes");
+    const sourceCopy = resolve(fixtureRoot, "test-continuity");
+    await cp(appDir, processCopy, { recursive: true });
+    await cp(resolve(import.meta.dir, "fixtures/test-continuity"), sourceCopy, { recursive: true });
+    const manifestPath = resolve(processCopy, "apteva.yaml");
+    const manifest = YAML.parse(await Bun.file(manifestPath).text());
+    manifest.requires.apps.push({ name: "test-continuity", optional: true });
+    await Bun.write(manifestPath, YAML.stringify(manifest));
+    scenario.setup.app.path = processCopy;
+    scenario.setup.apps = [{ path: sourceCopy, spawnable: true,
+      env: { DB_PATH: resolve(outputDir, "continuity-fixture.db") } }];
+  }
   scenario.setup.app.env = { ...scenario.setup.app.env, DB_PATH: dbPath };
   databases.set(scenario.name, dbPath);
   await Bun.write(
@@ -113,10 +128,16 @@ const operatorConfirmation: Promise<ConfirmationReport | Error | null> = operato
       log: (message) => console.log(message),
     }).catch((error: Error) => error)
   : Promise.resolve(null);
+const continuityDb = databases.get(EXECUTOR_CONTINUITY);
+const continuityConfirmation: Promise<ConfirmationReport | Error | null> = continuityDb
+  ? confirmWhenWaiting(continuityDb, { stepKey: "approve", output: CONTINUITY_APPROVAL,
+      signal: operatorAbort.signal, log: message => console.log(message) }).catch((error: Error) => error)
+  : Promise.resolve(null);
 const stdout = await new Response(child.stdout).text();
 const exit = await child.exited;
 operatorAbort.abort();
 const confirmed = await operatorConfirmation;
+const continuityConfirmed = await continuityConfirmation;
 await Bun.write(resolve(outputDir, "results.json"), stdout);
 check(exit === 0, `Tier 3 runner failed (${exit}); see ${outputDir}`);
 const report = JSON.parse(stdout);
@@ -163,6 +184,20 @@ for (const scenario of report.results) {
       direct_runs: runs.filter((r) => r.backend === "agent"),
       runs: runs.filter((r) => r.backend === "tasks"),
     };
+    if (scenario.scenario === EXECUTOR_CONTINUITY) {
+      check(continuityConfirmed && !(continuityConfirmed instanceof Error), `Continuity operator confirmation failed: ${continuityConfirmed instanceof Error ? continuityConfirmed.message : "never performed"}`);
+      const workers = db.query("SELECT * FROM process_run_workers WHERE run_id=?").all(runs[0]?.id) as any[];
+      const fixtureDb = new Database(resolve(outputDir, "continuity-fixture.db"), { readonly: true });
+      const fixture = { contexts: fixtureDb.query("SELECT * FROM prepared_contexts").all() as any[],
+        operations: fixtureDb.query("SELECT * FROM operations ORDER BY id").all() as any[] };
+      fixtureDb.close();
+      // Retain independently gathered evidence even if a new verifier check fails.
+      await Bun.write(resolve(outputDir, "continuity-evidence.json"), JSON.stringify({ ...history, workers, fixture, operator_confirmation: continuityConfirmed }, null, 2));
+      verifyExecutorContinuity(scenario.tool_calls, runs, workers, fixture, continuityConfirmed as ConfirmationReport);
+      observed[scenario.scenario] = { ...history, workers, fixture, operator_confirmation: continuityConfirmed };
+      console.log(`PASS ${scenario.scenario}: one worker, retained context/tools, exact receipts, validation join and HTTP approval verified (${scenario.iterations} iterations, ${scenario.tokens.total} tokens)`);
+      continue;
+    }
     verifyHistory(scenario.scenario, history);
     if (scenario.scenario === "processes-sequential-worker") {
       const workers = db.query("SELECT * FROM process_run_workers WHERE run_id=?").all(runs[0].id) as any[];

@@ -16,6 +16,8 @@ No Tasks integration is installed and no external publishing service is used.
 | `07-operator-confirmation.yaml` | A run parks on a human work step, the operator confirms it mid-run over HTTP, and the agent publishes only afterwards. |
 | `07-browser-continuity.yaml` | One local browser page stays open across three steps; the final real page submission proves the same session and worker were reused. |
 
+| `10-executor-continuity.yaml` | Same-agent branches and a validation join reuse one worker, prepared context and tools; save exact source/artifact/digest receipts; and publish once after HTTP operator approval. |
+
 Run from the Processes app directory:
 
 ```sh
@@ -245,3 +247,76 @@ event rather than by polling.
 ```sh
 APTEVA_TEST_PROVIDER=opencode-go bun run scenarios/run.ts scenarios/07-operator-confirmation.yaml
 ```
+
+## Executor worker continuity
+
+```sh
+APTEVA_TEST_MODEL=gpt-6.1-sol bun run scenarios/run.ts scenarios/10-executor-continuity.yaml
+```
+
+This case deliberately fails the old strict-chain detector: both portrait steps
+have only inventory as a dependency, and validation joins all three outputs.
+The assignment explicitly selects `worker_continuity=per_executor`. The test-only
+fixture app creates one prepared context bound to the trusted agent, project and
+worker thread. Subsequent operations must reuse that context: a different thread
+is rejected. It persists both simulated portrait identities and distinct digests,
+validates them, and accepts one publication receipt after operator approval.
+Fixture operations and receipts are real local MCP calls; no external Media or
+publishing service is called. The production manifest gains no test dependency.
+
+The independent verifier reads both app databases and checks the frozen policy,
+one persisted worker, serialized claims, separate tracked step execution IDs,
+exact source/context/artifact/digest receipts, all dependency audit gates, an
+actual operator HTTP confirmation, one setup, and no repeated fixture discovery.
+Negative tests reject extra workers, mixed receipts, early validation,
+self-approval, fabricated receipts, and repeated setup. Go regressions cover
+sidecar restart/checkpoint recovery, ambiguous delivery retries, timed waits,
+multiple executors, run isolation, and an out-of-order stored graph.
+
+Recorded on 2026-10-05 with `openai-codex` / `gpt-6.1-sol`: the live case and
+independent saved-state/tool-trace verifier passed in 26 iterations, 198.392
+seconds, with 554,671 reported tokens. Six steps completed, including real
+HTTP operator approval. One worker performed all five agent steps, one fixture
+tool search, one prepare, two distinct renders, one validation, one publication,
+and one final done. Five unique tracked execution receipts retained separate
+step attribution. Report: `/private/tmp/processes-executor-continuity-tier3/run-1oiWtC`.
+This is one passing live smoke run, not a Media performance benchmark. An earlier
+browser-based attempt was blocked by platform screenshot file access and stopped;
+it is not counted as a pass. The final fixture isolates worker continuity from
+that unrelated screenshot path.
+
+Worker response regressions also verify a single dependency manifest, verbatim
+ancestor receipts, default policy/checkpoint recovery after a sidecar restart,
+explicit `include_context=false` reuse, compact progress/blocker acknowledgements,
+idempotent lost completion replies, and the final approval/done gate. Operator
+HTTP and explicit run inspection retain full snapshots. In the large-context test,
+a full inspection is approximately 91.8 KB, the worker read is 25.7 KB, and the
+read with retained shared context is 14.9 KB; most remaining bytes are the exact
+required ancestor receipt. A 13.5 KB submitted output produces a 305–316 byte
+completion acknowledgement. These are deterministic payload measurements, not
+latency estimates. The live verifier also requires policy reuse on later claims,
+completion acknowledgements below 1 KB without echoed context, and one final
+`done=true` only after publication.
+
+Compact-response live rerun recorded on 2026-10-05 with `openai-codex` /
+`gpt-6.1-sol`: scenario and independent verifier passed in 26 iterations,
+222.179 seconds, with 529,359 reported tokens. Later claims explicitly reused
+shared policy. All five completion acknowledgements were 305–318 bytes, with
+`done=true` only after final publication. Total claim/update response payloads
+were 13,547 bytes versus 37,207 in the prior continuity smoke run
+(about 64% less). These are live payload measurements with model-authored
+procedure text; they do not establish an end-to-end latency improvement.
+Report: `/private/tmp/processes-executor-continuity-tier3/run-UT7S7P`.
+The preceding compact-response attempt completed the workflow but hit a verifier
+false negative because CLI argument telemetry encodes booleans as strings. The
+verifier now handles that representation, with regression coverage, and the
+complete live rerun above passed.
+
+Clean Processes 0.16.2 release verification on 2026-10-05 also passed with
+`openai-codex` / `gpt-6.1-sol`: 26 iterations, 208.216 seconds, 503,064 reported
+tokens. Both app databases and tool trace passed the complete independent verifier.
+Report: `/private/tmp/processes-release-0.16.2-tier3/run-GMdkqp`. Go race, 73
+UI/verifier tests, 19 Playwright tests, fixture tests, TypeScript checks and panel
+import validation passed on this release checkout. The first packaging attempt
+was rejected before any model iteration due to an unquoted comma in a tool
+manifest description; it was corrected before this successful run.

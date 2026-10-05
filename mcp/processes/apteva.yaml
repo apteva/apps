@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: processes
 display_name: Processes
-version: 0.16.1
+version: 0.16.2
 description: Visual company procedures with generic connected steps, independent assignments, multi-agent execution, recurring runs, event triggers, and durable native run history.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/processes
@@ -71,9 +71,9 @@ provides:
     - { name: assignment_activate, description: Enable an assignment. }
     - { name: assignment_pause, description: Pause one assignment. }
     - { name: assignment_archive, description: Archive one assignment. }
-    - { name: step_claim, description: Claim a sequential step and reuse its run worker. }
-    - { name: step_get, description: Read a workflow step and its dependency outputs. }
-    - { name: step_update, description: Report step progress or output and follow the returned worker completion action. }
+    - { name: step_claim, description: Claim an assigned step and reuse its persistent run worker. }
+    - { name: step_get, description: "Read the assigned step, frozen policy and one exact dependency manifest; reuse retained context on later reads." }
+    - { name: step_update, description: Save step progress or output; receive a compact acknowledgement and follow done and next_action. }
     - { name: run_cancel, description: Stop future handoffs in a structured run as coordinator or operator. }
     - { name: trigger_sources, description: "Configure, preview and inspect assignment event triggers." }
     - { name: triggers, description: "Configure, preview and inspect assignment event triggers." }
@@ -124,7 +124,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: processes/v0.16.1
+    ref: processes/v0.16.2
     entry: mcp/processes
   port: 8080
   health_check: /health

@@ -251,7 +251,7 @@ test("editing a paused assignment preserves parameters and uses revision", async
   await mount(
     {},
     {
-      assignments: [{ ...assignment, status: "paused" }],
+      assignments: [{ ...assignment, status: "paused", worker_continuity: "per_executor" }],
       parameters: [
         { key: "page", label: "Patreon page", type: "string", required: true },
       ],
@@ -294,6 +294,7 @@ test("editing a paused assignment preserves parameters and uses revision", async
   expect(payload.expected_revision).toBe(1);
   expect(payload.assignment.owner_agent_id).toBe(8);
   expect(payload.assignment.parameters.page).toBe("photo");
+  expect(payload.assignment.worker_continuity).toBe("per_executor");
 });
 
 const workflowSteps = [

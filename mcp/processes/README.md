@@ -203,6 +203,18 @@ step receives its instructions and all completed ancestor outputs.
 
 Agents read `step_get(process_id, run_id, step_id)` before acting, then report
 `step_update` with state, progress, output, and error.
+Worker reads and claims contain the assigned step/checkpoint, one `dependencies`
+manifest with complete ancestor receipts, and shared frozen policy. They omit
+unrelated steps and delivery diagnostics. Retain shared policy and pass
+`include_context=false` on later reads/claims to omit repeated policy, inputs,
+parameters and assignment details; omit the flag (default true) to recover
+context. `context_ref` identifies the frozen procedure and assignment revisions.
+Updates return only IDs, accepted state/revision/progress, run state, `done`,
+`next_action`, and any blocker reason. Follow `next_action`: continue current work
+after progress; after completion await the next event or call native done when
+`done=true`. Exact receipts remain saved and recoverable with `step_get`. Operator
+HTTP reads and explicit `run_get` retain full inspection snapshots.
+
 Only the assigned agent can update an agent step. Human steps are completed in
 **Runs** by authenticated project operators; agents cannot approve as a human.
 Completion requires nonempty evidence; waiting/blocked/failed/cancelled reports
@@ -367,6 +379,35 @@ in both light and dark modes. Running/ready work uses
 the host accent; completed, waiting/blocked, and failed work use semantic colors.
 Motion respects the reduced-motion preference.
 
+## Worker continuity
+
+Assignments expose `worker_continuity` in HTTP/MCP and **Worker threads** in
+its editor. The choice is frozen in each run's assignment snapshot:
+
+- `auto` (default, including historical assignments): reuse the existing worker
+  only for a strict, untimed same-agent chain; other steps remain isolated.
+- `per_executor`: one persistent worker thread per run and executor agent, even
+  with branches, dependency joins, redundant dependencies, or timed steps. This
+  retains conversational context and discovered tools. Ready work on the same
+  executor is serialized; different executor agents can run concurrently.
+- `isolated`: provision a separate worker thread for each step, preserving
+  parallel execution even when steps use the same agent.
+
+Dependencies and timers still control eligibility. A reserved step, including
+an ambiguous delivery or blocked step, prevents another step from being sent to
+its worker. Each dispatch retains a separate tracked execution ID and immutable
+delivery envelope; each step retains its own checkpoint and receipt. Workers
+claim the app-assigned step before acting and use durable dependency evidence
+for exact artifact identities. The final validation and human approval gates
+are unchanged. A worker finishes after its own frozen steps are terminal, or
+when the run becomes terminal, and stays available across waits while it still
+has future assigned work. App restarts reuse saved ownership and delivery IDs.
+
+Migration 014 preserves existing worker rows and changes their key to
+`(run_id, agent_id)`. Existing assignment edits only affect future runs; they
+never retarget previously dispatched step events. The app pins SDK v0.95.0,
+the latest published tag by commit ancestry when this change was implemented.
+
 ## Step timing
 
 Each structured step can define an optional `start_after` and `due_after` rule.
@@ -397,8 +438,9 @@ the first email's completion promptly.
 The app's five-second worker changes eligible steps from `scheduled` to `ready`
 and sends the normal tracked event to their assigned agent or requests human
 work. No model requests or sleeping worker are
-needed during the delay. Timed workflows use independent step deliveries; untimed
-sequential workflows still reuse their existing worker. Restarts retain timers;
+needed during the delay. In automatic mode, timed workflows use independent step deliveries and untimed
+strict sequential workflows reuse their existing worker. With `per_executor`,
+timers wake the same saved worker thread after the delay. Restarts retain timers;
 if the app was offline when due, it dispatches after recovery. Retries reuse the
 same delivery identity. Cancellation stops future handoffs; pausing an assignment
 only stops new runs. Start times are earliest eligibility, not guaranteed delivery

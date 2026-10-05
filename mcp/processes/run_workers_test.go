@@ -45,10 +45,10 @@ func TestRunWorkerClaimsReuseAcrossGenericSteps(t *testing.T) {
 		t.Fatal("claimed pending work")
 	}
 	result := claim("research")
-	if result["default_inputs"] != "Standing Barcelona context" || result["inputs"] != "Use Celsius today" || result["completion_criteria"] != "Save all receipts" || result["assignment"].(AssignmentConfig).OwnerAgentID != r.Binding.OwnerAgentID {
+	if result["default_inputs"] != "Standing Barcelona context" || result["inputs"] != "Use Celsius today" || result["completion_criteria"] != "Save all receipts" || result["assignment"].(WorkerAssignment).OwnerAgentID != r.Binding.OwnerAgentID {
 		t.Fatal("claim lost execution context", result)
 	}
-	if result["step"].(StepRun).State != "running" || result["worker"].(map[string]any)["done"] != false {
+	if result["step"].(WorkerStep).State != "running" || result["worker"].(map[string]any)["done"] != false {
 		t.Fatal("claim did not mark running", result)
 	}
 	if _, err := a.stepAction(p.ProjectID, "agent:7:competitor", p.ID, r.ID, first.ID, "step_claim", nil); err == nil {
@@ -90,7 +90,7 @@ func TestRunWorkerClaimsReuseAcrossGenericSteps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if raw.(map[string]any)["done"] != true || raw.(map[string]any)["worker"].(map[string]any)["done"] != true || !strings.Contains(raw.(map[string]any)["next_action"].(string), "done tool immediately") {
+	if raw.(map[string]any)["done"] != true || !strings.Contains(raw.(map[string]any)["next_action"].(string), "done tool immediately") {
 		t.Fatal("worker not released on completion")
 	}
 	before := len(f.events)

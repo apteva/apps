@@ -21,6 +21,9 @@ for (const pinnedRole of [false, true]) {
     }
     await expect(role).toHaveValue("1105");
     await expect(save).toBeEnabled();
+    const continuity = page.getByLabel("Worker threads", { exact: true });
+    await expect(continuity).toHaveValue("auto");
+    await continuity.selectOption("per_executor");
     await save.click();
     await expect(page.getByRole("button", { name: "Edit assignment", exact: true })).toBeVisible();
     const saved = await page.evaluate(() => JSON.parse(sessionStorage.getItem("submitted-assignment")!));
@@ -30,8 +33,10 @@ for (const pinnedRole of [false, true]) {
     expect(saved.assignment.parameters).toEqual({ city: "Barcelona" });
     expect(saved.assignment.schedule).toEqual({ kind: "cron", cron: "0 * * * *", timezone: "Europe/Madrid" });
     expect(saved.assignment.status).toBe("paused");
+    expect(saved.assignment.worker_continuity).toBe("per_executor");
     await page.getByRole("button", { name: "Edit assignment", exact: true }).click();
     await expect(owner).toHaveValue("1105");
+    await expect(continuity).toHaveValue("per_executor");
     await expect(role).toHaveValue("1105");
   });
 }
