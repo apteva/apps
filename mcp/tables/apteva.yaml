@@ -59,6 +59,11 @@ requires:
 provides:
   http_routes:
     - prefix: /
+  permissions:
+    - name: projections.read
+      description: Inspect projection definitions and refresh state.
+    - name: projections.manage
+      description: Create, refresh, pause, activate, or delete SQL projections.
   mcp_tools:
     - name: tables_create
       description: 'Create a project-confined table with typed columns. Args: name, columns (array of {name, type, nullable?, default?}). Returns the created table''s id + name.'
@@ -100,18 +105,28 @@ provides:
       description: 'Return versioned generic Tables capabilities, including the recursive filter AST contract and enforced limits.'
     - name: projections_create
       description: 'Create a versioned read-only SQL projection. Args: name, sql, source_tables, result_columns, scope_columns?. Projection SQL is validated read-only SQL and may use {table_name} placeholders.'
+      requires: projections.manage
     - name: projections_list
       description: 'List project-scoped SQL projections and their refresh status.'
+      requires: projections.read
     - name: projections_describe
       description: 'Describe one projection definition, result schema, dependencies, and current status. Args: name.'
+      requires: projections.read
     - name: projections_refresh
       description: 'Queue a projection rebuild or one affected scope. Args: name, scope? (object keyed by scope_columns), rebuild?.'
+      requires: projections.manage
     - name: projections_status
       description: 'Inspect projection queue backlog, freshness, watermarks, retries, and errors. Args: name.'
+      requires: projections.read
     - name: projections_pause
       description: 'Pause or resume projection processing. Args: name, paused.'
+      requires: projections.manage
+    - name: projections_activate
+      description: 'Atomically switch readers to a built projection version. Args: name, version.'
+      requires: projections.manage
     - name: projections_delete
       description: 'Delete a projection definition and its stored result rows. Args: name, confirm=true.'
+      requires: projections.manage
   ui_panels:
     - slot: project.page
       label: Tables
@@ -244,6 +259,16 @@ config_schema:
     default: "100000"
     label: Projection rows per scope
     description: Maximum calculated rows retained for one projection scope.
+  - name: max_projection_total_rows
+    type: text
+    default: "1000000"
+    label: Maximum rows per projection refresh
+    description: Global row ceiling for one refresh result before publication.
+  - name: max_projection_bytes
+    type: text
+    default: "67108864"
+    label: Maximum projection result bytes
+    description: Serialized byte ceiling for one refresh before publication.
   - name: max_batch_rows
     type: text
     default: "1000"

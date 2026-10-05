@@ -14,8 +14,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Error("db.migrations missing")
 	}
-	if len(m.Provides.MCPTools) != 26 {
-		t.Errorf("expected 26 MCP tools, got %d", len(m.Provides.MCPTools))
+	if len(m.Provides.MCPTools) != 27 {
+		t.Errorf("expected 27 MCP tools, got %d", len(m.Provides.MCPTools))
 	}
 }
 

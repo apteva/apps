@@ -60,6 +60,12 @@ func (a *App) toolTablesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	defer tx.Rollback()
+	var projectionExists int64
+	if err := tx.QueryRow(`SELECT id FROM projection_definitions WHERE project_id=? AND name=? LIMIT 1`, pid, name).Scan(&projectionExists); err == nil {
+		return nil, errf("projection %q already exists", name)
+	} else if err != sql.ErrNoRows {
+		return nil, err
+	}
 
 	var existing int64
 	if err := tx.QueryRow(`SELECT id FROM tables_meta WHERE project_id = ? AND name = ?`, pid, name).Scan(&existing); err == nil {

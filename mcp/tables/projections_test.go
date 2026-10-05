@@ -216,3 +216,94 @@ func TestWholeProjectionRefreshesWithoutScopeColumns(t *testing.T) {
 		t.Fatalf("unexpected whole projection result: %#v", rows)
 	}
 }
+
+func TestProjectionLeaseFencesStalePublisher(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	projectionSourceTable(t, app, ctx)
+	createProjection(t, app, ctx)
+	old, ok, err := claimProjectionQueue(context.Background(), ctx, "test-proj")
+	if err != nil || !ok {
+		t.Fatalf("first claim: %#v %v", old, err)
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE projection_queue SET claimed_until=datetime('now','-1 second') WHERE projection_id=? AND scope_key=?`, old.ProjectionID, old.ScopeKey); err != nil {
+		t.Fatal(err)
+	}
+	newer, ok, err := claimProjectionQueue(context.Background(), ctx, "test-proj")
+	if err != nil || !ok || newer.LeaseToken == old.LeaseToken {
+		t.Fatalf("second claim did not fence first: old=%#v new=%#v err=%v", old, newer, err)
+	}
+	p, err := app.loadProjection(ctx, "test-proj", "event_totals")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publishProjectionRows(ctx, p, old, map[string][]map[string]any{projectionAllScope: {}}); err == nil {
+		t.Fatal("stale worker published after losing its lease")
+	}
+	var token string
+	if err := ctx.AppDB().QueryRow(`SELECT lease_token FROM projection_queue WHERE projection_id=? AND scope_key=?`, old.ProjectionID, old.ScopeKey).Scan(&token); err != nil {
+		t.Fatal(err)
+	}
+	if token != newer.LeaseToken {
+		t.Fatalf("stale publication changed lease token: %q != %q", token, newer.LeaseToken)
+	}
+}
+
+func TestPausedProjectionCapturesAndResumes(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	projectionSourceTable(t, app, ctx)
+	createProjection(t, app, ctx)
+	runProjectionWorker(t, app, ctx)
+	mustCall(t, app, ctx, "projections_pause", map[string]any{"name": "event_totals", "paused": true})
+	mustCall(t, app, ctx, "rows_insert", map[string]any{"table": "events", "rows": []any{map[string]any{"centre_id": "paused", "value": 1}}})
+	var changes int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM projection_changes`).Scan(&changes); err != nil || changes == 0 {
+		t.Fatalf("paused projection lost durable change: %d %v", changes, err)
+	}
+	mustCall(t, app, ctx, "projections_pause", map[string]any{"name": "event_totals", "paused": false})
+	runProjectionWorker(t, app, ctx)
+	rows := projectionRows(t, app, ctx)
+	if len(rows) != 1 || rows[0]["centre_id"] != "paused" {
+		t.Fatalf("resume did not process captured change: %#v", rows)
+	}
+}
+
+func TestProjectionVersionsBuildAlongsideAndActivate(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	projectionSourceTable(t, app, ctx)
+	createProjection(t, app, ctx)
+	mustCall(t, app, ctx, "projections_create", map[string]any{
+		"name": "event_totals", "version": 2, "activate": false,
+		"sql":            "SELECT centre_id, COUNT(*) + 10 AS total FROM {events} GROUP BY centre_id",
+		"source_tables":  []any{"events"},
+		"result_columns": []any{map[string]any{"name": "centre_id", "type": "text", "nullable": false}, map[string]any{"name": "total", "type": "number", "nullable": false}},
+		"scope_columns":  []any{"centre_id"},
+	})
+	mustCall(t, app, ctx, "projections_activate", map[string]any{"name": "event_totals", "version": 2})
+	runProjectionWorker(t, app, ctx)
+	mustCall(t, app, ctx, "rows_insert", map[string]any{"table": "events", "rows": []any{map[string]any{"centre_id": "v", "value": 1}}})
+	runProjectionWorker(t, app, ctx)
+	rows := projectionRows(t, app, ctx)
+	if len(rows) != 1 || rows[0]["total"] != float64(11) {
+		t.Fatalf("activated version was not read/refreshed: %#v", rows)
+	}
+}
+
+func TestProjectionBoolResultsPublishOnce(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	mustCall(t, app, ctx, "tables_create", map[string]any{"name": "flags", "columns": []any{map[string]any{"name": "enabled", "type": "bool"}}})
+	mustCall(t, app, ctx, "rows_insert", map[string]any{"table": "flags", "rows": []any{map[string]any{"enabled": true}}})
+	mustCall(t, app, ctx, "projections_create", map[string]any{
+		"name": "flag_counts", "version": 1, "sql": "SELECT enabled, COUNT(*) AS total FROM {flags} GROUP BY enabled", "source_tables": []any{"flags"},
+		"result_columns": []any{map[string]any{"name": "enabled", "type": "bool", "nullable": false}, map[string]any{"name": "total", "type": "number", "nullable": false}},
+	})
+	runProjectionWorker(t, app, ctx)
+	out := mustCall(t, app, ctx, "tables_query", map[string]any{"sql": "SELECT enabled,total FROM {flag_counts}"})
+	rows := out["rows"].([]map[string]any)
+	if len(rows) != 1 || rows[0]["enabled"] != int64(1) || rows[0]["total"] != float64(1) {
+		t.Fatalf("bool projection result: %#v", rows)
+	}
+}

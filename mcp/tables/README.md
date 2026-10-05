@@ -8,16 +8,17 @@ table and row is resolved against the calling project_id.
 
 ## Surfaces
 
-- **26 MCP tools** — `tables_create`, `tables_list`, `tables_describe`,
+- **27 MCP tools** — `tables_create`, `tables_list`, `tables_describe`,
   `tables_alter`, `tables_drop`, `indexes_create`, `indexes_list`,
   `indexes_drop`, `rows_insert`, `rows_get`,
   `rows_upsert`, `rows_update`, `rows_delete`, `rows_search`,
   `rows_count`, `rows_aggregate`, `tables_query`, `tables_batch`
 - **Persistent SQL projections** — `projections_create`, `projections_list`,
   `projections_describe`, `projections_refresh`, `projections_status`,
-  `projections_pause`, and `projections_delete`. Projection SQL is validated
+  `projections_pause`, `projections_activate`, and `projections_delete`. Projection SQL is validated
   read-only SQL, source mutations are captured transactionally, affected
-  scopes are coalesced, and results are refreshed by a bounded worker.
+  scopes are coalesced, and results are refreshed by a bounded worker. New
+  versions can be built alongside the active version and switched atomically.
 - **Generic batch execution** — `tables_batch` combines validated reads or
   writes with explicit `read_snapshot`, `write_transaction`, and
   `best_effort` modes. Operations can reference earlier results with
