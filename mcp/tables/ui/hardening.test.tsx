@@ -353,3 +353,26 @@ test("the workspace sends typed row filters to the search endpoint", async () =>
   expect(search?.body).toEqual({ where: [{ col: "title", op: "contains", value: "Acme" }] });
   expect(search?.url.searchParams.get("include_total")).toBe("false");
 });
+
+test("the projections workspace exposes readiness and forced refresh", async () => {
+  const calls: { url: URL; body: any; method: string }[] = [];
+  (window as any).__aptevaAppEvents = { subscribe: () => () => {} };
+  globalThis.fetch = (async (input: any, options: any) => {
+    const url = new URL(String(input), "http://localhost");
+    calls.push({ url, body: options.body ? parseJSON(options.body) : null, method: options.method });
+    if (url.pathname.endsWith("/tables")) return response({ tables: [{ ...table, id: 41 }], has_more: false });
+    if (url.pathname.endsWith("/projections")) return response({ projections: [{ name: "prospect_stats", version: 1, status: "active", ready: true, is_current: true, pending_scopes: 0, min_refresh_interval_seconds: 30, published_change_id: 12, latest_relevant_change: 12, last_successful_publication_at: "2026-10-05T12:00:00Z" }] });
+    return response({ ...table, id: 41 });
+  }) as typeof fetch;
+  const ui = render(<TablesPanel appName="tables" projectId="p" installId={9} />);
+  await flush();
+  fireEvent.click(ui.getByText("Projections"));
+  await flush();
+  expect(ui.getByRole("heading", { name: "prospect_stats" })).toBeTruthy();
+  expect(ui.getAllByText("Ready").length).toBeGreaterThan(0);
+  fireEvent.click(ui.getByText("Refresh now"));
+  await flush();
+  const refresh = calls.find((call) => call.url.pathname.endsWith("/projections/prospect_stats/refresh"));
+  expect(refresh?.method).toBe("POST");
+  expect(refresh?.body).toEqual({ rebuild: true, force: true });
+});

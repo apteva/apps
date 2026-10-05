@@ -100,6 +100,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/tables", Handler: a.handleTablesCollection},
 		{Pattern: "/tables/", Handler: a.handleTablesItem},
+		{Pattern: "/projections", Handler: a.handleProjectionsCollection},
+		{Pattern: "/projections/", Handler: a.handleProjectionsItem},
 	}
 }
 

@@ -143,6 +143,7 @@ interface QueryResponse {
 
 const API = "/api/apps/tables";
 const PAGE_SIZE = 50;
+type PanelApi = <T>(method: string, path: string, params?: Record<string, string>, body?: unknown, signal?: AbortSignal) => Promise<T>;
 
 type RowFilter = { col: string; op: string; value: unknown };
 
@@ -167,6 +168,7 @@ export default function TablesPanel({
   const [selected, setSelected] = useState<string | null>(() =>
     new URLSearchParams(window.location.search).get("table"),
   );
+  const [surface, setSurface] = useState<"tables" | "projections">("tables");
   const [tableSearch, setTableSearch] = useState("");
   const [rowSearch, setRowSearch] = useState("");
   const [filterColumn, setFilterColumn] = useState("");
@@ -573,6 +575,10 @@ export default function TablesPanel({
             <span>{tables.length} tables</span>
             <span>{tables.reduce((sum, table) => sum + table.row_count, 0).toLocaleString()} rows</span>
           </div>
+          <nav className="mt-4 grid grid-cols-2 gap-1 rounded-md bg-bg-input/60 p-1" aria-label="Tables workspace">
+            <button type="button" onClick={() => setSurface("tables")} className={`rounded px-2 py-1.5 text-xs ${surface === "tables" ? "bg-bg-card font-medium text-text shadow-sm" : "text-text-dim hover:text-text"}`}>Data</button>
+            <button type="button" onClick={() => setSurface("projections")} className={`rounded px-2 py-1.5 text-xs ${surface === "projections" ? "bg-bg-card font-medium text-text shadow-sm" : "text-text-dim hover:text-text"}`}>Projections</button>
+          </nav>
         </header>
         <ul className="overflow-auto flex-1 p-2">
           {filteredTables.map((t) => (
@@ -596,7 +602,9 @@ export default function TablesPanel({
             {error}
           </div>
         )}
-        {selectedTable && gridTable ? (
+        {surface === "projections" ? (
+          <ProjectionWorkspace api={api} />
+        ) : selectedTable && gridTable ? (
           <>
             <header className="border-b border-border bg-bg-card px-5 py-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
@@ -761,6 +769,98 @@ export default function TablesPanel({
           />
         )}
       </main>
+    </div>
+  );
+}
+
+interface ProjectionStatus {
+  name: string;
+  version: number;
+  status: string;
+  is_current?: boolean;
+  built?: boolean;
+  ready?: boolean;
+  stale?: boolean;
+  latest_relevant_change?: number;
+  published_change_id?: number;
+  pending_scopes?: number;
+  refresh_running?: boolean;
+  min_refresh_interval_seconds?: number;
+  last_successful_publication_at?: string;
+  next_scheduled_refresh?: string;
+  last_failure?: string | null;
+  coverage_from?: string | null;
+  coverage_to?: string | null;
+  scope_columns?: string[];
+  source_tables?: string[];
+  sql?: string;
+}
+
+function projectionTone(projection: ProjectionStatus): string {
+  if (projection.last_failure) return "bg-red/10 text-red";
+  if (projection.ready) return "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400";
+  if (projection.status === "building" || projection.refresh_running) return "bg-sky-500/15 text-sky-600 dark:text-sky-400";
+  return "bg-amber-500/15 text-amber-600 dark:text-amber-400";
+}
+
+function ProjectionWorkspace({ api }: { api: PanelApi }) {
+  const [epoch, setEpoch] = useState(0);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [busy, setBusy] = useState("");
+  const [message, setMessage] = useState("");
+  const list = useResource<{ projections: ProjectionStatus[] }>("projections", epoch, (signal) => api("GET", "/projections", {}, undefined, signal));
+  const projections = list.data?.projections ?? [];
+  const active = projections.find((projection) => `${projection.name}:${projection.version}` === selected) ?? projections[0];
+  useEffect(() => {
+    if (!selected && active) setSelected(`${active.name}:${active.version}`);
+  }, [active, selected]);
+  const refresh = async (projection: ProjectionStatus) => {
+    setBusy(`${projection.name}:refresh`);
+    setMessage("");
+    try {
+      await api("POST", `/projections/${encodeURIComponent(projection.name)}/refresh`, {}, { rebuild: true, force: true });
+      setMessage("Refresh queued. The status will update automatically.");
+      setEpoch((value) => value + 1);
+    } catch (error) {
+      setMessage((error as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
+  const togglePause = async (projection: ProjectionStatus) => {
+    const paused = projection.status !== "paused";
+    setBusy(`${projection.name}:pause`);
+    setMessage("");
+    try {
+      await api("POST", `/projections/${encodeURIComponent(projection.name)}/pause`, {}, { paused });
+      setEpoch((value) => value + 1);
+    } catch (error) {
+      setMessage((error as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
+  return (
+    <div className="flex min-h-0 flex-1 flex-col bg-bg">
+      <header className="border-b border-border bg-bg-card px-6 py-5">
+        <p className="text-[11px] uppercase tracking-[0.16em] text-text-dim">Analytics</p>
+        <div className="mt-1 flex flex-wrap items-center justify-between gap-3"><div><h1 className="text-xl font-semibold text-text">Projections</h1><p className="mt-1 text-sm text-text-dim">Published, refreshable views over your Tables data.</p></div><span className="rounded-full bg-bg-input px-3 py-1.5 text-xs text-text-dim">{projections.length} versions</span></div>
+      </header>
+      {message && <div role="status" className="border-b border-accent/20 bg-accent/5 px-6 py-3 text-xs text-accent">{message}</div>}
+      <div className="flex min-h-0 flex-1">
+        <div className="w-72 shrink-0 overflow-auto border-r border-border p-3">
+          {list.error && <p className="p-3 text-xs text-red">{list.error}</p>}
+          {!list.busy && !projections.length && <div className="rounded-lg border border-dashed border-border p-5 text-center"><p className="text-sm font-medium text-text">No projections yet</p><p className="mt-1 text-xs text-text-dim">Create one with the projections_create tool, then manage it here.</p></div>}
+          <div className="flex flex-col gap-1">{projections.map((projection) => { const key = `${projection.name}:${projection.version}`; return <button type="button" key={key} onClick={() => setSelected(key)} className={`rounded-lg p-3 text-left ${selected === key ? "bg-accent/10" : "hover:bg-bg-input/60"}`}><div className="flex items-center justify-between gap-2"><span className="truncate font-mono text-xs text-text">{projection.name}</span><span className="text-[10px] text-text-dim">v{projection.version}</span></div><div className="mt-2 flex items-center gap-2"><span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${projectionTone(projection)}`}>{projection.last_failure ? "Failed" : projection.ready ? "Ready" : projection.status === "paused" ? "Paused" : projection.status === "building" ? "Building" : "Stale"}</span>{projection.is_current && <span className="text-[10px] text-text-dim">Current</span>}</div></button>; })}</div>
+        </div>
+        <div className="min-w-0 flex-1 overflow-auto p-6">
+          {active ? <div className="mx-auto max-w-4xl"><div className="flex flex-wrap items-start justify-between gap-4"><div><div className="flex items-center gap-2"><h2 className="font-mono text-lg text-text">{active.name}</h2><span className="text-xs text-text-dim">version {active.version}</span></div><div className="mt-2 flex flex-wrap gap-2"><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${projectionTone(active)}`}>{active.ready ? "Ready" : active.status}</span>{active.is_current && <span className="rounded-full bg-bg-input px-2.5 py-1 text-xs text-text-dim">Current version</span>}</div></div><div className="flex gap-2"><button type="button" disabled={busy !== ""} onClick={() => refresh(active)} className="rounded-md bg-accent px-3 py-2 text-xs font-medium text-bg hover:opacity-90 disabled:opacity-40">{busy === `${active.name}:refresh` ? "Queueing…" : "Refresh now"}</button><button type="button" disabled={busy !== ""} onClick={() => togglePause(active)} className="rounded-md border border-border px-3 py-2 text-xs text-text hover:bg-bg-input disabled:opacity-40">{active.status === "paused" ? "Resume" : "Pause"}</button></div></div>
+            {active.last_failure && <div className="mt-6 rounded-lg border border-red/30 bg-red/10 p-4 text-sm text-red"><strong>Last refresh failed</strong><p className="mt-1 text-xs">{active.last_failure}</p></div>}
+            <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{[["Published", active.last_successful_publication_at ? formatDate(active.last_successful_publication_at) : "Not yet"], ["Pending scopes", String(active.pending_scopes ?? 0)], ["Refresh interval", `${active.min_refresh_interval_seconds ?? 0}s`], ["Coverage", active.coverage_from && active.coverage_to ? `${formatDate(active.coverage_from)} – ${formatDate(active.coverage_to)}` : "Declared by definition"]].map(([label, value]) => <div key={label} className="rounded-lg border border-border bg-bg-card p-4"><p className="text-[11px] uppercase tracking-wide text-text-dim">{label}</p><p className="mt-2 text-sm font-medium text-text">{value}</p></div>)}</div>
+            <div className="mt-6 grid gap-6 lg:grid-cols-2"><section className="rounded-lg border border-border bg-bg-card p-5"><h3 className="text-sm font-semibold text-text">Sources and scopes</h3><dl className="mt-4 space-y-3 text-xs"><div><dt className="text-text-dim">Source tables</dt><dd className="mt-1 flex flex-wrap gap-1">{(active.source_tables ?? []).map((table) => <span key={table} className="rounded bg-bg-input px-2 py-1 font-mono text-text">{table}</span>)}</dd></div><div><dt className="text-text-dim">Scope columns</dt><dd className="mt-1 font-mono text-text">{active.scope_columns?.join(", ") || "Whole projection"}</dd></div></dl></section><section className="rounded-lg border border-border bg-bg-card p-5"><h3 className="text-sm font-semibold text-text">Freshness</h3><dl className="mt-4 space-y-3 text-xs"><div className="flex justify-between gap-3"><dt className="text-text-dim">Latest relevant change</dt><dd className="font-mono text-text">{active.latest_relevant_change ?? 0}</dd></div><div className="flex justify-between gap-3"><dt className="text-text-dim">Published change</dt><dd className="font-mono text-text">{active.published_change_id ?? 0}</dd></div><div className="flex justify-between gap-3"><dt className="text-text-dim">Next refresh</dt><dd className="text-text">{active.next_scheduled_refresh ? formatDate(active.next_scheduled_refresh) : "—"}</dd></div></dl></section></div>
+          </div> : <p className="text-sm text-text-dim">{list.busy ? "Loading projections…" : "Select a projection to inspect it."}</p>}
+        </div>
+      </div>
     </div>
   );
 }
