@@ -1,0 +1,84 @@
+name: processes-executor-continuity
+description: One real worker retains prepared context and tools across branches, a validation join, and operator approval.
+timeout: 10m
+settle_for: 5s
+max_iterations: 80
+setup:
+  mode: autonomous
+  app:
+    path: ./
+    spawnable: true
+directive: |
+  Test generic worker continuity in this isolated project. Your agent ID is
+  ${APTEVA_TEST_AGENT_ID}. Only Processes, Core thread tools and the installed
+  test-continuity fixture app are allowed. Fixture operations and receipts are
+  real and persisted, but artifact names represent simulated Media outputs;
+  do not call external services or send messages to real people.
+  Create exactly one unassigned procedure named Executor continuity with the
+  following SIX generic steps in this exact stored order:
+  1. inventory, role=media, depends_on=[]: Discover the test-continuity fixture
+     tools needed across the WHOLE run, and call its prepare tool exactly once.
+     Retain context_id, source_id and those discovered tools in this worker.
+     Output the exact returned JSON receipt as a JSON string.
+  2. portrait_3, role=media, depends_on=[inventory]: Reuse the prepared context
+     and discovered render tool, rendering artifact_id="portrait-3.png".
+     Output the exact fixture JSON receipt, including its source and digest.
+  3. portrait_4, role=media, depends_on=[inventory]: Reuse this same worker's
+     context and tools and the checkpoint left by portrait_3. Call render for
+     artifact_id="portrait-4.png". Never prepare again or rediscover tools.
+     Output the exact returned JSON receipt. This is deliberately a branch,
+     with only inventory as the dependency, not portrait_3.
+  4. validate, role=media, depends_on=[inventory,portrait_3,portrait_4]: Check
+     the two exact artifact IDs, matching source/context and saved digests in
+     dependency receipts. Call the fixture validate tool for the same context.
+     Output the exact returned JSON receipt. Do not publish yet.
+  5. approve, role=operator, depends_on=[validate]: The project operator confirms
+     the validated receipts. This role MUST be {kind:"human"}. Never self-approve.
+  6. publish, role=media, depends_on=[approve]: After operator approval, call
+     the fixture publish tool in the SAME context, passing approval_receipt
+     exactly as saved in the operator step's output. Output the exact fixture
+     JSON receipt. Never publish before validation or approval.
+  Each step needs its key, name, instructions and expected_output. Shared policy:
+  reuse prepared context and discovered tools in the SAME worker thread; claim
+  only assigned ready steps and save the exact fixture JSON receipts as output.
+  Completion criteria: both identities and digests validated, operator approval,
+  and one actual local fixture publication receipt. No repeated setup, render,
+  tool discovery, model-spawned workers, forwarding or per-step reports to main.
+  Create ONE assignment owned by yourself, follow_latest=true, no schedule,
+  worker_continuity="per_executor", and roles={operator:{kind:"human"}}.
+  Activate procedure and assignment and start ONCE with idempotency_key=continuity-1.
+  The main thread must not call fixture tools or execute steps: Processes owns
+  worker provisioning and handoffs. The runner will confirm the human step over
+  HTTP after validation; keep the worker available for the publish event.
+  Workers load shared policy on the first claim. On each later step_claim use
+  include_context=false while retaining that same frozen policy; recover with
+  include_context=true if context is missing. Use the one dependencies manifest
+  for full exact receipts. step_update returns a compact acknowledgement: continue
+  the current step after progress; await the next app event after completion.
+  No polling loops or repeated domain actions. When step_update returns done=true,
+  call done immediately. After completion, main reads runs once to verify all
+  SIX steps completed, then stops. It must not stop while the run is unfinished.
+assert:
+  - tool_called: processes_runs
+  - tool_called: processes_step_claim
+  - tool_called_with:
+      tool: test-continuity_prepare
+      count: 1
+      success: true
+  - tool_called_with:
+      tool: test-continuity_render
+      args: {artifact_id: "portrait-3.png"}
+      count: 1
+      success: true
+  - tool_called_with:
+      tool: test-continuity_render
+      args: {artifact_id: "portrait-4.png"}
+      count: 1
+      success: true
+  - tool_called: test-continuity_validate
+  - tool_called: test-continuity_publish
+  - tool_not_called: processes_run_update
+  - tool_not_called: spawn
+budget:
+  total_tokens: 4000000
+  cost_usd: 7.50

@@ -18,6 +18,7 @@ type Parameter struct {
 	Options  []string `json:"options,omitempty"`
 }
 type AssignmentConfig struct {
+	WorkerContinuity string              `json:"worker_continuity,omitempty"` // auto, per_executor, isolated
 	Roles            map[string]Executor `json:"roles,omitempty"`
 	FollowLatest     bool                `json:"follow_latest"`
 	Name             string              `json:"name"`

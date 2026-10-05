@@ -170,6 +170,11 @@ func (d Definition) procedureOnly() Definition {
 	return d
 }
 func validateExecution(c AssignmentConfig) error {
+	switch c.WorkerContinuity {
+	case "", "auto", "per_executor", "isolated":
+	default:
+		return errors.New("worker_continuity must be auto, per_executor, or isolated")
+	}
 	if c.OwnerAgentID <= 0 {
 		return errors.New("choose an owner agent for this assignment")
 	}

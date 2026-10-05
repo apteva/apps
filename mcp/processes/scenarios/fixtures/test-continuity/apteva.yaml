@@ -1,0 +1,21 @@
+schema: apteva-app/v1
+name: test-continuity
+display_name: Worker continuity test fixture
+version: 0.1.0
+scopes: [project]
+requires:
+  permissions: [db.write.app]
+provides:
+  mcp_tools:
+    - {name: prepare, description: Prepare one thread-owned context and source identity.}
+    - {name: render, description: Save one simulated portrait artifact using the prepared context.}
+    - {name: validate, description: Validate both saved artifact identities and digests.}
+    - {name: publish, description: Save one publication receipt after validation and operator approval.}
+runtime:
+  kind: source
+  source: {repo: github.com/apteva/apps, ref: main, entry: mcp/processes/scenarios/fixtures/test-continuity}
+  port: 8080
+db:
+  driver: sqlite
+  path: /data/continuity.db
+  migrations: migrations/

@@ -16,6 +16,7 @@ export type Schedule = {
   timezone?: string;
 };
 export type Assignment = {
+  worker_continuity?: "auto" | "per_executor" | "isolated";
   roles?: Record<string, Executor>;
   id: string;
   process_id: string;
@@ -448,6 +449,20 @@ export default function Assignments({
                 <p className="small muted">
                   Running work always keeps its original version. New versions
                   take effect when the process is activated.
+                </p>
+              </div>
+              <div className="field">
+                <label htmlFor="assignment-continuity">Worker threads</label>
+                <select id="assignment-continuity" value={draft.worker_continuity || "auto"}
+                  onChange={(e) => set({ worker_continuity: e.target.value as Assignment["worker_continuity"] })}>
+                  <option value="auto">Automatic</option>
+                  <option value="per_executor">Reuse one worker per agent</option>
+                  <option value="isolated">Separate worker for each step</option>
+                </select>
+                <p className="small muted">
+                  Reusing a worker retains context and tools across steps, including dependency joins and delays.
+                  Each agent executes one step at a time. Separate workers allow parallel steps.
+                  This choice applies to new runs; running work keeps its original setting.
                 </p>
               </div>
               <RolesEditor
