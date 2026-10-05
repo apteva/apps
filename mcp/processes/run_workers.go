@@ -63,13 +63,16 @@ func (a *App) claimStep(r Run, s StepRun, all []StepRun, actor string) error {
 	if s.State == "pending" || s.State == "scheduled" || !stepTimeReady(s, time.Now()) || !dependenciesReady(s, all) {
 		return errors.New("step dependencies are not complete")
 	}
+	if aiParallel(r) && terminal(r.State) && !terminal(s.State) {
+		return errors.New("run is terminal")
+	}
 	if !terminal(s.State) && !terminal(r.State) {
-		available, err := a.workerStepAvailable(r, s)
+		available, err := a.workerClaimAvailable(r, s)
 		if err != nil {
 			return err
 		}
 		if !available {
-			return errors.New("this worker already owns another unfinished step")
+			return errors.New("this worker has reached its unfinished step limit")
 		}
 	}
 	thread, err := a.runWorker(r.ID, agent)
@@ -109,6 +112,11 @@ func persistentWorkerAgent(r Run, s StepRun, all []StepRun) int64 {
 // Reserve a worker at provisioning, before even an ambiguous delivery attempt.
 // Query fresh storage: reconciliation's step slice predates earlier dispatches.
 func (a *App) workerStepAvailable(r Run, s StepRun) (bool, error) {
+	// Auto mode delivers all eligible steps to the same owner. The model decides
+	// which ones to claim and delegate; only claims consume concurrency slots.
+	if aiParallel(r) {
+		return true, nil
+	}
 	if r.Binding.WorkerContinuity != "per_executor" {
 		return true, nil
 	}

@@ -18,16 +18,18 @@ type Parameter struct {
 	Options  []string `json:"options,omitempty"`
 }
 type AssignmentConfig struct {
-	WorkerContinuity string              `json:"worker_continuity,omitempty"` // auto, per_executor, isolated
-	Roles            map[string]Executor `json:"roles,omitempty"`
-	FollowLatest     bool                `json:"follow_latest"`
-	Name             string              `json:"name"`
-	Target           string              `json:"target"`
-	OwnerAgentID     int64               `json:"owner_agent_id"`
-	ExecutionMode    string              `json:"-"`
-	Schedule         *Schedule           `json:"schedule,omitempty"`
-	ProcedureVersion int                 `json:"procedure_version"`
-	Parameters       map[string]any      `json:"parameters"`
+	ParallelExecution string              `json:"parallel_execution,omitempty"` // sequential (default), auto
+	MaxParallelSteps  int                 `json:"max_parallel_steps,omitempty"` // default 4, maximum 8
+	WorkerContinuity  string              `json:"worker_continuity,omitempty"`  // auto, per_executor, isolated
+	Roles             map[string]Executor `json:"roles,omitempty"`
+	FollowLatest      bool                `json:"follow_latest"`
+	Name              string              `json:"name"`
+	Target            string              `json:"target"`
+	OwnerAgentID      int64               `json:"owner_agent_id"`
+	ExecutionMode     string              `json:"-"`
+	Schedule          *Schedule           `json:"schedule,omitempty"`
+	ProcedureVersion  int                 `json:"procedure_version"`
+	Parameters        map[string]any      `json:"parameters"`
 }
 type Assignment struct {
 	ID               string `json:"id"`
@@ -220,6 +222,13 @@ func (a *App) saveAssignment(project, process, id string, expected int, c Assign
 	}
 	if e = validateExecution(c); e != nil {
 		return nil, e
+	}
+	if c.ParallelExecution == "auto" && c.MaxParallelSteps == 0 {
+		// Store the effective limit so later default changes cannot alter a run.
+		c.MaxParallelSteps = defaultParallelSteps
+	}
+	if c.ParallelExecution == "auto" && len(d.Steps) == 0 {
+		return nil, errors.New("parallel_execution requires structured steps")
 	}
 	if e = d.validate(); e != nil {
 		return nil, e

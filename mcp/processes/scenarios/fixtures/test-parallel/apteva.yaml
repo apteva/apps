@@ -1,0 +1,22 @@
+schema: apteva-app/v1
+name: test-parallel
+display_name: AI parallel process test fixture
+version: 0.1.0
+scopes: [project]
+requires:
+  permissions: [db.write.app]
+provides:
+  mcp_tools:
+    - {name: prepare, description: Prepare one transferable source reference and one owner-bound session.}
+    - {name: work, description: "Produce one independent artifact in 45 seconds. Source reference is transferable within this agent and project; separate artifacts share no mutable state."}
+    - {name: session, description: "Owner-thread-only session operations; phase b requires the saved phase a receipt."}
+    - {name: validate, description: Validate exact saved artifacts and session checkpoints.}
+    - {name: publish, description: Record local publication after validation and operator approval.}
+runtime:
+  kind: source
+  source: {repo: github.com/apteva/apps, ref: main, entry: mcp/processes/scenarios/fixtures/test-parallel}
+  port: 8080
+db:
+  driver: sqlite
+  path: /data/parallel.db
+  migrations: migrations/

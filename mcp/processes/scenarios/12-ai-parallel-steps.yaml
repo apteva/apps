@@ -1,0 +1,69 @@
+name: processes-ai-parallel-steps
+description: The persistent owner chooses useful Core subthreads for independent ready steps and retains exact receipts and approval gates.
+timeout: 12m
+settle_for: 5s
+max_iterations: 120
+setup:
+  mode: autonomous
+  app: {path: ./, spawnable: true}
+directive: |
+  Test Processes in this isolated project using only Processes, Core thread tools
+  and test-parallel. Agent ID: ${APTEVA_TEST_AGENT_ID}. All fixture actions are
+  local simulated artifacts; no external services or messages to real people.
+  Create ONE unassigned procedure named AI parallel execution with these EIGHT
+  generic steps in this stored order. Include instructions and expected_output
+  for each, preserving these exact keys and dependencies:
+  1. prepare, role=worker, depends_on=[]: discover the test-parallel tools needed
+     for the entire run and call prepare exactly once. Save its exact JSON receipt.
+  2. alpha, role=worker, depends_on=[prepare]: call test-parallel work using the
+     prepared context_id and artifact_id=alpha.png. This is a substantial independent
+     45-second operation; the context reference is transferable within this agent.
+     Save its exact JSON receipt. Never prepare again or repeat completed work.
+  3. beta, role=worker, depends_on=[prepare]: same independent operation for beta.png.
+     It shares no mutable resources with alpha; save its distinct exact JSON receipt.
+  4. session_a, role=worker, depends_on=[prepare]: call test-parallel session with
+     phase=a in the original prepared context's OWNER thread. This session is
+     thread-bound and must stay local; save the exact checkpoint receipt.
+  5. session_b, role=worker, depends_on=[session_a]: same owner-thread session,
+     phase=b; inspect phase a's exact saved checkpoint before acting.
+  6. validate, role=worker, depends_on=[alpha,beta,session_b]: verify exact artifact
+     identities/digests and session checkpoints, then call test-parallel validate
+     in the owner thread and save its exact JSON receipt. Do not publish yet.
+  7. approve, role=operator, depends_on=[validate]: a human operator confirms the
+     validation. Roles MUST bind operator to {kind:human}; never self-approve.
+  8. publish, role=worker, depends_on=[approve]: call test-parallel publish in the
+     owner thread with approval_receipt exactly as saved in the human output.
+     Save its exact JSON receipt and finish only after all assigned work is complete.
+  Shared procedure policy: minimize unnecessary setup and choose useful concurrency
+  among independent ready work. Respect session affinity and dependencies. The worker
+  chooses its own thread arrangement using Core; do not prescribe a fixed team.
+  Child results must return to the persistent owner, which claims steps, checks
+  exact returned receipts and records separate outputs. Children must not update
+  Processes, self-approve, publish or perform downstream work. Before waiting on
+  children, save their identities as progress checkpoints. After recovery inspect
+  existing children and stored evidence before retrying. Avoid polling and repeated
+  setup. Use include_context=false after retaining shared policy, recovering with
+  true if needed. Inspect ready_steps, active_steps, done and next_action in replies.
+  Completion criteria: exact alpha.png/beta.png receipts, owner-only session a/b,
+  validated evidence, real operator approval and one local publication receipt.
+  Create ONE paused assignment owned by yourself, follow_latest=true, no schedule,
+  worker_continuity=per_executor, parallel_execution=auto, max_parallel_steps=2,
+  roles={operator:{kind:human}}. Activate procedure and assignment and start ONCE
+  with idempotency_key=parallel-1. This test authorizes that execution.
+  Main must not perform domain work or spawn the run worker: Processes provisions
+  it. The runner confirms the human step over HTTP after validation. Keep the owner
+  alive through approval, settle children before done, and then have main inspect
+  runs once to verify all eight completed steps. Main must not finish early.
+assert:
+  - tool_called: spawn
+  - tool_called: processes_step_claim
+  - tool_called: processes_runs
+  - tool_called_with: {tool: test-parallel_prepare, count: 1, success: true}
+  - tool_called_with: {tool: test-parallel_work, args: {artifact_id: alpha.png}, count: 1, success: true}
+  - tool_called_with: {tool: test-parallel_work, args: {artifact_id: beta.png}, count: 1, success: true}
+  - tool_called: test-parallel_validate
+  - tool_called: test-parallel_publish
+  - tool_not_called: processes_run_update
+budget:
+  total_tokens: 4000000
+  cost_usd: 7.50

@@ -337,6 +337,9 @@ func (a *App) stepContext(p *Process, r Run, s StepRun, all []StepRun) string {
 		worker, _ := a.runWorker(r.ID, s.Executor.AgentID)
 		ids := fmt.Sprintf("process_id=%s, run_id=%s, step_id=%s", p.ID, r.ID, s.ID)
 		if worker != "" {
+			if aiParallel(r) {
+				return "Assigned step ready: " + ids + ". Claim this step to read frozen instructions, dependency evidence and the compact ready_steps/active_steps set. Decide useful parallel work through Core subthreads within max_parallel_steps; keep step ownership and receipts here. Retain shared context with include_context=false once loaded. Follow next_action and settle children before finishing."
+			}
 			contextHint := ""
 			for _, previous := range all {
 				if previous.ID != s.ID && previous.ThreadID == worker && previous.DeliveredAt != "" {
@@ -484,6 +487,16 @@ func processWorkerToolList(sequential bool) []string {
 	return tools
 }
 
+func processRunWorkerTools(r Run) []string {
+	tools := processWorkerToolList(true)
+	if aiParallel(r) {
+		// Core owns the descendant hierarchy, inherited capabilities and depth.
+		// Grant spawn so this owner can use the normal leader-thread machinery.
+		tools = append(tools, "spawn")
+	}
+	return tools
+}
+
 func processWorkerID(r Run, s StepRun, sequential bool) string {
 	if sequential {
 		if r.Binding.WorkerContinuity == "per_executor" {
@@ -562,6 +575,9 @@ func (a *App) spawnSequentialWorker(p *Process, r *Run, s *StepRun, all []StepRu
 		eventID = s.DeliveryEventID
 	}
 	directive := fmt.Sprintf("You are the persistent Processes worker for run %s. Keep this thread alive across your assigned steps, including timed waits and approval gates. For each authoritative ready step, call processes_step_claim before any domain action, use the returned frozen instructions and dependency evidence, then record milestones and the terminal outcome with processes_step_update. Do not execute unassigned work or create another worker. Inspect every step_update result: when its top-level done field is true, immediately call done before any text; when false, follow next_action: continue the current step for progress acknowledgements, or await the next Processes event after completion without polling.", r.ID)
+	if aiParallel(*r) {
+		directive = parallelWorkerDirective(*r)
+	}
 	if s.ThreadID != worker || s.DeliveryEventID != eventID {
 		if _, err := a.db.Exec(`UPDATE process_step_runs SET target_thread_id=?,delivery_event_id=? WHERE id=?`, worker, eventID, s.ID); err != nil {
 			return err
@@ -576,7 +592,7 @@ func (a *App) spawnSequentialWorker(p *Process, r *Run, s *StepRun, all []StepRu
 		ThreadID:        worker,
 		ProjectID:       p.ProjectID,
 		DirectiveSuffix: directive,
-		Tools:           processWorkerToolList(true),
+		Tools:           processRunWorkerTools(*r),
 		MCP:             nil,
 	}
 	if err := a.ensureProcessThread(p.ProjectID, eventID, request); err != nil {
@@ -905,7 +921,11 @@ func (a *App) stepAction(project, actor, process, run, id, action string, args m
 	if strings.HasPrefix(actor, "agent:") {
 		done, next := workerAction(r, s, actor, worker, all)
 		if action == "step_update" {
-			return workerAcknowledgement(process, r, s, done, next), nil
+			ack := workerAcknowledgement(process, r, s, done, next)
+			if actor == fmt.Sprintf("agent:%d:%s", s.Executor.AgentID, worker) {
+				parallelWorkHints(ack, r, s.Executor.AgentID, worker, all)
+			}
+			return ack, nil
 		}
 		result := map[string]any{
 			"process_id": process, "run_id": r.ID, "step_id": s.ID,
@@ -916,6 +936,7 @@ func (a *App) stepAction(project, actor, process, run, id, action string, args m
 		}
 		if worker != "" && actor == fmt.Sprintf("agent:%d:%s", s.Executor.AgentID, worker) {
 			result["worker"] = map[string]any{"thread_id": worker, "done": done}
+			parallelWorkHints(result, r, s.Executor.AgentID, worker, all)
 		}
 		// Explicit opt-out is safe across lost replies/restarts: callers can
 		// always request the full shared context again when memory is missing.
@@ -1088,7 +1109,10 @@ func (a *App) updateTaskState(s Task, r Run, all []Task, actor string, args map[
 		}
 		// A lost completion response may be retried after the next step was
 		// dispatched. Preserve terminal idempotency without releasing its owner.
-		if !terminal(s.State) {
+		if aiParallel(r) && s.State == "ready" {
+			return errors.New("claim this step before doing or recording work")
+		}
+		if !aiParallel(r) && !terminal(s.State) {
 			available, err := a.workerStepAvailable(r, s)
 			if err != nil {
 				return err

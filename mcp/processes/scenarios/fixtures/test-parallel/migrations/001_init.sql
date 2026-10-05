@@ -1,0 +1,2 @@
+CREATE TABLE contexts (id TEXT PRIMARY KEY,source_id TEXT NOT NULL,project_id TEXT NOT NULL,agent_id INTEGER NOT NULL,thread_id TEXT NOT NULL);
+CREATE TABLE operations (id INTEGER PRIMARY KEY AUTOINCREMENT,context_id TEXT NOT NULL,name TEXT NOT NULL,artifact_id TEXT NOT NULL DEFAULT '',thread_id TEXT NOT NULL,tool_call_id TEXT NOT NULL,started_at INTEGER NOT NULL,completed_at INTEGER NOT NULL DEFAULT 0,receipt_json TEXT NOT NULL DEFAULT '',UNIQUE(context_id,name,artifact_id));
