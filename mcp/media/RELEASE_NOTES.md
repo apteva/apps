@@ -1,3 +1,12 @@
+## Unreleased — still portrait composition
+
+- Refine standalone-image Smart Crop using the existing thumbnail when a single upright foreground has supporting head/torso evidence below a large plain bright background. Recover profile/closed-eye poses missed by the face cascade, protect independently supported faces, and bound tighter framing by the connected subject extent and a 1.5× zoom limit.
+- Keep wide gestures at full scale and protect the head/body. A filled 9:16 crop cannot preserve gestures wider than its available window; use the existing explicit `fit_mode=contain` to preserve every source edge with padding.
+- Preserve video still/reel tracking, center crops and explicit containment. Revise decision/request caches so new requests cannot reuse earlier portrait results; existing files remain unchanged. No new downloads, detector calls, dependencies, schema or SDK changes.
+- Add captured production portrait regressions for outputs 89777/89779/89781/89783/89785, including cached replay, unchanged modes/video decisions, and rendered 540×960 PNG previews. Private pixels stay outside the repository. Add synthetic ambiguity/furniture/headroom cases and photographic seated/reclining checks.
+
+Validation: full race suite passed 551 top-level tests (19 skipped), with the captured portrait and earlier Holly opening fixtures enabled. Final portrait/photo/face checks and updated captured-fixture assertions also passed under race detection. Five real Media–Storage render pipeline tests, vet and macOS/Linux builds passed. Existing private video footage retained only the same two December baseline failures, with identical coordinates. Added composition pass measured approximately 0.65 ms and 7 allocations on the synthetic 320px benchmark; existing analyzer/temporal/stationary allocation counts were unchanged. No rendering-speed improvement is claimed.
+
 ## 0.14.9 — output format validation and description retries
 
 - Normalize output filenames before queuing through both MCP and HTTP. Extensionless names receive the operation/source extension; PNG crops receive `.png`. Preserve supported explicit names and reject unsupported extensions and format conflicts with `invalid_output_format`.

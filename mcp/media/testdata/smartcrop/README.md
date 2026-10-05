@@ -49,3 +49,21 @@ checks, sampling selection, evidence passes, smoothing and path constraints run
 the production code. It checks the opening every 250 ms and can save the resolved
 path with `HOLLY_SMARTCROP_OUTPUT_PATH`. No credentials, signed URLs or private
 image/video bytes belong in this repository.
+
+`TestHollySmartCropPortraitLocalRegression` replays image renders 7514–7518
+(outputs 89777, 89779, 89781, 89783, 89785). Set
+`HOLLY_PORTRAIT_FIXTURE_DIR` to the external `holly-portraits` directory containing
+sources `89639.png`, `89659.png`, `89661.png`, `89663.png`, `89675.png` and their
+exact stored thumbnails `89640.jpg`, `89660.jpg`, `89662.jpg`, `89664.jpg`,
+`89676.jpg`. Source and thumbnail hashes are pinned in the test. Submission
+preprocessing, derivation validation, decision caches and FFmpeg plans run the
+production code. The assertions protect head/body bounds and reduce excessive
+headroom where the connected subject fits. Wide gestures retain full scale;
+these tests do not claim a filled portrait can preserve the whole gesture.
+
+Set `HOLLY_PORTRAIT_PREVIEW_DIR` to write the corrected PNGs and resolved params
+through real FFmpeg. The test verifies each preview is 540×960. It also replays
+identical pixels as video metadata to assert released horizontal decisions and
+full-height geometry are unchanged, and checks explicit center/contain modes.
+`BenchmarkComposeSmartCropPortrait320` measures the added still-only thumbnail
+pass alongside the unchanged analyzer/temporal/stationary benchmarks above.

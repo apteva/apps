@@ -286,24 +286,34 @@ func computeSmartCropStillV2(
 		x = containSmartCropFaceX(x, *sample.face, row.Width, cw)
 	}
 	x = clampInt(roundEven(x), 0, row.Width-cw)
+	y := 0
+	if sample := nearestSmartCropSample(samples, target.FocusMs); sample != nil {
+		y = clampInt(roundEven(sample.point.Y), 0, row.Height-ch)
+	}
+	win := cropWindow{W: cw, H: ch, X: x, Y: y}
+	if row.IsImage && !target.PreferKeyframe {
+		if sample := nearestSmartCropSample(samples, target.FocusMs); sample != nil {
+			if composed, changed := composeSmartCropPortrait(sample.img, win, row.Width, row.Height); changed && smartCropPortraitPreservesFace(composed, sample.face) {
+				win = composed
+				method += "+portrait-composition"
+			}
+		}
+	}
 	app.Logger().Info("smartcrop v2 resolved still",
 		"file_id", sourceFileID,
 		"samples", len(samples),
 		"sample_source", sampleSource,
 		"method", method,
 		"focus_ms", target.FocusMs,
-		"crop_w", cw,
-		"crop_h", ch,
-		"crop_x", x,
+		"crop_w", win.W,
+		"crop_h", win.H,
+		"crop_x", win.X,
+		"crop_y", win.Y,
 		"temporal_samples", temporal.Samples,
 		"temporal_concentration", temporal.Concentration,
 		"temporal_mean_activity", temporal.MeanActivity,
 		"temporal_active_fraction", temporal.ActiveFraction)
-	y := 0
-	if sample := nearestSmartCropSample(samples, target.FocusMs); sample != nil {
-		y = clampInt(roundEven(sample.point.Y), 0, row.Height-ch)
-	}
-	return &cropWindow{W: cw, H: ch, X: x, Y: y}, nil
+	return &win, nil
 }
 
 func selectSmartCropStillDerivations(derivs []DerivationRow, focusMs int64) []DerivationRow {
