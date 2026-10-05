@@ -20,6 +20,7 @@ type platformStub struct {
 	tk.BasePlatformClient
 	calls          []recordedCall
 	blockedEngines map[string]bool
+	searchErrors   map[string]error
 	searchPayload  any
 	extractPages   map[string]any
 	disableWeb     bool
@@ -43,6 +44,9 @@ func (p *platformStub) CallAppResult(app, tool string, input map[string]any, out
 	switch app + "/" + tool {
 	case "web/web_search":
 		engine := fmt.Sprint(input["engine"])
+		if err := p.searchErrors[engine]; err != nil {
+			return err
+		}
 		if p.blockedEngines[engine] {
 			return fmt.Errorf("search_blocked: %s unavailable", engine)
 		}
@@ -452,6 +456,36 @@ func TestDiscoveryFallsBackAndFiltersNoise(t *testing.T) {
 	exclusions, err := listExclusions(ctx.AppDB(), ctx.CurrentProject(), "domain", 10)
 	if err != nil || len(exclusions) != 2 {
 		t.Fatalf("noise exclusion missing: %+v err=%v", exclusions, err)
+	}
+}
+
+func TestDiscoveryFallsBackWhenWebSearchExtractionFails(t *testing.T) {
+	platform := &platformStub{
+		searchErrors: map[string]error{"google": fmt.Errorf("search_extraction_incomplete: visible results were rendered but result links could not be extracted")},
+		searchPayload: map[string]any{
+			"count": 1,
+			"results": []map[string]any{{
+				"title": "Bright Smiles Dental", "url": "https://brightsmiles.example",
+				"source": "duckduckgo", "rank": 1,
+			}},
+		},
+	}
+	ctx := newTestContext(t, platform)
+	profile, err := createProfile(ctx.AppDB(), ctx.CurrentProject(), map[string]any{
+		"name": "US Dental", "industries": []any{"Dental practice"}, "locations": []any{"United States"},
+	})
+	if err != nil {
+		t.Fatalf("create profile: %v", err)
+	}
+	result, err := runDiscoveryWithOptions(ctx, profile.ID, "dentist Austin", 10, "google", "duckduckgo")
+	if err != nil {
+		t.Fatalf("discovery: %v", err)
+	}
+	if result["engine"] != "duckduckgo" || result["fallback_used"] != true {
+		t.Fatalf("fallback metadata: %#v", result)
+	}
+	if len(platform.calls) != 2 || platform.calls[1].Input["engine"] != "duckduckgo" {
+		t.Fatalf("unexpected search calls: %+v", platform.calls)
 	}
 }
 
