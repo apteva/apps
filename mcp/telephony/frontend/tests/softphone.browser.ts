@@ -4,6 +4,20 @@ test("installed headless client talks through real Telephony with host-owned UI"
   if (!gateway) throw new Error("Run via TestTier2HeadlessBrowser; a compiled sidecar gateway is required");
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
+  let renewalFailures=0;
+  // Accelerate only the fixture's advertised client lease; the server still
+  // enforces its real lease. Inject one genuine HTTP 503 response.
+  const shorterLease=async(route:any)=>{
+    const response=await route.fetch();
+    if(response.ok()) {const body=await response.json();await route.fulfill({response,json:body.lease_seconds?{...body,lease_seconds:10}:body});}
+    else await route.fulfill({response});
+  };
+  await page.route('**/softphone/answer/**',shorterLease);
+  await page.route('**/softphone/attach/**',shorterLease);
+  await page.route('**/softphone/renew/**',async route=>{
+    if(renewalFailures++===0)await route.fulfill({status:503,contentType:'application/json',body:'{"code":"fixture_transient_failure"}'});
+    else await route.continue();
+  });
   await page.goto(process.env.TELEPHONY_TEST_SURFACE === "application-user" ? "/?application-user" : "/");
   await page.waitForFunction(() => typeof (window as any).loadPhone === "function");
   await page.evaluate(({ url, token }) => (window as any).loadPhone(url, token), { url: gateway, token: process.env.TELEPHONY_TEST_USER_TOKEN });
@@ -63,6 +77,17 @@ test("installed headless client talks through real Telephony with host-owned UI"
   await expect.poll(() => page.evaluate(() => (window as any).maxSpeaker), { timeout: 15000 }).toBeGreaterThan(0.01);
   await expect.poll(() => page.evaluate(() => (window as any).maxMic), { timeout: 15000 }).toBeGreaterThan(0.01);
   await expect.poll(async () => (await page.request.get(gateway + "/fixture/audio-ready")).json()).toEqual({ ready: true });
+  // Legacy trusted-operator Answer has no lease; explicit reconnect upgrades
+  // it to a managed, authorized attach session without changing the carrier leg.
+  if(await page.evaluate(()=>(window as any).phone.session.lease_seconds===undefined)) {
+    await page.evaluate(()=>(window as any).phone.reconnect());
+    await expect.poll(()=>page.evaluate(()=>(window as any).phone.getSnapshot().audioState)).toBe('live');
+  }
+  const mediaBeforeRenewal=await (await page.request.get(gateway+'/fixture/media-connections')).json();
+  await expect.poll(()=>renewalFailures,{timeout:10000}).toBeGreaterThanOrEqual(2);
+  const renewalSnapshot=await page.evaluate(()=>(window as any).phone.getSnapshot());
+  expect(renewalSnapshot.audioState,JSON.stringify(renewalSnapshot)).toBe('live');
+  expect(await (await page.request.get(gateway+'/fixture/media-connections')).json()).toEqual(mediaBeforeRenewal); // No audio teardown on the renewal failure.
   if (process.env.TELEPHONY_TEST_SURFACE === "headless") {
     const observer = await context.newPage();
     const observerErrors: string[] = [];
@@ -133,6 +158,14 @@ test("installed headless client talks through real Telephony with host-owned UI"
   await page.evaluate(() => { const w = window as any; w.phone.setMuted(true); w.phone.sendDTMF("12#"); });
   await expect.poll(() => page.evaluate(() => (window as any).notices)).toContain("Keypad tone sent");
   await expect.poll(() => page.evaluate(() => (window as any).diagnostics?.micInputGainDb)).toBe(0);
+  const originalMedia=await page.evaluate(()=>(window as any).phone.session.media_url);
+  // Force an actual transport close: the packaged worker must request a fresh
+  // authorized token, reconnect the same call and preserve the mute gate.
+  expect(await (await page.request.post(gateway+'/fixture/drop-browser')).json()).toEqual({ok:true});
+  await expect.poll(()=>page.evaluate(()=>(window as any).phone.session.media_url),{timeout:15000}).not.toBe(originalMedia);
+  await expect.poll(()=>page.evaluate(()=>(window as any).phone.getSnapshot().audioState),{timeout:15000}).toBe('live');
+  expect(await page.evaluate(()=>(window as any).phone.getSnapshot().muted)).toBe(true);
+  await expect.poll(()=>page.evaluate(()=>(window as any).diagnostics?.sessionEvents?.some((e:any)=>e.action==='websocket'&&e.code==='1006'))).toBe(true);
   await page.evaluate(() => (window as any).phone.reconnect({ inputGainDB: -6, playbackTargetMs: 80 }));
   await expect.poll(() => page.evaluate(() => (window as any).phone.getSnapshot().audioState)).toBe("live");
   expect(await page.evaluate(() => (window as any).phone.getSnapshot().muted)).toBe(true);

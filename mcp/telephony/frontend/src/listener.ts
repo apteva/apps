@@ -1,3 +1,4 @@
+import { MediaLease, type MediaSessionEvent } from "./media-lease";
 import type { CallSession, TelephonyClient } from "./client";
 import { createListenerAudio, type ListenerAudioConnection, type ListenerAudioRuntime, type ListenerDiagnostics, type ListenerPlaybackOptions } from "./listener-audio";
 
@@ -6,6 +7,7 @@ export interface ListenerSnapshot { readonly state: ListenerState; readonly call
 export interface CallListenerOptions extends ListenerPlaybackOptions {
   runtime?: ListenerAudioRuntime;
   onDiagnostics?: (value: ListenerDiagnostics) => void;
+  onSessionEvent?: (event: MediaSessionEvent) => void;
   /** Automatically retry transient disconnections for at most 30 seconds. Default true. */
   reconnect?: boolean;
 }
@@ -18,7 +20,7 @@ export class HeadlessCallListener {
   private attempt = 0;
   private session?: CallSession;
   private audio?: ListenerAudioConnection;
-  private lease?: ReturnType<typeof setInterval>;
+  private lease?: MediaLease;
   private retry?: ReturnType<typeof setTimeout>;
   private retryUntil = 0;
   private retryDelay = 500;
@@ -57,12 +59,9 @@ export class HeadlessCallListener {
         onDiagnostics: value => { if (current()) { try { this.options.onDiagnostics?.(value); } catch { /* host isolation */ } } },
       });
       this.audio = audio;
-      let renewing = false;
-      this.lease = setInterval(() => {
-        if (!current() || renewing || this.session !== session) return;
-        renewing = true;
-        void this.client.renewListening(session!).catch(() => { if (current()) this.disconnected("access_revoked", callId, generation); }).finally(() => { renewing = false; });
-      }, 20_000);
+      this.lease = new MediaLease(session.lease_seconds!, () => this.client.renewListening(session!), (reason) => {
+        if (current()) this.disconnected(reason === "revoked" ? "access_revoked" : "media_disconnected", callId, generation, reason === "expired" ? "Listener session expired" : "Listener access revoked");
+      }, this.options.onSessionEvent, session.lease_started_ms);
       await audio.start(this.client.listenerMediaURL(session),{coaching:session.coaching===true});
       if (!current()) audio.stop();
     } catch (error) {
@@ -77,7 +76,7 @@ export class HeadlessCallListener {
     }
   }
   private cleanup(): Promise<void> {
-    if (this.lease) clearInterval(this.lease); this.lease = undefined;
+    this.lease?.stop(); this.lease = undefined;
     const audio = this.audio; this.audio = undefined; audio?.stop();
     const session = this.session; this.session = undefined;
     return session ? this.client.stopListening(session).catch(() => {}) : Promise.resolve();

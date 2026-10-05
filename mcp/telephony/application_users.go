@@ -215,6 +215,10 @@ func (a *App) applicationUserHTTP(next http.HandlerFunc) http.HandlerFunc {
 		}
 		p, err := a.phonePrincipal(project, identity)
 		if err != nil {
+			if !errors.Is(err, errPhoneAccessDenied) {
+				writeJSONStatus(w, 503, map[string]any{"code": "policy_lookup_failed"})
+				return
+			}
 			http.Error(w, "Telephony access denied", 403)
 			return
 		}
@@ -460,8 +464,14 @@ func (a *App) issuePhoneSession(row *callRow, p *phonePrincipal) (*softphoneSess
 	revision := int64(0)
 	if p != nil {
 		fresh, err := a.phonePrincipal(row.ProjectID, p.Identity)
-		if err != nil || !a.phoneCallAllowed(fresh, row, false) {
-			return nil, errors.New("call not owned by user")
+		if err != nil {
+			return nil, err
+		}
+		if _, _, err = a.phoneOwner(row.ID); err != nil {
+			return nil, err
+		}
+		if !a.phoneCallAllowed(fresh, row, false) {
+			return nil, fmt.Errorf("call not owned by user: %w", errPhoneAccessDenied)
 		}
 		principal = p.Identity.key()
 		revision = fresh.Revision
@@ -483,60 +493,73 @@ func (a *App) validPhoneMedia(row *callRow, token string) bool {
 // The project policy revision is an audit marker, not a media revocation
 // epoch. Recheck the current user's call grant so edits to other users do not
 // disconnect an unrelated live call while an actual revocation still does.
+// Lookup failures are temporary. An established socket may retain only its
+// last verified lease deadline; neither HTTP nor a new socket bypasses checks.
+func temporaryMediaFailure(reason string) bool {
+	return reason == "media_session_lookup_failed" || reason == "policy_lookup_failed" || reason == "owner_lookup_failed"
+}
 func (a *App) phoneMediaDenialReason(row *callRow, token string) string {
+	reason, _ := a.phoneMediaCheck(row, token)
+	return reason
+}
+func (a *App) phoneMediaCheck(row *callRow, token string) (string, int64) {
 	var hash, principal string
 	var revision, expires int64
 	err := a.db().db.QueryRow(`SELECT token_hash,principal,policy_revision,expires_at FROM telephony_media_sessions WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID).Scan(&hash, &principal, &revision, &expires)
 	if err == sql.ErrNoRows {
 		owner, _, e := a.phoneOwner(row.ID)
 		if e != nil {
-			return "owner_lookup_failed"
+			return "owner_lookup_failed", expires
 		}
 		if owner == "" && row.PeerToken != "" && secureEqual(token, row.PeerToken) {
-			return ""
+			return "", expires
 		}
-		return "media_session_missing"
+		return "media_session_missing", expires
 	}
 	if err != nil {
-		return "media_session_lookup_failed"
+		return "media_session_lookup_failed", expires
 	}
 	if expires <= time.Now().Unix() {
-		return "media_lease_expired"
+		return "media_lease_expired", expires
 	}
 	if !secureEqual(phoneHash(token), hash) {
-		return "media_token_replaced"
+		return "media_token_replaced", expires
 	}
 	if principal == "" {
-		return ""
+		return "", expires
 	}
 	var identity phoneIdentity
 	if json.Unmarshal([]byte(principal), &identity) != nil || !identity.valid() {
-		return "media_principal_invalid"
+		return "media_principal_invalid", expires
 	}
 	p, err := a.phonePrincipal(row.ProjectID, identity)
 	if err != nil {
 		if errors.Is(err, errPhoneAccessDenied) {
-			return "user_access_revoked"
+			return "user_access_revoked", expires
 		}
-		return "policy_lookup_failed"
+		return "policy_lookup_failed", expires
 	}
 	if !a.phoneCallAllowed(p, row, false) {
 		owner, _, ownerErr := a.phoneOwner(row.ID)
 		if ownerErr != nil {
-			return "owner_lookup_failed"
+			return "owner_lookup_failed", expires
 		}
 		if owner != identity.key() {
-			return "call_ownership_changed"
+			return "call_ownership_changed", expires
 		}
-		return "call_permission_revoked"
+		return "call_permission_revoked", expires
 	}
-	return ""
+	return "", expires
 }
 func (a *App) handlePhoneSession(w http.ResponseWriter, r *http.Request, project, action, id string) {
 	unlock := a.softphones.lockClaim(id)
 	defer unlock()
 	row, err := a.db().findCall(id)
-	if err != nil || row == nil || row.ProjectID != project {
+	if err != nil {
+		writeJSONStatus(w, 503, map[string]any{"code": "call_lookup_failed"})
+		return
+	}
+	if row == nil || row.ProjectID != project {
 		http.Error(w, "call not found", 404)
 		return
 	}
@@ -545,6 +568,12 @@ func (a *App) handlePhoneSession(w http.ResponseWriter, r *http.Request, project
 		return
 	}
 	p := phoneUserFrom(r)
+	if p != nil && action != "takeover" {
+		if _, _, e := a.phoneOwner(id); e != nil {
+			writeJSONStatus(w, 503, map[string]any{"code": "owner_lookup_failed"})
+			return
+		}
+	}
 	if action == "takeover" {
 		if p != nil {
 			if !p.Supervisor || !a.phoneCallAllowed(p, row, true) {
@@ -572,8 +601,16 @@ func (a *App) handlePhoneSession(w http.ResponseWriter, r *http.Request, project
 		var body struct {
 			SessionToken string `json:"session_token"`
 		}
-		if decodeJSONBody(r, &body) != nil || !a.validPhoneMedia(row, body.SessionToken) {
-			http.Error(w, "session expired or replaced", 403)
+		if decodeJSONBody(r, &body) != nil || body.SessionToken == "" {
+			http.Error(w, "session credential required", 400)
+			return
+		}
+		if reason := a.phoneMediaDenialReason(row, body.SessionToken); reason != "" {
+			status := http.StatusForbidden
+			if temporaryMediaFailure(reason) {
+				status = http.StatusServiceUnavailable
+			}
+			writeJSONStatus(w, status, map[string]any{"code": reason})
 			return
 		}
 		// Renew only your own lease, not an administrative bearer grant.
@@ -596,7 +633,7 @@ func (a *App) handlePhoneSession(w http.ResponseWriter, r *http.Request, project
 	}
 	session, err := a.issuePhoneSession(row, p)
 	if err != nil {
-		http.Error(w, err.Error(), 403)
+		writePhoneSessionFailure(w, err)
 		return
 	}
 	writeJSON(w, session)
@@ -863,4 +900,12 @@ func (a *App) recentPhoneCalls(r *http.Request, project string, limit int) ([]ca
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+func writePhoneSessionFailure(w http.ResponseWriter, err error) {
+	if errors.Is(err, errPhoneAccessDenied) {
+		http.Error(w, "call not owned by user", http.StatusForbidden)
+		return
+	}
+	writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{"code": "media_session_unavailable"})
 }

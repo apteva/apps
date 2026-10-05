@@ -1,3 +1,4 @@
+import { MediaLease, type MediaSessionEvent } from "./media-lease";
 import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, playbackBufferOptions, type SoftphoneAudioOptions, type SoftphoneCallStatus, type SoftphoneDiagnostics, type SoftphoneState } from "../../ui/softphone-audio";
 import { createBrowserAudio, type AudioConnection, type AudioRuntime } from "./audio";
 import { isTerminalCall, type AnswerRequest, type Call, type CallControlResult, type CallSession, type CallTermination, type DialRequest, type TelephonyClient } from "./client";
@@ -38,6 +39,7 @@ export interface SoftphoneOptions {
   onLevels?: (microphone: number, speaker: number) => void;
   onDiagnostics?: (value: SoftphoneDiagnostics) => void;
   onNotice?: (detail: string) => void;
+  onSessionEvent?: (event: MediaSessionEvent) => void;
   /** Alternate device implementation for non-browser hosts or controlled tests. */
   audioRuntime?: AudioRuntime;
   /** Play a locally synthesized ringback while an outbound call rings. Off by default; pass a country code for its cadence (France otherwise). */
@@ -58,8 +60,7 @@ export class HeadlessSoftphone {
   private hangingUp?: Promise<void>;
   private controlPending?: Promise<CallControlResult>;
   private intent?: { value: string; request: DialRequest };
-  private leaseTimer?: ReturnType<typeof setTimeout>;
-  private leaseGeneration = 0;
+  private lease?: MediaLease;
   private timer?: ReturnType<typeof setTimeout>;
   private polling?: AbortController;
   private outbound = false;
@@ -215,7 +216,13 @@ export class HeadlessSoftphone {
     playbackBufferOptions(nextOptions);
     const generation = this.begin(false);
     this.audioOptions = nextOptions;
-    try { await this.attachAudio(this.session, generation); }
+    const id = this.session.call_id;
+    try {
+      const session = await this.client.attach(id);
+      this.assertCurrent(generation);
+      await this.attachAudio(session, generation);
+      await this.reconcileAttachedCall(session, generation);
+    }
     catch (error) { if (this.current(generation)) this.update({ detail: message(error) }); throw error; }
     finally { this.finish(generation); }
   }
@@ -356,9 +363,27 @@ export class HeadlessSoftphone {
     let audio: AudioConnection | undefined;
     const current = () => !this.disposed && audio !== undefined && this.audio === audio;
     const notify = (callback: () => void) => { if (current()) { try { callback(); } catch { /* isolate host callbacks */ } } };
+    let refreshing: Promise<string> | undefined;
     try {
       this.assertCurrent(generation);
       audio = this.runtime.create({
+        refreshMediaURL: () => {
+          if (refreshing) return refreshing;
+          if (!current() || this.snapshot.busy) return Promise.reject(new Error("Audio recovery is not currently available"));
+          const refreshGeneration = this.generation;
+          const pending = (async () => {
+            const fresh = await this.client.attach(session.call_id);
+            this.assertCurrent(refreshGeneration);
+            if (!current()) throw new Error("Audio connection no longer active");
+            session = fresh; this.session = fresh; this.startLease(fresh);
+            return this.client.mediaURL(fresh);
+          })();
+          refreshing = pending;
+          const reset = () => { if (refreshing === pending) refreshing = undefined; };
+          void pending.then(reset, reset);
+          return pending;
+        },
+        onSessionEvent: event => notify(() => this.options.onSessionEvent?.(event)),
         onState: (audioState, detail) => {
           if (!current()) return;
           if (audioState === "ended" && detail === "call.ended") {
@@ -368,7 +393,7 @@ export class HeadlessSoftphone {
           this.update({ audioState, detail });
           if (current() && (audioState === "error" || audioState === "ended")) {
             this.stopAudio();
-            if (audioState === "error") void this.reconcileFailedAudio(session, generation);
+            if (audioState === "error") void this.reconcileFailedAudio(session, this.generation);
           }
         },
         onLevels: (mic, speaker) => notify(() => this.options.onLevels?.(mic, speaker)),
@@ -420,26 +445,20 @@ export class HeadlessSoftphone {
   }
 
   private startLease(session: CallSession) {
-    const leaseGeneration = ++this.leaseGeneration;
+    this.lease?.stop();
     if (!session.lease_seconds) return;
-    const renew = async () => {
-      if (this.disposed || this.session !== session || leaseGeneration !== this.leaseGeneration) return;
-      try {
-        await this.client.renew(session);
-        if (leaseGeneration === this.leaseGeneration) this.leaseTimer = setTimeout(renew, session.lease_seconds! * 1000 / 3);
-      } catch (error) {
-        if (leaseGeneration !== this.leaseGeneration) return;
-        this.stopAudio();
-        this.update({ audioState: "error", detail: `Audio authorization ended: ${message(error)}` });
-      }
-    };
-    this.leaseTimer = setTimeout(renew, session.lease_seconds * 1000 / 3);
+    this.lease = new MediaLease(session.lease_seconds, () => this.client.renew(session), (reason, error) => {
+      if (this.disposed || this.session !== session) return;
+      this.stopAudio();
+      this.update({ audioState: "error", detail: reason === "expired" ? "Audio session expired. Reconnect audio." : `Audio authorization ended: ${message(error ?? reason)}` });
+    }, event => {
+      if (this.audio?.recordSessionEvent) this.audio.recordSessionEvent(event);
+      else { try { this.options.onSessionEvent?.(event); } catch { /* host isolation */ } }
+    }, session.lease_started_ms);
   }
 
   private stopAudio() {
-    ++this.leaseGeneration;
-    clearTimeout(this.leaseTimer);
-    this.leaseTimer = undefined;
+    this.lease?.stop(); this.lease = undefined;
     const audio = this.audio;
     this.audio = undefined;
     if (this.ringing) {

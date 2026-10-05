@@ -11,3 +11,5 @@ export type { RingbackPattern } from "../../ui/ringback";
 export { HeadlessCallListener } from "./listener";
 export type { CallListenerOptions, ListenerSnapshot, ListenerState } from "./listener";
 export type { ListenerDiagnostics, ListenerPlaybackOptions, ListenerAudioRuntime, ListenerAudioConnection } from "./listener-audio";
+
+export type { MediaSessionEvent } from "./media-lease";

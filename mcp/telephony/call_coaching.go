@@ -69,20 +69,29 @@ func (a *App) coachCapability(row *callRow) (bool, string) {
 }
 
 func (a *App) coachingTargetValid(row *callRow, g coachingGrant) bool {
+	return a.coachingTargetReason(row, g) == ""
+}
+func (a *App) coachingTargetReason(row *callRow, g coachingGrant) string {
 	if !g.Enabled || isTerminalStatus(row.Status) || row.PeerKind != peerKindHuman || phoneHash(row.PeerToken) != g.PeerHash {
-		return false
+		return "coach_target_changed"
 	}
 	owner, _, err := a.phoneOwner(row.ID)
-	if err != nil || phoneHash(owner) != g.OwnerHash {
-		return false
+	if err != nil {
+		return "owner_lookup_failed"
+	}
+	if phoneHash(owner) != g.OwnerHash {
+		return "coach_target_changed"
 	}
 	h := a.softphones.lookup(row.ID)
 	if h == nil {
-		return false
+		return "coach_target_changed"
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return !h.closed && h.browser != nil && h.readyBrowser == h.browser && h.whisperBrowser == h.browser && h.browserEpoch == g.BrowserEpoch && h.peer != nil
+	if !h.closed && h.browser != nil && h.readyBrowser == h.browser && h.whisperBrowser == h.browser && h.browserEpoch == g.BrowserEpoch && h.peer != nil {
+		return ""
+	}
+	return "coach_target_changed"
 }
 
 func (h *softphoneHub) stopCoachLocked(l *callListener, reasons ...string) {

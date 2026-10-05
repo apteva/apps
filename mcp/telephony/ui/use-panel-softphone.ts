@@ -18,6 +18,7 @@ export function usePanelSoftphone(projectId: string, installId: number, options:
       onLevels: (mic, speaker) => callbacks.current.onLevels?.(mic, speaker),
       onDiagnostics: value => callbacks.current.onDiagnostics?.(value),
       onNotice: value => callbacks.current.onNotice?.(value),
+      onSessionEvent: value => callbacks.current.onSessionEvent?.(value),
     });
     setPhone(controller);
     setState(controller.getSnapshot());

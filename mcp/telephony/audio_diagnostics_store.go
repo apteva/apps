@@ -58,6 +58,7 @@ type browserAudioTiming struct {
 		PlaybackSourceTimestampMS   float64            `json:"playback_source_timestamp_ms"`
 		PlaybackSourceSequence      float64            `json:"playback_source_sequence"`
 		PlaybackSourceEpoch         float64            `json:"playback_source_epoch"`
+		PlaybackIngressMS           float64            `json:"playback_ingress_ms"`
 		PlaybackReceivedMS          float64            `json:"playback_received_ms"`
 		PlaybackSequenceGaps        float64            `json:"playback_sequence_gaps"`
 		PlaybackMaxTransitMS        float64            `json:"playback_max_transit_ms"`
@@ -75,7 +76,19 @@ type browserAudioTiming struct {
 	} `json:"playback"`
 }
 
+type mediaSessionEvent struct {
+	Timestamp   string `json:"timestamp"`
+	Action      string `json:"action"`
+	Outcome     string `json:"outcome"`
+	Status      int    `json:"status,omitempty"`
+	Code        string `json:"code,omitempty"`
+	Detail      string `json:"detail,omitempty"`
+	RemainingMS int    `json:"remaining_ms,omitempty"`
+	WasClean    bool   `json:"was_clean,omitempty"`
+}
+
 type browserAudioDiagnostics struct {
+	SessionEvents          []mediaSessionEvent     `json:"session_events,omitempty"`
 	CarrierPeerConnected   bool                    `json:"carrier_peer_connected"`
 	ConnectionState        string                  `json:"connection_state,omitempty"`
 	AudioContextState      string                  `json:"audio_context_state,omitempty"`
@@ -188,7 +201,7 @@ func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics) browserAudi
 	if value.Timing != nil {
 		sanitize := func(values map[string]float64) map[string]float64 {
 			out := map[string]float64{}
-			for _, key := range []string{"playback_flush", "playback_hard_limit", "playback_age_limit", "capture_age_limit", "websocket_backpressure", "playback_transport_age", "playback_source_age", "playback_delivery_excess"} {
+			for _, key := range []string{"playback_flush", "playback_hard_limit", "playback_age_limit", "capture_age_limit", "capture_clock_unavailable", "websocket_backpressure", "playback_transport_age", "playback_source_age", "playback_delivery_excess"} {
 				if n, ok := values[key]; ok && !math.IsNaN(n) && !math.IsInf(n, 0) {
 					out[key] = math.Max(0, math.Min(n, 24*60*60*1000))
 				}
@@ -231,6 +244,19 @@ func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics) browserAudi
 	value.CaptureSequenceGaps = clampDiagnosticInt(value.CaptureSequenceGaps, 1000000000)
 	value.PlaybackSequenceGaps = clampDiagnosticInt(value.PlaybackSequenceGaps, 1000000000)
 	value.DropEvents = normalizeAudioDropEvents(value.DropEvents)
+	if len(value.SessionEvents) > 50 {
+		value.SessionEvents = value.SessionEvents[len(value.SessionEvents)-50:]
+	}
+	for i := range value.SessionEvents {
+		e := &value.SessionEvents[i]
+		e.Action = limitDiagnosticText(e.Action, 40)
+		e.Outcome = limitDiagnosticText(e.Outcome, 40)
+		e.Code = limitDiagnosticText(e.Code, 80)
+		e.Detail = limitDiagnosticText(e.Detail, 160)
+		e.Timestamp = limitDiagnosticText(e.Timestamp, 40)
+		e.Status = clampDiagnosticInt(e.Status, 599)
+		e.RemainingMS = clampDiagnosticInt(e.RemainingMS, 3600000)
+	}
 	return value
 }
 
@@ -301,4 +327,11 @@ func audioDiagnosticsPublic(raw string) map[string]any {
 		return map[string]any{}
 	}
 	return out
+}
+
+func limitDiagnosticText(value string, n int) string {
+	if len(value) > n {
+		return value[:n]
+	}
+	return value
 }

@@ -535,9 +535,14 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "call is not a softphone call", http.StatusConflict)
 		return
 	}
-	if reason := a.phoneMediaDenialReason(row, token); reason != "" {
+	reason, verifiedExpiry := a.phoneMediaCheck(row, token)
+	if reason != "" {
 		logSoftphone("softphone browser media session rejected", "call", callID, "reason", reason)
-		http.Error(w, "forbidden", http.StatusForbidden)
+		status := http.StatusForbidden
+		if temporaryMediaFailure(reason) {
+			status = http.StatusServiceUnavailable
+		}
+		writeJSONStatus(w, status, map[string]any{"code": reason})
 		return
 	}
 	if isTerminalStatus(row.Status) {
@@ -639,11 +644,17 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 				if ticks%5 == 0 {
 					_ = a.db().updateServerAudioDiagnostics(callID, hub.serverAudioSnapshot())
 				}
-				if reason := a.phoneMediaDenialReason(row, token); reason != "" {
-					logSoftphone("softphone browser media session closed", "call", callID, "reason", reason)
-					_ = conn.Close()
-					return
+				reason, expiry := a.phoneMediaCheck(row, token)
+				if reason == "" {
+					verifiedExpiry = expiry
+					continue
 				}
+				if temporaryMediaFailure(reason) && verifiedExpiry > time.Now().Unix() {
+					continue
+				}
+				logSoftphone("softphone browser media session closed", "call", callID, "reason", reason)
+				closer.Close(ws.StatusPolicyViolation, reason)
+				return
 			}
 		}
 	}()
@@ -952,7 +963,7 @@ func (a *App) softphonePlace(w http.ResponseWriter, r *http.Request, project str
 		}
 		session, e = a.issuePhoneSession(row, p)
 		if e != nil {
-			http.Error(w, e.Error(), 403)
+			writePhoneSessionFailure(w, e)
 			return
 		}
 	}
@@ -1035,7 +1046,7 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		if p != nil {
 			session, e := a.issuePhoneSession(row, p)
 			if e != nil {
-				http.Error(w, e.Error(), 403)
+				writePhoneSessionFailure(w, e)
 				return
 			}
 			writeJSON(w, session)
@@ -1115,7 +1126,7 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		session, e := a.issuePhoneSession(row, p)
 		if e != nil {
 			_ = a.db().resetAnswerClaim(callID, peerToken)
-			http.Error(w, e.Error(), 403)
+			writePhoneSessionFailure(w, e)
 			return
 		}
 		writeJSON(w, session)
