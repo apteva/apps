@@ -283,6 +283,10 @@ func TestProjectionVersionsBuildAlongsideAndActivate(t *testing.T) {
 		"result_columns": []any{map[string]any{"name": "centre_id", "type": "text", "nullable": false}, map[string]any{"name": "total", "type": "number", "nullable": false}},
 		"scope_columns":  []any{"centre_id"},
 	})
+	if _, err := callTool(app, ctx, "projections_activate", map[string]any{"name": "event_totals", "version": 2}); err == nil {
+		t.Fatal("activated an unbuilt replacement")
+	}
+	runProjectionWorker(t, app, ctx)
 	mustCall(t, app, ctx, "projections_activate", map[string]any{"name": "event_totals", "version": 2})
 	runProjectionWorker(t, app, ctx)
 	mustCall(t, app, ctx, "rows_insert", map[string]any{"table": "events", "rows": []any{map[string]any{"centre_id": "v", "value": 1}}})

@@ -730,6 +730,7 @@ func loadTablesContext(ctx context.Context, db *sql.DB, projectID string) ([]Tab
 
 // One statement gives the table list and its columns the same SQLite snapshot.
 type metadataReader interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
 

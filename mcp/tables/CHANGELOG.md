@@ -1,3 +1,14 @@
+## 0.2.0 — Scoped analytics refresh and safe publication
+
+- Bind validated scope parameters inside saved SQL, including timezone-aware day bounds. Map dependencies and old/new derived scopes through project-specific rules.
+- Persist per-projection minimum refresh intervals, coalesced invalidations, forced requests and retry backoff across restarts.
+- Manage result indexes, including indexes on building versions, using the existing index tools. Preserve indexes through publication and protect results from row writes.
+- Report relevant source changes, consumed and published watermarks, requested-scope readiness, pending/running work, successful publication, failures and published coverage. Query results include snapshot-consistent metadata; read batches can inspect scoped status.
+- Process building versions alongside current readers and reject activation until the complete build and relevant changes are published. Failed replacements preserve the current version.
+- Reserve one background read connection and serialize refreshes. Enforce the calculation/scan/publication deadline, total result caps, bounded writer batches and short atomic switches; reclaim old generations in bounded batches.
+- Migrate legacy results atomically while retaining their rows until rebuilding. **Downgrade requires restoring the pre-upgrade database**: v0.1.27 cannot write the new result views. Mark runtime.database_upgrade as requires_restore; no automatic production deployment is part of this release.
+- Retain SDK v0.95.0 and SQLite v1.50.0; verify SDK tag ancestry. Add joined-aggregate, event-burst, restart, readiness, failure, cancellation, concurrency, index and migration coverage, plus fixed-size file-backed benchmarks.
+
 ## 0.1.27 — Persistent SQL projections
 
 - Add versioned, project-scoped read-only SQL projections with explicit source dependencies and typed result schemas.

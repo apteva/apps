@@ -1,4 +1,4 @@
-# Tables (v0.1)
+# Tables (v0.2)
 
 Typed-row database for Apteva agents and human teams. The row-shaped
 sibling to the `storage` app.
@@ -8,14 +8,14 @@ table and row is resolved against the calling project_id.
 
 ## Surfaces
 
-- **27 MCP tools** — `tables_create`, `tables_list`, `tables_describe`,
+- **28 MCP tools** — `tables_create`, `tables_list`, `tables_describe`,
   `tables_alter`, `tables_drop`, `indexes_create`, `indexes_list`,
   `indexes_drop`, `rows_insert`, `rows_get`,
   `rows_upsert`, `rows_update`, `rows_delete`, `rows_search`,
   `rows_count`, `rows_aggregate`, `tables_query`, `tables_batch`
 - **Persistent SQL projections** — `projections_create`, `projections_list`,
   `projections_describe`, `projections_refresh`, `projections_status`,
-  `projections_pause`, `projections_activate`, and `projections_delete`. Projection SQL is validated
+  `projections_pause`, `projections_activate`, `projections_update`, and `projections_delete`. Projection SQL is validated
   read-only SQL, source mutations are captured transactionally, affected
   scopes are coalesced, and results are refreshed by a bounded worker. New
   versions can be built alongside the active version and switched atomically.
@@ -32,7 +32,7 @@ table and row is resolved against the calling project_id.
   writes remain serialized; schema metadata is cached per project and table
 - **Projection query access** — projection result tables are addressed through
   the normal `tables_query` placeholder interface and cannot be written through
-  row tools. Results are published by scope in complete transactions.
+  row tools. Rows are staged in bounded batches and published through an atomic scope switch. Query responses include freshness and coverage from the same snapshot.
 - **Composite indexes** — validated column-based indexes can be created,
   inspected, and dropped without exposing physical SQLite names
 - **Skill** — `how-to-use-tables` (`/tables`)
@@ -58,7 +58,7 @@ APTEVA_PROJECT_ID=test DB_PATH=/tmp/tables.db ./tables
 curl http://localhost:8080/health
 ```
 
-## Out of scope for v0.1
+## Out of scope
 
 - Cross-app `file_id` validation on insert (just stores the integer;
   hydration is best-effort on `rows_get`)
@@ -186,3 +186,10 @@ of delayed cancellation during result iteration in the pinned SQLite driver.
 ## Legacy default compatibility in 0.1.21
 
 Schema loaders accept historical unquoted defaults for text columns, such as `standard` and `EUR`, without rewriting metadata or existing rows. Valid JSON defaults retain their types; invalid non-text defaults report the column and type. Partially completed upgrades resume normally. See [validation and compatibility details](LEGACY_DEFAULTS.md).
+
+## Projection configuration and validation
+
+See [PROJECTIONS.md](PROJECTIONS.md) for scoped SQL, dependency mappings, intervals,
+indexes, coverage, replacement activation and upgrade behavior. See
+[PROJECTION_VALIDATION.md](PROJECTION_VALIDATION.md) for correctness, resource and
+file-backed benchmark coverage.

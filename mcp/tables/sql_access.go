@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"sort"
 	"strings"
 	"unicode"
@@ -140,22 +141,28 @@ func authorizeQuery(qctx context.Context, conn *sql.Conn, ctx *sdk.AppCtx, a *Ap
 		if err != nil {
 			return err
 		}
-		roots, err := conn.QueryContext(qctx, "SELECT rootpage FROM sqlite_master WHERE (type='table' AND name=?) OR (type='index' AND tbl_name=?)", table.PhysicalName, table.PhysicalName)
-		if err != nil {
-			return err
+		physicals := []string{table.PhysicalName}
+		if table.ProjectionID != 0 {
+			physicals = []string{fmt.Sprintf("pd_%d", table.ProjectionID), fmt.Sprintf("ph_%d", table.ProjectionID)}
 		}
-		for roots.Next() {
-			var root int64
-			if err = roots.Scan(&root); err != nil {
-				roots.Close()
+		for _, physical := range physicals {
+			roots, err := conn.QueryContext(qctx, "SELECT rootpage FROM sqlite_master WHERE (type='table' AND name=?) OR (type='index' AND tbl_name=?)", physical, physical)
+			if err != nil {
 				return err
 			}
-			allowed[root] = true
-		}
-		err = roots.Err()
-		roots.Close()
-		if err != nil {
-			return err
+			for roots.Next() {
+				var root int64
+				if err = roots.Scan(&root); err != nil {
+					roots.Close()
+					return err
+				}
+				allowed[root] = true
+			}
+			err = roots.Err()
+			roots.Close()
+			if err != nil {
+				return err
+			}
 		}
 	}
 	plan, err := conn.QueryContext(qctx, "EXPLAIN "+resolved, args...)

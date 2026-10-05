@@ -16,17 +16,19 @@ import (
 // operation to the same typed handler used by the standalone MCP tool, so
 // validation, authorization, row limits, and SQL construction stay unified.
 var batchHandlers = map[string]func(*App, *sdk.AppCtx, map[string]any) (any, error){
-	"tables_list":     func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolTablesList(c, x) },
-	"tables_describe": func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolTablesDescribe(c, x) },
-	"rows_search":     func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolRowsSearch(c, x) },
-	"rows_get":        func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolRowsGet(c, x) },
-	"rows_count":      func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolRowsCount(c, x) },
-	"rows_aggregate":  func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolRowsAggregate(c, x) },
-	"tables_query":    func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolTablesQuery(c, x) },
-	"rows_insert":     func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolRowsInsert(c, x) },
-	"rows_update":     func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolRowsUpdate(c, x) },
-	"rows_upsert":     func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolRowsUpsert(c, x) },
-	"rows_delete":     func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolRowsDelete(c, x) },
+	"projections_status":   func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolProjectionsStatus(c, x) },
+	"projections_describe": func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolProjectionsDescribe(c, x) },
+	"tables_list":          func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolTablesList(c, x) },
+	"tables_describe":      func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolTablesDescribe(c, x) },
+	"rows_search":          func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolRowsSearch(c, x) },
+	"rows_get":             func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolRowsGet(c, x) },
+	"rows_count":           func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolRowsCount(c, x) },
+	"rows_aggregate":       func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolRowsAggregate(c, x) },
+	"tables_query":         func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolTablesQuery(c, x) },
+	"rows_insert":          func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolRowsInsert(c, x) },
+	"rows_update":          func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolRowsUpdate(c, x) },
+	"rows_upsert":          func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolRowsUpsert(c, x) },
+	"rows_delete":          func(a *App, c *sdk.AppCtx, x map[string]any) (any, error) { return a.toolRowsDelete(c, x) },
 }
 
 var batchWriteOperations = map[string]bool{
@@ -267,7 +269,7 @@ func (a *App) preloadBatchSchemas(ctx *sdk.AppCtx, projectID string, ops []batch
 		if table, ok := op.args["table"].(string); ok && table != "" {
 			names[table] = true
 		}
-		if op.name == "tables_describe" {
+		if op.name == "tables_describe" || strings.HasPrefix(op.name, "projections_") {
 			if name, ok := op.args["name"].(string); ok && name != "" {
 				names[name] = true
 			}
@@ -288,7 +290,7 @@ func (a *App) preloadBatchSchemas(ctx *sdk.AppCtx, projectID string, ops []batch
 		if err := validateIdentifier("table", name); err != nil {
 			continue
 		}
-		table, err := a.loadTableSchema(scoped, projectID, name)
+		table, err := a.loadQueryTable(scoped, projectID, name)
 		if err != nil {
 			// Preserve per-operation isolation. A missing or malformed table
 			// is reported by its nested handler rather than aborting siblings.
@@ -315,7 +317,7 @@ func (a *App) acquireBatchReadLocks(ctx context.Context, ops []batchOperation) (
 		if table, ok := op.args["table"].(string); ok && table != "" {
 			names[table] = true
 		}
-		if op.name == "tables_describe" {
+		if op.name == "tables_describe" || strings.HasPrefix(op.name, "projections_") {
 			if name, ok := op.args["name"].(string); ok && name != "" {
 				names[name] = true
 			}
