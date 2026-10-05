@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/media
 go 1.26.6
 
 require (
-	github.com/apteva/app-sdk v0.90.0
+	github.com/apteva/app-sdk v0.95.0
 	github.com/esimov/pigo v1.4.6
 	github.com/muesli/smartcrop v0.3.0
 	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646

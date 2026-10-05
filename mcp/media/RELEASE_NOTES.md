@@ -1,3 +1,12 @@
+## 0.14.8 — stationary Smart Crop subject preservation
+
+- Prevent stationary tracking runs from replacing the subject with a disconnected static background feature. Reuse the existing subject-containment policy while preserving motion-continuity corrections.
+- Version crop-decision and pre-analysis request caches so new cropping requests cannot reuse an earlier incorrectly cropped output. Unrelated render caches remain reusable; existing stored renders are unchanged.
+- Add a captured-footage opening regression and synthetic stationary/background/edge-recovery cases, plus a regression for cache upgrades. No additional frame sampling or allocation increase in the existing microbenchmarks.
+- Upgrade app-sdk to v0.95.0, the latest tag by commit ancestry. No database migrations or required configuration changes.
+
+Validation: standard Go suite, race checks, real Media–Storage integration, build/vet, existing Smart Crop benchmarks, and a 40-second FFmpeg preview. Two pre-existing December private-fixture failures remain unchanged; no new private-corpus failures were introduced. Private footage and credentials are not included in the release.
+
 ## 0.14.7 — explicit metadata batches
 
 - Add read-only `media_get_batch` for up to 100 explicit Storage file IDs, returning current descriptions, provenance/timestamps, probe status, audience rating and duration in one project-scoped query.

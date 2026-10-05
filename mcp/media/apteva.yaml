@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.7
+version: 0.14.8
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -18,6 +18,11 @@ description: |
   via the optional `render_executor` integration role — local ffmpeg
   by default, Cloudinary when bound. A wedged encode releases its
   slot without disturbing the indexer.
+
+  v0.14.8 prevents stationary Smart Crop tracking from replacing the subject
+  with a disconnected background feature. Cropping requests recompute old
+  decisions and outputs; unrelated render-result caches remain reusable.
+  Uses app-sdk v0.95.0.
 
   v0.14.7 makes safe catalog discovery the default: compact, planning, and
   bounded full detail levels; field projection; explicit large expansions;
@@ -520,7 +525,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.7
+    ref: media/v0.14.8
     entry: mcp/media
   port: 8080
   health_check: /health
