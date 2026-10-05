@@ -90,7 +90,9 @@ test("process creation is unassigned; execution configuration lives in Assignmen
   expect(
     document.querySelector<HTMLSelectElement>("#assignment-agent")!.value,
   ).toBe("0");
-  expect(document.body.textContent).toContain("Execution and history are recorded natively");
+  expect(document.body.textContent).toContain(
+    "Execution and history are recorded natively",
+  );
 });
 
 test("run history renders native evidence without external task links", async () => {
@@ -115,15 +117,25 @@ test("run history renders native evidence without external task links", async ()
 });
 
 test("permanent delivery conflict is shown as repair required, not retry pending", async () => {
-  await mount({ direct_runs: [{
-    id: "suspended", version: 1, state: "blocked", delivery_suspended: true,
-    delivery_warning: "HTTP 409: source event id already exists with different content",
-    created_at: "2026-10-01T10:00:00Z",
-  }] });
+  await mount({
+    direct_runs: [
+      {
+        id: "suspended",
+        version: 1,
+        state: "blocked",
+        delivery_suspended: true,
+        delivery_warning:
+          "HTTP 409: source event id already exists with different content",
+        created_at: "2026-10-01T10:00:00Z",
+      },
+    ],
+  });
   await click("Weekly review");
   await click("Runs");
   await clickContaining("Direct agent run");
-  expect(document.body.textContent).toContain("Delivery suspended—repair required");
+  expect(document.body.textContent).toContain(
+    "Delivery suspended—repair required",
+  );
   expect(document.body.textContent).not.toContain("Delivery retry pending");
 });
 
@@ -188,6 +200,7 @@ test("assignment run sends its ID and opens parameter fields", async () => {
     return read(url as string, init);
   }) as typeof fetch;
   await click("Start run");
+  expect(payload.control_mode).toBe("automatic");
   expect(payload.assignment_id).toBe("cooking");
   expect(payload.idempotency_key).toBeTruthy();
 });
@@ -251,7 +264,9 @@ test("editing a paused assignment preserves parameters and uses revision", async
   await mount(
     {},
     {
-      assignments: [{ ...assignment, status: "paused", worker_continuity: "per_executor" }],
+      assignments: [
+        { ...assignment, status: "paused", worker_continuity: "per_executor" },
+      ],
       parameters: [
         { key: "page", label: "Patreon page", type: "string", required: true },
       ],
@@ -469,4 +484,36 @@ test("main Runs tab browses executions across processes", async () => {
   expect(document.body.textContent).not.toContain("Digest published");
   await clickContaining("Publish digest");
   expect(document.body.textContent).toContain("Digest published");
+});
+
+test("assignment offers step-by-step run and freezes the selected mode in start", async () => {
+  const steps = [
+    {
+      key: "prepare",
+      name: "Prepare",
+      role: "worker",
+      instructions: "Prepare exact artifact",
+      expected_output: "Receipt",
+      depends_on: [],
+    },
+  ];
+  await mount({}, { status: "active", assignments: [assignment], steps });
+  await click("Weekly review");
+  await click("Assignments");
+  await click("Run step by step");
+  expect(
+    document.querySelector<HTMLSelectElement>("#pc-run-control")?.value,
+  ).toBe("step_by_step");
+  const read = globalThis.fetch;
+  let payload: any;
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+    if (init?.method === "POST") {
+      payload = JSON.parse(String(init.body));
+      return Response.json({ run: { id: "r" } });
+    }
+    return read(url as string, init);
+  }) as typeof fetch;
+  await click("Start run");
+  expect(payload.control_mode).toBe("step_by_step");
+  expect(payload.assignment_id).toBe(assignment.id);
 });

@@ -55,6 +55,9 @@ func (a *App) runWorker(run string, agent int64) (string, error) {
 }
 
 func (a *App) claimStep(r Run, s StepRun, all []StepRun, actor string) error {
+	if !stepReleased(r, s) {
+		return errors.New("step is held for controller advancement")
+	}
 	agent := persistentWorkerAgent(r, s, all)
 	parts := strings.SplitN(actor, ":", 3)
 	if agent == 0 || s.Executor.Kind != "agent" || s.Executor.AgentID != agent || len(parts) != 3 || parts[0] != "agent" || parts[1] != fmt.Sprint(agent) || parts[2] == "" || parts[2] == "main" {

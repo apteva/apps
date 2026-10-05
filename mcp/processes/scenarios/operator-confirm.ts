@@ -24,7 +24,7 @@ type WaitingStep = {
 };
 
 /** The CLI assigns APTEVA_APP_PORT from pickFreePort, so the port is discovered, never pinned. */
-async function findSidecarPort(step: WaitingStep): Promise<number> {
+export async function findSidecarPort(step: WaitingStep): Promise<number> {
   const lsof = Bun.spawn(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"], {
     stdout: "pipe",
     stderr: "ignore",

@@ -1,3 +1,4 @@
+import { STEP_BY_STEP, controlStepByStep, verifyControlEvidence } from "./step-by-step";
 /** Real Codex/Terra scenarios with independent checks of the sidecar's saved state. */
 import { AI_PARALLEL, PARALLEL_APPROVAL, verifyAIParallel } from "./ai-parallel-steps";
 import { MCP_RESPONSE_RECOVERY, verifyMCPResponseRecovery } from "./mcp-response-recovery";
@@ -86,7 +87,7 @@ for (const file of files) {
     scenario.setup.apps = [{ path: sourceCopy, spawnable: true,
       env: { DB_PATH: resolve(outputDir, "continuity-fixture.db") } }];
   }
-  if (scenario.name === AI_PARALLEL) {
+  if (scenario.name === AI_PARALLEL || scenario.name === STEP_BY_STEP) {
     const fixtureRoot = resolve(outputDir, "parallel-fixture");
     const processCopy = resolve(fixtureRoot, "processes");
     const sourceCopy = resolve(fixtureRoot, "test-parallel");
@@ -154,12 +155,18 @@ const parallelConfirmation: Promise<ConfirmationReport | Error | null> = paralle
   ? confirmWhenWaiting(parallelDb, {stepKey: "approve", output: PARALLEL_APPROVAL,
       signal: operatorAbort.signal, log: message => console.log(message)}).catch((error: Error) => error)
   : Promise.resolve(null);
+const controlledDb = databases.get(STEP_BY_STEP);
+const controlReport = controlledDb
+  ? controlStepByStep(controlledDb, operatorAbort.signal, message => console.log(message))
+      .catch((e:Error) => { console.error(`Step-by-step controller failed: ${e.stack}`); return e; })
+  : Promise.resolve(null);
 const stdout = await new Response(child.stdout).text();
 const exit = await child.exited;
 operatorAbort.abort();
 const confirmed = await operatorConfirmation;
 const continuityConfirmed = await continuityConfirmation;
 const parallelConfirmed = await parallelConfirmation;
+const controlled = await controlReport;
 await Bun.write(resolve(outputDir, "results.json"), stdout);
 check(exit === 0, `Tier 3 runner failed (${exit}); see ${outputDir}`);
 const report = JSON.parse(stdout);
@@ -220,16 +227,23 @@ for (const scenario of report.results) {
       console.log(`PASS ${scenario.scenario}: one worker, retained context/tools, exact receipts, validation join and HTTP approval verified (${scenario.iterations} iterations, ${scenario.tokens.total} tokens)`);
       continue;
     }
-    if (scenario.scenario === AI_PARALLEL) {
+    if (scenario.scenario === AI_PARALLEL || scenario.scenario === STEP_BY_STEP) {
+      if (scenario.scenario === STEP_BY_STEP) check(controlled && !(controlled instanceof Error), `Controller failed: ${controlled instanceof Error ? controlled.message : "missing"}`);
+      const confirmation = scenario.scenario === STEP_BY_STEP && controlled && !(controlled instanceof Error) ? controlled.approval : parallelConfirmed;
       check(PROVIDER === "openai-codex" && MODEL === "gpt-6.1-sol" && scenario.observed_models?.includes(MODEL), "Parallel tier 3 must observe GPT-6.1 Sol");
-      check(parallelConfirmed && !(parallelConfirmed instanceof Error), `Parallel operator confirmation failed: ${parallelConfirmed instanceof Error ? parallelConfirmed.message : "never performed"}`);
+      check(confirmation && !(confirmation instanceof Error), `Parallel operator confirmation failed: ${parallelConfirmed instanceof Error ? parallelConfirmed.message : "never performed"}`);
       const workers = db.query("SELECT * FROM process_run_workers WHERE run_id=?").all(runs[0]?.id) as any[];
       const fixtureDb = new Database(resolve(outputDir, "parallel-fixture.db"), {readonly: true});
       const fixture = {contexts: fixtureDb.query("SELECT * FROM contexts").all() as any[], operations: fixtureDb.query("SELECT * FROM operations ORDER BY id").all() as any[]};
       fixtureDb.close();
-      const evidence = {...history, workers, fixture, operator_confirmation: parallelConfirmed};
+      const evidence = {...history, workers, fixture, operator_confirmation: confirmation};
       await Bun.write(resolve(outputDir, "parallel-evidence.json"), JSON.stringify(evidence, null, 2));
-      verifyAIParallel(scenario.tool_calls, runs, workers, fixture, parallelConfirmed as ConfirmationReport);
+      verifyAIParallel(scenario.tool_calls, runs, workers, fixture, confirmation as ConfirmationReport);
+      if (scenario.scenario === STEP_BY_STEP && controlled && !(controlled instanceof Error)) {
+        const advances = db.query("SELECT * FROM process_run_advances WHERE run_id=?").all(runs[0].id) as any[];
+        verifyControlEvidence(runs, advances, controlled);
+        await Bun.write(resolve(outputDir,"control-evidence.json"),JSON.stringify({...evidence,advances,control:controlled},null,2));
+      }
       observed[scenario.scenario] = evidence;
       console.log(`PASS ${scenario.scenario}: real child overlap, owner receipts, thread-bound sessions and HTTP approval verified (${scenario.iterations} iterations, ${scenario.tokens.total} tokens)`);
       continue;

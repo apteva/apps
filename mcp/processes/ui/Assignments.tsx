@@ -16,6 +16,7 @@ export type Schedule = {
   timezone?: string;
 };
 export type Assignment = {
+  control_mode?: "automatic" | "step_by_step";
   worker_continuity?: "auto" | "per_executor" | "isolated";
   roles?: Record<string, Executor>;
   id: string;
@@ -235,7 +236,7 @@ export default function Assignments({
   processStatus: string;
   api: (path: string, method?: string, body?: unknown) => Promise<any>;
   onChanged: () => Promise<void>;
-  onRun: (x: Assignment) => void;
+  onRun: (x: Assignment, mode?: "automatic" | "step_by_step") => void;
 }) {
   const [draft, setDraft] = useState<Assignment | null>(null),
     [busy, setBusy] = useState(false),
@@ -669,10 +670,11 @@ export default function Assignments({
                       x.status !== "active" ||
                       x.sync_pending
                     }
-                    onClick={() => onRun(x)}
+                    onClick={() => onRun(x, "automatic")}
                   >
                     Run now
                   </button>
+                  {versions.find(v => v.version === x.procedure_version)?.definition.steps?.length ? <button disabled={busy || processStatus !== "active" || x.status !== "active" || x.sync_pending} onClick={() => onRun(x, "step_by_step")}>Run step by step</button> : null}
                   <button
                     disabled={
                       busy ||

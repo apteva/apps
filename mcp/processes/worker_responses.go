@@ -10,6 +10,7 @@ type WorkerStep struct {
 	Definition Step     `json:"definition"`
 	Executor   Executor `json:"executor"`
 	State      string   `json:"state"`
+	ReleasedAt string   `json:"released_at,omitempty"`
 	Progress   int      `json:"progress"`
 	Revision   int      `json:"revision"`
 	Output     string   `json:"output,omitempty"`
@@ -28,7 +29,7 @@ type WorkerAssignment struct {
 
 func workerStep(s StepRun) WorkerStep {
 	return WorkerStep{ID: s.ID, Key: s.Key, Definition: s.Definition, Executor: s.Executor,
-		State: s.State, Progress: s.Progress, Revision: s.Revision, Output: s.Output,
+		State: s.State, ReleasedAt: s.ReleasedAt, Progress: s.Progress, Revision: s.Revision, Output: s.Output,
 		Error: s.Error, StartAt: s.StartAt, DueAt: s.DueAt}
 }
 
@@ -43,6 +44,9 @@ func workerAction(r Run, s StepRun, actor, worker string, all []StepRun) (bool, 
 			return true, "Stop or settle outstanding child work, then call native done once."
 		}
 		return true, "Call the native done tool immediately before writing any text."
+	}
+	if controlMode(r) == "step_by_step" && !stepReleased(r, s) {
+		return false, "This step is held. Await explicit controller advancement; do not execute it or advance downstream work."
 	}
 	if aiParallel(r) && persistent {
 		return false, "Continue your claimed work and assess ready_steps for useful parallel delegation within max_parallel_steps. Await Processes events or child results when no eligible work remains; do not poll."
@@ -61,7 +65,7 @@ func workerAction(r Run, s StepRun, actor, worker string, all []StepRun) (bool, 
 // blockers verbatim. Read/claim and run_get remain the checkpoint recovery path.
 func workerAcknowledgement(process string, r Run, s StepRun, done bool, next string) map[string]any {
 	result := map[string]any{"process_id": process, "run_id": r.ID, "step_id": s.ID,
-		"revision": s.Revision, "state": s.State, "progress": s.Progress, "run_state": r.State,
+		"control_mode": controlMode(r), "revision": s.Revision, "state": s.State, "progress": s.Progress, "run_state": r.State,
 		"done": done, "next_action": next, "reread": stepReread(process, r.ID, s.ID)}
 	if s.Error != "" {
 		result["error"] = s.Error

@@ -1,5 +1,5 @@
 import { TimingDetails, type TimingRule } from "./Timing";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ProcessFlow } from "./ProcessFlow";
 import ExecutionTools, { type ToolSource } from "./ExecutionTools";
 export type Step = {
@@ -15,6 +15,7 @@ export type Step = {
 };
 export type Executor = { kind: "agent" | "human"; agent_id?: number };
 export type StepRun = {
+  released_at?: string;
   start_at?: string;
   due_at?: string;
   completed_at?: string;
@@ -121,11 +122,14 @@ export function RolesEditor({
                 })
               }
             >
-              {x.kind === "agent" && !agents.some((a) => a.id === x.agent_id) && (
-                <option value={String(x.agent_id)} disabled>
-                  {x.agent_id ? `Agent ${x.agent_id} unavailable · choose a replacement` : "Choose an agent"}
-                </option>
-              )}
+              {x.kind === "agent" &&
+                !agents.some((a) => a.id === x.agent_id) && (
+                  <option value={String(x.agent_id)} disabled>
+                    {x.agent_id
+                      ? `Agent ${x.agent_id} unavailable · choose a replacement`
+                      : "Choose an agent"}
+                  </option>
+                )}
               <option value="human">Human · project operator</option>
               {agents.map((a) => (
                 <option key={a.id} value={a.id}>
@@ -143,6 +147,9 @@ export function RunSteps({
   steps,
   runID,
   runState,
+  controlMode = "automatic",
+  waitingForAdvance = false,
+  eligibleSteps = [],
   agents,
   projectId,
   api,
@@ -152,6 +159,9 @@ export function RunSteps({
   steps: StepRun[];
   runID: string;
   runState: string;
+  controlMode?: "automatic" | "step_by_step";
+  waitingForAdvance?: boolean;
+  eligibleSteps?: { id: string; key: string }[];
   agents: { id: number; name: string }[];
   projectId: string;
   api: (path: string, method?: string, body?: unknown) => Promise<any>;
@@ -162,6 +172,31 @@ export function RunSteps({
     [output, setOutput] = useState(""),
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
+  const [chosen, setChosen] = useState<string[]>([]);
+  const releaseKeys = useRef<Record<string, string>>({});
+  const advance = async (ids: string[]) => {
+    setBusy(true);
+    setError("");
+    try {
+      for (const id of ids) {
+        const key = (releaseKeys.current[id] ||= crypto.randomUUID());
+        await api(`/runs/${runID}/advance`, "POST", {
+          step_id: id,
+          idempotency_key: key,
+        });
+      }
+      setChosen([]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      try {
+        await onChanged();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+      setBusy(false);
+    }
+  };
   const isTerminal = ["completed", "failed", "cancelled"].includes(runState);
   const submit = async (step: StepRun) => {
     setBusy(true);
@@ -182,7 +217,71 @@ export function RunSteps({
   };
   return (
     <div style={{ marginTop: 18 }}>
-      <ProcessFlow steps={steps.map(s => s.definition)} executions={steps} agents={agents} />
+      {controlMode === "step_by_step" && (
+        <section className="notice" aria-label="Step-by-step controls">
+          <strong>Step-by-step run</strong>
+          <p>
+            {isTerminal
+              ? `Run ${runState}.`
+              : waitingForAdvance
+                ? "Waiting for you to advance. Review saved outputs, then choose the next ready step."
+                : "Released work is active, or the run is waiting on dependencies or timing."}
+          </p>
+          {!isTerminal && eligibleSteps.length > 0 && (
+            <>
+              <div>
+                {eligibleSteps.map((item) => (
+                  <label
+                    key={item.id}
+                    style={{ display: "block", marginBottom: 8 }}
+                  >
+                    <input
+                      type="checkbox"
+                      disabled={busy}
+                      checked={chosen.includes(item.id)}
+                      onChange={(e) =>
+                        setChosen((ids) =>
+                          e.target.checked
+                            ? [...ids, item.id]
+                            : ids.filter((id) => id !== item.id),
+                        )
+                      }
+                    />{" "}
+                    {steps.find((s) => s.id === item.id)?.definition.name ||
+                      item.key}
+                  </label>
+                ))}
+              </div>
+              <button
+                disabled={busy}
+                onClick={() => advance([eligibleSteps[0].id])}
+              >
+                Run next step
+              </button>
+              <button
+                disabled={
+                  busy ||
+                  !chosen.some((id) => eligibleSteps.some((s) => s.id === id))
+                }
+                onClick={() =>
+                  advance(
+                    chosen.filter((id) =>
+                      eligibleSteps.some((s) => s.id === id),
+                    ),
+                  )
+                }
+              >
+                Run selected steps
+              </button>
+            </>
+          )}
+        </section>
+      )}
+      <ProcessFlow
+        steps={steps.map((s) => s.definition)}
+        executions={steps}
+        agents={agents}
+      />
       <div className="row between">
         <h2>Step execution</h2>
         {!isTerminal && (
@@ -249,6 +348,7 @@ export function RunSteps({
         const human = s.executor.kind === "human",
           actionable =
             human &&
+            (controlMode !== "step_by_step" || !!s.released_at) &&
             !isTerminal &&
             ["ready", "waiting", "running", "blocked"].includes(s.state);
         return (
@@ -278,7 +378,8 @@ export function RunSteps({
               <div className="notice">
                 {s.delivery_suspended
                   ? "Delivery suspended—repair required"
-                  : "Delivery retry pending"}: {s.delivery_warning}
+                  : "Delivery retry pending"}
+                : {s.delivery_warning}
               </div>
             )}
             {s.output && <div className="prose">{s.output}</div>}
@@ -296,6 +397,11 @@ export function RunSteps({
                 executionID={s.execution_id}
                 sources={toolSources}
               />
+            )}
+            {!isTerminal && eligibleSteps.some((item) => item.id === s.id) && (
+              <button disabled={busy} onClick={() => advance([s.id])}>
+                Run this step
+              </button>
             )}
             {actionable && (
               <>
@@ -335,7 +441,9 @@ export function RunSteps({
                         ))}
                     </details>
                     <div className="field" style={{ marginTop: 12 }}>
-                      <label htmlFor={`result-${s.id}`}>Result and evidence</label>
+                      <label htmlFor={`result-${s.id}`}>
+                        Result and evidence
+                      </label>
                       <textarea
                         id={`result-${s.id}`}
                         required

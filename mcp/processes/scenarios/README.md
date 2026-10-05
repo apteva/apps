@@ -409,3 +409,22 @@ race test, 108 Bun UI/verifier tests, 19 Playwright tests, UI and scenario TypeS
 checks, and whitespace validation. Only Processes application sources, its embedded
 usage guidance, documentation and local test fixtures changed; Core, Server and SDK
 sources were unchanged.
+
+### Step-by-step control (GPT-6.1 Sol)
+
+`13-step-by-step.yaml` prepares a frozen controlled run, verifies the initial held
+state through MCP, then advances `prepare` twice with one stable key. The runner's
+operator watcher independently observes later ready records staying held for two
+seconds and releases them over real HTTP, retrying each identical request. It
+releases independent branches, validation, a separate human approval, and finally
+publication. All fixture actions remain local simulated artifacts.
+
+The independent verifier reads `process_run_advances`, exact step receipts, worker
+ownership and fixture operation timestamps. It rejects automatic mode, duplicate
+or mismatched releases, premature delivery/dependencies, worker advancement,
+missing held observations and missing HTTP approval. The parallel verifier also
+requires actual operation overlap and preserved owner-only session checkpoints.
+`control-evidence.json` retains release observations and durable authorization
+rows. Configure `APTEVA_TEST_PROVIDER=openai-codex` and
+`APTEVA_TEST_MODEL=gpt-6.1-sol` before invoking `bun run scenarios/run.ts
+scenarios/13-step-by-step.yaml` with the existing authenticated test environment.

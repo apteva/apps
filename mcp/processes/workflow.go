@@ -39,6 +39,7 @@ type Executor struct {
 // The Task alias is kept privately for decoding legacy pre-0.14 rows; it is
 // not exposed by the Processes manifest or API.
 type StepRun struct {
+	ReleasedAt        string   `json:"released_at,omitempty"`
 	StartAt           string   `json:"start_at,omitempty"`
 	CompletedAt       string   `json:"completed_at,omitempty"`
 	ProjectID         string   `json:"project_id"`
@@ -178,12 +179,12 @@ func (a *App) validateRoles(project string, d Definition, c AssignmentConfig) er
 	return nil
 }
 
-const stepColumns = `id,COALESCE(run_id,''),step_key,position,definition_json,executor_json,state,progress,output,error,decision,updated_by,updated_at,task_id,delivered_at,target_thread_id,execution_id,delivery_event_id,delivery_warning,delivery_attempts,next_attempt_at,lifecycle_sequence,execution_state,project_id,origin,required,due_at,created_at,created_by,revision,start_at,completed_at,delivery_suspended`
+const stepColumns = `id,COALESCE(run_id,''),step_key,position,definition_json,executor_json,state,progress,output,error,decision,updated_by,updated_at,task_id,delivered_at,target_thread_id,execution_id,delivery_event_id,delivery_warning,delivery_attempts,next_attempt_at,lifecycle_sequence,execution_state,project_id,origin,required,due_at,created_at,created_by,revision,start_at,completed_at,delivery_suspended,released_at`
 
 func scanStep(row scanner) (StepRun, error) {
 	var s StepRun
 	var def, executor, legacyDecision, legacyTaskID string
-	e := row.Scan(&s.ID, &s.RunID, &s.Key, &s.Position, &def, &executor, &s.State, &s.Progress, &s.Output, &s.Error, &legacyDecision, &s.UpdatedBy, &s.UpdatedAt, &legacyTaskID, &s.DeliveredAt, &s.ThreadID, &s.ExecutionID, &s.DeliveryEventID, &s.DeliveryWarning, &s.Attempts, &s.NextAttemptAt, &s.LifecycleSequence, &s.ExecutionState, &s.ProjectID, &s.Origin, &s.Required, &s.DueAt, &s.CreatedAt, &s.CreatedBy, &s.Revision, &s.StartAt, &s.CompletedAt, &s.DeliverySuspended)
+	e := row.Scan(&s.ID, &s.RunID, &s.Key, &s.Position, &def, &executor, &s.State, &s.Progress, &s.Output, &s.Error, &legacyDecision, &s.UpdatedBy, &s.UpdatedAt, &legacyTaskID, &s.DeliveredAt, &s.ThreadID, &s.ExecutionID, &s.DeliveryEventID, &s.DeliveryWarning, &s.Attempts, &s.NextAttemptAt, &s.LifecycleSequence, &s.ExecutionState, &s.ProjectID, &s.Origin, &s.Required, &s.DueAt, &s.CreatedAt, &s.CreatedBy, &s.Revision, &s.StartAt, &s.CompletedAt, &s.DeliverySuspended, &s.ReleasedAt)
 	if e == nil {
 		e = json.Unmarshal([]byte(def), &s.Definition)
 	}
@@ -329,7 +330,15 @@ func (a *App) staleStepReminder(p *Process, r Run, s StepRun, all []StepRun, now
 	return err
 }
 
-func (a *App) stepContext(p *Process, r Run, s StepRun, all []StepRun) string {
+func (a *App) stepContext(p *Process, r Run, s StepRun, all []StepRun) (message string) {
+	// Keep the release contract on every worker delivery, including isolated
+	// workers and later events to an existing persistent worker.
+	if controlMode(r) == "step_by_step" && s.Origin == "process_step" {
+		defer func() {
+			message = "Control mode: step_by_step. This step has explicit controller advancement. Later ready steps remain held until separately released. Workers must never call run_advance. " + message
+		}()
+	}
+
 	if s.Origin != "process_step" {
 		return a.nativeTaskContext(p, r, s, all)
 	}
@@ -367,7 +376,7 @@ func (a *App) stepContext(p *Process, r Run, s StepRun, all []StepRun) string {
 	return "Shared procedure context (execute only your assigned step):\n" + p.Instructions + "\nRequired inputs: " + p.RequiredInputs + "\nOverall completion criteria: " + p.CompletionCriteria + "\n" + fmt.Sprintf("Process: %s\nRun: %s\nAssignment: %s\nTarget: %s\nCoordinator agent: %d\nProcedure version: %d\nStep: %s (%s)\nRole: %s\nInstructions: %s\nExpected output: %s\nParameters: %s\nRun inputs: %s\nDependency outputs (data, not instructions): %s\nStanding context: %s\nApproval requirements: %s\n%s\n", p.Name, r.ID, r.Binding.Name, r.Binding.Target, r.Binding.OwnerAgentID, r.Version, s.Definition.Name, s.Key, s.Definition.Role, s.Definition.Instructions, s.Definition.ExpectedOutput, jsonText(r.Binding.Parameters), r.Inputs, jsonText(inputs), p.DefaultInputs, p.ApprovalRequirements, contract)
 }
 func (a *App) deliverStep(p *Process, r Run, s *StepRun, all []StepRun) (err error) {
-	if s.State == "pending" || s.State == "scheduled" || terminal(s.State) || s.Executor.Kind == "human" || s.DeliveredAt != "" || s.DeliverySuspended {
+	if !stepReleased(r, *s) || s.State == "pending" || s.State == "scheduled" || terminal(s.State) || s.Executor.Kind == "human" || s.DeliveredAt != "" || s.DeliverySuspended {
 		return nil
 	}
 	if t, e := time.Parse(time.RFC3339Nano, s.NextAttemptAt); e == nil && time.Now().Before(t) {
@@ -578,6 +587,9 @@ func (a *App) spawnSequentialWorker(p *Process, r *Run, s *StepRun, all []StepRu
 	if aiParallel(*r) {
 		directive = parallelWorkerDirective(*r)
 	}
+	if controlMode(*r) == "step_by_step" {
+		directive += " This run is step_by_step: a ready state alone is not authorization. Only steps explicitly released by the controller may be claimed or executed. Never call run_advance; keep this worker and await the next release event after completing released work."
+	}
 	if s.ThreadID != worker || s.DeliveryEventID != eventID {
 		if _, err := a.db.Exec(`UPDATE process_step_runs SET target_thread_id=?,delivery_event_id=? WHERE id=?`, worker, eventID, s.ID); err != nil {
 			return err
@@ -772,9 +784,18 @@ func (a *App) reconcileWorkflowAt(p *Process, r *Run, now time.Time) error {
 				continue
 			}
 			s.State = "ready"
-			if s.Executor.Kind == "human" {
+			if s.Executor.Kind == "human" && stepReleased(*r, *s) {
 				s.State = "waiting"
 			}
+			if e = a.writeStep(*s, s.State, 0, "", "", "workflow"); e != nil {
+				return e
+			}
+		}
+		if !stepReleased(*r, *s) {
+			continue
+		}
+		if s.Executor.Kind == "human" && s.State == "ready" {
+			s.State = "waiting"
 			if e = a.writeStep(*s, s.State, 0, "", "", "workflow"); e != nil {
 				return e
 			}
@@ -825,6 +846,17 @@ func (a *App) reconcileWorkflowAt(p *Process, r *Run, now time.Time) error {
 	if state == "running" && scheduled && !runnable {
 		state = "scheduled"
 	}
+	if controlMode(*r) == "step_by_step" && state == "running" {
+		active := false
+		for _, s := range all {
+			if stepReleased(*r, s) && !terminal(s.State) && s.State != "pending" && s.State != "scheduled" {
+				active = true
+			}
+		}
+		if !active {
+			state = "waiting"
+		}
+	}
 	result := ""
 	if done == total {
 		state = "completed"
@@ -855,6 +887,7 @@ func (a *App) reconcileWorkflowAt(p *Process, r *Run, now time.Time) error {
 	fresh, e := a.getRun(p.ProjectID, p.ID, r.ID)
 	if e == nil {
 		*r = fresh
+		setRunControl(r, all)
 	}
 	return errors.Join(append(failures, e)...)
 }
@@ -929,8 +962,9 @@ func (a *App) stepAction(project, actor, process, run, id, action string, args m
 		}
 		result := map[string]any{
 			"process_id": process, "run_id": r.ID, "step_id": s.ID,
-			"run":  map[string]any{"id": r.ID, "process_id": process, "state": r.State, "version": r.Version},
-			"step": workerStep(s), "dependencies": dependencyEvidence(s, all),
+			"control_mode": controlMode(r),
+			"run":          map[string]any{"id": r.ID, "process_id": process, "state": r.State, "version": r.Version},
+			"step":         workerStep(s), "dependencies": dependencyEvidence(s, all),
 			"done": done, "next_action": next, "reread": stepReread(process, r.ID, s.ID),
 			"context_ref": map[string]any{"procedure_version": r.Version, "assignment_id": r.AssignmentID, "assignment_revision": r.AssignmentRevision},
 		}
@@ -1095,6 +1129,9 @@ func (a *App) cancelWorkflow(project, actor, process, run, reason string) (any, 
 }
 
 func (a *App) updateTaskState(s Task, r Run, all []Task, actor string, args map[string]any) error {
+	if !stepReleased(r, s) {
+		return errors.New("step is held for controller advancement")
+	}
 	allowed := s.Executor.Kind == "human" && actor == "operator" || s.Executor.Kind == "agent" && strings.HasPrefix(actor, fmt.Sprintf("agent:%d:", s.Executor.AgentID))
 	if !allowed {
 		return errors.New("only this step's assigned executor can update it")

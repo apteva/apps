@@ -67,7 +67,7 @@ func (a *App) changeStatus(project, id, status string) (*Process, error) {
 func (a *App) start(project, id, key, inputs string) (any, error) {
 	return a.startAssignment(project, id, "assignment-"+id, key, inputs, nil)
 }
-func (a *App) startAssignment(project, id, assignmentID, key, inputs string, overrides map[string]any) (any, error) {
+func (a *App) startAssignment(project, id, assignmentID, key, inputs string, overrides map[string]any, modes ...string) (any, error) {
 	if len(key) == 0 || len(key) > 160 {
 		return nil, errors.New("idempotency_key must contain 1–160 characters")
 	}
@@ -85,6 +85,16 @@ func (a *App) startAssignment(project, id, assignmentID, key, inputs string, ove
 	p, e = a.assigned(p, x)
 	if e != nil {
 		return nil, e
+	}
+	if len(modes) > 0 && modes[0] != "" {
+		mode, err := normalizeControlMode(modes[0])
+		if err != nil {
+			return nil, err
+		}
+		if mode == "step_by_step" && len(p.Steps) == 0 {
+			return nil, errors.New("step_by_step requires structured steps")
+		}
+		p.Assignment.ControlMode = mode
 	}
 	requestKey := "manual:" + key
 	if assignmentID != "assignment-"+id {
@@ -125,6 +135,7 @@ func (a *App) runs(project, id string) (any, error) {
 				return nil, err
 			}
 		}
+		setRunControl(&r, r.Steps)
 		direct = append(direct, r)
 	}
 	return map[string]any{"runs": direct, "direct_runs": direct, "dispatches": records, "has_more": false}, nil
@@ -175,6 +186,7 @@ func (a *App) projectRuns(project string) (any, error) {
 			continue
 		}
 		out[i].Steps, err = a.steps(out[i].ID)
+		setRunControl(&out[i].Run, out[i].Steps)
 		if err != nil {
 			return nil, err
 		}

@@ -61,6 +61,10 @@ type Version struct {
 	CreatedAt  string     `json:"created_at"`
 }
 type Run struct {
+	ControlMode        string           `json:"control_mode"`
+	WaitingForAdvance  bool             `json:"waiting_for_advance"`
+	EligibleSteps      []WorkerWorkItem `json:"eligible_steps,omitempty"`
+	ActiveSteps        []WorkerWorkItem `json:"active_steps,omitempty"`
 	TriggerEventID     string           `json:"trigger_event_id,omitempty"`
 	Workflow           bool             `json:"workflow"`
 	Steps              []StepRun        `json:"steps,omitempty"`
@@ -170,6 +174,9 @@ func (d Definition) procedureOnly() Definition {
 	return d
 }
 func validateExecution(c AssignmentConfig) error {
+	if _, err := normalizeControlMode(c.ControlMode); err != nil {
+		return err
+	}
 	switch c.ParallelExecution {
 	case "", "sequential", "auto":
 	default:
@@ -418,7 +425,7 @@ func (a *App) reserveAssignedRun(p *Process, kind, key, inputs string, overrides
 	}
 	r, e := scanRun(a.db.QueryRow(`SELECT `+runColumns+` FROM process_runs WHERE process_id=? AND request_key=?`, p.ID, key))
 	if e == nil {
-		if r.AssignmentID != p.Assignment.ID || r.Inputs != inputs || r.Kind != kind || jsonText(params(r.Overrides)) != jsonText(params(overrides)) {
+		if controlMode(r) != effectiveControlMode(p.Assignment.ControlMode) || r.AssignmentID != p.Assignment.ID || r.Inputs != inputs || r.Kind != kind || jsonText(params(r.Overrides)) != jsonText(params(overrides)) {
 			return Run{}, errors.New("idempotency key already used with different input")
 		}
 		return r, nil
@@ -434,6 +441,7 @@ func (a *App) reserveAssignedRun(p *Process, kind, key, inputs string, overrides
 }
 func (a *App) prepareAssignedRun(p *Process, kind, key, inputs string, overrides map[string]any) (Run, error) {
 	c := p.Assignment.AssignmentConfig
+	c.ControlMode = effectiveControlMode(c.ControlMode)
 	if e := a.validateRoles(p.ProjectID, p.Definition, c); e != nil {
 		return Run{}, e
 	}
@@ -450,7 +458,7 @@ func (a *App) prepareAssignedRun(p *Process, kind, key, inputs string, overrides
 	if e != nil {
 		return Run{}, e
 	}
-	r := Run{ID: newID("run-"), ProcessID: p.ID, Version: p.Version, Kind: kind, RequestKey: key, Inputs: inputs, CreatedAt: timestamp(), Backend: "agent", State: "queued", AssignmentID: p.Assignment.ID, AssignmentRevision: p.Assignment.Revision, Binding: c, Overrides: params(overrides), Workflow: len(p.Steps) > 0}
+	r := Run{ControlMode: c.ControlMode, ID: newID("run-"), ProcessID: p.ID, Version: p.Version, Kind: kind, RequestKey: key, Inputs: inputs, CreatedAt: timestamp(), Backend: "agent", State: "queued", AssignmentID: p.Assignment.ID, AssignmentRevision: p.Assignment.Revision, Binding: c, Overrides: params(overrides), Workflow: len(p.Steps) > 0}
 	return r, nil
 }
 
@@ -477,6 +485,7 @@ func scanRun(row scanner) (Run, error) {
 	if err == nil {
 		err = json.Unmarshal([]byte(overrides), &r.Overrides)
 	}
+	r.ControlMode = controlMode(r)
 	return r, err
 }
 func (a *App) getRun(project, process, id string) (Run, error) {

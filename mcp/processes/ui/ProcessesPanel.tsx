@@ -64,6 +64,9 @@ type Entry = {
     id: string;
     trigger_event_id?: string;
     workflow?: boolean;
+    control_mode?: "automatic" | "step_by_step";
+    waiting_for_advance?: boolean;
+    eligible_steps?: {id: string; key: string}[];
     steps?: StepRun[];
     title: string;
     state: string;
@@ -290,6 +293,9 @@ function RunDetailCard({
           steps={run.steps || []}
           runID={run.id}
           runState={run.state}
+          controlMode={run.control_mode}
+          waitingForAdvance={run.waiting_for_advance}
+          eligibleSteps={run.eligible_steps || []}
           agents={agents}
           projectId={projectId}
           api={api}
@@ -360,7 +366,8 @@ function Panel(props: Props) {
   }, [tab, runs.length]);
   const [runModal, setRunModal] = useState(false),
     [runInput, setRunInput] = useState(""),
-    [runKey, setRunKey] = useState("");
+    [runKey, setRunKey] = useState(""),
+    [runControlMode, setRunControlMode] = useState<"automatic" | "step_by_step">("automatic");
   const api = async (path = "", method = "GET", body?: unknown) => {
     const [route, searchParams] = path.split("?");
     const q = new URLSearchParams(searchParams);
@@ -601,7 +608,8 @@ function Panel(props: Props) {
   const selectedProjectRun =
     filteredProjectRuns.find((run) => run.record.id === selectedProjectRunID) ||
     null;
-  const prepareRun = (x: Assignment) => {
+  const prepareRun = (x: Assignment, mode: "automatic" | "step_by_step" = "automatic") => {
+    setRunControlMode(mode);
     setRunAssignment(x);
     setRunParameters({});
     setRunInput("");
@@ -1519,6 +1527,7 @@ function Panel(props: Props) {
                 </>
               )}
             </p>
+            <div className="field"><label htmlFor="pc-run-control">Run control</label><select id="pc-run-control" value={runControlMode} onChange={e => setRunControlMode(e.target.value as "automatic" | "step_by_step")}><option value="automatic">Automatic · run ready steps</option>{detail?.versions.find(v => v.version === runAssignment.procedure_version)?.definition.steps?.length ? <option value="step_by_step">Step by step · review before advancing</option> : null}</select><p className="small muted">Step by step prepares the run and waits for you to release each step. Independent branches can be selected together. Human approval still requires its own evidence.</p></div>
             <ParameterValues
               fields={runSchema}
               values={{ ...runAssignment.parameters, ...runParameters }}
@@ -1557,13 +1566,14 @@ function Panel(props: Props) {
                       assignment_id: runAssignment.id,
                       parameters: runParameters,
                       idempotency_key: runKey,
+                      control_mode: runControlMode,
                       inputs: runInput,
                     });
                     setRunModal(false);
                     setNotice(
                       r.delivery_warning
                         ? `Run created; delivery needs attention: ${r.delivery_warning}`
-                        : "Run created and sent to the owner.",
+                        : runControlMode === "step_by_step" ? "Run prepared. Select a ready step to begin." : "Run created and sent to the owner.",
                     );
                     setTab("runs");
                     await loadRuns(p.id);

@@ -18,6 +18,7 @@ type Parameter struct {
 	Options  []string `json:"options,omitempty"`
 }
 type AssignmentConfig struct {
+	ControlMode       string              `json:"control_mode,omitempty"`
 	ParallelExecution string              `json:"parallel_execution,omitempty"` // sequential (default), auto
 	MaxParallelSteps  int                 `json:"max_parallel_steps,omitempty"` // default 4, maximum 8
 	WorkerContinuity  string              `json:"worker_continuity,omitempty"`  // auto, per_executor, isolated
@@ -226,6 +227,9 @@ func (a *App) saveAssignment(project, process, id string, expected int, c Assign
 	if c.ParallelExecution == "auto" && c.MaxParallelSteps == 0 {
 		// Store the effective limit so later default changes cannot alter a run.
 		c.MaxParallelSteps = defaultParallelSteps
+	}
+	if c.ControlMode == "step_by_step" && len(d.Steps) == 0 {
+		return nil, errors.New("step_by_step requires structured steps")
 	}
 	if c.ParallelExecution == "auto" && len(d.Steps) == 0 {
 		return nil, errors.New("parallel_execution requires structured steps")

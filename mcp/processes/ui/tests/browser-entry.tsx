@@ -35,6 +35,26 @@ let process = JSON.parse(sessionStorage.getItem("process") || "null") || {
   ],
   assignments: [],
 };
+const controlFixture = location.search.includes("step_control");
+let controlRun: any;
+if (controlFixture) {
+  process.status = "active";
+  process.assignments = [
+    {
+      id: "manual",
+      process_id: "weather",
+      revision: 1,
+      name: "Manual test",
+      target: "Local",
+      owner_agent_id: 7,
+      procedure_version: 1,
+      follow_latest: true,
+      parameters: {},
+      status: "active",
+      sync_pending: false,
+    },
+  ];
+}
 const missingAgent = location.search.includes("missing_agent");
 if (missingAgent) {
   process.assignments = [
@@ -86,6 +106,75 @@ window.fetch = (async (url: unknown, init?: RequestInit) => {
     );
   if (init?.method === "PUT" || init?.method === "POST") {
     const body = JSON.parse(String(init.body));
+    if (controlFixture && path.endsWith("/start")) {
+      sessionStorage.setItem("submitted-start", JSON.stringify(body));
+      controlRun = {
+        id: "controlled-run",
+        process_id: "weather",
+        version: 1,
+        workflow: true,
+        state: "waiting",
+        created_at: new Date().toISOString(),
+        control_mode: body.control_mode,
+        waiting_for_advance: true,
+        assignment: process.assignments[0],
+        steps: ["alpha", "beta", "approve"].map((key, i) => ({
+          id: key,
+          run_id: "controlled-run",
+          key,
+          definition: {
+            ...step(key, key, i === 2 ? ["alpha", "beta"] : []),
+            role: i === 2 ? "operator" : "worker",
+          },
+          executor: {
+            kind: i === 2 ? "human" : "agent",
+            agent_id: i === 2 ? undefined : 7,
+          },
+          state: i === 2 ? "pending" : "ready",
+          progress: 0,
+          output: "",
+          error: "",
+        })),
+        eligible_steps: [
+          { id: "alpha", key: "alpha" },
+          { id: "beta", key: "beta" },
+        ],
+      };
+      return Response.json({ run: controlRun });
+    }
+    if (controlFixture && path.endsWith("/advance")) {
+      const releases = JSON.parse(sessionStorage.getItem("releases") || "[]");
+      releases.push(body);
+      sessionStorage.setItem("releases", JSON.stringify(releases));
+      const selected = controlRun.steps.find((s: any) => s.id === body.step_id);
+      selected.released_at = new Date().toISOString();
+      selected.state =
+        selected.executor.kind === "human" ? "waiting" : "completed";
+      selected.output =
+        selected.executor.kind === "human"
+          ? ""
+          : `Exact receipt ${selected.id}.png`;
+      controlRun.eligible_steps = controlRun.eligible_steps.filter(
+        (s: any) => s.id !== selected.id,
+      );
+      if (
+        controlRun.steps.slice(0, 2).every((s: any) => s.state === "completed")
+      ) {
+        const human = controlRun.steps[2];
+        if (human.state === "pending") {
+          human.state = "ready";
+          controlRun.eligible_steps.push({ id: human.id, key: human.key });
+        }
+      }
+      return Response.json({ step_id: selected.id });
+    }
+    if (controlFixture && path.includes("/steps/approve")) {
+      sessionStorage.setItem("approval", JSON.stringify(body));
+      controlRun.steps[2].state = "completed";
+      controlRun.steps[2].output = body.output;
+      controlRun.state = "completed";
+      return Response.json({});
+    }
     if (path.endsWith("/assignments/barcelona") && body.assignment) {
       if (
         body.assignment.owner_agent_id !== 1105 ||
@@ -117,6 +206,11 @@ window.fetch = (async (url: unknown, init?: RequestInit) => {
     sessionStorage.setItem("process", JSON.stringify(process));
     return Response.json(process);
   }
+  if (controlFixture && path.endsWith("/runs"))
+    return Response.json({
+      direct_runs: controlRun ? [controlRun] : [],
+      runs: path.endsWith("/processes/runs") && controlRun ? [controlRun] : [],
+    });
   if (path.endsWith("/runs"))
     return location.search.includes("live")
       ? originalFetch("/fixture/runs")

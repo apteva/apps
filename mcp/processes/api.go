@@ -36,12 +36,13 @@ func (a *App) MCPTools() []sdk.Tool {
 	}
 	descriptions["assignment_create"] = "After creating a procedure, configure an executor, target, parameters, and optional schedule. The assignment is always created paused and does not run. Activate it only with explicit user authorization after the process is active."
 	descriptions["assignment_activate"] = "Enable a paused assignment only with explicit user authorization and only after the reviewed process is active."
+	descriptions["run_advance"] = "Controller/operator only: release one eligible step of a step_by_step run. Workers cannot advance steps. Read run_get eligible_steps, use an exact step_id and stable idempotency_key; separate calls may release independent branches. Does not complete or approve work."
 	descriptions["run_cancel"] = "Coordinator or operator: cancel a structured run and stop future handoffs. Already dispatched external work may continue."
 	descriptions["step_claim"] = "Claim and read an assigned ready step as the persistent run worker, including per-executor branches and joins. Marks ready work running. Reuse this worker for later steps; finish only when the top-level done field is true."
 	descriptions["step_get"] = "Read the assigned step, frozen context and one dependencies manifest with exact ancestor receipts. No full procedure snapshot. After retaining shared policy, include_context=false omits it; omit this flag for recovery."
 	descriptions["step_update"] = "Assigned executor only: save progress or output; returns only a compact saved-state acknowledgement, not instructions or receipts. A persistent worker must inspect the returned done field: follow next_action to finish when true, otherwise follow next_action and any ready_steps/active_steps; auto parallel owners may continue other eligible work and await child results. Never poll."
 	out := []sdk.Tool{}
-	for _, name := range []string{"list", "get", "validate_definition", "create", "update", "activate", "pause", "archive", "start", "runs", "run_get", "run_update", "assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive", "step_get", "step_claim", "step_update", "run_cancel"} {
+	for _, name := range []string{"list", "get", "validate_definition", "create", "update", "activate", "pause", "archive", "start", "runs", "run_get", "run_update", "assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive", "step_get", "step_claim", "step_update", "run_cancel", "run_advance"} {
 		name := name
 		props := map[string]any{}
 		required := []string{}
@@ -79,6 +80,11 @@ func (a *App) MCPTools() []sdk.Tool {
 				props["expected_version"] = map[string]any{"type": "integer", "minimum": 1}
 				required = append(required, "expected_version")
 			}
+		case "run_advance":
+			props["run_id"] = textField("Run ID")
+			props["step_id"] = textField("Eligible step execution ID")
+			props["idempotency_key"] = textField("Stable unique key for this step release; reuse on retry")
+			required = append(required, "run_id", "step_id", "idempotency_key")
 		case "run_cancel":
 			props["run_id"] = textField("Run ID")
 			props["reason"] = textField("Cancellation reason")
@@ -109,6 +115,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				required = append(required, "state")
 			}
 		case "start":
+			props["control_mode"] = controlModeSchema()
 			props["assignment_id"] = textField("Assignment ID; required when there are multiple non-archived assignments")
 			props["parameters"] = map[string]any{"type": "object", "description": "Run-only overrides for declared parameters"}
 			props["idempotency_key"] = textField("Stable unique key for this logical execution")
@@ -279,7 +286,7 @@ func (a *App) executeResponse(project, actor, action string, args map[string]any
 		if assignmentID == "" {
 			return nil, errors.New("create and activate an assignment before starting this process")
 		}
-		return a.startAssignment(project, id, assignmentID, str(args, "idempotency_key"), str(args, "inputs"), overrides)
+		return a.startAssignment(project, id, assignmentID, str(args, "idempotency_key"), str(args, "inputs"), overrides, str(args, "control_mode"))
 	case "assignments":
 		if _, e := a.get(project, id); e != nil {
 			return nil, e
@@ -308,6 +315,8 @@ func (a *App) executeResponse(project, actor, action string, args map[string]any
 		return a.assignmentStatus(project, id, str(args, "assignment_id"), "paused")
 	case "assignment_archive":
 		return a.assignmentStatus(project, id, str(args, "assignment_id"), "archived")
+	case "run_advance":
+		return a.advanceRun(project, actor, id, str(args, "run_id"), str(args, "step_id"), str(args, "idempotency_key"))
 	case "run_cancel":
 		return a.cancelWorkflow(project, actor, id, str(args, "run_id"), str(args, "reason"))
 	case "step_get", "step_claim", "step_update":
@@ -416,6 +425,9 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if len(parts) >= 3 && parts[1] == "runs" {
 		args["process_id"] = parts[0]
 		args["run_id"] = parts[2]
+		if len(parts) == 4 && parts[3] == "advance" && r.Method == "POST" {
+			action = "run_advance"
+		}
 		if len(parts) == 4 && parts[3] == "cancel" && r.Method == "POST" {
 			action = "run_cancel"
 		}
@@ -481,6 +493,10 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for k, v := range body {
+			if k == "step_id" && action == "run_advance" {
+				args[k] = v
+				continue
+			}
 			if k == "run_id" && action == "task_create" {
 				args[k] = v
 				continue
@@ -519,6 +535,7 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 func assignmentSchema() map[string]any {
 	return object([]string{"name", "owner_agent_id"}, map[string]any{
+		"control_mode":       controlModeSchema(),
 		"parallel_execution": map[string]any{"type": "string", "enum": []string{"sequential", "auto"}, "description": "Default sequential. auto requires per_executor continuity: let the persistent worker choose parallel delegation through Core subthreads among assigned ready steps. Frozen per run."}, "max_parallel_steps": map[string]any{"type": "integer", "minimum": 1, "maximum": 8, "description": "For parallel_execution auto, maximum unfinished claimed steps per executor; default 4. The model chooses concurrency within this bound."}, "worker_continuity": map[string]any{"type": "string", "enum": []string{"auto", "per_executor", "isolated"}, "description": "auto (default): reuse strict sequential runs; per_executor: reuse one worker thread per run and agent, preserving ownership across branches, joins and timers; sequential unless parallel_execution=auto; isolated: separate worker per step. Frozen for each run."}, "name": textField("Assignment name, for example Photography Patreon"), "target": textField("Page, client, business or other target; never credentials"), "owner_agent_id": map[string]any{"type": "integer", "minimum": 1}, "schedule": object([]string{"kind"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"interval", "cron"}}, "every": textField("Duration, e.g. 24h; minimum 1m"), "cron": textField("Five-field cron expression"), "timezone": textField("IANA timezone; default UTC")}), "procedure_version": map[string]any{"type": "integer", "minimum": 1}, "roles": map[string]any{"type": "object", "additionalProperties": executorSchema()}, "follow_latest": map[string]any{"type": "boolean", "description": "Adopt future procedure revisions; otherwise pin procedure_version"}, "parameters": map[string]any{"type": "object", "description": "Values for the procedure's declared parameters; use authorized connection references, not credentials"}})
 }
 

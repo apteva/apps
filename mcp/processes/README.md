@@ -499,3 +499,43 @@ not the number of Core subthreads; thread structure remains the worker's choice.
 Tier 3 scenario `scenarios/12-ai-parallel-steps.yaml` uses GPT-6.1 Sol and a local
 fixture to verify actual operation overlap, exact separate receipts, retained
 owner-only session checkpoints, real operator HTTP approval and publication.
+
+### Step-by-step runs
+
+Use **Run step by step** on an active assignment, or choose **Step by step** in
+its run dialog. This prepares the frozen structured run without sending ready
+work. Run detail shows ready steps and saved outputs; **Run this step** or **Run
+next step** releases one, while **Run selected steps** releases chosen branches
+with separate durable requests. Automatic **Run now** remains the default.
+
+MCP callers pass `control_mode: "step_by_step"` to `processes_start`.
+`processes_run_get` exposes `run.control_mode`, `eligible_steps`, `active_steps`,
+and `waiting_for_advance`. Advance an exact eligible step with:
+
+```json
+{"process_id":"…","run_id":"…","step_id":"…","idempotency_key":"release-1"}
+```
+
+Call `processes_run_advance` from the coordinator's default thread, or use
+`POST /processes/{process_id}/runs/{run_id}/advance` from the operator UI.
+Workers and their children cannot release steps. Reuse the same key after a lost
+reply; a key cannot select a different step. The compact response includes the
+saved release, remaining eligible/active identities, delivery warnings and a
+`processes_run_get` reread reference. Release authorization is committed before
+network dispatch, and existing delivery envelopes retain their exact identities.
+
+Ready status alone grants no execution authority in this mode. Unreleased steps
+cannot be claimed or updated, and reconciliation/restart does not dispatch them.
+Dependencies, timing, worker ownership and capacity still apply to released work.
+Human steps must first be released, then separately completed by the project
+operator with evidence; advancing an approval step does not approve it. Finishing
+one step makes successors eligible and leaves them held for the next review.
+The mode is frozen in the run binding; later assignment edits cannot change it.
+Optional assignment `control_mode` sets the default for future starts, while a
+start argument overrides it for that occurrence. Direct runs have no individual
+step records and therefore cannot use step-by-step control.
+
+Tier 3 scenario `scenarios/13-step-by-step.yaml` uses GPT-6.1 Sol, real MCP
+advancement, HTTP branch releases and operator approval. Its independent verifier
+checks stored authorizations, held-state observations, exact receipts, actual
+parallel overlap, validation dependencies and publication gating.

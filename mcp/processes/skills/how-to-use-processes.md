@@ -121,3 +121,24 @@ before waiting. Recover by reading saved checkpoints and inspecting existing Cor
 children before retrying; do not replace outstanding work. Keep the owner alive
 until all its steps and delegated work settle, respecting the final validation and
 human approval gates. Existing assignments remain sequential unless opted in.
+
+## Step-by-step review
+
+When the user wants to test or review one step at a time, start an active
+structured assignment with `control_mode="step_by_step"`. The run is prepared
+without dispatching ready work. Read `run_get`: `run.eligible_steps` contains exact
+step IDs, `active_steps` contains released unfinished work, and
+`waiting_for_advance` reports an idle run awaiting a release. Review saved outputs
+and call `run_advance(process_id, run_id, step_id, idempotency_key)` from the
+coordinator's default thread only. Reuse that key on retries; use separate calls
+and keys for independent branches the user wants to release. The operator can
+also release steps in the Processes UI.
+
+Workers cannot call `run_advance`. A ready step without `released_at` is held:
+do not act on it, claim it, or update it. Continue only released assigned work,
+then retain the worker and await the next release event. Completion makes
+successors eligible but does not dispatch them. Human approval still requires
+separate operator completion evidence after release. Advancing never approves
+or completes a step. Dependencies, timing, ownership and capacity remain enforced.
+The control mode and procedure are frozen for each run, including after restart.
+`automatic` remains the normal default.

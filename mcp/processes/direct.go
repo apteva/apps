@@ -140,6 +140,7 @@ func (a *App) directRunResponse(project, actor, process, id, action string, args
 		if e != nil {
 			return nil, e
 		}
+		setRunControl(&r, steps)
 		if mcp {
 			return mcpRunRead(process, r, d, steps), nil
 		}
