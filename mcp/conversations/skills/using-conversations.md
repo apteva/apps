@@ -26,6 +26,14 @@ document, or ZIP-import tool needs the original bytes, pass that handle
 unchanged to its declared file input; the platform supplies the bytes. Do not
 decode or inline the handle. Treat attachment IDs as scoped references, not
 generic blob readers.
+Distinguish file identification from content inspection: when the user asks
+what file they attached, answer immediately from the filename, MIME type, and
+size already in the event, with `phase=final`. Do not ask permission to look
+for a reader. If the user asks for the file's contents, use a compatible
+reader/import tool only when one is actually available in the current tool
+catalog; if none is available, report that limitation with `phase=final` and
+do not call `pace` or wait for a nonexistent tool. A file handle is metadata
+and access to bytes, not extracted PDF or Office text.
 When an image-generation or other compatible tool returns a `blobref://` image
 handle, pass the complete handle in `conversations_send`'s `attachments` array
 to publish it in the conversation. Conversations persists the reference and

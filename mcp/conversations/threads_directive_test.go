@@ -15,6 +15,9 @@ func TestConversationThreadDirectiveAcknowledgesEveryToolBackedRequest(t *testin
 		"normally leave about a minute between updates",
 		"If completion is near, finish and send the final outcome instead",
 		"The only exception is a response you can give without a tool, or a simple image question",
+		"Distinguish file identification from content inspection",
+		"Do not ask permission to look for a reader",
+		"do not call pace or wait for a nonexistent tool",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("conversation directive missing %q: %s", want, text)

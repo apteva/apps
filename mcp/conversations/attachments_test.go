@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 )
 
@@ -280,6 +281,28 @@ func TestMixedAttachmentEventPreservesVisionAndFileAccess(t *testing.T) {
 	}
 	if strings.Contains(text.String(), "attachment_id=photo") {
 		t.Fatal("image routed to file reader")
+	}
+}
+
+func TestFileAttachmentGuidanceDoesNotWaitForMissingReader(t *testing.T) {
+	a, _, _ := newTestEnv(t)
+	conv := mkConversation(t, a, 41)
+	msg := &Message{Content: "What is this file?", Attachments: []Attachment{{
+		ID: "pdf-attachment", Type: "file", Name: "statement.pdf", MimeType: "application/pdf", Size: 1234,
+	}}}
+	parts := a.agentEventPayloadWithFileRefs(conv, msg, 41, []int64{41}, map[string]sdk.FileHandle{
+		"pdf-attachment": {File: true, Ref: "blobref://pdf-attachment", Filename: "statement.pdf", MIMEType: "application/pdf", Size: 1234},
+	})
+	raw, _ := json.Marshal(parts)
+	text := string(raw)
+	for _, want := range []string{
+		"For file identification, answer from this metadata immediately",
+		"only when one is available",
+		"rather than asking permission or waiting",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("file guidance missing %q: %s", want, text)
+		}
 	}
 }
 
