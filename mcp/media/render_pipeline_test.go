@@ -22,6 +22,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -383,6 +385,49 @@ func TestSidecar_RenderPipeline_ExtractFrame(t *testing.T) {
 	// PNG signature: 89 50 4E 47
 	if len(bytes) < 8 || bytes[0] != 0x89 || bytes[1] != 'P' || bytes[2] != 'N' || bytes[3] != 'G' {
 		t.Errorf("output bytes lack PNG signature: %x", bytes[:min(8, len(bytes))])
+	}
+}
+
+func TestSidecar_RenderPipeline_PNGOutputNames(t *testing.T) {
+	skipIfNoFFmpeg(t)
+	sc := spawnMediaWithStorage(t)
+	var source bytes.Buffer
+	if err := png.Encode(&source, image.NewRGBA(image.Rect(0, 0, 64, 64))); err != nil {
+		t.Fatal(err)
+	}
+	srcID := uploadFixtureToStorage(t, sc, "test-proj", "source.png", "image/png", "/tests/", source.Bytes())
+	for _, name := range []string{"portrait", "valid-portrait.png"} {
+		subm := sc.MCP("media_crop", map[string]any{
+			"_project_id": "test-proj", "file_id": strconv.FormatInt(srcID, 10),
+			"x": 0, "y": 0, "width": 32, "height": 32, "output_name": name,
+		})
+		final := pollUntilOk(t, sc, "test-proj", int64(subm["render_id"].(float64)), 25*time.Second)
+		if final["status"] != "ok" {
+			t.Fatalf("crop failed: %v", final)
+		}
+		want := name
+		if !strings.HasSuffix(want, ".png") {
+			want += ".png"
+		}
+		if final["output_name"] != want {
+			t.Fatalf("job output name=%v want=%s", final["output_name"], want)
+		}
+		id, _ := strconv.ParseInt(final["output_file_id"].(string), 10, 64)
+		img, err := png.Decode(bytes.NewReader(downloadFromStorage(t, sc, "test-proj", id)))
+		if err != nil || img.Bounds().Dx() != 32 || img.Bounds().Dy() != 32 {
+			t.Fatalf("invalid crop err=%v", err)
+		}
+	}
+	files := listStorageFolder(t, sc, "test-proj", "/renders/")
+	for _, f := range files {
+		if !strings.HasSuffix(f["name"].(string), ".png") || f["content_type"] != "image/png" {
+			t.Fatalf("file metadata=%v", f)
+		}
+	}
+	// HTTP errors are structured and create no pending work.
+	res := sc.POST("/renders?project_id=test-proj", map[string]any{"operation": "crop", "file_id": strconv.FormatInt(srcID, 10), "output_name": "portrait.xyz", "params": map[string]any{"width": 32, "height": 32}}, nil)
+	if res.Status != 400 || !bytes.Contains(res.Body, []byte(`"error_code":"invalid_output_format"`)) {
+		t.Fatalf("HTTP %d %s", res.Status, res.Body)
 	}
 }
 

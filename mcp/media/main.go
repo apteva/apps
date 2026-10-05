@@ -666,7 +666,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"file_id":         map[string]any{"type": "string"},
 				"start_ms":        map[string]any{"type": "integer"},
 				"end_ms":          map[string]any{"type": "integer"},
-				"output_name":     map[string]any{"type": "string"},
+				"output_name":     map[string]any{"type": "string", "description": "Optional output filename. Extensionless names receive the operation/source extension; unsupported or conflicting formats are rejected before queuing."},
 				"output_folder":   map[string]any{"type": "string"},
 				"encoder_profile": encoderProfileSchema(),
 			}, []string{"file_id", "start_ms", "end_ms"}),
@@ -680,7 +680,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"width":           map[string]any{"type": "integer"},
 				"height":          map[string]any{"type": "integer"},
 				"keep_aspect":     map[string]any{"type": "boolean"},
-				"output_name":     map[string]any{"type": "string"},
+				"output_name":     map[string]any{"type": "string", "description": "Optional output filename. Extensionless names receive the operation/source extension; unsupported or conflicting formats are rejected before queuing."},
 				"output_folder":   map[string]any{"type": "string"},
 				"encoder_profile": encoderProfileSchema(),
 			}, []string{"file_id", "width"}),
@@ -695,7 +695,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"video_codec":     map[string]any{"type": "string"},
 				"audio_codec":     map[string]any{"type": "string"},
 				"bitrate":         map[string]any{"type": "string"},
-				"output_name":     map[string]any{"type": "string"},
+				"output_name":     map[string]any{"type": "string", "description": "Optional output filename. Extensionless names receive the operation/source extension; unsupported or conflicting formats are rejected before queuing."},
 				"output_folder":   map[string]any{"type": "string"},
 				"encoder_profile": encoderProfileSchema(),
 			}, []string{"file_id", "format"}),
@@ -706,7 +706,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Join multiple sources end-to-end (must share container/codec). Args: file_ids (array of strings, 2+), output_name (string, required).",
 			InputSchema: schemaObject(map[string]any{
 				"file_ids":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-				"output_name":     map[string]any{"type": "string"},
+				"output_name":     map[string]any{"type": "string", "description": "Optional output filename. Extensionless names receive the operation/source extension; unsupported or conflicting formats are rejected before queuing."},
 				"output_folder":   map[string]any{"type": "string"},
 				"encoder_profile": encoderProfileSchema(),
 			}, []string{"file_ids", "output_name"}),
@@ -725,7 +725,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"output_width":    map[string]any{"type": "integer", "description": "Optional scale width after target_ratio crop. Omit to preserve the computed crop dimensions."},
 				"crop_mode":       map[string]any{"type": "string", "description": "'smart' (default) for subject-aware crop via the source's cached thumbnail/keyframe saliency, or 'center' for geometric center. Smart falls back to center when derivations are unavailable."},
 				"fit_mode":        map[string]any{"type": "string", "description": "'crop' (default) fills the target canvas and may remove source edges; 'contain' preserves the complete frame and pads unused canvas area."},
-				"output_name":     map[string]any{"type": "string"},
+				"output_name":     map[string]any{"type": "string", "description": "Optional output filename. Extensionless names receive the operation/source extension; unsupported or conflicting formats are rejected before queuing."},
 				"output_folder":   map[string]any{"type": "string"},
 				"encoder_profile": encoderProfileSchema(),
 			}, []string{"file_id"}),
@@ -742,7 +742,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"output_width":    map[string]any{"type": "integer", "description": "Output width when target_ratio is set. Default 1080; height derives from ratio."},
 				"crop_mode":       map[string]any{"type": "string", "description": "\"smart\" (default) for subject-aware crop via the nearest cached keyframe for timed operations, or \"center\" for geometric center. Smart falls back to thumbnail/center when keyframes are not ready."},
 				"fit_mode":        map[string]any{"type": "string", "description": "'crop' (default) fills the target canvas; 'contain' preserves the complete frame with black padding."},
-				"output_name":     map[string]any{"type": "string"},
+				"output_name":     map[string]any{"type": "string", "description": "Optional PNG filename. Extensionless names receive .png; other extensions are rejected. Use .png for every portrait frame."},
 				"output_folder":   map[string]any{"type": "string"},
 				"encoder_profile": encoderProfileSchema(),
 			}, []string{"file_id", "at_ms"}),
@@ -754,7 +754,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{
 				"file_id":         map[string]any{"type": "string"},
 				"format":          map[string]any{"type": "string"},
-				"output_name":     map[string]any{"type": "string"},
+				"output_name":     map[string]any{"type": "string", "description": "Optional output filename. Extensionless names receive the operation/source extension; unsupported or conflicting formats are rejected before queuing."},
 				"output_folder":   map[string]any{"type": "string"},
 				"encoder_profile": encoderProfileSchema(),
 			}, []string{"file_id", "format"}),
@@ -768,7 +768,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"mode":            map[string]any{"type": "string", "description": "'normalize' (default), 'speech_clean', 'volume', or 'mute'."},
 				"target_lufs":     map[string]any{"type": "number", "description": "Target integrated loudness for normalize/speech_clean. Default -16."},
 				"gain_db":         map[string]any{"type": "number", "description": "Gain in dB for mode='volume', e.g. 3 or -2."},
-				"output_name":     map[string]any{"type": "string"},
+				"output_name":     map[string]any{"type": "string", "description": "Optional output filename. Extensionless names receive the operation/source extension; unsupported or conflicting formats are rejected before queuing."},
 				"output_folder":   map[string]any{"type": "string"},
 				"encoder_profile": encoderProfileSchema(),
 			}, []string{"file_id"}),
@@ -785,7 +785,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"output_width":  map[string]any{"type": "integer", "description": "Output width in pixels. Default 1080. Height auto-derives from target_ratio (rounded to even for codec compatibility)."},
 				"crop_mode":     map[string]any{"type": "string", "description": "\"smart\" (default) keeps the most interesting subject in frame using the nearest cached keyframe for the reel/frame; \"center\" uses a geometric center crop. Smart falls back to thumbnail/center when keyframes are not ready."},
 				"fit_mode":      map[string]any{"type": "string", "description": "'crop' (default) fills the canvas with a tracked crop; 'contain' preserves the complete frame and pads unused canvas area."},
-				"output_name":   map[string]any{"type": "string", "description": "Optional output filename. Extension auto-corrected to .mp4."},
+				"output_name":   map[string]any{"type": "string", "description": "Optional output filename. Extensionless names receive .mp4; conflicting extensions are rejected."},
 				"output_folder": map[string]any{"type": "string", "description": "Optional storage folder for the rendered output. Defaults to install's render_output_folder (typically /renders/)."},
 			}, []string{"file_id", "start_ms", "end_ms"}),
 			Handler: a.toolSubmitRender("extract_reel", []string{"start_ms", "end_ms", "target_ratio", "output_width", "crop_mode", "fit_mode"}, []string{"file_id"}),
@@ -2346,16 +2346,13 @@ func (a *App) toolSubmitRender(operation string, paramKeys, sourceKeys []string)
 		}
 		requestedBy, _ := args["_requested_by"].(string)
 
-		// Pre-validate by building the plan now. Fast-fail bad params
-		// at submit time rather than letting the worker pick up a
-		// guaranteed-failed render. sourceExt is left "" here: the
-		// source may not be probed yet at submit time, and validation
-		// only cares about params, not the output extension (which the
-		// executor re-resolves from the indexed row).
+		// Validate parameters and resolve the effective filename before queuing.
 		paramJSON, _ := json.Marshal(params)
-		if _, err := buildPlan(operation, sources, paramJSON, outputName, ""); err != nil {
+		plan, err := prepareRenderSubmission(ctx, pid, operation, sources, paramJSON, outputName)
+		if err != nil {
 			return nil, err
 		}
+		outputName = plan.Filename
 
 		id, err := insertRender(ctx.AppDB(), pid, operation, sources, params, outputName, outputFolder, requestedBy)
 		if err != nil {
@@ -2363,9 +2360,11 @@ func (a *App) toolSubmitRender(operation string, paramKeys, sourceKeys []string)
 		}
 		emitRenderQueued(ctx, id, pid, operation, sources, requestedBy)
 		return map[string]any{
-			"render_id": id,
-			"status":    "pending",
-			"operation": operation,
+			"render_id":    id,
+			"status":       "pending",
+			"operation":    operation,
+			"output_name":  plan.Filename,
+			"content_type": plan.ContentType,
 		}, nil
 	}
 }
@@ -2742,11 +2741,12 @@ func (a *App) handleRendersCollection(w http.ResponseWriter, r *http.Request) {
 			body.Params = map[string]any{}
 		}
 		paramJSON, _ := json.Marshal(body.Params)
-		// sourceExt "" — validation-only; executor re-resolves it.
-		if _, err := buildPlan(body.Operation, sources, paramJSON, body.OutputName, ""); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		plan, err := prepareRenderSubmission(globalCtx, pid, body.Operation, sources, paramJSON, body.OutputName)
+		if err != nil {
+			writeRenderValidationError(w, err)
 			return
 		}
+		body.OutputName = plan.Filename
 		id, err := insertRender(globalCtx.AppDB(), pid, body.Operation, sources, body.Params, body.OutputName, body.OutputFolder, body.RequestedBy)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -2754,7 +2754,7 @@ func (a *App) handleRendersCollection(w http.ResponseWriter, r *http.Request) {
 		}
 		emitRenderQueued(globalCtx, id, pid, body.Operation, sources, body.RequestedBy)
 		w.WriteHeader(http.StatusAccepted)
-		writeJSON(w, map[string]any{"render_id": id, "status": "pending"})
+		writeJSON(w, map[string]any{"render_id": id, "status": "pending", "output_name": plan.Filename, "content_type": plan.ContentType})
 	default:
 		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
 	}

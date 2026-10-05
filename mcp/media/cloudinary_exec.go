@@ -102,6 +102,10 @@ func (e *cloudinaryExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *
 	if err != nil {
 		return 0, fmt.Errorf("plan: %w", err)
 	}
+	if err := storeRenderOutputPlan(app, row, plan); err != nil {
+		return 0, fmt.Errorf("store output plan: %w", err)
+	}
+
 	// Build the eager transformation chain.
 	chain, err := buildCloudinaryChain(row.Operation, row.Params, plan.Filename)
 	if err != nil {

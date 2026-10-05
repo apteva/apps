@@ -23,6 +23,9 @@ func buildPlan(op string, sources []string, params json.RawMessage, name, source
 	if err != nil {
 		return nil, err
 	}
+	if err := validateRenderPlanOutput(op, plan); err != nil {
+		return nil, err
+	}
 	var opts struct {
 		EncoderProfile string `json:"encoder_profile"`
 	}

@@ -187,6 +187,16 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 	log := app.Logger()
 	db := app.AppDB()
 	cfg := app.Config()
+	model := defaultDescribeModel(bound.AppSlug, strings.TrimSpace(cfg.Get("describe_model")))
+	tool := bound.ToolFor("chat.complete")
+	active, err := descriptionBackoffActive(db, bound.ConnectionID, tool, model, time.Now())
+	if err != nil {
+		log.Warn("describer retry state unavailable", "err", err)
+		return
+	}
+	if active {
+		return
+	}
 
 	media, err := getMedia(db, projectID, fileID)
 	if err != nil {
@@ -254,8 +264,6 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 		return
 	}
 
-	model := strings.TrimSpace(cfg.Get("describe_model"))
-	model = defaultDescribeModel(bound.AppSlug, model)
 	// 8000 default since v0.13.0+ — the JSON-output prompt + up to 4
 	// keyframe images + (potentially) a long transcript eats the
 	// reasoning budget on Kimi K2.6 / DeepSeek V4. 4000 was the right
@@ -283,6 +291,22 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 		args,
 		timeout,
 	)
+	if info, upstream, limited := descriptionRateLimitInfo(res, err, time.Now()); limited {
+		info, backoffErr := recordDescriptionBackoff(db, bound.ConnectionID, tool, model, info, upstream, time.Now(), parseConfigIntFallback(cfg.Get("describe_retry_cooldown_seconds"), 600))
+		if backoffErr != nil {
+			log.Warn("store description backoff", "err", backoffErr)
+		}
+		metadata, _ := json.Marshal(info)
+		body := ""
+		if res != nil {
+			body = truncate(string(res.Data), 500)
+		}
+		if err != nil {
+			body = truncate(err.Error(), 500)
+		}
+		_ = markDescribeAttempt(db, projectID, fileID, "describe rate_limited: "+body+"; retry="+string(metadata))
+		return
+	}
 	if err != nil {
 		_ = markDescribeAttempt(db, projectID, fileID, "describe call: "+err.Error())
 		return
@@ -294,6 +318,10 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 		}
 		_ = markDescribeAttempt(db, projectID, fileID, "describe non-2xx: "+truncate(body, 500))
 		return
+	}
+
+	if _, err := db.Exec(`DELETE FROM description_backoff WHERE connection_id=? AND tool=? AND model=?`, bound.ConnectionID, tool, model); err != nil {
+		log.Warn("clear description backoff", "err", err)
 	}
 
 	rawContent, err := extractChatContent(res.Data)

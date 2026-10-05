@@ -45,6 +45,11 @@ func buildPlanBase(op string, sources []string, params json.RawMessage, outputNa
 	if err := validateOutputName(outputName); err != nil {
 		return nil, err
 	}
+	var err error
+	outputName, err = normalizeRenderOutputName(op, params, outputName, sourceExt)
+	if err != nil {
+		return nil, err
+	}
 	switch op {
 	case "trim":
 		return planTrim(sources, params, outputName)
@@ -808,12 +813,15 @@ func ffmpegFloat(v float64) string {
 // outputName from the caller, otherwise <op>-<sourceFileID><ext>
 // where ext is forceExt if set, else the source's ext if known.
 func defaultOutputName(explicit, sourceFileID, op, forceExt string) (string, string) {
-	if explicit != "" {
-		return explicit, contentTypeForName(explicit)
-	}
 	ext := forceExt
 	if ext == "" {
 		ext = ".mp4" // safe default for video; transcode/audio_extract override via forceExt
+	}
+	if explicit != "" {
+		if path.Ext(explicit) == "" {
+			explicit += ext
+		}
+		return explicit, contentTypeForName(explicit)
 	}
 	return fmt.Sprintf("%s-%s%s", op, sourceFileID, ext), contentTypeForName("x" + ext)
 }

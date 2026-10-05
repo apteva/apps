@@ -118,6 +118,7 @@ func emitRenderFailed(app *sdk.AppCtx, id int64, projectID, operation, errMsg st
 		"project_id": projectID,
 		"operation":  operation,
 		"error":      errMsg,
+		"error_code": renderFailureCode(errMsg),
 		"status":     "failed",
 	})
 }

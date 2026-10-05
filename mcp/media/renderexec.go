@@ -194,6 +194,10 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 		return 0, fmt.Errorf("build plan: %w", err)
 	}
 
+	if err := storeRenderOutputPlan(app, row, plan); err != nil {
+		return 0, fmt.Errorf("store output plan: %w", err)
+	}
+
 	// Bake source rotation into the output frame. The indexer stored
 	// display-space Width/Height + a rotation column; the renderer
 	// passes -noautorotate and prepends transpose=… so ffmpeg's

@@ -39,6 +39,7 @@ type RenderRow struct {
 	// render_output_folder config when empty.
 	OutputFolder string `json:"output_folder,omitempty"`
 	Error        string `json:"error,omitempty"`
+	ErrorCode    string `json:"error_code,omitempty"`
 	RequestedBy  string `json:"requested_by,omitempty"`
 	CreatedAt    string `json:"created_at"`
 	StartedAt    string `json:"started_at,omitempty"`
@@ -411,6 +412,7 @@ func scanRender(row *sql.Row) (*RenderRow, error) {
 	if err := json.Unmarshal([]byte(srcRaw), &r.SourceFileIDs); err != nil {
 		return nil, fmt.Errorf("decode source_file_ids: %w", err)
 	}
+	r.ErrorCode = renderFailureCode(r.Error)
 	r.Params = json.RawMessage(paramsRaw)
 	r.Metrics = json.RawMessage(metricsRaw)
 	if resolvedParamsRaw != "" {
@@ -434,6 +436,7 @@ func scanRenderFromRows(rows *sql.Rows) (*RenderRow, error) {
 	if err := json.Unmarshal([]byte(srcRaw), &r.SourceFileIDs); err != nil {
 		return nil, fmt.Errorf("decode source_file_ids: %w", err)
 	}
+	r.ErrorCode = renderFailureCode(r.Error)
 	r.Params = json.RawMessage(paramsRaw)
 	r.Metrics = json.RawMessage(metricsRaw)
 	if resolvedParamsRaw != "" {

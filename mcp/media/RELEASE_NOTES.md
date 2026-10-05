@@ -1,3 +1,11 @@
+## Unreleased — output format validation and description retries
+
+- Normalize output filenames before queuing through both MCP and HTTP. Extensionless names receive the operation/source extension; PNG crops receive `.png`. Preserve supported explicit names and reject unsupported extensions and format conflicts with `invalid_output_format`.
+- Keep the queued/effective filename, image/video encoder flags, content type and Storage upload consistent across local FFmpeg, remote FFmpeg and Cloudinary. Submission responses expose the effective name and content type; execution persists effective names for older queued jobs.
+- Separate normal remote source-cache hit/miss diagnostics into metrics so FFmpeg failures remain the primary error. Render rows and failure events expose an additive `error_code` for output-format failures.
+- Persist description rate-limit backoff by connection, tool and model. Retain forwarded Retry-After/reset headers and upstream reset metadata, defer later files in the batch, double the fallback cooldown up to one hour, honor longer upstream windows, and clear the backoff after success. Changing models does not inherit the previous model's cooldown.
+- Migration `023_description_backoff.sql` adds only a provider retry-state table. Existing media, renders, descriptions and configuration are preserved. No immediate provider retries or worker sleeps are added.
+
 ## 0.14.8 — stationary Smart Crop subject preservation
 
 - Prevent stationary tracking runs from replacing the subject with a disconnected static background feature. Reuse the existing subject-containment policy while preserving motion-continuity corrections.

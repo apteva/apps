@@ -154,6 +154,10 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 		return 0, fmt.Errorf("build plan: %w", err)
 	}
 
+	if err := storeRenderOutputPlan(app, row, plan); err != nil {
+		return 0, fmt.Errorf("store output plan: %w", err)
+	}
+
 	// Same rotation pre-pass as the local executor — see renderexec.go's
 	// applyRotation call site for the rationale. Both executors emit
 	// identical argv shape, so the helper works against either.
@@ -219,6 +223,9 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 	}
 
 	out, exit, runErr := runRemote(ctx, app, e.hostID, "setsid bash -c "+shellQuote(script), timeoutS)
+	primaryOutput, hits, misses := splitRemoteRenderDiagnostics(out)
+	recordRenderMetric(app, row, "source_cache_hits", hits)
+	recordRenderMetric(app, row, "source_cache_misses", misses)
 	if runErr != nil {
 		if ctx.Err() != nil {
 			return 0, ctx.Err()
@@ -227,8 +234,8 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 		// preserve the captured script stdout so the operator sees
 		// the actual cause (ffmpeg error, curl HTTP code, etc.)
 		// rather than just "Process exited with status N".
-		if out != "" {
-			return 0, fmt.Errorf("remote render: %w (output: %s)", runErr, truncate(out, 1000))
+		if primaryOutput != "" {
+			return 0, fmt.Errorf("remote render: %w (output: %s)", runErr, truncate(primaryOutput, 1500))
 		}
 		return 0, fmt.Errorf("remote render: %w", runErr)
 	}
@@ -236,15 +243,14 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 		if ctx.Err() != nil {
 			return 0, ctx.Err()
 		}
-		return 0, fmt.Errorf("remote render exit=%d: %s", exit, truncate(out, 1500))
+		return 0, fmt.Errorf("remote render exit=%d: %s", exit, truncate(primaryOutput, 1500))
 	}
 
 	res, err := parseAptevaResult(out)
 	if err != nil {
-		return 0, fmt.Errorf("parse remote result: %w (output=%s)", err, truncate(out, 500))
+		return 0, fmt.Errorf("parse remote result: %w (output=%s)", err, truncate(primaryOutput, 500))
 	}
 	recordRenderMetric(app, row, "output_bytes", res.Size)
-	recordRenderMetric(app, row, "source_cache_hits", strings.Count(out, "REMOTE_SOURCE_CACHE_HIT "))
 	uploaded, err := sc.GetFile(ctx, row.ProjectID, res.FileID)
 	if err != nil {
 		return 0, fmt.Errorf("verify remote render destination: %w", err)

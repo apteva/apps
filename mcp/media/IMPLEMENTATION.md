@@ -101,3 +101,38 @@ See `testdata/browser/README.md` for browser/vendor runtime overrides. Validatio
 ## Release validation: 0.14.4
 
 With SDK v0.74.1 and minimum Go 1.26.6, the combined unit/integration suite passed 638 cases (including subtests), with zero failures in 57.397 seconds. The same 22 conditional cases were skipped as described above. All four shipped UI bundles and the browser video/quality/default flow passed. Full race detection, vet, Linux amd64/arm64 source builds, and govulncheck passed; the scan reports zero reachable vulnerabilities and eight advisories in required modules without identified affected calls.
+
+## Render output naming and format contract
+
+MCP and HTTP submission share `prepareRenderSubmission`. The normalized
+filename is saved before the job enters the queue and returned with its content
+type. Shape-preserving operations consult indexed or Storage source metadata
+when an extension must be inferred. If that metadata is unavailable, callers
+must provide an explicit supported extension. No source bytes are downloaded
+for this check.
+
+`extract_frame` produces PNG and `extract_reel` produces MP4. For transcode and
+audio extraction, `format` and the filename extension must agree. Crop/resize
+continue to allow explicit image conversion, such as PNG to JPEG/WebP. HEIC/HEIF
+can be source formats but are not supported FFmpeg output containers; select an
+explicit supported image output such as `.png`.
+
+The shared planner rejects unsupported/conflicting names before any executor
+runs. Local FFmpeg, remote FFmpeg and Cloudinary use its filename and content
+type. Executors also save the effective name and `metrics.output_content_type`
+for jobs queued by older versions. Existing failed jobs are not automatically
+resubmitted.
+
+HTTP validation failures return HTTP 400 with `error` and `error_code`. MCP
+validation errors include the stable `invalid_output_format` code in their
+message. Stored renders and failure events expose `error_code` without changing
+the existing `error` field. Normal remote cache hits/misses are counted in
+metrics, including failed runs; cache integrity/download failures remain visible.
+
+Description 429s use a durable retry-state table scoped by connection, tool and
+model. Subsequent sweeps/notifications skip that scope until the later of a
+bounded exponential fallback or the supplied retry/reset window. Only retry and
+reset metadata is retained from headers. Successful provider responses reset
+consecutive rate-limit backoff. The worker does not sleep or issue immediate
+extra requests, and other models/connections remain available. Metadata already
+discarded upstream cannot be reconstructed by Media.
