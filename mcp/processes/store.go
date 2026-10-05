@@ -170,6 +170,17 @@ func (d Definition) procedureOnly() Definition {
 	return d
 }
 func validateExecution(c AssignmentConfig) error {
+	switch c.ParallelExecution {
+	case "", "sequential", "auto":
+	default:
+		return errors.New("parallel_execution must be sequential or auto")
+	}
+	if c.ParallelExecution == "auto" && c.WorkerContinuity != "per_executor" {
+		return errors.New("parallel_execution auto requires worker_continuity per_executor")
+	}
+	if c.MaxParallelSteps < 0 || c.MaxParallelSteps > 8 || (c.MaxParallelSteps > 0 && c.ParallelExecution != "auto") {
+		return errors.New("max_parallel_steps requires parallel_execution auto and must be between 1 and 8 (omitted defaults to 4)")
+	}
 	switch c.WorkerContinuity {
 	case "", "auto", "per_executor", "isolated":
 	default:

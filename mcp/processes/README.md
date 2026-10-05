@@ -469,3 +469,33 @@ tools with exact recovery arguments. Step recovery includes shared context.
 These projections apply at the MCP boundary. HTTP/UI objects, stored definitions
 and receipt evidence retain their existing behavior; no model summaries or
 arbitrary truncation are used.
+
+### AI-directed parallel steps
+
+Assignments can opt in with `worker_continuity: "per_executor"` and
+`parallel_execution: "auto"`. The persistent worker receives Core's normal
+subthread capabilities and decides which independent ready steps benefit from
+parallel work. Processes does not choose a fixed thread arrangement. Existing
+assignments retain sequential execution for each persistent executor.
+
+`max_parallel_steps` bounds unfinished claimed steps per executor (default 4,
+range 1–8). Eligible steps are delivered to the same owner; delivery is not a
+claim. Each claim checks dependencies, scheduled starts, exact owner and capacity
+under the app's mutation lock. Running, waiting and blocked claims consume slots.
+Step reads and acknowledgements include compact `ready_steps` and `active_steps`
+identities, states and revisions without repeated instructions or output receipts.
+Use step_get/step_claim with the returned IDs for exact context recovery.
+
+The worker claims before performing or delegating work, keeps shared setup, and
+passes children only the relevant frozen instructions, exact dependency evidence
+and transferable references. Thread-bound sessions and shared mutable resources
+stay sequential. Children report results through Core; only the durable owner can
+save each step's separate output. Progress output can checkpoint child/operation
+identities. On recovery the owner inspects those children and saved evidence before
+retrying, preserving pending work. Validation, human approval and final completion
+remain authoritative Processes gates. The limit bounds claimed process steps,
+not the number of Core subthreads; thread structure remains the worker's choice.
+
+Tier 3 scenario `scenarios/12-ai-parallel-steps.yaml` uses GPT-6.1 Sol and a local
+fixture to verify actual operation overlap, exact separate receipts, retained
+owner-only session checkpoints, real operator HTTP approval and publication.

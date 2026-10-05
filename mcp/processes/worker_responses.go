@@ -39,7 +39,13 @@ func workerAction(r Run, s StepRun, actor, worker string, all []StepRun) (bool, 
 		done = persistentWorkerDone(r, s.Executor.AgentID, all)
 	}
 	if done {
+		if aiParallel(r) && persistent {
+			return true, "Stop or settle outstanding child work, then call native done once."
+		}
 		return true, "Call the native done tool immediately before writing any text."
+	}
+	if aiParallel(r) && persistent {
+		return false, "Continue your claimed work and assess ready_steps for useful parallel delegation within max_parallel_steps. Await Processes events or child results when no eligible work remains; do not poll."
 	}
 	if s.State == "waiting" || s.State == "blocked" {
 		return false, "Retain this worker and await resolution of the recorded blocker; do not poll or repeat completed actions."

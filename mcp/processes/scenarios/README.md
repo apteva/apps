@@ -358,3 +358,54 @@ operator HTTP approval and publication. Report:
 The release checkout passed the full Go race suite, 86 Bun UI/verifier tests, 19
 Playwright tests, fixture tests, TypeScript checks and manifest validation.
 These live tests verify correctness and payload size, not a latency benchmark.
+
+## AI-directed parallel steps
+
+```sh
+APTEVA_TEST_MODEL=gpt-6.1-sol bun run scenarios/run.ts scenarios/12-ai-parallel-steps.yaml
+```
+
+The model creates one eight-step procedure and an explicit auto-parallel assignment.
+The run owner decides its Core thread arrangement. Two independent 45-second local
+artifact operations have transferable inputs; a separate session stays bound to the
+owner and requires its first saved checkpoint before the second operation. The
+independent verifier requires actual child work and overlapping fixture start/end
+timestamps, exact artifact receipts, one shared preparation, separate step ownership,
+child checkpoints, serial session operations, dependency joins, real operator HTTP
+approval and publication. It accepts either two child workers or useful overlap
+between the owner and one child, rather than prescribing a team.
+
+Negative verifier tests reject simulated overlap, mixed/fabricated receipts,
+missing child checkpoints, stolen step/session ownership, early joins, self-approval,
+missing HTTP confirmation, premature completion, repeated preparation and oversized
+updates. Go race regressions cover concurrent claims against the frozen capacity,
+in-flight checkpoint recovery after sidecar restart, replay of lost completion
+replies, authorization and cancellation. The existing serial continuity scenario
+remains the regression for thread-bound work and avoiding unnecessary delegation.
+
+Recorded on 2026-10-05 with `openai-codex` / `gpt-6.1-sol`: the full parallel
+scenario and independent saved-state/tool-trace verifier passed in 36 iterations,
+347.698 seconds, with 896,167 reported tokens. The owner inspected its Core child
+roster, selected two children for independent artifacts, saved their identities as
+checkpoints, retained separate receipts, kept both session phases local, validated,
+received actual operator HTTP approval and published. Report:
+`/private/tmp/processes-ai-parallel-tier3/run-CmVD9b`.
+
+The existing serial continuity regression also passed with the same model in 26
+iterations, 244.970 seconds, with 536,020 reported tokens: one worker, one prepared
+context, no model-created children, validation and actual HTTP approval. Report:
+`/private/tmp/processes-ai-parallel-tier3/run-5WhmuP`.
+
+The first parallel attempt completed the workflow with 44.53 seconds of real child
+operation overlap, but its verifier attempted to parse a shortened CLI telemetry
+preview as full JSON. The verifier now checks original response byte counts and
+uses full JSON only when present; durable state verifies exact outputs. Tests cover
+shortened previews and premature done markers. The fresh run above passed end to
+end after this correction. These fixture timings are correctness evidence, not a
+Media throughput or overall latency benchmark.
+
+Final verification passed: full Go race suite (100.160 seconds), the fixture's Go
+race test, 108 Bun UI/verifier tests, 19 Playwright tests, UI and scenario TypeScript
+checks, and whitespace validation. Only Processes application sources, its embedded
+usage guidance, documentation and local test fixtures changed; Core, Server and SDK
+sources were unchanged.

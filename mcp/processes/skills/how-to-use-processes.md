@@ -104,3 +104,20 @@ also include a reference to `processes_step_get` with full shared context enable
 A reference has `{tool, args}` naming an existing Processes tool and exact arguments.
 Use it when recovery or verification is needed; do not poll or replace saved receipts
 with memory. HTTP/UI responses and stored procedure definitions are unchanged.
+
+For useful parallel execution across independent steps of one executor, configure
+`worker_continuity="per_executor"`, `parallel_execution="auto"`, and optionally
+`max_parallel_steps` (1–8, default 4). These policies are frozen into the run.
+The persistent worker decides the Core subthread arrangement. Claim every eligible
+step before domain action or delegation; use `ready_steps`/`active_steps` hints to
+find this owner's work, then read/claim exact IDs. Never bypass dependency or time
+gates. The concurrency limit includes running, waiting and blocked claims.
+
+Retain shared setup, keep thread-bound sessions and shared mutable operations
+sequential, and delegate only transferable independent work. Children return exact
+results to the owner and must not claim/update Processes or self-approve. The owner
+checks and saves separate exact receipts and checkpoints child/operation identities
+before waiting. Recover by reading saved checkpoints and inspecting existing Core
+children before retrying; do not replace outstanding work. Keep the owner alive
+until all its steps and delegated work settle, respecting the final validation and
+human approval gates. Existing assignments remain sequential unless opted in.
