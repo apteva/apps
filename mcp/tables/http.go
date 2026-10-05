@@ -180,6 +180,11 @@ func (a *App) handleRowsSearch(w http.ResponseWriter, r *http.Request, tableName
 		return
 	}
 	body["table"] = tableName
+	// Keep pagination, ordering, projection and cursor query parameters
+	// consistent with GET /rows so the UI can switch between an unfiltered
+	// collection and the filtered search endpoint without changing its request
+	// bookkeeping.
+	mergeReadQueryArgs(r, body)
 	out, err := a.toolRowsSearch(requestAppCtx(r), injectProject(r, body))
 	writeToolResult(w, out, err)
 }
@@ -320,6 +325,9 @@ func selectQuery(r *http.Request) any {
 }
 func mergeReadQueryArgs(r *http.Request, args map[string]any) {
 	q := r.URL.Query()
+	if v := q.Get("order_by"); v != "" {
+		args["order_by"] = v
+	}
 	if v := q.Get("cursor"); v != "" {
 		args["cursor"] = v
 	}
