@@ -28,8 +28,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: llm
 display_name: LLM Gateway
-version: 0.5.6
-description: Generic OpenAI-compatible text and image access with provider-cost metering for Apteva-hosted apps and agents.
+version: 0.6.0
+description: Generic OpenAI-compatible text and image access with public model aliases, burst limits, live streaming, and provider-cost and sell-side metering for Apteva-hosted apps, agents, and external API customers.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
@@ -105,6 +105,18 @@ provides:
       description: Close an active provider rate without deleting its history.
     - name: llm_provider_rates_refresh
       description: Refresh rates from provider model metadata and the built-in catalog.
+    - name: llm_aliases_list
+      description: List public model aliases and the backends they resolve to.
+    - name: llm_aliases_upsert
+      description: Create or update a public model alias and its ordered backend targets.
+    - name: llm_aliases_delete
+      description: Deprecate a public model alias while retaining usage history.
+    - name: llm_prices_list
+      description: List sell-side prices charged for public model aliases.
+    - name: llm_prices_upsert
+      description: Set the customer-facing price for a public model alias.
+    - name: llm_prices_delete
+      description: Close the active price for a public model alias.
     - name: llm_policy_get
       description: Return the project or subject policy.
     - name: llm_policy_set
@@ -309,6 +321,10 @@ func ensureGatewaySchema(db *sql.DB) error {
 	}{
 		{"provider_request_id", `TEXT NOT NULL DEFAULT ''`},
 		{"token_id", `INTEGER NOT NULL DEFAULT 0`},
+		{"alias", `TEXT NOT NULL DEFAULT ''`},
+		{"billed_amount_microunits", `INTEGER NOT NULL DEFAULT 0`},
+		{"billed_currency", `TEXT NOT NULL DEFAULT ''`},
+		{"price_version", `INTEGER NOT NULL DEFAULT 0`},
 	} {
 		has, err := txTableHasColumn(tx, "usage_events", col.name)
 		if err != nil {
@@ -506,6 +522,34 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "llm_provider_rates_refresh", Description: "Refresh rates from provider model metadata and the built-in catalog.", InputSchema: schemaObject(map[string]any{
 			"project_id": map[string]any{"type": "string"}, "provider": map[string]any{"type": "string"},
 		}, nil), Handler: a.toolProviderRatesRefresh},
+		{Name: "llm_aliases_list", Description: "List public model aliases and the backends they resolve to.", InputSchema: schemaObject(map[string]any{
+			"project_id": map[string]any{"type": "string"}, "include_inactive": map[string]any{"type": "boolean"},
+		}, nil), Handler: a.toolAliasesList},
+		{Name: "llm_aliases_upsert", Description: "Create or update a public model alias and its ordered backend targets.", InputSchema: schemaObject(map[string]any{
+			"project_id":   map[string]any{"type": "string"},
+			"alias":        map[string]any{"type": "string"},
+			"display_name": map[string]any{"type": "string"},
+			"targets":      map[string]any{"type": "array"},
+			"status":       map[string]any{"type": "string"},
+		}, []string{"alias", "targets"}), Handler: a.toolAliasUpsert},
+		{Name: "llm_aliases_delete", Description: "Deprecate a public model alias while retaining usage history.", InputSchema: schemaObject(map[string]any{
+			"project_id": map[string]any{"type": "string"}, "alias": map[string]any{"type": "string"},
+		}, []string{"alias"}), Handler: a.toolAliasDelete},
+		{Name: "llm_prices_list", Description: "List sell-side prices charged for public model aliases.", InputSchema: schemaObject(map[string]any{
+			"project_id": map[string]any{"type": "string"}, "include_history": map[string]any{"type": "boolean"},
+		}, nil), Handler: a.toolPricesList},
+		{Name: "llm_prices_upsert", Description: "Set the customer-facing price for a public model alias, opening a new price version.", InputSchema: schemaObject(map[string]any{
+			"project_id":                    map[string]any{"type": "string"},
+			"alias":                         map[string]any{"type": "string"},
+			"currency":                      map[string]any{"type": "string"},
+			"input_microunits_per_million":  map[string]any{"type": "integer"},
+			"output_microunits_per_million": map[string]any{"type": "integer"},
+			"request_microunits":            map[string]any{"type": "integer"},
+			"minimum_charge_microunits":     map[string]any{"type": "integer"},
+		}, []string{"alias"}), Handler: a.toolPriceUpsert},
+		{Name: "llm_prices_delete", Description: "Close the active price for a public model alias while retaining history.", InputSchema: schemaObject(map[string]any{
+			"project_id": map[string]any{"type": "string"}, "alias": map[string]any{"type": "string"},
+		}, []string{"alias"}), Handler: a.toolPriceDelete},
 		{Name: "llm_policy_get", Description: "Return a project or subject policy.", InputSchema: schemaObject(map[string]any{
 			"project_id": map[string]any{"type": "string"}, "subject_type": map[string]any{"type": "string"}, "subject_id": map[string]any{"type": "string"},
 		}, nil), Handler: a.toolPolicyGet},
@@ -589,6 +633,11 @@ type Limits struct {
 	MonthlyProviderCostLimitMicrounits int64  `json:"monthly_provider_cost_limit_microunits,omitempty"`
 	ProviderCostCurrency               string `json:"provider_cost_currency,omitempty"`
 	UnpricedModelBehavior              string `json:"unpriced_model_behavior,omitempty"`
+	// Short-window limits. Zero means unlimited, so existing policies keep
+	// their current behaviour until a limit is set explicitly.
+	RequestsPerMinute     int64 `json:"requests_per_minute,omitempty"`
+	TokensPerMinute       int64 `json:"tokens_per_minute,omitempty"`
+	MaxConcurrentRequests int64 `json:"max_concurrent_requests,omitempty"`
 }
 
 type TokenIdentity struct {
@@ -640,6 +689,10 @@ type UsageEvent struct {
 	RequestID              string          `json:"request_id"`
 	ProviderRequestID      string          `json:"provider_request_id"`
 	TokenID                int64           `json:"token_id,omitempty"`
+	Alias                  string          `json:"alias,omitempty"`
+	BilledAmountMicrounits int64           `json:"billed_amount_microunits"`
+	BilledCurrency         string          `json:"billed_currency,omitempty"`
+	PriceVersion           int64           `json:"price_version,omitempty"`
 	CreatedAt              string          `json:"created_at"`
 	Duplicate              bool            `json:"duplicate,omitempty"`
 }
@@ -702,6 +755,9 @@ type chatResult struct {
 	ProviderCostReported   bool
 	UsageDetails           json.RawMessage
 	UsageEvent             *UsageEvent
+	// Streamed marks a result whose body was proxied to the caller live; its
+	// Body holds only reconstructed metering, not a completion payload.
+	Streamed bool
 }
 
 func (a *App) handleV1(w http.ResponseWriter, r *http.Request) {
@@ -715,6 +771,31 @@ func (a *App) handleV1(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", err.Error())
 		return
 	}
+	// Burst limits are applied before any provider work is scheduled, so a
+	// caller in a retry loop is rejected as cheaply as possible.
+	policies, err := dbEffectivePolicies(ctx.AppDB(), ident)
+	if err != nil {
+		writeOpenAIError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+	requestLimit, _, concurrencyLimit := tightestRateLimits(policies)
+	if limitErr := gatewayLimiter.reserveWindow(ident.ID, "requests_per_minute", 1, requestLimit); limitErr != nil {
+		var rle *rateLimitError
+		if errors.As(limitErr, &rle) {
+			emitRateLimitEvent(ctx, ident, "requests_per_minute", rle)
+			writeRateLimitError(w, rle)
+			return
+		}
+	}
+	if limitErr := gatewayLimiter.acquireSlot(ident.ID, concurrencyLimit); limitErr != nil {
+		var rle *rateLimitError
+		if errors.As(limitErr, &rle) {
+			emitRateLimitEvent(ctx, ident, "max_concurrent_requests", rle)
+			writeRateLimitError(w, rle)
+			return
+		}
+	}
+	defer gatewayLimiter.releaseSlot(ident.ID, concurrencyLimit)
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
 		if !tokenHasScope(ident, "models") {
@@ -759,6 +840,27 @@ func (a *App) handleV1Models(ctx *sdk.AppCtx, ident *TokenIdentity, w http.Respo
 	}
 	data := []map[string]any{}
 	seen := map[string]bool{}
+	aliases, err := dbModelAliasList(ctx.AppDB(), ident.ProjectID, false)
+	if err != nil {
+		writeOpenAIError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+	for _, alias := range aliases {
+		if seen[alias.Alias] {
+			continue
+		}
+		if err := policiesAllow(policies, aliasNamespace(alias.Alias), alias.Alias, 0); err != nil {
+			continue
+		}
+		seen[alias.Alias] = true
+		entry := map[string]any{
+			"id": alias.Alias, "object": "model", "owned_by": firstNonEmpty(aliasNamespace(alias.Alias), "gateway"),
+		}
+		if alias.DisplayName != "" {
+			entry["display_name"] = alias.DisplayName
+		}
+		data = append(data, entry)
+	}
 	cached, err := dbProviderModelsList(ctx.AppDB(), providerModelFilter{ProjectID: ident.ProjectID, Status: "active"})
 	if err != nil {
 		writeOpenAIError(w, http.StatusInternalServerError, "server_error", err.Error())
@@ -830,20 +932,33 @@ func (a *App) handleV1Chat(ctx *sdk.AppCtx, ident *TokenIdentity, w http.Respons
 		return
 	}
 	stream := boolArg(body, "stream")
-	if stream {
-		// Providers are called non-streaming so usage is committed atomically
-		// before a compatible SSE response is emitted.
-		body["stream"] = false
-		delete(body, "stream_options")
-	}
+	// The stream flag is re-applied per provider: routes that can carry SSE are
+	// proxied live, and the rest fall back to the buffered emitter below.
+	body["stream"] = false
+	delete(body, "stream_options")
 	body["_llm_request_id"] = requestIDFor(r, body)
-	res, err := a.executeChatContext(r.Context(), ctx, ident, body)
+
+	var sink *streamSink
+	if stream {
+		sink = newStreamSink(w)
+	}
+	res, err := a.executeChatContextSink(r.Context(), ctx, ident, body, sink)
 	if err != nil {
+		if sink != nil && sink.Started() {
+			// Status and early chunks are already sent; the only way left to
+			// report the failure is inside the stream.
+			writeSSEStreamError(sink, err)
+			return
+		}
 		status, typ := errorStatus(err)
 		writeOpenAIError(w, status, typ, err.Error())
 		return
 	}
 	if stream {
+		if res.Streamed {
+			// The provider's own chunks, including [DONE], were proxied live.
+			return
+		}
 		writeBufferedChatStream(w, res.Body)
 		return
 	}
@@ -1223,6 +1338,13 @@ type providerAttempt struct {
 }
 
 func (a *App) executeChatContext(reqCtx context.Context, ctx *sdk.AppCtx, ident *TokenIdentity, body map[string]any) (*chatResult, error) {
+	return a.executeChatContextSink(reqCtx, ctx, ident, body, nil)
+}
+
+// executeChatContextSink runs a chat request, proxying provider output live
+// when sink is non-nil. Quota is reserved before any provider work either way,
+// so a live stream cannot outrun the caller's budget.
+func (a *App) executeChatContextSink(reqCtx context.Context, ctx *sdk.AppCtx, ident *TokenIdentity, body map[string]any, sink *streamSink) (*chatResult, error) {
 	if err := normalizeChatImageInputs(body); err != nil {
 		return nil, err
 	}
@@ -1230,26 +1352,39 @@ func (a *App) executeChatContext(reqCtx context.Context, ctx *sdk.AppCtx, ident 
 	if model == "" {
 		return nil, userError("model is required")
 	}
-	provider := providerFromModel(model)
-	if provider == "" {
-		return nil, userError("model must include provider prefix, for example openai/gpt-4.1 or openrouter/anthropic/claude-sonnet-4")
-	}
 	policies, err := dbEffectivePolicies(ctx.AppDB(), ident)
 	if err != nil {
 		return nil, err
 	}
-	if err := policiesAllow(policies, provider, model, int64Arg(body, "max_tokens")); err != nil {
+	route, err := resolveModelRoute(ctx.AppDB(), ident.ProjectID, model, policies)
+	if err != nil {
+		return nil, err
+	}
+	// Policy is evaluated against what the caller asked for: the alias when one
+	// was used, the provider-prefixed model otherwise.
+	provider := route.PolicyProvider
+	if err := policiesAllow(policies, provider, route.PolicyModel, int64Arg(body, "max_tokens")); err != nil {
 		_ = dbAudit(ctx.AppDB(), ident, "request.denied", provider, model, "denied", err.Error(), nil)
 		return nil, err
 	}
-	if err := ensureModelSupportsRequest(ctx.AppDB(), ident.ProjectID, provider, model, body); err != nil {
+	attempts := route.Attempts
+	// Modality support is a property of the backend, not of the public name.
+	if err := ensureModelSupportsRequest(ctx.AppDB(), ident.ProjectID, attempts[0].Provider, attempts[0].Model, body); err != nil {
 		_ = dbAudit(ctx.AppDB(), ident, "request.denied", provider, model, "denied", err.Error(), map[string]any{"input_modality": "image"})
 		return nil, err
 	}
-	attempts := fallbackAttempts(policies, provider, model)
 	estimatedInput := estimateChatTokens(body)
+	if _, tokenLimit, _ := tightestRateLimits(policies); tokenLimit > 0 {
+		if limitErr := gatewayLimiter.reserveWindow(ident.ID, "tokens_per_minute", estimatedInput, tokenLimit); limitErr != nil {
+			var rle *rateLimitError
+			if errors.As(limitErr, &rle) {
+				emitRateLimitEvent(ctx, ident, "tokens_per_minute", rle)
+			}
+			return nil, limitErr
+		}
+	}
 	requestID := firstNonEmpty(strArg(body, "_llm_request_id"), "llm_req_"+randomSuffix(16))
-	reservation, grantedMax, err := reserveUsage(ctx.AppDB(), ident, provider, model, estimatedInput, int64Arg(body, "max_tokens"), requestID, policies, true)
+	reservation, grantedMax, err := reserveUsageAliased(ctx.AppDB(), ident, attempts[0].Provider, attempts[0].Model, route.Alias, estimatedInput, int64Arg(body, "max_tokens"), requestID, policies, true)
 	if err != nil {
 		if isPolicyError(err) {
 			ctx.EmitWithProject("llm.policy.limit_exceeded", ident.ProjectID, map[string]any{
@@ -1269,8 +1404,10 @@ func (a *App) executeChatContext(reqCtx context.Context, ctx *sdk.AppCtx, ident 
 	attemptDetails := []any{}
 	failedAttempts := 0
 	for i, attempt := range attempts {
-		if err := policiesAllow(policies, attempt.Provider, attempt.Model, int64Arg(body, "max_tokens")); err != nil {
-			continue
+		if route.Alias == "" {
+			if err := policiesAllow(policies, attempt.Provider, attempt.Model, int64Arg(body, "max_tokens")); err != nil {
+				continue
+			}
 		}
 		used = attempt
 		if i > 0 {
@@ -1292,10 +1429,14 @@ func (a *App) executeChatContext(reqCtx context.Context, ctx *sdk.AppCtx, ident 
 				var key string
 				key, err = resolveProviderKey(ctx, cfg)
 				if err == nil {
-					callResult, err = a.callProvider(reqCtx, cfg, key, attemptBody)
+					if sink != nil && providerSupportsStreaming(cfg, attempt.Model) {
+						callResult, err = a.callOpenAICompatibleStream(reqCtx, cfg, key, attemptBody, sink)
+					} else {
+						callResult, err = a.callProvider(reqCtx, cfg, key, attemptBody)
+					}
 				}
 			}
-			if err == nil {
+			if err == nil && !callResult.Streamed {
 				err = validateChatCompletion(callResult.Body)
 			}
 			if err == nil {
@@ -1309,7 +1450,7 @@ func (a *App) executeChatContext(reqCtx context.Context, ctx *sdk.AppCtx, ident 
 		lastErr = err
 		failedAttempts++
 		attemptDetails = append(attemptDetails, map[string]any{"provider": attempt.Provider, "model": attempt.Model, "status": "failed", "error": err.Error()})
-		retryable := isRetryableProviderError(err)
+		retryable := isRetryableProviderError(err) && (sink == nil || !sink.Started())
 		ctx.EmitWithProject("llm.provider.failed", ident.ProjectID, map[string]any{
 			"request_id": requestID, "provider": attempt.Provider, "model": attempt.Model,
 			"subject_type": ident.SubjectType, "subject_id": ident.SubjectID,
@@ -1343,6 +1484,9 @@ func (a *App) executeChatContext(reqCtx context.Context, ctx *sdk.AppCtx, ident 
 	usageEvent, err := finishUsageReservationCost(ctx.AppDB(), reservation.ID, used.Provider, used.Model, result.RequestTokens, result.ResponseTokens, "completed", result.RequestID,
 		result.ProviderCostMicrounits, result.ProviderCostCurrency, result.ProviderCostReported, result.UsageDetails)
 	if err != nil {
+		return nil, err
+	}
+	if err := applyBilling(ctx.AppDB(), usageEvent, route.Alias); err != nil {
 		return nil, err
 	}
 	_ = dbAudit(ctx.AppDB(), ident, "request.completed", used.Provider, used.Model, "completed", "", map[string]any{"request_id": requestID, "provider_request_id": result.RequestID, "usage_event_id": usageEvent.ID})
@@ -2973,7 +3117,14 @@ func dbUsageGet(db *sql.DB, f usageFilter) (*UsageSummary, error) {
 	return &out, nil
 }
 
+// reserveUsage reserves quota for a request that named a backend directly.
 func reserveUsage(db *sql.DB, ident *TokenIdentity, provider, model string, input, requestedOutput int64, requestID string, policies []*Policy, enforceOutput bool) (*UsageEvent, int64, error) {
+	return reserveUsageAliased(db, ident, provider, model, "", input, requestedOutput, requestID, policies, enforceOutput)
+}
+
+// reserveUsageAliased also records the public alias the caller used, so billing
+// can price against the alias while cost accounting stays on the real backend.
+func reserveUsageAliased(db *sql.DB, ident *TokenIdentity, provider, model, alias string, input, requestedOutput int64, requestID string, policies []*Policy, enforceOutput bool) (*UsageEvent, int64, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, 0, err
@@ -3005,11 +3156,11 @@ func reserveUsage(db *sql.DB, ident *TokenIdentity, provider, model string, inpu
 	res, err := tx.Exec(`INSERT INTO usage_events
 		(project_id, subject_type, subject_id, provider, model, request_tokens, response_tokens, total_tokens,
 		 estimated_cost_cents, provider_cost_microunits, provider_cost_currency, provider_cost_status,
-		 provider_cost_source, provider_rate_id, usage_details_json, status, period, request_id, provider_request_id, token_id)
-		VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, '{}', 'reserved', ?, ?, '', ?)`,
+		 provider_cost_source, provider_rate_id, usage_details_json, status, period, request_id, provider_request_id, token_id, alias)
+		VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, '{}', 'reserved', ?, ?, '', ?, ?)`,
 		ident.ProjectID, ident.SubjectType, ident.SubjectID, provider, model, input, input,
 		(costMicrounits+5000)/10000, costMicrounits, costCurrency, costStatus, costSource, rateID,
-		period, requestID, ident.ID)
+		period, requestID, ident.ID, alias)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique constraint") {
 			return nil, 0, conflictError("duplicate request id for this subject")
@@ -3231,7 +3382,7 @@ func dbUsageEventByRequestID(db *sql.DB, projectID, subjectType, subjectID, requ
 		SELECT id, project_id, subject_type, subject_id, provider, model, request_tokens, response_tokens,
 		       total_tokens, estimated_cost_cents, provider_cost_microunits, provider_cost_currency,
 		       provider_cost_status, provider_cost_source, provider_rate_id, usage_details_json,
-		       status, period, request_id, provider_request_id, token_id, COALESCE(created_at,'')
+		       status, period, request_id, provider_request_id, token_id, COALESCE(alias,''), billed_amount_microunits, COALESCE(billed_currency,''), price_version, COALESCE(created_at,'')
 		  FROM usage_events
 		 WHERE project_id = ? AND subject_type = ? AND subject_id = ? AND request_id = ?
 		 LIMIT 1`, projectID, subjectType, subjectID, requestID)
@@ -3242,7 +3393,7 @@ func dbUsageEventByID(db *sql.DB, id int64) (*UsageEvent, error) {
 	row := db.QueryRow(`SELECT id, project_id, subject_type, subject_id, provider, model, request_tokens, response_tokens,
 		total_tokens, estimated_cost_cents, provider_cost_microunits, provider_cost_currency,
 		provider_cost_status, provider_cost_source, provider_rate_id, usage_details_json,
-		status, period, request_id, provider_request_id, token_id, COALESCE(created_at,'')
+		status, period, request_id, provider_request_id, token_id, COALESCE(alias,''), billed_amount_microunits, COALESCE(billed_currency,''), price_version, COALESCE(created_at,'')
 		FROM usage_events WHERE id=?`, id)
 	return scanUsageEvent(row)
 }
@@ -3272,7 +3423,7 @@ func dbUsageEventsList(db *sql.DB, f usageFilter, limit int) ([]UsageEvent, erro
 	rows, err := db.Query(`SELECT id, project_id, subject_type, subject_id, provider, model, request_tokens, response_tokens,
 		total_tokens, estimated_cost_cents, provider_cost_microunits, provider_cost_currency,
 		provider_cost_status, provider_cost_source, provider_rate_id, usage_details_json,
-		status, period, request_id, provider_request_id, token_id, COALESCE(created_at,'')
+		status, period, request_id, provider_request_id, token_id, COALESCE(alias,''), billed_amount_microunits, COALESCE(billed_currency,''), price_version, COALESCE(created_at,'')
 		FROM usage_events WHERE `+strings.Join(conds, " AND ")+` ORDER BY id DESC LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
@@ -3300,7 +3451,8 @@ func scanUsageEvent(row usageEventScanner) (*UsageEvent, error) {
 		&ev.RequestTokens, &ev.ResponseTokens, &ev.TotalTokens, &ev.EstimatedCostCents,
 		&ev.ProviderCostMicrounits, &ev.ProviderCostCurrency, &ev.ProviderCostStatus, &ev.ProviderCostSource,
 		&ev.ProviderRateID, &usageDetails, &ev.Status, &ev.Period,
-		&ev.RequestID, &ev.ProviderRequestID, &ev.TokenID, &ev.CreatedAt); err != nil {
+		&ev.RequestID, &ev.ProviderRequestID, &ev.TokenID, &ev.Alias, &ev.BilledAmountMicrounits,
+		&ev.BilledCurrency, &ev.PriceVersion, &ev.CreatedAt); err != nil {
 		return nil, err
 	}
 	ev.UsageDetails = json.RawMessage(firstNonEmpty(usageDetails, "{}"))
@@ -3843,6 +3995,10 @@ func usageEventPayload(ev *UsageEvent, extra map[string]any) map[string]any {
 		"provider_cost_status":     "unpriced",
 		"provider_cost_source":     "",
 		"provider_rate_id":         int64(0),
+		"alias":                    "",
+		"billed_amount_microunits": int64(0),
+		"billed_currency":          "",
+		"price_version":            int64(0),
 		"usage_details":            map[string]any{},
 		"status":                   "",
 		"created_at":               "",
@@ -3866,6 +4022,10 @@ func usageEventPayload(ev *UsageEvent, extra map[string]any) map[string]any {
 		out["provider_cost_status"] = ev.ProviderCostStatus
 		out["provider_cost_source"] = ev.ProviderCostSource
 		out["provider_rate_id"] = ev.ProviderRateID
+		out["alias"] = ev.Alias
+		out["billed_amount_microunits"] = ev.BilledAmountMicrounits
+		out["billed_currency"] = ev.BilledCurrency
+		out["price_version"] = ev.PriceVersion
 		out["usage_details"] = rawJSON(string(ev.UsageDetails))
 		out["status"] = ev.Status
 		out["created_at"] = ev.CreatedAt
@@ -3901,6 +4061,10 @@ func providerError(status int, msg string) error {
 }
 
 func errorStatus(err error) (int, string) {
+	var rle *rateLimitError
+	if errors.As(err, &rle) {
+		return http.StatusTooManyRequests, "rate_limit_exceeded"
+	}
 	var te typedErr
 	if errors.As(err, &te) {
 		return te.status, te.typ
@@ -4094,6 +4258,9 @@ func limitsFromAny(v any) Limits {
 		MonthlyProviderCostLimitMicrounits: int64Arg(m, "monthly_provider_cost_limit_microunits"),
 		ProviderCostCurrency:               strings.ToUpper(firstNonEmpty(strArg(m, "provider_cost_currency"), "USD")),
 		UnpricedModelBehavior:              firstNonEmpty(strArg(m, "unpriced_model_behavior"), "deny"),
+		RequestsPerMinute:                  int64Arg(m, "requests_per_minute"),
+		TokensPerMinute:                    int64Arg(m, "tokens_per_minute"),
+		MaxConcurrentRequests:              int64Arg(m, "max_concurrent_requests"),
 	}
 }
 

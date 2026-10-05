@@ -2,18 +2,20 @@ schema: apteva-app/v1
 
 name: llm
 display_name: LLM Gateway
-version: 0.5.6
+version: 0.6.0
 description: |
   Managed AI API access for Apteva-hosted apps and agents. Provides an
   OpenAI-compatible tenant-safe gateway that routes text and image requests to configured
-  model providers, enforces project and subject policy, and records raw token,
-  request, and upstream provider-cost usage for orchestration apps.
+  model providers behind public model aliases, enforces project and subject policy
+  including per-minute burst limits, streams provider responses live, and records raw
+  token, request, upstream provider-cost, and customer-billed usage for orchestration
+  and billing apps.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/llm
 icon: /ui/icon.svg
 icon_style: monochrome
-tags: [llm, ai, gateway, openai-compatible, multimodal, vision, usage]
+tags: [llm, ai, gateway, openai-compatible, multimodal, vision, usage, billing, streaming]
 
 scopes: [project, global]
 min_apteva_version: "0.11.0"
@@ -99,6 +101,18 @@ provides:
       description: Close an active provider rate while retaining history.
     - name: llm_provider_rates_refresh
       description: Refresh rates from provider model metadata and the built-in catalog.
+    - name: llm_aliases_list
+      description: List public model aliases and the backends they resolve to.
+    - name: llm_aliases_upsert
+      description: Create or update a public model alias and its ordered backend targets.
+    - name: llm_aliases_delete
+      description: Deprecate a public model alias while retaining usage history.
+    - name: llm_prices_list
+      description: List sell-side prices charged for public model aliases.
+    - name: llm_prices_upsert
+      description: Set the customer-facing price for a public model alias.
+    - name: llm_prices_delete
+      description: Close the active price for a public model alias.
     - name: llm_policy_get
       description: Return the project or subject policy.
     - name: llm_policy_set
