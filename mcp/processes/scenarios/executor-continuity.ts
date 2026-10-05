@@ -68,6 +68,7 @@ export function verifyExecutorContinuity(
     check(update && update.result_original_bytes <= 1024 && !update.result_truncated, `${s.key}: oversized completion acknowledgement`);
     const ack = JSON.parse(update.result);
     check(ack.step_id === s.id && ack.run_id === run.id && ack.state === "completed" && Number.isInteger(ack.revision) && ack.progress === 100 && typeof ack.next_action === "string" && ack.done === (i === agentSteps.length - 1), `${s.key}: invalid compact completion acknowledgement`);
+    check(ack.reread?.tool === "processes_step_get" && ack.reread.args?.process_id === run.process_id && ack.reread.args?.run_id === run.id && ack.reread.args?.step_id === s.id && ack.reread.args?.include_context === true, `${s.key}: invalid receipt recovery reference`);
     check(!["step", "run", "definition", "dependencies", "dependency_outputs", "parameters", "output", "instructions"].some(k => k in ack), `${s.key}: acknowledgement repeated context or receipts`);
     const domain = calls.indexOf(domainCalls[i]);
     check(claim > previous && domain > claim && done > domain, `${s.key}: missing serialized claim/domain/completion`);

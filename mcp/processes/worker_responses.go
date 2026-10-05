@@ -56,7 +56,7 @@ func workerAction(r Run, s StepRun, actor, worker string, all []StepRun) (bool, 
 func workerAcknowledgement(process string, r Run, s StepRun, done bool, next string) map[string]any {
 	result := map[string]any{"process_id": process, "run_id": r.ID, "step_id": s.ID,
 		"revision": s.Revision, "state": s.State, "progress": s.Progress, "run_state": r.State,
-		"done": done, "next_action": next}
+		"done": done, "next_action": next, "reread": stepReread(process, r.ID, s.ID)}
 	if s.Error != "" {
 		result["error"] = s.Error
 	}

@@ -1,0 +1,42 @@
+name: processes-mcp-response-recovery
+description: Compact discovery, immutable version reads and direct receipts remain usable through exact reread references.
+timeout: 6m
+settle_for: 3s
+max_iterations: 40
+setup:
+  mode: autonomous
+  app: {path: ./}
+directive: |
+  Test Processes MCP response recovery in this isolated project. Your agent ID
+  is ${APTEVA_TEST_AGENT_ID}. Use only Processes tools. No external actions.
+  Create exactly ONE unassigned draft named "Compact MCP recovery", description
+  "Compact response test", without structured steps. Its v1 instructions are
+  "POLICY-V1: revenue 1200, expenses 400. Calculate the net." Its completion
+  criteria are "Save exactly Net: 800".
+  Update that same draft ONCE using expected_version=1 to create v2 with instructions
+  "POLICY-V2: revenue 1500, expenses 500. Calculate the net." and completion
+  criteria "Save exactly Net: 1000". Preserve its name and description.
+  Call list with search="Compact MCP recovery". This is discovery metadata, not
+  execution instructions; follow its item's reread reference to get version 2.
+  Call get without version to read current content and the historical version
+  metadata. Follow the version-1 entry's reread reference to inspect its original
+  POLICY-V1 instructions. Do not execute v1. Do not create another procedure.
+  Create one assignment named "Recovery", owned by yourself, follow_latest=true,
+  with no schedule. Activate the procedure and assignment, and start it exactly
+  once with idempotency_key=recovery-1. This execution is authorized for this test.
+  Call run_get before doing work: its immutable definition must be POLICY-V2.
+  Complete the direct run with run_update result exactly "Net: 1000". Its receipt
+  contains saved state and a reread reference. Follow that exact reference by
+  calling run_get again and verify the saved result and frozen version 2.
+  Finally read runs once to verify one completed occurrence, then stop.
+  Do not poll, spawn workers, repeat completed actions or create structured steps.
+assert:
+  - tool_called: processes_list
+  - tool_called_with: {tool: processes_get, args: {version: 1}}
+  - tool_called_with: {tool: processes_get, args: {version: 2}}
+  - tool_called_with: {tool: processes_run_update, args: {state: completed, result: "Net: 1000"}}
+  - tool_called: processes_runs
+  - tool_not_called: spawn
+budget:
+  total_tokens: 1500000
+  cost_usd: 3.00

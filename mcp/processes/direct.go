@@ -118,6 +118,9 @@ func (a *App) dispatchAgent(p *Process, r *Run) (err error) {
 	return err
 }
 func (a *App) directRun(project, actor, process, id, action string, args map[string]any) (any, error) {
+	return a.directRunResponse(project, actor, process, id, action, args, false)
+}
+func (a *App) directRunResponse(project, actor, process, id, action string, args map[string]any, mcp bool) (any, error) {
 	r, err := a.getRun(project, process, id)
 	if err != nil {
 		return nil, err
@@ -136,6 +139,9 @@ func (a *App) directRun(project, actor, process, id, action string, args map[str
 		steps, e := a.steps(r.ID)
 		if e != nil {
 			return nil, e
+		}
+		if mcp {
+			return mcpRunRead(process, r, d, steps), nil
 		}
 		return map[string]any{"run": r, "definition": d, "steps": steps}, nil
 	}
@@ -193,6 +199,12 @@ func (a *App) directRun(project, actor, process, id, action string, args map[str
 		if err != nil {
 			return nil, err
 		}
+	}
+	if mcp {
+		if action == "run_update" {
+			return mcpRunAcknowledgement(process, r), nil
+		}
+		return mcpRunRead(process, r, d, nil), nil
 	}
 	p, err := a.get(project, process)
 	if err != nil {

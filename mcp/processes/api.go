@@ -28,9 +28,9 @@ func definitionSchema() map[string]any {
 	})
 }
 func (a *App) MCPTools() []sdk.Tool {
-	descriptions := map[string]string{"list": "Find project procedures by search, status, or owner.", "get": "Read a procedure, readiness, and immutable versions. Specify version to retrieve a historical definition.", "validate_definition": "Validate and normalize a semantic procedure without saving it. Define steps and dependencies only; Processes always lays out the graph automatically.", "create": "Create an unassigned draft procedure. Send semantic steps and dependencies only; never graphical coordinates. No assignment or run is created. If the user names an executor, create the draft first, then use assignment_create, which starts paused.", "update": "Replace semantic procedure content with a new immutable draft version. Send no graphical coordinates. Requires a draft or fully paused process and expected_version.", "activate": "Activate a reviewed procedure only with explicit user authorization. An unassigned procedure schedules no work. Check sync_pending before claiming success.", "pause": "Stop future scheduled runs. Existing runs continue. Check sync_pending.", "archive": "Retire a process and stop future schedules. Existing runs continue.", "start": "Start one active assignment only with explicit user authorization. Create the draft, create a paused assignment, then explicitly activate the process and assignment first. Supply a stable idempotency_key and reuse it on retries.", "runs": "Read native process run and step history."}
-	descriptions["run_get"] = "Read the immutable procedure and direct run before acting."
-	descriptions["run_update"] = "Owner only: record direct run progress, blockers, or outcome. Completion requires evidence in result."
+	descriptions := map[string]string{"list": "Find procedures by search, status, or owner. Returns discovery metadata and reread references; use get to load instructions.", "get": "Read the current procedure once and historical version metadata. Specify version to load that exact immutable definition with procedure metadata. Follow reread references for recovery.", "validate_definition": "Validate and normalize a semantic procedure without saving it. Define steps and dependencies only; Processes always lays out the graph automatically.", "create": "Create an unassigned draft procedure. Send semantic steps and dependencies only; never graphical coordinates. No assignment or run is created. If the user names an executor, create the draft first, then use assignment_create, which starts paused.", "update": "Replace semantic procedure content with a new immutable draft version. Send no graphical coordinates. Requires a draft or fully paused process and expected_version.", "activate": "Activate a reviewed procedure only with explicit user authorization. An unassigned procedure schedules no work. Check sync_pending before claiming success.", "pause": "Stop future scheduled runs. Existing runs continue. Check sync_pending.", "archive": "Retire a process and stop future schedules. Existing runs continue.", "start": "Start one active assignment only with explicit user authorization. Create the draft, create a paused assignment, then explicitly activate the process and assignment first. Supply a stable idempotency_key and reuse it on retries.", "runs": "Read native process run and step history."}
+	descriptions["run_get"] = "Read the immutable procedure once and exact run/step state and evidence, with reread references. No duplicate textual snapshot."
+	descriptions["run_update"] = "Owner only: record direct run progress, blockers, or outcome. Completion requires evidence in result. Returns a compact saved-state receipt and a run_get reread reference; exact evidence remains stored."
 	for _, name := range []string{"assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive"} {
 		descriptions[name] = "Manage saved process assignments: separate owners, targets, parameters, schedules, and execution modes. Update requires a paused assignment and expected_revision. Activate only after the process is active."
 	}
@@ -123,12 +123,18 @@ func (a *App) MCPTools() []sdk.Tool {
 			if fixed := a.ctx.CurrentProject(); fixed != "" && fixed != caller.ProjectID {
 				return nil, errors.New("project scope mismatch")
 			}
-			return a.execute(caller.ProjectID, fmt.Sprintf("agent:%d:%s", caller.AgentID, caller.ThreadID), name, args)
+			return a.executeMCP(caller.ProjectID, fmt.Sprintf("agent:%d:%s", caller.AgentID, caller.ThreadID), name, args)
 		}})
 	}
 	return append(out, a.triggerTools()...)
 }
 func (a *App) execute(project, actor, action string, args map[string]any) (any, error) {
+	return a.executeResponse(project, actor, action, args, false)
+}
+func (a *App) executeMCP(project, actor, action string, args map[string]any) (any, error) {
+	return a.executeResponse(project, actor, action, args, true)
+}
+func (a *App) executeResponse(project, actor, action string, args map[string]any, mcp bool) (any, error) {
 	if action == "overview" {
 		if a.ctx.CurrentProject() == "" {
 			return a.overviewGlobal(str(args, "project_id"))
@@ -203,8 +209,18 @@ func (a *App) execute(project, actor, action string, args map[string]any) (any, 
 			}
 			out = append(out, p)
 		}
+		if mcp {
+			metadata := make([]ProcessMetadata, 0, len(out))
+			for _, p := range out {
+				metadata = append(metadata, processMetadata(p))
+			}
+			return map[string]any{"processes": metadata}, nil
+		}
 		return map[string]any{"processes": out}, nil
 	case "get":
+		if mcp {
+			return a.getMCP(project, id, args)
+		}
 		p, err := a.get(project, id)
 		if err != nil {
 			return nil, err
@@ -301,7 +317,7 @@ func (a *App) execute(project, actor, action string, args map[string]any) (any, 
 	case "project_runs":
 		return a.projectRuns(project)
 	case "run_get", "run_update":
-		return a.directRun(project, actor, id, str(args, "run_id"), action, args)
+		return a.directRunResponse(project, actor, id, str(args, "run_id"), action, args, mcp)
 	default:
 		return nil, errors.New("unknown action")
 	}
