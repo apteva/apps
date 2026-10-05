@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.14.9
+version: 0.14.10
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -31,7 +31,11 @@ description: |
   Cloudinary when bound, auto-transcribes audio + video via Deepgram,
   and auto-generates descriptions via OpenCode Go, OpenAI API, or
   OpenAI Codex when integrations are bound. Outputs all flow
-  through storage. v0.14.9 normalizes render filenames before queuing,
+  through storage. v0.14.10 improves standalone portrait framing using
+  cached-thumbnail head/torso evidence: recentres profile poses and reduces
+  excessive headroom when the subject fits. Wide gestures retain scale;
+  use fit_mode=contain to preserve every edge. Video tracking and explicit
+  center/contain stay unchanged. v0.14.9 normalizes render filenames before queuing,
   validates output formats, separates remote cache telemetry from failures,
   and persists description rate-limit backoff with upstream retry/reset hints.
   v0.14.8 preserves subjects during stationary Smart Crop
@@ -299,7 +303,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.9
+    ref: media/v0.14.10
     entry: mcp/media
   port: 8080
   health_check: /health

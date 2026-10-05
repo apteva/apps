@@ -1,4 +1,4 @@
-## Unreleased — still portrait composition
+## 0.14.10 — still portrait composition
 
 - Refine standalone-image Smart Crop using the existing thumbnail when a single upright foreground has supporting head/torso evidence below a large plain bright background. Recover profile/closed-eye poses missed by the face cascade, protect independently supported faces, and bound tighter framing by the connected subject extent and a 1.5× zoom limit.
 - Keep wide gestures at full scale and protect the head/body. A filled 9:16 crop cannot preserve gestures wider than its available window; use the existing explicit `fit_mode=contain` to preserve every source edge with padding.
