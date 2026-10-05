@@ -15,6 +15,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"html/template"
 	"io"
 	"net"
 	"net/http"
@@ -331,6 +332,9 @@ func (a *App) handleFeed(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if settings, _ := effectiveSettings(ctx, pid, siteID); settings["search_indexing"] == "false" {
+		w.Header().Set("X-Robots-Tag", "noindex")
+	}
 	r = withPublicLocale(r, ctx, pid, siteID)
 	if serveCachedPublic(w, r, siteID) {
 		return
@@ -362,6 +366,9 @@ func (a *App) handleSitemap(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if settings, _ := effectiveSettings(ctx, pid, siteID); settings["search_indexing"] == "false" {
+		w.Header().Set("X-Robots-Tag", "noindex")
 	}
 	r = withPublicLocale(r, ctx, pid, siteID)
 	if serveCachedPublic(w, r, siteID) {
@@ -487,6 +494,10 @@ func (a *App) handlePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rest := strings.TrimPrefix(r.URL.Path, "/preview/")
+	if !previewLinkActive(ctx.AppDB(), pid, siteID, rest) {
+		http.Error(w, "preview link revoked or expired", http.StatusUnauthorized)
+		return
+	}
 	postID, err := verifyPreviewToken(rest)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
@@ -526,7 +537,17 @@ func previewSecret() []byte {
 }
 
 func SignPreview(postID int64) string {
-	exp := time.Now().Add(15 * time.Minute).Unix()
+	return signPreviewWithTTL(postID, 7*24*time.Hour)
+}
+
+func signPreviewWithTTL(postID int64, ttl time.Duration) string {
+	if ttl <= 0 {
+		ttl = 7 * 24 * time.Hour
+	}
+	if ttl > 30*24*time.Hour {
+		ttl = 30 * 24 * time.Hour
+	}
+	exp := time.Now().Add(ttl).Unix()
 	payload := fmt.Sprintf("%d.%d", postID, exp)
 	mac := hmac.New(sha256.New, previewSecret())
 	mac.Write([]byte(payload))
@@ -678,17 +699,70 @@ func basePageData(ctx *sdk.AppCtx, pid string, siteID int64, settings map[string
 		rendered = renderMenuItems(mainMenu.Items, prefix, publicResourceQuery(r))
 	}
 	return PageData{
-		Theme:         activeThemeForSite(ctx, pid, siteID),
-		SiteTitle:     firstNonEmpty(settings["site_title"], "My Site"),
-		SiteTagline:   settings["site_tagline"],
-		Locale:        selectedPublicLocale(ctx, pid, siteID, r),
-		PublicBaseURL: settings["public_base_url"],
-		URLPrefix:     prefix,
-		ResourceQuery: publicResourceQuery(r),
-		SiteID:        siteID,
-		PrimaryMenu:   rendered,
-		Now:           time.Now().UTC().Format(time.RFC3339),
+		Theme:           activeThemeForSite(ctx, pid, siteID),
+		SiteTitle:       firstNonEmpty(settings["site_title"], "My Site"),
+		SiteTagline:     settings["site_tagline"],
+		BrandLogoURL:    safeBrandURL(settings["brand_logo_url"]),
+		BrandFaviconURL: safeBrandURL(settings["brand_favicon_url"]),
+		BrandCSS:        template.CSS(brandCSS(settings)),
+		CustomCSS:       template.CSS(safeCustomCSS(settings["custom_css"])),
+		CustomJS:        template.JS(safeCustomJS(settings["custom_js"])),
+		NoIndex:         settings["search_indexing"] == "false",
+		Locale:          selectedPublicLocale(ctx, pid, siteID, r),
+		PublicBaseURL:   settings["public_base_url"],
+		URLPrefix:       prefix,
+		ResourceQuery:   publicResourceQuery(r),
+		SiteID:          siteID,
+		PrimaryMenu:     rendered,
+		Now:             time.Now().UTC().Format(time.RFC3339),
 	}
+}
+
+func safeBrandURL(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.ContainsAny(value, "\"'<>\r\n") ||
+		(!strings.HasPrefix(value, "https://") && !strings.HasPrefix(value, "http://") && !strings.HasPrefix(value, "/")) {
+		return ""
+	}
+	return value
+}
+
+func brandCSS(settings map[string]string) string {
+	valid := func(value string) string {
+		value = strings.TrimSpace(value)
+		if value == "" || strings.ContainsAny(value, "{};\"'<>\r\n") || len(value) > 120 {
+			return ""
+		}
+		return value
+	}
+	var out []string
+	if v := valid(settings["brand_primary_color"]); v != "" {
+		out = append(out, "--accent:"+v)
+	}
+	if v := valid(settings["brand_secondary_color"]); v != "" {
+		out = append(out, "--accent-hover:"+v)
+	}
+	if v := valid(settings["brand_font_family"]); v != "" {
+		out = append(out, "--font-sans:"+v)
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	return ":root{" + strings.Join(out, ";") + "}"
+}
+
+func safeCustomCSS(value string) string {
+	if len(value) > 256<<10 || strings.Contains(strings.ToLower(value), "</style") {
+		return ""
+	}
+	return value
+}
+
+func safeCustomJS(value string) string {
+	if len(value) > 256<<10 || strings.Contains(strings.ToLower(value), "</script") {
+		return ""
+	}
+	return value
 }
 
 func computeURLPrefix(r *http.Request) string {

@@ -34,6 +34,35 @@ Validation: `GOWORK=off go test -race ./...`, `go vet ./...`,
 `bun test mcp/content/ui/editor-persistence.test.ts`, and
 `bun run scripts/build-panels.ts --app content` from the appropriate directories.
 
+## v2.15.0 prospect-site workflow
+
+Content includes a generic workflow for producing reviewable custom sites:
+
+- **Site identity** settings cover the title, tagline, logo, favicon, brand
+  colors, font family, canonical base URL, and search indexing. The default
+  and magazine themes consume these values without a theme fork.
+- **Custom CSS and JavaScript** are site-scoped settings, capped at 256KB and
+  emitted only after the authenticated owner saves them. They let a prospect
+  site receive a visual treatment without rebuilding the app.
+- **`core/section`** is a reusable full-width layout block with background,
+  padding, width, and alignment controls. It composes with the existing block
+  registry and works in both bundled themes.
+- **`sites_clone`** copies a site's settings, content, taxonomy, menus, media
+  metadata, redirects, and extensions with remapped IDs. The new site has no
+  hostname, so it is safe to customize before sharing.
+- **`preview_create`** creates a signed, noindex preview URL that lasts seven
+  days by default (up to thirty days). The dashboard exposes this as “Share
+  preview” for drafts and scheduled content.
+- **`site_preview_create`** creates a signed whole-site preview URL, starting
+  at the homepage for reviewing draft and published pages together.
+- Preview links are stored as hashed records and can be revoked with
+  `preview_revoke`.
+- **`templates_export_site`** exports the current site as a reusable YAML kit,
+  optionally registering it for future `templates_apply` calls.
+- **`sites_preflight`** and `/admin/preflight` check titles, empty published
+  content, image alt text, placeholder text, forms, menu targets, canonical
+  URL, and hostname readiness before publication.
+
 ## What's in v1.0
 
 - **Posts + pages** with hierarchical pages, per-page templates, SEO

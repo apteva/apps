@@ -170,12 +170,18 @@ func renderBlockWithTheme(theme *Theme, b Block) template.HTML {
 // concrete fields rather than a map so templates can access them
 // without index calls.
 type PageData struct {
-	Theme         *Theme
-	SiteID        int64
-	SiteTitle     string
-	SiteTagline   string
-	Locale        string
-	PublicBaseURL string
+	Theme           *Theme
+	SiteID          int64
+	SiteTitle       string
+	SiteTagline     string
+	BrandLogoURL    string
+	BrandFaviconURL string
+	BrandCSS        template.CSS
+	CustomCSS       template.CSS
+	CustomJS        template.JS
+	NoIndex         bool
+	Locale          string
+	PublicBaseURL   string
 	// URLPrefix is the path under which the app is currently mounted,
 	// with a trailing slash. Two cases:
 	//

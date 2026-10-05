@@ -200,6 +200,25 @@ func (a *App) handleHTTPSiteItem(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "site not found")
 		return
 	}
+	if len(parts) == 2 && parts[1] == "clone" {
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body == nil {
+			body = map[string]any{}
+		}
+		body["_project_id"], body["source_id"] = pid, site.ID
+		out, err := a.toolSitesClone(ctx, body)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, out)
+		return
+	}
 	if len(parts) == 2 && parts[1] == "set-default" {
 		if r.Method != http.MethodPost {
 			httpErr(w, http.StatusMethodNotAllowed, "POST only")
@@ -211,6 +230,26 @@ func (a *App) handleHTTPSiteItem(w http.ResponseWriter, r *http.Request) {
 		}
 		s, _ := dbGetSite(ctx.AppDB(), pid, site.ID)
 		httpJSON(w, map[string]any{"site": s})
+		return
+	}
+	if len(parts) == 2 && parts[1] == "clone" {
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body == nil {
+			body = map[string]any{}
+		}
+		body["_project_id"] = pid
+		body["source_id"] = site.ID
+		out, err := a.toolSitesClone(ctx, body)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, out)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "attach-domain" {

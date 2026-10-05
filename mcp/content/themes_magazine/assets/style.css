@@ -65,6 +65,7 @@ a { color: var(--accent); text-decoration: underline; text-decoration-thickness:
 a:hover { color: var(--accent-hover); }
 
 .container-narrow { max-width: var(--container-narrow); margin: 0 auto; padding: 0 1.5rem; }
+.site-logo { max-height: 2.25rem; width: auto; display: block; }
 
 /* ---------- Header ---------- */
 

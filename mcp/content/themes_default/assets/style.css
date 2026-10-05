@@ -98,6 +98,7 @@ a { color: var(--accent); text-decoration: none; transition: opacity 0.15s; }
 a:hover { opacity: 0.8; }
 
 .container { max-width: var(--container); margin: 0 auto; padding: 0 1.5rem; }
+.site-logo { max-height: 2.25rem; width: auto; display: block; }
 .container-narrow { max-width: var(--container-narrow); margin: 0 auto; padding: 0 1.5rem; }
 
 /* ---------- Site header & footer ---------- */

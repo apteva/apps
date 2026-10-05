@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: content
 display_name: Content
-version: 2.14.4
+version: 2.15.0
 description: |
   Block-based CMS for Apteva. Posts, pages, media, taxonomies, menus,
   revisions, redirects. Renders themed HTML and exposes a headless REST
@@ -236,7 +236,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: content/v2.14.4
+    ref: content/v2.15.0
     entry: mcp/content
   port: 8080
   health_check: /health
@@ -291,5 +291,32 @@ config_schema:
     type: toggle
     default: "false"
     label: Cross-post to bound social app on publish
+  - name: brand_logo_url
+    type: text
+    label: Logo URL
+  - name: brand_favicon_url
+    type: text
+    label: Favicon URL
+  - name: brand_primary_color
+    type: text
+    label: Primary brand color
+    default: "#4f46e5"
+  - name: brand_secondary_color
+    type: text
+    label: Secondary brand color
+    default: "#4338ca"
+  - name: brand_font_family
+    type: text
+    label: Font family
+  - name: search_indexing
+    type: toggle
+    default: "true"
+    label: Allow search indexing
+  - name: custom_css
+    type: text
+    label: Custom CSS (max 256KB)
+  - name: custom_js
+    type: text
+    label: Custom JavaScript (max 256KB)
 
 upgrade_policy: auto-patch

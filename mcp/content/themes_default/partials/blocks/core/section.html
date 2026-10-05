@@ -1,0 +1,6 @@
+{{- /* attrs: background, padding, max_width, align */ -}}
+<section class="block-section" style="{{ if .Attrs.background }}background:{{ .Attrs.background }};{{ end }}{{ if .Attrs.padding }}padding:{{ .Attrs.padding }};{{ end }}">
+  <div class="container" style="{{ if .Attrs.max_width }}max-width:{{ .Attrs.max_width }};{{ end }}{{ if .Attrs.align }}text-align:{{ .Attrs.align }};{{ end }}">
+    {{ renderBlocks .Inner }}
+  </div>
+</section>

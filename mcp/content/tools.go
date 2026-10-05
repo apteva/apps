@@ -373,6 +373,33 @@ func (a *App) mcpTools() []sdk.Tool {
 			Handler: a.toolSettingsSet,
 		},
 		{
+			Name:        "preview_create",
+			Description: "Create a durable noindex draft preview URL for a post or page. Defaults to 7 days and allows up to 30 days. Args: post_id, ttl_days?.",
+			InputSchema: schemaObject(map[string]any{
+				"post_id":  map[string]any{"type": "integer"},
+				"ttl_days": map[string]any{"type": "integer"},
+			}, []string{"post_id"}),
+			Handler: a.toolPreviewCreate,
+		},
+		{
+			Name:        "site_preview_create",
+			Description: "Create a durable noindex preview URL for the selected site's homepage and navigation. Defaults to 7 days and allows up to 30 days.",
+			InputSchema: schemaObject(map[string]any{"ttl_days": map[string]any{"type": "integer"}}, nil),
+			Handler:     a.toolSitePreviewCreate,
+		},
+		{
+			Name:        "preview_revoke",
+			Description: "Revoke a previously issued preview token immediately. Args: token.",
+			InputSchema: schemaObject(map[string]any{"token": map[string]any{"type": "string"}}, []string{"token"}),
+			Handler:     a.toolPreviewRevoke,
+		},
+		{
+			Name:        "sites_preflight",
+			Description: "Run a pre-publication check for the selected site. Reports missing titles, empty published content, missing image alt text, missing public_base_url, and invalid forms.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			Handler:     a.toolSitesPreflight,
+		},
+		{
 			Name:        "themes_list",
 			Description: "List installed themes.",
 			InputSchema: schemaObject(map[string]any{}, nil),
@@ -440,6 +467,17 @@ func (a *App) mcpTools() []sdk.Tool {
 			}, []string{"name"}),
 			Handler: a.toolTemplatesUnregister,
 		},
+		{
+			Name:        "templates_export_site",
+			Description: "Export the selected site as a reusable YAML template, optionally registering it in the project template catalog. Args: name, display_name?, description?, register?.",
+			InputSchema: schemaObject(map[string]any{
+				"name":         map[string]any{"type": "string"},
+				"display_name": map[string]any{"type": "string"},
+				"description":  map[string]any{"type": "string"},
+				"register":     map[string]any{"type": "boolean"},
+			}, []string{"name"}),
+			Handler: a.toolTemplatesExportSite,
+		},
 
 		// ── Sites (multi-site v2.0) ────────────────────────
 		{
@@ -467,6 +505,16 @@ func (a *App) mcpTools() []sdk.Tool {
 				"name": map[string]any{"type": "string"},
 			}, []string{"slug", "name"}),
 			Handler: a.toolSitesCreate,
+		},
+		{
+			Name:        "sites_clone",
+			Description: "Clone a site, including branding, settings, pages, posts, terms, menus, redirects, and extension manifests. The clone starts without a hostname and is suitable for staging or prospect customization.",
+			InputSchema: schemaObject(map[string]any{
+				"source_id": map[string]any{"type": "integer"},
+				"slug":      map[string]any{"type": "string"},
+				"name":      map[string]any{"type": "string"},
+			}, []string{"source_id", "slug", "name"}),
+			Handler: a.toolSitesClone,
 		},
 		{
 			Name:        "sites_update",

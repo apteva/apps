@@ -11,11 +11,15 @@
        in-template URLs below are relative; never use leading slashes. */ -}}
 <base href="{{ .URLPrefix }}">
 <title>{{ if .PageTitle }}{{ .PageTitle }} &middot; {{ end }}{{ .SiteTitle }}</title>
+{{ if .NoIndex }}<meta name="robots" content="noindex,nofollow">{{ end }}
+{{ if .BrandFaviconURL }}<link rel="icon" href="{{ .BrandFaviconURL }}">{{ end }}
+{{ if .BrandCSS }}<style>{{ .BrandCSS }}</style>{{ end }}
 {{ if .MetaDescription }}<meta name="description" content="{{ .MetaDescription }}">{{ end }}
 {{ if .Canonical }}<link rel="canonical" href="{{ .Canonical }}">{{ end }}
 <link rel="alternate" type="application/rss+xml" title="{{ .SiteTitle }}" href="feed.xml">
 <link rel="preload" as="font" type="font/woff2" crossorigin href="{{ asset "fonts/InterVariable.woff2" }}{{ .ResourceQuery }}">
 <link rel="stylesheet" href="{{ asset "style.css" }}{{ .ResourceQuery }}">
+{{ if .CustomCSS }}<style data-content-custom-css>{{ .CustomCSS }}</style>{{ end }}
 {{ if .OpenGraph }}
 <meta property="og:title" content="{{ .OpenGraph.Title }}">
 <meta property="og:description" content="{{ .OpenGraph.Description }}">
@@ -29,5 +33,6 @@
 {{ block "main" . }}{{ end }}
 </main>
 {{ template "footer" . }}
+{{ if .CustomJS }}<script data-content-custom-js>{{ .CustomJS }}</script>{{ end }}
 </body>
 </html>

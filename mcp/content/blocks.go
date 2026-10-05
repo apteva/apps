@@ -387,6 +387,16 @@ type BlockTypeInfo struct {
 }
 
 var coreBlockTypes = map[string]BlockTypeInfo{
+	"core/section": {
+		Name: "core/section", DisplayName: "Section", Category: "layout", Container: true,
+		Description: "Full-width section with a constrained inner layout. Use for branded backgrounds, spacing, alignment, and responsive landing-page composition.",
+		AttrsSchema: map[string]any{"type": "object", "properties": map[string]any{
+			"background": map[string]any{"type": "string"},
+			"padding":    map[string]any{"type": "string"},
+			"max_width":  map[string]any{"type": "string"},
+			"align":      map[string]any{"type": "string", "enum": []string{"left", "center", "right"}},
+		}},
+	},
 	"core/heading": {
 		Name: "core/heading", DisplayName: "Heading", Category: "text",
 		Description: "H1–H6 heading. Use level=1 once per page (the page's hero); level 2 for section titles, 3 for subsections.",
@@ -430,15 +440,15 @@ var coreBlockTypes = map[string]BlockTypeInfo{
 		AttrsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"eyebrow":      map[string]any{"type": "string"},
-				"heading":      map[string]any{"type": "string"},
-				"body":         map[string]any{"type": "string"},
-				"image_url":    map[string]any{"type": "string"},
+				"eyebrow":        map[string]any{"type": "string"},
+				"heading":        map[string]any{"type": "string"},
+				"body":           map[string]any{"type": "string"},
+				"image_url":      map[string]any{"type": "string"},
 				"image_media_id": map[string]any{"type": "integer"},
-				"image_alt":    map[string]any{"type": "string"},
-				"button_label": map[string]any{"type": "string"},
-				"button_url":   map[string]any{"type": "string"},
-				"reverse":      map[string]any{"type": "boolean"},
+				"image_alt":      map[string]any{"type": "string"},
+				"button_label":   map[string]any{"type": "string"},
+				"button_url":     map[string]any{"type": "string"},
+				"reverse":        map[string]any{"type": "boolean"},
 			},
 		},
 	},
@@ -469,10 +479,10 @@ var coreBlockTypes = map[string]BlockTypeInfo{
 		AttrsSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"quote":       map[string]any{"type": "string"},
-				"author":      map[string]any{"type": "string"},
-				"role":        map[string]any{"type": "string"},
-				"avatar_url":  map[string]any{"type": "string"},
+				"quote":      map[string]any{"type": "string"},
+				"author":     map[string]any{"type": "string"},
+				"role":       map[string]any{"type": "string"},
+				"avatar_url": map[string]any{"type": "string"},
 			},
 		},
 	},

@@ -250,6 +250,7 @@ function defaultAttrs(type: string): Record<string, any> {
     case "core/gallery":   return { media_ids: [], columns: 3 };
     case "core/columns":   return {};
     case "core/group":     return {};
+    case "core/section":   return { background: "", padding: "4rem 0", max_width: "" };
     default:               return {};
   }
 }
@@ -264,7 +265,7 @@ function defaultAttrs(type: string): Record<string, any> {
 // Switching between list and templates is via the top tab bar;
 // opening the editor replaces the view entirely (own back button).
 
-type View = "list" | "templates" | "themes" | "blocks" | "extensions";
+type View = "list" | "templates" | "themes" | "blocks" | "extensions" | "site";
 
 interface ExtensionSetting {
   key: string;
@@ -366,6 +367,7 @@ export default function ContentPanel({ projectId }: NativePanelProps) {
       {view === "themes" && <ThemesView api={api} />}
       {view === "blocks" && <BlocksView api={api} />}
       {view === "extensions" && <ExtensionsView api={api} projectId={projectId} siteSlug={activeSite} />}
+      {view === "site" && <SiteSettingsView api={api} />}
     </div>
   );
 }
@@ -389,6 +391,20 @@ function Tabs({
 }) {
   const [creating, setCreating] = useState(false);
   const [connectingDomain, setConnectingDomain] = useState(false);
+  const cloneSite = async () => {
+    if (!activeSite) return;
+    const source = sites.find((s) => s.slug === activeSite);
+    const slug = window.prompt("New site slug", `${activeSite}-copy`);
+    if (!slug) return;
+    const name = window.prompt("New site name", `${source?.name ?? activeSite} copy`);
+    if (!name) return;
+    try {
+      const response = await fetch(`/api/apps/content/admin/sites/${encodeURIComponent(activeSite)}/clone?project_id=${encodeURIComponent(projectId)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ slug, name }) });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body?.error || `HTTP ${response.status}`);
+      onCreatedSite(); onSiteChange(body.site.slug);
+    } catch (e) { window.alert(String(e)); }
+  };
   const tab = (id: View, label: string) => (
     <button
       key={id}
@@ -408,6 +424,7 @@ function Tabs({
         {tab("themes", "Themes")}
         {tab("blocks", "Blocks")}
         {tab("extensions", "Extensions")}
+        {tab("site", "Site")}
       </div>
       {/* Site switcher — hidden when only one site exists (single-site UX). */}
       {sites.length >= 2 ? (
@@ -438,6 +455,7 @@ function Tabs({
           >
             + New site
           </button>
+          <button onClick={() => void cloneSite()} className="px-2 py-1 text-xs rounded border border-border">Clone site</button>
         </div>
       ) : (
         // Single-site mode: show a discreet "+ Add second site" button
@@ -455,6 +473,7 @@ function Tabs({
           >
             + Add second site
           </button>
+          <button onClick={() => void cloneSite()} className="text-xs text-text-muted hover:text-text">Clone site</button>
         </div>
       )}
       {creating && (
@@ -1212,6 +1231,12 @@ function ListView({
       .then(refresh)
       .catch((e) => setError(String(e)));
   };
+  const createPreview = async (id: number) => {
+    try {
+      const out = await api<{ url: string }>("/admin/preview", { method: "POST", body: JSON.stringify({ post_id: id, ttl_days: 7 }) });
+      window.open(`/api/apps/content${out.url}`, "_blank", "noopener,noreferrer");
+    } catch (e) { setError(String(e)); }
+  };
 
   // Permanent delete — opens a custom confirm modal (no native window.confirm
   // anywhere in this panel; we own the modal styling).
@@ -1338,6 +1363,7 @@ function ListView({
               >
                 <Icon name="trash" />
               </button>
+              {p.status !== "published" && <button onClick={() => void createPreview(p.id)} className="px-2 py-1 text-xs rounded border border-border" title="Create a 7-day noindex preview link">Share preview</button>}
               <a
                 href={
                   p.status === "published"
@@ -2002,6 +2028,16 @@ function BlockEditor({
         </div>
       );
 
+    case "core/section":
+      return (
+        <div className="grid sm:grid-cols-2 gap-2">
+          <input type="text" value={a.background ?? ""} onChange={(e) => setAttr("background", e.target.value)} placeholder="Background (e.g. #f8fafc)" className={input} />
+          <input type="text" value={a.padding ?? ""} onChange={(e) => setAttr("padding", e.target.value)} placeholder="Padding (e.g. 4rem 0)" className={input} />
+          <input type="text" value={a.max_width ?? ""} onChange={(e) => setAttr("max_width", e.target.value)} placeholder="Max width (optional)" className={input} />
+          <select value={a.align ?? "left"} onChange={(e) => setAttr("align", e.target.value)} className="border border-border rounded px-2 py-1 bg-bg-input"><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select>
+        </div>
+      );
+
     case "core/columns":
     case "core/group":
       return (
@@ -2528,6 +2564,60 @@ function ThemesView({ api }: { api: ReturnType<typeof makeAPI> }) {
       </footer>
     </div>
   );
+}
+
+function SiteSettingsView({ api }: { api: ReturnType<typeof makeAPI> }) {
+  const [settings, setSettings] = useState<Record<string, string>>({});
+  const [issues, setIssues] = useState<Array<{ severity: string; message: string; slug?: string }>>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [sitePreview, setSitePreview] = useState<string | null>(null);
+  const load = useCallback(async () => {
+    setLoading(true); setError(null);
+    try {
+      const [s, p] = await Promise.all([
+        api<{ settings: Record<string, string> }>("/admin/settings"),
+        api<{ issues: Array<{ severity: string; message: string; slug?: string }> }>("/admin/preflight"),
+      ]);
+      setSettings(s.settings ?? {}); setIssues(p.issues ?? []);
+    } catch (e) { setError(String(e)); } finally { setLoading(false); }
+  }, [api]);
+  useEffect(() => { void load(); }, [load]);
+  const fields = [
+    ["site_title", "Site title", "text"], ["site_tagline", "Tagline", "text"],
+    ["brand_logo_url", "Logo URL", "text"], ["brand_favicon_url", "Favicon URL", "text"],
+    ["brand_primary_color", "Primary color", "color"], ["brand_secondary_color", "Secondary color", "color"],
+    ["brand_font_family", "Font family", "text"], ["public_base_url", "Public base URL", "url"],
+  ] as const;
+  async function save(key: string) {
+    setSaving(key); setError(null);
+    try { await api("/admin/settings", { method: "POST", body: JSON.stringify({ key, value: settings[key] ?? "" }) }); }
+    catch (e) { setError(String(e)); } finally { setSaving(null); }
+  }
+  async function createSitePreview() {
+    try { const out = await api<{ url: string }>("/admin/site-preview", { method: "POST" }); const full = `/api/apps/content${out.url}`; setSitePreview(full); window.open(full, "_blank", "noopener,noreferrer"); }
+    catch (e) { setError(String(e)); }
+  }
+  async function exportTemplate() {
+    const name = window.prompt("Template slug", "prospect-site"); if (!name) return;
+    try { const out = await api<{ body: string }>("/admin/templates/export", { method: "POST", body: JSON.stringify({ name, display_name: name, register: true }) }); const blob = new Blob([out.body], { type: "text/yaml" }); const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = `${name}.yaml`; link.click(); URL.revokeObjectURL(link.href); }
+    catch (e) { setError(String(e)); }
+  }
+  if (loading) return <div className="p-4 text-sm text-text-muted">Loading site settings…</div>;
+  return <div className="p-4 text-sm max-w-3xl">
+    <header className="flex items-center justify-between mb-4"><div><h2 className="text-base font-semibold">Site identity</h2><p className="text-xs text-text-muted">Branding is applied across the selected site.</p></div><div className="flex gap-2"><button onClick={() => void createSitePreview()} className="px-2 py-1 rounded border border-border text-xs">Share site preview</button><button onClick={() => void exportTemplate()} className="px-2 py-1 rounded border border-border text-xs">Export template</button><button onClick={() => void load()} className="px-2 py-1 rounded border border-border text-xs">Refresh</button></div></header>
+    {sitePreview && <p className="text-xs text-text-muted mb-3 break-all">Preview link: <a href={sitePreview} target="_blank" rel="noreferrer" className="text-accent">{sitePreview}</a></p>}
+    {error && <div className="bg-red-100 text-red-800 rounded px-3 py-2 mb-3">{error}</div>}
+    <div className="grid sm:grid-cols-2 gap-3">
+      {fields.map(([key, label, type]) => <label key={key} className="block"><span className="text-xs text-text-muted">{label}</span><div className="flex gap-2 mt-1"><input type={type} value={settings[key] ?? ""} onChange={(e) => setSettings((s) => ({ ...s, [key]: e.target.value }))} className="flex-1 border border-border rounded px-2 py-1 bg-bg-input" /><button onClick={() => void save(key)} disabled={saving === key} className="px-2 py-1 rounded border border-border text-xs">{saving === key ? "Saving…" : "Save"}</button></div></label>)}
+    </div>
+    <div className="grid lg:grid-cols-2 gap-3 mt-4">
+      {([['custom_css', 'Custom CSS'], ['custom_js', 'Custom JavaScript']] as const).map(([key, label]) => <label key={key} className="block"><span className="text-xs text-text-muted">{label}</span><textarea rows={8} value={settings[key] ?? ""} onChange={(e) => setSettings((s) => ({ ...s, [key]: e.target.value }))} className="block w-full mt-1 border border-border rounded px-2 py-1 bg-bg-input font-mono text-xs" placeholder={key === 'custom_css' ? ':root { --accent: #0f766e; }' : '/* optional site behavior */'} /><button onClick={() => void save(key)} disabled={saving === key} className="mt-1 px-2 py-1 rounded border border-border text-xs">{saving === key ? "Saving…" : `Save ${label}`}</button></label>)}
+    </div>
+    <label className="flex items-center gap-2 mt-4"><input type="checkbox" checked={(settings.search_indexing ?? "true") !== "false"} onChange={(e) => setSettings((s) => ({ ...s, search_indexing: e.target.checked ? "true" : "false" }))} /><span>Allow search indexing</span><button onClick={() => void save("search_indexing")} className="ml-2 px-2 py-1 rounded border border-border text-xs">Save</button></label>
+    <section className="mt-8"><h3 className="font-semibold mb-2">Pre-publication checks</h3>{issues.length === 0 ? <p className="text-emerald-700">No issues found.</p> : <ul className="space-y-1">{issues.map((issue, i) => <li key={i} className={`${issue.severity === "error" ? "text-red-700" : "text-amber-700"} text-xs`}>{issue.severity}: {issue.message}{issue.slug ? ` (${issue.slug})` : ""}</li>)}</ul>}</section>
+  </div>;
 }
 
 // ── blocks view (catalog browser) ────────────────────────────────

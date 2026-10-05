@@ -1,7 +1,7 @@
 {{ define "header" }}
 <header class="site-header">
   <div class="container site-header__inner">
-    <a class="site-title" href="./">{{ .SiteTitle }}</a>
+    <a class="site-title" href="./">{{ if .BrandLogoURL }}<img class="site-logo" src="{{ .BrandLogoURL }}" alt="{{ .SiteTitle }}">{{ else }}{{ .SiteTitle }}{{ end }}</a>
     {{ if .PrimaryMenu }}
     <nav class="site-nav">
       <ul>

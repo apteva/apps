@@ -127,10 +127,15 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/admin/menus", Handler: a.handleHTTPMenus},
 		{Pattern: "/admin/redirects", Handler: a.handleHTTPRedirects},
 		{Pattern: "/admin/settings", Handler: a.handleHTTPSettings},
+		{Pattern: "/admin/preflight", Handler: a.handleHTTPPreflight},
+		{Pattern: "/admin/preview", Handler: a.handleHTTPPreview},
+		{Pattern: "/admin/site-preview", Handler: a.handleHTTPSitePreview},
+		{Pattern: "/admin/preview/revoke", Handler: a.handleHTTPPreviewRevoke},
 		{Pattern: "/admin/themes", Handler: a.handleHTTPThemes},
 		{Pattern: "/admin/block-types", Handler: a.handleHTTPBlockTypes},
 		{Pattern: "/admin/domain-options", Handler: a.handleHTTPDomainOptions},
 		{Pattern: "/admin/templates", Handler: a.handleHTTPTemplates},
+		{Pattern: "/admin/templates/export", Handler: a.handleHTTPTemplateExport},
 		{Pattern: "/admin/templates/", Handler: a.handleHTTPTemplateItem},
 		{Pattern: "/admin/sites", Handler: a.handleHTTPSites},
 		{Pattern: "/admin/sites/", Handler: a.handleHTTPSiteItem},
@@ -145,6 +150,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/_actions/", Handler: a.handleExtensionAction, NoAuth: true},
 		{Pattern: "/_forms/submit/", Handler: a.handleFormSubmit, NoAuth: true},
 		{Pattern: "/preview/", Handler: a.handlePreview, NoAuth: true},
+		{Pattern: "/preview-site/", Handler: a.handleSitePreview, NoAuth: true},
 		{Pattern: "/feed.xml", Handler: a.handleFeed, NoAuth: true},
 		{Pattern: "/sitemap.xml", Handler: a.handleSitemap, NoAuth: true},
 		{Pattern: "/", Handler: a.handlePublic, NoAuth: true},
@@ -177,6 +183,8 @@ func (a *App) handlePublicGateway(w http.ResponseWriter, r *http.Request) {
 		a.handleFormSubmit(w, publicRequest)
 	case strings.HasPrefix(publicRequest.URL.Path, "/preview/"):
 		a.handlePreview(w, publicRequest)
+	case strings.HasPrefix(publicRequest.URL.Path, "/preview-site/"):
+		a.handleSitePreview(w, publicRequest)
 	case publicRequest.URL.Path == "/feed.xml":
 		a.handleFeed(w, publicRequest)
 	case publicRequest.URL.Path == "/sitemap.xml":
