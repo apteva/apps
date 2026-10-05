@@ -150,7 +150,11 @@ It exposes:
 Change IDs are watermarks, not counts; unrelated source tables do not increase a
 projection's latest relevant watermark. Consumption alone never declares a
 result ready. Scope inspection considers that scope and whole rebuild requests;
-unconsumed relevant changes conservatively make scopes stale until mapped.
+unconsumed relevant changes newer than the published snapshot conservatively
+make scopes stale until mapped. A full build publishes the watermark of its
+calculation snapshot even when log consumption is still catching up; those
+already covered events do not enqueue redundant automatic refreshes. Explicit
+refresh requests are preserved regardless of source watermark.
 Initial projections report not ready until the first complete successful build.
 A missing scope in a complete build represents an empty result.
 

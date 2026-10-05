@@ -15,6 +15,88 @@ func projectionStatusFor(t *testing.T, a *App, ctx *sdk.AppCtx, args map[string]
 	t.Helper()
 	return mustCall(t, a, ctx, "projections_status", args)
 }
+
+func TestProjectionFullPublicationCoversUnconsumedEvents(t *testing.T) {
+	ctx := newTestCtx(t)
+	a := &App{}
+	projectionSourceTable(t, a, ctx)
+	createProjection(t, a, ctx)
+	rows := make([]any, projectionChangeBatch+100)
+	for i := range rows {
+		rows[i] = map[string]any{"centre_id": "a", "value": i}
+	}
+	mustCall(t, a, ctx, "rows_insert", map[string]any{"table": "events", "rows": rows})
+	if err := a.consumeProjectionChanges(context.Background(), ctx, "test-proj"); err != nil {
+		t.Fatal(err)
+	}
+	item, ok, err := claimProjectionQueue(context.Background(), ctx, "test-proj")
+	if err != nil || !ok || item.ScopeKey != projectionAllScope {
+		t.Fatalf("expected initial whole build: %v %v %v", item, ok, err)
+	}
+	if err := a.refreshProjectionScope(context.Background(), ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	status := func(scope string) map[string]any {
+		args := map[string]any{"name": "event_totals"}
+		if scope != "" {
+			args["scope"] = map[string]any{"centre_id": scope}
+		}
+		return projectionStatusFor(t, a, ctx, args)
+	}
+	for _, scope := range []string{"", "a", "empty"} {
+		s := status(scope)
+		if s["ready"] != true || s["pending_scopes"] != 0 || s["published_change_id"] != s["latest_relevant_change"] || s["unconsumed_relevant_changes"] != true || s["consumed_change_id"].(int64) >= s["published_change_id"].(int64) {
+			t.Fatalf("successful full snapshot mislabeled for %q: %v", scope, s)
+		}
+	}
+	if got := projectionRows(t, a, ctx); len(got) != 1 || got[0]["total"] != float64(len(rows)) {
+		t.Fatal("build did not include the unconsumed events", got)
+	}
+	// A manual refresh still needs publication even without a new source ID.
+	mustCall(t, a, ctx, "projections_refresh", map[string]any{"name": "event_totals", "scope": map[string]any{"centre_id": "a"}, "force": true})
+	if err := a.consumeProjectionChanges(context.Background(), ctx, "test-proj"); err != nil {
+		t.Fatal(err)
+	}
+	if s := status(""); s["ready"] != false || s["pending_scopes"] != 1 || s["unconsumed_relevant_changes"] != false {
+		t.Fatal("consumption lost manual request or requeued covered events", s)
+	}
+	runProjectionWorker(t, a, ctx)
+	if s := status(""); s["ready"] != true {
+		t.Fatal("manual request did not publish", s)
+	}
+	// A newer change is not covered by the previous full snapshot. Until mapped,
+	// all scopes are conservative; after mapping, only its own scope is stale.
+	for i := range rows {
+		rows[i] = map[string]any{"centre_id": "b", "value": i}
+	}
+	mustCall(t, a, ctx, "rows_insert", map[string]any{"table": "events", "rows": rows})
+	if status("")["ready"] != false || status("a")["ready"] != false {
+		t.Fatal("newer unconsumed change incorrectly declared ready")
+	}
+	if err := a.consumeProjectionChanges(context.Background(), ctx, "test-proj"); err != nil {
+		t.Fatal(err)
+	}
+	if status("")["ready"] != false || status("b")["ready"] != false {
+		t.Fatal("newer mapped change lost scoped freshness", status(""), status("a"), status("b"))
+	}
+	item, ok, err = claimProjectionQueue(context.Background(), ctx, "test-proj")
+	if err != nil || !ok || item.ScopeKey == projectionAllScope {
+		t.Fatalf("expected scoped build: %v %v %v", item, ok, err)
+	}
+	if err := a.refreshProjectionScope(context.Background(), ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	if status("")["ready"] != false || status("b")["ready"] != true {
+		t.Fatal("scoped snapshot did not cover its unconsumed events", status(""), status("b"))
+	}
+	if err := a.consumeProjectionChanges(context.Background(), ctx, "test-proj"); err != nil {
+		t.Fatal(err)
+	}
+	if status("")["ready"] != true || status("")["pending_scopes"] != 0 || status("a")["ready"] != true || len(projectionRows(t, a, ctx)) != 2 {
+		t.Fatal("newer event was not published")
+	}
+}
+
 func TestProjectionIntervalRestartForceAndRelevantFreshness(t *testing.T) {
 	ctx := newTestCtx(t)
 	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)

@@ -21,8 +21,9 @@ projection regression suite cover:
   local day, canonical numeric/boolean scopes and safe scalar binding.
 - Persisted intervals, non-sliding deadlines under continuous changes, clean vs
   dirty scope readiness, unrelated changes, explicit force during a claim,
-  consumed vs published watermarks, reserved revision changes, and reopening the
-  actual SQLite file.
+  consumed vs published watermarks, full/scoped snapshots ahead of log
+  consumption without redundant refreshes or lost manual requests, reserved
+  revision changes, and reopening the actual SQLite file.
 - Initial not-ready state, building versions, activation gates, failed
   replacements, source changes during builds, index retention/version selection,
   safe result writes and coverage retained through failure.

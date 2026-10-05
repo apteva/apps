@@ -498,7 +498,7 @@ func (a *App) consumeProjectionChanges(ctx context.Context, app *sdk.AppCtx, pid
 		var mappingFailure string
 		invalidationCtx := context.WithValue(ctx, projectionInvalidationCacheKey{}, map[string][]map[string]any{})
 		for _, c := range changes {
-			if !c.relevant {
+			if !c.relevant || c.id <= p.Published {
 				continue
 			}
 			if mappingFailure != "" {
@@ -547,6 +547,18 @@ func (a *App) consumeProjectionChanges(ctx context.Context, app *sdk.AppCtx, pid
 			}
 		}
 		for key, watermark := range pending {
+			// A publication may already include events whose log records have not
+			// been consumed yet. Check again under the writer lock to also cover a
+			// publication that completed while dependency mappings were calculated.
+			// Explicit refresh requests still enqueue normally, regardless of watermark.
+			var covered int64
+			if err := tx.QueryRowContext(ctx, `SELECT MAX(published_change,COALESCE((SELECT MAX(watermark) FROM `+quote(projectionHeads(p))+` WHERE scope_key IN (?,?)),0)) FROM projection_definitions WHERE id=?`, key, projectionAllScope, p.ID).Scan(&covered); err != nil {
+				tx.Rollback()
+				return err
+			}
+			if watermark <= covered {
+				continue
+			}
 			if err := enqueueProjectionTx(ctx, tx, p, key, watermark, a.projectionTime().UnixMilli(), false); err != nil {
 				tx.Rollback()
 				return err

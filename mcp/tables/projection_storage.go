@@ -298,10 +298,10 @@ func publishProjectionGeneration(ctx context.Context, app *sdk.AppCtx, p *projec
 				return err
 			}
 		}
-		// Overall freshness advances only once every dirty scope was published and
-		// the captured relevant log has been consumed. A consumed cursor alone never
-		// declares results ready.
-		_, err := tx.ExecContext(c, `UPDATE projection_definitions SET built=1,published_at_ms=?,last_failure=NULL,published_change=CASE WHEN NOT EXISTS(SELECT 1 FROM projection_queue WHERE projection_id=?) AND latest_relevant_change<=? AND (SELECT last_change_id FROM projection_cursors WHERE projection_id=?)>=latest_relevant_change THEN latest_relevant_change ELSE published_change END,updated_at=CURRENT_TIMESTAMP WHERE id=?`, now, p.ID, watermark, p.ID, p.ID)
+		// A full publication covers its entire calculation snapshot, even when the
+		// change-log cursor is still catching up. Scoped publications advance overall
+		// freshness only after every relevant change was mapped and every queue drained.
+		_, err := tx.ExecContext(c, `UPDATE projection_definitions SET built=1,published_at_ms=?,last_failure=NULL,published_change=CASE WHEN ? THEN MAX(published_change,?) WHEN NOT EXISTS(SELECT 1 FROM projection_queue WHERE projection_id=?) AND latest_relevant_change<=? AND (SELECT last_change_id FROM projection_cursors WHERE projection_id=?)>=latest_relevant_change THEN latest_relevant_change ELSE published_change END,updated_at=CURRENT_TIMESTAMP WHERE id=?`, now, item.ScopeKey == projectionAllScope, watermark, p.ID, watermark, p.ID, p.ID)
 		return err
 	})
 }
