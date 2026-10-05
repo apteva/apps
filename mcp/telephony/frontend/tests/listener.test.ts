@@ -6,7 +6,7 @@ import { decodeListenerFrame, type ListenerAudioCallbacks, type ListenerAudioRun
 function fixture() {
   const requests: Array<{ url: URL; body: any }> = [];
   let response: (url: URL) => unknown = url => url.pathname.includes("listen-renew") || url.pathname.includes("listen-stop") ? { ok: true } : ({ call_id: "call", media_url: "/api/apps/telephony/_install/42/softphone/listen-media/call/secret", session_token: "secret", lease_seconds: 60 });
-  const sdk = new AptevaClient({ baseURL: "https://gateway.example", accessToken: "user-token", fetch: (async (url, init) => { const parsed = new URL(String(url)); requests.push({ url: parsed, body: init?.body ? JSON.parse(String(init.body)) : undefined }); return Response.json(await response(parsed)); }) as typeof fetch });
+  const sdk = new AptevaClient({ baseURL: "https://gateway.example", accessToken: "user-token", fetch: (async (url, init) => { const parsed = new URL(String(url)); requests.push({ url: parsed, body: init?.body ? JSON.parse(String(init.body)) : undefined }); const value=await response(parsed); return value instanceof Response ? value : Response.json(value); }) as typeof fetch });
   const client = new TelephonyClient(sdk.app("telephony", { projectId: "project", installId: 42 }), { authProvider: "auth" });
   let callbacks: ListenerAudioCallbacks | undefined;
   let stopped = 0;
@@ -96,4 +96,21 @@ describe('private coaching SDK',()=>{
   await listener.stop();resolve({call_id:'call',media_url:'/api/apps/telephony/_install/42/softphone/listen-media/call/secret',session_token:'secret',lease_seconds:60,coaching:true});await start;
   expect(f.stopped).toBe(0);expect(f.requests.some(r=>r.url.pathname.endsWith('/coach-stop/call'))).toBe(true);await listener.dispose();
  });
+});
+
+
+for(const coaching of [false,true]) test(`${coaching?'coaching':'listening'} keeps media through temporary renewal failures`,async()=>{
+ const f=fixture();let renews=0;const events:any[]=[];
+ f.setResponse(url=>{
+  if(url.pathname.includes('-renew/')) {if(++renews===1)return Response.json({code:'temporary_outage'},{status:503});return {lease_seconds:10};}
+  if(url.pathname.includes('-stop/'))return {ok:true};
+  return {call_id:'call',media_url:'/api/apps/telephony/_install/42/softphone/listen-media/call/secret',session_token:'secret',lease_seconds:10,coaching};
+ });
+ const listener=f.client.createCallListener({runtime:f.runtime,onSessionEvent:e=>events.push(e)});
+ try {
+  if(coaching)await listener.coach('call');else await listener.listen('call');
+  await Bun.sleep(3700);
+  expect(renews).toBe(2);expect(f.stopped).toBe(0);expect(listener.getSnapshot().state).toBe('listening');
+  expect(events.some(e=>e.outcome==='retrying'&&e.status===503)).toBe(true);expect(events.at(-1).outcome).toBe('renewed');
+ } finally {await listener.dispose();}
 });

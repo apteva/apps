@@ -47,14 +47,15 @@ type benchmarkDirection struct {
 	TailReceived    int     `json:"final_two_seconds_markers"`
 }
 type benchmarkBrowserResult struct {
-	WireDiagnostics []json.RawMessage `json:"wire_diagnostics"`
-	Markers         []bench.Marker    `json:"markers"`
-	Notices         []map[string]any  `json:"notices"`
-	States          []map[string]any  `json:"states"`
-	Diagnostics     []map[string]any  `json:"diagnostics"`
-	PageErrors      []string          `json:"page_errors"`
-	BrowserVersion  string            `json:"browser_version"`
-	StartAt         int64             `json:"start_at"`
+	ClockProgress   map[string]float64 `json:"clock_progress,omitempty"`
+	WireDiagnostics []json.RawMessage  `json:"wire_diagnostics"`
+	Markers         []bench.Marker     `json:"markers"`
+	Notices         []map[string]any   `json:"notices"`
+	States          []map[string]any   `json:"states"`
+	Diagnostics     []map[string]any   `json:"diagnostics"`
+	PageErrors      []string           `json:"page_errors"`
+	BrowserVersion  string             `json:"browser_version"`
+	StartAt         int64              `json:"start_at"`
 }
 type benchmarkResult struct {
 	Profile           bench.Profile              `json:"profile"`
@@ -234,6 +235,18 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 			io.WriteString(w, `<!doctype html><title>Local Telephony network benchmark</title><script type="module" src="/entry.js"></script>`)
 		case "/config":
 			writeTier2JSON(w, map[string]any{"media_url": "ws://" + proxy.Addr() + "/softphone/media/" + id + "/" + session.SessionToken, "duration_ms": duration, "drain_ms": 2500, "mute_microphone": profile.MuteMicrophone, "reconnect_browser": profile.ReconnectBrowser})
+		case "/refresh-media":
+			if r.Method != "POST" {
+				w.WriteHeader(405)
+				return
+			}
+			var fresh softphoneSession
+			result := sc.POST("/softphone/attach/"+id, map[string]any{}, &fresh)
+			if result.Status != 200 {
+				w.WriteHeader(result.Status)
+				return
+			}
+			writeTier2JSON(w, map[string]any{"media_url": "ws://" + proxy.Addr() + "/softphone/media/" + id + "/" + fresh.SessionToken})
 		case "/disconnect-browser":
 			if r.Method != "POST" {
 				w.WriteHeader(405)

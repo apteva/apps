@@ -408,8 +408,8 @@ func TestReliabilityFailedSessionCreationReleasesOwnerAndCapacity(t *testing.T) 
 	}
 	alice := phoneTestIdentity("alice")
 	response := phoneTestRequest(a, &alice, "POST", "/softphone/answer/"+row.ID, map[string]any{})
-	if response.Code != 403 {
-		t.Fatalf("session failure %d %s", response.Code, response.Body)
+	if response.Code != 503 || !strings.Contains(response.Body.String(), "media_session_unavailable") {
+		t.Fatalf("temporary session failure %d %s", response.Code, response.Body)
 	}
 	current, err := a.db().findCall(row.ID)
 	if err != nil {

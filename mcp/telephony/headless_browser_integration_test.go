@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
@@ -19,6 +20,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -153,6 +155,9 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 		r.Header.Set("X-Apteva-Project-ID", tier2Project)
 	}
 	var audioVerified atomic.Bool
+	var mediaMu sync.Mutex
+	var mediaConn net.Conn
+	var mediaConnections int
 	public := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", hostOrigin)
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
@@ -160,6 +165,23 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 		if r.URL.Path == "/fixture/logout" && authSidecar != nil && r.Method == http.MethodPost {
 			result := authSidecar.POST("/logout", map[string]any{"refresh_token": refreshToken}, nil)
 			w.WriteHeader(result.Status)
+			return
+		}
+		if r.URL.Path == "/fixture/drop-browser" {
+			mediaMu.Lock()
+			c := mediaConn
+			mediaMu.Unlock()
+			if c != nil {
+				_ = c.Close()
+			}
+			writeTier2JSON(w, map[string]bool{"ok": c != nil})
+			return
+		}
+		if r.URL.Path == "/fixture/media-connections" {
+			mediaMu.Lock()
+			n := mediaConnections
+			mediaMu.Unlock()
+			writeTier2JSON(w, map[string]int{"count": n})
 			return
 		}
 		if r.URL.Path == "/fixture/audio-ready" {
@@ -189,6 +211,10 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 			return
 		}
 		r.URL.Path = path
+		if strings.HasPrefix(path, "/softphone/media/") {
+			proxy.ServeHTTP(&phoneSocketRecorder{ResponseWriter: w, onHijack: func(c net.Conn) { mediaMu.Lock(); mediaConn = c; mediaConnections++; mediaMu.Unlock() }}, r)
+			return
+		}
 		proxy.ServeHTTP(w, r)
 	}))
 	defer public.Close()
@@ -329,4 +355,18 @@ func checkDeployedPhoneFrontend(t *testing.T, base, bearer string) {
 		t.Fatal("deployed frontend integrity mismatch")
 	}
 	t.Log("Deployed 0.4.1 manifest and hashed client accepted a genuine Auth bearer")
+}
+
+// Record the actual proxy socket, including connections initiated by Workers.
+type phoneSocketRecorder struct {
+	http.ResponseWriter
+	onHijack func(net.Conn)
+}
+
+func (w *phoneSocketRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	c, r, err := w.ResponseWriter.(http.Hijacker).Hijack()
+	if err == nil {
+		w.onHijack(c)
+	}
+	return c, r, err
 }

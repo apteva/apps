@@ -1,3 +1,4 @@
+import type { MediaSessionEvent } from "./media-lease";
 import { SoftphoneSession, MicrophoneTestSession, DEFAULT_SOFTPHONE_AUDIO_OPTIONS, microphoneConstraints, type SoftphoneAudioOptions, type SoftphoneCallbacks } from "../../ui/softphone-audio";
 import type { AppHandle } from "@apteva/web-sdk";
 import { embeddedAudioModules, loadAudioModules, type AudioModules } from "./audio-assets";
@@ -50,6 +51,7 @@ export function createMicrophonePreview(onLevel?: (level: number) => void, app?:
 export interface AudioConnection {
   start(url: string, options: SoftphoneAudioOptions): Promise<void>;
   stop(): void;
+  recordSessionEvent?(event: MediaSessionEvent): void;
   setMuted(muted: boolean): void;
   sendDTMF(digits: string): void;
   setOutputVolume(volume: number): void;
@@ -86,6 +88,7 @@ export function createBrowserAudio(app?: AppHandle): AudioRuntime { return {
         } catch (error) { stop(); throw error; }
       },
       stop,
+      recordSessionEvent: event => session.recordSessionEvent(event),
       setMuted: value => session.setMuted(value),
       sendDTMF: digits => session.sendDTMF(digits),
       setOutputVolume: value => session.setOutputVolume(value),

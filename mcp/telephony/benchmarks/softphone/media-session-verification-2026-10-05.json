@@ -1,0 +1,1039 @@
+{
+  "schema": "telephony-local-verification/v1",
+  "date": "2026-10-05",
+  "base_release": "0.10.0",
+  "scope": "Telephony only; no production/staging activation or live calls",
+  "source_sha256": {
+    "ai_handoff.go": "3944411e4a612c30bf4c7cd2344555f8437dde886907029627944bdf90efa533",
+    "application_sessions.go": "d83fdb616d073c50e6634c06f00a55b723e3faadbb5e8293e500f85b6c3372d2",
+    "application_users.go": "237120403fd73a21d298b0448e0cb65b17a9c075e0e56530c133969fd4f57037",
+    "apteva.yaml": "2c4ca4515ed158f4e5806436c9ac71bd1d169130c6a642cdce0219eff8a8cf6d",
+    "audio_diagnostics_store.go": "1d1c4c032b78265a7247ce44c5181e4ab23cbc760daa7adf88cf6fd8291eaa11",
+    "audio_frontend.go": "1e1f5a6a129e14d7fa6a27ab06359f465573ff7f33e1a7e43fb3bd72628819c1",
+    "audio_resampler.go": "e5deb19e91fcbff0f9d58648cb062f503e214b47e741eae2cb511499c0b69612",
+    "audio_transport_diagnostics.go": "3fe10c4ff4da4597ea3fa00ea51b1ecccc0f09a911619db7f2847b1500d04d75",
+    "bandwidth.go": "d04888c7e3f743a9f7cfc5f22604b8e6b734ce9f3a8b0835e22ec6f5217b4550",
+    "bandwidth_route.go": "7b00f177ed65e2772ad836a1e10718c05e12a1ed95e1b85c2b830dda49079e40",
+    "bridge_carriers.go": "51dde842c45e43e895d02e5ef80d91ee1ae9ff2b4c59bef25e15a6a6c5a73081",
+    "bridge_twilio.go": "9153147dc3cd4076ad2f5921f205f00a5cee3c9301f2bfe1482712e173fd7d9d",
+    "browser_offer.go": "f1ec36992965327b1cf83fca4bec0b173b30abbb79682651a66bc7388adbb520",
+    "call_classification.go": "a5915395655842d0fb3805025cd2962ab835fc390818513992016bd9f264d715",
+    "call_coaching.go": "2158490cd339b5aebc9c32196953ca4554f58596bea2345e606d425f386d3d1d",
+    "call_controls.go": "d296337e72713a88b32e5f50ad57f483ad4c9c53d7321ae4043e321682c85222",
+    "call_duration.go": "fa96d497f0a83d171b734ab668742e2b01c831598896ae0d310dd9e6ae50ec65",
+    "call_listeners.go": "68905ef1e1092ae71c27ed9bcbc39db56a508a841b7a5c98ff6bf18e494c4ebc",
+    "call_notifications.go": "f527e125173d6c2bfa62ca937c2d9f586e4c67161b99867854b87d21b60d0d52",
+    "call_progress.go": "6855c17997c895e1251776d2c29c6e31a667bb0ef06cae5857a5695945c90559",
+    "carrier.go": "23052cdf88c499c3a3aff3c6e808a3b052ad3894f5f280e8ae2f96e09ed64c72",
+    "carrier_activation.go": "60ec6d9455488390a97f4f64a72b04fd92e3f9ffe05bdccb7e195c09f7ea50c6",
+    "carrier_media_profile.go": "00f403de47e4498c605cae976ba8bec5e3d520825213adb45d0a2f382440cc58",
+    "carrier_media_timing.go": "5768ec1e8f435f060f965be69c61016965962c51358ad689e1f429e89e04c7ba",
+    "carrier_pacer.go": "1e9fb07751afbb6dfe8b2900f95946724578ddd81d90491303369deb8c392cf4",
+    "carrier_signaling.go": "240f3e2bbb5b9febf7fef68dfd89965b7fe03914454e528fdeb1a46a09de3f5e",
+    "carrier_termination.go": "6c6846157d79138816ebd193f5d48e1fa3636e0c9faa8e18a79ce69e9e4973c6",
+    "connected_numbers.go": "84a1f46a06e5c87b9007799f03c8a7c80880b7ee4455c93d4e5eb4d2467635aa",
+    "didww_documents.go": "e451fcc48332a8057b65f90e4614b3ddaceae7eb79def847c14a979af666c81a",
+    "didww_numbers.go": "2aa7ffba5ae37318c0f66740ba35fec924b47673246d25e4693e15c70d8c86cd",
+    "didww_outbound.go": "f23460a3e31a4f8561b2477bf3d8a4d5c222fd822a12b7096168b5d671009495",
+    "didww_resources.go": "aa2a13bcb200420ceda6801f1648e4d9abb8489dfc191a22e9f5a3a0431c9aa9",
+    "didww_sip.go": "67dbb23709774a7e4850aaadd06d42e9078d1cbac80f47b0e94bf3918e150107",
+    "frontend/src/assets.d.ts": "84c46e86959aaeb1634f9aa03b7a5df5bb5f4eb5f4f92f66fea5bca674930f35",
+    "frontend/src/audio-assets.ts": "055f38a6d025600cdb08eb146b9524af26ea9e71f622d6321a352f6398e9d000",
+    "frontend/src/audio.ts": "21d06522add46fab60fe86adc7cea5fbbe04e8ab2358f8ff2a8ab19174cb70dd",
+    "frontend/src/client.ts": "81a6b3eac3889775403c88a66dc56eaae71d02f1bead1fa1cfd04495b4f137ad",
+    "frontend/src/index.ts": "458c8d0627b45fb57b825b82fece6b581ce98347614c9f250960bb1af0f41580",
+    "frontend/src/listener-audio.ts": "d2e4f5086a10ab7adcbe981bf96910f73fd435010a408cb187793a16f6cbde4d",
+    "frontend/src/listener.ts": "6ad06c5d4c84176b15e8dcae0b99c68e8cc4781acd8e86079c2d27221d2b36d7",
+    "frontend/src/media-lease.ts": "c7213fcaf2d00dc7e6b4f816be7c8229691eae1cdf2514d0a5d8475a552d356f",
+    "frontend/src/softphone.ts": "ab294c9f01df0b4953ed14703a98c6a3e9ab892faf33db300935bee23ed09912",
+    "go.mod": "297001101b30ac52ae5921d789396c8882ffd4a7ef95bb5f66ba7bc602998363",
+    "go.sum": "6394389717c6438c9fd67347803b69e94b7709c157926b44464cbbbefd4e2840",
+    "inbound_carrier_capabilities.go": "ef0b9ed753ba5985b1b32c0cae6691edd2555a6b4864a8c4fc8cf752601978c1",
+    "inbound_protection.go": "3a5fc67a5a1f8c9d0ddfd8ffa128df60df13cd1f7ba18b41669f4f6ad90f4262",
+    "lifecycle.go": "e48be1e874845d5e17d20616182666fc0270685f3cef8c4959eacbf3a825fb6b",
+    "lifecycle_events.go": "f5398121e8e8fb1657ccf0d3752c40aaac8f8a7bc3726ce73af1b7776dae2302",
+    "live_audio_diagnostics.go": "296d57b74fc603f2a25f1b522122e4b4c6ebb912e3fd21dbb91cc5a51e9e47b2",
+    "main.go": "20bf670ca24acfd33287a046e60ce70347999ff7b5d038e85fe6a75e1e800339",
+    "numbers.go": "cedb28bfbc5c44e148505bc9bf8e7f30876442f7f9e7685cddca1036af2cb0fc",
+    "outbound_config.go": "6382f03bd7f356b7566150545b606a2537105318ddc0f7f38437cbe067c3b71c",
+    "phone_capacity.go": "cf9a3909231d8a300c7b41de475156c1570ec824d19dac97ebfeab85eb8a83a9",
+    "platform_routes.go": "8afcb97666207b9bc1fb4a07ba18ee7a0b14cda6f771c549cdf427eba248765c",
+    "plivo_route.go": "1889926b2d3bc5eb42c1505955aba330437bb69702ae81eef7780664cb2ba845",
+    "realtime_preparation.go": "db51c69611112a9d4a2cfc70ec56a8ca9f8489e81b18b8f87aaebe8f2491b1ae",
+    "recording.go": "d54ce415ac418471dd906d3a6cdd6a314d57dc95e41efd4da6c9b16fec66b618",
+    "recording_audio.go": "7dacd126526ad6a47a5cf95f91799043f468071b9b95175b2e17c1081933b133",
+    "recording_cache.go": "1e9c4eba9a9b5b874ab3a196c552447eed25a33f5f2b3fc4aa5da878ff495a80",
+    "recording_cleanup.go": "1fc0cbdc7ca3e546794ec6886a34dec638d2301b334236cd21097b1432d3cca8",
+    "recording_providers.go": "c241357fa24eab81469445815992542e528a2e95cf04097681a4425a4783b915",
+    "recording_storage.go": "7b7a83fe0312a72b07624fa18e84c0081bfa2defe6b88a1763b5af1f45c55f00",
+    "ring_groups.go": "1ae6025836b55f2661f52136f27021666f3f879d66af725b64ccd14e8edeeafc",
+    "ring_legs.go": "8d8aeb4d7391b7a856eac2c9667df12409991f21778330a6be656b51bc1c2eb6",
+    "routing.go": "11b1ea179ad786dff11c367047582390d8606523e1a411e9eb884bc2c7c325ef",
+    "routing_decisions.go": "b3e493708c830c7d9af4ae0aa49582aac6268eb04df0a68a0331953f0b593786",
+    "routing_dispatcher.go": "264e723a66317134c53bedff231d2cc09dfe08d408e5d935db9a044bdd299928",
+    "routing_effects.go": "173d5cf828bf521e88ecf022ef5dfee136863006823ff2a6535827cc119f23d8",
+    "security.go": "54d394ba918ea68247d4e505f3f04353dcc748e225c25162550135e2d1f2e799",
+    "sinch_carrier.go": "a350485dbd795d296a2490dedd16a9ca5ea06652fd44ed7c7c7a7636764e3033",
+    "sinch_webhook.go": "bb7febfa68b7b8da9d33c4697814cab85c37fec22cae11d4dc610cdbaa28fb50",
+    "sip_config.go": "11d20d47808f81dc15c6f393f3e1d0d559a36077e7281e4a0c59cc78809b875c",
+    "sip_dialog.go": "6d488a22ba21c63b4d82b8dfc6f9ab4931ff48be2c561b2d5dcb55d2a1994839",
+    "sip_gateway.go": "7aaa56418336cb7567ceb018959e9a3c720940278547f0074e40619e69115bbf",
+    "sip_routes.go": "6dba5df1e4dcfa0c015f02bd1f77b71fa3b43c307a4ff6e48dda6c75d075d6ab",
+    "sip_routes_db.go": "d0bf4ff1d64e64837dbbe824a8fec31eaa9752993d427629a408756e366cdb50",
+    "sip_rtp.go": "b8021d79ec75d5ec4f299af126fb3717ea1b95c1d507c950d036d2ee2509aac1",
+    "sip_sdp.go": "af53c35c16bb58343b4dec17da733e5a3df21ae8815525fbd1f9491447f9ff81",
+    "sip_tls.go": "3be81ccca0cfb6b74514b61d05baa4edc43ff7c19568e3650edb642fde816531",
+    "softphone.go": "a0082c4fa08f8bf9dea4072e2c4c52f6b96875aa2304d911e8377fef5f4f6b10",
+    "telnyx_resources.go": "d86196205b9dc57ec98367db4a058e61477cefd508dc1fe1914a2ad24ea0aa51",
+    "twilio_pacer.go": "1558166fdbddb43aef18a04b93ba54266db2006097371cc90d1907f8254fd410",
+    "twilio_resources.go": "44f783e6c35a1d9ddd71a3ef4a1fa2ba33e5571ab2149850105351f18ff71b8b",
+    "twilio_stream_status.go": "e8dc33bf55d9b31722b1cf88f92d100e16fbeaaf40418a93ffd3307b82db4c54",
+    "ui/CallsPanel.mjs": "8cc47d6f336c556a63d4a5f8f4da97e60f2127aaddb23c50e818403f98c33fa5",
+    "ui/frontend.json": "05888a540ac4bc541b69470b2bd769b6e59b65cb871096dc9e490f1758e9fcf0",
+    "ui/softphone-worker.js": "946efb096193b355bd00219cc73338ebaffbc8049b043a0e63dbed8317ecffc1",
+    "ui/softphone-worklet.js": "ecb995a42d4ae8a064507e13e5fbbaa99970d9d3622f31d2e61134b51e6f3277",
+    "websocket_close.go": "1dd45001d92459618fffa4f1b2c60717e3cf0d0d876812f5f81b874dc06cb658"
+  },
+  "go": {
+    "pass": 648,
+    "fail": 0,
+    "skip": 2
+  },
+  "race": {
+    "pass": 42,
+    "fail": 0,
+    "skip": 0
+  },
+  "frontend": {
+    "pass": 137,
+    "fail": 0
+  },
+  "browser_surfaces": [
+    "headless",
+    "headless-coaching-512k",
+    "headless-coaching-jitter",
+    "panel",
+    "application-user"
+  ],
+  "network": {
+    "seed": 20261005,
+    "duration_ms": 20000,
+    "results": [
+      {
+        "profile": {
+          "name": "local-baseline",
+          "expectation": "usable",
+          "down": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 250,
+          "max_missing_pct": 5
+        },
+        "outcome": "pass",
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 77.094970703125,
+          "p95_ms": 80.4189453125,
+          "p99_ms": 83.18603515625,
+          "max_ms": 83.18603515625,
+          "median_level_dbfs": -15.145145882172859,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 106.219970703125,
+          "p95_ms": 106.306396484375,
+          "p99_ms": 106.31396484375,
+          "max_ms": 106.31396484375,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        },
+        "clock_progress": {
+          "max_playback_lag_ms": 27.16666666666788,
+          "max_source_lag_ms": 32.46666666741203,
+          "playback_elapsed_ms": 23408,
+          "source_elapsed_ms": 23402.666666666668,
+          "wall_elapsed_ms": 23433.60000000056
+        }
+      },
+      {
+        "profile": {
+          "name": "broadband",
+          "expectation": "usable",
+          "down": {
+            "kbps": 5000,
+            "latency_ms": 20,
+            "jitter_ms": 5,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 1000,
+            "latency_ms": 20,
+            "jitter_ms": 5,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 350,
+          "max_missing_pct": 5
+        },
+        "outcome": "pass",
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 80.5439453125,
+          "p95_ms": 84.158935546875,
+          "p99_ms": 87.591064453125,
+          "max_ms": 87.591064453125,
+          "median_level_dbfs": -15.145145882172859,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 112.153564453125,
+          "p95_ms": 112.201904296875,
+          "p99_ms": 112.202392578125,
+          "max_ms": 112.202392578125,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        },
+        "clock_progress": {
+          "max_playback_lag_ms": 3.466666666481615,
+          "max_source_lag_ms": 3.466666666481615,
+          "playback_elapsed_ms": 23461.333333333332,
+          "source_elapsed_ms": 23461.333333333332,
+          "wall_elapsed_ms": 23460.400000000373
+        }
+      },
+      {
+        "profile": {
+          "name": "wifi-jitter",
+          "expectation": "usable",
+          "down": {
+            "kbps": 2000,
+            "latency_ms": 35,
+            "jitter_ms": 40,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 1000,
+            "latency_ms": 35,
+            "jitter_ms": 40,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 450,
+          "max_missing_pct": 10
+        },
+        "outcome": "pass",
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 227.052978515625,
+          "p95_ms": 246.376953125,
+          "p99_ms": 246.530029296875,
+          "max_ms": 246.530029296875,
+          "median_level_dbfs": -15.145278407155798,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 292.640625,
+          "p95_ms": 292.73828125,
+          "p99_ms": 292.740234375,
+          "max_ms": 292.740234375,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        },
+        "clock_progress": {
+          "max_playback_lag_ms": 4.066666667040408,
+          "max_source_lag_ms": 3.933333333890914,
+          "playback_elapsed_ms": 23397.333333333332,
+          "source_elapsed_ms": 23397.333333333332,
+          "wall_elapsed_ms": 23398.10000000056
+        }
+      },
+      {
+        "profile": {
+          "name": "mobile-latency",
+          "expectation": "usable",
+          "down": {
+            "kbps": 2000,
+            "latency_ms": 100,
+            "jitter_ms": 30,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 1000,
+            "latency_ms": 100,
+            "jitter_ms": 30,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 10
+        },
+        "outcome": "pass",
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 184.841064453125,
+          "p95_ms": 227.2490234375,
+          "p99_ms": 234.02392578125,
+          "max_ms": 234.02392578125,
+          "median_level_dbfs": -15.145172626717686,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 201.044677734375,
+          "p95_ms": 271.096923828125,
+          "p99_ms": 271.13623046875,
+          "max_ms": 271.13623046875,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        },
+        "clock_progress": {
+          "max_playback_lag_ms": 1.8333333333339397,
+          "max_source_lag_ms": 1.8333333333339397,
+          "playback_elapsed_ms": 23477.333333333336,
+          "source_elapsed_ms": 23477.333333333336,
+          "wall_elapsed_ms": 23474
+        }
+      },
+      {
+        "profile": {
+          "name": "512k-symmetric",
+          "expectation": "usable",
+          "down": {
+            "kbps": 512,
+            "latency_ms": 30,
+            "jitter_ms": 10,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 512,
+            "latency_ms": 30,
+            "jitter_ms": 10,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 450,
+          "max_missing_pct": 10
+        },
+        "outcome": "pass",
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 98.2041015625,
+          "p95_ms": 106.14892578125,
+          "p99_ms": 111.498046875,
+          "max_ms": 111.498046875,
+          "median_level_dbfs": -15.145195455923997,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 138.648681640625,
+          "p95_ms": 138.718994140625,
+          "p99_ms": 138.732177734375,
+          "max_ms": 138.732177734375,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        },
+        "clock_progress": {
+          "max_playback_lag_ms": 4.666666666667879,
+          "max_source_lag_ms": 4.6000000005606125,
+          "playback_elapsed_ms": 23439.999999999996,
+          "source_elapsed_ms": 23439.999999999996,
+          "wall_elapsed_ms": 23440.5
+        }
+      },
+      {
+        "profile": {
+          "name": "tcp-recovery-1pct",
+          "expectation": "degradation",
+          "down": {
+            "kbps": 2000,
+            "latency_ms": 30,
+            "jitter_ms": 15,
+            "recovery_probability": 0.01,
+            "recovery_ms": 180,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 1000,
+            "latency_ms": 30,
+            "jitter_ms": 15,
+            "recovery_probability": 0.01,
+            "recovery_ms": 180,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 700,
+          "max_missing_pct": 25
+        },
+        "outcome": "pass",
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 34,
+          "missing_markers_pct": 10.526315789473685,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 191.419921875,
+          "p95_ms": 256.012939453125,
+          "p99_ms": 256.153076171875,
+          "max_ms": 256.153076171875,
+          "median_level_dbfs": -15.145195455923997,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 37,
+          "missing_markers_pct": 2.6315789473684212,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 270.68115234375,
+          "p95_ms": 280.71923828125,
+          "p99_ms": 280.7294921875,
+          "max_ms": 280.7294921875,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        },
+        "clock_progress": {
+          "max_playback_lag_ms": 1.8666666668523249,
+          "max_source_lag_ms": 1.8666666668523249,
+          "playback_elapsed_ms": 23429.333333333332,
+          "source_elapsed_ms": 23429.333333333332,
+          "wall_elapsed_ms": 23429
+        }
+      },
+      {
+        "profile": {
+          "name": "upload-256k",
+          "expectation": "degradation",
+          "down": {
+            "kbps": 2000,
+            "latency_ms": 20,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 256,
+            "latency_ms": 20,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 700,
+          "max_missing_pct": 25
+        },
+        "outcome": "degraded",
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 0,
+          "missing_markers_pct": 100,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 0,
+          "p95_ms": 0,
+          "p99_ms": 0,
+          "max_ms": 0,
+          "median_level_dbfs": 0,
+          "final_two_seconds_markers": 0
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 181.7939453125,
+          "p95_ms": 181.862548828125,
+          "p99_ms": 181.892578125,
+          "max_ms": 181.892578125,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        },
+        "clock_progress": {
+          "max_playback_lag_ms": 3.400000000372529,
+          "max_source_lag_ms": 3.400000000372529,
+          "playback_elapsed_ms": 23471.999999999996,
+          "source_elapsed_ms": 23472,
+          "wall_elapsed_ms": 23470
+        }
+      },
+      {
+        "profile": {
+          "name": "download-256k",
+          "expectation": "degradation",
+          "down": {
+            "kbps": 256,
+            "latency_ms": 20,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 2000,
+            "latency_ms": 20,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 700,
+          "max_missing_pct": 25
+        },
+        "outcome": "degraded",
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 68.126953125,
+          "p95_ms": 72.68310546875,
+          "p99_ms": 74.23291015625,
+          "max_ms": 74.23291015625,
+          "median_level_dbfs": -15.145185149331294,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 0,
+          "missing_markers_pct": 100,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 0,
+          "p95_ms": 0,
+          "p99_ms": 0,
+          "max_ms": 0,
+          "median_level_dbfs": 0,
+          "final_two_seconds_markers": 0
+        },
+        "clock_progress": {
+          "max_playback_lag_ms": 3.1333333340789977,
+          "max_source_lag_ms": 3.1333333340789977,
+          "playback_elapsed_ms": 23397.333333333332,
+          "source_elapsed_ms": 23397.333333333332,
+          "wall_elapsed_ms": 23400
+        }
+      },
+      {
+        "profile": {
+          "name": "two-second-outage",
+          "expectation": "recovery",
+          "down": {
+            "kbps": 2000,
+            "latency_ms": 20,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 4000,
+            "outage_ms": 2000
+          },
+          "up": {
+            "kbps": 1000,
+            "latency_ms": 20,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 4000,
+            "outage_ms": 2000
+          },
+          "max_p95_ms": 700,
+          "max_missing_pct": 40
+        },
+        "outcome": "pass",
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 34,
+          "missing_markers_pct": 10.526315789473685,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 206.85693359375,
+          "p95_ms": 219.553955078125,
+          "p99_ms": 219.9951171875,
+          "max_ms": 219.9951171875,
+          "median_level_dbfs": -15.145301324537602,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 34,
+          "missing_markers_pct": 10.526315789473685,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 200.903564453125,
+          "p95_ms": 200.991943359375,
+          "p99_ms": 201.01708984375,
+          "max_ms": 201.01708984375,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        },
+        "clock_progress": {
+          "max_playback_lag_ms": 1.6666666666667425,
+          "max_source_lag_ms": 1.6666666666667425,
+          "playback_elapsed_ms": 23456,
+          "source_elapsed_ms": 23456,
+          "wall_elapsed_ms": 23452.700000000186
+        }
+      },
+      {
+        "profile": {
+          "carrier_down": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 3000,
+            "outage_ms": 10000
+          },
+          "name": "carrier-ten-second-catchup",
+          "expectation": "recovery",
+          "down": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 65
+        },
+        "outcome": "pass",
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 44.258056640625,
+          "p95_ms": 50.175048828125,
+          "p99_ms": 50.5458984375,
+          "max_ms": 50.5458984375,
+          "median_level_dbfs": -15.145145882172859,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 18,
+          "missing_markers_pct": 52.63157894736842,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 181.69384765625,
+          "p95_ms": 181.75830078125,
+          "p99_ms": 181.75830078125,
+          "max_ms": 181.75830078125,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        },
+        "clock_progress": {
+          "max_playback_lag_ms": 0,
+          "max_source_lag_ms": 0,
+          "playback_elapsed_ms": 23493.333333333332,
+          "source_elapsed_ms": 23488,
+          "wall_elapsed_ms": 23480.599999999627
+        }
+      },
+      {
+        "profile": {
+          "carrier_down": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 3000,
+            "outage_ms": 10000
+          },
+          "carrier_missing": true,
+          "name": "carrier-ten-second-missing",
+          "expectation": "recovery",
+          "down": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 65
+        },
+        "outcome": "pass",
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 41.222900390625,
+          "p95_ms": 45.93701171875,
+          "p99_ms": 49.72802734375,
+          "max_ms": 49.72802734375,
+          "median_level_dbfs": -15.145145882172859,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 18,
+          "missing_markers_pct": 52.63157894736842,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 175.1171875,
+          "p95_ms": 175.177734375,
+          "p99_ms": 175.177734375,
+          "max_ms": 175.177734375,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        },
+        "clock_progress": {
+          "max_playback_lag_ms": 0,
+          "max_source_lag_ms": 0,
+          "playback_elapsed_ms": 23456,
+          "source_elapsed_ms": 23456,
+          "wall_elapsed_ms": 23451
+        }
+      },
+      {
+        "profile": {
+          "mute_microphone": true,
+          "name": "intentional-microphone-mute",
+          "expectation": "recovery",
+          "down": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 20
+        },
+        "outcome": "pass",
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 34,
+          "missing_markers_pct": 10.526315789473685,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 25.783935546875,
+          "p95_ms": 46.0849609375,
+          "p99_ms": 47.260986328125,
+          "max_ms": 47.260986328125,
+          "median_level_dbfs": -15.1451390274426,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 98.55859375,
+          "p95_ms": 98.63037109375,
+          "p99_ms": 98.6318359375,
+          "max_ms": 98.6318359375,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        },
+        "clock_progress": {
+          "max_playback_lag_ms": 0.13333333314585616,
+          "max_source_lag_ms": 0,
+          "playback_elapsed_ms": 23424,
+          "source_elapsed_ms": 23429.333333333332,
+          "wall_elapsed_ms": 23422.099999999627
+        }
+      },
+      {
+        "profile": {
+          "reconnect_browser": true,
+          "name": "browser-reconnect",
+          "expectation": "recovery",
+          "down": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 20
+        },
+        "outcome": "pass",
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 37,
+          "missing_markers_pct": 2.6315789473684212,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 42.7919921875,
+          "p95_ms": 47.623046875,
+          "p99_ms": 48.342041015625,
+          "max_ms": 48.342041015625,
+          "median_level_dbfs": -15.14516266072684,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 37,
+          "missing_markers_pct": 2.6315789473684212,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 70.818115234375,
+          "p95_ms": 90.794921875,
+          "p99_ms": 90.80224609375,
+          "max_ms": 90.80224609375,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        },
+        "clock_progress": {
+          "max_playback_lag_ms": 2.366666666852325,
+          "max_source_lag_ms": 2.2666666662935313,
+          "playback_elapsed_ms": 23456,
+          "source_elapsed_ms": 23456,
+          "wall_elapsed_ms": 23455.5
+        }
+      }
+    ]
+  },
+  "retained_initial_failure": {
+    "profile": {
+      "name": "wifi-jitter",
+      "expectation": "usable",
+      "down": {
+        "kbps": 2000,
+        "latency_ms": 35,
+        "jitter_ms": 40,
+        "recovery_probability": 0,
+        "recovery_ms": 0,
+        "outage_at_ms": 0,
+        "outage_ms": 0
+      },
+      "up": {
+        "kbps": 1000,
+        "latency_ms": 35,
+        "jitter_ms": 40,
+        "recovery_probability": 0,
+        "recovery_ms": 0,
+        "outage_at_ms": 0,
+        "outage_ms": 0
+      },
+      "max_p95_ms": 450,
+      "max_missing_pct": 10
+    },
+    "outcome": "failed",
+    "adviser_to_carrier": {
+      "expected_markers": 38,
+      "received_markers": 35,
+      "missing_markers_pct": 7.894736842105263,
+      "duplicate_markers": 0,
+      "out_of_order_markers": 0,
+      "p50_ms": 4616.364990234375,
+      "p95_ms": 4632.52001953125,
+      "p99_ms": 4632.5859375,
+      "max_ms": 4632.5859375,
+      "median_level_dbfs": -15.145155588581991,
+      "final_two_seconds_markers": 1
+    },
+    "carrier_to_adviser": {
+      "expected_markers": 38,
+      "received_markers": 30,
+      "missing_markers_pct": 21.05263157894737,
+      "duplicate_markers": 0,
+      "out_of_order_markers": 0,
+      "p50_ms": 220.8681640625,
+      "p95_ms": 220.930419921875,
+      "p99_ms": 220.940673828125,
+      "max_ms": 220.940673828125,
+      "median_level_dbfs": -15.052743814492999,
+      "final_two_seconds_markers": 4
+    },
+    "clock_progress": {}
+  },
+  "isolated_same_seed_retry": {
+    "profile": {
+      "name": "wifi-jitter",
+      "expectation": "usable",
+      "down": {
+        "kbps": 2000,
+        "latency_ms": 35,
+        "jitter_ms": 40,
+        "recovery_probability": 0,
+        "recovery_ms": 0,
+        "outage_at_ms": 0,
+        "outage_ms": 0
+      },
+      "up": {
+        "kbps": 1000,
+        "latency_ms": 35,
+        "jitter_ms": 40,
+        "recovery_probability": 0,
+        "recovery_ms": 0,
+        "outage_at_ms": 0,
+        "outage_ms": 0
+      },
+      "max_p95_ms": 450,
+      "max_missing_pct": 10
+    },
+    "outcome": "pass",
+    "adviser_to_carrier": {
+      "expected_markers": 38,
+      "received_markers": 38,
+      "missing_markers_pct": 0,
+      "duplicate_markers": 0,
+      "out_of_order_markers": 0,
+      "p50_ms": 110.06591796875,
+      "p95_ms": 129.027099609375,
+      "p99_ms": 130.618896484375,
+      "max_ms": 130.618896484375,
+      "median_level_dbfs": -15.145145882172859,
+      "final_two_seconds_markers": 4
+    },
+    "carrier_to_adviser": {
+      "expected_markers": 38,
+      "received_markers": 38,
+      "missing_markers_pct": 0,
+      "duplicate_markers": 0,
+      "out_of_order_markers": 0,
+      "p50_ms": 150.68505859375,
+      "p95_ms": 150.74169921875,
+      "p99_ms": 150.777099609375,
+      "max_ms": 150.777099609375,
+      "median_level_dbfs": -15.052743814492999,
+      "final_two_seconds_markers": 4
+    },
+    "clock_progress": {
+      "max_playback_lag_ms": 1.5000000000001137,
+      "max_source_lag_ms": 1.3333333333339397,
+      "playback_elapsed_ms": 23456,
+      "source_elapsed_ms": 23456,
+      "wall_elapsed_ms": 23452.699999999255
+    }
+  }
+}

@@ -107,6 +107,7 @@ type serverAudioDiagnostics struct {
 	CaptureTimestampMS     float64                       `json:"capture_timestamp_ms"`
 	CaptureWorkerAgeMS     float64                       `json:"capture_worker_age_ms"`
 	CaptureTransitExcessMS float64                       `json:"capture_transit_excess_ms"`
+	CaptureDropEvents      []audioDropEvent              `json:"capture_drop_events,omitempty"`
 	CaptureSequenceGaps    int                           `json:"capture_sequence_gaps"`
 }
 
@@ -117,7 +118,7 @@ func (h *softphoneHub) serverAudioSnapshot() serverAudioDiagnostics {
 	return serverAudioDiagnostics{Reception: h.reception.snapshot(mediaClockMS(), h.carrierForward != nil && !h.held && (h.status == "answered" || h.status == "in-progress")), CarrierPacer: h.pacerStats.snapshot(), Process: sampleMediaProcess(), CaptureStaleBytes: h.captureStaleBytes, Epoch: epoch, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Stages: stages,
 		CarrierForward: mergeLiveAudioSnapshots(h.completedCarrierForward, h.carrierForward.audioSnapshot()),
 		ToBrowser:      mergeLiveAudioSnapshots(h.completedBrowser, h.browser.audioSnapshot()), ToCarrierBridge: mergeLiveAudioSnapshots(h.completedPeer, h.peer.audioSnapshot()),
-		CaptureTimestampMS: h.captureTimestampMS, CaptureWorkerAgeMS: h.captureWorkerAgeMS, CaptureSequenceGaps: h.captureSequenceGaps, CaptureTransitExcessMS: h.captureTransitExcessMS}
+		CaptureTimestampMS: h.captureTimestampMS, CaptureWorkerAgeMS: h.captureWorkerAgeMS, CaptureSequenceGaps: h.captureSequenceGaps, CaptureTransitExcessMS: h.captureTransitExcessMS, CaptureDropEvents: append([]audioDropEvent(nil), h.captureDropEvents...)}
 }
 func mergeLiveAudioSnapshots(a, b liveAudioQueueSnapshot) liveAudioQueueSnapshot {
 	a.QueuedMS = b.QueuedMS
@@ -174,6 +175,13 @@ func (h *softphoneHub) observeCaptureTiming(data []byte) (stale bool) {
 			// one-way latency. No wall-clock synchronization is assumed.
 			if delta-h.captureTransitBase > float64(liveAudioMaxAge/time.Millisecond) {
 				h.captureStaleBytes += int64(len(data) - 32)
+				h.captureDropEvents = append(h.captureDropEvents, audioDropEvent{
+					Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier", Reason: "capture_transit_age",
+					DurationMS: (len(data) - 32) * 1000 / 48000, QueueBeforeMS: int(min(60000, delta-h.captureTransitBase)), Sequence: uint64(binary.LittleEndian.Uint32(data[4:])),
+				})
+				if len(h.captureDropEvents) > 100 {
+					h.captureDropEvents = h.captureDropEvents[len(h.captureDropEvents)-100:]
+				}
 				stale = true
 			}
 		}
