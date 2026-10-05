@@ -212,7 +212,7 @@ func (a *App) substitutePlaceholders(ctx *sdk.AppCtx, projectID, query string) (
 		if token.kind != "placeholder" {
 			continue
 		}
-		table, err := a.loadTableSchema(ctx, projectID, token.value)
+		table, err := a.loadQueryTable(ctx, projectID, token.value)
 		if err != nil {
 			return "", err
 		}

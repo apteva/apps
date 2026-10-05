@@ -60,6 +60,12 @@ func (a *App) toolTablesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	defer tx.Rollback()
+	var projectionExists int64
+	if err := tx.QueryRow(`SELECT id FROM projection_definitions WHERE project_id=? AND name=? LIMIT 1`, pid, name).Scan(&projectionExists); err == nil {
+		return nil, errf("projection %q already exists", name)
+	} else if err != sql.ErrNoRows {
+		return nil, err
+	}
 
 	var existing int64
 	if err := tx.QueryRow(`SELECT id FROM tables_meta WHERE project_id = ? AND name = ?`, pid, name).Scan(&existing); err == nil {
@@ -340,6 +346,15 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	if provided != 1 {
 		return nil, errf("exactly one of add / rename / drop must be supplied")
+	}
+	if rename != nil || drop != "" {
+		var dependent int
+		if err := ctx.AppReadDB().QueryRowContext(requestContext(ctx), `SELECT COUNT(*) FROM projection_sources WHERE table_id=?`, t.ID).Scan(&dependent); err != nil {
+			return nil, err
+		}
+		if dependent > 0 {
+			return nil, errf("table %q is a projection source; recreate or retire its projections before renaming or dropping columns", name)
+		}
 	}
 
 	tx, err := beginWrite(ctx)
@@ -641,6 +656,13 @@ func (a *App) toolTablesDrop(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			return map[string]any{"dropped": name}, nil
 		}
 		return nil, err
+	}
+	var dependent int
+	if err := ctx.AppReadDB().QueryRowContext(requestContext(ctx), `SELECT COUNT(*) FROM projection_sources WHERE table_id=?`, t.ID).Scan(&dependent); err != nil {
+		return nil, err
+	}
+	if dependent > 0 {
+		return nil, errf("table %q is a projection source; retire its projections before dropping it", name)
 	}
 
 	tx, err := beginWrite(ctx)

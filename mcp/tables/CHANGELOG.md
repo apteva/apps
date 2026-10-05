@@ -1,3 +1,12 @@
+## 0.1.27 — Persistent SQL projections
+
+- Add versioned, project-scoped read-only SQL projections with explicit source dependencies and typed result schemas.
+- Capture source inserts, updates and deletes transactionally through SQLite triggers, retaining only declared scope columns.
+- Coalesce affected scopes into a durable queue with cursor watermarks, fenced leases, exponential retry backoff and pause/resume controls.
+- Build new versions alongside the active definition and switch readers atomically with `projections_activate`; gate management and inspection through declared permissions.
+- Refresh projections asynchronously and publish complete scope results atomically through the normal `tables_query` placeholder interface.
+- Add projection lifecycle tools, backlog/freshness status, rollback-safe change capture and end-to-end regression coverage.
+
 ## 0.1.21 — Legacy text default compatibility
 
 - Prevent startup migration failure when old text-column defaults contain raw strings instead of JSON-quoted strings.

@@ -8,11 +8,17 @@ table and row is resolved against the calling project_id.
 
 ## Surfaces
 
-- **18 MCP tools** — `tables_create`, `tables_list`, `tables_describe`,
+- **27 MCP tools** — `tables_create`, `tables_list`, `tables_describe`,
   `tables_alter`, `tables_drop`, `indexes_create`, `indexes_list`,
   `indexes_drop`, `rows_insert`, `rows_get`,
   `rows_upsert`, `rows_update`, `rows_delete`, `rows_search`,
   `rows_count`, `rows_aggregate`, `tables_query`, `tables_batch`
+- **Persistent SQL projections** — `projections_create`, `projections_list`,
+  `projections_describe`, `projections_refresh`, `projections_status`,
+  `projections_pause`, `projections_activate`, and `projections_delete`. Projection SQL is validated
+  read-only SQL, source mutations are captured transactionally, affected
+  scopes are coalesced, and results are refreshed by a bounded worker. New
+  versions can be built alongside the active version and switched atomically.
 - **Generic batch execution** — `tables_batch` combines validated reads or
   writes with explicit `read_snapshot`, `write_transaction`, and
   `best_effort` modes. Operations can reference earlier results with
@@ -24,6 +30,9 @@ table and row is resolved against the calling project_id.
   user tables, blocks internal tables, and enforces time/row/byte caps
 - **Concurrent reads** — reads use a four-connection read-only pool while
   writes remain serialized; schema metadata is cached per project and table
+- **Projection query access** — projection result tables are addressed through
+  the normal `tables_query` placeholder interface and cannot be written through
+  row tools. Results are published by scope in complete transactions.
 - **Composite indexes** — validated column-based indexes can be created,
   inspected, and dropped without exposing physical SQLite names
 - **Skill** — `how-to-use-tables` (`/tables`)
@@ -55,6 +64,9 @@ curl http://localhost:8080/health
   hydration is best-effort on `rows_get`)
 - Expression indexes, partial indexes, and FTS. Composite indexes are
   column-based; upsert keys are automatically backed by managed unique indexes.
+- Cross-app source transactions. A source app that owns a separate database
+  must provide its own transactional outbox before its data can drive a Tables
+  projection.
 
 
 ## 0.1.15 hardening
