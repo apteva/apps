@@ -144,6 +144,32 @@ provides:
       label: Functions
       icon: code
       entry: /ui/FunctionsPanel.mjs
+  ui_components:
+    - name: function-activity
+      label: Function activity
+      description: Live function invocations with quick error filtering and links to the full log viewer.
+      entry: /ui/FunctionActivityWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [invocation.started, invocation.completed]
+      settings_schema:
+        type: object
+        properties:
+          status:
+            type: string
+            title: Default filter
+            enum: [all, errors, running]
+            enum_names: [All invocations, Errors and timeouts, Running]
+            default: errors
+          max_items:
+            type: integer
+            title: Maximum invocations
+            default: 8
+            minimum: 4
+            maximum: 20
 
 runtime:
   kind: source

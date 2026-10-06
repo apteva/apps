@@ -377,8 +377,18 @@ func (a *App) handleHTTPInvocationsCollection(w http.ResponseWriter, r *http.Req
 		return
 	}
 	limit := atoiDefault(r.URL.Query().Get("limit"), 50, 200)
-	out, err := dbRecentInvocations(globalCtx.AppDB(), pid, limit)
+	query := InvocationQuery{
+		FunctionID: parseInt64(r.URL.Query().Get("function_id")),
+		Status:     strings.TrimSpace(r.URL.Query().Get("status")),
+		Limit:      limit,
+		Cursor:     parseInt64(r.URL.Query().Get("cursor")),
+	}
+	out, err := dbRecentInvocationsContext(r.Context(), globalCtx.AppDB(), pid, query)
 	if err != nil {
+		if strings.HasPrefix(err.Error(), "invalid invocation status") {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}

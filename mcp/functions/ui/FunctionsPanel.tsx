@@ -9,6 +9,7 @@
 // cookies.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { FunctionActivityView } from "./FunctionActivityView";
 import { PerformanceView } from "./PerformanceView";
 
 // Inlined SDK app-event subscription. Each app ships its own copy
@@ -217,7 +218,7 @@ function buildStatusTone(s: BuildStatus): string {
   }
 }
 
-type ApiFn = <T,>(method: string, path: string, body?: unknown, extra?: Record<string, string>) => Promise<T>;
+type ApiFn = <T,>(method: string, path: string, body?: unknown, extra?: Record<string, string>, signal?: AbortSignal) => Promise<T>;
 
 const FUNCTION_URL_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 
@@ -279,6 +280,7 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
   const [publicBaseURL, setPublicBaseURL] = useState("");
+  const [activityRevision, setActivityRevision] = useState(0);
 
   const withParams = useCallback(
     (extra: Record<string, string> = {}) => {
@@ -293,9 +295,10 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
   );
 
   const api: ApiFn = useCallback(
-    async <T,>(method: string, path: string, body?: unknown, extra: Record<string, string> = {}): Promise<T> => {
+    async <T,>(method: string, path: string, body?: unknown, extra: Record<string, string> = {}, signal?: AbortSignal): Promise<T> => {
       const res = await fetch(`${API}${path}?${withParams(extra)}`, {
         method,
+        signal,
         credentials: "same-origin",
         headers: body ? { "Content-Type": "application/json" } : {},
         body: body ? JSON.stringify(body) : undefined,
@@ -376,6 +379,9 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
       loadList();
       if (selectedId) loadDetail(selectedId);
     }
+    if (ev.topic === "invocation.started" || ev.topic === "invocation.completed") {
+      setActivityRevision((revision) => revision + 1);
+    }
   });
 
   const select = (id: number) => {
@@ -433,6 +439,13 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
       </header>
 
       <main className="flex-1 overflow-auto">
+        <FunctionActivityView
+          key={`${projectId}:${installId}`}
+          api={api}
+          functions={functions}
+          refreshToken={activityRevision}
+          renderInvocation={id => <LoadedInvocation id={id} api={api} />}
+        />
         <PerformanceView key={`${projectId}:${installId}`} api={api} functions={functions} onSelect={select} renderInvocation={id => <LoadedInvocation id={id} api={api} />} />
  <CapacityView api={api}/>
         {error ? (
