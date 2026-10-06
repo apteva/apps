@@ -1,4 +1,9 @@
-# Functions 1.16.0
+# Functions 1.17.0
+
+**New in 1.17.0:** project-wide Live logs with error and function filters,
+expandable invocation details, live/pause controls, and a configurable Function
+activity widget. Add the widget to Home or a custom Page. Custom Page support
+requires Apteva **0.82.1** or later.
 
 **New in 1.16.0:** performance rankings and slow-call diagnostics in the panel
 and MCP. Compare call volume, total execution time, average/p95 latency,
