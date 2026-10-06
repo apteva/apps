@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.2.5
+version: 0.2.6
 description: |
+  v0.2.6 Batches bounded projection work, records queue wait from durable
+  timestamps, and coalesces projection-ready notifications through a durable
+  retrying outbox.
   v0.2.5 Caches safe SQL parsing, bounds dependency fan-out, keeps obsolete
   generations indexed and out of reads, and reports projection phase timings
   with scope-ready events.
@@ -202,12 +205,14 @@ provides:
         id: integer
         deleted: integer
     - name: projection.ready
-      description: A projection scope was successfully published and is ready for selective UI refresh.
+      description: One or more projection scopes were successfully published and are ready for selective UI refresh. scope_key is included for a single scope; scope_keys is always present for coalesced delivery.
       payload:
         projection_id: integer
         name: string
         version: integer
         scope_key: string
+        scope_keys: array
+        scope_count: integer
         watermark: integer
         generation: string
         published_at: string
@@ -219,7 +224,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.2.5
+    ref: tables/v0.2.6
     entry: mcp/tables
   port: 8080
   health_check: /health

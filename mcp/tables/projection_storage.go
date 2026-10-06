@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	sdk "github.com/apteva/app-sdk"
+	"sort"
 	"strings"
 	"time"
 )
@@ -303,6 +304,34 @@ func publishProjectionGeneration(ctx context.Context, app *sdk.AppCtx, p *projec
 	if err != nil {
 		return err
 	}
+	scopes := make([]string, 0, len(grouped))
+	for scope := range grouped {
+		scopes = append(scopes, scope)
+	}
+	sort.Strings(scopes)
+	readyPayload := map[string]any{
+		"event_id":      fmt.Sprintf("projection-ready:%d:%s", p.ID, gen),
+		"projection_id": p.ID,
+		"name":          p.Name,
+		"version":       p.Version,
+		"scope_keys":    scopes,
+		"scope_count":   len(scopes),
+		"watermark":     watermark,
+		"generation":    gen,
+		"published_at":  projectionTimestamp(now),
+		"ready":         true,
+	}
+	if len(scopes) == 1 {
+		readyPayload["scope_key"] = scopes[0]
+	}
+	if p.Options.CoverageFrom != "" {
+		readyPayload["coverage_from"] = p.Options.CoverageFrom
+		readyPayload["coverage_to"] = p.Options.CoverageTo
+	}
+	readyJSON, err := json.Marshal(readyPayload)
+	if err != nil {
+		return err
+	}
 	// Check fencing before staging and once more during the atomic switch.
 	fence := func(c context.Context, tx *sql.Tx) error {
 		var token, status string
@@ -455,27 +484,14 @@ func publishProjectionGeneration(ctx context.Context, app *sdk.AppCtx, p *projec
 			*publicationMsOut = publicationMs
 		}
 		_, err := tx.ExecContext(c, `UPDATE projection_definitions SET built=1,published_at_ms=?,last_failure=NULL,published_change=CASE WHEN ? THEN MAX(published_change,?) WHEN NOT EXISTS(SELECT 1 FROM projection_queue WHERE projection_id=?) AND latest_relevant_change<=? AND (SELECT last_change_id FROM projection_cursors WHERE projection_id=?)>=latest_relevant_change THEN latest_relevant_change ELSE published_change END,updated_at=CURRENT_TIMESTAMP WHERE id=?`, now, item.ScopeKey == projectionAllScope, watermark, p.ID, watermark, p.ID, p.ID)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(c, `INSERT OR IGNORE INTO projection_event_outbox(event_id,project_id,projection_id,topic,payload,next_attempt_ms,created_at_ms) VALUES(?,?,?,?,?,?,?)`, readyPayload["event_id"], p.ProjectID, p.ID, topicProjectionReady, string(readyJSON), now, now)
 		return err
 	})
 	if err != nil {
 		return err
-	}
-	for scope := range grouped {
-		data := map[string]any{
-			"projection_id": p.ID,
-			"name":          p.Name,
-			"version":       p.Version,
-			"scope_key":     scope,
-			"watermark":     watermark,
-			"generation":    gen,
-			"published_at":  projectionTimestamp(now),
-			"ready":         true,
-		}
-		if p.Options.CoverageFrom != "" {
-			data["coverage_from"] = p.Options.CoverageFrom
-			data["coverage_to"] = p.Options.CoverageTo
-		}
-		emit(app, topicProjectionReady, data)
 	}
 	return nil
 }

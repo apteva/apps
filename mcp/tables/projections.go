@@ -17,9 +17,13 @@ import (
 const (
 	projectionAllScope               = "__all__"
 	projectionChangeBatch            = 512
-	projectionQueueBatch             = 8
+	projectionQueueBatch             = 64
 	projectionWorkerEvery            = "@every 1s"
 	projectionScopeCoalesceThreshold = 256
+	projectionWorkerBudget           = 900 * time.Millisecond
+	projectionWorkerGlobalBudget     = 2 * time.Second
+	projectionEventBatch             = 32
+	projectionEventBudget            = 100 * time.Millisecond
 )
 
 type projectionDefinition struct {

@@ -25,7 +25,12 @@ func enqueueProjectionTx(ctx context.Context, tx *sql.Tx, p *projectionDefinitio
 			due = last.Int64 + p.Options.Interval*1000
 		}
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO projection_queue(projection_id,project_id,scope_key,pending_change_id,due_at_ms,forced) VALUES(?,?,?,?,?,?) ON CONFLICT(projection_id,project_id,scope_key) DO UPDATE SET pending_change_id=MAX(projection_queue.pending_change_id,excluded.pending_change_id),revision=projection_queue.revision+1,forced=MAX(projection_queue.forced,excluded.forced),due_at_ms=CASE WHEN ? THEN MIN(projection_queue.due_at_ms,excluded.due_at_ms) ELSE projection_queue.due_at_ms END`, p.ID, p.ProjectID, key, change, due, force, force)
+	_, err := tx.ExecContext(ctx, `INSERT INTO projection_queue(projection_id,project_id,scope_key,pending_change_id,due_at_ms,forced,queued_at_ms) VALUES(?,?,?,?,?,?,?) ON CONFLICT(projection_id,project_id,scope_key) DO UPDATE SET pending_change_id=MAX(projection_queue.pending_change_id,excluded.pending_change_id),revision=projection_queue.revision+1,forced=MAX(projection_queue.forced,excluded.forced),due_at_ms=CASE WHEN ? THEN MIN(projection_queue.due_at_ms,excluded.due_at_ms) ELSE projection_queue.due_at_ms END`, p.ID, p.ProjectID, key, change, due, force, now, force)
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "queued_at_ms") {
+		// Compatibility fixtures created from 0.2.3–0.2.4 may invoke the
+		// storage upgrader before migration 011 has added the timing column.
+		_, err = tx.ExecContext(ctx, `INSERT INTO projection_queue(projection_id,project_id,scope_key,pending_change_id,due_at_ms,forced) VALUES(?,?,?,?,?,?) ON CONFLICT(projection_id,project_id,scope_key) DO UPDATE SET pending_change_id=MAX(projection_queue.pending_change_id,excluded.pending_change_id),revision=projection_queue.revision+1,forced=MAX(projection_queue.forced,excluded.forced),due_at_ms=CASE WHEN ? THEN MIN(projection_queue.due_at_ms,excluded.due_at_ms) ELSE projection_queue.due_at_ms END`, p.ID, p.ProjectID, key, change, due, force, force)
+	}
 	return err
 }
 func (a *App) queueProjectionScope(app *sdk.AppCtx, p *projectionDefinition, key string, change int64, force bool) error {
@@ -50,11 +55,7 @@ func claimProjectionQueueAt(ctx context.Context, app *sdk.AppCtx, pid string, no
 	}
 	// Serialize every scope of a projection, including a whole rebuild. Claims
 	// use SQLite time for lease expiry, independent from scheduling's test clock.
-	var queuedAt string
-	err = app.AppDB().QueryRowContext(ctx, `UPDATE projection_queue SET lease_token=?,forced=0,claimed_until=datetime('now',printf('+%d seconds',(SELECT COALESCE(json_extract(options,'$.max_refresh_ms'),?) FROM projection_definitions WHERE id=projection_queue.projection_id)/1000+10)),attempts=attempts+1 WHERE rowid=(SELECT q.rowid FROM projection_queue q JOIN projection_definitions p ON p.id=q.projection_id WHERE q.project_id=? AND p.status IN ('active','building') AND (p.built=1 OR q.scope_key='__all__') AND q.due_at_ms<=? AND (q.claimed_until IS NULL OR q.claimed_until<=CURRENT_TIMESTAMP) AND NOT EXISTS(SELECT 1 FROM projection_queue running WHERE running.projection_id=q.projection_id AND running.claimed_until>CURRENT_TIMESTAMP) AND (p.built=0 OR q.scope_key<>? OR NOT EXISTS(SELECT 1 FROM projection_queue small WHERE small.projection_id=q.projection_id AND small.scope_key<>? AND small.due_at_ms<=? AND (small.claimed_until IS NULL OR small.claimed_until<=CURRENT_TIMESTAMP))) ORDER BY CASE WHEN q.scope_key=? THEN 1 ELSE 0 END,q.due_at_ms,q.queued_at,q.scope_key LIMIT 1) RETURNING projection_id,project_id,scope_key,pending_change_id,revision,attempts,lease_token,queued_at`, token, maxProjectionMs(app), pid, now, projectionAllScope, projectionAllScope, now, projectionAllScope).Scan(&item.ProjectionID, &item.ProjectID, &item.ScopeKey, &item.PendingID, &item.Revision, &item.Attempts, &item.LeaseToken, &queuedAt)
-	if t, e := time.ParseInLocation("2006-01-02 15:04:05", queuedAt, time.UTC); e == nil {
-		item.QueuedAtMs = t.UnixMilli()
-	}
+	err = app.AppDB().QueryRowContext(ctx, `UPDATE projection_queue SET lease_token=?,forced=0,claimed_until=datetime('now',printf('+%d seconds',(SELECT COALESCE(json_extract(options,'$.max_refresh_ms'),?) FROM projection_definitions WHERE id=projection_queue.projection_id)/1000+10)),attempts=attempts+1 WHERE rowid=(SELECT q.rowid FROM projection_queue q JOIN projection_definitions p ON p.id=q.projection_id WHERE q.project_id=? AND p.status IN ('active','building') AND (p.built=1 OR q.scope_key='__all__') AND q.due_at_ms<=? AND (q.claimed_until IS NULL OR q.claimed_until<=CURRENT_TIMESTAMP) AND NOT EXISTS(SELECT 1 FROM projection_queue running WHERE running.projection_id=q.projection_id AND running.claimed_until>CURRENT_TIMESTAMP) AND (p.built=0 OR q.scope_key<>? OR NOT EXISTS(SELECT 1 FROM projection_queue small WHERE small.projection_id=q.projection_id AND small.scope_key<>? AND small.due_at_ms<=? AND (small.claimed_until IS NULL OR small.claimed_until<=CURRENT_TIMESTAMP))) ORDER BY CASE WHEN q.scope_key=? THEN 1 ELSE 0 END,q.due_at_ms,q.queued_at_ms,q.queued_at,q.scope_key LIMIT 1) RETURNING projection_id,project_id,scope_key,pending_change_id,revision,attempts,lease_token,queued_at_ms`, token, maxProjectionMs(app), pid, now, projectionAllScope, projectionAllScope, now, projectionAllScope).Scan(&item.ProjectionID, &item.ProjectID, &item.ScopeKey, &item.PendingID, &item.Revision, &item.Attempts, &item.LeaseToken, &item.QueuedAtMs)
 	if err == nil && item.QueuedAtMs > 0 && now > item.QueuedAtMs {
 		item.QueueWaitMs = now - item.QueuedAtMs
 	}
@@ -441,8 +442,9 @@ func (a *App) projectionWorker(ctx context.Context, app *sdk.AppCtx) error {
 	if err != nil {
 		return err
 	}
-	start := time.Now()
+	globalStart := time.Now()
 	for _, pid := range projects {
+		start := time.Now()
 		scoped := app.WithProject(pid)
 		activeContexts.Store(scoped, ctx)
 		err := a.consumeProjectionChanges(ctx, scoped, pid)
@@ -451,6 +453,9 @@ func (a *App) projectionWorker(ctx context.Context, app *sdk.AppCtx) error {
 			return err
 		}
 		for i := 0; i < projectionQueueBatch; i++ {
+			if time.Since(globalStart) >= projectionWorkerGlobalBudget {
+				break
+			}
 			item, ok, err := claimProjectionQueueAt(ctx, app, pid, a.projectionTime().UnixMilli())
 			if err != nil {
 				return err
@@ -466,7 +471,7 @@ func (a *App) projectionWorker(ctx context.Context, app *sdk.AppCtx) error {
 					return fmt.Errorf("record projection failure: %w", e)
 				}
 			}
-			if time.Since(start) > time.Second {
+			if time.Since(start) >= projectionWorkerBudget {
 				break
 			}
 		}
@@ -494,5 +499,5 @@ func (a *App) projectionWorker(ctx context.Context, app *sdk.AppCtx) error {
 			}
 		}
 	}
-	return nil
+	return a.deliverProjectionEvents(ctx, app)
 }

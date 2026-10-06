@@ -1,4 +1,4 @@
-# SQL projections in Tables 0.2.5
+# SQL projections in Tables 0.2.6
 
 A projection stores a complete published result in Tables. Source writes append
 small transactional change records; a worker consumes them and recalculates dirty
@@ -162,9 +162,14 @@ Initial projections report not ready until the first complete successful build.
 A missing scope in a complete build represents an empty result.
 
 After a successful publication Tables emits `projection.ready` with the
-projection version, scope key, generation and included source watermark. The
-event is an invalidation hint; consumers should use status or their next read
-for authoritative data.
+projection version, included scope keys, generation and included source
+watermark. A single scope also has the legacy `scope_key` field; coalesced
+delivery always includes `scope_keys` and `scope_count`. The event is an
+invalidation hint; consumers should use status or their next read for
+authoritative data. Publications are persisted in an outbox in the same
+transaction as the generation switch, delivered in bounded batches, and retried
+with exponential backoff after a gateway failure. Stable event IDs make
+ambiguous retries idempotent when the platform event API is available.
 
 Declare both coverage bounds as RFC3339 timestamps when SQL covers a fixed window
 `[coverage_from, coverage_to)`. Match the SQL's actual restrictions. Coverage is
@@ -222,7 +227,12 @@ until cleanup catches up.
 
 Migration 010 converts prior physical result tables into generation storage and
 stable read-only views atomically, retaining legacy results while rebuilding.
-Migration 011 adds persisted phase timings and generation-cleanup indexes.
+Migration 011 adds persisted phase timings, durable queue millisecond timestamps
+and generation-cleanup indexes. Migration 012 adds the projection-ready delivery
+outbox and backfills timestamps for older queue rows. The worker drains up to 64 scopes per project while staying
+within 900 ms per project and 2 seconds globally, then drains a bounded event
+batch. These are scheduling budgets; SQL calculation and publication still
+honour each projection's refresh limits.
 Back up the database before upgrade. **Downgrade to 0.1.27 requires restoring that
 backup**; the old worker cannot publish into the new views. The manifest declares
 For migrated projections, the app retains a writable `p_<id>` compatibility
