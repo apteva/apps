@@ -42,6 +42,36 @@ A post records one destination outcome and may include several assets of the sam
 
 The old per-asset publication MCP tools remain as a compatibility interface. Migration 004 copies legacy per-asset rows into posts, grouping former release targets only when their shared fields agree. It preserves the old tables as an archive and never modifies other apps. Search and availability now read the post records. Hosting a video never implies external publication.
 
+## Automatic session hosting collections
+
+Only an explicit `content_catalog_hosting_request` (or **Host approved asset**)
+can create a remote collection. The asset and its session must be active, the
+asset approved, and the brand's video-host connection bound. Browsing, search,
+imports, and existing-video backfill do not create collections or upload files.
+
+The destination order is the session's `host_collection_id`, then the brand's
+default collection. If both are empty, Catalog's optional provider collection
+contract finds or creates a collection named exactly after the session title
+(Bunny supports 1–100 characters). A single matching name in the selected
+connection/library is reused; multiple matches require an explicit collection
+ID. Lookup reads all pages before creating anything. Bunny is the first provider
+with this capability; providers without it retain their existing upload flow.
+
+Catalog saves the collection ID on the session and increments its revision.
+Later uploads reuse that ID even if the session title changes. Existing hosting
+records are checked first, so historical or backfilled videos are not moved or
+transferred again to create a session collection. An explicit brand default
+continues to be used without creating a session collection.
+
+A durable reservation prevents concurrent requests or restarts from sending
+another collection-creation call. If creation times out, a retry reads the host
+to find the uniquely matching collection. If no unambiguous result is visible,
+hosting stops; an operator can check the host and explicitly set the session's
+collection ID. Revision checks preserve edits made during the request. A remote
+collection already created remains on the host if saving the session fails;
+its saved result is reused on retry. No automatic scan, publication, Storage
+move/deletion, or Media mutation is involved.
+
 ## Boundaries
 
 Cloud hosting remains an explicit request for an approved video. Bunny Stream is the first provider. A session may override its brand video-host collection through the session create/update MCP tools. The `content_catalog_hosting_link_existing` MCP tool backfills an existing Bunny video by GUID, verifies it through `get_video`, and records its library, collection, duration, ready status, and source evidence. It never calls `fetch_video`. A linked existing video blocks a later hosting request for the same asset. Media's source checksum can corroborate the Storage asset record; Bunny supplies no cryptographic proof that its video matches those bytes. The backfill action has no UI control. Catalog does not automatically host based on size, discover Media derivatives, sync Social or Patreon results, or publish externally. A human or external workflow records post evidence through the UI or MCP tool.
