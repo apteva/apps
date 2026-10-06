@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.2.8
+version: 0.2.9
 description: |
+  v0.2.9 Compacts diagnostics rows and fixes responsive column layout in the
+  Tables panel and dashboard widget.
   v0.2.8 Adds durable redacted read diagnostics to the Tables panel and dashboard widget.
   v0.2.7 Separates interactive read and projection capacity, adds configurable
   worker/queue limits, and reports connection, worker, lock, staging,
@@ -238,7 +240,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.2.8
+    ref: tables/v0.2.9
     entry: mcp/tables
   port: 8080
   health_check: /health

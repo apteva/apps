@@ -1,3 +1,10 @@
+# Tables v0.2.9 — compact diagnostics layout
+
+- Keep diagnostic table headings and values in responsive columns even when
+  the host dashboard does not ship the app's arbitrary Tailwind grid utility.
+- Reduce panel padding and diagnostic row height so more operations remain
+  visible in both the full Tables panel and the dashboard widget.
+
 # Tables v0.2.8 — durable read diagnostics UI
 
 - Persist redacted slow, failed, timed-out, and canceled read diagnostics with
