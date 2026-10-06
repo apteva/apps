@@ -1,9 +1,25 @@
-# Storage 0.12.7
+# Storage 0.12.8
 
 Storage provides project-scoped file metadata, virtual folders, uploads, search,
 and sharing. Bytes live on disk or in a bound S3-compatible bucket. The Go
 sidecar uses app-sdk v0.79.0; the build requires Go 1.26.8 or newer. The React
 panel, file card, and native mobile surface share the HTTP API.
+
+Direct multipart completions expose `checksum_status=pending` while a durable
+background job streams the stored object through SHA-256. `files_get` reports
+the state; `files_ensure_checksum` queues an exact-file repair. Verification
+persists the backend object key separately, so repairs keep existing file IDs,
+URLs, and physical locations unchanged.
+
+## Version 0.12.8: verified whole-file checksums
+
+Direct multipart completions now enqueue a durable checksum job. Storage
+streams each completed object through SHA-256, verifies the byte count and
+object revision, and reports `pending`, `running`, `verified`, or `failed`
+through `files_get`. Upgrade repair scans older files with missing checksums in
+bounded batches, while `files_ensure_checksum` lets Catalog request an exact
+file repair. The existing backend object key is persisted independently, so
+repair keeps file IDs, URLs, and physical object locations unchanged.
 
 ## Version 0.12.7: progress, speed, and ETA on every browser upload
 

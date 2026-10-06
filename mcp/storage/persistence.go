@@ -152,7 +152,12 @@ func publishFile(c context.Context, app *sdk.AppCtx, pid string, in uploadInput,
 	}
 	defer tx.Rollback()
 	tags, _ := json.Marshal(cleanTags(in.Tags))
-	res, err := tx.Exec(`INSERT INTO files(project_id,name,folder,storage_key,content_type,size_bytes,sha256,uploaded_by,source,tags,visibility) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, pid, in.Name, in.Folder, sk, in.ContentType, size, sha, actorFrom(c), in.Source, string(tags), effectiveVisibility(app, in.Visibility))
+	backendKey := objectKey(sha, sk)
+	checksumStatus := "pending"
+	if sha != "" {
+		checksumStatus = "verified"
+	}
+	res, err := tx.Exec(`INSERT INTO files(project_id,name,folder,storage_key,object_key,content_type,size_bytes,sha256,checksum_status,checksum_error,revision,uploaded_by,source,tags,visibility) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, pid, in.Name, in.Folder, sk, backendKey, in.ContentType, size, sha, checksumStatus, "", 1, actorFrom(c), in.Source, string(tags), effectiveVisibility(app, in.Visibility))
 	if err != nil {
 		return nil, false, err
 	}
@@ -160,8 +165,13 @@ func publishFile(c context.Context, app *sdk.AppCtx, pid string, in uploadInput,
 	if err != nil {
 		return nil, false, err
 	}
-	if _, err = tx.Exec(`DELETE FROM blob_cleanup WHERE object_key=?`, objectKey(sha, sk)); err != nil {
+	if _, err = tx.Exec(`DELETE FROM blob_cleanup WHERE object_key=?`, backendKey); err != nil {
 		return nil, false, err
+	}
+	if sha == "" {
+		if _, err = tx.Exec(`INSERT OR IGNORE INTO checksum_jobs(file_id,project_id) VALUES(?,?)`, id, pid); err != nil {
+			return nil, false, err
+		}
 	}
 	if uploadID != "" {
 		if _, err = tx.Exec(`INSERT INTO completed_uploads(upload_id,project_id,folder,file_id,was_existing,completed_at,user_id) VALUES(?,?,?,?,0,?,?)`, uploadID, pid, in.Folder, id, time.Now().Unix(), in.UserID); err != nil {
@@ -222,7 +232,7 @@ func cleanupBlob(app *sdk.AppCtx, key string) bool {
 	catalogMu.Lock()
 	var n int
 	// A leftover job must never remove a referenced object, including tombstones.
-	err := app.AppDB().QueryRow(`SELECT count(*) FROM files WHERE (CASE WHEN length(sha256)>=2 THEN substr(sha256,1,2) ELSE '00' END)||'/'||storage_key=?`, key).Scan(&n)
+	err := app.AppDB().QueryRow(`SELECT count(*) FROM files WHERE COALESCE(NULLIF(object_key,''),(CASE WHEN length(sha256)>=2 THEN substr(sha256,1,2) ELSE '00' END)||'/'||storage_key)=?`, key).Scan(&n)
 	catalogMu.Unlock()
 	if n > 0 {
 		_, _ = app.AppDB().Exec(`DELETE FROM blob_cleanup WHERE object_key=?`, key)
@@ -278,11 +288,14 @@ func verifyBackendIdentity(app *sdk.AppCtx, be Backend) error {
 	}
 	if prior == "" {
 		// Before first pin, legacy local bytes must not be silently orphaned.
-		var sha, sk string
-		e := app.AppDB().QueryRow(`SELECT sha256,storage_key FROM files LIMIT 1`).Scan(&sha, &sk)
+		var sha, sk, bk string
+		e := app.AppDB().QueryRow(`SELECT sha256,storage_key,COALESCE(object_key,'') FROM files LIMIT 1`).Scan(&sha, &sk, &bk)
 		if e == nil {
 			c, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			_, statErr := be.Stat(c, objectKey(sha, sk))
+			if bk == "" {
+				bk = objectKey(sha, sk)
+			}
+			_, statErr := be.Stat(c, bk)
 			cancel()
 			if statErr != nil {
 				return fmt.Errorf("selected backend cannot read existing objects: %w", statErr)

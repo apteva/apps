@@ -295,7 +295,7 @@ func (s *s3Backend) HeadObject(ctx context.Context, key string) (ObjectMetadata,
 		return ObjectMetadata{}, fmt.Errorf("s3 stat %s: %w", key, err)
 	}
 	return ObjectMetadata{
-		Size: info.Size, ContentType: info.ContentType, ETag: info.ETag, LastModified: info.LastModified,
+		Size: info.Size, ContentType: info.ContentType, ETag: info.ETag, VersionID: info.VersionID, LastModified: info.LastModified,
 	}, nil
 }
 

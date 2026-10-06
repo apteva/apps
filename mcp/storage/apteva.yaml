@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: storage
 display_name: Storage
-version: 0.12.7
+version: 0.12.8
 description: |
   File storage for Apteva agents and human teams. Upload bytes,
   organise into folders, share via signed URLs. Pluggable backend:
@@ -103,6 +103,8 @@ provides:
     # gate out of the way.
     - name: files_get
       description: Fetch one file's metadata by id (no bytes). Returns {found:true,file:{...}} or {found:false,file:null}.
+    - name: files_ensure_checksum
+      description: Queue or inspect verified whole-file SHA-256 repair for one file. Returns checksum_status, sha256, and file revision; never moves or replaces the object.
     - name: files_get_url
       description: Mint a signed time-limited URL. Supports disposition=inline|attachment and delivery=apteva|direct|proxy. Proxy serves bytes through Storage without redirecting or exposing the backend. Omitting delivery uses revocable Storage delivery. Explicit direct links remain usable until their expiry.
     - name: files_get_content
@@ -195,7 +197,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: storage/v0.12.7
+    ref: storage/v0.12.8
     entry: mcp/storage
   port: 8080
   health_check: /health
