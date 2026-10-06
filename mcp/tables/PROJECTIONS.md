@@ -1,4 +1,4 @@
-# SQL projections in Tables 0.2.0
+# SQL projections in Tables 0.2.5
 
 A projection stores a complete published result in Tables. Source writes append
 small transactional change records; a worker consumes them and recalculates dirty
@@ -78,7 +78,9 @@ explicit IANA timezone. Identical dependency lookups are cached within each
 consumed change batch. Return distinct scopes to bound fan-out: each lookup may
 return at most 4,096 rows, and each change may invalidate at most 4,096 scopes.
 If a lookup fails or exceeds fan-out, Tables records the failure and conservatively
-queues a bounded whole rebuild; refresh failures use the same retry backoff.
+queues a bounded whole rebuild; a batch affecting more than 256 scopes is also
+coalesced into one rebuild when that is cheaper. Refresh failures use the same
+retry backoff.
 Index lookup joins and source filters. A dependency rule can map prospect campaign
 changes or campaign/offer changes to dependent calls without app-specific code.
 
@@ -146,6 +148,7 @@ It exposes:
 - `last_successful_publication_at`, `last_failure`, and a requested scope's
   `published_generation` (or `last_full_generation` for overall status).
 - Published `coverage_from` and `coverage_to`.
+- `phase_timings_ms` for queue wait, calculation, publication and cleanup.
 
 Change IDs are watermarks, not counts; unrelated source tables do not increase a
 projection's latest relevant watermark. Consumption alone never declares a
@@ -157,6 +160,11 @@ already covered events do not enqueue redundant automatic refreshes. Explicit
 refresh requests are preserved regardless of source watermark.
 Initial projections report not ready until the first complete successful build.
 A missing scope in a complete build represents an empty result.
+
+After a successful publication Tables emits `projection.ready` with the
+projection version, scope key, generation and included source watermark. The
+event is an invalidation hint; consumers should use status or their next read
+for authoritative data.
 
 Declare both coverage bounds as RFC3339 timestamps when SQL covers a fixed window
 `[coverage_from, coverage_to)`. Match the SQL's actual restrictions. Coverage is
@@ -205,11 +213,16 @@ the publication deadline. A pointer switch exceeding its deadline rolls back.
 
 Rows stage invisibly in bounded transactions. A short transaction switches scope
 heads only after staging succeeds; readers retain the previous complete result.
-Cleanup uses bounded deletion transactions and a limited per-tick budget. Excess
-retired storage applies refresh backpressure until cleanup catches up.
+SQL parsing and read-only program validation are cached with bounded,
+schema-invalidated entries; authorization is still checked on every request.
+Prepared read plans are discarded on table DDL and projection activation.
+Cleanup uses generation and scope indexes, bounded deletion transactions and a
+limited per-tick budget. Excess retired storage applies refresh backpressure
+until cleanup catches up.
 
 Migration 010 converts prior physical result tables into generation storage and
 stable read-only views atomically, retaining legacy results while rebuilding.
+Migration 011 adds persisted phase timings and generation-cleanup indexes.
 Back up the database before upgrade. **Downgrade to 0.1.27 requires restoring that
 backup**; the old worker cannot publish into the new views. The manifest declares
 For migrated projections, the app retains a writable `p_<id>` compatibility

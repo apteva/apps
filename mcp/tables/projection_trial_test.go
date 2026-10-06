@@ -97,6 +97,46 @@ func TestProjectionFullPublicationCoversUnconsumedEvents(t *testing.T) {
 	}
 }
 
+func TestProjectionCoalescesLargeDependencyFanoutAndPublishesReadyTiming(t *testing.T) {
+	ctx, recorder := newTestCtxWithRecorder(t)
+	a := &App{}
+	projectionSourceTable(t, a, ctx)
+	mustCall(t, a, ctx, "projections_create", map[string]any{
+		"name": "fanout", "version": 1,
+		"sql":           "SELECT centre_id,COUNT(*) AS total FROM {events} GROUP BY centre_id",
+		"source_tables": []any{"events"}, "scope_columns": []any{"centre_id"},
+		"result_columns": []any{map[string]any{"name": "centre_id", "type": "text"}, map[string]any{"name": "total", "type": "number"}},
+	})
+	runProjectionWorker(t, a, ctx)
+	rows := make([]any, projectionScopeCoalesceThreshold+10)
+	for i := range rows {
+		rows[i] = map[string]any{"centre_id": fmt.Sprintf("centre-%03d", i), "value": 1}
+	}
+	mustCall(t, a, ctx, "rows_insert", map[string]any{"table": "events", "rows": rows})
+	if err := a.consumeProjectionChanges(context.Background(), ctx, "test-proj"); err != nil {
+		t.Fatal(err)
+	}
+	var pending, full int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*),COALESCE(SUM(scope_key=?),0) FROM projection_queue WHERE projection_id=(SELECT id FROM projection_definitions WHERE name='fanout')`, projectionAllScope).Scan(&pending, &full); err != nil {
+		t.Fatal(err)
+	}
+	if full != 1 || pending != 1 {
+		t.Fatalf("large dependency fan-out was not coalesced: pending=%d full=%d", pending, full)
+	}
+	runProjectionWorker(t, a, ctx)
+	s := projectionStatusFor(t, a, ctx, map[string]any{"name": "fanout"})
+	phases := s["phase_timings_ms"].(map[string]any)
+	for _, key := range []string{"queue", "calculation", "publication", "cleanup"} {
+		if _, ok := phases[key]; !ok {
+			t.Fatalf("missing phase timing %q: %v", key, phases)
+		}
+	}
+	ready := recorder.EventsByTopic(topicProjectionReady)
+	if len(ready) == 0 {
+		t.Fatal("projection publication did not emit projection.ready")
+	}
+}
+
 func TestProjectionIntervalRestartForceAndRelevantFreshness(t *testing.T) {
 	ctx := newTestCtx(t)
 	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)

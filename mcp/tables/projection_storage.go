@@ -54,7 +54,10 @@ func createProjectionDataTable(tx *writeTx, p *projectionDefinition) error {
 	if _, err := tx.Exec(`CREATE TABLE ` + quote(projectionData(p)) + ` (` + strings.Join(defs, ",") + `)`); err != nil {
 		return err
 	}
-	_, err := tx.Exec(`CREATE INDEX ` + quote(fmt.Sprintf("pg_%d", p.ID)) + ` ON ` + quote(projectionData(p)) + ` (_projection_generation,_projection_scope)`)
+	if _, err := tx.Exec(`CREATE INDEX ` + quote(fmt.Sprintf("pg_%d", p.ID)) + ` ON ` + quote(projectionData(p)) + ` (_projection_generation,_projection_scope,id)`); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`CREATE INDEX ` + quote(fmt.Sprintf("pgs_%d", p.ID)) + ` ON ` + quote(projectionData(p)) + ` (_projection_scope,_projection_generation,id)`)
 	return err
 }
 
@@ -154,7 +157,42 @@ func (a *App) ensureProjectionStorage(app *sdk.AppCtx) error {
 			return err
 		}
 	}
+	if err := a.ensureProjectionDataIndexes(app); err != nil {
+		return err
+	}
 	return a.ensureProjectionCompatibility(app)
+}
+
+func (a *App) ensureProjectionDataIndexes(app *sdk.AppCtx) error {
+	rows, err := app.AppReadDB().QueryContext(requestContext(app), `SELECT id FROM projection_definitions WHERE storage_format>0`)
+	if err != nil {
+		return err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	tx, err := beginWrite(app)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, id := range ids {
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS ` + quote(fmt.Sprintf("pgs_%d", id)) + ` ON ` + quote(fmt.Sprintf("pd_%d", id)) + ` (_projection_scope,_projection_generation,id)`); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // Databases upgraded by Tables 0.2.0–0.2.3 already contain p_<id> views.
@@ -246,15 +284,16 @@ func publicationTx(parent context.Context, app *sdk.AppCtx, p *projectionDefinit
 func publishProjectionRows(app *sdk.AppCtx, p *projectionDefinition, item projectionQueueItem, grouped map[string][]map[string]any) error {
 	ctx, cancel := context.WithTimeout(requestContext(app), time.Duration(p.Options.MaxMs)*time.Millisecond)
 	defer cancel()
-	return publishProjectionGeneration(ctx, app, p, item, grouped, item.PendingID, time.Now().UnixMilli())
+	return publishProjectionGeneration(ctx, app, p, item, grouped, item.PendingID, time.Now().UnixMilli(), nil)
 }
-func publishProjectionGeneration(ctx context.Context, app *sdk.AppCtx, p *projectionDefinition, item projectionQueueItem, grouped map[string][]map[string]any, watermark, now int64) error {
+func publishProjectionGeneration(ctx context.Context, app *sdk.AppCtx, p *projectionDefinition, item projectionQueueItem, grouped map[string][]map[string]any, watermark, now int64, publicationMsOut *int64) error {
+	publicationStarted := time.Now()
 	var retained int
 	reader, _ := ctx.Value(projectionBackgroundDBKey{}).(*sql.DB)
 	if reader == nil {
 		reader = app.AppReadDB()
 	}
-	if err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT id FROM `+quote(projectionData(p))+` LIMIT ?)`, p.Options.MaxRows*3+1).Scan(&retained); err != nil {
+	if err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT d.id FROM `+quote(projectionData(p))+` d JOIN `+quote(projectionHeads(p))+` h ON h.scope_key=d._projection_scope AND h.generation=d._projection_generation LIMIT ?)`, p.Options.MaxRows*3+1).Scan(&retained); err != nil {
 		return err
 	}
 	if retained > p.Options.MaxRows*3 {
@@ -347,7 +386,7 @@ func publishProjectionGeneration(ctx context.Context, app *sdk.AppCtx, p *projec
 	}
 	// Whole builds can have many scopes. Stage head pointers separately, then
 	// copy them in one bounded publication transaction (bounded by result caps).
-	return publicationTx(ctx, app, p, func(c context.Context, tx *sql.Tx) error {
+	err = publicationTx(ctx, app, p, func(c context.Context, tx *sql.Tx) error {
 		if err := fence(c, tx); err != nil {
 			return err
 		}
@@ -411,9 +450,34 @@ func publishProjectionGeneration(ctx context.Context, app *sdk.AppCtx, p *projec
 		// A full publication covers its entire calculation snapshot, even when the
 		// change-log cursor is still catching up. Scoped publications advance overall
 		// freshness only after every relevant change was mapped and every queue drained.
+		publicationMs := time.Since(publicationStarted).Milliseconds()
+		if publicationMsOut != nil {
+			*publicationMsOut = publicationMs
+		}
 		_, err := tx.ExecContext(c, `UPDATE projection_definitions SET built=1,published_at_ms=?,last_failure=NULL,published_change=CASE WHEN ? THEN MAX(published_change,?) WHEN NOT EXISTS(SELECT 1 FROM projection_queue WHERE projection_id=?) AND latest_relevant_change<=? AND (SELECT last_change_id FROM projection_cursors WHERE projection_id=?)>=latest_relevant_change THEN latest_relevant_change ELSE published_change END,updated_at=CURRENT_TIMESTAMP WHERE id=?`, now, item.ScopeKey == projectionAllScope, watermark, p.ID, watermark, p.ID, p.ID)
 		return err
 	})
+	if err != nil {
+		return err
+	}
+	for scope := range grouped {
+		data := map[string]any{
+			"projection_id": p.ID,
+			"name":          p.Name,
+			"version":       p.Version,
+			"scope_key":     scope,
+			"watermark":     watermark,
+			"generation":    gen,
+			"published_at":  projectionTimestamp(now),
+			"ready":         true,
+		}
+		if p.Options.CoverageFrom != "" {
+			data["coverage_from"] = p.Options.CoverageFrom
+			data["coverage_to"] = p.Options.CoverageTo
+		}
+		emit(app, topicProjectionReady, data)
+	}
+	return nil
 }
 
 // Reclaim invisible generations in small writer batches, including abandoned
@@ -427,8 +491,8 @@ func (a *App) cleanupProjectionGenerations(ctx context.Context, app *sdk.AppCtx,
 	if err != nil {
 		return false, err
 	}
-	var gen, scope string
-	err = db.QueryRowContext(readCtx, `SELECT d._projection_generation,d._projection_scope FROM `+quote(projectionData(p))+` d WHERE NOT EXISTS(SELECT 1 FROM `+quote(projectionHeads(p))+` h WHERE h.scope_key=d._projection_scope AND h.generation=d._projection_generation) AND NOT EXISTS(SELECT 1 FROM projection_generations g JOIN projection_queue q ON q.projection_id=g.projection_id AND q.lease_token=g.lease_token WHERE g.projection_id=? AND g.generation=d._projection_generation AND q.claimed_until>CURRENT_TIMESTAMP) LIMIT 1`, p.ID).Scan(&gen, &scope)
+	var gen string
+	err = db.QueryRowContext(readCtx, `SELECT g.generation FROM projection_generations g WHERE g.projection_id=? AND NOT EXISTS(SELECT 1 FROM `+quote(projectionHeads(p))+` h WHERE h.generation=g.generation) AND NOT EXISTS(SELECT 1 FROM projection_queue q WHERE q.projection_id=g.projection_id AND q.lease_token=g.lease_token AND q.claimed_until>CURRENT_TIMESTAMP) ORDER BY g.created_at_ms,g.generation LIMIT 1`, p.ID).Scan(&gen)
 	if readCtx.Err() != nil {
 		return false, nil
 	}
@@ -446,7 +510,7 @@ func (a *App) cleanupProjectionGenerations(ctx context.Context, app *sdk.AppCtx,
 	}
 	removed := false
 	err = publicationTx(ctx, app, p, func(c context.Context, tx *sql.Tx) error {
-		result, err := tx.ExecContext(c, `DELETE FROM `+quote(projectionData(p))+` WHERE id IN (SELECT id FROM `+quote(projectionData(p))+` WHERE _projection_generation=? AND _projection_scope=? LIMIT ?) AND NOT EXISTS(SELECT 1 FROM `+quote(projectionHeads(p))+` WHERE scope_key=? AND generation=?) AND NOT EXISTS(SELECT 1 FROM projection_generations g JOIN projection_queue q ON q.projection_id=g.projection_id AND q.lease_token=g.lease_token WHERE g.projection_id=? AND g.generation=? AND q.claimed_until>CURRENT_TIMESTAMP)`, gen, scope, p.Options.BatchRows, scope, gen, p.ID, gen)
+		result, err := tx.ExecContext(c, `DELETE FROM `+quote(projectionData(p))+` WHERE id IN (SELECT id FROM `+quote(projectionData(p))+` WHERE _projection_generation=? LIMIT ?) AND NOT EXISTS(SELECT 1 FROM `+quote(projectionHeads(p))+` WHERE generation=?) AND NOT EXISTS(SELECT 1 FROM projection_generations g JOIN projection_queue q ON q.projection_id=g.projection_id AND q.lease_token=g.lease_token WHERE g.projection_id=? AND g.generation=? AND q.claimed_until>CURRENT_TIMESTAMP)`, gen, p.Options.BatchRows, gen, p.ID, gen)
 		if err != nil {
 			return err
 		}

@@ -80,6 +80,7 @@ func (a *App) projectionIndexTool(app *sdk.AppCtx, pid string, args map[string]a
 			return nil, err
 		}
 		a.plans.invalidateTable(-p.ID)
+		a.invalidateSQLCaches()
 		return map[string]any{"dropped": name}, nil
 	}
 	cols, err := parseIndexColumns(projectionTable(p), sliceArg(args, "columns"))
@@ -111,10 +112,10 @@ func (a *App) projectionIndexTool(app *sdk.AppCtx, pid string, args map[string]a
 	if _, err := tx.Exec(`INSERT INTO projection_indexes(projection_id,name,columns_json,unique_index) VALUES(?,?,?,?)`, p.ID, name, string(raw), unique); err != nil {
 		return nil, err
 	}
-	physicalCols := append([]IndexColumn{}, cols...)
-	if unique {
-		physicalCols = append([]IndexColumn{{Col: "_projection_generation", Order: "asc"}}, physicalCols...)
-	}
+	// Every physical projection index is generation-prefixed. The visible view
+	// joins on the current head generation; excluding obsolete generations from
+	// the index keeps lookup cost bounded as blue-green refreshes accumulate.
+	physicalCols := append([]IndexColumn{{Col: "_projection_generation", Order: "asc"}}, cols...)
 	if _, err := tx.Exec(buildCreateIndexSQL(projectionIndexPhysical(p, name, unique), projectionData(p), physicalCols, unique)); err != nil {
 		return nil, err
 	}
@@ -122,5 +123,6 @@ func (a *App) projectionIndexTool(app *sdk.AppCtx, pid string, args map[string]a
 		return nil, err
 	}
 	a.plans.invalidateTable(-p.ID)
+	a.invalidateSQLCaches()
 	return map[string]any{"index": TableIndex{Name: name, Columns: cols, Unique: unique}}, nil
 }

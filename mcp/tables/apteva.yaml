@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.2.4
+version: 0.2.5
 description: |
+  v0.2.5 Caches safe SQL parsing, bounds dependency fan-out, keeps obsolete
+  generations indexed and out of reads, and reports projection phase timings
+  with scope-ready events.
   v0.2.4 Adds an automatic projection-storage migration that keeps the prior
   result tables writable for safe blue-green fallback while readers use atomic
   generation views.
@@ -198,6 +201,17 @@ provides:
         table: string
         id: integer
         deleted: integer
+    - name: projection.ready
+      description: A projection scope was successfully published and is ready for selective UI refresh.
+      payload:
+        projection_id: integer
+        name: string
+        version: integer
+        scope_key: string
+        watermark: integer
+        generation: string
+        published_at: string
+        ready: boolean
 
 runtime:
   startup_timeout_seconds: 600
@@ -205,7 +219,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.2.4
+    ref: tables/v0.2.5
     entry: mcp/tables
   port: 8080
   health_check: /health

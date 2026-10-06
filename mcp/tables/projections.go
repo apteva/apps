@@ -15,35 +15,39 @@ import (
 )
 
 const (
-	projectionAllScope    = "__all__"
-	projectionChangeBatch = 512
-	projectionQueueBatch  = 8
-	projectionWorkerEvery = "@every 1s"
+	projectionAllScope               = "__all__"
+	projectionChangeBatch            = 512
+	projectionQueueBatch             = 8
+	projectionWorkerEvery            = "@every 1s"
+	projectionScopeCoalesceThreshold = 256
 )
 
 type projectionDefinition struct {
-	ID                                        int64
-	ProjectID, Name, Status, SQL, ResultTable string
-	Version                                   int
-	SourceTables                              []string
-	SourceIDs                                 []int64
-	ResultCols                                []Column
-	ScopeCols                                 []string
-	Options                                   projectionOptions
-	Current, Built                            bool
-	Latest, Published                         int64
-	PublishedAt                               sql.NullInt64
-	LastFailure                               sql.NullString
-	Format                                    int
+	ID                                               int64
+	ProjectID, Name, Status, SQL, ResultTable        string
+	Version                                          int
+	SourceTables                                     []string
+	SourceIDs                                        []int64
+	ResultCols                                       []Column
+	ScopeCols                                        []string
+	Options                                          projectionOptions
+	Current, Built                                   bool
+	Latest, Published                                int64
+	PublishedAt                                      sql.NullInt64
+	LastFailure                                      sql.NullString
+	QueueMs, CalculationMs, PublicationMs, CleanupMs int64
+	Format                                           int
 }
+type projectionPhaseMetrics struct{ Queue, Calculation, Publication, Cleanup int64 }
 type projectionQueuedRevision struct{ Revision, Pending int64 }
 type projectionQueueItem struct {
-	CoveredScopes       map[string]projectionQueuedRevision
-	ProjectionID        int64
-	ProjectID, ScopeKey string
-	PendingID, Revision int64
-	Attempts            int
-	LeaseToken          string
+	CoveredScopes                                         map[string]projectionQueuedRevision
+	ProjectionID                                          int64
+	ProjectID, ScopeKey                                   string
+	PendingID, Revision                                   int64
+	Attempts                                              int
+	LeaseToken                                            string
+	QueuedAtMs, QueueWaitMs, CalculationMs, PublicationMs int64
 }
 
 func projectionLeaseToken() (string, error) {
@@ -56,6 +60,40 @@ func (a *App) projectionTime() time.Time {
 		return a.projectionNow()
 	}
 	return time.Now()
+}
+
+func (a *App) setProjectionMetrics(id int64, update projectionPhaseMetrics) {
+	a.projectionMetricsMu.Lock()
+	if a.projectionMetrics == nil {
+		a.projectionMetrics = make(map[int64]projectionPhaseMetrics)
+	}
+	a.projectionMetrics[id] = update
+	a.projectionMetricsMu.Unlock()
+}
+
+func (a *App) projectionMetricsFor(id int64) projectionPhaseMetrics {
+	a.projectionMetricsMu.RLock()
+	m := a.projectionMetrics[id]
+	a.projectionMetricsMu.RUnlock()
+	return m
+}
+
+func (a *App) recordProjectionMetrics(ctx *sdk.AppCtx, id int64, m projectionPhaseMetrics) {
+	a.setProjectionMetrics(id, m)
+	// 0.2.4 databases may be inspected before migration 011 has run. The
+	// in-memory value remains available in that case; upgraded databases retain
+	// the latest timings across restarts.
+	_, _ = ctx.AppDB().ExecContext(requestContext(ctx), `UPDATE projection_definitions SET last_queue_ms=?,last_calculation_ms=?,last_publication_ms=?,last_cleanup_ms=? WHERE id=?`, m.Queue, m.Calculation, m.Publication, m.Cleanup, id)
+}
+
+func (a *App) loadStoredProjectionMetrics(ctx *sdk.AppCtx, id int64) projectionPhaseMetrics {
+	var m projectionPhaseMetrics
+	err := metadataReaderFor(ctx).QueryRowContext(requestContext(ctx), `SELECT last_queue_ms,last_calculation_ms,last_publication_ms,last_cleanup_ms FROM projection_definitions WHERE id=?`, id).Scan(&m.Queue, &m.Calculation, &m.Publication, &m.Cleanup)
+	if err != nil {
+		return a.projectionMetricsFor(id)
+	}
+	a.setProjectionMetrics(id, m)
+	return m
 }
 
 const projectionSelect = `SELECT id,project_id,name,version,status,sql_text,source_tables,result_columns,scope_columns,result_table,options,is_current,built,latest_relevant_change,published_change,published_at_ms,last_failure,storage_format FROM projection_definitions `
@@ -178,7 +216,9 @@ func (a *App) invalidateProjection(pid, name string) {
 	a.projectionMu.Lock()
 	delete(a.projectionCache, schemaCacheKey{pid, name})
 	a.projectionMu.Unlock()
-	a.plans.invalidateTable(0)
+	// Activation can replace the physical table behind a name, so invalidate
+	// every prepared projection plan rather than only the new version's id.
+	a.invalidateSQLCaches()
 }
 func projectionNameSchema() map[string]any {
 	return map[string]any{"name": map[string]any{"type": "string"}, "version": map[string]any{"type": "integer", "minimum": 1}}
