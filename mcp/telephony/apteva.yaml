@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.10.3
+version: 0.10.4
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -169,6 +169,7 @@ provides:
     - { name: telephony.audio.recovered, description: "An audio delivery stage recovered or became inactive.", payload: { call_id: string, provider: string, stage: string, state: string, occurred_at: string } }
     - { name: telephony.audio.alert, description: "Distinct calls showed audio impairment within a rolling 30-second window.", payload: { project_id: string, provider: string, stage: string, call_count: integer, call_ids: array, occurred_at: string } }
     - { name: telephony.audio.alert_recovered, description: "A correlated audio impairment alert recovered.", payload: { project_id: string, provider: string, stage: string, occurred_at: string } }
+    - { name: telephony.audio.reports.changed, description: "A bounded batch of audio reports was committed; refresh the project audio-health query.", payload: { call_ids: array, occurred_at: string } }
     - { name: telephony.burst.detected, description: "A destination-wide inbound burst was detected and alerted without blocking access to the number.", payload: { provider_call_id: string, to_number: string, reason: string, occurred_at: string } }
     - { name: telephony.spam.suppressed, description: "A displayed caller number matched the configured explicit block list; the call was rejected before adviser delivery.", payload: { provider_call_id: string, to_number: string, from_number: string, reason: string, occurred_at: string } }
     - name: call.incoming
@@ -258,7 +259,7 @@ provides:
       visibility: project
       supported_sizes: [half, full]
       default_size: half
-      refresh_topics: [telephony.audio.degraded, telephony.audio.recovered, telephony.audio.alert, telephony.audio.alert_recovered]
+      refresh_topics: [telephony.audio.degraded, telephony.audio.recovered, telephony.audio.alert, telephony.audio.alert_recovered, telephony.audio.reports.changed]
       settings_schema:
         type: object
         properties:

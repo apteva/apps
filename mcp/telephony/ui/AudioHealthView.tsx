@@ -1,3 +1,4 @@
+import { subscribeAudioDashboardEvents, type AudioUpdatesMode } from "./audio-dashboard-events";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   audioDashboardURL,
@@ -22,7 +23,8 @@ export function useAudioDashboard(
 ) {
   const [data, setData] = useState<AudioDashboardResponse | null>(null),
     [error, setError] = useState(""),
-    [loading, setLoading] = useState(false);
+    [loading, setLoading] = useState(false),
+    [updatesMode, setUpdatesMode] = useState<AudioUpdatesMode>("connecting");
   const request = useRef<AbortController | null>(null);
   const latest = useRef(0);
   const load = useCallback(async () => {
@@ -69,15 +71,20 @@ export function useAudioDashboard(
       request.current?.abort();
     };
   }, [load]);
+  const liveLoad = useRef(load);
+  liveLoad.current = load;
   useEffect(() => {
-    if (!host.eventRevision) return;
-    const timer = window.setTimeout(() => void load(), 500);
-    return () => window.clearTimeout(timer);
-  }, [host.eventRevision, load]);
+    let pending: ReturnType<typeof setTimeout> | undefined;
+    const unsubscribe = subscribeAudioDashboardEvents(host, () => {
+      if (document.hidden || pending) return;
+      pending = setTimeout(() => { pending = undefined; void liveLoad.current(); }, 300);
+    }, setUpdatesMode);
+    return () => { unsubscribe(); if (pending) clearTimeout(pending); };
+  }, [host.appName, host.installId, host.projectId]);
   useEffect(() => {
     const timer = window.setInterval(() => {
       if (!document.hidden) void load();
-    }, interval);
+    }, updatesMode === "fallback" ? interval : Math.max(interval, 60000));
     const resume = () => {
       if (!document.hidden) void load();
     };
@@ -86,8 +93,8 @@ export function useAudioDashboard(
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", resume);
     };
-  }, [load, interval]);
-  return { data, error, loading, reload: load };
+  }, [load, interval, updatesMode]);
+  return { data, error, loading, updatesMode, reload: load };
 }
 export function AudioHealthCards({ data }: { data: AudioDashboardResponse }) {
   return (

@@ -1,6 +1,7 @@
 # Audio health overview and dashboard widget
 
-Introduced in Telephony 0.10.3, retaining all Telephony 0.10.2 functionality.
+Introduced in Telephony 0.10.3, with widget presentation and SSE improvements in
+0.10.4. The release retains all earlier Telephony functionality.
 Only Telephony is changed.
 
 ## Using the app
@@ -42,11 +43,22 @@ dashboard's existing widget picker; no dashboard or CRM code is modified and no
 user's dashboard layout is overwritten.
 
 Settings: report window (one hour / 24 hours / seven days), optional provider,
-and 3–12 recent calls. The widget shows degraded calls, calls with observations
-and recent affected rows. Links preserve project, installation, filters and
-selected call, opening the Audio health tab. The widget refreshes every 30 seconds
-and responds to audio health events; the view refreshes every 15 seconds. Hidden
-browser tabs pause periodic fetches. Request errors and timeouts remain visible,
+and 3–12 recent calls. The widget highlights issue badges and separate drop,
+reception-gap, sequence and reconnect measurements; call-ended status does not
+hide historical errors. It contains time/problem filters and optional provider,
+adviser, direction, state and search filters, pagination and expandable metrics.
+It has no navigation links.
+
+The widget and Audio health view reuse the host's shared, authenticated project
+SSE channel. Outside the dashboard they subscribe to the app event API with a
+bounded reconnect budget. App/project/installation/topic filtering prevents an
+unrelated event from refreshing this view. The five-second indexing worker emits
+one `telephony.audio.reports.changed` hint per project/batch **after commit**;
+rapid hints are coalesced before fetching the indexed endpoint. No media frames
+are added to the event bus. Connection/reconnection and tab resumption reconcile
+with durable state. A visible-tab 60-second reconciliation covers missed hints,
+staleness and rolling time windows; standalone SSE failure restores 30-second
+widget / 15-second view polling. Request errors and timeouts remain visible,
 with last-success timestamps instead of suggesting stale data is current.
 
 ## Storage, performance and access
@@ -99,3 +111,19 @@ with last-success timestamps instead of suggesting stale data is current.
 Verification was local. Publishing does not activate installations. Production
 and staging, routes, numbers, carrier settings and dashboard layouts were not
 changed. No live calls were made.
+
+## Telephony 0.10.4 verification
+
+- 663 Go cases/subtests and 154 frontend/audio tests passed. Two live Twilio
+  cases were skipped.
+- Four Chromium dashboard scenarios passed, including issue emphasis, filters,
+  details, absence of widget navigation links, scoped SSE updates, coalescing,
+  stable subscription during filtering and disconnect/error handling.
+- Post-commit notifications preserve project isolation and the 100-call batch
+  ceiling; idle batches and failed transactions do not emit changes.
+- Three completed synthetic calls were displayed in the local installation.
+  A changed dropped-audio counter appeared through actual local SSE within four
+  seconds without a manual refresh. The carrier-gap filter selected only its
+  matching test call.
+- The shared headless client, media handlers, Worker/worklet, DSP, routing and
+  carrier commands are unchanged. No new live-carrier benchmark is claimed.

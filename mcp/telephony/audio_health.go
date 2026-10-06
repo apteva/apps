@@ -497,7 +497,11 @@ func (a *App) runAudioTelemetryTick(c context.Context, ctx *sdk.AppCtx) error {
 		}
 		ctx.WithProject(alert.ProjectID).Emit("telephony.audio.alert_recovered", alert)
 	}
-	return a.db().refreshAudioDashboard(c)
+	return a.db().refreshAudioDashboardAndNotify(c, func(changed map[string][]string) {
+		for project, ids := range changed {
+			ctx.WithProject(project).Emit("telephony.audio.reports.changed", map[string]any{"call_ids": ids, "occurred_at": time.Now().UTC().Format(time.RFC3339Nano)})
+		}
+	})
 }
 
 func audioBrowserCounters(v browserAudioDiagnostics) map[string]float64 {
