@@ -1,5 +1,14 @@
 # Content Catalog
 
+## Version 0.6.4: durable hosting requests and encoding progress
+
+Explicit hosting requests persist while waiting for checksum verification and
+resume automatically after eligibility and destination checks. Pending remote
+videos refresh automatically, showing encoding progress, provider stage, and
+transcoding messages. New uploads use Media's title when available, otherwise
+the session title and filename. Existing hosted titles stay unchanged. These
+workers only follow recorded hosting work; they never scan folders.
+
 ## Version 0.6.3: verified Storage checksums during hosting
 
 Catalog refreshes an asset's checksum from Storage's verified result and
