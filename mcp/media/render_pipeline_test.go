@@ -670,3 +670,40 @@ func TestSidecar_SetDescription_PartialUpdate(t *testing.T) {
 		t.Errorf("alt_text clobbered: %v", row["alt_text"])
 	}
 }
+
+// Real Storage, FFmpeg, indexing, queuing, persistence and request-cache reuse
+// must agree on the same crop decision and published app version.
+func TestSidecar_RenderPipeline_SmartCropProvenance(t *testing.T) {
+	skipIfNoFFmpeg(t)
+	sc := spawnMediaWithStorageFastIndexer(t)
+	var payload bytes.Buffer
+	if err := png.Encode(&payload, portraitCompositionFixture(160, false)); err != nil {
+		t.Fatal(err)
+	}
+	id := uploadFixtureToStorage(t, sc, "test-proj", "subject.png", "image/png", "/tests/", payload.Bytes())
+	fid := strconv.FormatInt(id, 10)
+	waitForIndexed(t, sc, "test-proj", fid, 15*time.Second)
+	var original json.RawMessage
+	for i := 0; i < 2; i++ {
+		sub := sc.MCP("media_crop", map[string]any{"_project_id": "test-proj", "file_id": fid, "target_ratio": "9:16", "output_width": 54, "output_name": "audited-portrait"})
+		rid := int64(sub["render_id"].(float64))
+		final := pollUntilOk(t, sc, "test-proj", rid, 25*time.Second)
+		resolved, ok := final["resolved_params"].(map[string]any)
+		if !ok {
+			t.Fatalf("missing saved params: %v", final)
+		}
+		diag, ok := resolved["crop_diagnostics"].(map[string]any)
+		if !ok || diag["algorithm_version"] != smartCropAlgorithmVersion || diag["app_version"] != (&App{}).Manifest().Version || diag["effective_crop"] == nil || diag["evidence"] == nil {
+			t.Fatalf("incomplete saved crop provenance: %v", resolved)
+		}
+		raw, _ := json.Marshal(resolved)
+		if i == 0 {
+			original = raw
+		} else {
+			metrics, _ := final["metrics"].(map[string]any)
+			if string(raw) != string(original) || metrics["result_cache_hit"] != true {
+				t.Fatalf("cache lost saved decision: first=%s second=%s metrics=%v", original, raw, metrics)
+			}
+		}
+	}
+}

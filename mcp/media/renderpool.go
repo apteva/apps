@@ -202,6 +202,16 @@ func runOneRender(app *sdk.AppCtx, row *RenderRow, local *localExecutor, remote 
 		} else {
 			defer release()
 			outputFileID = findCachedRender(ctx, app, sc, cacheKey, row.ProjectID, cacheFolder, cacheName)
+			if outputFileID > 0 {
+				var resolved string
+				if db.QueryRow(`SELECT COALESCE(resolved_params,'') FROM render_result_cache WHERE cache_key=? AND project_id=?`, cacheKey, row.ProjectID).Scan(&resolved) != nil || resolved == "" {
+					outputFileID = 0 // Old cache entries cannot explain their crop.
+				} else if storeErr := renderUpdateResolvedParams(db, row.ID, []byte(resolved)); storeErr != nil {
+					err = fmt.Errorf("store cached resolved params: %w", storeErr)
+				} else {
+					row.Params = []byte(resolved)
+				}
+			}
 		}
 	}
 	if err == nil && outputFileID == 0 {
@@ -212,6 +222,7 @@ func runOneRender(app *sdk.AppCtx, row *RenderRow, local *localExecutor, remote 
 			currentKey, _, _ := requestRenderCacheKey(ctx, app, sc, &cacheRequest, executor)
 			if currentKey == cacheKey {
 				saveCachedRender(ctx, app, sc, cacheKey, row.ProjectID, outputFileID)
+				_, _ = db.Exec(`UPDATE render_result_cache SET resolved_params=? WHERE cache_key=? AND project_id=?`, string(row.Params), cacheKey, row.ProjectID)
 			}
 		}
 	} else if err == nil {

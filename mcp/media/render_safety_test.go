@@ -232,6 +232,9 @@ func TestLocalRenderResultCacheSkipsEncoder(t *testing.T) {
 			t.Fatalf("queued render: %+v err=%v", got, err)
 		}
 		if i == 1 {
+			if len(got.ResolvedParams) == 0 {
+				t.Fatal("cache hit lost resolved params")
+			}
 			var metrics map[string]any
 			if json.Unmarshal(got.Metrics, &metrics) != nil || metrics["result_cache_hit"] != true {
 				t.Fatalf("request cache missed: %s", got.Metrics)

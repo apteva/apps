@@ -23,7 +23,7 @@ const renderAlgorithmVersion = "media-audit-1"
 // path, while unrelated render-result caches remain useful. Both decision and
 // pre-analysis request caches need it; resolved local plans already include the
 // changed coordinates in their result-cache key.
-const smartCropAlgorithmVersion = "media-smartcrop-portrait-composition-3"
+const smartCropAlgorithmVersion = "media-smartcrop-subject-extent-4"
 
 // Remote binaries/provider settings are not immutable. Restrict reuse to this
 // process lifetime as well as host/connection identity until they expose a
@@ -97,7 +97,7 @@ func preprocessSmartCrop(ctx context.Context, app *sdk.AppCtx, sc *storageClient
 		return preprocessSmartCropUncached(ctx, app, sc, project, op, sources, params)
 	}
 	row, err := getMedia(app.AppDB(), project, sources[0])
-	if err != nil || row.SourceSHA256 == "" {
+	if err != nil || row == nil || row.SourceSHA256 == "" {
 		return preprocessSmartCropUncached(ctx, app, sc, project, op, sources, params)
 	}
 	var parsed map[string]any
@@ -116,7 +116,7 @@ func preprocessSmartCrop(ctx context.Context, app *sdk.AppCtx, sc *storageClient
 	if mode == "" {
 		mode = "smart"
 	}
-	raw, _ := json.Marshal([]any{smartCropAlgorithmVersion, sc.base, project, op, sources, row.SourceSHA256, row.Width, row.Height, row.Rotation, row.Derivations, target, ratio, mode, parsed["fit_mode"], app.Config().Get("render_host_id")})
+	raw, _ := json.Marshal([]any{smartCropAlgorithmVersion, app.Manifest().Version, sc.base, project, op, sources, row.SourceSHA256, row.Width, row.Height, row.Rotation, row.Derivations, target, ratio, mode, parsed["fit_mode"], app.Config().Get("render_host_id")})
 	key := fmt.Sprintf("%x", sha256.Sum256(raw))
 	var cached string
 	if app.AppDB().QueryRow(`SELECT params FROM smartcrop_cache WHERE cache_key=?`, key).Scan(&cached) == nil {
@@ -134,7 +134,7 @@ func preprocessSmartCrop(ctx context.Context, app *sdk.AppCtx, sc *storageClient
 	var resolved map[string]any
 	if ctx.Err() == nil && json.Unmarshal(out, &resolved) == nil && resolved["crop_version"] == "v2" {
 		crop := map[string]any{}
-		for _, k := range []string{"crop_w", "crop_h", "crop_x", "crop_y", "crop_path", "crop_mode", "crop_version"} {
+		for _, k := range []string{"crop_w", "crop_h", "crop_x", "crop_y", "crop_path", "crop_mode", "crop_version", "crop_diagnostics"} {
 			if v, ok := resolved[k]; ok {
 				crop[k] = v
 			}
@@ -202,7 +202,7 @@ func requestRenderCacheKey(ctx context.Context, app *sdk.AppCtx, sc *storageClie
 	case "crop", "extract_frame", "extract_reel":
 		// Request-cache hits skip analysis entirely. Invalidating only the
 		// decision cache would still return an earlier incorrectly cropped file.
-		revision += ":" + smartCropAlgorithmVersion
+		revision += ":" + smartCropAlgorithmVersion + ":" + app.Manifest().Version
 	}
 	raw, _ := json.Marshal([]any{revision, sc.base, row.ProjectID, executor.Name(), identity, row.Operation, row.Params, sources, folder, plan.Filename})
 	return fmt.Sprintf("%x", sha256.Sum256(raw)), folder, plan.Filename

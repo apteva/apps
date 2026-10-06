@@ -67,3 +67,23 @@ identical pixels as video metadata to assert released horizontal decisions and
 full-height geometry are unchanged, and checks explicit center/contain modes.
 `BenchmarkComposeSmartCropPortrait320` measures the added still-only thumbnail
 pass alongside the unchanged analyzer/temporal/stationary benchmarks above.
+
+`TestAdditionalSmartCropProductionLocalRegression` replays the August cases
+through the full planner using `MEDIA_ADDITIONAL_CROP_FIXTURE_DIR`. It checks
+source 77371 at 528750 ms, source 77480 at 427975–468210 ms, and source 77155 at
+525000 ms, plus the two reported dance ranges. Each source directory contains
+`derivations.json`, all actual `storyboard/<position_ms>.jpg` frames, and paired
+`tracking/<position_ms>.analysis.jpg` / `.detail.jpg` samples. The test pins
+aggregate captured-pixel hashes and source identities; absent or changed pixels
+fail explicitly. The optional `MEDIA_ADDITIONAL_CROP_OUTPUT_DIR` writes resolved
+parameters and still previews. Customer pixels and runtime capture URLs stay
+outside the repository.
+
+These five outputs were replayed on installed production 0.14.10 before making
+an algorithm change: reclining portrait 78221 and reel 78178 still clipped the
+head, and portrait 78327 clipped an arm that fits. 0.14.11's full-planner replay
+retains those geometries and exposes the two dance cases as
+`crop_diagnostics.action_coverage=exceeds_crop_width`. The existing explicit
+`fit_mode=contain` is the rendering solution for wide actions. Coverage describes
+supported geometry at sampled timestamps; `sampled_extent_fits` does not certify
+that an entire unsampled action fits. Missing/ambiguous evidence remains unknown.

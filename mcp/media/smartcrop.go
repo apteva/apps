@@ -113,6 +113,8 @@ func computeSmartCrop(
 	}
 	validDerivations, validateErr := resolveValidDerivations(ctx, sc, projectID, row.Derivations)
 	if validateErr != nil {
+		recordSmartCropFallback(ctx, "derivation_identity_unavailable")
+		recordSmartCropMethod(ctx, "v1:center-fallback")
 		app.Logger().Warn("smartcrop fallback to center: derivative identity lookup failed",
 			"file_id", sourceFileID, "err", validateErr.Error())
 		return center, nil
@@ -125,17 +127,22 @@ func computeSmartCrop(
 	// after the indexer catches up will re-evaluate).
 	cropSource := pickSmartCropDerivation(row.Derivations, target)
 	if cropSource.StorageFileID == "" {
+		recordSmartCropFallback(ctx, "no_usable_derivation")
+		recordSmartCropMethod(ctx, "v1:center-fallback")
 		app.Logger().Info("smartcrop fallback to center: no usable frame derivation yet",
 			"file_id", sourceFileID)
 		return center, nil
 	}
 	thumb, err := downloadAndDecodeImage(ctx, sc, projectID, cropSource.StorageFileID)
 	if err != nil {
+		recordSmartCropFallback(ctx, "derivation_download_or_decode_unavailable")
+		recordSmartCropMethod(ctx, "v1:center-fallback")
 		app.Logger().Warn("smartcrop fallback to center: frame derivation download/decode failed",
 			"file_id", sourceFileID, "derivation_kind", cropSource.Kind,
 			"derivation_file_id", cropSource.StorageFileID, "err", err.Error())
 		return center, nil
 	}
+	recordSmartCropEvidence(ctx, "derivation:"+cropSource.Kind, cropSource.PositionMs, cropSource.StorageFileID)
 	tBounds := thumb.Bounds()
 	tW := tBounds.Dx()
 	tH := tBounds.Dy()
@@ -1225,7 +1232,7 @@ func preprocessSmartCropUncached(
 	projectID, op string,
 	sources []string,
 	params []byte,
-) []byte {
+) (out []byte) {
 	if op != "extract_reel" && op != "extract_frame" && op != "crop" {
 		return params
 	}
@@ -1270,6 +1277,16 @@ func preprocessSmartCropUncached(
 		return params
 	}
 	target := smartCropFocus(op, parsed)
+	audit := &smartCropAudit{AppVersion: app.Manifest().Version, AlgorithmVersion: smartCropAlgorithmVersion, SourceID: sources[0], Requested: smartCropAuditTarget{FocusMs: target.FocusMs, StartMs: target.StartMs, EndMs: target.EndMs, PreferKeyframe: target.PreferKeyframe}, Coverage: "unknown"}
+	if row, e := getMedia(app.AppDB(), projectID, sources[0]); e == nil && row != nil {
+		audit.SourceSHA256 = row.SourceSHA256
+		audit.SourceWidth = row.Width
+		audit.SourceHeight = row.Height
+		audit.SourceRotation = row.Rotation
+	}
+	ctx = context.WithValue(ctx, smartCropAuditKey{}, audit)
+	defer func() { out = attachSmartCropAudit(out, audit) }()
+
 	// V2 uses a bounded sample set. Dense storyboards stay on the cached fast
 	// path; sparse indexes are supplemented with temporary source screenshots.
 	// Source-sampling failures still fall through safely to v1.
@@ -1288,6 +1305,8 @@ func preprocessSmartCropUncached(
 				return out
 			}
 		} else {
+			recordSmartCropFallback(ctx, "v2_unavailable")
+			recordSmartCropFallback(ctx, smartCropFailureReason(v2Err))
 			app.Logger().Info("smartcrop v2 fallback to v1",
 				"op", op, "file_id", sources[0], "reason", v2Err.Error())
 		}
@@ -1304,17 +1323,23 @@ func preprocessSmartCropUncached(
 				return out
 			}
 		} else {
+			recordSmartCropFallback(ctx, "v2_unavailable")
+			recordSmartCropFallback(ctx, smartCropFailureReason(v2Err))
 			app.Logger().Info("smartcrop v2 fallback to v1",
 				"op", op, "file_id", sources[0], "reason", v2Err.Error())
 		}
 	}
+	recordSmartCropMethod(ctx, "v1:"+mode)
 	win, err := computeSmartCrop(ctx, app, sc, projectID, sources[0], rw, rh, mode, target)
 	if err != nil {
+		recordSmartCropFallback(ctx, "analysis_unavailable_symbolic_crop")
+		recordSmartCropFallback(ctx, smartCropFailureReason(err))
 		// Symbolic filter is fine — log + skip.
 		app.Logger().Info("smartcrop preprocess skipped",
 			"op", op, "file_id", sources[0], "reason", err.Error())
 		return params
 	}
+	parsed["crop_version"] = "v1"
 	parsed["crop_w"] = win.W
 	parsed["crop_h"] = win.H
 	parsed["crop_x"] = win.X
@@ -1322,7 +1347,7 @@ func preprocessSmartCropUncached(
 	// Keep crop_mode for downstream logging (panel can show "smart" vs
 	// "center"), but the planner reads only crop_w/h/x/y.
 	parsed["crop_mode"] = mode
-	out, err := json.Marshal(parsed)
+	out, err = json.Marshal(parsed)
 	if err != nil {
 		return params
 	}

@@ -117,7 +117,16 @@ func analyzeSmartCropV2Source(
 	projectID, sourceFileID string,
 	positions []int64,
 	srcW, srcH, targetW, targetH int,
-) ([]smartCropV2Sample, error) {
+) (result []smartCropV2Sample, resultErr error) {
+	defer func() {
+		for _, sample := range result {
+			recordSmartCropEvidence(ctx, "source", sample.point.AtMs, "")
+		}
+		if resultErr != nil {
+			recordSmartCropFallback(ctx, "source_sampling_unavailable")
+		}
+	}()
+
 	if len(positions) == 0 {
 		return nil, fmt.Errorf("no supplemental sample positions")
 	}

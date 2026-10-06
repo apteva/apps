@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -12,6 +13,17 @@ import (
 func TestEmbeddedManifest_Valid(t *testing.T) {
 	app := &App{}
 	m := app.Manifest()
+	raw, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	external, err := sdk.ParseManifest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if external.Version != m.Version || external.Runtime.Source.Ref != m.Runtime.Source.Ref {
+		t.Fatalf("runtime/installed version drift: embedded=%s external=%s", m.Version, external.Version)
+	}
 	if m.Name != "media" {
 		t.Errorf("name=%q", m.Name)
 	}

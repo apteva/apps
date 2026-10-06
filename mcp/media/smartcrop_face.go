@@ -1077,13 +1077,15 @@ func constrainSmartCropPathToFaceTracks(path []cropPathPoint, samples []smartCro
 		return path[len(path)-1].X
 	}
 	for _, sample := range samples {
-		if sample.face == nil && !sample.faceTracked && !sample.headTracked {
+		if sample.face == nil && sample.supportedHead == nil && !sample.faceTracked && !sample.headTracked {
 			continue
 		}
 		current := pathXAt(sample.point.AtMs)
 		desired := current
 		if sample.face != nil {
 			desired = containSmartCropFaceX(current, *sample.face, srcW, cropW)
+		} else if sample.supportedHead != nil {
+			desired = containSmartCropFaceX(current, *sample.supportedHead, srcW, cropW)
 		} else {
 			maxDrift := maxInt(16, cropW/20)
 			desired = clampInt(current, sample.point.X-maxDrift, sample.point.X+maxDrift)

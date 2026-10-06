@@ -51,6 +51,7 @@ type smartCropV2Sample struct {
 	img               image.Image
 	face              *smartCropFace
 	detailedFace      *smartCropFace
+	supportedHead     *smartCropFace
 	faceTracked       bool
 	headTracked       bool
 	headTrackX        int
@@ -155,6 +156,7 @@ func computeSmartCropStillV2(
 			refineSmartCropHeadSamples(samples, row.Width, cw)
 			trackingStill = true
 		} else if sampleErr != nil {
+			recordSmartCropFallback(ctx, "exact_tracking_unavailable")
 			app.Logger().Info("smartcrop v2 exact tracking unavailable",
 				"file_id", sourceFileID, "focus_ms", target.FocusMs, "err", sampleErr.Error())
 		}
@@ -262,10 +264,12 @@ func computeSmartCropStillV2(
 		x = furnitureX
 		method += "+edge-furniture-fallback"
 	}
+	var extentReferences []image.Image
 	if sample := nearestSmartCropSample(samples, target.FocusMs); sample != nil && sample.face == nil {
 		backgroundDerivs := selectSmartCropBackgroundDerivations(row.Derivations,
 			target.FocusMs-30_000, target.FocusMs+30_000, 12)
 		backgroundImages := downloadSmartCropBackgroundImages(ctx, sc, projectID, backgroundDerivs)
+		extentReferences = backgroundImages
 		if backgroundX, backgroundResult, ok := backgroundAwareNarrowSmartCropX(sample.img, backgroundImages, x, row.Width, cw); ok {
 			motionHandoff := trackingStill && smartCropStillHasMotionEvidence(samples, target.FocusMs)
 			if smartCropStillBackgroundCorrectionSupported(x, backgroundX, backgroundResult, contextTemporal, contextTemporalOK, cw) &&
@@ -285,6 +289,37 @@ func computeSmartCropStillV2(
 	if sample := nearestSmartCropSample(samples, target.FocusMs); sample != nil && sample.face != nil {
 		x = containSmartCropFaceX(x, *sample.face, row.Width, cw)
 	}
+
+	if target.PreferKeyframe {
+		if sample := nearestSmartCropSample(samples, target.FocusMs); sample != nil {
+			refs := extentReferences
+			if refs == nil {
+				refs = downloadSmartCropBackgroundImages(ctx, sc, projectID, selectSmartCropBackgroundDerivations(row.Derivations, target.FocusMs-30000, target.FocusMs+30000, 12))
+			}
+			extent, ok := supportedSmartCropSubjectExtent(*sample, refs, row.Width, row.Height, cw)
+			// Cached geometry can precede a pose change by several seconds. Resolve
+			// the actual requested instant before protecting inferred reclining heads.
+			if extent != nil && sample.face == nil && sample.point.AtMs != target.FocusMs && !trackingStill {
+				exact, e := analyzeSmartCropV2Source(ctx, app, sc, projectID, sourceFileID, smartCropStillTrackingPositions(target.FocusMs, row.DurationMs), row.Width, row.Height, targetW, targetH)
+				exactFocus := nearestSmartCropSample(exact, target.FocusMs)
+				if e == nil && exactFocus != nil && exactFocus.point.AtMs == target.FocusMs {
+					sample = exactFocus
+					method += "+exact-extent"
+					extent, ok = supportedSmartCropSubjectExtent(*sample, refs, row.Width, row.Height, cw)
+				} else {
+					recordSmartCropFallback(ctx, "exact_extent_unavailable")
+				}
+			}
+			if ok {
+				recordSmartCropExtent(ctx, *sample, extent, cw)
+				corrected := containSmartCropSubjectExtentX(x, extent, row.Width, cw)
+				if corrected != x {
+					x = corrected
+					method += "+supported-extent"
+				}
+			}
+		}
+	}
 	x = clampInt(roundEven(x), 0, row.Width-cw)
 	y := 0
 	if sample := nearestSmartCropSample(samples, target.FocusMs); sample != nil {
@@ -299,6 +334,7 @@ func computeSmartCropStillV2(
 			}
 		}
 	}
+	recordSmartCropMethod(ctx, method+":"+sampleSource)
 	app.Logger().Info("smartcrop v2 resolved still",
 		"file_id", sourceFileID,
 		"samples", len(samples),
@@ -375,6 +411,7 @@ func analyzeSmartCropV2Derivations(
 			if err != nil {
 				return
 			}
+			recordSmartCropEvidence(ctx, "derivation:"+d.Kind, d.PositionMs, d.StorageFileID)
 			results[i] = &smartCropV2Sample{
 				point: cropPathPoint{AtMs: d.PositionMs, X: win.X, Y: win.Y},
 				img:   img,
@@ -511,6 +548,7 @@ func computeSmartCropReelV2(
 				stationaryCorrections += correctSmartCropStationaryRuns(samples, row.Width, cw)
 				refineSmartCropHeadSamples(samples, row.Width, cw)
 			} else {
+				recordSmartCropFallback(ctx, "adaptive_tracking_unavailable")
 				app.Logger().Info("smartcrop v2 adaptive tracking unavailable",
 					"file_id", sourceFileID, "err", sampleErr.Error())
 			}
@@ -532,6 +570,20 @@ func computeSmartCropReelV2(
 	backgroundCorrections += correctSmartCropBackgroundEdgeDeparturesFromFaces(samples, row.Width, cw)
 	unsupportedExcursions := correctSmartCropUnsupportedExcursions(samples, row.Width, cw)
 
+	// Foreground-supported reclining head geometry is protected after competing
+	// background/temporal passes. Upright extents are measured for coverage;
+	// they do not introduce frame-by-frame limb tracking into reels.
+	for i := range samples {
+		if extent, ok := supportedSmartCropSubjectExtent(samples[i], backgroundImages, row.Width, row.Height, cw); ok {
+			if samples[i].point.AtMs >= target.StartMs && samples[i].point.AtMs <= target.EndMs {
+				recordSmartCropExtent(ctx, samples[i], extent, cw)
+			}
+			if samples[i].face == nil && extent.Evidence == "reclining_foreground_head" {
+				samples[i].supportedHead = extent.Head
+				samples[i].point.X = containSmartCropSubjectExtentX(samples[i].point.X, extent, row.Width, cw)
+			}
+		}
+	}
 	// Horizontal tracking heuristics are unchanged. Vertical crops retain a
 	// stable median subject position instead of accidentally anchoring at the top.
 	ys := make([]int, 0, len(samples))
@@ -551,7 +603,8 @@ func computeSmartCropReelV2(
 		return nil, nil, fmt.Errorf("smartcrop v2: empty crop path")
 	}
 
-	if x, ok := staticSmartCropPathX(path, cw); ok {
+	recordSmartCropMethod(ctx, "reel:"+sampleSource)
+	if x, ok := staticSmartCropPathX(path, cw); ok && smartCropStaticRetainsSupportedHeads(x, samples, row.Width, cw) {
 		app.Logger().Info("smartcrop v2 resolved static reel",
 			"file_id", sourceFileID, "samples", len(samples),
 			"sample_source", sampleSource,
@@ -1318,4 +1371,13 @@ func cropFilterForPath(w, h, y int, startMs int64, path []cropPathPoint) string 
 		expr = fmt.Sprintf("if(lt(t\\,%.3f)\\,%s\\,%s)", t1, segment, expr)
 	}
 	return fmt.Sprintf("crop=%d:%d:%s:%d", w, h, expr, y)
+}
+
+func smartCropStaticRetainsSupportedHeads(x int, samples []smartCropV2Sample, srcW, cropW int) bool {
+	for _, s := range samples {
+		if s.supportedHead != nil && containSmartCropFaceX(x, *s.supportedHead, srcW, cropW) != x {
+			return false
+		}
+	}
+	return true
 }

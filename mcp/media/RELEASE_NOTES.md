@@ -1,3 +1,15 @@
+## 0.14.11 — reclining subject protection and crop provenance
+
+- Reproduce the August reports on installed production 0.14.10 before changing the algorithm. The replay still clipped the reclining head in portrait 78221/reel 78178 and the available right arm in portrait 78327.
+- Use compatible, distributed background references to isolate supported foreground geometry. Protect upper head geometry in reclining poses without promoting it to a detector face. Reject lower limbs, static furniture, diffuse camera/exposure changes, and similarly substantial competing components. Resolve the exact requested still timestamp when cached reclining geometry may precede a pose change. Preserve supported subject extent with a small margin when it fits.
+- Protect inferred reclining heads after competing evidence passes and path smoothing. Measure upright reel extents for diagnostics while preserving the two dance paths. Expose supported sampled geometry wider than the crop as `crop_diagnostics.action_coverage=exceeds_crop_width` and recommend the existing explicit `fit_mode=contain`. Missing or ambiguous evidence remains unknown; sampled fits do not certify an unsampled action.
+- Persist app/algorithm version, source hash/dimensions/rotation, requested timeline, evidence timestamps, method, supported extent/head geometry, effective rectangle/path, and stable fallback codes. Align still/reel previews with the render planner. Preserve original resolved parameters on request-cache hits; migration 024 adds a nullable cache provenance column. Cropping caches include app/algorithm revisions.
+- Add hash-pinned full-planner regressions for sources 77371 at 528750 ms, 77480 at 427975–468210 ms, 77155 at 525000 ms, and both dance ranges. Customer pixels and signed URLs remain external. Existing saved outputs are preserved. Output-format validation and description backoff from 0.14.9 remain covered.
+
+SDK remains v0.95.0, reverified as the latest tag by commit topology. No dependency or configuration changes.
+
+Validation: 557 top-level standard tests passed under race detection (22 opt-in/long tests skipped); all five captured August cases passed, including the exact requested-frame path under race detection. The Holly opening and five portrait regressions passed under race detection. Six real Media–Storage rendering integrations passed, including saved crop provenance and request-cache reuse. Vet and macOS/Linux builds passed. The existing private benchmark retains the same two December failures at identical coordinates; no new failures were introduced. No rendering-speed improvement is claimed.
+
 ## 0.14.10 — still portrait composition
 
 - Refine standalone-image Smart Crop using the existing thumbnail when a single upright foreground has supporting head/torso evidence below a large plain bright background. Recover profile/closed-eye poses missed by the face cascade, protect independently supported faces, and bound tighter framing by the connected subject extent and a 1.5× zoom limit.

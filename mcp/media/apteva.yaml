@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.10
+version: 0.14.11
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -18,6 +18,13 @@ description: |
   via the optional `render_executor` integration role — local ffmpeg
   by default, Cloudinary when bound. A wedged encode releases its
   slot without disturbing the indexer.
+
+  v0.14.11 protects reclining head geometry with background-supported
+  foreground evidence, contains supported subject extent when it fits, and
+  reports actions wider than the crop with a fit_mode: contain recommendation.
+  Saved crop diagnostics include app/algorithm versions, source identity,
+  evidence timestamps and effective geometry, including on cache hits.
+  Smart Crop previews use the same planner as renders.
 
   v0.14.10 improves standalone portrait framing using cached-thumbnail
   head/torso evidence: recentres profile poses and reduces excessive headroom
@@ -535,7 +542,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.10
+    ref: media/v0.14.11
     entry: mcp/media
   port: 8080
   health_check: /health

@@ -183,6 +183,7 @@ func downloadSmartCropBackgroundImages(ctx context.Context, sc *storageClient, p
 			img, err := downloadAndDecodeImage(ctx, sc, projectID, derivation.StorageFileID)
 			if err == nil {
 				images[i] = img
+				recordSmartCropEvidence(ctx, "background", derivation.PositionMs, derivation.StorageFileID)
 			}
 		}()
 	}

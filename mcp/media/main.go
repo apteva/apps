@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.14.10
+version: 0.14.11
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -31,7 +31,11 @@ description: |
   Cloudinary when bound, auto-transcribes audio + video via Deepgram,
   and auto-generates descriptions via OpenCode Go, OpenAI API, or
   OpenAI Codex when integrations are bound. Outputs all flow
-  through storage. v0.14.10 improves standalone portrait framing using
+  through storage. v0.14.11 protects reclining head geometry, contains
+  supported subject extent when it fits, reports sampled action wider than
+  the crop, and persists crop versions, evidence and effective geometry.
+  Previews share the render planner and cache hits retain original provenance.
+  v0.14.10 improves standalone portrait framing using
   cached-thumbnail head/torso evidence: recentres profile poses and reduces
   excessive headroom when the subject fits. Wide gestures retain scale;
   use fit_mode=contain to preserve every edge. Video tracking and explicit
@@ -303,7 +307,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.10
+    ref: media/v0.14.11
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -800,7 +804,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		// ─── Render manage tools ────────────────────────────────────
 		{
 			Name:        "media_get_render",
-			Description: "Status of one render. Returns the original params and, once execution starts, resolved_params with effective executor values such as Smart Crop coordinates/path. Args: render_id.",
+			Description: "Status of one render. Returns the original params and, once execution starts, resolved_params with effective executor values and crop_diagnostics (app/algorithm versions, crop rectangle/path, evidence timestamps, fallback reasons, and sampled action_coverage). If action_coverage is exceeds_crop_width, fit_mode=contain preserves the full source frame. Args: render_id.",
 			InputSchema: schemaObject(map[string]any{"render_id": map[string]any{"type": "integer"}}, []string{"render_id"}),
 			Handler:     a.toolGetRender,
 		},
@@ -2639,6 +2643,7 @@ func (a *App) handleSmartCropPreview(w http.ResponseWriter, r *http.Request) {
 	target = target.Normalized()
 	var win *cropWindow
 	var cropPath []cropPathPoint
+	var diagnostics json.RawMessage
 	parent, cancel := mediaContext(r.Context(), globalCtx)
 	defer cancel()
 	cctx, release, budgetErr := acquireMediaWork(parent, globalCtx, 1)
@@ -2647,20 +2652,22 @@ func (a *App) handleSmartCropPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
-	if op == "extract_reel" && mode == "smart" && target.HasRange() {
-		params, _ := json.Marshal(map[string]any{"start_ms": body.StartMs, "end_ms": body.EndMs, "target_ratio": ratio, "crop_mode": mode})
+	if mode == "smart" && (op == "extract_reel" || op == "extract_frame" || op == "crop") {
+		params, _ := json.Marshal(map[string]any{"start_ms": body.StartMs, "end_ms": body.EndMs, "at_ms": body.AtMs, "target_ratio": ratio, "crop_mode": mode})
 		resolved := preprocessSmartCrop(cctx, globalCtx, newStorageClient(), pid, op, []string{body.FileID}, params)
 		var crop struct {
-			W    int             `json:"crop_w"`
-			H    int             `json:"crop_h"`
-			X    int             `json:"crop_x"`
-			Y    int             `json:"crop_y"`
-			Path []cropPathPoint `json:"crop_path"`
+			W           int             `json:"crop_w"`
+			H           int             `json:"crop_h"`
+			X           int             `json:"crop_x"`
+			Y           int             `json:"crop_y"`
+			Path        []cropPathPoint `json:"crop_path"`
+			Diagnostics json.RawMessage `json:"crop_diagnostics"`
 		}
 		err = json.Unmarshal(resolved, &crop)
 		if err == nil && crop.W > 0 && crop.H > 0 {
 			win = &cropWindow{W: crop.W, H: crop.H, X: crop.X, Y: crop.Y}
 			cropPath = crop.Path
+			diagnostics = crop.Diagnostics
 		} else {
 			err = errors.New("smart crop unavailable")
 		}
@@ -2681,6 +2688,9 @@ func (a *App) handleSmartCropPreview(w http.ResponseWriter, r *http.Request) {
 		"source_width":  row.Width,
 		"source_height": row.Height,
 		"mode":          mode,
+	}
+	if len(diagnostics) > 0 {
+		out["crop_diagnostics"] = diagnostics
 	}
 	if len(cropPath) > 1 {
 		out["crop_path"] = cropPath
