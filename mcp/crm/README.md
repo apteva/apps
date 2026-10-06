@@ -1,9 +1,29 @@
-# CRM v0.9.10
+# CRM v0.9.14
+
+Release `crm/v0.9.14`: HTML-only emails no longer inherit huge blank gaps from nested email layouts.
+The inbox also guards older inbound email display against repeated blank lines.
+`contacts_refresh_message_body` can explicitly normalize formatting when the stored body exactly matches
+CRM's former HTML conversion, and fill missing sender metadata from the verified Messaging original.
+Both options default off; dry runs default on. Existing content, audit metadata, and workflow state are preserved.
+All v0.9.13 inbound recipient ownership safeguards remain included.
 
 Apteva's contact, inbox, audience and opportunity sidecar. The supported dashboard
 is `ui/CrmPanel.tsx`, bundled as `CrmPanel.mjs`. `apteva.yaml` is embedded directly
 into the binary and is the single manifest source. `MCPTools()` supplies the
 executable input contracts, checked against the manifest by tests.
+
+Release `crm/v0.9.12`: inbox rows show the latest message's recorded destination. Individual messages
+show From, To, optional CC/BCC, and the receiving address when recorded. These
+are message-specific headers, not inferred contact addresses or a union of
+thread participants. Missing historical metadata is displayed as Unknown; no
+backfill, routing change, or migration is required.
+
+Release `crm/v0.9.11` makes `contacts_resolve_audience` delivery-health lookups
+contact-first using existing indexes. Full counts, pages, and source metadata
+use the read-only pool with request cancellation. Eligibility, exclusion
+precedence, address selection, and pagination remain unchanged. Use
+`include_counts: false` for count-free paging (count fields are then zero).
+No database migration or record updates are required.
 
 Release `crm/v0.9.10` marks `conversations_inbox` with standard MCP
 `readOnlyHint: true` and `destructiveHint: false` annotations, so it is eligible
@@ -125,6 +145,48 @@ composition and status mutations in the richer CRM surface. The component is
 read-only and does not send messages or change CRM data.
 
 ## Messaging and automation
+
+### Saved reply drafts (v0.9.16)
+
+Reply → **Save draft** persists a CRM reply without sending. **Save & close**
+saves before closing; existing drafts autosave after edits. Reopen them from
+**Saved reply drafts** in Inbox or a contact's conversation. Multiple drafts
+are supported, with source labels, last-editor timestamps and pinned From/To.
+These are CRM-local drafts, not drafts synchronized to Gmail or another mailbox.
+
+`conversation_drafts_create/get/list/update/discard` never send. The separate
+`conversation_drafts_send` is a real external send and requires explicit approval.
+For example, save with `{"conversation_id":123,"body":"Proposed reply"}`;
+after review, send with `{"id":456,"expected_revision":1}`. Editing, discarding
+and sending require the returned `revision` as `expected_revision`; a stale
+revision returns a conflict instead of overwriting another person's work.
+Read-only discovery includes get/list, not save/update/discard/send.
+
+Drafts preserve text, email HTML, attachments, template variables and the exact
+inbound reply anchor. SMS/WhatsApp may explicitly switch transport in the same
+phone conversation. Closed WhatsApp windows still allow drafting freeform text,
+but sending requires an approved template, a live window, or an explicit SMS
+switch. Template sends retain any freeform notes in the draft without sending
+those notes. Sending rechecks recipient, ownership, Messaging binding, verified
+sender, contact eligibility, suppression and WhatsApp window.
+
+REST: `GET/POST /drafts`, `GET/PATCH/DELETE /drafts/<id>`, and
+`POST /drafts/<id>/send`. List accepts `conversation_id`, `limit`, `offset` and
+`include_finished`; it returns summaries, not attachment payloads. Discard is
+soft: content is retained for audit. Draft changes publish
+`conversation.draft.changed` separately from message/activity events; saves do
+not change thread status or create message activities.
+
+Send failures retain content. Known rejection leaves the draft editable.
+Uncertain delivery has `status:send_failed` and locks edits/discard; retry the
+**same draft** with its new revision and durable operation key, never create a
+replacement send. In-progress sends use a five-minute lease; reopen after lease
+expiry to retry a crashed send. A committed message is recovered without another
+dispatch, and repeated successful sends return the original result. Contact
+merges preserve drafts/anchors and reject in-progress or uncertain sends.
+The additive migration does not rewrite existing messages or conversations.
+
+### Delivery and routing
 
 Bind Messaging in the platform's integration settings. Reading CRM Settings is
 read-only. Explicit routing repair uses CRM's `/messaging/routes` backend to set

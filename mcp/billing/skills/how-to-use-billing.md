@@ -125,6 +125,34 @@ unless the user said "void", "void it", "cancel that invoice", or
 
 ## Customer first, then invoice
 
+For **finding or reviewing an existing customer**, start with
+`customers_search(q="customer name", include_context=true)`. This returns
+customer records and their compact billing contexts together: invoice counts
+by status (open/paid/uncollectible), recent payments (default 3), and lifetime
+totals by currency. These totals and status counts are authoritative; do not
+fetch invoices or call `customers_get_context` again just to verify them. Fetch
+individual invoices only when their details are requested. Use one search per named
+customer; do not search invoice text for customer names or create a customer
+just to answer a read-only question. Use `customers_get_context` when you
+already know the customer ID or email.
+
+All monetary `*_cents` fields use integer cents. Divide by 100 for a human
+currency amount: `10000` cents is EUR 100.00, **not** EUR 10,000.00.
+
+Search ranks exact name/email matches first. If the full phrase has no match,
+it can return broader token candidates, e.g. `Google Ads` may suggest
+`Google Ireland Limited`. `match_mode=token_candidates` and
+`requires_confirmation=true` mean **possible matches**, not a verified alias.
+Identify the legal name in the answer and ask for confirmation if needed;
+never claim these are the same entity merely because a token matched, and never
+select a candidate for a write without resolving its identity. Multiple matches
+also require disambiguation. Do not retry progressively shorter searches when
+the tool already returned candidates.
+
+`invoices_search.q` matches invoice number, notes, or exact invoice ID only.
+For invoice details belonging to a customer, resolve them first and filter by
+`customer_id`. Empty invoice results do not establish that a customer is absent.
+
 Always look up or create the customer **before** drafting an
 invoice. The right primitive is `customers_upsert_by_email` —
 returns `{customer, was_created}`. Don't loop `customers_get` then
@@ -144,12 +172,12 @@ It is optional and can be corrected later with `invoices_update`.
 ## Sending the invoice — PDF + print view
 
 Once an invoice is **open** (finalized, has a number), the agent has
-three ways to share it:
+four ways to share it:
 
 | Surface | When to use | Returns |
 |---|---|---|
 | `invoices_render_pdf(invoice_id=…)` | Default. Get the PDF bytes back as base64 — useful when the agent is sending the file via another tool (email, messaging). | `{pdf_base64, filename, size_bytes}` |
-| `invoices_render_pdf(invoice_id=…, save_to_storage=true)` | Storage app is installed and you want a re-shareable URL or to attach a `file-card` to chat. | `{file_id, url, filename, size_bytes}` |
+| `invoices_render_pdf(invoice_id=…, save_to_storage=true)` | Storage is linked in Billing’s App dependencies and you want an expiring signed link or a `file-card`. New uploads are private. | `{file_id, url, expires_at, filename, size_bytes, saved, shareable}` |
 | `GET /api/apps/billing/invoices/{id}/print` | A human is in the loop and wants to print or save-as-PDF themselves. | HTML page with browser-driven Print/Save action |
 | `GET /api/apps/billing/invoices/{id}/pdf` | The dashboard's "Download PDF" button — same bytes as `invoices_render_pdf` but streamed direct. | `application/pdf` |
 
@@ -158,11 +186,26 @@ finalized-at date, and no commitment behind them. Finalize first;
 then render. The tool will technically work on a draft (the renderer
 shows "Draft #N") but the customer sees a confusing artifact.
 
-When `save_to_storage=true` and the storage app isn't installed,
-the tool errors with a clear "install storage or retry without
-save_to_storage" message. Default to `save_to_storage=false` and
-attach the bytes inline unless you specifically need the file to
-live in storage (e.g. to compose `respond(components=[file-card])`).
+When `save_to_storage=true`, always check `saved` and `shareable`:
+
+- `saved=true, shareable=true`: use the returned `url` exactly as supplied.
+  It is signed and expires at `expires_at` (Unix seconds), using Storage's
+  configured TTL (24 hours by default). Tell the user it expires.
+- `saved=false`: rendering succeeded but uploading failed. The response
+  includes `pdf_base64` and `storage_error`; attach the bytes if the delivery
+  channel supports file attachments. Do not invent a hosted URL or repeat
+  the render just to obtain the same bytes. If Storage is not linked, select
+  its installation in Billing's App dependencies; installation alone is
+  insufficient.
+- `saved=true, shareable=false`: the PDF exists in Storage, but signing failed.
+  Retry Storage's existing `files_get_url(id=file_id)` instead of uploading
+  again. Any `url` in this result is an authenticated content URL, not an
+  anonymous sharing link.
+
+Direct Billing `/pdf` and `/print` routes require authentication. For a global
+install include `?project_id=<project-id>`; preserve `install_id` when supplied
+by the platform. These routes are useful in the dashboard, but do not replace
+signed Storage links for external recipients.
 
 ## Recording manual payments
 

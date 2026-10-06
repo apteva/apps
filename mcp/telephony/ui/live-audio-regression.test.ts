@@ -99,18 +99,18 @@ test('delayed playback MessagePort frames expire and flush clears adaptation epo
 });
 
 function worker() {
- let now=10000;const messages:any[]=[];const sockets:any[]=[];const intervals:Function[]=[];
+ let now=10000;const messages:any[]=[];const sockets:any[]=[];const intervals:Function[]=[];const timeouts:Function[]=[];
  const port=()=>({postMessage(){},start(){},close(){},onmessage:null as any});
  const capturePort=port(),playbackPort=port();const received:any[]=[];
  playbackPort.postMessage=(x:any)=>received.push(x);
- class Socket { static OPEN=1;readyState=1;bufferedAmount=0;sent:any[]=[];onopen:any;onmessage:any;onclose:any;constructor(){sockets.push(this)}send(x:any){this.sent.push(x)}close(){} }
- const context=vm.createContext({ArrayBuffer,DataView,Uint8Array,Int16Array,Float32Array,performance:{timeOrigin:0,now:()=>now},WebSocket:Socket,postMessage:(x:any)=>messages.push(x),self:{},setInterval:(f:Function)=>{intervals.push(f);return intervals.length;},clearInterval(){},setTimeout(){},clearTimeout(){},close(){}});
+ class Socket { static OPEN=1;readyState=1;bufferedAmount=0;sent:any[]=[];onopen:any;onmessage:any;onclose:any;constructor(public url:string){sockets.push(this)}send(x:any){this.sent.push(x)}close(){} }
+ const context=vm.createContext({ArrayBuffer,DataView,Uint8Array,Int16Array,Float32Array,performance:{timeOrigin:0,now:()=>now},WebSocket:Socket,postMessage:(x:any)=>messages.push(x),self:{},setInterval:(f:Function)=>{intervals.push(f);return intervals.length;},clearInterval(){},setTimeout(f:Function){timeouts.push(f);return timeouts.length;},clearTimeout(){},close(){}});
  vm.runInContext(readFileSync(new URL('./softphone-worker.js',import.meta.url),'utf8'),context);
  const command=(x:any)=>context.self.onmessage({data:x});
  command({type:'init',mediaURL:'ws://local',capturePort,playbackPort,contextRate:24000,audioClockMS:0,monotonicEpochMS:now});
  sockets[0].onopen();received.length=0;command({type:'microphone.ready',value:true});
  const frame=(timestamp:number,sequence=1)=>capturePort.onmessage({data:{type:'capture',frame:new Float32Array(480).fill(.2),timestamp_ms:timestamp,sequence,sample_rate:24000}});
- return {context,command,frame,socket:sockets[0],messages,received,intervals,setNow:(n:number)=>{now=n;}};
+ return {context,command,frame,socket:sockets[0],messages,received,intervals,timeouts,sockets,setNow:(n:number)=>{now=n;}};
 }
 
 test('worker discards stale capture after a pause and retains current frames',()=>{
@@ -252,4 +252,71 @@ test('worker isolates coaching epoch and resampler from caller playback and capt
  deliver(f(7));expect(w.received.filter(x=>x.type==='whisper')).toHaveLength(1);
  const before=w.socket.sent.length;deliver(JSON.stringify({type:'coach.state',talking:false}));deliver(f(7));
  expect(w.received.filter(x=>x.type==='whisper')).toHaveLength(1);expect(w.socket.sent.length).toBe(before);
+});
+
+
+test('AudioContext pause/resume refreshes capture clock without mistaking fresh speech for old audio',()=>{
+ const w=worker();w.command({type:'clock.reset',paused:true});w.setNow(15000);w.frame(0);
+ expect(w.messages.at(-1).event.reason).toBe('capture_clock_unavailable');
+ w.command({type:'clock.reset',paused:false});
+ // A trustworthy worklet reply calibrates the resumed render clock.
+ vm.runInContext('capturePort.onmessage({data:{type:"clock.reply",nonce:15000,audio_ms:0}})',w.context);
+ w.frame(0,2);expect(w.socket.sent.filter((x:any)=>x instanceof ArrayBuffer)).toHaveLength(1);
+ w.setNow(16000);w.frame(0,3);expect(w.messages.at(-1).event.reason).toBe('capture_age_limit');
+ w.frame(1000,4);expect(w.socket.sent.filter((x:any)=>x instanceof ArrayBuffer)).toHaveLength(2);
+});
+
+test('expired render-clock estimates require recalibration and retain the capture age cap',()=>{
+ const w=worker();w.setNow(16000);w.frame(6000);
+ expect(w.messages.at(-1).event.reason).toBe('capture_clock_unavailable');
+ vm.runInContext('capturePort.onmessage({data:{type:"clock.reply",nonce:16000,audio_ms:6000}})',w.context);
+ w.frame(6000,2);expect(w.socket.sent.filter((x:any)=>x instanceof ArrayBuffer)).toHaveLength(1);
+});
+
+test('rejected playback retains worst-case ages, source metadata and exact timestamped accounting',()=>{
+ const w=worker();w.socket.onmessage({data:JSON.stringify({type:'media.capabilities',version:3})});
+ w.setNow(10020);w.socket.onmessage({data:JSON.stringify({type:'media.clock',nonce:10000,received_ms:100,sent_ms:100})});
+ w.socket.onmessage({data:sourcePlayback(110,0,1,110)});
+ w.setNow(11020);w.socket.onmessage({data:sourcePlayback(130,20,2,130)});w.intervals[0]();
+ const t=w.messages.findLast((m:any)=>m.type==='transport.stats').timing;
+ expect(t.playback_max_transit_ms).toBe(980);expect(t.playback_max_source_age_ms).toBe(980);
+ expect(t.playback_ingress_ms).toBe(40);expect(t.playback_received_ms+t.playback_transport_dropped_ms+t.playback_source_dropped_ms).toBe(40);
+ const e=w.messages.findLast((m:any)=>m.type==='transport.drop').event;
+ expect(e).toMatchObject({direction:'carrier_to_operator',reason:'playback_delivery_excess',duration_ms:20,queue_before_ms:980,sequence:2});
+ expect(Number.isFinite(Date.parse(e.timestamp))).toBe(true);
+});
+
+test('worker refreshes credentials before reconnect and preserves WebSocket close diagnostics',()=>{
+ const w=worker();vm.runInContext('refreshCredentials=true',w.context);
+ w.socket.onclose({code:1006,reason:'network interrupted',wasClean:false});
+ expect(w.messages.findLast((m:any)=>m.type==='socket.close')).toMatchObject({code:1006,reason:'network interrupted',wasClean:false});
+ w.timeouts[0]();const request=w.messages.findLast((m:any)=>m.type==='socket.reconnect');
+ expect(w.sockets).toHaveLength(1);
+ w.command({type:'socket.credentials',id:request.id,mediaURL:'ws://local/fresh'});
+ expect(w.sockets).toHaveLength(2);expect(w.sockets[1].url).toBe('ws://local/fresh');
+ w.command({type:'socket.credentials',id:request.id,mediaURL:'ws://local/duplicate'});expect(w.sockets).toHaveLength(2);
+ w.command({type:'socket.credentials',id:request.id-1,mediaURL:'ws://local/stale'});expect(w.sockets).toHaveLength(2);
+ w.command({type:'close'});w.command({type:'socket.credentials',id:request.id,mediaURL:'ws://local/late'});expect(w.sockets).toHaveLength(2);
+});
+
+test('worker timestamps pause observations and computes ping RTT off the main thread',()=>{
+ const w=worker();w.setNow(12000);w.intervals[0]();
+ const ping=JSON.parse(w.socket.sent.filter((x:any)=>typeof x==='string').at(-2));
+ expect(ping.type).toBe('ping');w.setNow(12045);
+ w.socket.onmessage({data:JSON.stringify({type:'pong',nonce:ping.nonce,capture_sequence_gaps:3})});
+ const stats=w.messages.filter(x=>x.type==='transport.stats').at(-1);
+ expect(stats.timing.rtt_ms).toBe(45);expect(stats.timing.rtt_samples.at(-1).rtt_ms).toBe(45);
+ expect(w.messages.some(x=>x.type==='runtime.event'&&x.event.action==='worker'&&x.event.duration_ms===1000)).toBe(true);
+ // A delayed main thread cannot change the already measured sample.
+ w.setNow(20000);expect(stats.timing.rtt_ms).toBe(45);
+});
+test('worker records reconnect cause, successful socket recovery and maximum bufferedAmount',()=>{
+ const w=worker();w.socket.bufferedAmount=8000;w.frame(0);w.intervals[0]();
+ expect(w.messages.filter(x=>x.type==='transport.stats').at(-1).timing.websocket_max_buffered_bytes).toBe(8000);
+ w.socket.onclose({code:1006,reason:'',wasClean:false});w.timeouts.at(-1)!();
+ expect(w.messages.some(x=>x.type==='runtime.event'&&x.event.action==='reconnect'&&x.event.outcome==='websocket_close_1006')).toBe(true);
+ expect(w.sockets.length).toBe(2);w.sockets[1].onopen();
+ w.frame(0,2);w.intervals.at(-1)!();
+ const stats=w.messages.filter(x=>x.type==='transport.stats').at(-1);
+ expect(stats.timing.reconnect_attempts).toBe(1);expect(stats.timing.reconnect_successes).toBe(1);
 });

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -227,44 +228,60 @@ func (a *App) listenerMediaURL(id, token string) string {
 	return path
 }
 func (a *App) listenerSessionValid(row *callRow, token string) bool {
+	reason, _ := a.listenerSessionCheck(row, token)
+	return reason == ""
+}
+func (a *App) listenerSessionCheck(row *callRow, token string) (string, int64) {
 	if isTerminalStatus(row.Status) {
-		return false
+		return "call_ended", 0
 	}
 	var principal, providerJSON string
 	var expires int64
 	var coaching bool
 	err := a.db().db.QueryRow(`SELECT principal,provider_json,expires_at,coaching FROM telephony_listener_sessions WHERE token_hash=? AND call_id=? AND project_id=?`, phoneHash(token), row.ID, row.ProjectID).Scan(&principal, &providerJSON, &expires, &coaching)
-	if err != nil || expires <= time.Now().Unix() {
-		return false
+	if err == sql.ErrNoRows {
+		return "access_revoked", 0
+	}
+	if err != nil {
+		return "media_session_lookup_failed", 0
+	}
+	if expires <= time.Now().Unix() {
+		return "media_lease_expired", expires
 	}
 	if coaching {
 		g, e := a.coachingGrant(row, token)
-		if e != nil || !a.coachingTargetValid(row, g) {
-			return false
+		if e != nil {
+			if e == sql.ErrNoRows {
+				return "access_revoked", expires
+			}
+			return "media_session_lookup_failed", expires
+		}
+		if reason := a.coachingTargetReason(row, g); reason != "" {
+			return reason, expires
 		}
 	}
 	if principal == "" {
-		return true
+		return "", expires
 	}
 	var identity phoneIdentity
 	if json.Unmarshal([]byte(principal), &identity) != nil || !identity.valid() {
-		return false
+		return "access_revoked", expires
 	}
 	policy, err := a.phonePolicy(row.ProjectID)
 	if err != nil {
-		return false
+		return "policy_lookup_failed", expires
 	}
 	p, err := phonePrincipalFromPolicy(row.ProjectID, identity, policy)
 	if err != nil || !a.phoneCanListen(p, row) || (coaching && !p.Coach) {
-		return false
+		return "access_revoked", expires
 	}
 	if providerJSON != "" {
 		var provider phoneAuthProvider
 		if json.Unmarshal([]byte(providerJSON), &provider) != nil || (!phoneProviderStillAllows(policy, provider, "call.listen") || (coaching && !phoneProviderStillAllows(policy, provider, "call.coach"))) {
-			return false
+			return "access_revoked", expires
 		}
 	}
-	return true
+	return "", expires
 }
 func (a *App) handleListenAction(w http.ResponseWriter, r *http.Request, project, action, id string) {
 	coaching := strings.HasPrefix(action, "coach")
@@ -274,7 +291,17 @@ func (a *App) handleListenAction(w http.ResponseWriter, r *http.Request, project
 	}
 	row, err := a.db().findCall(id)
 	p := phoneUserFrom(r)
-	if err != nil || row == nil || row.ProjectID != project || !a.phoneCanListen(p, row) || (coaching && !a.phoneCanCoach(p, row)) {
+	if err == nil && row != nil && row.ProjectID == project && p != nil && p.Supervisor && p.Listen {
+		if _, _, e := a.phoneOwner(id); e != nil {
+			writeJSONStatus(w, 503, map[string]any{"code": "owner_lookup_failed"})
+			return
+		}
+	}
+	if err != nil {
+		writeJSONStatus(w, 503, map[string]any{"code": "call_lookup_failed"})
+		return
+	}
+	if row == nil || row.ProjectID != project || !a.phoneCanListen(p, row) || (coaching && !a.phoneCanCoach(p, row)) {
 		http.Error(w, "call not found", 404)
 		return
 	}
@@ -330,6 +357,10 @@ func (a *App) handleListenAction(w http.ResponseWriter, r *http.Request, project
 			return
 		}
 		grant, grantErr := a.coachingGrant(row, body.SessionToken)
+		if grantErr != nil && grantErr != sql.ErrNoRows {
+			writeJSONStatus(w, 503, map[string]any{"code": "media_session_lookup_failed"})
+			return
+		}
 		if grantErr != nil || grant.Enabled != coaching {
 			http.Error(w, "session mode mismatch", 403)
 			return
@@ -351,8 +382,12 @@ func (a *App) handleListenAction(w http.ResponseWriter, r *http.Request, project
 			writeJSON(w, map[string]any{"ok": true})
 			return
 		}
-		if !a.listenerSessionValid(row, body.SessionToken) {
-			http.Error(w, "listener access expired or revoked", 403)
+		if reason, _ := a.listenerSessionCheck(row, body.SessionToken); reason != "" {
+			status := http.StatusForbidden
+			if temporaryMediaFailure(reason) {
+				status = http.StatusServiceUnavailable
+			}
+			writeJSONStatus(w, status, map[string]any{"code": reason})
 			return
 		}
 		res, err := a.db().db.Exec(`UPDATE telephony_listener_sessions SET expires_at=? WHERE token_hash=? AND call_id=? AND project_id=? AND principal=?`, time.Now().Unix()+phoneLeaseSeconds, phoneHash(body.SessionToken), id, project, principal)
@@ -440,8 +475,21 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 	}
 	id, token := softphonePathParts(r.URL.Path, "/softphone/listen-media/")
 	row, err := a.db().findCall(id)
-	if id == "" || token == "" || err != nil || row == nil || !a.listenerSessionValid(row, token) {
+	if err != nil {
+		writeJSONStatus(w, 503, map[string]any{"code": "call_lookup_failed"})
+		return
+	}
+	if id == "" || token == "" || row == nil {
 		http.Error(w, "listener access denied", 403)
+		return
+	}
+	reason, verifiedExpiry := a.listenerSessionCheck(row, token)
+	if reason != "" {
+		status := http.StatusForbidden
+		if temporaryMediaFailure(reason) {
+			status = http.StatusServiceUnavailable
+		}
+		writeJSONStatus(w, status, map[string]any{"code": reason})
 		return
 	}
 	tap := a.listeners.lookup(id)
@@ -451,7 +499,7 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 	}
 	grant, err := a.coachingGrant(row, token)
 	if err != nil {
-		http.Error(w, "session unavailable", 403)
+		writeJSONStatus(w, 503, map[string]any{"code": "media_session_lookup_failed"})
 		return
 	}
 	l, err := tap.addWithCoaching(phoneHash(token), a.maxCallListeners(), grant)
@@ -533,16 +581,18 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 				writer.queueControl(event)
 			case <-ticker.C:
 				current, e := a.db().findCall(id)
+				if e != nil && verifiedExpiry > time.Now().Unix() {
+					if h := a.softphones.lookup(id); h != nil {
+						h.stopCoach(l, "policy_unavailable")
+					}
+					continue
+				}
 				if e != nil || current == nil {
 					l.close("access_revoked")
 					continue
 				}
 				if isTerminalStatus(current.Status) {
 					l.close("call_ended")
-					continue
-				}
-				if l.coaching.grant.Enabled && !a.coachingTargetValid(current, l.coaching.grant) {
-					l.close("coach_target_changed")
 					continue
 				}
 				if l.coaching.talking.Load() && time.Now().UnixMilli() >= l.coaching.deadline.Load() {
@@ -552,10 +602,26 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 					finishSpurt("talk_timeout")
 
 				}
-				if !a.listenerSessionValid(current, token) {
-					l.close("access_revoked")
+				reason, expiry := a.listenerSessionCheck(current, token)
+				if reason == "" {
+					verifiedExpiry = expiry
 					continue
 				}
+				if temporaryMediaFailure(reason) && verifiedExpiry > time.Now().Unix() {
+					// A coach must explicitly push to talk again after an uncertain target check.
+					if h := a.softphones.lookup(id); h != nil {
+						h.stopCoach(l, "policy_unavailable")
+					}
+					continue
+				}
+				if reason == "coach_target_changed" {
+					l.close(reason)
+				} else if reason == "media_lease_expired" {
+					l.close("media_disconnected")
+				} else {
+					l.close("access_revoked")
+				}
+				continue
 			case frame := <-l.audio:
 				select {
 				case <-l.done:
@@ -611,8 +677,20 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 					if c.Type == "coach.start" || c.Type == "coach.keepalive" {
 						unlock := a.softphones.lockClaim(id)
 						current, e := a.db().findCall(id)
-						valid := e == nil && current != nil && a.listenerSessionValid(current, token)
-						if !valid {
+						reason := "access_revoked"
+						if e != nil {
+							reason = "media_session_lookup_failed"
+						} else if current != nil {
+							reason, _ = a.listenerSessionCheck(current, token)
+						}
+						if temporaryMediaFailure(reason) {
+							if h := a.softphones.lookup(id); h != nil {
+								h.stopCoach(l, "policy_unavailable")
+							}
+							unlock()
+							continue
+						}
+						if reason != "" {
 							unlock()
 							l.close("access_revoked")
 							return

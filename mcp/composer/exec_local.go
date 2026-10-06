@@ -1240,7 +1240,7 @@ func buildDrawText(t *TextOver, w, h int) string {
 		x, y = "(w-text_w)/2", strconv.Itoa(h-h/8-fs)
 	}
 	return fmt.Sprintf(
-		"drawtext=text='%s':fontfile='%s':fontsize=%d:fontcolor=%s:borderw=2:bordercolor=black@0.6:x=%s:y=%s",
+		"drawtext=text='%s':fontfile='%s':expansion=none:fontsize=%d:fontcolor=%s:borderw=2:bordercolor=black@0.6:x=%s:y=%s",
 		escDrawText(t.Body), composerFontFor(nil).Token, fs, color, x, y,
 	)
 }
@@ -1352,6 +1352,7 @@ func buildTimedDrawTextWithBody(c Clip, w, h int, body string) string {
 	parts := []string{
 		fmt.Sprintf("drawtext=text='%s'", escDrawText(body)),
 		fmt.Sprintf("fontfile='%s'", composerFontFor(c.Asset.Font).Token),
+		"expansion=none",
 		fmt.Sprintf("fontsize=%d", fs),
 		fmt.Sprintf("fontcolor=%s", color),
 		fmt.Sprintf("borderw=%d", borderW),
@@ -1667,18 +1668,19 @@ func escapeDrawTextExpr(s string) string {
 	return strings.NewReplacer(",", `\,`, ":", `\:`, "'", `\'`).Replace(s)
 }
 
-// escDrawText escapes the drawtext expression body. ffmpeg's drawtext
-// uses colons + single quotes + backslash with special meanings —
-// reject them via simple escaping.
+// escDrawText escapes a value inside a filtergraph's single-quoted argument.
+// First escape the drawtext option parser, then close/reopen the outer quote
+// around each apostrophe so the filtergraph parser preserves it. Actual line
+// breaks stay intact; replacing them with backslash-n makes drawtext print n.
+// Text filters disable expansion so percent expressions and backslashes remain
+// literal instead of passing through a third parsing layer.
 func escDrawText(s string) string {
 	r := strings.NewReplacer(
 		`\`, `\\`,
 		`:`, `\:`,
 		`'`, `\'`,
-		"%", `\%`,
-		"\n", `\n`,
 	)
-	return r.Replace(s)
+	return strings.ReplaceAll(r.Replace(s), "'", `'\''`)
 }
 
 // escFFmpegColor returns a color value the pad filter accepts. Empty

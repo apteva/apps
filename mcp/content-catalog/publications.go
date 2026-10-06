@@ -130,7 +130,18 @@ func (a *App) postsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	scope, err := lifecycleScope(args)
+	if err != nil {
+		return nil, err
+	}
 	q := `SELECT ` + postColumns + ` FROM posts p WHERE p.project_id=?`
+	archivedMember := `EXISTS (SELECT 1 FROM post_assets pa JOIN assets a ON a.id=pa.asset_id AND a.project_id=pa.project_id JOIN sessions s ON s.id=a.session_id AND s.project_id=a.project_id WHERE pa.project_id=p.project_id AND pa.post_id=p.id AND (a.lifecycle='archived' OR s.lifecycle='archived'))`
+	if scope == "active" {
+		q += " AND NOT " + archivedMember
+	}
+	if scope == "archived" {
+		q += " AND " + archivedMember
+	}
 	values := []any{pid}
 	if id := str(args, "session_id"); id != "" {
 		if _, err := sessionByID(ctx.AppDB(), pid, id); err != nil {
@@ -309,6 +320,13 @@ func (a *App) postsRecord(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			return nil, errors.New("first asset not found")
 		}
 		p.BrandID = brandID
+	}
+	if oneOf(p.Status, "planned", "scheduled", "submitted") {
+		for _, assetID := range ids {
+			if err = requireActiveAsset(ctx.AppDB(), pid, assetID); err != nil {
+				return nil, err
+			}
+		}
 	}
 	if err = validatePostAssets(ctx.AppDB(), pid, p.BrandID, ids); err != nil {
 		return nil, err

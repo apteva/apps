@@ -108,6 +108,42 @@ func applySQLFile(t *testing.T, db *sql.DB, path string) {
 	}
 }
 
+func TestGmailBackfillMigrationPreservesExistingMailboxAndMessages(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for version := 1; version <= 15; version++ {
+		matches, err := filepath.Glob(fmt.Sprintf("migrations/%03d_*.sql", version))
+		if err != nil || len(matches) != 1 {
+			t.Fatalf("migration %d lookup: %v %v", version, matches, err)
+		}
+		applySQLFile(t, db, matches[0])
+	}
+	if _, err := db.Exec(`INSERT INTO gmail_sync_state(project_id,connection_id,mailbox,history_id) VALUES('project-a',3,'support@example.com','2365');
+		INSERT INTO messages(id,project_id,channel,direction,from_addr,status,body_text,provider_slug,provider_connection_id,provider_message_id)
+		VALUES(40,'project-a','email','in','customer@example.org','received','Incoming preserved','gmail',3,'in-1'),
+		(41,'project-a','email','out','support@example.com','sent','Outgoing preserved','gmail',3,'out-1')`); err != nil {
+		t.Fatal(err)
+	}
+	applySQLFile(t, db, "migrations/016_gmail_mailbox_backfill.sql")
+	var cursor, mailbox, token, incoming, outgoing string
+	var complete int
+	if err := db.QueryRow(`SELECT history_id,mailbox,backfill_complete,backfill_page_token FROM gmail_sync_state`).Scan(&cursor, &mailbox, &complete, &token); err != nil || cursor != "2365" || mailbox != "support@example.com" || complete != 0 || token != "" {
+		t.Fatalf("existing mailbox changed: %s %s %d %s %v", cursor, mailbox, complete, token, err)
+	}
+	if err := db.QueryRow(`SELECT body_text FROM messages WHERE id=40`).Scan(&incoming); err != nil || incoming != "Incoming preserved" {
+		t.Fatalf("incoming message lost: %s %v", incoming, err)
+	}
+	if err := db.QueryRow(`SELECT body_text FROM messages WHERE id=41`).Scan(&outgoing); err != nil || outgoing != "Outgoing preserved" {
+		t.Fatalf("outgoing message lost: %s %v", outgoing, err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages(project_id,channel,direction,from_addr,status,provider_slug,provider_connection_id,provider_message_id) VALUES('project-a','email','in','support@example.com','received','gmail',3,'out-1')`); err == nil {
+		t.Fatal("same Gmail delivery duplicated across directions")
+	}
+}
+
 func TestUpgradeFromMessaging01346PreservesMessageContentAndIDs(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {

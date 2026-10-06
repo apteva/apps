@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.13.0
+version: 0.13.2
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Billing issues local invoices. Stripe is an optional payment processor;
@@ -10,6 +10,11 @@ description: |
   created only when explicitly requested. Lifecycle is explicit
   (draft → open → paid/void/uncollectible) with an append-only audit
   log per invoice.
+  v0.13.2 returns expiring signed invoice PDF links through linked Storage,
+  uploads new PDFs privately, and preserves rendered bytes when saving fails.
+  v0.13.1 improves existing customer search with ranked phrase matches,
+  labelled token candidates, and optional compact billing context so account
+  reviews need no redundant invoice lookups. Monetary values remain cents.
   v0.9.0 routes every Stripe API call through the bound integration.
   The platform registers and verifies Billing's webhook while keeping
   Stripe API and signing secrets out of Billing. Checkout remains
@@ -85,7 +90,7 @@ provides:
     - name: payment_processor_public_config
       description: Return browser-safe payment configuration such as Stripe's publishable key.
     - name: customers_search
-      description: Search customers by name or email, with limit and offset.
+      description: Find customers by name or email, with ranked phrase matches and labelled broader candidates. Set include_context=true for balances and recent payments in the same call.
     - name: customers_get
       description: Fetch one customer (snapshot only).
     - name: customers_get_context

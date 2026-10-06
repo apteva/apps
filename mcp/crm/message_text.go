@@ -24,6 +24,33 @@ func inboundActivityBody(body inboundPayload) string {
 // Never render inbound HTML. Extract human-readable text while excluding
 // executable, hidden metadata and stylesheet content.
 func plainTextFromHTML(raw string) string {
+	return normalizeHTMLMessageText(legacyPlainTextFromHTML(raw))
+}
+
+// Collapse layout-only blank lines, not message text or indentation. Email
+// tables often nest many empty div/tr elements, which are not paragraphs.
+func normalizeHTMLMessageText(raw string) string {
+	raw = strings.ReplaceAll(strings.ReplaceAll(raw, "\r\n", "\n"), "\r", "\n")
+	var lines []string
+	blank := false
+	for _, line := range strings.Split(raw, "\n") {
+		if strings.TrimSpace(line) == "" {
+			if len(lines) > 0 && !blank {
+				lines = append(lines, "")
+			}
+			blank = true
+			continue
+		}
+		lines = append(lines, line)
+		blank = false
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+// Retain the exact former extraction solely to prove that a stored body was
+// produced by CRM before explicitly repairing its formatting. Never use a
+// heuristic to replace complete or operator-edited content.
+func legacyPlainTextFromHTML(raw string) string {
 	doc, err := html.Parse(strings.NewReader(raw))
 	if err != nil {
 		return ""

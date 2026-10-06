@@ -5,21 +5,64 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 )
 
 func dbCustomerSearch(db *sql.DB, pid, q, email string, limit int, offsets ...int) ([]*Customer, error) {
+	rows, _, err := dbCustomerSearchMatches(db, pid, q, email, limit, offsets...)
+	return rows, err
+}
+
+// Broader token matches are candidates, never an assertion that two names
+// identify the same customer. Choose the mode before pagination so later pages
+// cannot fall back after exhausting direct matches.
+func dbCustomerSearchMatches(db *sql.DB, pid, q, email string, limit int, offsets ...int) ([]*Customer, string, error) {
+	q = strings.TrimSpace(q)
+	email = normaliseEmail(email)
 	var (
 		where = []string{"project_id = ?", "deleted_at IS NULL"}
 		args  = []any{pid}
 	)
+	mode := "all"
+	order := "updated_at DESC,id DESC"
+	var orderArgs []any
 	if email != "" {
 		where = append(where, "email = ?")
-		args = append(args, normaliseEmail(email))
+		args = append(args, email)
+		mode = "email"
 	}
 	if q != "" {
-		where = append(where, "(name LIKE ? OR email LIKE ?)")
-		pat := "%" + q + "%"
-		args = append(args, pat, pat)
+		mode = "phrase"
+		pat := customerSearchPattern(q)
+		predicate := `(name LIKE ? ESCAPE '\' OR email LIKE ? ESCAPE '\')`
+		tokens := customerSearchTokens(q)
+		broader := false
+		if len(tokens) > 1 && email == "" {
+			var exists bool
+			err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM customers WHERE `+strings.Join(where, " AND ")+` AND `+predicate+`)`, append(append([]any{}, args...), pat, pat)...).Scan(&exists)
+			if err != nil {
+				return nil, mode, err
+			}
+			broader = !exists
+		}
+		if broader {
+			mode = "token_candidates"
+			var matches, scores []string
+			for _, token := range tokens {
+				matches = append(matches, predicate)
+				scores = append(scores, "CASE WHEN "+predicate+" THEN 1 ELSE 0 END")
+				p := customerSearchPattern(token)
+				args = append(args, p, p)
+				orderArgs = append(orderArgs, p, p)
+			}
+			where = append(where, "("+strings.Join(matches, " OR ")+")")
+			order = "(" + strings.Join(scores, "+") + ") DESC," + order
+		} else {
+			where = append(where, predicate)
+			args = append(args, pat, pat)
+			order = "CASE WHEN name = ? COLLATE NOCASE OR email = ? COLLATE NOCASE THEN 0 ELSE 1 END," + order
+			orderArgs = append(orderArgs, q, q)
+		}
 	}
 	offset := 0
 	if len(offsets) > 0 {
@@ -29,27 +72,47 @@ func dbCustomerSearch(db *sql.DB, pid, q, email string, limit int, offsets ...in
 		limit = 50
 	}
 	limit = min(limit, 1001)
+	args = append(args, orderArgs...)
 	args = append(args, limit, offset)
 	sqlStr := `SELECT id, project_id, name, email, phone, billing_address, tax_ids,
 	             currency, external_id, metadata, created_at, updated_at
 	           FROM customers
 	           WHERE ` + strings.Join(where, " AND ") + `
-	           ORDER BY updated_at DESC,id DESC
+	           ORDER BY ` + order + `
 	           LIMIT ? OFFSET ?`
 	rows, err := db.Query(sqlStr, args...)
 	if err != nil {
-		return nil, err
+		return nil, mode, err
 	}
 	defer rows.Close()
-	var out []*Customer
+	out := []*Customer{}
 	for rows.Next() {
 		c, err := scanCustomer(rows)
 		if err != nil {
-			return nil, err
+			return nil, mode, err
 		}
 		out = append(out, c)
 	}
-	return out, rows.Err()
+	return out, mode, rows.Err()
+}
+
+func customerSearchPattern(q string) string {
+	return "%" + strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(q) + "%"
+}
+
+func customerSearchTokens(q string) []string {
+	var tokens []string
+	seen := map[string]bool{}
+	for _, token := range strings.FieldsFunc(strings.ToLower(q), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) {
+		if len([]rune(token)) >= 3 && !seen[token] {
+			tokens = append(tokens, token)
+			seen[token] = true
+		}
+		if len(tokens) == 8 {
+			break
+		}
+	}
+	return tokens
 }
 
 func dbCustomerGetByID(db *sql.DB, pid string, id int64) (*Customer, error) {
@@ -222,27 +285,32 @@ func dbCustomerMerge(db *sql.DB, pid string, loser, winner int64) error {
 }
 
 func dbCustomerTotals(db *sql.DB, pid string, cid int64) (map[string]any, error) {
-	rows, err := db.Query(`SELECT currency,count(*),COALESCE(sum(total_cents),0),COALESCE(sum(amount_paid_cents),0),COALESCE(sum(max(total_cents-amount_paid_cents,0)),0),COALESCE(sum(max(amount_paid_cents-total_cents,0)),0) FROM invoices WHERE project_id=? AND customer_id=? AND deleted_at IS NULL AND status IN ('open','paid','uncollectible') GROUP BY currency ORDER BY currency`, pid, cid)
+	rows, err := db.Query(`SELECT currency,count(*),COALESCE(sum(total_cents),0),COALESCE(sum(amount_paid_cents),0),COALESCE(sum(max(total_cents-amount_paid_cents,0)),0),COALESCE(sum(max(amount_paid_cents-total_cents,0)),0),sum(status='open'),sum(status='paid'),sum(status='uncollectible') FROM invoices WHERE project_id=? AND customer_id=? AND deleted_at IS NULL AND status IN ('open','paid','uncollectible') GROUP BY currency ORDER BY currency`, pid, cid)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	groups := []map[string]any{}
 	count := 0
+	statusCounts := map[string]int{"open": 0, "paid": 0, "uncollectible": 0}
 	for rows.Next() {
 		var cur string
 		var n int
+		var open, paidCount, uncollectible int
 		var total, paid, due, credit int64
-		if err = rows.Scan(&cur, &n, &total, &paid, &due, &credit); err != nil {
+		if err = rows.Scan(&cur, &n, &total, &paid, &due, &credit, &open, &paidCount, &uncollectible); err != nil {
 			return nil, err
 		}
 		count += n
+		statusCounts["open"] += open
+		statusCounts["paid"] += paidCount
+		statusCounts["uncollectible"] += uncollectible
 		groups = append(groups, map[string]any{"currency": cur, "invoice_count": n, "invoiced_cents": total, "paid_cents": paid, "outstanding_cents": due, "credit_cents": credit})
 	}
 	if err = rows.Err(); err != nil {
 		return nil, err
 	}
-	out := map[string]any{"by_currency": groups, "invoice_count": count, "mixed_currencies": len(groups) > 1}
+	out := map[string]any{"by_currency": groups, "invoice_count": count, "invoice_status_counts": statusCounts, "mixed_currencies": len(groups) > 1}
 	if len(groups) == 1 {
 		for k, v := range groups[0] {
 			out[k] = v

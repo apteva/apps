@@ -23,7 +23,7 @@ func TestInboundRollbackAndRetry(t *testing.T) {
 	if _, err := db.Exec(`CREATE TRIGGER injected_failure BEFORE INSERT ON conversation_participants BEGIN SELECT RAISE(ABORT,'injected failure'); END`); err != nil {
 		t.Fatal(err)
 	}
-	payload := inboundPayload{Channel: "email", From: "atomic@example.test", MessageID: 1234, BodyHTML: "<p>Hello <b>team</b></p><script>evil()</script><p>Final instruction</p>"}
+	payload := inboundPayload{MatchedRecipient: "inbox@example.test", Channel: "email", From: "atomic@example.test", MessageID: 1234, BodyHTML: "<p>Hello <b>team</b></p><script>evil()</script><p>Final instruction</p>"}
 	if _, err := ingestInbound(ctx, "test-proj", payload); err == nil {
 		t.Fatal("expected injected failure")
 	}
@@ -64,7 +64,7 @@ func TestConcurrentInboundHasOneThread(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := ingestInbound(ctx, "test-proj", inboundPayload{Channel: "email", From: "concurrent@example.test", MessageID: 5678, BodyText: "hello"})
+			_, err := ingestInbound(ctx, "test-proj", inboundPayload{MatchedRecipient: "inbox@example.test", Channel: "email", From: "concurrent@example.test", MessageID: 5678, BodyText: "hello"})
 			errs <- err
 		}()
 	}
@@ -281,7 +281,7 @@ func TestDoNotContactBlocksSendAndAudience(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	audience, err := resolveAudience(ctx.AppDB(), source, "test-proj", "email", 0, 100, false, true)
+	audience, err := resolveAudience(context.Background(), ctx.AppDB(), source, "test-proj", "email", 0, 100, false, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +306,7 @@ func TestAutomatedInboundReviewPolicy(t *testing.T) {
 	for _, policy := range []string{"ignore_new", "review_new"} {
 		t.Run(policy, func(t *testing.T) {
 			ctx := newTestCtx(t, tk.WithConfig(map[string]string{"automated_inbound_policy": policy}))
-			result, err := ingestInbound(ctx, "test-proj", inboundPayload{Channel: "email", From: "noreply@example.test", MessageID: 771, BodyText: "Your receipt"})
+			result, err := ingestInbound(ctx, "test-proj", inboundPayload{MatchedRecipient: "inbox@example.test", Channel: "email", From: "noreply@example.test", MessageID: 771, BodyText: "Your receipt"})
 			if err != nil {
 				t.Fatal(err)
 			}

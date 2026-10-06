@@ -40,6 +40,8 @@ type actorExecution struct {
 	items          []map[string]any
 	pageCount      int
 	trace          []map[string]any
+	media          []map[string]any
+	effects        []map[string]any
 	lastExtract    *actorStep
 	currentURL     string
 	startedAt      time.Time
@@ -51,6 +53,7 @@ type actorExecution struct {
 	datasetBytes   int
 	datasetFull    bool
 	selectedPreset string
+	crawl          *crawlDefinition
 }
 
 func (a *App) toolActorRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -341,6 +344,9 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 	runCtx, cancel := context.WithDeadline(workerCtx, exec.deadline)
 	defer cancel()
 	exec.workerCtx = runCtx
+	if exec.crawl != nil {
+		return a.executeCrawlRun(exec)
+	}
 	// Cancel in-flight Computer calls as well as checking between workflow steps.
 	watchDone := make(chan struct{})
 	defer close(watchDone)
@@ -407,6 +413,12 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 	out["items"] = previewActorItems(exec.items)
 	out["trace_preview"] = previewActorTrace(exec.trace)
 	out["current_url"] = exec.currentURL
+	if len(exec.media) > 0 {
+		out["media"] = exec.media
+	}
+	if len(exec.effects) > 0 {
+		out["effects"] = exec.effects
+	}
 	if exec.session != nil {
 		out["proxy"] = exec.session.Proxy
 	}
@@ -483,12 +495,22 @@ func newActorExecution(workerCtx context.Context, app *App, ctx *sdk.AppCtx, run
 	maxPages := boundedInt(templateInt(rendered.Limits.MaxPages), defaultActorMaxPages, 1, maxActorPages)
 	maxItems := boundedInt(templateInt(rendered.Limits.MaxItems), defaultActorMaxItems, 1, maxActorItems)
 	maxSeconds := boundedInt(templateInt(rendered.Limits.MaxDurationSeconds), defaultActorMaxSeconds, 1, maxActorSeconds)
+	if rendered.Crawl != nil {
+		maxPages = boundedInt(rendered.Crawl.Frontier.MaxPages, maxCrawlFrontierSize, 1, maxCrawlFrontierSize)
+		maxItems = boundedInt(rendered.Crawl.Frontier.MaxItems, maxActorItems, 1, maxActorItems)
+		if rendered.Limits.MaxPages != nil {
+			maxPages = minInt(maxPages, boundedInt(templateInt(rendered.Limits.MaxPages), defaultActorMaxPages, 1, maxActorPages))
+		}
+		if rendered.Limits.MaxItems != nil {
+			maxItems = minInt(maxItems, boundedInt(templateInt(rendered.Limits.MaxItems), defaultActorMaxItems, 1, maxActorItems))
+		}
+	}
 	retries := defaultActorRetries
 	if rendered.Limits.StepRetries != nil {
 		retries = clampInt(templateInt(rendered.Limits.StepRetries), 0, 10)
 	}
 	now := time.Now().UTC()
-	return &actorExecution{app: app, ctx: ctx, run: run, definition: rendered, variables: vars, deadline: now.Add(time.Duration(maxSeconds) * time.Second), maxPages: maxPages, maxItems: maxItems, retries: retries, startedAt: now, workerCtx: workerCtx, items: []map[string]any{}, trace: []map[string]any{}, selectedPreset: runInput.Preset}, nil
+	return &actorExecution{app: app, ctx: ctx, run: run, definition: rendered, deadline: now.Add(time.Duration(maxSeconds) * time.Second), maxPages: maxPages, maxItems: maxItems, retries: retries, startedAt: now, workerCtx: workerCtx, items: []map[string]any{}, trace: []map[string]any{}, selectedPreset: runInput.Preset, crawl: rendered.Crawl}, nil
 }
 
 func actorBrowserAudit(browser actorBrowser) map[string]any {
@@ -506,6 +528,9 @@ func actorBrowserAudit(browser actorBrowser) map[string]any {
 }
 
 func (e *actorExecution) runSteps() (map[string]any, error) {
+	if e.crawl != nil {
+		return e.runCrawl()
+	}
 	for index := range e.definition.Steps {
 		if err := e.checkpoint(); err != nil {
 			return nil, err
@@ -575,11 +600,15 @@ func (e *actorExecution) runStep(step actorStep) error {
 	case "goto":
 		return e.gotoURL(step.URL)
 	case "click":
-		return e.click(step.Locator)
-	case "fill", "key", "scroll":
+		return e.clickOnce(step)
+	case "fill", "set_text", "set_checked", "select_option", "set_temporal", "key", "scroll":
 		return e.interact(step)
+	case "upload_file":
+		return e.upload(step)
+	case "wait_for":
+		return e.waitFor(step)
 	case "assert_element":
-		doc, err := e.extractDOM()
+		doc, err := e.extractStepDOM(step)
 		if err != nil {
 			return err
 		}
@@ -686,13 +715,25 @@ func (e *actorExecution) gotoURL(target string) error {
 	return nil
 }
 
-func (e *actorExecution) click(locator actorLocator) error {
+func (e *actorExecution) click(step actorStep) error {
 	if e.session == nil {
 		return errors.New("click requires an open browser")
 	}
-	if selector := strings.TrimSpace(locator.Selector); selector != "" {
+	locator := step.Locator
+	clickArgs := map[string]any{"session_id": e.session.SessionID, "action": "click"}
+	if step.ExpectedText != "" {
+		clickArgs["expected_text"] = step.ExpectedText
+	}
+	if step.ExpectedEffect != "" {
+		clickArgs["expected_effect"] = step.ExpectedEffect
+	}
+	if step.ConfirmConsequence != "" {
+		clickArgs["confirm_consequence"] = step.ConfirmConsequence
+	}
+	if selector := strings.TrimSpace(locator.Selector); selector != "" && !locator.SOMOnly {
 		var out map[string]any
-		if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, map[string]any{"session_id": e.session.SessionID, "action": "click", "selector": selector}), &out); err != nil {
+		clickArgs["selector"] = selector
+		if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, clickArgs), &out); err != nil {
 			return err
 		}
 		return e.finishInteraction(out)
@@ -700,15 +741,36 @@ func (e *actorExecution) click(locator actorLocator) error {
 	var shot computerSOMScreenshot
 	err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, map[string]any{"session_id": e.session.SessionID, "action": "screenshot", "annotate": true, "include_som": true}), &shot)
 	if err == nil {
+		var matches []setOfMarkTarget
 		for _, target := range shot.SOM {
-			if locatorMatches(locator, target.Text, target.Role, "") {
-				var out map[string]any
-				if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, map[string]any{"session_id": e.session.SessionID, "action": "click", "label": target.Label}), &out); err != nil {
-					return err
-				}
-				return e.finishInteraction(out)
+			if !target.Disabled && somTargetMatches(locator, target) {
+				matches = append(matches, target)
 			}
 		}
+		if len(matches) > 1 {
+			return fmt.Errorf("ambiguous SOM locator: %d targets match text=%q role=%q", len(matches), locator.Text, locator.Role)
+		}
+		for _, target := range matches {
+			var out map[string]any
+			if target.ID != "" {
+				clickArgs["target_id"] = target.ID
+			} else {
+				clickArgs["label"] = target.Label
+			}
+			if shot.SOMRevision != nil {
+				clickArgs["som_revision"] = shot.SOMRevision
+			}
+			if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, clickArgs), &out); err != nil {
+				return err
+			}
+			return e.finishInteraction(out)
+		}
+	}
+	if locator.SOMOnly {
+		if err != nil {
+			return fmt.Errorf("observe SOM: %w", err)
+		}
+		return fmt.Errorf("locator not found in SOM: text=%q role=%q", locator.Text, locator.Role)
 	}
 	doc, err := e.extractDOM()
 	if err != nil {
@@ -798,6 +860,9 @@ func (e *actorExecution) validateResolvedProxy(proxy browserProxyState) error {
 }
 
 func locatorMatches(locator actorLocator, text, role, selector string) bool {
+	if locator.Exact && locator.Text != "" && !strings.EqualFold(strings.TrimSpace(text), strings.TrimSpace(locator.Text)) {
+		return false
+	}
 	if locator.Text != "" && !strings.Contains(strings.ToLower(strings.TrimSpace(text)), strings.ToLower(strings.TrimSpace(locator.Text))) {
 		return false
 	}
@@ -810,6 +875,18 @@ func locatorMatches(locator actorLocator, text, role, selector string) bool {
 	return locator.Text != "" || locator.Role != "" || locator.Selector != ""
 }
 
+func locatorHasTarget(locator actorLocator) bool {
+	return strings.TrimSpace(locator.Text) != "" || strings.TrimSpace(locator.Role) != "" || strings.TrimSpace(locator.Selector) != ""
+}
+
+func somTargetMatches(locator actorLocator, target setOfMarkTarget) bool {
+	if locator.Text == "" {
+		return locatorMatches(locator, "", firstNonEmpty(target.Role, target.Tag), "")
+	}
+	return locatorMatches(locator, target.Text, firstNonEmpty(target.Role, target.Tag), "") ||
+		locatorMatches(locator, target.AccessibleName, firstNonEmpty(target.Role, target.Tag), "")
+}
+
 func findLocatorRegion(locator actorLocator, regions []browserRegion) *browserRegion {
 	for i := range regions {
 		if locatorMatches(locator, firstNonEmpty(regions[i].Heading, regions[i].Text), regions[i].Role, regions[i].Selector) {
@@ -820,10 +897,37 @@ func findLocatorRegion(locator actorLocator, regions []browserRegion) *browserRe
 }
 
 func (e *actorExecution) extractDOM() (*browserExtractResult, error) {
+	return e.extractDOMOptions(map[string]any{"formats": []string{"html", "regions", "metadata"}, "max_chars": 200000, "wait_ms": 250})
+}
+
+func (e *actorExecution) extractStepDOM(step actorStep) (*browserExtractResult, error) {
+	options := map[string]any{"formats": []string{"html", "regions", "metadata"}, "max_chars": 200000, "wait_ms": 250}
+	if step.Readability != nil {
+		options["readability"] = *step.Readability
+	}
+	return e.extractDOMOptions(options)
+}
+
+// Crawl extraction needs complete HTML; other representations share Computer's
+// response budget and are unnecessary for CSS-based dataset extraction.
+func (e *actorExecution) extractCrawlDOM() (*browserExtractResult, error) {
+	for _, limit := range []int{200000, 400000, 800000, 1000000} {
+		doc, err := e.extractDOMOptions(map[string]any{"formats": []string{"html"}, "max_chars": limit, "wait_ms": 250})
+		if err != nil {
+			return nil, err
+		}
+		if !doc.Truncated {
+			return doc, nil
+		}
+	}
+	return nil, errors.New("rendered HTML still truncated at the 1 MB response limit; narrow the extraction or update Computer to v0.7.92 or later")
+}
+
+func (e *actorExecution) extractDOMOptions(options map[string]any) (*browserExtractResult, error) {
 	if e.session == nil {
 		return nil, errors.New("extract requires an open browser")
 	}
-	doc, err := e.app.extractBrowserDOM(e.workerCtx, e.ctx, e.session.SessionID, map[string]any{"formats": []string{"html", "regions", "metadata"}, "max_chars": 200000, "wait_ms": 250}, false)
+	doc, err := e.app.extractBrowserDOM(e.workerCtx, e.ctx, e.session.SessionID, options, false)
 	if err != nil {
 		return nil, err
 	}
@@ -838,7 +942,7 @@ func (e *actorExecution) extractDOM() (*browserExtractResult, error) {
 }
 
 func (e *actorExecution) extractPage(step actorStep) error {
-	doc, err := e.extractDOM()
+	doc, err := e.extractStepDOM(step)
 	if err != nil {
 		return err
 	}
@@ -893,7 +997,7 @@ func (e *actorExecution) paginate(step actorStep) error {
 		if err := e.checkpoint(); err != nil {
 			return err
 		}
-		if err := e.click(step.Locator); err != nil {
+		if err := e.click(step); err != nil {
 			if strings.Contains(err.Error(), "locator not found") {
 				return nil
 			}
@@ -995,6 +1099,23 @@ func extractNodeItem(node *html.Node, fields map[string]actorField, baseURL stri
 			raw = htmlNodeText(target)
 		}
 		raw = strings.TrimSpace(raw)
+		if field.Pattern != "" {
+			pattern, err := regexp.Compile(field.Pattern)
+			if err != nil {
+				return nil, fmt.Errorf("field %s pattern: %w", name, err)
+			}
+			match := pattern.FindStringSubmatch(raw)
+			if len(match) == 0 {
+				if field.Required {
+					return nil, fmt.Errorf("required field %s pattern did not match", name)
+				}
+				continue
+			}
+			raw = match[0]
+			if len(match) > 1 {
+				raw = match[1]
+			}
+		}
 		if raw == "" && field.Required {
 			return nil, fmt.Errorf("required field %s is empty", name)
 		}

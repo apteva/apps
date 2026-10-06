@@ -1,4 +1,4 @@
-# Tables (v0.1)
+# Tables (v0.2.4)
 
 Typed-row database for Apteva agents and human teams. The row-shaped
 sibling to the `storage` app.
@@ -8,11 +8,28 @@ table and row is resolved against the calling project_id.
 
 ## Surfaces
 
-- **18 MCP tools** — `tables_create`, `tables_list`, `tables_describe`,
+The Tables workspace is designed for day-to-day data work: searchable table
+navigation, typed filtering, server-backed sorting, readable date/boolean/JSON
+values, sticky headers, and a row-detail drawer for safe edits and deletes. The
+SQL editor, schema editor, API examples, and projection controls remain available
+as secondary tools so the data grid stays focused.
+
+The **Projections** workspace gives analytics users a dedicated view of published
+projection versions, readiness, freshness watermarks, coverage, pending scopes,
+pause/resume state, and forced refreshes. It complements the projection MCP tools
+and keeps operational refresh work separate from ordinary row editing.
+
+- **28 MCP tools** — `tables_create`, `tables_list`, `tables_describe`,
   `tables_alter`, `tables_drop`, `indexes_create`, `indexes_list`,
   `indexes_drop`, `rows_insert`, `rows_get`,
   `rows_upsert`, `rows_update`, `rows_delete`, `rows_search`,
   `rows_count`, `rows_aggregate`, `tables_query`, `tables_batch`
+- **Persistent SQL projections** — `projections_create`, `projections_list`,
+  `projections_describe`, `projections_refresh`, `projections_status`,
+  `projections_pause`, `projections_activate`, `projections_update`, and `projections_delete`. Projection SQL is validated
+  read-only SQL, source mutations are captured transactionally, affected
+  scopes are coalesced, and results are refreshed by a bounded worker. New
+  versions can be built alongside the active version and switched atomically.
 - **Generic batch execution** — `tables_batch` combines validated reads or
   writes with explicit `read_snapshot`, `write_transaction`, and
   `best_effort` modes. Operations can reference earlier results with
@@ -24,6 +41,9 @@ table and row is resolved against the calling project_id.
   user tables, blocks internal tables, and enforces time/row/byte caps
 - **Concurrent reads** — reads use a four-connection read-only pool while
   writes remain serialized; schema metadata is cached per project and table
+- **Projection query access** — projection result tables are addressed through
+  the normal `tables_query` placeholder interface and cannot be written through
+  row tools. Rows are staged in bounded batches and published through an atomic scope switch. Query responses include freshness and coverage from the same snapshot.
 - **Composite indexes** — validated column-based indexes can be created,
   inspected, and dropped without exposing physical SQLite names
 - **Skill** — `how-to-use-tables` (`/tables`)
@@ -49,12 +69,15 @@ APTEVA_PROJECT_ID=test DB_PATH=/tmp/tables.db ./tables
 curl http://localhost:8080/health
 ```
 
-## Out of scope for v0.1
+## Out of scope
 
 - Cross-app `file_id` validation on insert (just stores the integer;
   hydration is best-effort on `rows_get`)
 - Expression indexes, partial indexes, and FTS. Composite indexes are
   column-based; upsert keys are automatically backed by managed unique indexes.
+- Cross-app source transactions. A source app that owns a separate database
+  must provide its own transactional outbox before its data can drive a Tables
+  projection.
 
 
 ## 0.1.15 hardening
@@ -174,3 +197,10 @@ of delayed cancellation during result iteration in the pinned SQLite driver.
 ## Legacy default compatibility in 0.1.21
 
 Schema loaders accept historical unquoted defaults for text columns, such as `standard` and `EUR`, without rewriting metadata or existing rows. Valid JSON defaults retain their types; invalid non-text defaults report the column and type. Partially completed upgrades resume normally. See [validation and compatibility details](LEGACY_DEFAULTS.md).
+
+## Projection configuration and validation
+
+See [PROJECTIONS.md](PROJECTIONS.md) for scoped SQL, dependency mappings, intervals,
+indexes, coverage, replacement activation and upgrade behavior. See
+[PROJECTION_VALIDATION.md](PROJECTION_VALIDATION.md) for correctness, resource and
+file-backed benchmark coverage.

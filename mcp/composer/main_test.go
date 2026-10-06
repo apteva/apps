@@ -2153,10 +2153,10 @@ func TestEscDrawText(t *testing.T) {
 	cases := map[string]string{
 		"hello":        "hello",
 		"a:b":          `a\:b`,
-		"it's":         `it\'s`,
+		"it's":         `it\'\''s`,
 		`a\b`:          `a\\b`,
-		"line1\nline2": `line1\nline2`,
-		"100%":         `100\%`,
+		"line1\nline2": "line1\nline2",
+		"100%":         `100%`,
 	}
 	for in, want := range cases {
 		if got := escDrawText(in); got != want {

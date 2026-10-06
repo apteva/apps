@@ -118,9 +118,10 @@ func directParts(c context.Context, meta *uploadMeta) ([]remotePart, error) {
 	return be.MultipartParts(c, objectKey("", meta.Direct.StorageKey), meta.Direct.ID)
 }
 
-// Called with the exclusive session lock. Only S3 metadata crosses Apteva:
-// authoritative part sizes/ETags, complete, and HEAD. No download, re-upload,
-// staging file, or invented whole-file SHA256.
+// Called with the exclusive session lock. Completion only crosses S3 metadata
+// (authoritative part sizes/ETags, complete, and HEAD), then queues a durable
+// streaming whole-file checksum job. Upload completion stays fast and never
+// invents a multipart ETag as a content SHA-256.
 func completeDirectMultipart(c context.Context, app *sdk.AppCtx, id string, meta *uploadMeta) (any, error) {
 	be, ok := backend().(multipartBackend)
 	if !ok {
@@ -161,10 +162,15 @@ func completeDirectMultipart(c context.Context, app *sdk.AppCtx, id string, meta
 	if err != nil {
 		return nil, err
 	}
+	if f.SHA256 == "" {
+		if err = queueChecksumJob(app, f); err != nil {
+			return nil, err
+		}
+	}
 	_ = os.RemoveAll(uploadSessionDir(app, id))
 	releaseUploadReservation(app, id)
 	retireSessionLock(id)
 	app.Logger().Info("multipart upload completed", "upload_id", id, "project_id", meta.ProjectID, "file_id", f.ID, "bytes", f.SizeBytes, "mode", "s3_multipart")
 	emitFileEvent(app, "file.added", f, existed)
-	return map[string]any{"file": f, "was_existing": existed, "size_bytes": f.SizeBytes}, nil
+	return map[string]any{"file": f, "was_existing": existed, "sha256": f.SHA256, "checksum_status": f.ChecksumStatus, "size_bytes": f.SizeBytes}, nil
 }

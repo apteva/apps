@@ -2,8 +2,27 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.1.26
+version: 0.2.5
 description: |
+  v0.2.5 Caches safe SQL parsing, bounds dependency fan-out, keeps obsolete
+  generations indexed and out of reads, and reports projection phase timings
+  with scope-ready events.
+  v0.2.4 Adds an automatic projection-storage migration that keeps the prior
+  result tables writable for safe blue-green fallback while readers use atomic
+  generation views.
+  v0.2.3 Fixes the Tables workspace when summary table listings omit column metadata.
+  v0.2.2 Adds a dedicated projections workspace with readiness, freshness,
+  coverage, pending scopes, interval, pause/resume and forced refresh controls.
+  v0.2.1 Redesigns the Tables workspace with searchable navigation, typed
+  filters, server-backed sorting, readable values, sticky headers, and a
+  row-detail editor drawer.
+  v0.2.0 Adds inner SQL scopes, generic dependency mappings, persistent refresh
+  intervals, result indexes, accurate readiness and bounded atomic generation
+  publication. Projection storage upgrades are automatic and retain a writable
+  compatibility surface for the previous worker.
+  v0.1.27 Adds durable, coalesced SQL projections with transactional change
+  capture, scoped refreshes, retries, watermarks, and read-only projection
+  tables for efficient analytics workloads.
   v0.1.26 Fixes recursive-filter literal coercion: explicit cast operands
   retain their declared type, boolean literals are coerced once, and
   casted outer numeric IDs can use indexed text foreign keys.
@@ -56,6 +75,11 @@ requires:
 provides:
   http_routes:
     - prefix: /
+  permissions:
+    - name: projections.read
+      description: Inspect projection definitions and refresh state.
+    - name: projections.manage
+      description: Create, refresh, pause, activate, or delete SQL projections.
   mcp_tools:
     - name: tables_create
       description: 'Create a project-confined table with typed columns. Args: name, columns (array of {name, type, nullable?, default?}). Returns the created table''s id + name.'
@@ -95,6 +119,33 @@ provides:
       description: 'Execute a bounded list of validated Tables operations. Modes: read_snapshot, write_transaction, best_effort. Supports dependency references with {$ref: operation.path}; returns per-operation status and errors.'
     - name: tables_capabilities
       description: 'Return versioned generic Tables capabilities, including the recursive filter AST contract and enforced limits.'
+    - name: projections_create
+      description: 'Create a versioned read-only SQL projection. Args: name, sql, source_tables, result_columns, scope_columns?. Projection SQL is validated read-only SQL and may use {table_name} placeholders.'
+      requires: projections.manage
+    - name: projections_list
+      description: 'List project-scoped SQL projections and their refresh status.'
+      requires: projections.read
+    - name: projections_describe
+      description: 'Describe one projection definition, result schema, dependencies, and current status. Args: name.'
+      requires: projections.read
+    - name: projections_refresh
+      description: 'Queue a projection rebuild or one affected scope. Args: name, scope? (object keyed by scope_columns), rebuild?.'
+      requires: projections.manage
+    - name: projections_status
+      description: 'Inspect projection queue backlog, freshness, watermarks, retries, and errors. Args: name.'
+      requires: projections.read
+    - name: projections_pause
+      description: 'Pause or resume projection processing. Args: name, paused.'
+      requires: projections.manage
+    - name: projections_activate
+      description: 'Atomically switch readers to a built projection version. Args: name, version.'
+      requires: projections.manage
+    - name: projections_update
+      description: Persist a projection minimum refresh interval.
+      requires: projections.manage
+    - name: projections_delete
+      description: 'Delete a projection definition and its stored result rows. Args: name, confirm=true.'
+      requires: projections.manage
   ui_panels:
     - slot: project.page
       label: Tables
@@ -150,6 +201,17 @@ provides:
         table: string
         id: integer
         deleted: integer
+    - name: projection.ready
+      description: A projection scope was successfully published and is ready for selective UI refresh.
+      payload:
+        projection_id: integer
+        name: string
+        version: integer
+        scope_key: string
+        watermark: integer
+        generation: string
+        published_at: string
+        ready: boolean
 
 runtime:
   startup_timeout_seconds: 600
@@ -157,7 +219,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.1.26
+    ref: tables/v0.2.5
     entry: mcp/tables
   port: 8080
   health_check: /health
@@ -217,6 +279,26 @@ config_schema:
     default: "1048576"
     label: Max stored value bytes
     description: Maximum UTF-8 text or encoded JSON bytes accepted in one cell.
+  - name: max_projection_ms
+    type: text
+    default: "30000"
+    label: Projection refresh timeout (ms)
+    description: Maximum time allowed for one projection scope refresh.
+  - name: max_projection_rows
+    type: text
+    default: "100000"
+    label: Projection rows per scope
+    description: Maximum calculated rows retained for one projection scope.
+  - name: max_projection_total_rows
+    type: text
+    default: "1000000"
+    label: Maximum rows per projection refresh
+    description: Global row ceiling for one refresh result before publication.
+  - name: max_projection_bytes
+    type: text
+    default: "67108864"
+    label: Maximum projection result bytes
+    description: Serialized byte ceiling for one refresh before publication.
   - name: max_batch_rows
     type: text
     default: "1000"

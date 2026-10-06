@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: tasks
 display_name: Tasks
-version: 3.6.0
+version: 3.7.0
 description: Durable work, progress, schedules, occurrences, and thread assignment for Apteva agents.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/tasks
@@ -31,7 +31,8 @@ provides:
     - { name: set_progress, description: "Record one meaningful nonterminal progress milestone." }
     - { name: edit, description: "Atomically edit a task definition while preserving omitted fields." }
     - { name: fail, description: "Record an explicit terminal task failure." }
-    - { name: update, description: "Legacy compatibility tool; use set_progress, edit, fail, or complete." }
+    - { name: update, description: "Legacy compatibility tool; edits draft definitions or records progress and terminal state." }
+    - { name: start, description: "Validate a draft and atomically queue it for a selected execution agent." }
     - { name: assign, description: Assign a task to an existing opaque agent thread. }
     - { name: complete, description: Complete a task with a concrete result. }
     - { name: cancel, description: Cancel a task or schedule. }
@@ -116,7 +117,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tasks/v3.6.0
+    ref: tasks/v3.7.0
     entry: mcp/tasks
   image: ghcr.io/apteva/app-tasks:0.3.0
   port: 8080

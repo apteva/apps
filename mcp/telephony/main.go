@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.10.0
+version: 0.10.3
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -87,6 +87,7 @@ provides:
     - { prefix: /ivr/, no_auth: true }
     - { prefix: /xml/, no_auth: true }
     - { prefix: /ui/ }
+    - { prefix: /audio-health }
     - { prefix: /calls }
     - { prefix: /calls/ }
     - { prefix: /recordings/ }
@@ -193,6 +194,10 @@ provides:
     - { name: call.routing.node_entered, description: "A call entered a routing node.", payload: { call_id: string, node_id: string, node_type: string, outcome: string } }
     - { name: call.offered, description: "A ring group offered a call.", payload: { call_id: string, ring_group_id: string } }
     - { name: telephony.burst.suppressed, description: "A new carrier call ID was suppressed before adviser delivery by the configured inbound burst guard.", payload: { provider_call_id: string, to_number: string, from_number: string, reason: string, occurred_at: string } }
+    - { name: telephony.audio.degraded, description: "Recoverable audio delivery impairment; call status is unchanged.", payload: { call_id: string, provider: string, stage: string, reason: string, occurred_at: string } }
+    - { name: telephony.audio.recovered, description: "An audio delivery stage recovered or became inactive.", payload: { call_id: string, provider: string, stage: string, state: string, occurred_at: string } }
+    - { name: telephony.audio.alert, description: "Distinct calls showed audio impairment within a rolling 30-second window.", payload: { project_id: string, provider: string, stage: string, call_count: integer, call_ids: array, occurred_at: string } }
+    - { name: telephony.audio.alert_recovered, description: "A correlated audio impairment alert recovered.", payload: { project_id: string, provider: string, stage: string, occurred_at: string } }
     - { name: telephony.burst.detected, description: "A destination-wide inbound burst was detected and alerted without blocking access to the number.", payload: { provider_call_id: string, to_number: string, reason: string, occurred_at: string } }
     - { name: telephony.spam.suppressed, description: "A displayed caller number matched the configured explicit block list; the call was rejected before adviser delivery.", payload: { provider_call_id: string, to_number: string, from_number: string, reason: string, occurred_at: string } }
     - name: call.incoming
@@ -270,6 +275,36 @@ provides:
       label: Calls
       icon: phone
       entry: /ui/CallsPanel.mjs
+  ui_components:
+    - name: audio-health
+      label: Telephony audio health
+      description: Project-wide audio degradation and recent browser/carrier observations, linking to filterable Telephony diagnostics.
+      entry: /ui/AudioHealthWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [telephony.audio.degraded, telephony.audio.recovered, telephony.audio.alert, telephony.audio.alert_recovered]
+      settings_schema:
+        type: object
+        properties:
+          time_range:
+            type: string
+            title: Time window
+            enum: [1h, 24h, 7d]
+            enum_names: [Last hour, Last 24 hours, Last 7 days]
+            default: 24h
+          provider:
+            type: string
+            title: Provider (blank for all)
+            default: ""
+          max_calls:
+            type: integer
+            title: Maximum calls
+            default: 6
+            minimum: 3
+            maximum: 12
 runtime:
   kind: source
   source:
@@ -283,6 +318,9 @@ db:
   path: /data/telephony.db
   migrations: migrations/
 config_schema:
+  - { name: audio_alert_min_calls, type: text, default: "3", label: "Audio alert minimum distinct calls", description: "2–256 affected calls per project/provider/stage within 30 seconds. 0 disables alerts; invalid values use 3." }
+  - { name: audio_alert_cooldown_seconds, type: text, default: "120", label: "Audio alert cooldown (seconds)", description: "30–3600 seconds between correlated alerts for the same project/provider/stage." }
+  - { name: audio_telemetry_trusted_proxy_cidrs, type: text, label: "Trusted proxy CIDRs for audio telemetry", description: "Optional comma-separated CIDRs. Only these immediate proxies may supply X-Forwarded-For; otherwise telemetry hashes the socket peer address. Hashes are scoped to this process and contain no raw IP." }
   - { name: connected_call_max_duration_seconds, type: text, default: "14400", label: "Connected call duration limit (seconds)", description: "60–14400 seconds, measured from first confirmed carrier answer or connected media. Snapshotted for each new call." }
   - { name: call_setup_timeout_seconds, type: text, default: "3600", label: "Call setup safety timeout (seconds)", description: "60–3600 seconds. Separate from shorter ringing, routing and AI preparation deadlines." }
   - { name: call_media_recovery_timeout_seconds, type: text, default: "120", label: "Media recovery timeout (seconds)", description: "30–600 seconds after a media transport failure/disconnection. Silence, mute and hold do not trigger this timer." }
@@ -315,6 +353,8 @@ upgrade_policy: auto-patch
 var globalCtx *sdk.AppCtx
 
 type App struct {
+	audioPeerHasher  audioPeerHasher
+	audioAlerts      audioAlertCorrelator
 	decisionWG       sync.WaitGroup
 	decisionStopping bool
 	aiRecovering     map[string]bool
@@ -407,6 +447,7 @@ func (a *App) OnUnmount(*sdk.AppCtx) error {
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{
+		{Name: "audio-telemetry", Schedule: "@every 5s", Run: a.runAudioTelemetryTick},
 		{Name: "carrier-activations", Schedule: "@every 1s", Run: a.runCarrierActivations},
 		{Name: "ai-handoffs", Schedule: "@every 1s", Run: a.runAIHandoffs},
 		{Name: "routing-decisions", Schedule: "@every 1s", Run: a.runDecisionTick},
@@ -460,6 +501,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/inbound/plivo/", Handler: a.handlePlivoInbound, NoAuth: true},
 		{Pattern: "/ivr/", Handler: a.handleIVRCallback, NoAuth: true},
 		// Panel data endpoint — lists active + recent calls.
+		{Pattern: "/audio-health", Handler: a.handleAudioDashboard},
 		{Pattern: "/calls", Handler: a.handleListCalls},
 		{Pattern: "/calls/events", Handler: a.handleCallNotifications},
 		// Panel action endpoint.

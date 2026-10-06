@@ -20,14 +20,14 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Version == "" {
 		t.Error("manifest.Version is empty")
 	}
-	if len(m.Provides.MCPTools) != 54 {
-		t.Errorf("expected 54 MCP tools, got %d", len(m.Provides.MCPTools))
+	if len(m.Provides.MCPTools) != 60 {
+		t.Errorf("expected 60 MCP tools, got %d", len(m.Provides.MCPTools))
 	}
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Errorf("manifest.DB.Migrations missing")
 	}
-	if len(m.Provides.Publishes) != 26 {
-		t.Errorf("expected 26 published event declarations, got %d", len(m.Provides.Publishes))
+	if len(m.Provides.Publishes) != 27 {
+		t.Errorf("expected 27 published event declarations, got %d", len(m.Provides.Publishes))
 	}
 	if len(m.Provides.UIComponents) != 1 {
 		t.Fatalf("ui components=%d, want 1", len(m.Provides.UIComponents))

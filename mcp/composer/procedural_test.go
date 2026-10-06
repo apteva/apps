@@ -16,6 +16,74 @@ import (
 	tk "github.com/apteva/app-sdk/testkit"
 )
 
+func TestProcedureExamplesCanBeCopiedIntoBindings(t *testing.T) {
+	for _, tc := range []struct{ target, outputKind string }{
+		{"clip", "video"}, {"composition", "video"}, {"audio", "audio"}, {"still", "image"},
+	} {
+		t.Run(tc.target, func(t *testing.T) {
+			ctx := tk.NewAppCtx(t, "apteva.yaml").WithProject("project-a")
+			app := &App{}
+			created, err := app.toolProcedureCreate(ctx, map[string]any{
+				"name": "Example", "runtime": "python-3.13-media", "source": "print('fixture')",
+				"target": tc.target, "output_kind": tc.outputKind,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := created.(map[string]any)["procedure"].(*ProcedureRecord).ID
+			check := func(response any, target, outputKind string, revision int) {
+				t.Helper()
+				data, err := json.Marshal(response.(map[string]any)["asset"])
+				if err != nil {
+					t.Fatal(err)
+				}
+				var asset Asset
+				if err := json.Unmarshal(data, &asset); err != nil {
+					t.Fatal(err)
+				}
+				if asset.Procedure == nil || asset.Procedure.Target != target || asset.Procedure.OutputKind != outputKind || asset.Procedure.ProcedureID != id || asset.Procedure.Revision != revision {
+					t.Errorf("example does not match requested revision: %s", data)
+				}
+				trackType := "visual"
+				if outputKind == "audio" {
+					trackType = "audio"
+				}
+				edit, err := json.Marshal(Edit{Timeline: Timeline{Tracks: []Track{{Type: trackType, Clips: []Clip{{Asset: asset, Length: 1}}}}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				validated, err := app.toolCompositionValidate(ctx, map[string]any{"edit_json": string(edit)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if result := validated.(CompositionValidation); !result.Valid {
+					t.Errorf("copied example binding rejected: %+v", result.Errors)
+				}
+			}
+			check(created, tc.target, tc.outputKind, 1)
+			// A later revision may change target. Fetching revision 1 must
+			// still return an example matching that immutable revision.
+			if _, err := app.toolProcedureRevisionCreate(ctx, map[string]any{
+				"id": id, "expected_revision": 1, "runtime": "python-3.13-media", "source": "print('revised')",
+				"target": "clip", "output_kind": "video",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			for _, revision := range []int{1, 0} {
+				got, err := app.toolProcedureGet(ctx, map[string]any{"id": id, "revision": revision})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if revision == 1 {
+					check(got, tc.target, tc.outputKind, 1)
+				} else {
+					check(got, "clip", "video", 2)
+				}
+			}
+		})
+	}
+}
+
 func TestProcedureSourceHashStable(t *testing.T) {
 	first := map[string]any{
 		"runtime": "python-3.13-media", "entrypoint": "render.py",

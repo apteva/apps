@@ -18,11 +18,11 @@ Actors turns website workflows into reusable, versioned operations callable by a
 
 Actors must not require Web. Browser workflows and extraction call Computer directly. A caller may orchestrate Web and Actors, but that does not make Web an Actors runtime dependency. New reusable workflow capabilities belong in Actors. Web's old extractor surface remains a legacy compatibility concern, not the location for a second evolving actor engine.
 
-## Current implementation: v0.1.0
+## Current implementation: v0.2.0
 
 The app starts from the existing Web extractor engine, extracted without Web's search, research, crawl, cache or snapshot tool handlers. It adds named operations, immutable revision history, pinned tasks, saved context selection, fill/key/scroll/element assertions, context exclusion, cancellation-aware Computer calls, private exports, page-level dataset commits and cursor reads. Schedules are Actors-owned and pinned to revisions; access is project-scoped. The app includes a panel, MCP tools, HTTP routes and a generic page-reader example.
 
-This is a runnable initial product, not completion of the target platform. Current definition schema 1 uses a flat output field/type map, bounded sequential steps and one worker process. It retains an in-memory dataset bounded to 32 MiB for exports even though pages are persisted independently. There is no automatic checkpoint replay, distributed queue, full JSON Schema, untrusted code execution, public API publishing or webhook service yet. README documents operational limits and test commands.
+Schema version 2 now adds a durable per-run URL frontier, route matching, bounded fan-out, host throttling, retry leases with fencing, keyed run evidence, materialized datasets, cursor reads, and declarative transforms for dates, durations, ratios and common numeric fields. Computer remains the browser and JavaScript runtime. The implementation is still bounded and single-process per app database: distributed workers, arbitrary code actors, full JSON Schema, public API publishing and webhook delivery remain future work.
 
 ## Target object model
 

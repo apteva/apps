@@ -54,6 +54,8 @@ func (p *idempotentMessagingPlatform) CallAppResult(appName, tool string, input 
 	p.calls = append(p.calls, crmCallAppCall{AppName: appName, Tool: tool, Input: input})
 	payload := map[string]any{"ok": true}
 	switch tool {
+	case "identities_list":
+		payload = map[string]any{"identities": []map[string]any{{"kind": "email_domain", "address": "example.test"}}}
 	case "suppression_check":
 		payload = map[string]any{"suppressed": false}
 	case "send_message":

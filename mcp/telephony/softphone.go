@@ -40,6 +40,7 @@ import (
 
 	sdk "github.com/apteva/app-sdk"
 	"github.com/gobwas/ws"
+	"github.com/gobwas/ws/wsutil"
 )
 
 // softphoneHub joins one carrier-facing peer socket to one operator browser
@@ -47,6 +48,7 @@ import (
 // unattached side is dropped rather than buffered, because late audio on a
 // phone call is worse than no audio.
 type softphoneHub struct {
+	telemetry               audioCallTelemetry
 	pacerStats              *livePacerStats
 	captureStaleBytes       int64
 	carrierForward          *websocketWriterPump
@@ -535,9 +537,14 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "call is not a softphone call", http.StatusConflict)
 		return
 	}
-	if reason := a.phoneMediaDenialReason(row, token); reason != "" {
+	reason, verifiedExpiry := a.phoneMediaCheck(row, token)
+	if reason != "" {
 		logSoftphone("softphone browser media session rejected", "call", callID, "reason", reason)
-		http.Error(w, "forbidden", http.StatusForbidden)
+		status := http.StatusForbidden
+		if temporaryMediaFailure(reason) {
+			status = http.StatusServiceUnavailable
+		}
+		writeJSONStatus(w, status, map[string]any{"code": reason})
 		return
 	}
 	if isTerminalStatus(row.Status) {
@@ -553,9 +560,19 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 	writer := newWebSocketWriterPump(conn, ws.StateServerSide)
 	closer := newGracefulWebSocket(conn, writer)
 	hub := a.softphones.hubFor(callID)
+	hub.telemetry.restore(row.BrowserAudioDiagnostics)
+	proxies := ""
+	if globalCtx != nil {
+		proxies = globalCtx.WithProject(row.ProjectID).Config()["audio_telemetry_trusted_proxy_cidrs"]
+	}
+	hash, hashEpoch, addressSource := a.audioPeerHasher.hash(r, proxies)
+	hub.telemetry.opened(writer, hash, hashEpoch, addressSource)
 	defer func() {
+		hub.telemetry.closed(writer, "handler_closed", nil)
 		hub.clearBrowser(writer)
-		_ = a.db().updateServerAudioDiagnostics(callID, hub.serverAudioSnapshot())
+		if err := a.persistAudioTelemetry(callID, hub); err != nil {
+			logSoftphone("persist audio telemetry failed", "call", callID, "err", err)
+		}
 		closer.Close(ws.StatusNormalClosure, "softphone browser closed")
 		a.softphones.dropIfEmpty(callID, hub)
 		logSoftphone("softphone browser detached", "call", callID)
@@ -565,6 +582,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 	// A reconnecting tab replaces the previous socket. Close the old one so a
 	// stale session cannot keep injecting audio into a live call.
 	if previous := hub.setBrowser(writer); previous != nil {
+		hub.telemetry.closed(previous, "session_replaced", nil)
 		_ = previous.Write(ws.OpText, softphoneEvent("session.replaced", ""))
 		previous.Stop()
 		_ = previous.conn.Close()
@@ -636,20 +654,31 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			case <-ticker.C:
 				ticks++
 				hub.carrierDeliveryNotice()
-				if ticks%5 == 0 {
-					_ = a.db().updateServerAudioDiagnostics(callID, hub.serverAudioSnapshot())
+				a.sampleAudioHealth(row, hub, writer, time.Now())
+				if (ticks%5 == 0 || hub.telemetry.pending()) && hub.readyBrowserWriter() == writer {
+					if err := a.persistAudioTelemetry(callID, hub); err != nil {
+						logSoftphone("persist audio telemetry failed", "call", callID, "err", err)
+					}
 				}
-				if reason := a.phoneMediaDenialReason(row, token); reason != "" {
-					logSoftphone("softphone browser media session closed", "call", callID, "reason", reason)
-					_ = conn.Close()
-					return
+				reason, expiry := a.phoneMediaCheck(row, token)
+				if reason == "" {
+					verifiedExpiry = expiry
+					continue
 				}
+				if temporaryMediaFailure(reason) && verifiedExpiry > time.Now().Unix() {
+					continue
+				}
+				logSoftphone("softphone browser media session closed", "call", callID, "reason", reason)
+				hub.telemetry.closed(writer, reason, wsutil.ClosedError{Code: ws.StatusPolicyViolation})
+				closer.Close(ws.StatusPolicyViolation, reason)
+				return
 			}
 		}
 	}()
 	for {
 		data, op, err := readWebSocketData(readConn, ws.StateServerSide, writer)
 		if err != nil {
+			hub.telemetry.closed(writer, "transport_read_error", err)
 			return
 		}
 		switch op {
@@ -734,12 +763,10 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 				}
 				_ = writer.Write(ws.OpText, softphoneEvent("dtmf.sent", callID))
 			case "diagnostics":
-				if control.Diagnostics != nil {
-					snapshot := hub.serverAudioSnapshot()
-					control.Diagnostics.Server = &snapshot
-					if err := a.db().updateBrowserAudioDiagnostics(callID, *control.Diagnostics); err != nil {
-						logSoftphone("persist browser audio diagnostics failed", "call", callID, "err", err)
-					}
+				if control.Diagnostics != nil && hub.readyBrowserWriter() == writer {
+					normalized := normalizeBrowserAudioDiagnostics(*control.Diagnostics)
+					hub.telemetry.observeBrowser(normalized)
+					// Coalesce reports in memory; the watcher persists off the frame path.
 				}
 			}
 		}
@@ -952,7 +979,7 @@ func (a *App) softphonePlace(w http.ResponseWriter, r *http.Request, project str
 		}
 		session, e = a.issuePhoneSession(row, p)
 		if e != nil {
-			http.Error(w, e.Error(), 403)
+			writePhoneSessionFailure(w, e)
 			return
 		}
 	}
@@ -1035,7 +1062,7 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		if p != nil {
 			session, e := a.issuePhoneSession(row, p)
 			if e != nil {
-				http.Error(w, e.Error(), 403)
+				writePhoneSessionFailure(w, e)
 				return
 			}
 			writeJSON(w, session)
@@ -1115,7 +1142,7 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		session, e := a.issuePhoneSession(row, p)
 		if e != nil {
 			_ = a.db().resetAnswerClaim(callID, peerToken)
-			http.Error(w, e.Error(), 403)
+			writePhoneSessionFailure(w, e)
 			return
 		}
 		writeJSON(w, session)

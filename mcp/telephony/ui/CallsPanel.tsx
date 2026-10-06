@@ -11,6 +11,7 @@ import {
   persistAudioOptions,
 } from "./audio-settings";
 
+import AudioHealthView from "./AudioHealthView";
 import { usePanelSoftphone } from "./use-panel-softphone";
 import { callTerminationLabel, isIncomingBrowserCall, type Call as TelephonyCall } from "../frontend/src/client";
 
@@ -3612,7 +3613,7 @@ function NodeConfiguration({ node, nodes, destinations, groups, update }: { node
 }
 
 export default function CallsPanel(props: NativePanelProps) {
-  const [view, setView] = useState<"calls" | "routing" | "numbers" | "addresses" | "bundles">("calls");
+  const [view, setView] = useState<"calls" | "routing" | "numbers" | "addresses" | "bundles" | "audio-health">(() => new URLSearchParams(window.location.search).get("tab")==="audio-health"?"audio-health":"calls");
   return (
     <div className="h-full min-h-0 min-w-0 max-w-full flex flex-col bg-bg text-text">
       <nav className="shrink-0 min-h-11 max-w-full overflow-x-auto border-b border-border px-2 flex items-center gap-1" aria-label="Telephony views">
@@ -3630,6 +3631,7 @@ export default function CallsPanel(props: NativePanelProps) {
         >
           Calls
         </button>
+        <button type="button" onClick={() => setView("audio-health")} className={`h-8 px-3 rounded text-sm whitespace-nowrap ${view === "audio-health" ? "bg-bg-muted font-medium" : "text-text-muted hover:bg-bg-muted/60"}`}>Audio health</button>
         <button
           type="button"
           onClick={() => setView("numbers")}
@@ -3654,6 +3656,7 @@ export default function CallsPanel(props: NativePanelProps) {
       </nav>
       <div className="min-h-0 min-w-0 flex-1 flex flex-col">
         <CallsView key={`${props.projectId}:${props.installId}`} {...props} visible={view === "calls"} showCalls={()=>setView("calls")} />
+        {view === "audio-health" ? <AudioHealthView key={`${props.projectId}:${props.installId}`} {...props} /> : null}
         {view === "routing" ? <RoutingView {...props} onOpenNumbers={() => setView("numbers")} /> : null}
         {view === "numbers" ? <NumbersView key={props.projectId} {...props} /> : null}
         {view === "addresses" ? <AddressesView {...props} /> : null}

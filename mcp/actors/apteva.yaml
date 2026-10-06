@@ -1,13 +1,15 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.1.0
+version: 0.2.8
 description: |
-  Reusable browser actors with named operations, saved tasks, revisioned
-  definitions, durable run history, datasets, and Jobs schedules.
+  Reusable browser actors with named operations, crawl queues, URL fan-out,
+  revisioned definitions, structured datasets, durable run history, Jobs schedules,
+  semantic media, form controls, verified waits, and guarded consequential actions.
   Uses Computer directly for browser sessions and saved contexts.
   Web is independent and is not required. Site workflows are user definitions.
 icon: /ui/icon.svg
+icon_style: monochrome
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/actors
 tags: [automation, actors, extraction, browser]
@@ -17,7 +19,7 @@ requires:
   permissions: [db.write.app, net.egress, platform.apps.call]
   apps:
     - name: computer
-      version: ">=0.7.72"
+      version: ">=0.7.92"
       reason: Browser control, saved contexts, rendered extraction and screenshots.
     - name: storage
       reason: Private dataset exports, screenshots and run traces.
@@ -60,6 +62,18 @@ provides:
       description: Delete a saved task.
     - name: actors_dataset_read
       description: Read a run dataset with cursor pagination, including partial results.
+    - name: actors_crawl_save
+      description: Create or update a schema version 2 crawl actor with routes and datasets.
+    - name: actors_crawl_run
+      description: Queue a crawl actor run with durable URL fan-out.
+    - name: actors_crawl_status
+      description: Get crawl frontier counts and run status.
+    - name: actors_crawl_resume
+      description: Resume a partial crawl from its durable frontier.
+    - name: actors_frontier_list
+      description: List crawl URLs and retry state.
+    - name: actors_dataset_query
+      description: Read a materialized named crawl dataset.
   ui_panels:
     - slot: project.page
       label: Actors
@@ -77,7 +91,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.1.0
+    ref: actors/v0.2.8
     entry: mcp/actors
   port: 8080
   health_check: /health

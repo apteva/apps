@@ -56,6 +56,11 @@ func (a *App) handleAgentEventLifecycle(ctx *sdk.AppCtx, event sdk.Event) error 
 	if ctx != nil && strings.TrimSpace(ctx.CurrentProject()) != "" {
 		projectID = strings.TrimSpace(ctx.CurrentProject())
 	}
+	if existing, getErr := a.store.Get(taskID); getErr == nil && existing.State == stateDraft {
+		// Drafts have no execution event by contract; ignore stale lifecycle
+		// notifications rather than allowing them to become runnable work.
+		return nil
+	}
 	var task *Task
 	var changed bool
 	if purpose == agentTerminalizationPurpose {

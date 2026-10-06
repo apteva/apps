@@ -21,6 +21,7 @@
     "tests/*.test.ts",
     "../../../../node_modules/@types/bun",
     "../ui/CallsPanel.tsx",
+    "../ui/AudioHealthWidget.tsx",
     "../ui/use-panel-softphone.ts",
     "example/main.ts"
   ]

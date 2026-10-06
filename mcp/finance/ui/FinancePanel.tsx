@@ -19,6 +19,21 @@ import EnableBankingConnect from "./EnableBankingConnect";
 import { createFinanceAPI, type FinanceAPI } from "./finance-api";
 
 const FinanceAPIContext = createContext<FinanceAPI | null>(null);
+// Panel bundles run inside dashboards with different Tailwind builds. Own the
+// responsive grid so the wide chart does not depend on the host's utilities.
+const FINANCE_LAYOUT_CSS = `
+.finance-panel .finance-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+}
+.finance-panel .finance-grid > * { min-width: 0; }
+.finance-panel .finance-history-frame { height: 16rem; width: 100%; min-width: 0; }
+@media (min-width: 64rem) {
+  .finance-panel .finance-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .finance-panel .finance-wide { grid-column: span 2 / span 2; }
+}
+`;
 function useFinanceAPI(): FinanceAPI {
   const api = useContext(FinanceAPIContext);
   if (!api) throw new Error("Finance panel connection is unavailable");
@@ -459,8 +474,12 @@ function FinancePanelContent({ projectId, installId }: NativePanelProps) {
   const [showNewBudget, setShowNewBudget] = useState(false);
   const [syncingBroker, setSyncingBroker] = useState(false);
   const [error, setError] = useState<string>("");
+  const syncInProgress = useRef(false);
+  const eventRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refreshGeneration = useRef(0);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (commitDuringSync = false) => {
+    const generation = ++refreshGeneration.current;
     try {
       const [s, a, h, t, alloc, bs, cats] = await Promise.all([
         api<Settings>("/settings"),
@@ -471,6 +490,7 @@ function FinancePanelContent({ projectId, installId }: NativePanelProps) {
         api<{ budgets: BudgetStatus[]; period_start: string; period_end: string }>("/budgets/status?period=monthly"),
         api<{ categories: Category[] }>("/categories"),
       ]);
+      if (generation !== refreshGeneration.current || (syncInProgress.current && !commitDuringSync)) return;
       setSettings(s);
       setAccounts(a.accounts ?? []);
       setHoldings((h.holdings ?? []).filter(x => !x.closed_at));
@@ -481,22 +501,43 @@ function FinancePanelContent({ projectId, installId }: NativePanelProps) {
       setCategories(cats.categories ?? []);
       setError("");
     } catch (e: unknown) {
+      if (generation !== refreshGeneration.current || (syncInProgress.current && !commitDuringSync)) return;
       setError(e instanceof Error ? e.message : String(e));
     }
   }, [api]);
 
   useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => () => {
+    if (eventRefreshTimer.current) clearTimeout(eventRefreshTimer.current);
+  }, []);
 
-  useAppEvents("finance", projectId, () => { refresh(); });
+  useAppEvents("finance", projectId, (ev) => {
+    if (ev.install_id !== installId || syncInProgress.current) return;
+    if (eventRefreshTimer.current) clearTimeout(eventRefreshTimer.current);
+    // A broker import emits one event per transaction. Wait for the burst to
+    // settle instead of reloading every report for each imported row.
+    eventRefreshTimer.current = setTimeout(() => {
+      eventRefreshTimer.current = null;
+      void refresh();
+    }, ev.topic.endsWith("brokerage.synced") ? 0 : 1500);
+  });
 
   const syncBrokerage = async () => {
+    if (syncInProgress.current) return;
+    syncInProgress.current = true;
+    refreshGeneration.current++;
+    if (eventRefreshTimer.current) clearTimeout(eventRefreshTimer.current);
+    eventRefreshTimer.current = null;
     setSyncingBroker(true);
     try {
       await api("/brokerage/sync", { method: "POST", body: JSON.stringify({}) });
-      await refresh();
+      await refresh(true);
     } catch (e: unknown) {
+      // Some rows may already have been imported when a later page fails.
+      await refresh(true);
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      syncInProgress.current = false;
       setSyncingBroker(false);
     }
   };
@@ -504,7 +545,8 @@ function FinancePanelContent({ projectId, installId }: NativePanelProps) {
   const base = settings?.base_currency ?? "EUR";
 
   return (
-    <div className="flex h-full flex-col gap-3 p-4">
+    <div className="finance-panel flex h-full flex-col gap-3 p-4">
+      <style>{FINANCE_LAYOUT_CSS}</style>
       <header className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <Icon name="wallet" size={20} />
@@ -541,6 +583,9 @@ function FinancePanelContent({ projectId, installId }: NativePanelProps) {
           {error}
         </div>
       )}
+      {syncingBroker && <div role="status" className="rounded-md border border-border bg-bg-card px-3 py-2 text-sm text-text-muted">
+        Syncing broker data… Showing the last loaded values until the import finishes.
+      </div>}
 
       <div className="flex-1 overflow-auto">
         {tab === "overview" && (
@@ -648,7 +693,6 @@ function OverviewTab({
     let cancelled = false;
     setHistoryLoading(true);
     setHistoryError("");
-    setNetWorth(null);
     const query = new URLSearchParams({ series: resolution, from, to });
     api<NetWorthSeries>(`/reports/net-worth?${query.toString()}`)
       .then(result => { if (!cancelled) setNetWorth(result); })
@@ -675,8 +719,8 @@ function OverviewTab({
   }, [holdings]);
 
   return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-      <section className="min-w-0 rounded-lg border border-border bg-bg-card p-4 lg:col-span-2">
+    <div className="finance-grid">
+      <section className="finance-wide min-w-0 rounded-lg border border-border bg-bg-card p-4">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <div className="text-xs uppercase tracking-wide text-text-muted">Net worth</div>
@@ -714,10 +758,11 @@ function OverviewTab({
             className="ml-1 rounded-md border border-border bg-bg-card px-2 py-1 text-text" /></label>
         </div>}
         {historyError ? <div role="alert" className="mt-6 rounded-md border border-error/30 bg-error/10 p-3 text-sm text-error">{historyError}</div>
-          : historyLoading || !netWorth ? <div className="grid h-64 place-items-center text-sm text-text-muted">Loading history…</div>
-          : <NetWorthChart points={netWorth.points} currency={base} />}
-        {netWorth && !historyLoading && !historyError && <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-xs text-text-muted">
-          <span>{fmtHistoryDate(netWorth.from)} – {fmtHistoryDate(netWorth.to)} · {netWorth.points.length} {resolution} values</span>
+          : netWorth ? <div aria-busy={historyLoading}><NetWorthChart points={netWorth.points} currency={base} /></div>
+          : <div className="finance-history-frame grid place-items-center text-sm text-text-muted">Loading history…</div>}
+        {netWorth && !historyError && <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-xs text-text-muted">
+          <span>{fmtHistoryDate(netWorth.from)} – {fmtHistoryDate(netWorth.to)} · {netWorth.points.length} {netWorth.series} values</span>
+          {historyLoading && <span role="status">Updating history…</span>}
           <span>Historical values are estimates where market prices are missing.</span>
         </div>}
         {netWorth && netWorth.points.length > 0 && <details className="mt-3 border-t border-border pt-2 text-xs">
@@ -737,7 +782,7 @@ function OverviewTab({
 
       <BudgetsCard status={budgetStatus} base={base} onSetBudget={onSetBudget} />
 
-      <section className="rounded-lg border border-border bg-bg-card p-4 border-border bg-bg-card lg:col-span-2">
+      <section className="finance-wide rounded-lg border border-border bg-bg-card p-4 border-border bg-bg-card">
         <div className="mb-3 text-xs uppercase tracking-wide text-text-muted">Top movers</div>
         {movers.length === 0 ? (
           <EmptyState message="No price data yet — set a price on an instrument to see P&L." />
@@ -801,7 +846,7 @@ function BudgetsCard({
   }, [status]);
 
   return (
-    <section className="rounded-lg border border-border bg-bg-card p-4 border-border bg-bg-card lg:col-span-2">
+    <section className="finance-wide rounded-lg border border-border bg-bg-card p-4 border-border bg-bg-card">
       <header className="mb-3 flex items-center justify-between">
         <div>
           <div className="text-xs uppercase tracking-wide text-text-muted">Budgets — {periodLabel}</div>
@@ -860,8 +905,8 @@ function BudgetBar({ b, base }: { b: BudgetStatus; base: string }) {
 }
 
 function NetWorthChart({ points, currency }: { points: NetWorthSeries["points"]; currency: string }) {
-  if (points.length === 0) return <div className="grid h-64 place-items-center text-sm text-text-muted">No history in this range.</div>;
-  if (points.length === 1) return <div className="grid h-64 place-items-center text-center text-sm text-text-muted">
+  if (points.length === 0) return <div className="finance-history-frame grid place-items-center text-sm text-text-muted">No history in this range.</div>;
+  if (points.length === 1) return <div className="finance-history-frame grid place-items-center text-center text-sm text-text-muted">
     <div><div>{fmtHistoryDate(points[0].as_of)}</div><div className="mt-1 text-lg font-semibold text-text">{fmtMoney(points[0].total, currency)}</div></div>
   </div>;
   const data = points.map(p => ({ ...p, time: Date.parse(p.as_of) }));
@@ -871,7 +916,7 @@ function NetWorthChart({ points, currency }: { points: NetWorthSeries["points"];
   const padding = Math.max(100, (high - low) * 0.12);
   const axisLow = low >= 0 ? Math.max(0, low - padding) : low - padding;
   const compact = new Intl.NumberFormat(undefined, { style: "currency", currency, notation: "compact", maximumFractionDigits: 1 });
-  return <div className="mt-4 h-64 w-full min-w-0" role="img" aria-label={`Net worth from ${fmtHistoryDate(points[0].as_of)} to ${fmtHistoryDate(points[points.length - 1].as_of)}`}>
+  return <div className="finance-history-frame mt-4" role="img" aria-label={`Net worth from ${fmtHistoryDate(points[0].as_of)} to ${fmtHistoryDate(points[points.length - 1].as_of)}`}>
     <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={256} initialDimension={{ width: 720, height: 256 }}>
       <AreaChart data={data} margin={{ top: 12, right: 12, bottom: 4, left: 0 }}>
         <defs><linearGradient id="financeNetWorthFill" x1="0" y1="0" x2="0" y2="1">
@@ -1065,7 +1110,7 @@ function BankingTab({ accounts, onChanged, callbackURL }: { accounts: Account[];
   };
 
   return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+    <div className="finance-grid">
       <section className="rounded-lg border border-border bg-bg-card p-4">
         <div className="mb-3 flex items-center justify-between">
           <div>
@@ -1112,7 +1157,7 @@ function BankingTab({ accounts, onChanged, callbackURL }: { accounts: Account[];
         </div>
       </section>
 
-      <section className="rounded-lg border border-border bg-bg-card lg:col-span-2">
+      <section className="finance-wide rounded-lg border border-border bg-bg-card">
         <header className="flex items-center justify-between border-b border-border-subtle px-4 py-2">
           <div className="text-xs uppercase tracking-wide text-text-muted">Discovered accounts</div>
           <button onClick={() => void sync(true)} disabled={!selectedConn || !!busy || !linked.some(a => a.connection_id === selected)} className="text-xs text-text-muted hover:text-text">

@@ -15,11 +15,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		// ── Customers ────────────────────────────────────────────────
 		{
 			Name:        "customers_search",
-			Description: "Filtered customer search. Args: q (free text matches name+email), email (exact), limit (default 50, max 200).",
+			Description: "Find billing customers by name or email; start here for customer/account/balance checks, not invoices_search. For reviews set include_context=true: contexts contains authoritative invoice totals/balances by currency, invoice_status_counts (open/paid/uncollectible), and recent payments. All monetary *_cents fields are integer cents: divide by 100 for display (10000 cents = 100.00 EUR, not 10000 EUR). This already answers totals, outstanding balance, payment status, and latest payment: do not fetch invoices or call customers_get_context again to verify these figures. Only fetch individual invoices when the user asks for their details. q searches the literal name/email phrase, ranks exact matches first, and returns broader token candidates only when no phrase matches. match_mode=token_candidates and requires_confirmation mean possible matches, not verified aliases; clarify ambiguous identities. Args: q, email (exact), include_context (page capped at 20), payments_limit (default 3 with context), limit (default 50, max 200), offset.",
 			InputSchema: schemaObject(map[string]any{
-				"q":     map[string]any{"type": "string"},
-				"email": map[string]any{"type": "string"},
-				"limit": map[string]any{"type": "integer"},
+				"q":               map[string]any{"type": "string"},
+				"email":           map[string]any{"type": "string"},
+				"limit":           map[string]any{"type": "integer"},
+				"include_context": map[string]any{"type": "boolean", "description": "Include billing context for each returned customer; caps page size at 20."},
+				"payments_limit":  map[string]any{"type": "integer", "minimum": 1, "maximum": 100},
 			}, nil),
 			Handler: a.toolCustomersSearch,
 		},
@@ -153,7 +155,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "invoices_search",
-			Description: "Filter invoices. Args: customer_id, status (draft|open|paid|void|uncollectible), provider (local|stripe), currency, since (RFC3339), until (RFC3339), min_total_cents, max_total_cents, sort (due_date), limit (default 50, max 200).",
+			Description: "Filter invoices. q searches invoice number, notes, or exact invoice ID; it does not search customer names. For a named customer, use customers_search first (include_context=true for balances), then customer_id here if individual invoices are needed. Args: q, customer_id, status (draft|open|paid|void|uncollectible), provider (local|stripe), currency, since (RFC3339), until (RFC3339), min_total_cents, max_total_cents, sort (due_date), limit (default 50, max 200), offset.",
 			InputSchema: schemaObject(map[string]any{
 				"customer_id":     map[string]any{"type": "integer"},
 				"status":          map[string]any{"type": "string"},
@@ -195,7 +197,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "invoices_render_pdf",
-			Description: "Render an invoice as a PDF. Default returns {pdf_base64, filename, size_bytes}. With save_to_storage=true, writes the PDF to the storage app (must be installed) and returns {file_id, url, filename, size_bytes} so the agent can attach it to chat / email. Args: invoice_id, save_to_storage (default false), folder (storage path, default '/invoices/').",
+			Description: "Render an invoice as a PDF. Default returns {pdf_base64, filename, size_bytes, saved:false}. With save_to_storage=true, uploads new PDFs privately to the Storage install linked in Billing's App dependencies and returns {file_id, url, expires_at, filename, size_bytes, saved:true, shareable:true}; url is an expiring signed link. Check saved and shareable: upload failure returns PDF bytes plus storage_error; signed-link failure returns saved:true, shareable:false plus storage_error. Never claim a hosted/shareable URL when shareable=false. Args: invoice_id, save_to_storage (default false), folder (default '/.billing/invoices/').",
 			InputSchema: schemaObject(map[string]any{
 				"invoice_id":      map[string]any{"type": "integer"},
 				"save_to_storage": map[string]any{"type": "boolean"},
@@ -360,7 +362,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			p["offset"] = map[string]any{"type": "integer", "minimum": 0}
 			p["limit"] = map[string]any{"type": "integer", "minimum": 1, "maximum": 200}
 			if tools[i].Name == "invoices_search" {
-				p["q"] = map[string]any{"type": "string"}
+				p["q"] = map[string]any{"type": "string", "description": "Invoice number, notes, or exact invoice ID. Resolve customer names with customers_search."}
 			}
 		}
 	}

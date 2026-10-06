@@ -1,7 +1,7 @@
 // Storage v0.6 — file storage with pluggable backend (disk or
 // S3-compatible), virtual folders, signed URLs, dedup.
 //
-// Blob layout (key, identical on both backends):
+// Legacy blob layout (key, identical on both backends):
 //
 //	<sha256[:2]>/<storage_key>
 //
@@ -9,9 +9,8 @@
 // object key. The two-byte hex prefix exists for the disk's benefit
 // (avoids 1M files in one directory) and is harmless on S3.
 //
-// Each upload writes a fresh storage_key; sha256 is recorded for ETag
-// and dedup checks but bytes are not yet shared between rows. v0.7
-// reference-counts and reclaims.
+// Each upload writes a fresh storage_key. New rows also persist the complete
+// backend object key so learning a checksum later never relocates bytes.
 package main
 
 import (
@@ -93,6 +92,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := recoverStorageState(ctx); err != nil {
 		return err
 	}
+	// Queue a bounded repair batch on every boot. The durable job table keeps
+	// this idempotent and the periodic sweeper advances through the remainder.
+	enqueueChecksumScan(ctx, checksumScanBatch)
 	ctx.Logger().Info("storage mounted",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
 		"backend", be.Kind(),
@@ -112,6 +114,8 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		sweepBlobCleanup(ctx)
 		sweepStaleUploads(ctx)
 		sweepStalePendingUploads(ctx)
+		enqueueChecksumScan(ctx, checksumScanBatch)
+		processChecksumJobs(sweepCtx, ctx, checksumJobsPerTick)
 		interval := configuredSweepInterval(ctx)
 		ctx.Logger().Info("upload sweeper started",
 			"interval", interval.String(),
@@ -129,6 +133,8 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 			sweepBlobCleanup(ctx)
 			sweepStaleUploads(ctx)
 			sweepStalePendingUploads(ctx)
+			enqueueChecksumScan(ctx, checksumScanBatch)
+			processChecksumJobs(sweepCtx, ctx, checksumJobsPerTick)
 		}
 	}()
 	return nil
@@ -193,6 +199,12 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Fetch metadata for one file. Args: id. Returns {found:true,file:{...}} when present or {found:false,file:null} when missing/deleted.",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
 			HandlerCtx:  a.toolGetCtx,
+		},
+		{
+			Name:        "files_ensure_checksum",
+			Description: "Queue or inspect whole-file SHA-256 verification for one file. Returns checksum_status (pending, running, verified, or failed), sha256, and revision. Idempotent; never moves or replaces the stored object.",
+			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
+			HandlerCtx:  a.toolEnsureChecksumCtx,
 		},
 		{
 			Name:        "files_get_url",
@@ -431,18 +443,22 @@ func resolveProjectFromRequest(r *http.Request) (string, error) {
 // ─── Domain types ──────────────────────────────────────────────────
 
 type File struct {
-	ID          int64    `json:"id"`
-	ProjectID   string   `json:"project_id,omitempty"`
-	Name        string   `json:"name"`
-	Folder      string   `json:"folder"`
-	StorageKey  string   `json:"storage_key,omitempty"`
-	ContentType string   `json:"content_type,omitempty"`
-	SizeBytes   int64    `json:"size_bytes"`
-	SHA256      string   `json:"sha256"`
-	UploadedBy  string   `json:"uploaded_by,omitempty"`
-	Source      string   `json:"source,omitempty"`
-	Tags        []string `json:"tags"`
-	Visibility  string   `json:"visibility"`
+	ID             int64    `json:"id"`
+	ProjectID      string   `json:"project_id,omitempty"`
+	Name           string   `json:"name"`
+	Folder         string   `json:"folder"`
+	StorageKey     string   `json:"storage_key,omitempty"`
+	BackendKey     string   `json:"-"`
+	ContentType    string   `json:"content_type,omitempty"`
+	SizeBytes      int64    `json:"size_bytes"`
+	SHA256         string   `json:"sha256"`
+	ChecksumStatus string   `json:"checksum_status"`
+	ChecksumError  string   `json:"checksum_error,omitempty"`
+	Revision       int64    `json:"revision"`
+	UploadedBy     string   `json:"uploaded_by,omitempty"`
+	Source         string   `json:"source,omitempty"`
+	Tags           []string `json:"tags"`
+	Visibility     string   `json:"visibility"`
 	// URL — the file's canonical absolute URL. Reachable per the
 	// file's visibility:
 	//
@@ -746,7 +762,7 @@ func (a *App) toolGetURL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 
 	if delivery == "direct" && be.Kind() == "s3" {
-		key := objectKey(f.SHA256, f.StorageKey)
+		key := fileObjectKey(f)
 		url, err := be.PresignGet(context.Background(), key, options, time.Duration(ttl)*time.Second)
 		if err != nil {
 			return nil, fmt.Errorf("presign: %w", err)
@@ -812,7 +828,7 @@ func (a *App) toolGetContent(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			id, f.SizeBytes, maxBytes)
 	}
 
-	key := objectKey(f.SHA256, f.StorageKey)
+	key := fileObjectKey(f)
 	c, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	read, err := backend().OpenObject(c, key, ObjectReadOptions{})
@@ -1659,7 +1675,7 @@ func (a *App) httpServeContent(w http.ResponseWriter, r *http.Request, id int64,
 		}
 	}
 
-	key := objectKey(f.SHA256, f.StorageKey)
+	key := fileObjectKey(f)
 	contentType := safeResponseContentType(f.ContentType)
 	disposition := effectiveContentDisposition(requestedDisposition, contentType)
 
@@ -1776,7 +1792,7 @@ func (a *App) httpServeProxy(w http.ResponseWriter, r *http.Request, id int64, r
 		return
 	}
 
-	key := objectKey(f.SHA256, f.StorageKey)
+	key := fileObjectKey(f)
 	contentType := safeResponseContentType(f.ContentType)
 	recorder.Header().Set("Cache-Control", "private, no-store")
 	recorder.Header().Set("Pragma", "no-cache")
@@ -2048,14 +2064,17 @@ func emitFileEvent(ctx *sdk.AppCtx, topic string, f *File, existed bool) {
 		return
 	}
 	ctx.EmitWithProject(topic, f.ProjectID, map[string]any{
-		"id":           f.ID,
-		"name":         f.Name,
-		"folder":       f.Folder,
-		"size_bytes":   f.SizeBytes,
-		"content_type": f.ContentType,
-		"sha256":       f.SHA256,
-		"visibility":   f.Visibility,
-		"was_existing": existed,
+		"id":              f.ID,
+		"name":            f.Name,
+		"folder":          f.Folder,
+		"size_bytes":      f.SizeBytes,
+		"content_type":    f.ContentType,
+		"sha256":          f.SHA256,
+		"checksum_status": f.ChecksumStatus,
+		"checksum_error":  f.ChecksumError,
+		"file_revision":   f.Revision,
+		"visibility":      f.Visibility,
+		"was_existing":    existed,
 	})
 }
 
@@ -2187,8 +2206,9 @@ func dbGetByIDs(db *sql.DB, pid string, ids []int64) ([]*File, error) {
 }
 
 const fileSelectColumns = `id, project_id, name, folder, storage_key,
-	COALESCE(content_type,''), COALESCE(size_bytes,0), COALESCE(sha256,''),
-	COALESCE(uploaded_by,''), COALESCE(source,''), COALESCE(tags,'[]'),
+	COALESCE(object_key,''), COALESCE(content_type,''), COALESCE(size_bytes,0), COALESCE(sha256,''),
+	COALESCE(checksum_status, CASE WHEN length(COALESCE(sha256,''))=64 THEN 'verified' ELSE 'pending' END),
+	COALESCE(checksum_error,''), COALESCE(revision,1), COALESCE(uploaded_by,''), COALESCE(source,''), COALESCE(tags,'[]'),
 	visibility, COALESCE(created_at,''), COALESCE(updated_at,'')`
 
 type fileRowScanner interface {
@@ -2201,8 +2221,8 @@ type fileRowScanner interface {
 func scanFile(row fileRowScanner, withURL bool) (*File, error) {
 	f := &File{}
 	var tagsRaw string
-	err := row.Scan(&f.ID, &f.ProjectID, &f.Name, &f.Folder, &f.StorageKey,
-		&f.ContentType, &f.SizeBytes, &f.SHA256, &f.UploadedBy, &f.Source,
+	err := row.Scan(&f.ID, &f.ProjectID, &f.Name, &f.Folder, &f.StorageKey, &f.BackendKey,
+		&f.ContentType, &f.SizeBytes, &f.SHA256, &f.ChecksumStatus, &f.ChecksumError, &f.Revision, &f.UploadedBy, &f.Source,
 		&tagsRaw, &f.Visibility, &f.CreatedAt, &f.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -2583,7 +2603,7 @@ func deleteFile(ctx *sdk.AppCtx, pid string, id int64, keepRecord bool) (bool, e
 		}
 		return false, err
 	}
-	key := objectKey(prior.SHA256, prior.StorageKey)
+	key := fileObjectKey(prior)
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
 		catalogMu.Unlock()

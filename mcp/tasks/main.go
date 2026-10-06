@@ -128,6 +128,8 @@ func taskWakePayload(task *Task, threadID, eventType string) map[string]any {
 	payload := map[string]any{
 		"type": eventType, "origin": origin, "task_id": task.ID,
 		"occurrence_id": task.ID, "parent_task_id": parentTaskID,
+		"title": task.Title, "description": task.Description, "expected_outcome": task.ExpectedOutcome,
+		"inputs":             task.Inputs,
 		"assigned_thread_id": threadID, "reply_required": false, "reply_thread_id": nil,
 		"required_first_action": map[string]any{"tool": "tasks_get", "task_id": task.ID},
 		"instruction":           instruction,

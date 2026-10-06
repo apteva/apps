@@ -1,3 +1,52 @@
+# Composer v0.9.3
+
+`procedure_create` and `procedure_get` now return example assets with the
+procedure revision's actual target instead of hardcoding `clip`. Examples for
+`composition`, `audio`, and `still` can be copied into bindings without a target
+mismatch. Fetching an older revision continues to use that revision's target
+even when a newer revision changes it.
+
+No migration or media regeneration is required. Validation: full Composer Go
+suite, build, and `go vet`; regressions create each supported target, copy the
+returned examples into composition validation, and check pinned/latest revision
+lookups after changing the target.
+
+---
+
+# Composer v0.9.2
+
+V1 clip text and timed text tracks now render straight apostrophes without
+breaking the FFmpeg filter graph, and actual line breaks remain new lines
+instead of printing literal `n` characters. Text escaping handles both the
+filtergraph and drawtext option parsers. Disabling text expansion also preserves
+literal percent expressions and backslashes.
+
+The fixes apply to local rendering and remote rendering through Instances.
+Existing compositions and generated assets remain reusable; no configuration
+change, migration, or media regeneration is required.
+
+Validation: the full Composer Go suite, build, and `go vet` pass. Pixel-level
+regressions compare inline text with FFmpeg text-file rendering across both
+text paths and local/remote commands, including apostrophes, filter delimiters,
+LF/CRLF line breaks, blank lines, literal backslash-n, Unicode, and percent text.
+
+---
+
+# Composer v0.9.1
+
+Remote rendering now explicitly invokes Bash when sending generated scripts to
+Instances. Previously, Instances executed the Bash script through `sh`, causing
+upload arrays or `pipefail` to fail before rendering could complete. The script
+is quoted as one argument so literal values survive the outer shell and failed
+pipelines retain their exit status.
+
+Remote render hosts require Bash. No configuration or database migration is
+needed. The full Composer Go suite, build, and `go vet` pass. A transport regression
+executes the generated render/upload script through a POSIX shell and covers
+literal quotes, substitutions, multiline values, and pipeline failures.
+
+---
+
 # Composer v0.9.0
 
 Composer now supports procedural clips as an additive source alongside image,

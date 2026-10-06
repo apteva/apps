@@ -84,7 +84,7 @@ func TestInboundContactAddedIncludesRoutedListIDs(t *testing.T) {
 	}
 	listID := out.(map[string]any)["list"].(*List).ID
 
-	if _, err := ingestInbound(ctx, "test-proj", inboundPayload{
+	if _, err := ingestInbound(ctx, "test-proj", inboundPayload{MatchedRecipient: "sales@example.test",
 		MessageID:       77001,
 		Channel:         channelEmail,
 		From:            "prospect@example.test",

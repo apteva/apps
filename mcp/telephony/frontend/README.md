@@ -239,3 +239,18 @@ gateway-delegated issuer sessions are revalidated on the twenty-second stream
 lease reconnect. A revocation closes push and triggers an authorized refresh;
 recreate the watcher after renewed login to restore push. `close()` or abort stops
 subscriptions, timers and late callback delivery.
+
+
+## Media session recovery
+
+Adviser reconnect obtains a fresh authorized `/softphone/attach` session for the
+same call. It does not dial or answer another carrier leg. Temporary renewal
+failures retry within the current lease; confirmed revocation or expiry stops
+local media while durable call status remains authoritative. Listening and
+coaching share lease renewal; coaching never automatically retargets an adviser.
+
+`createSoftphone({ onSessionEvent })` and
+`createCallListener({ onSessionEvent })` expose structured renewal and recovery
+events. Adviser `onDiagnostics` includes bounded session events and directional
+frame-drop samples. See [media session resilience](../docs/media-session-resilience.md)
+for clock handling, authorization boundaries and diagnostic fields.

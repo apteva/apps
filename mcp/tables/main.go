@@ -15,11 +15,14 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	_ "embed"
 	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -29,11 +32,26 @@ import (
 var manifestYAML string
 
 type App struct {
-	schemaMu   contextRWMutex
-	locksMu    sync.Mutex
-	tableLocks map[schemaCacheKey]*tableLockRef
-	cache      schemaCache
-	plans      queryPlanCache
+	projectionNow              func() time.Time
+	projectionGeneration       uint64
+	projectionWorkerMu         sync.Mutex
+	projectionReaderMu         sync.Mutex
+	projectionReader           *sql.DB
+	projectionReaderGeneration uint64
+	schemaMu                   contextRWMutex
+	locksMu                    sync.Mutex
+	tableLocks                 map[schemaCacheKey]*tableLockRef
+	cache                      schemaCache
+	plans                      queryPlanCache
+	projectionMu               sync.RWMutex
+	projectionCache            map[schemaCacheKey]*Table
+	projectionSQLMu            sync.RWMutex
+	projectionSQLCache         map[string]projectionSQLValidation
+	projectionSQLEpoch         uint64
+	projectionMetricsMu        sync.RWMutex
+	projectionMetrics          map[int64]projectionPhaseMetrics
+	authorizationMu            sync.RWMutex
+	authorizationCache         map[string]struct{}
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -49,6 +67,12 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("tables requires a db block")
 	}
 	if err := a.upgradeAll(ctx); err != nil {
+		return err
+	}
+	if err := a.ensureProjectionStorage(ctx); err != nil {
+		return err
+	}
+	if err := a.rebuildAllProjectionTriggers(ctx); err != nil {
 		return err
 	}
 	globalCtx = ctx
@@ -72,15 +96,19 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return a.plans.close() }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { a.closeProjectionReader(); return a.plans.close() }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{Name: "tables-projections", Schedule: projectionWorkerEvery, Run: a.projectionWorker}}
+}
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/tables", Handler: a.handleTablesCollection},
 		{Pattern: "/tables/", Handler: a.handleTablesItem},
+		{Pattern: "/projections", Handler: a.handleProjectionsCollection},
+		{Pattern: "/projections/", Handler: a.handleProjectionsItem},
 	}
 }
 
@@ -354,6 +382,12 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler:     a.toolTablesCapabilities,
 		},
 	}
+	for i := range tools {
+		if strings.HasPrefix(tools[i].Name, "indexes_") {
+			tools[i].InputSchema["properties"].(map[string]any)["version"] = map[string]any{"type": "integer", "minimum": 1, "description": "Optional projection version."}
+		}
+	}
+	tools = append(tools, a.projectionTools()...)
 	for i := range tools {
 		switch tools[i].Name {
 		case "tables_query", "rows_get", "rows_search", "rows_count", "rows_aggregate", "tables_list", "tables_describe", "indexes_list":

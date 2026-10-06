@@ -131,22 +131,26 @@ type browserScreenshot struct {
 }
 
 type computerSOMScreenshot struct {
-	CurrentURL string            `json:"current_url"`
-	Width      int               `json:"width"`
-	Height     int               `json:"height"`
-	SOM        []setOfMarkTarget `json:"som"`
+	CurrentURL  string            `json:"current_url"`
+	Width       int               `json:"width"`
+	Height      int               `json:"height"`
+	SOM         []setOfMarkTarget `json:"som"`
+	SOMRevision any               `json:"som_revision"`
 }
 
 type setOfMarkTarget struct {
-	Label int    `json:"label"`
-	X     int    `json:"x"`
-	Y     int    `json:"y"`
-	W     int    `json:"w"`
-	H     int    `json:"h"`
-	Tag   string `json:"tag"`
-	Role  string `json:"role"`
-	Text  string `json:"text"`
-	Type  string `json:"type"`
+	ID             string `json:"id"`
+	AccessibleName string `json:"accessible_name"`
+	Disabled       bool   `json:"disabled"`
+	Label          int    `json:"label"`
+	X              int    `json:"x"`
+	Y              int    `json:"y"`
+	W              int    `json:"w"`
+	H              int    `json:"h"`
+	Tag            string `json:"tag"`
+	Role           string `json:"role"`
+	Text           string `json:"text"`
+	Type           string `json:"type"`
 }
 
 type linkInfo struct {
@@ -232,9 +236,12 @@ func (a *App) extractBrowserDOM(callCtx context.Context, ctx *sdk.AppCtx, sessio
 	extractArgs := withProjectID(ctx, map[string]any{
 		"session_id":  sessionID,
 		"formats":     formats,
-		"max_chars":   boundedInt(intArg(args, "max_chars"), defaultMaxChars, 1000, 200000),
+		"max_chars":   boundedInt(intArg(args, "max_chars"), defaultMaxChars, 1000, 1000000),
 		"readability": true,
 	})
+	if value, ok := args["readability"].(bool); ok {
+		extractArgs["readability"] = value
+	}
 	if waitMS := intArg(args, "wait_ms"); waitMS > 0 {
 		extractArgs["wait_ms"] = waitMS
 	}
@@ -266,7 +273,26 @@ func stringSliceFromAny(v any) []string {
 }
 
 func recoverInterruptedRuns(ctx *sdk.AppCtx) error {
-	_, err := ctx.AppDB().Exec(
+	// Schema v2 contains only reconstructible read operations. In-flight pages
+	// return to the frontier, while v1 actions retain their original failure policy.
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE actors_crawl_queue SET status='pending',fence=fence+1,lease_until=NULL WHERE status='running'`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE actors_runs SET status=CASE WHEN cancel_requested_at IS NULL THEN 'queued' ELSE 'cancelled' END WHERE status='running' AND json_extract(definition_snapshot_json,'$.schema_version')=2`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM actors_context_locks WHERE run_id IN (SELECT id FROM actors_runs WHERE status IN ('queued','cancelled'))`); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	_, err = ctx.AppDB().Exec(
 		`UPDATE actors_runs
 		    SET status='failed', error='interrupted by app restart', completed_at=?
 		  WHERE status='running'`,

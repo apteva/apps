@@ -69,7 +69,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("billing mounted",
-		"version", "0.12.5",
+		"version", a.Manifest().Version,
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }

@@ -61,10 +61,11 @@ func previewFileID(ctx *sdk.AppCtx, pid string, asset *Asset) (int64, bool) {
 }
 
 func sessionPreviewAsset(db *sql.DB, pid, sessionID string) ([]string, error) {
-	if _, err := sessionByID(db, pid, sessionID); err != nil {
+	session, err := sessionByID(db, pid, sessionID)
+	if err != nil {
 		return nil, err
 	}
-	rows, err := db.Query(`SELECT id FROM assets WHERE project_id=? AND session_id=? AND (content_type LIKE 'image/%' OR content_type LIKE 'video/%' OR content_type LIKE 'audio/%' OR kind IN ('image','video','audio')) ORDER BY CASE WHEN content_type LIKE 'image/%' OR kind='image' THEN 0 WHEN content_type LIKE 'video/%' OR kind='video' THEN 1 ELSE 2 END,created_at DESC,id DESC LIMIT 30`, pid, sessionID)
+	rows, err := db.Query(`SELECT id FROM assets WHERE project_id=? AND session_id=? AND (lifecycle='active' OR ?='archived') AND (content_type LIKE 'image/%' OR content_type LIKE 'video/%' OR content_type LIKE 'audio/%' OR kind IN ('image','video','audio')) ORDER BY CASE WHEN content_type LIKE 'image/%' OR kind='image' THEN 0 WHEN content_type LIKE 'video/%' OR kind='video' THEN 1 ELSE 2 END,created_at DESC,id DESC LIMIT 30`, pid, sessionID, session.Lifecycle)
 	if err != nil {
 		return nil, err
 	}

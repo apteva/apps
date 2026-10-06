@@ -13,6 +13,13 @@ import (
 )
 
 type Asset struct {
+	LifecycleFields
+	AssetLabelFields
+	OriginalSessionID    string           `json:"original_session_id"`
+	SessionLifecycle     string           `json:"session_lifecycle"`
+	SessionRevision      int64            `json:"session_revision"`
+	Eligible             bool             `json:"eligible"`
+	Sources              []AssetSource    `json:"sources"`
 	ID                   string           `json:"id"`
 	SessionID            string           `json:"session_id"`
 	StorageInstallID     int64            `json:"storage_install_id"`
@@ -31,14 +38,22 @@ type Asset struct {
 	DurationMS           int64            `json:"duration_ms"`
 	MediaError           string           `json:"media_error,omitempty"`
 	Publications         []Publication    `json:"publications"`
+	HostingIntents       []HostingIntent  `json:"hosting_intents"`
 	Hostings             []HostingSummary `json:"hostings"`
 }
 
 func assetByID(db *sql.DB, pid, id string) (*Asset, error) {
 	a := &Asset{}
-	err := db.QueryRow(`SELECT id,session_id,storage_install_id,storage_file_id,name,kind,content_type,sha256,size_bytes,review_status,media_status,media_rating FROM assets WHERE project_id=? AND id=?`, pid, id).Scan(&a.ID, &a.SessionID, &a.StorageInstallID, &a.StorageFileID, &a.Name, &a.Kind, &a.ContentType, &a.SHA256, &a.SizeBytes, &a.ReviewStatus, &a.MediaStatus, &a.MediaRating)
+	err := db.QueryRow(`SELECT id,session_id,storage_install_id,storage_file_id,name,kind,content_type,sha256,size_bytes,review_status,media_status,media_rating,favorite,patreon_intent FROM assets WHERE project_id=? AND id=?`, pid, id).Scan(&a.ID, &a.SessionID, &a.StorageInstallID, &a.StorageFileID, &a.Name, &a.Kind, &a.ContentType, &a.SHA256, &a.SizeBytes, &a.ReviewStatus, &a.MediaStatus, &a.MediaRating, &a.Favorite, &a.PatreonIntent)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("asset not found")
+	}
+	if err == nil {
+		refs := []*Asset{a}
+		err = loadAssetLifecycle(db, pid, refs)
+		if err == nil {
+			err = loadAssetLabels(db, pid, refs)
+		}
 	}
 	return a, err
 }
@@ -71,6 +86,9 @@ func (a *App) sessionUploadTarget(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
+	if err = requireActiveSession(s); err != nil {
+		return nil, err
+	}
 	b, err := brandByID(ctx.AppDB(), pid, s.BrandID)
 	if err != nil {
 		return nil, err
@@ -94,6 +112,9 @@ func (a *App) attachAsset(ctx *sdk.AppCtx, args map[string]any, uploaded bool) (
 	if err != nil {
 		return nil, err
 	}
+	if err = requireActiveSession(session); err != nil {
+		return nil, err
+	}
 	bound := ctx.IntegrationFor("storage")
 	if bound == nil || bound.InstallID <= 0 {
 		return nil, errors.New("Storage app is not bound")
@@ -105,13 +126,16 @@ func (a *App) attachAsset(ctx *sdk.AppCtx, args map[string]any, uploaded bool) (
 	var result struct {
 		Found bool `json:"found"`
 		File  struct {
-			ID          int64  `json:"id"`
-			Name        string `json:"name"`
-			SHA256      string `json:"sha256"`
-			SizeBytes   int64  `json:"size_bytes"`
-			ContentType string `json:"content_type"`
-			Folder      string `json:"folder"`
-			ProjectID   string `json:"project_id"`
+			ID             int64  `json:"id"`
+			Name           string `json:"name"`
+			SHA256         string `json:"sha256"`
+			SizeBytes      int64  `json:"size_bytes"`
+			ContentType    string `json:"content_type"`
+			Folder         string `json:"folder"`
+			ProjectID      string `json:"project_id"`
+			ChecksumStatus string `json:"checksum_status"`
+			ChecksumError  string `json:"checksum_error"`
+			Revision       int64  `json:"revision"`
 		} `json:"file"`
 	}
 	if err = ctx.PlatformAPI().CallAppResult("storage", "files_get", map[string]any{"_project_id": pid, "id": fileID}, &result); err != nil {
@@ -160,6 +184,17 @@ func (a *App) attachAsset(ctx *sdk.AppCtx, args map[string]any, uploaded bool) (
 	if err != nil {
 		return nil, err
 	}
+	// Reattaching is also a metadata refresh. Older Catalog rows may have
+	// been attached while Storage's checksum was empty.
+	if actual != id && result.File.ChecksumStatus == "verified" && result.File.SHA256 != "" {
+		if _, err = ctx.AppDB().Exec(`UPDATE assets SET sha256=?,size_bytes=?,content_type=?,name=?,revision=revision+1,updated_at=? WHERE project_id=? AND id=?`, result.File.SHA256, result.File.SizeBytes, result.File.ContentType, result.File.Name, attachedAt, pid, actual); err != nil {
+			return nil, err
+		}
+		asset, err = assetByID(ctx.AppDB(), pid, actual)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if actual == id {
 		ctx.EmitWithProject("content-catalog.asset.attached", pid, map[string]any{"asset_id": id, "session_id": asset.SessionID, "storage_file_id": fileID})
 	}
@@ -176,7 +211,11 @@ func (a *App) assetsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if _, err = sessionByID(ctx.AppDB(), pid, str(args, "session_id")); err != nil {
 		return nil, err
 	}
-	rows, err := ctx.AppDB().Query(`SELECT id,session_id,storage_install_id,storage_file_id,name,kind,content_type,sha256,size_bytes,review_status,media_status,media_rating FROM assets WHERE project_id=? AND session_id=? ORDER BY created_at DESC,id DESC LIMIT 200`, pid, str(args, "session_id"))
+	scope, err := lifecycleScope(args)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := ctx.AppDB().Query(`SELECT a.id,a.session_id,a.storage_install_id,a.storage_file_id,a.name,a.kind,a.content_type,a.sha256,a.size_bytes,a.review_status,a.media_status,a.media_rating,a.favorite,a.patreon_intent FROM assets a JOIN sessions s ON s.project_id=a.project_id AND s.id=a.session_id WHERE a.project_id=? AND a.session_id=?`+lifecyclePredicate(scope, "a", "s")+` ORDER BY a.created_at DESC,a.id DESC LIMIT 200`, pid, str(args, "session_id"))
 	if err != nil {
 		return nil, err
 	}
@@ -184,7 +223,7 @@ func (a *App) assetsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	out := []Asset{}
 	for rows.Next() {
 		var item Asset
-		if err = rows.Scan(&item.ID, &item.SessionID, &item.StorageInstallID, &item.StorageFileID, &item.Name, &item.Kind, &item.ContentType, &item.SHA256, &item.SizeBytes, &item.ReviewStatus, &item.MediaStatus, &item.MediaRating); err != nil {
+		if err = rows.Scan(&item.ID, &item.SessionID, &item.StorageInstallID, &item.StorageFileID, &item.Name, &item.Kind, &item.ContentType, &item.SHA256, &item.SizeBytes, &item.ReviewStatus, &item.MediaStatus, &item.MediaRating, &item.Favorite, &item.PatreonIntent); err != nil {
 			return nil, err
 		}
 		out = append(out, item)
@@ -205,7 +244,16 @@ func (a *App) assetsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	for i := range out {
 		assetRefs[i] = &out[i]
 	}
+	if err = loadAssetLifecycle(ctx.AppDB(), pid, assetRefs); err != nil {
+		return nil, err
+	}
+	if err = loadAssetLabels(ctx.AppDB(), pid, assetRefs); err != nil {
+		return nil, err
+	}
 	if err = loadAssetHostings(ctx.AppDB(), pid, assetRefs); err != nil {
+		return nil, err
+	}
+	if err = loadAssetSources(ctx.AppDB(), pid, assetRefs); err != nil {
 		return nil, err
 	}
 	a.loadAssetMedia(ctx, assetRefs)
@@ -220,23 +268,7 @@ func (a *App) assetGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := ctx.AppDB().Query(`SELECT source_asset_id,relation,source_order,media_render_id FROM asset_sources WHERE project_id=? AND child_asset_id=? ORDER BY source_order`, pid, asset.ID)
-	if err != nil {
-		return nil, err
-	}
-	sources := []map[string]any{}
-	for rows.Next() {
-		var id, relation string
-		var order, renderID int64
-		if err = rows.Scan(&id, &relation, &order, &renderID); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		sources = append(sources, map[string]any{"asset_id": id, "relation": relation, "source_order": order, "media_render_id": renderID})
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
+	if err = loadAssetSources(ctx.AppDB(), pid, []*Asset{asset}); err != nil {
 		return nil, err
 	}
 	hostingsAny, err := a.hostingsList(ctx, map[string]any{"asset_id": asset.ID})
@@ -250,7 +282,7 @@ func (a *App) assetGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err = loadAssetHostings(ctx.AppDB(), pid, []*Asset{asset}); err != nil {
 		return nil, err
 	}
-	out := map[string]any{"asset": asset, "sources": sources, "hostings": hostingsAny.(map[string]any)["hostings"], "publications": asset.Publications}
+	out := map[string]any{"asset": asset, "sources": asset.Sources, "hostings": hostingsAny.(map[string]any)["hostings"], "hosting_intents": hostingsAny.(map[string]any)["hosting_intents"], "publications": asset.Publications}
 	asset.MediaStatus, asset.MediaRating = "unavailable", ""
 	if ctx.IntegrationFor("media") != nil {
 		var media struct {
@@ -326,7 +358,7 @@ func (a *App) assetReview(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if state != "pending" && state != "approved" && state != "rejected" {
 		return nil, errors.New("review_status must be pending, approved, or rejected")
 	}
-	res, err := ctx.AppDB().Exec(`UPDATE assets SET review_status=?,updated_at=? WHERE project_id=? AND id=?`, state, now(), pid, str(args, "asset_id"))
+	res, err := ctx.AppDB().Exec(`UPDATE assets SET review_status=?,revision=revision+1,updated_at=? WHERE project_id=? AND id=?`, state, now(), pid, str(args, "asset_id"))
 	if err != nil {
 		return nil, err
 	}

@@ -26,19 +26,20 @@ function fixture() {
   let start = async () => { callbacks.onState?.("live"); };
   let muted = false, dtmf = "";
   const startedOptions: any[] = [];
+  const startedURLs: string[] = [];
   const runtime: AudioRuntime = {
     async preflight() { preflighted++; await preflight(); },
     create(cb) {
       callbacks = cb;
       return {
-        async start(url, options) { startedOptions.push(options); expect(url).toBe("wss://gateway.example" + session.media_url); started++; await start(); },
+        async start(url, options) { startedOptions.push(options); startedURLs.push(url); expect(url).toStartWith("wss://gateway.example/api/apps/telephony/_install/42/softphone/media/call-1/"); started++; await start(); },
         stop() { stopped++; }, setMuted(value) { muted = value; },
         sendDTMF(value) { dtmf = value; }, setOutputVolume() {},
       };
     },
   };
   const phone = client.createSoftphone({ audioRuntime: runtime, pollIntervalMs: 0 });
-  return { sdk, client, phone, requests, session, runtime, startedOptions,
+  return { sdk, client, phone, requests, session, runtime, startedOptions, startedURLs,
     setResponse(value: typeof response) { response = value; },
     setPreflight(value: typeof preflight) { preflight = value; },
     setStart(value: typeof start) { start = value; },
@@ -408,7 +409,7 @@ test("online provider routes calls through authenticated user API", async () => 
 test("lease renewal runs without status polling and stops audio on revoked authentication", async () => {
   const f = fixture();
   f.setResponse(async url => {
-    if (url.pathname.includes("/renew/")) throw new Error("login revoked");
+    if (url.pathname.includes("/renew/")) return new Response("login revoked", { status: 403 });
     return { ...f.session, lease_seconds: 10 };
   });
   await f.phone.attach("call-1");
@@ -434,4 +435,38 @@ test("audio tuning passes through create/reconnect and invalid profiles leave a 
   expect(f.stopped).toBe(stopped); expect(f.started).toBe(started);
  } finally { await phone.dispose(); await f.phone.dispose(); }
  expect(() => f.client.createSoftphone({ audio: { playbackTargetMs: NaN } })).toThrow();
+});
+
+
+test("a temporary renewal failure preserves healthy audio and retries", async () => {
+ const f=fixture(); let renews=0;
+ f.setResponse(async url=>{
+  if(url.pathname.includes("/renew/")) { if(++renews===1) throw new TypeError("Failed to fetch"); return {lease_seconds:10}; }
+  return {...f.session,lease_seconds:10};
+ });
+ try {
+  await f.phone.attach("call-1"); await Bun.sleep(3700);
+  expect(renews).toBe(2); expect(f.stopped).toBe(0); expect(f.phone.getSnapshot().audioState).toBe("live");
+ } finally { f.phone.dispose(); }
+});
+
+test("explicit and automatic reconnect obtain fresh credentials without placing or answering",async()=>{
+ const f=fixture();let token=0;
+ f.setResponse(async url=>url.pathname.includes("/attach/")?{...f.session,session_token:`fresh-${++token}`,media_url:f.session.media_url.replace("secret",`fresh-${token}`)}:{calls:[{id:"call-1",status:"answered"}]});
+ try {
+  await f.phone.attach("call-1");f.phone.setMuted(true);
+  await f.phone.reconnect();expect(f.startedURLs.at(-1)).toEndWith("fresh-2");expect(f.muted).toBe(true);
+  const refresh=f.callbacks.refreshMediaURL!;
+  const [a,b]=await Promise.all([refresh(),refresh()]);expect(a).toBe(b);expect(a).toEndWith("fresh-3");
+  expect(token).toBe(3);expect(f.requests.some(r=>/\/(place|answer|takeover)/.test(r.url.pathname))).toBe(false);
+ } finally {f.phone.dispose();}
+});
+
+test("late automatic authorization cannot revive a terminated call",async()=>{
+ const f=fixture();await f.phone.attach("call-1");
+ let resolve!:(value:any)=>void;
+ f.setResponse(async url=>url.pathname.includes("/attach/")?await new Promise(r=>{resolve=r}):{ok:true});
+ const pending=f.callbacks.refreshMediaURL!();
+ f.phone.observeCall({id:"call-1",status:"completed"});resolve(f.session);
+ await expect(pending).rejects.toThrow("cancelled");expect(f.phone.getSnapshot().callId).toBeUndefined();expect(f.started).toBe(1);f.phone.dispose();
 });

@@ -66,13 +66,35 @@ func (e *actorExecution) interact(step actorStep) error {
 	if e.session == nil {
 		return errors.New("interaction requires an open browser")
 	}
+	if step.Action == "fill" || step.Action == "set_text" {
+		args := map[string]any{
+			"session_id": e.session.SessionID,
+			"action":     "set_text",
+			"text":       step.Text,
+			"mode":       firstNonEmpty(step.Mode, "replace"),
+		}
+		if step.NewlineMode != "" {
+			args["newline_mode"] = step.NewlineMode
+		}
+		return e.dispatchSemantic(step, args)
+	}
+	if step.Action == "set_checked" || step.Action == "select_option" || step.Action == "set_temporal" {
+		args := map[string]any{"session_id": e.session.SessionID, "action": step.Action}
+		if step.Action == "set_checked" {
+			checked, ok := step.Checked.(bool)
+			if !ok {
+				return errors.New("set_checked requires a boolean checked value")
+			}
+			args["checked"] = checked
+		} else if len(step.Values) > 0 && step.Action == "select_option" {
+			args["values"] = step.Values
+		} else {
+			args["value"] = step.Value
+		}
+		return e.dispatchSemantic(step, args)
+	}
 	args := map[string]any{"session_id": e.session.SessionID, "action": step.Action}
 	switch step.Action {
-	case "fill":
-		args["action"] = "set_text"
-		args["selector"] = step.Locator.Selector
-		args["text"] = step.Text
-		args["mode"] = "replace"
 	case "key":
 		args["key"] = step.Key
 	case "scroll":
@@ -86,6 +108,163 @@ func (e *actorExecution) interact(step actorStep) error {
 	return e.finishInteraction(out)
 }
 
+// dispatchSemantic sends a DOM-targeted Computer action using the current
+// semantic observation. It deliberately avoids coordinate fallbacks: media
+// controls and composers must be tied to the live SOM target.
+func (e *actorExecution) dispatchSemantic(step actorStep, args map[string]any) error {
+	locator := step.Locator
+	if selector := strings.TrimSpace(locator.Selector); selector != "" && !locator.SOMOnly {
+		args["selector"] = selector
+		var out map[string]any
+		if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, args), &out); err != nil {
+			return err
+		}
+		e.recordMediaResult(out)
+		return e.finishInteraction(out)
+	}
+	var shot computerSOMScreenshot
+	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, map[string]any{
+		"session_id": e.session.SessionID, "action": "screenshot", "annotate": true, "include_som": true,
+	}), &shot); err != nil {
+		return fmt.Errorf("observe SOM: %w", err)
+	}
+	var match *setOfMarkTarget
+	for i := range shot.SOM {
+		target := &shot.SOM[i]
+		if target.Disabled || !somTargetMatches(locator, *target) {
+			continue
+		}
+		if match != nil {
+			return fmt.Errorf("ambiguous SOM locator: multiple targets match text=%q role=%q", locator.Text, locator.Role)
+		}
+		match = target
+	}
+	if match == nil {
+		return fmt.Errorf("locator not found in SOM: text=%q role=%q", locator.Text, locator.Role)
+	}
+	if match.ID != "" {
+		args["target_id"] = match.ID
+	} else {
+		args["label"] = match.Label
+	}
+	if shot.SOMRevision != nil {
+		args["som_revision"] = shot.SOMRevision
+	}
+	var out map[string]any
+	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, args), &out); err != nil {
+		return err
+	}
+	e.recordMediaResult(out)
+	return e.finishInteraction(out)
+}
+
+func (e *actorExecution) upload(step actorStep) error {
+	if e.session == nil {
+		return errors.New("upload_file requires an open browser")
+	}
+	args := map[string]any{"session_id": e.session.SessionID, "action": "upload_file"}
+	for key, value := range map[string]string{
+		"source_url": step.SourceURL, "base64": step.Base64, "file_path": step.FilePath,
+		"filename": step.Filename, "mime_type": step.MIMEType,
+	} {
+		if strings.TrimSpace(value) != "" {
+			args[key] = value
+		}
+	}
+	return e.dispatchSemantic(step, args)
+}
+
+func (e *actorExecution) recordMediaResult(out map[string]any) {
+	uploaded, _ := out["uploaded"].(bool)
+	if !uploaded {
+		return
+	}
+	media := map[string]any{"uploaded": true}
+	for _, key := range []string{"filename", "size_bytes", "mime_type", "file_source"} {
+		if value, ok := out[key]; ok {
+			media[key] = value
+		}
+	}
+	e.media = append(e.media, media)
+}
+
+func validateWaitStep(step actorStep) error {
+	if len(step.Conditions) < 1 || len(step.Conditions) > 8 {
+		return errors.New("wait_for requires between 1 and 8 conditions")
+	}
+	if step.Match != "" && step.Match != "any" && step.Match != "all" {
+		return errors.New("wait_for match must be any or all")
+	}
+	for _, condition := range step.Conditions {
+		switch condition.Type {
+		case "url_changed", "url_equals", "url_contains", "text_present", "text_absent":
+			if strings.TrimSpace(condition.Value) == "" {
+				return fmt.Errorf("wait_for %s requires value", condition.Type)
+			}
+		case "selector_present", "selector_absent":
+			if strings.TrimSpace(condition.Selector) == "" {
+				return fmt.Errorf("wait_for %s requires selector", condition.Type)
+			}
+		case "target_present", "target_absent", "target_state":
+			if strings.TrimSpace(condition.TargetID) == "" {
+				return fmt.Errorf("wait_for %s requires target_id", condition.Type)
+			}
+			if condition.Type == "target_state" {
+				switch condition.State {
+				case "ready", "loading", "enabled", "disabled", "checked", "unchecked":
+				default:
+					return errors.New("wait_for target_state requires a valid state")
+				}
+			}
+		case "media_present", "media_error":
+		default:
+			return fmt.Errorf("unsupported wait_for condition %q", condition.Type)
+		}
+	}
+	return nil
+}
+
+// A structured Computer timeout is a failed actor assertion. Do not continue
+// into a publish step when the required player or page state did not appear.
+func (e *actorExecution) waitFor(step actorStep) error {
+	if e.session == nil {
+		return errors.New("wait_for requires an open browser")
+	}
+	var out map[string]any
+	args := map[string]any{
+		"session_id": e.session.SessionID, "action": "wait_for",
+		"conditions": step.Conditions, "match": firstNonEmpty(step.Match, "any"),
+		"timeout_ms": boundedInt(templateInt(step.TimeoutMS), 10000, 500, 30000),
+	}
+	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, args), &out); err != nil {
+		return err
+	}
+	e.currentURL = firstNonEmpty(stringFromAny(out["current_url"]), e.currentURL)
+	if !hostAllowed(e.currentURL, e.definition.AllowedHosts) {
+		return fmt.Errorf("browser navigated outside allowed_hosts: %s", e.currentURL)
+	}
+	matched, _ := out["matched"].(bool)
+	timedOut, _ := out["timed_out"].(bool)
+	if !matched || timedOut {
+		return fmt.Errorf("wait_for required conditions not met (timed_out=%t, media_embed_status=%q)", timedOut, stringFromAny(out["media_embed_status"]))
+	}
+	if out["media_embed_status"] == "loaded" {
+		media := map[string]any{"kind": "embed", "status": "loaded"}
+		for from, to := range map[string]string{"media_provider": "provider", "media_iframe_src": "iframe_url", "media_thumbnail_url": "thumbnail_url"} {
+			if value := stringFromAny(out[from]); value != "" {
+				media[to] = value
+			}
+		}
+		for _, existing := range e.media {
+			if existing["kind"] == "embed" && existing["iframe_url"] == media["iframe_url"] {
+				return nil
+			}
+		}
+		e.media = append(e.media, media)
+	}
+	return nil
+}
+
 func (a *App) platformTools() []sdk.Tool {
 	integer := map[string]any{"type": "integer", "minimum": 1}
 	return []sdk.Tool{
@@ -93,7 +272,7 @@ func (a *App) platformTools() []sdk.Tool {
 		{Name: "actors_task_list", Description: "List saved tasks in the current project.", InputSchema: schemaObject(map[string]any{}, nil), Handler: a.toolTaskList},
 		{Name: "actors_task_run", Description: "Queue a saved task using its pinned revision and inputs.", InputSchema: schemaObject(map[string]any{"id": integer}, []string{"id"}), Handler: a.toolTaskRun},
 		{Name: "actors_task_delete", Description: "Delete a saved task; actor definitions and historical runs remain.", InputSchema: schemaObject(map[string]any{"id": integer}, []string{"id"}), Handler: a.toolTaskDelete},
-		{Name: "actors_dataset_read", Description: "Read committed dataset items for a run, including partial results after failure. Pass next_cursor as after for the next page.", InputSchema: schemaObject(map[string]any{"run_id": integer, "after": map[string]any{"type": "integer", "minimum": 0}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 200}}, []string{"run_id"}), Handler: a.toolDatasetRead},
+		{Name: "actors_dataset_read", Description: "Read committed dataset items for a run, including partial results after failure. Pass next_cursor as after for the next page.", InputSchema: schemaObject(map[string]any{"run_id": integer, "dataset": map[string]any{"type": "string", "description": "Optional named dataset within a crawl run."}, "after": map[string]any{"type": "integer", "minimum": 0}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 200}}, []string{"run_id"}), Handler: a.toolDatasetRead},
 	}
 }
 
@@ -240,12 +419,68 @@ func persistDatasetPage(ctx *sdk.AppCtx, runID int64, items []map[string]any) er
 
 func (a *App) toolDatasetRead(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := int64ArgLocal(args, "run_id")
-	var status string
-	if err := ctx.AppDB().QueryRow(`SELECT status FROM actors_runs WHERE id=? AND project_id=?`, id, projectID(ctx)).Scan(&status); err != nil {
+	var status, snapshot string
+	if err := ctx.AppDB().QueryRow(`SELECT status,COALESCE(definition_snapshot_json,'{}') FROM actors_runs WHERE id=? AND project_id=?`, id, projectID(ctx)).Scan(&status, &snapshot); err != nil {
 		return nil, errors.New("run not found")
 	}
+	var definition actorDefinition
+	if err := json.Unmarshal([]byte(snapshot), &definition); err != nil {
+		return nil, err
+	}
+	dataset := strings.TrimSpace(stringArg(args, "dataset"))
+	datasets := []map[string]any{}
+	table := "actors_dataset_items"
+	if definition.SchemaVersion == 2 {
+		table = "actors_crawl_records"
+		counts, err := ctx.AppDB().Query(`SELECT dataset,COUNT(*) FROM actors_crawl_records WHERE run_id=? AND project_id=? GROUP BY dataset ORDER BY dataset`, id, projectID(ctx))
+		if err != nil {
+			return nil, err
+		}
+		for counts.Next() {
+			var name string
+			var count int
+			if err := counts.Scan(&name, &count); err != nil {
+				counts.Close()
+				return nil, err
+			}
+			datasets = append(datasets, map[string]any{"name": name, "count": count, "schema": definition.Crawl.Datasets[name].Schema})
+		}
+		err = counts.Err()
+		counts.Close()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		var count int
+		if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM actors_dataset_items WHERE run_id=? AND project_id=?`, id, projectID(ctx)).Scan(&count); err != nil {
+			return nil, err
+		}
+		datasets = append(datasets, map[string]any{"name": "default", "count": count, "schema": definition.OutputSchema})
+		if dataset != "" && dataset != "default" {
+			return nil, errors.New("dataset not found in run")
+		}
+	}
+	total := 0
+	found := dataset == ""
+	for _, entry := range datasets {
+		if dataset == "" || entry["name"] == dataset {
+			total += entry["count"].(int)
+			found = true
+		}
+	}
+	if !found {
+		return nil, errors.New("dataset not found in run")
+	}
 	limit := boundedInt(intArg(args, "limit"), 50, 1, 200)
-	rows, err := ctx.AppDB().Query(`SELECT id,item_json FROM actors_dataset_items WHERE run_id=? AND project_id=? AND id>? ORDER BY id LIMIT ?`, id, projectID(ctx), int64ArgLocal(args, "after"), limit+1)
+	query := "SELECT id,item_json FROM " + table + " WHERE run_id=? AND project_id=? AND id>?"
+	params := []any{id, projectID(ctx), int64ArgLocal(args, "after")}
+	if definition.SchemaVersion == 2 && dataset != "" {
+		query += " AND dataset=?"
+		params = append(params, dataset)
+	}
+	query += " ORDER BY id LIMIT ?"
+	params = append(params, limit+1)
+	rows, err := ctx.AppDB().Query(query, params...)
 	if err != nil {
 		return nil, err
 	}
@@ -272,7 +507,7 @@ func (a *App) toolDatasetRead(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		cursor = rowID
 		size += len(raw)
 	}
-	return map[string]any{"run_id": id, "status": status, "items": items, "next_cursor": cursor, "has_more": more}, rows.Err()
+	return map[string]any{"run_id": id, "status": status, "items": items, "next_cursor": cursor, "has_more": more, "dataset": dataset, "datasets": datasets, "total": total}, rows.Err()
 }
 
 func (a *App) platformRoutes() []sdk.Route {
@@ -304,7 +539,7 @@ func (a *App) toolRoute(handler func(*sdk.AppCtx, map[string]any) (any, error)) 
 			args["id"] = id
 			args["run_id"] = id
 		}
-		for _, key := range []string{"after", "limit"} {
+		for _, key := range []string{"after", "limit", "dataset"} {
 			if value := r.URL.Query().Get(key); value != "" {
 				args[key] = value
 			}

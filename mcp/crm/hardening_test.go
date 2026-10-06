@@ -54,7 +54,7 @@ func TestListMembershipRejectsCrossProjectContact(t *testing.T) {
 
 func TestInboundDuplicateDoesNotCreateAnotherConversation(t *testing.T) {
 	ctx := newTestCtx(t)
-	payload := inboundPayload{
+	payload := inboundPayload{MatchedRecipient: "support@example.test",
 		MessageID:       9001,
 		Channel:         channelEmail,
 		From:            "human@example.test",

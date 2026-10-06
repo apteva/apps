@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"sort"
 	"strings"
 	"unicode"
@@ -130,33 +131,47 @@ func placeholderNames(s string) ([]string, error) {
 // Other virtual tables and dynamic roots fail closed.
 // query_only remains enabled as an independent write barrier.
 func authorizeQuery(qctx context.Context, conn *sql.Conn, ctx *sdk.AppCtx, a *App, pid, raw, resolved string, args []any) error {
-	names, err := placeholderNames(raw)
+	tokens, err := a.cachedProjectionSQL(ctx, raw)
 	if err != nil {
 		return err
 	}
+	names := placeholderNamesFromTokens(tokens)
 	allowed := map[int64]bool{}
 	for _, name := range names {
-		table, err := a.loadTableSchema(ctx, pid, name)
+		table, err := a.loadQueryTable(ctx, pid, name)
 		if err != nil {
 			return err
 		}
-		roots, err := conn.QueryContext(qctx, "SELECT rootpage FROM sqlite_master WHERE (type='table' AND name=?) OR (type='index' AND tbl_name=?)", table.PhysicalName, table.PhysicalName)
-		if err != nil {
-			return err
+		physicals := []string{table.PhysicalName}
+		if table.ProjectionID != 0 {
+			physicals = []string{fmt.Sprintf("pd_%d", table.ProjectionID), fmt.Sprintf("ph_%d", table.ProjectionID)}
 		}
-		for roots.Next() {
-			var root int64
-			if err = roots.Scan(&root); err != nil {
-				roots.Close()
+		for _, physical := range physicals {
+			roots, err := conn.QueryContext(qctx, "SELECT rootpage FROM sqlite_master WHERE (type='table' AND name=?) OR (type='index' AND tbl_name=?)", physical, physical)
+			if err != nil {
 				return err
 			}
-			allowed[root] = true
+			for roots.Next() {
+				var root int64
+				if err = roots.Scan(&root); err != nil {
+					roots.Close()
+					return err
+				}
+				allowed[root] = true
+			}
+			err = roots.Err()
+			roots.Close()
+			if err != nil {
+				return err
+			}
 		}
-		err = roots.Err()
-		roots.Close()
-		if err != nil {
-			return err
-		}
+	}
+	// Permissions are intentionally checked above on every invocation. Once
+	// those checks pass, a successful SQLite program verification can be reused
+	// until a schema or projection epoch changes. This removes repeated EXPLAIN
+	// work while keeping revocations immediate.
+	if a.authorizationCached(ctx, resolved) {
+		return nil
 	}
 	plan, err := conn.QueryContext(qctx, "EXPLAIN "+resolved, args...)
 	if err != nil {
@@ -211,6 +226,7 @@ func authorizeQuery(qctx context.Context, conn *sql.Conn, ctx *sdk.AppCtx, a *Ap
 			return errf("only built-in json_each and json_tree virtual tables are available in tables_query")
 		}
 	}
+	a.rememberAuthorization(ctx, resolved)
 	return nil
 }
 func stringValue(v any) string {

@@ -29,11 +29,12 @@ func TestDispatchInboundRepairsLegacyHTMLOnlyTextAndRoutesBothBodies(t *testing.
 		t.Run(provided, func(t *testing.T) {
 			platform := &stubPlatform{}
 			ctx := newTestCtx(t, platform)
+			seedSESRecipient(t, ctx, "inbox@example.test")
 			if _, err := dbInboundRouteUpsert(ctx.AppDB(), "test-proj", channelEmail, "*", "crm", "/inbound", 0); err != nil {
 				t.Fatal(err)
 			}
-			res, err := ctx.AppDB().Exec(`INSERT INTO messages(project_id,channel,direction,from_addr,to_addrs,subject,body_text,body_html,status,route_status)
-				VALUES('test-proj','email','in','sender@example.test','["inbox@example.test"]','Example',?,?,'received','pending')`, provided, testHTMLOnlyEmail)
+			res, err := ctx.AppDB().Exec(`INSERT INTO messages(project_id,channel,direction,from_addr,to_addrs,envelope_recipients,subject,body_text,body_html,status,route_status)
+				VALUES('test-proj','email','in','sender@example.test','["inbox@example.test"]','["inbox@example.test"]','Example',?,?,'received','pending')`, provided, testHTMLOnlyEmail)
 			if err != nil {
 				t.Fatal(err)
 			}

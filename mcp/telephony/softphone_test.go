@@ -901,7 +901,7 @@ func TestSoftphoneUsesAdaptiveJitterAndVisibleDiagnostics(t *testing.T) {
 			t.Fatalf("adaptive jitter worklet missing %q", required)
 		}
 	}
-	for _, required := range []string{"onDiagnostics", `type: "ping"`, "noiseSuppression: false", "autoGainControl: false", "microphoneTransportReady", `type: "diagnostics"`} {
+	for _, required := range []string{"onDiagnostics", "noiseSuppression: false", "autoGainControl: false", "microphoneTransportReady", `type: "diagnostics"`} {
 		if !strings.Contains(string(audio), required) {
 			t.Fatalf("softphone diagnostics/audio controls missing %q", required)
 		}

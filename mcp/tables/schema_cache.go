@@ -84,6 +84,9 @@ func (a *App) loadTableSchema(ctx *sdk.AppCtx, projectID, name string) (*Table, 
 	key := schemaCacheKey{projectID: projectID, tableName: name}
 	if schemas, ok := requestContext(ctx).Value(batchSchemaCacheKey{}).(map[schemaCacheKey]*Table); ok {
 		if table, found := schemas[key]; found {
+			if table.ProjectionID != 0 {
+				return nil, notFound("table not found")
+			}
 			return cloneTable(table), nil
 		}
 	}
@@ -94,7 +97,7 @@ func (a *App) loadTableSchema(ctx *sdk.AppCtx, projectID, name string) (*Table, 
 
 	qctx, cancel := context.WithTimeoutCause(requestContext(ctx), time.Duration(maxQueryMs(ctx))*time.Millisecond, errReadMetadataDeadline)
 	defer func() { observeReadCancellation(ctx, qctx); cancel() }()
-	rows, err := ctx.AppReadDB().QueryContext(qctx, `SELECT
+	rows, err := metadataReaderFor(ctx).QueryContext(qctx, `SELECT
 		t.id, t.name, t.scope, t.physical_name, t.created_at, t.row_count,
 		c.name, c.type, c.nullable, c.default_value
 		FROM tables_meta t

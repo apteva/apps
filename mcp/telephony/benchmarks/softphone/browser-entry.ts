@@ -16,7 +16,11 @@ function tone(frame:Float32Array,rate:number):[number,number]{
  // Controlled signal replaces the hardware microphone only. Capture DSP,
  // framing, worker, WebSockets, Go bridge and carrier codec still execute.
  navigator.mediaDevices.getUserMedia=async()=>destination.stream;
- const session:any=new SoftphoneSession({onNotice:detail=>notices.push({detail,at:Date.now()}),onState:(state,detail)=>states.push({state,detail,at:Date.now()}),onDiagnostics:d=>diagnostics.push({at:Date.now(),...d})});
+ const session:any=new SoftphoneSession({refreshMediaURL:async()=>{
+  const response=await fetch('/refresh-media',{method:'POST'});
+  if(!response.ok)throw Object.assign(new Error('Local media attach failed'),{status:response.status});
+  return (await response.json()).media_url;
+ },onNotice:detail=>notices.push({detail,at:Date.now()}),onState:(state,detail)=>states.push({state,detail,at:Date.now()}),onDiagnostics:d=>diagnostics.push({at:Date.now(),...d})});
  const wireDiagnostics:unknown[]=[];
  const sendText=session.sendText.bind(session);
  session.sendText=(data:string)=>{
@@ -46,16 +50,25 @@ function tone(frame:Float32Array,rate:number):[number,number]{
     const [hi,lo,check]=symbols;if((hi^lo^10)===check)markers.push({id:hi*16+lo,at_ms:start,level_dbfs:level});symbols=[];start=-1000;
    }}
   };
+  // Report render-clock stalls separately from nominal marker latency. A
+  // synthetic source can emit its tone late before the softphone sees it.
+  const clockBase={wall:performance.now(),source:sourceContext.currentTime,playback:ctx.currentTime};
+  const clockProgress={wall_elapsed_ms:0,source_elapsed_ms:0,playback_elapsed_ms:0,max_source_lag_ms:0,max_playback_lag_ms:0};
   const finish=arm.start_at+config.duration_ms+config.drain_ms;
   let muted=false,unmuted=false,reconnected=false;
   while(Date.now()<finish) {
     const elapsed=Date.now()-arm.start_at;
+    clockProgress.wall_elapsed_ms=performance.now()-clockBase.wall;
+    clockProgress.source_elapsed_ms=(sourceContext.currentTime-clockBase.source)*1000;
+    clockProgress.playback_elapsed_ms=(ctx.currentTime-clockBase.playback)*1000;
+    clockProgress.max_source_lag_ms=Math.max(clockProgress.max_source_lag_ms,clockProgress.wall_elapsed_ms-clockProgress.source_elapsed_ms);
+    clockProgress.max_playback_lag_ms=Math.max(clockProgress.max_playback_lag_ms,clockProgress.wall_elapsed_ms-clockProgress.playback_elapsed_ms);
     if(config.mute_microphone && elapsed>=4000 && !muted) {session.setMuted(true);muted=true;}
     if(config.mute_microphone && elapsed>=6000 && !unmuted) {session.setMuted(false);unmuted=true;}
     if(config.reconnect_browser && elapsed>=4000 && !reconnected) {reconnected=true;await fetch('/disconnect-browser',{method:'POST'});}
     await new Promise(r=>setTimeout(r,100));
   }
-  const result={wire_diagnostics:wireDiagnostics,markers,states,notices,diagnostics:diagnostics.slice(-8),audio_context_rate:ctx.sampleRate,source_context_rate:sourceContext.sampleRate,start_at:arm.start_at,output_clock_mapping_uncertainty_ms:20,errors};
+  const result={clock_progress:clockProgress,wire_diagnostics:wireDiagnostics,markers,states,notices,diagnostics:diagnostics.slice(-8),audio_context_rate:ctx.sampleRate,source_context_rate:sourceContext.sampleRate,start_at:arm.start_at,output_clock_mapping_uncertainty_ms:20,errors};
   session.sendDiagnostics();return result;
  }finally{navigator.mediaDevices.getUserMedia=original;probe?.disconnect();session.stop();source.disconnect();await sourceContext.close();}
 };
