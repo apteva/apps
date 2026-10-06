@@ -446,3 +446,32 @@
 .ap-processes .pf-inspector-head,
 .ap-processes .pf-inspector > .pf-save-controls { flex-shrink: 0; }
 .ap-processes .pf-inspector-content { min-height: 0; overflow: auto; padding-right: 2px; }
+
+/* Native modal keeps focus in the editor and leaves the flow at full width. */
+.ap-processes dialog.pf-step-modal {
+  width: min(960px, calc(100vw - 48px));
+  height: min(860px, calc(100dvh - 48px));
+  max-width: none;
+  max-height: none;
+  margin: auto;
+  border: 1px solid var(--pf-border);
+  border-radius: 16px;
+  padding: 24px;
+  color: var(--pc-text);
+  box-shadow: 0 24px 80px #0006;
+}
+.ap-processes dialog.pf-step-modal:not([open]) { display: none; }
+.ap-processes dialog.pf-step-modal::backdrop { background: #0009; }
+.ap-processes .pf-step-modal .pf-inspector-head h3 { font-size: 20px; }
+.ap-processes .pf-step-modal .pf-inspector-content { flex: 1; padding-right: 12px; overscroll-behavior: contain; }
+.ap-processes .pf-step-modal :is(input, textarea, select) { font-size: 14px; }
+.ap-processes .pf-step-modal textarea { line-height: 1.6; }
+@media (max-width: 600px) {
+  .ap-processes dialog.pf-step-modal {
+    width: calc(100vw - 16px);
+    height: calc(100dvh - 16px);
+    padding: 16px;
+    border-radius: 12px;
+  }
+  .ap-processes .pf-step-modal .pf-inspector-content { padding-right: 4px; }
+}

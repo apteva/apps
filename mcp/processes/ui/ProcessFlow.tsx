@@ -5,7 +5,7 @@ import {
   validTimings,
 } from "./Timing";
 /// <reference path="./flow-css.d.ts" />
-import { useEffect, useMemo, useState, useId, type ReactNode } from "react";
+import { useEffect, useMemo, useState, useId, useRef, type ReactNode } from "react";
 import {
   ReactFlow,
   Background,
@@ -325,6 +325,21 @@ export function ProcessFlow({
   // Refit when connections or available canvas width change. Positions are a
   // deterministic view of dependency semantics and are never procedure data.
   const inspectorOpen = steps.some((s) => s.key === selected);
+  const dialogRef = useRef<HTMLDialogElement | null>(null);
+  useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null;
+    if (editable && inspectorOpen && dialogRef.current && !dialogRef.current.open) {
+      dialogRef.current.showModal();
+    }
+    if (!editable || !inspectorOpen) return;
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = overflow;
+      if (opener?.isConnected) opener.focus();
+    };
+  }, [editable, inspectorOpen, selected]);
+  const Inspector = editable ? "dialog" : "aside";
   const topology = steps
     .map((s) => `${s.key}:${s.depends_on.join(",")}`)
     .join("|");
@@ -427,7 +442,7 @@ export function ProcessFlow({
           {notice}
         </p>
       )}
-      <div className={`pf-workspace ${active ? "has-inspector" : ""}`}>
+      <div className={`pf-workspace ${active && !editable ? "has-inspector" : ""}`}>
         <div className="pf-canvas">
           {steps.length ? (
             <ReactFlow
@@ -437,7 +452,8 @@ export function ProcessFlow({
               nodeTypes={nodeTypes}
               edgeTypes={edgeTypes}
               onInit={setFlow}
-              onNodeClick={(_, node) => {
+              onNodeClick={(event, node) => {
+                if ((event.target as Element).closest(".react-flow__handle")) return;
                 if (node.type === "step") {
                   setSelected(node.id);
                   setSelectedEdge(null);
@@ -553,7 +569,26 @@ export function ProcessFlow({
           </div>
         </div>
         {active && (
-          <aside className="pf-inspector" aria-label="Step details">
+          <Inspector
+            ref={(element) => { dialogRef.current = element?.tagName === "DIALOG" ? element as HTMLDialogElement : null; }}
+            className={`pf-inspector ${editable ? "pf-step-modal" : ""}`}
+            aria-label={editable ? "Edit step" : "Step details"}
+            aria-modal={editable ? true : undefined}
+            onKeyDown={(event) => {
+              if (!editable || event.key !== "Tab") return;
+              const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>(
+                'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], [tabindex="0"]',
+              )).filter(element => element.getClientRects().length > 0);
+              const first = controls[0], last = controls[controls.length - 1];
+              if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault(); last?.focus();
+              } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault(); first?.focus();
+              }
+            }}
+            onCancel={() => setSelected("")}
+            onClose={() => setSelected("")}
+          >
             <div className="pf-inspector-head">
               <div>
                 <span className="pf-eyebrow">
@@ -599,7 +634,7 @@ export function ProcessFlow({
                   id={`${instanceID}-instructions`}
                   aria-label="Step instructions"
                   required
-                  rows={6}
+                  rows={10}
                   value={active.instructions}
                   onChange={(e) => update({ instructions: e.target.value })}
                   placeholder="What should happen in this step?"
@@ -688,8 +723,11 @@ export function ProcessFlow({
               </>
             )}
             </div>
-            {saveControls}
-          </aside>
+            {saveControls || (editable && <div className="pf-save-controls">
+              <p className="pf-hint">Your edits are kept in the procedure form. Save the draft when ready.</p>
+              <button type="button" onClick={() => setSelected("")}>Done editing step</button>
+            </div>)}
+          </Inspector>
         )}
       </div>
     </section>

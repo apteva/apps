@@ -6,6 +6,9 @@ test("step timing is editable, persists, and cleans up removed anchors", async (
   await page
     .getByRole("button", { name: "Hourly weather alerts", exact: true })
     .click();
+  if (await page.getByRole("dialog", {name:"Edit step"}).count()) {
+    await page.getByRole("button", {name:"Close step details"}).click();
+  }
   await page
     .getByRole("button", { name: "Edit procedure", exact: true })
     .click();
@@ -29,6 +32,7 @@ test("step timing is editable, persists, and cleans up removed anchors", async (
     path: info.outputPath("timing-editor.png"),
     fullPage: true,
   });
+  await page.getByRole("button", {name:"Done editing step", exact:true}).click();
   await page.getByRole("button", { name: "Save draft", exact: true }).click();
   const saved = await page.evaluate(() =>
     JSON.parse(sessionStorage.getItem("process")!),
@@ -51,8 +55,11 @@ test("step timing is editable, persists, and cleans up removed anchors", async (
     })
     .press("Enter");
   await expect(
-    page.getByRole("complementary", { name: "Step details" }),
+    page.getByRole("dialog", { name: "Edit step" }),
   ).toContainText("10 minutes after Fetch current weather completes");
+  if (await page.getByRole("dialog", {name:"Edit step"}).count()) {
+    await page.getByRole("button", {name:"Close step details"}).click();
+  }
   await page
     .getByRole("button", { name: "Edit procedure", exact: true })
     .click();

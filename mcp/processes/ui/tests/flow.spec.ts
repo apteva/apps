@@ -25,7 +25,7 @@ test("view, edit, connect and persist the semantic weather flow", async ({
     .getByRole("button", { name: "Step 1: Fetch current weather", exact: true })
     .click();
   await expect(
-    page.getByRole("complementary", { name: "Step details" }),
+    page.getByRole("dialog", { name: "Edit step" }),
   ).toContainText("Timestamped report");
   await page.getByRole("button", { name: "Close step details" }).click();
   await page
@@ -58,6 +58,9 @@ test("view, edit, connect and persist the semantic weather flow", async ({
   await expect(
     page.locator('[data-testid="rf__edge-post_conversations:send_pushover"]'),
   ).toHaveCount(1);
+  if (await page.getByRole("dialog", {name:"Edit step"}).count()) {
+    await page.getByRole("button", {name:"Done editing step", exact:true}).click();
+  }
   await page.getByRole("button", { name: "Save draft", exact: true }).click();
   const saved = await page.evaluate(() =>
     JSON.parse(sessionStorage.getItem("process")!),
@@ -105,7 +108,7 @@ test("view, edit, connect and persist the semantic weather flow", async ({
   await expect(page.locator(".pf-step")).toHaveCount(3);
   expect(errors).toEqual([]);
 });
-test("mobile editor fits the page and opens step details below the canvas", async ({
+test("mobile editor opens a roomy step modal within the viewport", async ({
   page,
 }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
@@ -114,11 +117,12 @@ test("mobile editor fits the page and opens step details below the canvas", asyn
     .getByRole("button", { name: "+ New process", exact: true })
     .click();
   await page
-    .getByRole("button", { name: "Add first step", exact: true })
-    .click();
-  await page
     .getByLabel("Process name", { exact: true })
     .fill("Unassigned weather process");
+  await page
+    .getByRole("button", { name: "Add first step", exact: true })
+    .click();
+
   await expect(
     page.getByLabel("Responsible agent", { exact: true }),
   ).toHaveCount(0);
@@ -132,11 +136,16 @@ test("mobile editor fits the page and opens step details below the canvas", asyn
   expect(await page.evaluate(() => document.body.scrollWidth)).toBe(390);
   const canvas = (await page.locator(".pf-canvas").boundingBox())!;
   const inspector = (await page.locator(".pf-inspector").boundingBox())!;
-  expect(inspector.y).toBeGreaterThanOrEqual(canvas.y + canvas.height);
+  expect(inspector.width).toBeGreaterThan(360);
+  expect(inspector.y).toBeGreaterThanOrEqual(0);
+  expect(inspector.y + inspector.height).toBeLessThanOrEqual(844);
   await page.screenshot({
     path: testInfo.outputPath("flow-mobile.png"),
     fullPage: true,
   });
+  if (await page.getByRole("dialog", {name:"Edit step"}).count()) {
+    await page.getByRole("button", {name:"Done editing step", exact:true}).click();
+  }
   await page.getByRole("button", { name: "Save draft", exact: true }).click();
   await expect(
     page.getByRole("heading", {
