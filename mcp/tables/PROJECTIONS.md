@@ -1,4 +1,4 @@
-# SQL projections in Tables 0.2.6
+# SQL projections in Tables 0.2.7
 
 A projection stores a complete published result in Tables. Source writes append
 small transactional change records; a worker consumes them and recalculates dirty
@@ -150,6 +150,13 @@ It exposes:
 - Published `coverage_from` and `coverage_to`.
 - `phase_timings_ms` for queue wait, calculation, publication and cleanup.
 
+Tables also reports `worker_queue`, `read_queue`, `write_lock`, and `staging`
+inside `phase_timings_ms` (with matching `*_ms` fields). This separates time
+waiting for an interactive connection or projection worker from calculation,
+SQLite writer-lock acquisition, bounded row staging, the short generation
+publication switch, and old-generation cleanup. The previous `publication_ms`
+value remains available as the end-to-end publication phase for compatibility.
+
 Change IDs are watermarks, not counts; unrelated source tables do not increase a
 projection's latest relevant watermark. Consumption alone never declares a
 result ready. Scope inspection considers that scope and whole rebuild requests;
@@ -199,9 +206,17 @@ capture. Retired versions cannot resume capture; create a new version instead.
 
 ## Resource limits and upgrades
 
-One refresh runs per App instance, with one dedicated read-only background
-connection for file-backed databases. Interactive SDK readers remain available.
-In-memory test fixtures use their shared database pool. Each refresh deadline
+Interactive operations and projection refreshes have separate capacity
+reservations. `max_read_conns` limits interactive read slots,
+`max_projection_workers` limits concurrent scope calculations, and
+`max_total_concurrency` caps their shared capacity while preserving one slot
+for each class (when the total allows it). `max_read_queue_ms`
+and `max_projection_queue_ms` bound waits for those slots. Increasing read
+connections is optional; choose it based on CPU and SQLite workload.
+
+Refreshes use a dedicated bounded read-only background pool for file-backed
+databases; its size follows `max_projection_workers`. Interactive SDK readers
+remain available. In-memory test fixtures use their shared database pool. Each refresh deadline
 covers calculation, decoding, row/byte validation, staging and publication.
 A bounded single JSON result keeps all SQLite calculation under the pinned
 driver's cancellation watcher; typed cells preserve floating-point precision.
@@ -229,7 +244,8 @@ Migration 010 converts prior physical result tables into generation storage and
 stable read-only views atomically, retaining legacy results while rebuilding.
 Migration 011 adds persisted phase timings, durable queue millisecond timestamps
 and generation-cleanup indexes. Migration 012 adds the projection-ready delivery
-outbox and backfills timestamps for older queue rows. The worker drains up to 64 scopes per project while staying
+outbox and backfills timestamps for older queue rows. Migration 013 adds
+capacity and publication timing fields. The worker drains up to 64 scopes per project while staying
 within 900 ms per project and 2 seconds globally, then drains a bounded event
 batch. These are scheduling budgets; SQL calculation and publication still
 honour each projection's refresh limits.

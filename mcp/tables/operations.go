@@ -128,7 +128,27 @@ func (a *App) beginOperation(ctx *sdk.AppCtx, args map[string]any, operation str
 	}
 	scoped := ctx.WithProject(pid)
 	activeContexts.Store(scoped, callCtx)
-	cleanup := func() { observeReadCancellation(scoped, callCtx); activeContexts.Delete(scoped); cancel() }
+	var capacityRelease func()
+	if operationNeedsInteractiveCapacity(operation) {
+		if held, _ := callCtx.Value(interactiveCapacityHeldKey{}).(bool); !held {
+			var capacityErr error
+			capacityRelease, _, capacityErr = a.acquireCapacity(callCtx, ctx, interactiveCapacityKind)
+			if capacityErr != nil {
+				activeContexts.Delete(scoped)
+				cancel()
+				return nil, nil, queryStageErr("read_queue", operation, capacityErr)
+			}
+		}
+	}
+	cleanup := func() {
+		if capacityRelease != nil {
+			capacityRelease()
+			capacityRelease = nil
+		}
+		observeReadCancellation(scoped, callCtx)
+		activeContexts.Delete(scoped)
+		cancel()
+	}
 	readPhase(scoped, "schema_queue")
 	if err := a.schemaMu.acquire(callCtx, false); err != nil {
 		cleanup()

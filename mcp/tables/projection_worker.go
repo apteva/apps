@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -48,14 +49,20 @@ func claimProjectionQueue(ctx context.Context, app *sdk.AppCtx, pid string) (pro
 	return claimProjectionQueueAt(ctx, app, pid, time.Now().UnixMilli())
 }
 func claimProjectionQueueAt(ctx context.Context, app *sdk.AppCtx, pid string, now int64) (projectionQueueItem, bool, error) {
+	return claimProjectionQueueAtWithLimit(ctx, app, pid, now, 1)
+}
+func claimProjectionQueueAtWithLimit(ctx context.Context, app *sdk.AppCtx, pid string, now int64, workers int) (projectionQueueItem, bool, error) {
 	var item projectionQueueItem
+	if workers < 1 {
+		workers = 1
+	}
 	token, err := projectionLeaseToken()
 	if err != nil {
 		return item, false, err
 	}
 	// Serialize every scope of a projection, including a whole rebuild. Claims
 	// use SQLite time for lease expiry, independent from scheduling's test clock.
-	err = app.AppDB().QueryRowContext(ctx, `UPDATE projection_queue SET lease_token=?,forced=0,claimed_until=datetime('now',printf('+%d seconds',(SELECT COALESCE(json_extract(options,'$.max_refresh_ms'),?) FROM projection_definitions WHERE id=projection_queue.projection_id)/1000+10)),attempts=attempts+1 WHERE rowid=(SELECT q.rowid FROM projection_queue q JOIN projection_definitions p ON p.id=q.projection_id WHERE q.project_id=? AND p.status IN ('active','building') AND (p.built=1 OR q.scope_key='__all__') AND q.due_at_ms<=? AND (q.claimed_until IS NULL OR q.claimed_until<=CURRENT_TIMESTAMP) AND NOT EXISTS(SELECT 1 FROM projection_queue running WHERE running.projection_id=q.projection_id AND running.claimed_until>CURRENT_TIMESTAMP) AND (p.built=0 OR q.scope_key<>? OR NOT EXISTS(SELECT 1 FROM projection_queue small WHERE small.projection_id=q.projection_id AND small.scope_key<>? AND small.due_at_ms<=? AND (small.claimed_until IS NULL OR small.claimed_until<=CURRENT_TIMESTAMP))) ORDER BY CASE WHEN q.scope_key=? THEN 1 ELSE 0 END,q.due_at_ms,q.queued_at_ms,q.queued_at,q.scope_key LIMIT 1) RETURNING projection_id,project_id,scope_key,pending_change_id,revision,attempts,lease_token,queued_at_ms`, token, maxProjectionMs(app), pid, now, projectionAllScope, projectionAllScope, now, projectionAllScope).Scan(&item.ProjectionID, &item.ProjectID, &item.ScopeKey, &item.PendingID, &item.Revision, &item.Attempts, &item.LeaseToken, &item.QueuedAtMs)
+	err = app.AppDB().QueryRowContext(ctx, `UPDATE projection_queue SET lease_token=?,forced=0,claimed_until=datetime('now',printf('+%d seconds',(SELECT COALESCE(json_extract(options,'$.max_refresh_ms'),?) FROM projection_definitions WHERE id=projection_queue.projection_id)/1000+10)),attempts=attempts+1 WHERE rowid=(SELECT q.rowid FROM projection_queue q JOIN projection_definitions p ON p.id=q.projection_id WHERE q.project_id=? AND p.status IN ('active','building') AND (p.built=1 OR q.scope_key='__all__') AND q.due_at_ms<=? AND (q.claimed_until IS NULL OR q.claimed_until<=CURRENT_TIMESTAMP) AND (SELECT COUNT(*) FROM projection_queue running WHERE running.projection_id=q.projection_id AND running.claimed_until>CURRENT_TIMESTAMP) < ? AND NOT EXISTS(SELECT 1 FROM projection_queue running WHERE running.projection_id=q.projection_id AND running.claimed_until>CURRENT_TIMESTAMP AND (running.scope_key=? OR q.scope_key=?)) AND (p.built=0 OR q.scope_key<>? OR NOT EXISTS(SELECT 1 FROM projection_queue small WHERE small.projection_id=q.projection_id AND small.scope_key<>? AND small.due_at_ms<=? AND (small.claimed_until IS NULL OR small.claimed_until<=CURRENT_TIMESTAMP))) ORDER BY CASE WHEN q.scope_key=? THEN 1 ELSE 0 END,q.due_at_ms,q.queued_at_ms,q.queued_at,q.scope_key LIMIT 1) RETURNING projection_id,project_id,scope_key,pending_change_id,revision,attempts,lease_token,queued_at_ms`, token, maxProjectionMs(app), pid, now, workers, projectionAllScope, projectionAllScope, projectionAllScope, projectionAllScope, now, projectionAllScope).Scan(&item.ProjectionID, &item.ProjectID, &item.ScopeKey, &item.PendingID, &item.Revision, &item.Attempts, &item.LeaseToken, &item.QueuedAtMs)
 	if err == nil && item.QueuedAtMs > 0 && now > item.QueuedAtMs {
 		item.QueueWaitMs = now - item.QueuedAtMs
 	}
@@ -104,7 +111,7 @@ func (a *App) closeProjectionReader() {
 func (a *App) backgroundReader(ctx context.Context, app *sdk.AppCtx) (*sql.DB, error) {
 	a.projectionReaderMu.Lock()
 	defer a.projectionReaderMu.Unlock()
-	if a.projectionReader != nil && a.projectionReaderGeneration == app.AppDBGeneration() {
+	if a.projectionReader != nil && a.projectionReaderGeneration == app.AppDBGeneration() && a.projectionReader.Stats().MaxOpenConnections == maxProjectionWorkers(app) {
 		return a.projectionReader, nil
 	}
 	if a.projectionReader != nil {
@@ -117,7 +124,7 @@ func (a *App) backgroundReader(ctx context.Context, app *sdk.AppCtx) (*sql.DB, e
 		return nil, err
 	}
 	// In-memory fixtures use the existing database; file-backed installations
-	// reserve exactly one separate background connection, leaving SDK readers free.
+	// use a bounded pool dedicated to projection calculations.
 	if path == "" {
 		return app.AppReadDB(), nil
 	}
@@ -131,8 +138,8 @@ func (a *App) backgroundReader(ctx context.Context, app *sdk.AppCtx) (*sql.DB, e
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	db.SetMaxOpenConns(maxProjectionWorkers(app))
+	db.SetMaxIdleConns(maxProjectionWorkers(app))
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, err
@@ -173,7 +180,11 @@ func (a *App) readProjectionRows(parent context.Context, app *sdk.AppCtx, p *pro
 	if err != nil {
 		return nil, 0, err
 	}
+	connStarted := time.Now()
 	conn, err := db.Conn(parent)
+	if timing, ok := parent.Value(projectionTimingKey{}).(*projectionTimingState); ok && timing != nil {
+		timing.readQueue += time.Since(connStarted)
+	}
 	if err != nil {
 		return nil, 0, err
 	}
@@ -328,6 +339,22 @@ func (a *App) refreshProjectionScope(parent context.Context, app *sdk.AppCtx, it
 	if err != nil {
 		return err
 	}
+	var capacityRelease func()
+	if held, _ := parent.Value(projectionCapacityHeldKey{}).(bool); !held {
+		var wait time.Duration
+		var err error
+		capacityRelease, wait, err = a.acquireCapacity(parent, app, projectionCapacityKind)
+		if err != nil {
+			return err
+		}
+		defer capacityRelease()
+		parent = context.WithValue(parent, projectionTimingKey{}, &projectionTimingState{workerQueue: wait})
+	}
+	timing, _ := parent.Value(projectionTimingKey{}).(*projectionTimingState)
+	if timing == nil {
+		timing = &projectionTimingState{}
+	}
+	parent = context.WithValue(parent, projectionTimingKey{}, timing)
 	ctx, cancel := context.WithTimeout(parent, time.Duration(p.Options.MaxMs)*time.Millisecond)
 	defer cancel()
 	scoped, finish, err := a.beginOperation(app, map[string]any{"name": p.Name, "_project_id": p.ProjectID, "_request_context": ctx}, "projection_worker", false)
@@ -380,11 +407,17 @@ func (a *App) refreshProjectionScope(parent context.Context, app *sdk.AppCtx, it
 		}
 	}
 	calculationStarted := time.Now()
+	readWaitBefore := timing.readQueue
 	rows, watermark, err := a.readProjectionRows(ctx, scoped, p, raw, bound, true)
 	if err != nil {
 		return err
 	}
-	item.CalculationMs = time.Since(calculationStarted).Milliseconds()
+	calculationElapsed := time.Since(calculationStarted)
+	readWaitDuring := timing.readQueue - readWaitBefore
+	if readWaitDuring > 0 && readWaitDuring < calculationElapsed {
+		calculationElapsed -= readWaitDuring
+	}
+	item.CalculationMs = calculationElapsed.Milliseconds()
 	grouped := map[string][]map[string]any{}
 	if item.ScopeKey == projectionAllScope {
 		grouped[projectionAllScope] = nil
@@ -412,9 +445,53 @@ func (a *App) refreshProjectionScope(parent context.Context, app *sdk.AppCtx, it
 	var publicationMs int64
 	err = publishProjectionGeneration(ctx, scoped, p, item, grouped, watermark, a.projectionTime().UnixMilli(), &publicationMs)
 	if err == nil {
-		a.recordProjectionMetrics(scoped, p.ID, projectionPhaseMetrics{Queue: item.QueueWaitMs, Calculation: item.CalculationMs, Publication: publicationMs, Cleanup: a.projectionMetricsFor(p.ID).Cleanup})
+		m := a.projectionMetricsFor(p.ID)
+		a.recordProjectionMetrics(scoped, p.ID, projectionPhaseMetrics{Queue: item.QueueWaitMs, WorkerQueue: timing.workerQueue.Milliseconds(), ReadQueue: timing.readQueue.Milliseconds(), Calculation: item.CalculationMs, WriteLock: timing.writeLock.Milliseconds(), Staging: timing.staging.Milliseconds(), Publication: publicationMs, Cleanup: m.Cleanup})
 	}
 	return err
+}
+
+func (a *App) runProjectionRefresh(parent context.Context, app *sdk.AppCtx, item projectionQueueItem) error {
+	release, wait, err := a.acquireCapacity(parent, app, projectionCapacityKind)
+	if err != nil {
+		return err
+	}
+	defer release()
+	timing := &projectionTimingState{workerQueue: wait}
+	ctx := context.WithValue(parent, projectionCapacityHeldKey{}, true)
+	ctx = context.WithValue(ctx, projectionTimingKey{}, timing)
+	if err := a.refreshProjectionScope(ctx, app, item); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (a *App) processProjectionItems(ctx context.Context, app *sdk.AppCtx, items []projectionQueueItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(items))
+	for _, item := range items {
+		item := item
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := a.runProjectionRefresh(ctx, app, item); err != nil {
+				failureCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+				errCh <- failProjectionQueueAt(failureCtx, app, item, err, a.projectionTime().UnixMilli())
+				cancel()
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			return fmt.Errorf("record projection failure: %w", err)
+		}
+	}
+	return nil
 }
 func (a *App) projectionWorker(ctx context.Context, app *sdk.AppCtx) error {
 	if !a.projectionWorkerMu.TryLock() {
@@ -447,30 +524,39 @@ func (a *App) projectionWorker(ctx context.Context, app *sdk.AppCtx) error {
 		start := time.Now()
 		scoped := app.WithProject(pid)
 		activeContexts.Store(scoped, ctx)
+		consumeRelease, _, acquireErr := a.acquireCapacity(ctx, app, projectionCapacityKind)
+		if acquireErr != nil {
+			activeContexts.Delete(scoped)
+			return acquireErr
+		}
 		err := a.consumeProjectionChanges(ctx, scoped, pid)
+		consumeRelease()
 		activeContexts.Delete(scoped)
 		if err != nil {
 			return err
 		}
-		for i := 0; i < projectionQueueBatch; i++ {
+		for processed := 0; processed < projectionQueueBatch; {
 			if time.Since(globalStart) >= projectionWorkerGlobalBudget {
 				break
 			}
-			item, ok, err := claimProjectionQueueAt(ctx, app, pid, a.projectionTime().UnixMilli())
-			if err != nil {
-				return err
+			batch := make([]projectionQueueItem, 0, maxProjectionWorkers(app))
+			for len(batch) < maxProjectionWorkers(app) && processed+len(batch) < projectionQueueBatch {
+				item, ok, err := claimProjectionQueueAtWithLimit(ctx, app, pid, a.projectionTime().UnixMilli(), maxProjectionWorkers(app))
+				if err != nil {
+					return err
+				}
+				if !ok {
+					break
+				}
+				batch = append(batch, item)
 			}
-			if !ok {
+			if len(batch) == 0 {
 				break
 			}
-			if err := a.refreshProjectionScope(ctx, app, item); err != nil {
-				failureCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-				e := failProjectionQueueAt(failureCtx, app, item, err, a.projectionTime().UnixMilli())
-				cancel()
-				if e != nil {
-					return fmt.Errorf("record projection failure: %w", e)
-				}
+			if err := a.processProjectionItems(ctx, app, batch); err != nil {
+				return err
 			}
+			processed += len(batch)
 			if time.Since(start) >= projectionWorkerBudget {
 				break
 			}

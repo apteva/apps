@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.2.6
+version: 0.2.7
 description: |
+  v0.2.7 Separates interactive read and projection capacity, adds configurable
+  worker/queue limits, and reports connection, worker, lock, staging,
+  publication, and cleanup timings for mixed workloads.
   v0.2.6 Batches bounded projection work, records queue wait from durable
   timestamps, and coalesces projection-ready notifications through a durable
   retrying outbox.
@@ -224,7 +227,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.2.6
+    ref: tables/v0.2.7
     entry: mcp/tables
   port: 8080
   health_check: /health
@@ -264,6 +267,21 @@ config_schema:
     default: "4"
     label: Concurrent read connections
     description: Read-only SQLite connections available independently of the serialized writer. Valid range is 1 to 16.
+  - name: max_projection_workers
+    type: text
+    default: "1"
+    label: Concurrent projection workers
+    description: Maximum projection scopes calculated concurrently. Valid range is 1 to 16.
+  - name: max_total_concurrency
+    type: text
+    default: "5"
+    label: Total Tables concurrency
+    description: Shared capacity for interactive operations and projection workers. Tables preserves one slot for each class when the total allows it.
+  - name: max_projection_queue_ms
+    type: text
+    default: "2000"
+    label: Max projection worker queue wait (ms)
+    description: Time a projection refresh may wait for a worker slot before it is retried.
   - name: log_all_reads
     type: boolean
     default: "false"

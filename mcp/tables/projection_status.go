@@ -9,7 +9,7 @@ import (
 func projectionTimestamp(ms int64) string { return time.UnixMilli(ms).UTC().Format(time.RFC3339Nano) }
 func (a *App) projectionStatus(app *sdk.AppCtx, p *projectionDefinition, key string) (map[string]any, error) {
 	m := a.loadStoredProjectionMetrics(app, p.ID)
-	p.QueueMs, p.CalculationMs, p.PublicationMs, p.CleanupMs = m.Queue, m.Calculation, m.Publication, m.Cleanup
+	p.QueueMs, p.WorkerQueueMs, p.ReadQueueMs, p.CalculationMs, p.WriteLockMs, p.StagingMs, p.PublicationMs, p.CleanupMs = m.Queue, m.WorkerQueue, m.ReadQueue, m.Calculation, m.WriteLock, m.Staging, m.Publication, m.Cleanup
 	reader := metadataReaderFor(app)
 	ctx := requestContext(app)
 	var cursor int64
@@ -30,9 +30,13 @@ func (a *App) projectionStatus(app *sdk.AppCtx, p *projectionDefinition, key str
 	unconsumed := p.Latest > cursor
 	ready := p.Built && pending == 0 && p.Latest <= p.Published
 	out := map[string]any{"name": p.Name, "version": p.Version, "status": p.Status, "is_current": p.Current, "built": p.Built, "ready": ready, "stale": p.Built && !ready, "latest_relevant_change": p.Latest, "latest_change_id": p.Latest, "consumed_change_id": cursor, "published_change_id": p.Published, "pending_scopes": pending, "refresh_running": running > 0, "lag": max(int64(0), p.Latest-p.Published), "unconsumed_relevant_changes": unconsumed, "min_refresh_interval_seconds": p.Options.Interval, "last_failure": nil, "last_successful_publication_at": nil, "next_scheduled_refresh": nil, "coverage_from": nil, "coverage_to": nil}
-	out["phase_timings_ms"] = map[string]any{"queue": p.QueueMs, "calculation": p.CalculationMs, "publication": p.PublicationMs, "cleanup": p.CleanupMs}
+	out["phase_timings_ms"] = map[string]any{"queue": p.QueueMs, "worker_queue": p.WorkerQueueMs, "read_queue": p.ReadQueueMs, "calculation": p.CalculationMs, "write_lock": p.WriteLockMs, "staging": p.StagingMs, "publication": p.PublicationMs, "cleanup": p.CleanupMs}
 	out["queue_ms"] = p.QueueMs
+	out["worker_queue_ms"] = p.WorkerQueueMs
+	out["read_queue_ms"] = p.ReadQueueMs
 	out["calculation_ms"] = p.CalculationMs
+	out["write_lock_ms"] = p.WriteLockMs
+	out["staging_ms"] = p.StagingMs
 	out["publication_ms"] = p.PublicationMs
 	out["cleanup_ms"] = p.CleanupMs
 	out["queued"] = pending

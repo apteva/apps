@@ -103,6 +103,15 @@ func (a *App) toolTablesBatch(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			return nil, queryStageErr("schema_queue", "tables_batch", err)
 		}
 		defer releaseSnapshot()
+		var wait time.Duration
+		var capacityErr error
+		capacityRelease, wait, capacityErr := a.acquireCapacity(batchCtx, ctx, interactiveCapacityKind)
+		if capacityErr != nil {
+			return nil, queryStageErr("read_queue", "tables_batch", capacityErr)
+		}
+		_ = wait
+		defer capacityRelease()
+		batchCtx = context.WithValue(batchCtx, interactiveCapacityHeldKey{}, true)
 	}
 	var readState *batchReadState
 	if mode == "read_snapshot" {

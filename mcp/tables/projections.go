@@ -27,22 +27,24 @@ const (
 )
 
 type projectionDefinition struct {
-	ID                                               int64
-	ProjectID, Name, Status, SQL, ResultTable        string
-	Version                                          int
-	SourceTables                                     []string
-	SourceIDs                                        []int64
-	ResultCols                                       []Column
-	ScopeCols                                        []string
-	Options                                          projectionOptions
-	Current, Built                                   bool
-	Latest, Published                                int64
-	PublishedAt                                      sql.NullInt64
-	LastFailure                                      sql.NullString
-	QueueMs, CalculationMs, PublicationMs, CleanupMs int64
-	Format                                           int
+	ID                                                                                                   int64
+	ProjectID, Name, Status, SQL, ResultTable                                                            string
+	Version                                                                                              int
+	SourceTables                                                                                         []string
+	SourceIDs                                                                                            []int64
+	ResultCols                                                                                           []Column
+	ScopeCols                                                                                            []string
+	Options                                                                                              projectionOptions
+	Current, Built                                                                                       bool
+	Latest, Published                                                                                    int64
+	PublishedAt                                                                                          sql.NullInt64
+	LastFailure                                                                                          sql.NullString
+	QueueMs, WorkerQueueMs, ReadQueueMs, CalculationMs, WriteLockMs, StagingMs, PublicationMs, CleanupMs int64
+	Format                                                                                               int
 }
-type projectionPhaseMetrics struct{ Queue, Calculation, Publication, Cleanup int64 }
+type projectionPhaseMetrics struct {
+	Queue, WorkerQueue, ReadQueue, Calculation, WriteLock, Staging, Publication, Cleanup int64
+}
 type projectionQueuedRevision struct{ Revision, Pending int64 }
 type projectionQueueItem struct {
 	CoveredScopes                                         map[string]projectionQueuedRevision
@@ -87,12 +89,12 @@ func (a *App) recordProjectionMetrics(ctx *sdk.AppCtx, id int64, m projectionPha
 	// 0.2.4 databases may be inspected before migration 011 has run. The
 	// in-memory value remains available in that case; upgraded databases retain
 	// the latest timings across restarts.
-	_, _ = ctx.AppDB().ExecContext(requestContext(ctx), `UPDATE projection_definitions SET last_queue_ms=?,last_calculation_ms=?,last_publication_ms=?,last_cleanup_ms=? WHERE id=?`, m.Queue, m.Calculation, m.Publication, m.Cleanup, id)
+	_, _ = ctx.AppDB().ExecContext(requestContext(ctx), `UPDATE projection_definitions SET last_queue_ms=?,last_worker_queue_ms=?,last_read_queue_ms=?,last_calculation_ms=?,last_write_lock_ms=?,last_staging_ms=?,last_publication_ms=?,last_cleanup_ms=? WHERE id=?`, m.Queue, m.WorkerQueue, m.ReadQueue, m.Calculation, m.WriteLock, m.Staging, m.Publication, m.Cleanup, id)
 }
 
 func (a *App) loadStoredProjectionMetrics(ctx *sdk.AppCtx, id int64) projectionPhaseMetrics {
 	var m projectionPhaseMetrics
-	err := metadataReaderFor(ctx).QueryRowContext(requestContext(ctx), `SELECT last_queue_ms,last_calculation_ms,last_publication_ms,last_cleanup_ms FROM projection_definitions WHERE id=?`, id).Scan(&m.Queue, &m.Calculation, &m.Publication, &m.Cleanup)
+	err := metadataReaderFor(ctx).QueryRowContext(requestContext(ctx), `SELECT last_queue_ms,last_worker_queue_ms,last_read_queue_ms,last_calculation_ms,last_write_lock_ms,last_staging_ms,last_publication_ms,last_cleanup_ms FROM projection_definitions WHERE id=?`, id).Scan(&m.Queue, &m.WorkerQueue, &m.ReadQueue, &m.Calculation, &m.WriteLock, &m.Staging, &m.Publication, &m.Cleanup)
 	if err != nil {
 		return a.projectionMetricsFor(id)
 	}

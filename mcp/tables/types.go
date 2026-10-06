@@ -339,6 +339,18 @@ func maxReadConns(ctx *sdk.AppCtx) int {
 	return int(cfgInt64Range(ctx, "max_read_conns", 4, 1, 16))
 }
 
+func maxProjectionWorkers(ctx *sdk.AppCtx) int {
+	return int(cfgInt64Range(ctx, "max_projection_workers", 1, 1, 16))
+}
+
+func maxTotalConcurrency(ctx *sdk.AppCtx) int {
+	return int(cfgInt64Range(ctx, "max_total_concurrency", int64(maxReadConns(ctx)+maxProjectionWorkers(ctx)), 1, 32))
+}
+
+func maxProjectionQueueMs(ctx *sdk.AppCtx) int {
+	return int(cfgInt64Range(ctx, "max_projection_queue_ms", 2000, 1, 60_000))
+}
+
 func slowQueryMs(ctx *sdk.AppCtx) int {
 	return int(cfgInt64Range(ctx, "slow_query_ms", 250, 1, 60_000))
 }

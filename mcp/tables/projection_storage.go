@@ -267,17 +267,43 @@ func quotedColumns(cols []string) []string {
 	return out
 }
 func publicationTx(parent context.Context, app *sdk.AppCtx, p *projectionDefinition, fn func(context.Context, *sql.Tx) error) error {
+	return publicationTxPhase(parent, app, p, "publication", fn)
+}
+
+func publicationTxPhase(parent context.Context, app *sdk.AppCtx, p *projectionDefinition, phase string, fn func(context.Context, *sql.Tx) error) error {
 	ctx, cancel := context.WithTimeout(parent, time.Duration(p.Options.PublishMs)*time.Millisecond)
 	defer cancel()
+	started := time.Now()
 	tx, err := app.AppDB().BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	// modernc defers SQLite's RESERVED lock until the first write. Force that
+	// acquisition explicitly so write_lock_ms describes the real contention,
+	// rather than only the inexpensive BeginTx call.
+	lockStarted := started
+	if _, err := tx.ExecContext(ctx, `UPDATE projection_definitions SET updated_at=updated_at WHERE id=?`, p.ID); err != nil {
+		return err
+	}
+	if timing, ok := parent.Value(projectionTimingKey{}).(*projectionTimingState); ok && timing != nil {
+		timing.writeLock += time.Since(lockStarted)
+	}
+	workStarted := time.Now()
 	if err = fn(ctx, tx); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if timing, ok := parent.Value(projectionTimingKey{}).(*projectionTimingState); ok && timing != nil {
+		if phase == "staging" {
+			timing.staging += time.Since(workStarted)
+		} else {
+			timing.publication += time.Since(workStarted)
+		}
+	}
+	return nil
 }
 
 // Compatibility entry point also used by lease tests. The production worker
@@ -288,7 +314,6 @@ func publishProjectionRows(app *sdk.AppCtx, p *projectionDefinition, item projec
 	return publishProjectionGeneration(ctx, app, p, item, grouped, item.PendingID, time.Now().UnixMilli(), nil)
 }
 func publishProjectionGeneration(ctx context.Context, app *sdk.AppCtx, p *projectionDefinition, item projectionQueueItem, grouped map[string][]map[string]any, watermark, now int64, publicationMsOut *int64) error {
-	publicationStarted := time.Now()
 	var retained int
 	reader, _ := ctx.Value(projectionBackgroundDBKey{}).(*sql.DB)
 	if reader == nil {
@@ -324,6 +349,20 @@ func publishProjectionGeneration(ctx context.Context, app *sdk.AppCtx, p *projec
 	if len(scopes) == 1 {
 		readyPayload["scope_key"] = scopes[0]
 	}
+	// Validate and size rows before taking SQLite's writer lock. The final
+	// publication transaction only switches heads and removes queue entries.
+	scopeBytes := make(map[string]int64, len(grouped))
+	for key, rows := range grouped {
+		var total int64
+		for _, row := range rows {
+			n, err := jsonSize(row, p.Options.MaxBytes)
+			if err != nil {
+				return err
+			}
+			total += n
+		}
+		scopeBytes[key] = total
+	}
 	if p.Options.CoverageFrom != "" {
 		readyPayload["coverage_from"] = p.Options.CoverageFrom
 		readyPayload["coverage_to"] = p.Options.CoverageTo
@@ -343,7 +382,8 @@ func publishProjectionGeneration(ctx context.Context, app *sdk.AppCtx, p *projec
 		}
 		return nil
 	}
-	err = publicationTx(ctx, app, p, func(c context.Context, tx *sql.Tx) error {
+	atomicPublicationStarted := time.Now()
+	err = publicationTxPhase(ctx, app, p, "publication", func(c context.Context, tx *sql.Tx) error {
 		if err := fence(c, tx); err != nil {
 			return err
 		}
@@ -370,7 +410,7 @@ func publishProjectionGeneration(ctx context.Context, app *sdk.AppCtx, p *projec
 		if len(batch) == 0 {
 			return nil
 		}
-		err := publicationTx(ctx, app, p, func(c context.Context, tx *sql.Tx) error {
+		err := publicationTxPhase(ctx, app, p, "staging", func(c context.Context, tx *sql.Tx) error {
 			stmt, err := tx.PrepareContext(c, q)
 			if err != nil {
 				return err
@@ -415,7 +455,7 @@ func publishProjectionGeneration(ctx context.Context, app *sdk.AppCtx, p *projec
 	}
 	// Whole builds can have many scopes. Stage head pointers separately, then
 	// copy them in one bounded publication transaction (bounded by result caps).
-	err = publicationTx(ctx, app, p, func(c context.Context, tx *sql.Tx) error {
+	err = publicationTxPhase(ctx, app, p, "publication", func(c context.Context, tx *sql.Tx) error {
 		if err := fence(c, tx); err != nil {
 			return err
 		}
@@ -433,20 +473,13 @@ func publishProjectionGeneration(ctx context.Context, app *sdk.AppCtx, p *projec
 			if err := tx.QueryRowContext(c, `SELECT COALESCE(SUM(row_count),0),COALESCE(SUM(result_bytes),0) FROM `+quote(projectionHeads(p))+` WHERE scope_key=?`, key).Scan(&oldRows, &oldBytes); err != nil {
 				return err
 			}
-			var scopeBytes int64
-			for _, row := range rows {
-				n, err := jsonSize(row, p.Options.MaxBytes)
-				if err != nil {
-					return err
-				}
-				scopeBytes += n
-			}
+			newScopeBytes := scopeBytes[key]
 			totalRows += int64(len(rows)) - oldRows
-			totalBytes += scopeBytes - oldBytes
+			totalBytes += newScopeBytes - oldBytes
 			if totalRows > int64(p.Options.MaxRows) || totalBytes > p.Options.MaxBytes {
 				return errf("published projection exceeds total row or byte budget")
 			}
-			if _, err := tx.ExecContext(c, `INSERT INTO `+quote(projectionHeads(p))+` VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(scope_key) DO UPDATE SET generation=excluded.generation,watermark=excluded.watermark,computed_at_ms=excluded.computed_at_ms,coverage_from=excluded.coverage_from,coverage_to=excluded.coverage_to,row_count=excluded.row_count,result_bytes=excluded.result_bytes`, key, gen, watermark, now, p.Options.CoverageFrom, p.Options.CoverageTo, len(rows), scopeBytes); err != nil {
+			if _, err := tx.ExecContext(c, `INSERT INTO `+quote(projectionHeads(p))+` VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(scope_key) DO UPDATE SET generation=excluded.generation,watermark=excluded.watermark,computed_at_ms=excluded.computed_at_ms,coverage_from=excluded.coverage_from,coverage_to=excluded.coverage_to,row_count=excluded.row_count,result_bytes=excluded.result_bytes`, key, gen, watermark, now, p.Options.CoverageFrom, p.Options.CoverageTo, len(rows), newScopeBytes); err != nil {
 				return err
 			}
 		}
@@ -479,7 +512,7 @@ func publishProjectionGeneration(ctx context.Context, app *sdk.AppCtx, p *projec
 		// A full publication covers its entire calculation snapshot, even when the
 		// change-log cursor is still catching up. Scoped publications advance overall
 		// freshness only after every relevant change was mapped and every queue drained.
-		publicationMs := time.Since(publicationStarted).Milliseconds()
+		publicationMs := time.Since(atomicPublicationStarted).Milliseconds()
 		if publicationMsOut != nil {
 			*publicationMsOut = publicationMs
 		}

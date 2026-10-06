@@ -35,6 +35,8 @@ type App struct {
 	projectionNow              func() time.Time
 	projectionGeneration       uint64
 	projectionWorkerMu         sync.Mutex
+	capacityMu                 sync.Mutex
+	capacity                   *capacityState
 	projectionReaderMu         sync.Mutex
 	projectionReader           *sql.DB
 	projectionReaderGeneration uint64
@@ -80,12 +82,16 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		ctx.AppReadDB().SetMaxOpenConns(maxReadConns(ctx))
 		ctx.AppReadDB().SetMaxIdleConns(maxReadConns(ctx))
 	}
+	a.ensureCapacityLimits(ctx)
 	ctx.Logger().Info("tables mounted",
 		"max_rows_per_table", maxRowsPerTable(ctx),
 		"max_query_rows", maxQueryRows(ctx),
 		"max_query_ms", maxQueryMs(ctx),
 		"max_read_queue_ms", maxReadQueueMs(ctx),
 		"max_read_conns", maxReadConns(ctx),
+		"max_projection_workers", maxProjectionWorkers(ctx),
+		"max_total_concurrency", maxTotalConcurrency(ctx),
+		"max_projection_queue_ms", maxProjectionQueueMs(ctx),
 		"effective_read_max_open", ctx.AppReadDB().Stats().MaxOpenConnections,
 		"shared_writer_pool", ctx.AppReadDB() == ctx.AppDB(),
 		"gomaxprocs", runtime.GOMAXPROCS(0),
