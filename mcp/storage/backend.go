@@ -13,11 +13,10 @@ package main
 // Disk implements the proxy ops + returns ErrPresignNotSupported on
 // the presigned ones. S3 implements all four.
 //
-// Key layout: every blob is addressed by a `<sha256[:2]>/<storage_key>`
-// path-style key. Disk uses it as a filesystem path under blobsDir;
-// S3 uses it as the bucket-relative object key. The two-byte hash
-// prefix exists for the disk's benefit (avoids 1M files in one
-// directory) and is harmless on S3.
+// New rows persist their complete backend object key on the file row. The
+// legacy objectKey helper remains the default for old rows and for new
+// content-addressed uploads; direct multipart rows intentionally persist
+// 00/<storage_key> and keep that location after asynchronous hashing.
 
 import (
 	"context"
@@ -68,6 +67,7 @@ type ObjectMetadata struct {
 	Size         int64
 	ContentType  string
 	ETag         string
+	VersionID    string
 	LastModified time.Time
 }
 

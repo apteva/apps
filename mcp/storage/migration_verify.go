@@ -39,20 +39,23 @@ func verifyMigratedBackend(app *sdk.AppCtx, be Backend, identity string) error {
 	if cleanup > 0 {
 		return errors.New("drain pending blob cleanup on the old backend before migrating")
 	}
-	rows, err := app.AppDB().Query(`SELECT storage_key,sha256,size_bytes FROM files`)
+	rows, err := app.AppDB().Query(`SELECT storage_key,sha256,size_bytes,COALESCE(object_key,'') FROM files`)
 	if err != nil {
 		return err
 	}
 	type object struct {
-		key, sha string
-		size     int64
+		key, sha, objectKey string
+		size                int64
 	}
 	var objects []object
 	for rows.Next() {
 		var o object
-		if err = rows.Scan(&o.key, &o.sha, &o.size); err != nil {
+		if err = rows.Scan(&o.key, &o.sha, &o.size, &o.objectKey); err != nil {
 			rows.Close()
 			return err
+		}
+		if o.objectKey == "" {
+			o.objectKey = objectKey(o.sha, o.key)
 		}
 		objects = append(objects, o)
 	}
@@ -63,7 +66,7 @@ func verifyMigratedBackend(app *sdk.AppCtx, be Backend, identity string) error {
 	}
 	for _, o := range objects {
 		c, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		r, e := be.OpenObject(c, objectKey(o.sha, o.key), ObjectReadOptions{})
+		r, e := be.OpenObject(c, o.objectKey, ObjectReadOptions{})
 		if e != nil {
 			cancel()
 			return fmt.Errorf("migration: missing object %s: %w", o.key, e)
