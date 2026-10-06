@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.10.2
+version: 0.10.3
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -87,6 +87,7 @@ provides:
     - { prefix: /ivr/, no_auth: true }
     - { prefix: /xml/, no_auth: true }
     - { prefix: /ui/ }
+    - { prefix: /audio-health }
     - { prefix: /calls }
     - { prefix: /calls/ }
     - { prefix: /recordings/ }
@@ -274,6 +275,36 @@ provides:
       label: Calls
       icon: phone
       entry: /ui/CallsPanel.mjs
+  ui_components:
+    - name: audio-health
+      label: Telephony audio health
+      description: Project-wide audio degradation and recent browser/carrier observations, linking to filterable Telephony diagnostics.
+      entry: /ui/AudioHealthWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [telephony.audio.degraded, telephony.audio.recovered, telephony.audio.alert, telephony.audio.alert_recovered]
+      settings_schema:
+        type: object
+        properties:
+          time_range:
+            type: string
+            title: Time window
+            enum: [1h, 24h, 7d]
+            enum_names: [Last hour, Last 24 hours, Last 7 days]
+            default: 24h
+          provider:
+            type: string
+            title: Provider (blank for all)
+            default: ""
+          max_calls:
+            type: integer
+            title: Maximum calls
+            default: 6
+            minimum: 3
+            maximum: 12
 runtime:
   kind: source
   source:
@@ -470,6 +501,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/inbound/plivo/", Handler: a.handlePlivoInbound, NoAuth: true},
 		{Pattern: "/ivr/", Handler: a.handleIVRCallback, NoAuth: true},
 		// Panel data endpoint — lists active + recent calls.
+		{Pattern: "/audio-health", Handler: a.handleAudioDashboard},
 		{Pattern: "/calls", Handler: a.handleListCalls},
 		{Pattern: "/calls/events", Handler: a.handleCallNotifications},
 		// Panel action endpoint.
