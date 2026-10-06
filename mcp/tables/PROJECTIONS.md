@@ -212,5 +212,9 @@ Migration 010 converts prior physical result tables into generation storage and
 stable read-only views atomically, retaining legacy results while rebuilding.
 Back up the database before upgrade. **Downgrade to 0.1.27 requires restoring that
 backup**; the old worker cannot publish into the new views. The manifest declares
-`database_upgrade: requires_restore`. Releasing a source version does not install
-or deploy it to production.
+For migrated projections, the app retains a writable `p_<id>` compatibility
+table for the previous worker and serves current readers from an atomic
+`pv_<id>` generation view. This makes the schema migration
+`database_upgrade: backward_compatible` and allows normal blue-green
+activation. Releasing a source version does not install or deploy it to
+production.

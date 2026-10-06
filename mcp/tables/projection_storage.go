@@ -14,6 +14,10 @@ type projectionBackgroundDBKey struct{}
 
 func projectionData(p *projectionDefinition) string  { return fmt.Sprintf("pd_%d", p.ID) }
 func projectionHeads(p *projectionDefinition) string { return fmt.Sprintf("ph_%d", p.ID) }
+
+// ResultTable remains the old, writable p_<id> name for compatibility with
+// the previous Tables worker. New readers use the generation-published view.
+func projectionVisibleTable(p *projectionDefinition) string { return fmt.Sprintf("pv_%d", p.ID) }
 func projectionVisibleColumns(p *projectionDefinition) []string {
 	out := []string{"id", "created_at", "updated_at", "_revision"}
 	for _, c := range p.ResultCols {
@@ -22,6 +26,19 @@ func projectionVisibleColumns(p *projectionDefinition) []string {
 	return out
 }
 func createProjectionStorage(tx *writeTx, p *projectionDefinition) error {
+	if err := createProjectionDataTable(tx, p); err != nil {
+		return err
+	}
+	if err := createProjectionHeadsTable(tx, p); err != nil {
+		return err
+	}
+	if err := createProjectionView(tx, p); err != nil {
+		return err
+	}
+	return createProjectionCompatibilitySurface(tx, p)
+}
+
+func createProjectionDataTable(tx *writeTx, p *projectionDefinition) error {
 	defs := []string{`id INTEGER PRIMARY KEY`, `created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP`, `updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP`, `_revision INTEGER NOT NULL DEFAULT 1`, `_projection_scope TEXT NOT NULL`, `_projection_generation TEXT NOT NULL`}
 	for _, c := range p.ResultCols {
 		typ, err := sqliteType(c.Type)
@@ -34,23 +51,50 @@ func createProjectionStorage(tx *writeTx, p *projectionDefinition) error {
 		}
 		defs = append(defs, d)
 	}
-	for _, q := range []string{
-		`CREATE TABLE ` + quote(projectionData(p)) + ` (` + strings.Join(defs, ",") + `)`,
-		`CREATE INDEX ` + quote(fmt.Sprintf("pg_%d", p.ID)) + ` ON ` + quote(projectionData(p)) + ` (_projection_generation,_projection_scope)`,
-		`CREATE TABLE ` + quote(projectionHeads(p)) + ` (scope_key TEXT PRIMARY KEY,generation TEXT NOT NULL,watermark INTEGER NOT NULL,computed_at_ms INTEGER NOT NULL,coverage_from TEXT,coverage_to TEXT,row_count INTEGER NOT NULL DEFAULT 0,result_bytes INTEGER NOT NULL DEFAULT 0)`,
-	} {
-		if _, err := tx.Exec(q); err != nil {
+	if _, err := tx.Exec(`CREATE TABLE ` + quote(projectionData(p)) + ` (` + strings.Join(defs, ",") + `)`); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`CREATE INDEX ` + quote(fmt.Sprintf("pg_%d", p.ID)) + ` ON ` + quote(projectionData(p)) + ` (_projection_generation,_projection_scope)`)
+	return err
+}
+
+func createProjectionHeadsTable(tx *writeTx, p *projectionDefinition) error {
+	_, err := tx.Exec(`CREATE TABLE ` + quote(projectionHeads(p)) + ` (scope_key TEXT PRIMARY KEY,generation TEXT NOT NULL,watermark INTEGER NOT NULL,computed_at_ms INTEGER NOT NULL,coverage_from TEXT,coverage_to TEXT,row_count INTEGER NOT NULL DEFAULT 0,result_bytes INTEGER NOT NULL DEFAULT 0)`)
+	return err
+}
+
+// New projections use a cheap alias because no previous worker knows about
+// them. Migrated definitions retain a plain p_<id> table for fallback.
+func createProjectionCompatibilitySurface(tx *writeTx, p *projectionDefinition) error {
+	if p.Format == 2 {
+		_, err := tx.Exec(`CREATE VIEW ` + quote(p.ResultTable) + ` AS SELECT * FROM ` + quote(projectionVisibleTable(p)))
+		return err
+	}
+	return createProjectionCompatibilityTableNamed(tx, p, p.ResultTable)
+}
+
+func createProjectionCompatibilityTableNamed(tx *writeTx, p *projectionDefinition, name string) error {
+	defs := []string{`id INTEGER PRIMARY KEY`, `created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP`, `updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP`, `_revision INTEGER NOT NULL DEFAULT 1`}
+	for _, c := range p.ResultCols {
+		typ, err := sqliteType(c.Type)
+		if err != nil {
 			return err
 		}
+		d := quote(c.Name) + " " + typ
+		if !c.Nullable {
+			d += " NOT NULL"
+		}
+		defs = append(defs, d)
 	}
-	return createProjectionView(tx, p)
+	_, err := tx.Exec(`CREATE TABLE ` + quote(name) + ` (` + strings.Join(defs, ",") + `)`)
+	return err
 }
 func createProjectionView(tx *writeTx, p *projectionDefinition) error {
 	cols := []string{}
 	for _, c := range projectionVisibleColumns(p) {
 		cols = append(cols, "d."+quote(c))
 	}
-	_, err := tx.Exec(`CREATE VIEW ` + quote(p.ResultTable) + ` AS SELECT ` + strings.Join(cols, ",") + ` FROM ` + quote(projectionData(p)) + ` d JOIN ` + quote(projectionHeads(p)) + ` h ON h.scope_key=d._projection_scope AND h.generation=d._projection_generation`)
+	_, err := tx.Exec(`CREATE VIEW ` + quote(projectionVisibleTable(p)) + ` AS SELECT ` + strings.Join(cols, ",") + ` FROM ` + quote(projectionData(p)) + ` d JOIN ` + quote(projectionHeads(p)) + ` h ON h.scope_key=d._projection_scope AND h.generation=d._projection_generation`)
 	return err
 }
 
@@ -80,23 +124,18 @@ func (a *App) ensureProjectionStorage(app *sdk.AppCtx) error {
 		if err != nil {
 			return err
 		}
-		if _, err = tx.Exec(`ALTER TABLE ` + quote(p.ResultTable) + ` RENAME TO ` + quote(projectionData(p))); err == nil {
-			_, err = tx.Exec(`ALTER TABLE ` + quote(projectionData(p)) + ` ADD COLUMN _projection_scope TEXT NOT NULL DEFAULT '__all__'`)
-		}
-		if err == nil {
-			_, err = tx.Exec(`ALTER TABLE ` + quote(projectionData(p)) + ` ADD COLUMN _projection_generation TEXT NOT NULL DEFAULT 'legacy'`)
+		if err = createProjectionDataTable(tx, p); err == nil {
+			cols := strings.Join(quotedColumns(projectionVisibleColumns(p)), ",")
+			_, err = tx.Exec(`INSERT INTO ` + quote(projectionData(p)) + ` (` + cols + `,_projection_scope,_projection_generation) SELECT ` + cols + `, '__all__', 'legacy' FROM ` + quote(p.ResultTable))
 		}
 		if err == nil {
 			_, err = tx.Exec(`UPDATE `+quote(projectionData(p))+` SET _projection_scope=COALESCE((SELECT scope_key FROM projection_result_index WHERE projection_id=? AND result_id=id LIMIT 1),'__all__')`, p.ID)
 		}
 		if err == nil {
-			_, err = tx.Exec(`CREATE TABLE ` + quote(projectionHeads(p)) + ` (scope_key TEXT PRIMARY KEY,generation TEXT NOT NULL,watermark INTEGER NOT NULL,computed_at_ms INTEGER NOT NULL,coverage_from TEXT,coverage_to TEXT,row_count INTEGER NOT NULL DEFAULT 0,result_bytes INTEGER NOT NULL DEFAULT 0)`)
+			err = createProjectionHeadsTable(tx, p)
 		}
 		if err == nil {
 			_, err = tx.Exec(`INSERT INTO ` + quote(projectionHeads(p)) + ` SELECT _projection_scope,'legacy',0,0,NULL,NULL,COUNT(*),0 FROM ` + quote(projectionData(p)) + ` GROUP BY _projection_scope`)
-		}
-		if err == nil {
-			_, err = tx.Exec(`CREATE INDEX ` + quote(fmt.Sprintf("pg_%d", p.ID)) + ` ON ` + quote(projectionData(p)) + ` (_projection_generation,_projection_scope)`)
 		}
 		if err == nil {
 			err = createProjectionView(tx, p)
@@ -115,7 +154,78 @@ func (a *App) ensureProjectionStorage(app *sdk.AppCtx) error {
 			return err
 		}
 	}
+	return a.ensureProjectionCompatibility(app)
+}
+
+// Databases upgraded by Tables 0.2.0–0.2.3 already contain p_<id> views.
+// Materialize those views back into writable compatibility tables before an
+// automatic blue-green upgrade can be considered backward compatible.
+func (a *App) ensureProjectionCompatibility(app *sdk.AppCtx) error {
+	rows, err := app.AppReadDB().QueryContext(requestContext(app), projectionSelect+`WHERE storage_format=1`)
+	if err != nil {
+		return err
+	}
+	var defs []*projectionDefinition
+	for rows.Next() {
+		p, e := decodeProjection(app, rows)
+		if e != nil {
+			rows.Close()
+			return e
+		}
+		defs = append(defs, p)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, p := range defs {
+		var kind string
+		if err := app.AppReadDB().QueryRowContext(requestContext(app), `SELECT type FROM sqlite_master WHERE name=?`, p.ResultTable).Scan(&kind); err != nil {
+			return err
+		}
+		tx, err := beginWrite(app)
+		if err != nil {
+			return err
+		}
+		if kind == "view" {
+			compat := fmt.Sprintf("pc_%d", p.ID)
+			if err = createProjectionCompatibilityTableNamed(tx, p, compat); err == nil {
+				cols := strings.Join(quotedColumns(projectionVisibleColumns(p)), ",")
+				_, err = tx.Exec(`INSERT INTO ` + quote(compat) + ` (` + cols + `) SELECT ` + cols + ` FROM ` + quote(p.ResultTable))
+			}
+			if err == nil {
+				_, err = tx.Exec(`DROP VIEW ` + quote(p.ResultTable))
+			}
+			if err == nil {
+				_, err = tx.Exec(`ALTER TABLE ` + quote(compat) + ` RENAME TO ` + quote(p.ResultTable))
+			}
+		}
+		if err == nil {
+			var viewExists int
+			if e := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='view' AND name=?`, projectionVisibleTable(p)).Scan(&viewExists); e != nil {
+				err = e
+			} else if viewExists == 0 {
+				err = createProjectionView(tx, p)
+			}
+		}
+		if err == nil {
+			err = tx.Commit()
+		}
+		tx.Rollback()
+		if err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func quotedColumns(cols []string) []string {
+	out := make([]string, len(cols))
+	for i, col := range cols {
+		out[i] = quote(col)
+	}
+	return out
 }
 func publicationTx(parent context.Context, app *sdk.AppCtx, p *projectionDefinition, fn func(context.Context, *sql.Tx) error) error {
 	ctx, cancel := context.WithTimeout(parent, time.Duration(p.Options.PublishMs)*time.Millisecond)

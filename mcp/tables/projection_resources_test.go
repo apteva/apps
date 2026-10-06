@@ -211,6 +211,13 @@ func TestProjectionMigrationPreservesLegacyRows(t *testing.T) {
 	if err := a.ensureProjectionStorage(ctx); err != nil {
 		t.Fatal(err)
 	}
+	var kind string
+	if err := ctx.AppDB().QueryRow(`SELECT type FROM sqlite_master WHERE name='p_1'`).Scan(&kind); err != nil || kind != "table" {
+		t.Fatalf("legacy result compatibility surface = %q (%v), want table", kind, err)
+	}
+	if err := ctx.AppDB().QueryRow(`SELECT type FROM sqlite_master WHERE name='pv_1'`).Scan(&kind); err != nil || kind != "view" {
+		t.Fatalf("generation result surface = %q (%v), want view", kind, err)
+	}
 	out := mustCall(t, a, ctx, "tables_query", map[string]any{"sql": "SELECT total FROM {legacy}"})["rows"].([]map[string]any)
 	if out[0]["total"] != float64(42) {
 		t.Fatal("migration lost legacy result")
@@ -297,6 +304,35 @@ func TestProjectionMigrationFromReleasedSchema(t *testing.T) {
 	var total float64
 	if err := db.QueryRow(`SELECT total FROM p_1`).Scan(&total); err != nil || total != 7 {
 		t.Fatal(total, err)
+	}
+}
+
+func TestProjectionCompatibilityMaterializesPreviousGenerationView(t *testing.T) {
+	ctx := newTestCtx(t)
+	a := &App{}
+	projectionSourceTable(t, a, ctx)
+	createProjection(t, a, ctx)
+	mustCall(t, a, ctx, "rows_insert", map[string]any{"table": "events", "rows": []any{map[string]any{"centre_id": "a", "value": 1}}})
+	runProjectionWorker(t, a, ctx)
+	p, err := a.loadProjection(ctx, "test-proj", "event_totals")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The current create path uses the same p_<id> view shape that 0.2.0–0.2.3
+	// shipped, so the compatibility pass should materialize it in place.
+	if _, err := ctx.AppDB().Exec(`UPDATE projection_definitions SET storage_format=1 WHERE id=?`, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ensureProjectionCompatibility(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var kind string
+	if err := ctx.AppDB().QueryRow(`SELECT type FROM sqlite_master WHERE name=?`, p.ResultTable).Scan(&kind); err != nil || kind != "table" {
+		t.Fatalf("materialized compatibility surface = %q (%v), want table", kind, err)
+	}
+	out := mustCall(t, a, ctx, "tables_query", map[string]any{"sql": "SELECT centre_id,total FROM {event_totals}"})["rows"].([]map[string]any)
+	if len(out) != 1 || out[0]["centre_id"] != "a" {
+		t.Fatalf("materialized view lost published rows: %#v", out)
 	}
 }
 
