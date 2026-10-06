@@ -145,10 +145,11 @@ func (a *App) validateProjection(ctx *sdk.AppCtx, p *projectionDefinition) error
 		}
 	}
 	for _, q := range queries {
-		ph, err := placeholderNames(q.text)
+		tokens, err := a.cachedProjectionSQL(ctx, q.text)
 		if err != nil {
 			return err
 		}
+		ph := placeholderNamesFromTokens(tokens)
 		for _, name := range ph {
 			if sources[name] == nil {
 				return errf("SQL references undeclared source %q", name)
@@ -496,13 +497,16 @@ func (a *App) consumeProjectionChanges(ctx context.Context, app *sdk.AppCtx, pid
 		}
 		pending := map[string]int64{}
 		var mappingFailure string
+		coalesced := false
 		invalidationCtx := context.WithValue(ctx, projectionInvalidationCacheKey{}, map[string][]map[string]any{})
 		for _, c := range changes {
 			if !c.relevant || c.id <= p.Published {
 				continue
 			}
-			if mappingFailure != "" {
-				pending[projectionAllScope] = c.id
+			if mappingFailure != "" || coalesced {
+				if c.id > pending[projectionAllScope] {
+					pending[projectionAllScope] = c.id
+				}
 				continue
 			}
 			keys, err := a.projectionChangeScopes(invalidationCtx, app, p, c.source.String, c.old, c.next)
@@ -519,6 +523,13 @@ func (a *App) consumeProjectionChanges(ctx context.Context, app *sdk.AppCtx, pid
 			}
 			for key := range keys {
 				pending[key] = c.id
+			}
+			if len(pending) > projectionScopeCoalesceThreshold {
+				// Once fan-out is broad, one complete snapshot is cheaper and safer
+				// than retaining hundreds of independent generations. The complete
+				// rebuild carries the newest watermark and coalesces later changes.
+				pending = map[string]int64{projectionAllScope: c.id}
+				coalesced = true
 			}
 		}
 		tx, err := app.AppDB().BeginTx(ctx, nil)

@@ -8,6 +8,8 @@ import (
 
 func projectionTimestamp(ms int64) string { return time.UnixMilli(ms).UTC().Format(time.RFC3339Nano) }
 func (a *App) projectionStatus(app *sdk.AppCtx, p *projectionDefinition, key string) (map[string]any, error) {
+	m := a.loadStoredProjectionMetrics(app, p.ID)
+	p.QueueMs, p.CalculationMs, p.PublicationMs, p.CleanupMs = m.Queue, m.Calculation, m.Publication, m.Cleanup
 	reader := metadataReaderFor(app)
 	ctx := requestContext(app)
 	var cursor int64
@@ -28,6 +30,11 @@ func (a *App) projectionStatus(app *sdk.AppCtx, p *projectionDefinition, key str
 	unconsumed := p.Latest > cursor
 	ready := p.Built && pending == 0 && p.Latest <= p.Published
 	out := map[string]any{"name": p.Name, "version": p.Version, "status": p.Status, "is_current": p.Current, "built": p.Built, "ready": ready, "stale": p.Built && !ready, "latest_relevant_change": p.Latest, "latest_change_id": p.Latest, "consumed_change_id": cursor, "published_change_id": p.Published, "pending_scopes": pending, "refresh_running": running > 0, "lag": max(int64(0), p.Latest-p.Published), "unconsumed_relevant_changes": unconsumed, "min_refresh_interval_seconds": p.Options.Interval, "last_failure": nil, "last_successful_publication_at": nil, "next_scheduled_refresh": nil, "coverage_from": nil, "coverage_to": nil}
+	out["phase_timings_ms"] = map[string]any{"queue": p.QueueMs, "calculation": p.CalculationMs, "publication": p.PublicationMs, "cleanup": p.CleanupMs}
+	out["queue_ms"] = p.QueueMs
+	out["calculation_ms"] = p.CalculationMs
+	out["publication_ms"] = p.PublicationMs
+	out["cleanup_ms"] = p.CleanupMs
 	out["queued"] = pending
 	out["failed"] = failed
 	out["change_cursor"] = cursor
@@ -91,6 +98,7 @@ func (a *App) projectionStatus(app *sdk.AppCtx, p *projectionDefinition, key str
 		}
 		if key != "" {
 			out["published_change_id"] = published
+			out["source_change_included"] = published
 			out["last_successful_publication_at"] = projectionTimestamp(computed)
 			out["lag"] = nil
 		}
@@ -106,6 +114,9 @@ func (a *App) projectionStatus(app *sdk.AppCtx, p *projectionDefinition, key str
 		// newer than both its published snapshot and the complete result watermark.
 		out["ready"] = p.Built && pending == 0 && p.Latest <= max(cursor, p.Published, published)
 		out["stale"] = p.Built && out["ready"] != true
+		out["requested_scope_ready"] = out["ready"]
+	} else {
+		out["source_change_included"] = p.Published
 	}
 	return out, nil
 }
