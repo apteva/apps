@@ -13,6 +13,7 @@ import (
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
+	tk "github.com/apteva/app-sdk/testkit"
 )
 
 type readLogRecorder struct {
@@ -400,4 +401,88 @@ func TestReadDiagnosticsInitialExecutionCancellation(t *testing.T) {
 		t.Fatalf("initial execution diagnostics: %+v", r)
 	}
 	assertPoolReusable(t, &App{}, ctx, reader)
+}
+
+func TestReadDiagnosticEventAfterPersistenceUsesResolvedProject(t *testing.T) {
+	ctx, rec := newTestCtxWithRecorder(t)
+	// A global install context and a resolved project must still emit on the
+	// same project lane as the stored record, never the wildcard lane.
+	d := &readObservation{app: ctx.WithProject(""), projectID: "diagnostic-project", started: time.Now(),
+		operation: "tables_query", queryID: "redacted", phases: map[string]time.Duration{}}
+	recordReadDiagnostic(d, fmt.Errorf("secret SQL text"), "error", "select", 0, false, nil)
+	events := rec.EventsByTopic(topicDiagnosticRecorded)
+	if len(events) != 1 || events[0].ProjectID != d.projectID {
+		t.Fatalf("diagnostics event project = %+v", events)
+	}
+	if payload, ok := events[0].Data.(map[string]any); !ok || len(payload) != 0 {
+		t.Fatalf("unexpected diagnostics payload: %+v", events[0].Data)
+	}
+	var count int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM read_diagnostics WHERE project_id=?`, d.projectID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("event without persisted diagnostic: %d %v", count, err)
+	}
+	rec.Reset()
+	if _, err := ctx.AppDB().Exec(`DROP TABLE read_diagnostics`); err != nil {
+		t.Fatal(err)
+	}
+	recordReadDiagnostic(d, nil, "ok", "", 0, false, nil)
+	if len(rec.Events()) != 0 {
+		t.Fatal("event emitted for failed persistence")
+	}
+}
+
+func TestDiagnosticsFiltersLimitsIsolationAndNoReadEventLoop(t *testing.T) {
+	rec := tk.NewEmitRecorder()
+	ctx := newTestCtx(t, tk.WithEmitter(rec))
+	ctx.Config()["log_all_reads"] = "true"
+	previous := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previous })
+	for i := 0; i < 125; i++ {
+		for _, outcome := range []string{"ok", "error", "timeout", "canceled"} {
+			if _, err := ctx.AppDB().Exec(`INSERT INTO read_diagnostics(project_id,recorded_at_ms,operation,call_id,query_id,outcome) VALUES(?,?,'tables_query','','redacted',?)`, "test-proj", i, outcome); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, err := ctx.AppDB().Exec(`INSERT INTO read_diagnostics(project_id,recorded_at_ms,operation,call_id,query_id,outcome) VALUES('other',999,'private','','redacted','error')`); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		query        string
+		count, total int
+		outcome      string
+	}{
+		{"limit=10&outcome=error", 10, 125, "error"},
+		{"limit=10000&outcome=timeout", 100, 125, "timeout"},
+		{"limit=0&outcome=canceled", 1, 125, "canceled"},
+		{"limit=25", 25, 500, ""},
+	} {
+		t.Run(tc.query, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			(&App{}).handleDiagnostics(w, httptest.NewRequest("GET", "/diagnostics?project_id=test-proj&"+tc.query, nil))
+			if w.Code != 200 {
+				t.Fatalf("status=%d: %s", w.Code, w.Body.String())
+			}
+			var data struct {
+				Diagnostics []readDiagnostic `json:"diagnostics"`
+				Total       int              `json:"total"`
+				HasMore     bool             `json:"has_more"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &data); err != nil {
+				t.Fatal(err)
+			}
+			if len(data.Diagnostics) != tc.count || data.Total != tc.total || !data.HasMore {
+				t.Fatalf("unexpected diagnostics: %+v", data)
+			}
+			for _, row := range data.Diagnostics {
+				if row.Operation == "private" || (tc.outcome != "" && row.Outcome != tc.outcome) {
+					t.Fatalf("filter/isolation failure: %+v", row)
+				}
+			}
+		})
+	}
+	if len(rec.EventsByTopic(topicDiagnosticRecorded)) != 0 {
+		t.Fatal("reading diagnostics caused a diagnostic event loop")
+	}
 }

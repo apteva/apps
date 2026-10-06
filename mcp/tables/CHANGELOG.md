@@ -1,3 +1,14 @@
+# Tables v0.2.10 — filtered live diagnostics
+
+- Add errors-only, timeout and cancellation filters, with 10/25/50 row limits
+  (10 by default) in both the panel and dashboard widget. Keep narrow widget
+  metrics in two columns and truncate long row details with hover text.
+- Replace manual refresh and 10-second polling with project/install-filtered
+  SSE invalidations after diagnostics are saved. Coalesce bursts, retain a
+  follow-up refresh during requests, and reconcile after reconnect/focus.
+- Abort obsolete requests and retry failed fetches with bounded backoff.
+- Establish a verified baseline before testing projection refresh deadlines.
+
 # Tables v0.2.9 — compact diagnostics layout
 
 - Keep diagnostic table headings and values in responsive columns even when

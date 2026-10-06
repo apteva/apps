@@ -2,8 +2,9 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.2.9
+version: 0.2.10
 description: |
+  v0.2.10 Adds diagnostics outcome filters, bounded row lists and live SSE updates.
   v0.2.9 Compacts diagnostics rows and fixes responsive column layout in the
   Tables panel and dashboard widget.
   v0.2.8 Adds durable redacted read diagnostics to the Tables panel and dashboard widget.
@@ -183,6 +184,8 @@ provides:
         icon: 🗃️
 
   publishes:
+    - name: diagnostics.recorded
+      description: A redacted read diagnostic was saved; reload the project diagnostics list.
     - name: table.created
       description: A table was created.
       payload:
@@ -240,7 +243,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.2.9
+    ref: tables/v0.2.10
     entry: mcp/tables
   port: 8080
   health_check: /health

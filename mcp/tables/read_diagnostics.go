@@ -208,6 +208,9 @@ func recordReadDiagnostic(d *readObservation, err error, outcome, stage string, 
 		sqliteCode,
 	)
 	if insertErr == nil {
+		// Invalidate only after the record is readable, using the resolved project
+		// even for a global install. Never emit SQL, errors or query parameters.
+		d.app.EmitWithProject(topicDiagnosticRecorded, d.projectID, map[string]any{})
 		if id, idErr := result.LastInsertId(); idErr == nil && id%128 == 0 {
 			_, _ = d.app.AppDB().ExecContext(ctx, `DELETE FROM read_diagnostics WHERE project_id=? AND id NOT IN (SELECT id FROM read_diagnostics WHERE project_id=? ORDER BY recorded_at_ms DESC,id DESC LIMIT 10000)`, d.projectID, d.projectID)
 		}

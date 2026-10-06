@@ -46,8 +46,16 @@ The Tables project panel now includes a **Diagnostics** surface, and Tables
 registers a suggested `dashboard.home` diagnostics widget. It reads the same
 redacted records through `GET /diagnostics`, showing error and slow-read
 counts, recent p95 duration, operation, phase, queue time, and outcome. The
-sidecar keeps the newest 10,000 records per project; raw SQL, parameters, row
-values, and raw database error text are never stored.
+list defaults to 10 newest rows, with 25/50-row options and server-side
+filters for errors, timeouts or cancellations. Counts follow the selected
+filter; recent p95 covers only the displayed rows. The shared app SSE stream
+reloads on `diagnostics.recorded` for the current install/project, coalescing
+bursts and retaining one follow-up during an in-flight request. There is no
+Refresh button or periodic polling. Reconnect, focus and visibility recovery
+reload authoritative data; fetch failures retry at 1/2/4 seconds, then wait
+for another event or recovery trigger. Events are best-effort invalidations;
+the durable list remains authoritative. The sidecar keeps the newest 10,000
+records per project; raw SQL, parameters, row values, and raw database error text are never stored.
 
 `tables read completed` is emitted once per observed read after its rows,
 explicit connection, and operation locks have been released. All eight read

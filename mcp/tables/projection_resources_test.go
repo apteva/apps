@@ -341,8 +341,17 @@ func TestProjectionDeadlineIncludesExpensiveLaterRows(t *testing.T) {
 	a := &App{}
 	projectionSourceTable(t, a, ctx)
 	mustCall(t, a, ctx, "rows_insert", map[string]any{"table": "events", "rows": []any{map[string]any{"centre_id": "a", "value": 8}}})
-	mustCall(t, a, ctx, "projections_create", map[string]any{"name": "later_rows", "version": 1, "sql": `SELECT CASE WHEN id=1 THEN value ELSE (WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<10000000) SELECT SUM(n) FROM seq) END AS total FROM {events} ORDER BY id`, "source_tables": []any{"events"}, "result_columns": []any{map[string]any{"name": "total", "type": "number"}}, "max_refresh_ms": 20})
+	mustCall(t, a, ctx, "projections_create", map[string]any{"name": "later_rows", "version": 1, "sql": `SELECT CASE WHEN id=1 THEN value ELSE (WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<10000000) SELECT SUM(n) FROM seq) END AS total FROM {events} ORDER BY id`, "source_tables": []any{"events"}, "result_columns": []any{map[string]any{"name": "total", "type": "number"}}, "max_refresh_ms": 2000})
 	runProjectionWorker(t, a, ctx)
+	baseline := projectionStatusFor(t, a, ctx, map[string]any{"name": "later_rows"})
+	if baseline["ready"] != true {
+		t.Fatalf("baseline never published: %v", baseline)
+	}
+	// Only the second refresh uses the deadline under test; CI must not
+	// accidentally time out the initial complete generation.
+	if _, err := ctx.AppDB().Exec(`UPDATE projection_definitions SET options=json_set(options,'$.max_refresh_ms',20) WHERE name='later_rows'`); err != nil {
+		t.Fatal(err)
+	}
 	mustCall(t, a, ctx, "rows_insert", map[string]any{"table": "events", "rows": []any{map[string]any{"centre_id": "b", "value": 1}}})
 	started := time.Now()
 	runProjectionWorker(t, a, ctx)

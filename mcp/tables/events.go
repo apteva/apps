@@ -8,13 +8,14 @@ import sdk "github.com/apteva/app-sdk"
 // can match by exact topic or by prefix ("table.*", "row.*").
 
 const (
-	topicTableCreated    = "table.created"
-	topicTableAltered    = "table.altered"
-	topicTableDropped    = "table.dropped"
-	topicRowInserted     = "row.inserted"
-	topicRowUpdated      = "row.updated"
-	topicRowDeleted      = "row.deleted"
-	topicProjectionReady = "projection.ready"
+	topicTableCreated       = "table.created"
+	topicTableAltered       = "table.altered"
+	topicTableDropped       = "table.dropped"
+	topicRowInserted        = "row.inserted"
+	topicRowUpdated         = "row.updated"
+	topicRowDeleted         = "row.deleted"
+	topicDiagnosticRecorded = "diagnostics.recorded"
+	topicProjectionReady    = "projection.ready"
 )
 
 // Emissions are best-effort UI invalidations. The panel reloads authoritative

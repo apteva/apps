@@ -27,6 +27,9 @@ const {
   RowEditor,
   InsertDialog,
 } = await import("./TablesPanel");
+const { default: TablesDiagnosticsWidget } = await import(
+  "./TablesDiagnosticsWidget"
+);
 const { parseInputValue, parseJSON, stringifyJSON } = await import(
   "./lib/values"
 );
@@ -335,22 +338,41 @@ test("the workspace sends typed row filters to the search endpoint", async () =>
   (window as any).__aptevaAppEvents = { subscribe: () => () => {} };
   globalThis.fetch = (async (input: any, options: any) => {
     const url = new URL(String(input), "http://localhost");
-    calls.push({ url, body: options.body ? parseJSON(options.body) : null, method: options.method });
+    calls.push({
+      url,
+      body: options.body ? parseJSON(options.body) : null,
+      method: options.method,
+    });
     const path = url.pathname;
-    if (path.endsWith("/tables")) return response({ tables: [{ ...table, id: 41 }], has_more: false });
-    if (path.endsWith("/rows/search")) return response({ rows: [], has_more: false, next_offset: 0 });
-    if (path.endsWith("/rows")) return response({ rows: [{ id: 1, _revision: 1, title: "Acme", note: "" }], has_more: false, next_offset: 1 });
+    if (path.endsWith("/tables"))
+      return response({ tables: [{ ...table, id: 41 }], has_more: false });
+    if (path.endsWith("/rows/search"))
+      return response({ rows: [], has_more: false, next_offset: 0 });
+    if (path.endsWith("/rows"))
+      return response({
+        rows: [{ id: 1, _revision: 1, title: "Acme", note: "" }],
+        has_more: false,
+        next_offset: 1,
+      });
     return response({ ...table, id: 41 });
   }) as typeof fetch;
-  const ui = render(<TablesPanel appName="tables" projectId="p" installId={9} />);
+  const ui = render(
+    <TablesPanel appName="tables" projectId="p" installId={9} />,
+  );
   await flush();
   await flush();
-  fireEvent.change(ui.getByPlaceholderText("Search title…"), { target: { value: "Acme" } });
+  fireEvent.change(ui.getByPlaceholderText("Search title…"), {
+    target: { value: "Acme" },
+  });
   fireEvent.click(ui.getByText("Search"));
   await flush();
-  const search = calls.find((call) => call.url.pathname.endsWith("/rows/search"));
+  const search = calls.find((call) =>
+    call.url.pathname.endsWith("/rows/search"),
+  );
   expect(search?.method).toBe("POST");
-  expect(search?.body).toEqual({ where: [{ col: "title", op: "contains", value: "Acme" }] });
+  expect(search?.body).toEqual({
+    where: [{ col: "title", op: "contains", value: "Acme" }],
+  });
   expect(search?.url.searchParams.get("include_total")).toBe("false");
 });
 
@@ -359,12 +381,35 @@ test("the projections workspace exposes readiness and forced refresh", async () 
   (window as any).__aptevaAppEvents = { subscribe: () => () => {} };
   globalThis.fetch = (async (input: any, options: any) => {
     const url = new URL(String(input), "http://localhost");
-    calls.push({ url, body: options.body ? parseJSON(options.body) : null, method: options.method });
-    if (url.pathname.endsWith("/tables")) return response({ tables: [{ ...table, id: 41 }], has_more: false });
-    if (url.pathname.endsWith("/projections")) return response({ projections: [{ name: "prospect_stats", version: 1, status: "active", ready: true, is_current: true, pending_scopes: 0, min_refresh_interval_seconds: 30, published_change_id: 12, latest_relevant_change: 12, last_successful_publication_at: "2026-10-05T12:00:00Z" }] });
+    calls.push({
+      url,
+      body: options.body ? parseJSON(options.body) : null,
+      method: options.method,
+    });
+    if (url.pathname.endsWith("/tables"))
+      return response({ tables: [{ ...table, id: 41 }], has_more: false });
+    if (url.pathname.endsWith("/projections"))
+      return response({
+        projections: [
+          {
+            name: "prospect_stats",
+            version: 1,
+            status: "active",
+            ready: true,
+            is_current: true,
+            pending_scopes: 0,
+            min_refresh_interval_seconds: 30,
+            published_change_id: 12,
+            latest_relevant_change: 12,
+            last_successful_publication_at: "2026-10-05T12:00:00Z",
+          },
+        ],
+      });
     return response({ ...table, id: 41 });
   }) as typeof fetch;
-  const ui = render(<TablesPanel appName="tables" projectId="p" installId={9} />);
+  const ui = render(
+    <TablesPanel appName="tables" projectId="p" installId={9} />,
+  );
   await flush();
   fireEvent.click(ui.getByText("Projections"));
   await flush();
@@ -372,7 +417,9 @@ test("the projections workspace exposes readiness and forced refresh", async () 
   expect(ui.getAllByText("Ready").length).toBeGreaterThan(0);
   fireEvent.click(ui.getByText("Refresh now"));
   await flush();
-  const refresh = calls.find((call) => call.url.pathname.endsWith("/projections/prospect_stats/refresh"));
+  const refresh = calls.find((call) =>
+    call.url.pathname.endsWith("/projections/prospect_stats/refresh"),
+  );
   expect(refresh?.method).toBe("POST");
   expect(refresh?.body).toEqual({ rebuild: true, force: true });
 });
@@ -382,12 +429,222 @@ test("summary table entries without columns do not crash the workspace", async (
   globalThis.fetch = (async (input: any) => {
     const url = new URL(String(input), "http://localhost");
     if (url.pathname.endsWith("/tables")) {
-      return response({ tables: [{ ...table, columns: undefined }], has_more: false });
+      return response({
+        tables: [{ ...table, columns: undefined }],
+        has_more: false,
+      });
     }
     return response(table);
   }) as typeof fetch;
-  const ui = render(<TablesPanel appName="tables" projectId="p" installId={9} />);
+  const ui = render(
+    <TablesPanel appName="tables" projectId="p" installId={9} />,
+  );
   await flush();
   await flush();
   expect(ui.getAllByText("books").length).toBeGreaterThan(0);
+});
+
+const diagnosticPayload = (operation = "tables_query", count = 1) => ({
+  diagnostics: Array.from({ length: count }, (_, index) => ({
+    id: index + 1,
+    operation,
+    recorded_at: "2026-10-06T12:00:00Z",
+    query_id: "redacted",
+    outcome: "error",
+    total_ms: 250,
+    sql_ms: 200,
+    read_queue_ms: 50,
+    rows_returned: 0,
+  })),
+  total: count,
+  error_count: count,
+  slow_count: count,
+  has_more: false,
+});
+const diagnosticsEvent = {
+  topic: "diagnostics.recorded",
+  project_id: "proj",
+  install_id: 7,
+};
+const settleDiagnostics = async () => {
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 300));
+  });
+};
+
+test("diagnostics filter errors on the server, cap rows, and have no manual refresh or polling", async () => {
+  const urls: URL[] = [];
+  (window as any).__aptevaAppEvents = { subscribe: () => () => {} };
+  globalThis.fetch = (async (url: any) => {
+    urls.push(new URL(String(url), window.location.origin));
+    return response(diagnosticPayload("tables_query", 60));
+  }) as any;
+  const originalInterval = window.setInterval;
+  let intervals = 0;
+  window.setInterval = (() => {
+    intervals++;
+    return 0;
+  }) as any;
+  try {
+    const ui = render(
+      <TablesDiagnosticsWidget projectId="proj" installId={7} />,
+    );
+    await flush();
+    expect(urls[0]!.searchParams.get("limit")).toBe("10");
+    expect(ui.getAllByText("tables_query")).toHaveLength(10);
+    expect(ui.queryByRole("button", { name: "Refresh" })).toBeNull();
+    expect(intervals).toBe(0);
+    fireEvent.change(ui.getByLabelText("Diagnostic outcome"), {
+      target: { value: "error" },
+    });
+    await flush();
+    expect(urls.at(-1)!.searchParams.get("outcome")).toBe("error");
+    fireEvent.change(ui.getByLabelText("Diagnostic row limit"), {
+      target: { value: "25" },
+    });
+    await flush();
+    expect(urls.at(-1)!.searchParams.get("limit")).toBe("25");
+    expect(ui.getAllByText("tables_query")).toHaveLength(25);
+    expect(
+      ui.getByText("Showing 25 of 60 matching records · latest first"),
+    ).toBeTruthy();
+  } finally {
+    window.setInterval = originalInterval;
+  }
+});
+
+test("diagnostics SSE coalesces bursts and retains one refresh arriving during a request", async () => {
+  let listener: (event: any) => void = () => {};
+  let unsubscribed = false;
+  let requests = 0;
+  let complete: ((value: Response) => void) | undefined;
+  (window as any).__aptevaAppEvents = {
+    subscribe: (app: string, project: string, fn: any) => {
+      expect(app).toBe("tables");
+      expect(project).toBe("proj");
+      listener = fn;
+      return () => {
+        unsubscribed = true;
+      };
+    },
+  };
+  globalThis.fetch = (async () => {
+    requests++;
+    if (requests === 2)
+      return new Promise<Response>((resolve) => {
+        complete = resolve;
+      });
+    return response(diagnosticPayload(`read-${requests}`));
+  }) as any;
+  const ui = render(<TablesDiagnosticsWidget projectId="proj" installId={7} />);
+  await flush();
+  listener({ ...diagnosticsEvent, project_id: "another" });
+  listener({ ...diagnosticsEvent, install_id: 8 });
+  listener({ ...diagnosticsEvent, topic: "row.inserted" });
+  await settleDiagnostics();
+  expect(requests).toBe(1);
+  for (let i = 0; i < 100; i++) listener(diagnosticsEvent);
+  await settleDiagnostics();
+  expect(requests).toBe(2);
+  for (let i = 0; i < 100; i++) listener(diagnosticsEvent);
+  await settleDiagnostics();
+  expect(requests).toBe(2);
+  await act(async () => {
+    complete!(response(diagnosticPayload("read-2")));
+  });
+  await settleDiagnostics();
+  expect(requests).toBe(3);
+  expect(ui.getByText("read-3")).toBeTruthy();
+  listener(diagnosticsEvent);
+  ui.unmount();
+  await settleDiagnostics();
+  expect(unsubscribed).toBe(true);
+  expect(requests).toBe(3);
+});
+
+test("diagnostics discard stale filter requests and reconcile on the correct SSE reconnect", async () => {
+  let complete: (value: Response) => void = () => {};
+  let obsoleteSignal: AbortSignal | undefined;
+  let requests = 0;
+  (window as any).__aptevaAppEvents = { subscribe: () => () => {} };
+  globalThis.fetch = (async (_url: any, options: any) => {
+    requests++;
+    if (requests === 1) {
+      obsoleteSignal = options.signal;
+      return new Promise<Response>((resolve) => {
+        complete = resolve;
+      });
+    }
+    return response(diagnosticPayload("current-error"));
+  }) as any;
+  const ui = render(
+    <TablesDiagnosticsWidget projectId="proj" installId={7} compact={false} />,
+  );
+  fireEvent.change(ui.getByLabelText("Diagnostic outcome"), {
+    target: { value: "error" },
+  });
+  await flush();
+  expect(obsoleteSignal!.aborted).toBe(true);
+  await act(async () => {
+    complete(response(diagnosticPayload("obsolete-result")));
+  });
+  expect(ui.queryByText("obsolete-result")).toBeNull();
+  expect(ui.getByText("current-error")).toBeTruthy();
+  window.dispatchEvent(
+    new (window as any).CustomEvent("apteva:app-events-connected", {
+      detail: { projectId: "other" },
+    }),
+  );
+  await settleDiagnostics();
+  expect(requests).toBe(2);
+  window.dispatchEvent(
+    new (window as any).CustomEvent("apteva:app-events-connected", {
+      detail: { projectId: "proj" },
+    }),
+  );
+  await settleDiagnostics();
+  expect(requests).toBe(3);
+});
+
+test("diagnostics retry failed fetches with bounded backoff", async () => {
+  const originalTimeout = window.setTimeout;
+  const originalClear = window.clearTimeout;
+  const pending = new Map<number, { delay: number; callback: () => void }>();
+  let nextID = 1,
+    requests = 0;
+  (window as any).__aptevaAppEvents = { subscribe: () => () => {} };
+  window.setTimeout = ((callback: () => void, delay: number) => {
+    const id = nextID++;
+    pending.set(id, { delay, callback });
+    return id;
+  }) as any;
+  window.clearTimeout = ((id: number) => {
+    pending.delete(id);
+  }) as any;
+  globalThis.fetch = (async () => {
+    requests++;
+    return new Response("Unavailable", { status: 503 });
+  }) as any;
+  try {
+    const ui = render(
+      <TablesDiagnosticsWidget projectId="proj" installId={7} />,
+    );
+    await flush();
+    for (const delay of [1000, 2000, 4000]) {
+      const [id, timer] = [...pending.entries()][0]!;
+      expect(timer.delay).toBe(delay);
+      pending.delete(id);
+      await act(async () => {
+        timer.callback();
+      });
+      await flush();
+    }
+    expect(requests).toBe(4);
+    expect(pending.size).toBe(0);
+    expect(ui.getByRole("alert").textContent).toBe("Unavailable");
+    ui.unmount();
+  } finally {
+    window.setTimeout = originalTimeout;
+    window.clearTimeout = originalClear;
+  }
 });
