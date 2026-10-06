@@ -1,4 +1,4 @@
-# Tables (v0.2.3)
+# Tables (v0.2.4)
 
 Typed-row database for Apteva agents and human teams. The row-shaped
 sibling to the `storage` app.

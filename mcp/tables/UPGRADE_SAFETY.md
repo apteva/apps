@@ -59,11 +59,12 @@ retry, detects early process exit, and reports progress in supervisor logs.
 Failed activation retains/restarts and verifies the prior process. Its error
 explicitly states that committed database changes were not restored.
 
-Apps declaring `requires_restore` are rejected by automatic activation. Such
-upgrades need a separate offline procedure: stop all database writers, take and
-verify a consistent backup, migrate and validate, and restore only while all
-writers remain stopped if validation fails. Never restore over a live fallback
-process. A binary health probe is not proof of database compatibility.
+Projection upgrades retain each migrated `p_<id>` result table as a writable
+compatibility surface and publish current reads through a separate `pv_<id>`
+generation view. This lets the previous worker continue to operate if a new
+process fails startup, so Tables can declare `backward_compatible` and use
+normal automatic activation. A binary health probe is still not proof of
+projection readiness; the projection status API reports that separately.
 
 ## Validation
 
