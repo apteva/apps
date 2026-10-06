@@ -107,13 +107,15 @@ export default function ExecutionTools({
   threadID,
   executionID,
   sources,
+  defaultOpen = false,
 }: {
   agentID?: number;
   threadID?: string;
   executionID?: string;
   sources: ToolSource[];
+  defaultOpen?: boolean;
 }) {
-  const [requested, setRequested] = useState(false),
+  const [requested, setRequested] = useState(defaultOpen),
     [events, setEvents] = useState<TelemetryEvent[]>([]),
     [loading, setLoading] = useState(false),
     [error, setError] = useState("");
@@ -163,6 +165,7 @@ export default function ExecutionTools({
   return (
     <details
       className="tool-activity"
+      open={defaultOpen || undefined}
       onToggle={(event) => {
         if (event.currentTarget.open) setRequested(true);
       }}

@@ -134,8 +134,8 @@ func TestIndependentStepAssignmentWakesExistingWorker(t *testing.T) {
 	if len(f.events) != 1 || f.events[0].ThreadID != step.ThreadID || step.ThreadID == "main" {
 		t.Fatalf("ready step was not delivered directly to an app-created worker: %+v step=%+v", f.events, step)
 	}
-	if len(f.threads) != 1 || f.threads[0].MCP != nil {
-		t.Fatalf("worker did not request inherited agent MCP scopes: %+v", f.threads)
+	if len(f.threads) != 1 || len(f.threads[0].MCP) != 1 || f.threads[0].MCP[0] != "processes" {
+		t.Fatalf("worker did not request the Processes MCP scope: %+v", f.threads)
 	}
 	for _, required := range strings.Split(processWorkerTools, ",") {
 		if !hasTool(f.threads[0].Tools, required) {

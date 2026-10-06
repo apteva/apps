@@ -139,6 +139,53 @@ test("permanent delivery conflict is shown as repair required, not retry pending
   expect(document.body.textContent).not.toContain("Delivery retry pending");
 });
 
+test("active workflow runs open a live full-width detail with the current step", async () => {
+  await mount({
+    direct_runs: [
+      {
+        id: "workflow-live",
+        version: 1,
+        workflow: true,
+        state: "running",
+        progress: 25,
+        created_at: "2026-10-06T08:00:00Z",
+        steps: [
+          {
+            id: "step-research",
+            run_id: "workflow-live",
+            key: "research",
+            definition: {
+              key: "research",
+              name: "Research",
+              role: "researcher",
+              instructions: "Check the configured sources.",
+              expected_output: "Research notes",
+              depends_on: [],
+            },
+            executor: { kind: "agent", agent_id: 7 },
+            state: "running",
+            progress: 25,
+            output: "",
+            error: "",
+            updated_by: "",
+            updated_at: "2026-10-06T08:00:10Z",
+          },
+        ],
+      },
+    ],
+  });
+  await click("Weekly review");
+  await click("Runs");
+  await clickContaining("Team workflow run");
+  expect(document.querySelector(".run-detail-page")).toBeTruthy();
+  expect(document.querySelector(".run-live")).toBeTruthy();
+  expect(document.body.textContent).toContain("Current step");
+  expect(document.body.textContent).toContain("Research");
+  expect(document.body.textContent).toContain("Worker is working");
+  await click("← Back to runs");
+  expect(document.querySelector(".run-detail-page")).toBeNull();
+});
+
 const assignment = {
   id: "photo",
   process_id: "p",

@@ -567,7 +567,11 @@ func (a *App) spawnIndependentWorker(p *Process, r *Run, s *StepRun, all []StepR
 		Tools:           processWorkerToolList(false),
 		// A nil MCP slice deliberately means “inherit all spawnable MCP
 		// servers attached to this agent”; the server filters no_spawn scopes.
-		MCP: nil,
+		// The worker must retain the Processes control surface even when the
+		// parent agent's inherited catalog is stale or was refreshed after the
+		// run was created. Without this explicit scope it can receive the event
+		// but cannot claim or update the assigned step.
+		MCP: []string{"processes"},
 	}
 	if err := a.ensureProcessThread(p.ProjectID, eventID, request); err != nil {
 		return err
@@ -609,7 +613,7 @@ func (a *App) spawnSequentialWorker(p *Process, r *Run, s *StepRun, all []StepRu
 		ProjectID:       p.ProjectID,
 		DirectiveSuffix: directive,
 		Tools:           processRunWorkerTools(*r),
-		MCP:             nil,
+		MCP:             []string{"processes"},
 	}
 	if err := a.ensureProcessThread(p.ProjectID, eventID, request); err != nil {
 		return err

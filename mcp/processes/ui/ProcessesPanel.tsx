@@ -196,6 +196,13 @@ const date = (s?: string) =>
       })
     : "—";
 const terminalRunStates = new Set(["completed", "failed", "cancelled"]);
+const activeStepStates = new Set(["running", "ready", "waiting", "blocked"]);
+function currentStep(steps: StepRun[]) {
+  return steps.find((step) => step.state === "running") ||
+    steps.find((step) => activeStepStates.has(step.state)) ||
+    steps.find((step) => step.state !== "completed" && step.state !== "cancelled") ||
+    null;
+}
 const matchesProjectRunFilter = (run: Entry, filter: string) => {
   const state = run.record.state;
   if (!filter) return true;
@@ -216,6 +223,7 @@ const css = `
 .ap-processes{--pc-bg:var(--color-bg,#101216);--pc-panel:var(--color-bg-card,#181b21);--pc-line:var(--color-border,#30343e);--pc-text:var(--color-text,#eceef2);--pc-muted:var(--color-text-muted,#969eac);--pc-accent:var(--color-accent,#ff6b00);color:var(--pc-text);background:var(--pc-bg);font-size:14px;line-height:1.55;min-height:100%;height:100%;overflow:auto;padding:28px;box-sizing:border-box}
 .ap-processes .pf-basics{display:grid;grid-template-columns:1fr 1fr;gap:20px}.ap-processes .pf-settings{margin:18px 0}.ap-processes .pf-settings>summary{cursor:pointer;color:var(--pc-muted);padding:10px 0 18px}.ap-processes .pf-basics .field{margin-bottom:0}@media(max-width:760px){.ap-processes .pf-basics{grid-template-columns:1fr}}.ap-processes *{box-sizing:border-box}.ap-processes h1{font-size:24px;line-height:1.25;margin:0;font-weight:650;letter-spacing:-.5px}.ap-processes h2{font-size:16px;margin:0 0 14px;font-weight:600}.ap-processes p{margin:6px 0}.ap-processes .muted{color:var(--pc-muted)}.ap-processes .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.ap-processes .between{justify-content:space-between}.ap-processes .head{margin-bottom:24px}.ap-processes button,.ap-processes .button{font:inherit;font-size:13px;border:1px solid var(--pc-line);background:var(--pc-panel);color:var(--pc-text);border-radius:8px;padding:9px 14px;cursor:pointer;text-decoration:none;display:inline-flex;gap:6px}.ap-processes button:hover{border-color:var(--pc-accent)}.ap-processes button:disabled{opacity:.45;cursor:default}.ap-processes .primary{background:var(--pc-accent);border-color:transparent;color:var(--pc-bg);font-weight:650}.ap-processes input,.ap-processes select,.ap-processes textarea{width:100%;border:1px solid var(--pc-line);border-radius:8px;background:var(--pc-bg);color:var(--pc-text);font:inherit;font-size:13px;padding:10px 12px}.ap-processes textarea{resize:vertical}.ap-processes :is(button,a,input,select,textarea):focus-visible{outline:2px solid var(--pc-accent);outline-offset:3px}.ap-processes label{display:block;font-size:12px;font-weight:600;margin-bottom:7px}.ap-processes .field{margin-bottom:19px}.ap-processes .card{background:var(--pc-panel);border:1px solid var(--pc-line);border-radius:12px;padding:22px}.ap-processes .process-item{cursor:pointer;transition:background-color .15s ease}.ap-processes .process-item:is(:hover,:focus-within){background:var(--color-bg-hover,#202020)}.ap-processes .process-item:focus-within{outline:2px solid var(--pc-accent);outline-offset:-2px}.ap-processes .grid{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(250px,1fr);gap:20px}.ap-processes .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:22px 0}.ap-processes .stat{border:1px solid var(--pc-line);border-radius:10px;padding:16px}.ap-processes .stat strong{display:block;font-size:25px}.ap-processes .stat span{font-size:12px;color:var(--pc-muted)}.ap-processes .pill{font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid var(--pc-line);text-transform:capitalize;white-space:nowrap}.ap-processes .pill.active,.ap-processes .pill.completed{color:#62ccaa;background:#62ccaa14;border-color:#62ccaa40}.ap-processes .pill.blocked,.ap-processes .pill.failed,.ap-processes .pill.paused{color:#e3b86d;background:#e3b86d14;border-color:#e3b86d40}.ap-processes .notice{border:1px solid #e3b86d66;background:#e3b86d10;border-radius:9px;padding:12px 15px;margin:15px 0;overflow-wrap:anywhere}.ap-processes .filters{margin-bottom:16px}.ap-processes .filters input{flex:1;min-width:180px}.ap-processes .filters select{width:auto;max-width:240px}.ap-processes table{color:var(--pc-text);border-collapse:collapse;width:100%;text-align:left;font-size:13px}.ap-processes th{color:var(--pc-muted);font-size:11px;text-transform:uppercase;letter-spacing:.07em;font-weight:500;padding:13px 16px;border-bottom:1px solid var(--pc-line)}.ap-processes td{padding:16px;border-bottom:1px solid var(--pc-line);vertical-align:top}.ap-processes tbody tr:last-child td{border-bottom:0}.ap-processes .table-wrap{overflow:auto;border:1px solid var(--pc-line);border-radius:10px}.ap-processes td button{border:0;padding:0;background:none;text-align:left;font-weight:600}.ap-processes .sub{font-size:12px;color:var(--pc-muted);margin-top:4px;max-width:390px}.ap-processes .tabs{display:flex;gap:20px;border-bottom:1px solid var(--pc-line);margin-bottom:23px}.ap-processes .tabs button{background:none;border:0;border-radius:0;padding:10px 0 13px;color:var(--pc-muted)}.ap-processes .tabs button.on{color:var(--pc-accent);border-bottom:2px solid var(--pc-accent)}.ap-processes .prose{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8}.ap-processes .block+.block{margin-top:26px}.ap-processes .empty{text-align:center;padding:60px 24px;border:1px dashed var(--pc-line);border-radius:12px}.ap-processes .empty p{margin:10px auto 20px;max-width:430px;color:var(--pc-muted)}.ap-processes .crumb{background:none;border:0;padding:0;color:var(--pc-muted);margin-bottom:18px}.ap-processes .small{font-size:12px}.ap-processes .toolbar{position:sticky;bottom:0;background:var(--pc-panel);padding:15px;border:1px solid var(--pc-line);border-radius:10px;margin-top:20px}.ap-processes .run{margin-bottom:12px}.ap-processes a{color:var(--pc-accent)}.ap-processes .run .prose{margin-top:12px}.ap-processes .overlay{position:fixed;inset:0;z-index:100;background:#0008;display:grid;place-items:center;padding:20px}.ap-processes .dialog{width:min(560px,100%);max-height:85vh;overflow:auto}@media(max-width:760px){.ap-processes{padding:18px}.ap-processes .grid{grid-template-columns:1fr}.ap-processes h1{font-size:21px}.ap-processes .stats{gap:7px}.ap-processes .stat{padding:12px}.ap-processes .hide-small{display:none}}
 .ap-processes .run-browser{display:grid;grid-template-columns:minmax(280px,.72fr) minmax(0,1.45fr);gap:16px;align-items:start}.ap-processes .run-list{display:flex;flex-direction:column;gap:8px}.ap-processes .run-list>button{display:block;width:100%;padding:14px;text-align:left}.ap-processes .run-list>button.on{border-color:var(--pc-accent);background:color-mix(in srgb,var(--pc-accent) 8%,var(--pc-panel))}.ap-processes .run-list-title{display:flex;align-items:center;justify-content:space-between;gap:10px}.ap-processes .run-detail{min-width:0}.ap-processes .tool-activity{margin-top:14px;border-top:1px solid var(--pc-line);padding-top:11px}.ap-processes .tool-activity>summary{cursor:pointer;color:var(--pc-muted);font-size:12px;font-weight:600}.ap-processes .tool-calls{list-style:none;margin:12px 0 0;padding:0}.ap-processes .tool-calls li{display:grid;grid-template-columns:34px minmax(0,1fr);gap:10px;padding:10px 0;border-top:1px solid var(--pc-line)}.ap-processes .tool-icon{width:30px;height:30px;border-radius:7px;object-fit:contain;background:var(--pc-bg);padding:5px}.ap-processes .tool-icon.mono{filter:grayscale(1)}.ap-processes .tool-icon.fallback{display:grid;place-items:center;color:var(--pc-accent);font-size:20px}.ap-processes .tool-call-copy{min-width:0}.ap-processes .tool-call-copy strong,.ap-processes .tool-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ap-processes .tool-reason{display:block;margin-top:5px;font-size:12px;overflow-wrap:anywhere}.ap-processes .tool-reason code{color:var(--pc-accent)}.ap-processes .tool-unavailable{margin-top:12px}@media(max-width:900px){.ap-processes .run-browser{grid-template-columns:1fr}}
+.ap-processes .run-detail-page{max-width:1180px;margin:0 auto}.ap-processes .run-detail-page .run-detail{padding:26px}.ap-processes .run-live{display:inline-flex;align-items:center;gap:6px;color:#62ccaa;font-size:12px;font-weight:600}.ap-processes .run-live.attention{color:#e3b86d}.ap-processes .run-live::before{content:"";width:7px;height:7px;border-radius:999px;background:#62ccaa;box-shadow:0 0 0 0 #62ccaa66;animation:pc-live-pulse 1.7s ease-out infinite}.ap-processes .run-live.attention::before{background:#e3b86d}.ap-processes .run-detail-grid{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(280px,.75fr);gap:20px;margin-top:20px}.ap-processes .run-current-step{align-self:start;position:sticky;top:18px}.ap-processes .run-current-step h2{margin-bottom:6px}.ap-processes .run-current-step .state-line{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:14px}.ap-processes .run-current-step .step-copy{border-top:1px solid var(--pc-line);padding-top:14px;margin-top:14px}.ap-processes .run-current-step .step-copy p{white-space:pre-wrap;overflow-wrap:anywhere}.ap-processes .run-activity-status{display:flex;align-items:center;gap:9px;color:var(--pc-muted);font-size:12px}.ap-processes .run-activity-status::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--pc-accent)}.ap-processes .run-activity-status.active::before{animation:pc-live-pulse 1.7s ease-out infinite}.ap-processes .run-detail-header{align-items:flex-start}.ap-processes .run-detail-header>div:first-child{min-width:0}@keyframes pc-live-pulse{0%{box-shadow:0 0 0 0 #62ccaa66;opacity:1}70%{box-shadow:0 0 0 7px #62ccaa00;opacity:.75}100%{box-shadow:0 0 0 0 #62ccaa00;opacity:1}}@media(max-width:900px){.ap-processes .run-detail-grid{grid-template-columns:1fr}.ap-processes .run-current-step{position:static}}
 .ap-processes .process-publishing{max-width:520px}.ap-processes .process-publishing .row{justify-content:flex-end}.ap-processes .process-publishing p{text-align:right}@media(max-width:760px){.ap-processes .process-publishing .row{justify-content:flex-start}.ap-processes .process-publishing p{text-align:left}}
 .ap-processes .readiness{margin:0 0 20px}.ap-processes .readiness h2{margin:0}.ap-processes .readiness-counts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:16px}.ap-processes .readiness-counts span{padding:10px;border:1px solid var(--pc-line);border-radius:8px;color:var(--pc-muted);font-size:11px}.ap-processes .readiness-counts strong{display:block;color:var(--pc-text);font-size:18px}@media(max-width:700px){.ap-processes .readiness-counts{grid-template-columns:repeat(2,minmax(0,1fr))}}
 `;
@@ -232,6 +240,7 @@ function RunDetailCard({
   onChanged,
   onProcedure,
   onOpenProcess,
+  onBack,
   toolSources,
 }: {
   entry: Entry;
@@ -242,19 +251,33 @@ function RunDetailCard({
   onChanged: () => Promise<void>;
   onProcedure: () => void;
   onOpenProcess?: () => void;
+  onBack?: () => void;
   toolSources: ToolSource[];
 }) {
   const run = entry.record;
+  const active = run.steps ? currentStep(run.steps) : null;
+  const live = !terminalRunStates.has(run.state);
+  const workerName = active?.executor.kind === "agent"
+    ? ownerName(active.executor.agent_id || 0)
+    : active?.executor.kind === "human" ? "Project operator" : "Owner agent";
   return (
     <article id={`run-${run.id}`} className="card run run-detail">
-      <div className="row between">
-        <div className="row">
+      <div className="row between run-detail-header">
+        <div>
+          <div className="row">
           <Pill state={run.state} />
           <strong>{entry.process_name || run.title}</strong>
+          {live && <span className={`run-live ${run.state === "blocked" ? "attention" : ""}`}>
+            {run.state === "blocked" ? "Needs attention" : "Live · updating"}
+          </span>}
+          </div>
+          {entry.process_name && <p className="small muted">{run.title}</p>}
         </div>
-        {onOpenProcess && <button onClick={onOpenProcess}>Open process</button>}
+        <div className="row">
+          {onBack && <button onClick={onBack}>← Back to runs</button>}
+          {onOpenProcess && <button onClick={onOpenProcess}>Open process</button>}
+        </div>
       </div>
-      {entry.process_name && <p className="small muted">{run.title}</p>}
       {entry.assignment && (
         <p className="small muted">
           {entry.assignment.name} ·{" "}
@@ -289,28 +312,74 @@ function RunDetailCard({
             ? "Waiting for the next step’s scheduled start."
             : "Queued for the owner agent.")}
       </div>
-      {run.workflow ? (
-        <RunSteps
-          steps={run.steps || []}
-          runID={run.id}
-          runState={run.state}
-          controlMode={run.control_mode}
-          waitingForAdvance={run.waiting_for_advance}
-          eligibleSteps={run.eligible_steps || []}
-          agents={agents}
-          projectId={projectId}
-          api={api}
-          onChanged={onChanged}
-          toolSources={toolSources}
-        />
-      ) : (
-        <ExecutionTools
-          agentID={entry.assignment?.owner_agent_id}
-          threadID={run.target_thread_id}
-          executionID={run.execution_id}
-          sources={toolSources}
-        />
-      )}
+      <div className="run-detail-grid">
+        <div>
+          {run.workflow ? (
+            <RunSteps
+              steps={run.steps || []}
+              runID={run.id}
+              runState={run.state}
+              controlMode={run.control_mode}
+              waitingForAdvance={run.waiting_for_advance}
+              eligibleSteps={run.eligible_steps || []}
+              agents={agents}
+              projectId={projectId}
+              api={api}
+              onChanged={onChanged}
+              toolSources={toolSources}
+            />
+          ) : (
+            <div className="card">
+              <h2>Run activity</h2>
+              <p className="small muted">The owner worker receives the run and records its result here.</p>
+            </div>
+          )}
+        </div>
+        <aside className="card run-current-step" aria-live="polite">
+          <div className="state-line">
+            <h2>Current step</h2>
+            <span className={`pill ${active?.state || run.state}`}>{active?.state || run.state}</span>
+          </div>
+          {active ? (
+            <>
+              <strong>{active.definition.name || active.key}</strong>
+              <p className="small muted">{active.definition.role} · {workerName}</p>
+              <div className="step-copy">
+                <div className={`run-activity-status ${live && active.state === "running" ? "active" : ""}`}>
+                  {active.state === "running" ? "Worker is working" : active.state === "ready" ? "Ready to start" : active.state === "waiting" ? "Waiting on dependencies or timing" : active.state === "blocked" ? "Blocked — needs attention" : active.state}
+                </div>
+                <p className="small">{active.definition.instructions}</p>
+                {active.progress > 0 && <progress max={100} value={active.progress} style={{ width: "100%", accentColor: "var(--pc-accent)" }} />}
+                {(active.delivery_warning || active.error) && (
+                  <div className="notice small">
+                    {active.delivery_suspended ? "Delivery suspended—repair required: " : active.delivery_warning ? "Delivery retry pending: " : "Worker error: "}
+                    {active.delivery_warning || active.error}
+                  </div>
+                )}
+              </div>
+              {active.executor.kind === "agent" ? (
+                <ExecutionTools
+                  agentID={active.executor.agent_id}
+                  threadID={active.target_thread_id}
+                  executionID={active.execution_id}
+                  sources={toolSources}
+                  defaultOpen={live}
+                />
+              ) : (
+                <p className="small muted">This step is assigned to a project operator.</p>
+              )}
+            </>
+          ) : (
+            <>
+              <div className={`run-activity-status ${live ? "active" : ""}`}>
+                {live ? "Waiting for worker activity" : "No active step"}
+              </div>
+              <p className="small muted">{run.result || run.error || "The run has not exposed a current step."}</p>
+              {!run.workflow && <ExecutionTools agentID={entry.assignment?.owner_agent_id} threadID={run.target_thread_id} executionID={run.execution_id} sources={toolSources} defaultOpen={live} />}
+            </>
+          )}
+        </aside>
+      </div>
     </article>
   );
 }
@@ -605,10 +674,22 @@ function Panel(props: Props) {
       matchesProjectRunFilter(run, projectRunStateFilter),
   );
   const selectedExecution =
-    filteredExecutions.find((run) => run.record.id === selectedRunID) || null;
+    executions.find((run) => run.record.id === selectedRunID) || null;
   const selectedProjectRun =
     filteredProjectRuns.find((run) => run.record.id === selectedProjectRunID) ||
     null;
+  useEffect(() => {
+    if (!selected || tab !== "runs" || !selectedRunID || !selectedExecution || terminalRunStates.has(selectedExecution.record.state)) return;
+    let live = true;
+    const refresh = () => {
+      loadRuns(selected).catch((e) => live && setError(e.message));
+    };
+    const timer = window.setInterval(refresh, 2000);
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+    };
+  }, [selected, tab, selectedRunID, selectedExecution?.record.state, props.projectId, props.installId]);
   const prepareRun = (x: Assignment, mode: "automatic" | "step_by_step" = "automatic") => {
     setRunControlMode(mode);
     setRunAssignment(x);
@@ -1442,31 +1523,9 @@ function Panel(props: Props) {
                   ))}
                 </select>
               </div>
-              {filteredExecutions.length ? (
-                <div className="run-browser">
-                  <div className="run-list" aria-label={`${p.name} runs`}>
-                    {filteredExecutions.map((run) => (
-                      <button
-                        key={run.record.id}
-                        className={selectedRunID === run.record.id ? "on" : ""}
-                        aria-pressed={selectedRunID === run.record.id}
-                        onClick={() => setSelectedRunID(run.record.id)}
-                      >
-                        <span className="run-list-title">
-                          <strong>{run.assignment?.name || run.record.title}</strong>
-                          <Pill state={run.record.state} />
-                        </span>
-                        <span className="sub">
-                          {date(run.record.created_at)} · Procedure v{run.version}
-                        </span>
-                        <span className="sub">
-                          {run.record.current_step ||
-                            (run.record.workflow ? "Team workflow" : "Direct run")}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                  {selectedExecution ? (
+              {filteredExecutions.length || selectedExecution ? (
+                selectedExecution ? (
+                  <div className="run-detail-page">
                     <RunDetailCard
                       entry={selectedExecution}
                       ownerName={ownerName}
@@ -1477,18 +1536,43 @@ function Panel(props: Props) {
                         api(`/${p.id}${path}`, method, body)
                       }
                       onChanged={() => loadRuns(p.id)}
+                      onBack={() => setSelectedRunID("")}
                       onProcedure={() => {
                         setVersion(selectedExecution.version);
                         setTab("procedure");
                       }}
                     />
-                  ) : (
+                  </div>
+                ) : (
+                  <div className="run-browser">
+                    <div className="run-list" aria-label={`${p.name} runs`}>
+                      {filteredExecutions.map((run) => (
+                        <button
+                          key={run.record.id}
+                          className={selectedRunID === run.record.id ? "on" : ""}
+                          aria-pressed={selectedRunID === run.record.id}
+                          onClick={() => setSelectedRunID(run.record.id)}
+                        >
+                          <span className="run-list-title">
+                            <strong>{run.assignment?.name || run.record.title}</strong>
+                            <Pill state={run.record.state} />
+                          </span>
+                          <span className="sub">
+                            {date(run.record.created_at)} · Procedure v{run.version}
+                          </span>
+                          <span className="sub">
+                            {run.record.current_step ||
+                              (run.record.workflow ? "Team workflow" : "Direct run")}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
                     <div className="empty">
                       <h2>Select a run</h2>
-                      <p>Choose an execution to inspect its steps, outcome, and tool activity.</p>
+                      <p>Choose an execution to inspect its current step, worker activity, outcome, and tool calls.</p>
                     </div>
-                  )}
-                </div>
+                  </div>
+                )
               ) : (
                 <div className="empty">
                   <h2>No runs yet</h2>
