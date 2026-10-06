@@ -1,3 +1,4 @@
+import { AudioRuntimeTelemetry } from "./audio-runtime-telemetry";
 import { mediaFailure, type MediaSessionEvent } from "../frontend/src/media-lease";
 // Browser audio engine for the Telephony softphone.
 //
@@ -79,7 +80,13 @@ export interface SoftphoneCallStatus {
   control_error?: string;
 }
 
+export interface SoftphoneAudioHealth {
+  state: "healthy" | "audio_degraded";
+  reason?: "audio_degraded";
+  stages: Record<string, {state: "healthy" | "audio_degraded" | "inactive"; reason?: string; signal?: string; last_bad_at?: string}>;
+}
 export interface SoftphoneCallbacks {
+  onAudioHealth?: (health: SoftphoneAudioHealth) => void;
   refreshMediaURL?: () => Promise<string>;
   onSessionEvent?: (event: MediaSessionEvent) => void;
   onState?: (state: SoftphoneState, detail?: string) => void;
@@ -118,6 +125,7 @@ export interface AudioDropEvent {
 }
 
 export interface SoftphoneDiagnostics {
+  audioHealth?: SoftphoneAudioHealth;
   sessionEvents?: MediaSessionEvent[];
   coachingPlayedMs?: number;
   coachingDroppedMs?: number;
@@ -362,6 +370,7 @@ export class MicrophoneTestSession {
 }
 
 export class SoftphoneSession {
+  private clientEpoch = crypto.randomUUID();
   private worker: Worker | null = null;
   private ctx: AudioContext | null = null;
   private stream: MediaStream | null = null;
@@ -375,6 +384,8 @@ export class SoftphoneSession {
   private speakerLevel = 0;
   private levelTimer: ReturnType<typeof setInterval> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private telemetryTimer: ReturnType<typeof setInterval> | null = null;
+  private runtimeTelemetry = new AudioRuntimeTelemetry(event => this.recordSessionEvent(event));
   private opened = false;
   private cancelWorkerStart?: () => void;
   private microphoneTransportReady = false;
@@ -405,6 +416,8 @@ export class SoftphoneSession {
     const playbackOptions = playbackBufferOptions(options);
     this.diagnostics.targetMs = playbackOptions.initialTargetMs;
     this.callbacks.onState?.("connecting");
+    this.runtimeTelemetry.tick();
+    this.telemetryTimer = setInterval(() => this.runtimeTelemetry.tick(), 1000);
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({ audio: microphoneConstraints(options) });
       this.ensureOpen();
@@ -423,7 +436,9 @@ export class SoftphoneSession {
       };
       try { this.ctx = new AudioContext({ sampleRate:SAMPLE_RATE, latencyHint:"interactive" }); }
       catch { this.ctx = new AudioContext({latencyHint:"interactive"}); }
+      this.runtimeTelemetry.context(this.ctx.state);
       if (this.ctx.state === "suspended") await this.ctx.resume();
+      this.runtimeTelemetry.context(this.ctx.state);
       this.ensureOpen();
       if (options.outputDeviceId && "setSinkId" in this.ctx) { await (this.ctx as AudioContext & {setSinkId(id:string):Promise<void>}).setSinkId(options.outputDeviceId); this.ensureOpen(); }
       await loadAudioWorklet(this.ctx, workletURL);
@@ -450,8 +465,10 @@ export class SoftphoneSession {
       await this.openWorker(mediaURL, workerURL);
       this.ensureOpen();
       this.capture.onprocessorerror = this.playback.onprocessorerror = () => this.fail("Audio processing stopped. Reconnect audio.");
+      this.runtimeTelemetry.context(this.ctx.state);
       this.ctx.onstatechange = () => {
         if (this.closed) return;
+        this.runtimeTelemetry.context(this.ctx?.state ?? "closed");
         this.worker?.postMessage({type:"clock.reset",paused:this.ctx?.state !== "running"});
         if (this.ctx?.state === "suspended" || (this.ctx?.state as string) === "interrupted") this.callbacks.onState?.("reconnecting", "Browser paused audio. Reconnect audio to continue.");
         else if (this.ctx?.state === "running" && this.microphoneTransportReady) this.callbacks.onState?.("live");
@@ -538,6 +555,8 @@ export class SoftphoneSession {
           this.mediaSocketConnected = true;
           this.startRTTProbe();
           finish();
+        } else if (message?.type === "runtime.event") {
+          this.recordSessionEvent(message.event);
         } else if (message?.type === "socket.message") {
           this.handleControl(message.data);
         } else if (message?.type === "socket.reconnect") {
@@ -567,6 +586,7 @@ export class SoftphoneSession {
         } else if (message?.type === "transport.stats") {
           this.diagnostics.websocketBufferedBytes = message.buffered_bytes ?? 0;
           this.transportTiming = message.timing ?? {};
+          if (typeof message.timing?.rtt_ms === "number") this.diagnostics.rttMs = Math.round(message.timing.rtt_ms);
         }
       };
       worker.onerror = (event) => { this.recordSessionEvent({timestamp:new Date().toISOString(),action:"audio_worker",outcome:"error",detail:event.message?.slice(0,160)}); finish(new Error("audio worker failed")); if (!this.closed) this.fail("Audio worker failed. Reconnect audio."); };
@@ -578,15 +598,16 @@ export class SoftphoneSession {
   }
 
   private carrierDeliveryStalled = false;
+  private deliveryDegradedNotice = false;
 
   private handleControl(data: string): void {
     if (this.closed) return;
     try {
       const parsed = JSON.parse(data) as { type?: string; detail?: string; nonce?: number; capture_sequence_gaps?:number; call_id?: string; status?: string };
       if (parsed.type === "dtmf.error" || parsed.type === "dtmf.sent") { this.callbacks.onNotice?.(parsed.type === "dtmf.sent" ? "Keypad tone sent" : parsed.detail || "Keypad tone failed");
-      } else if (parsed.type === "pong" && typeof parsed.nonce === "number" && parsed.nonce >= 0) {
+      } else if (parsed.type === "pong") {
         this.diagnostics.captureSequenceGaps = parsed.capture_sequence_gaps ?? this.diagnostics.captureSequenceGaps;
-        this.diagnostics.rttMs = Math.max(0, Math.round(performance.now() - parsed.nonce));
+        if (typeof parsed.nonce === "number" && parsed.nonce >= 0) this.diagnostics.rttMs = Math.max(0, Math.round(performance.now() - parsed.nonce));
         this.callbacks.onDiagnostics?.({ ...this.diagnostics });
       } else if (parsed.type === "call.ended" || parsed.type === "session.replaced") {
         this.closed = true;
@@ -602,6 +623,19 @@ export class SoftphoneSession {
         this.fail(parsed.detail || "The call could not be connected.");
       } else if (parsed.type === "coach.state") {
         this.callbacks.onNotice?.((parsed as unknown as {talking?:boolean}).talking ? "Private coaching connected. Only you hear the supervisor." : "Private coaching stopped.");
+      } else if (parsed.type === "audio.health") {
+        const health = parsed as unknown as SoftphoneAudioHealth;
+        if (health.state !== "healthy" && health.state !== "audio_degraded") return;
+        this.diagnostics.audioHealth = {state:health.state, reason:health.reason, stages:health.stages};
+        this.callbacks.onAudioHealth?.(this.diagnostics.audioHealth);
+        this.callbacks.onDiagnostics?.({...this.diagnostics});
+        if (health.state === "audio_degraded" && !this.deliveryDegradedNotice) {
+          this.deliveryDegradedNotice = true;
+          this.callbacks.onNotice?.("Speech delivery is interrupted. The call remains connected.");
+        } else if (this.deliveryDegradedNotice && health.state === "healthy" && health.stages?.telephony_to_browser?.state === "healthy" && this.ctx?.state === "running") {
+          this.deliveryDegradedNotice = false;
+          this.callbacks.onNotice?.("Speech delivery restored.");
+        }
       } else if (parsed.type === "media.delivery") {
         const state = (parsed as unknown as {state?:string}).state;
         if (state === "stalled") this.callbacks.onNotice?.("Caller audio delivery interrupted. Your microphone remains connected.");
@@ -623,7 +657,7 @@ export class SoftphoneSession {
   private startRTTProbe(): void {
     this.stopRTTProbe();
     const ping = () => {
-      this.sendText(JSON.stringify({ type: "ping", nonce: performance.now() }));
+      // RTT is measured in the Worker, independent of main-thread delays.
       this.sendDiagnostics();
     };
     ping();
@@ -641,8 +675,8 @@ export class SoftphoneSession {
   private sendDiagnostics(): void {
     const value = this.diagnostics;
     this.sendText(JSON.stringify({ type: "diagnostics", diagnostics: {
-      session_events:value.sessionEvents,
-      timing: {transport:this.transportTiming, playback:this.playbackTiming},
+      client_epoch:this.clientEpoch, session_events:value.sessionEvents,
+      timing: {transport:this.transportTiming, playback:this.playbackTiming, runtime:this.runtimeTelemetry.counters},
       connection_state: this.mediaSocketConnected ? "connected" : this.closed ? "closed" : "reconnecting",
       carrier_peer_connected: this.microphoneTransportReady,
       audio_context_state: this.ctx?.state ?? "closed",
@@ -696,6 +730,9 @@ export class SoftphoneSession {
     this.cancelWorkerStart = undefined;
     try { this.sendDiagnostics(); } catch { /* diagnostics cannot prevent device cleanup */ }
     this.stopRTTProbe();
+    if (this.telemetryTimer !== null) clearInterval(this.telemetryTimer);
+    this.telemetryTimer = null;
+    if (this.ctx) { this.ctx.onstatechange = null; this.runtimeTelemetry.context("closed"); }
     if (this.levelTimer !== null) clearInterval(this.levelTimer);
     this.levelTimer = null;
     const worker = this.worker;

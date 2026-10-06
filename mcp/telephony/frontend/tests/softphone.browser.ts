@@ -3,6 +3,14 @@ test("installed headless client talks through real Telephony with host-owned UI"
   const gateway = process.env.TELEPHONY_TEST_GATEWAY;
   if (!gateway) throw new Error("Run via TestTier2HeadlessBrowser; a compiled sidecar gateway is required");
   const errors: string[] = [];
+  await context.addInitScript(() => {
+    const original = window.AudioContext;
+    const w = window as any; w.telephonyContexts = [];
+    window.AudioContext = class extends original {
+      constructor(options?: AudioContextOptions) {super(options);w.telephonyContexts.push(this);}
+    };
+  });
+
   page.on("pageerror", error => errors.push(error.message));
   let renewalFailures=0;
   // Accelerate only the fixture's advertised client lease; the server still
@@ -158,6 +166,21 @@ test("installed headless client talks through real Telephony with host-owned UI"
   await page.evaluate(() => { const w = window as any; w.phone.setMuted(true); w.phone.sendDTMF("12#"); });
   await expect.poll(() => page.evaluate(() => (window as any).notices)).toContain("Keypad tone sent");
   await expect.poll(() => page.evaluate(() => (window as any).diagnostics?.micInputGainDb)).toBe(0);
+
+  // The actual packaged backbone records AudioContext changes and delayed UI
+  // scheduling without ending/replacing the carrier or media socket.
+  const beforePauses=await (await page.request.get(gateway+'/fixture/media-connections')).json();
+  await page.evaluate(async()=>{
+    const audio=(window as any).telephonyContexts.findLast((c:AudioContext)=>c.state!=="closed");
+    await audio.suspend();
+  });
+  await expect.poll(()=>page.evaluate(()=>(window as any).diagnostics?.sessionEvents?.some((e:any)=>e.action==='audio_context'&&e.outcome==='suspended'))).toBe(true);
+  await page.evaluate(async()=>{await (window as any).telephonyContexts.findLast((c:AudioContext)=>c.state!=="closed").resume();});
+  await expect.poll(()=>page.evaluate(()=>(window as any).phone.getSnapshot().audioState)).toBe('live');
+  await page.evaluate(()=>{const end=performance.now()+2200;while(performance.now()<end) {/* simulate a UI long task */}});
+  await expect.poll(()=>page.evaluate(()=>(window as any).diagnostics?.sessionEvents?.some((e:any)=>e.action==='main_thread'&&e.outcome==='scheduling_gap'&&e.duration_ms>=1000))).toBe(true);
+  const afterPauses=await (await page.request.get(gateway+'/fixture/media-connections')).json();
+  expect(afterPauses).toEqual(beforePauses);
   const originalMedia=await page.evaluate(()=>(window as any).phone.session.media_url);
   // Force an actual transport close: the packaged worker must request a fresh
   // authorized token, reconnect the same call and preserve the mute gate.
@@ -166,6 +189,7 @@ test("installed headless client talks through real Telephony with host-owned UI"
   await expect.poll(()=>page.evaluate(()=>(window as any).phone.getSnapshot().audioState),{timeout:15000}).toBe('live');
   expect(await page.evaluate(()=>(window as any).phone.getSnapshot().muted)).toBe(true);
   await expect.poll(()=>page.evaluate(()=>(window as any).diagnostics?.sessionEvents?.some((e:any)=>e.action==='websocket'&&e.code==='1006'))).toBe(true);
+  await expect.poll(()=>page.evaluate(()=>(window as any).diagnostics?.sessionEvents?.some((e:any)=>e.action==='reconnect'&&e.outcome==='connected'))).toBe(true);
   await page.evaluate(() => (window as any).phone.reconnect({ inputGainDB: -6, playbackTargetMs: 80 }));
   await expect.poll(() => page.evaluate(() => (window as any).phone.getSnapshot().audioState)).toBe("live");
   expect(await page.evaluate(() => (window as any).phone.getSnapshot().muted)).toBe(true);

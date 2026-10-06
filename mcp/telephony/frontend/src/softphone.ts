@@ -1,5 +1,5 @@
 import { MediaLease, type MediaSessionEvent } from "./media-lease";
-import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, playbackBufferOptions, type SoftphoneAudioOptions, type SoftphoneCallStatus, type SoftphoneDiagnostics, type SoftphoneState } from "../../ui/softphone-audio";
+import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, playbackBufferOptions, type SoftphoneAudioHealth, type SoftphoneAudioOptions, type SoftphoneCallStatus, type SoftphoneDiagnostics, type SoftphoneState } from "../../ui/softphone-audio";
 import { createBrowserAudio, type AudioConnection, type AudioRuntime } from "./audio";
 import { isTerminalCall, type AnswerRequest, type Call, type CallControlResult, type CallSession, type CallTermination, type DialRequest, type TelephonyClient } from "./client";
 
@@ -37,6 +37,7 @@ export interface SoftphoneOptions {
   /** 0 disables automatic status reconciliation; the host then calls observeCall. */
   pollIntervalMs?: number;
   onLevels?: (microphone: number, speaker: number) => void;
+  onAudioHealth?: (health: SoftphoneAudioHealth) => void;
   onDiagnostics?: (value: SoftphoneDiagnostics) => void;
   onNotice?: (detail: string) => void;
   onSessionEvent?: (event: MediaSessionEvent) => void;
@@ -397,6 +398,7 @@ export class HeadlessSoftphone {
           }
         },
         onLevels: (mic, speaker) => notify(() => this.options.onLevels?.(mic, speaker)),
+        onAudioHealth: health => notify(() => this.options.onAudioHealth?.(health)),
         onDiagnostics: diagnostics => notify(() => this.options.onDiagnostics?.(diagnostics)),
         onNotice: detail => notify(() => this.options.onNotice?.(detail)),
         onCallStatus: status => notify(() => this.observeCall({

@@ -298,3 +298,25 @@ test('worker refreshes credentials before reconnect and preserves WebSocket clos
  w.command({type:'socket.credentials',id:request.id-1,mediaURL:'ws://local/stale'});expect(w.sockets).toHaveLength(2);
  w.command({type:'close'});w.command({type:'socket.credentials',id:request.id,mediaURL:'ws://local/late'});expect(w.sockets).toHaveLength(2);
 });
+
+test('worker timestamps pause observations and computes ping RTT off the main thread',()=>{
+ const w=worker();w.setNow(12000);w.intervals[0]();
+ const ping=JSON.parse(w.socket.sent.filter((x:any)=>typeof x==='string').at(-2));
+ expect(ping.type).toBe('ping');w.setNow(12045);
+ w.socket.onmessage({data:JSON.stringify({type:'pong',nonce:ping.nonce,capture_sequence_gaps:3})});
+ const stats=w.messages.filter(x=>x.type==='transport.stats').at(-1);
+ expect(stats.timing.rtt_ms).toBe(45);expect(stats.timing.rtt_samples.at(-1).rtt_ms).toBe(45);
+ expect(w.messages.some(x=>x.type==='runtime.event'&&x.event.action==='worker'&&x.event.duration_ms===1000)).toBe(true);
+ // A delayed main thread cannot change the already measured sample.
+ w.setNow(20000);expect(stats.timing.rtt_ms).toBe(45);
+});
+test('worker records reconnect cause, successful socket recovery and maximum bufferedAmount',()=>{
+ const w=worker();w.socket.bufferedAmount=8000;w.frame(0);w.intervals[0]();
+ expect(w.messages.filter(x=>x.type==='transport.stats').at(-1).timing.websocket_max_buffered_bytes).toBe(8000);
+ w.socket.onclose({code:1006,reason:'',wasClean:false});w.timeouts.at(-1)!();
+ expect(w.messages.some(x=>x.type==='runtime.event'&&x.event.action==='reconnect'&&x.event.outcome==='websocket_close_1006')).toBe(true);
+ expect(w.sockets.length).toBe(2);w.sockets[1].onopen();
+ w.frame(0,2);w.intervals.at(-1)!();
+ const stats=w.messages.filter(x=>x.type==='transport.stats').at(-1);
+ expect(stats.timing.reconnect_attempts).toBe(1);expect(stats.timing.reconnect_successes).toBe(1);
+});
