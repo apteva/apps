@@ -213,7 +213,7 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (resultValue
 
 var (
 	queryPlaceholderRe = regexp.MustCompile(`\{[a-z][a-z0-9_]*\}`)
-	internalSQLNameRe  = regexp.MustCompile(`(?i)(?:\b(?:t_[0-9]+|p_[0-9]+|pd_[0-9]+|ph_[0-9]+|projection_(?:definitions|sources|changes|cursors|queue|scopes|result_index|indexes|generations)|tables_meta|columns_meta|indexes_meta|index_columns|table_identity|sqlite_[a-z0-9_]*|pragma_[a-z0-9_]*|dbstat)\b|\b_migrations\b)`)
+	internalSQLNameRe  = regexp.MustCompile(`(?i)(?:\b(?:t_[0-9]+|p_[0-9]+|pv_[0-9]+|pd_[0-9]+|ph_[0-9]+|projection_(?:definitions|sources|changes|cursors|queue|scopes|result_index|indexes|generations)|tables_meta|columns_meta|indexes_meta|index_columns|table_identity|sqlite_[a-z0-9_]*|pragma_[a-z0-9_]*|dbstat)\b|\b_migrations\b)`)
 )
 
 // validateReadOnlySQL rejects anything but a single SELECT or WITH

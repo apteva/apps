@@ -125,7 +125,7 @@ func projectionFromArgs(ctx *sdk.AppCtx, pid string, args map[string]any) (*proj
 	return loadProjectionWhere(ctx, `WHERE project_id=? AND name=? AND is_current=1`, pid, name)
 }
 func projectionTable(p *projectionDefinition) *Table {
-	return &Table{ID: -p.ID, Name: p.Name, Scope: "project", PhysicalName: p.ResultTable, Columns: p.ResultCols, ProjectionID: p.ID}
+	return &Table{ID: -p.ID, Name: p.Name, Scope: "project", PhysicalName: projectionVisibleTable(p), Columns: p.ResultCols, ProjectionID: p.ID}
 }
 func (a *App) loadQueryTable(ctx *sdk.AppCtx, pid, name string) (*Table, error) {
 	key := schemaCacheKey{pid, name}
@@ -311,7 +311,7 @@ func (a *App) toolProjectionsCreate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if err != nil {
 		return nil, err
 	}
-	res, err := tx.Exec(`INSERT INTO projection_definitions(project_id,name,version,status,sql_text,source_tables,result_columns,scope_columns,result_table,is_current,options,storage_format) VALUES(?,?,?,?,?,?,?,?,?,?,?,1)`, pid, name, version, p.Status, text, string(rawSources), string(rawCols), string(rawScopes), "pending_"+token, p.Current, string(rawOpts))
+	res, err := tx.Exec(`INSERT INTO projection_definitions(project_id,name,version,status,sql_text,source_tables,result_columns,scope_columns,result_table,is_current,options,storage_format) VALUES(?,?,?,?,?,?,?,?,?,?,?,2)`, pid, name, version, p.Status, text, string(rawSources), string(rawCols), string(rawScopes), "pending_"+token, p.Current, string(rawOpts))
 	if err != nil {
 		return nil, err
 	}
@@ -320,6 +320,7 @@ func (a *App) toolProjectionsCreate(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return nil, err
 	}
 	p.ResultTable = fmt.Sprintf("p_%d", p.ID)
+	p.Format = 2
 	if _, err := tx.Exec(`UPDATE projection_definitions SET result_table=? WHERE id=?`, p.ResultTable, p.ID); err != nil {
 		return nil, err
 	}
@@ -599,7 +600,13 @@ func (a *App) toolProjectionsDelete(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return nil, err
 	}
 	defer tx.Rollback()
-	for _, q := range []string{`DROP VIEW IF EXISTS ` + quote(p.ResultTable), `DROP TABLE IF EXISTS ` + quote(projectionData(p)), `DROP TABLE IF EXISTS ` + quote(projectionHeads(p)), `DELETE FROM projection_definitions WHERE id=?`} {
+	var resultKind string
+	_ = tx.QueryRow(`SELECT type FROM sqlite_master WHERE name=?`, p.ResultTable).Scan(&resultKind)
+	resultDrop := `DROP TABLE IF EXISTS ` + quote(p.ResultTable)
+	if resultKind == "view" {
+		resultDrop = `DROP VIEW ` + quote(p.ResultTable)
+	}
+	for _, q := range []string{resultDrop, `DROP VIEW IF EXISTS ` + quote(projectionVisibleTable(p)), `DROP TABLE IF EXISTS ` + quote(projectionData(p)), `DROP TABLE IF EXISTS ` + quote(projectionHeads(p)), `DELETE FROM projection_definitions WHERE id=?`} {
 		var vals []any
 		if strings.Contains(q, "?") {
 			vals = []any{p.ID}

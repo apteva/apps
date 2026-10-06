@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.2.3
+version: 0.2.4
 description: |
+  v0.2.4 Adds an automatic projection-storage migration that keeps the prior
+  result tables writable for safe blue-green fallback while readers use atomic
+  generation views.
   v0.2.3 Fixes the Tables workspace when summary table listings omit column metadata.
   v0.2.2 Adds a dedicated projections workspace with readiness, freshness,
   coverage, pending scopes, interval, pause/resume and forced refresh controls.
@@ -12,7 +15,8 @@ description: |
   row-detail editor drawer.
   v0.2.0 Adds inner SQL scopes, generic dependency mappings, persistent refresh
   intervals, result indexes, accurate readiness and bounded atomic generation
-  publication. The result-storage migration requires restore for downgrade.
+  publication. Projection storage upgrades are automatic and retain a writable
+  compatibility surface for the previous worker.
   v0.1.27 Adds durable, coalesced SQL projections with transactional change
   capture, scoped refreshes, retries, watermarks, and read-only projection
   tables for efficient analytics workloads.
@@ -197,11 +201,11 @@ provides:
 
 runtime:
   startup_timeout_seconds: 600
-  database_upgrade: requires_restore
+  database_upgrade: backward_compatible
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.2.3
+    ref: tables/v0.2.4
     entry: mcp/tables
   port: 8080
   health_check: /health
