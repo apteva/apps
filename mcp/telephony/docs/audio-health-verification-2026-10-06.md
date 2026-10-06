@@ -1,7 +1,9 @@
 # Audio health telemetry — local verification, 6 October 2026
 
-Local, unreleased changes based on Telephony 0.10.1. Only Telephony files were
-edited. No production/staging installation, carrier setting, number, route or
+Local verification of changes based on Telephony 0.10.1, subsequently packaged
+as Telephony 0.10.2. Only Telephony files were edited. The release preparation
+changes version metadata and documentation; evidence retains the original
+verified source hashes. No production/staging installation, carrier setting, number, route or
 live call was changed. Standalone dependency tests use `GOWORK=off`; app SDK
 v0.95.0 remains the latest tag by verified commit topology.
 
