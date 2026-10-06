@@ -1,5 +1,13 @@
 # Content Catalog
 
+## Version 0.6.3: verified Storage checksums during hosting
+
+Catalog refreshes an asset's checksum from Storage's verified result and
+requests exact-file repair when hosting encounters a pending checksum. Hosting
+then resumes with the same reservation, so concurrent repair requests and
+reattachment do not trigger duplicate uploads. Storage checksum-ready events
+also refresh the existing Catalog asset record.
+
 Content Catalog coordinates production sessions, Storage files, Media metadata, Gigs, cloud video hosting, and platform posts. Catalog owns stable IDs and relationships. Storage owns file bytes; the publishing platforms own external posts.
 
 ## Sessions and files

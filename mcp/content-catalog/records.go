@@ -125,13 +125,16 @@ func (a *App) attachAsset(ctx *sdk.AppCtx, args map[string]any, uploaded bool) (
 	var result struct {
 		Found bool `json:"found"`
 		File  struct {
-			ID          int64  `json:"id"`
-			Name        string `json:"name"`
-			SHA256      string `json:"sha256"`
-			SizeBytes   int64  `json:"size_bytes"`
-			ContentType string `json:"content_type"`
-			Folder      string `json:"folder"`
-			ProjectID   string `json:"project_id"`
+			ID             int64  `json:"id"`
+			Name           string `json:"name"`
+			SHA256         string `json:"sha256"`
+			SizeBytes      int64  `json:"size_bytes"`
+			ContentType    string `json:"content_type"`
+			Folder         string `json:"folder"`
+			ProjectID      string `json:"project_id"`
+			ChecksumStatus string `json:"checksum_status"`
+			ChecksumError  string `json:"checksum_error"`
+			Revision       int64  `json:"revision"`
 		} `json:"file"`
 	}
 	if err = ctx.PlatformAPI().CallAppResult("storage", "files_get", map[string]any{"_project_id": pid, "id": fileID}, &result); err != nil {
@@ -179,6 +182,17 @@ func (a *App) attachAsset(ctx *sdk.AppCtx, args map[string]any, uploaded bool) (
 	asset, err := assetByID(ctx.AppDB(), pid, actual)
 	if err != nil {
 		return nil, err
+	}
+	// Reattaching is also a metadata refresh. Older Catalog rows may have
+	// been attached while Storage's checksum was empty.
+	if actual != id && result.File.ChecksumStatus == "verified" && result.File.SHA256 != "" {
+		if _, err = ctx.AppDB().Exec(`UPDATE assets SET sha256=?,size_bytes=?,content_type=?,name=?,revision=revision+1,updated_at=? WHERE project_id=? AND id=?`, result.File.SHA256, result.File.SizeBytes, result.File.ContentType, result.File.Name, attachedAt, pid, actual); err != nil {
+			return nil, err
+		}
+		asset, err = assetByID(ctx.AppDB(), pid, actual)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if actual == id {
 		ctx.EmitWithProject("content-catalog.asset.attached", pid, map[string]any{"asset_id": id, "session_id": asset.SessionID, "storage_file_id": fileID})
