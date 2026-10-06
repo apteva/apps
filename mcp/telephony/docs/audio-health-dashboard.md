@@ -1,6 +1,7 @@
 # Audio health overview and dashboard widget
 
-Unreleased addition based on Telephony 0.10.2. Only Telephony is changed.
+Introduced in Telephony 0.10.3, retaining all Telephony 0.10.2 functionality.
+Only Telephony is changed.
 
 ## Using the app
 
@@ -95,5 +96,6 @@ with last-success timestamps instead of suggesting stale data is current.
   were not changed; prior network benchmark evidence remains in the repository.
   No new live-carrier or network-quality benchmark is claimed for the dashboard.
 
-All work remains local. Production/staging installations, routes, numbers,
-carrier settings and dashboard layouts were not changed. No live calls were made.
+Verification was local. Publishing does not activate installations. Production
+and staging, routes, numbers, carrier settings and dashboard layouts were not
+changed. No live calls were made.
