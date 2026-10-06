@@ -50,7 +50,14 @@ func claimProjectionQueueAt(ctx context.Context, app *sdk.AppCtx, pid string, no
 	}
 	// Serialize every scope of a projection, including a whole rebuild. Claims
 	// use SQLite time for lease expiry, independent from scheduling's test clock.
-	err = app.AppDB().QueryRowContext(ctx, `UPDATE projection_queue SET lease_token=?,forced=0,claimed_until=datetime('now',printf('+%d seconds',(SELECT COALESCE(json_extract(options,'$.max_refresh_ms'),?) FROM projection_definitions WHERE id=projection_queue.projection_id)/1000+10)),attempts=attempts+1 WHERE rowid=(SELECT q.rowid FROM projection_queue q JOIN projection_definitions p ON p.id=q.projection_id WHERE q.project_id=? AND p.status IN ('active','building') AND (p.built=1 OR q.scope_key='__all__') AND q.due_at_ms<=? AND (q.claimed_until IS NULL OR q.claimed_until<=CURRENT_TIMESTAMP) AND NOT EXISTS(SELECT 1 FROM projection_queue running WHERE running.projection_id=q.projection_id AND running.claimed_until>CURRENT_TIMESTAMP) ORDER BY q.due_at_ms,q.queued_at,q.scope_key LIMIT 1) RETURNING projection_id,project_id,scope_key,pending_change_id,revision,attempts,lease_token`, token, maxProjectionMs(app), pid, now).Scan(&item.ProjectionID, &item.ProjectID, &item.ScopeKey, &item.PendingID, &item.Revision, &item.Attempts, &item.LeaseToken)
+	var queuedAt string
+	err = app.AppDB().QueryRowContext(ctx, `UPDATE projection_queue SET lease_token=?,forced=0,claimed_until=datetime('now',printf('+%d seconds',(SELECT COALESCE(json_extract(options,'$.max_refresh_ms'),?) FROM projection_definitions WHERE id=projection_queue.projection_id)/1000+10)),attempts=attempts+1 WHERE rowid=(SELECT q.rowid FROM projection_queue q JOIN projection_definitions p ON p.id=q.projection_id WHERE q.project_id=? AND p.status IN ('active','building') AND (p.built=1 OR q.scope_key='__all__') AND q.due_at_ms<=? AND (q.claimed_until IS NULL OR q.claimed_until<=CURRENT_TIMESTAMP) AND NOT EXISTS(SELECT 1 FROM projection_queue running WHERE running.projection_id=q.projection_id AND running.claimed_until>CURRENT_TIMESTAMP) AND (p.built=0 OR q.scope_key<>? OR NOT EXISTS(SELECT 1 FROM projection_queue small WHERE small.projection_id=q.projection_id AND small.scope_key<>? AND small.due_at_ms<=? AND (small.claimed_until IS NULL OR small.claimed_until<=CURRENT_TIMESTAMP))) ORDER BY CASE WHEN q.scope_key=? THEN 1 ELSE 0 END,q.due_at_ms,q.queued_at,q.scope_key LIMIT 1) RETURNING projection_id,project_id,scope_key,pending_change_id,revision,attempts,lease_token,queued_at`, token, maxProjectionMs(app), pid, now, projectionAllScope, projectionAllScope, now, projectionAllScope).Scan(&item.ProjectionID, &item.ProjectID, &item.ScopeKey, &item.PendingID, &item.Revision, &item.Attempts, &item.LeaseToken, &queuedAt)
+	if t, e := time.ParseInLocation("2006-01-02 15:04:05", queuedAt, time.UTC); e == nil {
+		item.QueuedAtMs = t.UnixMilli()
+	}
+	if err == nil && item.QueuedAtMs > 0 && now > item.QueuedAtMs {
+		item.QueueWaitMs = now - item.QueuedAtMs
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return item, false, nil
 	}
@@ -140,7 +147,8 @@ func (a *App) projectionSQLRows(parent context.Context, app *sdk.AppCtx, p *proj
 	return out, err
 }
 func (a *App) readProjectionRows(parent context.Context, app *sdk.AppCtx, p *projectionDefinition, raw string, bound []any, result bool) ([]map[string]any, int64, error) {
-	if err := validateReadOnlySQL(raw); err != nil {
+	tokens, err := a.cachedProjectionSQL(app, raw)
+	if err != nil {
 		return nil, 0, err
 	}
 	resolved, err := a.substitutePlaceholders(app, p.ProjectID, raw)
@@ -148,10 +156,7 @@ func (a *App) readProjectionRows(parent context.Context, app *sdk.AppCtx, p *pro
 		return nil, 0, err
 	}
 	// Authorizer resolves schemas before acquiring the lone background reader.
-	names, err := placeholderNames(raw)
-	if err != nil {
-		return nil, 0, err
-	}
+	names := placeholderNamesFromTokens(tokens)
 	schemas := map[schemaCacheKey]*Table{}
 	for _, n := range names {
 		t, e := a.loadTableSchema(app, p.ProjectID, n)
@@ -207,7 +212,13 @@ func (a *App) readProjectionRows(parent context.Context, app *sdk.AppCtx, p *pro
 	// every SQLite step (including expensive later rows) runs under that watcher.
 	// SQLITE_LIMIT_LENGTH caps the aggregate buffer before it crosses MaxBytes.
 	query := strings.TrimSuffix(strings.TrimSpace(resolved), ";")
-	schemaRows, err := tx.QueryContext(parent, `SELECT * FROM (`+query+`) LIMIT 0`, bound...)
+	schemaSQL := `SELECT * FROM (` + query + `) LIMIT 0`
+	schemaStmt, err := tx.PrepareContext(parent, schemaSQL)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer schemaStmt.Close()
+	schemaRows, err := schemaStmt.QueryContext(parent, bound...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -242,7 +253,12 @@ func (a *App) readProjectionRows(parent context.Context, app *sdk.AppCtx, p *pro
 	}
 	aggregate := `SELECT json_group_array(json_object(` + strings.Join(fields, ",") + `)) FROM (SELECT * FROM (` + query + `) LIMIT ` + fmt.Sprint(limit+1) + `)`
 	var encoded string
-	if err := tx.QueryRowContext(parent, aggregate, bound...).Scan(&encoded); err != nil {
+	aggregateStmt, err := tx.PrepareContext(parent, aggregate)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer aggregateStmt.Close()
+	if err := aggregateStmt.QueryRowContext(parent, bound...).Scan(&encoded); err != nil {
 		if parent.Err() != nil {
 			return nil, 0, parent.Err()
 		}
@@ -362,10 +378,12 @@ func (a *App) refreshProjectionScope(parent context.Context, app *sdk.AppCtx, it
 			return err
 		}
 	}
+	calculationStarted := time.Now()
 	rows, watermark, err := a.readProjectionRows(ctx, scoped, p, raw, bound, true)
 	if err != nil {
 		return err
 	}
+	item.CalculationMs = time.Since(calculationStarted).Milliseconds()
 	grouped := map[string][]map[string]any{}
 	if item.ScopeKey == projectionAllScope {
 		grouped[projectionAllScope] = nil
@@ -390,7 +408,12 @@ func (a *App) refreshProjectionScope(parent context.Context, app *sdk.AppCtx, it
 		return err
 	}
 	ctx = context.WithValue(ctx, projectionBackgroundDBKey{}, reader)
-	return publishProjectionGeneration(ctx, scoped, p, item, grouped, watermark, a.projectionTime().UnixMilli())
+	var publicationMs int64
+	err = publishProjectionGeneration(ctx, scoped, p, item, grouped, watermark, a.projectionTime().UnixMilli(), &publicationMs)
+	if err == nil {
+		a.recordProjectionMetrics(scoped, p.ID, projectionPhaseMetrics{Queue: item.QueueWaitMs, Calculation: item.CalculationMs, Publication: publicationMs, Cleanup: a.projectionMetricsFor(p.ID).Cleanup})
+	}
+	return err
 }
 func (a *App) projectionWorker(ctx context.Context, app *sdk.AppCtx) error {
 	if !a.projectionWorkerMu.TryLock() {
@@ -453,6 +476,7 @@ func (a *App) projectionWorker(ctx context.Context, app *sdk.AppCtx) error {
 		}
 		gcStart := time.Now()
 		for _, p := range defs {
+			cleanupStarted := time.Now()
 			for i := 0; i < 32 && time.Since(gcStart) < 100*time.Millisecond; i++ {
 				removed, err := a.cleanupProjectionGenerations(ctx, app, p)
 				if err != nil {
@@ -461,6 +485,12 @@ func (a *App) projectionWorker(ctx context.Context, app *sdk.AppCtx) error {
 				if !removed {
 					break
 				}
+			}
+			cleanupMs := time.Since(cleanupStarted).Milliseconds()
+			if cleanupMs > 0 {
+				m := a.projectionMetricsFor(p.ID)
+				m.Cleanup = cleanupMs
+				a.recordProjectionMetrics(app, p.ID, m)
 			}
 		}
 	}

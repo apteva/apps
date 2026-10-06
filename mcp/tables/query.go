@@ -41,7 +41,8 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (resultValue
 	if len(rawSQL) > 64<<10 {
 		return nil, errf("sql exceeds 65536 bytes")
 	}
-	if err := validateReadOnlySQL(rawSQL); err != nil {
+	tokens, err := a.cachedProjectionSQL(ctx, rawSQL)
+	if err != nil {
 		return nil, err
 	}
 	resolved, err := a.substitutePlaceholders(ctx, pid, rawSQL)
@@ -56,10 +57,7 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (resultValue
 	bound := make([]any, len(params))
 	copy(bound, params)
 
-	names, err := placeholderNames(rawSQL)
-	if err != nil {
-		return nil, err
-	}
+	names := placeholderNamesFromTokens(tokens)
 	projectionIDs := []int64{}
 	for _, name := range names {
 		table, err := a.loadQueryTable(ctx, pid, name)
@@ -243,7 +241,7 @@ func validateReadOnlySQL(s string) error {
 	return nil
 }
 func (a *App) substitutePlaceholders(ctx *sdk.AppCtx, projectID, query string) (string, error) {
-	tokens, err := sqlTokens(query)
+	tokens, err := a.cachedProjectionSQL(ctx, query)
 	if err != nil {
 		return "", err
 	}

@@ -122,6 +122,7 @@ func (a *App) toolTablesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error
 	}
 	a.cache.invalidate(pid, name)
 	a.plans.invalidateTable(id)
+	a.invalidateSQLCaches()
 
 	emit(ctx, topicTableCreated, map[string]any{
 		"id":      id,
@@ -487,6 +488,7 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	a.cache.invalidate(pid, name)
 	a.plans.invalidateTable(t.ID)
+	a.invalidateSQLCaches()
 
 	updated := t
 	emit(ctx, topicTableAltered, map[string]any{
@@ -683,6 +685,7 @@ func (a *App) toolTablesDrop(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	a.cache.invalidate(pid, name)
 	a.plans.invalidateTable(t.ID)
+	a.invalidateSQLCaches()
 	emit(ctx, topicTableDropped, map[string]any{
 		"id":   t.ID,
 		"name": name,

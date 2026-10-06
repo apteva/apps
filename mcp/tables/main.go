@@ -45,6 +45,13 @@ type App struct {
 	plans                      queryPlanCache
 	projectionMu               sync.RWMutex
 	projectionCache            map[schemaCacheKey]*Table
+	projectionSQLMu            sync.RWMutex
+	projectionSQLCache         map[string]projectionSQLValidation
+	projectionSQLEpoch         uint64
+	projectionMetricsMu        sync.RWMutex
+	projectionMetrics          map[int64]projectionPhaseMetrics
+	authorizationMu            sync.RWMutex
+	authorizationCache         map[string]struct{}
 }
 
 func (a *App) Manifest() sdk.Manifest {
