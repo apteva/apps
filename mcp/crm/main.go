@@ -92,6 +92,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/inbound", Handler: a.handleInbound},
 		// Cross-contact triage queue.
 		{Pattern: "/inbox", Handler: a.handleHTTPInbox},
+		{Pattern: "/drafts", Handler: a.handleHTTPDrafts},
+		{Pattern: "/drafts/", Handler: a.handleHTTPDrafts},
 		// Messaging dependency read surface for the CRM panel. These
 		// route through CRM's bound messaging install instead of having
 		// the browser guess a messaging install_id.
@@ -303,7 +305,7 @@ func (a *App) handleHTTPPostActivity(w http.ResponseWriter, r *http.Request) {
 // ─── MCP tools (the agent's surface) ───────────────────────────────
 
 func (a *App) MCPTools() []sdk.Tool {
-	return []sdk.Tool{
+	return append([]sdk.Tool{
 		{
 			Name:        "contacts_search",
 			Description: "Filtered contact search. Args: q (free text over name/email/phone/company), filters [], limit (default 50, max 200), offset (for paging). Returns {contacts, count, total, offset} — use total + offset to page. Each filter is either a core-field filter {field, op, value} (field ∈ first_name,last_name,display_name,company,job_title,primary_email,primary_phone,status,owner_user_id,source,first_contact_at,last_contact_at,created_at,updated_at), a custom-field filter {attribute: \"<key>\", op, value}, or a list predicate {predicate: \"in_list\"|\"not_in_list\", list_id}. ops: eq,neq,gt,gte,lt,lte,contains,starts_with,is_null,in. Timestamp fields support ISO-8601 values.",
@@ -466,9 +468,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_reply",
-			Description: "REAL EXTERNAL SEND: reply on the contact's most-recent inbound conversation (or the one given by conversation_id). Never use this to test configuration. For a free-form reply, OMIT template_id, content_sid, template_vars, and other unused optional fields. A reply may contain body/body_html, a template, attachments, or any combination. attachments accepts Storage IDs, public HTTPS URLs, or base64 files; attachment_storage_ids is shorthand for Storage files (maximum 20 files / 25 MB total). Sets In-Reply-To/References for email and automatically deduplicates identical replies for five minutes unless idempotency_key is supplied. Sender precedence: from > original receiving identity > list.default_sender > install default. Recipient is selected inbound Reply-To/From; blocked replies never switch addresses. Select a specific inbound message with reply_to_activity_id. For WhatsApp outside 24h, use messaging_templates_list and pass template_id/template_vars.",
+			Description: "REAL EXTERNAL SEND: reply on the contact's most-recent inbound conversation (or the one given by conversation_id). Never use this to test configuration. For a free-form reply, OMIT template_id, content_sid, template_vars, and other unused optional fields. A reply may contain body/body_html, a template, attachments, or any combination. attachments accepts Storage IDs, public HTTPS URLs, or base64 files; attachment_storage_ids is shorthand for Storage files (maximum 20 files / 25 MB total). Sets In-Reply-To/References for email and automatically deduplicates identical replies for five minutes unless idempotency_key is supplied. Sender precedence: from > original receiving identity > list.default_sender > install default. Recipient is selected inbound Reply-To/From; blocked replies never switch addresses. Select a specific inbound message with reply_to_activity_id. For WhatsApp outside 24h, use messaging_templates_list and pass template_id/template_vars. Optional channel defaults to selected/latest inbound phone transport. Explicit SMS/WhatsApp switches keep this conversation and its exact remote phone; select a verified sender for the requested channel. Later replies to that exact sender return to this conversation. Never switch channels without user authorization; email threads cannot change transport.",
 			InputSchema: messageInputSchema(map[string]any{
 				"id":                     map[string]any{"type": "integer", "minimum": 1},
+				"channel":                map[string]any{"type": "string", "enum": []string{"email", "sms", "whatsapp"}, "description": "Optional reply transport. Defaults to selected/latest inbound phone transport. Explicit SMS/WhatsApp switches stay in the same conversation, use its exact remote number, and require a verified sender for that channel. Email cannot switch transport."},
 				"body":                   map[string]any{"type": "string"},
 				"conversation_id":        map[string]any{"type": "integer"},
 				"reply_to_activity_id":   map[string]any{"type": "integer", "minimum": 1},
@@ -527,7 +530,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "messaging_whatsapp_session_check",
-			Description: "Check whether WhatsApp free-form sending is allowed. WhatsApp requires an inbound message from the contact within 24 hours; otherwise use an approved template. Args: id/contact_id? (uses contact phone as recipient), to? (E.164 recipient override), from? (verified WhatsApp sender; defaults to CRM/Messaging WhatsApp sender). Returns active, from, to, since, last_inbound.",
+			Description: "Check whether WhatsApp free-form sending is allowed. WhatsApp requires an inbound message from the contact to the chosen sender within 24 hours; otherwise use an approved template. Args: id/contact_id? (uses contact phone as recipient), to? (E.164 recipient override), from? (verified WhatsApp sender; defaults to CRM/Messaging WhatsApp sender). Returns active, from, to, since, last_inbound, expires_at, checked_at. The expiry is the latest matching inbound time plus 24 hours; outgoing messages do not extend it. A lookup failure is an error, not a closed window. Messaging rechecks at send time.",
 			InputSchema: schemaObject(map[string]any{
 				"id":         map[string]any{"type": "integer"},
 				"contact_id": map[string]any{"type": "integer"},
@@ -537,26 +540,40 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolMessagingWhatsAppSessionCheck,
 		},
 		{
-			Name:        "messaging_inbound_receive",
-			Description: "Receive an inbound message dispatched by Messaging and attach it to the CRM contact timeline. Internal plumbing; agents normally should not call this directly.",
+			Name:        "contacts_refresh_message_body",
+			Description: "Recover one existing inbound email activity from its original in the bound Messaging app. Args: id (contact id), activity_id, dry_run? (default true; pass false to repair), normalize_formatting? (default false; repairs excessive blank lines only when the stored body exactly matches CRM's former HTML conversion), recover_sender? (default false; fills missing From metadata from the verified original). Matches project, source install, and RFC Message-ID. Preserves edited/complete bodies, existing sender metadata, IDs, status, timestamps, attachments, and workflows; never sends or redispatches mail. Returns recoverable, body_repaired, formatting_recoverable/formatting_repaired, and sender_recoverable/sender_repaired.",
 			InputSchema: schemaObject(map[string]any{
-				"message_id":        map[string]any{"type": "integer"},
-				"channel":           map[string]any{"type": "string"},
-				"from":              map[string]any{"type": "string"},
-				"to":                map[string]any{"type": "array"},
-				"cc":                map[string]any{"type": "array"},
-				"subject":           map[string]any{"type": "string"},
-				"body_text":         map[string]any{"type": "string"},
-				"body_html":         map[string]any{"type": "string"},
-				"message_id_header": map[string]any{"type": "string"},
-				"in_reply_to":       map[string]any{"type": "string"},
-				"references":        map[string]any{"type": "array"},
-				"headers":           map[string]any{"type": "object"},
-				"received_at":       map[string]any{"type": "string"},
-				"matched_recipient": map[string]any{"type": "string"},
-				"matched_pattern":   map[string]any{"type": "string"},
-				"to_subaddress":     map[string]any{"type": "string"},
-				"attachments":       map[string]any{"type": "array", "items": map[string]any{"type": "object"}, "maxItems": maxMessageAttachments},
+				"id":                   map[string]any{"type": "integer"},
+				"activity_id":          map[string]any{"type": "integer"},
+				"dry_run":              map[string]any{"type": "boolean", "default": true},
+				"normalize_formatting": map[string]any{"type": "boolean", "default": false},
+				"recover_sender":       map[string]any{"type": "boolean", "default": false},
+			}, []string{"id", "activity_id"}),
+			Handler: a.toolRefreshMessageBody,
+		},
+		{
+			Name:        "messaging_inbound_receive",
+			Description: "Receive an inbound message dispatched by Messaging. Email requires matched_recipient or exactly one envelope recipient; visible To is not delivery proof. CRM validates the receiving identity against the bound project's Messaging senders/domains and ignores suppressed, unmatched, or foreign-project deliveries before creating CRM data. Internal plumbing; agents normally should not call this directly.",
+			InputSchema: schemaObject(map[string]any{
+				"message_id":          map[string]any{"type": "integer"},
+				"channel":             map[string]any{"type": "string"},
+				"from":                map[string]any{"type": "string"},
+				"to":                  map[string]any{"type": "array"},
+				"cc":                  map[string]any{"type": "array"},
+				"subject":             map[string]any{"type": "string"},
+				"body_text":           map[string]any{"type": "string"},
+				"body_html":           map[string]any{"type": "string"},
+				"message_id_header":   map[string]any{"type": "string"},
+				"in_reply_to":         map[string]any{"type": "string"},
+				"references":          map[string]any{"type": "array"},
+				"headers":             map[string]any{"type": "object"},
+				"received_at":         map[string]any{"type": "string"},
+				"route_status":        map[string]any{"type": "string", "description": "Suppressed and no_match deliveries are ignored."},
+				"envelope_recipients": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Actual SMTP delivery recipients; never inferred from visible To."},
+				"matched_recipient":   map[string]any{"type": "string"},
+				"matched_pattern":     map[string]any{"type": "string"},
+				"to_subaddress":       map[string]any{"type": "string"},
+				"attachments":         map[string]any{"type": "array", "items": map[string]any{"type": "object"}, "maxItems": maxMessageAttachments},
 			}, []string{"channel", "from"}),
 			Handler: a.toolMessagingInboundReceive,
 		},
@@ -572,7 +589,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_resolve_audience",
-			Description: "Resolve exactly one segment, list, or contact into currently messageable recipients for a channel. Returns exact raw/eligible/excluded counts, exclusion reasons, healthy addresses, and cursor pagination. Args: channel (email|sms|whatsapp), exactly one of segment_id/list_id/contact_id, limit? (default 1000, max 5000), after_contact_id?, include_automated? (default false).",
+			Description: "Resolve exactly one segment, list, or contact into currently messageable recipients for a channel. Returns exact raw/eligible/excluded counts, exclusion reasons, healthy addresses, and cursor pagination. Args: channel (email|sms|whatsapp), exactly one of segment_id/list_id/contact_id, limit? (default 1000, max 5000), after_contact_id?, include_automated? (default false), include_counts? (default true; false skips full-audience counts and returns zero count fields).",
 			InputSchema: schemaObject(map[string]any{
 				"channel":           map[string]any{"type": "string", "enum": []string{"email", "sms", "whatsapp"}},
 				"segment_id":        map[string]any{"type": "integer"},
@@ -583,7 +600,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"include_automated": map[string]any{"type": "boolean"},
 				"include_counts":    map[string]any{"type": "boolean"},
 			}, []string{"channel"}),
-			Handler: a.toolResolveAudience,
+			HandlerCtx: a.toolResolveAudience,
 		},
 		{
 			Name:        "contacts_list_conversations",
@@ -623,6 +640,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name:        "conversations_inbox",
 			Description: "Cross-contact triage queue: conversations across all contacts, newest activity first, with contact summary + last-message snippet + automated/priority flags. Args: status? (open [default] | pending | closed | all), limit? (default 50, max 200), offset? (for paging), filters? array of {field, op, value}. Filter fields: channel, from, to, cc, bcc, contact, list, tag, priority. Ops: is, is_not, contains, domain, in.",
+			Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false},
 			InputSchema: schemaObject(map[string]any{
 				"status":   map[string]any{"type": "string"},
 				"limit":    map[string]any{"type": "integer"},
@@ -880,15 +898,9 @@ func (a *App) MCPTools() []sdk.Tool {
 		// call), static (frozen snapshot via segments_materialise).
 		{
 			Name:        "segments_create",
-			Description: "Create a segment. Args: name, kind (dynamic|static, default dynamic), description?, list_id? (scopes the segment to a list — definition is implicitly AND-ed with in_list), definition (predicate array).",
-			InputSchema: schemaObject(map[string]any{
-				"name":        map[string]any{"type": "string"},
-				"kind":        map[string]any{"type": "string"},
-				"description": map[string]any{"type": "string"},
-				"list_id":     map[string]any{"type": "integer"},
-				"definition":  map[string]any{"type": "array"},
-			}, []string{"name"}),
-			Handler: a.toolSegmentsCreate,
+			Description: "Create a segment. Args: name, kind (dynamic|static, default dynamic), description?, list_id? (optional list scope), definition. " + segmentDefinitionContract,
+			InputSchema: segmentCreateInputSchema(),
+			Handler:     a.toolSegmentsCreate,
 		},
 		{
 			Name:        "segments_list",
@@ -908,12 +920,9 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "segments_update",
-			Description: "Partial-patch a segment (name, description, kind, list_id, definition). Mutating definition busts the cached count.",
-			InputSchema: schemaObject(map[string]any{
-				"id":    map[string]any{"type": "integer"},
-				"patch": map[string]any{"type": "object"},
-			}, []string{"id", "patch"}),
-			Handler: a.toolSegmentsUpdate,
+			Description: "Partial-patch a segment (name, description, kind, list_id, definition). Mutating definition busts the cached count. " + segmentDefinitionContract,
+			InputSchema: segmentUpdateInputSchema(),
+			Handler:     a.toolSegmentsUpdate,
 		},
 		{
 			Name:        "segments_delete",
@@ -949,7 +958,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"id"}),
 			Handler: a.toolSegmentsMaterialise,
 		},
-	}
+	}, a.draftTools()...)
 }
 
 func main() { sdk.Run(&App{}) }
@@ -1421,12 +1430,25 @@ func (a *App) toolMerge(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	notes, _ := args["notes"].(string)
 	source, _ := args["source"].(string)
+	loserListIDs, listErr := dbActiveListIDsForContact(ctx.AppDB(), pid, loser)
+	if listErr != nil {
+		ctx.Logger().Warn("merge loser list snapshot failed", "contact_id", loser, "err", listErr)
+		loserListIDs = []int64{}
+	}
 	if err := dbMerge(ctx.AppDB(), pid, loser, winner, notes, source); err != nil {
 		return nil, err
 	}
+	winnerListIDs, listErr := dbActiveListIDsForContact(ctx.AppDB(), pid, winner)
+	if listErr != nil {
+		ctx.Logger().Warn("merge winner list snapshot failed", "contact_id", winner, "err", listErr)
+		winnerListIDs = []int64{}
+	}
 	if ctx != nil {
 		emitCRMEvent(ctx, pid, "contact.merged", map[string]any{
-			"winner_id": winner, "loser_id": loser,
+			"winner_id":                   winner,
+			"loser_id":                    loser,
+			"winner_list_ids":             winnerListIDs,
+			"loser_list_ids_before_merge": loserListIDs,
 		})
 	}
 	return map[string]any{"merged": true, "winner_id": winner, "loser_id": loser}, nil
@@ -1434,8 +1456,8 @@ func (a *App) toolMerge(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 // emitContact broadcasts a contact mutation. Best-effort: ctx.Emit is
 // fire-and-forget and the DB write has already committed. Subscribers
-// re-fetch the row themselves rather than trusting the payload. The added
-// event also includes the complete active list membership snapshot.
+// re-fetch the row themselves rather than trusting the payload. The shared
+// event enricher adds the complete active list membership snapshot.
 func emitContact(ctx *sdk.AppCtx, pid, topic string, c *Contact) {
 	if ctx == nil || c == nil {
 		return
@@ -1446,20 +1468,6 @@ func emitContact(ctx *sdk.AppCtx, pid, topic string, c *Contact) {
 		"first_name":   c.FirstName,
 		"last_name":    c.LastName,
 		"archived":     c.Status == "archived",
-	}
-	if topic == "contact.added" {
-		// Query after all create-time list operations so this is the complete
-		// active membership set, not merely the lists requested by one caller.
-		lists, err := dbListsForContact(ctx.AppDB(), pid, c.ID)
-		listIDs := make([]int64, 0, len(lists))
-		if err != nil {
-			ctx.Logger().Warn("contact event list lookup failed", "contact_id", c.ID, "err", err)
-		} else {
-			for _, list := range lists {
-				listIDs = append(listIDs, list.ID)
-			}
-		}
-		payload["list_ids"] = listIDs
 	}
 	emitCRMEvent(ctx, pid, topic, payload)
 }
@@ -1901,6 +1909,11 @@ func (a *App) handleHTTPArchive(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "id required")
 		return
 	}
+	listIDs, listErr := dbActiveListIDsForContact(ctx.AppDB(), pid, id)
+	if listErr != nil {
+		ctx.Logger().Warn("contact archive list snapshot failed", "contact_id", id, "err", listErr)
+		listIDs = []int64{}
+	}
 	if _, err := ctx.AppDB().Exec(
 		`UPDATE contacts SET status='archived', updated_at = CURRENT_TIMESTAMP
 		 WHERE id = ? AND project_id = ?`, id, pid); err != nil {
@@ -1908,7 +1921,10 @@ func (a *App) handleHTTPArchive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ctx != nil {
-		emitCRMEvent(ctx, pid, "contact.deleted", map[string]any{"id": id})
+		emitCRMEvent(ctx, pid, "contact.deleted", map[string]any{
+			"id":                     id,
+			"list_ids_before_delete": listIDs,
+		})
 	}
 	httpJSON(w, map[string]any{"archived": true})
 }
@@ -2926,6 +2942,13 @@ func dbMerge(db *sql.DB, pid string, loserID, winnerID int64, notes, source stri
 	defer tx.Rollback()
 
 	// Verify both contacts belong to this project.
+	var busyDrafts int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM conversation_drafts WHERE project_id=? AND contact_id IN (?,?) AND status IN ('sending','send_failed')`, pid, loserID, winnerID).Scan(&busyDrafts); err != nil {
+		return err
+	}
+	if busyDrafts > 0 {
+		return errors.New("resolve in-progress or uncertain draft sends before merging contacts")
+	}
 	var n int
 	if err := tx.QueryRow(
 		`SELECT COUNT(*) FROM contacts WHERE id IN (?, ?) AND project_id = ? AND deleted_at IS NULL AND status != 'merged'`,
@@ -2956,6 +2979,9 @@ func dbMerge(db *sql.DB, pid string, loserID, winnerID int64, notes, source stri
 			return err
 		}
 		if err := exec(`UPDATE contact_activities SET conversation_id=? WHERE project_id=? AND conversation_id=?`, winning, pid, losing); err != nil {
+			return err
+		}
+		if err := exec(`UPDATE conversation_drafts SET conversation_id=?,contact_id=?,revision=revision+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE project_id=? AND conversation_id=?`, winning, winnerID, pid, losing); err != nil {
 			return err
 		}
 		if err := exec(`UPDATE OR IGNORE conversation_participants SET conversation_id=? WHERE project_id=? AND conversation_id=?`, winning, pid, losing); err != nil {
@@ -3005,6 +3031,9 @@ func dbMerge(db *sql.DB, pid string, loserID, winnerID int64, notes, source stri
 	}
 
 	// Move every contact-owned relation, not only the visible timeline.
+	if err := exec(`UPDATE conversation_drafts SET contact_id=?,revision=revision+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE project_id=? AND contact_id=?`, winnerID, pid, loserID); err != nil {
+		return err
+	}
 	if err := exec(
 		`UPDATE contact_activities SET contact_id = ? WHERE contact_id = ? AND project_id = ?`,
 		winnerID, loserID, pid); err != nil {

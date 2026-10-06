@@ -18,9 +18,10 @@ var manifestYAML string
 var skillBody string
 
 type App struct {
-	ctx *sdk.AppCtx
-	db  *sql.DB
-	mu  sync.Mutex
+	ctx     *sdk.AppCtx
+	db      *sql.DB
+	mu      sync.Mutex
+	eventMu sync.Mutex
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -46,6 +47,6 @@ func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 
 func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{{Name: "event-triggers", Schedule: "@every 5s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.tickTriggers(ctx) }}, {Name: "direct-runs", Schedule: "@every 5s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.tickDirect(ctx, time.Now().UTC()) }}, {Name: "task-sync", Schedule: "@every 30s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.retryPending(ctx) }}}
+	return []sdk.Worker{{Name: "publish-events", Schedule: "@every 1s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.drainEvents(ctx) }}, {Name: "event-triggers", Schedule: "@every 5s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.tickTriggers(ctx) }}, {Name: "direct-runs", Schedule: "@every 5s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.tickDirect(ctx, time.Now().UTC()) }}, {Name: "task-sync", Schedule: "@every 30s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.retryPending(ctx) }}}
 }
 func main() { sdk.Run(&App{}) }

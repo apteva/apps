@@ -14,7 +14,7 @@ import (
 )
 
 type nestedProtocolPlatform struct {
-	tk.BasePlatformClient
+	contextPlatformFixture
 	gate    chan struct{}
 	entered chan struct{}
 	active  atomic.Int32

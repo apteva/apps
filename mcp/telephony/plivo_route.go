@@ -161,6 +161,10 @@ func (a *App) handlePlivoInbound(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if !route.Enabled {
+		http.NotFound(w, r)
+		return
+	}
 	callUUID := strings.TrimSpace(r.FormValue("CallUUID"))
 	from := strings.TrimSpace(r.FormValue("From"))
 	to := strings.TrimSpace(firstNonEmpty(r.FormValue("To"), route.PhoneNumber))
@@ -181,9 +185,17 @@ func (a *App) handlePlivoInbound(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "persist call: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if route.RoutingTerminalType == "hangup" || route.RoutingTerminalType == "reject" {
-		_ = a.db().updateStatus(stored.ID, "completed", "")
+	if isSuppressedHandlingReason(stored.HandlingReason) {
+		_ = a.db().updateStatus(stored.ID, "canceled", stored.ErrorMessage)
 		writePlivoHangup(w)
+		return
+	}
+	if route.RoutingTerminalType == "hangup" || route.RoutingTerminalType == "reject" {
+		if stored.AnnouncementState != "" {
+			writePlivoSayHangup(w, stored.AnnouncementText)
+		} else {
+			writePlivoHangup(w)
+		}
 		return
 	}
 	if route.AnswerMode == answerModeRealtimeImmediate {
@@ -221,7 +233,7 @@ func (a *App) handlePlivoInbound(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) authorizedPlivoRoute(r *http.Request, routeID string) (*routeRow, error) {
 	route, err := a.db().findRoute(routeID)
-	if err != nil || route == nil || route.CarrierSlug != "plivo" || !route.Enabled || route.Secret == "" ||
+	if err != nil || route == nil || route.CarrierSlug != "plivo" || route.Secret == "" ||
 		!secureEqual(r.URL.Query().Get("secret"), route.Secret) || r.URL.Query().Get("project_id") != route.ProjectID {
 		return nil, errors.New("route unavailable")
 	}
@@ -316,6 +328,11 @@ func writePlivoWait(w http.ResponseWriter, waitURL string) {
 func writePlivoHangup(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/xml")
 	_, _ = w.Write([]byte(`<Response><Hangup/></Response>`))
+}
+
+func writePlivoSayHangup(w http.ResponseWriter, prompt string) {
+	w.Header().Set("Content-Type", "application/xml")
+	_, _ = fmt.Fprintf(w, `<Response><Speak language="fr-FR">%s</Speak><Hangup/></Response>`, xmlEscape(prompt))
 }
 
 func plivoApplicationID(value any) string {

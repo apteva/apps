@@ -1,0 +1,7 @@
+# Added to the runner's built-in Go Tier 1 and Tier 2 commands.
+native:
+  "1":
+    - [bun, test, ./ui, ./frontend/tests]
+    - [bun, run, --cwd, frontend, typecheck:consumer]
+  "2":
+    - [bun, x, --no-install, playwright, test, --config, frontend/playwright.config.ts]

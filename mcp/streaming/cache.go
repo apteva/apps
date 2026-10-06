@@ -32,6 +32,18 @@ type playbackRecord struct {
 // from a future path that forgets to.
 const playbackCacheTTL = 10 * time.Second
 
+// playbackMissTTL bounds how long a "no such stream" answer is reused.
+//
+// v0.2 cached hits only, so every request naming an id that doesn't
+// exist went to the DB. The media and heartbeat routes are NoAuth and
+// take the id straight off the path, so anyone could loop
+// GET /streams/999999/index.m3u8 and queue serialized reads ahead of
+// every real viewer's manifest fetch on the single-connection app DB —
+// the exact contention this cache exists to remove, reachable without
+// a token. Misses are cached briefly; streams_create invalidates so a
+// freshly minted id is never shadowed by a probe that preceded it.
+const playbackMissTTL = 5 * time.Second
+
 // playbackCache keeps one playbackRecord per (project, stream).
 //
 // Why this exists: the SDK opens the app DB with SetMaxOpenConns(1),
@@ -50,6 +62,9 @@ type playbackCache struct {
 type playbackEntry struct {
 	rec       playbackRecord
 	fetchedAt time.Time
+	// missing marks a cached negative: the row did not exist when we
+	// looked. Held for playbackMissTTL rather than the full ttl.
+	missing bool
 }
 
 func newPlaybackCache(ttl time.Duration) *playbackCache {
@@ -63,17 +78,27 @@ func playbackCacheKey(pid string, id int64) string {
 	return pid + ":" + strconv.FormatInt(id, 10)
 }
 
-func (c *playbackCache) get(pid string, id int64) (playbackRecord, bool) {
+// get returns the cached entry for one stream. `fresh` reports whether
+// anything usable was found; `missing` distinguishes a cached negative
+// (the row does not exist) from a cached record.
+func (c *playbackCache) get(pid string, id int64) (rec playbackRecord, missing, fresh bool) {
 	if c == nil {
-		return playbackRecord{}, false
+		return playbackRecord{}, false, false
 	}
 	c.mu.RLock()
 	e, ok := c.entries[playbackCacheKey(pid, id)]
 	c.mu.RUnlock()
-	if !ok || time.Since(e.fetchedAt) > c.ttl {
-		return playbackRecord{}, false
+	if !ok {
+		return playbackRecord{}, false, false
 	}
-	return e.rec, true
+	ttl := c.ttl
+	if e.missing {
+		ttl = playbackMissTTL
+	}
+	if time.Since(e.fetchedAt) > ttl {
+		return playbackRecord{}, false, false
+	}
+	return e.rec, e.missing, true
 }
 
 func (c *playbackCache) put(rec playbackRecord) {
@@ -82,6 +107,16 @@ func (c *playbackCache) put(rec playbackRecord) {
 	}
 	c.mu.Lock()
 	c.entries[playbackCacheKey(rec.ProjectID, rec.ID)] = playbackEntry{rec: rec, fetchedAt: time.Now()}
+	c.mu.Unlock()
+}
+
+// putMissing records that (pid, id) named no row.
+func (c *playbackCache) putMissing(pid string, id int64) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.entries[playbackCacheKey(pid, id)] = playbackEntry{fetchedAt: time.Now(), missing: true}
 	c.mu.Unlock()
 }
 
@@ -97,7 +132,10 @@ func (c *playbackCache) invalidate(pid string, id int64) {
 // playbackFor returns the gating record for one stream, from cache
 // when it's warm. Returns (nil, nil) when the row doesn't exist.
 func (a *App) playbackFor(ctx *sdk.AppCtx, pid string, id int64) (*playbackRecord, error) {
-	if rec, ok := a.playback.get(pid, id); ok {
+	if rec, missing, fresh := a.playback.get(pid, id); fresh {
+		if missing {
+			return nil, nil
+		}
 		return &rec, nil
 	}
 	rec := playbackRecord{ID: id}
@@ -113,6 +151,7 @@ func (a *App) playbackFor(ctx *sdk.AppCtx, pid string, id int64) (*playbackRecor
 		&rec.StoragePrefix, &rec.Status, &record)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			a.playback.putMissing(pid, id)
 			return nil, nil
 		}
 		return nil, err

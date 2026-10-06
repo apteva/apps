@@ -60,6 +60,12 @@ func (a *App) toolTablesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	defer tx.Rollback()
+	var projectionExists int64
+	if err := tx.QueryRow(`SELECT id FROM projection_definitions WHERE project_id=? AND name=? LIMIT 1`, pid, name).Scan(&projectionExists); err == nil {
+		return nil, errf("projection %q already exists", name)
+	} else if err != sql.ErrNoRows {
+		return nil, err
+	}
 
 	var existing int64
 	if err := tx.QueryRow(`SELECT id FROM tables_meta WHERE project_id = ? AND name = ?`, pid, name).Scan(&existing); err == nil {
@@ -115,6 +121,8 @@ func (a *App) toolTablesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	a.cache.invalidate(pid, name)
+	a.plans.invalidateTable(id)
+	a.invalidateSQLCaches()
 
 	emit(ctx, topicTableCreated, map[string]any{
 		"id":      id,
@@ -238,7 +246,7 @@ func (a *App) toolTablesList(ctx *sdk.AppCtx, args map[string]any) (resultValue 
 	}
 	offset := intArg(args, "offset", 0)
 	readPhase(ctx, "metadata")
-	tables, err := loadTablesPage(qctx, ctx.AppReadDB(), pid, limit+1, offset, maxQueryBytes(ctx))
+	tables, err := loadTablesPage(qctx, metadataReaderFor(ctx), pid, limit+1, offset, maxQueryBytes(ctx))
 	if err != nil {
 		return nil, queryStageErr("metadata", "<tables>", err)
 	}
@@ -339,6 +347,15 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	if provided != 1 {
 		return nil, errf("exactly one of add / rename / drop must be supplied")
+	}
+	if rename != nil || drop != "" {
+		var dependent int
+		if err := ctx.AppReadDB().QueryRowContext(requestContext(ctx), `SELECT COUNT(*) FROM projection_sources WHERE table_id=?`, t.ID).Scan(&dependent); err != nil {
+			return nil, err
+		}
+		if dependent > 0 {
+			return nil, errf("table %q is a projection source; recreate or retire its projections before renaming or dropping columns", name)
+		}
 	}
 
 	tx, err := beginWrite(ctx)
@@ -470,6 +487,8 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	a.cache.invalidate(pid, name)
+	a.plans.invalidateTable(t.ID)
+	a.invalidateSQLCaches()
 
 	updated := t
 	emit(ctx, topicTableAltered, map[string]any{
@@ -640,6 +659,13 @@ func (a *App) toolTablesDrop(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		}
 		return nil, err
 	}
+	var dependent int
+	if err := ctx.AppReadDB().QueryRowContext(requestContext(ctx), `SELECT COUNT(*) FROM projection_sources WHERE table_id=?`, t.ID).Scan(&dependent); err != nil {
+		return nil, err
+	}
+	if dependent > 0 {
+		return nil, errf("table %q is a projection source; retire its projections before dropping it", name)
+	}
 
 	tx, err := beginWrite(ctx)
 	if err != nil {
@@ -658,6 +684,8 @@ func (a *App) toolTablesDrop(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	a.cache.invalidate(pid, name)
+	a.plans.invalidateTable(t.ID)
+	a.invalidateSQLCaches()
 	emit(ctx, topicTableDropped, map[string]any{
 		"id":   t.ID,
 		"name": name,
@@ -704,7 +732,12 @@ func loadTablesContext(ctx context.Context, db *sql.DB, projectID string) ([]Tab
 }
 
 // One statement gives the table list and its columns the same SQLite snapshot.
-func loadTablesPage(ctx context.Context, db *sql.DB, projectID string, limit, offset int, byteCap int64) ([]Table, error) {
+type metadataReader interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func loadTablesPage(ctx context.Context, db metadataReader, projectID string, limit, offset int, byteCap int64) ([]Table, error) {
 	rows, err := db.QueryContext(ctx, `WITH chosen AS (
  SELECT * FROM tables_meta WHERE project_id=? ORDER BY name LIMIT ? OFFSET ?)
  SELECT t.id,t.name,t.scope,t.physical_name,t.created_at,t.row_count,c.name,c.type,c.nullable,c.default_value
@@ -812,7 +845,7 @@ func listTableSummaries(ctx *sdk.AppCtx, pid string, args map[string]any) (any, 
 	offset := intArg(args, "offset", 0)
 	qctx, cancel := queryTimeoutContext(ctx)
 	defer cancel()
-	rows, err := ctx.AppReadDB().QueryContext(qctx, `SELECT id,name,scope,COALESCE(row_count,0),created_at FROM tables_meta WHERE project_id=? ORDER BY name LIMIT ? OFFSET ?`, pid, limit+1, offset)
+	rows, err := metadataReaderFor(ctx).QueryContext(qctx, `SELECT id,name,scope,COALESCE(row_count,0),created_at FROM tables_meta WHERE project_id=? ORDER BY name LIMIT ? OFFSET ?`, pid, limit+1, offset)
 	if err != nil {
 		return nil, err
 	}

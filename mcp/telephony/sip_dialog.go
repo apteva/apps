@@ -92,7 +92,7 @@ func (g *sipGateway) reserveSession(id string) int {
 	if g.byProviderCall[id] != nil || g.reserved[id] {
 		return 482
 	}
-	if len(g.byCall)+len(g.reserved) >= g.cfg.MaxSessions {
+	if len(g.byCall)+len(g.reserved)+len(g.outboundByCall)+len(g.outboundReserved) >= g.cfg.MaxSessions {
 		return 503
 	}
 	if g.reserved == nil {

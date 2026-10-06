@@ -119,8 +119,10 @@ func (a *App) OnUnmount(*sdk.AppCtx) error {
 	}
 	return nil
 }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{Name: "workspace-previews", Schedule: "@every 3s", Run: a.reconcileWorkspacePreviews}}
+}
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func main() { sdk.Run(&App{}) }

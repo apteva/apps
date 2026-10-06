@@ -85,11 +85,11 @@ func validateStoreAssets(dataDir string, d *Deployment, build *Build, doc StoreD
 			continue
 		}
 		counts[locale+"\x00"+asset.Kind]++
-		if d.TargetKind == "ios" {
+		if isApplePlatform(d.TargetKind) {
 			if metadata.HasAlpha {
 				add(asset.Kind, asset.ID, "asset.apple_alpha", locale, "path", "App Store screenshots cannot contain transparency.", "Export the image without an alpha channel.")
 			}
-			if asset.Kind == "phone_screenshot" || asset.Kind == "tablet_screenshot" {
+			if asset.Kind == "phone_screenshot" || asset.Kind == "tablet_screenshot" || asset.Kind == "desktop_screenshot" {
 				target := appleScreenshotDisplayTargetForSize(asset, metadata.Width, metadata.Height)
 				if !appleScreenshotSizeAllowed(target, metadata.Width, metadata.Height) {
 					add(asset.Kind, asset.ID, "asset.apple_dimensions", locale, "display_target",
@@ -110,6 +110,10 @@ func validateStoreAssets(dataDir string, d *Deployment, build *Build, doc StoreD
 		}
 		if iosRequiresIPadScreenshots(d, build) && tabletCount == 0 {
 			add("tablet_screenshot", "", "screenshots.ipad_required", defaultLocale, "assets", "This binary supports iPad, so a valid 13-inch iPad screenshot is required.", "Upload a 13-inch iPad screenshot.")
+		}
+	} else if d.TargetKind == "macos" {
+		if counts[defaultLocale+"\x00desktop_screenshot"] == 0 {
+			add("desktop_screenshot", "", "screenshots.mac_required", defaultLocale, "assets", "At least one valid Mac screenshot is required for the default locale.", "Upload a Mac desktop screenshot.")
 		}
 	} else {
 		if phoneCount+tabletCount < 2 {
@@ -153,6 +157,9 @@ func appleScreenshotDisplayTarget(asset StoreAsset) string {
 	if strings.TrimSpace(asset.DisplayTarget) != "" {
 		return strings.ToUpper(strings.TrimSpace(asset.DisplayTarget))
 	}
+	if asset.Kind == "desktop_screenshot" {
+		return "APP_DESKTOP"
+	}
 	if asset.Kind == "tablet_screenshot" {
 		return "APP_IPAD_PRO_3GEN_129"
 	}
@@ -165,6 +172,9 @@ func appleScreenshotDisplayTargetForSize(asset StoreAsset, width, height int) st
 		if width <= 0 || height <= 0 || appleScreenshotSizeAllowed(target, width, height) {
 			return target
 		}
+	}
+	if asset.Kind == "desktop_screenshot" {
+		return "APP_DESKTOP"
 	}
 	if asset.Kind == "tablet_screenshot" {
 		return "APP_IPAD_PRO_3GEN_129"
@@ -181,6 +191,14 @@ func appleScreenshotDisplayTargetForSize(asset StoreAsset, width, height int) st
 }
 
 func appleScreenshotSizeAllowed(target string, width, height int) bool {
+	if strings.EqualFold(strings.TrimSpace(target), "APP_DESKTOP") {
+		for _, size := range [][2]int{{1280, 800}, {1440, 900}, {2560, 1600}, {2880, 1800}} {
+			if width == size[0] && height == size[1] {
+				return true
+			}
+		}
+		return false
+	}
 	if width > height {
 		width, height = height, width
 	}

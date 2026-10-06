@@ -87,8 +87,8 @@ func (codemagicCloudBootstrapper) Setup(
 	d *Deployment,
 	input cloudBackendSetupInput,
 ) (*cloudBackendSetupResult, error) {
-	if d.TargetKind != "ios" && d.TargetKind != "android" {
-		return nil, errors.New("the maintained Codemagic adapter currently supports iOS and Android targets")
+	if !isAppPlatform(d.TargetKind) {
+		return nil, errors.New("the maintained Codemagic adapter supports iOS, macOS, and Android targets")
 	}
 	repositoryURL := strings.TrimRight(strings.TrimSpace(defaultStr(input.RepositoryURL, defaultCodemagicAdapterRepository)), "/")
 	workflowID := strings.TrimSpace(defaultStr(input.WorkflowID, defaultCodemagicMobileWorkflow))
@@ -157,7 +157,7 @@ func (codemagicCloudBootstrapper) Setup(
 	cfg.ArtifactName = defaultCloudArtifactName
 	cfg.ArtifactMode = strings.ToLower(strings.TrimSpace(input.ArtifactMode))
 	if cfg.ArtifactMode == "" {
-		if d.TargetKind == "ios" {
+		if isApplePlatform(d.TargetKind) {
 			cfg.ArtifactMode = "store_upload"
 		} else {
 			cfg.ArtifactMode = "file"

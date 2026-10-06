@@ -81,7 +81,7 @@ func releaseChannel(d *Deployment, opts releaseOptions) string {
 	if opts.Channel != "" {
 		return opts.Channel
 	}
-	if d.TargetKind == "android" || d.TargetKind == "ios" {
+	if isAppPlatform(d.TargetKind) {
 		return "internal"
 	}
 	return defaultStr(d.EnvironmentName, "production")

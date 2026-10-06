@@ -1,10 +1,14 @@
-# Billing (v0.13.0)
+# Billing (v0.13.2)
 
 Customers, invoices, and payments for Apteva agents and human teams.
 
 ## Current capabilities
 
 - **Customers** with billing address, tax IDs, soft-delete + merge.
+- **Customer account lookup** through the existing `customers_search` tool:
+  exact name/email matches rank first; unmatched multiword queries return
+  labelled token candidates. `include_context=true` includes balances and
+  recent payments in the same response, capped at 20 customers per page.
 - **Invoices** with line items and an explicit lifecycle
   (draft → open → paid / void / uncollectible). The invoice issuer remains
   local; Stripe can process its outstanding balance through Checkout. An
@@ -26,7 +30,9 @@ Customers, invoices, and payments for Apteva agents and human teams.
   `GET /invoices/{id}/print` (self-contained HTML for browser-driven
   Save-as-PDF). Agents call `invoices_render_pdf` to get bytes back
   as base64, or with `save_to_storage=true` to push the file into
-  the storage app via cross-app SDK call.
+  the linked Storage app via cross-app SDK calls. New files are private;
+  the response includes an expiring signed `url` and `expires_at`. Check
+  `saved` / `shareable`; upload failures preserve the PDF bytes for delivery.
 - **REST surface** at `/api/apps/billing/*` for the dashboard panel.
 - **Billing panel** (React + Tailwind) at `slot: project.page`,
   plus inline `invoice-card` and `customer-card` components for

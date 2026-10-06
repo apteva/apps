@@ -135,7 +135,7 @@ func TestTelnyxIVRAnswerStartsRecordingAndBrowserAnswerStartsStream(t *testing.T
 		ID: "call-ivr", ProjectID: "p1", CarrierSlug: "telnyx", CarrierSID: "v3:test",
 		CarrierConnectionID: 9, CallbackSecret: "secret", RecordingMode: recordingModeAlways,
 		RecordingChannels: "dual", RoutingFlowVersionID: "flow-version-1",
-		AnsweredAt: time.Now().UTC().Format(time.RFC3339Nano),
+		CarrierAnsweredAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if err := app.answerTelnyxIVR(ctx, row); err != nil {
 		t.Fatal(err)

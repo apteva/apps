@@ -1082,13 +1082,10 @@ func TestGoogleCampaignCreate_RejectsUnsupportedGenericSemantics(t *testing.T) {
 	)
 	acctID, _ := res.LastInsertId()
 
+	// objective=sales is no longer rejected: Google expresses the goal through
+	// the bidding strategy, covered by TestGoogleCampaignObjectiveSelectsBidding.
+	// A lifetime budget still has no generic Google equivalent.
 	out, _ := app.toolCampaignCreate(ctx, map[string]any{
-		"ad_account_id": acctID, "name": "Sales", "objective": "sales", "daily_budget_cents": 1000,
-	})
-	if out.(map[string]any)["isError"] != true || len(pf.executeCalls) != 0 {
-		t.Fatalf("unsupported objective was not rejected before mutation: %#v", out)
-	}
-	out, _ = app.toolCampaignCreate(ctx, map[string]any{
 		"ad_account_id": acctID, "name": "Traffic", "objective": "traffic", "lifetime_budget_cents": 1000,
 	})
 	if out.(map[string]any)["isError"] != true || len(pf.executeCalls) != 0 {

@@ -89,3 +89,125 @@ func TestToolActivityLifecycleIsolationAndRecovery(t *testing.T) {
 		t.Fatalf("activity became messages: %v %v", msgs, err)
 	}
 }
+
+func TestMessageTimestampKeepsSubsecondPrecision(t *testing.T) {
+	a, _, _ := newTestEnv(t)
+	conv := mkConversation(t, a, 41)
+	message, err := a.store.AppendMessage(&Message{ConversationID: conv.ID, Role: "agent", AgentID: 41, Content: "I found it"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored string
+	if err := a.store.db.QueryRow(`SELECT created_at FROM messages WHERE id=?`, message.ID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stored, ".") || message.CreatedAt.Nanosecond() == 0 {
+		t.Fatalf("message timestamp lost subsecond ordering: %q / %s", stored, message.CreatedAt)
+	}
+}
+
+func TestConversationSendStaysInReplyBubbleButOtherConversationToolsAreVisible(t *testing.T) {
+	a, _, _ := newTestEnv(t)
+	conv := mkConversation(t, a, 41)
+	boundConversationCaller(t, a, conv, 41)
+	thread := conversationThreadID(conv.ID)
+	for _, name := range []string{"conversations_request_approval", "conversations_conversations_request_approval", "conversations_report", "conversations_alert", "conversations_history", "conversations_read_attachment"} {
+		t.Run(name, func(t *testing.T) {
+			if !visibleActivityTool(name) {
+				t.Fatal("conversation work tool is hidden")
+			}
+			data, _ := json.Marshal(map[string]string{"id": name, "name": name})
+			if err := a.ingestToolActivity("tool.call", 41, thread, string(data), time.Now()); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	rows, err := a.store.toolActivities(conv.ID)
+	if err != nil || len(rows) != 6 {
+		t.Fatalf("live rows: %+v, %v", rows, err)
+	}
+	for _, name := range []string{"send", " SEND ", "conversations_send"} {
+		if visibleActivityTool(name) {
+			t.Fatalf("internal/reply send should be hidden: %s", name)
+		}
+		data, _ := json.Marshal(map[string]string{"id": "hidden-" + name, "name": name})
+		if err := a.ingestToolActivity("tool.call", 41, thread, string(data), time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Retained send records from older versions are hidden without deletion.
+	_, err = a.store.db.Exec(`INSERT INTO conversation_tool_activity(conversation_id,agent_id,thread_id,call_id,name,started_at) VALUES(?,?,?,?,?,?)`, conv.ID, 41, thread, "legacy-send", "send", activityTime(time.Now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err = a.store.toolActivities(conv.ID)
+	if err != nil || len(rows) != 6 {
+		t.Fatalf("internal sends leaked in live/history rows: %+v, %v", rows, err)
+	}
+	// Simulate an approval call persisted by a previous version; it is now
+	// visible after the activity policy change.
+	_, err = a.store.db.Exec(`INSERT INTO conversation_tool_activity(conversation_id,agent_id,thread_id,call_id,name,started_at) VALUES(?,?,?,?,?,?)`, conv.ID, 41, thread, "legacy", "conversations_request_approval", activityTime(time.Now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err = a.store.toolActivities(conv.ID)
+	if err != nil || len(rows) != 7 {
+		t.Fatalf("history rows: %+v, %v", rows, err)
+	}
+	if !visibleActivityTool("tickets_create") || !visibleActivityTool("code_delete_repository") || !visibleActivityTool("sms_send") || !visibleActivityTool("slack_send") {
+		t.Fatal("unrelated tools hidden")
+	}
+}
+
+func TestToolActivityHonorsCoreFailureFlag(t *testing.T) {
+	a, _, _ := newTestEnv(t)
+	conv := mkConversation(t, a, 41)
+	boundConversationCaller(t, a, conv, 41)
+	thread := conversationThreadID(conv.ID)
+	now := time.Now()
+	if err := a.ingestToolActivity("tool.call", 41, thread, `{"id":"wrong-tool","name":"code_repos_archive","reason":"Oops wrong tool"}`, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ingestToolActivity("tool.result", 41, thread, `{"id":"wrong-tool","name":"code_repos_archive","success":false,"duration_ms":3,"result":"slug required"}`, now.Add(3*time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := a.store.toolActivities(conv.ID)
+	if err != nil || len(rows) != 1 || rows[0].Status != "failed" {
+		t.Fatalf("failure lost: %+v %v", rows, err)
+	}
+}
+
+func TestSearchToolsHiddenWithoutHidingOtherQueries(t *testing.T) {
+	a, _, _ := newTestEnv(t)
+	conv := mkConversation(t, a, 41)
+	boundConversationCaller(t, a, conv, 41)
+	thread := conversationThreadID(conv.ID)
+	now := time.Now()
+	for _, event := range []string{"tool.call", "tool.result"} {
+		if err := a.ingestToolActivity(event, 41, thread, `{"id":"lookup","name":"search_tools"}`, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var count int
+	if err := a.store.db.QueryRow(`SELECT COUNT(*) FROM conversation_tool_activity WHERE conversation_id=?`, conv.ID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("lookup persisted: %d, %v", count, err)
+	}
+	_, err := a.store.db.Exec(`INSERT INTO conversation_tool_activity(conversation_id,agent_id,thread_id,call_id,name,started_at) VALUES(?,?,?,?,?,?)`, conv.ID, 41, thread, "old-lookup", "search_tools", activityTime(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := a.store.toolActivities(conv.ID)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("old lookup visible: %+v, %v", rows, err)
+	}
+	for _, name := range []string{"search_tools", " SEARCH_TOOLS "} {
+		if visibleActivityTool(name) {
+			t.Fatalf("internal lookup visible: %s", name)
+		}
+	}
+	for _, name := range []string{"tickets_search", "agent_query", "search_tools_extra", "custom_search_tools"} {
+		if !visibleActivityTool(name) {
+			t.Fatalf("unrelated tool hidden: %s", name)
+		}
+	}
+}

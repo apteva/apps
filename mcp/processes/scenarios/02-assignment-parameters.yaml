@@ -2,7 +2,7 @@ name: processes-assignment-parameters
 description: One real LLM executes the same procedure for two different page parameters.
 timeout: 5m
 settle_for: 3s
-max_iterations: 22
+max_iterations: 26
 setup:
   mode: autonomous
   app:
@@ -10,11 +10,13 @@ setup:
 directive: |
   Test one reusable procedure for two pages in this isolated project. Your agent
   ID is ${APTEVA_TEST_AGENT_ID}. Use Processes only, with direct agent execution.
-  Create exactly one procedure named "Tier 3 page briefing", owned by you,
-  no schedule and no structured steps, with required string parameter page
+  Create exactly one procedure named "Tier 3 page briefing", with no assignment
+  and no structured steps, with required string parameter page
   defaulting to photography. Instructions: read the run's frozen page parameter
   and report exactly "Briefing for <page>". Completion criteria: that exact result.
-  The default assignment will use photography. Add one assignment named "Cooking"
+  Create an assignment named "Photography", owned by you, execution_mode=agent,
+  follow_latest=true, no schedule, parameters={"page":"photography"}.
+  Add one assignment named "Cooking"
   with target "Cooking page", owned by you, execution_mode=agent, follow_latest=true,
   parameters={"page":"cooking"}. You are authorized to activate the procedure and
   both assignments.

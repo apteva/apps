@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: streaming
 display_name: Streaming
-version: 0.2.0
+version: 0.3.0
 description: |
   Live ingest + HLS packaging for sibling Apteva apps. Fully
   standalone: segments and recordings live on the sidecar's local
@@ -71,7 +71,7 @@ provides:
     - { name: streams_rotate_key,    description: "Generate new stream_key; optionally rotate playback_token + signing secret." }
     - { name: streams_get_metrics,   description: "Lightweight metrics for the dashboard polling lane." }
     - { name: streams_replay_url,    description: "Once status=ended, returns the replay URL." }
-    - { name: streams_signed_url,    description: "Expiring signed playback/replay URL." }
+    - { name: streams_signed_url,    description: "Expiring signed playback/replay URL, scoped to its kind." }
     - { name: streams_set_url_policy, description: "Require expiring signed URLs for a stream." }
     - { name: streams_load_test,     description: "Synthetic load generator — simulate N concurrent viewers." }
 runtime:
@@ -162,22 +162,13 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 
 	a.runners = map[int64]*streamRunner{}
 	a.viewers = newViewerTracker()
-	a.throttle = newViewerThrottle()
+	a.throttle = newViewerThrottle(a.maxViewersPerIP(ctx))
 	a.playback = newPlaybackCache(playbackCacheTTL)
 	if a.runnerFactory == nil {
 		a.runnerFactory = newFFmpegRunner
 	}
 
-	// Reconciler: any row left as status=live across a restart is dead.
-	// Mark errored, free the port (free-list is fresh anyway).
-	// ended_at is written from Go as RFC3339 UTC — CURRENT_TIMESTAMP
-	// would put SQLite's "YYYY-MM-DD HH:MM:SS" into the same column the
-	// other paths fill with RFC3339, which breaks anyone parsing or
-	// lexically sorting it.
-	if _, err := ctx.AppDB().Exec(
-		`UPDATE streams
-		 SET status='errored', error='sidecar restarted; runner lost', ended_at = ?
-		 WHERE status='live' OR status='idle'`, nowStamp()); err != nil {
+	if err := a.reconcileOrphans(ctx); err != nil {
 		return fmt.Errorf("reconcile: %w", err)
 	}
 
@@ -188,16 +179,122 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
-	// Stop every active runner gracefully so recordings get finalized.
-	a.runnersMu.Lock()
-	runners := make([]*streamRunner, 0, len(a.runners))
-	for _, r := range a.runners {
-		runners = append(runners, r)
+// reconcileOrphans finalizes every row the previous process left
+// mid-flight.
+//
+// v0.2 did this with a bare UPDATE, which made it a THIRD end-of-stream
+// path alongside streams_stop and the watchdog — and the one that
+// didn't write recording_path or the VOD playlist. Since OnUnmount
+// stopped ffmpeg without touching the DB at all, the ordinary sequence
+// for a restart during a recorded webinar was: ffmpeg exits cleanly and
+// writes a complete mp4 → nothing records that → next boot marks the
+// row errored with no recording_path → streams_replay_url says
+// "available: false" forever while a perfectly playable file sits on
+// disk waiting for the retention sweeper to delete it. That is exactly
+// the stranded-recording bug v0.2 set out to eliminate, surviving on
+// the one path it didn't touch.
+//
+// Now every terminal transition in the app goes through
+// finalizeStream, which picks up a complete recording wherever it
+// finds one. OnUnmount finalizes gracefully ahead of a clean shutdown,
+// so what reaches this function is a hard kill — hence `errored`.
+func (a *App) reconcileOrphans(ctx *sdk.AppCtx) error {
+	rows, err := ctx.AppDB().Query(
+		`SELECT id, project_id FROM streams WHERE status IN ('live','idle')`)
+	if err != nil {
+		return err
 	}
+	type orphan struct {
+		id  int64
+		pid string
+	}
+	orphans := []orphan{}
+	for rows.Next() {
+		var o orphan
+		if err := rows.Scan(&o.id, &o.pid); err == nil {
+			orphans = append(orphans, o)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, o := range orphans {
+		if _, err := a.finalizeStream(ctx, o.pid, o.id, finalizeOpts{
+			status: "errored",
+			errMsg: "sidecar restarted; runner lost",
+		}); err != nil {
+			ctx.Logger().Warn("reconcile: finalize", "id", o.id, "err", err)
+		}
+	}
+	if len(orphans) > 0 {
+		ctx.Logger().Info("reconciled orphaned streams", "count", len(orphans))
+	}
+	return nil
+}
+
+func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
+	// Stop every active runner gracefully so recordings get finalized,
+	// then write that outcome to the DB.
+	//
+	// Two things v0.2 got wrong here. It stopped runners SERIALLY, each
+	// with the full per-stream finalize grace (60s by default, up to an
+	// hour by config) — so a box at max_concurrent_streams took minutes
+	// to shut down, the platform's shutdown budget expired long before
+	// that, and the SIGKILL landed on ffmpeg children still rewriting
+	// their moov atom. The generous grace that exists to protect those
+	// recordings was the reason they got truncated. And it never wrote
+	// anything to the DB, so even the recordings that survived were
+	// stranded (see reconcileOrphans).
+	//
+	// Stop them concurrently against one shared budget, then finalize.
+	a.runnersMu.Lock()
+	runners := make(map[int64]*streamRunner, len(a.runners))
+	for id, r := range a.runners {
+		runners[id] = r
+	}
+	a.runners = map[int64]*streamRunner{}
 	a.runnersMu.Unlock()
-	for _, r := range runners {
-		a.stopRunner(ctx, r)
+
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		stopErrs = map[int64]error{}
+	)
+	for id, r := range runners {
+		wg.Add(1)
+		go func(id int64, r *streamRunner) {
+			defer wg.Done()
+			err := r.stop(a.finalizeGrace(ctx, r.record))
+			a.ports.release(r.port)
+			mu.Lock()
+			stopErrs[id] = err
+			mu.Unlock()
+		}(id, r)
+	}
+	wg.Wait()
+
+	// The DB writes stay serial — they contend on the app DB's single
+	// connection anyway, and the slow part was the waiting, not this.
+	for id := range runners {
+		var pid string
+		if err := ctx.AppDB().QueryRow(
+			`SELECT project_id FROM streams WHERE id = ?`, id).Scan(&pid); err != nil || pid == "" {
+			continue
+		}
+		// A runner that had already crashed before we asked it to stop
+		// must not be recorded as a clean end just because shutdown is
+		// what finally noticed. classifyExit only returns nil for an
+		// exit we requested.
+		opts := finalizeOpts{status: "ended"}
+		if err := stopErrs[id]; err != nil {
+			opts = finalizeOpts{status: "errored", errMsg: err.Error()}
+		}
+		if _, err := a.finalizeStream(ctx, pid, id, opts); err != nil {
+			ctx.Logger().Warn("unmount: finalize", "id", id, "err", err)
+		}
+		a.viewers.drop(id)
 	}
 	return nil
 }
@@ -205,11 +302,17 @@ func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
+// viewerCounterInterval is both the viewer-counter's schedule and the
+// watch-time each of its ticks credits. One constant so the two can't
+// drift — v0.2 scheduled "@every 10s" and separately hardcoded a ×10
+// in the total_viewer_seconds arithmetic.
+const viewerCounterInterval = 10 * time.Second
+
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{
 		{
 			Name:     "viewer-counter",
-			Schedule: "@every 10s",
+			Schedule: fmt.Sprintf("@every %s", viewerCounterInterval),
 			Run:      a.runViewerCounter,
 		},
 		{
@@ -388,6 +491,11 @@ type Stream struct {
 	PlaybackURL    string `json:"playback_url,omitempty"`
 	HeartbeatURL   string `json:"heartbeat_url,omitempty"`
 	PlaybackToken  string `json:"playback_token,omitempty"`
+	// PlaybackURLExpiresAt is the unix expiry of the signature on
+	// PlaybackURL/HeartbeatURL, or 0 when they carry none. Consumers
+	// under require_signed_urls refresh on this rather than waiting
+	// for playback to 404.
+	PlaybackURLExpiresAt int64 `json:"playback_url_expires_at,omitempty"`
 	// URLSigningSecret never leaves the sidecar — it's the HMAC key
 	// behind streams_signed_url. Callers get signed URLs, not keys.
 	URLSigningSecret   string  `json:"-"`
@@ -431,6 +539,10 @@ const (
 	indexPlaylistFile  = "index.m3u8"  // live, rolling window
 	replayPlaylistFile = "replay.m3u8" // VOD, written at finalize
 	recordingFile      = "record.mp4"
+	// segmentLogFile records each segment's REAL duration as it rolls
+	// out of the live window, so finalize can write an accurate VOD
+	// manifest. Not servable — validPlaybackFilename rejects it.
+	segmentLogFile = "segments.log"
 )
 
 // ─── Shared helpers ───────────────────────────────────────────────
@@ -561,6 +673,60 @@ func (a *App) viewerIdleSeconds(ctx *sdk.AppCtx) int {
 		}
 	}
 	return 30
+}
+
+// maxViewersPerIP is the heartbeat throttle's identity budget for one
+// (source IP, stream) pair — see the throttle block in viewers.go.
+// Operators fronted by a large shared egress (a university, a big
+// corporate NAT) raise it; the beat ceiling scales with it.
+func (a *App) maxViewersPerIP(ctx *sdk.AppCtx) int {
+	if ctx == nil {
+		return defaultMaxViewersPerIP
+	}
+	if v := strings.TrimSpace(ctx.Config().Get("max_viewers_per_ip")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 4096 {
+			return n
+		}
+	}
+	return defaultMaxViewersPerIP
+}
+
+// signedURLTTL is how long the signed URLs materializeURLs mints stay
+// valid, in seconds. Two very different lifetimes hide behind one
+// question here:
+//
+//   - A terminal stream's replay link should be short. An hour is
+//     plenty to open a player, and the whole point of
+//     require_signed_urls is that the link stops working.
+//   - A LIVE stream's playback URL has to outlast the broadcast.
+//     rewriteManifestQuery propagates the manifest's own exp+sig onto
+//     every segment URI, so the entire viewing session is gated on
+//     that one timestamp. v0.2 used the 1h replay TTL for live streams
+//     too, which meant a 90-minute webinar went dark for every viewer
+//     at once at T+60min, with no renewal path — the consumer app
+//     would have had to re-poll streams_signed_url and swap the player
+//     source mid-stream, which nothing told it to do.
+//
+// Callers that want an exact lifetime still use streams_signed_url.
+// The expiry is now reported alongside the URL (see Stream's
+// playback_url_expires_at) so a consumer can refresh deliberately
+// rather than discovering it in a 404.
+func (a *App) signedURLTTL(ctx *sdk.AppCtx, live bool) time.Duration {
+	key, def, min, max := "replay_url_ttl_seconds", replayURLTTL, time.Minute, 7*24*time.Hour
+	if live {
+		key, def = "live_url_ttl_seconds", liveURLTTL
+	}
+	if ctx != nil {
+		if v := strings.TrimSpace(ctx.Config().Get(key)); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				d := time.Duration(n) * time.Second
+				if d >= min && d <= max {
+					return d
+				}
+			}
+		}
+	}
+	return def
 }
 
 func (a *App) ffmpegPath(ctx *sdk.AppCtx) string {

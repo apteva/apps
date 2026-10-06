@@ -31,6 +31,111 @@ func TestSidecar_BootsAndHealthOK(t *testing.T) {
 	}
 }
 
+func TestSidecar_ResolveAudienceContextHandler(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	created := sc.MCP("contacts_upsert_by_channel", map[string]any{
+		"kind": "email", "value": "audience@example.test",
+	})
+	contact := created["contact"].(map[string]any)
+	for _, counts := range []bool{false, true} {
+		r := sc.MCP("contacts_resolve_audience", map[string]any{
+			"channel": "email", "contact_id": contact["id"], "include_counts": counts,
+		})
+		recipients, ok := r["recipients"].([]any)
+		if !ok || len(recipients) != 1 || recipients[0].(map[string]any)["address"] != "audience@example.test" {
+			t.Fatalf("unexpected audience result: %#v", r)
+		}
+		want := float64(0)
+		if counts {
+			want = 1
+		}
+		if r["raw_count"] != want || r["eligible_count"] != want {
+			t.Fatalf("counts=%v: unexpected count fields: %#v", counts, r)
+		}
+	}
+}
+
+func TestSidecar_InboxReadOnlyAnnotations(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	out, err := sc.MCPRaw("tools/list", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, ok := out["tools"].([]any)
+	if !ok {
+		t.Fatalf("tools/list missing tools array: %#v", out)
+	}
+	found := false
+	draftReads := 0
+	for _, raw := range tools {
+		tool := raw.(map[string]any)
+		annotations, _ := tool["annotations"].(map[string]any)
+		if tool["name"] == "conversations_inbox" {
+			found = true
+			if annotations["readOnlyHint"] != true || annotations["destructiveHint"] != false {
+				t.Fatalf("inbox annotations absent or incorrect in tools/list: %#v", tool)
+			}
+		} else if tool["name"] == "conversation_drafts_get" || tool["name"] == "conversation_drafts_list" {
+			draftReads++
+			if annotations["readOnlyHint"] != true || annotations["destructiveHint"] != false {
+				t.Fatalf("draft read annotation incorrect: %v", tool)
+			}
+		} else if annotations["readOnlyHint"] == true {
+			t.Errorf("unexpected read-only annotation on %v", tool["name"])
+		}
+	}
+	if !found {
+		t.Fatal("conversations_inbox missing from tools/list")
+	}
+	if draftReads != 2 {
+		t.Fatalf("draft read tools found=%d", draftReads)
+	}
+	// Discovery must not rename the tool or alter its query behavior.
+	inbox := sc.MCP("conversations_inbox", map[string]any{"limit": 1})
+	if inbox["count"] != float64(0) || inbox["total"] != float64(0) {
+		t.Fatalf("unexpected empty inbox response: %#v", inbox)
+	}
+}
+
+func TestSidecar_SavedReplyDraftRoundTrip(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	var inbound map[string]any
+	resp := sc.POST("/inbound", map[string]any{"channel": "email", "from": "draft-customer@example.test", "matched_recipient": "support@example.test", "subject": "Draft roundtrip", "body_text": "Question", "message_id": 721}, &inbound)
+	if resp.Status != 200 {
+		t.Fatalf("inbound: %d %s", resp.Status, resp.Body)
+	}
+	created := sc.MCP("conversation_drafts_create", map[string]any{"conversation_id": inbound["conversation_id"], "body": "Saved through MCP", "source": "agent:Writer"})
+	draft := created["draft"].(map[string]any)
+	var edited map[string]any
+	resp = sc.PATCH("/drafts/"+anyString(draft["id"]), map[string]any{"body": "Edited through HTTP", "expected_revision": draft["revision"], "source": "human"}, &edited)
+	if resp.Status != 200 {
+		t.Fatalf("HTTP save: %d %s", resp.Status, resp.Body)
+	}
+	updated := edited["draft"].(map[string]any)
+	read := sc.MCP("conversation_drafts_get", map[string]any{"id": draft["id"]})["draft"].(map[string]any)
+	if read["content"].(map[string]any)["body"] != "Edited through HTTP" || read["revision"] != updated["revision"] {
+		t.Fatalf("draft roundtrip lost content: %v", read)
+	}
+	var list map[string]any
+	resp = sc.GET("/drafts?conversation_id="+anyString(inbound["conversation_id"]), &list)
+	if resp.Status != 200 || list["total"] != float64(1) {
+		t.Fatalf("HTTP list: %d %v", resp.Status, list)
+	}
+	resp = sc.PATCH("/drafts/"+anyString(draft["id"]), map[string]any{"body": "Stale edit", "expected_revision": draft["revision"]}, nil)
+	if resp.Status != 409 {
+		t.Fatalf("stale save: %d %s", resp.Status, resp.Body)
+	}
+	// No Messaging binding is configured: explicit send must fail safely.
+	out := sc.MCP("conversation_drafts_send", map[string]any{"id": draft["id"], "expected_revision": updated["revision"]})
+	if out["sent"] != false || out["draft"].(map[string]any)["content"].(map[string]any)["body"] != "Edited through HTTP" {
+		t.Fatalf("failed send lost draft: %v", out)
+	}
+	conversation := sc.MCP("contacts_get_conversation", map[string]any{"id": inbound["contact_id"], "conversation_id": inbound["conversation_id"]})
+	if conversation["conversation"].(map[string]any)["status"] != "open" || len(conversation["activities"].([]any)) != 1 {
+		t.Fatalf("save/failed send changed thread: %v", conversation)
+	}
+}
+
 func TestSidecar_FullToolFlow(t *testing.T) {
 	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
 

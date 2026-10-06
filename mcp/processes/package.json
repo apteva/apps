@@ -1,0 +1,13 @@
+{
+  "name": "@apteva/processes-panel",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "apteva": {
+    "panelExternals": [
+      "react-dom",
+      "react-dom/client"
+    ]
+  }
+}

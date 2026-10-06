@@ -30,7 +30,7 @@ func (a *App) MCPTools() []sdk.Tool {
 					"source_kind":               map[string]any{"type": "string", "enum": []string{"code", "local"}},
 					"source_ref":                map[string]any{"type": "string"},
 					"source_extra_json":         map[string]any{"type": "string", "description": "Code snapshot_id/subdir and transfer budgets as a JSON object"},
-					"target_kind":               map[string]any{"type": "string", "enum": []string{"service", "android", "ios", "artifact"}},
+					"target_kind":               map[string]any{"type": "string", "enum": []string{"service", "android", "ios", "macos", "artifact"}},
 					"framework":                 map[string]any{"type": "string"},
 					"target_config_json":        map[string]any{"type": "string"},
 					"build_cmd":                 map[string]any{"type": "string"},
@@ -567,10 +567,13 @@ func (a *App) toolInit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := validateBuildBackendSelection(in.BuildBackend, defaultStr(in.BuildBackendJSON, "{}")); err != nil {
 		return nil, err
 	}
-	if in.TargetKind != "service" && in.TargetKind != "android" && in.TargetKind != "ios" && in.TargetKind != "artifact" {
-		return nil, fmt.Errorf("target_kind %q not supported (service|android|ios|artifact)", in.TargetKind)
+	if _, err := sourceBuildSubdir(&Deployment{SourceKind: in.SourceKind, SourceExtraJSON: in.SourceExtraJSON}); err != nil {
+		return nil, err
 	}
-	if in.TargetKind == "android" || in.TargetKind == "ios" {
+	if in.TargetKind != "service" && !isAppPlatform(in.TargetKind) && in.TargetKind != "artifact" {
+		return nil, fmt.Errorf("target_kind %q not supported (service|android|ios|macos|artifact)", in.TargetKind)
+	}
+	if isAppPlatform(in.TargetKind) {
 		if in.Framework == "" {
 			in.Framework = in.TargetKind
 		}
@@ -1108,7 +1111,7 @@ func (a *App) toolPromote(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if base.TargetKind == "artifact" {
 		return a.toolPromoteArtifact(ctx, base, args)
 	}
-	if base.TargetKind == "android" || base.TargetKind == "ios" {
+	if isAppPlatform(base.TargetKind) {
 		return a.toolPromoteMobile(ctx, base, args)
 	}
 	sourceName := normalizeEnvironmentName(defaultStr(strArg(args, "source_environment"), "staging"))

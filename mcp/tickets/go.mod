@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/tickets
 go 1.25.12
 
 require (
-	github.com/apteva/app-sdk v0.56.3
+	github.com/apteva/app-sdk v0.81.0
 	modernc.org/sqlite v1.50.0
 )
 

@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 const (
@@ -270,6 +272,10 @@ func (a *App) handleTasks(w http.ResponseWriter, r *http.Request) {
 			AgentID          int64          `json:"agent_id"`
 			Title            string         `json:"title"`
 			Description      string         `json:"description"`
+			ExpectedOutcome  string         `json:"expected_outcome"`
+			Inputs           []TaskInput    `json:"inputs"`
+			SuggestedAgentID int64          `json:"suggested_agent_id"`
+			State            string         `json:"state"`
 			AssignedThreadID string         `json:"assigned_thread_id"`
 			IdempotencyKey   string         `json:"idempotency_key"`
 			OperationKey     string         `json:"operation_key"`
@@ -279,29 +285,49 @@ func (a *App) handleTasks(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
-		agent, err := a.ctx.GetAgent(body.AgentID)
-		if err != nil {
-			http.Error(w, "agent not found", http.StatusNotFound)
+		state := strings.ToLower(strings.TrimSpace(body.State))
+		if state == "" {
+			state = stateQueued
+		}
+		if state == stateDraft {
+			if strings.TrimSpace(r.Header.Get("X-Apteva-Operator-ID")) == "" {
+				http.Error(w, "operator identity required for draft creation", http.StatusUnauthorized)
+				return
+			}
+		} else if body.AgentID <= 0 {
+			http.Error(w, "agent_id required", http.StatusBadRequest)
 			return
 		}
-		if agent.ProjectID != projectID {
-			http.Error(w, "agent is outside this project", http.StatusForbidden)
-			return
+		var agent *sdk.PlatformAgent
+		var err error
+		if body.AgentID > 0 {
+			agent, err = a.ctx.GetAgent(body.AgentID)
+			if err != nil {
+				http.Error(w, "agent not found", http.StatusNotFound)
+				return
+			}
+			if agent.ProjectID != projectID {
+				http.Error(w, "agent is outside this project", http.StatusForbidden)
+				return
+			}
 		}
 		assigned := strings.TrimSpace(body.AssignedThreadID)
-		if assigned == "" {
+		if state == stateDraft {
+			assigned = ""
+		}
+		if state != stateDraft && assigned == "" && agent != nil {
 			assigned = strings.TrimSpace(agent.DefaultThreadID)
 		}
-		if assigned == "" {
+		if state != stateDraft && assigned == "" {
 			http.Error(w, "agent has no default thread", http.StatusConflict)
 			return
 		}
-		task, created, err := a.store.Create(CreateTaskInput{AgentID: body.AgentID, ProjectID: projectID, Title: body.Title, Description: body.Description, State: stateQueued, AssignedThreadID: assigned, IdempotencyKey: body.IdempotencyKey, OperationKey: body.OperationKey, Schedule: body.Schedule})
+		task, created, err := a.store.Create(CreateTaskInput{AgentID: body.AgentID, ProjectID: projectID, Title: body.Title, Description: body.Description, ExpectedOutcome: body.ExpectedOutcome, Inputs: body.Inputs, SuggestedAgentID: body.SuggestedAgentID, CreatedByOperatorID: r.Header.Get("X-Apteva-Operator-ID"), State: state, AssignedThreadID: assigned, IdempotencyKey: body.IdempotencyKey, OperationKey: body.OperationKey, Schedule: body.Schedule})
 		if err != nil {
 			writeTaskError(w, err)
 			return
 		}
-		if created && body.Schedule == nil {
+		if created && state != stateDraft && body.Schedule == nil {
 			_ = a.notifyAssigned(task, assigned, "task.assigned")
 		}
 		status := http.StatusOK
@@ -405,6 +431,53 @@ func (a *App) handleTask(w http.ResponseWriter, r *http.Request) {
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"task": recovery, "created": created})
 			return
+		case "start":
+			if r.Method != http.MethodPost {
+				http.Error(w, "POST only", http.StatusMethodNotAllowed)
+				return
+			}
+			var body struct {
+				AgentID int64 `json:"agent_id"`
+			}
+			if err := decodeStrictJSON(w, r, &body); err != nil {
+				http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			if strings.TrimSpace(r.Header.Get("X-Apteva-Operator-ID")) == "" {
+				http.Error(w, "operator identity required", http.StatusUnauthorized)
+				return
+			}
+			if task.State != stateDraft {
+				writeJSON(w, http.StatusOK, map[string]any{"task": task, "started": false})
+				return
+			}
+			if body.AgentID <= 0 {
+				body.AgentID = task.SuggestedAgentID
+			}
+			agent, agentErr := a.ctx.GetAgent(body.AgentID)
+			if agentErr != nil {
+				http.Error(w, "agent not found", http.StatusNotFound)
+				return
+			}
+			if agent.ProjectID != task.ProjectID {
+				http.Error(w, "agent is outside this project", http.StatusForbidden)
+				return
+			}
+			assigned := strings.TrimSpace(agent.DefaultThreadID)
+			if assigned == "" {
+				http.Error(w, "agent has no default thread", http.StatusConflict)
+				return
+			}
+			updated, started, startErr := a.store.Start(task.ID, "operator:"+strings.TrimSpace(r.Header.Get("X-Apteva-Operator-ID")), body.AgentID, assigned)
+			if startErr != nil {
+				writeTaskError(w, startErr)
+				return
+			}
+			if started {
+				_ = a.drainDeliveries(updated.ID, updated.ProjectID, a.store.now())
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"task": updated, "started": started})
+			return
 		case "pause", "resume", "run-now":
 			if r.Method != http.MethodPost {
 				http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -446,9 +519,16 @@ func (a *App) handleTask(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"task": task, "events": events.Events, "events_next_cursor": events.NextCursor, "agent_executions": executions})
 	case http.MethodPatch, http.MethodPut:
+		if task.State == stateDraft && strings.TrimSpace(r.Header.Get("X-Apteva-Operator-ID")) == "" {
+			http.Error(w, "operator identity required", http.StatusUnauthorized)
+			return
+		}
 		var body struct {
 			Title            *string        `json:"title"`
 			Description      *string        `json:"description"`
+			ExpectedOutcome  *string        `json:"expected_outcome"`
+			Inputs           *[]TaskInput   `json:"inputs"`
+			SuggestedAgentID *int64         `json:"suggested_agent_id"`
 			State            *string        `json:"state"`
 			Progress         *int           `json:"progress"`
 			ClearProgress    bool           `json:"clear_progress"`
@@ -464,7 +544,7 @@ func (a *App) handleTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		updated, changed, err := a.store.Update(task.ID, "api", UpdateTaskInput{
-			Title: body.Title, Description: body.Description, State: body.State, Progress: body.Progress,
+			Title: body.Title, Description: body.Description, ExpectedOutcome: body.ExpectedOutcome, Inputs: body.Inputs, SuggestedAgentID: body.SuggestedAgentID, State: body.State, Progress: body.Progress,
 			ClearProgress: body.ClearProgress, CurrentStep: body.CurrentStep,
 			AssignedThreadID: body.AssignedThreadID, Result: body.Result,
 			ResultReference: body.ResultReference, Error: body.Error, Schedule: body.Schedule,

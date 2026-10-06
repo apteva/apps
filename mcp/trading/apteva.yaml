@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: trading
 display_name: Trading
-version: 0.9.1
+version: 0.14.0
 description: |
+  v0.14 attributes realized and open P&L to the strategy that traded it, and
+  adds two dashboard widgets: portfolio watch and live strategies.
+
   Trading desk for Apteva agents. Multi-portfolio, multi-asset (equity,
   etf, crypto, polymarket prediction markets). Each portfolio runs in
   one of two modes:
@@ -189,6 +192,8 @@ provides:
       description: "Pause this portfolio (no new orders). Self-only — resume is human-only via REST."
     - name: portfolio_arm_live
       description: "Explicitly arm or disarm automated execution for a broker_live portfolio. Arming requires the exact LIVE MONEY confirmation."
+    - name: strategy_catalog
+      description: "Discover indicators, conditions and hourly strategy research templates."
     - name: strategy_create
       description: "Create a deterministic strategy definition with indicator/ranking/allocation rules."
     - name: strategy_update
@@ -205,6 +210,10 @@ provides:
       description: "Assign a saved strategy to a portfolio for strategy or hybrid control."
     - name: strategy_backtest_create
       description: "Create a deterministic strategy backtest using the existing backtest tables."
+    - name: backtest_control
+      description: "Run, step, pause, cancel or inspect an event simulation."
+    - name: backtest_artifact
+      description: "Export or import a portable reproducible backtest bundle."
     - name: strategy_validate_backtest
       description: "Run fixed-parameter strategy validation with in-sample and out-of-sample backtests."
     - name: strategy_scorecard_get
@@ -215,6 +224,24 @@ provides:
       description: "Evaluate a completed strategy backtest against its scorecard."
     - name: strategy_promotion_update
       description: "Promote, demote, or suspend a strategy under its scorecard gate."
+    - name: validation_create
+      description: "Plan validation windows and scenario batches from captured backtests."
+    - name: validation_list
+      description: "List validation suites."
+    - name: validation_control
+      description: "Run, pause, cancel or inspect a validation suite."
+    - name: validation_report
+      description: "Read validation distributions and export reproducible suite artifacts."
+    - name: agent_backtest_create
+      description: "Create an agent simulation from a complete event tape."
+    - name: backtest_observation
+      description: "Read current event replay observations."
+    - name: backtest_events
+      description: "Read observed replay events."
+    - name: backtest_decision_finish
+      description: "Seal an agent replay decision and memory."
+    - name: backtest_agent_exchange
+      description: "Internal agent replay mailbox."
     - name: backtest_market_step
       description: "Internal backtest runner tool: load replay prices into an isolated environment."
   # Same shape as crm + storage: a panel mounted in the dashboard's
@@ -229,6 +256,54 @@ provides:
       label: Trading
       icon: trending-up
       entry: /ui/TradingPanel.mjs
+  ui_components:
+    # Portfolio watch is the safety-critical one: it is the surface an
+    # operator glances at without opening the desk, so live and armed
+    # portfolios are badged and tinted rather than merely listed.
+    - name: portfolio-watch
+      label: Portfolios
+      description: Equity, day and total P&L across paper and live portfolios.
+      entry: /ui/PortfolioWatchWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [portfolio.performance.updated, portfolio.status.changed,
+        portfolio.live_armed.changed, portfolio.created, portfolio.agent.changed,
+        portfolio.objective.changed, position.changed, order.filled, order.rejected,
+        risk.limit.breached, alert.fired]
+      native:
+        schema: apteva-native-surface/v1
+        entry: /ui/surfaces/portfolio-watch.json
+      settings_schema:
+        type: object
+        properties:
+          show_paper: {type: boolean, title: Paper portfolios, default: true}
+          show_live: {type: boolean, title: Live portfolios, default: true}
+          pnl_basis: {type: string, title: P&L shown, default: day, enum: [day, open, total]}
+          sort_by: {type: string, title: Sort, default: equity, enum: [equity, day_pnl_pct, total_pnl_pct, name]}
+          row_limit: {type: integer, title: Visible rows, default: 5, minimum: 1, maximum: 12}
+    # Execution-driven, so it wakes on orders and fills rather than on
+    # scorecard evaluations: this reads what strategies actually did.
+    - name: strategy-live
+      label: Live strategies
+      description: Realized and open P&L attributed to the strategy that traded it.
+      entry: /ui/StrategyLiveWidget.mjs
+      slots: [dashboard.home]
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: full
+      refresh_topics: [strategy.assigned, strategy.updated, strategy.created,
+        strategy.promotion.changed, order.placed, order.filled, order.rejected,
+        order.cancelled, position.changed, portfolio.performance.updated,
+        risk.limit.breached]
+      settings_schema:
+        type: object
+        properties:
+          scope: {type: string, title: Show, default: live, enum: [live, all]}
+          primary_metric: {type: string, title: Headline, default: total_pnl, enum: [total_pnl, realized_pnl, unrealized_pnl, execution_cost]}
+          row_limit: {type: integer, title: Visible rows, default: 6, minimum: 1, maximum: 15}
   # No prompt_fragments. Approval policy belongs in the operator's
   # per-instance directive; objective and numeric portfolio risk state are
   # native Trading domains. The MCP tool descriptions carry the

@@ -1,8 +1,8 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "games",
-  "version": "0.5.0",
-  "description": "Multi-game backend and content studio: thirteen asset kinds, immutable versions and manifests, Media Studio generation, Unity/Godot imports, players, Code/Deploy delivery and reporting.",
+  "version": "0.6.0",
+  "description": "Multi-game backend and content studio with versioned assets, players, delivery, and per-game Google Play and Apple sales reporting.",
   "author": {
     "name": "Apteva",
     "url": "https://apteva.com"

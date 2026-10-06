@@ -145,6 +145,8 @@ func (a *App) toolEditComment(callCtx context.Context, ctx *sdk.AppCtx, args map
 	if err != nil {
 		return nil, err
 	}
+	ticket, _ := getTicket(ctx.AppDB(), pid, int64Arg(args, "id"))
+	emitTicket(ctx, "ticket.updated", ticket, map[string]any{"comment_id": comment.ID})
 	return map[string]any{"comment": comment}, nil
 }
 

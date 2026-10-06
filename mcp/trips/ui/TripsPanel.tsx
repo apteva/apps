@@ -10,6 +10,8 @@
 
 import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from "react";
 
+import { stayNightCount, stayPriceTotal } from "./stay-favorite-prices";
+
 const API = "/api/apps/trips";
 
 interface NativePanelProps {
@@ -48,6 +50,8 @@ interface Destination {
   depart_at: string;
   order_idx: number;
   notes: string;
+  lat?: number;
+  lng?: number;
 }
 
 interface TransportLeg {
@@ -81,7 +85,25 @@ interface Accommodation {
   cost_actual?: number;
   currency: string;
   booked: boolean;
+  confirmation_number: string;
   notes: string;
+}
+
+interface StayFavorite {
+  id: number;
+  trip_id: number;
+  destination_id: number;
+  name: string;
+  kind: string;
+  listing_url: string;
+  photo_url: string;
+  address: string;
+  price_amount: number | null;
+  price_basis: "total" | "per_night";
+  currency: string;
+  notes: string;
+  top_choice: boolean;
+  accommodation_id?: number;
 }
 
 interface Activity {
@@ -159,6 +181,12 @@ interface FlightOffer {
   arrive_location: string;
   stops: number;
   cabin?: string;
+  return_depart_at?: string;
+  return_arrive_at?: string;
+  return_depart_location?: string;
+  return_arrive_location?: string;
+  return_duration?: string;
+  return_stops?: number;
   total_amount_cents: number;
   currency: string;
 }
@@ -272,6 +300,7 @@ interface TripDashboard {
   activities: Activity[];
   todos: Todo[];
   budget: BudgetSummary;
+  stay_favorites: StayFavorite[];
 }
 
 type Tab = "overview" | "itinerary" | "deals" | "budget" | "todos";
@@ -643,13 +672,17 @@ function TripsPanelInner({ projectId }: NativePanelProps) {
   const [showNew, setShowNew] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [error, setError] = useState("");
+  const refreshSequence = useRef(0);
 
   const refresh = useCallback(async () => {
+    const sequence = ++refreshSequence.current;
     try {
       const r = await api<{ trips: Trip[] }>("/trips");
+      if (sequence !== refreshSequence.current) return;
       setTrips(r.trips ?? []);
       setError("");
     } catch (e: unknown) {
+      if (sequence !== refreshSequence.current) return;
       setError(e instanceof Error ? e.message : String(e));
     }
   }, []);
@@ -1215,13 +1248,17 @@ function TripDetail({ tripID, projectId, onBack, onChanged }: { tripID: number; 
   const [tab, setTab] = useState<Tab>("overview");
   const [error, setError] = useState("");
   const [showEdit, setShowEdit] = useState(false);
+  const refreshSequence = useRef(0);
 
   const refresh = useCallback(async () => {
+    const sequence = ++refreshSequence.current;
     try {
       const d = await api<TripDashboard>(`/dashboard?trip_id=${tripID}`);
+      if (sequence !== refreshSequence.current) return;
       setData(d);
       setError("");
     } catch (e: unknown) {
+      if (sequence !== refreshSequence.current) return;
       setError(e instanceof Error ? e.message : String(e));
     }
   }, [tripID]);
@@ -1324,6 +1361,9 @@ function TripDetail({ tripID, projectId, onBack, onChanged }: { tripID: number; 
         </div>
       </section>
 
+      {error && <div role="alert" className="rounded-md border border-error/30 bg-error/10 p-3 text-sm text-error">
+        Could not refresh this trip: {error} <button onClick={refresh} className="underline">Retry</button>
+      </div>}
       <div className="flex-1 overflow-auto">
         {tab === "overview" && <OverviewTab data={data} onChanged={() => { refresh(); onChanged(); }} />}
         {tab === "itinerary" && <ItineraryTab data={data} onChanged={() => { refresh(); onChanged(); }} />}
@@ -1400,7 +1440,7 @@ function UpcomingList({ data }: { data: TripDashboard }) {
             <div className="truncate font-medium">{i.title}</div>
             <div className="truncate text-xs text-text-muted">{i.subtitle}</div>
           </div>
-          <div className="text-xs text-text-muted">{fmtDateShort(i.when)} {fmtTime(i.when)}</div>
+          <div className="text-xs text-text-muted">{fmtDateShort(i.kind === "accommodation" ? i.when.slice(0,10) : i.when)} {i.kind !== "accommodation" && fmtTime(i.when)}</div>
         </li>
       ))}
     </ul>
@@ -1732,7 +1772,7 @@ function ItineraryRow({
     icon = "bed";
     title = a.name;
     subtitle = a.address;
-    when2 = a.check_in_at && a.check_out_at ? `${fmtDateShort(a.check_in_at)} – ${fmtDateShort(a.check_out_at)}` : "Idea";
+    when2 = a.check_in_at && a.check_out_at ? `${fmtDateShort(a.check_in_at.slice(0,10))} – ${fmtDateShort(a.check_out_at.slice(0,10))}` : "Idea";
   } else {
     const a = item.data as Activity;
     icon = "compass";
@@ -1776,6 +1816,7 @@ function ItineraryRow({
       </div>
       <div className="flex flex-col items-end gap-1 text-right text-sm">
         <div className="tabular-nums">{cost != null ? fmtMoney(cost, costCcy) : "—"}</div>
+        <span className="text-xs text-text-dim">{item.data.cost_actual != null ? "Actual" : item.data.booked ? "Estimate · actual unknown" : "Estimate"}</span>
         <button onClick={remove} disabled={busy} aria-label={`Delete ${title}`} className="text-text-dim hover:text-error" title="Delete">
           <Icon name="trash" size={12} />
         </button>
@@ -1819,7 +1860,7 @@ function DestinationsSection({ data, onChanged }: { data: TripDashboard; onChang
   const remove = async (dest: Destination) => {
     if (!await ui.confirm({
       title: "Delete destination?",
-      message: `"${dest.place_name}" will be removed from this trip.`,
+      message: `"${dest.place_name}" and its saved stay options will be removed from this trip. Any itinerary stays are kept.`,
       confirmLabel: "Delete",
     })) return;
     setBusy(true);
@@ -1846,7 +1887,8 @@ function DestinationsSection({ data, onChanged }: { data: TripDashboard; onChang
       ) : (
         <ul className="divide-y divide-border-subtle text-sm">
           {dests.map((d, i) => (
-            <li key={d.id} className="flex items-center gap-2 px-4 py-2">
+            <li key={d.id} className="px-4 py-3">
+              <div className="flex items-center gap-2">
               <div className="flex-1 min-w-0">
                 <div className="truncate font-medium">
                   {d.place_name}
@@ -1860,6 +1902,8 @@ function DestinationsSection({ data, onChanged }: { data: TripDashboard; onChang
               <button onClick={() => move(d, 1)} disabled={busy || i === dests.length - 1} aria-label={`Move ${d.place_name} down`} className="p-1 text-text-dim hover:text-text disabled:opacity-30" title="Move down"><Icon name="chevron-right" size={12} /></button>
               <button onClick={() => setEditing(d)} aria-label={`Edit ${d.place_name}`} className="p-1 text-text-dim hover:text-text" title="Edit"><Icon name="edit" size={12} /></button>
               <button onClick={() => remove(d)} disabled={busy} aria-label={`Delete ${d.place_name}`} className="p-1 text-text-dim hover:text-error" title="Delete"><Icon name="trash" size={12} /></button>
+              </div>
+              <StayFavoritesSection destination={d} data={data} onChanged={onChanged} />
             </li>
           ))}
         </ul>
@@ -1883,11 +1927,187 @@ function DestinationsSection({ data, onChanged }: { data: TripDashboard; onChang
   );
 }
 
+// ─── Destination stay shortlists ─────────────────────────────────
+
+function StayFavoritesSection({ destination, data, onChanged }: {
+  destination: Destination; data: TripDashboard; onChanged: () => void;
+}) {
+  const ui = useUI();
+  const [editing, setEditing] = useState<StayFavorite | "new" | null>(null);
+  const [selecting, setSelecting] = useState<StayFavorite | null>(null);
+  const [viewing, setViewing] = useState<Accommodation | null>(null);
+  const [busy, setBusy] = useState(false);
+  const favorites = (data.stay_favorites ?? []).filter(f => f.destination_id === destination.id);
+  const mutate = async (path: string, method: string, body?: unknown) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await api<unknown>(path, { method, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+      onChanged();
+    } catch (e: unknown) { ui.notify(e instanceof Error ? e.message : String(e)); }
+    finally { setBusy(false); }
+  };
+  const remove = async (f: StayFavorite) => {
+    if (await ui.confirm({ title: "Remove stay option?", message: `Remove “${f.name}” from the shortlist? Any stay already in your itinerary is kept.`, confirmLabel: "Remove" })) {
+      await mutate(`/stay-favorites/${f.id}`, "DELETE");
+    }
+  };
+  return (
+    <div className="mt-3 border-t border-border-subtle pt-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-medium text-text-muted">Stay options · {favorites.length}</span>
+        <button onClick={() => setEditing("new")} className="btn-secondary text-xs"><Icon name="plus" size={12} /> Save a stay</button>
+      </div>
+      {!favorites.length ? <p className="mt-2 text-xs text-text-dim">Save hotels and Airbnbs for {destination.place_name}, then choose a stay when you’re ready.</p> : (
+        <div className="stay-favorites-grid mt-3">
+          {favorites.map(f => (
+            <article key={f.id} className="flex flex-col gap-2 rounded-lg border border-border bg-bg p-3">
+              {f.photo_url && <img src={f.photo_url} alt="" loading="lazy" referrerPolicy="no-referrer" className="stay-favorite-photo" />}
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="font-medium break-words">{f.name}</div>
+                  <div className="text-xs capitalize text-text-dim">{f.kind}</div>
+                </div>
+                <button disabled={busy} onClick={() => mutate(`/stay-favorites/${f.id}`, "PATCH", { top_choice: !f.top_choice })}
+                  aria-label={`${f.top_choice ? "Clear" : "Make"} ${f.name} top choice`} aria-pressed={f.top_choice}
+                  className={`shrink-0 flex items-center gap-1 text-xs ${f.top_choice ? "text-accent" : "text-text-muted"}`}>
+                  <Icon name="star" size={14} />{f.top_choice ? "Top choice" : "Prefer"}
+                </button>
+              </div>
+              {f.address && <div className="text-xs text-text-muted break-words">{f.address}</div>}
+              <div className="text-sm font-medium">{f.price_amount != null ? <>{fmtMoney(f.price_amount, f.currency)} <span className="text-xs font-normal text-text-muted">{f.price_basis === "per_night" ? "per night" : "total estimate"}</span></> : <span className="text-xs font-normal text-text-dim">Price unknown</span>}</div>
+              {f.notes && <p className="text-xs text-text-muted whitespace-pre-wrap break-words">{f.notes}</p>}
+              {f.listing_url && <a href={f.listing_url} target="_blank" rel="noopener noreferrer" className="text-xs text-accent">View listing ↗</a>}
+              <div className="mt-auto flex flex-wrap items-center gap-2 pt-2">
+                <button disabled={busy} className="btn-secondary" onClick={() => {
+                  const stay = data.accommodations.find(a => a.id === f.accommodation_id);
+                  if (stay) setViewing(stay); else setSelecting(f);
+                }}>{f.accommodation_id ? "View itinerary stay" : "Use this stay"}</button>
+                <button disabled={busy} onClick={() => setEditing(f)} className="p-1 text-text-muted" aria-label={`Edit ${f.name}`}><Icon name="edit" size={14} /></button>
+                <button disabled={busy} onClick={() => remove(f)} className="p-1 text-text-muted hover:text-error" aria-label={`Remove ${f.name}`}><Icon name="trash" size={14} /></button>
+              </div>
+              {f.accommodation_id && <span className="text-xs text-success">Added to itinerary</span>}
+            </article>
+          ))}
+        </div>
+      )}
+      <p className="mt-2 text-xs text-text-dim">Options enter your budget and calendar when added to the itinerary.</p>
+      {editing && <StayFavoriteDialog trip={data.trip} destination={destination} existing={editing === "new" ? undefined : editing}
+        onClose={() => setEditing(null)} onSaved={() => { setEditing(null); onChanged(); }} />}
+      {selecting && <SelectStayFavoriteDialog favorite={selecting} destination={destination} onClose={() => setSelecting(null)}
+        onSaved={() => { setSelecting(null); onChanged(); }} />}
+      {viewing && <ItemDialog kind="accommodation" trip={data.trip} destinations={data.destinations} existing={viewing}
+        onClose={() => setViewing(null)} onSaved={() => { setViewing(null); onChanged(); }} />}
+      <style>{`.stay-favorites-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr));gap:12px}.stay-favorite-photo{width:100%;height:128px;object-fit:cover;border-radius:6px}`}</style>
+    </div>
+  );
+}
+
+function StayFavoriteDialog({ trip, destination, existing, onClose, onSaved }: {
+  trip: Trip; destination: Destination; existing?: StayFavorite; onClose: () => void; onSaved: () => void;
+}) {
+  const [name, setName] = useState(existing?.name ?? "");
+  const [kind, setKind] = useState(existing?.kind ?? "hotel");
+  const [listing, setListing] = useState(existing?.listing_url ?? "");
+  const [photo, setPhoto] = useState(existing?.photo_url ?? "");
+  const [address, setAddress] = useState(existing?.address ?? "");
+  const [currency, setCurrency] = useState(existing?.currency ?? trip.home_currency);
+  const [price, setPrice] = useState(existing?.price_amount != null ? moneyInput(existing.price_amount, currency) : "");
+  const [basis, setBasis] = useState(existing?.price_basis ?? "per_night");
+  const [notes, setNotes] = useState(existing?.notes ?? "");
+  const [top, setTop] = useState(existing?.top_choice ?? false);
+  const [searching, setSearching] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const submit = async () => {
+    if (busy) return;
+    setBusy(true); setErr("");
+    try {
+      const body = { ...(existing ? {} : { destination_id: destination.id }), name, kind, listing_url: listing,
+        photo_url: photo, address, price_amount: price.trim() ? parseMoneyDecimal(price, currency) : null,
+        price_basis: basis, currency, notes, top_choice: top };
+      await api<StayFavorite>(existing ? `/stay-favorites/${existing.id}` : "/stay-favorites", { method: existing ? "PATCH" : "POST", body: JSON.stringify(body) });
+      onSaved();
+    } catch (e: unknown) { setErr(e instanceof Error ? e.message : String(e)); setBusy(false); }
+  };
+  return (
+    <Dialog title={`${existing ? "Edit" : "Save"} stay option · ${destination.place_name}`} onClose={onClose}>
+      <p className="text-sm text-text-muted">Keep this as an option while planning. You can add it to the itinerary later.</p>
+      {!existing && <button onClick={() => setSearching(true)} className="btn-secondary"><Icon name="search" size={14} /> Search hotels nearby</button>}
+      <Field label="Name"><input className="input" value={name} onChange={e => setName(e.target.value)} autoFocus placeholder="Hotel or Airbnb name" /></Field>
+      <Field label="Kind"><select className="input" value={kind} onChange={e => setKind(e.target.value)}>
+        <option value="hotel">Hotel</option><option value="airbnb">Airbnb</option><option value="hostel">Hostel</option><option value="rental">Rental</option><option value="friend">Friend</option><option value="other">Other</option>
+      </select></Field>
+      <Field label="Listing URL"><input className="input" type="url" value={listing} onChange={e => setListing(e.target.value)} placeholder="https://…" /></Field>
+      <Field label="Address"><input className="input" value={address} onChange={e => setAddress(e.target.value)} /></Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Estimated price"><input className="input" inputMode="decimal" value={price} onChange={e => setPrice(e.target.value)} placeholder="Unknown" /></Field>
+        <Field label="Price basis"><select className="input" value={basis} onChange={e => setBasis(e.target.value as StayFavorite["price_basis"])}><option value="per_night">Per night</option><option value="total">Total stay</option></select></Field>
+      </div>
+      <Field label="Currency"><input className="input uppercase" maxLength={3} value={currency} onChange={e => setCurrency(e.target.value.toUpperCase())} /></Field>
+      <Field label="Photo URL (optional)"><input className="input" type="url" value={photo} onChange={e => setPhoto(e.target.value)} placeholder="https://…" /></Field>
+      <Field label="Notes"><textarea className="input" rows={3} value={notes} onChange={e => setNotes(e.target.value)} placeholder="Why you like it, amenities, cancellation policy…" /></Field>
+      <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={top} onChange={e => setTop(e.target.checked)} /> Top choice for this destination</label>
+      {existing?.accommodation_id && <p className="text-xs text-text-muted">These edits change the saved option. Edit the itinerary stay separately to change its dates or budget.</p>}
+      {err && <p role="alert" className="text-sm text-error">{err}</p>}
+      <DialogActions><button onClick={onClose} className="btn-dialog-secondary">Cancel</button><button disabled={busy || !name.trim()} onClick={submit} className="btn-dialog-primary">{busy ? "Saving…" : "Save option"}</button></DialogActions>
+      {searching && <SearchPlacesModal trip={trip} destinations={[destination]} defaultKind="lodging" onClose={() => setSearching(false)}
+        onPick={p => { setName(p.name); setKind("hotel"); setAddress(p.formatted_address ?? ""); if (p.google_maps_uri) setListing(p.google_maps_uri); setSearching(false); }} />}
+    </Dialog>
+  );
+}
+
+function moneyInput(minor: number, currency: string): string {
+  const digits = currencyFractionDigits(currency);
+  return (minor / 10 ** digits).toFixed(digits);
+}
+
+function SelectStayFavoriteDialog({ favorite, destination, onClose, onSaved }: {
+  favorite: StayFavorite; destination: Destination; onClose: () => void; onSaved: () => void;
+}) {
+  const defaultStart = destination.arrive_at?.slice(0, 10) || "";
+  const defaultEnd = destination.depart_at?.slice(0, 10) || "";
+  const [datesKnown, setDatesKnown] = useState(stayNightCount(defaultStart, defaultEnd) > 0);
+  const [start, setStart] = useState(defaultStart);
+  const [end, setEnd] = useState(defaultEnd);
+  const [manualPrice, setManualPrice] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const calculated = stayPriceTotal(favorite.price_amount, favorite.price_basis, datesKnown ? start : "", datesKnown ? end : "");
+  const price = manualPrice ?? (calculated != null ? moneyInput(calculated, favorite.currency) : "");
+  const submit = async () => {
+    if (busy) return;
+    setBusy(true); setErr("");
+    try {
+      if (datesKnown && (!start || !end || stayNightCount(start, end) <= 0)) throw new Error("Choose check-in and check-out dates with at least one night.");
+      await api<Accommodation>(`/stay-favorites/${favorite.id}/select`, { method: "POST", body: JSON.stringify({
+        check_in_at: datesKnown ? `${start}T15:00:00Z` : null,
+        check_out_at: datesKnown ? `${end}T11:00:00Z` : null,
+        cost_estimated: price.trim() ? parseMoneyDecimal(price, favorite.currency) : null,
+      }) });
+      onSaved();
+    } catch (e: unknown) { setErr(e instanceof Error ? e.message : String(e)); setBusy(false); }
+  };
+  return (
+    <Dialog title={`Use ${favorite.name}`} onClose={onClose}>
+      <p className="text-sm text-text-muted">Add this stay to {destination.place_name} in your itinerary. Your other options stay saved.</p>
+      <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={datesKnown} onChange={e => setDatesKnown(e.target.checked)} /> Dates known</label>
+      {datesKnown && <DateRangeField startLabel="Check-in" endLabel="Check-out" start={start} end={end} onChange={(s,e) => { setStart(s); setEnd(e); }} />}
+      <Field label={`Total estimated cost (${favorite.currency})`}><input className="input" inputMode="decimal" value={price} onChange={e => setManualPrice(e.target.value)} placeholder="Unknown" /></Field>
+      {favorite.price_amount != null && <p className="text-xs text-text-muted">Saved estimate: {fmtMoney(favorite.price_amount, favorite.currency)} {favorite.price_basis === "per_night" ? "per night" : "total"}{datesKnown && favorite.price_basis === "per_night" ? ` · ${stayNightCount(start, end)} nights` : ""}. Confirm the total, including any fees.</p>}
+      <p className="text-xs text-text-muted">This adds an unbooked stay to your budget{datesKnown ? " and calendar" : " as an idea"}. Mark it booked after arranging the booking.</p>
+      {err && <p role="alert" className="text-sm text-error">{err}</p>}
+      <DialogActions><button className="btn-dialog-secondary" onClick={onClose}>Cancel</button><button className="btn-dialog-primary" disabled={busy} onClick={submit}>{busy ? "Adding…" : "Add to itinerary"}</button></DialogActions>
+    </Dialog>
+  );
+}
+
 // ─── Budget tab ──────────────────────────────────────────────────
 
 function BudgetTab({ data, onChanged }: { data: TripDashboard; onChanged: () => void }) {
   const trip = data.trip;
   const [editing, setEditing] = useState(false);
+  const totalCap = trip.total_budget ?? (data.budget.total_cap > 0 ? data.budget.total_cap : null);
   return (
     <div className="space-y-3">
       <div className="overflow-hidden rounded-lg border border-border bg-bg-card">
@@ -1913,11 +2133,11 @@ function BudgetTab({ data, onChanged }: { data: TripDashboard; onChanged: () => 
               <BudgetRow key={c.category} row={c} currency={trip.home_currency} tripID={trip.id} editing={editing} onChanged={onChanged} />
             ))}
             <tr className="border-t border-border font-medium border-border">
-              <td className="px-3 py-2">Total</td>
-              <td className="px-3 py-2 text-right tabular-nums">{fmtMoney(data.budget.total_cap, trip.home_currency)}</td>
+              <td className="px-3 py-2">Total{trip.total_budget != null ? " · overall cap" : ""}</td>
+              <td className="px-3 py-2 text-right tabular-nums">{totalCap != null ? fmtMoney(totalCap, trip.home_currency) : <span className="text-text-dim">—</span>}</td>
               <td className="px-3 py-2 text-right tabular-nums">{fmtMoney(data.budget.total_planned, trip.home_currency)}</td>
               <td className="px-3 py-2 text-right tabular-nums">{fmtMoney(data.budget.total_actual, trip.home_currency)}</td>
-              <td className="px-3 py-2 text-right tabular-nums">{fmtMoney(data.budget.total_planned - data.budget.total_actual, trip.home_currency, { signed: true })}</td>
+              <td className={`px-3 py-2 text-right tabular-nums ${totalCap != null && data.budget.total_actual > totalCap ? "text-error" : ""}`}>{totalCap != null ? fmtMoney(totalCap - data.budget.total_actual, trip.home_currency, { signed: true }) : fmtMoney(data.budget.total_planned - data.budget.total_actual, trip.home_currency, { signed: true })}</td>
             </tr>
           </tbody>
         </table>
@@ -2154,12 +2374,14 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
 
   const [name, setName] = useState(a?.name ?? c?.name ?? "");
   const [cost, setCost] = useState(() => {
-    const v = existing?.cost_actual ?? existing?.cost_estimated;
+    const v = existing?.cost_estimated;
     if (v == null) return "";
     const digits = currencyFractionDigits(existing?.currency ?? trip.home_currency);
     return (v / (10 ** digits)).toFixed(digits);
   });
   const [currency, setCurrency] = useState(existing?.currency ?? trip.home_currency);
+  const [actualCost, setActualCost] = useState(existing?.cost_actual != null ? moneyInput(existing.cost_actual, existing.currency) : "");
+  const [confirmation, setConfirmation] = useState(t?.confirmation_number ?? a?.confirmation_number ?? "");
   const [notes, setNotes] = useState(existing?.notes ?? "");
 
   const [tKind, setTKind] = useState<TransportLeg["kind"]>(t?.kind ?? "flight");
@@ -2173,6 +2395,7 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
 
   const [aKind, setAKind] = useState<Accommodation["kind"]>(a?.kind ?? "hotel");
   const [address, setAddress] = useState(a?.address ?? "");
+  const [destinationID, setDestinationID] = useState(a?.destination_id || c?.destination_id ? String(a?.destination_id || c?.destination_id) : "");
   const [stayDatesKnown, setStayDatesKnown] = useState(a ? hasDateRange(a.check_in_at, a.check_out_at) : hasDateRange(trip.start_at, trip.end_at));
   const [checkIn, setCheckIn] = useState(a?.check_in_at ? a.check_in_at.slice(0, 10) : (trip.start_at ? trip.start_at.slice(0, 10) : todayPlus(0)));
   const [checkOut, setCheckOut] = useState(a?.check_out_at ? a.check_out_at.slice(0, 10) : (trip.end_at ? trip.end_at.slice(0, 10) : todayPlus(1)));
@@ -2183,21 +2406,18 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
   const [actLocation, setActLocation] = useState(c?.location ?? "");
 
   const submit = async () => {
+    if (busy) return;
     setBusy(true); setErr("");
     try {
       const cents = cost.trim() ? parseMoneyDecimal(cost, currency) : null;
-      // Field name for the cost field switches based on edit mode:
-      // when we already have a cost_actual we update it; otherwise we
-      // edit cost_estimated. The mark-booked button is the dedicated
-      // path for the planned→actual transition.
-      const costField = isEdit && existing?.cost_actual != null ? "cost_actual" : "cost_estimated";
+      const costs = {cost_estimated: cents, ...(isEdit ? {cost_actual: actualCost.trim() ? parseMoneyDecimal(actualCost, currency) : null} : {})};
       if (kind === "transport") {
         const body = {
           trip_id: trip.id, kind: tKind,
           depart_at: transportDatesKnown && departAt ? ensureRfc3339(departAt) : null,
           arrive_at: transportDatesKnown && arriveAt ? ensureRfc3339(arriveAt) : null,
-          provider, reference, depart_location: departLoc, arrive_location: arriveLoc,
-          [costField]: cents, currency, notes,
+          provider, reference, depart_location: departLoc, arrive_location: arriveLoc, confirmation_number: confirmation,
+          ...costs, currency, notes,
         };
         if (isEdit) {
           await api<TransportLeg>(`/transport-legs/${existing!.id}`, { method: "PATCH", body: JSON.stringify(body) });
@@ -2206,10 +2426,10 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
         }
       } else if (kind === "accommodation") {
         const body = {
-          trip_id: trip.id, name, kind: aKind, address,
+          trip_id: trip.id, name, kind: aKind, address, confirmation_number: confirmation, destination_id: destinationID ? Number(destinationID) : null,
           check_in_at: stayDatesKnown && checkIn ? checkIn + "T15:00:00Z" : null,
           check_out_at: stayDatesKnown && checkOut ? checkOut + "T11:00:00Z" : null,
-          [costField]: cents, currency, notes,
+          ...costs, currency, notes,
         };
         if (isEdit) {
           await api<Accommodation>(`/accommodations/${existing!.id}`, { method: "PATCH", body: JSON.stringify(body) });
@@ -2218,10 +2438,10 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
         }
       } else {
         const body = {
-          trip_id: trip.id, name, category: actCategory,
+          trip_id: trip.id, name, category: actCategory, destination_id: destinationID ? Number(destinationID) : null,
           start_at: actStart ? ensureRfc3339(actStart) : null,
           end_at: actEnd ? ensureRfc3339(actEnd) : null,
-          location: actLocation, [costField]: cents, currency, notes,
+          location: actLocation, ...costs, currency, notes,
         };
         if (isEdit) {
           await api<Activity>(`/activities/${existing!.id}`, { method: "PATCH", body: JSON.stringify(body) });
@@ -2249,9 +2469,17 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
     setDepartLoc(offer.depart_location);
     setArriveLoc(offer.arrive_location);
     if (offer.total_amount_cents > 0) {
-      setCost((offer.total_amount_cents / 100).toFixed(2));
+      setCost(moneyInput(offer.total_amount_cents, offer.currency || "EUR"));
     }
     if (offer.currency) setCurrency(offer.currency);
+    if (offer.return_depart_at) {
+      const returnSummary = [
+        `Round-trip total; return ${offer.return_depart_location || ""} → ${offer.return_arrive_location || ""}`.trim(),
+        offer.return_depart_at ? `${fmtDateShort(offer.return_depart_at)} ${fmtTime(offer.return_depart_at)}` : "",
+        offer.return_arrive_at ? `– ${fmtTime(offer.return_arrive_at)}` : "",
+      ].filter(Boolean).join(" ");
+      setNotes(prev => prev ? `${prev}\n${returnSummary}` : returnSummary);
+    }
     setShowFlightSearch(false);
   };
 
@@ -2325,6 +2553,10 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
       )}
       {kind === "accommodation" && (
         <>
+          <Field label="Destination"><select className="input" value={destinationID} onChange={e => setDestinationID(e.target.value)}>
+            <option value="">No destination</option>
+            {(destinations ?? []).map(d => <option key={d.id} value={d.id}>{d.place_name}</option>)}
+          </select></Field>
           <Field label="Name"><input value={name} onChange={e => setName(e.target.value)} className="input" autoFocus placeholder="Hotel des Saints" /></Field>
           <Field label="Kind">
             <select value={aKind} onChange={e => setAKind(e.target.value)} className="input">
@@ -2351,6 +2583,9 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
       )}
       {kind === "activity" && (
         <>
+          <Field label="Destination"><select className="input" value={destinationID} onChange={e => setDestinationID(e.target.value)}>
+            <option value="">No destination</option>{(destinations ?? []).map(d => <option key={d.id} value={d.id}>{d.place_name}</option>)}
+          </select></Field>
           <Field label="Name"><input value={name} onChange={e => setName(e.target.value)} className="input" autoFocus placeholder="Louvre" /></Field>
           <Field label="Category">
             <select value={actCategory} onChange={e => setActCategory(e.target.value as Activity["category"])} className="input">
@@ -2367,9 +2602,11 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
         </>
       )}
       <div className="grid grid-cols-2 gap-3">
-        <Field label={`Cost (${currency})`}><input value={cost} onChange={e => setCost(e.target.value)} className="input" placeholder="0.00" /></Field>
+        <Field label={`Estimated cost (${currency})`}><input value={cost} onChange={e => setCost(e.target.value)} className="input" placeholder="0.00" /></Field>
         <Field label="Currency"><input value={currency} onChange={e => setCurrency(e.target.value.toUpperCase())} className="input uppercase" maxLength={3} /></Field>
       </div>
+      {isEdit && <Field label={`Actual cost (${currency}, optional)`}><input className="input" inputMode="decimal" value={actualCost} onChange={e => setActualCost(e.target.value)} placeholder="Unknown" /></Field>}
+      {kind !== "activity" && <Field label="Confirmation number (optional)"><input className="input" value={confirmation} onChange={e => setConfirmation(e.target.value)} /></Field>}
       <Field label="Notes"><input value={notes} onChange={e => setNotes(e.target.value)} className="input" /></Field>
       {err && <p className="text-sm text-error">{err}</p>}
       <DialogActions>
@@ -2388,7 +2625,7 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
       {showPlaceSearch && (
         <SearchPlacesModal
           trip={trip}
-          destinations={destinations ?? []}
+          destinations={destinationID ? (destinations ?? []).filter(d => d.id === Number(destinationID)) : destinations ?? []}
           defaultKind={kind === "accommodation" ? "lodging" : "attraction"}
           onPick={onPlacePicked}
           onClose={() => setShowPlaceSearch(false)}
@@ -2413,6 +2650,26 @@ function DestinationDialog({ trip, existing, onClose, onSaved }: {
   const [arriveAt, setArriveAt] = useState(existing?.arrive_at ? existing.arrive_at.slice(0, 10) : (trip.start_at ? trip.start_at.slice(0, 10) : todayPlus(0)));
   const [departAt, setDepartAt] = useState(existing?.depart_at ? existing.depart_at.slice(0, 10) : (trip.end_at ? trip.end_at.slice(0, 10) : todayPlus(1)));
   const [notes, setNotes] = useState(existing?.notes ?? "");
+  const [coordinates, setCoordinates] = useState<{lat: number; lng: number} | null>(existing?.lat != null && existing?.lng != null ? {lat: existing.lat, lng: existing.lng} : null);
+  const [resolvingPlace, setResolvingPlace] = useState(false);
+  const placeRequest = useRef(0);
+  const [placeWarning, setPlaceWarning] = useState("");
+  const pickPlace = async (p: PlaceResult) => {
+    const request = ++placeRequest.current;
+    setPlaceName(p.name); setCoordinates(null); setPlaceWarning("");
+    if (p.country?.length === 2) setCountry(p.country.toUpperCase());
+    if (p.lat != null && p.lng != null) {setCoordinates({lat:p.lat,lng:p.lng});setResolvingPlace(false);return;}
+    if (!p.place_id) return;
+    setResolvingPlace(true);
+    try {
+      const details = await api<PlaceResult>(`/search/place?place_id=${encodeURIComponent(p.place_id)}`);
+      if (placeRequest.current !== request) return;
+      if (details.lat != null && details.lng != null) setCoordinates({lat:details.lat,lng:details.lng});
+      else setPlaceWarning("Location unavailable. Nearby search will need a place name.");
+      if (details.country?.length === 2) setCountry(details.country.toUpperCase());
+    } catch {if (placeRequest.current === request) setPlaceWarning("Could not resolve this location. You can still save it and search hotels by name.");}
+    finally {if (placeRequest.current === request) setResolvingPlace(false);}
+  };
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -2422,7 +2679,7 @@ function DestinationDialog({ trip, existing, onClose, onSaved }: {
       const body: Record<string, unknown> = {
         trip_id: trip.id,
         place_name: placeName,
-        country,
+        country, lat: coordinates?.lat ?? null, lng: coordinates?.lng ?? null,
         arrive_at: datesKnown ? arriveAt + "T00:00:00Z" : null,
         depart_at: datesKnown ? departAt + "T23:59:59Z" : null,
         notes,
@@ -2444,18 +2701,12 @@ function DestinationDialog({ trip, existing, onClose, onSaved }: {
       <Field label="Place">
         <PlaceAutocomplete
           value={placeName}
-          onChange={setPlaceName}
-          onPick={(p) => {
-            setPlaceName(p.name);
-            // Try to extract a 2-letter country code from the
-            // secondary text Google returns ("France" etc.). If it
-            // isn't a clean 2-letter code we leave it for the user.
-            if (p.country && p.country.length === 2) {
-              setCountry(p.country.toUpperCase());
-            }
-          }}
+          onChange={value => {++placeRequest.current; setPlaceName(value); setCoordinates(null); setResolvingPlace(false); setPlaceWarning("");}}
+          onPick={pickPlace}
         />
       </Field>
+      {resolvingPlace && <p className="text-xs text-text-muted">Resolving location…</p>}
+      {placeWarning && <p className="text-xs text-warn">{placeWarning}</p>}
       <Field label="Country (ISO-2)"><input value={country} onChange={e => setCountry(e.target.value.toUpperCase())} className="input uppercase" maxLength={2} placeholder="FR" /></Field>
       <label className="flex items-center gap-2 text-sm">
         <input type="checkbox" checked={datesKnown} onChange={e => setDatesKnown(e.target.checked)} />
@@ -2474,7 +2725,7 @@ function DestinationDialog({ trip, existing, onClose, onSaved }: {
       {err && <p className="text-sm text-error">{err}</p>}
       <DialogActions>
         <button onClick={onClose} className="btn-dialog-secondary">Cancel</button>
-        <button onClick={submit} disabled={busy || !placeName} className="btn-dialog-primary">{busy ? "Saving…" : isEdit ? "Update" : "Save"}</button>
+        <button onClick={submit} disabled={busy || resolvingPlace || !placeName.trim()} className="btn-dialog-primary">{busy ? "Saving…" : isEdit ? "Update" : "Save"}</button>
       </DialogActions>
     </Dialog>
   );
@@ -2489,6 +2740,7 @@ function TripEditDialog({ trip, onClose, onSaved }: { trip: Trip; onClose: () =>
   const [color, setColor] = useState(trip.color);
   const [syncCalendar, setSyncCalendar] = useState(trip.sync_calendar);
   const [notes, setNotes] = useState(trip.notes);
+  const [totalBudget, setTotalBudget] = useState(trip.total_budget != null ? moneyInput(trip.total_budget, trip.home_currency) : "");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -2505,6 +2757,7 @@ function TripEditDialog({ trip, onClose, onSaved }: { trip: Trip; onClose: () =>
           color,
           sync_calendar: syncCalendar,
           notes,
+          total_budget: totalBudget.trim() ? parseMoneyDecimal(totalBudget, trip.home_currency) : null,
         }),
       });
       onSaved();
@@ -2548,6 +2801,9 @@ function TripEditDialog({ trip, onClose, onSaved }: { trip: Trip; onClose: () =>
           <input type="checkbox" checked={syncCalendar} onChange={e => setSyncCalendar(e.target.checked)} />
           Mirror itinerary into a dedicated calendar
         </label>
+      </Field>
+      <Field label={`Overall budget (${trip.home_currency})`}>
+        <input className="input" inputMode="decimal" value={totalBudget} onChange={e => setTotalBudget(e.target.value)} placeholder="Optional" />
       </Field>
       <Field label="Notes"><input value={notes} onChange={e => setNotes(e.target.value)} className="input" /></Field>
       {err && <p className="text-sm text-error">{err}</p>}
@@ -2820,9 +3076,15 @@ function SearchFlightsModal({ trip, defaultTo, defaultDepartAt, onPick, onClose 
                   <div className="text-xs text-text-dim">
                     {fmtDateShort(o.depart_at)} {fmtTime(o.depart_at)} – {fmtTime(o.arrive_at)}
                   </div>
+                  {o.return_depart_at && (
+                    <div className="text-xs text-text-dim">
+                      Return: {o.return_depart_location} → {o.return_arrive_location} · {fmtDateShort(o.return_depart_at)} {fmtTime(o.return_depart_at)}{o.return_arrive_at ? ` – ${fmtTime(o.return_arrive_at)}` : ""}
+                    </div>
+                  )}
                 </div>
                 <div className="text-right tabular-nums text-sm font-medium">
                   {fmtMoney(o.total_amount_cents, o.currency || "EUR")}
+                  {o.return_depart_at && <div className="text-[0.65rem] font-normal text-text-dim">round-trip total</div>}
                 </div>
               </button>
             </li>
@@ -2854,7 +3116,9 @@ function SearchPlacesModal({ trip, destinations, defaultKind, onPick, onClose }:
     setBusy(true);
     try {
       const params = new URLSearchParams({ kind });
-      if (query.trim()) params.set("query", query.trim());
+      const destination = destinations.find(d => d.id === destID);
+      const text = query.trim() || (destination && (destination.lat == null || destination.lng == null) ? `${kindLabel(kind)} in ${destination.place_name}` : "");
+      if (text) params.set("query", text);
       if (destID) params.set("destination_id", String(destID));
       params.set("limit", "12");
       const r = await api<{ places: PlaceResult[] }>(`/search/places?${params}`);
@@ -3097,8 +3361,19 @@ function trapDialogTab(e: React.KeyboardEvent<HTMLElement>) {
 
 function Dialog({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
   const titleID = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    const dialog = dialogRef.current;
+    if (dialog && !dialog.contains(document.activeElement)) {
+      const first = dialog.querySelector<HTMLElement>('input:not([disabled]),textarea:not([disabled]),select:not([disabled]),button:not([disabled])');
+      first?.focus();
+    }
+    return () => {if (previous?.isConnected) previous.focus({preventScroll:true});};
+  }, []);
   return (
     <div
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-labelledby={titleID}

@@ -259,6 +259,16 @@ func TestReliabilityDeleteRestoresFilesWhenDBFails(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestReliabilityRepeatedHardDeleteReportsNotFound(t *testing.T) {
+	a, ctx, r := reliabilityApp(t)
+	if err := a.hardDeleteRepo(ctx.AppDB(), "p", r.Slug); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.hardDeleteRepo(ctx.AppDB(), "p", r.Slug); !errors.Is(err, errRepositoryNotFound) {
+		t.Fatalf("second delete error = %v, want repository not found", err)
+	}
+}
 func TestReliabilityCoordinatorDoesNotStarveOtherRepositories(t *testing.T) {
 	t.Setenv("CODE_MAX_COMMANDS", "2")
 	c := commandCoordinator{}

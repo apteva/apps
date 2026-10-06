@@ -294,6 +294,10 @@ type ingressRecoveryPlatform struct {
 	fail    bool
 }
 
+func (p *ingressRecoveryPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
+	return &sdk.InstallIdentity{Bindings: map[string]any{}}, nil
+}
+
 func (p *ingressRecoveryPlatform) ExposeIngress(in sdk.IngressExposeRequest) (*sdk.IngressRoute, error) {
 	p.exposed = in.Hostname
 	return &sdk.IngressRoute{}, nil

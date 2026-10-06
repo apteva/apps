@@ -1,5 +1,36 @@
 # Apteva Code
 
+## v0.13.1
+
+Uses a unique workspace name for each preview attempt, including retries after
+failed provisioning. Requires Workspaces 0.6.1 and Containers 0.5.1.
+
+
+## v0.13.0 — Run in a connected workspace
+
+When Workspaces is connected, both the Run button and `repos_dev_start` execute
+web previews through Workspaces → Containers → local Docker. No local execution
+grant is needed for that path, and connection failures never fall back to host
+execution. Mobile previews retain the Simulator path; unbound web previews
+retain their existing local execution policy.
+
+Each Run creates a dedicated preview workspace and imports the repository.
+JavaScript uses the workspace's Bun runtime for dependency installation and
+scripts. Vite and Next receive explicit host/port flags. Custom commands must
+listen on `0.0.0.0:$PORT` (port 3000 inside the container). Code edits sync into
+the live preview every three seconds; dependencies are installed when Run starts,
+so restart Run after changing dependency declarations. The preview workspace is
+a one-way source mirror; use the separate command workspace for changes you
+intend to apply back to Code.
+
+The UI labels the runner **Docker workspace**, links to its loopback HTTP port,
+and streams container logs. Stop stops the container and retains its source and
+volumes until workspace expiry; a subsequent Run creates a fresh preview. The
+usual Workspaces TTL applies (two hours by default). A Code/Workspaces restart
+preserves the preview handle. Public exposure remains opt-in through `expose`;
+loopback URLs are for browsers on the Docker host. Requires Workspaces 0.6.0.
+
+
 Code provides project-scoped source repositories, native Git, issues, templates,
 editing and development previews through 56 MCP tools, REST routes and four
 React panels. `apteva.yaml` is the single embedded manifest source.
@@ -63,6 +94,12 @@ exclude generated trees. Ambiguous global template slugs fail; MCP accepts
 `from_project_id` to select the owner. Metadata updates validate every supplied
 field before a single column-selective SQL update.
 
+## Local execution permission
+
+Live Run previews and `runtime=local` commands require an explicit permission for the repository. The Run button presents **Allow and run** the first time; agents can use `repos_execution_configure` with `enabled=true, confirm=true`. The permission is stored by repository, survives restarts, and can be revoked for future runs. `trusted_local_execution=true` remains an installation-wide default for operators who have explicitly trusted every repository.
+
+`repos_execution_status` reports whether the selected repository needs local execution and where its permission comes from. Workspaces remain the automatic isolated runtime for finite commands.
+
 ## Commands and Workspaces
 
 `repos_run_command` defaults to `runtime=workspace`, using the optional bound
@@ -88,6 +125,8 @@ Git data, dependency caches and excluded outputs are not applied back.
 a working directory is not a sandbox. Use Workspaces for untrusted code or
 installations requiring repository isolation. Static previews execute no repo
 scripts. Mobile previews delegate to the bound Simulator app.
+
+Vite dev scripts receive an explicit loopback host, the allocated preview port, and `--strictPort`. This keeps Vite, readiness checks and the preview link on the same address. Custom `run_cmd` scripts must honor `PORT` themselves.
 
 ## Preview lifecycle and issues
 

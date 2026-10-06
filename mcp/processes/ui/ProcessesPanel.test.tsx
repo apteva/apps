@@ -9,6 +9,10 @@ Object.assign(globalThis, {
   window,
   document: window.document,
   HTMLElement: window.HTMLElement,
+  SVGElement: window.SVGElement,
+  ResizeObserver: window.ResizeObserver,
+  requestAnimationFrame: window.requestAnimationFrame.bind(window),
+  cancelAnimationFrame: window.cancelAnimationFrame.bind(window),
   IS_REACT_ACT_ENVIRONMENT: true,
 });
 let root: Root;
@@ -60,19 +64,33 @@ async function click(text: string) {
   expect(button).toBeTruthy();
   await act(async () => button!.click());
 }
-test("execution selector defaults to direct and allows optional Tasks", async () => {
+test("process creation is unassigned; execution configuration lives in Assignments", async () => {
   await mount({});
   await click("+ New process");
-  const select = document.querySelector<HTMLSelectElement>("#pc-mode")!;
+  expect(document.querySelector("#pc-owner")).toBeNull();
+  expect(document.querySelector("#pc-mode")).toBeNull();
+  expect(document.querySelector("#pc-cadence")).toBeNull();
+  expect(document.body.textContent).toContain("Saved as an unassigned draft");
+  await click("Cancel");
+  await click("Weekly review");
+  await click("Assignments");
+  await click("Add assignment");
+  const select = document.querySelector<HTMLSelectElement>("#assignment-mode")!;
   expect(select.value).toBe("agent");
+  expect(
+    document.querySelector<HTMLSelectElement>("#assignment-agent")!.value,
+  ).toBe("0");
   await act(async () => {
     select.value = "tasks";
     select.dispatchEvent(
       new window.Event("change", { bubbles: true }) as unknown as Event,
     );
   });
-  expect(document.body.textContent).toContain("Requires Tasks 3.6.0");
+  expect(
+    document.querySelector<HTMLSelectElement>("#assignment-mode")!.value,
+  ).toBe("tasks");
 });
+
 test("mixed history renders direct evidence and links only Tasks records", async () => {
   await mount({
     direct_runs: [
@@ -300,13 +318,28 @@ test("workflow template creates editable dependencies and approval gate", async 
   await mount({});
   await click("+ New process");
   await click("Use research → write → review → publish");
-  expect(document.querySelector<HTMLInputElement>("#step-role-2")?.value).toBe(
-    "reviewer",
-  );
-  expect(document.querySelector<HTMLSelectElement>("#step-kind-2")?.value).toBe(
+  expect(document.querySelectorAll(".pf-step").length).toBe(4);
+  const review = document.querySelector<HTMLElement>(
+    '[aria-label="Step 3: Review"]',
+  )!;
+  expect(review).toBeTruthy();
+  await act(async () => review.click());
+  const inspector = document.querySelector(".pf-inspector")!;
+  expect(inspector.querySelector<HTMLSelectElement>("select")?.value).toBe(
     "approval",
   );
-  expect(document.querySelectorAll("fieldset input:checked").length).toBe(3);
+  expect(
+    inspector.querySelector<HTMLInputElement>('input[id$="-role"]')?.value,
+  ).toBe("reviewer");
+  expect(
+    inspector.querySelectorAll('input[type="checkbox"]:checked').length,
+  ).toBe(1);
+  expect(
+    inspector.querySelectorAll('input[type="checkbox"]:disabled').length,
+  ).toBe(1);
+  await click("Remove step");
+  expect(document.querySelectorAll(".pf-step").length).toBe(3);
+  expect(document.querySelector('[aria-label="Step 3: Publish"]')).toBeTruthy();
 });
 test("assignment saves agent role bindings and defaults approval to human", async () => {
   await mount(
@@ -339,14 +372,12 @@ test("assignment saves agent role bindings and defaults approval to human", asyn
     return read(url as string, init);
   }) as typeof fetch;
   await act(async () =>
-    document
-      .querySelector("form")!
-      .dispatchEvent(
-        new window.Event("submit", {
-          bubbles: true,
-          cancelable: true,
-        }) as unknown as Event,
-      ),
+    document.querySelector("form")!.dispatchEvent(
+      new window.Event("submit", {
+        bubbles: true,
+        cancelable: true,
+      }) as unknown as Event,
+    ),
   );
   expect(payload.assignment.roles.writer).toEqual({
     kind: "agent",

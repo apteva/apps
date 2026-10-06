@@ -78,12 +78,21 @@ func (a *App) runRetention(ctx context.Context, app *sdk.AppCtx) error {
 			app.Logger().Warn("retention: rmdir", "id", p.id, "err", err)
 			continue
 		}
-		if _, err := app.AppDB().Exec(`DELETE FROM stream_events WHERE stream_id = ?`, p.id); err != nil {
+		// Both writes carry project_id, like every other write in the
+		// app. Stream ids are unique across the single app DB today, so
+		// this changes no behavior — but the sweeper was the one place
+		// that relied on that implicitly, and it is the one place that
+		// deletes. An id remap, an import, or a future move to
+		// per-project databases would turn the unscoped form into
+		// cross-project deletion.
+		if _, err := app.AppDB().Exec(
+			`DELETE FROM stream_events WHERE stream_id = ? AND project_id = ?`,
+			p.id, p.projectID); err != nil {
 			app.Logger().Warn("retention: delete events", "id", p.id, "err", err)
 		}
 		if _, err := app.AppDB().Exec(
-			`UPDATE streams SET pruned_at = ?, recording_path = NULL WHERE id = ?`,
-			nowStamp(), p.id); err != nil {
+			`UPDATE streams SET pruned_at = ?, recording_path = NULL WHERE id = ? AND project_id = ?`,
+			nowStamp(), p.id, p.projectID); err != nil {
 			app.Logger().Warn("retention: mark pruned", "id", p.id, "err", err)
 			continue
 		}

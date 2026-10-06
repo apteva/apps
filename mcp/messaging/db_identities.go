@@ -12,7 +12,7 @@ package main
 //                   tokens, inbound bootstrap config) that has no
 //                   analog on the sendable side. Never a From value.
 //
-// The cross-app lookup ("is alice@socialcast.dev's parent domain
+// The cross-app lookup ("is alice@example.org's parent domain
 // verified?") used to walk the senders table via string-suffix match;
 // now it's a single indexed FK on senders.parent_identity_id.
 
@@ -25,44 +25,46 @@ import (
 )
 
 type identityRow struct {
-	ID                  int64
-	ProjectID           string
-	Kind                string
-	Address             string
-	Provider            string
-	ProviderIdentityID  string
-	Verified            bool
-	VerificationStatus  string
-	DkimStatus          string
-	InboundBootstrapped bool
-	InboundConfig       string // JSON
-	Notes               string
-	Metadata            string // JSON
-	LastSyncedAt        *time.Time
-	LastSyncError       string
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
-	DeletedAt           *time.Time
+	ID                   int64
+	ProjectID            string
+	Kind                 string
+	Address              string
+	Provider             string
+	ProviderConnectionID int64
+	ProviderIdentityID   string
+	Verified             bool
+	VerificationStatus   string
+	DkimStatus           string
+	InboundBootstrapped  bool
+	InboundConfig        string // JSON
+	Notes                string
+	Metadata             string // JSON
+	LastSyncedAt         *time.Time
+	LastSyncError        string
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+	DeletedAt            *time.Time
 }
 
 type identityUpsert struct {
-	ProjectID           string
-	Kind                string
-	Address             string
-	Provider            string
-	ProviderIdentityID  string
-	Verified            bool
-	VerificationStatus  string
-	DkimStatus          string
-	InboundBootstrapped bool
-	InboundConfig       string
-	Metadata            string
-	MarkSyncedNow       bool
-	SyncError           string
+	ProjectID            string
+	Kind                 string
+	Address              string
+	Provider             string
+	ProviderConnectionID int64
+	ProviderIdentityID   string
+	Verified             bool
+	VerificationStatus   string
+	DkimStatus           string
+	InboundBootstrapped  bool
+	InboundConfig        string
+	Metadata             string
+	MarkSyncedNow        bool
+	SyncError            string
 }
 
 const identityColumns = `id, project_id, kind, address,
-	provider, COALESCE(provider_identity_id,''),
+	provider, COALESCE(provider_connection_id,0), COALESCE(provider_identity_id,''),
 	verified, COALESCE(verification_status,''),
 	COALESCE(dkim_status,''),
 	inbound_bootstrapped, COALESCE(inbound_config,''),
@@ -78,7 +80,7 @@ func scanIdentity(row interface {
 	var deletedAt sql.NullTime
 	err := row.Scan(
 		&i.ID, &i.ProjectID, &i.Kind, &i.Address,
-		&i.Provider, &i.ProviderIdentityID,
+		&i.Provider, &i.ProviderConnectionID, &i.ProviderIdentityID,
 		&i.Verified, &i.VerificationStatus,
 		&i.DkimStatus,
 		&i.InboundBootstrapped, &i.InboundConfig,
@@ -106,18 +108,19 @@ func dbUpsertIdentity(db *sql.DB, u *identityUpsert) (int64, error) {
 		return 0, errors.New("project_id + kind + address required")
 	}
 	addr := strings.ToLower(strings.TrimSpace(u.Address))
-	_, err := db.Exec(
+	result, err := db.Exec(
 		`INSERT INTO identities (
 			project_id, kind, address,
-			provider, provider_identity_id,
+			provider, provider_connection_id, provider_identity_id,
 			verified, verification_status, dkim_status,
 			inbound_bootstrapped, inbound_config,
 			metadata,
 			last_synced_at, last_sync_error
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, `+
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, `+
 			conditionalTS(u.MarkSyncedNow)+`, ?)
 		ON CONFLICT (project_id, kind, address) DO UPDATE SET
 			provider = excluded.provider,
+			provider_connection_id = CASE WHEN excluded.provider_connection_id=0 THEN identities.provider_connection_id ELSE excluded.provider_connection_id END,
 			provider_identity_id = excluded.provider_identity_id,
 			verified = excluded.verified,
 			verification_status = excluded.verification_status,
@@ -131,9 +134,12 @@ func dbUpsertIdentity(db *sql.DB, u *identityUpsert) (int64, error) {
 			last_synced_at = excluded.last_synced_at,
 			last_sync_error = excluded.last_sync_error,
 			updated_at = CURRENT_TIMESTAMP,
-			deleted_at = NULL`,
+			deleted_at = NULL
+		WHERE identities.deleted_at IS NOT NULL OR
+			(identities.provider = excluded.provider AND
+			 (identities.provider_connection_id = 0 OR excluded.provider_connection_id = 0 OR identities.provider_connection_id = excluded.provider_connection_id))`,
 		u.ProjectID, u.Kind, addr,
-		u.Provider, u.ProviderIdentityID,
+		u.Provider, u.ProviderConnectionID, u.ProviderIdentityID,
 		boolInt(u.Verified), u.VerificationStatus, u.DkimStatus,
 		boolInt(u.InboundBootstrapped), u.InboundConfig,
 		u.Metadata,
@@ -141,6 +147,9 @@ func dbUpsertIdentity(db *sql.DB, u *identityUpsert) (int64, error) {
 	)
 	if err != nil {
 		return 0, fmt.Errorf("upsert identity: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return 0, fmt.Errorf("identity %s already belongs to another provider connection", addr)
 	}
 	var id int64
 	err = db.QueryRow(

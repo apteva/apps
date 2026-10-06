@@ -287,6 +287,52 @@ func TestUISessionListIncludesHistoryWithoutChangingAgentList(t *testing.T) {
 	}
 }
 
+func TestUISessionViewsKeepHistoryOutOfLiveList(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	previousCtx := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previousCtx })
+	now := time.Now().UTC()
+	app := &App{reg: &registry{m: map[string]*session{
+		"br_live": {comp: &historyFakeComp{sessionID: "provider-live", url: "https://live.test"}, backend: "browserbase", openedAt: now, lastUsed: now},
+	}}}
+	for i := 0; i < 3; i++ {
+		putRecordingHistory(t, ctx, fmt.Sprintf("br_past_%d", i), "browserbase", now.Add(-time.Duration(i+1)*time.Minute))
+	}
+	check := func(query string) (got struct {
+		Sessions   []sessionInfo `json:"sessions"`
+		HasMore    bool          `json:"has_more"`
+		NextOffset int           `json:"next_offset"`
+	}) {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		app.handleListSessions(recorder, httptest.NewRequest(http.MethodGet, "/sessions?"+query, nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("list %s: HTTP %d: %s", query, recorder.Code, recorder.Body.String())
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	live := check("view=active")
+	if len(live.Sessions) != 1 || live.Sessions[0].SessionID != "br_live" {
+		t.Fatalf("live view includes history: %+v", live)
+	}
+	all := check("")
+	if len(all.Sessions) != 4 {
+		t.Fatalf("legacy all view changed: %+v", all)
+	}
+	first := check("view=history&limit=2")
+	if len(first.Sessions) != 2 || !first.HasMore || first.NextOffset != 2 || first.Sessions[0].SessionID != "br_past_0" {
+		t.Fatalf("first history page = %+v", first)
+	}
+	last := check("view=history&limit=2&offset=2")
+	if len(last.Sessions) != 1 || last.HasMore || last.Sessions[0].SessionID != "br_past_2" {
+		t.Fatalf("last history page = %+v", last)
+	}
+}
+
 func TestRecordingHTTPRoutesProxyPlaylistsWithoutCredentials(t *testing.T) {
 	previous := newReplayResolver
 	previousGlobal := globalCtx

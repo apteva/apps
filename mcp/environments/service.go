@@ -98,7 +98,22 @@ func (s *service) startDefinition(id string) (*Run, error) {
 	if err := s.db.setDesired(id, "running"); err != nil {
 		return nil, err
 	}
-	return s.start(id, "interactive", d.Spec)
+	// An explicit start is also an explicit retry. Clear a terminal or backed-off
+	// state before attempting provisioning again.
+	if err := s.db.clearReconcileState(id); err != nil {
+		return nil, err
+	}
+	run, startErr := s.start(id, "interactive", d.Spec)
+	if startErr != nil {
+		threshold, configErr := reconcileFailureThreshold()
+		if configErr != nil {
+			return run, fmt.Errorf("%w; reconcile policy: %v", startErr, configErr)
+		}
+		if stateErr := s.recordReconcileFailure(id, startErr.Error(), threshold); stateErr != nil {
+			return run, fmt.Errorf("%w; record reconcile failure: %v", startErr, stateErr)
+		}
+	}
+	return run, startErr
 }
 
 func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (run *Run, err error) {
@@ -144,19 +159,27 @@ func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (run *
 	if err = s.createProtocolFixtures(run, spec); err != nil {
 		return run, fmt.Errorf("create protocol fixtures: %w", err)
 	}
-	req := sdk.RuntimeCreateRequest{ID: runtimeID, ProjectID: s.ctx.CurrentProject(), TTLSeconds: spec.TTLSeconds, AppInstallIDs: spec.AppInstallIDs, ConnectionIDs: spec.ConnectionIDs, MCPServerIDs: spec.MCPServerIDs, NetworkMode: spec.NetworkMode, IntegrationMode: spec.IntegrationMode, AllowHostSuffixes: spec.AllowHostSuffixes, HTTPMocks: spec.HTTPMocks, IntegrationFixtures: spec.IntegrationFixtures, IntegrationBindings: protocolFixtureBindings(spec), ConnectionBindings: spec.ConnectionBindings, Subscriptions: spec.Subscriptions, SnapshotID: spec.SnapshotID}
+	req := sdk.RuntimeCreateRequest{ID: runtimeID, ProjectID: s.ctx.CurrentProject(), TTLSeconds: spec.TTLSeconds, Clock: spec.Clock, AppInstallIDs: spec.AppInstallIDs, ConnectionIDs: spec.ConnectionIDs, MCPServerIDs: spec.MCPServerIDs, NetworkMode: spec.NetworkMode, IntegrationMode: spec.IntegrationMode, AllowHostSuffixes: spec.AllowHostSuffixes, HTTPMocks: spec.HTTPMocks, IntegrationFixtures: spec.IntegrationFixtures, IntegrationBindings: protocolFixtureBindings(spec), ConnectionBindings: spec.ConnectionBindings, Subscriptions: spec.Subscriptions, SnapshotID: spec.SnapshotID}
 	created = true
 	if _, err = s.runtime().CreateRuntime(req); err != nil {
 		return run, fmt.Errorf("create runtime: %w", err)
 	}
+	// Seed results stay addressable so a later seed can reference what an
+	// earlier one created, through {"$ref": "<index>.<path>"} in its input.
+	results := make([]any, 0, len(spec.Seeds))
 	for i, seed := range spec.Seeds {
 		if strings.TrimSpace(seed.App) == "" || strings.TrimSpace(seed.Tool) == "" {
 			return run, fmt.Errorf("seed %d: app and tool required", i)
 		}
+		input, refErr := resolveSeedRefs(seed.Input, results)
+		if refErr != nil {
+			return run, fmt.Errorf("seed %d %s.%s: %w", i, seed.App, seed.Tool, refErr)
+		}
 		var result any
-		if err = s.runtime().CallRuntimeAppResult(runtimeID, seed.App, seed.Tool, seed.Input, &result); err != nil {
+		if err = s.runtime().CallRuntimeAppResult(runtimeID, seed.App, seed.Tool, input, &result); err != nil {
 			return run, fmt.Errorf("seed %d %s.%s: %w", i, seed.App, seed.Tool, err)
 		}
+		results = append(results, result)
 	}
 	for i, agent := range spec.Agents {
 		_, err = s.runtime().SpawnRuntimeAgent(runtimeID, sdk.RuntimeAgentSpawnRequest{SourceAgentID: agent.SourceAgentID, Draft: agent.Draft, Directive: agent.Directive, Alias: agent.Alias, StartPaused: agent.StartPaused, Provider: agent.Provider, Model: agent.Model})
@@ -193,6 +216,11 @@ func (s *service) stopDefinition(id string) error {
 	if err := s.db.setDesired(id, "stopped"); err != nil {
 		return err
 	}
+	// A user-requested stop must be able to recover a previously degraded
+	// cleanup. It starts a fresh bounded retry sequence if cleanup still fails.
+	if err := s.db.clearReconcileState(id); err != nil {
+		return err
+	}
 	runs, err := s.db.activeRuns(id)
 	if err != nil {
 		return err
@@ -201,6 +229,15 @@ func (s *service) stopDefinition(id string) error {
 	for i := range runs {
 		if err := s.stopRun(&runs[i]); err != nil && firstErr == nil {
 			firstErr = err
+		}
+	}
+	if firstErr != nil {
+		threshold, configErr := reconcileFailureThreshold()
+		if configErr != nil {
+			return fmt.Errorf("%w; reconcile policy: %v", firstErr, configErr)
+		}
+		if stateErr := s.recordReconcileFailure(id, firstErr.Error(), threshold); stateErr != nil {
+			return fmt.Errorf("%w; record reconcile failure: %v", firstErr, stateErr)
 		}
 	}
 	return firstErr
@@ -234,9 +271,21 @@ func (s *service) stopRun(run *Run) error {
 }
 
 func (s *service) reconcile(context.Context) error {
+	threshold, err := reconcileFailureThreshold()
+	if err != nil {
+		return err
+	}
 	live, err := s.liveMap()
 	if err != nil {
 		return err
+	}
+	defs, err := s.db.listDefinitions()
+	if err != nil {
+		return err
+	}
+	byID := make(map[string]*Definition, len(defs))
+	for i := range defs {
+		byID[defs[i].ID] = &defs[i]
 	}
 	runs, err := s.db.activeRuns("")
 	if err != nil {
@@ -244,12 +293,25 @@ func (s *service) reconcile(context.Context) error {
 	}
 	for i := range runs {
 		r := &runs[i]
+		d := byID[r.EnvironmentID]
 		if r.Status == "starting" && time.Since(r.StartedAt) < startingRunGracePeriod {
 			continue
 		}
 		if r.Status == "stopping" {
+			if reconcileBlocked(d, time.Now()) {
+				continue
+			}
 			if err := s.stopRun(r); err != nil {
 				s.ctx.Logger().Error("runtime cleanup retry failed", "run_id", r.ID, "err", err)
+				if d != nil {
+					if stateErr := s.recordReconcileFailure(d.ID, err.Error(), threshold); stateErr != nil {
+						return stateErr
+					}
+				}
+			} else if d != nil && d.DesiredState == "stopped" {
+				if err := s.db.clearReconcileState(d.ID); err != nil {
+					return err
+				}
 			}
 			continue
 		}
@@ -268,9 +330,22 @@ func (s *service) reconcile(context.Context) error {
 				return err
 			}
 			s.ctx.Emit("environment.expired", map[string]any{"environment_id": r.EnvironmentID, "run_id": r.ID, "runtime_id": r.RuntimeID})
+			if d != nil && d.DesiredState == "running" {
+				if err := s.recordReconcileFailure(d.ID, "runtime no longer exists", threshold); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if r.Status == "running" && live[r.RuntimeID] != nil && d != nil && d.ReconcileStatus != "healthy" {
+			if err := s.db.clearReconcileState(d.ID); err != nil {
+				return err
+			}
 		}
 	}
-	defs, err := s.db.listDefinitions()
+	// Reload after active-run recovery because it may have advanced backoff or
+	// moved a definition into the terminal degraded state.
+	defs, err = s.db.listDefinitions()
 	if err != nil {
 		return err
 	}
@@ -278,8 +353,14 @@ func (s *service) reconcile(context.Context) error {
 		d := defs[i]
 		if d.DesiredState == "running" {
 			if d.ActiveRun == nil {
+				if reconcileBlocked(&d, time.Now()) {
+					continue
+				}
 				if _, err := s.start(d.ID, "reconcile", d.Spec); err != nil {
 					s.ctx.Logger().Error("environment reconcile start failed", "id", d.ID, "err", err)
+					if stateErr := s.recordReconcileFailure(d.ID, err.Error(), threshold); stateErr != nil {
+						return stateErr
+					}
 				}
 			}
 		}
@@ -480,6 +561,14 @@ func (s *service) liveMap() (map[string]*sdk.RuntimeSummary, error) {
 	return out, nil
 }
 func validateSpec(spec EnvironmentSpec) error {
+	if spec.Clock != nil {
+		if spec.Clock.Mode != "real" && spec.Clock.Mode != "manual" {
+			return errors.New("clock mode must be real or manual")
+		}
+		if spec.Clock.Mode == "real" && spec.Clock.InitialTime != nil {
+			return errors.New("initial_time requires manual clock mode")
+		}
+	}
 	if spec.TTLSeconds != 0 && (spec.TTLSeconds < 60 || spec.TTLSeconds > 86400) {
 		return errors.New("ttl_seconds must be between 60 and 86400")
 	}
@@ -488,6 +577,11 @@ func validateSpec(spec EnvironmentSpec) error {
 	}
 	if len(spec.MCPServerIDs) > 16 {
 		return errors.New("mcp_server_ids may contain at most 16 entries")
+	}
+	for i, seed := range spec.Seeds {
+		if err := validateSeedRefs(seed.Input, i); err != nil {
+			return fmt.Errorf("seed %d: %w", i, err)
+		}
 	}
 	seen := map[string]bool{}
 	for i, fixture := range spec.WebFixtures {
@@ -530,6 +624,14 @@ func token(n int) string {
 	return hex.EncodeToString(b)[:n]
 }
 func jsonPath(v any, path string) any {
+	got, _ := jsonPathLookup(v, path)
+	return got
+}
+
+// jsonPathLookup walks dotted map keys and reports whether the path resolved,
+// which lets callers tell a missing key apart from a value that is really null.
+// It walks objects only: a list on the way down is a miss.
+func jsonPathLookup(v any, path string) (any, bool) {
 	cur := v
 	for _, p := range strings.Split(strings.Trim(path, "."), ".") {
 		if p == "" {
@@ -537,11 +639,15 @@ func jsonPath(v any, path string) any {
 		}
 		m, ok := cur.(map[string]any)
 		if !ok {
-			return nil
+			return nil, false
 		}
-		cur = m[p]
+		next, ok := m[p]
+		if !ok {
+			return nil, false
+		}
+		cur = next
 	}
-	return cur
+	return cur, true
 }
 
 func runtimeNotFound(err error) bool {

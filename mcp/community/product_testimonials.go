@@ -86,6 +86,9 @@ func productTestimonialTools() []sdk.Tool {
 }
 
 func toolProductTestimonialsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	communityID, productID, err := productTestimonialTarget(ctx, args)
 	if err != nil {
 		return nil, err
@@ -94,6 +97,9 @@ func toolProductTestimonialsGet(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 func toolProductTestimonialsSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	communityID, productID, err := productTestimonialTarget(ctx, args)
 	if err != nil {
 		return nil, err

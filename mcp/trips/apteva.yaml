@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trips
 display_name: Trips
-version: 0.8.6
+version: 0.9.1
 description: |
   Plan trips end-to-end: destinations, transport, accommodation,
   activities, packing, budget. Calendar-synced — each trip owns a
@@ -13,6 +13,9 @@ description: |
   are known; adding dates schedules them and starts calendar mirroring.
   Flight searches feed long-lived route/deal intelligence with global
   scans, Duffel airport autocomplete, and route/date heatmaps.
+  Destination stay favourites save hotel and Airbnb options with listing links,
+  photos, price estimates, notes and a top choice; select an option to add it
+  to the itinerary without booking, while keeping alternatives saved.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/trips
@@ -63,6 +66,12 @@ provides:
     - { name: transport_legs_delete,      description: "Delete a transport leg. Removes the calendar event." }
     - { name: transport_legs_mark_booked, description: "Convenience: flip booked=1 and optionally set cost_actual + confirmation_number. Args: id, cost_actual?, confirmation_number?." }
 
+    - { name: stay_favorites_list, description: "List saved hotel/Airbnb options for a trip or destination." }
+    - { name: stay_favorites_add, description: "Save a stay option for a destination, with links, price, notes and optional top_choice." }
+    - { name: stay_favorites_update, description: "Edit a saved stay option or its top-choice flag." }
+    - { name: stay_favorites_delete, description: "Remove an option, preserving any selected itinerary stay." }
+    - { name: stay_favorites_select, description: "Create an unbooked itinerary stay from an option; repeated selection returns the existing stay." }
+
     - { name: accommodations_add,         description: "Add an accommodation or stay idea. check_in_at/check_out_at are optional; budget estimates still count while undated." }
     - { name: accommodations_update,      description: "Update an accommodation. Upserts the calendar event." }
     - { name: accommodations_delete,      description: "Delete an accommodation." }
@@ -111,6 +120,9 @@ provides:
     - { name: transport.updated, description: "A transport leg was updated." }
     - { name: transport.deleted, description: "A transport leg was deleted." }
     - { name: transport.booked, description: "A transport leg was marked booked." }
+    - { name: stay_favorite.updated, description: "A stay favourite was saved or updated." }
+    - { name: stay_favorite.deleted, description: "A stay favourite was removed." }
+    - { name: stay_favorite.selected, description: "A stay favourite was added to the itinerary." }
     - { name: accommodation.created, description: "An accommodation or stay idea was added." }
     - { name: accommodation.added, description: "Compatibility alias for accommodation.created." }
     - { name: accommodation.updated, description: "An accommodation was updated." }
@@ -132,7 +144,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: trips/v0.9.0
     entry: mcp/trips
   port: 8080
   health_check: /health

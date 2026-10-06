@@ -57,3 +57,19 @@ test("a delayed inspection cannot overwrite the newly selected environment", asy
  expect(document.body.textContent).toContain("Beta-app");
  expect(document.body.textContent).not.toContain("Stale-alpha-app");
 });
+test("degraded reconciliation is visible and offers an explicit retry", async () => {
+ let retried = false;
+ await mount((async (input: any, init?: RequestInit) => {
+  const path = new URL(String(input), window.location.origin).pathname;
+  if (path.endsWith("/catalog")) return json(catalog);
+  if (path.endsWith("/environments/env/start") && init?.method === "POST") { retried = true; return json({}); }
+  if (path.endsWith("/environments")) return json([{ id: "env", name: "Broken", desired_state: "running", spec, reconcile_status: "degraded", reconcile_failures: 5, reconcile_error: "seed failed" }]);
+  throw new Error(path);
+ }) as any);
+ expect(document.body.textContent).toContain("degraded");
+ await click("Broken");
+ expect(document.body.textContent).toContain("Automatic reconciliation stopped after 5 failures.");
+ expect(document.body.textContent).toContain("seed failed");
+ await click("Retry");
+ expect(retried).toBe(true);
+});

@@ -252,7 +252,7 @@ export default function Assignments({
             revision: 0,
             name: "",
             target: "",
-            owner_agent_id: agents[0]?.id || 0,
+            owner_agent_id: 0,
             execution_mode: "agent",
             procedure_version: current,
             follow_latest: true,
@@ -291,6 +291,11 @@ export default function Assignments({
         v.version ===
         (draft?.follow_latest ? current : draft?.procedure_version),
     )?.definition.parameters || [];
+  const ownerAvailable = !!draft && agents.some((a) => a.id === draft.owner_agent_id);
+  const unavailableRole = draft && workflow.find((step) => {
+    const executor = draft.roles?.[step.role];
+    return executor?.kind === "agent" && !agents.some((a) => a.id === executor.agent_id);
+  });
   const set = (v: Partial<Assignment>) =>
     setDraft((d) => (d ? { ...d, ...v } : d));
   return (
@@ -315,11 +320,21 @@ export default function Assignments({
           {error}
         </div>
       )}
+      {!draft && !items.length && (
+        <div className="empty">
+          <h3>No assignments yet</h3>
+          <p>
+            This process is ready to configure. Add an assignment to choose its
+            agent, parameter values, and schedule.
+          </p>
+        </div>
+      )}
       {draft ? (
         <form
           className="card"
           onSubmit={(e) => {
             e.preventDefault();
+            if (!ownerAvailable || unavailableRole) return;
             work(async () => {
               await api(
                 `/assignments${draft.id ? `/${draft.id}` : ""}`,
@@ -341,6 +356,12 @@ export default function Assignments({
           }}
         >
           <h2>{draft.id ? "Edit assignment" : "New assignment"}</h2>
+          {((draft.owner_agent_id > 0 && !ownerAvailable) || unavailableRole) && (
+            <p role="alert" className="notice">
+              An assigned agent is no longer available in this project. Choose a
+              replacement for the coordinator and any unavailable roles before saving.
+            </p>
+          )}
           <div className="grid">
             <div>
               <div className="field">
@@ -381,6 +402,11 @@ export default function Assignments({
                   <option value="0" disabled>
                     Choose an agent
                   </option>
+                  {draft.owner_agent_id > 0 && !ownerAvailable && (
+                    <option value={draft.owner_agent_id} disabled>
+                      Agent {draft.owner_agent_id} unavailable · choose a replacement
+                    </option>
+                  )}
                   {agents.map((a) => (
                     <option key={a.id} value={a.id}>
                       {a.name}
@@ -560,7 +586,7 @@ export default function Assignments({
             </button>
             <button
               className="primary"
-              disabled={busy || !draft.owner_agent_id}
+              disabled={busy || !ownerAvailable || !!unavailableRole}
             >
               {busy ? "Saving…" : "Save assignment"}
             </button>

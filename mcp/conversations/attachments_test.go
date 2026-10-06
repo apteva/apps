@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
@@ -91,6 +92,9 @@ func TestAttachmentRoundTripAndCoreVision(t *testing.T) {
 	if _, err := a.toolReadAttachment(caller, ctx, map[string]any{"conversation_id": conv.ID, "attachment_id": item.ID}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := a.toolAttachmentToBlob(caller, ctx, map[string]any{"conversation_id": conv.ID, "attachment_id": item.ID}); err == nil {
+		t.Fatal("image attachment was sent through the blob handoff")
+	}
 	other := mkConversation(t, a, 41)
 	if attachmentRequest(a, "GET", "/attachments?chat_id="+other.ID+"&id="+item.ID, nil).Code != 404 {
 		t.Fatal("cross conversation download")
@@ -153,6 +157,57 @@ func TestAttachmentDelegatedAccessAndFileRead(t *testing.T) {
 	}
 }
 
+func TestAttachmentToBlobReturnsCoreBinaryEnvelope(t *testing.T) {
+	a, ctx, _ := newTestEnv(t)
+	conv := mkConversation(t, a, 41)
+	var archive bytes.Buffer
+	zw := zip.NewWriter(&archive)
+	entry, err := zw.Create("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.Write([]byte("import me")); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw := archive.Bytes()
+	input := map[string]any{"id": "upload-zip-12345678", "name": "hello.zip", "content_base64": base64.StdEncoding.EncodeToString(raw)}
+	w := attachmentRequest(a, "POST", "/attachments?chat_id="+conv.ID, input)
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	var item Attachment
+	if err := json.Unmarshal(w.Body.Bytes(), &item); err != nil {
+		t.Fatal(err)
+	}
+	w = attachmentRequest(a, "POST", "/messages?chat_id="+conv.ID, map[string]any{"content": "Import this", "client_message_id": "zip-message", "attachments": []Attachment{{ID: item.ID, Type: "file"}}})
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	caller := boundConversationCaller(t, a, conv, 41)
+	result, err := a.toolAttachmentToBlob(caller, ctx, map[string]any{"conversation_id": conv.ID, "attachment_id": item.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope, ok := result.(map[string]any)
+	if !ok || envelope["_binary"] != true || envelope["mimeType"] == "" || envelope["size"] != len(raw) {
+		t.Fatalf("unexpected Core binary envelope: %#v", result)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(envelope["base64"].(string))
+	if err != nil || !bytes.Equal(decoded, raw) {
+		t.Fatalf("binary payload changed: %q", decoded)
+	}
+	reader, err := zip.NewReader(bytes.NewReader(decoded), int64(len(decoded)))
+	if err != nil {
+		t.Fatalf("handoff is not a readable ZIP: %v", err)
+	}
+	if len(reader.File) != 1 || reader.File[0].Name != "README.md" {
+		t.Fatalf("unexpected ZIP entries: %v", reader.File)
+	}
+}
+
 type attachmentStoragePlatform struct {
 	*recordingPlatform
 	uploads int
@@ -211,10 +266,61 @@ func TestMixedAttachmentEventPreservesVisionAndFileAccess(t *testing.T) {
 			text.WriteString(part["text"].(string))
 		}
 	}
-	if images != 1 || !strings.Contains(text.String(), "attachment_id=notes") || !strings.Contains(text.String(), "Use conversations_read_attachment") || !strings.Contains(text.String(), "file_id=42") {
+	if images != 1 || !strings.Contains(text.String(), "attachment_id=notes") || !strings.Contains(text.String(), "conversations_attachment_to_blob") || !strings.Contains(text.String(), "file_id=42") {
 		t.Fatal("mixed attachment routing lost image or file access")
+	}
+	if strings.Contains(text.String(), "conversations_read_attachment") {
+		t.Fatal("retired attachment reader was advertised to the agent")
+	}
+	if !strings.Contains(text.String(), "visual finding in your first conversations_send acknowledgement") || !strings.Contains(text.String(), "only tool call in this turn") {
+		t.Fatal("multi-step image instructions lost the first-turn visual handoff")
 	}
 	if strings.Contains(text.String(), "attachment_id=photo") {
 		t.Fatal("image routed to file reader")
 	}
+}
+
+func TestImageStorageMirrorPreservesVisionAndExposesFileID(t *testing.T) {
+	p := &attachmentStoragePlatform{recordingPlatform: &recordingPlatform{}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProject), tk.WithPlatform(p), tk.WithConfig(map[string]string{"attachment_storage": "true"}))
+	a := &App{}
+	if err := a.OnMount(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer a.OnUnmount(ctx)
+	conv := mkConversation(t, a, 41)
+	input := map[string]any{"id": "image-storage-123456", "name": "photo.png", "content_base64": base64.StdEncoding.EncodeToString([]byte("\x89PNG\r\n\x1a\n"))}
+	// Use the same upload path as the browser; replace the tiny invalid image
+	// with a valid fixture so imagePreview and Storage copying are exercised.
+	input["content_base64"] = base64.StdEncoding.EncodeToString(onePixelPNG())
+	upload := attachmentRequest(a, "POST", "/attachments?chat_id="+conv.ID, input)
+	if upload.Code != 200 {
+		t.Fatalf("upload: %d %s", upload.Code, upload.Body)
+	}
+	var item Attachment
+	if err := json.Unmarshal(upload.Body.Bytes(), &item); err != nil {
+		t.Fatal(err)
+	}
+	msg := &Message{Content: "What is in this image?", Attachments: []Attachment{item}}
+	if err := a.mirrorAttachments(ctx, conv, msg); err != nil {
+		t.Fatal(err)
+	}
+	if msg.Attachments[0].FileID != 123 || msg.Attachments[0].StorageApp != "storage" {
+		t.Fatalf("missing Storage reference: %+v", msg.Attachments[0])
+	}
+	parts := a.agentEventPayload(conv, msg, 41, []int64{41}).([]map[string]any)
+	raw, _ := json.Marshal(parts)
+	if !bytes.Contains(raw, []byte(`"type":"image_url"`)) || !bytes.Contains(raw, []byte(item.DataURL)) || !bytes.Contains(raw, []byte(`file_id=123`)) {
+		t.Fatalf("vision or Storage reference missing: %s", raw)
+	}
+}
+
+func onePixelPNG() []byte {
+	var raw bytes.Buffer
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	img.Set(0, 0, color.RGBA{R: 255, A: 255})
+	if err := png.Encode(&raw, img); err != nil {
+		return nil
+	}
+	return raw.Bytes()
 }

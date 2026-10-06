@@ -745,7 +745,7 @@ func TestLiveRoomPlayback_SignedAndFallsBack(t *testing.T) {
 	if !streaming.policy[w.StreamID] {
 		t.Error("creating a webinar should lock its stream to signed URLs")
 	}
-	snap, _ := streaming.GetStream(w.StreamID)
+	snap, _ := streaming.GetStream(w.ProjectID, w.StreamID)
 
 	pb := app.LiveRoomPlayback(ctx, w, &snap)
 	if !pb.Signed || pb.URL == "" {
@@ -981,11 +981,11 @@ func TestAttendanceTracker_CreditsRealElapsedTime(t *testing.T) {
 	if got := tr.record(key, "p", 1, base.Add(time.Hour), 10*time.Second); got != 20 {
 		t.Errorf("an hour-long gap credited %d, want the 20s ceiling", got)
 	}
-	batch := tr.drain()
+	batch := tr.drain("")
 	if len(batch) != 1 || batch[0].Seconds != 37 {
 		t.Errorf("drain=%+v, want one entry totalling 37s", batch)
 	}
-	if got := tr.drain(); len(got) != 0 {
+	if got := tr.drain(""); len(got) != 0 {
 		t.Errorf("second drain returned %d entries, want 0", len(got))
 	}
 	// The entry stays resident after a flush — that's what makes the

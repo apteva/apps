@@ -680,10 +680,11 @@ func placeStrategyPaperOrders(e *engine, app *sdk.AppCtx, pf *Portfolio, strateg
 	}
 
 	type plan struct {
-		symbol string
-		side   string
-		qty    float64
-		price  float64
+		symbol  string
+		side    string
+		qty     float64
+		price   float64
+		qtyStep float64
 	}
 	sells := []plan{}
 	buys := []plan{}
@@ -698,6 +699,7 @@ func placeStrategyPaperOrders(e *engine, app *sdk.AppCtx, pf *Portfolio, strateg
 		if err != nil || mark == nil || mark.Price <= 0 {
 			return nil, false, fmt.Errorf("executable mark unavailable for %s", symbol)
 		}
+		profile := resolveVenueProfile(e.db, pf, symbol, inferAssetClass(symbol))
 		curValue := currentQty[symbol] * mark.Price
 		targetValue := equity * targets[symbol]
 		diff := targetValue - curValue
@@ -705,15 +707,15 @@ func placeStrategyPaperOrders(e *engine, app *sdk.AppCtx, pf *Portfolio, strateg
 			continue
 		}
 		if diff > 0 {
-			qty := floor4(diff / mark.Price)
+			qty := floorStrategyOrderQuantity(diff/mark.Price, profile.QtyStep)
 			if qty > 0 {
-				buys = append(buys, plan{symbol: symbol, side: "buy", qty: qty, price: mark.Price})
+				buys = append(buys, plan{symbol: symbol, side: "buy", qty: qty, price: mark.Price, qtyStep: profile.QtyStep})
 			}
 			continue
 		}
-		qty := floor4(math.Min(currentQty[symbol], -diff/mark.Price))
+		qty := floorStrategyOrderQuantity(math.Min(currentQty[symbol], -diff/mark.Price), profile.QtyStep)
 		if qty > 0 {
-			sells = append(sells, plan{symbol: symbol, side: "sell", qty: qty, price: mark.Price})
+			sells = append(sells, plan{symbol: symbol, side: "sell", qty: qty, price: mark.Price, qtyStep: profile.QtyStep})
 		}
 	}
 	settings := dbPortfolioExecutionSettings(e.db, pf.ID)
@@ -733,7 +735,7 @@ func placeStrategyPaperOrders(e *engine, app *sdk.AppCtx, pf *Portfolio, strateg
 	if desiredBuyCost > budget && desiredBuyCost > 0 {
 		scale := math.Max(0, budget/desiredBuyCost)
 		for i := range buys {
-			buys[i].qty = floor4(buys[i].qty * scale)
+			buys[i].qty = floorStrategyOrderQuantity(buys[i].qty*scale, buys[i].qtyStep)
 		}
 	}
 	if err := persistRebalance(e.db, pf, strategy, assignment, eval); err != nil {
@@ -779,6 +781,15 @@ func placeStrategyPaperOrders(e *engine, app *sdk.AppCtx, pf *Portfolio, strateg
 		return created, false, err
 	}
 	return created, false, nil
+}
+
+// Strategy orders use the same quantity grid as the venue pre-trade check.
+// Reapply the grid after cash scaling, which can otherwise create off-lot buys.
+func floorStrategyOrderQuantity(qty, step float64) float64 {
+	if step <= 0 {
+		return floor4(qty)
+	}
+	return math.Floor(qty/step+1e-9) * step
 }
 
 func floor4(v float64) float64 {
@@ -1108,6 +1119,10 @@ func tryFill(e *engine, o *Order) error {
 		_ = tx.Rollback()
 		return err
 	}
+	if err := accrueStrategyExecutionCost(tx, pf.ID, o, fee, estimate.SpreadCost, estimate.SlippageCost); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
 	if fee != 0 {
 		if _, err := tx.Exec(`UPDATE portfolios SET cash = cash - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, fee, pf.ID); err != nil {
 			_ = tx.Rollback()
@@ -1377,8 +1392,14 @@ func tryReconcile(e *engine, pf *Portfolio, o *Order) error {
 		return err
 	}
 	args := bb.Adapter.StatusArgs(o, brokerOrderID)
+	statusTool := bb.toolFor("order.status")
+	if brokerOrderID == "" {
+		if tool := bb.Adapter.ToolMap()["order.status_by_client_id"]; tool != "" {
+			statusTool = tool
+		}
+	}
 	res, err := globalCtx.PlatformAPI().ExecuteIntegrationTool(
-		bb.ConnectionID, bb.toolFor("order.status"), args,
+		bb.ConnectionID, statusTool, args,
 	)
 	if err != nil {
 		noteVenueCall(bb.Adapter.Slug(), err)
@@ -1402,9 +1423,30 @@ func tryReconcile(e *engine, pf *Portfolio, o *Order) error {
 		return fmt.Errorf("broker get_order: %s: %s", code, detail)
 	}
 	br, perr := bb.Adapter.ParseOrder(res.Data)
+	if perr != nil && bb.Adapter.Slug() == "bybit" {
+		br, perr = bybitHistoricalStatus(globalCtx, bb, o, brokerOrderID)
+	}
+	if perr == nil && brokerOrderID != "" && br.BrokerOrderID != brokerOrderID {
+		perr = errors.New("broker status returned a different order")
+	}
+	if perr == nil && brokerOrderID == "" {
+		expected := o.ID
+		if bb.Adapter.Slug() == "okx" {
+			expected = okxClientOrderID(o.ID)
+		}
+		if br.ClientOrderID != "" && br.ClientOrderID != expected {
+			perr = errors.New("broker status returned a different client order")
+		}
+	}
 	if perr != nil {
 		noteVenueCall(bb.Adapter.Slug(), perr)
 		return perr
+	}
+	if br.BrokerOrderID == "" {
+		return errors.New("broker status missing order ID")
+	}
+	if _, err := e.db.Exec(`UPDATE orders SET broker_order_id=?,reconciliation_required=0 WHERE id=? AND (broker_order_id IS NULL OR broker_order_id='' OR broker_order_id=?)`, br.BrokerOrderID, o.ID, br.BrokerOrderID); err != nil {
+		return err
 	}
 	noteVenueCall(bb.Adapter.Slug(), nil)
 	previousFilled := o.FilledQty
@@ -1534,6 +1576,12 @@ func applyBrokerProgress(db *sql.DB, projectID string, pf *Portfolio, o *Order, 
 		}
 
 		if err := dbAccruePositionAccountingTx(tx, pf.ID, o.Symbol, polyOutcome(o), 0, fee); err != nil {
+			_ = tx.Rollback()
+			return false, err
+		}
+		// The broker path writes its fills row without spread or slippage, so
+		// the strategy book must not invent them either.
+		if err := accrueStrategyExecutionCost(tx, pf.ID, o, fee, 0, 0); err != nil {
 			_ = tx.Rollback()
 			return false, err
 		}
@@ -1729,6 +1777,10 @@ func reconcileLiveAccounts(e *engine) {
 		}
 		if err := applyAccountSnapshot(e.db, p, acct, holdingsComplete, revision); err != nil {
 			e.logger.Warn("account reconciliation deferred", "portfolio_id", p.ID, "err", err)
+			continue
+		}
+		if tool, args := bb.Adapter.OpenOrdersTool(); tool != "" {
+			importBrokerOrders(globalCtx, p.ProjectID, p.ID, bb, tool, args, "open_sync")
 		}
 
 	}

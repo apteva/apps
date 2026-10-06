@@ -1,0 +1,121 @@
+Unindexed last-match find
+File: engine.test
+Type: cpu
+Time: 2026-09-07 11:30:24 CEST
+Duration: 15.22s, Total samples = 15.87s (104.30%)
+Showing nodes accounting for 10.95s, 69.00% of 15.87s total
+Dropped 203 nodes (cum <= 0.08s)
+Showing top 30 nodes out of 104
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%     11.28s 71.08%  github.com/apteva/apps/mcp/database/engine.(*Manager).Execute
+         0     0%     0%     11.28s 71.08%  github.com/apteva/apps/mcp/database/engine.(*Manager).Execute.func2
+         0     0%     0%     11.28s 71.08%  github.com/apteva/apps/mcp/database/engine.(*pebbleBackend).transaction
+         0     0%     0%     11.28s 71.08%  github.com/apteva/apps/mcp/database/engine.(*pebbleTx).find
+         0     0%     0%     11.28s 71.08%  github.com/apteva/apps/mcp/database/engine.(*pebbleTx).scan
+         0     0%     0%     11.28s 71.08%  github.com/apteva/apps/mcp/database/engine.TestLargeScanBenchmark.func1
+         0     0%     0%     11.28s 71.08%  github.com/apteva/apps/mcp/database/engine.TestLargeScanBenchmark.func1.1
+         0     0%     0%     11.28s 71.08%  github.com/apteva/apps/mcp/database/engine.execute
+         0     0%     0%     11.28s 71.08%  testing.tRunner
+         0     0%     0%     11.20s 70.57%  github.com/apteva/apps/mcp/database/engine.(*pebbleTx).get
+         0     0%     0%     11.08s 69.82%  github.com/apteva/apps/mcp/database/engine.(*pebbleTx).read
+     0.02s  0.13%  0.13%     11.08s 69.82%  github.com/cockroachdb/pebble/v2.(*DB).getInternal
+         0     0%  0.13%     11.08s 69.82%  github.com/cockroachdb/pebble/v2.(*Snapshot).Get
+         0     0%  0.13%     11.06s 69.69%  github.com/cockroachdb/pebble/v2/sstable/block.(*Reader).Read
+         0     0%  0.13%     11.05s 69.63%  github.com/cockroachdb/pebble/v2.(*Iterator).First
+         0     0%  0.13%     11.05s 69.63%  github.com/cockroachdb/pebble/v2.(*Iterator).iterFirstWithinBounds
+         0     0%  0.13%     11.05s 69.63%  github.com/cockroachdb/pebble/v2.(*getIter).First
+         0     0%  0.13%     11.05s 69.63%  github.com/cockroachdb/pebble/v2.(*getIter).Next
+         0     0%  0.13%     11.02s 69.44%  github.com/cockroachdb/pebble/v2/sstable/block.(*Reader).doRead
+         0     0%  0.13%     10.94s 68.94%  github.com/cockroachdb/pebble/v2/objstorage/objstorageprovider.(*vfsReadHandle).ReadAt
+         0     0%  0.13%     10.93s 68.87%  internal/poll.(*FD).Pread
+         0     0%  0.13%     10.93s 68.87%  internal/poll.(*FD).Pread.func1 (inline)
+         0     0%  0.13%     10.93s 68.87%  internal/poll.ignoringEINTR2[go.shape.int] (inline)
+         0     0%  0.13%     10.93s 68.87%  os.(*File).ReadAt
+         0     0%  0.13%     10.93s 68.87%  os.(*File).pread (inline)
+         0     0%  0.13%     10.93s 68.87%  syscall.Pread (inline)
+         0     0%  0.13%     10.93s 68.87%  syscall.pread
+    10.93s 68.87% 69.00%     10.93s 68.87%  syscall.syscall6
+         0     0% 69.00%      8.62s 54.32%  github.com/cockroachdb/pebble/v2/sstable.(*Reader).readIndexBlock (inline)
+         0     0% 69.00%      6.19s 39.00%  github.com/cockroachdb/pebble/v2.(*getIter).initializeNextIterator
+
+
+Unindexed top-10 sort
+File: engine.test
+Type: cpu
+Time: 2026-09-07 11:30:39 CEST
+Duration: 4.23s, Total samples = 4.21s (99.45%)
+Showing nodes accounting for 0, 0% of 4.21s total
+Dropped 82 nodes (cum <= 0.02s)
+Showing top 30 nodes out of 89
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%      3.55s 84.32%  github.com/apteva/apps/mcp/database/engine.(*Manager).Execute
+         0     0%     0%      3.55s 84.32%  github.com/apteva/apps/mcp/database/engine.(*Manager).Execute.func2
+         0     0%     0%      3.55s 84.32%  github.com/apteva/apps/mcp/database/engine.(*pebbleBackend).transaction
+         0     0%     0%      3.55s 84.32%  github.com/apteva/apps/mcp/database/engine.(*pebbleTx).find
+         0     0%     0%      3.55s 84.32%  github.com/apteva/apps/mcp/database/engine.(*pebbleTx).scan
+         0     0%     0%      3.55s 84.32%  github.com/apteva/apps/mcp/database/engine.TestLargeScanBenchmark.func1
+         0     0%     0%      3.55s 84.32%  github.com/apteva/apps/mcp/database/engine.TestLargeScanBenchmark.func1.1
+         0     0%     0%      3.55s 84.32%  github.com/apteva/apps/mcp/database/engine.execute
+         0     0%     0%      3.55s 84.32%  testing.tRunner
+         0     0%     0%      3.35s 79.57%  github.com/cockroachdb/pebble/v2.(*Iterator).Next (inline)
+         0     0%     0%      3.35s 79.57%  github.com/cockroachdb/pebble/v2.(*Iterator).nextUserKey
+         0     0%     0%      3.35s 79.57%  github.com/cockroachdb/pebble/v2.(*Iterator).nextWithLimit
+         0     0%     0%      3.35s 79.57%  github.com/cockroachdb/pebble/v2.(*levelIter).Next
+         0     0%     0%      3.35s 79.57%  github.com/cockroachdb/pebble/v2.(*mergingIter).Next
+         0     0%     0%      3.35s 79.57%  github.com/cockroachdb/pebble/v2.(*mergingIter).nextEntry
+         0     0%     0%      3.35s 79.57%  github.com/cockroachdb/pebble/v2/sstable.(*twoLevelIterator[go.shape.struct { github.com/cockroachdb/pebble/v2/sstable/rowblk.iter github.com/cockroachdb/pebble/v2/sstable/rowblk.Iter },go.shape.*github.com/cockroachdb/pebble/v2/sstable/rowblk.IndexIter,go.shape.2d95560dd2a436f029e6e31dd6b50f33cdf7f7fbac770a905f7c097f0b5ec4b0,go.shape.*github.com/cockroachdb/pebble/v2/sstable/rowblk.Iter]).Next
+         0     0%     0%      3.35s 79.57%  github.com/cockroachdb/pebble/v2/sstable/block.(*Reader).Read
+         0     0%     0%      3.34s 79.33%  github.com/cockroachdb/pebble/v2/sstable/block.(*Reader).doRead
+         0     0%     0%      3.33s 79.10%  github.com/cockroachdb/pebble/v2/objstorage/objstorageprovider.(*vfsReadHandle).ReadAt
+         0     0%     0%      3.33s 79.10%  github.com/cockroachdb/pebble/v2/sstable.(*Reader).readDataBlock (inline)
+         0     0%     0%      3.33s 79.10%  github.com/cockroachdb/pebble/v2/sstable.(*singleLevelIterator[go.shape.struct { github.com/cockroachdb/pebble/v2/sstable/rowblk.iter github.com/cockroachdb/pebble/v2/sstable/rowblk.Iter },go.shape.*github.com/cockroachdb/pebble/v2/sstable/rowblk.IndexIter,go.shape.2d95560dd2a436f029e6e31dd6b50f33cdf7f7fbac770a905f7c097f0b5ec4b0,go.shape.*github.com/cockroachdb/pebble/v2/sstable/rowblk.Iter]).Next
+         0     0%     0%      3.33s 79.10%  github.com/cockroachdb/pebble/v2/sstable.(*singleLevelIterator[go.shape.struct { github.com/cockroachdb/pebble/v2/sstable/rowblk.iter github.com/cockroachdb/pebble/v2/sstable/rowblk.Iter },go.shape.*github.com/cockroachdb/pebble/v2/sstable/rowblk.IndexIter,go.shape.2d95560dd2a436f029e6e31dd6b50f33cdf7f7fbac770a905f7c097f0b5ec4b0,go.shape.*github.com/cockroachdb/pebble/v2/sstable/rowblk.Iter]).loadDataBlock
+         0     0%     0%      3.33s 79.10%  github.com/cockroachdb/pebble/v2/sstable.(*singleLevelIterator[go.shape.struct { github.com/cockroachdb/pebble/v2/sstable/rowblk.iter github.com/cockroachdb/pebble/v2/sstable/rowblk.Iter },go.shape.*github.com/cockroachdb/pebble/v2/sstable/rowblk.IndexIter,go.shape.2d95560dd2a436f029e6e31dd6b50f33cdf7f7fbac770a905f7c097f0b5ec4b0,go.shape.*github.com/cockroachdb/pebble/v2/sstable/rowblk.Iter]).skipForward
+         0     0%     0%      3.33s 79.10%  internal/poll.(*FD).Pread
+         0     0%     0%      3.33s 79.10%  internal/poll.(*FD).Pread.func1 (inline)
+         0     0%     0%      3.33s 79.10%  internal/poll.ignoringEINTR2[go.shape.int] (inline)
+         0     0%     0%      3.33s 79.10%  os.(*File).ReadAt
+         0     0%     0%      3.33s 79.10%  os.(*File).pread (inline)
+         0     0%     0%      3.33s 79.10%  syscall.Pread (inline)
+         0     0%     0%      3.33s 79.10%  syscall.pread
+
+
+Grouped aggregate
+File: engine.test
+Type: cpu
+Time: 2026-09-07 11:30:43 CEST
+Duration: 4.17s, Total samples = 4.14s (99.28%)
+Showing nodes accounting for 3.41s, 82.37% of 4.14s total
+Dropped 68 nodes (cum <= 0.02s)
+Showing top 30 nodes out of 84
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%      3.56s 85.99%  github.com/apteva/apps/mcp/database/engine.(*Manager).Execute
+         0     0%     0%      3.56s 85.99%  github.com/apteva/apps/mcp/database/engine.(*Manager).Execute.func2
+         0     0%     0%      3.56s 85.99%  github.com/apteva/apps/mcp/database/engine.(*pebbleBackend).transaction
+         0     0%     0%      3.56s 85.99%  github.com/apteva/apps/mcp/database/engine.(*pebbleTx).aggregate
+     0.01s  0.24%  0.24%      3.56s 85.99%  github.com/apteva/apps/mcp/database/engine.(*pebbleTx).scan
+         0     0%  0.24%      3.56s 85.99%  github.com/apteva/apps/mcp/database/engine.TestLargeScanBenchmark.func1
+         0     0%  0.24%      3.56s 85.99%  github.com/apteva/apps/mcp/database/engine.TestLargeScanBenchmark.func1.1
+         0     0%  0.24%      3.56s 85.99%  github.com/apteva/apps/mcp/database/engine.execute
+         0     0%  0.24%      3.56s 85.99%  testing.tRunner
+         0     0%  0.24%      3.41s 82.37%  github.com/cockroachdb/pebble/v2.(*Iterator).Next (inline)
+         0     0%  0.24%      3.41s 82.37%  github.com/cockroachdb/pebble/v2.(*Iterator).nextUserKey
+         0     0%  0.24%      3.41s 82.37%  github.com/cockroachdb/pebble/v2.(*Iterator).nextWithLimit
+         0     0%  0.24%      3.41s 82.37%  github.com/cockroachdb/pebble/v2.(*levelIter).Next
+         0     0%  0.24%      3.41s 82.37%  github.com/cockroachdb/pebble/v2.(*mergingIter).Next
+         0     0%  0.24%      3.41s 82.37%  github.com/cockroachdb/pebble/v2.(*mergingIter).nextEntry
+         0     0%  0.24%      3.41s 82.37%  github.com/cockroachdb/pebble/v2/sstable.(*twoLevelIterator[go.shape.struct { github.com/cockroachdb/pebble/v2/sstable/rowblk.iter github.com/cockroachdb/pebble/v2/sstable/rowblk.Iter },go.shape.*github.com/cockroachdb/pebble/v2/sstable/rowblk.IndexIter,go.shape.2d95560dd2a436f029e6e31dd6b50f33cdf7f7fbac770a905f7c097f0b5ec4b0,go.shape.*github.com/cockroachdb/pebble/v2/sstable/rowblk.Iter]).Next
+         0     0%  0.24%      3.41s 82.37%  github.com/cockroachdb/pebble/v2/sstable/block.(*Reader).Read
+         0     0%  0.24%      3.41s 82.37%  github.com/cockroachdb/pebble/v2/sstable/block.(*Reader).doRead
+         0     0%  0.24%      3.40s 82.13%  github.com/cockroachdb/pebble/v2/objstorage/objstorageprovider.(*vfsReadHandle).ReadAt
+         0     0%  0.24%      3.40s 82.13%  internal/poll.(*FD).Pread
+         0     0%  0.24%      3.40s 82.13%  internal/poll.(*FD).Pread.func1 (inline)
+         0     0%  0.24%      3.40s 82.13%  internal/poll.ignoringEINTR2[go.shape.int] (inline)
+         0     0%  0.24%      3.40s 82.13%  os.(*File).ReadAt
+         0     0%  0.24%      3.40s 82.13%  os.(*File).pread (inline)
+         0     0%  0.24%      3.40s 82.13%  syscall.Pread (inline)
+         0     0%  0.24%      3.40s 82.13%  syscall.pread
+     3.40s 82.13% 82.37%      3.40s 82.13%  syscall.syscall6
+         0     0% 82.37%      3.37s 81.40%  github.com/cockroachdb/pebble/v2/sstable.(*Reader).readDataBlock (inline)
+         0     0% 82.37%      3.37s 81.40%  github.com/cockroachdb/pebble/v2/sstable.(*singleLevelIterator[go.shape.struct { github.com/cockroachdb/pebble/v2/sstable/rowblk.iter github.com/cockroachdb/pebble/v2/sstable/rowblk.Iter },go.shape.*github.com/cockroachdb/pebble/v2/sstable/rowblk.IndexIter,go.shape.2d95560dd2a436f029e6e31dd6b50f33cdf7f7fbac770a905f7c097f0b5ec4b0,go.shape.*github.com/cockroachdb/pebble/v2/sstable/rowblk.Iter]).loadDataBlock
+         0     0% 82.37%      3.36s 81.16%  github.com/cockroachdb/pebble/v2/sstable.(*singleLevelIterator[go.shape.struct { github.com/cockroachdb/pebble/v2/sstable/rowblk.iter github.com/cockroachdb/pebble/v2/sstable/rowblk.Iter },go.shape.*github.com/cockroachdb/pebble/v2/sstable/rowblk.IndexIter,go.shape.2d95560dd2a436f029e6e31dd6b50f33cdf7f7fbac770a905f7c097f0b5ec4b0,go.shape.*github.com/cockroachdb/pebble/v2/sstable/rowblk.Iter]).Next

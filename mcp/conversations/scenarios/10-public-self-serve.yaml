@@ -1,0 +1,18 @@
+name: conversations-public-self-serve
+timeout: 9m
+max_iterations: 80
+setup:
+  app:
+    path: .
+  agents: 1
+  driver: ["go", "-C", "..", "test", "-tags=scenario", "-run", "^TestScenario_PublicSelfServe$", "-v", "-count=1", "-timeout=8m", "."]
+directive: |
+  You are an operations and customer-support agent. Answer chat messages briefly
+  and directly. When monitor or scheduler events arrive, act on them per your
+  conversations skill. Policy: you may approve refunds up to $100 yourself;
+  larger refunds require operator approval. Refuse impossible or absurd requests
+  politely without escalating. All operations here use isolated test data.
+budget:
+  total_tokens: 500000
+trajectory_assert:
+  - tool_called: conversations_send

@@ -1,7 +1,8 @@
 # Processes
 
 Reusable company procedures, configured assignments, and independent execution
-runs. Agents can execute directly, or use the optional Tasks app for tracking.
+runs, with native tasks for both recurring and one-off work. Agents can execute
+directly, or use the optional Tasks app for procedure execution.
 
 ## Model
 
@@ -11,9 +12,9 @@ runs. Agents can execute directly, or use the optional Tasks app for tracking.
   schedule, execution mode, and procedure version policy.
 - **Run:** one occurrence with a snapshot of the assignment, resolved parameters,
   original owner, procedure version, delivery identity, and outcome.
-- **Task:** optional Tasks-backed work linked to a run. Direct runs need no Tasks
-  installation. A Tasks schedule creates its occurrences in Tasks; Processes
-  reads their results live and associates them with their assignment.
+- **Task:** an executable procedure step, standalone work item, or extra work
+  attached to a run. Native tasks reuse step execution and need no Tasks app.
+  The optional Tasks execution backend remains available for procedure work.
 
 For example, one “Publish a Patreon post” procedure can have Photography and
 Cooking assignments with different page IDs, languages, agents, and daily times.
@@ -21,11 +22,37 @@ The same idempotency key can be used independently on each assignment.
 
 ## Panel
 
-The project-page panel has Overview, Procedure, Assignments, and Runs tabs.
+The project-page panel has **Processes** and **Work** areas. Each process has
+Overview, Procedure, Assignments, and Runs tabs. Work combines native tasks and
+approvals across the project, with filters, creation, settings, and history.
+Run workspaces also support adding required or optional tasks to an active run.
+See [native tasks](docs-native-tasks.md) for the shared model and permissions.
 
-- Create a procedure and its convenience default assignment in one form.
+The **Processes overview** dashboard widget shows active runs, approval/blocker
+attention, upcoming assignments, and recent outcomes across the current project.
+Its default All view orders running work before schedules and past/blocked runs.
+Four equal-height rows show the process and assignment on the left and the
+current step, status, and completed-step count on the right. Schedules show their
+next run time and finished runs show their outcome;
+select a row for live steps, agent names, and links to run or assignment details.
+Visible rows can be configured from one to six. It is read-only and refreshes
+through host event revisions without creating a stream or invoking a model.
+A native mobile widget provides the same overview and live step summaries.
+
+`GET /processes/overview` (also `/overview` and `/processes/mobile/overview`)
+requires project context. Direct-run counts cover the project; each returned list
+is capped at 12 and each run at 60 step rows. Recent outcomes sort by run creation
+time, which the UI labels explicitly. Optional Tasks history uses authoritative
+Tasks state, with at most eight procedure lookups and 200 records per procedure;
+partial/unavailable history is disclosed instead of treating dispatch records as
+live executions. No execution or schedule settings change on an overview read.
+
+- Create an unassigned procedure with no agent or schedule, even in a project with no agents.
+- Configure execution later in Assignments; saving a procedure never creates an assignment.
 - Define text, number, and yes/no parameters, required fields, and defaults.
 - Add and edit assignments with independent agents, schedules, and parameters.
+- Unavailable coordinators and role agents are shown explicitly. Select replacements
+  before saving; roles without an explicit agent follow the new coordinator.
 - Start, pause, activate, or archive one assignment without changing the others.
 - Override parameters for one manual run without modifying the assignment.
 - Filter run history by assignment, agent, or outcome. Only Tasks records link
@@ -46,13 +73,19 @@ must be configured before activation. Runs already created never change.
 ## Agent API
 
 MCP requires trusted agent/project context. Tools are scoped to a process in
-that project. The host namespaces these local tool names:
+that project, or to project-level native work. The host namespaces these local tool names:
 
 - `list`, `get`, `create`, `update`, `activate`, `pause`, `archive`
 - `assignments`, `assignment_get`, `assignment_create`, `assignment_update`,
   `assignment_activate`, `assignment_pause`, `assignment_archive`
 - `start`, `runs`, `run_get`, `run_update`, `run_cancel`
 - `step_get`, `step_update`
+- `tasks`, `task_runs`, `task_create`, `task_get`, `task_update`, `task_cancel`
+
+Native task updates use the current `expected_revision`; creation uses a stable
+`idempotency_key`. Standalone tasks create no hidden procedure or run.
+[Event triggers](docs-event-triggers.md) provide assignment event configuration,
+preview, activation, and event history tools.
 
 Procedure definitions accept a `parameters` array:
 
@@ -106,6 +139,10 @@ Tasks-backed runs use Tasks tools for progress and completion.
 Records include assignment identity and the original assignment snapshot.
 `tasks_error` reports unavailable Tasks history; `has_more` indicates that Tasks
 has older records beyond its 200-record response limit.
+
+## Visual process editor
+
+Overview and Procedure show work steps and approval gates as connected cards. In the editor, add steps, select a card to edit its instructions, role and required output, and drag between its ports to set dependencies. Connections mean every predecessor must finish; cycles are rejected. Select a connection to remove it, or use the inspector’s dependency checklist. Drag cards to arrange them, use Auto layout to restore dependency order, and Fit flow to reset zoom. Layout positions are stored with each immutable procedure version. General instructions and execution settings are below the canvas.
 
 ## Collaborative workflows
 
@@ -198,7 +235,9 @@ operations return HTTP 202 when schedule synchronization is pending.
 SQLite stores `processes`, immutable `process_versions`, `process_assignments`,
 and `process_runs`. Run snapshots preserve resolved parameter values, agent,
 backend, target, schedule, and assignment revision. Legacy procedure owner/mode/
-schedule fields remain as API compatibility defaults for the first assignment.
+schedule fields remain readable in historical definitions. New versions omit
+them, and round-tripping those fields cannot change an assignment. Creating a
+procedure never creates a default assignment.
 
 Migration 003 creates one default assignment per existing process and links old
 runs to it. It preserves deadlines, pending synchronization, task IDs, original
@@ -219,8 +258,10 @@ fallback between execution backends.
 
 ## Installation and limits
 
-Apteva >=0.50.4; app-sdk v0.79.0. Tasks >=3.6.0 is optional. Source manifest pins
-`processes/v0.4.0`. This release changes Processes only.
+Apteva >=0.51.3; app-sdk v0.80.0. Tasks >=3.6.0 is optional. Source manifest pins
+`processes/v0.6.0`. Event triggers retain the durable app subscription requirement
+introduced in v0.5.0; see [platform requirements](docs-release-0.5.0.md#platform-requirement).
+Native tasks require no additional server changes. This release changes Processes only.
 
 Structured approval steps enforce downstream handoffs. Free-text approval
 requirements remain guidance. These gates do not revoke an agent’s general
@@ -237,10 +278,16 @@ publication. Direct history is currently returned without pagination.
 GOWORK=off go test -race -tags integration ./...
 ```
 
+The panel declares its host ReactDOM imports in `package.json` under
+`apteva.panelExternals`; the shared panel builder keeps other apps’ import
+contracts unchanged.
+
 From the apps repository root:
 
 ```sh
-bun test mcp/processes/ui/ProcessesPanel.test.tsx
+bun test mcp/processes/ui/ProcessesPanel.test.tsx mcp/processes/ui/flow-model.test.ts
+bunx playwright test --config mcp/processes/playwright.config.ts
+bun test mcp/processes/ui/Work.test.tsx
 bun run scripts/build-panels.ts --app processes
 ```
 
@@ -254,3 +301,75 @@ Tier 3 live-LLM smoke tests are in [scenarios/README.md](scenarios/README.md).
 Run `bun run scenarios/run.ts` from this app directory to use Codex /
 `gpt-5.6-terra` and verify persisted direct-run, assignment, and approval-gate
 outcomes. These are separate from the deterministic Go integration suite.
+
+
+## Project map
+
+The Processes panel includes a Project map view for the whole project. One shared
+canvas shows every SOP inside its own boundary, including every defined step and
+dependency. Horizontal and vertical layouts pack the boundaries into a roughly
+square overview, with shared pan, zoom, minimap, and Fit all SOPs controls.
+
+Concurrent live runs of the current procedure version appear separately on each
+step, labeled with assignment, run ID, state, and agent. Runs from older or unknown
+versions, and runs without matching step tracking, have their own visible run cards
+inside the SOP boundary, showing version, state and current work. Each live run is
+accounted for on the canvas. Their original step snapshots remain available in the
+execution inspector; they are never projected onto the latest definition. Select a SOP, step, or run to
+inspect instructions and execution details, then open the existing SOP/run page.
+Unstructured runs remain visible in the inspector. Recurring Tasks schedule records
+are not counted as live executions. The map has search, status and live-only filters.
+
+The read-only map uses the panel's existing event stream. Refresh preserves the
+viewport, cancels stale requests, limits concurrent history reads to four, and
+reports missing or truncated execution data while retaining all SOP boundaries.
+
+
+Project and individual flows share Apteva theme colors, status icons, selection
+outlines, and theme geometry. Neutral step outlines and connectors use moderate contrast, between the host
+hairlines and the brighter v0.11.2 treatment. Terminal and Clean themes are checked
+in both light and dark modes. Running/ready work uses
+the host accent; completed, waiting/blocked, and failed work use semantic colors.
+Motion respects the reduced-motion preference.
+
+## Step timing
+
+Each structured step can define an optional `start_after` and `due_after` rule.
+`start_after` holds work until the earliest start time; `due_after` is a completion
+deadline, which flags overdue work without delaying or cancelling it. Rules use
+`after: "run_start"` or `after: "step_completed"` with a `step_key` referencing a
+step dependency or its ancestor. Offsets are nonnegative whole `minutes`, `hours`,
+or `days`, at most 365 days; a day is 24 hours. All dependencies and approvals
+must still finish even if the start time has already passed.
+
+For “send an email now, then send a follow-up 10 minutes later,” define two steps,
+make the second depend on the first, and add this to the second:
+
+```json
+{
+  "start_after": {"after":"step_completed","step_key":"send_first","offset":10,"unit":"minutes"},
+  "due_after": {"after":"step_completed","step_key":"send_first","offset":30,"unit":"minutes"}
+}
+```
+
+The editor exposes these under **Timing**. Agents can create the same rules via
+`create`/`update`. Definitions and timing rules are frozen with each run. Resolved
+`start_at`, `due_at`, and the first successful `completed_at` are persisted in
+SQLite. A completion-relative timer starts when Processes records successful
+completion (or reconciles a Tasks completion), not when an external service says
+it performed the action. Report the first email's completion promptly.
+
+The app's five-second worker changes eligible steps from `scheduled` to `ready`
+and sends the normal tracked event to their assigned agent, or requests human
+work/creates the optional Tasks record. No model requests or sleeping worker are
+needed during the delay. Timed workflows use independent step deliveries; untimed
+sequential workflows still reuse their existing worker. Restarts retain timers;
+if the app was offline when due, it dispatches after recovery. Retries reuse the
+same delivery identity. Cancellation stops future handoffs; pausing an assignment
+only stops new runs. Start times are earliest eligibility, not guaranteed delivery
+or completion times.
+
+Live flows, the project map, Work, and the overview widget show scheduled timing
+and deadlines. Procedure-relative deadlines cannot be overridden on an individual
+task. Date-parameter anchors, business calendars, reminders and escalation rules
+are not part of this release. No Server or Core changes are required.

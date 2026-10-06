@@ -23,17 +23,62 @@ type carrierPlaceRequest struct {
 	AudioBridgeURL    string
 	RecordingMode     string
 	RecordingChannels string
+	// MachineDetection is off, detect, or premium; MachineDetectionAction is
+	// notify or hangup. Carriers that cannot detect reject non-off modes.
+	MachineDetection       string
+	MachineDetectionAction string
 }
 
 type carrierPlaceResult struct {
 	CarrierSID       string
 	CarrierRequestID string
+	CarrierLegID     string
+	CarrierSessionID string
 }
 
 type carrierAdapter interface {
 	Slug() string
 	Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrierPlaceResult, error)
 	Hangup(ctx *sdk.AppCtx, row *callRow) error
+}
+
+// SIP adapters can defer network signaling until the local call ID and its
+// owner are durable. REST carriers do not implement this optional hook.
+type carrierPostPlacement interface {
+	StartPlacedCall(ctx *sdk.AppCtx, row *callRow) error
+}
+
+// Optional carrier contract. Other adapters remain valid but explicitly report
+// unsupported controls until they implement this interface.
+type carrierCallController interface {
+	StartHoldMusic(ctx *sdk.AppCtx, row *callRow, musicURL, commandID string) error
+	StopHoldMusic(ctx *sdk.AppCtx, row *callRow, commandID string) error
+	PauseRecording(ctx *sdk.AppCtx, row *callRow, commandID string) error
+	ResumeRecording(ctx *sdk.AppCtx, row *callRow, commandID string) error
+}
+
+// Carrier capabilities describe operations that an adapter can actually
+// complete. The public softphone contract stays the same for every carrier;
+// unsupported operations are never presented as successful controls.
+type carrierControlFeatures struct {
+	HoldMusic      bool
+	RecordingPause bool
+}
+
+type carrierControlCapabilityProvider interface {
+	ControlFeatures() carrierControlFeatures
+}
+
+func carrierControlFeaturesForSlug(slug string) carrierControlFeatures {
+	adapter, err := (&App{}).carrierForSlug(slug, 0, nil)
+	if err != nil {
+		return carrierControlFeatures{}
+	}
+	provider, ok := adapter.(carrierControlCapabilityProvider)
+	if !ok {
+		return carrierControlFeatures{}
+	}
+	return provider.ControlFeatures()
 }
 
 func (a *App) carrierFor(bound *sdk.BoundIntegration, credentialSlug string, fields map[string]string) (carrierAdapter, error) {
@@ -73,13 +118,97 @@ func (a *App) carrierForSlug(slug string, connID int64, fields map[string]string
 		return &plivoCarrier{app: a, connID: connID}, nil
 	case "vonage":
 		return &vonageCarrier{app: a, connID: connID}, nil
+	case "bandwidth":
+		return &bandwidthCarrier{app: a, connID: connID, fields: fields}, nil
+	case "sinch":
+		return &sinchCarrier{app: a, connID: connID, fields: fields}, nil
+	case "didww":
+		return &didwwCarrier{app: a, connID: connID, fields: fields}, nil
 	default:
 		return nil, fmt.Errorf("unsupported carrier %q", slug)
 	}
 }
 
+type bandwidthCarrier struct {
+	app    *App
+	connID int64
+	fields map[string]string
+}
+
+func (c *bandwidthCarrier) Slug() string { return "bandwidth" }
+
+func (c *bandwidthCarrier) ControlFeatures() carrierControlFeatures {
+	return carrierControlFeatures{RecordingPause: true}
+}
+
+func (c *bandwidthCarrier) StartHoldMusic(*sdk.AppCtx, *callRow, string, string) error {
+	return errors.New("Bandwidth hold requires a conference-backed call and is not available")
+}
+
+func (c *bandwidthCarrier) StopHoldMusic(*sdk.AppCtx, *callRow, string) error {
+	return errors.New("Bandwidth hold requires a conference-backed call and is not available")
+}
+
+func (c *bandwidthCarrier) PauseRecording(ctx *sdk.AppCtx, row *callRow, _ string) error {
+	_, err := executeCarrierTool(ctx, c.connID, "update_call_recording", map[string]any{
+		"callId": row.CarrierSID, "state": "paused",
+	})
+	return err
+}
+
+func (c *bandwidthCarrier) ResumeRecording(ctx *sdk.AppCtx, row *callRow, _ string) error {
+	_, err := executeCarrierTool(ctx, c.connID, "update_call_recording", map[string]any{
+		"callId": row.CarrierSID, "state": "recording",
+	})
+	return err
+}
+
+func (c *bandwidthCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrierPlaceResult, error) {
+	if req.MachineDetection != "" && req.MachineDetection != machineDetectionOff {
+		return nil, errors.New("answering machine detection is not implemented for provider bandwidth")
+	}
+	applicationID := strings.TrimSpace(c.fields["application_id"])
+	if applicationID == "" {
+		return nil, errors.New("Bandwidth application_id is required for outbound calls")
+	}
+	data, err := executeCarrierTool(ctx, c.connID, "create_call", map[string]any{
+		"to": req.To, "from": req.From, "applicationId": applicationID,
+		"answerUrl":        c.app.bandwidthXMLURL(req.CallID, req.CallbackSecret, req.ProjectID),
+		"answerMethod":     "POST",
+		"disconnectUrl":    c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID),
+		"disconnectMethod": "POST",
+		"callTimeout":      req.TimeoutSec,
+		"username":         "apteva", "password": req.CallbackSecret,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("bandwidth create_call failed: %w", err)
+	}
+	var out struct {
+		CallID string `json:"callId"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, fmt.Errorf("decode bandwidth create_call response: %w", err)
+	}
+	if out.CallID == "" {
+		return nil, errors.New("bandwidth create_call returned no call ID")
+	}
+	return &carrierPlaceResult{CarrierSID: out.CallID}, nil
+}
+
+func (c *bandwidthCarrier) Hangup(ctx *sdk.AppCtx, row *callRow) error {
+	_, err := executeCarrierTool(ctx, c.connID, "update_call", map[string]any{
+		"callId": row.CarrierSID, "state": "completed",
+	})
+	return err
+}
+
 func executeCarrierTool(ctx *sdk.AppCtx, connID int64, tool string, input map[string]any) (json.RawMessage, error) {
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, tool, input)
+	if res != nil {
+		recordCarrierCommand(ctx, connID, tool, input, res.Status, err == nil && res.Success)
+	} else {
+		recordCarrierCommand(ctx, connID, tool, input, 0, false)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +283,7 @@ func (c *twilioCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 		ID: req.CallID, CallbackSecret: req.CallbackSecret, ProjectID: req.ProjectID,
 		RecordingMode: req.RecordingMode, RecordingChannels: req.RecordingChannels,
 	})
-	data, err := executeCarrierTool(ctx, c.connID, "make_call", map[string]any{
+	input := map[string]any{
 		"To":                   req.To,
 		"From":                 req.From,
 		"Twiml":                twiml,
@@ -162,7 +291,10 @@ func (c *twilioCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 		"StatusCallbackMethod": "POST",
 		"StatusCallbackEvent":  []string{"initiated", "ringing", "answered", "completed"},
 		"Timeout":              req.TimeoutSec,
-	})
+		"TimeLimit":            callDurationOrDefault(req.MaxDurationSec),
+	}
+	applyTwilioMachineDetection(input, req, c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID))
+	data, err := executeCarrierTool(ctx, c.connID, "make_call", input)
 	if err != nil {
 		return nil, fmt.Errorf("twilio make_call failed: %w", err)
 	}
@@ -195,7 +327,7 @@ func (c *signalWireCarrier) Slug() string { return "signalwire" }
 
 func (c *signalWireCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrierPlaceResult, error) {
 	cxml := fmt.Sprintf(`<Response><Connect><Stream url="%s" codec="L16@24000h" realtime="true"/></Connect></Response>`, xmlEscape(c.app.publicWSStreamURL("signalwire", req.CallID, req.CallbackSecret)))
-	data, err := executeCarrierTool(ctx, c.connID, "make_call", map[string]any{
+	input := map[string]any{
 		"To":                   req.To,
 		"From":                 req.From,
 		"Twiml":                cxml,
@@ -203,7 +335,9 @@ func (c *signalWireCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*ca
 		"StatusCallbackMethod": "POST",
 		"StatusCallbackEvent":  []string{"initiated", "ringing", "answered", "completed"},
 		"Timeout":              req.TimeoutSec,
-	})
+	}
+	applyTwilioMachineDetection(input, req, c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID))
+	data, err := executeCarrierTool(ctx, c.connID, "make_call", input)
 	if err != nil {
 		return nil, fmt.Errorf("signalwire make_call failed: %w", err)
 	}
@@ -235,6 +369,10 @@ type telnyxCarrier struct {
 
 func (c *telnyxCarrier) Slug() string { return "telnyx" }
 
+func (c *telnyxCarrier) ControlFeatures() carrierControlFeatures {
+	return carrierControlFeatures{HoldMusic: true, RecordingPause: true}
+}
+
 func (c *telnyxCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrierPlaceResult, error) {
 	connectionID := ""
 	if c.fields != nil {
@@ -257,6 +395,7 @@ func (c *telnyxCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 		"webhook_url_method":                     "POST",
 	}
 	applyTelnyxMediaProfile(input)
+	applyTelnyxMachineDetection(input, req)
 	if req.RecordingMode == recordingModeAlways {
 		input["record"] = "record-from-answer"
 		input["record_channels"] = telnyxRecordingChannels(req.RecordingChannels)
@@ -271,6 +410,7 @@ func (c *telnyxCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 		Data struct {
 			CallControlID string `json:"call_control_id"`
 			CallLegID     string `json:"call_leg_id"`
+			CallSessionID string `json:"call_session_id"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(data, &out); err != nil {
@@ -278,12 +418,9 @@ func (c *telnyxCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 	}
 	sid := out.Data.CallControlID
 	if sid == "" {
-		sid = out.Data.CallLegID
-	}
-	if sid == "" {
 		return nil, errors.New("telnyx dial_call returned no call control id")
 	}
-	return &carrierPlaceResult{CarrierSID: sid}, nil
+	return &carrierPlaceResult{CarrierSID: sid, CarrierLegID: out.Data.CallLegID, CarrierSessionID: out.Data.CallSessionID}, nil
 }
 
 func (c *telnyxCarrier) Hangup(ctx *sdk.AppCtx, row *callRow) error {
@@ -294,6 +431,55 @@ func (c *telnyxCarrier) Hangup(ctx *sdk.AppCtx, row *callRow) error {
 	return err
 }
 
+func (c *telnyxCarrier) StartHoldMusic(ctx *sdk.AppCtx, row *callRow, musicURL, commandID string) error {
+	_, err := executeCarrierTool(ctx, c.connID, "play_audio", map[string]any{
+		"call_control_id": row.CarrierSID, "audio_url": musicURL,
+		"loop": "infinity", "target_legs": "self", "command_id": commandID,
+		"client_state": row.HoldClientState,
+	})
+	return err
+}
+
+func (c *telnyxCarrier) StopHoldMusic(ctx *sdk.AppCtx, row *callRow, commandID string) error {
+	_, err := executeCarrierTool(ctx, c.connID, "stop_audio", map[string]any{
+		"call_control_id": row.CarrierSID, "stop": "all", "command_id": commandID,
+		"client_state": row.HoldClientState,
+	})
+	return err
+}
+
+func (c *telnyxCarrier) PauseRecording(ctx *sdk.AppCtx, row *callRow, commandID string) error {
+	data, err := executeCarrierTool(ctx, c.connID, "pause_call_recording", map[string]any{
+		"call_control_id": row.CarrierSID, "command_id": commandID,
+	})
+	if err != nil {
+		return err
+	}
+	return telnyxRecordingControlConfirmed(data)
+}
+
+func (c *telnyxCarrier) ResumeRecording(ctx *sdk.AppCtx, row *callRow, commandID string) error {
+	data, err := executeCarrierTool(ctx, c.connID, "resume_call_recording", map[string]any{
+		"call_control_id": row.CarrierSID, "command_id": commandID,
+	})
+	if err != nil {
+		return err
+	}
+	return telnyxRecordingControlConfirmed(data)
+}
+
+func telnyxRecordingControlConfirmed(data json.RawMessage) error {
+	var response struct {
+		Data struct {
+			Result string `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil || response.Data.Result != "ok" {
+		return errors.New("Telnyx did not confirm the recording command")
+	}
+	return nil
+}
+
 type plivoCarrier struct {
 	app    *App
 	connID int64
@@ -302,7 +488,7 @@ type plivoCarrier struct {
 func (c *plivoCarrier) Slug() string { return "plivo" }
 
 func (c *plivoCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrierPlaceResult, error) {
-	data, err := executeCarrierTool(ctx, c.connID, "make_call", map[string]any{
+	input := map[string]any{
 		"from":          req.From,
 		"to":            req.To,
 		"answer_url":    plivoReliableCallbackURL(c.app.plivoXMLURL(req.CallID, req.CallbackSecret, req.ProjectID)),
@@ -313,7 +499,9 @@ func (c *plivoCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrier
 		"hangup_method": "POST",
 		"ring_timeout":  req.TimeoutSec,
 		"time_limit":    req.MaxDurationSec,
-	})
+	}
+	applyPlivoMachineDetection(input, req, plivoReliableCallbackURL(c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID)))
+	data, err := executeCarrierTool(ctx, c.connID, "make_call", input)
 	if err != nil {
 		return nil, fmt.Errorf("plivo make_call failed: %w", err)
 	}
@@ -350,6 +538,9 @@ type vonageCarrier struct {
 func (c *vonageCarrier) Slug() string { return "vonage" }
 
 func (c *vonageCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrierPlaceResult, error) {
+	if req.MachineDetection != "" && req.MachineDetection != machineDetectionOff {
+		return nil, errors.New("answering machine detection is not supported for provider vonage")
+	}
 	ncco := []map[string]any{{
 		"action": "connect",
 		"endpoint": []map[string]any{{

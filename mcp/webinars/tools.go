@@ -92,7 +92,13 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		ProjectID: pid,
 	})
 	if sErr != nil {
-		_, _ = ctx.AppDB().Exec(`DELETE FROM webinars WHERE id = ?`, id)
+		// Compensating delete for the row we just wrote. If even that
+		// fails the webinar is left with no pipe, which webinars_delete
+		// can clear — but it must not be silent.
+		if _, dErr := ctx.AppDB().Exec(`DELETE FROM webinars WHERE id = ?`, id); dErr != nil {
+			ctx.Logger().Error("could not roll back webinar after stream allocation failed",
+				"webinar_id", id, "err", dErr)
+		}
 		return nil, fmt.Errorf("streaming.streams_create: %w", sErr)
 	}
 	if _, err := ctx.AppDB().Exec(
@@ -100,11 +106,25 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			status = CASE WHEN scheduled_at IS NULL THEN 'draft' ELSE 'scheduled' END
 		 WHERE id = ?`,
 		created.Stream.ID, id); err != nil {
+		// The stream exists but nothing references it. Tear it down
+		// rather than leaking a stream for every failed create.
+		if dErr := a.streamingCaller.DeleteStream(pid, created.Stream.ID); dErr != nil {
+			ctx.Logger().Error("orphaned stream after failed stream_id write",
+				"webinar_id", id, "stream_id", created.Stream.ID, "err", dErr)
+		}
+		if _, dErr := ctx.AppDB().Exec(`DELETE FROM webinars WHERE id = ?`, id); dErr != nil {
+			ctx.Logger().Error("could not roll back webinar", "webinar_id", id, "err", dErr)
+		}
 		return nil, err
 	}
 	if scheduledAt != "" && schedulingMode == "single" {
+		// A missing slot is recoverable — syncSingleModeSlot rebuilds it
+		// on the next reschedule — so it must not fail a create whose
+		// webinar and stream both exist. Returning an error here told
+		// the caller the create failed while leaving both behind.
 		if _, err := a.createSlot(ctx, pid, id, scheduledAt, "", timezone, slotDuration, 0, "scheduled", "scheduled_at", ""); err != nil {
-			return nil, err
+			ctx.Logger().Warn("could not materialize the scheduled_at slot",
+				"webinar_id", id, "err", err)
 		}
 	}
 
@@ -228,7 +248,7 @@ func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// stream_id pointing at a deleted stream; surface what we have.
 	var snap *StreamSnapshot
 	if w.StreamID != 0 {
-		s, err := a.streamingCaller.GetStream(w.StreamID)
+		s, err := a.streamingCaller.GetStream(w.ProjectID, w.StreamID)
 		if err == nil {
 			snap = &s
 		}
@@ -274,13 +294,25 @@ func (a *App) toolList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		where = append(where, "kind = ?")
 		qargs = append(qargs, v)
 	}
+	// Both bounds are compared lexically against stored UTC RFC3339, so
+	// they have to be normalized the same way every write path is.
+	// Passing them through raw meant "2026-03-01T00:00+01:00" — or any
+	// other legal-looking layout — silently matched the wrong rows.
 	if v := strArg(args, "scheduled_at_after"); v != "" {
+		norm, err := normalizeRFC3339(v)
+		if err != nil {
+			return nil, fmt.Errorf("scheduled_at_after must be RFC3339: %w", err)
+		}
 		where = append(where, "scheduled_at >= ?")
-		qargs = append(qargs, v)
+		qargs = append(qargs, norm)
 	}
 	if v := strArg(args, "scheduled_at_before"); v != "" {
+		norm, err := normalizeRFC3339(v)
+		if err != nil {
+			return nil, fmt.Errorf("scheduled_at_before must be RFC3339: %w", err)
+		}
 		where = append(where, "scheduled_at <= ?")
-		qargs = append(qargs, v)
+		qargs = append(qargs, norm)
 	}
 	qargs = append(qargs, limit)
 
@@ -511,7 +543,7 @@ func patchString(v any) (string, bool) {
 // registration page stops offering them.
 func (a *App) cancelWebinar(ctx *sdk.AppCtx, pid string, w *Webinar) error {
 	if w.StreamID != 0 {
-		_ = a.streamingCaller.StopStream(w.StreamID)
+		_ = a.streamingCaller.StopStream(w.ProjectID, w.StreamID)
 	}
 	if _, err := ctx.AppDB().Exec(
 		`UPDATE webinar_reminders
@@ -620,7 +652,7 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 
 	if w.StreamID != 0 {
-		_ = a.streamingCaller.DeleteStream(w.StreamID)
+		_ = a.streamingCaller.DeleteStream(w.ProjectID, w.StreamID)
 	}
 	if _, err := ctx.AppDB().Exec(
 		`DELETE FROM webinars WHERE id = ? AND project_id = ?`, id, pid); err != nil {
@@ -790,10 +822,24 @@ func (a *App) toolRegister(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 //     second full set of SMS reminders. ux_reg_phone (003) plus the
 //     phone conflict target below close that.
 func (a *App) upsertRegistrant(ctx *sdk.AppCtx, pid string, wid int64, email, phone, displayName, source string, slot *WebinarSlot) (int64, bool, error) {
+	// The capacity guard is part of the INSERT rather than a check
+	// before it. slotIsAvailable runs at resolve time, so two
+	// registrations that both read "1 of 2 taken" both passed and both
+	// wrote — a capacity=1 slot reliably took two people. Expressing it
+	// as INSERT ... SELECT ... WHERE NOT EXISTS makes the count and the
+	// write one statement, which is atomic no matter how many
+	// connections the pool grows to later.
 	const insertPrefix = `INSERT INTO webinar_registrants
 			(project_id, webinar_id, email, phone, display_name,
 			 join_token, source, slot_id, registered_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+		 WHERE NOT EXISTS (
+			SELECT 1 FROM webinar_slots s
+			 WHERE s.id = ?
+			   AND s.capacity IS NOT NULL AND s.capacity > 0
+			   AND (SELECT COUNT(*) FROM webinar_registrants r
+			         WHERE r.slot_id = s.id) >= s.capacity
+		 )
 		 `
 	conflict := `ON CONFLICT(webinar_id, email) WHERE email IS NOT NULL AND email <> ''
 		 DO NOTHING`
@@ -803,9 +849,10 @@ func (a *App) upsertRegistrant(ctx *sdk.AppCtx, pid string, wid int64, email, ph
 		 DO NOTHING`
 	}
 
+	slotID := nullableSlotID(slot)
 	res, err := ctx.AppDB().Exec(insertPrefix+conflict,
 		pid, wid, nullStr(email), nullStr(phone), nullStr(displayName),
-		randomToken(), source, nullableSlotID(slot), nowRFC3339())
+		randomToken(), source, slotID, nowRFC3339(), slotID)
 	if err != nil {
 		return 0, false, fmt.Errorf("insert registrant: %w", err)
 	}
@@ -821,7 +868,9 @@ func (a *App) upsertRegistrant(ctx *sdk.AppCtx, pid string, wid int64, email, ph
 		return id, true, nil
 	}
 
-	// The conflict fired — this contact already registered.
+	// Nothing was written. Either the conflict fired (this contact is
+	// already registered — return the row they already have) or the
+	// capacity guard rejected it. The lookup tells those apart.
 	var id int64
 	lookup := `SELECT id FROM webinar_registrants
 		 WHERE project_id = ? AND webinar_id = ? AND email = ?`
@@ -832,11 +881,20 @@ func (a *App) upsertRegistrant(ctx *sdk.AppCtx, pid string, wid int64, email, ph
 		   AND (email IS NULL OR email = '')`
 		key = phone
 	}
-	if err := ctx.AppDB().QueryRow(lookup, pid, wid, key).Scan(&id); err != nil {
+	err = ctx.AppDB().QueryRow(lookup, pid, wid, key).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, errSlotFull
+	}
+	if err != nil {
 		return 0, false, fmt.Errorf("resolve existing registrant: %w", err)
 	}
 	return id, false, nil
 }
+
+// errSlotFull — the chosen slot filled up between the availability
+// check and the write. Surfaced to the registration form as-is, and
+// mapped to 409 on the admin REST mirror.
+var errSlotFull = simpleErr("that time is now full — please pick another")
 
 // ─── webinars_list_registrants ───────────────────────────────────
 
@@ -952,10 +1010,10 @@ func (a *App) toolSendReminder(ctx *sdk.AppCtx, args map[string]any) (any, error
 	}
 	rows.Close()
 
+	// bodyOverride is one string for the whole blast, but the join link
+	// is per-recipient — so the body is finished per job below rather
+	// than once here.
 	body := bodyOverride
-	if body == "" {
-		body = defaultReminderBody(w, "now")
-	}
 
 	// One generation stamp per invocation. Without it every manual send
 	// reused the key "webinar:N:reg:M:lead:manual:ch:email", so the
@@ -968,14 +1026,15 @@ func (a *App) toolSendReminder(ctx *sdk.AppCtx, args map[string]any) (any, error
 		regID   int64
 		channel string
 		to      string
+		token   string
 	}
 	jobs := []job{}
 	for _, r := range recs {
 		if (channel == "all" || channel == "email") && r.Email != "" {
-			jobs = append(jobs, job{r.ID, "email", r.Email})
+			jobs = append(jobs, job{r.ID, "email", r.Email, r.JoinToken})
 		}
 		if (channel == "all" || channel == "sms") && r.Phone != "" {
-			jobs = append(jobs, job{r.ID, "sms", r.Phone})
+			jobs = append(jobs, job{r.ID, "sms", r.Phone, r.JoinToken})
 		}
 	}
 
@@ -984,13 +1043,20 @@ func (a *App) toolSendReminder(ctx *sdk.AppCtx, args map[string]any) (any, error
 	// cross-app round-trips.
 	var mu sync.Mutex
 	sent, skipped, failed := 0, 0, 0
-	runBounded(jobs, a.reminderConcurrency(ctx), func(j job) {
+	runBounded(jobs, a.reminderConcurrency(ctx), guarded(ctx, "manual-reminder-blast", func(j job) {
+		link := a.joinURL(ctx, j.token)
+		text := body
+		if text == "" {
+			text = a.reminderBody(ctx, w, "now", link)
+		} else {
+			text = appendJoinLink(text, link)
+		}
 		_, err := a.dispatchOneReminder(ctx, pid, w, reminderDispatch{
 			RegistrantID: j.regID,
 			Channel:      j.channel,
 			To:           j.to,
 			Lead:         "manual",
-			Body:         body,
+			Body:         text,
 			IdemSuffix:   fmt.Sprintf("gen:%d", gen),
 		})
 		mu.Lock()
@@ -1003,7 +1069,7 @@ func (a *App) toolSendReminder(ctx *sdk.AppCtx, args map[string]any) (any, error
 		default:
 			failed++
 		}
-	})
+	}))
 	return map[string]any{
 		"sent":    sent,
 		"skipped": skipped,
@@ -1110,6 +1176,19 @@ func (a *App) toolPushPoll(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("id, question, and >= 2 choices required")
 	}
 	dur := intArg(args, "duration_seconds", 60)
+
+	// Ownership check. Every sibling tool resolves the webinar against
+	// the caller's project before writing; this one went straight to the
+	// INSERT with a caller-supplied id. Under scope=global that let a
+	// caller in project A push a poll onto project B's webinar — the
+	// row carried A's project_id but B's webinar_id, bumped B's sequence
+	// counter, and was delivered into B's live room.
+	if w, err := a.dbGet(ctx, pid, id); err != nil || w == nil {
+		if err != nil {
+			return nil, err
+		}
+		return nil, errors.New("webinar not found")
+	}
 
 	choices := []string{}
 	for _, c := range choicesRaw {
@@ -1244,7 +1323,7 @@ func (a *App) toolGetEngagement(ctx *sdk.AppCtx, args map[string]any) (any, erro
 
 	// Peak concurrent — read from streaming.
 	if w.StreamID != 0 {
-		if m, err := a.streamingCaller.GetMetrics(w.StreamID); err == nil {
+		if m, err := a.streamingCaller.GetMetrics(w.ProjectID, w.StreamID); err == nil {
 			out["peak_concurrent"] = m.PeakViewers
 			out["total_viewer_seconds"] = m.TotalViewerSeconds
 		}
@@ -1308,7 +1387,7 @@ func (a *App) toolClose(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 
 	if w.StreamID != 0 {
-		_ = a.streamingCaller.StopStream(w.StreamID)
+		_ = a.streamingCaller.StopStream(w.ProjectID, w.StreamID)
 	}
 
 	if _, err := ctx.AppDB().Exec(
@@ -1487,6 +1566,13 @@ func (a *App) dbGetSlot(ctx *sdk.AppCtx, pid string, id int64) (*WebinarSlot, er
 	return slot, nil
 }
 
+// maxSlotRows bounds one slot listing. This query groups a join over
+// webinar_registrants, and the public registration page runs it on
+// every GET — an evergreen webinar that has generated slots for a year
+// would otherwise grade the whole history on each page view and render
+// every one of them as a form control.
+const maxSlotRows = 500
+
 func (a *App) dbListSlots(ctx *sdk.AppCtx, pid string, webinarID int64, from, to string, availableOnly bool) ([]*WebinarSlot, error) {
 	where := []string{"s.project_id = ?", "s.webinar_id = ?"}
 	args := []any{pid, webinarID}
@@ -1498,6 +1584,7 @@ func (a *App) dbListSlots(ctx *sdk.AppCtx, pid string, webinarID int64, from, to
 		where = append(where, "s.starts_at <= ?")
 		args = append(args, to)
 	}
+	args = append(args, maxSlotRows)
 	rows, err := ctx.AppDB().Query(
 		`SELECT s.id, s.project_id, s.webinar_id, s.starts_at,
 				COALESCE(s.ends_at,''), COALESCE(s.timezone,''),
@@ -1508,7 +1595,8 @@ func (a *App) dbListSlots(ctx *sdk.AppCtx, pid string, webinarID int64, from, to
 		 LEFT JOIN webinar_registrants r ON r.slot_id = s.id
 		 WHERE `+strings.Join(where, " AND ")+`
 		 GROUP BY s.id
-		 ORDER BY s.starts_at ASC`, args...)
+		 ORDER BY s.starts_at ASC
+		 LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1663,8 +1751,7 @@ func (a *App) materialize(ctx *sdk.AppCtx, w *Webinar, snap *StreamSnapshot) {
 		return
 	}
 	base := a.publicAppPath(ctx)
-	prefix := strings.TrimSuffix(suppressNonEmptyOr(ctx.Config().Get("registration_url_prefix"), "/r"), "/")
-	w.RegistrationURL = base + prefix + "/" + w.Slug
+	w.RegistrationURL = base + registrationPathPrefix + "/" + w.Slug
 
 	if snap != nil {
 		w.IngestURL = snap.IngestURL
@@ -1672,8 +1759,7 @@ func (a *App) materialize(ctx *sdk.AppCtx, w *Webinar, snap *StreamSnapshot) {
 		w.PlaybackURL = snap.PlaybackURL
 	}
 	if w.RecordingPublished && w.ReplayToken != "" {
-		replayPrefix := strings.TrimSuffix(suppressNonEmptyOr(ctx.Config().Get("replay_url_prefix"), "/replay"), "/")
-		w.ReplayURL = base + replayPrefix + "/" + w.Slug + "?t=" + w.ReplayToken
+		w.ReplayURL = base + replayPathPrefix + "/" + w.Slug + "?t=" + w.ReplayToken
 	}
 }
 
@@ -1681,7 +1767,16 @@ func (a *App) materializeRegistrant(ctx *sdk.AppCtx, w *Webinar, r *Registrant) 
 	if r == nil {
 		return
 	}
-	base := a.publicAppPath(ctx)
-	prefix := strings.TrimSuffix(suppressNonEmptyOr(ctx.Config().Get("live_room_url_prefix"), "/live"), "/")
-	r.JoinURL = base + prefix + "/" + r.JoinToken
+	r.JoinURL = a.joinURL(ctx, r.JoinToken)
+}
+
+// joinURL builds the live-room URL for one join token. Factored out of
+// materializeRegistrant because the reminder bodies need it too — they
+// selected the token and then never used it, so every reminder went out
+// without a way back into the room.
+func (a *App) joinURL(ctx *sdk.AppCtx, token string) string {
+	if token == "" {
+		return ""
+	}
+	return a.publicAppPath(ctx) + liveRoomPathPrefix + "/" + token
 }

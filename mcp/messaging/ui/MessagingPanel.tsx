@@ -2305,7 +2305,7 @@ function SendersView({
               className={inputCls + " w-48"}
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
-              placeholder="Marco at Socialcast"
+              placeholder="Your company or team"
             />
           </Field>
           <button

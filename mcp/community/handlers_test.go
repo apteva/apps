@@ -13,13 +13,10 @@ import (
 
 // ─── Test harness ────────────────────────────────────────────────
 
-func newTestCtx(t *testing.T) (*sdk.AppCtx, *tk.EmitRecorder) {
+func newTestCtx(t *testing.T, options ...tk.Option) (*sdk.AppCtx, *tk.EmitRecorder) {
 	t.Helper()
 	rec := tk.NewEmitRecorder()
-	ctx := tk.NewAppCtx(t, "apteva.yaml",
-		tk.WithProjectID("test-proj"),
-		tk.WithEmitter(rec),
-	)
+	ctx := tk.NewAppCtx(t, "apteva.yaml", append([]tk.Option{tk.WithProjectID("test-proj"), tk.WithEmitter(rec)}, options...)...)
 	globalCtx = ctx
 	return ctx, rec
 }

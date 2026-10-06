@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: social
 display_name: Social
-version: 0.16.3
+version: 0.16.6
 description: |
   Schedule and publish posts to your social media accounts: X (Twitter),
   Facebook Pages, Instagram Business, LinkedIn, TikTok, YouTube, Reddit,
@@ -63,6 +63,7 @@ requires:
 provides:
   http_routes:
     - prefix: /
+    - { method: GET, prefix: /accounts/oauth_done, no_auth: true }
   workers:
     - name: scheduled_publisher
       schedule: "@every 1m"
@@ -88,7 +89,7 @@ provides:
     - { name: post_draft_approve,          description: "Approve the exact revision currently in review." }
     - { name: post_draft_reject,           description: "Reject the exact revision currently in review with a reason." }
     - { name: post_draft_publish,          description: "Publish now or schedule a stored draft using explicit mode=publish|schedule and expected_revision." }
-    - { name: post_list,                   description: "List recent posts with per-target status. Args: limit?, status?." }
+    - { name: post_list,                   description: "List stored posts with profile filters, pagination, and separate post/target totals." }
     - { name: post_retry,                  description: "Re-attempt retryable failures only. Deterministic duplicate/content errors fail once and return failure_code plus existing_post_id instead of being retried." }
     - { name: post_publish_scheduled,      description: "Internal Jobs callback that publishes one scheduled post and reports the final downstream result. Args: post_id." }
     - { name: inbox_list,                  description: "List inbox items (comments, DMs, mentions, reviews) across connected social accounts. Filters: kinds, status, social_account_ids, since, limit." }
@@ -109,6 +110,45 @@ provides:
       icon: megaphone
       entry: /ui/SocialPanel.mjs
   ui_components:
+    - name: publishing-calendar
+      label: Social · Publishing calendar
+      description: Upcoming scheduled posts, a week calendar, and items needing attention.
+      entry: /ui/SocialPublishingCalendarWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [post.created, post.rescheduled, post.completed, post.deleted, post.draft_created, post.draft_updated, post.draft_submitted, post.draft_approved, post.draft_rejected, post.publish_requested, target.published, target.pending, target.published_warning, target.failed, profile.accounts_moved, account.deleted]
+      settings_schema:
+        type: object
+        properties:
+          profile_id: { type: integer, title: Profile ID, description: '0 includes all profiles in this project.', minimum: 0, default: 0 }
+          account_ids: { type: string, title: Account IDs, description: 'Optional comma-separated Social account IDs.', default: '' }
+          view: { type: string, title: View, enum: [auto, upcoming, calendar], default: auto }
+          horizon_days: { type: integer, title: Upcoming days, minimum: 1, maximum: 42, default: 7 }
+          max_posts: { type: integer, title: Upcoming post limit, minimum: 1, maximum: 20, default: 5 }
+          show_attention: { type: boolean, title: Show items needing attention, default: true }
+      preview_props: { preview: true }
+    - name: performance
+      label: Social · Performance
+      description: Cached audience totals, daily performance trends, and account coverage.
+      entry: /ui/SocialPerformanceWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [metrics.updated, account.added, account.disconnected, account.deleted, profile.accounts_moved]
+      settings_schema:
+        type: object
+        properties:
+          profile_id: { type: integer, title: Profile ID, description: '0 includes all profiles in this project.', minimum: 0, default: 0 }
+          account_ids: { type: string, title: Account IDs, description: 'Optional comma-separated Social account IDs.', default: '' }
+          days: { type: integer, title: Complete days, enum: [7, 28, 90], default: 28 }
+          visibility_metric: { type: string, title: Visibility metric, enum: [views, impressions], default: views }
+          show_trends: { type: boolean, title: Show trends, default: true }
+      preview_props: { preview: true }
     - name: calendar-card
       entry: /ui/SocialCalendarCard.mjs
       slots: [chat.message_attachment]

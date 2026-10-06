@@ -21,22 +21,25 @@ func textField(description string) map[string]any {
 	return map[string]any{"type": "string", "description": description}
 }
 func definitionSchema() map[string]any {
-	return object([]string{"name", "instructions", "completion_criteria", "owner_agent_id"}, map[string]any{
-		"steps": map[string]any{"type": "array", "maxItems": 30, "items": stepSchema()}, "parameters": map[string]any{"type": "array", "maxItems": 50, "items": object([]string{"key", "type"}, map[string]any{"key": textField("Unique parameter key"), "label": textField("Human-readable label"), "type": map[string]any{"type": "string", "enum": []string{"string", "number", "boolean"}}, "required": map[string]any{"type": "boolean"}, "default": map[string]any{}, "options": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}})}, "execution_mode": map[string]any{"type": "string", "enum": []string{"agent", "tasks"}, "description": "Default agent; tasks requires the optional Tasks integration"}, "name": textField("Procedure name"), "description": textField("Purpose"), "instructions": textField("Ordered steps or checklist in plain language"), "required_inputs": textField("Inputs or sources the owner must obtain"), "default_inputs": textField("Standing execution context"), "completion_criteria": textField("Required outcomes and evidence"), "approval_requirements": textField("Explicit approval checkpoints; does not enforce a software gate"), "owner_agent_id": map[string]any{"type": "integer", "minimum": 1}, "schedule": object([]string{"kind"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"interval", "cron"}}, "every": textField("Duration, e.g. 24h; minimum 1m"), "cron": textField("Five-field cron expression"), "timezone": textField("IANA timezone; default UTC")}),
+	return object([]string{"name", "instructions", "completion_criteria"}, map[string]any{
+		"steps":      map[string]any{"type": "array", "maxItems": 30, "items": stepSchema()},
+		"parameters": map[string]any{"type": "array", "maxItems": 50, "items": object([]string{"key", "type"}, map[string]any{"key": textField("Unique parameter key"), "label": textField("Human-readable label"), "type": map[string]any{"type": "string", "enum": []string{"string", "number", "boolean"}}, "required": map[string]any{"type": "boolean"}, "default": map[string]any{}, "options": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}})},
+		"name":       textField("Procedure name"), "description": textField("Purpose"), "instructions": textField("Shared instructions for the procedure"), "required_inputs": textField("Inputs or sources execution requires"), "default_inputs": textField("Standing procedure context"), "completion_criteria": textField("Required outcomes and evidence"), "approval_requirements": textField("Approval instructions; use approval steps for enforced gates"),
 	})
 }
 func (a *App) MCPTools() []sdk.Tool {
-	descriptions := map[string]string{"list": "Find project procedures by search, status, or owner.", "get": "Read a procedure and immutable versions. Specify version to retrieve a historical definition.", "create": "Create a draft company procedure only when authorized to define company policy.", "update": "Replace the definition with a new immutable version. Requires a draft or fully paused process and expected_version.", "activate": "Activate a procedure and its schedule. Check sync_pending before claiming success.", "pause": "Stop future scheduled runs. Existing runs continue. Check sync_pending.", "archive": "Retire a process and stop future schedules. Existing runs continue.", "start": "Start one active procedure on its owner agent. Supply a stable idempotency_key and reuse it on retries. Track execution in the selected backend.", "runs": "Read direct runs and live Tasks history when used."}
+	descriptions := map[string]string{"list": "Find project procedures by search, status, or owner.", "get": "Read a procedure and immutable versions. Specify version to retrieve a historical definition.", "create": "Create an unassigned draft procedure when authorized to define company policy. Configure agents, parameter values, execution mode, and schedules separately with assignment_create. No assignment is created automatically.", "update": "Replace the definition with a new immutable version. Requires a draft or fully paused process and expected_version.", "activate": "Activate a procedure for use by its assignments; an unassigned procedure schedules no work. Check sync_pending before claiming success.", "pause": "Stop future scheduled runs. Existing runs continue. Check sync_pending.", "archive": "Retire a process and stop future schedules. Existing runs continue.", "start": "Start one active assignment of a procedure. Create and activate an assignment first. Supply a stable idempotency_key and reuse it on retries. Track execution in the selected backend.", "runs": "Read direct runs and live Tasks history when used."}
 	descriptions["run_get"] = "Read the immutable procedure and direct run before acting."
 	descriptions["run_update"] = "Owner only: record direct run progress, blockers, or outcome. Completion requires evidence in result."
 	for _, name := range []string{"assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive"} {
 		descriptions[name] = "Manage saved process assignments: separate owners, targets, parameters, schedules, and execution modes. Update requires a paused assignment and expected_revision. Activate only after the process is active."
 	}
 	descriptions["run_cancel"] = "Coordinator or operator: cancel a structured run and stop future handoffs. Already dispatched external work may continue."
+	descriptions["step_claim"] = "Claim and read a ready step as the persistent worker for a sequential same-agent run. Marks ready work running. Reuse this worker for later steps; finish only when worker.done is true."
 	descriptions["step_get"] = "Read a step, frozen executor, parameters, and completed dependency outputs before acting."
 	descriptions["step_update"] = "Assigned executor only: report step progress or output; approval steps require an explicit approved/rejected decision."
 	out := []sdk.Tool{}
-	for _, name := range []string{"list", "get", "create", "update", "activate", "pause", "archive", "start", "runs", "run_get", "run_update", "assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive", "step_get", "step_update", "run_cancel"} {
+	for _, name := range []string{"list", "get", "create", "update", "activate", "pause", "archive", "start", "runs", "run_get", "run_update", "assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive", "step_get", "step_claim", "step_update", "run_cancel"} {
 		name := name
 		props := map[string]any{}
 		required := []string{}
@@ -73,7 +76,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			props["run_id"] = textField("Run ID")
 			props["reason"] = textField("Cancellation reason")
 			required = append(required, "run_id", "reason")
-		case "step_get", "step_update":
+		case "step_get", "step_claim", "step_update":
 			props["run_id"] = textField("Run ID")
 			props["step_id"] = textField("Step execution ID")
 			required = append(required, "run_id", "step_id")
@@ -114,11 +117,17 @@ func (a *App) MCPTools() []sdk.Tool {
 			return a.execute(caller.ProjectID, fmt.Sprintf("agent:%d:%s", caller.AgentID, caller.ThreadID), name, args)
 		}})
 	}
-	return append(out, a.triggerTools()...)
+	return append(append(out, a.triggerTools()...), a.taskTools()...)
 }
 func (a *App) execute(project, actor, action string, args map[string]any) (any, error) {
+	if action == "overview" {
+		return a.overview(project)
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if action == "tasks" || strings.HasPrefix(action, "task_") {
+		return a.executeTask(project, actor, action, args)
+	}
 	if strings.HasPrefix(action, "trigger_") || action == "triggers" {
 		return a.executeTrigger(project, action, args)
 	}
@@ -177,13 +186,6 @@ func (a *App) execute(project, actor, action string, args map[string]any) (any, 
 		}
 		if action == "create" {
 			id = ""
-		} else if d.ExecutionMode == "" {
-			// Older clients omit this field; editing must not switch backends.
-			current, e := a.get(project, id)
-			if e != nil {
-				return nil, e
-			}
-			d.ExecutionMode = current.ExecutionMode
 		}
 		return a.save(project, id, actor, number(args, "expected_version"), d)
 	case "activate":
@@ -214,6 +216,9 @@ func (a *App) execute(project, actor, action string, args map[string]any) (any, 
 		overrides, ok := args["parameters"].(map[string]any)
 		if args["parameters"] != nil && !ok {
 			return nil, errors.New("parameters must be an object")
+		}
+		if assignmentID == "" {
+			return nil, errors.New("create and activate an assignment before starting this process")
 		}
 		return a.startAssignment(project, id, assignmentID, str(args, "idempotency_key"), str(args, "inputs"), overrides)
 	case "assignments":
@@ -246,7 +251,7 @@ func (a *App) execute(project, actor, action string, args map[string]any) (any, 
 		return a.assignmentStatus(project, id, str(args, "assignment_id"), "archived")
 	case "run_cancel":
 		return a.cancelWorkflow(project, actor, id, str(args, "run_id"), str(args, "reason"))
-	case "step_get", "step_update":
+	case "step_get", "step_claim", "step_update":
 		return a.stepAction(project, actor, id, str(args, "run_id"), str(args, "step_id"), action, args)
 	case "runs":
 		return a.runs(project, id)
@@ -257,7 +262,7 @@ func (a *App) execute(project, actor, action string, args map[string]any) (any, 
 	}
 }
 func (a *App) HTTPRoutes() []sdk.Route {
-	return []sdk.Route{{Pattern: "/processes", Handler: a.handleHTTP}, {Pattern: "/processes/", Handler: a.handleHTTP}}
+	return []sdk.Route{{Pattern: "/overview", Handler: a.handleHTTP}, {Pattern: "/processes", Handler: a.handleHTTP}, {Pattern: "/processes/", Handler: a.handleHTTP}}
 }
 func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	project := strings.TrimSpace(r.Header.Get("X-Apteva-Project-ID"))
@@ -284,6 +289,8 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		} else if r.Method == "POST" {
 			action = "create"
 		}
+	} else if (path == "overview" || path == "mobile/overview") && r.Method == "GET" {
+		action = "overview"
 	} else if len(parts) == 1 {
 		args["process_id"] = parts[0]
 		if r.Method == "GET" {
@@ -389,6 +396,43 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if parts[0] == "tasks" || path == "task-runs" {
+		args = map[string]any{}
+		action = ""
+		if path == "task-runs" && r.Method == "GET" {
+			action = "task_runs"
+		}
+		if path == "tasks" {
+			if r.Method == "POST" {
+				action = "task_create"
+			}
+			if r.Method == "GET" {
+				action = "tasks"
+				for _, k := range []string{"assignee", "state", "origin", "run_id", "process_id", "search"} {
+					args[k] = r.URL.Query().Get(k)
+				}
+				args["overdue"] = r.URL.Query().Get("overdue") == "true"
+				for _, k := range []string{"limit", "offset"} {
+					v, _ := strconv.Atoi(r.URL.Query().Get(k))
+					args[k] = float64(v)
+				}
+			}
+		}
+		if len(parts) == 2 && parts[0] == "tasks" {
+			args["task_id"] = parts[1]
+			if r.Method == "GET" {
+				action = "task_get"
+			}
+			if r.Method == "PUT" {
+				action = "task_update"
+			}
+		}
+		if len(parts) == 3 && parts[0] == "tasks" && parts[2] == "cancel" && r.Method == "POST" {
+			args["task_id"] = parts[1]
+			action = "task_cancel"
+		}
+	}
+
 	if action == "" {
 		http.Error(w, "unsupported route or method", 405)
 		return
@@ -402,7 +446,11 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for k, v := range body {
-			if k != "process_id" && k != "project_id" && k != "_project_id" && k != "run_id" && k != "step_id" && k != "trigger_id" && (k != "assignment_id" || args["assignment_id"] == nil) {
+			if k == "run_id" && action == "task_create" {
+				args[k] = v
+				continue
+			}
+			if k != "task_id" && k != "process_id" && k != "project_id" && k != "_project_id" && k != "run_id" && k != "step_id" && k != "trigger_id" && (k != "assignment_id" || args["assignment_id"] == nil) {
 				args[k] = v
 			}
 		}
@@ -432,14 +480,13 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func assignmentSchema() map[string]any {
-	d := definitionSchema()["properties"].(map[string]any)
 	return object([]string{"name", "owner_agent_id", "execution_mode"}, map[string]any{
-		"name": textField("Assignment name, for example Photography Patreon"), "target": textField("Page, client, business or other target; never credentials"), "owner_agent_id": d["owner_agent_id"], "execution_mode": d["execution_mode"], "schedule": d["schedule"], "procedure_version": map[string]any{"type": "integer", "minimum": 1}, "roles": map[string]any{"type": "object", "additionalProperties": executorSchema()}, "follow_latest": map[string]any{"type": "boolean", "description": "Adopt future procedure revisions; otherwise pin procedure_version"}, "parameters": map[string]any{"type": "object", "description": "Values for the procedure's declared parameters; use authorized connection references, not credentials"}})
+		"name": textField("Assignment name, for example Photography Patreon"), "target": textField("Page, client, business or other target; never credentials"), "owner_agent_id": map[string]any{"type": "integer", "minimum": 1}, "execution_mode": map[string]any{"type": "string", "enum": []string{"agent", "tasks"}, "description": "Direct agent by default; tasks requires the optional Tasks integration"}, "schedule": object([]string{"kind"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"interval", "cron"}}, "every": textField("Duration, e.g. 24h; minimum 1m"), "cron": textField("Five-field cron expression"), "timezone": textField("IANA timezone; default UTC")}), "procedure_version": map[string]any{"type": "integer", "minimum": 1}, "roles": map[string]any{"type": "object", "additionalProperties": executorSchema()}, "follow_latest": map[string]any{"type": "boolean", "description": "Adopt future procedure revisions; otherwise pin procedure_version"}, "parameters": map[string]any{"type": "object", "description": "Values for the procedure's declared parameters; use authorized connection references, not credentials"}})
 }
 
 func executorSchema() map[string]any {
 	return object([]string{"kind"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"agent", "human"}}, "agent_id": map[string]any{"type": "integer", "minimum": 1}})
 }
 func stepSchema() map[string]any {
-	return object([]string{"key", "name", "role", "kind", "instructions", "expected_output"}, map[string]any{"key": textField("Unique step key"), "name": textField("Step name"), "role": textField("Role key bound to an executor by each assignment"), "kind": map[string]any{"type": "string", "enum": []string{"work", "approval"}}, "instructions": textField("Instructions for this step only"), "expected_output": textField("Required output and evidence"), "depends_on": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}})
+	return object([]string{"key", "name", "role", "kind", "instructions", "expected_output"}, map[string]any{"key": textField("Unique step key"), "name": textField("Step name"), "role": textField("Role key bound to an executor by each assignment"), "kind": map[string]any{"type": "string", "enum": []string{"work", "approval"}}, "instructions": textField("Instructions for this step only"), "expected_output": textField("Required output and evidence"), "position": object([]string{"x", "y"}, map[string]any{"x": map[string]any{"type": "number", "minimum": -100000, "maximum": 100000}, "y": map[string]any{"type": "number", "minimum": -100000, "maximum": 100000}}), "depends_on": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "start_after": timingSchema("Earliest start; Processes waits and notifies the executor when due. Never use agent sleep for a delay."), "due_after": timingSchema("Completion deadline; flags overdue work without delaying or cancelling execution.")})
 }

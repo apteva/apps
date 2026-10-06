@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -39,10 +40,24 @@ type audienceSource struct {
 	args  []any
 }
 
+// Existing list/segment helpers share a small query interface. Keep their
+// metadata reads on the same cancellable read pool as the audience query.
+type audienceMetadataDB struct {
+	*sql.DB
+	ctx context.Context
+}
+
+func (db audienceMetadataDB) QueryRow(query string, args ...any) *sql.Row {
+	return db.DB.QueryRowContext(db.ctx, query, args...)
+}
+
 // toolResolveAudience evaluates exactly one CRM-owned audience source and
 // resolves a healthy address for the requested transport. It is deliberately
 // campaign-agnostic so CRM and Campaigns remain independently deployable.
-func (a *App) toolResolveAudience(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolResolveAudience(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := callCtx.Err(); err != nil {
+		return nil, err
+	}
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -51,7 +66,8 @@ func (a *App) toolResolveAudience(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if channel != channelEmail && channel != channelSMS && channel != channelWhatsApp {
 		return nil, fmt.Errorf("invalid channel %q (email|sms|whatsapp)", channel)
 	}
-	source, err := buildAudienceSource(ctx.AppDB(), pid, args)
+	db := ctx.AppReadDB()
+	source, err := buildAudienceSource(audienceMetadataDB{DB: db, ctx: callCtx}, pid, args)
 	if err != nil {
 		return nil, err
 	}
@@ -62,10 +78,14 @@ func (a *App) toolResolveAudience(ctx *sdk.AppCtx, args map[string]any) (any, er
 	afterID := int64Arg(args, "after_contact_id")
 	includeAutomated := boolArg(args, "include_automated", false)
 	includeCounts := boolArg(args, "include_counts", true)
-	return resolveAudience(ctx.AppDB(), source, pid, channel, afterID, limit, includeAutomated, includeCounts)
+	result, err := resolveAudience(callCtx, db, source, pid, channel, afterID, limit, includeAutomated, includeCounts)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
-func buildAudienceSource(db *sql.DB, pid string, args map[string]any) (*audienceSource, error) {
+func buildAudienceSource(db sqlQueryExecer, pid string, args map[string]any) (*audienceSource, error) {
 	segmentID := int64Arg(args, "segment_id")
 	listID := int64Arg(args, "list_id")
 	contactID := int64Arg(args, "contact_id")
@@ -131,53 +151,60 @@ func buildAudienceSource(db *sql.DB, pid string, args map[string]any) (*audience
 	}, nil
 }
 
-func resolveAudience(db *sql.DB, source *audienceSource, pid, channel string, afterID int64, limit int, includeAutomated, includeCounts bool) (*AudienceResolution, error) {
-	if source == nil {
-		return nil, errors.New("audience source required")
-	}
+func audiencePolicySQL(channel string, includeAutomated bool) (reason, address string) {
 	kind := "phone"
 	if channel == channelEmail {
 		kind = "email"
 	}
 	// channel and kind are validated closed-set constants before interpolation.
+	// SQLite may reorder an ordinary JOIN and scan all healthy project routes
+	// for every contact. CROSS JOIN deliberately fixes the contact-first order:
+	// ix_channel_contact, then the (project_id, channel_id, transport) primary key.
 	healthy := `EXISTS (SELECT 1 FROM contact_channels cc
-		JOIN contact_channel_delivery_state ds ON ds.project_id = cc.project_id AND ds.channel_id = cc.id
+		CROSS JOIN contact_channel_delivery_state ds ON ds.project_id = cc.project_id AND ds.channel_id = cc.id
 		WHERE cc.project_id = c.project_id AND cc.contact_id = c.id
 		  AND cc.kind = '` + kind + `' AND ds.transport = '` + channel + `'
 		  AND ds.suppressed = 0 AND ds.quarantined = 0
 		  AND ds.status NOT IN ('hard_bounced','complained','unsubscribed'))`
 	automated := `EXISTS (SELECT 1 FROM contact_tags t WHERE t.project_id = c.project_id
 		AND t.contact_id = c.id AND t.tag_name = 'automated')`
-	reason := `CASE
+	reason = `CASE
  WHEN EXISTS(SELECT 1 FROM contact_attributes a JOIN contact_attribute_defs d ON d.id=a.def_id WHERE a.contact_id=c.id AND a.project_id=c.project_id AND d.key='do_not_contact' AND a.value_bool=1) THEN 'do_not_contact'
 		WHEN ` + fmt.Sprintf("%d", boolToInt(!includeAutomated)) + ` = 1 AND ` + automated + ` THEN 'automated'
 		WHEN ` + healthy + ` THEN 'eligible'
 		WHEN NOT EXISTS (SELECT 1 FROM contact_channels cc WHERE cc.project_id = c.project_id
 			AND cc.contact_id = c.id AND cc.kind = '` + kind + `') THEN 'no_channel'
-		WHEN EXISTS (SELECT 1 FROM contact_channels cc JOIN contact_channel_delivery_state ds
+		WHEN EXISTS (SELECT 1 FROM contact_channels cc CROSS JOIN contact_channel_delivery_state ds
 			ON ds.project_id = cc.project_id AND ds.channel_id = cc.id WHERE cc.project_id = c.project_id
 			AND cc.contact_id = c.id AND cc.kind = '` + kind + `' AND ds.transport = '` + channel + `' AND ds.suppressed = 1) THEN 'suppressed'
-		WHEN EXISTS (SELECT 1 FROM contact_channels cc JOIN contact_channel_delivery_state ds
+		WHEN EXISTS (SELECT 1 FROM contact_channels cc CROSS JOIN contact_channel_delivery_state ds
 			ON ds.project_id = cc.project_id AND ds.channel_id = cc.id WHERE cc.project_id = c.project_id
 			AND cc.contact_id = c.id AND cc.kind = '` + kind + `' AND ds.transport = '` + channel + `' AND ds.quarantined = 1) THEN 'quarantined'
-		WHEN EXISTS (SELECT 1 FROM contact_channels cc JOIN contact_channel_delivery_state ds
+		WHEN EXISTS (SELECT 1 FROM contact_channels cc CROSS JOIN contact_channel_delivery_state ds
 			ON ds.project_id = cc.project_id AND ds.channel_id = cc.id WHERE cc.project_id = c.project_id
 			AND cc.contact_id = c.id AND cc.kind = '` + kind + `' AND ds.transport = '` + channel + `' AND ds.status = 'complained') THEN 'complained'
-		WHEN EXISTS (SELECT 1 FROM contact_channels cc JOIN contact_channel_delivery_state ds
+		WHEN EXISTS (SELECT 1 FROM contact_channels cc CROSS JOIN contact_channel_delivery_state ds
 			ON ds.project_id = cc.project_id AND ds.channel_id = cc.id WHERE cc.project_id = c.project_id
 			AND cc.contact_id = c.id AND cc.kind = '` + kind + `' AND ds.transport = '` + channel + `' AND ds.status = 'hard_bounced') THEN 'hard_bounced'
-		WHEN EXISTS (SELECT 1 FROM contact_channels cc JOIN contact_channel_delivery_state ds
+		WHEN EXISTS (SELECT 1 FROM contact_channels cc CROSS JOIN contact_channel_delivery_state ds
 			ON ds.project_id = cc.project_id AND ds.channel_id = cc.id WHERE cc.project_id = c.project_id
 			AND cc.contact_id = c.id AND cc.kind = '` + kind + `' AND ds.transport = '` + channel + `' AND ds.status = 'unsubscribed') THEN 'unsubscribed'
 		ELSE 'unmessageable' END`
-	address := `(SELECT cc.value FROM contact_channels cc
-		JOIN contact_channel_delivery_state ds ON ds.project_id = cc.project_id AND ds.channel_id = cc.id
+	address = `(SELECT cc.value FROM contact_channels cc
+		CROSS JOIN contact_channel_delivery_state ds ON ds.project_id = cc.project_id AND ds.channel_id = cc.id
 		WHERE cc.project_id = c.project_id AND cc.contact_id = c.id
 		  AND cc.kind = '` + kind + `' AND ds.transport = '` + channel + `'
 		  AND ds.suppressed = 0 AND ds.quarantined = 0
 		  AND ds.status NOT IN ('hard_bounced','complained','unsubscribed')
 		ORDER BY cc.is_primary DESC, cc.id ASC LIMIT 1)`
+	return reason, address
+}
 
+func resolveAudience(callCtx context.Context, db *sql.DB, source *audienceSource, pid, channel string, afterID int64, limit int, includeAutomated, includeCounts bool) (*AudienceResolution, error) {
+	if source == nil {
+		return nil, errors.New("audience source required")
+	}
+	reason, address := audiencePolicySQL(channel, includeAutomated)
 	result := &AudienceResolution{
 		Channel:          channel,
 		ExcludedByReason: map[string]int64{},
@@ -187,7 +214,7 @@ func resolveAudience(db *sql.DB, source *audienceSource, pid, channel string, af
 	if includeCounts {
 		countSQL := `SELECT reason, COUNT(*) FROM (SELECT ` + reason + ` AS reason
 			FROM (` + source.query + `) a JOIN contacts c ON c.id = a.contact_id) GROUP BY reason`
-		rows, err := db.Query(countSQL, source.args...)
+		rows, err := db.QueryContext(callCtx, countSQL, source.args...)
 		if err != nil {
 			return nil, err
 		}
@@ -206,6 +233,10 @@ func resolveAudience(db *sql.DB, source *audienceSource, pid, channel string, af
 				result.ExcludedCount += count
 			}
 		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
 		if err := rows.Close(); err != nil {
 			return nil, err
 		}
@@ -215,7 +246,7 @@ func resolveAudience(db *sql.DB, source *audienceSource, pid, channel string, af
 	pageSQL := `SELECT a.contact_id, COALESCE(` + address + `, ''), ` + reason + `
 		FROM (` + source.query + `) a JOIN contacts c ON c.id = a.contact_id
 		WHERE a.contact_id > ? ORDER BY a.contact_id LIMIT ?`
-	rows, err := db.Query(pageSQL, pageArgs...)
+	rows, err := db.QueryContext(callCtx, pageSQL, pageArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +264,14 @@ func resolveAudience(db *sql.DB, source *audienceSource, pid, channel string, af
 		}
 		page = append(page, row)
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
 	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := callCtx.Err(); err != nil {
 		return nil, err
 	}
 	if len(page) > limit {

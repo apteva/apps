@@ -84,13 +84,9 @@ func validateRecordingSettings(settings recordingSettings) error {
 }
 
 func (a *App) toolRouteRecordingPolicy(callerCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	routeID := strings.TrimSpace(strArg(args, "route_id", ""))
-	route, err := a.db().findRoute(routeID)
-	if err != nil || route == nil {
-		return mcpError("unknown route_id"), nil
-	}
-	if route.AgentID != callerAgentID(callerCtx) || route.ProjectID != currentProject(ctx) {
-		return mcpError("route belongs to another agent or project"), nil
+	route, err := a.routeForCaller(ctx, strArg(args, "route_id", ""), callerAgentID(callerCtx))
+	if err != nil {
+		return mcpError(err.Error()), nil
 	}
 	mode, err := normalizeRouteRecordingMode(strArg(args, "recording_mode", ""))
 	if err != nil {
@@ -163,7 +159,7 @@ func recordingCarrierSupport(ctx *sdk.AppCtx) (string, bool) {
 
 func providerSupportsRecording(slug string) bool {
 	switch strings.ToLower(strings.TrimSpace(slug)) {
-	case "twilio", "telnyx", "plivo":
+	case "twilio", "telnyx", "plivo", "bandwidth":
 		return true
 	default:
 		return false

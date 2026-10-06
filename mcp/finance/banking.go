@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,10 +17,11 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-var bankingProviderSlugs = []string{"plaid", "teller", "nordigen", "truelayer", "saltedge"}
+var bankingProviderSlugs = []string{"open-banking-io", "plaid", "teller", "nordigen", "truelayer", "saltedge", "enable-banking", "truelayer-payments", "saltedge-payments"}
 
 type bankingConnectionView struct {
 	ID       int64  `json:"id"`
+	Default  bool   `json:"default"`
 	Provider string `json:"provider"`
 	AppSlug  string `json:"app_slug"`
 	Name     string `json:"name"`
@@ -28,14 +30,15 @@ type bankingConnectionView struct {
 }
 
 type bankingAccount struct {
-	ExternalID   string         `json:"external_id"`
-	Name         string         `json:"name"`
-	Currency     string         `json:"currency"`
-	Kind         string         `json:"kind"`
-	Institution  string         `json:"institution,omitempty"`
-	Mask         string         `json:"mask,omitempty"`
-	BalanceMinor *int64         `json:"balance_minor,omitempty"`
-	Raw          map[string]any `json:"raw,omitempty"`
+	NeedsReconnect bool           `json:"needs_reconnect,omitempty"`
+	ExternalID     string         `json:"external_id"`
+	Name           string         `json:"name"`
+	Currency       string         `json:"currency"`
+	Kind           string         `json:"kind"`
+	Institution    string         `json:"institution,omitempty"`
+	Mask           string         `json:"mask,omitempty"`
+	BalanceMinor   *int64         `json:"balance_minor,omitempty"`
+	Raw            map[string]any `json:"raw,omitempty"`
 }
 
 type bankingTxn struct {
@@ -55,7 +58,7 @@ type bankingLink struct {
 	Provider   string         `json:"provider"`
 	Connection int64          `json:"connection_id"`
 	ExternalID string         `json:"external_account_id"`
-	Metadata   map[string]any `json:"metadata,omitempty"`
+	Metadata   map[string]any `json:"-"`
 }
 
 type bankingSyncStats struct {
@@ -81,7 +84,7 @@ func (a *App) toolBankingConnections(ctx *sdk.AppCtx, args map[string]any) (any,
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"providers": bankingProviderSlugs, "connections": conns}, nil
+	return map[string]any{"providers": bankingProviderSlugs, "connections": conns, "provider_guidance": bankingProviderGuidance(), "payment_capabilities": bankingPaymentCapabilities()}, nil
 }
 
 func (a *App) toolBankingDiscover(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -135,6 +138,9 @@ func (a *App) toolBankingLinkAccount(ctx *sdk.AppCtx, args map[string]any) (any,
 	if found == nil {
 		return nil, fmt.Errorf("external account %q not found for %s connection %d", externalID, provider, conn.ID)
 	}
+	if found.NeedsReconnect {
+		return nil, errors.New("bank consent expired; reconnect in the provider app before linking")
+	}
 	financeID := int64(intArg(args, "finance_account_id", 0))
 	create := boolArg(args, "create_account", financeID == 0)
 	link, err := linkBankingAccount(ctx, provider, conn, *found, financeID, create, bankingProviderMetadata(args))
@@ -152,6 +158,14 @@ func (a *App) toolBankingSync(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	from := strArg(args, "from", time.Now().UTC().AddDate(0, -3, 0).Format("2006-01-02"))
 	to := strArg(args, "to", time.Now().UTC().Format("2006-01-02"))
 
+	fromDate, err := time.Parse("2006-01-02", from)
+	if err != nil {
+		return nil, errors.New("from must be YYYY-MM-DD")
+	}
+	toDate, err := time.Parse("2006-01-02", to)
+	if err != nil || toDate.Before(fromDate) {
+		return nil, errors.New("to must be YYYY-MM-DD and not before from")
+	}
 	links, err := bankingLinks(ctx, provider, requestedConn, accountID)
 	if err != nil {
 		return nil, err
@@ -161,16 +175,29 @@ func (a *App) toolBankingSync(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	stats := bankingSyncStats{Provider: provider, ConnectionID: requestedConn, AccountID: accountID, DryRun: dry}
 	for _, link := range links {
+		errorStart := len(stats.Errors)
+		importedStart, skippedStart := stats.Imported, stats.Skipped
 		conn, gotProvider, err := bankingConnection(ctx, link.Provider, link.Connection)
 		if err != nil {
 			stats.Errors = append(stats.Errors, err.Error())
 			continue
 		}
 		adapter := bankingAdapterFor(gotProvider)
+		if refresher, ok := adapter.(interface {
+			RefreshAccount(*sdk.AppCtx, sdk.PlatformConnection, bankingLink) error
+		}); ok && !dry {
+			if err := refresher.RefreshAccount(ctx, conn, link); err != nil {
+				stats.Errors = append(stats.Errors, fmt.Sprintf("account %d refresh: %v", link.Account.ID, err))
+				ctx.AppDB().Exec(`UPDATE accounts SET sync_error=? WHERE id=?`, err.Error(), link.Account.ID)
+				continue
+			}
+		}
 		txns, err := adapter.FetchTransactions(ctx, conn, link, from, to)
 		if err != nil {
 			stats.Errors = append(stats.Errors, fmt.Sprintf("%s account %d: %v", gotProvider, link.Account.ID, err))
-			_, _ = ctx.AppDB().Exec(`UPDATE accounts SET sync_error=? WHERE id=?`, err.Error(), link.Account.ID)
+			if !dry {
+				_, _ = ctx.AppDB().Exec(`UPDATE accounts SET sync_error=? WHERE id=?`, err.Error(), link.Account.ID)
+			}
 			continue
 		}
 		stats.Accounts++
@@ -192,7 +219,11 @@ func (a *App) toolBankingSync(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			stats.Imported += imported
 			stats.Skipped += skipped
 		}
-		if balance, err := adapter.FetchBalance(ctx, conn, link); err == nil && balance != nil {
+		balance, balanceErr := adapter.FetchBalance(ctx, conn, link)
+		if balanceErr != nil {
+			stats.Errors = append(stats.Errors, fmt.Sprintf("account %d balance: %v", link.Account.ID, balanceErr))
+		}
+		if balanceErr == nil && balance != nil && len(stats.Errors) == errorStart {
 			n, skipped, err := reconcileBankingBalance(ctx, gotProvider, conn.ID, link.Account, *balance, dry)
 			if err != nil {
 				stats.Errors = append(stats.Errors, err.Error())
@@ -202,14 +233,18 @@ func (a *App) toolBankingSync(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			}
 		}
 		if !dry {
+			if len(stats.Errors) > errorStart {
+				_, _ = ctx.AppDB().Exec(`UPDATE accounts SET sync_error=? WHERE id=?`, strings.Join(stats.Errors[errorStart:], "; "), link.Account.ID)
+				continue
+			}
 			now := time.Now().UTC().Format(time.RFC3339)
 			meta := link.Metadata
 			if meta == nil {
 				meta = map[string]any{}
 			}
 			meta["last_sync_at"] = now
-			meta["last_sync_imported"] = stats.Imported
-			meta["last_sync_skipped"] = stats.Skipped
+			meta["last_sync_imported"] = stats.Imported - importedStart
+			meta["last_sync_skipped"] = stats.Skipped - skippedStart
 			metaJSON, _ := json.Marshal(meta)
 			_, _ = ctx.AppDB().Exec(
 				`UPDATE external_links SET metadata_json=?, last_seen_at=?, updated_at=CURRENT_TIMESTAMP
@@ -245,7 +280,7 @@ func (a *App) toolBankingUnlink(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return nil, err
 	}
 	_, _ = ctx.AppDB().Exec(
-		`UPDATE accounts SET source='manual', connection_id=NULL, sync_error=NULL WHERE project_id=? AND id=?`,
+		`UPDATE accounts SET source='manual', connection_id=NULL, external_id=NULL, sync_error=NULL WHERE project_id=? AND id=?`,
 		pid, accountID,
 	)
 	n, _ := res.RowsAffected()
@@ -253,27 +288,19 @@ func (a *App) toolBankingUnlink(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 func listBankingConnections(ctx *sdk.AppCtx, provider string) ([]bankingConnectionView, error) {
-	if ctx == nil || ctx.PlatformAPI() == nil {
-		return nil, errors.New("platform connections are not available")
+	if provider != "" && !isBankingProvider(provider) {
+		return nil, fmt.Errorf("unsupported banking provider %q", provider)
 	}
-	slugs := bankingProviderSlugs
-	if provider != "" {
-		if !isBankingProvider(provider) {
-			return nil, fmt.Errorf("unsupported banking provider %q", provider)
-		}
-		slugs = []string{provider}
+	conns, err := financeConnections(ctx)
+	if err != nil {
+		return nil, err
 	}
 	out := []bankingConnectionView{}
-	for _, slug := range slugs {
-		conns, err := ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{AppSlug: slug})
-		if err != nil {
-			return nil, err
+	for _, c := range conns {
+		if !isBankingProvider(c.AppSlug) || (provider != "" && c.AppSlug != provider) {
+			continue
 		}
-		for _, c := range conns {
-			out = append(out, bankingConnectionView{
-				ID: c.ID, Provider: slug, AppSlug: c.AppSlug, Name: c.Name, Status: c.Status, Project: c.ProjectID,
-			})
-		}
+		out = append(out, bankingConnectionView{ID: c.ID, Provider: c.AppSlug, AppSlug: c.AppSlug, Name: c.Name, Status: c.Status, Project: c.ProjectID, Default: c.Default})
 	}
 	sortBankingConnections(out)
 	return out, nil
@@ -281,6 +308,9 @@ func listBankingConnections(ctx *sdk.AppCtx, provider string) ([]bankingConnecti
 
 func sortBankingConnections(conns []bankingConnectionView) {
 	sort.SliceStable(conns, func(i, j int) bool {
+		if conns[i].Default != conns[j].Default {
+			return conns[i].Default
+		}
 		if conns[i].Provider != conns[j].Provider {
 			return conns[i].Provider < conns[j].Provider
 		}
@@ -289,42 +319,29 @@ func sortBankingConnections(conns []bankingConnectionView) {
 }
 
 func bankingConnection(ctx *sdk.AppCtx, provider string, requested int64) (sdk.PlatformConnection, string, error) {
-	if ctx == nil || ctx.PlatformAPI() == nil {
-		return sdk.PlatformConnection{}, "", errors.New("platform connections are not available")
+	if provider != "" && !isBankingProvider(provider) {
+		return sdk.PlatformConnection{}, "", fmt.Errorf("unsupported banking provider %q", provider)
 	}
-	if requested != 0 {
-		c, err := ctx.PlatformAPI().GetConnection(requested)
+	if provider == "" && requested == 0 {
+		conns, err := financeConnections(ctx)
 		if err != nil {
 			return sdk.PlatformConnection{}, "", err
 		}
-		if c == nil {
-			return sdk.PlatformConnection{}, "", fmt.Errorf("connection %d not found", requested)
+		for _, c := range conns {
+			if isBankingProvider(c.AppSlug) && (c.Status == "" || c.Status == "active" || c.Status == "connected") {
+				return c.PlatformConnection, c.AppSlug, nil
+			}
 		}
-		got := c.AppSlug
-		if provider != "" && provider != got {
-			return sdk.PlatformConnection{}, "", fmt.Errorf("connection %d is %s, not %s", requested, got, provider)
-		}
-		if !isBankingProvider(got) {
-			return sdk.PlatformConnection{}, "", fmt.Errorf("connection %d uses unsupported banking provider %q", requested, got)
-		}
-		return *c, got, nil
+		return sdk.PlatformConnection{}, "", errors.New("no active bank connection selected in Financial connections")
 	}
-	if provider == "" {
-		return sdk.PlatformConnection{}, "", errors.New("provider or connection_id required")
-	}
-	if !isBankingProvider(provider) {
-		return sdk.PlatformConnection{}, "", fmt.Errorf("unsupported banking provider %q", provider)
-	}
-	conns, err := ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{AppSlug: provider})
+	conn, err := financeConnection(ctx, provider, requested)
 	if err != nil {
-		return sdk.PlatformConnection{}, "", err
+		return conn, "", err
 	}
-	for _, c := range conns {
-		if c.Status == "" || c.Status == "active" || c.Status == "connected" {
-			return c, provider, nil
-		}
+	if !isBankingProvider(conn.AppSlug) {
+		return conn, "", fmt.Errorf("connection %d does not support banking", conn.ID)
 	}
-	return sdk.PlatformConnection{}, "", fmt.Errorf("no active %s connection bound", provider)
+	return conn, conn.AppSlug, nil
 }
 
 func isBankingProvider(slug string) bool {
@@ -337,6 +354,9 @@ func isBankingProvider(slug string) bool {
 }
 
 func bankingAdapterFor(provider string) bankingAdapter {
+	if provider == "open-banking-io" {
+		return openBankingIOAdapter{}
+	}
 	return genericBankingAdapter{provider: provider}
 }
 
@@ -344,6 +364,8 @@ type genericBankingAdapter struct{ provider string }
 
 func (a genericBankingAdapter) DiscoverAccounts(ctx *sdk.AppCtx, conn sdk.PlatformConnection, args map[string]any) ([]bankingAccount, error) {
 	switch a.provider {
+	case "enable-banking":
+		return discoverEnableBanking(ctx, conn, args)
 	case "plaid":
 		var raw any
 		accessToken := strArg(args, "access_token", "")
@@ -386,6 +408,8 @@ func (a genericBankingAdapter) DiscoverAccounts(ctx *sdk.AppCtx, conn sdk.Platfo
 func (a genericBankingAdapter) FetchTransactions(ctx *sdk.AppCtx, conn sdk.PlatformConnection, link bankingLink, from, to string) ([]bankingTxn, error) {
 	input := map[string]any{}
 	switch a.provider {
+	case "enable-banking":
+		return fetchEnableBankingTransactions(ctx, conn, link, from, to)
 	case "plaid":
 		accessToken, err := bankingLinkAccessToken(link)
 		if err != nil {
@@ -437,6 +461,12 @@ func (a genericBankingAdapter) FetchBalance(ctx *sdk.AppCtx, conn sdk.PlatformCo
 	var tool string
 	input := map[string]any{"account_id": link.ExternalID}
 	switch a.provider {
+	case "enable-banking":
+		var raw map[string]any
+		if err := executeIntegrationJSON(ctx, conn.ID, "get_account_balances", input, &raw); err != nil {
+			return nil, err
+		}
+		return enableBankingBalance(raw, link.Account.Currency)
 	case "plaid":
 		tool = "get_balances"
 		accessToken, err := bankingLinkAccessToken(link)
@@ -451,7 +481,7 @@ func (a genericBankingAdapter) FetchBalance(ctx *sdk.AppCtx, conn sdk.PlatformCo
 	case "truelayer":
 		tool = "get_account_balance"
 	case "saltedge":
-		return link.AccountBalance(), nil
+		tool = "get_account"
 	default:
 		return nil, fmt.Errorf("unsupported banking provider %q", a.provider)
 	}
@@ -568,10 +598,10 @@ func normalizeBankingTxns(provider, accountExternalID string, raw any) []banking
 		if provider == "plaid" {
 			amount = -amount
 		}
-		postedAt := firstTime(item)
-		if postedAt == "" {
-			postedAt = time.Now().UTC().Format(time.RFC3339)
+		if provider == "truelayer" && strings.EqualFold(firstString(item, "transaction_type"), "DEBIT") && amount > 0 {
+			amount = -amount
 		}
+		postedAt := firstTime(item)
 		payee := firstString(item, "merchant_name", "merchantName", "counterparty", "description", "payee", "name", "remittanceInformationUnstructured")
 		memo := firstString(item, "description", "details", "reference", "memo", "remittanceInformationUnstructured")
 		pending := boolFromAny(item["pending"]) || strings.EqualFold(firstString(item, "status"), "pending")
@@ -602,7 +632,7 @@ func flattenItems(raw any) []map[string]any {
 		return v
 	case map[string]any:
 		for _, key := range []string{"accounts", "results", "data", "items", "resources"} {
-			if arr := arrayAny(v[key]); len(arr) > 0 {
+			if arr := arrayAny(v[key]); arr != nil {
 				return mapsFromArray(arr)
 			}
 			if m, ok := v[key].(map[string]any); ok {
@@ -619,8 +649,8 @@ func flattenItems(raw any) []map[string]any {
 
 func flattenTransactionItems(raw any) []map[string]any {
 	if m := asMap(raw); m != nil {
-		if arr := mapsFromArray(arrayAny(m["transactions"])); len(arr) > 0 {
-			return arr
+		if arr := arrayAny(m["transactions"]); arr != nil {
+			return mapsFromArray(arr)
 		}
 		if txs := childMap(m, "transactions"); len(txs) > 0 {
 			out := []map[string]any{}
@@ -632,9 +662,7 @@ func flattenTransactionItems(raw any) []map[string]any {
 					out = append(out, item)
 				}
 			}
-			if len(out) > 0 {
-				return out
-			}
+			return out
 		}
 	}
 	return flattenItems(raw)
@@ -687,8 +715,8 @@ func extractBalanceMinor(raw any, currency string) *int64 {
 	}
 	for _, item := range flattenItems(raw) {
 		for _, key := range []string{
-			"balances.current", "balances.available", "balance.current", "balance.available",
-			"current_balance", "available_balance", "current", "available", "ledger", "balance",
+			"balances.current", "balance.current", "balances.available", "balance.available",
+			"current_balance", "current", "ledger", "balance", "available_balance", "available",
 		} {
 			if v, ok := nestedAny(item, key); ok {
 				if f, ok := floatAny(v); ok {
@@ -705,7 +733,7 @@ func amountMinorFromTxn(item map[string]any) int64 {
 	if f, ok := floatAny(item["amount"]); ok {
 		return int64(math.Round(f * 100))
 	}
-	for _, key := range []string{"transactionAmount.amount", "amount.value", "value", "running_balance.amount"} {
+	for _, key := range []string{"transactionAmount.amount", "amount.value", "value"} {
 		if v, ok := nestedAny(item, key); ok {
 			if f, ok := floatAny(v); ok {
 				return int64(math.Round(f * 100))
@@ -721,6 +749,12 @@ func amountMinorFromTxn(item map[string]any) int64 {
 }
 
 func linkBankingAccount(ctx *sdk.AppCtx, provider string, conn sdk.PlatformConnection, ba bankingAccount, financeID int64, create bool, extraMeta map[string]any) (bankingLink, error) {
+	if ba.NeedsReconnect {
+		return bankingLink{}, errors.New("bank consent expired; reconnect in the provider app before linking")
+	}
+	if provider == "enable-banking" {
+		return linkEnableBankingAccount(ctx, conn, ba, financeID, create, extraMeta)
+	}
 	pid := projectID(ctx)
 	if ba.ExternalID == "" {
 		return bankingLink{}, errors.New("banking account has empty external_id")
@@ -754,10 +788,18 @@ func linkBankingAccount(ctx *sdk.AppCtx, provider string, conn sdk.PlatformConne
 		}
 		financeID, _ = res.LastInsertId()
 	} else {
-		if _, err := readAccount(ctx, financeID); err != nil {
+		acc, err := readAccount(ctx, financeID)
+		if err != nil {
 			return bankingLink{}, err
 		}
-		_, err := ctx.AppDB().Exec(
+		if acc.Kind != "cash" || acc.Currency != ba.Currency || acc.Archived {
+			return bankingLink{}, errors.New("bank link requires an active cash account with matching currency")
+		}
+		if acc.Source != "manual" && (acc.Source != "integration:"+provider || acc.ConnectionID != strconv.FormatInt(conn.ID, 10) || acc.ExternalID != ba.ExternalID) {
+			return bankingLink{}, errors.New("account already linked to another source; unlink it first")
+		}
+
+		_, err = ctx.AppDB().Exec(
 			`UPDATE accounts SET source=?, connection_id=?, external_id=?, sync_error=NULL WHERE project_id=? AND id=?`,
 			"integration:"+provider, strconv.FormatInt(conn.ID, 10), ba.ExternalID, pid, financeID,
 		)
@@ -802,6 +844,9 @@ func linkBankingAccount(ctx *sdk.AppCtx, provider string, conn sdk.PlatformConne
 
 func bankingProviderMetadata(args map[string]any) map[string]any {
 	meta := map[string]any{}
+	if session := strArg(args, "session_id", ""); session != "" {
+		meta["session_id"] = session
+	}
 	if token := strArg(args, "access_token", ""); token != "" {
 		meta["access_token"] = token
 	}
@@ -873,15 +918,18 @@ func bankingLinks(ctx *sdk.AppCtx, provider string, connID int64, accountID int6
 }
 
 func importBankingTxn(ctx *sdk.AppCtx, provider string, connID int64, link bankingLink, bt bankingTxn, dry bool) (int, int, error) {
-	pid := projectID(ctx)
-	connStr := strconv.FormatInt(connID, 10)
-	var existing int64
-	if err := ctx.AppDB().QueryRow(
-		`SELECT finance_id FROM external_links
-		 WHERE project_id=? AND provider=? AND connection_id=? AND external_type='transaction' AND external_id=?`,
-		pid, provider, connStr, bt.ExternalID,
-	).Scan(&existing); err == nil {
+	// Pending bank rows are not booked cash. Import the final posted transaction.
+	if bt.Pending {
 		return 0, 1, nil
+	}
+	if bt.AccountExternalID != link.ExternalID {
+		return 0, 0, errors.New("transaction belongs to a different bank account")
+	}
+	if bt.Currency != "" && bt.Currency != link.Account.Currency {
+		return 0, 0, errors.New("transaction currency differs from linked account currency")
+	}
+	if _, err := parseFlexibleTime(bt.PostedAt); err != nil {
+		return 0, 0, fmt.Errorf("bank transaction date: %w", err)
 	}
 	externalID := provider + ":bank:" + bt.ExternalID
 	if txnExternalIDExists(ctx, link.Account.ID, externalID) {
@@ -890,51 +938,61 @@ func importBankingTxn(ctx *sdk.AppCtx, provider string, connID int64, link banki
 	if dry {
 		return 1, 0, nil
 	}
-	kind := bankingTxnKind(bt)
-	id, err := insertTxn(ctx, txnIn{
-		AccountID:  link.Account.ID,
-		PostedAt:   bt.PostedAt,
-		Kind:       kind,
-		Amount:     bt.AmountMinor,
-		Currency:   nonempty(bt.Currency, link.Account.Currency),
-		Payee:      bt.Payee,
-		Memo:       bt.Memo,
-		ExternalID: externalID,
-	})
+	tx, err := ctx.AppDB().Begin()
 	if err != nil {
 		return 0, 0, err
 	}
-	meta := map[string]any{"pending": bt.Pending, "provider_account_id": bt.AccountExternalID}
-	rawMeta, _ := json.Marshal(meta)
-	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = ctx.AppDB().Exec(
-		`INSERT INTO external_links
-		   (project_id, provider, connection_id, external_type, external_id, finance_type, finance_id, metadata_json, last_seen_at)
-		 VALUES (?, ?, ?, 'transaction', ?, 'transaction', ?, ?, ?)`,
-		pid, provider, connStr, bt.ExternalID, id, string(rawMeta), now,
-	)
+	defer tx.Rollback()
+	var existing int64
+	err = tx.QueryRow(`SELECT id FROM transactions WHERE account_id=? AND external_id=?`, link.Account.ID, externalID).Scan(&existing)
+	if err == nil {
+		return 0, 1, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, err
+	}
+	id, err := insertTxnTx(tx, txnIn{AccountID: link.Account.ID, PostedAt: bt.PostedAt, Kind: bankingTxnKind(bt), Amount: bt.AmountMinor, Currency: link.Account.Currency, Payee: bt.Payee, Memo: bt.Memo, ExternalID: externalID})
 	if err != nil {
+		return 0, 0, err
+	}
+	meta, _ := json.Marshal(map[string]any{"pending": false, "provider_account_id": bt.AccountExternalID})
+	// Provider transaction IDs can be account-local. Keep the account in the map key.
+	_, err = tx.Exec(`INSERT INTO external_links(project_id,provider,connection_id,external_type,external_id,finance_type,finance_id,metadata_json,last_seen_at) VALUES(?,?,?,'transaction',?,'transaction',?,?,?)
+ ON CONFLICT(project_id,provider,connection_id,external_type,external_id) DO UPDATE SET finance_id=excluded.finance_id,metadata_json=excluded.metadata_json,last_seen_at=excluded.last_seen_at`, projectID(ctx), provider, strconv.FormatInt(connID, 10), link.ExternalID+":"+bt.ExternalID, id, string(meta), time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		return 0, 0, err
+	}
+	if err = tx.Commit(); err != nil {
 		return 0, 0, err
 	}
 	return 1, 0, nil
 }
 
 func bankingTxnKind(bt bankingTxn) string {
-	text := strings.ToLower(bt.Payee + " " + bt.Memo)
-	if strings.Contains(text, "fee") || strings.Contains(text, "charge") {
-		return "fee"
-	}
-	if strings.Contains(text, "tax") {
-		return "tax"
-	}
 	if bt.AmountMinor >= 0 {
 		return "income"
+	}
+	text := " " + strings.ToLower(bt.Payee+" "+bt.Memo) + " "
+	if strings.Contains(text, " fee ") || strings.Contains(text, " charge ") {
+		return "fee"
+	}
+	if strings.Contains(text, " tax ") {
+		return "tax"
 	}
 	return "expense"
 }
 
 func reconcileBankingBalance(ctx *sdk.AppCtx, provider string, connID int64, acc Account, reported int64, dry bool) (int, int, error) {
-	current := mustCashBalance(ctx, acc.ID, acc.OpeningBalance)
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+	var current int64
+	err = tx.QueryRow(`SELECT opening_balance+COALESCE((SELECT SUM(amount) FROM transactions WHERE account_id=accounts.id AND pending=0 AND kind!='valuation'),0) FROM accounts WHERE id=? AND project_id=?`, acc.ID, projectID(ctx)).Scan(&current)
+	if err != nil {
+		return 0, 0, err
+	}
 	delta := reported - current
 	if delta == 0 {
 		return 0, 1, nil
@@ -944,24 +1002,25 @@ func reconcileBankingBalance(ctx *sdk.AppCtx, provider string, connID int64, acc
 	}
 	day := time.Now().UTC().Format("2006-01-02")
 	externalID := provider + ":balance-reconcile:" + strconv.FormatInt(connID, 10) + ":" + day
+	var id, previous int64
+	err = tx.QueryRow(`SELECT id,amount FROM transactions WHERE account_id=? AND external_id=?`, acc.ID, externalID).Scan(&id, &previous)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, err
+	}
+	amount := previous + delta
 	kind := "deposit"
-	if delta < 0 {
+	if amount < 0 {
 		kind = "withdraw"
 	}
-	if txnExternalIDExists(ctx, acc.ID, externalID) {
-		return 0, 1, nil
+	if id != 0 {
+		_, err = tx.Exec(`UPDATE transactions SET amount=?,kind=?,posted_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, amount, kind, time.Now().UTC().Format(time.RFC3339), id)
+	} else {
+		_, err = insertTxnTx(tx, txnIn{AccountID: acc.ID, PostedAt: time.Now().UTC().Format(time.RFC3339), Kind: kind, Amount: amount, Currency: acc.Currency, Payee: "Bank balance reconciliation", Memo: "Imported balance adjustment", ExternalID: externalID})
 	}
-	_, err := insertTxn(ctx, txnIn{
-		AccountID:  acc.ID,
-		PostedAt:   time.Now().UTC().Format(time.RFC3339),
-		Kind:       kind,
-		Amount:     delta,
-		Currency:   acc.Currency,
-		Payee:      "Bank balance reconciliation",
-		Memo:       "Imported balance adjustment",
-		ExternalID: externalID,
-	})
 	if err != nil {
+		return 0, 0, err
+	}
+	if err = tx.Commit(); err != nil {
 		return 0, 0, err
 	}
 	return 1, 0, nil
@@ -1016,4 +1075,9 @@ func (a *App) handleBankingSync(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleBankingUnlink(w http.ResponseWriter, r *http.Request) {
 	postBody(w, r, a.toolBankingUnlink)
+}
+
+// Provider onboarding guidance is shared by the HTTP panel and MCP consumers.
+func bankingProviderGuidance() map[string]any {
+	return map[string]any{"open-banking-io": map[string]string{"url": "https://open-banking.io", "label": "Connect or renew bank access", "description": "Link your banks in Open Banking Access, then return and click Discover. Sync linked refreshes bank data before importing. This provider supports account data only."}}
 }

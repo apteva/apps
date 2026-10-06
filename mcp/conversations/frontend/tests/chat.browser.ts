@@ -9,6 +9,7 @@ for (const host of ["dashboard", "external"]) {
   await emit(activity);
   const row=page.locator(".chat-tool-activity");
   await expect(row).toHaveCount(1);await expect(row).toHaveAttribute("aria-label",/Running/);
+  expect(await row.locator(".chat-tool-copy").first().evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-tool-copy-breathe");
   await page.setViewportSize({width:390,height:800});
   await page.screenshot({path:test.info().outputPath("live-tool-mobile.png")});
   await expect(page.getByRole("button",{name:"Ask the agent to pause and reconsider"})).toBeEnabled();
@@ -17,10 +18,19 @@ for (const host of ["dashboard", "external"]) {
   await page.getByRole("textbox").fill("");
   await emit({...activity,status:"completed",ended_at:new Date().toISOString(),revision:2});
   await expect(row).toHaveAttribute("aria-label",/Done/);
+  // History without an active response must remain settled.
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(page.getByRole("status",{name:"Preparing response…",exact:true})).toHaveCount(0);
   // Delayed snapshots/events cannot regress the completed row.
   await emit(activity);await expect(row).toHaveAttribute("aria-label",/Done/);
+  // History without an active response must remain settled.
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(page.getByRole("status",{name:"Preparing response…",exact:true})).toHaveCount(0);
   await emit({...activity,status:"completed",ended_at:new Date().toISOString(),revision:2});
   await page.reload();await expect(row).toHaveAttribute("aria-label",/Done/);
+  // History without an active response must remain settled.
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(page.getByRole("status",{name:"Preparing response…",exact:true})).toHaveCount(0);
   await expect(row).toHaveCount(1);
   await emit({...activity,id:72,call_id:"tool-72",status:"failed",revision:2});
   await expect(row).toHaveAttribute("aria-label",/failed/i);
@@ -36,6 +46,33 @@ for (const host of ["dashboard", "external"]) {
   await page.screenshot({path:test.info().outputPath("original-tools-expanded.png")});
   await emit({...activity,id:99,chat_id:"another-chat",reason:"Must not appear"});
   await expect(page.getByText("Must not appear")).toHaveCount(0);
+ });
+}
+
+for (const host of ["dashboard", "external", "package"]) {
+ test(`${host}: many tool sources keep the latest icon in front and expand to every source`, async ({page,request}) => {
+  await request.post("/reset");await page.goto(`/?host=${host}`);
+  await expect(page.getByTitle("Live")).toBeVisible();
+  const chat=host==="dashboard"?"chat-operator":"chat-visitor-a";
+  const names=["tasks_list","storage_files_list","apteva-server_apps_list","processes_start"];
+  for (const [index,name] of names.entries()) {
+   const activity={id:810+index,chat_id:chat,agent_id:41,thread_id:chat,call_id:`source-${index}`,name,reason:`Step ${index+1}`,status:index===3?"running":"completed",started_at:new Date(Date.now()+index*100).toISOString(),ended_at:index===3?"":new Date(Date.now()+index*100+20).toISOString(),revision:1};
+   await request.post("/emit",{data:{chat_id:chat,agent_id:41,tool_activity:activity}});
+  }
+  const row=page.locator(".chat-tool-activity");
+  await expect(row).toHaveCount(1);
+  await expect(row.locator(".chat-tool-copy").first()).toHaveText("Step 4");
+  const icons=row.getByRole("button").first().locator(".chat-tool-icon");
+  await expect(icons).toHaveCount(2);
+  await expect(icons.first()).toHaveAttribute("title","Apteva");
+  await expect(icons.last()).toHaveAttribute("title","Processes");
+  await page.setViewportSize({width:390,height:800});
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  await page.screenshot({path:test.info().outputPath("tool-sources-stacked-mobile.png")});
+  await row.getByRole("button").first().click();
+  await expect(row.locator("[id^=tools-] > div")).toHaveCount(4);
+  await expect(row.locator("[id^=tools-] .chat-tool-icon")).toHaveCount(4);
+  expect(await row.locator("[id^=tools-] .chat-tool-icon").evaluateAll(icons=>icons.map(icon=>icon.getAttribute("title")))).toEqual(["Tasks","Storage","Apteva","Processes"]);
  });
 }
 
@@ -145,6 +182,25 @@ for(const host of ["dashboard","external"]){
   const calls=await (await request.get("/requests")).json();const own=calls.filter((c:any)=>c.bearer===(host==="external"));expect(own.some((c:any)=>c.path.endsWith("/messages")&&c.method==="POST")).toBe(true);
   expect(own.every((c:any)=>c.query.install_id==="7"&&c.query.project_id==="project")).toBe(true);
   if(host==="external")expect(own.every((c:any)=>!c.cookie)).toBe(true);
+ });
+}
+
+for (const surface of ["dashboard", "external", "panel"] as const) {
+ test(`${surface}: composer has breathing room below its rounded box`, async ({page,request}) => {
+  await request.post("/reset");
+  if(surface==="panel") await request.post("/seed-panel",{data:[{id:"chat-operator",project_id:"project",lead_agent_id:41,title:"Support chat",kind:"direct",audience:"operator",origin:"web",created_at:"",updated_at:""}]});
+  for (const width of [390, 1280]) {
+   await page.setViewportSize({width, height:800});
+   await page.goto(surface==="external"?"/?host=external":surface==="panel"?"/?host=dashboard&surface=panel":"/?host=dashboard");
+   if (surface==="panel" && width===390) await page.getByRole("button", {name:/Support chat/}).click();
+   const geometry = await page.locator(".chat-composer-safe:visible").first().evaluate(footer => {
+    const box = footer.querySelector(".chat-composer-box")!.getBoundingClientRect();
+    const edge = footer.getBoundingClientRect();
+    return {gap:edge.bottom-box.bottom, footerBottom:edge.bottom};
+   });
+   expect(geometry.gap).toBeGreaterThanOrEqual(23);
+   expect(geometry.footerBottom).toBeLessThanOrEqual(800);
+  }
  });
 }
 
@@ -289,5 +345,227 @@ for (const host of ["dashboard", "external"]) {
    const distance=await box.evaluate(el=>el.querySelector(".chat-composer-add")!.getBoundingClientRect().top-el.querySelector("textarea")!.getBoundingClientRect().top);
    if(layout==="compact")expect(Math.abs(distance)).toBeLessThan(2);else expect(distance).toBeGreaterThan(30);
   }
+ });
+}
+
+for (const host of ["dashboard", "external", "package"]) {
+ test(`${host}: single-line stays fixed with French, multiline drafts and image sends`, async ({page,request}) => {
+  await request.post("/reset");
+  await page.addInitScript(() => { (window as any).COMPOSER_OPTIONS = {layout:"single-line"}; });
+  await page.goto(`/?host=${host}&locale=fr-FR&theme=clean`);
+  const input=page.getByRole("textbox");
+  await expect(input).toHaveAttribute("placeholder","Écrivez à l’agent…");
+  const geometry=()=>page.locator(".chat-composer-box").evaluate(el=>{
+   const rect=(selector:string)=>el.querySelector(selector)!.getBoundingClientRect().toJSON();
+   return {input:rect("textarea"),add:rect(".chat-composer-add"),send:rect(".chat-composer-send")};
+  });
+  for(const width of [1280,390,320]) {
+   await page.setViewportSize({width,height:800});
+   await input.fill("Bonjour, pouvez-vous examiner cette image ? ".repeat(20)+"\nDeuxième ligne");
+   const box=await geometry();
+   expect(box.input.height).toBe(24);
+   expect(Math.abs(box.input.y+12-box.add.y-box.add.height/2)).toBeLessThan(2);
+   expect(Math.abs(box.input.y+12-box.send.y-box.send.height/2)).toBeLessThan(2);
+   expect(box.add.right).toBeLessThanOrEqual(box.input.x);
+   expect(box.input.right).toBeLessThanOrEqual(box.send.x);
+   expect(await input.evaluate(el=>el.scrollHeight>el.clientHeight)).toBe(true);
+   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  }
+  await input.fill("Première ligne");await input.press("End");await input.press("Shift+Enter");await input.pressSequentially("Deuxième ligne");
+  await expect(input).toHaveValue("Première ligne\nDeuxième ligne");
+  await page.locator('input[type="file"]').setInputFiles({name:"chaton.png",mimeType:"image/png",buffer:Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6ZRkAAAAASUVORK5CYII=","base64")});
+  await expect(page.locator(".chat-attachment-chip img")).toBeVisible();
+  expect((await geometry()).input.height).toBe(24);
+  await page.screenshot({path:test.info().outputPath("single-line-french-image.png")});
+  const sendRequest=page.waitForRequest(req=>req.method()==="POST"&&new URL(req.url()).pathname.endsWith("/messages"));
+  await input.press("Enter");
+  const body=(await sendRequest).postDataJSON();
+  expect(body.content).toBe("Première ligne\nDeuxième ligne");expect(body.attachments).toHaveLength(1);
+  await expect(page.locator(".chat-message-photo img")).toBeVisible();
+  await expect(input).toHaveValue("");
+  await page.reload();
+  await expect(page.locator(".chat-message-photo img")).toBeVisible();
+  expect((await geometry()).input.height).toBe(24);
+ });
+}
+
+for (const host of ["external","package"]) {
+ test(`${host}: late progress frames do not move a transcript the user scrolled away from`, async ({page,request}) => {
+  await request.post("/reset"); await request.post("/seed", {data:{}});
+  await page.setViewportSize({width:390,height:500});
+  await page.goto(`/?host=${host}`);
+  const transcript = page.locator(".chat-transcript");
+  await expect(transcript).toBeVisible();
+  const chat = host === "dashboard" ? "chat-operator" : "chat-visitor-a";
+  for (let index = 0; index < 12; index++) await request.post("/append-message", {data:{id:100 + index,conversation_id:chat,role:"agent",agent_id:41,content:`Scroll fixture ${index} — ${"content ".repeat(18)}`,components:[],created_at:new Date().toISOString()}});
+  await expect(page.getByText("Scroll fixture 11")).toBeVisible();
+  const before = await transcript.evaluate(element => {
+   element.scrollTop = Math.max(1, Math.floor((element.scrollHeight - element.clientHeight) / 2));
+   element.dispatchEvent(new Event("scroll"));
+   return element.scrollTop;
+  });
+  expect(before).toBeGreaterThan(0);
+  await request.post("/emit", {data:{chat_id:chat,agent_id:41,thread_id:chat,response_progress:{phase:"thinking",run_id:"scroll-test",revision:1,started_at:new Date().toISOString()}}});
+  await expect.poll(() => transcript.evaluate(element => element.scrollTop)).toBe(before);
+  await transcript.evaluate(element => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event("scroll")); });
+  await request.post("/emit", {data:{chat_id:chat,agent_id:41,thread_id:chat,response_progress:{phase:"continuing",run_id:"scroll-test",revision:2,started_at:new Date().toISOString()}}});
+  await expect.poll(() => transcript.evaluate(element => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(80);
+ });
+}
+
+for (const host of ["dashboard","external","package"]) {
+ test(`${host}: preparation pulses, a 50ms tool settles through a long model wait, and approval waiting stops activity`,async({page,request})=>{
+  await request.post("/reset");await page.goto(`/?host=${host}`);
+  await expect(page.getByTitle("Live")).toBeVisible();
+  const chat=host==="dashboard"?"chat-operator":"chat-visitor-a";
+  const start=new Date(Date.now()-1000).toISOString();
+  const frame={chat_id:chat,agent_id:41,thread_id:chat,call_id:"",text:"",done:false};
+  const progress={run_id:"response-1",revision:1,after_message_id:0,started_at:start,phase:"thinking"};
+  const phase=async(phase:string,revision:number,extra={})=>request.post("/emit",{data:{...frame,response_progress:{...progress,phase,revision,...extra}}});
+  await phase("thinking",1);
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
+  await phase("preparing_tool",2,{tool_name:"code_repos_list",call_id:"call-1"});
+  const row=page.locator(".chat-tool-activity");
+  await expect(row).toHaveCount(1);
+  await expect(row).toHaveAttribute("aria-label",/Preparing/);
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toHaveCount(0);
+  expect(await row.locator(".chat-tool-copy").first().evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-tool-copy-breathe");
+  await page.screenshot({path:test.info().outputPath("preparing-tool.png")});
+  const activity={id:501,chat_id:chat,agent_id:41,thread_id:chat,call_id:"call-1",name:"code_repos_list",reason:"Listing repositories",status:"running",started_at:new Date().toISOString(),ended_at:"",revision:1};
+  await request.post("/emit",{data:{...frame,tool_activity:activity}});await phase("running",3);
+  await expect(row).toHaveCount(1);await expect(row).toHaveAttribute("aria-label",/Running/);
+  expect(await row.locator(".chat-tool-copy").first().evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-tool-copy-breathe");
+  await request.post("/emit",{data:{...frame,tool_activity:{...activity,status:"completed",ended_at:new Date().toISOString(),duration_ms:50,revision:2}}});
+  await expect(row).toHaveAttribute("aria-label",/Done/);
+  // A completed call settles; the next model step owns the indicator.
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
+  await phase("continuing",4);
+  await expect(row.getByText("Listing repositories",{exact:true})).toBeVisible();
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(row).toHaveAttribute("aria-label",/Done/);
+  await expect(row.getByText("50ms",{exact:true})).toHaveCount(0);
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
+  // Reproduce the production gap after the 50ms result without spending
+  // another 28 seconds executing (or animating) an already completed tool.
+  await page.clock.install(); await page.clock.fastForward(28_400);
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(row).toHaveAttribute("aria-label",/Done/);
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
+  await page.screenshot({path:test.info().outputPath("continuing-tool.png")});
+  await phase("idle",5);
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toHaveCount(0);
+  await expect(page.getByRole("button",{name:"Send",exact:true})).toBeDisabled();
+  // An approval verdict begins a new turn. Existing tool history stays done.
+  await phase("thinking",6,{run_id:"response-2",started_at:new Date().toISOString()});
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+ });
+}
+
+for (const host of ["dashboard","external","package"]) {
+ test(`${host}: send responds immediately and failed delivery clears the local indicator`,async({page,request})=>{
+  await request.post("/reset");await page.goto(`/?host=${host}`);
+  await expect(page.getByTitle("Live")).toBeVisible();
+  const chat=host==="dashboard"?"chat-operator":"chat-visitor-a";
+  // Completion of the previous turn must not hide the next optimistic state.
+  await request.post("/emit",{data:{chat_id:chat,agent_id:41,thread_id:chat,call_id:"",text:"",done:false,response_progress:{phase:"idle",run_id:"old",revision:1,started_at:new Date(Date.now()-1000).toISOString(),after_message_id:0}}});
+  let release!:()=>void;
+  const pending=new Promise<void>(resolve=>{release=resolve;});
+  await page.route("**/messages?**",async route=>{
+   if(route.request().method()!=="POST")return route.continue();
+   await pending;await route.fulfill({status:500,body:"delivery unavailable"});
+  });
+  await page.locator("textarea").fill("Hello");await page.getByRole("button",{name:"Send",exact:true}).click();
+  await expect(page.getByRole("status",{name:"Preparing response…",exact:true})).toBeVisible();
+  release();
+  await expect(page.getByRole("status",{name:"Preparing response…",exact:true})).toHaveCount(0);
+ });
+ test(`${host}: running parallel calls pulse; completed groups yield to thinking`,async({page,request})=>{
+  await request.post("/reset");await page.goto(`/?host=${host}`);
+  await expect(page.getByTitle("Live")).toBeVisible();
+  const chat=host==="dashboard"?"chat-operator":"chat-visitor-a";
+  const start=new Date(Date.now()-1000).toISOString();
+  const frame={chat_id:chat,agent_id:41,thread_id:chat,call_id:"",text:"",done:false};
+  // Legacy acknowledgement frames must also transfer ownership to tool rows.
+  await request.post("/emit",{data:{...frame,call_id:"ack-1",phase:"acknowledgement",created_at:start}});
+  const activity={id:601,chat_id:chat,agent_id:41,thread_id:chat,call_id:"parallel-1",name:"code_repos_list",reason:"Listing repositories",status:"running",started_at:new Date().toISOString(),ended_at:"",revision:1};
+  await request.post("/emit",{data:{...frame,tool_activity:activity}});
+  await request.post("/emit",{data:{...frame,tool_activity:{...activity,id:602,call_id:"parallel-2",reason:"Checking repository"}}});
+  await request.post("/emit",{data:{...frame,tool_activity:{...activity,status:"completed",ended_at:new Date().toISOString(),duration_ms:50,revision:2}}});
+  const row=page.locator(".chat-tool-activity");
+  await expect(row).toHaveCount(1);await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1);
+  await request.post("/emit",{data:{...frame,tool_activity:{...activity,id:602,call_id:"parallel-2",reason:"Checking repository",status:"completed",ended_at:new Date().toISOString(),duration_ms:64,revision:2}}});
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  // Once every parallel call finishes, model work owns Thinking even before
+  // an intermediate reply moves the transcript tail away from the tool group.
+  await request.post("/emit",{data:{...frame,response_progress:{phase:"continuing",run_id:"ack-1",revision:1,started_at:start,after_message_id:0}}});
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
+  await request.post("/append-message",{data:{id:900,conversation_id:chat,role:"agent",agent_id:41,phase:"intermediate",content:"I am checking the next step.",components:[],created_at:new Date().toISOString()}});
+  await expect(page.getByText("I am checking the next step.")).toBeVisible();
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
+  await request.post("/emit",{data:{...frame,response_progress:{phase:"idle",run_id:"ack-1",revision:2,started_at:start,after_message_id:0}}});
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+ });
+}
+
+
+for (const host of ["dashboard","external","package"]) {
+ test(`${host}: consecutive tool calls stay on one line across long gaps and reload`,async({page,request})=>{
+  await request.post("/reset");await page.goto(`/?host=${host}`);
+  await expect(page.getByTitle("Live")).toBeVisible();
+  const chat=host==="dashboard"?"chat-operator":"chat-visitor-a";
+  const start=Date.now()-180000;
+  const activity={id:701,chat_id:chat,agent_id:41,thread_id:chat,call_id:"first",name:"code_repos_list",reason:"Inspecting app repository",status:"completed",started_at:new Date(start).toISOString(),ended_at:new Date(start+100).toISOString(),duration_ms:100,revision:2};
+  const emit=(tool:any)=>request.post("/emit",{data:{chat_id:chat,agent_id:41,tool_activity:tool}});
+  await emit(activity);
+  const row=page.locator(".chat-tool-activity");
+  await expect(row).toHaveCount(1);
+  await emit({...activity,id:702,call_id:"second",reason:"Verifying React project files",started_at:new Date(start+120000).toISOString(),ended_at:new Date(start+120200).toISOString(),duration_ms:200});
+  await expect(row).toHaveCount(1);
+  await expect(row.getByText("Verifying React project files",{exact:true})).toBeVisible();
+  await expect(row.getByText("+1",{exact:true})).toBeVisible();
+  await expect(row.getByText("300ms",{exact:true})).toHaveCount(0);
+  await row.getByRole("button").first().click();
+  await expect(row.locator("[id^=tools-] > div")).toHaveCount(2);
+  await page.reload();await expect(row).toHaveCount(1);
+  await expect(row.getByText("+1",{exact:true})).toBeVisible();
+  // A real message is the boundary; elapsed time alone never is.
+  await request.post("/append-message",{data:{id:901,conversation_id:chat,role:"agent",agent_id:41,content:"The files are ready.",components:[],created_at:new Date(start+130000).toISOString()}});
+  await emit({...activity,id:703,call_id:"third",reason:"Checking the build",started_at:new Date(start+140000).toISOString(),ended_at:new Date(start+140100).toISOString()});
+  await expect(row).toHaveCount(2);
+  await expect(page.getByText("The files are ready.")).toBeVisible();
+ });
+}
+
+
+for (const host of ["dashboard","external","package"]) {
+ test(`${host}: internal lookup and parent-thread send stay hidden live and after reload`,async({page,request})=>{
+  await request.post("/reset");await page.goto(`/?host=${host}`);
+  await expect(page.getByTitle("Live")).toBeVisible();
+  const chat=host==="dashboard"?"chat-operator":"chat-visitor-a";
+  const frame={chat_id:chat,agent_id:41,thread_id:chat,call_id:"",text:"",done:false};
+  const activity={id:801,chat_id:chat,agent_id:41,thread_id:chat,call_id:"lookup",name:"search_tools",reason:"Internal capability lookup",status:"running",started_at:new Date().toISOString(),ended_at:"",revision:1};
+  await request.post("/emit",{data:{...frame,response_progress:{phase:"preparing_tool",tool_name:"search_tools",call_id:"lookup",run_id:"turn",revision:1,after_message_id:0,started_at:activity.started_at}}});
+  await request.post("/emit",{data:{...frame,tool_activity:activity}});
+  await expect(page.locator(".chat-tool-activity")).toHaveCount(0);
+  await request.post("/emit",{data:{...frame,tool_activity:{...activity,status:"completed",ended_at:new Date().toISOString(),revision:2}}});
+  await request.post("/emit",{data:{...frame,response_progress:{phase:"preparing_tool",tool_name:"send",call_id:"parent-report",run_id:"turn",revision:2,after_message_id:0,started_at:activity.started_at}}});
+  await request.post("/emit",{data:{...frame,tool_activity:{...activity,id:803,call_id:"parent-report",name:"send",reason:"Reporting repository results",status:"completed",revision:2}}});
+  await expect(page.locator(".chat-tool-activity")).toHaveCount(0);
+  await request.post("/emit",{data:{...frame,tool_activity:{...activity,id:802,call_id:"search",name:"tickets_search",reason:"Searching tickets"}}});
+  await expect(page.locator(".chat-tool-activity")).toHaveCount(1);
+  await expect(page.getByText("Searching tickets",{exact:true})).toBeVisible();
+  await expect(page.getByText("Internal capability lookup",{exact:true})).toHaveCount(0);
+  await expect(page.getByText("Reporting repository results",{exact:true})).toHaveCount(0);
+  await expect(page.locator(".chat-tool-activity").getByText("+1",{exact:true})).toHaveCount(0);
+  await page.reload();
+  await expect(page.locator(".chat-tool-activity")).toHaveCount(1);
+  await expect(page.getByText("Searching tickets",{exact:true})).toBeVisible();
+  await expect(page.getByText("Internal capability lookup",{exact:true})).toHaveCount(0);
+  await expect(page.getByText("Reporting repository results",{exact:true})).toHaveCount(0);
  });
 }

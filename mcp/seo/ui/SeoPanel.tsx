@@ -136,9 +136,19 @@ interface KeywordMetricJob {
   incomplete_keywords: number;
   volume_completed: number;
   difficulty_completed: number;
+  volume_unavailable: number;
+  difficulty_unavailable: number;
   last_error?: string;
   created_at: number;
   updated_at: number;
+}
+
+interface KeywordRefreshResult {
+  status: "completed" | "partial";
+  available: string[];
+  unavailable: string[];
+  provider: string;
+  last_refreshed_at: number;
 }
 
 interface Ranking {
@@ -236,8 +246,16 @@ interface KeywordIdea {
 
 interface ContentOpportunity {
   search_engine: string;
+  provider: string;
+  keyword_id?: number | null;
   keyword: string;
-  opportunity_score?: number;
+  location_id: number;
+  location_name: string;
+  country_iso?: string | null;
+  language_code: string;
+  metrics_status: "available" | "partial" | "unavailable";
+  metrics_last_refreshed_at?: number | null;
+  opportunity_score?: number | null;
   result_count?: number;
   top10_count?: number;
   latest_ts?: number;
@@ -715,7 +733,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     setBusy(true);
     setErr("");
     try {
-      await api<Record<string, unknown>>("POST", `/keywords/${keyword.id}/refresh`, {
+      const result = await api<KeywordRefreshResult>("POST", `/keywords/${keyword.id}/refresh`, {
         location_id: String(keyword.location_id),
         ...(provider ? { provider } : {}),
       });
@@ -723,8 +741,12 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
       setSelectedKeyword(keyword);
       const detail = await callTool<{ keyword: Keyword; metrics: KeywordMetrics | null }>("keywords_get", { id: keyword.id, ...(provider ? { provider } : {}) });
       setKeywordMetrics(detail.metrics || null);
-      setStatus("Keyword refreshed");
-      pushActivity(`Keyword refreshed: ${keyword.text}`);
+      const unavailable = result.unavailable || [];
+      const message = result.status === "partial"
+        ? `Keyword refreshed; ${unavailable.join(" and ") || "some metrics"} unavailable from provider`
+        : "Keyword refreshed";
+      setStatus(message);
+      pushActivity(`${message}: ${keyword.text}`);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -748,9 +770,11 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
       mergeMetricJobs(jobs);
     }
     await Promise.all([reloadKeywords(), reloadMetricJobs()]);
-    const incomplete = jobs.filter((job) => job.status !== "completed");
-    if (incomplete.length > 0) {
-      throw new Error(incomplete.map((job) => job.last_error || `Metric job ${job.id} is ${job.status}`).join("\n"));
+    const failed = jobs.filter((job) =>
+      job.status === "failed" || (job.status === "partial" && job.phase !== "provider_no_data"),
+    );
+    if (failed.length > 0) {
+      throw new Error(failed.map((job) => job.last_error || `Metric job ${job.id} failed`).join("\n"));
     }
     return jobs;
   }
@@ -780,8 +804,12 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
       { keyword_ids: rows.map((keyword) => keyword.id), ...(provider ? { provider } : {}) },
     );
     const jobs = await waitForMetricJobs(response.jobs || []);
-    setStatus(`Refreshed volume and difficulty for ${fmt(rows.length)} keywords`);
-    pushActivity(`Refreshed volume and difficulty for ${fmt(rows.length)} keywords`);
+    const partial = jobs.reduce((total, job) => total + (job.incomplete_keywords || 0), 0);
+    const message = partial > 0
+      ? `Refreshed ${fmt(rows.length)} keywords; ${fmt(partial)} returned partial provider data`
+      : `Refreshed volume and difficulty for ${fmt(rows.length)} keywords`;
+    setStatus(message);
+    pushActivity(message);
     return jobs;
   }
 
@@ -802,8 +830,8 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     setErr("");
     try {
       await api<Record<string, unknown>>("POST", `/keyword-metric-jobs/${job.id}/resume`);
-      await waitForMetricJobs([{ ...job, status: "pending", phase: "queued", last_error: "" }]);
-      setStatus(`Metric job ${job.id} completed`);
+      const [result] = await waitForMetricJobs([{ ...job, status: "pending", phase: "queued", last_error: "" }]);
+      setStatus(result.status === "partial" ? `Metric job ${job.id} remains partial` : `Metric job ${job.id} completed`);
       pushActivity(`Resumed metric job ${job.id}`);
     } catch (e) {
       setErr((e as Error).message);
@@ -1485,6 +1513,7 @@ function IdeasTable({ ideas }: { ideas: KeywordIdea[] }) {
           <thead className="bg-surface-2 text-text-dim">
             <tr>
               <th className="text-left font-medium px-3 py-2">Keyword</th>
+              <th className="text-left font-medium px-3 py-2">Locale</th>
               <th className="text-left font-medium px-3 py-2 w-24">Score</th>
               <th className="text-left font-medium px-3 py-2">Examples</th>
             </tr>
@@ -1522,9 +1551,14 @@ function OpportunitiesTable({ rows }: { rows: ContentOpportunity[] }) {
           </thead>
           <tbody>
             {rows.map((row) => (
-              <tr key={row.keyword} className="border-t border-border align-top">
+              <tr key={`${row.provider}-${row.location_id}-${row.keyword}`} className="border-t border-border align-top">
                 <td className="px-3 py-2 font-medium">{row.keyword}</td>
-                <td className="px-3 py-2 tabular-nums">{fmt(row.opportunity_score)}</td>
+                <td className="px-3 py-2 text-text-dim">
+                  {row.location_name} · {[row.country_iso, row.language_code].filter(Boolean).join("/")} · {row.provider}
+                </td>
+                <td className="px-3 py-2 tabular-nums">
+                  {row.metrics_status === "available" ? fmt(row.opportunity_score) : "Unavailable"}
+                </td>
                 <td className="px-3 py-2 tabular-nums">{fmt(row.top10_count)} / {fmt(row.result_count)}</td>
                 <td className="px-3 py-2 text-text-dim">
                   <div>{(row.example_titles || []).slice(0, 3).join(" / ") || "-"}</div>
@@ -2327,7 +2361,8 @@ function SeedView(props: {
                 <span className="text-xs text-text-dim">Volume and difficulty</span>
               </div>
               {props.metricJobs.slice(0, 5).map((job) => {
-                const fieldsDone = job.volume_completed + job.difficulty_completed;
+                const fieldsDone = job.volume_completed + job.difficulty_completed +
+                  (job.volume_unavailable || 0) + (job.difficulty_unavailable || 0);
                 const totalFields = Math.max(1, job.total_keywords * 2);
                 const progress = Math.min(100, Math.round((fieldsDone / totalFields) * 100));
                 const resumable = job.status === "partial" || job.status === "failed";
@@ -2341,7 +2376,12 @@ function SeedView(props: {
                       <div className="h-full bg-accent" style={{ width: `${progress}%` }} />
                     </div>
                     <div className="flex items-center justify-between gap-3 text-xs text-text-dim">
-                      <span>Volume {job.volume_completed}/{job.total_keywords} - Difficulty {job.difficulty_completed}/{job.total_keywords}</span>
+                      <span>
+                        Volume {job.volume_completed}/{job.total_keywords}
+                        {job.volume_unavailable ? ` (${job.volume_unavailable} unavailable)` : ""}
+                        {" - "}Difficulty {job.difficulty_completed}/{job.total_keywords}
+                        {job.difficulty_unavailable ? ` (${job.difficulty_unavailable} unavailable)` : ""}
+                      </span>
                       {resumable && (
                         <button type="button" className={buttonCls} disabled={props.busy} onClick={() => props.onResume(job)}>
                           Resume missing

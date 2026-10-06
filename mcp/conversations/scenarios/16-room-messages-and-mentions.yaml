@@ -1,0 +1,16 @@
+name: conversations-room-messages-and-mentions
+timeout: 22m
+max_iterations: 150
+setup:
+  app:
+    path: .
+  agents: 2
+  driver: ["go", "-C", "..", "test", "-tags=scenario", "-run", "^TestScenario_RoomMessagesAndMentions$", "-v", "-count=1", "-timeout=21m", "."]
+directive: |
+  You are a helpful assistant. Answer conversational requests briefly and directly.
+  All operations here use isolated test data.
+budget:
+  total_tokens: 600000
+trajectory_assert:
+  - tool_called: conversations_send
+  - tool_called: conversations_history

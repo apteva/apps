@@ -6,7 +6,7 @@
 // Layout: left rail = list of tables (with row counts), main area =
 // selected table's row grid, bottom drawer = SELECT escape hatch.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   parseJSON,
   stringifyJSON,
@@ -143,6 +143,23 @@ interface QueryResponse {
 
 const API = "/api/apps/tables";
 const PAGE_SIZE = 50;
+type PanelApi = <T>(method: string, path: string, params?: Record<string, string>, body?: unknown, signal?: AbortSignal) => Promise<T>;
+
+type RowFilter = { col: string; op: string; value: unknown };
+
+function formatRowCount(value: number): string {
+  return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(value);
+}
+
+function formatDate(value: unknown): string {
+  if (typeof value !== "string" || !value) return "—";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
+}
 
 export default function TablesPanel({
   projectId,
@@ -151,6 +168,13 @@ export default function TablesPanel({
   const [selected, setSelected] = useState<string | null>(() =>
     new URLSearchParams(window.location.search).get("table"),
   );
+  const [surface, setSurface] = useState<"tables" | "projections">("tables");
+  const [tableSearch, setTableSearch] = useState("");
+  const [rowSearch, setRowSearch] = useState("");
+  const [filterColumn, setFilterColumn] = useState("");
+  const [filterValue, setFilterValue] = useState("");
+  const [filterApplied, setFilterApplied] = useState<RowFilter | null>(null);
+  const [orderBy, setOrderBy] = useState("");
   const [epoch, setEpoch] = useState(0);
   const [page, setPage] = useState(0);
   const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
@@ -238,7 +262,15 @@ export default function TablesPanel({
           undefined,
           signal,
         );
-        tables.push(...result.tables);
+        // Summary/list responses from older sidecars may omit the schema
+        // payload. Keep the workspace renderable while the selected table's
+        // full description is loaded below.
+        tables.push(
+          ...(result.tables ?? []).map((table) => ({
+            ...table,
+            columns: Array.isArray(table.columns) ? table.columns : [],
+          })),
+        );
         if (!result.has_more) break;
         offset = result.next_offset;
       } while (!signal.aborted);
@@ -261,29 +293,75 @@ export default function TablesPanel({
     : null;
   const visibleColumns = (selectedTable?.columns ?? []).slice(0, columnLimit);
   const visibleNames = visibleColumns.map((c) => c.name).join(",");
+  const rowSearchColumn = selectedTable?.columns.find((c) => c.type === "text");
   const rowKey = selectedTable
-    ? `${identity}:${selectedTable.id}:${page}:${cursors[page] ?? ""}:${visibleNames}`
+    ? `${identity}:${selectedTable.id}:${page}:${cursors[page] ?? ""}:${visibleNames}:${JSON.stringify(filterApplied)}:${orderBy}`
     : "";
-  const rowResource = useResource<RowsResponse>(rowKey, epoch, (signal) =>
-    api<RowsResponse>(
-      "GET",
-      `/tables/${selected}/rows`,
-      {
-        limit: String(PAGE_SIZE),
-        include_total: "false",
-        select: [
-          "id",
-          "_revision",
-          "updated_at",
-          ...visibleColumns.map((c) => c.name),
-        ].join(","),
-        ...(cursors[page] ? { cursor: cursors[page]! } : {}),
-      },
-      undefined,
+  const rowResource = useResource<RowsResponse>(rowKey, epoch, (signal) => {
+    const where = filterApplied ? [filterApplied] : [];
+    const params = {
+      limit: String(PAGE_SIZE),
+      include_total: "false",
+      select: [
+        "id",
+        "_revision",
+        "updated_at",
+        ...visibleColumns.map((c) => c.name),
+      ].join(","),
+      ...(orderBy ? { order_by: orderBy } : {}),
+      ...(cursors[page] ? { cursor: cursors[page]! } : {}),
+    };
+    return api<RowsResponse>(
+      where.length ? "POST" : "GET",
+      `/tables/${selected}/rows${where.length ? "/search" : ""}`,
+      params,
+      where.length ? { where } : undefined,
       signal,
-    ),
-  );
+    );
+  });
   const rows = rowResource.data?.rows ?? [];
+  const filteredTables = useMemo(() => {
+    const query = tableSearch.trim().toLowerCase();
+    if (!query) return tables;
+    return tables.filter((table) => table.name.toLowerCase().includes(query));
+  }, [tableSearch, tables]);
+  const resetRows = () => {
+    setPage(0);
+    setCursors([undefined]);
+    setEditing(null);
+  };
+  const applyQuickSearch = () => {
+    const value = rowSearch.trim();
+    if (!value || !rowSearchColumn) {
+      setFilterApplied(null);
+      resetRows();
+      return;
+    }
+    setFilterApplied({ col: rowSearchColumn.name, op: "contains", value });
+    resetRows();
+  };
+  const applyTypedFilter = () => {
+    const column = selectedTable?.columns.find((c) => c.name === filterColumn);
+    if (!column || !filterValue.trim()) return;
+    try {
+      const value = parseInputValue(column, filterValue.trim());
+      setFilterApplied({
+        col: column.name,
+        op: column.type === "text" ? "contains" : "eq",
+        value,
+      });
+      setRowSearch("");
+      resetRows();
+    } catch (error) {
+      setStatus((error as Error).message);
+    }
+  };
+  const clearFilter = () => {
+    setFilterApplied(null);
+    setRowSearch("");
+    setFilterValue("");
+    resetRows();
+  };
   const selectTable = (name: string) => {
     editRequest.current++;
     deepRow.current = null;
@@ -294,6 +372,11 @@ export default function TablesPanel({
     setPage(0);
     setCursors([undefined]);
     setEditing(null);
+    setRowSearch("");
+    setFilterColumn("");
+    setFilterValue("");
+    setFilterApplied(null);
+    setOrderBy("");
   };
   useEffect(() => {
     setPage(0);
@@ -306,6 +389,11 @@ export default function TablesPanel({
     setShowSchema(false);
     setShowApi(false);
     setStatus("");
+    setRowSearch("");
+    setFilterColumn("");
+    setFilterValue("");
+    setFilterApplied(null);
+    setOrderBy("");
   }, [identity]);
   useEffect(() => {
     if (!selected) return;
@@ -466,51 +554,121 @@ export default function TablesPanel({
     : null;
   const error = status || rowResource.error || description.error || list.error;
   return (
-    <div className="relative h-full flex min-h-0">
-      <aside className="w-56 shrink-0 border-r border-border flex flex-col">
-        <header className="p-3 flex justify-between">
-          <strong>Tables</strong>
-          <button onClick={() => setShowCreate(true)}>+ New</button>
+    <div className="relative h-full flex min-h-0 bg-bg">
+      <aside className="w-64 shrink-0 border-r border-border bg-bg-card flex flex-col">
+        <header className="p-4 border-b border-border">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-[11px] uppercase tracking-[0.16em] text-text-dim">Workspace</p>
+              <strong className="text-base text-text">Tables</strong>
+            </div>
+            <button
+              type="button"
+              className="rounded-md bg-accent px-2.5 py-1.5 text-xs font-medium text-bg hover:opacity-90"
+              onClick={() => setShowCreate(true)}
+            >
+              + New table
+            </button>
+          </div>
+          <label className="relative mt-3 block">
+            <span className="sr-only">Search tables</span>
+            <input
+              value={tableSearch}
+              onChange={(event) => setTableSearch(event.target.value)}
+              placeholder="Search tables…"
+              className="w-full rounded-md border border-border bg-bg-input px-3 py-2 text-sm text-text outline-none placeholder:text-text-dim focus:border-accent"
+            />
+          </label>
+          <div className="mt-3 flex items-center justify-between text-[11px] text-text-dim">
+            <span>{tables.length} tables</span>
+            <span>{tables.reduce((sum, table) => sum + table.row_count, 0).toLocaleString()} rows</span>
+          </div>
+          <nav className="mt-4 grid grid-cols-2 gap-1 rounded-md bg-bg-input/60 p-1" aria-label="Tables workspace">
+            <button type="button" onClick={() => setSurface("tables")} className={`rounded px-2 py-1.5 text-xs ${surface === "tables" ? "bg-bg-card font-medium text-text shadow-sm" : "text-text-dim hover:text-text"}`}>Data</button>
+            <button type="button" onClick={() => setSurface("projections")} className={`rounded px-2 py-1.5 text-xs ${surface === "projections" ? "bg-bg-card font-medium text-text shadow-sm" : "text-text-dim hover:text-text"}`}>Projections</button>
+          </nav>
         </header>
-        <ul className="overflow-auto flex-1">
-          {tables.map((t) => (
+        <ul className="overflow-auto flex-1 p-2">
+          {filteredTables.map((t) => (
             <li key={t.id}>
               <button
                 disabled={mutation}
                 onClick={() => selectTable(t.name)}
-                className={`w-full p-3 text-left ${selected === t.name ? "bg-accent/10" : ""}`}
+                className={`w-full rounded-md px-3 py-2.5 text-left transition-colors ${selected === t.name ? "bg-accent/10 text-text" : "text-text-muted hover:bg-bg-input/60 hover:text-text"}`}
               >
-                <span className="font-mono">{t.name}</span>{" "}
-                <small>{t.row_count}</small>
+                <span className="block truncate font-mono text-xs">{t.name}</span>
+                <span className="mt-1 block text-[11px] text-text-dim">{formatRowCount(t.row_count)} rows · {(t.columns ?? []).length} columns</span>
               </button>
             </li>
           ))}
+          {!filteredTables.length && <li className="p-4 text-center text-xs text-text-dim">No matching tables</li>}
         </ul>
       </aside>
       <main className="flex-1 flex flex-col min-w-0 min-h-0">
         {error && (
-          <div role="alert" className="p-3 text-red">
+          <div role="alert" className="border-b border-red/30 bg-red/10 px-4 py-2 text-xs text-red">
             {error}
           </div>
         )}
-        {selectedTable && gridTable ? (
+        {surface === "projections" ? (
+          <ProjectionWorkspace api={api} />
+        ) : selectedTable && gridTable ? (
           <>
-            <header className="p-3 border-b border-border flex gap-3 flex-wrap items-center">
-              <strong>{selectedTable.name}</strong>
-              <small>{selectedTable.row_count} rows</small>
-              <button disabled={mutation} onClick={() => setShowInsert(true)}>
-                + Insert
-              </button>
-              <button onClick={() => setShowQuery((v) => !v)}>Query</button>
-              <button disabled={mutation} onClick={() => setShowSchema(true)}>
-                Schema
-              </button>
-              <button onClick={() => setShowApi(true)}>API</button>
-              <button disabled={mutation} onClick={onDropTable}>
-                Drop
-              </button>
-              <label>
-                Columns{" "}
+            <header className="border-b border-border bg-bg-card px-5 py-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <h1 className="truncate text-lg font-semibold text-text">{selectedTable.name}</h1>
+                    <span className="rounded-full bg-bg-input px-2 py-0.5 text-[11px] text-text-dim">{selectedTable.scope}</span>
+                  </div>
+                  <p className="mt-1 text-xs text-text-dim">{formatRowCount(selectedTable.row_count)} rows · {selectedTable.columns.length} columns</p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button disabled={mutation} onClick={() => setShowInsert(true)} className="rounded-md bg-accent px-3 py-2 text-xs font-medium text-bg hover:opacity-90">+ Insert row</button>
+                  <button onClick={() => setShowQuery((v) => !v)} className="rounded-md border border-border px-3 py-2 text-xs text-text hover:bg-bg-input">SQL editor</button>
+                  <button disabled={mutation} onClick={() => setShowSchema(true)} className="rounded-md border border-border px-3 py-2 text-xs text-text hover:bg-bg-input">Schema</button>
+                  <button onClick={() => setShowApi(true)} className="rounded-md border border-border px-3 py-2 text-xs text-text hover:bg-bg-input">API</button>
+                  <button disabled={mutation} onClick={onDropTable} className="rounded-md px-2 py-2 text-xs text-red hover:bg-red/10" aria-label="More table actions">•••</button>
+                </div>
+              </div>
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                <form className="flex min-w-[15rem] flex-1 gap-2" onSubmit={(event) => { event.preventDefault(); applyQuickSearch(); }}>
+                  <input
+                    value={rowSearch}
+                    onChange={(event) => setRowSearch(event.target.value)}
+                    placeholder={rowSearchColumn ? `Search ${rowSearchColumn.name}…` : "Search rows…"}
+                    className="min-w-0 flex-1 rounded-md border border-border bg-bg-input px-3 py-2 text-xs text-text outline-none placeholder:text-text-dim focus:border-accent"
+                  />
+                  <button type="submit" className="rounded-md border border-border px-3 py-2 text-xs text-text hover:bg-bg-input">Search</button>
+                </form>
+                <select
+                  aria-label="Filter column"
+                  value={filterColumn}
+                  onChange={(event) => setFilterColumn(event.target.value)}
+                  className="rounded-md border border-border bg-bg-input px-2.5 py-2 text-xs text-text outline-none"
+                >
+                  <option value="">Filter by column…</option>
+                  {selectedTable.columns.map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}
+                </select>
+                <input
+                  aria-label="Filter value"
+                  value={filterValue}
+                  onChange={(event) => setFilterValue(event.target.value)}
+                  onKeyDown={(event) => { if (event.key === "Enter") applyTypedFilter(); }}
+                  placeholder="Value"
+                  className="w-32 rounded-md border border-border bg-bg-input px-2.5 py-2 text-xs text-text outline-none placeholder:text-text-dim focus:border-accent"
+                />
+                <button type="button" onClick={applyTypedFilter} disabled={!filterColumn || !filterValue.trim()} className="rounded-md border border-border px-3 py-2 text-xs text-text hover:bg-bg-input disabled:opacity-40">Add filter</button>
+                {filterApplied && <button type="button" onClick={clearFilter} className="rounded-full bg-accent/10 px-2.5 py-1.5 text-xs text-accent hover:bg-accent/20">{filterApplied.col} {filterApplied.op} · clear</button>}
+                <label className="ml-auto flex items-center gap-2 text-xs text-text-dim">
+                  Sort
+                  <select aria-label="Sort rows" value={orderBy} onChange={(event) => { setOrderBy(event.target.value); resetRows(); }} className="rounded-md border border-border bg-bg-input px-2.5 py-2 text-xs text-text outline-none">
+                    <option value="">Default</option>
+                    {selectedTable.columns.flatMap((column) => [<option key={`${column.name}-asc`} value={`${column.name} asc`}>{column.name} ↑</option>, <option key={`${column.name}-desc`} value={`${column.name} desc`}>{column.name} ↓</option>])}
+                  </select>
+                </label>
+                <label className="flex items-center gap-2 text-xs text-text-dim">
+                  Columns
                 <select
                   aria-label="Visible columns"
                   value={columnLimit}
@@ -525,45 +683,31 @@ export default function TablesPanel({
                     </option>
                   ))}
                 </select>
-              </label>
+                </label>
+              </div>
             </header>
             <div className="flex-1 overflow-auto">
               {rows.length ? (
                 <RowsTable
                   table={gridTable}
                   rows={rows}
-                  editingRow={activeEdit}
                   onEditStart={editRow}
-                  onEditCancel={() => setEditing(null)}
-                  onEditSave={onUpdate}
-                  onDelete={onDeleteRow}
+                  orderBy={orderBy}
+                  onSort={(value) => { setOrderBy(value); resetRows(); }}
                 />
               ) : (
-                <p className="p-8">
-                  {rowResource.busy ? "Loading…" : "No rows on this page."}
+                <p className="p-12 text-center text-sm text-text-dim">
+                  {rowResource.busy ? "Loading rows…" : filterApplied || rowSearch ? "No rows match this filter." : "No rows yet. Insert the first one to get started."}
                 </p>
               )}
             </div>
-            {activeEdit &&
-              !rows.some((r) => String(r.id) === String(activeEdit.id)) && (
-                <table className="w-full">
-                  <tbody>
-                    <RowEditor
-                      table={gridTable}
-                      row={activeEdit}
-                      onCancel={() => setEditing(null)}
-                      onSave={(fields) =>
-                        onUpdate(String(activeEdit.id), fields)
-                      }
-                      onDelete={() => onDeleteRow(String(activeEdit.id))}
-                    />
-                  </tbody>
-                </table>
-              )}
-            <footer className="p-3 border-t border-border flex gap-3">
+            <footer className="flex items-center justify-between border-t border-border bg-bg-card px-5 py-3 text-xs text-text-dim">
+              <span>{rowResource.busy ? "Refreshing…" : filterApplied ? "Filtered view" : "All rows"}</span>
+              <div className="flex items-center gap-2">
               <button
                 disabled={!page || rowResource.busy}
                 onClick={() => setPage((p) => p - 1)}
+                className="rounded-md border border-border px-2.5 py-1.5 hover:bg-bg-input disabled:opacity-40"
               >
                 Previous
               </button>
@@ -581,11 +725,13 @@ export default function TablesPanel({
                   ]);
                   setPage((p) => p + 1);
                 }}
+                className="rounded-md border border-border px-2.5 py-1.5 hover:bg-bg-input disabled:opacity-40"
               >
                 Next
               </button>
-              {rowResource.busy && <span>Refreshing…</span>}
+              </div>
             </footer>
+            {activeEdit && <RowDetailDrawer table={selectedTable} row={activeEdit} onClose={() => setEditing(null)} onSave={(fields) => onUpdate(String(activeEdit.id), fields)} onDelete={() => onDeleteRow(String(activeEdit.id))} />}
             {showQuery && (
               <QueryDrawer
                 key={identity}
@@ -635,72 +781,148 @@ export default function TablesPanel({
   );
 }
 
+interface ProjectionStatus {
+  name: string;
+  version: number;
+  status: string;
+  is_current?: boolean;
+  built?: boolean;
+  ready?: boolean;
+  stale?: boolean;
+  latest_relevant_change?: number;
+  published_change_id?: number;
+  pending_scopes?: number;
+  refresh_running?: boolean;
+  min_refresh_interval_seconds?: number;
+  last_successful_publication_at?: string;
+  next_scheduled_refresh?: string;
+  last_failure?: string | null;
+  coverage_from?: string | null;
+  coverage_to?: string | null;
+  scope_columns?: string[];
+  source_tables?: string[];
+  sql?: string;
+}
+
+function projectionTone(projection: ProjectionStatus): string {
+  if (projection.last_failure) return "bg-red/10 text-red";
+  if (projection.ready) return "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400";
+  if (projection.status === "building" || projection.refresh_running) return "bg-sky-500/15 text-sky-600 dark:text-sky-400";
+  return "bg-amber-500/15 text-amber-600 dark:text-amber-400";
+}
+
+function ProjectionWorkspace({ api }: { api: PanelApi }) {
+  const [epoch, setEpoch] = useState(0);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [busy, setBusy] = useState("");
+  const [message, setMessage] = useState("");
+  const list = useResource<{ projections: ProjectionStatus[] }>("projections", epoch, (signal) => api("GET", "/projections", {}, undefined, signal));
+  const projections = list.data?.projections ?? [];
+  const active = projections.find((projection) => `${projection.name}:${projection.version}` === selected) ?? projections[0];
+  useEffect(() => {
+    if (!selected && active) setSelected(`${active.name}:${active.version}`);
+  }, [active, selected]);
+  const refresh = async (projection: ProjectionStatus) => {
+    setBusy(`${projection.name}:refresh`);
+    setMessage("");
+    try {
+      await api("POST", `/projections/${encodeURIComponent(projection.name)}/refresh`, {}, { rebuild: true, force: true });
+      setMessage("Refresh queued. The status will update automatically.");
+      setEpoch((value) => value + 1);
+    } catch (error) {
+      setMessage((error as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
+  const togglePause = async (projection: ProjectionStatus) => {
+    const paused = projection.status !== "paused";
+    setBusy(`${projection.name}:pause`);
+    setMessage("");
+    try {
+      await api("POST", `/projections/${encodeURIComponent(projection.name)}/pause`, {}, { paused });
+      setEpoch((value) => value + 1);
+    } catch (error) {
+      setMessage((error as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
+  return (
+    <div className="flex min-h-0 flex-1 flex-col bg-bg">
+      <header className="border-b border-border bg-bg-card px-6 py-5">
+        <p className="text-[11px] uppercase tracking-[0.16em] text-text-dim">Analytics</p>
+        <div className="mt-1 flex flex-wrap items-center justify-between gap-3"><div><h1 className="text-xl font-semibold text-text">Projections</h1><p className="mt-1 text-sm text-text-dim">Published, refreshable views over your Tables data.</p></div><span className="rounded-full bg-bg-input px-3 py-1.5 text-xs text-text-dim">{projections.length} versions</span></div>
+      </header>
+      {message && <div role="status" className="border-b border-accent/20 bg-accent/5 px-6 py-3 text-xs text-accent">{message}</div>}
+      <div className="flex min-h-0 flex-1">
+        <div className="w-72 shrink-0 overflow-auto border-r border-border p-3">
+          {list.error && <p className="p-3 text-xs text-red">{list.error}</p>}
+          {!list.busy && !projections.length && <div className="rounded-lg border border-dashed border-border p-5 text-center"><p className="text-sm font-medium text-text">No projections yet</p><p className="mt-1 text-xs text-text-dim">Create one with the projections_create tool, then manage it here.</p></div>}
+          <div className="flex flex-col gap-1">{projections.map((projection) => { const key = `${projection.name}:${projection.version}`; return <button type="button" key={key} onClick={() => setSelected(key)} className={`rounded-lg p-3 text-left ${selected === key ? "bg-accent/10" : "hover:bg-bg-input/60"}`}><div className="flex items-center justify-between gap-2"><span className="truncate font-mono text-xs text-text">{projection.name}</span><span className="text-[10px] text-text-dim">v{projection.version}</span></div><div className="mt-2 flex items-center gap-2"><span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${projectionTone(projection)}`}>{projection.last_failure ? "Failed" : projection.ready ? "Ready" : projection.status === "paused" ? "Paused" : projection.status === "building" ? "Building" : "Stale"}</span>{projection.is_current && <span className="text-[10px] text-text-dim">Current</span>}</div></button>; })}</div>
+        </div>
+        <div className="min-w-0 flex-1 overflow-auto p-6">
+          {active ? <div className="mx-auto max-w-4xl"><div className="flex flex-wrap items-start justify-between gap-4"><div><div className="flex items-center gap-2"><h2 className="font-mono text-lg text-text">{active.name}</h2><span className="text-xs text-text-dim">version {active.version}</span></div><div className="mt-2 flex flex-wrap gap-2"><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${projectionTone(active)}`}>{active.ready ? "Ready" : active.status}</span>{active.is_current && <span className="rounded-full bg-bg-input px-2.5 py-1 text-xs text-text-dim">Current version</span>}</div></div><div className="flex gap-2"><button type="button" disabled={busy !== ""} onClick={() => refresh(active)} className="rounded-md bg-accent px-3 py-2 text-xs font-medium text-bg hover:opacity-90 disabled:opacity-40">{busy === `${active.name}:refresh` ? "Queueing…" : "Refresh now"}</button><button type="button" disabled={busy !== ""} onClick={() => togglePause(active)} className="rounded-md border border-border px-3 py-2 text-xs text-text hover:bg-bg-input disabled:opacity-40">{active.status === "paused" ? "Resume" : "Pause"}</button></div></div>
+            {active.last_failure && <div className="mt-6 rounded-lg border border-red/30 bg-red/10 p-4 text-sm text-red"><strong>Last refresh failed</strong><p className="mt-1 text-xs">{active.last_failure}</p></div>}
+            <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{[["Published", active.last_successful_publication_at ? formatDate(active.last_successful_publication_at) : "Not yet"], ["Pending scopes", String(active.pending_scopes ?? 0)], ["Refresh interval", `${active.min_refresh_interval_seconds ?? 0}s`], ["Coverage", active.coverage_from && active.coverage_to ? `${formatDate(active.coverage_from)} – ${formatDate(active.coverage_to)}` : "Declared by definition"]].map(([label, value]) => <div key={label} className="rounded-lg border border-border bg-bg-card p-4"><p className="text-[11px] uppercase tracking-wide text-text-dim">{label}</p><p className="mt-2 text-sm font-medium text-text">{value}</p></div>)}</div>
+            <div className="mt-6 grid gap-6 lg:grid-cols-2"><section className="rounded-lg border border-border bg-bg-card p-5"><h3 className="text-sm font-semibold text-text">Sources and scopes</h3><dl className="mt-4 space-y-3 text-xs"><div><dt className="text-text-dim">Source tables</dt><dd className="mt-1 flex flex-wrap gap-1">{(active.source_tables ?? []).map((table) => <span key={table} className="rounded bg-bg-input px-2 py-1 font-mono text-text">{table}</span>)}</dd></div><div><dt className="text-text-dim">Scope columns</dt><dd className="mt-1 font-mono text-text">{active.scope_columns?.join(", ") || "Whole projection"}</dd></div></dl></section><section className="rounded-lg border border-border bg-bg-card p-5"><h3 className="text-sm font-semibold text-text">Freshness</h3><dl className="mt-4 space-y-3 text-xs"><div className="flex justify-between gap-3"><dt className="text-text-dim">Latest relevant change</dt><dd className="font-mono text-text">{active.latest_relevant_change ?? 0}</dd></div><div className="flex justify-between gap-3"><dt className="text-text-dim">Published change</dt><dd className="font-mono text-text">{active.published_change_id ?? 0}</dd></div><div className="flex justify-between gap-3"><dt className="text-text-dim">Next refresh</dt><dd className="text-text">{active.next_scheduled_refresh ? formatDate(active.next_scheduled_refresh) : "—"}</dd></div></dl></section></div>
+          </div> : <p className="text-sm text-text-dim">{list.busy ? "Loading projections…" : "Select a projection to inspect it."}</p>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── rows table ─────────────────────────────────────────────────────
 
 function RowsTable({
   table,
   rows,
-  editingRow,
   onEditStart,
-  onEditCancel,
-  onEditSave,
-  onDelete,
+  orderBy,
+  onSort,
 }: {
   table: TableMeta;
   rows: Record<string, unknown>[];
-  editingRow: Record<string, unknown> | null;
   onEditStart: (r: Record<string, unknown>) => void;
-  onEditCancel: () => void;
-  onEditSave: (id: string, fields: Record<string, unknown>) => Promise<void>;
-  onDelete: (id: string) => Promise<void>;
+  orderBy: string;
+  onSort: (value: string) => void;
 }) {
+  const toggleSort = (name: string) => {
+    const [column, direction] = orderBy.split(" ");
+    onSort(column === name && direction === "asc" ? `${name} desc` : `${name} asc`);
+  };
   return (
-    <table className="w-full text-xs font-mono">
-      <thead className="bg-bg-input/50 text-text-dim text-[10px] uppercase">
+    <table className="min-w-full text-sm">
+      <thead className="sticky top-0 z-[1] bg-bg-card text-[11px] uppercase tracking-wide text-text-dim shadow-sm">
         <tr>
-          <th className="text-left px-2 py-1.5 w-16">id</th>
+          <th className="border-b border-border px-4 py-3 text-left font-medium">ID</th>
           {table.columns.map((c) => (
-            <th key={c.name} className="text-left px-2 py-1.5">
-              <span className="text-text">{c.name}</span>{" "}
-              <span className="text-text-dim normal-case">{c.type}</span>
+            <th key={c.name} className="border-b border-border px-4 py-3 text-left font-medium">
+              <button type="button" onClick={() => toggleSort(c.name)} className="group flex items-center gap-2 whitespace-nowrap text-left hover:text-text">
+                <span className="font-mono normal-case text-text">{c.name}</span>
+                <span className="rounded bg-bg-input px-1.5 py-0.5 text-[10px] normal-case text-text-dim">{c.type}</span>
+                {orderBy.startsWith(`${c.name} `) && <span className="text-accent">{orderBy.endsWith("asc") ? "↑" : "↓"}</span>}
+              </button>
             </th>
           ))}
-          <th className="text-left px-2 py-1.5 w-32">updated_at</th>
-          <th className="w-20" />
+          <th className="border-b border-border px-4 py-3 text-left font-medium">Updated</th>
+          <th className="border-b border-border px-4 py-3" />
         </tr>
       </thead>
       <tbody>
         {rows.map((r) => {
           const id = String(r.id);
-          const editing = editingRow && String(editingRow.id) === id;
-          return editing ? (
-            <RowEditor
-              key={id}
-              table={table}
-              row={editingRow!}
-              onCancel={onEditCancel}
-              onSave={(fields) => onEditSave(id, fields)}
-              onDelete={() => onDelete(id)}
-            />
-          ) : (
-            <tr
-              key={id}
-              onClick={() => onEditStart(r)}
-              className="border-t border-border cursor-pointer hover:bg-bg-input/30"
-            >
-              <td className="px-2 py-1.5 text-text-dim">{id}</td>
+          return (
+            <tr key={id} onClick={() => onEditStart(r)} className="cursor-pointer border-b border-border/70 transition-colors hover:bg-accent/5">
+              <td className="px-4 py-3 align-middle font-mono text-xs text-text-dim">{id}</td>
               {table.columns.map((c) => (
-                <td
-                  key={c.name}
-                  className="px-2 py-1.5 text-text truncate max-w-xs"
-                >
+                <td key={c.name} className="max-w-[22rem] truncate px-4 py-3 align-middle text-text">
                   {renderCell(c, r[c.name])}
                 </td>
               ))}
-              <td className="px-2 py-1.5 text-text-dim">
-                {String(r.updated_at || "").slice(0, 16)}
-              </td>
-              <td className="px-2 py-1.5 text-right text-text-dim">edit</td>
+              <td className="whitespace-nowrap px-4 py-3 align-middle text-xs text-text-dim">{formatDate(r.updated_at)}</td>
+              <td className="px-4 py-3 text-right text-xs text-accent">View →</td>
             </tr>
           );
         })}
@@ -709,11 +931,87 @@ function RowsTable({
   );
 }
 
-function renderCell(c: ColumnDef, v: unknown): string {
-  if (v === null || v === undefined) return "—";
-  if (c.type === "bool") return v ? "true" : "false";
-  if (c.type === "json") return stringifyJSON(v);
-  return String(v);
+function renderCell(c: ColumnDef, v: unknown): ReactNode {
+  if (v === null || v === undefined || v === "") return <span className="text-text-dim">—</span>;
+  if (c.type === "bool") return <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${v ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400" : "bg-bg-input text-text-dim"}`}>{v ? "True" : "False"}</span>;
+  if (c.type === "datetime") return <span className="whitespace-nowrap">{formatDate(v)}</span>;
+  if (c.type === "json") return <span className="font-mono text-xs text-text-muted" title={stringifyJSON(v)}>{stringifyJSON(v)}</span>;
+  return <span className={c.type === "number" ? "tabular-nums" : ""}>{String(v)}</span>;
+}
+
+function RowDetailDrawer({
+  table,
+  row,
+  onClose,
+  onSave,
+  onDelete,
+}: {
+  table: TableMeta;
+  row: Record<string, unknown>;
+  onClose: () => void;
+  onSave: (fields: Record<string, unknown>) => Promise<void>;
+  onDelete: () => Promise<void>;
+}) {
+  const [fields, setFields] = useState<Record<string, FieldValue>>(() =>
+    Object.fromEntries(table.columns.map((column) => [column.name, initialField(column, row[column.name])])),
+  );
+  const dirty = useRef(new Set<string>());
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const update = (name: string, value: FieldValue) => {
+    dirty.current.add(name);
+    setFields((current) => ({ ...current, [name]: value }));
+  };
+  const save = async () => {
+    if (!dirty.current.size) return;
+    setBusy(true);
+    setError("");
+    try {
+      const patch: Record<string, unknown> = {};
+      for (const column of table.columns) {
+        if (dirty.current.has(column.name)) patch[column.name] = fieldValue(column, fields[column.name]!);
+      }
+      await onSave(patch);
+    } catch (error) {
+      setError((error as Error).message);
+      setBusy(false);
+    }
+  };
+  const remove = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      await onDelete();
+    } catch (error) {
+      setError((error as Error).message);
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="absolute inset-0 z-10 bg-black/20" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <aside role="dialog" aria-label={`Row ${String(row.id)}`} className="absolute inset-y-0 right-0 flex w-[min(28rem,100%)] flex-col border-l border-border bg-bg-card shadow-2xl">
+        <header className="flex items-center justify-between border-b border-border px-5 py-4">
+          <div><p className="text-[11px] uppercase tracking-[0.14em] text-text-dim">Row detail</p><h2 className="mt-1 font-mono text-sm text-text">{table.name} · {String(row.id)}</h2></div>
+          <button type="button" onClick={onClose} className="rounded-md px-2 py-1 text-xl leading-none text-text-dim hover:bg-bg-input hover:text-text" aria-label="Close row detail">×</button>
+        </header>
+        <div className="flex-1 overflow-auto px-5 py-4">
+          {error && <div role="alert" className="mb-4 rounded-md border border-red/30 bg-red/10 p-3 text-xs text-red">{error}</div>}
+          <div className="mb-5 grid grid-cols-2 gap-3 rounded-md bg-bg-input/40 p-3 text-xs">
+            <div><span className="block text-text-dim">Row ID</span><span className="mt-1 block font-mono text-text">{String(row.id)}</span></div>
+            <div><span className="block text-text-dim">Revision</span><span className="mt-1 block font-mono text-text">{String(row._revision ?? "—")}</span></div>
+            <div className="col-span-2"><span className="block text-text-dim">Updated</span><span className="mt-1 block text-text">{formatDate(row.updated_at)}</span></div>
+          </div>
+          <div className="flex flex-col gap-4">
+            {table.columns.map((column) => <label key={column.name} className="flex flex-col gap-1.5"><span className="flex items-center justify-between text-xs font-medium text-text"><span className="font-mono">{column.name}</span><span className="text-[10px] font-normal text-text-dim">{column.type}{column.nullable ? " · nullable" : ""}</span></span><FieldInput column={column} value={fields[column.name]!} onChange={(value) => update(column.name, value)} disabled={busy} /></label>)}
+          </div>
+        </div>
+        <footer className="flex items-center justify-between border-t border-border px-5 py-4">
+          <button type="button" disabled={busy} onClick={remove} className="rounded-md px-2 py-2 text-xs text-red hover:bg-red/10 disabled:opacity-40">Delete row</button>
+          <div className="flex gap-2"><button type="button" disabled={busy} onClick={onClose} className="rounded-md border border-border px-3 py-2 text-xs text-text hover:bg-bg-input">Cancel</button><button type="button" disabled={busy || !dirty.current.size} onClick={save} className="rounded-md bg-accent px-3 py-2 text-xs font-medium text-bg hover:opacity-90 disabled:opacity-40">{busy ? "Saving…" : "Save changes"}</button></div>
+        </footer>
+      </aside>
+    </div>
+  );
 }
 
 export function FieldInput({

@@ -105,15 +105,44 @@ func (v *viewerTracker) trackedStreams() []int64 {
 // It is not a defense against a distributed spoofer — nothing here
 // can be, since viewers are anonymous by design — it just makes the
 // trivial single-client attack ineffective.
+//
+// v0.2's limits (8 identities, 120 beats per IP per minute, both
+// global across streams) assumed one viewer per address. Real webinar
+// audiences are full of shared egress: an office, a school, a
+// conference. At the documented ~10s cadence each genuine viewer
+// spends 6 beats a minute, so the 21st person behind one corporate
+// NAT pushed the whole building past 120 and every viewer there
+// started getting 429s mid-webinar. Below that threshold the damage
+// was silent instead — past 8 identities everyone collapsed into one
+// synthetic head, so a 50-person office reported as 9 viewers.
+//
+// v0.3 keeps the same two-tier shape but: buckets per (IP, stream) so
+// one stream's audience can't throttle another's, defaults the
+// identity budget to something a real shared egress fits inside, and
+// derives the beat budget from it rather than fixing it independently
+// — the two were describing the same population and drifted apart.
 const (
-	throttleWindow        = time.Minute
-	throttleMaxBeats      = 120
-	throttleMaxIdentities = 8
+	throttleWindow = time.Minute
+	// beatsPerIdentity is the per-window beat allowance each admitted
+	// identity contributes. The documented cadence is one beat per 10s
+	// (6/window); the headroom absorbs retries, a faster player, and
+	// clock skew across the window boundary.
+	beatsPerIdentity = 12
+	// defaultMaxViewersPerIP is the identity budget for one (IP,
+	// stream) pair. Sized for a large shared egress rather than a
+	// household; operators with bigger ones raise max_viewers_per_ip.
+	defaultMaxViewersPerIP = 64
+	// throttleMaxBuckets caps the map before the opportunistic GC runs.
+	throttleMaxBuckets = 8192
 )
 
 type viewerThrottle struct {
-	mu  sync.Mutex
-	ips map[string]*ipBucket
+	mu sync.Mutex
+	// keyed by "<ip>|<stream_id>"
+	buckets map[string]*ipBucket
+	// maxIdentities is the per-bucket identity budget; the beat budget
+	// is derived from it.
+	maxIdentities int
 }
 
 type ipBucket struct {
@@ -122,13 +151,20 @@ type ipBucket struct {
 	ids         map[string]bool
 }
 
-func newViewerThrottle() *viewerThrottle {
-	return &viewerThrottle{ips: map[string]*ipBucket{}}
+func newViewerThrottle(maxIdentities int) *viewerThrottle {
+	if maxIdentities <= 0 {
+		maxIdentities = defaultMaxViewersPerIP
+	}
+	return &viewerThrottle{buckets: map[string]*ipBucket{}, maxIdentities: maxIdentities}
 }
 
-// admit records a heartbeat from ip claiming identity id. It returns
-// the identity to actually count and whether the request is allowed.
-func (t *viewerThrottle) admit(ip, id string) (string, bool) {
+// maxBeats is the per-window request ceiling for one bucket.
+func (t *viewerThrottle) maxBeats() int { return t.maxIdentities * beatsPerIdentity }
+
+// admit records a heartbeat from ip claiming identity id on one
+// stream. It returns the identity to actually count and whether the
+// request is allowed.
+func (t *viewerThrottle) admit(ip string, streamID int64, id string) (string, bool) {
 	if t == nil || ip == "" {
 		return id, true
 	}
@@ -136,29 +172,30 @@ func (t *viewerThrottle) admit(ip, id string) (string, bool) {
 	defer t.mu.Unlock()
 
 	now := time.Now()
-	b, ok := t.ips[ip]
+	key := ip + "|" + strconv.FormatInt(streamID, 10)
+	b, ok := t.buckets[key]
 	if !ok || now.Sub(b.windowStart) > throttleWindow {
 		b = &ipBucket{windowStart: now, ids: map[string]bool{}}
-		t.ips[ip] = b
+		t.buckets[key] = b
 	}
 	b.beats++
-	if b.beats > throttleMaxBeats {
+	if b.beats > t.maxBeats() {
 		return id, false
 	}
 	if !b.ids[id] {
-		if len(b.ids) >= throttleMaxIdentities {
+		if len(b.ids) >= t.maxIdentities {
 			// Over the identity budget — count this beat against one
-			// synthetic per-IP viewer instead of a new head.
+			// synthetic per-(IP, stream) viewer instead of a new head.
 			return "ip:" + ip, true
 		}
 		b.ids[id] = true
 	}
 	// Opportunistic GC so a long-lived sidecar doesn't accumulate a
-	// bucket per IP it has ever seen.
-	if len(t.ips) > 4096 {
-		for k, v := range t.ips {
+	// bucket per address it has ever seen.
+	if len(t.buckets) > throttleMaxBuckets {
+		for k, v := range t.buckets {
 			if now.Sub(v.windowStart) > throttleWindow {
-				delete(t.ips, k)
+				delete(t.buckets, k)
 			}
 		}
 	}
@@ -170,14 +207,29 @@ func (t *viewerThrottle) admit(ip, id string) (string, bool) {
 //
 // Everything reaching this sidecar in production has been
 // reverse-proxied by apteva-server, so RemoteAddr is loopback for
-// every viewer on the planet — trust X-Forwarded-For (which Go's
-// httputil.ReverseProxy appends), but ONLY when the immediate peer is
-// loopback, i.e. our own proxy. A non-proxy peer can't talk its way
-// into a different bucket.
+// every viewer on the planet — we have to read X-Forwarded-For, but
+// ONLY when the immediate peer is loopback, i.e. our own proxy. A
+// non-proxy peer can't talk its way into a different bucket.
 //
-// A loopback peer with no forwarded address means we genuinely can't
-// tell viewers apart, and throttling them as one client would rate-
-// limit a whole audience into 429s. Returning "" disables the
+// Which entry matters is the whole ballgame. httputil.ReverseProxy
+// APPENDS the peer it saw to whatever the client sent, and the
+// server's proxy Director scrubs several headers but not this one —
+// so the LEFTMOST entry is attacker-supplied. v0.2 read exactly that,
+// which meant a client sending a fresh X-Forwarded-For on every beat
+// landed in a fresh throttle bucket every time and both limits below
+// were decorative.
+//
+// Walk from the right instead — the end of the list is the part our
+// own infrastructure wrote — and skip private/loopback/link-local
+// hops, which is what a proxy in front of apteva-server (nginx, a
+// tunnel client) contributes. The first public address from that end
+// is the nearest hop we did not add ourselves. Mirrors the server's
+// own resolvedClientIP walk, minus the configurable trusted-CIDR set,
+// which the sidecar has no access to.
+//
+// A loopback peer with no usable forwarded address means we genuinely
+// can't tell viewers apart, and throttling them as one client would
+// rate-limit a whole audience into 429s. Returning "" disables the
 // throttle for that request — fail open, since the throttle is an
 // anti-inflation measure, not an access control.
 func clientIP(r *http.Request) string {
@@ -185,17 +237,41 @@ func clientIP(r *http.Request) string {
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-		fwd := r.Header.Get("X-Forwarded-For")
-		if fwd == "" {
-			return ""
-		}
-		if first := strings.TrimSpace(strings.SplitN(fwd, ",", 2)[0]); first != "" {
-			return first
-		}
+	peer := net.ParseIP(host)
+	if peer == nil || !peer.IsLoopback() {
+		return host
+	}
+	fwd := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
+	if fwd == "" {
 		return ""
 	}
-	return host
+	parts := strings.Split(fwd, ",")
+	fallback := ""
+	for i := len(parts) - 1; i >= 0; i-- {
+		ip := net.ParseIP(strings.TrimSpace(parts[i]))
+		if ip == nil {
+			continue
+		}
+		if isInternalHop(ip) {
+			// A hop we (or a proxy in front of us) added. Remember the
+			// nearest one in case the whole chain is internal — a
+			// LAN-only deployment has no public address to find.
+			if fallback == "" {
+				fallback = ip.String()
+			}
+			continue
+		}
+		return ip.String()
+	}
+	return fallback
+}
+
+// isInternalHop reports addresses that cannot identify an internet
+// viewer and so must not stop the right-to-left walk.
+func isInternalHop(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified()
 }
 
 // validViewerID accepts the documented `?v=<viewer_id>` shape: a short
@@ -269,7 +345,7 @@ func (a *App) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !playbackAuthorized(rec, r.URL.Query(), time.Now()) {
+	if !playbackAuthorized(rec, r.URL.Query(), scopeHeartbeat, time.Now()) {
 		http.NotFound(w, r)
 		return
 	}
@@ -306,7 +382,7 @@ func (a *App) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   86400, // 24h — same idle window-of-windows
 	})
 
-	counted, ok := app.throttle.admit(clientIP(r), viewerID)
+	counted, ok := app.throttle.admit(clientIP(r), id, viewerID)
 	if !ok {
 		httpErr(w, http.StatusTooManyRequests, "heartbeat rate limit")
 		return
@@ -352,7 +428,8 @@ func (a *App) runViewerCounter(ctx context.Context, app *sdk.AppCtx) error {
 		// heartbeat handler already refuses beats for these.)
 		if status == "ended" || status == "errored" {
 			_, _ = app.AppDB().Exec(
-				`UPDATE streams SET current_viewers = 0 WHERE id = ?`, streamID)
+				`UPDATE streams SET current_viewers = 0 WHERE id = ? AND project_id = ?`,
+				streamID, pid)
 			a.viewers.drop(streamID)
 			continue
 		}
@@ -361,20 +438,22 @@ func (a *App) runViewerCounter(ctx context.Context, app *sdk.AppCtx) error {
 		if current > peak {
 			newPeak = current
 		}
-		// Tick adds (current * 10s) of watch time. Approximate; v0.2
-		// could compute per-cookie session lengths from the map.
+		// Each tick adds (current × the worker's own period) of watch
+		// time. Approximate; a later version could compute per-cookie
+		// session lengths from the map. Derived from the same constant
+		// Workers() schedules with, so the two can't drift.
+		tickSeconds := int(viewerCounterInterval / time.Second)
 		_, _ = app.AppDB().Exec(
 			`UPDATE streams
 			 SET current_viewers = ?, peak_viewers = ?,
 			     total_viewer_seconds = total_viewer_seconds + ?
-			 WHERE id = ?`,
-			current, newPeak, current*10, streamID)
+			 WHERE id = ? AND project_id = ?`,
+			current, newPeak, current*tickSeconds, streamID, pid)
 
 		app.Emit("stream.viewer_count_changed", map[string]any{
 			"id":    streamID,
 			"count": current,
 		})
-		_ = pid // reserved for v0.2 per-project rate limiting
 	}
 	return nil
 }
@@ -451,17 +530,23 @@ func (a *App) runWatchdog(ctx context.Context, app *sdk.AppCtx) error {
 		if !m.HasPublisher {
 			continue
 		}
-		var status string
-		_ = app.AppDB().QueryRow(`SELECT status FROM streams WHERE id = ?`, id).Scan(&status)
-		if status == "idle" {
+		// One read per runner per tick. v0.2 issued a second query for
+		// project_id on the idle→live edge; both columns come off the
+		// same row and every read here serializes through the app DB's
+		// single connection alongside every viewer's manifest fetch.
+		var status, pid string
+		if err := app.AppDB().QueryRow(
+			`SELECT status, project_id FROM streams WHERE id = ?`, id).Scan(&status, &pid); err != nil {
+			continue
+		}
+		switch status {
+		case "idle":
 			_, _ = app.AppDB().Exec(
 				`UPDATE streams
 				 SET status = 'live', started_at = ?, current_bitrate_kbps = ?,
 				     current_fps = ?, resolution = ?, dropped_frames = ?
-				 WHERE id = ?`,
-				nowStamp(), m.BitrateKbps, m.FPS, m.Resolution, m.DroppedFrames, id)
-			var pid string
-			_ = app.AppDB().QueryRow(`SELECT project_id FROM streams WHERE id = ?`, id).Scan(&pid)
+				 WHERE id = ? AND project_id = ?`,
+				nowStamp(), m.BitrateKbps, m.FPS, m.Resolution, m.DroppedFrames, id, pid)
 			// status changed — the media handlers' cached copy is stale.
 			a.invalidatePlayback(pid, id)
 			if pid != "" {
@@ -470,13 +555,13 @@ func (a *App) runWatchdog(ctx context.Context, app *sdk.AppCtx) error {
 					"bitrate":    m.BitrateKbps,
 				})
 			}
-		} else if status == "live" {
+		case "live":
 			_, _ = app.AppDB().Exec(
 				`UPDATE streams
 				 SET current_bitrate_kbps = ?, current_fps = ?, resolution = ?,
 				     dropped_frames = ?
-				 WHERE id = ?`,
-				m.BitrateKbps, m.FPS, m.Resolution, m.DroppedFrames, id)
+				 WHERE id = ? AND project_id = ?`,
+				m.BitrateKbps, m.FPS, m.Resolution, m.DroppedFrames, id, pid)
 		}
 	}
 	return nil

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
@@ -19,23 +20,34 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	tk "github.com/apteva/app-sdk/testkit"
+	bench "github.com/apteva/apps/mcp/telephony/benchmarks/softphone"
 	"github.com/gobwas/ws/wsutil"
 )
 
 // Chromium executes the actual app-served SDK bundle, AudioWorklet and Worker.
 // Only the platform gateway and carrier are fixtures; HTTP/WS and Telephony are real.
 func TestTier2HeadlessBrowser(t *testing.T) {
-	for _, surface := range []string{"headless", "panel", "application-user"} {
+	for _, surface := range []string{"headless", "headless-coaching-512k", "headless-coaching-jitter", "panel", "application-user"} {
 		t.Run(surface, func(t *testing.T) { runHeadlessBrowser(t, surface) })
 	}
 }
 
 func runHeadlessBrowser(t *testing.T, surface string) {
+	var coachingLink *bench.Link
+	if surface == "headless-coaching-512k" {
+		coachingLink = &bench.Link{Kbps: 512, LatencyMS: 30, JitterMS: 10}
+		surface = "headless"
+	}
+	if surface == "headless-coaching-jitter" {
+		coachingLink = &bench.Link{Kbps: 2000, LatencyMS: 35, JitterMS: 40}
+		surface = "headless"
+	}
 	platform := newTier2PlatformGateway(t)
 	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID(tier2Project), tk.WithEnv("APTEVA_GATEWAY_URL", platform.server.URL))
 	created := tier2MCPAs(t, sc, "telephony_routes_create", map[string]any{"phone_number": tier2Number, "answer_mode": "human_browser"})
@@ -114,10 +126,23 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 	}
 
 	target, _ := url.Parse(sc.URL())
+	adviserTarget := target.Host
+	if coachingLink != nil {
+		shaped, err := bench.NewProxy(target.Host, bench.Profile{Up: *coachingLink, Down: *coachingLink}, 20261002)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer shaped.Close()
+		shaped.Arm(time.Now())
+		adviserTarget = shaped.Addr()
+	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.Director = func(r *http.Request) {
 		r.URL.Scheme, r.URL.Host = target.Scheme, target.Host
-		r.Host = target.Host
+		if coachingLink != nil && strings.HasPrefix(r.URL.Path, "/softphone/media/") {
+			r.URL.Host = adviserTarget
+		}
+		r.Host = r.URL.Host
 		// Match the production proxy: manifest-public frontend downloads keep
 		// the user's bearer. The installation token travels separately.
 		publicRoute := strings.HasPrefix(r.URL.Path, "/user/") || r.URL.Path == "/ui/frontend.json" || strings.HasPrefix(r.URL.Path, "/ui/frontend/")
@@ -130,6 +155,9 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 		r.Header.Set("X-Apteva-Project-ID", tier2Project)
 	}
 	var audioVerified atomic.Bool
+	var mediaMu sync.Mutex
+	var mediaConn net.Conn
+	var mediaConnections int
 	public := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", hostOrigin)
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
@@ -137,6 +165,23 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 		if r.URL.Path == "/fixture/logout" && authSidecar != nil && r.Method == http.MethodPost {
 			result := authSidecar.POST("/logout", map[string]any{"refresh_token": refreshToken}, nil)
 			w.WriteHeader(result.Status)
+			return
+		}
+		if r.URL.Path == "/fixture/drop-browser" {
+			mediaMu.Lock()
+			c := mediaConn
+			mediaMu.Unlock()
+			if c != nil {
+				_ = c.Close()
+			}
+			writeTier2JSON(w, map[string]bool{"ok": c != nil})
+			return
+		}
+		if r.URL.Path == "/fixture/media-connections" {
+			mediaMu.Lock()
+			n := mediaConnections
+			mediaMu.Unlock()
+			writeTier2JSON(w, map[string]int{"count": n})
 			return
 		}
 		if r.URL.Path == "/fixture/audio-ready" {
@@ -152,8 +197,8 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 			http.NotFound(w, r)
 			return
 		}
-		media := strings.HasPrefix(path, "/_install/42/softphone/media/")
-		audioAsset := strings.HasPrefix(path, "/_install/42/ui/frontend/worklet-") || strings.HasPrefix(path, "/_install/42/ui/frontend/worker-")
+		media := strings.HasPrefix(path, "/_install/42/softphone/media/") || strings.HasPrefix(path, "/_install/42/softphone/listen-media/")
+		audioAsset := strings.HasPrefix(path, "/_install/42/ui/frontend/worklet-") || strings.HasPrefix(path, "/_install/42/ui/frontend/worker-") || strings.HasPrefix(path, "/_install/42/ui/frontend/listener-")
 		if !media && (r.Header.Get("Authorization") != "Bearer "+browserToken || r.URL.Query().Get("project_id") != tier2Project || r.URL.Query().Get("install_id") != "42") {
 			http.Error(w, "invalid fixture auth/scope", 403)
 			return
@@ -166,6 +211,10 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 			return
 		}
 		r.URL.Path = path
+		if strings.HasPrefix(path, "/softphone/media/") {
+			proxy.ServeHTTP(&phoneSocketRecorder{ResponseWriter: w, onHijack: func(c net.Conn) { mediaMu.Lock(); mediaConn = c; mediaConnections++; mediaMu.Unlock() }}, r)
+			return
+		}
 		proxy.ServeHTTP(w, r)
 	}))
 	defer public.Close()
@@ -306,4 +355,18 @@ func checkDeployedPhoneFrontend(t *testing.T, base, bearer string) {
 		t.Fatal("deployed frontend integrity mismatch")
 	}
 	t.Log("Deployed 0.4.1 manifest and hashed client accepted a genuine Auth bearer")
+}
+
+// Record the actual proxy socket, including connections initiated by Workers.
+type phoneSocketRecorder struct {
+	http.ResponseWriter
+	onHijack func(net.Conn)
+}
+
+func (w *phoneSocketRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	c, r, err := w.ResponseWriter.(http.Hijacker).Hijack()
+	if err == nil {
+		w.onHijack(c)
+	}
+	return c, r, err
 }

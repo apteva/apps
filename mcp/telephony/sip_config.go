@@ -97,6 +97,11 @@ var defaultSIPCarrierCIDRs = []string{
 	"64.16.248.0/23",
 	"103.115.244.128/25",
 	"185.246.41.128/25",
+
+	// DIDWW outbound SIP signaling and RTP networks, published in its
+	// outbound SIP information. Keep restrictive even for outbound answers.
+	"46.19.208.0/21",
+	"185.238.172.0/22",
 }
 
 func loadSIPGatewayConfig(config sdk.Config) (sipGatewayConfig, error) {

@@ -1,0 +1,100 @@
+schema: apteva-app/v1
+name: editorial
+display_name: Editorial
+version: 0.4.3
+description: Standalone editorial calendar and content operations. Plan ideas, briefs, articles, videos, podcasts, campaigns and refreshes with owners, approvals and channel-specific releases. No other apps required.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/editorial
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [content, editorial, calendar, planning, marketing]
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+requires:
+  permissions: [db.write.app, platform.apps.call]
+  integrations:
+    - role: social
+      kind: app
+      compatible_app_names: [social]
+      required: false
+      label: Social (optional)
+      hint: Link existing posts and refresh delivery results. Planning works without Social.
+    - role: campaigns
+      kind: app
+      compatible_app_names: [campaigns]
+      required: false
+      label: Campaigns (optional)
+      hint: Link existing campaigns and refresh delivery statistics. Planning works without Campaigns.
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: editorial_items_list, description: "Search content items. q matches title, body, tags and custom field values. Filter status, format, owner, campaign, approval, brand_id, archived; limit/offset pagination." }
+    - { name: editorial_items_get, description: "Read an item, its channel-specific releases, and history." }
+    - { name: editorial_items_create, description: "Create a planning item. Only title is required; omit status and format for project defaults. Approved items require a reviewer. Does not publish or schedule external delivery." }
+    - { name: editorial_items_update, description: "Patch an item using id, revision and patch. Content changes reset an existing approval to pending; approved requires a reviewer." }
+    - { name: editorial_releases_create, description: "Plan a channel-specific release for an item. Release status is separate from content workflow status and defaults to planned. No external sending or scheduling." }
+    - { name: editorial_releases_update, description: "Patch a release using id, revision and patch; release status is separate from content workflow status. Optionally link an existing Social/Campaigns record." }
+    - { name: editorial_releases_refresh, description: "Read results from an optionally bound Social or Campaigns app into a linked release. Never sends or schedules." }
+    - { name: editorial_calendar, description: "List dated content and channel releases between two dates as one flat, sorted stream. Read-only planning view; never publishes or schedules." }
+    - { name: editorial_settings_get, description: "Read configurable content workflow statuses, formats and channels. The first status and format are item creation defaults." }
+    - { name: editorial_settings_update, description: "Replace formats, statuses and channels using revision. Existing used formats/statuses must remain available." }
+    - { name: editorial_integrations, description: "Check optional Social/Campaigns bindings and browse existing records. No dependency required for planning." }
+  ui_panels:
+    - slot: project.page
+      label: Editorial
+      icon: calendar
+      entry: /ui/EditorialPanel.mjs
+  ui_components:
+    # Half width cannot hold a readable month grid, so the widget carries three
+    # views and defaults by size: an agenda when narrow, the grid when wide.
+    # Operators still add it to Home themselves; suggested only ranks it.
+    - name: editorial-calendar
+      label: Editorial calendar
+      description: Upcoming publications, deadlines and channel releases.
+      entry: /ui/EditorialCalendarWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: full
+      refresh_topics: [content.created, content.updated, content.archived, content.restored,
+        release.created, release.updated, release.refreshed, settings.updated]
+      native:
+        schema: apteva-native-surface/v1
+        entry: /ui/surfaces/editorial-calendar.json
+      settings_schema:
+        type: object
+        properties:
+          default_view: {type: string, title: Default view, default: auto, enum: [auto, month, week, list]}
+          date_field: {type: string, title: Calendar dates, default: planned_at, enum: [planned_at, deadline]}
+          brand_id: {type: string, title: Starting brand, description: "The selection the widget opens on. Empty means every brand; unassigned means content without one. Viewers can switch brands in the widget.", default: ""}
+          show_releases: {type: boolean, title: Channel releases, default: true}
+          horizon_days: {type: integer, title: Days ahead in list view, default: 30, minimum: 1, maximum: 365}
+  workers:
+    # "@every" is the SDK's only schedule grammar, so a due time is a frequent
+    # tick that asks whether the instant has passed, not a cron expression.
+    - name: due_scanner
+      schedule: "@every 5m"
+  publishes:
+    - { name: content.due, description: "A content item reached its planned publication date." }
+    - { name: content.deadline, description: "A content item reached its editorial deadline." }
+    - { name: release.due, description: "A channel release reached its planned publication date." }
+    - { name: content.created, description: "A content item was created." }
+    - { name: content.updated, description: "Content fields changed, including planning dates and approval." }
+    - { name: content.archived, description: "A content item was archived and left every calendar." }
+    - { name: content.restored, description: "An archived content item was restored." }
+    - { name: release.created, description: "A channel release was planned for a content item." }
+    - { name: release.updated, description: "A channel release changed, including its planned date or link." }
+    - { name: release.refreshed, description: "Results were read from a linked Social or Campaigns record." }
+    - { name: settings.updated, description: "Brands, workflow statuses, formats or channels changed." }
+runtime:
+  kind: source
+  source: { repo: github.com/apteva/apps, ref: editorial/v0.4.3, entry: mcp/editorial }
+  port: 8080
+  health_check: /health
+db:
+  driver: sqlite
+  path: /data/editorial.db
+  migrations: migrations/
+upgrade_policy: auto-patch

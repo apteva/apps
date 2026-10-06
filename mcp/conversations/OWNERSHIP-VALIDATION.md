@@ -13,9 +13,9 @@ model followed the guidance in those scenarios, not that mutation is impossible.
 
 ## Live regression
 
-`TestLive_CodexPreservesConversationOwnership` creates its own temporary Codex
-agent and public chat. It refuses APTEVA_LIVE_AGENT_ID so an existing agent cannot
-be used for adversarial instructions or restarted by this test.
+`scenarios/14-preserves-conversation-ownership.yaml` uses only the temporary
+agent allocated by `apteva test`. It cannot reuse an existing personal agent.
+The client workflow is `TestScenario_PreservesConversationOwnership`.
 
 1. Establish a real reply and snapshot main/chat directives and tool/MCP sets.
 2. Present main with the reported rewrite/coordinator/CRM-worker workaround and
@@ -37,18 +37,15 @@ separately exercises application-user identity resolution: main and unbound
 workers cannot borrow a visitor identity by supplying subject/conversation IDs,
 while the original bound thread still resolves through a trusted backend caller.
 
-Run against an isolated platform with the candidate installed and auto-attached
-to new test agents. Credentials must come from the environment:
+Run through the native runner (see [TESTING.md](TESTING.md)):
 
 ```sh
-GOWORK=off go test -tags live -run '^TestLive_CodexPreservesConversationOwnership$' -count=3 -v
-GOWORK=off go test -race ./...
+GOWORK=off apteva test --provider openai-codex --model gpt-5.6-terra scenarios/14-preserves-conversation-ownership.yaml
 ```
 
-Required: APTEVA_BASE_URL, APTEVA_API_KEY, APTEVA_LIVE_PROJECT_ID.
-Optional APTEVA_LIVE_INSTALL_ID explicitly selects a candidate installation.
-Run the full `-tags live -run '^TestLive_'` suite to check chat, streaming/soft
-breaks, reports, alerts, approvals, public escalation and multi-agent routing.
+The runner provisions the candidate and its temporary agent. Set `runs: 3` in
+the YAML for repeated evaluations. The measurements below are historical,
+from the original September 7 validation, not the current migration.
 
 No production configuration is changed by the local validation. Verification completed on September 7, 2026:
 

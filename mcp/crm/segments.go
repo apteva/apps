@@ -53,6 +53,125 @@ type Segment struct {
 	UpdatedAt   string          `json:"updated_at,omitempty"`
 }
 
+var supportedSegmentPredicates = []string{
+	"tag_in",
+	"tag_not_in",
+	"attribute",
+	"last_activity_within",
+	"channel_present",
+	"in_list",
+	"not_in_list",
+	"not_in_segment",
+}
+
+const segmentDefinitionContract = `Conditions in definition are AND-ed. Supported synthetic shapes: {"predicate":"tag_in","tags":["vip"]}; {"predicate":"tag_not_in","tags":["suppressed"]}; {"predicate":"attribute","key":"score","op":"gte","value":80} (ops: eq, neq, gt, gte, lt, lte, contains, starts_with, is_null, is_not_null; multi-select arrays support eq/neq); {"predicate":"last_activity_within","days":30,"kind":"email"} (kind optional); {"predicate":"channel_present","kind":"email"}; {"predicate":"in_list","list_id":123}; {"predicate":"not_in_list","list_id":123}; {"predicate":"not_in_segment","segment_id":456} (referenced segment must be active and static). Core-field filters use {"field":"company","op":"eq","value":"Acme"}; fields: first_name, last_name, display_name, company, job_title, primary_email, primary_phone, status, owner_user_id, source, first_contact_at, last_contact_at, created_at, updated_at; ops: eq, neq, gt, gte, lt, lte, contains, starts_with, is_null, in. An empty definition matches all active contacts.`
+
+func supportedSegmentPredicateHint() string {
+	return "supported predicates: " + strings.Join(supportedSegmentPredicates, ", ") +
+		`; or use a core-field filter such as {"field":"company","op":"eq","value":"Acme"}`
+}
+
+func segmentDefinitionExamples() []any {
+	return []any{
+		[]any{map[string]any{"predicate": "tag_in", "tags": []any{"vip"}}},
+		[]any{map[string]any{"predicate": "tag_not_in", "tags": []any{"suppressed"}}},
+		[]any{map[string]any{"predicate": "attribute", "key": "score", "op": "gte", "value": 80}},
+		[]any{map[string]any{"predicate": "last_activity_within", "days": 30, "kind": "email"}},
+		[]any{map[string]any{"predicate": "channel_present", "kind": "email"}},
+		[]any{map[string]any{"predicate": "in_list", "list_id": 123}},
+		[]any{map[string]any{"predicate": "not_in_list", "list_id": 123}},
+		[]any{map[string]any{"predicate": "not_in_segment", "segment_id": 456}},
+		[]any{map[string]any{"field": "company", "op": "eq", "value": "Acme"}},
+	}
+}
+
+func segmentDefinitionInputSchema() map[string]any {
+	return map[string]any{
+		"type":        "array",
+		"description": segmentDefinitionContract,
+		"items": map[string]any{
+			"type":        "object",
+			"description": `One synthetic {"predicate":...} condition or one core-field {"field":...,"op":...,"value":...} condition.`,
+		},
+		"maxItems": 100,
+		"examples": segmentDefinitionExamples(),
+	}
+}
+
+func segmentCreateInputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"name":        map[string]any{"type": "string"},
+			"kind":        map[string]any{"type": "string", "enum": []any{"dynamic", "static"}},
+			"description": map[string]any{"type": "string"},
+			"list_id":     map[string]any{"type": "integer", "description": "Optional list scope; implicitly AND-ed with in_list."},
+			"definition":  segmentDefinitionInputSchema(),
+		},
+		"required": []string{"name"},
+		"examples": []any{
+			map[string]any{
+				"name": "VIP contacts",
+				"kind": "dynamic",
+				"definition": []any{
+					map[string]any{"predicate": "tag_in", "tags": []any{"vip"}},
+				},
+			},
+			map[string]any{
+				"name": "Recently active enterprise contacts",
+				"definition": []any{
+					map[string]any{"field": "company", "op": "contains", "value": "Enterprise"},
+					map[string]any{"predicate": "last_activity_within", "days": 30},
+				},
+			},
+		},
+	}
+}
+
+func segmentUpdateInputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"id": map[string]any{"type": "integer"},
+			"patch": map[string]any{
+				"type":        "object",
+				"description": "Partial segment update. definition uses the same documented predicate contract as segments_create.",
+				"properties": map[string]any{
+					"name":        map[string]any{"type": "string"},
+					"description": map[string]any{"type": "string"},
+					"kind":        map[string]any{"type": "string", "enum": []any{"dynamic", "static"}},
+					"list_id":     map[string]any{"type": []any{"integer", "null"}},
+					"definition":  segmentDefinitionInputSchema(),
+				},
+			},
+		},
+		"required": []string{"id", "patch"},
+		"examples": []any{
+			map[string]any{
+				"id": 12,
+				"patch": map[string]any{
+					"definition": []any{map[string]any{"predicate": "tag_in", "tags": []any{"vip"}}},
+				},
+			},
+		},
+	}
+}
+
+func segmentEventPayload(s *Segment, payload map[string]any) map[string]any {
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	payload["list_id"] = nil
+	if s == nil {
+		return payload
+	}
+	payload["id"] = s.ID
+	if s.ListID != nil {
+		payload["list_id"] = *s.ListID
+	}
+	return payload
+}
+
 // ─── Definition compiler ──────────────────────────────────────────
 
 // compiledFilter is the SQL fragment + args produced by walking one
@@ -117,7 +236,7 @@ func compilePredicate(cf *compiledFilter, pid string, e map[string]any) error {
 	field, _ := e["field"].(string)
 	op, _ := e["op"].(string)
 	if field == "" {
-		return errors.New("predicate or field required")
+		return fmt.Errorf("predicate or field required; %s", supportedSegmentPredicateHint())
 	}
 	clause, args, err := buildFilterClause(field, op, e["value"])
 	if err != nil {
@@ -258,7 +377,7 @@ func compileSyntheticPredicate(cf *compiledFilter, pid, pred string, e map[strin
 			pid, segID)
 		return nil
 	}
-	return fmt.Errorf("unknown predicate %q", pred)
+	return fmt.Errorf("unknown predicate %q; %s", pred, supportedSegmentPredicateHint())
 }
 
 // attrColumnForOp picks which value_* column to compare against
@@ -818,7 +937,7 @@ func (a *App) toolSegmentsCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
-	emitCRMEvent(ctx, pid, "segment.created", map[string]any{"id": out.ID, "name": out.Name, "kind": out.Kind})
+	emitCRMEvent(ctx, pid, "segment.created", segmentEventPayload(out, map[string]any{"name": out.Name, "kind": out.Kind}))
 	return map[string]any{"segment": out}, nil
 }
 
@@ -871,7 +990,7 @@ func (a *App) toolSegmentsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
-	emitCRMEvent(ctx, pid, "segment.updated", map[string]any{"id": id})
+	emitCRMEvent(ctx, pid, "segment.updated", segmentEventPayload(out, nil))
 	return map[string]any{"segment": out}, nil
 }
 
@@ -884,10 +1003,14 @@ func (a *App) toolSegmentsDelete(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
+	s, err := dbSegmentGet(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
 	if err := dbSegmentArchive(ctx.AppDB(), pid, id); err != nil {
 		return nil, err
 	}
-	emitCRMEvent(ctx, pid, "segment.archived", map[string]any{"id": id})
+	emitCRMEvent(ctx, pid, "segment.archived", segmentEventPayload(s, map[string]any{"id": id}))
 	return map[string]any{"archived": true, "id": id}, nil
 }
 
@@ -959,7 +1082,7 @@ func (a *App) toolSegmentsMaterialise(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
-	emitCRMEvent(ctx, pid, "segment.materialised", map[string]any{"id": id, "count": n})
+	emitCRMEvent(ctx, pid, "segment.materialised", segmentEventPayload(s, map[string]any{"count": n}))
 	return map[string]any{"materialised": true, "id": id, "count": n, "kind": "static"}, nil
 }
 
@@ -1052,7 +1175,7 @@ func (a *App) handleHTTPSegmentsCreate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	emitCRMEvent(globalCtx, pid, "segment.created", map[string]any{"id": out.ID, "name": out.Name, "kind": out.Kind})
+	emitCRMEvent(globalCtx, pid, "segment.created", segmentEventPayload(out, map[string]any{"name": out.Name, "kind": out.Kind}))
 	httpJSON(w, map[string]any{"segment": out})
 }
 
@@ -1090,7 +1213,7 @@ func (a *App) handleHTTPSegmentUpdate(w http.ResponseWriter, r *http.Request, id
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	emitCRMEvent(globalCtx, pid, "segment.updated", map[string]any{"id": id})
+	emitCRMEvent(globalCtx, pid, "segment.updated", segmentEventPayload(out, nil))
 	httpJSON(w, map[string]any{"segment": out})
 }
 
@@ -1100,11 +1223,16 @@ func (a *App) handleHTTPSegmentDelete(w http.ResponseWriter, r *http.Request, id
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	s, err := dbSegmentGet(globalCtx.AppDB(), pid, id)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if err := dbSegmentArchive(globalCtx.AppDB(), pid, id); err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	emitCRMEvent(globalCtx, pid, "segment.archived", map[string]any{"id": id})
+	emitCRMEvent(globalCtx, pid, "segment.archived", segmentEventPayload(s, map[string]any{"id": id}))
 	httpJSON(w, map[string]any{"archived": true, "id": id})
 }
 
@@ -1168,7 +1296,7 @@ func (a *App) handleHTTPSegmentMaterialise(w http.ResponseWriter, r *http.Reques
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	emitCRMEvent(globalCtx, pid, "segment.materialised", map[string]any{"id": id, "count": n})
+	emitCRMEvent(globalCtx, pid, "segment.materialised", segmentEventPayload(s, map[string]any{"count": n}))
 	httpJSON(w, map[string]any{"materialised": true, "id": id, "count": n, "kind": "static"})
 }
 

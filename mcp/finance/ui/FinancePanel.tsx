@@ -11,9 +11,34 @@
 // dashboard's Tailwind JIT doesn't scan apps/mcp/*/ui/ — class-based
 // fill / stroke utilities would render as black.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useContext, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import BankPayments from "./BankPayments";
+import EnableBankingConnect from "./EnableBankingConnect";
 
-const API = "/api/apps/finance";
+import { createFinanceAPI, type FinanceAPI } from "./finance-api";
+
+const FinanceAPIContext = createContext<FinanceAPI | null>(null);
+// Panel bundles run inside dashboards with different Tailwind builds. Own the
+// responsive grid so the wide chart does not depend on the host's utilities.
+const FINANCE_LAYOUT_CSS = `
+.finance-panel .finance-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+}
+.finance-panel .finance-grid > * { min-width: 0; }
+.finance-panel .finance-history-frame { height: 16rem; width: 100%; min-width: 0; }
+@media (min-width: 64rem) {
+  .finance-panel .finance-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .finance-panel .finance-wide { grid-column: span 2 / span 2; }
+}
+`;
+function useFinanceAPI(): FinanceAPI {
+  const api = useContext(FinanceAPIContext);
+  if (!api) throw new Error("Finance panel connection is unavailable");
+  return api;
+}
 
 interface NativePanelProps {
   appName: string;
@@ -33,6 +58,8 @@ interface Account {
   name: string;
   kind: string;
   source: string;
+  connection_id?: string;
+  external_id?: string;
   currency: string;
   opening_balance: number;
   color: string;
@@ -160,6 +187,7 @@ interface BankingConnection {
 }
 
 interface BankingAccount {
+  needs_reconnect?: boolean;
   external_id: string;
   name: string;
   currency: string;
@@ -259,21 +287,12 @@ function useAppEvents<T = unknown>(
 
 // ─── Helpers ──────────────────────────────────────────────────────
 
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(`${API}${path}`, {
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    ...init,
-  });
-  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
-  return r.json();
-}
-
 function isInvestmentTxnKind(kind: TxnKind): kind is InvestmentTxnKind {
   return kind === "buy" || kind === "sell" || kind === "dividend";
 }
 
 async function resolveTradeInstrument(
+  api: FinanceAPI,
   symbolInput: string,
   kind: TradeInstrumentKind,
   accountCurrency: string,
@@ -353,6 +372,10 @@ function fmtDate(s: string): string {
   return new Date(s).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
+function fmtHistoryDate(s: string): string {
+  return new Date(s).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+}
+
 const KIND_LABEL: Record<string, string> = {
   cash: "Cash",
   brokerage: "Brokerage",
@@ -429,59 +452,92 @@ function kindIcon(kind: string): string {
 
 // ─── Panel ───────────────────────────────────────────────────────
 
-export default function FinancePanel({ projectId }: NativePanelProps) {
+export default function FinancePanel(props: NativePanelProps) {
+  const api = useMemo(() => createFinanceAPI(props.projectId, props.installId), [props.projectId, props.installId]);
+  return <FinanceAPIContext.Provider value={api}>
+    <FinancePanelContent key={`${props.projectId}:${props.installId}`} {...props} />
+  </FinanceAPIContext.Provider>;
+}
+
+function FinancePanelContent({ projectId, installId }: NativePanelProps) {
+  const api = useFinanceAPI();
   const [tab, setTab] = useState<Tab>("overview");
   const [settings, setSettings] = useState<Settings | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [holdings, setHoldings] = useState<Holding[]>([]);
   const [recentTxns, setRecentTxns] = useState<Transaction[]>([]);
   const [allocation, setAllocation] = useState<AllocationReport | null>(null);
-  const [netWorthSeries, setNetWorthSeries] = useState<NetWorthSeries | null>(null);
+  const [historyRevision, setHistoryRevision] = useState(0);
   const [budgetStatus, setBudgetStatus] = useState<{ budgets: BudgetStatus[]; period_start: string; period_end: string } | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
   const [showNewAccount, setShowNewAccount] = useState(false);
   const [showNewBudget, setShowNewBudget] = useState(false);
   const [syncingBroker, setSyncingBroker] = useState(false);
   const [error, setError] = useState<string>("");
+  const syncInProgress = useRef(false);
+  const eventRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refreshGeneration = useRef(0);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (commitDuringSync = false) => {
+    const generation = ++refreshGeneration.current;
     try {
-      const [s, a, h, t, alloc, nw, bs, cats] = await Promise.all([
+      const [s, a, h, t, alloc, bs, cats] = await Promise.all([
         api<Settings>("/settings"),
         api<{ accounts: Account[] }>("/accounts"),
         api<{ holdings: Holding[] }>("/holdings"),
         api<{ transactions: Transaction[] }>("/txns?limit=20"),
         api<AllocationReport>("/reports/allocation"),
-        api<NetWorthSeries>(`/reports/net-worth?series=monthly&from=${encodeURIComponent(monthsAgo(12))}&to=${encodeURIComponent(now())}`),
         api<{ budgets: BudgetStatus[]; period_start: string; period_end: string }>("/budgets/status?period=monthly"),
         api<{ categories: Category[] }>("/categories"),
       ]);
+      if (generation !== refreshGeneration.current || (syncInProgress.current && !commitDuringSync)) return;
       setSettings(s);
       setAccounts(a.accounts ?? []);
       setHoldings((h.holdings ?? []).filter(x => !x.closed_at));
       setRecentTxns(t.transactions ?? []);
       setAllocation(alloc);
-      setNetWorthSeries(nw);
+      setHistoryRevision(n => n + 1);
       setBudgetStatus(bs);
       setCategories(cats.categories ?? []);
       setError("");
     } catch (e: unknown) {
+      if (generation !== refreshGeneration.current || (syncInProgress.current && !commitDuringSync)) return;
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, []);
+  }, [api]);
 
   useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => () => {
+    if (eventRefreshTimer.current) clearTimeout(eventRefreshTimer.current);
+  }, []);
 
-  useAppEvents("finance", projectId, () => { refresh(); });
+  useAppEvents("finance", projectId, (ev) => {
+    if (ev.install_id !== installId || syncInProgress.current) return;
+    if (eventRefreshTimer.current) clearTimeout(eventRefreshTimer.current);
+    // A broker import emits one event per transaction. Wait for the burst to
+    // settle instead of reloading every report for each imported row.
+    eventRefreshTimer.current = setTimeout(() => {
+      eventRefreshTimer.current = null;
+      void refresh();
+    }, ev.topic.endsWith("brokerage.synced") ? 0 : 1500);
+  });
 
   const syncBrokerage = async () => {
+    if (syncInProgress.current) return;
+    syncInProgress.current = true;
+    refreshGeneration.current++;
+    if (eventRefreshTimer.current) clearTimeout(eventRefreshTimer.current);
+    eventRefreshTimer.current = null;
     setSyncingBroker(true);
     try {
       await api("/brokerage/sync", { method: "POST", body: JSON.stringify({}) });
-      await refresh();
+      await refresh(true);
     } catch (e: unknown) {
+      // Some rows may already have been imported when a later page fails.
+      await refresh(true);
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      syncInProgress.current = false;
       setSyncingBroker(false);
     }
   };
@@ -489,7 +545,8 @@ export default function FinancePanel({ projectId }: NativePanelProps) {
   const base = settings?.base_currency ?? "EUR";
 
   return (
-    <div className="flex h-full flex-col gap-3 p-4">
+    <div className="finance-panel flex h-full flex-col gap-3 p-4">
+      <style>{FINANCE_LAYOUT_CSS}</style>
       <header className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <Icon name="wallet" size={20} />
@@ -526,6 +583,9 @@ export default function FinancePanel({ projectId }: NativePanelProps) {
           {error}
         </div>
       )}
+      {syncingBroker && <div role="status" className="rounded-md border border-border bg-bg-card px-3 py-2 text-sm text-text-muted">
+        Syncing broker data… Showing the last loaded values until the import finishes.
+      </div>}
 
       <div className="flex-1 overflow-auto">
         {tab === "overview" && (
@@ -534,7 +594,7 @@ export default function FinancePanel({ projectId }: NativePanelProps) {
             holdings={holdings}
             recentTxns={recentTxns}
             allocation={allocation}
-            netWorth={netWorthSeries}
+            historyRevision={historyRevision}
             budgetStatus={budgetStatus}
             base={base}
             onSetBudget={() => setShowNewBudget(true)}
@@ -547,7 +607,7 @@ export default function FinancePanel({ projectId }: NativePanelProps) {
           <HoldingsTab holdings={holdings} accounts={accounts} />
         )}
         {tab === "banking" && (
-          <BankingTab accounts={accounts} onChanged={refresh} />
+          <BankingTab key={projectId} accounts={accounts} onChanged={refresh} callbackURL={`${window.location.origin}/api/apps/finance/banking/enable/callback?project_id=${encodeURIComponent(projectId)}&install_id=${installId}`} />
         )}
       </div>
 
@@ -584,26 +644,71 @@ interface AllocationReport {
 interface NetWorthSeries {
   series: string;
   base_currency: string;
+  from: string;
+  to: string;
   points: Array<{ as_of: string; total: number }>;
 }
 
+type HistoryRange = "1M" | "3M" | "1Y" | "5Y" | "All" | "Custom";
+type HistoryResolution = "daily" | "weekly" | "monthly";
+const HISTORY_RANGES: HistoryRange[] = ["1M", "3M", "1Y", "5Y", "All", "Custom"];
+
 function OverviewTab({
-  accounts, holdings, recentTxns, allocation, netWorth, budgetStatus, base, onSetBudget,
+  accounts, holdings, recentTxns, allocation, historyRevision, budgetStatus, base, onSetBudget,
 }: {
   accounts: Account[];
   holdings: Holding[];
   recentTxns: Transaction[];
   allocation: AllocationReport | null;
-  netWorth: NetWorthSeries | null;
+  historyRevision: number;
   budgetStatus: { budgets: BudgetStatus[]; period_start: string; period_end: string } | null;
   base: string;
   onSetBudget: () => void;
 }) {
+  const api = useFinanceAPI();
   const total = allocation?.total ?? 0;
-  const lastDelta = useMemo(() => {
+  const [range, setRange] = useState<HistoryRange>("1Y");
+  const [resolution, setResolution] = useState<HistoryResolution>("weekly");
+  const [customFrom, setCustomFrom] = useState("");
+  const [customTo, setCustomTo] = useState("");
+  const [netWorth, setNetWorth] = useState<NetWorthSeries | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+
+  useEffect(() => {
+    if (!historyRevision) return;
+    if (range === "Custom" && (!/^\d{4}-\d{2}-\d{2}$/.test(customFrom) || !/^\d{4}-\d{2}-\d{2}$/.test(customTo))) {
+      setHistoryError("Choose both dates to show a custom range.");
+      setNetWorth(null);
+      return;
+    }
+    const to = range === "Custom" ? `${customTo}T23:59:59Z` : now();
+    const from = range === "All" ? "all" : range === "Custom" ? `${customFrom}T00:00:00Z`
+      : monthsAgo({ "1M": 1, "3M": 3, "1Y": 12, "5Y": 60 }[range]);
+    if (range === "Custom" && customFrom > customTo) {
+      setHistoryError("The start date must be on or before the end date.");
+      setNetWorth(null);
+      return;
+    }
+    let cancelled = false;
+    setHistoryLoading(true);
+    setHistoryError("");
+    const query = new URLSearchParams({ series: resolution, from, to });
+    api<NetWorthSeries>(`/reports/net-worth?${query.toString()}`)
+      .then(result => { if (!cancelled) setNetWorth(result); })
+      .catch((e: unknown) => { if (!cancelled) setHistoryError(e instanceof Error ? e.message : String(e)); })
+      .finally(() => { if (!cancelled) setHistoryLoading(false); });
+    return () => { cancelled = true; };
+  }, [api, historyRevision, range, resolution, customFrom, customTo]);
+
+  const selectRange = (next: HistoryRange) => {
+    setRange(next);
+    setResolution(next === "1M" || next === "3M" ? "daily" : next === "1Y" || next === "Custom" ? "weekly" : "monthly");
+  };
+  const periodDelta = useMemo(() => {
     const pts = netWorth?.points ?? [];
-    if (pts.length < 2) return 0;
-    return pts[pts.length - 1].total - pts[pts.length - 2].total;
+    if (pts.length < 2) return null;
+    return pts[pts.length - 1].total - pts[0].total;
   }, [netWorth]);
 
   // Top movers from current holdings (by unrealized_pct).
@@ -614,21 +719,60 @@ function OverviewTab({
   }, [holdings]);
 
   return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-      <section className="rounded-lg border border-border bg-bg-card p-4 border-border bg-bg-card lg:col-span-2">
-        <div className="flex items-start justify-between">
+    <div className="finance-grid">
+      <section className="finance-wide min-w-0 rounded-lg border border-border bg-bg-card p-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <div className="text-xs uppercase tracking-wide text-text-muted">Net worth</div>
-            <div className="mt-1 text-3xl font-semibold">{fmtMoney(total, base)}</div>
-            {lastDelta !== 0 && (
-              <div className={`mt-1 flex items-center gap-1 text-sm ${lastDelta > 0 ? "text-success" : "text-error"}`}>
-                <Icon name={lastDelta > 0 ? "trending-up" : "trending-down"} size={14} />
-                {fmtMoney(Math.abs(lastDelta), base)} this month
+            <div className="mt-1 text-3xl font-semibold tabular-nums">{fmtMoney(total, base)}</div>
+            {periodDelta !== null && (
+              <div className={`mt-1 flex items-center gap-1 text-sm ${periodDelta > 0 ? "text-success" : periodDelta < 0 ? "text-error" : "text-text-muted"}`}>
+                <Icon name={periodDelta >= 0 ? "trending-up" : "trending-down"} size={14} />
+                {fmtMoney(periodDelta, base, { signed: true })} over selected range
               </div>
             )}
           </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap rounded-md border border-border p-0.5" role="group" aria-label="Net worth date range">
+              {HISTORY_RANGES.map(option => <button key={option} type="button" onClick={() => selectRange(option)}
+                aria-pressed={range === option}
+                className={`rounded px-2 py-1 text-xs ${range === option ? "bg-accent text-bg" : "text-text-muted hover:bg-bg-hover hover:text-text"}`}>
+                {option}
+              </button>)}
+            </div>
+            <label className="flex items-center gap-1.5 text-xs text-text-muted">
+              Resolution
+              <select value={resolution} onChange={e => setResolution(e.target.value as HistoryResolution)}
+                className="rounded-md border border-border bg-bg-card px-2 py-1 text-text">
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+              </select>
+            </label>
+          </div>
         </div>
-        <Sparkline points={(netWorth?.points ?? []).map(p => p.total)} height={80} />
+        {range === "Custom" && <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-text-muted">
+          <label>From <input type="date" value={customFrom} onChange={e => setCustomFrom(e.target.value)} onInput={e => setCustomFrom(e.currentTarget.value)}
+            className="ml-1 rounded-md border border-border bg-bg-card px-2 py-1 text-text" /></label>
+          <label>To <input type="date" value={customTo} onChange={e => setCustomTo(e.target.value)} onInput={e => setCustomTo(e.currentTarget.value)}
+            className="ml-1 rounded-md border border-border bg-bg-card px-2 py-1 text-text" /></label>
+        </div>}
+        {historyError ? <div role="alert" className="mt-6 rounded-md border border-error/30 bg-error/10 p-3 text-sm text-error">{historyError}</div>
+          : netWorth ? <div aria-busy={historyLoading}><NetWorthChart points={netWorth.points} currency={base} /></div>
+          : <div className="finance-history-frame grid place-items-center text-sm text-text-muted">Loading history…</div>}
+        {netWorth && !historyError && <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-xs text-text-muted">
+          <span>{fmtHistoryDate(netWorth.from)} – {fmtHistoryDate(netWorth.to)} · {netWorth.points.length} {netWorth.series} values</span>
+          {historyLoading && <span role="status">Updating history…</span>}
+          <span>Historical values are estimates where market prices are missing.</span>
+        </div>}
+        {netWorth && netWorth.points.length > 0 && <details className="mt-3 border-t border-border pt-2 text-xs">
+          <summary className="cursor-pointer text-text-muted hover:text-text">View history values</summary>
+          <div className="mt-2 max-h-60 overflow-auto rounded-md border border-border">
+            <table className="w-full text-left tabular-nums"><thead className="sticky top-0 bg-bg-card text-text-muted"><tr><th className="px-3 py-2">Date</th><th className="px-3 py-2 text-right">Net worth</th></tr></thead>
+              <tbody className="divide-y divide-border-subtle">{netWorth.points.map(p => <tr key={p.as_of}><td className="px-3 py-1.5">{fmtHistoryDate(p.as_of)}</td><td className="px-3 py-1.5 text-right">{fmtMoney(p.total, base)}</td></tr>)}</tbody>
+            </table>
+          </div>
+        </details>}
       </section>
 
       <section className="rounded-lg border border-border bg-bg-card p-4 border-border bg-bg-card">
@@ -638,7 +782,7 @@ function OverviewTab({
 
       <BudgetsCard status={budgetStatus} base={base} onSetBudget={onSetBudget} />
 
-      <section className="rounded-lg border border-border bg-bg-card p-4 border-border bg-bg-card lg:col-span-2">
+      <section className="finance-wide rounded-lg border border-border bg-bg-card p-4 border-border bg-bg-card">
         <div className="mb-3 text-xs uppercase tracking-wide text-text-muted">Top movers</div>
         {movers.length === 0 ? (
           <EmptyState message="No price data yet — set a price on an instrument to see P&L." />
@@ -702,7 +846,7 @@ function BudgetsCard({
   }, [status]);
 
   return (
-    <section className="rounded-lg border border-border bg-bg-card p-4 border-border bg-bg-card lg:col-span-2">
+    <section className="finance-wide rounded-lg border border-border bg-bg-card p-4 border-border bg-bg-card">
       <header className="mb-3 flex items-center justify-between">
         <div>
           <div className="text-xs uppercase tracking-wide text-text-muted">Budgets — {periodLabel}</div>
@@ -760,24 +904,46 @@ function BudgetBar({ b, base }: { b: BudgetStatus; base: string }) {
   );
 }
 
-function Sparkline({ points, height = 60 }: { points: number[]; height?: number }) {
-  if (points.length < 2) return <div style={{ height }} className="mt-3 text-xs text-text-dim">Not enough data</div>;
-  const min = Math.min(...points);
-  const max = Math.max(...points);
-  const range = Math.max(1, max - min);
-  const w = 600;
-  const h = height;
-  const pts = points.map((p, i) => {
-    const x = (i / (points.length - 1)) * w;
-    const y = h - ((p - min) / range) * (h - 4) - 2;
-    return `${x},${y}`;
-  }).join(" ");
-  // Color via CSS var so dashboard's Tailwind JIT doesn't need to scan us.
-  return (
-    <svg viewBox={`0 0 ${w} ${h}`} className="mt-3 w-full" preserveAspectRatio="none" style={{ height }}>
-      <polyline points={pts} fill="none" stroke="var(--accent)" strokeWidth={2} />
-    </svg>
-  );
+function NetWorthChart({ points, currency }: { points: NetWorthSeries["points"]; currency: string }) {
+  if (points.length === 0) return <div className="finance-history-frame grid place-items-center text-sm text-text-muted">No history in this range.</div>;
+  if (points.length === 1) return <div className="finance-history-frame grid place-items-center text-center text-sm text-text-muted">
+    <div><div>{fmtHistoryDate(points[0].as_of)}</div><div className="mt-1 text-lg font-semibold text-text">{fmtMoney(points[0].total, currency)}</div></div>
+  </div>;
+  const data = points.map(p => ({ ...p, time: Date.parse(p.as_of) }));
+  const values = data.map(p => p.total);
+  const low = Math.min(...values);
+  const high = Math.max(...values);
+  const padding = Math.max(100, (high - low) * 0.12);
+  const axisLow = low >= 0 ? Math.max(0, low - padding) : low - padding;
+  const compact = new Intl.NumberFormat(undefined, { style: "currency", currency, notation: "compact", maximumFractionDigits: 1 });
+  return <div className="finance-history-frame mt-4" role="img" aria-label={`Net worth from ${fmtHistoryDate(points[0].as_of)} to ${fmtHistoryDate(points[points.length - 1].as_of)}`}>
+    <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={256} initialDimension={{ width: 720, height: 256 }}>
+      <AreaChart data={data} margin={{ top: 12, right: 12, bottom: 4, left: 0 }}>
+        <defs><linearGradient id="financeNetWorthFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="var(--accent)" stopOpacity={0.24} />
+          <stop offset="100%" stopColor="var(--accent)" stopOpacity={0.015} />
+        </linearGradient></defs>
+        <CartesianGrid stroke="var(--border)" strokeDasharray="3 4" vertical={false} />
+        <XAxis dataKey="time" type="number" domain={["dataMin", "dataMax"]} tickCount={5}
+          tickFormatter={value => fmtHistoryDate(new Date(value).toISOString())}
+          tick={{ fill: "var(--text-muted)", fontSize: 11 }} axisLine={false} tickLine={false} minTickGap={28} />
+        <YAxis width={70} domain={[axisLow, high + padding]}
+          tickFormatter={value => compact.format(Number(value) / 100)}
+          tick={{ fill: "var(--text-muted)", fontSize: 11 }} axisLine={false} tickLine={false} tickCount={5} />
+        <Tooltip cursor={{ stroke: "var(--text-muted)", strokeDasharray: "3 3" }}
+          content={({ active, payload }) => {
+            if (!active || !payload?.length) return null;
+            const point = payload[0].payload as (typeof data)[number];
+            return <div className="rounded-md border border-border bg-bg-card px-3 py-2 text-xs shadow-lg">
+              <div className="text-text-muted">{fmtHistoryDate(point.as_of)}</div>
+              <div className="mt-0.5 font-semibold tabular-nums text-text">{fmtMoney(point.total, currency)}</div>
+            </div>;
+          }} />
+        <Area type="linear" dataKey="total" name="Net worth" stroke="var(--accent)" strokeWidth={2.5}
+          fill="url(#financeNetWorthFill)" dot={false} activeDot={{ r: 5, fill: "var(--accent)", stroke: "var(--bg-card)" }} isAnimationActive={false} />
+      </AreaChart>
+    </ResponsiveContainer>
+  </div>;
 }
 
 function AllocationDonut({ groups, total }: { groups: AllocationGroup[]; total: number }) {
@@ -840,11 +1006,14 @@ function arcPath(cx: number, cy: number, r: number, start: number, end: number):
 
 // ─── Banking tab ─────────────────────────────────────────────────
 
-function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: () => void }) {
+function BankingTab({ accounts, onChanged, callbackURL }: { accounts: Account[]; onChanged: () => void; callbackURL: string }) {
+  const api = useFinanceAPI();
   const [connections, setConnections] = useState<BankingConnection[]>([]);
+  const [guidance,setGuidance] = useState<Record<string,{url:string;label:string;description:string}>>({});
   const [selected, setSelected] = useState("");
   const [accessToken, setAccessToken] = useState("");
   const [providerConnectionID, setProviderConnectionID] = useState("");
+  const [sessionID,setSessionID]=useState("");
   const [bankAccounts, setBankAccounts] = useState<BankingAccount[]>([]);
   const [syncResult, setSyncResult] = useState<BankingSyncStats | null>(null);
   const [busy, setBusy] = useState("");
@@ -856,14 +1025,30 @@ function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: (
   );
 
   const loadConnections = useCallback(async () => {
-    setErr("");
-    const body = await api<{ connections: BankingConnection[] }>("/banking/connections");
+    const body = await api<{ connections: BankingConnection[]; provider_guidance?: typeof guidance }>("/banking/connections");
     const next = body.connections ?? [];
     setConnections(next);
-    setSelected(prev => prev || (next[0] ? String(next[0].id) : ""));
-  }, []);
+    setGuidance(body.provider_guidance ?? {});
+    setSelected(prev => next.some(c => String(c.id) === prev) ? prev : (next[0] ? String(next[0].id) : ""));
+  }, [api]);
 
-  useEffect(() => { void loadConnections(); }, [loadConnections]);
+  useEffect(() => {
+    const reload = () => { void loadConnections().catch(e => setErr(e instanceof Error ? e.message : String(e))); };
+    reload(); const timer = window.setInterval(reload, 10000);
+    window.addEventListener("focus", reload);
+    return () => { window.clearInterval(timer); window.removeEventListener("focus", reload); };
+  }, [loadConnections]);
+  useEffect(() => { setSessionID(""); setBankAccounts([]); setSyncResult(null); }, [selected]);
+  useEffect(() => {
+    if (!sessionID || !selected) return;
+    let cancelled = false;
+    setBusy("discover"); setErr("");
+    api<{ accounts: BankingAccount[] }>("/banking/discover", { method: "POST", body: JSON.stringify({ connection_id: Number(selected), session_id: sessionID }) })
+      .then(out => { if (!cancelled) setBankAccounts(out.accounts ?? []); })
+      .catch(e => { if (!cancelled) setErr(e.message); })
+      .finally(() => { if (!cancelled) setBusy(""); });
+    return () => { cancelled = true; };
+  }, [api, selected, sessionID]);
 
   const selectedConn = connections.find(c => String(c.id) === selected) ?? null;
   const provider = selectedConn?.provider ?? "";
@@ -873,6 +1058,7 @@ function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: (
     provider,
     ...(accessToken ? { access_token: accessToken } : {}),
     ...(providerConnectionID ? { provider_connection_id: providerConnectionID } : {}),
+    ...(sessionID ? { session_id: sessionID } : {}),
   });
 
   const discover = async () => {
@@ -907,6 +1093,7 @@ function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: (
   };
 
   const sync = async (dryRun = false) => {
+    if (!selectedConn) return;
     setBusy(dryRun ? "dry" : "sync"); setErr("");
     try {
       const body = await api<BankingSyncStats>("/banking/sync", {
@@ -923,66 +1110,72 @@ function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: (
   };
 
   return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+    <div className="finance-grid">
       <section className="rounded-lg border border-border bg-bg-card p-4">
         <div className="mb-3 flex items-center justify-between">
           <div>
             <div className="text-xs uppercase tracking-wide text-text-muted">Connections</div>
-            <div className="text-sm text-text-muted">Plaid, Teller, Nordigen, TrueLayer, Salt Edge</div>
+            <div className="text-sm text-text-muted">Bank accounts and financial providers</div>
           </div>
-          <button onClick={() => void loadConnections()} className="text-text-muted hover:text-text">
+          <button aria-label="Refresh connections" title="Refresh connections" onClick={() => void loadConnections().catch(e => setErr(e instanceof Error ? e.message : String(e)))} className="text-text-muted hover:text-text">
             <Icon name="arrow-up-right" size={16} />
           </button>
         </div>
         {connections.length === 0 ? (
-          <EmptyState message="No open-banking connections bound to this project yet." />
+          <EmptyState message="No financial connection selected yet. Open Finance’s app settings, select your saved bank provider under Financial connections, then return here. This list refreshes automatically." />
         ) : (
           <Field label="Connection">
-            <select value={selected} onChange={e => setSelected(e.target.value)} className="input">
+            <select value={selected} disabled={!!busy} onChange={e => { setSelected(e.target.value); setBankAccounts([]); setSyncResult(null); setAccessToken(""); setProviderConnectionID(""); setSessionID(""); setErr(""); }} className="input">
               {connections.map(c => (
                 <option key={c.id} value={c.id}>{c.name || c.provider} - {c.provider} #{c.id}</option>
               ))}
             </select>
           </Field>
         )}
+        {guidance[provider] && <div className="my-3 space-y-2 text-sm">
+          <p className="text-text-muted">{guidance[provider].description}</p>
+          <a className="btn-secondary inline-block" href={guidance[provider].url} target="_blank" rel="noopener noreferrer">{guidance[provider].label} →</a>
+        </div>}
         {provider === "plaid" && (
           <Field label="Plaid access token">
-            <input value={accessToken} onChange={e => setAccessToken(e.target.value)} className="input" placeholder="access-..." />
+            <input type="password" autoComplete="off" value={accessToken} onChange={e => setAccessToken(e.target.value)} className="input" placeholder="access-..." />
           </Field>
         )}
+        {provider === "enable-banking" && selectedConn && <EnableBankingConnect key={selected} api={api} connectionId={selectedConn.id} callbackURL={callbackURL} onSession={setSessionID} />}
         {provider === "saltedge" && (
           <Field label="Salt Edge connection id">
             <input value={providerConnectionID} onChange={e => setProviderConnectionID(e.target.value)} className="input" placeholder="connection id" />
           </Field>
         )}
         <div className="mt-3 flex gap-2">
-          <button onClick={discover} disabled={!selectedConn || busy === "discover"} className="btn-primary">
+          <button onClick={discover} disabled={!selectedConn || !!busy || provider.endsWith("-payments") || (provider === "enable-banking" && !sessionID)} className="btn-primary">
             {busy === "discover" ? "Discovering..." : "Discover"}
           </button>
-          <button onClick={() => void sync(false)} disabled={busy === "sync" || linked.length === 0} className="btn-secondary">
+          <button onClick={() => void sync(false)} disabled={!selectedConn || !!busy || !linked.some(a => a.connection_id === selected)} className="btn-secondary">
             {busy === "sync" ? "Syncing..." : "Sync linked"}
           </button>
         </div>
       </section>
 
-      <section className="rounded-lg border border-border bg-bg-card lg:col-span-2">
+      <section className="finance-wide rounded-lg border border-border bg-bg-card">
         <header className="flex items-center justify-between border-b border-border-subtle px-4 py-2">
           <div className="text-xs uppercase tracking-wide text-text-muted">Discovered accounts</div>
-          <button onClick={() => void sync(true)} disabled={busy === "dry" || linked.length === 0} className="text-xs text-text-muted hover:text-text">
+          <button onClick={() => void sync(true)} disabled={!selectedConn || !!busy || !linked.some(a => a.connection_id === selected)} className="text-xs text-text-muted hover:text-text">
             Dry run sync
           </button>
         </header>
         {err && <div className="m-4 rounded-md border border-error/30 bg-error/10 px-3 py-2 text-sm text-error">{err}</div>}
         {bankAccounts.length === 0 ? (
-          <EmptyState message="Choose a connection and discover accounts." />
+          <EmptyState message={provider.endsWith("-payments") ? "Use this connection for payments below. Connect a separate account-data provider to sync accounts." : "Choose a connection and discover accounts."} />
         ) : (
           <ul className="divide-y divide-border-subtle">
             {bankAccounts.map(a => {
-              const existing = linked.find(x => x.external_id === a.external_id);
+              const existing = linked.find(x => x.external_id === a.external_id && x.connection_id === selected && x.source === `integration:${provider}`);
               return (
                 <li key={a.external_id} className="flex items-center justify-between px-4 py-3">
                   <div className="min-w-0">
                     <div className="truncate text-sm font-medium">{a.name}</div>
+                    {a.needs_reconnect && <p className="text-xs text-error">Consent expired — reconnect in the provider app.</p>}
                     <div className="text-xs text-text-muted">
                       {[a.institution, a.mask, a.currency].filter(Boolean).join(" - ")}
                     </div>
@@ -994,7 +1187,7 @@ function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: (
                     ) : (
                       <button
                         onClick={() => void linkAccount(a.external_id)}
-                        disabled={busy === `link:${a.external_id}`}
+                        disabled={!!busy || a.needs_reconnect}
                         className="btn-secondary"
                       >
                         {busy === `link:${a.external_id}` ? "Linking..." : "Link"}
@@ -1013,6 +1206,7 @@ function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: (
           </div>
         )}
       </section>
+      <BankPayments connection={selectedConn} accounts={accounts} api={api} />
       <style>{`
         .input { width: 100%; padding: 0.5rem 0.75rem; border-radius: 0.375rem; border: 1px solid var(--border); background: var(--bg-input); color: var(--text); }
         .input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
@@ -1095,13 +1289,14 @@ function AccountsTab({ accounts, base, onChanged }: { accounts: Account[]; base:
 }
 
 function AccountDetail({ account, onBack, onChanged }: { account: Account; onBack: () => void; onChanged: () => void }) {
+  const api = useFinanceAPI();
   const [txns, setTxns] = useState<Transaction[]>([]);
   const [showNewTxn, setShowNewTxn] = useState(false);
   const [showImportCSV, setShowImportCSV] = useState(false);
   const refresh = useCallback(async () => {
     const r = await api<{ transactions: Transaction[] }>(`/txns?account_id=${account.id}&limit=200`);
     setTxns(r.transactions ?? []);
-  }, [account.id]);
+  }, [account.id, api]);
   useEffect(() => { refresh(); }, [refresh]);
 
   return (
@@ -1190,6 +1385,7 @@ function AccountDetail({ account, onBack, onChanged }: { account: Account; onBac
 type SortKey = "value" | "pl" | "pct";
 
 function HoldingsTab({ holdings, accounts }: { holdings: Holding[]; accounts: Account[] }) {
+  const api = useFinanceAPI();
   const [sortKey, setSortKey] = useState<SortKey>("value");
   const [instruments, setInstruments] = useState<Record<number, Instrument>>({});
 
@@ -1213,7 +1409,7 @@ function HoldingsTab({ holdings, accounts }: { holdings: Holding[]; accounts: Ac
       }
     })();
     return () => { cancelled = true; };
-  }, [holdings, instruments]);
+  }, [holdings, instruments, api]);
 
   const sorted = useMemo(() => {
     const arr = [...holdings];
@@ -1288,6 +1484,7 @@ function HoldingsTab({ holdings, accounts }: { holdings: Holding[]; accounts: Ac
 // ─── Dialogs ─────────────────────────────────────────────────────
 
 function NewAccountDialog({ onClose, onCreated, defaultCurrency }: { onClose: () => void; onCreated: () => void; defaultCurrency: string }) {
+  const api = useFinanceAPI();
   const [name, setName] = useState("");
   const [kind, setKind] = useState("cash");
   const [currency, setCurrency] = useState(defaultCurrency);
@@ -1334,6 +1531,7 @@ function NewAccountDialog({ onClose, onCreated, defaultCurrency }: { onClose: ()
 }
 
 function CSVImportDialog({ account, onClose, onImported }: { account: Account; onClose: () => void; onImported: () => void }) {
+  const api = useFinanceAPI();
   const [fileName, setFileName] = useState("");
   const [csvText, setCsvText] = useState("");
   const [headers, setHeaders] = useState<string[]>([]);
@@ -1513,6 +1711,7 @@ function normaliseHeader(s: string): string {
 }
 
 function NewTxnDialog({ account, onClose, onCreated }: { account: Account; onClose: () => void; onCreated: () => void }) {
+  const api = useFinanceAPI();
   const [kind, setKind] = useState<TxnKind>(INVESTMENT_ACCOUNT_KINDS.has(account.kind) ? "buy" : "expense");
   const [instrumentKind, setInstrumentKind] = useState<TradeInstrumentKind>("stock");
   const [symbol, setSymbol] = useState("");
@@ -1579,7 +1778,7 @@ function NewTxnDialog({ account, onClose, onCreated }: { account: Account; onClo
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [investment, symbol, kind, postedAt, showSuggestions]);
+  }, [investment, symbol, kind, postedAt, showSuggestions, api]);
 
   const applyStockHit = (hit: StockSearchHit) => {
     const next = (hit.symbol ?? "").toUpperCase();
@@ -1605,7 +1804,7 @@ function NewTxnDialog({ account, onClose, onCreated }: { account: Account; onClo
     try {
       const posted_at = postedAt + "T00:00:00Z";
       if (isInvestmentTxnKind(kind)) {
-        const instrument = await resolveTradeInstrument(symbol, instrumentKind, account.currency, quote ?? selectedStock);
+        const instrument = await resolveTradeInstrument(api, symbol, instrumentKind, account.currency, quote ?? selectedStock);
         const baseBody = {
           account_id: account.id,
           instrument_id: instrument.id,
@@ -1773,6 +1972,7 @@ function NewBudgetDialog({
   onClose: () => void;
   onCreated: () => void;
 }) {
+  const api = useFinanceAPI();
   // "" = total spend (NULL category_id on the server).
   const [categoryID, setCategoryID] = useState<string>("");
   const [amount, setAmount] = useState("");

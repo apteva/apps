@@ -25,10 +25,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -36,21 +38,26 @@ import (
 // StreamFrame mirrors channel-chat's wire shape so the dashboard's
 // existing streaming-bubble machinery ports to the panel unchanged.
 type StreamFrame struct {
-	Activity       *ToolActivity `json:"tool_activity,omitempty"`
-	AfterMessageID int64         `json:"after_message_id,omitempty"`
-	Type           string        `json:"type"` // always "stream"
-	ConversationID string        `json:"chat_id"`
-	AgentID        int64         `json:"agent_id,omitempty"`
-	ThreadID       string        `json:"thread_id"`
-	CallID         string        `json:"call_id"`
-	RunID          string        `json:"run_id,omitempty"`
-	Text           string        `json:"text"`
-	Phase          string        `json:"phase,omitempty"`
-	Done           bool          `json:"done"`
-	CreatedAt      time.Time     `json:"created_at"`
+	Snapshot       bool              `json:"snapshot,omitempty"`
+	Frames         []StreamFrame     `json:"frames,omitempty"`
+	Progress       *ResponseProgress `json:"response_progress,omitempty"`
+	Activity       *ToolActivity     `json:"tool_activity,omitempty"`
+	AfterMessageID int64             `json:"after_message_id,omitempty"`
+	Type           string            `json:"type"` // always "stream"
+	ConversationID string            `json:"chat_id"`
+	AgentID        int64             `json:"agent_id,omitempty"`
+	ThreadID       string            `json:"thread_id"`
+	CallID         string            `json:"call_id"`
+	RunID          string            `json:"run_id,omitempty"`
+	Text           string            `json:"text"`
+	Phase          string            `json:"phase,omitempty"`
+	Done           bool              `json:"done"`
+	CreatedAt      time.Time         `json:"created_at"`
 }
 
 type streamState struct {
+	agentID        int64
+	afterMessageID int64
 	runID          string
 	buf            strings.Builder
 	parser         flatStringParser
@@ -63,22 +70,26 @@ type streamState struct {
 }
 
 type streamer struct {
-	hub      *hub
-	resolve  func(int64, string) string
-	throttle time.Duration
-	mu       sync.Mutex
-	buffers  map[string]*streamState
-	lastEmit map[string]string
-	touched  map[string]time.Time
-	ackTimes map[string]time.Time
+	responses          map[string]*responseProgressState
+	progressSeq        uint64
+	telemetryConnected bool
+	hub                *hub
+	resolve            func(int64, string) string
+	throttle           time.Duration
+	mu                 sync.Mutex
+	buffers            map[string]*streamState
+	lastEmit           map[string]string
+	touched            map[string]time.Time
+	ackTimes           map[string]time.Time
 	// pendingAcks maps conversation → the outstanding ack frame's call
 	// id. Ack ids are unique per emission (ackSeq): providers like
 	// Gemini reuse call ids across responses, and the panel tombstones
 	// settled ids — a constant id would suppress every bubble after
 	// the first reply.
-	pendingAcks map[string]string
-	ackSeq      uint64
-	onFrame     func(StreamFrame)
+	pendingAcks      map[string]string
+	ackSeq           uint64
+	onFrame          func(StreamFrame)
+	onActivityChange func(string)
 }
 
 func (s *streamer) publish(frame StreamFrame) {
@@ -90,10 +101,11 @@ func (s *streamer) publish(frame StreamFrame) {
 
 func newStreamer(h *hub) *streamer {
 	return &streamer{
-		hub:      h,
-		buffers:  map[string]*streamState{},
-		lastEmit: map[string]string{},
-		touched:  map[string]time.Time{}, ackTimes: map[string]time.Time{},
+		hub:       h,
+		responses: map[string]*responseProgressState{},
+		buffers:   map[string]*streamState{},
+		lastEmit:  map[string]string{},
+		touched:   map[string]time.Time{}, ackTimes: map[string]time.Time{},
 		pendingAcks: map[string]string{},
 	}
 }
@@ -101,6 +113,11 @@ func newStreamer(h *hub) *streamer {
 // All ephemeral maps have a time and size bound, including final-only calls.
 func (s *streamer) pruneLocked() {
 	now := time.Now()
+	for key, p := range s.responses {
+		if now.Sub(p.touched) > 5*time.Minute || len(s.responses) > 1024 {
+			delete(s.responses, key)
+		}
+	}
 	for key, at := range s.touched {
 		if now.Sub(at) > 5*time.Minute || len(s.touched) > 1024 {
 			delete(s.touched, key)
@@ -173,6 +190,14 @@ func (s *streamer) Ingest(eventType string, agentID int64, threadID, dataJSON st
 	if conversationID == "" {
 		return
 	}
+	s.mu.Lock()
+	p := s.responses[responseProgressKey(conversationID, agentID)]
+	queued := p != nil && p.inboundPreview != "" && !p.inboundReceived
+	s.mu.Unlock()
+	if queued && eventType != "event.received" {
+		return
+	}
+	s.ingestProgress(eventType, agentID, threadID, conversationID, dataJSON, ts)
 	switch eventType {
 	case "llm.tool_chunk":
 		s.onChunk(agentID, threadID, conversationID, dataJSON, ts)
@@ -211,6 +236,7 @@ func (s *streamer) onChunk(agentID int64, threadID, conversationID, dataJSON str
 		return
 	}
 	st := s.runLocked(key)
+	s.identifyStream(st, agentID, threadID, conversationID, callID, ts)
 	if st.buf.Len()+len(chunk) > maxMessageBytes {
 		delete(s.buffers, key)
 		delete(s.lastEmit, key)
@@ -235,7 +261,7 @@ func (s *streamer) onChunk(agentID int64, threadID, conversationID, dataJSON str
 	}
 	s.publish(StreamFrame{
 		Type: "stream", ConversationID: conversationID, AgentID: agentID, ThreadID: threadID,
-		CallID: callID, RunID: st.runID, Text: text, CreatedAt: ts,
+		CallID: callID, RunID: st.runID, Text: text, CreatedAt: st.createdAt, AfterMessageID: st.afterMessageID,
 	})
 }
 
@@ -273,6 +299,7 @@ func (s *streamer) onFinalArgs(agentID int64, threadID, conversationID, dataJSON
 		return
 	}
 	st := s.runLocked(key)
+	s.identifyStream(st, agentID, threadID, conversationID, callID, ts)
 	changed := text != s.lastEmit[key]
 	if changed {
 		s.lastEmit[key] = text
@@ -283,7 +310,7 @@ func (s *streamer) onFinalArgs(agentID int64, threadID, conversationID, dataJSON
 	}
 	s.publish(StreamFrame{
 		Type: "stream", ConversationID: conversationID, AgentID: agentID, ThreadID: threadID,
-		CallID: callID, RunID: st.runID, Text: text, CreatedAt: ts,
+		CallID: callID, RunID: st.runID, Text: text, CreatedAt: st.createdAt, AfterMessageID: st.afterMessageID,
 	})
 }
 
@@ -327,22 +354,109 @@ func (s *streamer) onToolEnd(agentID int64, threadID, conversationID, dataJSON s
 // message forwarded" and "agent reply landed". Each emission mints a
 // fresh call id and records it as the conversation's pending ack.
 func (s *streamer) emitAck(conversationID, threadID string, agentID int64, afterMessageIDs ...int64) {
-	s.mu.Lock()
-	s.pruneLocked()
-	s.ackSeq++
-	id := "ack-" + conversationID + "-" + strconv.FormatUint(s.ackSeq, 10)
 	afterID := int64(0)
 	if len(afterMessageIDs) > 0 {
 		afterID = afterMessageIDs[0]
 	}
+	s.emitResponseAck(conversationID, threadID, agentID, afterID, "")
+}
+
+func (s *streamer) emitInboundAck(chat, thread string, agent int64, msg *Message) {
+	// Core's event.received preview contains at most the first 100 bytes.
+	preview := "[chat] " + msg.Content
+	if len(preview) > 100 {
+		preview = preview[:100]
+		for !utf8.ValidString(preview) {
+			preview = preview[:len(preview)-1]
+		}
+	}
+	s.mu.Lock()
+	connected := s.telemetryConnected
+	s.mu.Unlock()
+	if !connected {
+		preview = "" // Keep durable-reply settlement on servers without telemetry.
+	}
+	s.emitResponseAck(chat, thread, agent, msg.ID, preview)
+}
+
+func (s *streamer) emitResponseAck(conversationID, threadID string, agentID, afterID int64, preview string) {
+	s.mu.Lock()
+	s.pruneLocked()
+	s.ackSeq++
+	id := "ack-" + conversationID + "-" + strconv.FormatUint(s.ackSeq, 10)
+	now := time.Now()
+	s.responses[responseProgressKey(conversationID, agentID)] = &responseProgressState{ResponseProgress: ResponseProgress{Phase: "thinking", RunID: id, AfterMessageID: afterID, StartedAt: now}, agentID: agentID, threadID: threadID, chatID: conversationID, touched: now, lastEvent: now, inboundPreview: preview}
+	s.progressSeq++
+	s.responses[responseProgressKey(conversationID, agentID)].Revision = s.progressSeq
+	progress := s.progressFrame(s.responses[responseProgressKey(conversationID, agentID)])
 	s.pendingAcks[conversationID+":"+strconv.FormatInt(agentID, 10)] = id
 	s.ackTimes[conversationID+":"+strconv.FormatInt(agentID, 10)] = time.Now()
 	s.mu.Unlock()
 	s.publish(StreamFrame{
 		Type: "stream", ConversationID: conversationID, AgentID: agentID, ThreadID: threadID,
 		CallID: id, Phase: "acknowledgement", AfterMessageID: afterID,
+		Progress:  progress.Progress,
 		CreatedAt: time.Now(),
 	})
+	if s.onActivityChange != nil {
+		s.onActivityChange(conversationID)
+	}
+}
+
+// Called with mu held. The first source timestamp anchors text in the same
+// timeline as durable messages and tools, including after reconnect.
+func (s *streamer) identifyStream(st *streamState, agent int64, thread, chat, call string, ts time.Time) {
+	if st.conversationID != "" {
+		return
+	}
+	st.agentID, st.threadID, st.conversationID, st.callID = agent, thread, chat, call
+	st.createdAt = ts
+	if p := s.responses[responseProgressKey(chat, agent)]; p != nil {
+		st.afterMessageID = p.AfterMessageID
+	}
+}
+
+// Subscribe before taking this snapshot so events racing the snapshot are
+// queued. Stream snapshots never participate in the durable change cursor.
+func (s *streamer) snapshot(chat string) StreamFrame {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked()
+	// Older clients ignore this as an unrelated done frame rather than
+	// accidentally rendering the snapshot envelope as an empty text bubble.
+	frame := StreamFrame{Type: "stream", ConversationID: chat, Snapshot: true, Done: true, CallID: "snapshot", CreatedAt: time.Now()}
+	for _, p := range s.responses {
+		if p.chatID == chat {
+			frame.Frames = append(frame.Frames, s.progressFrame(p))
+		}
+	}
+	for key, st := range s.buffers {
+		if st.conversationID == chat && s.lastEmit[key] != "" {
+			frame.Frames = append(frame.Frames, StreamFrame{Type: "stream", ConversationID: chat, AgentID: st.agentID, ThreadID: st.threadID, CallID: st.callID, RunID: st.runID, Text: s.lastEmit[key], CreatedAt: st.createdAt, AfterMessageID: st.afterMessageID})
+		}
+	}
+	return frame
+}
+
+// activeConversationIDs is a compact, ephemeral projection for conversation
+// lists. The HTTP handler applies the requesting user's visibility and agent
+// filters before returning any IDs; this method never exposes stream content.
+func (s *streamer) activeConversationIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked()
+	active := make(map[string]bool)
+	for _, progress := range s.responses {
+		if progress.Phase != "idle" && progress.chatID != "" {
+			active[progress.chatID] = true
+		}
+	}
+	ids := make([]string, 0, len(active))
+	for id := range active {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // settleAck settles the conversation's outstanding ack, if any. A
@@ -371,9 +485,10 @@ func (s *streamer) settleAck(conversationID string, agents ...int64) {
 // ─── telemetry feed ──────────────────────────────────────────────────
 
 // runTelemetryFeed subscribes to the platform's telemetry bridge and
-// pipes events into the streamer. Returns false when the bridge is
-// unavailable — the app then runs on Stage-1 phase frames alone, and
-// the panel cannot tell the difference structurally (only textually).
+// pipes events into the streamer. The platform can briefly return 401 while
+// an app install is being registered after a sidecar restart. Keep retrying
+// those transient startup failures instead of permanently falling back to
+// phase frames for the lifetime of the process.
 func (a *App) runTelemetryFeed(ctx *sdk.AppCtx) bool {
 	tc, ok := ctx.PlatformAPI().(sdk.TelemetryClient)
 	if !ok {
@@ -381,27 +496,112 @@ func (a *App) runTelemetryFeed(ctx *sdk.AppCtx) bool {
 	}
 	feedCtx, cancel := context.WithCancel(context.Background())
 	a.telemetryStop = cancel
-	ch, err := tc.SubscribeTelemetry(feedCtx, sdk.TelemetrySubscription{
-		Events:       []string{"llm.tool_chunk", "tool.call", "tool.result"},
+	go a.connectTelemetryFeed(ctx, tc, feedCtx, sdk.TelemetrySubscription{
+		Events:       []string{"event.received", "llm.start", "llm.tool_chunk", "tool.call", "tool.result", "llm.error", "llm.err", "thread.done"},
 		ThreadPrefix: "chat-",
-	})
-	if err != nil {
-		cancel()
-		a.telemetryStop = nil
-		ctx.Logger().Info("telemetry bridge unavailable — streaming falls back to phase frames", "err", err)
+	}, false)
+	go a.connectTelemetryFeed(ctx, tc, feedCtx, sdk.TelemetrySubscription{
+		Events:       []string{"realtime.user", "realtime.assistant", "tool.call", "tool.result", "thread.done"},
+		ThreadPrefix: "voice-",
+	}, true)
+	return true
+}
+
+const (
+	telemetryRetryInitial = 250 * time.Millisecond
+	telemetryRetryMax     = 30 * time.Second
+)
+
+// connectTelemetryFeed owns one filtered subscription. 403/404/405 mean the
+// permission or bridge is genuinely unavailable; other startup failures,
+// including 401 while registration settles, are retried with backoff.
+func (a *App) connectTelemetryFeed(ctx *sdk.AppCtx, tc sdk.TelemetryClient, feedCtx context.Context, sub sdk.TelemetrySubscription, voice bool) {
+	backoff := telemetryRetryInitial
+	for {
+		if feedCtx.Err() != nil {
+			return
+		}
+		ch, err := tc.SubscribeTelemetry(feedCtx, sub)
+		if err == nil {
+			if !voice {
+				a.streamer.mu.Lock()
+				a.streamer.telemetryConnected = true
+				a.streamer.mu.Unlock()
+			}
+			ctx.Logger().Info("telemetry bridge connected", "thread_prefix", sub.ThreadPrefix)
+			if voice {
+				a.consumeVoiceTelemetry(ctx, ch)
+			} else {
+				a.consumeChatTelemetry(ctx, ch)
+			}
+			return
+		}
+		if feedCtx.Err() != nil {
+			return
+		}
+		if !retryTelemetrySubscription(err) {
+			if voice {
+				ctx.Logger().Warn("voice telemetry unavailable; voice transcript is not captured", "err", err)
+			} else {
+				ctx.Logger().Info("chat telemetry unavailable — streaming falls back to phase frames", "err", err)
+			}
+			return
+		}
+		ctx.Logger().Info("telemetry bridge not ready — retrying", "err", err, "backoff", backoff.String())
+		timer := time.NewTimer(backoff)
+		select {
+		case <-feedCtx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		if backoff < telemetryRetryMax {
+			backoff *= 2
+			if backoff > telemetryRetryMax {
+				backoff = telemetryRetryMax
+			}
+		}
+	}
+}
+
+func retryTelemetrySubscription(err error) bool {
+	if err == nil {
 		return false
 	}
-	go func() {
-		for ev := range ch {
-			if err := a.ingestToolActivity(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time); err != nil {
-				ctx.Logger().Error("tool activity persistence failed", "err", err)
-			}
-			a.streamer.Ingest(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time)
+	text := err.Error()
+	for _, code := range []string{"HTTP 403", "HTTP 404", "HTTP 405"} {
+		if strings.Contains(text, code) {
+			return false
 		}
-		_ = a.store.interruptToolActivities()
-		ctx.Logger().Info("telemetry feed ended")
-	}()
+	}
 	return true
+}
+
+func (a *App) consumeChatTelemetry(ctx *sdk.AppCtx, ch <-chan sdk.TelemetryStreamEvent) {
+	for ev := range ch {
+		if err := a.ingestToolActivity(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time); err != nil {
+			ctx.Logger().Error("tool activity persistence failed", "err", err)
+		}
+		a.streamer.Ingest(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time)
+	}
+	a.streamer.mu.Lock()
+	a.streamer.telemetryConnected = false
+	a.streamer.mu.Unlock()
+	_ = a.store.interruptToolActivities()
+	ctx.Logger().Info("telemetry feed ended")
+}
+
+func (a *App) consumeVoiceTelemetry(ctx *sdk.AppCtx, ch <-chan sdk.TelemetryStreamEvent) {
+	for ev := range ch {
+		if err := a.ingestVoiceEvent(ev); err != nil {
+			ctx.Logger().Error("voice transcript persistence failed", "err", err)
+		}
+		if err := a.ingestToolActivity(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time); err != nil {
+			ctx.Logger().Error("voice tool activity persistence failed", "err", err)
+		}
+		a.streamer.Ingest(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time)
+	}
+	ctx.Logger().Warn("voice telemetry ended; future voice transcript may be incomplete")
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────

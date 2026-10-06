@@ -79,7 +79,7 @@ func newTestApp(t *testing.T) (*App, *sdk.AppCtx) {
 	app := &App{
 		runners:       map[int64]*streamRunner{},
 		viewers:       newViewerTracker(),
-		throttle:      newViewerThrottle(),
+		throttle:      newViewerThrottle(defaultMaxViewersPerIP),
 		playback:      newPlaybackCache(playbackCacheTTL),
 		runnerFactory: newFakeRunnerFactory(t),
 	}

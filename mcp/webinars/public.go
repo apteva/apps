@@ -8,6 +8,7 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,7 +39,7 @@ import (
 // POST /r/<slug>           → submit form, 302 to /live/<token>
 
 func (a *App) handleRegistrationPage(w http.ResponseWriter, r *http.Request) {
-	slug := strings.TrimPrefix(r.URL.Path, "/r/")
+	slug := strings.TrimPrefix(r.URL.Path, registrationPathPrefix+"/")
 	slug = strings.Trim(slug, "/")
 	if slug == "" {
 		notFoundPage(w)
@@ -62,6 +63,23 @@ func (a *App) handleRegistrationPage(w http.ResponseWriter, r *http.Request) {
 	}
 	if webinar == nil {
 		notFoundPage(w)
+		return
+	}
+
+	// Terminal states, before anything renders a form. A finished or
+	// cancelled webinar has no seat left to save.
+	//
+	// "ended" is only closed on the PUBLIC form: an evergreen or replay
+	// funnel legitimately keeps taking registrations after the live
+	// date, but it does that through webinars_register, which stays
+	// permissive. What a stranger following an old link should see is
+	// the replay, or an honest dead end.
+	if webinar.Status == "cancelled" || (webinar.Status == "ended" && !webinar.RecordingPublished) {
+		registrationClosedPage(w, webinar, "")
+		return
+	}
+	if webinar.Status == "ended" {
+		registrationClosedPage(w, webinar, app.replayLinkFor(ctx, webinar, nil, r))
 		return
 	}
 
@@ -187,11 +205,44 @@ func registrationErrorMessage(err error) string {
 	if err == nil {
 		return ""
 	}
-	msg := strings.TrimSpace(err.Error())
-	if msg == "" {
-		return "We couldn’t complete your registration. Please try again."
+	// Allowlist, not a length cap. v0.2 rendered err.Error() for
+	// anything at all, truncated to 200 runes — which is a smaller
+	// blast radius than nothing but still put driver and constraint
+	// text on an unauthenticated page for a stranger to read. Only
+	// errors this app raises deliberately, and that a visitor can act
+	// on, are shown; everything else gets the generic line (the real
+	// error is already logged by the caller).
+	for _, known := range registrationUserErrors {
+		if errors.Is(err, known) {
+			return known.Error()
+		}
 	}
-	return truncateRunes(msg, 200)
+	msg := strings.TrimSpace(err.Error())
+	for _, prefix := range registrationUserErrorTexts {
+		if strings.HasPrefix(msg, prefix) {
+			return truncateRunes(msg, 200)
+		}
+	}
+	return "We couldn’t complete your registration. Please try again."
+}
+
+// registrationUserErrors are sentinel errors whose text is written for
+// the visitor.
+var registrationUserErrors = []error{
+	errRegistrationRateLimited,
+	errSlotFull,
+}
+
+// registrationUserErrorTexts are the non-sentinel validation errors
+// raised by NormalizeRegistrationContact and the slot resolver. Matched
+// by prefix because several interpolate the offending value.
+var registrationUserErrorTexts = []string{
+	"email",
+	"phone",
+	"slot ",
+	"no available slots",
+	"webinar is cancelled",
+	"webinar has already ended",
 }
 
 // ─── Registration form ────────────────────────────────────────────
@@ -215,6 +266,7 @@ type registrationView struct {
 	Message     string
 	Slots       []slotChoice
 	SingleSlot  bool
+	ManySlots   bool
 	Name        string
 	Email       string
 	Phone       string
@@ -235,6 +287,10 @@ func (a *App) renderRegistrationForm(w http.ResponseWriter, r *http.Request, web
 		Message:     message,
 		Slots:       slotChoices(slots),
 		SingleSlot:  len(slots) == 1,
+		// Past a handful, a radio list stops being a comparison and
+		// starts being a scroll. Evergreen webinars generate slots by
+		// the dozen.
+		ManySlots: len(slots) > maxSlotRadios,
 		// Re-fill what the visitor typed so a rejected submit is not a
 		// blank form.
 		Name:  strings.TrimSpace(r.FormValue("display_name")),
@@ -258,6 +314,10 @@ func (a *App) renderRegistrationForm(w http.ResponseWriter, r *http.Request, web
 		globalCtx.Logger().Warn("render registration form", "webinar_id", webinar.ID, "err", err)
 	}
 }
+
+// maxSlotRadios is where the slot picker switches from radio cards to
+// a single <select>.
+const maxSlotRadios = 8
 
 func slotChoices(slots []*WebinarSlot) []slotChoice {
 	out := make([]slotChoice, 0, len(slots))
@@ -294,11 +354,14 @@ const registrationHTML = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>Register: {{.Title}}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex">
 <style nonce="{{.Nonce}}">
 {{template "base-css" .}}
   [hidden] { display: none !important; }
   body { max-width: 34rem; margin: 0 auto; padding: 3rem 1rem 4rem; }
+  select {
+    font: inherit; padding: 0.7rem; border: 1px solid var(--line);
+    border-radius: 8px; background: var(--card); color: var(--fg); width: 100%;
+  }
   h1 { margin: 0 0 0.35rem; font-size: 1.6rem; line-height: 1.25; }
   .meta { color: var(--muted); margin-bottom: 1.25rem; }
   .desc { white-space: pre-wrap; margin-bottom: 1.5rem; line-height: 1.55; }
@@ -340,7 +403,7 @@ const registrationHTML = `<!doctype html>
   </div>
   {{if .Message}}<div class="message" role="alert">{{.Message}}</div>{{end}}
   {{if .Description}}<div class="desc">{{.Description}}</div>{{end}}
-  <form method="POST" novalidate>
+  <form method="POST">
     <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
     {{if .Slots}}
       {{if .SingleSlot}}
@@ -353,6 +416,16 @@ const registrationHTML = `<!doctype html>
           </div>
         </div>
         {{end}}
+      {{else if .ManySlots}}
+        <div class="field">
+          <label for="slot_id">Pick a time</label>
+          <select id="slot_id" name="slot_id" required>
+            {{range .Slots}}
+            <option value="{{.ID}}"{{if .Checked}} selected{{end}}
+                    {{if .ISO}}data-iso="{{.ISO}}"{{end}}>{{.Label}}{{if .Meta}} — {{.Meta}}{{end}}</option>
+            {{end}}
+          </select>
+        </div>
       {{else}}
         <fieldset>
           <legend>Pick a time</legend>
@@ -386,6 +459,23 @@ const registrationHTML = `<!doctype html>
   </form>
 <script nonce="{{.Nonce}}">
 {{template "localtime-js" .}}
+/* <option> can't hold a <time>, so the dropdown's labels are localized
+   here from the ISO value stashed on each option. */
+(function () {
+  var sel = document.getElementById("slot_id");
+  if (!sel || !sel.options) return;
+  Array.prototype.forEach.call(sel.options, function (opt) {
+    var iso = opt.getAttribute("data-iso");
+    if (!iso) return;
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return;
+    var rest = opt.textContent.indexOf(" — ");
+    var tail = rest === -1 ? "" : opt.textContent.slice(rest);
+    try {
+      opt.textContent = d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) + tail;
+    } catch (e) {}
+  });
+})();
 </script>
 </body></html>`
 
@@ -396,7 +486,7 @@ const registrationHTML = `<!doctype html>
 // /live/<token>/events all in one place.
 
 func (a *App) handleLiveRoute(w http.ResponseWriter, r *http.Request) {
-	rest := strings.TrimPrefix(r.URL.Path, "/live/")
+	rest := strings.TrimPrefix(r.URL.Path, liveRoomPathPrefix+"/")
 	rest = strings.Trim(rest, "/")
 	if rest == "" {
 		notFoundPage(w)
@@ -512,7 +602,7 @@ func (a *App) handleLiveRoom(rw http.ResponseWriter, r *http.Request, ctx *sdk.A
 
 	var snap *StreamSnapshot
 	if webinar.StreamID != 0 {
-		if s, err := globalApp.streamingCaller.GetStream(webinar.StreamID); err == nil && s.ID != 0 {
+		if s, err := a.streamingCaller.GetStream(webinar.ProjectID, webinar.StreamID); err == nil && s.ID != 0 {
 			snap = &s
 		}
 	}
@@ -531,7 +621,7 @@ func (a *App) handleLiveRoom(rw http.ResponseWriter, r *http.Request, ctx *sdk.A
 	// once require_signed_urls is on, but with streaming's fixed 1h
 	// replay TTL — a webinar longer than an hour would lose video
 	// mid-session. LiveRoomPlayback sizes the TTL to the webinar.
-	playback := globalApp.LiveRoomPlayback(ctx, webinar, snap)
+	playback := a.LiveRoomPlayback(ctx, webinar, snap)
 	if !playback.Signed {
 		// Not fatal: an older streaming install without
 		// streams_signed_url still serves the legacy static-token URL.
@@ -545,12 +635,12 @@ func (a *App) handleLiveRoom(rw http.ResponseWriter, r *http.Request, ctx *sdk.A
 	if displayName == "" {
 		displayName = "Guest"
 	}
-	publicBase := globalApp.publicAppPath(ctx)
+	publicBase := a.publicAppPath(ctx)
 	streamingBase := strings.Replace(publicBase, "/api/apps/webinars", "/api/apps/streaming", 1)
 	// Ask streaming for a purpose-built signed heartbeat URL. Only when
 	// it can't mint one (an install predating kind=heartbeat) do we fall
 	// back to reassembling the beat from the playback URL's credentials.
-	heartbeatURL := globalApp.LiveRoomStreamHeartbeat(ctx, webinar)
+	heartbeatURL := a.LiveRoomStreamHeartbeat(ctx, webinar)
 	hbToken, hbExp, hbSig := streamAuthParams(playback.URL, snap.PlaybackToken)
 
 	view := liveRoomView{
@@ -565,7 +655,7 @@ func (a *App) handleLiveRoom(rw http.ResponseWriter, r *http.Request, ctx *sdk.A
 		PlaybackURL:   playback.URL,
 		PlaybackKind:  playback.Kind,
 		Viewers:       snap.CurrentViewers,
-		HeartbeatMS:   globalApp.heartbeatIntervalSeconds(ctx) * 1000,
+		HeartbeatMS:   a.heartbeatIntervalSeconds(ctx) * 1000,
 		HLSSrc:        hlsScriptURL,
 		HLSIntegrity:  hlsScriptIntegrity,
 		HeartbeatURL:  heartbeatURL,
@@ -638,8 +728,7 @@ func (a *App) replayLinkFor(ctx *sdk.AppCtx, w *Webinar, reg *Registrant, req *h
 			return ""
 		}
 	}
-	prefix := strings.TrimSuffix(suppressNonEmptyOr(ctx.Config().Get("replay_url_prefix"), "/replay"), "/")
-	link := a.publicAppPath(ctx) + prefix + "/" + w.Slug
+	link := a.publicAppPath(ctx) + replayPathPrefix + "/" + w.Slug
 	if w.ReplayToken != "" {
 		link = withQuery(link, "t", w.ReplayToken)
 	}
@@ -754,6 +843,12 @@ const liveRoomHTML = `<!doctype html>
   .card .choice:hover:not(:disabled) { background: #3a3a3d; }
   .card .choice:disabled { opacity: 0.6; cursor: default; }
   .card .choice[aria-pressed="true"] { background: var(--accent); color: var(--accent-fg); }
+  .card .foot { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+  .card .timer { color: var(--muted); font-size: 0.8125rem; font-variant-numeric: tabular-nums; }
+  .card.offer.expired { opacity: 0.55; }
+  .card.offer.expired a.cta {
+    background: #2a2a2d; color: var(--muted); cursor: default; text-decoration: none;
+  }
 
   .jump {
     position: absolute; left: 50%; transform: translateX(-50%); bottom: 3.6rem;
@@ -849,6 +944,7 @@ const liveRoomHTML = `<!doctype html>
 var PLAYBACK_URL   = "{{.PlaybackURL}}";
 var PLAYBACK_KIND  = "{{.PlaybackKind}}";
 var JOIN_TOKEN     = "{{.JoinToken}}";
+var WHOAMI         = "{{.DisplayName}}";
 var WEBINARS_BASE  = "{{.WebinarsBase}}";
 var STREAMING_BASE = "{{.StreamingBase}}";
 var STREAM_ID      = {{.StreamID}};
@@ -858,6 +954,11 @@ var HEARTBEAT_MS   = {{.HeartbeatMS}};
 var PROJECT_ID     = new URLSearchParams(location.search).get("project_id") || "";
 
 var POLL_MS = 2000, MAX_BACKOFF_MS = 30000, MAX_CHAT_NODES = 300, PIN_SLOP_PX = 48;
+/* How far this device's clock runs ahead of the server's. Every
+   deadline the room renders (offer countdowns, poll closes) is a server
+   timestamp, so a viewer with a skewed clock would otherwise see every
+   offer already closed. Refreshed on each successful poll. */
+var SERVER_SKEW_MS = 0;
 
 var chatPane   = document.getElementById("chat-pane");
 var offersPane = document.getElementById("offers-pane");
@@ -1027,7 +1128,13 @@ function el(tag, cls, text) {
   return n;
 }
 
+/* Messages this tab already rendered optimistically. The poll echoes
+   everything back, including our own line, so the sequence the send
+   returned is remembered and skipped exactly once. */
+var ownSeqs = Object.create(null);
+
 function renderChat(e) {
+  if (e.sequence && ownSeqs[e.sequence]) { delete ownSeqs[e.sequence]; return; }
   var hide = document.getElementById("chat-empty");
   if (hide) hide.remove();
   var wasPinned = chatPinned();
@@ -1039,14 +1146,23 @@ function renderChat(e) {
   if (wasPinned) scrollChatToEnd(); else jumpBtn.hidden = false;
 }
 
+/* Offers run for duration_seconds from shown_at. Both columns were
+   written from v0.1 and never read, so every "limited time" offer was
+   permanent. An expired card is dimmed and its CTA retired rather than
+   removed — yanking a card out from under someone mid-read is worse
+   than letting them see that they missed it. */
 function renderOffer(e) {
   var hide = document.getElementById("offers-empty");
   if (hide) hide.remove();
   var card = el("div", "card offer");
   card.appendChild(el("div", "h", e.headline || ""));
   if (e.body) card.appendChild(el("div", "b", e.body));
-  if (e.cta_url && /^https?:\/\//i.test(e.cta_url)) {
-    var a = el("a", "cta", e.cta_label || "Open");
+
+  var foot = el("div", "foot");
+  var linkOK = e.cta_url && /^https?:\/\//i.test(e.cta_url);
+  var a = null;
+  if (linkOK) {
+    a = el("a", "cta", e.cta_label || "Open");
     a.href = e.cta_url;
     a.target = "_blank";
     a.rel = "noopener noreferrer";
@@ -1054,12 +1170,54 @@ function renderOffer(e) {
       fetch(WEBINARS_BASE + "/live/" + JOIN_TOKEN + "/offer-click?" + params({ offer_id: e.id }),
         { method: "POST", keepalive: true });
     });
-    card.appendChild(a);
+    foot.appendChild(a);
   }
+  var timer = el("span", "timer", "");
+  foot.appendChild(timer);
+  card.appendChild(foot);
   offersPane.appendChild(card);
+
+  var endsAt = offerEndsAt(e);
+  if (endsAt) {
+    var iv = setInterval(function () {
+      var left = Math.round((endsAt - Date.now()) / 1000);
+      if (left > 0) { timer.textContent = "Closes in " + mmss(left); return; }
+      clearInterval(iv);
+      card.classList.add("expired");
+      timer.textContent = "This offer has closed";
+      if (a) { a.removeAttribute("href"); a.setAttribute("aria-disabled", "true"); }
+    }, 1000);
+    var left0 = Math.round((endsAt - Date.now()) / 1000);
+    timer.textContent = left0 > 0 ? "Closes in " + mmss(left0) : "This offer has closed";
+    if (left0 <= 0) {
+      clearInterval(iv);
+      card.classList.add("expired");
+      if (a) { a.removeAttribute("href"); a.setAttribute("aria-disabled", "true"); }
+    }
+  }
   noteUnseen("The host shared an offer");
 }
 
+/* Server clock, not the viewer's: a device whose clock is off by an
+   hour would otherwise close every offer on arrival. SERVER_SKEW_MS is
+   refreshed from each poll's server timestamp. */
+function offerEndsAt(e) {
+  if (!e.duration_seconds || !e.shown_at) return 0;
+  var shown = new Date(e.shown_at).getTime();
+  if (isNaN(shown)) return 0;
+  return shown + e.duration_seconds * 1000 - SERVER_SKEW_MS;
+}
+
+function mmss(total) {
+  var m = Math.floor(total / 60), s = total % 60;
+  return m + ":" + (s < 10 ? "0" : "") + s;
+}
+
+/* Polls close server-side at closes_at. The old card never knew that:
+   the buttons stayed live, the vote came back 409, and the response was
+   never looked at — so a rejected vote rendered as a successful one.
+   The card now disables itself on time, restores an answer already on
+   file (your_choice), and only locks in a selection the server took. */
 function renderPoll(e) {
   var hide = document.getElementById("offers-empty");
   if (hide) hide.remove();
@@ -1070,23 +1228,59 @@ function renderPoll(e) {
   var group = el("div", "");
   group.setAttribute("role", "group");
   group.setAttribute("aria-labelledby", q.id);
+
+  var status = el("div", "b", "");
+  var answered = e.your_choice !== undefined && e.your_choice !== null;
+
+  function lock(selectedIdx, message) {
+    group.querySelectorAll(".choice").forEach(function (b, i) {
+      b.disabled = true;
+      b.setAttribute("aria-pressed", i === selectedIdx ? "true" : "false");
+    });
+    status.textContent = message;
+  }
+
   (e.choices || []).forEach(function (choice, i) {
     var btn = el("button", "choice", choice);
     btn.type = "button";
     btn.setAttribute("aria-pressed", "false");
-    btn.addEventListener("click", function () {
-      group.querySelectorAll(".choice").forEach(function (b) {
-        b.disabled = true;
-        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
-      });
-      fetch(WEBINARS_BASE + "/live/" + JOIN_TOKEN + "/poll-response?" + params({ poll_id: e.id, choice: i }),
-        { method: "POST", keepalive: true });
+    btn.addEventListener("click", async function () {
+      var previously = group.querySelectorAll(".choice");
+      previously.forEach(function (b) { b.disabled = true; });
+      status.textContent = "Sending…";
+      var ok = false;
+      try {
+        var res = await fetch(
+          WEBINARS_BASE + "/live/" + JOIN_TOKEN + "/poll-response?" + params({ poll_id: e.id, choice: i }),
+          { method: "POST" });
+        ok = res.ok;
+        if (!ok && res.status === 409) { lock(-1, "This poll has closed."); return; }
+      } catch (err) {}
+      if (ok) { lock(i, "Answer recorded."); return; }
+      previously.forEach(function (b) { b.disabled = false; });
+      status.textContent = "That didn’t send. Try again.";
     });
     group.appendChild(btn);
   });
   card.appendChild(group);
+  card.appendChild(status);
   offersPane.appendChild(card);
+
+  if (answered) lock(e.your_choice, "Answer recorded.");
+  schedulePollClose(e, function () {
+    if (!answered) lock(-1, "This poll has closed.");
+    else group.querySelectorAll(".choice").forEach(function (b) { b.disabled = true; });
+  });
   noteUnseen("The host opened a poll");
+}
+
+function schedulePollClose(e, onClose) {
+  if (!e.closes_at) return;
+  var at = new Date(e.closes_at).getTime();
+  if (isNaN(at)) return;
+  var ms = at - Date.now() + SERVER_SKEW_MS * -1;
+  if (ms <= 0) { onClose(); return; }
+  setTimeout(onClose, Math.min(ms, 86400000));
 }
 
 /* Event poll. Backs off on failure instead of hammering a struggling
@@ -1097,6 +1291,10 @@ function setConn(down) { connEl.hidden = !down; }
 
 function applyEvents(data) {
   if (data.status === "ended" || data.status === "cancelled") { location.reload(); return; }
+  if (data.now) {
+    var srv = new Date(data.now).getTime();
+    if (!isNaN(srv)) SERVER_SKEW_MS = Date.now() - srv;
+  }
   cursor = data.cursor || cursor;
   if (data.viewers !== null && data.viewers !== undefined) {
     document.getElementById("viewers").textContent = data.viewers + " watching";
@@ -1140,6 +1338,15 @@ document.getElementById("composer").addEventListener("submit", async function (e
       body: JSON.stringify({ body: text }),
     });
     if (!res.ok) throw new Error("send failed");
+    /* Show it immediately. The events poll is on a 2s cadence, so
+       without this your own message takes up to two seconds to appear
+       and the room reads as a broken send button. The returned
+       sequence is recorded so the echo is skipped when it arrives. */
+    var sent = await res.json();
+    if (sent && sent.sequence) {
+      ownSeqs[sent.sequence] = true;
+      renderChat({ sequence: 0, display_name: WHOAMI, body: text });
+    }
   } catch (err) {
     input.value = text;
     showToast("That message did not send. Try again.");
@@ -1168,7 +1375,7 @@ func (a *App) handleLiveHeartbeat(rw http.ResponseWriter, r *http.Request, ctx *
 		httpErr(rw, http.StatusMethodNotAllowed, "POST")
 		return
 	}
-	credited := globalApp.RecordHeartbeat(ctx, webinar, reg)
+	credited := a.RecordHeartbeat(ctx, webinar, reg)
 	httpJSON(rw, map[string]any{"ok": true, "credited_seconds": credited})
 }
 
@@ -1209,7 +1416,7 @@ func (a *App) handleLiveChat(rw http.ResponseWriter, r *http.Request, ctx *sdk.A
 	// under exactly the load a live room is built for. It also writes
 	// created_at as RFC3339 rather than leaning on SQLite's
 	// CURRENT_TIMESTAMP, which the readers cannot parse.
-	id, seq, err := globalApp.InsertChatMessage(ctx, webinar, reg, displayName, text, kind)
+	id, seq, err := a.InsertChatMessage(ctx, webinar, reg, displayName, text, kind)
 	if err != nil {
 		ctx.Logger().Warn("chat insert", "webinar_id", webinar.ID, "err", err)
 		httpErr(rw, http.StatusInternalServerError, "could not send message")
@@ -1237,7 +1444,7 @@ func (a *App) handleLivePollResponse(rw http.ResponseWriter, r *http.Request, ct
 		httpErr(rw, http.StatusBadRequest, "poll_id required")
 		return
 	}
-	if err := globalApp.RecordPollResponse(ctx, webinar, reg, pollID, choice); err != nil {
+	if err := a.RecordPollResponse(ctx, webinar, reg, pollID, choice); err != nil {
 		writeEngagementError(rw, ctx, "poll response", webinar.ID, err)
 		return
 	}
@@ -1257,7 +1464,7 @@ func (a *App) handleLiveOfferClick(rw http.ResponseWriter, r *http.Request, ctx 
 		httpErr(rw, http.StatusBadRequest, "offer_id required")
 		return
 	}
-	if err := globalApp.RecordOfferClick(ctx, webinar, reg, offerID); err != nil {
+	if err := a.RecordOfferClick(ctx, webinar, reg, offerID); err != nil {
 		writeEngagementError(rw, ctx, "offer click", webinar.ID, err)
 		return
 	}
@@ -1282,8 +1489,61 @@ func writeEngagementError(rw http.ResponseWriter, ctx *sdk.AppCtx, what string, 
 	}
 }
 
+// Per-source row caps for one /events response. All three tables draw
+// from ONE sequence space, which is why these interact — see the
+// cursor-ceiling logic in handleLiveEvents.
+const (
+	chatEventLimit  = 200
+	offerEventLimit = 50
+	pollEventLimit  = 20
+)
+
+// liveEvent is one entry in the merged live-room feed.
+type liveEvent struct {
+	Kind        string   `json:"kind"`
+	ID          int64    `json:"id"`
+	Sequence    int      `json:"sequence"`
+	DisplayName string   `json:"display_name,omitempty"`
+	Body        string   `json:"body,omitempty"`
+	KindDetail  string   `json:"kind_detail,omitempty"`
+	Headline    string   `json:"headline,omitempty"`
+	CTALabel    string   `json:"cta_label,omitempty"`
+	CTAURL      string   `json:"cta_url,omitempty"`
+	Question    string   `json:"question,omitempty"`
+	Choices     []string `json:"choices,omitempty"`
+
+	// DurationSeconds and ShownAt let an offer card run its own
+	// countdown and close itself. Both were stored from v0.1 and
+	// neither was ever read back, so a timed offer was permanent.
+	DurationSeconds int    `json:"duration_seconds,omitempty"`
+	ShownAt         string `json:"shown_at,omitempty"`
+	// ClosesAt lets the room disable a poll's choices the moment it
+	// closes. Without it the buttons stayed live, the vote was rejected
+	// with 409, and the client — which ignored the response — rendered
+	// the failure as a successful selection.
+	ClosesAt string `json:"closes_at,omitempty"`
+	// YourChoice is this registrant's existing answer, so a reload or a
+	// reconnect restores the poll's answered state rather than offering
+	// a second vote.
+	YourChoice *int `json:"your_choice,omitempty"`
+}
+
 // handleLiveEvents — poll endpoint returning chat + offers + polls newer
 // than the cursor. Single response, ~2s client poll.
+//
+// The cursor contract is the subtle part. Chat, offers and polls share
+// one sequence space but are read with three separately-capped queries,
+// and the response's cursor is what the client sends back as `since`.
+// Advancing it to the highest sequence ACROSS the three was wrong: 250
+// pending chat rows next to one offer at sequence 251 delivered chat
+// 1..200 (its cap) plus the offer, then set cursor=251 — and chat
+// 201..250 could never be requested again. Silent message loss, in the
+// same place v0.2 fixed the duplicate-sequence version of it.
+//
+// So every query that comes back FULL lowers a ceiling to its own last
+// delivered row, the cursor is capped by that ceiling, and anything
+// above the ceiling is dropped from this response rather than sent with
+// a cursor that would re-deliver it.
 func (a *App) handleLiveEvents(rw http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, webinar *Webinar, reg *Registrant) {
 	if r.Method != http.MethodGet {
 		httpErr(rw, http.StatusMethodNotAllowed, "GET")
@@ -1291,81 +1551,140 @@ func (a *App) handleLiveEvents(rw http.ResponseWriter, r *http.Request, ctx *sdk
 	}
 	since, _ := strconv.Atoi(r.URL.Query().Get("since"))
 
-	type event struct {
-		Kind        string   `json:"kind"`
-		ID          int64    `json:"id"`
-		Sequence    int      `json:"sequence"`
-		DisplayName string   `json:"display_name,omitempty"`
-		Body        string   `json:"body,omitempty"`
-		KindDetail  string   `json:"kind_detail,omitempty"`
-		Headline    string   `json:"headline,omitempty"`
-		CTALabel    string   `json:"cta_label,omitempty"`
-		CTAURL      string   `json:"cta_url,omitempty"`
-		Question    string   `json:"question,omitempty"`
-		Choices     []string `json:"choices,omitempty"`
-	}
-	events := []event{}
+	events := []liveEvent{}
 	maxSeq := since
 
+	// ceiling is the highest sequence this response may claim. -1 means
+	// "no truncated source", i.e. everything pending was delivered.
+	ceiling := -1
+	lowerCeiling := func(last int) {
+		if ceiling < 0 || last < ceiling {
+			ceiling = last
+		}
+	}
+	// collect drains one query's rows, tracking the row count so a full
+	// page can lower the ceiling to its last delivered sequence.
+	collect := func(limit int, last *int) func(liveEvent) {
+		n := 0
+		return func(e liveEvent) {
+			n++
+			*last = e.Sequence
+			events = append(events, e)
+			if e.Sequence > maxSeq {
+				maxSeq = e.Sequence
+			}
+			if n == limit {
+				lowerCeiling(*last)
+			}
+		}
+	}
+
+	// project_id is in every WHERE below, not just webinar_id. The rows
+	// are keyed by webinar, and the webinar was already resolved against
+	// the caller's project — but a write path that failed to check
+	// ownership could still land a row here, and the live room is where
+	// it would surface. Defence in depth for a table the browser reads.
+	var lastChat, lastOffer, lastPoll int
+	addChat := collect(chatEventLimit, &lastChat)
 	chatRows, err := ctx.AppDB().Query(
 		`SELECT id, sequence, display_name, body, kind FROM webinar_chat
-		 WHERE webinar_id = ? AND sequence > ?
-		 ORDER BY sequence ASC LIMIT 200`, webinar.ID, since)
+		 WHERE webinar_id = ? AND project_id = ? AND sequence > ?
+		 ORDER BY sequence ASC LIMIT ?`, webinar.ID, webinar.ProjectID, since, chatEventLimit)
 	if err == nil {
 		for chatRows.Next() {
-			e := event{Kind: "chat"}
-			_ = chatRows.Scan(&e.ID, &e.Sequence, &e.DisplayName, &e.Body, &e.KindDetail)
-			events = append(events, e)
-			if e.Sequence > maxSeq {
-				maxSeq = e.Sequence
+			e := liveEvent{Kind: "chat"}
+			if err := chatRows.Scan(&e.ID, &e.Sequence, &e.DisplayName, &e.Body, &e.KindDetail); err != nil {
+				continue
 			}
+			addChat(e)
 		}
 		chatRows.Close()
+	} else {
+		ctx.Logger().Warn("live events: chat query", "webinar_id", webinar.ID, "err", err)
 	}
 
+	addOffer := collect(offerEventLimit, &lastOffer)
 	offerRows, err := ctx.AppDB().Query(
-		`SELECT id, sequence, headline, COALESCE(body,''), cta_label, cta_url
+		`SELECT id, sequence, headline, COALESCE(body,''), cta_label, cta_url,
+				duration_seconds, COALESCE(shown_at,'')
 		 FROM webinar_offers
-		 WHERE webinar_id = ? AND shown_at IS NOT NULL AND sequence > ?
-		 ORDER BY sequence ASC LIMIT 50`, webinar.ID, since)
+		 WHERE webinar_id = ? AND project_id = ? AND shown_at IS NOT NULL AND sequence > ?
+		 ORDER BY sequence ASC LIMIT ?`, webinar.ID, webinar.ProjectID, since, offerEventLimit)
 	if err == nil {
 		for offerRows.Next() {
-			e := event{Kind: "offer"}
-			_ = offerRows.Scan(&e.ID, &e.Sequence, &e.Headline, &e.Body, &e.CTALabel, &e.CTAURL)
-			events = append(events, e)
-			if e.Sequence > maxSeq {
-				maxSeq = e.Sequence
+			e := liveEvent{Kind: "offer"}
+			if err := offerRows.Scan(&e.ID, &e.Sequence, &e.Headline, &e.Body,
+				&e.CTALabel, &e.CTAURL, &e.DurationSeconds, &e.ShownAt); err != nil {
+				continue
 			}
+			addOffer(e)
 		}
 		offerRows.Close()
+	} else {
+		ctx.Logger().Warn("live events: offer query", "webinar_id", webinar.ID, "err", err)
 	}
 
+	addPoll := collect(pollEventLimit, &lastPoll)
+	registrantID := int64(0)
+	if reg != nil {
+		registrantID = reg.ID
+	}
 	pollRows, err := ctx.AppDB().Query(
-		`SELECT id, sequence, question, choices FROM webinar_polls
-		 WHERE webinar_id = ? AND sequence > ?
-		 ORDER BY sequence ASC LIMIT 20`, webinar.ID, since)
+		`SELECT p.id, p.sequence, p.question, p.choices, COALESCE(p.closes_at,''), resp.choice_index
+		 FROM webinar_polls p
+		 LEFT JOIN webinar_poll_responses resp
+		        ON resp.poll_id = p.id AND resp.registrant_id = ?
+		 WHERE p.webinar_id = ? AND p.project_id = ? AND p.sequence > ?
+		 ORDER BY p.sequence ASC LIMIT ?`,
+		registrantID, webinar.ID, webinar.ProjectID, since, pollEventLimit)
 	if err == nil {
 		for pollRows.Next() {
-			e := event{Kind: "poll"}
+			e := liveEvent{Kind: "poll"}
 			var choicesJSON string
-			_ = pollRows.Scan(&e.ID, &e.Sequence, &e.Question, &choicesJSON)
-			_ = json.Unmarshal([]byte(choicesJSON), &e.Choices)
-			events = append(events, e)
-			if e.Sequence > maxSeq {
-				maxSeq = e.Sequence
+			var choice sql.NullInt64
+			if err := pollRows.Scan(&e.ID, &e.Sequence, &e.Question, &choicesJSON, &e.ClosesAt, &choice); err != nil {
+				continue
 			}
+			_ = json.Unmarshal([]byte(choicesJSON), &e.Choices)
+			if choice.Valid {
+				v := int(choice.Int64)
+				e.YourChoice = &v
+			}
+			addPoll(e)
 		}
 		pollRows.Close()
+	} else {
+		ctx.Logger().Warn("live events: poll query", "webinar_id", webinar.ID, "err", err)
 	}
 
+	cursor := maxSeq
+	if ceiling >= 0 && ceiling < cursor {
+		cursor = ceiling
+		// Drop what sits above the ceiling. Sending it with a lower
+		// cursor would just re-deliver it on the next poll, and the
+		// client renders each arrival as new.
+		kept := events[:0]
+		for _, e := range events {
+			if e.Sequence <= cursor {
+				kept = append(kept, e)
+			}
+		}
+		events = kept
+	}
+	// One ordered feed, as the shared sequence space promises. The three
+	// queries append in table order, so without this a poll at sequence
+	// 4 arrives after a chat line at sequence 90.
+	sort.Slice(events, func(i, j int) bool { return events[i].Sequence < events[j].Sequence })
+
 	httpJSON(rw, map[string]any{
-		"cursor":  maxSeq,
+		"cursor":  cursor,
 		"events":  events,
-		"viewers": a.cachedViewerCount(webinar.StreamID),
+		"viewers": a.cachedViewerCount(webinar.ProjectID, webinar.StreamID),
 		// The client reloads on a terminal status, so a room that ends
 		// while people are watching moves them to the replay instead of
 		// leaving them staring at a frozen frame.
 		"status": webinar.Status,
+		"now":    nowRFC3339(),
 	})
 }
 
@@ -1379,36 +1698,88 @@ func (a *App) handleLiveEvents(rw http.ResponseWriter, r *http.Request, ctx *sdk
 
 var (
 	viewerCacheMu sync.Mutex
-	viewerCache   = map[int64]viewerCacheEntry{}
+	viewerCache   = map[int64]*viewerCacheEntry{}
 )
 
 type viewerCacheEntry struct {
-	count int
-	at    time.Time
+	// refreshing is held for the duration of one upstream call, so the
+	// N-th concurrent poller waits for the in-flight refresh instead of
+	// starting its own.
+	refreshing sync.Mutex
+	count      int
+	at         time.Time
 }
 
 const viewerCacheTTL = 3 * time.Second
 
-func (a *App) cachedViewerCount(streamID int64) int {
+// cachedViewerCount collapses the events endpoint's per-request metrics
+// lookup into one upstream call per TTL window, per stream.
+//
+// The v0.2 version released the map mutex before calling streaming and
+// took it again afterwards, which is not a cache so much as a delay:
+// 1000 attendees polling every 2s against a 3s TTL all observed the
+// same stale entry at expiry and all issued their own cross-app call.
+// The entry now carries its own mutex — the first arrival refreshes,
+// everyone else blocks on it and reads the fresh value, which is what
+// the comment always claimed.
+func (a *App) cachedViewerCount(projectID string, streamID int64) int {
 	if streamID == 0 || a.streamingCaller == nil {
 		return 0
 	}
 	viewerCacheMu.Lock()
 	entry, ok := viewerCache[streamID]
-	if ok && time.Since(entry.at) < viewerCacheTTL {
-		viewerCacheMu.Unlock()
-		return entry.count
+	if !ok {
+		entry = &viewerCacheEntry{}
+		// Bound the map: it only ever grew, one entry per stream the
+		// sidecar has ever served, for the life of the process.
+		if len(viewerCache) >= maxViewerCacheEntries {
+			evictStaleViewerEntriesLocked()
+		}
+		viewerCache[streamID] = entry
 	}
+	fresh := !entry.at.IsZero() && time.Since(entry.at) < viewerCacheTTL
+	count := entry.count
+	viewerCacheMu.Unlock()
+	if fresh {
+		return count
+	}
+
+	entry.refreshing.Lock()
+	defer entry.refreshing.Unlock()
+	// Re-check: while we waited, the goroutine that held this lock very
+	// likely did the refresh for us.
+	viewerCacheMu.Lock()
+	if !entry.at.IsZero() && time.Since(entry.at) < viewerCacheTTL {
+		count = entry.count
+		viewerCacheMu.Unlock()
+		return count
+	}
+	count = entry.count
 	viewerCacheMu.Unlock()
 
-	count := entry.count
-	if m, err := a.streamingCaller.GetMetrics(streamID); err == nil {
+	if m, err := a.streamingCaller.GetMetrics(projectID, streamID); err == nil {
 		count = m.CurrentViewers
 	}
 	viewerCacheMu.Lock()
-	viewerCache[streamID] = viewerCacheEntry{count: count, at: time.Now()}
+	entry.count = count
+	entry.at = time.Now()
 	viewerCacheMu.Unlock()
 	return count
+}
+
+// maxViewerCacheEntries bounds the per-stream cache. Well above any
+// plausible count of concurrently-live webinars.
+const maxViewerCacheEntries = 1024
+
+// evictStaleViewerEntriesLocked drops entries nothing has read in a
+// while. Caller holds viewerCacheMu.
+func evictStaleViewerEntriesLocked() {
+	cutoff := time.Now().Add(-10 * time.Minute)
+	for id, e := range viewerCache {
+		if e.at.Before(cutoff) {
+			delete(viewerCache, id)
+		}
+	}
 }
 
 // ─── Replay (public) ──────────────────────────────────────────────
@@ -1433,7 +1804,7 @@ var replayTmpl = template.Must(
 	template.Must(template.New("replay").Parse(sharedDefs)).Parse(replayHTML))
 
 func (a *App) handleReplayPage(rw http.ResponseWriter, r *http.Request) {
-	rest := strings.TrimPrefix(r.URL.Path, "/replay/")
+	rest := strings.TrimPrefix(r.URL.Path, replayPathPrefix+"/")
 	rest = strings.Trim(rest, "/")
 	if rest == "" {
 		notFoundPage(rw)

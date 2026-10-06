@@ -147,6 +147,8 @@ interface BrowserTab {
 
 interface ListResponse {
   sessions?: SessionRow[];
+  next_offset?: number;
+  has_more?: boolean;
   error?: string;
 }
 
@@ -232,6 +234,7 @@ const SETTINGS_URL = "/api/apps/computer/settings";
 const PROXY_PROFILES_URL = "/api/apps/computer/proxy-profiles";
 const PROXY_RESOURCES_URL = "/api/apps/computer/proxy-resources";
 const POLL_MS = 4000;
+const HISTORY_PAGE_SIZE = 20;
 
 const BACKEND_LABEL: Record<string, string> = {
   local: "Local Chrome",
@@ -265,6 +268,13 @@ export default function ComputerPanel(props: NativePanelProps) {
 function ComputerPanelContent({ projectId }: NativePanelProps) {
  const settingsGeneration = useRef(0);
   const [rows, setRows] = useState<SessionRow[]>([]);
+  const [historyRows, setHistoryRows] = useState<SessionRow[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyOffset, setHistoryOffset] = useState(0);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const historyGeneration = useRef(0);
   const [loadedProject, setLoadedProject] = useState<string | null>(null);
   const pendingSelection = useRef<string | null>(null);
   const [contexts, setContexts] = useState<ContextRow[]>([]);
@@ -290,11 +300,38 @@ function ComputerPanelContent({ projectId }: NativePanelProps) {
   const [showAddProxy, setShowAddProxy] = useState(false);
   const [pendingProxyDelete, setPendingProxyDelete] = useState<string | null>(null);
 
+  const loadHistory = useCallback(async (offset: number) => {
+    const generation = ++historyGeneration.current;
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const response = await fetch(appURL(SESSIONS_URL, projectId, {
+        view: "history", limit: HISTORY_PAGE_SIZE, offset,
+      }), { credentials: "include" });
+      if (!response.ok) throw new Error(`history HTTP ${response.status}`);
+      const body = (await response.json()) as ListResponse;
+      if (body.error) throw new Error(body.error);
+      if (generation !== historyGeneration.current) return;
+      const page = body.sessions ?? [];
+      setHistoryRows((previous) => offset === 0 ? page : [
+        ...previous, ...page.filter((row) => !previous.some((item) => item.session_id === row.session_id)),
+      ]);
+      setHistoryOffset(body.next_offset ?? offset + page.length);
+      setHistoryHasMore(body.has_more ?? false);
+    } catch (e: any) {
+      if (generation === historyGeneration.current) setHistoryError(String(e?.message ?? e));
+    } finally {
+      if (generation === historyGeneration.current) setHistoryLoading(false);
+    }
+  }, [projectId]);
+
+  useEffect(() => () => { historyGeneration.current++; }, []);
+
   const refresh = usePollingRefresh(async (signal) => {
     const settingsVersion = settingsGeneration.current;
     try {
       const [sessionsRes, contextsRes, settingsRes, proxiesRes] = await Promise.all([
-        fetch(appURL(SESSIONS_URL, projectId), { credentials: "include", signal }),
+        fetch(appURL(SESSIONS_URL, projectId, { view: "active" }), { credentials: "include", signal }),
         fetch(appURL(CONTEXTS_URL, projectId), { credentials: "include", signal }),
         fetch(appURL(SETTINGS_URL, projectId), { credentials: "include", signal }),
         fetch(appURL(PROXY_PROFILES_URL, projectId), { credentials: "include", signal }),
@@ -315,11 +352,18 @@ function ComputerPanelContent({ projectId }: NativePanelProps) {
       const nextRows = body.sessions ?? [];
       const requested = pendingSelection.current ?? selected;
       if (requested && !nextRows.some((row) => row.session_id === requested)) {
-        const detail = await fetch(appURL(`${SESSIONS_URL}/${encodeURIComponent(requested)}/presentation`, projectId), { credentials: "include", signal });
-        if (detail.ok) {
-          const presentation = await detail.json();
-          if (signal.aborted) return;
-          if (presentation.session) nextRows.push(presentation.session);
+        const existing = historyRows.find((row) => row.session_id === requested)
+          ?? rows.find((row) => row.session_id === requested && row.status !== "active")
+          ?? (closedSession?.session_id === requested ? closedSession : null);
+        if (existing) {
+          nextRows.push(existing);
+        } else {
+          const detail = await fetch(appURL(`${SESSIONS_URL}/${encodeURIComponent(requested)}/presentation`, projectId), { credentials: "include", signal });
+          if (detail.ok) {
+            const presentation = await detail.json();
+            if (signal.aborted) return;
+            if (presentation.session) nextRows.push(presentation.session);
+          }
         }
       }
       if (signal.aborted) return;
@@ -358,7 +402,7 @@ function ComputerPanelContent({ projectId }: NativePanelProps) {
       case "session.reaped":
         if (ev.data?.session_id) {
           const active = rows.find((row) => row.session_id === ev.data.session_id);
-          if (active || selected === ev.data.session_id) {
+          if (selected === ev.data.session_id) {
             setClosedSession({
               ...(active ?? closedSession ?? ({} as SessionRow)),
               ...ev.data,
@@ -370,10 +414,10 @@ function ComputerPanelContent({ projectId }: NativePanelProps) {
               status: ev.data.status ?? (ev.topic === "session.reaped" ? "reaped" : "closed"),
               recording_status: ev.data.recording_status ?? "processing",
             });
-            setSelected(ev.data.session_id);
           }
         }
         void refresh();
+        if (historyOpen) void loadHistory(0);
         break;
       case "recording.ready":
       case "recording.failed":
@@ -394,13 +438,16 @@ function ComputerPanelContent({ projectId }: NativePanelProps) {
   useEffect(() => {
     if (loadedProject !== (projectId ?? "") || pendingSelection.current) return;
     if (!selected && rows.length > 0) setSelected(rows[0].session_id);
-    if (selected && !rows.some((r) => r.session_id === selected) && closedSession?.session_id !== selected) {
+    if (selected && !rows.some((r) => r.session_id === selected) && !historyRows.some((r) => r.session_id === selected) && closedSession?.session_id !== selected) {
       setSelected(rows[0]?.session_id ?? null);
     }
-  }, [rows, selected, closedSession, loadedProject, projectId]);
+  }, [rows, historyRows, selected, closedSession, loadedProject, projectId]);
 
   useEffect(() => {
-    setRows([]); setContexts([]); setClosedSession(null); setLoadedProject(null);
+    historyGeneration.current++;
+    setRows([]); setHistoryRows([]); setHistoryOpen(false); setHistoryLoading(false);
+    setHistoryOffset(0); setHistoryHasMore(false); setHistoryError(null);
+    setContexts([]); setClosedSession(null); setLoadedProject(null);
     const query = new URLSearchParams(window.location.search);
     const requested = query.get("instance") || query.get("session_id");
     pendingSelection.current = requested;
@@ -419,7 +466,7 @@ function ComputerPanelContent({ projectId }: NativePanelProps) {
         return;
       }
       const body = await r.json();
-      if (active) {
+      if (active && selected === id) {
         setClosedSession({
           ...active,
           status: body.status ?? "closed",
@@ -427,14 +474,16 @@ function ComputerPanelContent({ projectId }: NativePanelProps) {
           usage: body.usage ?? active.usage,
           closed_at: new Date().toISOString(),
         });
-        setSelected(id);
       }
       void refresh();
+      if (historyOpen) void loadHistory(0);
     },
-    [projectId, refresh, rows],
+    [projectId, refresh, rows, selected, historyOpen, loadHistory],
   );
 
-  const sel = rows.find((r) => r.session_id === selected) ?? (closedSession?.session_id === selected ? closedSession : null);
+  const sel = rows.find((r) => r.session_id === selected)
+    ?? historyRows.find((r) => r.session_id === selected)
+    ?? (closedSession?.session_id === selected ? closedSession : null);
   const closeTarget = rows.find((r) => r.session_id === pendingClose) ?? null;
   const contextDeleteTarget = contexts.find((c) => c.id === pendingContextDelete) ?? null;
   const proxyDeleteTarget = proxyProfiles.find((profile) => profile.id === pendingProxyDelete) ?? null;
@@ -502,6 +551,23 @@ function ComputerPanelContent({ projectId }: NativePanelProps) {
       <style>{computerPanelLayoutCSS}</style>
       <BrowsersList
         rows={rows}
+        historyRows={historyRows}
+        historyOpen={historyOpen}
+        historyLoading={historyLoading}
+        historyError={historyError}
+        historyHasMore={historyHasMore}
+        onToggleHistory={() => {
+          if (historyOpen) {
+            historyGeneration.current++;
+            setHistoryOpen(false);
+            setHistoryLoading(false);
+          } else {
+            setHistoryOpen(true);
+            void loadHistory(0);
+          }
+        }}
+        onLoadMoreHistory={() => void loadHistory(historyOffset)}
+        onRefreshHistory={() => void loadHistory(0)}
         err={err}
         selected={selected}
         now={nowTick}
@@ -596,6 +662,14 @@ function ComputerPanelContent({ projectId }: NativePanelProps) {
 
 function BrowsersList({
   rows,
+  historyRows,
+  historyOpen,
+  historyLoading,
+  historyError,
+  historyHasMore,
+  onToggleHistory,
+  onLoadMoreHistory,
+  onRefreshHistory,
   err,
   selected,
   now,
@@ -611,6 +685,14 @@ function BrowsersList({
   onDeleteProxy,
 }: {
   rows: SessionRow[];
+  historyRows: SessionRow[];
+  historyOpen: boolean;
+  historyLoading: boolean;
+  historyError: string | null;
+  historyHasMore: boolean;
+  onToggleHistory: () => void;
+  onLoadMoreHistory: () => void;
+  onRefreshHistory: () => void;
   err: string | null;
   selected: string | null;
   now: number;
@@ -626,7 +708,7 @@ function BrowsersList({
   onDeleteProxy: (id: string) => void;
 }) {
   const activeRows = rows.filter((row) => !row.status || row.status === "active");
-  const pastRows = rows.filter((row) => row.status && row.status !== "active");
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   return (
     <Card fullWidth className="overflow-hidden flex flex-col h-full min-h-0">
@@ -670,16 +752,23 @@ function BrowsersList({
             />
           ))}
         </ul>
-        {pastRows.length > 0 && (
-          <div className="border-t border-border" style={{ marginTop: "12px", paddingTop: "10px" }}>
-            <div
-              className="text-text-muted"
-              style={{ fontSize: "11px", fontWeight: 600, textTransform: "uppercase", marginBottom: "8px" }}
-            >
-              Past sessions
-            </div>
-            <ul style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-              {pastRows.map((row) => (
+        <div className="border-t border-border" style={{ marginTop: "12px", paddingTop: "10px" }}>
+          <button type="button" aria-expanded={historyOpen} onClick={onToggleHistory}
+            className="text-text-muted hover:text-text"
+            style={{ width: "100%", display: "flex", justifyContent: "space-between", background: "transparent", border: 0, padding: "2px 0", cursor: "pointer", fontSize: "12px", fontWeight: 600 }}>
+            <span>Session history</span><span>{historyOpen ? "Hide" : "Show"}</span>
+          </button>
+          {historyOpen && (
+            <div style={{ marginTop: "8px" }}>
+              <p className="text-text-muted" style={{ fontSize: "11px", marginBottom: "8px" }}>
+                Closed sessions and recordings, newest first.
+              </p>
+              {historyError && <p className="text-text-muted" role="alert" style={{ fontSize: "11px" }}>{historyError}</p>}
+              {!historyLoading && !historyError && historyRows.length === 0 && (
+                <p className="text-text-muted" style={{ fontSize: "12px" }}>No past sessions.</p>
+              )}
+              <ul style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                {historyRows.map((row) => (
                 <BrowserListItem
                   key={row.session_id}
                   row={row}
@@ -687,10 +776,26 @@ function BrowsersList({
                   now={now}
                   onSelect={() => onSelect(row.session_id)}
                 />
-              ))}
-            </ul>
-          </div>
-        )}
+                ))}
+              </ul>
+              {historyLoading && <p className="text-text-muted" style={{ fontSize: "11px", marginTop: "8px" }}>Loading history…</p>}
+              <div style={{ display: "flex", gap: "10px", marginTop: "8px" }}>
+                <button type="button" onClick={onRefreshHistory} disabled={historyLoading}
+                  className="text-text-muted hover:text-text" style={linkButtonStyle}>Refresh</button>
+                {historyHasMore && <button type="button" onClick={onLoadMoreHistory} disabled={historyLoading}
+                  className="text-text-muted hover:text-text" style={linkButtonStyle}>Load more</button>}
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="border-t border-border" style={{ marginTop: "12px", paddingTop: "10px" }}>
+          <button type="button" aria-expanded={settingsOpen} onClick={() => setSettingsOpen((open) => !open)}
+            className="text-text-muted hover:text-text"
+            style={{ width: "100%", display: "flex", justifyContent: "space-between", background: "transparent", border: 0, padding: "2px 0", cursor: "pointer", fontSize: "12px", fontWeight: 600 }}>
+            <span>Browser settings</span><span>{settingsOpen ? "Hide" : "Show"}</span>
+          </button>
+        </div>
+        {settingsOpen && <>
         <div className="border-t border-border" style={{ marginTop: "12px", paddingTop: "10px" }}>
           <div
             className="text-text-muted"
@@ -864,6 +969,7 @@ function BrowsersList({
             </ul>
           )}
         </div>
+        </>}
       </div>
     </Card>
   );
@@ -885,132 +991,45 @@ function BrowserListItem({
   const isActive = !row.status || row.status === "active";
   const host = hostFor(row.current_url);
   const contextLabel = row.context_name || row.app_context_id || row.context_id || "";
-  const openedAgo = relativeAge(row.opened_at, now);
-  const lastUsedAgo = relativeAge(row.last_used_at, now);
-  const viewport = row.width && row.height ? `${row.width}x${row.height}` : "";
-  const providerLife = providerLifetimeLabel(row, now);
+  const age = relativeAge(isActive ? row.last_used_at : row.closed_at || row.last_used_at, now);
   return (
-    <li>
+    <li className={"border " + (selected ? "border-accent bg-bg-subtle" : "border-border")}
+      style={{ borderRadius: "6px", display: "flex", alignItems: "flex-start" }}>
       <button
         type="button"
         onClick={onSelect}
-        className={
-          "w-full text-left border " +
-          (selected
-            ? "border-accent bg-bg-subtle text-text"
-            : "border-border text-text hover:bg-bg-subtle")
-        }
+        aria-current={selected ? "true" : undefined}
+        title={`${row.session_id} · ${row.current_url || "No URL"}`}
+        className="text-left text-text hover:bg-bg-subtle"
         style={{
+          flex: 1,
+          minWidth: 0,
           padding: "9px 10px",
           borderRadius: "6px",
+          border: 0,
+          background: "transparent",
           cursor: "pointer",
-          display: "block",
         }}
       >
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: "8px",
-            marginBottom: "2px",
-          }}
-        >
-          <span
-            style={{
-              fontSize: "12px",
-              fontWeight: 500,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {host}
-          </span>
-          <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-            <StatusPill variant={isActive ? "success" : "neutral"}>{row.status || "active"}</StatusPill>
-            {isActive && onClose && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onClose();
-                }}
-                title="Close session"
-                className="text-text-muted hover:text-text"
-                style={{
-                  background: "transparent",
-                  border: 0,
-                  padding: "2px 4px",
-                  borderRadius: "4px",
-                  cursor: "pointer",
-                  display: "inline-flex",
-                }}
-              >
-                <XIcon />
-              </button>
-            )}
-          </div>
+        <div style={{ display: "flex", gap: "6px", alignItems: "center", justifyContent: "space-between" }}>
+          <span style={{ fontSize: "12px", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{host}</span>
+          <StatusPill variant={isActive ? "success" : "neutral"}>{row.status || "active"}</StatusPill>
         </div>
-        <div
-          className="text-text-muted"
-          style={{
-            fontSize: "11px",
-            display: "flex",
-            gap: "6px",
-            alignItems: "center",
-            minWidth: 0,
-          }}
-        >
+        <div className="text-text-muted" style={{ fontSize: "11px", marginTop: "4px", display: "flex", gap: "5px", overflow: "hidden", whiteSpace: "nowrap" }}>
           <span>{BACKEND_LABEL[row.backend] ?? row.backend}</span>
-          <span>|</span>
-          <span
-            style={{
-              fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {row.session_id}
-          </span>
-        </div>
-        <div
-          className="text-text-muted"
-          style={{
-            marginTop: "6px",
-            display: "grid",
-            gridTemplateColumns: "auto 1fr",
-            columnGap: "8px",
-            rowGap: "2px",
-            fontSize: "11px",
-            lineHeight: 1.35,
-          }}
-        >
-          <span>Opened</span>
-          <span className="text-text" title={formatTime(row.opened_at)}>
-            {openedAgo}
-          </span>
-          <span>Context</span>
-          <span
-            className={contextLabel ? "text-text" : "text-text-muted"}
-            title={contextLabel || "No saved context"}
-            style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}
-          >
-            {contextLabel || "none"}
-            {isActive && contextLabel && row.persist === false ? " (read-only)" : ""}
-          </span>
-          <span>{isActive ? "Last used" : "Closed"}</span>
-          <span title={formatTime(isActive ? row.last_used_at : row.closed_at || row.last_used_at)}>
-            {isActive ? lastUsedAgo : relativeAge(row.closed_at || row.last_used_at, now)}
-            {isActive && viewport ? ` | ${viewport}` : ""}
-            {isActive && row.tab_count && row.tab_count > 1 ? ` | ${row.tab_count} tabs` : ""}
-          </span>
-          <span>{isActive ? "Provider" : "Recording"}</span>
-          <span title={isActive && row.provider_expires_at ? formatTime(row.provider_expires_at) : undefined}>
-            {isActive ? providerLife : recordingStatusLabel(row.recording_status ?? "unavailable")}
-          </span>
+          <span>·</span>
+          <span title={formatTime(isActive ? row.last_used_at : row.closed_at || row.last_used_at)}>{age}</span>
+          {contextLabel && <><span>·</span><span style={{ overflow: "hidden", textOverflow: "ellipsis" }} title={contextLabel}>{contextLabel}</span></>}
+          {!isActive && row.recording_supported && <><span>·</span><span>{recordingStatusLabel(row.recording_status ?? "unavailable")}</span></>}
         </div>
       </button>
+      {isActive && onClose && (
+        <button type="button" onClick={onClose} title="Close session" aria-label={`Close ${host} session`}
+          className="text-text-muted hover:text-text"
+          style={{ background: "transparent", border: 0, padding: "10px 8px", cursor: "pointer", display: "inline-flex" }}>
+          <XIcon />
+        </button>
+      )}
     </li>
   );
 }

@@ -1,4 +1,10 @@
-# Functions 1.14.1
+# Functions 1.16.0
+
+**New in 1.16.0:** performance rankings and slow-call diagnostics in the panel
+and MCP. Compare call volume, total execution time, average/p95 latency,
+queue waits and errors over a selected period, then inspect individual calls.
+`functions_performance`, `functions_slow_invocations` and the expanded
+`functions_logs` response provide the same diagnostics to agents.
 
 **Fixed in 1.14.1:** business event fields such as a new user’s `password` pass through unchanged. Credential validation applies to identity claims; authenticated request bodies remain excluded from invocation history. Trusted admission and nested propagation remain enforced.
 
@@ -56,6 +62,66 @@ Operator settings:
 Preparation queues hold at most 32 priority and 64 ordinary jobs. The scanner reads functions in pages of 100 and applies backpressure. `/capabilities` includes the current preparation queue length and actual artifact build count. No new database migration is required for 1.9.0.
 
 The panel exposes preparation controls, actionable failures, runtime readiness and invocation timings. For 1.9.0 invocations, the existing `build_ms` field measures time waiting for shared preparation; the preparation result contains the actual build duration. `queue_ms` is worker admission, `cold_start_ms` is request-time worker startup, and `execution_ms` includes handler execution **and downstream app calls**. These fields do not claim to isolate upstream service latency. Cancellation statuses distinguish `canceled` (caller cancellation/runtime shutdown), `upstream_timeout` (parent deadline), and `timeout` (the function's own deadline).
+
+## Performance overview and agent diagnostics
+
+The panel opens with **Performance**. Choose a period (1h, 6h, 24h, 7d or
+30d) and rank functions by calls, total execution time, average/p95 execution
+or total latency, queue wait, errors or error rate. Table headings also select
+the ranking. Each row links to the function and its **Slow calls**. That view
+can filter a function, completion status and minimum duration, sort by total
+time, execution time or queue wait, and expand a call's timings, downstream
+resources and logs. Refresh takes a new snapshot; pagination keeps the original
+time window.
+
+Agents can use the same reports directly:
+
+```javascript
+// Busiest functions over the last day:
+functions_performance({"window":"24h","sort":"calls","limit":10})
+
+// Functions with the slowest p95 handler + downstream execution:
+functions_performance({"window":"7d","sort":"p95_execution_ms","limit":10})
+
+// Calls taking at least one second, across the project:
+functions_slow_invocations({"window":"24h","sort":"duration_ms","min_ms":1000,"limit":20})
+
+// Drill into a returned function_id and then an invocation id:
+functions_slow_invocations({"name":"my-function","window":"24h","sort":"queue_ms"})
+functions_logs({"invocation_id":123})
+```
+
+For global installations, include `_project_id` in MCP arguments. Project
+installations always use their own project scope. Both reports accept optional
+`id` or `name`, and custom RFC3339 `since` (inclusive) and `until` (exclusive)
+timestamps instead of a preset; ranges must be positive and at most 30 days.
+`functions_slow_invocations` returns `next_cursor`; send it as `cursor` with
+the same function, sort, status and minimum filters. The cursor keeps the
+original time bounds. Ranking results expose `function_count` and `has_more`
+when the requested top list is truncated; their totals cover all matching
+functions. Both tools default to 50 results and allow up to 200.
+
+`functions_logs` includes `duration_ms`, `build_ms`, `queue_ms`,
+`cold_start_ms`, `execution_ms`, `version_id` and `resources` (including stored
+downstream-call timings), alongside the existing output and identity fields.
+Reports contain timing summaries only; they do not load payloads, logs,
+principals, source code or environment values.
+
+The HTTP equivalents are `GET /performance` and `GET /invocations/slow` on
+the sidecar, routed through `/api/apps/functions/`, with `project_id` in the
+query for a global installation. HTTP and MCP use the same report code.
+
+Measurements use retained invocations **started** inside the selected window.
+Latencies use completed calls, including errors and cancellations; running
+calls are counted but have no finalized latency. p95 is exact nearest rank
+(the smallest measured latency covering at least 95% of completed calls).
+`error_rate` is errors / completed calls, excluding caller cancellations from
+the error count. Call rate is calls / window minutes. **Total execution time
+is summed wall time, including downstream calls, not CPU time**; parallel
+calls can exceed the period's elapsed time. No raw-history sampling is used.
+Retention can make older periods incomplete, and timing breakdowns recorded
+before their introduction can be zero. Queries are cancellable and have a
+15-second budget.
 
 See [preparation regression and performance results](PREPARATION_RESULTS.md). These changes move cold-build work ahead of traffic; they do not make the compiler or downstream apps inherently faster.
 

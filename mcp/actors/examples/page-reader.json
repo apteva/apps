@@ -1,0 +1,20 @@
+{
+  "name": "page-reader",
+  "description": "Optional example: read a page heading using Computer directly.",
+  "definition": {
+    "schema_version": 1,
+    "defaults": {"url": "https://example.com"},
+    "browser": {},
+    "allowed_hosts": ["example.com"],
+    "limits": {"max_pages": 1, "max_items": 10, "max_duration_seconds": 60, "step_retries": 1},
+    "operations": {
+      "read": {
+        "steps": [
+          {"action": "goto", "url": "{{url}}"},
+          {"action": "extract", "items": "body", "fields": {"title": {"selector": "h1", "type": "text", "required": true}}}
+        ],
+        "output_schema": {"title": "string"}
+      }
+    }
+  }
+}

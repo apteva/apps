@@ -1,0 +1,352 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+func mobileGET(t *testing.T, handler http.HandlerFunc, target string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	authorizeTestRequest(req)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+	return rec
+}
+
+func TestMobileConversationSummaryIsOptIn(t *testing.T) {
+	app, _, _ := newTestEnv(t)
+
+	emptyPage := mobileGET(t, app.handleChats, "/chats?page=1")
+	if emptyPage.Code != http.StatusOK || !strings.Contains(emptyPage.Body.String(), `"conversations":[]`) {
+		t.Fatalf("empty page status=%d body=%s", emptyPage.Code, emptyPage.Body.String())
+	}
+
+	empty := mobileGET(t, app.handleChats, "/chats?view=summary")
+	if empty.Code != http.StatusOK || strings.TrimSpace(empty.Body.String()) != `{"items":[]}` {
+		t.Fatalf("empty summary status=%d body=%s", empty.Code, empty.Body.String())
+	}
+
+	conv := mkConversation(t, app, 41)
+	summary := mobileGET(t, app.handleChats, "/chats?view=summary")
+	var wrapped struct {
+		Items []chatListEntry `json:"items"`
+	}
+	if err := json.Unmarshal(summary.Body.Bytes(), &wrapped); err != nil {
+		t.Fatal(err)
+	}
+	if len(wrapped.Items) != 1 || wrapped.Items[0].ID != conv.ID {
+		t.Fatalf("summary=%s", summary.Body.String())
+	}
+	page := mobileGET(t, app.handleChats, "/chats?page=1")
+	var paged struct {
+		Conversations []chatListEntry `json:"conversations"`
+		NextCursor    string          `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(page.Body.Bytes(), &paged); err != nil {
+		t.Fatal(err)
+	}
+	if len(paged.Conversations) != 1 || paged.Conversations[0].ID != conv.ID {
+		t.Fatalf("page=%s", page.Body.String())
+	}
+
+	legacy := mobileGET(t, app.handleChats, "/chats")
+	var rows []chatListEntry
+	if err := json.Unmarshal(legacy.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("legacy chats is no longer an array: %v body=%s", err, legacy.Body.String())
+	}
+	if len(rows) != 1 || rows[0].ID != conv.ID {
+		t.Fatalf("legacy chats=%+v", rows)
+	}
+}
+
+func TestMobileMessagePageCursorReturnsLatestRowsWithoutGaps(t *testing.T) {
+	app, _, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+	var inserted []*Message
+	for _, content := range []string{"one", "two", "three", "four", "five"} {
+		message, err := app.store.AppendMessage(&Message{ConversationID: conv.ID, Role: "agent", Content: content})
+		if err != nil {
+			t.Fatal(err)
+		}
+		inserted = append(inserted, message)
+	}
+
+	type cursorResponse struct {
+		Messages   []Message `json:"messages"`
+		NextCursor string    `json:"next_cursor"`
+	}
+	read := func(target string) cursorResponse {
+		t.Helper()
+		rec := mobileGET(t, app.handleMessages, target)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", target, rec.Code, rec.Body.String())
+		}
+		var response cursorResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+
+	first := read("/messages?chat_id=" + conv.ID + "&page=1&limit=2")
+	if len(first.Messages) != 2 || first.Messages[0].ID != inserted[3].ID || first.Messages[1].ID != inserted[4].ID || first.NextCursor != strconv.FormatInt(inserted[3].ID, 10) {
+		t.Fatalf("first page=%+v", first)
+	}
+	second := read("/messages?chat_id=" + conv.ID + "&page=1&limit=2&before=" + first.NextCursor)
+	if len(second.Messages) != 2 || second.Messages[0].ID != inserted[1].ID || second.Messages[1].ID != inserted[2].ID || second.NextCursor != strconv.FormatInt(inserted[1].ID, 10) {
+		t.Fatalf("second page=%+v", second)
+	}
+	last := read("/messages?chat_id=" + conv.ID + "&page=1&limit=2&before=" + second.NextCursor)
+	if len(last.Messages) != 1 || last.Messages[0].ID != inserted[0].ID || last.NextCursor != "" {
+		t.Fatalf("last page=%+v", last)
+	}
+
+	legacy := mobileGET(t, app.handleMessages, "/messages?chat_id="+conv.ID+"&limit=2")
+	var legacyRows []Message
+	if err := json.Unmarshal(legacy.Body.Bytes(), &legacyRows); err != nil {
+		t.Fatalf("legacy messages is no longer an array: %v body=%s", err, legacy.Body.String())
+	}
+}
+
+func TestMobileSeenDefaultsToLatestVisibleMessage(t *testing.T) {
+	app, _, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+	first, err := app.store.AppendMessage(&Message{ConversationID: conv.ID, Role: "agent", Content: "visible"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest, err := app.store.AppendMessage(&Message{ConversationID: conv.ID, Role: "agent", Content: "latest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.AppendMessage(&Message{ConversationID: conv.ID, Role: "agent", Content: "inbox only", InboxOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	post := func(userID int64, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/seen", strings.NewReader(body))
+		req.Header.Set("X-User-ID", strconv.FormatInt(userID, 10))
+		req.Header.Set("X-Apteva-Project-ID", testProject)
+		rec := httptest.NewRecorder()
+		app.handleSeen(rec, req)
+		return rec
+	}
+	if rec := post(1, `{"chat_id":"`+conv.ID+`"}`); rec.Code != http.StatusOK {
+		t.Fatalf("default seen status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var seen int64
+	if err := app.store.db.QueryRow(`SELECT last_seen_id FROM read_marks WHERE user_id=1 AND conversation_id=?`, conv.ID).Scan(&seen); err != nil || seen != latest.ID {
+		t.Fatalf("default last_seen_id=%d want=%d err=%v", seen, latest.ID, err)
+	}
+
+	if _, err := app.store.db.Exec(`INSERT INTO participants(conversation_id,user_id) VALUES(?,2)`, conv.ID); err != nil {
+		t.Fatal(err)
+	}
+	if rec := post(2, `{"chat_id":"`+conv.ID+`","last_seen_id":`+strconv.FormatInt(first.ID, 10)+`}`); rec.Code != http.StatusOK {
+		t.Fatalf("explicit seen status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if err := app.store.db.QueryRow(`SELECT last_seen_id FROM read_marks WHERE user_id=2 AND conversation_id=?`, conv.ID).Scan(&seen); err != nil || seen != first.ID {
+		t.Fatalf("explicit last_seen_id=%d want=%d err=%v", seen, first.ID, err)
+	}
+}
+
+type recordingSSEWriter struct {
+	mu      sync.Mutex
+	header  http.Header
+	body    bytes.Buffer
+	flushed chan struct{}
+}
+
+func newRecordingSSEWriter() *recordingSSEWriter {
+	return &recordingSSEWriter{header: make(http.Header), flushed: make(chan struct{}, 8)}
+}
+
+func (w *recordingSSEWriter) Header() http.Header { return w.header }
+func (w *recordingSSEWriter) WriteHeader(int)     {}
+func (w *recordingSSEWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.body.Write(p)
+}
+func (w *recordingSSEWriter) Flush() {
+	select {
+	case w.flushed <- struct{}{}:
+	default:
+	}
+}
+func (w *recordingSSEWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.body.String()
+}
+
+func TestMobileSSEUsesNamedRevisionEventsAndReplaysUpdates(t *testing.T) {
+	app, _, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+	old, err := app.store.AppendMessage(&Message{ConversationID: conv.ID, Role: "agent", Content: "before"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialRevision := old.Revision
+	if _, err := app.store.db.Exec(`UPDATE messages SET content='after' WHERE id=?`, old.ID); err != nil {
+		t.Fatal(err)
+	}
+	added, err := app.store.AppendMessage(&Message{ConversationID: conv.ID, Role: "agent", Content: "new"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := app.store.GetMessage(old.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updateCursor, addedCursor int64
+	if err := app.store.db.QueryRow(`SELECT MAX(id) FROM message_changes WHERE message_id=?`, updated.ID).Scan(&updateCursor); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.store.db.QueryRow(`SELECT MAX(id) FROM message_changes WHERE message_id=?`, added.ID).Scan(&addedCursor); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Revision != updateCursor || added.Revision != addedCursor {
+		t.Fatalf("message revisions are not change cursors: updated=%d/%d added=%d/%d", updated.Revision, updateCursor, added.Revision, addedCursor)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/stream?chat_id="+conv.ID+"&since="+strconv.FormatInt(initialRevision, 10), nil)
+	app.streamer.emitAck(conv.ID, "chat-"+conv.ID, 41, added.ID)
+	authorizeTestRequest(request)
+	ctx, cancel := context.WithCancel(request.Context())
+	request = request.WithContext(ctx)
+	writer := newRecordingSSEWriter()
+	done := make(chan struct{})
+	go func() {
+		app.handleStream(writer, request)
+		close(done)
+	}()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-writer.flushed:
+		case <-time.After(2 * time.Second):
+			cancel()
+			t.Fatal("stream did not flush replay")
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream did not stop")
+	}
+
+	body := writer.String()
+	if !strings.Contains(body, `"snapshot":true`) || !strings.Contains(body, `"phase":"thinking"`) {
+		t.Fatalf("reconnect did not restore current response progress: %s", body)
+	}
+	if strings.Count(body, "event: message\n") != 2 ||
+		!strings.Contains(body, "id: "+strconv.FormatInt(updated.Revision, 10)+"\n") ||
+		!strings.Contains(body, "id: "+strconv.FormatInt(added.Revision, 10)+"\n") ||
+		!strings.Contains(body, `"content":"after"`) || !strings.Contains(body, `"content":"new"`) {
+		t.Fatalf("replay body:\n%s", body)
+	}
+
+	durable := httptest.NewRecorder()
+	activity := httptest.NewRecorder()
+	writeSSE(durable, *updated)
+	if !strings.HasPrefix(durable.Body.String(), "event: message\nid: ") {
+		t.Fatalf("durable frame=%q", durable.Body.String())
+	}
+	if !writeStreamSSE(activity, StreamFrame{Type: "stream", ConversationID: conv.ID, Text: "typing"}) {
+		t.Fatal("stream frame did not encode")
+	}
+	if !strings.HasPrefix(activity.Body.String(), "event: stream\ndata: ") || strings.Contains(activity.Body.String(), "\nid:") {
+		t.Fatalf("ephemeral frame=%q", activity.Body.String())
+	}
+}
+
+func TestMobileSSEReconnectHandoffHasNoGapOrDuplicate(t *testing.T) {
+	app, _, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+	base, err := app.store.AppendMessage(&Message{ConversationID: conv.ID, Role: "agent", Content: "base"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	missed, err := app.store.AppendMessage(&Message{ConversationID: conv.ID, Role: "agent", Content: "missed while offline"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/stream?chat_id="+conv.ID+"&since="+strconv.FormatInt(base.Revision, 10), nil)
+	authorizeTestRequest(request)
+	ctx, cancel := context.WithCancel(request.Context())
+	defer cancel()
+	request = request.WithContext(ctx)
+	writer := newRecordingSSEWriter()
+	done := make(chan struct{})
+	go func() {
+		app.handleStream(writer, request)
+		close(done)
+	}()
+
+	waitFor := func(condition func(string) bool, label string) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if condition(writer.String()) {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		cancel()
+		t.Fatalf("timed out waiting for %s; stream=%q", label, writer.String())
+	}
+	waitFor(func(body string) bool {
+		return strings.Contains(body, "id: "+strconv.FormatInt(missed.Revision, 10)+"\n")
+	}, "replayed change")
+
+	// Simulate a durable notification buffered while the replay query
+	// observed the same commit. It must not cross the handoff twice.
+	app.hub.publish(conv.ID, *missed)
+	live, err := app.store.AppendMessage(&Message{ConversationID: conv.ID, Role: "agent", Content: "live after reconnect"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.hub.publish(conv.ID, *live)
+	waitFor(func(body string) bool {
+		return strings.Contains(body, "id: "+strconv.FormatInt(live.Revision, 10)+"\n")
+	}, "live change")
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream did not stop")
+	}
+
+	body := writer.String()
+	if got := strings.Count(body, "id: "+strconv.FormatInt(missed.Revision, 10)+"\n"); got != 1 {
+		t.Fatalf("replayed change count=%d want=1; stream=%q", got, body)
+	}
+	if got := strings.Count(body, "id: "+strconv.FormatInt(live.Revision, 10)+"\n"); got != 1 {
+		t.Fatalf("live change count=%d want=1; stream=%q", got, body)
+	}
+}
+
+func TestMobileCursorEndpointsPreserveConversationAuthorization(t *testing.T) {
+	app, _, _ := newTestEnv(t)
+	conv, err := app.store.CreateConversation(CreateConversationInput{ProjectID: "other-project", LeadAgentID: 41, Title: "Other", OwnerUserID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := mobileGET(t, app.handleMessages, "/messages?chat_id="+conv.ID+"&pagination=cursor&limit=50")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-project cursor status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}

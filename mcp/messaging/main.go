@@ -1,5 +1,5 @@
 // Messaging provides channel-agnostic send/receive over a unified
-// messages table. Email uses AWS SES; SMS and WhatsApp use Twilio.
+// messages table. Email uses bound SES or Gmail connections; SMS and WhatsApp use Twilio.
 //
 // Architecture:
 //   - Email and phone providers are optional so installs can enable only
@@ -27,6 +27,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"database/sql"
+	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -62,152 +63,8 @@ const (
 
 // ─── Manifest (also lives in apteva.yaml) ──────────────────────────
 
-const manifestYAML = `schema: apteva-app/v1
-name: messaging
-display_name: Messaging
-version: 0.13.47
-description: |
-  Send and receive email through AWS SES and SMS/WhatsApp through Twilio.
-author: Apteva
-scopes: [project, global]
-requires:
-  permissions:
-    - db.write.app
-    - net.egress
-    - platform.connections.execute
-    - platform.connections.read_credentials
-    - platform.apps.call
-    - platform.dns.read
-    - platform.dns.write
-  dynamic_app_calls: true
-  integrations:
-    - role: email_provider
-      kind: integration
-      compatible_slugs: [aws-ses]
-      capabilities: [email.send]
-      tools:
-        email.send: send_email
-      required: false
-      label: "Email provider (AWS SES)"
-    - role: phone_provider
-      kind: integration
-      compatible_slugs: [twilio]
-      capabilities: [sms.send, whatsapp.send]
-      tools:
-        sms.send: send_sms
-        whatsapp.send: send_whatsapp
-      required: false
-      label: "Phone provider (SMS + WhatsApp via Twilio)"
-    - role: storage
-      kind: app
-      compatible_app_names: [storage]
-      capabilities: [files.read, files.write]
-      required: false
-      label: "Storage (optional)"
-    - role: domains
-      kind: app
-      compatible_app_names: [domains]
-      capabilities: [dns.upsert_record]
-      required: false
-      label: "Domains (optional)"
-    - role: inbound_storage
-      kind: integration
-      compatible_slugs: [aws-s3]
-      capabilities: [files.read, files.write]
-      tools:
-        files.read: get_object
-        files.write: put_object
-      required: false
-      label: "Inbound storage (AWS S3)"
-    - role: inbound_notifications
-      kind: integration
-      compatible_slugs: [aws-sns]
-      capabilities: [topic.manage, topic.subscribe]
-      tools:
-        topic.manage: set_topic_attributes
-        topic.subscribe: subscribe
-        topic.list_subscriptions: list_subscriptions_by_topic
-        topic.unsubscribe: unsubscribe
-      required: false
-      label: "Inbound notifications (AWS SNS)"
-provides:
-  http_routes:
-    - prefix: /
-    - { prefix: /webhooks/ses-bounces, method: POST, no_auth: true }
-    - { prefix: /webhooks/ses-inbound, method: POST, no_auth: true }
-    - { prefix: /webhooks/twilio-inbound, method: POST, no_auth: true }
-    - { prefix: /webhooks/twilio-status, method: POST, no_auth: true }
-  mcp_tools:
-    - { name: send_message,           description: "Send a message and return normalized attachment metadata. Channel is an explicit arg (email|sms|whatsapp)." }
-    - { name: send_message_template,  description: "Render a saved template + send." }
-    - { name: message_get,            description: "Fetch one message with normalized attachment metadata." }
-    - { name: message_list,           description: "List messages with normalized attachment metadata and filters." }
-    - { name: inbound_redispatch,     description: "Re-attempt routing with the same normalized attachment metadata." }
-    - { name: inbound_route_set,      description: "Bind a recipient pattern to any app tool; payloads include normalized attachment metadata only." }
-    - { name: inbound_route_list,     description: "List configured inbound routes." }
-    - { name: inbound_route_delete,   description: "Remove an inbound route." }
-    - { name: template_create,        description: "Create a template." }
-    - { name: template_update,        description: "Update a template (partial)." }
-    - { name: template_get,           description: "Fetch a template." }
-    - { name: template_list,          description: "List templates." }
-    - { name: template_delete,        description: "Delete a template." }
-    - { name: suppression_list,       description: "List suppressed exact addresses and domains with stable pagination and a real total." }
-    - { name: suppression_add,        description: "Suppress an address or email domain for outbound and inbound." }
-    - { name: suppression_remove,     description: "Remove an address or email domain from suppression." }
-    - { name: suppression_check,      description: "Suppression lookup for an address; checks exact address plus email domain." }
-    - { name: senders_list,           description: "List sending identities. Returns canonical URI rows." }
-    - { name: senders_get,            description: "Get one identity's verification + DKIM state." }
-    - { name: senders_delete,         description: "Remove a sending identity from the provider." }
-    - { name: senders_get_quota,      description: "Provider sandbox + send-quota status." }
-    - { name: senders_create,         description: "Register a sender across email (SES) + SMS/WhatsApp (Twilio). Domain → DKIM + DNS + optional inbound bootstrap. Phone → adopt + optional Twilio inbound webhook wiring." }
-    - { name: senders_refresh,        description: "Reconcile local senders with bound providers." }
-    - { name: senders_set_default,    description: "Flip the per-(project, channel) default sender." }
-    - { name: senders_update,         description: "Patch local-mutable fields on a sender (display_name, notes)." }
-    - { name: identities_list,        description: "List anchor identities (DKIM domains, WABAs)." }
-  ui_panels:
-    - slot: project.page
-      label: Messaging
-      icon: mail
-      entry: /ui/MessagingPanel.mjs
-  workers:
-    - name: messaging-recovery
-      schedule: "@every 30s"
-    - name: ses-verify-poller
-      schedule: "@every 5m"
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: main
-    entry: mcp/messaging
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/messaging.db
-  migrations: migrations/
-config_schema:
-  - name: webhook_public_url
-    type: text
-    label: Webhook public URL override
-    description: Optional HTTPS origin used for provider callbacks instead of the Apteva instance Public URL, for example https://mail.example.com. Must route to this Apteva instance.
-  - name: ses_bounce_topic_arn
-    type: text
-    label: SES bounce/complaint SNS topic ARN
-  - name: ses_inbound_topic_arn
-    type: text
-    label: SES inbound SNS topic ARN
-  - name: ses_inbound_bucket
-    type: text
-    label: SES inbound S3 bucket
-  - name: webhook_signing_secret
-    type: secret
-    label: Webhook shared secret
-  - name: twilio_auth_token
-    type: secret
-    label: Twilio Auth Token fallback
-upgrade_policy: auto-patch
-`
+//go:embed apteva.yaml
+var manifestYAML string
 
 // ─── App ───────────────────────────────────────────────────────────
 
@@ -248,7 +105,8 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 // this window.
 const pollVerifyMaxAge = 7 * 24 * time.Hour
 
-// Workers runs the background SES verification poller. It self-heals
+// Workers uses the SDK scheduler for Gmail mailbox sync, durable recovery,
+// SES subscription reconciliation and verification polling. The SES poller self-heals
 // NOT_STARTED / PENDING / TEMPORARY_FAILURE statuses that the cached
 // local row would otherwise hold stale until someone called
 // senders_list/get. The worker enumerates the projects with pending
@@ -259,7 +117,9 @@ const pollVerifyMaxAge = 7 * 24 * time.Hour
 // (verified/failed) or older than the poll cap.
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{
+		{Name: "ses-inbound-subscriptions", Schedule: "@every 5m", Run: func(_ context.Context, ctx *sdk.AppCtx) error { return a.reconcileSESInboundSubscriptions(ctx) }},
 		{Name: "messaging-recovery", Schedule: "@every 30s", Run: func(_ context.Context, ctx *sdk.AppCtx) error { return a.retryMessagingWork(ctx) }},
+		{Name: "gmail-mailbox-sync", Schedule: "@every 2m", Run: func(_ context.Context, ctx *sdk.AppCtx) error { return a.syncGmailMailboxes(ctx) }},
 		{
 			Name:     "ses-verify-poller",
 			Schedule: "@every 5m",
@@ -271,8 +131,13 @@ func (a *App) Workers() []sdk.Worker {
 }
 
 func (a *App) pollVerifications(ctx *sdk.AppCtx) error {
-	bound := ctx.IntegrationFor("email_provider")
-	if bound == nil {
+	var sesBounds []*sdk.BoundIntegration
+	for _, bound := range ctx.IntegrationsFor("email_provider") {
+		if bound.AppSlug == "aws-ses" {
+			sesBounds = append(sesBounds, bound)
+		}
+	}
+	if len(sesBounds) == 0 {
 		return nil
 	}
 	pids, err := dbProjectsWithNonTerminalVerifications(ctx.AppDB(), pollVerifyMaxAge)
@@ -281,8 +146,10 @@ func (a *App) pollVerifications(ctx *sdk.AppCtx) error {
 	}
 	var firstErr error
 	for _, pid := range pids {
-		if err := a.refreshSESIdentities(ctx, pid, bound.ConnectionID); err != nil && firstErr == nil {
-			firstErr = err
+		for _, bound := range sesBounds {
+			if err := a.refreshSESIdentities(ctx, pid, bound.ConnectionID); err != nil && firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
 	return firstErr
@@ -296,6 +163,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: http.MethodPost, Pattern: "/webhooks/twilio-status", Handler: a.handleTwilioStatusWebhook, NoAuth: true},
 		{Pattern: "/messages", Handler: a.handleMessagesList},
 		{Pattern: "/messages/", Handler: a.handleMessageItem},
+		{Method: http.MethodGet, Pattern: "/mobile/conversations", Handler: a.handleMobileConversations},
 		{Pattern: "/templates", Handler: a.handleTemplatesList},
 		{Pattern: "/inbound-routes", Handler: a.handleInboundRoutesList},
 		{Pattern: "/suppressions", Handler: a.handleSuppressionsList},
@@ -348,11 +216,12 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Cross-channel attachment fields: attachments, attachment_storage_ids. SMS/WhatsApp-only fields: media_url, content_sid, content_variables. WhatsApp accepts one media attachment; ContentSid cannot be combined with Body or media. " +
 				"Common: template_id, vars, idempotency_key. " +
 				"Addresses are plain — emails (alice@x.com) and E.164 phone numbers (+15551234567), no scheme prefix. " +
-				"Returns {id, channel, status, recipients:[{address, status}], provider_message_id?, attachments:[normalized metadata]}. " +
+				"Returns {id, channel, status, recipients:[{address, status}], provider_message_id?, message_id_header?, attachments:[normalized metadata]}. provider_message_id is the provider's opaque ID; message_id_header is the RFC email Message-ID when known and is the value to use for threading. " +
 				"Suppressed recipients return a JSON error with code=recipient_suppressed plus address, matched, kind, reason, source, and recipients.",
 			InputSchema: schemaObject(map[string]any{
 				"channel":                map[string]any{"type": "string", "enum": []string{"email", "sms", "whatsapp"}},
 				"from":                   map[string]any{"type": "string"},
+				"connection_id":          map[string]any{"type": "integer", "description": "Optional bound email connection. Registered sender connection always takes precedence."},
 				"from_name":              map[string]any{"type": "string", "description": "Email-only friendly From display name. Composes \"Name\" <addr>. Defaults to sender.display_name when unset."},
 				"to":                     map[string]any{},
 				"body":                   map[string]any{"type": "string"},
@@ -572,12 +441,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "senders_create",
-			Description: "Register a sender end-to-end across email + SMS providers. The address shape picks the path: " +
-				"\"foo@x.com\" → SES verify_email; \"x.com\" → SES verify_domain + DKIM/SPF/DMARC/custom-MAIL-FROM DNS + (auto when aws-s3+aws-sns bound) full inbound bootstrap; \"+15551234567\" → adopt the Twilio phone for SMS or the approved WhatsApp sender for WhatsApp; SMS auto-wires SmsUrl and WhatsApp auto-wires sender callback_url to /webhooks/twilio-inbound. " +
-				"Args: address (required), channel? (email|sms|whatsapp; auto-detected if blank), inbound? (auto|true|false; default auto), publish_dns? (default true), spf? (default true), dmarc? (default true), mail_from? (default true), mail_from_sub? (default mail), region? (email/SES inbound, default eu-west-1), bucket_name?, topic_name?, rule_set_name?, rule_name?, display_name?, set_default? (bool). " +
+			Description: "Register a sender with a bound SES or Gmail email connection, or Twilio phone connection. Gmail adopts verified send-as aliases; SES also supports domains and inbound bootstrap. " +
+				"SES mailboxes use verify_email; SES domains use DKIM/SPF/DMARC and optional inbound bootstrap. Gmail addresses must already be verified send-as aliases. Phone addresses adopt Twilio SMS or WhatsApp senders. " +
+				"Args: address (required), channel? (email|sms|whatsapp), connection_id? (bound email account), inbound? (SES), publish_dns? (SES), spf?, dmarc?, mail_from?, mail_from_sub?, region?, bucket_name?, topic_name?, rule_set_name?, rule_name?, display_name?, set_default?. " +
 				"Idempotent. Writes a row in the local senders table. Returns {address, kind, dkim_tokens?, dns_records?, inbound:{bootstrapped, …}, steps[]}.",
 			InputSchema: schemaObject(map[string]any{
 				"address":       map[string]any{"type": "string"},
+				"connection_id": map[string]any{"type": "integer"},
 				"channel":       map[string]any{"type": "string"},
 				"inbound":       map[string]any{"type": "string"},
 				"publish_dns":   map[string]any{"type": "boolean"},
@@ -873,6 +743,10 @@ type Message struct {
 	Status               string              `json:"status"`
 	StatusReason         string              `json:"status_reason,omitempty"`
 	ProviderMessageID    string              `json:"provider_message_id,omitempty"`
+	ProviderSlug         string              `json:"provider_slug,omitempty"`
+	ProviderConnectionID int64               `json:"provider_connection_id,omitempty"`
+	EnvelopeRecipients   []string            `json:"envelope_recipients,omitempty"`
+	ReceivingIdentity    string              `json:"receiving_identity,omitempty"`
 	IdempotencyKey       string              `json:"idempotency_key,omitempty"`
 	RouteTargetApp       string              `json:"route_target_app,omitempty"`
 	RouteTargetRoute     string              `json:"route_target_route,omitempty"`
@@ -884,13 +758,14 @@ type Message struct {
 	ToSubaddress         string              `json:"to_subaddress,omitempty"`
 	TemplateID           int64               `json:"template_id,omitempty"`
 	// v0.5: verdicts (SES) and S3-mode raw .eml location.
-	Verdicts    json.RawMessage `json:"verdicts,omitempty"`
-	S3Key       string          `json:"s3_key,omitempty"`
-	CreatedAt   string          `json:"created_at,omitempty"`
-	SentAt      string          `json:"sent_at,omitempty"`
-	ReceivedAt  string          `json:"received_at,omitempty"`
-	LastEventAt string          `json:"last_event_at,omitempty"`
-	EventCounts map[string]int  `json:"event_counts,omitempty"`
+	Verdicts        json.RawMessage `json:"verdicts,omitempty"`
+	S3Key           string          `json:"s3_key,omitempty"`
+	CreatedAt       string          `json:"created_at,omitempty"`
+	SentAt          string          `json:"sent_at,omitempty"`
+	ReceivedAt      string          `json:"received_at,omitempty"`
+	LastEventAt     string          `json:"last_event_at,omitempty"`
+	EventCounts     map[string]int  `json:"event_counts,omitempty"`
+	ownedRecipients []string
 }
 
 type Template struct {
@@ -1101,6 +976,16 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
+	var emailBound *sdk.BoundIntegration
+	if channel == channelEmail {
+		emailBound, err = chooseEmailBinding(ctx, int64Arg(args, "connection_id"), sender)
+		if err != nil {
+			return nil, err
+		}
+		if emailBound.AppSlug == "gmail" && sender == nil {
+			return nil, errors.New("Gmail From address must be registered with senders_create")
+		}
+	}
 	// Compose RFC 5322 friendly-form From for email: "Display Name"
 	// <addr>. Precedence: explicit from_name arg > sender.display_name
 	// looked up from the local senders row > none (raw address).
@@ -1175,19 +1060,22 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			(project_id, channel, direction, from_addr, to_addrs, cc_addrs, bcc_addrs,
 			 subject, body_text, body_html, headers, attachment_storage_ids,
 			 message_id_header, in_reply_to, references_json,
-			 status, idempotency_key, template_id)
-		 VALUES (?, ?, 'out', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+			 status, idempotency_key, template_id, provider_slug, provider_connection_id)
+		 VALUES (?, ?, 'out', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
 		pid, channel, from, string(toJSON), string(ccJSON), string(bccJSON),
 		subject, body, bodyHTML, string(headersJSON), string(attachJSON),
 		strArg(args, "message_id_header"),
 		inReplyTo,
 		string(referencesJSON),
-		idemNullable, nullableInt64(templateID),
+		idemNullable, nullableInt64(templateID), emailProviderSlug(emailBound), emailProviderConnection(emailBound),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert message: %w", err)
 	}
 	id, _ := res.LastInsertId()
+	if channel == channelEmail && emailBound.AppSlug == "gmail" && strArg(args, "message_id_header") == "" {
+		_, _ = ctx.AppDB().Exec(`UPDATE messages SET message_id_header=? WHERE id=? AND project_id=?`, fmt.Sprintf("<apteva-message-%d@apteva.local>", id), id, pid)
+	}
 	if len(attachments) > 0 {
 		if err := dbInsertMessageAttachments(ctx.AppDB(), pid, id, attachments); err != nil {
 			return nil, fmt.Errorf("insert message attachments: %w", err)
@@ -1202,11 +1090,15 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		From:    from, To: to, CC: cc, BCC: bcc,
 		Subject: subject, BodyText: body, BodyHTML: bodyHTML,
 		ReplyTo: replyTo, InReplyTo: inReplyTo, References: references, Headers: headers,
+		RFCMessageID:     strArg(args, "message_id_header"),
 		Attachments:      attachments,
 		ContentSid:       contentSid,
 		ContentVariables: contentVars,
 		MessageID:        id,
 		ProjectID:        pid,
+	}
+	if channel == channelEmail && emailBound.AppSlug == "gmail" && inReplyTo != "" {
+		_ = ctx.AppDB().QueryRow(`SELECT provider_thread_id FROM messages WHERE project_id=? AND provider_slug='gmail' AND provider_connection_id=? AND message_id_header=? AND provider_thread_id<>'' ORDER BY id DESC LIMIT 1`, pid, emailBound.ConnectionID, inReplyTo).Scan(&in.ProviderThreadID)
 	}
 
 	// Re-check at the last possible point before the external provider call.
@@ -1235,27 +1127,39 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, suppressedErr
 	}
 	var providerMessageID string
+	var providerThreadID string
 	var providerErr error
 	switch channel {
 	case channelEmail:
-		providerMessageID, providerErr = sendViaSES(ctx, in)
+		providerMessageID, providerThreadID, providerErr = sendViaEmailProvider(ctx, emailBound, in)
 	case channelSMS, channelWhatsApp:
 		providerMessageID, providerErr = sendViaTwilio(ctx, in)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	if providerErr != nil {
+		status := "failed"
+		var ambiguous *ambiguousSendError
+		if errors.As(providerErr, &ambiguous) {
+			status = "pending"
+		}
 		_, _ = ctx.AppDB().Exec(
-			`UPDATE messages SET status='failed', status_reason=?, last_event_at=? WHERE id=?`,
-			truncate(providerErr.Error(), 500), now, id,
+			`UPDATE messages SET status=?, status_reason=?, last_event_at=? WHERE id=?`,
+			status, truncate(providerErr.Error(), 500), now, id,
 		)
 		ctx.Logger().Warn("send_message: provider failed", "id", id, "err", providerErr)
 		m, _ := dbMessageGet(ctx.AppDB(), pid, id)
 		return sendResponse(m), nil
 	}
 
+	messageIDHeader := ""
+	if channel == channelEmail && emailBound.AppSlug == "aws-ses" {
+		messageIDHeader = sesMessageIDHeader(providerMessageID, lookupConnectionCredential(ctx, emailBound.ConnectionID, "region"))
+	}
 	_, saveErr := ctx.AppDB().Exec(
-		`UPDATE messages SET status='sent', provider_message_id=?, sent_at=?, last_event_at=? WHERE id=?`,
-		providerMessageID, now, now, id,
+		`UPDATE messages SET status='sent', provider_message_id=?, provider_thread_id=?,
+		 message_id_header=CASE WHEN ?<>'' THEN ? ELSE message_id_header END,
+		 sent_at=?, last_event_at=? WHERE id=?`,
+		providerMessageID, providerThreadID, messageIDHeader, messageIDHeader, now, now, id,
 	)
 	if saveErr != nil {
 		return nil, fmt.Errorf("provider accepted message %s but local persistence failed; do not resend blindly: %w", providerMessageID, saveErr)
@@ -1314,6 +1218,7 @@ func sendResponse(m *Message) map[string]any {
 		"status":              m.Status,
 		"recipients":          recips,
 		"provider_message_id": m.ProviderMessageID,
+		"message_id_header":   m.MessageIDHeader,
 		"status_reason":       m.StatusReason,
 		"attachments":         consumerAttachmentMetadata(m.Attachments),
 	}
@@ -1334,18 +1239,20 @@ func (a *App) toolSendMessageTemplate(ctx *sdk.AppCtx, args map[string]any) (any
 // ─── Provider invocation ───────────────────────────────────────────
 
 type providerSendInput struct {
-	Channel       string
-	From, ReplyTo string
-	To, CC, BCC   []string
-	Subject       string
-	BodyText      string
-	BodyHTML      string
-	InReplyTo     string
-	References    []string
-	Headers       map[string]any
-	Attachments   []providerAttachment
-	MessageID     int64
-	ProjectID     string
+	Channel          string
+	From, ReplyTo    string
+	To, CC, BCC      []string
+	Subject          string
+	BodyText         string
+	BodyHTML         string
+	InReplyTo        string
+	References       []string
+	Headers          map[string]any
+	Attachments      []providerAttachment
+	MessageID        int64
+	ProjectID        string
+	ProviderThreadID string
+	RFCMessageID     string
 	// SMS / WhatsApp only:
 	ContentSid       string
 	ContentVariables string
@@ -1359,9 +1266,13 @@ const sesEventConfigurationSetName = "apteva-messaging"
 // clients instead of only being stored locally.
 func sendViaSES(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 	bound := ctx.IntegrationFor("email_provider")
-	if bound == nil {
+	if bound == nil || bound.AppSlug != "aws-ses" {
 		return "", errors.New("no email_provider bound — install/select an aws-ses connection")
 	}
+	return sendViaSESConnection(ctx, bound, in)
+}
+
+func sendViaSESConnection(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, in providerSendInput) (string, error) {
 	tool := bound.ToolFor("email.send")
 	if tool == "" {
 		tool = "send_email"
@@ -1536,7 +1447,9 @@ func buildRawEmail(in providerSendInput) ([]byte, error) {
 	}
 	writeHeader(&b, "Subject", mime.QEncoding.Encode("UTF-8", subj))
 	writeHeader(&b, "Date", time.Now().UTC().Format(time.RFC1123Z))
-	if in.MessageID > 0 {
+	if in.RFCMessageID != "" {
+		writeHeader(&b, "Message-ID", in.RFCMessageID)
+	} else if in.MessageID > 0 {
 		writeHeader(&b, "Message-ID", fmt.Sprintf("<apteva-message-%d@apteva.local>", in.MessageID))
 	}
 	if in.InReplyTo != "" {
@@ -2800,11 +2713,12 @@ func canonicalSenderAddress(_ string, raw string) string {
 // for a given capability, returning the failure string the panel
 // understands when no provider is bound.
 func emailProviderConn(ctx *sdk.AppCtx) (connID int64, toolFor func(string) string, err error) {
-	bound := ctx.IntegrationFor("email_provider")
-	if bound == nil {
-		return 0, nil, errors.New("no email_provider bound — install/select an aws-ses connection in app settings")
+	for _, bound := range ctx.IntegrationsFor("email_provider") {
+		if bound.AppSlug == "aws-ses" {
+			return bound.ConnectionID, bound.ToolFor, nil
+		}
 	}
-	return bound.ConnectionID, bound.ToolFor, nil
+	return 0, nil, errors.New("no AWS SES email connection bound")
 }
 
 // toolSendersList reads from the local senders table. The local
@@ -2868,7 +2782,9 @@ func (a *App) toolSendersGet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	// Probe the provider for the freshest state — best-effort. If
 	// the probe fails we still return the local row.
 	if channel == "email" {
-		if local == nil || local.Kind != "email_mailbox" || local.ParentIdentityID == nil {
+		if local != nil && local.Provider == "gmail" {
+			_ = a.refreshGmailSenders(ctx, pid, local.ProviderConnectionID)
+		} else if local == nil || local.Kind != "email_mailbox" || local.ParentIdentityID == nil {
 			_ = a.refreshOneSESIdentity(ctx, pid, addr)
 		}
 	} else if channel == "sms" || channel == "whatsapp" {
@@ -2884,9 +2800,28 @@ func (a *App) toolSendersGet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 // refreshOneSESIdentity probes SES for a single identity and upserts
 // the local row. Used by senders_get for the click-to-recheck path.
 func (a *App) refreshOneSESIdentity(ctx *sdk.AppCtx, pid, addr string) error {
-	bound := ctx.IntegrationFor("email_provider")
+	var bound *sdk.BoundIntegration
+	if local, _ := dbFindSender(ctx.AppDB(), pid, "email", addr); local != nil && local.Provider == "aws-ses" {
+		bound, _ = chooseEmailBinding(ctx, 0, local)
+	}
 	if bound == nil {
-		return errors.New("email_provider not bound")
+		if identity, _ := dbFindIdentity(ctx.AppDB(), pid, "email_domain", addr); identity != nil && identity.ProviderConnectionID != 0 {
+			bound, _ = emailBinding(ctx, identity.ProviderConnectionID)
+			if bound != nil && bound.AppSlug != "aws-ses" {
+				bound = nil
+			}
+		}
+	}
+	if bound == nil {
+		for _, candidate := range ctx.IntegrationsFor("email_provider") {
+			if candidate.AppSlug == "aws-ses" {
+				bound = candidate
+				break
+			}
+		}
+	}
+	if bound == nil {
+		return errors.New("SES email_provider not bound")
 	}
 	_, raw, err := classifyEmailIdentity(addr)
 	if err != nil {
@@ -2939,31 +2874,33 @@ func (a *App) refreshOneSESIdentity(ctx *sdk.AppCtx, pid, addr string) error {
 	// Route to the right table by what SES says this identity is.
 	if inner.IdentityType == "DOMAIN" || inner.IdentityType == "MANAGED_DOMAIN" {
 		_, err = dbUpsertIdentity(ctx.AppDB(), &identityUpsert{
-			ProjectID:          pid,
-			Kind:               "email_domain",
-			Address:            raw,
-			Provider:           "aws-ses",
-			ProviderIdentityID: raw,
-			Verified:           inner.VerifiedForSendingStatus,
-			VerificationStatus: verifiedStatus,
-			DkimStatus:         dkimStatus,
-			Metadata:           metadata,
-			MarkSyncedNow:      true,
+			ProjectID:            pid,
+			Kind:                 "email_domain",
+			Address:              raw,
+			Provider:             "aws-ses",
+			ProviderConnectionID: bound.ConnectionID,
+			ProviderIdentityID:   raw,
+			Verified:             inner.VerifiedForSendingStatus,
+			VerificationStatus:   verifiedStatus,
+			DkimStatus:           dkimStatus,
+			Metadata:             metadata,
+			MarkSyncedNow:        true,
 		})
 		return err
 	}
 	_, err = dbUpsertSender(ctx.AppDB(), &senderUpsert{
-		ProjectID:          pid,
-		Channel:            "email",
-		Address:            raw,
-		Kind:               "email_mailbox",
-		Provider:           "aws-ses",
-		ProviderIdentityID: raw,
-		Verified:           inner.VerifiedForSendingStatus,
-		VerificationStatus: verifiedStatus,
-		SendingEnabled:     true,
-		DkimStatus:         dkimStatus,
-		MarkSyncedNow:      true,
+		ProjectID:            pid,
+		Channel:              "email",
+		Address:              raw,
+		Kind:                 "email_mailbox",
+		Provider:             "aws-ses",
+		ProviderConnectionID: bound.ConnectionID,
+		ProviderIdentityID:   raw,
+		Verified:             inner.VerifiedForSendingStatus,
+		VerificationStatus:   verifiedStatus,
+		SendingEnabled:       true,
+		DkimStatus:           dkimStatus,
+		MarkSyncedNow:        true,
 	})
 	return err
 }
@@ -3049,10 +2986,30 @@ func (a *App) toolSendersDelete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 
 	switch provider {
+	case "gmail":
+		// A Gmail alias may be shared by other applications; unassign it
+		// locally without deleting the upstream account setting.
 	case "aws-ses":
 		connID, _, err := emailProviderConn(ctx)
 		if err != nil {
 			return nil, err
+		}
+		if local != nil && local.ProviderConnectionID != 0 {
+			bound, err := chooseEmailBinding(ctx, 0, local)
+			if err != nil {
+				return nil, err
+			}
+			connID = bound.ConnectionID
+		}
+		if anchor != nil && anchor.ProviderConnectionID != 0 {
+			bound, err := emailBinding(ctx, anchor.ProviderConnectionID)
+			if err != nil {
+				return nil, err
+			}
+			if bound.AppSlug != "aws-ses" {
+				return nil, errors.New("domain identity is not owned by SES")
+			}
+			connID = bound.ConnectionID
 		}
 		_, raw, err := classifyEmailIdentity(addr)
 		if err != nil {
@@ -3160,6 +3117,9 @@ func verifyNextStepHint(kind string) string {
 }
 
 func (a *App) toolSendersGetQuota(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if bound := ctx.IntegrationFor("email_provider"); bound != nil && bound.AppSlug != "aws-ses" {
+		return nil, fmt.Errorf("quota is not supported by %s; select an SES connection", bound.AppSlug)
+	}
 	connID, _, err := emailProviderConn(ctx)
 	if err != nil {
 		return nil, err
@@ -3392,6 +3352,10 @@ func (a *App) handleInboundWebhook(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "envelope: "+err.Error())
 		return
 	}
+	if !snsTopicAuthorized(globalCtx, "", env.TopicARN, "ses_inbound_topic_arn") {
+		httpErr(w, http.StatusForbidden, "SNS topic is not authorized")
+		return
+	}
 	if env.Type == "SubscriptionConfirmation" {
 		if env.SubscribeURL != "" {
 			go confirmSNSSubscription(env.SubscribeURL)
@@ -3400,34 +3364,20 @@ func (a *App) handleInboundWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse SES payload BEFORE resolving project — global-scope
-	// installs can't safely stamp project_id into the SNS subscription
-	// URL (one topic per install, but potentially many projects
-	// sharing it), so v0.12.6 falls back to deriving project_id from
-	// the addressed-to domain via the local identities table. The
-	// recipient list lives inside the SES payload, which means we
-	// have to parse first.
+	// Resolve delivery ownership only after obtaining SMTP envelope evidence,
+	// including SES's outermost Received hop when the envelope is absent.
 	parsed, sesEnv, err := parseSESInboundContent(env.Message)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, "ses inbound: "+err.Error())
 		return
 	}
 
-	pid, err := resolveProjectFromRequest(r)
-	if err != nil {
-		pid = resolveProjectFromInboundEmail(globalCtx, parsed, sesEnv)
-		if pid == "" {
-			httpErr(w, http.StatusBadRequest, "project_id required: not in URL and could not derive from recipients")
-			return
-		}
-	}
-	if !snsTopicAuthorized(globalCtx, pid, env.TopicARN, "ses_inbound_topic_arn") {
-		httpErr(w, http.StatusForbidden, "SNS topic is not authorized for this project")
-		return
-	}
 	// S3-action mode: no inline content, but receipt.action.bucketName +
 	// objectKey tell us where to fetch the .eml from.
 	s3Key := ""
+	if sesEnv.Receipt.Action.BucketName != "" && sesEnv.Receipt.Action.ObjectKey != "" {
+		s3Key = sesEnv.Receipt.Action.BucketName + "/" + sesEnv.Receipt.Action.ObjectKey
+	}
 	if parsed == nil && sesEnv != nil &&
 		sesEnv.Receipt.Action.Type == "S3" &&
 		sesEnv.Receipt.Action.BucketName != "" &&
@@ -3454,6 +3404,30 @@ func (a *App) handleInboundWebhook(w http.ResponseWriter, r *http.Request) {
 		httpJSON(w, map[string]any{"ok": true, "skipped": "no content/S3 pointer in notification"})
 		return
 	}
+	recipients, err := sesSMTPRecipients(parsed, sesEnv)
+	if err != nil {
+		httpErr(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	pid, ownedRecipients, err := inboundEmailOwnership(globalCtx, recipients, "aws-ses", 0)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, errInboundOwnership) {
+			status = http.StatusUnprocessableEntity
+		}
+		httpErr(w, status, err.Error())
+		return
+	}
+	for _, hint := range []string{r.URL.Query().Get("project_id"), os.Getenv("APTEVA_PROJECT_ID")} {
+		if hint = strings.TrimSpace(hint); hint != "" && hint != pid {
+			httpErr(w, http.StatusForbidden, "webhook project does not own the SMTP recipient")
+			return
+		}
+	}
+	if !snsTopicAuthorized(globalCtx, pid, env.TopicARN, "ses_inbound_topic_arn") {
+		httpErr(w, http.StatusForbidden, "SNS topic is not authorized for the SMTP recipient's project")
+		return
+	}
 
 	verdictsJSON, _ := json.Marshal(sesEnv.extractVerdicts())
 	if len(verdictsJSON) == 0 {
@@ -3471,74 +3445,47 @@ func (a *App) handleInboundWebhook(w http.ResponseWriter, r *http.Request) {
 	ccJSON, _ := json.Marshal(cc)
 	refsJSON, _ := json.Marshal(parsed.References)
 	now := time.Now().UTC().Format(time.RFC3339)
-	if existingID, duplicate, err := findExistingInboundMessage(globalCtx.AppDB(), pid, s3Key, sesEnv.Mail.MessageID); err != nil {
-		httpErr(w, http.StatusInternalServerError, "dedupe lookup: "+err.Error())
-		return
-	} else if duplicate {
-		_ = scheduleInboundRetry(globalCtx, pid, existingID)
-		httpJSON(w, map[string]any{"ok": true, "id": existingID, "duplicate": true})
-		return
-	}
-
 	var s3KeyArg any
 	if s3Key != "" {
 		s3KeyArg = s3Key
 	}
-	res, err := persistInbound(globalCtx, pid, "email", parsed.Attachments,
-		`INSERT OR IGNORE INTO messages
+	providerID := sesEnv.Mail.MessageID
+	if providerID == "" {
+		providerID = "sns:" + env.MessageID
+	}
+	id, duplicate, err := persistSESInbound(globalCtx, pid, s3Key, providerID, sesDeliveryKeys(env, sesEnv, s3Key), recipients, ownedRecipients[0], parsed.Attachments,
+		`INSERT INTO messages
 			(project_id, channel, direction, from_addr, to_addrs, cc_addrs,
 			 subject, body_text, body_html, headers,
 			 message_id_header, in_reply_to, references_json,
 			 status, route_status, received_at, last_event_at,
-			 verdicts, s3_key, provider_message_id, envelope_recipients)
-		 VALUES (?, 'email', 'in', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', 'pending', ?, ?, ?, ?, NULLIF(?, ''), ?)`,
+			 verdicts, s3_key, provider_message_id, envelope_recipients, provider_slug, receiving_identity)
+		 VALUES (?, 'email', 'in', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', 'pending', ?, ?, ?, ?, NULLIF(?, ''), ?, 'aws-ses', ?)`,
 		pid, from, string(toJSON), string(ccJSON),
 		parsed.Subject, parsed.BodyText, parsed.BodyHTML, string(hdrJSON),
 		parsed.MessageID, parsed.InReplyTo, string(refsJSON),
 		now, now,
-		string(verdictsJSON), s3KeyArg, sesEnv.Mail.MessageID, string(mustJSON(normaliseEmailListPlain(sesEnv.Receipt.Recipients))),
+		string(verdictsJSON), s3KeyArg, providerID, string(mustJSON(recipients)), ownedRecipients[0],
 	)
 	if err != nil {
+		if errors.Is(err, errInboundDeliveryConflict) {
+			httpErr(w, http.StatusConflict, err.Error())
+			return
+		}
 		httpErr(w, http.StatusInternalServerError, "persist: "+err.Error())
 		return
 	}
-	if affected, _ := res.RowsAffected(); affected == 0 {
-		existingID, _, _ := findExistingInboundMessage(globalCtx.AppDB(), pid, s3Key, sesEnv.Mail.MessageID)
-		_ = scheduleInboundRetry(globalCtx, pid, existingID)
-		httpJSON(w, map[string]any{"ok": true, "id": existingID, "duplicate": true})
+	if duplicate {
+		if err := scheduleInboundRetry(globalCtx, pid, id); err != nil {
+			httpErr(w, http.StatusInternalServerError, "schedule retry: "+err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"ok": true, "id": id, "duplicate": true})
 		return
 	}
-	id, _ := res.LastInsertId()
-
-	m, _ := dbMessageGet(globalCtx.AppDB(), pid, id)
-	emitMessagingEvent(globalCtx, pid, "message.received", map[string]any{
-		"id":               id,
-		"channel":          "email",
-		"from":             from,
-		"attachment_count": messageAttachmentCount(m),
-	})
+	// Consumer events are emitted by the worker only after ownership,
+	// suppression, and route checks succeed.
 	httpJSON(w, map[string]any{"ok": true, "id": id})
-}
-
-func findExistingInboundMessage(db *sql.DB, projectID, s3Key, messageID string) (int64, bool, error) {
-	checks := []struct {
-		column string
-		value  string
-	}{{"s3_key", s3Key}, {"provider_message_id", messageID}}
-	for _, check := range checks {
-		if check.value == "" {
-			continue
-		}
-		var id int64
-		err := db.QueryRow(`SELECT id FROM messages WHERE project_id = ? AND direction = 'in' AND `+check.column+` = ? ORDER BY id LIMIT 1`, projectID, check.value).Scan(&id)
-		if err == nil {
-			return id, true, nil
-		}
-		if err != sql.ErrNoRows {
-			return 0, false, err
-		}
-	}
-	return 0, false, nil
 }
 
 // ─── Twilio inbound webhook ────────────────────────────────────────
@@ -3695,15 +3642,7 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 		w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><Response/>`))
 		return
 	}
-	id, _ := res.LastInsertId()
-
-	m, _ := dbMessageGet(globalCtx.AppDB(), pid, id)
-	emitMessagingEvent(globalCtx, pid, "message.received", map[string]any{
-		"id":               id,
-		"channel":          channel,
-		"from":             from,
-		"attachment_count": messageAttachmentCount(m),
-	})
+	// The worker publishes receive events after checking suppression/routes.
 	// Twilio expects a 2xx within 15s or it retries. Empty TwiML body
 	// tells Twilio "I handled it; no auto-reply please."
 	w.Header().Set("Content-Type", "text/xml")
@@ -3937,6 +3876,29 @@ func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 	if m == nil {
 		return errors.New("nil message")
 	}
+	if m.Direction != "in" {
+		return errors.New("outbound messages cannot enter inbound routing")
+	}
+	if eligible, err := ensureInboundEmailOwnership(ctx, pid, m); err != nil || !eligible {
+		return err
+	}
+	var verdicts map[string]string
+	_ = json.Unmarshal(m.Verdicts, &verdicts)
+	if verdicts["virus"] == "FAIL" {
+		return quarantineInbound(ctx, pid, m.ID, "SES virus verdict failed")
+	}
+	if m.Channel == channelEmail && strings.TrimSpace(m.BodyText) == "" {
+		if text := inboundEmailText(m.BodyText, m.BodyHTML); text != "" {
+			// Also covers old HTML-only records when an operator retries them.
+			// Never overwrite text another process has filled in meanwhile.
+			if _, err := ctx.AppDB().Exec(`UPDATE messages SET body_text=? WHERE id=? AND project_id=? AND direction='in' AND COALESCE(body_text,'')=?`, text, m.ID, pid, m.BodyText); err != nil {
+				return err
+			}
+			if err := ctx.AppDB().QueryRow(`SELECT COALESCE(body_text,'') FROM messages WHERE id=? AND project_id=? AND direction='in'`, m.ID, pid).Scan(&m.BodyText); err != nil {
+				return err
+			}
+		}
+	}
 	sender := canonicalAddrForChannel(m.Channel, m.From)
 	if sender != "" {
 		match, err := dbSuppressionMatch(ctx.AppDB(), pid, m.Channel, sender)
@@ -3946,12 +3908,16 @@ func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 		if match != nil {
 			now := time.Now().UTC().Format(time.RFC3339)
 			reason := fmt.Sprintf("suppressed by %s %s", match.Kind, match.Address)
-			_, _ = ctx.AppDB().Exec(
+			_, err := ctx.AppDB().Exec(
 				`UPDATE messages
-				 SET route_status='suppressed', route_error = ?, route_attempts = route_attempts + 1, last_event_at = ?
-				 WHERE id = ?`,
-				reason, now, m.ID,
+				 SET route_status='suppressed', route_error = ?, route_attempts = route_attempts + 1, last_event_at = ?,
+				 matched_recipient=NULLIF(receiving_identity,''), matched_pattern=NULL, route_target_app=NULL, route_target_route=NULL
+				 WHERE id = ? AND project_id=?`,
+				reason, now, m.ID, pid,
 			)
+			if err != nil {
+				return err
+			}
 			emitMessagingEvent(ctx, pid, "message.suppressed", map[string]any{
 				"id":      m.ID,
 				"channel": m.Channel,
@@ -3974,16 +3940,9 @@ func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 	}
 	var winner *matched
 	recipients := append(append([]string{}, m.To...), m.CC...)
-	envelope := "[]"
-	if err := ctx.AppDB().QueryRow(`SELECT envelope_recipients FROM messages WHERE id=? AND project_id=?`, m.ID, pid).Scan(&envelope); err != nil && err != sql.ErrNoRows {
-		return err
-	}
-	var delivered []string
-	if err := json.Unmarshal([]byte(envelope), &delivered); err != nil {
-		return err
-	}
-	if len(delivered) > 0 {
-		recipients = delivered
+	if m.Channel == channelEmail {
+		// Wildcard routes are restricted to recipients actually owned here.
+		recipients = m.ownedRecipients
 	}
 	for _, recip := range recipients {
 		for i := range routes {
@@ -4005,8 +3964,9 @@ func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	if winner == nil {
 		_, err := ctx.AppDB().Exec(
-			`UPDATE messages SET route_status='no_match', route_attempts = route_attempts + 1, last_event_at = ? WHERE id = ?`,
-			now, m.ID,
+			`UPDATE messages SET route_status='no_match', route_error='', route_attempts = route_attempts + 1, last_event_at = ?,
+			 matched_recipient=NULL, matched_pattern=NULL, route_target_app=NULL, route_target_route=NULL WHERE id = ? AND project_id=?`,
+			now, m.ID, pid,
 		)
 		return err
 	}
@@ -4019,25 +3979,41 @@ func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 		attachments = dbMessageAttachments(ctx.AppDB(), pid, m.ID)
 	}
 	payload := map[string]any{
-		"message_id":        m.ID,
-		"idempotency_key":   fmt.Sprintf("messaging:%s:%d", pid, m.ID),
-		"verdicts":          m.Verdicts,
-		"channel":           m.Channel,
-		"matched_recipient": winner.recipient,
-		"matched_pattern":   winner.route.Pattern,
-		"to_subaddress":     winner.subaddr,
-		"from":              m.From,
-		"to":                m.To,
-		"cc":                m.CC,
-		"subject":           m.Subject,
-		"body_text":         m.BodyText,
-		"body_html":         m.BodyHTML,
-		"message_id_header": m.MessageIDHeader,
-		"in_reply_to":       m.InReplyTo,
-		"references":        m.References,
-		"headers":           hdr,
-		"received_at":       m.ReceivedAt,
-		"attachments":       consumerAttachmentMetadata(attachments),
+		"message_id":          m.ID,
+		"idempotency_key":     fmt.Sprintf("messaging:%s:%d", pid, m.ID),
+		"verdicts":            m.Verdicts,
+		"channel":             m.Channel,
+		"direction":           "in",
+		"route_status":        "ok",
+		"receiving_identity":  winner.recipient,
+		"envelope_recipients": m.EnvelopeRecipients,
+		"matched_recipient":   winner.recipient,
+		"matched_pattern":     winner.route.Pattern,
+		"to_subaddress":       winner.subaddr,
+		"from":                m.From,
+		"to":                  m.To,
+		"cc":                  m.CC,
+		"subject":             m.Subject,
+		"body_text":           m.BodyText,
+		"body_html":           m.BodyHTML,
+		"message_id_header":   m.MessageIDHeader,
+		"in_reply_to":         m.InReplyTo,
+		"references":          m.References,
+		"headers":             hdr,
+		"received_at":         m.ReceivedAt,
+		"attachments":         consumerAttachmentMetadata(attachments),
+	}
+	if m.Channel == channelEmail {
+		payload["header_to"], payload["header_cc"] = m.To, m.CC
+		payload["to"], payload["cc"] = recipients, []string{}
+	}
+	// Save the canonical identity before calling the consumer, which may
+	// hydrate message_get during delivery. Never expose a NULL recipient.
+	_, err = ctx.AppDB().Exec(`UPDATE messages SET route_status='routing', receiving_identity=?, matched_recipient=?, matched_pattern=?,
+		route_target_app=?,route_target_route=?,to_subaddress=? WHERE id=? AND project_id=?`,
+		winner.recipient, winner.recipient, winner.route.Pattern, winner.route.TargetApp, winner.route.TargetRoute, winner.subaddr, m.ID, pid)
+	if err != nil {
+		return err
 	}
 
 	targetTool := inboundRouteTargetTool(winner.route.TargetApp, winner.route.TargetRoute)
@@ -4058,9 +4034,9 @@ func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 		 SET route_status = ?, route_target_app = ?, route_target_route = ?,
 		     route_error = ?, route_attempts = route_attempts + 1,
 		     matched_recipient = ?, matched_pattern = ?, to_subaddress = ?, last_event_at = ?
-		 WHERE id = ?`,
+		 WHERE id = ? AND project_id=?`,
 		status, winner.route.TargetApp, winner.route.TargetRoute, errMsg,
-		winner.recipient, winner.route.Pattern, winner.subaddr, now, m.ID,
+		winner.recipient, winner.route.Pattern, winner.subaddr, now, m.ID, pid,
 	)
 	if callErr != nil {
 		return callErr
@@ -4836,17 +4812,18 @@ func stableProviderEventID(msg *Message, ev providerEvent) string {
 // ─── SES inbound parsing ───────────────────────────────────────────
 
 type parsedInbound struct {
-	From        string
-	To          []string
-	Cc          []string
-	Subject     string
-	BodyText    string
-	BodyHTML    string
-	MessageID   string
-	InReplyTo   string
-	References  []string
-	Headers     map[string]string
-	Attachments []providerAttachment
+	EnvelopeRecipients []string
+	From               string
+	To                 []string
+	Cc                 []string
+	Subject            string
+	BodyText           string
+	BodyHTML           string
+	MessageID          string
+	InReplyTo          string
+	References         []string
+	Headers            map[string]string
+	Attachments        []providerAttachment
 }
 
 // sesInboundEnvelope is the parsed shape of the inner JSON SNS
@@ -4856,8 +4833,9 @@ type sesInboundEnvelope struct {
 	NotificationType string `json:"notificationType"`
 	Content          string `json:"content"`
 	Mail             struct {
-		MessageID string                         `json:"messageId"`
-		Headers   []struct{ Name, Value string } `json:"headers"`
+		MessageID   string                         `json:"messageId"`
+		Destination []string                       `json:"destination"`
+		Headers     []struct{ Name, Value string } `json:"headers"`
 	} `json:"mail"`
 	Receipt struct {
 		// Recipients lists the addressed-to mailboxes the SES receipt
@@ -4878,70 +4856,19 @@ type sesInboundEnvelope struct {
 	} `json:"receipt"`
 }
 
-// resolveProjectFromInboundEmail derives the owning project_id from
-// the recipient list when the SNS subscription URL didn't carry one
-// (global-scope installs where multiple projects can share a single
-// SNS topic). Walks the candidate recipients, strips each to its
-// parent domain, and requires every owned recipient to resolve to one
-// project. Returns "" when nothing matches or ownership spans projects;
-// caller surfaces a clean error in either case.
-//
-// Order of trust:
-//  1. sesEnv.Receipt.Recipients (what the SES rule matched on —
-//     always present, even in S3-action mode where the .eml isn't
-//     fetched yet)
-//  2. parsed.To (inline-content path; equivalent in practice but
-//     kept as a fallback in case the receipt.recipients block is
-//     ever empty)
+// Webhook project parameters and visible email headers are never ownership
+// evidence. This compatibility wrapper follows the same SMTP-only checks as
+// the webhook and durable processing paths.
 func resolveProjectFromInboundEmail(ctx *sdk.AppCtx, parsed *parsedInbound, sesEnv *sesInboundEnvelope) string {
-	if ctx == nil {
+	recipients, err := sesSMTPRecipients(parsed, sesEnv)
+	if err != nil {
 		return ""
 	}
-	candidates := []string{}
-	if sesEnv != nil {
-		candidates = append(candidates, sesEnv.Receipt.Recipients...)
+	project, _, err := inboundEmailOwnership(ctx, recipients, "aws-ses", 0)
+	if err != nil {
+		return ""
 	}
-	if len(candidates) == 0 && parsed != nil {
-		candidates = append(candidates, parsed.To...)
-	}
-	seen := map[string]bool{}
-	projects := map[string]bool{}
-	for _, addr := range candidates {
-		clean := normaliseEmailFromHeader(addr)
-		if clean == "" {
-			clean = strings.TrimSpace(strings.ToLower(addr))
-		}
-		if projectID, err := dbResolveSenderProjectByAddress(ctx.AppDB(), channelEmail, clean); err != nil {
-			ctx.Logger().Warn("inbound email sender ownership is ambiguous", "recipient", clean, "err", err)
-			return ""
-		} else if projectID != "" {
-			projects[projectID] = true
-			if len(projects) > 1 {
-				ctx.Logger().Warn("inbound email recipients span projects", "recipient", clean)
-				return ""
-			}
-			continue
-		}
-		domain := parentDomainOf(clean)
-		if domain == "" || seen[domain] {
-			continue
-		}
-		seen[domain] = true
-		if projectID, err := dbResolveIdentityProjectByAddress(ctx.AppDB(), "email_domain", domain); err != nil {
-			ctx.Logger().Warn("inbound email domain ownership is ambiguous", "domain", domain, "err", err)
-			return ""
-		} else if projectID != "" {
-			projects[projectID] = true
-			if len(projects) > 1 {
-				ctx.Logger().Warn("inbound email recipients span projects", "domain", domain)
-				return ""
-			}
-		}
-	}
-	for projectID := range projects {
-		return projectID
-	}
-	return ""
+	return project
 }
 
 // resolveProjectFromInboundPhone is the Twilio analogue of
@@ -5048,17 +4975,18 @@ func parseRawEml(rawBytes []byte, fallbackMessageID string) (*parsedInbound, err
 	)
 
 	parsed := &parsedInbound{
-		From:        hdrs["From"],
-		To:          splitAddrList(hdrs["To"]),
-		Cc:          splitAddrList(hdrs["Cc"]),
-		Subject:     decodeMIMEHeader(hdrs["Subject"]),
-		BodyText:    bodyText,
-		BodyHTML:    bodyHTML,
-		MessageID:   hdrs["Message-Id"],
-		InReplyTo:   hdrs["In-Reply-To"],
-		References:  splitRefs(hdrs["References"]),
-		Headers:     hdrs,
-		Attachments: attachments,
+		EnvelopeRecipients: receivedSMTPRecipients(msg.Header.Get("Received")),
+		From:               hdrs["From"],
+		To:                 splitAddrList(hdrs["To"]),
+		Cc:                 splitAddrList(hdrs["Cc"]),
+		Subject:            decodeMIMEHeader(hdrs["Subject"]),
+		BodyText:           inboundEmailText(bodyText, bodyHTML),
+		BodyHTML:           bodyHTML,
+		MessageID:          hdrs["Message-Id"],
+		InReplyTo:          hdrs["In-Reply-To"],
+		References:         splitRefs(hdrs["References"]),
+		Headers:            hdrs,
+		Attachments:        attachments,
 	}
 	if parsed.MessageID == "" && fallbackMessageID != "" {
 		parsed.MessageID = fallbackMessageID
@@ -6263,7 +6191,8 @@ const messageSelectColumns = `id, project_id, channel, direction, from_addr, to_
 	COALESCE(route_status,''), COALESCE(route_error,''), COALESCE(route_attempts,0),
 	COALESCE(matched_recipient,''), COALESCE(matched_pattern,''), COALESCE(to_subaddress,''),
 	COALESCE(template_id,0), COALESCE(verdicts,'{}'), COALESCE(s3_key,''),
-	COALESCE(created_at,''), COALESCE(sent_at,''), COALESCE(received_at,''), COALESCE(last_event_at,'')`
+	COALESCE(created_at,''), COALESCE(sent_at,''), COALESCE(received_at,''), COALESCE(last_event_at,''),
+	COALESCE(envelope_recipients,'[]'), COALESCE(receiving_identity,''), COALESCE(provider_slug,''), COALESCE(provider_connection_id,0)`
 
 func dbMessageGet(db *sql.DB, pid string, id int64) (*Message, error) {
 	q := `SELECT ` + messageSelectColumns + ` FROM messages WHERE id = ?`
@@ -6465,7 +6394,7 @@ func messageSearchPattern(q string) string {
 
 func scanMessage(row interface{ Scan(...any) error }) (*Message, error) {
 	m := &Message{}
-	var to, cc, bcc, headers, attachIDs, refs, verdicts string
+	var to, cc, bcc, headers, attachIDs, refs, verdicts, envelope string
 	var templateID sql.NullInt64
 	err := row.Scan(
 		&m.ID, &m.ProjectID, &m.Channel, &m.Direction, &m.From,
@@ -6481,6 +6410,7 @@ func scanMessage(row interface{ Scan(...any) error }) (*Message, error) {
 		&templateID,
 		&verdicts, &m.S3Key,
 		&m.CreatedAt, &m.SentAt, &m.ReceivedAt, &m.LastEventAt,
+		&envelope, &m.ReceivingIdentity, &m.ProviderSlug, &m.ProviderConnectionID,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -6489,6 +6419,7 @@ func scanMessage(row interface{ Scan(...any) error }) (*Message, error) {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(to), &m.To)
+	_ = json.Unmarshal([]byte(envelope), &m.EnvelopeRecipients)
 	_ = json.Unmarshal([]byte(cc), &m.CC)
 	_ = json.Unmarshal([]byte(bcc), &m.BCC)
 	_ = json.Unmarshal([]byte(refs), &m.References)

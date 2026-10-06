@@ -15,11 +15,14 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	_ "embed"
 	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -29,10 +32,26 @@ import (
 var manifestYAML string
 
 type App struct {
-	schemaMu   contextRWMutex
-	locksMu    sync.Mutex
-	tableLocks map[schemaCacheKey]*tableLockRef
-	cache      schemaCache
+	projectionNow              func() time.Time
+	projectionGeneration       uint64
+	projectionWorkerMu         sync.Mutex
+	projectionReaderMu         sync.Mutex
+	projectionReader           *sql.DB
+	projectionReaderGeneration uint64
+	schemaMu                   contextRWMutex
+	locksMu                    sync.Mutex
+	tableLocks                 map[schemaCacheKey]*tableLockRef
+	cache                      schemaCache
+	plans                      queryPlanCache
+	projectionMu               sync.RWMutex
+	projectionCache            map[schemaCacheKey]*Table
+	projectionSQLMu            sync.RWMutex
+	projectionSQLCache         map[string]projectionSQLValidation
+	projectionSQLEpoch         uint64
+	projectionMetricsMu        sync.RWMutex
+	projectionMetrics          map[int64]projectionPhaseMetrics
+	authorizationMu            sync.RWMutex
+	authorizationCache         map[string]struct{}
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -48,6 +67,12 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("tables requires a db block")
 	}
 	if err := a.upgradeAll(ctx); err != nil {
+		return err
+	}
+	if err := a.ensureProjectionStorage(ctx); err != nil {
+		return err
+	}
+	if err := a.rebuildAllProjectionTriggers(ctx); err != nil {
 		return err
 	}
 	globalCtx = ctx
@@ -71,15 +96,19 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { a.closeProjectionReader(); return a.plans.close() }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{Name: "tables-projections", Schedule: projectionWorkerEvery, Run: a.projectionWorker}}
+}
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/tables", Handler: a.handleTablesCollection},
 		{Pattern: "/tables/", Handler: a.handleTablesItem},
+		{Pattern: "/projections", Handler: a.handleProjectionsCollection},
+		{Pattern: "/projections/", Handler: a.handleProjectionsItem},
 	}
 }
 
@@ -282,10 +311,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "rows_search",
-			Description: "Filter, sort, paginate. Args: table, where?, order_by?, limit?, offset?, select?, include_total? (default true). Set include_total=false to skip COUNT. Pass next_cursor as cursor for subsequent pages; cursors are tied to the table, schema, filter and sort. Returns {rows, total?, has_more, truncated}.",
+			Description: "Filter, sort, paginate. Args: table, where? (legacy flat predicates), filter_ast? (versioned recursive predicates with correlated exists), order_by?, limit?, offset?, select?, include_total? (default true). Set include_total=false to skip COUNT. Pass next_cursor as cursor for subsequent pages; cursors are tied to the table, schema, filter and sort. Returns {rows, total?, has_more, truncated}.",
 			InputSchema: schemaObject(map[string]any{
 				"table":         map[string]any{"type": "string"},
 				"where":         whereSchema,
+				"filter_ast":    map[string]any{"type": "object"},
 				"order_by":      map[string]any{"type": "string"},
 				"limit":         map[string]any{"type": "integer"},
 				"offset":        map[string]any{"type": "integer"},
@@ -297,23 +327,25 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "rows_count",
-			Description: "Count rows matching a filter. Args: table, where?. Returns {count}.",
+			Description: "Count rows matching a filter. Args: table, where? or filter_ast?. Returns {count}.",
 			InputSchema: schemaObject(map[string]any{
-				"table": map[string]any{"type": "string"},
-				"where": whereSchema,
+				"table":      map[string]any{"type": "string"},
+				"where":      whereSchema,
+				"filter_ast": map[string]any{"type": "object"},
 			}, []string{"table"}),
 			Handler: a.toolRowsCount,
 		},
 		{
 			Name:        "rows_aggregate",
-			Description: "Single-table grouped aggregations. Args: table, where?, group_by? (column names or {col, bucket: day|week|month|year, name?}), metrics ([{name, op, col?, distinct?, numerator?, denominator?}]), order_by?, limit?. Ops: count, sum, avg, min, max, avg_ratio. Returns {rows, truncated}.",
+			Description: "Single-table grouped aggregations. Args: table, where? or filter_ast?, group_by? (column names or {col, bucket: day|week|month|year, name?}), metrics ([{name, op, col?, distinct?, numerator?, denominator?}]), order_by?, limit?. Ops: count, sum, avg, min, max, avg_ratio. Returns {rows, truncated}.",
 			InputSchema: schemaObject(map[string]any{
-				"table":    map[string]any{"type": "string"},
-				"where":    whereSchema,
-				"group_by": groupBySchema,
-				"metrics":  metricSchema,
-				"order_by": map[string]any{"type": "string"},
-				"limit":    map[string]any{"type": "integer"},
+				"table":      map[string]any{"type": "string"},
+				"where":      whereSchema,
+				"filter_ast": map[string]any{"type": "object"},
+				"group_by":   groupBySchema,
+				"metrics":    metricSchema,
+				"order_by":   map[string]any{"type": "string"},
+				"limit":      map[string]any{"type": "integer"},
 			}, []string{"table", "metrics"}),
 			Handler: a.toolRowsAggregate,
 		},
@@ -326,7 +358,36 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"sql"}),
 			Handler: a.toolTablesQuery,
 		},
+		{
+			Name:        "tables_batch",
+			Description: "Execute a bounded list of validated Tables operations. Args: mode (read_snapshot, write_transaction, or best_effort), operations ([{id, operation, args}]). Operations may reference prior results with {\"$ref\":\"operation.path\"}. Returns per-operation status, result, and error.",
+			InputSchema: schemaObject(map[string]any{
+				"mode": map[string]any{"type": "string", "enum": []string{"read_snapshot", "write_transaction", "best_effort"}},
+				"operations": map[string]any{"type": "array", "maxItems": 256, "items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"id":        map[string]any{"type": "string"},
+						"operation": map[string]any{"type": "string"},
+						"args":      map[string]any{"type": "object"},
+					},
+					"required": []string{"id", "operation", "args"},
+				}},
+			}, []string{"operations"}),
+			Handler: a.toolTablesBatch,
+		},
+		{
+			Name:        "tables_capabilities",
+			Description: "Return versioned generic Tables capabilities, including the recursive filter AST contract and enforced limits.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			Handler:     a.toolTablesCapabilities,
+		},
 	}
+	for i := range tools {
+		if strings.HasPrefix(tools[i].Name, "indexes_") {
+			tools[i].InputSchema["properties"].(map[string]any)["version"] = map[string]any{"type": "integer", "minimum": 1, "description": "Optional projection version."}
+		}
+	}
+	tools = append(tools, a.projectionTools()...)
 	for i := range tools {
 		switch tools[i].Name {
 		case "tables_query", "rows_get", "rows_search", "rows_count", "rows_aggregate", "tables_list", "tables_describe", "indexes_list":
@@ -344,6 +405,21 @@ func (a *App) MCPTools() []sdk.Tool {
 		}
 	}
 	return tools
+}
+
+func (a *App) toolTablesCapabilities(_ *sdk.AppCtx, _ map[string]any) (any, error) {
+	return map[string]any{
+		"filter_ast": map[string]any{
+			"supported":         true,
+			"version":           "1",
+			"max_nodes":         maxFilterNodes,
+			"max_depth":         maxFilterDepth,
+			"max_subqueries":    maxFilterSubqueries,
+			"operators":         []string{"and", "or", "not", "eq", "neq", "lt", "lte", "gt", "gte", "contains", "in", "between", "is_null", "is_not_null", "exists", "not_exists"},
+			"value_expressions": []string{"literal", "column", "outer_column", "coalesce", "cast"},
+		},
+		"batch": map[string]any{"supported": true, "modes": []string{"read_snapshot", "write_transaction", "best_effort"}},
+	}, nil
 }
 
 func main() { sdk.Run(&App{}) }

@@ -16,19 +16,28 @@ generic strategy scorecards with backtest evidence and staged paper/live
 promotion gates.
 
 Same canonical layout as `apps/mcp/crm` and `apps/mcp/storage`: a Go
-sidecar serving MCP tools + REST routes, with two UI surfaces under
-`ui/` — a small dashboard panel and a rich trader-terminal SPA.
+sidecar serving MCP tools + REST routes, with UI surfaces under `ui/` — a
+dashboard panel, two dashboard widgets, and a rich trader-terminal SPA.
+
+Version 0.14 attributes realized and open P&L to the strategy that traded it.
+See [Strategy P&L attribution](#strategy-pl-attribution).
+
+Version 0.11 adds out-of-sample and walk-forward selection, robustness grids,
+stress scenarios, and seeded Monte Carlo execution uncertainty with persisted
+progress, isolated runs, and replayable artifacts. See [Validation suites](VALIDATION.md).
 
 ## Layout
 
 ```
 apps/mcp/trading/
-├── apteva.yaml             # manifest — kind: source, declares 50 mcp_tools
+├── apteva.yaml             # manifest — kind: source, declares 63 mcp_tools
 ├── go.mod / go.sum
 ├── main.go                 # App impl, HTTP routes, Workers wiring
 ├── tools.go                # MCP tools (the agent's surface)
 ├── store.go                # DB layer
 ├── exec.go                 # Paper-execution + alert engine (Workers)
+├── strategy_attribution.go # Strategy-own lot book + fills-ledger rebuild
+├── strategy_live.go        # /strategies/live rollup for the dashboard widget
 ├── pricing.go              # Explicit offline mock provider
 ├── pricing_live.go         # Live market-data router
 ├── handlers_test.go        # Tier 1 — in-process handler tests
@@ -117,6 +126,32 @@ by apteva-server. Bare paths shown here.
 | `GET/PUT` | `/strategies/{id}/scorecard?portfolio_id=…` | Read scorecard evidence / configure generic pass criteria |
 | `POST` | `/strategies/{id}/scorecard/evaluate` | Persist an immutable evaluation for a completed backtest |
 | `POST` | `/strategies/{id}/promotion` | Promote, demote, or suspend one strategy for one portfolio |
+| `GET`  | `/strategies/live?scope=live&include_unattributed=…` | Per-strategy realized, open, and total P&L with run health |
+
+## Strategy P&L attribution
+
+`position_accounting` is keyed `(portfolio_id, symbol, outcome)` and has no
+strategy dimension, so when two strategies hold the same symbol a closing fill
+has no attributable cost basis. `strategy_position_accounting` keeps a parallel
+average-cost book scoped to the strategy that originated each fill, read from
+`orders.strategy_id`.
+
+The convention is that **a strategy closes against its own lots, never the
+portfolio's blend**. Where a symbol has exactly one owner the two books agree
+exactly; where several owners overlap they diverge by construction, and
+`/strategies/live` reports `shared_symbols` so a caller can say so rather than
+present a convention-dependent number as the only one.
+
+`strategy_id` 0 is the unattributed bucket — manual orders, agent orders, and
+imported broker history — so the strategy books plus bucket 0 reconcile against
+the portfolio book.
+
+Like `position_accounting`, the table is rebuilt from the append-only fills
+ledger on mount and after a broker import (`dbRebuildStrategyAttribution`). The
+rebuild is a full, idempotent replay, so it is also self-healing. It cannot
+recover imported opening balances or corporate actions, which never pass
+through fills; those stay in the portfolio book and show up as the gap between
+it and the strategy books.
 
 ## Reference-data behavior
 
@@ -194,9 +229,10 @@ broker-paper portfolio and live stage for a broker-live portfolio.
 `market_source`, `market_calendar`, `reference_data_status`,
 `security_resolve`, `corporate_actions_list`, `exchange_sessions_list`.
 
-**Strategy and backtesting (14):** `strategy_create`, `strategy_update`,
+**Strategy and backtesting (16):** `strategy_create`, `strategy_update`,
 `strategy_get`, `strategy_list`, `strategy_validate`, `strategy_evaluate`,
 `strategy_assign`, `strategy_backtest_create`, `strategy_validate_backtest`,
+`backtest_control`, `backtest_artifact`,
 `backtest_market_step`, `strategy_scorecard_get`,
 `strategy_scorecard_update`, `strategy_scorecard_evaluate`,
 `strategy_promotion_update`.
@@ -249,6 +285,28 @@ orders after a restart. Backtests capture data source, adjustment, execution
 model, row count, and a SHA-256 dataset identity alongside professional risk
 metrics.
 
+Strategy backtests compute indicators from completed candles at the strategy's
+cadence. The replay interval defaults to that cadence; finer intervals can supply
+execution prices and equity marks without changing indicator windows. Daily and
+weekly equity signals follow US trading sessions, including holidays and early
+closes. `rebalance_every` counts completed strategy candles, and signals execute
+at the next replay bar's open. Coarser replay intervals are rejected because they
+cannot reconstruct the strategy's candles. Realized P&L accumulates across closed
+positions and survives pause/resume; total return also includes execution costs.
+Previously completed backtests must be rerun to obtain corrected results.
+
+New strategy and agent runs use the discrete-event simulator with background
+execution, latency and partial fills, generic feature/news inputs, benchmark
+metrics, and portable result bundles. Agents receive past-only observations,
+stage trading commands, and explicitly checkpoint decisions and memory. Recorded
+agent decisions replay without model calls. See [Event backtesting](EVENT_BACKTESTING.md) for configuration,
+API/MCP usage, feed adapters, reproduction, and execution-model assumptions.
+
+Validation suites run chronological holdouts, rolling/expanding walk-forward windows,
+strategy parameter grids, stress scenarios, and seeded execution Monte Carlo batches
+for strategies and agents. See [Validation suites](VALIDATION.md) for the UI,
+API/MCP, statistical assumptions, budgets, and reproducible reports.
+
 ## Approvals — by design, not in the sidecar
 
 If a portfolio's mandate calls for human sign-off above some notional,
@@ -258,3 +316,41 @@ approvals, never expires a token, never reconciles state across
 systems — that policy lives where it belongs, in the agent's directive
 per portfolio. See `prompts/risk_rules.md` for the language that ships
 with the app.
+
+
+## Broker execution and recovery
+
+Broker paper is supported through verified Alpaca paper endpoints and OKX demo
+credentials (`simulated` or `demo`). The environment is checked at portfolio
+creation, explicit account binding, and every execution/reconciliation resolution.
+Binance, Kraken, Coinbase, Bybit, Bitstamp and Polymarket currently have fixed live
+connector URLs and reject `broker_paper`; use local `simulation` for paper trading
+with those providers. The Binance catalog's `testnet` flag does not currently
+change its transport URL and is not proof of a test environment.
+
+Alpaca advertises the implemented market, limit and stop order types. Lost
+submissions use the dedicated `get_order_by_client_order_id` connector tool; ship
+the updated `integrations/src/apps/alpaca-trading.json` alongside this app.
+OKX, Bybit, Binance and Bitstamp recover using the original client ID, then save
+the broker ID. Bybit also queries historical status when its recent-order cache
+no longer contains an order. Coinbase and Kraken submissions without a returned
+broker ID still require reconciliation; the app never blindly resubmits them.
+
+Crypto open orders are imported at creation and rediscovered during periodic
+account reconciliation. History import supports Coinbase, Kraken, OKX and Bybit
+pagination, plus Binance history for pairs found in positions, orders or the
+portfolio watchlist. Pages are bounded at 100 per request sequence; failures and
+stalled cursors are logged as incomplete imports. This covers the provider's
+available history window, not a guaranteed lifetime archive. Bitstamp's connector
+exposes open orders and transactions, but no closed-order listing; it imports open
+orders with an execution baseline rather than inventing closed orders from cash
+transactions. Non-USD/USDT pairs and unsupported quote-sized open Coinbase orders
+are excluded from this USD-based spot model.
+
+Imported order identity, cumulative fill baseline and audit metadata commit
+atomically and are deduplicated per portfolio. Import does not debit broker cash
+again; fees absent from history are recorded as unknown. Account snapshots remain
+authoritative. Automated tests use provider fixtures and local transport mocks;
+these checks do not certify a real account connection or place venue orders.
+
+Indicator formulas, templates and research sources: [INDICATOR_STRATEGIES.md](INDICATOR_STRATEGIES.md). Discover them through `strategy_catalog` or `GET /strategies/catalog`.

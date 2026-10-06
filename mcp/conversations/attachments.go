@@ -247,21 +247,51 @@ func (a *App) mirrorAttachments(app *sdk.AppCtx, conv *Conversation, msg *Messag
 	return nil
 }
 
-func (a *App) toolReadAttachment(ctx context.Context, _ *sdk.AppCtx, args map[string]any) (any, error) {
+// agentAttachment centralizes the authenticated, conversation-scoped lookup
+// shared by the internal compatibility reader and the blob handoff tool.
+func (a *App) agentAttachment(ctx context.Context, args map[string]any) (Attachment, []byte, error) {
 	from, err := requireAgentCaller(ctx)
 	if err != nil {
-		return nil, err
+		return Attachment{}, nil, err
 	}
 	conv, err := a.requireParticipant(from, stringArg(args, "conversation_id"))
 	if err != nil {
-		return nil, err
+		return Attachment{}, nil, err
 	}
 	id := stringArg(args, "attachment_id")
 	var linked bool
 	if a.store.db.QueryRow(`SELECT `+attachmentLinkedSQL()+` FROM conversation_attachments WHERE conversation_id=? AND id=?`, conv.ID, id).Scan(&linked) != nil || !linked {
-		return nil, errors.New("attachment not found")
+		return Attachment{}, nil, errors.New("attachment not found")
 	}
-	item, raw, err := a.loadAttachment(conv.ID, id)
+	return a.loadAttachment(conv.ID, id)
+}
+
+// toolAttachmentToBlob is the narrow agent-facing handoff for non-image files.
+// Core converts this _binary envelope into a temporary blobref:// handle before
+// returning the tool result to the model; downstream tools can then consume the
+// original bytes without the model seeing or copying base64.
+func (a *App) toolAttachmentToBlob(ctx context.Context, _ *sdk.AppCtx, args map[string]any) (any, error) {
+	item, raw, err := a.agentAttachment(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	if item.Type == "image" {
+		return nil, errors.New("image attachment is already supplied directly; do not fetch it")
+	}
+	mimeType := item.MimeType
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	return map[string]any{
+		"_binary":  true,
+		"base64":   base64.StdEncoding.EncodeToString(raw),
+		"mimeType": mimeType,
+		"size":     len(raw),
+	}, nil
+}
+
+func (a *App) toolReadAttachment(ctx context.Context, _ *sdk.AppCtx, args map[string]any) (any, error) {
+	item, raw, err := a.agentAttachment(ctx, args)
 	if err != nil {
 		return nil, err
 	}

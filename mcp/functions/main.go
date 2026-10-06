@@ -1,4 +1,4 @@
-// Functions v1.14.1 — Lambda-style serverless functions.
+// Functions v1.16.0 — Lambda-style serverless functions.
 //
 // A function is an immutable, built version (functions_deploy) served
 // by a pool of warm worker processes (pool.go / worker.go). The
@@ -100,6 +100,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/runtime/status", Handler: a.handleRuntimeStatus},
 		{Pattern: "/capacity", Handler: a.handleHTTPCapacity},
 		{Pattern: "/capacity/settings", Handler: a.handleHTTPCapacitySettings},
+		{Pattern: "/performance", Handler: a.handleHTTPPerformance},
+		{Pattern: "/invocations/slow", Handler: a.handleHTTPSlowInvocations},
 		// CRUD on functions.
 		{Pattern: "/functions", Handler: a.handleHTTPFunctionsCollection},
 		{Pattern: "/functions/", Handler: a.handleHTTPFunctionItem},
@@ -121,6 +123,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
+		performanceTool(a, false),
+		performanceTool(a, true),
 		authenticatedInvocationTool(a),
 		{Name: "functions_capacity", Description: "Live per-call and per-function memory, worker reservations, queues, limits, and rejection reasons. Project scoped details.", InputSchema: schemaObject(map[string]any{}, nil), Handler: func(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			pid, err := resolveProjectFromArgs(args)
@@ -228,9 +232,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "functions_logs",
-			Description: "Return value + captured console output of one invocation. Args: invocation_id.",
+			Description: "Inspect one invocation: return value, console output, status, total duration, preparation/queue/start/execution timings and resource/downstream-call measurements. Args: invocation_id. Use after functions_performance or functions_slow_invocations to investigate a slow call.",
 			InputSchema: schemaObject(map[string]any{
 				"invocation_id": map[string]any{"type": "integer"},
+				"_project_id":   map[string]any{"type": "string", "description": "Required for a global installation."},
 			}, []string{"invocation_id"}),
 			Handler: a.toolLogs,
 		},

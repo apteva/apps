@@ -99,3 +99,53 @@ func TestApplicationSessionProviderRedirectAndProjectDenied(t *testing.T) {
 		t.Fatal(w.Body)
 	}
 }
+
+func TestApplicationSessionPolicyEditDuringOnlineAuthentication(t *testing.T) {
+	softphoneTestCtx(t)
+	app := &App{installID: 42}
+	policy := phoneTestPolicy(t, app)
+	updates := make(chan phonePolicy, 1)
+	updateCodes := make(chan int, 1)
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if next, ok := <-updates; ok {
+			result := phoneTestRequest(app, nil, "PUT", "/access/policy", next)
+			updateCodes <- result.Code
+		}
+		writeJSON(w, map[string]any{"user": map[string]any{"id": "alice", "organization_id": "org-1", "project_id": "project-a"}})
+	}))
+	defer provider.Close()
+	policy.Providers = []phoneAuthProvider{{ID: "login", IssuerApp: "auth", IssuerInstallID: "11", URL: provider.URL,
+		Format: "apteva-auth", Actions: []string{"call.read"}}}
+	w := phoneTestRequest(app, nil, "PUT", "/access/policy", policy)
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &policy) != nil {
+		t.Fatalf("provider policy: %d %s", w.Code, w.Body)
+	}
+	request := func() *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", "/user/calls?auth_provider=login", nil)
+		r.Header.Set("Authorization", "Bearer verified-login-session")
+		response := httptest.NewRecorder()
+		app.handleApplicationSession(response, r)
+		return response
+	}
+	policy.Users = append(policy.Users, phoneUser{Identity: phoneTestIdentity("hamza"), Enabled: true,
+		phoneGrant: phoneGrant{Role: "user", Destinations: []string{"support"}}})
+	updates <- policy
+	if result := request(); result.Code != 200 {
+		t.Fatalf("unrelated edit denied online request: %d %s", result.Code, result.Body)
+	}
+	if code := <-updateCodes; code != 200 {
+		t.Fatalf("unrelated edit failed: %d", code)
+	}
+	w = phoneTestRequest(app, nil, "GET", "/access/policy", nil)
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &policy) != nil {
+		t.Fatalf("read current policy: %d %s", w.Code, w.Body)
+	}
+	policy.Providers = nil
+	updates <- policy
+	if result := request(); result.Code != 403 {
+		t.Fatalf("removed provider remained authorized: %d %s", result.Code, result.Body)
+	}
+	if code := <-updateCodes; code != 200 {
+		t.Fatalf("provider removal failed: %d", code)
+	}
+}

@@ -69,7 +69,17 @@ func (a *App) toolLoadTest(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("stream not found")
 	}
 
-	manifestURL := a.loopbackPlaybackURL(s, indexPlaylistFile)
+	// Sign the target when the stream demands it, so the load test can
+	// exercise the configuration production actually runs. Give the
+	// signature the run's own duration plus slack.
+	var exp int64
+	if s.RequireSignedURLs {
+		if err := a.ensureSigningSecret(ctx, s); err != nil {
+			return nil, err
+		}
+		exp = time.Now().Add(time.Duration(duration)*time.Second + 5*time.Minute).Unix()
+	}
+	manifestURL := a.loopbackPlaybackURL(s, indexPlaylistFile, exp)
 	res, err := runLoadTest(ctx, manifestURL, viewers, duration)
 	if err != nil {
 		return nil, err
@@ -89,13 +99,29 @@ func (a *App) toolLoadTest(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 // rewrite produced http://localhost:<port>/api/apps/streaming/... —
 // the proxy's path, which the sidecar itself doesn't serve, so every
 // request 404'd and the tool reported refusals.
-func (a *App) loopbackPlaybackURL(s *Stream, file string) string {
+// The port comes from APTEVA_APP_PORT, which is what the SDK binds
+// (app-sdk/run.go) and what apteva-server injects per sidecar. v0.2
+// read APTEVA_LISTEN_PORT — a name nothing in the platform sets — and
+// so always fell back to 8080 while the sidecar listened on its
+// assigned port, making every load test fail at the probe (or, worse,
+// measure whichever unrelated sidecar happened to hold 8080). Its own
+// smoke test set APTEVA_LISTEN_PORT, so the suite passed against the
+// bug; the test now sets what the SDK reads.
+//
+// ttl > 0 signs the URL, which a stream under require_signed_urls
+// needs — v0.2 built a bare ?t= URL and could not load-test those
+// streams at all.
+func (a *App) loopbackPlaybackURL(s *Stream, file string, exp int64) string {
 	q := url.Values{}
 	q.Set("t", s.PlaybackToken)
 	if v := urlProjectID(s.ProjectID); v != "" {
 		q.Set("project_id", v)
 	}
-	port := strings.TrimSpace(getenv("APTEVA_LISTEN_PORT", "8080"))
+	if exp > 0 {
+		q.Set("exp", strconv.FormatInt(exp, 10))
+		q.Set("sig", signPlayback(s.URLSigningSecret, s.ID, exp, scopeForFile(file)))
+	}
+	port := strings.TrimSpace(getenv("APTEVA_APP_PORT", getenv("APTEVA_LISTEN_PORT", "8080")))
 	return fmt.Sprintf("http://127.0.0.1:%s/streams/%d/%s?%s", port, s.ID, file, q.Encode())
 }
 

@@ -118,6 +118,7 @@ func accountResourceCapabilities(platform string) map[string]any {
 		providerTypes = []string{"meta_pixel"}
 	case "google":
 		supported = true
+		create = true
 		resourceKind = resourceConversionAction
 		providerTypes = []string{"google_conversion_action"}
 	case "reddit":
@@ -128,7 +129,9 @@ func accountResourceCapabilities(platform string) map[string]any {
 	if create {
 		operations = append(operations, "create")
 	}
-	install := platform == "meta"
+	// Meta returns a Pixel base-code config; Google returns the gtag global
+	// site tag plus the event snippet for this conversion action.
+	install := platform == "meta" || platform == "google"
 	if install {
 		operations = append(operations, "install_config")
 	}

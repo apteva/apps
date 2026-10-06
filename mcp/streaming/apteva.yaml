@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: streaming
 display_name: Streaming
-version: 0.2.0
+version: 0.3.0
 description: |
   Live ingest + HLS packaging for sibling Apteva apps. Owns RTMP ingest,
   ffmpeg-driven HLS segmentation, recording-to-mp4, viewer heartbeats,
@@ -14,12 +14,20 @@ description: |
   Fully standalone: segments and recordings live on the sidecar's
   local data dir and are served directly from there. No storage/media
   dependency — keeps the replay path local-only and the deployment
-  trivial. v0.3 adds optional storage upload + media derivatives.
+  trivial. v0.4 adds optional storage upload + media derivatives.
 
-  v0.2 adds expiring HMAC-signed playback URLs (streams_signed_url +
-  streams_set_url_policy), a bounded live HLS window with a separate
-  VOD replay manifest, and a retention sweeper that finally enforces
-  retention_days.
+  v0.3 closes the gaps v0.2's own hardening left open: every terminal
+  transition (including restart and shutdown) now goes through one
+  finalize path, signatures are bound to the URL kind they were minted
+  for, rotate_key no longer overwrites the session it replaces, the
+  heartbeat throttle reads a forwarded address it can trust and sizes
+  for shared egress, and the VOD manifest carries real segment
+  durations.
+
+  BREAKING: signed URLs issued by v0.2 stop validating — the signature
+  now covers the URL's scope. Streams left at the default
+  require_signed_urls=0 are unaffected; for the rest, re-issue with
+  streams_signed_url (or read playback_url again).
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/streaming
@@ -122,5 +130,33 @@ config_schema:
     default: "ffmpeg"
     label: ffmpeg binary
     description: Resolved via $PATH when unset. Override for non-standard installs.
+  - name: max_viewers_per_ip
+    type: number
+    default: 64
+    label: Max counted viewers per source IP
+    description: >-
+      Heartbeat anti-inflation budget, applied per (source IP, stream). Beyond
+      it, extra viewers from that address still get served but stop adding
+      headcount. Raise it when your audience sits behind a large shared egress
+      (a university, a corporate NAT) — v0.2's budget of 8 undercounted those
+      badly. The per-window request ceiling scales with this value.
+  - name: live_url_ttl_seconds
+    type: number
+    default: 43200
+    label: Signed URL lifetime — live streams (seconds)
+    description: >-
+      Lifetime of the signed playback URL for a stream still in progress. Every
+      segment inherits the manifest's signature, so this has to outlast the
+      whole broadcast: when it expires, playback stops for every viewer at once.
+      The expiry is reported as playback_url_expires_at so a consumer can
+      refresh ahead of it.
+  - name: replay_url_ttl_seconds
+    type: number
+    default: 3600
+    label: Signed URL lifetime — replays (seconds)
+    description: >-
+      Lifetime of the signed URL for a finished stream. Short on purpose —
+      expiring is the point of require_signed_urls. Callers that want an exact
+      lifetime use streams_signed_url.
 
 upgrade_policy: auto-patch

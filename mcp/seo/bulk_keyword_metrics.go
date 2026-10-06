@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -16,24 +17,46 @@ import (
 
 const keywordMetricBatchSize = 1000
 
+// One app process owns one SQLite database and one provider binding set.
+// Serializing metric jobs prevents concurrent single-keyword refreshes from
+// turning into a burst of provider requests. Creation is serialized
+// separately so overlapping active jobs can be reused atomically.
+var keywordMetricRunMu sync.Mutex
+var keywordMetricCreateMu sync.Mutex
+var keywordMetricPreflightMu sync.Mutex
+
 type keywordMetricJob struct {
-	ID                  int64  `json:"id"`
-	ProjectID           string `json:"project_id"`
-	Provider            string `json:"provider"`
-	SearchEngine        string `json:"search_engine"`
-	LocationID          int64  `json:"location_id"`
-	Status              string `json:"status"`
-	Phase               string `json:"phase"`
-	TotalKeywords       int64  `json:"total_keywords"`
-	CompletedKeywords   int64  `json:"completed_keywords"`
-	IncompleteKeywords  int64  `json:"incomplete_keywords"`
-	VolumeCompleted     int64  `json:"volume_completed"`
-	DifficultyCompleted int64  `json:"difficulty_completed"`
-	LastError           string `json:"last_error,omitempty"`
-	CreatedAt           int64  `json:"created_at"`
-	StartedAt           *int64 `json:"started_at,omitempty"`
-	CompletedAt         *int64 `json:"completed_at,omitempty"`
-	UpdatedAt           int64  `json:"updated_at"`
+	ID                    int64                        `json:"id"`
+	ProjectID             string                       `json:"project_id"`
+	Provider              string                       `json:"provider"`
+	SearchEngine          string                       `json:"search_engine"`
+	LocationID            int64                        `json:"location_id"`
+	Status                string                       `json:"status"`
+	Phase                 string                       `json:"phase"`
+	TotalKeywords         int64                        `json:"total_keywords"`
+	CompletedKeywords     int64                        `json:"completed_keywords"`
+	IncompleteKeywords    int64                        `json:"incomplete_keywords"`
+	VolumeCompleted       int64                        `json:"volume_completed"`
+	DifficultyCompleted   int64                        `json:"difficulty_completed"`
+	VolumeUnavailable     int64                        `json:"volume_unavailable"`
+	DifficultyUnavailable int64                        `json:"difficulty_unavailable"`
+	LastError             string                       `json:"last_error,omitempty"`
+	CreatedAt             int64                        `json:"created_at"`
+	StartedAt             *int64                       `json:"started_at,omitempty"`
+	CompletedAt           *int64                       `json:"completed_at,omitempty"`
+	UpdatedAt             int64                        `json:"updated_at"`
+	Items                 []keywordMetricJobItemStatus `json:"items,omitempty"`
+}
+
+type keywordMetricJobItemStatus struct {
+	ID               int64  `json:"id"`
+	KeywordID        int64  `json:"keyword_id"`
+	Keyword          string `json:"keyword"`
+	VolumeStatus     string `json:"volume_status"`
+	DifficultyStatus string `json:"difficulty_status"`
+	Attempts         int64  `json:"attempts"`
+	LastError        string `json:"last_error,omitempty"`
+	UpdatedAt        int64  `json:"updated_at"`
 }
 
 type keywordMetricJobItem struct {
@@ -132,6 +155,9 @@ func (a *App) handleKeywordMetricJobItem(w http.ResponseWriter, r *http.Request)
 	}
 	if len(parts) == 1 && r.Method == http.MethodGet {
 		job, err := getKeywordMetricJob(mustCtx(r).AppDB(), pid, id)
+		if err == nil {
+			job.Items, err = listKeywordMetricJobItems(mustCtx(r).AppDB(), id, job.Status)
+		}
 		writeJSONOrErr(w, job, err)
 		return
 	}
@@ -139,6 +165,10 @@ func (a *App) handleKeywordMetricJobItem(w http.ResponseWriter, r *http.Request)
 		job, err := getKeywordMetricJob(mustCtx(r).AppDB(), pid, id)
 		if err != nil {
 			writeJSONOrErr(w, nil, err)
+			return
+		}
+		if job.Status != "pending" && job.Status != "partial" && job.Status != "failed" {
+			http.Error(w, "only pending, partial, or failed jobs can be resumed", http.StatusConflict)
 			return
 		}
 		provider, err := selectProvider(mustCtx(r), job.Provider)
@@ -151,17 +181,12 @@ func (a *App) handleKeywordMetricJobItem(w http.ResponseWriter, r *http.Request)
 			writeJSONOrErr(w, nil, err)
 			return
 		}
-		res, err := mustCtx(r).AppDB().Exec(
-			`UPDATE keyword_metric_jobs SET status = 'pending', phase = 'queued', last_error = '',
-			        completed_at = NULL, updated_at = ?
-			  WHERE id = ? AND project_id = ? AND status IN ('pending', 'partial', 'failed')`,
-			time.Now().Unix(), id, pid)
+		updated, err := resumeKeywordMetricJob(mustCtx(r).AppDB(), pid, id)
 		if err != nil {
 			writeJSONOrErr(w, nil, err)
 			return
 		}
-		updated, _ := res.RowsAffected()
-		if updated == 0 {
+		if !updated {
 			http.Error(w, "only pending, partial, or failed jobs can be resumed", http.StatusConflict)
 			return
 		}
@@ -175,7 +200,11 @@ func (a *App) handleKeywordMetricJobItem(w http.ResponseWriter, r *http.Request)
 }
 
 func preflightDataForSEO(ctx *sdk.AppCtx, connID int64) (float64, error) {
-	rows, _, err := callDfsRowsWithIntegrationInput(ctx, connID, "account_info", map[string]any{})
+	keywordMetricPreflightMu.Lock()
+	defer keywordMetricPreflightMu.Unlock()
+	rows, _, err := retryProviderCall(func() ([]json.RawMessage, []byte, error) {
+		return callDfsRowsWithIntegrationInput(ctx, connID, "account_info", map[string]any{})
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -250,6 +279,9 @@ func createKeywordMetricJobsWithPreflight(db *sql.DB, pid string, keywordIDs []i
 		}
 	}
 
+	keywordMetricCreateMu.Lock()
+	defer keywordMetricCreateMu.Unlock()
+
 	now := time.Now().Unix()
 	_, _ = db.Exec(`DELETE FROM keyword_metric_jobs WHERE completed_at IS NOT NULL AND completed_at < ?`, now-30*86400)
 	groupKeys := make([]string, 0, len(groups))
@@ -258,8 +290,40 @@ func createKeywordMetricJobsWithPreflight(db *sql.DB, pid string, keywordIDs []i
 	}
 	sort.Strings(groupKeys)
 	out := make([]keywordMetricJob, 0, len(groups))
+	returnedJobIDs := map[int64]bool{}
 	for _, key := range groupKeys {
 		g := groups[key]
+		newIDs := make([]int64, 0, len(g.IDs))
+		for _, keywordID := range g.IDs {
+			var activeJobID int64
+			err := db.QueryRow(
+				`SELECT j.id
+				   FROM keyword_metric_jobs j
+				   JOIN keyword_metric_job_items ji ON ji.job_id = j.id
+				  WHERE j.project_id = ? AND j.provider = ? AND j.location_id = ?
+				    AND j.status IN ('pending', 'running') AND ji.keyword_id = ?
+				  ORDER BY j.id DESC LIMIT 1`,
+				pid, g.Provider, g.LocationID, keywordID,
+			).Scan(&activeJobID)
+			if err == nil {
+				if !returnedJobIDs[activeJobID] {
+					job, loadErr := getKeywordMetricJob(db, pid, activeJobID)
+					if loadErr != nil {
+						return nil, loadErr
+					}
+					out = append(out, *job)
+					returnedJobIDs[activeJobID] = true
+				}
+				continue
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return nil, err
+			}
+			newIDs = append(newIDs, keywordID)
+		}
+		if len(newIDs) == 0 {
+			continue
+		}
 		tx, err := db.Begin()
 		if err != nil {
 			return nil, err
@@ -269,13 +333,13 @@ func createKeywordMetricJobsWithPreflight(db *sql.DB, pid string, keywordIDs []i
 			   (project_id, provider, search_engine, location_id, status, phase,
 			    total_keywords, incomplete_keywords, created_at, updated_at)
 			 VALUES (?, ?, 'google', ?, 'pending', 'queued', ?, ?, ?, ?)`,
-			pid, g.Provider, g.LocationID, len(g.IDs), len(g.IDs), now, now)
+			pid, g.Provider, g.LocationID, len(newIDs), len(newIDs), now, now)
 		if err != nil {
 			tx.Rollback()
 			return nil, err
 		}
 		jobID, _ := res.LastInsertId()
-		for _, keywordID := range g.IDs {
+		for _, keywordID := range newIDs {
 			if _, err := tx.Exec(
 				`INSERT INTO keyword_metric_job_items (job_id, keyword_id, updated_at) VALUES (?, ?, ?)`,
 				jobID, keywordID, now); err != nil {
@@ -291,7 +355,9 @@ func createKeywordMetricJobsWithPreflight(db *sql.DB, pid string, keywordIDs []i
 			return nil, err
 		}
 		out = append(out, *job)
+		returnedJobIDs[jobID] = true
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
 }
 
@@ -299,13 +365,15 @@ func runKeywordMetricJob(ctx *sdk.AppCtx, jobID int64) error {
 	if ctx == nil {
 		return errors.New("seo app is not mounted")
 	}
+	keywordMetricRunMu.Lock()
+	defer keywordMetricRunMu.Unlock()
 	db := ctx.AppDB()
 	now := time.Now().Unix()
 	res, err := db.Exec(
 		`UPDATE keyword_metric_jobs
 		    SET status = 'running', phase = 'account_check', started_at = COALESCE(started_at, ?),
 		        completed_at = NULL, last_error = '', updated_at = ?
-		  WHERE id = ? AND status IN ('pending', 'partial', 'failed')`, now, now, jobID)
+		  WHERE id = ? AND status = 'pending'`, now, now, jobID)
 	if err != nil {
 		return err
 	}
@@ -494,8 +562,11 @@ func persistKeywordVolumeBatch(db *sql.DB, locationID int64, batch []keywordMetr
 	now := time.Now().Unix()
 	for _, pending := range batch {
 		item, ok := values[normaliseKeyword(pending.Text)]
-		if !ok {
-			_, err = tx.Exec(`UPDATE keyword_metric_job_items SET attempts = attempts + 1, last_error = ?, updated_at = ? WHERE id = ?`, "volume response omitted keyword", now, pending.ItemID)
+		if !ok || item.SearchVolume == nil {
+			_, err = tx.Exec(`UPDATE keyword_metric_job_items
+				SET volume_unavailable = 1, attempts = attempts + 1,
+				    last_error = ?, updated_at = ? WHERE id = ?`,
+				"provider returned no search volume for keyword", now, pending.ItemID)
 			if err != nil {
 				return err
 			}
@@ -523,7 +594,8 @@ func persistKeywordVolumeBatch(db *sql.DB, locationID int64, batch []keywordMetr
 		}
 		if _, err := tx.Exec(
 			`UPDATE keyword_metric_job_items
-			    SET metric_snapshot_id = ?, volume_done = 1, attempts = attempts + 1,
+			    SET metric_snapshot_id = ?, volume_done = 1, volume_unavailable = 0,
+			        attempts = attempts + 1,
 			        last_error = '', updated_at = ? WHERE id = ?`, snapshotID, now, pending.ItemID); err != nil {
 			return err
 		}
@@ -541,7 +613,10 @@ func persistKeywordDifficultyBatch(db *sql.DB, locationID int64, batch []keyword
 	for _, pending := range batch {
 		item, ok := values[normaliseKeyword(pending.Text)]
 		if !ok || item.Difficulty == nil {
-			_, err = tx.Exec(`UPDATE keyword_metric_job_items SET attempts = attempts + 1, last_error = ?, updated_at = ? WHERE id = ?`, "difficulty response omitted keyword", now, pending.ItemID)
+			_, err = tx.Exec(`UPDATE keyword_metric_job_items
+				SET difficulty_unavailable = 1, attempts = attempts + 1,
+				    last_error = ?, updated_at = ? WHERE id = ?`,
+				"provider returned no keyword difficulty for keyword", now, pending.ItemID)
 			if err != nil {
 				return err
 			}
@@ -556,7 +631,8 @@ func persistKeywordDifficultyBatch(db *sql.DB, locationID int64, batch []keyword
 		}
 		if _, err := tx.Exec(
 			`UPDATE keyword_metric_job_items
-			    SET metric_snapshot_id = ?, difficulty_done = 1, attempts = attempts + 1,
+			    SET metric_snapshot_id = ?, difficulty_done = 1, difficulty_unavailable = 0,
+			        attempts = attempts + 1,
 			        last_error = '', updated_at = ? WHERE id = ?`, snapshotID, now, pending.ItemID); err != nil {
 			return err
 		}
@@ -604,13 +680,16 @@ func mergeMetricResultRaw(existing, field string, providerRaw []byte) string {
 
 func pendingKeywordMetricItems(db *sql.DB, jobID int64, field string) ([]keywordMetricJobItem, error) {
 	column := "volume_done"
+	unavailableColumn := "volume_unavailable"
 	if field == "difficulty" {
 		column = "difficulty_done"
+		unavailableColumn = "difficulty_unavailable"
 	}
 	rows, err := db.Query(
 		`SELECT ji.id, ji.keyword_id, k.text, ji.metric_snapshot_id
 		   FROM keyword_metric_job_items ji JOIN keywords k ON k.id = ji.keyword_id
-		  WHERE ji.job_id = ? AND ji.`+column+` = 0 ORDER BY ji.keyword_id`, jobID)
+		  WHERE ji.job_id = ? AND ji.`+column+` = 0 AND ji.`+unavailableColumn+` = 0
+		  ORDER BY ji.keyword_id`, jobID)
 	if err != nil {
 		return nil, err
 	}
@@ -659,16 +738,20 @@ func refreshKeywordMetricJobCounts(db *sql.DB, jobID int64) {
 
 func finalizeKeywordMetricJob(db *sql.DB, jobID int64) error {
 	refreshKeywordMetricJobCounts(db, jobID)
-	var incomplete int64
-	if err := db.QueryRow(`SELECT incomplete_keywords FROM keyword_metric_jobs WHERE id = ?`, jobID).Scan(&incomplete); err != nil {
+	var incomplete, unavailable int64
+	if err := db.QueryRow(
+		`SELECT j.incomplete_keywords,
+		        (SELECT COUNT(*) FROM keyword_metric_job_items
+		          WHERE job_id = j.id AND (volume_unavailable = 1 OR difficulty_unavailable = 1))
+		   FROM keyword_metric_jobs j WHERE j.id = ?`, jobID,
+	).Scan(&incomplete, &unavailable); err != nil {
 		return err
 	}
 	status, phase, lastError := "completed", "completed", ""
 	var completedAt any = time.Now().Unix()
 	if incomplete > 0 {
-		status, phase = "partial", "incomplete"
-		lastError = fmt.Sprintf("%d keyword(s) still have missing metric fields; resume retries only those fields", incomplete)
-		completedAt = nil
+		status, phase = "partial", "provider_no_data"
+		lastError = fmt.Sprintf("provider returned no data for one or more metric fields on %d keyword(s); available fields were saved", unavailable)
 	}
 	_, err := db.Exec(`UPDATE keyword_metric_jobs SET status = ?, phase = ?, last_error = ?, completed_at = ?, updated_at = ? WHERE id = ?`, status, phase, lastError, completedAt, time.Now().Unix(), jobID)
 	return err
@@ -683,11 +766,14 @@ func getKeywordMetricJob(db *sql.DB, pid string, id int64) (*keywordMetricJob, e
 		        j.incomplete_keywords,
 		        (SELECT COUNT(*) FROM keyword_metric_job_items WHERE job_id = j.id AND volume_done = 1),
 		        (SELECT COUNT(*) FROM keyword_metric_job_items WHERE job_id = j.id AND difficulty_done = 1),
+		        (SELECT COUNT(*) FROM keyword_metric_job_items WHERE job_id = j.id AND volume_unavailable = 1),
+		        (SELECT COUNT(*) FROM keyword_metric_job_items WHERE job_id = j.id AND difficulty_unavailable = 1),
 		        j.last_error, j.created_at, j.started_at, j.completed_at, j.updated_at
 		   FROM keyword_metric_jobs j WHERE j.id = ? AND j.project_id = ?`, id, pid,
 	).Scan(&job.ID, &job.ProjectID, &job.Provider, &job.SearchEngine, &job.LocationID,
 		&job.Status, &job.Phase, &job.TotalKeywords, &job.CompletedKeywords,
 		&job.IncompleteKeywords, &job.VolumeCompleted, &job.DifficultyCompleted,
+		&job.VolumeUnavailable, &job.DifficultyUnavailable,
 		&job.LastError, &job.CreatedAt, &startedAt, &completedAt, &job.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("keyword metric job %d not found", id)
@@ -702,6 +788,91 @@ func getKeywordMetricJob(db *sql.DB, pid string, id int64) (*keywordMetricJob, e
 		job.CompletedAt = &completedAt.Int64
 	}
 	return &job, nil
+}
+
+func resetUnavailableKeywordMetricFields(db *sql.DB, jobID int64) error {
+	_, err := db.Exec(
+		`UPDATE keyword_metric_job_items
+		    SET volume_unavailable = CASE WHEN volume_done = 0 THEN 0 ELSE volume_unavailable END,
+		        difficulty_unavailable = CASE WHEN difficulty_done = 0 THEN 0 ELSE difficulty_unavailable END,
+		        last_error = '', updated_at = ?
+		  WHERE job_id = ?`, time.Now().Unix(), jobID)
+	return err
+}
+
+func resumeKeywordMetricJob(db *sql.DB, pid string, jobID int64) (bool, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	now := time.Now().Unix()
+	res, err := tx.Exec(
+		`UPDATE keyword_metric_jobs SET status = 'pending', phase = 'queued', last_error = '',
+		        completed_at = NULL, updated_at = ?
+		  WHERE id = ? AND project_id = ? AND status IN ('pending', 'partial', 'failed')`,
+		now, jobID, pid)
+	if err != nil {
+		return false, err
+	}
+	updated, _ := res.RowsAffected()
+	if updated == 0 {
+		return false, nil
+	}
+	if _, err := tx.Exec(
+		`UPDATE keyword_metric_job_items
+		    SET volume_unavailable = CASE WHEN volume_done = 0 THEN 0 ELSE volume_unavailable END,
+		        difficulty_unavailable = CASE WHEN difficulty_done = 0 THEN 0 ELSE difficulty_unavailable END,
+		        last_error = '', updated_at = ?
+		  WHERE job_id = ?`, now, jobID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func listKeywordMetricJobItems(db *sql.DB, jobID int64, jobStatus string) ([]keywordMetricJobItemStatus, error) {
+	rows, err := db.Query(
+		`SELECT ji.id, ji.keyword_id, k.text,
+		        ji.volume_done, ji.volume_unavailable,
+		        ji.difficulty_done, ji.difficulty_unavailable,
+		        ji.attempts, ji.last_error, ji.updated_at
+		   FROM keyword_metric_job_items ji
+		   JOIN keywords k ON k.id = ji.keyword_id
+		  WHERE ji.job_id = ? ORDER BY ji.keyword_id`, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []keywordMetricJobItemStatus{}
+	for rows.Next() {
+		var item keywordMetricJobItemStatus
+		var volumeDone, volumeUnavailable, difficultyDone, difficultyUnavailable int64
+		if err := rows.Scan(&item.ID, &item.KeywordID, &item.Keyword,
+			&volumeDone, &volumeUnavailable, &difficultyDone, &difficultyUnavailable,
+			&item.Attempts, &item.LastError, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		item.VolumeStatus = keywordMetricFieldStatus(volumeDone, volumeUnavailable, jobStatus, item.LastError)
+		item.DifficultyStatus = keywordMetricFieldStatus(difficultyDone, difficultyUnavailable, jobStatus, item.LastError)
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func keywordMetricFieldStatus(done, unavailable int64, jobStatus, lastError string) string {
+	if done != 0 {
+		return "available"
+	}
+	if unavailable != 0 {
+		return "unavailable"
+	}
+	if jobStatus == "failed" || (jobStatus == "partial" && lastError != "") {
+		return "failed"
+	}
+	return "pending"
 }
 
 func listKeywordMetricJobs(db *sql.DB, pid string, limit int) ([]keywordMetricJob, error) {

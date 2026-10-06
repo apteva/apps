@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -24,6 +25,11 @@ var delegatedMemberTools = map[string]bool{
 	"lesson_resources_list": true, "lesson_bundle_get": true, "quizzes_list": true, "assignments_list": true,
 	"certificates_get": true, "drip_schedule_list": true, "enrollment_rules_get": true,
 	"course_enroll": true, "lesson_comments_list": true, "lesson_comments_post": true,
+	"quiz_submit": true, "assignment_submit": true, "learning_status": true, "issued_certificate_get": true,
+	"course_tracks_list": true, "course_track_select": true, "milestones_list": true, "milestone_submit": true, "lesson_file_url": true,
+	"assignment_reviews_list": true, "assignment_review": true, "milestone_review": true,
+	"milestone_reviews_list": true,
+	"course_file_upload":     true, "course_file_url": true,
 	"course_offer_get": true, "course_purchase_start": true,
 	"course_purchase_status": true, "course_purchase_cancel": true,
 	"membership_plans_list": true, "membership_plans_get": true,
@@ -37,7 +43,9 @@ var delegatedMemberTools = map[string]bool{
 var enrollmentRequiredTools = map[string]bool{
 	"lessons_list": true, "lessons_get": true, "lessons_mark_complete": true,
 	"lessons_progress": true, "lesson_resources_list": true, "lesson_bundle_get": true, "quizzes_list": true,
-	"assignments_list": true, "lesson_comments_list": true, "lesson_comments_post": true,
+	"assignments_list": true, "lesson_comments_list": true,
+	"course_tracks_list": true, "course_track_select": true, "milestones_list": true, "milestone_submit": true, "lesson_comments_post": true,
+	"quiz_submit": true, "assignment_submit": true, "learning_status": true, "lesson_file_url": true, "course_file_upload": true, "course_file_url": true,
 }
 
 func secureTools(tools []sdk.Tool) []sdk.Tool {
@@ -47,6 +55,9 @@ func secureTools(tools []sdk.Tool) []sdk.Tool {
 		handler := tool.Handler
 		tool.Handler = nil
 		tool.HandlerCtx = func(callCtx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+			if err := validateContentArgs(args); err != nil {
+				return nil, err
+			}
 			caller := sdk.CallerFrom(callCtx)
 			if caller == nil || caller.SubjectType == "" {
 				return handler(app, args)
@@ -70,13 +81,41 @@ func secureTools(tools []sdk.Tool) []sdk.Tool {
 			}
 
 			safeArgs := cloneArgs(args)
+			delete(safeArgs, "_viewer_member_id")
+			delete(safeArgs, "_auth_subject_id")
+			delete(safeArgs, "_subject_email")
 			communityID, err := communityForTool(app, tool.Name, safeArgs)
 			if err != nil {
 				return nil, err
 			}
+			safeArgs["community_id"] = communityID
 			member, err := memberForSubject(app, communityID, caller.SubjectID)
 			if err != nil {
 				return nil, err
+			}
+			if tool.Name == "assignment_reviews_list" || tool.Name == "assignment_review" || tool.Name == "milestone_review" || tool.Name == "milestone_reviews_list" {
+				spaceID, err := courseSpaceForTool(app.AppDB(), tool.Name, safeArgs)
+				if err != nil {
+					return nil, err
+				}
+				if !isCourseInstructor(app.AppDB(), spaceID, member.ID) {
+					return nil, errors.New("instructor access required")
+				}
+				safeArgs["reviewer_id"] = member.ID
+			}
+			if tool.Name == "quiz_submit" {
+				quiz, err := loadQuiz(app.AppDB(), strArg(safeArgs, "quiz_id", ""))
+				if err != nil {
+					return nil, err
+				}
+				safeArgs["lesson_id"] = quiz.LessonID
+			}
+			if tool.Name == "assignment_submit" {
+				assignment, err := loadAssignment(app.AppDB(), strArg(safeArgs, "assignment_id", ""))
+				if err != nil {
+					return nil, err
+				}
+				safeArgs["lesson_id"] = assignment.LessonID
 			}
 			safeArgs["_viewer_member_id"] = member.ID
 			safeArgs["_auth_subject_id"] = caller.SubjectID
@@ -123,6 +162,9 @@ func sanitizeDelegatedMembers(result any) any {
 	case Member:
 		return sanitize(value)
 	case map[string]any:
+		if quizzes, ok := value["quizzes"].([]Quiz); ok {
+			value["quizzes"] = publicQuizzes(quizzes)
+		}
 		if community, ok := value["community"].(Community); ok {
 			value["community"] = communityForMember(community)
 		}
@@ -152,7 +194,7 @@ func lessonIDForTool(tool string, args map[string]any) string {
 	case "lessons_get", "lesson_bundle_get":
 		return strArg(args, "id", "")
 	case "lessons_mark_complete", "lesson_resources_list", "quizzes_list",
-		"assignments_list", "lesson_comments_list", "lesson_comments_post":
+		"assignments_list", "lesson_comments_list", "lesson_comments_post", "quiz_submit", "assignment_submit", "learning_status", "lesson_file_url":
 		return strArg(args, "lesson_id", "")
 	default:
 		return ""
@@ -177,14 +219,16 @@ func applyMemberIdentity(tool string, args map[string]any, memberID string) {
 		"lessons_mark_complete", "lessons_progress", "course_enroll", "lesson_comments_post",
 		"course_purchase_start", "course_purchase_status", "course_purchase_cancel",
 		"membership_checkout_start", "membership_status", "membership_cancel",
-		"membership_resume", "course_access_explain", "storefront_checkout_start", "storefront_checkout_claim":
+		"membership_resume", "course_access_explain", "storefront_checkout_start", "storefront_checkout_claim", "quiz_submit", "assignment_submit", "learning_status", "issued_certificate_get", "course_track_select", "milestone_submit", "course_file_upload":
+		args["member_id"] = memberID
+	case "course_tracks_list", "milestones_list":
 		args["member_id"] = memberID
 	case "members_update":
 		args["id"] = memberID
 		delete(args, "status")
 		delete(args, "contact_id")
 		delete(args, "auth_user_id")
-	case "lessons_list", "lessons_get":
+	case "lessons_list", "lessons_get", "lesson_bundle_get":
 		args["member_id"] = memberID
 		args["include_drafts"] = false
 	case "dms_open":
@@ -346,10 +390,18 @@ func memberForSubject(ctx *sdk.AppCtx, communityID, subjectID string) (Member, e
 }
 
 func communityForTool(ctx *sdk.AppCtx, tool string, args map[string]any) (string, error) {
-	db := ctx.AppDB()
-	if id := strArg(args, "community_id", ""); id != "" {
-		return id, nil
+	id, err := resolveCommunityForTool(ctx, tool, args)
+	if err != nil {
+		return "", err
 	}
+	if supplied := strArg(args, "community_id", ""); supplied != "" && supplied != id {
+		return "", errors.New("forbidden: resource belongs to another community")
+	}
+	return id, nil
+}
+
+func resolveCommunityForTool(ctx *sdk.AppCtx, tool string, args map[string]any) (string, error) {
+	db := ctx.AppDB()
 	switch tool {
 	case "communities_get":
 		if id := strArg(args, "id", ""); id != "" {
@@ -357,16 +409,19 @@ func communityForTool(ctx *sdk.AppCtx, tool string, args map[string]any) (string
 		}
 		c, err := loadCommunityBySlug(db, scopeProject(ctx), strArg(args, "slug", ""))
 		return c.ID, err
-	case "members_get", "members_update":
+	case "members_update":
+		return mustStr(args, "community_id")
+	case "members_get":
 		if id := strArg(args, "id", ""); id != "" {
 			m, err := loadMember(db, id)
 			return m.CommunityID, err
 		}
-	case "spaces_list":
+		return mustStr(args, "community_id")
+	case "members_list", "spaces_list", "storefront_checkout_start", "storefront_checkout_claim":
 		return mustStr(args, "community_id")
 	case "threads_create", "threads_list", "courses_get_details", "sections_list",
 		"lessons_list", "lessons_progress", "certificates_get", "drip_schedule_list",
-		"enrollment_rules_get", "course_enroll", "course_offer_get", "course_purchase_start":
+		"enrollment_rules_get", "course_enroll", "course_offer_get", "course_purchase_start", "issued_certificate_get", "course_tracks_list", "course_track_select", "milestones_list":
 		return communityBySpace(db, strArg(args, "space_id", ""))
 	case "membership_plans_list", "membership_status":
 		return mustStr(args, "community_id")
@@ -397,7 +452,42 @@ func communityForTool(ctx *sdk.AppCtx, tool string, args map[string]any) (string
 		return communityByLesson(db, strArg(args, "id", ""))
 	case "lessons_mark_complete":
 		return communityByLesson(db, strArg(args, "lesson_id", ""))
-	case "lesson_resources_list", "quizzes_list", "assignments_list", "lesson_comments_list", "lesson_comments_post":
+	case "milestone_submit":
+		if spaceID := strArg(args, "space_id", ""); spaceID != "" {
+			return communityBySpace(db, spaceID)
+		}
+		var spaceID string
+		if err := db.QueryRow(`SELECT space_id FROM milestone_definitions WHERE id=?`, strArg(args, "definition_id", "")).Scan(&spaceID); err != nil {
+			return "", notFound(err, "milestone")
+		}
+		return communityBySpace(db, spaceID)
+	case "assignment_reviews_list", "milestone_reviews_list":
+		return communityBySpace(db, strArg(args, "space_id", ""))
+	case "assignment_review":
+		a, err := loadAssignment(db, strArg(args, "assignment_id", ""))
+		if err != nil {
+			return "", err
+		}
+		return spaceByLesson(db, a.LessonID)
+	case "milestone_review":
+		var spaceID string
+		err := db.QueryRow(`SELECT space_id FROM milestone_definitions WHERE id=?`, strArg(args, "definition_id", "")).Scan(&spaceID)
+		return spaceID, notFound(err, "milestone")
+	case "course_file_upload", "course_file_url":
+		return courseFileSpace(db, args)
+	case "quiz_submit":
+		q, err := loadQuiz(db, strArg(args, "quiz_id", ""))
+		if err != nil {
+			return "", err
+		}
+		return communityByLesson(db, q.LessonID)
+	case "assignment_submit":
+		a, err := loadAssignment(db, strArg(args, "assignment_id", ""))
+		if err != nil {
+			return "", err
+		}
+		return communityByLesson(db, a.LessonID)
+	case "lesson_resources_list", "quizzes_list", "assignments_list", "lesson_comments_list", "lesson_comments_post", "learning_status", "lesson_file_url":
 		return communityByLesson(db, strArg(args, "lesson_id", ""))
 	}
 	return "", fmt.Errorf("cannot resolve community for %s", tool)
@@ -460,13 +550,49 @@ func notFound(err error, kind string) error {
 
 func courseSpaceForTool(db *sql.DB, tool string, args map[string]any) (string, error) {
 	switch tool {
-	case "lessons_list", "lessons_progress":
+	case "lessons_list", "lessons_progress", "course_tracks_list", "course_track_select", "milestones_list":
 		return mustStr(args, "space_id")
 	case "lessons_get", "lesson_bundle_get":
 		return spaceByLesson(db, strArg(args, "id", ""))
+	case "milestone_submit":
+		var spaceID string
+		err := db.QueryRow(`SELECT space_id FROM milestone_definitions WHERE id=?`, strArg(args, "definition_id", "")).Scan(&spaceID)
+		return spaceID, notFound(err, "milestone")
+	case "assignment_reviews_list", "milestone_reviews_list":
+		return mustStr(args, "space_id")
+	case "assignment_review":
+		a, err := loadAssignment(db, strArg(args, "assignment_id", ""))
+		if err != nil {
+			return "", err
+		}
+		return spaceByLesson(db, a.LessonID)
+	case "milestone_review":
+		var spaceID string
+		err := db.QueryRow(`SELECT space_id FROM milestone_definitions WHERE id=?`, strArg(args, "definition_id", "")).Scan(&spaceID)
+		return spaceID, notFound(err, "milestone")
 	default:
 		return spaceByLesson(db, strArg(args, "lesson_id", ""))
 	}
+}
+
+func isCourseInstructor(db *sql.DB, spaceID, memberID string) bool {
+	var legacy sql.NullString
+	var ids string
+	if err := db.QueryRow(`SELECT instructor_member_id, instructor_ids_json FROM course_details WHERE space_id=?`, spaceID).Scan(&legacy, &ids); err != nil {
+		return false
+	}
+	if legacy.Valid && legacy.String == memberID {
+		return true
+	}
+	var list []string
+	if json.Unmarshal([]byte(ids), &list) == nil {
+		for _, id := range list {
+			if id == memberID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func spaceByLesson(db *sql.DB, lessonID string) (string, error) {
@@ -516,8 +642,9 @@ func lessonAvailableToMember(db *sql.DB, lessonID, memberID string) (bool, error
 		    AND (e.access_expires_at IS NULL OR datetime(e.access_expires_at) >= CURRENT_TIMESTAMP)
 		    AND (d.release_at IS NULL OR datetime(d.release_at) <= CURRENT_TIMESTAMP)
 		    AND (d.release_after_days IS NULL OR
-		         datetime(e.enrolled_at, '+' || d.release_after_days || ' days') <= CURRENT_TIMESTAMP)`,
-		memberID, lessonID,
+		         datetime(e.enrolled_at, '+' || d.release_after_days || ' days') <= CURRENT_TIMESTAMP)
+ AND (NOT EXISTS(SELECT 1 FROM lesson_track_assignments t0 WHERE t0.lesson_id=l.id) OR EXISTS(SELECT 1 FROM lesson_track_assignments t1 JOIN member_course_tracks mct ON mct.track_id=t1.track_id AND mct.space_id=s.space_id AND mct.member_id=? WHERE t1.lesson_id=l.id))`,
+		memberID, lessonID, memberID,
 	).Scan(&count)
 	return count > 0, err
 }

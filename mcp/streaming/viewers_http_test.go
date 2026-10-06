@@ -85,39 +85,44 @@ func TestHeartbeat_RejectsUnusableVParam(t *testing.T) {
 // drive the headcount arbitrarily high.
 func TestHeartbeat_ThrottleCapsIdentitiesPerIP(t *testing.T) {
 	app, ctx := newTestApp(t)
+	// A small budget so the test doesn't have to issue the production
+	// default's worth of requests to reach the cap.
+	const cap = 8
+	app.throttle = newViewerThrottle(cap)
 	out, _ := app.toolCreate(ctx, map[string]any{"name": "spoof"})
 	s := out.(map[string]any)["stream"].(*Stream)
 	srv := newTestServer(t, app)
 
-	for i := 0; i < throttleMaxIdentities+12; i++ {
+	for i := 0; i < cap+12; i++ {
 		url := fmt.Sprintf("%s/heartbeat/%d?t=%s&v=spoof-%d", srv.URL, s.ID, s.PlaybackToken, i)
 		if code := beatFrom(t, url, "203.0.113.9"); code != http.StatusOK {
 			t.Fatalf("beat %d returned %d", i, code)
 		}
 	}
 	got := app.viewers.count(s.ID)
-	if got > throttleMaxIdentities+1 {
-		t.Errorf("counted %d viewers from one IP, cap is %d(+1 synthetic)",
-			got, throttleMaxIdentities)
+	if got > cap+1 {
+		t.Errorf("counted %d viewers from one IP, cap is %d(+1 synthetic)", got, cap)
 	}
 }
 
 func TestHeartbeat_RateLimited(t *testing.T) {
 	app, ctx := newTestApp(t)
+	app.throttle = newViewerThrottle(4) // maxBeats = 4 * beatsPerIdentity
 	out, _ := app.toolCreate(ctx, map[string]any{"name": "flood"})
 	s := out.(map[string]any)["stream"].(*Stream)
 	srv := newTestServer(t, app)
 
+	budget := app.throttle.maxBeats()
 	url := fmt.Sprintf("%s/heartbeat/%d?t=%s&v=one", srv.URL, s.ID, s.PlaybackToken)
 	limited := false
-	for i := 0; i < throttleMaxBeats+5; i++ {
+	for i := 0; i < budget+5; i++ {
 		if beatFrom(t, url, "203.0.113.9") == http.StatusTooManyRequests {
 			limited = true
 			break
 		}
 	}
 	if !limited {
-		t.Errorf("no 429 after %d beats from one IP", throttleMaxBeats+5)
+		t.Errorf("no 429 after %d beats from one IP", budget+5)
 	}
 
 	// A different client is unaffected by its neighbour's flood.

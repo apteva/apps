@@ -52,11 +52,11 @@ func (p *platformMessagingCaller) SendMessage(req MsgSendReq) (MsgSendResp, erro
 		return MsgSendResp{}, errMessagingNotBound
 	}
 	args := map[string]any{
-		"channel":  req.Channel,
-		"to":       req.To,
-		"from":     req.From,
-		"subject":  req.Subject,
-		"body":     req.Body,
+		"channel":   req.Channel,
+		"to":        req.To,
+		"from":      req.From,
+		"subject":   req.Subject,
+		"body":      req.Body,
 		"body_html": req.BodyHTML,
 	}
 	if req.IdempotencyKey != "" {

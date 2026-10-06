@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 )
 
@@ -187,6 +188,21 @@ func TestSidecar_BootsAndHealthOK(t *testing.T) {
 	}
 	if got["ok"] != true {
 		t.Errorf("/health body=%v", got)
+	}
+}
+
+func TestSidecar_ServesPackagedMobileSurface(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID(itProject))
+	response := sc.GET("/ui/surfaces/conversations.json", nil)
+	if response.Status != http.StatusOK {
+		t.Fatalf("surface status=%d body=%s", response.Status, response.Body)
+	}
+	surface, err := sdk.ParseNativeSurface(response.Body)
+	if err != nil {
+		t.Fatalf("parse packaged surface: %v", err)
+	}
+	if err := sdk.ValidateNativeSurfaceForDescriptor(surface, (&App{}).Manifest().Provides.UISurfaces[0]); err != nil {
+		t.Fatalf("validate packaged surface: %v", err)
 	}
 }
 

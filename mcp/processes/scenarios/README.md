@@ -1,7 +1,7 @@
 # Processes Tier 3 tests
 
 These tests run real Apteva Core agents with the `openai-codex` provider and
-`gpt-5.6-terra`. The Processes sidecar is built from this checkout. Each scenario
+`gpt-5.6-terra` by default (`APTEVA_TEST_MODEL=gpt-6-astra` selects Astra). The Processes sidecar is built from this checkout. Each scenario
 gets fresh app storage; the runner creates and removes a disposable server.
 No Tasks integration is installed and no external publishing service is used.
 
@@ -12,6 +12,7 @@ No Tasks integration is installed and no external publishing service is used.
 | `03-human-approval-gate.yaml` | The agent finishes the draft; human review remains waiting and publication remains pending and undispatched. |
 | `04-multi-agent-workflow.yaml` | Three distinct agents complete five steps with parallel inputs, a dependency join, explicit agent approval, and a simulated receipt. |
 | `05-event-trigger-workflow.yaml` | A duplicate signup publication starts one five-step run across three agents through the real app bus. |
+| `06-sequential-worker.yaml` | Three simulated weather/receipt steps complete in order using exactly one persisted worker and one spawn. |
 
 Run from the Processes app directory:
 
@@ -49,10 +50,15 @@ The fourth scenario uses `setup.topology.nodes` with a primary coordinator and
 two responder agents (writer and reviewer). Use a topology-capable CLI build
 through `APTEVA_TEST_CLI`. Generated `${PRIMARY_AGENT_ID}`, `${AGENT_writer_ID}`,
 and `${AGENT_reviewer_ID}` values bind workflow roles to the actual instances.
-Every agent uses the selected Terra model. Research and audience steps become
+Every agent uses the selected model. The CLI must persist its model override
+for connection-backed provider configuration, otherwise server defaults can replace it. Research and audience steps become
 ready together; drafting waits for both; review gates simulated publication.
 The verifier checks audit ordering, frozen roles, distinct executor IDs, and
 successful read/completion calls attributed to the assigned agent.
+The fourth fixture enables `setup.app.spawnable` so workers can access Processes,
+and requires successful main-thread spawns plus an authoritative read and
+completion from a distinct worker for every step. Main coordinates; focused
+workers read and complete the assigned steps.
 
 This is a starter suite. It does not yet cover operator approval/rejection,
 Tasks-backed execution, scheduled dispatch, or delivery fault injection. Those
@@ -92,3 +98,66 @@ Recorded on 2026-09-13: the event-triggered scenario passed all YAML, saved-stat
 and agent-attribution checks with `openai-codex` / `gpt-5.6-terra`: 30 aggregate
 iterations, 484,305 reported tokens, approximately 144 seconds. Two publishes of
 the same signup produced one event record and one completed five-step run.
+
+Workers receive approval evidence directly in `step_get.dependencies`: ancestor
+IDs, kinds, states, decisions, outputs, and direct-dependency flags. They should
+not need `run_get` or parent confirmation to verify complete approval evidence.
+The worker verifier rejects completion on main and missing worker reads/spawns.
+
+## Sequential worker benchmark
+
+`06-sequential-worker.yaml` uses real model calls but simulated Barcelona weather,
+conversation and notification receipts. This isolates orchestration; it does not
+measure live weather retrieval or external delivery. Use the same CLI, Core,
+server, model and fixture for before/after comparisons. The current verifier
+requires one persisted worker, one successful spawn, ordered claims/completions,
+and exactly one worker `done` after the last step. The unoptimized baseline is
+checked for saved outputs and ordering without the worker-reuse requirement.
+
+Recorded on 2026-09-13 using `openai-codex` / `gpt-5.6-terra`:
+
+| App implementation | Whole scenario | Run creation to final step | Iterations | Reported tokens | Workers |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Baseline (`b0a4c1f8`) | 98.160 s | 48.566 s | 21 | 245,322 | 3 |
+| Worker reuse, initial | 79.506 s | 38.744 s | 18 | 200,269 | 1 |
+| Worker reuse, final context-preservation fix | 93.251 s | 53.871 s | 17 | 186,234 | 1 |
+
+The whole scenario includes model-driven procedure/assignment creation and the
+final verification. Run execution is measured from persisted `created_at` to the
+last step's `updated_at`. Worker reuse consistently removed two spawns in these
+samples; final reported token usage was 24% lower. The latency measurements are
+mixed, so these individual runs do not establish a reliable speedup or a
+reliability rate.
+
+Local reports: `/private/tmp/processes-worker-before/run-twfzkb`,
+`/private/tmp/processes-worker-after/run-KFi7Ia`, and
+`/private/tmp/processes-worker-final/run-yPBfBW`.
+
+The accompanying multi-agent regression initially used a CLI without topology
+support; assignment validation correctly rejected nonexistent responder agents.
+Using the existing topology-capable CLI produced five completed steps, but the
+research output included the sentence-ending period from its fixture instruction
+and failed the exact-output assertion. The fixture now delimits expected strings
+and explicitly excludes trailing punctuation; assertions remain unchanged. These
+failed attempts are not counted as passing regressions.
+
+The clarified multi-agent regression passed on 2026-09-13: 122.055 s,
+38 iterations, 457,742 reported tokens. All five independent workers, three
+assigned agents, parallel inputs, dependency join, approval, saved outputs and
+tool-attribution checks passed. Report:
+`/private/tmp/processes-worker-multiagent-delimited/run-PGW9i9`.
+
+Local deterministic validation also passed: `GOWORK=off go test -race ./...`
+and all 33 UI/outcome-verifier tests. No Core, server or SDK source changes were
+needed; the topology regression used the existing topology-capable CLI binary.
+
+## Isolated workers smoke run
+
+On 2026-09-13, the updated five-step scenario passed with `gpt-6-astra`:
+203 seconds, 40 iterations, 480,809 reported tokens. All five steps completed
+in distinct workers spawned from each assigned agent's main thread; persisted
+state, dependency ordering, approval and worker-read assertions passed. The
+publication worker used dependency evidence without tool discovery or a parent
+clarification. The preceding run stopped at 48 iterations after 242 seconds
+with only four steps complete. These are individual smoke runs, not a latency
+benchmark or reliability estimate.

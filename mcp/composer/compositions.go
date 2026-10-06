@@ -106,17 +106,40 @@ type Timing struct {
 }
 
 type Asset struct {
-	Type     string         `json:"type"` // video|image|audio|generated
-	Src      string         `json:"src"`  // storage:N | https://… | mediastudio:N
-	Provider string         `json:"provider,omitempty"`
-	Kind     string         `json:"kind,omitempty"`
-	Request  map[string]any `json:"request,omitempty"`
-	Text     string         `json:"text,omitempty"`
-	Font     *TextFont      `json:"font,omitempty"`
-	Style    *TextStyle     `json:"style,omitempty"`
-	Stroke   *TextStroke    `json:"stroke,omitempty"`
-	Shadow   *TextShadow    `json:"shadow,omitempty"`
-	Align    *TextAlign     `json:"align,omitempty"`
+	Type      string           `json:"type"` // video|image|audio|generated
+	Src       string           `json:"src"`  // storage:N | https://… | mediastudio:N
+	Provider  string           `json:"provider,omitempty"`
+	Kind      string           `json:"kind,omitempty"`
+	Request   map[string]any   `json:"request,omitempty"`
+	Text      string           `json:"text,omitempty"`
+	Font      *TextFont        `json:"font,omitempty"`
+	Style     *TextStyle       `json:"style,omitempty"`
+	Stroke    *TextStroke      `json:"stroke,omitempty"`
+	Shadow    *TextShadow      `json:"shadow,omitempty"`
+	Align     *TextAlign       `json:"align,omitempty"`
+	Procedure *ProceduralAsset `json:"procedure,omitempty"`
+}
+
+// ProceduralAsset is an additive clip source. Composer materializes the
+// immutable procedure revision and its named inputs before normal rendering.
+type ProceduralAsset struct {
+	ProcedureID int64                      `json:"procedure_id"`
+	Revision    int                        `json:"revision,omitempty"`
+	Target      string                     `json:"target,omitempty"`
+	OutputName  string                     `json:"output_name,omitempty"`
+	OutputKind  string                     `json:"output_kind,omitempty"`
+	Parameters  map[string]any             `json:"parameters,omitempty"`
+	Inputs      map[string]*ProcedureInput `json:"inputs,omitempty"`
+	CacheKey    string                     `json:"cache_key,omitempty"`
+	Status      string                     `json:"status,omitempty"`
+	StorageID   int64                      `json:"storage_id,omitempty"`
+	Error       string                     `json:"error,omitempty"`
+}
+
+type ProcedureInput struct {
+	Kind string   `json:"kind,omitempty"`
+	Src  string   `json:"src,omitempty"`
+	AI   *AIAsset `json:"ai,omitempty"`
 }
 
 type AIAsset struct {
@@ -363,7 +386,10 @@ func validateEdit(e *Edit) error {
 		for i := range track.Clips {
 			c := &track.Clips[i]
 			at := clipAssetType(*c, tt)
-			if c.Asset.Src == "" && c.AI == nil && at != "silence" && at != "text" {
+			if err := validateProceduralAsset(c.Asset.Procedure); err != nil {
+				return fmt.Errorf("track[%d].clip[%d]: procedure: %w", ti, i, err)
+			}
+			if c.Asset.Src == "" && c.AI == nil && c.Asset.Procedure == nil && at != "silence" && at != "text" {
 				return fmt.Errorf("track[%d].clip[%d]: asset.src required", ti, i)
 			}
 			if at == "" {
@@ -484,6 +510,37 @@ func validateEdit(e *Edit) error {
 		}
 		if err := validateTiming(s.Timing); err != nil {
 			return fmt.Errorf("soundtrack: %w", err)
+		}
+	}
+	return nil
+}
+
+func validateProceduralAsset(procedure *ProceduralAsset) error {
+	if procedure == nil {
+		return nil
+	}
+	if procedure.ProcedureID <= 0 {
+		return errors.New("procedure_id must be > 0")
+	}
+	if procedure.Revision < 0 {
+		return errors.New("revision must be >= 0")
+	}
+	switch strings.ToLower(strings.TrimSpace(procedure.Target)) {
+	case "", "clip", "audio", "still", "composition":
+	default:
+		return errors.New("target must be clip|audio|still|composition")
+	}
+	switch strings.ToLower(strings.TrimSpace(procedure.OutputKind)) {
+	case "", "video", "image", "audio":
+	default:
+		return errors.New("output_kind must be video|image|audio")
+	}
+	for name, input := range procedure.Inputs {
+		if err := validateProcedureInputName(name); err != nil {
+			return err
+		}
+		if input == nil || (strings.TrimSpace(input.Src) == "" && input.AI == nil) {
+			return fmt.Errorf("input %q requires src or ai", name)
 		}
 	}
 	return nil
@@ -1013,6 +1070,15 @@ func validateFit(fit string) error {
 }
 
 func clipAssetType(c Clip, trackType string) string {
+	if c.Asset.Procedure != nil {
+		if kind := strings.ToLower(strings.TrimSpace(c.Asset.Procedure.OutputKind)); kind != "" {
+			return kind
+		}
+		if trackType == "audio" {
+			return "audio"
+		}
+		return "video"
+	}
 	switch strings.ToLower(strings.TrimSpace(c.Asset.Type)) {
 	case "", "generated":
 		if trackType == "overlay" {

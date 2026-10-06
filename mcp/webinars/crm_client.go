@@ -15,7 +15,7 @@ type crmCaller interface {
 }
 
 type CRMUpsertReq struct {
-	Kind      string         `json:"kind"`     // "email" | "phone"
+	Kind      string         `json:"kind"` // "email" | "phone"
 	Value     string         `json:"value"`
 	Defaults  map[string]any `json:"defaults,omitempty"`
 	Source    string         `json:"source,omitempty"`

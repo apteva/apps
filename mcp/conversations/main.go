@@ -62,6 +62,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("conversations requires a db block")
 	}
 	a.store = newStore(ctx.AppDB())
+	if err := a.recoverVoiceSessions(ctx); err != nil {
+		ctx.Logger().Warn("voice session recovery incomplete", "err", err)
+	}
 	if err := a.store.interruptToolActivities(); err != nil {
 		return err
 	}
@@ -73,17 +76,19 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		var id string
 		err := a.store.db.QueryRow(`SELECT c.id FROM conversations c JOIN conversation_agent_threads t ON t.conversation_id=c.id JOIN participants p ON p.conversation_id=c.id AND p.agent_id=t.agent_id WHERE t.agent_id=? AND t.thread_id=? AND c.archived_at IS NULL`, agentID, threadID).Scan(&id)
 		if err != nil {
-			return ""
+			_ = a.store.db.QueryRow(`SELECT conversation_id FROM conversation_voice_sessions WHERE agent_id=? AND thread_id=? AND status IN ('starting','active')`, agentID, threadID).Scan(&id)
 		}
 		return id
 	}
 	a.telegramFeedback = newTelegramFeedbackManager(a)
 	a.streamer.onFrame = a.telegramFeedback.OnFrame
+	a.streamer.onActivityChange = a.publishListProgress
 	mountedCtx = ctx
 	// Token-level streaming when the platform grants it; Stage-1 phase
-	// frames otherwise. The panel renders either without knowing which.
+	// frames otherwise. The bridge connects asynchronously because the
+	// platform may still be registering this install during startup.
 	if a.runTelemetryFeed(ctx) {
-		ctx.Logger().Info("telemetry bridge active — token-level streaming on")
+		ctx.Logger().Info("telemetry bridge enabled — connecting")
 	}
 	// Crash recovery: anything the ledger recorded but never confirmed
 	// goes out again according to its persisted retry schedule.
@@ -99,7 +104,12 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error {
+func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
+	if a.store != nil && ctx != nil {
+		if err := a.recoverVoiceSessions(ctx); err != nil {
+			ctx.Logger().Warn("voice shutdown incomplete", "err", err)
+		}
+	}
 	if a.deliveryWorker != nil {
 		close(a.deliveryWorker.stop)
 		a.deliveryWorker.done.Wait()
@@ -149,7 +159,10 @@ func (a *App) EventHandlers() []sdk.EventHandler {
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
-		{Name: "read_attachment", Description: "Read an attachment in this conversation. Text is bounded; images include vision data; binary files return metadata and optional Storage file_id for document tools.", InputSchema: schemaObject(map[string]any{"conversation_id": map[string]any{"type": "string"}, "attachment_id": map[string]any{"type": "string"}, "offset": map[string]any{"type": "integer", "minimum": 0}}, []string{"conversation_id", "attachment_id"}), HandlerCtx: a.toolReadAttachment},
+		// toolReadAttachment remains implemented for compatibility and direct
+		// tests, but is deliberately not exposed to agents. The narrow blob
+		// handoff below is the supported path for non-image file consumers.
+		{Name: "attachment_to_blob", Description: "Pass a non-image attachment into Core's blob pipeline. Returns a temporary blobref:// handle for a downstream file, document, or ZIP-import tool. Images are already supplied directly and must not be fetched. Args: conversation_id, attachment_id.", InputSchema: schemaObject(map[string]any{"conversation_id": map[string]any{"type": "string"}, "attachment_id": map[string]any{"type": "string"}}, []string{"conversation_id", "attachment_id"}), HandlerCtx: a.toolAttachmentToBlob},
 		{Name: "resolve_thread_identity", Description: "Internal trusted backend identity resolution; never accepts a user identity from an agent.", InputSchema: schemaObject(map[string]any{"agent_id": map[string]any{"type": "integer"}, "thread_id": map[string]any{"type": "string"}}, []string{"agent_id", "thread_id"}), HandlerCtx: a.toolResolveThreadIdentity},
 		{
 			Name: "send",
@@ -157,7 +170,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"work stays there; never rewrite an app-owned chat with Core update/evolve or delegate its identity-dependent calls. " +
 				"Main returns escalated decisions/results to the originating thread; generic workers report to their parent and are " +
 				"never granted Conversations tools. Delivery updates every bound surface. Set phase to " +
-				"acknowledgement, progress, or final. Exception: main may acknowledge its own resolved approval " +
+				"acknowledgement, progress, or final. If sending a pre-work acknowledgement, call this tool alone and wait for its result before calling work tools; do not batch them. For work with two or more distinct stages or batches, send at least one concise progress update between stages, even when the first batch finishes quickly. For long multi-step work, send concise progress updates after meaningful milestones, plan changes, blockers, or requests for input; combine nearby milestones. Do not send one update per tool call, and do not narrate individual tool calls, routine retries, or unchanged waits. Exception: main may acknowledge its own resolved approval " +
 				"with phase=acknowledgement and approval_message_id from approval.result.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id":     map[string]any{"type": "string"},
@@ -176,12 +189,14 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Ask the operator to approve gated work owned by main or by the originating conversation " +
 				"thread, using that conversation's exact id. Generic workers report the blocked decision to their " +
 				"parent instead. The card is actionable in the conversation and inbox; the verdict returns to the " +
-				"asking thread as approval.result.",
+				"asking thread as approval.result. The card itself asks the question: call this directly, without a separate conversations_send announcing the approval. " +
+				"Main must use an operator conversation id from conversations_list or create one with conversations_create if none exists; main is a thread id, not a conversation id. " +
+				"Omit actions for Approve/Deny defaults. Custom actions require id and label (not value); style is optional.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
 				"title":           map[string]any{"type": "string"},
 				"body":            map[string]any{"type": "string"},
-				"actions":         map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+				"actions":         approvalActionsSchema(),
 			}, []string{"conversation_id", "title"}),
 			HandlerCtx: a.toolRequestApproval,
 		},
@@ -259,7 +274,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"title":             map[string]any{"type": "string"},
 				"body":              map[string]any{"type": "string"},
 				"severity":          map[string]any{"type": "string"},
-				"actions":           map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+				"actions":           approvalActionsSchema(),
 				"sections":          map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
 				"callback_tool":     map[string]any{"type": "string"},
 				"client_message_id": map[string]any{"type": "string", "maxLength": 200, "description": "Stable request key scoped to the authenticated app install. Reuse only for identical retries."},
@@ -433,6 +448,11 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 	}
 	// The durable reply supersedes any pending thinking bubble.
 	a.streamer.settleAck(conv.ID, from.AgentID)
+	if phase == "final" {
+		a.streamer.finishResponse(conv.ID, from.AgentID)
+	} else {
+		a.streamer.intermediateReply(conv.ID, from.AgentID)
+	}
 	return map[string]any{"message_id": msg.ID, "conversation_id": conv.ID, "phase": msg.Phase,
 		"inserted": inserted, "duplicate_suppressed": !inserted}, nil
 }
@@ -471,6 +491,11 @@ func (a *App) toolRequestApproval(ctx context.Context, app *sdk.AppCtx, args map
 	})
 	if err != nil {
 		return nil, err
+	}
+	// The approval card is the response: the next step belongs to the user.
+	if inserted {
+		a.streamer.settleAck(conv.ID, from.AgentID)
+		a.streamer.finishResponseWithMessage(conv.ID, from.AgentID, msg.ID)
 	}
 	return map[string]any{"message_id": msg.ID, "status": "pending", "inserted": inserted, "duplicate_suppressed": !inserted}, nil
 }
@@ -714,6 +739,23 @@ func attachmentsArg(args map[string]any, key string) ([]Attachment, error) {
 		}
 	}
 	return out, nil
+}
+
+// Keep the model-facing contract aligned with approvalActionsArg.
+func approvalActionsSchema() map[string]any {
+	return map[string]any{
+		"type": "array", "minItems": 1, "maxItems": 8,
+		"description": "Optional custom choices. Omit for Approve/Deny. Each choice requires a unique id and label; use id, not value. The selected id is returned in approval.result. Without styles the first choice has an accent outline, the rest are neutral.",
+		"items": map[string]any{
+			"type": "object", "additionalProperties": false,
+			"required": []string{"id", "label"},
+			"properties": map[string]any{
+				"id":    map[string]any{"type": "string", "minLength": 1, "description": "Unique non-empty action identifier. pending and resolved are reserved."},
+				"label": map[string]any{"type": "string", "minLength": 1, "description": "Human-readable choice, such as Delete repository or Keep repository."},
+				"style": map[string]any{"type": "string", "enum": []string{"primary", "secondary", "danger"}, "description": "primary: filled theme accent; secondary: neutral outline; danger: accent outline for a consequential action."},
+			},
+		},
+	}
 }
 
 func approvalActionsArg(args map[string]any) ([]approvalAction, error) {

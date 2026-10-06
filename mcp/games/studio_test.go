@@ -1,6 +1,9 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf16"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -24,6 +28,7 @@ type studioFake struct {
 	analyticsIn             []map[string]any
 	facts                   map[string]map[string]any
 	providerCall            func(string, map[string]any) (any, error)
+	providerResult          func(string, map[string]any) (*sdk.ExecuteResult, error)
 }
 
 func (f *studioFake) WhoAmI() (*sdk.InstallIdentity, error) {
@@ -37,9 +42,15 @@ func (f *studioFake) GetConnection(id int64) (*sdk.PlatformConnection, error) {
 	if id == 9 {
 		slug = "app-store-connect"
 	}
+	if id == 10 {
+		slug = "google-play-developer"
+	}
 	return &sdk.PlatformConnection{ID: id, AppSlug: slug, ProjectID: "test-proj"}, nil
 }
 func (f *studioFake) ExecuteIntegrationTool(id int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+	if f.providerResult != nil {
+		return f.providerResult(tool, input)
+	}
 	if f.providerCall == nil {
 		return nil, fmt.Errorf("unexpected provider call %s", tool)
 	}
@@ -89,7 +100,7 @@ func (f *studioFake) CallAppResult(app, tool string, in map[string]any, out any)
 }
 func newStudioFixture(t *testing.T) (*sdk.AppCtx, *studioFake, GameScope) {
 	t.Helper()
-	f := &studioFake{fakeAuth: newFakeAuth(t), bindings: map[string]any{"code": int64(2), "deploy": int64(3), "analytics": int64(4), "reporting": map[string]any{"ids": []any{int64(7), int64(8), int64(9)}}}, repoID: 1, deployID: 2, envID: 3, source: "moon", facts: map[string]map[string]any{}}
+	f := &studioFake{fakeAuth: newFakeAuth(t), bindings: map[string]any{"code": int64(2), "deploy": int64(3), "analytics": int64(4), "reporting": map[string]any{"ids": []any{int64(7), int64(8), int64(9), int64(10)}}}, repoID: 1, deployID: 2, envID: 3, source: "moon", facts: map[string]map[string]any{}}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("test-proj"), tk.WithPlatform(f), tk.WithConfig(map[string]string{"analytics_enabled": "true"}))
 	if e := initializeGames(ctx); e != nil {
 		t.Fatal(e)
@@ -257,6 +268,155 @@ func TestAppleSalesCurrenciesAndCorrections(t *testing.T) {
 	}
 	if _, e = parseAppleSales([]byte(raw), map[string]any{"external_id": "123"}, "2026-09-02"); e == nil {
 		t.Fatal("wrong date accepted")
+	}
+}
+
+func playZIP(t *testing.T, csvText string) map[string]any {
+	t.Helper()
+	var out bytes.Buffer
+	w := zip.NewWriter(&out)
+	f, err := w.Create("report.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte(csvText)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return map[string]any{"_binary": true, "base64": base64.StdEncoding.EncodeToString(out.Bytes())}
+}
+
+func TestGooglePlayMonthlyReportsAreScopedAndDistinct(t *testing.T) {
+	ctx, f, scope := newStudioFixture(t)
+	if _, err := metricSourceSet(ctx, scope, map[string]any{"provider": "google-play-developer", "connection_id": 10, "external_id": "invalid", "family": "sales"}); err == nil {
+		t.Fatal("invalid package accepted")
+	}
+	if _, err := metricSourceSet(ctx, scope, map[string]any{"provider": "google-play-developer", "connection_id": 10, "external_id": "com.example.game", "family": "network"}); err == nil {
+		t.Fatal("unsupported report family accepted")
+	}
+	sales, err := metricSourceSet(ctx, scope, map[string]any{"provider": "google-play-developer", "connection_id": 10, "external_id": "com.example.game", "family": "sales"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	earnings, err := metricSourceSet(ctx, scope, map[string]any{"provider": "google-play-developer", "connection_id": 10, "external_id": "com.example.game", "family": "earnings"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// CSV monetary amounts containing thousands separators must be quoted.
+	salesCSV := "Package ID,Order Charged Date,Financial Status,Currency of Sale,Charged Amount\ncom.example.game,2026-08-02,charged,USD,\"9,007,199.25\"\ncom.other.game,2026-08-02,charged,USD,999.00\ncom.example.game,2026-08-03,refund,USD,-1.25\n"
+	earningsCSV := "Package ID,Transaction Date,Transaction Type,Merchant Currency,Amount (Merchant Currency)\ncom.example.game,Aug 2 2026,Charge,EUR,8.50\ncom.example.game,Aug 2 2026,Google fee,EUR,-1.25\ncom.other.game,Aug 2 2026,Charge,EUR,999.00\n"
+	f.providerCall = func(tool string, in map[string]any) (any, error) {
+		if in["year_month"] != "202608" {
+			t.Fatalf("wrong report month: %v", in)
+		}
+		switch tool {
+		case "get_sales_report":
+			return playZIP(t, salesCSV), nil
+		case "get_earnings_report":
+			return playZIP(t, earningsCSV), nil
+		}
+		return nil, fmt.Errorf("unexpected tool %s", tool)
+	}
+	for _, src := range []map[string]any{sales.(map[string]any), earnings.(map[string]any)} {
+		if _, err := syncMetricSourceMonth(ctx, scope, txt(src["id"]), 7, "202608"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(f.facts) != 2 {
+		t.Fatalf("expected two monthly source events, got %d", len(f.facts))
+	}
+	for _, event := range f.facts {
+		if event["month"] != "202608" || event["external_id"] != "com.example.game" {
+			t.Fatal(event)
+		}
+		facts := event["facts"].([]map[string]any)
+		if len(facts) != 2 {
+			t.Fatal(facts)
+		}
+		switch event["family"] {
+		case "sales":
+			for _, fact := range facts {
+				if fact["financial_status"] == "charged" && fact["buyer_paid_micros"] != "9007199250000" {
+					t.Fatal(fact)
+				}
+			}
+		case "earnings":
+			for _, fact := range facts {
+				if fact["transaction_type"] == "Google fee" && fact["merchant_amount_micros"] != "-1250000" {
+					t.Fatal(fact)
+				}
+			}
+		default:
+			t.Fatal(event)
+		}
+	}
+	if _, err := syncMetricSourceMonth(ctx, scope, txt(sales.(map[string]any)["id"]), 7, "202613"); err == nil {
+		t.Fatal("invalid report month accepted")
+	}
+}
+
+func TestGooglePlayReportRejectsIncompleteData(t *testing.T) {
+	source := map[string]any{"external_id": "com.example.game", "family": "sales", "timezone": "UTC"}
+	bad := "Package ID,Order Charged Date,Financial Status,Currency of Sale,Charged Amount\ncom.example.game,2026-08-02,charged,USD,1.0000001\n"
+	if _, err := parsePlayReport(playZIP(t, bad), source, "202608"); err == nil {
+		t.Fatal("amount beyond micros accepted")
+	}
+	if _, err := parsePlayReport(map[string]any{"_binary": true, "base64": base64.StdEncoding.EncodeToString([]byte("not a zip"))}, source, "202608"); err == nil {
+		t.Fatal("invalid archive accepted")
+	}
+}
+
+func TestGooglePlayUTF16Report(t *testing.T) {
+	source := map[string]any{"external_id": "com.example.game", "family": "sales", "timezone": "UTC"}
+	csvText := "Package ID,Order Charged Date,Financial Status,Currency of Sale,Charged Amount\ncom.example.game,2026-08-02,charged,USD,12.34\n"
+	encoded := []byte{0xff, 0xfe}
+	for _, unit := range utf16.Encode([]rune(csvText)) {
+		encoded = append(encoded, byte(unit), byte(unit>>8))
+	}
+	var out bytes.Buffer
+	w := zip.NewWriter(&out)
+	f, err := w.Create("report.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(encoded); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	facts, err := parsePlayReport(map[string]any{"_binary": true, "base64": base64.StdEncoding.EncodeToString(out.Bytes())}, source, "202608")
+	if err != nil || len(facts) != 1 || facts[0]["buyer_paid_micros"] != "12340000" {
+		t.Fatal(facts, err)
+	}
+}
+
+func TestGooglePlayReportAvailabilityAndPagination(t *testing.T) {
+	ctx, f, scope := newStudioFixture(t)
+	source := map[string]any{"provider": "google-play-developer", "connection_id": int64(10), "external_id": "com.example.game", "family": "sales", "timezone": "UTC"}
+	current := time.Now().UTC().Format("200601")
+	pages := 0
+	f.providerCall = func(tool string, in map[string]any) (any, error) {
+		if tool != "list_sales_reports" {
+			return nil, fmt.Errorf("unexpected tool %s", tool)
+		}
+		pages++
+		if in["pageToken"] == "" {
+			return map[string]any{"items": []any{map[string]any{"name": "sales/salesreport_202401.zip"}}, "nextPageToken": "next"}, nil
+		}
+		return map[string]any{"items": []any{map[string]any{"name": "sales/salesreport_" + current + ".zip"}}}, nil
+	}
+	months, err := playReportMonths(ctx, scope, source, "")
+	if err != nil || pages != 2 || len(months) != 2 || months[0] != current {
+		t.Fatal(months, pages, err)
+	}
+	f.providerResult = func(tool string, in map[string]any) (*sdk.ExecuteResult, error) {
+		return &sdk.ExecuteResult{Status: 404, Success: false}, nil
+	}
+	if _, found, err := playReportTool(ctx, scope, source, "get_sales_report", current); err != nil || found {
+		t.Fatal(found, err)
 	}
 }
 func TestMetricSyncDedupLeaseAndScopedQuery(t *testing.T) {

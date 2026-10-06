@@ -292,7 +292,7 @@ func (a *App) submitCloudBuildWithOptions(ctx context.Context, d *Deployment, re
 		return nil, err
 	}
 	buildBackendJSON := d.BuildBackendJSON
-	if releaseOpts != nil && (d.TargetKind == "ios" || d.TargetKind == "android") {
+	if releaseOpts != nil && isAppPlatform(d.TargetKind) {
 		channel, channelErr := normalizeMobileChannel(d.TargetKind, releaseOpts.Channel)
 		if channelErr != nil {
 			return nil, channelErr
@@ -1220,9 +1220,9 @@ func externalStoreArtifactManifest(d *Deployment, build *Build) (artifactManifes
 	if platform == "" || platform == "service" {
 		platform = build.Framework
 	}
-	provider := map[string]string{"ios": "app_store_connect", "android": "google_play"}[platform]
+	provider := mobileStoreProvider(platform)
 	if provider == "" {
-		return artifactManifest{}, errors.New("store_upload artifact mode requires an ios or android target")
+		return artifactManifest{}, errors.New("store_upload artifact mode requires an Apple or Android target")
 	}
 	if platform == "android" && strings.TrimSpace(cfg.VersionCode) == "" {
 		return artifactManifest{}, errors.New("Android store_upload requires target_config_json.version_code")
@@ -1237,7 +1237,7 @@ func externalStoreArtifactManifest(d *Deployment, build *Build) (artifactManifes
 		DeviceFamilies:   cfg.DeviceFamilies,
 		Channel:          cloudCfg.StoreChannel,
 		ExternalProvider: provider, ExternalID: build.ExternalJobID,
-		ExternalStatus: map[string]string{"ios": "uploaded_processing", "android": "completed"}[platform],
+		ExternalStatus: map[string]string{"ios": "uploaded_processing", "macos": "uploaded_processing", "android": "completed"}[platform],
 	}, nil
 }
 
@@ -1253,26 +1253,32 @@ func cloudBuildContractVariables(cfg cloudBuildConfig, d *Deployment, build *Bui
 		Env: parseEnvJSON(d.EnvJSON), TargetConfigJSON: defaultStr(d.TargetConfigJSON, "{}"),
 		MachineClass: resolvedMachineClass(cfg), SoftwareVersions: cfg.SoftwareVersions,
 	}
+	buildSubdir, err := sourceBuildSubdir(d)
+	if err != nil {
+		return nil, err
+	}
+	spec.BuildSubdir = buildSubdir
 	specJSON, err := json.Marshal(spec)
 	if err != nil {
 		return nil, err
 	}
 	values := map[string]string{
-		"APTEVA_PROTOCOL":          cloudBuildProtocolVersion,
-		"APTEVA_BUILD_ID":          strconv.FormatInt(build.ID, 10),
-		"APTEVA_DEPLOYMENT":        d.Name,
-		"APTEVA_ENVIRONMENT":       d.EnvironmentName,
-		"APTEVA_TARGET_KIND":       d.TargetKind,
-		"APTEVA_FRAMEWORK":         d.Framework,
-		"APTEVA_BUILD_CMD":         d.BuildCmd,
-		"APTEVA_SOURCE_MODE":       cfg.SourceMode,
-		"APTEVA_ARTIFACT_MODE":     mode,
-		"APTEVA_ARTIFACT_NAME":     cfg.ArtifactName,
-		"APTEVA_ARTIFACT_FILE":     cfg.ArtifactFile,
-		"APTEVA_STORE_CHANNEL":     cfg.StoreChannel,
-		"APTEVA_TARGET_CONFIG_B64": base64.StdEncoding.EncodeToString([]byte(defaultStr(d.TargetConfigJSON, "{}"))),
-		"APTEVA_ENV_B64":           base64.StdEncoding.EncodeToString([]byte(defaultStr(d.EnvJSON, "{}"))),
-		"APTEVA_BUILD_SPEC_B64":    base64.StdEncoding.EncodeToString(specJSON),
+		"APTEVA_PROTOCOL":            cloudBuildProtocolVersion,
+		"APTEVA_BUILD_ID":            strconv.FormatInt(build.ID, 10),
+		"APTEVA_DEPLOYMENT":          d.Name,
+		"APTEVA_ENVIRONMENT":         d.EnvironmentName,
+		"APTEVA_TARGET_KIND":         d.TargetKind,
+		"APTEVA_FRAMEWORK":           d.Framework,
+		"APTEVA_BUILD_CMD":           d.BuildCmd,
+		"APTEVA_SOURCE_MODE":         cfg.SourceMode,
+		"APTEVA_SOURCE_BUILD_SUBDIR": buildSubdir,
+		"APTEVA_ARTIFACT_MODE":       mode,
+		"APTEVA_ARTIFACT_NAME":       cfg.ArtifactName,
+		"APTEVA_ARTIFACT_FILE":       cfg.ArtifactFile,
+		"APTEVA_STORE_CHANNEL":       cfg.StoreChannel,
+		"APTEVA_TARGET_CONFIG_B64":   base64.StdEncoding.EncodeToString([]byte(defaultStr(d.TargetConfigJSON, "{}"))),
+		"APTEVA_ENV_B64":             base64.StdEncoding.EncodeToString([]byte(defaultStr(d.EnvJSON, "{}"))),
+		"APTEVA_BUILD_SPEC_B64":      base64.StdEncoding.EncodeToString(specJSON),
 	}
 	if d.TargetKind == "android" {
 		values["APTEVA_SIGNING_CONTRACT"] = mobileSigningArtifactContractVersion
@@ -1300,10 +1306,16 @@ func resolvedCloudArtifactMode(cfg cloudBuildConfig, d *Deployment) string {
 	if cfg.ArtifactMode != "" {
 		return cfg.ArtifactMode
 	}
-	if d != nil && d.TargetKind == "ios" && cfg.SourceMode == "bundle" {
+	// A macOS package can only be inspected and uploaded with Apple's tools.
+	// The Deploy service commonly runs on Linux, so let the macOS build runner
+	// upload it and track the resulting platform-specific build in ASC.
+	if d != nil && d.TargetKind == "macos" {
+		return "store_upload"
+	}
+	if d != nil && isApplePlatform(d.TargetKind) && cfg.SourceMode == "bundle" {
 		return "file"
 	}
-	if d != nil && d.TargetKind == "ios" {
+	if d != nil && isApplePlatform(d.TargetKind) {
 		return "store_upload"
 	}
 	return "bundle"
@@ -1372,7 +1384,7 @@ func (a *App) downloadAndStageCloudArtifact(bound *sdk.BoundIntegration, d *Depl
 			return err
 		}
 	}
-	if d.TargetKind == "android" || d.TargetKind == "ios" {
+	if isAppPlatform(d.TargetKind) {
 		targetJSON := d.TargetConfigJSON
 		if strings.TrimSpace(build.TargetConfigJSON) != "" && strings.TrimSpace(build.TargetConfigJSON) != "{}" {
 			targetJSON = build.TargetConfigJSON

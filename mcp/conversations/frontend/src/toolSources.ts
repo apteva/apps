@@ -1,10 +1,22 @@
 // Generated from public app manifests by build-tool-sources.ts.
 export const toolSources = [
   {
+    "name": "3d-studio",
+    "display_name": "3D Studio",
+    "icon": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22currentColor%22%20stroke-width%3D%221.7%22%20stroke-linejoin%3D%22round%22%20stroke-linecap%3D%22round%22%3E%0A%20%20%3Cpath%20d%3D%22m12%202%209%205v10l-9%205-9-5V7zM3%207l9%205%209-5M12%2012v10%22%2F%3E%0A%20%20%3Cpath%20d%3D%22m7.5%204.5%209%205v5l-4.5%202.5-4.5-2.5v-5l9-5%22%2F%3E%0A%3C%2Fsvg%3E%0A",
+    "icon_style": "monochrome"
+  },
+  {
     "name": "a2a",
     "display_name": "Agent to Agent",
     "icon": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22currentColor%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%0A%20%20%3C!--%20Apteva%20adaptive%20app%20icon.%20Geometry%20based%20on%20Lucide%20Icons%20(ISC).%20--%3E%0A%20%20%3Cpath%20d%3D%22M8%203%204%207l4%204%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M4%207h16%22%2F%3E%0A%20%20%3Cpath%20d%3D%22m16%2021%204-4-4-4%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M20%2017H4%22%2F%3E%0A%3C%2Fsvg%3E%0A",
     "icon_style": "monochrome"
+  },
+  {
+    "name": "actors",
+    "display_name": "Actors",
+    "icon": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%20fill%3D%22none%22%3E%3Crect%20width%3D%2264%22%20height%3D%2264%22%20rx%3D%2216%22%20fill%3D%22%23312e81%22%2F%3E%3Cpath%20d%3D%22M20%2020h24M20%2044h24M20%2020v24M44%2020v24%22%20stroke%3D%22%23a5b4fc%22%20stroke-width%3D%223%22%2F%3E%3Crect%20x%3D%2212%22%20y%3D%2212%22%20width%3D%2216%22%20height%3D%2216%22%20rx%3D%225%22%20fill%3D%22%23c7d2fe%22%2F%3E%3Crect%20x%3D%2236%22%20y%3D%2236%22%20width%3D%2216%22%20height%3D%2216%22%20rx%3D%225%22%20fill%3D%22%23c7d2fe%22%2F%3E%3Cpath%20d%3D%22m40%2014%2010%206-10%206zM16%2039l9%205-9%205z%22%20fill%3D%22%23fff%22%2F%3E%3C%2Fsvg%3E%0A",
+    "icon_style": "image"
   },
   {
     "name": "ads",
@@ -16,6 +28,12 @@ export const toolSources = [
     "name": "affiliate",
     "display_name": "Affiliate",
     "icon": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22currentColor%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%0A%20%20%3C!--%20Apteva%20adaptive%20app%20icon.%20Geometry%20based%20on%20Lucide%20Icons%20(ISC).%20--%3E%0A%20%20%3Cpath%20d%3D%22M9%2017H7A5%205%200%200%201%207%207h2%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M15%207h2a5%205%200%201%201%200%2010h-2%22%2F%3E%0A%20%20%3Cline%20x1%3D%228%22%20x2%3D%2216%22%20y1%3D%2212%22%20y2%3D%2212%22%2F%3E%0A%3C%2Fsvg%3E%0A",
+    "icon_style": "monochrome"
+  },
+  {
+    "name": "agent-worlds",
+    "display_name": "Agent Worlds",
+    "icon": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%3E%0A%20%20%3Cpath%20d%3D%22M32%2017%2015%2046h34L32%2017Z%22%20fill%3D%22none%22%20stroke%3D%22%2356d6b8%22%20stroke-width%3D%224%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%2F%3E%0A%20%20%3Ccircle%20cx%3D%2232%22%20cy%3D%2217%22%20r%3D%225%22%20fill%3D%22%23f0c777%22%2F%3E%0A%20%20%3Ccircle%20cx%3D%2215%22%20cy%3D%2246%22%20r%3D%225%22%20fill%3D%22%2379a5f7%22%2F%3E%0A%20%20%3Ccircle%20cx%3D%2249%22%20cy%3D%2246%22%20r%3D%225%22%20fill%3D%22%23de8ca4%22%2F%3E%0A%3C%2Fsvg%3E%0A",
     "icon_style": "monochrome"
   },
   {
@@ -175,6 +193,12 @@ export const toolSources = [
     "icon_style": "monochrome"
   },
   {
+    "name": "content-catalog",
+    "display_name": "Content Catalog",
+    "icon": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22currentColor%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%0A%20%20%3Crect%20x%3D%223%22%20y%3D%224%22%20width%3D%2218%22%20height%3D%2216%22%20rx%3D%222%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M3%2010h18M9%204v16M13%2014l2%202%204-4%22%2F%3E%0A%3C%2Fsvg%3E%0A",
+    "icon_style": "monochrome"
+  },
+  {
     "name": "conversations",
     "display_name": "Conversations",
     "icon": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22currentColor%22%20stroke-width%3D%222%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%0A%20%20%3C!--%20conversations%3A%20two%20chat%20bubbles%20in%20dialogue%20--%3E%0A%20%20%3Cpath%20d%3D%22M14%209a2%202%200%200%201-2%202H6l-4%204V4a2%202%200%200%201%202-2h8a2%202%200%200%201%202%202z%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M18%209h2a2%202%200%200%201%202%202v11l-4-4h-6a2%202%200%200%201-2-2v-1%22%2F%3E%0A%3C%2Fsvg%3E%0A",
@@ -196,6 +220,12 @@ export const toolSources = [
     "name": "currencies",
     "display_name": "Currencies",
     "icon": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22currentColor%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%0A%20%20%3Ccircle%20cx%3D%2212%22%20cy%3D%2212%22%20r%3D%229%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M15.5%208.5c-.8-.7-1.8-1-3-1-1.8%200-3%20.9-3%202.2%200%201.4%201.2%201.9%203.1%202.3%201.8.4%202.9.9%202.9%202.3%200%201.4-1.3%202.3-3.2%202.3-1.4%200-2.6-.4-3.5-1.3%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M12%205.5v13%22%2F%3E%0A%3C%2Fsvg%3E%0A",
+    "icon_style": "monochrome"
+  },
+  {
+    "name": "database",
+    "display_name": "Database",
+    "icon": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22currentColor%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cellipse%20cx%3D%2212%22%20cy%3D%225%22%20rx%3D%228%22%20ry%3D%223%22%2F%3E%3Cpath%20d%3D%22M4%205v14c0%201.7%203.6%203%208%203s8-1.3%208-3V5M4%2012c0%201.7%203.6%203%208%203s8-1.3%208-3%22%2F%3E%3C%2Fsvg%3E%0A",
     "icon_style": "monochrome"
   },
   {
@@ -232,6 +262,12 @@ export const toolSources = [
     "name": "domains",
     "display_name": "Domains",
     "icon": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22currentColor%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%0A%20%20%3C!--%20Apteva%20adaptive%20app%20icon.%20Geometry%20based%20on%20Lucide%20Icons%20(ISC).%20--%3E%0A%20%20%3Cpath%20d%3D%22M21.54%2015H17a2%202%200%200%200-2%202v4.54%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M7%203.34V5a3%203%200%200%200%203%203a2%202%200%200%201%202%202c0%201.1.9%202%202%202a2%202%200%200%200%202-2c0-1.1.9-2%202-2h3.17%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M11%2021.95V18a2%202%200%200%200-2-2a2%202%200%200%201-2-2v-1a2%202%200%200%200-2-2H2.05%22%2F%3E%0A%20%20%3Ccircle%20cx%3D%2212%22%20cy%3D%2212%22%20r%3D%2210%22%2F%3E%0A%3C%2Fsvg%3E%0A",
+    "icon_style": "monochrome"
+  },
+  {
+    "name": "editorial",
+    "display_name": "Editorial",
+    "icon": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22currentColor%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Crect%20x%3D%223%22%20y%3D%225%22%20width%3D%2218%22%20height%3D%2216%22%20rx%3D%222%22%2F%3E%3Cpath%20d%3D%22M16%203v4M8%203v4M3%2011h18M7%2015h3M7%2018h7M15%2015h2%22%2F%3E%3C%2Fsvg%3E%0A",
     "icon_style": "monochrome"
   },
   {
@@ -514,6 +550,12 @@ export const toolSources = [
     "name": "social",
     "display_name": "Social",
     "icon": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22currentColor%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%0A%20%20%3C!--%20Apteva%20adaptive%20app%20icon.%20--%3E%0A%20%20%3Ccircle%20cx%3D%226%22%20cy%3D%2212%22%20r%3D%222%22%2F%3E%0A%20%20%3Ccircle%20cx%3D%2218%22%20cy%3D%226%22%20r%3D%222%22%2F%3E%0A%20%20%3Ccircle%20cx%3D%2218%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%0A%20%20%3Cpath%20d%3D%22m7.8%2011%208.4-4M7.8%2013l8.4%204%22%2F%3E%0A%3C%2Fsvg%3E%0A",
+    "icon_style": "monochrome"
+  },
+  {
+    "name": "sportsbook",
+    "display_name": "Sportsbook",
+    "icon": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22currentColor%22%20stroke-width%3D%221.7%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M8%203h8v5a4%204%200%200%201-8%200zM8%205H4v2a4%204%200%200%200%204%204m8-6h4v2a4%204%200%200%201-4%204M12%2012v6m-5%203h10m-9-3h8%22%2F%3E%3C%2Fsvg%3E",
     "icon_style": "monochrome"
   },
   {

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -31,7 +32,9 @@ func (p phoneIdentity) valid() bool {
 }
 
 type phoneGrant struct {
-	Role            string   `json:"role"` // user or supervisor; supervisors still have resource bounds
+	Coach           bool     `json:"coach,omitempty"`  // separate private coaching grant
+	Listen          bool     `json:"listen,omitempty"` // explicit passive listening grant; visibility alone is insufficient
+	Role            string   `json:"role"`             // user or supervisor; supervisors still have resource bounds
 	Destinations    []string `json:"destinations"`
 	OutboundNumbers []string `json:"outbound_numbers"`
 }
@@ -55,11 +58,18 @@ type phonePrincipal struct {
 	Identity     phoneIdentity
 	Project      string
 	Revision     int64
+	Listen       bool
+	ListenScope  bool
+	Coach        bool
+	CoachScope   bool
+	AuthProvider *phoneAuthProvider
 	Supervisor   bool
 	Destinations map[string]bool
 	Numbers      map[string]bool
 }
 type phonePrincipalKey struct{}
+
+var errPhoneAccessDenied = errors.New("application user has no Telephony access")
 
 func phoneUserFrom(r *http.Request) *phonePrincipal {
 	p, _ := r.Context().Value(phonePrincipalKey{}).(*phonePrincipal)
@@ -86,9 +96,14 @@ func (a *App) phonePrincipal(project string, identity phoneIdentity) (*phonePrin
 	if err != nil {
 		return nil, err
 	}
+	return phonePrincipalFromPolicy(project, identity, policy)
+}
+func phonePrincipalFromPolicy(project string, identity phoneIdentity, policy phonePolicy) (*phonePrincipal, error) {
 	p := &phonePrincipal{Identity: identity, Project: project, Revision: policy.Revision, Destinations: map[string]bool{}, Numbers: map[string]bool{}}
 	add := func(g phoneGrant) {
 		p.Supervisor = p.Supervisor || g.Role == "supervisor"
+		p.Listen = p.Listen || g.Listen
+		p.Coach = p.Coach || g.Coach
 		for _, v := range g.Destinations {
 			p.Destinations[v] = true
 		}
@@ -109,7 +124,7 @@ func (a *App) phonePrincipal(project string, identity phoneIdentity) (*phonePrin
 			return p, nil
 		}
 	}
-	return nil, errors.New("application user has no Telephony access")
+	return nil, errPhoneAccessDenied
 }
 func phoneRequestIdentity(r *http.Request) (phoneIdentity, bool) {
 	p := phoneIdentity{r.Header.Get("X-Apteva-Issuer-App"), r.Header.Get("X-Apteva-Issuer-Install-ID"), r.Header.Get("X-Apteva-Subject-Type"), r.Header.Get("X-Apteva-Subject-ID"), r.Header.Get("X-Apteva-Organization-ID")}
@@ -117,19 +132,33 @@ func phoneRequestIdentity(r *http.Request) (phoneIdentity, bool) {
 }
 func phoneAction(r *http.Request) string {
 	path := r.URL.Path
-	if r.Method == "GET" && path == "/calls" {
+	if r.Method == "GET" && (path == "/calls" || path == "/calls/events") {
 		return "call.read"
 	}
+	if r.Method == "GET" && strings.HasPrefix(path, "/softphone/listen-audit/") {
+		return "call.listen"
+	}
 	if r.Method == "GET" && path == "/softphone/access" {
+		return "call.read"
+	}
+	if r.Method == "GET" && strings.HasPrefix(path, "/calls/") && strings.Count(strings.Trim(path, "/"), "/") == 1 && path != "/calls/events" {
 		return "call.read"
 	}
 	if r.Method != "POST" {
 		return ""
 	}
 	switch {
+	case strings.HasPrefix(path, "/softphone/coach/"), strings.HasPrefix(path, "/softphone/coach-renew/"), strings.HasPrefix(path, "/softphone/coach-stop/"):
+		return "call.coach"
+	case strings.HasPrefix(path, "/softphone/listen/"), strings.HasPrefix(path, "/softphone/listen-renew/"), strings.HasPrefix(path, "/softphone/listen-stop/"):
+		return "call.listen"
 	case path == "/softphone/place":
 		return "call.dial"
 	case strings.HasPrefix(path, "/softphone/answer/"):
+		return "call.answer"
+	case strings.HasPrefix(path, "/softphone/offer/ack/"):
+		return "call.read"
+	case strings.HasPrefix(path, "/softphone/offer/decline/"):
 		return "call.answer"
 	case strings.HasPrefix(path, "/softphone/attach/"), strings.HasPrefix(path, "/softphone/renew/"):
 		return "call.attach"
@@ -139,6 +168,10 @@ func phoneAction(r *http.Request) string {
 		return "call.answer"
 	case strings.HasPrefix(path, "/calls/") && strings.HasSuffix(path, "/hangup"):
 		return "call.hangup"
+	case strings.HasPrefix(path, "/calls/") && (strings.HasSuffix(path, "/hold") || strings.HasSuffix(path, "/resume")):
+		return "call.hold"
+	case strings.HasPrefix(path, "/calls/") && (strings.HasSuffix(path, "/pause-recording") || strings.HasSuffix(path, "/resume-recording")):
+		return "call.recording.control"
 	}
 	return ""
 }
@@ -182,10 +215,22 @@ func (a *App) applicationUserHTTP(next http.HandlerFunc) http.HandlerFunc {
 		}
 		p, err := a.phonePrincipal(project, identity)
 		if err != nil {
+			if !errors.Is(err, errPhoneAccessDenied) {
+				writeJSONStatus(w, 503, map[string]any{"code": "policy_lookup_failed"})
+				return
+			}
 			http.Error(w, "Telephony access denied", 403)
 			return
 		}
-		if action == "call.takeover" && !p.Supervisor {
+		for _, scope := range scopes {
+			if scope.Type == "app_user" && scope.App == "telephony" {
+				for _, v := range scope.Actions {
+					p.ListenScope = p.ListenScope || v == "call.listen"
+					p.CoachScope = p.CoachScope || v == "call.coach"
+				}
+			}
+		}
+		if (action == "call.takeover" || action == "call.listen" || action == "call.coach") && !p.Supervisor {
 			http.Error(w, "supervisor permission required", 403)
 			return
 		}
@@ -212,8 +257,52 @@ func (a *App) phoneOwner(call string) (string, string, error) {
 	return owner, dest, err
 }
 func (a *App) setPhoneOwner(row *callRow, p *phonePrincipal, dest string) error {
-	_, err := a.db().db.Exec(`INSERT INTO telephony_call_owners(call_id,project_id,principal,destination_id) VALUES(?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET principal=excluded.principal,destination_id=excluded.destination_id`, row.ID, row.ProjectID, p.Identity.key(), dest)
-	return err
+	capacity, err := a.capacityForIdentity(row.ProjectID, p.Identity)
+	if err != nil {
+		return err
+	}
+	if dest != "" && !p.Supervisor && !a.destinationAllowsIdentity(row.ProjectID, dest, p.Identity) {
+		return errors.New("destination is assigned to another identity")
+	}
+	tx, err := a.db().db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = reserveCapacityTx(tx, row.ID, row.ProjectID, dest, capacity, ""); err != nil {
+		return err
+	}
+	// A supervisor may take over, but the reserved personal destination remains
+	// occupied. The actor's own usage is also counted through call ownership.
+	resourcePrincipal := ""
+	if dest != "" {
+		var raw string
+		e := tx.QueryRow(`SELECT config_json FROM routing_destinations WHERE id=? AND project_id=?`, dest, row.ProjectID).Scan(&raw)
+		if e != nil {
+			return e
+		}
+		resource, e := readDestinationCapacity(raw)
+		if e != nil {
+			return e
+		}
+		if resource.Limit > 0 {
+			resourcePrincipal = resource.Identity.key()
+			if e = reserveCapacityTx(tx, row.ID, row.ProjectID, dest, resource, ""); e != nil {
+				return e
+			}
+		}
+	}
+	if _, err = tx.Exec(`DELETE FROM phone_capacity WHERE call_id=? AND principal<>? AND principal<>?`, row.ID, p.Identity.key(), resourcePrincipal); err != nil {
+		return err
+	}
+	_, err = tx.Exec(`INSERT INTO telephony_call_owners(call_id,project_id,principal,destination_id) VALUES(?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET principal=excluded.principal,destination_id=excluded.destination_id`, row.ID, row.ProjectID, p.Identity.key(), dest)
+	if err != nil {
+		return err
+	}
+	if h := a.softphones.lookup(row.ID); h != nil {
+		h.invalidateCoaching()
+	}
+	return a.db().commitCall(tx, row.ID)
 }
 func (a *App) phoneCallAllowed(p *phonePrincipal, row *callRow, shared bool) bool {
 	if p == nil {
@@ -241,7 +330,7 @@ func (a *App) phoneCallAllowed(p *phonePrincipal, row *callRow, shared bool) boo
 	return false
 }
 func (a *App) phoneOfferDestination(p *phonePrincipal, row *callRow, requested string) string {
-	if row.Status != "pending" || row.Direction != "inbound" {
+	if row.Status != "pending" || row.Direction != "inbound" || isSuppressedHandlingReason(row.HandlingReason) {
 		return ""
 	}
 	offers, err := a.db().activeRingOffers(row.ID, row.ProjectID)
@@ -249,14 +338,100 @@ func (a *App) phoneOfferDestination(p *phonePrincipal, row *callRow, requested s
 		return ""
 	}
 	for _, offer := range offers {
-		if offer.Kind == "browser" && p.Destinations[offer.DestinationID] && (requested == "" || requested == offer.DestinationID) {
+		if offer.Kind == "browser" && p.Destinations[offer.DestinationID] && a.destinationAllowsIdentity(row.ProjectID, offer.DestinationID, p.Identity) && (requested == "" || requested == offer.DestinationID) {
 			return offer.DestinationID
 		}
 	}
-	if len(offers) == 0 && row.PeerKind == peerKindHuman && p.Destinations[row.RoutingDestinationID] && (requested == "" || requested == row.RoutingDestinationID) {
+	// A ring-group offer can expire while the call remains pending. Only a
+	// direct destination may use the fallback when no offer is active.
+	var ringRuns int
+	if err := a.db().db.QueryRow(`SELECT COUNT(*) FROM call_ring_runs WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID).Scan(&ringRuns); err != nil {
+		return ""
+	}
+	if len(offers) == 0 && ringRuns == 0 && row.PeerKind == peerKindHuman && p.Destinations[row.RoutingDestinationID] && a.destinationAllowsIdentity(row.ProjectID, row.RoutingDestinationID, p.Identity) && (requested == "" || requested == row.RoutingDestinationID) {
 		return row.RoutingDestinationID
 	}
 	return ""
+}
+
+// An expired offer is disclosed only to a caller who still has access to a
+// destination that was actually offered. The offer record is destination
+// scoped, just like the live claim; it does not identify a browser session.
+func (a *App) phoneHadOfferedDestination(p *phonePrincipal, row *callRow, requested string) bool {
+	if p == nil || row.ProjectID != p.Project || row.Direction != "inbound" {
+		return false
+	}
+	rows, err := a.db().db.Query(`SELECT destination_id FROM call_offers WHERE call_id=? AND project_id=? AND kind='browser' AND offered_at<>''`, row.ID, row.ProjectID)
+	if err != nil {
+		return false
+	}
+	candidates := make([]string, 0, 1)
+	for rows.Next() {
+		var destination string
+		if rows.Scan(&destination) != nil {
+			_ = rows.Close()
+			return false
+		}
+		if p.Destinations[destination] && (requested == "" || requested == destination) {
+			candidates = append(candidates, destination)
+		}
+	}
+	if rows.Err() != nil || rows.Close() != nil {
+		return false
+	}
+	for _, destination := range candidates {
+		if a.destinationAllowsIdentity(row.ProjectID, destination, p.Identity) {
+			return true
+		}
+	}
+	return false
+}
+
+// A carrier cancellation can settle active offers before a browser's Answer
+// request acquires the call lock. Offers belong to destinations rather than
+// individual browser sessions, so any user who is still authorized for the
+// historically offered destination may receive the terminal outcome. Users
+// without current destination access must not learn it.
+func (a *App) phoneCanAccessSettledOffer(p *phonePrincipal, row *callRow, requested string) bool {
+	if p == nil || row.ProjectID != p.Project || row.Direction != "inbound" {
+		return false
+	}
+	rows, err := a.db().db.Query(`SELECT destination_id,kind,offered_at FROM call_offers WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID)
+	if err != nil {
+		return false
+	}
+	hasOffers := false
+	candidates := make([]string, 0, 1)
+	for rows.Next() {
+		hasOffers = true
+		var destination, kind, offeredAt string
+		if rows.Scan(&destination, &kind, &offeredAt) != nil {
+			_ = rows.Close()
+			return false
+		}
+		if kind == "browser" && offeredAt != "" && p.Destinations[destination] &&
+			(requested == "" || requested == destination) {
+			candidates = append(candidates, destination)
+		}
+	}
+	if rows.Err() != nil || rows.Close() != nil {
+		return false
+	}
+	// destinationAllowsIdentity performs its own query. Do not run it while
+	// the historical-offer rows are open: Telephony deliberately uses a
+	// single SQLite connection, so a nested query would deadlock.
+	for _, destination := range candidates {
+		if a.destinationAllowsIdentity(row.ProjectID, destination, p.Identity) {
+			return true
+		}
+	}
+	if hasOffers || row.PeerKind != peerKindHuman {
+		return false
+	}
+	destination := row.RoutingDestinationID
+	return destination != "" && p.Destinations[destination] &&
+		a.destinationAllowsIdentity(row.ProjectID, destination, p.Identity) &&
+		(requested == "" || requested == destination)
 }
 func (a *App) filterPhoneCalls(r *http.Request, rows []callRow) []callRow {
 	p := phoneUserFrom(r)
@@ -288,49 +463,103 @@ func (a *App) issuePhoneSession(row *callRow, p *phonePrincipal) (*softphoneSess
 	principal := ""
 	revision := int64(0)
 	if p != nil {
-		if !a.phoneCallAllowed(p, row, false) {
-			return nil, errors.New("call not owned by user")
-		}
 		fresh, err := a.phonePrincipal(row.ProjectID, p.Identity)
-		if err != nil || fresh.Revision != p.Revision {
-			return nil, errors.New("access changed; retry")
+		if err != nil {
+			return nil, err
+		}
+		if _, _, err = a.phoneOwner(row.ID); err != nil {
+			return nil, err
+		}
+		if !a.phoneCallAllowed(fresh, row, false) {
+			return nil, fmt.Errorf("call not owned by user: %w", errPhoneAccessDenied)
 		}
 		principal = p.Identity.key()
-		revision = p.Revision
+		revision = fresh.Revision
 	}
 	token := newSecret()
 	_, err := a.db().db.Exec(`INSERT INTO telephony_media_sessions(call_id,project_id,token_hash,principal,policy_revision,expires_at) VALUES(?,?,?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET token_hash=excluded.token_hash,principal=excluded.principal,policy_revision=excluded.policy_revision,expires_at=excluded.expires_at`, row.ID, row.ProjectID, phoneHash(token), principal, revision, time.Now().Unix()+phoneLeaseSeconds)
 	if err != nil {
 		return nil, err
 	}
+	if h := a.softphones.lookup(row.ID); h != nil {
+		h.invalidateCoaching()
+	}
 	return &softphoneSession{CallID: row.ID, MediaURL: a.softphoneMediaURL(row.ID, token), SessionToken: token, To: row.ToNumber, From: row.FromNumber, LeaseSeconds: phoneLeaseSeconds}, nil
 }
 func (a *App) validPhoneMedia(row *callRow, token string) bool {
+	return a.phoneMediaDenialReason(row, token) == ""
+}
+
+// The project policy revision is an audit marker, not a media revocation
+// epoch. Recheck the current user's call grant so edits to other users do not
+// disconnect an unrelated live call while an actual revocation still does.
+// Lookup failures are temporary. An established socket may retain only its
+// last verified lease deadline; neither HTTP nor a new socket bypasses checks.
+func temporaryMediaFailure(reason string) bool {
+	return reason == "media_session_lookup_failed" || reason == "policy_lookup_failed" || reason == "owner_lookup_failed"
+}
+func (a *App) phoneMediaDenialReason(row *callRow, token string) string {
+	reason, _ := a.phoneMediaCheck(row, token)
+	return reason
+}
+func (a *App) phoneMediaCheck(row *callRow, token string) (string, int64) {
 	var hash, principal string
 	var revision, expires int64
 	err := a.db().db.QueryRow(`SELECT token_hash,principal,policy_revision,expires_at FROM telephony_media_sessions WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID).Scan(&hash, &principal, &revision, &expires)
 	if err == sql.ErrNoRows {
 		owner, _, e := a.phoneOwner(row.ID)
-		return e == nil && owner == "" && row.PeerToken != "" && secureEqual(token, row.PeerToken)
+		if e != nil {
+			return "owner_lookup_failed", expires
+		}
+		if owner == "" && row.PeerToken != "" && secureEqual(token, row.PeerToken) {
+			return "", expires
+		}
+		return "media_session_missing", expires
 	}
-	if err != nil || expires <= time.Now().Unix() || !secureEqual(phoneHash(token), hash) {
-		return false
+	if err != nil {
+		return "media_session_lookup_failed", expires
+	}
+	if expires <= time.Now().Unix() {
+		return "media_lease_expired", expires
+	}
+	if !secureEqual(phoneHash(token), hash) {
+		return "media_token_replaced", expires
 	}
 	if principal == "" {
-		return true
+		return "", expires
 	}
 	var identity phoneIdentity
-	if json.Unmarshal([]byte(principal), &identity) != nil {
-		return false
+	if json.Unmarshal([]byte(principal), &identity) != nil || !identity.valid() {
+		return "media_principal_invalid", expires
 	}
 	p, err := a.phonePrincipal(row.ProjectID, identity)
-	return err == nil && p.Revision == revision && a.phoneCallAllowed(p, row, false)
+	if err != nil {
+		if errors.Is(err, errPhoneAccessDenied) {
+			return "user_access_revoked", expires
+		}
+		return "policy_lookup_failed", expires
+	}
+	if !a.phoneCallAllowed(p, row, false) {
+		owner, _, ownerErr := a.phoneOwner(row.ID)
+		if ownerErr != nil {
+			return "owner_lookup_failed", expires
+		}
+		if owner != identity.key() {
+			return "call_ownership_changed", expires
+		}
+		return "call_permission_revoked", expires
+	}
+	return "", expires
 }
 func (a *App) handlePhoneSession(w http.ResponseWriter, r *http.Request, project, action, id string) {
 	unlock := a.softphones.lockClaim(id)
 	defer unlock()
 	row, err := a.db().findCall(id)
-	if err != nil || row == nil || row.ProjectID != project {
+	if err != nil {
+		writeJSONStatus(w, 503, map[string]any{"code": "call_lookup_failed"})
+		return
+	}
+	if row == nil || row.ProjectID != project {
 		http.Error(w, "call not found", 404)
 		return
 	}
@@ -339,6 +568,12 @@ func (a *App) handlePhoneSession(w http.ResponseWriter, r *http.Request, project
 		return
 	}
 	p := phoneUserFrom(r)
+	if p != nil && action != "takeover" {
+		if _, _, e := a.phoneOwner(id); e != nil {
+			writeJSONStatus(w, 503, map[string]any{"code": "owner_lookup_failed"})
+			return
+		}
+	}
 	if action == "takeover" {
 		if p != nil {
 			if !p.Supervisor || !a.phoneCallAllowed(p, row, true) {
@@ -366,8 +601,16 @@ func (a *App) handlePhoneSession(w http.ResponseWriter, r *http.Request, project
 		var body struct {
 			SessionToken string `json:"session_token"`
 		}
-		if decodeJSONBody(r, &body) != nil || !a.validPhoneMedia(row, body.SessionToken) {
-			http.Error(w, "session expired or replaced", 403)
+		if decodeJSONBody(r, &body) != nil || body.SessionToken == "" {
+			http.Error(w, "session credential required", 400)
+			return
+		}
+		if reason := a.phoneMediaDenialReason(row, body.SessionToken); reason != "" {
+			status := http.StatusForbidden
+			if temporaryMediaFailure(reason) {
+				status = http.StatusServiceUnavailable
+			}
+			writeJSONStatus(w, status, map[string]any{"code": reason})
 			return
 		}
 		// Renew only your own lease, not an administrative bearer grant.
@@ -390,7 +633,7 @@ func (a *App) handlePhoneSession(w http.ResponseWriter, r *http.Request, project
 	}
 	session, err := a.issuePhoneSession(row, p)
 	if err != nil {
-		http.Error(w, err.Error(), 403)
+		writePhoneSessionFailure(w, err)
 		return
 	}
 	writeJSON(w, session)
@@ -406,8 +649,8 @@ func (a *App) validatePhonePolicy(project string, p phonePolicy) error {
 		}
 		for _, id := range g.Destinations {
 			d, e := a.findRoutingDestination(project, id)
-			if e != nil || d == nil || d.Kind != "browser" || !d.Enabled {
-				return errors.New("grant requires an enabled browser destination in this project")
+			if e != nil || d == nil || (d.Kind != "browser" && g.Role != "supervisor") || !d.Enabled {
+				return errors.New("grant requires an enabled destination in this project; users require browser destinations")
 			}
 		}
 		for _, n := range g.OutboundNumbers {
@@ -509,6 +752,8 @@ func (a *App) handlePhoneAccess(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "policy revision changed", 409)
 			return
 		}
+		a.routingCommitted(project)
+		a.revokeCallListeners(project)
 		p.Revision++
 		writeJSON(w, p)
 		return
@@ -561,15 +806,88 @@ func (a *App) handlePhoneAccess(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-// Apply visibility before the result limit. A busy project cannot crowd an
-// authorized incoming call out of the user's first page with other users' calls.
+func phoneGrantKeys(grants map[string]bool) []string {
+	keys := make([]string, 0, len(grants))
+	for key, allowed := range grants {
+		if allowed {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func phonePlaceholders(count int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", count), ",")
+}
+
+// Select only calls with an indexed path to this principal. The permission
+// checks below remain authoritative: a historical offer or a destination
+// grant alone does not make a call visible or answerable.
+func phoneCallCandidates(p *phonePrincipal, project string) (string, []any) {
+	sources := []string{`SELECT call_id FROM telephony_call_owners WHERE project_id=? AND principal=?`}
+	args := []any{project, p.Identity.key()}
+	destinations := phoneGrantKeys(p.Destinations)
+	if len(destinations) > 0 {
+		placeholders := phonePlaceholders(len(destinations))
+		sources = append(sources, `SELECT o.call_id FROM call_offers o JOIN call_ring_runs r ON r.id=o.run_id
+			WHERE o.project_id=? AND o.destination_id IN (`+placeholders+`)
+			AND o.kind='browser' AND o.status='offered' AND o.expires_at>?
+			AND r.status='ringing'`)
+		args = append(args, project)
+		for _, destination := range destinations {
+			args = append(args, destination)
+		}
+		args = append(args, ringTime(time.Now()))
+		// A direct browser destination can be answerable without a ring run.
+		// Pending calls are the only such calls not covered by ownership.
+		sources = append(sources, `SELECT id FROM calls WHERE project_id=? AND direction='inbound'
+			AND status='pending' AND peer_kind='human' AND routing_destination_id IN (`+placeholders+`)`)
+		args = append(args, project)
+		for _, destination := range destinations {
+			args = append(args, destination)
+		}
+		if p.Supervisor {
+			sources = append(sources, `SELECT id FROM calls WHERE project_id=? AND direction='inbound'
+				AND routing_destination_id IN (`+placeholders+`)`)
+			args = append(args, project)
+			for _, destination := range destinations {
+				args = append(args, destination)
+			}
+			sources = append(sources, `SELECT call_id FROM telephony_call_owners
+				WHERE project_id=? AND destination_id IN (`+placeholders+`)`)
+			args = append(args, project)
+			for _, destination := range destinations {
+				args = append(args, destination)
+			}
+		}
+	}
+	if p.Supervisor {
+		numbers := phoneGrantKeys(p.Numbers)
+		if len(numbers) > 0 {
+			sources = append(sources, `SELECT id FROM calls WHERE project_id=? AND direction='outbound'
+				AND from_number IN (`+phonePlaceholders(len(numbers))+`)`)
+			args = append(args, project)
+			for _, number := range numbers {
+				args = append(args, number)
+			}
+		}
+	}
+	return strings.Join(sources, " UNION "), args
+}
+
+// Apply visibility before the result limit. Paging here traverses only calls
+// with an indexed ownership, offer, or destination candidate for this user.
 func (a *App) recentPhoneCalls(r *http.Request, project string, limit int) ([]callRow, error) {
-	if phoneUserFrom(r) == nil {
+	p := phoneUserFrom(r)
+	if p == nil {
 		return a.db().recent(project, limit)
 	}
+	candidates, args := phoneCallCandidates(p, project)
 	out := []callRow{}
 	for offset := 0; len(out) < limit; offset += 200 {
-		rows, err := a.db().listWhere(`project_id=? AND ingress_path<>'ring_group' ORDER BY placed_at DESC,id DESC LIMIT 200 OFFSET `+fmt.Sprint(offset), project)
+		queryArgs := append(append([]any{}, args...), project)
+		rows, err := a.db().listWhere(`id IN (`+candidates+`) AND project_id=? AND ingress_path<>'ring_group' ORDER BY placed_at DESC,id DESC LIMIT 200 OFFSET `+fmt.Sprint(offset), queryArgs...)
 		if err != nil {
 			return nil, err
 		}
@@ -582,4 +900,12 @@ func (a *App) recentPhoneCalls(r *http.Request, project string, limit int) ([]ca
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+func writePhoneSessionFailure(w http.ResponseWriter, err error) {
+	if errors.Is(err, errPhoneAccessDenied) {
+		http.Error(w, "call not owned by user", http.StatusForbidden)
+		return
+	}
+	writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{"code": "media_session_unavailable"})
 }

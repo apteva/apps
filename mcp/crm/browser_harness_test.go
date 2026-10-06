@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 )
 
 type browserPlatform struct {
@@ -21,7 +22,15 @@ func (p *browserPlatform) CallAppResult(app, tool string, args map[string]any, o
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if tool == "senders_list" {
-		raw, _ := json.Marshal(map[string]any{"senders": []map[string]any{{"channel": "email", "address": "sales@example.test", "display_name": "Sales", "is_default": true}, {"channel": "email", "address": "support@example.test", "display_name": "Support"}}})
+		raw, _ := json.Marshal(map[string]any{"senders": []map[string]any{{"channel": "email", "address": "sales@example.test", "display_name": "Sales", "is_default": true}, {"channel": "email", "address": "support@example.test", "display_name": "Support"}, {"channel": "whatsapp", "address": "+15550001111", "display_name": "WhatsApp support", "is_default": true}, {"channel": "sms", "address": "+15550002222", "display_name": "SMS support", "is_default": true}}})
+		return json.Unmarshal(raw, out)
+	}
+	if tool == "message_list" {
+		messages := []map[string]any{}
+		if args["address"] == "+15551234567" {
+			messages = append(messages, map[string]any{"from": "+15551234567", "matched_recipient": "+15550001111", "received_at": time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)})
+		}
+		raw, _ := json.Marshal(map[string]any{"messages": messages})
 		return json.Unmarshal(raw, out)
 	}
 	if tool == "inbound_route_list" {
@@ -65,6 +74,18 @@ func TestBrowserHarness(t *testing.T) {
 	}
 	if _, err = ingestInbound(ctx, "test-proj", inboundPayload{Channel: "email", From: "private@example.test", To: []string{"support@example.test"}, MatchedRecipient: "support@example.test", MessageID: 777, Subject: "Private address conversation", BodyText: "Please reply here."}); err != nil {
 		t.Fatal(err)
+	}
+	for i, phone := range []string{"+15551234567", "+15551234568"} {
+		name := "WhatsApp open window"
+		if i == 1 {
+			name = "WhatsApp closed window"
+		}
+		if _, err = dbCreate(ctx.AppDB(), "test-proj", map[string]any{"display_name": name, "channels": []any{map[string]any{"kind": "phone", "value": phone, "is_primary": true}}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = ingestInbound(ctx, "test-proj", inboundPayload{Channel: "whatsapp", From: phone, MatchedRecipient: "+15550001111", To: []string{"+15550001111"}, MessageID: int64(778 + i), BodyText: "Please reply to my phone question."}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err = dbOpportunityCreate(ctx.AppDB(), "test-proj", opportunityCreateInput{ContactID: alice.ID, Title: "Default deal"}); err != nil {
 		t.Fatal(err)

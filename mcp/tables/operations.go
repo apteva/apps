@@ -100,9 +100,21 @@ func (a *App) beginOperation(ctx *sdk.AppCtx, args map[string]any, operation str
 	if parent == nil {
 		parent = context.Background()
 	}
+	if strings.HasPrefix(operation, "projections_") {
+		permission := "projections.manage"
+		if operation == "projections_status" || operation == "projections_list" || operation == "projections_describe" {
+			permission = "projections.read"
+		}
+		if !sdk.CallerFrom(parent).Allows(permission, strArg(args, "name")) {
+			return nil, nil, &statusError{403, "projection permission denied"}
+		}
+	}
 	duration := maxQueryMs(ctx) + maxReadQueueMs(ctx)
 	if schemaWrite || operation == "rows_insert" || operation == "rows_upsert" || operation == "rows_update" || operation == "rows_delete" {
 		duration = int(cfgInt64Range(ctx, "max_write_ms", 30000, 1, 300000))
+	}
+	if operation == "projection_worker" {
+		duration = maxProjectionMs(ctx)
 	}
 	callCtx, cancel := context.WithTimeoutCause(parent, time.Duration(duration)*time.Millisecond, errReadOperationDeadline)
 	if err := validateArguments(args); err != nil {
@@ -182,22 +194,22 @@ func (a *App) beginOperation(ctx *sdk.AppCtx, args map[string]any, operation str
 }
 
 func validateArguments(args map[string]any) error {
-	for _, key := range []string{"where", "params", "select", "columns", "key", "rows", "metrics", "group_by"} {
+	for _, key := range []string{"where", "params", "select", "columns", "key", "rows", "metrics", "group_by", "source_tables", "result_columns", "scope_columns", "scope_params", "scope_rules"} {
 		if v, ok := args[key]; ok && v != nil {
 			if _, ok := v.([]any); !ok {
 				return errf("%s must be an array", key)
 			}
 		}
 	}
-	for _, key := range []string{"id", "expected_revision", "expected_table_id", "limit", "offset"} {
+	for _, key := range []string{"id", "expected_revision", "expected_table_id", "limit", "offset", "version"} {
 		if v, ok := args[key]; ok {
 			n, err := exactInteger(v)
-			if err != nil || n < 0 || ((key == "id" || key == "expected_revision" || key == "expected_table_id") && n == 0) {
-				return errf("%s must be an exact %s integer", key, map[bool]string{true: "positive", false: "nonnegative"}[key == "id" || key == "expected_revision" || key == "expected_table_id"])
+			if err != nil || n < 0 || ((key == "id" || key == "expected_revision" || key == "expected_table_id" || key == "version") && n == 0) {
+				return errf("%s must be an exact %s integer", key, map[bool]string{true: "positive", false: "nonnegative"}[key == "id" || key == "expected_revision" || key == "expected_table_id" || key == "version"])
 			}
 		}
 	}
-	for _, key := range []string{"confirm", "include_total", "hydrate_files", "unique", "summary", "release_managed"} {
+	for _, key := range []string{"confirm", "include_total", "hydrate_files", "unique", "summary", "release_managed", "rebuild", "paused", "activate", "force"} {
 		if v, ok := args[key]; ok {
 			if _, ok := v.(bool); !ok {
 				return errf("%s must be boolean", key)
@@ -226,16 +238,37 @@ func exactInteger(v any) (int64, error) {
 
 type writeTx struct {
 	*sql.Tx
-	ctx    context.Context
-	counts map[int64]int64
+	ctx     context.Context
+	counts  map[int64]int64
+	managed bool
 }
 
 func beginWrite(ctx *sdk.AppCtx) (*writeTx, error) {
+	if shared, ok := requestContext(ctx).Value(batchWriteTxKey{}).(*writeTx); ok && shared != nil {
+		return &writeTx{Tx: shared.Tx, ctx: requestContext(ctx), counts: shared.counts, managed: true}, nil
+	}
 	tx, err := ctx.AppDB().BeginTx(requestContext(ctx), nil)
 	if err != nil {
 		return nil, queryStageErr("writer_queue", "", err)
 	}
 	return &writeTx{Tx: tx, ctx: requestContext(ctx), counts: map[int64]int64{}}, nil
+}
+
+// Batch-managed transactions are committed and rolled back by the batch
+// executor. Individual operation handlers still call Commit/Rollback, so
+// these methods deliberately become no-ops for their lightweight wrappers.
+func (t *writeTx) Commit() error {
+	if t.managed {
+		return nil
+	}
+	return t.Tx.Commit()
+}
+
+func (t *writeTx) Rollback() error {
+	if t.managed {
+		return nil
+	}
+	return t.Tx.Rollback()
 }
 func (t *writeTx) Exec(q string, args ...any) (sql.Result, error) {
 	return t.Tx.ExecContext(t.ctx, q, args...)

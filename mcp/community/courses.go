@@ -249,6 +249,7 @@ func coursesTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{
 				"lesson_id": map[string]any{"type": "string"},
 				"limit":     map[string]any{"type": "integer"},
+				"offset":    map[string]any{"type": "integer", "minimum": 0},
 			}, []string{"lesson_id"}),
 			Handler: toolLessonCommentsList,
 		},
@@ -259,6 +260,9 @@ func coursesTools() []sdk.Tool {
 // ─── courses_create (sugar) ──────────────────────────────────────
 
 func toolCoursesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	clone := map[string]any{
 		"community_id": args["community_id"],
 		"slug":         args["slug"],
@@ -274,6 +278,9 @@ func toolCoursesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 // ─── Sections ────────────────────────────────────────────────────
 
 func toolSectionsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -321,6 +328,9 @@ func toolSectionsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolSectionsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -352,6 +362,9 @@ func toolSectionsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolSectionsReorder(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -416,6 +429,9 @@ func toolSectionsReorder(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 // ─── Lessons ─────────────────────────────────────────────────────
 
 func toolLessonsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	sectionID, err := mustStr(args, "section_id")
 	if err != nil {
 		return nil, err
@@ -476,6 +492,9 @@ func toolLessonsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolLessonsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -522,6 +541,9 @@ func toolLessonsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolLessonsPublish(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -558,6 +580,9 @@ func toolLessonsPublish(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolLessonsReorder(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	sectionID, err := mustStr(args, "section_id")
 	if err != nil {
 		return nil, err
@@ -623,6 +648,9 @@ func toolLessonsReorder(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolLessonsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -655,7 +683,11 @@ func toolLessonsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		       AND (d.release_after_days IS NULL OR
 		            datetime(e.enrolled_at, '+' || d.release_after_days || ' days') <= CURRENT_TIMESTAMP)`
 	}
-	q += ` ORDER BY s.position, l.position`
+	if memberID != "" {
+		q += ` AND ` + lessonTrackClause("l")
+		queryArgs = append(queryArgs, spaceID, memberID)
+	}
+	q += ` ORDER BY s.position, l.position, l.id`
 	rows, err := ctx.AppDB().Query(q, queryArgs...)
 	if err != nil {
 		return nil, err
@@ -687,6 +719,9 @@ func toolLessonsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolLessonsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -722,6 +757,9 @@ func toolLessonsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 // (when ffmpeg is bound) auto-probes the duration via the storage
 // app's signed URL.
 func toolLessonsAttachVideo(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	id, err := mustStr(args, "id")
 	if err != nil {
 		return nil, err
@@ -833,6 +871,9 @@ var lessonStatuses = map[string]bool{
 }
 
 func toolLessonsMarkComplete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	lessonID, err := mustStr(args, "lesson_id")
 	if err != nil {
 		return nil, err
@@ -913,6 +954,9 @@ func toolLessonsMarkComplete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 }
 
 func toolLessonsProgress(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -935,6 +979,7 @@ func toolLessonsProgress(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		 LEFT JOIN drip_schedules d ON d.lesson_id = l.id
 		 LEFT JOIN lesson_progress lp ON lp.lesson_id = l.id AND lp.member_id = ?
 		 WHERE s.space_id = ? AND l.published_at IS NOT NULL
+		   AND `+lessonTrackClause("l")+`
 		   AND (? = '' OR (
 		     e.status IN ('active','completed')
 		     AND e.access_revoked_at IS NULL
@@ -944,7 +989,7 @@ func toolLessonsProgress(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		          datetime(e.enrolled_at, '+' || d.release_after_days || ' days') <= CURRENT_TIMESTAMP)
 		   ))
 		 ORDER BY s.position, l.position`,
-		memberID, memberID, spaceID, strArg(args, "_viewer_member_id", ""),
+		memberID, memberID, spaceID, spaceID, memberID, strArg(args, "_viewer_member_id", ""),
 	)
 	if err != nil {
 		return nil, err
@@ -997,6 +1042,9 @@ func toolLessonsProgress(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolCourseProgress(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	spaceID, err := mustStr(args, "space_id")
 	if err != nil {
 		return nil, err
@@ -1037,6 +1085,9 @@ func toolCourseProgress(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 // ─── Lesson comments ─────────────────────────────────────────────
 
 func toolLessonCommentsPost(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	lessonID, err := mustStr(args, "lesson_id")
 	if err != nil {
 		return nil, err
@@ -1080,6 +1131,9 @@ func toolLessonCommentsPost(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func toolLessonCommentsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateContentArgs(args); err != nil {
+		return nil, err
+	}
 	lessonID, err := mustStr(args, "lesson_id")
 	if err != nil {
 		return nil, err
@@ -1088,7 +1142,11 @@ func toolLessonCommentsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if _, _, err := ensureLessonVisible(ctx, ctx.AppDB(), lessonID); err != nil {
 		return nil, err
 	}
-	rows, err := ctx.AppDB().Query(
+	return listLessonComments(ctx.AppDB(), lessonID, limit)
+}
+
+func listLessonComments(db *sql.DB, lessonID string, limit int) (any, error) {
+	rows, err := db.Query(
 		`SELECT id, lesson_id, member_id, body, created_at FROM lesson_comments
 		 WHERE lesson_id = ? ORDER BY created_at, id LIMIT ?`,
 		lessonID, limit,
@@ -1259,6 +1317,10 @@ func syncCourseCompletion(db *sql.DB, lessonID, memberID string) error {
 	).Scan(&spaceID); err != nil {
 		return err
 	}
+	return syncCourseCompletionForSpace(db, spaceID, memberID)
+}
+
+func syncCourseCompletionForSpace(db *sql.DB, spaceID, memberID string) error {
 	var total, completed int
 	if err := db.QueryRow(
 		`SELECT COUNT(*), COUNT(lp.lesson_id)
@@ -1266,12 +1328,49 @@ func syncCourseCompletion(db *sql.DB, lessonID, memberID string) error {
 		   JOIN sections s ON s.id = l.section_id
 		   LEFT JOIN lesson_progress lp
 		     ON lp.lesson_id = l.id AND lp.member_id = ? AND lp.status = 'complete'
-		  WHERE s.space_id = ? AND l.published_at IS NOT NULL`,
-		memberID, spaceID,
+		  WHERE s.space_id = ? AND l.published_at IS NOT NULL AND `+lessonTrackClause("l"),
+		memberID, spaceID, spaceID, memberID,
 	).Scan(&total, &completed); err != nil {
 		return err
 	}
-	if total > 0 && total == completed {
+	var trackCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM course_tracks WHERE space_id=? AND active=1`, spaceID).Scan(&trackCount); err != nil {
+		return err
+	}
+	selected, err := selectedTrackID(db, spaceID, memberID)
+	if err != nil {
+		return err
+	}
+	if total > 0 && total == completed && (trackCount == 0 || selected != "") {
+		var requireQuizzes, requireAssignments, requireMilestones int
+		_ = db.QueryRow(`SELECT require_quizzes_passed, require_assignments_approved, require_milestones_approved FROM course_certificates WHERE space_id=?`, spaceID).Scan(&requireQuizzes, &requireAssignments, &requireMilestones)
+		if requireQuizzes != 0 {
+			var totalQ, passedQ int
+			if err := db.QueryRow(`SELECT COUNT(*), COUNT(DISTINCT q.id) FILTER (WHERE EXISTS (SELECT 1 FROM quiz_attempts qa WHERE qa.quiz_id=q.id AND qa.member_id=? AND qa.passed=1)) FROM quizzes q JOIN lessons l ON l.id=q.lesson_id JOIN sections s ON s.id=l.section_id WHERE s.space_id=? AND l.published_at IS NOT NULL AND `+lessonTrackClause("l"), memberID, spaceID, spaceID, memberID).Scan(&totalQ, &passedQ); err != nil {
+				return err
+			}
+			if totalQ != passedQ {
+				return resetCourseCompletion(db, spaceID, memberID)
+			}
+		}
+		if requireAssignments != 0 {
+			var pending int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM assignments a JOIN lessons l ON l.id=a.lesson_id JOIN sections s ON s.id=l.section_id LEFT JOIN assignment_submissions sub ON sub.assignment_id=a.id AND sub.member_id=? WHERE s.space_id=? AND l.published_at IS NOT NULL AND `+lessonTrackClause("l")+` AND COALESCE(sub.status,'') <> 'approved'`, memberID, spaceID, spaceID, memberID).Scan(&pending); err != nil {
+				return err
+			}
+			if pending > 0 {
+				return resetCourseCompletion(db, spaceID, memberID)
+			}
+		}
+		if requireMilestones != 0 {
+			var pending int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM milestone_definitions d LEFT JOIN member_milestones m ON m.definition_id=d.id AND m.member_id=? WHERE d.space_id=? AND d.active=1 AND (d.track_id IS NULL OR d.track_id=?) AND COALESCE(m.status,'') <> 'approved'`, memberID, spaceID, nullableValue(selected)).Scan(&pending); err != nil {
+				return err
+			}
+			if pending > 0 {
+				return resetCourseCompletion(db, spaceID, memberID)
+			}
+		}
 		result, err := db.Exec(
 			`UPDATE course_enrollments
 			    SET status = 'completed', completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)
@@ -1306,6 +1405,10 @@ func syncCourseCompletion(db *sql.DB, lessonID, memberID string) error {
 		}
 		return nil
 	}
+	return resetCourseCompletion(db, spaceID, memberID)
+}
+
+func resetCourseCompletion(db *sql.DB, spaceID, memberID string) error {
 	_, err := db.Exec(
 		`UPDATE course_enrollments SET status = 'active', completed_at = NULL
 		  WHERE space_id = ? AND member_id = ? AND status = 'completed'`,
@@ -1368,7 +1471,7 @@ func (a *App) httpSections(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "space_id required")
 		return
 	}
-	out, err := toolSectionsList(globalCtx, map[string]any{"space_id": spaceID})
+	out, err := toolSectionsList(requestAppCtx(r), map[string]any{"space_id": spaceID})
 	if err != nil {
 		writeDomainErr(w, err)
 		return
@@ -1393,7 +1496,7 @@ func (a *App) httpLessons(w http.ResponseWriter, r *http.Request) {
 	if mid := r.URL.Query().Get("member_id"); mid != "" {
 		args["member_id"] = mid
 	}
-	out, err := toolLessonsList(globalCtx, args)
+	out, err := toolLessonsList(requestAppCtx(r), args)
 	if err != nil {
 		writeDomainErr(w, err)
 		return
@@ -1415,7 +1518,7 @@ func (a *App) httpLesson(w http.ResponseWriter, r *http.Request) {
 	if mid := r.URL.Query().Get("member_id"); mid != "" {
 		args["member_id"] = mid
 	}
-	out, err := toolLessonsGet(globalCtx, args)
+	out, err := toolLessonsGet(requestAppCtx(r), args)
 	if err != nil {
 		writeDomainErr(w, err)
 		return

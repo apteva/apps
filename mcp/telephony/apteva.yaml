@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.4.5
+version: 0.10.1
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -29,14 +29,18 @@ requires:
     - platform.instances.read             # resolve assigned agent names in the routing panel
     - platform.realtime.spawn             # open realtime threads in core
   apps:
+    - name: functions
+      optional: true
+      reason: executes configured routing decisions using the active function version
     - name: storage
       version: ">=0.8.1"
       optional: true
-      reason: stores private durable copies of provider call recordings; without it recordings remain with the carrier
+      reason: stores private durable copies of provider call recordings and optionally supplies signed hold music; without it recordings remain with the carrier and hold music requires a direct HTTPS URL
   integrations:
     - role: carrier
       kind: integration
-      compatible_slugs: [twilio, telnyx, plivo, signalwire, vonage]
+      mode: multiple
+      compatible_slugs: [twilio, telnyx, plivo, signalwire, vonage, bandwidth, sinch, didww]
       capabilities: [voice.place, voice.update]
       # Carrier tool names are provider-specific (for example, Twilio uses
       # make_call while Telnyx uses dial_call). The generic carrier adapter
@@ -44,7 +48,7 @@ requires:
       # one-size-fits-all mapping here.
       required: true
       label: "Voice carrier"
-      hint: "Provide a Twilio, Telnyx, Plivo, SignalWire, or Vonage connection with a voice-capable phone number. The From= value is read from the connection's phone_number field."
+      hint: "Provide a supported voice connection with a voice-capable phone number. DIDWW outbound calls require its SIP trunk host and credentials plus a configured TLS/SRTP gateway; its REST API key alone cannot place calls. Provider-specific recording and call controls appear only where implemented."
 
 provides:
   http_routes:
@@ -66,18 +70,19 @@ provides:
     - { prefix: /ui/frontend/, no_auth: true }
     - { prefix: /softphone/ }
     - { prefix: /softphone/media/, no_auth: true }
+    - { prefix: /softphone/listen-media/, no_auth: true }
     - { prefix: /peer/, no_auth: true }
   mcp_tools:
-    - { name: telephony_place_call,   description: "Place an outbound voice call. Args: to (E.164), directive, voice?, recording?, timeout_sec?, max_duration_sec?, idempotency_key?. Telephony spawns the realtime thread and bridges carrier audio into it." }
+    - { name: telephony_place_call,   description: "Place an outbound voice call. Args: to (E.164), directive, voice?, recording?, timeout_sec?, max_duration_sec?, idempotency_key?, machine_detection? (off|detect|premium), machine_detection_action? (notify|hangup). Telephony spawns the realtime thread and bridges carrier audio into it." }
     - { name: telephony_answer_call,  description: "Answer a pending inbound call by spawning a realtime thread. Args: call_id, directive, voice?." }
     - { name: telephony_reject_call,  description: "Reject a pending inbound call. Args: call_id." }
-    - { name: telephony_routes_create, description: "Create an inbound phone-number route to an agent. Args: phone_number?, phone_number_id?, hold_prompt?, timeout_sec?, answer_mode?, directive?, voice?, greeting?, inbound_transport?." }
+    - { name: telephony_routes_create, description: "Create an inbound phone-number route to an agent. Agents own what they create; API keys and panel sessions pass agent_id. Args: phone_number?, phone_number_id?, agent_id?, hold_prompt?, timeout_sec?, answer_mode?, directive?, voice?, greeting?, inbound_transport?." }
     - { name: telephony_routes_set_answer_mode, description: "Configure agent-decided or immediate realtime answering for an inbound route." }
     - { name: telephony_routes_set_recording_policy, description: "Set recording behavior for future calls on an inbound route." }
     - { name: telephony_routes_set_transport, description: "Select programmable WebSocket or direct SIP transport for an inbound route." }
     - { name: telephony_routes_configure_carrier, description: "Configure carrier routing for an inbound route. Args: route_id." }
     - { name: telephony_routes_disable, description: "Disable an inbound route and restore its previous carrier webhook. Args: route_id." }
-    - { name: telephony_routes_list,  description: "List inbound call routes." }
+    - { name: telephony_routes_list,  description: "List inbound call routes. Agents see their own; platform callers see the whole project." }
     - { name: telephony_flows_create, description: "Create a draft carrier-neutral IVR/routing flow." }
     - { name: telephony_flows_list, description: "List routing flows." }
     - { name: telephony_flows_get, description: "Get one routing flow and its draft." }
@@ -98,10 +103,13 @@ provides:
     - { name: telephony_hangup,       description: "End an active call. Args: call_id." }
     - { name: telephony_active_calls, description: "List ongoing calls with thread IDs and durations." }
     - { name: telephony_calls_list, description: "List calls updated since a cursor or timestamp for event reconciliation." }
-    - { name: telephony_call_get, description: "Get one call by Telephony or provider call id." }
+    - { name: telephony_call_get, description: "Get one project call, including its current verified softphone owner when present." }
+    - { name: telephony_decisions_list, description: "Reconcile routing decisions and fallback reasons for a call." }
     - { name: telephony_call_events_list, description: "List durable lifecycle events for one call." }
     - { name: telephony_recording_settings_get, description: "Get the project's recording and durable-storage policy." }
     - { name: telephony_recording_settings_set, description: "Set recording policy for future calls. Args: default_mode?, channels?, storage_mode?, retention_days?." }
+    - { name: telephony_outbound_settings_get, description: "Get outbound call defaults: answering machine detection mode and action." }
+    - { name: telephony_outbound_settings_set, description: "Set outbound call defaults for future calls. Args: machine_detection? (off|detect|premium), machine_detection_action? (notify|hangup), default_timeout_sec? (0 keeps built-in defaults)." }
     - { name: telephony_recordings_list, description: "List call recordings. Args: call_id?, limit?." }
     - { name: telephony_recording_get, description: "Get recording metadata and a private playback URL backed by Storage or the carrier. Args: recording_id." }
     - { name: telephony_recording_retry_import, description: "Retry copying a provider recording into Storage. Args: recording_id." }
@@ -111,6 +119,9 @@ provides:
     - { name: telephony_numbers_purchase, description: "Purchase a quoted phone number after explicit user confirmation. This spends real money. Args: confirmation_token, address_id?, compliance_id?." }
     - { name: telephony_addresses_list, description: "List provider addresses. Args: country?, customer_name?, limit?." }
     - { name: telephony_address_create, description: "Create and validate a provider address. Args: customer_name, street, city, region, postal_code, country, street_secondary?, friendly_name?, auto_correct?." }
+    - { name: telephony_identities_list, description: "List provider regulatory identities. Args: identity_type?, limit?." }
+    - { name: telephony_identity_create, description: "Create a provider regulatory identity. DIDWW supports personal and business identities." }
+    - { name: telephony_identity_get, description: "Get one provider regulatory identity. Args: identity_id." }
     - { name: telephony_regulatory_requirements, description: "Discover current provider requirements. Args: country, number_type, end_user_type." }
     - { name: telephony_regulatory_bundles_list, description: "List regulatory bundles. Args: country?, number_type?, end_user_type?, status?, friendly_name?, limit?." }
     - { name: telephony_regulatory_bundle_create, description: "Create a draft regulatory bundle. Args: friendly_name, email, regulation_sid? or country+number_type+end_user_type." }
@@ -125,9 +136,35 @@ provides:
     - { name: telephony_compliance_profile_evaluate, description: "Evaluate compliance-profile completeness. Args: compliance_id." }
     - { name: telephony_compliance_profile_submit, description: "Submit a complete compliance profile for review. Args: compliance_id." }
   publishes:
+    - { name: telephony.routing.requested, description: "Durable correlated routing outcome: requested.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.accepted, description: "Durable correlated routing outcome: accepted.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.rejected, description: "Durable correlated routing outcome: rejected.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.timed_out, description: "Durable correlated routing outcome: timed_out.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.fallback, description: "Durable correlated routing outcome: fallback.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.exhausted, description: "Durable correlated routing outcome: exhausted.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.waiting, description: "Durable correlated routing outcome: waiting.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.canceled, description: "Durable correlated routing outcome: canceled.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.offer.offered, description: "Durable correlated routing outcome: offer.offered.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.offer.declined, description: "Durable correlated routing outcome: offer.declined.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.offer.acknowledged, description: "Durable correlated routing outcome: offer.acknowledged.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.offer.claimed, description: "Durable correlated routing outcome: offer.claimed.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.offer.answerer, description: "Durable correlated routing outcome: offer.answerer.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.offer.failed, description: "Durable correlated routing outcome: offer.failed.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.offer.expired, description: "Durable correlated routing outcome: offer.expired.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.offer.canceled, description: "Durable correlated routing outcome: offer.canceled.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.destination.connected, description: "Durable correlated routing outcome: destination.connected.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.destination.connection_failed, description: "Durable correlated routing outcome: destination.connection_failed.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.call.completed, description: "Durable correlated routing outcome: call.completed.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.call.failed, description: "Durable correlated routing outcome: call.failed.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.call.busy, description: "Durable correlated routing outcome: call.busy.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.call.no-answer, description: "Durable correlated routing outcome: call.no-answer.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.call.canceled, description: "Durable correlated routing outcome: call.canceled.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
     - { name: call.routing.started, description: "A call pinned and began executing a published routing flow.", payload: { call_id: string, flow_id: string, flow_version_id: string, destination_id: string, ring_group_id: string, occurred_at: string } }
     - { name: call.routing.node_entered, description: "A call entered a routing-flow node.", payload: { call_id: string, flow_id: string, flow_version_id: string, node_id: string, node_type: string, outcome: string, occurred_at: string } }
     - { name: call.offered, description: "A ring group offered a call to eligible destinations.", payload: { call_id: string, flow_id: string, flow_version_id: string, ring_group_id: string, occurred_at: string } }
+    - { name: telephony.burst.suppressed, description: "A new carrier call ID was suppressed before adviser delivery by the configured inbound burst guard.", payload: { provider_call_id: string, to_number: string, from_number: string, reason: string, occurred_at: string } }
+    - { name: telephony.burst.detected, description: "A destination-wide inbound burst was detected and alerted without blocking access to the number.", payload: { provider_call_id: string, to_number: string, reason: string, occurred_at: string } }
+    - { name: telephony.spam.suppressed, description: "A displayed caller number matched the configured explicit block list; the call was rejected before adviser delivery.", payload: { provider_call_id: string, to_number: string, from_number: string, reason: string, occurred_at: string } }
     - name: call.incoming
       description: An inbound call reached a configured route.
       payload: &call_event_payload
@@ -159,7 +196,14 @@ provides:
         duration_seconds: integer
         talk_duration_seconds: integer
         error_message: string
+        handling_reason: string
+        missed_pool_eligible: boolean
+        call_classification: string
+        routing_resolution: string
+        callback_opportunity_id: string
         termination: object
+        answered_by: string
+        synthesized: boolean
     - { name: call.initiated, description: "A carrier accepted an outbound call request.", payload: *call_event_payload }
     - { name: call.ringing, description: "The destination is ringing.", payload: *call_event_payload }
     - { name: call.answered, description: "The call was answered.", payload: *call_event_payload }
@@ -168,6 +212,7 @@ provides:
     - { name: call.busy, description: "The destination was busy.", payload: *call_event_payload }
     - { name: call.no_answer, description: "The call was not answered before its deadline.", payload: *call_event_payload }
     - { name: call.canceled, description: "The call was canceled.", payload: *call_event_payload }
+    - { name: call.machine_detected, description: "Answering machine detection finished; answered_by reports human, machine, fax, silence, or unknown.", payload: *call_event_payload }
     - name: recording.ready
       description: A provider recording is ready.
       payload: &recording_event_payload
@@ -213,6 +258,17 @@ db:
   migrations: migrations/
 
 config_schema:
+  - { name: connected_call_max_duration_seconds, type: text, default: "14400", label: "Connected call duration limit (seconds)", description: "60–14400 seconds, measured from first confirmed carrier answer or connected media. Snapshotted for each new call." }
+  - { name: call_setup_timeout_seconds, type: text, default: "3600", label: "Call setup safety timeout (seconds)", description: "60–3600 seconds. Separate from shorter ringing, routing and AI preparation deadlines." }
+  - { name: call_media_recovery_timeout_seconds, type: text, default: "120", label: "Media recovery timeout (seconds)", description: "30–600 seconds after a media transport failure/disconnection. Silence, mute and hold do not trigger this timer." }
+  - { name: ai_startup_max_attempts, type: text, default: "3", label: "AI startup maximum attempts", description: "Call-wide budget, 1–5. Only explicit temporary failures are retried." }
+  - { name: ai_startup_timeout_seconds, type: text, default: "15", label: "AI startup total timeout (seconds)", description: "1–120 seconds, capped by the remaining call deadline." }
+  - { name: inbound_burst_window_seconds, type: text, default: "60", label: "Inbound burst window (seconds)" }
+  - { name: inbound_burst_per_caller, type: text, default: "12", label: "New calls per caller and number in window", description: "0 disables this limit. Counts distinct carrier call IDs." }
+  - { name: inbound_burst_per_number, type: text, default: "60", label: "New calls per number in window", description: "0 disables this alert. Detects rotating caller IDs without blocking the destination." }
+  - { name: inbound_burst_cooldown_seconds, type: text, default: "300", label: "Burst suppression cooldown (seconds)" }
+  - { name: inbound_burst_trusted_numbers, type: text, label: "Trusted caller numbers", description: "Comma-separated E.164 caller numbers exempt from the per-caller limit; destination-wide protection still applies." }
+  - { name: inbound_spam_blocked_callers, type: text, label: "Blocked displayed caller numbers", description: "Comma-separated E.164 caller numbers, optionally scoped as caller@destination. Rejects matching calls before adviser delivery; never disables the destination number. Displayed caller ID can be spoofed." }
   - { name: human_audio_send_ahead_ms, type: select, default: "40", label: "Human audio send-ahead (ms)", options: ["20", "40", "60", "80"], description: "Carrier pacing cushion for new human/external bridges. Keep 40 unless measurements justify a change. Stale-audio limits remain enabled." }
   - { name: sip_transport, type: select, default: "tls", label: "SIP signaling transport", options: [tls, tcp, udp] }
   - { name: sip_listen, type: text, default: "0.0.0.0:5061", label: "SIP listen address" }
@@ -225,6 +281,7 @@ config_schema:
   - { name: sip_rtp_port_min, type: text, default: "20000", label: "First RTP UDP port" }
   - { name: sip_rtp_port_max, type: text, default: "20199", label: "Last RTP UDP port" }
   - { name: sip_srtp, type: select, default: "preferred", label: "Media encryption", options: [required, preferred, disabled] }
+  - { name: max_call_listeners, type: text, default: "4", label: "Maximum listeners per call", description: "Independent listening/coaching sessions, limited to 1–16. Requires explicit listening/coaching access." }
   - { name: sip_max_sessions, type: text, default: "100", label: "Maximum SIP sessions" }
   - { name: sip_allow_insecure_signaling, type: toggle, default: "false", label: "Allow UDP or TCP signaling" }
 

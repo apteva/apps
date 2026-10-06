@@ -31,7 +31,7 @@ func phoneTestRequest(app *App, identity *phoneIdentity, method, path string, bo
 		r.Header.Set("X-Apteva-Subject-Type", identity.SubjectType)
 		r.Header.Set("X-Apteva-Subject-ID", identity.SubjectID)
 		r.Header.Set("X-Apteva-Organization-ID", identity.OrganizationID)
-		r.Header.Set("X-Apteva-Scopes", `[{"type":"app_user","app":"telephony","actions":["call.read","call.dial","call.answer","call.attach","call.hangup","call.takeover"]}]`)
+		r.Header.Set("X-Apteva-Scopes", `[{"type":"app_user","app":"telephony","actions":["call.read","call.dial","call.answer","call.attach","call.hangup","call.takeover","call.hold","call.recording.control","call.listen"]}]`)
 	}
 	mux := http.NewServeMux()
 	for _, route := range app.HTTPRoutes() {
@@ -70,6 +70,44 @@ func phoneTestCall(t *testing.T, app *App, id, status string) callRow {
 		t.Fatal(e)
 	}
 	return row
+}
+
+func phoneTestRingOfferCall(t *testing.T, app *App, id string) callRow {
+	t.Helper()
+	row := phoneTestCall(t, app, id, "pending")
+	now := time.Now().UTC()
+	runID := "run-" + id
+	for _, item := range []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO call_route_executions(id,call_id,project_id,flow_id,flow_version_id,status,current_node_id,started_at) VALUES(?,?,?,?,?,'selected','team',?)`, []any{"exec-" + id, id, row.ProjectID, "flow", "version", ringTime(now)}},
+		{`INSERT INTO call_ring_runs(id,call_id,project_id,node_id,ring_group_id,strategy,status,started_at,deadline_at) VALUES(?,?,?,'team','team','sequential','ringing',?,?)`, []any{runID, id, row.ProjectID, ringTime(now), ringTime(now.Add(time.Minute))}},
+		{`INSERT INTO call_offers(id,call_id,project_id,destination_id,status,offered_at,expires_at,run_id,kind,position,timeout_sec) VALUES(?,?,?,'sales','offered',?,?,?,'browser',0,20)`, []any{"sales-" + id, id, row.ProjectID, ringTime(now), ringTime(now.Add(20 * time.Second)), runID}},
+		{`INSERT INTO call_offers(id,call_id,project_id,destination_id,status,offered_at,expires_at,run_id,kind,position,timeout_sec) VALUES(?,?,?,'support','queued','','',?,'browser',1,20)`, []any{"support-" + id, id, row.ProjectID, runID}},
+	} {
+		if _, err := app.db().db.Exec(item.query, item.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return row
+}
+
+func phoneTestAnswerable(t *testing.T, app *App, identity *phoneIdentity, callID string) (bool, int) {
+	t.Helper()
+	w := phoneTestRequest(app, identity, "GET", "/calls?call_id="+callID, nil)
+	if w.Code != http.StatusOK {
+		return false, w.Code
+	}
+	var response struct {
+		Calls []struct {
+			Answerable bool `json:"answerable"`
+		} `json:"calls"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil || len(response.Calls) != 1 {
+		t.Fatalf("call list response: %d %s err=%v", w.Code, w.Body.String(), err)
+	}
+	return response.Calls[0].Answerable, w.Code
 }
 func TestApplicationUserPolicyIsolation(t *testing.T) {
 	softphoneTestCtx(t)
@@ -186,6 +224,160 @@ func TestApplicationUserAnswerOwnershipAndTakeover(t *testing.T) {
 		t.Fatal("old user renewed after takeover")
 	}
 }
+
+func TestApplicationUserAnswerableOfferMovesWithoutLeakingCall(t *testing.T) {
+	softphoneTestCtx(t)
+	app := &App{installID: 42}
+	phoneTestPolicy(t, app)
+	row := phoneTestRingOfferCall(t, app, "moving-browser-offer")
+	alice, eve, boss := phoneTestIdentity("alice"), phoneTestIdentity("eve"), phoneTestIdentity("boss")
+	if answerable, code := phoneTestAnswerable(t, app, &alice, row.ID); code != 200 || !answerable {
+		t.Fatalf("current offeree: answerable=%v status=%d", answerable, code)
+	}
+	list := phoneTestRequest(app, &alice, "GET", "/calls", nil)
+	var listing struct {
+		Calls []struct {
+			ID         string `json:"id"`
+			Answerable bool   `json:"answerable"`
+		} `json:"calls"`
+	}
+	if list.Code != 200 || json.Unmarshal(list.Body.Bytes(), &listing) != nil || len(listing.Calls) != 1 || listing.Calls[0].ID != row.ID || !listing.Calls[0].Answerable {
+		t.Fatalf("call list omitted active answerable offer: %d %s", list.Code, list.Body.String())
+	}
+	if answerable, code := phoneTestAnswerable(t, app, &eve, row.ID); code != 404 || answerable {
+		t.Fatalf("never-offered user saw call: answerable=%v status=%d", answerable, code)
+	}
+	if w := phoneTestRequest(app, &eve, "POST", "/softphone/answer/"+row.ID, map[string]any{}); w.Code != 404 || strings.Contains(w.Body.String(), "offer_expired") {
+		t.Fatalf("never-offered answer disclosed call: %d %s", w.Code, w.Body.String())
+	}
+	// The browser has already rendered the old Answer button when the offer
+	// expires and moves to a different destination.
+	tx, err := app.db().db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := advanceRingRunTx(tx, "run-"+row.ID, time.Now().Add(21*time.Second)); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if answerable, code := phoneTestAnswerable(t, app, &boss, row.ID); code != 200 || answerable {
+		t.Fatalf("supervisor visibility confused with offer: answerable=%v status=%d", answerable, code)
+	}
+	if answerable, code := phoneTestAnswerable(t, app, &eve, row.ID); code != 200 || !answerable {
+		t.Fatalf("new offeree: answerable=%v status=%d", answerable, code)
+	}
+	w := phoneTestRequest(app, &alice, "POST", "/softphone/answer/"+row.ID, map[string]any{"destination_id": "sales"})
+	var conflict map[string]any
+	if w.Code != http.StatusConflict || json.Unmarshal(w.Body.Bytes(), &conflict) != nil || conflict["code"] != "offer_expired" {
+		t.Fatalf("stale Answer result: %d %s", w.Code, w.Body.String())
+	}
+	if w := phoneTestRequest(app, &eve, "POST", "/softphone/answer/"+row.ID, map[string]any{"destination_id": "support"}); w.Code != 200 {
+		t.Fatalf("current offeree could not answer: %d %s", w.Code, w.Body.String())
+	}
+	owner, _, err := app.phoneOwner(row.ID)
+	if err != nil || owner != eve.key() {
+		t.Fatalf("claimed owner=%q err=%v", owner, err)
+	}
+}
+
+func TestApplicationUserExpiredRingOfferDoesNotUseDirectDestinationFallback(t *testing.T) {
+	softphoneTestCtx(t)
+	app := &App{installID: 42}
+	phoneTestPolicy(t, app)
+	row := phoneTestRingOfferCall(t, app, "expired-browser-offer")
+	if _, err := app.db().db.Exec(`UPDATE call_offers SET status='expired' WHERE call_id=? AND destination_id='sales'`, row.ID); err != nil {
+		t.Fatal(err)
+	}
+	alice, boss := phoneTestIdentity("alice"), phoneTestIdentity("boss")
+	if answerable, code := phoneTestAnswerable(t, app, &boss, row.ID); code != 200 || answerable {
+		t.Fatalf("supervisor sees expired offer as answerable: %v, %d", answerable, code)
+	}
+	w := phoneTestRequest(app, &alice, "POST", "/softphone/answer/"+row.ID, map[string]any{})
+	var conflict map[string]any
+	if w.Code != http.StatusConflict || json.Unmarshal(w.Body.Bytes(), &conflict) != nil || conflict["code"] != "offer_expired" {
+		t.Fatalf("expired ring offer used direct fallback: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestApplicationUserAnswerRacingOfferMoveHasOneOutcome(t *testing.T) {
+	softphoneTestCtx(t)
+	app := &App{installID: 42}
+	phoneTestPolicy(t, app)
+	alice := phoneTestIdentity("alice")
+	for i := 0; i < 12; i++ {
+		row := phoneTestRingOfferCall(t, app, fmt.Sprintf("offer-race-%d", i))
+		start := make(chan struct{})
+		results := make(chan *httptest.ResponseRecorder, 1)
+		moves := make(chan error, 1)
+		go func() {
+			<-start
+			results <- phoneTestRequest(app, &alice, "POST", "/softphone/answer/"+row.ID, map[string]any{"destination_id": "sales"})
+		}()
+		go func() {
+			<-start
+			tx, err := app.db().db.Begin()
+			if err == nil {
+				err = advanceRingRunTx(tx, "run-"+row.ID, time.Now().Add(21*time.Second))
+				if err == nil {
+					err = tx.Commit()
+				} else {
+					_ = tx.Rollback()
+				}
+			}
+			moves <- err
+		}()
+		close(start)
+		w := <-results
+		if err := <-moves; err != nil {
+			t.Fatal(err)
+		}
+		if w.Code != http.StatusOK {
+			var conflict map[string]any
+			if w.Code != http.StatusConflict || json.Unmarshal(w.Body.Bytes(), &conflict) != nil || conflict["code"] != "offer_expired" {
+				t.Fatalf("race result %d: %d %s", i, w.Code, w.Body.String())
+			}
+		}
+		var claimed int
+		if err := app.db().db.QueryRow(`SELECT COUNT(*) FROM call_offers WHERE call_id=? AND status='claimed'`, row.ID).Scan(&claimed); err != nil || claimed > 1 {
+			t.Fatalf("race %d duplicate claim=%d err=%v", i, claimed, err)
+		}
+	}
+}
+
+func TestCanceledOfferAnswerReportsEndedToAuthorizedDestinationMembers(t *testing.T) {
+	softphoneTestCtx(t)
+	app := &App{installID: 42}
+	phoneTestPolicy(t, app)
+	row := phoneTestCall(t, app, "caller-canceled-before-answer", "pending")
+	when := time.Now().UTC().Format(time.RFC3339)
+	if _, err := app.db().db.Exec(`INSERT INTO call_offers(id,call_id,project_id,destination_id,status,offered_at,expires_at,kind) VALUES(?,?,?,?,?,?,?,?)`,
+		"offer-canceled", row.ID, row.ProjectID, "sales", "offered", when, when, "browser"); err != nil {
+		t.Fatal(err)
+	}
+	// The carrier cancels and the ring offer settles just before Answer arrives.
+	if _, err := app.db().db.Exec(`UPDATE calls SET status='canceled',ended_at=? WHERE id=?`, when, row.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db().db.Exec(`UPDATE call_offers SET status='canceled' WHERE call_id=?`, row.ID); err != nil {
+		t.Fatal(err)
+	}
+	alice, bob, eve := phoneTestIdentity("alice"), phoneTestIdentity("bob"), phoneTestIdentity("eve")
+	if w := phoneTestRequest(app, &alice, "POST", "/softphone/answer/"+row.ID, map[string]any{"destination_id": "sales"}); w.Code != http.StatusGone || !strings.Contains(w.Body.String(), "call has ended") {
+		t.Fatalf("authorized destination member: %d %s", w.Code, w.Body.String())
+	}
+	// Offers are destination-scoped, not browser-session-scoped. Another
+	// currently authorized sales member receives the same terminal result even
+	// if this test never presented that member with a browser notification.
+	if w := phoneTestRequest(app, &bob, "POST", "/softphone/answer/"+row.ID, map[string]any{}); w.Code != http.StatusGone || !strings.Contains(w.Body.String(), "call has ended") {
+		t.Fatalf("other authorized destination member: %d %s", w.Code, w.Body.String())
+	}
+	if w := phoneTestRequest(app, &eve, "POST", "/softphone/answer/"+row.ID, map[string]any{}); w.Code != http.StatusForbidden {
+		t.Fatalf("unauthorized destination member: %d %s", w.Code, w.Body.String())
+	}
+}
 func TestApplicationUserBackendAssignmentAndLease(t *testing.T) {
 	softphoneTestCtx(t)
 	app := &App{installID: 42}
@@ -214,6 +406,24 @@ func TestApplicationUserBackendAssignmentAndLease(t *testing.T) {
 	server := softphoneTestServer(t, app)
 	browser := dialWS(t, server.URL+strings.Replace(session.MediaURL, "/api/apps/telephony/_install/42", "", 1))
 	readSoftphoneEventWithin(t, browser, "ready", 3*time.Second)
+	// Adding a different agent changes the project revision but not Alice's
+	// ownership or grants. Her live socket and lease must survive that edit.
+	policy.Users = append(policy.Users, phoneUser{Identity: phoneTestIdentity("hamza"), Enabled: true,
+		phoneGrant: phoneGrant{Role: "user", Destinations: []string{"support"}}})
+	w = phoneTestRequest(app, nil, "PUT", "/access/policy", policy)
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &policy) != nil {
+		t.Fatalf("add unrelated user: %d %s", w.Code, w.Body)
+	}
+	if reason := app.phoneMediaDenialReason(&row, session.SessionToken); reason != "" {
+		t.Fatalf("unrelated policy edit invalidated media: %s", reason)
+	}
+	if w := phoneTestRequest(app, &alice, "POST", "/softphone/renew/"+row.ID, map[string]any{"session_token": session.SessionToken}); w.Code != 200 {
+		t.Fatalf("unrelated policy edit blocked renewal: %d %s", w.Code, w.Body)
+	}
+	time.Sleep(1200 * time.Millisecond) // Cross the live socket's grant-check tick.
+	if hub := app.softphones.lookup(row.ID); hub == nil || hub.browserWriter() == nil {
+		t.Fatal("unrelated policy edit disconnected live media")
+	}
 	for i := range policy.Users {
 		if policy.Users[i].Identity == alice {
 			policy.Users[i].Enabled = false
@@ -224,6 +434,9 @@ func TestApplicationUserBackendAssignmentAndLease(t *testing.T) {
 	}
 	if app.validPhoneMedia(&row, session.SessionToken) {
 		t.Fatal("revocation retained media grant")
+	}
+	if reason := app.phoneMediaDenialReason(&row, session.SessionToken); reason != "user_access_revoked" {
+		t.Fatalf("revocation reason: %s", reason)
 	}
 	_ = browser.SetReadDeadline(time.Now().Add(3 * time.Second))
 	for {
@@ -241,6 +454,36 @@ func TestApplicationUserBackendAssignmentAndLease(t *testing.T) {
 	_, _, _, err := ws.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http")+strings.Replace(session.MediaURL, "/api/apps/telephony/_install/42", "", 1))
 	if err == nil {
 		t.Fatal("revoked media reconnected")
+	}
+}
+func TestApplicationUserMediaGrantRemovalWithoutDisablingUser(t *testing.T) {
+	softphoneTestCtx(t)
+	app := &App{installID: 42}
+	policy := phoneTestPolicy(t, app)
+	row := phoneTestCall(t, app, "grant-removed-call", "in-progress")
+	alice := phoneTestIdentity("alice")
+	if err := app.setPhoneOwner(&row, &phonePrincipal{Identity: alice, Project: row.ProjectID,
+		Destinations: map[string]bool{"sales": true}, Numbers: map[string]bool{}}, "sales"); err != nil {
+		t.Fatal(err)
+	}
+	w := phoneTestRequest(app, &alice, "POST", "/softphone/attach/"+row.ID, nil)
+	var session softphoneSession
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &session) != nil {
+		t.Fatalf("attach: %d %s", w.Code, w.Body)
+	}
+	for i := range policy.Users {
+		if policy.Users[i].Identity == alice {
+			policy.Users[i].Groups = nil
+		}
+	}
+	if w := phoneTestRequest(app, nil, "PUT", "/access/policy", policy); w.Code != 200 {
+		t.Fatalf("remove grant: %d %s", w.Code, w.Body)
+	}
+	if reason := app.phoneMediaDenialReason(&row, session.SessionToken); reason != "call_permission_revoked" {
+		t.Fatalf("grant removal reason: %s", reason)
+	}
+	if w := phoneTestRequest(app, &alice, "POST", "/softphone/renew/"+row.ID, map[string]any{"session_token": session.SessionToken}); w.Code < 400 {
+		t.Fatalf("removed grant renewed media: %d %s", w.Code, w.Body)
 	}
 }
 func TestApplicationUserMCPAndIncompleteScopesDenied(t *testing.T) {

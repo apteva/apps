@@ -1,13 +1,17 @@
 import type { ComposerOptions } from "./composer";
 export type { ComposerOptions } from "./composer";
-type ChatConfiguration = ConversationLocalization & {composer?:ComposerOptions};
+import type { PageContext } from "./pageContext";
+export type { PageContext } from "./pageContext";
+import type { ComposerSuggestion, ConversationComposerHandle } from "./composerHost";
+export type { ComposerInsertOptions, ComposerInsertResult, ComposerInsertStatus, ComposerSuggestion, ConversationComposerHandle } from "./composerHost";
+type ChatConfiguration = ConversationLocalization & {composer?:ComposerOptions;pageContext?:PageContext;onContextCleared?:(context:PageContext)=>void};
 import { ConversationLocalizationProvider, ConversationLocaleRegion, type ConversationLocalization } from "./i18n";
 export { ConversationLocalizationProvider } from "./i18n";
 export type { ConversationLocalization, ConversationMessages, ConversationMessage, ConversationMessageKey } from "./i18n";
-import type { ReactNode } from "react";
+import { forwardRef, type ReactNode } from "react";
 import AgentWidget from "./AgentConversationsWidget";
 import { ConversationChat as Thread, type Conversation } from "./ConversationsPanel";
-import { ConversationsProvider } from "./context";
+import { ConversationsProvider, PageContextProvider } from "./context";
 import type { ConversationsClient } from "./client";
 export { ConversationsProvider } from "./context";
 
@@ -15,32 +19,42 @@ export interface ChatProps extends ChatConfiguration {
   conversations: ConversationsClient;
   agentId: number;
   showNewConversation?: boolean;
+  showToolCompletion?: boolean;
+  showToolDuration?: boolean;
+  showPageContext?: boolean;
+  welcomeText?: string;
+  suggestions?: ComposerSuggestion[];
+  contextLabel?: string;
   className?: string;
 }
-function Surface({ conversations, children, className, ...localization }: ChatConfiguration & { conversations: ConversationsClient; children: ReactNode; className?: string }) {
-  return <ConversationsProvider conversations={conversations} {...localization} key={conversations.storageKey}>
+function Surface({ conversations, children, className, pageContext, ...localization }: ChatConfiguration & { conversations: ConversationsClient; children: ReactNode; className?: string }) {
+  return <PageContextProvider.Provider value={pageContext}><ConversationsProvider conversations={conversations} {...localization} key={conversations.storageKey}>
     <ConversationLocaleRegion className={className}>{children}</ConversationLocaleRegion>
-  </ConversationsProvider>;
+  </ConversationsProvider></PageContextProvider.Provider>;
 }
-export function ConversationChat({ conversations, agentId, showNewConversation = true, className, ...localization }: ChatProps) {
-  return <Surface conversations={conversations} className={className} {...localization}><AgentWidget
+export const ConversationChat = forwardRef<ConversationComposerHandle, ChatProps>(function ConversationChat({ conversations, agentId, showNewConversation = true, showToolCompletion = false, showToolDuration = false, showPageContext = true, welcomeText, suggestions, contextLabel, className, onContextCleared, ...localization }: ChatProps, ref) {
+  return <Surface conversations={conversations} className={className} {...localization}><AgentWidget composerRef={ref} onContextCleared={onContextCleared}
     appName="conversations" projectId={conversations.projectId} installId={conversations.installId ?? 0}
-    instanceId={agentId} widgetSettings={{display_mode:"single",show_new_conversation:showNewConversation}}
+    instanceId={agentId} widgetSettings={{display_mode:"single",show_new_conversation:showNewConversation,show_page_context:showPageContext,show_tool_completion:showToolCompletion,show_tool_duration:showToolDuration,welcome_text:welcomeText,suggestions,context_label:contextLabel}}
   /></Surface>;
-}
-export function AgentConversations({ conversations, agentId, showNewConversation = true, className, ...localization }: ChatProps) {
-  return <Surface conversations={conversations} className={className} {...localization}><AgentWidget
+});
+export const AgentConversations = forwardRef<ConversationComposerHandle, ChatProps>(function AgentConversations({ conversations, agentId, showNewConversation = true, showToolCompletion = false, showToolDuration = false, showPageContext = true, welcomeText, suggestions, contextLabel, className, onContextCleared, ...localization }: ChatProps, ref) {
+  return <Surface conversations={conversations} className={className} {...localization}><AgentWidget composerRef={ref} onContextCleared={onContextCleared}
     appName="conversations" projectId={conversations.projectId} installId={conversations.installId ?? 0}
-    instanceId={agentId} widgetSettings={{display_mode:"browser",show_new_conversation:showNewConversation}}
+    instanceId={agentId} widgetSettings={{display_mode:"browser",show_new_conversation:showNewConversation,show_page_context:showPageContext,show_tool_completion:showToolCompletion,show_tool_duration:showToolDuration,welcome_text:welcomeText,suggestions,context_label:contextLabel}}
   /></Surface>;
-}
-export function ConversationThread({ conversations, conversation, onChanged = () => {}, ...localization }: ChatConfiguration & {
+});
+export const ConversationThread = forwardRef<ConversationComposerHandle, ChatConfiguration & {
   conversations: ConversationsClient; conversation: Conversation; onChanged?: () => void;
-}) {
+  showToolCompletion?: boolean; showToolDuration?: boolean; showPageContext?: boolean;
+  welcomeText?: string; suggestions?: ComposerSuggestion[]; contextLabel?: string;
+}>(function ConversationThread({ conversations, conversation, onChanged = () => {}, showToolCompletion = false, showToolDuration = false, showPageContext = true, welcomeText, suggestions, contextLabel, onContextCleared, ...localization }, ref) {
   if (conversation.project_id !== conversations.projectId) throw new Error("Conversation project does not match the host scope");
-  return <Surface conversations={conversations} {...localization}><Thread key={conversation.id} conversation={conversation}
-    archived={Boolean(conversation.archived_at)} onActed={onChanged} onRemoved={onChanged}/></Surface>;
-}
+  return <Surface conversations={conversations} {...localization}><Thread ref={ref} key={conversation.id} conversation={conversation}
+    archived={Boolean(conversation.archived_at)} onActed={onChanged} onRemoved={onChanged}
+    showPageContext={showPageContext} welcomeText={welcomeText} suggestions={suggestions} contextLabel={contextLabel} onContextCleared={onContextCleared}
+    showToolCompletion={showToolCompletion} showToolDuration={showToolDuration}/></Surface>;
+});
 
 import { useEffect, useState } from "react";
 import InboxWidget from "./InboxWidget";

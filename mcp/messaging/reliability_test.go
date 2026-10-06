@@ -13,7 +13,8 @@ import (
 
 func insertJob(t *testing.T, ctx *sdk.AppCtx, source any) int64 {
 	t.Helper()
-	res, err := persistInbound(ctx, "test-proj", "email", source, `INSERT INTO messages(project_id,channel,direction,from_addr,to_addrs,status,route_status) VALUES('test-proj','email','in','alice@example.com','["support@example.com"]','received','pending')`)
+	seedSESRecipient(t, ctx, "support@example.com")
+	res, err := persistInbound(ctx, "test-proj", "email", source, `INSERT INTO messages(project_id,channel,direction,from_addr,to_addrs,envelope_recipients,status,route_status) VALUES('test-proj','email','in','alice@example.com','["support@example.com"]','["support@example.com"]','received','pending')`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,6 +40,7 @@ func TestInboundCommitRollsBackWhenJobCannotBeSaved(t *testing.T) {
 func TestWebhookAcknowledgesDurableWorkBeforeDispatch(t *testing.T) {
 	plat := &stubPlatform{}
 	ctx := newTestCtx(t, plat)
+	seedSESRecipient(t, ctx, "support@example.com")
 	app := &App{}
 	_, err := dbInboundRouteUpsert(ctx.AppDB(), "test-proj", "email", "support@example.com", "tickets", "receive", 10)
 	if err != nil {

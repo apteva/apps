@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: webinars
 display_name: Webinars
-version: 0.2.0
+version: 0.3.0
 description: |
   Live, scheduled, and on-demand webinars. Composes the streaming app
   for the pipe (RTMP→HLS+recording), CRM for the contact + activity
@@ -86,18 +86,6 @@ db:
   migrations: migrations/
 
 config_schema:
-  - name: registration_url_prefix
-    type: text
-    default: "/r"
-    label: Public registration path prefix
-  - name: live_room_url_prefix
-    type: text
-    default: "/live"
-    label: Public live-room path prefix
-  - name: replay_url_prefix
-    type: text
-    default: "/replay"
-    label: Public replay path prefix
   - name: reminder_lead_hours
     type: text
     default: "24,1,0.25"

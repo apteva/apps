@@ -63,13 +63,13 @@ func (a *App) MCPTools() []sdk.Tool {
 			"q": sString(), "status": enumSchema(statusValues), "area": sString(), "type": enumSchema(typeValues),
 			"priority": enumSchema(priorityValues), "requester_email": sString(), "limit": sInteger(), "offset": sInteger(),
 		}, nil), a.toolList),
-		tool("tickets_get", "Fetch one ticket with comments, attachments, links, and chronological history.", idSchema(), a.toolGet),
-		tool("tickets_update", "Patch ticket fields and record every changed value.", updateSchema(), a.toolUpdate),
-		tool("tickets_set_status", "Move a ticket through its workflow and record the transition.", objectSchema(map[string]any{
+		tool("tickets_get", "Read a single ticket by ID, including its current status, assignee, description, comments, internal notes, attachments, links, and history.", idSchema(), a.toolGet),
+		tool("tickets_update", "Edit ticket details or assign/reassign a ticket to an agent or team member using assignee_kind, assignee_ref, and assignee_name. Also updates title, description, area, type, priority, requester, and due date. For status changes, use tickets_set_status.", updateSchema(), a.toolUpdate),
+		tool("tickets_set_status", "Change a ticket's workflow status: new, acknowledged, planned, in_progress, waiting_client, resolved, or closed. Use this to acknowledge, start work, resolve, close, or reopen a ticket. Returns the updated ticket.", objectSchema(map[string]any{
 			"id": sInteger(), "status": enumSchema(statusValues), "reason": sString(), "actor_name": sString(),
 		}, []string{"id", "status"}), a.toolSetStatus),
 		tool("tickets_comment", "Add a public comment visible to the client.", commentSchema(), a.toolComment),
-		tool("tickets_add_internal_note", "Add an internal team/agent note hidden from the client.", commentSchema(), a.toolInternalNote),
+		tool("tickets_add_internal_note", "Record internal triage findings, implementation progress, or a resolution summary on a ticket. Hidden from the client. Does not change ticket status.", commentSchema(), a.toolInternalNote),
 		tool("tickets_edit_comment", "Edit a comment while preserving its previous body as a revision.", objectSchema(map[string]any{
 			"id": sInteger(), "comment_id": sInteger(), "body": sString(), "actor_name": sString(),
 		}, []string{"id", "comment_id", "body"}), a.toolEditComment),

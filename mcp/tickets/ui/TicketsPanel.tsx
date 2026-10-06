@@ -1,5 +1,7 @@
 import { type DragEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { liveRefresh, mergeDraft, subscribeTickets } from "./live";
+
 interface NativePanelProps { appName: string; installId: number; projectId: string; instanceId?: number }
 interface Area { id:number; slug:string; name:string; color:string; sort_order:number; archived:boolean }
 interface Ticket { id:number; key:string; title:string; description:string; area_id?:number; area_slug?:string; area_name?:string; area_color?:string; type:string; status:string; priority:string; requester_name?:string; requester_email?:string; requester_organization?:string; requester_crm_contact_id?:number; assignee_name?:string; due_at?:string; portal_url?:string; created_at:string; updated_at:string; public_comment_count?:number; internal_note_count?:number; attachment_count?:number }
@@ -16,7 +18,7 @@ const statuses=["new","acknowledged","planned","in_progress","waiting_client","r
 const types=["feedback","bug","feature","change_request","question","support"];
 const priorities=["low","normal","high","urgent"];
 
-export default function TicketsPanel({projectId}:NativePanelProps){
+export default function TicketsPanel({projectId,installId}:NativePanelProps){
   const [tickets,setTickets]=useState<Ticket[]>([]),[areas,setAreas]=useState<Area[]>([]);
   const [selectedId,setSelectedId]=useState(0),[detail,setDetail]=useState<Detail|null>(null);
   const [query,setQuery]=useState(""),[statusFilter,setStatusFilter]=useState(""),[areaFilter,setAreaFilter]=useState("");
@@ -24,15 +26,35 @@ export default function TicketsPanel({projectId}:NativePanelProps){
   const [message,setMessage]=useState(""),[busy,setBusy]=useState(false),[creating,setCreating]=useState(false),[showAreas,setShowAreas]=useState(false);
   const [portal,setPortal]=useState<Portal|null>(null),[composer,setComposer]=useState(""),[internal,setInternal]=useState(false);
   const [draft,setDraft]=useState(emptyDraft());
-  const withProject=useCallback((path:string)=>`${API}${path}${path.includes("?")?"&":"?"}project_id=${encodeURIComponent(projectId)}`,[projectId]);
+  const withProject=useCallback((path:string)=>`${API}${installId?`/_install/${installId}`:""}${path}${path.includes("?")?"&":"?"}project_id=${encodeURIComponent(projectId)}`,[projectId,installId]);
 
+  const scope=`${projectId}:${installId}`;
+  const scopeRef=useRef(scope);scopeRef.current=scope;
+  const selectedRef=useRef(selectedId);selectedRef.current=selectedId;
+  const detailRef=useRef(detail);detailRef.current=detail;
+  const busyRef=useRef(busy);busyRef.current=busy;
   const loadAreas=useCallback(async()=>{const r=await fetch(withProject("/areas"),{credentials:"same-origin"});if(r.ok)setAreas((await r.json()).areas??[])},[withProject]);
   const loadPortal=useCallback(async()=>{const r=await fetch(withProject("/portal"),{credentials:"same-origin"});if(r.ok)setPortal((await r.json()).portal??null)},[withProject]);
-  const loadTickets=useCallback(async()=>{const p=new URLSearchParams();if(query.trim())p.set("q",query.trim());if(view==="list"&&statusFilter)p.set("status",statusFilter);if(areaFilter)p.set("area",areaFilter);p.set("limit","200");try{const r=await fetch(withProject(`/tickets?${p}`),{credentials:"same-origin"});if(!r.ok)throw new Error(await r.text());const out=await r.json();const rows=out.tickets??[];setTickets(rows);setSelectedId(current=>current&&rows.some((t:Ticket)=>t.id===current)?current:0);setMessage(`${out.total??rows.length} ticket${(out.total??rows.length)===1?"":"s"}`)}catch(e){setMessage((e as Error).message)}},[areaFilter,query,statusFilter,view,withProject]);
-  const loadDetail=useCallback(async(id:number)=>{if(!id){setDetail(null);return}try{const r=await fetch(withProject(`/tickets/${id}`),{credentials:"same-origin"});if(!r.ok)throw new Error(await r.text());const out=await r.json();setDetail(out);const t=out.ticket as Ticket;setDraft({title:t.title,description:t.description,type:t.type,status:t.status,priority:t.priority,area:t.area_slug||"general",requester_name:t.requester_name||"",requester_email:t.requester_email||"",requester_organization:t.requester_organization||"",assignee_name:t.assignee_name||"",due_at:t.due_at||""})}catch(e){setMessage((e as Error).message)}},[withProject]);
+  const listRequest=useRef(0);
+  const loadTickets=useCallback(async(background=false)=>{const request=++listRequest.current;const p=new URLSearchParams();if(query.trim())p.set("q",query.trim());if(view==="list"&&statusFilter)p.set("status",statusFilter);if(areaFilter)p.set("area",areaFilter);p.set("limit","200");try{const r=await fetch(withProject(`/tickets?${p}`),{credentials:"same-origin"});if(!r.ok)throw new Error(await r.text());const out=await r.json();if(request!==listRequest.current||scopeRef.current!==scope)return;const rows=out.tickets??[];setTickets(rows);if(!background)setSelectedId(current=>current&&rows.some((t:Ticket)=>t.id===current)?current:0);if(!background)setMessage(`${out.total??rows.length} ticket${(out.total??rows.length)===1?"":"s"}`)}catch(e){setMessage((e as Error).message)}},[areaFilter,query,statusFilter,view,withProject,scope]);
+  const detailRequest=useRef(0);
+  const loadDetail=useCallback(async(id:number,background=false)=>{const request=++detailRequest.current;if(!id){setDetail(null);return}try{const r=await fetch(withProject(`/tickets/${id}`),{credentials:"same-origin"});if(!r.ok)throw new Error(await r.text());const out=await r.json();if(request!==detailRequest.current||scopeRef.current!==scope||selectedRef.current!==id)return;const previous=detailRef.current;setDetail(out);const t=out.ticket as Ticket;const next={title:t.title,description:t.description,type:t.type,status:t.status,priority:t.priority,area:t.area_slug||"general",requester_name:t.requester_name||"",requester_email:t.requester_email||"",requester_organization:t.requester_organization||"",assignee_name:t.assignee_name||"",due_at:t.due_at||""};setDraft(current=>background&&previous?.ticket.id===id?mergeDraft(current,ticketDraft(previous.ticket),next):next)}catch(e){setMessage((e as Error).message)}},[withProject,scope]);
   useEffect(()=>{void loadAreas();void loadPortal()},[loadAreas,loadPortal]);
   useEffect(()=>{const timer=window.setTimeout(()=>void loadTickets(),query?220:0);return()=>window.clearTimeout(timer)},[loadTickets,query]);
   useEffect(()=>{if(!creating&&!showAreas)void loadDetail(selectedId)},[creating,loadDetail,selectedId,showAreas]);
+
+  const refreshRef=useRef(async()=>{});
+  refreshRef.current=async()=>{await loadTickets(true);if(selectedRef.current&&!creating&&!showAreas)await loadDetail(selectedRef.current,true)};
+  useEffect(()=>{
+    if(!projectId)return;
+    const queue=liveRefresh(()=>refreshRef.current(),()=>busyRef.current);
+    const unsubscribe=subscribeTickets(window,projectId,installId,()=>queue.request());
+    const focus=()=>queue.request();
+    const visible=()=>{if(document.visibilityState==="visible")queue.request()};
+    window.addEventListener("focus",focus);
+    document.addEventListener("visibilitychange",visible);
+    return()=>{unsubscribe();queue.stop();window.removeEventListener("focus",focus);document.removeEventListener("visibilitychange",visible)};
+  },[projectId,installId]);
 
   const startNew=()=>{setView("list");setCreating(true);setShowAreas(false);setSelectedId(0);setDetail(null);setDraft(emptyDraft());setMessage("New ticket")};
   const createTicket=async()=>{if(!draft.title.trim()){setMessage("Title is required.");return}setBusy(true);try{const body={...draft,status:undefined,due_at:draft.due_at||""};const r=await fetch(withProject("/tickets"),{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});const out=await r.json();if(!r.ok)throw new Error(out.error||"Create failed");setCreating(false);await loadTickets();setSelectedId(out.ticket.id);setMessage(`${out.ticket.key} created.`)}catch(e){setMessage((e as Error).message)}finally{setBusy(false)}};
@@ -164,3 +186,5 @@ function relative(v:string){const ms=Date.now()-new Date(v).getTime();if(!v||Num
 function eventSummary(e:Event){const d=e.data||{};if(d.reason)return String(d.reason);if(d.from!==undefined&&d.to!==undefined)return`${label(String(d.from))} → ${label(String(d.to))}`;if(d.changes&&typeof d.changes==="object")return`Changed ${Object.keys(d.changes).map(label).join(", ")}`;return""}
 function fileBase64(file:File){return new Promise<string>((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(String(r.result).split(",")[1]||"");r.onerror=()=>reject(r.error);r.readAsDataURL(file)})}
 function formatBytes(n:number){if(!n)return"";if(n<1024)return`${n} B`;if(n<1024*1024)return`${(n/1024).toFixed(1)} KB`;return`${(n/1024/1024).toFixed(1)} MB`}
+
+function ticketDraft(t:Ticket):Draft{return {title:t.title,description:t.description,type:t.type,status:t.status,priority:t.priority,area:t.area_slug||"general",requester_name:t.requester_name||"",requester_email:t.requester_email||"",requester_organization:t.requester_organization||"",assignee_name:t.assignee_name||"",due_at:t.due_at||""}}

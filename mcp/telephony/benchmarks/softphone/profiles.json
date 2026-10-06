@@ -1,0 +1,205 @@
+[
+  {
+    "name": "local-baseline",
+    "expectation": "usable",
+    "down": {
+      "kbps": 10000
+    },
+    "up": {
+      "kbps": 10000
+    },
+    "max_p95_ms": 250,
+    "max_missing_pct": 5
+  },
+  {
+    "name": "broadband",
+    "expectation": "usable",
+    "down": {
+      "kbps": 5000,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "up": {
+      "kbps": 1000,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "max_p95_ms": 350,
+    "max_missing_pct": 5
+  },
+  {
+    "name": "wifi-jitter",
+    "expectation": "usable",
+    "down": {
+      "kbps": 2000,
+      "latency_ms": 35,
+      "jitter_ms": 40
+    },
+    "up": {
+      "kbps": 1000,
+      "latency_ms": 35,
+      "jitter_ms": 40
+    },
+    "max_p95_ms": 450,
+    "max_missing_pct": 10
+  },
+  {
+    "name": "mobile-latency",
+    "expectation": "usable",
+    "down": {
+      "kbps": 2000,
+      "latency_ms": 100,
+      "jitter_ms": 30
+    },
+    "up": {
+      "kbps": 1000,
+      "latency_ms": 100,
+      "jitter_ms": 30
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 10
+  },
+  {
+    "name": "512k-symmetric",
+    "expectation": "usable",
+    "down": {
+      "kbps": 512,
+      "latency_ms": 30,
+      "jitter_ms": 10
+    },
+    "up": {
+      "kbps": 512,
+      "latency_ms": 30,
+      "jitter_ms": 10
+    },
+    "max_p95_ms": 450,
+    "max_missing_pct": 10
+  },
+  {
+    "name": "tcp-recovery-1pct",
+    "expectation": "degradation",
+    "down": {
+      "kbps": 2000,
+      "latency_ms": 30,
+      "jitter_ms": 15,
+      "recovery_probability": 0.01,
+      "recovery_ms": 180
+    },
+    "up": {
+      "kbps": 1000,
+      "latency_ms": 30,
+      "jitter_ms": 15,
+      "recovery_probability": 0.01,
+      "recovery_ms": 180
+    },
+    "max_p95_ms": 700,
+    "max_missing_pct": 25
+  },
+  {
+    "name": "upload-256k",
+    "expectation": "degradation",
+    "down": {
+      "kbps": 2000,
+      "latency_ms": 20
+    },
+    "up": {
+      "kbps": 256,
+      "latency_ms": 20
+    },
+    "max_p95_ms": 700,
+    "max_missing_pct": 25
+  },
+  {
+    "name": "download-256k",
+    "expectation": "degradation",
+    "down": {
+      "kbps": 256,
+      "latency_ms": 20
+    },
+    "up": {
+      "kbps": 2000,
+      "latency_ms": 20
+    },
+    "max_p95_ms": 700,
+    "max_missing_pct": 25
+  },
+  {
+    "name": "two-second-outage",
+    "expectation": "recovery",
+    "down": {
+      "kbps": 2000,
+      "latency_ms": 20,
+      "outage_at_ms": 4000,
+      "outage_ms": 2000
+    },
+    "up": {
+      "kbps": 1000,
+      "latency_ms": 20,
+      "outage_at_ms": 4000,
+      "outage_ms": 2000
+    },
+    "max_p95_ms": 700,
+    "max_missing_pct": 40
+  },
+  {
+    "name": "carrier-ten-second-catchup",
+    "expectation": "recovery",
+    "down": {
+      "kbps": 10000
+    },
+    "up": {
+      "kbps": 10000
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 65,
+    "carrier_down": {
+      "kbps": 10000,
+      "outage_at_ms": 3000,
+      "outage_ms": 10000
+    }
+  },
+  {
+    "name": "carrier-ten-second-missing",
+    "expectation": "recovery",
+    "down": {
+      "kbps": 10000
+    },
+    "up": {
+      "kbps": 10000
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 65,
+    "carrier_missing": true,
+    "carrier_down": {
+      "kbps": 10000,
+      "outage_at_ms": 3000,
+      "outage_ms": 10000
+    }
+  },
+  {
+    "name": "intentional-microphone-mute",
+    "expectation": "recovery",
+    "down": {
+      "kbps": 10000
+    },
+    "up": {
+      "kbps": 10000
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 20,
+    "mute_microphone": true
+  },
+  {
+    "name": "browser-reconnect",
+    "expectation": "recovery",
+    "down": {
+      "kbps": 10000
+    },
+    "up": {
+      "kbps": 10000
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 20,
+    "reconnect_browser": true
+  }
+]

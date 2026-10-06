@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"github.com/robfig/cron/v3"
 	"strings"
 	"time"
@@ -24,7 +23,7 @@ type Schedule struct {
 type Definition struct {
 	Steps                []Step      `json:"steps,omitempty"`
 	Parameters           []Parameter `json:"parameters,omitempty"`
-	ExecutionMode        string      `json:"execution_mode"`
+	ExecutionMode        string      `json:"execution_mode,omitempty"`
 	Name                 string      `json:"name"`
 	Description          string      `json:"description"`
 	Instructions         string      `json:"instructions"`
@@ -32,7 +31,7 @@ type Definition struct {
 	DefaultInputs        string      `json:"default_inputs"`
 	CompletionCriteria   string      `json:"completion_criteria"`
 	ApprovalRequirements string      `json:"approval_requirements"`
-	OwnerAgentID         int64       `json:"owner_agent_id"`
+	OwnerAgentID         int64       `json:"owner_agent_id,omitempty"`
 	Schedule             *Schedule   `json:"schedule,omitempty"`
 }
 type Process struct {
@@ -107,12 +106,6 @@ func (d *Definition) validate() error {
 	if e := validateSchema(d.Parameters); e != nil {
 		return e
 	}
-	if d.ExecutionMode == "" {
-		d.ExecutionMode = "agent"
-	}
-	if d.ExecutionMode != "agent" && d.ExecutionMode != "tasks" {
-		return errors.New("execution_mode must be agent or tasks")
-	}
 	d.Name = strings.TrimSpace(d.Name)
 	d.Instructions = strings.TrimSpace(d.Instructions)
 	if d.Name == "" || len(d.Name) > 160 {
@@ -121,14 +114,29 @@ func (d *Definition) validate() error {
 	if d.Instructions == "" || strings.TrimSpace(d.CompletionCriteria) == "" {
 		return errors.New("instructions and completion criteria are required")
 	}
-	if d.OwnerAgentID <= 0 {
-		return errors.New("choose an owner agent")
-	}
 	raw, _ := json.Marshal(d)
 	if len(raw) > 128*1024 {
 		return errors.New("procedure exceeds 128 KB")
 	}
-	if s := d.Schedule; s != nil {
+	return nil
+}
+
+// Execution fields remain readable on historical definitions and are overlaid
+// for execution, but new procedure versions never own assignment configuration.
+func (d Definition) procedureOnly() Definition {
+	d.OwnerAgentID = 0
+	d.ExecutionMode = ""
+	d.Schedule = nil
+	return d
+}
+func validateExecution(c AssignmentConfig) error {
+	if c.OwnerAgentID <= 0 {
+		return errors.New("choose an owner agent for this assignment")
+	}
+	if c.ExecutionMode != "agent" && c.ExecutionMode != "tasks" {
+		return errors.New("execution_mode must be agent or tasks")
+	}
+	if s := c.Schedule; s != nil {
 		if s.Timezone == "" {
 			s.Timezone = "UTC"
 		}
@@ -167,7 +175,7 @@ func (a *App) get(project, id string) (*Process, error) {
 	if err = json.Unmarshal([]byte(body), &p.Definition); err != nil {
 		return nil, err
 	}
-	if p.ExecutionMode == "" {
+	if p.ExecutionMode == "" && p.OwnerAgentID > 0 {
 		p.ExecutionMode = "tasks"
 	}
 	p.Assignments, err = a.assignments(p.ID)
@@ -233,7 +241,7 @@ func (a *App) versions(id string) ([]Version, error) {
 		if err = json.Unmarshal([]byte(body), &v.Definition); err != nil {
 			return nil, err
 		}
-		if v.Definition.ExecutionMode == "" {
+		if v.Definition.ExecutionMode == "" && v.Definition.OwnerAgentID > 0 {
 			v.Definition.ExecutionMode = "tasks"
 		}
 		out = append(out, v)
@@ -247,21 +255,15 @@ func (a *App) definition(id string, version int) (Definition, error) {
 	if err == nil {
 		err = json.Unmarshal([]byte(raw), &d)
 	}
-	if d.ExecutionMode == "" {
+	if d.ExecutionMode == "" && d.OwnerAgentID > 0 {
 		d.ExecutionMode = "tasks"
 	}
 	return d, err
 }
 func (a *App) save(project, id, actor string, expected int, d Definition) (*Process, error) {
+	d = d.procedureOnly()
 	if err := d.validate(); err != nil {
 		return nil, err
-	}
-	agent, err := a.ctx.GetAgent(d.OwnerAgentID)
-	if err != nil {
-		return nil, fmt.Errorf("resolve owner: %w", err)
-	}
-	if agent.ProjectID != project {
-		return nil, errors.New("owner is outside this project")
 	}
 	var previous *Process
 	version := 1
@@ -301,21 +303,12 @@ func (a *App) save(project, id, actor string, expected int, d Definition) (*Proc
 	if err != nil {
 		return nil, err
 	}
-	if create {
-		c := AssignmentConfig{FollowLatest: true, Name: "Default assignment", OwnerAgentID: d.OwnerAgentID, ExecutionMode: d.ExecutionMode, Schedule: d.Schedule, ProcedureVersion: version, Parameters: map[string]any{}}
-		_, err = tx.Exec(`INSERT INTO process_assignments(id,process_id,body_json,status,created_at,updated_at) VALUES(?,?,?,'active',?,?)`, "assignment-"+id, id, jsonText(c), now, now)
-	} else {
+	if !create {
 		for _, x := range previous.Assignments {
 			c := x.AssignmentConfig
 			changed := false
 			if c.FollowLatest {
 				c.ProcedureVersion = version
-				changed = true
-			}
-			if x.ID == "assignment-"+id && (previous.OwnerAgentID != d.OwnerAgentID || previous.ExecutionMode != d.ExecutionMode || jsonText(previous.Schedule) != jsonText(d.Schedule)) {
-				c.OwnerAgentID = d.OwnerAgentID
-				c.ExecutionMode = d.ExecutionMode
-				c.Schedule = d.Schedule
 				changed = true
 			}
 			if changed {

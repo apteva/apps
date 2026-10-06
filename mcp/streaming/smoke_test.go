@@ -96,7 +96,7 @@ func TestSmokeLoadTest(t *testing.T) {
 	app := &App{
 		runners:       map[int64]*streamRunner{},
 		viewers:       newViewerTracker(),
-		throttle:      newViewerThrottle(),
+		throttle:      newViewerThrottle(defaultMaxViewersPerIP),
 		playback:      newPlaybackCache(playbackCacheTTL),
 		runnerFactory: newFFmpegRunner,
 	}
@@ -217,7 +217,7 @@ func TestSmokeLoadTest(t *testing.T) {
 	// same way streams_load_test builds it, so this exercises the real
 	// target-resolution path (loopback, sidecar's own route, project_id
 	// when the install is global-scoped).
-	playbackURL := app.loopbackPlaybackURL(stream, indexPlaylistFile)
+	playbackURL := app.loopbackPlaybackURL(stream, indexPlaylistFile, 0)
 	t.Logf("playback_url %s", playbackURL)
 	t.Logf("load_test viewers=%d duration=%ds", viewers, durationSec)
 

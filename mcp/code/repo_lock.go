@@ -15,6 +15,8 @@ import (
 // ordinary FileStore operations used by agents and the panel. A keyed lock is
 // kept for the life of the app; repository counts are small and retaining the
 // mutex avoids reference-count races during archive/delete.
+var errRepositoryNotFound = errors.New("repository not found")
+
 type repoLockSet struct {
 	mu        sync.Mutex
 	locks     map[string]*sync.RWMutex
@@ -158,8 +160,11 @@ func (s *lockedFileStore) RepoPath(slug string) string {
 // the row/link and restore the source so deletion can be retried safely.
 func (a *App) hardDeleteRepo(db *sql.DB, projectID, slug string) (err error) {
 	repo, err := dbGetRepoBySlug(db, projectID, slug)
-	if err != nil || repo == nil {
+	if err != nil {
 		return err
+	}
+	if repo == nil {
+		return errRepositoryNotFound
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

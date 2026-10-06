@@ -386,6 +386,7 @@ func upsertRemoteAgent(db *sql.DB, peer peerConfig, entry directoryEntry, card *
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(peer_id, card_id) DO UPDATE SET
 			ref=excluded.ref, name=excluded.name, description=excluded.description,
+			directory_visible=1,
 			endpoint_url=CASE WHEN excluded.endpoint_url <> '' THEN excluded.endpoint_url ELSE a2a_remote_agents.endpoint_url END,
 			skills_json=excluded.skills_json,
 			card_json=CASE WHEN excluded.card_json <> '' THEN excluded.card_json ELSE a2a_remote_agents.card_json END,

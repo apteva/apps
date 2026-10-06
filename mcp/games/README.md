@@ -1,4 +1,4 @@
-# Games v0.5
+# Games v0.6
 
 See [Assets and content](ASSETS.md) for all thirteen asset kinds, Media Studio generation, immutable manifests and Unity/Godot importers.
 
@@ -10,7 +10,7 @@ workspace shows the selected game and keeps its data separate.
 ## Studio workspace
 
 Source links, Deploy release controls, portfolio status, gameplay telemetry and
-AdMob/GA4/Apple sales reporting are described in [STUDIO.md](STUDIO.md).
+AdMob/GA4/Apple sales and Google Play sales/earnings reporting are described in [STUDIO.md](STUDIO.md).
 Code 0.10.0 and Deploy 0.26.0 provide the build/publishing foundation. No engine
 or store publisher implementation is duplicated in Games.
 

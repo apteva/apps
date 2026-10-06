@@ -1,0 +1,87 @@
+import { expect, test } from "bun:test";
+import { pendingResponsePhase, responseToolGroup } from "../src/responseActivity";
+import { isVisibleChatTool, buildChatTimeline, toolDurationMs, toolGroupDurationMs, type ToolActivity } from "../src/toolActivityModel";
+import { applyConversationActivityFrame } from "../src/conversationActivity";
+
+const base: ToolActivity = { id:"1", callId:"c1", agentId:41, threadId:"chat-1", name:"repos", reason:"Checking repositories", state:"done", startedAt:1000, finishedAt:2500, durationMs:1500 };
+test("tool activity owns progress while a response is calling tools", () => {
+  const bubble = { agentId:41, threadId:"chat-1", afterMessageId:7, createdAt:1000 };
+  const user = { id:7, conversation_id:"chat-1", role:"user" as const, content:"hi", components:[], created_at:new Date(1000).toISOString() };
+  expect(pendingResponsePhase(bubble, [{...base, status:"running", agent_id:41, thread_id:"chat-1", started_at:new Date(1000).toISOString()} as any], [user])).toBeNull();
+  expect(pendingResponsePhase(bubble, [{status:"completed", agent_id:41, thread_id:"chat-1", started_at:new Date(1500).toISOString()} as any], [user])).toBe("preparing");
+});
+test("tool durations use provider duration and group parallel intervals once", () => {
+  expect(toolDurationMs(base, 9999)).toBe(1500);
+  const second = {...base, id:"2", startedAt:1800, finishedAt:2800, durationMs:1000};
+  expect(toolGroupDurationMs([base, second], 9999)).toBe(1800);
+});
+
+test("fast call/result bursts paint running first without blocking parallel starts", async () => {
+ const {splitActivityPaint}=await import("../src/toolActivityPaint");
+ const a={id:1,status:"running",revision:1} as any;
+ const result={...a,status:"completed",revision:2};
+ const b={...a,id:2};
+ const first=splitActivityPaint([a,result,b]);
+ expect(first.paint).toEqual([a,b]);expect(first.deferred).toEqual([result]);
+ expect(splitActivityPaint(first.deferred).paint).toEqual([result]);
+});
+
+test("only an executing tool owns the response indicator",()=>{
+ const user={id:7,role:"user",created_at:new Date(900).toISOString()} as any;
+ const timeline=[{kind:"toolGroup",key:"group",tools:[{...base,state:"running"}]}, {kind:"message",key:"reply",message:{id:8,role:"agent"}}] as any;
+ const response={agentId:41,threadId:"chat-1",afterMessageId:7,createdAt:1200};
+ expect(responseToolGroup(response,timeline,[user])).toBe("group");
+ expect(responseToolGroup(response,[{kind:"toolGroup",key:"group",tools:[base]}] as any,[user])).toBeUndefined();
+ expect(responseToolGroup({...response,agentId:42},timeline,[user])).toBeUndefined();
+ expect(responseToolGroup({...response,threadId:"other"},timeline,[user])).toBeUndefined();
+ expect(responseToolGroup({...response,afterMessageId:8,createdAt:3000},timeline,[user])).toBeUndefined();
+ expect(responseToolGroup({...response,optimistic:true,createdAt:3000},timeline,[user])).toBeUndefined();
+});
+
+test("completed tools stay settled during model continuation; only the next live tool owns progress",()=>{
+ const completed={...base,state:"done" as const};
+ const timeline=[{kind:"toolGroup",key:"group",tools:[completed]}] as any;
+ const response={agentId:41,threadId:"chat-1",afterMessageId:7,createdAt:1200};
+ const messages=[{id:7,role:"user",created_at:new Date(900).toISOString()} as any];
+ expect(responseToolGroup(response,timeline,messages)).toBeUndefined();
+ for (const state of ["preparing","running"] as const) {
+  expect(responseToolGroup(response,[{...timeline[0],tools:[completed,{...base,id:"2",state}]}],messages)).toBe("group");
+ }
+});
+
+test("consecutive tools keep one stable group across long gaps until a message",()=>{
+ const later={...base,id:"2",callId:"c2",startedAt:120000,finishedAt:120100,durationMs:100};
+ const first=buildChatTimeline([], [base]).find(item=>item.kind==="toolGroup")!;
+ const groups=buildChatTimeline([], [base,later]).filter(item=>item.kind==="toolGroup");
+ expect(groups).toHaveLength(1);
+ expect(groups[0]!.key).toBe(first.key);
+ expect(groups[0]!.tools).toEqual([base,later]);
+ expect(toolGroupDurationMs(groups[0]!.tools,130000)).toBe(1600);
+ const message={id:1,role:"agent",content:"An intermediate update",created_at:new Date(60000).toISOString()} as any;
+ const separated=buildChatTimeline([message], [base,later]).filter(item=>item.kind!=="day" && item.kind!=="time");
+ expect(separated.map(item=>item.kind)).toEqual(["toolGroup","message","toolGroup"]);
+});
+
+test("subsecond message timestamps retain the order around a completed tool",()=>{
+ const user={id:826,role:"user",content:"Locate the client onboarding process",created_at:"2026-09-23T12:12:34.761Z"} as any;
+ const tool={...base,startedAt:Date.parse("2026-09-23T12:12:39.537Z"),finishedAt:Date.parse("2026-09-23T12:12:39.554Z")};
+ const acknowledgement={id:828,role:"agent",content:"I'll search",created_at:"2026-09-23T12:12:39.630Z"} as any;
+ const timeline=buildChatTimeline([user,acknowledgement],[tool]).filter(item=>item.kind!=="day" && item.kind!=="time");
+ expect(timeline.map(item=>item.kind)).toEqual(["message","toolGroup","message"]);
+});
+
+test("only the exact internal search_tools lookup is hidden",()=>{
+ for(const name of ["search_tools"," SEARCH_TOOLS "]) expect(isVisibleChatTool(name)).toBe(false);
+ for(const name of ["tickets_search","agent_query","search_tools_extra","custom_search_tools"]) expect(isVisibleChatTool(name)).toBe(true);
+});
+
+test("conversation work tools appear in panels and widgets while reply sends stay in bubbles",()=>{
+ for(const name of ["conversations_read_attachment", "conversations_conversations_read_attachment", "conversations_history", "conversations_report", " CODE_REPOS_LIST ", "sms_send", "slack_send", "monitoring_alert", "conversations_alert_history"]) expect(isVisibleChatTool(name)).toBe(true);
+ for(const name of ["", "pace", "done", "wait", "think", "send", " SEND ", "conversations_send", "conversations_conversations_send", "conversations_request_approval", "conversations_conversations_request_approval", "conversations_alert", " CONVERSATIONS_CONVERSATIONS_ALERT ", "channels_send", "channels_channels_respond"]) expect(isVisibleChatTool(name)).toBe(false);
+});
+
+test("conversation activity clears on idle progress frames and authoritative empty snapshots",()=>{
+ const active = new Set(["chat-1", "chat-2"]);
+ expect([...applyConversationActivityFrame(active, {chat_id:"chat-1",response_progress:{phase:"idle"}} as any)]).toEqual(["chat-2"]);
+ expect([...applyConversationActivityFrame(new Set(["chat-1"]), {snapshot:true,chat_id:"",frames:[]} as any)]).toEqual([]);
+});

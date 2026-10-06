@@ -2,8 +2,14 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 1.14.1
+version: 1.16.0
 description: |
+  v1.16.0 Adds sortable performance rankings and slow-call diagnostics in
+  the panel and MCP. Compare calls, total execution wall time, average/p95
+  latency, queue wait and errors over a selected period; inspect invocation
+  timings and downstream resources. Reports use retained, project-scoped
+  history with exact percentiles and cancellable queries.
+
   v1.14.1 Accepts opaque business payloads, including new-user passwords,
   while excluding caller credentials from identity claims and authenticated
   request bodies from invocation history. Trusted admission and nested
@@ -100,6 +106,10 @@ provides:
     - prefix: /url/
       no_auth: true
   mcp_tools:
+    - name: functions_performance
+      description: "Rank hot, busy, slow or failing functions over window (1h|6h|24h|7d|30d) or since/until. Optional id/name, sort, limit. Returns calls, rate, errors, average/p95 latency, queue wait and total execution wall time."
+    - name: functions_slow_invocations
+      description: "Find slow completed calls across the project or for id/name. Args: window or since/until, sort (duration_ms|execution_ms|queue_ms), min_ms, status, limit, cursor. Use returned id with functions_logs for timing and downstream details."
     - name: functions_invoke_authenticated
       exposure: app_only
       description: "Invoke with a separate principal, exact Function scope, and original deadline; restricted to configured platform-verified caller installations."
@@ -122,7 +132,7 @@ provides:
     - name: functions_invocations
       description: "Recent invocations for a function. Args: id (or name), limit (default 50, max 200)."
     - name: functions_logs
-      description: "Return value + console output of a single invocation. Args: invocation_id."
+      description: "Inspect output, status, total duration, timing breakdown and resource/downstream-call measurements of a single invocation. Args: invocation_id."
     - name: functions_deploy
       description: "Deploy a new immutable version and make it active. Args: id (or name), source OR (repo_id+repo_path), package_json?."
     - name: functions_rollback
@@ -139,7 +149,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: functions/v1.14.1
+    ref: functions/v1.16.0
     entry: mcp/functions
   port: 8080
   health_check: /health

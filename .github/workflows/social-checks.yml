@@ -42,7 +42,7 @@ jobs:
           git show origin/main:scripts/verify-social-artifacts.ts > scripts/verify-social-artifacts.ts
           git show origin/main:scripts/verify-social-artifacts.test.ts > scripts/verify-social-artifacts.test.ts
       - run: bun test mcp/social/ui scripts/verify-social-artifacts.test.ts
-      - run: bunx -p typescript@7.0.2 tsc --noEmit --jsx react-jsx --module esnext --moduleResolution bundler --target es2022 --skipLibCheck --allowImportingTsExtensions mcp/social/ui/SocialPanel.tsx mcp/social/ui/SocialCharts.tsx
+      - run: bunx -p typescript@7.0.2 tsc --noEmit --jsx react-jsx --module esnext --moduleResolution bundler --target es2022 --skipLibCheck --allowImportingTsExtensions mcp/social/ui/SocialPanel.tsx mcp/social/ui/SocialCharts.tsx mcp/social/ui/SocialPublishingCalendarWidget.tsx mcp/social/ui/SocialPerformanceWidget.tsx
       - run: bun run scripts/build-panels.ts --app social
       - name: Verify committed frontend artifacts
         run: bun run scripts/verify-social-artifacts.ts

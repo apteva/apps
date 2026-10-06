@@ -1,5 +1,29 @@
 # Workspaces
 
+## v0.6.2
+
+Preview Stop succeeds when the workspace was already destroyed, allowing Code
+to restart or delete the repository after workspace retention cleanup. Requires
+Containers 0.5.2 for source updates alongside dependency caches.
+
+
+## v0.6.1
+
+Requires Containers 0.5.1 for compatibility with SDK project-routing metadata.
+
+
+## v0.6.0
+
+App callers can create a workspace with `preview_port` and use
+`workspace_preview_start/get/logs/stop` to manage an HTTP preview. Containers
+publishes an automatically allocated loopback port; the process binds
+`0.0.0.0` inside Docker. Preview executions have a separate lifecycle from the
+command PTY, bounded logs, readiness checks, a ten-minute startup deadline, and
+the workspace TTL as their maximum lifetime. Stop halts the container and
+retains volumes under the workspace retention policy. Handles persist through
+Code and Workspaces restarts. Requires Containers 0.5.0 or later.
+
+
 ## v0.5.0
 
 - Accept an operator-allowlisted, digest-pinned image per workspace while

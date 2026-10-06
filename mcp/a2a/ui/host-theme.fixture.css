@@ -1,0 +1,146 @@
+/* Test fixture: dashboard/src/index.css identity and palettes, 2026-09-15. */
+/* Identity: typography + geometry. Vary by theme only. */
+[data-theme="terminal"] {
+  --font-base: "JetBrains Mono", "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 6px;
+  --shadow-card: none;
+  --shadow-popover: 0 0 0 1px rgb(0 0 0 / 0.4);
+}
+[data-theme="clean"] {
+  --font-base: "Inter", "system-ui", -apple-system, sans-serif;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.04), 0 1px 3px rgb(0 0 0 / 0.06);
+  --shadow-popover: 0 4px 6px rgb(0 0 0 / 0.05), 0 10px 20px rgb(0 0 0 / 0.10);
+}
+
+/* Always-mono token, for code / inline IDs / log lines. Never themed. */
+:root {
+  --font-mono-fixed: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --safe-area-top: env(safe-area-inset-top, 0px);
+  --safe-area-right: env(safe-area-inset-right, 0px);
+  --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-area-left: env(safe-area-inset-left, 0px);
+  --chat-tool-running: #f97316;
+  --chat-tool-failed: #ff3d24;
+}
+
+[data-mode="light"] {
+  --chat-tool-running: #c2410c;
+  --chat-tool-failed: #c92314;
+}
+
+/* ─── Palettes (4 = theme × mode) ─────────────────────────────────
+ * Color values are hand-tuned per (theme × mode) combination. Each
+ * row of tokens is the same semantic shape so every palette can be
+ * swapped without touching component code.
+ *
+ * Naming:
+ *   bg / bg-card / bg-subtle / bg-hover / bg-input / bg-overlay — surfaces
+ *   text / text-muted / text-dim                      — type tones
+ *   border / border-subtle / border-strong            — separators
+ *   accent / accent-hover / accent-muted              — brand
+ *   success / warn / error / info                     — statuses
+ * ─────────────────────────────────────────────────────────────── */
+
+/* Default (no data-theme set) = terminal-dark. Same palette as the
+ * previous hardcoded values so there's zero visual drift on first
+ * paint before the bootstrap script runs. */
+:root,
+[data-theme="terminal"][data-mode="dark"] {
+  --bg: #0a0a0a;
+  --bg-card: #141414;
+  --bg-subtle: #101010;
+  --bg-hover: #1c1c1c;
+  --bg-input: #111111;
+  --bg-overlay: rgb(0 0 0 / 0.6);
+  --text: #e8e8e8;
+  --text-muted: #aaaaaa;
+  --text-dim: #888888;
+  --border: #2a2a2a;
+  --border-subtle: #333333;
+  --border-strong: #4a4a4a;
+  --accent: #f97316;
+  --accent-hover: #fb923c;
+  --accent-muted: #c2410c;
+  --success: #22c55e;
+  --warn: #eab308;
+  --error: #ef4444;
+  --info: #3b82f6;
+  --recurring: #a78bfa;
+}
+
+[data-theme="terminal"][data-mode="light"] {
+  --bg: #faf8f3;
+  --bg-card: #f1ede4;
+  --bg-subtle: #f7f4ed;
+  --bg-hover: #e8e3d6;
+  --bg-input: #f6f2e9;
+  --bg-overlay: rgb(0 0 0 / 0.5);
+  --text: #1a1a1a;
+  --text-muted: #555555;
+  --text-dim: #777777;
+  --border: #d4ccb8;
+  --border-subtle: #e2dcca;
+  --border-strong: #b9b09a;
+  --accent: #c2410c;          /* darker than terminal-dark's accent — pops on light */
+  --accent-hover: #9a3412;
+  --accent-muted: #fdba74;
+  --success: #15803d;
+  --warn: #a16207;
+  --error: #b91c1c;
+  --info: #1d4ed8;
+  --recurring: #6d28d9;
+}
+
+[data-theme="clean"][data-mode="dark"] {
+  --bg: #0f1419;              /* slightly cooler than terminal-dark */
+  --bg-card: #1a2128;
+  --bg-subtle: #151b22;
+  --bg-hover: #232b34;
+  --bg-input: #131920;
+  --bg-overlay: rgb(0 0 0 / 0.6);
+  --text: #e6e8eb;
+  --text-muted: #a3aab3;
+  --text-dim: #7d848e;
+  --border: #2a3340;
+  --border-subtle: #1f2630;
+  --border-strong: #3d4759;
+  --accent: #6e8aff;          /* cooler blue-violet */
+  --accent-hover: #8aa1ff;
+  --accent-muted: #4255a5;
+  --success: #4ade80;
+  --warn: #fbbf24;
+  --error: #f87171;
+  --info: #60a5fa;
+  --recurring: #c084fc;
+}
+
+[data-theme="clean"][data-mode="light"] {
+  --bg: #ffffff;
+  --bg-card: #f7f8fa;
+  --bg-subtle: #fafbfc;
+  --bg-hover: #eef0f4;
+  --bg-input: #ffffff;
+  --bg-overlay: rgb(0 0 0 / 0.4);
+  --text: #15171a;
+  --text-muted: #4b5563;
+  --text-dim: #6b7280;
+  --border: #e5e7eb;
+  --border-subtle: #f1f3f5;
+  --border-strong: #cbd1d8;
+  --accent: #4f5fdb;          /* same family as clean-dark's accent, deeper */
+  --accent-hover: #4150c4;
+  --accent-muted: #c1c8f0;
+  --success: #047857;
+  --warn: #b45309;
+  --error: #b91c1c;
+  --info: #1d4ed8;
+  --recurring: #7c3aed;
+}
+
+
+html,body{height:100%;margin:0}body{font-family:var(--font-base);font-size:14px;line-height:1.5;background:var(--bg);color:var(--text)}*{box-sizing:border-box}button,input,select{font-family:inherit}#root{height:100dvh}

@@ -12,7 +12,9 @@ import {
 } from "./audio-settings";
 
 import { usePanelSoftphone } from "./use-panel-softphone";
-import { isIncomingBrowserCall } from "../frontend/src/client";
+import { callTerminationLabel, isIncomingBrowserCall, type Call as TelephonyCall } from "../frontend/src/client";
+
+import type { HeadlessCallListener, ListenerSnapshot } from "../frontend/src/listener";
 
 const API = "/api/apps/telephony";
 
@@ -24,6 +26,9 @@ interface NativePanelProps {
 }
 
 interface RawCall {
+  coachable?: boolean;
+  listenable?: boolean;
+  listen_supported?: boolean;
   ID?: string;
   id?: string;
   ThreadID?: string;
@@ -62,6 +67,8 @@ interface RawCall {
   answered_at?: string;
   EndedAt?: string;
   ended_at?: string;
+  answered_by?: string;
+  termination_reason?: string;
   ProjectID?: string;
   project_id?: string;
   ErrorMessage?: string;
@@ -139,6 +146,8 @@ interface CarrierAudioDiagnostics {
 interface RingOffer {id:string;destination_id:string;name:string;kind:string;agent_id?:number;expires_at:string}
 
 interface Call {
+  coachable: boolean;
+  listenable: boolean;
   ringOffers: RingOffer[];
   id: string;
   threadId: string;
@@ -170,6 +179,8 @@ interface Call {
   terminationCause: string;
   terminationCode: string;
   terminationInitiator: string;
+  terminationReason: string;
+  answeredBy: string;
   browserAudioDiagnostics: BrowserAudioDiagnostics;
   carrierAudioDiagnostics: CarrierAudioDiagnostics;
 }
@@ -242,6 +253,8 @@ function usePanelWidth() {
 
 function normalizeCall(row: RawCall): Call {
   return {
+    listenable: row.listenable === true,
+    coachable: row.coachable === true,
     id: row.id ?? row.ID ?? "",
     threadId: row.thread_id ?? row.ThreadID ?? "",
     carrierSid: row.carrier_sid ?? row.CarrierSID ?? "",
@@ -261,6 +274,8 @@ function normalizeCall(row: RawCall): Call {
     placedAt: row.placed_at ?? row.PlacedAt ?? "",
     answeredAt: row.answered_at ?? row.AnsweredAt ?? "",
     endedAt: row.ended_at ?? row.EndedAt ?? "",
+    terminationReason: row.termination_reason ?? "",
+    answeredBy: row.answered_by ?? "",
     projectId: row.project_id ?? row.ProjectID ?? "",
     errorMessage: row.error_message ?? row.ErrorMessage ?? "",
     recordingMode: row.recording_mode ?? row.RecordingMode ?? "off",
@@ -992,6 +1007,17 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     onDiagnostics: setDiagnostics,
     onNotice: setStatus,
   });
+  const [callListener, setCallListener] = useState<HeadlessCallListener>();
+  const [listenerState, setListenerState] = useState<ListenerSnapshot>({ state: "idle" });
+  useEffect(() => {
+    const listener = telephony.createCallListener({inputDeviceId:audioOptions.inputDeviceId});
+    setCallListener(listener);
+    setListenerState(listener.getSnapshot());
+    const unsubscribe = listener.subscribe(setListenerState);
+    return () => { unsubscribe(); void listener.dispose(); };
+  }, [telephony,audioOptions.inputDeviceId]);
+  useEffect(() => { if (!visible) callListener?.stopTalking(); },[visible,callListener]);
+  useEffect(() => { callListener?.stopTalking(); },[selectedId,callListener]);
   const softphoneCallId = phoneState.callId ?? "";
   const softphoneState = phoneState.audioState;
   const softphoneDetail = phoneState.detail ?? "";
@@ -1074,24 +1100,27 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     if (dialerOpen) void loadOutboundNumbers();
   }, [dialerOpen, loadOutboundNumbers]);
 
+  const receiveCalls = useCallback((raw: TelephonyCall[]) => {
+    const list = raw.map(call => normalizeCall(call as RawCall));
+    setCalls(list);
+    setSelectedId(current => current && list.some(c => c.id === current) ? current : list[0]?.id ?? "");
+    setLoading(false);
+  }, []);
+
   const loadCalls = useCallback(async () => {
     if (callsRequest.current) return;
     const request = new AbortController(); callsRequest.current = request;
     setLoading(true);
     try {
-      const list = (await telephony.listCalls(request.signal)).map(call => normalizeCall(call as RawCall));
-      if (request.signal.aborted) return;
-      setCalls(list);
-      setSelectedId((current) => current && list.some((c) => c.id === current)
-        ? current
-        : list[0]?.id ?? "");
+      const list = await telephony.listCalls(request.signal);
+      if (!request.signal.aborted) receiveCalls(list);
     } catch (e) {
       if (!request.signal.aborted) setStatus((e as Error).message || "Load failed");
     } finally {
       if (callsRequest.current === request) callsRequest.current = null;
       setLoading(false);
     }
-  }, [telephony]);
+  }, [telephony, receiveCalls]);
 
   const loadRecordingSettings = useCallback(async () => {
     try {
@@ -1125,7 +1154,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
   }, [withProject]);
 
   useEffect(() => {
-    void Promise.all([loadCalls(), loadRecordingSettings()]);
+    void loadRecordingSettings();
     return () => { callsRequest.current?.abort(); callsRequest.current = null; recordingsRequest.current?.abort(); };
   }, [loadCalls, loadRecordingSettings]);
 
@@ -1134,18 +1163,16 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     return () => window.clearInterval(timer);
   }, []);
 
-  // A ringing softphone call is only answerable while the carrier holds the
-  // caller, so poll fast whenever anything is live and fall back to the idle
-  // cadence otherwise.
-  const hasUrgentCall = useMemo(
-    () => calls.some((call) => call.status === "pending" || LIVE_STATUSES.has(call.status)),
-    [calls],
-  );
-
   useEffect(() => {
-    const timer = window.setInterval(loadCalls, 2000);
-    return () => window.clearInterval(timer);
-  }, [loadCalls, hasUrgentCall]);
+    const watcher = telephony.watchCalls(receiveCalls, {
+      onFailure: sample => {
+        setLoading(false);
+        const response = sample.status === undefined ? "network" : `HTTP ${sample.status}`;
+        setStatus(`Call refresh failed (${response}, ${Math.round(sample.fetchMs)} ms, ${sample.trigger}): ${(sample.error as Error).message || "request failed"}`);
+      },
+    });
+    return () => watcher.close();
+  }, [telephony, receiveCalls]);
 
   const selected = useMemo(
     () => calls.find((call) => call.id === selectedId) ?? calls[0] ?? null,
@@ -1436,6 +1463,12 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                       <span className={`inline-flex max-w-full items-center rounded border px-2 py-0.5 text-xs ${statusClass(call.status)}`}>
                         <span className="truncate">{call.status || "unknown"}</span>
                       </span>
+                      {call.terminationReason && call.terminationReason !== call.status.replaceAll("-", "_") ? (
+                        <div className="mt-1 truncate text-xs text-text-dim">{callTerminationLabel({reason:call.terminationReason},typeof navigator!=="undefined" ? navigator.language : "en")}</div>
+                      ) : null}
+                      {call.answeredBy && call.answeredBy !== "human" ? (
+                        <div className="mt-1 truncate text-xs text-text-dim">Answered by {call.answeredBy}</div>
+                      ) : null}
                     </div>
                     <div className="min-w-0">
                       <div className="truncate text-sm font-medium">{call.toNumber || "-"}</div>
@@ -1502,6 +1535,27 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                   <div className="mt-1 text-lg font-semibold truncate">{(selected.direction === "inbound" ? selected.fromNumber : selected.toNumber) || selected.id}</div>
                   <div className="mt-1 text-xs text-text-muted truncate">{selected.threadId}</div>
                 </div>
+                {selected.listenable && listenerState.callId !== selected.id ? (
+                  <button type="button" disabled={!callListener || Boolean(softphoneCallId)} onClick={() => void callListener?.listen(selected.id).catch(error => setStatus(String(error)))} className="h-8 px-3 rounded border border-border text-xs">Listen</button>
+                ) : null}
+                {selected.coachable && listenerState.callId !== selected.id ? (
+                  <button type="button" disabled={!callListener || Boolean(softphoneCallId)} onClick={() => void callListener?.coach(selected.id).catch(error => setStatus(String(error)))} className="h-8 px-3 rounded border border-border text-xs">Private coaching</button>
+                ) : null}
+                {listenerState.coaching && listenerState.state === "listening" && listenerState.callId === selected.id ? (
+                  <div className="text-xs">
+                    <button type="button" aria-pressed={listenerState.talking===true}
+                      onPointerDown={e => { if(e.button!==0)return; e.currentTarget.setPointerCapture(e.pointerId); void callListener?.startTalking().catch(error=>setStatus(String(error))); }}
+                      onPointerUp={()=>callListener?.stopTalking()} onPointerCancel={()=>callListener?.stopTalking()} onLostPointerCapture={()=>callListener?.stopTalking()}
+                      onKeyDown={e=>{if((e.key===" " || e.key==="Enter") && !e.repeat){e.preventDefault();void callListener?.startTalking().catch(error=>setStatus(String(error)));}}}
+                      onKeyUp={e=>{if(e.key===" " || e.key==="Enter"){e.preventDefault();callListener?.stopTalking();}}}
+                      onBlur={()=>callListener?.stopTalking()}
+                      className={`h-8 px-3 rounded border border-border touch-none ${listenerState.talking ? "bg-accent text-bg" : ""}`}>Hold to talk to adviser</button>
+                    <span className="ml-2">Only the adviser hears you. Use a headset.</span>
+                  </div>
+                ) : null}
+                {listenerState.callId ? (
+                  <div className="text-xs"><span>{listenerState.state.replaceAll("_", " ")}</span><button type="button" onClick={() => void callListener?.stop()} className="ml-2 h-8 px-3 rounded border border-border">Stop listening</button><label className="ml-2">Volume <input aria-label="Listener volume" type="range" min="0" max="1" step="0.05" defaultValue="1" onChange={e => callListener?.setOutputVolume(Number(e.target.value))} /></label></div>
+                ) : null}
                 {selected.peerKind === "human"
                   && !selected.routingWaiting
                   && ((selected.direction === "inbound" && selected.status === "pending") || LIVE_STATUSES.has(selected.status))
@@ -1739,6 +1793,10 @@ interface NumberOffer {
   matching_compliance_profiles?: number;
   purchase_ready: boolean;
   purchase_blocker?: string;
+  provider_resource_id?: string;
+  provider_group_id?: string;
+  provider_sku_id?: string;
+  inventory_mode?: string;
 }
 
 interface NumberSearchResponse {
@@ -1762,6 +1820,12 @@ interface ConnectedRoute {
   recording_mode: string;
   inbound_transport: "programmable_websocket" | "sip_direct";
   transport_configured: boolean;
+}
+
+interface ProjectAgent {
+  id: number;
+  name?: string;
+  status?: string;
 }
 
 interface ConnectedNumber {
@@ -1833,6 +1897,7 @@ interface RegulatoryBundle {
   sid: string;
   friendly_name?: string;
   status?: string;
+  resource_kind?: "identity" | "verification";
   regulation_sid?: string;
   email?: string;
   valid_until?: string;
@@ -1904,6 +1969,9 @@ function NumbersView({ projectId }: NativePanelProps) {
   const [transportSaving, setTransportSaving] = useState("");
   const [transportStatus, setTransportStatus] = useState("");
   const [answerModeSaving, setAnswerModeSaving] = useState("");
+  const [agents, setAgents] = useState<ProjectAgent[]>([]);
+  const [routeDrafts, setRouteDrafts] = useState<Record<string, { agent_id: string; answer_mode: string }>>({});
+  const [routeSaving, setRouteSaving] = useState("");
   const [countries, setCountries] = useState("EE, AT");
   const [numberType, setNumberType] = useState("local");
   const [offers, setOffers] = useState<NumberOffer[]>([]);
@@ -1940,6 +2008,14 @@ function NumbersView({ projectId }: NativePanelProps) {
           .filter((number) => number.route)
           .map((number) => [number.route!.id, number.route!.inbound_transport || "programmable_websocket"]),
       ));
+      try {
+        const directory = await postJSON<{ agents?: ProjectAgent[] }>(endpoint("/numbers/agents"), {});
+        if (requestId !== connectedRequestRef.current) return;
+        setAgents(directory.agents ?? []);
+      } catch {
+        // The agent directory is optional; the form falls back to a manual agent id.
+        setAgents([]);
+      }
     } catch (e) {
       if (requestId !== connectedRequestRef.current) return;
       setConnectedNumbers([]);
@@ -2033,7 +2109,7 @@ function NumbersView({ projectId }: NativePanelProps) {
         ...(addressSid.trim() ? { address_id: addressSid.trim() } : {}),
         ...(bundleSid.trim() ? { compliance_id: bundleSid.trim() } : {}),
       });
-      setPurchaseResult(`${data.phone_number || selected.phone_number} purchased through ${data.provider || selected.provider}`);
+      setPurchaseResult(`${data.phone_number || selected.phone_number || selected.friendly_name || "DIDWW number"} purchased through ${data.provider || selected.provider}`);
       setSelected(null);
       setStatus("Purchase completed");
       await loadConnected();
@@ -2084,6 +2160,61 @@ function NumbersView({ projectId }: NativePanelProps) {
     } finally {
       await loadConnected();
       setAnswerModeSaving("");
+    }
+  };
+
+  const routeDraft = (number: ConnectedNumber) =>
+    routeDrafts[number.phone_number] || { agent_id: agents[0] ? String(agents[0].id) : "", answer_mode: "agent" };
+
+  const updateRouteDraft = (number: ConnectedNumber, patch: Partial<{ agent_id: string; answer_mode: string }>) => {
+    const current = routeDraft(number);
+    setRouteDrafts((drafts) => ({ ...drafts, [number.phone_number]: { ...current, ...patch } }));
+  };
+
+  // Bind an unrouted carrier number to an agent. The backend configures the
+  // carrier webhook in the same request; a warning means the route exists but
+  // still needs carrier configuration.
+  const createRoute = async (number: ConnectedNumber) => {
+    const draft = routeDraft(number);
+    const agentId = Number(draft.agent_id);
+    if (!Number.isInteger(agentId) || agentId <= 0) {
+      setTransportStatus("Choose the agent that should own this number");
+      return;
+    }
+    setRouteSaving(number.phone_number);
+    setTransportStatus("");
+    try {
+      const result = await postJSON<{ warning?: string }>(endpoint("/numbers/routes/create"), {
+        phone_number: number.phone_number,
+        phone_number_id: number.provider_number_id || "",
+        agent_id: agentId,
+        answer_mode: draft.answer_mode,
+        configure: true,
+      });
+      setTransportStatus(result.warning
+        ? `${number.phone_number} routed, but ${result.warning}`
+        : `${number.phone_number} now routes to agent ${agentId}`);
+    } catch (e) {
+      setTransportStatus((e as Error).message || "Could not create the inbound route");
+    } finally {
+      await loadConnected();
+      setRouteSaving("");
+    }
+  };
+
+  const disableRoute = async (number: ConnectedNumber) => {
+    if (!number.route) return;
+    const routeId = number.route.id;
+    setRouteSaving(routeId);
+    setTransportStatus("");
+    try {
+      await postJSON(endpoint("/numbers/routes/disable"), { route_id: routeId });
+      setTransportStatus(`${number.phone_number} route disabled; the carrier webhook was restored`);
+    } catch (e) {
+      setTransportStatus((e as Error).message || "Could not disable the inbound route");
+    } finally {
+      await loadConnected();
+      setRouteSaving("");
     }
   };
 
@@ -2168,11 +2299,70 @@ function NumbersView({ projectId }: NativePanelProps) {
                       {number.route ? (
                         <>
                           <div className="truncate font-mono text-xs" title={number.route.id}>{compactId(number.route.id)}</div>
-                          <span className={`mt-1 inline-flex rounded border px-2 py-0.5 text-xs ${number.route.enabled ? "border-success/30 bg-success/10 text-success" : "border-border bg-bg-muted text-text-muted"}`}>
-                            {number.route.enabled ? "Enabled" : "Disabled"}
-                          </span>
+                          <div className="mt-1 flex items-center gap-1.5">
+                            <span className={`inline-flex rounded border px-2 py-0.5 text-xs ${number.route.enabled ? "border-success/30 bg-success/10 text-success" : "border-border bg-bg-muted text-text-muted"}`}>
+                              {number.route.enabled ? "Enabled" : "Disabled"}
+                            </span>
+                            {number.route.enabled ? (
+                              <button
+                                type="button"
+                                disabled={routeSaving === number.route.id}
+                                onClick={() => void disableRoute(number)}
+                                className="h-7 rounded border border-border px-2 text-xs hover:bg-bg-muted disabled:opacity-40"
+                              >
+                                Disable
+                              </button>
+                            ) : null}
+                          </div>
                         </>
-                      ) : <span className="text-xs text-text-muted">Not routed</span>}
+                      ) : (
+                        <div className="flex min-w-0 flex-col gap-1">
+                          <span className="text-xs text-text-muted">Not routed</span>
+                          {agents.length > 0 ? (
+                            <select
+                              aria-label={`Agent for ${number.phone_number}`}
+                              value={routeDraft(number).agent_id}
+                              onChange={(event) => updateRouteDraft(number, { agent_id: event.target.value })}
+                              disabled={routeSaving === number.phone_number}
+                              className="h-8 min-w-0 rounded border border-border bg-bg px-2 text-xs"
+                            >
+                              {agents.map((agent) => (
+                                <option key={agent.id} value={String(agent.id)}>{agent.name || `Agent ${agent.id}`}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <input
+                              aria-label={`Agent id for ${number.phone_number}`}
+                              value={routeDraft(number).agent_id}
+                              onChange={(event) => updateRouteDraft(number, { agent_id: event.target.value })}
+                              placeholder="Agent ID"
+                              inputMode="numeric"
+                              disabled={routeSaving === number.phone_number}
+                              className="h-8 min-w-0 rounded border border-border bg-bg px-2 text-xs"
+                            />
+                          )}
+                          <div className="flex items-center gap-1.5">
+                            <select
+                              aria-label={`Answer mode for ${number.phone_number}`}
+                              value={routeDraft(number).answer_mode}
+                              onChange={(event) => updateRouteDraft(number, { answer_mode: event.target.value })}
+                              disabled={routeSaving === number.phone_number}
+                              className="h-8 min-w-0 flex-1 rounded border border-border bg-bg px-2 text-xs"
+                            >
+                              <option value="agent">Agent decides</option>
+                              <option value="human_browser">Ring in browser</option>
+                            </select>
+                            <button
+                              type="button"
+                              disabled={routeSaving === number.phone_number}
+                              onClick={() => void createRoute(number)}
+                              className="h-8 shrink-0 rounded border border-border px-2 text-xs hover:bg-bg-muted disabled:opacity-40"
+                            >
+                              Create route
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                     <div className="min-w-0">
                       {number.route ? (
@@ -2315,11 +2505,11 @@ function NumbersView({ projectId }: NativePanelProps) {
                 </div>
                 {offers.map((offer) => (
                   <div
-                    key={`${offer.provider}-${offer.phone_number}`}
+                    key={`${offer.provider}-${offer.provider_resource_id || offer.provider_group_id || offer.phone_number}`}
                     className="grid gap-3 items-center px-4 py-3 border-b border-border/70 text-sm"
                     style={{ gridTemplateColumns: NUMBER_COLUMNS }}
                   >
-                    <div className="font-medium truncate">{offer.phone_number}</div>
+                    <div className="font-medium truncate">{offer.phone_number || offer.friendly_name || "Number selected after order"}</div>
                     <div>
                       <div>{offer.country}</div>
                       <div className="text-xs text-text-dim">{offer.number_type.replace("_", " ")}</div>
@@ -2354,7 +2544,7 @@ function NumbersView({ projectId }: NativePanelProps) {
       {selected ? (
         <section className="shrink-0 border-t border-border bg-bg-muted/40 px-4 py-3 flex flex-wrap items-center gap-4">
           <div className="min-w-0 flex-1">
-            <div className="text-sm font-semibold">Confirm purchase of {selected.phone_number}</div>
+            <div className="text-sm font-semibold">Confirm purchase of {selected.phone_number || selected.friendly_name || "DIDWW number"}</div>
             <div className="mt-1 text-xs text-text-muted">
               {money(selected.monthly_price, selected.currency, "/month")}
               {selected.upfront_price ? ` + ${money(selected.upfront_price, selected.currency)} setup` : ""}
@@ -2362,6 +2552,11 @@ function NumbersView({ projectId }: NativePanelProps) {
               {selected.address_requirement ? `; address requirement: ${selected.address_requirement}` : ""}
               {selected.recommended_compliance_name ? `; approved profile: ${selected.recommended_compliance_name}` : ""}
             </div>
+            {selected.provider === "didww" && selected.compliance_required ? (
+              <div className="mt-3 max-w-3xl rounded border border-warn/30 bg-warn/10 p-3 text-xs text-warn">
+                DIDWW completes registration after the order allocates a DID. Confirm the order first; then create or select the identity and address and submit an approved verification for the allocated number.
+              </div>
+            ) : null}
             {selected.provider === "twilio" || selected.provider === "telnyx" ? (
               <div className="mt-3 grid max-w-3xl gap-3 md:grid-cols-2">
                 {selected.provider === "twilio" ? <label>
@@ -2386,7 +2581,7 @@ function NumbersView({ projectId }: NativePanelProps) {
                     onChange={(event) => setBundleSid(event.target.value)}
                     className="h-9 w-full rounded border border-border bg-bg px-2 text-sm outline-none focus:border-text-dim"
                   >
-                    <option value="">{resourcesLoading ? "Loading profiles..." : "No profile selected"}</option>
+                      <option value="">{resourcesLoading ? "Loading profiles..." : "No profile selected"}</option>
                     {bundles.map((bundle) => (
                       <option key={bundle.sid} value={bundle.sid}>{bundle.friendly_name || bundle.sid}</option>
                     ))}
@@ -2410,7 +2605,7 @@ function NumbersView({ projectId }: NativePanelProps) {
               selected.provider === "twilio" &&
               ((selected.address_requirement && selected.address_requirement !== "none" && !/^AD[0-9a-fA-F]{32}$/.test(addressSid.trim())) ||
               (bundleSid.trim() && !/^BU[0-9a-fA-F]{32}$/.test(bundleSid.trim()))) ||
-              (selected.compliance_required && !bundleSid.trim())
+              ((selected.provider === "twilio" || selected.provider === "telnyx") && selected.compliance_required && !bundleSid.trim())
             )}
             className="h-9 px-4 rounded bg-error text-bg text-sm font-medium disabled:opacity-50"
           >
@@ -2429,7 +2624,7 @@ function AddressesView({ projectId }: NativePanelProps) {
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({
     customer_name: "", friendly_name: "", street: "", street_secondary: "",
-    city: "", region: "", postal_code: "", country: "",
+    city: "", region: "", postal_code: "", country: "", identity_id: "",
   });
   const endpoint = useCallback((path: string) => {
     const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
@@ -2451,7 +2646,7 @@ function AddressesView({ projectId }: NativePanelProps) {
     setSaving(true);
     try {
       await postJSON(endpoint("/numbers/addresses/create"), { ...form, auto_correct: true });
-      setForm({ ...form, customer_name: "", friendly_name: "", street: "", street_secondary: "", city: "", region: "", postal_code: "" });
+      setForm({ ...form, customer_name: "", friendly_name: "", street: "", street_secondary: "", city: "", region: "", postal_code: "", identity_id: "" });
       setStatus("Address created");
       await load();
     } catch (e) {
@@ -2505,6 +2700,7 @@ function AddressesView({ projectId }: NativePanelProps) {
           <Field label="Postal code" value={form.postal_code} onChange={(value) => setForm({ ...form, postal_code: value })} required />
           <Field label="Country" value={form.country} onChange={(value) => setForm({ ...form, country: value.toUpperCase().slice(0, 2) })} required />
         </div>
+        <Field label="DIDWW identity ID (when required)" value={form.identity_id} onChange={(value) => setForm({ ...form, identity_id: value })} />
         <button type="submit" disabled={saving} className="h-9 w-full rounded bg-accent text-bg text-sm font-medium disabled:opacity-50">
           {saving ? "Creating..." : "Create address"}
         </button>
@@ -2529,8 +2725,11 @@ function BundlesView({ projectId }: NativePanelProps) {
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [bundleForm, setBundleForm] = useState({
-    country: "EE", number_type: "national", end_user_type: "individual", friendly_name: "Estonia national", email: "",
+    country: "FR", number_type: "local", end_user_type: "business", friendly_name: "", email: "",
   });
+  const [identityForm, setIdentityForm] = useState({ first_name: "", last_name: "", company_reg_number: "", vat_id: "", phone_number: "" });
+  const [proofForm, setProofForm] = useState({ entity: "identity", entity_id: "", proof_type_id: "", file_ids: "" });
+  const [verificationForm, setVerificationForm] = useState({ address_id: "", did_id: "", service_description: "French voice number" });
   const [itemForm, setItemForm] = useState({ kind: "end_user", friendly_name: "", type: "individual", attributes: "{}", requirement_id: "", field_value: "" });
   const [itemFile, setItemFile] = useState<File | null>(null);
   const endpoint = useCallback((path: string) => {
@@ -2550,10 +2749,10 @@ function BundlesView({ projectId }: NativePanelProps) {
   }, [endpoint]);
   useEffect(() => { void load(); }, [load]);
 
-  const inspect = async (bundleSid: string, preserveResult = false) => {
+  const inspect = async (bundleSid: string, resourceKind: RegulatoryBundle["resource_kind"] = "verification", preserveResult = false) => {
     setBusy(true);
     try {
-      const data = await postJSON<BundleDetails>(endpoint("/numbers/regulatory/bundles/get"), { compliance_id: bundleSid });
+      const data = await postJSON<BundleDetails>(endpoint("/numbers/regulatory/bundles/get"), { compliance_id: bundleSid, ...(resourceKind ? { resource_kind: resourceKind } : {}) });
       setSelected(data);
       if (!preserveResult) setResult(null);
     } catch (e) {
@@ -2578,10 +2777,24 @@ function BundlesView({ projectId }: NativePanelProps) {
     event.preventDefault();
     setBusy(true);
     try {
-      const data = await postJSON<{ bundle?: RegulatoryBundle }>(endpoint("/numbers/regulatory/bundles/create"), bundleForm);
-      setStatus("Compliance profile created");
+      const didww = provider === "didww";
+      let data: { bundle?: RegulatoryBundle };
+      if (didww) {
+        await postJSON<{ profile?: RegulatoryBundle; identity?: Record<string, unknown> }>(endpoint("/numbers/identities/create"), {
+          identity_type: bundleForm.end_user_type === "business" ? "business" : "personal",
+          country: bundleForm.country,
+          company_name: bundleForm.friendly_name,
+          contact_email: bundleForm.email,
+          description: bundleForm.friendly_name,
+          ...identityForm,
+        });
+        data = {};
+      } else {
+        data = await postJSON<{ bundle?: RegulatoryBundle }>(endpoint("/numbers/regulatory/bundles/create"), bundleForm);
+      }
+      setStatus(didww ? "DIDWW identity created; add the required proofs and regulatory address" : "Compliance profile created");
       await load();
-      if (data.bundle?.sid) await inspect(data.bundle.sid);
+      if (!didww && data.bundle?.sid) await inspect(data.bundle.sid);
     } catch (e) {
       setStatus((e as Error).message || "Bundle creation failed");
     } finally {
@@ -2591,6 +2804,10 @@ function BundlesView({ projectId }: NativePanelProps) {
   const addItem = async (event: React.FormEvent) => {
     event.preventDefault();
     const bundleSid = selected?.bundle?.sid;
+    if (selected?.bundle?.resource_kind === "identity") {
+      setStatus("Select an address verification to add the allocated DID and supporting documents");
+      return;
+    }
     if (!bundleSid) return;
     let attributes: Record<string, unknown>;
     try {
@@ -2610,22 +2827,67 @@ function BundlesView({ projectId }: NativePanelProps) {
       setResult(data);
       setStatus("Compliance requirement assigned");
       setItemFile(null);
-      await inspect(bundleSid, true);
+      await inspect(bundleSid, selected?.bundle?.resource_kind, true);
     } catch (e) {
       setStatus((e as Error).message || "Item creation failed");
     } finally {
       setBusy(false);
     }
   };
+  const uploadDIDWWProof = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const entityID = proofForm.entity_id.trim() || (proofForm.entity === "identity" && selected?.bundle?.resource_kind === "identity" ? selected.bundle.sid : "");
+    if (!entityID || !proofForm.proof_type_id.trim() || (!itemFile && !proofForm.file_ids.trim())) {
+      setStatus("Select an identity or address, proof type, and document");
+      return;
+    }
+    if (itemFile && itemFile.size > 5 * 1024 * 1024) { setStatus("Document must be at most 5 MB"); return; }
+    setBusy(true);
+    try {
+      const data = await postJSON(endpoint("/numbers/regulatory/bundles/items/create"), {
+        kind: "document", [proofForm.entity === "identity" ? "identity_id" : "address_id"]: entityID,
+        proof_type_id: proofForm.proof_type_id.trim(),
+        ...(itemFile ? { file: await readAsDataURL(itemFile), file_name: itemFile.name } : { file_ids: proofForm.file_ids.split(/[\s,]+/).filter(Boolean) }),
+      });
+      setResult(data);
+      setStatus("Document encrypted and proof attached");
+      setItemFile(null);
+      if (selected?.bundle) await inspect(selected.bundle.sid, selected.bundle.resource_kind, true);
+    } catch (e) { setStatus((e as Error).message || "Proof attachment failed"); }
+    finally { setBusy(false); }
+  };
+  const createDIDWWVerification = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const didIDs = verificationForm.did_id.split(/[\s,]+/).map((value) => value.trim()).filter(Boolean);
+    if (!verificationForm.address_id.trim() || didIDs.length === 0) {
+      setStatus("Address ID and allocated DID ID are required");
+      return;
+    }
+    setBusy(true);
+    try {
+      await postJSON(endpoint("/numbers/regulatory/bundles/items/create"), {
+        address_id: verificationForm.address_id.trim(),
+        did_ids: didIDs,
+        service_description: verificationForm.service_description.trim() || "French voice number",
+      });
+      setStatus("DIDWW address verification created; wait for provider approval");
+      setVerificationForm({ ...verificationForm, address_id: "", did_id: "" });
+      await load();
+    } catch (e) {
+      setStatus((e as Error).message || "DIDWW verification creation failed");
+    } finally {
+      setBusy(false);
+    }
+  };
   const bundleAction = async (action: "evaluate" | "submit") => {
     const bundleSid = selected?.bundle?.sid;
-    if (!bundleSid) return;
+    if (!bundleSid || selected?.bundle?.resource_kind === "identity") return;
     setBusy(true);
     try {
       const data = await postJSON(endpoint(`/numbers/regulatory/bundles/${action}`), { compliance_id: bundleSid });
       setResult(data);
       setStatus(action === "submit" ? "Submission processed" : "Evaluation complete");
-      await inspect(bundleSid, true);
+      await inspect(bundleSid, selected?.bundle?.resource_kind, true);
     } catch (e) {
       setStatus((e as Error).message || `${action} failed`);
     } finally {
@@ -2645,7 +2907,7 @@ function BundlesView({ projectId }: NativePanelProps) {
           <span className="truncate text-xs text-text-muted">{status}</span>
         </header>
         {bundles.map((bundle) => (
-          <button key={bundle.sid} type="button" onClick={() => inspect(bundle.sid)} className={`w-full px-4 py-3 text-left border-b border-border/70 hover:bg-bg-muted/60 ${selected?.bundle?.sid === bundle.sid ? "bg-bg-muted" : ""}`}>
+          <button key={`${bundle.resource_kind ?? "verification"}:${bundle.sid}`} type="button" onClick={() => inspect(bundle.sid, bundle.resource_kind)} className={`w-full px-4 py-3 text-left border-b border-border/70 hover:bg-bg-muted/60 ${selected?.bundle?.sid === bundle.sid ? "bg-bg-muted" : ""}`}>
             <div className="flex items-center justify-between gap-2">
               <span className="truncate text-sm font-medium">{bundle.friendly_name || bundle.sid}</span>
               <span className="shrink-0 text-xs text-text-muted">{bundle.status || "unknown"}</span>
@@ -2664,8 +2926,8 @@ function BundlesView({ projectId }: NativePanelProps) {
                 <div className="mt-1 truncate font-mono text-xs text-text-dim">{selected.bundle.sid}</div>
               </div>
               <span className="rounded border border-border px-2 py-1 text-xs">{selected.bundle.status || "unknown"}</span>
-              <button type="button" disabled={busy} onClick={() => bundleAction("evaluate")} className="h-8 px-3 rounded border border-border text-xs disabled:opacity-50">Evaluate</button>
-              <button type="button" disabled={busy || selected.bundle.status !== "draft"} onClick={() => bundleAction("submit")} className="h-8 px-3 rounded bg-accent text-bg text-xs font-medium disabled:opacity-50">Submit</button>
+              <button type="button" disabled={busy || selected.bundle.resource_kind === "identity"} onClick={() => bundleAction("evaluate")} className="h-8 px-3 rounded border border-border text-xs disabled:opacity-50">Evaluate</button>
+              <button type="button" disabled={busy || selected.bundle.resource_kind === "identity" || selected.bundle.status !== "draft"} onClick={() => bundleAction("submit")} className="h-8 px-3 rounded bg-accent text-bg text-xs font-medium disabled:opacity-50">Submit</button>
             </header>
             <div className="grid lg:grid-cols-2">
               <section className="p-4 border-b lg:border-r border-border">
@@ -2683,7 +2945,11 @@ function BundlesView({ projectId }: NativePanelProps) {
                 <pre className="max-h-80 overflow-auto whitespace-pre-wrap text-xs leading-5 text-text-muted">{JSON.stringify(result, null, 2)}</pre>
               </section>
             ) : null}
-            <form onSubmit={addItem} className="p-4 space-y-3">
+            {provider === "didww" ? (
+              <div className="m-4 rounded border border-warn/30 bg-warn/10 p-3 text-xs text-warn">
+                Attach the required proofs to the identity and address below. Once the DID is allocated, submit its address verification and wait for provider approval.
+              </div>
+            ) : <form onSubmit={addItem} className="p-4 space-y-3">
               <h3 className="text-sm font-semibold">Set requirement</h3>
               {provider === "telnyx" ? (
                 <div className="grid md:grid-cols-2 gap-3">
@@ -2711,7 +2977,7 @@ function BundlesView({ projectId }: NativePanelProps) {
                 <input type="file" accept="image/jpeg,image/png,application/pdf" onChange={(event) => setItemFile(event.target.files?.[0] ?? null)} className="block w-full text-xs text-text-muted file:mr-3 file:h-8 file:rounded file:border file:border-border file:bg-bg file:px-3 file:text-xs file:text-text" />
               ) : null}
               <button type="submit" disabled={busy} className="h-9 px-4 rounded bg-accent text-bg text-sm font-medium disabled:opacity-50">Create and assign</button>
-            </form>
+            </form>}
           </div>
         ) : <div className="h-full flex items-center justify-center text-sm text-text-muted" style={{ minHeight: "18rem" }}>Select a compliance profile</div>}
       </section>
@@ -2734,6 +3000,15 @@ function BundlesView({ projectId }: NativePanelProps) {
           </select>
         </label>
         <Field label="Name" value={bundleForm.friendly_name} onChange={(value) => setBundleForm({ ...bundleForm, friendly_name: value })} required />
+        {provider === "didww" ? <>
+          {bundleForm.end_user_type === "business" ? <>
+            <Field label="Business registration number" value={identityForm.company_reg_number} onChange={(value) => setIdentityForm({ ...identityForm, company_reg_number: value })} />
+            <Field label="VAT ID" value={identityForm.vat_id} onChange={(value) => setIdentityForm({ ...identityForm, vat_id: value })} />
+          </> : null}
+          <Field label="First name / contact" value={identityForm.first_name} onChange={(value) => setIdentityForm({ ...identityForm, first_name: value })} required={bundleForm.end_user_type === "individual"} />
+          <Field label="Last name / contact" value={identityForm.last_name} onChange={(value) => setIdentityForm({ ...identityForm, last_name: value })} required={bundleForm.end_user_type === "individual"} />
+          <Field label="Contact phone" value={identityForm.phone_number} onChange={(value) => setIdentityForm({ ...identityForm, phone_number: value })} />
+        </> : null}
         {provider !== "telnyx" ? <Field label="Status email" value={bundleForm.email} onChange={(value) => setBundleForm({ ...bundleForm, email: value })} type="email" required /> : null}
         <div className="grid grid-cols-2 gap-2">
           <button type="button" onClick={discover} disabled={busy} className="h-9 rounded border border-border text-sm disabled:opacity-50">Requirements</button>
@@ -2741,6 +3016,30 @@ function BundlesView({ projectId }: NativePanelProps) {
         </div>
         {requirements ? <pre className="overflow-auto whitespace-pre-wrap border-t border-border pt-3 text-xs leading-5 text-text-muted" style={{ maxHeight: "30rem" }}>{JSON.stringify(requirements, null, 2)}</pre> : null}
       </form>
+      {provider === "didww" ? <form onSubmit={uploadDIDWWProof} className="border-t border-border p-4 space-y-3">
+        <h2 className="text-sm font-semibold">Attach regulatory document</h2>
+        <p className="text-xs text-text-muted">Use a proof type from Requirements. Documents are encrypted with DIDWW's public keys before upload. PDF, JPEG or PNG, up to 5 MB.</p>
+        <label className="block"><span className="mb-1 block text-xs text-text-muted">Attach to</span>
+          <select value={proofForm.entity} onChange={(event) => setProofForm({ ...proofForm, entity: event.target.value, entity_id: "" })} className="h-9 w-full rounded border border-border bg-bg px-2 text-sm">
+            <option value="identity">Identity</option><option value="address">Address</option>
+          </select>
+        </label>
+        <Field label="Identity or address ID" value={proofForm.entity_id || (proofForm.entity === "identity" && selected?.bundle?.resource_kind === "identity" ? selected.bundle.sid : "")} onChange={(value) => setProofForm({ ...proofForm, entity_id: value })} required />
+        <Field label="Proof type ID from Requirements" value={proofForm.proof_type_id} onChange={(value) => setProofForm({ ...proofForm, proof_type_id: value })} required />
+        <input type="file" accept="image/jpeg,image/png,application/pdf" onChange={(event) => { setItemFile(event.target.files?.[0] ?? null); setProofForm({ ...proofForm, file_ids: "" }); }} className="block w-full text-xs" />
+        <Field label="Or reuse encrypted file ID(s)" value={proofForm.file_ids} onChange={(value) => { setProofForm({ ...proofForm, file_ids: value }); setItemFile(null); }} />
+        <button type="submit" disabled={busy} className="h-9 w-full rounded bg-accent text-bg text-sm font-medium disabled:opacity-50">Attach proof</button>
+      </form> : null}
+      {provider === "didww" ? (
+        <form onSubmit={createDIDWWVerification} className="min-h-0 overflow-auto border-t border-border p-4 space-y-3">
+          <h2 className="text-sm font-semibold">New DIDWW address verification</h2>
+          <p className="text-xs text-text-muted">Create this after the order allocates a DID and the French address is linked to the business identity.</p>
+          <Field label="Address ID" value={verificationForm.address_id} onChange={(value) => setVerificationForm({ ...verificationForm, address_id: value })} required />
+          <Field label="Allocated DID ID(s)" value={verificationForm.did_id} onChange={(value) => setVerificationForm({ ...verificationForm, did_id: value })} required />
+          <Field label="Service description" value={verificationForm.service_description} onChange={(value) => setVerificationForm({ ...verificationForm, service_description: value })} required />
+          <button type="submit" disabled={busy} className="h-9 w-full rounded bg-accent text-bg text-sm font-medium disabled:opacity-50">{busy ? "Creating..." : "Create verification"}</button>
+        </form>
+      ) : null}
     </div>
   );
 }
@@ -2797,7 +3096,7 @@ interface RoutingSimulation { valid: boolean; errors?: string[]; trace?: Array<{
 interface RoutingBulkValidation { valid: boolean; errors?: string[]; numbers: Array<{ route_id: string; phone_number?: string; carrier?: string; valid: boolean; errors?: string[] }> }
 
 const NODE_LABELS: Record<string, string> = {
-  announcement: "Announcement", schedule: "Business hours", caller_match: "Caller rule",
+  decision: "Routing decision", announcement: "Announcement", schedule: "Business hours", caller_match: "Caller rule",
   dtmf_menu: "Keypad menu", destination: "Destination", ring_group: "Ring group",
   voicemail: "Voicemail", reject: "Reject", hangup: "Hang up",
 };
@@ -3085,6 +3384,12 @@ function AdvancedRoutingEditor({ projectId }: Pick<NativePanelProps,"projectId">
   const [busy, setBusy] = useState(false);
   const [simulation, setSimulation] = useState<RoutingSimulation | null>(null);
   const [caller, setCaller] = useState("+33600000000");
+  const [mockDecisions, setMockDecisions] = useState("{}");
+  const [traceCallId, setTraceCallId] = useState("");
+  const [decisionTrace, setDecisionTrace] = useState<unknown>(null);
+  const [personal, setPersonal] = useState(false);
+  const [capacityIdentity, setCapacityIdentity] = useState({issuer_app:"auth", issuer_install_id:"", subject_type:"user", subject_id:"", organization_id:""});
+  const [capacityLimit, setCapacityLimit] = useState(1);
   const [routeIds, setRouteIds] = useState<string[]>([]);
   const [destinationForm, setDestinationForm] = useState({ name: "Browser operator", kind: "browser", target: "", directive: "" });
   const [groupForm, setGroupForm] = useState({ name: "Team", strategy: "simultaneous", timeout_sec: 20, members: [] as string[] });
@@ -3141,7 +3446,7 @@ function AdvancedRoutingEditor({ projectId }: Pick<NativePanelProps,"projectId">
   const simulate = async () => {
     setBusy(true);
     try {
-      const result = await postJSON<RoutingSimulation>(api("/routing/flows/simulate"), { id: selectedId, draft, context: { caller } });
+      const result = await postJSON<RoutingSimulation>(api("/routing/flows/simulate"), { id: selectedId, draft, context: { caller, decisions: JSON.parse(mockDecisions) } });
       setSimulation(result); setStatus(result.valid ? "Simulation completed" : (result.errors || []).join(" · "));
     } catch (error) { setStatus((error as Error).message || "Simulation failed"); } finally { setBusy(false); }
   };
@@ -3160,6 +3465,7 @@ function AdvancedRoutingEditor({ projectId }: Pick<NativePanelProps,"projectId">
     const node: RoutingNode = { id, type, label: NODE_LABELS[type] || type, config: {} };
     if (type === "destination" && snapshot.destinations[0]) node.config = { destination_id: snapshot.destinations[0].id };
     if (type === "ring_group" && snapshot.ring_groups[0]) node.config = { ring_group_id: snapshot.ring_groups[0].id };
+    if (type === "decision") { node.config = { function_id: 0, timeout_ms: 2000, ring_timeout_seconds: 20, max_attempts: 1, total_wait_seconds: 300, function_retry_limit: 0, retry_delay_seconds: 2, allow_repeat: false, callback_on_ai: false, destination_ids: [] }; node.branches = { fallback: "" }; }
     if (type === "announcement") node.config = { text: "Welcome. Please wait while we connect you." };
     if (type === "schedule") { node.config = { timezone: "Europe/Paris", days: ["mon", "tue", "wed", "thu", "fri"], start: "09:00", end: "18:00" }; node.branches = { open: "", closed: "" }; }
     if (type === "dtmf_menu") { node.config = { prompt: "Press 1 for sales, or 2 for support." }; node.branches = { "1": "", "2": "", default: "" }; }
@@ -3172,6 +3478,7 @@ function AdvancedRoutingEditor({ projectId }: Pick<NativePanelProps,"projectId">
     const kind = destinationForm.kind;
     let config: Record<string, unknown> = {};
     if (kind === "agent" || kind === "ai") config = { agent_id: Number(destinationForm.target), directive: destinationForm.directive };
+    if (kind === "browser" && personal) config = {capacity: {identity:capacityIdentity, concurrent_call_limit:capacityLimit}};
     if (kind === "pstn") config = { phone_number: destinationForm.target };
     if (kind === "sip") config = { uri: destinationForm.target };
     setBusy(true);
@@ -3245,6 +3552,10 @@ function AdvancedRoutingEditor({ projectId }: Pick<NativePanelProps,"projectId">
         <section className="rounded border border-border p-3">
           <h3 className="text-sm font-semibold">Test and assign</h3>
           <Field label="Simulated caller" value={caller} onChange={setCaller} />
+          {draft.nodes.some(n=>n.type==="decision") ? <label className="block mt-2"><span className="text-xs text-text-muted">Mock decisions by node ID (JSON)</span><textarea aria-label="Mock decisions" className="w-full rounded border border-border bg-bg p-2 text-xs font-mono" rows={4} value={mockDecisions} onChange={e=>setMockDecisions(e.target.value)}/><span className="text-xs text-text-dim">No function runs during simulation. An omitted decision follows its fallback.</span></label> : null}
+          <Field label="Call ID for decision trace" value={traceCallId} onChange={setTraceCallId}/>
+          <button className="h-9 border border-border rounded px-2 text-xs" disabled={!traceCallId || busy} onClick={async()=>{try{const response=await fetch(api("/routing/decisions")+(projectId?"&":"?")+"call_id="+encodeURIComponent(traceCallId),{credentials:"same-origin"});if(!response.ok)throw new Error(await response.text());setDecisionTrace(await response.json());}catch(e){setStatus((e as Error).message);}}}>Load decision trace</button>
+          {decisionTrace ? <pre className="max-h-64 overflow-auto text-xs whitespace-pre-wrap">{JSON.stringify(decisionTrace,null,2)}</pre> : null}
           <div className="mt-2"><div className="mb-1 flex items-center justify-between"><span className="text-xs text-text-muted">Inbound numbers</span><button type="button" onClick={() => setRouteIds(snapshot.routes.map((route) => route.id))} className="text-xs text-accent">Select all</button></div><div className="max-h-48 space-y-1 overflow-auto rounded border border-border p-2">{snapshot.routes.map((route) => <label key={route.id} className="flex cursor-pointer items-center gap-2 text-xs"><input type="checkbox" checked={routeIds.includes(route.id)} onChange={(event) => setRouteIds(event.target.checked ? [...routeIds, route.id] : routeIds.filter((id) => id !== route.id))} /><span className="font-mono">{route.phone_number}</span>{route.flow_id === selectedId ? <span className="ml-auto text-success">assigned</span> : null}</label>)}</div></div>
           <button type="button" onClick={assign} disabled={busy || !selected?.published_version_id || !routeIds.length} className="mt-2 h-9 w-full rounded border border-border text-sm disabled:opacity-50">Assign to {routeIds.length || 0} selected</button>
         </section>
@@ -3253,6 +3564,7 @@ function AdvancedRoutingEditor({ projectId }: Pick<NativePanelProps,"projectId">
           <h3 className="text-sm font-semibold">New destination</h3>
           <Field label="Name" value={destinationForm.name} onChange={(name) => setDestinationForm({ ...destinationForm, name })} />
           <label className="block"><span className="mb-1 block text-xs text-text-muted">Type</span><select value={destinationForm.kind} onChange={(event) => setDestinationForm({ ...destinationForm, kind: event.target.value })} className="h-9 w-full rounded border border-border bg-bg px-2 text-sm"><option value="browser">Browser user</option><option value="ai">AI agent</option><option value="agent">Agent offer</option><option value="pstn">External number</option><option value="sip">SIP endpoint</option><option value="voicemail">Voicemail</option></select></label>
+          {destinationForm.kind === "browser" ? <div className="space-y-2"><label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={personal} onChange={e=>setPersonal(e.target.checked)}/>Assign to one user with a call limit</label>{personal ? <><Field label="Identity provider app" value={capacityIdentity.issuer_app} onChange={issuer_app=>setCapacityIdentity(v=>({...v,issuer_app}))}/><Field label="Identity provider installation ID" value={capacityIdentity.issuer_install_id} onChange={issuer_install_id=>setCapacityIdentity(v=>({...v,issuer_install_id}))}/><Field label="User ID" value={capacityIdentity.subject_id} onChange={subject_id=>setCapacityIdentity(v=>({...v,subject_id}))}/><Field label="Organization ID (if applicable)" value={capacityIdentity.organization_id} onChange={organization_id=>setCapacityIdentity(v=>({...v,organization_id}))}/><Field label="Concurrent calls (1–10)" type="number" value={String(capacityLimit)} onChange={v=>setCapacityLimit(Number(v))}/><p className="text-xs text-text-muted">Grant this identity access to the destination before publishing a decision flow.</p></> : <p className="text-xs text-text-muted">Shared operator pool. Routing decisions require an individually assigned destination.</p>}</div> : null}
           {destinationForm.kind === "agent" || destinationForm.kind === "ai" ? <Field label="Agent ID" value={destinationForm.target} onChange={(target) => setDestinationForm({ ...destinationForm, target })} type="number" /> : null}
           {destinationForm.kind === "pstn" ? <Field label="Telephone (E.164)" value={destinationForm.target} onChange={(target) => setDestinationForm({ ...destinationForm, target })} /> : null}
           {destinationForm.kind === "sip" ? <Field label="SIP URI" value={destinationForm.target} onChange={(target) => setDestinationForm({ ...destinationForm, target })} /> : null}
@@ -3284,6 +3596,8 @@ function NodeConfiguration({ node, nodes, destinations, groups, update }: { node
   const NextSelect = ({ label = "Then", value = node.next || "", onChange = (next: string) => update({ next }) }: { label?: string; value?: string; onChange?: (value: string) => void }) => <label className="block"><span className="mb-1 block text-xs text-text-muted">{label}</span><select value={value} onChange={(event) => onChange(event.target.value)} className="h-8 w-full rounded border border-border bg-bg px-2 text-xs"><option value="">Select next step</option>{options.map((item) => <option key={item.id} value={item.id}>{item.label || item.id}</option>)}</select></label>;
   return (
     <div className="mt-3 grid gap-3 md:grid-cols-2">
+      {node.type === "decision" ? <><Field label="Function ID (bound Functions app, active version)" type="number" value={String(node.config?.function_id || "")} onChange={v=>setConfig("function_id",Number(v))}/><Field label="Decision deadline (100–5000 ms)" type="number" value={String(node.config?.timeout_ms ?? 2000)} onChange={v=>setConfig("timeout_ms",Number(v))}/><Field label="Maximum ring time (5–60 seconds)" type="number" value={String(node.config?.ring_timeout_seconds ?? 20)} onChange={v=>setConfig("ring_timeout_seconds",Number(v))}/><NextSelect label="Final fallback when routing ends" value={node.branches?.fallback || ""} onChange={v=>setBranch("fallback",v)}/><label className="block md:col-span-2"><span className="text-xs text-text-muted">Variables sent to the function (JSON object)</span><textarea key={node.id} defaultValue={JSON.stringify(node.config?.variables || {},null,2)} rows={3} className="w-full rounded border border-border bg-bg p-2 text-xs font-mono" onBlur={e=>{try{const value=JSON.parse(e.target.value);if(!value||Array.isArray(value)||typeof value!=="object")throw new Error("Enter a JSON object");setConfig("variables",value);e.target.setCustomValidity("");}catch{e.target.setCustomValidity("Enter a valid JSON object");e.target.reportValidity();}}}/></label><div className="md:col-span-2"><span className="text-xs text-text-muted">Permitted individual destinations</span>{destinations.filter(d=>d.enabled && d.kind==="browser" && d.config.capacity).map(d=><label key={d.id} className="flex items-center gap-2 text-xs py-1"><input type="checkbox" checked={((node.config?.destination_ids || []) as string[]).includes(d.id)} onChange={e=>{const ids=(node.config?.destination_ids || []) as string[];setConfig("destination_ids",e.target.checked?[...ids,d.id]:ids.filter(id=>id!==d.id));}}/>{d.name}</label>)}</div></> : null}
+      {node.type === "decision" ? <><Field label="Maximum decision attempts (1–100)" type="number" value={String(node.config?.max_attempts ?? 1)} onChange={v=>setConfig("max_attempts",Number(v))}/><Field label="Total wait ceiling (5–1800 seconds)" type="number" value={String(node.config?.total_wait_seconds ?? 300)} onChange={v=>setConfig("total_wait_seconds",Number(v))}/><Field label="Function error retries (0–5)" type="number" value={String(node.config?.function_retry_limit ?? 0)} onChange={v=>setConfig("function_retry_limit",Number(v))}/><Field label="Retry delay (1–30 seconds)" type="number" value={String(node.config?.retry_delay_seconds ?? 2)} onChange={v=>setConfig("retry_delay_seconds",Number(v))}/><label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={Boolean(node.config?.allow_repeat)} onChange={e=>setConfig("allow_repeat",e.target.checked)}/>Allow the same adviser again</label><label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={Boolean(node.config?.callback_on_ai)} onChange={e=>setConfig("callback_on_ai",e.target.checked)}/>Create callback opportunity after AI handling</label></> : null}
       {node.type === "announcement" ? <label className="block md:col-span-2"><span className="mb-1 block text-xs text-text-muted">Message</span><textarea rows={2} value={String(node.config?.text || "")} onChange={(event) => setConfig("text", event.target.value)} className="w-full rounded border border-border bg-bg px-2 py-1 text-sm" /></label> : null}
       {node.type === "destination" ? <label className="block"><span className="mb-1 block text-xs text-text-muted">Destination</span><select value={String(node.config?.destination_id || "")} onChange={(event) => setConfig("destination_id", event.target.value)} className="h-8 w-full rounded border border-border bg-bg px-2 text-xs"><option value="">Select destination</option>{destinations.map((item) => <option value={item.id} key={item.id}>{item.name} · {item.kind}</option>)}</select></label> : null}
       {node.type === "ring_group" ? <label className="block"><span className="mb-1 block text-xs text-text-muted">Ring group</span><select value={String(node.config?.ring_group_id || "")} onChange={(event) => setConfig("ring_group_id", event.target.value)} className="h-8 w-full rounded border border-border bg-bg px-2 text-xs"><option value="">Select group</option>{groups.map((item) => <option value={item.id} key={item.id}>{item.name} · {item.strategy}</option>)}</select></label> : null}
@@ -3292,7 +3606,7 @@ function NodeConfiguration({ node, nodes, destinations, groups, update }: { node
       {node.type === "caller_match" ? <><Field label="Caller prefixes (comma separated)" value={Array.isArray(node.config?.prefixes) ? (node.config?.prefixes as string[]).join(", ") : ""} onChange={(value) => setConfig("prefixes", value.split(",").map((item) => item.trim()).filter(Boolean))} /><span /><NextSelect label="Match" value={node.branches?.match || ""} onChange={(value) => setBranch("match", value)} /><NextSelect label="Otherwise" value={node.branches?.default || ""} onChange={(value) => setBranch("default", value)} /></> : null}
       {node.type === "ring_group" || (node.type === "destination" && ["pstn","sip"].includes(destinations.find(d=>d.id===node.config?.destination_id)?.kind||"")) ? <NextSelect label="If no one answers (empty ends the call)" value={node.branches?.no_answer || node.next || ""} onChange={value=>setBranch("no_answer",value)} /> : null}
       {node.type === "announcement" ? <NextSelect /> : null}
-      {!(["announcement", "schedule", "caller_match", "dtmf_menu", "destination", "ring_group", "voicemail", "reject", "hangup"].includes(node.type)) ? <NextSelect /> : null}
+      {!(["decision", "announcement", "schedule", "caller_match", "dtmf_menu", "destination", "ring_group", "voicemail", "reject", "hangup"].includes(node.type)) ? <NextSelect /> : null}
     </div>
   );
 }

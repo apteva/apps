@@ -96,7 +96,7 @@ func (f *fakeStreaming) CreateStream(req CreateStreamReq) (CreateStreamResp, err
 	return CreateStreamResp{Stream: *snap}, nil
 }
 
-func (f *fakeStreaming) GetStream(id int64) (StreamSnapshot, error) {
+func (f *fakeStreaming) GetStream(_ string, id int64) (StreamSnapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	s, ok := f.streams[id]
@@ -106,7 +106,7 @@ func (f *fakeStreaming) GetStream(id int64) (StreamSnapshot, error) {
 	return *s, nil
 }
 
-func (f *fakeStreaming) StopStream(id int64) error {
+func (f *fakeStreaming) StopStream(_ string, id int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stopped[id] = true
@@ -116,7 +116,7 @@ func (f *fakeStreaming) StopStream(id int64) error {
 	return nil
 }
 
-func (f *fakeStreaming) DeleteStream(id int64) error {
+func (f *fakeStreaming) DeleteStream(_ string, id int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.deleted[id] = true
@@ -124,7 +124,7 @@ func (f *fakeStreaming) DeleteStream(id int64) error {
 	return nil
 }
 
-func (f *fakeStreaming) GetMetrics(id int64) (StreamMetrics, error) {
+func (f *fakeStreaming) GetMetrics(_ string, id int64) (StreamMetrics, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	s, ok := f.streams[id]
@@ -141,7 +141,7 @@ func (f *fakeStreaming) GetMetrics(id int64) (StreamMetrics, error) {
 	}, nil
 }
 
-func (f *fakeStreaming) ReplayURL(id int64) (ReplayURLs, error) {
+func (f *fakeStreaming) ReplayURL(_ string, id int64) (ReplayURLs, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	s, ok := f.streams[id]

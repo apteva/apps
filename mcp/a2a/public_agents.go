@@ -33,6 +33,8 @@ type connectionView struct {
 	ManagedBy       string   `json:"managed_by"`
 	Authenticated   bool     `json:"authenticated"`
 	Agents          []string `json:"agents,omitempty"`
+	DiscoverAgents  []string `json:"discover_agents"`
+	InvokeAgents    []string `json:"invoke_agents"`
 }
 
 func publicConnectionID(cardURL string) string {
@@ -262,8 +264,8 @@ func (a *App) handleConnections(w http.ResponseWriter, r *http.Request) {
 			view := connectionView{ID: record.ID, Name: record.Name, Kind: record.Kind,
 				BaseURL: record.BaseURL, CardURL: record.DiscoveryURL,
 				ProtocolVersion: record.ProtocolVersion, ManagedBy: record.ManagedBy,
-				Authenticated: record.Token != ""}
-			rows, _ := app.AppDB().Query(`SELECT name FROM a2a_remote_agents WHERE peer_id = ? ORDER BY name`, record.ID)
+				Authenticated: record.Token != "", DiscoverAgents: record.DiscoverAgents, InvokeAgents: record.InvokeAgents}
+			rows, _ := app.AppDB().Query(`SELECT name FROM a2a_remote_agents WHERE peer_id = ? AND directory_visible=1 ORDER BY name`, record.ID)
 			if rows != nil {
 				for rows.Next() {
 					var name string
@@ -338,6 +340,14 @@ func (a *App) handleConnections(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleConnectionItem(w http.ResponseWriter, r *http.Request) {
+	if strings.HasSuffix(r.URL.Path, "/check") {
+		a.handleConnectionCheck(w, r, strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/connections/"), "/check"))
+		return
+	}
+	if r.Method == http.MethodPatch {
+		a.handleConnectionAccess(w, r)
+		return
+	}
 	if r.Method != http.MethodDelete {
 		http.Error(w, "DELETE only", http.StatusMethodNotAllowed)
 		return

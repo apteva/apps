@@ -1,3 +1,4 @@
+import { useScopedRevision } from "./live-events";
 import { useEffect, useState } from "react";
 import type { Parameter, Assignment } from "./Assignments";
 type Filter = { path: string; op: string; value?: unknown };
@@ -51,6 +52,7 @@ export default function Triggers({
     [preview, setPreview] = useState<any>(null),
     [history, setHistory] = useState<any[] | null>(null),
     [run, setRun] = useState<any>(null);
+  const liveRevision = useScopedRevision(e => e.data?.assignment_id === assignment.id && /^(trigger|assignment)\./.test(e.topic));
   const base = `/assignments/${assignment.id}/triggers`;
   const load = async () => {
     const r = await api(base);
@@ -72,7 +74,16 @@ export default function Triggers({
     return () => {
       active = false;
     };
-  }, [open, assignment.id, assignment.status]);
+  }, [open, assignment.id, assignment.status, liveRevision]);
+  useEffect(() => {
+    if (!open || !history) return;
+    let active = true;
+    api(base).then(async r => {
+      const results = await Promise.all((r.triggers || []).map((t: Trigger) => api(`/triggers/${t.id}/events`)));
+      if (active) setHistory(results.flatMap(r => r.events || []).sort((a,b) => b.created_at.localeCompare(a.created_at)).slice(0,100));
+    }).catch(e => { if (active) setError(e.message); });
+    return () => { active = false; };
+  }, [open, assignment.id, liveRevision, !!history]);
   const work = async (fn: () => Promise<void>) => {
     setBusy(true);
     setError("");

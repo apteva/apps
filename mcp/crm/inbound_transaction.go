@@ -17,6 +17,9 @@ func messagingInstallID(ctx *sdk.AppCtx) int64 {
 	return 0
 }
 func queueCRMEvent(tx *sql.Tx, pid, topic string, payload map[string]any) error {
+	if err := enrichCRMEventListContext(tx, pid, topic, payload); err != nil {
+		return fmt.Errorf("enrich %s list context: %w", topic, err)
+	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -31,12 +34,20 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 	if ctx == nil {
 		return nil, errors.New("crm context not initialized")
 	}
+	body.Channel = strings.ToLower(strings.TrimSpace(body.Channel))
 	if body.Channel != "email" && body.Channel != "sms" && body.Channel != "whatsapp" {
 		return nil, errors.New("invalid inbound channel")
 	}
 	body.From = canonicalAddress(body.Channel, body.From)
 	if body.From == "" {
 		return nil, errors.New("from required")
+	}
+	recipient, ignoredReason, err := validateInboundDelivery(ctx, pid, &body)
+	if err != nil {
+		return nil, err
+	}
+	if ignoredReason != "" {
+		return map[string]any{"ok": true, "ignored": true, "reason": ignoredReason, "matched_recipient": recipient}, nil
 	}
 	if body.ReceivedAt == "" {
 		body.ReceivedAt = time.Now().UTC().Format(time.RFC3339Nano)
@@ -88,6 +99,10 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 		var aid, cid, convoID int64
 		err = tx.QueryRow(`SELECT id,contact_id,COALESCE(conversation_id,0) FROM contact_activities WHERE project_id=? AND messaging_install_id=? AND messaging_id=?`, pid, sourceID, body.MessageID).Scan(&aid, &cid, &convoID)
 		if err == nil {
+			repaired, err := repairMissingInboundBodyTx(tx, pid, cid, aid, body)
+			if err != nil {
+				return nil, err
+			}
 			if err = insertActivityAttachmentsTx(tx, pid, aid, body.Attachments); err != nil {
 				return nil, err
 			}
@@ -97,7 +112,7 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 			if err = deliverQueuedCRMEvents(ctx); err != nil {
 				ctx.Logger().Warn("inbound events pending", "err", err)
 			}
-			return map[string]any{"ok": true, "deduped": true, "contact_id": cid, "activity_id": aid, "conversation_id": convoID}, nil
+			return map[string]any{"ok": true, "deduped": true, "body_repaired": repaired, "contact_id": cid, "activity_id": aid, "conversation_id": convoID}, nil
 		}
 		if err != sql.ErrNoRows {
 			return nil, err
@@ -136,7 +151,11 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 			return nil, err
 		}
 	}
-	recipients := append([]string{body.MatchedRecipient}, body.To...)
+	recipients := []string{body.MatchedRecipient}
+	if body.Channel != channelEmail {
+		recipients = append(recipients, body.To...)
+	}
+	attributedListIDs := []int64{}
 	for _, rule := range rules {
 		if !rule.Enabled || !ruleRecipientMatches(rule, recipients) || !ruleSenderMatches(rule, body.From) {
 			continue
@@ -145,6 +164,7 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 			if _, err = dbListAddContactChanged(tx, pid, *rule.AddListID, cid, "routing_rule"); err != nil {
 				return nil, err
 			}
+			attributedListIDs = append(attributedListIDs, *rule.AddListID)
 		}
 		if tag := strings.TrimSpace(rule.AddTag); tag != "" {
 			if err = dbAddTag(tx, pid, cid, tag); err != nil {
@@ -163,26 +183,49 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 			if _, err = dbListAddContactChanged(tx, pid, listID, cid, "messaging:inbound"); err != nil {
 				return nil, err
 			}
+			attributedListIDs = append(attributedListIDs, listID)
 		}
 	}
 	var convoID int64
 	if body.Channel != "email" {
-		err = tx.QueryRow(`SELECT id FROM contact_conversations WHERE project_id=? AND contact_id=? AND channel=?`, pid, cid, body.Channel).Scan(&convoID)
+		convoID, err = switchedPhoneConversationTx(tx, pid, cid, sourceID, body.Channel, body.From, canonicalParticipantAddress(body.Channel, body.MatchedRecipient), body.ReceivedAt)
+		if err != nil {
+			return nil, err
+		}
+		if convoID == 0 {
+			err = tx.QueryRow(`SELECT id FROM contact_conversations WHERE project_id=? AND contact_id=? AND channel=?`, pid, cid, body.Channel).Scan(&convoID)
+		}
 		if err != nil && err != sql.ErrNoRows {
 			return nil, err
 		}
 	} else {
 		refs := append([]string{body.InReplyTo}, body.References...)
 		for _, ref := range refs {
-			if ref == "" {
-				continue
-			}
-			err = tx.QueryRow(`SELECT id FROM contact_conversations WHERE project_id=? AND contact_id=? AND channel='email' AND (root_message_id=? OR id IN (SELECT conversation_id FROM contact_activities WHERE project_id=? AND contact_id=? AND message_id_header=?)) ORDER BY id LIMIT 1`, pid, cid, ref, pid, cid, ref).Scan(&convoID)
-			if err == nil {
-				break
-			}
-			if err != sql.ErrNoRows {
+			var sesFallback bool
+			convoID, sesFallback, err = emailConversationByReferenceTx(tx, pid, cid, ref)
+			if err != nil {
 				return nil, err
+			}
+			if convoID != 0 {
+				// Repair the root of a legacy SES conversation as its first
+				// matching reply arrives. Also correct an SES header whose
+				// delivered domain differs from the sending region's usual form.
+				if sesFallback {
+					var root string
+					if err = tx.QueryRow(`SELECT COALESCE(root_message_id,'') FROM contact_conversations WHERE project_id=? AND contact_id=? AND id=?`, pid, cid, convoID).Scan(&root); err != nil {
+						return nil, err
+					}
+					providerID := sesProviderIDFromReference(ref)
+					if root == "" || root == providerID || sesProviderIDFromReference(root) == providerID {
+						_, err = tx.Exec(`UPDATE contact_conversations SET root_message_id=?
+							WHERE project_id=? AND contact_id=? AND id=? AND COALESCE(root_message_id,'')=?`,
+							strings.TrimSpace(ref), pid, cid, convoID, root)
+						if err != nil {
+							return nil, err
+						}
+					}
+				}
+				break
 			}
 		}
 	}
@@ -212,25 +255,27 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 			return nil, err
 		}
 	}
-	text := body.BodyText
-	if text == "" && body.BodyHTML != "" {
-		text = plainTextFromHTML(body.BodyHTML)
-	}
-	if body.Channel == "email" && body.Subject != "" {
-		text = body.Subject + "\n\n" + text
-	}
+	text := inboundActivityBody(body)
 	replyTo := ""
 	for key, value := range body.Headers {
 		if strings.EqualFold(key, "Reply-To") {
 			replyTo = anyString(value)
 		}
 	}
-	act, err := logMessageActivityTx(tx, logMessageActivityInput{ProjectID: pid, ContactID: cid, Kind: receivedKindForChannel(body.Channel), Body: text, OccurredAt: body.ReceivedAt, Source: "messaging", ConversationID: convoID, MessagingID: body.MessageID, MessagingInstallID: sourceID, MessageIDHeader: body.MessageIDHeader, Attachments: body.Attachments, SourceDetail: map[string]any{"messaging_id": body.MessageID, "source_install_id": sourceID, "message_id_header": body.MessageIDHeader, "in_reply_to": body.InReplyTo, "matched_pattern": body.MatchedPattern, "from": body.From, "reply_to": replyTo, "receiving_identity": body.MatchedRecipient, "to": body.To, "cc": body.CC, "sender_automated": automated, "sender_class": reason}})
+	deliveryTo := body.To
+	if body.Channel == channelEmail {
+		deliveryTo = []string{body.MatchedRecipient}
+	}
+	act, err := logMessageActivityTx(tx, logMessageActivityInput{ProjectID: pid, ContactID: cid, Kind: receivedKindForChannel(body.Channel), Body: text, OccurredAt: body.ReceivedAt, Source: "messaging", ConversationID: convoID, MessagingID: body.MessageID, MessagingInstallID: sourceID, MessageIDHeader: body.MessageIDHeader, Attachments: body.Attachments, SourceDetail: map[string]any{"messaging_id": body.MessageID, "source_install_id": sourceID, "message_id_header": body.MessageIDHeader, "in_reply_to": body.InReplyTo, "matched_pattern": body.MatchedPattern, "from": body.From, "reply_to": replyTo, "receiving_identity": body.MatchedRecipient, "to": deliveryTo, "header_to": body.To, "cc": body.CC, "sender_automated": automated, "sender_class": reason}})
 	if err != nil {
 		return nil, err
 	}
 	parts := []conversationParticipant{{Role: "from", Address: body.From, ContactID: cid}}
-	for _, address := range append(body.To, body.MatchedRecipient) {
+	toParticipants := []string{body.MatchedRecipient}
+	if body.Channel != channelEmail {
+		toParticipants = append(toParticipants, body.To...)
+	}
+	for _, address := range toParticipants {
 		parts = append(parts, conversationParticipant{Role: "to", Address: address})
 	}
 	for _, address := range body.CC {
@@ -239,36 +284,23 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 	if err = dbConversationParticipantsAdd(tx, pid, convoID, body.Channel, parts); err != nil {
 		return nil, err
 	}
+	listIDs, err := dbActiveListIDsForContact(tx, pid, cid)
+	if err != nil {
+		return nil, err
+	}
+	attributedListIDs = normalizeEventListIDs(attributedListIDs)
 	if created {
-		ids := []int64{}
-		rows, err := tx.Query(`SELECT list_id FROM contact_list_members WHERE project_id=? AND contact_id=? ORDER BY list_id`, pid, cid)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			var id int64
-			if err = rows.Scan(&id); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			ids = append(ids, id)
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return nil, err
-		}
-		payload := map[string]any{"id": cid, "contact_id": cid, "display_name": contact.DisplayName, "primary_email": contact.PrimaryEmail, "primary_phone": contact.PrimaryPhone, "source": contact.Source, "list_ids": ids}
+		payload := map[string]any{"id": cid, "contact_id": cid, "display_name": contact.DisplayName, "primary_email": contact.PrimaryEmail, "primary_phone": contact.PrimaryPhone, "source": contact.Source, "list_ids": listIDs}
 		if err = queueCRMEvent(tx, pid, "contact.added", payload); err != nil {
 			return nil, err
 		}
 	}
 	if targetStatus != status {
-		if err = queueCRMEvent(tx, pid, "conversation.status.changed", map[string]any{"contact_id": cid, "conversation_id": convoID, "status": targetStatus, "previous_status": status, "auto_reopened": targetStatus == "open"}); err != nil {
+		if err = queueCRMEvent(tx, pid, "conversation.status.changed", map[string]any{"contact_id": cid, "conversation_id": convoID, "status": targetStatus, "previous_status": status, "auto_reopened": targetStatus == "open", "list_ids": listIDs}); err != nil {
 			return nil, err
 		}
 	}
-	payload := map[string]any{"contact_id": cid, "activity_id": act.ID, "conversation_id": convoID, "kind": act.Kind, "source": "messaging", "attachment_count": len(body.Attachments)}
+	payload := map[string]any{"contact_id": cid, "activity_id": act.ID, "conversation_id": convoID, "kind": act.Kind, "source": "messaging", "attachment_count": len(body.Attachments), "list_ids": listIDs, "attributed_list_ids": attributedListIDs}
 	if err = queueCRMEvent(tx, pid, "contact.activity.added", payload); err != nil {
 		return nil, err
 	}

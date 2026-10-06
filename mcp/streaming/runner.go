@@ -56,6 +56,14 @@ type streamRunner struct {
 	doneOnce sync.Once
 	done     chan runnerExit
 
+	// quit closes when the child has been reaped, stopping the segment
+	// duration tracker; tracked closes once that tracker has taken its
+	// final reading. wait() blocks on tracked before reporting the exit,
+	// so finalize never reads a segment log that is still being written.
+	quitOnce sync.Once
+	quit     chan struct{}
+	tracked  chan struct{}
+
 	// scraped closes when the stderr reader has drained the pipe.
 	// os/exec requires that all pipe reads finish before Wait() is
 	// called; v0.1 raced them and lost the final stderr lines, which
@@ -77,6 +85,10 @@ type runnerOpts struct {
 	hlsTime   int
 	hlsWindow int
 	record    bool
+	// startNumber is the first HLS segment index this session writes.
+	// Non-zero when respawning into a directory that already holds a
+	// previous session's segments — see prepareSessionDir.
+	startNumber int
 }
 
 type runnerExit struct {
@@ -112,12 +124,19 @@ func newFFmpegRunner(opts runnerOpts) (*streamRunner, error) {
 	// delete exactly the segments replay needs. Segments stay on disk
 	// until the retention sweeper or streams_delete reclaims them, and
 	// finalize builds the full VOD manifest from them.
+	//
+	// start_number continues the previous session's numbering when this
+	// runner is a respawn. Without it a rotate_key on a live stream
+	// restarted at seg-00000.ts and overwrote the first session's
+	// segments one by one, while append_list kept the stale playlist
+	// entries pointing at files that now held different video.
 	args = append(args,
 		"-c", "copy",
 		"-f", "hls",
 		"-hls_time", strconv.Itoa(opts.hlsTime),
 		"-hls_list_size", strconv.Itoa(opts.hlsWindow),
 		"-hls_flags", "independent_segments+program_date_time+append_list",
+		"-start_number", strconv.Itoa(opts.startNumber),
 		"-hls_segment_filename", segPath,
 		indexPath,
 	)
@@ -154,6 +173,8 @@ func newFFmpegRunner(opts runnerOpts) (*streamRunner, error) {
 		cmd:       cmd,
 		done:      make(chan runnerExit, 1),
 		scraped:   make(chan struct{}),
+		quit:      make(chan struct{}),
+		tracked:   make(chan struct{}),
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -165,8 +186,225 @@ func newFFmpegRunner(opts runnerOpts) (*streamRunner, error) {
 		close(r.scraped)
 	}()
 	go r.wait()
+	go r.trackSegmentDurations()
 
 	return r, nil
+}
+
+// ─── Segment duration log ─────────────────────────────────────────
+//
+// finalize builds the VOD playlist from the segment FILES on disk, but
+// the files carry no duration — that lives in the live playlist's
+// EXTINF lines, which roll past as the window advances. v0.2 therefore
+// wrote a uniform `#EXTINF:<hls_time>` for every entry and used the
+// same number for EXT-X-TARGETDURATION.
+//
+// Both are wrong in the same direction. With `-c copy` ffmpeg can only
+// cut on a keyframe, so a segment routinely runs LONGER than -hls_time;
+// a playlist whose TARGETDURATION is below its longest segment is
+// invalid per RFC 8216 and strict players reject or stall on it. And
+// the last segment of a stream is a short partial, so a uniform EXTINF
+// overstates the replay's duration and puts the seek bar out of step
+// with the media.
+//
+// So capture the real numbers while they're still visible: poll the
+// live playlist and append each (name, duration) the first time it is
+// seen. One small append-only file per stream, read once at finalize.
+func (r *streamRunner) trackSegmentDurations() {
+	defer close(r.tracked)
+	if r.dataDir == "" {
+		return
+	}
+	// Poll a little faster than segments are produced so nothing rolls
+	// out of the window between reads. The window is hls_window_segments
+	// entries deep (10 by default), so this has an ample margin.
+	interval := time.Duration(r.hlsTime) * time.Second / 2
+	if interval < time.Second {
+		interval = time.Second
+	}
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+
+	seen := map[string]bool{}
+	for name := range readSegmentDurations(r.dataDir) {
+		seen[name] = true // resume across a respawn
+	}
+	for {
+		select {
+		case <-r.quit:
+			// Final sweep: the last window never rolls, so its entries
+			// are only ever observable here.
+			r.harvestSegmentDurations(seen)
+			return
+		case <-tick.C:
+			r.harvestSegmentDurations(seen)
+		}
+	}
+}
+
+// harvestSegmentDurations appends any newly-seen EXTINF pairs from the
+// live playlist to the segment log.
+func (r *streamRunner) harvestSegmentDurations(seen map[string]bool) {
+	body, err := os.ReadFile(filepath.Join(r.dataDir, indexPlaylistFile))
+	if err != nil {
+		return
+	}
+	var pending []string
+	for name, dur := range parsePlaylistDurations(string(body)) {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		pending = append(pending, fmt.Sprintf("%s\t%.6f", name, dur))
+	}
+	if len(pending) == 0 {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(r.dataDir, segmentLogFile),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.WriteString(strings.Join(pending, "\n") + "\n")
+}
+
+// parsePlaylistDurations pulls name→seconds from an HLS playlist's
+// `#EXTINF:<d>,` / `<name>` pairs.
+func parsePlaylistDurations(body string) map[string]float64 {
+	out := map[string]float64{}
+	pending := -1.0
+	for _, raw := range strings.Split(body, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#EXTINF:") {
+			v := strings.TrimPrefix(line, "#EXTINF:")
+			v = strings.TrimSuffix(strings.TrimSpace(v), ",")
+			v = strings.TrimSpace(strings.SplitN(v, ",", 2)[0])
+			if d, err := strconv.ParseFloat(v, 64); err == nil && d > 0 {
+				pending = d
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		if pending > 0 {
+			// Strip any query a rewriter added; the log keys on names.
+			name := line
+			if i := strings.IndexByte(name, '?'); i >= 0 {
+				name = name[:i]
+			}
+			out[name] = pending
+			pending = -1
+		}
+	}
+	return out
+}
+
+// readSegmentDurations loads the segment log written during the
+// stream. Missing or unreadable returns an empty map — finalize falls
+// back to the configured segment length.
+func readSegmentDurations(dir string) map[string]float64 {
+	out := map[string]float64{}
+	body, err := os.ReadFile(filepath.Join(dir, segmentLogFile))
+	if err != nil {
+		return out
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		name, dur, ok := strings.Cut(strings.TrimSpace(line), "\t")
+		if !ok {
+			continue
+		}
+		if d, err := strconv.ParseFloat(dur, 64); err == nil && d > 0 {
+			out[name] = d
+		}
+	}
+	return out
+}
+
+// ─── Respawning into a used directory ─────────────────────────────
+//
+// streams_rotate_key on a live stream kills the session and starts a
+// new ffmpeg against the SAME storage_prefix. In v0.2 that was
+// silently destructive: HLS numbering restarted at seg-00000.ts and
+// overwrote the earlier segments, and `-f mp4 record.mp4` truncated
+// the recording made so far. Rotating a leaked key 40 minutes into a
+// recorded webinar destroyed those 40 minutes in both formats.
+//
+// prepareSessionDir makes the respawn additive instead:
+//
+//   - segments continue from the existing high-water mark, so
+//     replay.m3u8 (which globs seg-*.ts and sorts) covers every
+//     session end to end.
+//   - a previous recording is rolled aside to record-<n>.mp4 rather
+//     than truncated. It stays on disk for the operator and is
+//     reclaimed by streams_delete and the retention sweeper with the
+//     rest of the directory.
+//
+// The mp4 the API serves remains the LAST session's — one file can't
+// be the concatenation of several without a remux. HLS replay is the
+// complete record across rotations; the README says so.
+func prepareSessionDir(dir string) (startNumber int, err error) {
+	next, err := nextSegmentIndex(dir)
+	if err != nil {
+		return 0, err
+	}
+	if err := rollRecording(dir); err != nil {
+		return 0, err
+	}
+	return next, nil
+}
+
+// rxSegmentName matches the seg-NNNNN.ts names the HLS muxer writes.
+var rxSegmentName = regexp.MustCompile(`^seg-(\d+)\.ts$`)
+
+// nextSegmentIndex returns one past the highest existing segment
+// index in dir, or 0 when there are none.
+func nextSegmentIndex(dir string) (int, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	highest := -1
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		m := rxSegmentName.FindStringSubmatch(e.Name())
+		if len(m) != 2 {
+			continue
+		}
+		n, err := strconv.Atoi(m[1])
+		if err == nil && n > highest {
+			highest = n
+		}
+	}
+	return highest + 1, nil
+}
+
+// rollRecording moves an existing record.mp4 out of the way so a new
+// session doesn't truncate it. No-op when there's nothing there.
+func rollRecording(dir string) error {
+	src := filepath.Join(dir, recordingFile)
+	if st, err := os.Stat(src); err != nil || st.IsDir() || st.Size() == 0 {
+		return nil //nolint:nilerr // nothing to preserve
+	}
+	base := strings.TrimSuffix(recordingFile, filepath.Ext(recordingFile))
+	ext := filepath.Ext(recordingFile)
+	for n := 1; n < 1000; n++ {
+		dst := filepath.Join(dir, fmt.Sprintf("%s-%d%s", base, n, ext))
+		if _, err := os.Stat(dst); err == nil {
+			continue // taken
+		}
+		return os.Rename(src, dst)
+	}
+	return fmt.Errorf("rollRecording: no free slot for %s in %s", recordingFile, dir)
 }
 
 // ffmpegProgressLine matches lines like:
@@ -277,6 +515,18 @@ func (r *streamRunner) wait() {
 		<-r.scraped
 	}
 	err := classifyExit(r.cmd.Wait(), r.stopRequested.Load())
+	// Let the duration tracker take its final reading BEFORE anyone
+	// learns the process is gone — the last window's EXTINFs never roll
+	// out on their own, and stop() returns straight into finalize,
+	// which reads the log. The timeout is a deadlock guard: a stuck
+	// tracker must not wedge shutdown.
+	r.quitOnce.Do(func() { close(r.quit) })
+	if r.tracked != nil {
+		select {
+		case <-r.tracked:
+		case <-time.After(5 * time.Second):
+		}
+	}
 	r.doneOnce.Do(func() {
 		r.done <- runnerExit{err: err}
 		close(r.done)
@@ -329,6 +579,15 @@ func (r *streamRunner) stop(grace time.Duration) error {
 	// Mark first: whatever signal lands from here on is one we asked
 	// for, and classifyExit reads this flag.
 	r.stopRequested.Store(true)
+	// Already finished? Report what it exited WITH. Two reasons this
+	// has to come first: a runner that crashed before we got here must
+	// not be laundered into a clean stop by the caller seeing a nil
+	// error, and the pid of a reaped child is no longer ours to signal
+	// — the kernel is free to have handed that number to somebody
+	// else's process group.
+	if ex, finished := r.tryReadExit(); finished {
+		return ex.err
+	}
 	if r.cmd == nil || r.cmd.Process == nil {
 		return nil
 	}

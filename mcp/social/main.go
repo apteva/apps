@@ -53,7 +53,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.16.3
+version: 0.16.6
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -95,6 +95,7 @@ requires:
 provides:
   http_routes:
     - prefix: /
+    - { method: GET, prefix: /accounts/oauth_done, no_auth: true }
   workers:
     - { name: scheduled_publisher, schedule: "@every 1m" }
     - { name: inbox_collector, schedule: "@every 5m" }
@@ -116,7 +117,7 @@ provides:
     - { name: post_draft_approve,         description: "Approve the exact revision in review." }
     - { name: post_draft_reject,          description: "Reject the exact revision in review with a reason." }
     - { name: post_draft_publish,         description: "Publish or schedule a stored draft with explicit mode and expected_revision." }
-    - { name: post_list,                  description: "List recent posts." }
+    - { name: post_list,                  description: "List stored posts with profile filters, pagination, and separate post/target totals." }
     - { name: post_retry,                 description: "Retry transient failures only; deterministic duplicates fail once and return the existing post id." }
     - { name: post_publish_scheduled,     description: "Internal Jobs callback that publishes one scheduled post and reports the final downstream result." }
     - { name: inbox_list,                 description: "List inbox items (comments, DMs, mentions, reviews) from connected accounts." }
@@ -137,6 +138,45 @@ provides:
       icon: megaphone
       entry: /ui/SocialPanel.mjs
   ui_components:
+    - name: publishing-calendar
+      label: Social · Publishing calendar
+      description: Upcoming scheduled posts, a week calendar, and items needing attention.
+      entry: /ui/SocialPublishingCalendarWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [post.created, post.rescheduled, post.completed, post.deleted, post.draft_created, post.draft_updated, post.draft_submitted, post.draft_approved, post.draft_rejected, post.publish_requested, target.published, target.pending, target.published_warning, target.failed, profile.accounts_moved, account.deleted]
+      settings_schema:
+        type: object
+        properties:
+          profile_id: { type: integer, title: Profile ID, description: '0 includes all profiles in this project.', minimum: 0, default: 0 }
+          account_ids: { type: string, title: Account IDs, description: 'Optional comma-separated Social account IDs.', default: '' }
+          view: { type: string, title: View, enum: [auto, upcoming, calendar], default: auto }
+          horizon_days: { type: integer, title: Upcoming days, minimum: 1, maximum: 42, default: 7 }
+          max_posts: { type: integer, title: Upcoming post limit, minimum: 1, maximum: 20, default: 5 }
+          show_attention: { type: boolean, title: Show items needing attention, default: true }
+      preview_props: { preview: true }
+    - name: performance
+      label: Social · Performance
+      description: Cached audience totals, daily performance trends, and account coverage.
+      entry: /ui/SocialPerformanceWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [metrics.updated, account.added, account.disconnected, account.deleted, profile.accounts_moved]
+      settings_schema:
+        type: object
+        properties:
+          profile_id: { type: integer, title: Profile ID, description: '0 includes all profiles in this project.', minimum: 0, default: 0 }
+          account_ids: { type: string, title: Account IDs, description: 'Optional comma-separated Social account IDs.', default: '' }
+          days: { type: integer, title: Complete days, enum: [7, 28, 90], default: 28 }
+          visibility_metric: { type: string, title: Visibility metric, enum: [views, impressions], default: views }
+          show_trends: { type: boolean, title: Show trends, default: true }
+      preview_props: { preview: true }
     - name: calendar-card
       entry: /ui/SocialCalendarCard.mjs
       slots: [chat.message_attachment]
@@ -721,7 +761,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// Account management
 		{Pattern: "/accounts", Handler: a.handleAccountsAPI},
 		{Pattern: "/accounts/start", Handler: a.handleAccountsStart},
-		{Pattern: "/accounts/oauth_done", Handler: a.handleOAuthDone},
+		{Method: http.MethodGet, Pattern: "/accounts/oauth_done", Handler: a.handleOAuthDone, NoAuth: true},
 		{Pattern: "/accounts/finalize", Handler: a.handleAccountsFinalize},
 		{Pattern: "/accounts/", Handler: a.handleAccountsItem}, // /accounts/:id (DELETE) and /accounts/:id/pages (GET)
 		{Pattern: "/provider-profiles", Handler: a.handleProviderProfiles},
@@ -734,6 +774,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// Post management
 		{Pattern: "/posts", Handler: a.handlePostsAPI},
 		{Pattern: "/posts/", Handler: a.handlePostsItem}, // /posts/:id and /posts/:id/retry
+		// Read-only summaries for project Home widgets.
+		{Pattern: "/widgets/publishing-calendar", Handler: a.handlePublishingWidget},
+		{Pattern: "/widgets/performance", Handler: a.handlePerformanceWidget},
 		// Static info
 		{Pattern: "/platforms", Handler: a.handlePlatforms},
 		// Profiles (brand/client/site containers — see profiles.go)
@@ -771,7 +814,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"force_new":           map[string]any{"type": "boolean"},
 				"return_to": map[string]any{
 					"type":        "string",
-					"description": "Where to redirect the browser after OAuth. Defaults to the social app's panel.",
+					"description": "Optional Social OAuth callback path; must be /api/apps/social/accounts/oauth_done, optionally with the matching project_id.",
 				},
 			}, []string{"platform"}),
 			Handler: a.toolAccountAdd,
@@ -947,10 +990,15 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "post_list",
-			Description: "List recent posts with per-target status. Args: limit? (default 50, max 200), status? (filter).",
+			Description: "List stored posts with per-target status, newest lifecycle date first. Filter by profile_id or profile (slug), status, and from/to before pagination. Args: limit? (default 50, max 200), offset? (default 0). Returns posts, total (matching post records), total_targets (matching per-account delivery entries), returned_targets, limit, offset, has_more, next_offset (null at end). Continue with next_offset and the same filters. Counts include all statuses unless filtered, and only stored history; deleted or never-imported platform history is excluded. Keep the dataset unchanged while paging, or restart if it changes.",
 			InputSchema: schemaObject(map[string]any{
-				"limit":  map[string]any{"type": "integer", "default": 50},
-				"status": map[string]any{"type": "string"},
+				"limit":      map[string]any{"type": "integer", "default": 50, "minimum": 1, "maximum": 200},
+				"offset":     map[string]any{"type": "integer", "default": 0, "minimum": 0},
+				"status":     map[string]any{"type": "string", "description": "Exact post status; omitted includes all statuses."},
+				"profile_id": map[string]any{"type": "integer", "minimum": 0, "description": "Social profile ID from profile_list. Omitted or 0 includes all profiles unless a profile slug is supplied; a positive ID takes precedence over profile."},
+				"profile":    map[string]any{"type": "string", "description": "Social profile slug from profile_list."},
+				"from":       map[string]any{"type": "string", "description": "Inclusive RFC3339 lifecycle date: published_at for published/partial posts, otherwise schedule_at or created_at."},
+				"to":         map[string]any{"type": "string", "description": "Exclusive RFC3339 lifecycle date bound."},
 			}, nil),
 			Handler: a.toolPostList,
 		},
@@ -1297,37 +1345,32 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		// fall through to fresh OAuth path
 	}
 
-	// Build the panel landing URL. Whether the request came from an
-	// agent (MCP tool) or from the panel's "Add account" button, the
-	// platform redirects there; the panel JS reads ?conn_id and either
-	// finalizes immediately (no page-selection) or shows the picker.
-	returnTo, _ := args["return_to"].(string)
-	if returnTo == "" {
-		returnTo = "/api/apps/social/accounts/oauth_done?project_id=" + url.QueryEscape(pid)
-	} else if !strings.HasPrefix(returnTo, "/") || strings.HasPrefix(returnTo, "//") {
-		return mcpError("return_to must be a same-origin absolute path"), nil
+	// Both MCP and panel starts return to the same token-validated handoff.
+	returnTo, err := socialOAuthReturnURL(pid, toString(args["return_to"]))
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
+	callbackToken, callbackHash, err := newOAuthCallbackToken()
+	if err != nil {
+		return nil, fmt.Errorf("create OAuth callback token: %w", err)
 	}
 
 	// Pre-create the pending row so we have a stable id we can hand
 	// the agent. It'll be linked to the connection once OAuth completes.
 	now := time.Now().UTC()
 	res, err := ctx.AppDB().Exec(
-		`INSERT INTO pending_accounts (project_id, platform, integration_slug, status, expires_at, profile_id)
-		 VALUES (?, ?, ?, 'pending_oauth', ?, ?)`,
-		pid, def.Platform, def.IntegrationSlug, pendingExpiry(now.Add(10*time.Minute)), profileID,
+		`INSERT INTO pending_accounts (project_id, platform, integration_slug, status, expires_at, profile_id, callback_token_hash)
+		 VALUES (?, ?, ?, 'pending_oauth', ?, ?, ?)`,
+		pid, def.Platform, def.IntegrationSlug, pendingExpiry(now.Add(10*time.Minute)), profileID, callbackHash,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create pending account: %w", err)
 	}
 	pendingID, _ := res.LastInsertId()
 
-	// Embed the pending id in the return_url so the OAuth callback
-	// landing page knows which row to graduate.
-	sep := "?"
-	if strings.Contains(returnTo, "?") {
-		sep = "&"
-	}
-	returnURL := fmt.Sprintf("%s%spending=%d", returnTo, sep, pendingID)
+	// The platform preserves these parameters when it redirects the browser
+	// back with conn_id and status. Only the token hash is stored locally.
+	returnURL := fmt.Sprintf("%s&pending=%d&callback_token=%s", returnTo, pendingID, url.QueryEscape(callbackToken))
 
 	out, err := ctx.PlatformAPI().StartOAuth(sdk.OAuthStartRequest{
 		IntegrationSlug: def.IntegrationSlug,
@@ -1339,6 +1382,23 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		// Roll the pending row back so we don't leak orphaned rows.
 		_, _ = ctx.AppDB().Exec(`DELETE FROM pending_accounts WHERE id=?`, pendingID)
 		return mcpError("OAuth start failed: " + err.Error()), nil
+	}
+	if out == nil || out.ConnectionID <= 0 {
+		_, _ = ctx.AppDB().Exec(`DELETE FROM pending_accounts WHERE id=?`, pendingID)
+		return mcpError("OAuth start did not return a connection ID"), nil
+	}
+	linked, err := ctx.AppDB().Exec(
+		`UPDATE pending_accounts SET connection_id=? WHERE id=? AND project_id=? AND status='pending_oauth'`,
+		out.ConnectionID, pendingID, pid,
+	)
+	if err != nil {
+		_, _ = ctx.AppDB().Exec(`DELETE FROM pending_accounts WHERE id=?`, pendingID)
+		_ = ctx.PlatformAPI().DisconnectConnection(out.ConnectionID)
+		return nil, fmt.Errorf("save pending OAuth connection: %w", err)
+	}
+	if n, _ := linked.RowsAffected(); n != 1 {
+		_ = ctx.PlatformAPI().DisconnectConnection(out.ConnectionID)
+		return mcpError("pending OAuth request disappeared before the connection was linked"), nil
 	}
 
 	return map[string]any{
@@ -5078,9 +5138,13 @@ func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 // listPosts backs both the MCP tool and the panel HTTP route. The MCP surface
 // keeps its established 200-row ceiling; the panel can request a bounded
-// calendar window with a larger cap without changing the agent-facing schema.
+// calendar window with a larger cap. Both surfaces return pagination metadata.
 func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any, error) {
 	pid := projectScope(ctx, args)
+	offset, offsetErr := postListOffset(args)
+	if offsetErr != nil {
+		return mcpError(offsetErr.Error()), nil
+	}
 	limit := intArg(args, "limit", 50)
 	if limit < 1 {
 		limit = 1
@@ -5104,11 +5168,11 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 	if profileID < 0 {
 		return mcpError(fmt.Sprintf("profile %q not found in this project", args["profile"])), nil
 	}
-	q := `SELECT id, body, COALESCE(media_storage_ids,'[]'), COALESCE(external_media_urls,'[]'), COALESCE(schedule_at,''),
+	fields := `SELECT id, body, COALESCE(media_storage_ids,'[]'), COALESCE(external_media_urls,'[]'), COALESCE(schedule_at,''),
 	             status, created_at, COALESCE(published_at,''), COALESCE(profile_id,0),
 	             revision, approval_status, approved_revision, approval_required,
-	             COALESCE(rejection_reason,''), requested_mode, provider_sync_mode, source, COALESCE(updated_at,created_at)
-	      FROM posts WHERE project_id=?`
+	             COALESCE(rejection_reason,''), requested_mode, provider_sync_mode, source, COALESCE(updated_at,created_at)`
+	where := ` FROM posts WHERE project_id=?`
 	qArgs := []any{pid}
 	effectiveTime := `CASE
 		WHEN status IN ('published','partial') AND COALESCE(published_at,'') != '' THEN published_at
@@ -5116,27 +5180,39 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 		ELSE created_at
 	END`
 	if statusFilter != "" {
-		q += " AND status=?"
+		where += " AND status=?"
 		qArgs = append(qArgs, statusFilter)
 	}
 	if profileID > 0 {
-		q += " AND profile_id=?"
+		where += " AND profile_id=?"
 		qArgs = append(qArgs, profileID)
 	}
 	if from != nil {
-		q += " AND datetime(" + effectiveTime + ") >= datetime(?)"
+		where += " AND datetime(" + effectiveTime + ") >= datetime(?)"
 		qArgs = append(qArgs, from.UTC().Format(time.RFC3339))
 	}
 	if to != nil {
-		q += " AND datetime(" + effectiveTime + ") < datetime(?)"
+		where += " AND datetime(" + effectiveTime + ") < datetime(?)"
 		qArgs = append(qArgs, to.UTC().Format(time.RFC3339))
 	}
-	q += " ORDER BY datetime(" + effectiveTime + ") DESC, id DESC LIMIT ?"
-	qArgs = append(qArgs, limit)
-	rows, err := ctx.AppDB().Query(q, qArgs...)
+	// One read snapshot keeps totals, the page, and its targets consistent
+	// even when background publishing updates the database during this call.
+	tx, err := ctx.AppDB().Begin()
 	if err != nil {
 		return nil, err
 	}
+	defer tx.Rollback()
+	var total, totalTargets int
+	if err := tx.QueryRow(postCountsSQL+where, qArgs...).Scan(&total, &totalTargets); err != nil {
+		return nil, fmt.Errorf("count posts: %w", err)
+	}
+	q := fields + where + " ORDER BY datetime(" + effectiveTime + ") DESC, id DESC LIMIT ? OFFSET ?"
+	qArgs = append(qArgs, limit, offset)
+	rows, err := tx.Query(q, qArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 	type postRow struct {
 		id                                                                                  int64
 		profID                                                                              int64
@@ -5161,7 +5237,7 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 		if err := rows.Scan(&id, &body, &mediaJSON, &extMediaJSON, &schedAt, &status, &createdAt, &pubAt, &profID,
 			&revision, &approvalStatus, &approvedRevision, &approvalRequired, &rejectionReason,
 			&requestedMode, &providerSyncMode, &source, &updatedAt); err != nil {
-			continue
+			return nil, fmt.Errorf("scan post: %w", err)
 		}
 		var mediaIDs []int64
 		_ = json.Unmarshal([]byte(mediaJSON), &mediaIDs)
@@ -5182,10 +5258,20 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 			providerSyncMode: providerSyncMode, source: source, updatedAt: updatedAt,
 		})
 	}
-	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
 	out := []map[string]any{}
+	returnedTargets := 0
 	for _, p := range postRows {
-		targets := a.loadTargets(ctx, p.id)
+		targets, err := loadTargetsFrom(tx, p.id)
+		if err != nil {
+			return nil, fmt.Errorf("load post targets: %w", err)
+		}
+		returnedTargets += len(targets)
 		out = append(out, map[string]any{
 			"id":                  p.id,
 			"body":                p.body,
@@ -5208,7 +5294,19 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 			"targets":             targets,
 		})
 	}
-	return map[string]any{"posts": out}, nil
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	var nextOffset any
+	hasMore := offset < total && len(out) < total-offset
+	if hasMore {
+		nextOffset = offset + len(out)
+	}
+	return map[string]any{
+		"posts": out, "total": total, "total_targets": totalTargets,
+		"returned_targets": returnedTargets, "limit": limit, "offset": offset,
+		"has_more": hasMore, "next_offset": nextOffset,
+	}, nil
 }
 
 func (a *App) loadPostByID(ctx *sdk.AppCtx, projectID string, postID int64) (map[string]any, error) {
@@ -5318,7 +5416,14 @@ func postListTimeBound(args map[string]any, name string) (*time.Time, error) {
 }
 
 func (a *App) loadTargets(ctx *sdk.AppCtx, postID int64) []map[string]any {
-	rows, err := ctx.AppDB().Query(
+	out, _ := loadTargetsFrom(ctx.AppDB(), postID)
+	return out
+}
+
+func loadTargetsFrom(db interface {
+	Query(string, ...any) (*sql.Rows, error)
+}, postID int64) ([]map[string]any, error) {
+	rows, err := db.Query(
 		`SELECT t.id, t.social_account_id, a.platform, a.display_name, COALESCE(a.avatar_url,''),
 		        t.status, COALESCE(t.platform_post_id,''), COALESCE(t.platform_url,''),
 		        t.attempts, COALESCE(t.last_error,''), COALESCE(t.published_at,''), COALESCE(t.options,''),
@@ -5329,7 +5434,7 @@ func (a *App) loadTargets(ctx *sdk.AppCtx, postID int64) []map[string]any {
 		postID,
 	)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
 	out := []map[string]any{}
@@ -5344,7 +5449,7 @@ func (a *App) loadTargets(ctx *sdk.AppCtx, postID int64) []map[string]any {
 		)
 		if err := rows.Scan(&tid, &acctID, &platform, &name, &avatar, &status, &ppid, &purl, &attempts, &lastErr, &pubAt,
 			&optionsRaw, &failureCode, &retryable, &upstreamStatus, &existingPostID, &providerSyncStatus, &providerUpdatedAt); err != nil {
-			continue
+			return nil, err
 		}
 		options := map[string]any{}
 		if optionsRaw != "" {
@@ -5371,7 +5476,7 @@ func (a *App) loadTargets(ctx *sdk.AppCtx, postID int64) []map[string]any {
 			"provider_updated_at":  providerUpdatedAt,
 		})
 	}
-	return out
+	return out, rows.Err()
 }
 
 // ─── post_retry ───────────────────────────────────────────────────
@@ -9998,26 +10103,36 @@ func (a *App) handleAccountsStart(w http.ResponseWriter, r *http.Request) {
 // that postMessages the panel — the panel JS then either auto-finalizes
 // or shows the picker.
 func (a *App) handleOAuthDone(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	pendingStr := r.URL.Query().Get("pending")
 	connStr := r.URL.Query().Get("conn_id")
 	status := r.URL.Query().Get("status")
+	requestProject := strings.TrimSpace(r.URL.Query().Get("project_id"))
+	callbackToken := r.URL.Query().Get("callback_token")
 	pendingID, _ := strconv.ParseInt(pendingStr, 10, 64)
 	connID, _ := strconv.ParseInt(connStr, 10, 64)
 	ready := false
-	row, rowErr := a.getPending(pendingID)
-	if rowErr == nil && !row.expired && row.status == "pending_oauth" {
-		requestProject := strings.TrimSpace(r.URL.Query().Get("project_id"))
-		if requestProject == "" || requestProject == row.projectID {
-			if row.providerSlug == zernioProviderSlug {
+	if pendingID > 0 && requestProject != "" && callbackToken != "" {
+		row, rowErr := a.getPending(pendingID)
+		if rowErr == nil && row.projectID == requestProject && !row.expired && row.status == "pending_oauth" &&
+			oauthCallbackTokenMatches(row.callbackTokenHash, callbackToken) {
+			if row.providerSlug == zernioProviderSlug && a.pendingConnectionAllowed(globalCtx, row, row.connectionID) {
 				if doneConnID, ok := a.completeZernioOAuth(globalCtx, r, row); ok {
 					connID = doneConnID
 					ready = true
 				}
 			} else if connID > 0 && status == "ok" && a.pendingConnectionAllowed(globalCtx, row, connID) {
 				res, err := globalCtx.AppDB().Exec(
-					`UPDATE pending_accounts SET connection_id=?, status='ready'
-					  WHERE id=? AND project_id=? AND status='pending_oauth'`,
-					connID, pendingID, row.projectID,
+					`UPDATE pending_accounts SET status='ready', callback_token_hash=''
+					  WHERE id=? AND project_id=? AND status='pending_oauth' AND connection_id=?
+					    AND callback_token_hash=? AND julianday(expires_at)>julianday(?)`,
+					pendingID, row.projectID, connID, row.callbackTokenHash, pendingExpiry(time.Now().UTC()),
 				)
 				if err == nil {
 					n, _ := res.RowsAffected()
@@ -10043,6 +10158,9 @@ func (a *App) handleOAuthDone(w http.ResponseWriter, r *http.Request) {
 		eventType = "social.oauth_ready"
 		heading = "Authorization complete"
 		detail = "You can close this window."
+	} else {
+		pendingID = 0
+		connID = 0
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, `<!doctype html><html><body style="font-family:system-ui;background:#111;color:#eee;display:grid;place-items:center;height:100vh;margin:0">
@@ -10055,11 +10173,8 @@ setTimeout(function(){ window.location.href = "/" }, 1500);
 }
 
 func (a *App) pendingConnectionAllowed(ctx *sdk.AppCtx, row *pendingRow, connID int64) bool {
-	if row == nil || connID <= 0 {
+	if row == nil || connID <= 0 || row.connectionID != connID {
 		return false
-	}
-	if row.providerSlug == zernioProviderSlug {
-		return row.connectionID == connID
 	}
 	conns, err := ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{
 		ProjectID: row.projectID,
@@ -10114,6 +10229,20 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "oauth_status" && r.Method == http.MethodGet {
+		requestProject := strings.TrimSpace(r.URL.Query().Get("project_id"))
+		row, err := a.getPending(id)
+		if err != nil || requestProject == "" || row.projectID != requestProject {
+			http.Error(w, "pending account not found", http.StatusNotFound)
+			return
+		}
+		status := row.status
+		if row.expired && status == "pending_oauth" {
+			status = "expired"
+		}
+		writeJSON(w, map[string]any{"status": status})
 		return
 	}
 	if len(parts) == 2 && parts[1] == "creator-info" && r.Method == http.MethodGet {
@@ -10209,7 +10338,7 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 func (a *App) handlePostsAPI(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		out, err := a.listPosts(globalCtx, scopedQueryArgs(r, "profile_id", "profile", "status", "limit", "from", "to"), 1000)
+		out, err := a.listPosts(globalCtx, scopedQueryArgs(r, "profile_id", "profile", "status", "limit", "offset", "from", "to"), 1000)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -10642,6 +10771,7 @@ type pendingRow struct {
 	providerProfileID string
 	providerState     string
 	providerData      string
+	callbackTokenHash string
 	expired           bool
 }
 
@@ -10651,9 +10781,9 @@ func (a *App) getPending(id int64) (*pendingRow, error) {
 	err := globalCtx.AppDB().QueryRow(
 		`SELECT id, project_id, platform, integration_slug, COALESCE(connection_id,0), status,
 		        COALESCE(profile_id,0), COALESCE(provider_slug,''), COALESCE(provider_profile_id,''),
-		        COALESCE(provider_state,''), COALESCE(provider_data,''), COALESCE(expires_at,'')
+		        COALESCE(provider_state,''), COALESCE(provider_data,''), COALESCE(callback_token_hash,''), COALESCE(expires_at,'')
 		 FROM pending_accounts WHERE id=?`, id,
-	).Scan(&row.id, &row.projectID, &row.platform, &row.integrationSlug, &row.connectionID, &row.status, &row.profileID, &row.providerSlug, &row.providerProfileID, &row.providerState, &row.providerData, &expiresAt)
+	).Scan(&row.id, &row.projectID, &row.platform, &row.integrationSlug, &row.connectionID, &row.status, &row.profileID, &row.providerSlug, &row.providerProfileID, &row.providerState, &row.providerData, &row.callbackTokenHash, &expiresAt)
 	if err != nil {
 		return nil, err
 	}

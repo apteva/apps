@@ -19,6 +19,7 @@ import (
 // ─── domain types ──────────────────────────────────────────────────
 
 type Table struct {
+	ProjectionID  int64    `json:"-"`
 	LegacyStorage bool     `json:"-"`
 	ID            int64    `json:"id"`
 	Name          string   `json:"name"`
@@ -352,6 +353,30 @@ func maxValueBytes(ctx *sdk.AppCtx) int64 {
 
 func maxBatchRows(ctx *sdk.AppCtx) int {
 	return int(cfgInt64Range(ctx, "max_batch_rows", 1000, 1, 10_000))
+}
+
+func maxBatchOperations(ctx *sdk.AppCtx) int {
+	return int(cfgInt64Range(ctx, "max_batch_operations", 32, 1, 256))
+}
+
+func maxBatchMs(ctx *sdk.AppCtx) int {
+	return int(cfgInt64Range(ctx, "max_batch_ms", 10_000, 1, 300_000))
+}
+
+func maxBatchResultRows(ctx *sdk.AppCtx) int {
+	return int(cfgInt64Range(ctx, "max_batch_result_rows", 10_000, 1, 1_000_000))
+}
+
+func maxBatchResultBytes(ctx *sdk.AppCtx) int64 {
+	return cfgInt64Range(ctx, "max_batch_result_bytes", 16<<20, 1024, 256<<20)
+}
+
+func maxBatchOptimizedRows(ctx *sdk.AppCtx) int {
+	return int(cfgInt64Range(ctx, "max_batch_optimized_rows", 2000, 1, 100_000))
+}
+
+func maxBatchOptimizedBytes(ctx *sdk.AppCtx) int64 {
+	return cfgInt64Range(ctx, "max_batch_optimized_bytes", 4<<20, 1024, 64<<20)
 }
 
 func cfgInt64Range(ctx *sdk.AppCtx, key string, def, min, max int64) int64 {

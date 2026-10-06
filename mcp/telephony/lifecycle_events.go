@@ -31,6 +31,9 @@ type lifecycleFacts struct {
 	TerminationCause     string
 	TerminationCode      string
 	TerminationInitiator string
+	// Synthesized marks a progress event Telephony derived itself, for example
+	// ringing for a carrier that never reports it.
+	Synthesized bool
 }
 
 type lifecycleEventRow struct {
@@ -73,6 +76,15 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
 		return false, nil
 	}
 
+	// Carrier completion can race our intentional duration-limit hangup.
+	// Keep its durable reason and completed classification through late callbacks.
+	durationEnded := current.TerminationReason == terminationTimeLimit && current.TerminationInitiator == "telephony"
+	if durationEnded && isTerminalStatus(status) {
+		status = "completed"
+		facts.TerminationCause = "max_duration"
+		facts.TerminationInitiator = "telephony"
+		errMsg = ""
+	}
 	now := time.Now().UTC()
 	occurredAt := normalizedEventTime(facts.OccurredAt, now)
 	lateNonTerminal := isTerminalStatus(current.Status) && !isTerminalStatus(status)
@@ -91,6 +103,12 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
 	answeredAt := current.AnsweredAt
 	if allowLateFacts && (status == "answered" || status == "in-progress") {
 		answeredAt = earliestRFC3339(answeredAt, occurredAt)
+	}
+	if allowLateFacts && facts.Source == "provider" && (status == "answered" || status == "in-progress") {
+		confirmed := earliestRFC3339(current.CarrierAnsweredAt, occurredAt)
+		if _, err := tx.Exec(`UPDATE calls SET carrier_answered_at=? WHERE id=?`, confirmed, id); err != nil {
+			return false, err
+		}
 	}
 	endedAt := current.EndedAt
 	if isTerminalStatus(status) {
@@ -111,6 +129,14 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
 	if answeredAt != "" && endedAt != "" {
 		talkDurationSeconds = elapsedSeconds(answeredAt, endedAt)
 	}
+	// AI conversation time requires a connected media bridge. Carrier answer
+	// time includes IVR/waiting and is retained separately in answered_at.
+	if current.Direction == "inbound" && current.PeerKind == peerKindRealtime {
+		talkDurationSeconds = 0
+		if current.MediaConnectedAt != "" && endedAt != "" {
+			talkDurationSeconds = elapsedSeconds(current.MediaConnectedAt, endedAt)
+		}
+	}
 	providerSequence := current.ProviderSequence
 	if facts.ProviderSequence > providerSequence {
 		providerSequence = facts.ProviderSequence
@@ -124,10 +150,14 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
 		terminationCode = firstNonEmpty(facts.TerminationCode, terminationCode)
 		terminationInitiator = firstNonEmpty(facts.TerminationInitiator, terminationInitiator)
 	}
+	terminationReason := current.TerminationReason
+	if isTerminalStatus(status) && (transitionAccepted || current.Status == status) {
+		terminationReason = terminationReasonFor(status, terminationCause, terminationCode)
+	}
 
 	_, err = tx.Exec(`UPDATE calls SET
         status = ?,
-        error_message = CASE WHEN ? <> '' THEN ? ELSE error_message END,
+        error_message = CASE WHEN ? THEN '' WHEN ? <> '' THEN ? ELSE error_message END,
         answered_at = NULLIF(?, ''),
         ended_at = NULLIF(?, ''),
         updated_at = ?,
@@ -137,13 +167,18 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
         termination_cause = ?,
         termination_code = ?,
         termination_initiator = ?,
+        termination_reason = ?,
         provider_sequence = ?,
         provider_event_id = ?,
-        media_active = CASE WHEN ? THEN 0 ELSE media_active END
+        media_active = CASE WHEN ? THEN 0 ELSE media_active END,
+        hold_state = CASE WHEN ? THEN 'ended' ELSE hold_state END,
+        recording_control_state = CASE WHEN ? THEN 'ended' ELSE recording_control_state END,
+        control_action = CASE WHEN ? THEN '' ELSE control_action END
         WHERE id = ?`,
-		nextStatus, errorToStore, errorToStore, answeredAt, endedAt, now.Format(time.RFC3339Nano),
+		nextStatus, durationEnded, errorToStore, errorToStore, answeredAt, endedAt, now.Format(time.RFC3339Nano),
 		providerOccurredAt, durationSeconds, talkDurationSeconds, terminationCause,
-		terminationCode, terminationInitiator, providerSequence, providerEventID,
+		terminationCode, terminationInitiator, terminationReason, providerSequence, providerEventID,
+		isTerminalStatus(nextStatus), isTerminalStatus(nextStatus), isTerminalStatus(nextStatus),
 		isTerminalStatus(nextStatus), id)
 	if err != nil {
 		return false, err
@@ -168,6 +203,9 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
 		}
 	}
 	if isTerminalStatus(nextStatus) {
+		if _, err := tx.Exec(`UPDATE routing_effects SET status='canceled',updated_at=? WHERE call_id=? AND status='pending'`, ringTime(now), id); err != nil {
+			return false, err
+		}
 		if _, err := tx.Exec(`UPDATE inbound_event_outbox
             SET delivered_at = COALESCE(NULLIF(delivered_at, ''), ?), last_error = ''
             WHERE call_id = ?`, now.Format(time.RFC3339Nano), id); err != nil {
@@ -177,6 +215,7 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}
+	c.committed(current.ProjectID)
 	if c.afterTransition != nil && (transitionAccepted || created) {
 		c.afterTransition(id)
 	}
@@ -242,35 +281,47 @@ func lifecycleEventID(call callRow, topic string, facts lifecycleFacts) string {
 func lifecycleEventPublic(call callRow, eventID, topic, occurredAt string, facts lifecycleFacts) map[string]any {
 	source := firstNonEmpty(facts.Source, "telephony")
 	eventStatus := call.Status
-	if strings.HasPrefix(topic, "call.") {
+	if strings.HasPrefix(topic, "call.") && topic != topicMachineDetected {
 		eventStatus = strings.ReplaceAll(strings.TrimPrefix(topic, "call."), "_", "-")
 		if eventStatus == "incoming" {
 			eventStatus = "pending"
 		}
 	}
 	payload := map[string]any{
-		"schema_version":   lifecycleSchemaVersion,
-		"event_id":         eventID,
-		"topic":            topic,
-		"call_id":          call.ID,
-		"provider":         call.CarrierSlug,
-		"provider_call_id": firstNonEmpty(call.CarrierSID, call.CarrierRequestID),
-		"direction":        call.Direction,
-		"from_number":      call.FromNumber,
-		"to_number":        call.ToNumber,
-		"status":           eventStatus,
-		"carrier_status":   call.Status,
-		"media_status":     firstNonEmpty(call.MediaStatus, "idle"),
-		"previous_status":  facts.PreviousStatus,
-		"agent_id":         call.AgentID,
-		"route_id":         call.RouteID,
-		"occurred_at":      occurredAt,
-		"placed_at":        call.PlacedAt,
-		"revision":         call.LifecycleRevision,
-		"source":           source,
+		"schema_version":          lifecycleSchemaVersion,
+		"event_id":                eventID,
+		"topic":                   topic,
+		"call_id":                 call.ID,
+		"provider":                call.CarrierSlug,
+		"provider_call_id":        firstNonEmpty(call.CarrierSID, call.CarrierRequestID),
+		"direction":               call.Direction,
+		"from_number":             call.FromNumber,
+		"to_number":               call.ToNumber,
+		"status":                  eventStatus,
+		"carrier_status":          call.Status,
+		"media_status":            firstNonEmpty(call.MediaStatus, "idle"),
+		"previous_status":         facts.PreviousStatus,
+		"agent_id":                call.AgentID,
+		"route_id":                call.RouteID,
+		"occurred_at":             occurredAt,
+		"placed_at":               call.PlacedAt,
+		"revision":                call.LifecycleRevision,
+		"source":                  source,
+		"missed_pool_eligible":    callbackEligible(call),
+		"call_classification":     callClassification(call),
+		"callback_opportunity_id": callbackOpportunityID(call),
+		"routing_resolution":      call.RoutingResolution,
+		"max_duration_sec":        call.MaxDurationSec, "duration_started_at": call.DurationStartedAt, "connected_deadline_at": call.ConnectedDeadlineAt,
 	}
+	addOptionalString(payload, "provider_leg_id", call.CarrierLegID)
+	addOptionalString(payload, "provider_session_id", call.CarrierSessionID)
 	addOptionalString(payload, "answered_at", call.AnsweredAt)
 	addOptionalString(payload, "ended_at", call.EndedAt)
+	addOptionalString(payload, "answered_by", call.AnsweredBy)
+	addOptionalString(payload, "handling_reason", call.HandlingReason)
+	if facts.Synthesized {
+		payload["synthesized"] = true
+	}
 	addOptionalString(payload, "provider_event_id", facts.ProviderEventID)
 	if facts.ProviderSequence > 0 {
 		payload["provider_sequence"] = facts.ProviderSequence
@@ -278,7 +329,7 @@ func lifecycleEventPublic(call callRow, eventID, topic, occurredAt string, facts
 	if call.DurationSeconds > 0 {
 		payload["duration_seconds"] = call.DurationSeconds
 	}
-	if call.TalkDurationSeconds > 0 {
+	if call.TalkDurationSeconds > 0 || (call.Direction == "inbound" && call.PeerKind == peerKindRealtime && isTerminalStatus(call.Status)) {
 		payload["talk_duration_seconds"] = call.TalkDurationSeconds
 	}
 	if call.ErrorMessage != "" {
@@ -300,6 +351,7 @@ func lifecycleEventPublic(call callRow, eventID, topic, occurredAt string, facts
 	}
 	payload["media"] = media
 	termination := map[string]any{}
+	addOptionalString(termination, "reason", call.TerminationReason)
 	addOptionalString(termination, "cause", call.TerminationCause)
 	addOptionalString(termination, "code", call.TerminationCode)
 	addOptionalString(termination, "initiator", call.TerminationInitiator)
@@ -459,7 +511,7 @@ func (a *App) publishLifecycleEvents(ctx *sdk.AppCtx, callID string) error {
 		// This is the SDK's documented app-event endpoint. Its fire-and-forget
 		// Emit method cannot acknowledge delivery; mark the durable outbox only
 		// after an HTTP success. Consumers deduplicate using event_id/revision.
-		body, err := json.Marshal(map[string]any{"topic": event.Topic, "project_id": event.ProjectID, "data": event.Payload})
+		body, err := json.Marshal(map[string]any{"event_id": event.EventID, "topic": event.Topic, "project_id": event.ProjectID, "data": event.Payload})
 		if err != nil {
 			return err
 		}
@@ -580,7 +632,34 @@ func (a *App) toolCallGet(_ context.Context, ctx *sdk.AppCtx, args map[string]an
 	if call == nil {
 		return mcpError("call not found"), nil
 	}
-	return map[string]any{"call": reconciliationCallPublic(*call)}, nil
+	public := reconciliationCallPublic(*call)
+	public["peer_kind"] = call.PeerKind
+	public["routing_flow_id"] = call.RoutingFlowID
+	var signaling map[string][]string
+	if json.Unmarshal([]byte(call.CarrierSignalingJSON), &signaling) == nil && len(signaling) > 0 {
+		public["carrier_signaling"] = signaling
+	}
+	commands, commandErr := a.carrierCommandHistory(projectID, call.ID)
+	if commandErr != nil {
+		return mcpError("get carrier command history: " + commandErr.Error()), nil
+	}
+	public["carrier_commands"] = commands
+	var principal string
+	err = a.db().db.QueryRow(`SELECT principal FROM telephony_call_owners WHERE call_id=? AND project_id=?`, call.ID, projectID).Scan(&principal)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		// Ownership enriches the existing call response. Keep it best-effort so
+		// an optional/corrupt owner record can never make a previously valid
+		// reconciliation lookup fail.
+		ctx.Logger().Warn("get optional call owner", "call", call.ID, "err", err)
+	} else if principal != "" {
+		var owner phoneIdentity
+		if err := json.Unmarshal([]byte(principal), &owner); err != nil {
+			ctx.Logger().Warn("decode optional call owner", "call", call.ID, "err", err)
+		} else if owner.valid() {
+			public["owner_identity"] = owner
+		}
+	}
+	return map[string]any{"call": public}, nil
 }
 
 func (a *App) toolCallEventsList(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -714,15 +793,25 @@ func decodeLifecycleCursor(raw string) (lifecycleCursor, error) {
 }
 
 type callbackUpdate struct {
-	Status      string
-	Error       string
-	MediaStatus string
-	MediaError  string
-	CarrierSID  string
-	Facts       lifecycleFacts
+	Status        string
+	ProviderEvent string
+	Error         string
+	MediaStatus   string
+	MediaError    string
+	CarrierSID    string
+	// AnsweredBy is a normalized answering machine detection result, empty
+	// when the callback carries none.
+	AnsweredBy string
+	Facts      lifecycleFacts
 }
 
 func callbackUpdateFor(carrier string, r *http.Request) callbackUpdate {
+	if carrier == "sinch" {
+		return sinchCallbackUpdate(r)
+	}
+	if carrier == "bandwidth" {
+		return bandwidthCallbackUpdate(r)
+	}
 	if carrier == "telnyx" {
 		return telnyxCallbackUpdate(r)
 	}
@@ -741,6 +830,7 @@ func callbackUpdateFor(carrier string, r *http.Request) callbackUpdate {
 			Status:     normalizeCallStatus(firstString(body, "CallStatus", "Status", "status", "Event", "event")),
 			Error:      firstString(body, "ErrorMessage", "error", "reason", "StatusReason"),
 			CarrierSID: firstString(body, "CallSid", "CallUUID", "uuid", "call_uuid"),
+			AnsweredBy: normalizeAnsweredBy(firstString(body, "AnsweredBy", "answered_by", "Machine")),
 			Facts: lifecycleFacts{
 				OccurredAt:           firstString(body, "Timestamp", "timestamp", "EventTime", "event_time"),
 				Source:               "provider",
@@ -765,6 +855,7 @@ func callbackUpdateFor(carrier string, r *http.Request) callbackUpdate {
 	terminationInitiator := firstNonEmpty(r.FormValue("HangupSource"), r.FormValue("hangup_source"))
 	return callbackUpdate{
 		Status: status, Error: providerCallbackError(status, errMsg, terminationCause, terminationInitiator), CarrierSID: carrierSID,
+		AnsweredBy: normalizeAnsweredBy(firstNonEmpty(r.FormValue("AnsweredBy"), r.FormValue("Machine"))),
 		Facts: lifecycleFacts{
 			OccurredAt:           firstNonEmpty(r.FormValue("Timestamp"), r.FormValue("EventTime"), r.FormValue("event_time")),
 			Source:               "provider",
@@ -837,11 +928,17 @@ func telnyxCallbackUpdate(r *http.Request) callbackUpdate {
 				HangupCause   string `json:"hangup_cause"`
 				HangupSource  string `json:"hangup_source"`
 				SIPCode       string `json:"sip_hangup_cause"`
+				Result        string `json:"result"`
 			} `json:"payload"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
 		return callbackUpdate{Error: "invalid Telnyx callback"}
+	}
+	answeredBy := ""
+	switch body.Data.EventType {
+	case "call.machine.detection.ended", "call.machine.premium.detection.ended":
+		answeredBy = normalizeAnsweredBy(firstNonEmpty(body.Data.Payload.Result, "not_sure"))
 	}
 	status := telnyxStatusFromEvent(body.Data.EventType, body.Data.Payload.HangupCause)
 	mediaStatus := telnyxMediaStatusFromEvent(body.Data.EventType)
@@ -852,7 +949,7 @@ func telnyxCallbackUpdate(r *http.Request) callbackUpdate {
 	return callbackUpdate{
 		Status: status, Error: providerCallbackError(status, "", body.Data.Payload.HangupCause, body.Data.Payload.HangupSource),
 		MediaStatus: mediaStatus, MediaError: mediaError,
-		CarrierSID: body.Data.Payload.CallControlID,
+		CarrierSID: body.Data.Payload.CallControlID, AnsweredBy: answeredBy,
 		Facts: lifecycleFacts{
 			OccurredAt:           body.Data.OccurredAt,
 			Source:               "provider",

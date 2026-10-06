@@ -27,6 +27,7 @@ var (
 )
 
 type twilioPacedPacket struct {
+	EnqueuedAt time.Time
 	PCM        []int16
 	ItemID     string
 	AudioEndMS int
@@ -50,6 +51,7 @@ type twilioPacerCommand struct {
 // carrier sees it. A short carrier lead absorbs network jitter; later packets
 // replenish that lead at absolute media deadlines.
 type twilioAudioPacer struct {
+	diagnostics              livePacerStats
 	ctx                      context.Context
 	commands                 chan twilioPacerCommand
 	clearCommands            chan twilioPacerCommand
@@ -117,6 +119,7 @@ func (p *twilioAudioPacer) dropEvents() []audioDropEvent {
 }
 
 func (p *twilioAudioPacer) recordDrop(event audioDropEvent) {
+	p.diagnostics.dropped(event.Reason, event.DurationMS)
 	p.dropMu.Lock()
 	defer p.dropMu.Unlock()
 	p.drops = append(p.drops, event)
@@ -136,7 +139,7 @@ func (p *twilioAudioPacer) enqueueWithDiagnostics(ctx context.Context, packets [
 	}
 	paced := make([]twilioPacedPacket, len(packets))
 	for i, packet := range packets {
-		paced[i] = twilioPacedPacket{PCM: packet.PCM, ItemID: frame.ItemID, AudioEndMS: packet.AudioEndMS}
+		paced[i] = twilioPacedPacket{EnqueuedAt: time.Now(), PCM: packet.PCM, ItemID: frame.ItemID, AudioEndMS: packet.AudioEndMS}
 	}
 	result := p.command(ctx, twilioPacerCommand{packets: paced})
 	return result.queuedMS, result.droppedMS, result.err
@@ -244,6 +247,12 @@ func (p *twilioAudioPacer) run() {
 		queue = queue[1:]
 		queuedSamples -= len(packet.PCM)
 
+		if p.dropStale && !packet.EnqueuedAt.IsZero() && time.Since(packet.EnqueuedAt) >= liveAudioMaxAge {
+			droppedSamples += len(packet.PCM)
+			needsCrossfade = true
+			p.recordDrop(audioDropEvent{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier", Reason: "live_audio_age_limit", DurationMS: carrierSamplesToMS(len(packet.PCM), twilioMediaSampleRate)})
+			return 0, nil
+		}
 		pcm := packet.PCM
 		if needsCrossfade && len(lastSentTail) > 0 {
 			pcm = append([]int16(nil), pcm...)
@@ -253,9 +262,11 @@ func (p *twilioAudioPacer) run() {
 		out := twilioOutbound{Event: "media", StreamSID: p.streamSID}
 		out.Media.Payload = base64.StdEncoding.EncodeToString(pcm16ToUlaw(pcm))
 		payload, _ := json.Marshal(out)
+		writeStarted := time.Now()
 		if err := p.write(payload); err != nil {
 			return 0, err
 		}
+		p.diagnostics.sent(carrierSamplesToMS(len(packet.PCM), twilioMediaSampleRate), writeStarted)
 		if markName := p.playback.add(packet.ItemID, packet.AudioEndMS); markName != "" {
 			mark, _ := json.Marshal(map[string]any{
 				"event": "mark", "streamSid": p.streamSID, "mark": map[string]string{"name": markName},
@@ -337,6 +348,7 @@ func (p *twilioAudioPacer) run() {
 				adaptiveUntil = time.Now().Add(5 * time.Second)
 			}
 		}
+		p.diagnostics.queued(carrierSamplesToMS(queuedSamples, twilioMediaSampleRate))
 		queuedAtEnqueue := queuedSamples
 		err := fillCarrierLead()
 		command.response <- twilioPacerResult{queuedMS: samplesToMS(queuedAtEnqueue), droppedMS: samplesToMS(droppedSamples), err: err}

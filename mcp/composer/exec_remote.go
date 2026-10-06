@@ -400,7 +400,9 @@ fi
 }
 
 // remoteRunScript SSHes via instances.instance_run_command. Returns
-// the combined stdout/stderr.
+// the combined stdout/stderr. Instances runs commands through sh, so select
+// Bash explicitly for pipefail and the upload script's arrays. Quote the entire
+// script as one argument to preserve it through the outer shell.
 func remoteRunScript(ctx context.Context, hostID int64, script string) (string, error) {
 	var out struct {
 		Output   string `json:"output"`
@@ -411,7 +413,7 @@ func remoteRunScript(ctx context.Context, hostID int64, script string) (string, 
 	}
 	if err := callComposerInstancesRunCommand(ctx, 1800, map[string]any{
 		"id":        hostID,
-		"cmd":       script,
+		"cmd":       "bash -c " + shellQuote(script),
 		"timeout_s": 1800,
 	}, &out); err != nil {
 		return out.Output + out.Stdout + out.Stderr, err

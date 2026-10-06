@@ -205,16 +205,43 @@ interface MarketingResource {
   status: string;
 }
 
-interface MetaAccountOption {
+interface MarketingAccountOption {
   id: number;
+  provider: string;
+  platform?: string;
   display_name: string;
   currency?: string;
+  tracking_source_type?: string;
   resources?: MarketingResource[];
   resource_error?: string;
 }
 
+// Presentation only. The provider list itself comes from the server, so an
+// unknown provider still renders with a sensible generic label.
+const MARKETING_PROVIDERS: Record<string, { label: string; blurb: string; resource: string }> = {
+  meta: {
+    label: "Facebook & Instagram",
+    blurb: "Meta Pixel browser events with an explicit visitor consent prompt.",
+    resource: "Pixel",
+  },
+  google: {
+    label: "Google Ads",
+    blurb: "Google conversion tracking through gtag, with an explicit visitor consent prompt.",
+    resource: "conversion action",
+  },
+};
+
+function providerInfo(provider: string) {
+  return MARKETING_PROVIDERS[provider] || {
+    label: provider ? provider.charAt(0).toUpperCase() + provider.slice(1) : "Channel",
+    blurb: "Browser events with an explicit visitor consent prompt.",
+    resource: "tracking source",
+  };
+}
+
 interface MarketingChannel {
   id: number;
+  provider: string;
   status: string;
   ad_account_id: number;
   tracking_source_resource_id: number;
@@ -226,12 +253,13 @@ interface MarketingChannel {
 
 interface MarketingChannelOptions {
   ads_available: boolean;
-  accounts: MetaAccountOption[];
+  accounts: MarketingAccountOption[];
   error?: string;
 }
 
 interface MarketingChannelResponse {
   channel: MarketingChannel | null;
+  channels?: MarketingChannel[];
   options: MarketingChannelOptions;
 }
 
@@ -255,9 +283,9 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
   const [dispatches, setDispatches] = useState<DispatchJob[]>([]);
   const [storefront, setStorefront] = useState<StorefrontStatus | null>(null);
   const [storeSettings, setStoreSettings] = useState<StoreSettings | null>(null);
-  const [marketingChannel, setMarketingChannel] = useState<MarketingChannel | null>(null);
+  const [marketingChannels, setMarketingChannels] = useState<MarketingChannel[]>([]);
   const [marketingOptions, setMarketingOptions] = useState<MarketingChannelOptions>({ ads_available: false, accounts: [] });
-  const [marketingDraft, setMarketingDraft] = useState({ adAccountId: "", resourceId: "", pixelName: "" });
+  const [marketingDraft, setMarketingDraft] = useState({ adAccountId: "", resourceId: "", sourceName: "" });
   const [providerDrafts, setProviderDrafts] = useState<Record<number, ProviderPolicy>>({});
   const [catalogProvider, setCatalogProvider] = useState<ProviderPolicy | null>(null);
   const [providerProducts, setProviderProducts] = useState<ProviderProduct[]>([]);
@@ -350,13 +378,13 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
 
   const loadMarketing = useCallback(async () => {
     if (!selectedStore) {
-      setMarketingChannel(null);
+      setMarketingChannels([]);
       setMarketingOptions({ ads_available: false, accounts: [] });
       return;
     }
     try {
       const result = await api<MarketingChannelResponse>(`/admin/marketing-channel?store_id=${encodeURIComponent(selectedStore)}`);
-      setMarketingChannel(result.channel || null);
+      setMarketingChannels(result.channels || (result.channel ? [result.channel] : []));
       setMarketingOptions(result.options || { ads_available: false, accounts: [] });
     } catch (error) {
       setNotice({ tone: "error", message: errorMessage(error) });
@@ -373,15 +401,19 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
   }, [stores, productForm.store_id, collectionForm.store_id]);
 
   useEffect(() => {
-    const accountId = marketingChannel?.ad_account_id || marketingOptions.accounts[0]?.id;
+    const configured = marketingChannels.find((channel) => channel.status === "active") || marketingChannels[0];
+    const accountId = configured?.ad_account_id || marketingOptions.accounts[0]?.id;
     const account = marketingOptions.accounts.find((row) => row.id === accountId);
-    const resourceId = marketingChannel?.tracking_source_resource_id || account?.resources?.[0]?.id;
-    setMarketingDraft({ adAccountId: accountId ? String(accountId) : "", resourceId: resourceId ? String(resourceId) : "", pixelName: "" });
-  }, [selectedStore, marketingChannel?.id, marketingOptions]);
+    const resourceId = configured?.tracking_source_resource_id || account?.resources?.[0]?.id;
+    setMarketingDraft({ adAccountId: accountId ? String(accountId) : "", resourceId: resourceId ? String(resourceId) : "", sourceName: "" });
+  }, [selectedStore, marketingChannels, marketingOptions]);
 
   const totals = summary || { stores: stores.length, products: products.length, open_carts: 0, sales: sales.length };
   const currentStore = useMemo(() => stores.find((store) => String(store.id) === selectedStore), [stores, selectedStore]);
-  const selectedMetaAccount = useMemo(() => marketingOptions.accounts.find((account) => String(account.id) === marketingDraft.adAccountId), [marketingOptions.accounts, marketingDraft.adAccountId]);
+  const selectedAdAccount = useMemo(() => marketingOptions.accounts.find((account) => String(account.id) === marketingDraft.adAccountId), [marketingOptions.accounts, marketingDraft.adAccountId]);
+  const draftProvider = selectedAdAccount?.provider || "";
+  const draftInfo = providerInfo(draftProvider);
+  const draftChannel = useMemo(() => marketingChannels.find((channel) => channel.provider === draftProvider) || null, [marketingChannels, draftProvider]);
 
   async function run(action: () => Promise<void>, success: string) {
     setBusy(true);
@@ -587,25 +619,26 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
   }
 
   async function configureMarketingChannel() {
-    if (!selectedStore) throw new Error("Select a store before configuring Meta");
-    if (!marketingDraft.adAccountId) throw new Error("Select a Meta ad account");
-    if (!marketingDraft.resourceId && !marketingDraft.pixelName.trim()) throw new Error("Select a Pixel or enter a name for a new one");
+    if (!selectedStore) throw new Error("Select a store before configuring a channel");
+    if (!marketingDraft.adAccountId) throw new Error("Select an ad account");
+    if (!marketingDraft.resourceId && !marketingDraft.sourceName.trim()) throw new Error(`Select a ${draftInfo.resource} or enter a name for a new one`);
     await api("/admin/marketing-channel", {
       method: "POST",
       body: JSON.stringify({
         store_id: Number(selectedStore),
         ad_account_id: Number(marketingDraft.adAccountId),
+        provider: draftProvider || undefined,
         tracking_source_resource_id: marketingDraft.resourceId ? Number(marketingDraft.resourceId) : undefined,
-        pixel_name: marketingDraft.resourceId ? undefined : marketingDraft.pixelName.trim(),
+        tracking_source_name: marketingDraft.resourceId ? undefined : marketingDraft.sourceName.trim(),
         set_default: true,
       }),
     });
     await loadMarketing();
   }
 
-  async function disconnectMarketingChannel() {
-    if (!selectedStore) throw new Error("Select a store before disconnecting Meta");
-    await api(`/admin/marketing-channel?store_id=${encodeURIComponent(selectedStore)}`, { method: "DELETE" });
+  async function disconnectMarketingChannel(provider: string) {
+    if (!selectedStore) throw new Error("Select a store before disconnecting a channel");
+    await api(`/admin/marketing-channel?store_id=${encodeURIComponent(selectedStore)}&provider=${encodeURIComponent(provider)}`, { method: "DELETE" });
     await loadMarketing();
   }
 
@@ -924,42 +957,52 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
               <div className="rounded-md border border-border px-4 py-10 text-center text-sm text-text-muted">Select a store to configure its channels.</div>
             ) : !marketingOptions.ads_available ? (
               <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-4 text-sm">
-                <h3 className="font-semibold">Facebook &amp; Instagram</h3>
-                <p className="mt-2 text-text-muted">Install or upgrade Ads, then connect a Meta account there first.</p>
+                <h3 className="font-semibold">No ad accounts available</h3>
+                <p className="mt-2 text-text-muted">Install or upgrade Ads, then connect a Meta or Google account there first.</p>
                 {marketingOptions.error && <p className="mt-2 text-xs text-amber-800 dark:text-amber-200">{marketingOptions.error}</p>}
+              </div>
+            ) : !marketingOptions.accounts.length ? (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-4 text-sm">
+                <h3 className="font-semibold">No supported ad accounts</h3>
+                <p className="mt-2 text-text-muted">Ads is connected, but none of its accounts are on a platform Commerce can install storefront tracking for.</p>
               </div>
             ) : (
               <div className="grid gap-5 md:grid-cols-[minmax(0,1fr)_260px]">
                 <div className="rounded-md border border-border p-4 space-y-4">
                   <div className="flex items-start justify-between gap-3">
-                    <div><h3 className="font-semibold">Facebook &amp; Instagram</h3><p className="mt-1 text-xs leading-5 text-text-muted">Meta Pixel browser events with an explicit visitor consent prompt.</p></div>
-                    <Status value={marketingChannel?.status === "active" ? "active" : "not configured"} />
+                    <div><h3 className="font-semibold">{draftInfo.label}</h3><p className="mt-1 text-xs leading-5 text-text-muted">{draftInfo.blurb}</p></div>
                   </div>
-                  <Field label="Meta ad account">
-                    <select value={marketingDraft.adAccountId} onChange={(event) => { const account = marketingOptions.accounts.find((row) => String(row.id) === event.target.value); setMarketingDraft({ adAccountId: event.target.value, resourceId: account?.resources?.[0] ? String(account.resources[0].id) : "", pixelName: "" }); }} className={inputClass}>
-                      <option value="">Select account</option>
-                      {marketingOptions.accounts.map((account) => <option key={account.id} value={account.id}>{account.display_name || `Account #${account.id}`}</option>)}
+                  <Field label="Ad account">
+                    <select value={marketingDraft.adAccountId} onChange={(event) => { const account = marketingOptions.accounts.find((row) => String(row.id) === event.target.value); setMarketingDraft({ adAccountId: event.target.value, resourceId: account?.resources?.[0] ? String(account.resources[0].id) : "", sourceName: "" }); }} className={inputClass}>
+                      {marketingOptions.accounts.map((account) => <option key={account.id} value={account.id}>{providerInfo(account.provider).label} — {account.display_name || `Account #${account.id}`}</option>)}
                     </select>
                   </Field>
-                  <Field label="Meta Pixel">
+                  <Field label={draftInfo.resource.charAt(0).toUpperCase() + draftInfo.resource.slice(1)}>
                     <select value={marketingDraft.resourceId} onChange={(event) => setMarketingDraft({ ...marketingDraft, resourceId: event.target.value })} disabled={!marketingDraft.adAccountId} className={inputClass}>
-                      <option value="">Create a new Pixel</option>
-                      {(selectedMetaAccount?.resources || []).map((resource) => <option key={resource.id} value={resource.id}>{resource.name || resource.display_name || `Pixel #${resource.id}`}</option>)}
+                      <option value="">Create a new {draftInfo.resource}</option>
+                      {(selectedAdAccount?.resources || []).map((resource) => <option key={resource.id} value={resource.id}>{resource.name || resource.display_name || `#${resource.id}`}</option>)}
                     </select>
                   </Field>
-                  {!marketingDraft.resourceId && <Field label="New Pixel name"><input value={marketingDraft.pixelName} onChange={(event) => setMarketingDraft({ ...marketingDraft, pixelName: event.target.value })} placeholder={`${currentStore?.name || "Store"} Pixel`} className={inputClass} /></Field>}
-                  {selectedMetaAccount?.resource_error && <p className="text-xs text-amber-700 dark:text-amber-300">Could not refresh Pixels: {selectedMetaAccount.resource_error}</p>}
-                  <button type="button" disabled={busy || !marketingDraft.adAccountId || (!marketingDraft.resourceId && !marketingDraft.pixelName.trim())} onClick={() => void run(configureMarketingChannel, marketingChannel?.status === "active" ? "Meta Pixel updated" : "Meta Pixel connected")} className="h-9 rounded-md bg-accent px-4 text-sm font-medium text-bg disabled:opacity-50">{marketingChannel?.status === "active" ? "Update Meta Pixel" : "Connect Meta Pixel"}</button>
+                  {!marketingDraft.resourceId && <Field label={`New ${draftInfo.resource} name`}><input value={marketingDraft.sourceName} onChange={(event) => setMarketingDraft({ ...marketingDraft, sourceName: event.target.value })} placeholder={`${currentStore?.name || "Store"} ${draftInfo.resource}`} className={inputClass} /></Field>}
+                  {selectedAdAccount?.resource_error && <p className="text-xs text-amber-700 dark:text-amber-300">Could not refresh {draftInfo.resource}s: {selectedAdAccount.resource_error}</p>}
+                  <button type="button" disabled={busy || !marketingDraft.adAccountId || (!marketingDraft.resourceId && !marketingDraft.sourceName.trim())} onClick={() => void run(configureMarketingChannel, draftChannel?.status === "active" ? `${draftInfo.label} updated` : `${draftInfo.label} connected`)} className="h-9 rounded-md bg-accent px-4 text-sm font-medium text-bg disabled:opacity-50">{draftChannel?.status === "active" ? `Update ${draftInfo.label}` : `Connect ${draftInfo.label}`}</button>
                 </div>
                 <aside className="space-y-3">
-                  <div className="rounded-md border border-border divide-y divide-border">
-                    <StorefrontRow label="Pixel" value={marketingChannel?.tracking_source_name || "Not selected"} />
-                    <StorefrontRow label="Data sharing" value="Browser only" />
-                    <StorefrontRow label="Storefront" value={marketingChannel?.site_tracking_status === "installed" ? "Installed" : storefront?.configured ? "Pending refresh" : "Configure Content first"} />
-                  </div>
-                  {marketingChannel?.site_tracking_error && <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">{marketingChannel.site_tracking_error}</p>}
-                  {marketingChannel?.status === "active" && <button type="button" disabled={busy} onClick={() => void run(disconnectMarketingChannel, "Meta Pixel disconnected")} className="w-full h-9 rounded-md border border-red-500/40 text-sm text-red-600 disabled:opacity-50">Disconnect</button>}
-                  <p className="text-xs leading-5 text-text-muted">Tracks PageView, product views, search, add-to-cart, and checkout after consent. Catalog sync and server-side Conversions API are not included yet.</p>
+                  {!marketingChannels.length ? (
+                    <div className="rounded-md border border-border px-3 py-4 text-xs text-text-muted">No channels connected yet.</div>
+                  ) : marketingChannels.map((channel) => (
+                    <div key={channel.provider} className="space-y-2">
+                      <div className="rounded-md border border-border divide-y divide-border">
+                        <StorefrontRow label={providerInfo(channel.provider).label} value={channel.status === "active" ? "Connected" : "Disabled"} />
+                        <StorefrontRow label={providerInfo(channel.provider).resource.charAt(0).toUpperCase() + providerInfo(channel.provider).resource.slice(1)} value={channel.tracking_source_name || "Not selected"} />
+                        <StorefrontRow label="Data sharing" value="Browser only" />
+                        <StorefrontRow label="Storefront" value={channel.site_tracking_status === "installed" ? "Installed" : storefront?.configured ? "Pending refresh" : "Configure Content first"} />
+                      </div>
+                      {channel.site_tracking_error && <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">{channel.site_tracking_error}</p>}
+                      {channel.status === "active" && <button type="button" disabled={busy} onClick={() => void run(() => disconnectMarketingChannel(channel.provider), `${providerInfo(channel.provider).label} disconnected`)} className="w-full h-9 rounded-md border border-red-500/40 text-sm text-red-600 disabled:opacity-50">Disconnect {providerInfo(channel.provider).label}</button>}
+                    </div>
+                  ))}
+                  <p className="text-xs leading-5 text-text-muted">Tracks page views, product views, search, add-to-cart, and checkout after consent, on every connected channel. Catalog sync and server-side conversion APIs are not included yet.</p>
                 </aside>
               </div>
             )}

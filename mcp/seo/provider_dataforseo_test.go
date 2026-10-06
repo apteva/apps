@@ -521,6 +521,80 @@ func TestContentOpportunities_UsesLatestSnapshotOnly(t *testing.T) {
 	}
 }
 
+func TestContentOpportunities_SeparatesLocalesAndUsesMatchingMetrics(t *testing.T) {
+	db := newSEOTestDB(t, "migrations/001_init.sql", "migrations/004_search_entities.sql", "migrations/005_search_engine_keyword_backfill.sql")
+	if _, err := db.Exec(`INSERT INTO seo_locations
+		(provider, search_engine, location_code, location_name, country_iso, language_code, language_name)
+		VALUES ('dataforseo', 'google', 2840, 'United States', 'US', 'en', 'English'),
+		       ('dataforseo', 'google', 2826, 'United Kingdom', 'GB', 'en', 'English')`); err != nil {
+		t.Fatal(err)
+	}
+	usKeyword, err := insertKeywordRecord(db, "project-1", "google", "best dividend etf", 1, "US", "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ukKeyword, err := insertKeywordRecord(db, "project-1", "google", "best dividend etf", 2, "GB", "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherKeyword, err := insertKeywordRecord(db, "project-2", "google", "other project keyword", 1, "US", "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO keyword_metrics
+		(keyword_id, location_id, provider, ts, volume, difficulty, raw_json)
+		VALUES (?, 1, 'dataforseo', 150, 18100, 20, '{}'),
+		       (?, 1, 'dataforseo', 150, 999999, 1, '{}')`, usKeyword, otherKeyword); err != nil {
+		t.Fatal(err)
+	}
+	for _, seed := range []struct {
+		projectID string
+		keywordID int64
+		keyword   string
+		location  int64
+		ts        int64
+	}{
+		{"project-1", usKeyword, "best dividend etf", 1, 200},
+		{"project-1", ukKeyword, "best dividend etf", 2, 300},
+		{"project-2", otherKeyword, "other project keyword", 1, 400},
+	} {
+		res, err := db.Exec(`INSERT INTO search_serp_snapshots
+			(project_id, search_engine, keyword_id, keyword_text, location_id, provider, ts, raw_json)
+			VALUES (?, 'google', ?, ?, ?, 'dataforseo', ?, '{}')`,
+			seed.projectID, seed.keywordID, seed.keyword, seed.location, seed.ts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshotID, _ := res.LastInsertId()
+		if _, err := db.Exec(`INSERT INTO search_serp_results
+			(snapshot_id, rank, result_type, title, url, raw_json)
+			VALUES (?, 1, 'organic', 'Result', 'https://example.com', '{}')`, snapshotID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := contentOpportunitiesProvider(db, "project-1", "google", 10, "dataforseo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := got.(map[string]any)["items"].([]map[string]any)
+	if len(items) != 2 {
+		t.Fatalf("items = %#v, want one row per locale", items)
+	}
+	byCountry := map[string]map[string]any{}
+	for _, item := range items {
+		byCountry[item["country_iso"].(string)] = item
+	}
+	if byCountry["US"]["volume"] != int64(18100) || byCountry["US"]["difficulty"] != int64(20) ||
+		byCountry["US"]["opportunity_score"] != int64(90) || byCountry["US"]["metrics_status"] != "available" {
+		t.Fatalf("US opportunity = %#v", byCountry["US"])
+	}
+	if byCountry["GB"]["volume"] != nil || byCountry["GB"]["opportunity_score"] != nil ||
+		byCountry["GB"]["metrics_status"] != "unavailable" {
+		t.Fatalf("GB opportunity = %#v", byCountry["GB"])
+	}
+}
+
 func TestCurrentRankingsForDomain_ExcludesOlderObservation(t *testing.T) {
 	db := newSEOTestDB(t, "migrations/001_init.sql", "migrations/002_rankings_current_unique.sql", "migrations/003_rankings_daily_history.sql", "migrations/004_search_entities.sql", "migrations/005_search_engine_keyword_backfill.sql", "migrations/006_serp_consistency_and_retention.sql")
 	if _, err := db.Exec(`INSERT INTO seo_locations
@@ -617,6 +691,8 @@ func TestAllSEOMigrationsApplyInOrder(t *testing.T) {
 		"migrations/007_keyword_metric_jobs.sql",
 		"migrations/008_daily_rank_tracking.sql",
 		"migrations/009_rank_tracking_frequency.sql",
+		"migrations/010_backlink_summary_index.sql",
+		"migrations/011_keyword_metric_availability.sql",
 	)
 	var indexCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_search_serp_snapshots_latest'`).Scan(&indexCount); err != nil {

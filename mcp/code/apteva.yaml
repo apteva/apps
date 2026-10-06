@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.11.0
+version: 0.13.1
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -25,6 +25,9 @@ description: |
   v0.8.1 adds monorepo-scoped workspaces: editable path globs and read-only
   support inputs are transferred independently and only editable paths can be
   applied back to Code.
+  v0.13.1 aligns Vite preview host and port with readiness checks and reports early startup errors.
+  v0.12.0 adds saved repository execution permissions, agent controls and Allow and run in the preview toolbar.
+  v0.11.1 reports repeated hard-delete requests as repository-not-found instead of success.
   v0.11.0 adds opt-in automatic commits and origin synchronization with
   debounced checkpoints, offline retries, divergence protection and toolbar controls.
   v0.10.0 adds immutable source snapshots with revision, checksum, size,
@@ -94,7 +97,7 @@ requires:
     - platform.ingress.write
   apps:
     - name: workspaces
-      version: ">=0.5.0"
+      version: ">=0.6.1"
       optional: true
       reason: Provides isolated, durable command execution and generic source transfer while Code remains the repository and Git authority.
   binaries:
@@ -135,6 +138,10 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - name: repos_execution_status
+      description: Read local execution permission for a repository.
+    - name: repos_execution_configure
+      description: Allow or revoke local execution for a repository after explicit confirmation.
     - name: repos_git_sync_configure
       description: Enable or pause automatic commits and origin synchronization.
     - name: repos_git_sync_status
@@ -292,7 +299,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: code/v0.11.0
+    ref: code/v0.13.1
     entry: mcp/code
   port: 8080
   health_check: /health

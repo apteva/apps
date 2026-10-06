@@ -12,7 +12,7 @@ import (
 type store struct{ db *sql.DB }
 
 func (s store) listDefinitions() ([]Definition, error) {
-	rows, err := s.db.Query(`SELECT id,name,description,desired_state,spec_version,spec_json,created_at,updated_at FROM environment_definitions ORDER BY updated_at DESC`)
+	rows, err := s.db.Query(`SELECT id,name,description,desired_state,spec_version,spec_json,created_at,updated_at,reconcile_status,reconcile_failures,reconcile_error,reconcile_next_at,degraded_at FROM environment_definitions ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -21,7 +21,8 @@ func (s store) listDefinitions() ([]Definition, error) {
 	for rows.Next() {
 		var d Definition
 		var raw, created, updated string
-		if err := rows.Scan(&d.ID, &d.Name, &d.Description, &d.DesiredState, &d.SpecVersion, &raw, &created, &updated); err != nil {
+		var next, degraded sql.NullString
+		if err := rows.Scan(&d.ID, &d.Name, &d.Description, &d.DesiredState, &d.SpecVersion, &raw, &created, &updated, &d.ReconcileStatus, &d.ReconcileFailures, &d.ReconcileError, &next, &degraded); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(raw), &d.Spec); err != nil {
@@ -29,6 +30,8 @@ func (s store) listDefinitions() ([]Definition, error) {
 		}
 		d.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 		d.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+		d.ReconcileNextAt = parseOptionalTime(next)
+		d.DegradedAt = parseOptionalTime(degraded)
 		out = append(out, d)
 	}
 	if err := rows.Err(); err != nil {
@@ -56,7 +59,8 @@ func (s store) listDefinitions() ([]Definition, error) {
 func (s store) getDefinition(id string) (*Definition, error) {
 	var d Definition
 	var raw, created, updated string
-	err := s.db.QueryRow(`SELECT id,name,description,desired_state,spec_version,spec_json,created_at,updated_at FROM environment_definitions WHERE id=?`, id).Scan(&d.ID, &d.Name, &d.Description, &d.DesiredState, &d.SpecVersion, &raw, &created, &updated)
+	var next, degraded sql.NullString
+	err := s.db.QueryRow(`SELECT id,name,description,desired_state,spec_version,spec_json,created_at,updated_at,reconcile_status,reconcile_failures,reconcile_error,reconcile_next_at,degraded_at FROM environment_definitions WHERE id=?`, id).Scan(&d.ID, &d.Name, &d.Description, &d.DesiredState, &d.SpecVersion, &raw, &created, &updated, &d.ReconcileStatus, &d.ReconcileFailures, &d.ReconcileError, &next, &degraded)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -68,6 +72,8 @@ func (s store) getDefinition(id string) (*Definition, error) {
 	}
 	d.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 	d.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	d.ReconcileNextAt = parseOptionalTime(next)
+	d.DegradedAt = parseOptionalTime(degraded)
 	d.ActiveRun, _ = s.activeRun(id)
 	return &d, nil
 }
@@ -88,7 +94,24 @@ func (s store) saveDefinition(d *Definition) error {
 	if d.DesiredState == "" {
 		d.DesiredState = "stopped"
 	}
-	_, err = s.db.Exec(`INSERT INTO environment_definitions(id,name,description,desired_state,spec_version,spec_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,desired_state=excluded.desired_state,spec_version=excluded.spec_version,spec_json=excluded.spec_json,updated_at=excluded.updated_at`, d.ID, d.Name, d.Description, d.DesiredState, d.SpecVersion, raw, d.CreatedAt.Format(time.RFC3339Nano), d.UpdatedAt.Format(time.RFC3339Nano))
+	_, err = s.db.Exec(`INSERT INTO environment_definitions(id,name,description,desired_state,spec_version,spec_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,desired_state=excluded.desired_state,spec_version=excluded.spec_version,spec_json=excluded.spec_json,updated_at=excluded.updated_at,reconcile_status='healthy',reconcile_failures=0,reconcile_error='',reconcile_next_at=NULL,degraded_at=NULL`, d.ID, d.Name, d.Description, d.DesiredState, d.SpecVersion, raw, d.CreatedAt.Format(time.RFC3339Nano), d.UpdatedAt.Format(time.RFC3339Nano))
+	return err
+}
+
+func (s store) clearReconcileState(id string) error {
+	_, err := s.db.Exec(`UPDATE environment_definitions SET reconcile_status='healthy',reconcile_failures=0,reconcile_error='',reconcile_next_at=NULL,degraded_at=NULL WHERE id=?`, id)
+	return err
+}
+
+func (s store) setReconcileFailure(id string, failures int, message, status string, nextAt, degradedAt *time.Time) error {
+	var next, degraded any
+	if nextAt != nil {
+		next = nextAt.UTC().Format(time.RFC3339Nano)
+	}
+	if degradedAt != nil {
+		degraded = degradedAt.UTC().Format(time.RFC3339Nano)
+	}
+	_, err := s.db.Exec(`UPDATE environment_definitions SET reconcile_status=?,reconcile_failures=?,reconcile_error=?,reconcile_next_at=?,degraded_at=? WHERE id=?`, status, failures, message, next, degraded, id)
 	return err
 }
 
@@ -191,6 +214,17 @@ func scanRun(row rowScanner) (*Run, error) {
 		r.StoppedAt = &t
 	}
 	return &r, nil
+}
+
+func parseOptionalTime(value sql.NullString) *time.Time {
+	if !value.Valid {
+		return nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value.String)
+	if err != nil {
+		return nil
+	}
+	return &parsed
 }
 
 func (s store) saveSnapshot(x Snapshot) error {

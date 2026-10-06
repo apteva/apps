@@ -334,7 +334,7 @@ func TestCreate_ConcurrentCreatesRespectTheCap(t *testing.T) {
 	app := &App{
 		runners:       map[int64]*streamRunner{},
 		viewers:       newViewerTracker(),
-		throttle:      newViewerThrottle(),
+		throttle:      newViewerThrottle(defaultMaxViewersPerIP),
 		playback:      newPlaybackCache(playbackCacheTTL),
 		runnerFactory: newFakeRunnerFactory(t),
 	}
@@ -696,7 +696,7 @@ func TestPublicURL_CachedAcrossListLoops(t *testing.T) {
 	app := &App{
 		runners:       map[int64]*streamRunner{},
 		viewers:       newViewerTracker(),
-		throttle:      newViewerThrottle(),
+		throttle:      newViewerThrottle(defaultMaxViewersPerIP),
 		playback:      newPlaybackCache(playbackCacheTTL),
 		runnerFactory: newFakeRunnerFactory(t),
 	}

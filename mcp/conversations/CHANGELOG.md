@@ -1,5 +1,305 @@
 # Changelog
 
+## 0.24.31 — 2026-10-02
+
+- Use neutral user-message bubbles in light mode while retaining the existing dark-mode styling.
+- Add a real-model two-agent Tier 3 scenario covering normal messages, mentions, shared history, recipient overrides, and retry deduplication; validated with GPT-6.1 Sol.
+- Stop pulsing completed tool cards while the model processes their results. Show Thinking during that wait, and pulse the group again only when another tool is preparing or running. Cover refreshes and subsequent turns across shared chat surfaces.
+- Remove the agent-facing `read_attachment` tool from the Conversations catalog while retaining its implementation for compatibility and direct access tests. Non-image events keep scoped attachment references and optional Storage file IDs for downstream apps.
+- Add the narrow `attachment_to_blob` handoff for non-image files; Core converts its binary result into a temporary `blobref://` handle for tools such as Code ZIP import. Images continue through direct vision content.
+
+## 0.24.30 — 2026-10-01
+
+- Use the native app icon when a legacy integration shares its tool namespace, including Torrent.
+- Match tool icons by the actual namespace while preserving exact tool ownership and more specific integration matches.
+
+## 0.24.29 — 2026-10-01
+
+- Keep animated Thinking or a pulsing tool card visible throughout active responses, including after acknowledgements, hidden tool preparation, refreshes, and later turns.
+- Settle response indicators when the final reply arrives and clear stale thread activity on idle snapshots.
+- Stabilize transcript scrolling during tool updates and preserve the position when reading earlier messages.
+
+## 0.24.28 — 2026-10-01
+
+- Suppress the duplicate generic Thinking row after an acknowledgement while a hidden pacing tool is prepared.
+- Keep visible work tools, streamed replies, approval cards, and final responses unchanged.
+
+## 0.24.27 — 2026-10-01
+
+- Normalize spacing around text, lists, tool groups, and cards across panels, widgets, and embedded chats.
+- Hide duplicate alert tool activity while retaining the alert card, including after refresh.
+- Clear read alert notifications per reader while preserving chat history, newer alerts, pending approvals, and inbox-only items.
+- Replace sidebar attention dots with the matching card icon and severity color.
+
+## 0.24.26 — 2026-10-01
+
+- Show resolved approval decisions as compact badges with a check icon and the selected action’s original theme colors.
+- Preserve full decision labels, notes, and narrow-pane wrapping across the shared panel and widget.
+
+## 0.24.25 — 2026-10-01
+
+- Keep approval preparation visibly active until its card arrives, including reconnects and either stream event order.
+- Show the selected approval option’s full label and note in the chat, including after refresh, with localized fallback for older cards.
+
+## 0.24.24 — 2026-10-01
+
+- Keep approval requests represented by their approval card instead of duplicating the internal approval tool activity.
+- Keep completed tool groups visibly active while a multi-step response continues into its next tool call.
+
+## 0.24.23 — 2026-09-30
+
+- Require at least one concise progress message between distinct stages or batches of a multi-step request, including when the first batch completes quickly.
+- Add a real Codex scenario and durable transcript assertion covering acknowledgement → work → progress → next work stage → final outcome.
+
+## 0.24.22 — 2026-09-30
+
+- Add concise progress guidance for long multi-step work at meaningful milestones, plan changes, blockers, and input requests, while suppressing per-tool narration.
+- Include the progress contract in the Conversations tool description and thread directive.
+
+## 0.24.21 — 2026-09-30
+
+- Require a short visible acknowledgement before every tool-backed user request, including one-call lookups, so the user sees what the agent is about to do before work starts.
+- Keep direct no-tool answers and simple image answers immediate.
+
+## 0.24.20 — 2026-09-30
+
+- Keep the named work-tool row pulsing across the preparation-to-execution handoff, including fast calls and reconnects where the durable activity frame arrives separately.
+- Preserve tool identity on running progress frames and add regression coverage for the shared panel and widget rendering.
+
+## 0.24.19 — 2026-09-30
+
+- Add one shared embedded-chat contract for host-provided welcome text, draft suggestions, scoped context labels, and idempotent composer insertion without automatic sending.
+- Expose explicit acknowledgement statuses for wrong project/agent, closed conversation, archived chat, voice mode, and repeated requests.
+- Preserve existing panel/widget defaults, per-conversation drafts and attachments, responsive layout, tool activity, and context-sharing behavior.
+
+## 0.24.18 — 2026-09-30
+
+- Hide Core’s internal parent-thread `send` activity by default across all chat surfaces, including preparation and historical rows after refresh.
+- Preserve real work tools such as repository calls, attachment reads, and app-specific send tools.
+
+## 0.24.17 — 2026-09-30
+
+- Keep Thinking and tool preparation active for queued follow-up requests; previous-response housekeeping and final sends cannot settle the new response.
+- Register progress before event delivery and transfer ownership when the agent consumes the inbound message, including fast first responses.
+- Verify three consecutive replies and reconnects during Thinking, preparation, execution, and continuation, with real animation assertions across panel/widget, external, and package hosts.
+
+## 0.24.16 — 2026-09-30
+
+- Retry transient telemetry subscription failures during startup, including HTTP 401 while a local install is being enabled, so tool activity and voice capture recover automatically.
+- Show attachment reads and other Conversations work tools consistently in the shared frontend, native panel, and agent widget.
+- Add regression coverage for startup authentication recovery, live activity persistence, cancellation, and frontend tool visibility.
+
+## 0.24.15 — 2026-09-30
+
+- Show Conversations work-tool activity, including attachment reads, while keeping reply sends represented by the resulting chat message.
+- Replace the generic attachment glyph with recognizable archive, code, document, and file icons; ZIP attachments now use an archive icon.
+- Preserve the read-only attachment flow: binary files remain bounded bytes and are never extracted or executed by Conversations.
+
+## 0.24.14 — 2026-09-30
+
+- Give the shared chat composer a larger bottom inset across the panel and agent widget, matching the Codex-style floating composer spacing.
+- Add browser coverage for the composer’s bottom breathing room on dashboard, external, and panel surfaces.
+
+## 0.24.13 — 2026-09-29
+
+- Refresh conversation-list unread counts immediately from durable messages on the existing user-scoped SSE connection, including after reconnect; keep the eight-second refresh as a fallback.
+- Show the unread badge on a mobile list after leaving a conversation, even while that conversation remains selected internally. Preserve read-on-view behavior and exported chat.
+- Add panel and agent-widget browser regressions for live unread updates.
+
+## 0.24.12 — 2026-09-29
+
+- Drive conversation-list activity through the existing user-scoped SSE stream instead of polling. The indicator starts when a response is acknowledged and clears only after all responding agents settle.
+- Send authorized, progress-only snapshots on connect, reconnect, and heartbeat; preserve the existing cursor-free `stream` event and leave exported chat unchanged.
+- Add scoped SSE, multi-agent settlement, and packaged panel/widget browser regressions.
+
+## 0.24.11 — 2026-09-29
+
+- Frame the agent Overview chat widget like its neighboring dashboard cards, using the page background and the existing chat header. Keep the Build surface and exported chat embeds unchanged.
+- Let header actions wrap in narrow widget widths while messages retain internal scrolling and the composer stays visible. Add widget-scope regression coverage and rebuild the packaged UI assets.
+- Pin App SDK v0.89.1, the latest tagged SDK release by commit ancestry.
+
+## 0.24.10 — 2026-09-29
+
+- Offer the existing agent-conversations widget on agent detail pages as well as Build, with half- and full-width options. Agent details default to the focused single-agent chat; Build retains its browser default.
+- Keep conversation lists, creation, and history scoped to the host-provided agent. Give the detail widget a usable chat height and stack its browser layout when placed at half width. Add manifest and widget regressions.
+
+## 0.24.9 — 2026-09-29
+
+- Add live voice to existing direct operator conversations through a temporary realtime thread, while keeping typed chat and exported widgets unchanged. Show speech turns in the same conversation and carry recent voice context into the next typed turn.
+- Make the mic capability-aware: use a configured project realtime provider independently of the agent's text provider, or dictate into a reviewable text draft when realtime is unavailable. Never auto-send browser speech recognition output.
+- Keep voice child lifecycle, authorization, cleanup, and tool activity bounded to its owning conversation. Add Go and browser regressions for lifecycle, capability fallback, transcript handling, and packaging.
+
+## 0.24.8 — 2026-09-29
+
+- Show a small live activity indicator beside responding conversations in the full panel and agent-conversations widget thread lists, including the single-conversation history list. Keep unread and inbox-attention markers distinct, and respect reduced-motion preferences.
+- Use one authorized, lightweight activity summary for visible lists rather than a stream per thread. Clear the indicator when a response settles or its activity becomes unavailable; exported chat remains unchanged.
+- Add authorization, lifecycle, scoped polling, and packaged mobile panel/widget browser regressions. Pin App SDK v0.89.0.
+
+## 0.24.7 — 2026-09-28
+
+- Give the full Conversations panel a mobile list-to-detail flow instead of stacking the list above an automatically selected chat. Keep the composer in a full-height chat view and restore list position and focus on Back.
+- Reduce mobile chrome to Chats and Inbox; move Telegram and archived chats into the overflow menu. Show older-conversation pagination only when a next page exists.
+- Leave desktop columns and exported widget navigation unchanged. Add packaged-panel browser coverage for phone widths, navigation, pagination, and widget isolation.
+
+## 0.24.6 — 2026-09-25
+
+- Create conversations from the in-app panel as operator conversations without an audience selector. Public conversations for external sites remain unchanged.
+- Add a packaged-panel browser regression test for the modal and its create request.
+
+## 0.24.5 — 2026-09-23
+
+- Keep streamed replies, preparing tools, executing tools, and saved messages in one chronological transcript. Retain completed streamed text until its durable replacement arrives.
+- Publish immediate response progress, restore Thinking after acknowledgements and completed calls, and reject delayed preparation events that would revive completed tools.
+- Restore current response progress and partial text on SSE reconnect; periodic snapshots repair dropped ephemeral frames without changing durable message cursors.
+- Rebuild native widget/panel bundles as well as app-served assets. Browser tests now load the actual packaged dashboard widget, and release tests reject stale compiled panel sources.
+- Add a sanitized replay of the reported Processes telemetry plus delayed-delivery, reconnect, streaming-order, and shipped-surface lifecycle regressions. Pin App SDK v0.88.0.
+
+## 0.24.4 — 2026-09-23
+
+- Keep grouped tool activity compact when many apps or integrations are involved: show the source for the visible latest action in front, with at most one earlier source peeking behind it. Expanding the group still shows every call and its own source icon.
+
+## 0.24.3 — 2026-09-23
+
+- Make the shared dashboard and exported-chat tool display configurable. It now defaults to the source icon and activity text; completion checks and durations are optional.
+- Hand progress back to Thinking when a tool finishes, retain subsecond message ordering alongside tool telemetry, and require a completed acknowledgement call before multi-step work tools.
+- Carry an attached image's visual finding into the first acknowledgement before its transient model input expires. Clarify operator-conversation creation for escalations and approvals.
+- Add a live acknowledgement-before-tool assertion; all 14 Tier 3 scenarios passed with GPT-6 Luna.
+
+## 0.24.2 — 2026-09-22
+
+- Restore the host-personalized conversation workspace rail in the full Conversations project page, with app-owned Details plus eligible `dashboard.thread_sidebar` widgets.
+- Keep exported conversation and Inbox widgets unchanged, and retain the standalone Details column when the host does not provide a workspace rail.
+
+## 0.24.1 — 2026-09-21
+
+- Remove the redundant manual Refresh control from the Inbox widget; app events and the 15-second fallback poll continue to keep it current.
+
+## 0.24.0 — 2026-09-21
+
+- Expose the existing Inbox dashboard widget in global dashboards as well as project dashboards.
+- Add a global Inbox view that combines only the authenticated user's visible projects, with project filtering and labels while preserving the existing priority and cursor ordering.
+- Keep Inbox mutations project-scoped by carrying each item's project through approval, dismissal, and seen actions.
+- Upgrade to App SDK v0.85.0, the combined release containing both the existing chat/v1 surface contract and global dashboard scopes.
+
+## 0.23.26 — 2026-09-20
+
+- Accept the platform's signed first-party bearer principal on Conversations HTTP routes instead of misclassifying it as an incomplete delegated application user.
+- Keep delegated application-user isolation fail-closed whenever an issuer marker is present but the external identity or scope is incomplete.
+
+## 0.23.25 — 2026-09-20
+
+- Bind the generic `chat/v1` surface to the established `/chats?page=1` and `/messages?page=1` page contracts while preserving every legacy dashboard response shape.
+- Close the SSE replay/live handoff gap by deduplicating buffered changes with the durable `message_changes` cursor; ephemeral `stream` frames remain cursor-free.
+- Pin source installs to the immutable `conversations/v0.23.25` release ref and add release-artifact, packaged-surface, page-contract, mark-seen, and reconnect coverage.
+
+## 0.23.24 — 2026-09-20
+
+- Publish Conversations as an optional `mobile.project_app` using the generic `chat/v1` native surface contract, with app-owned conversation, agent, history, send, create, seen, and subscription routes.
+- Add opt-in summary and cursor response modes without changing the existing dashboard response shapes.
+- Make durable SSE messages named and revision-cursored so reconnects replay both new messages and updates, while ephemeral stream activity remains uncursored.
+- Let a missing or zero seen cursor atomically mark through the latest visible durable message.
+
+## 0.23.23 — 2026-09-19
+
+- Preserve the mounted app service identity for background and cookieless HTTP work while deriving request-scoped platform credentials for signed-in browser requests.
+- Restore browser-session propagation through the generic artifact pipeline, with regression coverage proving the mounted context is never replaced.
+
+## 0.23.22 — 2026-09-18
+
+- Rebuild the manifest-loaded `AgentConversationsWidget.mjs` so the generic `show_page_context: false` presentation setting shipped in 0.23.21 is honored at runtime.
+- Add a release regression check that rejects a stale compiled widget bundle missing the declared page-context display setting.
+
+## 0.23.21 — 2026-09-18
+
+- Add the generic `show_page_context` agent-conversation widget setting. It defaults to `true`; setting it to `false` hides the complete context row without changing the page-context snapshot attached to sent messages.
+- Keep transport and presentation independent, with regression coverage proving hidden context is still posted intact. Conversations contains no onboarding- or app-specific display behavior.
+
+## 0.23.20 — 2026-09-18
+
+- Carry the operator's explicitly shared dashboard page identifiers through the Conversations widget, durable message metadata, retries, and agent events. Context is project-bound, allowlisted, size-limited, and clearly marked as untrusted descriptive data rather than instructions or authorization.
+- Show the context snapshot beside the composer with a per-page remove action, keep it out of public conversations, and expose the same typed option to app-served and npm React chat surfaces.
+- Add browser-level transport coverage and an HTTP-to-durable-store-to-agent-event regression test so future frontend or delivery changes cannot silently drop context again.
+
+## 0.23.19 — 2026-09-15
+
+- Hide the exact internal `search_tools` lookup from preparation, live tool activity, summary counts, and historical activity. Other search/query tools remain visible.
+- Apply the same filtering to the Conversations backend, dashboard panels, embedded chat, and npm React exports.
+
+## 0.23.18 — 2026-09-14
+
+- Keep consecutive tool calls on one updating, expandable summary line, including across long pauses and after reload. Only intervening messages split tool groups; remove the former 30-second cutoff.
+- Preserve live pulsing, individual call details, and actual execution durations in dashboard, embedded, and npm-exported chat.
+
+## 0.23.17 — 2026-09-14
+
+- Show an immediate response indicator on Send, including while the request is in flight; clear it on failure or replace it with confirmed live progress.
+- Keep the current response’s latest tool group pulsing across results, model preparation, parallel calls and intermediate replies. Keep tool labels and completed execution durations; avoid a separate Preparing response row once tools own progress.
+- Apply the same behavior to dashboard, embedded and npm-exported chat.
+
+## 0.23.16 — 2026-09-14
+
+- Restore live tool preparation and pulsing continuation from the dashboard chat lifecycle. Model and tool events drive progress; background work after final replies and approval waiting stays silent.
+- Paint rapid tool starts before results while preserving actual execution durations. Report Core success=false results as failures.
+- Clear pending thinking when an approval card is delivered and start a fresh indicator when the approval verdict reaches the requesting agent. Preserve room isolation and old-card replay handling.
+- Share the lifecycle and animations across dashboard panels, app-loaded embeds and npm React exports.
+
+## 0.23.15 — 2026-09-14
+
+- Define approval action IDs, labels, styles and bounds in the tool schema, including the app-only inbox tool, so agents do not have to discover required fields through failed calls.
+- Ask for approval directly through the card without a redundant announcement message.
+- Give unstyled first choices and destructive choices an accent outline; keep alternatives neutral, including the default Deny action. Applies to existing cards and dashboard/exported chat.
+
+## 0.23.14 — 2026-09-14
+
+- Hide all Conversations tools from live and historical activity, including approval requests already represented by cards.
+- Use the host accent for primary approval actions and neutral outlined secondary actions and status badges in both dashboard and exported chat.
+- Include the shared progress and execution-duration fixes from 0.23.13 in the public npm package.
+
+## 0.23.12 — 2026-09-13
+
+- Hide integration logos in narrow chat tool rows (up to 640px) so tool text and status controls remain aligned and readable. Roomy chats keep the existing icons.
+
+## 0.23.11 — 2026-09-13
+
+- Preserve both direct Core vision content and the bound Storage `file_id` for image attachments. Downstream tools can now attach the original image after the agent receives it.
+- Add Tier 2 coverage and an opt-in Tier 3 real-Codex scenario that creates a Tickets record and verifies `storage_file_id` on its attachment.
+
+
+## 0.23.10 — 2026-09-13
+
+- Authorize delegated `GET /tool-visuals` requests with the explicit `tool_visuals.read` action. Requests without that permission remain forbidden, and the frontend keeps static icon fallbacks.
+- Add registered-route regression coverage for authorized and unauthorized delegated users.
+
+
+## 0.23.9 — 2026-09-13
+
+- Map `GET /tool-visuals` to the explicit delegated action `tool_visuals.read`, allowing authorized external users to load integration-logo metadata instead of receiving an unconditional 403.
+- Document the exact issuer-policy permission and cover the registered route with allowed/denied tests. Metadata access does not grant conversation access; fallback icons remain available without the permission.
+
+## 0.23.8 — 2026-09-13
+
+- Add typed `composer={{ layout: "single-line" }}` with a fixed one-row textarea and inline attachment/send controls, preserving multiline drafts, images, screenshots, French labels and pause behavior. Existing compact/auto modes still grow with text.
+- Publish the shared UI as `@apteva/conversations@0.23.8` for hosts that pin their frontend dependency. Dashboard and app-served bundles use the same implementation.
+- Namespace the shared base CSS layer so npm consumers using Tailwind v3 (including Flexylead) can import the compiled stylesheet.
+- Reject unsupported runtime layout values instead of silently rendering a default.
+
+## 0.23.7 — 2026-09-13
+
+- Rebuild the release against the pinned SDK-compatible HTTP context path so source installs can upgrade without requiring an unpublished SDK method.
+
+## 0.23.6 — 2026-09-13
+
+- Restore integration logos in ChatToolActivity by loading project runtime catalog metadata, with static icons and generic glyphs as fallbacks.
+
+## 0.23.5 — 2026-09-13
+
+- Restore project integration logos in tool activity by loading runtime catalog integration metadata, with static app icons and generic glyphs as fallbacks.
+
+## 0.23.4 — 2026-09-13
+
+- Make archiving and unarchiving responsive: mutation responses avoid an unnecessary platform agent lookup, and the UI removes the row immediately without waiting for a full unread/inbox refresh.
+- Preserve configurable empty transcript text for agent conversation widgets and complete its shared chat prop wiring.
+
 ## 0.23.3 — 2026-09-12
 
 - Render compact user image thumbnails above the message text, aligned right, in the shared dashboard and exported chat. Keep enlargement, image metadata and original downloads in the image dialog.

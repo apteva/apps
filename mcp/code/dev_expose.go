@@ -76,7 +76,7 @@ func (s *devSupervisor) expose(ctx *sdk.AppCtx, repo *Repo, dr *DevRun) (string,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p := s.all[dr.ID]
-	if p == nil || p.stopping || p.logFile == nil || p.logFile.Name() != dr.LogPath {
+	if dr.Runner != workspacesAppName && (p == nil || p.stopping || p.logFile == nil || p.logFile.Name() != dr.LogPath) {
 		return "", errors.New("dev run changed before exposure; retry the current run")
 	}
 	hostname, err := exposeDevRun(ctx, repoStoreKey(repo), dr.Port)

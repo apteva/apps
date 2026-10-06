@@ -12,6 +12,38 @@ Runs whose runtime cleanup fails stay `stopping`. Reconciliation retries cleanup
 before permitting a replacement runtime for the same definition. Reconciliation
 processes all active runs independently of the 200-entry history list.
 
+Failed provisioning and cleanup attempts use persisted exponential backoff,
+starting at 30 seconds and capped at 15 minutes. After five consecutive failures,
+the definition enters `degraded` state and automatic reconciliation stops. A
+successful running-runtime health check clears the failure streak. An explicit
+`environment_start`, dashboard Retry, or definition update clears the terminal
+state and permits another bounded sequence. Set
+`ENVIRONMENTS_RECONCILE_FAILURE_THRESHOLD` to a value from 1 through 1000 to
+change the default threshold of five.
+
+## Seeds
+
+Seeds run in spec order when an environment starts. A seed can consume what an
+earlier seed created by putting a reference object anywhere in its `input`:
+
+```json
+{"seeds": [
+  {"app": "crm", "tool": "contact_create", "input": {"name": "Ada"}},
+  {"app": "crm", "tool": "activity_log",
+   "input": {"contact_id": {"$ref": "0.contact.id"}, "kind": "note", "body": "hi"}}
+]}
+```
+
+`$ref` is `"<index>.<path>"`: the index of an earlier seed, then a dotted path
+into its result. An empty path (`"0"`) references the whole result. References
+resolve anywhere in the input tree, including inside arrays, and a `$ref` object
+must carry no other keys.
+
+A reference that cannot resolve fails the run at the seed that carries it rather
+than passing an unresolved object to the tool. Referencing a later seed, the seed
+itself, or a malformed index is rejected when the definition is written. The path
+walks objects only — it cannot index into an array.
+
 ## Assertions and voice evidence
 
 `mcp_tool_call` requires `mcp` and matches names qualified by that server. Omitting
@@ -58,3 +90,40 @@ From the apps repository root, rebuild the shipped panel:
 ```sh
 bun run scripts/build-panels.ts --app environments
 ```
+
+## Manual clock
+
+Environment runs use wall time by default. To test date-dependent behavior,
+create a run with a manual clock:
+
+```json
+{
+  "spec": {
+    "version": 1,
+    "clock": {"mode": "manual", "initial_time": "2030-01-01T00:00:00Z"},
+    "http_mocks": [
+      {"host": "example.test", "path": "/status", "body": {"phase": "before"}, "expires_at": "2030-01-02T00:00:00Z"},
+      {"host": "example.test", "path": "/status", "body": {"phase": "after"}, "available_at": "2030-01-02T00:00:00Z"}
+    ]
+  }
+}
+```
+
+Pass this to `environment_run_create`, then call
+`environment_clock_advance` with the returned `run_id` and
+`to: "2030-01-02T00:00:00Z"`. `environment_clock_get` returns the current
+time and advancement history. Advancing to the current time or earlier fails.
+An agent in a manual-clock run has a read-only `environment_clock_get` tool.
+
+Integration fixtures accept the same `available_at` and `expires_at` fields.
+The start is inclusive and the expiry is exclusive. Dated responses take
+precedence over undated fallback responses. Overlapping dated responses for
+the same request are rejected. Without a matching response, the runtime uses
+its existing network or integration mode behavior.
+
+Cloned apps using the updated SDK can call `ctx.Now()` or
+`ctx.EnvironmentTime()` to read the server-owned clock. Apps calling Go's
+`time.Now()` directly still see wall time. LLM calls, network deadlines, and
+runtime expiry also continue to use wall time. Snapshots retain the clock,
+its advancement history, and the fixture rules; restoring one starts a new
+run at the captured logical time.

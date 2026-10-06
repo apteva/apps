@@ -37,6 +37,7 @@ const telephony = loaded.client; // TypeScript: use apps.load<TelephonyClient>(.
 const phone = telephony.createSoftphone({
   onLevels: (microphone, speaker) => updateMeters(microphone, speaker),
   onDiagnostics: diagnostics => updateDiagnostics(diagnostics),
+  ringback: { country: "FR" }, // optional local ringback while an outbound call rings
 });
 renderCallState(phone.getSnapshot());
 const unsubscribe = phone.subscribe(renderCallState);
@@ -100,6 +101,18 @@ this Telephony change does not alter the SDK's own module-loading policy.
 - Transport health is checked in the worker with heartbeats. A ringing call can
   remain connected without a carrier audio peer. Stalled sockets/handshakes retry
   with a bounded budget; mute survives reconnect and buffers discard stale audio.
+- Snapshots expose `phase` (`idle`, `placing`, `ringing`, `connected`, `ended`)
+  next to the raw `carrierStatus`. After a call ends, `termination`
+  (`reason`, `cause`, `code`, `initiator`), `answeredBy`, and `endedAt` stay on
+  the snapshot until the next dial or answer. `detail` is cleared at call end as
+  before.
+- `ringback` plays a locally synthesized tone through the SDK's own audio
+  context from ringing until answer, so it follows the selected output device.
+  It is off by default; pass `true` or `{ country }` (France otherwise). The
+  tone follows the call's direction, so a call placed by a backend and joined
+  with `attach()` or `takeover()` rings like one placed with `dial()`.
+- The media socket pushes `call.status` frames (status, answered and ended
+  times, `termination`, `answered_by`), so phases update without polling.
 - Active-call reconciliation polls every two seconds without overlapping reads.
   Pass `pollIntervalMs: 0` and feed `observeCall()` if the host already watches
   calls. `watchCalls()` is an optional cancellable watcher for incoming calls.
@@ -196,3 +209,48 @@ AudioContext and worklet URLs are released on stop or startup failure. The meter
 returns to zero on stop. `phone.configureAudio({inputDeviceId})` selects the device
 for future calls; `phone.reconnect({inputDeviceId})` applies it to an active call.
 The 0.4.3 gain/playback options remain available.
+
+## Incoming call notifications
+
+From Telephony 0.5.1, `watchCalls()` uses authenticated fetch/SSE hints by default
+and retains polling for recovery. The native Calls panel uses this same watcher.
+Existing integrations benefit after reloading the updated installed client.
+
+```ts
+const watcher = telephony.watchCalls(renderCalls, {
+  push: true,          // default; false uses polling only
+  intervalMs: 2000,    // recovery; use 500 for faster polling when push is unavailable
+  onTiming: ({trigger, fetchMs}) => recordCallListTiming(trigger, fetchMs),
+  onError: reportCallListError,
+});
+// On logout or a change of project, installation, or authenticated user:
+watcher.close();
+```
+
+One list request runs at a time; bursts coalesce into one follow-up refresh.
+Reconnects use the current SDK credentials and refetch authorized state. No token
+is placed in a stream URL. Missing streaming support in older servers or host SDK
+handles leaves polling active. Hints contain no call data and reveal changes only
+to visible calls/offers. `fetchMs` measures the list request locally, not total
+caller-to-ringtone latency. Routing traces expose separate `dispatch_delay_ms`.
+
+Online sessions and Telephony grants are rechecked on each hint/heartbeat;
+gateway-delegated issuer sessions are revalidated on the twenty-second stream
+lease reconnect. A revocation closes push and triggers an authorized refresh;
+recreate the watcher after renewed login to restore push. `close()` or abort stops
+subscriptions, timers and late callback delivery.
+
+
+## Media session recovery
+
+Adviser reconnect obtains a fresh authorized `/softphone/attach` session for the
+same call. It does not dial or answer another carrier leg. Temporary renewal
+failures retry within the current lease; confirmed revocation or expiry stops
+local media while durable call status remains authoritative. Listening and
+coaching share lease renewal; coaching never automatically retargets an adviser.
+
+`createSoftphone({ onSessionEvent })` and
+`createCallListener({ onSessionEvent })` expose structured renewal and recovery
+events. Adviser `onDiagnostics` includes bounded session events and directional
+frame-drop samples. See [media session resilience](../docs/media-session-resilience.md)
+for clock handling, authorization boundaries and diagnostic fields.

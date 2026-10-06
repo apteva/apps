@@ -33,7 +33,7 @@ func fetchSource(ctx *sdk.AppCtx, d *Deployment, destDir string, cfg sourceConfi
 	}
 	switch d.SourceKind {
 	case "code":
-		return (&codeFetcher{platform: ctx.PlatformAPI(), config: cfg}).Fetch(d, destDir)
+		return fetchCodeSourceWithDependencies(d, destDir, cfg, ctx.PlatformAPI())
 	case "local":
 		return (&localFetcher{}).Fetch(d, destDir)
 	default:

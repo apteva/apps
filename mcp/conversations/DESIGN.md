@@ -178,36 +178,14 @@ is a visible terminal delivery failure rather than silent truncation or retries.
 
 Build with Go 1.26.8 or newer; the module minimum and x/sys 0.44.0 remove known standard-library and Windows dependency advisories found during the audit. Go 1.26.8 is an official supported patch release: https://go.dev/dl/#go1.26.8.
 
-Run from this app with the pinned SDK rather than the workspace overlay:
+Use the native `apteva test` runner for every tier. See [TESTING.md](TESTING.md)
+for setup, the complete coverage map, single-scenario runs and credential handling.
 
-```
-GOWORK=off go test ./... -short
-GOWORK=off go test -race -tags integration ./... -count=1
-GOWORK=off go vet ./...
-GOWORK=off go test -run '^$' -bench BenchmarkAuditStreamSizes -benchmem
+```sh
+GOWORK=off apteva test --tier all --provider openai-codex --model gpt-5.6-terra scenarios
 ```
 
-From the apps repository root:
-
-```
-bun test mcp/conversations/ui
-bun run scripts/build-panels.ts --app conversations
-```
-
-Tier 1 covers store, permissions, retries, concurrency, migrations and regression
-invariants. Tier 2 starts actual sidecar binaries and uses real local HTTP with a
-stub platform. React behavioral tests exercise snapshot/SSE ordering, switches,
-retries, read visibility, draft preservation and multi-agent streams.
-
-Tier 3 requires a real server/Core, a working `openai-codex` connection, this exact
-candidate installed, and auto-attachment to newly created test agents:
-
-```
-APTEVA_BASE_URL=... APTEVA_API_KEY=... APTEVA_LIVE_PROJECT_ID=... \
-  GOWORK=off go test -tags live -run '^TestLive_' -v -count=1 -timeout 30m
-```
-
-The tests create/clean temporary agents and conversations. Use a dedicated local
-validation server, not a production user's existing conversations. Real Codex
-coverage does not substitute for real Telegram/network fault testing. See the
-repository audit-fix report for measured results and candidate provenance.
+The runner provisions local sidecars, configuration, bindings and real agents.
+The image scenario includes Storage and Tickets automatically. Native Tier 1 and
+Tier 2 also run the UI/type/browser checks declared in `apteva.test.yaml`.
+Real Codex coverage does not substitute for real Telegram/network fault testing.

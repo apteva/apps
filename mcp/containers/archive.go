@@ -38,9 +38,22 @@ tar -xzf - -C /tmp/stage
 dest=/volume
 rel="$1"; set -f; oldifs="$IFS"; IFS=/; set -- $rel; IFS="$oldifs"
 for part in "$@"; do [ "$part" = . ] && continue; dest="$dest/$part"; [ ! -L "$dest" ] || { echo 'destination symlink rejected' >&2; exit 73; }; done
-if [ -d "$dest" ] && [ -n "$(find "$dest" -type l -print -quit)" ]; then echo 'destination contains symlinks' >&2; exit 73; fi
+# Check only paths this import will touch. Dependency caches commonly contain
+# symlinks; unrelated links cannot redirect these writes. The workload stays
+# paused across validation and copy, preventing a path-replacement race.
+find /tmp/stage -mindepth 1 -exec sh -c '
+  base="$1"; shift
+  for entry in "$@"; do
+    rel="${entry#/tmp/stage/}"; current="$base"
+    set -f; oldifs="$IFS"; IFS=/; set -- $rel; IFS="$oldifs"
+    for part in "$@"; do
+      current="$current/$part"
+      [ ! -L "$current" ] || { echo "destination symlink rejected" >&2; exit 73; }
+    done
+  done
+' sh "$dest" {} +
 mkdir -p "$dest"
-cp -a /tmp/stage/. "$dest/"`
+cp -a --remove-destination /tmp/stage/. "$dest/"`
 	_, err := helperContainer(ctx, archive, 1024, "-i", "--tmpfs", "/tmp:rw,nosuid,nodev,size=160m", "-v", volumeName+":/volume", "alpine:3.20", "sh", "-c", script, "sh", relativePath)
 	return err
 }

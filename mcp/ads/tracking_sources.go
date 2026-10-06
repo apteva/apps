@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -24,6 +26,18 @@ func trackingSourceCreateSchema() map[string]any {
 		"reuse_existing": map[string]any{
 			"type": "boolean", "default": true,
 		},
+		"category": map[string]any{
+			"type": "string",
+			"enum": []string{
+				"purchase", "lead", "signup", "page_view", "download", "add_to_cart",
+				"begin_checkout", "subscribe_paid", "submit_lead_form", "contact", "other",
+			},
+			"description": "Google Ads conversion category. Determines how Smart Bidding treats the action. Defaults to purchase. Ignored by Meta, which creates an untyped Pixel.",
+		},
+		"default_value_cents": map[string]any{
+			"type": "integer", "minimum": 0,
+			"description": "Google Ads only. Conversion value used when the page reports none.",
+		},
 	}, []string{"ad_account_id", "name"})
 }
 
@@ -38,6 +52,9 @@ func (a *App) toolTrackingSourceCreate(ctx *sdk.AppCtx, args map[string]any) (an
 	}
 	if utf8.RuneCountInString(name) > 255 {
 		return mcpError("name must be 255 characters or fewer"), nil
+	}
+	if acct.Platform == "google" {
+		return a.createGoogleConversionAction(ctx, acct, args, name)
 	}
 	if acct.Platform != "meta" {
 		out := mcpError("tracking source creation is not supported for " + acct.Platform)
@@ -121,6 +138,9 @@ func (a *App) toolTrackingSourceInstallationGet(ctx *sdk.AppCtx, args map[string
 	acct, _, errOut := a.resolveAdAccount(ctx, args)
 	if errOut != nil {
 		return errOut, nil
+	}
+	if acct.Platform == "google" {
+		return a.googleConversionInstallation(ctx, acct, args)
 	}
 	if acct.Platform != "meta" {
 		out := mcpError("tracking source browser installation is not supported for " + acct.Platform)
@@ -263,4 +283,210 @@ func (a *App) trackingSourceResult(
 		"resource":                resource.response(),
 		"site_tracking_installed": false,
 	}, nil
+}
+
+// Google Ads models conversion tracking as a ConversionAction rather than a
+// Pixel. The write path has always existed on the provider
+// (ConversionActionService.MutateConversionActions); only this app was missing
+// it, which forced a Purchase action to be created in the Google UI and
+// blocked Smart Bidding from being configured programmatically.
+
+var googleConversionCategories = map[string]string{
+	"purchase":         "PURCHASE",
+	"lead":             "LEAD",
+	"signup":           "SIGNUP",
+	"page_view":        "PAGE_VIEW",
+	"download":         "DOWNLOAD",
+	"add_to_cart":      "ADD_TO_CART",
+	"begin_checkout":   "BEGIN_CHECKOUT",
+	"subscribe_paid":   "SUBSCRIBE_PAID",
+	"submit_lead_form": "SUBMIT_LEAD_FORM",
+	"contact":          "CONTACT",
+	"other":            "DEFAULT",
+}
+
+func googleConversionCategory(raw string) (string, error) {
+	value := strings.TrimSpace(strings.ToLower(raw))
+	if value == "" {
+		return "PURCHASE", nil
+	}
+	if mapped, ok := googleConversionCategories[value]; ok {
+		return mapped, nil
+	}
+	return "", fmt.Errorf("category must be one of purchase, lead, signup, page_view, download, add_to_cart, begin_checkout, subscribe_paid, submit_lead_form, contact, other")
+}
+
+// A purchase can legitimately happen more than once per click; a lead should
+// be counted once. Getting this wrong quietly distorts Smart Bidding.
+func googleConversionCounting(category string) string {
+	switch category {
+	case "PURCHASE", "ADD_TO_CART", "BEGIN_CHECKOUT", "SUBSCRIBE_PAID", "PAGE_VIEW":
+		return "MANY_PER_CLICK"
+	default:
+		return "ONE_PER_CLICK"
+	}
+}
+
+func (a *App) refreshAndMatchConversionActions(ctx *sdk.AppCtx, acct *adAccount, name string) ([]adResource, map[string]any) {
+	discovered, errOut := a.discoverResources(ctx, acct, resourceConversionAction)
+	if errOut != nil {
+		return nil, errOut
+	}
+	if err := a.replaceResources(ctx, acct, resourceConversionAction, discovered); err != nil {
+		return nil, mcpError(err.Error())
+	}
+	resources, err := a.listResources(ctx, acct, resourceConversionAction)
+	if err != nil {
+		return nil, mcpError(err.Error())
+	}
+	matches := make([]adResource, 0)
+	for _, resource := range resources {
+		if resource.Status == "active" && strings.EqualFold(strings.TrimSpace(resource.DisplayName), name) {
+			matches = append(matches, resource)
+		}
+	}
+	return matches, nil
+}
+
+func (a *App) createGoogleConversionAction(
+	ctx *sdk.AppCtx, acct *adAccount, args map[string]any, name string,
+) (any, error) {
+	category, categoryErr := googleConversionCategory(stringArgAny(args, "category"))
+	if categoryErr != nil {
+		return mcpError(categoryErr.Error()), nil
+	}
+	setDefault := boolArgDefault(args, "set_default", true)
+	reuseExisting := boolArgDefault(args, "reuse_existing", true)
+
+	if reuseExisting {
+		matches, refreshErr := a.refreshAndMatchConversionActions(ctx, acct, name)
+		if refreshErr != nil {
+			return refreshErr, nil
+		}
+		if len(matches) > 1 {
+			return trackingSourceSelectionRequired(matches), nil
+		}
+		if len(matches) == 1 {
+			return a.trackingSourceResult(ctx, acct, &matches[0], false, true, false, setDefault)
+		}
+	}
+
+	conversionAction := map[string]any{
+		"name":           name,
+		"type":           "WEBPAGE",
+		"category":       category,
+		"status":         "ENABLED",
+		"primaryForGoal": true,
+		"countingType":   googleConversionCounting(category),
+	}
+	if cents := intArg(args, "default_value_cents", -1); cents >= 0 {
+		conversionAction["valueSettings"] = map[string]any{
+			"defaultValue":          float64(cents) / 100,
+			"alwaysUseDefaultValue": false,
+		}
+	}
+	parsed, createErr := a.execIntegrationTool(ctx, acct, "conversion_action_mutate", map[string]any{
+		"customer_id": acct.NativeAccountID,
+		"operations":  []any{map[string]any{"create": conversionAction}},
+	})
+	if createErr != nil {
+		return createErr, nil
+	}
+	resourceName := firstResourceName(parsed)
+	nativeID := googleAssetID(resourceName)
+	if nativeID == "" {
+		out := mcpError("conversion_action_mutate returned no resourceName")
+		out["code"] = "provider_response_invalid"
+		out["platform"] = acct.Platform
+		return out, nil
+	}
+	resource, err := a.upsertResource(ctx, acct, discoveredResource{
+		Kind: resourceConversionAction, ProviderType: "google_conversion_action", NativeID: nativeID,
+		DisplayName: name, Status: "active",
+		Capabilities: []string{"conversion_tracking", "smart_bidding"},
+		Metadata:     map[string]any{"category": category, "resource_name": resourceName},
+		ManagedByApp: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	result, err := a.trackingSourceResult(ctx, acct, resource, true, false, false, setDefault)
+	if err == nil {
+		a.emitTrackingSourceCreated(ctx, acct, resource, setDefault)
+	}
+	return result, err
+}
+
+// Google embeds the conversion id and label in the event snippet's send_to
+// value (AW-123456789/AbC-D_efGh). Surfacing them separately saves every
+// caller from scraping the snippet.
+var googleSendToPattern = regexp.MustCompile(`(AW-[0-9]+)/([A-Za-z0-9_-]+)`)
+
+func (a *App) googleConversionInstallation(ctx *sdk.AppCtx, acct *adAccount, args map[string]any) (any, error) {
+	resource, resourceErr := a.resolveResourceChoice(
+		ctx, acct, trackingSourceDefaultPurpose, resourceConversionAction,
+		"google_conversion_action", int64(intArg(args, "tracking_source_resource_id", 0)),
+	)
+	if resourceErr != nil {
+		return resourceErr, nil
+	}
+	if !googleNumericID(resource.NativeID) {
+		return mcpError("conversion action id is not numeric: " + resource.NativeID), nil
+	}
+	query := fmt.Sprintf(
+		"SELECT conversion_action.id, conversion_action.name, conversion_action.status, "+
+			"conversion_action.category, conversion_action.tag_snippets "+
+			"FROM conversion_action WHERE conversion_action.id = %s", resource.NativeID,
+	)
+	rows, errOut := a.googleSearchRows(ctx, acct, query)
+	if errOut != nil {
+		return errOut, nil
+	}
+	installation := map[string]any{
+		"provider":                   "google",
+		"public_id":                  resource.NativeID,
+		"script_origins":             []string{"https://www.googletagmanager.com"},
+		"connect_origins":            []string{"https://www.googletagmanager.com", "https://www.google.com", "https://googleads.g.doubleclick.net"},
+		"image_origins":              []string{"https://www.google.com", "https://googleads.g.doubleclick.net"},
+		"requires_site_installation": true,
+	}
+	if len(rows) == 0 {
+		// The action exists locally but the provider returned no snippet. Say so
+		// rather than returning an installation block that looks complete.
+		installation["snippet_available"] = false
+		return map[string]any{"resource": resource.response(), "installation": installation}, nil
+	}
+	action := mapAt(rows[0], "conversionAction")
+	if len(action) == 0 {
+		action = mapAt(rows[0], "conversion_action")
+	}
+	snippets, _ := action["tagSnippets"].([]any)
+	if len(snippets) == 0 {
+		snippets, _ = action["tag_snippets"].([]any)
+	}
+	for _, entry := range snippets {
+		snippet := asMap(entry)
+		globalTag := firstString(snippet, "globalSiteTag", "global_site_tag")
+		eventSnippet := firstString(snippet, "eventSnippet", "event_snippet")
+		if globalTag == "" && eventSnippet == "" {
+			continue
+		}
+		installation["global_site_tag"] = globalTag
+		installation["event_snippet"] = eventSnippet
+		installation["page_format"] = firstString(snippet, "pageFormat", "page_format")
+		if match := googleSendToPattern.FindStringSubmatch(globalTag + " " + eventSnippet); len(match) == 3 {
+			installation["conversion_id"] = match[1]
+			installation["conversion_label"] = match[2]
+			installation["send_to"] = match[1] + "/" + match[2]
+		}
+		break
+	}
+	installation["snippet_available"] = installation["event_snippet"] != nil
+	installation["script_url"] = "https://www.googletagmanager.com/gtag/js?id=" + toString(installation["conversion_id"])
+	if installation["conversion_id"] == nil {
+		delete(installation, "script_url")
+	}
+	installation["category"] = firstString(action, "category")
+	installation["status"] = firstString(action, "status")
+	return map[string]any{"resource": resource.response(), "installation": installation}, nil
 }

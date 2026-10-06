@@ -1,0 +1,46 @@
+{
+  "schema": "apteva-native-surface/v1",
+  "id": "portfolio-watch",
+  "version": "1.0.0",
+  "title": "Portfolios",
+  "description": "Equity and P&L across paper and live trading desks",
+  "icon": "wallet",
+  "context": {"scope": "project"},
+  "presentation": "widget",
+  "data_sources": {
+    "portfolios": {
+      "request": {
+        "method": "GET",
+        "path": "/portfolios"
+      },
+      "response": {
+        "items": "$.portfolios",
+        "id": "$.id"
+      },
+      "refresh": {
+        "on_appear": true,
+        "pull_to_refresh": true
+      }
+    }
+  },
+  "blocks": [
+    {
+      "id": "portfolios",
+      "type": "list",
+      "title": "Portfolios",
+      "source": "portfolios",
+      "items": "$.portfolios",
+      "limit": 6,
+      "item": {
+        "id": "{item.id}",
+        "title": "{item.name}",
+        "subtitle": [
+          {"value": "{item.equity}", "format": "number"},
+          {"value": "{item.day_pnl_pct}", "format": "number"}
+        ],
+        "badge": {"value": "$item.execution_environment"}
+      },
+      "empty": {"title": "No portfolios yet", "icon": "wallet"}
+    }
+  ]
+}

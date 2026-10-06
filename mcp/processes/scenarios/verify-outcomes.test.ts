@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { verifyHistory, verifyMultiAgentTrajectory } from "./verify-outcomes";
+import { verifyHistory, verifyMultiAgentTrajectory, verifySequentialWorker } from "./verify-outcomes";
 function waitingRun() {
   return {
     workflow: true,
@@ -138,4 +138,42 @@ test("requires a successful read and completion by each assigned real agent", ()
   expect(() => verifyMultiAgentTrajectory(wrongActor, run)).toThrow("no successful real-agent completion trace");
   const failed = teamCalls(run).map(c => c.agent === "reviewer" ? { ...c, ok: false } : c);
   expect(() => verifyMultiAgentTrajectory(failed, run)).toThrow("no successful real-agent completion trace");
+});
+
+test("worker verification rejects main completion, wrong agent, and missing worker read", async () => {
+  const { verifyStepWorkers } = await import("./verify-outcomes");
+  const run = { steps: [{ id: "s1", key: "publish" }] };
+  const calls = [
+    { name: "spawn", agent: "primary", thread_id: "main", ok: true, completed: true, args: { id: "worker" } },
+    { name: "processes_step_get", agent: "primary", thread_id: "worker", ok: true, completed: true, args: { step_id: "s1" } },
+    { name: "processes_step_update", agent: "primary", thread_id: "worker", ok: true, completed: true, args: { step_id: "s1", state: "completed" } },
+  ];
+  expect(() => verifyStepWorkers(calls, run)).not.toThrow();
+  expect(() => verifyStepWorkers([calls[0], calls[2]], run)).toThrow("authoritative worker read");
+  expect(() => verifyStepWorkers([calls[0], calls[1], { ...calls[2], thread_id: "main" }], run)).toThrow("not recorded by a worker");
+  expect(() => verifyStepWorkers([{ ...calls[0], agent: "other" }, calls[1], calls[2]], run)).toThrow("missing main spawn");
+});
+
+test("sequential verification rejects extra workers, premature done, and missing claims", () => {
+  const worker = { agent_id: 29, thread_id: "weather-worker" };
+  const run = {
+    assignment: { owner_agent_id: 29 },
+    steps: ["weather", "conversation", "push"].map((key, i) => ({
+      id: key, key, updated_by: "agent:29:weather-worker",
+      events: [{ id: 2 * i + 1, state: "ready" }, { id: 2 * i + 2, state: "completed" }],
+    })),
+  };
+  const call = (name: string, args = {}, thread_id = worker.thread_id) => ({ name, args, thread_id, agent: "primary", completed: true, ok: true });
+  const calls = [
+    call("spawn", { id: worker.thread_id }, "main"),
+    ...run.steps.flatMap(s => [call("processes_step_claim", { step_id: s.id }), call("processes_step_update", { step_id: s.id, state: "completed" })]),
+    call("done"),
+  ];
+  expect(() => verifySequentialWorker(calls, run, [worker])).not.toThrow();
+  expect(() => verifySequentialWorker([...calls, call("spawn", { id: "extra" }, "main")], run, [worker])).toThrow("exactly one main-thread spawn");
+  expect(() => verifySequentialWorker(calls.filter(c => c.name !== "processes_step_claim"), run, [worker])).toThrow("missing ordered claim");
+  expect(() => verifySequentialWorker([calls[0], calls.at(-1)!, ...calls.slice(1, -1)], run, [worker])).toThrow("finish once after the final step");
+  expect(() => verifySequentialWorker(calls, run, [worker, worker])).toThrow("one persisted run worker");
+  run.steps[1].events[0].id = 1;
+  expect(() => verifySequentialWorker(calls, run, [worker])).toThrow("dependency audit ordering failed");
 });

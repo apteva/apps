@@ -148,6 +148,16 @@ type platformDef struct {
 	AudienceCreateCustomTool    string
 	AudienceCreateLookalikeTool string
 
+	// Keyword tools. Google only: an ad group is a keyword container, and a
+	// Search campaign serves nothing without them. Campaign-level negatives
+	// use a separate criterion service from ad-group criteria.
+	KeywordMutateTool           string
+	CampaignCriterionMutateTool string
+
+	// Campaign-level assets: lead forms today, plus sitelink, callout and
+	// structured-snippet extensions.
+	CampaignAssetMutateTool string
+
 	// Field name on each integration tool that carries the ad-account
 	// id. Meta uses "adAccountId" (act_*); Google uses "customer_id".
 	// When set, runtime fills it from the resolved local ad_account.
@@ -191,30 +201,33 @@ var platforms = map[string]platformDef{
 		AccountIDInputField:         "adAccountId",
 	},
 	"google": {
-		Platform:                 "google",
-		IntegrationSlug:          "google-ads",
-		DisplayName:              "Google Ads",
-		NativeIDFormat:           "<customer_id without hyphens>",
-		ListAccountsTool:         "list_accounts",
-		AccountIDInputField:      "customer_id",
-		CampaignCreateTool:       "campaign_mutate",
-		CampaignListTool:         "search",
-		CampaignUpdateTool:       "campaign_mutate",
-		CampaignDeleteTool:       "campaign_mutate",
-		AdSetCreateTool:          "ad_group_mutate",
-		AdSetListTool:            "search",
-		AdSetUpdateTool:          "ad_group_mutate",
-		AdSetDeleteTool:          "ad_group_mutate",
-		AdCreateTool:             "ad_mutate",
-		AdListTool:               "search",
-		AdUpdateTool:             "ad_mutate",
-		AdDeleteTool:             "ad_mutate",
-		CreativeCreateTool:       "asset_mutate",
-		CreativeGetTool:          "search",
-		CreativeListTool:         "search",
-		CreativeAssetStatusTool:  "search",
-		AudienceListTool:         "search",
-		AudienceCreateCustomTool: "user_list_mutate",
+		Platform:                    "google",
+		IntegrationSlug:             "google-ads",
+		DisplayName:                 "Google Ads",
+		NativeIDFormat:              "<customer_id without hyphens>",
+		ListAccountsTool:            "list_accounts",
+		AccountIDInputField:         "customer_id",
+		CampaignCreateTool:          "campaign_mutate",
+		CampaignListTool:            "search",
+		CampaignUpdateTool:          "campaign_mutate",
+		CampaignDeleteTool:          "campaign_mutate",
+		AdSetCreateTool:             "ad_group_mutate",
+		AdSetListTool:               "search",
+		AdSetUpdateTool:             "ad_group_mutate",
+		AdSetDeleteTool:             "ad_group_mutate",
+		AdCreateTool:                "ad_mutate",
+		AdListTool:                  "search",
+		AdUpdateTool:                "ad_mutate",
+		AdDeleteTool:                "ad_mutate",
+		CreativeCreateTool:          "asset_mutate",
+		CreativeGetTool:             "search",
+		CreativeListTool:            "search",
+		CreativeAssetStatusTool:     "search",
+		AudienceListTool:            "search",
+		AudienceCreateCustomTool:    "user_list_mutate",
+		KeywordMutateTool:           "ad_group_criterion_mutate",
+		CampaignCriterionMutateTool: "campaign_criterion_mutate",
+		CampaignAssetMutateTool:     "campaign_asset_mutate",
 	},
 	"x": {
 		Platform:                    "x",
@@ -680,20 +693,90 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "campaign_create",
 			Description: "Create a campaign on the bound ad account. " +
 				"Unified args: ad_account_id (local id from account_list), name, objective (sales|leads|traffic|engagement|awareness|app_promotion), status (PAUSED|ACTIVE — defaults to PAUSED), daily_budget_cents?, lifetime_budget_cents?, bid_strategy? (lowest_cost|cost_cap|bid_cap), start_time?, end_time?. " +
+				"channel_type selects the Google Ads campaign shape (search|performance_max|display|shopping|video|demand_gen, default search) and is ignored on other platforms. " +
+				"On Google the objective picks a bidding strategy (sales=maximize conversion value, leads=maximize conversions, traffic=target spend, awareness=target impression share); " +
+				"bid_strategy overrides it with a named Google strategy. " +
+				"On Google, pass locations (and optionally excluded_locations and languages) or the campaign will target everywhere. " +
 				"Pass platform_options for any field the unified surface doesn't cover (Meta requires special_ad_categories — pass [] when none).",
 			InputSchema: schemaObject(map[string]any{
-				"ad_account_id":         map[string]any{"type": "integer"},
-				"name":                  map[string]any{"type": "string"},
-				"objective":             map[string]any{"type": "string", "enum": []string{"sales", "leads", "traffic", "engagement", "awareness", "app_promotion"}},
+				"ad_account_id": map[string]any{"type": "integer"},
+				"name":          map[string]any{"type": "string"},
+				"objective":     map[string]any{"type": "string", "enum": []string{"sales", "leads", "traffic", "engagement", "awareness", "app_promotion"}},
+				"channel_type": map[string]any{
+					"type": "string",
+					"enum": []string{"search", "performance_max", "display", "shopping", "video", "demand_gen"},
+					"description": "Google Ads campaign shape. Determines the whole campaign, not just its goal. " +
+						"Defaults to search. Ignored by Meta, X and Reddit.",
+				},
 				"status":                map[string]any{"type": "string", "enum": []string{"PAUSED", "ACTIVE"}, "default": "PAUSED"},
 				"daily_budget_cents":    map[string]any{"type": "integer"},
 				"lifetime_budget_cents": map[string]any{"type": "integer"},
-				"bid_strategy":          map[string]any{"type": "string", "enum": []string{"lowest_cost", "cost_cap", "bid_cap"}},
-				"start_time":            map[string]any{"type": "string"},
-				"end_time":              map[string]any{"type": "string"},
-				"platform_options":      map[string]any{"type": "object"},
+				"bid_strategy": map[string]any{
+					"type": "string",
+					"enum": []string{
+						"lowest_cost", "cost_cap", "bid_cap",
+						"manual_cpc", "maximize_clicks", "target_spend", "maximize_conversions",
+						"target_cpa", "maximize_conversion_value", "target_roas", "target_impression_share",
+					},
+					"description": "The first three names are Meta's. The rest are Google's and override the " +
+						"objective mapping; maximize_clicks is Google's TargetSpend. Smart Bidding needs conversion " +
+						"history, so a new Google account should start on manual_cpc or maximize_clicks.",
+				},
+				"target_roas": map[string]any{
+					"type": "number", "minimum": 0,
+					"description": "Google, value bidding. Target return on ad spend, e.g. 3.5 for 350%.",
+				},
+				"target_cpa_cents": map[string]any{
+					"type": "integer", "minimum": 0,
+					"description": "Google, conversion bidding. Target cost per acquisition.",
+				},
+				"cpc_bid_ceiling_cents": map[string]any{
+					"type": "integer", "minimum": 0,
+					"description": "Google. Maximum CPC for target_spend and target_impression_share bidding.",
+				},
+				"impression_share_location": map[string]any{
+					"type":        "string",
+					"enum":        []string{"ANYWHERE_ON_PAGE", "TOP_OF_PAGE", "ABSOLUTE_TOP_OF_PAGE"},
+					"description": "Google, awareness bidding. Defaults to ANYWHERE_ON_PAGE.",
+				},
+				"impression_share_percent": map[string]any{
+					"type": "number", "minimum": 1, "maximum": 100,
+					"description": "Google, awareness bidding. Target impression share. Defaults to 65.",
+				},
+				"locations": map[string]any{
+					"type": "array", "maxItems": 500,
+					"items":       map[string]any{"type": "string"},
+					"description": "Google. Geo target constant ids or geoTargetConstants/<id> resource names from targeting_catalog_search. A campaign created without these targets everywhere.",
+				},
+				"excluded_locations": map[string]any{
+					"type": "array", "maxItems": 500,
+					"items":       map[string]any{"type": "string"},
+					"description": "Google. Locations to exclude, in the same form as locations.",
+				},
+				"languages": map[string]any{
+					"type": "array", "maxItems": 100,
+					"items":       map[string]any{"type": "string"},
+					"description": "Google. Language constant ids or languageConstants/<id> resource names.",
+				},
+				"contains_eu_political_advertising": map[string]any{
+					"type": "boolean", "default": false,
+					"description": "Google Ads requires this declaration on every campaign create. Set true only " +
+						"when the campaign does carry EU political advertising.",
+				},
+				"shared_budget": map[string]any{
+					"type": "boolean", "default": false,
+					"description": "Google. Create the budget as explicitly shared. Requires a portfolio bidding " +
+						"strategy via platform_options.campaign.biddingStrategy; Google rejects an inline strategy " +
+						"against a shared budget.",
+				},
+				"start_time":       map[string]any{"type": "string"},
+				"end_time":         map[string]any{"type": "string"},
+				"platform_options": map[string]any{"type": "object"},
 				"funding_source_resource_id": map[string]any{
-					"type": "integer", "description": "Normalized funding source. Used automatically when only one is available.",
+					"type": "integer",
+					"description": "Normalized funding source, for X Ads and Reddit Ads only, where a campaign must name a " +
+						"funding instrument. Used automatically when only one is available. Meta and Google bill the " +
+						"account rather than the campaign, expose no funding_source resource kind, and ignore this field.",
 				},
 			}, []string{"ad_account_id", "name", "objective"}),
 			Handler: a.toolCampaignCreate,
@@ -809,7 +892,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "adset_create",
 			Description: "Create an ad set under a campaign. " +
-				"Unified args: ad_account_id, campaign_id, name, optimization_goal (link_clicks|conversions|leads|reach|impressions|page_likes|post_engagement|thruplay), billing_event? (impressions|link_clicks; default impressions), daily_budget_cents?, lifetime_budget_cents?, bid_strategy?, bid_amount_cents?, start_time?, end_time?, status?, targeting? (object — passthrough; Meta requires geo_locations + targeting_automation), promoted_object? (object — passthrough), destination_type?, dsa_beneficiary?, dsa_payor?, platform_options. Meta requests are preflighted against the parent campaign objective. For video views, use optimization_goal=thruplay with billing_event=impressions; THRUPLAY billing is account-restricted and is not exposed.",
+				"Unified args: ad_account_id, campaign_id, name, optimization_goal (link_clicks|conversions|leads|reach|impressions|page_likes|post_engagement|thruplay), billing_event? (impressions|link_clicks; default impressions), daily_budget_cents?, lifetime_budget_cents?, bid_strategy?, bid_amount_cents?, start_time?, end_time?, status?, targeting? (object — passthrough; required by Meta, which needs geo_locations + targeting_automation), promoted_object? (object — passthrough), destination_type?, dsa_beneficiary?, dsa_payor?, platform_options. optimization_goal and targeting are required by Meta only; Google ad groups take name, campaign_id, bid_amount_cents? and platform_options.ad_group. Meta requests are preflighted against the parent campaign objective. For video views, use optimization_goal=thruplay with billing_event=impressions; THRUPLAY billing is account-restricted and is not exposed.",
 			InputSchema: schemaObject(map[string]any{
 				"ad_account_id":         map[string]any{"type": "integer"},
 				"campaign_id":           map[string]any{"type": "string"},
@@ -838,7 +921,11 @@ func (a *App) MCPTools() []sdk.Tool {
 				"dsa_beneficiary":     map[string]any{"type": "string"},
 				"dsa_payor":           map[string]any{"type": "string"},
 				"platform_options":    map[string]any{"type": "object"},
-			}, []string{"ad_account_id", "campaign_id", "name", "optimization_goal", "targeting"}),
+				// optimization_goal and targeting are Meta concepts and are
+				// enforced by the Meta adapter. Google ad groups, X line items
+				// and Reddit ad groups have no equivalent, so requiring them
+				// here would only force callers to invent ignored values.
+			}, []string{"ad_account_id", "campaign_id", "name"}),
 			Handler: a.toolAdSetCreate,
 		},
 		{
@@ -878,18 +965,258 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolAdSetDelete,
 		},
 
+		// ── Budgets (Google) ──
+		{
+			Name: "budget_list",
+			Description: "List Google campaign budgets on an ad account. reference_count is the number of campaigns " +
+				"using each budget, so reference_count=0 marks a budget nothing points at — typically stranded by a " +
+				"campaign create that failed after its budget landed. Args: ad_account_id, only_orphaned?, limit?.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"only_orphaned": map[string]any{"type": "boolean", "default": false},
+				"limit":         map[string]any{"type": "integer", "minimum": 1, "maximum": 1000, "default": 200},
+			}, []string{"ad_account_id"}),
+			Handler: a.toolBudgetList,
+		},
+		{
+			Name:        "budget_delete",
+			Description: "Remove Google campaign budgets. A budget still referenced by a campaign cannot be removed. Args: ad_account_id, budget_ids (from budget_list).",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"budget_ids": map[string]any{
+					"type": "array", "minItems": 1, "maxItems": 100,
+					"items": map[string]any{"type": "string"},
+				},
+			}, []string{"ad_account_id", "budget_ids"}),
+			Handler: a.toolBudgetDelete,
+		},
+
+		// ── Campaign targeting (Google) ──
+		{
+			Name: "campaign_targeting_add",
+			Description: "Add location and language targeting to a Google campaign. A campaign with no location criteria " +
+				"serves everywhere, so this is what confines it to a market. Ids come from targeting_catalog_search and may " +
+				"be bare numbers or geoTargetConstants/<id> resource names. " +
+				"Args: ad_account_id, campaign_id, locations?, excluded_locations?, languages?.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id":      map[string]any{"type": "integer"},
+				"campaign_id":        map[string]any{"type": "string"},
+				"locations":          map[string]any{"type": "array", "maxItems": 500, "items": map[string]any{"type": "string"}},
+				"excluded_locations": map[string]any{"type": "array", "maxItems": 500, "items": map[string]any{"type": "string"}},
+				"languages":          map[string]any{"type": "array", "maxItems": 100, "items": map[string]any{"type": "string"}},
+			}, []string{"ad_account_id", "campaign_id"}),
+			Handler: a.toolCampaignTargetingAdd,
+		},
+		{
+			Name: "campaign_targeting_list",
+			Description: "List location and language criteria on a Google campaign. targets_everywhere is true when no " +
+				"location criteria exist. Args: ad_account_id, campaign_id.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"campaign_id":   map[string]any{"type": "string"},
+			}, []string{"ad_account_id", "campaign_id"}),
+			Handler: a.toolCampaignTargetingList,
+		},
+		{
+			Name:        "campaign_targeting_remove",
+			Description: "Remove location or language criteria from a Google campaign. Args: ad_account_id, campaign_id, criterion_ids (from campaign_targeting_list).",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"campaign_id":   map[string]any{"type": "string"},
+				"criterion_ids": map[string]any{"type": "array", "minItems": 1, "maxItems": 1000, "items": map[string]any{"type": "string"}},
+			}, []string{"ad_account_id", "campaign_id", "criterion_ids"}),
+			Handler: a.toolCampaignTargetingRemove,
+		},
+
+		// ── Keywords (Google) ──
+		{
+			Name: "keyword_create",
+			Description: "Add keywords to a Google ad group. Google Ads only: an ad group is a keyword container, " +
+				"and a Search campaign serves nothing until keywords exist. Match type is a field, not punctuation — " +
+				"pass match_type rather than [brackets] or \"quotes\". " +
+				"Args: ad_account_id, adset_id (ad group), keywords ([{text, match_type?, cpc_bid_cents?}]), status? (default ACTIVE).",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"adset_id":      map[string]any{"type": "string", "description": "Google ad group id."},
+				"status":        map[string]any{"type": "string", "enum": []string{"PAUSED", "ACTIVE"}, "default": "ACTIVE"},
+				"keywords":      keywordSpecArraySchema(true),
+			}, []string{"ad_account_id", "adset_id", "keywords"}),
+			Handler: a.toolKeywordCreate,
+		},
+		{
+			Name:        "keyword_list",
+			Description: "List keywords on a Google ad group. Args: ad_account_id, adset_id, include_negatives? (default false), limit?.",
+			InputSchema: keywordListSchema(),
+			Handler:     a.toolKeywordList,
+		},
+		{
+			Name:        "keyword_update",
+			Description: "Update one Google keyword's status or bid. Args: ad_account_id, adset_id, keyword_id, status?, cpc_bid_cents?.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"adset_id":      map[string]any{"type": "string"},
+				"keyword_id":    map[string]any{"type": "string", "description": "Criterion id from keyword_list."},
+				"status":        map[string]any{"type": "string", "enum": []string{"PAUSED", "ACTIVE"}},
+				"cpc_bid_cents": map[string]any{"type": "integer", "minimum": 0},
+			}, []string{"ad_account_id", "adset_id", "keyword_id"}),
+			Handler: a.toolKeywordUpdate,
+		},
+		{
+			Name:        "keyword_delete",
+			Description: "Remove keywords from a Google ad group. Args: ad_account_id, adset_id, keyword_ids (criterion ids).",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"adset_id":      map[string]any{"type": "string"},
+				"keyword_ids":   map[string]any{"type": "array", "minItems": 1, "maxItems": 1000, "items": map[string]any{"type": "string"}},
+			}, []string{"ad_account_id", "adset_id", "keyword_ids"}),
+			Handler: a.toolKeywordDelete,
+		},
+		{
+			Name: "negative_keyword_create",
+			Description: "Add negative keywords at Google ad group or campaign level. " +
+				"Negative criteria take no status and no bid. " +
+				"Args: ad_account_id, level (ad_group|campaign, default ad_group), adset_id (ad_group level), campaign_id (campaign level), keywords.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"level":         map[string]any{"type": "string", "enum": []string{"ad_group", "campaign"}, "default": "ad_group"},
+				"adset_id":      map[string]any{"type": "string"},
+				"campaign_id":   map[string]any{"type": "string"},
+				"keywords":      keywordSpecArraySchema(false),
+			}, []string{"ad_account_id", "keywords"}),
+			Handler: a.toolNegativeKeywordCreate,
+		},
+		{
+			Name:        "negative_keyword_list",
+			Description: "List negative keywords at Google ad group or campaign level. Args: ad_account_id, level?, adset_id?, campaign_id?.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"level":         map[string]any{"type": "string", "enum": []string{"ad_group", "campaign"}, "default": "ad_group"},
+				"adset_id":      map[string]any{"type": "string"},
+				"campaign_id":   map[string]any{"type": "string"},
+			}, []string{"ad_account_id"}),
+			Handler: a.toolNegativeKeywordList,
+		},
+		{
+			Name:        "negative_keyword_delete",
+			Description: "Remove negative keywords at Google ad group or campaign level. Args: ad_account_id, level?, adset_id?, campaign_id?, keyword_ids.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"level":         map[string]any{"type": "string", "enum": []string{"ad_group", "campaign"}, "default": "ad_group"},
+				"adset_id":      map[string]any{"type": "string"},
+				"campaign_id":   map[string]any{"type": "string"},
+				"keyword_ids":   map[string]any{"type": "array", "minItems": 1, "maxItems": 1000, "items": map[string]any{"type": "string"}},
+			}, []string{"ad_account_id", "keyword_ids"}),
+			Handler: a.toolNegativeKeywordDelete,
+		},
+
+		// ── Ad extensions (Google) ──
+		{
+			Name: "ad_extension_create",
+			Description: "Add sitelink, callout or structured-snippet extensions to a Google campaign. " +
+				"Creates the assets and links them to the campaign in one call. " +
+				"Args: ad_account_id, campaign_id, type (sitelink|callout|structured_snippet), extensions. " +
+				"sitelink items are {link_text, final_url, description1?, description2?}; callout items are {text}; " +
+				"structured_snippet items are {header, values}.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"campaign_id":   map[string]any{"type": "string"},
+				"type":          map[string]any{"type": "string", "enum": []string{"sitelink", "callout", "structured_snippet"}},
+				"extensions": map[string]any{
+					"type": "array", "minItems": 1, "maxItems": 20,
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"link_text":    map[string]any{"type": "string", "maxLength": sitelinkTextMaxRunes},
+							"final_url":    map[string]any{"type": "string"},
+							"description1": map[string]any{"type": "string", "maxLength": sitelinkDescriptionMaxRunes},
+							"description2": map[string]any{"type": "string", "maxLength": sitelinkDescriptionMaxRunes},
+							"text":         map[string]any{"type": "string", "maxLength": calloutTextMaxRunes},
+							"header":       map[string]any{"type": "string"},
+							"values": map[string]any{
+								"type": "array", "minItems": snippetMinValues, "maxItems": snippetMaxValues,
+								"items": map[string]any{"type": "string", "maxLength": snippetValueMaxRunes},
+							},
+						},
+					},
+				},
+			}, []string{"ad_account_id", "campaign_id", "type", "extensions"}),
+			Handler: a.toolAdExtensionCreate,
+		},
+		{
+			Name:        "ad_extension_list",
+			Description: "List sitelink, callout and structured-snippet extensions on a Google campaign. Args: ad_account_id, campaign_id, type? (filter).",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"campaign_id":   map[string]any{"type": "string"},
+				"type":          map[string]any{"type": "string", "enum": []string{"sitelink", "callout", "structured_snippet"}},
+			}, []string{"ad_account_id", "campaign_id"}),
+			Handler: a.toolAdExtensionList,
+		},
+		{
+			Name:        "ad_extension_delete",
+			Description: "Unlink extensions from a Google campaign. Args: ad_account_id, campaign_id, type, asset_resource_names (from ad_extension_list).",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"campaign_id":   map[string]any{"type": "string"},
+				"type":          map[string]any{"type": "string", "enum": []string{"sitelink", "callout", "structured_snippet"}},
+				"asset_resource_names": map[string]any{
+					"type": "array", "minItems": 1, "maxItems": 20,
+					"items": map[string]any{"type": "string"},
+				},
+			}, []string{"ad_account_id", "campaign_id", "type", "asset_resource_names"}),
+			Handler: a.toolAdExtensionDelete,
+		},
+
 		// ── Ads ──
 		{
-			Name:        "ad_create",
-			Description: "Create an ad referencing an existing creative. Args: ad_account_id, adset_id, name, creative_id, status? (PAUSED|ACTIVE), platform_options.",
+			Name: "ad_create",
+			Description: "Create an ad. Meta, X and Reddit reference an existing creative via creative_id. " +
+				"Google Ads embeds the ad format in the ad itself: pass headlines + descriptions + final_urls to " +
+				"build a Responsive Search Ad (Google has served RSA-only since 2022), or platform_options.ad for " +
+				"any other Google ad format. " +
+				"Args: ad_account_id, adset_id, name, creative_id (Meta/X/Reddit), headlines?, descriptions?, " +
+				"final_urls?, path1?, path2?, status? (PAUSED|ACTIVE), platform_options.",
 			InputSchema: schemaObject(map[string]any{
-				"ad_account_id":    map[string]any{"type": "integer"},
-				"adset_id":         map[string]any{"type": "string"},
-				"name":             map[string]any{"type": "string"},
-				"creative_id":      map[string]any{"type": "string"},
+				"ad_account_id": map[string]any{"type": "integer"},
+				"adset_id":      map[string]any{"type": "string"},
+				"name":          map[string]any{"type": "string"},
+				"creative_id":   map[string]any{"type": "string", "description": "Required by Meta, X and Reddit. Google embeds the format in the ad."},
+				"headlines": map[string]any{
+					"type": "array", "minItems": rsaMinHeadlines, "maxItems": rsaMaxHeadlines,
+					"description": "Google RSA headlines (3-15). Each is {text, pinned_field?}; pinned_field is headline_1|headline_2|headline_3.",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"text":         map[string]any{"type": "string", "minLength": 1, "maxLength": rsaHeadlineMaxRunes},
+							"pinned_field": map[string]any{"type": "string", "enum": []string{"headline_1", "headline_2", "headline_3"}},
+						},
+						"required": []string{"text"},
+					},
+				},
+				"descriptions": map[string]any{
+					"type": "array", "minItems": rsaMinDescriptions, "maxItems": rsaMaxDescriptions,
+					"description": "Google RSA descriptions (2-4). Each is {text, pinned_field?}; pinned_field is description_1|description_2.",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"text":         map[string]any{"type": "string", "minLength": 1, "maxLength": rsaDescriptionMaxRunes},
+							"pinned_field": map[string]any{"type": "string", "enum": []string{"description_1", "description_2"}},
+						},
+						"required": []string{"text"},
+					},
+				},
+				"final_urls": map[string]any{
+					"type": "array", "minItems": 1, "maxItems": 10,
+					"items":       map[string]any{"type": "string"},
+					"description": "Google RSA landing pages. Absolute http(s) URLs.",
+				},
+				"path1":            map[string]any{"type": "string", "maxLength": rsaPathMaxRunes, "description": "Google RSA display path segment."},
+				"path2":            map[string]any{"type": "string", "maxLength": rsaPathMaxRunes, "description": "Google RSA second display path segment; requires path1."},
 				"status":           map[string]any{"type": "string", "enum": []string{"PAUSED", "ACTIVE"}, "default": "PAUSED"},
 				"platform_options": map[string]any{"type": "object"},
-			}, []string{"ad_account_id", "adset_id", "name", "creative_id"}),
+				// creative_id is enforced by the Meta and X/Reddit adapters.
+				// Google builds the format from headlines/descriptions instead.
+			}, []string{"ad_account_id", "adset_id", "name"}),
 			Handler: a.toolAdCreate,
 		},
 		{
@@ -3201,6 +3528,11 @@ func (googleAdapter) ListAccounts(a *App, ctx *sdk.AppCtx, row *pendingRow, def 
 		if strings.TrimSpace(toString(account["name"])) == "" {
 			account["name"] = id
 		}
+		// Every row carries the flag, so a caller can always tell an operating
+		// account from a manager instead of inferring it from absent metadata.
+		if _, ok := account["manager"]; !ok {
+			account["manager"] = false
+		}
 		seen[id] = true
 		accounts = append(accounts, account)
 	}
@@ -3210,18 +3542,34 @@ func (googleAdapter) ListAccounts(a *App, ctx *sdk.AppCtx, row *pendingRow, def 
 			continue
 		}
 		account := map[string]any{"id": customerID, "name": customerID}
-		enriched, err := googleFetchCustomer(ctx, row.connectionID, customerID)
-		if err == nil {
+		enriched, detailErr := googleFetchCustomer(ctx, row.connectionID, customerID)
+		if detailErr == nil {
 			for k, v := range enriched {
 				if v != nil && (toString(v) != "" || k == "manager") {
 					account[k] = v
 				}
 			}
+		} else {
+			// A failed detail read used to fall through as a bare id row whose
+			// absent manager flag read false, so an MCC was offered as a place
+			// to run ads. Fall back to the hierarchy instead: it reports each
+			// client with its own descriptive name and manager flag, and a
+			// plain operating account simply returns itself at level 0.
+			ctx.Logger().Warn("google customer detail lookup failed",
+				"customer_id", customerID, "error", detailErr)
 		}
-		if googleBool(account["manager"]) {
-			clients, err := googleFetchClientAccounts(ctx, row.connectionID, customerID)
-			if err != nil {
-				return nil, fmt.Errorf("list client accounts for manager %s: %w", customerID, err)
+		if googleBool(account["manager"]) || detailErr != nil {
+			clients, clientErr := googleFetchClientAccounts(ctx, row.connectionID, customerID)
+			if clientErr != nil {
+				if detailErr == nil {
+					return nil, fmt.Errorf("list client accounts for manager %s: %w", customerID, clientErr)
+				}
+				// Neither read succeeded. Surface the account rather than
+				// dropping it, but mark the metadata as unverified so the
+				// caller does not read the defaults as facts.
+				account["detail_unavailable"] = true
+				appendAccount(account)
+				continue
 			}
 			for _, client := range clients {
 				appendAccount(client)
@@ -3314,50 +3662,99 @@ func (googleAdapter) CampaignCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, de
 	if intArg(args, "lifetime_budget_cents", 0) > 0 {
 		return mcpError("Google Ads generic campaigns support daily_budget_cents only; use native platform_options for other budget semantics"), nil
 	}
-	if objective := strings.ToLower(stringArgAny(args, "objective")); objective != "traffic" {
-		return mcpError("Google Ads generic campaign_create currently supports objective=traffic (Search) only"), nil
-	}
-	budgetMicros := googleBudgetMicros(args)
 	opts, _ := args["platform_options"].(map[string]any)
-	if budgetMicros == "" && opts["campaignBudget"] == nil && opts["campaign_budget"] == nil {
-		return mcpError("google campaign_create requires daily_budget_cents or platform_options.campaignBudget"), nil
+
+	// Everything that can be rejected is checked before the first mutate. The
+	// budget and the campaign are separate mutates, so a validation failure
+	// after the budget lands would leave an orphan behind.
+	channelType, channelErr := googleChannelType(stringArgAny(args, "channel_type"))
+	if channelErr != nil {
+		return mcpError(channelErr.Error()), nil
+	}
+	// Validated here, applied after the campaign exists: a bad geo id must not
+	// cost a budget and a campaign.
+	targeting, targetingErr := normalizedCampaignTargeting(args)
+	if targetingErr != nil {
+		return mcpError(targetingErr.Error()), nil
+	}
+	nativeStrategy := googleCampaignHasBiddingStrategy(opts)
+	biddingField := ""
+	if !nativeStrategy {
+		field, biddingErr := googleBiddingField(args, channelType)
+		if biddingErr != nil {
+			return mcpError(biddingErr.Error()), nil
+		}
+		biddingField = field
 	}
 
-	var budget any
+	budgetMicros := googleBudgetMicros(args)
 	budgetResource := toString(opts["campaignBudget"])
 	if budgetResource == "" {
 		budgetResource = toString(opts["campaign_budget"])
 	}
+	if budgetMicros == "" && budgetResource == "" {
+		return mcpError("google campaign_create requires daily_budget_cents or platform_options.campaignBudget"), nil
+	}
+
+	// An explicitly shared budget requires a portfolio bidding strategy: Google
+	// rejects an inline campaign-level strategy against one with
+	// BIDDING_STRATEGY_TYPE_INCOMPATIBLE_WITH_SHARED_BUDGET. One budget per
+	// campaign is the normal case and what this unified surface implies, so
+	// sharing is opt-in and incompatible combinations are refused up front.
+	sharedBudget := boolArgDefault(args, "shared_budget", false)
+	if custom, ok := opts["budget"].(map[string]any); ok {
+		if raw, present := custom["explicitlyShared"]; present {
+			sharedBudget = googleBool(raw)
+		}
+		if raw, present := custom["explicitly_shared"]; present {
+			sharedBudget = googleBool(raw)
+		}
+	}
+	if sharedBudget && biddingField != "" {
+		return mcpError("shared_budget=true requires a portfolio bidding strategy: create a BiddingStrategy and pass " +
+			"platform_options.campaign.biddingStrategy=<resource name>. Google rejects an inline campaign-level " +
+			"strategy against a shared budget (BIDDING_STRATEGY_TYPE_INCOMPATIBLE_WITH_SHARED_BUDGET)."), nil
+	}
+
+	var budget any
+	createdBudget := false
 	if budgetResource == "" {
 		budgetCreate := map[string]any{
-			"name":           name + " Budget",
-			"amountMicros":   budgetMicros,
-			"deliveryMethod": "STANDARD",
+			"name":             name + " Budget",
+			"amountMicros":     budgetMicros,
+			"deliveryMethod":   "STANDARD",
+			"explicitlyShared": sharedBudget,
 		}
 		if custom, ok := opts["budget"].(map[string]any); ok {
 			for k, v := range custom {
 				budgetCreate[k] = v
 			}
 		}
-		var err error
-		budget, err = a.execOrErr(ctx, acct, "budget_mutate", map[string]any{
+		created, budgetErr := a.execIntegrationTool(ctx, acct, "budget_mutate", map[string]any{
 			"customer_id": acct.NativeAccountID,
 			"operations":  []any{map[string]any{"create": budgetCreate}},
 		})
-		if err != nil {
-			return nil, err
+		if budgetErr != nil {
+			return budgetErr, nil
 		}
-		budgetResource = firstResourceName(budget)
+		budget = created
+		budgetResource = firstResourceName(created)
 		if budgetResource == "" {
 			return mcpError("google budget_mutate returned no resourceName"), nil
 		}
+		createdBudget = true
 	}
 
 	campaign := map[string]any{
 		"name":                   name,
 		"status":                 googleCampaignStatus(stringArgAny(args, "status")),
-		"advertisingChannelType": "SEARCH",
+		"advertisingChannelType": channelType,
 		"campaignBudget":         budgetResource,
+		// Required on create since Google Ads API v23.
+		"containsEuPoliticalAdvertising": googleEUPoliticalDeclaration(args),
+	}
+	if biddingField != "" {
+		campaign[biddingField] = googleBiddingPayload(biddingField, args)
 	}
 	if v, _ := args["start_time"].(string); v != "" {
 		campaign["startDate"] = googleDate(v)
@@ -3366,6 +3763,14 @@ func (googleAdapter) CampaignCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, de
 		campaign["endDate"] = googleDate(v)
 	}
 	if custom, ok := opts["campaign"].(map[string]any); ok {
+		// The native escape hatch may still set the channel, but not disagree
+		// with an explicit channel_type: one of the two would be silently lost.
+		if native := firstString(custom, "advertisingChannelType", "advertising_channel_type"); native != "" {
+			if requested := stringArgAny(args, "channel_type"); requested != "" &&
+				!strings.EqualFold(native, channelType) {
+				return mcpError("channel_type=" + requested + " conflicts with platform_options.campaign.advertisingChannelType=" + native), nil
+			}
+		}
 		for k, v := range custom {
 			campaign[k] = v
 		}
@@ -3374,23 +3779,65 @@ func (googleAdapter) CampaignCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, de
 	delete(campaign, "budget")
 	delete(campaign, "campaign")
 	delete(campaign, "campaign_budget")
+	collapseGoogleFieldSpellings(campaign)
 	out, errOut := a.execIntegrationTool(ctx, acct, def.CampaignCreateTool, map[string]any{
 		"customer_id": acct.NativeAccountID,
 		"operations":  []any{map[string]any{"create": campaign}},
 	})
 	if errOut != nil {
-		if budget != nil {
+		if createdBudget {
 			_, cleanupErr := a.execIntegrationTool(ctx, acct, "budget_mutate", map[string]any{
 				"customer_id": acct.NativeAccountID,
 				"operations":  []any{map[string]any{"remove": budgetResource}},
 			})
 			if cleanupErr != nil {
+				// Name the survivor: budgets are otherwise invisible through
+				// this app, so an unrollbackable one is silently stranded.
 				errOut["cleanup_warning"] = "campaign creation failed and the new budget could not be removed"
+				errOut["orphaned_budget"] = budgetResource
+				errOut["hint"] = "remove the stranded budget with budget_delete, or reuse it via platform_options.campaignBudget"
 			}
 		}
 		return errOut, nil
 	}
-	return map[string]any{"budget": budget, "campaign": out}, nil
+	result := map[string]any{"budget": budget, "campaign": out}
+	// Surface the created id so a caller can chain straight into adset_create
+	// without parsing a provider resource name.
+	campaignID := createdProviderID(out, "campaign")
+	if campaignID != "" {
+		result["id"] = campaignID
+		if payload := asMap(out); payload != nil {
+			payload["id"] = campaignID
+		}
+	}
+	if !targeting.empty() {
+		if campaignID == "" {
+			result["targeting_warning"] = "campaign created but its id could not be read, so location and language targeting was not applied"
+			return result, nil
+		}
+		applied, targetErrOut := a.execIntegrationTool(ctx, acct, def.CampaignCriterionMutateTool, map[string]any{
+			"customer_id": acct.NativeAccountID,
+			"operations":  targeting.operations(acct.NativeAccountID, campaignID),
+		})
+		if targetErrOut != nil {
+			// The campaign exists and currently targets everywhere. That is the
+			// dangerous state, so it is reported rather than folded away.
+			targetErrOut["campaign_id"] = campaignID
+			targetErrOut["campaign_created"] = true
+			targetErrOut["hint"] = "the campaign was created but targets everywhere; apply targeting with campaign_targeting_add before activating it"
+			return targetErrOut, nil
+		}
+		result["targeting"] = map[string]any{
+			"locations":          len(targeting.Locations),
+			"excluded_locations": len(targeting.ExcludedLocations),
+			"languages":          len(targeting.Languages),
+			"result":             applied,
+		}
+	} else {
+		// Nothing rejects an untargeted campaign, so name the consequence.
+		result["targeting_warning"] = "no locations were supplied, so this campaign targets everywhere; set them with campaign_targeting_add before activating it"
+	}
+	return result, nil
 }
 
 func (googleAdapter) CampaignUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
@@ -3669,8 +4116,15 @@ func (googleAdapter) AdCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pla
 	}
 	ad, _ := opts["ad"].(map[string]any)
 	asid, _ := args["adset_id"].(string)
+	if len(ad) == 0 && responsiveSearchAdRequested(args) {
+		built, rsaErr := googleResponsiveSearchAd(args)
+		if rsaErr != nil {
+			return mcpError(rsaErr.Error()), nil
+		}
+		ad = built
+	}
 	if asid == "" || len(ad) == 0 {
-		return mcpError("google ad_create requires adset_id and platform_options.ad, or platform_options.operations"), nil
+		return mcpError("google ad_create requires adset_id plus headlines, descriptions and final_urls for a responsive search ad, or platform_options.ad, or platform_options.operations"), nil
 	}
 	if !googleNumericID(asid) {
 		return mcpError("google adset_id must be numeric"), nil
@@ -3931,6 +4385,7 @@ func (a *App) toolAdSetCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	out, err := platformAdapters[acct.Platform].AdSetCreate(a, ctx, acct, def, args)
 	if err == nil && successfulProviderResult(out) {
 		if id := createdProviderID(out, "ad_group"); id != "" {
+			annotateCreatedID(out, id)
 			row := cloneMap(args)
 			row["id"] = id
 			if persistErr := a.upsertDeliveryEntities(ctx, acct, "ad_group", []map[string]any{row}, campaignID); persistErr != nil {
@@ -4021,6 +4476,7 @@ func (a *App) toolAdCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	out, err := platformAdapters[acct.Platform].AdCreate(a, ctx, acct, def, args)
 	if err == nil && successfulProviderResult(out) {
 		if id := createdProviderID(out, "ad"); id != "" {
+			annotateCreatedID(out, id)
 			row := cloneMap(args)
 			row["id"] = id
 			row["adset_id"] = adSetID
@@ -4544,6 +5000,45 @@ func googleCampaignStatus(status string) string {
 	}
 }
 
+// advertisingChannelType determines the entire Google campaign shape, so it is
+// a first-class argument rather than a hardcoded default buried in the adapter.
+var googleChannelTypes = map[string]string{
+	"search":          "SEARCH",
+	"performance_max": "PERFORMANCE_MAX",
+	"display":         "DISPLAY",
+	"shopping":        "SHOPPING",
+	"video":           "VIDEO",
+	"demand_gen":      "DEMAND_GEN",
+}
+
+// googleCampaignHasBiddingStrategy reports whether a native payload already
+// selects one, in any of the spellings the Google Ads API accepts.
+func googleCampaignHasBiddingStrategy(opts map[string]any) bool {
+	custom, ok := opts["campaign"].(map[string]any)
+	if !ok {
+		return false
+	}
+	for key := range custom {
+		lowered := strings.ToLower(key)
+		if strings.Contains(lowered, "bidding") || strings.HasPrefix(lowered, "maximize") ||
+			strings.HasPrefix(lowered, "target") || lowered == "manualcpc" || lowered == "manual_cpc" {
+			return true
+		}
+	}
+	return false
+}
+
+func googleChannelType(raw string) (string, error) {
+	value := strings.TrimSpace(strings.ToLower(raw))
+	if value == "" {
+		return "SEARCH", nil
+	}
+	if mapped, ok := googleChannelTypes[value]; ok {
+		return mapped, nil
+	}
+	return "", fmt.Errorf("channel_type must be one of search, performance_max, display, shopping, video, demand_gen")
+}
+
 func googleValidStatus(status string) bool {
 	switch strings.ToUpper(strings.TrimSpace(status)) {
 	case "", "PAUSED", "ACTIVE", "ENABLED":
@@ -4635,6 +5130,37 @@ func googleMaskField(field string) string {
 		}
 	}
 	return strings.ToLower(string(out))
+}
+
+// allResourceNames returns every resourceName in a mutate response, in order.
+// A batch asset create returns one result per operation and each has to be
+// linked separately.
+// annotateCreatedID surfaces the normalized provider id on a create response so
+// a caller can chain campaign -> ad group -> ad without parsing resource names.
+func annotateCreatedID(out any, id string) {
+	if id == "" {
+		return
+	}
+	if payload := asMap(out); payload != nil {
+		if _, exists := payload["id"]; !exists {
+			payload["id"] = id
+		}
+	}
+}
+
+func allResourceNames(v any) []string {
+	names := make([]string, 0)
+	for _, row := range resultRows(v) {
+		if rn := firstString(row, "resourceName", "resource_name"); rn != "" {
+			names = append(names, rn)
+		}
+	}
+	if len(names) == 0 {
+		if rn := firstResourceName(v); rn != "" {
+			names = append(names, rn)
+		}
+	}
+	return names
 }
 
 func firstResourceName(v any) string {

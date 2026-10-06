@@ -23,7 +23,7 @@ func (t *audioSequenceTracker) observe(sequence uint64, direction string) {
 		t.gaps += gap
 		t.events = append(t.events, audioDropEvent{
 			Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: direction,
-			Reason: "carrier_sequence_gap", DurationMS: gap * 20, Sequence: t.expected,
+			Reason: "carrier_sequence_gap", DurationMS: 0, Sequence: t.expected,
 		})
 		if len(t.events) > 100 {
 			t.events = t.events[len(t.events)-100:]
@@ -39,29 +39,86 @@ func (t *audioSequenceTracker) snapshot() (int, []audioDropEvent) {
 	return t.gaps, append([]audioDropEvent(nil), t.events...)
 }
 
+type coachingPlaybackTiming struct {
+	PlayedMS   float64 `json:"played_ms"`
+	DroppedMS  float64 `json:"dropped_ms"`
+	MaxQueueMS float64 `json:"max_queue_ms"`
+}
+
+type browserAudioTiming struct {
+	Transport struct {
+		CaptureFrames               float64            `json:"capture_frames"`
+		CaptureSentMS               float64            `json:"capture_sent_ms"`
+		CaptureDroppedMS            float64            `json:"capture_dropped_ms"`
+		CaptureMaxAgeMS             float64            `json:"capture_max_age_ms"`
+		PlaybackTransportDroppedMS  float64            `json:"playback_transport_dropped_ms"`
+		PlaybackSourceDroppedMS     float64            `json:"playback_source_dropped_ms"`
+		PlaybackMaxDeliveryExcessMS float64            `json:"playback_max_delivery_excess_ms"`
+		PlaybackMaxSourceAgeMS      float64            `json:"playback_max_source_age_ms"`
+		PlaybackSourceTimestampMS   float64            `json:"playback_source_timestamp_ms"`
+		PlaybackSourceSequence      float64            `json:"playback_source_sequence"`
+		PlaybackSourceEpoch         float64            `json:"playback_source_epoch"`
+		PlaybackIngressMS           float64            `json:"playback_ingress_ms"`
+		PlaybackReceivedMS          float64            `json:"playback_received_ms"`
+		PlaybackSequenceGaps        float64            `json:"playback_sequence_gaps"`
+		PlaybackMaxTransitMS        float64            `json:"playback_max_transit_ms"`
+		PlaybackMaxServerQueueMS    float64            `json:"playback_max_server_queue_ms"`
+		WorkerMaxTickGapMS          float64            `json:"worker_max_tick_gap_ms"`
+		ClockUncertaintyMS          *float64           `json:"clock_uncertainty_ms"`
+		ClockSampleAgeMS            *float64           `json:"clock_sample_age_ms"`
+		DropTotalsMS                map[string]float64 `json:"drop_totals_ms,omitempty"`
+	} `json:"transport"`
+	Playback struct {
+		Coaching       *coachingPlaybackTiming `json:"coaching,omitempty"`
+		PlayedMS       float64                 `json:"played_ms"`
+		MaxResidenceMS float64                 `json:"max_residence_ms"`
+		DropTotalsMS   map[string]float64      `json:"drop_totals_ms,omitempty"`
+	} `json:"playback"`
+}
+
+type mediaSessionEvent struct {
+	Timestamp   string `json:"timestamp"`
+	Action      string `json:"action"`
+	Outcome     string `json:"outcome"`
+	Status      int    `json:"status,omitempty"`
+	Code        string `json:"code,omitempty"`
+	Detail      string `json:"detail,omitempty"`
+	RemainingMS int    `json:"remaining_ms,omitempty"`
+	WasClean    bool   `json:"was_clean,omitempty"`
+}
+
 type browserAudioDiagnostics struct {
-	ReceivedAt             string           `json:"received_at,omitempty"`
-	RTTMS                  *int             `json:"rtt_ms,omitempty"`
-	PlaybackQueueMS        int              `json:"playback_queue_ms"`
-	PlaybackTargetMS       int              `json:"playback_target_ms"`
-	PlaybackMaxQueueMS     int              `json:"playback_max_queue_ms"`
-	PlaybackUnderruns      int              `json:"playback_underruns"`
-	PlaybackDroppedMS      int              `json:"playback_dropped_ms"`
-	WebSocketBufferedBytes int              `json:"websocket_buffered_bytes"`
-	AudioContextRate       int              `json:"audio_context_rate"`
-	MicrophoneSampleRate   int              `json:"microphone_sample_rate,omitempty"`
-	MicrophoneChannelCount int              `json:"microphone_channel_count,omitempty"`
-	EchoCancellation       *bool            `json:"echo_cancellation,omitempty"`
-	NoiseSuppression       *bool            `json:"noise_suppression,omitempty"`
-	AutoGainControl        *bool            `json:"auto_gain_control,omitempty"`
-	MicActiveRMSDBFS       *float64         `json:"mic_active_rms_dbfs,omitempty"`
-	MicPeakDBFS            *float64         `json:"mic_peak_dbfs,omitempty"`
-	MicPostPeakDBFS        *float64         `json:"mic_post_peak_dbfs,omitempty"`
-	MicInputGainDB         *float64         `json:"mic_input_gain_db,omitempty"`
-	MicLimiterReductionDB  *float64         `json:"mic_limiter_reduction_db,omitempty"`
-	CaptureSequenceGaps    int              `json:"capture_sequence_gaps"`
-	PlaybackSequenceGaps   int              `json:"playback_sequence_gaps"`
-	DropEvents             []audioDropEvent `json:"drop_events,omitempty"`
+	SessionEvents          []mediaSessionEvent     `json:"session_events,omitempty"`
+	CarrierPeerConnected   bool                    `json:"carrier_peer_connected"`
+	ConnectionState        string                  `json:"connection_state,omitempty"`
+	AudioContextState      string                  `json:"audio_context_state,omitempty"`
+	MicrophoneMuted        bool                    `json:"microphone_muted"`
+	MicrophoneTrackState   string                  `json:"microphone_track_state,omitempty"`
+	MicrophoneDeviceMuted  bool                    `json:"microphone_device_muted"`
+	Timing                 *browserAudioTiming     `json:"timing,omitempty"`
+	Server                 *serverAudioDiagnostics `json:"server,omitempty"`
+	ReceivedAt             string                  `json:"received_at,omitempty"`
+	RTTMS                  *int                    `json:"rtt_ms,omitempty"`
+	PlaybackQueueMS        int                     `json:"playback_queue_ms"`
+	PlaybackTargetMS       int                     `json:"playback_target_ms"`
+	PlaybackMaxQueueMS     int                     `json:"playback_max_queue_ms"`
+	PlaybackUnderruns      int                     `json:"playback_underruns"`
+	PlaybackDroppedMS      int                     `json:"playback_dropped_ms"`
+	WebSocketBufferedBytes int                     `json:"websocket_buffered_bytes"`
+	AudioContextRate       int                     `json:"audio_context_rate"`
+	MicrophoneSampleRate   int                     `json:"microphone_sample_rate,omitempty"`
+	MicrophoneChannelCount int                     `json:"microphone_channel_count,omitempty"`
+	EchoCancellation       *bool                   `json:"echo_cancellation,omitempty"`
+	NoiseSuppression       *bool                   `json:"noise_suppression,omitempty"`
+	AutoGainControl        *bool                   `json:"auto_gain_control,omitempty"`
+	MicActiveRMSDBFS       *float64                `json:"mic_active_rms_dbfs,omitempty"`
+	MicPeakDBFS            *float64                `json:"mic_peak_dbfs,omitempty"`
+	MicPostPeakDBFS        *float64                `json:"mic_post_peak_dbfs,omitempty"`
+	MicInputGainDB         *float64                `json:"mic_input_gain_db,omitempty"`
+	MicLimiterReductionDB  *float64                `json:"mic_limiter_reduction_db,omitempty"`
+	CaptureSequenceGaps    int                     `json:"capture_sequence_gaps"`
+	PlaybackSequenceGaps   int                     `json:"playback_sequence_gaps"`
+	DropEvents             []audioDropEvent        `json:"drop_events,omitempty"`
 }
 
 type audioDropEvent struct {
@@ -74,7 +131,35 @@ type audioDropEvent struct {
 	Sequence      uint64 `json:"sequence,omitempty"`
 }
 
+// Browser clocks report fractional milliseconds. Accept them at the wire
+// boundary while keeping the existing integer diagnostics API. Otherwise one
+// fractional event causes json.Unmarshal to discard the entire snapshot.
+func (event *audioDropEvent) UnmarshalJSON(data []byte) error {
+	type fields audioDropEvent
+	var decoded fields
+	wire := struct {
+		*fields
+		DurationMS    float64 `json:"duration_ms"`
+		QueueBeforeMS float64 `json:"queue_before_ms"`
+		QueueAfterMS  float64 `json:"queue_after_ms"`
+	}{fields: &decoded}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	milliseconds := func(value float64) int {
+		return int(math.Round(math.Max(0, math.Min(value, 60000))))
+	}
+	decoded.DurationMS = milliseconds(wire.DurationMS)
+	decoded.QueueBeforeMS = milliseconds(wire.QueueBeforeMS)
+	decoded.QueueAfterMS = milliseconds(wire.QueueAfterMS)
+	*event = audioDropEvent(decoded)
+	return nil
+}
+
 type carrierAudioDiagnostics struct {
+	OperatorInterrupts           int64                  `json:"operator_interrupts"`
+	LocalInterrupts              int64                  `json:"local_interrupts"`
+	ProviderCoreInterrupts       int64                  `json:"provider_or_core_interrupts"`
 	SendAheadMS                  int                    `json:"send_ahead_ms"`
 	InputAudio                   audioTransportSnapshot `json:"input_audio"`
 	InboundDroppedMS             int                    `json:"inbound_dropped_ms,omitempty"`
@@ -88,6 +173,8 @@ type carrierAudioDiagnostics struct {
 	MaxQueuedMS                  int                    `json:"max_queued_ms"`
 	DroppedStaleMS               int                    `json:"dropped_stale_ms"`
 	PreAnswerMicrophoneDroppedMS int64                  `json:"pre_answer_microphone_dropped_ms"`
+	CarrierSequenceGaps          int                    `json:"carrier_sequence_gaps"`
+	CaptureSequenceGaps          int                    `json:"capture_sequence_gaps"`
 	SequenceGaps                 int                    `json:"sequence_gaps"`
 	DropEvents                   []audioDropEvent       `json:"drop_events,omitempty"`
 }
@@ -111,6 +198,30 @@ func clampDiagnosticDBFS(value *float64) *float64 {
 }
 
 func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics) browserAudioDiagnostics {
+	if value.Timing != nil {
+		sanitize := func(values map[string]float64) map[string]float64 {
+			out := map[string]float64{}
+			for _, key := range []string{"playback_flush", "playback_hard_limit", "playback_age_limit", "capture_age_limit", "capture_clock_unavailable", "websocket_backpressure", "playback_transport_age", "playback_source_age", "playback_delivery_excess"} {
+				if n, ok := values[key]; ok && !math.IsNaN(n) && !math.IsInf(n, 0) {
+					out[key] = math.Max(0, math.Min(n, 24*60*60*1000))
+				}
+			}
+			return out
+		}
+		value.Timing.Transport.DropTotalsMS = sanitize(value.Timing.Transport.DropTotalsMS)
+		value.Timing.Playback.DropTotalsMS = sanitize(value.Timing.Playback.DropTotalsMS)
+	}
+	enum := func(value string, allowed ...string) string {
+		for _, v := range allowed {
+			if value == v {
+				return value
+			}
+		}
+		return ""
+	}
+	value.ConnectionState = enum(value.ConnectionState, "connected", "reconnecting", "closed")
+	value.AudioContextState = enum(value.AudioContextState, "running", "suspended", "interrupted", "closed")
+	value.MicrophoneTrackState = enum(value.MicrophoneTrackState, "live", "ended")
 	value.ReceivedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	if value.RTTMS != nil {
 		rtt := clampDiagnosticInt(*value.RTTMS, 60000)
@@ -133,6 +244,19 @@ func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics) browserAudi
 	value.CaptureSequenceGaps = clampDiagnosticInt(value.CaptureSequenceGaps, 1000000000)
 	value.PlaybackSequenceGaps = clampDiagnosticInt(value.PlaybackSequenceGaps, 1000000000)
 	value.DropEvents = normalizeAudioDropEvents(value.DropEvents)
+	if len(value.SessionEvents) > 50 {
+		value.SessionEvents = value.SessionEvents[len(value.SessionEvents)-50:]
+	}
+	for i := range value.SessionEvents {
+		e := &value.SessionEvents[i]
+		e.Action = limitDiagnosticText(e.Action, 40)
+		e.Outcome = limitDiagnosticText(e.Outcome, 40)
+		e.Code = limitDiagnosticText(e.Code, 80)
+		e.Detail = limitDiagnosticText(e.Detail, 160)
+		e.Timestamp = limitDiagnosticText(e.Timestamp, 40)
+		e.Status = clampDiagnosticInt(e.Status, 599)
+		e.RemainingMS = clampDiagnosticInt(e.RemainingMS, 3600000)
+	}
 	return value
 }
 
@@ -203,4 +327,11 @@ func audioDiagnosticsPublic(raw string) map[string]any {
 		return map[string]any{}
 	}
 	return out
+}
+
+func limitDiagnosticText(value string, n int) string {
+	if len(value) > n {
+		return value[:n]
+	}
+	return value
 }

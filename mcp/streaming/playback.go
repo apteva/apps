@@ -81,9 +81,11 @@ func (a *App) handlePlayback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Visibility + signature gate. 404, not 403, so we don't leak
-	// existence.
-	if !playbackAuthorized(rec, r.URL.Query(), time.Now()) {
+	// Visibility + signature gate, scoped to the class of URL this is:
+	// an mp4 signature does not unlock HLS and vice versa, and neither
+	// is minted by the heartbeat endpoint. 404, not 403, so we don't
+	// leak existence.
+	if !playbackAuthorized(rec, r.URL.Query(), scopeForFile(filename), time.Now()) {
 		http.NotFound(w, r)
 		return
 	}

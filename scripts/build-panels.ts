@@ -64,7 +64,7 @@ async function main() {
     grouped.set(directory, [...(grouped.get(directory) || []), panel]);
   }
 
-  const build = async (sources: string[], split: boolean) => {
+  const build = async (sources: string[], split: boolean, extraExternals: string[]) => {
     const outDir = dirname(sources[0]);
     if (split) {
       for (const file of await readdir(outDir)) {
@@ -81,7 +81,7 @@ async function main() {
       minify: true,
       sourcemap: "external",
       splitting: split,
-      external: ["react", "react/jsx-runtime", "react/jsx-dev-runtime", "@apteva/ui-kit"],
+      external: ["react", "react/jsx-runtime", "react/jsx-dev-runtime", "@apteva/ui-kit", ...extraExternals],
       define: {
         "process.env.NODE_ENV": '"production"',
       },
@@ -107,8 +107,14 @@ async function main() {
     // hide wire-type errors in panels that provide a TypeScript contract.
     const appDir = dirname(uiDir);
     const manifestPath = join(appDir, "package.json");
+    let extraExternals: string[] = [];
     if (existsSync(manifestPath)) {
       const manifest = await Bun.file(manifestPath).json();
+      // Opt-in host modules preserve the bundle contracts of existing apps.
+      extraExternals = manifest.apteva?.panelExternals ?? [];
+      if (!Array.isArray(extraExternals) || extraExternals.some((name) => typeof name !== "string")) {
+        throw new Error(`Invalid apteva.panelExternals: ${manifestPath}`);
+      }
       if (manifest.scripts?.["build:frontend"]) {
         const frontend = Bun.spawn(["bun", "run", "build:frontend"], { cwd: appDir, stdout: "inherit", stderr: "inherit" });
         if (await frontend.exited !== 0) throw new Error(`Frontend build failed: ${appDir}`);
@@ -119,11 +125,11 @@ async function main() {
       }
     }
     if (existsSync(join(uiDir, "split-bundle.json"))) {
-      await build(sources, true);
+      await build(sources, true, extraExternals);
       continue;
     }
     for (const src of sources) {
-      await build([src], false);
+      await build([src], false, extraExternals);
     }
   }
 

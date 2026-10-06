@@ -40,6 +40,34 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 				clip.UID = fmt.Sprintf("track-%d-clip-%d", ti+1, i+1)
 				out.Changed = true
 			}
+			if procedure := clip.Asset.Procedure; procedure != nil {
+				for name, input := range procedure.Inputs {
+					if input == nil || input.AI == nil {
+						continue
+					}
+					changed, pending, err := materializeOneAIAsset(ctx, input.AI, "clip "+clip.UID+" procedure input "+name, projectID, nil, nil)
+					if err != nil {
+						return out, err
+					}
+					if changed {
+						out.Changed = true
+					}
+					if pending != "" {
+						out.Pending = append(out.Pending, pending)
+						continue
+					}
+					if input.AI.StorageID > 0 {
+						next := fmt.Sprintf("storage:%d", input.AI.StorageID)
+						if input.Src != next {
+							input.Src = next
+							out.Changed = true
+						}
+						if input.Kind == "" {
+							input.Kind = assetTypeForAI(input.AI.MediaKind)
+						}
+					}
+				}
+			}
 			if clip.AI == nil {
 				continue
 			}

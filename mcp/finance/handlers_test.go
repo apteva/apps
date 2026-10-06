@@ -947,6 +947,10 @@ type bankingPlatform struct {
 	conn sdk.PlatformConnection
 }
 
+func (p *bankingPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
+	return &sdk.InstallIdentity{Bindings: map[string]any{financeConnectionRole: float64(p.conn.ID)}}, nil
+}
+
 func (p *bankingPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
 	if id == p.conn.ID {
 		return &p.conn, nil

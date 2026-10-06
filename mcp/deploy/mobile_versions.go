@@ -21,7 +21,7 @@ type mobileVersionAllocation struct {
 // prepareMobileBuildTarget snapshots the effective target contract on the
 // build. Missing store identifiers are allocated before any backend starts.
 func (a *App) prepareMobileBuildTarget(d *Deployment, build *Build) (*Deployment, error) {
-	if d == nil || build == nil || (d.TargetKind != "ios" && d.TargetKind != "android") {
+	if d == nil || build == nil || !isAppPlatform(d.TargetKind) {
 		return d, nil
 	}
 	cfg, err := parseMobileTargetConfig(d.TargetConfigJSON)
@@ -39,7 +39,7 @@ func (a *App) prepareMobileBuildTarget(d *Deployment, build *Build) (*Deployment
 	}
 	if !cfg.SmokeOnly {
 		switch d.TargetKind {
-		case "ios":
+		case "ios", "macos":
 			if cfg.BuildNumber == "" && (strategy == "auto" || (strategy == "" && mobileIntegrationAvailable("app_store"))) {
 				allocation, allocErr := a.allocateIOSBuildNumber(d, build, cfg)
 				if allocErr != nil {
@@ -59,8 +59,8 @@ func (a *App) prepareMobileBuildTarget(d *Deployment, build *Build) (*Deployment
 		}
 	}
 	if strategy == "auto" {
-		if d.TargetKind == "ios" && cfg.BuildNumber == "" {
-			return nil, errors.New("automatic iOS version allocation requires an App Store Connect integration")
+		if isApplePlatform(d.TargetKind) && cfg.BuildNumber == "" {
+			return nil, errors.New("automatic Apple build-number allocation requires an App Store Connect integration")
 		}
 		if d.TargetKind == "android" && cfg.VersionCode == "" {
 			return nil, errors.New("automatic Android version allocation requires a Google Play integration")
@@ -111,7 +111,7 @@ func (a *App) allocateIOSBuildNumber(d *Deployment, build *Build, cfg mobileTarg
 		}
 	}
 	builds, err := executeIntegration(bound, "list_builds", map[string]any{
-		"app_id": appID, "limit": 200, "sort": "-uploadedDate",
+		"app_id": appID, "platform": appleStorePlatform(d.TargetKind), "limit": 200, "sort": "-uploadedDate",
 	})
 	if err != nil {
 		return mobileVersionAllocation{}, err
@@ -120,7 +120,7 @@ func (a *App) allocateIOSBuildNumber(d *Deployment, build *Build, cfg mobileTarg
 	a.mobileVersionMu.Lock()
 	defer a.mobileVersionMu.Unlock()
 	allocation := mobileVersionAllocation{
-		Platform: "ios", Provider: "app_store_connect", AppKey: appID, VersionName: cfg.VersionName,
+		Platform: d.TargetKind, Provider: "app_store_connect", AppKey: appID, VersionName: cfg.VersionName,
 	}
 	next, err := dbReserveMobileVersion(globalCtx.AppDB(), d, build.ID, allocation, remoteMax)
 	if err != nil {
@@ -183,9 +183,9 @@ func dbReserveMobileVersion(db *sql.DB, d *Deployment, buildID int64, allocation
 		column = "version_code"
 	}
 	query := `SELECT COALESCE(MAX(CAST(` + column + ` AS INTEGER)), 0)
-		FROM mobile_version_allocations WHERE provider = ? AND app_key = ?`
-	args := []any{allocation.Provider, allocation.AppKey}
-	if allocation.Platform == "ios" {
+		FROM mobile_version_allocations WHERE provider = ? AND app_key = ? AND platform = ?`
+	args := []any{allocation.Provider, allocation.AppKey, allocation.Platform}
+	if isApplePlatform(allocation.Platform) {
 		query += ` AND version_name = ?`
 		args = append(args, allocation.VersionName)
 	}
@@ -198,7 +198,7 @@ func dbReserveMobileVersion(db *sql.DB, d *Deployment, buildID int64, allocation
 		next = localMax + 1
 	}
 	buildNumber, versionCode := "", ""
-	if allocation.Platform == "ios" {
+	if isApplePlatform(allocation.Platform) {
 		buildNumber = strconv.FormatInt(next, 10)
 	} else {
 		versionCode = strconv.FormatInt(next, 10)

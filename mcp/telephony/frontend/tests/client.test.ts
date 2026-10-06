@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { AptevaClient } from "@apteva/web-sdk";
-import { TelephonyClient, telephonyExtension, type CallSession } from "../src/client";
+import { TelephonyClient, telephonyExtension, type CallControlResult, type CallSession } from "../src/client";
 import type { AudioRuntime } from "../src/audio";
 import type { SoftphoneCallbacks } from "../../ui/softphone-audio";
 
@@ -16,7 +16,8 @@ function fixture() {
     const parsed = new URL(String(url));
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     requests.push({ url: parsed, headers: new Headers(init?.headers), body });
-    return Response.json(await response(parsed, body));
+    const value = await response(parsed, body);
+    return value instanceof Response ? value : Response.json(value);
   }) as typeof fetch });
   const client = sdk.use(telephonyExtension, { projectId: "p1", installId: 42 });
   let callbacks: SoftphoneCallbacks = {};
@@ -25,19 +26,20 @@ function fixture() {
   let start = async () => { callbacks.onState?.("live"); };
   let muted = false, dtmf = "";
   const startedOptions: any[] = [];
+  const startedURLs: string[] = [];
   const runtime: AudioRuntime = {
     async preflight() { preflighted++; await preflight(); },
     create(cb) {
       callbacks = cb;
       return {
-        async start(url, options) { startedOptions.push(options); expect(url).toBe("wss://gateway.example" + session.media_url); started++; await start(); },
+        async start(url, options) { startedOptions.push(options); startedURLs.push(url); expect(url).toStartWith("wss://gateway.example/api/apps/telephony/_install/42/softphone/media/call-1/"); started++; await start(); },
         stop() { stopped++; }, setMuted(value) { muted = value; },
         sendDTMF(value) { dtmf = value; }, setOutputVolume() {},
       };
     },
   };
   const phone = client.createSoftphone({ audioRuntime: runtime, pollIntervalMs: 0 });
-  return { sdk, client, phone, requests, session, runtime, startedOptions,
+  return { sdk, client, phone, requests, session, runtime, startedOptions, startedURLs,
     setResponse(value: typeof response) { response = value; },
     setPreflight(value: typeof preflight) { preflight = value; },
     setStart(value: typeof start) { start = value; },
@@ -53,6 +55,18 @@ function deferred() {
 }
 
 describe("Telephony extension", () => {
+  test("call controls use the same authenticated project-scoped client", async () => {
+    const f = fixture();
+    const state: CallControlResult = { call_id: "call-1", hold_state: "held", recording_state: "pause_requested", control_error: "",
+      capabilities: { hold_music: true, recording_pause: true } };
+    f.setResponse(async () => state);
+    expect(await f.client.hold("call-1")).toEqual(state);
+    await f.client.resume("call-1");
+    await f.client.pauseRecording("call-1");
+    await f.client.resumeRecording("call-1");
+    expect(f.requests.map(r => r.url.pathname.split("/").at(-1))).toEqual(["hold", "resume", "pause-recording", "resume-recording"]);
+    expect(f.requests.every(r => r.url.searchParams.get("project_id") === "p1" && r.url.searchParams.get("install_id") === "42")).toBe(true);
+  });
   test("script-only client reuses live SDK auth and scopes every operation", async () => {
     const f = fixture();
     await f.client.listCalls();
@@ -106,6 +120,17 @@ describe("Telephony extension", () => {
     expect(f.muted).toBe(true);
     stale.onState?.("error", "old session");
     expect(f.phone.getSnapshot().audioState).toBe("live");
+    f.phone.dispose();
+  });
+  test("headless softphone controls its attached call and updates the snapshot", async () => {
+    const f = fixture();
+    const result: CallControlResult = { call_id: "call-1", hold_state: "starting", recording_state: "active",
+      control_error: "", capabilities: { hold_music: true, recording_pause: true } };
+    f.setResponse(async url => url.pathname.endsWith("/hold") ? result : f.session);
+    await f.phone.dial({ to: "+12025550100" });
+    expect(await f.phone.hold()).toEqual(result);
+    expect(f.phone.getSnapshot().holdState).toBe("starting");
+    expect(f.requests.at(-1)?.url.pathname).toEndWith("/calls/call-1/hold");
     f.phone.dispose();
   });
   test("audio setup failure hangs up an outbound leg", async () => {
@@ -177,17 +202,24 @@ describe("Telephony extension", () => {
     expect(f.stopped).toBe(1);
     expect(f.requests).toHaveLength(1); // dispose does not hang up an established call
   });
-  test("incoming list includes browser ring offers but excludes AI and completed calls", () => {
+  test("incoming list includes answerable browser offers but excludes stale and supervisor-visible calls", () => {
     const f = fixture();
     const base = { direction: "inbound", status: "pending", from_number: "", to_number: "", peer_kind: "human" };
     const result = f.client.incomingCalls([
       { ...base, id: "human" },
-      { ...base, id: "group", peer_kind: "agent", ring_offers: [{ kind: "browser", destination_id: "desk" }] },
+      { ...base, id: "group", peer_kind: "agent", ring_offers: [{ id: "offer-desk", kind: "browser", destination_id: "desk" }] },
+      { ...base, id: "moved", answerable: false, ring_offers: [{ id: "offer-other", kind: "browser", destination_id: "other" }] },
+      { ...base, id: "supervisor", answerable: false },
       { ...base, id: "ai", peer_kind: "agent" },
       { ...base, id: "waiting", routing_waiting: true },
       { ...base, id: "finished", status: "completed" },
     ]);
     expect(result.map(c => c.id)).toEqual(["human", "group"]);
+  });
+  test("Answer exposes offer_expired as a stable error code", async () => {
+    const f = fixture();
+    f.setResponse(async () => Response.json({ code: "offer_expired", error: "call offer expired" }, { status: 409 }));
+    await expect(f.client.answer("call-1")).rejects.toMatchObject({ code: "offer_expired", status: 409 });
   });
   test("watch cancellation suppresses late responses and overlapping requests", async () => {
     const f = fixture(), gate = deferred();
@@ -195,10 +227,10 @@ describe("Telephony extension", () => {
     let delivered = 0;
     const watch = f.client.watchCalls(() => { delivered++; }, { intervalMs: 100 });
     await Bun.sleep(150);
-    expect(f.requests).toHaveLength(1);
+    expect(f.requests.filter(r=>r.url.pathname.endsWith("/calls"))).toHaveLength(1);
     watch.close(); gate.resolve();
     await Bun.sleep(150);
-    expect(f.requests).toHaveLength(1);
+    expect(f.requests.filter(r=>r.url.pathname.endsWith("/calls"))).toHaveLength(1);
     expect(delivered).toBe(0);
   });
   test("active monitoring consumes durable completion and then stops", async () => {
@@ -337,8 +369,12 @@ describe("authorized application-user sessions", () => {
   test("attach uses the existing call and never places or answers a carrier leg", async () => {
     const f = fixture();
     await f.phone.attach("call-1");
-    expect(f.requests).toHaveLength(1);
+    // Attach claims the existing call, then reads it once for direction and
+    // status. It never places or answers a carrier leg.
+    expect(f.requests).toHaveLength(2);
     expect(f.requests[0].url.pathname).toEndWith("/softphone/attach/call-1");
+    expect(f.requests[1].url.pathname).toEndWith("/calls");
+    expect(f.requests.every((r) => !/\/(place|answer)/.test(r.url.pathname))).toBe(true);
     expect(f.phone.getSnapshot().callId).toBe("call-1");
     expect(f.preflighted).toBe(1);
     f.phone.dispose();
@@ -373,7 +409,7 @@ test("online provider routes calls through authenticated user API", async () => 
 test("lease renewal runs without status polling and stops audio on revoked authentication", async () => {
   const f = fixture();
   f.setResponse(async url => {
-    if (url.pathname.includes("/renew/")) throw new Error("login revoked");
+    if (url.pathname.includes("/renew/")) return new Response("login revoked", { status: 403 });
     return { ...f.session, lease_seconds: 10 };
   });
   await f.phone.attach("call-1");
@@ -399,4 +435,38 @@ test("audio tuning passes through create/reconnect and invalid profiles leave a 
   expect(f.stopped).toBe(stopped); expect(f.started).toBe(started);
  } finally { await phone.dispose(); await f.phone.dispose(); }
  expect(() => f.client.createSoftphone({ audio: { playbackTargetMs: NaN } })).toThrow();
+});
+
+
+test("a temporary renewal failure preserves healthy audio and retries", async () => {
+ const f=fixture(); let renews=0;
+ f.setResponse(async url=>{
+  if(url.pathname.includes("/renew/")) { if(++renews===1) throw new TypeError("Failed to fetch"); return {lease_seconds:10}; }
+  return {...f.session,lease_seconds:10};
+ });
+ try {
+  await f.phone.attach("call-1"); await Bun.sleep(3700);
+  expect(renews).toBe(2); expect(f.stopped).toBe(0); expect(f.phone.getSnapshot().audioState).toBe("live");
+ } finally { f.phone.dispose(); }
+});
+
+test("explicit and automatic reconnect obtain fresh credentials without placing or answering",async()=>{
+ const f=fixture();let token=0;
+ f.setResponse(async url=>url.pathname.includes("/attach/")?{...f.session,session_token:`fresh-${++token}`,media_url:f.session.media_url.replace("secret",`fresh-${token}`)}:{calls:[{id:"call-1",status:"answered"}]});
+ try {
+  await f.phone.attach("call-1");f.phone.setMuted(true);
+  await f.phone.reconnect();expect(f.startedURLs.at(-1)).toEndWith("fresh-2");expect(f.muted).toBe(true);
+  const refresh=f.callbacks.refreshMediaURL!;
+  const [a,b]=await Promise.all([refresh(),refresh()]);expect(a).toBe(b);expect(a).toEndWith("fresh-3");
+  expect(token).toBe(3);expect(f.requests.some(r=>/\/(place|answer|takeover)/.test(r.url.pathname))).toBe(false);
+ } finally {f.phone.dispose();}
+});
+
+test("late automatic authorization cannot revive a terminated call",async()=>{
+ const f=fixture();await f.phone.attach("call-1");
+ let resolve!:(value:any)=>void;
+ f.setResponse(async url=>url.pathname.includes("/attach/")?await new Promise(r=>{resolve=r}):{ok:true});
+ const pending=f.callbacks.refreshMediaURL!();
+ f.phone.observeCall({id:"call-1",status:"completed"});resolve(f.session);
+ await expect(pending).rejects.toThrow("cancelled");expect(f.phone.getSnapshot().callId).toBeUndefined();expect(f.started).toBe(1);f.phone.dispose();
 });

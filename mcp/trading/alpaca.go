@@ -5,8 +5,8 @@ package main
 // signs and transports the request; we only build args and parse
 // responses.
 //
-// Equities + ETFs + crypto, long-only, fractional. Limit + stop +
-// stop-limit + trailing-stop all map directly. Idempotency via
+// Equities + ETFs + crypto, long-only, fractional. Market, limit and stop
+// orders map directly. Idempotency via
 // client_order_id (we pass our local Order.ID).
 //
 // Stocks trade only during US market hours (with optional
@@ -37,7 +37,7 @@ func (alpacaAdapter) Slug() string { return "alpaca-trading" }
 func (alpacaAdapter) Capabilities() brokerCapabilities {
 	return brokerCapabilities{
 		AssetClasses:     []string{"equity", "etf", "crypto"},
-		OrderTypes:       []string{"market", "limit", "stop", "stop_limit", "trailing_stop"},
+		OrderTypes:       []string{"market", "limit", "stop"},
 		TIFs:             []string{"day", "gtc", "ioc", "fok", "opg", "cls"},
 		Fractional:       true,
 		CancelByClientID: false, // cancel_order needs the alpaca order id
@@ -47,11 +47,12 @@ func (alpacaAdapter) Capabilities() brokerCapabilities {
 
 func (alpacaAdapter) ToolMap() map[string]string {
 	return map[string]string{
-		"order.place":     "create_order",
-		"order.cancel":    "cancel_order",
-		"order.status":    "get_order",
-		"account.summary": "get_account",
-		"positions.list":  "list_positions",
+		"order.place":               "create_order",
+		"order.cancel":              "cancel_order",
+		"order.status":              "get_order",
+		"order.status_by_client_id": "get_order_by_client_order_id",
+		"account.summary":           "get_account",
+		"positions.list":            "list_positions",
 	}
 }
 
@@ -436,12 +437,11 @@ func (alpacaAdapter) CancelArgs(o *Order, brokerOrderID string) map[string]any {
 }
 
 func (alpacaAdapter) StatusArgs(o *Order, brokerOrderID string) map[string]any {
-	// get_order accepts the alpaca id OR the client_order_id; prefer the
-	// alpaca id when known (faster lookup), else fall back to client.
+	// Broker IDs and client IDs use different Alpaca endpoints.
 	if brokerOrderID != "" {
 		return map[string]any{"order_id": brokerOrderID}
 	}
-	return map[string]any{"order_id": o.ID} // client_order_id route
+	return map[string]any{"client_order_id": o.ID}
 }
 
 // IsUnknownOrderError — alpaca returns HTTP 404 with body

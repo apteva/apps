@@ -1,6 +1,10 @@
 import { AptevaClient, pickBaseURL } from "@apteva/web-sdk";
 import type {
   Assignment,
+  AssignmentSubmission,
+  QuizAttempt,
+  LearningStatus,
+  IssuedCertificate,
   Community,
   CourseCertificate,
   CourseDetails,
@@ -19,6 +23,7 @@ import type {
   Post,
   PublicProduct,
   PublicLessonPreview,
+  CourseTrack, MemberMilestone, AssignmentReviewItem, MilestoneReviewItem,
   Quiz,
   Section,
   Space,
@@ -52,6 +57,7 @@ const portalFetch = ((input: RequestInfo | URL, init?: RequestInit) =>
 export const apteva = new AptevaClient({
   baseURL: pickBaseURL(__API_BASE__),
   projectId: currentProjectId(),
+  onUnauthorized: () => { if (typeof window !== "undefined") window.dispatchEvent(new Event("community:session-expired")); },
   // The portal authenticates with a delegated member token. Do not let a
   // same-origin operator dashboard cookie shadow that explicit identity.
   fetch: portalFetch,
@@ -191,8 +197,8 @@ export const api = {
   members: {
     ensure: (community_id: string, display_name?: string) =>
       community.tool<{ member: Member; created: boolean }>("members_ensure", { community_id, display_name }),
-    list: (community_id: string) =>
-      community.tool<{ members: Member[] }>("members_list", { community_id, status: "active", limit: 500 }),
+    list: (community_id: string, offset = 0) =>
+      community.tool<{ members: Member[] }>("members_list", { community_id, status: "active", limit: 100, offset }),
     me: (community_id: string) =>
       community.tool<{ member: Member }>("members_me", { community_id }),
     update: (community_id: string, body: { display_name?: string; bio?: string }) =>
@@ -203,8 +209,8 @@ export const api = {
       community.tool<{ spaces: Space[] }>("spaces_list", { community_id }),
   },
   threads: {
-    list: (space_id: string) =>
-      community.tool<{ threads: Thread[] }>("threads_list", { space_id, limit: 100 }),
+    list: (space_id: string, offset = 0) =>
+      community.tool<{ threads: Thread[] }>("threads_list", { space_id, limit: 100, offset }),
     create: (space_id: string, title: string, body: string) =>
       community.tool<{ thread: Thread; first_post?: Post }>("threads_create", {
         space_id,
@@ -214,8 +220,8 @@ export const api = {
       }),
   },
   posts: {
-    list: (thread_id: string) =>
-      community.tool<{ posts: Post[] }>("posts_list", { thread_id, limit: 300 }),
+    list: (thread_id: string, offset = 0) =>
+      community.tool<{ posts: Post[] }>("posts_list", { thread_id, limit: 100, offset }),
     create: (thread_id: string, body: string, reply_to_id?: string) =>
       community.tool<Post>("posts_create", { thread_id, author_id: self, body, reply_to_id }),
     react: (post_id: string, emoji: string) =>
@@ -226,6 +232,21 @@ export const api = {
       community.tool<{ ok: boolean }>("posts_remove", { id, caller_member_id: self }),
   },
   courses: {
+    fileURL: (lesson_id: string, file_id: string) => community.tool<{ url: string; expires_at: number }>("lesson_file_url", { lesson_id, file_id }),
+    submitQuiz: (quiz_id: string, answers: number[]) => community.tool<QuizAttempt>("quiz_submit", { quiz_id, member_id: self, answers }),
+    submitAssignment: (assignment_id: string, body: string, links: string[] = [], files: string[] = []) => community.tool<AssignmentSubmission>("assignment_submit", { assignment_id, member_id: self, body, links, files }),
+    uploadFile: (name: string, content_base64: string, content_type: string, target: { assignment_id?: string; definition_id?: string }) => community.tool<{ file_id: string; name: string; size_bytes: number }>("course_file_upload", { name, content_base64, content_type, ...target, member_id: self }),
+    submissionFileURL: (file_id: string, target: { assignment_id?: string; definition_id?: string }, member_id = self) => community.tool<{ url: string; expires_at: number }>("course_file_url", { file_id, ...target, member_id }),
+    learningStatus: (lesson_id: string) => community.tool<LearningStatus>("learning_status", { lesson_id, member_id: self }),
+    tracks: (space_id: string) => community.tool<{ tracks: CourseTrack[]; selected_track_id?: string }>("course_tracks_list", { space_id, member_id: self }),
+    selectTrack: (space_id: string, track_id: string) => community.tool("course_track_select", { space_id, track_id, member_id: self }),
+    milestones: (space_id: string) => community.tool<{ milestones: MemberMilestone[]; next_action: string }>("milestones_list", { space_id, member_id: self }),
+    submitMilestone: (definition_id: string, evidence_text: string, evidence_links: string[] = [], evidence_files: string[] = []) => community.tool("milestone_submit", { definition_id, member_id: self, evidence_text, evidence_links, evidence_files }),
+    reviewQueue: (space_id: string) => community.tool<{ submissions: AssignmentReviewItem[] }>("assignment_reviews_list", { space_id, status: "submitted", limit: 100, offset: 0 }),
+    reviewAssignment: (assignment_id: string, member_id: string, status: "approved" | "needs_changes", feedback: string) => community.tool("assignment_review", { assignment_id, member_id, status, feedback }),
+    milestoneReviewQueue: (space_id: string) => community.tool<{ submissions: MilestoneReviewItem[] }>("milestone_reviews_list", { space_id, status: "submitted" }),
+    reviewMilestone: (definition_id: string, member_id: string, status: "approved" | "needs_changes", feedback: string) => community.tool("milestone_review", { definition_id, member_id, status, feedback }),
+    certificate: (space_id: string) => community.tool<{ certificate: IssuedCertificate | null }>("issued_certificate_get", { space_id, member_id: self }),
     details: (space_id: string) =>
       community.tool<{ details: CourseDetails; enrollment_rules: EnrollmentRule; certificate: CourseCertificate }>(
         "courses_get_details",
@@ -299,19 +320,20 @@ export const api = {
       }),
   },
   dms: {
-    list: (community_id: string) =>
+    list: (community_id: string, offset = 0) =>
       community.tool<{ threads: DMThread[] }>("dms_list_threads", {
         community_id,
         member_id: self,
         limit: 100,
+        offset,
       }),
-    get: (id: string) =>
-      community.tool<DMThreadView>("dms_get_thread", { id, caller_member_id: self, limit: 300 }),
+    get: (id: string, offset = 0) =>
+      community.tool<DMThreadView>("dms_get_thread", { id, caller_member_id: self, limit: 100, offset }),
     open: (community_id: string, participant: string) =>
       community.tool<DMThread>("dms_open", { community_id, participants: [self, participant] }),
     send: (dm_thread_id: string, body: string) =>
       community.tool("dms_send", { dm_thread_id, author_id: self, body }),
-    markRead: (dm_thread_id: string) =>
-      community.tool("dms_mark_read", { dm_thread_id, member_id: self }),
+    markRead: (dm_thread_id: string, through_message_id: string) =>
+      community.tool("dms_mark_read", { dm_thread_id, member_id: self, through_message_id }),
   },
 };

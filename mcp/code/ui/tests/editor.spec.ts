@@ -103,3 +103,19 @@ test('auto-sync enables the selected branch, syncs, shows history and pauses wit
  await expect(page.getByRole('status')).toHaveText('Paused');
  await expect(page.locator('textarea')).toHaveValue('Unsaved work');
 });
+
+test('connected workspace runs without a local grant and identifies Docker',async({page})=>{
+ let started=false,stopped=false,permissionWrites=0;
+ await fixture(page,async(route,path)=>{
+  if(path.endsWith('/dev/execution')){if(route.request().method()!=='GET')permissionWrites++;await route.fulfill({json:{enabled:false,requires_local_execution:false,source:'default'}});return true;}
+  if(path.endsWith('/dev/start')){started=true;await route.fulfill({json:{}});return true;}
+  if(path.endsWith('/dev/stop')){stopped=true;await route.fulfill({json:{}});return true;}
+  if(path.endsWith('/dev/status')){await route.fulfill({json:{dev_run:started&&!stopped?{id:1,status:'live',runner:'workspaces',workspace_id:'wsp_test',port:45678,framework:'node',preview_url:'http://127.0.0.1:45678/'}:null}});return true;}
+  return false;
+ });
+ await page.getByText('Alpha',{exact:true}).click();await page.getByRole('button',{name:'Run',exact:true}).click();
+ await expect(page.getByText(/Docker workspace/)).toBeVisible();
+ await expect(page.getByRole('link',{name:'Preview',exact:true})).toHaveAttribute('href','http://127.0.0.1:45678/');
+ await expect(page.getByRole('dialog',{name:'Local execution permission'})).toHaveCount(0);expect(permissionWrites).toBe(0);
+ await page.getByRole('button',{name:'Stop',exact:true}).click();await expect(page.getByRole('button',{name:'Run',exact:true})).toBeEnabled();expect(stopped).toBe(true);
+});

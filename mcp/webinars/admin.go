@@ -75,6 +75,19 @@ func (a *App) handleAdminItem(w http.ResponseWriter, r *http.Request) {
 		case "registrants":
 			args["webinar_id"] = id
 			delete(args, "id")
+			// The MCP tool takes these; the REST mirror silently didn't,
+			// so the panel could neither page nor filter.
+			if v := r.URL.Query().Get("limit"); v != "" {
+				if n, err := strconv.Atoi(v); err == nil {
+					args["limit"] = n
+				}
+			}
+			switch r.URL.Query().Get("attended") {
+			case "true":
+				args["attended"] = true
+			case "false":
+				args["attended"] = false
+			}
 			out, err := a.toolListRegistrants(globalCtx, args)
 			if err != nil {
 				httpErr(w, http.StatusBadRequest, err.Error())
@@ -142,6 +155,12 @@ func (a *App) handleAdminItem(w http.ResponseWriter, r *http.Request) {
 				if errors.Is(err, errRegistrationRateLimited) {
 					w.Header().Set("Retry-After", "60")
 					httpErr(w, http.StatusTooManyRequests, err.Error())
+					return
+				}
+				// A slot that filled up is a conflict, not a malformed
+				// request — a client can usefully retry against another.
+				if errors.Is(err, errSlotFull) {
+					httpErr(w, http.StatusConflict, err.Error())
 					return
 				}
 				httpErr(w, http.StatusBadRequest, err.Error())

@@ -10,7 +10,7 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-const commerceStorefrontExtensionVersion = "10"
+const commerceStorefrontExtensionVersion = "11"
 
 type StorefrontStatus struct {
 	StoreID      int64  `json:"store_id"`
@@ -29,13 +29,18 @@ func storefrontExtensionKey(storeID int64) string {
 	return fmt.Sprintf("commerce-store-%d", storeID)
 }
 
-func commerceStorefrontManifest(store *Store, channel *MarketingChannel) map[string]any {
+func commerceStorefrontManifest(store *Store, channels []*MarketingChannel) map[string]any {
 	fixedStore := map[string]any{"store_id": store.ID}
 	activeStore := map[string]any{"store_id": store.ID, "status": "active"}
 	scriptOrigins := []any{"https://js.stripe.com", "https://checkout.stripe.com"}
 	connectOrigins := []any{"https://api.stripe.com", "https://checkout.stripe.com"}
 	imageOrigins := []any{"https://*.stripe.com"}
-	if channel != nil && channel.Status == "active" {
+	// Union the origins of every active channel. Scoping CSP to one channel
+	// would block the others' tags in the browser.
+	for _, channel := range channels {
+		if channel == nil || channel.Status != "active" {
+			continue
+		}
 		scriptOrigins = appendStringValues(scriptOrigins, channel.PublicConfig["script_origins"])
 		connectOrigins = appendStringValues(connectOrigins, channel.PublicConfig["connect_origins"])
 		imageOrigins = appendStringValues(imageOrigins, channel.PublicConfig["image_origins"])
@@ -370,7 +375,7 @@ const homeStorefrontBody = productCardTemplate + `
 
 const productStorefrontBody = `
   {{$result := index .Data "product"}}{{$product := get $result "product"}}{{$meta := get $product "metadata"}}{{$variants := get $product "variants"}}{{$variant := first $variants}}
-  <section class="product-detail" data-meta-product data-product-id="commerce-product-{{get $product "id"}}" data-product-title="{{get $product "title"}}">
+  <section class="product-detail" data-marketing-product data-product-id="commerce-product-{{get $product "id"}}" data-product-title="{{get $product "title"}}">
     <div class="detail-media">{{with get $meta "image_url"}}<img src="{{.}}" alt="{{get $product "title"}}" width="1200" height="1200">{{else}}<span class="media-placeholder">{{get $product "title"}}</span>{{end}}</div>
     <div class="detail-copy">
       <p class="eyebrow">{{get $product "vendor"}}</p>
@@ -378,7 +383,7 @@ const productStorefrontBody = `
       {{with $variant}}<p class="detail-price" data-product-price>{{money (get . "price_cents") (get . "currency")}}</p>{{end}}
       <div class="description">{{safeHTML (text (get $product "description_html"))}}</div>
       {{if $variant}}
-      <form data-storefront-action="{{action "add_to_cart"}}" data-meta-add-to-cart data-success="Added to cart">
+      <form data-storefront-action="{{action "add_to_cart"}}" data-marketing-add-to-cart data-success="Added to cart">
         <label class="product-option">Option
           <select name="variant_id" data-variant-select required>
             {{range $variants}}<option value="{{get . "id"}}" data-price-cents="{{get . "price_cents"}}" data-currency="{{get . "currency"}}">{{get . "title"}}</option>{{end}}
@@ -590,32 +595,89 @@ const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&
 const toast=(message)=>{const el=qs('[data-toast]');if(!el)return;el.textContent=message;el.classList.add('visible');setTimeout(()=>el.classList.remove('visible'),2200)};
 async function call(url,input={}){const response=await fetch(url,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Requested-With':'storefront'},body:JSON.stringify(input)});const body=await response.json().catch(()=>({}));if(!response.ok){const error=new Error(body.error||'Request failed');error.code=body.code||'';error.retryable=Boolean(body.retryable);throw error}return body}
 const marketingConsentKey='apteva-marketing-consent-v1';
-let metaConfig=null,metaEnabled=false,pendingPurchase=null;
+let marketingChannels=[],marketingActive=false,pendingPurchase=null;
 const marketingConsent=()=>{try{return localStorage.getItem(marketingConsentKey)||''}catch{return''}};
 const setMarketingConsent=value=>{try{localStorage.setItem(marketingConsentKey,value)}catch{}}
 const eventID=()=>globalThis.crypto?.randomUUID?.()||String(Date.now())+'-'+Math.random().toString(36).slice(2);
-function metaTrack(name,params={}){if(!metaEnabled||typeof window.fbq!=='function'){if(name==='Purchase')pendingPurchase=params;return}window.fbq('track',name,params,{eventID:eventID()})}
-function initialMetaEvents(){
-  metaTrack('PageView');
-  const product=qs('[data-meta-product]');
-  if(product){const option=qs('[data-variant-select] option:checked',product);metaTrack('ViewContent',{content_ids:[option?'commerce-variant-'+option.value:product.dataset.productId],content_type:'product',content_name:product.dataset.productTitle,value:Number(option?.dataset.priceCents||0)/100,currency:option?.dataset.currency||'USD'})}
-  const query=new URLSearchParams(location.search).get('q');if(query)metaTrack('Search',{search_string:query});
-  if(qs('[data-checkout-form]'))metaTrack('InitiateCheckout');
-	if(pendingPurchase){const purchase=pendingPurchase;pendingPurchase=null;metaTrack('Purchase',purchase)}
+function loadTag(src){if(!src||document.querySelector('script[data-marketing-tag="'+src+'"]'))return;const script=document.createElement('script');script.async=true;script.src=src;script.dataset.marketingTag=src;document.head.append(script)}
+// One adapter per provider. Every adapter receives the same canonical event
+// name and the same payload {ids,name,value,currency,quantity,query,contents}
+// and maps it onto its own SDK, so storefront code never branches on provider.
+const marketingAdapters={
+  meta:{
+    events:{page_view:'PageView',view_item:'ViewContent',search:'Search',add_to_cart:'AddToCart',begin_checkout:'InitiateCheckout',purchase:'Purchase'},
+    start(channel){
+      if(!window.fbq){const fbq=window.fbq=function(){fbq.callMethod?fbq.callMethod.apply(fbq,arguments):fbq.queue.push(arguments)};fbq.push=fbq;fbq.loaded=true;fbq.version='2.0';fbq.queue=[];loadTag(channel.script_url||'https://connect.facebook.net/en_US/fbevents.js')}
+      window.fbq('init',String(channel.public_id));
+    },
+    track(channel,event,data){
+      const name=this.events[event];if(!name||typeof window.fbq!=='function')return;
+      const params={};
+      if(data.ids?.length){params.content_ids=data.ids;params.content_type='product'}
+      if(data.name)params.content_name=data.name;
+      if(data.value!=null)params.value=data.value;
+      if(data.currency)params.currency=data.currency;
+      if(data.quantity)params.num_items=data.quantity;
+      if(data.query)params.search_string=data.query;
+      if(data.contents?.length){params.contents=data.contents;params.content_type='product'}
+      window.fbq('track',name,params,{eventID:eventID()});
+    }
+  },
+  google:{
+    events:{page_view:'page_view',view_item:'view_item',search:'search',add_to_cart:'add_to_cart',begin_checkout:'begin_checkout',purchase:'purchase'},
+    start(channel){
+      const tagID=channel.conversion_id||channel.public_id;
+      if(!window.gtag){window.dataLayer=window.dataLayer||[];window.gtag=function(){window.dataLayer.push(arguments)};window.gtag('js',new Date());loadTag(channel.script_url||'https://www.googletagmanager.com/gtag/js?id='+encodeURIComponent(tagID))}
+      window.gtag('config',tagID);
+    },
+    track(channel,event,data){
+      const name=this.events[event];if(!name||typeof window.gtag!=='function')return;
+      const params={};
+      if(data.ids?.length)params.items=data.ids.map(id=>({item_id:id,item_name:data.name||undefined,quantity:data.quantity||1}));
+      if(data.value!=null)params.value=data.value;
+      if(data.currency)params.currency=data.currency;
+      if(data.query)params.search_term=data.query;
+      window.gtag('event',name,params);
+      // Google Ads attributes the sale through the conversion action's send_to,
+      // which is a separate event from the GA4-style purchase above.
+      if(event==='purchase'&&channel.send_to)window.gtag('event','conversion',{send_to:channel.send_to,value:data.value,currency:data.currency,transaction_id:eventID()});
+    }
+  }
+};
+function marketingTrack(event,data={}){
+  if(!marketingActive){if(event==='purchase')pendingPurchase=data;return}
+  for(const channel of marketingChannels){const adapter=marketingAdapters[channel.provider];if(!adapter)continue;try{adapter.track(channel,event,data)}catch{}}
 }
-function loadMeta(){
-  if(metaEnabled||!metaConfig?.public_id||marketingConsent()!=='granted')return;
-  metaEnabled=true;
-  if(!window.fbq){const fbq=window.fbq=function(){fbq.callMethod?fbq.callMethod.apply(fbq,arguments):fbq.queue.push(arguments)};fbq.push=fbq;fbq.loaded=true;fbq.version='2.0';fbq.queue=[];const script=document.createElement('script');script.async=true;script.src=metaConfig.script_url||'https://connect.facebook.net/en_US/fbevents.js';document.head.append(script)}
-  window.fbq('init',String(metaConfig.public_id));initialMetaEvents();
+function initialMarketingEvents(){
+  marketingTrack('page_view');
+  const product=qs('[data-marketing-product]');
+  if(product){const option=qs('[data-variant-select] option:checked',product);marketingTrack('view_item',{ids:[option?'commerce-variant-'+option.value:product.dataset.productId],name:product.dataset.productTitle,value:Number(option?.dataset.priceCents||0)/100,currency:option?.dataset.currency||'USD'})}
+  const query=new URLSearchParams(location.search).get('q');if(query)marketingTrack('search',{query});
+  if(qs('[data-checkout-form]'))marketingTrack('begin_checkout');
+  if(pendingPurchase){const purchase=pendingPurchase;pendingPurchase=null;marketingTrack('purchase',purchase)}
 }
-function showConsent(){const panel=qs('[data-marketing-consent]');if(panel&&metaConfig?.enabled)panel.hidden=false}
+function loadMarketing(){
+  if(marketingActive||!marketingChannels.length||marketingConsent()!=='granted')return;
+  marketingActive=true;
+  for(const channel of marketingChannels){const adapter=marketingAdapters[channel.provider];if(!adapter)continue;try{adapter.start(channel)}catch{}}
+  initialMarketingEvents();
+}
+function showConsent(){const panel=qs('[data-marketing-consent]');if(panel&&marketingChannels.length)panel.hidden=false}
 async function initializeMarketing(){
   const action=document.body.dataset.marketingConfigAction;if(!action)return;
-  try{const body=await call(action);metaConfig=body?.result||body?.steps?.at(-1)||body;if(!metaConfig?.enabled)return;const choice=marketingConsent();if(choice==='granted')loadMeta();else if(choice!=='denied')showConsent()}catch{}
+  try{
+    const body=await call(action);const config=body?.result||body?.steps?.at(-1)||body;
+    if(!config?.enabled)return;
+    // channels[] is the 0.9.0 shape; the flat fields are the pre-0.9.0 one.
+    const listed=Array.isArray(config.channels)&&config.channels.length?config.channels:(config.public_id?[{provider:config.provider||'meta',public_id:config.public_id,script_url:config.script_url}]:[]);
+    marketingChannels=listed.filter(channel=>channel&&channel.public_id&&marketingAdapters[channel.provider]);
+    if(!marketingChannels.length)return;
+    const choice=marketingConsent();
+    if(choice==='granted')loadMarketing();else if(choice!=='denied')showConsent();
+  }catch{}
 }
-qsa('[data-marketing-accept]').forEach(button=>button.addEventListener('click',()=>{setMarketingConsent('granted');qs('[data-marketing-consent]').hidden=true;loadMeta()}));
-qsa('[data-marketing-decline]').forEach(button=>button.addEventListener('click',()=>{setMarketingConsent('denied');metaEnabled=false;qs('[data-marketing-consent]').hidden=true}));
+qsa('[data-marketing-accept]').forEach(button=>button.addEventListener('click',()=>{setMarketingConsent('granted');qs('[data-marketing-consent]').hidden=true;loadMarketing()}));
+qsa('[data-marketing-decline]').forEach(button=>button.addEventListener('click',()=>{setMarketingConsent('denied');marketingActive=false;qs('[data-marketing-consent]').hidden=true}));
 qsa('[data-consent-settings]').forEach(button=>button.addEventListener('click',showConsent));
 initializeMarketing();
 function cartFrom(body){return body?.result?.cart||body?.result||body?.steps?.at(-1)?.cart||null}
@@ -625,7 +687,7 @@ const money=(cents,currency)=>new Intl.NumberFormat(undefined,{style:'currency',
 function imageURL(value){try{const url=new URL(String(value||''),location.href);return ['http:','https:'].includes(url.protocol)?url.href:''}catch{return''}}
 qsa('[data-variant-select]').forEach(select=>{const price=qs('[data-product-price]');const sync=()=>{const option=select.selectedOptions[0];if(price&&option)price.textContent=money(Number(option.dataset.priceCents||0),option.dataset.currency||'USD')};select.addEventListener('change',sync);sync()});
 const searchForm=qs('[data-search-form]');if(searchForm)searchForm.addEventListener('submit',event=>{event.preventDefault();const target=new URL(searchForm.action);target.searchParams.set('q',qs('input[name=q]',searchForm).value);location.assign(target)});
-qsa('form[data-storefront-action]:not([data-checkout-form])').forEach(form=>form.addEventListener('submit',async event=>{event.preventDefault();const button=qs('button[type=submit]',form);if(button)button.disabled=true;try{const input=Object.fromEntries(new FormData(form));qsa('input[type=number]',form).forEach(field=>input[field.name]=Number(field.value));const body=await call(form.dataset.storefrontAction,input);updateCount(cartFrom(body));if(form.matches('[data-meta-add-to-cart]')){const option=qs('[data-variant-select] option:checked',form);metaTrack('AddToCart',{content_ids:['commerce-variant-'+input.variant_id],content_type:'product',value:Number(option?.dataset.priceCents||0)*Number(input.quantity||1)/100,currency:option?.dataset.currency||'USD',num_items:Number(input.quantity||1)})}toast(form.dataset.success||'Updated')}catch(error){toast(error.message)}finally{if(button)button.disabled=false}}));
+qsa('form[data-storefront-action]:not([data-checkout-form])').forEach(form=>form.addEventListener('submit',async event=>{event.preventDefault();const button=qs('button[type=submit]',form);if(button)button.disabled=true;try{const input=Object.fromEntries(new FormData(form));qsa('input[type=number]',form).forEach(field=>input[field.name]=Number(field.value));const body=await call(form.dataset.storefrontAction,input);updateCount(cartFrom(body));if(form.matches('[data-marketing-add-to-cart]')){const option=qs('[data-variant-select] option:checked',form);marketingTrack('add_to_cart',{ids:['commerce-variant-'+input.variant_id],value:Number(option?.dataset.priceCents||0)*Number(input.quantity||1)/100,currency:option?.dataset.currency||'USD',quantity:Number(input.quantity||1)})}toast(form.dataset.success||'Updated')}catch(error){toast(error.message)}finally{if(button)button.disabled=false}}));
 const cartRoot=qs('[data-cart]');if(cartRoot){const render=cart=>{updateCount(cart);if(!cart?.items?.length){cartRoot.innerHTML='<p class="empty">Your cart is empty.</p>';return}cartRoot.innerHTML=cart.items.map(item=>'<div class="cart-row"><div><strong>'+esc(cartTitle(item))+'</strong><br><small>'+esc(item.sku)+'</small></div><input aria-label="Quantity" data-item="'+Number(item.id)+'" type="number" min="0" step="1" value="'+Number(item.quantity)+'"><span class="line-total">'+esc(money(item.unit_amount_cents*item.quantity,item.currency))+'</span></div>').join('')+'<div class="cart-total"><span>Total</span><span>'+esc(money(cart.total_cents,cart.currency))+'</span></div><a class="button wide" href="'+esc(cartRoot.dataset.checkoutUrl)+'">Continue to checkout</a>';qsa('[data-item]',cartRoot).forEach(input=>{let saving=false;const persist=async()=>{if(saving)return;saving=true;input.disabled=true;try{const body=await call(cartRoot.dataset.quantityAction,{item_id:Number(input.dataset.item),quantity:Number(input.value)});render(cartFrom(body))}catch(error){input.disabled=false;saving=false;toast(error.message)}};input.addEventListener('change',persist);input.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();persist()}})})};call(cartRoot.dataset.cartAction).then(body=>render(cartFrom(body))).catch(error=>{cartRoot.textContent=error.message})}
 
 const checkoutForm=qs('[data-checkout-form]');
@@ -910,7 +972,7 @@ if(paymentReturn){
       const status=body?.result||{};
       if(status.payment_status==='paid'){
 		const purchaseKey='apteva-meta-purchase-'+String(status.sale_id||status.invoice_number||'');
-		try{if(!sessionStorage.getItem(purchaseKey)){metaTrack('Purchase',{value:Number(status.total_cents||0)/100,currency:status.currency||'USD',contents:Array.isArray(status.contents)?status.contents:[],content_type:'product'});sessionStorage.setItem(purchaseKey,'1')}}catch{metaTrack('Purchase',{value:Number(status.total_cents||0)/100,currency:status.currency||'USD'})}
+		try{if(!sessionStorage.getItem(purchaseKey)){marketingTrack('purchase',{value:Number(status.total_cents||0)/100,currency:status.currency||'USD',contents:Array.isArray(status.contents)?status.contents:[]});sessionStorage.setItem(purchaseKey,'1')}}catch{marketingTrack('purchase',{value:Number(status.total_cents||0)/100,currency:status.currency||'USD'})}
         pill.textContent='Paid';
         title.textContent='Order confirmed';
         message.textContent=status.invoice_number?'Payment is confirmed for invoice '+status.invoice_number+'. Your order is being prepared.':'Payment is confirmed and your order is being prepared.';
@@ -973,18 +1035,20 @@ func (a *App) configureContentStorefront(ctx *sdk.AppCtx, pid string, store *Sto
 		return nil, err
 	}
 	extensionKey := storefrontExtensionKey(store.ID)
-	channel, err := dbMarketingChannelGet(ctx.AppDB(), pid, store.ID, metaMarketingProvider)
+	channels, err := dbMarketingChannelList(ctx.AppDB(), pid, store.ID)
 	if err != nil {
-		return nil, fmt.Errorf("read marketing channel: %w", err)
+		return nil, fmt.Errorf("read marketing channels: %w", err)
 	}
 	var extensionResult map[string]any
 	if err := ctx.PlatformAPI().CallAppResult("content", "extensions_upsert", map[string]any{
 		"_project_id": pid, "_site_id": siteID,
 		"key": extensionKey, "provider_app": "commerce",
-		"manifest": commerceStorefrontManifest(store, channel), "publish": true,
+		"manifest": commerceStorefrontManifest(store, channels), "publish": true,
 	}, &extensionResult); err != nil {
-		if channel != nil && channel.Status == "active" {
-			_ = dbMarketingChannelSiteStatus(ctx.AppDB(), pid, store.ID, "error", err.Error())
+		for _, channel := range channels {
+			if channel.Status == "active" {
+				_ = dbMarketingChannelSiteStatus(ctx.AppDB(), pid, store.ID, channel.Provider, "error", err.Error())
+			}
 		}
 		return nil, fmt.Errorf("install Content storefront: %w", err)
 	}
@@ -997,8 +1061,10 @@ func (a *App) configureContentStorefront(ctx *sdk.AppCtx, pid string, store *Sto
 	if err != nil {
 		return nil, err
 	}
-	if channel != nil && channel.Status == "active" {
-		_ = dbMarketingChannelSiteStatus(ctx.AppDB(), pid, store.ID, "installed", "")
+	for _, channel := range channels {
+		if channel.Status == "active" {
+			_ = dbMarketingChannelSiteStatus(ctx.AppDB(), pid, store.ID, channel.Provider, "installed", "")
+		}
 	}
 	return storefrontStatus(pid, updated, site, ""), nil
 }

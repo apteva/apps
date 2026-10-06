@@ -163,6 +163,8 @@ func (a *App) handleTicket(w http.ResponseWriter, r *http.Request) {
 			httpStoreErr(w, r, err)
 			return
 		}
+		ticket, _ := getTicket(ctx.AppDB(), pid, id)
+		emitTicket(ctx, "ticket.updated", ticket, map[string]any{"comment_id": comment.ID})
 		writeJSON(w, http.StatusOK, map[string]any{"comment": comment})
 	case r.Method == http.MethodPost && action == "attachments":
 		body, err := decodeMapLimited(w, r, 14<<20)

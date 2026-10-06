@@ -1191,7 +1191,8 @@ func (a *App) checkWhatsAppSession(ctx *sdk.AppCtx, pid, from, to string) (map[s
 	if err != nil {
 		return nil, err
 	}
-	since := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339)
+	now := time.Now().UTC()
+	since := now.Add(-24 * time.Hour).Format(time.RFC3339)
 	var out struct {
 		Messages []struct {
 			From             string   `json:"from"`
@@ -1200,42 +1201,55 @@ func (a *App) checkWhatsAppSession(ctx *sdk.AppCtx, pid, from, to string) (map[s
 			ReceivedAt       string   `json:"received_at"`
 			CreatedAt        string   `json:"created_at"`
 		} `json:"messages"`
+		HasMore bool `json:"has_more"`
 	}
 	// Messaging filters `address` by exact SQL equality, so `to` has to
 	// already be in the canonical form Messaging stores (plain E.164) or
 	// the query matches nothing before we ever compare below.
-	if err := callMessagingTool(ctx, "message_list", map[string]any{
-		"_project_id": pid,
-		"direction":   "in",
-		"channel":     channelWhatsApp,
-		"address":     to,
-		"since":       since,
-		"limit":       50,
-	}, &out); err != nil {
-		return nil, err
-	}
-	active := false
-	lastInbound := ""
-	for _, m := range out.Messages {
-		if waCompareAddress(m.From) != to {
-			continue
+	var last time.Time
+	for page := 0; page < 20; page++ {
+		out.Messages = nil
+		out.HasMore = false
+		if err := callMessagingTool(ctx, "message_list", map[string]any{
+			"_project_id": pid, "direction": "in", "channel": channelWhatsApp,
+			"address": to, "since": since, "limit": 200, "offset": page * 200,
+		}, &out); err != nil {
+			return nil, err
 		}
-		matched := waCompareAddress(m.MatchedRecipient) == from
-		for _, recipient := range m.To {
-			if waCompareAddress(recipient) == from {
-				matched = true
-				break
+		for _, m := range out.Messages {
+			if waCompareAddress(m.From) != to {
+				continue
+			}
+			matched := waCompareAddress(m.MatchedRecipient) == from
+			for _, recipient := range m.To {
+				if waCompareAddress(recipient) == from {
+					matched = true
+					break
+				}
+			}
+			if matched {
+				raw := m.ReceivedAt
+				if raw == "" {
+					raw = m.CreatedAt
+				}
+				at, err := time.Parse(time.RFC3339Nano, raw)
+				if err == nil && !at.After(now) && at.After(last) {
+					last = at
+				}
 			}
 		}
-		if matched {
-			active = true
-			if m.ReceivedAt != "" {
-				lastInbound = m.ReceivedAt
-			} else {
-				lastInbound = m.CreatedAt
-			}
+		if !out.HasMore {
 			break
 		}
+		if page == 19 {
+			return nil, errors.New("unable to check WhatsApp window: too many recent messages; try again or use an approved template")
+		}
+	}
+	lastInbound, expiresAt := "", ""
+	active := !last.IsZero() && now.Before(last.Add(24*time.Hour))
+	if !last.IsZero() {
+		lastInbound = last.UTC().Format(time.RFC3339Nano)
+		expiresAt = last.Add(24 * time.Hour).UTC().Format(time.RFC3339Nano)
 	}
 	return map[string]any{
 		"active":       active,
@@ -1243,6 +1257,8 @@ func (a *App) checkWhatsAppSession(ctx *sdk.AppCtx, pid, from, to string) (map[s
 		"to":           to,
 		"since":        since,
 		"last_inbound": lastInbound,
+		"expires_at":   expiresAt,
+		"checked_at":   now.Format(time.RFC3339Nano),
 	}, nil
 }
 
@@ -1263,6 +1279,10 @@ func emitCRMEvent(ctx *sdk.AppCtx, pid, topic string, payload map[string]any) {
 	if strings.TrimSpace(pid) == "" {
 		ctx.Logger().Warn("crm emit without project", "topic", topic)
 		return
+	}
+	if err := enrichCRMEventListContext(ctx.AppDB(), pid, topic, payload); err != nil {
+		ctx.Logger().Warn("crm event list context lookup failed", "topic", topic, "err", err)
+		preserveCRMEventListShape(topic, payload)
 	}
 	if topic != "list.member.added" && topic != "list.member.removed" {
 		raw, err := json.Marshal(payload)
@@ -1482,10 +1502,22 @@ func outboundSendResult(
 		"to":                  to,
 		"messaging_id":        act.MessagingID,
 		"provider_message_id": providerMessageID,
+		"message_id_header":   act.MessageIDHeader,
 		"conversation_id":     act.ConversationID,
 		"idempotency_key":     idempotencyKey,
 		"deduped":             deduped,
 	}
+}
+
+func activityProviderMessageID(act *Activity) string {
+	if act == nil {
+		return ""
+	}
+	var detail map[string]any
+	if json.Unmarshal([]byte(act.SourceDetail), &detail) == nil {
+		return strings.TrimSpace(anyString(detail["provider_message_id"]))
+	}
+	return ""
 }
 
 func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool) (any, error) {
@@ -1530,18 +1562,26 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 		if err != nil {
 			return nil, err
 		}
-		if convo == nil || convo.ContactID != cid || (preferChannel != "" && preferChannel != convo.Channel) {
+		if convo == nil || convo.ContactID != cid {
 			return nil, errors.New("conversation does not match contact and transport")
 		}
-		preferChannel = convo.Channel
-		route, sender, err := replyRoute(ctx.AppDB(), pid, cid, convoID, convo.Channel, int64Arg(args, "reply_to_activity_id"))
+		if preferChannel == "" {
+			preferChannel = convo.Channel
+		}
+		if err := validateReplyTransport(convo.Channel, preferChannel); err != nil {
+			return nil, err
+		}
+		route, sender, err := replyRoute(ctx.AppDB(), pid, cid, convoID, preferChannel, int64Arg(args, "reply_to_activity_id"))
 		if err != nil {
 			return nil, err
 		}
+		if preferChannel != convo.Channel && route == "" {
+			return nil, errors.New("a channel switch requires an inbound phone message in this conversation")
+		}
 		if route != "" {
-			addr = &resolvedAddress{Channel: convo.Channel, Address: route}
+			addr = &resolvedAddress{Channel: preferChannel, Address: route}
 			var blocked int
-			err = ctx.AppDB().QueryRow(`SELECT ch.id,EXISTS(SELECT 1 FROM contact_channel_delivery_state ds WHERE ds.project_id=ch.project_id AND ds.channel_id=ch.id AND ds.transport=? AND (ds.suppressed=1 OR ds.quarantined=1 OR ds.status IN ('hard_bounced','complained','unsubscribed'))) FROM contact_channels ch WHERE ch.project_id=? AND ch.contact_id=? AND ch.kind=? AND ch.value=?`, convo.Channel, pid, cid, contactChannelKindFor(convo.Channel), route).Scan(&addr.ChannelID, &blocked)
+			err = ctx.AppDB().QueryRow(`SELECT ch.id,EXISTS(SELECT 1 FROM contact_channel_delivery_state ds WHERE ds.project_id=ch.project_id AND ds.channel_id=ch.id AND ds.transport=? AND (ds.suppressed=1 OR ds.quarantined=1 OR ds.status IN ('hard_bounced','complained','unsubscribed'))) FROM contact_channels ch WHERE ch.project_id=? AND ch.contact_id=? AND ch.kind=? AND ch.value=?`, preferChannel, pid, cid, contactChannelKindFor(preferChannel), route).Scan(&addr.ChannelID, &blocked)
 			if err != nil && err != sql.ErrNoRows {
 				return nil, err
 			}
@@ -1558,6 +1598,9 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 		if err != nil {
 			return nil, err
 		}
+	}
+	if expected := strArg(args, "_draft_expected_to"); expected != "" && addr.Address != expected {
+		return nil, errors.New("draft reply recipient changed; refusing to send")
 	}
 
 	if err := validateStandaloneEmailArgs(args, addr.Channel, templateID); err != nil {
@@ -1599,7 +1642,7 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 	from := strArg(args, "from")
 	listID := int64Arg(args, "list_id")
 	var resolvedList *List
-	if from == "" && listID != 0 {
+	if listID != 0 {
 		l, err := dbListGet(ctx.AppDB(), pid, listID)
 		if err != nil {
 			return nil, fmt.Errorf("list lookup: %w", err)
@@ -1608,7 +1651,9 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 			return nil, fmt.Errorf("list_id %d not found", listID)
 		}
 		resolvedList = l
-		from = l.defaultSenderForChannel(addr.Channel)
+	}
+	if from == "" && resolvedList != nil {
+		from = resolvedList.defaultSenderForChannel(addr.Channel)
 	}
 	if from == "" {
 		from = defaultSenderForChannel(ctx, addr.Channel)
@@ -1616,8 +1661,6 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 	if from == "" {
 		return nil, missingSenderError(addr.Channel, listID)
 	}
-	_ = resolvedList // reserved for future "tag activity with list" enrichment
-
 	sendArgs := map[string]any{
 		"_project_id": pid,
 		"channel":     addr.Channel,
@@ -1694,7 +1737,7 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 			existingActivity,
 			addr.Channel,
 			addr.Address,
-			existingActivity.MessageIDHeader,
+			activityProviderMessageID(existingActivity),
 			candidate.key,
 			true,
 		), nil
@@ -1714,7 +1757,7 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 		if convo == nil || convo.ContactID != cid {
 			return nil, errors.New("conversation_id does not belong to this contact")
 		}
-		if convo.Channel == channelEmail && convo.RootMessageID != "" {
+		if convo.Channel == channelEmail && strings.HasPrefix(convo.RootMessageID, "<") && strings.HasSuffix(convo.RootMessageID, ">") {
 			sendArgs["in_reply_to"] = convo.RootMessageID
 			sendArgs["headers"] = map[string]any{
 				"In-Reply-To": convo.RootMessageID,
@@ -1745,8 +1788,27 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 			convo, _ = dbConversationGet(ctx.AppDB(), pid, id)
 		}
 	}
+	channelSwitch := convo != nil && convo.Channel != addr.Channel && !isTest
+	if channelSwitch {
+		from = canonicalParticipantAddress(addr.Channel, from)
+		if !looksLikeE164(from) || !looksLikeE164(addr.Address) {
+			return nil, errors.New("phone-channel replies require canonical E.164 sender and recipient")
+		}
+		if err := verifyReplySender(ctx, pid, addr.Channel, from); err != nil {
+			return nil, err
+		}
+		sendArgs["from"] = from
+	}
 
+	if before, ok := args["_draft_before_dispatch"].(func() error); ok {
+		if err := before(); err != nil {
+			return nil, err
+		}
+	}
 	resp, sendErr := callMessagingSend(ctx, sendArgs)
+	if outcome, ok := args["_draft_dispatch_outcome"].(func(map[string]any, error)); ok {
+		outcome(resp, sendErr)
+	}
 	if sendErr == nil {
 		sendErr = messagingSendResponseError(resp)
 	}
@@ -1782,7 +1844,7 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 					"status_reason":       statusReason,
 				},
 				ConversationID:     convoID,
-				MessageIDHeader:    providerMsgID,
+				MessageIDHeader:    "",
 				MessagingID:        msgID,
 				MessagingInstallID: messagingInstallID(ctx),
 				Attachments:        attachments,
@@ -1792,6 +1854,10 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 	}
 
 	providerMsgID, _ := resp["provider_message_id"].(string)
+	messageIDHeader := strings.TrimSpace(anyString(resp["message_id_header"]))
+	if addr.Channel != channelEmail || !strings.HasPrefix(messageIDHeader, "<") || !strings.HasSuffix(messageIDHeader, ">") {
+		messageIDHeader = ""
+	}
 	msgID := int64FromAny(resp["id"])
 	if msgID <= 0 {
 		return nil, errors.New("messaging.send_message returned no message id")
@@ -1821,14 +1887,14 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 	}
 
 	// New email thread → create the conversation now, rooted at the
-	// outbound provider Message-Id.
+	// outbound RFC Message-ID when Messaging can provide it.
 	var createdConversationID int64
 	if !isTest && convo == nil && addr.Channel == channelEmail {
 		tx, err := ctx.AppDB().Begin()
 		if err == nil {
 			now := time.Now().UTC().Format(time.RFC3339)
 			subj := strArg(args, "subject")
-			id, err := dbConversationCreate(tx, pid, cid, channelEmail, subj, providerMsgID, now)
+			id, err := dbConversationCreate(tx, pid, cid, channelEmail, subj, messageIDHeader, now)
 			if err != nil {
 				tx.Rollback()
 			} else if err := tx.Commit(); err == nil {
@@ -1860,16 +1926,18 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 		Body:      activityBody,
 		Source:    "messaging",
 		SourceDetail: map[string]any{
-			"messaging_id":        msgID,
-			"source_install_id":   messagingInstallID(ctx),
-			"provider_message_id": providerMsgID,
-			"from":                from,
-			"to":                  addr.Address,
-			"test":                isTest,
-			"idempotency_key":     idempotencyKey,
+			"messaging_id":         msgID,
+			"source_install_id":    messagingInstallID(ctx),
+			"provider_message_id":  providerMsgID,
+			"message_id_header":    messageIDHeader,
+			"from":                 from,
+			"to":                   addr.Address,
+			"test":                 isTest,
+			"idempotency_key":      idempotencyKey,
+			"reply_channel_switch": channelSwitch,
 		},
 		ConversationID:     convoIDForLog,
-		MessageIDHeader:    providerMsgID,
+		MessageIDHeader:    messageIDHeader,
 		MessagingID:        msgID,
 		MessagingInstallID: messagingInstallID(ctx),
 		IdempotencyKey:     idempotencyKey,
@@ -1932,13 +2000,18 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 			})
 		}
 	}
+	attributedListIDs := []int64{}
+	if listID != 0 {
+		attributedListIDs = append(attributedListIDs, listID)
+	}
 	emitCRMEvent(ctx, pid, "contact.activity.added", map[string]any{
-		"contact_id":       cid,
-		"activity_id":      act.ID,
-		"conversation_id":  act.ConversationID,
-		"kind":             kind,
-		"source":           act.Source,
-		"attachment_count": len(act.Attachments),
+		"contact_id":          cid,
+		"activity_id":         act.ID,
+		"conversation_id":     act.ConversationID,
+		"kind":                kind,
+		"source":              act.Source,
+		"attachment_count":    len(act.Attachments),
+		"attributed_list_ids": attributedListIDs,
 	})
 
 	return outboundSendResult(
@@ -1995,9 +2068,32 @@ func (a *App) toolReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 	}
 
+	channel := strings.ToLower(strings.TrimSpace(strArg(args, "channel")))
+	if channel == "" {
+		channel = convo.Channel
+		// Mixed phone conversations default to the selected/latest inbound
+		// message's actual transport, not the conversation's original channel.
+		if phoneTransport(convo.Channel) {
+			var kind string
+			activityID := int64Arg(args, "reply_to_activity_id")
+			err := ctx.AppDB().QueryRow(`SELECT kind FROM contact_activities WHERE project_id=? AND contact_id=? AND conversation_id=? AND (?=0 OR id=?) AND kind IN ('sms_received','whatsapp_received') ORDER BY julianday(occurred_at) DESC,id DESC LIMIT 1`, pid, cid, convo.ID, activityID, activityID).Scan(&kind)
+			if err != nil && err != sql.ErrNoRows {
+				return nil, err
+			}
+			if kind == "sms_received" {
+				channel = channelSMS
+			}
+			if kind == "whatsapp_received" {
+				channel = channelWhatsApp
+			}
+		}
+	}
+	if err := validateReplyTransport(convo.Channel, channel); err != nil {
+		return nil, err
+	}
 	sendArgs := map[string]any{
 		"id":              cid,
-		"channel":         convo.Channel,
+		"channel":         channel,
 		"body":            body,
 		"conversation_id": convo.ID,
 	}
@@ -2038,6 +2134,11 @@ func (a *App) toolReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	if idem := strArg(args, "idempotency_key"); idem != "" {
 		sendArgs["idempotency_key"] = idem
+	}
+	for _, key := range []string{"_draft_before_dispatch", "_draft_dispatch_outcome", "_draft_expected_to"} {
+		if value, ok := args[key]; ok {
+			sendArgs[key] = value
+		}
 	}
 	if pidArg := strArg(args, "_project_id"); pidArg != "" {
 		sendArgs["_project_id"] = pidArg
@@ -2420,7 +2521,23 @@ func buildInboxFilterWhere(filters []inboxFilter) ([]string, []any, error) {
 func buildInboxFilterClause(field, op string, value any) (string, []any, error) {
 	switch field {
 	case "channel":
-		return scalarInboxClause("cc.channel", op, value)
+		negative := op == "is_not" || op == "neq"
+		if negative {
+			op = "is"
+		}
+		root, rootArgs, err := scalarInboxClause("cc.channel", op, value)
+		if err != nil {
+			return "", nil, err
+		}
+		activity, activityArgs, err := scalarInboxClause("substr(ca.kind,1,instr(ca.kind,'_')-1)", op, value)
+		if err != nil {
+			return "", nil, err
+		}
+		clause := "(" + root + ` OR EXISTS (SELECT 1 FROM contact_activities ca WHERE ca.project_id=cc.project_id AND ca.conversation_id=cc.id AND ca.kind IN ('email_received','email_sent','sms_received','sms_sent','whatsapp_received','whatsapp_sent') AND ` + activity + "))"
+		if negative {
+			clause = "NOT " + clause
+		}
+		return clause, append(rootArgs, activityArgs...), nil
 	case "priority":
 		return scalarInboxClause("COALESCE(cc.priority,'normal')", op, value)
 	case "contact":
@@ -2598,18 +2715,20 @@ func stringValuesFromAny(v any) []string {
 // ─── Inbox (cross-contact triage queue) ───────────────────────────
 
 type inboxRow struct {
-	ID             int64  `json:"id"`
-	ContactID      int64  `json:"contact_id"`
-	ContactName    string `json:"contact_name,omitempty"`
-	ContactEmail   string `json:"contact_email,omitempty"`
-	ContactPhone   string `json:"contact_phone,omitempty"`
-	Channel        string `json:"channel"`
-	Subject        string `json:"subject,omitempty"`
-	Status         string `json:"status"`
-	Priority       string `json:"priority"`
-	LastActivityAt string `json:"last_activity_at"`
-	Snippet        string `json:"snippet,omitempty"`
-	Automated      bool   `json:"automated,omitempty"`
+	ID                   int64             `json:"id"`
+	ContactID            int64             `json:"contact_id"`
+	ContactName          string            `json:"contact_name,omitempty"`
+	ContactEmail         string            `json:"contact_email,omitempty"`
+	ContactPhone         string            `json:"contact_phone,omitempty"`
+	Channel              string            `json:"channel"`
+	Channels             []string          `json:"channels"`
+	Subject              string            `json:"subject,omitempty"`
+	Status               string            `json:"status"`
+	Priority             string            `json:"priority"`
+	LastActivityAt       string            `json:"last_activity_at"`
+	Snippet              string            `json:"snippet,omitempty"`
+	Automated            bool              `json:"automated,omitempty"`
+	LastMessageAddresses *MessageAddresses `json:"last_message_addresses,omitempty"`
 }
 
 // dbInboxConversations returns conversations across all contacts for the
@@ -2662,7 +2781,11 @@ func dbInboxConversations(db *sql.DB, pid, status string, limit, offset int, fil
 						  WHERE a.project_id = cc.project_id AND a.conversation_id = cc.id
 						  ORDER BY julianday(a.occurred_at) DESC, a.id DESC LIMIT 1), ''),
 				EXISTS (SELECT 1 FROM contact_tags t
-						WHERE t.contact_id = cc.contact_id AND t.tag_name = ?)
+						WHERE t.contact_id = cc.contact_id AND t.tag_name = ?),
+				COALESCE((SELECT json_object('kind', a.kind, 'source_detail', a.source_detail)
+					FROM contact_activities a WHERE a.project_id = cc.project_id AND a.conversation_id = cc.id
+					ORDER BY julianday(a.occurred_at) DESC, a.id DESC LIMIT 1), ''),
+				COALESCE((SELECT GROUP_CONCAT(DISTINCT substr(a.kind,1,instr(a.kind,'_')-1)) FROM contact_activities a WHERE a.project_id=cc.project_id AND a.conversation_id=cc.id AND a.kind IN ('email_received','email_sent','sms_received','sms_sent','whatsapp_received','whatsapp_sent')), '')
 		 FROM contact_conversations cc
 		 JOIN contacts c ON c.id = cc.contact_id AND c.project_id = cc.project_id
 		 WHERE `+where+`
@@ -2677,12 +2800,26 @@ func dbInboxConversations(db *sql.DB, pid, status string, limit, offset int, fil
 	for rows.Next() {
 		r := &inboxRow{}
 		var autom int
+		var latest, channels string
 		if err := rows.Scan(&r.ID, &r.ContactID, &r.ContactName, &r.ContactEmail,
 			&r.ContactPhone, &r.Channel, &r.Subject, &r.Status, &r.Priority, &r.LastActivityAt,
-			&r.Snippet, &autom); err != nil {
+			&r.Snippet, &autom, &latest, &channels); err != nil {
 			return nil, 0, err
 		}
 		r.Automated = autom != 0
+		r.Channels = []string{r.Channel}
+		for _, channel := range strings.Split(channels, ",") {
+			if channel != "" && channel != r.Channel {
+				r.Channels = append(r.Channels, channel)
+			}
+		}
+		var recorded struct {
+			Kind   string `json:"kind"`
+			Detail string `json:"source_detail"`
+		}
+		if json.Unmarshal([]byte(latest), &recorded) == nil {
+			r.LastMessageAddresses = messageAddresses(recorded.Kind, recorded.Detail)
+		}
 		r.Snippet = truncate(r.Snippet, 160)
 		out = append(out, r)
 	}
@@ -2771,23 +2908,25 @@ func (a *App) toolRoutingRulesDelete(ctx *sdk.AppCtx, args map[string]any) (any,
 // inboundPayload mirrors what messaging.dispatchInbound POSTs to us.
 // Field names match messaging/main.go:2466-2483.
 type inboundPayload struct {
-	MessageID        int64                 `json:"message_id"`
-	Channel          string                `json:"channel"`
-	From             string                `json:"from"`
-	To               []string              `json:"to"`
-	CC               []string              `json:"cc"`
-	Subject          string                `json:"subject"`
-	BodyText         string                `json:"body_text"`
-	BodyHTML         string                `json:"body_html"`
-	MessageIDHeader  string                `json:"message_id_header"`
-	InReplyTo        string                `json:"in_reply_to"`
-	References       []string              `json:"references"`
-	Headers          map[string]any        `json:"headers"`
-	ReceivedAt       string                `json:"received_at"`
-	MatchedRecipient string                `json:"matched_recipient"`
-	MatchedPattern   string                `json:"matched_pattern"`
-	ToSubaddress     string                `json:"to_subaddress"`
-	Attachments      []messagingAttachment `json:"attachments"`
+	MessageID          int64                 `json:"message_id"`
+	Channel            string                `json:"channel"`
+	From               string                `json:"from"`
+	To                 []string              `json:"to"`
+	CC                 []string              `json:"cc"`
+	Subject            string                `json:"subject"`
+	BodyText           string                `json:"body_text"`
+	BodyHTML           string                `json:"body_html"`
+	MessageIDHeader    string                `json:"message_id_header"`
+	InReplyTo          string                `json:"in_reply_to"`
+	References         []string              `json:"references"`
+	Headers            map[string]any        `json:"headers"`
+	ReceivedAt         string                `json:"received_at"`
+	RouteStatus        string                `json:"route_status"`
+	EnvelopeRecipients []string              `json:"envelope_recipients"`
+	MatchedRecipient   string                `json:"matched_recipient"`
+	MatchedPattern     string                `json:"matched_pattern"`
+	ToSubaddress       string                `json:"to_subaddress"`
+	Attachments        []messagingAttachment `json:"attachments"`
 }
 
 func (a *App) handleInbound(w http.ResponseWriter, r *http.Request) {
@@ -2823,21 +2962,23 @@ func (a *App) toolMessagingInboundReceive(ctx *sdk.AppCtx, args map[string]any) 
 		return nil, err
 	}
 	body := inboundPayload{
-		MessageID:        int64Arg(args, "message_id"),
-		Channel:          strArg(args, "channel"),
-		From:             strArg(args, "from"),
-		To:               stringSliceArg(args, "to"),
-		CC:               stringSliceArg(args, "cc"),
-		Subject:          strArg(args, "subject"),
-		BodyText:         strArg(args, "body_text"),
-		BodyHTML:         strArg(args, "body_html"),
-		MessageIDHeader:  strArg(args, "message_id_header"),
-		InReplyTo:        strArg(args, "in_reply_to"),
-		References:       stringSliceArg(args, "references"),
-		ReceivedAt:       strArg(args, "received_at"),
-		MatchedRecipient: strArg(args, "matched_recipient"),
-		MatchedPattern:   strArg(args, "matched_pattern"),
-		ToSubaddress:     strArg(args, "to_subaddress"),
+		MessageID:          int64Arg(args, "message_id"),
+		Channel:            strArg(args, "channel"),
+		From:               strArg(args, "from"),
+		To:                 stringSliceArg(args, "to"),
+		CC:                 stringSliceArg(args, "cc"),
+		Subject:            strArg(args, "subject"),
+		BodyText:           strArg(args, "body_text"),
+		BodyHTML:           strArg(args, "body_html"),
+		MessageIDHeader:    strArg(args, "message_id_header"),
+		InReplyTo:          strArg(args, "in_reply_to"),
+		References:         stringSliceArg(args, "references"),
+		ReceivedAt:         strArg(args, "received_at"),
+		RouteStatus:        strArg(args, "route_status"),
+		EnvelopeRecipients: stringSliceArg(args, "envelope_recipients"),
+		MatchedRecipient:   strArg(args, "matched_recipient"),
+		MatchedPattern:     strArg(args, "matched_pattern"),
+		ToSubaddress:       strArg(args, "to_subaddress"),
 	}
 	if headers, ok := args["headers"].(map[string]any); ok {
 		body.Headers = headers
@@ -3546,8 +3687,8 @@ func replyRoute(db *sql.DB, pid string, cid, convoID int64, transport string, ac
 		activityID = activityIDs[0]
 	}
 
-	var raw string
-	err := db.QueryRow(`SELECT COALESCE(source_detail,'{}') FROM contact_activities WHERE project_id=? AND contact_id=? AND conversation_id=? AND (?=0 OR id=?) AND kind IN ('email_received','sms_received','whatsapp_received') ORDER BY julianday(occurred_at) DESC,id DESC LIMIT 1`, pid, cid, convoID, activityID, activityID).Scan(&raw)
+	var raw, kind string
+	err := db.QueryRow(`SELECT COALESCE(source_detail,'{}'),kind FROM contact_activities WHERE project_id=? AND contact_id=? AND conversation_id=? AND (?=0 OR id=?) AND kind IN ('email_received','sms_received','whatsapp_received') ORDER BY CASE WHEN kind=? THEN 0 ELSE 1 END,julianday(occurred_at) DESC,id DESC LIMIT 1`, pid, cid, convoID, activityID, activityID, receivedKindForChannel(transport)).Scan(&raw, &kind)
 	if err == sql.ErrNoRows {
 		if activityID > 0 {
 			return "", "", errors.New("reply_to_activity_id must identify an inbound message in this conversation")
@@ -3555,6 +3696,10 @@ func replyRoute(db *sql.DB, pid string, cid, convoID int64, transport string, ac
 		return "", "", nil
 	}
 	if err != nil {
+		return "", "", err
+	}
+	original := strings.TrimSuffix(kind, "_received")
+	if err := validateReplyTransport(original, transport); err != nil {
 		return "", "", err
 	}
 	var detail map[string]any
@@ -3566,7 +3711,7 @@ func replyRoute(db *sql.DB, pid string, cid, convoID int64, transport string, ac
 		to = anyString(detail["from"])
 	}
 	if to == "" {
-		err = db.QueryRow(`SELECT address FROM conversation_participants WHERE project_id=? AND conversation_id=? AND role='from' AND contact_id=? ORDER BY id DESC LIMIT 1`, pid, convoID, cid).Scan(&to)
+		err = db.QueryRow(`SELECT address FROM conversation_participants WHERE project_id=? AND conversation_id=? AND channel=? AND role='from' AND contact_id=? ORDER BY id DESC LIMIT 1`, pid, convoID, original, cid).Scan(&to)
 		if err != nil && err != sql.ErrNoRows {
 			return "", "", err
 		}
@@ -3577,7 +3722,16 @@ func replyRoute(db *sql.DB, pid string, cid, convoID int64, transport string, ac
 			from = anyString(recipients[0])
 		}
 	}
-	return canonicalParticipantAddress(transport, to), canonicalParticipantAddress(transport, from), nil
+	if original != transport {
+		// Preserve the exact remote phone; do not reuse a WhatsApp-only
+		// sender as an SMS sender. The caller must choose an eligible sender.
+		from = ""
+	}
+	to = canonicalParticipantAddress(transport, to)
+	if phoneTransport(transport) && !looksLikeE164(to) {
+		return "", "", errors.New("inbound reply phone is missing or invalid; refusing to switch to another contact address")
+	}
+	return to, canonicalParticipantAddress(transport, from), nil
 }
 
 func (a *App) handleHTTPMessagingRoutes(w http.ResponseWriter, r *http.Request) {
@@ -3641,10 +3795,18 @@ func (a *App) handleHTTPReplyRoute(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 404, "conversation not found")
 		return
 	}
-	to, from, err := replyRoute(globalCtx.AppDB(), pid, cid, convoID, convo.Channel, activityID)
+	channel := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("channel")))
+	if channel == "" {
+		channel = convo.Channel
+	}
+	if err := validateReplyTransport(convo.Channel, channel); err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	to, from, err := replyRoute(globalCtx.AppDB(), pid, cid, convoID, channel, activityID)
 	if err != nil {
 		httpErr(w, 400, err.Error())
 		return
 	}
-	httpJSON(w, map[string]any{"to": to, "from": from, "channel": convo.Channel})
+	httpJSON(w, map[string]any{"to": to, "from": from, "channel": channel})
 }

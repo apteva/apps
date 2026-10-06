@@ -1,8 +1,12 @@
 import { ComposerAttachments, ComposerMenu, type ComposerController } from "./composer";
+import type { ComposerSuggestion } from "./composerHost";
 import { useConversationLocalization } from "./i18n";
 import { useLayoutEffect, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 
 export interface ConversationChatViewProps {
+  contextChip?: ReactNode;
+  voiceControl?: ReactNode;
+  voiceActive?: boolean;
   attachments:ComposerController;
   title: string;
   subtitle: string;
@@ -12,6 +16,11 @@ export interface ConversationChatViewProps {
   messageNodes: ReactNode;
   hasMessages: boolean;
   streamNode: ReactNode;
+  emptyMessage?: string;
+  welcomeText?: string;
+  suggestions?: ComposerSuggestion[];
+  onSuggestion?: (suggestion: ComposerSuggestion) => void;
+  leadingAction?: ReactNode;
   headerActions?: ReactNode;
   bottomRef: RefObject<HTMLDivElement | null>;
   inputRef: RefObject<HTMLTextAreaElement | null>;
@@ -69,10 +78,14 @@ const GLYPH_PAUSE = "M9 5v14 M15 5v14";
 export default function ConversationChatView(props: ConversationChatViewProps) {
   const { t } = useConversationLocalization();
   const layout = props.attachments.options.layout ?? "auto";
+  if (!["auto", "compact", "expanded", "single-line"].includes(layout)) {
+    throw new Error(`Unsupported Conversations composer layout: ${layout}`);
+  }
   // Reflow long/restored drafts when the container or selected layout changes.
   useLayoutEffect(() => {
     const input = props.inputRef.current;
     if (!input) return;
+    if (layout === "single-line") { input.style.height = ""; return; }
     const resize = () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 144) + "px"; };
     resize();
     if (typeof ResizeObserver === "undefined") return;
@@ -82,11 +95,13 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
     return () => observer.disconnect();
   }, [props.draft, layout, props.archived]);
   const hasDraft = Boolean(props.draft.trim()) || props.attachments.items.length>0;
+  const showSuggestions = !props.hasMessages && !props.streamNode && !hasDraft && !props.archived && Boolean(props.suggestions?.length);
   const showBreak = props.responseActive && !hasDraft;
   const breakLabel = t(props.breakRequested ? "chat.breakRequested" : props.breakBusy ? "chat.breakRequesting" : "chat.breakLabel");
   return (
     <section className="min-h-0 flex-1 flex flex-col">
       <div className="shrink-0 border-b border-border px-4 py-3 flex flex-wrap items-center gap-3">
+        {props.leadingAction}
         <div className="min-w-0 flex-1 basis-32">
           <div className="flex items-center gap-2 min-w-0">
             <h2 className="text-sm font-semibold text-text truncate">{props.title}</h2>
@@ -103,7 +118,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
           <p className="text-xs text-text-muted truncate">{props.subtitle}</p>
         </div>
         {props.headerActions && (
-          <div className="ml-auto flex shrink-0 items-center gap-1">{props.headerActions}</div>
+          <div data-chat-header-actions className="ml-auto flex shrink-0 items-center gap-1">{props.headerActions}</div>
         )}
         {!props.archived && props.onOpenDetails && (
           <button
@@ -118,13 +133,28 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
         )}
       </div>
 
-      <div className="flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-4">
+      <div className="chat-transcript flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-4">
         {!props.hasMessages && !props.streamNode ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-text-muted">
             <span className="text-text-dim">
               <Glyph d={GLYPH_CHAT} size={32} />
             </span>
-            <p className="text-sm text-center">{t("chat.empty")}</p>
+            {(props.welcomeText || props.emptyMessage) && <p className="text-sm text-center">{props.welcomeText || props.emptyMessage}</p>}
+            {!props.welcomeText && !props.emptyMessage && !showSuggestions && <p className="text-sm text-center">{t("chat.empty")}</p>}
+            {showSuggestions && (
+              <div className="flex max-w-xl flex-wrap justify-center gap-2">
+                {props.suggestions!.map((suggestion) => (
+                  <button
+                    key={suggestion.id}
+                    type="button"
+                    className="rounded-full border border-border px-3 py-1.5 text-xs text-text-muted hover:border-accent hover:text-text"
+                    onClick={() => props.onSuggestion?.(suggestion)}
+                  >
+                    {suggestion.label}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         ) : (
           <>
@@ -181,15 +211,16 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
           </span>
         </footer>
       ) : (
-        <footer className="chat-composer-safe shrink-0 px-2 pt-2 pb-2 sm:px-5">
+        <footer className="chat-composer-safe shrink-0 px-2 pt-2 sm:px-5">
           {props.sendError && <p className="mx-1 mb-1 text-xs text-error">{props.sendError}</p>}
+          {props.contextChip}
           <form
             onDragOver={event=>{if(props.attachments.options.files!==false)event.preventDefault()}}
             onDrop={event=>{if(props.attachments.options.files!==false){event.preventDefault();void props.attachments.add(Array.from(event.dataTransfer.files));}}}
             onPaste={event=>{if(props.attachments.options.files!==false&&event.clipboardData.files.length){event.preventDefault();void props.attachments.add(Array.from(event.clipboardData.files));}}}
             onSubmit={(event) => {
               event.preventDefault();
-              if (hasDraft && !props.sending) props.onSend();
+              if (hasDraft && !props.sending && !props.voiceActive) props.onSend();
             }}
             className="chat-composer-box"
             data-layout={layout}
@@ -198,21 +229,22 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
             <textarea
               ref={props.inputRef}
               value={props.draft}
+              disabled={props.voiceActive}
               onChange={(event) => props.onDraftChange(event.target.value, event.target)}
               onKeyDown={props.onComposerKeyDown}
               rows={1}
-              placeholder={props.connected ? t("chat.placeholder") : t("chat.reconnectingPlaceholder")}
+              placeholder={props.voiceActive ? t("voice.endToType") : props.connected ? t("chat.placeholder") : t("chat.reconnectingPlaceholder")}
               className="chat-composer-input"
               autoFocus={
                 typeof window !== "undefined" &&
                 window.matchMedia("(hover: hover) and (pointer: fine)").matches
               }
             />
-            <div className="chat-composer-toolbar"><ComposerMenu controller={props.attachments}/>
+            <div className="chat-composer-toolbar">{!props.voiceActive && <ComposerMenu controller={props.attachments}/>}{props.voiceControl}
             <button
               type={showBreak ? "button" : "submit"}
               onClick={showBreak ? props.onSoftBreak : undefined}
-              disabled={showBreak ? props.breakBusy || props.breakRequested : props.sending || !hasDraft || props.attachments.items.some(i=>!i.attachment || i.busy || i.error)}
+              disabled={props.voiceActive || (showBreak ? props.breakBusy || props.breakRequested : props.sending || !hasDraft || props.attachments.items.some(i=>!i.attachment || i.busy || i.error))}
               className="chat-composer-send"
               aria-label={showBreak ? breakLabel : t("chat.send")}
               aria-busy={showBreak && props.breakBusy ? true : undefined}

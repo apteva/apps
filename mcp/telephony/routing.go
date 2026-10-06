@@ -71,12 +71,13 @@ type ringGroupMemberRow struct {
 }
 
 type routingSimulationContext struct {
-	Caller            string            `json:"caller,omitempty"`
-	Called            string            `json:"called,omitempty"`
-	At                string            `json:"at,omitempty"`
-	Digits            map[string]string `json:"digits,omitempty"`
-	StartNode         string            `json:"-"`
-	StopAtInteraction bool              `json:"-"`
+	Caller            string                      `json:"caller,omitempty"`
+	Called            string                      `json:"called,omitempty"`
+	At                string                      `json:"at,omitempty"`
+	Digits            map[string]string           `json:"digits,omitempty"`
+	Decisions         map[string]decisionResponse `json:"decisions,omitempty"`
+	StartNode         string                      `json:"-"`
+	StopAtInteraction bool                        `json:"-"`
 }
 
 const routingTimeoutSelection = "__timeout__"
@@ -110,6 +111,9 @@ type inboundRoutingPlan struct {
 	Group                                                       *ringGroupRow
 	GroupDestinations                                           map[string]routingDestinationRow
 	OverflowNodeID                                              string
+	DecisionNotBefore                                           string
+	RoutingResolution                                           string
+	CallbackOnAI                                                bool
 }
 
 var routingIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
@@ -117,6 +121,7 @@ var routingVariableKeyPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.-]{0,63
 var routingTemplatePattern = regexp.MustCompile(`\{\{\s*number\.([A-Za-z][A-Za-z0-9_.-]{0,127})\s*\}\}`)
 
 var supportedRoutingNodes = map[string]bool{
+	"decision":     true,
 	"announcement": true,
 	"schedule":     true,
 	"caller_match": true,
@@ -171,6 +176,11 @@ func validateRoutingDefinition(def routingDefinition) []string {
 		node.Type = strings.ToLower(strings.TrimSpace(node.Type))
 		if !supportedRoutingNodes[node.Type] {
 			errs = append(errs, fmt.Sprintf("node %q has unsupported type %q", node.ID, node.Type))
+		}
+		if node.Type == "decision" {
+			if _, err := parseDecisionConfig(node); err != nil {
+				errs = append(errs, fmt.Sprintf("decision node %s: %v", node.ID, err))
+			}
 		}
 		nodes[node.ID] = node
 	}
@@ -292,6 +302,26 @@ func simulateRoutingDefinition(def routingDefinition, input routingSimulationCon
 		trace := routingTraceStep{NodeID: node.ID, NodeType: node.Type, Label: node.Label}
 		next := node.Next
 		switch node.Type {
+		case "decision":
+			if mock, ok := input.Decisions[node.ID]; ok && !input.StopAtInteraction {
+				cfg, _ := parseDecisionConfig(node)
+				if (mock.Action != "offer" && mock.Action != "fallback") || (mock.Action == "offer" && (!decisionTargetAllowed(node, mock.DestinationID) || (mock.RingTimeout != 0 && (mock.RingTimeout < 5 || mock.RingTimeout > cfg.RingTimeout)))) {
+					result.Valid = false
+					result.Errors = []string{"invalid mock decision for node " + node.ID}
+					return result
+				}
+			}
+			if input.StopAtInteraction {
+				trace.Outcome = "decision_pending"
+				result.TerminalNodeID, result.TerminalType = node.ID, node.Type
+			} else if mock, ok := input.Decisions[node.ID]; ok && mock.Action == "offer" && decisionTargetAllowed(node, mock.DestinationID) {
+				trace.Outcome = "mock_offer"
+				result.DestinationID = mock.DestinationID
+				result.TerminalNodeID, result.TerminalType = node.ID, "destination"
+			} else {
+				trace.Outcome = "mock_fallback"
+				next = node.Branches["fallback"]
+			}
 		case "announcement":
 			trace.Outcome = "play"
 		case "schedule":
@@ -597,6 +627,19 @@ func (a *App) validateRoutingReferences(project string, def routingDefinition) [
 	errs := validateRoutingDefinition(def)
 	for _, node := range def.Nodes {
 		switch node.Type {
+		case "decision":
+			cfg, e := parseDecisionConfig(node)
+			if e != nil {
+				continue
+			}
+			for _, id := range cfg.Destinations {
+				d, e := a.findRoutingDestination(project, id)
+				if e != nil {
+					errs = append(errs, e.Error())
+				} else if e = a.validateDecisionDestination(project, d); e != nil {
+					errs = append(errs, e.Error())
+				}
+			}
 		case "destination":
 			id := routingConfigString(node.Config, "destination_id")
 			if id != "" {
@@ -665,12 +708,19 @@ func (a *App) validateFlowForRoute(project string, def routingDefinition, route 
 		return []string{"route is unavailable"}
 	}
 	errs := []string{}
+	capabilities := inboundCapabilities(route)
 	for _, node := range def.Nodes {
-		if node.Type == "dtmf_menu" && (route.InboundTransport == inboundTransportSIPDirect || (route.CarrierSlug != "twilio" && route.CarrierSlug != "telnyx")) {
+		if node.Type == "decision" && !capabilities.Decisions {
+			errs = append(errs, fmt.Sprintf("%s %s routes do not support routing decisions", route.CarrierSlug, route.InboundTransport))
+		}
+		if node.Type == "dtmf_menu" && !capabilities.DTMFMenu {
 			errs = append(errs, fmt.Sprintf("%s does not support Telephony-managed DTMF menus on this route", route.CarrierSlug))
 		}
-		if node.Type == "voicemail" && (route.CarrierSlug != "twilio" || route.InboundTransport == inboundTransportSIPDirect) {
+		if node.Type == "voicemail" && !capabilities.Voicemail {
 			errs = append(errs, fmt.Sprintf("voicemail is not enabled for %s routes yet", route.CarrierSlug))
+		}
+		if node.Type == "announcement" && !capabilities.TerminalAnnouncements {
+			errs = append(errs, fmt.Sprintf("%s %s routes cannot play routing announcements", route.CarrierSlug, route.InboundTransport))
 		}
 		ids := []string{}
 		if node.Type == "destination" {
@@ -704,14 +754,11 @@ func (a *App) validateFlowForRoute(project string, def routingDefinition, route 
 				continue
 			}
 			if destination.Kind == "pstn" || destination.Kind == "sip" {
-				if route.InboundTransport == inboundTransportSIPDirect {
-					errs = append(errs, "external ring destinations require a provider webhook route")
-				}
-				if route.CarrierSlug != "twilio" && route.CarrierSlug != "telnyx" && route.CarrierSlug != "plivo" {
-					errs = append(errs, "external ring destinations require Twilio, Telnyx, or Plivo")
+				if !capabilities.ExternalDestinations {
+					errs = append(errs, "external ring destinations are not supported on this carrier route")
 				}
 			}
-			if destination.Kind == "voicemail" && (route.CarrierSlug != "twilio" || route.InboundTransport == inboundTransportSIPDirect) {
+			if destination.Kind == "voicemail" && !capabilities.Voicemail {
 				errs = append(errs, "voicemail requires a Twilio webhook route")
 			}
 		}
@@ -914,6 +961,13 @@ func (a *App) saveRoutingDestination(project, id, name, kind string, config any,
 	if len(raw) == 0 || json.Unmarshal(raw, &decoded) != nil {
 		decoded = map[string]any{}
 		raw = []byte("{}")
+	}
+	capacity, err := readDestinationCapacity(string(raw))
+	if err != nil {
+		return nil, err
+	}
+	if capacity.Limit > 0 && kind != "browser" {
+		return nil, errors.New("individual capacity is only supported for browser destinations")
 	}
 	switch kind {
 	case "agent", "ai":
@@ -1235,6 +1289,12 @@ func (a *App) resolveRoutingDefinition(route *routeRow, caller string, digits ma
 	plan := &inboundRoutingPlan{FlowID: version.FlowID, VersionID: version.ID, TerminalType: simulation.TerminalType, DestinationID: simulation.DestinationID, Trace: simulation.Trace, AnswerMode: route.AnswerMode, Directive: route.AutoDirective, Voice: route.AutoVoice, Greeting: route.AutoGreeting, HoldPrompt: route.HoldPrompt, AgentID: route.AgentID, TimeoutSec: route.TimeoutSec}
 	plan.RingGroupID = simulation.RingGroupID
 	plan.NodeID = simulation.TerminalNodeID
+	if plan.TerminalType == "decision" {
+		plan.AgentID = 0
+		plan.AnswerMode = answerModeHumanBrowser
+		plan.TimeoutSec = 10
+		plan.HoldPrompt = "Please wait while we connect your call."
+	}
 	if simulation.TerminalType == "dtmf_menu" {
 		for _, node := range def.Nodes {
 			if node.ID != simulation.TerminalNodeID {
@@ -1394,7 +1454,7 @@ func (a *App) resolveRoutingDefinition(route *routeRow, caller string, digits ma
 	if holdPrompt, ok := variables["hold_prompt"].(string); ok && strings.TrimSpace(holdPrompt) != "" {
 		plan.HoldPrompt = strings.TrimSpace(holdPrompt)
 	}
-	context, _ := json.Marshal(routingExecutionContext{Route: *route, Definition: def})
+	context, _ := json.Marshal(routingExecutionContext{Route: *route, Definition: def, Digits: digits})
 	plan.ContextJSON = string(context)
 	return plan, nil
 }
@@ -1411,6 +1471,7 @@ func (a *App) persistRoutingExecution(callID, project string, plan *inboundRouti
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+	a.routingCommitted(project)
 	a.emitRoutingTrace(project, callID, plan, true)
 	return nil
 }
@@ -1423,6 +1484,15 @@ func persistRoutingExecutionTx(tx *sql.Tx, callID, project string, plan *inbound
 	if _, err := tx.Exec(`UPDATE calls SET routing_flow_id=?,routing_flow_version_id=?,routing_destination_id=? WHERE id=? AND project_id=? AND (routing_flow_version_id='' OR routing_flow_version_id=?)`, plan.FlowID, plan.VersionID, plan.DestinationID, callID, project, plan.VersionID); err != nil {
 		return err
 	}
+	if plan.TerminalType == "decision" {
+		expires, err := decisionCallExpiryTx(tx, callID, plan, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE calls SET state_expires_at=? WHERE id=? AND project_id=? AND status='pending'`, expires.Format(time.RFC3339), callID, project); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.Exec(`INSERT OR IGNORE INTO call_route_executions(id,call_id,project_id,flow_id,flow_version_id,status,current_node_id,selected_destination_id,started_at,context_json) VALUES(?,?,?,?,?,'selected',?,?,?,?)`, executionID, callID, project, plan.FlowID, plan.VersionID, lastTraceNode(plan.Trace), plan.DestinationID, now, plan.ContextJSON); err != nil {
 		return err
 	}
@@ -1433,10 +1503,13 @@ func persistRoutingExecutionTx(tx *sql.Tx, callID, project string, plan *inbound
 			return err
 		}
 	}
+	if err := enqueueDecisionTx(tx, callID, project, plan); err != nil {
+		return err
+	}
 	if err := initRingRunTx(tx, callID, project, plan, time.Now()); err != nil {
 		return err
 	}
-	return nil
+	return enqueueRoutingEffectTx(tx, callID, project, plan)
 }
 
 func lastTraceNode(trace []routingTraceStep) string {
@@ -1469,16 +1542,51 @@ func (a *App) routingPlanForCall(row *callRow, digits map[string]string) (*route
 	}
 	var execution routingExecutionContext
 	var plan *inboundRoutingPlan
+	// A terminal node's preceding announcements cannot be reconstructed by
+	// starting the graph at that node. Reuse the full committed terminal plan.
+	var terminalJSON string
+	terminalErr := a.db().db.QueryRow(`SELECT plan_json FROM routing_effects WHERE call_id=? AND project_id=? AND node_id=?`, row.ID, row.ProjectID, current).Scan(&terminalJSON)
+	if terminalErr != nil && !errors.Is(terminalErr, sql.ErrNoRows) {
+		return nil, nil, terminalErr
+	}
+	if terminalErr == nil {
+		var saved inboundRoutingPlan
+		if err := json.Unmarshal([]byte(terminalJSON), &saved); err != nil {
+			return nil, nil, err
+		}
+		if saved.TerminalType == "hangup" || saved.TerminalType == "reject" {
+			if err := json.Unmarshal([]byte(saved.ContextJSON), &execution); err != nil {
+				return nil, nil, err
+			}
+			if execution.Route.ID != "" {
+				route = &execution.Route
+			}
+			applyRoutingPlanToRoute(route, &saved)
+			return route, &saved, nil
+		}
+	}
 	if json.Unmarshal([]byte(contextJSON), &execution) == nil && execution.Definition.Entry != "" {
 		route = &execution.Route
 
 		// Old callbacks are retries: render the current interaction without consuming their digits.
-		input := map[string]string{}
+		input := execution.Digits
+		if input == nil {
+			input = map[string]string{}
+		}
 		if value, ok := digits[current]; ok {
 			input[current] = value
 		}
 		version := &routingFlowVersionRow{ID: row.RoutingFlowVersionID, FlowID: row.RoutingFlowID}
-		plan, err = a.resolveRoutingDefinition(route, row.FromNumber, input, version, execution.Definition, current)
+		base, _ := decisionRuntimeNode(current)
+		plan, err = a.resolveRoutingDefinition(route, row.FromNumber, input, version, execution.Definition, base)
+		if err == nil && plan.TerminalType == "decision" {
+			plan.NodeID = current
+			if selected, e := a.acceptedDecisionPlan(row, current); e != nil {
+				return nil, nil, e
+			} else if selected != nil {
+				plan = selected
+			}
+		}
 	} else {
 		plan, err = a.resolveInboundRoutingPlan(route, row.FromNumber, digits)
 	}
@@ -1535,6 +1643,17 @@ func (a *App) persistRoutingProgress(callID, project string, plan *inboundRoutin
 		return err
 	}
 	defer tx.Rollback()
+	if err = writeRoutingProgressTx(tx, callID, project, plan, finishedRuns...); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	a.routingCommitted(project)
+	a.emitRoutingTrace(project, callID, plan, false)
+	return nil
+}
+func writeRoutingProgressTx(tx *sql.Tx, callID, project string, plan *inboundRoutingPlan, finishedRuns ...string) error {
 	var status string
 	if err := tx.QueryRow(`SELECT status FROM calls WHERE id=? AND project_id=?`, callID, project).Scan(&status); err != nil {
 		return err
@@ -1557,18 +1676,26 @@ func (a *App) persistRoutingProgress(callID, project string, plan *inboundRoutin
 		}
 	}
 	if currentNode != plan.NodeID && plan.Group == nil {
-		seconds := plan.TimeoutSec
+		now := time.Now().UTC()
+		expires := now.Add(time.Duration(max(plan.TimeoutSec, 5)) * time.Second)
 		if plan.TerminalType == "voicemail" {
-			seconds = 190
+			expires = now.Add(190 * time.Second)
 		}
 		if plan.TerminalType == "dtmf_menu" {
-			seconds = max(seconds, 30)
+			expires = now.Add(time.Duration(max(plan.TimeoutSec, 30)) * time.Second)
 		}
-		if _, err := tx.Exec(`UPDATE calls SET state_expires_at=? WHERE id=?`, time.Now().UTC().Add(time.Duration(max(seconds, 5))*time.Second).Format(time.RFC3339), callID); err != nil {
+		if plan.TerminalType == "decision" {
+			var err error
+			expires, err = decisionCallExpiryTx(tx, callID, plan, now)
+			if err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(`UPDATE calls SET state_expires_at=? WHERE id=?`, expires.Format(time.RFC3339), callID); err != nil {
 			return err
 		}
 	}
-	if _, err := tx.Exec(`UPDATE calls SET agent_id=?,peer_kind=?,directive=?,voice=?,routing_flow_id=?,routing_flow_version_id=?,routing_destination_id=?,updated_at=? WHERE id=? AND project_id=?`, plan.AgentID, inboundPeerKind(plan.AnswerMode), firstNonEmpty(plan.Directive, "inbound pending"), plan.Voice, plan.FlowID, plan.VersionID, plan.DestinationID, time.Now().UTC().Format(time.RFC3339Nano), callID, project); err != nil {
+	if _, err := tx.Exec(`UPDATE calls SET agent_id=?,peer_kind=?,directive=?,voice=?,routing_flow_id=?,routing_flow_version_id=?,routing_destination_id=?,routing_resolution=CASE WHEN ?<>'' THEN ? ELSE routing_resolution END,callback_on_ai=CASE WHEN ? THEN 1 ELSE callback_on_ai END,updated_at=? WHERE id=? AND project_id=?`, plan.AgentID, inboundPeerKind(plan.AnswerMode), firstNonEmpty(plan.Directive, "inbound pending"), plan.Voice, plan.FlowID, plan.VersionID, plan.DestinationID, plan.RoutingResolution, plan.RoutingResolution, plan.CallbackOnAI, time.Now().UTC().Format(time.RFC3339Nano), callID, project); err != nil {
 		return err
 	}
 	if plan.Group == nil && plan.AnswerMode == answerModeAgent && plan.DestinationID != "" {
@@ -1588,14 +1715,13 @@ func (a *App) persistRoutingProgress(callID, project string, plan *inboundRoutin
 			return err
 		}
 	}
+	if err := enqueueDecisionTx(tx, callID, project, plan); err != nil {
+		return err
+	}
 	if err := initRingRunTx(tx, callID, project, plan, time.Now()); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	a.emitRoutingTrace(project, callID, plan, false)
-	return nil
+	return enqueueRoutingEffectTx(tx, callID, project, plan)
 }
 
 func (a *App) emitRoutingTrace(project, callID string, plan *inboundRoutingPlan, started bool) {
@@ -1630,6 +1756,9 @@ func (a *App) writeTwilioRoutingPlan(w http.ResponseWriter, row *callRow, route 
 		return errors.New("routing plan is unavailable")
 	}
 	switch plan.TerminalType {
+	case "decision":
+		writeTwilioHold(w, plan.HoldPrompt, a.twilioWaitURL(*route, row.ID))
+		return nil
 	case "dtmf_menu":
 		prompt := firstNonEmpty(plan.Prompt, "Please choose an option using your telephone keypad.")
 		w.Header().Set("Content-Type", "application/xml")
@@ -1673,7 +1802,11 @@ func (a *App) writeTwilioRoutingPlan(w http.ResponseWriter, row *callRow, route 
 		_, _ = fmt.Fprintf(w, `<Response><Say>%s</Say><Record maxLength="180" playBeep="true" recordingStatusCallback="%s" recordingStatusCallbackMethod="POST"/><Hangup/></Response>`, xmlEscape(firstNonEmpty(plan.Prompt, "Please leave a message after the tone.")), xmlEscape(a.twilioRecordingStatusURL(row.ID, row.CallbackSecret, row.ProjectID)))
 		return nil
 	case "reject", "hangup":
-		writeTwilioHangup(w)
+		if prompt := terminalAnnouncementText(plan); prompt != "" {
+			writeTwilioSayHangup(w, prompt)
+		} else {
+			writeTwilioHangup(w)
+		}
 		return nil
 	default:
 		return fmt.Errorf("unsupported routing terminal %q", plan.TerminalType)
@@ -1807,48 +1940,56 @@ func (a *App) startTelnyxStream(ctx *sdk.AppCtx, row *callRow) error {
 }
 
 func (a *App) executeTelnyxRoutingPlan(ctx *sdk.AppCtx, row *callRow, route *routeRow, plan *inboundRoutingPlan) error {
+	if row == nil || plan == nil {
+		return errors.New("routing plan unavailable")
+	}
+	if plan.TerminalType == "hangup" || plan.TerminalType == "reject" || plan.TerminalType == "dtmf_menu" {
+		if err := a.updateCallRoutingPlan(row, plan); err != nil {
+			return err
+		}
+		if err := a.ensureRoutingEffect(row, plan); err != nil {
+			return err
+		}
+		return a.driveRoutingEffect(ctx.WithProject(row.ProjectID), row.ID, plan.NodeID)
+	}
+	if (plan.TerminalType == "destination" || plan.TerminalType == "ring_group") && plan.AnswerMode == answerModeRealtimeImmediate {
+		if err := a.updateCallRoutingPlan(row, plan); err != nil {
+			return err
+		}
+		current, err := a.db().findCall(row.ID)
+		if err != nil {
+			return err
+		}
+		if current == nil || isTerminalStatus(current.Status) {
+			return errAnswerCallEnded
+		}
+		_, err = a.prepareAndActivateTelnyxAI(ctx, current, plan.Directive, plan.Voice, plan.Greeting)
+		return err
+	}
+	unlock := a.softphones.lockClaim(row.ID)
+	defer unlock()
 	if err := a.updateCallRoutingPlan(row, plan); err != nil {
 		return err
 	}
 	row, _ = a.db().findCall(row.ID)
+	if !routingMayControlCall(row) {
+		return nil
+	}
 	switch plan.TerminalType {
-	case "dtmf_menu":
-		return a.startTelnyxGather(ctx, row, plan)
+	case "decision":
+		return nil
 	case "destination", "ring_group":
 		switch plan.AnswerMode {
-		case answerModeRealtimeImmediate:
-			_, err := a.sharedRealtimeWork(row, "ivr-stream", true, func(owned *callRow) error {
-				if _, err := a.sharedRealtimeWork(owned, "prepare", false, func(preparing *callRow) error {
-					return a.runInboundPreparation(ctx, preparing, plan.Directive, plan.Voice, plan.Greeting)
-				}); err != nil {
-					return err
-				}
-				if err := a.db().updateStatus(owned.ID, "answered", ""); err != nil {
-					return err
-				}
-				current, err := a.db().findCall(owned.ID)
-				if err != nil {
-					return err
-				}
-				if current == nil || isTerminalStatus(current.Status) {
-					return errAnswerCallEnded
-				}
-				return a.startTelnyxStream(ctx, current)
-			})
-			return err
 		case answerModeHumanBrowser:
 			// The carrier leg is already answered by the IVR. Return it to the
 			// project's browser-offer state; softphoneAnswer starts streaming
 			// after the operator atomically claims it.
-			_, err := a.db().db.Exec(`UPDATE calls SET status='pending',peer_kind=?,state_expires_at=?,updated_at=? WHERE id=?`, peerKindHuman, time.Now().UTC().Add(time.Duration(route.TimeoutSec)*time.Second).Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339Nano), row.ID)
+			_, err := a.db().db.Exec(`UPDATE calls SET status='pending',peer_kind=?,state_expires_at=?,updated_at=? WHERE id=? AND status IN ('pending','answered') AND peer_token='' AND media_connected_at=''`, peerKindHuman, time.Now().UTC().Add(time.Duration(route.TimeoutSec)*time.Second).Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339Nano), row.ID)
 			return err
 		default:
-			_, err := a.db().db.Exec(`UPDATE calls SET status='pending',state_expires_at=?,updated_at=? WHERE id=?`, time.Now().UTC().Add(time.Duration(route.TimeoutSec)*time.Second).Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339Nano), row.ID)
+			_, err := a.db().db.Exec(`UPDATE calls SET status='pending',state_expires_at=?,updated_at=? WHERE id=? AND status IN ('pending','answered') AND peer_token='' AND media_connected_at=''`, time.Now().UTC().Add(time.Duration(route.TimeoutSec)*time.Second).Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339Nano), row.ID)
 			return err
 		}
-	case "reject", "hangup":
-		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "hangup_call", map[string]any{"call_control_id": row.CarrierSID, "command_id": telnyxCommandID(row.ID, "ivr-hangup")})
-		return err
 	case "voicemail":
 		return errors.New("Telnyx voicemail destination is not enabled yet")
 	default:
@@ -2088,6 +2229,10 @@ func (a *App) handleRouting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/routing/"), "/")
+	if r.Method == http.MethodGet && path == "decisions" {
+		a.handleDecisionList(w, r, project)
+		return
+	}
 	if r.Method == http.MethodGet && path == "snapshot" {
 		a.routingSnapshot(w, project)
 		return
@@ -2542,6 +2687,7 @@ func validateExecutableRingGroup(group ringGroupRow) error {
 type routingExecutionContext struct {
 	Route      routeRow          `json:"route"`
 	Definition routingDefinition `json:"definition"`
+	Digits     map[string]string `json:"digits,omitempty"`
 }
 
 func (a *App) snapshotRoutingReferences(project string, def *routingDefinition) error {
@@ -2559,6 +2705,17 @@ func (a *App) snapshotRoutingReferences(project string, def *routingDefinition) 
 		return nil
 	}
 	for _, node := range def.Nodes {
+		if node.Type == "decision" {
+			cfg, e := parseDecisionConfig(node)
+			if e != nil {
+				return e
+			}
+			for _, id := range cfg.Destinations {
+				if e = add(id); e != nil {
+					return e
+				}
+			}
+		}
 		if node.Type == "destination" {
 			if err := add(routingConfigString(node.Config, "destination_id")); err != nil {
 				return err

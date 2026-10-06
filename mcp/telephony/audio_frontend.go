@@ -69,6 +69,7 @@ type audioFrontendSnapshot struct {
 	SuppressedFrames       int64
 	LocalInterrupts        int64
 	ProviderCoreInterrupts int64
+	OperatorInterrupts     int64
 }
 
 type audioDiagnosticsLogger interface {
@@ -109,6 +110,7 @@ type carrierAudioFrontend struct {
 	suppressedFrames       int64
 	localInterrupts        int64
 	providerCoreInterrupts int64
+	operatorInterrupts     int64
 	diagnosticNoiseFloor   float64
 	lastLocalSignal        time.Time
 }
@@ -360,6 +362,10 @@ func (f *carrierAudioFrontend) markLocalSignal() {
 func (f *carrierAudioFrontend) markInterrupt(source string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if source == "operator" {
+		f.operatorInterrupts++
+		return "operator"
+	}
 	if source == "local" || (!f.lastLocalSignal.IsZero() && time.Since(f.lastLocalSignal) <= 2*time.Second) {
 		f.localInterrupts++
 		f.lastLocalSignal = time.Time{}
@@ -388,6 +394,7 @@ func (f *carrierAudioFrontend) snapshot() audioFrontendSnapshot {
 		SuppressedFrames:       f.suppressedFrames,
 		LocalInterrupts:        f.localInterrupts,
 		ProviderCoreInterrupts: f.providerCoreInterrupts,
+		OperatorInterrupts:     f.operatorInterrupts,
 	}
 }
 
@@ -453,6 +460,7 @@ func logAudioFrontendDiagnostics(logger audioDiagnosticsLogger, frontend *carrie
 			"suppressed_frames", snapshot.SuppressedFrames,
 			"local_interrupts", snapshot.LocalInterrupts,
 			"provider_or_core_interrupts", snapshot.ProviderCoreInterrupts,
+			"operator_interrupts", snapshot.OperatorInterrupts,
 		)
 	}
 	logger.Info("carrier audio diagnostics", fields...)

@@ -10,24 +10,25 @@ import (
 
 // Only display metadata crosses into a chat; arguments and results stay in telemetry.
 type ToolActivity struct {
-	ID             int64  `json:"id"`
-	ConversationID string `json:"chat_id"`
-	AgentID        int64  `json:"agent_id"`
-	ThreadID       string `json:"thread_id"`
-	CallID         string `json:"call_id"`
-	Name           string `json:"name"`
-	Reason         string `json:"reason"`
-	Status         string `json:"status"`
-	StartedAt      string `json:"started_at"`
-	EndedAt        string `json:"ended_at"`
-	Revision       int64  `json:"revision"`
+	ID             int64    `json:"id"`
+	ConversationID string   `json:"chat_id"`
+	AgentID        int64    `json:"agent_id"`
+	ThreadID       string   `json:"thread_id"`
+	CallID         string   `json:"call_id"`
+	Name           string   `json:"name"`
+	Reason         string   `json:"reason"`
+	Status         string   `json:"status"`
+	StartedAt      string   `json:"started_at"`
+	EndedAt        string   `json:"ended_at"`
+	DurationMs     *float64 `json:"duration_ms,omitempty"`
+	Revision       int64    `json:"revision"`
 }
 
-const activityColumns = `id,conversation_id,agent_id,thread_id,call_id,name,reason,status,started_at,ended_at,revision`
+const activityColumns = `id,conversation_id,agent_id,thread_id,call_id,name,reason,status,started_at,ended_at,revision,duration_ms`
 
 func scanActivity(row interface{ Scan(...any) error }) (ToolActivity, error) {
 	var a ToolActivity
-	err := row.Scan(&a.ID, &a.ConversationID, &a.AgentID, &a.ThreadID, &a.CallID, &a.Name, &a.Reason, &a.Status, &a.StartedAt, &a.EndedAt, &a.Revision)
+	err := row.Scan(&a.ID, &a.ConversationID, &a.AgentID, &a.ThreadID, &a.CallID, &a.Name, &a.Reason, &a.Status, &a.StartedAt, &a.EndedAt, &a.Revision, &a.DurationMs)
 	return a, err
 }
 func (s *store) toolActivities(chat string) ([]ToolActivity, error) {
@@ -42,7 +43,9 @@ func (s *store) toolActivities(chat string) ([]ToolActivity, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, a)
+		if visibleActivityTool(a.Name) {
+			out = append(out, a)
+		}
 	}
 	return out, rows.Err()
 }
@@ -60,7 +63,19 @@ func (a *App) handleToolActivity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, rows)
 }
 func visibleActivityTool(name string) bool {
-	return name != "" && !visibleConversationTool(name) && name != "pace" && name != "done" && name != "wait" && name != "think"
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" || name == "search_tools" || name == "send" || name == "pace" || name == "done" || name == "wait" || name == "think" {
+		return false
+	}
+	// Core send reports between threads and is internal conversation plumbing.
+	// conversations_send is represented by the resulting chat message and
+	// response bubble, so showing a second activity row would duplicate it.
+	// Other Conversations tools are meaningful work (for example reading an
+	// attachment) and should be visible in the shared activity timeline.
+	if visibleConversationTool(name) {
+		return false
+	}
+	return true
 }
 func activityTime(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000000000Z") }
 func (a *App) ingestToolActivity(event string, agent int64, thread, data string, ts time.Time) error {
@@ -76,13 +91,15 @@ func (a *App) ingestToolActivity(event string, agent int64, thread, data string,
 		return nil
 	}
 	var d struct {
-		Name       string `json:"name"`
-		Tool       string `json:"tool"`
-		ID         string `json:"id"`
-		CallID     string `json:"call_id"`
-		ToolCallID string `json:"tool_call_id"`
-		Reason     string `json:"reason"`
-		IsError    bool   `json:"is_error"`
+		Name       string   `json:"name"`
+		Tool       string   `json:"tool"`
+		ID         string   `json:"id"`
+		CallID     string   `json:"call_id"`
+		ToolCallID string   `json:"tool_call_id"`
+		Reason     string   `json:"reason"`
+		DurationMs *float64 `json:"duration_ms"`
+		Success    *bool    `json:"success"`
+		IsError    bool     `json:"is_error"`
 	}
 	if err := json.Unmarshal([]byte(data), &d); err != nil {
 		return nil
@@ -114,16 +131,19 @@ func (a *App) ingestToolActivity(event string, agent int64, thread, data string,
 		if err != nil {
 			return err
 		}
-		if item.Status == "completed" || item.Status == "failed" {
+		if !visibleActivityTool(item.Name) || item.Status == "completed" || item.Status == "failed" {
 			return nil
 		}
 		item.Status = "completed"
-		if d.IsError {
+		if d.IsError || (d.Success != nil && !*d.Success) {
 			item.Status = "failed"
 		}
 		item.EndedAt = at
+		if d.DurationMs != nil && *d.DurationMs >= 0 {
+			item.DurationMs = d.DurationMs
+		}
 		item.Revision++
-		_, err = tx.Exec(`UPDATE conversation_tool_activity SET status=?,ended_at=?,revision=? WHERE id=?`, item.Status, item.EndedAt, item.Revision, item.ID)
+		_, err = tx.Exec(`UPDATE conversation_tool_activity SET status=?,ended_at=?,revision=?,duration_ms=? WHERE id=?`, item.Status, item.EndedAt, item.Revision, item.DurationMs, item.ID)
 	}
 	if err != nil {
 		return err

@@ -10,6 +10,7 @@ export interface CreateConversation {
   directive?: string;
 }
 export interface SendMessage {
+  page_context?: import("./pageContext").PageContext;
   content: string;
   client_message_id: string;
   attachments?: Message["attachments"];
@@ -33,6 +34,23 @@ export interface ConversationSubscription {
   onError?: (error: unknown) => void;
   signal?: AbortSignal;
 }
+export interface ConversationActivitySubscription {
+  onFrame: (frame: StreamFrame) => void;
+  onMessage?: (message: Message) => void;
+  onResync?: () => void;
+  onOpen?: () => void;
+  onError?: (error: unknown) => void;
+  signal?: AbortSignal;
+}
+export interface VoiceSession {
+  id?: string;
+  conversation_id?: string;
+  agent_id?: number;
+  thread_id?: string;
+  status: "starting" | "active" | "closed";
+  mode?: "live" | "dictation";
+  audio_bridge_url?: string;
+}
 const query = (path: string, values: Record<string, string | number | boolean | undefined>) => {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(values)) {
@@ -51,12 +69,12 @@ export class ConversationsClient {
   readonly installId: number | undefined;
   readonly storageKey: string;
 
-  constructor(readonly app: AppHandle, storageKey?: string, readonly audience?: "public" | "operator") {
-    if (app.name !== "conversations" || !app.projectId) throw new Error("Conversations requires a project-scoped conversations app handle");
-    this.projectId = app.projectId;
+  constructor(readonly app: AppHandle, storageKey?: string, readonly audience?: "public" | "operator", readonly global = false) {
+    if (app.name !== "conversations" || (!app.projectId && !global)) throw new Error("Conversations requires a project-scoped conversations app handle");
+    this.projectId = app.projectId ?? "";
     this.installId = app.installId;
     // Hosts may provide a stable, non-secret user key. Default isolates client instances.
-    this.storageKey = `${app.projectId}:${app.installId ?? "default"}:${storageKey ?? instanceKey()}`;
+    this.storageKey = `${app.projectId ?? "global"}:${app.installId ?? "default"}:${storageKey ?? instanceKey()}`;
   }
 
   list = (options: ListConversations = {}, init?: RequestInit) =>
@@ -73,6 +91,15 @@ export class ConversationsClient {
     this.app.get<ChangePage>(query("/changes", { chat_id: id, cursor }), init);
   send = (id: string, input: SendMessage, init?: RequestInit) =>
     this.app.post<Message>(query("/messages", { chat_id: id }), input, init);
+  voiceStatus = (id: string) => this.app.get<VoiceSession>(query("/voice", { chat_id: id }));
+  startVoice = (id: string) => this.app.post<VoiceSession>(query("/voice", { chat_id: id }));
+  renewVoice = (id: string) => this.app.patch<VoiceSession>(query("/voice", { chat_id: id }));
+  endVoice = (id: string) => this.app.del<VoiceSession>(query("/voice", { chat_id: id }));
+  voiceWorkletURL = () => {
+    const url = new URL(this.app.mcpURL(), window.location.href);
+    url.pathname = url.pathname.replace(/\/mcp$/, "/ui/realtime-capture-worklet.js");
+    return url.toString();
+  };
   upload = (chat:string,id:string,name:string,content_base64:string) => this.app.post<Attachment>(query("/attachments",{chat_id:chat}),{id,name,content_base64});
   attachment = (chat:string,id:string) => this.app.get<{attachment:Attachment;content_base64:string}>(query("/attachments",{chat_id:chat,id}));
   markSeen = (id: string, lastSeenId: number, init?: RequestInit) =>
@@ -80,9 +107,10 @@ export class ConversationsClient {
   unread = (agentId?: number, init?: RequestInit) =>
     this.app.get<UnreadEntry[]>(query("/unread-summary", { agent_id: agentId }), init);
   activity = (id: string, init?: RequestInit) => this.app.get<ToolActivity[]>(query("/activity", { chat_id: id }), init);
+  toolVisuals = (init?: RequestInit) => this.app.get<{ integrations: Array<{slug:string;name:string;logo?:string}> }>("/tool-visuals", init);
   agents = (init?: RequestInit) => this.app.get<AgentInfo[]>("/agents", init);
-  inbox = (options: { agent_id?: number; cursor?: string; limit?: number } = {}, init?: RequestInit) =>
-    this.app.get<InboxPage>(query("/inbox", { page: 1, ...options }), init);
+  inbox = (options: { agent_id?: number; cursor?: string; limit?: number; project_id?: string } = {}, init?: RequestInit) =>
+    this.app.get<InboxPage>(query("/inbox", { page: 1, scope: this.global ? "global" : undefined, ...options }), init);
   act = (messageId: number, actionId: string, note = "", init?: RequestInit) =>
     this.app.post<{ message: Message }>("/message-action", { message_id: messageId, action_id: actionId, note }, init);
   dismiss = (messageId: number, init?: RequestInit) => this.app.post("/message-dismiss", { message_id: messageId }, init);
@@ -105,26 +133,51 @@ export class ConversationsClient {
     }, options);
   };
 
+  // The existing user-scoped stream also carries progress-only snapshots for
+  // thread lists. One SSE connection covers every visible conversation.
+  subscribeActivity = (agentId: number | undefined, handlers: ConversationActivitySubscription) =>
+    this.app.subscribe<StreamFrame | Message>(query("/stream", { scope: "user", agent_id: agentId }), (event, meta) => {
+      if (meta.event === "stream") handlers.onFrame(event as StreamFrame);
+      else if (meta.event === "message") handlers.onMessage?.(event as Message);
+      else if (meta.event === "resync") handlers.onResync?.();
+    }, {
+      eventTypes: ["stream", "message", "resync"],
+      signal: handlers.signal,
+      onOpen: handlers.onOpen,
+      onError: handlers.onError,
+    });
+
   // Shared adapter for administrative UI routes; scope comes exclusively from the handle.
   private checkProject(projectId: string) {
+    if (this.global) {
+      if (!projectId) throw new Error("Global Conversations actions require the item's project scope");
+      return;
+    }
     if (projectId !== this.projectId) throw new Error("Conversation project does not match the host scope");
   }
+  private scopedPath(path: string, projectId: string) {
+    this.checkProject(projectId);
+    if (!this.global) return path;
+    const url = new URL(path, "http://conversations.invalid");
+    url.searchParams.set("project_id", projectId);
+    return `${url.pathname}${url.search}`;
+  }
   apiGet = <T>(path: string, projectId = this.projectId): Promise<T> => {
-    this.checkProject(projectId); return this.app.get<T>(path);
+    return this.app.get<T>(this.scopedPath(path, projectId));
   };
   apiPost = <T>(path: string, body: unknown, projectId = this.projectId): Promise<T> => {
-    this.checkProject(projectId);
+    const scopedPath = this.scopedPath(path, projectId);
     if (path === "/chats" && this.audience && body && typeof body === "object") body = { ...body, audience: this.audience };
-    return this.app.post<T>(path, body);
+    return this.app.post<T>(scopedPath, body);
   };
   apiPatch = <T>(path: string, body: unknown, projectId = this.projectId): Promise<T> => {
-    this.checkProject(projectId); return this.app.patch<T>(path, body);
+    return this.app.patch<T>(this.scopedPath(path, projectId), body);
   };
   apiDelete = <T>(path: string, projectId = this.projectId): Promise<T> => {
-    this.checkProject(projectId); return this.app.del<T>(path);
+    return this.app.del<T>(this.scopedPath(path, projectId));
   };
 }
 
-export function conversationsExtension(options: { storageKey?: string; audience?: "public" | "operator" } = {}) {
-  return defineAppExtension({ app: "conversations", create: ({ app }) => new ConversationsClient(app, options.storageKey, options.audience) });
+export function conversationsExtension(options: { storageKey?: string; audience?: "public" | "operator"; global?: boolean } = {}) {
+  return defineAppExtension({ app: "conversations", create: ({ app }) => new ConversationsClient(app, options.storageKey, options.audience, options.global) });
 }

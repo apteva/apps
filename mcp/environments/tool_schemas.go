@@ -25,8 +25,12 @@ func anyObjectSchema() map[string]any {
 }
 
 var environmentSpecSchema = strictObject(map[string]any{
-	"version":             map[string]any{"type": "integer", "minimum": 1},
-	"ttl_seconds":         map[string]any{"type": "integer", "minimum": 60, "maximum": 86400},
+	"version":     map[string]any{"type": "integer", "minimum": 1},
+	"ttl_seconds": map[string]any{"type": "integer", "minimum": 60, "maximum": 86400},
+	"clock": strictObject(map[string]any{
+		"mode":         map[string]any{"type": "string", "enum": []string{"real", "manual"}},
+		"initial_time": map[string]any{"type": "string", "format": "date-time"},
+	}, "mode"),
 	"app_install_ids":     arraySchema(map[string]any{"type": "integer"}),
 	"connection_ids":      arraySchema(map[string]any{"type": "integer"}),
 	"mcp_server_ids":      arraySchema(map[string]any{"type": "integer"}),
@@ -34,18 +38,22 @@ var environmentSpecSchema = strictObject(map[string]any{
 	"integration_mode":    map[string]any{"type": "string", "enum": []string{"mock", "real"}},
 	"allow_host_suffixes": arraySchema(map[string]any{"type": "string"}),
 	"http_mocks": arraySchema(strictObject(map[string]any{
-		"host":    map[string]any{"type": "string"},
-		"path":    map[string]any{"type": "string"},
-		"method":  map[string]any{"type": "string"},
-		"status":  map[string]any{"type": "integer"},
-		"headers": stringMapSchema(),
-		"body":    map[string]any{},
+		"host":         map[string]any{"type": "string"},
+		"path":         map[string]any{"type": "string"},
+		"method":       map[string]any{"type": "string"},
+		"status":       map[string]any{"type": "integer"},
+		"headers":      stringMapSchema(),
+		"body":         map[string]any{},
+		"available_at": map[string]any{"type": "string", "format": "date-time"},
+		"expires_at":   map[string]any{"type": "string", "format": "date-time"},
 	})),
 	"integration_fixtures": arraySchema(strictObject(map[string]any{
-		"app":    map[string]any{"type": "string"},
-		"tool":   map[string]any{"type": "string"},
-		"status": map[string]any{"type": "integer"},
-		"data":   map[string]any{},
+		"app":          map[string]any{"type": "string"},
+		"tool":         map[string]any{"type": "string"},
+		"status":       map[string]any{"type": "integer"},
+		"data":         map[string]any{},
+		"available_at": map[string]any{"type": "string", "format": "date-time"},
+		"expires_at":   map[string]any{"type": "string", "format": "date-time"},
 	})),
 	"integration_bindings": arraySchema(strictObject(map[string]any{
 		"app":              map[string]any{"type": "string"},
@@ -74,9 +82,13 @@ var environmentSpecSchema = strictObject(map[string]any{
 		"enabled":            map[string]any{"type": "boolean"},
 	})),
 	"seeds": arraySchema(strictObject(map[string]any{
-		"app":   map[string]any{"type": "string"},
-		"tool":  map[string]any{"type": "string"},
-		"input": anyObjectSchema(),
+		"app":  map[string]any{"type": "string"},
+		"tool": map[string]any{"type": "string"},
+		"input": map[string]any{
+			"type":                 "object",
+			"additionalProperties": true,
+			"description":          `Tool arguments. Anywhere in this object, {"$ref": "<index>.<path>"} is replaced by the value at that dotted path in the result of an earlier seed, so seed 1 can use an id created by seed 0. An empty path references the whole result.`,
+		},
 	}, "app", "tool")),
 	"agents": arraySchema(strictObject(map[string]any{
 		"source_agent_id": map[string]any{"type": "integer"},

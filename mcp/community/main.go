@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.12.3
+version: 0.14.4
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   spaces (feed/forum/chat/course), members, threads, posts, reactions,
@@ -206,6 +206,26 @@ provides:
     - { name: product_testimonials_set, description: "Set ordered published Testimonials IDs for a Community storefront product." }
     - { name: lesson_resources_add, description: "Attach a storage-backed resource to a lesson." }
     - { name: lesson_resources_list, description: "List storage-backed resources for a lesson." }
+    - { name: quiz_submit, description: "Grade and save a member quiz attempt." }
+    - { name: assignment_submit, description: "Save a member assignment submission." }
+    - { name: course_tracks_list, description: "List a course's learning tracks and the member's selected track." }
+    - { name: course_track_select, description: "Select or switch a learning track without losing lesson progress." }
+    - { name: course_tracks_create, description: "Create a course learning track." }
+    - { name: course_tracks_update, description: "Update a course learning track." }
+    - { name: course_track_lessons_set, description: "Assign a lesson to one or more learning tracks; empty means shared." }
+    - { name: assignment_reviews_list, description: "List assignment submissions awaiting instructor review." }
+    - { name: assignment_review, description: "Approve an assignment or request changes with feedback." }
+    - { name: milestones_create, description: "Create a student milestone." }
+    - { name: milestones_update, description: "Update a student milestone." }
+    - { name: milestones_list, description: "List milestones and member next action." }
+    - { name: milestone_submit, description: "Submit milestone evidence." }
+    - { name: milestone_review, description: "Approve milestone evidence or request changes." }
+    - { name: milestone_reviews_list, description: "List milestone evidence awaiting instructor review." }
+    - { name: learning_status, description: "Fetch member quiz and assignment results." }
+    - { name: issued_certificate_get, description: "Fetch an earned course certificate." }
+    - { name: lesson_file_url, description: "Mint a protected lesson file URL." }
+    - { name: course_file_upload, description: "Upload private course evidence through Storage." }
+    - { name: course_file_url, description: "Mint a protected course evidence file URL." }
     - { name: lesson_bundle_get,  description: "Fetch an available lesson with all member-facing extras." }
     - { name: lesson_resources_delete, description: "Unlink a lesson resource." }
     - { name: quizzes_create,      description: "Create a lesson quiz." }
@@ -272,7 +292,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: community/v0.12.3
+    ref: community/v0.14.4
     entry: mcp/community
   port: 8080
   health_check: /health
@@ -393,6 +413,9 @@ func (a *App) MCPTools() []sdk.Tool {
 	tools = append(tools, postsTools()...)
 	tools = append(tools, dmsTools()...)
 	tools = append(tools, coursesTools()...)
+	tools = append(tools, learningTools()...)
+	tools = append(tools, trackTools()...)
+	tools = append(tools, reviewMilestoneTools()...)
 	tools = append(tools, instructorTools()...)
 	tools = append(tools, productTestimonialTools()...)
 	tools = append(tools, courseSalesTools()...)
@@ -429,7 +452,7 @@ func writeDomainErr(w http.ResponseWriter, err error) {
 	case strings.Contains(lower, "not found"):
 		writeErr(w, http.StatusNotFound, msg)
 	case strings.Contains(lower, "required"), strings.Contains(lower, "invalid"),
-		strings.Contains(lower, "must "), strings.Contains(lower, "cannot be"):
+		strings.Contains(lower, "must "), strings.Contains(lower, "cannot be"), strings.Contains(lower, "no project context"):
 		writeErr(w, http.StatusBadRequest, msg)
 	case strings.Contains(lower, "archived"), strings.Contains(lower, "forbidden"),
 		strings.Contains(lower, "only the"), strings.Contains(lower, "not a participant"),
@@ -522,6 +545,23 @@ func emit(ctx *sdk.AppCtx, topic string, payload map[string]any) {
 		return
 	}
 	ctx.Emit(topic, payload)
+}
+
+func requestAppCtx(r *http.Request) *sdk.AppCtx {
+	if globalCtx == nil {
+		return nil
+	}
+	if scopeProject(globalCtx) != "" {
+		return globalCtx
+	}
+	return globalCtx.WithProject(strings.TrimSpace(r.Header.Get("X-Apteva-Project-ID")))
+}
+
+func boundedOffset(args map[string]any) int64 {
+	if n, ok := intArg(args, "offset"); ok && n > 0 {
+		return n
+	}
+	return 0
 }
 
 func dbHandle() *sql.DB {

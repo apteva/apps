@@ -12,7 +12,7 @@ import (
 // provider and Deploy. Provider metadata is required, but never sufficient:
 // Deploy verifies the downloaded bundle and managed signer itself.
 func (a *App) verifyStagedCloudMobileArtifact(d *Deployment, build *Build, distDir string) error {
-	if d == nil || (d.TargetKind != "android" && d.TargetKind != "ios") {
+	if d == nil || !isAppPlatform(d.TargetKind) {
 		return nil
 	}
 	targetJSON := d.TargetConfigJSON
@@ -29,33 +29,36 @@ func (a *App) verifyStagedCloudMobileArtifact(d *Deployment, build *Build, distD
 	manifest, err := readArtifactManifestFile(filepath.Join(distDir, artifactManifestFilename))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return errors.New("Android cloud artifact has no signing manifest")
+			return fmt.Errorf("%s cloud artifact has no manifest", d.TargetKind)
 		}
-		return fmt.Errorf("read Android cloud artifact manifest: %w", err)
+		return fmt.Errorf("read %s cloud artifact manifest: %w", d.TargetKind, err)
+	}
+	if manifest.Platform != d.TargetKind {
+		return fmt.Errorf("%s cloud artifact reports platform %q", d.TargetKind, manifest.Platform)
 	}
 	primaryPath, err := confinedDownloadArtifactPath(distDir, manifest.Primary)
 	if err != nil {
 		return err
 	}
+	if spec, ok := appPlatformFor(d.TargetKind); !ok || !strings.EqualFold(filepath.Ext(primaryPath), spec.ArtifactExt) {
+		return fmt.Errorf("%s cloud artifact requires a %s file", d.TargetKind, spec.ArtifactExt)
+	}
 	actual, err := verifyMobileBinaryIdentity(primaryPath, d.TargetKind, target)
 	if err != nil {
 		return err
 	}
-	if d.TargetKind == "ios" {
-		if manifest.Platform != "ios" {
-			return errors.New("iOS artifact platform mismatch")
-		}
+	if isApplePlatform(d.TargetKind) {
 		manifest.BundleID = actual.Identifier
 		manifest.VersionName = actual.Version
 		manifest.BuildNumber = actual.Build
+		if d.TargetKind == "macos" {
+			manifest.SigningVerified = true // pkgutil verified the package signature.
+		}
 		return writeArtifactManifest(distDir, manifest)
 	}
 	manifest.PackageName = actual.Identifier
 	manifest.VersionName = actual.Version
 	manifest.VersionCode = actual.Build
-	if manifest.Platform != "android" {
-		return fmt.Errorf("Android cloud artifact reports platform %q", manifest.Platform)
-	}
 	if manifest.SigningContract != mobileSigningArtifactContractVersion {
 		return fmt.Errorf(
 			"Android cloud artifact does not implement signing contract %s; the build adapter is stale or incompatible",

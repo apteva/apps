@@ -31,7 +31,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: campaigns
 display_name: Campaigns
-version: 0.2.17
+version: 0.2.18
 description: |
   Bulk-send orchestrator. Compose a campaign, target a CRM segment or
   list, schedule it; jobs drives the materialise → tick loop, messaging
@@ -74,6 +74,8 @@ requires:
 provides:
   http_routes:
     - prefix: /
+    - prefix: /unsubscribe
+      no_auth: true
   mcp_tools:
     - name: campaigns_create
       description: Create a new campaign in draft state.
@@ -251,7 +253,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// Public (no auth, token-validated). Mounted at the same root
 		// so the platform's reverse proxy serves them under
 		// /api/apps/campaigns/unsubscribe.
-		{Pattern: "/unsubscribe", Handler: a.handleHTTPUnsubscribe},
+		{Pattern: "/unsubscribe", NoAuth: true, Handler: a.handleHTTPUnsubscribe},
 	}
 }
 

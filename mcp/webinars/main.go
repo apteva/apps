@@ -1,4 +1,4 @@
-// Webinars v0.1 — funnel + live + replay on top of streaming.
+// Webinars — funnel + live + replay on top of streaming.
 //
 // Composition:
 //   - Hard dep on streaming for the pipe (RTMP→HLS+recording).
@@ -31,6 +31,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+	// Reminder bodies render start times in the webinar's own timezone
+	// via time.LoadLocation. The release image is scratch/Alpine with no
+	// /usr/share/zoneinfo, so the database is embedded rather than
+	// silently falling back to UTC for every recipient.
+	_ "time/tzdata"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -41,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: webinars
 display_name: Webinars
-version: 0.2.0
+version: 0.3.0
 description: |
   Live, scheduled, and on-demand webinars on top of streaming + CRM
   + messaging.
@@ -106,18 +111,6 @@ db:
   path: /data/webinars.db
   migrations: migrations/
 config_schema:
-  - name: registration_url_prefix
-    type: text
-    default: "/r"
-    label: Public registration path prefix
-  - name: live_room_url_prefix
-    type: text
-    default: "/live"
-    label: Public live-room path prefix
-  - name: replay_url_prefix
-    type: text
-    default: "/replay"
-    label: Public replay path prefix
   - name: reminder_lead_hours
     type: text
     default: "24,1,0.25"
@@ -233,13 +226,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		a.messagingCaller = newPlatformMessagingCaller(ctx)
 	}
 
-	// Reconciler: any in-flight live webinar across a restart needs
-	// its status checked against streaming. Keep simple for v0.1: any
-	// status=live row gets demoted to ended, since we lost the
-	// in-process schedulers.
-	if _, err := ctx.AppDB().Exec(
-		`UPDATE webinars SET status='ended', ended_at = ?
-		 WHERE status='live'`, nowRFC3339()); err != nil {
+	if err := a.reconcileLiveWebinars(ctx); err != nil {
 		return fmt.Errorf("reconcile: %w", err)
 	}
 
@@ -248,6 +235,70 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	_ = a.publicURL(ctx)
 
 	ctx.Logger().Info("webinars mounted")
+	return nil
+}
+
+// reconcileLiveWebinars settles every status='live' row against
+// streaming after a restart.
+//
+// v0.1 and v0.2 demoted ALL of them to 'ended' unconditionally, on the
+// reasoning that the in-process schedulers were lost. But the pipe is
+// not in this process — a sidecar restart during a webinar left the
+// stream ingesting happily while every attendee's room flipped to
+// "This webinar has ended", and nothing ever put it back: stream.started
+// had already fired, so it would not fire again.
+//
+// The stream's own status is the answer. Still live → leave it alone,
+// the room keeps working. Anything else → end it, as before.
+//
+// When streaming can't be reached the honest answer is "unknown", and
+// the safe side of unknown is to leave the webinar alone: a stale 'live'
+// row is repaired by the next stream.ended event or by webinars_close,
+// whereas a wrongly-ended one strands a live audience with no recovery
+// path at all.
+func (a *App) reconcileLiveWebinars(ctx *sdk.AppCtx) error {
+	rows, err := ctx.AppDB().Query(
+		`SELECT id, project_id, COALESCE(stream_id, 0) FROM webinars WHERE status = 'live'`)
+	if err != nil {
+		return err
+	}
+	type liveRow struct {
+		ID       int64
+		Project  string
+		StreamID int64
+	}
+	live := []liveRow{}
+	for rows.Next() {
+		var lr liveRow
+		if err := rows.Scan(&lr.ID, &lr.Project, &lr.StreamID); err == nil {
+			live = append(live, lr)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, lr := range live {
+		if lr.StreamID != 0 && a.streamingCaller != nil {
+			snap, sErr := a.streamingCaller.GetStream(lr.Project, lr.StreamID)
+			if sErr != nil {
+				ctx.Logger().Warn("reconcile: streaming unreachable, leaving webinar live",
+					"webinar_id", lr.ID, "stream_id", lr.StreamID, "err", sErr)
+				continue
+			}
+			if snap.Status == "live" {
+				ctx.Logger().Info("reconcile: webinar still live across restart",
+					"webinar_id", lr.ID, "stream_id", lr.StreamID)
+				continue
+			}
+		}
+		if _, err := ctx.AppDB().Exec(
+			`UPDATE webinars SET status='ended', ended_at = ? WHERE id = ?`,
+			nowRFC3339(), lr.ID); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -274,12 +325,33 @@ func (a *App) Workers() []sdk.Worker {
 	}
 }
 
+// Public path prefixes. Constants, deliberately — not configuration.
+//
+// v0.2 shipped registration_url_prefix / live_room_url_prefix /
+// replay_url_prefix as config fields, but only the URL *builders* ever
+// read them. HTTPRoutes registered "/r/", "/live/" and "/replay/"
+// literally and every handler trimmed the same literal, so setting a
+// custom prefix produced links the app did not serve — a configuration
+// field whose only effect was a 404.
+//
+// Making the routes themselves configurable isn't available to us: the
+// routes are fixed at HTTPRoutes() time, before any config is in hand,
+// and the fallback (one "/" catch-all that dispatches on the config at
+// request time) would have to be NoAuth — which the SDK's
+// matchesPublicRoute reads as "every path on this sidecar is public",
+// including /admin. Fixed paths and no dead knobs is the honest shape.
+const (
+	registrationPathPrefix = "/r"
+	liveRoomPathPrefix     = "/live"
+	replayPathPrefix       = "/replay"
+)
+
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		// Public funnel — NoAuth, identified by slug or join_token.
-		{Pattern: "/r/", Handler: a.handleRegistrationPage, NoAuth: true},
-		{Pattern: "/live/", Handler: a.handleLiveRoute, NoAuth: true},
-		{Pattern: "/replay/", Handler: a.handleReplayPage, NoAuth: true},
+		{Pattern: registrationPathPrefix + "/", Handler: a.handleRegistrationPage, NoAuth: true},
+		{Pattern: liveRoomPathPrefix + "/", Handler: a.handleLiveRoute, NoAuth: true},
+		{Pattern: replayPathPrefix + "/", Handler: a.handleReplayPage, NoAuth: true},
 
 		// Admin REST mirror for the dashboard panel.
 		{Pattern: "/admin/webinars", Handler: a.handleAdminCollection},
@@ -777,23 +849,22 @@ func (a *App) reminderLeadHours(ctx *sdk.AppCtx) []float64 {
 }
 
 // reminderLeadLabel — human-readable label for a lead-hours value.
+//
+// The label is part of the reminder's natural key
+// (registrant, channel, lead_label, scheduled_for), so two distinct
+// lead times must not collapse onto one label. The old version had two
+// byte-identical branches (`>= 24` and `>= 1` both rendered "T-%dh")
+// and truncated with int(), so lead_hours "1.5,1" produced "T-1h"
+// twice. Fractional hours below a day now render in minutes.
 func reminderLeadLabel(hours float64) string {
 	switch {
-	case hours >= 24:
+	case hours >= 24 && hours == float64(int(hours)):
 		return fmt.Sprintf("T-%dh", int(hours))
-	case hours >= 1:
+	case hours >= 1 && hours == float64(int(hours)):
 		return fmt.Sprintf("T-%dh", int(hours))
 	default:
-		return fmt.Sprintf("T-%dm", int(hours*60))
+		return fmt.Sprintf("T-%dm", int(hours*60+0.5))
 	}
-}
-
-// suppressNonEmptyOr returns a if non-empty, else b.
-func suppressNonEmptyOr(a, b string) string {
-	if strings.TrimSpace(a) != "" {
-		return a
-	}
-	return b
 }
 
 // minInt returns the smaller of two ints.
