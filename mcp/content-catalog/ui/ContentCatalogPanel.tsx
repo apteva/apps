@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { buildAssetFamilies, lineageBadge, type AssetFamily } from "./lineage";
+import { hostingNotice, hostingPending, hostingStageLabel, transcodingMessages } from "./hosting";
 import { uploadResumable } from "../../storage/ui/uploadResumable";
 
 const API = "/api/apps/content-catalog";
@@ -7,9 +8,11 @@ type Brand = { id: string; slug: string; name: string; storage_root: string; hos
 type Lifecycle = { lifecycle?: "active" | "archived"; revision?: number; archive_reason?: string; archived_at?: string };
 type Session = Lifecycle & { id: string; brand_id: string; title: string; session_date: string; status: string; notes: string };
 type Publication = { id: string; asset_id: string; asset_ids: string[]; title: string; destination: string; account_ref: string; audience: string; status: string; planned_at: string; actual_at: string; external_post_id: string; external_url: string; evidence_source: string; failure_details: string; legacy_target_id: string };
-type HostingSummary = { id: string; provider: string; connection_id: number; status: string; remote_id: string; last_checked_at: string };
-type Asset = Lifecycle & { original_session_id?: string; session_lifecycle?: string; session_revision?: number; eligible?: boolean; id: string; session_id: string; storage_install_id: number; storage_file_id: string; name: string; kind: string; content_type: string; size_bytes: number; review_status: string; media_status: string; media_rating: string; favorite?: boolean; patreon_intent?: "unset" | "free" | "paid"; tags?: string[]; description?: string; description_source?: string; description_updated_at?: string; duration_ms?: number; media_error?: string; publications: Publication[]; hostings?: HostingSummary[]; sources?: AssetSource[] };
-type Hosting = { id: string; provider: string; remote_id: string; status: string; embed_url: string; error: string };
+type HostingSummary = { id: string; provider: string; connection_id: number; status: string; remote_id: string; last_checked_at: string; encode_progress?: number | null; provider_stage?: string };
+type Asset = Lifecycle & { original_session_id?: string; session_lifecycle?: string; session_revision?: number; eligible?: boolean; id: string; session_id: string; storage_install_id: number; storage_file_id: string; name: string; kind: string; content_type: string; size_bytes: number; review_status: string; media_status: string; media_rating: string; favorite?: boolean; patreon_intent?: "unset" | "free" | "paid"; tags?: string[]; description?: string; description_source?: string; description_updated_at?: string; duration_ms?: number; media_error?: string; publications: Publication[]; hostings?: HostingSummary[]; hosting_intents?: HostingIntent[]; sources?: AssetSource[] };
+type Hosting = HostingSummary & { asset_id: string; embed_url: string; error: string; provider_status?: number | null; transcoding_messages?: unknown; check_error?: string; next_check_at?: string };
+type HostingIntent = { id: string; asset_id: string; title: string; status: string; checksum_status: string; error: string; hosting_id?: string };
+type HostingResponse = { hostings: Hosting[]; hosting_intents: HostingIntent[] };
 type AssetSource = { asset_id: string; relation: string; source_order: number; media_render_id: number; name?: string; session_id?: string; kind?: string; content_type?: string };
 type GigLink = { gigs_install_id: number; gig_id: number; role: string };
 type MediaDetails = { title?: string; description?: string; duration_ms?: number; width?: number; height?: number; audience_rating?: string; transcript_status?: string; probe_status?: string };
@@ -153,14 +156,15 @@ const previewCardStyle: CSSProperties = { display: "flex", flexDirection: "colum
 function AssetCardPreview({ asset, projectId }: { asset: Asset; projectId: string }) {
   return <div style={{ position: "relative", width: "100%", flexShrink: 0 }}>
     <PreviewImage src={previewURL(projectId, "assets", asset.id)} alt={`Preview of ${asset.name}`} fallback={mediaGlyph(assetMediaKind(asset))} />
-    {!!asset.hostings?.length && <div className="flex flex-wrap gap-1" style={{ position: "absolute", top: 8, left: 8, right: 8 }} aria-label="Cloud hosting status">{asset.hostings.map(hosting => {
+    {(!!asset.hostings?.length || asset.hosting_intents?.some(i=>i.status==="waiting_checksum")) && <div className="flex flex-wrap gap-1" style={{ position: "absolute", top: 8, left: 8, right: 8 }} aria-label="Cloud hosting status">{(asset.hostings||[]).map(hosting => {
       const status = hosting.status === "ready" && !hosting.remote_id ? "uncertain" : hosting.status;
-      const label = ({ ready: "Ready", processing: "Processing", reserved: "Queued", uncertain: "Unverified", failed: "Failed" } as Record<string, string>)[status] || "Unverified";
+      let label = ({ ready: "Ready", processing: "Processing", reserved: "Queued", uncertain: "Unverified", failed: "Failed" } as Record<string, string>)[status] || "Unverified";
+      if(status==="processing"){label=hosting.provider_stage?hostingStageLabel(hosting.provider_stage):label;if(hosting.encode_progress!=null)label+=` ${Math.round(hosting.encode_progress)}%`;}
       const provider = hosting.provider === "bunny" ? "Bunny" : hosting.provider;
       const color = status === "ready" ? "#bbf7d0" : status === "failed" ? "#fecaca" : "#fde68a";
       const background = status === "ready" ? "rgba(5, 46, 22, .94)" : status === "failed" ? "rgba(69, 10, 10, .94)" : "rgba(66, 32, 6, .94)";
       return <span key={hosting.id} className="rounded-md px-2 py-1 text-xs font-medium" style={{ color, background, border: "1px solid currentColor", boxShadow: "0 1px 4px rgba(0,0,0,.35)" }} title={`${provider} hosting: ${label.toLowerCase()} · connection ${hosting.connection_id}${hosting.last_checked_at ? ` · last checked ${hosting.last_checked_at}` : ""}`} aria-label={`${provider} hosting: ${label}`}>{provider} · {label}</span>;
-    })}</div>}
+    })}{(asset.hosting_intents||[]).filter(i=>i.status==="waiting_checksum").map(i=><span key={i.id} className="rounded-md px-2 py-1 text-xs font-medium" style={{color:"#fde68a",background:"rgba(66,32,6,.94)",border:"1px solid currentColor"}}>Waiting for checksum</span>)}</div>}
   </div>;
 }
 
@@ -291,6 +295,8 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const activeSessionId = useRef("");
   const [assetSources, setAssetSources] = useState<AssetSource[]>([]);
   const [hostings, setHostings] = useState<Hosting[]>([]);
+  const [hostingIntents,setHostingIntents]=useState<HostingIntent[]>([]);
+  const [hostingRefreshError,setHostingRefreshError]=useState("");
   const [assetMedia, setAssetMedia] = useState<MediaDetails | null>(null);
   const [candidates, setCandidates] = useState<ImportCandidate[]>([]);
   const [importLimitReached, setImportLimitReached] = useState(false);
@@ -394,9 +400,50 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   }, [get]);
   const openAsset = useCallback(async (asset: Asset) => {
     const request = ++assetRequest.current;
-    setSelectedAsset(asset); setAssetLoading(true); setAssetMedia(null); setAssetSources([]); setHostings([]); setError(""); setNotice("");
-    try { const result = await get<{ asset: Asset; hostings: Hosting[]; sources: AssetSource[]; publications: Publication[]; media?: MediaDetails; media_error?: string }>(`/assets/${asset.id}`); if (request !== assetRequest.current) return; const loaded = { ...result.asset, sources: result.sources || result.asset.sources || [], publications: result.publications || [] }; setSelectedAsset(loaded); setHostings(result.hostings || []); setAssets(current => current.map(item => item.id === asset.id ? loaded : item)); setAssetSources(result.sources || []); setAssetMedia(result.media || null); if (result.media_error) setError(`Media unavailable: ${result.media_error}`); } catch (e) { if (request === assetRequest.current) setError(errorText(e)); } finally { if (request === assetRequest.current) setAssetLoading(false); }
+    setSelectedAsset(asset); setAssetLoading(true); setAssetMedia(null); setAssetSources([]); setHostings([]); setHostingIntents([]);setHostingRefreshError(""); setError(""); setNotice("");
+    try { const result = await get<{ asset: Asset; hostings: Hosting[]; hosting_intents: HostingIntent[]; sources: AssetSource[]; publications: Publication[]; media?: MediaDetails; media_error?: string }>(`/assets/${asset.id}`); if (request !== assetRequest.current) return; const loaded = { ...result.asset, sources: result.sources || result.asset.sources || [], publications: result.publications || [] }; setSelectedAsset(loaded); setHostings(result.hostings || []);setHostingIntents(result.hosting_intents || []); setAssets(current => current.map(item => item.id === asset.id ? loaded : item)); setAssetSources(result.sources || []); setAssetMedia(result.media || null); if (result.media_error) setError(`Media unavailable: ${result.media_error}`); } catch (e) { if (request === assetRequest.current) setError(errorText(e)); } finally { if (request === assetRequest.current) setAssetLoading(false); }
   }, [get]);
+  const pendingHosting=hostingPending(hostings,hostingIntents);
+  useEffect(()=>{
+    if(!selectedAsset?.id || !pendingHosting)return;
+    let active=true;let timer:number|undefined;
+    const assetId=selectedAsset.id;
+    const poll=async()=>{
+      try{
+        const result=await get<HostingResponse>("/hostings",{asset_id:assetId});
+        if(!active)return;
+        setHostings(result.hostings||[]);setHostingIntents(result.hosting_intents||[]);setHostingRefreshError("");
+        setAssets(current=>current.map(a=>a.id===assetId?{...a,hostings:result.hostings||[],hosting_intents:result.hosting_intents||[]}:a));
+      }catch(err){if(active)setHostingRefreshError(errorText(err));}
+      if(active)timer=window.setTimeout(poll,5000);
+    };
+    timer=window.setTimeout(poll,5000);
+    return()=>{active=false;window.clearTimeout(timer);};
+  },[get,selectedAsset?.id,pendingHosting]);
+  useEffect(()=>{
+    if(!selectedSession?.id)return;
+    let active=true;let timer:number|undefined;
+    const sessionId=selectedSession.id;
+    const poll=async()=>{
+      try{
+        const result=await get<HostingResponse>("/hostings",{session_id:sessionId});
+        if(!active)return;
+        setAssets(current=>current.map(a=>({...a,hostings:(result.hostings||[]).filter(h=>h.asset_id===a.id),hosting_intents:(result.hosting_intents||[]).filter(i=>i.asset_id===a.id)})));
+      }catch{}
+      if(active)timer=window.setTimeout(poll,15000);
+    };
+    timer=window.setTimeout(poll,15000);
+    return()=>{active=false;window.clearTimeout(timer);};
+  },[get,selectedSession?.id]);
+  const requestHosting=async()=>{
+    if(!selectedAsset)return;
+    setBusy(true);setError("");setNotice("");
+    const asset=selectedAsset;
+    try{
+      const result=await action<{hosting?:Hosting;hosting_intent?:HostingIntent;pending_checksum?:boolean;checksum_status?:string;warning?:string}>("content_catalog_hosting_request",{asset_id:asset.id});
+      await openAsset(asset);setNotice(hostingNotice(result));
+    }catch(err){setError(errorText(err));}finally{setBusy(false);}
+  };
   const closeAsset = useCallback(() => { ++assetRequest.current; setSelectedAsset(null); setAssetLoading(false); }, []);
   const toggleFavorite = useCallback(async (asset: Asset) => {
     try {
@@ -621,8 +668,11 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
         <div className="min-w-0 space-y-3">
           <LifecycleHistory entity="asset" id={selectedAsset.id} get={get} />
  <h4 className="font-medium">Cloud hosting</h4>
-          <button disabled={busy || selectedAsset.review_status !== "approved" || selectedAsset.eligible === false} className="rounded border border-accent px-3 py-1.5 text-sm disabled:opacity-40" onClick={() => run(async () => { await action("content_catalog_hosting_request", { asset_id: selectedAsset.id }); await openAsset(selectedAsset); }, "Hosting request recorded")}>Host approved asset</button>
-          <div className="space-y-2">{hostings.map(h => <div key={h.id} className="rounded border border-border p-2 text-sm"><span className="font-medium">{h.provider}: {h.status}</span>{h.remote_id && <span className="ml-2 text-text-muted">{short(h.remote_id)}</span>}{h.embed_url && <a className="ml-2 text-accent underline" href={h.embed_url} target="_blank" rel="noreferrer">Open host</a>}{h.error && <p className="text-red-400">{h.error}</p>}{h.remote_id && h.status !== "ready" && <button className="text-accent underline" onClick={() => run(async () => { await action("content_catalog_hosting_check", { id: h.id }); await openAsset(selectedAsset); }, "Host checked")}>Check readiness</button>}</div>)}</div>
+          <button disabled={busy || pendingHosting || selectedAsset.review_status !== "approved" || selectedAsset.eligible === false} className="rounded border border-accent px-3 py-1.5 text-sm disabled:opacity-40" onClick={requestHosting}>Host approved asset</button>
+          {pendingHosting && <p className="text-xs text-text-muted" role="status">Updates automatically while this request is pending.</p>}
+          {hostingRefreshError && <p className="text-xs text-yellow-400">Could not refresh progress. Retrying… {hostingRefreshError}</p>}
+          <div className="space-y-2">{hostingIntents.slice(0,1).filter(i=>i.status!=="submitted").map(i=><div key={i.id} className="rounded border border-border p-3 text-sm" role="status"><p className="font-medium">{i.status==="waiting_checksum"?"Waiting for checksum verification":i.status==="cancelled"?"Hosting request cancelled":i.status==="blocked"?"Hosting request needs attention":"Checksum verification failed"}</p><p className="text-xs text-text-muted">{i.title}</p>{i.status==="waiting_checksum" && <p className="mt-1 text-xs text-text-muted">Storage: {i.checksum_status || "pending"}. Upload resumes automatically after verification and eligibility checks.</p>}{i.error && <p className="mt-1 text-xs text-yellow-400">{i.error}</p>}{i.status==="waiting_checksum" && <button type="button" disabled={busy} className="mt-2 text-xs text-accent underline" onClick={()=>run(async()=>{await action("content_catalog_hosting_cancel",{intent_id:i.id});const result=await get<HostingResponse>("/hostings",{asset_id:selectedAsset.id});setHostingIntents(result.hosting_intents||[]);},"Hosting request cancelled")}>Cancel waiting upload</button>}</div>)}</div>
+          <div className="space-y-2">{hostings.map(h => <div key={h.id} className="rounded border border-border p-3 text-sm"><div className="flex flex-wrap items-center gap-2"><span className="font-medium">{h.provider}: {h.status}</span>{h.remote_id && <span className="text-text-muted">{short(h.remote_id)}</span>}{h.embed_url && <a className="text-accent underline" href={h.embed_url} target="_blank" rel="noreferrer">Open host</a>}</div>{h.provider_stage && <p className="mt-1 text-xs text-text-muted">{hostingStageLabel(h.provider_stage)}{h.provider_status!=null?` · Provider status ${h.provider_status}`:""}</p>}{h.encode_progress!=null && <div className="mt-2 space-y-1"><div className="flex justify-between text-xs"><span>Encoding</span><span>{Math.round(h.encode_progress)}%</span></div><progress className="h-2 w-full accent-accent" value={h.encode_progress} max={100} aria-label="Video encoding progress" /></div>}{transcodingMessages(h.transcoding_messages).length>0 && <ul className="mt-2 space-y-1 text-xs text-text-muted">{transcodingMessages(h.transcoding_messages).map((message,index)=><li key={index}>{message}</li>)}</ul>}{h.error && <p className="mt-2 text-red-400">{h.error}</p>}{h.check_error && <p className="mt-2 text-xs text-yellow-400">Last check failed: {h.check_error}. Pending checks will retry automatically.</p>}{h.last_checked_at && <p className="mt-2 text-xs text-text-muted">Last checked {new Date(h.last_checked_at).toLocaleTimeString()}</p>}{h.remote_id && <button disabled={busy} className="mt-2 text-xs text-accent underline" onClick={() => run(async () => { await action("content_catalog_hosting_check", { id: h.id });const result=await get<HostingResponse>("/hostings",{asset_id:selectedAsset.id});setHostings(result.hostings||[]); }, "Host checked")}>Check readiness</button>}</div>)}</div>
           <div className="space-y-2 text-sm"><div className="flex items-center justify-between gap-2"><h4 className="font-medium">Platforms and posts</h4><button type="button" className="rounded border border-accent px-2 py-1 text-xs text-accent" onClick={() => { setEditingPublication(null); setModal("publication"); }}>+ Add platform</button></div>{!selectedAsset.publications?.length && <p className="text-xs text-text-muted">Nothing recorded for this file yet.</p>}{(selectedAsset.publications || []).map(p => <div key={p.id} className="flex flex-wrap items-center gap-2 rounded border border-border p-2 text-xs"><PublicationIcons items={[p]} /><span className="font-medium">{publicationLabel(p.status)}</span><span className="text-text-muted">{p.asset_ids?.length || 1} file{p.asset_ids?.length === 1 ? "" : "s"}</span>{p.account_ref && <span className="text-text-muted">{p.account_ref}</span>}{p.audience && <span className="text-text-muted">{p.audience}</span>}{p.actual_at && <span className="text-text-muted">{p.actual_at.slice(0, 10)}</span>}{p.planned_at && !p.actual_at && <span className="text-text-muted">Planned {p.planned_at.slice(0, 10)}</span>}{p.external_url && <a className="text-accent underline" href={p.external_url} target="_blank" rel="noreferrer">View post</a>}{p.external_post_id && <span className="text-text-muted">ID {p.external_post_id}</span>}{p.evidence_source && <span className="text-text-muted">via {p.evidence_source}</span>}{p.failure_details && <span className="text-red-400">{p.failure_details}</span>}<button type="button" className="ml-auto text-accent underline" onClick={() => { setEditingPublication(p); setModal("publication"); }}>Update status</button></div>)}</div>
         </div>
       </div>

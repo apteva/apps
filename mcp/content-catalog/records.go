@@ -38,6 +38,7 @@ type Asset struct {
 	DurationMS           int64            `json:"duration_ms"`
 	MediaError           string           `json:"media_error,omitempty"`
 	Publications         []Publication    `json:"publications"`
+	HostingIntents       []HostingIntent  `json:"hosting_intents"`
 	Hostings             []HostingSummary `json:"hostings"`
 }
 
@@ -281,7 +282,7 @@ func (a *App) assetGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err = loadAssetHostings(ctx.AppDB(), pid, []*Asset{asset}); err != nil {
 		return nil, err
 	}
-	out := map[string]any{"asset": asset, "sources": asset.Sources, "hostings": hostingsAny.(map[string]any)["hostings"], "publications": asset.Publications}
+	out := map[string]any{"asset": asset, "sources": asset.Sources, "hostings": hostingsAny.(map[string]any)["hostings"], "hosting_intents": hostingsAny.(map[string]any)["hosting_intents"], "publications": asset.Publications}
 	asset.MediaStatus, asset.MediaRating = "unavailable", ""
 	if ctx.IntegrationFor("media") != nil {
 		var media struct {

@@ -30,5 +30,8 @@ func (a *App) onStorageChecksumReady(ctx *sdk.AppCtx, event sdk.Event) error {
 		return nil
 	}
 	_, err := ctx.AppDB().Exec(`UPDATE assets SET sha256=?,revision=revision+1,updated_at=? WHERE project_id=? AND storage_install_id=? AND storage_file_id=? AND sha256<>?`, sha, now(), pid, bound.InstallID, fileID, sha)
-	return err
+	if err != nil {
+		return err
+	}
+	return a.resumeChecksumIntents(ctx, pid, fileID)
 }
