@@ -142,3 +142,8 @@ separate operator completion evidence after release. Advancing never approves
 or completes a step. Dependencies, timing, ownership and capacity remain enforced.
 The control mode and procedure are frozen for each run, including after restart.
 `automatic` remains the normal default.
+
+Use `draft` with `process_id` to return a published or paused process to draft.
+New runs stop; existing runs and their frozen definitions remain. Wait for
+`sync_pending=false` before updating. Use `activate` to publish again after review
+and explicit user authorization. Assignment activation choices are preserved.

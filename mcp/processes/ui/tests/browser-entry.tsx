@@ -104,6 +104,12 @@ window.fetch = (async (url: unknown, init?: RequestInit) => {
     );
   if (init?.method === "PUT" || init?.method === "POST") {
     const body = JSON.parse(String(init.body));
+    const lifecycle = path.match(/\/processes\/weather\/(activate|pause|draft)$/)?.[1];
+    if (lifecycle) {
+      process.status = lifecycle === "activate" ? "active" : lifecycle === "pause" ? "paused" : "draft";
+      sessionStorage.setItem("process", JSON.stringify(process));
+      return Response.json(process);
+    }
     if (controlFixture && path.endsWith("/start")) {
       sessionStorage.setItem("submitted-start", JSON.stringify(body));
       controlRun = {

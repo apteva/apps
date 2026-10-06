@@ -30,6 +30,7 @@ func definitionSchema() map[string]any {
 func (a *App) MCPTools() []sdk.Tool {
 	descriptions := map[string]string{"list": "Find procedures by search, status, or owner. Returns discovery metadata and reread references; use get to load instructions.", "get": "Read the current procedure once and historical version metadata. Specify version to load that exact immutable definition with procedure metadata. Follow reread references for recovery.", "validate_definition": "Validate and normalize a semantic procedure without saving it. Define steps and dependencies only; Processes always lays out the graph automatically.", "create": "Create an unassigned draft procedure. Send semantic steps and dependencies only; never graphical coordinates. No assignment or run is created. If the user names an executor, create the draft first, then use assignment_create, which starts paused.", "update": "Replace semantic procedure content with a new immutable draft version. Send no graphical coordinates. Requires a draft or fully paused process and expected_version.", "activate": "Activate a reviewed procedure only with explicit user authorization. An unassigned procedure schedules no work. Check sync_pending before claiming success.", "pause": "Stop future scheduled runs. Existing runs continue. Check sync_pending.", "archive": "Retire a process and stop future schedules. Existing runs continue.", "start": "Start one active assignment only with explicit user authorization. Create the draft, create a paused assignment, then explicitly activate the process and assignment first. Supply a stable idempotency_key and reuse it on retries.", "runs": "Read native process run and step history."}
 	descriptions["run_get"] = "Read the immutable procedure once and exact run/step state and evidence, with reread references. No duplicate textual snapshot."
+	descriptions["draft"] = "Return a process to draft for review or editing. Stop new manual, scheduled and triggered runs; existing runs continue. Preserve procedure versions, assignments and history. Check sync_pending."
 	descriptions["run_update"] = "Owner only: record direct run progress, blockers, or outcome. Completion requires evidence in result. Returns a compact saved-state receipt and a run_get reread reference; exact evidence remains stored."
 	for _, name := range []string{"assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive"} {
 		descriptions[name] = "Manage saved process assignments: separate owners, parameters, schedules, and execution modes. Update requires a paused assignment and expected_revision. Activate only after the process is active."
@@ -42,7 +43,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	descriptions["step_get"] = "Read the assigned step, frozen context and one dependencies manifest with exact ancestor receipts. No full procedure snapshot. After retaining shared policy, include_context=false omits it; omit this flag for recovery."
 	descriptions["step_update"] = "Assigned executor only: save progress or output; returns only a compact saved-state acknowledgement, not instructions or receipts. A persistent worker must inspect the returned done field: follow next_action to finish when true, otherwise follow next_action and any ready_steps/active_steps; auto parallel owners may continue other eligible work and await child results. Never poll."
 	out := []sdk.Tool{}
-	for _, name := range []string{"list", "get", "validate_definition", "create", "update", "activate", "pause", "archive", "start", "runs", "run_get", "run_update", "assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive", "step_get", "step_claim", "step_update", "run_cancel", "run_advance"} {
+	for _, name := range []string{"list", "get", "validate_definition", "create", "update", "activate", "pause", "draft", "archive", "start", "runs", "run_get", "run_update", "assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive", "step_get", "step_claim", "step_update", "run_cancel", "run_advance"} {
 		name := name
 		props := map[string]any{}
 		required := []string{}
@@ -258,6 +259,8 @@ func (a *App) executeResponse(project, actor, action string, args map[string]any
 		return a.changeStatus(project, id, "active")
 	case "pause":
 		return a.changeStatus(project, id, "paused")
+	case "draft":
+		return a.changeStatus(project, id, "draft")
 	case "archive":
 		return a.changeStatus(project, id, "archived")
 	case "start":
@@ -388,7 +391,7 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			action = "runs"
 		} else if r.Method == "POST" {
 			switch parts[1] {
-			case "activate", "pause", "archive", "start":
+			case "activate", "pause", "draft", "archive", "start":
 				action = parts[1]
 			}
 		}

@@ -185,13 +185,16 @@ func TestTriggerPauseAssignmentPauseAndStaleRevision(t *testing.T) {
 	}
 }
 func TestTriggerRapidParentPauseResumeInvalidatesQueuedEvents(t *testing.T) {
-	for _, parent := range []string{"process", "assignment"} {
+	for _, parent := range []string{"process", "draft", "assignment"} {
 		t.Run(parent, func(t *testing.T) {
 			a, f, p, tr := triggerSetup(t)
 			stale := signupEvent(tr, "queued-before-pause")
 			for _, status := range []string{"paused", "active"} {
 				var err error
-				if parent == "process" {
+				if parent == "process" || parent == "draft" {
+					if parent == "draft" && status == "paused" {
+						status = "draft"
+					}
 					_, err = a.changeStatus(p.ProjectID, p.ID, status)
 				} else {
 					_, err = a.assignmentStatus(p.ProjectID, p.ID, tr.AssignmentID, status)

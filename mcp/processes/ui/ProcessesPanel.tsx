@@ -122,7 +122,7 @@ function ReadinessCard({
       )}
       {status && status !== "active" && (
         <p className="small muted">
-          Activate the reviewed process explicitly before enabling assignments or starting runs.
+          Publish the reviewed process before enabling assignments or starting runs.
         </p>
       )}
     </section>
@@ -216,6 +216,7 @@ const css = `
 .ap-processes{--pc-bg:var(--color-bg,#101216);--pc-panel:var(--color-bg-card,#181b21);--pc-line:var(--color-border,#30343e);--pc-text:var(--color-text,#eceef2);--pc-muted:var(--color-text-muted,#969eac);--pc-accent:var(--color-accent,#ff6b00);color:var(--pc-text);background:var(--pc-bg);font-size:14px;line-height:1.55;min-height:100%;height:100%;overflow:auto;padding:28px;box-sizing:border-box}
 .ap-processes .pf-basics{display:grid;grid-template-columns:1fr 1fr;gap:20px}.ap-processes .pf-settings{margin:18px 0}.ap-processes .pf-settings>summary{cursor:pointer;color:var(--pc-muted);padding:10px 0 18px}.ap-processes .pf-basics .field{margin-bottom:0}@media(max-width:760px){.ap-processes .pf-basics{grid-template-columns:1fr}}.ap-processes *{box-sizing:border-box}.ap-processes h1{font-size:24px;line-height:1.25;margin:0;font-weight:650;letter-spacing:-.5px}.ap-processes h2{font-size:16px;margin:0 0 14px;font-weight:600}.ap-processes p{margin:6px 0}.ap-processes .muted{color:var(--pc-muted)}.ap-processes .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.ap-processes .between{justify-content:space-between}.ap-processes .head{margin-bottom:24px}.ap-processes button,.ap-processes .button{font:inherit;font-size:13px;border:1px solid var(--pc-line);background:var(--pc-panel);color:var(--pc-text);border-radius:8px;padding:9px 14px;cursor:pointer;text-decoration:none;display:inline-flex;gap:6px}.ap-processes button:hover{border-color:var(--pc-accent)}.ap-processes button:disabled{opacity:.45;cursor:default}.ap-processes .primary{background:var(--pc-accent);border-color:transparent;color:var(--pc-bg);font-weight:650}.ap-processes input,.ap-processes select,.ap-processes textarea{width:100%;border:1px solid var(--pc-line);border-radius:8px;background:var(--pc-bg);color:var(--pc-text);font:inherit;font-size:13px;padding:10px 12px}.ap-processes textarea{resize:vertical}.ap-processes :is(button,a,input,select,textarea):focus-visible{outline:2px solid var(--pc-accent);outline-offset:3px}.ap-processes label{display:block;font-size:12px;font-weight:600;margin-bottom:7px}.ap-processes .field{margin-bottom:19px}.ap-processes .card{background:var(--pc-panel);border:1px solid var(--pc-line);border-radius:12px;padding:22px}.ap-processes .process-item{cursor:pointer;transition:background-color .15s ease}.ap-processes .process-item:is(:hover,:focus-within){background:var(--color-bg-hover,#202020)}.ap-processes .process-item:focus-within{outline:2px solid var(--pc-accent);outline-offset:-2px}.ap-processes .grid{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(250px,1fr);gap:20px}.ap-processes .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:22px 0}.ap-processes .stat{border:1px solid var(--pc-line);border-radius:10px;padding:16px}.ap-processes .stat strong{display:block;font-size:25px}.ap-processes .stat span{font-size:12px;color:var(--pc-muted)}.ap-processes .pill{font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid var(--pc-line);text-transform:capitalize;white-space:nowrap}.ap-processes .pill.active,.ap-processes .pill.completed{color:#62ccaa;background:#62ccaa14;border-color:#62ccaa40}.ap-processes .pill.blocked,.ap-processes .pill.failed,.ap-processes .pill.paused{color:#e3b86d;background:#e3b86d14;border-color:#e3b86d40}.ap-processes .notice{border:1px solid #e3b86d66;background:#e3b86d10;border-radius:9px;padding:12px 15px;margin:15px 0;overflow-wrap:anywhere}.ap-processes .filters{margin-bottom:16px}.ap-processes .filters input{flex:1;min-width:180px}.ap-processes .filters select{width:auto;max-width:240px}.ap-processes table{color:var(--pc-text);border-collapse:collapse;width:100%;text-align:left;font-size:13px}.ap-processes th{color:var(--pc-muted);font-size:11px;text-transform:uppercase;letter-spacing:.07em;font-weight:500;padding:13px 16px;border-bottom:1px solid var(--pc-line)}.ap-processes td{padding:16px;border-bottom:1px solid var(--pc-line);vertical-align:top}.ap-processes tbody tr:last-child td{border-bottom:0}.ap-processes .table-wrap{overflow:auto;border:1px solid var(--pc-line);border-radius:10px}.ap-processes td button{border:0;padding:0;background:none;text-align:left;font-weight:600}.ap-processes .sub{font-size:12px;color:var(--pc-muted);margin-top:4px;max-width:390px}.ap-processes .tabs{display:flex;gap:20px;border-bottom:1px solid var(--pc-line);margin-bottom:23px}.ap-processes .tabs button{background:none;border:0;border-radius:0;padding:10px 0 13px;color:var(--pc-muted)}.ap-processes .tabs button.on{color:var(--pc-accent);border-bottom:2px solid var(--pc-accent)}.ap-processes .prose{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8}.ap-processes .block+.block{margin-top:26px}.ap-processes .empty{text-align:center;padding:60px 24px;border:1px dashed var(--pc-line);border-radius:12px}.ap-processes .empty p{margin:10px auto 20px;max-width:430px;color:var(--pc-muted)}.ap-processes .crumb{background:none;border:0;padding:0;color:var(--pc-muted);margin-bottom:18px}.ap-processes .small{font-size:12px}.ap-processes .toolbar{position:sticky;bottom:0;background:var(--pc-panel);padding:15px;border:1px solid var(--pc-line);border-radius:10px;margin-top:20px}.ap-processes .run{margin-bottom:12px}.ap-processes a{color:var(--pc-accent)}.ap-processes .run .prose{margin-top:12px}.ap-processes .overlay{position:fixed;inset:0;z-index:100;background:#0008;display:grid;place-items:center;padding:20px}.ap-processes .dialog{width:min(560px,100%);max-height:85vh;overflow:auto}@media(max-width:760px){.ap-processes{padding:18px}.ap-processes .grid{grid-template-columns:1fr}.ap-processes h1{font-size:21px}.ap-processes .stats{gap:7px}.ap-processes .stat{padding:12px}.ap-processes .hide-small{display:none}}
 .ap-processes .run-browser{display:grid;grid-template-columns:minmax(280px,.72fr) minmax(0,1.45fr);gap:16px;align-items:start}.ap-processes .run-list{display:flex;flex-direction:column;gap:8px}.ap-processes .run-list>button{display:block;width:100%;padding:14px;text-align:left}.ap-processes .run-list>button.on{border-color:var(--pc-accent);background:color-mix(in srgb,var(--pc-accent) 8%,var(--pc-panel))}.ap-processes .run-list-title{display:flex;align-items:center;justify-content:space-between;gap:10px}.ap-processes .run-detail{min-width:0}.ap-processes .tool-activity{margin-top:14px;border-top:1px solid var(--pc-line);padding-top:11px}.ap-processes .tool-activity>summary{cursor:pointer;color:var(--pc-muted);font-size:12px;font-weight:600}.ap-processes .tool-calls{list-style:none;margin:12px 0 0;padding:0}.ap-processes .tool-calls li{display:grid;grid-template-columns:34px minmax(0,1fr);gap:10px;padding:10px 0;border-top:1px solid var(--pc-line)}.ap-processes .tool-icon{width:30px;height:30px;border-radius:7px;object-fit:contain;background:var(--pc-bg);padding:5px}.ap-processes .tool-icon.mono{filter:grayscale(1)}.ap-processes .tool-icon.fallback{display:grid;place-items:center;color:var(--pc-accent);font-size:20px}.ap-processes .tool-call-copy{min-width:0}.ap-processes .tool-call-copy strong,.ap-processes .tool-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ap-processes .tool-reason{display:block;margin-top:5px;font-size:12px;overflow-wrap:anywhere}.ap-processes .tool-reason code{color:var(--pc-accent)}.ap-processes .tool-unavailable{margin-top:12px}@media(max-width:900px){.ap-processes .run-browser{grid-template-columns:1fr}}
+.ap-processes .process-publishing{max-width:520px}.ap-processes .process-publishing .row{justify-content:flex-end}.ap-processes .process-publishing p{text-align:right}@media(max-width:760px){.ap-processes .process-publishing .row{justify-content:flex-start}.ap-processes .process-publishing p{text-align:left}}
 .ap-processes .readiness{margin:0 0 20px}.ap-processes .readiness h2{margin:0}.ap-processes .readiness-counts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:16px}.ap-processes .readiness-counts span{padding:10px;border:1px solid var(--pc-line);border-radius:8px;color:var(--pc-muted);font-size:11px}.ap-processes .readiness-counts strong{display:block;color:var(--pc-text);font-size:18px}@media(max-width:700px){.ap-processes .readiness-counts{grid-template-columns:repeat(2,minmax(0,1fr))}}
 `;
 const Pill = ({ state }: { state: string }) => (
@@ -654,9 +655,40 @@ function Panel(props: Props) {
           </button>
         )}
         {p && !editing && (
-          <div className="row">
-            <Pill state={p.status} />
-            <span className="small muted">Version {p.version}</span>
+          <div className="process-publishing" role="group" aria-label="Process publishing">
+            <div className="row">
+              <span className={`pill ${p.status}`}>{p.status === "active" ? "Published" : p.status}</span>
+              <span className="small muted">Version {p.version}</span>
+              {p.status !== "archived" && (
+                <>
+                  {p.status !== "active" && (
+                    <button className="primary" disabled={busy || p.sync_pending} onClick={() => mutate("activate")}>
+                      Publish process
+                    </button>
+                  )}
+                  {p.status !== "draft" && (
+                    <button disabled={busy} onClick={() => mutate("draft")}>Return to draft</button>
+                  )}
+                  {p.status === "active" ? (
+                    <button disabled={busy} onClick={() => mutate("pause")}>Pause process</button>
+                  ) : (
+                    <button disabled={busy || p.sync_pending} onClick={() => {
+                      setDraft({ ...p });
+                      setEditing(true);
+                    }}>Edit procedure</button>
+                  )}
+                </>
+              )}
+            </div>
+            <p className="small muted">
+              {p.status === "draft"
+                ? "Draft: review or edit, then publish. Publishing allows enabled assignments to start runs."
+                : p.status === "active"
+                  ? "Published: enabled assignments can start runs. Returning to draft stops new runs; existing runs continue."
+                  : p.status === "paused"
+                    ? "Paused: new runs are stopped. Publish to resume, or return to draft for review."
+                    : "Archived: new runs are stopped. Existing runs and history remain available."}
+            </p>
           </div>
         )}
       </header>
@@ -1094,7 +1126,7 @@ function Panel(props: Props) {
                       ? "activate"
                       : p.status === "archived"
                         ? "archive"
-                        : "pause",
+                        : p.status === "draft" ? "draft" : "pause",
                   )
                 }
               >
@@ -1169,8 +1201,8 @@ function Panel(props: Props) {
                     enabled assignments · {(p.assignments || []).length} total
                   </p>
                   <p className="small muted">
-                    Pause this process to stop future runs for all its
-                    assignments. Use Assignments to control one page or agent.
+                    Publishing and draft controls are at the top of this page.
+                    Use Assignments to control individual agents, parameters and schedules.
                   </p>
                   <button onClick={() => setTab("assignments")}>
                     Manage assignments
@@ -1202,40 +1234,9 @@ function Panel(props: Props) {
                         >
                           Run now
                         </button>
-                        <button disabled={busy} onClick={() => mutate("pause")}>
-                          Pause
-                        </button>
                       </>
-                    ) : (
-                      p.status !== "archived" && (
-                        <button
-                          className="primary"
-                          disabled={busy}
-                          onClick={() => mutate("activate")}
-                        >
-                          Activate
-                        </button>
-                      )
-                    )}
-                    {p.status !== "archived" && (
-                      <button
-                        disabled={
-                          busy || p.status === "active" || p.sync_pending
-                        }
-                        onClick={() => {
-                          setDraft({ ...p });
-                          setEditing(true);
-                        }}
-                      >
-                        Edit procedure
-                      </button>
-                    )}
+                    ) : null}
                   </div>
-                  {p.status === "active" && (
-                    <p className="small muted" style={{ marginTop: 14 }}>
-                      Pause the process before editing its procedure.
-                    </p>
-                  )}
                   {p.status !== "archived" && (
                     <button
                       style={{ marginTop: 25 }}

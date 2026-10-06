@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: processes
 display_name: Processes
-version: 0.16.9
+version: 0.16.10
 description: Visual company procedures with generic connected steps, independent assignments, multi-agent execution, recurring runs, event triggers, and durable native run history.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/processes
@@ -24,7 +24,7 @@ provides:
     - name: process.updated
       description: A procedure or its synchronization status changed.
     - name: process.state_changed
-      description: A procedure was activated, paused, or archived.
+      description: A procedure was published, paused, returned to draft, or archived.
     - name: assignment.created
       description: An execution assignment was created.
     - name: assignment.updated
@@ -59,6 +59,7 @@ provides:
     - { name: update, description: Create an immutable procedure revision while paused or draft. }
     - { name: activate, description: Activate a procedure for use by its assignments. }
     - { name: pause, description: Stop future scheduled runs without interrupting current work. }
+    - { name: draft, description: Return a procedure to draft and stop new runs while preserving current work and history. }
     - { name: archive, description: Retire a procedure and stop future scheduled runs. }
     - { name: start, description: Start one execution of an active assignment. }
     - { name: runs, description: Inspect native process execution history. }
@@ -125,7 +126,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: processes/v0.16.9
+    ref: processes/v0.16.10
     entry: mcp/processes
   port: 8080
   health_check: /health

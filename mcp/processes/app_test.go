@@ -278,7 +278,7 @@ func TestProjectIsolationAndValidation(t *testing.T) {
 	if _, err := a.get("other", p.ID); !errors.Is(err, errNotFound) {
 		t.Fatal("cross-project read")
 	}
-	for _, action := range []string{"get", "update", "start", "runs", "pause", "activate", "archive"} {
+	for _, action := range []string{"get", "update", "start", "runs", "pause", "draft", "activate", "archive"} {
 		if _, err := a.execute("other", "operator", action, map[string]any{"process_id": p.ID, "idempotency_key": "key", "definition": def()}); err == nil {
 			t.Fatalf("cross-project %s", action)
 		}

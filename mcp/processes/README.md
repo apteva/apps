@@ -81,7 +81,7 @@ must be configured before activation. Runs already created never change.
 MCP requires trusted agent/project context. Tools are scoped to a process in
 that project, or to project-level native work. The host namespaces these local tool names:
 
-- `list`, `get`, `create`, `update`, `activate`, `pause`, `archive`
+- `list`, `get`, `create`, `update`, `activate`, `pause`, `draft`, `archive`
 - `assignments`, `assignment_get`, `assignment_create`, `assignment_update`,
   `assignment_activate`, `assignment_pause`, `assignment_archive`
 - `start`, `runs`, `run_get`, `run_update`, `run_cancel`
@@ -246,7 +246,7 @@ query matching the installation's scope. Route IDs cannot be overridden in JSON.
 
 - `GET/POST /processes`
 - `GET/PUT /processes/{process}`
-- `POST /processes/{process}/activate|pause|archive|start`
+- `POST /processes/{process}/activate|pause|draft|archive|start`
 - `GET /processes/{process}/runs`
 - `GET /processes/runs`
 - `GET /processes/{process}/runs/{run}`
@@ -543,3 +543,15 @@ Tier 3 scenario `scenarios/13-step-by-step.yaml` uses GPT-6.1 Sol, real MCP
 advancement, HTTP branch releases and operator approval. Its independent verifier
 checks stored authorizations, held-state observations, exact receipts, actual
 parallel overlap, validation dependencies and publication gating.
+
+### Publishing and returning to draft
+
+Use **Publish process** beside the status at the top of process details.
+Publishing enables active assignments to start manual, scheduled or triggered
+runs; paused assignments remain paused. **Return to draft** stops new runs
+and makes the procedure editable after synchronization. Existing runs continue
+with their frozen definitions, and all versions, assignments and history remain.
+Returning to draft does not create a version; **Save draft** creates the next
+immutable version. The same action is available as MCP `draft` and HTTP
+`POST /processes/{process}/draft`. **Pause process** remains available for
+temporarily stopping new runs without returning to draft.
