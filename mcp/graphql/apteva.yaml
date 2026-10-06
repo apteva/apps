@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: graphql
 display_name: GraphQL
-version: 0.7.8
+version: 0.7.9
 description: |
   Standalone multi-API GraphQL and realtime runtime. Define multiple named
   endpoints with independent schemas, resolver bindings, environments,
@@ -120,11 +120,52 @@ provides:
       icon: share
       entry: /ui/GraphQLPanel.mjs
 
+  ui_components:
+    - name: graphql-telemetry
+      label: GraphQL request health
+      description: Errors, slow queries, response sizes, and request details with live filters.
+      entry: /ui/GraphQLTelemetryWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      settings_schema:
+        type: object
+        properties:
+          api_slug:
+            type: string
+            title: API slug
+            default: default
+          window_minutes:
+            type: integer
+            title: Time window (minutes)
+            default: 60
+            minimum: 1
+            maximum: 10080
+          slow_threshold_ms:
+            type: integer
+            title: Slow request threshold (ms)
+            default: 1000
+            minimum: 1
+            maximum: 3600000
+          recent_limit:
+            type: integer
+            title: Requests displayed
+            default: 10
+            minimum: 1
+            maximum: 50
+          default_view:
+            type: string
+            title: Initial view
+            enum: [all, errors, slow]
+            default: all
+
 runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: graphql/v0.7.8
+    ref: graphql/v0.7.9
     entry: mcp/graphql
   port: 8080
   health_check: /health

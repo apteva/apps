@@ -31,6 +31,10 @@ func (a *App) projectFromRequest(r *http.Request) (string, error) {
 }
 
 func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
+	if requestTelemetryFrom(r) == nil {
+		a.observeGraphQL(w, r, a.handleGraphQL)
+		return
+	}
 	if r.Method != http.MethodPost && r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET, POST")
 		writeJSONError(w, http.StatusMethodNotAllowed, "GET or POST required", "method_not_allowed")
@@ -49,6 +53,14 @@ func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	apiLookupDuration := time.Since(apiLookupStart)
+	telemetry := requestTelemetryFrom(r)
+	if telemetry.environment == "" {
+		environment := r.Header.Get("X-GraphQL-Environment")
+		if environment == "" {
+			environment = r.URL.Query().Get("environment")
+		}
+		telemetry.environment = normalizeEnvironment(environment)
+	}
 	var req graphqlRequest
 	reader := io.Reader(http.MaxBytesReader(w, r.Body, int64(maxRequestBytes(a.ctx))))
 	if r.Method == http.MethodGet {
@@ -101,7 +113,7 @@ func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	if headerEnv := strings.TrimSpace(r.Header.Get("X-GraphQL-Environment")); headerEnv != "" {
 		environment = normalizeEnvironment(headerEnv)
 	}
-	start := time.Now()
+	requestTelemetryFrom(r).environment = environment
 	result, executeErr := a.execute(context.WithValue(r.Context(), requestMethodKey{}, r.Method), project, api.Slug, environment, req)
 	w.Header().Add("Server-Timing", fmt.Sprintf("graphql_api;dur=%.3f, graphql_config;dur=%.3f, graphql_prepare;dur=%.3f, graphql_plan;dur=%.3f, graphql_source;dur=%.3f, graphql_execute;dur=%.3f, graphql_fast;desc=%q",
 		milliseconds(apiLookupDuration), milliseconds(result.Timings.Config), milliseconds(result.Timings.Prepare), milliseconds(result.Timings.Plan), milliseconds(result.Timings.Source), milliseconds(result.Timings.Execute), fmt.Sprint(result.Timings.Fast)))
@@ -153,11 +165,17 @@ func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		response = map[string]any{"errors": result.Errors}
 		encoded, _ = json.Marshal(response)
 	}
-	requestID := r.Header.Get("X-Request-ID")
-	if identity := securityIdentity(r.Context()); identity != nil {
-		requestID = identity.RequestID
+	if identity := securityIdentity(r.Context()); identity != nil && identity.RequestID != "" {
+		w.Header().Set("X-Request-ID", identity.RequestID)
 	}
-	_ = a.logRequest(project, api.Slug, result, requestID, status, time.Since(start), len(encoded))
+	telemetry.result = result
+	telemetry.hasResult = true
+	telemetry.phases["api"] = milliseconds(apiLookupDuration)
+	telemetry.phases["config"] = milliseconds(result.Timings.Config)
+	telemetry.phases["prepare"] = milliseconds(result.Timings.Prepare)
+	telemetry.phases["plan"] = milliseconds(result.Timings.Plan)
+	telemetry.phases["source"] = milliseconds(result.Timings.Source)
+	telemetry.phases["execute"] = milliseconds(result.Timings.Execute)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(append(encoded, '\n'))
@@ -645,7 +663,20 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusInternalServerError, err.Error(), "storage_error")
 			return
 		}
-		writeJSON(w, map[string]any{"logs": rows, "count": len(rows)})
+		slowMS := int64(1000)
+		if value := r.URL.Query().Get("slow_threshold_ms"); value != "" {
+			slowMS, err = strconv.ParseInt(value, 10, 64)
+			if err != nil || slowMS < 1 {
+				writeJSONError(w, 400, "slow_threshold_ms must be a positive integer", "invalid_request")
+				return
+			}
+		}
+		summary, err := logSummary(a.ctx.AppReadDB(), storageProject(project, api.Slug), filter, slowMS)
+		if err != nil {
+			writeJSONError(w, 500, err.Error(), "storage_error")
+			return
+		}
+		writeJSON(w, map[string]any{"logs": rows, "count": len(rows), "summary": summary})
 		return
 	}
 	if path == "events" && r.Method == http.MethodPost {
@@ -669,6 +700,10 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) logRequest(project, apiSlug string, result executeResult, requestID string, status int, duration time.Duration, responseBytes int) error {
+	a.enqueueRequestLog(makeRequestLog(project, apiSlug, result, requestID, status, duration, responseBytes))
+	return nil
+}
+func makeRequestLog(project, apiSlug string, result executeResult, requestID string, status int, duration time.Duration, responseBytes int) requestLogEntry {
 	message := ""
 	codes := []string{}
 	if len(result.Errors) > 0 {
@@ -684,8 +719,12 @@ func (a *App) logRequest(project, apiSlug string, result executeResult, requestI
 		}
 	}
 	timings, _ := json.Marshal(result.SourceTimings)
+	allErrors, _ := json.Marshal(result.Errors)
+	if result.Errors == nil {
+		allErrors = []byte("[]")
+	}
 	encodedCodes, _ := json.Marshal(uniqueStrings(codes))
-	a.enqueueRequestLog(requestLogEntry{
+	return requestLogEntry{
 		projectID:     storageProject(project, apiSlug),
 		operationName: result.OperationName,
 		operationType: result.OperationType,
@@ -693,9 +732,8 @@ func (a *App) logRequest(project, apiSlug string, result executeResult, requestI
 		durationMS:    duration.Milliseconds(),
 		errorMessage:  message,
 		createdAt:     nowUTC(),
-		operationHash: result.OperationHash, apiRelease: result.Release, responseBytes: responseBytes, rowCount: result.Rows, resolverCount: result.Resolvers, sourceTimings: string(timings), errorCodes: string(encodedCodes), authorizationScope: result.AuthScope, requestID: requestID,
-	})
-	return nil
+		operationHash: result.OperationHash, apiRelease: result.Release, responseBytes: responseBytes, rowCount: result.Rows, resolverCount: result.Resolvers, sourceTimings: string(timings), errorCodes: string(encodedCodes), authorizationScope: result.AuthScope, requestID: requestID, allErrors: string(allErrors), timings: "{}",
+	}
 }
 
 func writeGraphQLError(w http.ResponseWriter, status int, err error) {

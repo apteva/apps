@@ -496,3 +496,50 @@ can set `config.topic`; Tables row events are bridged automatically and trusted
 source adapters or the `graphql_event_publish` tool can publish matching
 events. Database-native change-feed integration is the next step for full
 collection CDC delivery.
+
+## Request health and dashboard widget
+
+The **Logs** tab and the **GraphQL request health** dashboard widget share the
+same server-side filters. Choose **Errors** to include HTTP failures and GraphQL
+errors returned with HTTP 200, **Slow** for requests over the threshold, or
+**Large** for responses of at least 1 MB. Search matches operation names/hashes,
+request IDs, and every retained error message. Advanced filters include error
+code, exact operation, environment, operation type, HTTP status, duration,
+response bytes, rows, and resolver counts; each numeric dimension has lower and
+upper bounds. Time windows include custom local dates, converted to UTC.
+
+Expand a request to read every error, its field path and source location, the
+request ID, authorization scope, API release, response statistics, execution
+phases, and source timings. Copy details exports the stored request metadata.
+Query text, variables, request bodies, and authentication tokens are not stored.
+
+Summary counts and averages cover **all matching stored requests**, independently
+of the list's limit (at most 500). They describe the selected filters, rather than
+an unfiltered global error rate. Logging is asynchronous and may drop entries
+under queue saturation or a storage failure; it is operational telemetry rather
+than a durable audit trail. Older entries retain their existing details, with an
+unknown environment where none was recorded. Use **All environments** to include
+them.
+
+HTTP observations include decoding, public-route authentication, execution and
+response writing. Malformed requests, authentication rejections, and method
+rejections are logged too, when a project can be established. WebSocket
+subscriptions are not included in this request view.
+
+The app exports `graphql-telemetry` in `provides.ui_components` for
+`dashboard.home`, with project visibility and half/full sizes, following the
+Tasks widget convention. Add **GraphQL request health** from the dashboard widget
+gallery. Per-widget settings select the API slug, window in minutes, slow
+threshold in milliseconds, initial view (all/errors/slow), and list limit. The
+widget supports changing APIs, filtering and expanding details directly; live
+refresh runs every 30 seconds while the page is visible. The app pins SDK v0.95.0.
+
+Build and validate this UI without rebuilding other apps:
+
+```sh
+bun build mcp/graphql/ui/GraphQLTelemetryWidget.tsx --target browser --format esm \
+  --external react --external react/jsx-runtime --external react/jsx-dev-runtime \
+  --define 'process.env.NODE_ENV="production"' \
+  --outfile mcp/graphql/ui/GraphQLTelemetryWidget.mjs
+bun test mcp/graphql/ui/telemetry.test.ts
+```

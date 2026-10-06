@@ -22,6 +22,10 @@ type logFilter struct {
 	minResolvers     *int64
 	maxResolvers     *int64
 	statusCode       *int
+	hasErrors        *bool
+	errorCode        string
+	search           string
+	environment      string
 	operationName    string
 	operationType    string
 	since            string
@@ -73,6 +77,9 @@ func (f *logFilter) normalize() error {
 		return invalid("status_code must be between 100 and 599")
 	}
 	f.operationName = strings.TrimSpace(f.operationName)
+	f.errorCode = strings.TrimSpace(f.errorCode)
+	f.search = strings.TrimSpace(f.search)
+	f.environment = strings.TrimSpace(f.environment)
 	f.operationType = strings.ToLower(strings.TrimSpace(f.operationType))
 	if f.operationType != "" && f.operationType != "query" && f.operationType != "mutation" && f.operationType != "subscription" {
 		return invalid("operation_type must be query, mutation, or subscription")
@@ -92,6 +99,8 @@ func (f *logFilter) normalize() error {
 	if f.sortOrder != "asc" && f.sortOrder != "desc" {
 		return invalid("sort_order must be asc or desc")
 	}
+	f.since = strings.TrimSpace(f.since)
+	f.until = strings.TrimSpace(f.until)
 	for name, value := range map[string]string{"since": f.since, "until": f.until} {
 		if strings.TrimSpace(value) == "" {
 			continue
@@ -106,8 +115,12 @@ func (f *logFilter) normalize() error {
 			f.until = parsed.UTC().Format(time.RFC3339Nano)
 		}
 	}
-	if f.since != "" && f.until != "" && f.since > f.until {
-		return invalid("since cannot be after until")
+	if f.since != "" && f.until != "" {
+		since, _ := time.Parse(time.RFC3339Nano, f.since)
+		until, _ := time.Parse(time.RFC3339Nano, f.until)
+		if since.After(until) {
+			return invalid("since cannot be after until")
+		}
 	}
 	return nil
 }
@@ -175,6 +188,16 @@ func parseLogFiltersArgs(args map[string]any) (logFilter, error) {
 		}
 	}
 	filter.operationName = stringArg(args, "operation_name", "")
+	if value, ok := args["has_errors"]; ok && value != nil {
+		parsed, ok := value.(bool)
+		if !ok {
+			return filter, invalid("has_errors must be a boolean")
+		}
+		filter.hasErrors = &parsed
+	}
+	filter.errorCode = stringArg(args, "error_code", "")
+	filter.search = stringArg(args, "search", "")
+	filter.environment = stringArg(args, "environment", "")
 	filter.operationType = stringArg(args, "operation_type", "")
 	filter.since = stringArg(args, "since", "")
 	filter.until = stringArg(args, "until", "")
@@ -226,6 +249,16 @@ func parseLogFiltersQuery(values url.Values) (logFilter, error) {
 		filter.statusCode = &parsed
 	}
 	filter.operationName = values.Get("operation_name")
+	if value := values.Get("has_errors"); value != "" {
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return filter, invalid("has_errors must be a boolean")
+		}
+		filter.hasErrors = &parsed
+	}
+	filter.errorCode = values.Get("error_code")
+	filter.search = values.Get("search")
+	filter.environment = values.Get("environment")
 	filter.operationType = values.Get("operation_type")
 	filter.since = values.Get("since")
 	filter.until = values.Get("until")
@@ -234,12 +267,10 @@ func parseLogFiltersQuery(values url.Values) (logFilter, error) {
 	return filter, filter.normalize()
 }
 
-func publicLogsFiltered(db *sql.DB, project string, filter logFilter) ([]map[string]any, error) {
-	if err := filter.normalize(); err != nil {
-		return nil, err
-	}
-	query := `SELECT id, operation_name, operation_type, status_code, duration_ms, error, created_at, operation_hash, api_release, response_bytes, row_count, resolver_count, source_timings_json, error_codes_json, authorization_scope, request_id
-        FROM graphql_request_logs WHERE project_id=?`
+const logErrorCondition = `(status_code>=400 OR error<>'' OR EXISTS (SELECT 1 FROM json_each(error_codes_json)) OR EXISTS (SELECT 1 FROM json_each(errors_json)))`
+
+func logWhere(project string, filter logFilter) (string, []any) {
+	query := " WHERE project_id=?"
 	args := []any{project}
 	conditions := []struct {
 		value *int64
@@ -268,35 +299,89 @@ func publicLogsFiltered(db *sql.DB, project string, filter logFilter) ([]map[str
 		query += " AND operation_type=?"
 		args = append(args, filter.operationType)
 	}
+	if filter.environment != "" {
+		query += " AND environment=?"
+		args = append(args, filter.environment)
+	}
+	if filter.hasErrors != nil {
+		if *filter.hasErrors {
+			query += " AND " + logErrorCondition
+		} else {
+			query += " AND NOT " + logErrorCondition
+		}
+	}
+	if filter.errorCode != "" {
+		query += " AND EXISTS (SELECT 1 FROM json_each(error_codes_json) WHERE value=?)"
+		args = append(args, filter.errorCode)
+	}
+	if filter.search != "" {
+		query += " AND (instr(lower(operation_name),lower(?))>0 OR instr(lower(error),lower(?))>0 OR instr(lower(request_id),lower(?))>0 OR instr(lower(operation_hash),lower(?))>0 OR instr(lower(errors_json),lower(?))>0)"
+		for range 5 {
+			args = append(args, filter.search)
+		}
+	}
 	if filter.since != "" {
-		query += " AND created_at>=?"
+		query += " AND julianday(created_at)>=julianday(?)"
 		args = append(args, filter.since)
 	}
 	if filter.until != "" {
-		query += " AND created_at<=?"
+		query += " AND julianday(created_at)<=julianday(?)"
 		args = append(args, filter.until)
 	}
-	query += " ORDER BY " + filter.sortBy + " " + strings.ToUpper(filter.sortOrder) + ", id DESC LIMIT ?"
+	return query, args
+}
+
+func publicLogsFiltered(db *sql.DB, project string, filter logFilter) ([]map[string]any, error) {
+	if err := filter.normalize(); err != nil {
+		return nil, err
+	}
+	where, args := logWhere(project, filter)
+	query := `SELECT id, operation_name, operation_type, status_code, duration_ms, error, created_at, operation_hash, api_release, response_bytes, row_count, resolver_count, source_timings_json, error_codes_json, authorization_scope, request_id, environment, errors_json, timings_json FROM graphql_request_logs` + where
+	sortColumn := filter.sortBy
+	if sortColumn == "created_at" {
+		sortColumn = "julianday(created_at)"
+	}
+	query += " ORDER BY " + sortColumn + " " + strings.ToUpper(filter.sortOrder) + ", id DESC LIMIT ?"
 	args = append(args, filter.limit)
 	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []map[string]any
+	out := make([]map[string]any, 0)
 	for rows.Next() {
 		var id, duration int64
 		var operationName, operationType, message, created, operationHash, sourceTimings, errorCodes, authScope, requestID string
 		var status int
 		var release, responseBytes, rowCount, resolverCount int
-		if err := rows.Scan(&id, &operationName, &operationType, &status, &duration, &message, &created, &operationHash, &release, &responseBytes, &rowCount, &resolverCount, &sourceTimings, &errorCodes, &authScope, &requestID); err != nil {
+		var environment, allErrors, phases string
+		if err := rows.Scan(&id, &operationName, &operationType, &status, &duration, &message, &created, &operationHash, &release, &responseBytes, &rowCount, &resolverCount, &sourceTimings, &errorCodes, &authScope, &requestID, &environment, &allErrors, &phases); err != nil {
 			return nil, err
 		}
 		var timings any
 		_ = json.Unmarshal([]byte(sourceTimings), &timings)
 		var codes any
 		_ = json.Unmarshal([]byte(errorCodes), &codes)
-		out = append(out, map[string]any{"id": id, "operation_name": operationName, "operation_type": operationType, "status_code": status, "duration_ms": duration, "error": message, "created_at": created, "operation_hash": operationHash, "api_release": release, "response_bytes": responseBytes, "row_count": rowCount, "resolver_count": resolverCount, "source_timings": timings, "error_codes": codes, "authorization_scope": authScope, "request_id": requestID})
+		var errors, timingPhases any
+		_ = json.Unmarshal([]byte(allErrors), &errors)
+		_ = json.Unmarshal([]byte(phases), &timingPhases)
+		out = append(out, map[string]any{"id": id, "operation_name": operationName, "operation_type": operationType, "status_code": status, "duration_ms": duration, "error": message, "created_at": created, "operation_hash": operationHash, "api_release": release, "response_bytes": responseBytes, "row_count": rowCount, "resolver_count": resolverCount, "source_timings": timings, "error_codes": codes, "authorization_scope": authScope, "request_id": requestID, "environment": environment, "errors": errors, "timings": timingPhases})
 	}
 	return out, rows.Err()
+}
+
+// Counts cover every matching stored request, rather than just the limited list.
+func logSummary(db *sql.DB, project string, filter logFilter, slowMS int64) (map[string]any, error) {
+	if err := filter.normalize(); err != nil {
+		return nil, err
+	}
+	where, args := logWhere(project, filter)
+	query := `SELECT COUNT(*), COALESCE(SUM(CASE WHEN ` + logErrorCondition + ` THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN duration_ms>=? THEN 1 ELSE 0 END),0), COALESCE(AVG(duration_ms),0), COALESCE(MAX(duration_ms),0), COALESCE(SUM(response_bytes),0) FROM graphql_request_logs` + where
+	args = append([]any{slowMS}, args...)
+	var count, errors, slow, maxMS, bytes int64
+	var avgMS float64
+	if err := db.QueryRow(query, args...).Scan(&count, &errors, &slow, &avgMS, &maxMS, &bytes); err != nil {
+		return nil, err
+	}
+	return map[string]any{"requests": count, "errors": errors, "slow": slow, "avg_duration_ms": avgMS, "max_duration_ms": maxMS, "response_bytes": bytes, "slow_threshold_ms": slowMS}, nil
 }

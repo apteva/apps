@@ -52,6 +52,15 @@ func testDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec(string(migration)); err != nil {
 		t.Fatal(err)
 	}
+	for _, name := range []string{"006_log_filter_indexes.sql", "007_telemetry_details.sql"} {
+		migration, err := os.ReadFile("migrations/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.Exec(string(migration)); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return db
 }
 

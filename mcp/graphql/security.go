@@ -528,6 +528,10 @@ func authorizePermissionFields(ctx context.Context, p securityPolicy, fields []s
 // A separate Auth-only entry point preserves the platform gate on the existing
 // /graphql, /admin and MCP surfaces. No anonymous fallback, even on default APIs.
 func (a *App) handlePublicGraphQL(w http.ResponseWriter, r *http.Request) {
+	if requestTelemetryFrom(r) == nil {
+		a.observeGraphQL(w, r, a.handlePublicGraphQL)
+		return
+	}
 	w.Header().Set("Cache-Control", "private, no-store")
 	project := a.ctx.CurrentProject()
 	if project == "" {
@@ -564,7 +568,9 @@ func (a *App) handlePublicGraphQL(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	r = r.WithContext(ctx)
 	authStart := time.Now()
+	requestTelemetryFrom(r).environment = p.Environment
 	identity, err := a.authenticateGraphQL(r, project, slug, p)
+	requestTelemetryFrom(r).phases["auth"] = milliseconds(time.Since(authStart))
 	w.Header().Add("Server-Timing", fmt.Sprintf("graphql_auth;dur=%.3f", milliseconds(time.Since(authStart))))
 	if err != nil {
 		status := 401
