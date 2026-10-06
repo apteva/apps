@@ -21,11 +21,29 @@ if (!cssPath) {
   }
 }
 
+const streams = new Set<ReadableStreamDefaultController>();
 Bun.serve({
   hostname: "127.0.0.1",
   port: 5297,
   fetch(r) {
     const path = new URL(r.url).pathname;
+    if (path === "/api/app-events/telephony") {
+      let controller: ReadableStreamDefaultController;
+      return new Response(new ReadableStream({
+        start(c) { controller = c; streams.add(c); c.enqueue(new TextEncoder().encode(": connected\n\n")); },
+        cancel() { streams.delete(controller); },
+      }), { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" } });
+    }
+    if (path === "/fixture/streams") return Response.json({ count: streams.size });
+    if (path === "/fixture/audio-events" && r.method === "POST") {
+      return r.json().then((event) => {
+        for (const c of [...streams]) {
+          try { if (event.disconnect) { c.close(); streams.delete(c); } else c.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`)); }
+          catch { streams.delete(c); }
+        }
+        return Response.json({ ok: true });
+      });
+    }
     if (path === "/health") return new Response("ok");
     if (path === "/app.js")
       return new Response(source, {

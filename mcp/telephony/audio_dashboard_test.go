@@ -344,3 +344,69 @@ func TestAudioDashboardWindowUnderHistoricalLoad(t *testing.T) {
 	}
 	t.Logf("3641 indexed reports: average complete aggregate + page + facets: %s", time.Since(start)/5)
 }
+
+func TestAudioDashboardNotificationsFollowCommitAndStayBounded(t *testing.T) {
+	softphoneTestCtx(t)
+	a := &App{installID: 42}
+	for i := range 125 {
+		id := fmt.Sprintf("notify-%03d", i)
+		audioDashboardTestSample(t, a, id, browserAudioDiagnostics{PlaybackDroppedMS: 40})
+		if i < 10 {
+			if _, err := a.db().db.Exec(`UPDATE calls SET project_id='project-b' WHERE id=?`, id); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	notifications := 0
+	notify := func(changed map[string][]string) {
+		notifications++
+		size := 0
+		for project, ids := range changed {
+			for _, id := range ids {
+				var actual string
+				// The notification must run after commit and outside the transaction.
+				if err := a.db().db.QueryRow(`SELECT project_id FROM telephony_audio_reports WHERE call_id=?`, id).Scan(&actual); err != nil {
+					t.Fatal(err)
+				}
+				if actual != project {
+					t.Fatalf("wrong notification project %s != %s", project, actual)
+				}
+			}
+			size += len(ids)
+		}
+		if size == 0 || size > 100 {
+			t.Fatalf("unbounded notification size %d", size)
+		}
+	}
+	for range 2 {
+		if err := a.db().refreshAudioDashboardAndNotify(context.Background(), notify); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if notifications != 2 {
+		t.Fatalf("notifications=%d", notifications)
+	}
+	if err := a.db().refreshAudioDashboardAndNotify(context.Background(), notify); err != nil {
+		t.Fatal(err)
+	}
+	if notifications != 2 {
+		t.Fatal("idle worker emitted a change")
+	}
+	audioDashboardTestSample(t, a, "rollback-notify", browserAudioDiagnostics{PlaybackDroppedMS: 80})
+	if _, err := a.db().db.Exec(`DROP TABLE telephony_audio_reports`); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db().refreshAudioDashboardAndNotify(context.Background(), notify); err == nil {
+		t.Fatal("expected indexing failure")
+	}
+	if notifications != 2 {
+		t.Fatal("failed transaction emitted a change")
+	}
+	var pending int
+	if err := a.db().db.QueryRow(`SELECT count(*) FROM telephony_audio_pending WHERE call_id='rollback-notify'`).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending != 1 {
+		t.Fatal("failed transaction lost work")
+	}
+}

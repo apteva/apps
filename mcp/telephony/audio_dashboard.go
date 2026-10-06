@@ -198,6 +198,12 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 // Atomic bounded batch: a simultaneous diagnostic write cannot be lost when
 // the queue item is removed. Failure leaves every selected item queued.
 func (c *callsDB) refreshAudioDashboard(ctx context.Context) error {
+	return c.refreshAudioDashboardAndNotify(ctx, nil)
+}
+
+// Notify only after commit, so an SSE refresh sees the indexed diagnostics.
+// One hint per project/batch keeps notifications out of the media frame path.
+func (c *callsDB) refreshAudioDashboardAndNotify(ctx context.Context, notify func(map[string][]string)) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	tx, err := c.db.BeginTx(ctx, nil)
@@ -223,6 +229,7 @@ func (c *callsDB) refreshAudioDashboard(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	changed := map[string][]string{}
 	for _, id := range ids {
 		var r callRow
 		err = tx.QueryRowContext(ctx, `SELECT id,project_id,carrier_slug,placed_at,COALESCE(browser_audio_diagnostics,'{}'),COALESCE(carrier_audio_diagnostics,'{}'),COALESCE(media_error_message,''),COALESCE(media_close_code,0),COALESCE(peer_kind,'') FROM calls WHERE id=?`, id).Scan(&r.ID, &r.ProjectID, &r.CarrierSlug, &r.PlacedAt, &r.BrowserAudioDiagnostics, &r.CarrierAudioDiagnostics, &r.MediaErrorMessage, &r.MediaCloseCode, &r.PeerKind)
@@ -242,11 +249,20 @@ func (c *callsDB) refreshAudioDashboard(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		if r.ProjectID != "" {
+			changed[r.ProjectID] = append(changed[r.ProjectID], id)
+		}
 		if _, err = tx.ExecContext(ctx, `DELETE FROM telephony_audio_pending WHERE call_id=?`, id); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if notify != nil && len(changed) > 0 {
+		notify(changed)
+	}
+	return nil
 }
 
 func (c *callsDB) saveAudioDashboardAlert(alert audioAlert) error {
