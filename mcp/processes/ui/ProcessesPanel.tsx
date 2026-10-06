@@ -676,7 +676,7 @@ function Panel(props: Props) {
   const selectedExecution =
     executions.find((run) => run.record.id === selectedRunID) || null;
   const selectedProjectRun =
-    filteredProjectRuns.find((run) => run.record.id === selectedProjectRunID) ||
+    projectRuns.find((run) => run.record.id === selectedProjectRunID) ||
     null;
   useEffect(() => {
     if (!selected || tab !== "runs" || !selectedRunID || !selectedExecution || terminalRunStates.has(selectedExecution.record.state)) return;
@@ -834,31 +834,9 @@ function Panel(props: Props) {
               <option value="cancelled">Cancelled</option>
             </select>
           </div>
-          {filteredProjectRuns.length ? (
-            <div className="run-browser">
-              <div className="run-list" aria-label="Project runs">
-                {filteredProjectRuns.map((run) => (
-                  <button
-                    key={run.record.id}
-                    className={selectedProjectRunID === run.record.id ? "on" : ""}
-                    aria-pressed={selectedProjectRunID === run.record.id}
-                    onClick={() => setSelectedProjectRunID(run.record.id)}
-                  >
-                    <span className="run-list-title">
-                      <strong>{run.process_name || "Process run"}</strong>
-                      <Pill state={run.record.state} />
-                    </span>
-                    <span className="sub">
-                      {run.assignment?.name || run.record.title} · {date(run.record.created_at)}
-                    </span>
-                    <span className="sub">
-                      {run.record.current_step ||
-                        (run.record.workflow ? "Team workflow" : "Direct run")}
-                    </span>
-                  </button>
-                ))}
-              </div>
-              {selectedProjectRun ? (
+          {filteredProjectRuns.length || selectedProjectRun ? (
+            selectedProjectRun ? (
+              <div className="run-detail-page">
                 <RunDetailCard
                   entry={selectedProjectRun}
                   ownerName={ownerName}
@@ -879,14 +857,39 @@ function Panel(props: Props) {
                     setTab("overview");
                     setVersion(0);
                   }}
+                  onBack={() => setSelectedProjectRunID("")}
                 />
-              ) : (
+              </div>
+            ) : (
+              <div className="run-browser">
+                <div className="run-list" aria-label="Project runs">
+                  {filteredProjectRuns.map((run) => (
+                    <button
+                      key={run.record.id}
+                      className={selectedProjectRunID === run.record.id ? "on" : ""}
+                      aria-pressed={selectedProjectRunID === run.record.id}
+                      onClick={() => setSelectedProjectRunID(run.record.id)}
+                    >
+                      <span className="run-list-title">
+                        <strong>{run.process_name || "Process run"}</strong>
+                        <Pill state={run.record.state} />
+                      </span>
+                      <span className="sub">
+                        {run.assignment?.name || run.record.title} · {date(run.record.created_at)}
+                      </span>
+                      <span className="sub">
+                        {run.record.current_step ||
+                          (run.record.workflow ? "Team workflow" : "Direct run")}
+                      </span>
+                    </button>
+                  ))}
+                </div>
                 <div className="empty">
                   <h2>Select a run</h2>
                   <p>Choose an execution to inspect its steps, outcomes, and tool activity.</p>
                 </div>
-              )}
-            </div>
+              </div>
+            )
           ) : (
             <div className="empty">
               <h2>No runs found</h2>

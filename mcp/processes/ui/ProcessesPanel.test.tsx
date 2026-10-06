@@ -533,6 +533,13 @@ test("main Runs tab browses executions across processes", async () => {
   expect(document.body.textContent).not.toContain("Digest published");
   await clickContaining("Publish digest");
   expect(document.body.textContent).toContain("Digest published");
+  expect(document.querySelector(".run-detail-page")).toBeTruthy();
+  expect(document.querySelector(".run-detail-page .run-detail")).toBeTruthy();
+  expect(document.querySelector(".run-detail-page .run-list")).toBeNull();
+  expect(document.body.textContent).toContain("Procedure v2");
+  await click("← Back to runs");
+  expect(document.querySelector(".run-detail-page")).toBeNull();
+  expect(document.querySelector(".run-list")).toBeTruthy();
 });
 
 test("assignment offers step-by-step run and freezes the selected mode in start", async () => {
