@@ -25,7 +25,6 @@ type AssignmentConfig struct {
 	Roles             map[string]Executor `json:"roles,omitempty"`
 	FollowLatest      bool                `json:"follow_latest"`
 	Name              string              `json:"name"`
-	Target            string              `json:"target"`
 	OwnerAgentID      int64               `json:"owner_agent_id"`
 	ExecutionMode     string              `json:"-"`
 	Schedule          *Schedule           `json:"schedule,omitempty"`
@@ -208,8 +207,8 @@ func (a *App) saveAssignment(project, process, id string, expected int, c Assign
 		return nil, errors.New("process is archived")
 	}
 	c.Name = strings.TrimSpace(c.Name)
-	if c.Name == "" || len(c.Name) > 160 || len(c.Target) > 500 {
-		return nil, errors.New("assignment name is required (max 160); target max 500")
+	if c.Name == "" || len(c.Name) > 160 {
+		return nil, errors.New("assignment name is required (max 160)")
 	}
 	if c.FollowLatest || c.ProcedureVersion == 0 {
 		c.ProcedureVersion = p.Version

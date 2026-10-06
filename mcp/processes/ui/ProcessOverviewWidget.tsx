@@ -31,7 +31,6 @@ export type Item = {
   process_name: string;
   assignment_id?: string;
   assignment_name?: string;
-  target?: string;
   agent_id?: number;
   version?: number;
   state: string;
@@ -406,7 +405,6 @@ function Overview(props: Props) {
               const identity = [
                 x.project_name || x.project_id,
                 x.assignment_name || name(x.agent_id),
-                x.target,
               ]
                 .filter(Boolean)
                 .join(" · ");
@@ -490,7 +488,6 @@ function Overview(props: Props) {
               <p>
                 {[
                   detail.item.assignment_name,
-                  detail.item.target,
                   name(detail.item.agent_id),
                 ]
                   .filter(Boolean)

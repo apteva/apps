@@ -12,7 +12,7 @@ import (
 
 func addAssignment(t *testing.T, a *App, p *Process, name string, owner int64, mode string, schedule *Schedule, values map[string]any) *Assignment {
 	t.Helper()
-	x, e := a.saveAssignment(p.ProjectID, p.ID, "", 0, AssignmentConfig{Name: name, Target: name, OwnerAgentID: owner, ExecutionMode: mode, ProcedureVersion: p.Version, FollowLatest: true, Schedule: schedule, Parameters: values})
+	x, e := a.saveAssignment(p.ProjectID, p.ID, "", 0, AssignmentConfig{Name: name, OwnerAgentID: owner, ExecutionMode: mode, ProcedureVersion: p.Version, FollowLatest: true, Schedule: schedule, Parameters: values})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -100,7 +100,7 @@ func TestAssignmentSnapshotSurvivesEditsAndRetry(t *testing.T) {
 	}
 	c := x.AssignmentConfig
 	c.OwnerAgentID = 7
-	c.Target = "Page B"
+	c.Name = "Page B"
 	if _, e = a.saveAssignment(p.ProjectID, p.ID, x.ID, x.Revision, c); e != nil {
 		t.Fatal(e)
 	}

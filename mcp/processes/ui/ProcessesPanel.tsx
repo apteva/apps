@@ -256,7 +256,7 @@ function RunDetailCard({
       {entry.process_name && <p className="small muted">{run.title}</p>}
       {entry.assignment && (
         <p className="small muted">
-          {entry.assignment.name} · {entry.assignment.target || ""} ·{" "}
+          {entry.assignment.name} ·{" "}
           {ownerName(entry.assignment.owner_agent_id || 0)}
         </p>
       )}
@@ -740,7 +740,6 @@ function Panel(props: Props) {
                     </span>
                     <span className="sub">
                       {run.record.current_step ||
-                        run.assignment?.target ||
                         (run.record.workflow ? "Team workflow" : "Direct run")}
                     </span>
                   </button>
@@ -1298,7 +1297,7 @@ function Panel(props: Props) {
                       <div>
                         <h2 style={{ marginBottom: 4 }}>{assignment.name}</h2>
                         <p className="small muted">
-                          {assignment.target || "No target label"} · Procedure v{assignment.procedure_version}
+                          Procedure v{assignment.procedure_version}
                         </p>
                       </div>
                       <Pill state={assignment.status} />
@@ -1461,7 +1460,6 @@ function Panel(props: Props) {
                         </span>
                         <span className="sub">
                           {run.record.current_step ||
-                            run.assignment?.target ||
                             (run.record.workflow ? "Team workflow" : "Direct run")}
                         </span>
                       </button>

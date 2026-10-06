@@ -144,7 +144,6 @@ const assignment = {
   process_id: "p",
   revision: 1,
   name: "Photography Patreon",
-  target: "Photo page",
   owner_agent_id: 7,
   execution_mode: "agent",
   procedure_version: 1,
@@ -275,6 +274,8 @@ test("editing a paused assignment preserves parameters and uses revision", async
   await click("Weekly review");
   await click("Assignments");
   await click("Edit assignment");
+  expect(document.querySelector("#assignment-target")).toBeNull();
+  expect(document.body.textContent).not.toContain("Page, client, or business");
   expect(
     document.querySelector<HTMLInputElement>("#parameter-page")?.value,
   ).toBe("photo");
@@ -309,6 +310,7 @@ test("editing a paused assignment preserves parameters and uses revision", async
   expect(payload.expected_revision).toBe(1);
   expect(payload.assignment.owner_agent_id).toBe(8);
   expect(payload.assignment.parameters.page).toBe("photo");
+  expect(payload.assignment).not.toHaveProperty("target");
   expect(payload.assignment.worker_continuity).toBe("per_executor");
 });
 

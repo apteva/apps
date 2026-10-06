@@ -4,7 +4,6 @@ import type { Step, StepRun } from "./Workflow";
 export type MapAssignment = {
   id: string;
   name: string;
-  target?: string;
   status?: string;
   schedule?: { kind: string };
   owner_agent_id?: number;

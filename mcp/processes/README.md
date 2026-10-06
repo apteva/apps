@@ -8,7 +8,7 @@ Evals is an optional integration for testing immutable revisions before activati
 
 - **Process:** shared instructions, parameter definitions, operating policy,
   completion criteria, and immutable procedure versions.
-- **Assignment:** a saved target (page, client, business), agent, parameter values,
+- **Assignment:** a configured agent, parameter values,
   schedule, and procedure version policy.
 - **Run:** one occurrence with a snapshot of the assignment, resolved parameters,
   original owner, procedure version, delivery identity, and outcome.
@@ -18,6 +18,8 @@ Evals is an optional integration for testing immutable revisions before activati
 For example, one “Publish a Patreon post” procedure can have Photography and
 Cooking assignments with different page IDs, languages, agents, and daily times.
 The same idempotency key can be used independently on each assignment.
+Assignment-specific inputs belong in declared process parameters; assignments
+do not have a separate page, client, or business field.
 
 ## Panel
 
@@ -109,7 +111,6 @@ Create an assignment with `process_id` and `assignment`:
 ```json
 {
   "name":"Photography Patreon",
-  "target":"Photography page",
   "owner_agent_id":7,
   "execution_mode":"agent",
   "follow_latest":true,
@@ -263,7 +264,7 @@ operations return HTTP 202 when schedule synchronization is pending.
 
 SQLite stores `processes`, immutable `process_versions`, `process_assignments`,
 and `process_runs`. Run snapshots preserve resolved parameter values, agent,
-target, schedule, and assignment revision. Legacy procedure owner/mode/
+schedule, and assignment revision. Legacy procedure owner/mode/
 schedule fields remain readable in historical definitions. New versions omit
 them, and round-tripping those fields cannot change an assignment. Creating a
 procedure never creates a default assignment.
@@ -272,6 +273,9 @@ Migration 003 creates one default assignment per existing process and links old
 runs to it. It preserves deadlines, pending synchronization, legacy identifiers,
 original owners, procedure versions, and idempotency keys. Migration 010 adopts
 legacy assignments into native execution without creating a new run.
+Migration 017 removes the obsolete top-level assignment target label from saved
+configurations and run snapshots while preserving parameter values. Existing
+delivery envelopes remain byte-for-byte unchanged for safe retries.
 
 Direct delivery uses stable tracked agent event IDs and pinned threads. Retries
 back off from 30 seconds to 15 minutes for transient errors, including unavailable

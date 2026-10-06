@@ -17,7 +17,7 @@ directive: |
   Create an assignment named "Photography", owned by you,
   follow_latest=true, no schedule, parameters={"page":"photography"}.
   Add one assignment named "Cooking"
-  with target "Cooking page", owned by you, follow_latest=true,
+  owned by you, follow_latest=true,
   parameters={"page":"cooking"}. You are authorized to activate the procedure and
   both assignments.
   Start each assignment exactly once using the SAME idempotency_key=day-1 for

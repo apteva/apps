@@ -33,7 +33,6 @@ type overviewItem struct {
 	ProcessName    string         `json:"process_name"`
 	AssignmentID   string         `json:"assignment_id"`
 	AssignmentName string         `json:"assignment_name"`
-	Target         string         `json:"target"`
 	AgentID        int64          `json:"agent_id"`
 	Version        int            `json:"version"`
 	State          string         `json:"state"`
@@ -113,7 +112,6 @@ func (a *App) overview(project string) (*processOverview, error) {
 				return nil, e
 			}
 			x.AssignmentName = b.Name
-			x.Target = b.Target
 			x.AgentID = b.OwnerAgentID
 			x.Steps = []overviewStep{}
 			items = append(items, x)
@@ -155,7 +153,6 @@ func (a *App) overview(project string) (*processOverview, error) {
 		}
 		x.AssignmentID = x.ID
 		x.AssignmentName = b.Name
-		x.Target = b.Target
 		x.AgentID = b.OwnerAgentID
 		x.Backend = b.ExecutionMode
 		x.Schedule = b.Schedule

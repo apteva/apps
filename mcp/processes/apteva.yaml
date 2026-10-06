@@ -125,7 +125,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: processes/v0.16.5
+    ref: processes/v0.16.6
     entry: mcp/processes
   port: 8080
   health_check: /health

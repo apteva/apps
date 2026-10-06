@@ -26,7 +26,6 @@ type WorkerAssignment struct {
 	ID           string `json:"id"`
 	Revision     int    `json:"revision"`
 	Name         string `json:"name"`
-	Target       string `json:"target"`
 	OwnerAgentID int64  `json:"owner_agent_id"`
 }
 

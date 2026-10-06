@@ -23,7 +23,6 @@ export type Assignment = {
   process_id: string;
   revision: number;
   name: string;
-  target: string;
   owner_agent_id: number;
   procedure_version: number;
   follow_latest: boolean;
@@ -252,7 +251,6 @@ export default function Assignments({
             process_id: "",
             revision: 0,
             name: "",
-            target: "",
             owner_agent_id: 0,
             procedure_version: current,
             follow_latest: true,
@@ -304,7 +302,7 @@ export default function Assignments({
         <div>
           <h2>Assignments</h2>
           <p className="muted">
-            One procedure, different agents, pages, parameters, and schedules.
+            One procedure, different agents, parameter values, and schedules.
           </p>
         </div>
         <button
@@ -371,20 +369,8 @@ export default function Assignments({
                   required
                   maxLength={160}
                   value={draft.name}
-                  placeholder="Photography Patreon"
+                  placeholder="Assignment name"
                   onChange={(e) => set({ name: e.target.value })}
-                />
-              </div>
-              <div className="field">
-                <label htmlFor="assignment-target">
-                  Page, client, or business
-                </label>
-                <input
-                  id="assignment-target"
-                  maxLength={500}
-                  value={draft.target || ""}
-                  placeholder="Photography page"
-                  onChange={(e) => set({ target: e.target.value })}
                 />
               </div>
               <div className="field">
@@ -595,7 +581,6 @@ export default function Assignments({
               <div>
                 <h2>{x.name}</h2>
                 <p className="muted">
-                  {x.target || "No target label"} ·{" "}
                   {agents.find((a) => a.id === x.owner_agent_id)?.name ||
                     `Agent ${x.owner_agent_id}`}{" "}
                   · Native Process execution
