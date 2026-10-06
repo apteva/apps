@@ -8,6 +8,7 @@ if (!result.success) throw new Error(result.logs.join("\n"));
 const streams = new Set<ReadableStreamDefaultController<Uint8Array>>();
 const encoder = new TextEncoder();
 let runs: any[] = [], reads = 0;
+let telemetryRows: any[] = [], telemetryReads = 0;
 Bun.serve({
   hostname: "127.0.0.1",
   port: 5394,
@@ -17,6 +18,11 @@ Bun.serve({
       let own: ReadableStreamDefaultController<Uint8Array>;
       return new Response(new ReadableStream({ start(controller) {own=controller; streams.add(controller);controller.enqueue(encoder.encode(": connected\n\n"));}, cancel() {streams.delete(own);} }), {headers:{"Content-Type":"text/event-stream","Cache-Control":"no-cache"}});
     }
+    if (path === "/fixture/telemetry") {
+      if (request.method === "POST") {telemetryRows = await request.json() as any[]; telemetryReads = 0; return Response.json({ok:true});}
+      telemetryReads++;return Response.json(telemetryRows);
+    }
+    if (path === "/fixture/telemetry-stats") return Response.json({reads:telemetryReads});
     if (path === "/fixture/runs") {
       if (request.method === "POST") { runs = await request.json() as any[]; return Response.json({ok:true}); }
       reads++; return Response.json({direct_runs:runs,runs:[]});

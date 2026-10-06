@@ -77,6 +77,14 @@ if (missingAgent) {
     },
   ];
 }
+
+if (location.search.includes("activity")) {
+  const listeners = new Set<(event:any)=>void>();
+  (window as any).__aptevaTelemetryBus = {subscribe:(_id:number, fn:(event:any)=>void)=>{listeners.add(fn);return ()=>listeners.delete(fn);}};
+  (window as any).__emitWorkerTelemetry = (event:any)=>listeners.forEach(fn=>fn(event));
+  process.approval_requirements = "Separate operator approval is required before notification.";
+  process.completion_criteria = "Keep the exact receipt after explicit approval.";
+}
 const originalFetch = window.fetch.bind(window);
 window.fetch = (async (url: unknown, init?: RequestInit) => {
   const path = String(url).split("?")[0];
@@ -88,6 +96,9 @@ window.fetch = (async (url: unknown, init?: RequestInit) => {
   if (path.endsWith("/runs") && location.search.includes("map"))
     return originalFetch(`/fixture/map-runs/${path.split("/").at(-2)}`, init);
   if (path.endsWith("/overview")) return originalFetch(String(url), init);
+  if (path === "/api/telemetry") return originalFetch("/fixture/telemetry",init);
+  if (path === "/api/apps") return Response.json([{name:"processes",display_name:"Processes",icon:"/fixture/process-icon.svg",icon_style:"monochrome",surfaces:{mcp_tool_names:["processes_step_claim"]}}]);
+  if (path === "/api/connections") return Response.json([]);
   if (path === "/api/agents")
     return Response.json(
       location.search.includes("no_agents")

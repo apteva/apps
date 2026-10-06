@@ -8,6 +8,7 @@ import ExecutionTools, {
   type ToolSource,
 } from "./ExecutionTools";
 
+import {subscribeWorker} from "./execution-activity";
 const originalFetch = globalThis.fetch;
 const window = new Window({ url: "http://localhost" });
 Object.assign(globalThis, {
@@ -133,7 +134,23 @@ test("expanded tool activity shows provider icon and reason", async () => {
   });
   expect(requested).toContain("agent_id=7");
   expect(requested).toContain("thread_id=worker-thread");
-  expect(requested).toContain("type=tool");
+  expect(requested).not.toContain("type=tool");
   expect(container.textContent).toContain("Load the customer record");
   expect(container.querySelector<HTMLImageElement>('img[src="/crm.svg"]')).toBeTruthy();
+});
+
+
+test("multiple views share one worker feed and its live subscription", async()=>{
+  let reads=0, callback:((event:any)=>void)|undefined, stopped=0;
+  (window as any).__aptevaTelemetryBus={subscribe:(_id:number, fn:(event:any)=>void)=>{callback=fn;return ()=>{stopped++;};}};
+  globalThis.fetch=(async(_url:unknown)=>{reads++;return Response.json([]);}) as typeof fetch;
+  let latest:any;
+  const one=subscribeWorker(77,"shared",true,()=>{});
+  await new Promise(resolve=>setTimeout(resolve,0));
+  const two=subscribeWorker(77,"shared",true,s=>{latest=s;});
+  expect(reads).toBe(1);
+  callback!({id:"live",type:"llm.thinking",thread_id:"shared",time:"2026-10-06T12:00:00Z",data:{text:"Recorded live text"}});
+  expect(latest.events[0].data.text).toBe("Recorded live text");
+  one();expect(stopped).toBe(0);two();await new Promise(resolve=>setTimeout(resolve,0));expect(stopped).toBe(1);
+  delete (window as any).__aptevaTelemetryBus;
 });

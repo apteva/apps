@@ -15,6 +15,7 @@
     --color-warn,
     color-mix(in srgb, #b87513 70%, var(--pc-text))
   );
+  --pf-waiting: var(--color-activity-thought, #b095de);
   --pf-danger: var(
     --color-error,
     color-mix(in srgb, #d04040 70%, var(--pc-text))
@@ -32,8 +33,7 @@
 }
 .ap-processes :is(.pm, .pf-shell) [data-state="blocked"],
 .ap-processes :is(.pm, .pf-shell) [data-state="scheduled"],
-.ap-processes :is(.pm, .pf-shell) [data-state="overdue"],
-.ap-processes :is(.pm, .pf-shell) [data-state="waiting"] {
+.ap-processes :is(.pm, .pf-shell) [data-state="overdue"] {
   --flow-state: var(--pf-warning);
 }
 .ap-processes :is(.pm, .pf-shell) [data-state="failed"] {
@@ -134,3 +134,12 @@
 }
 
 .ap-processes .pm button.pm-run-card {border-radius:var(--radius-md,8px)}
+
+.ap-processes :is(.pm, .pf-shell) [data-state="waiting"] { --flow-state: var(--pf-waiting); }
+.ap-processes .pf-shared-context { margin: 16px 0; border: 1px solid var(--pf-border); border-radius: 8px; padding: 12px; }
+.ap-processes .pf-shared-context > summary { cursor: pointer; font-size: 12px; font-weight: 600; }
+@media (prefers-reduced-motion: no-preference) {
+  .ap-processes .flow-status[data-state="ready"] svg,
+  .ap-processes .flow-status[data-state="waiting"] svg { animation: flow-status-pulse 1.8s ease-in-out infinite; }
+  @keyframes flow-status-pulse { 50% { opacity: .4; } }
+}

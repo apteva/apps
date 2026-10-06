@@ -216,7 +216,7 @@ export function RunSteps({
     }
   };
   return (
-    <div style={{ marginTop: 18 }}>
+    <div className="run-steps">
       {controlMode === "step_by_step" && (
         <section className="notice" aria-label="Step-by-step controls">
           <strong>Step-by-step run</strong>
@@ -395,6 +395,9 @@ export function RunSteps({
                 agentID={s.executor.agent_id}
                 threadID={s.target_thread_id}
                 executionID={s.execution_id}
+                stepID={s.id}
+                completedAt={s.completed_at || (s.state === "completed" ? s.updated_at : undefined)}
+                live={!isTerminal && ["running", "ready", "waiting", "blocked"].includes(s.state)}
                 sources={toolSources}
               />
             )}

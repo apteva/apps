@@ -183,7 +183,7 @@ export function ProcessFlow({
   executions,
   runExecutions,
   agents,
-  saveControls,
+  saveControls, sharedContext,
 }: {
   steps: Step[];
   onChange?: (s: Step[]) => void;
@@ -192,6 +192,7 @@ export function ProcessFlow({
   runExecutions?: StepRun[][];
   agents?: { id: number; name: string }[];
   saveControls?: ReactNode;
+  sharedContext?: ReactNode;
 }) {
   const editable = !!onChange,
     instanceID = useId();
@@ -291,12 +292,13 @@ export function ProcessFlow({
       const color =
         selected || state === "running" || state === "ready"
           ? "var(--pc-accent)"
+          : state === "waiting" ? "var(--pf-waiting)"
           : state === "completed"
             ? "var(--pf-success)"
             : "var(--pf-edge)";
       return {
         id: `${source}:${target}`,
-        animated: state === "running",
+        animated: ["running", "ready", "waiting"].includes(state),
         source,
         target,
         type: "dependency",
@@ -648,6 +650,7 @@ export function ProcessFlow({
                   onChange={(e) => update({ expected_output: e.target.value })}
                   placeholder="What evidence confirms this step is complete?"
                 />
+                {sharedContext}
                 <fieldset>
                   <legend>Wait for</legend>
                   {steps
