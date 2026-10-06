@@ -39,6 +39,71 @@ type HostAdapter struct {
 	SupportedKinds  map[string]bool
 }
 
+type storageChecksumFile struct {
+	ID             int64  `json:"id"`
+	Name           string `json:"name"`
+	SHA256         string `json:"sha256"`
+	SizeBytes      int64  `json:"size_bytes"`
+	ContentType    string `json:"content_type"`
+	ProjectID      string `json:"project_id"`
+	ChecksumStatus string `json:"checksum_status"`
+	ChecksumError  string `json:"checksum_error"`
+	Revision       int64  `json:"revision"`
+}
+
+// refreshAssetStorageChecksum makes Catalog's cached asset identity follow
+// Storage's authoritative row. A pending/running checksum is returned to the
+// caller before any host reservation or provider upload is created.
+func refreshAssetStorageChecksum(ctx *sdk.AppCtx, pid string, asset *Asset, fileID int64) (string, error) {
+	var result struct {
+		Found bool                `json:"found"`
+		File  storageChecksumFile `json:"file"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get", map[string]any{"_project_id": pid, "id": fileID}, &result); err != nil {
+		return "", fmt.Errorf("check Storage file: %w", err)
+	}
+	if !result.Found || result.File.ID != fileID {
+		return "", errors.New("Storage file not found")
+	}
+	if result.File.ProjectID != "" && result.File.ProjectID != pid {
+		return "", errors.New("Storage file belongs to another project")
+	}
+	status := strings.ToLower(strings.TrimSpace(result.File.ChecksumStatus))
+	if status == "" && result.File.SHA256 != "" {
+		if asset.SHA256 == "" {
+			// An older Storage response cannot prove that its non-empty value
+			// is a verified whole-file checksum. Current Storage always sends
+			// checksum_status, so keep the safe legacy behavior here.
+			return "", errors.New("asset has no verified Storage checksum")
+		}
+		status = "verified"
+	}
+	if status != "verified" || result.File.SHA256 == "" {
+		var queued struct {
+			ChecksumStatus string              `json:"checksum_status"`
+			SHA256         string              `json:"sha256"`
+			File           storageChecksumFile `json:"file"`
+		}
+		if err := ctx.PlatformAPI().CallAppResult("storage", "files_ensure_checksum", map[string]any{"_project_id": pid, "id": fileID}, &queued); err != nil {
+			return "", fmt.Errorf("request Storage checksum: %w", err)
+		}
+		if queued.ChecksumStatus != "" {
+			status = strings.ToLower(strings.TrimSpace(queued.ChecksumStatus))
+		}
+		if status == "" {
+			status = "pending"
+		}
+		return status, nil
+	}
+	if asset.SHA256 != result.File.SHA256 || asset.SizeBytes != result.File.SizeBytes || asset.Name != result.File.Name || asset.ContentType != result.File.ContentType {
+		if _, err := ctx.AppDB().Exec(`UPDATE assets SET sha256=?,size_bytes=?,name=?,content_type=?,revision=revision+1,updated_at=? WHERE project_id=? AND id=?`, result.File.SHA256, result.File.SizeBytes, result.File.Name, result.File.ContentType, now(), pid, asset.ID); err != nil {
+			return "", err
+		}
+		asset.SHA256, asset.SizeBytes, asset.Name, asset.ContentType = result.File.SHA256, result.File.SizeBytes, result.File.Name, result.File.ContentType
+	}
+	return "verified", nil
+}
+
 var hostProviders = map[string]HostAdapter{"bunny": {IntegrationSlug: "bunny-stream", Provider: bunnyProvider{}, SupportedKinds: map[string]bool{"video": true}}}
 
 type bunnyProvider struct{}
@@ -244,12 +309,16 @@ func (a *App) hostingRequest(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if asset.ReviewStatus != "approved" {
 		return nil, errors.New("asset must be approved before hosting")
 	}
-	if asset.SHA256 == "" {
-		return nil, errors.New("asset has no Storage checksum")
-	}
 	fileID, err := strconv.ParseInt(asset.StorageFileID, 10, 64)
 	if err != nil || fileID <= 0 {
 		return nil, errors.New("asset has an invalid Storage file ID")
+	}
+	checksumStatus, err := refreshAssetStorageChecksum(ctx, pid, asset, fileID)
+	if err != nil {
+		return nil, err
+	}
+	if checksumStatus != "verified" || asset.SHA256 == "" {
+		return map[string]any{"pending_checksum": checksumStatus != "failed", "checksum_status": checksumStatus, "storage_file_id": asset.StorageFileID, "asset_id": asset.ID}, nil
 	}
 	session, err := sessionByID(ctx.AppDB(), pid, asset.SessionID)
 	if err != nil {

@@ -51,7 +51,10 @@ func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker          { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler {
-	return []sdk.EventHandler{{Event: "media.completed", Handler: a.onMediaCompleted}}
+	return []sdk.EventHandler{
+		{Event: "media.completed", Handler: a.onMediaCompleted},
+		{Event: "file.checksum.ready", Handler: a.onStorageChecksumReady},
+	}
 }
 
 func (a *App) HTTPRoutes() []sdk.Route {
@@ -133,7 +136,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "content_catalog_posts_list", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "List shared platform posts; optional session_id, asset_id, brand_id, lifecycle. Defaults to posts with only active assets/sessions; archived/all explicitly includes historical archive references. Each post contains its asset IDs and one observed outcome.", InputSchema: lifecycleListSchema(), Handler: a.postsList},
 		{Name: "content_catalog_posts_get", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Get one shared platform post and its asset IDs. Args: id.", InputSchema: schema("id"), Handler: a.postsGet},
 		{Name: "content_catalog_posts_record", Description: "Create or update a shared platform post. Args: asset_ids (one or more same-brand Catalog assets), destination and status for new posts; post_id for updates. Supports title, account_ref, audience, planned_at, actual_at, external_post_id, external_url, evidence_source, failure_details. Writes Catalog evidence only; does not publish externally.", InputSchema: schema("status"), Handler: a.postsRecord},
-		{Name: "content_catalog_hosting_request", Description: "REAL EXTERNAL HOSTING: request an approved asset's video upload to the brand's video host. Bunny Stream is supported. If no session or brand collection is configured, creates/reuses a collection named after the session and saves its ID. Does not publish to a channel.", InputSchema: schema("asset_id"), Handler: a.hostingRequest},
+		{Name: "content_catalog_hosting_request", Description: "REAL EXTERNAL HOSTING: request an approved asset's video upload to the brand's video host. Bunny Stream is supported. If Storage checksum repair is pending, returns checksum_status without reserving or uploading; retrying after file.checksum.ready resumes idempotently. If no session or brand collection is configured, creates/reuses a collection named after the session and saves its ID. Does not publish to a channel.", InputSchema: schema("asset_id"), Handler: a.hostingRequest},
 		{Name: "content_catalog_hosting_check", Description: "Fetch provider readiness for one hosting id and update Catalog's observation. Args: id.", InputSchema: schema("id"), Handler: a.hostingCheck},
 		{Name: "content_catalog_hosting_link_existing", Description: "Backfill a video asset with an existing Bunny GUID using only get_video. Args: asset_id, remote_id, connection_id. Confirms library, collection, duration, and readiness; never calls fetch_video. Media checksum is supporting Storage evidence, not a Bunny source-file match.", InputSchema: schema("asset_id", "remote_id", "connection_id"), Handler: a.hostingLinkExisting},
 		{Name: "content_catalog_hosting_list", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "List hosting records for an asset. Args: asset_id.", InputSchema: schema("asset_id"), Handler: a.hostingsList},
