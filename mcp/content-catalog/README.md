@@ -1,5 +1,10 @@
 # Content Catalog
 
+## Version 0.6.5: session hosting tool discovery
+
+The read-only hosting list advertises both asset and session queries with an
+exclusive choice in its MCP schema, matching the existing handler.
+
 ## Version 0.6.4: durable hosting requests and encoding progress
 
 Explicit hosting requests persist while waiting for checksum verification and

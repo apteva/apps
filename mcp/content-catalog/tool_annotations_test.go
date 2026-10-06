@@ -58,6 +58,20 @@ func TestCatalogToolsListEmitsReadOnlyAnnotations(t *testing.T) {
 	for _, item := range listed["tools"].([]any) {
 		tool := item.(map[string]any)
 		name := tool["name"].(string)
+		if name == "content_catalog_hosting_list" {
+			// Verify the actual MCP wire schema, not just the unused schema helper.
+			schema := tool["inputSchema"].(map[string]any)
+			properties := schema["properties"].(map[string]any)
+			if properties["asset_id"] == nil || properties["session_id"] == nil {
+				t.Fatalf("hosting list must advertise asset and session queries: %#v", schema)
+			}
+			if _, required := schema["required"]; required {
+				t.Fatalf("hosting list must not require asset_id for session queries: %#v", schema)
+			}
+			if choices, ok := schema["oneOf"].([]any); !ok || len(choices) != 2 {
+				t.Fatalf("hosting list must advertise exactly one asset or session: %#v", schema)
+			}
+		}
 		if readOnly[name] {
 			if !reflect.DeepEqual(tool["annotations"], want) {
 				t.Errorf("tools/list %s annotations = %#v", name, tool["annotations"])
