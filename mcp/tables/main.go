@@ -115,6 +115,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/tables/", Handler: a.handleTablesItem},
 		{Pattern: "/projections", Handler: a.handleProjectionsCollection},
 		{Pattern: "/projections/", Handler: a.handleProjectionsItem},
+		{Pattern: "/diagnostics", Handler: a.handleDiagnostics},
 	}
 }
 

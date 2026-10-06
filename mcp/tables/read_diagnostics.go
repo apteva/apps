@@ -121,7 +121,8 @@ func (d *readObservation) finish(result any, err error) {
 	}
 	d.setPhase("done")
 	elapsed := time.Since(d.started)
-	if err == nil && elapsed < time.Duration(slowQueryMs(d.app))*time.Millisecond && d.app.Config().Get("log_all_reads") != "true" {
+	shouldRecord := err != nil || elapsed >= time.Duration(slowQueryMs(d.app))*time.Millisecond || d.app.Config().Get("log_all_reads") == "true"
+	if !shouldRecord {
 		return
 	}
 	var sqliteErr *sqlite.Error
@@ -144,6 +145,11 @@ func (d *readObservation) finish(result any, err error) {
 		}
 	}
 	returnedRows, truncated := readResultSummary(result)
+	var sqliteCode any
+	if sqliteErr != nil {
+		sqliteCode = int64(sqliteErr.Code())
+	}
+	recordReadDiagnostic(d, err, outcome, stage, returnedRows, truncated, sqliteCode)
 	end := d.app.AppReadDB().Stats()
 	var overrun time.Duration
 	if !d.expiredDeadline.IsZero() && d.deadlineSource != "caller_cancel" {
@@ -170,6 +176,41 @@ func (d *readObservation) finish(result any, err error) {
 		d.app.Logger().Warn("tables read completed", fields...)
 	} else {
 		d.app.Logger().Info("tables read completed", fields...)
+	}
+}
+
+// recordReadDiagnostic stores the same redacted fields emitted to the logger.
+// It uses a short independent context because the request context may already
+// be canceled when Rows.Close or a deadline finishes. Persistence failures are
+// intentionally ignored: diagnostics must never turn a completed read into a
+// second failure.
+func recordReadDiagnostic(d *readObservation, err error, outcome, stage string, rows int, truncated bool, sqliteCode any) {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	requestID := d.requestID
+	result, insertErr := d.app.AppDB().ExecContext(ctx, `INSERT INTO read_diagnostics(
+		project_id,recorded_at_ms,operation,call_id,request_id,query_id,outcome,stage,
+		deadline_source,total_ms,sql_ms,read_queue_ms,select_ms,scan_ms,rows_returned,
+		rows_materialized,truncated,error_type,sqlite_error_code
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		d.projectID, time.Now().UnixMilli(), d.operation, d.callID, requestID, d.queryID,
+		outcome, stage, d.deadlineSource,
+		time.Since(d.started).Milliseconds(),
+		(d.phases["count"] + d.phases["select"] + d.phases["scan"]).Milliseconds(),
+		d.phases["read_queue"].Milliseconds(), d.phases["select"].Milliseconds(),
+		d.phases["scan"].Milliseconds(), rows, max(rows, d.partialRows), truncated,
+		func() string {
+			if err == nil {
+				return ""
+			}
+			return fmt.Sprintf("%T", err)
+		}(),
+		sqliteCode,
+	)
+	if insertErr == nil {
+		if id, idErr := result.LastInsertId(); idErr == nil && id%128 == 0 {
+			_, _ = d.app.AppDB().ExecContext(ctx, `DELETE FROM read_diagnostics WHERE project_id=? AND id NOT IN (SELECT id FROM read_diagnostics WHERE project_id=? ORDER BY recorded_at_ms DESC,id DESC LIMIT 10000)`, d.projectID, d.projectID)
+		}
 	}
 }
 func durationMS(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }

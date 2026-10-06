@@ -31,6 +31,7 @@ import (
 //   GET    /projections                → projections_list
 //   GET    /projections/{name}/status  → projections_status
 //   POST   /projections/{name}/refresh → projections_refresh
+//   GET    /diagnostics                → redacted slow/failed read diagnostics
 
 // globalCtx is set in OnMount; HTTP handlers reach for it because the
 // SDK's Route.Handler signature is the bare http.HandlerFunc with no

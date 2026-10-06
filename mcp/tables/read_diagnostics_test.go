@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -56,6 +57,41 @@ func invokeObservedRead(app *App, ctx *sdk.AppCtx, parent context.Context, args 
 		}
 	}
 	panic("missing tables_query")
+}
+
+func TestReadDiagnosticsPersistAndServePanelData(t *testing.T) {
+	ctx, _, _ := diagnosticTestCtx(t)
+	app := &App{}
+	_, err := invokeObservedRead(app, ctx, context.Background(), map[string]any{"sql": "SELECT * FROM {missing_table}"})
+	if err == nil {
+		t.Fatal("expected diagnostic read to fail")
+	}
+	var count int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM read_diagnostics WHERE project_id=? AND outcome='error'`, "diagnostics").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("persisted diagnostics=%d, want one", count)
+	}
+	previous := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previous })
+	req := httptest.NewRequest(http.MethodGet, "/diagnostics?project_id=diagnostics&limit=10", nil)
+	res := httptest.NewRecorder()
+	app.handleDiagnostics(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("diagnostics HTTP status=%d body=%s", res.Code, res.Body.String())
+	}
+	var payload struct {
+		Diagnostics []map[string]any `json:"diagnostics"`
+		ErrorCount  int              `json:"error_count"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Diagnostics) != 1 || payload.ErrorCount != 1 {
+		t.Fatalf("diagnostics payload=%+v", payload)
+	}
 }
 func assertPoolReusable(t *testing.T, app *App, ctx *sdk.AppCtx, reader *sql.DB) {
 	t.Helper()

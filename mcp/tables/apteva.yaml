@@ -2,8 +2,9 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.2.7
+version: 0.2.8
 description: |
+  v0.2.8 Adds durable redacted read diagnostics to the Tables panel and dashboard widget.
   v0.2.7 Separates interactive read and projection capacity, adds configurable
   worker/queue limits, and reports connection, worker, lock, staging,
   publication, and cleanup timings for mixed workloads.
@@ -157,6 +158,16 @@ provides:
       label: Tables
       icon: database
       entry: /ui/TablesPanel.mjs
+  ui_components:
+    - name: tables-diagnostics
+      label: Tables diagnostics
+      description: Slow reads, database failures, and recent query phase timings.
+      entry: /ui/TablesDiagnosticsWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      supported_sizes: [half, full]
+      default_size: half
+      visibility: project
   skills:
     - name: how-to-use-tables
       command: /tables
@@ -227,7 +238,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.2.7
+    ref: tables/v0.2.8
     entry: mcp/tables
   port: 8080
   health_check: /health

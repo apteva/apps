@@ -1,6 +1,7 @@
 const result = await Bun.build({
   entrypoints: [
     "TablesPanel.tsx",
+    "TablesDiagnosticsWidget.tsx",
     "TableCard.tsx",
     "RowCard.tsx",
     "TableRowListCard.tsx",

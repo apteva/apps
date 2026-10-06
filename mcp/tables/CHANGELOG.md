@@ -1,3 +1,13 @@
+# Tables v0.2.8 — durable read diagnostics UI
+
+- Persist redacted slow, failed, timed-out, and canceled read diagnostics with
+  bounded per-project retention.
+- Add a project-panel Diagnostics surface and a suggested dashboard Home
+  widget with error/slow counts, recent p95 duration, phase timing, and
+  refresh controls.
+- Serve diagnostics through the authenticated `GET /diagnostics` route without
+  exposing SQL, parameters, row values, or raw database error text.
+
 # Tables v0.2.4 — automatic projection migration
 
 - Upgrade projection storage automatically during startup.

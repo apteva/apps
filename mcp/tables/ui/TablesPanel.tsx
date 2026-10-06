@@ -19,6 +19,7 @@ import {
 } from "./lib/values";
 import { useResource } from "./lib/useResource";
 import { Dialog } from "./Dialog";
+import TablesDiagnosticsWidget from "./TablesDiagnosticsWidget";
 
 // Inlined SDK app-event subscription. Panels are runtime-bundled
 // standalone .mjs files and each app is independently installable
@@ -168,7 +169,7 @@ export default function TablesPanel({
   const [selected, setSelected] = useState<string | null>(() =>
     new URLSearchParams(window.location.search).get("table"),
   );
-  const [surface, setSurface] = useState<"tables" | "projections">("tables");
+  const [surface, setSurface] = useState<"tables" | "projections" | "diagnostics">("tables");
   const [tableSearch, setTableSearch] = useState("");
   const [rowSearch, setRowSearch] = useState("");
   const [filterColumn, setFilterColumn] = useState("");
@@ -583,9 +584,10 @@ export default function TablesPanel({
             <span>{tables.length} tables</span>
             <span>{tables.reduce((sum, table) => sum + table.row_count, 0).toLocaleString()} rows</span>
           </div>
-          <nav className="mt-4 grid grid-cols-2 gap-1 rounded-md bg-bg-input/60 p-1" aria-label="Tables workspace">
+          <nav className="mt-4 grid grid-cols-3 gap-1 rounded-md bg-bg-input/60 p-1" aria-label="Tables workspace">
             <button type="button" onClick={() => setSurface("tables")} className={`rounded px-2 py-1.5 text-xs ${surface === "tables" ? "bg-bg-card font-medium text-text shadow-sm" : "text-text-dim hover:text-text"}`}>Data</button>
             <button type="button" onClick={() => setSurface("projections")} className={`rounded px-2 py-1.5 text-xs ${surface === "projections" ? "bg-bg-card font-medium text-text shadow-sm" : "text-text-dim hover:text-text"}`}>Projections</button>
+            <button type="button" onClick={() => setSurface("diagnostics")} className={`rounded px-2 py-1.5 text-xs ${surface === "diagnostics" ? "bg-bg-card font-medium text-text shadow-sm" : "text-text-dim hover:text-text"}`}>Diagnostics</button>
           </nav>
         </header>
         <ul className="overflow-auto flex-1 p-2">
@@ -612,6 +614,8 @@ export default function TablesPanel({
         )}
         {surface === "projections" ? (
           <ProjectionWorkspace api={api} />
+        ) : surface === "diagnostics" ? (
+          <TablesDiagnosticsWidget projectId={projectId} installId={installId} compact={false} />
         ) : selectedTable && gridTable ? (
           <>
             <header className="border-b border-border bg-bg-card px-5 py-4">

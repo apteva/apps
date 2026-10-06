@@ -42,6 +42,13 @@ Do not add a second read semaphore on top of the existing connection limit.
 
 ## Completion records
 
+The Tables project panel now includes a **Diagnostics** surface, and Tables
+registers a suggested `dashboard.home` diagnostics widget. It reads the same
+redacted records through `GET /diagnostics`, showing error and slow-read
+counts, recent p95 duration, operation, phase, queue time, and outcome. The
+sidecar keeps the newest 10,000 records per project; raw SQL, parameters, row
+values, and raw database error text are never stored.
+
 `tables read completed` is emitted once per observed read after its rows,
 explicit connection, and operation locks have been released. All eight read
 tools are covered, including errors before execution, authorization failures,
