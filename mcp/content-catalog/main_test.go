@@ -32,6 +32,15 @@ type catalogPlatform struct {
 	collectionResponseLibrary string
 	fetchedCollections        []string
 	beforeCollectionCreate    func()
+	checksumState             string
+	checksumEnsures           int
+	storageReadError          error
+	videoBody                 map[string]any
+	videoChecks               int
+	videoCheckError           error
+	videoFetchError           error
+	fetchedTitles             []string
+	beforeStorageURL          func()
 }
 
 func (*catalogPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
@@ -47,13 +56,29 @@ func (p *catalogPlatform) CallAppResult(app, tool string, input map[string]any, 
 	var data any
 	switch app + "/" + tool {
 	case "storage/files_get":
+		if p.storageReadError != nil {
+			return p.storageReadError
+		}
 		id := number(input, "id")
 		contentType := "video/mp4"
 		if id == 2 {
 			contentType = "image/jpeg"
 		}
 		data = map[string]any{"found": true, "file": map[string]any{"id": id, "name": fmt.Sprintf("clip-%d.mp4", id), "sha256": fmt.Sprintf("sha-%d", id), "size_bytes": 1000, "content_type": contentType, "project_id": "project-a", "folder": p.folder}}
+		if p.checksumState != "" {
+			file := data.(map[string]any)["file"].(map[string]any)
+			file["checksum_status"] = p.checksumState
+			if p.checksumState != "verified" {
+				file["sha256"] = ""
+			}
+		}
+	case "storage/files_ensure_checksum":
+		p.checksumEnsures++
+		data = map[string]any{"checksum_status": p.checksumState}
 	case "storage/files_get_url":
+		if p.beforeStorageURL != nil {
+			p.beforeStorageURL()
+		}
 		data = map[string]any{"url": "https://storage.example/signed"}
 	case "storage/files_list":
 		data = map[string]any{"files": p.files}
@@ -98,6 +123,10 @@ func (p *catalogPlatform) ExecuteIntegrationTool(id int64, tool string, input ma
 	switch tool {
 	case "fetch_video":
 		p.starts++
+		p.fetchedTitles = append(p.fetchedTitles, str(input, "title"))
+		if p.videoFetchError != nil {
+			return nil, p.videoFetchError
+		}
 		p.videoCollection = str(input, "collectionId")
 		p.fetchedCollections = append(p.fetchedCollections, p.videoCollection)
 		return &sdk.ExecuteResult{Success: true, Data: json.RawMessage(`{"id":"video-1"}`)}, nil
@@ -138,11 +167,19 @@ func (p *catalogPlatform) ExecuteIntegrationTool(id int64, tool string, input ma
 		body, _ := json.Marshal(collection)
 		return &sdk.ExecuteResult{Success: true, Data: body}, nil
 	case "get_video":
+		p.videoChecks++
+		if p.videoCheckError != nil {
+			return nil, p.videoCheckError
+		}
 		library := p.videoLibrary
 		if library == "" {
 			library = "42"
 		}
-		body, _ := json.Marshal(map[string]any{"guid": "video-1", "videoLibraryId": library, "collectionId": p.videoCollection, "length": 34, "status": 4})
+		video := map[string]any{"guid": "video-1", "videoLibraryId": library, "collectionId": p.videoCollection, "length": 34, "status": 4}
+		for k, v := range p.videoBody {
+			video[k] = v
+		}
+		body, _ := json.Marshal(video)
 		return &sdk.ExecuteResult{Success: true, Data: body}, nil
 	}
 	return nil, fmt.Errorf("unexpected tool %s", tool)

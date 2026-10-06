@@ -1,11 +1,20 @@
 # Content Catalog
 
+## Version 0.6.4: durable hosting requests and encoding progress
+
+Explicit hosting requests persist while waiting for checksum verification and
+resume automatically after eligibility and destination checks. Pending remote
+videos refresh automatically, showing encoding progress, provider stage, and
+transcoding messages. New uploads use Media's title when available, otherwise
+the session title and filename. Existing hosted titles stay unchanged. These
+workers only follow recorded hosting work; they never scan folders.
+
 ## Version 0.6.3: verified Storage checksums during hosting
 
 Catalog refreshes an asset's checksum from Storage's verified result and
-requests exact-file repair when hosting encounters a pending checksum. Hosting
-then resumes with the same reservation, so concurrent repair requests and
-reattachment do not trigger duplicate uploads. Storage checksum-ready events
+requests exact-file repair when hosting encounters a pending checksum. In v0.6.3, callers
+retried hosting after verification; the durable intents described below now
+resume automatically, while existing reservations prevent duplicate uploads. Storage checksum-ready events
 also refresh the existing Catalog asset record.
 
 Content Catalog coordinates production sessions, Storage files, Media metadata, Gigs, cloud video hosting, and platform posts. Catalog owns stable IDs and relationships. Storage owns file bytes; the publishing platforms own external posts.
@@ -104,3 +113,48 @@ Use `content_catalog_search` with `availability=ready_to_publish`, the explicit 
 Catalog rejects hosting uploads, attaching/upload routing into archived sessions, and new planned/scheduled/submitted post records containing archived assets or sessions. Normal post listing excludes archive members; explicit archive/all inspection and direct historical reads preserve their evidence. Hosting readiness checks and existing-video backfill remain available for historical inspection; these do not transfer bytes or publish posts. Lifecycle changes emit `content-catalog.lifecycle.changed` for external consumers to invalidate cached selections.
 
 This release changes **Content Catalog only**. It does not modify Media, Media Processing agents or external publication tools. Agents that call those apps directly must follow the Catalog eligibility policy; Catalog cannot intercept direct calls or cancel work already running in another app. Existing Holly records are not automatically archived or relocated on upgrade.
+
+## Hosting progress and checksum waiting
+
+An explicit **Host approved asset** action persists an intent tied to the exact
+asset, Storage install/file, session, and video-host destination. If the checksum
+is pending, Catalog shows **Waiting for checksum verification** and its Storage
+state. The Storage checksum-ready event resumes that intent; a bounded worker
+checks saved intents every 15 seconds as a fallback after restarts or missed
+notifications. It checks only those explicitly requested files, never lists
+Storage folders or creates hosting requests for other assets.
+
+Before resuming, Catalog checks active asset/session lifecycle, current approval,
+Storage binding, and the saved connection/library/collection policy. A manually
+changed destination or revoked eligibility blocks the request for review.
+Another asset's automatically created session collection can be reused. The
+final approval and route are checked again before the provider transfer.
+**Cancel waiting upload** stops an intent before transfer; it cannot cancel an
+upload that already started. Failed checksums stop the request. Temporary read
+errors back off, while ambiguous collection or video mutations need explicit
+reconciliation and are never automatically repeated.
+
+New uploads use an explicit MCP `title` when supplied, otherwise the current
+Media title when available, otherwise `<session title> — <filename>`. The chosen
+title is saved with the intent. Existing hosted titles are never renamed.
+
+Catalog keeps `encode_progress`, numeric `provider_status`, `provider_stage`,
+and the complete `transcoding_messages` from Bunny. Unknown progress is null;
+unknown stage codes remain visible rather than being invented. Bunny's encoding
+and upload failures are terminal. Only recorded remote videos in `processing`
+are checked automatically; ready, failed, and unresolved transfers stop polling.
+Provider read errors preserve the last observed state and retry with backoff.
+
+Asset cards show observed stage/percentage or a checksum-waiting badge. The file
+modal shows percentage, provider stage, messages, last check, and any refresh
+error. Its progress refresh uses read-only Catalog records every five seconds;
+session cards refresh every fifteen seconds without reloading Media or the
+player. `content_catalog_hosting_list` accepts exactly one `asset_id` or
+`session_id` and returns both `hostings` and `hosting_intents` without a provider
+call. Manual **Check readiness** remains available.
+
+These changes affect Catalog only. They do not modify Media, move/delete files,
+scan folders, or publish to Social/Patreon. Upgrading creates no new hosting
+intents for historical files. Existing pending remote uploads can be observed
+automatically after upgrade; no historical checksum wait is silently converted
+into permission to upload.

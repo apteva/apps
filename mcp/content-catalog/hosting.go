@@ -20,17 +20,21 @@ type HostProvider interface {
 	Check(ctx *sdk.AppCtx, connectionID int64, remoteID, libraryID string) (HostObservation, error)
 }
 type HostObservation struct {
-	Status             string
-	RemoteID           string
-	LibraryID          string
-	ReportedLibraryID  string
-	CollectionID       string
-	CollectionReported bool
-	DurationSeconds    int64
-	DurationReported   bool
-	GUIDConfirmed      bool
-	EmbedURL           string
-	Error              string
+	Status              string
+	RemoteID            string
+	LibraryID           string
+	ReportedLibraryID   string
+	CollectionID        string
+	CollectionReported  bool
+	DurationSeconds     int64
+	DurationReported    bool
+	GUIDConfirmed       bool
+	EmbedURL            string
+	Error               string
+	EncodeProgress      *float64
+	ProviderStatus      *int64
+	ProviderStage       string
+	TranscodingMessages json.RawMessage
 }
 
 type HostAdapter struct {
@@ -54,7 +58,7 @@ type storageChecksumFile struct {
 // refreshAssetStorageChecksum makes Catalog's cached asset identity follow
 // Storage's authoritative row. A pending/running checksum is returned to the
 // caller before any host reservation or provider upload is created.
-func refreshAssetStorageChecksum(ctx *sdk.AppCtx, pid string, asset *Asset, fileID int64) (string, error) {
+func refreshAssetStorageChecksum(ctx *sdk.AppCtx, pid string, asset *Asset, fileID int64, requestRepair bool) (string, error) {
 	var result struct {
 		Found bool                `json:"found"`
 		File  storageChecksumFile `json:"file"`
@@ -79,6 +83,12 @@ func refreshAssetStorageChecksum(ctx *sdk.AppCtx, pid string, asset *Asset, file
 		status = "verified"
 	}
 	if status != "verified" || result.File.SHA256 == "" {
+		if status == "failed" {
+			return "failed", nil
+		}
+		if !requestRepair && (status == "pending" || status == "running") {
+			return status, nil
+		}
 		var queued struct {
 			ChecksumStatus string              `json:"checksum_status"`
 			SHA256         string              `json:"sha256"`
@@ -162,15 +172,26 @@ func (bunnyProvider) Check(ctx *sdk.AppCtx, connectionID int64, remoteID, librar
 	obs := HostObservation{Status: "processing", RemoteID: remoteID, LibraryID: libraryID, ReportedLibraryID: reportedLibrary,
 		CollectionID: stringValue(body, "collectionId"), CollectionReported: collectionReported,
 		DurationSeconds: intValue(body, "length"), DurationReported: durationReported && duration != nil, GUIDConfirmed: guid != "" && strings.EqualFold(guid, remoteID)}
+	if status >= 0 {
+		obs.ProviderStatus = &status
+		obs.ProviderStage = bunnyStage(status)
+	}
+	if progress, ok := body["encodeProgress"].(float64); ok && progress >= 0 && progress <= 100 {
+		obs.EncodeProgress = &progress
+	}
+	obs.TranscodingMessages = json.RawMessage(`[]`)
+	if messages, ok := body["transcodingMessages"]; ok && messages != nil {
+		obs.TranscodingMessages, _ = json.Marshal(messages)
+	}
 	if status == 4 {
 		obs.Status = "ready"
 		if libraryID != "" {
 			obs.EmbedURL = "https://iframe.mediadelivery.net/embed/" + libraryID + "/" + remoteID
 		}
 	}
-	if status == 5 {
+	if status == 5 || status == 6 {
 		obs.Status = "failed"
-		obs.Error = "Bunny reported video processing failure"
+		obs.Error = "Bunny reported " + obs.ProviderStage
 	}
 	return obs, nil
 }
@@ -221,31 +242,39 @@ func validateHostBinding(ctx *sdk.AppCtx, providerName string, connectionID int6
 }
 
 type Hosting struct {
-	ID                  string `json:"id"`
-	AssetID             string `json:"asset_id"`
-	Provider            string `json:"provider"`
-	ConnectionID        int64  `json:"connection_id"`
-	LibraryID           string `json:"library_id"`
-	CollectionID        string `json:"collection_id"`
-	SourceSHA256        string `json:"source_sha256"`
-	RemoteID            string `json:"remote_id"`
-	EmbedURL            string `json:"embed_url"`
-	Status              string `json:"status"`
-	Error               string `json:"error"`
-	LastCheckedAt       string `json:"last_checked_at"`
-	LinkOrigin          string `json:"link_origin"`
-	DurationSeconds     int64  `json:"duration_seconds"`
-	ProviderVerifiedAt  string `json:"provider_verified_at"`
-	SourceEvidence      string `json:"source_evidence"`
-	ProviderSourceMatch string `json:"provider_source_match"`
+	ID                  string          `json:"id"`
+	AssetID             string          `json:"asset_id"`
+	Provider            string          `json:"provider"`
+	ConnectionID        int64           `json:"connection_id"`
+	LibraryID           string          `json:"library_id"`
+	CollectionID        string          `json:"collection_id"`
+	SourceSHA256        string          `json:"source_sha256"`
+	RemoteID            string          `json:"remote_id"`
+	EmbedURL            string          `json:"embed_url"`
+	Status              string          `json:"status"`
+	Error               string          `json:"error"`
+	LastCheckedAt       string          `json:"last_checked_at"`
+	LinkOrigin          string          `json:"link_origin"`
+	DurationSeconds     int64           `json:"duration_seconds"`
+	ProviderVerifiedAt  string          `json:"provider_verified_at"`
+	SourceEvidence      string          `json:"source_evidence"`
+	ProviderSourceMatch string          `json:"provider_source_match"`
+	EncodeProgress      *float64        `json:"encode_progress"`
+	ProviderStatus      *int64          `json:"provider_status"`
+	ProviderStage       string          `json:"provider_stage"`
+	TranscodingMessages json.RawMessage `json:"transcoding_messages"`
+	NextCheckAt         string          `json:"next_check_at"`
+	CheckError          string          `json:"check_error"`
 }
 
 func hostingByID(db *sql.DB, pid, id string) (*Hosting, error) {
 	h := &Hosting{}
-	err := db.QueryRow(`SELECT id,asset_id,provider,connection_id,library_id,collection_id,source_sha256,remote_id,embed_url,status,error,last_checked_at,link_origin,duration_seconds,provider_verified_at,source_evidence,provider_source_match FROM hostings WHERE project_id=? AND id=?`, pid, id).Scan(&h.ID, &h.AssetID, &h.Provider, &h.ConnectionID, &h.LibraryID, &h.CollectionID, &h.SourceSHA256, &h.RemoteID, &h.EmbedURL, &h.Status, &h.Error, &h.LastCheckedAt, &h.LinkOrigin, &h.DurationSeconds, &h.ProviderVerifiedAt, &h.SourceEvidence, &h.ProviderSourceMatch)
+	var messages string
+	err := db.QueryRow(`SELECT id,asset_id,provider,connection_id,library_id,collection_id,source_sha256,remote_id,embed_url,status,error,last_checked_at,link_origin,duration_seconds,provider_verified_at,source_evidence,provider_source_match,encode_progress,provider_status,provider_stage,transcoding_messages,next_check_at,check_error FROM hostings WHERE project_id=? AND id=?`, pid, id).Scan(&h.ID, &h.AssetID, &h.Provider, &h.ConnectionID, &h.LibraryID, &h.CollectionID, &h.SourceSHA256, &h.RemoteID, &h.EmbedURL, &h.Status, &h.Error, &h.LastCheckedAt, &h.LinkOrigin, &h.DurationSeconds, &h.ProviderVerifiedAt, &h.SourceEvidence, &h.ProviderSourceMatch, &h.EncodeProgress, &h.ProviderStatus, &h.ProviderStage, &messages, &h.NextCheckAt, &h.CheckError)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("hosting record not found")
 	}
+	h.TranscodingMessages = json.RawMessage(messages)
 	return h, err
 }
 func (a *App) hostingsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -253,13 +282,22 @@ func (a *App) hostingsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = required(args, "asset_id"); err != nil {
+	assetID, sessionID := str(args, "asset_id"), str(args, "session_id")
+	if (assetID == "") == (sessionID == "") {
+		return nil, errors.New("provide exactly one of asset_id or session_id")
+	}
+	where, params := "h.asset_id=?", []any{pid, assetID}
+	intentWhere := "asset_id=?"
+	if sessionID != "" {
+		if _, err = sessionByID(ctx.AppDB(), pid, sessionID); err != nil {
+			return nil, err
+		}
+		where, params = "a.session_id=?", []any{pid, sessionID}
+		intentWhere = "session_id=?"
+	} else if _, err = assetByID(ctx.AppDB(), pid, assetID); err != nil {
 		return nil, err
 	}
-	if _, err = assetByID(ctx.AppDB(), pid, str(args, "asset_id")); err != nil {
-		return nil, err
-	}
-	rows, err := ctx.AppDB().Query(`SELECT id FROM hostings WHERE project_id=? AND asset_id=? ORDER BY created_at DESC,id DESC`, pid, str(args, "asset_id"))
+	rows, err := ctx.AppDB().Query(`SELECT h.id FROM hostings h JOIN assets a ON a.project_id=h.project_id AND a.id=h.asset_id WHERE h.project_id=? AND `+where+` ORDER BY h.created_at DESC,h.id DESC`, params...)
 	if err != nil {
 		return nil, err
 	}
@@ -285,17 +323,77 @@ func (a *App) hostingsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		out = append(out, *h)
 	}
-	return map[string]any{"hostings": out}, nil
+	intentRows, err := ctx.AppDB().Query(`SELECT `+intentColumns+` FROM hosting_intents WHERE project_id=? AND `+intentWhere+` ORDER BY created_at DESC,rowid DESC`, params...)
+	if err != nil {
+		return nil, err
+	}
+	intents := []HostingIntent{}
+	for intentRows.Next() {
+		i, e := scanHostingIntent(intentRows)
+		if e != nil {
+			intentRows.Close()
+			return nil, e
+		}
+		intents = append(intents, *i)
+	}
+	err = intentRows.Err()
+	intentRows.Close()
+	return map[string]any{"hostings": out, "hosting_intents": intents}, err
 }
 func (a *App) hostingRequest(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	a.lifecycleMu.RLock()
 	defer a.lifecycleMu.RUnlock()
 	a.hostPolicyMu.Lock()
 	defer a.hostPolicyMu.Unlock()
+	return a.hostingRequestLocked(ctx, args, nil)
+}
+
+func (a *App) hostingRequestLocked(ctx *sdk.AppCtx, args map[string]any, intent *HostingIntent) (result any, err error) {
 	pid, err := project(ctx)
 	if err != nil {
 		return nil, err
 	}
+	checksumStatus := ""
+	checksumReadFailed := false
+	executionToken, executionIntentID := "", ""
+	defer func() {
+		defer func() {
+			if executionIntentID != "" {
+				_, _ = ctx.AppDB().Exec(`UPDATE hosting_intents SET execution_token='' WHERE project_id=? AND id=? AND execution_token=?`, pid, executionIntentID, executionToken)
+			}
+		}()
+		if intent == nil {
+			return
+		}
+		state, message, hostingID := "blocked", "", ""
+		if err != nil {
+			message = err.Error()
+			if checksumReadFailed {
+				state = "waiting_checksum"
+			}
+		} else if body, ok := result.(map[string]any); ok {
+			if h, ok := body["hosting"].(*Hosting); ok && h != nil {
+				hostingID = h.ID
+				if h.RemoteID != "" {
+					state = "submitted"
+				} else {
+					message = "Hosting result needs reconciliation; no automatic transfer retry"
+				}
+			} else if checksumStatus != "verified" {
+				state = "waiting_checksum"
+				if checksumStatus == "failed" {
+					state = "failed"
+					message = "Storage checksum verification failed"
+				}
+			}
+		}
+		if e := updateHostingIntent(ctx, pid, intent, state, checksumStatus, message, hostingID); e != nil && err == nil {
+			err = e
+		}
+		if body, ok := result.(map[string]any); ok {
+			body["hosting_intent"] = intent
+		}
+	}()
 	if err = required(args, "asset_id"); err != nil {
 		return nil, err
 	}
@@ -312,13 +410,6 @@ func (a *App) hostingRequest(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	fileID, err := strconv.ParseInt(asset.StorageFileID, 10, 64)
 	if err != nil || fileID <= 0 {
 		return nil, errors.New("asset has an invalid Storage file ID")
-	}
-	checksumStatus, err := refreshAssetStorageChecksum(ctx, pid, asset, fileID)
-	if err != nil {
-		return nil, err
-	}
-	if checksumStatus != "verified" || asset.SHA256 == "" {
-		return map[string]any{"pending_checksum": checksumStatus != "failed", "checksum_status": checksumStatus, "storage_file_id": asset.StorageFileID, "asset_id": asset.ID}, nil
 	}
 	session, err := sessionByID(ctx.AppDB(), pid, asset.SessionID)
 	if err != nil {
@@ -337,6 +428,46 @@ func (a *App) hostingRequest(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	if err = validateHostBinding(ctx, brand.HostProvider, brand.HostConnectionID); err != nil {
 		return nil, err
+	}
+	if intent == nil {
+		title, e := hostingTitle(ctx, args, session, asset)
+		if e != nil {
+			return nil, e
+		}
+		intent, err = prepareHostingIntent(ctx, pid, asset, session, brand, title)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// A second event, worker or sidecar must not execute or overwrite the
+	// outcome of the intent currently being handled by another caller.
+	executionToken = newID()
+	execution, executionErr := ctx.AppDB().Exec(`UPDATE hosting_intents SET execution_token=? WHERE project_id=? AND id=? AND status='waiting_checksum' AND execution_token=''`, executionToken, pid, intent.ID)
+	if executionErr != nil {
+		intent = nil
+		return nil, executionErr
+	}
+	ownsExecution, executionErr := execution.RowsAffected()
+	if executionErr != nil {
+		intent = nil
+		return nil, executionErr
+	}
+	if ownsExecution == 0 {
+		shared, e := hostingIntentByID(ctx.AppDB(), pid, intent.ID)
+		intent = nil
+		return map[string]any{"hosting_intent": shared, "was_existing": true, "warning": "Hosting request is already being handled; progress updates automatically."}, e
+	}
+	executionIntentID = intent.ID
+	if err = validateIntentRoute(ctx, pid, intent, asset, session, brand); err != nil {
+		return nil, err
+	}
+	checksumStatus, err = refreshAssetStorageChecksum(ctx, pid, asset, fileID, intent.Attempts == 0)
+	if err != nil {
+		checksumReadFailed = true
+		return nil, err
+	}
+	if checksumStatus != "verified" || asset.SHA256 == "" {
+		return map[string]any{"pending_checksum": checksumStatus != "failed", "checksum_status": checksumStatus, "storage_file_id": asset.StorageFileID, "asset_id": asset.ID, "message": "Waiting for checksum verification"}, nil
 	}
 	collectionID := brand.HostCollectionID
 	if session.HostCollectionID != "" {
@@ -400,7 +531,46 @@ func (a *App) hostingRequest(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		_, _ = ctx.AppDB().Exec(`UPDATE hostings SET status='failed',error=?,updated_at=? WHERE id=? AND project_id=?`, msg, now(), id, pid)
 		return nil, fmt.Errorf("hosting not started: %s", msg)
 	}
-	remoteID, startErr := adapter.Provider.Start(ctx, brand.HostConnectionID, urlResult.URL, asset.Name, collectionID)
+	// Approval can be revoked while obtaining the signed URL. Check it again
+	// immediately before the external transfer, including the saved route.
+	fresh, guardErr := assetByID(ctx.AppDB(), pid, asset.ID)
+	if guardErr == nil {
+		guardErr = requireActiveAsset(ctx.AppDB(), pid, asset.ID)
+	}
+	if guardErr == nil && (fresh.ReviewStatus != "approved" || fresh.SHA256 != asset.SHA256) {
+		guardErr = errors.New("asset approval or verified source changed before upload")
+	}
+	if guardErr == nil {
+		currentSession, e := sessionByID(ctx.AppDB(), pid, fresh.SessionID)
+		guardErr = e
+		if e == nil {
+			currentBrand, e := brandByID(ctx.AppDB(), pid, currentSession.BrandID)
+			guardErr = e
+			if e == nil {
+				guardErr = validateIntentRoute(ctx, pid, intent, fresh, currentSession, currentBrand)
+			}
+		}
+	}
+	if guardErr != nil {
+		_, _ = ctx.AppDB().Exec(`UPDATE hostings SET status='failed',error=?,updated_at=? WHERE project_id=? AND id=? AND remote_id=''`, guardErr.Error(), now(), pid, id)
+		return nil, guardErr
+	}
+	// Claim the saved intent at the authorization boundary. A concurrent
+	// cancellation, approval revocation or destination edit wins atomically.
+	claimed, claimErr := ctx.AppDB().Exec(`UPDATE hosting_intents SET status='submitted',hosting_id=?,updated_at=? WHERE project_id=? AND id=? AND status='waiting_checksum' AND EXISTS (SELECT 1 FROM assets a JOIN sessions s ON s.id=a.session_id AND s.project_id=a.project_id JOIN brands b ON b.id=s.brand_id AND b.project_id=s.project_id WHERE a.id=hosting_intents.asset_id AND a.project_id=hosting_intents.project_id AND a.lifecycle='active' AND s.lifecycle='active' AND a.review_status='approved' AND a.sha256=? AND a.session_id=? AND a.storage_install_id=? AND a.storage_file_id=? AND b.host_provider=? AND b.host_connection_id=? AND b.host_library_id=? AND (CASE WHEN s.host_collection_id<>'' THEN s.host_collection_id ELSE b.host_collection_id END)=?)`, id, now(), pid, intent.ID, asset.SHA256, intent.SessionID, intent.StorageInstallID, intent.StorageFileID, intent.Provider, intent.ConnectionID, intent.LibraryID, collectionID)
+	if claimErr != nil {
+		return nil, claimErr
+	}
+	claimedCount, claimErr := claimed.RowsAffected()
+	if claimErr != nil {
+		return nil, claimErr
+	}
+	if claimedCount != 1 {
+		_, _ = ctx.AppDB().Exec(`UPDATE hostings SET status='failed',error='Intent cancelled, claimed, or no longer eligible before upload',updated_at=? WHERE project_id=? AND id=? AND remote_id=''`, now(), pid, id)
+		return nil, errors.New("hosting intent cancelled, claimed or changed before upload; no transfer started")
+	}
+	intent.Status = "submitted"
+	remoteID, startErr := adapter.Provider.Start(ctx, brand.HostConnectionID, urlResult.URL, intent.Title, collectionID)
 	if startErr != nil {
 		_, _ = ctx.AppDB().Exec(`UPDATE hostings SET status='uncertain',error=?,updated_at=? WHERE id=? AND project_id=?`, startErr.Error(), now(), id, pid)
 		h, _ := hostingByID(ctx.AppDB(), pid, id)
@@ -414,7 +584,9 @@ func (a *App) hostingRequest(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	h, err := hostingByID(ctx.AppDB(), pid, id)
 	return map[string]any{"hosting": h, "was_existing": false}, err
 }
-func (a *App) hostingCheck(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) hostingCheck(ctx *sdk.AppCtx, args map[string]any) (result any, err error) {
+	a.hostCheckMu.Lock()
+	defer a.hostCheckMu.Unlock()
 	pid, err := project(ctx)
 	if err != nil {
 		return nil, err
@@ -426,6 +598,11 @@ func (a *App) hostingCheck(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if err != nil {
+			_ = deferHostingCheck(ctx, pid, h.ID, err.Error())
+		}
+	}()
 	if h.RemoteID == "" {
 		return map[string]any{"hosting": h, "warning": "no remote ID; reconcile manually before retry"}, nil
 	}
@@ -443,9 +620,22 @@ func (a *App) hostingCheck(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if h.CollectionID != "" && obs.CollectionReported && !strings.EqualFold(obs.CollectionID, h.CollectionID) {
 		return nil, errors.New("hosted video moved to a different collection")
 	}
-	_, err = ctx.AppDB().Exec(`UPDATE hostings SET status=?,library_id=?,embed_url=?,error=?,last_checked_at=?,duration_seconds=CASE WHEN ? THEN ? ELSE duration_seconds END,provider_verified_at=?,updated_at=? WHERE id=? AND project_id=?`, obs.Status, obs.LibraryID, obs.EmbedURL, obs.Error, now(), obs.DurationReported, obs.DurationSeconds, now(), now(), h.ID, pid)
+	next := nextHostingCheck(obs.Status)
+	messages := obs.TranscodingMessages
+	if len(messages) == 0 {
+		messages = json.RawMessage(`[]`)
+	}
+	recorded, err := ctx.AppDB().Exec(`UPDATE hostings SET status=?,library_id=?,embed_url=?,error=?,last_checked_at=?,duration_seconds=CASE WHEN ? THEN ? ELSE duration_seconds END,provider_verified_at=?,updated_at=?,encode_progress=?,provider_status=?,provider_stage=?,transcoding_messages=?,next_check_at=?,check_attempts=0,check_error='' WHERE id=? AND project_id=? AND last_checked_at=? AND status=?`, obs.Status, obs.LibraryID, obs.EmbedURL, obs.Error, now(), obs.DurationReported, obs.DurationSeconds, now(), now(), obs.EncodeProgress, obs.ProviderStatus, obs.ProviderStage, string(messages), next, h.ID, pid, h.LastCheckedAt, h.Status)
 	if err != nil {
 		return nil, err
+	}
+	changed, err := recorded.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if changed == 0 {
+		fresh, e := hostingByID(ctx.AppDB(), pid, h.ID)
+		return map[string]any{"hosting": fresh}, e
 	}
 	ctx.EmitWithProject("content-catalog.hosting.updated", pid, map[string]any{"id": h.ID, "status": obs.Status})
 	h, err = hostingByID(ctx.AppDB(), pid, h.ID)
@@ -541,6 +731,9 @@ func (a *App) hostingLinkExisting(ctx *sdk.AppCtx, args map[string]any) (any, er
 		if err != nil {
 			return nil, err
 		}
+		if err = saveHostProgress(ctx, pid, existing.ID, obs); err != nil {
+			return nil, err
+		}
 		fresh, err := hostingByID(ctx.AppDB(), pid, existing.ID)
 		return map[string]any{"hosting": fresh, "was_existing": true}, err
 	}
@@ -594,6 +787,9 @@ func (a *App) hostingLinkExisting(ctx *sdk.AppCtx, args map[string]any) (any, er
 			}
 			return map[string]any{"hosting": h, "was_existing": true}, nil
 		}
+		return nil, err
+	}
+	if err = saveHostProgress(ctx, pid, id, obs); err != nil {
 		return nil, err
 	}
 	ctx.EmitWithProject("content-catalog.hosting.updated", pid, map[string]any{"id": id, "status": "ready", "link_origin": "existing_link"})

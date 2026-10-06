@@ -225,9 +225,9 @@ func TestSeparateAppCannotRepeatPendingCollectionCreation(t *testing.T) {
 	go func() { _, err := a.hostingRequest(ctx, map[string]any{"asset_id": id}); done <- err }()
 	<-entered
 	// A second process has no shared Go mutex, but sees the DB reservation.
-	_, err := (&App{}).hostingRequest(ctx, map[string]any{"asset_id": id})
-	if err == nil || !strings.Contains(err.Error(), "uncertain") {
-		t.Errorf("pending operation was not blocked: %v", err)
+	result, err := (&App{}).hostingRequest(ctx, map[string]any{"asset_id": id})
+	if err != nil || result.(map[string]any)["was_existing"] != true {
+		t.Errorf("pending operation was not reused: %v, %v", result, err)
 	}
 	unblock()
 	if err := <-done; err != nil {
