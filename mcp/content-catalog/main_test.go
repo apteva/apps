@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,14 +16,22 @@ import (
 
 type catalogPlatform struct {
 	tk.BasePlatformClient
-	mediaBatchCalls int
-	mediaRows       map[string]map[string]any
-	mediaBatchError error
-	starts          int
-	files           []map[string]any
-	folder          string
-	videoCollection string
-	videoLibrary    string
+	mediaBatchCalls           int
+	mediaRows                 map[string]map[string]any
+	mediaBatchError           error
+	starts                    int
+	files                     []map[string]any
+	folder                    string
+	videoCollection           string
+	videoLibrary              string
+	collections               []map[string]any
+	collectionCreates         int
+	collectionLists           int
+	collectionCreateError     error
+	collectionListError       error
+	collectionResponseLibrary string
+	fetchedCollections        []string
+	beforeCollectionCreate    func()
 }
 
 func (*catalogPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
@@ -82,14 +91,52 @@ func (p *catalogPlatform) CallAppResult(app, tool string, input map[string]any, 
 	b, _ := json.Marshal(data)
 	return json.Unmarshal(b, out)
 }
-func (p *catalogPlatform) ExecuteIntegrationTool(id int64, tool string, _ map[string]any) (*sdk.ExecuteResult, error) {
+func (p *catalogPlatform) ExecuteIntegrationTool(id int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
 	if id != 21 {
 		return nil, fmt.Errorf("unexpected connection %d", id)
 	}
 	switch tool {
 	case "fetch_video":
 		p.starts++
+		p.videoCollection = str(input, "collectionId")
+		p.fetchedCollections = append(p.fetchedCollections, p.videoCollection)
 		return &sdk.ExecuteResult{Success: true, Data: json.RawMessage(`{"id":"video-1"}`)}, nil
+	case "list_collections":
+		p.collectionLists++
+		if p.collectionListError != nil {
+			return nil, p.collectionListError
+		}
+		items := p.collections
+		if items == nil {
+			items = []map[string]any{}
+		}
+		page := int(number(input, "page"))
+		start := (page - 1) * 100
+		end := start + 100
+		if start > len(items) {
+			return nil, errors.New("invalid page")
+		}
+		if end > len(items) {
+			end = len(items)
+		}
+		body, _ := json.Marshal(map[string]any{"items": items[start:end], "currentPage": page, "totalItems": len(items)})
+		return &sdk.ExecuteResult{Success: true, Data: body}, nil
+	case "create_collection":
+		p.collectionCreates++
+		if p.beforeCollectionCreate != nil {
+			p.beforeCollectionCreate()
+		}
+		library := "42"
+		if p.collectionResponseLibrary != "" {
+			library = p.collectionResponseLibrary
+		}
+		collection := map[string]any{"guid": fmt.Sprintf("collection-%d", p.collectionCreates), "name": str(input, "name"), "videoLibraryId": library}
+		p.collections = append(p.collections, collection)
+		if p.collectionCreateError != nil {
+			return nil, p.collectionCreateError
+		}
+		body, _ := json.Marshal(collection)
+		return &sdk.ExecuteResult{Success: true, Data: body}, nil
 	case "get_video":
 		library := p.videoLibrary
 		if library == "" {
@@ -318,7 +365,11 @@ func TestSessionAndAssetPreviewResolveToStorage(t *testing.T) {
 }
 
 func TestHostingIsIdempotentAndProviderNeutralRecord(t *testing.T) {
-	a, ctx, p, _, session := setupCatalog(t)
+	a, ctx, p, brand, session := setupCatalog(t)
+	// This test exercises checksum reuse across sessions sharing an explicit destination.
+	if _, err := a.brandUpdate(ctx, map[string]any{"id": brand, "host_collection_id": "shared"}); err != nil {
+		t.Fatal(err)
+	}
 	asset := attach(t, a, ctx, session, 1)
 	if _, err := a.assetReview(ctx, map[string]any{"asset_id": asset, "review_status": "approved"}); err != nil {
 		t.Fatal(err)

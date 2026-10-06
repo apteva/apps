@@ -14,6 +14,7 @@ import (
 
 // HostProvider keeps cloud hosting separate from Catalog's records. A future
 // provider implements these two operations without changing the schema or UI.
+// Hosts with collections may also implement HostCollectionProvider.
 type HostProvider interface {
 	Start(ctx *sdk.AppCtx, connectionID int64, sourceURL, title, collectionID string) (string, error)
 	Check(ctx *sdk.AppCtx, connectionID int64, remoteID, libraryID string) (HostObservation, error)
@@ -224,6 +225,8 @@ func (a *App) hostingsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 func (a *App) hostingRequest(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	a.lifecycleMu.RLock()
 	defer a.lifecycleMu.RUnlock()
+	a.hostPolicyMu.Lock()
+	defer a.hostPolicyMu.Unlock()
 	pid, err := project(ctx)
 	if err != nil {
 		return nil, err
@@ -271,51 +274,29 @@ func (a *App) hostingRequest(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		collectionID = session.HostCollectionID
 	}
 	// A manually linked video is already hosted. A later collection-policy edit
-	// must not start another transfer of that asset by accident.
+	// must not start another transfer of that asset by accident. Without an
+	// explicit collection, also preserve earlier transfers in any collection.
 	var linkedID string
-	err = ctx.AppDB().QueryRow(`SELECT id FROM hostings WHERE project_id=? AND asset_id=? AND provider=? AND connection_id=? AND library_id=? AND link_origin='existing_link' AND remote_id<>'' LIMIT 1`, pid, asset.ID, brand.HostProvider, brand.HostConnectionID, brand.HostLibraryID).Scan(&linkedID)
+	err = ctx.AppDB().QueryRow(`SELECT id FROM hostings WHERE project_id=? AND asset_id=? AND provider=? AND connection_id=? AND library_id=? AND ((link_origin='existing_link' AND remote_id<>'') OR (?='' AND source_sha256=?)) ORDER BY CASE WHEN remote_id<>'' THEN 0 ELSE 1 END,created_at LIMIT 1`, pid, asset.ID, brand.HostProvider, brand.HostConnectionID, brand.HostLibraryID, collectionID, asset.SHA256).Scan(&linkedID)
 	if err == nil {
 		linked, e := hostingByID(ctx.AppDB(), pid, linkedID)
-		return map[string]any{"hosting": linked, "was_existing": true, "warning": "existing provider video is linked; no transfer started"}, e
+		return map[string]any{"hosting": linked, "was_existing": true, "warning": "existing hosting record found; no transfer started"}, e
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
-	var existingID string
-	err = ctx.AppDB().QueryRow(`SELECT id FROM hostings WHERE project_id=? AND asset_id=? AND provider=? AND connection_id=? AND library_id=? AND collection_id=? AND source_sha256=?`, pid, asset.ID, brand.HostProvider, brand.HostConnectionID, brand.HostLibraryID, collectionID, asset.SHA256).Scan(&existingID)
-	if err == nil {
-		existing, _ := hostingByID(ctx.AppDB(), pid, existingID)
-		return map[string]any{"hosting": existing, "was_existing": true}, nil
+	if existing, found, err := reusableHosting(ctx, pid, asset, brand, collectionID); err != nil || found {
+		return existing, err
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	previousCollection := collectionID
+	collectionID, err = ensureSessionCollection(ctx, pid, session, brand, adapter.Provider)
+	if err != nil {
 		return nil, err
 	}
-	// A file can be linked to several sessions. Reuse an already started
-	// transfer for the same bytes and destination across those assets.
-	var sharedID string
-	err = ctx.AppDB().QueryRow(`SELECT id FROM hostings WHERE project_id=? AND provider=? AND connection_id=? AND library_id=? AND collection_id=? AND source_sha256=? ORDER BY CASE WHEN remote_id<>'' THEN 0 ELSE 1 END,created_at LIMIT 1`, pid, brand.HostProvider, brand.HostConnectionID, brand.HostLibraryID, collectionID, asset.SHA256).Scan(&sharedID)
-	if err == nil {
-		shared, getErr := hostingByID(ctx.AppDB(), pid, sharedID)
-		if getErr != nil {
-			return nil, getErr
+	if collectionID != previousCollection {
+		if existing, found, err := reusableHosting(ctx, pid, asset, brand, collectionID); err != nil || found {
+			return existing, err
 		}
-		if shared.RemoteID == "" {
-			return map[string]any{"hosting": shared, "was_existing": true, "warning": "same checksum has an unresolved hosting request; reconcile it before uploading again"}, nil
-		}
-		id := newID()
-		_, err = ctx.AppDB().Exec(`INSERT OR IGNORE INTO hostings(id,project_id,asset_id,provider,connection_id,library_id,collection_id,source_sha256,remote_id,embed_url,status,error,last_checked_at,link_origin,duration_seconds,provider_verified_at,source_evidence,provider_source_match) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, pid, asset.ID, shared.Provider, shared.ConnectionID, shared.LibraryID, shared.CollectionID, shared.SourceSHA256, shared.RemoteID, shared.EmbedURL, shared.Status, shared.Error, shared.LastCheckedAt, shared.LinkOrigin, shared.DurationSeconds, shared.ProviderVerifiedAt, shared.SourceEvidence, shared.ProviderSourceMatch)
-		if err != nil {
-			return nil, err
-		}
-		var actual string
-		if err = ctx.AppDB().QueryRow(`SELECT id FROM hostings WHERE project_id=? AND asset_id=? AND provider=? AND connection_id=? AND library_id=? AND collection_id=? AND source_sha256=?`, pid, asset.ID, brand.HostProvider, brand.HostConnectionID, brand.HostLibraryID, collectionID, asset.SHA256).Scan(&actual); err != nil {
-			return nil, err
-		}
-		reused, err := hostingByID(ctx.AppDB(), pid, actual)
-		return map[string]any{"hosting": reused, "was_existing": actual != id, "reused_remote": true}, err
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return nil, err
 	}
 	// Reserve before any external call. An ambiguous provider error remains
 	// uncertain; another request returns this row instead of uploading again.
@@ -549,4 +530,44 @@ func (a *App) hostingLinkExisting(ctx *sdk.AppCtx, args map[string]any) (any, er
 	ctx.EmitWithProject("content-catalog.hosting.updated", pid, map[string]any{"id": id, "status": "ready", "link_origin": "existing_link"})
 	h, err := hostingByID(ctx.AppDB(), pid, id)
 	return map[string]any{"hosting": h, "was_existing": false}, err
+}
+
+func reusableHosting(ctx *sdk.AppCtx, pid string, asset *Asset, brand *Brand, collectionID string) (any, bool, error) {
+	var existingID string
+	err := ctx.AppDB().QueryRow(`SELECT id FROM hostings WHERE project_id=? AND asset_id=? AND provider=? AND connection_id=? AND library_id=? AND collection_id=? AND source_sha256=?`, pid, asset.ID, brand.HostProvider, brand.HostConnectionID, brand.HostLibraryID, collectionID, asset.SHA256).Scan(&existingID)
+	if err == nil {
+		existing, _ := hostingByID(ctx.AppDB(), pid, existingID)
+		return map[string]any{"hosting": existing, "was_existing": true}, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, false, err
+	}
+	// A file can be linked to several sessions. Reuse an already started
+	// transfer for the same bytes and destination across those assets.
+	var sharedID string
+	err = ctx.AppDB().QueryRow(`SELECT id FROM hostings WHERE project_id=? AND provider=? AND connection_id=? AND library_id=? AND collection_id=? AND source_sha256=? ORDER BY CASE WHEN remote_id<>'' THEN 0 ELSE 1 END,created_at LIMIT 1`, pid, brand.HostProvider, brand.HostConnectionID, brand.HostLibraryID, collectionID, asset.SHA256).Scan(&sharedID)
+	if err == nil {
+		shared, getErr := hostingByID(ctx.AppDB(), pid, sharedID)
+		if getErr != nil {
+			return nil, false, getErr
+		}
+		if shared.RemoteID == "" {
+			return map[string]any{"hosting": shared, "was_existing": true, "warning": "same checksum has an unresolved hosting request; reconcile it before uploading again"}, true, nil
+		}
+		id := newID()
+		_, err = ctx.AppDB().Exec(`INSERT OR IGNORE INTO hostings(id,project_id,asset_id,provider,connection_id,library_id,collection_id,source_sha256,remote_id,embed_url,status,error,last_checked_at,link_origin,duration_seconds,provider_verified_at,source_evidence,provider_source_match) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, pid, asset.ID, shared.Provider, shared.ConnectionID, shared.LibraryID, shared.CollectionID, shared.SourceSHA256, shared.RemoteID, shared.EmbedURL, shared.Status, shared.Error, shared.LastCheckedAt, shared.LinkOrigin, shared.DurationSeconds, shared.ProviderVerifiedAt, shared.SourceEvidence, shared.ProviderSourceMatch)
+		if err != nil {
+			return nil, false, err
+		}
+		var actual string
+		if err = ctx.AppDB().QueryRow(`SELECT id FROM hostings WHERE project_id=? AND asset_id=? AND provider=? AND connection_id=? AND library_id=? AND collection_id=? AND source_sha256=?`, pid, asset.ID, brand.HostProvider, brand.HostConnectionID, brand.HostLibraryID, collectionID, asset.SHA256).Scan(&actual); err != nil {
+			return nil, false, err
+		}
+		reused, err := hostingByID(ctx.AppDB(), pid, actual)
+		return map[string]any{"hosting": reused, "was_existing": actual != id, "reused_remote": true}, true, err
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, false, err
+	}
+	return nil, false, nil
 }
