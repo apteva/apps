@@ -5,7 +5,7 @@ import {
   validTimings,
 } from "./Timing";
 /// <reference path="./flow-css.d.ts" />
-import { useEffect, useMemo, useState, useId } from "react";
+import { useEffect, useMemo, useState, useId, type ReactNode } from "react";
 import {
   ReactFlow,
   Background,
@@ -183,6 +183,7 @@ export function ProcessFlow({
   executions,
   runExecutions,
   agents,
+  saveControls,
 }: {
   steps: Step[];
   onChange?: (s: Step[]) => void;
@@ -190,6 +191,7 @@ export function ProcessFlow({
   executions?: StepRun[];
   runExecutions?: StepRun[][];
   agents?: { id: number; name: string }[];
+  saveControls?: ReactNode;
 }) {
   const editable = !!onChange,
     instanceID = useId();
@@ -390,11 +392,14 @@ export function ProcessFlow({
           </h2>
           <p>
             {editable
-              ? "Processes arranges the graph automatically. Connect steps to define execution order."
+              ? saveControls
+                ? "Select a step, edit its settings, then save your changes."
+                : "Processes arranges the graph automatically. Connect steps to define execution order."
               : "Follow the connections. Select any step to see its instructions."}
           </p>
         </div>
         <div className="pf-actions">
+          {!active && saveControls}
           {editable && (
             <>
               <button
@@ -564,6 +569,7 @@ export function ProcessFlow({
                 ×
               </button>
             </div>
+            <div className="pf-inspector-content">
             {editable ? (
               <>
                 <label htmlFor={`${instanceID}-name`}>Name</label>
@@ -641,6 +647,7 @@ export function ProcessFlow({
                     </p>
                   )}
                 </fieldset>
+                {saveControls && <TimingRules step={active} steps={steps} />}
                 <TimingEditor step={active} steps={steps} onChange={update} />
                 <button
                   type="button"
@@ -680,6 +687,8 @@ export function ProcessFlow({
                 </p>
               </>
             )}
+            </div>
+            {saveControls}
           </aside>
         )}
       </div>

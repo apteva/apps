@@ -22,6 +22,9 @@ func TestSidecarTimedNotificationSurvivesRestart(t *testing.T) {
 	}
 	events := make(chan delivery, 8)
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveExecutorAttachment(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/apps/callback/agents/7":
@@ -51,7 +54,7 @@ func TestSidecarTimedNotificationSurvivesRestart(t *testing.T) {
 	if resp := app.POST("/processes?project_id=project-a", map[string]any{"definition": d}, &p); resp.Status != 200 {
 		t.Fatal(string(resp.Body))
 	}
-	x := sidecarAssignment(t, app, p, AssignmentConfig{Name: "Timer test", OwnerAgentID: 7, ExecutionMode: "agent", FollowLatest: true})
+	x := sidecarAssignment(t, app, p, AssignmentConfig{Name: "Timer test", OwnerAgentID: 7, WorkerContinuity: "per_executor", ExecutionMode: "agent", FollowLatest: true})
 	base := "/processes/" + p.ID
 	if resp := app.POST(base+"/activate?project_id=project-a", map[string]any{}, &p); resp.Status != 200 {
 		t.Fatal(string(resp.Body))
@@ -80,7 +83,8 @@ func TestSidecarTimedNotificationSurvivesRestart(t *testing.T) {
 		}
 	}
 	read()
-	app.MCPAs("step_update", map[string]any{"process_id": p.ID, "run_id": started.Run.ID, "step_id": detail.Steps[0].ID, "state": "completed", "output": "First action recorded"}, 7, "owner-thread", "project-a")
+	app.MCPAs("step_claim", map[string]any{"process_id": p.ID, "run_id": started.Run.ID, "step_id": detail.Steps[0].ID}, 7, detail.Steps[0].ThreadID, "project-a")
+	app.MCPAs("step_update", map[string]any{"process_id": p.ID, "run_id": started.Run.ID, "step_id": detail.Steps[0].ID, "state": "completed", "output": "First action recorded"}, 7, detail.Steps[0].ThreadID, "project-a")
 	read()
 	saved := detail.Steps[1].StartAt
 	first := detail.Steps[0].CompletedAt
@@ -113,7 +117,9 @@ func TestSidecarTimedNotificationSurvivesRestart(t *testing.T) {
 	}
 	completed, _ := time.Parse(time.RFC3339Nano, first)
 	t.Logf("Follow-up notification arrived %.2fs after completion (%.2fs after due), across an app restart", next.at.Sub(completed).Seconds(), next.at.Sub(due).Seconds())
-	app.MCPAs("step_update", map[string]any{"process_id": p.ID, "run_id": started.Run.ID, "step_id": detail.Steps[1].ID, "state": "completed", "output": "Follow-up action recorded"}, 7, "owner-thread", "project-a")
+	read() // The scheduled step now has its persisted worker binding.
+	app.MCPAs("step_claim", map[string]any{"process_id": p.ID, "run_id": started.Run.ID, "step_id": detail.Steps[1].ID}, 7, detail.Steps[1].ThreadID, "project-a")
+	app.MCPAs("step_update", map[string]any{"process_id": p.ID, "run_id": started.Run.ID, "step_id": detail.Steps[1].ID, "state": "completed", "output": "Follow-up action recorded"}, 7, detail.Steps[1].ThreadID, "project-a")
 	read()
 	if detail.Run.State != "completed" {
 		t.Fatal("delayed workflow did not complete")

@@ -83,6 +83,9 @@ func (a *App) dispatchAgent(p *Process, r *Run) (err error) {
 			err = errors.Join(err, saveErr)
 		}
 	}()
+	if err = a.ensureExecutorTools(p.ProjectID, d.OwnerAgentID); err != nil {
+		return err
+	}
 	if r.TargetThreadID == "" {
 		agent, e := a.ctx.GetAgent(d.OwnerAgentID)
 		if e != nil {

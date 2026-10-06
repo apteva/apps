@@ -17,13 +17,33 @@ import (
 type fakeTasks struct {
 	overviewHistory []any
 	tk.BasePlatformClient
-	tasks      map[string]map[string]any
-	keys       map[string]string
-	fail       string
-	loseCreate bool
-	creates    int
-	calls      []string
-	threads    []sdk.ThreadSpawnRequest
+	tasks           map[string]map[string]any
+	keys            map[string]string
+	fail            string
+	loseCreate      bool
+	creates         int
+	calls           []string
+	attached        []int64
+	attachError     error
+	attachUnapplied bool
+	profiles        []sdk.ThreadEnsureRequest
+	profileError    error
+	threads         []sdk.ThreadSpawnRequest
+}
+
+func (f *fakeTasks) EnsureAppToolsAttached(req sdk.EnsureAppToolsRequest) (*sdk.EnsureAppToolsResult, error) {
+	f.attached = append(f.attached, req.AgentID)
+	if f.attachError != nil {
+		return nil, f.attachError
+	}
+	return &sdk.EnsureAppToolsResult{AgentID: req.AgentID, Applied: !f.attachUnapplied, MCPServerIDs: []int64{394}, AttachedInstallIDs: []int64{52804}}, nil
+}
+func (f *fakeTasks) EnsureThread(req sdk.ThreadEnsureRequest) (*sdk.ThreadEnsureResult, error) {
+	f.profiles = append(f.profiles, req)
+	if f.profileError != nil {
+		return nil, f.profileError
+	}
+	return &sdk.ThreadEnsureResult{Status: "updated", Thread: sdk.ThreadRef{AgentID: req.AgentID, ThreadID: req.ThreadID}}, nil
 }
 
 func (f *fakeTasks) GetInstance(id int64) (*sdk.PlatformInstance, error) {

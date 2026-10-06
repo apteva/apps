@@ -3,11 +3,9 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,105 +13,37 @@ import (
 	"testing"
 )
 
-// Boots both real binaries. The gateway fixture implements only platform
-// routing and agent delivery; all procedure/task state lives in real sidecars.
-func TestSidecarsProcessToTasks(t *testing.T) {
-	var tasks *tk.Sidecar
-	var delivered atomic.Int32
+// Legacy assignment values are normalized to native dispatch; no Tasks app is required.
+func TestSidecarLegacyTasksAssignmentUsesNativeRun(t *testing.T) {
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveExecutorAttachment(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/apps/callback/agents/7":
-			_ = json.NewEncoder(w).Encode(sdk.PlatformInstance{ID: 7, ProjectID: "project-a", DefaultThreadID: "opaque-owner"})
+			json.NewEncoder(w).Encode(sdk.PlatformInstance{ID: 7, ProjectID: "project-a", DefaultThreadID: "owner-thread"})
 		case "/api/apps/callback/agents/7/event":
-			var request sdk.AgentEventRequest
-			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-				http.Error(w, err.Error(), 400)
-				return
-			}
-			delivered.Add(1)
-			_ = json.NewEncoder(w).Encode(sdk.AgentEventReceipt{SourceEventID: request.SourceEventID, ExecutionID: "preview:" + request.SourceEventID, ThreadID: request.ThreadID, Accepted: true})
-		case "/api/apps/callback/apps/tasks/call":
-			var input struct {
-				Tool  string         `json:"tool"`
-				Input map[string]any `json:"input"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-				http.Error(w, err.Error(), 400)
-				return
-			}
-			raw, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": input.Tool, "arguments": input.Input}})
-			req, _ := http.NewRequest("POST", tasks.URL()+"/mcp", bytes.NewReader(raw))
-			req.Header.Set("Authorization", "Bearer "+tasks.Token())
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set(sdk.HeaderBoundCallerInstallID, "88")
-			req.Header.Set(sdk.HeaderBoundCallerAppName, "processes")
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				http.Error(w, err.Error(), 502)
-				return
-			}
-			defer resp.Body.Close()
-			w.WriteHeader(resp.StatusCode)
-			_, _ = io.Copy(w, resp.Body)
+			json.NewEncoder(w).Encode(sdk.AgentEventReceipt{Accepted: true, ExecutionID: "native-execution"})
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	defer gateway.Close()
-	tasks = tk.SpawnSidecar(t, "../tasks", tk.WithProjectID("project-a"), tk.WithEnv("APTEVA_GATEWAY_URL", gateway.URL))
-	processes := tk.SpawnSidecar(t, ".", tk.WithProjectID("project-a"), tk.WithEnv("APTEVA_GATEWAY_URL", gateway.URL))
+	app := tk.SpawnSidecar(t, ".", tk.WithProjectID("project-a"), tk.WithEnv("APTEVA_GATEWAY_URL", gateway.URL))
 	var p Process
-	resp := processes.POST("/processes?project_id=project-a", map[string]any{"definition": def().procedureOnly()}, &p)
-	if resp.Status != 200 {
-		t.Fatalf("create %d %s", resp.Status, resp.Body)
-	}
-	if len(p.Assignments) != 0 || p.OwnerAgentID != 0 {
-		t.Fatal("process creation assigned an agent")
-	}
-	initial := sidecarAssignment(t, processes, p, AssignmentConfig{Name: "Primary", OwnerAgentID: 7, ExecutionMode: "tasks", FollowLatest: true})
-	resp = processes.POST("/processes/"+p.ID+"/activate?project_id=project-a", map[string]any{}, &p)
-	if resp.Status != 200 || p.SyncPending {
-		t.Fatalf("activate %d %s", resp.Status, resp.Body)
-	}
-	resp = processes.POST("/processes/"+p.ID+"/assignments/"+initial.ID+"/activate?project_id=project-a", map[string]any{}, nil)
-	if resp.Status != 200 {
+	if resp := app.POST("/processes?project_id=project-a", map[string]any{"definition": def().procedureOnly()}, &p); resp.Status != 200 {
 		t.Fatal(string(resp.Body))
 	}
+	x := sidecarAssignment(t, app, p, AssignmentConfig{Name: "Legacy", OwnerAgentID: 7, ExecutionMode: "tasks", FollowLatest: true})
+	app.POST("/processes/"+p.ID+"/activate?project_id=project-a", map[string]any{}, &p)
+	app.POST("/processes/"+p.ID+"/assignments/"+x.ID+"/activate?project_id=project-a", map[string]any{}, nil)
 	var started struct {
-		Task            map[string]any `json:"task"`
-		DeliveryWarning string         `json:"delivery_warning"`
+		Run Run `json:"run"`
 	}
-	path := "/processes/" + p.ID + "/start?project_id=project-a"
-	resp = processes.POST(path, map[string]any{"idempotency_key": "september", "inputs": "September records"}, &started)
-	if resp.Status != 200 {
-		t.Fatalf("start %d %s", resp.Status, resp.Body)
-	}
-	id := started.Task["id"].(string)
-	if started.DeliveryWarning != "" || delivered.Load() != 1 || !strings.Contains(started.Task["description"].(string), "Procedure version: 1") {
-		t.Fatal("snapshot or delivery missing")
-	}
-	processes.POST(path, map[string]any{"idempotency_key": "september", "inputs": "September records"}, &started)
-	if started.Task["id"] != id {
-		t.Fatal("duplicate run")
-	}
-	tasks.MCPAs("complete", map[string]any{"task_id": id, "result": "Approved report attached"}, 7, "opaque-owner", "project-a")
-	var history struct {
-		Runs []struct {
-			Version      int            `json:"version"`
-			AssignmentID string         `json:"assignment_id"`
-			Task         map[string]any `json:"task"`
-		} `json:"runs"`
-	}
-	resp = processes.GET("/processes/"+p.ID+"/runs?project_id=project-a", &history)
-	if resp.Status != 200 || len(history.Runs) != 1 || history.Runs[0].Task["state"] != "completed" || history.Runs[0].Version != 1 || history.Runs[0].AssignmentID != initial.ID {
-		t.Fatalf("history %d %s", resp.Status, resp.Body)
-	}
-	// SDK must reject private tools when called through an agent connection.
-	var denied map[string]any
-	resp = tasks.RequestWithHeaders("POST", "/mcp", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "process_task", "arguments": map[string]any{"action": "list", "process_id": p.ID}}}, &denied, nil)
-	if denied["error"] == nil {
-		t.Fatalf("private bridge exposed: %s", resp.Body)
+	resp := app.POST("/processes/"+p.ID+"/start?project_id=project-a", map[string]any{"assignment_id": x.ID, "idempotency_key": "legacy"}, &started)
+	if resp.Status != 200 || started.Run.DeliveredAt == "" {
+		t.Fatalf("native dispatch: %s", resp.Body)
 	}
 }
 
@@ -122,6 +52,9 @@ func TestSidecarDirectWithoutTasks(t *testing.T) {
 	var delivered atomic.Int32
 	var interApp atomic.Int32
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveExecutorAttachment(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/apps/callback/agents/7":
@@ -185,6 +118,9 @@ func TestSidecarDirectWithoutTasks(t *testing.T) {
 func TestSidecarAssignmentsAndParameterIsolation(t *testing.T) {
 	var delivered atomic.Int32
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveExecutorAttachment(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/api/apps/callback/agents/7" || r.URL.Path == "/api/apps/callback/agents/8" {
 			id := int64(7)
@@ -252,6 +188,9 @@ func TestSidecarAssignmentsAndParameterIsolation(t *testing.T) {
 func TestSidecarWorkflowAgentHandoffsAndGenericHumanStep(t *testing.T) {
 	var delivered atomic.Int32
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveExecutorAttachment(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/api/apps/callback/agents/7" || r.URL.Path == "/api/apps/callback/agents/8" {
 			id := int64(7)
@@ -306,8 +245,9 @@ func TestSidecarWorkflowAgentHandoffsAndGenericHumanStep(t *testing.T) {
 	}
 	read()
 	for i, agent := range []int64{8, 7} {
-		app.MCPAs("step_get", map[string]any{"process_id": p.ID, "run_id": started.Run.ID, "step_id": detail.Steps[i].ID}, agent, "owner-thread", "project-a")
-		app.MCPAs("step_update", map[string]any{"process_id": p.ID, "run_id": started.Run.ID, "step_id": detail.Steps[i].ID, "state": "completed", "output": "Evidence"}, agent, "owner-thread", "project-a")
+		app.MCPAs("step_get", map[string]any{"process_id": p.ID, "run_id": started.Run.ID, "step_id": detail.Steps[i].ID}, agent, detail.Steps[i].ThreadID, "project-a")
+		app.MCPAs("step_update", map[string]any{"process_id": p.ID, "run_id": started.Run.ID, "step_id": detail.Steps[i].ID, "state": "completed", "output": "Evidence"}, agent, detail.Steps[i].ThreadID, "project-a")
+		read()
 	}
 	read()
 	if delivered.Load() != 2 || detail.Steps[2].State != "waiting" || detail.Steps[3].State != "pending" {
@@ -318,67 +258,32 @@ func TestSidecarWorkflowAgentHandoffsAndGenericHumanStep(t *testing.T) {
 	if resp.Status != 200 || delivered.Load() != 3 {
 		t.Fatalf("human completion %s", resp.Body)
 	}
-	app.MCPAs("step_update", map[string]any{"process_id": p.ID, "run_id": started.Run.ID, "step_id": detail.Steps[3].ID, "state": "completed", "output": "Published URL"}, 8, "owner-thread", "project-a")
+	read()
+	app.MCPAs("step_update", map[string]any{"process_id": p.ID, "run_id": started.Run.ID, "step_id": detail.Steps[3].ID, "state": "completed", "output": "Published URL"}, 8, detail.Steps[3].ThreadID, "project-a")
 	read()
 	if detail.Run.State != "completed" || detail.Steps[2].UpdatedBy != "operator" {
 		t.Fatal("workflow did not complete", detail)
 	}
 }
 
-// The real Processes sidecar exposes native task tools and dispatches directly
-// through the existing tracked agent API. No Tasks sidecar is present.
-func TestSidecarNativeTaskMCPWithoutTasksApp(t *testing.T) {
-	var delivered, interApp atomic.Int32
-	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/api/apps/callback/agents/7":
-			json.NewEncoder(w).Encode(sdk.PlatformInstance{ID: 7, ProjectID: "project-a", DefaultThreadID: "worker"})
-		case "/api/apps/callback/agents/7/event":
-			var event sdk.AgentEventRequest
-			json.NewDecoder(r.Body).Decode(&event)
-			delivered.Add(1)
-			if !strings.Contains(event.Message.(string), "processes_task_get") {
-				t.Error("missing native task contract")
-			}
-			json.NewEncoder(w).Encode(sdk.AgentEventReceipt{Accepted: true, ExecutionID: "native-task-execution", ThreadID: event.ThreadID, SourceEventID: event.SourceEventID})
-		default:
-			if strings.HasPrefix(r.URL.Path, "/api/apps/callback/apps/") {
-				interApp.Add(1)
-			}
-			http.NotFound(w, r)
+// Standalone task tools were removed; real MCP discovery must match the manifest.
+func TestSidecarDoesNotExposeRemovedTaskTools(t *testing.T) {
+	app := tk.SpawnSidecar(t, ".", tk.WithProjectID("project-a"))
+	var result struct {
+		Result struct {
+			Tools []struct {
+				Name string `json:"name"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	resp := app.RequestWithHeaders("POST", "/mcp", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, &result, nil)
+	if resp.Status != 200 || len(result.Result.Tools) == 0 {
+		t.Fatalf("discovery: %s", resp.Body)
+	}
+	for _, tool := range result.Result.Tools {
+		if strings.HasPrefix(tool.Name, "task") {
+			t.Fatal("removed task tool exported", tool.Name)
 		}
-	}))
-	defer gateway.Close()
-	app := tk.SpawnSidecar(t, ".", tk.WithProjectID("project-a"), tk.WithEnv("APTEVA_GATEWAY_URL", gateway.URL))
-	args := map[string]any{"title": "Check payment", "instructions": "Verify payment record and report evidence.", "executor": map[string]any{"kind": "agent", "agent_id": 7}, "idempotency_key": "native-task"}
-	created := app.MCPAs("task_create", args, 7, "worker", "project-a")
-	s := created["task"].(map[string]any)
-	id := s["id"].(string)
-	again := app.MCPAs("task_create", args, 7, "worker", "project-a")
-	if again["task"].(map[string]any)["id"] != id || delivered.Load() != 1 {
-		t.Fatal("creation retry duplicated work")
-	}
-	read := app.MCPAs("task_get", map[string]any{"task_id": id}, 7, "worker", "project-a")
-	revision := read["task"].(map[string]any)["revision"]
-	updated := app.MCPAs("task_update", map[string]any{"task_id": id, "expected_revision": revision, "state": "completed", "output": "Verified receipt payment-123"}, 7, "worker", "project-a")
-	if updated["task"].(map[string]any)["state"] != "completed" || interApp.Load() != 0 {
-		t.Fatal("native task did not complete independently")
-	}
-	var list struct {
-		Tasks []Task `json:"tasks"`
-		Total int    `json:"total"`
-	}
-	resp := app.GET("/processes/tasks?project_id=project-a&state=completed", &list)
-	if resp.Status != 200 || list.Total != 1 || list.Tasks[0].ID != id {
-		t.Fatal("Work API failed", resp.Status, string(resp.Body))
-	}
-	var processes struct {
-		Processes []Process `json:"processes"`
-	}
-	resp = app.GET("/processes?project_id=project-a", &processes)
-	if resp.Status != 200 || len(processes.Processes) != 0 {
-		t.Fatal("standalone work created a hidden procedure")
 	}
 }
 
@@ -390,4 +295,33 @@ func sidecarAssignment(t *testing.T, app *tk.Sidecar, p Process, c AssignmentCon
 		t.Fatalf("create assignment: %s", resp.Body)
 	}
 	return x
+}
+
+// The real SDK now verifies the caller's current MCP attachment before delivery.
+func serveExecutorAttachment(w http.ResponseWriter, r *http.Request) bool {
+	if r.URL.Path == "/api/apps/callback/threads/spawn" {
+		var req sdk.ThreadSpawnRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), 400)
+			return true
+		}
+		if req.MCP != nil {
+			http.Error(w, "worker excluded inherited domain tools", 400)
+			return true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sdk.ThreadSpawnResult{Status: "created", Thread: sdk.ThreadRef{AgentID: req.AgentID, ThreadID: req.ThreadID}})
+		return true
+	}
+	if r.URL.Path != "/api/apps/callback/agent-tools/ensure-attached" {
+		return false
+	}
+	var req sdk.EnsureAppToolsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), 400)
+		return true
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(sdk.EnsureAppToolsResult{AgentID: req.AgentID, Applied: true, MCPServerIDs: []int64{394}, AttachedInstallIDs: []int64{52804}})
+	return true
 }

@@ -93,6 +93,65 @@ function procedureOnly(d: Definition) {
   };
 }
 
+function EditableProcedureFlow({ definition, version, published, editable, save }: {
+  definition: Definition;
+  version: number;
+  published: boolean;
+  editable: boolean;
+  save: (definition: Definition, expectedVersion: number) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState<{definition: Definition; version: number} | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
+  const invalid = draft?.definition.steps?.find(step => stepProblem(step));
+  const controls = editable ? (
+    <div className="pf-save-controls">
+      <p className="pf-hint">{published
+        ? "Saving creates a new draft version. Publish it when ready. Existing runs keep their current instructions."
+        : "Saving creates a new draft version. Existing runs keep their current instructions."}</p>
+      {draft && version !== draft.version && <p role="alert">The procedure changed while you were editing. Cancel to reload the latest version.</p>}
+      {invalid && <p role="alert">{invalid.name || "Untitled step"}: {stepProblem(invalid)}.</p>}
+      {error && <p role="alert">{error}</p>}
+      {saved && <p role="status">Changes saved as a new draft version.</p>}
+      <div className="pf-actions">
+        <button type="button" className="primary" disabled={!draft || saving || !!invalid || version !== draft.version} onClick={async () => {
+          if (!draft) return;
+          setSaving(true);
+          setError("");
+          try {
+            await save(draft.definition, draft.version);
+            setDraft(null);
+            setSaved(true);
+          } catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+          } finally {
+            setSaving(false);
+          }
+        }}>{saving ? "Saving…" : "Save changes"}</button>
+        <button type="button" disabled={!draft || saving} onClick={() => {
+          setDraft(null);
+          setError("");
+          setSaved(false);
+        }}>Cancel</button>
+      </div>
+    </div>
+  ) : undefined;
+  return <ProcessFlow
+    steps={(draft?.definition || definition).steps || []}
+    onChange={editable ? steps => {
+      if (saving) return;
+      setDraft(previous => ({
+        definition: {...(previous?.definition || structuredClone(definition)), steps},
+        version: previous?.version ?? version,
+      }));
+      setError("");
+      setSaved(false);
+    } : undefined}
+    saveControls={controls}
+  />;
+}
+
 function ReadinessCard({
   definition,
   assignments = [],
@@ -642,6 +701,30 @@ function Panel(props: Props) {
     chosen = version
       ? detail?.versions.find((v) => v.version === version)?.definition
       : p;
+  const saveFlow = async (definition: Definition, expectedVersion: number) => {
+    setBusy(true);
+    try {
+      const updated = await api(`/${selected}`, "PUT", {
+        definition: procedureOnly(definition),
+        expected_version: expectedVersion,
+        save_as_draft: true,
+      });
+      setVersion(0);
+      setDetail(previous => previous ? {
+        ...previous,
+        process: updated,
+        versions: [...previous.versions, {version: updated.version, definition: updated}],
+      } : previous);
+      setItems(previous => previous.map(item => item.id === updated.id ? updated : item));
+      try {
+        await Promise.all([load(), loadDetail(selected!)]);
+      } catch {
+        setNotice("Changes saved. Refresh the page to reload the latest details.");
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
   const ownerName = (id: number) =>
     id ? agents.find((a) => a.id === id)?.name || `Agent ${id}` : "Unassigned";
   const visible = items.filter(
@@ -1237,7 +1320,7 @@ function Panel(props: Props) {
                 assignments={p.assignments}
                 status={p.status}
               />
-              <ProcessFlow steps={p.steps || []} />
+              <EditableProcedureFlow definition={p} version={p.version} published={p.status === "active"} editable={p.status !== "archived" && !p.sync_pending} save={saveFlow} />
               <div className="grid">
                 <section className="card">
                   <div className="block">
@@ -1441,7 +1524,7 @@ function Panel(props: Props) {
                   status={version > 0 && version !== p.version ? undefined : p.status}
                 />
               )}
-              <ProcessFlow steps={chosen?.steps || []} />
+              {chosen && <EditableProcedureFlow definition={chosen} version={version || p.version} published={p.status === "active"} editable={(version === 0 || version === p.version) && p.status !== "archived" && !p.sync_pending} save={saveFlow} />}
               {!!chosen?.parameters?.length && (
                 <div className="block">
                   <h2>Parameters</h2>

@@ -400,6 +400,9 @@ func (a *App) deliverStep(p *Process, r Run, s *StepRun, all []StepRun) (err err
 			return nil
 		}
 	}
+	if err = a.ensureExecutorTools(s.ProjectID, s.Executor.AgentID); err != nil {
+		return err
+	}
 	// Processes owns execution-worker provisioning. The worker is created
 	// through the platform thread API, which inherits the executor agent's
 	// spawnable MCP-server scopes when MCP is omitted from the request. This is
@@ -423,6 +426,9 @@ func (a *App) deliverStep(p *Process, r Run, s *StepRun, all []StepRun) (err err
 				}
 				if !provisioned {
 					return a.spawnSequentialWorker(p, &r, s, all)
+				}
+				if e = a.reconcileWorkerTools(p.ProjectID, s.Executor.AgentID, worker, true); e != nil {
+					return e
 				}
 				s.ThreadID = worker
 				if s.DeliveryEventID == "" {
@@ -565,13 +571,8 @@ func (a *App) spawnIndependentWorker(p *Process, r *Run, s *StepRun, all []StepR
 		ProjectID:       p.ProjectID,
 		DirectiveSuffix: envelope.Message.(string),
 		Tools:           processWorkerToolList(false),
-		// A nil MCP slice deliberately means “inherit all spawnable MCP
-		// servers attached to this agent”; the server filters no_spawn scopes.
-		// The worker must retain the Processes control surface even when the
-		// parent agent's inherited catalog is stale or was refreshed after the
-		// run was created. Without this explicit scope it can receive the event
-		// but cannot claim or update the assigned step.
-		MCP: []string{"processes"},
+		// Inherit the executor's spawnable domain tools after ensuring the
+		// current Processes installation is attached.
 	}
 	if err := a.ensureProcessThread(p.ProjectID, eventID, request); err != nil {
 		return err
@@ -613,7 +614,6 @@ func (a *App) spawnSequentialWorker(p *Process, r *Run, s *StepRun, all []StepRu
 		ProjectID:       p.ProjectID,
 		DirectiveSuffix: directive,
 		Tools:           processRunWorkerTools(*r),
-		MCP:             []string{"processes"},
 	}
 	if err := a.ensureProcessThread(p.ProjectID, eventID, request); err != nil {
 		return err

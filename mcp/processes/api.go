@@ -254,6 +254,9 @@ func (a *App) executeResponse(project, actor, action string, args map[string]any
 		if action == "create" {
 			id = ""
 		}
+		if action == "update" && !mcp && actor == "operator" && args["save_as_draft"] == true {
+			return a.saveDefinition(project, id, actor, number(args, "expected_version"), d, true)
+		}
 		return a.save(project, id, actor, number(args, "expected_version"), d)
 	case "activate":
 		return a.changeStatus(project, id, "active")

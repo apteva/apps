@@ -59,7 +59,7 @@ func (a *App) ensureProcessThread(project, eventID string, candidate sdk.ThreadS
 		return err
 	}
 	if spawned {
-		return nil
+		return a.reconcileWorkerTools(project, candidate.AgentID, candidate.ThreadID, true)
 	}
 	if raw == "" {
 		encoded, err := json.Marshal(candidate)
@@ -79,7 +79,15 @@ func (a *App) ensureProcessThread(project, eventID string, candidate sdk.ThreadS
 		return err
 	}
 	_, err := a.db.Exec(`UPDATE process_delivery_envelopes SET spawned=1 WHERE event_id=? AND spawned=0`, eventID)
-	return err
+	if err != nil {
+		return err
+	}
+	// An old immutable request may restrict MCP to Processes. Preserve the
+	// request for ambiguous-spawn retries, then repair the confirmed profile.
+	if request.MCP != nil {
+		return a.reconcileWorkerTools(project, request.AgentID, request.ThreadID, true)
+	}
+	return nil
 }
 
 func (a *App) persistentThreadProvisioned(worker string, agent int64, all []StepRun) (bool, error) {

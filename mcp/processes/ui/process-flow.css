@@ -222,7 +222,9 @@
   padding: 20px;
   background: var(--pc-panel);
   max-height: 560px;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   min-width: 0;
 }
 .ap-processes .pf-inspector-head {
@@ -420,3 +422,27 @@
 .ap-processes .pf-step-top {margin-bottom:10px}
 .ap-processes .pf-execution {border-top:1px solid var(--pf-divider);padding-top:10px;gap:7px}
 .ap-processes .pf-executor {font-size:11px;color:var(--pc-muted)}
+
+.ap-processes .pf-save-controls {
+  border-top: 1px solid var(--pc-line);
+  margin-top: 18px;
+  padding-top: 14px;
+}
+.ap-processes .pf-toolbar .pf-save-controls {
+  border-top: 0;
+  margin-top: 0;
+  padding-top: 0;
+  max-width: 440px;
+}
+.ap-processes .pf-save-controls [role="alert"] {
+  color: var(--pf-warning);
+  font-size: 12px;
+}
+.ap-processes .pf-save-controls [role="status"] {
+  color: var(--pc-muted);
+  font-size: 12px;
+}
+
+.ap-processes .pf-inspector-head,
+.ap-processes .pf-inspector > .pf-save-controls { flex-shrink: 0; }
+.ap-processes .pf-inspector-content { min-height: 0; overflow: auto; padding-right: 2px; }

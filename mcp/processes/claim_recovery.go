@@ -32,6 +32,9 @@ func (a *App) recoverUnclaimedStep(p *Process, r Run, s StepRun, all []StepRun, 
 	if now.Before(due) {
 		return nil
 	}
+	if next, e := time.Parse(time.RFC3339Nano, s.NextAttemptAt); e == nil && now.Before(next) {
+		return nil
+	}
 	worker, err := a.runWorker(r.ID, s.Executor.AgentID)
 	if err != nil || worker != s.ThreadID {
 		return err
@@ -54,6 +57,11 @@ func (a *App) recoverUnclaimedStep(p *Process, r Run, s StepRun, all []StepRun, 
 	if s.ClaimAttempts >= maxClaimRecoveryAttempts {
 		_, err = a.db.Exec(`UPDATE process_step_runs SET delivery_warning=?,delivery_suspended=1,claim_next_at='' WHERE id=?`, fmt.Sprintf("Run stalled: delivered step %s remains unclaimed after %d recovery attempts. Inspect worker %s and call processes_step_claim; no domain work was retried by Processes.", s.ID, s.ClaimAttempts, worker), s.ID)
 		return err
+	}
+	if err = a.repairWorkerTools(s.ProjectID, s.Executor.AgentID, worker); err != nil {
+		// Use normal delivery backoff so failed provisioning does not create
+		// repeated model wakes or consume the bounded claim attempts.
+		return a.recordStepDeliveryError(s, err)
 	}
 	eventID := s.ClaimEventID
 	if eventID == "" {

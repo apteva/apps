@@ -35,6 +35,7 @@ let process = JSON.parse(sessionStorage.getItem("process") || "null") || {
   ],
   assignments: [],
 };
+let processVersions = JSON.parse(sessionStorage.getItem("process-versions") || "null") || [{version:process.version,definition:structuredClone(process)}];
 const controlFixture = location.search.includes("step_control");
 let controlRun: any;
 if (controlFixture) {
@@ -196,6 +197,11 @@ window.fetch = (async (url: unknown, init?: RequestInit) => {
       return Response.json(process.assignments[0]);
     }
     if (!body.definition) throw new Error("Unexpected fixture write");
+    if (location.search.includes("fail_save") && init?.method === "PUT" && !sessionStorage.getItem("save-failed-once")) {
+      sessionStorage.setItem("save-failed-once", "true");
+      return new Response("Temporary save failure", {status:500});
+    }
+    if (init?.method === "PUT" && body.expected_version !== process.version) return new Response("procedure changed; reload before saving", {status:409});
     sessionStorage.setItem(
       "submitted-definition",
       JSON.stringify(body.definition),
@@ -205,8 +211,11 @@ window.fetch = (async (url: unknown, init?: RequestInit) => {
         ? { id: "weather", status: "draft", assignments: [] }
         : process),
       ...body.definition,
+      ...(body.save_as_draft ? {status:"draft"} : {}),
       version: process.version + 1,
     };
+    processVersions.push({version:process.version,definition:structuredClone(process)});
+    sessionStorage.setItem("process-versions",JSON.stringify(processVersions));
     sessionStorage.setItem("process", JSON.stringify(process));
     return Response.json(process);
   }
@@ -224,7 +233,7 @@ window.fetch = (async (url: unknown, init?: RequestInit) => {
   if (path.endsWith("/weather"))
     return Response.json({
       process,
-      versions: [{ version: process.version, definition: process }],
+      versions: processVersions,
     });
   return Response.json({ processes: [process] });
 }) as typeof fetch;

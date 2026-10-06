@@ -322,6 +322,12 @@ func (a *App) definition(id string, version int) (Definition, error) {
 	return d, err
 }
 func (a *App) save(project, id, actor string, expected int, d Definition) (*Process, error) {
+	return a.saveDefinition(project, id, actor, expected, d, false)
+}
+
+// The operator UI can explicitly save edits to a published procedure as a
+// new draft in one transaction. Existing run definitions remain immutable.
+func (a *App) saveDefinition(project, id, actor string, expected int, d Definition, asDraft bool) (*Process, error) {
 	d = d.procedureOnly()
 	if err := d.validate(); err != nil {
 		return nil, err
@@ -341,7 +347,7 @@ func (a *App) save(project, id, actor string, expected int, d Definition) (*Proc
 		if p.Version != expected {
 			return nil, errConflict
 		}
-		if p.SyncPending || p.Status == "active" || p.Status == "archived" {
+		if p.SyncPending || (p.Status == "active" && !asDraft) || p.Status == "archived" {
 			return nil, errors.New("pause and synchronize the process before editing")
 		}
 		version = p.Version + 1
@@ -355,7 +361,15 @@ func (a *App) save(project, id, actor string, expected int, d Definition) (*Proc
 	if create {
 		_, err = tx.Exec(`INSERT INTO processes(id,project_id,created_at,updated_at) VALUES(?,?,?,?)`, id, project, now, now)
 	} else {
-		_, err = tx.Exec(`UPDATE processes SET current_version=?,status='draft',sync_error='',next_run_at='',scheduled_version=0,last_schedule_note='',updated_at=? WHERE id=? AND project_id=?`, version, now, id, project)
+		var result sql.Result
+		result, err = tx.Exec(`UPDATE processes SET current_version=?,status='draft',sync_error='',next_run_at='',scheduled_version=0,last_schedule_note='',updated_at=? WHERE id=? AND project_id=? AND current_version=? AND sync_pending=0 AND (status IN ('draft','paused') OR (? AND status='active'))`, version, now, id, project, expected, asDraft)
+		if err == nil {
+			var affected int64
+			affected, err = result.RowsAffected()
+			if err == nil && affected != 1 {
+				err = errConflict
+			}
+		}
 	}
 	if err != nil {
 		return nil, err
