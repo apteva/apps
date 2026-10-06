@@ -2,8 +2,13 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 1.16.0
+version: 1.17.0
 description: |
+  v1.17.0 Adds project-wide Live logs with error and function filters,
+  expandable invocation details, and a configurable Function activity widget.
+  Updates live through events and periodic refresh. Custom Page widgets
+  require Apteva v0.82.1 or later.
+
   v1.16.0 Adds sortable performance rankings and slow-call diagnostics in
   the panel and MCP. Compare calls, total execution wall time, average/p95
   latency, queue wait and errors over a selected period; inspect invocation
@@ -144,12 +149,38 @@ provides:
       label: Functions
       icon: code
       entry: /ui/FunctionsPanel.mjs
+  ui_components:
+    - name: function-activity
+      label: Function activity
+      description: Live function invocations with quick error filtering and links to the full log viewer.
+      entry: /ui/FunctionActivityWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [invocation.started, invocation.completed]
+      settings_schema:
+        type: object
+        properties:
+          status:
+            type: string
+            title: Default filter
+            enum: [all, errors, running]
+            enum_names: [All invocations, Errors and timeouts, Running]
+            default: errors
+          max_items:
+            type: integer
+            title: Maximum invocations
+            default: 8
+            minimum: 4
+            maximum: 20
 
 runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: functions/v1.16.0
+    ref: functions/v1.17.0
     entry: mcp/functions
   port: 8080
   health_check: /health

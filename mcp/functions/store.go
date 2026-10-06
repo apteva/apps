@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -85,6 +86,7 @@ type Invocation struct {
 	Truncated    bool            `json:"truncated,omitempty"`
 	ID           int64           `json:"id"`
 	FunctionID   int64           `json:"function_id"`
+	FunctionName string          `json:"function_name,omitempty"`
 	StartedAt    string          `json:"started_at"`
 	FinishedAt   string          `json:"finished_at,omitempty"`
 	DurationMS   int64           `json:"duration_ms"`
@@ -102,6 +104,13 @@ type FunctionFilter struct {
 	Runtime string
 	Status  string
 	Limit   int
+}
+
+type InvocationQuery struct {
+	FunctionID int64
+	Status     string
+	Limit      int
+	Cursor     int64
 }
 
 // ─── Validation ────────────────────────────────────────────────────
@@ -650,18 +659,27 @@ func dbInsertInvocation(db *sql.DB, pid string, inv *Invocation, owner ...string
 	return id, tx.Commit()
 }
 
+func scanInvocation(row scanRow, inv *Invocation) error {
+	return row.Scan(&inv.ID, &inv.FunctionID, &inv.FunctionName, &inv.StartedAt, &inv.FinishedAt,
+		&inv.DurationMS, &inv.Status, &inv.ExitCode,
+		&inv.TriggerKind, &inv.EventJSON, &inv.ResponseBody,
+		&inv.Stderr, &inv.Error, &inv.VersionID, &inv.ConfigHash, &inv.Truncated,
+		&inv.BuildMS, &inv.QueueMS, &inv.ColdStartMS, &inv.ExecutionMS,
+		&inv.Resources, &inv.Identity)
+}
+
 func dbListInvocations(db *sql.DB, pid string, fnID int64, limit int, before ...int64) ([]*Invocation, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
 	rows, err := db.Query(
-		`SELECT id, function_id, started_at, COALESCE(finished_at,''),
-			COALESCE(duration_ms,0), status, COALESCE(exit_code,0),
-			trigger_kind, COALESCE(event_json,''), COALESCE(response_body,''),
-			COALESCE(stderr,''), COALESCE(error,''), version_id, COALESCE(config_hash,''), truncated,build_ms,queue_ms,cold_start_ms,execution_ms,COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=function_invocations.id),'null'),COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=function_invocations.id),'null')
-		 FROM function_invocations
-		 WHERE project_id = ? AND function_id = ? AND (?=0 OR id<?)
-		 ORDER BY id DESC LIMIT ?`,
+		`SELECT i.id, i.function_id, f.name, i.started_at, COALESCE(i.finished_at,''),
+			COALESCE(i.duration_ms,0), i.status, COALESCE(i.exit_code,0),
+			i.trigger_kind, COALESCE(i.event_json,''), COALESCE(i.response_body,''),
+			COALESCE(i.stderr,''), COALESCE(i.error,''), i.version_id, COALESCE(i.config_hash,''), i.truncated,i.build_ms,i.queue_ms,i.cold_start_ms,i.execution_ms,COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=i.id),'null'),COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=i.id),'null')
+		 FROM function_invocations i JOIN functions f ON f.id=i.function_id AND f.project_id=i.project_id
+		 WHERE i.project_id = ? AND i.function_id = ? AND (?=0 OR i.id<?)
+		 ORDER BY i.id DESC LIMIT ?`,
 		pid, fnID, cursorValue(before), cursorValue(before), limit)
 	if err != nil {
 		return nil, err
@@ -670,10 +688,7 @@ func dbListInvocations(db *sql.DB, pid string, fnID int64, limit int, before ...
 	out := []*Invocation{}
 	for rows.Next() {
 		inv := &Invocation{}
-		if err := rows.Scan(&inv.ID, &inv.FunctionID, &inv.StartedAt, &inv.FinishedAt,
-			&inv.DurationMS, &inv.Status, &inv.ExitCode,
-			&inv.TriggerKind, &inv.EventJSON, &inv.ResponseBody,
-			&inv.Stderr, &inv.Error, &inv.VersionID, &inv.ConfigHash, &inv.Truncated, &inv.BuildMS, &inv.QueueMS, &inv.ColdStartMS, &inv.ExecutionMS, &inv.Resources, &inv.Identity); err == nil {
+		if err := scanInvocation(rows, inv); err == nil {
 			out = append(out, inv)
 		} else {
 			return nil, err
@@ -684,18 +699,15 @@ func dbListInvocations(db *sql.DB, pid string, fnID int64, limit int, before ...
 
 func dbGetInvocation(db *sql.DB, pid string, id int64) (*Invocation, error) {
 	row := db.QueryRow(
-		`SELECT id, function_id, started_at, COALESCE(finished_at,''),
-			COALESCE(duration_ms,0), status, COALESCE(exit_code,0),
-			trigger_kind, COALESCE(event_json,''), COALESCE(response_body,''),
-			COALESCE(stderr,''), COALESCE(error,''), version_id, COALESCE(config_hash,''), truncated,build_ms,queue_ms,cold_start_ms,execution_ms,COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=function_invocations.id),'null'),COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=function_invocations.id),'null')
-		 FROM function_invocations
-		 WHERE project_id = ? AND id = ?`,
+		`SELECT i.id, i.function_id, f.name, i.started_at, COALESCE(i.finished_at,''),
+			COALESCE(i.duration_ms,0), i.status, COALESCE(i.exit_code,0),
+			i.trigger_kind, COALESCE(i.event_json,''), COALESCE(i.response_body,''),
+			COALESCE(i.stderr,''), COALESCE(i.error,''), i.version_id, COALESCE(i.config_hash,''), i.truncated,i.build_ms,i.queue_ms,i.cold_start_ms,i.execution_ms,COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=i.id),'null'),COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=i.id),'null')
+		 FROM function_invocations i JOIN functions f ON f.id=i.function_id AND f.project_id=i.project_id
+		 WHERE i.project_id = ? AND i.id = ?`,
 		pid, id)
 	inv := &Invocation{}
-	err := row.Scan(&inv.ID, &inv.FunctionID, &inv.StartedAt, &inv.FinishedAt,
-		&inv.DurationMS, &inv.Status, &inv.ExitCode,
-		&inv.TriggerKind, &inv.EventJSON, &inv.ResponseBody,
-		&inv.Stderr, &inv.Error, &inv.VersionID, &inv.ConfigHash, &inv.Truncated, &inv.BuildMS, &inv.QueueMS, &inv.ColdStartMS, &inv.ExecutionMS, &inv.Resources, &inv.Identity)
+	err := scanInvocation(row, inv)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -715,18 +727,51 @@ func dbGetInvocation(db *sql.DB, pid string, id int64) (*Invocation, error) {
 }
 
 func dbRecentInvocations(db *sql.DB, pid string, limit int) ([]*Invocation, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
+	return dbRecentInvocationsQuery(db, pid, InvocationQuery{Limit: limit})
+}
+
+func dbRecentInvocationsQuery(db *sql.DB, pid string, query InvocationQuery) ([]*Invocation, error) {
+	return dbRecentInvocationsContext(context.Background(), db, pid, query)
+}
+
+func dbRecentInvocationsContext(parent context.Context, db *sql.DB, pid string, query InvocationQuery) ([]*Invocation, error) {
+	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
+	defer cancel()
+	if query.Limit <= 0 || query.Limit > 200 {
+		query.Limit = 50
 	}
-	rows, err := db.Query(
-		`SELECT id, function_id, started_at, COALESCE(finished_at,''),
-			COALESCE(duration_ms,0), status, COALESCE(exit_code,0),
-			trigger_kind, COALESCE(event_json,''), COALESCE(response_body,''),
-			COALESCE(stderr,''), COALESCE(error,''), version_id, COALESCE(config_hash,''), truncated,build_ms,queue_ms,cold_start_ms,execution_ms,COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=function_invocations.id),'null'),COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=function_invocations.id),'null')
-		 FROM function_invocations
-		 WHERE project_id = ?
-		 ORDER BY started_at DESC LIMIT ?`,
-		pid, limit)
+	where := []string{"i.project_id = ?"}
+	args := []any{pid}
+	if query.FunctionID > 0 {
+		where = append(where, "i.function_id = ?")
+		args = append(args, query.FunctionID)
+	}
+	if query.Status != "" {
+		switch query.Status {
+		case "errors":
+			where = append(where, "i.status IN ('error','timeout','upstream_timeout')")
+		case "ok", "running", "error", "timeout", "canceled", "upstream_timeout":
+			where = append(where, "i.status = ?")
+			args = append(args, query.Status)
+		default:
+			return nil, fmt.Errorf("invalid invocation status %q", query.Status)
+		}
+	}
+	if query.Cursor > 0 {
+		where = append(where, "i.id < ?")
+		args = append(args, query.Cursor)
+	}
+	args = append(args, query.Limit)
+	rows, err := db.QueryContext(ctx,
+		`SELECT i.id, i.function_id, f.name, i.started_at, COALESCE(i.finished_at,''),
+			COALESCE(i.duration_ms,0), i.status, COALESCE(i.exit_code,0),
+			i.trigger_kind, '', '', '', COALESCE(i.error,''), i.version_id, COALESCE(i.config_hash,''), i.truncated,
+			i.build_ms,i.queue_ms,i.cold_start_ms,i.execution_ms,
+			COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=i.id),'null'),
+			COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=i.id),'null')
+		 FROM function_invocations i JOIN functions f ON f.id=i.function_id AND f.project_id=i.project_id
+		 WHERE `+strings.Join(where, " AND ")+`
+		 ORDER BY i.id DESC LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -734,10 +779,7 @@ func dbRecentInvocations(db *sql.DB, pid string, limit int) ([]*Invocation, erro
 	out := []*Invocation{}
 	for rows.Next() {
 		inv := &Invocation{}
-		if err := rows.Scan(&inv.ID, &inv.FunctionID, &inv.StartedAt, &inv.FinishedAt,
-			&inv.DurationMS, &inv.Status, &inv.ExitCode,
-			&inv.TriggerKind, &inv.EventJSON, &inv.ResponseBody,
-			&inv.Stderr, &inv.Error, &inv.VersionID, &inv.ConfigHash, &inv.Truncated, &inv.BuildMS, &inv.QueueMS, &inv.ColdStartMS, &inv.ExecutionMS, &inv.Resources, &inv.Identity); err == nil {
+		if err := scanInvocation(rows, inv); err == nil {
 			out = append(out, inv)
 		} else {
 			return nil, err

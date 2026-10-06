@@ -1,4 +1,9 @@
-# Functions 1.16.0
+# Functions 1.17.0
+
+**New in 1.17.0:** project-wide Live logs with error and function filters,
+expandable invocation details, live/pause controls, and a configurable Function
+activity widget. Add the widget to Home or a custom Page. Custom Page support
+requires Apteva **0.82.1** or later.
 
 **New in 1.16.0:** performance rankings and slow-call diagnostics in the panel
 and MCP. Compare call volume, total execution time, average/p95 latency,
@@ -73,6 +78,22 @@ can filter a function, completion status and minimum duration, sort by total
 time, execution time or queue wait, and expand a call's timings, downstream
 resources and logs. Refresh takes a new snapshot; pagination keeps the original
 time window.
+
+The panel also includes a project-wide **Live logs** view. It shows recent
+invocations from every function, supports all/error/running/successful and
+per-function filters, and expands a row to show the stored return value,
+console output, error, timings and downstream resources. New invocation rows
+refresh through `invocation.started` and `invocation.completed` app events,
+with a small polling fallback when the event connection is unavailable.
+The same activity feed is exported as the `function-activity` dashboard
+widget; its settings choose the default status filter and row count.
+
+The HTTP equivalent is `GET /invocations` with optional `status` (`errors`,
+`ok`, `running`, `error`, `timeout`, `canceled`, `upstream_timeout`),
+`function_id`, `limit` and `cursor`. List responses include `function_name`
+and safe status/error summaries; fetch `/invocations/<id>` for the full stored
+log. A running invocation has a live resource snapshot but its final console
+output and error are available after completion.
 
 Agents can use the same reports directly:
 
