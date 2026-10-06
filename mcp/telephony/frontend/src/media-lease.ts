@@ -8,6 +8,7 @@ export interface MediaSessionEvent {
   remaining_ms?: number;
   detail?: string;
   was_clean?: boolean;
+  duration_ms?: number;
 }
 export const leaseClock = () => performance.now();
 export function mediaFailure(error: unknown): { status?: number; code?: string; denied: boolean; expired: boolean } {

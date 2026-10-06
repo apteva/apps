@@ -94,6 +94,8 @@ func (d *liveAudioTimeline) snapshot() (string, map[string]mediaStageSnapshot) {
 }
 
 type serverAudioDiagnostics struct {
+	Socket                 audioSocketSnapshot           `json:"browser_socket"`
+	Health                 audioHealthSnapshot           `json:"audio_health"`
 	Reception              carrierReceptionSnapshot      `json:"carrier_reception"`
 	CarrierPacer           livePacerSnapshot             `json:"carrier_pacer"`
 	Process                mediaProcessSnapshot          `json:"process"`
@@ -113,9 +115,10 @@ type serverAudioDiagnostics struct {
 
 func (h *softphoneHub) serverAudioSnapshot() serverAudioDiagnostics {
 	epoch, stages := h.timeline.snapshot()
+	socket, health := h.telemetry.snapshots()
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return serverAudioDiagnostics{Reception: h.reception.snapshot(mediaClockMS(), h.carrierForward != nil && !h.held && (h.status == "answered" || h.status == "in-progress")), CarrierPacer: h.pacerStats.snapshot(), Process: sampleMediaProcess(), CaptureStaleBytes: h.captureStaleBytes, Epoch: epoch, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Stages: stages,
+	return serverAudioDiagnostics{Socket: socket, Health: health, Reception: h.reception.snapshot(mediaClockMS(), h.carrierForward != nil && !h.held && (h.status == "answered" || h.status == "in-progress")), CarrierPacer: h.pacerStats.snapshot(), Process: sampleMediaProcess(), CaptureStaleBytes: h.captureStaleBytes, Epoch: epoch, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Stages: stages,
 		CarrierForward: mergeLiveAudioSnapshots(h.completedCarrierForward, h.carrierForward.audioSnapshot()),
 		ToBrowser:      mergeLiveAudioSnapshots(h.completedBrowser, h.browser.audioSnapshot()), ToCarrierBridge: mergeLiveAudioSnapshots(h.completedPeer, h.peer.audioSnapshot()),
 		CaptureTimestampMS: h.captureTimestampMS, CaptureWorkerAgeMS: h.captureWorkerAgeMS, CaptureSequenceGaps: h.captureSequenceGaps, CaptureTransitExcessMS: h.captureTransitExcessMS, CaptureDropEvents: append([]audioDropEvent(nil), h.captureDropEvents...)}

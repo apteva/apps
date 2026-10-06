@@ -27,6 +27,7 @@ type carrierSource struct {
 }
 
 type carrierReceptionSnapshot struct {
+	GapsOverBudget     int64                  `json:"gaps_over_budget"`
 	Stream             string                 `json:"stream,omitempty"`
 	Epoch              uint32                 `json:"epoch"`
 	Frames             int64                  `json:"frames"`
@@ -137,6 +138,10 @@ func (r *carrierReception) observe(src carrierSource, duration, now float64) (ma
 		r.s.Stalled = true
 		r.s.Stalls++
 		r.event("reception_stalled", now, gap, 0, src)
+	}
+	if !r.paused && r.s.ContinuousExpected && gap > liveSourceBudgetMS {
+		r.s.GapsOverBudget++
+		r.event("reception_gap_over_budget", now, gap, 0, src)
 	}
 	r.s.Frames++
 	r.s.ReceivedMS += duration

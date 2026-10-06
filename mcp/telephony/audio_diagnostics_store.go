@@ -45,7 +45,18 @@ type coachingPlaybackTiming struct {
 	MaxQueueMS float64 `json:"max_queue_ms"`
 }
 
+type browserRTTSample struct {
+	At    string  `json:"at"`
+	RTTMS float64 `json:"rtt_ms"`
+}
+type browserAudioRuntime struct {
+	MainThreadPauseCount     float64 `json:"main_thread_pause_count"`
+	MainThreadMaxPauseMS     float64 `json:"main_thread_max_pause_ms"`
+	AudioContextSuspendCount float64 `json:"audio_context_suspend_count"`
+	AudioContextSuspendedMS  float64 `json:"audio_context_suspended_ms"`
+}
 type browserAudioTiming struct {
+	Runtime   browserAudioRuntime `json:"runtime"`
 	Transport struct {
 		CaptureFrames               float64            `json:"capture_frames"`
 		CaptureSentMS               float64            `json:"capture_sent_ms"`
@@ -63,6 +74,13 @@ type browserAudioTiming struct {
 		PlaybackSequenceGaps        float64            `json:"playback_sequence_gaps"`
 		PlaybackMaxTransitMS        float64            `json:"playback_max_transit_ms"`
 		PlaybackMaxServerQueueMS    float64            `json:"playback_max_server_queue_ms"`
+		ReconnectAttempts           float64            `json:"reconnect_attempts"`
+		ReconnectSuccesses          float64            `json:"reconnect_successes"`
+		WorkerPauseCount            float64            `json:"worker_pause_count"`
+		RTTSamples                  []browserRTTSample `json:"rtt_samples,omitempty"`
+		RTTMS                       *float64           `json:"rtt_ms,omitempty"`
+		RTTMaxMS                    float64            `json:"rtt_max_ms"`
+		WebSocketMaxBufferedBytes   float64            `json:"websocket_max_buffered_bytes"`
 		WorkerMaxTickGapMS          float64            `json:"worker_max_tick_gap_ms"`
 		ClockUncertaintyMS          *float64           `json:"clock_uncertainty_ms"`
 		ClockSampleAgeMS            *float64           `json:"clock_sample_age_ms"`
@@ -77,6 +95,7 @@ type browserAudioTiming struct {
 }
 
 type mediaSessionEvent struct {
+	DurationMS  int    `json:"duration_ms,omitempty"`
 	Timestamp   string `json:"timestamp"`
 	Action      string `json:"action"`
 	Outcome     string `json:"outcome"`
@@ -88,6 +107,7 @@ type mediaSessionEvent struct {
 }
 
 type browserAudioDiagnostics struct {
+	ClientEpoch            string                  `json:"client_epoch,omitempty"`
 	SessionEvents          []mediaSessionEvent     `json:"session_events,omitempty"`
 	CarrierPeerConnected   bool                    `json:"carrier_peer_connected"`
 	ConnectionState        string                  `json:"connection_state,omitempty"`
@@ -199,6 +219,34 @@ func clampDiagnosticDBFS(value *float64) *float64 {
 
 func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics) browserAudioDiagnostics {
 	if value.Timing != nil {
+		finite := func(n float64, cap float64) float64 {
+			if math.IsNaN(n) || math.IsInf(n, 0) {
+				return 0
+			}
+			return math.Max(0, math.Min(n, cap))
+		}
+		tr, rt := &value.Timing.Transport, &value.Timing.Runtime
+		tr.ReconnectAttempts = finite(tr.ReconnectAttempts, 1e9)
+		tr.ReconnectSuccesses = finite(tr.ReconnectSuccesses, 1e9)
+		tr.WorkerPauseCount = finite(tr.WorkerPauseCount, 1e9)
+		if len(tr.RTTSamples) > 32 {
+			tr.RTTSamples = tr.RTTSamples[len(tr.RTTSamples)-32:]
+		}
+		for i := range tr.RTTSamples {
+			tr.RTTSamples[i].At = limitDiagnosticText(tr.RTTSamples[i].At, 40)
+			tr.RTTSamples[i].RTTMS = finite(tr.RTTSamples[i].RTTMS, 60000)
+		}
+		if tr.RTTMS != nil {
+			v := finite(*tr.RTTMS, 60000)
+			tr.RTTMS = &v
+		}
+		tr.RTTMaxMS = finite(tr.RTTMaxMS, 60000)
+		tr.WebSocketMaxBufferedBytes = finite(tr.WebSocketMaxBufferedBytes, 64*1024*1024)
+		rt.MainThreadPauseCount = finite(rt.MainThreadPauseCount, 1e9)
+		rt.MainThreadMaxPauseMS = finite(rt.MainThreadMaxPauseMS, 86400000)
+		rt.AudioContextSuspendCount = finite(rt.AudioContextSuspendCount, 1e9)
+		rt.AudioContextSuspendedMS = finite(rt.AudioContextSuspendedMS, 86400000)
+
 		sanitize := func(values map[string]float64) map[string]float64 {
 			out := map[string]float64{}
 			for _, key := range []string{"playback_flush", "playback_hard_limit", "playback_age_limit", "capture_age_limit", "capture_clock_unavailable", "websocket_backpressure", "playback_transport_age", "playback_source_age", "playback_delivery_excess"} {
@@ -222,6 +270,7 @@ func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics) browserAudi
 	value.ConnectionState = enum(value.ConnectionState, "connected", "reconnecting", "closed")
 	value.AudioContextState = enum(value.AudioContextState, "running", "suspended", "interrupted", "closed")
 	value.MicrophoneTrackState = enum(value.MicrophoneTrackState, "live", "ended")
+	value.ClientEpoch = limitDiagnosticText(value.ClientEpoch, 64)
 	value.ReceivedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	if value.RTTMS != nil {
 		rtt := clampDiagnosticInt(*value.RTTMS, 60000)
@@ -254,6 +303,7 @@ func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics) browserAudi
 		e.Code = limitDiagnosticText(e.Code, 80)
 		e.Detail = limitDiagnosticText(e.Detail, 160)
 		e.Timestamp = limitDiagnosticText(e.Timestamp, 40)
+		e.DurationMS = clampDiagnosticInt(e.DurationMS, 86400000)
 		e.Status = clampDiagnosticInt(e.Status, 599)
 		e.RemainingMS = clampDiagnosticInt(e.RemainingMS, 3600000)
 	}
