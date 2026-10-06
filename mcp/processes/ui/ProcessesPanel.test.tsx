@@ -536,6 +536,7 @@ test("main Runs tab browses executions across processes", async () => {
   expect(document.querySelector(".run-detail-page")).toBeTruthy();
   expect(document.querySelector(".run-detail-page .run-detail")).toBeTruthy();
   expect(document.querySelector(".run-detail-page .run-list")).toBeNull();
+  expect(document.querySelector(".run-list")).toBeNull();
   expect(document.body.textContent).toContain("Procedure v2");
   await click("← Back to runs");
   expect(document.querySelector(".run-detail-page")).toBeNull();
