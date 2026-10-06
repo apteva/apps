@@ -531,6 +531,8 @@ test("main Runs tab browses executions across processes", async () => {
   expect(document.body.textContent).toContain("Weekly review");
   expect(document.body.textContent).toContain("Publish digest");
   expect(document.body.textContent).not.toContain("Digest published");
+  expect(document.querySelector('[data-state="running"]')).toBeTruthy();
+  expect(document.querySelector('[data-state="completed"]')).toBeTruthy();
   await clickContaining("Publish digest");
   expect(document.body.textContent).toContain("Digest published");
   expect(document.querySelector(".run-detail-page")).toBeTruthy();
