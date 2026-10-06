@@ -95,3 +95,39 @@ test("step modal traps focus, closes with Escape and keeps unsaved edits", async
   await step.press("Enter");
   await expect(dialog.getByLabel("Step instructions", {exact:true})).toHaveValue("Keep this pending edit.");
 });
+
+
+for (const width of [1440, 375]) {
+  test(`focused step fields retain their complete outline at ${width}px`, async ({page}) => {
+    await page.setViewportSize({width, height:720});
+    await page.goto("/");
+    await page.getByRole("button", {name:"Hourly weather alerts", exact:true}).click();
+    await page.getByRole("button", {name:"Step 2: Post alert in Conversations", exact:true}).click();
+    const dialog = page.getByRole("dialog", {name:"Edit step"});
+    for (const name of ["Step name", "Step instructions", "Required output"]) {
+      const field = dialog.getByLabel(name, {exact:true});
+      await field.focus();
+      await field.evaluate(el => el.scrollIntoView({block:"center"}));
+      const bounds = await field.evaluate(el => {
+        const rect = el.getBoundingClientRect();
+        const scroller = el.closest(".pf-inspector-content")!;
+        const clip = scroller.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        const ring = parseFloat(style.outlineWidth) + parseFloat(style.outlineOffset);
+        return {left:rect.left-ring, right:rect.right+ring, top:rect.top-ring, bottom:rect.bottom+ring,
+          clipLeft:clip.left, clipRight:clip.left+scroller.clientWidth, clipTop:clip.top, clipBottom:clip.bottom, ring};
+      });
+      expect(bounds.ring).toBeGreaterThan(0);
+      expect(bounds.left).toBeGreaterThanOrEqual(bounds.clipLeft);
+      expect(bounds.right).toBeLessThanOrEqual(bounds.clipRight);
+      expect(bounds.top).toBeGreaterThanOrEqual(bounds.clipTop);
+      expect(bounds.bottom).toBeLessThanOrEqual(bounds.clipBottom);
+    }
+    const instructions = dialog.getByLabel("Step instructions", {exact:true});
+    await instructions.focus();
+    await instructions.evaluate(el => el.scrollIntoView({block:"center"}));
+    await dialog.screenshot({path:`/private/tmp/processes-modal-focus-${width}.png`});
+    await expect(dialog.getByRole("button", {name:"Close step details"})).toBeInViewport();
+    await expect(dialog.getByRole("button", {name:"Save changes", exact:true})).toBeInViewport();
+  });
+}

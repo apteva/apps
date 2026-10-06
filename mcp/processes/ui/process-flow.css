@@ -463,7 +463,7 @@
 .ap-processes dialog.pf-step-modal:not([open]) { display: none; }
 .ap-processes dialog.pf-step-modal::backdrop { background: #0009; }
 .ap-processes .pf-step-modal .pf-inspector-head h3 { font-size: 20px; }
-.ap-processes .pf-step-modal .pf-inspector-content { flex: 1; padding-right: 12px; overscroll-behavior: contain; }
+.ap-processes .pf-step-modal .pf-inspector-content { flex: 1; padding: 6px 12px 6px 6px; scroll-padding: 6px; overscroll-behavior: contain; }
 .ap-processes .pf-step-modal :is(input, textarea, select) { font-size: 14px; }
 .ap-processes .pf-step-modal textarea { line-height: 1.6; }
 @media (max-width: 600px) {
@@ -473,5 +473,5 @@
     padding: 16px;
     border-radius: 12px;
   }
-  .ap-processes .pf-step-modal .pf-inspector-content { padding-right: 4px; }
+  .ap-processes .pf-step-modal .pf-inspector-content { padding-right: 6px; }
 }
