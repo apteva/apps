@@ -164,24 +164,9 @@ func inputLiteral(v *ast.Value, vars map[string]any) (any, bool) {
 }
 
 func executeRuntime(ctx context.Context, runtime *gql.Schema, schema *ast.Schema, doc *ast.QueryDocument, op *ast.OperationDefinition, variables map[string]any) (*gql.Result, error) {
-	vars := map[string]any{}
-	for _, v := range op.VariableDefinitions {
-		value, present := variables[v.Variable]
-		if !present && v.DefaultValue != nil {
-			value, _ = v.DefaultValue.Value(nil)
-			present = true
-		}
-		if !present {
-			if v.Type.NonNull {
-				return nil, fmt.Errorf("variable $%s is required", v.Variable)
-			}
-			continue
-		}
-		coerced, err := coerceInput(schema, v.Type, value)
-		if err != nil {
-			return nil, fmt.Errorf("variable $%s: %w", v.Variable, err)
-		}
-		vars[v.Variable] = coerced
+	vars, err := coerceVariables(schema, op, variables)
+	if err != nil {
+		return nil, err
 	}
 	args := argumentValues{}
 	usedFragments := map[string]bool{}
@@ -346,4 +331,27 @@ func standardArguments(resolve gql.FieldResolveFn) gql.FieldResolveFn {
 
 func inputError(err error) *gql.Result {
 	return &gql.Result{Errors: []gqlerrors.FormattedError{gqlerrors.NewFormattedError(err.Error())}}
+}
+
+func coerceVariables(schema *ast.Schema, op *ast.OperationDefinition, variables map[string]any) (map[string]any, error) {
+	vars := map[string]any{}
+	for _, v := range op.VariableDefinitions {
+		value, present := variables[v.Variable]
+		if !present && v.DefaultValue != nil {
+			value, _ = v.DefaultValue.Value(nil)
+			present = true
+		}
+		if !present {
+			if v.Type.NonNull {
+				return nil, fmt.Errorf("variable $%s is required", v.Variable)
+			}
+			continue
+		}
+		coerced, err := coerceInput(schema, v.Type, value)
+		if err != nil {
+			return nil, fmt.Errorf("variable $%s: %w", v.Variable, err)
+		}
+		vars[v.Variable] = coerced
+	}
+	return vars, nil
 }

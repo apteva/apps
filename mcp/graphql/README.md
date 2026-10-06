@@ -482,7 +482,9 @@ Small Tables read fan-outs use `tables_batch` (requires Tables 0.1.22 or newer),
 in groups of at most five operations with individual requested limits up to 100.
 Larger reads use parallel individual calls, bounded to eight source tasks.
 Rows-only queries skip total counts unless explicitly configured otherwise.
-Batching uses `best_effort`, not cross-table snapshot consistency.
+Default batching uses `best_effort`. Version 0.8.0 adds opt-in native batch snapshots,
+request snapshots for capable upstream adapters, admission limits and in-flight
+read sharing; see [RUNTIME.md](RUNTIME.md) for the contract and consistency limits.
 
 Version 0.3.0 pins SDK v0.82.0, including cancellable trusted Function calls and
 negotiated inner JSON results. Platform-only read optimizations are preserved.
@@ -543,3 +545,12 @@ bun build mcp/graphql/ui/GraphQLTelemetryWidget.tsx --target browser --format es
   --outfile mcp/graphql/ui/GraphQLTelemetryWidget.mjs
 bun test mcp/graphql/ui/telemetry.test.ts
 ```
+
+## Reusable runtime capabilities
+
+Version 0.8.0 adds opt-in authorized in-flight sharing, real Tables point-read
+batching, generic upstream adapters with bounded read snapshots, and configurable
+admission queues. Deploy controls configure the immutable release. Logs and the
+existing dashboard widget show queue/shared execution views, source metadata,
+loader/backend counts and per-resolver timing details. See [RUNTIME.md](RUNTIME.md)
+for configuration, capability contracts and backend consistency boundaries.

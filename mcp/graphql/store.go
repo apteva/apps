@@ -213,10 +213,10 @@ func publishSchema(db *sql.DB, project, environment string, version int) (*schem
 
 func validateSourceKind(kind string) error {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
-	case "database", "tables", "function", "http", "module":
+	case "database", "tables", "function", "http", "module", "upstream":
 		return nil
 	default:
-		return invalid("source kind must be database, tables, function, HTTP, or module")
+		return invalid("source kind must be database, tables, function, HTTP, module, or upstream")
 	}
 }
 
@@ -227,6 +227,11 @@ func createSource(db *sql.DB, project, name, kind string, config map[string]any)
 	}
 	if err := validateSourceKind(kind); err != nil {
 		return nil, err
+	}
+	if strings.EqualFold(kind, "upstream") {
+		if err := validateUpstreamSource(config); err != nil {
+			return nil, err
+		}
 	}
 	if strings.EqualFold(kind, "function") {
 		if _, err := functionSecurity(config); err != nil {

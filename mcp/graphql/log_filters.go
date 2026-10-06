@@ -13,6 +13,9 @@ import (
 // and the GraphQL panel have identical server-side filtering semantics.
 type logFilter struct {
 	limit            int
+	minQueueMS       *int64
+	coalesced        *bool
+	minBackendReads  *int64
 	minDurationMS    *int64
 	maxDurationMS    *int64
 	minResponseBytes *int64
@@ -46,6 +49,8 @@ func (f *logFilter) normalize() error {
 		f.limit = 500
 	}
 	for name, value := range map[string]*int64{
+		"min_queue_ms":       f.minQueueMS,
+		"min_backend_reads":  f.minBackendReads,
 		"min_duration_ms":    f.minDurationMS,
 		"max_duration_ms":    f.maxDurationMS,
 		"min_response_bytes": f.minResponseBytes,
@@ -88,7 +93,7 @@ func (f *logFilter) normalize() error {
 		f.sortBy = "created_at"
 	}
 	switch f.sortBy {
-	case "created_at", "duration_ms", "response_bytes", "row_count", "resolver_count", "status_code", "operation_name":
+	case "created_at", "duration_ms", "response_bytes", "row_count", "resolver_count", "status_code", "operation_name", "queue_ms", "backend_reads":
 	default:
 		return invalid("sort_by must be created_at, duration_ms, response_bytes, row_count, resolver_count, status_code, or operation_name")
 	}
@@ -167,7 +172,7 @@ func parseLogFiltersArgs(args map[string]any) (logFilter, error) {
 		key    string
 		target **int64
 	}{
-		{"min_duration_ms", &filter.minDurationMS}, {"max_duration_ms", &filter.maxDurationMS},
+		{"min_queue_ms", &filter.minQueueMS}, {"min_backend_reads", &filter.minBackendReads}, {"min_duration_ms", &filter.minDurationMS}, {"max_duration_ms", &filter.maxDurationMS},
 		{"min_response_bytes", &filter.minResponseBytes}, {"max_response_bytes", &filter.maxResponseBytes},
 		{"min_rows", &filter.minRows}, {"max_rows", &filter.maxRows},
 		{"min_resolvers", &filter.minResolvers}, {"max_resolvers", &filter.maxResolvers},
@@ -188,6 +193,13 @@ func parseLogFiltersArgs(args map[string]any) (logFilter, error) {
 		}
 	}
 	filter.operationName = stringArg(args, "operation_name", "")
+	if value, ok := args["coalesced"]; ok && value != nil {
+		parsed, ok := value.(bool)
+		if !ok {
+			return filter, invalid("coalesced must be a boolean")
+		}
+		filter.coalesced = &parsed
+	}
 	if value, ok := args["has_errors"]; ok && value != nil {
 		parsed, ok := value.(bool)
 		if !ok {
@@ -230,7 +242,7 @@ func parseLogFiltersQuery(values url.Values) (logFilter, error) {
 		key    string
 		target **int64
 	}{
-		{"min_duration_ms", &filter.minDurationMS}, {"max_duration_ms", &filter.maxDurationMS},
+		{"min_queue_ms", &filter.minQueueMS}, {"min_backend_reads", &filter.minBackendReads}, {"min_duration_ms", &filter.minDurationMS}, {"max_duration_ms", &filter.maxDurationMS},
 		{"min_response_bytes", &filter.minResponseBytes}, {"max_response_bytes", &filter.maxResponseBytes},
 		{"min_rows", &filter.minRows}, {"max_rows", &filter.maxRows},
 		{"min_resolvers", &filter.minResolvers}, {"max_resolvers", &filter.maxResolvers},
@@ -249,6 +261,13 @@ func parseLogFiltersQuery(values url.Values) (logFilter, error) {
 		filter.statusCode = &parsed
 	}
 	filter.operationName = values.Get("operation_name")
+	if value := values.Get("coalesced"); value != "" {
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return filter, invalid("coalesced must be a boolean")
+		}
+		filter.coalesced = &parsed
+	}
 	if value := values.Get("has_errors"); value != "" {
 		parsed, err := strconv.ParseBool(value)
 		if err != nil {
@@ -276,6 +295,8 @@ func logWhere(project string, filter logFilter) (string, []any) {
 		value *int64
 		sql   string
 	}{
+		{filter.minQueueMS, " AND COALESCE(json_extract(runtime_metrics_json, '$.queue_ms'), 0)>=?"},
+		{filter.minBackendReads, " AND COALESCE(json_extract(runtime_metrics_json, '$.backend_reads'), 0)>=?"},
 		{filter.minDurationMS, " AND duration_ms>=?"}, {filter.maxDurationMS, " AND duration_ms<=?"},
 		{filter.minResponseBytes, " AND response_bytes>=?"}, {filter.maxResponseBytes, " AND response_bytes<=?"},
 		{filter.minRows, " AND row_count>=?"}, {filter.maxRows, " AND row_count<=?"},
@@ -286,6 +307,10 @@ func logWhere(project string, filter logFilter) (string, []any) {
 			query += condition.sql
 			args = append(args, *condition.value)
 		}
+	}
+	if filter.coalesced != nil {
+		query += " AND COALESCE(json_extract(runtime_metrics_json, '$.coalesced'), 0)=?"
+		args = append(args, *filter.coalesced)
 	}
 	if filter.statusCode != nil {
 		query += " AND status_code=?"
@@ -336,8 +361,11 @@ func publicLogsFiltered(db *sql.DB, project string, filter logFilter) ([]map[str
 		return nil, err
 	}
 	where, args := logWhere(project, filter)
-	query := `SELECT id, operation_name, operation_type, status_code, duration_ms, error, created_at, operation_hash, api_release, response_bytes, row_count, resolver_count, source_timings_json, error_codes_json, authorization_scope, request_id, environment, errors_json, timings_json FROM graphql_request_logs` + where
+	query := `SELECT id, operation_name, operation_type, status_code, duration_ms, error, created_at, operation_hash, api_release, response_bytes, row_count, resolver_count, source_timings_json, error_codes_json, authorization_scope, request_id, environment, errors_json, timings_json, runtime_metrics_json FROM graphql_request_logs` + where
 	sortColumn := filter.sortBy
+	if sortColumn == "queue_ms" || sortColumn == "backend_reads" {
+		sortColumn = "COALESCE(json_extract(runtime_metrics_json, '$." + sortColumn + "'), 0)"
+	}
 	if sortColumn == "created_at" {
 		sortColumn = "julianday(created_at)"
 	}
@@ -354,18 +382,19 @@ func publicLogsFiltered(db *sql.DB, project string, filter logFilter) ([]map[str
 		var operationName, operationType, message, created, operationHash, sourceTimings, errorCodes, authScope, requestID string
 		var status int
 		var release, responseBytes, rowCount, resolverCount int
-		var environment, allErrors, phases string
-		if err := rows.Scan(&id, &operationName, &operationType, &status, &duration, &message, &created, &operationHash, &release, &responseBytes, &rowCount, &resolverCount, &sourceTimings, &errorCodes, &authScope, &requestID, &environment, &allErrors, &phases); err != nil {
+		var environment, allErrors, phases, runtimeJSON string
+		if err := rows.Scan(&id, &operationName, &operationType, &status, &duration, &message, &created, &operationHash, &release, &responseBytes, &rowCount, &resolverCount, &sourceTimings, &errorCodes, &authScope, &requestID, &environment, &allErrors, &phases, &runtimeJSON); err != nil {
 			return nil, err
 		}
 		var timings any
 		_ = json.Unmarshal([]byte(sourceTimings), &timings)
 		var codes any
 		_ = json.Unmarshal([]byte(errorCodes), &codes)
-		var errors, timingPhases any
+		var errors, timingPhases, metrics any
 		_ = json.Unmarshal([]byte(allErrors), &errors)
 		_ = json.Unmarshal([]byte(phases), &timingPhases)
-		out = append(out, map[string]any{"id": id, "operation_name": operationName, "operation_type": operationType, "status_code": status, "duration_ms": duration, "error": message, "created_at": created, "operation_hash": operationHash, "api_release": release, "response_bytes": responseBytes, "row_count": rowCount, "resolver_count": resolverCount, "source_timings": timings, "error_codes": codes, "authorization_scope": authScope, "request_id": requestID, "environment": environment, "errors": errors, "timings": timingPhases})
+		_ = json.Unmarshal([]byte(runtimeJSON), &metrics)
+		out = append(out, map[string]any{"id": id, "operation_name": operationName, "operation_type": operationType, "status_code": status, "duration_ms": duration, "error": message, "created_at": created, "operation_hash": operationHash, "api_release": release, "response_bytes": responseBytes, "row_count": rowCount, "resolver_count": resolverCount, "source_timings": timings, "error_codes": codes, "authorization_scope": authScope, "request_id": requestID, "environment": environment, "errors": errors, "timings": timingPhases, "runtime": metrics})
 	}
 	return out, rows.Err()
 }
@@ -376,12 +405,13 @@ func logSummary(db *sql.DB, project string, filter logFilter, slowMS int64) (map
 		return nil, err
 	}
 	where, args := logWhere(project, filter)
-	query := `SELECT COUNT(*), COALESCE(SUM(CASE WHEN ` + logErrorCondition + ` THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN duration_ms>=? THEN 1 ELSE 0 END),0), COALESCE(AVG(duration_ms),0), COALESCE(MAX(duration_ms),0), COALESCE(SUM(response_bytes),0) FROM graphql_request_logs` + where
+	query := `SELECT COUNT(*), COALESCE(SUM(CASE WHEN ` + logErrorCondition + ` THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN duration_ms>=? THEN 1 ELSE 0 END),0), COALESCE(AVG(duration_ms),0), COALESCE(MAX(duration_ms),0), COALESCE(SUM(response_bytes),0), COALESCE(AVG(COALESCE(json_extract(runtime_metrics_json, '$.queue_ms'),0)),0), COALESCE(SUM(CASE WHEN json_extract(runtime_metrics_json, '$.coalesced')=1 THEN 1 ELSE 0 END),0) FROM graphql_request_logs` + where
 	args = append([]any{slowMS}, args...)
 	var count, errors, slow, maxMS, bytes int64
-	var avgMS float64
-	if err := db.QueryRow(query, args...).Scan(&count, &errors, &slow, &avgMS, &maxMS, &bytes); err != nil {
+	var avgMS, avgQueueMS float64
+	var coalesced int64
+	if err := db.QueryRow(query, args...).Scan(&count, &errors, &slow, &avgMS, &maxMS, &bytes, &avgQueueMS, &coalesced); err != nil {
 		return nil, err
 	}
-	return map[string]any{"requests": count, "errors": errors, "slow": slow, "avg_duration_ms": avgMS, "max_duration_ms": maxMS, "response_bytes": bytes, "slow_threshold_ms": slowMS}, nil
+	return map[string]any{"requests": count, "errors": errors, "slow": slow, "avg_duration_ms": avgMS, "max_duration_ms": maxMS, "response_bytes": bytes, "slow_threshold_ms": slowMS, "avg_queue_ms": avgQueueMS, "coalesced": coalesced}, nil
 }

@@ -22,6 +22,10 @@ type standardRequest struct {
 	project, api       string
 	bindings           *executionBindings
 	policy             securityPolicy
+	reads              requestReads
+	metrics            runtimeMetrics
+	metadata           map[string]any
+	metadataBytes      int
 	loader             *resolverLoader
 	mutation           bool
 	synchronous        bool
@@ -35,6 +39,7 @@ type standardRequest struct {
 	limits             releaseLimits
 	resolverCount      atomic.Int64
 	rowCount           int
+	upstreamNanos      atomic.Int64
 	tablesNanos        atomic.Int64
 	databaseNanos      atomic.Int64
 	functionNanos      atomic.Int64
@@ -52,9 +57,11 @@ func (a *App) executeStandard(ctx context.Context, project, api, key string, sch
 	if limits.MaxNestedResolvers == 0 {
 		limits = defaultReleaseLimits()
 	}
+	limits = runtimeLimits(limits)
 	state := &standardRequest{project: project, api: api, bindings: bindings, policy: policy, mutation: op.Operation == ast.Mutation, limits: limits}
 	ctx = context.WithValue(ctx, standardRequestKey{}, state)
 	state.loader = newResolverLoader(a, ctx, project)
+	defer state.reads.close(ctx)
 	result, inputErr := executeRuntime(ctx, runtime, schema, doc, op, req.Variables)
 	if inputErr != nil {
 		result = inputError(inputErr)
@@ -66,7 +73,7 @@ func (a *App) executeStandard(ctx context.Context, project, api, key string, sch
 	out.Timings.Fast = state.fastProjectionUsed
 	out.Resolvers = int(state.resolverCount.Load())
 	out.SourceTimings = map[string]float64{}
-	for name, nanos := range map[string]int64{"tables": state.tablesNanos.Load(), "database": state.databaseNanos.Load(), "function": state.functionNanos.Load(), "http": state.httpNanos.Load(), "module": state.moduleNanos.Load()} {
+	for name, nanos := range map[string]int64{"upstream": state.upstreamNanos.Load(), "tables": state.tablesNanos.Load(), "database": state.databaseNanos.Load(), "function": state.functionNanos.Load(), "http": state.httpNanos.Load(), "module": state.moduleNanos.Load()} {
 		if nanos > 0 {
 			out.SourceTimings[name] = milliseconds(time.Duration(nanos))
 		}
@@ -91,9 +98,30 @@ func (a *App) executeStandard(ctx context.Context, project, api, key string, sch
 		}
 		out.Errors = append(out.Errors, item)
 	}
+	if closeErr := state.reads.close(ctx); closeErr != nil {
+		out.Errors = append(out.Errors, map[string]any{"message": "upstream snapshot cleanup failed", "extensions": map[string]any{"code": "snapshot_cleanup_failed"}})
+	}
+	state.timingMu.Lock()
+	metricsJSON, _ := json.Marshal(state.metrics)
+	_ = json.Unmarshal(metricsJSON, &out.Runtime)
+	out.Runtime.Consistency = "none"
+	if !state.mutation {
+		out.Runtime.Consistency = limits.ReadConsistency
+	}
+	if len(state.metadata) > 0 {
+		entries := []any{}
+		for _, item := range state.metadata {
+			entries = append(entries, item)
+		}
+		out.Extensions = map[string]any{"sources": entries}
+		out.Runtime.Sources = entries
+	}
+	state.timingMu.Unlock()
 	out.Rows = countResultRows(result.Data)
 	if out.Rows > limits.MaxRows {
-		return executeResult{}, &graphqlError{Code: "row_limit_exceeded", Message: fmt.Sprintf("result rows %d exceeds limit %d", out.Rows, limits.MaxRows)}
+		out.Data = nil
+		out.HasData = false
+		return out, &graphqlError{Code: "row_limit_exceeded", Message: fmt.Sprintf("result rows %d exceeds limit %d", out.Rows, limits.MaxRows)}
 	}
 	return out, nil
 }
@@ -338,6 +366,25 @@ func (a *App) standardResolve(p gql.ResolveParams) (any, error) {
 	if !found {
 		return nil, resolverError{internal("resolver source not found")}
 	}
+	if source.Kind == "upstream" {
+		if state.mutation {
+			return nil, resolverError{invalid("upstream read adapters cannot be used by mutations")}
+		}
+		read := trackResolverError(state, p, state.loader.loadUpstream(source, r.Operation, p.Args, p.Source))
+		if state.synchronous {
+			return read()
+		}
+		return read, nil
+	}
+	if !state.mutation && state.limits.ReadConsistency == "request" && source.Kind != "upstream" && source.Kind != "module" {
+		return nil, resolverError{runtimeError("snapshot_unsupported", "source does not support reusable request snapshots")}
+	}
+	if !state.mutation && state.limits.ReadConsistency == "batch" && source.Kind != "tables" && source.Kind != "upstream" && source.Kind != "module" {
+		return nil, resolverError{runtimeError("snapshot_unsupported", "source does not support batch snapshots")}
+	}
+	if !state.mutation && state.limits.ReadConsistency != "none" && source.Kind == "tables" && !tablesReadOperation(r.Operation) {
+		return nil, resolverError{runtimeError("snapshot_unsupported", "snapshot execution accepts Tables read operations only")}
+	}
 	config := mergeMaps(source.Config, r.Config)
 	if source.Kind == "tables" {
 		if r.Operation == aggregatePipelineOperation {
@@ -373,6 +420,12 @@ func (a *App) standardResolve(p gql.ResolveParams) (any, error) {
 	config["parent"] = p.Source
 	call := func() (any, error) {
 		started := time.Now()
+		if source.Kind != "module" {
+			state.timingMu.Lock()
+			state.metrics.BackendCalls++
+			state.metrics.BackendReads++
+			state.timingMu.Unlock()
+		}
 		defer func() {
 			nanos := time.Since(started).Nanoseconds()
 			switch source.Kind {
@@ -410,7 +463,7 @@ func (a *App) standardResolve(p gql.ResolveParams) (any, error) {
 		return value, nil
 	}
 	if state.mutation {
-		return call()
+		return trackResolverError(state, p, call)()
 	}
 	if source.Kind == "tables" {
 		if r.Operation == aggregatePipelineOperation {
@@ -454,6 +507,9 @@ func (a *App) standardResolve(p gql.ResolveParams) (any, error) {
 			return nil, resolverError{err}
 		}
 		if input == nil {
+			if state.limits.ReadConsistency != "none" {
+				return nil, resolverError{runtimeError("snapshot_unsupported", "resolver cannot participate in a snapshot batch")}
+			}
 			goto deferred
 		}
 		tool := "rows_" + strings.ToLower(r.Operation)
@@ -495,7 +551,11 @@ deferred:
 
 func trackResolverError(state *standardRequest, p gql.ResolveParams, read func() (any, error)) func() (any, error) {
 	return func() (any, error) {
+		started := time.Now()
 		value, err := read()
+		state.timingMu.Lock()
+		state.metrics.recordResolver(p.Info.ParentType.Name()+"."+p.Info.FieldName, time.Since(started), err != nil)
+		state.timingMu.Unlock()
 		if err != nil {
 			key, _ := json.Marshal(p.Info.Path.AsArray())
 			state.errorMu.Lock()

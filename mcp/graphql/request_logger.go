@@ -26,6 +26,7 @@ type requestLogEntry struct {
 	requestID          string
 	environment        string
 	allErrors          string
+	runtimeMetrics     string
 	timings            string
 }
 
@@ -106,14 +107,14 @@ func (a *App) writeRequestLogs(batch []requestLogEntry) {
 		a.logRequestWriterError(err)
 		return
 	}
-	stmt, err := tx.Prepare(`INSERT INTO graphql_request_logs(project_id,operation_name,operation_type,status_code,duration_ms,error,created_at,operation_hash,api_release,response_bytes,row_count,resolver_count,source_timings_json,error_codes_json,authorization_scope,request_id,environment,errors_json,timings_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	stmt, err := tx.Prepare(`INSERT INTO graphql_request_logs(project_id,operation_name,operation_type,status_code,duration_ms,error,created_at,operation_hash,api_release,response_bytes,row_count,resolver_count,source_timings_json,error_codes_json,authorization_scope,request_id,environment,errors_json,timings_json,runtime_metrics_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		_ = tx.Rollback()
 		a.logRequestWriterError(err)
 		return
 	}
 	for _, entry := range batch {
-		if _, err = stmt.Exec(entry.projectID, entry.operationName, entry.operationType, entry.status, entry.durationMS, entry.errorMessage, entry.createdAt, entry.operationHash, entry.apiRelease, entry.responseBytes, entry.rowCount, entry.resolverCount, entry.sourceTimings, entry.errorCodes, entry.authorizationScope, entry.requestID, entry.environment, entry.allErrors, entry.timings); err != nil {
+		if _, err = stmt.Exec(entry.projectID, entry.operationName, entry.operationType, entry.status, entry.durationMS, entry.errorMessage, entry.createdAt, entry.operationHash, entry.apiRelease, entry.responseBytes, entry.rowCount, entry.resolverCount, entry.sourceTimings, entry.errorCodes, entry.authorizationScope, entry.requestID, entry.environment, entry.allErrors, entry.timings, entry.runtimeMetrics); err != nil {
 			break
 		}
 	}

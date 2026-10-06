@@ -120,6 +120,15 @@ func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusOK
 	if executeErr != nil {
 		status = http.StatusBadRequest
+		if errorCode(executeErr) == "queue_full" || errorCode(executeErr) == "coalescing_limit" {
+			status = http.StatusTooManyRequests
+		}
+		if errorCode(executeErr) == "queue_timeout" || errorCode(executeErr) == "execution_timeout" {
+			status = http.StatusGatewayTimeout
+		}
+		if errorCode(executeErr) == "execution_cancelled" {
+			status = http.StatusRequestTimeout
+		}
 		if errorCode(executeErr) == "unauthenticated" {
 			status = http.StatusUnauthorized
 		}
@@ -154,6 +163,9 @@ func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	if len(result.Errors) > 0 {
 		response["errors"] = result.Errors
 	}
+	if len(result.Extensions) > 0 {
+		response["extensions"] = result.Extensions
+	}
 	encoded, _ := json.Marshal(response)
 	limits := defaultReleaseLimits()
 	if release, _ := a.cachedActiveRelease(project, api.Slug, environment); release != nil {
@@ -176,6 +188,8 @@ func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	telemetry.phases["plan"] = milliseconds(result.Timings.Plan)
 	telemetry.phases["source"] = milliseconds(result.Timings.Source)
 	telemetry.phases["execute"] = milliseconds(result.Timings.Execute)
+	telemetry.phases["queue"] = result.Runtime.QueueMS
+	telemetry.phases["snapshot"] = result.Runtime.SnapshotMS
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(append(encoded, '\n'))
@@ -718,6 +732,7 @@ func makeRequestLog(project, apiSlug string, result executeResult, requestID str
 			}
 		}
 	}
+	runtimeMetrics, _ := json.Marshal(result.Runtime)
 	timings, _ := json.Marshal(result.SourceTimings)
 	allErrors, _ := json.Marshal(result.Errors)
 	if result.Errors == nil {
@@ -732,7 +747,7 @@ func makeRequestLog(project, apiSlug string, result executeResult, requestID str
 		durationMS:    duration.Milliseconds(),
 		errorMessage:  message,
 		createdAt:     nowUTC(),
-		operationHash: result.OperationHash, apiRelease: result.Release, responseBytes: responseBytes, rowCount: result.Rows, resolverCount: result.Resolvers, sourceTimings: string(timings), errorCodes: string(encodedCodes), authorizationScope: result.AuthScope, requestID: requestID, allErrors: string(allErrors), timings: "{}",
+		operationHash: result.OperationHash, apiRelease: result.Release, responseBytes: responseBytes, rowCount: result.Rows, resolverCount: result.Resolvers, sourceTimings: string(timings), errorCodes: string(encodedCodes), authorizationScope: result.AuthScope, requestID: requestID, allErrors: string(allErrors), timings: "{}", runtimeMetrics: string(runtimeMetrics),
 	}
 }
 

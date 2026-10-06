@@ -27,3 +27,11 @@ test("all-time does not send hidden custom dates; custom bounds use UTC", () => 
   expect(query.get("since")).toBe("2026-10-06T12:00:00.000Z");
   expect(query.get("until")).toBe("2026-10-06T14:00:00.000Z");
 });
+
+test("runtime filters retain false sharing values and queue/backend sorts", () => {
+  const query = telemetryQuery({ range: "all", coalesced: "false", min_queue_ms: "10", min_backend_reads: "2", sort_by: "queue_ms" }, 1000);
+  expect(query.get("coalesced")).toBe("false");
+  expect(query.get("min_queue_ms")).toBe("10");
+  expect(query.get("min_backend_reads")).toBe("2");
+  expect(query.get("sort_by")).toBe("queue_ms");
+});

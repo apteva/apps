@@ -39,15 +39,16 @@ type identityRowFilter struct {
 	ValueType string `json:"value_type,omitempty"`
 }
 type requestIdentity struct {
-	Subject     string
-	Issuer      string
-	Project     string
-	API         string
-	Tenant      string
-	Claims      map[string]any
-	Permissions []string
-	Expires     time.Time
-	RequestID   string
+	Subject              string
+	Issuer               string
+	Project              string
+	API                  string
+	Tenant               string
+	Claims               map[string]any
+	Permissions          []string
+	Expires              time.Time
+	AuthorizationVersion any
+	RequestID            string
 }
 type identityKey struct{}
 
@@ -334,6 +335,12 @@ func (a *App) authenticateGraphQL(r *http.Request, project, api string, p securi
 		return nil, unauthenticated()
 	}
 	identity := &requestIdentity{Subject: strconv.FormatInt(id, 10), Issuer: "apteva:auth:" + out.Org, Project: project, API: normalizeAPISlug(api), Tenant: out.Org, Claims: map[string]any{}, Expires: time.Unix(token.Exp, 0), RequestID: uuid.NewString()}
+	if version, ok := out.Authorization["authorization_version"]; ok {
+		if !safeIdentityValue(version) {
+			return nil, internal("invalid authorization version")
+		}
+		identity.AuthorizationVersion = version
+	}
 	for _, name := range p.Claims {
 		if value, ok := out.Authorization[name]; ok {
 			if !safeIdentityValue(value) {
@@ -564,9 +571,7 @@ func (a *App) handlePublicGraphQL(w http.ResponseWriter, r *http.Request) {
 		writeGraphQLError(w, 403, forbidden("user-authenticated API is not enabled"))
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-	defer cancel()
-	r = r.WithContext(ctx)
+	ctx := r.Context()
 	authStart := time.Now()
 	requestTelemetryFrom(r).environment = p.Environment
 	identity, err := a.authenticateGraphQL(r, project, slug, p)

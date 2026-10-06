@@ -12,18 +12,26 @@ import (
 )
 
 type releaseLimits struct {
-	MaxCost            int `json:"max_cost"`
-	MaxDepth           int `json:"max_depth"`
-	MaxRows            int `json:"max_rows"`
-	MaxNestedResolvers int `json:"max_nested_resolvers"`
-	MaxResponseBytes   int `json:"max_response_bytes"`
-	MaxExecutionMS     int `json:"max_execution_ms"`
-	MaxParallelism     int `json:"max_parallelism"`
-	DefaultListSize    int `json:"default_list_size"`
+	MaxCost                 int    `json:"max_cost"`
+	MaxDepth                int    `json:"max_depth"`
+	MaxRows                 int    `json:"max_rows"`
+	MaxNestedResolvers      int    `json:"max_nested_resolvers"`
+	MaxResponseBytes        int    `json:"max_response_bytes"`
+	MaxExecutionMS          int    `json:"max_execution_ms"`
+	MaxParallelism          int    `json:"max_parallelism"`
+	DefaultListSize         int    `json:"default_list_size"`
+	MaxConcurrentRequests   int    `json:"max_concurrent_requests"`
+	MaxConcurrentOperations int    `json:"max_concurrent_operations"`
+	MaxQueuedOperations     int    `json:"max_queued_operations"`
+	MaxQueueMS              int    `json:"max_queue_ms"`
+	MaxCoalescedWaiters     int    `json:"max_coalesced_waiters"`
+	CoalesceReads           bool   `json:"coalesce_reads"`
+	ReadConsistency         string `json:"read_consistency"`
+	MaxSnapshotMS           int    `json:"max_snapshot_ms"`
 }
 
 func defaultReleaseLimits() releaseLimits {
-	return releaseLimits{MaxCost: 100000, MaxDepth: 12, MaxRows: 10000, MaxNestedResolvers: 2000, MaxResponseBytes: 4 << 20, MaxExecutionMS: 15000, MaxParallelism: 8, DefaultListSize: 100}
+	return releaseLimits{MaxCost: 100000, MaxDepth: 12, MaxRows: 10000, MaxNestedResolvers: 2000, MaxResponseBytes: 4 << 20, MaxExecutionMS: 15000, MaxParallelism: 8, DefaultListSize: 100, MaxConcurrentRequests: 128, MaxConcurrentOperations: 32, MaxQueuedOperations: 128, MaxQueueMS: 1000, MaxCoalescedWaiters: 128, ReadConsistency: "none", MaxSnapshotMS: 15000}
 }
 
 func parseReleaseLimits(raw any) (releaseLimits, error) {
@@ -42,8 +50,18 @@ func parseReleaseLimits(raw any) (releaseLimits, error) {
 	if limits.MaxCost < 1 || limits.MaxCost > 1_000_000_000 || limits.MaxDepth < 1 || limits.MaxDepth > 64 ||
 		limits.MaxRows < 1 || limits.MaxRows > 10_000_000 || limits.MaxNestedResolvers < 1 || limits.MaxNestedResolvers > 1_000_000 ||
 		limits.MaxResponseBytes < 1024 || limits.MaxResponseBytes > 64<<20 || limits.MaxExecutionMS < 10 || limits.MaxExecutionMS > 300_000 ||
-		limits.MaxParallelism < 1 || limits.MaxParallelism > 64 || limits.DefaultListSize < 1 || limits.DefaultListSize > 10000 {
+		limits.MaxParallelism < 1 || limits.MaxParallelism > 64 || limits.DefaultListSize < 1 || limits.DefaultListSize > 10000 ||
+		limits.MaxConcurrentRequests < 1 || limits.MaxConcurrentRequests > 4096 ||
+		limits.MaxConcurrentOperations < 1 || limits.MaxConcurrentOperations > 1024 ||
+		limits.MaxQueuedOperations < 0 || limits.MaxQueuedOperations > 10000 ||
+		limits.MaxQueueMS < 1 || limits.MaxQueueMS > 300000 ||
+		limits.MaxCoalescedWaiters < 1 || limits.MaxCoalescedWaiters > 10000 ||
+		limits.MaxSnapshotMS < 1 || limits.MaxSnapshotMS > 300000 {
+
 		return limits, invalid("release limits are outside supported bounds")
+	}
+	if limits.ReadConsistency != "none" && limits.ReadConsistency != "batch" && limits.ReadConsistency != "request" {
+		return limits, invalid("read_consistency must be none, batch, or request")
 	}
 	return limits, nil
 }
@@ -156,6 +174,11 @@ func validateReleaseSnapshot(schemaRow *schemaRecord, sources []sourceRecord, re
 		source, ok := sourceByID[resolver.SourceID]
 		if !ok || source.Status != "active" {
 			return invalid("resolver %s.%s references an unavailable source", resolver.ParentType, resolver.FieldName)
+		}
+		if source.Kind == "upstream" {
+			if err := validateUpstreamSource(source.Config); err != nil {
+				return err
+			}
 		}
 		if source.Kind == "module" {
 			name, _ := source.Config["module"].(string)
@@ -330,4 +353,29 @@ func releaseDeadline(parent time.Time, limits releaseLimits) time.Time {
 
 func releaseRuntimeKey(project, api, environment string, release int64) string {
 	return fmt.Sprintf("%s\x00%s\x00%s\x00%d", project, normalizeAPISlug(api), normalizeEnvironment(environment), release)
+}
+
+// Releases created before 0.8 retain their original limits and gain bounded
+// admission defaults. Snapshot consistency and sharing remain opt-in.
+func runtimeLimits(l releaseLimits) releaseLimits {
+	if l.MaxConcurrentRequests == 0 {
+		l.MaxConcurrentRequests = 128
+	}
+	if l.MaxConcurrentOperations == 0 {
+		l.MaxConcurrentOperations = 32
+		l.MaxQueuedOperations = 128
+	}
+	if l.MaxQueueMS == 0 {
+		l.MaxQueueMS = 1000
+	}
+	if l.MaxCoalescedWaiters == 0 {
+		l.MaxCoalescedWaiters = 128
+	}
+	if l.ReadConsistency == "" {
+		l.ReadConsistency = "none"
+	}
+	if l.MaxSnapshotMS == 0 {
+		l.MaxSnapshotMS = 15000
+	}
+	return l
 }

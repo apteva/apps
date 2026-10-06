@@ -41,6 +41,8 @@ type executeResult struct {
 	Resolvers     int
 	SourceTimings map[string]float64
 	AuthScope     string
+	Extensions    map[string]any
+	Runtime       runtimeMetrics
 }
 
 type executionTimings struct {
@@ -58,6 +60,7 @@ type preparedOperation struct {
 	fields           int
 	depth            int
 	permissionFields []string
+	canonical        string
 }
 
 const compiledCacheLimit = 256
@@ -129,6 +132,7 @@ func (a *App) prepareOperation(key, query, operationName string, schema *ast.Sch
 	fields, depth := queryCost(op.SelectionSet, 0)
 	prepared = &preparedOperation{
 		doc:              doc,
+		canonical:        canonicalDocument(doc),
 		op:               op,
 		fields:           fields,
 		depth:            depth,
@@ -155,7 +159,7 @@ func (a *App) execute(ctx context.Context, project, apiSlug, environment string,
 	var bindings *executionBindings
 	if release != nil {
 		policy = release.Security
-		limits = release.Limits
+		limits = runtimeLimits(release.Limits)
 		schemaRow = &schemaRecord{Version: release.SchemaVersion, Hash: release.SchemaHash, SDL: release.SchemaSDL, Status: "published"}
 		bindings = a.bindingsFromRelease(release)
 	} else {
@@ -206,6 +210,12 @@ func (a *App) execute(ctx context.Context, project, apiSlug, environment string,
 	if ctx.Value(requestMethodKey{}) == http.MethodGet && op.Operation != ast.Query {
 		return resultBase, &graphqlError{Code: "method_not_allowed", Message: "GET supports query operations only"}
 	}
+	coerced, inputErr := coerceVariables(schema, op, req.Variables)
+	if inputErr != nil {
+		resultBase.Errors = []map[string]any{{"message": inputErr.Error(), "extensions": map[string]any{"code": "invalid_variables"}}}
+		return resultBase, nil
+	}
+	req.Variables = coerced
 	cost, estimatedRows, estimatedResolvers := cardinalityCost(op.SelectionSet, req.Variables, limits.DefaultListSize)
 	if cost > limits.MaxCost {
 		return resultBase, &graphqlError{Code: "query_cost_exceeded", Message: fmt.Sprintf("query cost %d exceeds limit %d", cost, limits.MaxCost)}
@@ -231,25 +241,55 @@ func (a *App) execute(ctx context.Context, project, apiSlug, environment string,
 		}
 	}
 	timings.Plan = time.Since(planStart)
-	deadline := releaseDeadline(deadlineFromContext(ctx), limits)
-	ctx, cancel := context.WithDeadline(ctx, deadline)
-	defer cancel()
 	ctx = context.WithValue(ctx, executionBindingsKey{}, bindings)
 	ctx = context.WithValue(ctx, executionLimitsKey{}, limits)
-	executeStart := time.Now()
-	result, err := a.executeStandard(ctx, project, apiSlug, schemaKey, schema, req, op, prepared.doc, policy)
-	timings.Execute = time.Since(executeStart)
+	canonical := prepared.canonical
+	operationKey := runtimeDigest([]any{project, apiSlug, normalizeEnvironment(environment), canonical, op.Name})
+	run := func(runCtx context.Context) (executeResult, error) {
+		started := time.Now()
+		leave, queueErr := a.runtime.admit(runCtx, apiRuntimeKey(project, apiSlug)+"\x00"+normalizeEnvironment(environment), operationKey, limits)
+		queueMS := milliseconds(time.Since(started))
+		if queueErr != nil {
+			out := resultBase
+			out.Runtime.QueueMS = queueMS
+			return out, queueErr
+		}
+		defer leave()
+		deadline := releaseDeadline(deadlineFromContext(runCtx), limits)
+		execCtx, cancel := context.WithDeadline(runCtx, deadline)
+		defer cancel()
+		executeStart := time.Now()
+		out, execErr := a.executeStandard(execCtx, project, apiSlug, schemaKey, schema, req, op, prepared.doc, policy)
+		out.Timings.Execute = time.Since(executeStart)
+		out.Runtime.QueueMS = queueMS
+		if executionDeadlineExceeded(execCtx, deadline) {
+			execErr = &graphqlError{Code: "execution_timeout", Message: "GraphQL execution exceeded its release deadline"}
+		}
+		if execCtx.Err() == context.Canceled {
+			execErr = &graphqlError{Code: "execution_cancelled", Message: "GraphQL execution cancelled"}
+		}
+		return out, execErr
+	}
+	var result executeResult
+	if limits.CoalesceReads && release != nil && pureReadOperation(prepared, bindings, schema) {
+		key, keyErr := coalescingKey(ctx, project, apiSlug, environment, release, canonical, op.Name, req.Variables)
+		if keyErr != nil {
+			return resultBase, keyErr
+		}
+		result, err = a.runtime.share(ctx, key, limits, run)
+		remapErrorLocations(result.Errors, op.SelectionSet)
+	} else {
+		result, err = run(ctx)
+	}
+	timings.Execute = result.Timings.Execute
 	timings.Source = result.Timings.Source
 	timings.Fast = result.Timings.Fast
 	result.Timings = timings
 	result.OperationName = resultBase.OperationName
 	result.OperationType = resultBase.OperationType
 	result.Release = resultBase.Release
-	result.OperationHash = resultBase.OperationHash
+	result.OperationHash = runtimeDigest([]any{canonical, op.Name})
 	result.AuthScope = resultBase.AuthScope
-	if executionDeadlineExceeded(ctx, deadline) {
-		return result, &graphqlError{Code: "execution_timeout", Message: "GraphQL execution exceeded its release deadline"}
-	}
 	return result, err
 }
 
@@ -859,7 +899,7 @@ func (a *App) callDatabase(ctx context.Context, operation string, config map[str
 		tool = "db_aggregate"
 	}
 	var out any
-	if err := a.ctx.WithProject(config["_project_id"].(string)).PlatformAPI().CallAppResult("database", tool, input, &out); err != nil {
+	if err := sdk.CallAppResultContext(ctx, a.ctx.WithProject(config["_project_id"].(string)).PlatformAPI(), "database", tool, input, &out); err != nil {
 		return nil, err
 	}
 	return unwrapSourceResult(operation, out), nil
@@ -966,7 +1006,7 @@ func (a *App) callFunction(ctx context.Context, config map[string]any, args map[
 		Response string `json:"response"`
 		Error    string `json:"error"`
 	}
-	if err := a.ctx.WithProject(config["_project_id"].(string)).PlatformAPI().CallAppResult("functions", "functions_invoke", map[string]any{"name": name, "event": event, "_project_id": config["_project_id"]}, &out); err != nil {
+	if err := sdk.CallAppResultContext(ctx, a.ctx.WithProject(config["_project_id"].(string)).PlatformAPI(), "functions", "functions_invoke", map[string]any{"name": name, "event": event, "_project_id": config["_project_id"]}, &out); err != nil {
 		return nil, err
 	}
 	if out.Status != "" && out.Status != "ok" {

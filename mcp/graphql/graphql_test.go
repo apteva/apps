@@ -52,7 +52,7 @@ func testDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec(string(migration)); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"006_log_filter_indexes.sql", "007_telemetry_details.sql"} {
+	for _, name := range []string{"006_log_filter_indexes.sql", "007_telemetry_details.sql", "008_runtime_metrics.sql"} {
 		migration, err := os.ReadFile("migrations/" + name)
 		if err != nil {
 			t.Fatal(err)

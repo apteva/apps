@@ -14,6 +14,7 @@ import (
 // collects fields. Its deferred resolvers preserve standard completion/errors
 // while coalescing sibling reads, including relationships across list items.
 type resolverJob struct {
+	source          *sourceRecord
 	tool, operation string
 	input           map[string]any
 	call            func() (any, error)
@@ -43,6 +44,11 @@ func (l *resolverLoader) enqueue(j *resolverJob, key string) func() (any, error)
 	l.mu.Lock()
 	if old := l.cache[key]; key != "" && old != nil {
 		j = old
+		if state, ok := l.ctx.Value(standardRequestKey{}).(*standardRequest); ok {
+			state.timingMu.Lock()
+			state.metrics.LoaderHits++
+			state.timingMu.Unlock()
+		}
 	} else {
 		j.done = make(chan struct{})
 		l.count++
@@ -68,6 +74,9 @@ func (l *resolverLoader) enqueue(j *resolverJob, key string) func() (any, error)
 			if j.err != nil {
 				return nil, resolverError{j.err}
 			}
+			if j.source != nil {
+				return j.value, nil
+			}
 			return unwrapSourceResult(j.operation, j.value), nil
 		case <-l.ctx.Done():
 			return nil, l.ctx.Err()
@@ -89,6 +98,12 @@ func (l *resolverLoader) flush() {
 	if len(jobs) == 0 {
 		return
 	}
+	tablesOnly := true
+	for _, j := range jobs {
+		if j.source != nil || j.call != nil {
+			tablesOnly = false
+		}
+	}
 	sourceStart := time.Now()
 	defer func() {
 		if state, ok := l.ctx.Value(standardRequestKey{}).(*standardRequest); ok {
@@ -96,10 +111,26 @@ func (l *resolverLoader) flush() {
 			duration := time.Since(sourceStart)
 			state.sourceDuration += duration
 			state.timingMu.Unlock()
-			state.tablesNanos.Add(duration.Nanoseconds())
+			if tablesOnly {
+				state.tablesNanos.Add(duration.Nanoseconds())
+			}
 		}
 	}()
-	fusions := fuseCountAggregates(jobs)
+	jobs = l.bulkRecordJobs(jobs)
+	var fusions []countAggregateFusion
+	if l.consistency() == "none" {
+		fusions = fuseCountAggregates(jobs)
+	}
+	upstreamGroups := map[int64][]*resolverJob{}
+	tablesJobs := []*resolverJob{}
+	for _, j := range jobs {
+		if j.source != nil {
+			upstreamGroups[j.source.ID] = append(upstreamGroups[j.source.ID], j)
+		} else {
+			tablesJobs = append(tablesJobs, j)
+		}
+	}
+	jobs = tablesJobs
 	var small, singles []*resolverJob
 	for _, j := range jobs {
 		limit := 100
@@ -113,20 +144,29 @@ func (l *resolverLoader) flush() {
 				limit = int(v)
 			}
 		}
-		if j.call == nil && limit > 0 && limit <= 100 {
+		if j.call == nil && (l.consistency() == "batch" || limit > 0 && limit <= 100) {
 			small = append(small, j)
 		} else {
 			singles = append(singles, j)
 		}
 	}
 	var tasks []func()
+	for _, group := range upstreamGroups {
+		for len(group) > 0 {
+			n := min(100, len(group))
+			chunk := group[:n]
+			group = group[n:]
+			tasks = append(tasks, func() { l.upstreamBatch(chunk) })
+		}
+	}
+
 	// Small chunks keep the Tables batch envelope bounded. Large reads stay
 	// independent so their transport/decode can run concurrently.
 	for len(small) > 0 {
 		n := min(5, len(small))
 		group := small[:n]
 		small = small[n:]
-		if n == 1 {
+		if n == 1 && l.consistency() == "none" {
 			singles = append(singles, group[0])
 			continue
 		}
@@ -148,7 +188,9 @@ func (l *resolverLoader) flush() {
 				j.value, j.err = j.call()
 				return
 			}
+			l.backendMetrics(1, 1)
 			j.err = sdk.CallAppResultContext(l.ctx, l.app.ctx.WithProject(l.project).PlatformAPI(), "tables", j.tool, j.input, &j.value)
+			l.tablesMetadata(j.value)
 		})
 	}
 	parallelism := 8
@@ -158,7 +200,12 @@ func (l *resolverLoader) flush() {
 	sem := make(chan struct{}, parallelism)
 	var wg sync.WaitGroup
 	for _, task := range tasks {
-		sem <- struct{}{}
+		select {
+		case sem <- struct{}{}:
+		case <-l.ctx.Done():
+			task()
+			continue
+		}
 		wg.Add(1)
 		go func() { defer wg.Done(); defer func() { <-sem }(); task() }()
 	}
@@ -296,10 +343,19 @@ func (f countAggregateFusion) finish() {
 // compatibility fallback: query loaders contain reads only, so an outer
 // transport failure can be retried without duplicating mutations.
 func (l *resolverLoader) batch(jobs []*resolverJob) {
+	if l.consistency() == "batch" {
+		l.snapshotBatch(jobs)
+		return
+	}
 	if err := l.serverBatch(jobs); err == nil {
 		return
 	}
-	_ = l.tablesBatch(jobs)
+	if err := l.tablesBatch(jobs); err != nil {
+		for _, j := range jobs {
+			j.err = err
+			close(j.done)
+		}
+	}
 }
 
 func (l *resolverLoader) serverBatch(jobs []*resolverJob) (err error) {
@@ -315,6 +371,7 @@ func (l *resolverLoader) serverBatch(jobs []*resolverJob) (err error) {
 			err = fmt.Errorf("server app batch unavailable: %v", recovered)
 		}
 	}()
+	l.backendMetrics(len(jobs), len(jobs))
 	results, err := sdk.CallAppBatchContext(
 		l.ctx,
 		l.app.ctx.WithProject(l.project).PlatformAPI(),
@@ -339,6 +396,7 @@ func (l *resolverLoader) serverBatch(jobs []*resolverJob) (err error) {
 			job.err = fmt.Errorf("server app batch omitted operation op%d", i)
 		} else {
 			job.err = result.Decode(&job.value)
+			l.tablesMetadata(job.value)
 		}
 		close(job.done)
 	}
@@ -352,6 +410,7 @@ func (l *resolverLoader) tablesBatch(jobs []*resolverJob) (err error) {
 		}
 	}()
 	var out tablesBatchResult
+	l.backendMetrics(len(jobs), len(jobs))
 	err = sdk.CallAppResultContext(l.ctx, l.app.ctx.WithProject(l.project).PlatformAPI(), "tables", "tables_batch", l.tablesBatchInput(jobs), &out)
 	if err != nil {
 		return err
@@ -385,6 +444,7 @@ func (l *resolverLoader) completeTablesBatch(jobs []*resolverJob, out tablesBatc
 			j.err = fmt.Errorf("tables read failed: %v", entry.Error)
 		} else {
 			j.value = entry.Result
+			l.tablesMetadata(j.value)
 		}
 		close(j.done)
 	}

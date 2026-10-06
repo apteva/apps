@@ -18,6 +18,7 @@ var manifestYAML []byte
 // App is deliberately independent from the API gateway app. It owns the
 // GraphQL HTTP/WebSocket surface and calls source apps through PlatformAPI.
 type App struct {
+	runtime          executionRuntime
 	httpClient       *http.Client
 	hub              *subscriptionHub
 	ctx              *sdk.AppCtx
@@ -83,6 +84,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 }
 
 func (a *App) OnUnmount(*sdk.AppCtx) error {
+	a.runtime.stop()
 	if a.hub != nil {
 		a.hub.close()
 	}

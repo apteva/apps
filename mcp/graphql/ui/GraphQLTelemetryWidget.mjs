@@ -81,6 +81,102 @@ function FilterButton({ active, children, onClick }) {
     children
   });
 }
+function RuntimeDetails({ metrics }) {
+  const resolvers = Object.entries(metrics.resolver_timings || {}).sort((a, b) => b[1].total_ms - a[1].total_ms);
+  return /* @__PURE__ */ jsxs("div", {
+    className: "space-y-2",
+    children: [
+      /* @__PURE__ */ jsx("h3", {
+        className: "font-semibold",
+        children: "Runtime diagnostics"
+      }),
+      /* @__PURE__ */ jsx("div", {
+        className: "flex flex-wrap gap-2",
+        children: [["Queue", `${Number(metrics.queue_ms || 0).toFixed(1)} ms`], ["Execution", metrics.coalesced ? "Joined shared execution" : "Own execution"], ["Waiters", metrics.waiters || 1], ["Loader hits", metrics.loader_hits || 0], ["Backend calls", metrics.backend_calls || 0], ["Backend operations", metrics.backend_reads || 0], ["Snapshot acquisition", `${Number(metrics.snapshot_ms || 0).toFixed(1)} ms`], ["Consistency", metrics.consistency || "none"]].map(([name, value]) => /* @__PURE__ */ jsxs("span", {
+          className: "rounded border border-border px-2 py-1",
+          children: [
+            name,
+            ": ",
+            value
+          ]
+        }, String(name)))
+      }),
+      metrics.execution_id && /* @__PURE__ */ jsxs("p", {
+        className: "break-all text-text-dim",
+        children: [
+          "Shared execution ID: ",
+          metrics.execution_id
+        ]
+      }),
+      metrics.batch_sizes?.length > 0 && /* @__PURE__ */ jsxs("p", {
+        className: "text-text-dim",
+        children: [
+          "Batch sizes: ",
+          metrics.batch_sizes.join(", ")
+        ]
+      }),
+      resolvers.length > 0 && /* @__PURE__ */ jsx("div", {
+        className: "overflow-x-auto",
+        children: /* @__PURE__ */ jsxs("table", {
+          className: "w-full text-left",
+          children: [
+            /* @__PURE__ */ jsx("caption", {
+              className: "mb-1 text-left text-text-dim",
+              children: "Resolver completion time, including waits for source reads"
+            }),
+            /* @__PURE__ */ jsx("thead", {
+              children: /* @__PURE__ */ jsx("tr", {
+                children: ["Field", "Calls", "Total ms", "Max ms", "Errors"].map((label) => /* @__PURE__ */ jsx("th", {
+                  className: "px-2 py-1 font-normal text-text-dim",
+                  children: label
+                }, label))
+              })
+            }),
+            /* @__PURE__ */ jsx("tbody", {
+              children: resolvers.map(([field, raw]) => /* @__PURE__ */ jsxs("tr", {
+                className: "border-t border-border",
+                children: [
+                  /* @__PURE__ */ jsx("td", {
+                    className: "px-2 py-1 font-mono",
+                    children: field
+                  }),
+                  /* @__PURE__ */ jsx("td", {
+                    className: "px-2",
+                    children: raw.calls
+                  }),
+                  /* @__PURE__ */ jsx("td", {
+                    className: "px-2",
+                    children: Number(raw.total_ms).toFixed(1)
+                  }),
+                  /* @__PURE__ */ jsx("td", {
+                    className: "px-2",
+                    children: Number(raw.max_ms).toFixed(1)
+                  }),
+                  /* @__PURE__ */ jsx("td", {
+                    className: `px-2 ${raw.errors ? "text-red-300" : ""}`,
+                    children: raw.errors
+                  })
+                ]
+              }, field))
+            })
+          ]
+        })
+      }),
+      metrics.sources?.length > 0 && /* @__PURE__ */ jsxs("details", {
+        children: [
+          /* @__PURE__ */ jsx("summary", {
+            className: "cursor-pointer text-text-dim",
+            children: "Source freshness and coverage"
+          }),
+          /* @__PURE__ */ jsx("pre", {
+            className: "mt-2 overflow-auto whitespace-pre-wrap break-words",
+            children: JSON.stringify(metrics.sources, null, 2)
+          })
+        ]
+      })
+    ]
+  });
+}
 function Details({ log }) {
   const errors = log.errors?.length ? log.errors : log.error ? [{ message: log.error }] : [];
   const [copied, setCopied] = useState(false);
@@ -147,6 +243,9 @@ function Details({ log }) {
           "Sources: ",
           Object.entries(log.source_timings || {}).map(([name, ms]) => `${name} ${Number(ms).toFixed(1)} ms`).join(" · ") || "None recorded"
         ]
+      }),
+      log.runtime && Object.keys(log.runtime).length > 0 && /* @__PURE__ */ jsx(RuntimeDetails, {
+        metrics: log.runtime
       }),
       /* @__PURE__ */ jsx("button", {
         type: "button",
@@ -227,7 +326,7 @@ function LogsPanel(props) {
   }
   function quick(view) {
     const next = { ...active };
-    for (const key of ["has_errors", "min_duration_ms", "min_response_bytes", "error_code", "status_code"])
+    for (const key of ["has_errors", "min_duration_ms", "min_response_bytes", "error_code", "status_code", "min_queue_ms", "coalesced"])
       delete next[key];
     next.sort_order = "desc";
     next.sort_by = "created_at";
@@ -237,6 +336,12 @@ function LogsPanel(props) {
       next.min_duration_ms = String(slowMS);
       next.sort_by = "duration_ms";
     }
+    if (view === "queued") {
+      next.min_queue_ms = "1";
+      next.sort_by = "queue_ms";
+    }
+    if (view === "shared")
+      next.coalesced = "true";
     if (view === "large") {
       next.min_response_bytes = "1048576";
       next.sort_by = "response_bytes";
@@ -292,7 +397,7 @@ function LogsPanel(props) {
         className: "mb-3 flex flex-wrap gap-2",
         children: [
           /* @__PURE__ */ jsx(FilterButton, {
-            active: !active.has_errors && !active.min_duration_ms && !active.min_response_bytes,
+            active: !active.has_errors && !active.min_duration_ms && !active.min_response_bytes && !active.min_queue_ms && !active.coalesced,
             onClick: () => quick("all"),
             children: "All requests"
           }),
@@ -314,6 +419,16 @@ function LogsPanel(props) {
             active: !!active.min_response_bytes,
             onClick: () => quick("large"),
             children: "Large ≥ 1 MB"
+          }),
+          /* @__PURE__ */ jsx(FilterButton, {
+            active: !!active.min_queue_ms,
+            onClick: () => quick("queued"),
+            children: "Queued"
+          }),
+          /* @__PURE__ */ jsx(FilterButton, {
+            active: active.coalesced === "true",
+            onClick: () => quick("shared"),
+            children: "Shared executions"
           })
         ]
       }),
@@ -376,7 +491,7 @@ function LogsPanel(props) {
                   className: input,
                   value: draft.sort_by,
                   onChange: (e) => setField("sort_by", e.target.value),
-                  children: [["created_at", "Time"], ["duration_ms", "Duration"], ["response_bytes", "Response size"], ["row_count", "Rows"], ["resolver_count", "Resolvers"], ["status_code", "Status"], ["operation_name", "Operation"]].map(([value, label]) => /* @__PURE__ */ jsx("option", {
+                  children: [["created_at", "Time"], ["duration_ms", "Duration"], ["response_bytes", "Response size"], ["row_count", "Rows"], ["resolver_count", "Resolvers"], ["status_code", "Status"], ["queue_ms", "Queue wait"], ["backend_reads", "Backend operations"], ["operation_name", "Operation"]].map(([value, label]) => /* @__PURE__ */ jsx("option", {
                     value,
                     children: label
                   }, value))
@@ -479,12 +594,34 @@ function LogsPanel(props) {
                       }, value))
                     })
                   }),
-                  [["min_duration_ms", "Min duration (ms)"], ["max_duration_ms", "Max duration (ms)"], ["min_response_bytes", "Min response (bytes)"], ["max_response_bytes", "Max response (bytes)"], ["min_rows", "Min rows"], ["max_rows", "Max rows"], ["min_resolvers", "Min resolvers"], ["max_resolvers", "Max resolvers"]].map(([name, label]) => /* @__PURE__ */ jsx(NumberFilter, {
+                  [["min_duration_ms", "Min duration (ms)"], ["max_duration_ms", "Max duration (ms)"], ["min_response_bytes", "Min response (bytes)"], ["max_response_bytes", "Max response (bytes)"], ["min_rows", "Min rows"], ["max_rows", "Max rows"], ["min_resolvers", "Min resolvers"], ["max_resolvers", "Max resolvers"], ["min_queue_ms", "Min queue wait (ms)"], ["min_backend_reads", "Min backend operations"]].map(([name, label]) => /* @__PURE__ */ jsx(NumberFilter, {
                     name,
                     label,
                     draft,
                     setField
                   }, name)),
+                  /* @__PURE__ */ jsx(Field, {
+                    label: "Execution sharing",
+                    children: /* @__PURE__ */ jsxs("select", {
+                      className: input,
+                      value: draft.coalesced || "",
+                      onChange: (e) => setField("coalesced", e.target.value),
+                      children: [
+                        /* @__PURE__ */ jsx("option", {
+                          value: "",
+                          children: "All executions"
+                        }),
+                        /* @__PURE__ */ jsx("option", {
+                          value: "true",
+                          children: "Joined shared execution"
+                        }),
+                        /* @__PURE__ */ jsx("option", {
+                          value: "false",
+                          children: "Own execution"
+                        })
+                      ]
+                    })
+                  }),
                   /* @__PURE__ */ jsx(Field, {
                     label: "Order",
                     children: /* @__PURE__ */ jsxs("select", {
@@ -546,8 +683,8 @@ function LogsPanel(props) {
         ]
       }),
       summary && /* @__PURE__ */ jsx("div", {
-        className: `mb-3 grid gap-2 ${props.compact ? "grid-cols-3" : "grid-cols-2 md:grid-cols-6"}`,
-        children: [["Matching requests", count.toLocaleString()], ["Errors", `${summary.errors}${count ? ` · ${(summary.errors * 100 / count).toFixed(1)}%` : ""}`], ["Slow requests", summary.slow], ["Average", `${Number(summary.avg_duration_ms).toFixed(1)} ms`], ["Slowest", `${summary.max_duration_ms} ms`], ["Response bytes", formatBytes(summary.response_bytes)]].map(([label, value]) => /* @__PURE__ */ jsxs("div", {
+        className: `mb-3 grid gap-2 ${props.compact ? "grid-cols-3" : "grid-cols-2 md:grid-cols-4"}`,
+        children: [["Matching requests", count.toLocaleString()], ["Errors", `${summary.errors}${count ? ` · ${(summary.errors * 100 / count).toFixed(1)}%` : ""}`], ["Slow requests", summary.slow], ["Average", `${Number(summary.avg_duration_ms).toFixed(1)} ms`], ["Slowest", `${summary.max_duration_ms} ms`], ["Response bytes", formatBytes(summary.response_bytes)], ["Avg queue wait", `${Number(summary.avg_queue_ms || 0).toFixed(1)} ms`], ["Shared callers", summary.coalesced || 0]].map(([label, value]) => /* @__PURE__ */ jsxs("div", {
           className: "rounded border border-border p-2",
           children: [
             /* @__PURE__ */ jsx("p", {
