@@ -94,10 +94,13 @@ func TestProjectionMixedWorkloadKeepsReadsAndInvalidationsBounded(t *testing.T) 
 				return
 			default:
 			}
-			_ = a.projectionWorker(workerCtx, ctx)
+			// Stop between iterations: canceling an in-flight refresh can
+			// legitimately leave its durable lease until recovery/expiry.
+			_ = a.projectionWorker(context.Background(), ctx)
 			time.Sleep(3 * time.Millisecond)
 		}
 	}()
+	t.Cleanup(func() { stopWorker(); workerWG.Wait() })
 	for i := 0; i < 200; i++ {
 		if _, err := callTool(a, ctx, "rows_insert", map[string]any{"table": "events", "rows": []any{map[string]any{"centre_id": fmt.Sprintf("centre-%d", i%4), "value": i}}}); err != nil {
 			t.Fatal(err)
@@ -110,12 +113,13 @@ func TestProjectionMixedWorkloadKeepsReadsAndInvalidationsBounded(t *testing.T) 
 	for err := range readErrs {
 		t.Fatal(err)
 	}
-	for i := 0; i < 100; i++ {
+	drainDeadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(drainDeadline) {
 		if err := a.projectionWorker(context.Background(), ctx); err != nil {
 			t.Fatal(err)
 		}
 		var pending int
-		if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM projection_queue WHERE projection_id=(SELECT id FROM projection_definitions WHERE name='mixed_stats') AND (claimed_until IS NULL OR claimed_until<=CURRENT_TIMESTAMP)`).Scan(&pending); err != nil {
+		if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM projection_queue WHERE projection_id=(SELECT id FROM projection_definitions WHERE name='mixed_stats')`).Scan(&pending); err != nil {
 			t.Fatal(err)
 		}
 		if pending == 0 {
@@ -140,6 +144,11 @@ func TestProjectionMixedWorkloadKeepsReadsAndInvalidationsBounded(t *testing.T) 
 	rows := mustCall(t, a, ctx, "tables_query", map[string]any{"sql": "SELECT centre_id,total FROM {mixed_stats}"})["rows"].([]map[string]any)
 	if len(rows) != 4 {
 		t.Fatalf("mixed projection rows=%d, want four affected scopes", len(rows))
+	}
+	for _, row := range rows {
+		if row["total"] != float64(275) {
+			t.Fatalf("mixed projection lost source changes: %+v, want 275 per centre", row)
+		}
 	}
 }
 

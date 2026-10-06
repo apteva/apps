@@ -273,7 +273,7 @@ export default function TablesDiagnosticsWidget({
             style={{
               gridTemplateColumns: compact
                 ? "repeat(2, minmax(0, 1fr))"
-                : "repeat(auto-fit, minmax(min(100%, 180px), 1fr))",
+                : "repeat(auto-fit, minmax(min(100%, 130px), 1fr))",
             }}
           >
             <Metric label="Recorded" value={String(data?.total ?? 0)} />

@@ -7,7 +7,8 @@
   SSE invalidations after diagnostics are saved. Coalesce bursts, retain a
   follow-up refresh during requests, and reconcile after reconnect/focus.
 - Abort obsolete requests and retry failed fetches with bounded backoff.
-- Establish a verified baseline before testing projection refresh deadlines.
+- Establish a verified baseline before testing projection refresh deadlines;
+  stop the mixed-workload worker gracefully and assert every aggregate count.
 
 # Tables v0.2.9 — compact diagnostics layout
 
