@@ -18,6 +18,9 @@ test("Calls panel uses shared controller and preserves a call across navigation"
   await expect.poll(async () => (await page.request.get(process.env.TELEPHONY_TEST_GATEWAY + "/fixture/audio-ready")).json()).toEqual({ ready: true });
   await controls.getByRole("button", { name: "Mute", exact: true }).click();
   await expect(controls.getByRole("button", { name: "Unmute" })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "Audio health", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Audio health", exact: true })).toBeVisible();
+  await expect(controls).toContainText("Audio connected");
   await page.getByRole("button", { name: "Numbers", exact: true }).click();
   await expect(controls).toContainText("Audio connected");
   await controls.getByRole("button", { name: "Keypad", exact: true }).click();

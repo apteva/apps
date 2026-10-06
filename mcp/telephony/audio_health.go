@@ -461,6 +461,9 @@ func (a *App) sampleAudioHealth(row *callRow, h *softphoneHub, w *websocketWrite
 				topic = "telephony.audio.alert_recovered"
 			}
 			ctx.Logger().Warn("correlated audio health", "stage", alert.Stage, "state", alert.State, "calls", alert.CallCount)
+			if err := a.db().saveAudioDashboardAlert(*alert); err != nil {
+				ctx.Logger().Warn("audio alert history write failed", "error", err)
+			}
 			ctx.Emit(topic, alert)
 		}
 	}
@@ -487,11 +490,14 @@ func (a *audioAlertCorrelator) expire(now time.Time) []audioAlert {
 	}
 	return out
 }
-func (a *App) runAudioTelemetryTick(_ context.Context, ctx *sdk.AppCtx) error {
+func (a *App) runAudioTelemetryTick(c context.Context, ctx *sdk.AppCtx) error {
 	for _, alert := range a.audioAlerts.expire(time.Now()) {
+		if err := a.db().saveAudioDashboardAlert(alert); err != nil {
+			ctx.Logger().Warn("audio alert history write failed", "error", err)
+		}
 		ctx.WithProject(alert.ProjectID).Emit("telephony.audio.alert_recovered", alert)
 	}
-	return nil
+	return a.db().refreshAudioDashboard(c)
 }
 
 func audioBrowserCounters(v browserAudioDiagnostics) map[string]float64 {
