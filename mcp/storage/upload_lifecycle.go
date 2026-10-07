@@ -178,6 +178,11 @@ func reserveUpload(app *sdk.AppCtx, id, pid string, size, expires int64) error {
 	if size > maxBytes {
 		return fmt.Errorf("file exceeds pending-upload allowance (%d MiB); increase max_pending_upload_mb in Storage settings", maxBytes/(1024*1024))
 	}
+	// Repair committed reservations before admitting another upload, rather
+	// than leaving quota blocked until the next periodic sweep.
+	if err := reconcileUploadReservations(app); err != nil {
+		return err
+	}
 	// One SQLite statement makes admission atomic across all session protocols.
 	res, err := app.AppDB().Exec(`INSERT INTO upload_reservations(upload_id,project_id,size_bytes,expires_at)
  SELECT ?,?,?,? WHERE (SELECT count(*) FROM upload_reservations)< ? AND
@@ -195,5 +200,42 @@ func reserveUpload(app *sdk.AppCtx, id, pid string, size, expires int64) error {
 	return nil
 }
 func releaseUploadReservation(app *sdk.AppCtx, id string) {
-	_, _ = app.AppDB().Exec(`DELETE FROM upload_reservations WHERE upload_id=?`, id)
+	if _, err := app.AppDB().Exec(`DELETE FROM upload_reservations WHERE upload_id=?`, id); err != nil {
+		app.Logger().Warn("upload reservation release failed; scheduling repair", "upload_id", id, "error", err)
+		// Completion receipts also serve as durable repair intent if the DB is
+		// unavailable here. This queue covers abort and failed-init cleanup too.
+		if _, queueErr := app.AppDB().Exec(`INSERT OR IGNORE INTO upload_reservation_cleanup(upload_id) VALUES(?)`, id); queueErr != nil {
+			app.Logger().Warn("upload reservation repair scheduling failed", "upload_id", id, "error", queueErr)
+		}
+	}
+}
+
+// A completion receipt is authoritative even after its file was deleted.
+// Never infer completion merely from a matching file or checksum: genuine
+// unfinished uploads can share those bytes and must retain their quota.
+func reconcileUploadReservations(app *sdk.AppCtx) error {
+	tx, err := app.AppDB().Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// Iterate the bounded reservation set, using primary-key lookups, instead
+	// of scanning all completion history on every new upload.
+	res, err := tx.Exec(`DELETE FROM upload_reservations WHERE
+ EXISTS(SELECT 1 FROM completed_uploads c WHERE c.upload_id=upload_reservations.upload_id)
+ OR EXISTS(SELECT 1 FROM upload_reservation_cleanup q WHERE q.upload_id=upload_reservations.upload_id)`)
+	if err != nil {
+		return fmt.Errorf("reconcile upload reservations: %w", err)
+	}
+	if _, err = tx.Exec(`DELETE FROM upload_reservation_cleanup WHERE NOT EXISTS
+ (SELECT 1 FROM upload_reservations r WHERE r.upload_id=upload_reservation_cleanup.upload_id)`); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n > 0 {
+		app.Logger().Info("upload reservations repaired", "count", n)
+	}
+	return nil
 }

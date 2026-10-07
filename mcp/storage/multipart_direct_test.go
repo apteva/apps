@@ -104,8 +104,17 @@ func TestDirectMultipartCompletesWithoutMovingBytesAndRetriesIdempotently(t *tes
 	if w := completeUpload(t, app, id); w.Code != 200 {
 		t.Fatalf("complete %d %s", w.Code, w.Body)
 	}
+	if got := reservationBytes(t, ctx); got != 0 {
+		t.Fatalf("direct completion retains %d bytes", got)
+	}
+	if _, err := ctx.AppDB().Exec(`INSERT INTO upload_reservations(upload_id,project_id,size_bytes) VALUES(?,?,?)`, id, "test-proj", be.size); err != nil {
+		t.Fatal(err)
+	}
 	if w := completeUpload(t, app, id); w.Code != 200 {
 		t.Fatalf("retry %d %s", w.Code, w.Body)
+	}
+	if got := reservationBytes(t, ctx); got != 0 {
+		t.Fatalf("direct completion replay retains %d bytes", got)
 	}
 	if be.complete != 1 {
 		t.Fatal("completed twice")

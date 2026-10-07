@@ -180,6 +180,10 @@ func publishFile(c context.Context, app *sdk.AppCtx, pid string, in uploadInput,
 		if _, err = tx.Exec(`DELETE FROM pending_uploads WHERE upload_id=?`, uploadID); err != nil {
 			return nil, false, err
 		}
+		if _, err = tx.Exec(`DELETE FROM upload_reservations WHERE upload_id=?`, uploadID); err != nil {
+			app.Logger().Warn("completion reservation release failed; transaction rolled back", "upload_id", uploadID, "error", err)
+			return nil, false, err
+		}
 	}
 	if err = tx.Commit(); err != nil {
 		return nil, false, err
@@ -200,6 +204,10 @@ func recordCompletion(app *sdk.AppCtx, id, pid, folder string, fileID int64, exi
 	if _, err = tx.Exec(`DELETE FROM pending_uploads WHERE upload_id=?`, id); err != nil {
 		return err
 	}
+	if _, err = tx.Exec(`DELETE FROM upload_reservations WHERE upload_id=?`, id); err != nil {
+		app.Logger().Warn("completion reservation release failed; transaction rolled back", "upload_id", id, "error", err)
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -213,6 +221,10 @@ func completedUpload(app *sdk.AppCtx, id, pid string) (*File, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
+	// A replay must repair a previous cleanup failure even if scratch is gone.
+	// Keep returning the committed file if cleanup is temporarily unavailable;
+	// the receipt and repair queue retain intent for the next sweep/restart.
+	releaseUploadReservation(app, id)
 	f, err := dbGetByID(app.AppDB(), pid, fid)
 	if err == nil && f == nil {
 		err = errors.New("completed upload's file has been deleted")
@@ -250,6 +262,9 @@ func cleanupBlob(app *sdk.AppCtx, key string) bool {
 	return err == nil
 }
 func sweepBlobCleanup(app *sdk.AppCtx) {
+	if err := reconcileUploadReservations(app); err != nil {
+		app.Logger().Warn("upload reservation reconciliation failed; retrying next sweep", "error", err)
+	}
 	sweepScratchFiles(app)
 	_, _ = app.AppDB().Exec(`DELETE FROM upload_reservations WHERE expires_at>0 AND expires_at<?`, time.Now().Add(-time.Minute).Unix())
 	rows, err := app.AppDB().Query(`SELECT object_key FROM blob_cleanup WHERE not_before<=? LIMIT 100`, time.Now().Unix())
@@ -267,7 +282,7 @@ func sweepBlobCleanup(app *sdk.AppCtx) {
 	for _, key := range keys {
 		cleanupBlob(app, key)
 	}
-	_, _ = app.AppDB().Exec(`DELETE FROM completed_uploads WHERE completed_at<?`, time.Now().Add(-7*24*time.Hour).Unix())
+	pruneCompletedUploadReceipts(app)
 }
 
 func verifyBackendIdentity(app *sdk.AppCtx, be Backend) error {
