@@ -60,11 +60,14 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.91
+version: 0.7.93
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.91 shows live sessions
-  first, loads past sessions on demand in pages, and folds browser settings
-  away from the session list.
+  Watch, steer, and replay hosted browser sessions. v0.7.93 shows live sessions
+  first, loads past sessions on demand in pages, folds browser settings away
+  from the session list, and supports bounded rendered DOM responses up to 1 MB
+  for large structured crawls.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/computer
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
@@ -253,7 +256,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: computer/v0.7.93
     entry: mcp/computer
   port: 8080
   health_check: /health
@@ -278,7 +281,7 @@ const reapInterval = 5 * time.Minute
 const maxUploadBytes = 100 * 1024 * 1024
 const recordingProcessingWindow = 15 * time.Minute
 const internalAppCallerHeader = sdk.HeaderBoundCallerInstallID
-const maxExtractChars = 200000
+const maxExtractChars = 1000000
 const defaultExtractChars = 50000
 const maxExtractWaitMS = 10000
 
@@ -845,7 +848,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{
 				"session_id":  map[string]any{"type": "string"},
 				"formats":     map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"text", "markdown", "html", "metadata", "structured_data", "json", "links", "images", "regions"}}},
-				"max_chars":   map[string]any{"type": "integer", "description": "Maximum aggregate response characters. Default 50000; maximum 200000."},
+				"max_chars":   map[string]any{"type": "integer", "description": "Maximum aggregate response characters. Default 50000; maximum 1000000."},
 				"readability": map[string]any{"type": "boolean", "description": "Prefer the primary article/content region. Defaults true."},
 				"wait_ms":     map[string]any{"type": "integer", "description": "Optional wait before extraction for client-rendered pages; maximum 10000."},
 			}, []string{"session_id"}),

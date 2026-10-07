@@ -53,7 +53,7 @@ func TestAuditMembershipEventsAreIdempotent(t *testing.T) {
 func TestAuditFullMessageBody(t *testing.T) {
 	ctx := newTestCtx(t)
 	body := strings.Repeat("x", 4500) + " IMPORTANT FINAL INSTRUCTION"
-	result, err := ingestInbound(ctx, "test-proj", inboundPayload{Channel: "email", From: "long@example.test", MessageID: 901, MessageIDHeader: "<long>", BodyText: body})
+	result, err := ingestInbound(ctx, "test-proj", inboundPayload{MatchedRecipient: "inbox@example.test", Channel: "email", From: "long@example.test", MessageID: 901, MessageIDHeader: "<long>", BodyText: body})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestAuditReplyUsesThreadAddress(t *testing.T) {
 		map[string]any{"kind": "email", "value": "work@example.test", "is_primary": true},
 		map[string]any{"kind": "email", "value": "private@example.test"},
 	}})
-	in, err := ingestInbound(ctx, "test-proj", inboundPayload{Channel: "email", From: "private@example.test", To: []string{"support@example.test"}, MessageID: 900, MessageIDHeader: "<private-thread>", Subject: "Private", BodyText: "Hello"})
+	in, err := ingestInbound(ctx, "test-proj", inboundPayload{MatchedRecipient: "support@example.test", Channel: "email", From: "private@example.test", To: []string{"support@example.test"}, MessageID: 900, MessageIDHeader: "<private-thread>", Subject: "Private", BodyText: "Hello"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,11 +214,11 @@ func TestAuditReplyUsesThreadAddress(t *testing.T) {
 
 func TestAuditCrossContactThreadLink(t *testing.T) {
 	ctx := newTestCtx(t)
-	first, err := ingestInbound(ctx, "test-proj", inboundPayload{Channel: "email", From: "a@example.test", MessageID: 801, MessageIDHeader: "<thread-a>", BodyText: "A"})
+	first, err := ingestInbound(ctx, "test-proj", inboundPayload{MatchedRecipient: "inbox@example.test", Channel: "email", From: "a@example.test", MessageID: 801, MessageIDHeader: "<thread-a>", BodyText: "A"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := ingestInbound(ctx, "test-proj", inboundPayload{Channel: "email", From: "b@example.test", MessageID: 802, MessageIDHeader: "<thread-b>", InReplyTo: "<thread-a>", BodyText: "B"})
+	second, err := ingestInbound(ctx, "test-proj", inboundPayload{MatchedRecipient: "inbox@example.test", Channel: "email", From: "b@example.test", MessageID: 802, MessageIDHeader: "<thread-b>", InReplyTo: "<thread-a>", BodyText: "B"})
 	if err != nil {
 		t.Fatal(err)
 	}

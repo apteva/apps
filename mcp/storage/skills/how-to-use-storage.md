@@ -39,6 +39,11 @@ conflict is an error; update visibility or tags explicitly instead of assuming
 an upload changed them. `files_dedupe_check` finds a readable matching digest,
 which can be at a different destination.
 
+Direct S3 multipart completion returns `checksum_status=pending` while Storage
+streams the completed object through SHA-256. Poll `files_get` or call
+`files_ensure_checksum` for an exact file; only `verified` is a usable whole-file
+digest. Repair preserves file IDs, URLs, and the physical object location.
+
 ## Listing and changes
 
 Use `files_list` for one folder and `recursive=true` for descendants. Use

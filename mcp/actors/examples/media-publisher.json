@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "description": "Generic semantic media publisher template. Replace the URLs, locators, and input variables for your site.",
+  "browser": {"persist": true},
+  "allowed_hosts": ["example.com"],
+  "limits": {"max_duration_seconds": 180, "step_retries": 0},
+  "steps": [
+    {"action": "goto", "url": "{{start_url}}"},
+    {"action": "fill", "locator": {"text": "Title", "exact": true, "som_only": true}, "text": "{{title}}"},
+    {"action": "upload_file", "locator": {"text": "Image", "role": "button", "exact": true, "som_only": true}, "source_url": "{{image_url}}", "filename": "{{filename}}", "mime_type": "{{mime_type}}"},
+    {"action": "click", "locator": {"text": "Publish", "role": "button", "exact": true, "som_only": true}, "expected_text": "Publish", "expected_effect": "immediate_external_commit", "confirm_consequence": "immediate_external_commit"}
+  ],
+  "output_schema": {"status": "string"}
+}

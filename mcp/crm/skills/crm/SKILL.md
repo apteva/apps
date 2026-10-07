@@ -74,12 +74,42 @@ customer conversations, lists, segments, opportunities, and pipelines.
 
 ## Messaging safety
 
+- To draft a reply, use `conversation_drafts_create` with `conversation_id`,
+  optional `reply_to_activity_id`, and proposed `body`/`body_html`/attachments.
+  Saving never sends, creates message activities, or changes thread status.
+  Multiple CRM-local drafts are supported; they are not synchronized to Gmail.
+- Inspect full content with `conversation_drafts_get`; `conversation_drafts_list`
+  returns paged summaries only. Use the returned `revision` as
+  `expected_revision` for update/discard/send. Conflicts require reloading and
+  reviewing the newer content, never blindly overwriting it.
+- `conversation_drafts_send` is a real external send, only after explicit user
+  approval. A draft's recipient and inbound reply anchor are pinned. Sending
+  rechecks verified sender, Messaging binding, ownership, contact eligibility,
+  suppression and WhatsApp reply window. Never silently redirect or switch
+  transport. Freeform WhatsApp text can be drafted outside the 24-hour window
+  but cannot be sent until eligible; use a template or SMS only explicitly.
+- Failure responses preserve content and return the latest draft/revision.
+  `status:send_failed` means delivery is uncertain: content/discard are locked.
+  Retry that SAME saved draft with its new revision, not a new draft or ordinary
+  reply tool. `status:sending` is leased; wait/reload before retrying. `sent`
+  retries return the original result without a new send. Discard is soft/audited.
+
 - `contacts_send_message`, `contacts_reply`, and `contacts_send_test` create
   real external messages. Call them only when the user explicitly requests a
   send or a previously approved workflow requires it.
 - Replies use the inbound message's Reply-To/From and receiving identity. Use
   `reply_to_activity_id` for a specific inbound message; do not work around a
   blocked reply route by silently sending to a different address.
+- For an explicitly requested SMS fallback to WhatsApp, call `contacts_reply`
+  with `channel: "sms"`, `conversation_id`, and a verified SMS `from` from
+  `messaging_senders_list`. It keeps the exact inbound phone and conversation;
+  subsequent SMS received at that sender returns to this conversation. No old
+  SMS history is merged. Email conversations cannot change transport. Omit
+  `channel` to reply on the selected/latest inbound phone message's transport.
+- `messaging_whatsapp_session_check` returns `active`, `last_inbound`,
+  `expires_at`, and `checked_at`. The 24-hour window starts at the customer's
+  latest inbound WhatsApp message to the chosen sender. Outside it, use an
+  approved template or explicitly requested SMS; never silently switch channels.
 - `do_not_contact` blocks sending and audience eligibility. Delivery recovery
   does not remove Messaging suppressions. Legacy messages with unknown source
   installation retain local history but omit remote status enrichment.

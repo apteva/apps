@@ -1,0 +1,37 @@
+{
+  "name": "site-crawl-template",
+  "description": "Generic schema version 2 crawl template. Replace the example host, selectors, fields, datasets, and routes for your site.",
+  "definition": {
+    "schema_version": 2,
+    "browser": {},
+    "allowed_hosts": ["example.org"],
+    "limits": {"max_items": 1000, "max_duration_seconds": 600},
+    "crawl": {
+      "seeds": ["https://example.org/"],
+      "frontier": {"max_depth": 1, "max_pages": 20, "max_items": 1000, "max_retries": 2, "dedupe": "canonical_url"},
+      "datasets": {
+        "items": {
+          "key": "item_url",
+          "schema": {"item_url": "url", "title": "string", "summary": "string?"}
+        }
+      },
+      "routes": {
+        "index": {
+          "match": "/",
+          "extract": [
+            {
+              "dataset": "items",
+              "items": "article",
+              "fields": {
+                "item_url": {"selector": "a", "type": "url", "attribute": "href", "required": true},
+                "title": {"selector": "h1, h2, h3", "type": "text"},
+                "summary": {"selector": "p", "type": "text"}
+              },
+              "transforms": {"title": "trim", "summary": "trim"}
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -108,3 +108,35 @@ File hydration needs the optional Storage binding and app-call permission.
 Inspect `file_hydration` for per-column errors; an unresolved integer is not a
 successful URL resolution. Upsert uniqueness indexes count toward the shared
 64-index cap. Removing one requires `release_managed: true` and `confirm: true`.
+
+## Persistent analytics projections (0.2.0)
+
+Use projections for repeated SQL analytics. Declare source_tables, result_columns
+and scope_columns. Source writes capture changes transactionally; the worker
+coalesces scopes and publishes complete generations. Results stay read-only.
+
+For joined/materialized CTEs, supply scope_sql with predicates inside the CTE and
+scope_params naming bound scope columns; add indexes to source lookup fields.
+Default outer filtering can still calculate historical data. Use scope_rules for
+derived day/month scopes with an explicit IANA timezone, or generic dependency
+SQL with params taken from both old/new source fields. Return DISTINCT scopes.
+Timezone-aware start/end day parameters use normalized UTC timestamps and handle
+DST; full SQL must implement equivalent grouping.
+
+Set min_refresh_interval_seconds (for example 30), inspect it through
+projections_describe, or update it through projections_update. Dirty deadlines
+persist and don't slide under continuous changes. Administrative force:true on
+projections_refresh bypasses the interval while retaining limits and pause.
+
+Manage result indexes using indexes_create/list/drop and optional version.
+Inspect projections_status with an optional scope. Compare published_change_id
+with relevant changes, and use ready/stale, pending/running work and published
+coverage_from/to. Consumed changes alone do not make results ready.
+Tables_query includes projection metadata from the same snapshot as rows; a
+read_snapshot batch can combine scoped projections_status with the data query.
+
+Build replacements with activate:false, create their indexes, wait for ready:true
+and activate explicitly. A failed build leaves the current version usable.
+Coverage is the declared half-open SQL window, published with the successful
+generation. Applications decide whether to use a covered zero or fallback query.
+See PROJECTIONS.md for examples, limits and the restore-required downgrade policy.

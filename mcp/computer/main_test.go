@@ -1204,7 +1204,7 @@ func TestInternalSessionExtractErrorsAndBounds(t *testing.T) {
 		app := appWithSession("br_test", fake, "local")
 		w := internalExtractResponse(t, app, "br_test", `{
 			"formats":["TEXT","text","json"],
-			"max_chars":999999,
+			"max_chars":9999999,
 			"readability":false,
 			"wait_ms":999999
 		}`, "web")
@@ -4033,4 +4033,22 @@ func postJSON(t *testing.T, handler http.HandlerFunc, path string, body any) map
 		t.Fatalf("decode response: %v body=%s", err, w.Body.String())
 	}
 	return out
+}
+
+func TestLargeRenderedHTMLFitsExpandedResponseBudget(t *testing.T) {
+	limit := 400000
+	opts, err := normalizeExtractOptions(extractRequest{Formats: []string{"html"}, MaxChars: &limit})
+	if err != nil || opts.MaxChars != limit {
+		t.Fatalf("large response budget: %+v, %v", opts, err)
+	}
+	html := "<html><body>" + strings.Repeat("complete history ", 16000) + "</body></html>"
+	fields := []extractResponseField{{Key: "html", Value: html}, {Key: "rendered", Value: true}}
+	out := limitExtractResponse(fields, opts.MaxChars)
+	if out["html"] != html || out["truncated"] == true {
+		t.Fatal("large HTML was truncated despite fitting the requested budget")
+	}
+	out = limitExtractResponse(fields, 200000)
+	if out["truncated"] != true {
+		t.Fatal("smaller response limit failed to report truncation")
+	}
 }

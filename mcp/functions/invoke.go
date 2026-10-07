@@ -115,6 +115,9 @@ func invokeFunctionWithStream(ctx *sdk.AppCtx, parent context.Context, fn *Funct
 	if err != nil {
 		return nil, fmt.Errorf("record invocation: %w", err)
 	}
+	ctx.EmitWithProject("invocation.started", fn.ProjectID, map[string]any{
+		"id": id, "function_id": fn.ID, "function_name": fn.Name,
+	})
 	trace := p.newTrace(parent, fn, id)
 	invokeCtx = context.WithValue(invokeCtx, traceKey{}, trace)
 	if httpStream, ok := stream.(*httpInvocationStream); ok {
@@ -180,6 +183,12 @@ func invokeFunctionWithStream(ctx *sdk.AppCtx, parent context.Context, fn *Funct
 		_, err := ctx.AppDB().Exec(`UPDATE function_invocations SET finished_at=?,duration_ms=?,status=?,exit_code=?,response_body=?,stderr=?,error=?,truncated=?,build_ms=?,queue_ms=?,cold_start_ms=?,execution_ms=? WHERE id=? AND project_id=? AND started_at=?`, time.Now().UTC().Format(time.RFC3339Nano), res.DurationMS, res.Status, res.ExitCode, truncate(redactSecrets(res.Response, fn.Env), stdoutCap), truncate(logs, stderrCap), truncate(res.Error, stderrCap), inv.Truncated || len(res.Response) > stdoutCap, timings.build.Milliseconds(), timings.queue.Milliseconds(), timings.cold.Milliseconds(), timings.execution.Milliseconds(), id, fn.ProjectID, inv.StartedAt)
 		if err != nil {
 			ctx.Logger().Warn("finalize invocation", "id", id, "err", err)
+		}
+		if err == nil {
+			ctx.EmitWithProject("invocation.completed", fn.ProjectID, map[string]any{
+				"id": id, "function_id": fn.ID, "function_name": fn.Name,
+				"status": res.Status, "error_code": res.ErrorCode,
+			})
 		}
 	}()
 	if fn.Status != "active" {

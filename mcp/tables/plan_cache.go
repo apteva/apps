@@ -65,6 +65,20 @@ func (c *queryPlanCache) invalidateTable(tableID int64) {
 	}
 }
 
+// invalidateAll is used for DDL and projection activation. A prepared
+// statement can outlive the schema object it was compiled against, and a
+// projection name can switch to a different physical generation. Clearing the
+// bounded cache is cheap compared with returning a stale or SQLITE_SCHEMA
+// result, and permission checks still happen before every read is bound.
+func (c *queryPlanCache) invalidateAll() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for key, entry := range c.entries {
+		_ = entry.stmt.Close()
+		delete(c.entries, key)
+	}
+}
+
 func (c *queryPlanCache) close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

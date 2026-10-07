@@ -168,6 +168,7 @@ func auditInbound(t *testing.T, app *App, providerID, raw string, recipients []s
 func TestAuditInboundRetryResumesDispatch(t *testing.T) {
 	plat := &stubPlatform{callAppResultErr: errors.New("temporary downstream outage")}
 	ctx := newTestCtx(t, plat)
+	seedSESRecipient(t, ctx, "support@acme.com")
 	app := &App{}
 	_, err := app.toolInboundRouteSet(ctx, map[string]any{"pattern": "support@acme.com", "target_app": "crm", "target_route": "/inbound"})
 	if err != nil {
@@ -184,6 +185,7 @@ func TestAuditInboundRetryResumesDispatch(t *testing.T) {
 }
 func TestAuditInboundUsesEnvelopeRecipient(t *testing.T) {
 	ctx := newTestCtx(t, &stubPlatform{})
+	seedSESRecipient(t, ctx, "support@acme.com")
 	app := &App{}
 	_, err := app.toolInboundRouteSet(ctx, map[string]any{"pattern": "support@acme.com", "target_app": "crm", "target_route": "/inbound"})
 	if err != nil {
@@ -198,6 +200,7 @@ func TestAuditInboundUsesEnvelopeRecipient(t *testing.T) {
 }
 func TestAuditDistinctSESDeliveriesWithRepeatedRFCID(t *testing.T) {
 	ctx := newTestCtx(t, &stubPlatform{})
+	seedSESRecipient(t, ctx, "support@acme.com")
 	app := &App{}
 	raw := "From: customer@example.com\r\nTo: support@acme.com\r\nMessage-ID: <reused@example.com>\r\n\r\nHello"
 	auditInbound(t, app, "delivery-1", raw, []string{"support@acme.com"})

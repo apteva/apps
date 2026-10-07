@@ -3,9 +3,9 @@ package main
 // LLM-based OCR path (v0.1.3+). Activates when ocr_provider="llm".
 // Bills fetches the file bytes from storage, renders PDF pages to
 // JPEG via embedded PDFium-WASM (no system deps, no CGO), and sends
-// the image(s) to the bound vision_llm integration's chat-completion
-// endpoint with a structured-output prompt. The reply is parsed into
-// the same ExtractedInvoice shape the rest of the OCR pipeline uses.
+// the image(s) to the bound vision_llm integration with a structured-output
+// prompt (native Responses for Codex, Messages/chat completions otherwise).
+// The reply is parsed into the ExtractedInvoice shape used by the OCR pipeline.
 //
 // Storage cross-app shape: files_get for metadata (content_type),
 // files_get_url for a signed URL we http.GET. We deliberately don't
@@ -87,36 +87,36 @@ func callOCRViaLLM(ctx *sdk.AppCtx, pid string, fileID int64) (*ExtractedInvoice
 
 	// 3. Build the request shape per provider. Branch on bound.AppSlug
 	//    rather than on a generic capability name — anthropic-api
-	//    speaks Anthropic's Messages shape, every other compatible_slug
-	//    today (opencode-go/openai-codex) speaks OpenAI's
-	//    chat-completion shape.
+	//    speaks Messages, Codex speaks native Responses (including reasoning
+	//    effort), and OpenCode speaks OpenAI-compatible chat completions.
 	//    Different request, different response, different model
 	//    defaults — but the rest of the pipeline (storage fetch, render,
 	//    audit, vendor resolve) is identical.
 	model, toolName, args := buildLLMArgs(ctx, bound, images, fileName)
 
+	reasoning, _ := args["reasoning"].(map[string]any)
 	log.Info("ocr/llm: calling vision_llm",
 		"file_id", fileID, "provider_slug", bound.AppSlug, "model", model,
-		"tool", toolName, "pages", len(images))
+		"tool", toolName, "reasoning_effort", reasoning["effort"], "pages", len(images))
 	t3 := time.Now()
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, toolName, args)
 	llmElapsed := time.Since(t3).Milliseconds()
 	if err != nil {
-		log.Warn("ocr/llm: chat completion call errored",
+		log.Warn("ocr/llm: model call errored",
 			"file_id", fileID, "model", model, "err", err, "elapsed_ms", llmElapsed)
-		return nil, "llm/" + model, fmt.Errorf("vision_llm chat completion: %w", err)
+		return nil, "llm/" + model, fmt.Errorf("vision_llm model call: %w", err)
 	}
 	if res == nil || !res.Success {
 		body := ""
 		if res != nil {
 			body = string(res.Data)
 		}
-		log.Warn("ocr/llm: chat completion non-2xx",
+		log.Warn("ocr/llm: model call non-2xx",
 			"file_id", fileID, "model", model,
 			"body", truncate(body, 500), "elapsed_ms", llmElapsed)
 		return nil, "llm/" + model, fmt.Errorf("vision_llm non-2xx: %s", truncate(body, 500))
 	}
-	log.Info("ocr/llm: chat completion ok",
+	log.Info("ocr/llm: model call ok",
 		"file_id", fileID, "model", model, "response_bytes", len(res.Data),
 		"elapsed_ms", llmElapsed)
 
@@ -125,6 +125,8 @@ func callOCRViaLLM(ctx *sdk.AppCtx, pid string, fileID int64) (*ExtractedInvoice
 	switch bound.AppSlug {
 	case "anthropic-api":
 		parsed, err = parseAnthropicInvoice(res.Data)
+	case "openai-codex":
+		parsed, err = parseResponsesInvoice(res.Data)
 	default:
 		parsed, err = parseAssistantInvoice(res.Data)
 	}
@@ -161,14 +163,12 @@ func buildLLMArgs(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, images [][]byte,
 		tool = "create_message"
 		args = buildAnthropicArgs(images, model, maxTokens, fileName)
 	case "openai-codex":
-		// Codex exposes an OpenAI-style chat_completion compatibility
-		// wrapper backed by the subscription/device-login Responses
-		// runtime. Keep a Codex-native default model; falling through to
-		// OpenCode's qwen3.6-plus would fail for this integration.
-		model = configString(ctx, "ocr_llm_model", "gpt-5.5")
-		maxTokens := configIntDefault(ctx, "ocr_llm_max_tokens", 8000)
-		tool = "chat_completion"
-		args = buildOpenAICompatibleArgs(images, model, maxTokens, fileName)
+		// Native Responses preserves reasoning effort; the chat compatibility
+		// adapter drops it. The subscription endpoint also rejects temperature
+		// and output-token caps, so leave both out of this request.
+		model = configString(ctx, "ocr_llm_model", "gpt-6-luna")
+		tool = "responses_create"
+		args = buildCodexResponsesArgs(images, model, fileName)
 	default:
 		// OpenAI-compatible chat-completion shape (opencode-go and any
 		// future compatible providers). Reasoning-shaped models (Kimi
@@ -180,6 +180,72 @@ func buildLLMArgs(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, images [][]byte,
 		args = buildOpenAICompatibleArgs(images, model, maxTokens, fileName)
 	}
 	return
+}
+
+// buildCodexResponsesArgs uses the subscription runtime's native request
+// shape so the requested low thinking effort reaches the model unchanged.
+func buildCodexResponsesArgs(images [][]byte, model, fileName string) map[string]any {
+	parts := []any{map[string]any{
+		"type": "input_text",
+		"text": buildOCRUserInstruction(fileName, "below"),
+	}}
+	for _, img := range images {
+		parts = append(parts, map[string]any{
+			"type":      "input_image",
+			"image_url": "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(img),
+		})
+	}
+	return map[string]any{
+		"model":        model,
+		"instructions": ocrSystemPrompt,
+		"input":        []any{map[string]any{"role": "user", "content": parts}},
+		"reasoning":    map[string]any{"effort": "low"},
+		"text":         map[string]any{"format": map[string]any{"type": "json_object"}},
+		"store":        false,
+		"stream":       true,
+	}
+}
+
+// parseResponsesInvoice reads final assistant output, skipping reasoning and
+// tool items. Some gateways also provide the aggregated output_text field.
+func parseResponsesInvoice(raw json.RawMessage) (*ExtractedInvoice, error) {
+	var envelope struct {
+		Status     string `json:"status"`
+		OutputText string `json:"output_text"`
+		Output     []struct {
+			Type    string `json:"type"`
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, fmt.Errorf("decode responses envelope: %w", err)
+	}
+	if envelope.Status != "" && envelope.Status != "completed" {
+		return nil, fmt.Errorf("Codex response %s", envelope.Status)
+	}
+	text := envelope.OutputText
+	if strings.TrimSpace(text) == "" {
+		var parts []string
+		for _, item := range envelope.Output {
+			if item.Type != "message" || item.Role != "assistant" {
+				continue
+			}
+			for _, part := range item.Content {
+				if part.Type == "output_text" {
+					parts = append(parts, part.Text)
+				}
+			}
+		}
+		text = strings.Join(parts, "")
+	}
+	if strings.TrimSpace(text) == "" {
+		return nil, errors.New("Codex response has no assistant output text")
+	}
+	return parseInvoiceJSON(text)
 }
 
 func buildOpenAICompatibleArgs(images [][]byte, model string, maxTokens int, fileName string) map[string]any {
@@ -357,12 +423,20 @@ func renderPDFToJPEGs(pdfBytes []byte, dpi, maxPages int) ([][]byte, error) {
 				},
 			},
 			DPI: dpi,
+			// Filled invoice values may be widget annotations rather than
+			// page text. Include them in the image sent to the vision model.
+			RenderForm: true,
+			Document:   &doc.Document,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("pdfium render page %d: %w", i, err)
 		}
 		var buf bytes.Buffer
-		if err := jpeg.Encode(&buf, render.Result.Image, &jpeg.Options{Quality: 80}); err != nil {
+		err = jpeg.Encode(&buf, render.Result.Image, &jpeg.Options{Quality: 80})
+		// The image borrows a PDFium bitmap in WASM memory; release it
+		// after encoding, including on an encoding error.
+		render.Cleanup()
+		if err != nil {
 			return nil, fmt.Errorf("jpeg encode page %d: %w", i, err)
 		}
 		out = append(out, buf.Bytes())

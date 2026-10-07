@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 
@@ -54,11 +55,11 @@ func (a *App) toolRefreshMessageBody(ctx *sdk.AppCtx, args map[string]any) (any,
 		return nil, errors.New("Messaging app must be bound to recover the original message")
 	}
 	var messageID, sourceID int64
-	var header, stored string
+	var header, stored, sourceDetail string
 	err = ctx.AppDB().QueryRow(`SELECT COALESCE(messaging_id,0),COALESCE(messaging_install_id,0),
-		COALESCE(message_id_header,''),COALESCE(body,'') FROM contact_activities
+		COALESCE(message_id_header,''),COALESCE(body,''),COALESCE(source_detail,'') FROM contact_activities
 		WHERE project_id=? AND contact_id=? AND id=? AND kind='email_received' AND source='messaging'`,
-		pid, contactID, activityID).Scan(&messageID, &sourceID, &header, &stored)
+		pid, contactID, activityID).Scan(&messageID, &sourceID, &header, &stored, &sourceDetail)
 	if err == sql.ErrNoRows {
 		return nil, errors.New("inbound email activity not found in this contact and project")
 	}
@@ -75,6 +76,7 @@ func (a *App) toolRefreshMessageBody(ctx *sdk.AppCtx, args map[string]any) (any,
 			Channel         string `json:"channel"`
 			Direction       string `json:"direction"`
 			Subject         string `json:"subject"`
+			From            string `json:"from"`
 			BodyText        string `json:"body_text"`
 			BodyHTML        string `json:"body_html"`
 			MessageIDHeader string `json:"message_id_header"`
@@ -93,13 +95,46 @@ func (a *App) toolRefreshMessageBody(ctx *sdk.AppCtx, args map[string]any) (any,
 	}
 	body := inboundPayload{MessageID: m.ID, Channel: m.Channel, Subject: m.Subject, BodyText: m.BodyText, BodyHTML: m.BodyHTML}
 	missing := strings.TrimSpace(stored) == "" || strings.TrimSpace(stored) == strings.TrimSpace(m.Subject)
-	recoverable := missing && strings.TrimSpace(inboundMessageText(body)) != ""
+	newBody := inboundActivityBody(body)
+	bodyRecoverable := missing && strings.TrimSpace(inboundMessageText(body)) != ""
+	normalizeFormatting, _ := args["normalize_formatting"].(bool)
+	recoverSender, _ := args["recover_sender"].(bool)
+	formattingRecoverable := false
+	if normalizeFormatting && !missing && strings.TrimSpace(m.BodyText) == "" && strings.TrimSpace(m.BodyHTML) != "" {
+		legacyBody := legacyPlainTextFromHTML(m.BodyHTML)
+		if m.Subject != "" {
+			legacyBody = m.Subject + "\n\n" + legacyBody
+		}
+		formattingRecoverable = stored == legacyBody && newBody != stored && strings.TrimSpace(inboundMessageText(body)) != ""
+	}
+	newDetail := sourceDetail
+	senderRecoverable := false
+	if recoverSender && inboundEmailRecipient(m.From) != "" {
+		detail := map[string]json.RawMessage{}
+		if strings.TrimSpace(sourceDetail) == "" || json.Unmarshal([]byte(sourceDetail), &detail) == nil {
+			if detail != nil { // Preserve malformed/null audit metadata instead of replacing it.
+				current, exists := detail["from"]
+				var from string
+				if !exists || (json.Unmarshal(current, &from) == nil && strings.TrimSpace(from) == "") {
+					detail["from"], _ = json.Marshal(inboundEmailRecipient(m.From))
+					encoded, encodeErr := json.Marshal(detail)
+					if encodeErr != nil {
+						return nil, encodeErr
+					}
+					newDetail, senderRecoverable = string(encoded), true
+				}
+			}
+		}
+	}
+	recoverable := bodyRecoverable || formattingRecoverable || senderRecoverable
 	dryRun := true
 	if value, ok := args["dry_run"].(bool); ok {
 		dryRun = value
 	}
 	out := map[string]any{"contact_id": contactID, "activity_id": activityID, "messaging_id": messageID,
-		"dry_run": dryRun, "recoverable": recoverable, "body_repaired": false}
+		"dry_run": dryRun, "recoverable": recoverable, "body_repaired": false,
+		"formatting_recoverable": formattingRecoverable, "formatting_repaired": false,
+		"sender_recoverable": senderRecoverable, "sender_repaired": false}
 	if dryRun || !recoverable {
 		return out, nil
 	}
@@ -111,21 +146,38 @@ func (a *App) toolRefreshMessageBody(ctx *sdk.AppCtx, args map[string]any) (any,
 	// Recheck provenance after the provider read, including concurrent edits.
 	var unchanged int
 	err = tx.QueryRow(`SELECT COUNT(*) FROM contact_activities WHERE project_id=? AND contact_id=? AND id=?
-		AND messaging_id=? AND messaging_install_id=? AND COALESCE(message_id_header,'')=? AND COALESCE(body,'')=?`,
-		pid, contactID, activityID, messageID, sourceID, header, stored).Scan(&unchanged)
+		AND messaging_id=? AND messaging_install_id=? AND COALESCE(message_id_header,'')=? AND COALESCE(body,'')=?
+		AND COALESCE(source_detail,'')=?`,
+		pid, contactID, activityID, messageID, sourceID, header, stored, sourceDetail).Scan(&unchanged)
 	if err != nil {
 		return nil, err
 	}
 	if unchanged != 1 {
 		return nil, errors.New("activity changed during recovery; read it again before retrying")
 	}
-	repaired, err := repairMissingInboundBodyTx(tx, pid, contactID, activityID, body)
+	if !bodyRecoverable && !formattingRecoverable {
+		newBody = stored
+	}
+	result, err := tx.Exec(`UPDATE contact_activities SET body=?,source_detail=CASE WHEN ? THEN ? ELSE source_detail END
+		WHERE project_id=? AND contact_id=? AND id=? AND messaging_id=? AND messaging_install_id=?
+		AND kind='email_received' AND source='messaging' AND COALESCE(message_id_header,'')=?
+		AND COALESCE(body,'')=? AND COALESCE(source_detail,'')=?`, newBody, senderRecoverable, newDetail,
+		pid, contactID, activityID, messageID, sourceID, header, stored, sourceDetail)
 	if err != nil {
 		return nil, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if count != 1 {
+		return nil, errors.New("activity changed during recovery; read it again before retrying")
 	}
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
-	out["body_repaired"] = repaired
+	out["body_repaired"] = bodyRecoverable || formattingRecoverable
+	out["formatting_repaired"] = formattingRecoverable
+	out["sender_repaired"] = senderRecoverable
 	return out, nil
 }

@@ -60,6 +60,12 @@ func (a *App) toolTablesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	defer tx.Rollback()
+	var projectionExists int64
+	if err := tx.QueryRow(`SELECT id FROM projection_definitions WHERE project_id=? AND name=? LIMIT 1`, pid, name).Scan(&projectionExists); err == nil {
+		return nil, errf("projection %q already exists", name)
+	} else if err != sql.ErrNoRows {
+		return nil, err
+	}
 
 	var existing int64
 	if err := tx.QueryRow(`SELECT id FROM tables_meta WHERE project_id = ? AND name = ?`, pid, name).Scan(&existing); err == nil {
@@ -116,6 +122,7 @@ func (a *App) toolTablesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error
 	}
 	a.cache.invalidate(pid, name)
 	a.plans.invalidateTable(id)
+	a.invalidateSQLCaches()
 
 	emit(ctx, topicTableCreated, map[string]any{
 		"id":      id,
@@ -341,6 +348,15 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if provided != 1 {
 		return nil, errf("exactly one of add / rename / drop must be supplied")
 	}
+	if rename != nil || drop != "" {
+		var dependent int
+		if err := ctx.AppReadDB().QueryRowContext(requestContext(ctx), `SELECT COUNT(*) FROM projection_sources WHERE table_id=?`, t.ID).Scan(&dependent); err != nil {
+			return nil, err
+		}
+		if dependent > 0 {
+			return nil, errf("table %q is a projection source; recreate or retire its projections before renaming or dropping columns", name)
+		}
+	}
 
 	tx, err := beginWrite(ctx)
 	if err != nil {
@@ -472,6 +488,7 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	a.cache.invalidate(pid, name)
 	a.plans.invalidateTable(t.ID)
+	a.invalidateSQLCaches()
 
 	updated := t
 	emit(ctx, topicTableAltered, map[string]any{
@@ -642,6 +659,13 @@ func (a *App) toolTablesDrop(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		}
 		return nil, err
 	}
+	var dependent int
+	if err := ctx.AppReadDB().QueryRowContext(requestContext(ctx), `SELECT COUNT(*) FROM projection_sources WHERE table_id=?`, t.ID).Scan(&dependent); err != nil {
+		return nil, err
+	}
+	if dependent > 0 {
+		return nil, errf("table %q is a projection source; retire its projections before dropping it", name)
+	}
 
 	tx, err := beginWrite(ctx)
 	if err != nil {
@@ -661,6 +685,7 @@ func (a *App) toolTablesDrop(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	a.cache.invalidate(pid, name)
 	a.plans.invalidateTable(t.ID)
+	a.invalidateSQLCaches()
 	emit(ctx, topicTableDropped, map[string]any{
 		"id":   t.ID,
 		"name": name,
@@ -708,6 +733,7 @@ func loadTablesContext(ctx context.Context, db *sql.DB, projectID string) ([]Tab
 
 // One statement gives the table list and its columns the same SQLite snapshot.
 type metadataReader interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
 

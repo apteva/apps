@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.9.10
+version: 0.9.16
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -98,7 +98,7 @@ provides:
     - name: contacts_send_message
       description: "REAL EXTERNAL SEND. Supports body/template content plus up to 20 attachments / 25 MB from Storage IDs, HTTPS URLs, or base64. Never use for sender/config testing; use messaging_senders_list. New standalone emails require a subject. Identical sends are automatically deduplicated for five minutes."
     - name: contacts_reply
-      description: "REAL EXTERNAL SEND. Supports body/template content plus up to 20 attachments / 25 MB from Storage IDs, HTTPS URLs, or base64. Reply on the contact's most-recent inbound conversation, preserve email threading, and deduplicate identical replies for five minutes."
+      description: "REAL EXTERNAL SEND. Supports body/template content plus attachments. Reply on the contact's most-recent inbound conversation, preserve email threading, and deduplicate identical replies for five minutes. Explicit channel=sms/whatsapp switches stay in the same phone conversation and require a verified sender for that channel; email threads cannot switch."
     - name: contacts_send_test
       description: "REAL EXTERNAL SEND for an explicitly requested delivery test; not a configuration check. Pass body and omit unused template/optional fields. Logged as *_test_sent and deduplicated for five minutes."
     - name: messaging_senders_list
@@ -106,11 +106,11 @@ provides:
     - name: messaging_templates_list
       description: List templates from the bound Messaging app, especially approved WhatsApp templates.
     - name: messaging_whatsapp_session_check
-      description: Check whether a WhatsApp contact is inside the 24-hour free-form reply window.
+      description: Check the WhatsApp 24-hour free-form reply window; returns active, last_inbound, expires_at and checked_at for the exact phone/sender pair.
     - name: contacts_refresh_message_body
       description: Preview or recover missing inbound email content from the original Messaging record while preserving the existing activity and conversation.
     - name: messaging_inbound_receive
-      description: Receive an inbound message and normalized attachment metadata dispatched by Messaging and attach it to CRM contact activity.
+      description: Receive inbound Messaging deliveries and normalized attachments; require a canonical receiving identity and ignore suppressed, unmatched, or foreign-project email deliveries before creating CRM data.
     - name: contacts_list_messageable
       description: List contacts with at least one non-suppressed, non-quarantined route for the requested email, SMS, or WhatsApp transport.
     - name: contacts_resolve_audience
@@ -123,6 +123,18 @@ provides:
       description: Set a conversation's workflow status (open/pending/closed/spam) and/or priority (low/normal/high/urgent). Spam marks the contact and best-effort adds a Messaging suppression for the sender or email domain.
     - name: conversations_inbox
       description: Cross-contact triage queue — open conversations across all contacts, newest first; supports channel/from/to/list/tag filters and paging.
+    - name: conversation_drafts_create
+      description: Save a reply draft without sending; pins recipient and conversation, supports incomplete content, HTML, attachments and templates.
+    - name: conversation_drafts_get
+      description: Read full saved draft content and current revision. Never sends.
+    - name: conversation_drafts_list
+      description: Read paged draft summaries for one conversation. Never sends.
+    - name: conversation_drafts_update
+      description: Save changes with expected_revision; concurrent edits return conflicts. Never sends.
+    - name: conversation_drafts_discard
+      description: Soft-discard an editable draft with expected_revision, retaining its content for audit. Never sends.
+    - name: conversation_drafts_send
+      description: Explicit real external send of a saved reply draft with expected_revision; revalidates eligibility and uses durable idempotent retries.
     - name: pipelines_list
       description: List CRM sales pipelines and allowed stages.
     - name: pipeline_create
@@ -222,6 +234,15 @@ provides:
             minimum: 4
             maximum: 20
   publishes:
+    - name: conversation.draft.changed
+      description: A reply draft was saved, updated, discarded or its send outcome recorded. Not a sent-message event; inspect status. Contains no draft body or attachments.
+      payload:
+        event_id: string
+        draft_id: integer
+        conversation_id: integer
+        contact_id: integer
+        revision: integer
+        status: string
     - name: contact.added
       description: A contact was created or first materialised from inbound messaging; list_ids contains its active list memberships after creation routing completes.
       payload:
@@ -484,7 +505,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: crm/v0.9.16
     entry: mcp/crm
   port: 8080
   health_check: /health

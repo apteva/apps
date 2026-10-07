@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"regexp"
 	"strings"
 	"time"
@@ -40,7 +41,8 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (resultValue
 	if len(rawSQL) > 64<<10 {
 		return nil, errf("sql exceeds 65536 bytes")
 	}
-	if err := validateReadOnlySQL(rawSQL); err != nil {
+	tokens, err := a.cachedProjectionSQL(ctx, rawSQL)
+	if err != nil {
 		return nil, err
 	}
 	resolved, err := a.substitutePlaceholders(ctx, pid, rawSQL)
@@ -55,6 +57,17 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (resultValue
 	bound := make([]any, len(params))
 	copy(bound, params)
 
+	names := placeholderNamesFromTokens(tokens)
+	projectionIDs := []int64{}
+	for _, name := range names {
+		table, err := a.loadQueryTable(ctx, pid, name)
+		if err != nil {
+			return nil, err
+		}
+		if table.ProjectionID != 0 {
+			projectionIDs = append(projectionIDs, table.ProjectionID)
+		}
+	}
 	read, err := acquireReadConn(ctx, "<sql>")
 	if err != nil {
 		return nil, err
@@ -63,6 +76,17 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (resultValue
 	defer read.close()
 	qctx, cancel := queryTimeoutContext(ctx)
 	defer cancel()
+	if len(projectionIDs) > 0 && read.tx == nil {
+		tx, err := conn.BeginTx(qctx, &sql.TxOptions{ReadOnly: true})
+		if err != nil {
+			return nil, err
+		}
+		read.tx = tx
+		defer tx.Rollback()
+		parent := requestContext(ctx)
+		activeContexts.Store(ctx, context.WithValue(parent, batchReadStateKey{}, &batchReadState{conn: conn, tx: tx}))
+		defer activeContexts.Store(ctx, parent)
+	}
 	sharedWriterConnection := ctx.AppReadDB() == ctx.AppDB()
 	if sharedWriterConnection {
 		if _, err := conn.ExecContext(qctx, "PRAGMA query_only = ON"); err != nil {
@@ -163,16 +187,31 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (resultValue
 	if err := rows.Err(); err != nil {
 		return nil, queryStageErr("scan", "<sql>", err)
 	}
-	return map[string]any{
-		"columns":   cols,
-		"rows":      out,
-		"truncated": truncated,
-	}, nil
+	result := map[string]any{"columns": cols, "rows": out, "truncated": truncated}
+	if len(projectionIDs) > 0 {
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		metadata := []map[string]any{}
+		for _, id := range projectionIDs {
+			p, err := loadProjectionWhere(ctx, `WHERE id=? AND project_id=?`, id, pid)
+			if err != nil {
+				return nil, err
+			}
+			s, err := a.projectionStatus(ctx, p, "")
+			if err != nil {
+				return nil, err
+			}
+			metadata = append(metadata, s)
+		}
+		result["projections"] = metadata
+	}
+	return result, nil
 }
 
 var (
 	queryPlaceholderRe = regexp.MustCompile(`\{[a-z][a-z0-9_]*\}`)
-	internalSQLNameRe  = regexp.MustCompile(`(?i)(?:\b(?:t_[0-9]+|tables_meta|columns_meta|indexes_meta|index_columns|table_identity|sqlite_[a-z0-9_]*|pragma_[a-z0-9_]*|dbstat)\b|\b_migrations\b)`)
+	internalSQLNameRe  = regexp.MustCompile(`(?i)(?:\b(?:t_[0-9]+|p_[0-9]+|pv_[0-9]+|pd_[0-9]+|ph_[0-9]+|projection_(?:definitions|sources|changes|cursors|queue|scopes|result_index|indexes|generations)|tables_meta|columns_meta|indexes_meta|index_columns|table_identity|sqlite_[a-z0-9_]*|pragma_[a-z0-9_]*|dbstat)\b|\b_migrations\b)`)
 )
 
 // validateReadOnlySQL rejects anything but a single SELECT or WITH
@@ -202,7 +241,7 @@ func validateReadOnlySQL(s string) error {
 	return nil
 }
 func (a *App) substitutePlaceholders(ctx *sdk.AppCtx, projectID, query string) (string, error) {
-	tokens, err := sqlTokens(query)
+	tokens, err := a.cachedProjectionSQL(ctx, query)
 	if err != nil {
 		return "", err
 	}
@@ -212,7 +251,7 @@ func (a *App) substitutePlaceholders(ctx *sdk.AppCtx, projectID, query string) (
 		if token.kind != "placeholder" {
 			continue
 		}
-		table, err := a.loadTableSchema(ctx, projectID, token.value)
+		table, err := a.loadQueryTable(ctx, projectID, token.value)
 		if err != nil {
 			return "", err
 		}

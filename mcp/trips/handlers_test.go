@@ -1008,6 +1008,78 @@ func TestUnit_SearchFlights_RejectsNonIATA(t *testing.T) {
 	}
 }
 
+func TestUnit_SearchFlights_RejectsFractionalSearchIntegers(t *testing.T) {
+	ctx, fake := newCtx(t)
+	app := &App{}
+	_, _ = app.toolSettingsSet(ctx, map[string]any{"duffel_connection_id": float64(11), "home_airport": "CDG"})
+	if _, err := app.toolSearchFlights(ctx, map[string]any{
+		"to": "LIN", "depart_date": "2026-06-05", "passengers": 1.5,
+	}); err == nil {
+		t.Fatal("expected fractional passengers to fail")
+	}
+	if len(fake.integCalls) != 0 {
+		t.Fatal("invalid search must not call the provider")
+	}
+}
+
+func TestUnit_SearchFlights_CachedResultRecordsForAnotherTrip(t *testing.T) {
+	ctx, fake, rec := newCtxWithEmitter(t)
+	app := &App{}
+	_, _ = app.toolSettingsSet(ctx, map[string]any{"duffel_connection_id": float64(11), "home_airport": "CDG"})
+	fake.integResponses["search_flights"] = map[string]any{"data": map[string]any{"offers": []any{
+		map[string]any{"id": "off_1", "total_amount": "85.00", "total_currency": "EUR", "slices": []any{map[string]any{"segments": []any{map[string]any{
+			"marketing_carrier": map[string]any{"iata_code": "U2", "name": "easyJet"}, "marketing_carrier_flight_number": "4321",
+			"departing_at": "2026-06-05T10:00:00", "arriving_at": "2026-06-05T11:30:00",
+			"origin": map[string]any{"iata_code": "CDG"}, "destination": map[string]any{"iata_code": "LIN"},
+		}}}}},
+	}}}
+	trip1 := mustCreateTrip(t, app, ctx, "First", false)
+	trip2 := mustCreateTrip(t, app, ctx, "Second", false)
+	args := map[string]any{"to": "LIN", "depart_date": "2026-06-05", "trip_id": float64(trip1.ID)}
+	if _, err := app.toolSearchFlights(ctx, args); err != nil {
+		t.Fatal(err)
+	}
+	args["trip_id"] = float64(trip2.ID)
+	out, err := app.toolSearchFlights(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.(map[string]any)["cached"] != true || out.(map[string]any)["recorded_observations"] != 1 {
+		t.Fatalf("cached search should attach an observation to the second trip: %+v", out)
+	}
+	if len(rec.EventsByTopic("price_observations.created")) != 2 {
+		t.Fatalf("fresh and cached inserts should both emit events, got %d", len(rec.EventsByTopic("price_observations.created")))
+	}
+}
+
+func TestUnit_PriceRouteSummary_InitializesCheapestMetadata(t *testing.T) {
+	date := "2026-06-05"
+	routes := summarizePriceObservations([]TravelPriceObservation{{
+		Kind: "flight", OriginCode: "CDG", DestinationCode: "LIN", Currency: "EUR", PartySize: 1,
+		DepartDate: date, ReturnDate: "2026-06-08", ProviderName: "Duffel", ItemName: "AF123",
+		AmountCents: 8500, ObservedAt: "2026-06-01T10:00:00Z",
+	}})
+	if len(routes) != 1 {
+		t.Fatalf("expected one route, got %+v", routes)
+	}
+	r := routes[0]
+	if r.CheapestDepartDate != date || r.CheapestReturnDate != "2026-06-08" || r.CheapestProviderName != "Duffel" || r.CheapestObservedAt == "" {
+		t.Fatalf("first observation should carry cheapest metadata: %+v", r)
+	}
+}
+
+func TestUnit_NormalizeFlightsResponse_PreservesReturnSlice(t *testing.T) {
+	raw := json.RawMessage(`{"data":{"offers":[{"id":"rt1","total_amount":"250.00","total_currency":"EUR","slices":[{"duration":"PT2H","segments":[{"departing_at":"2026-06-05T08:00:00Z","arriving_at":"2026-06-05T10:00:00Z","origin":{"iata_code":"CDG"},"destination":{"iata_code":"LIN"}}]},{"duration":"PT2H10M","segments":[{"departing_at":"2026-06-08T18:00:00Z","arriving_at":"2026-06-08T20:10:00Z","origin":{"iata_code":"LIN"},"destination":{"iata_code":"CDG"}}]}]},{"id":"bad","total_amount":"oops","total_currency":"EUR","slices":[]}]}}`)
+	out := normalizeFlightsResponse(raw)
+	offers := out["offers"].([]FlightOffer)
+	if len(offers) != 1 {
+		t.Fatalf("invalid offers should be skipped, got %+v", offers)
+	}
+	if offers[0].ReturnDepartLocation != "LIN" || offers[0].ReturnArriveLocation != "CDG" || offers[0].ReturnDepartAt == "" || offers[0].ReturnDuration != "PT2H10M" {
+		t.Fatalf("return slice was not preserved: %+v", offers[0])
+	}
+}
+
 func TestUnit_SearchAirports_UsesDuffelAndFilters(t *testing.T) {
 	ctx, fake := newCtx(t)
 	app := &App{}

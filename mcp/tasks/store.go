@@ -18,6 +18,7 @@ type taskStore struct {
 	db         *sql.DB
 	onEvent    func(TaskEvent)
 	recoveryMu sync.Mutex
+	startMu    sync.Mutex
 	clock      func() time.Time
 }
 
@@ -33,8 +34,9 @@ func newTaskStore(db *sql.DB, onEvent func(TaskEvent)) *taskStore {
 }
 
 const taskColumns = `id, agent_id, project_id, title, description, state,
+	expected_outcome, inputs_json, suggested_agent_id, created_by_operator_id,
 	progress, current_step, created_by_thread_id, assigned_thread_id,
-	execution_thread_id, parent_task_id, idempotency_key, recovery_of_task_id,
+	execution_thread_id, parent_task_id, idempotency_key, idempotency_scope, recovery_of_task_id,
 	original_occurrence_key, recovery_attempt, recovery_reason, operation_key, schedule_kind,
 	schedule_expression, schedule_timezone, schedule_enabled,
 	schedule_overlap_policy, schedule_catchup_policy, next_run_at, last_run_at,
@@ -51,12 +53,15 @@ type rowScanner interface{ Scan(...any) error }
 func scanTask(row rowScanner) (*Task, error) {
 	var t Task
 	var progress sql.NullInt64
+	var inputsJSON, idempotencyScope string
+	var suggestedAgent sql.NullInt64
 	var scheduleEnabled int
 	var next, last, lastDispatched, scheduled, dispatched, lastDispatchAttempt, accepted, executionUpdated, settleDeadline, started, completed sql.NullString
 	var created, updated string
 	err := row.Scan(&t.ID, &t.AgentID, &t.ProjectID, &t.Title, &t.Description, &t.State,
+		&t.ExpectedOutcome, &inputsJSON, &suggestedAgent, &t.CreatedByOperatorID,
 		&progress, &t.CurrentStep, &t.CreatedByThreadID, &t.AssignedThreadID,
-		&t.ExecutionThreadID, &t.ParentTaskID, &t.IdempotencyKey, &t.RecoveryOfTaskID,
+		&t.ExecutionThreadID, &t.ParentTaskID, &t.IdempotencyKey, &idempotencyScope, &t.RecoveryOfTaskID,
 		&t.OriginalOccurrenceKey, &t.RecoveryAttempt, &t.RecoveryReason, &t.OperationKey, &t.ScheduleKind,
 		&t.ScheduleExpression, &t.ScheduleTimezone, &scheduleEnabled,
 		&t.ScheduleOverlapPolicy, &t.ScheduleCatchupPolicy, &next, &last, &lastDispatched,
@@ -74,6 +79,14 @@ func scanTask(row rowScanner) (*Task, error) {
 	if progress.Valid {
 		v := int(progress.Int64)
 		t.Progress = &v
+	}
+	if strings.TrimSpace(inputsJSON) != "" {
+		if err := json.Unmarshal([]byte(inputsJSON), &t.Inputs); err != nil {
+			return nil, fmt.Errorf("decode task inputs: %w", err)
+		}
+	}
+	if suggestedAgent.Valid {
+		t.SuggestedAgentID = suggestedAgent.Int64
 	}
 	t.ScheduleEnabled = scheduleEnabled != 0
 	t.NextRunAt = parseNullableTime(next)
@@ -163,11 +176,24 @@ func (s *taskStore) createTx(tx *sql.Tx, input CreateTaskInput, now time.Time, e
 	input.ProjectID = strings.TrimSpace(input.ProjectID)
 	input.AssignedThreadID = strings.TrimSpace(input.AssignedThreadID)
 	input.CreatedByThreadID = strings.TrimSpace(input.CreatedByThreadID)
-	if input.AgentID <= 0 || input.ProjectID == "" || input.Title == "" || input.AssignedThreadID == "" {
-		return nil, false, validationError("agent_id, project_id, title, and assigned_thread_id are required")
-	}
 	if input.State == "" {
 		input.State = stateQueued
+	}
+	if input.ProjectID == "" || input.Title == "" {
+		return nil, false, validationError("project_id and title are required")
+	}
+	if input.State != stateDraft && (input.AgentID <= 0 || input.AssignedThreadID == "") {
+		return nil, false, validationError("agent_id and assigned_thread_id are required for executable tasks")
+	}
+	if input.State == stateDraft && (input.Schedule != nil || input.ScheduledFor != nil || input.ParentTaskID != "") {
+		return nil, false, validationError("drafts cannot have a schedule")
+	}
+	if input.State == stateDraft {
+		input.AgentID = 0
+		input.AssignedThreadID = ""
+		input.CreatedByThreadID = ""
+		input.CurrentStep = ""
+		input.Progress = nil
 	}
 	if !validState(input.State) {
 		return nil, false, fmt.Errorf("%w: %s", errInvalidState, input.State)
@@ -175,8 +201,19 @@ func (s *taskStore) createTx(tx *sql.Tx, input CreateTaskInput, now time.Time, e
 	if input.Progress != nil && (*input.Progress < 0 || *input.Progress > 100) {
 		return nil, false, errInvalidProgress
 	}
+	if err := validateTaskInputs(input.Inputs); err != nil {
+		return nil, false, err
+	}
+	inputsJSON, err := json.Marshal(input.Inputs)
+	if err != nil {
+		return nil, false, err
+	}
+	idempotencyScope := fmt.Sprintf("agent:%d", input.AgentID)
+	if input.State == stateDraft {
+		idempotencyScope = "project:" + input.ProjectID
+	}
 	if input.IdempotencyKey != "" {
-		existing, getErr := scanTask(tx.QueryRow(`SELECT `+taskColumns+` FROM tasks WHERE agent_id=? AND idempotency_key=?`, input.AgentID, input.IdempotencyKey))
+		existing, getErr := scanTask(tx.QueryRow(`SELECT `+taskColumns+` FROM tasks WHERE idempotency_scope=? AND idempotency_key=?`, idempotencyScope, input.IdempotencyKey))
 		if getErr == nil {
 			return existing, false, nil
 		}
@@ -185,7 +222,6 @@ func (s *taskStore) createTx(tx *sql.Tx, input CreateTaskInput, now time.Time, e
 		}
 	}
 	var normalized *normalizedSchedule
-	var err error
 	if input.Schedule != nil {
 		value, normalizeErr := normalizeSchedule(*input.Schedule, now)
 		if normalizeErr != nil {
@@ -226,8 +262,9 @@ func (s *taskStore) createTx(tx *sql.Tx, input CreateTaskInput, now time.Time, e
 	}
 	_, err = tx.Exec(`INSERT INTO tasks (`+taskColumns+`) VALUES (`+strings.TrimSuffix(strings.Repeat("?,", strings.Count(taskColumns, ",")+1), ",")+`)`,
 		id, input.AgentID, input.ProjectID, input.Title, strings.TrimSpace(input.Description), input.State,
+		strings.TrimSpace(input.ExpectedOutcome), string(inputsJSON), nullableInt(input.SuggestedAgentID), strings.TrimSpace(input.CreatedByOperatorID),
 		progress, strings.TrimSpace(input.CurrentStep), input.CreatedByThreadID, input.AssignedThreadID,
-		"", strings.TrimSpace(input.ParentTaskID), strings.TrimSpace(input.IdempotencyKey),
+		"", strings.TrimSpace(input.ParentTaskID), strings.TrimSpace(input.IdempotencyKey), idempotencyScope,
 		strings.TrimSpace(input.RecoveryOfTaskID), strings.TrimSpace(input.OriginalOccurrenceKey), input.RecoveryAttempt,
 		strings.TrimSpace(input.RecoveryReason), strings.TrimSpace(input.OperationKey), scheduleKind,
 		expression, timezone, enabled, overlap, catchup, nextRun, nil, nil, "", "", "", "",
@@ -258,8 +295,75 @@ func (s *taskStore) createTx(tx *sql.Tx, input CreateTaskInput, now time.Time, e
 	return task, true, nil
 }
 
+func nullableInt(value int64) any {
+	if value <= 0 {
+		return nil
+	}
+	return value
+}
+
 func (s *taskStore) Get(id string) (*Task, error) {
 	return scanTask(s.db.QueryRow(`SELECT `+taskColumns+` FROM tasks WHERE id=?`, strings.TrimSpace(id)))
+}
+
+// Start performs the only draft -> queued transition. The state predicate is
+// part of the update so two simultaneous start requests can create at most one
+// durable execution delivery.
+func (s *taskStore) Start(id, actor string, agentID int64, assignedThread string) (*Task, bool, error) {
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, false, err
+	}
+	defer tx.Rollback()
+	current, err := scanTask(tx.QueryRow(`SELECT `+taskColumns+` FROM tasks WHERE id=?`, strings.TrimSpace(id)))
+	if err != nil {
+		return nil, false, err
+	}
+	if current.State != stateDraft {
+		return current, false, nil
+	}
+	if agentID <= 0 || strings.TrimSpace(assignedThread) == "" {
+		return nil, false, validationError("a valid agent and execution thread are required")
+	}
+	if missing := requiredInputsMissing(current.Inputs); len(missing) > 0 {
+		return nil, false, validationError("required inputs missing: %s", strings.Join(missing, ", "))
+	}
+	now := s.now()
+	step := "Queued"
+	result, err := tx.Exec(`UPDATE tasks SET agent_id=?, assigned_thread_id=?, state=?, current_step=?, updated_at=? WHERE id=? AND state=?`,
+		agentID, strings.TrimSpace(assignedThread), stateQueued, step, now.Format(timeFormat), id, stateDraft)
+	if err != nil {
+		return nil, false, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return nil, false, err
+	}
+	if changed == 0 {
+		latest, getErr := scanTask(tx.QueryRow(`SELECT `+taskColumns+` FROM tasks WHERE id=?`, id))
+		return latest, false, getErr
+	}
+	task, err := scanTask(tx.QueryRow(`SELECT `+taskColumns+` FROM tasks WHERE id=?`, id))
+	if err != nil {
+		return nil, false, err
+	}
+	event, err := insertEvent(tx, TaskEvent{TaskID: id, AgentID: agentID, EventType: "state_changed", ThreadID: actor,
+		FromState: stateDraft, ToState: stateQueued, Data: map[string]any{
+			"assigned_thread_id": assignedThread, "started_by": actor,
+		}})
+	if err != nil {
+		return nil, false, err
+	}
+	if err := enqueueDeliveryTx(tx, task, assignedThread, "task.ready", "execution:"+id, now); err != nil {
+		return nil, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, false, err
+	}
+	s.emit(event)
+	return task, true, nil
 }
 
 func (s *taskStore) List(filter TaskFilter) ([]Task, error) {
@@ -281,6 +385,12 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 		(current.ParentTaskID != "" || current.ScheduledFor != nil) {
 		return nil, false, validationError("cannot edit an occurrence definition; update its recurring parent task")
 	}
+	if current.State == stateDraft && (input.Progress != nil || input.ExecutionThreadID != nil || input.AssignedThreadID != nil || input.Result != nil || input.ResultReference != nil) {
+		return nil, false, validationError("drafts cannot record execution progress or threads")
+	}
+	if current.State != stateDraft && (input.Inputs != nil || input.SuggestedAgentID != nil || input.ExpectedOutcome != nil) {
+		return nil, false, validationError("draft configuration is immutable after start")
+	}
 	title := current.Title
 	if input.Title != nil {
 		title = strings.TrimSpace(*input.Title)
@@ -292,12 +402,34 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 	if input.Description != nil {
 		description = *input.Description
 	}
+	expectedOutcome := current.ExpectedOutcome
+	if input.ExpectedOutcome != nil {
+		expectedOutcome = strings.TrimSpace(*input.ExpectedOutcome)
+	}
+	inputs := current.Inputs
+	if input.Inputs != nil {
+		if err := validateTaskInputs(*input.Inputs); err != nil {
+			return nil, false, err
+		}
+		inputs = *input.Inputs
+	}
+	suggestedAgentID := current.SuggestedAgentID
+	if input.SuggestedAgentID != nil {
+		suggestedAgentID = *input.SuggestedAgentID
+	}
+	inputsJSON, err := json.Marshal(inputs)
+	if err != nil {
+		return nil, false, err
+	}
 
 	scheduleKind, scheduleExpression, scheduleTimezone := current.ScheduleKind, current.ScheduleExpression, current.ScheduleTimezone
 	scheduleOverlap, scheduleCatchup, scheduleEnabled := current.ScheduleOverlapPolicy, current.ScheduleCatchupPolicy, current.ScheduleEnabled
 	nextRunAt := current.NextRunAt
 	scheduleChanged, addingSchedule := false, false
 	if input.Schedule != nil {
+		if draftState(current.State) {
+			return nil, false, validationError("drafts cannot have a schedule")
+		}
 		if terminalState(current.State) {
 			return nil, false, errTerminalTask
 		}
@@ -326,6 +458,9 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 		}
 		if !validTransition(current.State, state) {
 			return nil, false, errTerminalTask
+		}
+		if draftState(current.State) && state != stateDraft && state != stateCancelled {
+			return nil, false, validationError("use start to begin a draft")
 		}
 	} else if addingSchedule {
 		state = stateWaiting
@@ -360,6 +495,9 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 		step = "Completed"
 	}
 	if input.AssignedThreadID != nil {
+		if draftState(current.State) {
+			return nil, false, validationError("drafts cannot be assigned a thread before start")
+		}
 		assigned = strings.TrimSpace(*input.AssignedThreadID)
 		if assigned != current.AssignedThreadID {
 			execution = ""
@@ -383,7 +521,8 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 	if input.Error != nil {
 		failure = strings.TrimSpace(*input.Error)
 	}
-	changed := title != current.Title || description != current.Description || scheduleChanged ||
+	changed := title != current.Title || description != current.Description || expectedOutcome != current.ExpectedOutcome ||
+		!equalTaskInputs(inputs, current.Inputs) || suggestedAgentID != current.SuggestedAgentID || scheduleChanged ||
 		state != current.State || !equalProgress(progress, current.Progress) || step != current.CurrentStep ||
 		assigned != current.AssignedThreadID || execution != current.ExecutionThreadID || result != current.Result ||
 		resultReference != current.ResultReference || failure != current.Error
@@ -447,19 +586,19 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 		enabledValue = 1
 	}
 	if input.Schedule != nil {
-		_, err = tx.Exec(`UPDATE tasks SET title=?, description=?, state=?, progress=?, current_step=?,
+		_, err = tx.Exec(`UPDATE tasks SET title=?, description=?, expected_outcome=?, inputs_json=?, suggested_agent_id=?, state=?, progress=?, current_step=?,
 			assigned_thread_id=?, execution_thread_id=?, accepted_at=?, telemetry_reference=?, result=?,
 			result_reference=?, error=?, schedule_kind=?, schedule_expression=?, schedule_timezone=?,
 			schedule_enabled=?, schedule_overlap_policy=?, schedule_catchup_policy=?, next_run_at=?,
-			agent_settle_deadline_at=?, updated_at=?, started_at=?, completed_at=? WHERE id=?`, title, description, state,
-			progressValue, step, assigned, execution, acceptedValue, telemetryReference, result, resultReference,
+			agent_settle_deadline_at=?, updated_at=?, started_at=?, completed_at=? WHERE id=?`, title, description,
+			expectedOutcome, string(inputsJSON), nullableInt(suggestedAgentID), state, progressValue, step, assigned, execution, acceptedValue, telemetryReference, result, resultReference,
 			failure, scheduleKind, scheduleExpression, scheduleTimezone, enabledValue, scheduleOverlap,
 			scheduleCatchup, nextRunValue, settleDeadline, now.Format(timeFormat), started, completed, id)
 	} else {
-		_, err = tx.Exec(`UPDATE tasks SET title=?, description=?, state=?, progress=?, current_step=?,
+		_, err = tx.Exec(`UPDATE tasks SET title=?, description=?, expected_outcome=?, inputs_json=?, suggested_agent_id=?, state=?, progress=?, current_step=?,
 			assigned_thread_id=?, execution_thread_id=?, accepted_at=?, telemetry_reference=?, result=?,
 			result_reference=?, error=?, schedule_enabled=?, next_run_at=?, agent_settle_deadline_at=?, updated_at=?, started_at=?, completed_at=?
-			WHERE id=?`, title, description, state, progressValue, step, assigned, execution,
+			WHERE id=?`, title, description, expectedOutcome, string(inputsJSON), nullableInt(suggestedAgentID), state, progressValue, step, assigned, execution,
 			acceptedValue, telemetryReference, result, resultReference, failure, enabledValue, nextRunValue, settleDeadline, now.Format(timeFormat),
 			started, completed, id)
 	}
@@ -492,7 +631,9 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 	changedFields := []string{}
 	for field, fieldChanged := range map[string]bool{
 		"title": title != current.Title, "description": description != current.Description,
-		"schedule": scheduleChanged, "state": state != current.State,
+		"expected_outcome": expectedOutcome != current.ExpectedOutcome, "inputs": !equalTaskInputs(inputs, current.Inputs),
+		"suggested_agent_id": suggestedAgentID != current.SuggestedAgentID,
+		"schedule":           scheduleChanged, "state": state != current.State,
 		"progress": !equalProgress(progress, current.Progress), "current_step": step != current.CurrentStep,
 		"assigned_thread_id":  assigned != current.AssignedThreadID,
 		"execution_thread_id": execution != current.ExecutionThreadID,
@@ -588,6 +729,9 @@ func (s *taskStore) MarkDispatched(id, actor string, at time.Time) (*Task, bool,
 		return nil, false, err
 	}
 	if current.DispatchedAt != nil || terminalState(current.State) {
+		return current, false, nil
+	}
+	if current.State == stateDraft {
 		return current, false, nil
 	}
 	at = at.UTC()
@@ -818,11 +962,11 @@ func (s *taskStore) Counts(projectID string, agentID int64, includeRuns bool) (T
 		where += ` AND parent_task_id=''`
 	}
 	sum := func(condition string) string { return `COALESCE(SUM(CASE WHEN ` + condition + ` THEN 1 ELSE 0 END),0)` }
-	columns := []string{sum(`state IN ('queued','running','waiting','blocked') AND NOT ` + definitionPredicate)}
+	columns := []string{sum(`state='draft'`), sum(`state IN ('queued','running','waiting','blocked') AND NOT ` + definitionPredicate)}
 	for _, state := range []string{stateQueued, stateRunning, stateWaiting, stateBlocked, stateCompleted, stateFailed, stateCancelled} {
 		columns = append(columns, sum("state='"+state+"'"))
 	}
 	columns = append(columns, sum(definitionPredicate+` AND state='waiting' AND schedule_enabled=1`), sum(definitionPredicate+` AND state='waiting' AND schedule_enabled=0`))
-	err := s.db.QueryRow(`SELECT `+strings.Join(columns, ",")+` FROM tasks`+where, args...).Scan(&out.Active, &out.Queued, &out.Running, &out.Waiting, &out.Blocked, &out.Completed, &out.Failed, &out.Cancelled, &out.Scheduled, &out.Paused)
+	err := s.db.QueryRow(`SELECT `+strings.Join(columns, ",")+` FROM tasks`+where, args...).Scan(&out.Draft, &out.Active, &out.Queued, &out.Running, &out.Waiting, &out.Blocked, &out.Completed, &out.Failed, &out.Cancelled, &out.Scheduled, &out.Paused)
 	return out, err
 }

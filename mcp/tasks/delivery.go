@@ -43,6 +43,9 @@ func enqueueDeliveryTx(tx *sql.Tx, task *Task, target, eventType, key string, at
 }
 
 func enqueueCreatedTaskTx(tx *sql.Tx, task *Task, at time.Time) error {
+	if draftState(task.State) {
+		return nil
+	}
 	if task.ScheduledFor != nil {
 		eventType := "task.ready"
 		if task.RecoveryOfTaskID != "" {

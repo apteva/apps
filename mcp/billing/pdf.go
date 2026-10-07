@@ -21,7 +21,7 @@ package main
 //   - GET /invoices/{id}/pdf            → application/pdf bytes
 //   - invoices_render_pdf MCP tool      → {pdf_base64} or, with
 //                                          save_to_storage=true,
-//                                          {file_id, signed_url}
+//                                          {file_id, url, expires_at}
 //                                          via the storage app.
 
 import (

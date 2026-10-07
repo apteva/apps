@@ -1,0 +1,66 @@
+name: share-invoice-pdf
+description: Real Billing to Storage upload returns a signed link while keeping the invoice private.
+timeout: 120s
+max_iterations: 8
+runs: 3
+required_pass_rate: 1.0
+setup:
+  mode: autonomous
+  interaction: thread
+  thread:
+    id: invoice-delivery
+    directive: Deliver an existing invoice PDF using Billing. Report tool outcomes accurately. Send the final answer to main with send, including the exact returned URL and expiry or the specific storage_error. Only call done after sending this answer to main.
+    tools: [search_tools, send, done, pace]
+    mcp: [billing]
+  app:
+    path: ./
+    bindings: {storage: app}
+  seed_mcp_calls:
+    - app: billing
+      tool: customers_upsert_by_email
+      thread_id: fixture-setup
+      args: {email: pdf@example.test, defaults: {name: PDF Customer}}
+    - app: billing
+      tool: invoices_create
+      thread_id: fixture-setup
+      args:
+        customer_id: 1
+        line_items:
+          - {description: Service, quantity: 1, unit_price_cents: 1000}
+    - app: billing
+      tool: invoices_finalize
+      thread_id: fixture-setup
+      args: {invoice_id: 1}
+directive: |
+  The invoice-delivery request thread owns the invoice PDF request. Wait for
+  its final answer, then stop. Do not duplicate its work or change invoices.
+prompt: |
+  Give me a shareable PDF link for existing invoice 1. Keep the invoice file
+  private and tell me when the link expires. Use Billing to render and save
+  the PDF, and return the URL it supplies. Do not paste PDF base64.
+trajectory_assert:
+  - tool_called_with:
+      tool: invoices_render_pdf
+      args: {invoice_id: 1, save_to_storage: true}
+      count: 1
+      success: true
+      result_contains: sig=
+  - tool_called_with:
+      tool: invoices_render_pdf
+      args: {invoice_id: 1, save_to_storage: true}
+      count: 1
+      success: true
+      result_contains: '"shareable":true'
+  - tool_not_called: invoices_create | invoices_finalize | files_upload | files_set_visibility
+  - iterations_at_most: 8
+outcome_assert:
+  - agent_response_contains: sig=
+    thread_id: invoice-delivery
+  - agent_response_contains: expires | expiry | expire | expiration
+    thread_id: invoice-delivery
+  - http: GET /api/apps/billing/invoices?status=open
+    expect_count_at: invoices
+    expect_count: 1
+budget:
+  total_tokens: 650000
+  cost_usd: 0.50

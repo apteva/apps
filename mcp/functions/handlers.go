@@ -377,8 +377,18 @@ func (a *App) handleHTTPInvocationsCollection(w http.ResponseWriter, r *http.Req
 		return
 	}
 	limit := atoiDefault(r.URL.Query().Get("limit"), 50, 200)
-	out, err := dbRecentInvocations(globalCtx.AppDB(), pid, limit)
+	query := InvocationQuery{
+		FunctionID: parseInt64(r.URL.Query().Get("function_id")),
+		Status:     strings.TrimSpace(r.URL.Query().Get("status")),
+		Limit:      limit,
+		Cursor:     parseInt64(r.URL.Query().Get("cursor")),
+	}
+	out, err := dbRecentInvocationsContext(r.Context(), globalCtx.AppDB(), pid, query)
 	if err != nil {
+		if strings.HasPrefix(err.Error(), "invalid invocation status") {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -1166,6 +1176,13 @@ func (a *App) toolLogs(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"exit_code":     inv.ExitCode,
 		"started_at":    inv.StartedAt,
 		"finished_at":   inv.FinishedAt,
+		"duration_ms":   inv.DurationMS,
+		"build_ms":      inv.BuildMS,
+		"queue_ms":      inv.QueueMS,
+		"cold_start_ms": inv.ColdStartMS,
+		"execution_ms":  inv.ExecutionMS,
+		"resources":     inv.Resources,
+		"version_id":    inv.VersionID,
 	}, nil
 }
 

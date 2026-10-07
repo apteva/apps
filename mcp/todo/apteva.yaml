@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: todo
 display_name: Todo
-version: 0.4.12
+version: 0.4.14
 description: |
   Personal todo list — human-first counterpart to the agent mission
   board (`tasks`). Inbox / Today / Upcoming views, lists (the
@@ -32,18 +32,18 @@ provides:
   mcp_tools:
     - { name: todos_quick_add,   description: "Create a todo from a single natural-language line ('call the plumber tomorrow p1 #home'). Returns the parsed row." }
     - { name: todos_create,      description: "Create a todo with structured fields. Args: title, list_id?, priority?, due_at?, notes?, tags?, rrule?." }
-    - { name: todos_list,        description: "List todos. Args: view? (inbox|today|upcoming|overdue|all|done), list_id?, tag?, limit?, tz_offset? (minutes east of UTC; sets where 'today' ends). Snoozed-to-later-today rows stay in the today view." }
+    - { name: todos_list,        description: "List or search todos. Args: view?, q?, status? (open|done|cancelled|any), list_id?, group_id?, tag?, limit?, cursor?, format? (compact), include_total?, tz_offset?. q or compact format returns bounded discovery results; legacy calls return arrays." }
     - { name: todos_get,         description: "Read a single todo. Args: id." }
     - { name: todos_update,      description: "Update a todo. Args: id, title?, notes?, priority?, due_at?, list_id?, rrule?, tags?." }
     - { name: todos_complete,    description: "Mark a todo as done. For recurring todos, rolls the next occurrence forward. Args: id." }
     - { name: todos_uncomplete,  description: "Re-open a completed todo. Args: id." }
     - { name: todos_snooze,      description: "Push a todo's due_at out. Args: id, until (RFC3339) or for ('1h'|'tomorrow'|'next_week')." }
     - { name: todos_delete,      description: "Delete a todo. Args: id." }
-    - { name: lists_list,        description: "List the user-facing buckets in this scope." }
+    - { name: lists_list,        description: "List or search user-facing buckets. Args: q?, id?, group_id?, include_archived?, limit?, cursor?, format? (compact), include_total?." }
     - { name: lists_create,      description: "Create a list. Args: name, color?." }
     - { name: lists_update,      description: "Update a list. Args: id, name?, color?, archived?, group_id? (0 to ungroup)." }
     - { name: lists_delete,      description: "Delete a list. Todos in it move to inbox. Args: id." }
-    - { name: list_groups_list,   description: "List the list-groups (sidebar containers above lists) in this scope." }
+    - { name: list_groups_list,   description: "List or search list-groups. Args: q?, id?, include_archived?, limit?, cursor?, format? (compact), include_total?." }
     - { name: list_groups_create, description: "Create a list-group. Args: name, color?." }
     - { name: list_groups_update, description: "Update a list-group. Args: id, name?, color?, archived?." }
     - { name: list_groups_delete, description: "Delete a list-group. Member lists become ungrouped (group_id → NULL). Args: id." }

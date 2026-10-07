@@ -39,6 +39,7 @@ const (
 type actorDefinition struct {
 	Operations    map[string]actorOperation `json:"operations,omitempty"`
 	SchemaVersion int                       `json:"schema_version"`
+	Crawl         *crawlDefinition          `json:"crawl,omitempty"`
 	Defaults      map[string]any            `json:"defaults,omitempty"`
 	Presets       map[string]map[string]any `json:"presets,omitempty"`
 	Browser       actorBrowser              `json:"browser"`
@@ -68,27 +69,58 @@ type actorLimits struct {
 }
 
 type actorStep struct {
-	Text       string                `json:"text,omitempty"`
-	Key        string                `json:"key,omitempty"`
-	Direction  string                `json:"direction,omitempty"`
-	Amount     int                   `json:"amount,omitempty"`
-	Action     string                `json:"action"`
-	URL        string                `json:"url,omitempty"`
-	Locator    actorLocator          `json:"locator,omitempty"`
-	Optional   bool                  `json:"optional,omitempty"`
-	Items      string                `json:"items,omitempty"`
-	Fields     map[string]actorField `json:"fields,omitempty"`
-	MaxPages   any                   `json:"max_pages,omitempty"`
-	Duration   any                   `json:"duration_ms,omitempty"`
-	Label      string                `json:"label,omitempty"`
-	Host       string                `json:"host,omitempty"`
-	PathPrefix string                `json:"path_prefix,omitempty"`
+	Text               string                `json:"text,omitempty"`
+	Key                string                `json:"key,omitempty"`
+	Direction          string                `json:"direction,omitempty"`
+	Amount             int                   `json:"amount,omitempty"`
+	Action             string                `json:"action"`
+	URL                string                `json:"url,omitempty"`
+	Locator            actorLocator          `json:"locator,omitempty"`
+	ExpectedText       string                `json:"expected_text,omitempty"`
+	ExpectedEffect     string                `json:"expected_effect,omitempty"`
+	ConfirmConsequence string                `json:"confirm_consequence,omitempty"`
+	Optional           bool                  `json:"optional,omitempty"`
+	Items              string                `json:"items,omitempty"`
+	Fields             map[string]actorField `json:"fields,omitempty"`
+	MaxPages           any                   `json:"max_pages,omitempty"`
+	Duration           any                   `json:"duration_ms,omitempty"`
+	Label              string                `json:"label,omitempty"`
+	Host               string                `json:"host,omitempty"`
+	PathPrefix         string                `json:"path_prefix,omitempty"`
+	// Media inputs are generic; Computer resolves the source and attaches it
+	// to the semantic target selected by locator.
+	SourceURL   string               `json:"source_url,omitempty"`
+	Base64      string               `json:"base64,omitempty"`
+	FilePath    string               `json:"file_path,omitempty"`
+	Filename    string               `json:"filename,omitempty"`
+	MIMEType    string               `json:"mime_type,omitempty"`
+	Mode        string               `json:"mode,omitempty"`
+	NewlineMode string               `json:"newline_mode,omitempty"`
+	Conditions  []actorWaitCondition `json:"conditions,omitempty"`
+	Match       string               `json:"match,omitempty"`
+	TimeoutMS   any                  `json:"timeout_ms,omitempty"`
+	Checked     any                  `json:"checked,omitempty"`
+	Value       string               `json:"value,omitempty"`
+	Values      []string             `json:"values,omitempty"`
+	Readability *bool                `json:"readability,omitempty"`
+	OnceKey     string               `json:"once_key,omitempty"`
+}
+
+type actorWaitCondition struct {
+	Type          string `json:"type"`
+	Value         string `json:"value,omitempty"`
+	Selector      string `json:"selector,omitempty"`
+	TargetID      string `json:"target_id,omitempty"`
+	State         string `json:"state,omitempty"`
+	CaseSensitive bool   `json:"case_sensitive,omitempty"`
 }
 
 type actorLocator struct {
 	Text     string `json:"text,omitempty"`
 	Role     string `json:"role,omitempty"`
 	Selector string `json:"selector,omitempty"`
+	Exact    bool   `json:"exact,omitempty"`
+	SOMOnly  bool   `json:"som_only,omitempty"`
 }
 
 type actorField struct {
@@ -96,6 +128,7 @@ type actorField struct {
 	Type      string `json:"type,omitempty"`
 	Attribute string `json:"attribute,omitempty"`
 	Required  bool   `json:"required,omitempty"`
+	Pattern   string `json:"pattern,omitempty"`
 }
 
 type actorRecord struct {
@@ -120,8 +153,8 @@ type actorQueuedRun struct {
 }
 
 func (a *App) actorTools() []sdk.Tool {
-	definitionSchema := map[string]any{"type": "object", "description": "Version 1 actor definition: defaults, presets, browser (including saved context_id), allowed_hosts, limits, and either steps plus output_schema or named operations each containing steps and output_schema. See /actors skill for an example."}
-	return []sdk.Tool{
+	definitionSchema := map[string]any{"type": "object", "description": "Version 1 actor definition uses browser steps. Version 2 uses crawl.seeds, crawl.routes, crawl.datasets, and a durable frontier. Both use browser, allowed_hosts, and limits."}
+	return append([]sdk.Tool{
 		{
 			Name: "actors_save", Description: "Create or update a reusable browser actor. Updating increments its revision; expected_revision prevents lost updates.",
 			InputSchema: schemaObject(map[string]any{
@@ -184,7 +217,7 @@ func (a *App) actorTools() []sdk.Tool {
 			Name: "actors_unschedule", Description: "Cancel a Jobs-owned actor schedule.",
 			InputSchema: schemaObject(map[string]any{"job_id": map[string]any{"type": "integer"}}, []string{"job_id"}), Handler: a.toolActorUnschedule,
 		},
-	}
+	}, a.crawlTools()...)
 }
 
 func decodeActorDefinition(raw any) (actorDefinition, string, error) {
@@ -207,6 +240,32 @@ func decodeActorDefinition(raw any) (actorDefinition, string, error) {
 }
 
 func validateActorDefinition(def actorDefinition) error {
+	if def.SchemaVersion == 2 {
+		if len(def.Operations) > 0 || len(def.Steps) > 0 {
+			return errors.New("schema version 2 uses crawl and does not support steps or operations")
+		}
+		if def.Crawl == nil {
+			return errors.New("definition.crawl is required for schema version 2")
+		}
+		if err := validateCrawlDefinition(*def.Crawl); err != nil {
+			return err
+		}
+		// Reuse the same browser/host validation for both schema versions.
+		common := def
+		common.SchemaVersion = 1
+		common.Crawl = nil
+		common.Steps = []actorStep{{Action: "wait"}}
+		common.OutputSchema = nil
+		if err := validateActorDefinition(common); err != nil {
+			return err
+		}
+		for _, seed := range def.Crawl.Seeds {
+			if !strings.Contains(seed, "{{") && !hostAllowed(seed, def.AllowedHosts) {
+				return errors.New("crawl seed is outside allowed_hosts")
+			}
+		}
+		return nil
+	}
 	if len(def.Operations) > 0 {
 		if len(def.Steps) > 0 || len(def.Operations) > 50 {
 			return errors.New("use either steps or up to 50 named operations")
@@ -294,8 +353,42 @@ func validateActorDefinition(def actorDefinition) error {
 	for i, step := range def.Steps {
 		switch step.Action {
 		case "fill":
-			if step.Locator.Selector == "" {
-				return fmt.Errorf("steps[%d].locator.selector is required for fill", i)
+			if !locatorHasTarget(step.Locator) {
+				return fmt.Errorf("steps[%d].locator is required for fill", i)
+			}
+		case "set_text":
+			if !locatorHasTarget(step.Locator) {
+				return fmt.Errorf("steps[%d].locator is required for set_text", i)
+			}
+		case "set_checked", "select_option", "set_temporal":
+			if !locatorHasTarget(step.Locator) {
+				return fmt.Errorf("steps[%d].locator is required for %s", i, step.Action)
+			}
+			if step.Action == "set_checked" {
+				if _, ok := step.Checked.(bool); !ok && !actorTemplateValue(stringFromAny(step.Checked)) {
+					return fmt.Errorf("steps[%d].checked must be a boolean or template", i)
+				}
+			} else if step.Value == "" && (step.Action != "select_option" || len(step.Values) == 0) {
+				return fmt.Errorf("steps[%d].value is required for %s", i, step.Action)
+			}
+		case "upload_file":
+			if !locatorHasTarget(step.Locator) {
+				return fmt.Errorf("steps[%d].locator is required for upload_file", i)
+			}
+			sources := 0
+			for _, source := range []string{step.SourceURL, step.Base64, step.FilePath} {
+				if strings.TrimSpace(source) != "" {
+					sources++
+				}
+			}
+			if sources != 1 {
+				return fmt.Errorf("steps[%d] upload_file requires exactly one of source_url, base64, or file_path", i)
+			}
+			if step.SourceURL != "" && !actorTemplateValue(step.SourceURL) {
+				u, err := url.Parse(step.SourceURL)
+				if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+					return fmt.Errorf("steps[%d].source_url must be http or https", i)
+				}
 			}
 		case "key":
 			if step.Key == "" {
@@ -317,6 +410,9 @@ func validateActorDefinition(def actorDefinition) error {
 			if step.Locator.Text == "" && step.Locator.Role == "" && step.Locator.Selector == "" {
 				return fmt.Errorf("steps[%d].locator is required", i)
 			}
+			if step.OnceKey != "" && (step.Action != "click" || step.ExpectedEffect == "" || step.ConfirmConsequence != step.ExpectedEffect) {
+				return fmt.Errorf("steps[%d].once_key requires a click with an acknowledged expected_effect", i)
+			}
 		case "extract":
 			if strings.TrimSpace(step.Items) == "" || len(step.Fields) == 0 {
 				return fmt.Errorf("steps[%d] requires items and fields", i)
@@ -330,6 +426,10 @@ func validateActorDefinition(def actorDefinition) error {
 			}
 			if step.PathPrefix != "" && !strings.HasPrefix(step.PathPrefix, "/") {
 				return fmt.Errorf("steps[%d].path_prefix must start with /", i)
+			}
+		case "wait_for":
+			if err := validateWaitStep(step); err != nil {
+				return fmt.Errorf("steps[%d]: %w", i, err)
 			}
 		case "wait", "screenshot":
 		default:

@@ -229,7 +229,7 @@ func (a *App) toolProcedureCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err == nil {
 		ctx.EmitWithProject("procedure.created", pid, map[string]any{"procedure_id": id, "revision": 1})
 	}
-	return map[string]any{"procedure": procedure, "revision": revision, "asset": procedureAssetExample(id, 1, outputKind)}, err
+	return map[string]any{"procedure": procedure, "revision": revision, "asset": procedureAssetExample(id, 1, target, outputKind)}, err
 }
 
 func (a *App) toolProcedureRevisionCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -290,7 +290,7 @@ func (a *App) toolProcedureGet(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"procedure": procedure, "revision": revision, "asset": procedureAssetExample(id, revision.Revision, revision.OutputKind)}, nil
+	return map[string]any{"procedure": procedure, "revision": revision, "asset": procedureAssetExample(id, revision.Revision, revision.Target, revision.OutputKind)}, nil
 }
 
 func (a *App) toolProcedureList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -351,8 +351,8 @@ func getProcedure(db *sql.DB, pid string, id int64, revision int) (*ProcedureRec
 	return &p, &r, nil
 }
 
-func procedureAssetExample(id int64, revision int, outputKind string) map[string]any {
-	return map[string]any{"type": "procedural", "procedure": map[string]any{"procedure_id": id, "revision": revision, "target": "clip", "output_kind": outputKind, "parameters": map[string]any{}, "inputs": map[string]any{}}}
+func procedureAssetExample(id int64, revision int, target, outputKind string) map[string]any {
+	return map[string]any{"type": "procedural", "procedure": map[string]any{"procedure_id": id, "revision": revision, "target": target, "output_kind": outputKind, "parameters": map[string]any{}, "inputs": map[string]any{}}}
 }
 
 func validateProcedureReferences(db *sql.DB, projectID string, edit *Edit) []string {

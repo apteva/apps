@@ -30,6 +30,9 @@ apteva test ./scenarios/ --max-budget-usd 1.50
 | `03-customer-balance.yaml` | `customers_get_context` answers "what's outstanding" | Pre-flight read works; agent doesn't over-call by looping search + list. |
 | `04-void-confirmation.yaml` | void requires explicit confirmation | The skill doc says quote-back-and-confirm. Cautious-mode test pins this behavior. |
 | `05-render-pdf.yaml` | finalize → `invoices_render_pdf` returns base64 + filename | Agent picks `invoices_render_pdf` (not the `/print` HTML view) when the user wants bytes for delivery. |
+| `06-efficient-customer-lookup.yaml` | two customer searches include balances and recent payments | Replays Circlewise / Google Ads with pre-seeded records; no invoice text searches, retries, redundant context fetches, or writes. Broader legal-name matches remain candidates. Runs three times. |
+| `07-share-invoice-pdf.yaml` | render → private Storage upload → signed link | Uses real Storage; asserts a signed tool result, unchanged invoice count, and expiry reported by the agent. Tier 2 checks privacy and downloads. Runs three times. |
+| `08-storage-unlinked.yaml` | render with an absent Storage binding | PDF bytes remain available; agent explains the missing link without retries or invented URLs. Runs three times. |
 
 ## Authoring guidelines
 

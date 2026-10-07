@@ -19,7 +19,11 @@ func (a *App) toolCustomersSearch(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	rows, err := dbCustomerSearch(ctx.AppReadDB(), pid,
+	includeContext, _ := args["include_context"].(bool)
+	if includeContext {
+		limit = min(limit, 20)
+	}
+	rows, mode, err := dbCustomerSearchMatches(ctx.AppReadDB(), pid,
 		strArg(args, "q"), strArg(args, "email"), limit+1, intArg(args, "offset", 0))
 	if err != nil {
 		return nil, err
@@ -28,7 +32,20 @@ func (a *App) toolCustomersSearch(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if more {
 		rows = rows[:limit]
 	}
-	return map[string]any{"customers": rows, "count": len(rows), "has_more": more}, nil
+	out := map[string]any{"customers": rows, "count": len(rows), "has_more": more,
+		"match_mode": mode, "requires_confirmation": len(rows) > 0 && (mode == "token_candidates" || len(rows) > 1 || more || intArg(args, "offset", 0) > 0)}
+	if includeContext {
+		contexts := []map[string]any{}
+		for _, c := range rows {
+			context, err := customerBillingSummary(ctx, pid, c, intArg(args, "payments_limit", 3))
+			if err != nil {
+				return nil, err
+			}
+			contexts = append(contexts, context)
+		}
+		out["contexts"] = contexts
+	}
+	return out, nil
 }
 
 func (a *App) toolCustomersGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -58,15 +75,27 @@ func (a *App) toolCustomersGetContext(ctx *sdk.AppCtx, args map[string]any) (any
 	if c == nil {
 		return map[string]any{"customer": nil, "found": false}, nil
 	}
-	plimit := intArg(args, "payments_limit", 10)
-	if plimit <= 0 || plimit > 100 {
-		plimit = 10
+	return customerBillingContext(ctx, pid, c, intArg(args, "payments_limit", 10))
+}
+
+func customerBillingContext(ctx *sdk.AppCtx, pid string, c *Customer, plimit int) (map[string]any, error) {
+	out, err := customerBillingSummary(ctx, pid, c, plimit)
+	if err != nil {
+		return nil, err
 	}
 	openInvs, err := dbInvoiceSearch(ctx.AppReadDB(), pid, invoiceFilters{
 		customerID: c.ID, status: "open", limit: 50,
 	})
 	if err != nil {
 		return nil, err
+	}
+	out["open_invoices"] = openInvs
+	return out, nil
+}
+
+func customerBillingSummary(ctx *sdk.AppCtx, pid string, c *Customer, plimit int) (map[string]any, error) {
+	if plimit <= 0 || plimit > 100 {
+		plimit = 10
 	}
 	pays, err := dbPaymentList(ctx.AppReadDB(), pid, paymentFilters{
 		customerID: c.ID, limit: plimit,
@@ -80,7 +109,7 @@ func (a *App) toolCustomersGetContext(ctx *sdk.AppCtx, args map[string]any) (any
 	}
 	return map[string]any{
 		"customer":        c,
-		"open_invoices":   openInvs,
+		"money_unit":      "cents (100 cents = 1 currency unit)",
 		"recent_payments": pays,
 		"lifetime":        totals,
 		"found":           true,
@@ -501,44 +530,79 @@ func (a *App) toolInvoicesRenderPDF(ctx *sdk.AppCtx, args map[string]any) (any, 
 		}, nil
 	}
 
+	// Rendering already succeeded. Keep the bytes usable if the optional
+	// storage dependency is unavailable, instead of making the agent render
+	// the same invoice again just to obtain a fallback attachment.
+	fallback := func(reason string) (any, error) {
+		return map[string]any{
+			"pdf_base64":    base64.StdEncoding.EncodeToString(pdfBytes),
+			"filename":      filename,
+			"size_bytes":    len(pdfBytes),
+			"saved":         false,
+			"shareable":     false,
+			"storage_error": reason,
+		}, nil
+	}
 	folder, _ := args["folder"].(string)
 	if folder == "" {
-		// App-internal default per storage's dotted-folder convention —
-		// these are voucher PDFs the agent attaches to chat via
-		// invoice-card; users don't browse them through the storage
-		// panel directly. Caller can pass any non-dot folder to make
-		// them user-visible.
 		folder = "/.billing/invoices/"
 	}
-	// Cross-app call: hand the bytes to storage's files_upload tool.
-	// Falls back to base64 + a clear error reason if storage isn't
-	// installed for this project — keeps the agent's failure mode
-	// recoverable ("retry without save_to_storage").
 	if ctx.PlatformAPI() == nil {
-		return nil, errors.New("save_to_storage=true requires the platform API; running outside an Apteva server")
+		return fallback("Storage saving requires the Apteva platform API. Use pdf_base64 to attach this PDF; no hosted URL was created.")
 	}
-	var got struct {
-		ID int64 `json:"id"`
+	var uploaded struct {
+		ID  int64  `json:"id"`
+		URL string `json:"url"`
 	}
 	if callErr := ctx.PlatformAPI().CallAppResult("storage", "files_upload", map[string]any{
+		"_project_id":    pid,
 		"name":           filename,
 		"folder":         folder,
 		"content_base64": base64.StdEncoding.EncodeToString(pdfBytes),
 		"content_type":   "application/pdf",
 		"tags":           []any{"invoice", "billing", inv.Status},
 		"source":         "billing",
-	}, &got); callErr != nil {
-		return nil, fmt.Errorf("save_to_storage: storage app call failed (%w) — install the storage app or retry with save_to_storage=false", callErr)
+		"visibility":     "private",
+	}, &uploaded); callErr != nil {
+		reason := fmt.Sprintf("Storage upload failed (%v). Use pdf_base64 to attach this PDF; no hosted URL was created.", callErr)
+		if strings.Contains(callErr.Error(), "app not bound") || strings.Contains(callErr.Error(), "app is not bound") {
+			reason = "Storage is not linked to Billing. Select a Storage install in Billing's App dependencies (install Storage first if absent). Use pdf_base64 to attach this PDF; no hosted URL was created."
+		}
+		return fallback(reason)
 	}
-	if got.ID == 0 {
-		return nil, errors.New("save_to_storage: storage returned no file id")
+	if uploaded.ID == 0 {
+		return fallback("Storage returned no file id. Use pdf_base64 to attach this PDF; no shareable URL is available.")
 	}
-	storageID := got.ID
-	return map[string]any{
-		"file_id":    storageID,
-		"url":        fmt.Sprintf("/api/apps/storage/files/%d/content?project_id=%s", storageID, pid),
+	result := map[string]any{
+		"file_id":    uploaded.ID,
 		"filename":   filename,
 		"size_bytes": len(pdfBytes),
 		"saved":      true,
-	}, nil
+		"shareable":  false,
+	}
+	if uploaded.URL != "" {
+		// Preserve Storage's routing metadata. This is an authenticated
+		// content URL until files_get_url supplies a signed link below.
+		result["url"] = uploaded.URL
+	}
+	var signed struct {
+		URL       string `json:"url"`
+		ExpiresAt int64  `json:"expires_at"`
+	}
+	callErr := ctx.PlatformAPI().CallAppResult("storage", "files_get_url", map[string]any{
+		"_project_id": pid,
+		"id":          uploaded.ID,
+	}, &signed)
+	if callErr != nil || signed.URL == "" || signed.ExpiresAt <= time.Now().Unix() {
+		reason := "Storage returned no valid signed URL"
+		if callErr != nil {
+			reason = fmt.Sprintf("Signed URL creation failed (%v)", callErr)
+		}
+		result["storage_error"] = reason + ". The PDF is saved; retry storage.files_get_url using file_id. Any returned content URL requires authentication."
+		return result, nil
+	}
+	result["url"] = signed.URL
+	result["expires_at"] = signed.ExpiresAt
+	result["shareable"] = true
+	return result, nil
 }

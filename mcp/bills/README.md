@@ -1,8 +1,43 @@
-# Bills (v0.1.31)
+# Bills (v0.2.5)
 
 Vendors, bills, and bill payments for Apteva agents and human teams.
 The accounts-payable mirror of the `billing` app — money OUT instead
 of money in.
+
+## What's in v0.2.5
+
+PDF invoice OCR now renders filled AcroForm fields, including vendor
+details, line items, totals, and due dates. Previously, Bills sent the
+blank template to the vision model when those values lived in form
+widgets. PDFium bitmap buffers are now released after each page is
+encoded, preventing them from accumulating across uploads. Codex still
+uses GPT-6 Luna with low thinking through the existing integration.
+
+## What's in v0.2.4
+
+Codex invoice OCR now defaults to `gpt-6-luna` with low thinking,
+using the existing device-login Codex integration and native Responses
+call. The model override remains available. This applies to new uploads
+without changing existing bill records.
+
+## What's in v0.2.3
+
+Codex invoice OCR defaults to `gpt-6.1-sol` with medium thinking.
+Bills uses the native `responses_create` tool so the reasoning setting
+reaches Codex unchanged, and reads the final assistant output from the
+Responses envelope. The `ocr_llm_model` override remains available.
+Codex's subscription runtime manages its output budget; the max-token
+configuration applies to Anthropic and OpenCode.
+
+## What's in v0.2.2
+
+Codex invoice extraction now omits the unsupported `temperature`
+parameter. If extraction fails, dashboard uploads and
+`bills_create_from_file` return the extraction error without creating
+a bill. The document remains in Storage for retry. Selecting a vendor
+can no longer turn an extraction failure into a zero-amount bill.
+Agent uploads also recognize an automatically bound vision integration
+without requiring a separate `ocr_provider` setting.
 
 ## What's in v0.1.31
 

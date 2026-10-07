@@ -6,7 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
+
+type rowQuerier interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
 
 type scanner interface {
 	Scan(dest ...any) error
@@ -75,7 +80,7 @@ func listProfiles(db *sql.DB, pid, status string) ([]TargetProfile, error) {
 	return out, rows.Err()
 }
 
-func getProfile(db *sql.DB, pid string, id int64) (*TargetProfile, error) {
+func getProfile(db rowQuerier, pid string, id int64) (*TargetProfile, error) {
 	if id <= 0 {
 		return nil, errors.New("profile id required")
 	}
@@ -323,7 +328,7 @@ const candidateSelect = `SELECT id,project_id,profile_id,run_id,canonical_key,co
     fit_score,confidence_score,score_reasons_json,status,source,source_url,decision_reason,crm_contact_id,
     COALESCE(researched_at,''),COALESCE(accepted_at,''),COALESCE(rejected_at,''),COALESCE(deferred_at,''),COALESCE(enriched_at,''),created_at,updated_at FROM candidates`
 
-func getCandidate(db *sql.DB, pid string, id int64) (*Candidate, error) {
+func getCandidate(db rowQuerier, pid string, id int64) (*Candidate, error) {
 	c, err := scanCandidateRow(db.QueryRow(candidateSelect+` WHERE project_id=? AND id=?`, pid, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -410,7 +415,37 @@ func listCandidates(db *sql.DB, pid string, filter candidateFilter) ([]Candidate
 	return out, total, rows.Err()
 }
 
+// Keep the read, patch and derived scores in one SQLite transaction. A
+// concurrent writer invalidates a read snapshot rather than overwriting its
+// changes; retry the entire edit against the newly committed record.
 func updateCandidate(db *sql.DB, pid string, id int64, args map[string]any) (*Candidate, error) {
+	var lastErr error
+	for attempt := 0; attempt < 20; attempt++ {
+		tx, err := db.Begin()
+		var candidate *Candidate
+		if err == nil {
+			candidate, err = updateCandidateTx(tx, pid, id, args)
+			if err == nil {
+				err = tx.Commit()
+			}
+			if err != nil {
+				_ = tx.Rollback()
+			}
+		}
+		if err == nil {
+			return candidate, nil
+		}
+		var coded interface{ Code() int }
+		if !errors.As(err, &coded) || (coded.Code()&0xff != 5 && coded.Code()&0xff != 6) {
+			return nil, err
+		}
+		lastErr = err
+		time.Sleep(time.Duration(min(attempt+1, 10)) * 5 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("candidate edit remained busy: %w", lastErr)
+}
+
+func updateCandidateTx(db *sql.Tx, pid string, id int64, args map[string]any) (*Candidate, error) {
 	c, err := getCandidate(db, pid, id)
 	if err != nil || c == nil {
 		if err == nil {
@@ -459,7 +494,10 @@ func updateCandidate(db *sql.DB, pid string, id int64, args map[string]any) (*Ca
 	if err != nil || p == nil {
 		return nil, fmt.Errorf("load target profile: %w", err)
 	}
-	evidenceCount, _ := countEvidence(db, pid, c.ID)
+	evidenceCount, err := countEvidence(db, pid, c.ID)
+	if err != nil {
+		return nil, err
+	}
 	fit, confidence, reasons := scoreCandidate(p, c, evidenceCount)
 	_, err = db.Exec(`UPDATE candidates SET company_name=?,company_domain=?,website=?,person_first_name=?,person_last_name=?,person_display_name=?,job_title=?,email=?,phone=?,summary=?,source_url=?,fit_score=?,confidence_score=?,score_reasons_json=?,updated_at=? WHERE project_id=? AND id=?`,
 		c.CompanyName, c.CompanyDomain, c.Website, c.PersonFirstName, c.PersonLastName, c.PersonDisplayName, c.JobTitle, c.Email, c.Phone,
@@ -585,7 +623,7 @@ func listEvidence(db *sql.DB, pid string, candidateID int64) ([]Evidence, error)
 	return out, rows.Err()
 }
 
-func countEvidence(db *sql.DB, pid string, candidateID int64) (int, error) {
+func countEvidence(db rowQuerier, pid string, candidateID int64) (int, error) {
 	var count int
 	err := db.QueryRow(`SELECT COUNT(*) FROM candidate_evidence WHERE project_id=? AND candidate_id=?`, pid, candidateID).Scan(&count)
 	return count, err

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "description": "Generic hosted-video publisher example. Replace URLs and controls for your site; provide video_url as an input.",
+  "browser": {"persist": true},
+  "allowed_hosts": ["example.com"],
+  "limits": {"max_duration_seconds": 180, "step_retries": 0},
+  "steps": [
+    {"action": "goto", "url": "{{start_url}}"},
+    {"action": "fill", "locator": {"text": "Title", "exact": true, "som_only": true}, "text": "{{title}}"},
+    {"action": "click", "locator": {"text": "Video", "exact": true, "som_only": true}},
+    {"action": "click", "locator": {"text": "Embed URL", "exact": true, "som_only": true}},
+    {"action": "fill", "locator": {"text": "Video URL", "exact": true, "som_only": true}, "text": "{{video_url}}"},
+    {"action": "wait_for", "conditions": [{"type": "media_present"}], "timeout_ms": 30000},
+    {"action": "click", "locator": {"text": "Publish", "exact": true, "som_only": true}, "expected_text": "Publish", "expected_effect": "immediate_external_commit", "confirm_consequence": "immediate_external_commit"}
+  ],
+  "output_schema": {}
+}

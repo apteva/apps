@@ -40,7 +40,8 @@ type Profile struct {
 	IsDefault    bool   `json:"is_default"`
 	CreatedAt    string `json:"created_at"`
 	AccountCount int    `json:"account_count,omitempty"`
-	PostCount    int    `json:"post_count,omitempty"`
+	PostCount    int    `json:"post_count"`
+	TargetCount  int    `json:"target_count"`
 }
 
 // ─── slug helper ─────────────────────────────────────────────────────
@@ -154,6 +155,9 @@ func loadProfile(db *sql.DB, projectID string, id int64) (*Profile, error) {
 		return nil, err
 	}
 	p.IsDefault = isDefault == 1
+	if err := loadProfilePostCounts(db, &p); err != nil {
+		return nil, err
+	}
 	return &p, nil
 }
 
@@ -176,13 +180,13 @@ func (a *App) profileTools() []sdk.Tool {
 		},
 		{
 			Name:        "profile_list",
-			Description: "List profiles in the current project with their account_count + post_count. Returns [{id, slug, name, color, account_count, post_count, is_default}]. Use this when the agent prompt mentions a profile name and you need its slug/id, or to surface available brands to the operator.",
+			Description: "List profiles in the current project. Returns [{id, slug, name, color, account_count, post_count, target_count, is_default}]. post_count counts stored post records across all statuses; target_count counts their per-account delivery entries, not successful publications. Deleted or never-imported platform history is excluded. Use profile_id=id or profile=slug in post_list to retrieve a profile's posts and reconcile its counts.",
 			InputSchema: schemaObject(nil, nil),
 			Handler:     a.toolProfileList,
 		},
 		{
 			Name:        "profile_get",
-			Description: "Fetch one profile by id or slug. Returns the row + nested accounts + recent posts. Args: id?, profile? (slug). One of the two is required.",
+			Description: "Fetch one profile by id or slug. Returns the profile, nested accounts, and the same stored post_count/target_count as profile_list. Use post_list with this profile to retrieve posts. Args: id?, profile? (slug). One of the two is required.",
 			InputSchema: schemaObject(map[string]any{
 				"id":      map[string]any{"type": "integer"},
 				"profile": map[string]any{"type": "string"},
@@ -300,20 +304,29 @@ func (a *App) toolProfileList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		var isDefault int
 		if err := rows.Scan(&p.ID, &p.ProjectID, &p.Name, &p.Slug, &p.Description, &p.Color,
 			&isDefault, &p.CreatedAt); err != nil {
-			continue
+			rows.Close()
+			return nil, err
 		}
 		p.IsDefault = isDefault == 1
 		out = append(out, p)
 	}
-	rows.Close()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
 	// Second pass: counts.
 	for i := range out {
-		_ = ctx.AppDB().QueryRow(
-			`SELECT COUNT(*) FROM social_accounts WHERE profile_id=? AND status='active'`, out[i].ID,
-		).Scan(&out[i].AccountCount)
-		_ = ctx.AppDB().QueryRow(
-			`SELECT COUNT(*) FROM posts WHERE profile_id=?`, out[i].ID,
-		).Scan(&out[i].PostCount)
+		if err := ctx.AppDB().QueryRow(
+			`SELECT COUNT(*) FROM social_accounts WHERE project_id=? AND profile_id=? AND status='active'`, pid, out[i].ID,
+		).Scan(&out[i].AccountCount); err != nil {
+			return nil, err
+		}
+		if err := loadProfilePostCounts(ctx.AppDB(), &out[i]); err != nil {
+			return nil, err
+		}
 	}
 	return map[string]any{"profiles": out}, nil
 }
@@ -367,10 +380,12 @@ func (a *App) toolProfileGet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		rows.Close()
 	}
 	p.AccountCount = len(accounts)
-	_ = ctx.AppDB().QueryRow(
-		`SELECT COUNT(*) FROM posts WHERE profile_id=?`, id,
-	).Scan(&p.PostCount)
 	return map[string]any{"profile": p, "accounts": accounts}, nil
+}
+
+func loadProfilePostCounts(db *sql.DB, p *Profile) error {
+	return db.QueryRow(postCountsSQL+` FROM posts WHERE project_id=? AND profile_id=?`, p.ProjectID, p.ID).
+		Scan(&p.PostCount, &p.TargetCount)
 }
 
 func (a *App) toolProfileUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -441,7 +456,13 @@ func (a *App) toolProfileUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	updated, _ := loadProfile(ctx.AppDB(), pid, id)
+	updated, err := loadProfile(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
+	if updated == nil {
+		return nil, errors.New("updated profile not found")
+	}
 	ctx.Emit("profile.updated", map[string]any{"profile_id": id, "slug": updated.Slug})
 	return map[string]any{"profile": updated}, nil
 }

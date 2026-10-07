@@ -237,6 +237,17 @@ func TestInvocationsRoundtrip(t *testing.T) {
 	if one.ResponseBody != "first" {
 		t.Errorf("ResponseBody = %q", one.ResponseBody)
 	}
+	if one.FunctionName != "i" {
+		t.Errorf("FunctionName = %q, want i", one.FunctionName)
+	}
+
+	errors, err := dbRecentInvocationsQuery(db, testProj, InvocationQuery{Status: "errors", Limit: 50})
+	if err != nil {
+		t.Fatalf("filtered list: %v", err)
+	}
+	if len(errors) != 1 || errors[0].ID != id2 || errors[0].FunctionName != "i" {
+		t.Fatalf("filtered errors = %#v, want invocation %d for i", errors, id2)
+	}
 }
 
 func strRepeat(s string, n int) string {

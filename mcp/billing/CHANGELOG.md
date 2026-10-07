@@ -1,5 +1,41 @@
 # Billing release notes
 
+## 0.13.2
+
+- Return Storage’s signed invoice PDF URL and expiry instead of constructing an
+  authenticated relative path. Preserve Storage’s URL and project routing.
+- Upload new invoice PDFs privately through the existing `invoices_render_pdf`
+  tool; the linked Storage install supplies the signed-link TTL.
+- Preserve PDF bytes when upload fails and distinguish a missing Storage
+  binding from other failures. If signing fails after upload, retain the saved
+  file ID and report `shareable=false` so callers can retry `files_get_url`.
+- Clarify linking, expiry, partial failures, and authenticated direct PDF routes.
+- Correct the startup version log and pin app-sdk v0.95.0. No new tools or
+  database migrations.
+
+Validation: race-enabled Tier 1 tests, real Billing/Storage integration tests
+(including missing, tampered, and expired signatures), go vet, and two live-agent
+Tier 3 scenarios covering signed delivery and missing bindings, three runs each,
+plus three customer-search regression runs. All checks use the clean release
+checkout and published SDK modules without the workspace overlay.
+
+## 0.13.1
+
+- Improve the existing `customers_search` tool with exact-match ranking,
+  literal phrase matching, and labelled broader token candidates when no phrase
+  matches. Preserve project isolation, deleted-customer filtering, and pagination.
+- Add optional `include_context=true` for invoice totals and balances by currency,
+  invoice status counts, and recent payments in the same call. Context pages are
+  capped at 20 customers; broader candidates require identity confirmation.
+- Clarify customer-first account reviews and invoice text-search semantics.
+  Make integer-cent units explicit to prevent incorrect currency amounts.
+- Pin app-sdk v0.93.0. No new tools or database migrations.
+
+Validated with the complete Tier 1 suite using the published SDK without the
+workspace overlay, plus three live-agent OpenCode Go scenario runs. Each review
+used exactly two customer searches, no invoice/context follow-up calls, and no
+billing writes; amounts and candidate identity were checked.
+
 ## 0.13.0
 
 - Recover ambiguous Stripe operations with durable idempotent requests, a verified

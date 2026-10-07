@@ -48,7 +48,7 @@ func (a *App) toolIndexesCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	table, err := a.loadTableSchema(ctx, pid, tableName)
 	if err != nil {
-		return nil, err
+		return a.projectionIndexTool(ctx, pid, args, "create", err)
 	}
 	columns, err := parseIndexColumns(table, sliceArg(args, "columns"))
 	if err != nil {
@@ -97,6 +97,7 @@ func (a *App) toolIndexesCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return nil, err
 	}
 	a.plans.invalidateTable(table.ID)
+	a.invalidateSQLCaches()
 	index := TableIndex{Name: name, Columns: columns, Unique: unique, Managed: false}
 	return map[string]any{"index": index}, nil
 }
@@ -120,7 +121,7 @@ func (a *App) toolIndexesList(ctx *sdk.AppCtx, args map[string]any) (resultValue
 	}
 	table, err := a.loadTableSchema(ctx, pid, tableName)
 	if err != nil {
-		return nil, err
+		return a.projectionIndexTool(ctx, pid, args, "list", err)
 	}
 	qctx, cancel := context.WithTimeoutCause(requestContext(ctx), time.Duration(maxQueryMs(ctx))*time.Millisecond, errReadMetadataDeadline)
 	defer func() { observeReadCancellation(ctx, qctx); cancel() }()
@@ -181,7 +182,7 @@ func (a *App) toolIndexesDrop(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	table, err := a.loadTableSchema(ctx, pid, tableName)
 	if err != nil {
-		return nil, err
+		return a.projectionIndexTool(ctx, pid, args, "drop", err)
 	}
 	tx, err := beginWrite(ctx)
 	if err != nil {
@@ -210,6 +211,7 @@ func (a *App) toolIndexesDrop(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	a.plans.invalidateTable(table.ID)
+	a.invalidateSQLCaches()
 	return map[string]any{"dropped": name}, nil
 }
 
