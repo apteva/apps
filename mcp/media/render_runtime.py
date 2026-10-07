@@ -1,14 +1,16 @@
 """Guarded media runtime, embedded in the sidecar; Python 3 standard library only.
 
 Runs against materialized local sources on either executor. Never uploads bytes.
-The caller runs the common every-frame trim validator before uploading.
+Shared validation evidence is checked by the caller before uploading.
 """
+import hashlib
 import json
 import math
 import os
 import re
 import struct
 import subprocess
+import threading
 import sys
 from fractions import Fraction
 
@@ -203,6 +205,90 @@ def packets(binary, source, start, end):
         "-show_entries", "packet=pts_time,dts_time,duration_time,flags"]).get("packets", [])
 
 
+def runtime_event(req, stage, diagnostics=None):
+    if req.get("progress") and req["progress"] != "pipe:1":
+        with open(req["progress"], "w"):
+            pass
+    state = req.setdefault("_live_diagnostics", {})
+    state.update(diagnostics or {})
+    event = {"stage": stage, "diagnostics": state}
+    raw = json.dumps(event, allow_nan=False)
+    with open("runtime-status.json.tmp", "w") as f:
+        f.write(raw)
+    os.replace("runtime-status.json.tmp", "runtime-status.json")
+    if req.get("progress") == "pipe:1":
+        print("APTEVA_STATUS:" + raw, flush=True)
+
+
+def packet_signature(binary, source):
+    info = probe(binary, source, ["-select_streams", "v:0", "-show_packets", "-show_data_hash", "sha256",
+        "-show_entries", "packet=pts_time,dts_time,duration_time,data_hash"])
+    data = info.get("packets", [])
+    if not data or any(not p.get("data_hash") for p in data):
+        raise ValueError("missing video packet signature")
+    return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def run_with_progress(binary, args, progress):
+    p = subprocess.Popen([binary] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    log = []
+    def read_log():
+        target = open(progress, "w") if progress != "pipe:1" else None
+        try:
+            for line in p.stderr:
+                if re.match(r"(?:out_time_ms|speed|progress)=", line):
+                    if target:
+                        target.write(line)
+                        target.flush()
+                    else:
+                        print(line.rstrip(), flush=True)
+                else:
+                    log.append(line)
+        finally:
+            if target:
+                target.close()
+    reader = threading.Thread(target=read_log)
+    reader.start()
+    out = p.stdout.read()
+    p.wait()
+    reader.join()
+    err = "".join(log)
+    if p.returncode:
+        raise ValueError("media_runtime_failed: " + err[-3000:])
+    return out, err
+
+
+def scan_video(req, source, duration):
+    """Decode output once for picture hashes, black frames and both timelines."""
+    runtime_event(req, "validation")
+    out, log = run_with_progress(req["ffmpeg"], ["-progress", "pipe:2", "-filter_threads", "1", "-hide_banner", "-nostats", "-v", "info", "-xerror",
+        "-threads", "2", "-i", source, "-map", "0:v:0", "-map", "0:a:0?",
+        "-vf", "blackdetect=d=0:pix_th=0.10,metadata=mode=print:key=lavfi.black_end,showinfo=checksum=0",
+        "-af", "ashowinfo", "-fps_mode", "passthrough", "-enc_time_base", "demux", "-f", "framemd5", "-"], req["progress"])
+    frames = parse_frame_hashes(out)
+    # Canonical decoded timestamps come from the hash muxer. showinfo supplies
+    # picture durations; do not count FFmpeg's possibly interleaved log lines.
+    shown = re.findall(r"pts_time:([-0-9.e+]+)\s+duration:\s*[-0-9]+\s+duration_time:([-0-9.e+]+)", log)
+    last_duration = float(shown[-1][1]) if shown else 0
+    audio = re.findall(r"pts_time:([-0-9.e+]+)\s+fmt:\S+\s+channels:.*?rate:(\d+).*?nb_samples:(\d+)", log)
+    compact = [line for line in log.splitlines() if "black_start:" in line or "lavfi.black_end=" in line]
+    if frames:
+        compact.append("APTEVA_VIDEO_SCAN count=%d first=%.9f last=%.9f duration=%.9f" %
+                       (len(frames), frames[0][0], frames[-1][0], last_duration))
+    if audio:
+        last = audio[-1]
+        compact.append("APTEVA_AUDIO_SCAN count=%d first=%.9f end=%.9f" %
+                       (len(audio), float(audio[0][0]), float(last[0]) + int(last[2]) / int(last[1])))
+    if not frames or abs(frames[0][0]) > .002 or (audio and abs(float(audio[0][0])) > .002):
+        raise ValueError("trim_validation_failed: missing decoded stream or nonzero opening timestamp")
+    if frames[-1][0] + last_duration + max(.05, 2 * last_duration) < duration:
+        raise ValueError("trim_validation_failed: video ends before requested interval")
+    text = "\n".join(compact) + "\n"
+    with open("runtime-validation.log", "w") as f:
+        f.write(text)
+    return frames, text
+
+
 def frame_hashes(binary, source, start=None, duration=None):
     args = ["-v", "error", "-xerror", "-threads", "2"]
     if start is not None:
@@ -232,7 +318,7 @@ def parse_frame_hashes(out):
             tb = float(Fraction(line.split(":", 1)[1].strip()))
         elif line and not line.startswith("#"):
             fields = line.split(",")
-            if len(fields) == 6 and tb is not None:
+            if len(fields) == 6 and tb is not None and int(fields[0]) == 0:
                 frames.append((int(fields[2]) * tb, fields[5].strip()))
     return frames
 
@@ -284,11 +370,15 @@ def copy_trim(req, info, diagnostics):
             "-t", seconds(duration), "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn", "-c:v", "copy",
             "-c:a", "aac", "-b:a", "192k", "-af", "atrim=duration=" + seconds(duration) + ",aresample=async=1:first_pts=0",
             "-ar", str(rate), "-avoid_negative_ts", "disabled", "-movie_timescale", "1000000", "-movflags", "+faststart+write_colr"] + color_args(video) + [output]
+    diagnostics["trim_diagnostics"].update({"mode": "keyframe_copy", "reencoded": False,
+        "actual_start_ms": round(first * 1000, 6), "actual_end_ms": round(last * 1000, 6),
+        "effective_video_encoding": {"codec": "copy", "source_codec": video["codec_name"]}})
+    runtime_event(req, "video_copy", {"trim_diagnostics": diagnostics["trim_diagnostics"]})
     encode(req["ffmpeg"], args)
     patch_presentation_end(output, duration)
     output_info = probe(req["ffprobe"], output)
     check_video_color(video, next((s for s in output_info["streams"] if s.get("codec_type") == "video"), {}))
-    frames = frame_hashes(req["ffmpeg"], output)
+    frames, validation_log = scan_video(req, output, duration)
     if len(frames) != len(expected) or any(abs(f[0] - t) > .001 for f, t in zip(frames, expected)):
         raise ValueError("copy_presentation_does_not_match_source_packet_timeline")
     # Decode source windows with preroll and original PTS. A key packet in
@@ -304,6 +394,9 @@ def copy_trim(req, info, diagnostics):
         "start_drift_ms": round((first - start) * 1000, 6), "end_drift_ms": round((last - end) * 1000, 6),
         "source_frames_expected": len(expected), "copy_frames_checked": len(frames),
         "source_endpoint_hashes_match": True, "effective_video_encoding": {"codec":"copy", "source_codec":video["codec_name"]}, "audio_origin":"selected_start", "presentation_cutoff": "mp4_single_edit_duration"})
+    diagnostics["trim_validation_log"] = validation_log
+    diagnostics["video_evidence"] = {"algorithm_version": "media-shared-validation-1", "decode_ok": True,
+        "frames_checked": len(frames), "packet_signature": packet_signature(req["ffprobe"], output)}
     return duration
 
 
@@ -331,6 +424,7 @@ def normalized_audio(req, info, diagnostics):
     extent = float(audio.get("duration", 0))
     extent_filter = "atrim=duration=" + seconds(extent) + "," if extent > 0 else ""
     prefix = extent_filter + filter_prefix(mode)
+    runtime_event(req, "audio_measurement")
     measured = measurement(req, req["source"], prefix)
     target = p.get("target_lufs", -16) or -16
     peak = p.get("target_peak_dbtp", -1.5)
@@ -368,12 +462,14 @@ def normalized_audio(req, info, diagnostics):
                 # the full picture comparison below remains authoritative.
                 if "vide" not in durations:
                     durations = None
+    runtime_event(req, "audio_normalization")
     encode(req["ffmpeg"], args)
+    runtime_event(req, "validation")
     if durations:
         patch_presentation_end(req["output"], max(durations.values()), durations)
     actual = measurement(req, req["output"])
     actual_i, actual_tp = float(actual["input_i"]), float(actual["input_tp"])
-    diagnostics["audio_normalization"] = {"algorithm_version": "media-two-pass-loudnorm-2", "passes": 2,
+    diagnostics["audio_normalization"] = {"algorithm_version": "media-two-pass-loudnorm-3", "passes": 2,
         "target_lufs": target, "target_peak_dbtp": peak, "internal_peak_dbtp": internal_peak,
         "source_measurements": measured, "encoded_lufs": actual_i, "encoded_peak_dbtp": actual_tp,
         "loudness_tolerance_lu": .5, "peak_tolerance_db": .1, "sample_rate": rate,
@@ -409,14 +505,28 @@ def normalized_audio(req, info, diagnostics):
         # Container duration tolerances alone cannot detect a missing picture.
         # Check every decoded source/output picture and presentation timestamp,
         # including the last picture and any hidden reorder dependencies.
-        source_frames = frame_hashes(req["ffmpeg"], req["source"])
-        output_frames = frame_hashes(req["ffmpeg"], req["output"])
-        diagnostics["audio_normalization"]["video_frames_expected"] = len(source_frames)
-        diagnostics["audio_normalization"]["video_frames_checked"] = len(output_frames)
-        if not source_frames or len(source_frames) != len(output_frames) or any(
-                abs(x[0] - y[0]) > .001 or x[1] != y[1] for x, y in zip(source_frames, output_frames)):
-            raise ValueError("audio_normalization_failed: retained video pictures or timestamps changed")
-        diagnostics["audio_normalization"]["video_pictures_match"] = True
+        evidence = p.get("_validated_video_evidence", {})
+        reused = False
+        if evidence.get("algorithm_version") == "media-shared-validation-1" and evidence.get("decode_ok") and evidence.get("frames_checked", 0) > 0:
+            signature = packet_signature(req["ffprobe"], req["source"])
+            if signature == evidence.get("packet_signature") and signature == packet_signature(req["ffprobe"], req["output"]):
+                reused = True
+                diagnostics["audio_normalization"].update({"video_frames_expected": evidence["frames_checked"],
+                    "video_frames_checked": evidence["frames_checked"], "video_validation_reused": True,
+                    "video_evidence_source_sha256": evidence.get("sha256"), "video_pictures_match": True})
+                diagnostics["video_evidence"] = dict(evidence)
+                diagnostics["video_evidence"].pop("sha256", None)
+        if not reused:
+            source_frames = frame_hashes(req["ffmpeg"], req["source"])
+            output_frames = frame_hashes(req["ffmpeg"], req["output"])
+            diagnostics["audio_normalization"].update({"video_frames_expected": len(source_frames),
+                "video_frames_checked": len(output_frames), "video_validation_reused": False})
+            if not source_frames or len(source_frames) != len(output_frames) or any(
+                    abs(x[0] - y[0]) > .001 or x[1] != y[1] for x, y in zip(source_frames, output_frames)):
+                raise ValueError("audio_normalization_failed: retained video pictures or timestamps changed")
+            diagnostics["audio_normalization"]["video_pictures_match"] = True
+            diagnostics["video_evidence"] = {"algorithm_version": "media-shared-validation-1", "decode_ok": True,
+                "frames_checked": len(output_frames), "packet_signature": packet_signature(req["ffprobe"], req["output"])}
     # Video has already been decoded and checked above; finish audio decoding.
     run(req["ffmpeg"], ["-v", "error", "-xerror", "-i", req["output"], "-map", "0:a:0", "-vn", "-sn", "-dn", "-f", "null", "-"])
     diagnostics["audio_normalization"]["decode_ok"] = True
@@ -436,16 +546,25 @@ def main(req, diagnostics):
             diagnostics["trim_diagnostics"]["limitations"] = ["Output carries the source base-layer color; Dolby Vision dynamic metadata and container signaling are not guaranteed by this workflow."]
         if video.get("color_transfer") == "arib-std-b67":
             diagnostics["trim_diagnostics"]["output_color"] = "HLG / BT.2020" if video.get("color_primaries") == "bt2020" else "HLG"
+        planned = dict(diagnostics["trim_diagnostics"])
         try:
             copy_trim(req, info, diagnostics)
         except (ValueError, OSError) as error:
+            diagnostics["trim_diagnostics"] = planned
             diagnostics["trim_diagnostics"]["fallback_reason"] = str(error)
             diagnostics["trim_diagnostics"]["mode"] = "accurate"
             diagnostics["trim_diagnostics"]["reencoded"] = True
             budget = p.get("render_budget", {})
             if budget.get("estimated_seconds", 0) > req.get("remaining_seconds", 1e10):
                 raise ValueError("render_budget_exceeded: accurate fallback estimate exceeds remaining timeout")
+            runtime_event(req, "video_encoding", {"trim_diagnostics": diagnostics["trim_diagnostics"]})
             encode(req["ffmpeg"], req["args"])
+            duration = (p["end_ms"] - p["start_ms"]) / 1000
+            if video:
+                frames, validation_log = scan_video(req, req["output"], duration)
+                diagnostics["trim_validation_log"] = validation_log
+                diagnostics["video_evidence"] = {"algorithm_version": "media-shared-validation-1", "decode_ok": True,
+                    "frames_checked": len(frames), "packet_signature": packet_signature(req["ffprobe"], req["output"])}
     else:
         normalized_audio(req, info, diagnostics)
 

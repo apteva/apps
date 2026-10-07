@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strconv"
 	"testing"
+	"time"
 
 	tk "github.com/apteva/app-sdk/testkit"
 )
@@ -140,7 +141,7 @@ func TestSidecar_SubmitTrim_QueuesRow(t *testing.T) {
 		// in this scope so any claim that does happen will fail
 		// quickly and the failed row is fine for our assertions.
 		tk.WithConfig(map[string]string{
-			"render_pool_size":      "1",
+			"render_pool_size":       "1",
 			"render_timeout_seconds": "5",
 		}),
 	)
@@ -235,13 +236,28 @@ func TestSidecar_CancelPendingRender(t *testing.T) {
 		"_project_id": "test-proj",
 		"render_id":   id,
 	})
-	// Race: the worker pool may have picked it up and failed it
-	// before we cancelled (no storage to download from). Either
-	// "cancelled" or already-terminal "failed" are acceptable; we
-	// just assert it isn't "running" / "pending" any more.
+	// Running cancellation is a request until cleanup has been confirmed.
 	status, _ := out["status"].(string)
+	if status == "running" {
+		if out["cancellation_requested"] != true || out["cancellation_confirmed"] != false {
+			t.Fatal(out)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			result := sc.MCP("media_get_render", map[string]any{"_project_id": "test-proj", "render_id": id})
+			row, _ := result["render"].(map[string]any)
+			if row == nil {
+				row = result
+			}
+			status, _ = row["status"].(string)
+			if status == "cancelled" || status == "failed" {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
 	if status != "cancelled" && status != "failed" {
-		t.Errorf("expected cancelled or already-failed, got %v (raw=%v)", status, out)
+		t.Fatalf("unconfirmed cancellation: %v", out)
 	}
 }
 

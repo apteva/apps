@@ -20,6 +20,7 @@ func recordRenderMetric(app *sdk.AppCtx, row *RenderRow, key string, value any) 
 func renderStage(app *sdk.AppCtx, row *RenderRow, name string) func() {
 	start := time.Now()
 	recordRenderMetric(app, row, "stage", name)
+	recordRenderMetric(app, row, "stage_progress_pct", nil)
 	app.EmitWithProject("render.stage", row.ProjectID, map[string]any{"render_id": row.ID, "stage": name})
 	return func() { recordRenderMetric(app, row, name+"_ms", time.Since(start).Milliseconds()) }
 }

@@ -27,6 +27,23 @@ func prepareAudioFilterParams(db *sql.DB, projectID, operation string, sourceFil
 		params = map[string]any{}
 	}
 	params["_source_sample_rate"] = rate
+	delete(params, "_validated_video_evidence")
+	delete(params, "video_evidence")
+	delete(params, "trim_validation_log")
+	if db != nil && len(sourceFileIDs) == 1 {
+		var resolved string
+		if db.QueryRow(`SELECT resolved_params FROM renders WHERE project_id=? AND output_file_id=? AND status='ok' ORDER BY id DESC LIMIT 1`, projectID, sourceFileIDs[0]).Scan(&resolved) == nil {
+			var previous map[string]any
+			if json.Unmarshal([]byte(resolved), &previous) == nil {
+				evidence, ok := previous["video_evidence"].(map[string]any)
+				// The executor checks this bound hash against fresh Storage
+				// metadata after download; indexing need not have finished.
+				if ok && evidence["sha256"] != nil && evidence["sha256"] != "" && evidence["algorithm_version"] == "media-shared-validation-1" && evidence["decode_ok"] == true {
+					params["_validated_video_evidence"] = evidence
+				}
+			}
+		}
+	}
 	out, err := json.Marshal(params)
 	if err != nil {
 		return raw

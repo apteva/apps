@@ -402,3 +402,81 @@ func TestNormalizationRejectsMissingLastPicture(t *testing.T) {
 		t.Fatal(d)
 	}
 }
+
+func TestSharedTrimValidationAndNormalizationEvidence(t *testing.T) {
+	source := guardedFixture(t, true)
+	for _, remote := range []bool{false, true} {
+		copy, result, err := runGuardedFixture(t, source, "trim", map[string]any{"start_ms": 1005, "end_ms": 2990, "trim_mode": "auto", "trim_diagnostics": map[string]any{}}, remote)
+		if err != nil {
+			t.Fatalf("%v %v", err, result)
+		}
+		rawStatus, err := os.ReadFile(filepath.Join(filepath.Dir(copy), "runtime-status.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var status map[string]any
+		if json.Unmarshal(rawStatus, &status) != nil || status["diagnostics"].(map[string]any)["trim_diagnostics"].(map[string]any)["mode"] != "keyframe_copy" {
+			t.Fatalf("lost live copy mode: %s", rawStatus)
+		}
+		evidence := result["video_evidence"].(map[string]any)
+		validation := parseTrimValidation(result["trim_validation_log"].(string))
+		if validation.Video.FramesChecked != 60 || evidence["frames_checked"] != float64(60) || checkTrimValidation(validation, 2000) != nil {
+			t.Fatalf("%+v %v", validation, evidence)
+		}
+		_, normalized, err := runGuardedFixture(t, copy, "audio_filter", map[string]any{"target_lufs": -20, "target_peak_dbtp": -3, "_validated_video_evidence": evidence}, remote)
+		if err != nil {
+			t.Fatalf("%v %v", err, normalized)
+		}
+		d := normalized["audio_normalization"].(map[string]any)
+		if d["video_validation_reused"] != true || d["video_frames_checked"] != float64(60) || d["validated"] != true {
+			t.Fatalf("remote=%v %v", remote, d)
+		}
+		// A stale/altered packet proof falls back to full picture comparison.
+		bad := map[string]any{"algorithm_version": "media-shared-validation-1", "decode_ok": true, "frames_checked": 60, "packet_signature": "wrong"}
+		_, normalized, err = runGuardedFixture(t, copy, "audio_filter", map[string]any{"target_lufs": -20, "target_peak_dbtp": -3, "_validated_video_evidence": bad}, remote)
+		if err != nil || normalized["audio_normalization"].(map[string]any)["video_validation_reused"] != false {
+			t.Fatalf("%v %v", err, normalized)
+		}
+	}
+}
+
+func TestSharedTrimHasOneFullOutputDecodeAndReuseHasNone(t *testing.T) {
+	source := guardedFixture(t, true)
+	realFFmpeg, _ := exec.LookPath("ffmpeg")
+	realProbe, _ := exec.LookPath("ffprobe")
+	dir := t.TempDir()
+	trace := filepath.Join(dir, "commands.log")
+	wrapper := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shellQuote(trace) + "\nexec " + shellQuote(realFFmpeg) + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "ffmpeg"), []byte(wrapper), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realProbe, filepath.Join(dir, "ffprobe")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	copy, result, err := runGuardedFixture(t, source, "trim", map[string]any{"start_ms": 1005, "end_ms": 2990, "trim_mode": "auto", "trim_diagnostics": map[string]any{}}, false)
+	if err != nil {
+		t.Fatalf("%v %v", err, result)
+	}
+	raw, _ := os.ReadFile(trace)
+	scans := 0
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.Contains(line, "-i "+copy) && strings.Contains(line, "-f framemd5") {
+			scans++
+		}
+	}
+	if scans != 1 {
+		t.Fatalf("full output decodes=%d: %s", scans, raw)
+	}
+	if err := os.WriteFile(trace, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, result, err = runGuardedFixture(t, copy, "audio_filter", map[string]any{"target_lufs": -20, "target_peak_dbtp": -3, "_validated_video_evidence": result["video_evidence"]}, false)
+	if err != nil {
+		t.Fatalf("%v %v", err, result)
+	}
+	raw, _ = os.ReadFile(trace)
+	if strings.Contains(string(raw), "-f framemd5") || result["audio_normalization"].(map[string]any)["video_validation_reused"] != true {
+		t.Fatalf("video unnecessarily decoded: %s %v", raw, result)
+	}
+}

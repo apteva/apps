@@ -191,6 +191,9 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 	row.Params = preprocessSmartCrop(ctx, app, sc, row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
 	row.Params = prepareTrimParams(app.AppDB(), row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
 	row.Params = prepareAudioFilterParams(db, row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
+	if len(row.SourceFileIDs) == 1 {
+		row.Params = verifySourceEvidenceIdentity(row.Params, sourceMetadata[row.SourceFileIDs[0]].SHA256)
+	}
 	if err := renderUpdateResolvedParams(db, row.ID, row.Params); err != nil {
 		return 0, fmt.Errorf("store resolved params: %w", err)
 	}
@@ -321,7 +324,13 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 
 	if row.Operation == "trim" {
 		doneValidation := renderStage(app, row, "trim_validation")
-		log, err := runCompactedFFmpeg(ctx, e.ffmpegPath, trimValidationArgs(outputPath))
+		var log string
+		var err error
+		if raw, readErr := os.ReadFile(filepath.Join(jobDir, "runtime-validation.log")); useRuntime && readErr == nil {
+			log = string(raw)
+		} else {
+			log, err = runCompactedFFmpeg(ctx, e.ffmpegPath, trimValidationArgs(outputPath))
+		}
 		validation := parseTrimValidation(log)
 		validation.DecodeOK = err == nil
 		recordRenderMetric(app, row, "trim_validation", validation)
@@ -343,6 +352,9 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 	if err != nil {
 		return 0, fmt.Errorf("upload: %w", err)
 	}
+	if err := bindVideoEvidence(ctx, app, sc, row, uploaded); err != nil {
+		return 0, err
+	}
 	saveCachedRender(ctx, app, sc, cacheKey, row.ProjectID, uploaded)
 	return uploaded, nil
 }
@@ -356,8 +368,14 @@ func forwardProgress(r io.ReadCloser, db *sql.DB, id int64, app *sdk.AppCtx, pro
 	defer r.Close()
 	scanner := bufio.NewScanner(r)
 	lastPct := 0
+	lastStagePct := -1
 	for scanner.Scan() {
 		line := scanner.Text()
+		if strings.HasPrefix(line, "APTEVA_STATUS:") {
+			persistRuntimeStatus(app, id, projectID, strings.TrimPrefix(line, "APTEVA_STATUS:"))
+			lastStagePct = -1
+			continue
+		}
 		if strings.HasPrefix(line, "speed=") {
 			if speed, err := strconv.ParseFloat(strings.TrimSuffix(strings.TrimPrefix(line, "speed="), "x"), 64); err == nil && speed > 0 {
 				recordRenderMetric(app, &RenderRow{ID: id}, "observed_encode_speed", speed)
@@ -367,6 +385,11 @@ func forwardProgress(r io.ReadCloser, db *sql.DB, id int64, app *sdk.AppCtx, pro
 			continue
 		}
 		pct := progressPctFromOutTimeLine(line, expectedDurationMs)
+		if pct > 0 && pct != lastStagePct {
+			recordRenderMetric(app, &RenderRow{ID: id}, "stage_progress_pct", pct)
+			emitRenderProgress(app, id, projectID, max(pct, lastPct), pct)
+			lastStagePct = pct
+		}
 		if pct <= 0 {
 			continue
 		}

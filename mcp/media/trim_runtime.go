@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const trimAlgorithmVersion = "media-guarded-trim-2"
+const trimAlgorithmVersion = "media-guarded-trim-3"
 
 // Preserve indexed precision and color signaling when a phone source is HDR.
 // Re-encoding is required for accurate cuts; this is not a lossless operation.
@@ -63,7 +63,15 @@ func prepareTrimParams(db *sql.DB, project, op string, sources []string, raw jso
 			}
 		}
 	}
+	delete(params, "video_evidence")
+	delete(params, "trim_validation_log")
 	params["trim_diagnostics"] = map[string]any{"algorithm_version": trimAlgorithmVersion, "mode": "accurate", "interval": "start_inclusive_end_exclusive", "video_origin": "first_retained_frame", "audio_origin": "requested_start", "reencoded": true, "actual_start_ms": params["start_ms"], "actual_end_ms": params["end_ms"]}
+	if params["trim_mode"] == "auto" {
+		d := params["trim_diagnostics"].(map[string]any)
+		d["mode"] = "selecting"
+		delete(d, "reencoded")
+	}
+
 	if encoding, ok := params["_trim_source_video"].(trimVideoEncoding); ok {
 		diagnostics := params["trim_diagnostics"].(map[string]any)
 		diagnostics["source_color"] = encoding

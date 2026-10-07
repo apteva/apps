@@ -22,8 +22,13 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.14.14
+version: 0.14.15
 description: |
+  v0.14.15 combines copy-trim picture, black-frame and timeline validation
+  into one decode. Normalization reuses trusted file-bound video evidence
+  when copied packets and presentation match. Live status reports selected
+  copy/encoding mode, validation and upload phases. Remote cancellation
+  verifies process-group shutdown and surfaces failures.
   v0.14.14 preserves exact video presentation boundaries during audio
   normalization and verifies every retained picture against the source,
   preventing last-frame loss. Analysis windows use preceding-frame coverage
@@ -290,7 +295,7 @@ provides:
           expires_after: 24h
     - { name: media_get_render,      description: "Status of one render, with original params and effective resolved_params once execution starts." }
     - { name: media_list_renders,    description: "List renders filtered by status / operation." }
-    - { name: media_cancel_render,   description: "Cancel a pending or running render. Idempotent." }
+    - { name: media_cancel_render,   description: "Request cancellation. Running jobs remain active until cleanup is confirmed; poll media_get_render. Remote stop failures are reported." }
     - { name: media_set_description, description: "Set title / description / alt_text on a media row. Partial update; omitted fields preserved." }
     - { name: media_patch_metadata,  description: "Atomically merge-patch arbitrary workflow metadata with optional path conditions and metadata-version compare-and-swap." }
     - { name: media_set_audience_rating, description: "Override audience rating (general | mature | adult | unrated). 'unrated' clears and re-queues for the describer." }
@@ -327,7 +332,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.14
+    ref: media/v0.14.15
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -854,7 +859,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_cancel_render",
-			Description: "Cancel a pending or running render. Idempotent — already-terminal rows are no-ops. Args: render_id.",
+			Description: "Request cancellation of a pending or running render. Active jobs return cancellation_requested=true and remain running until worker cleanup is confirmed; poll media_get_render. Remote stop failures are reported as remote_cancellation_failed. Already-terminal rows are idempotent no-ops. Args: render_id.",
 			InputSchema: schemaObject(map[string]any{"render_id": map[string]any{"type": "integer"}}, []string{"render_id"}),
 			Handler:     a.toolCancelRender,
 		},
@@ -2507,6 +2512,14 @@ func (a *App) toolCancelRender(ctx *sdk.AppCtx, args map[string]any) (any, error
 	// emit fires from runOneRender for running rows; the pending
 	// branch emits here since no worker ever picked it up.
 	triggered := triggerCancel(id)
+	if triggered {
+		recordRenderMetric(ctx, r, "stage", "cancelling")
+		recordRenderMetric(ctx, r, "stage_progress_pct", nil)
+		return map[string]any{"found": true, "status": "running", "cancellation_requested": true, "cancellation_confirmed": false}, nil
+	}
+	if err := cancelOrphanRemoteRender(ctx, r); err != nil {
+		return nil, err
+	}
 	if err := renderMarkCancelled(ctx.AppDB(), id); err != nil {
 		return nil, err
 	}
@@ -2882,6 +2895,16 @@ func (a *App) handleRenderItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		triggered := triggerCancel(id)
+		if triggered {
+			recordRenderMetric(globalCtx, row, "stage", "cancelling")
+			recordRenderMetric(globalCtx, row, "stage_progress_pct", nil)
+			writeJSON(w, map[string]any{"status": "running", "cancellation_requested": true, "cancellation_confirmed": false})
+			return
+		}
+		if err := cancelOrphanRemoteRender(globalCtx, row); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		if err := renderMarkCancelled(globalCtx.AppDB(), id); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

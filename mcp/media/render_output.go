@@ -121,6 +121,9 @@ func storeRenderOutputPlan(app *sdk.AppCtx, row *RenderRow, plan *opPlan) error 
 }
 
 func renderFailureCode(message string) string {
+	if strings.Contains(message, "REMOTE_CANCELLATION_FAILED") {
+		return "remote_cancellation_failed"
+	}
 	for _, code := range []string{"render_budget_exceeded", "audio_normalization_failed", "unsupported_color_preservation", "render_runtime_unavailable"} {
 		if strings.Contains(message, code+":") {
 			return code
@@ -151,7 +154,7 @@ func sanitizeSubmittedRenderParams(params map[string]any) map[string]any {
 			continue
 		}
 		switch k {
-		case "trim_diagnostics", "trim_validation", "render_budget", "audio_normalization", "runtime_error":
+		case "trim_diagnostics", "trim_validation", "render_budget", "audio_normalization", "runtime_error", "video_evidence", "trim_validation_log":
 			continue
 		}
 		out[k] = v

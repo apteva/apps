@@ -77,16 +77,20 @@ func emitRenderStarted(app *sdk.AppCtx, row *RenderRow, executor string) {
 // at most once per render; if + when ffmpeg's real -progress
 // parsing lands the throttling decision belongs to the call site,
 // not here.
-func emitRenderProgress(app *sdk.AppCtx, id int64, projectID string, pct int) {
+func emitRenderProgress(app *sdk.AppCtx, id int64, projectID string, pct int, stagePct ...int) {
 	if app == nil {
 		return
 	}
-	app.EmitWithProject(topicRenderProgress, projectID, map[string]any{
+	payload := map[string]any{
 		"render_id":    id,
 		"project_id":   projectID,
 		"progress_pct": pct,
 		"status":       "running",
-	})
+	}
+	if len(stagePct) > 0 {
+		payload["stage_progress_pct"] = stagePct[0]
+	}
+	app.EmitWithProject(topicRenderProgress, projectID, payload)
 }
 
 // emitRenderCompleted fires after renderMarkOk. output_file_id is

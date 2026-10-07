@@ -35,10 +35,10 @@ package main
 // multipart POST path works everywhere. Presigned PUT is a worthwhile
 // follow-up for S3 installs but not v1.
 //
-// Cancellation: the script writes $$ → pid before ffmpeg starts.
-// On ctx-cancel, registerRemoteKill best-effort SSHes a SIGTERM to
-// that pid. The trap on EXIT also rm -rfs the workdir so we don't
-// leave scratch around on aborts.
+// Cancellation: the script publishes its session leader before work.
+// A joined stop attempt terminates its process group and confirms no live
+// workers remain. Startup cancellation uses a workdir guard; failures remain
+// visible in render state and diagnostics. The EXIT trap cleans scratch.
 
 import (
 	"context"
@@ -114,12 +114,13 @@ func newRemoteExecutor(hostID int64, installer *remoteFFmpegInstaller, local *lo
 	}, nil
 }
 
-func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *RenderRow) (int64, error) {
+func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *RenderRow) (fileID int64, execErr error) {
 	log := app.Logger()
 	finish := renderStage(app, row, "remote_execution")
 	defer finish()
 	row.WorkDir = uniqueRemoteWorkDir(row.ID)
 	recordRenderMetric(app, row, "remote_work_dir", row.WorkDir)
+	recordRenderMetric(app, row, "remote_host_id", e.hostID)
 
 	publicURL, err := resolvePublicURL(app)
 	if err != nil {
@@ -190,6 +191,9 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 		sourceNames = append(sourceNames, sanitizeFilename(meta.Name))
 		sourceSizes = append(sourceSizes, meta.SizeBytes)
 		sourceSHA256s = append(sourceSHA256s, strings.ToLower(strings.TrimSpace(meta.SHA256)))
+		if len(signedURLs) == 1 {
+			row.Params = verifySourceEvidenceIdentity(row.Params, meta.SHA256)
+		}
 	}
 
 	folder := row.OutputFolder
@@ -217,9 +221,14 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 		"id", row.ID, "op", row.Operation, "host_id", e.hostID,
 		"sources", len(row.SourceFileIDs), "output_folder", folder)
 
-	// Per-render best-effort kill on ctx-cancel. Registered before the
+	// Per-render verified group termination on ctx-cancel. Registered before the
 	// long-running call so a cancel mid-encode hits the remote PID.
-	registerRemoteKill(ctx, app, e.hostID, row.ID, row.WorkDir)
+	finishCancellation := registerRemoteKill(ctx, app, e.hostID, row.ID, row.WorkDir)
+	defer func() {
+		if err := finishCancellation(); err != nil {
+			execErr = err
+		}
+	}()
 
 	// Live progress: poll the remote progress.log every few seconds
 	// while ffmpeg runs. Stops when Execute returns.
@@ -288,6 +297,9 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 	if err := validateRenderUploadDestination(uploaded, folder, plan.Filename); err != nil {
 		return 0, err
 	}
+	if err := bindVideoEvidence(ctx, app, sc, row, res.FileID); err != nil {
+		return 0, err
+	}
 	log.Info("remote render complete",
 		"id", row.ID, "file_id", res.FileID, "size", res.Size, "sha256", res.SHA256)
 	return res.FileID, nil
@@ -353,9 +365,10 @@ func (e *remoteExecutor) buildScript(
 	b.WriteString(`fi` + "\n")
 	b.WriteString(`mkdir -p "$WORK"` + "\n")
 	b.WriteString(`cd "$WORK"` + "\n")
-	b.WriteString("echo $$ > pid\n")
 	// Always-rm cleanup. Runs on any exit including non-zero/abort.
 	b.WriteString(`trap 'cd "$WORK_ROOT" && rm -rf "$WORK"' EXIT` + "\n")
+	b.WriteString("echo $$ > pid\n")
+	b.WriteString(`if [ -f "$WORK/cancel.requested" ]; then echo 'REMOTE_CANCEL_REQUESTED'; exit 1; fi` + "\n")
 	b.WriteString(`curl_retry() { curl -sS --retry 3 --retry-delay 1 --retry-max-time 120 --retry-connrefused --retry-all-errors "$@"; }` + "\n")
 	if row.Operation == "audio_filter" && needsRenderRuntime(row.Operation, row.Params) {
 		b.WriteString("command -v python3 >/dev/null || { echo 'render_runtime_unavailable: Python 3 is required for two-pass normalization'; exit 1; }\n")
@@ -393,9 +406,14 @@ func (e *remoteExecutor) buildScript(
 		if needsRenderRuntime(row.Operation, row.Params) {
 			validationScript = strings.Replace(validationScript, "-v expected="+formatSeconds(expectedProgressDurationMs(nil, row)), "-v expected=\"$TRIM_EXPECTED\"", 1)
 		}
-		b.WriteString(validationScript)
+		if needsRenderRuntime(row.Operation, row.Params) {
+			b.WriteString("if [ -f runtime-validation.log ]; then cat runtime-validation.log; else\n" + validationScript + "fi\n")
+		} else {
+			b.WriteString(validationScript)
+		}
 	}
 
+	b.WriteString("printf '%s\\n' '{\"stage\":\"upload\"}' > runtime-status.json.tmp; mv runtime-status.json.tmp runtime-status.json; : > progress.log\n")
 	// Stat + hash output before upload.
 	fmt.Fprintf(&b, "OUT=%s\n", shellQuote(plan.Filename))
 	b.WriteString(`SIZE=$(file_size_bytes "$OUT")` + "\n")
@@ -865,9 +883,11 @@ func pollRemoteProgress(ctx context.Context, done <-chan struct{}, app *sdk.AppC
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	lastPct := 0
-	cmd := fmt.Sprintf(
-		`tail -n 20 %s 2>/dev/null | grep -F 'out_time_ms=' | tail -1`,
-		shellQuote(filepath.Join(selectedRemoteWorkDir(renderID, workDirs), remoteProgressFilename)))
+	lastStagePct := -1
+	work := selectedRemoteWorkDir(renderID, workDirs)
+	cmd := "cat " + shellQuote(filepath.Join(work, "runtime-status.json")) + " 2>/dev/null; printf '\n'; " +
+		"tail -n 20 " + shellQuote(filepath.Join(work, remoteProgressFilename)) + " 2>/dev/null | grep -F 'out_time_ms=' | tail -1"
+	lastStatus := ""
 	for {
 		select {
 		case <-ctx.Done():
@@ -876,16 +896,35 @@ func pollRemoteProgress(ctx context.Context, done <-chan struct{}, app *sdk.AppC
 			return
 		case <-ticker.C:
 			out, _, err := runRemote(context.Background(), app, hostID, cmd, 8)
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			default:
+			}
 			if err != nil {
 				// Network blips, partial install, etc. Don't spam logs —
 				// next tick will re-attempt. Worst case: progress stays
 				// at 0 until terminal.
 				continue
 			}
+			for _, line := range strings.Split(out, "\n") {
+				if strings.HasPrefix(line, "{") && line != lastStatus {
+					persistRuntimeStatus(app, renderID, projectID, line)
+					lastStatus = line
+					lastStagePct = -1
+				}
+			}
 			if !strings.Contains(out, "out_time_ms=") {
 				continue
 			}
-			pct := progressPctFromOutTimeLine(strings.TrimSpace(out), expectedDurationMs)
+			pct := progressPctFromOutTimeLine(strings.TrimSpace(lastRemoteProgressLine(strings.TrimSpace(out))), expectedDurationMs)
+			if pct > 0 && pct != lastStagePct {
+				recordRenderMetric(app, &RenderRow{ID: renderID}, "stage_progress_pct", pct)
+				emitRenderProgress(app, renderID, projectID, max(pct, lastPct), pct)
+				lastStagePct = pct
+			}
 			if pct <= lastPct {
 				continue
 			}
@@ -896,28 +935,6 @@ func pollRemoteProgress(ctx context.Context, done <-chan struct{}, app *sdk.AppC
 			lastPct = pct
 		}
 	}
-}
-
-// registerRemoteKill spawns a tiny goroutine that, on ctx-cancel,
-// best-effort kills the remote bash by reading its captured pid and
-// SSHing a SIGTERM. Fire-and-forget — the trap in the script cleans
-// the workdir; this just makes the abort prompt instead of waiting
-// for the run-command timeout.
-func registerRemoteKill(ctx context.Context, app *sdk.AppCtx, hostID, renderID int64, workDirs ...string) {
-	go func() {
-		<-ctx.Done()
-		log := app.Logger()
-		killCmd := fmt.Sprintf(
-			`PID=$(cat %s 2>/dev/null || true); `+
-				`if [ -n "$PID" ]; then kill -TERM -- "-$PID" 2>/dev/null || true; fi`,
-			shellQuote(filepath.Join(selectedRemoteWorkDir(renderID, workDirs), "pid")))
-		// Detached background; run with its own short timeout so a
-		// dead host doesn't pin this goroutine.
-		_, _, err := runRemote(context.Background(), app, hostID, killCmd, 10)
-		if err != nil {
-			log.Warn("remote render kill failed", "id", renderID, "host_id", hostID, "err", err)
-		}
-	}()
 }
 
 // ─── helpers ───────────────────────────────────────────────────────

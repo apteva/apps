@@ -717,7 +717,7 @@ func TestSidecar_RenderPipeline_SmartCropProvenance(t *testing.T) {
 
 func TestSidecar_RenderPipeline_GuardedTrimAndNormalize(t *testing.T) {
 	skipIfNoFFmpeg(t)
-	sc := spawnMediaWithStorage(t)
+	sc := spawnMediaWithStorageFastIndexer(t)
 	source := guardedFixture(t, false)
 	bytes, err := os.ReadFile(source)
 	if err != nil {
@@ -735,6 +735,8 @@ func TestSidecar_RenderPipeline_GuardedTrimAndNormalize(t *testing.T) {
 	if d["mode"] != "keyframe_copy" || d["actual_start_ms"] != float64(1000) || d["actual_end_ms"] != float64(3000) || resolved["trim_validation"].(map[string]any)["decode_ok"] != true {
 		t.Fatal(final)
 	}
+	// Stabilize indexing metadata before testing result-cache reuse.
+	waitForIndexed(t, sc, "test-proj", final["output_file_id"].(string), 15*time.Second)
 	// The subsequent job uses the real uploaded trim and must retain its timing.
 	normalize := sc.MCP("media_audio_filter", map[string]any{"_project_id": "test-proj", "file_id": final["output_file_id"], "mode": "normalize", "target_lufs": -20, "target_peak_dbtp": -3, "output_name": "normalized.mov"})
 	normalized := pollUntilOk(t, sc, "test-proj", int64(normalize["render_id"].(float64)), 35*time.Second)
@@ -743,7 +745,7 @@ func TestSidecar_RenderPipeline_GuardedTrimAndNormalize(t *testing.T) {
 	}
 	resolved = normalized["resolved_params"].(map[string]any)
 	audio := resolved["audio_normalization"].(map[string]any)
-	if audio["validated"] != true || audio["timeline_validated"] != true || audio["sample_rate"] != float64(44100) {
+	if audio["validated"] != true || audio["timeline_validated"] != true || audio["sample_rate"] != float64(44100) || audio["video_validation_reused"] != true {
 		t.Fatal(normalized)
 	}
 	// A request-cache hit must retain the checked loudness and original app version.

@@ -22,6 +22,8 @@ interface RenderRow {
   operation: string;
   status: "pending" | "running" | "ok" | "failed" | "cancelled";
   progress_pct?: number;
+  metrics?: {stage?: string; stage_progress_pct?: number|null};
+  resolved_params?: {trim_diagnostics?: {mode?: string}};
   output_file_id?: string;
   output_name?: string;
   output_folder?: string;
@@ -133,7 +135,9 @@ export default function RenderCard({ render_id, projectId, preview }: Props) {
   }
 
   const status = statusLabel(row.status);
-  const pct = row.progress_pct ?? 0;
+  const pct = row.metrics?.stage ? (row.metrics.stage_progress_pct ?? 0) : (row.progress_pct ?? 0);
+  const stage = row.metrics?.stage?.replaceAll("_", " ");
+  const mode = row.resolved_params?.trim_diagnostics?.mode;
 
   return (
     <Card>
@@ -152,7 +156,8 @@ export default function RenderCard({ render_id, projectId, preview }: Props) {
               />
             </div>
             <div className="text-xs text-text-muted mt-1.5 font-mono">
-              {pct.toFixed(0)}%
+              {stage || "Working"}{pct > 0 ? ` · ${pct.toFixed(0)}%` : "…"}
+              {mode ? ` · ${mode === "keyframe_copy" ? "Keyframe copy" : mode === "selecting" ? "Choosing trim mode" : "Accurate encoding"}` : ""}
             </div>
           </div>
         )}

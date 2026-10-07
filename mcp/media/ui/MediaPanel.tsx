@@ -1272,7 +1272,7 @@ interface RenderRow {
   error?: string;
   started_at?: string;
   completed_at?: string;
-  metrics?: { stage?: string; result_cache_hit?: boolean };
+  metrics?: { stage?: string; stage_progress_pct?: number|null; result_cache_hit?: boolean };
  resolved_params?: {
    render_budget?: { effective_timeout_seconds:number; estimated_seconds?:number; warning?:string };
    trim_diagnostics?: { mode?:string; actual_start_ms?:number; actual_end_ms?:number; output_color?:string; fallback_reason?:string };
@@ -1357,7 +1357,7 @@ function RenderStatusCard({
   const serverEnd = row?.completed_at ? Date.parse(row.completed_at) : nowMs;
   const elapsedS = Math.max(0, Math.floor((serverEnd - serverStart) / 1000));
   const running = row.status === "pending" || row.status === "running";
-  const pct = Math.max(0, Math.min(100, row.progress_pct ?? 0));
+  const pct = Math.max(0, Math.min(100, row.metrics?.stage ? (row.metrics.stage_progress_pct ?? 0) : (row.progress_pct ?? 0)));
 
   return (
     <div className="border border-border rounded p-2 text-xs space-y-1.5">
@@ -1399,7 +1399,7 @@ function RenderStatusCard({
       {row.resolved_params?.trim_diagnostics?.actual_start_ms != null && (
         <div className="text-text-dim text-[10px]">
           Cut {(row.resolved_params.trim_diagnostics.actual_start_ms / 1000).toFixed(3)}–{((row.resolved_params.trim_diagnostics.actual_end_ms ?? 0) / 1000).toFixed(3)} s
-          {row.resolved_params.trim_diagnostics.mode === "keyframe_copy" ? " · Keyframe copy" : " · Accurate encoding"}
+          {row.resolved_params.trim_diagnostics.mode === "keyframe_copy" ? " · Keyframe copy" : row.resolved_params.trim_diagnostics.mode === "selecting" ? " · Choosing trim mode" : " · Accurate encoding"}
           {row.resolved_params.trim_diagnostics.output_color ? ` · ${row.resolved_params.trim_diagnostics.output_color}` : ""}
           {row.resolved_params.trim_diagnostics.fallback_reason && <div>Copy fallback: {row.resolved_params.trim_diagnostics.fallback_reason}</div>}
         </div>
@@ -3491,6 +3491,7 @@ interface QueueRow {
   source_file_ids: string[];
   status: string;
   progress_pct: number;
+  metrics?: {stage?: string; stage_progress_pct?: number|null};
   output_file_id?: string;
   error?: string;
   requested_by?: string;
@@ -3794,11 +3795,11 @@ function QueueRowView({ row }: { row: QueueRow }) {
           <div className="flex-1 h-1 bg-bg-input rounded overflow-hidden max-w-[200px]">
             <div
               className="h-full bg-accent transition-all"
-              style={{ width: `${Math.max(5, row.progress_pct)}%` }}
+              style={{ width: `${Math.max(5, row.metrics?.stage ? (row.metrics.stage_progress_pct ?? 0) : row.progress_pct)}%` }}
             />
           </div>
           <span className="text-text-dim text-[10px] tabular-nums">
-            {row.progress_pct}%
+            {row.metrics?.stage ? `${row.metrics.stage.replaceAll("_", " ")}${row.metrics.stage_progress_pct != null ? ` · ${row.metrics.stage_progress_pct}%` : "…"}` : `${row.progress_pct}%`}
           </span>
         </div>
       )}

@@ -236,6 +236,10 @@ func runOneRender(app *sdk.AppCtx, row *RenderRow, local *localExecutor, remote 
 		recordRenderMetric(app, row, "result_cache_hit", true)
 	}
 	if err != nil {
+		if errors.Is(err, errRemoteCancellation) {
+			recordCancellationFailure(app, row, err)
+			return
+		}
 		// Distinguish cancellation / timeout from a backend failure so
 		// the row reflects the right terminal state. We check ctx.Err()
 		// rather than the returned error: backends are encouraged to
