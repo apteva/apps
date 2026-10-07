@@ -364,6 +364,19 @@ result.
 
 ## Continuous monitoring (v0.6.0)
 
+v0.6.2 reduces checkpoint CPU and allocation cost by caching compressed completed
+seconds and closed incident records. The cache is capped at 8 MiB and expires with
+its source data. Checkpoints keep the same JSON/gzip format, including compatibility
+with older collectors, the 32 MiB spool cap, and the ten-second save interval.
+Per-record gzip members trade a larger (still bounded) spool for less recurring CPU
+work. CPU sampling remains 250 ms with the same history and incident retention.
+
+Performance can be checked against a retained spool:
+
+```sh
+GOWORK=off INSTANCES_MONITOR_BENCH_SPOOL=/path/spool.json.gz go test ./internal/monitor -run '^$' -bench BenchmarkSpoolSave -benchmem
+```
+
 v0.6.1 fixes idle CPU samples being rejected on long-running hosts due to
 floating-point cancellation in cumulative CPU counters. Collector upgrades preserve
 existing recordings; genuine sampling gaps remain visible in retained history.
@@ -372,7 +385,7 @@ Monitoring is enabled by default for every instance. On app mount, and every
 five seconds afterward, Instances reconciles the inventory. Ready Linux/macOS
 AMD64/ARM64 SSH hosts receive the version-pinned Go collector automatically;
 new and temporarily unreachable hosts are retried without recreating them.
-Collectors are downloaded by the app from the `instances/v0.6.1` GitHub release,
+Collectors are downloaded by the app from the `instances/v0.6.2` GitHub release,
 verified against the SHA-256 values embedded in this source, and uploaded over
 SSH. No compiler, public listening port, or platform credential is installed
 on the host. Linux requires systemd; macOS uses a launch daemon. Service

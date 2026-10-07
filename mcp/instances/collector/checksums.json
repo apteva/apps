@@ -1,6 +1,6 @@
 {
-  "instances-collector-darwin-amd64": "da2af76dc73a877949184bcf355446e068d12fc28e964f493355356e1f82a1d9",
-  "instances-collector-darwin-arm64": "0a0150ecf297105e2837c3fbcb7417b50cc1ff8db46100b9159fff7ae5d0dc5b",
-  "instances-collector-linux-amd64": "27999e075bf66c8c57aad063e9a9a7263aedf359aecb9b439f6476179dc32f42",
-  "instances-collector-linux-arm64": "f0b7219774c76f7f72da24c6d610749a03d6fdcbb270fa5548bb73ce3c2c1c47"
+  "instances-collector-darwin-amd64": "7dd18a612b382001329c70de1d4d859c56234a6643aff90b5c60c014162dc7c2",
+  "instances-collector-darwin-arm64": "4ea627fdeba86f040ea498cd3349acf9c2f3e965be7822e44c53017fcc5b368c",
+  "instances-collector-linux-amd64": "a33b902723c2bba43dbcac16b0fd153a9705fafb7b2cbb9272ac53ba91e15116",
+  "instances-collector-linux-arm64": "c782f22de9246fb258f4fac5001e4827bd53f023649dcb562472047eca824046"
 }
