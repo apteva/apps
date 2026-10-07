@@ -31,6 +31,64 @@ func TestSidecar_BootsAndHealthOK(t *testing.T) {
 	}
 }
 
+func TestSidecar_AttributeScalarCompatibilityAndReadback(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	for key, typ := range map[string]string{"opportunity_score": "number", "custom_flag": "bool", "external_code": "text"} {
+		sc.MCP("contacts_define_attribute", map[string]any{"key": key, "label": key, "type": typ})
+	}
+	for _, row := range []struct {
+		name  string
+		input any
+		want  float64
+	}{{"ACC", "88", 88}, {"MAYU", "83", 83}, {"DiagVision", float64(89), 89}} {
+		created := sc.MCP("contacts_create", map[string]any{"display_name": row.name})
+		id := created["contact"].(map[string]any)["id"]
+		for key, value := range map[string]any{"opportunity_score": row.input, "custom_flag": "false", "external_code": "00123"} {
+			sc.MCP("contacts_set_attribute", map[string]any{"contact_id": id, "key": key, "value": value, "source": "agent:integration"})
+		}
+		read := func() map[string]any {
+			contact := sc.MCP("contacts_get", map[string]any{"id": id})["contact"].(map[string]any)
+			values := map[string]any{}
+			for _, raw := range contact["attributes"].([]any) {
+				attribute := raw.(map[string]any)
+				values[attribute["key"].(string)] = attribute["value"]
+				if attribute["source"] != "agent:integration" {
+					t.Fatalf("attribute provenance lost: %v", attribute)
+				}
+			}
+			return values
+		}
+		values := read()
+		if values["opportunity_score"] != row.want || values["custom_flag"] != false || values["external_code"] != "00123" {
+			t.Fatalf("incorrect typed readback for %s: %v", row.name, values)
+		}
+		// The fix is limited to the MCP scalar boundary, not lax HTTP typing.
+		resp := sc.POST("/contacts/"+anyString(id)+"/attributes", map[string]any{"key": "opportunity_score", "value": "77"}, nil)
+		if resp.Status != http.StatusInternalServerError || !strings.Contains(string(resp.Body), "expects a number") {
+			t.Fatalf("HTTP did not reject string number via strict validation: %d %s", resp.Status, resp.Body)
+		}
+		if got := read()["opportunity_score"]; got != row.want {
+			t.Fatalf("rejected HTTP write changed score: %v", got)
+		}
+	}
+	listed, err := sc.MCPRaw("tools/list", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range listed["tools"].([]any) {
+		tool := raw.(map[string]any)
+		if tool["name"] == "contacts_set_attribute" {
+			properties := tool["inputSchema"].(map[string]any)["properties"].(map[string]any)
+			value := properties["value"].(map[string]any)
+			if len(value["anyOf"].([]any)) != 5 || !strings.Contains(tool["description"].(string), "contacts_get") {
+				t.Fatalf("live schema/readback guidance missing: %v", tool)
+			}
+			return
+		}
+	}
+	t.Fatal("contacts_set_attribute missing from live tools/list")
+}
+
 func TestSidecar_ResolveAudienceContextHandler(t *testing.T) {
 	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
 	created := sc.MCP("contacts_upsert_by_channel", map[string]any{

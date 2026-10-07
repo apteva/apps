@@ -1,4 +1,16 @@
-# CRM v0.9.14
+# CRM v0.9.17
+
+Release `crm/v0.9.17`: `contacts_set_attribute` recovers numeric and boolean
+JSON scalars sent as strings by legacy agent adapters, using the project-owned
+attribute definition. Numeric scores such as `"88"` are stored as numbers;
+text such as `"00123"` stays text. Invalid/non-finite scalars are rejected before
+writing. HTTP and contact-patch validation remain strict. Missing `value` no
+longer clears an attribute; explicit JSON null still clears optional values.
+
+The MCP contract documents supported JSON types and copyable examples. Agent
+guidance requires `contacts_get` readback of all workflow-required fields before
+advancing dossier readiness. No project-specific readiness invariant is imposed
+on unrelated contacts. This release performs no data migration or score repair.
 
 Release `crm/v0.9.14`: HTML-only emails no longer inherit huge blank gaps from nested email layouts.
 The inbox also guards older inbound email display against repeated blank lines.

@@ -4,7 +4,7 @@ description: Use CRM tools for contacts, customer conversations, lists, segments
 compatibility: Requires the CRM MCP tools supplied by an Apteva app installation.
 metadata:
   author: apteva
-  version: "1.2"
+  version: "1.3"
 ---
 
 # CRM
@@ -71,6 +71,27 @@ customer conversations, lists, segments, opportunities, and pipelines.
   `not_in_segment`; core-field conditions use `{"field","op","value"}`.
 - Page list/segment evaluation using `next_after_contact_id` until an empty page.
   Resolve an audience before sending; static membership alone is not eligibility.
+
+## Typed attributes and dossier readiness
+
+- `contacts_set_attribute` writes a value according to its project-owned
+  definition. Use native JSON numbers for numeric scores and booleans for flags:
+  `{"contact_id":123,"key":"opportunity_score","value":88}` and
+  `{"contact_id":123,"key":"do_not_contact","value":false}`.
+- Legacy scalar-string adapters are supported only for number/bool definitions:
+  `"88"` becomes numeric 88, `"false"` becomes boolean false. Text/select/date/URL
+  values are never inferred from their content; `"00123"` remains text for a
+  text definition. Multi-select requires an array of allowed strings. Explicit
+  JSON null clears an optional attribute; missing `value` is an error.
+- Before setting `research_status: solution_ready`, a readiness tag, or another
+  workflow completion state, read the contact with `contacts_get` and verify
+  EVERY workflow-required attribute, including a numeric `opportunity_score`
+  when the workflow requires one. A successful write response alone is not
+  readback. If any write fails, readback is missing/wrongly typed, or required
+  dossier content is incomplete, do not advance readiness; report the failure.
+- Existing readiness labels are not proof of completeness. CRM does not
+  hard-code a project-specific score requirement for all contacts. This safety
+  rule must also be followed by the workflow driving those labels.
 
 ## Messaging safety
 
