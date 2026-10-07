@@ -3,7 +3,11 @@ package main
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
+	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -110,6 +114,106 @@ func TestListTodosHydratesTagsInBatches(t *testing.T) {
 		if todo.Tags == nil {
 			t.Fatalf("todo %d has nil tags; want an empty JSON array", todo.ID)
 		}
+	}
+}
+
+func TestCompactSearchPaginatesTodosAndIncludesHierarchy(t *testing.T) {
+	db := openTestDB(t)
+	const pid = "project-search"
+	g, err := insertListGroup(db, pid, "Personal", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := insertList(db, pid, "Admin", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE lists SET group_id = ? WHERE id = ?`, g.ID, l.ID); err != nil {
+		t.Fatal(err)
+	}
+	listID := l.ID
+	for _, title := range []string{"Pay taxes", "Tax documents", "Book dentist"} {
+		if _, err := insertTodo(db, pid, &Todo{Title: title, ListID: &listID, Tags: []string{"admin"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := insertTodo(db, pid, &Todo{Title: "Old tax receipt", ListID: &listID, Status: "done"}); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := searchTodosCompact(db, pid, "", "any", "tax", nil, nil, "", "", 1, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Items) != 1 || !first.HasMore || first.NextCursor == "" {
+		t.Fatalf("first page = %#v", first)
+	}
+	if first.Items[0].List == nil || first.Items[0].List.Name != "Admin" || first.Items[0].Group == nil || first.Items[0].Group.Name != "Personal" {
+		t.Fatalf("hierarchy = %#v", first.Items[0])
+	}
+	second, err := searchTodosCompact(db, pid, "", "any", "tax", nil, nil, "", first.NextCursor, 10, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Items) != 2 || second.HasMore || second.Total == nil || *second.Total != 3 {
+		t.Fatalf("second page = %#v", second)
+	}
+}
+
+func TestCompactSearchFindsListsAndGroupsWithoutListingEverything(t *testing.T) {
+	db := openTestDB(t)
+	const pid = "project-search-lists"
+	g, err := insertListGroup(db, pid, "Personal Admin", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := insertList(db, pid, "Tax Work", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE lists SET group_id = ? WHERE id = ?`, g.ID, l.ID); err != nil {
+		t.Fatal(err)
+	}
+	lists, err := searchListsCompact(db, pid, "tax", nil, nil, false, "", 20, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lists.Items) != 1 || lists.Items[0].Name != "Tax Work" || lists.Total == nil || *lists.Total != 1 {
+		t.Fatalf("lists = %#v", lists)
+	}
+	groups, err := searchListGroupsCompact(db, pid, "admin", nil, false, "", 20, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups.Items) != 1 || groups.Items[0].Name != "Personal Admin" {
+		t.Fatalf("groups = %#v", groups)
+	}
+}
+
+func TestCompactSearchIndexesFollowTodoUpdatesAndDeletes(t *testing.T) {
+	db := openTestDB(t)
+	const pid = "project-search-index"
+	todo, err := insertTodo(db, pid, &Todo{Title: "Original title"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := searchTodosCompact(db, pid, "", "open", "original", nil, nil, "", "", 20, 0, false)
+	if err != nil || len(page.Items) != 1 {
+		t.Fatalf("initial search = %#v, err=%v", page, err)
+	}
+	if err := updateTodoFields(db, pid, todo.ID, map[string]any{"title": "Renamed item"}); err != nil {
+		t.Fatal(err)
+	}
+	page, err = searchTodosCompact(db, pid, "", "open", "renamed", nil, nil, "", "", 20, 0, false)
+	if err != nil || len(page.Items) != 1 {
+		t.Fatalf("updated search = %#v, err=%v", page, err)
+	}
+	if _, err := db.Exec(`DELETE FROM todos WHERE id = ? AND project_id = ?`, todo.ID, pid); err != nil {
+		t.Fatal(err)
+	}
+	page, err = searchTodosCompact(db, pid, "", "any", "renamed", nil, nil, "", "", 20, 0, false)
+	if err != nil || len(page.Items) != 0 {
+		t.Fatalf("deleted search = %#v, err=%v", page, err)
 	}
 }
 
@@ -272,15 +376,23 @@ func TestUpdateTodoFieldsCannotModifyAnotherProjectTags(t *testing.T) {
 
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
+	db.SetMaxOpenConns(1)
+	migrateTestDB(t, db)
+	return db
+}
+
+func migrateTestDB(t *testing.T, db *sql.DB) {
+	t.Helper()
 	for _, path := range []string{
 		"migrations/001_init.sql",
 		"migrations/002_rename_projects_to_lists.sql",
 		"migrations/003_list_groups.sql",
+		"migrations/004_search_indexes.sql",
 	} {
 		raw, err := os.ReadFile(path)
 		if err != nil {
@@ -290,5 +402,107 @@ func openTestDB(t *testing.T) *sql.DB {
 			t.Fatalf("%s: %v", path, err)
 		}
 	}
-	return db
+}
+
+func rejectTestTagLinks(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.Exec(`CREATE TRIGGER reject_tag_link BEFORE INSERT ON todo_tags
+		WHEN (SELECT name FROM tags WHERE id = NEW.tag_id) = 'reject'
+		BEGIN SELECT RAISE(ABORT, 'tag link rejected'); END`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInsertTodoRollsBackOnTagFailure(t *testing.T) {
+	db := openTestDB(t)
+	rejectTestTagLinks(t, db)
+	if _, err := insertTodo(db, "project-test", &Todo{Title: "economics", Tags: []string{"income", "reject"}}); err == nil {
+		t.Fatal("expected tag failure")
+	}
+	for _, table := range []string{"todos", "tags", "todo_tags"} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Errorf("%s contains %d rows after failed create", table, count)
+		}
+	}
+}
+
+func TestUpdateTodoRollsBackOnTagFailure(t *testing.T) {
+	db := openTestDB(t)
+	todo, err := insertTodo(db, "project-test", &Todo{Title: "original", Tags: []string{"original"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejectTestTagLinks(t, db)
+	err = updateTodoFields(db, "project-test", todo.ID, map[string]any{"title": "changed", "tags": []string{"income", "reject"}})
+	if err == nil {
+		t.Fatal("expected tag failure")
+	}
+	stored, err := getTodo(db, "project-test", todo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(stored, todo) {
+		t.Fatalf("failed update changed todo: got %#v, want %#v", stored, todo)
+	}
+}
+
+func TestConcurrentTodoCreatesAndTagUpdates(t *testing.T) {
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "todo.db")+
+		"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_pragma=busy_timeout(30000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	db.SetMaxOpenConns(8)
+	migrateTestDB(t, db)
+	const pid = "project-concurrent"
+	const workers = 20
+	start := make(chan struct{})
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			unique := fmt.Sprintf("unique-%d", i)
+			todo, err := insertTodo(db, pid, &Todo{Title: unique, Tags: []string{"income", "marketplaces", unique}})
+			if err == nil {
+				err = updateTodoFields(db, pid, todo.ID, map[string]any{"tags": []string{"income", "updated", unique}})
+			}
+			if err != nil {
+				errs <- fmt.Errorf("worker %d: %w", i, err)
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+	todos, err := listTodos(db, pid, "all", nil, "", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(todos) != workers {
+		t.Fatalf("got %d todos, want %d", len(todos), workers)
+	}
+	for _, todo := range todos {
+		want := []string{"income", todo.Title, "updated"}
+		if !reflect.DeepEqual(todo.Tags, want) {
+			t.Errorf("%s tags = %v, want %v", todo.Title, todo.Tags, want)
+		}
+	}
+	var unused int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM tags WHERE id NOT IN (SELECT tag_id FROM todo_tags)`).Scan(&unused); err != nil {
+		t.Fatal(err)
+	}
+	if unused != 0 {
+		t.Errorf("got %d unused tags", unused)
+	}
 }
