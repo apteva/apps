@@ -83,7 +83,7 @@ Each direction sends 160 frames; rates include media, SRTP, IP and UDP overhead.
 | 64 kbit/s, up to 15 ms added jitter, one media packet lost in 30 | 155/160 | Passed within configured loss gates |
 | 24 kbit/s constrained | 85/160 | Expected degradation detected |
 
-The Chromium TCP proxy shapes WebRTC signaling only. The UDP fixture supplies
+The original Chromium baseline/mute/reconnect TCP proxy shapes WebRTC signaling only. The UDP fixture supplies
 separate transport impairment evidence; it does not score browser concealment or
 certify subjective speech quality. The browser codec path also successfully
 interoperated with native Chromium and an independent ffmpeg/libopus decoder.
@@ -108,3 +108,15 @@ Before a live rollout, configure reachable ICE/UDP or restricted TURN, then
 validate real calls and shared-network capacity under separate authorization.
 Native browser jitter targets remain hints; server queue/age bounds do not certify
 a universal browser playout latency cap. No such live checks were authorized here.
+
+## Follow-up: actual native browser bandwidth limits
+
+The follow-up [bandwidth verification](softphone-bandwidth-verification.md)
+adds a forced local TURN/UDP relay to the Chromium harness. Media and signaling
+share the configured per-direction budget; the selected candidate and relay
+traffic are verified. The final 20-second 128/96/64 kbit/s profiles passed with
+zero missing markers. A 60-second 64 kbit/s repeat also passed. 48/32 kbit/s and
+PCM WebSocket at 64 kbit/s showed substantial degradation. See that report for
+measured delays, overhead accounting, retained artifacts and limits. This replaces
+the earlier native-browser bandwidth evidence gap; it does not certify a real
+WAN/VPN/carrier connection or perceptual speech quality.

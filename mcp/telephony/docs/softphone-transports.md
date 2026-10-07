@@ -118,9 +118,12 @@ DSP parity, explicit selection, cleanup before fallback, and telemetry persisten
 Real Chromium benchmarks exercise the complete sidecar/hub/codec/browser path,
 including intentional mute and a fresh audio context after reconnect. Separate
 Pion virtual-network profiles shape actual encrypted UDP media at 256, 64 and
-24 kbit/s, including jitter and loss. The TCP proxy in the Chromium benchmark
-shapes WebRTC signaling, **not RTP**; those browser profiles do not certify
-WebRTC performance at the proxy's nominal bandwidth. See the benchmark README.
+24 kbit/s, including jitter and loss. The `webrtc-udp-*` Chromium profiles
+add a forced local TURN/UDP relay: actual encrypted browser audio and signaling
+share the configured per-direction bandwidth, with explicit overhead/drop counters
+and selected-relay verification. Unshaped WebRTC baseline/mute/reconnect profiles
+continue to constrain signaling only. See the benchmark README for accounting,
+measurement gates, network-model limits and reproducible commands.
 
 These checks are software pipeline/regression evidence. They do not certify
 physical microphone/speaker quality, perceptual MOS, every carrier, a production

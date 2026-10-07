@@ -15,6 +15,7 @@ require (
 	github.com/pion/sdp/v3 v3.0.20
 	github.com/pion/srtp/v3 v3.1.0
 	github.com/pion/transport/v5 v5.1.1
+	github.com/pion/turn/v5 v5.1.2
 	github.com/pion/webrtc/v4 v4.2.22
 	github.com/twilio/twilio-go v1.30.9
 	modernc.org/sqlite v1.50.0
@@ -36,7 +37,6 @@ require (
 	github.com/pion/rtcp v1.2.18 // indirect
 	github.com/pion/sctp v1.11.3 // indirect
 	github.com/pion/stun/v4 v4.0.1 // indirect
-	github.com/pion/turn/v5 v5.1.2 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect

@@ -283,5 +283,112 @@
     "max_p95_ms": 500,
     "max_missing_pct": 20,
     "reconnect_browser": true
+  },
+  {
+    "name": "webrtc-udp-128k",
+    "media_transport": "webrtc",
+    "rtc_udp": true,
+    "expectation": "usable",
+    "up": {
+      "kbps": 128,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "down": {
+      "kbps": 128,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 5
+  },
+  {
+    "name": "webrtc-udp-96k",
+    "media_transport": "webrtc",
+    "rtc_udp": true,
+    "expectation": "usable",
+    "up": {
+      "kbps": 96,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "down": {
+      "kbps": 96,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 5
+  },
+  {
+    "name": "webrtc-udp-64k",
+    "media_transport": "webrtc",
+    "rtc_udp": true,
+    "expectation": "usable",
+    "up": {
+      "kbps": 64,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "down": {
+      "kbps": 64,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 5
+  },
+  {
+    "name": "webrtc-udp-48k",
+    "media_transport": "webrtc",
+    "rtc_udp": true,
+    "expectation": "degradation",
+    "up": {
+      "kbps": 48,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "down": {
+      "kbps": 48,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 5
+  },
+  {
+    "name": "webrtc-udp-32k",
+    "media_transport": "webrtc",
+    "rtc_udp": true,
+    "expectation": "degradation",
+    "up": {
+      "kbps": 32,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "down": {
+      "kbps": 32,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 5
+  },
+  {
+    "name": "websocket-64k",
+    "media_transport": "websocket",
+    "expectation": "degradation",
+    "up": {
+      "kbps": 64,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "down": {
+      "kbps": 64,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 5
   }
 ]

@@ -15,6 +15,10 @@ function tone(frame:Float32Array,rate:number):[number,number]{
  const source=new AudioWorkletNode(sourceContext,'benchmark-source'),destination=sourceContext.createMediaStreamDestination();source.connect(destination);
  const original=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
  const OriginalAudioContext=window.AudioContext;
+ const OriginalPeerConnection=window.RTCPeerConnection;
+ if(config.rtc_force_relay)window.RTCPeerConnection=class extends OriginalPeerConnection {
+  constructor(options?:RTCConfiguration){super({...options,iceServers:config.rtc_ice_servers,iceTransportPolicy:'relay'});}
+ };
  // Force the production fallback resampler without changing the app or source.
  if(config.audio_context_rate)window.AudioContext=class extends OriginalAudioContext {
   constructor(options?:AudioContextOptions){super({...options,sampleRate:config.audio_context_rate});}
@@ -92,6 +96,9 @@ function tone(frame:Float32Array,rate:number):[number,number]{
     await new Promise(r=>setTimeout(r,100));
   }
   const result={clock_progress:clockProgress,wire_diagnostics:wireDiagnostics,markers,states,notices,diagnostics:diagnostics.slice(-8),audio_context_rate:ctx.sampleRate,source_context_rate:sourceContext.sampleRate,start_at:arm.start_at,output_clock_mapping_uncertainty_ms:20,errors};
-  if(rtc){await session.statistics(session.generation);(result as any).rtc_stats=Array.from((await session.pc.getStats()).values()).filter((s:any)=>s.type==='inbound-rtp'||s.type==='outbound-rtp'||s.type==='codec');}else session.sendDiagnostics();return result;
- }finally{window.AudioContext=OriginalAudioContext;navigator.mediaDevices.getUserMedia=original;probe?.disconnect();session.stop();source.disconnect();await sourceContext.close();}
+  if(rtc){await session.statistics(session.generation);
+ const stats=await session.pc.getStats(), candidates:any[]=[];
+ stats.forEach((s:any)=>{if(s.type==='transport'&&s.selectedCandidatePairId){const pair=stats.get(s.selectedCandidatePairId);if(pair){const candidate=stats.get(pair.localCandidateId);if(candidate)candidates.push({candidateType:candidate.candidateType,protocol:candidate.protocol});}}});
+ (result as any).rtc_candidates=candidates;(result as any).rtc_stats=Array.from((await session.pc.getStats()).values()).filter((s:any)=>s.type==='inbound-rtp'||s.type==='outbound-rtp'||s.type==='codec');}else session.sendDiagnostics();return result;
+ }finally{window.RTCPeerConnection=OriginalPeerConnection;window.AudioContext=OriginalAudioContext;navigator.mediaDevices.getUserMedia=original;probe?.disconnect();session.stop();source.disconnect();await sourceContext.close();}
 };

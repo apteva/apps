@@ -72,7 +72,7 @@ IPC, audio devices, network/kernel buffers and server work. Timer resolution
 can quantize very short measurements to zero; these are not zero CPU cost.
 Use the end-to-end Chromium profiles for delivery quality and recovery.
 
-The browser connection carries raw 24 kHz, 16-bit mono PCM: **384 kbit/s per
+The default WebSocket browser connection carries raw 24 kHz, 16-bit mono PCM: **384 kbit/s per
 direction before framing**. A 256 kbit/s link cannot sustain it. The benchmark
 must expose that limitation; queue bounds cannot manufacture missing bandwidth.
 512 kbit/s is a test point with limited headroom, not a deployment guarantee.
@@ -180,3 +180,46 @@ counters. Intentional RTC mute can send silent RTP rather than omit capture
 frames; mute/unmute events and zero false capture gaps are checked instead.
 See [softphone transports](../../docs/softphone-transports.md) for configuration,
 security, buffering limits and deployment requirements.
+
+## Full-browser bandwidth tests for WebRTC
+
+```sh
+bun run benchmark:softphone --profiles webrtc-udp-128k,webrtc-udp-96k,webrtc-udp-64k,webrtc-udp-48k,webrtc-udp-32k,websocket-64k --seconds 20
+bun run benchmark:softphone --profiles webrtc-udp-64k --seconds 60 --seed 20261007
+```
+
+The `webrtc-udp-*` profiles add `rtc_udp: true`. The harness overrides only
+its browser's peer-connection configuration to force a loopback TURN/UDP relay.
+The production `WebRTCAudioConnection`, DSP, native Chromium Opus/jitter buffer,
+server decoder/encoder, media hub and carrier substitute still execute. The
+selected candidate must actually be UDP relay; each direction must report
+substantial delivered relay traffic. This prevents direct host candidates from
+bypassing the impairment.
+
+**Audio and signaling share one bandwidth budget per direction.** Relay datagrams
+include encrypted SRTP, RTCP, DTLS/ICE maintenance and TURN framing, plus 28 bytes
+IPv4/UDP overhead. Signaling consumes the same serializer, with a conservative
+52-byte IPv4/TCP header allowance per proxy read chunk. The report records
+`udp_network` packet/byte/drop/queue counters and `connection_budget` aggregate
+admitted bytes, elapsed window and maximum backlog; the aggregate rate is also
+checked. Setup before the measurement epoch remains unrestricted.
+
+The modeled network drops UDP whose scheduled delivery would exceed 200 ms.
+The real application continues to enforce its own stale-audio limits. This
+fixture cannot certify a universal native browser playout cap. Kernel TCP ACKs,
+actual packetization/retransmission, Ethernet/VPN overhead and unrelated host
+traffic are excluded. TCP chunk header accounting is an estimate. The available
+rate is for **one call in each direction**, not shared across many advisers.
+
+Profiles use 20 ms one-way latency and up to 5 ms added jitter. The 128, 96 and
+64 kbit/s profiles enforce existing gates: p95 marker delay at most 500 ms,
+missing markers at most 5%, no duplicate/reordered markers, plus RTC source
+level within ±2.5 dB. The 48/32 kbit/s and PCM WebSocket 64 kbit/s comparisons
+are deliberately inadequate and must report actual degradation honestly.
+A passing command with `degraded` rows is not an all-quality-passed result.
+
+Synthetic acoustic markers and signal levels are reproducible objective probes;
+they do not prove speech intelligibility, a MOS score, or lossless Opus encoding.
+Use shared-network planning headroom above the lowest passing laboratory point.
+No staging/production route, carrier account, operating-system traffic shaper or
+real call is used or modified by this benchmark.
