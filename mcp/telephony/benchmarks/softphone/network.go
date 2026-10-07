@@ -23,16 +23,19 @@ type Link struct {
 	OutageMS            float64 `json:"outage_ms"`
 }
 type Profile struct {
-	CarrierDown      *Link   `json:"carrier_down,omitempty"`
-	CarrierMissing   bool    `json:"carrier_missing,omitempty"`
-	MuteMicrophone   bool    `json:"mute_microphone,omitempty"`
-	ReconnectBrowser bool    `json:"reconnect_browser,omitempty"`
-	Name             string  `json:"name"`
-	Expectation      string  `json:"expectation"`
-	Down             Link    `json:"down"`
-	Up               Link    `json:"up"`
-	MaxP95MS         float64 `json:"max_p95_ms"`
-	MaxMissingPct    float64 `json:"max_missing_pct"`
+	CarrierDown          *Link   `json:"carrier_down,omitempty"`
+	CarrierMissing       bool    `json:"carrier_missing,omitempty"`
+	MuteMicrophone       bool    `json:"mute_microphone,omitempty"`
+	ReconnectBrowser     bool    `json:"reconnect_browser,omitempty"`
+	BrowserDeliveryPause bool    `json:"browser_delivery_pause,omitempty"`
+	MainThreadPauseMS    int     `json:"main_thread_pause_ms,omitempty"`
+	AudioContextRate     int     `json:"audio_context_rate,omitempty"`
+	Name                 string  `json:"name"`
+	Expectation          string  `json:"expectation"`
+	Down                 Link    `json:"down"`
+	Up                   Link    `json:"up"`
+	MaxP95MS             float64 `json:"max_p95_ms"`
+	MaxMissingPct        float64 `json:"max_missing_pct"`
 }
 
 func Profiles(path string) ([]Profile, error) {
@@ -45,6 +48,9 @@ func Profiles(path string) ([]Profile, error) {
 		return nil, err
 	}
 	for _, p := range profiles {
+		if p.MainThreadPauseMS < 0 || p.MainThreadPauseMS > 10000 || (p.AudioContextRate != 0 && p.AudioContextRate != 44100 && p.AudioContextRate != 48000) {
+			return nil, fmt.Errorf("invalid browser scenario %s", p.Name)
+		}
 		links := []Link{p.Down, p.Up}
 		if p.CarrierDown != nil {
 			links = append(links, *p.CarrierDown)

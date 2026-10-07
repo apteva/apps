@@ -47,6 +47,30 @@ Latency is one-way; random positive jitter is added up to the stated maximum.
 | carrier-ten-second-missing | 10000 / 10000 | 0 ms | 0 ms | Carrier skips source frames at 3–13 seconds, without catch-up |
 | intentional-microphone-mute | 10000 / 10000 | 0 ms | 0 ms | Mute at 4–6 seconds; caller delivery must remain healthy |
 | browser-reconnect | 10000 / 10000 | 0 ms | 0 ms | Close browser fixture sockets at 4 seconds; worker reconnects |
+| browser-seven-second-catchup | 10000 / 10000 | 0 ms | 0 ms | Hold browser download bytes for 7.23 seconds; carrier ingress and microphone continue |
+| main-thread-two-second-pause | 10000 / 10000 | 0 ms | 0 ms | Block UI JavaScript for two seconds; media Worker and Worklets continue |
+| browser-48k-fallback | 10000 / 10000 | 0 ms | 0 ms | Force 48 kHz AudioContext so production fallback resampling runs in both directions |
+
+The browser catch-up scenario needs at least four seconds of recovery after
+its outage; use `--seconds 20`. It verifies that carrier ingress has no stall,
+the browser measures/discards received stale audio, microphone delivery stays
+healthy and playback recovers. UI blocking must be observed by runtime
+telemetry without violating the usable audio gates. The runtime observer
+measures scheduling delay beyond its one-second interval, rather than the
+full duration of a busy interval.
+
+For a separate processing-cost microbenchmark in a real Chromium Worker:
+
+```sh
+bun benchmarks/softphone/worker-processing.ts /absolute/path/worker-processing.json
+```
+
+This imports the exact production Worker source with fixture clocks and media
+ports. It measures bidirectional 20 ms packet processing at 24, 44.1 and 48 kHz,
+including clock probes and telemetry calculations. It excludes real Worklet
+IPC, audio devices, network/kernel buffers and server work. Timer resolution
+can quantize very short measurements to zero; these are not zero CPU cost.
+Use the end-to-end Chromium profiles for delivery quality and recovery.
 
 The browser connection carries raw 24 kHz, 16-bit mono PCM: **384 kbit/s per
 direction before framing**. A 256 kbit/s link cannot sustain it. The benchmark

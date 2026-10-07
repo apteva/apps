@@ -30,3 +30,32 @@ test('carrier delivery notices preserve the healthy microphone and report recove
  session.handleControl(JSON.stringify({type:'media.delivery',state:'flowing'}));
  expect(notices).toHaveLength(2);expect(states).toHaveLength(0);
 });
+
+test('playback reports retain timestamped Worker rejection events without duplication', async()=>{
+ const {SoftphoneSession}=await import('./softphone-audio');
+ const descriptor=Object.getOwnPropertyDescriptor(globalThis,'Worker');
+ let worker:any;
+ Object.defineProperty(globalThis,'Worker',{configurable:true,value:class {
+  onmessage:any;onerror:any;constructor(){worker=this;}postMessage(){}terminate(){}
+ }});
+ const session:any=new SoftphoneSession();
+ session.capture={port:{postMessage(){}}};session.playback={port:{postMessage(){}}};
+ try {
+  session.installWorkletDiagnostics();
+  const started=session.openWorker('ws://unused','worker.js');
+  worker.onmessage({data:{type:'socket.open'}});await started;
+  const transport={timestamp:'2026-10-07T10:00:00.000Z',direction:'carrier_to_operator',reason:'playback_delivery_excess',duration_ms:20,sequence:1};
+  const rendered={...transport,timestamp:'2026-10-07T10:00:00.020Z',reason:'playback_hard_limit',sequence:2};
+  worker.onmessage({data:{type:'transport.drop',event:transport}});
+  const report=()=>session.playback.port.onmessage({data:{type:'stats',drop_events:[rendered]}});
+  report();report();
+  expect(session.diagnostics.dropEvents).toEqual([transport,rendered]);
+  session.playback.port.onmessage({data:{type:'stats',drop_events:[]}});
+  expect(session.diagnostics.dropEvents).toEqual([transport]);
+  for(let i=0;i<351;i++)worker.onmessage({data:{type:'transport.drop',event:{...transport,sequence:i+3}}});
+  report();expect(session.diagnostics.dropEvents.length).toBeLessThanOrEqual(100);
+ } finally {
+  session.capture=null;session.playback=null;session.stop();
+  if(descriptor)Object.defineProperty(globalThis,'Worker',descriptor);else Reflect.deleteProperty(globalThis,'Worker');
+ }
+});

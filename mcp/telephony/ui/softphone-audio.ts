@@ -393,6 +393,8 @@ export class SoftphoneSession {
   private ringback: (() => void) | null = null;
   private transportTiming: Record<string, unknown> = {};
   private playbackTiming: Record<string, unknown> = {};
+  private workerDropEvents: AudioDropEvent[] = [];
+  private playbackDropEvents: AudioDropEvent[] = [];
   private diagnostics: SoftphoneDiagnostics = {
     rttMs: null, queueMs: 0, targetMs: JITTER_TARGET_MS, underruns: 0,
     droppedMs: 0, maxQueueMs: 0, audioContextRate: SAMPLE_RATE,
@@ -520,7 +522,7 @@ export class SoftphoneSession {
         ...this.diagnostics, coachingPlayedMs:stats.whisper_played_ms ?? 0, coachingDroppedMs:stats.whisper_dropped_ms ?? 0, coachingMaxQueueMs:stats.whisper_max_queue_ms ?? 0, queueMs: stats.queue_ms ?? 0, targetMs: stats.target_ms ?? JITTER_TARGET_MS,
         underruns: stats.underruns ?? 0, droppedMs: stats.dropped_ms ?? 0,
         maxQueueMs: stats.max_queue_ms ?? 0, playbackSequenceGaps: stats.playback_sequence_gaps ?? 0,
-        dropEvents: [...this.diagnostics.dropEvents.filter((item) => item.direction !== "carrier_to_operator"), ...(stats.drop_events ?? [])].slice(-100),
+        dropEvents: this.mergeDropEvents(undefined, stats.drop_events ?? []),
       };
       this.callbacks.onDiagnostics?.({ ...this.diagnostics });
     };
@@ -582,7 +584,7 @@ export class SoftphoneSession {
           finish(new Error(message.detail || "audio connection lost"));
           this.fail(message.detail || "audio connection lost");
         } else if (message?.type === "transport.drop" && message.event) {
-          this.diagnostics.dropEvents = [...this.diagnostics.dropEvents, message.event].slice(-100);
+          this.diagnostics.dropEvents = this.mergeDropEvents(message.event);
         } else if (message?.type === "transport.stats") {
           this.diagnostics.websocketBufferedBytes = message.buffered_bytes ?? 0;
           this.transportTiming = message.timing ?? {};
@@ -595,6 +597,15 @@ export class SoftphoneSession {
         capturePort: captureChannel.port2, playbackPort: playbackChannel.port2,
       }, [captureChannel.port2, playbackChannel.port2]);
     });
+  }
+
+  // Worklet statistics are a rolling snapshot, while Worker drops are events.
+  // Keep their bounded histories separately so neither overwrites the other.
+  private mergeDropEvents(workerEvent?: AudioDropEvent, playbackEvents?: AudioDropEvent[]): AudioDropEvent[] {
+    if (workerEvent) this.workerDropEvents = [...this.workerDropEvents, workerEvent].slice(-100);
+    if (playbackEvents) this.playbackDropEvents = playbackEvents.slice(-100);
+    return [...this.workerDropEvents, ...this.playbackDropEvents]
+      .sort((a, b) => a.timestamp.localeCompare(b.timestamp)).slice(-100);
   }
 
   private carrierDeliveryStalled = false;
