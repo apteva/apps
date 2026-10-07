@@ -71,7 +71,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("bills mounted",
-		"version", "0.1.26",
+		"version", a.Manifest().Version,
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
 		"ocr_provider", configString(ctx, "ocr_provider", "(disabled)"))
 	return nil
@@ -1193,7 +1193,8 @@ func (a *App) toolBillsCreateFromFile(ctx *sdk.AppCtx, args map[string]any) (any
 	// resolveVendorFromExtraction will fill it from the extracted
 	// vendor email/name. When OCR is disabled, vendor_id is required
 	// and we error early before uploading bytes.
-	ocrEnabled := strings.TrimSpace(configString(ctx, "ocr_provider", "")) != ""
+	ocrConfig := strings.TrimSpace(configString(ctx, "ocr_provider", ""))
+	ocrEnabled := ocrConfig != "off" && (ocrConfig != "" || ctx.IntegrationFor("vision_llm") != nil)
 	if int64Arg(args, "vendor_id") == 0 && !ocrEnabled {
 		return nil, errors.New("vendor_id required (OCR is disabled — set ocr_provider config to 'llm' or pass vendor_id)")
 	}
@@ -1240,14 +1241,15 @@ func (a *App) toolBillsCreateFromFile(ctx *sdk.AppCtx, args map[string]any) (any
 	// 3. v0.1.2 — OCR auto-fill. When ocr_provider is configured and a
 	//    capable integration is installed, extract structured fields
 	//    from the file BEFORE creating the bill. Caller args win on
-	//    every conflict; extraction only fills gaps. Failures are
-	//    non-fatal — bill still gets created from caller args.
+	//    every conflict; extraction only fills gaps. Extraction failures
+	//    stop creation so an upload cannot silently become an empty bill.
 	extracted, ocrProvider, ocrErr := callOCR(ctx, pid, fileID)
 	var fieldsFilled []string
 	var vendorVia string
 	if ocrErr != nil {
-		ctx.Logger().Warn("ocr extraction failed, falling back to manual fields",
+		ctx.Logger().Warn("ocr extraction failed, bill not created",
 			"provider", ocrProvider, "file_id", fileID, "err", ocrErr)
+		return nil, invoiceExtractionError(fileID, ocrErr)
 	} else if extracted != nil {
 		fieldsFilled = mergeExtractedIntoArgs(createArgs, extracted)
 		via, vErr := resolveVendorFromExtraction(ctx.AppDB(), pid, extracted, createArgs)
@@ -2161,16 +2163,18 @@ func (a *App) handleHTTPBillsCreateFromFile(w http.ResponseWriter, r *http.Reque
 
 	// v0.1.2 — OCR auto-fill. Runs after the file is in storage but
 	// before we validate vendor_id (extraction may resolve it). Same
-	// "caller-args win" rule as the MCP path. Failures are non-fatal.
+	// "caller-args win" rule as the MCP path. Failures stop creation.
 	ocrStart := time.Now()
 	extracted, ocrProvider, ocrErr := callOCR(ctx, pid, fileID)
 	ocrElapsed := time.Since(ocrStart).Milliseconds()
 	var fieldsFilled []string
 	var vendorVia string
 	if ocrErr != nil {
-		ctx.Logger().Warn("from-file: ocr extraction failed, falling back to manual fields",
+		ctx.Logger().Warn("from-file: ocr extraction failed, bill not created",
 			"provider", ocrProvider, "file_id", fileID, "err", ocrErr,
 			"ocr_ms", ocrElapsed)
+		httpErr(w, http.StatusBadGateway, invoiceExtractionError(fileID, ocrErr).Error())
+		return
 	} else if extracted != nil {
 		fieldsFilled = mergeExtractedIntoArgs(billBody, extracted)
 		via, vErr := resolveVendorFromExtraction(ctx.AppDB(), pid, extracted, billBody)

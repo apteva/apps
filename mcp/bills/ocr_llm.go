@@ -169,6 +169,8 @@ func buildLLMArgs(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, images [][]byte,
 		maxTokens := configIntDefault(ctx, "ocr_llm_max_tokens", 8000)
 		tool = "chat_completion"
 		args = buildOpenAICompatibleArgs(images, model, maxTokens, fileName)
+		// The Codex subscription Responses endpoint rejects temperature.
+		delete(args, "temperature")
 	default:
 		// OpenAI-compatible chat-completion shape (opencode-go and any
 		// future compatible providers). Reasoning-shaped models (Kimi

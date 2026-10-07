@@ -223,6 +223,9 @@ func TestBuildLLMArgs_OpenAICodexDefaults(t *testing.T) {
 	if args["model"] != "gpt-5.5" {
 		t.Errorf("args model=%v", args["model"])
 	}
+	if _, ok := args["temperature"]; ok {
+		t.Fatal("Codex requests must omit unsupported temperature")
+	}
 	if args["max_tokens"] != 8000 {
 		t.Errorf("max_tokens=%v, want 8000", args["max_tokens"])
 	}
@@ -243,6 +246,9 @@ func TestBuildLLMArgs_OpenCodeDefaultsRemainSeparateFromCodex(t *testing.T) {
 	}
 	if args["model"] != "qwen3.6-plus" {
 		t.Errorf("args model=%v", args["model"])
+	}
+	if args["temperature"] != 0.1 {
+		t.Errorf("OpenCode temperature=%v, want 0.1", args["temperature"])
 	}
 }
 

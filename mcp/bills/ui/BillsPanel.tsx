@@ -1683,11 +1683,18 @@ function BillsTab({
     );
     if (!r.ok) {
       const text = await r.text().catch(() => "");
-      const err = new Error(`${r.status}: ${text}`);
+      let message = text || `Upload failed (${r.status})`;
+      try {
+        const error = JSON.parse(text).error;
+        if (typeof error === "string") message = error;
+      } catch {
+        // Non-JSON gateway errors already have a readable body.
+      }
+      const err = new Error(message);
       // Tag the error so onDrop can decide whether to fall back to a
       // vendor pick (the backend tells us when vendor_id is the gap).
       (err as Error & { vendorRequired?: boolean }).vendorRequired =
-        text.includes("vendor_id required");
+        message.includes("vendor_id required");
       throw err;
     }
     const j = await r.json();
