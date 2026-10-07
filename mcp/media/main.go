@@ -22,8 +22,13 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.14.15
+version: 0.14.16
 description: |
+  v0.14.16 retries encoded audio peak overshoots with bounded adaptive
+  headroom while preserving the loudness target and validated video evidence.
+  Upload quota and rate-limit errors retain their Storage phase/cause; only
+  unsupported protocols permit fallback. Validation progress is indeterminate
+  and overall progress reserves room for validation and upload.
   v0.14.15 combines copy-trim picture, black-frame and timeline validation
   into one decode. Normalization reuses trusted file-bound video evidence
   when copied packets and presentation match. Live status reports selected
@@ -332,7 +337,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.15
+    ref: media/v0.14.16
     entry: mcp/media
   port: 8080
   health_check: /health

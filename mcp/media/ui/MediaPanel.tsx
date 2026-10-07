@@ -3526,6 +3526,8 @@ interface RenderEventPayload {
   output_file_id?: string;
   error?: string;
   executor?: string;
+  stage?: string;
+  stage_progress_pct?: number|null;
 }
 
 function RenderQueue({
@@ -3604,6 +3606,11 @@ function RenderQueue({
         source_file_ids: ev.source_file_ids ?? existing?.source_file_ids ?? [],
         status: ev.status ?? existing?.status ?? "pending",
         progress_pct: ev.progress_pct ?? existing?.progress_pct ?? 0,
+        metrics: {
+          ...existing?.metrics,
+          ...(ev.stage ? {stage: ev.stage, stage_progress_pct: null} : {}),
+          ...(ev.stage_progress_pct !== undefined ? {stage_progress_pct: ev.stage_progress_pct} : {}),
+        },
         output_file_id: ev.output_file_id ?? existing?.output_file_id,
         error: ev.error ?? existing?.error,
         requested_by: ev.requested_by ?? existing?.requested_by,
@@ -3636,6 +3643,7 @@ function RenderQueue({
             next.counts.running += 1;
           }
           break;
+        case "render.stage":
         case "render.progress":
           row.status = "running";
           next.running = [...next.running, row].sort((a, b) =>

@@ -367,16 +367,23 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 func forwardProgress(r io.ReadCloser, db *sql.DB, id int64, app *sdk.AppCtx, projectID string, expectedDurationMs int64) {
 	defer r.Close()
 	scanner := bufio.NewScanner(r)
-	lastPct := 0
+	stage := "encode"
 	lastStagePct := -1
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "APTEVA_STATUS:") {
-			persistRuntimeStatus(app, id, projectID, strings.TrimPrefix(line, "APTEVA_STATUS:"))
+			raw := strings.TrimPrefix(line, "APTEVA_STATUS:")
+			var status struct {
+				Stage string `json:"stage"`
+			}
+			if json.Unmarshal([]byte(raw), &status) == nil && status.Stage != "" {
+				stage = status.Stage
+			}
+			persistRuntimeStatus(app, id, projectID, raw)
 			lastStagePct = -1
 			continue
 		}
-		if strings.HasPrefix(line, "speed=") {
+		if strings.HasPrefix(line, "speed=") && !indeterminateRenderStage(stage) {
 			if speed, err := strconv.ParseFloat(strings.TrimSuffix(strings.TrimPrefix(line, "speed="), "x"), 64); err == nil && speed > 0 {
 				recordRenderMetric(app, &RenderRow{ID: id}, "observed_encode_speed", speed)
 			}
@@ -385,18 +392,9 @@ func forwardProgress(r io.ReadCloser, db *sql.DB, id int64, app *sdk.AppCtx, pro
 			continue
 		}
 		pct := progressPctFromOutTimeLine(line, expectedDurationMs)
-		if pct > 0 && pct != lastStagePct {
-			recordRenderMetric(app, &RenderRow{ID: id}, "stage_progress_pct", pct)
-			emitRenderProgress(app, id, projectID, max(pct, lastPct), pct)
+		if pct != lastStagePct {
+			publishStageProgress(app, id, projectID, stage, pct)
 			lastStagePct = pct
-		}
-		if pct <= 0 {
-			continue
-		}
-		if pct > lastPct {
-			_ = renderUpdateProgress(db, id, pct)
-			emitRenderProgress(app, id, projectID, pct)
-			lastPct = pct
 		}
 	}
 }

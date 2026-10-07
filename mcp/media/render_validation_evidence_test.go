@@ -24,7 +24,7 @@ func TestLiveRuntimeModeAndPhaseBeforeCompletion(t *testing.T) {
 	var params, metrics map[string]any
 	_ = json.Unmarshal(row.ResolvedParams, &params)
 	_ = json.Unmarshal(row.Metrics, &metrics)
-	if row.Status != "running" || params["trim_diagnostics"].(map[string]any)["mode"] != "keyframe_copy" || metrics["stage"] != "validation" || metrics["stage_progress_pct"] != float64(25) {
+	if row.Status != "running" || params["trim_diagnostics"].(map[string]any)["mode"] != "keyframe_copy" || metrics["stage"] != "validation" || metrics["stage_progress_pct"] != nil || row.ProgressPct != 80 {
 		t.Fatalf("row=%+v params=%v metrics=%v", row, params, metrics)
 	}
 	persistRuntimeStatus(app, id, testProj, `{"stage":"upload"}`)

@@ -18,3 +18,14 @@ func splitRemoteRenderDiagnostics(output string) (primary string, hits, misses i
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n")), hits, misses
 }
+
+// Keep both context and the final cause, even after thousands of FFmpeg lines.
+func truncateRenderFailure(output string, limit int) string {
+	if len(output) <= limit {
+		return output
+	}
+	marker := "\n... earlier output omitted ...\n"
+	tail := (limit - len(marker)) * 3 / 4
+	head := limit - len(marker) - tail
+	return output[:head] + marker + output[len(output)-tail:]
+}

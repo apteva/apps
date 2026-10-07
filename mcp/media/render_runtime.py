@@ -437,16 +437,8 @@ def normalized_audio(req, info, diagnostics):
         raise ValueError("audio_normalization_failed: Opus does not support the source sample rate; choose WAV/FLAC/AAC to preserve it")
     headroom = 2 if codec in ("aac", "libmp3lame", "libopus") else 0
     internal_peak = max(-9, peak - headroom)
-    loudnorm = ("loudnorm=I=%s:TP=%s:LRA=11:measured_I=%s:measured_TP=%s:measured_LRA=%s:measured_thresh=%s:offset=%s:linear=true" %
-                (target, internal_peak, measured["input_i"], measured["input_tp"], measured["input_lra"], measured["input_thresh"], measured["target_offset"]))
-    chain = prefix + loudnorm + ",aresample=" + str(rate)
-    if extent > 0:
-        chain += ",atrim=duration=" + seconds(extent)
-    # Do not add a post-normalization gain-changing limiter. Validate the
-    # encoded peaks/loudness instead; failed delivery is never uploaded.
+    # Retry from the original source; never normalize an already encoded retry.
     args = list(req["args"])
-    for flag, value in (("-af", chain), ("-ar", str(rate))):
-        args[args.index(flag) + 1] = value
     source_video = next((s for s in info["streams"] if s.get("codec_type") == "video"), {})
     durations = None
     if source_video and "-vn" not in args:
@@ -462,21 +454,44 @@ def normalized_audio(req, info, diagnostics):
                 # the full picture comparison below remains authoritative.
                 if "vide" not in durations:
                     durations = None
-    runtime_event(req, "audio_normalization")
-    encode(req["ffmpeg"], args)
-    runtime_event(req, "validation")
-    if durations:
-        patch_presentation_end(req["output"], max(durations.values()), durations)
-    actual = measurement(req, req["output"])
-    actual_i, actual_tp = float(actual["input_i"]), float(actual["input_tp"])
-    diagnostics["audio_normalization"] = {"algorithm_version": "media-two-pass-loudnorm-3", "passes": 2,
-        "target_lufs": target, "target_peak_dbtp": peak, "internal_peak_dbtp": internal_peak,
-        "source_measurements": measured, "encoded_lufs": actual_i, "encoded_peak_dbtp": actual_tp,
-        "loudness_tolerance_lu": .5, "peak_tolerance_db": .1, "sample_rate": rate,
-        "effective_filter": chain, "validated": False,
-        "presentation_boundary_mode": "exact_source_edits" if durations else "encoded_timeline_verified"}
-    if abs(actual_i - target) > .5 or actual_tp > peak + .1:
-        raise ValueError("audio_normalization_failed: encoded loudness %.2f LUFS / %.2f dBTP differs from requested %.2f LUFS / ceiling %.2f dBTP" % (actual_i, actual_tp, target, peak))
+    attempts = []
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        loudnorm = ("loudnorm=I=%s:TP=%s:LRA=11:measured_I=%s:measured_TP=%s:measured_LRA=%s:measured_thresh=%s:offset=%s:linear=true" %
+                    (target, internal_peak, measured["input_i"], measured["input_tp"], measured["input_lra"], measured["input_thresh"], measured["target_offset"]))
+        chain = prefix + loudnorm + ",aresample=" + str(rate)
+        if extent > 0:
+            chain += ",atrim=duration=" + seconds(extent)
+        for flag, value in (("-af", chain), ("-ar", str(rate))):
+            args[args.index(flag) + 1] = value
+        diagnostics["audio_normalization"] = {"algorithm_version": "media-two-pass-loudnorm-4", "passes": 2,
+            "target_lufs": target, "target_peak_dbtp": peak, "internal_peak_dbtp": internal_peak,
+            "source_measurements": measured, "attempt": attempt, "max_attempts": max_attempts,
+            "attempts": attempts, "loudness_tolerance_lu": .5, "peak_tolerance_db": .1,
+            "sample_rate": rate, "effective_filter": chain, "validated": False,
+            "presentation_boundary_mode": "exact_source_edits" if durations else "encoded_timeline_verified"}
+        runtime_event(req, "audio_normalization", {"audio_normalization": diagnostics["audio_normalization"]})
+        encode(req["ffmpeg"], args)
+        runtime_event(req, "validation")
+        if durations:
+            patch_presentation_end(req["output"], max(durations.values()), durations)
+        actual = measurement(req, req["output"])
+        actual_i, actual_tp = float(actual["input_i"]), float(actual["input_tp"])
+        attempts.append({"attempt": attempt, "internal_peak_dbtp": internal_peak,
+            "encoded_lufs": actual_i, "encoded_peak_dbtp": actual_tp})
+        diagnostics["audio_normalization"].update({"encoded_lufs": actual_i, "encoded_peak_dbtp": actual_tp,
+            "retry_count": attempt - 1})
+        peak_ok = actual_tp <= peak + .1
+        if abs(actual_i - target) <= .5 and peak_ok:
+            break
+        next_peak = max(-9, internal_peak - max(1, actual_tp - peak + .5))
+        if peak_ok or attempt == max_attempts or next_peak >= internal_peak:
+            raise ValueError("audio_normalization_failed: after %d attempt(s), encoded loudness %.2f LUFS / %.2f dBTP differs from requested %.2f LUFS / ceiling %.2f dBTP (internal ceiling %.2f dBTP)" %
+                (attempt, actual_i, actual_tp, target, peak, internal_peak))
+        internal_peak = next_peak
+    # Validate the accepted output once. Video proof reuse and the final
+    # every-picture fallback stay authoritative, independent of audio retries.
+    runtime_event(req, "validation", {"audio_normalization": diagnostics["audio_normalization"]})
     output_info = probe(req["ffprobe"], req["output"])
     output_audio = next((s for s in output_info["streams"] if s.get("codec_type") == "audio"), {})
     if source_video and "-vn" not in args:

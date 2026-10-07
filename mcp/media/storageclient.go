@@ -942,16 +942,43 @@ func (c *storageClient) do(ctx context.Context, method, path string, jsonBody an
 		req.Header.Set("Content-Type", contentType)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
+	upload := strings.HasPrefix(path, "/uploads")
+	for attempt := 1; ; attempt++ {
+		current := req.Clone(ctx)
+		if req.GetBody != nil {
+			current.Body, err = req.GetBody()
+			if err != nil {
+				return nil, err
+			}
+		}
+		resp, err := c.httpClient.Do(current)
+		if err != nil {
+			return nil, err
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if resp.StatusCode/100 == 2 {
+			return body, nil
+		}
+		if !upload {
+			return nil, fmt.Errorf("%s %s: %d: %s", method, path, resp.StatusCode, string(body))
+		}
+		failure := newStorageUploadError(method, path, resp.StatusCode, resp.Header.Get("Retry-After"), string(body), attempt)
+		transient := resp.StatusCode == 429 || resp.StatusCode == 500 || resp.StatusCode == 502 || resp.StatusCode == 503 || resp.StatusCode == 504
+		if !transient || failure.Code == "storage_upload_quota_exhausted" || attempt == 4 {
+			return nil, failure
+		}
+		timer := time.NewTimer(storageRetryDelay(failure.RetryAfter, attempt))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, fmt.Errorf("%w (retry interrupted: %v)", failure, ctx.Err())
+		case <-timer.C:
+		}
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("%s %s: %d: %s", method, path, resp.StatusCode, string(body))
-	}
-	return body, nil
 }
 
 func errMsg(op string, resp *http.Response) error {

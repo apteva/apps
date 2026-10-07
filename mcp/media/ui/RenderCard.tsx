@@ -151,8 +151,8 @@ export default function RenderCard({ render_id, projectId, preview }: Props) {
           <div>
             <div className="h-1.5 bg-bg-input rounded overflow-hidden">
               <div
-                className="h-full bg-accent transition-all duration-200"
-                style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
+                className={`h-full bg-accent transition-all duration-200 ${pct === 0 ? "animate-pulse" : ""}`}
+                style={{ width: `${pct === 0 ? 100 : Math.min(100, Math.max(0, pct))}%`, opacity: pct === 0 ? 0.3 : 1 }}
               />
             </div>
             <div className="text-xs text-text-muted mt-1.5 font-mono">

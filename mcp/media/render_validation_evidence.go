@@ -28,9 +28,7 @@ func persistRuntimeStatus(app *sdk.AppCtx, id int64, project, raw string) {
 			return
 		}
 	}
-	recordRenderMetric(app, row, "stage", status.Stage)
-	recordRenderMetric(app, row, "stage_progress_pct", nil)
-	app.EmitWithProject("render.stage", project, map[string]any{"render_id": id, "stage": status.Stage})
+	publishRenderStage(app, row, status.Stage)
 }
 
 func lastRemoteProgressLine(out string) string {

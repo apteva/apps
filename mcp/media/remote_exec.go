@@ -264,7 +264,7 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 		// the actual cause (ffmpeg error, curl HTTP code, etc.)
 		// rather than just "Process exited with status N".
 		if primaryOutput != "" {
-			return 0, fmt.Errorf("remote render: %w (output: %s)", runErr, truncate(primaryOutput, 1500))
+			return 0, fmt.Errorf("remote render: %w (output: %s)", runErr, truncateRenderFailure(primaryOutput, 1500))
 		}
 		return 0, fmt.Errorf("remote render: %w", runErr)
 	}
@@ -272,12 +272,12 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 		if ctx.Err() != nil {
 			return 0, ctx.Err()
 		}
-		return 0, fmt.Errorf("remote render exit=%d: %s", exit, truncate(primaryOutput, 1500))
+		return 0, fmt.Errorf("remote render exit=%d: %s", exit, truncateRenderFailure(primaryOutput, 1500))
 	}
 
 	res, err := parseAptevaResult(out)
 	if err != nil {
-		return 0, fmt.Errorf("parse remote result: %w (output=%s)", err, truncate(primaryOutput, 500))
+		return 0, fmt.Errorf("parse remote result: %w (output=%s)", err, truncateRenderFailure(primaryOutput, 500))
 	}
 	recordRenderMetric(app, row, "output_bytes", res.Size)
 	if row.Operation == "trim" {
@@ -402,6 +402,7 @@ func (e *remoteExecutor) buildScript(
 		b.WriteString(shellCommand(ffmpegPath, args) + "\n")
 	}
 	if row.Operation == "trim" {
+		b.WriteString("printf '%s\\n' '{\"stage\":\"validation\"}' > runtime-status.json.tmp; mv runtime-status.json.tmp runtime-status.json; : > progress.log\n")
 		validationScript := trimValidationScript(ffmpegPath, "./"+plan.Filename, expectedProgressDurationMs(nil, row))
 		if needsRenderRuntime(row.Operation, row.Params) {
 			validationScript = strings.Replace(validationScript, "-v expected="+formatSeconds(expectedProgressDurationMs(nil, row)), "-v expected=\"$TRIM_EXPECTED\"", 1)
@@ -459,18 +460,53 @@ func (e *remoteExecutor) buildScript(
 // to the returned signed S3 URL, then POST /files/<id>/finalize.
 // Chunked fallback: POST /uploads, PUT fixed-size parts, complete
 // with sha256. Last resort: single POST /files for old storage.
-const uploadScriptFragment = remoteJSONReader + `INIT_BODY_FILE=$(mktemp)
-INIT_CODE=$(curl_retry -o "$INIT_BODY_FILE" -w "%{http_code}" \
+const uploadScriptFragment = remoteJSONReader + `# Only an unsupported protocol may fall back. Quota/rate-limit failures
+# keep their original phase/body; retries are bounded and never POST /files.
+storage_init() {
+  phase="$1"; body_file="$2"; shift 2
+  headers_file=$(mktemp)
+  attempt=1
+  while :; do
+    code=$(curl -sS --connect-timeout 15 --max-time 120 -D "$headers_file" -o "$body_file" -w '%{http_code}' "$@") || code=000
+    retry_after=$(awk 'tolower($1)=="retry-after:" {sub(/^[^:]*:[ \t]*/, ""); sub(/\r$/, ""); print}' "$headers_file" | tail -1)
+    quota=0
+    if [ "$code" = "429" ] && tr '[:upper:]' '[:lower:]' < "$body_file" | grep -E 'quota|pending' >/dev/null; then quota=1; fi
+    case "$code" in
+      200|201|404|405|501) rm -f "$headers_file"; printf '%s' "$code"; return 0;;
+    esac
+    if [ "$quota" = "0" ] && [ "$attempt" -lt 4 ]; then
+      case "$code" in
+        000|429|500|502|503|504)
+          delay=$((1 << (attempt - 1)))
+          case "$retry_after" in ''|*[!0-9]*) ;; *) if [ "$retry_after" -gt "$delay" ]; then delay="$retry_after"; fi;; esac
+          if [ "$delay" -gt 10 ]; then delay=10; fi
+          echo "STORAGE_UPLOAD_RETRY phase=$phase http_status=$code attempt=$attempt retry_after=$retry_after delay_seconds=$delay" >&2
+          sleep "$delay"
+          attempt=$((attempt + 1))
+          continue;;
+      esac
+    fi
+    failure=storage_upload_failed
+    if [ "$quota" = "1" ]; then failure=storage_upload_quota_exhausted; fi
+    if [ "$code" = "429" ] && [ "$quota" = "0" ]; then failure=storage_upload_rate_limited; fi
+    echo "$failure: phase=$phase http_status=$code attempts=$attempt retry_after=$retry_after body=$(tail -c 1000 "$body_file" | tr '\n\r\t' '   ')" >&2
+    if [ "$quota" = "1" ]; then echo 'Storage pending-upload quota exhausted; free/complete pending uploads or increase the Storage quota before retrying.' >&2; fi
+    rm -f "$headers_file"
+    return 1
+  done
+}
+INIT_BODY_FILE=$(mktemp)
+INIT_CODE=$(storage_init direct_init "$INIT_BODY_FILE" \
   -X POST \
   -H "Authorization: Bearer $STORAGE_TOKEN" \
   -H "Content-Type: application/json" \
   -d "{\"name\":$NAME_JSON,\"folder\":$FOLDER_JSON,\"content_type\":$CT_JSON,\"size_bytes\":$SIZE,\"sha256\":\"$SHA\",\"visibility\":\"private\",\"source\":\"media-render\",\"tags\":[\"render\"]}" \
-  "$STORAGE_BASE/files/init?project_id=$PROJECT_ID" || echo 000)
+  "$STORAGE_BASE/files/init?project_id=$PROJECT_ID")
 FILE_ID=""
 NEED_MULTIPART=1
-if [ "$INIT_CODE" = "200" ]; then
-  UPLOAD_URL=$(json_get upload_url < "$INIT_BODY_FILE")
-  UPLOAD_ID=$(json_get upload_id < "$INIT_BODY_FILE")
+if [ "$INIT_CODE" = "200" ] || [ "$INIT_CODE" = "201" ]; then
+  UPLOAD_URL=$(json_get upload_url < "$INIT_BODY_FILE" || true)
+  UPLOAD_ID=$(json_get upload_id < "$INIT_BODY_FILE" || true)
   if [ -n "$UPLOAD_URL" ] && [ -n "$UPLOAD_ID" ]; then
     NEED_MULTIPART=0
     curl_retry --fail -o /dev/null -X PUT -H "Content-Type: $CT" --upload-file "$OUT" "$UPLOAD_URL"
@@ -480,7 +516,7 @@ if [ "$INIT_CODE" = "200" ]; then
       -d "{\"sha256\":\"$SHA\"}" \
       "$STORAGE_BASE/files/$UPLOAD_ID/finalize?project_id=$PROJECT_ID")
     FILE_ID=$(printf '%s' "$FIN_BODY" | json_file_id)
-  elif [ "$(json_get was_existing < "$INIT_BODY_FILE")" = "true" ]; then
+  elif [ "$(json_get was_existing < "$INIT_BODY_FILE" || true)" = "true" ]; then
     # Dedup hit: storage already stores these exact bytes (same sha256),
     # so /files/init returns the existing file instead of a presigned
     # URL: {"file":{"id":N,...},"mode":"deduplicated","was_existing":true}.
@@ -489,48 +525,48 @@ if [ "$INIT_CODE" = "200" ]; then
     # already-stored result (identical crop/resize params -> identical
     # bytes -> same sha). The local executor never hit it because the
     # storage Go client handles dedup; only this bash path was naive.
-    FILE_ID=$(json_file_id < "$INIT_BODY_FILE")
+    FILE_ID=$(json_file_id < "$INIT_BODY_FILE" || true)
     if [ -n "$FILE_ID" ]; then
       NEED_MULTIPART=0
     else
-      echo "STORAGE_INIT_DEDUP_NO_ID body[0:200]=$(head -c 200 "$INIT_BODY_FILE" | tr '\n\r\t' '   ')" >&2
+      echo "storage_upload_failed: phase=direct_init http_status=$INIT_CODE invalid_response STORAGE_INIT_DEDUP_NO_ID body[0:200]=$(head -c 200 "$INIT_BODY_FILE" | tr '\n\r\t' '   ')" >&2; exit 1
     fi
   else
     # init returned 200 but neither presigned fields nor a dedup hit —
     # e.g. a tunnel/proxy interstitial or an SPA fallback page reached
     # the remote box instead of storage. Surface exactly what came back
     # (the old "STORAGE_INIT_PARSE_FAILED" threw the body away, which
-    # made this undiagnosable), then fall through to the multipart proxy
-    # upload below — it hits a different endpoint and may still succeed.
-    echo "STORAGE_INIT_UNPARSEABLE code=$INIT_CODE body[0:200]=$(head -c 200 "$INIT_BODY_FILE" | tr '\n\r\t' '   ')" >&2
+    # made this undiagnosable). A malformed success is a protocol error,
+    # not evidence that single-shot upload is supported.
+    echo "storage_upload_failed: phase=direct_init http_status=$INIT_CODE invalid_response STORAGE_INIT_UNPARSEABLE code=$INIT_CODE body[0:200]=$(head -c 200 "$INIT_BODY_FILE" | tr '\n\r\t' '   ')" >&2; exit 1
   fi
 fi
 rm -f "$INIT_BODY_FILE"
 if [ "$NEED_MULTIPART" = "1" ]; then
   UPLOADS_INIT_FILE=$(mktemp)
-  UPLOADS_INIT_CODE=$(curl_retry -o "$UPLOADS_INIT_FILE" -w "%{http_code}" \
+  UPLOADS_INIT_CODE=$(storage_init multipart_init "$UPLOADS_INIT_FILE" \
     -X POST \
     -H "Authorization: Bearer $STORAGE_TOKEN" \
     -H "Content-Type: application/json" \
     -d "{\"filename\":$NAME_JSON,\"folder\":$FOLDER_JSON,\"content_type\":$CT_JSON,\"size\":$SIZE,\"sha256\":\"$SHA\",\"visibility\":\"private\",\"source\":\"media-render\",\"tags\":[\"render\"]}" \
-    "$STORAGE_BASE/uploads?project_id=$PROJECT_ID" || echo 000)
-  if [ "$UPLOADS_INIT_CODE" = "200" ]; then
-    if [ "$(json_get was_existing < "$UPLOADS_INIT_FILE")" = "true" ]; then
-      FILE_ID=$(json_file_id < "$UPLOADS_INIT_FILE")
+    "$STORAGE_BASE/uploads?project_id=$PROJECT_ID")
+  if [ "$UPLOADS_INIT_CODE" = "200" ] || [ "$UPLOADS_INIT_CODE" = "201" ]; then
+    if [ "$(json_get was_existing < "$UPLOADS_INIT_FILE" || true)" = "true" ]; then
+      FILE_ID=$(json_file_id < "$UPLOADS_INIT_FILE" || true)
       if [ -n "$FILE_ID" ]; then
         NEED_MULTIPART=0
       else
-        echo "STORAGE_UPLOADS_DEDUP_NO_ID body[0:200]=$(head -c 200 "$UPLOADS_INIT_FILE" | tr '\n\r\t' '   ')" >&2
+        echo "storage_upload_failed: phase=multipart_init http_status=$UPLOADS_INIT_CODE invalid_response STORAGE_UPLOADS_DEDUP_NO_ID body[0:200]=$(head -c 200 "$UPLOADS_INIT_FILE" | tr '\n\r\t' '   ')" >&2; exit 1
       fi
     else
-      CHUNK_UPLOAD_ID=$(json_get upload_id < "$UPLOADS_INIT_FILE")
-      PART_SIZE=$(json_get part_size < "$UPLOADS_INIT_FILE")
+      CHUNK_UPLOAD_ID=$(json_get upload_id < "$UPLOADS_INIT_FILE" || true)
+      PART_SIZE=$(json_get part_size < "$UPLOADS_INIT_FILE" || true)
       if [ -n "$CHUNK_UPLOAD_ID" ]; then
         NEED_MULTIPART=0
         PART_SIZE=${PART_SIZE:-5242880}
         case "$PART_SIZE" in ''|*[!0-9]*) echo "INVALID_PART_SIZE" >&2; exit 1;; esac
         if [ "$PART_SIZE" -le 0 ] || [ "$PART_SIZE" -gt 104857600 ]; then echo "INVALID_PART_SIZE" >&2; exit 1; fi
-        MAX_PARALLEL=$(json_get max_parallel < "$UPLOADS_INIT_FILE")
+        MAX_PARALLEL=$(json_get max_parallel < "$UPLOADS_INIT_FILE" || true)
         case "$MAX_PARALLEL" in 1) MAX_PARALLEL=1;; *) MAX_PARALLEL=2;; esac
         PART_DIR=$(mktemp -d ./upload-parts.XXXXXX)
         OFFSET=0
@@ -574,13 +610,17 @@ if [ "$NEED_MULTIPART" = "1" ]; then
           exit 1
         fi
       else
-        echo "STORAGE_UPLOADS_INIT_UNPARSEABLE code=$UPLOADS_INIT_CODE body[0:200]=$(head -c 200 "$UPLOADS_INIT_FILE" | tr '\n\r\t' '   ')" >&2
+        echo "storage_upload_failed: phase=multipart_init http_status=$UPLOADS_INIT_CODE invalid_response STORAGE_UPLOADS_INIT_UNPARSEABLE code=$UPLOADS_INIT_CODE body[0:200]=$(head -c 200 "$UPLOADS_INIT_FILE" | tr '\n\r\t' '   ')" >&2; exit 1
       fi
     fi
   fi
   rm -f "$UPLOADS_INIT_FILE"
 fi
 if [ "$NEED_MULTIPART" = "1" ]; then
+  # Leave room for multipart framing beneath the platform's 1 GiB body cap.
+  if [ "$SIZE" -gt 1072693248 ]; then
+    echo "storage_upload_failed: phase=legacy_upload unsupported resumable upload; output exceeds the safe single-request body limit" >&2; exit 1
+  fi
   RESP=$(curl_retry --fail --form-escape -X POST \
     -H "Authorization: Bearer $STORAGE_TOKEN" \
     --form-string "folder=$FOLDER" \
@@ -882,7 +922,7 @@ func parseAptevaResult(stdout string) (*remoteRenderResult, error) {
 func pollRemoteProgress(ctx context.Context, done <-chan struct{}, app *sdk.AppCtx, hostID, renderID int64, projectID string, expectedDurationMs int64, workDirs ...string) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-	lastPct := 0
+	stage := "encode"
 	lastStagePct := -1
 	work := selectedRemoteWorkDir(renderID, workDirs)
 	cmd := "cat " + shellQuote(filepath.Join(work, "runtime-status.json")) + " 2>/dev/null; printf '\n'; " +
@@ -911,6 +951,12 @@ func pollRemoteProgress(ctx context.Context, done <-chan struct{}, app *sdk.AppC
 			}
 			for _, line := range strings.Split(out, "\n") {
 				if strings.HasPrefix(line, "{") && line != lastStatus {
+					var status struct {
+						Stage string `json:"stage"`
+					}
+					if json.Unmarshal([]byte(line), &status) == nil && status.Stage != "" {
+						stage = status.Stage
+					}
 					persistRuntimeStatus(app, renderID, projectID, line)
 					lastStatus = line
 					lastStagePct = -1
@@ -920,19 +966,10 @@ func pollRemoteProgress(ctx context.Context, done <-chan struct{}, app *sdk.AppC
 				continue
 			}
 			pct := progressPctFromOutTimeLine(strings.TrimSpace(lastRemoteProgressLine(strings.TrimSpace(out))), expectedDurationMs)
-			if pct > 0 && pct != lastStagePct {
-				recordRenderMetric(app, &RenderRow{ID: renderID}, "stage_progress_pct", pct)
-				emitRenderProgress(app, renderID, projectID, max(pct, lastPct), pct)
+			if pct != lastStagePct {
+				publishStageProgress(app, renderID, projectID, stage, pct)
 				lastStagePct = pct
 			}
-			if pct <= lastPct {
-				continue
-			}
-			if updErr := renderUpdateProgress(app.AppDB(), renderID, pct); updErr != nil {
-				app.Logger().Warn("remote progress bump failed", "id", renderID, "err", updErr)
-			}
-			emitRenderProgress(app, renderID, projectID, pct)
-			lastPct = pct
 		}
 	}
 }

@@ -17,7 +17,7 @@ import (
 //go:embed render_runtime.py
 var renderRuntimePython string
 
-const audioNormalizationVersion = "media-two-pass-loudnorm-3"
+const audioNormalizationVersion = "media-two-pass-loudnorm-4"
 
 func needsRenderRuntime(op string, raw json.RawMessage) bool {
 	var p struct {

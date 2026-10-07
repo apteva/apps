@@ -124,7 +124,7 @@ func renderFailureCode(message string) string {
 	if strings.Contains(message, "REMOTE_CANCELLATION_FAILED") {
 		return "remote_cancellation_failed"
 	}
-	for _, code := range []string{"render_budget_exceeded", "audio_normalization_failed", "unsupported_color_preservation", "render_runtime_unavailable"} {
+	for _, code := range []string{"storage_upload_quota_exhausted", "storage_upload_rate_limited", "storage_upload_failed", "render_budget_exceeded", "audio_normalization_failed", "unsupported_color_preservation", "render_runtime_unavailable"} {
 		if strings.Contains(message, code+":") {
 			return code
 		}
