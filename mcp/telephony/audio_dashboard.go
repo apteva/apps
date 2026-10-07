@@ -76,6 +76,14 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 	m["browser_max_queue_ms"] = float64(b.PlaybackMaxQueueMS)
 	m["playback_sequence_gaps"] = float64(b.PlaybackSequenceGaps)
 	m["capture_sequence_gaps"] = float64(b.CaptureSequenceGaps)
+	if b.WebRTC != nil {
+		m["webrtc_packets_lost"] = b.WebRTC.PacketsLost
+		m["webrtc_packets_discarded"] = b.WebRTC.PacketsDiscarded
+		m["webrtc_concealed_ms"] = b.WebRTC.ConcealedMS
+		m["webrtc_jitter_buffer_ms"] = b.WebRTC.JitterBufferMS
+		add("dropped_audio", "telephony_to_browser", b.WebRTC.PacketsDiscarded > 0)
+		add("audio_degraded", "telephony_to_browser", b.WebRTC.JitterBufferMS > 320)
+	}
 	if b.RTTMS != nil {
 		m["rtt_ms"] = float64(*b.RTTMS)
 		m["max_rtt_ms"] = float64(*b.RTTMS)
@@ -113,6 +121,12 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 	}
 	if b.Server != nil {
 		v := b.Server
+		m["server_webrtc_outbound_dropped_ms"] = float64(v.WebRTC.OutboundDroppedMS)
+		m["server_webrtc_pacing_skipped_ms"] = float64(v.WebRTC.PacingSkippedMS)
+		add("audio_degraded", "telephony_to_browser", v.WebRTC.PacingSkippedMS > 0)
+		m["server_webrtc_ingress_rejected_packets"] = float64(v.WebRTC.IngressRejectedPackets + v.WebRTC.IngressQueueDrops + v.WebRTC.DecodeErrors)
+		add("dropped_audio", "telephony_to_browser", v.WebRTC.OutboundDroppedMS > 0)
+		add("dropped_audio", "browser_to_telephony", m["server_webrtc_ingress_rejected_packets"] > 0)
 		observed = max(observed, audioDashboardTime(v.UpdatedAt))
 		s.Health = v.Health
 		m["connections"] = float64(v.Socket.Connections)

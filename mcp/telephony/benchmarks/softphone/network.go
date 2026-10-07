@@ -23,6 +23,7 @@ type Link struct {
 	OutageMS            float64 `json:"outage_ms"`
 }
 type Profile struct {
+	MediaTransport       string  `json:"media_transport,omitempty"`
 	CarrierDown          *Link   `json:"carrier_down,omitempty"`
 	CarrierMissing       bool    `json:"carrier_missing,omitempty"`
 	MuteMicrophone       bool    `json:"mute_microphone,omitempty"`
@@ -48,6 +49,9 @@ func Profiles(path string) ([]Profile, error) {
 		return nil, err
 	}
 	for _, p := range profiles {
+		if p.MediaTransport != "" && p.MediaTransport != "websocket" && p.MediaTransport != "webrtc" && p.MediaTransport != "auto" {
+			return nil, fmt.Errorf("invalid transport %s", p.Name)
+		}
 		if p.MainThreadPauseMS < 0 || p.MainThreadPauseMS > 10000 || (p.AudioContextRate != 0 && p.AudioContextRate != 44100 && p.AudioContextRate != 48000) {
 			return nil, fmt.Errorf("invalid browser scenario %s", p.Name)
 		}

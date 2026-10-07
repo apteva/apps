@@ -102,6 +102,7 @@ func (d *liveAudioTimeline) snapshot() (string, map[string]mediaStageSnapshot) {
 }
 
 type serverAudioDiagnostics struct {
+	WebRTC                 rtcMediaSnapshot              `json:"webrtc"`
 	Socket                 audioSocketSnapshot           `json:"browser_socket"`
 	Health                 audioHealthSnapshot           `json:"audio_health"`
 	Reception              carrierReceptionSnapshot      `json:"carrier_reception"`
@@ -129,7 +130,14 @@ func (h *softphoneHub) serverAudioSnapshot() serverAudioDiagnostics {
 	socket, health := h.telemetry.snapshots()
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	rtc := h.completedRTC
+	if h.browser != nil {
+		if c, ok := h.browser.conn.(*rtcHubConn); ok {
+			rtc = mergeRTCSnapshots(rtc, c.stats.snapshot())
+		}
+	}
 	return serverAudioDiagnostics{Socket: socket, Health: health, Reception: h.reception.snapshot(mediaClockMS(), h.carrierForward != nil && !h.held && (h.status == "answered" || h.status == "in-progress")), CarrierPacer: h.pacerStats.snapshot(), Process: sampleMediaProcess(), CaptureStaleBytes: h.captureStaleBytes, Epoch: epoch, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Stages: stages,
+		WebRTC:         rtc,
 		CarrierForward: mergeLiveAudioSnapshots(h.completedCarrierForward, h.carrierForward.audioSnapshot()),
 		ToBrowser:      mergeLiveAudioSnapshots(h.completedBrowser, h.browser.audioSnapshot()), ToCarrierBridge: mergeLiveAudioSnapshots(h.completedPeer, h.peer.audioSnapshot()),
 		CaptureTimestampMS: h.captureTimestampMS, CaptureWorkerAgeMS: h.captureWorkerAgeMS, CaptureSequenceGaps: h.captureSequenceGaps, CaptureTransitExcessMS: h.captureTransitExcessMS, CaptureDropEvents: append([]audioDropEvent(nil), h.captureDropEvents...), CaptureMutedFrames: h.captureMutedFrames, CaptureMutedMS: h.captureMutedFrames * 20, CaptureMutedEvents: append([]captureMutedEvent(nil), h.captureMutedEvents...)}

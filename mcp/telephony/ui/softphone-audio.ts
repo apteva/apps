@@ -98,6 +98,8 @@ export interface SoftphoneCallbacks {
 }
 
 export interface SoftphoneAudioOptions {
+	/** Optional browser transport; existing PCM WebSocket remains the default. */
+	mediaTransport?: "websocket" | "webrtc" | "auto";
   inputDeviceId?: string;
   outputDeviceId?: string;
   outputVolume?: number;
@@ -125,6 +127,9 @@ export interface AudioDropEvent {
 }
 
 export interface SoftphoneDiagnostics {
+	mediaTransport?: "websocket" | "webrtc";
+	codec?: "pcm16" | "opus";
+	webrtc?: { protocol?: string; candidateType?: string; sendBitrateBps?: number; receiveBitrateBps?: number; packetsLost?: number; jitterMs?: number; concealedMs?: number; packetsDiscarded?: number; jitterBufferMs?: number };
   audioHealth?: SoftphoneAudioHealth;
   sessionEvents?: MediaSessionEvent[];
   coachingPlayedMs?: number;
@@ -162,6 +167,7 @@ export const DEFAULT_SOFTPHONE_AUDIO_OPTIONS: SoftphoneAudioOptions = {
 };
 
 export function playbackBufferOptions(options: Partial<SoftphoneAudioOptions>) {
+	if (options.mediaTransport !== undefined && !["websocket", "webrtc", "auto"].includes(options.mediaTransport)) throw new RangeError("Unsupported softphone media transport");
   const initialTargetMs = options.playbackTargetMs ?? JITTER_TARGET_MS;
   const minTargetMs = options.playbackMinMs ?? Math.min(JITTER_TARGET_MS, initialTargetMs);
   const maxTargetMs = options.playbackMaxMs ?? 160;
@@ -396,6 +402,7 @@ export class SoftphoneSession {
   private workerDropEvents: AudioDropEvent[] = [];
   private playbackDropEvents: AudioDropEvent[] = [];
   private diagnostics: SoftphoneDiagnostics = {
+    mediaTransport: "websocket", codec: "pcm16",
     rttMs: null, queueMs: 0, targetMs: JITTER_TARGET_MS, underruns: 0,
     droppedMs: 0, maxQueueMs: 0, audioContextRate: SAMPLE_RATE,
     websocketBufferedBytes: 0, microphoneSampleRate: 0, microphoneChannelCount: 0,
@@ -686,6 +693,7 @@ export class SoftphoneSession {
   private sendDiagnostics(): void {
     const value = this.diagnostics;
     this.sendText(JSON.stringify({ type: "diagnostics", diagnostics: {
+      media_transport: "websocket", codec: "pcm16",
       client_epoch:this.clientEpoch, session_events:value.sessionEvents,
       timing: {transport:this.transportTiming, playback:this.playbackTiming, runtime:this.runtimeTelemetry.counters},
       connection_state: this.mediaSocketConnected ? "connected" : this.closed ? "closed" : "reconnecting",

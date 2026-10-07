@@ -9,5 +9,5 @@
     "types": ["bun"],
     "noEmit": true
   },
-  "include": ["*.ts"]
+  "include": ["*.ts", "../../frontend/src/assets.d.ts"]
 }

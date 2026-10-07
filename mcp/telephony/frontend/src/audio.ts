@@ -2,6 +2,7 @@ import type { MediaSessionEvent } from "./media-lease";
 import { SoftphoneSession, MicrophoneTestSession, DEFAULT_SOFTPHONE_AUDIO_OPTIONS, microphoneConstraints, type SoftphoneAudioOptions, type SoftphoneCallbacks } from "../../ui/softphone-audio";
 import type { AppHandle } from "@apteva/web-sdk";
 import { embeddedAudioModules, loadAudioModules, type AudioModules } from "./audio-assets";
+import { selectableAudio, WebRTCAudioConnection } from "./webrtc-audio";
 
 export interface MicrophoneDevice { deviceId: string; label: string }
 export interface MicrophonePreview {
@@ -65,7 +66,7 @@ export interface AudioRuntime {
 }
 
 /** Source strings are inside the integrity-checked client bundle, not fetched separately. */
-export function createBrowserAudio(app?: AppHandle): AudioRuntime { return {
+function createWebSocketAudio(app?: AppHandle): AudioRuntime { return {
   async preflight(options) {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: microphoneConstraints(options) });
     stream.getTracks().forEach(track => track.stop());
@@ -97,3 +98,27 @@ export function createBrowserAudio(app?: AppHandle): AudioRuntime { return {
     };
   },
 }; }
+
+export function createBrowserAudio(app?: AppHandle): AudioRuntime {
+  const websocket = createWebSocketAudio(app);
+  return {
+    preflight: options => websocket.preflight(options),
+    create(callbacks) {
+      return selectableAudio(callbacks, () => websocket.create(callbacks), () => {
+        const connection = new WebRTCAudioConnection(callbacks);
+        let modules: AudioModules | undefined, stopped = false;
+        return {
+          async start(url, options) {
+            modules = app ? await loadAudioModules(app) : embeddedAudioModules();
+            if (stopped) { modules.dispose(); modules=undefined; throw new Error("Audio session cancelled"); }
+            await connection.start(url, options, modules.urls[0]);
+          },
+          stop() { stopped=true; connection.stop(); modules?.dispose(); modules=undefined; },
+          setMuted:value=>connection.setMuted(value), sendDTMF:digits=>connection.sendDTMF(digits),
+          setOutputVolume:value=>connection.setOutputVolume(value), recordSessionEvent:event=>connection.recordSessionEvent(event),
+          startRingback:country=>connection.startRingback(country), stopRingback:()=>connection.stopRingback(),
+        };
+      });
+    },
+  };
+}

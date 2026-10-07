@@ -67,6 +67,7 @@ type softphoneHub struct {
 	captureWorkerAgeMS      float64
 	completedBrowser        liveAudioQueueSnapshot
 	completedPeer           liveAudioQueueSnapshot
+	completedRTC            rtcMediaSnapshot
 
 	mu      sync.Mutex
 	peer    *websocketWriterPump
@@ -233,6 +234,9 @@ func (h *softphoneHub) clearBrowser(w *websocketWriterPump) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.completedBrowser = mergeLiveAudioSnapshots(h.completedBrowser, w.audioSnapshot())
+	if c, ok := w.conn.(*rtcHubConn); ok {
+		h.completedRTC = mergeRTCSnapshots(h.completedRTC, c.stats.snapshot())
+	}
 	if h.browser == w {
 		h.stopCoachLocked(nil, "adviser_disconnected")
 		h.browserEpoch = newSecret()
@@ -567,10 +571,51 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	transport := r.URL.Query().Get("transport")
+	if transport != "" && transport != "websocket" && transport != "webrtc" {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]any{"code": "unsupported_media_transport"})
+		return
+	}
+	var rtcConfig softphoneRTCConfig
+	if transport == "webrtc" {
+		config := map[string]string{}
+		if globalCtx != nil {
+			config = globalCtx.WithProject(row.ProjectID).Config()
+		}
+		rtcConfig, err = parseSoftphoneRTCConfig(config)
+		if err != nil || !rtcConfig.Enabled {
+			writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{"code": "webrtc_unavailable"})
+			return
+		}
+	}
+
 	conn, readConn, err := upgradeBuffered(w, r)
 	if err != nil {
 		logSoftphone("browser ws upgrade failed", "call", callID, "err", err)
 		return
+	}
+	if transport == "webrtc" {
+		// Negotiate before replacing the browser or answering the carrier. Failed
+		// setup leaves the existing hub/carrier untouched, including auto fallback.
+		var stopRTC func()
+		unlock()
+		unlock = nil
+		conn, stopRTC, err = connectSoftphoneRTC(conn, readConn, rtcConfig)
+		if err != nil {
+			return
+		}
+		defer stopRTC()
+		readConn = conn
+		unlock = a.softphones.lockClaim(callID)
+		current, findErr := a.db().findCall(callID)
+		if findErr != nil || current == nil || isTerminalStatus(current.Status) {
+			return
+		}
+		reason, verifiedExpiry, identity = a.phoneMediaCheckDetails(current, token)
+		if reason != "" {
+			return
+		}
+		row = current
 	}
 	writer := newWebSocketWriterPump(conn, ws.StateServerSide)
 	closer := newGracefulWebSocket(conn, writer)

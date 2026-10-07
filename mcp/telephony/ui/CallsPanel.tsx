@@ -634,6 +634,7 @@ function AudioProcessingSettings({
     <div className="rounded border border-border/70 p-3">
       <div className="text-xs font-medium">Audio devices and processing</div>
       <div className="grid gap-2 mt-2 text-xs">
+        <label>Audio transport <select disabled={disabled} value={value.mediaTransport ?? "websocket"} onChange={e=>onChange({...value,mediaTransport:e.target.value as SoftphoneAudioOptions["mediaTransport"]})} className="max-w-full border border-border bg-bg rounded p-2"><option value="websocket">WebSocket (default)</option><option value="webrtc">WebRTC / Opus</option><option value="auto">Automatic (WebRTC, then WebSocket)</option></select></label>
         <label>Microphone <select disabled={disabled} value={value.inputDeviceId || ""} onChange={e=>onChange({...value,inputDeviceId:e.target.value})} className="max-w-full border border-border bg-bg rounded p-2"><option value="">System default</option>{devices.filter(d=>d.kind==="audioinput").map((d,i)=><option key={d.deviceId || i} value={d.deviceId}>{d.label || `Microphone ${i+1}`}</option>)}</select></label>
         {typeof AudioContext!=="undefined" && "setSinkId" in AudioContext.prototype ? <label>Speaker <select disabled={disabled} value={value.outputDeviceId || ""} onChange={e=>onChange({...value,outputDeviceId:e.target.value})} className="max-w-full border border-border bg-bg rounded p-2"><option value="">System default</option>{devices.filter(d=>d.kind==="audiooutput").map((d,i)=><option key={d.deviceId || i} value={d.deviceId}>{d.label || `Speaker ${i+1}`}</option>)}</select></label> : <span>Speaker output follows your system settings in this browser.</span>}
         <label>Speaker volume <input type="range" min="0" max="1" step="0.05" disabled={disabled} value={value.outputVolume ?? 1} onChange={e=>onChange({...value,outputVolume:Number(e.target.value)})}/></label>
@@ -1625,6 +1626,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                   <LiveLevels sink={levelsSink} />
                   {diagnostics ? (
                     <div className="text-xs text-text-dim tabular-nums">
+                      {diagnostics.mediaTransport === "webrtc" ? `WebRTC / Opus · ${diagnostics.webrtc?.protocol ?? "negotiating"} · ` : "WebSocket / PCM · "}
                       Browser ↔ app RTT {diagnostics.rttMs === null ? "–" : `${diagnostics.rttMs} ms`}
                       {` · buffer ${diagnostics.queueMs}/${diagnostics.targetMs} ms (max ${diagnostics.maxQueueMs})`}
                       {` · underruns ${diagnostics.underruns}`}

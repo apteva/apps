@@ -542,6 +542,9 @@ func closeWebSocketProtocolError(writer *websocketWriterPump, reason string) err
 
 // Coaching has its own small, lower-priority queue; it cannot evict caller PCM.
 func (p *websocketWriterPump) queueWhisper(data []byte, valid func() bool) bool {
+	if rtc, ok := p.conn.(*rtcHubConn); ok {
+		return rtc.queueWhisper(data, valid)
+	}
 	p.whisperMu.Lock()
 	defer p.whisperMu.Unlock()
 	select {

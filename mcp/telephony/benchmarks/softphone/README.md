@@ -150,3 +150,33 @@ markers. Application audio regression evidence is in `../../AUDIO-QUALITY.md`.
 The first measured matrix and identified limits are recorded in
 [RESULTS.md](RESULTS.md). Recent outbound diagnostics messages are also retained
 and checked against the Go decoder; malformed telemetry fails the benchmark.
+
+## WebRTC transport checks
+
+The `webrtc-baseline`, `webrtc-microphone-mute` and `webrtc-reconnect` profiles
+use the production optional WebRTC connection, native Chromium Opus, and the
+same compiled Telephony media hub/carrier substitute. Reconnect retaps the new
+AudioContext; it does not keep measuring a closed playback graph.
+
+```sh
+bun run benchmark:softphone --profiles webrtc-baseline,webrtc-microphone-mute,webrtc-reconnect --seconds 20
+GOWORK=off go test -run '^TestRTCUDPNetworkProfiles$' -count=1 -v .
+```
+
+**The browser TCP proxy only shapes signaling for WebRTC.** RTP flows separately
+through UDP. These three browser profiles verify end-to-end codec interoperability,
+normal delivery, mute accounting and reconnection; they do not measure RTP under
+the proxy's advertised bandwidth/latency. The separate Go profile shapes actual
+bidirectional SRTP packets using Pion's virtual UDP network: 256 kbit/s normal,
+64 kbit/s with up to 15 ms added jitter and one dropped media packet in 30, and
+24 kbit/s deliberately constrained. Budgets include SRTP plus IP/UDP overhead.
+ICE/DTLS control traffic is excluded from that media budget. The constrained
+profile must show packet loss rather than conceal an insufficient connection.
+The packet fixture decodes each received Opus frame, but does not score speech
+or certify Chromium's native jitter buffer under those network conditions.
+
+Native browser concealment and packet loss remain distinct from PCM discard
+counters. Intentional RTC mute can send silent RTP rather than omit capture
+frames; mute/unmute events and zero false capture gaps are checked instead.
+See [softphone transports](../../docs/softphone-transports.md) for configuration,
+security, buffering limits and deployment requirements.

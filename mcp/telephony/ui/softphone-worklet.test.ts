@@ -30,6 +30,24 @@ beforeAll(async () => {
 });
 
 describe("softphone realtime worklet", () => {
+  test("native RTC output preserves capture DSP and mute without PCM messages", () => {
+    const Capture = processors.get("softphone-capture")!;
+    const normal = new Capture({processorOptions:{inputGainDB:-3}});
+    const native = new Capture({processorOptions:{nativeOutput:true,inputGainDB:-3}});
+    const rendered:number[]=[];
+    for(let block=0;block<12;block++) {
+      const input=new Float32Array(128);for(let k=0;k<128;k++)input[k]=Math.sin((block*128+k)*.2)*1.2;
+      const output=new Float32Array(128), silent=new Float32Array(128);
+      native.process([[input]],[[output]]);normal.process([[input]],[[silent]]);
+      rendered.push(...output);expect(silent.every(v=>v===0)).toBe(true);
+    }
+    const frames=normal.port.messages.filter(v=>v instanceof Float32Array) as Float32Array[];
+    expect(rendered.slice(0,frames.length*480)).toEqual(frames.flatMap(f=>Array.from(f)));
+    expect(native.port.messages.some(v=>v instanceof Float32Array)).toBe(false);
+    native.port.onmessage?.({data:{type:"muted",value:true}});
+    const output=new Float32Array(128);native.process([[new Float32Array(128).fill(1)]],[[output]]);
+    expect(output.every(v=>v===0)).toBe(true);
+  });
   test("adds microphone headroom and caps the processed carrier signal", () => {
     const Capture = processors.get("softphone-capture");
     expect(Capture).toBeDefined();
