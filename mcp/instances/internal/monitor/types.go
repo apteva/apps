@@ -3,7 +3,7 @@ package monitor
 
 import "time"
 
-const CollectorVersion = "0.6.0"
+const CollectorVersion = "0.6.1"
 const SampleInterval = 250 * time.Millisecond
 
 type Metrics struct {
