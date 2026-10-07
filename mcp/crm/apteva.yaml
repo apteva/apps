@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.9.16
+version: 0.9.17
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -91,7 +91,7 @@ provides:
     - name: contacts_log_activity
       description: Append to a contact's timeline.
     - name: contacts_set_attribute
-      description: Write one custom-attribute value with provenance.
+      description: Write a typed custom attribute with provenance; recover legacy number/bool scalar strings using the project definition, preserve text, and verify readback before advancing workflow readiness.
     - name: contacts_define_attribute
       description: Create or update an attribute definition.
     # Messaging-coupled tools — gate on the messaging dep being bound.
