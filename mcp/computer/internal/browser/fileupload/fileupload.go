@@ -181,7 +181,7 @@ func resolveUploadInput(ctx context.Context, target Target) (Result, error) {
   var name=(el.getAttribute('aria-label')||el.innerText||el.textContent||'').trim();
   // This fallback activates a control. Restrict it to explicit file-picker
   // names, never an arbitrary button that happens to share a file-input form.
-  if(!/^(?:(?:browse|upload)(?:\s+(?:files?|images?|photos?|videos?))?|(?:choose|select|attach|add)\s+(?:a\s+)?(?:files?|images?|photos?|videos?|attachments?))\s*[,.:…]*$/i.test(name)) return {error:'upload_file: no related input and target is not an explicit file-picker control'};
+  if(!/^(?:(?:browse|upload)(?:\s+(?:files?|images?|photos?|videos?|media))?|(?:choose|select|attach|add)\s+(?:a\s+)?(?:files?|images?|photos?|videos?|media|attachments?))\s*[,.:…]*$/i.test(name)) return {error:'upload_file: no related input and target is not an explicit file-picker control'};
   var button=el.closest('button'), link=el.closest('a[href]'), rect=el.getBoundingClientRect();
   if((button&&button.type!=='button')||link||!rect.width||!rect.height||getComputedStyle(el).visibility==='hidden') return {error:'upload_file: file-picker fallback requires a visible non-submit control'};
   var root=el.getRootNode(), hitRoot=root.elementFromPoint?root:el.ownerDocument;
