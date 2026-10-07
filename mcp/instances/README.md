@@ -364,11 +364,15 @@ result.
 
 ## Continuous monitoring (v0.6.0)
 
+v0.6.1 fixes idle CPU samples being rejected on long-running hosts due to
+floating-point cancellation in cumulative CPU counters. Collector upgrades preserve
+existing recordings; genuine sampling gaps remain visible in retained history.
+
 Monitoring is enabled by default for every instance. On app mount, and every
 five seconds afterward, Instances reconciles the inventory. Ready Linux/macOS
 AMD64/ARM64 SSH hosts receive the version-pinned Go collector automatically;
 new and temporarily unreachable hosts are retried without recreating them.
-Collectors are downloaded by the app from the `instances/v0.6.0` GitHub release,
+Collectors are downloaded by the app from the `instances/v0.6.1` GitHub release,
 verified against the SHA-256 values embedded in this source, and uploaded over
 SSH. No compiler, public listening port, or platform credential is installed
 on the host. Linux requires systemd; macOS uses a launch daemon. Service

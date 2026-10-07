@@ -27,8 +27,11 @@ func CPUDelta(previous, current []cpu.TimesStat, elapsed time.Duration) (CPUMetr
 	for i, c := range current {
 		p := previous[i]
 		// guest and guest_nice are already included in user/nice on Linux.
-		du := c.User + c.Nice - p.User - p.Nice
-		ds := c.System + c.Irq + c.Softirq - p.System - p.Irq - p.Softirq
+		// Subtract matching counters before adding deltas. Summing cumulative
+		// counters first loses precision on long-running hosts and can produce
+		// tiny negative deltas for unchanged counters, rejecting idle samples.
+		du := (c.User - p.User) + (c.Nice - p.Nice)
+		ds := (c.System - p.System) + (c.Irq - p.Irq) + (c.Softirq - p.Softirq)
 		dw := c.Iowait - p.Iowait
 		dst := c.Steal - p.Steal
 		idle := c.Idle - p.Idle

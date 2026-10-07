@@ -31,6 +31,24 @@ func TestCPUDeltaGuestCountersAndSingleCore(t *testing.T) {
 	}
 }
 
+func TestCPUDeltaLongRunningIdleHost(t *testing.T) {
+	previous := []cpu.TimesStat{{User: 234567.89, Nice: 0.03, System: 123456.01, Irq: 0.01, Softirq: 0.01, Idle: 8765432.1}}
+	current := append([]cpu.TimesStat{}, previous...)
+	current[0].Idle += 0.25
+	got, valid := CPUDelta(previous, current, 250*time.Millisecond)
+	if !valid || got.TotalPct != 0 || got.UserPct != 0 || got.SystemPct != 0 {
+		t.Fatalf("idle sample rejected or fabricated CPU usage: %+v valid=%v", got, valid)
+	}
+	// A subsequent burst remains observable after the accepted idle sample.
+	previous = current
+	current = append([]cpu.TimesStat{}, previous...)
+	current[0].User += 0.25
+	got, valid = CPUDelta(previous, current, 250*time.Millisecond)
+	if !valid || got.TotalPct != 100 || got.BusiestCorePct != 100 {
+		t.Fatalf("burst lost after idle sample: %+v valid=%v", got, valid)
+	}
+}
+
 func TestIncidentBeforeAfterRecoveryAndSpool(t *testing.T) {
 	e := NewEngine()
 	base := time.Now().Add(-3*time.Minute).UnixMilli() / 1000 * 1000
