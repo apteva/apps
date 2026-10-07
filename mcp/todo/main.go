@@ -42,7 +42,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: todo
 display_name: Todo
-version: 0.4.13
+version: 0.4.14
 description: Personal todo list — human-first, agent-helpful.
 author: Apteva
 icon: /ui/icon.svg
@@ -773,25 +773,27 @@ func insertListGroup(db *sql.DB, pid, name, color string) (*ListGroup, error) {
 	return getListGroup(db, pid, id)
 }
 
-func upsertTag(db *sql.DB, pid, name string) (int64, error) {
+func upsertTag(tx *sql.Tx, pid, name string) (int64, error) {
 	name = strings.TrimSpace(strings.TrimPrefix(name, "@"))
 	if name == "" {
 		return 0, errors.New("empty tag")
 	}
-	if _, err := db.Exec(
+	if _, err := tx.Exec(
 		`INSERT OR IGNORE INTO tags (project_id, name) VALUES (?, ?)`, pid, name,
 	); err != nil {
 		return 0, err
 	}
 	var id int64
-	err := db.QueryRow(
+	err := tx.QueryRow(
 		`SELECT id FROM tags WHERE project_id = ? AND name = ?`, pid, name,
 	).Scan(&id)
 	return id, err
 }
 
-func setTodoTags(db *sql.DB, pid string, todoID int64, names []string) error {
-	if _, err := db.Exec(`DELETE FROM todo_tags WHERE todo_id = ?`, todoID); err != nil {
+// Keep tag creation, linking and cleanup in the caller's write transaction.
+// Otherwise another writer can remove a new tag before it is linked.
+func setTodoTags(tx *sql.Tx, pid string, todoID int64, names []string) error {
+	if _, err := tx.Exec(`DELETE FROM todo_tags WHERE todo_id = ?`, todoID); err != nil {
 		return err
 	}
 	for _, n := range names {
@@ -799,11 +801,11 @@ func setTodoTags(db *sql.DB, pid string, todoID int64, names []string) error {
 		if n == "" {
 			continue
 		}
-		tagID, err := upsertTag(db, pid, n)
+		tagID, err := upsertTag(tx, pid, n)
 		if err != nil {
 			return err
 		}
-		if _, err := db.Exec(
+		if _, err := tx.Exec(
 			`INSERT OR IGNORE INTO todo_tags (todo_id, tag_id) VALUES (?, ?)`,
 			todoID, tagID,
 		); err != nil {
@@ -812,7 +814,7 @@ func setTodoTags(db *sql.DB, pid string, todoID int64, names []string) error {
 	}
 	// GC: drop tag rows in this scope that no todo references anymore,
 	// so the sidebar doesn't accrete zero-count zombies over time.
-	if _, err := db.Exec(
+	if _, err := tx.Exec(
 		`DELETE FROM tags WHERE project_id = ?
 		   AND id NOT IN (SELECT DISTINCT tag_id FROM todo_tags)`, pid,
 	); err != nil {
@@ -933,6 +935,21 @@ func getTodo(db *sql.DB, pid string, id int64) (*Todo, error) {
 	return scanTodo(db, row)
 }
 
+// Acquire SQLite's writer lock before FTS triggers can open a read snapshot.
+// With deferred transactions, upgrading that snapshot during concurrent writes
+// can return SQLITE_BUSY immediately, bypassing the configured busy timeout.
+func beginTodoWrite(db *sql.DB) (*sql.Tx, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`UPDATE tags SET name = name WHERE 0`); err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+	return tx, nil
+}
+
 func insertTodo(db *sql.DB, pid string, t *Todo) (*Todo, error) {
 	if t.Source == "" {
 		t.Source = "human"
@@ -949,7 +966,12 @@ func insertTodo(db *sql.DB, pid string, t *Todo) (*Todo, error) {
 		}
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := db.Exec(
+	tx, err := beginTodoWrite(db)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(
 		`INSERT INTO todos
 		  (project_id, list_id, title, notes, priority, due_at,
 		   rrule, source, created_at, updated_at)
@@ -960,11 +982,17 @@ func insertTodo(db *sql.DB, pid string, t *Todo) (*Todo, error) {
 	if err != nil {
 		return nil, err
 	}
-	id, _ := res.LastInsertId()
+	id, err := res.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
 	if len(t.Tags) > 0 {
-		if err := setTodoTags(db, pid, id, t.Tags); err != nil {
+		if err := setTodoTags(tx, pid, id, t.Tags); err != nil {
 			return nil, err
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
 	return getTodo(db, pid, id)
 }
@@ -1567,11 +1595,16 @@ func updateTodoFields(db *sql.DB, pid string, id int64, fields map[string]any) e
 	if len(cols) == 0 && fields["tags"] == nil {
 		return nil
 	}
+	tx, err := beginTodoWrite(db)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	if len(cols) > 0 {
 		cols = append(cols, "updated_at = ?")
 		args = append(args, time.Now().UTC().Format(time.RFC3339))
 		args = append(args, id, pid)
-		_, err := db.Exec(
+		_, err := tx.Exec(
 			`UPDATE todos SET `+strings.Join(cols, ", ")+` WHERE id = ? AND project_id = ?`,
 			args...,
 		)
@@ -1584,9 +1617,11 @@ func updateTodoFields(db *sql.DB, pid string, id int64, fields map[string]any) e
 		if err != nil {
 			return err
 		}
-		return setTodoTags(db, pid, id, names)
+		if err := setTodoTags(tx, pid, id, names); err != nil {
+			return err
+		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 // rollRecurring advances due_at to the next occurrence based on rrule.
