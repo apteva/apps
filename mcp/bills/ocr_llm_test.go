@@ -213,24 +213,77 @@ func TestBuildAnthropicArgs_ImageBeforeText(t *testing.T) {
 func TestBuildLLMArgs_OpenAICodexDefaults(t *testing.T) {
 	ctx := newTestCtx(t)
 	bound := &sdk.BoundIntegration{AppSlug: "openai-codex"}
-	model, tool, args := buildLLMArgs(ctx, bound, [][]byte{[]byte("page-bytes")}, "invoice.pdf")
-	if model != "gpt-5.5" {
-		t.Fatalf("model=%q, want gpt-5.5", model)
+	images := [][]byte{[]byte("first-page"), []byte("last-page")}
+	model, tool, args := buildLLMArgs(ctx, bound, images, "invoice.pdf")
+	if model != "gpt-6.1-sol" || args["model"] != model || tool != "responses_create" {
+		t.Fatalf("model=%q tool=%q args model=%v", model, tool, args["model"])
 	}
-	if tool != "chat_completion" {
-		t.Fatalf("tool=%q, want chat_completion", tool)
+	if args["reasoning"].(map[string]any)["effort"] != "medium" {
+		t.Fatalf("reasoning=%v, want medium", args["reasoning"])
 	}
-	if args["model"] != "gpt-5.5" {
-		t.Errorf("args model=%v", args["model"])
+	for _, unsupported := range []string{"temperature", "max_tokens", "max_output_tokens", "messages"} {
+		if _, ok := args[unsupported]; ok {
+			t.Fatalf("Codex request contains unsupported %s", unsupported)
+		}
 	}
-	if _, ok := args["temperature"]; ok {
-		t.Fatal("Codex requests must omit unsupported temperature")
+	if args["store"] != false || args["stream"] != true || args["instructions"] != ocrSystemPrompt {
+		t.Fatal("Codex request must stream without storage and include OCR instructions")
 	}
-	if args["max_tokens"] != 8000 {
-		t.Errorf("max_tokens=%v, want 8000", args["max_tokens"])
+	if args["text"].(map[string]any)["format"].(map[string]any)["type"] != "json_object" {
+		t.Fatalf("text=%v", args["text"])
 	}
-	if args["response_format"].(map[string]any)["type"] != "json_object" {
-		t.Errorf("response_format=%v", args["response_format"])
+	input := args["input"].([]any)
+	user := input[0].(map[string]any)
+	parts := user["content"].([]any)
+	if len(input) != 1 || user["role"] != "user" || len(parts) != 3 {
+		t.Fatalf("input=%v", input)
+	}
+	instruction := parts[0].(map[string]any)
+	if instruction["type"] != "input_text" || !strings.Contains(instruction["text"].(string), "invoice.pdf") {
+		t.Fatalf("instruction=%v", instruction)
+	}
+	for i, image := range images {
+		part := parts[i+1].(map[string]any)
+		if part["type"] != "input_image" || part["image_url"] != "data:image/jpeg;base64,"+base64.StdEncoding.EncodeToString(image) {
+			t.Fatalf("page %d not passed correctly: %v", i, part)
+		}
+	}
+}
+
+func TestBuildLLMArgs_OpenAICodexModelOverrideKeepsMediumThinking(t *testing.T) {
+	ctx := newTestCtx(t, tk.WithConfig(map[string]string{"ocr_llm_model": "custom-vision-model"}))
+	model, tool, args := buildLLMArgs(ctx, &sdk.BoundIntegration{AppSlug: "openai-codex"}, nil, "invoice.pdf")
+	if model != "custom-vision-model" || tool != "responses_create" || args["reasoning"].(map[string]any)["effort"] != "medium" {
+		t.Fatalf("model=%q tool=%q reasoning=%v", model, tool, args["reasoning"])
+	}
+}
+
+func TestParseResponsesInvoice(t *testing.T) {
+	for _, raw := range []string{
+		`{"status":"completed","output_text":"{\"invoice_number\":\"188\",\"currency\":\"GBP\",\"total_cents\":15200}"}`,
+		`{"status":"completed","output":[{"type":"reasoning","content":[{"type":"output_text","text":"ignore me"}]},{"type":"message","role":"user","content":[{"type":"output_text","text":"ignore me"}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"{\"invoice_number\":\"188\","},{"type":"output_text","text":"\"currency\":\"GBP\",\"total_cents\":15200}"}]}]}`,
+	} {
+		got, err := parseResponsesInvoice([]byte(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.InvoiceNumber != "188" || got.Currency != "GBP" || got.TotalCents != 15200 {
+			t.Fatalf("got %+v", got)
+		}
+	}
+}
+
+func TestParseResponsesInvoiceRejectsMissingOrIncompleteOutput(t *testing.T) {
+	for _, raw := range []string{
+		`not-json`, `{"status":"completed","output":[]}`,
+		`{"status":"incomplete","output_text":"{\"total_cents\":15200}"}`,
+		`{"status":"failed","output_text":"{\"total_cents\":15200}"}`,
+		`{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"refusal","refusal":"declined"}]}]}`,
+		`{"status":"completed","output_text":"invalid invoice JSON"}`,
+	} {
+		if _, err := parseResponsesInvoice([]byte(raw)); err == nil {
+			t.Fatalf("expected error for %s", raw)
+		}
 	}
 }
 

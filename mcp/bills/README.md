@@ -1,8 +1,17 @@
-# Bills (v0.2.2)
+# Bills (v0.2.3)
 
 Vendors, bills, and bill payments for Apteva agents and human teams.
 The accounts-payable mirror of the `billing` app — money OUT instead
 of money in.
+
+## What's in v0.2.3
+
+Codex invoice OCR defaults to `gpt-6.1-sol` with medium thinking.
+Bills uses the native `responses_create` tool so the reasoning setting
+reaches Codex unchanged, and reads the final assistant output from the
+Responses envelope. The `ocr_llm_model` override remains available.
+Codex's subscription runtime manages its output budget; the max-token
+configuration applies to Anthropic and OpenCode.
 
 ## What's in v0.2.2
 
