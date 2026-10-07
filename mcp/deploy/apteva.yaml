@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.27.1
+version: 0.27.2
 description: |
   Build and release services, mobile apps, and arbitrary artifacts from Code
   or local sources using local and external build backends. Generic command
@@ -11,6 +11,10 @@ description: |
 
   Supports source kinds {code, local} and frameworks
   {go, node, bun, static, blank, android, ios, macos, command}.
+  v0.27.2 installs pinned, checksum-verified XcodeGen 2.46.0 when Apple
+  source bundles require project generation. Existing Xcode projects and
+  workspaces remain supported. Deploy logs include Codemagic step output
+  with provider fallback, bounded tails, and a short polling cache.
   v0.27.1 relocates source-internal Bun and Node symlinks into staged build
   artifacts before integrity checks, fixing static site builds with Bun cache
   links while keeping artifact attestation and external-link rejection.
@@ -182,7 +186,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: deploy/v0.27.1
+    ref: deploy/v0.27.2
     entry: mcp/deploy
   port: 8080
   health_check: /health

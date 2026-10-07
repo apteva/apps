@@ -404,7 +404,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "deploy_logs", Handler: a.toolLogs,
-			Description: "Tail build or runtime logs. Args: build_id OR release_id, tail? (lines, default 200).",
+			Description: "Tail build or runtime logs, including Codemagic provider step output. Args: build_id OR release_id, tail? (lines, default 200).",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -1208,7 +1208,7 @@ func (a *App) toolLogs(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if err != nil || b == nil {
 			return nil, fmt.Errorf("build %d not found", bid)
 		}
-		body, err := tailFile(b.LogPath, tail)
+		body, err := a.buildLog(context.Background(), b, tail)
 		if err != nil {
 			return nil, err
 		}

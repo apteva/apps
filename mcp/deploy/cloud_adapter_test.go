@@ -92,3 +92,10 @@ func TestCodemagicAdapterTemplateIsGenericAndValidYAML(t *testing.T) {
 		}
 	}
 }
+
+func TestCodemagicAppleProjectGeneration(t *testing.T) {
+	command := exec.Command("python3", "-B", "-m", "unittest", "discover", "-s", "runners/codemagic/tests", "-v")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Apple runner regression tests: %v\n%s", err, output)
+	}
+}
