@@ -39,12 +39,53 @@ func recoverStorageState(app *sdk.AppCtx) error {
 		if err != nil {
 			continue
 		}
-		_, err = app.AppDB().Exec(`INSERT OR IGNORE INTO upload_reservations(upload_id,project_id,size_bytes) VALUES(?,?,?)`, e.Name(), meta.ProjectID, meta.DeclaredSize)
+		// Leftover scratch after completion/abort must not recreate its quota.
+		_, err = app.AppDB().Exec(`INSERT OR IGNORE INTO upload_reservations(upload_id,project_id,size_bytes)
+ SELECT ?,?,? WHERE NOT EXISTS(SELECT 1 FROM completed_uploads WHERE upload_id=?)
+ AND NOT EXISTS(SELECT 1 FROM upload_reservation_cleanup WHERE upload_id=?)`, e.Name(), meta.ProjectID, meta.DeclaredSize, e.Name(), e.Name())
 		if err != nil {
 			return err
 		}
 	}
-	return nil
+	return reconcileUploadReservations(app)
+}
+
+func pruneCompletedUploadReceipts(app *sdk.AppCtx) {
+	// Keep completion evidence while cleanup is pending or scratch remains;
+	// otherwise a later startup could recreate a completed reservation.
+	cutoff := time.Now().Add(-7 * 24 * time.Hour).Unix()
+	rows, err := app.AppDB().Query(`SELECT upload_id FROM completed_uploads WHERE completed_at<?
+ AND NOT EXISTS(SELECT 1 FROM upload_reservations r WHERE r.upload_id=completed_uploads.upload_id)
+ ORDER BY completed_at LIMIT 1000`, cutoff)
+	if err != nil {
+		app.Logger().Warn("completion receipt pruning failed", "error", err)
+		return
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			break
+		}
+		ids = append(ids, id)
+	}
+	if err == nil {
+		err = rows.Err()
+	}
+	rows.Close()
+	if err != nil {
+		app.Logger().Warn("completion receipt pruning failed", "error", err)
+		return
+	}
+	for _, id := range ids {
+		if _, err := os.Stat(uploadSessionDir(app, id)); !os.IsNotExist(err) {
+			continue
+		}
+		if _, err := app.AppDB().Exec(`DELETE FROM completed_uploads WHERE upload_id=? AND completed_at<?
+ AND NOT EXISTS(SELECT 1 FROM upload_reservations r WHERE r.upload_id=completed_uploads.upload_id)`, id, cutoff); err != nil {
+			app.Logger().Warn("completion receipt pruning failed", "upload_id", id, "error", err)
+		}
+	}
 }
 
 func sweepScratchFiles(app *sdk.AppCtx) {
