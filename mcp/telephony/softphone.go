@@ -81,6 +81,11 @@ type softphoneHub struct {
 	captureExpected     uint32
 	captureSequenceGaps int
 	captureDropEvents   []audioDropEvent
+	captureMutedRanges  []captureMutedRange
+	captureMutedEvents  []captureMutedEvent
+	captureMutedFrames  uint64
+	captureMuteSeen     bool
+	captureMuteLast     uint32
 	whisperBrowser      *websocketWriterPump
 	browserEpoch        string
 	coach               *callListener
@@ -110,13 +115,17 @@ func (h *softphoneHub) observeCaptureFrame(sequence uint32, connectionIDs ...str
 	defer h.mu.Unlock()
 	if h.captureSequenceSet && sequence > h.captureExpected {
 		gap := int(sequence - h.captureExpected)
-		h.captureSequenceGaps += gap
-		h.captureDropEvents = append(h.captureDropEvents, audioDropEvent{
-			Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier",
-			Reason: "capture_sequence_gap", ConnectionID: connectionID, DurationMS: gap * 20, Sequence: uint64(h.captureExpected),
-		})
-		if len(h.captureDropEvents) > 100 {
-			h.captureDropEvents = h.captureDropEvents[len(h.captureDropEvents)-100:]
+		muted, firstUnexpected := h.mutedFramesInGap(h.captureExpected, sequence-1)
+		gap -= int(muted)
+		if gap > 0 {
+			h.captureSequenceGaps += gap
+			h.captureDropEvents = append(h.captureDropEvents, audioDropEvent{
+				Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier",
+				Reason: "capture_sequence_gap", ConnectionID: connectionID, DurationMS: gap * 20, Sequence: uint64(firstUnexpected),
+			})
+			if len(h.captureDropEvents) > 100 {
+				h.captureDropEvents = h.captureDropEvents[len(h.captureDropEvents)-100:]
+			}
 		}
 	}
 	h.captureExpected = sequence + 1
@@ -199,6 +208,8 @@ func (h *softphoneHub) setBrowser(w *websocketWriterPump) (replaced *websocketWr
 	h.deliveryNotice = ""
 	h.framedVersion = 0
 	h.captureSequenceSet = false
+	h.captureMutedRanges = nil
+	h.captureMuteSeen = false
 	h.captureTransitSet = false
 	return replaced
 }
@@ -706,18 +717,26 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			hub.forwardMicrophone(writer, payload)
 		case ws.OpText:
 			var control struct {
-				Type        string                   `json:"type"`
-				Nonce       float64                  `json:"nonce,omitempty"`
-				Version     int                      `json:"version,omitempty"`
-				Whisper     bool                     `json:"whisper,omitempty"`
-				Versions    []int                    `json:"versions,omitempty"`
-				Digits      string                   `json:"digits,omitempty"`
-				Diagnostics *browserAudioDiagnostics `json:"diagnostics,omitempty"`
+				Type          string                   `json:"type"`
+				Nonce         float64                  `json:"nonce,omitempty"`
+				Version       int                      `json:"version,omitempty"`
+				Whisper       bool                     `json:"whisper,omitempty"`
+				Versions      []int                    `json:"versions,omitempty"`
+				Digits        string                   `json:"digits,omitempty"`
+				Diagnostics   *browserAudioDiagnostics `json:"diagnostics,omitempty"`
+				Reason        string                   `json:"reason,omitempty"`
+				FirstSequence uint32                   `json:"first_sequence,omitempty"`
+				LastSequence  uint32                   `json:"last_sequence,omitempty"`
+				Frames        uint64                   `json:"frames,omitempty"`
 			}
 			if json.Unmarshal(data, &control) != nil {
 				continue
 			}
 			switch control.Type {
+			case "capture.omitted":
+				if control.Reason == "muted" {
+					hub.observeMutedCaptureRange(writer, control.FirstSequence, control.LastSequence, control.Frames, connectionID)
+				}
 			case "media.capabilities":
 				if control.Version == 2 {
 					// Old clients negotiate APT2; new clients advertise APT3 as well.

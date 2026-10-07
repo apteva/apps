@@ -143,6 +143,45 @@ test('mute and reconnect gates do not replay earlier capture',()=>{
  w.frame(100);expect(w.socket.sent.filter((x:any)=>x instanceof ArrayBuffer)).toHaveLength(1);
 });
 
+test('mute reports exact omitted sequences before fresh PCM and preserves frame numbers',()=>{
+ const w=worker();w.frame(0,1);
+ w.command({type:'muted',value:true});
+ for(let i=0;i<100;i++) {w.setNow(10020+i*20);w.frame(20+i*20,2+i);}
+ expect(w.socket.sent.filter((m:any)=>m instanceof ArrayBuffer)).toHaveLength(1);
+ w.setNow(12020);w.command({type:'muted',value:false});w.frame(2020,102);
+ const omitted=w.socket.sent.find((m:any)=>typeof m==='string'&&JSON.parse(m).type==='capture.omitted');
+ expect(JSON.parse(omitted)).toEqual({type:'capture.omitted',reason:'muted',first_sequence:2,last_sequence:101,frames:100});
+ expect(w.socket.sent.indexOf(omitted)).toBeLessThan(w.socket.sent.length-1);
+ const audio=w.socket.sent.filter((m:any)=>m instanceof ArrayBuffer);
+ expect(audio).toHaveLength(2);expect(new DataView(audio[1]).getUint32(4,true)).toBe(102);
+ expect(new Int16Array(audio[1],16).every((x:number)=>x===6553)).toBe(true);
+ w.intervals[0]();const t=w.messages.findLast((m:any)=>m.type==='transport.stats').timing;
+ expect(t.capture_muted_frames).toBe(100);expect(t.capture_muted_ms).toBe(2000);
+ expect(t.capture_dropped_ms).toBe(0);
+});
+
+test('mute metadata stays socket scoped and failed observations cannot stop fresh audio',()=>{
+ const w=worker();w.command({type:'muted',value:true});w.frame(0,1);
+ w.socket.onclose({code:1006,reason:'',wasClean:false});w.timeouts.at(-1)!();
+ const next=w.sockets.at(-1);next.onopen();
+ w.command({type:'microphone.ready',value:true});
+ w.setNow(10020);w.command({type:'muted',value:false});w.frame(20,2);
+ expect(next.sent.some((m:any)=>typeof m==='string'&&JSON.parse(m).type==='capture.omitted')).toBe(false);
+ expect(next.sent.filter((m:any)=>m instanceof ArrayBuffer)).toHaveLength(1);
+ w.command({type:'muted',value:true});w.setNow(10040);w.frame(40,3);
+ const send=next.send.bind(next);next.send=(m:any)=>{if(typeof m==='string'&&JSON.parse(m).type==='capture.omitted')throw Error('observation failed');send(m);};
+ w.command({type:'muted',value:false});w.frame(40,4);
+ expect(next.sent.filter((m:any)=>m instanceof ArrayBuffer)).toHaveLength(2);
+});
+
+test('closing a muted socket flushes its final observation without sending microphone audio',()=>{
+ const w=worker();w.command({type:'muted',value:true});w.frame(0,1);
+ w.command({type:'close'});
+ const ranges=w.socket.sent.filter((m:any)=>typeof m==='string'&&JSON.parse(m).type==='capture.omitted');
+ expect(ranges).toHaveLength(1);expect(JSON.parse(ranges[0]).frames).toBe(1);
+ expect(w.socket.sent.filter((m:any)=>m instanceof ArrayBuffer)).toHaveLength(0);
+});
+
 function timedPlayback(sent:number,sequence=1) {
  const frame=new ArrayBuffer(32+960), view=new DataView(frame);
  view.setUint32(0,0x32545041,true);view.setUint32(4,sequence,true);view.setFloat64(16,sent,true);

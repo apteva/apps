@@ -188,3 +188,57 @@ tests skipped, 154 frontend/audio tests and four Chromium dashboard scenarios
 passed. Focused race checks, Go vet, standalone build, frontend typecheck,
 panel import checks and manifest parity passed. The headless client, media
 protocol, Worker/worklet and DSP bytes remain unchanged.
+
+## Intentional microphone mute and capture gaps
+
+The shared softphone session records timestamped `microphone` / `muted` and
+`unmuted` session events, including for headless hosts. Duplicate mute commands
+do not create duplicate transition events. Observer failures cannot affect the
+mute gate or call state.
+
+While muted, the capture Worklet still generates source sequence numbers and
+the Worker suppresses transmission. The Worker now coalesces those exact
+omitted ranges into `capture.omitted` / `reason: muted` metadata on the same
+ordered media WebSocket. It flushes once per statistics interval and before
+the next transmitted microphone frame. No PCM payload or frame numbering is
+changed. Metadata never reaches the carrier/AI peer.
+
+The server accepts well-formed, bounded ranges only from the current browser
+writer. Duplicate/replayed ranges are ignored; pending ranges reset at socket
+replacement. Only ranges intersecting an observed sequence gap are excluded
+from `capture_sequence_gaps`. Unreported losses before, after or between muted
+ranges still count. Intentional suppression is recorded separately:
+
+- `timing.transport.capture_muted_frames` and `capture_muted_ms` in browser diagnostics.
+- `server.capture_muted_frames`, `capture_muted_ms`, and up to 32
+  `capture_muted_events`, with receipt timestamp, connection ID and source range.
+- Informational `capture_muted_frames` / `capture_muted_ms` dashboard metrics.
+
+Muted frames are not added to dropped-audio totals or issue filters. Raw
+microphone inter-arrival timing can still show a long silent interval during
+mute; that interval is an observation, not proof of a transport fault. Correlate
+it with the mute transitions and omitted ranges. Unexplained sequence gaps can
+also reflect other browser-side rejections; they are not proof of network loss.
+
+This is provider independent and applies to the panel and headless backbone.
+It changes diagnostics only: authorization, media gates, resampling, reconnect,
+carrier commands and incoming stale-playback protection are unchanged.
+Older servers ignore the additional metadata. Older clients cannot provide
+these exact ranges; updates require the new client/Worker as well as the server.
+Existing historical counters are not rewritten.
+
+Local verification on 7 October 2026: 687 Go tests/subtests and 162 frontend/audio
+tests passed, with two opt-in live-carrier tests skipped. Focused race tests,
+benchmark gate tests, vet, typechecks and Telephony-only panel/headless builds
+passed. The suite and real Chromium mute benchmark were rechecked using SDK
+v0.96.0, the latest release by ancestry, as required by workspace instructions.
+Baseline, Wi-Fi jitter, intentional mute and browser reconnection benchmark
+profiles passed. The controlled mute case recorded about two seconds of
+intentional omissions, zero unexpected capture sequence gaps, zero Worker
+capture drops and no caller playback loss. Exact-range, mixed-loss, duplicate,
+stale-connection, final-close and observation-failure tests cover the new path.
+All changes remain local; no production/staging calls, configuration, data or
+installation were changed. Evidence is in
+`/private/tmp/telephony-mute-diagnostics-20261007/` and
+`/private/tmp/telephony-mute-sdk096-20261007/`, plus the local test logs prefixed
+`/private/tmp/telephony-mute-`.

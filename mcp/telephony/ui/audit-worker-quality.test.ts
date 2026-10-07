@@ -23,13 +23,14 @@ test("muted worker startup cannot send capture audio before an explicit unmute",
     let sent = 0;
     connect = () => {};
     self.onmessage({data:{type:"init",muted:true,audioClockMS:0,monotonicEpochMS:0,mediaURL:"ws://unused",capturePort:{postMessage(){}},playbackPort:{}}});
-    socket = { readyState: 1, bufferedAmount: 0, send() { sent++; } };
+    socket = { readyState: 1, bufferedAmount: 0, send(data) { if(data instanceof ArrayBuffer) sent++; } };
     WebSocket = { OPEN: 1 };
     microphoneReady = true;
     const packet = {type:"capture",frame:new Float32Array(480).fill(0.5),sequence:1,timestamp_ms:0,sample_rate:24000};
     capture(packet);
     const mutedCount = sent;
     self.onmessage({data:{type:"muted",value:false}});
+    packet.sequence=2;
     capture(packet);
     return [mutedCount,sent];
   })()`, context);

@@ -31,6 +31,16 @@ test('carrier delivery notices preserve the healthy microphone and report recove
  expect(notices).toHaveLength(2);expect(states).toHaveLength(0);
 });
 
+test('mute and unmute events show the updated state and ignore duplicate commands',async()=>{
+ const {SoftphoneSession}=await import('./softphone-audio');
+ const events:any[]=[];
+ const session:any=new SoftphoneSession({onSessionEvent:e=>{events.push({event:e,muted:session.isMuted});throw Error('observer');}});
+ session.setMuted(true);session.setMuted(true);session.setMuted(false);
+ expect(events.map(e=>[e.event.action,e.event.outcome,e.muted])).toEqual([['microphone','muted',true],['microphone','unmuted',false]]);
+ expect(events.every(e=>Number.isFinite(Date.parse(e.event.timestamp)))).toBe(true);
+ expect(session.closed).toBe(false);
+});
+
 test('playback reports retain timestamped Worker rejection events without duplication', async()=>{
  const {SoftphoneSession}=await import('./softphone-audio');
  const descriptor=Object.getOwnPropertyDescriptor(globalThis,'Worker');

@@ -714,10 +714,12 @@ export class SoftphoneSession {
   }
 
   setMuted(muted: boolean): void {
+    const changed = this.muted !== muted;
     this.muted = muted;
     this.worker?.postMessage({type:"muted",value:muted});
     this.capture?.port.postMessage({ type: "muted", value: muted });
     if (muted) this.sendText(JSON.stringify({ type: "interrupt" }));
+    if (changed) this.recordSessionEvent({timestamp:new Date().toISOString(),action:"microphone",outcome:muted ? "muted" : "unmuted"});
   }
 
   stop(): void {

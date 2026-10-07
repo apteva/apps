@@ -60,6 +60,8 @@ type browserAudioTiming struct {
 	Runtime   browserAudioRuntime `json:"runtime"`
 	Transport struct {
 		CaptureFrames               float64            `json:"capture_frames"`
+		CaptureMutedFrames          float64            `json:"capture_muted_frames"`
+		CaptureMutedMS              float64            `json:"capture_muted_ms"`
 		CaptureSentMS               float64            `json:"capture_sent_ms"`
 		CaptureDroppedMS            float64            `json:"capture_dropped_ms"`
 		CaptureMaxAgeMS             float64            `json:"capture_max_age_ms"`
@@ -230,6 +232,8 @@ func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics) browserAudi
 			return math.Max(0, math.Min(n, cap))
 		}
 		tr, rt := &value.Timing.Transport, &value.Timing.Runtime
+		tr.CaptureMutedFrames = finite(tr.CaptureMutedFrames, 1e9)
+		tr.CaptureMutedMS = finite(tr.CaptureMutedMS, 86400000)
 		tr.ReconnectAttempts = finite(tr.ReconnectAttempts, 1e9)
 		tr.ReconnectSuccesses = finite(tr.ReconnectSuccesses, 1e9)
 		tr.WorkerPauseCount = finite(tr.WorkerPauseCount, 1e9)

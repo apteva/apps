@@ -571,6 +571,16 @@ func benchmarkInterruptionChecks(r benchmarkResult) []string {
 	if r.Profile.MuteMicrophone && (s.Stalls != 0 || interrupted) {
 		errors = append(errors, "intentional microphone mute raised caller transport incident")
 	}
+	if r.Profile.MuteMicrophone {
+		muted, unmuted := false, false
+		for _, event := range d.SessionEvents {
+			muted = muted || event.Action == "microphone" && event.Outcome == "muted"
+			unmuted = unmuted || event.Action == "microphone" && event.Outcome == "unmuted"
+		}
+		if d.Server.CaptureSequenceGaps != 0 || d.Server.CaptureMutedMS < 1500 || d.Server.CaptureMutedMS > 2500 || !muted || !unmuted {
+			errors = append(errors, "intentional mute not separated from unexpected capture loss or missing transition events")
+		}
+	}
 	if r.Profile.ReconnectBrowser {
 		reconnected := false
 		for _, state := range r.Browser.States {

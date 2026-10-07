@@ -149,6 +149,9 @@ func TestSoftphoneHubBridgesAudioBothDirections(t *testing.T) {
 
 	peer := dialWS(t, server.URL+"/peer/call-soft-1/cb-secret")
 	browser := dialWS(t, server.URL+"/softphone/media/call-soft-1/peer-secret")
+	// The HTTP upgrade can finish before the handler attaches this browser to
+	// the hub. Exercise connected media, not delivery to a not-yet-attached tab.
+	readSoftphoneEventWithin(t, browser, "ready", 3*time.Second)
 
 	callerAudio := pcm16ToBytes([]int16{100, -100, 2000, -2000})
 	if err := wsutil.WriteClientBinary(peer, callerAudio); err != nil {

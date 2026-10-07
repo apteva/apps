@@ -77,19 +77,25 @@ func TestBrowserNetworkFrozenIdentityAndConnectionSamples(t *testing.T) {
 	alice, bob := phoneTestIdentity("alice"), phoneTestIdentity("bob")
 	metadata := audioNetworkEvent{CallID: "call", ProjectID: "project", AdviserIdentity: alice, ClientIP: "198.51.100.7", Classification: "known_vpn_exit", Retention: 24 * time.Hour}
 	id1 := tracker.openedWithNetwork(first, "hash", "epoch", "socket_peer", metadata, collect)
-	oldSample := time.Now().UTC().Format(time.RFC3339Nano)
+	// Explicit intervals avoid equal wall-clock readings during rapid attachment
+	// and replacement. This test exercises attribution, not clock resolution.
+	base := time.Now().UTC().Add(-20 * time.Millisecond)
+	tracker.socket.Events[0].At = base.Format(time.RFC3339Nano)
+	oldSample := base.Add(5 * time.Millisecond).Format(time.RFC3339Nano)
 	metadata.AdviserIdentity = bob
 	metadata.ClientIP = "203.0.113.8"
 	metadata.Classification = "unknown"
 	id2 := tracker.openedWithNetwork(second, "hash2", "epoch", "socket_peer", metadata, collect)
 	tracker.closed(first, "session_replaced", nil)
 	tracker.closed(first, "handler_closed", nil)
+	tracker.socket.Events[1].At = base.Add(10 * time.Millisecond).Format(time.RFC3339Nano)
+	tracker.socket.Events[2].At = base.Add(11 * time.Millisecond).Format(time.RFC3339Nano)
 	if id1 == id2 || len(collected) != 3 || collected[2].AdviserIdentity != alice || collected[2].ClientIP != "198.51.100.7" || collected[2].Action != "replaced" || collected[1].AdviserIdentity != bob {
 		t.Fatalf("%+v", collected)
 	}
 	report := browserAudioDiagnostics{ConnectionID: "forged", ReceivedAt: time.Now().UTC().Format(time.RFC3339Nano), DropEvents: []audioDropEvent{
 		{Timestamp: oldSample, ConnectionID: "forged"},
-		{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), ConnectionID: "forged"},
+		{Timestamp: base.Add(15 * time.Millisecond).Format(time.RFC3339Nano), ConnectionID: "forged"},
 		{Timestamp: "invalid", ConnectionID: "forged"},
 	}, SessionEvents: []mediaSessionEvent{{Timestamp: oldSample, ConnectionID: "forged"}}}
 	tracker.observeBrowserConnection(second, report)

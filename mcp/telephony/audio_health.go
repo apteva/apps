@@ -617,7 +617,7 @@ func audioBrowserCounters(v browserAudioDiagnostics) map[string]float64 {
 	}
 	tr, rt := v.Timing.Transport, v.Timing.Runtime
 	return map[string]float64{"reconnect_attempts": tr.ReconnectAttempts, "reconnect_successes": tr.ReconnectSuccesses, "worker_pause_count": tr.WorkerPauseCount, "main_thread_pause_count": rt.MainThreadPauseCount, "audio_context_suspend_count": rt.AudioContextSuspendCount, "audio_context_suspended_ms": rt.AudioContextSuspendedMS,
-		"playback_transport_dropped_ms": tr.PlaybackTransportDroppedMS, "playback_source_dropped_ms": tr.PlaybackSourceDroppedMS, "capture_worker_dropped_ms": tr.CaptureDroppedMS, "playback_worklet_dropped_ms": float64(v.PlaybackDroppedMS), "playback_transport_sequence_gaps": tr.PlaybackSequenceGaps, "playback_worklet_sequence_gaps": float64(v.PlaybackSequenceGaps),
+		"playback_transport_dropped_ms": tr.PlaybackTransportDroppedMS, "playback_source_dropped_ms": tr.PlaybackSourceDroppedMS, "capture_worker_dropped_ms": tr.CaptureDroppedMS, "capture_muted_ms": tr.CaptureMutedMS, "capture_muted_frames": tr.CaptureMutedFrames, "playback_worklet_dropped_ms": float64(v.PlaybackDroppedMS), "playback_transport_sequence_gaps": tr.PlaybackSequenceGaps, "playback_worklet_sequence_gaps": float64(v.PlaybackSequenceGaps),
 		"playback_latency_discard_ms": tr.DropTotalsMS["playback_transport_age"] + tr.DropTotalsMS["playback_delivery_excess"] + tr.DropTotalsMS["playback_source_age"] + v.Timing.Playback.DropTotalsMS["playback_hard_limit"] + v.Timing.Playback.DropTotalsMS["playback_age_limit"],
 		"capture_latency_discard_ms":  tr.DropTotalsMS["capture_age_limit"] + tr.DropTotalsMS["websocket_backpressure"]}
 }

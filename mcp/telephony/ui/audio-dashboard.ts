@@ -209,6 +209,8 @@ export const metricLabel: Record<string, string> = {
   carrier_max_write_ms: "Max carrier send write (ms)",
   browser_transport_sequence_gaps: "Browser transport sequence gaps",
   capture_sequence_gaps: "Capture sequence gaps",
+  capture_muted_frames: "Intentionally muted microphone frames",
+  capture_muted_ms: "Intentional microphone mute (ms)",
   playback_sequence_gaps: "Playback sequence gaps",
   carrier_sequence_gaps: "Carrier sequence gaps",
 };

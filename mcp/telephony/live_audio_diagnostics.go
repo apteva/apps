@@ -119,6 +119,9 @@ type serverAudioDiagnostics struct {
 	CaptureTransitExcessMS float64                       `json:"capture_transit_excess_ms"`
 	CaptureDropEvents      []audioDropEvent              `json:"capture_drop_events,omitempty"`
 	CaptureSequenceGaps    int                           `json:"capture_sequence_gaps"`
+	CaptureMutedFrames     uint64                        `json:"capture_muted_frames"`
+	CaptureMutedMS         uint64                        `json:"capture_muted_ms"`
+	CaptureMutedEvents     []captureMutedEvent           `json:"capture_muted_events,omitempty"`
 }
 
 func (h *softphoneHub) serverAudioSnapshot() serverAudioDiagnostics {
@@ -129,7 +132,7 @@ func (h *softphoneHub) serverAudioSnapshot() serverAudioDiagnostics {
 	return serverAudioDiagnostics{Socket: socket, Health: health, Reception: h.reception.snapshot(mediaClockMS(), h.carrierForward != nil && !h.held && (h.status == "answered" || h.status == "in-progress")), CarrierPacer: h.pacerStats.snapshot(), Process: sampleMediaProcess(), CaptureStaleBytes: h.captureStaleBytes, Epoch: epoch, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Stages: stages,
 		CarrierForward: mergeLiveAudioSnapshots(h.completedCarrierForward, h.carrierForward.audioSnapshot()),
 		ToBrowser:      mergeLiveAudioSnapshots(h.completedBrowser, h.browser.audioSnapshot()), ToCarrierBridge: mergeLiveAudioSnapshots(h.completedPeer, h.peer.audioSnapshot()),
-		CaptureTimestampMS: h.captureTimestampMS, CaptureWorkerAgeMS: h.captureWorkerAgeMS, CaptureSequenceGaps: h.captureSequenceGaps, CaptureTransitExcessMS: h.captureTransitExcessMS, CaptureDropEvents: append([]audioDropEvent(nil), h.captureDropEvents...)}
+		CaptureTimestampMS: h.captureTimestampMS, CaptureWorkerAgeMS: h.captureWorkerAgeMS, CaptureSequenceGaps: h.captureSequenceGaps, CaptureTransitExcessMS: h.captureTransitExcessMS, CaptureDropEvents: append([]audioDropEvent(nil), h.captureDropEvents...), CaptureMutedFrames: h.captureMutedFrames, CaptureMutedMS: h.captureMutedFrames * 20, CaptureMutedEvents: append([]captureMutedEvent(nil), h.captureMutedEvents...)}
 }
 func mergeLiveAudioSnapshots(a, b liveAudioQueueSnapshot) liveAudioQueueSnapshot {
 	a.QueuedMS = b.QueuedMS
