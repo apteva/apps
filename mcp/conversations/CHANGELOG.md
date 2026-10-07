@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.45 — 2026-10-07
+
+- Keep transcript progress and thread-list activity idle during post-reply model work that decides to pace. New input and subsequent timer wakes still start visible activity.
+- Keep Thinking visible for genuine proactive turns after earlier final replies or approval cards.
+- Update the app SDK dependency to v0.96.0.
+
 ## 0.24.44 — 2026-10-05
 
 - Identify attached files from their metadata without asking for an unavailable reader or entering a waiting state.
