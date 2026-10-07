@@ -31,3 +31,7 @@ Keep the same operation and `quip_request_id` on retry. A durable once-key block
 Exact text readback was tested with plain, single-paragraph text. Rich formatting or multiple paragraphs can change HTML whitespace and will fail closed if exact readback differs. Media operations publish one attachment per run; updating attachments and scheduling media are outside this example.
 
 This is an editable site workflow example. Patreon selectors and English labels belong to its definition, not the Actors or Computer engines.
+
+## Validation (2026-10-07)
+
+Local creator checks completed for real text/image/native-MP4 publication, reload and saved-media/body/reply verification, caption editing, full scheduling with saved date/time/timezone verification, scheduled-test cleanup, populated library rows, and structured stats. Incorrect expected text failed before editing; reusing an image-post request ID failed before a second Share. An Anyone-replies preflight passed at the production 1600×800 viewport. Production smoke checks opened/closed the empty composer and correctly read the empty Quips library; no production content was posted. Existing Patreon operations, presets, browser settings and run limits were preserved. The generic Computer media-picker change passed browser tests for dynamic/native inputs and unsafe-target rejection plus the Computer Go test suite.
