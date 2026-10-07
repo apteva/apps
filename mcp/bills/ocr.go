@@ -87,7 +87,7 @@ type ExtractedInvoice struct {
 //	         hook for custom providers. Calls via CallAppResult.
 //
 // Real failures (network, malformed response) return an error; the
-// caller logs and continues with manual fields.
+// caller surfaces the error without creating a bill.
 func callOCR(ctx *sdk.AppCtx, pid string, fileID int64) (*ExtractedInvoice, string, error) {
 	provider := strings.TrimSpace(configString(ctx, "ocr_provider", ""))
 
@@ -418,4 +418,8 @@ func writeExtractedAudit(db *sql.DB, billID int64, provider string, fieldsFilled
 		return err
 	}
 	return tx.Commit()
+}
+
+func invoiceExtractionError(fileID int64, err error) error {
+	return fmt.Errorf("invoice extraction failed: %w. No bill was created. The document is retained as storage file #%d; fix the extraction integration and retry", err, fileID)
 }
