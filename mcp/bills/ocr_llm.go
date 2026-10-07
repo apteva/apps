@@ -166,7 +166,7 @@ func buildLLMArgs(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, images [][]byte,
 		// Native Responses preserves reasoning effort; the chat compatibility
 		// adapter drops it. The subscription endpoint also rejects temperature
 		// and output-token caps, so leave both out of this request.
-		model = configString(ctx, "ocr_llm_model", "gpt-6.1-sol")
+		model = configString(ctx, "ocr_llm_model", "gpt-6-luna")
 		tool = "responses_create"
 		args = buildCodexResponsesArgs(images, model, fileName)
 	default:
@@ -183,7 +183,7 @@ func buildLLMArgs(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, images [][]byte,
 }
 
 // buildCodexResponsesArgs uses the subscription runtime's native request
-// shape so the requested medium thinking effort reaches the model unchanged.
+// shape so the requested low thinking effort reaches the model unchanged.
 func buildCodexResponsesArgs(images [][]byte, model, fileName string) map[string]any {
 	parts := []any{map[string]any{
 		"type": "input_text",
@@ -199,7 +199,7 @@ func buildCodexResponsesArgs(images [][]byte, model, fileName string) map[string
 		"model":        model,
 		"instructions": ocrSystemPrompt,
 		"input":        []any{map[string]any{"role": "user", "content": parts}},
-		"reasoning":    map[string]any{"effort": "medium"},
+		"reasoning":    map[string]any{"effort": "low"},
 		"text":         map[string]any{"format": map[string]any{"type": "json_object"}},
 		"store":        false,
 		"stream":       true,

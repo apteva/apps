@@ -1,8 +1,15 @@
-# Bills (v0.2.3)
+# Bills (v0.2.4)
 
 Vendors, bills, and bill payments for Apteva agents and human teams.
 The accounts-payable mirror of the `billing` app — money OUT instead
 of money in.
+
+## What's in v0.2.4
+
+Codex invoice OCR now defaults to `gpt-6-luna` with low thinking,
+using the existing device-login Codex integration and native Responses
+call. The model override remains available. This applies to new uploads
+without changing existing bill records.
 
 ## What's in v0.2.3
 

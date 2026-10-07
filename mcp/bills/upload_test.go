@@ -156,7 +156,7 @@ func (p *boundCodexUploadPlatform) ExecuteIntegrationTool(id int64, tool string,
 	if _, ok := input["temperature"]; ok {
 		p.t.Fatal("unsupported temperature sent to Codex")
 	}
-	if id != 1 || tool != "responses_create" || input["model"] != "gpt-6.1-sol" || input["reasoning"].(map[string]any)["effort"] != "medium" {
+	if id != 1 || tool != "responses_create" || input["model"] != "gpt-6-luna" || input["reasoning"].(map[string]any)["effort"] != "low" {
 		p.t.Fatalf("incorrect Codex request: id=%d tool=%q model=%v reasoning=%v", id, tool, input["model"], input["reasoning"])
 	}
 	raw, _ := json.Marshal(map[string]any{"status": "completed", "output_text": `{"vendor":{"name":"Acme"},"total_cents":12500,"currency":"EUR"}`})

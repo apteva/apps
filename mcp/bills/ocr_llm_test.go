@@ -215,11 +215,11 @@ func TestBuildLLMArgs_OpenAICodexDefaults(t *testing.T) {
 	bound := &sdk.BoundIntegration{AppSlug: "openai-codex"}
 	images := [][]byte{[]byte("first-page"), []byte("last-page")}
 	model, tool, args := buildLLMArgs(ctx, bound, images, "invoice.pdf")
-	if model != "gpt-6.1-sol" || args["model"] != model || tool != "responses_create" {
+	if model != "gpt-6-luna" || args["model"] != model || tool != "responses_create" {
 		t.Fatalf("model=%q tool=%q args model=%v", model, tool, args["model"])
 	}
-	if args["reasoning"].(map[string]any)["effort"] != "medium" {
-		t.Fatalf("reasoning=%v, want medium", args["reasoning"])
+	if args["reasoning"].(map[string]any)["effort"] != "low" {
+		t.Fatalf("reasoning=%v, want low", args["reasoning"])
 	}
 	for _, unsupported := range []string{"temperature", "max_tokens", "max_output_tokens", "messages"} {
 		if _, ok := args[unsupported]; ok {
@@ -250,10 +250,10 @@ func TestBuildLLMArgs_OpenAICodexDefaults(t *testing.T) {
 	}
 }
 
-func TestBuildLLMArgs_OpenAICodexModelOverrideKeepsMediumThinking(t *testing.T) {
+func TestBuildLLMArgs_OpenAICodexModelOverrideKeepsLowThinking(t *testing.T) {
 	ctx := newTestCtx(t, tk.WithConfig(map[string]string{"ocr_llm_model": "custom-vision-model"}))
 	model, tool, args := buildLLMArgs(ctx, &sdk.BoundIntegration{AppSlug: "openai-codex"}, nil, "invoice.pdf")
-	if model != "custom-vision-model" || tool != "responses_create" || args["reasoning"].(map[string]any)["effort"] != "medium" {
+	if model != "custom-vision-model" || tool != "responses_create" || args["reasoning"].(map[string]any)["effort"] != "low" {
 		t.Fatalf("model=%q tool=%q reasoning=%v", model, tool, args["reasoning"])
 	}
 }
