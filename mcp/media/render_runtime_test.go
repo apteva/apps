@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"os/exec"
@@ -306,5 +307,98 @@ func TestNormalizationAudioOnlyExports(t *testing.T) {
 		if err != nil || result["audio_normalization"].(map[string]any)["validated"] != true {
 			t.Fatalf("%s: %v %v", name, err, result)
 		}
+	}
+}
+
+// Some valid MOV sources report media duration at the last picture's PTS,
+// while their presentation edit still includes that picture (production 90825).
+func normalizationBoundaryFixture(t *testing.T) string {
+	t.Helper()
+	source := guardedFixture(t, true)
+	dir := filepath.Dir(source)
+	helper := filepath.Join(dir, "helper.py")
+	if err := os.WriteFile(helper, []byte(renderRuntimePython), 0600); err != nil {
+		t.Fatal(err)
+	}
+	script := `import sys,struct
+sys.path.insert(0, sys.argv[1])
+from helper import movie_metadata,movie_boxes
+with open(sys.argv[2], 'r+b') as f:
+ offset,header,data=movie_metadata(f)
+ for a,b,k in movie_boxes(data,0,len(data)):
+  if k != b'trak': continue
+  for m,n,t in movie_boxes(data,a,b):
+   if t != b'mdia': continue
+   children=list(movie_boxes(data,m,n))
+   if not any(k==b'hdlr' and data[h+8:h+12]==b'vide' for h,_,k in children): continue
+   for o,_,kind in children:
+    if kind==b'mdhd':
+     pos=o+(16 if data[o]==0 else 24);fmt='>I' if data[o]==0 else '>Q'
+     duration=struct.unpack_from(fmt,data,pos)[0]
+     struct.pack_into(fmt,data,pos,duration-duration//150)
+ f.seek(offset+header);f.write(data)
+`
+	if out, err := exec.Command("python3", "-c", script, dir, source).CombinedOutput(); err != nil {
+		t.Fatalf("boundary fixture: %v %s", err, out)
+	}
+	return source
+}
+
+func TestNormalizationRetainsLastPictureAtMediaDuration(t *testing.T) {
+	source := normalizationBoundaryFixture(t)
+	for _, remote := range []bool{false, true} {
+		_, result, err := runGuardedFixture(t, source, "audio_filter", map[string]any{"target_lufs": -20, "target_peak_dbtp": -1.5}, remote)
+		if err != nil {
+			t.Fatalf("remote=%v %v %v", remote, err, result)
+		}
+		d := result["audio_normalization"].(map[string]any)
+		if d["video_frames_expected"] != float64(150) || d["video_frames_checked"] != float64(150) || d["video_pictures_match"] != true {
+			t.Fatalf("remote=%v %v", remote, d)
+		}
+	}
+}
+
+func TestSource90825NormalizationRetainsAll150Pictures(t *testing.T) {
+	root := os.Getenv("MEDIA_TRIM_FIXTURE_DIR")
+	if root == "" {
+		t.Skip("private production regression opt-in")
+	}
+	source := filepath.Join(root, "feedback-0.14.14", "90825.mov")
+	for _, remote := range []bool{false, true} {
+		_, result, err := runGuardedFixture(t, source, "audio_filter", map[string]any{"target_lufs": -20, "target_peak_dbtp": -1.5}, remote)
+		if err != nil {
+			t.Fatalf("remote=%v %v %v", remote, err, result)
+		}
+		d := result["audio_normalization"].(map[string]any)
+		if d["video_frames_expected"] != float64(150) || d["video_frames_checked"] != float64(150) || d["video_pictures_match"] != true || d["validated"] != true {
+			t.Fatalf("remote=%v %v", remote, d)
+		}
+	}
+}
+
+func TestNormalizationRejectsMissingLastPicture(t *testing.T) {
+	source := guardedFixture(t, false)
+	dir := t.TempDir()
+	output := filepath.Join(dir, "out.mov")
+	row := &RenderRow{Operation: "audio_filter", Params: raw(t, map[string]any{"target_lufs": -20, "target_peak_dbtp": -1.5})}
+	binary, _ := exec.LookPath("ffmpeg")
+	args := []string{"-y", "-v", "error", "-i", source, "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy", "-c:a", "aac", "-af", "volume=0", "-ar", "44100", "-frames:v", "149", output}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd, err := localRuntimeCommand(ctx, row, dir, binary, source, output, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log, err := cmd.CombinedOutput()
+	var result map[string]any
+	if jsonErr := json.Unmarshal(runtimeResultFromLog(string(log)), &result); jsonErr != nil {
+		t.Fatal(jsonErr)
+	}
+	if err == nil || !strings.Contains(fmt.Sprint(result["runtime_error"]), "retained video pictures or timestamps changed") {
+		t.Fatalf("lost picture accepted: %v %s", err, log)
+	}
+	d := result["audio_normalization"].(map[string]any)
+	if d["validated"] != false || d["video_frames_expected"] != float64(150) || d["video_frames_checked"] != float64(149) {
+		t.Fatal(d)
 	}
 }

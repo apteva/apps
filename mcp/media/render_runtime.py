@@ -36,48 +36,104 @@ def seconds(value):
     return "%.9f" % value
 
 
-def patch_presentation_end(filename, duration, track_durations=None):
-    """Keep decoding dependencies; end the MOV/MP4 presentation at an edit boundary.
+def movie_metadata(f, allow_fragmented=False):
+    """Read bounded MOV metadata without loading compressed media."""
+    size = os.fstat(f.fileno()).st_size
+    pos = 0
+    moov = None
+    while pos < size:
+        f.seek(pos)
+        header = f.read(8)
+        if len(header) != 8:
+            raise ValueError("incomplete container header")
+        length, kind = struct.unpack(">I4s", header)
+        hsize = 8
+        if length == 1:
+            length = struct.unpack(">Q", f.read(8))[0]
+            hsize = 16
+        if length == 0:
+            length = size - pos
+        if length < hsize or pos + length > size or (kind == b"moof" and not allow_fragmented):
+            raise ValueError("unsupported fragmented or invalid container")
+        if kind == b"moov":
+            if moov or length > 32 * 1024 * 1024:
+                raise ValueError("unsupported movie metadata")
+            moov = (pos, hsize, bytearray(f.read(length - hsize)))
+        pos += length
+    if not moov:
+        raise ValueError("missing movie metadata")
+    return moov
 
-    Only the bounded moov metadata is loaded, not the mdat. Reject ambiguous
-    edits/fragmentation instead of altering timestamps or compressed samples.
+
+def movie_boxes(data, start, end):
+    while start < end:
+        if start + 8 > end:
+            raise ValueError("invalid child box")
+        n, t = struct.unpack_from(">I4s", data, start)
+        if n < 8 or start + n > end:
+            raise ValueError("unsupported child box")
+        yield start + 8, start + n, t
+        start += n
+
+
+def presentation_durations(filename):
+    """Use exact edit boundaries, not rounded ffprobe stream durations.
+
+    A stream's media duration can end at its last picture's PTS while the
+    presentation edit includes that picture. Conversely, guarded copy edits
+    intentionally hide reordered dependencies. Preserve either boundary.
     """
-    with open(filename, "r+b") as f:
-        size = os.fstat(f.fileno()).st_size
-        pos = 0
-        moov = None
-        while pos < size:
-            f.seek(pos)
-            header = f.read(8)
-            if len(header) != 8:
-                raise ValueError("incomplete container header")
-            length, kind = struct.unpack(">I4s", header)
-            hsize = 8
-            if length == 1:
-                length = struct.unpack(">Q", f.read(8))[0]
-                hsize = 16
-            if length == 0:
-                length = size - pos
-            if length < hsize or pos + length > size or kind == b"moof":
-                raise ValueError("unsupported fragmented or invalid container")
-            if kind == b"moov":
-                if moov or length > 32 * 1024 * 1024:
-                    raise ValueError("unsupported movie metadata")
-                moov = (pos, hsize, bytearray(f.read(length - hsize)))
-            pos += length
-        if not moov:
-            raise ValueError("missing movie metadata")
-        offset, header_size, data = moov
+    with open(filename, "rb") as f:
+        _, _, data = movie_metadata(f, allow_fragmented=True)
+    children = list(movie_boxes(data, 0, len(data)))
+    clocks = [x for x in children if x[2] == b"mvhd"]
+    if len(clocks) != 1:
+        raise ValueError("missing movie clock")
+    o = clocks[0][0]
+    if data[o] not in (0, 1):
+        raise ValueError("unsupported movie clock")
+    scale = struct.unpack_from(">I", data, o + (12 if data[o] == 0 else 20))[0]
+    if scale <= 0:
+        raise ValueError("unsupported movie timescale")
+    durations = {}
+    for a, b, kind in children:
+        if kind != b"trak":
+            continue
+        tk = list(movie_boxes(data, a, b))
+        handler = None
+        for m, n, t in tk:
+            if t == b"mdia":
+                for h, _, k in movie_boxes(data, m, n):
+                    if k == b"hdlr":
+                        handler = bytes(data[h + 8:h + 12]).decode("ascii")
+        if handler not in ("vide", "soun"):
+            continue
+        edits = [x for x in tk if x[2] == b"edts"]
+        if len(edits) != 1 or handler in durations:
+            continue
+        entries = [x for x in movie_boxes(data, edits[0][0], edits[0][1]) if x[2] == b"elst"]
+        if len(entries) != 1:
+            continue
+        o = entries[0][0]
+        v = data[o]
+        if v not in (0, 1) or struct.unpack_from(">I", data, o + 4)[0] != 1:
+            continue
+        width = 4 if v == 0 else 8
+        media_time = struct.unpack_from(">i" if v == 0 else ">q", data, o + 8 + width)[0]
+        rate = struct.unpack_from(">hh", data, o + 8 + 2 * width)
+        if media_time < 0 or rate != (1, 0):
+            continue
+        ticks = struct.unpack_from(">I" if v == 0 else ">Q", data, o + 8)[0]
+        durations[handler] = Fraction(ticks, scale)
+    return scale, durations
 
+
+def patch_presentation_end(filename, duration, track_durations=None):
+    """Keep decoding dependencies; end the MOV/MP4 presentation at an edit boundary."""
+    with open(filename, "r+b") as f:
+        offset, header_size, data = movie_metadata(f)
         def boxes(start, end):
-            while start < end:
-                if start + 8 > end:
-                    raise ValueError("invalid child box")
-                n, t = struct.unpack_from(">I4s", data, start)
-                if n < 8 or start + n > end:
-                    raise ValueError("unsupported child box")
-                yield start + 8, start + n, t
-                start += n
+            return movie_boxes(data, start, end)
 
         children = list(boxes(0, len(data)))
         mvhd = [x for x in children if x[2] == b"mvhd"]
@@ -89,7 +145,7 @@ def patch_presentation_end(filename, duration, track_durations=None):
             raise ValueError("unsupported movie clock")
         scale_offset = o + (12 if version == 0 else 20)
         scale = struct.unpack_from(">I", data, scale_offset)[0]
-        ticks = math.floor((duration - 1e-6) * scale + 1e-7)
+        ticks = math.ceil(duration * scale) if track_durations else math.floor((duration - 1e-6) * scale + 1e-7)
         if scale < 1000 or ticks <= 0:
             raise ValueError("unsupported movie timescale")
         struct.pack_into(">I" if version == 0 else ">Q", data, scale_offset + 4, ticks)
@@ -106,8 +162,9 @@ def patch_presentation_end(filename, duration, track_durations=None):
                         for h, _, k in boxes(m, n):
                             if k == b"hdlr":
                                 handler = bytes(data[h + 8:h + 12]).decode("ascii")
-                if handler in track_durations:
-                    track_ticks = math.floor(float(track_durations[handler]) * scale + 1e-7)
+                if handler not in track_durations:
+                    continue
+                track_ticks = math.ceil(track_durations[handler] * scale)
             headers = [x for x in tk if x[2] == b"tkhd"]
             edits = [x for x in tk if x[2] == b"edts"]
             if len(headers) != 1 or len(edits) != 1:
@@ -297,25 +354,31 @@ def normalized_audio(req, info, diagnostics):
     for flag, value in (("-af", chain), ("-ar", str(rate))):
         args[args.index(flag) + 1] = value
     source_video = next((s for s in info["streams"] if s.get("codec_type") == "video"), {})
+    durations = None
     if source_video and "-vn" not in args:
         args[-1:-1] = color_args(source_video)
         if os.path.splitext(req["output"])[1].lower() in (".mov", ".mp4"):
             args[-1:-1] = ["-movflags", "+faststart+write_colr"]
+            if "mov" in info.get("format", {}).get("format_name", "").split(","):
+                scale, durations = presentation_durations(req["source"])
+                # Match the source clock so even an exclusive one-microsecond
+                # copy cutoff remains exact through audio-only remuxing.
+                args[-1:-1] = ["-movie_timescale", str(scale * 1000 // math.gcd(scale, 1000) if scale < 1000 else scale)]
+                # Complex/no-edit sources retain FFmpeg's flattened timeline;
+                # the full picture comparison below remains authoritative.
+                if "vide" not in durations:
+                    durations = None
     encode(req["ffmpeg"], args)
-    # Remuxing a video copy can expose reference packets hidden beyond a MOV
-    # edit boundary. Keep the source's presentation durations after muxing.
-    if any(s.get("codec_type") == "video" for s in info["streams"]) and os.path.splitext(req["output"])[1].lower() in (".mov", ".mp4"):
-        durations = {"vide" if s["codec_type"] == "video" else "soun": float(s["duration"])
-                     for s in info["streams"] if s.get("codec_type") in ("video", "audio") and s.get("duration")}
-        if durations:
-            patch_presentation_end(req["output"], max(durations.values()), durations)
+    if durations:
+        patch_presentation_end(req["output"], max(durations.values()), durations)
     actual = measurement(req, req["output"])
     actual_i, actual_tp = float(actual["input_i"]), float(actual["input_tp"])
-    diagnostics["audio_normalization"] = {"algorithm_version": "media-two-pass-loudnorm-1", "passes": 2,
+    diagnostics["audio_normalization"] = {"algorithm_version": "media-two-pass-loudnorm-2", "passes": 2,
         "target_lufs": target, "target_peak_dbtp": peak, "internal_peak_dbtp": internal_peak,
         "source_measurements": measured, "encoded_lufs": actual_i, "encoded_peak_dbtp": actual_tp,
         "loudness_tolerance_lu": .5, "peak_tolerance_db": .1, "sample_rate": rate,
-        "effective_filter": chain, "validated": False}
+        "effective_filter": chain, "validated": False,
+        "presentation_boundary_mode": "exact_source_edits" if durations else "encoded_timeline_verified"}
     if abs(actual_i - target) > .5 or actual_tp > peak + .1:
         raise ValueError("audio_normalization_failed: encoded loudness %.2f LUFS / %.2f dBTP differs from requested %.2f LUFS / ceiling %.2f dBTP" % (actual_i, actual_tp, target, peak))
     output_info = probe(req["ffprobe"], req["output"])
@@ -342,7 +405,20 @@ def normalized_audio(req, info, diagnostics):
             raise ValueError("audio_normalization_failed: %s start timeline changed" % kind)
         if src.get("duration") and dst.get("duration") and abs(float(src["duration"]) - float(dst["duration"])) > duration_tolerance:
             raise ValueError("audio_normalization_failed: %s duration changed" % kind)
-    run(req["ffmpeg"], ["-v", "error", "-xerror", "-i", req["output"], "-map", "0:v:0?", "-map", "0:a:0?", "-sn", "-dn", "-f", "null", "-"])
+    if source_video and "-vn" not in args:
+        # Container duration tolerances alone cannot detect a missing picture.
+        # Check every decoded source/output picture and presentation timestamp,
+        # including the last picture and any hidden reorder dependencies.
+        source_frames = frame_hashes(req["ffmpeg"], req["source"])
+        output_frames = frame_hashes(req["ffmpeg"], req["output"])
+        diagnostics["audio_normalization"]["video_frames_expected"] = len(source_frames)
+        diagnostics["audio_normalization"]["video_frames_checked"] = len(output_frames)
+        if not source_frames or len(source_frames) != len(output_frames) or any(
+                abs(x[0] - y[0]) > .001 or x[1] != y[1] for x, y in zip(source_frames, output_frames)):
+            raise ValueError("audio_normalization_failed: retained video pictures or timestamps changed")
+        diagnostics["audio_normalization"]["video_pictures_match"] = True
+    # Video has already been decoded and checked above; finish audio decoding.
+    run(req["ffmpeg"], ["-v", "error", "-xerror", "-i", req["output"], "-map", "0:a:0", "-vn", "-sn", "-dn", "-f", "null", "-"])
     diagnostics["audio_normalization"]["decode_ok"] = True
     diagnostics["audio_normalization"]["validated"] = True
     diagnostics["audio_normalization"]["timeline_validated"] = True

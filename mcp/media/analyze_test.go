@@ -336,3 +336,99 @@ func TestParseRemoteAnalysisResultLastMarkerWins(t *testing.T) {
 		t.Fatalf("got=%+v err=%v", got, err)
 	}
 }
+
+func TestAnalysisWindowCoverageLocalRemote(t *testing.T) {
+	source := guardedFixture(t, false)
+	vfr := filepath.Join(t.TempDir(), "vfr.mov")
+	if out, err := exec.Command("ffmpeg", "-v", "error", "-i", source, "-vf", "select=not(mod(n\\,5))", "-fps_mode", "vfr", "-c:v", "libx264", "-an", vfr).CombinedOutput(); err != nil {
+		t.Fatalf("VFR fixture: %v %s", err, out)
+	}
+	delayed := filepath.Join(t.TempDir(), "delayed.mov")
+	if out, err := exec.Command("ffmpeg", "-v", "error", "-itsoffset", "0.209", "-i", source,
+		"-i", source, "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", delayed).CombinedOutput(); err != nil {
+		t.Fatalf("delayed fixture: %v %s", err, out)
+	}
+	for _, tc := range []struct {
+		name, source          string
+		start                 int64
+		wantGap, wantCoverage bool
+	}{
+		{"between_frames", source, 1017, false, true},
+		{"first_interval", source, 17, false, true},
+		{"variable_frame_duration", vfr, 1017, false, true},
+		{"frame_boundary", source, 1000, false, false},
+		{"real_opening_gap", delayed, 0, true, false},
+		{"window_inside_real_gap", delayed, 17, true, false},
+	} {
+		for _, remote := range []bool{false, true} {
+			t.Run(tc.name+map[bool]string{false: "/local", true: "/remote"}[remote], func(t *testing.T) {
+				row := &MediaRow{HasVideo: true}
+				opts := analysisOptions{StartMs: tc.start, EndMs: tc.start + 1000}
+				var log string
+				if remote {
+					out, err := exec.Command("bash", "-c", buildRemoteAnalysisScript("ffmpeg", tc.source, row, opts)).CombinedOutput()
+					if err != nil {
+						t.Fatalf("%v %s", err, out)
+					}
+					wire, err := parseRemoteAnalysisResult(string(out))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if wire.VisualExit != 0 {
+						t.Fatalf("%+v", wire)
+					}
+					log, err = decodeRemoteAnalysisLog(wire.VisualLog)
+					if err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					var err error
+					log, err = runCompactedFFmpeg(context.Background(), "ffmpeg", visualAnalysisArgs(tc.source, row, opts))
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				v := parseVisualAnalysis(log, tc.start, opts.EndMs)
+				gap := false
+				for _, issue := range visualIssues(v) {
+					if issue.Code == "VIDEO_START_GAP" {
+						gap = true
+					}
+				}
+				if v.FrameValidation == nil || gap != tc.wantGap || v.FrameValidation.WindowStartCovered != tc.wantCoverage {
+					t.Fatalf("gap=%v want=%v validation=%+v log=%s", gap, tc.wantGap, v.FrameValidation, log)
+				}
+				if tc.wantCoverage && ((tc.source != vfr && v.FrameValidation.FramesChecked != 30) || v.FrameValidation.FirstFrameMs <= tc.start) {
+					t.Fatalf("preroll leaked into range scan: %+v", v.FrameValidation)
+				}
+			})
+		}
+	}
+}
+
+func TestCoverageEvidenceDoesNotHideMissingPicturesOrWeakenTrim(t *testing.T) {
+	for _, tc := range []struct {
+		prior string
+		gap   bool
+	}{
+		{"last=-0.016 duration=0.033", false},
+		{"last=-0.016 duration=0.005", true},
+		{"last=-0.016 duration=0", true},
+	} {
+		log := "APTEVA_VIDEO_PREROLL " + tc.prior + "\nAPTEVA_VIDEO_SCAN count=30 first=0.017 last=0.98 duration=0.033\n"
+		v := parseVisualAnalysis(log, 1017, 2017)
+		gap := false
+		for _, issue := range visualIssues(v) {
+			if issue.Code == "VIDEO_START_GAP" {
+				gap = true
+			}
+		}
+		if gap != tc.gap {
+			t.Fatalf("gap=%v want=%v evidence=%s", gap, tc.gap, log)
+		}
+		v.FrameValidation.RangeStartMs = 0
+		if err := checkTrimValidation(trimValidation{Video: v.FrameValidation}); err == nil {
+			t.Fatal("coverage evidence weakened exact trim zero-origin requirement")
+		}
+	}
+}

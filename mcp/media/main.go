@@ -22,8 +22,13 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.14.13
+version: 0.14.14
 description: |
+  v0.14.14 preserves exact video presentation boundaries during audio
+  normalization and verifies every retained picture against the source,
+  preventing last-frame loss. Analysis windows use preceding-frame coverage
+  to distinguish between-frame starts from genuine video gaps. Accurate
+  trims, zero-start alignment and guarded copy cutoffs remain intact.
   v0.14.13 adds guarded auto keyframe trimming with bounded drift, source
   picture/timeline checks and accurate fallback. HEVC speed/quality profiles,
   estimated per-job budgets and explicit HLG/Dolby Vision diagnostics make
@@ -322,7 +327,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.13
+    ref: media/v0.14.14
     entry: mcp/media
   port: 8080
   health_check: /health

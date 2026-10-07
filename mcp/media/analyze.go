@@ -458,13 +458,23 @@ func commonRangeArgs(sourceURL string, opts analysisOptions) []string {
 
 func visualAnalysisArgs(sourceURL string, row *MediaRow, opts analysisOptions) []string {
 	args := commonRangeArgs(sourceURL, opts)
+	if opts.StartMs > 0 && !row.IsImage {
+		// Decode keyframe preroll to observe the picture covering the window
+		// boundary, then remove negative-PTS pictures from the actual scan.
+		args = append([]string{"-noaccurate_seek"}, args...)
+	}
 	filter := "scale=w='min(1280,iw)':h=-2,signalstats,blurdetect,blockdetect,metadata=print"
 	if !row.IsImage {
 		// Continuity checks see every decoded frame. Expensive per-frame
 		// visual metrics run only on one representative sample every 5s.
 		filter = "blackdetect=d=0:pix_th=0.10,metadata=mode=print:key=lavfi.black_end,showinfo=checksum=0,freezedetect=n=-60dB:d=2,fps=1/5," + filter
 		if opts.EndMs > opts.StartMs {
-			filter = "trim=duration=" + formatSeconds(opts.EndMs-opts.StartMs) + "," + filter
+			filter = "trim=start=0:duration=" + formatSeconds(opts.EndMs-opts.StartMs) + "," + filter
+		} else {
+			filter = "trim=start=0," + filter
+		}
+		if opts.StartMs > 0 {
+			filter = "showinfo@coverage=checksum=0," + filter
 		}
 	}
 	args = append(args, "-map", "0:v:0", "-vf", filter, "-an", "-sn", "-dn")
@@ -639,7 +649,7 @@ func visualIssues(v *visualAnalysis) []analysisIssue {
 		return nil
 	}
 	out := make([]analysisIssue, 0, len(v.BlackSegments)+len(v.FrozenSegments))
-	if fv := v.FrameValidation; fv != nil && fv.FirstFrameMs-fv.RangeStartMs > 2 {
+	if fv := v.FrameValidation; fv != nil && fv.FirstFrameMs-fv.RangeStartMs > 2 && !fv.WindowStartCovered {
 		out = append(out, analysisIssue{Code: "VIDEO_START_GAP", Severity: "warning", Message: "The first decoded picture starts after the beginning of the analyzed timeline.", StartMs: fv.RangeStartMs, EndMs: fv.FirstFrameMs})
 	}
 	for _, s := range v.BlackSegments {

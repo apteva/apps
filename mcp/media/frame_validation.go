@@ -16,6 +16,9 @@ import (
 // Scan every decoded picture, before any sampling of expensive visual metrics.
 // The remote and local commands return bounded summaries instead of frame logs.
 type frameValidation struct {
+	WindowStartCovered  bool   `json:"window_start_covered,omitempty"`
+	CoveringFrameMs     *int64 `json:"covering_frame_ms,omitempty"`
+	CoveringFrameEndMs  *int64 `json:"covering_frame_end_ms,omitempty"`
 	RangeStartMs        int64  `json:"range_start_ms"`
 	FramesChecked       int64  `json:"frames_checked"`
 	FirstFrameMs        int64  `json:"first_frame_ms"`
@@ -41,6 +44,12 @@ const compactFrameLogAWK = `
 function field(prefix, i) { for (i=1;i<=NF;i++) if (index($i,prefix)==1) return substr($i,length(prefix)+1); return 0 }
 {
  original=$0;
+ if($0 ~ /showinfo@coverage/) {
+  if(match($0,/pts_time:[-0-9.e+]+[[:space:]]+duration:[[:space:]]*[-0-9]+[[:space:]]+duration_time:/)) {
+   $0=substr($0,RSTART); pt=field("pts_time:"); if(pt<0) { pc++; pl=pt; pd=field("duration_time:"); }
+  }
+  next;
+ }
  if(match($0,/pts_time:[-0-9.e+]+[[:space:]]+fmt:[^ ]+[[:space:]]+channels:/)) {
   $0=substr($0,RSTART); if(ac==0) af=field("pts_time:"); ac++; al=field("pts_time:"); ar=field("rate:"); an=field("nb_samples:");
  }
@@ -53,6 +62,7 @@ function field(prefix, i) { for (i=1;i<=NF;i++) if (index($i,prefix)==1) return 
 }
 /lavfi\.(signalstats\.[A-Z]+|blur|block|freezedetect\.|black_end)|black_start:|^[[:space:]]*(I:|LRA:|Peak:)|Peak level dB:|RMS level dB:|Dynamic range:|DC offset:|silence_start:|silence_end:/ { print }
 END {
+ if(pc>0) printf "APTEVA_VIDEO_PREROLL last=%.9f duration=%.9f\n",pl,pd;
  if(vc>0) printf "APTEVA_VIDEO_SCAN count=%d first=%.9f last=%.9f duration=%.9f\n",vc,vf,vl,vd;
  if(ac>0) printf "APTEVA_AUDIO_SCAN count=%d first=%.9f end=%.9f\n",ac,af,al+(ar>0?an/ar:0);
  if(strict && expected>0 && vc>0 && vl+vd+(vd*2>0.05?vd*2:0.05)<expected) { print "trim_validation_failed: video ends before requested interval"; exit 1 }
@@ -60,20 +70,31 @@ END {
 }`
 
 var videoScanRE = regexp.MustCompile(`APTEVA_VIDEO_SCAN count=(\d+) first=([-0-9.e+]+) last=([-0-9.e+]+) duration=([-0-9.e+]+)`)
+var videoPrerollRE = regexp.MustCompile(`APTEVA_VIDEO_PREROLL last=([-0-9.e+]+) duration=([-0-9.e+]+)`)
 var audioScanRE = regexp.MustCompile(`APTEVA_AUDIO_SCAN count=(\d+) first=([-0-9.e+]+) end=([-0-9.e+]+)`)
 var showFrameRE = regexp.MustCompile(`pts_time:([-0-9.e+]+)\s+(?:duration:\s*[-0-9]+\s+)?duration_time:([-0-9.e+]+)`)
 var showAudioRE = regexp.MustCompile(`pts_time:([-0-9.e+]+)\s+fmt:\S+\s+channels:.*?rate:(\d+).*?nb_samples:(\d+)`)
 
 type analysisLogCollector struct {
-	log                   strings.Builder
-	count                 int64
-	first, last, duration string
-	audioCount            int64
-	audioEnd              float64
-	audioFirst            string
+	log                          strings.Builder
+	count                        int64
+	first, last, duration        string
+	audioCount                   int64
+	audioEnd                     float64
+	audioFirst                   string
+	prerollLast, prerollDuration string
 }
 
 func (c *analysisLogCollector) add(line string) {
+	if strings.Contains(line, "showinfo@coverage") {
+		for _, m := range showFrameRE.FindAllStringSubmatch(line, -1) {
+			pt, _ := strconv.ParseFloat(m[1], 64)
+			if pt < 0 {
+				c.prerollLast, c.prerollDuration = m[1], m[2]
+			}
+		}
+		return
+	}
 	for _, m := range showFrameRE.FindAllStringSubmatch(line, -1) {
 		if c.count == 0 {
 			c.first = m[1]
@@ -101,6 +122,9 @@ func (c *analysisLogCollector) add(line string) {
 }
 
 func (c *analysisLogCollector) result() string {
+	if c.prerollLast != "" {
+		fmt.Fprintf(&c.log, "APTEVA_VIDEO_PREROLL last=%s duration=%s\n", c.prerollLast, c.prerollDuration)
+	}
 	if c.count > 0 {
 		fmt.Fprintf(&c.log, "APTEVA_VIDEO_SCAN count=%d first=%s last=%s duration=%s\n", c.count, c.first, c.last, c.duration)
 	}
@@ -145,7 +169,18 @@ func parseFrameValidation(log string, offset int64) *frameValidation {
 		return nil
 	}
 	count, _ := strconv.ParseInt(m[1], 10, 64)
-	return &frameValidation{RangeStartMs: offset, FramesChecked: count, FirstFrameMs: secondsToMs(m[2]) + offset, LastFrameMs: secondsToMs(m[3]) + offset, LastFrameDurationMs: secondsToMs(m[4]), BlackDetection: "every_decoded_frame_near_black_98_percent_pixels"}
+	fv := &frameValidation{RangeStartMs: offset, FramesChecked: count, FirstFrameMs: secondsToMs(m[2]) + offset, LastFrameMs: secondsToMs(m[3]) + offset, LastFrameDurationMs: secondsToMs(m[4]), BlackDetection: "every_decoded_frame_near_black_98_percent_pixels"}
+	if p := videoPrerollRE.FindStringSubmatch(log); p != nil {
+		start, _ := strconv.ParseFloat(p[1], 64)
+		duration, _ := strconv.ParseFloat(p[2], 64)
+		if start < 0 && duration > 0 && start+duration >= -0.000001 {
+			a := secondsToMs(p[1]) + offset
+			b := int64((start+duration)*1000+0.5) + offset
+			fv.WindowStartCovered = true
+			fv.CoveringFrameMs, fv.CoveringFrameEndMs = &a, &b
+		}
+	}
+	return fv
 }
 
 func trimValidationArgs(source string) []string {
