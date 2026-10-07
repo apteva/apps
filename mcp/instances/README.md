@@ -37,7 +37,10 @@ registered as externally managed SSH machines.
 | `instance_run_command` | Shell command. Local: in-process exec. Remote: SSH. |
 | `instance_upload_file` | Write a file. Local: filesystem (path-allowlisted to `<dataDir>/local-files/`). Remote: SCP-equivalent over SSH. |
 | `instance_wait_ready` | Poll until SSH reachable. |
-| `instance_metrics` | CPU / mem / disk / network / load / uptime. 5s cache. |
+| `instance_metrics` | Latest continuously collected snapshot plus collector health/freshness. |
+| `instance_metrics_history` | Bounded history with original 250ms CPU/core peaks and timestamps, averages, threshold durations and coverage. |
+| `instance_metrics_incidents` | List spike recordings or retrieve one incident with best-effort process attribution. |
+| `instance_monitoring` | Read collector version/health or set `enabled` per host. |
 | `instance_storage_capabilities` | Describe boot/data support, storage classes, tiers, and lifecycle operations for a provider. |
 | `instance_list_storage_types` | List generic storage tiers and their provider-native mappings. |
 | `instance_volume_create` | Create a managed data volume, optionally attaching and preparing it inside the guest. |
@@ -359,16 +362,104 @@ untracked server, volume, and bucket IDs. `instance_storage_benchmark` performs
 a bounded 256 MiB write benchmark, removes its temporary file, and saves the
 result.
 
-## Metrics
+## Continuous monitoring (v0.6.0)
 
-Local: `gopsutil` for CPU / memory / disk / network / load / uptime.
+Monitoring is enabled by default for every instance. On app mount, and every
+five seconds afterward, Instances reconciles the inventory. Ready Linux/macOS
+AMD64/ARM64 SSH hosts receive the version-pinned Go collector automatically;
+new and temporarily unreachable hosts are retried without recreating them.
+Collectors are downloaded by the app from the `instances/v0.6.0` GitHub release,
+verified against the SHA-256 values embedded in this source, and uploaded over
+SSH. No compiler, public listening port, or platform credential is installed
+on the host. Linux requires systemd; macOS uses a launch daemon. Service
+installation requires root or passwordless sudo on the configured SSH account.
+The service runs as that account. Errors are visible through the UI/API/MCP;
+monitoring failure does not change the instance's lifecycle state.
 
-Remote Linux: SSH-execute a shell collector that parses `/proc` and `df`.
-Remote macOS: use `top`, `vm_stat`, `sysctl`, `df`, and `netstat`. Both emit
-the same JSON shape and tolerate SSH preamble noise.
+The local host is sampled inside the Instances sidecar. Remote services keep
+running through sidecar restarts and host reboots. Host files live in
+`$HOME/.local/share/apteva-instances-monitor/` with owner-only permissions;
+exports use a private Unix socket over the existing SSH transport. CPU reads
+are independent of slower filesystem/process observations. Resources are
+sampled every second, disk capacity every 30 seconds, and live snapshots are
+imported about every two seconds, independent of any open dashboard.
 
-Cached 5s per-instance to avoid duplicate SSH sessions on rapid panel
-refreshes.
+CPU counter deltas cover consecutive approximately 250ms intervals. The
+collector records total CPU, busiest-core usage, user/system CPU, I/O wait and
+VM steal separately, without double-counting Linux guest CPU. It records memory,
+swap, interface throughput, load, uptime, process count, disk capacity and disk
+I/O. A system-wide disk I/O history value is the maximum device rate, rather
+than a sum that double-counts partitions and their parent disks. Resource
+observations have their own timestamp/error. Delayed CPU samples over 500ms
+are excluded from fine history rather than represented as precise 250ms peaks.
+Sampling cannot reconstruct the instantaneous amplitude of shorter bursts.
+
+The separate `<DataDir>/monitoring.db` stores one packed record per host and
+bucket. Every tier is updated transactionally from original one-second
+summaries; replay is idempotent. Each metric retains its observed-duration
+weighted sum, minimum, maximum and original peak timestamp. CPU also retains
+observed time above 80%/95%. Missing observations remain gaps, never zeros.
+
+| Resolution | Normal retention | Approximate records per host |
+|---|---|---:|
+| 1 second, preserving 250ms peaks | 1 hour | 3,600 |
+| 1 minute | 48 hours | 2,880 |
+| 5 minutes | 14 days | 4,032 |
+| 1 hour | 90 days | 2,160 |
+| 1 day | 1 year | 365 |
+
+Normal steady-state storage is approximately 13,000 records per host. The
+512MiB global budget can shorten that retention; the API/UI reports budget
+evictions and available history. The database reserves space for its bounded
+rollback journal, uses a page allocation ceiling and reclaims expired pages.
+Under allocation pressure it evicts oldest incident detail first, then oldest
+fine history and finally older summaries. Every range query defaults to at
+most 600 buckets; `max_points` is capped at 3,600. Automatic resolution selects
+a retained tier that fits the range and response limit. Explicit over-large
+requests fail instead of silently truncating the end of the chart.
+
+CPU >=90% in a measurement window, any core >=95% for one second, or sustained
+low available memory/high I/O wait opens an incident. A ring preserves two
+minutes before the trigger, then five minutes after recovery. Hysteresis merges
+fluctuating overload; sustained incidents are capped rather than recorded
+forever. A one-second process-counter observation after the trigger captures
+up to five processes (names/PIDs only, no command lines or environment).
+Attribution is best effort: a short-lived process may exit before observation.
+
+Remote spools retain up to one hour of second-level readings and 50 incidents,
+with a 32MiB compressed ceiling. They are saved atomically every ten seconds;
+a crash may lose the most recent unsaved tail. Imports catch up in bounded
+batches after reconnect. Longer outages appear as gaps. Incident detail has a
+30-day age limit, a 16MiB per-host limit and a shared global limit. Central
+incident metadata is capped at 200 records per host. Expired detail is marked
+explicitly; retained rollup peaks remain available within their own retention.
+
+`instance_metrics` and `GET /api/instances/<id>/metrics` share the same stored
+live snapshot and `monitoring` status. No sample yet produces `metrics: null`.
+Old snapshots retain their original timestamp; health becomes stale after 15s.
+The UI refreshes live values every 2s while visible and history every 10s when
+expanded. History charts show averages, CPU/core peaks, memory, actual timestamps
+and gaps. Incident detail and monitoring controls are available in the UI.
+
+Additional REST endpoints:
+
+- `GET /api/instances/<id>/metrics/history?from=<RFC3339>&to=<RFC3339>&resolution=auto&max_points=600`
+- `GET /api/instances/<id>/metrics/incidents?limit=50`
+- `GET /api/instances/<id>/metrics/incidents?incident_id=<id>`
+- `GET /api/instances/<id>/monitoring`
+- `POST /api/instances/<id>/monitoring` with `{"enabled":false}` or `true`
+
+Disabling monitoring persists the setting and asynchronously stops the host
+service. Failed stop attempts are reported and retried. Re-enabling starts the
+collector again. Forgetting an external host stops app-side imports; its
+already-installed collector service may remain on that host and can be removed
+with systemctl/launchctl using the service names above.
+
+Build collector release assets with
+`bun run collector/build.ts /absolute/output-directory`; it emits four binaries,
+`SHA256SUMS`, and updates `collector/checksums.json`. Rebuild app binaries after
+that step so they embed the correct checksums. Attach all five files to the
+GitHub release matching the app/source/collector version.
 
 ## Naming
 
@@ -383,7 +474,7 @@ the linguistic collision.
 - Multiple different providers and multiple accounts of the same provider can
   be selected by connection ID for provisioning requests.
 - In-place resizing is currently available only for Hetzner.
-- Metrics are pull-only through `instance_metrics`, cached for 5 seconds.
+- Reboot-persistent remote monitoring requires systemd/launchd and root or passwordless sudo; unsupported hosts expose a monitoring error.
 
 ## Tests
 

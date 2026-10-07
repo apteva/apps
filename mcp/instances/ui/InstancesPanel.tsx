@@ -1,3 +1,4 @@
+import {MonitoringHistory, type MonitoringStatus} from "./MonitoringHistory";
 import { normalizeArchitecture } from "./catalog-state";
 // InstancesPanel — install-settings admin view for the instances app.
 //
@@ -132,8 +133,12 @@ interface StorageCapabilitiesWire {
 }
 
 interface MetricsWire {
+  resource_timestamp?: string;
+  resource_error?: string;
+  net?: Array<{iface:string;rx_bps:number;tx_bps:number}>;
+  io?: Array<{device:string;read_bps:number;write_bps:number}>;
   timestamp: string;
-  cpu: { total_pct: number; cores?: number };
+  cpu: { total_pct: number; cores?: number; peak_pct?: number; busiest_core_pct?: number; iowait_pct?: number; steal_pct?: number };
   mem: { used_bytes: number; total_bytes: number; available_bytes: number };
   disk: Array<{ mount: string; used_bytes: number; total_bytes: number; used_pct: number }>;
   load: { l1: number; l5: number; l15: number };
@@ -290,138 +295,6 @@ function ProgressBar({
         />
       </div>
     </div>
-  );
-}
-
-// Sparkline — single-series tiny line chart. Plots in equal-width
-// steps, auto-scales y to data range. Pure SVG, no library.
-function Sparkline({
-  values, width, height, color,
-}: {
-  values: number[];
-  width?: number;
-  height?: number;
-  color?: string;
-}) {
-  const w = width ?? 80;
-  const h = height ?? 20;
-  if (values.length < 2) {
-    return <svg width={w} height={h} />;
-  }
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const range = max - min || 1;
-  const stepX = w / (values.length - 1);
-  const path = values
-    .map((v, i) => {
-      const x = i * stepX;
-      const y = h - ((v - min) / range) * h;
-      return `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
-    })
-    .join(" ");
-  return (
-    <svg width={w} height={h} className="block" aria-hidden>
-      <path d={path} fill="none" stroke={color ?? "#3b82f6"} strokeWidth="1.5" />
-    </svg>
-  );
-}
-
-// MultiLineChart — dual-line (CPU% + memory%) over the in-memory
-// history window. Y axis pinned 0-100 so both series are comparable.
-// Includes gridlines at 25/50/75/100 and a tiny legend.
-function MultiLineChart({
-  cpu, mem, height,
-}: {
-  cpu: number[];
-  mem: number[];
-  height?: number;
-}) {
-  // ViewBox sized to roughly match a typical panel width so
-  // preserveAspectRatio="none" stretching is minimal (1.0x–1.3x
-  // horizontal). The earlier 800-wide viewBox stretched to 1900px
-  // panels showed a 2.4x horizontal squash — every CPU/MEM change
-  // got visually compressed and the chart read as a flat line.
-  // 1400 lands much closer to common panel widths.
-  const VIEW_W = 1400;
-  const h = height ?? 160;
-  const padLeft = 32;
-  const padRight = 12;
-  const padTop = 10;
-  const padBottom = 26;
-  const plotW = VIEW_W - padLeft - padRight;
-  const plotH = h - padTop - padBottom;
-  const n = Math.max(cpu.length, mem.length);
-  if (n < 2) {
-    // Slim placeholder — full-height empty box dominated the card
-    // when there were 0-1 samples; this reads as "waiting" without
-    // wasting vertical space.
-    return (
-      <div
-        className="text-[11px] text-text-dim flex items-center justify-center rounded"
-        style={{
-          height: 32,
-          backgroundColor: "rgba(255,255,255,0.02)",
-          color: "rgba(255,255,255,0.35)",
-        }}
-      >
-        Accumulating samples · chart will fill in over the next ticks
-      </div>
-    );
-  }
-  const xAt = (i: number, len: number) =>
-    padLeft + (len > 1 ? (i / (len - 1)) * plotW : 0);
-  const yAt = (v: number) =>
-    padTop + (1 - Math.max(0, Math.min(100, v)) / 100) * plotH;
-  const lineFor = (vs: number[]) =>
-    vs
-      .map((v, i) => `${i === 0 ? "M" : "L"} ${xAt(i, vs.length).toFixed(1)} ${yAt(v).toFixed(1)}`)
-      .join(" ");
-  return (
-    <svg
-      viewBox={`0 0 ${VIEW_W} ${h}`}
-      // "none" → fills the container width completely (operator
-      // wanted edge-to-edge). The widened viewBox above keeps the
-      // visual aspect close to natural; lines stay readable without
-      // the flat-horizon stretch that the original 800-wide viewBox
-      // showed at 1900px.
-      preserveAspectRatio="none"
-      className="block w-full"
-      style={{ height: h }}
-      aria-label="cpu/memory history"
-    >
-      {/* gridlines — non-scaling stroke so they stay 1px sharp on
-          any panel width (preserveAspectRatio="none" stretches the
-          chart horizontally, which would otherwise thicken strokes). */}
-      {[0, 25, 50, 75, 100].map((g) => (
-        <line
-          key={g}
-          x1={padLeft} y1={yAt(g)} x2={VIEW_W - padRight} y2={yAt(g)}
-          stroke="currentColor"
-          strokeOpacity={g === 0 || g === 100 ? "0.15" : "0.06"}
-          strokeWidth="1"
-          vectorEffect="non-scaling-stroke"
-        />
-      ))}
-      {/* y labels */}
-      {[0, 50, 100].map((g) => (
-        <text
-          key={g}
-          x={padLeft - 6} y={yAt(g) + 3}
-          textAnchor="end" fontSize="10" fill="currentColor" fillOpacity="0.45"
-        >{g}%</text>
-      ))}
-      <path d={lineFor(cpu)} fill="none" stroke="#3b82f6" strokeWidth="2" vectorEffect="non-scaling-stroke" />
-      <path d={lineFor(mem)} fill="none" stroke="#a78bfa" strokeWidth="2" vectorEffect="non-scaling-stroke" />
-      {/* Color-key only legend — the "N samples · ~M min" hint moved
-          up to the section header so we don't repeat it inside the
-          plot area. */}
-      <g transform={`translate(${padLeft}, ${h - 8})`} fontSize="10" fill="currentColor" fillOpacity="0.7">
-        <rect x="0" y="-7" width="10" height="2" fill="#3b82f6" />
-        <text x="16" y="0">CPU</text>
-        <rect x="56" y="-7" width="10" height="2" fill="#a78bfa" />
-        <text x="72" y="0">Memory</text>
-      </g>
-    </svg>
   );
 }
 
@@ -1256,17 +1129,6 @@ function UpgradeDialog({
   );
 }
 
-// MetricsSample is a single tick captured for the in-memory history.
-// We don't persist anything; the panel session is the entire window.
-// Caps at HISTORY_MAX entries so memory stays bounded if someone
-// leaves the panel open for hours.
-interface MetricsSample {
-  ts: number; // ms since epoch when the metrics fetch resolved
-  cpuPct: number;
-  memPct: number;
-  l1: number;
-}
-const HISTORY_MAX = 360;          // 10s polling × 360 = 1 hour
 const STALE_THRESHOLD_MS = 30000; // 30s without a successful poll → "stale"
 
 export function InstanceCard({
@@ -1282,6 +1144,7 @@ export function InstanceCard({
 }) {
   const [metrics, setMetrics] = useState<MetricsWire | null>(null);
   const [metricsError, setMetricsError] = useState("");
+  const [monitoring, setMonitoring] = useState<MonitoringStatus | null>(null);
   const [lastPollAt, setLastPollAt] = useState(0);
   const [expanded, setExpanded] = useState(false);
 	const [comparison, setComparison] = useState<{ complete?: boolean; warnings?: string[]; differences?: string[]; provider_state?: string; checked_at?: string } | null>(null);
@@ -1304,11 +1167,13 @@ export function InstanceCard({
         });
         if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "metrics unavailable")}`);
         const payload = await response.json();
-        if (cancelled || !payload?.metrics) return;
+        if (cancelled) return;
+        if (payload.monitoring) setMonitoring(payload.monitoring);
+        if (!payload.metrics) {setMetrics(null);setMetricsError(payload.monitoring?.error || "");return;}
         const next = payload.metrics as MetricsWire;
         setMetrics(next);
         setMetricsError("");
-        setLastPollAt(Date.now());
+        setLastPollAt(next.timestamp ? Date.parse(next.timestamp) : Date.now());
       } catch (error) {
         if (!cancelled && (error as Error).name !== "AbortError") setMetricsError((error as Error).message);
       } finally {
@@ -1316,7 +1181,7 @@ export function InstanceCard({
       }
     };
     fetchMetrics();
-    const poll = setInterval(fetchMetrics, 10000);
+    const poll = setInterval(fetchMetrics, 2000);
     const clock = setInterval(() => setNowTick((value) => value + 1), 5000);
     return () => {
       cancelled = true;
@@ -1338,7 +1203,7 @@ export function InstanceCard({
   const loadPct = metrics?.cpu?.cores ? (metrics.load.l1 / metrics.cpu.cores) * 100 : 0;
   const rootDisk = metrics?.disk?.find((disk) => disk.mount === "/") || metrics?.disk?.[0];
   const staleAge = lastPollAt ? Math.floor((Date.now() - lastPollAt) / 1000) : 0;
-  const stale = staleAge > STALE_THRESHOLD_MS / 1000;
+  const stale = staleAge > STALE_THRESHOLD_MS / 1000 || (!!monitoring && monitoring.state !== "running");
   const meta = [inst.provider, inst.size, inst.region, resources].filter(Boolean).join(" · ");
 	const compare = async () => {
 		setDiagnosticBusy(true);
@@ -1422,12 +1287,13 @@ export function InstanceCard({
       {inst.error && <div className="px-3 py-1.5 text-[10px] text-red border-t border-red/20">{inst.lifecycle_stage ? `${inst.lifecycle_stage}: ` : ""}{inst.error}{inst.cleanup_error ? ` · cleanup: ${inst.cleanup_error}` : ""}</div>}
 	  {comparison && <div className={`px-3 py-1.5 text-[10px] border-t ${(!comparison.complete || comparison.differences?.length) ? "text-amber border-amber/20" : "text-green border-green/20"}`}>Provider {comparison.provider_state || "state"}: {comparison.differences?.length ? comparison.differences.join(" · ") : comparison.complete ? "matches checked state" : "comparison incomplete"}</div>}
 
+      {monitoring && <div className="px-3 py-1 text-[10px] text-text-dim border-t border-border">Monitoring: {monitoring.state}{monitoring.error ? ` · ${monitoring.error}` : ""}{monitoring.last_seen ? ` · last sample ${new Date(monitoring.last_seen).toLocaleTimeString()}` : ""}</div>}
       {metrics ? (
         <div
           className="grid grid-cols-2 md:grid-cols-5 px-3 py-2.5"
           style={{ borderTop: `1px solid ${FAINT_DIVIDER}`, opacity: stale ? 0.6 : 1, columnGap: 24, rowGap: 10 }}
         >
-          <CompactMetric label="CPU" value={formatCPUDetail(metrics.cpu)} pct={metrics.cpu.total_pct} />
+          <CompactMetric label="CPU" value={`${formatCPUDetail(metrics.cpu)}${metrics.cpu.busiest_core_pct !== undefined ? ` · core peak ${metrics.cpu.busiest_core_pct.toFixed(0)}%` : ""}`} pct={metrics.cpu.total_pct} />
           <CompactMetric label="Memory" value={`${formatBytes(metrics.mem.used_bytes)} / ${formatBytes(metrics.mem.total_bytes)} used (${memPct.toFixed(0)}%)`} pct={memPct} />
           <CompactMetric label="Root disk" value={rootDisk ? `${rootDisk.used_pct.toFixed(0)}% · ${formatBytes(rootDisk.used_bytes)}` : "—"} pct={rootDisk?.used_pct} />
           <CompactMetric label="Load" value={metrics.cpu.cores ? `${metrics.load.l1.toFixed(2)} · ${loadPct.toFixed(0)}% cap` : metrics.load.l1.toFixed(2)} pct={loadPct} />
@@ -1435,12 +1301,19 @@ export function InstanceCard({
         </div>
       ) : inst.status === "ready" ? (
         <div className={`px-3 py-2 text-[10px] border-t ${metricsError ? "text-red border-red/20" : "text-text-dim"}`}>
-          {metricsError ? `Vitals unavailable: ${metricsError}` : "Loading vitals…"}
+          {metricsError ? `Monitoring unavailable: ${metricsError}` : monitoring?.enabled === false ? "Monitoring disabled" : "Waiting for collector…"}
         </div>
       ) : null}
 
       {expanded && (
         <div className="px-3 py-3 space-y-3" style={{ borderTop: `1px solid ${SUBTLE_BORDER}`, backgroundColor: SUB_CARD_BG }}>
+          <MonitoringHistory id={inst.id} withParams={withParams} />
+          {metrics?.resource_error && <p className="text-[10px] text-red">Resource observations unavailable: {metrics.resource_error}</p>}
+          {metrics?.resource_timestamp && Date.now()-Date.parse(metrics.resource_timestamp)>5000 && <p className="text-[10px] text-red">Memory/network/disk observations are stale.</p>}
+          {(!!metrics?.net?.length || !!metrics?.io?.length) && <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[10px] text-text-dim">
+            <div><span className="text-text">Live network RX / TX</span>{metrics?.net?.map(n=><p key={n.iface}>{n.iface} · {formatBytes(n.rx_bps)}/s / {formatBytes(n.tx_bps)}/s</p>)}</div>
+            <div><span className="text-text">Live disk read / write</span>{metrics?.io?.map(d=><p key={d.device}>{d.device} · {formatBytes(d.read_bps)}/s / {formatBytes(d.write_bps)}/s</p>)}</div>
+          </div>}
           {metricsError && metrics && <div className="text-[10px] text-red">Metrics refresh failed: {metricsError}</div>}
           {metrics?.disk?.length ? (
             <div className="grid grid-cols-1 md:grid-cols-2" style={{ columnGap: 24, rowGap: 10 }}>

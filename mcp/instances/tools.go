@@ -10,7 +10,7 @@ import (
 )
 
 func (a *App) MCPTools() []sdk.Tool {
-	return []sdk.Tool{
+	return append(monitoringTools(), []sdk.Tool{
 		{
 			Name:        "instance_list_providers",
 			Description: "List all VPS provider connections bound to this Instances install and identify the configured default. Read-only and does not call a provider API.",
@@ -240,7 +240,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "instance_metrics",
-			Description: "CPU / memory / disk / network / load / uptime. Local: gopsutil. Remote: SSH-execute /proc parse. Cached 5s.",
+			Description: "Latest continuous CPU, memory, disk, network/I/O, load and uptime. Includes monitoring installation state and sample timestamp. Null metrics means no sample yet; stale or disabled snapshots retain their original timestamp.",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
 			Handler:     a.toolMetrics,
 		},
@@ -269,7 +269,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}, "provider_connection_id": map[string]any{"type": "integer", "minimum": 1}, "region": map[string]any{"type": "string"}, "resource_class": map[string]any{"type": "string"}}, nil),
 			Handler:     a.toolListImages,
 		},
-	}
+	}...)
 }
 
 func volumePrepareObjectSchema(description string) map[string]any {
@@ -510,16 +510,7 @@ func (a *App) toolWaitReady(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	id := int64Arg(args, "id")
-	inst, err := dbGetInstance(ctx.AppDB(), id)
-	if err != nil {
-		return nil, err
-	}
-	m, err := collectMetrics(inst)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"instance_id": id, "metrics": m}, nil
+	return liveMonitoring(ctx, int64Arg(args, "id"))
 }
 
 func (a *App) toolListServerTypes(ctx *sdk.AppCtx, args map[string]any) (any, error) {
