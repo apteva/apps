@@ -423,12 +423,20 @@ func renderPDFToJPEGs(pdfBytes []byte, dpi, maxPages int) ([][]byte, error) {
 				},
 			},
 			DPI: dpi,
+			// Filled invoice values may be widget annotations rather than
+			// page text. Include them in the image sent to the vision model.
+			RenderForm: true,
+			Document:   &doc.Document,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("pdfium render page %d: %w", i, err)
 		}
 		var buf bytes.Buffer
-		if err := jpeg.Encode(&buf, render.Result.Image, &jpeg.Options{Quality: 80}); err != nil {
+		err = jpeg.Encode(&buf, render.Result.Image, &jpeg.Options{Quality: 80})
+		// The image borrows a PDFium bitmap in WASM memory; release it
+		// after encoding, including on an encoding error.
+		render.Cleanup()
+		if err != nil {
 			return nil, fmt.Errorf("jpeg encode page %d: %w", i, err)
 		}
 		out = append(out, buf.Bytes())
