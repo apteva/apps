@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/apteva/apps/mcp/instances/internal/monitor"
 	"strings"
 	"sync"
 	"time"
@@ -34,48 +35,12 @@ import (
 	"github.com/shirou/gopsutil/v4/process"
 )
 
-type Metrics struct {
-	Timestamp string        `json:"timestamp"`
-	CPU       CPUMetrics    `json:"cpu"`
-	Mem       MemMetrics    `json:"mem"`
-	Disk      []DiskMetrics `json:"disk"`
-	Net       []NetMetrics  `json:"net"`
-	Load      LoadMetrics   `json:"load"`
-	UptimeSec uint64        `json:"uptime_s"`
-	ProcCount int           `json:"process_count"`
-}
-
-type CPUMetrics struct {
-	TotalPct float64   `json:"total_pct"`
-	PerCore  []float64 `json:"per_core,omitempty"`
-	Cores    int       `json:"cores,omitempty"`
-}
-
-type MemMetrics struct {
-	UsedBytes      uint64 `json:"used_bytes"`
-	TotalBytes     uint64 `json:"total_bytes"`
-	AvailableBytes uint64 `json:"available_bytes"`
-	SwapUsedBytes  uint64 `json:"swap_used_bytes,omitempty"`
-}
-
-type DiskMetrics struct {
-	Mount      string  `json:"mount"`
-	UsedBytes  uint64  `json:"used_bytes"`
-	TotalBytes uint64  `json:"total_bytes"`
-	UsedPct    float64 `json:"used_pct"`
-}
-
-type NetMetrics struct {
-	Iface   string `json:"iface"`
-	RxBytes uint64 `json:"rx_bytes"`
-	TxBytes uint64 `json:"tx_bytes"`
-}
-
-type LoadMetrics struct {
-	L1  float64 `json:"l1"`
-	L5  float64 `json:"l5"`
-	L15 float64 `json:"l15"`
-}
+type Metrics = monitor.Metrics
+type CPUMetrics = monitor.CPUMetrics
+type MemMetrics = monitor.MemMetrics
+type DiskMetrics = monitor.DiskMetrics
+type NetMetrics = monitor.NetMetrics
+type LoadMetrics = monitor.LoadMetrics
 
 // ─── Cache ────────────────────────────────────────────────────────
 

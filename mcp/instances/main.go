@@ -42,7 +42,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.5.2
+version: 0.6.0
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
@@ -120,7 +120,10 @@ provides:
     - { name: instance_open_tunnel,  description: "Open or reuse a loopback-only TCP tunnel through remote SSH. Args: id, target_port." }
     - { name: instance_close_tunnel, description: "Close a loopback TCP tunnel. Args: id, target_port." }
     - { name: instance_wait_ready,   description: "Poll the instance until SSH accepts the key and can run a non-interactive command. Args: id, timeout_s?." }
-    - { name: instance_metrics,      description: "CPU / memory / disk / network / load / uptime for local, remote Linux, and remote macOS hosts. Args: id." }
+    - { name: instance_metrics_history, description: "Bounded CPU/memory/I/O history with preserved 250ms peaks, threshold durations and coverage. Args: id, from?, to?, resolution?, max_points?." }
+    - { name: instance_metrics_incidents, description: "List spike incidents or retrieve a bounded recording and best-effort process attribution. Args: id, incident_id?, limit?." }
+    - { name: instance_monitoring, description: "Read collector health/version or enable/disable automatic background monitoring. Args: id, enabled?." }
+    - { name: instance_metrics,      description: "Latest continuous CPU/memory/I/O snapshot and collector freshness for local and remote Linux/macOS hosts. Args: id." }
     - { name: instance_list_server_types, description: "Live list of active, non-deprecated compute types from the bound provider — name, cores, memory_gb, disk_gb, platform, resource_class, price, available_in. Includes virtual and bare-metal types where supported. Args: provider? (default: bound provider)." }
     - { name: instance_list_locations,    description: "Live list of VPS regions from the bound provider — name, city, country, network_zone. Args: provider? (default: bound provider)." }
     - { name: instance_list_images,       description: "Live list of bootable OS images from the bound provider, with platform, resource class, location, and server-type compatibility. Args: provider? (default: bound provider)." }
@@ -193,7 +196,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.5.2
+    ref: instances/v0.6.0
     entry: mcp/instances
   port: 8080
   health_check: /health
@@ -268,10 +271,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		}
 	})
 
-	return nil
+	return startMonitoring(ctx)
 }
 
 func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
+	stopMonitoring(ctx)
 	stopInstanceWorkers(ctx)
 	globalTunnelRegistry.closeAll()
 	globalSSHPool.closeAll()
