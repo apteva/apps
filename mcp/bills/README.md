@@ -1,8 +1,17 @@
-# Bills (v0.2.4)
+# Bills (v0.2.5)
 
 Vendors, bills, and bill payments for Apteva agents and human teams.
 The accounts-payable mirror of the `billing` app — money OUT instead
 of money in.
+
+## What's in v0.2.5
+
+PDF invoice OCR now renders filled AcroForm fields, including vendor
+details, line items, totals, and due dates. Previously, Bills sent the
+blank template to the vision model when those values lived in form
+widgets. PDFium bitmap buffers are now released after each page is
+encoded, preventing them from accumulating across uploads. Codex still
+uses GPT-6 Luna with low thinking through the existing integration.
 
 ## What's in v0.2.4
 
