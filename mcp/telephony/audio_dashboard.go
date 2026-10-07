@@ -409,7 +409,12 @@ func (a *App) handleAudioDashboard(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		writeJSON(w, map[string]any{"browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics)})
+		network, err := a.db().browserNetworkEvents(r.Context(), project, id, time.Now())
+		if err != nil {
+			http.Error(w, "load network diagnostics", 500)
+			return
+		}
+		writeJSON(w, map[string]any{"browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "network_events": network})
 		return
 	}
 	now := time.Now()

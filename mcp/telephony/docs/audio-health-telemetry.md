@@ -16,7 +16,8 @@ answer permissions or carrier-call termination behavior is changed.
   counted as a new connection, not assumed to be a network failure.
 - Socket peer address uses a process-scoped HMAC hash, without IP or port storage.
   `peer_hash_epoch` must match before hashes are compared. The process key is not
-  exported; restart changes hashes. `address_source` distinguishes socket peer,
+  exported; restart changes hashes. Separate operator-only browser network
+  records now retain resolved raw addresses (see below). `address_source` distinguishes socket peer,
   trusted forwarded peer and unavailable. By default an app behind a proxy hashes
   the proxy. Optional `audio_telemetry_trusted_proxy_cidrs` permits a strictly
   parsed X-Forwarded-For chain from trusted immediate peers only, walked right to
@@ -116,3 +117,74 @@ Events and structured logs are the integration points for host alerts. They use
 the existing SDK event delivery contract; this does not configure an external
 email/Slack notification or a durable incident queue. Per-call health and socket
 histories are persisted alongside the existing call diagnostics.
+
+## Browser network collection
+
+Provider-independent browser network telemetry extends the existing softphone
+handler. It is observational: classification never influences answering, routing,
+permissions, media forwarding, reconnection or carrier commands.
+
+After successful media-session validation and WebSocket upgrade, Telephony
+creates a distinct browser `connection_id`. It records connection, reconnection,
+replacement and disconnection events with the call/project, UTC timestamp,
+resolved client IP, address source, classification and adviser identity from the
+validated media session. Identity is captured once for that connection, including
+issuer app/installation, subject and organization. Session renewal does not create
+a new connection. Platform/legacy sessions without an attributable adviser are
+explicitly `unattributed`; the latest call owner is never used to guess identity.
+
+- `audio_telemetry_known_vpn_exits`: optional comma-separated IPv4/IPv6 addresses
+  or CIDRs. Matches are `known_vpn_exit`; all other results are `unknown`. Invalid
+  entries and /0 ranges are ignored. An empty list classifies every connection as
+  unknown. Neither label proves that a VPN caused an audio interruption.
+- `audio_telemetry_trusted_proxy_cidrs`: existing explicit trust configuration.
+  The socket peer is authoritative unless it is a configured trusted proxy;
+  forwarded addresses are walked from right to left until the first untrusted
+  hop. Browser-supplied prefixes cannot override that hop. Without the complete
+  deployment proxy chain configured, the recorded address can be a proxy, not
+  the browser's public exit. Inspect `address_source`; no automatic VPN detection
+  or proxy trust expansion is performed.
+- `audio_telemetry_network_retention_days`: 1–31 days, default seven, captured
+  on attachment. Expired events are immediately excluded from reads and purged
+  in bounded background batches. Failed writes/cleanup retry on later ticks.
+
+Raw IP records are in `telephony_browser_network_events`, separate from shared
+call diagnostics. The existing **operator-only**, project-scoped
+`GET /audio-health?call_id=...` includes up to 100 newest unexpired
+`network_events`. Audio health's full recorded diagnostics displays this payload.
+Delegated callers cannot enumerate it. Raw IPs are not added to ordinary call
+responses, browser messages or published SSE hints. Trusted internal records
+contain structured `softphone.browser.connected` / `softphone.browser.disconnected`
+events; free-form peer close text is discarded in favor of a server reason code
+and numeric close code. No media token, authorization header or URL is collected.
+
+Socket handlers use a non-waiting append to a maximum 1,024-event memory queue.
+The five-second worker commits at most 100 events per transaction with a two-second
+deadline, independently of media frame processing. It never holds the collection
+lock during database work. Failed batches remain queued; overflow/contention is
+counted and reported without waiting or rejecting a connection. Collection is
+best effort: process crashes, queue overflow or prolonged storage failure can
+lose telemetry. There is no telemetry backpressure on audio or calls.
+
+Browser reports carry the server-assigned connection ID, and stale/replaced
+socket reports are ignored. Server microphone gap samples carry both the previous
+and current connection IDs when a gap spans a reconnect; capture-drop records
+carry their receiving connection ID. Timestamped browser drop/session/RTT samples
+are associated with retained attachment intervals rather than blindly assigned
+to the newest socket. Missing, invalid or out-of-history timestamps remain
+unattributed. Browser wall-clock accuracy still limits this historical matching;
+server-observed microphone timing does not depend on the browser's wall clock.
+Cumulative counters remain per call, not per-connection loss totals.
+
+The local regression tests cover proxy spoofing, IPv4/IPv6 and VPN matching,
+non-waiting bounded collection, frozen identity and replacement races,
+connection-linked gaps, retry/idempotency, retention, concurrent flushing and
+operator/project isolation. Real local WebSockets exercise both audio directions
+and replacement while the network telemetry table is deliberately unavailable.
+No staging/production activation or live-carrier test is implied.
+
+Verification on 7 October 2026: 679 Go cases/subtests passed, two live Twilio
+tests skipped, 154 frontend/audio tests and four Chromium dashboard scenarios
+passed. Focused race checks, Go vet, standalone build, frontend typecheck,
+panel import checks and manifest parity passed. The headless client, media
+protocol, Worker/worklet and DSP bytes remain unchanged.

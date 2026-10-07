@@ -101,7 +101,11 @@ func decodeSoftphoneAudioFrame(data []byte) (payload []byte, sequence uint32, fr
 	return data[16:], binary.LittleEndian.Uint32(data[4:8]), true
 }
 
-func (h *softphoneHub) observeCaptureFrame(sequence uint32) {
+func (h *softphoneHub) observeCaptureFrame(sequence uint32, connectionIDs ...string) {
+	connectionID := ""
+	if len(connectionIDs) > 0 {
+		connectionID = connectionIDs[0]
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.captureSequenceSet && sequence > h.captureExpected {
@@ -109,7 +113,7 @@ func (h *softphoneHub) observeCaptureFrame(sequence uint32) {
 		h.captureSequenceGaps += gap
 		h.captureDropEvents = append(h.captureDropEvents, audioDropEvent{
 			Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier",
-			Reason: "capture_sequence_gap", DurationMS: gap * 20, Sequence: uint64(h.captureExpected),
+			Reason: "capture_sequence_gap", ConnectionID: connectionID, DurationMS: gap * 20, Sequence: uint64(h.captureExpected),
 		})
 		if len(h.captureDropEvents) > 100 {
 			h.captureDropEvents = h.captureDropEvents[len(h.captureDropEvents)-100:]
@@ -537,7 +541,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "call is not a softphone call", http.StatusConflict)
 		return
 	}
-	reason, verifiedExpiry := a.phoneMediaCheck(row, token)
+	reason, verifiedExpiry, identity := a.phoneMediaCheckDetails(row, token)
 	if reason != "" {
 		logSoftphone("softphone browser media session rejected", "call", callID, "reason", reason)
 		status := http.StatusForbidden
@@ -561,12 +565,12 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 	closer := newGracefulWebSocket(conn, writer)
 	hub := a.softphones.hubFor(callID)
 	hub.telemetry.restore(row.BrowserAudioDiagnostics)
-	proxies := ""
+	networkConfig := map[string]string{}
 	if globalCtx != nil {
-		proxies = globalCtx.WithProject(row.ProjectID).Config()["audio_telemetry_trusted_proxy_cidrs"]
+		networkConfig = globalCtx.WithProject(row.ProjectID).Config()
 	}
-	hash, hashEpoch, addressSource := a.audioPeerHasher.hash(r, proxies)
-	hub.telemetry.opened(writer, hash, hashEpoch, addressSource)
+	hash, hashEpoch, addressSource := a.audioPeerHasher.hash(r, networkConfig["audio_telemetry_trusted_proxy_cidrs"])
+	connectionID := hub.telemetry.openedWithNetwork(writer, hash, hashEpoch, addressSource, newAudioNetworkContext(row, identity, r, networkConfig), a.audioNetworks.enqueue)
 	defer func() {
 		hub.telemetry.closed(writer, "handler_closed", nil)
 		hub.clearBrowser(writer)
@@ -687,13 +691,13 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			payload, sequence, framed := decodeSoftphoneAudioFrame(data)
 			sourceSequence := ""
 			if framed {
-				hub.observeCaptureFrame(sequence)
+				hub.observeCaptureFrame(sequence, connectionID)
 				sourceSequence = strconv.FormatUint(uint64(sequence), 10)
 			}
-			hub.timeline.observe("microphone_server_receipt", len(data), time.Time{}, "", sourceSequence)
+			hub.timeline.observe("microphone_server_receipt", len(data), time.Time{}, "", sourceSequence, connectionID)
 			// Received sequence gaps and our intentional stale-frame drops
 			// are separate measurements, so observe arrival before filtering.
-			if hub.observeCaptureTiming(data) {
+			if hub.observeCaptureTiming(data, connectionID) {
 				continue
 			}
 			if len(payload) == 0 {
@@ -765,7 +769,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			case "diagnostics":
 				if control.Diagnostics != nil && hub.readyBrowserWriter() == writer {
 					normalized := normalizeBrowserAudioDiagnostics(*control.Diagnostics)
-					hub.telemetry.observeBrowser(normalized)
+					hub.telemetry.observeBrowserConnection(writer, normalized)
 					// Coalesce reports in memory; the watcher persists off the frame path.
 				}
 			}

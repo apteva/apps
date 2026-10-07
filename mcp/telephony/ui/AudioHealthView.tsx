@@ -167,8 +167,8 @@ function AudioDetails({
   return (
     <details className="mt-3">
       <summary className="cursor-pointer text-text-muted">
-        Full recorded diagnostics: peer hash, session events, closes, timings
-        and drops
+        Full recorded diagnostics: browser networks, peer hash, session events,
+        closes, timings and drops
       </summary>
       <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-all rounded bg-bg-muted p-3 text-xs">
         {value ? JSON.stringify(value, null, 2) : "Loading diagnostics…"}

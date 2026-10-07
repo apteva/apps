@@ -503,53 +503,57 @@ func (a *App) phoneMediaDenialReason(row *callRow, token string) string {
 	return reason
 }
 func (a *App) phoneMediaCheck(row *callRow, token string) (string, int64) {
+	reason, expiry, _ := a.phoneMediaCheckDetails(row, token)
+	return reason, expiry
+}
+func (a *App) phoneMediaCheckDetails(row *callRow, token string) (string, int64, phoneIdentity) {
 	var hash, principal string
 	var revision, expires int64
 	err := a.db().db.QueryRow(`SELECT token_hash,principal,policy_revision,expires_at FROM telephony_media_sessions WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID).Scan(&hash, &principal, &revision, &expires)
 	if err == sql.ErrNoRows {
 		owner, _, e := a.phoneOwner(row.ID)
 		if e != nil {
-			return "owner_lookup_failed", expires
+			return "owner_lookup_failed", expires, phoneIdentity{}
 		}
 		if owner == "" && row.PeerToken != "" && secureEqual(token, row.PeerToken) {
-			return "", expires
+			return "", expires, phoneIdentity{}
 		}
-		return "media_session_missing", expires
+		return "media_session_missing", expires, phoneIdentity{}
 	}
 	if err != nil {
-		return "media_session_lookup_failed", expires
+		return "media_session_lookup_failed", expires, phoneIdentity{}
 	}
 	if expires <= time.Now().Unix() {
-		return "media_lease_expired", expires
+		return "media_lease_expired", expires, phoneIdentity{}
 	}
 	if !secureEqual(phoneHash(token), hash) {
-		return "media_token_replaced", expires
+		return "media_token_replaced", expires, phoneIdentity{}
 	}
 	if principal == "" {
-		return "", expires
+		return "", expires, phoneIdentity{}
 	}
 	var identity phoneIdentity
 	if json.Unmarshal([]byte(principal), &identity) != nil || !identity.valid() {
-		return "media_principal_invalid", expires
+		return "media_principal_invalid", expires, phoneIdentity{}
 	}
 	p, err := a.phonePrincipal(row.ProjectID, identity)
 	if err != nil {
 		if errors.Is(err, errPhoneAccessDenied) {
-			return "user_access_revoked", expires
+			return "user_access_revoked", expires, phoneIdentity{}
 		}
-		return "policy_lookup_failed", expires
+		return "policy_lookup_failed", expires, phoneIdentity{}
 	}
 	if !a.phoneCallAllowed(p, row, false) {
 		owner, _, ownerErr := a.phoneOwner(row.ID)
 		if ownerErr != nil {
-			return "owner_lookup_failed", expires
+			return "owner_lookup_failed", expires, phoneIdentity{}
 		}
 		if owner != identity.key() {
-			return "call_ownership_changed", expires
+			return "call_ownership_changed", expires, phoneIdentity{}
 		}
-		return "call_permission_revoked", expires
+		return "call_permission_revoked", expires, phoneIdentity{}
 	}
-	return "", expires
+	return "", expires, identity
 }
 func (a *App) handlePhoneSession(w http.ResponseWriter, r *http.Request, project, action, id string) {
 	unlock := a.softphones.lockClaim(id)
