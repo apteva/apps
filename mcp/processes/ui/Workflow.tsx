@@ -1,3 +1,4 @@
+import ResultContent from "./ResultContent";
 import { TimingDetails, type TimingRule } from "./Timing";
 import { useRef, useState } from "react";
 import { ProcessFlow } from "./ProcessFlow";
@@ -382,7 +383,7 @@ export function RunSteps({
                 : {s.delivery_warning}
               </div>
             )}
-            {s.output && <div className="prose">{s.output}</div>}
+            {s.output && <ResultContent content={s.output} />}
             {s.error && <div className="notice">{s.error}</div>}
             {s.updated_by && s.state === "completed" && (
               <p className="small muted">
@@ -439,7 +440,7 @@ export function RunSteps({
                         .map((x) => (
                           <div className="block" key={x.id}>
                             <strong>{x.definition.name}</strong>
-                            <div className="prose">{x.output}</div>
+                            <ResultContent content={x.output} />
                           </div>
                         ))}
                     </details>

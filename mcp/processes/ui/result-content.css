@@ -1,0 +1,29 @@
+.ap-processes .result-content { min-width: 0; font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
+.ap-processes .result-fields { margin: 0; }
+.ap-processes .result-fields > div + div { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--pc-line); }
+.ap-processes .result-fields dt { font-weight: 650; margin-bottom: 5px; }
+.ap-processes .result-fields dd { margin: 0; }
+.ap-processes .result-items { margin: 0; padding-left: 22px; }
+.ap-processes .result-items > li + li { margin-top: 10px; }
+.ap-processes .result-markdown > :first-child { margin-top: 0; }
+.ap-processes .result-markdown > :last-child { margin-bottom: 0; }
+.ap-processes .result-markdown :is(h1,h2,h3,h4,h5,h6) { font-size: 15px; margin: 16px 0 8px; }
+.ap-processes .result-markdown p { white-space: normal; margin: 8px 0; }
+.ap-processes .result-markdown a { color: var(--pc-accent); text-decoration: underline; }
+.ap-processes .result-markdown pre { padding: 12px; border-radius: 8px; background: var(--pc-bg); overflow: auto; white-space: pre; }
+.ap-processes .result-markdown blockquote { margin: 12px 0; padding-left: 12px; border-left: 3px solid var(--pc-line); color: var(--pc-muted); }
+.ap-processes .result-markdown table { display: block; overflow: auto; }
+.ap-processes .result-markdown :is(th,td) { padding: 8px 10px; }
+.ap-processes .run-result-modal { width: min(900px, calc(100vw - 32px)); max-width: none; max-height: calc(100dvh - 32px); padding: 0; border: 1px solid var(--pc-line); border-radius: 14px; background: var(--pc-panel); color: var(--pc-text); box-shadow: 0 24px 80px #0006; }
+.ap-processes .run-result-modal::backdrop { background: #0009; }
+.ap-processes .run-result-modal > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 22px; border-bottom: 1px solid var(--pc-line); }
+.ap-processes .run-result-modal h2 { margin: 0; }
+.ap-processes .run-result-body { padding: 22px; overflow: auto; max-height: calc(100dvh - 130px); }
+.ap-processes .run-progress { max-width: 300px; margin: 14px 0 20px; }
+.ap-processes .run-progress-label { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; margin-bottom: 8px; }
+.ap-processes .run-progress progress { display: block; appearance: none; border: 0; border-radius: 999px; overflow: hidden; width: 100%; height: 12px; background: var(--pc-bg); accent-color: var(--pc-accent); }
+.ap-processes .run-progress progress::-webkit-progress-bar { background: var(--pc-bg); border-radius: 999px; }
+.ap-processes .run-progress progress::-webkit-progress-value { background: var(--pc-accent); border-radius: 999px; }
+.ap-processes .run-progress progress::-moz-progress-bar { background: var(--pc-accent); border-radius: 999px; }
+.ap-processes .run-current-step .step-output { margin-top: 14px; border-top: 1px solid var(--pc-line); padding-top: 14px; }
+.ap-processes .run-current-step .step-output h3 { font-size: 13px; margin: 0 0 8px; }

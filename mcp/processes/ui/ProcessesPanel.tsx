@@ -2,6 +2,8 @@ import { LiveContext, useProcessEvents, useScopedRevision, type AppEvent } from 
 import { useEffect, useState } from "react";
 import { ProcessFlow } from "./ProcessFlow";
 import ProjectMap from "./ProjectMap";
+import ResultContent, { ResultModal } from "./ResultContent";
+import resultStyles from "./result-content.css" with { type: "text" };
 import { stepProblem } from "./flow-model";
 import { StepEditor, RunSteps, type Step, type StepRun } from "./Workflow";
 import Assignments, {
@@ -327,6 +329,7 @@ function RunDetailCard({
 }) {
   const run = entry.record;
   const [workerActivityStatus, setWorkerActivityStatus] = useState("");
+  const [resultOpen, setResultOpen] = useState(false);
   const active = run.steps ? currentStep(run.steps) : null;
   const live = !terminalRunStates.has(run.state);
   useEffect(()=>setWorkerActivityStatus(""),[active?.id]);
@@ -335,6 +338,8 @@ function RunDetailCard({
     : active?.executor.kind === "human" ? "Project operator" : "Owner agent";
   return (
     <article id={`run-${run.id}`} className="card run run-detail">
+      <style>{resultStyles}</style>
+      {resultOpen && run.result && <ResultModal content={run.result} onClose={() => setResultOpen(false)} />}
       <div className="row between run-detail-header">
         <div>
           <div className="row">
@@ -347,6 +352,7 @@ function RunDetailCard({
           {entry.process_name && <p className="small muted">{run.title}</p>}
         </div>
         <div className="row">
+          {run.result && <button type="button" className="primary" onClick={() => setResultOpen(true)}>View result</button>}
           {onBack && <button onClick={onBack}>← Back to runs</button>}
           {onOpenProcess && <button onClick={onOpenProcess}>Open process</button>}
         </div>
@@ -365,26 +371,8 @@ function RunDetailCard({
         </button>{" "}
         · {run.scheduled_for ? "Scheduled" : "Manual"}
       </p>
-      {run.progress !== undefined && (
-        <progress
-          style={{ width: "100%", accentColor: "var(--pc-accent)", height: 5 }}
-          max={100}
-          value={run.progress}
-        />
-      )}
-      <div className="prose">
-        {run.delivery_warning && (
-          <p className="notice">
-            {run.delivery_suspended
-              ? "Delivery suspended—repair required"
-              : "Delivery retry pending"}: {run.delivery_warning}
-          </p>
-        )}
-        {run.result || run.error || run.current_step ||
-          (run.state === "scheduled"
-            ? "Waiting for the next step’s scheduled start."
-            : "Queued for the owner agent.")}
-      </div>
+      {run.delivery_warning && <p className="notice">{run.delivery_suspended ? "Delivery suspended—repair required" : "Delivery retry pending"}: {run.delivery_warning}</p>}
+      {run.error && <div className="notice"><ResultContent content={run.error} /></div>}
       <div className="run-detail-grid">
         <div>
           {run.workflow ? (
@@ -409,6 +397,10 @@ function RunDetailCard({
           )}
         </div>
         <aside className="card run-current-step" aria-live="polite">
+          {run.progress !== undefined && <div className="run-progress">
+            <div className="run-progress-label"><strong>Run progress</strong><span>{run.progress}%</span></div>
+            <progress aria-label="Run progress" max={100} value={run.progress} />
+          </div>}
           <div className="state-line">
             <h2>Current step</h2>
             <span className={`pill ${active?.state || run.state}`}>{active?.state || run.state}</span>
@@ -422,7 +414,10 @@ function RunDetailCard({
                   {workerActivityStatus || (active.state === "running" ? "Worker is working" : active.state === "ready" ? "Ready to start" : active.state === "waiting" ? "Waiting for input, approval or timing" : active.state === "blocked" ? "Blocked — needs attention" : active.state)}
                 </div>
                 <p className="small">{active.definition.instructions}</p>
-                {active.progress > 0 && <progress max={100} value={active.progress} style={{ width: "100%", accentColor: "var(--pc-accent)" }} />}
+                {active.progress > 0 && <div className="run-progress">
+                  <div className="run-progress-label"><strong>Step progress</strong><span>{active.progress}%</span></div>
+                  <progress aria-label="Step progress" max={100} value={active.progress} />
+                </div>}
                 {(active.delivery_warning || active.error) && (
                   <div className="notice small">
                     {active.delivery_suspended ? "Delivery suspended—repair required: " : active.delivery_warning ? "Delivery retry pending: " : "Worker error: "}
@@ -430,6 +425,7 @@ function RunDetailCard({
                   </div>
                 )}
               </div>
+              {active.output && <section className="step-output"><h3>Step output</h3><ResultContent content={active.output} /></section>}
               {active.executor.kind === "agent" ? (
                 <ExecutionTools
                   key={active.id}
@@ -450,9 +446,9 @@ function RunDetailCard({
           ) : (
             <>
               <div className={`run-activity-status ${live ? "active" : ""}`}>
-                {live ? "Waiting for worker activity" : "No active step"}
+                {live ? "Waiting for worker activity" : run.state === "completed" ? "All steps completed" : "No active step"}
               </div>
-              <p className="small muted">{run.result || run.error || "The run has not exposed a current step."}</p>
+              {run.result ? <p className="small muted">The saved process result is available from View result.</p> : <p className="small muted">{run.error || (live ? "The run has not exposed a current step." : "No result was recorded.")}</p>}
               {!run.workflow && <ExecutionTools agentID={entry.assignment?.owner_agent_id} threadID={run.target_thread_id} executionID={run.execution_id} live={live} sources={toolSources} defaultOpen={live} />}
             </>
           )}

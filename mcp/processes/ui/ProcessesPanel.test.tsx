@@ -112,6 +112,7 @@ test("run history renders native evidence without external task links", async ()
   await click("Runs");
   expect(document.body.textContent).not.toContain("Direct report approved");
   await clickContaining("Direct agent run");
+  await click("View result");
   expect(document.body.textContent).toContain("Direct report approved");
   expect(document.querySelectorAll('a[href*="/apps/tasks/"]').length).toBe(0);
 });
@@ -304,6 +305,7 @@ test("run history filters independent assignments", async () => {
   expect(runList.textContent).toContain("Photography Patreon");
   expect(runList.textContent).not.toContain("Cooking");
   await clickContaining("Photography Patreon");
+  await click("View result");
   expect(document.body.textContent).toContain("Photo result");
 });
 test("editing a paused assignment preserves parameters and uses revision", async () => {
@@ -534,6 +536,7 @@ test("main Runs tab browses executions across processes", async () => {
   expect(document.querySelector('[data-state="running"]')).toBeTruthy();
   expect(document.querySelector('[data-state="completed"]')).toBeTruthy();
   await clickContaining("Publish digest");
+  await click("View result");
   expect(document.body.textContent).toContain("Digest published");
   expect(document.querySelector(".run-detail-page")).toBeTruthy();
   expect(document.querySelector(".run-detail-page .run-detail")).toBeTruthy();
