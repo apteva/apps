@@ -81,6 +81,11 @@ type softphoneHub struct {
 	captureExpected     uint32
 	captureSequenceGaps int
 	captureDropEvents   []audioDropEvent
+	captureMutedRanges  []captureMutedRange
+	captureMutedEvents  []captureMutedEvent
+	captureMutedFrames  uint64
+	captureMuteSeen     bool
+	captureMuteLast     uint32
 	whisperBrowser      *websocketWriterPump
 	browserEpoch        string
 	coach               *callListener
@@ -101,18 +106,26 @@ func decodeSoftphoneAudioFrame(data []byte) (payload []byte, sequence uint32, fr
 	return data[16:], binary.LittleEndian.Uint32(data[4:8]), true
 }
 
-func (h *softphoneHub) observeCaptureFrame(sequence uint32) {
+func (h *softphoneHub) observeCaptureFrame(sequence uint32, connectionIDs ...string) {
+	connectionID := ""
+	if len(connectionIDs) > 0 {
+		connectionID = connectionIDs[0]
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.captureSequenceSet && sequence > h.captureExpected {
 		gap := int(sequence - h.captureExpected)
-		h.captureSequenceGaps += gap
-		h.captureDropEvents = append(h.captureDropEvents, audioDropEvent{
-			Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier",
-			Reason: "capture_sequence_gap", DurationMS: gap * 20, Sequence: uint64(h.captureExpected),
-		})
-		if len(h.captureDropEvents) > 100 {
-			h.captureDropEvents = h.captureDropEvents[len(h.captureDropEvents)-100:]
+		muted, firstUnexpected := h.mutedFramesInGap(h.captureExpected, sequence-1)
+		gap -= int(muted)
+		if gap > 0 {
+			h.captureSequenceGaps += gap
+			h.captureDropEvents = append(h.captureDropEvents, audioDropEvent{
+				Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier",
+				Reason: "capture_sequence_gap", ConnectionID: connectionID, DurationMS: gap * 20, Sequence: uint64(firstUnexpected),
+			})
+			if len(h.captureDropEvents) > 100 {
+				h.captureDropEvents = h.captureDropEvents[len(h.captureDropEvents)-100:]
+			}
 		}
 	}
 	h.captureExpected = sequence + 1
@@ -195,6 +208,8 @@ func (h *softphoneHub) setBrowser(w *websocketWriterPump) (replaced *websocketWr
 	h.deliveryNotice = ""
 	h.framedVersion = 0
 	h.captureSequenceSet = false
+	h.captureMutedRanges = nil
+	h.captureMuteSeen = false
 	h.captureTransitSet = false
 	return replaced
 }
@@ -537,7 +552,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "call is not a softphone call", http.StatusConflict)
 		return
 	}
-	reason, verifiedExpiry := a.phoneMediaCheck(row, token)
+	reason, verifiedExpiry, identity := a.phoneMediaCheckDetails(row, token)
 	if reason != "" {
 		logSoftphone("softphone browser media session rejected", "call", callID, "reason", reason)
 		status := http.StatusForbidden
@@ -561,12 +576,12 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 	closer := newGracefulWebSocket(conn, writer)
 	hub := a.softphones.hubFor(callID)
 	hub.telemetry.restore(row.BrowserAudioDiagnostics)
-	proxies := ""
+	networkConfig := map[string]string{}
 	if globalCtx != nil {
-		proxies = globalCtx.WithProject(row.ProjectID).Config()["audio_telemetry_trusted_proxy_cidrs"]
+		networkConfig = globalCtx.WithProject(row.ProjectID).Config()
 	}
-	hash, hashEpoch, addressSource := a.audioPeerHasher.hash(r, proxies)
-	hub.telemetry.opened(writer, hash, hashEpoch, addressSource)
+	hash, hashEpoch, addressSource := a.audioPeerHasher.hash(r, networkConfig["audio_telemetry_trusted_proxy_cidrs"])
+	connectionID := hub.telemetry.openedWithNetwork(writer, hash, hashEpoch, addressSource, newAudioNetworkContext(row, identity, r, networkConfig), a.audioNetworks.enqueue)
 	defer func() {
 		hub.telemetry.closed(writer, "handler_closed", nil)
 		hub.clearBrowser(writer)
@@ -687,13 +702,13 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			payload, sequence, framed := decodeSoftphoneAudioFrame(data)
 			sourceSequence := ""
 			if framed {
-				hub.observeCaptureFrame(sequence)
+				hub.observeCaptureFrame(sequence, connectionID)
 				sourceSequence = strconv.FormatUint(uint64(sequence), 10)
 			}
-			hub.timeline.observe("microphone_server_receipt", len(data), time.Time{}, "", sourceSequence)
+			hub.timeline.observe("microphone_server_receipt", len(data), time.Time{}, "", sourceSequence, connectionID)
 			// Received sequence gaps and our intentional stale-frame drops
 			// are separate measurements, so observe arrival before filtering.
-			if hub.observeCaptureTiming(data) {
+			if hub.observeCaptureTiming(data, connectionID) {
 				continue
 			}
 			if len(payload) == 0 {
@@ -702,18 +717,26 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			hub.forwardMicrophone(writer, payload)
 		case ws.OpText:
 			var control struct {
-				Type        string                   `json:"type"`
-				Nonce       float64                  `json:"nonce,omitempty"`
-				Version     int                      `json:"version,omitempty"`
-				Whisper     bool                     `json:"whisper,omitempty"`
-				Versions    []int                    `json:"versions,omitempty"`
-				Digits      string                   `json:"digits,omitempty"`
-				Diagnostics *browserAudioDiagnostics `json:"diagnostics,omitempty"`
+				Type          string                   `json:"type"`
+				Nonce         float64                  `json:"nonce,omitempty"`
+				Version       int                      `json:"version,omitempty"`
+				Whisper       bool                     `json:"whisper,omitempty"`
+				Versions      []int                    `json:"versions,omitempty"`
+				Digits        string                   `json:"digits,omitempty"`
+				Diagnostics   *browserAudioDiagnostics `json:"diagnostics,omitempty"`
+				Reason        string                   `json:"reason,omitempty"`
+				FirstSequence uint32                   `json:"first_sequence,omitempty"`
+				LastSequence  uint32                   `json:"last_sequence,omitempty"`
+				Frames        uint64                   `json:"frames,omitempty"`
 			}
 			if json.Unmarshal(data, &control) != nil {
 				continue
 			}
 			switch control.Type {
+			case "capture.omitted":
+				if control.Reason == "muted" {
+					hub.observeMutedCaptureRange(writer, control.FirstSequence, control.LastSequence, control.Frames, connectionID)
+				}
 			case "media.capabilities":
 				if control.Version == 2 {
 					// Old clients negotiate APT2; new clients advertise APT3 as well.
@@ -765,7 +788,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			case "diagnostics":
 				if control.Diagnostics != nil && hub.readyBrowserWriter() == writer {
 					normalized := normalizeBrowserAudioDiagnostics(*control.Diagnostics)
-					hub.telemetry.observeBrowser(normalized)
+					hub.telemetry.observeBrowserConnection(writer, normalized)
 					// Coalesce reports in memory; the watcher persists off the frame path.
 				}
 			}

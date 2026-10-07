@@ -13,6 +13,11 @@ function tone(frame:Float32Array,rate:number):[number,number]{
  const sourceContext=new AudioContext({sampleRate:24000});await sourceContext.audioWorklet.addModule('/probe.js');await sourceContext.resume();
  const source=new AudioWorkletNode(sourceContext,'benchmark-source'),destination=sourceContext.createMediaStreamDestination();source.connect(destination);
  const original=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+ const OriginalAudioContext=window.AudioContext;
+ // Force the production fallback resampler without changing the app or source.
+ if(config.audio_context_rate)window.AudioContext=class extends OriginalAudioContext {
+  constructor(options?:AudioContextOptions){super({...options,sampleRate:config.audio_context_rate});}
+ };
  // Controlled signal replaces the hardware microphone only. Capture DSP,
  // framing, worker, WebSockets, Go bridge and carrier codec still execute.
  navigator.mediaDevices.getUserMedia=async()=>destination.stream;
@@ -55,7 +60,7 @@ function tone(frame:Float32Array,rate:number):[number,number]{
   const clockBase={wall:performance.now(),source:sourceContext.currentTime,playback:ctx.currentTime};
   const clockProgress={wall_elapsed_ms:0,source_elapsed_ms:0,playback_elapsed_ms:0,max_source_lag_ms:0,max_playback_lag_ms:0};
   const finish=arm.start_at+config.duration_ms+config.drain_ms;
-  let muted=false,unmuted=false,reconnected=false;
+  let muted=false,unmuted=false,reconnected=false,mainThreadPaused=false;
   while(Date.now()<finish) {
     const elapsed=Date.now()-arm.start_at;
     clockProgress.wall_elapsed_ms=performance.now()-clockBase.wall;
@@ -66,9 +71,14 @@ function tone(frame:Float32Array,rate:number):[number,number]{
     if(config.mute_microphone && elapsed>=4000 && !muted) {session.setMuted(true);muted=true;}
     if(config.mute_microphone && elapsed>=6000 && !unmuted) {session.setMuted(false);unmuted=true;}
     if(config.reconnect_browser && elapsed>=4000 && !reconnected) {reconnected=true;await fetch('/disconnect-browser',{method:'POST'});}
+    if(config.main_thread_pause_ms && elapsed>=6000 && !mainThreadPaused) {
+      mainThreadPaused=true;
+      const end=performance.now()+config.main_thread_pause_ms;
+      while(performance.now()<end) { /* Deliberately block UI, not the media Worker. */ }
+    }
     await new Promise(r=>setTimeout(r,100));
   }
   const result={clock_progress:clockProgress,wire_diagnostics:wireDiagnostics,markers,states,notices,diagnostics:diagnostics.slice(-8),audio_context_rate:ctx.sampleRate,source_context_rate:sourceContext.sampleRate,start_at:arm.start_at,output_clock_mapping_uncertainty_ms:20,errors};
   session.sendDiagnostics();return result;
- }finally{navigator.mediaDevices.getUserMedia=original;probe?.disconnect();session.stop();source.disconnect();await sourceContext.close();}
+ }finally{window.AudioContext=OriginalAudioContext;navigator.mediaDevices.getUserMedia=original;probe?.disconnect();session.stop();source.disconnect();await sourceContext.close();}
 };

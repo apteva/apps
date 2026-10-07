@@ -94,6 +94,8 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 		tr := b.Timing.Transport
 		rt := b.Timing.Runtime
 		m["capture_dropped_ms"] = tr.CaptureDroppedMS
+		m["capture_muted_frames"] = tr.CaptureMutedFrames
+		m["capture_muted_ms"] = tr.CaptureMutedMS
 		m["browser_transport_dropped_ms"] = tr.PlaybackTransportDroppedMS
 		m["browser_source_dropped_ms"] = tr.PlaybackSourceDroppedMS
 		m["max_rtt_ms"] = max(m["max_rtt_ms"], tr.RTTMaxMS)
@@ -140,7 +142,7 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 				m["context_suspensions"] = max(m["context_suspensions"], n)
 			case "audio_context_suspended_ms":
 				m["context_suspended_ms"] = max(m["context_suspended_ms"], n)
-			case "reconnect_attempts", "reconnect_successes":
+			case "reconnect_attempts", "reconnect_successes", "capture_muted_ms", "capture_muted_frames":
 				m[k] = max(m[k], n)
 			}
 		}
@@ -155,6 +157,8 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 		m["browser_max_queue_delay_ms"] = float64(v.ToBrowser.MaxResidenceMS)
 		m["server_browser_dropped_ms"] = float64(v.ToBrowser.StaleBytes+v.ToBrowser.SourceStaleBytes+v.ToBrowser.OverflowBytes) / 48
 		m["server_capture_dropped_ms"] = float64(v.CaptureStaleBytes) / 48
+		m["capture_muted_frames"] = max(m["capture_muted_frames"], float64(v.CaptureMutedFrames))
+		m["capture_muted_ms"] = max(m["capture_muted_ms"], float64(v.CaptureMutedMS))
 		m["carrier_max_write_ms"] = float64(v.CarrierPacer.MaxWriteMS)
 		add("carrier_stall", "carrier_to_telephony", v.Reception.Stalls > 0 || v.Reception.GapsOverBudget > 0)
 		add("dropped_audio", "carrier_to_telephony", v.Reception.StaleDroppedMS > 0)
@@ -409,7 +413,12 @@ func (a *App) handleAudioDashboard(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		writeJSON(w, map[string]any{"browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics)})
+		network, err := a.db().browserNetworkEvents(r.Context(), project, id, time.Now())
+		if err != nil {
+			http.Error(w, "load network diagnostics", 500)
+			return
+		}
+		writeJSON(w, map[string]any{"browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "network_events": network})
 		return
 	}
 	now := time.Now()

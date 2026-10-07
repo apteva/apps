@@ -143,6 +143,45 @@ test('mute and reconnect gates do not replay earlier capture',()=>{
  w.frame(100);expect(w.socket.sent.filter((x:any)=>x instanceof ArrayBuffer)).toHaveLength(1);
 });
 
+test('mute reports exact omitted sequences before fresh PCM and preserves frame numbers',()=>{
+ const w=worker();w.frame(0,1);
+ w.command({type:'muted',value:true});
+ for(let i=0;i<100;i++) {w.setNow(10020+i*20);w.frame(20+i*20,2+i);}
+ expect(w.socket.sent.filter((m:any)=>m instanceof ArrayBuffer)).toHaveLength(1);
+ w.setNow(12020);w.command({type:'muted',value:false});w.frame(2020,102);
+ const omitted=w.socket.sent.find((m:any)=>typeof m==='string'&&JSON.parse(m).type==='capture.omitted');
+ expect(JSON.parse(omitted)).toEqual({type:'capture.omitted',reason:'muted',first_sequence:2,last_sequence:101,frames:100});
+ expect(w.socket.sent.indexOf(omitted)).toBeLessThan(w.socket.sent.length-1);
+ const audio=w.socket.sent.filter((m:any)=>m instanceof ArrayBuffer);
+ expect(audio).toHaveLength(2);expect(new DataView(audio[1]).getUint32(4,true)).toBe(102);
+ expect(new Int16Array(audio[1],16).every((x:number)=>x===6553)).toBe(true);
+ w.intervals[0]();const t=w.messages.findLast((m:any)=>m.type==='transport.stats').timing;
+ expect(t.capture_muted_frames).toBe(100);expect(t.capture_muted_ms).toBe(2000);
+ expect(t.capture_dropped_ms).toBe(0);
+});
+
+test('mute metadata stays socket scoped and failed observations cannot stop fresh audio',()=>{
+ const w=worker();w.command({type:'muted',value:true});w.frame(0,1);
+ w.socket.onclose({code:1006,reason:'',wasClean:false});w.timeouts.at(-1)!();
+ const next=w.sockets.at(-1);next.onopen();
+ w.command({type:'microphone.ready',value:true});
+ w.setNow(10020);w.command({type:'muted',value:false});w.frame(20,2);
+ expect(next.sent.some((m:any)=>typeof m==='string'&&JSON.parse(m).type==='capture.omitted')).toBe(false);
+ expect(next.sent.filter((m:any)=>m instanceof ArrayBuffer)).toHaveLength(1);
+ w.command({type:'muted',value:true});w.setNow(10040);w.frame(40,3);
+ const send=next.send.bind(next);next.send=(m:any)=>{if(typeof m==='string'&&JSON.parse(m).type==='capture.omitted')throw Error('observation failed');send(m);};
+ w.command({type:'muted',value:false});w.frame(40,4);
+ expect(next.sent.filter((m:any)=>m instanceof ArrayBuffer)).toHaveLength(2);
+});
+
+test('closing a muted socket flushes its final observation without sending microphone audio',()=>{
+ const w=worker();w.command({type:'muted',value:true});w.frame(0,1);
+ w.command({type:'close'});
+ const ranges=w.socket.sent.filter((m:any)=>typeof m==='string'&&JSON.parse(m).type==='capture.omitted');
+ expect(ranges).toHaveLength(1);expect(JSON.parse(ranges[0]).frames).toBe(1);
+ expect(w.socket.sent.filter((m:any)=>m instanceof ArrayBuffer)).toHaveLength(0);
+});
+
 function timedPlayback(sent:number,sequence=1) {
  const frame=new ArrayBuffer(32+960), view=new DataView(frame);
  view.setUint32(0,0x32545041,true);view.setUint32(4,sequence,true);view.setFloat64(16,sent,true);
@@ -284,6 +323,56 @@ test('rejected playback retains worst-case ages, source metadata and exact times
  const e=w.messages.findLast((m:any)=>m.type==='transport.drop').event;
  expect(e).toMatchObject({direction:'carrier_to_operator',reason:'playback_delivery_excess',duration_ms:20,queue_before_ms:980,sequence:2});
  expect(Number.isFinite(Date.parse(e.timestamp))).toBe(true);
+});
+
+test('a 7.23-second browser delivery hold reproduces 351 discarded frames and recovers',()=>{
+ const w=worker();w.socket.onmessage({data:JSON.stringify({type:'media.capabilities',version:3})});
+ w.socket.onmessage({data:sourcePlayback(100,0,0,100)});
+ // Ordered catch-up at 0.3ms/frame after a 7.23s relative delivery delay.
+ // Ingress and server processing stayed prompt; only browser delivery waited.
+ for(let i=0;i<362;i++) {
+  w.setNow(17250+i*.3);w.socket.onmessage({data:sourcePlayback(120+i*20,20+i*20,i+1,120+i*20)});
+ }
+ const events=w.messages.filter((m:any)=>m.type==='transport.drop');
+ expect(events).toHaveLength(351);
+ expect(events.reduce((n:number,m:any)=>n+m.event.duration_ms,0)).toBe(7020);
+ expect(events.every((m:any)=>Number.isFinite(Date.parse(m.event.timestamp)))).toBe(true);
+ w.setNow(17260);w.socket.onmessage({data:sourcePlayback(7360,7260,363,7360)});
+ w.intervals[0]();const stats=w.messages.findLast((m:any)=>m.type==='transport.stats').timing;
+ expect(stats.playback_max_delivery_excess_ms).toBe(7230);
+ expect(stats.playback_ingress_ms).toBe(stats.playback_received_ms+stats.playback_transport_dropped_ms+stats.playback_source_dropped_ms);
+ expect(w.received.at(-1).sequence).toBe(363); // Live speech resumes.
+});
+
+test('prompt delivery tolerates wall-clock steps, carrier epoch changes, mute and fresh clock probes',()=>{
+ const w=worker();w.socket.onmessage({data:JSON.stringify({type:'media.capabilities',version:3})});
+ for(let i=0;i<1000;i++) {
+  w.setNow(10000+i*20);
+  if(i%100===0) {
+   w.command({type:'muted',value:(i%200)===0});
+   w.socket.onmessage({data:JSON.stringify({type:'media.clock',nonce:10000+i*20,received_ms:100+i*20,sent_ms:100+i*20})});
+  }
+  // Source timestamps restart; mapped server source time remains monotonic.
+  w.socket.onmessage({data:sourcePlayback(100+i*20,(i%100)*20,i,100+i*20,1+Math.floor(i/100))});
+ }
+ expect(w.received).toHaveLength(1000);
+ expect(w.messages.filter((m:any)=>m.type==='transport.drop')).toHaveLength(0);
+ // Date.now and wall time do not enter the playback age calculation.
+ vm.runInContext('Date.now=()=>1;Date.prototype.toISOString=()=>"2000-01-01T00:00:00.000Z"',w.context);
+ w.setNow(30000);w.socket.onmessage({data:sourcePlayback(20100,0,1000,20100,11)});
+ expect(w.received).toHaveLength(1001);
+});
+
+test('a wrong mapped source clock can imitate late delivery despite a fresh send timestamp',()=>{
+ const w=worker();w.socket.onmessage({data:JSON.stringify({type:'media.capabilities',version:3})});
+ w.setNow(20000);w.socket.onmessage({data:sourcePlayback(10000,0,1,10000)});
+ w.setNow(20020);w.socket.onmessage({data:sourcePlayback(2790,20,2,10020)});
+ w.intervals[0]();const stats=w.messages.findLast((m:any)=>m.type==='transport.stats').timing;
+ expect(stats.playback_max_delivery_excess_ms).toBe(7230);
+ expect(w.received).toHaveLength(1);
+ expect(stats.playback_transport_dropped_ms).toBe(20);
+ // This deliberately invalid fixture shows why relative delay alone cannot
+ // establish the network as the cause. Compare source and send clocks.
 });
 
 test('worker refreshes credentials before reconnect and preserves WebSocket close diagnostics',()=>{

@@ -46,8 +46,9 @@ type coachingPlaybackTiming struct {
 }
 
 type browserRTTSample struct {
-	At    string  `json:"at"`
-	RTTMS float64 `json:"rtt_ms"`
+	ConnectionID string  `json:"connection_id,omitempty"`
+	At           string  `json:"at"`
+	RTTMS        float64 `json:"rtt_ms"`
 }
 type browserAudioRuntime struct {
 	MainThreadPauseCount     float64 `json:"main_thread_pause_count"`
@@ -59,6 +60,8 @@ type browserAudioTiming struct {
 	Runtime   browserAudioRuntime `json:"runtime"`
 	Transport struct {
 		CaptureFrames               float64            `json:"capture_frames"`
+		CaptureMutedFrames          float64            `json:"capture_muted_frames"`
+		CaptureMutedMS              float64            `json:"capture_muted_ms"`
 		CaptureSentMS               float64            `json:"capture_sent_ms"`
 		CaptureDroppedMS            float64            `json:"capture_dropped_ms"`
 		CaptureMaxAgeMS             float64            `json:"capture_max_age_ms"`
@@ -95,18 +98,20 @@ type browserAudioTiming struct {
 }
 
 type mediaSessionEvent struct {
-	DurationMS  int    `json:"duration_ms,omitempty"`
-	Timestamp   string `json:"timestamp"`
-	Action      string `json:"action"`
-	Outcome     string `json:"outcome"`
-	Status      int    `json:"status,omitempty"`
-	Code        string `json:"code,omitempty"`
-	Detail      string `json:"detail,omitempty"`
-	RemainingMS int    `json:"remaining_ms,omitempty"`
-	WasClean    bool   `json:"was_clean,omitempty"`
+	ConnectionID string `json:"connection_id,omitempty"`
+	DurationMS   int    `json:"duration_ms,omitempty"`
+	Timestamp    string `json:"timestamp"`
+	Action       string `json:"action"`
+	Outcome      string `json:"outcome"`
+	Status       int    `json:"status,omitempty"`
+	Code         string `json:"code,omitempty"`
+	Detail       string `json:"detail,omitempty"`
+	RemainingMS  int    `json:"remaining_ms,omitempty"`
+	WasClean     bool   `json:"was_clean,omitempty"`
 }
 
 type browserAudioDiagnostics struct {
+	ConnectionID           string                  `json:"connection_id,omitempty"`
 	ClientEpoch            string                  `json:"client_epoch,omitempty"`
 	SessionEvents          []mediaSessionEvent     `json:"session_events,omitempty"`
 	CarrierPeerConnected   bool                    `json:"carrier_peer_connected"`
@@ -142,6 +147,7 @@ type browserAudioDiagnostics struct {
 }
 
 type audioDropEvent struct {
+	ConnectionID  string `json:"connection_id,omitempty"`
 	Timestamp     string `json:"timestamp"`
 	Direction     string `json:"direction"`
 	Reason        string `json:"reason"`
@@ -226,6 +232,8 @@ func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics) browserAudi
 			return math.Max(0, math.Min(n, cap))
 		}
 		tr, rt := &value.Timing.Transport, &value.Timing.Runtime
+		tr.CaptureMutedFrames = finite(tr.CaptureMutedFrames, 1e9)
+		tr.CaptureMutedMS = finite(tr.CaptureMutedMS, 86400000)
 		tr.ReconnectAttempts = finite(tr.ReconnectAttempts, 1e9)
 		tr.ReconnectSuccesses = finite(tr.ReconnectSuccesses, 1e9)
 		tr.WorkerPauseCount = finite(tr.WorkerPauseCount, 1e9)

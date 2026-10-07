@@ -30,3 +30,42 @@ test('carrier delivery notices preserve the healthy microphone and report recove
  session.handleControl(JSON.stringify({type:'media.delivery',state:'flowing'}));
  expect(notices).toHaveLength(2);expect(states).toHaveLength(0);
 });
+
+test('mute and unmute events show the updated state and ignore duplicate commands',async()=>{
+ const {SoftphoneSession}=await import('./softphone-audio');
+ const events:any[]=[];
+ const session:any=new SoftphoneSession({onSessionEvent:e=>{events.push({event:e,muted:session.isMuted});throw Error('observer');}});
+ session.setMuted(true);session.setMuted(true);session.setMuted(false);
+ expect(events.map(e=>[e.event.action,e.event.outcome,e.muted])).toEqual([['microphone','muted',true],['microphone','unmuted',false]]);
+ expect(events.every(e=>Number.isFinite(Date.parse(e.event.timestamp)))).toBe(true);
+ expect(session.closed).toBe(false);
+});
+
+test('playback reports retain timestamped Worker rejection events without duplication', async()=>{
+ const {SoftphoneSession}=await import('./softphone-audio');
+ const descriptor=Object.getOwnPropertyDescriptor(globalThis,'Worker');
+ let worker:any;
+ Object.defineProperty(globalThis,'Worker',{configurable:true,value:class {
+  onmessage:any;onerror:any;constructor(){worker=this;}postMessage(){}terminate(){}
+ }});
+ const session:any=new SoftphoneSession();
+ session.capture={port:{postMessage(){}}};session.playback={port:{postMessage(){}}};
+ try {
+  session.installWorkletDiagnostics();
+  const started=session.openWorker('ws://unused','worker.js');
+  worker.onmessage({data:{type:'socket.open'}});await started;
+  const transport={timestamp:'2026-10-07T10:00:00.000Z',direction:'carrier_to_operator',reason:'playback_delivery_excess',duration_ms:20,sequence:1};
+  const rendered={...transport,timestamp:'2026-10-07T10:00:00.020Z',reason:'playback_hard_limit',sequence:2};
+  worker.onmessage({data:{type:'transport.drop',event:transport}});
+  const report=()=>session.playback.port.onmessage({data:{type:'stats',drop_events:[rendered]}});
+  report();report();
+  expect(session.diagnostics.dropEvents).toEqual([transport,rendered]);
+  session.playback.port.onmessage({data:{type:'stats',drop_events:[]}});
+  expect(session.diagnostics.dropEvents).toEqual([transport]);
+  for(let i=0;i<351;i++)worker.onmessage({data:{type:'transport.drop',event:{...transport,sequence:i+3}}});
+  report();expect(session.diagnostics.dropEvents.length).toBeLessThanOrEqual(100);
+ } finally {
+  session.capture=null;session.playback=null;session.stop();
+  if(descriptor)Object.defineProperty(globalThis,'Worker',descriptor);else Reflect.deleteProperty(globalThis,'Worker');
+ }
+});

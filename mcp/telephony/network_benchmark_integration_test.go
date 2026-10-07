@@ -146,6 +146,9 @@ func TestSoftphoneNetworkBenchmark(t *testing.T) {
 		}
 	}
 	for _, p := range profiles {
+		if (selection == "all" || selected[p.Name]) && p.BrowserDeliveryPause && float64(seconds*1000) < p.Down.OutageAtMS+p.Down.OutageMS+4000 {
+			t.Fatal("browser delivery interruption requires four seconds after recovery; use --seconds 20")
+		}
 		if (selection == "all" || selected[p.Name]) && p.CarrierDown != nil && float64(seconds*1000) < p.CarrierDown.OutageAtMS+p.CarrierDown.OutageMS+4000 {
 			t.Fatal("carrier interruption profiles require at least 17 seconds; use --seconds 20")
 		}
@@ -234,7 +237,7 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 		case "/":
 			io.WriteString(w, `<!doctype html><title>Local Telephony network benchmark</title><script type="module" src="/entry.js"></script>`)
 		case "/config":
-			writeTier2JSON(w, map[string]any{"media_url": "ws://" + proxy.Addr() + "/softphone/media/" + id + "/" + session.SessionToken, "duration_ms": duration, "drain_ms": 2500, "mute_microphone": profile.MuteMicrophone, "reconnect_browser": profile.ReconnectBrowser})
+			writeTier2JSON(w, map[string]any{"media_url": "ws://" + proxy.Addr() + "/softphone/media/" + id + "/" + session.SessionToken, "duration_ms": duration, "drain_ms": 2500, "mute_microphone": profile.MuteMicrophone, "reconnect_browser": profile.ReconnectBrowser, "main_thread_pause_ms": profile.MainThreadPauseMS, "audio_context_rate": profile.AudioContextRate})
 		case "/refresh-media":
 			if r.Method != "POST" {
 				w.WriteHeader(405)
@@ -513,7 +516,7 @@ func benchmarkSourceMetadata(t *testing.T) map[string]any {
 // These gates assert the incident behavior, rather than accepting any result
 // simply because an outage profile is allowed to lose expected audio.
 func benchmarkInterruptionChecks(r benchmarkResult) []string {
-	if r.Profile.CarrierDown == nil && !r.Profile.MuteMicrophone && !r.Profile.ReconnectBrowser {
+	if r.Profile.CarrierDown == nil && !r.Profile.MuteMicrophone && !r.Profile.ReconnectBrowser && !r.Profile.BrowserDeliveryPause && r.Profile.MainThreadPauseMS == 0 && r.Profile.AudioContextRate == 0 {
 		return nil
 	}
 	var errors []string
@@ -523,6 +526,25 @@ func benchmarkInterruptionChecks(r benchmarkResult) []string {
 		return []string{"missing server timing diagnostics"}
 	}
 	s := d.Server.Reception
+	if r.Profile.BrowserDeliveryPause {
+		if s.Stalls != 0 || s.StaleDroppedMS != 0 {
+			errors = append(errors, "browser delivery hold falsely attributed to carrier ingress")
+		}
+		if d.Timing == nil || d.Timing.Transport.PlaybackMaxDeliveryExcessMS < 6500 || d.Timing.Transport.PlaybackTransportDroppedMS < 6000 {
+			errors = append(errors, "seven-second browser delivery hold not measured or stale frames replayed")
+		}
+		if r.Up.MissingPct > 5 || r.Up.P95 > 350 || r.Down.Max > 700 {
+			errors = append(errors, "browser delivery hold disrupted healthy microphone or replayed delayed speech")
+		}
+	}
+	// The one-second observer records excess scheduling delay, not the entire
+	// busy interval; its tick can fall anywhere inside that interval.
+	if r.Profile.MainThreadPauseMS > 0 && (d.Timing == nil || d.Timing.Runtime.MainThreadMaxPauseMS < float64(r.Profile.MainThreadPauseMS-1200)) {
+		errors = append(errors, "main-thread load was not exercised and observed")
+	}
+	if r.Profile.AudioContextRate > 0 && d.AudioContextRate != r.Profile.AudioContextRate {
+		errors = append(errors, "fallback AudioContext sample rate was not exercised")
+	}
 	interrupted, recovered := false, false
 	for _, notice := range r.Browser.Notices {
 		detail, _ := notice["detail"].(string)
@@ -548,6 +570,16 @@ func benchmarkInterruptionChecks(r benchmarkResult) []string {
 	}
 	if r.Profile.MuteMicrophone && (s.Stalls != 0 || interrupted) {
 		errors = append(errors, "intentional microphone mute raised caller transport incident")
+	}
+	if r.Profile.MuteMicrophone {
+		muted, unmuted := false, false
+		for _, event := range d.SessionEvents {
+			muted = muted || event.Action == "microphone" && event.Outcome == "muted"
+			unmuted = unmuted || event.Action == "microphone" && event.Outcome == "unmuted"
+		}
+		if d.Server.CaptureSequenceGaps != 0 || d.Server.CaptureMutedMS < 1500 || d.Server.CaptureMutedMS > 2500 || !muted || !unmuted {
+			errors = append(errors, "intentional mute not separated from unexpected capture loss or missing transition events")
+		}
 	}
 	if r.Profile.ReconnectBrowser {
 		reconnected := false
@@ -633,6 +665,47 @@ func TestBenchmarkGatesRejectFailuresAndSeparateExpectedDegradation(t *testing.T
 			got, _ := benchmarkEvaluate(profile, tc.direction, healthy, tc.errors)
 			if got != tc.want {
 				t.Fatalf("got %s want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBenchmarkBrowserIncidentGates(t *testing.T) {
+	for _, name := range []string{"main-thread-delay-observed", "main-thread-delay-missing", "browser-delay-observed", "browser-delay-missing", "wrong-ingress-attribution", "sample-rate-observed", "sample-rate-missing"} {
+		t.Run(name, func(t *testing.T) {
+			d := browserAudioDiagnostics{Server: &serverAudioDiagnostics{}, Timing: &browserAudioTiming{}, AudioContextRate: 48000}
+			d.Timing.Runtime.MainThreadMaxPauseMS = 1000 // Excess beyond the one-second observer interval.
+			d.Timing.Transport.PlaybackMaxDeliveryExcessMS = 7200
+			d.Timing.Transport.PlaybackTransportDroppedMS = 6900
+			profile := bench.Profile{}
+			wantError := false
+			switch name {
+			case "main-thread-delay-observed", "main-thread-delay-missing":
+				profile.MainThreadPauseMS = 2000
+				if name == "main-thread-delay-missing" {
+					d.Timing.Runtime.MainThreadMaxPauseMS = 0
+					wantError = true
+				}
+			case "browser-delay-observed", "browser-delay-missing", "wrong-ingress-attribution":
+				profile.BrowserDeliveryPause = true
+				if name == "browser-delay-missing" {
+					d.Timing.Transport.PlaybackMaxDeliveryExcessMS = 0
+					wantError = true
+				}
+				if name == "wrong-ingress-attribution" {
+					d.Server.Reception.Stalls = 1
+					wantError = true
+				}
+			case "sample-rate-observed", "sample-rate-missing":
+				profile.AudioContextRate = 48000
+				if name == "sample-rate-missing" {
+					d.AudioContextRate = 24000
+					wantError = true
+				}
+			}
+			errors := benchmarkInterruptionChecks(benchmarkResult{Profile: profile, ServerDiagnostics: map[string]any{"browser": d}})
+			if (len(errors) > 0) != wantError {
+				t.Fatalf("unexpected gate result: %v", errors)
 			}
 		})
 	}

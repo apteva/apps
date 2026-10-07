@@ -1,5 +1,32 @@
 [
   {
+    "name": "browser-seven-second-catchup",
+    "expectation": "recovery",
+    "browser_delivery_pause": true,
+    "down": {"kbps": 10000, "outage_at_ms": 4000, "outage_ms": 7230},
+    "up": {"kbps": 10000},
+    "max_p95_ms": 500,
+    "max_missing_pct": 50
+  },
+  {
+    "name": "main-thread-two-second-pause",
+    "expectation": "usable",
+    "main_thread_pause_ms": 2000,
+    "down": {"kbps": 10000},
+    "up": {"kbps": 10000},
+    "max_p95_ms": 350,
+    "max_missing_pct": 5
+  },
+  {
+    "name": "browser-48k-fallback",
+    "expectation": "usable",
+    "audio_context_rate": 48000,
+    "down": {"kbps": 10000},
+    "up": {"kbps": 10000},
+    "max_p95_ms": 350,
+    "max_missing_pct": 5
+  },
+  {
     "name": "local-baseline",
     "expectation": "usable",
     "down": {

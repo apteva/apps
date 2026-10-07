@@ -27,10 +27,13 @@ func encodePlaybackFrame(data []byte, sequence uint32) []byte {
 }
 
 type mediaGapEvent struct {
-	At    string  `json:"at"`
-	GapMS float64 `json:"gap_ms"`
+	ConnectionID         string  `json:"connection_id,omitempty"`
+	PreviousConnectionID string  `json:"previous_connection_id,omitempty"`
+	At                   string  `json:"at"`
+	GapMS                float64 `json:"gap_ms"`
 }
 type mediaStageSnapshot struct {
+	ConnectionID    string          `json:"connection_id,omitempty"`
 	Frames          int64           `json:"frames"`
 	Bytes           int64           `json:"bytes"`
 	LastAt          string          `json:"last_at,omitempty"`
@@ -47,7 +50,7 @@ type liveAudioTimeline struct {
 	stages map[string]mediaStageSnapshot
 }
 
-func (d *liveAudioTimeline) observe(stage string, bytes int, started time.Time, sourceTimestamp, sourceSequence string) {
+func (d *liveAudioTimeline) observe(stage string, bytes int, started time.Time, sourceTimestamp, sourceSequence string, connectionIDs ...string) {
 	now := time.Now()
 	clock := mediaClockMS()
 	d.mu.Lock()
@@ -57,16 +60,21 @@ func (d *liveAudioTimeline) observe(stage string, bytes int, started time.Time, 
 		d.epoch = now.UTC().Format(time.RFC3339Nano)
 	}
 	s := d.stages[stage]
+	connectionID := ""
+	if len(connectionIDs) > 0 {
+		connectionID = connectionIDs[0]
+	}
 	if s.Frames > 0 {
 		gap := clock - s.LastClockMS
 		s.MaxGapMS = max(s.MaxGapMS, gap)
 		if gap >= 100 {
-			s.GapEvents = append(s.GapEvents, mediaGapEvent{now.UTC().Format(time.RFC3339Nano), gap})
+			s.GapEvents = append(s.GapEvents, mediaGapEvent{At: now.UTC().Format(time.RFC3339Nano), GapMS: gap, ConnectionID: connectionID, PreviousConnectionID: s.ConnectionID})
 			if len(s.GapEvents) > 32 {
 				s.GapEvents = append([]mediaGapEvent(nil), s.GapEvents[len(s.GapEvents)-32:]...)
 			}
 		}
 	}
+	s.ConnectionID = connectionID
 	s.Frames++
 	s.Bytes += int64(bytes)
 	s.LastClockMS = clock
@@ -111,6 +119,9 @@ type serverAudioDiagnostics struct {
 	CaptureTransitExcessMS float64                       `json:"capture_transit_excess_ms"`
 	CaptureDropEvents      []audioDropEvent              `json:"capture_drop_events,omitempty"`
 	CaptureSequenceGaps    int                           `json:"capture_sequence_gaps"`
+	CaptureMutedFrames     uint64                        `json:"capture_muted_frames"`
+	CaptureMutedMS         uint64                        `json:"capture_muted_ms"`
+	CaptureMutedEvents     []captureMutedEvent           `json:"capture_muted_events,omitempty"`
 }
 
 func (h *softphoneHub) serverAudioSnapshot() serverAudioDiagnostics {
@@ -121,7 +132,7 @@ func (h *softphoneHub) serverAudioSnapshot() serverAudioDiagnostics {
 	return serverAudioDiagnostics{Socket: socket, Health: health, Reception: h.reception.snapshot(mediaClockMS(), h.carrierForward != nil && !h.held && (h.status == "answered" || h.status == "in-progress")), CarrierPacer: h.pacerStats.snapshot(), Process: sampleMediaProcess(), CaptureStaleBytes: h.captureStaleBytes, Epoch: epoch, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Stages: stages,
 		CarrierForward: mergeLiveAudioSnapshots(h.completedCarrierForward, h.carrierForward.audioSnapshot()),
 		ToBrowser:      mergeLiveAudioSnapshots(h.completedBrowser, h.browser.audioSnapshot()), ToCarrierBridge: mergeLiveAudioSnapshots(h.completedPeer, h.peer.audioSnapshot()),
-		CaptureTimestampMS: h.captureTimestampMS, CaptureWorkerAgeMS: h.captureWorkerAgeMS, CaptureSequenceGaps: h.captureSequenceGaps, CaptureTransitExcessMS: h.captureTransitExcessMS, CaptureDropEvents: append([]audioDropEvent(nil), h.captureDropEvents...)}
+		CaptureTimestampMS: h.captureTimestampMS, CaptureWorkerAgeMS: h.captureWorkerAgeMS, CaptureSequenceGaps: h.captureSequenceGaps, CaptureTransitExcessMS: h.captureTransitExcessMS, CaptureDropEvents: append([]audioDropEvent(nil), h.captureDropEvents...), CaptureMutedFrames: h.captureMutedFrames, CaptureMutedMS: h.captureMutedFrames * 20, CaptureMutedEvents: append([]captureMutedEvent(nil), h.captureMutedEvents...)}
 }
 func mergeLiveAudioSnapshots(a, b liveAudioQueueSnapshot) liveAudioQueueSnapshot {
 	a.QueuedMS = b.QueuedMS
@@ -151,7 +162,11 @@ func (c *callsDB) updateServerAudioDiagnostics(id string, s serverAudioDiagnosti
 	_, err = c.db.Exec(`UPDATE calls SET browser_audio_diagnostics=json_set(CASE WHEN json_valid(browser_audio_diagnostics) THEN browser_audio_diagnostics ELSE '{}' END, '$.server', json(?)) WHERE id=? AND peer_kind='human'`, string(encoded), id)
 	return err
 }
-func (h *softphoneHub) observeCaptureTiming(data []byte) (stale bool) {
+func (h *softphoneHub) observeCaptureTiming(data []byte, connectionIDs ...string) (stale bool) {
+	connectionID := ""
+	if len(connectionIDs) > 0 {
+		connectionID = connectionIDs[0]
+	}
 	if len(data) < 16 {
 		return
 	}
@@ -179,7 +194,7 @@ func (h *softphoneHub) observeCaptureTiming(data []byte) (stale bool) {
 			if delta-h.captureTransitBase > float64(liveAudioMaxAge/time.Millisecond) {
 				h.captureStaleBytes += int64(len(data) - 32)
 				h.captureDropEvents = append(h.captureDropEvents, audioDropEvent{
-					Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier", Reason: "capture_transit_age",
+					Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier", Reason: "capture_transit_age", ConnectionID: connectionID,
 					DurationMS: (len(data) - 32) * 1000 / 48000, QueueBeforeMS: int(min(60000, delta-h.captureTransitBase)), Sequence: uint64(binary.LittleEndian.Uint32(data[4:])),
 				})
 				if len(h.captureDropEvents) > 100 {
