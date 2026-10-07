@@ -36,12 +36,18 @@
 }
 .ap-processes .pf-actions {
   display: flex;
+  align-items: center;
+  flex-shrink: 0;
   gap: 7px;
   flex-wrap: wrap;
 }
 .ap-processes .pf-actions button {
-  padding: 7px 11px;
   align-items: center;
+  justify-content: center;
+  flex: none;
+  width: auto;
+  white-space: nowrap;
+  padding: 7px 11px;
   font-size: 12px;
 }
 .ap-processes .pf-workspace {
@@ -428,11 +434,38 @@
   margin-top: 18px;
   padding-top: 14px;
 }
-.ap-processes .pf-toolbar .pf-save-controls {
-  border-top: 0;
-  margin-top: 0;
-  padding-top: 0;
-  max-width: 440px;
+.ap-processes .pf-editor-save-bar {
+  border-bottom: 1px solid var(--pf-divider);
+  background: var(--pc-panel);
+}
+.ap-processes .pf-editor-save-bar .pf-save-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 20px;
+  border: 0;
+  margin: 0;
+  padding: 16px 20px;
+}
+.ap-processes .pf-save-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 12px;
+  font-size: 13px;
+}
+.ap-processes .pf-editor-save-bar .pf-save-controls > .pf-actions {
+  grid-column: 2;
+  grid-row: 1 / 3;
+  align-self: center;
+}
+.ap-processes .pf-editor-save-bar .pf-save-controls > p {
+  grid-column: 1;
+  margin: 0;
+  font-size: 12px;
+}
+@media (max-width: 760px) {
+  .ap-processes .pf-editor-save-bar .pf-save-controls { grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 14px; }
+  .ap-processes .pf-editor-save-bar .pf-save-controls > .pf-actions { grid-column: 1; grid-row: auto; }
 }
 .ap-processes .pf-save-controls [role="alert"] {
   color: var(--pf-warning);

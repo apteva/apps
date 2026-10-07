@@ -399,6 +399,7 @@ export function ProcessFlow({
         {styles}
         {themeStyles}
       </style>
+      {!active && saveControls && <div className="pf-editor-save-bar" role="group" aria-label="Procedure changes">{saveControls}</div>}
       <div className="pf-toolbar">
         <div>
           <h2>
@@ -416,7 +417,6 @@ export function ProcessFlow({
           </p>
         </div>
         <div className="pf-actions">
-          {!active && saveControls}
           {editable && (
             <>
               <button
