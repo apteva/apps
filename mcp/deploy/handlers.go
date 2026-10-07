@@ -458,7 +458,7 @@ func (a *App) handleBuildItem(w http.ResponseWriter, r *http.Request) {
 		}
 		httpJSON(w, map[string]any{"build": buildWithArtifactDownloadURL(build, pid)})
 	case "log":
-		body, _ := tailFile(build.LogPath, queryInt(r, "tail", 200))
+		body, _ := a.buildLog(r.Context(), build, queryInt(r, "tail", 200))
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte(body))
 	case "cancel":
