@@ -1,0 +1,83 @@
+/* Layout follows the editor column, including when nested beside policy fields. */
+.ap-processes .parameter-editor {
+  container-type: inline-size;
+  margin-top: 24px;
+}
+.ap-processes .parameter-editor-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.ap-processes .parameter-editor-heading h2 { margin: 0; }
+.ap-processes .parameter-editor-heading button {
+  padding: 7px 11px;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+}
+.ap-processes .parameter-editor > p { margin: 8px 0 14px; }
+.ap-processes .parameter-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-areas: "key label" "type default" "required remove";
+  align-items: end;
+  gap: 10px 12px;
+  padding: 14px 0;
+  border-top: 1px solid var(--pc-line);
+}
+.ap-processes .parameter-row .field { min-width: 0; margin: 0; }
+.ap-processes .parameter-row label { margin-bottom: 5px; }
+.ap-processes .parameter-row :is(input:not([type="checkbox"]), select) {
+  height: 36px;
+  padding: 7px 10px;
+}
+.ap-processes .parameter-key { grid-area: key; }
+.ap-processes .parameter-label { grid-area: label; }
+.ap-processes .parameter-type { grid-area: type; }
+.ap-processes .parameter-default { grid-area: default; min-width: 0; }
+.ap-processes .parameter-row .parameter-required {
+  grid-area: required;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 36px;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ap-processes .parameter-required input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--pc-accent);
+  cursor: pointer;
+}
+.ap-processes .parameter-row .parameter-remove {
+  grid-area: remove;
+  justify-self: end;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  color: var(--pc-muted);
+}
+.ap-processes .parameter-remove:hover { color: var(--pc-text); }
+@container (min-width: 740px) {
+  .ap-processes .parameter-row {
+    grid-template-columns: minmax(120px, 1fr) minmax(140px, 1.2fr) 104px minmax(120px, 1fr) 84px 36px;
+    grid-template-areas: "key label type default required remove";
+  }
+}
+@container (max-width: 400px) {
+  .ap-processes .parameter-row {
+    grid-template-areas: "key key" "label label" "type default" "required remove";
+    gap: 10px;
+  }
+}

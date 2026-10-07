@@ -1,5 +1,7 @@
 import Triggers from "./Triggers";
 import { useState } from "react";
+import { Trash2 } from "lucide-react";
+import parameterStyles from "./parameter-editor.css" with { type: "text" };
 import { RolesEditor, type Step, type Executor } from "./Workflow";
 export type Parameter = {
   key: string;
@@ -119,8 +121,9 @@ export function ParameterEditor({
   const update = (i: number, v: Partial<Parameter>) =>
     onChange(fields.map((f, j) => (i === j ? { ...f, ...v } : f)));
   return (
-    <section className="card" style={{ marginTop: 20 }}>
-      <div className="row between">
+    <section className="parameter-editor" aria-label="Process parameters">
+      <style>{parameterStyles}</style>
+      <div className="parameter-editor-heading">
         <h2>Parameters</h2>
         <button
           type="button"
@@ -135,86 +138,82 @@ export function ParameterEditor({
         </button>
       </div>
       <p className="small muted">
-        Define what changes per page or client. Values are set on each
-        assignment; use connection references rather than credentials.
+        Define values that vary between assignments. Use connection references for integrations.
       </p>
+      {!fields.length && <p className="small muted parameter-empty">No parameters yet. Add one if assignments need different values.</p>}
       {fields.map((f, i) => (
-        <div className="card" key={i} style={{ marginTop: 12 }}>
-          <div className="row">
-            <div className="field" style={{ flex: 1 }}>
-              <label htmlFor={`param-key-${i}`}>Key</label>
-              <input
-                id={`param-key-${i}`}
-                required
-                pattern="[a-zA-Z][a-zA-Z0-9_]*"
-                value={f.key}
-                placeholder="page_id"
-                onChange={(e) => update(i, { key: e.target.value })}
-              />
-            </div>
-            <div className="field" style={{ flex: 1 }}>
-              <label htmlFor={`param-label-${i}`}>Label</label>
-              <input
-                id={`param-label-${i}`}
-                value={f.label || ""}
-                placeholder="Patreon page"
-                onChange={(e) => update(i, { label: e.target.value })}
-              />
-            </div>
+        <div className="parameter-row" key={i} role="group" aria-label={`Parameter ${i + 1}`}>
+          <div className="field parameter-key">
+            <label htmlFor={`param-key-${i}`}>Key</label>
+            <input
+              id={`param-key-${i}`}
+              required
+              pattern="[a-zA-Z][a-zA-Z0-9_]*"
+              value={f.key}
+              placeholder="location"
+              onChange={(e) => update(i, { key: e.target.value })}
+            />
           </div>
-          <div className="row">
-            <div className="field" style={{ flex: 1 }}>
-              <label htmlFor={`param-type-${i}`}>Type</label>
-              <select
-                id={`param-type-${i}`}
-                value={f.type}
-                onChange={(e) =>
-                  update(i, {
-                    type: e.target.value as Parameter["type"],
-                    default: undefined,
-                    options: undefined,
-                  })
-                }
-              >
-                <option value="string">Text</option>
-                <option value="number">Number</option>
-                <option value="boolean">Yes / no</option>
-              </select>
-            </div>
-            <div className="field" style={{ flex: 1 }}>
-              <label htmlFor={`param-required-${i}`}>Required</label>
-              <select
-                id={`param-required-${i}`}
-                value={String(!!f.required)}
-                onChange={(e) =>
-                  update(i, { required: e.target.value === "true" })
-                }
-              >
-                <option value="true">Required</option>
-                <option value="false">Optional</option>
-              </select>
-            </div>
-            <button
-              type="button"
-              aria-label={`Remove parameter ${i + 1}`}
-              onClick={() => onChange(fields.filter((_, j) => i !== j))}
+          <div className="field parameter-label">
+            <label htmlFor={`param-label-${i}`}>Label</label>
+            <input
+              id={`param-label-${i}`}
+              value={f.label || ""}
+              placeholder="Location"
+              onChange={(e) => update(i, { label: e.target.value })}
+            />
+          </div>
+          <div className="field parameter-type">
+            <label htmlFor={`param-type-${i}`}>Type</label>
+            <select
+              id={`param-type-${i}`}
+              value={f.type}
+              onChange={(e) =>
+                update(i, {
+                  type: e.target.value as Parameter["type"],
+                  default: undefined,
+                  options: undefined,
+                })
+              }
             >
-              Remove
-            </button>
+              <option value="string">Text</option>
+              <option value="number">Number</option>
+              <option value="boolean">Yes / no</option>
+            </select>
           </div>
-          <ParameterValues
-            fields={[{ ...f, required: false, label: "Default value" }]}
-            values={{ [f.key]: f.default }}
-            prefix={`default-${i}`}
-            onChange={(v) =>
-              update(i, {
-                default:
-                  v[f.key] === null
-                    ? undefined
-                    : (v[f.key] as Parameter["default"]),
-              })
-            }
-          />
+          <div className="parameter-default">
+            <ParameterValues
+              fields={[{ ...f, required: false, label: "Default value" }]}
+              values={{ [f.key]: f.default }}
+              prefix={`default-${i}`}
+              onChange={(v) =>
+                update(i, {
+                  default:
+                    v[f.key] === null
+                      ? undefined
+                      : (v[f.key] as Parameter["default"]),
+                })
+              }
+            />
+          </div>
+          <label className="parameter-required" htmlFor={`param-required-${i}`}>
+            <input
+              id={`param-required-${i}`}
+              type="checkbox"
+              checked={!!f.required}
+              onChange={(e) => update(i, { required: e.target.checked })}
+            />
+            Required
+          </label>
+          <button
+            className="parameter-remove"
+            type="button"
+            aria-label={`Remove parameter ${i + 1}`}
+            title="Remove parameter"
+            onClick={() => onChange(fields.filter((_, j) => i !== j))}
+          >
+            <Trash2 size={16} aria-hidden="true" />
+          </button>
         </div>
       ))}
     </section>
