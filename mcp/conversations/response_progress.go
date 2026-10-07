@@ -34,6 +34,37 @@ type responseProgressState struct {
 	lastEvent       time.Time
 }
 
+// Keep the completed turn boundary through the model's post-reply work.
+// New input or a completed pace permits a subsequent event/timer turn. Scope
+// by agent/thread so one participant cannot hide another participant's work.
+type completedResponseTurn struct {
+	settledAt time.Time
+	wakeAt    time.Time
+}
+
+func (s *streamer) observeResponseWake(event string, agent int64, thread, raw string, ts time.Time) {
+	if event != "event.received" && event != "tool.result" {
+		return
+	}
+	if event == "tool.result" {
+		var data struct {
+			Name    string `json:"name"`
+			Tool    string `json:"tool"`
+			Success *bool  `json:"success"`
+		}
+		if json.Unmarshal([]byte(raw), &data) != nil || firstNonEmptyString(data.Name, data.Tool) != "pace" || (data.Success != nil && !*data.Success) {
+			return
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := streamCallKey(agent, thread, "")
+	if turn, ok := s.completedTurns[key]; ok && ts.After(turn.settledAt) && ts.After(turn.wakeAt) {
+		turn.wakeAt = ts
+		s.completedTurns[key] = turn
+	}
+}
+
 func responseProgressKey(chat string, agent int64) string {
 	return chat + ":" + strconv.FormatInt(agent, 10)
 }
@@ -56,6 +87,11 @@ func (s *streamer) finishResponseWithMessage(chat string, agent, messageID int64
 		return
 	}
 	delete(s.responses, responseProgressKey(chat, agent))
+	settledAt := time.Now()
+	if p.lastEvent.After(settledAt) {
+		settledAt = p.lastEvent
+	}
+	s.completedTurns[streamCallKey(agent, p.threadID, "")] = completedResponseTurn{settledAt: settledAt}
 	s.progressSeq++
 	p.Revision = s.progressSeq
 	p.Phase = "idle"

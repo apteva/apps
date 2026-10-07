@@ -7,8 +7,8 @@
     "sha256": "5ec2f269e373ce7593c2e1eeae93cd9362affdc495c5154905c13be24452a41b"
   },
   "ui": {
-    "path": "/ui/frontend/react-5287174a56283500.mjs",
-    "sha256": "5287174a56283500ddb7d38cfb1c549a06927f5540c849cec7b236a261c7f92b",
+    "path": "/ui/frontend/react-9a55343d2c97ca2a.mjs",
+    "sha256": "9a55343d2c97ca2a83dfd9d459e3157f8fa21a78fcd5f70bc128d90a5ebfa7f5",
     "reactMajor": 19,
     "components": [
       "agent-conversations",

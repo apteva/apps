@@ -71,6 +71,7 @@ type streamState struct {
 
 type streamer struct {
 	responses          map[string]*responseProgressState
+	completedTurns     map[string]completedResponseTurn
 	progressSeq        uint64
 	telemetryConnected bool
 	hub                *hub
@@ -114,11 +115,12 @@ func (s *streamer) publish(frame StreamFrame) {
 
 func newStreamer(h *hub) *streamer {
 	return &streamer{
-		hub:       h,
-		responses: map[string]*responseProgressState{},
-		buffers:   map[string]*streamState{},
-		lastEmit:  map[string]string{},
-		touched:   map[string]time.Time{}, ackTimes: map[string]time.Time{},
+		hub:            h,
+		responses:      map[string]*responseProgressState{},
+		completedTurns: map[string]completedResponseTurn{},
+		buffers:        map[string]*streamState{},
+		lastEmit:       map[string]string{},
+		touched:        map[string]time.Time{}, ackTimes: map[string]time.Time{},
 		pendingAcks: map[string]string{},
 	}
 }
@@ -126,6 +128,11 @@ func newStreamer(h *hub) *streamer {
 // All ephemeral maps have a time and size bound, including final-only calls.
 func (s *streamer) pruneLocked() {
 	now := time.Now()
+	for key, turn := range s.completedTurns {
+		if now.Sub(turn.settledAt) > 24*time.Hour || len(s.completedTurns) > 1024 {
+			delete(s.completedTurns, key)
+		}
+	}
 	for key, p := range s.responses {
 		if now.Sub(p.touched) > 5*time.Minute || len(s.responses) > 1024 {
 			delete(s.responses, key)
@@ -212,6 +219,7 @@ func (s *streamer) Ingest(eventType string, agentID int64, threadID, dataJSON st
 	if conversationID == "" {
 		return
 	}
+	s.observeResponseWake(eventType, agentID, threadID, dataJSON, ts)
 	// Proactive turns (subscription, webhook, timer, or an agent-created
 	// conversation) have no inbound user message to seed response progress.
 	// llm.start is their first reliable signal, so create the same response
@@ -252,11 +260,18 @@ func (s *streamer) startProactiveResponse(chat, thread string, agent int64, ts t
 		s.mu.Unlock()
 		return false
 	}
+	if turn, ok := s.completedTurns[streamCallKey(agent, thread, "")]; ok &&
+		(!turn.wakeAt.After(turn.settledAt) || ts.Before(turn.wakeAt)) {
+		// A final reply/approval already completed the user-facing response.
+		// Another model iteration deciding to pace is not a new proactive turn.
+		s.mu.Unlock()
+		return false
+	}
 	s.ackSeq++
 	id := "ack-" + chat + "-" + strconv.FormatUint(s.ackSeq, 10)
 	p := &responseProgressState{
 		ResponseProgress: ResponseProgress{Phase: "thinking", RunID: id, StartedAt: ts},
-		agentID: agent, threadID: thread, chatID: chat,
+		agentID:          agent, threadID: thread, chatID: chat,
 		modelStarted: true, touched: ts, lastEvent: ts,
 	}
 	s.responses[key] = p

@@ -118,6 +118,8 @@ func TestResponseProgressLifecycle(t *testing.T) {
 	if len(frames) != 0 {
 		t.Fatal("background work was displayed")
 	}
+	// Production resolves mapped threads, including proactive llm.start.
+	s.resolve = func(int64, string) string { return "conv-progress" }
 	s.emitAck("conv-progress", "chat-conv-progress", 41, 70)
 	phase := func(want string) {
 		t.Helper()
@@ -174,6 +176,69 @@ func TestResponseProgressLifecycle(t *testing.T) {
 	phase("thinking")
 	ingest("tool.call", `{"name":"pace"}`)
 	phase("idle")
+}
+
+func TestFinalReplyDoesNotRestartActivityForHousekeeping(t *testing.T) {
+	s := newStreamer(newHub())
+	chat, thread := "conv-final", "chat-conv-final"
+	s.resolve = func(int64, string) string { return chat }
+	var listSnapshots []StreamFrame
+	s.onActivityChange = func(id string) { listSnapshots = append(listSnapshots, s.snapshot(id)) }
+	s.emitAck(chat, thread, 41, 1311)
+	start := time.Now()
+	s.Ingest("llm.start", 41, thread, `{"iteration":1}`, start)
+	s.finishResponse(chat, 41)
+	settledCount := len(listSnapshots)
+	// Reported trace: final saved, 24 ms later an extra model pass, then
+	// pacing after 7.5 seconds. List and transcript must both remain idle.
+	s.Ingest("llm.start", 41, thread, `{"iteration":2}`, start.Add(24*time.Millisecond))
+	if ids := s.activeConversationIDs(); len(ids) != 0 {
+		t.Fatalf("final reply restarted list activity: %v", ids)
+	}
+	if snapshot := s.snapshot(chat); len(snapshot.Frames) != 0 {
+		t.Fatalf("final reply restarted transcript progress: %+v", snapshot)
+	}
+	s.Ingest("tool.call", 41, thread, `{"name":"pace","id":"waiting"}`, start.Add(7500*time.Millisecond))
+	if len(listSnapshots) != settledCount {
+		t.Fatalf("housekeeping republished list activity: %+v", listSnapshots[settledCount:])
+	}
+	// A delayed input from the completed response cannot claim a new turn.
+	s.Ingest("event.received", 41, thread, `{"message":"[chat] old"}`, start.Add(-time.Second))
+	s.Ingest("llm.start", 41, thread, `{}`, start.Add(7600*time.Millisecond))
+	if s.responseActive(chat, 41) {
+		t.Fatal("stale received event restarted response")
+	}
+	// A real subscription event on the same thread still starts feedback.
+	s.Ingest("event.received", 41, thread, `{"message":"[subscription:todos] updated"}`, start.Add(8*time.Second))
+	s.Ingest("llm.start", 41, thread, `{}`, start.Add(9*time.Second))
+	if !s.responseActive(chat, 41) || len(s.activeConversationIDs()) != 1 {
+		t.Fatal("fresh proactive event did not restart shared progress")
+	}
+}
+
+func TestCompletedPaceAllowsNextTimerWake(t *testing.T) {
+	s := newStreamer(newHub())
+	chat, thread := "conv-timer", "chat-conv-timer"
+	s.resolve = func(int64, string) string { return chat }
+	s.emitAck(chat, thread, 41, 10)
+	start := time.Now()
+	s.Ingest("llm.start", 41, thread, `{}`, start)
+	s.finishResponse(chat, 41)
+	s.Ingest("llm.start", 41, thread, `{}`, start.Add(time.Second))
+	s.Ingest("tool.call", 41, thread, `{"name":"pace","id":"sleep"}`, start.Add(2*time.Second))
+	s.Ingest("tool.result", 41, thread, `{"name":"pace","id":"sleep","success":true}`, start.Add(3*time.Second))
+	// Core's timer-only wakes have no event.received; the previous cycle
+	// really ended when pace completed, so the next model start is new work.
+	s.Ingest("llm.start", 41, thread, `{}`, start.Add(time.Minute))
+	if !s.responseActive(chat, 41) {
+		t.Fatal("timer wake lost visible progress")
+	}
+	s.finishResponse(chat, 41)
+	// Completion is scoped to this agent/thread, never to the whole chat.
+	s.Ingest("llm.start", 42, "subscription-worker", `{}`, start.Add(2*time.Minute))
+	if !s.responseActive(chat, 42) || s.responseActive(chat, 41) {
+		t.Fatal("completed agent suppressed another participant's response")
+	}
 }
 
 func TestProactiveStartCreatesVisibleProgress(t *testing.T) {

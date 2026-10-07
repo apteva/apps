@@ -632,6 +632,26 @@ test("Processes trace: acknowledgement precedes grouped tools, model waits show 
  expect(element.textContent!.indexOf("Lookup 3")).toBeLessThan(element.textContent!.indexOf("There is one process"));
 });
 
+test("proactive progress uses its start time after a completed conversation", async () => {
+ await render();
+ const events=FakeEvents.instances[0];
+ const frame=async(value:any)=>act(async()=>events.listeners.get("stream")!({data:JSON.stringify({chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"",text:"",done:false,...value})}));
+ const previous={...message(100,"a","Previous reply"),role:"agent",agent_id:41,phase:"final",created_at:"2026-10-07T10:19:34Z"};
+ await act(async()=>events.emit(previous));
+ await act(async()=>events.emit({...message(101),role:"agent",agent_id:41,component_kind:"approval",created_at:"2026-10-07T10:19:35Z",components:[{app:"conversations",name:"approval-card",props:{title:"Previous decision",status:"approved",actions:[]}}]}));
+ const progress={phase:"thinking",run_id:"subscription",revision:10,after_message_id:0,started_at:"2026-10-07T10:20:00Z"};
+ await frame({response_progress:progress});
+ expect(element.querySelector('[aria-label="Thinking"]')).not.toBeNull();
+ await frame({snapshot:true,frames:[{chat_id:"a",agent_id:41,thread_id:"chat-a",response_progress:progress}]});
+ expect(element.querySelector('[aria-label="Thinking"]')).not.toBeNull();
+ await act(async()=>events.emit({...message(102,"a","Subscription reply"),role:"agent",agent_id:41,phase:"final",created_at:"2026-10-07T10:20:02Z"}));
+ expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+ await frame({response_progress:{...progress,phase:"idle",revision:11}});
+ await frame({snapshot:true,frames:[]});
+ expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+ expect(element.textContent).toContain("Subscription reply");
+});
+
 test("reconnect restores authoritative progress/text and ignores snapshot overlap and durable-first text", async () => {
  await render();const events=FakeEvents.instances[0];
  const frame=async(value:any)=>act(async()=>events.listeners.get("stream")!({data:JSON.stringify({chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"",text:"",done:false,...value})}));

@@ -1757,14 +1757,18 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
       hasMessages={timeline.length > 0}
       streamNode={bubbles.length || progresses.some(p=>p.phase!=="idle" || awaitingProgressMessage(p)) ? <>{bubbles.map(b => { const phase = pendingResponsePhase(b, activities, messages); if (b.text || phase === null || ownsToolGroup(b) || progresses.some(p=>p.agent_id===b.agentId)) return null; return <ThinkingMessagePlaceholder key={`${b.agentId}:${b.callId}:${b.runId}`} preparing={b.optimistic}/>; })}
         {progresses.map(p => {
+          // Proactive turns have no inbound message ID. Their start time is
+          // the boundary; history from a completed turn must not hide them.
+          const belongsToResponse = (m: Message) => m.id > p.after_message_id
+            && (p.after_message_id > 0 || Date.parse(m.created_at) >= Date.parse(p.started_at));
           // Hidden approval calls still own a response until their card is
           // rendered. Old cards and verdict edits cannot settle a later turn.
           const approvalDelivered = messages.some(m => m.role === "agent" && m.component_kind === "approval"
-            && m.agent_id === p.agent_id && m.id > p.after_message_id);
+            && m.agent_id === p.agent_id && belongsToResponse(m));
           // An acknowledgement or progress message is not completion. Keep
           // Thinking until a live text stream or pulsing tool owns feedback.
           const finalDelivered = messages.some(m => m.role === "agent" && !m.component_kind
-            && m.phase === "final" && m.agent_id === p.agent_id && m.id > p.after_message_id);
+            && m.phase === "final" && m.agent_id === p.agent_id && belongsToResponse(m));
           if (finalDelivered) return null;
           if (awaitingProgressMessage(p)) return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`}/>;
           // Continuing is model work after a result, not an executing tool.

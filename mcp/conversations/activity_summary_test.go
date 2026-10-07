@@ -72,6 +72,49 @@ func TestActivitySummaryFollowsResponseAndVisibility(t *testing.T) {
 	}
 }
 
+func TestFinalSendKeepsTranscriptAndListIdleThroughPacingDecision(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+	caller := boundConversationCaller(t, app, conv, 41)
+	thread := conversationThreadID(conv.ID)
+	req := httptest.NewRequest(http.MethodGet, "/stream?scope=user", nil)
+	authorizeTestRequest(req)
+	app.streamer.emitAck(conv.ID, thread, 41, 10)
+	start := time.Now()
+	app.streamer.Ingest("llm.start", 41, thread, `{}`, start)
+	if _, err := app.toolSend(caller, ctx, map[string]any{
+		"conversation_id": conv.ID, "text": "You're welcome!", "phase": "final",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertIdle := func() {
+		t.Helper()
+		if got := app.streamer.snapshot(conv.ID); len(got.Frames) != 0 {
+			t.Fatalf("transcript is active after final: %+v", got)
+		}
+		if got := app.userActivitySnapshot(req, 0); len(got.Frames) != 0 {
+			t.Fatalf("list is active after final: %+v", got)
+		}
+		if ids := app.visibleActivityIDs(req, 0); len(ids) != 0 {
+			t.Fatalf("activity-summary is active after final: %v", ids)
+		}
+	}
+	assertIdle()
+	app.streamer.Ingest("llm.start", 41, thread, `{"iteration":2}`, start.Add(time.Second))
+	assertIdle()
+	app.streamer.Ingest("tool.call", 41, thread, `{"name":"pace"}`, start.Add(8*time.Second))
+	assertIdle()
+	// A later external event still lights both surfaces, despite old history.
+	app.streamer.Ingest("event.received", 41, thread, `{"message":"[subscription:todos] changed"}`, start.Add(9*time.Second))
+	app.streamer.Ingest("llm.start", 41, thread, `{}`, start.Add(10*time.Second))
+	if got := app.streamer.snapshot(conv.ID); len(got.Frames) != 1 || got.Frames[0].Progress.Phase != "thinking" {
+		t.Fatalf("new event missing transcript progress: %+v", got)
+	}
+	if got := app.userActivitySnapshot(req, 0); len(got.Frames) != 1 || got.Frames[0].Progress.Phase != "thinking" {
+		t.Fatalf("new event missing list progress: %+v", got)
+	}
+}
+
 func TestUserSSEReusesStreamProgressForScopedThreadActivity(t *testing.T) {
 	app, _, _ := newTestEnv(t)
 	first := mkConversation(t, app, 41)
