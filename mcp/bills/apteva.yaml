@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: bills
 display_name: Bills
-version: 0.2.2
+version: 0.2.3
 description: |
   Vendors, bills, and bill payments for Apteva agents and human teams.
   The accounts-payable mirror of the `billing` app — money OUT instead
@@ -48,13 +48,13 @@ requires:
       compatible_slugs: [anthropic-api, opencode-go, openai-codex]
       capabilities: [chat.complete, vision.describe]
       tools:
-        chat.complete: chat_completion       # opencode-go/openai-codex tool name
+        chat.complete: chat_completion       # opencode-go tool name
         vision.describe: chat_completion     # bills picks the right tool per
                                              # bound.AppSlug — anthropic-api uses
-                                             # create_message instead
+                                             # create_message; openai-codex uses responses_create
       required: false
       label: "Vision LLM provider"
-      hint: "Bind one. Anthropic API (Claude Haiku 4.5 default) is fastest — ~3s per page, cheap. OpenCode Go (Qwen3.6 Plus default) works on a flat-rate subscription. OpenAI Codex (gpt-5.5 default) uses device login, no API key."
+      hint: "Bind one. Anthropic API (Claude Haiku 4.5 default) is fastest — ~3s per page, cheap. OpenCode Go (Qwen3.6 Plus default) works on a flat-rate subscription. OpenAI Codex (gpt-6.1-sol, medium thinking default) uses device login, no API key."
 
 provides:
   http_routes:
@@ -205,7 +205,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: bills/v0.2.2
+    ref: bills/v0.2.3
     entry: mcp/bills
   port: 8080
   health_check: /health
@@ -281,7 +281,7 @@ config_schema:
       provider-aware default:
         anthropic-api → claude-haiku-4-5-20251001  (~3s/page, recommended)
         opencode-go   → qwen3.6-plus               (~100s/page, flat-rate)
-        openai-codex  → gpt-5.5                    (subscription/device login)
+        openai-codex  → gpt-6.1-sol               (medium thinking, subscription/device login)
       Override to pick another vision-capable model from the bound
       provider's catalog (e.g. claude-sonnet-4-6, kimi-k2.6, glm-5.1).
   - name: ocr_llm_max_tokens
@@ -291,9 +291,10 @@ config_schema:
     description: |
       Max tokens the LLM is allowed to generate. Empty picks a
       provider-aware default: 4096 for anthropic-api (Haiku produces
-      ~250-500 on typical invoices), 8000 for opencode-go/openai-codex
-      (reasoning models need headroom). Bump for line-item-heavy bills
-      if responses are getting truncated.
+      ~250-500 on typical invoices), 8000 for opencode-go (reasoning
+      models need headroom). Bump for line-item-heavy bills if responses
+      are getting truncated. Codex uses medium thinking; its subscription
+      runtime manages the output budget and does not accept token caps.
   - name: max_pages
     type: text
     default: "10"
