@@ -143,6 +143,7 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 	// dimensions, so it can only run after sc exists. No-op for ops
 	// that don't crop (trim, concat, audio_extract, …).
 	row.Params = preprocessSmartCrop(ctx, app, sc, row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
+	row.Params = prepareTrimParams(app.AppDB(), row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
 	row.Params = prepareAudioFilterParams(app.AppDB(), row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
 	if err := renderUpdateResolvedParams(app.AppDB(), row.ID, row.Params); err != nil {
 		return 0, fmt.Errorf("store resolved params: %w", err)
@@ -251,6 +252,16 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 		return 0, fmt.Errorf("parse remote result: %w (output=%s)", err, truncate(primaryOutput, 500))
 	}
 	recordRenderMetric(app, row, "output_bytes", res.Size)
+	if row.Operation == "trim" {
+		validation := parseTrimValidation(out)
+		if err := checkTrimValidation(validation, expectedProgressDurationMs(app.AppDB(), row)); err != nil {
+			return 0, err
+		}
+		recordRenderMetric(app, row, "trim_validation", validation)
+		if err := persistTrimValidation(app, row, validation); err != nil {
+			return 0, err
+		}
+	}
 	uploaded, err := sc.GetFile(ctx, row.ProjectID, res.FileID)
 	if err != nil {
 		return 0, fmt.Errorf("verify remote render destination: %w", err)
@@ -356,6 +367,10 @@ func (e *remoteExecutor) buildScript(
 		b.WriteString(shellQuote(a))
 	}
 	b.WriteString("\n")
+
+	if row.Operation == "trim" {
+		b.WriteString(trimValidationScript(ffmpegPath, "./"+plan.Filename, expectedProgressDurationMs(nil, row)))
+	}
 
 	// Stat + hash output before upload.
 	fmt.Fprintf(&b, "OUT=%s\n", shellQuote(plan.Filename))

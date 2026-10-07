@@ -199,6 +199,8 @@ func requestRenderCacheKey(ctx context.Context, app *sdk.AppCtx, sc *storageClie
 	}
 	revision := renderAlgorithmVersion
 	switch row.Operation {
+	case "trim":
+		revision += ":" + trimAlgorithmVersion
 	case "crop", "extract_frame", "extract_reel":
 		// Request-cache hits skip analysis entirely. Invalidating only the
 		// decision cache would still return an earlier incorrectly cropped file.

@@ -247,9 +247,8 @@ func TestFFmpeg_Trim(t *testing.T) {
 
 	r := probe(t, out)
 	d := r.durationSec()
-	// Stream-copy trims are keyframe-aligned so duration may be
-	// slightly off — tolerate ±0.5s either side of the 2s target.
-	if d < 1.5 || d > 2.5 {
+	// Accurate trim must stay within one video frame.
+	if d < 1.967 || d > 2.034 {
 		t.Errorf("trim duration=%.2fs want ~2.0s", d)
 	}
 	if _, err := r.videoStream(); err != nil {

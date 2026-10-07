@@ -22,8 +22,8 @@ func TestPlanTrim_Valid(t *testing.T) {
 	if !contains(plan.Args, "-ss") || !contains(plan.Args, "1.000") {
 		t.Errorf("missing -ss 1.000 in argv: %v", plan.Args)
 	}
-	if !contains(plan.Args, "-to") || !contains(plan.Args, "3.000") {
-		t.Errorf("missing -to 3.000 in argv: %v", plan.Args)
+	if !argPair(plan.Args, "-t", "2.000") {
+		t.Errorf("missing -t 2.000 in argv: %v", plan.Args)
 	}
 	if !contains(plan.Args, "{input}") {
 		t.Errorf("missing {input} placeholder: %v", plan.Args)
@@ -31,9 +31,9 @@ func TestPlanTrim_Valid(t *testing.T) {
 	if plan.Filename == "" {
 		t.Error("filename empty")
 	}
-	// Stream copy is the v0.2 default — fast + lossless.
-	if !argPair(plan.Args, "-c", "copy") {
-		t.Errorf("expected -c copy: %v", plan.Args)
+	// Accurate cuts require encoding and a zero video origin.
+	if argPair(plan.Args, "-c", "copy") || !argPair(plan.Args, "-vf", "trim=duration=2.000,setpts=PTS-STARTPTS") {
+		t.Errorf("inaccurate trim: %v", plan.Args)
 	}
 }
 

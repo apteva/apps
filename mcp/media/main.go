@@ -22,8 +22,15 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.14.11
+version: 0.14.12
 description: |
+  v0.14.12 makes trimming frame-accurate by decoding and re-encoding the
+  requested interval, aligns retained pictures and audio at zero, and scans
+  every output frame before upload. Read-only analysis detects single-frame
+  black segments and reports opening/ending coverage. Saved trim diagnostics
+  survive cache reuse. Source bit depth and base color signaling are retained;
+  Dolby Vision dynamic metadata is not retained and is reported explicitly.
+  Accurate trim uses FFmpeg locally or on the configured remote host.
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
   waveform), runs on-demand edits (trim/resize/transcode/concat/
@@ -44,7 +51,7 @@ description: |
   and persists description rate-limit backoff with upstream retry/reset hints.
   v0.14.8 preserves subjects during stationary Smart Crop
   tracking and invalidates old crop decisions and outputs while retaining
-  unrelated render caches. Uses app-sdk v0.95.0. v0.14.7 adds compact/planning/bounded-full search,
+  unrelated render caches. Uses app-sdk v0.96.0. v0.14.7 adds compact/planning/bounded-full search,
   projections, explicit expansions, stable cursors, release-readiness fields,
   planning sorts, and record-free media_inventory counts. v0.14.5 fixes a
   Media indexing queue defect that could leave
@@ -106,7 +113,7 @@ requires:
         image.transform: upload
       required: false
       label: "Cloud render backend"
-      hint: "Optional. Connect Cloudinary to offload trim/resize/transcode/crop/extract_frame to the cloud — useful on Pi-class hosts. Without it (the default), renders run on local ffmpeg. concat + audio_extract + audio_filter always stay local."
+      hint: "Optional. Connect Cloudinary to offload resize/transcode/crop/extract_frame to the cloud — useful on Pi-class hosts. Without it (the default), renders run on local ffmpeg. concat + audio_extract + audio_filter always stay local."
   binaries:
     - name: ffmpeg
       version: "7.0.2"
@@ -143,7 +150,7 @@ provides:
     - { name: media_reindex,         description: "Queue one atomic re-probe + re-derive for a file_id, or requeue all failed rows. Exact file IDs are fetched directly from Storage, so reindexing does not depend on catalog position or inventory size. A queued response is asynchronous; wait for media.derived or poll media_get/media_get_keyframes. Do not submit a second force request merely because keyframes are still being generated." }
     - { name: media_index_status,    description: "Counts of pending / ok / failed / unsupported / skipped_size." }
     - name: media_trim
-      description: "Cut a clip from a video/audio source. Returns render_id."
+      description: "Frame-accurate cut from a video/audio source. Re-encodes the requested interval and validates every output picture before upload. Returns render_id."
       async_result:
         id_field: render_id
         notify:
@@ -307,7 +314,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.11
+    ref: media/v0.14.12
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -489,7 +496,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_analyze",
-			Description: "Analyze an existing image, video, or audio source without modifying it. Returns catalog/stream encoding details, decode integrity, sampled visual measurements, black/frozen video segments, and LUFS/peak/RMS/silence audio measurements where applicable. When render_host_id is configured, analysis runs on that remote host without silent local fallback; the result reports the effective executor. depth=standard analyzes at most 60 seconds; depth=full analyzes the requested/full duration. No render, derivation, or Storage object is created.",
+			Description: "Analyze an existing image, video, or audio source without modifying it. Returns catalog/stream encoding details, decode integrity, sampled visual measurements, every-frame black/frozen video checks and opening/ending coverage, and LUFS/peak/RMS/silence audio measurements where applicable. When render_host_id is configured, analysis runs on that remote host without silent local fallback; the result reports the effective executor. depth=standard analyzes at most 60 seconds; depth=full analyzes the requested/full duration. No render, derivation, or Storage object is created.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":              map[string]any{"type": "string"},
 				"depth":                map[string]any{"type": "string", "enum": []string{"standard", "full"}, "default": "standard"},
@@ -672,7 +679,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		// asynchronously. Callers poll media_get_render for status.
 		{
 			Name:        "media_trim",
-			Description: "Cut a clip from a video/audio file. Args: file_id (string), start_ms, end_ms (int), output_name (string, optional).",
+			Description: "Frame-accurate cut from a video/audio file. Re-encodes [start_ms,end_ms), aligns retained pictures/audio at zero, and validates every output picture before upload. Source bit depth/base color signaling are retained; Dolby Vision dynamic metadata is not retained and appears in trim_diagnostics. Local/remote FFmpeg execution. Args: file_id (string), start_ms, end_ms (int), output_name (string, optional).",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":         map[string]any{"type": "string"},
 				"start_ms":        map[string]any{"type": "integer"},
@@ -804,7 +811,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		// ─── Render manage tools ────────────────────────────────────
 		{
 			Name:        "media_get_render",
-			Description: "Status of one render. Returns the original params and, once execution starts, resolved_params with effective executor values and crop_diagnostics (app/algorithm versions, crop rectangle/path, evidence timestamps, fallback reasons, and sampled action_coverage). If action_coverage is exceeds_crop_width, fit_mode=contain preserves the full source frame. Args: render_id.",
+			Description: "Status of one render. Returns the original params and, once execution starts, resolved_params with effective executor values, trim_diagnostics/trim_validation (algorithm/version, accurate interval, every-frame opening/ending checks and limitations), and crop_diagnostics (app/algorithm versions, crop rectangle/path, evidence timestamps, fallback reasons, and sampled action_coverage). If action_coverage is exceeds_crop_width, fit_mode=contain preserves the full source frame. Args: render_id.",
 			InputSchema: schemaObject(map[string]any{"render_id": map[string]any{"type": "integer"}}, []string{"render_id"}),
 			Handler:     a.toolGetRender,
 		},

@@ -121,7 +121,7 @@ func TestMediaBudgetCancellation(t *testing.T) {
 	}
 }
 func TestEncoderProfilesKeepCopyPaths(t *testing.T) {
-	for _, op := range []string{"trim", "concat"} {
+	for _, op := range []string{"concat"} {
 		sources := []string{"1"}
 		if op == "concat" {
 			sources = append(sources, "2")
@@ -203,7 +203,7 @@ func TestLocalRenderResultCacheSkipsEncoder(t *testing.T) {
 	}
 	executor := &localExecutor{ffmpegPath: binary, scratchRoot: root, outputFolder: "/renders/"}
 	for i := 0; i < 2; i++ {
-		id, err := insertRender(app.AppDB(), testProj, "trim", []string{"1"}, map[string]any{"start_ms": 0, "end_ms": 1000}, "out.mp4", "/renders/", "")
+		id, err := insertRender(app.AppDB(), testProj, "transcode", []string{"1"}, map[string]any{"format": "mp4"}, "out.mp4", "/renders/", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -218,7 +218,7 @@ func TestLocalRenderResultCacheSkipsEncoder(t *testing.T) {
 		_, _ = app.AppDB().Exec(`UPDATE renders SET status='ok' WHERE id=?`, id)
 	}
 	for i := 0; i < 2; i++ {
-		_, err := insertRender(app.AppDB(), testProj, "trim", []string{"1"}, map[string]any{"start_ms": 0, "end_ms": 1000}, "out.mp4", "/renders/", "")
+		_, err := insertRender(app.AppDB(), testProj, "transcode", []string{"1"}, map[string]any{"format": "mp4"}, "out.mp4", "/renders/", "")
 		if err != nil {
 			t.Fatal(err)
 		}

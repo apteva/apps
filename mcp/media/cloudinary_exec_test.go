@@ -258,7 +258,7 @@ func TestSelectExecutor_NoBinding_ReturnsLocal(t *testing.T) {
 func TestSelectExecutor_CloudinaryBound_SupportedOp_ReturnsCloudinary(t *testing.T) {
 	ctx := newTestCtxWithPlatform(t, boundCloudinary())
 	local := &localExecutor{ffmpegPath: "ffmpeg", scratchRoot: "/tmp", outputFolder: "/r/"}
-	for _, op := range []string{"trim", "resize", "transcode", "crop", "extract_frame"} {
+	for _, op := range []string{"resize", "transcode", "crop", "extract_frame"} {
 		row := &RenderRow{Operation: op}
 		got := selectExecutor(ctx, local, nil, row)
 		if got.Name() != "cloudinary" {
@@ -272,7 +272,7 @@ func TestSelectExecutor_CloudinaryBound_UnsupportedOp_FallsBackLocal(t *testing.
 	// selectExecutor must still hand them to local ffmpeg silently.
 	ctx := newTestCtxWithPlatform(t, boundCloudinary())
 	local := &localExecutor{ffmpegPath: "ffmpeg", scratchRoot: "/tmp", outputFolder: "/r/"}
-	for _, op := range []string{"concat", "audio_extract"} {
+	for _, op := range []string{"trim", "concat", "audio_extract"} {
 		row := &RenderRow{Operation: op}
 		got := selectExecutor(ctx, local, nil, row)
 		if got.Name() != "local" {

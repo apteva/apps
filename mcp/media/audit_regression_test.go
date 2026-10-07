@@ -60,7 +60,7 @@ func TestAuditRenderCleanupKeepsExistingOutput(t *testing.T) {
 	defer srv.Close()
 	app = tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithEnv("APTEVA_GATEWAY_URL", srv.URL), tk.WithEnv("APTEVA_OUTBOUND_TOKEN", "test"))
 	globalCtx = app
-	id, err := insertRender(app.AppDB(), testProj, "trim", []string{"1"}, map[string]any{"start_ms": 0, "end_ms": 1000}, "repeat.mp4", "/renders/", "")
+	id, err := insertRender(app.AppDB(), testProj, "transcode", []string{"1"}, map[string]any{"format": "mp4"}, "repeat.mp4", "/renders/", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,6 +79,14 @@ func TestAuditRenderCleanupKeepsExistingOutput(t *testing.T) {
 	runOneRender(app, row, &localExecutor{ffmpegPath: binary, scratchRoot: root, outputFolder: "/renders/"}, nil, 30)
 	if deleted {
 		t.Fatal("completion conflict deleted pre-existing storage file 99 returned by dedup")
+	}
+	finished, err := getRender(app.AppDB(), testProj, row.ID)
+	if err != nil || finished.Status != "cancelled" {
+		t.Fatalf("completion conflict was not exercised: %+v %v", finished, err)
+	}
+	var retained string
+	if err := app.AppDB().QueryRow(`SELECT storage_file_id FROM render_uncommitted_outputs WHERE render_id=?`, row.ID).Scan(&retained); err != nil || retained != "99" {
+		t.Fatalf("uncommitted dedup output not retained: %s %v", retained, err)
 	}
 }
 

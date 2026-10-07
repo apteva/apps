@@ -13,7 +13,7 @@ import (
 
 // Existing request-level hits bypass Smart Crop entirely. Seed the exact
 // released v0.14.7 key format, then verify that an upgrade refuses those output
-// files for crop operations but can still reuse a trim's verified output.
+// files for crop operations but also refuses the earlier approximate trim output.
 func TestSmartCropUpgradeInvalidatesRequestCacheOnlyForCropping(t *testing.T) {
 	app := newTestCtx(t)
 	source := StorageFile{ID: 1, Name: "source.mp4", SHA256: strings.Repeat("a", 64), SizeBytes: 100}
@@ -50,11 +50,7 @@ func TestSmartCropUpgradeInvalidatesRequestCacheOnlyForCropping(t *testing.T) {
 				t.Fatal("request cache key missing")
 			}
 			got := findCachedRender(context.Background(), app, sc, key, testProj, folder, name)
-			if op == "trim" {
-				if got != output.ID {
-					t.Fatalf("unrelated cached trim was invalidated: file=%d", got)
-				}
-			} else if got != 0 {
+			if got != 0 {
 				t.Fatalf("earlier cropped output bypassed corrected analysis: file=%d", got)
 			}
 		})

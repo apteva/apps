@@ -2,8 +2,15 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.11
+version: 0.14.12
 description: |
+  v0.14.12 makes trimming frame-accurate by decoding and re-encoding the
+  requested interval, aligns retained pictures and audio at zero, and scans
+  every output frame before upload. Read-only analysis detects single-frame
+  black segments and reports opening/ending coverage. Saved trim diagnostics
+  survive cache reuse. Source bit depth and base color signaling are retained;
+  Dolby Vision dynamic metadata is not retained and is reported explicitly.
+  Accurate trim uses FFmpeg locally or on the configured remote host.
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
   codecs, bitrate, sample rate), generates canonical thumbnails for
@@ -39,7 +46,7 @@ description: |
   v0.14.8 prevents stationary Smart Crop tracking from replacing the subject
   with a disconnected background feature. Cropping requests recompute old
   decisions and outputs; unrelated render-result caches remain reusable.
-  Uses app-sdk v0.95.0.
+  Uses app-sdk v0.96.0.
 
   v0.14.7 makes safe catalog discovery the default: compact, planning, and
   bounded full detail levels; field projection; explicit large expansions;
@@ -116,7 +123,7 @@ requires:
         image.transform: upload
       required: false
       label: "Cloud render backend"
-      hint: "Optional. Connect Cloudinary to offload trim/resize/transcode/crop/extract_frame to the cloud — useful on Pi-class hosts. Without it (the default), renders run on local ffmpeg. concat + audio_extract + audio_filter always stay local."
+      hint: "Optional. Connect Cloudinary to offload resize/transcode/crop/extract_frame to the cloud — useful on Pi-class hosts. Without it (the default), renders run on local ffmpeg. concat + audio_extract + audio_filter always stay local."
   binaries:
     - name: ffmpeg
       version: "7.0.2"
@@ -143,7 +150,7 @@ provides:
     - name: media_get
       description: Fetch one media record by storage file_id, including arbitrary metadata + metadata_version, probe fields, and derivation pointers. External ingestion URL delivery defaults to apteva/inline; callers can explicitly request delivery=proxy, delivery=direct, or disposition=attachment. Returned delivery, disposition, and expires_at are Storage-confirmed effective values.
     - name: media_analyze
-      description: Analyze an existing image, video, or audio source without modifying it. Returns encoding metadata, decode integrity, visual measurements and black/frozen segments, plus LUFS/peak/RMS/silence audio measurements where applicable. When render_host_id is configured, analysis runs on that remote host without silent local fallback and reports the effective executor. depth=standard analyzes at most 60 seconds; depth=full analyzes the requested/full duration. Creates no render, derivation, or Storage object. Args — file_id, depth? (standard|full), start_ms?, end_ms?, silence_threshold_db?, silence_min_ms?.
+      description: Analyze an existing image, video, or audio source without modifying it. Returns encoding metadata, decode integrity, visual measurements, every-frame black/frozen checks and opening/ending coverage, plus LUFS/peak/RMS/silence audio measurements where applicable. When render_host_id is configured, analysis runs on that remote host without silent local fallback and reports the effective executor. depth=standard analyzes at most 60 seconds; depth=full analyzes the requested/full duration. Creates no render, derivation, or Storage object. Args — file_id, depth? (standard|full), start_ms?, end_ms?, silence_threshold_db?, silence_min_ms?.
     - name: media_ask
       description: Ask a grounded question using the configured descriptions vision/chat integration and only artifacts that already exist. Images use an existing thumbnail or source object; videos use the canonical thumbnail and cached storyboard keyframes; at_ms selects the nearest existing keyframe and reports the actual timestamp; audio uses an existing completed transcript. Never runs ffmpeg, generates frames/derivations, or writes files. Args — file_id, question, at_ms?, frame_count? (1-8), include_transcript?.
     - name: media_get_batch
@@ -171,7 +178,7 @@ provides:
 
     # Renders — submit (returns render_id; poll media_get_render for status)
     - name: media_trim
-      description: Cut a clip from a video/audio source. Args — file_id, start_ms, end_ms, output_name?.
+      description: Frame-accurate cut from a video/audio source. Re-encodes [start_ms,end_ms), starts retained pictures/audio at zero, validates every output picture before upload, and returns persisted trim diagnostics. Args — file_id, start_ms, end_ms, output_name?.
       async_result:
         id_field: render_id
         notify:
@@ -542,7 +549,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.11
+    ref: media/v0.14.12
     entry: mcp/media
   port: 8080
   health_check: /health

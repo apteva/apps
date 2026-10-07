@@ -50,18 +50,23 @@ func buildPlan(op string, sources []string, params json.RawMessage, name, source
 	if strings.HasPrefix(plan.ContentType, "image/") {
 		return plan, nil
 	}
-	if op == "trim" || op == "concat" || op == "extract_frame" || op == "audio_extract" || op == "audio_filter" {
+	if isAudioExt(filepath.Ext(plan.Filename)) || op == "concat" || op == "extract_frame" || op == "audio_extract" || op == "audio_filter" {
 		return plan, nil
 	}
 	ext := strings.ToLower(filepath.Ext(plan.Filename))
 	if ext != ".mp4" && ext != ".mov" && ext != ".mkv" {
 		return nil, fmt.Errorf("encoder_profile requires MP4, MOV or MKV output")
 	}
+	codec := "libx264"
 	for i, a := range plan.Args {
+		if op == "trim" && a == "-c:v" && i+1 < len(plan.Args) && plan.Args[i+1] == "libx265" {
+			codec = "libx265"
+			continue
+		}
 		if (a == "-c:v" || a == "-vcodec") && i+1 < len(plan.Args) && plan.Args[i+1] != "libx264" {
 			return nil, fmt.Errorf("encoder_profile conflicts with explicit codec %s", plan.Args[i+1])
 		}
 	}
-	plan.Args = append(plan.Args, "-c:v", "libx264", "-preset", preset, "-crf", crf)
+	plan.Args = append(plan.Args, "-c:v", codec, "-preset", preset, "-crf", crf)
 	return plan, nil
 }

@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
@@ -45,15 +44,16 @@ type timedSegment struct {
 }
 
 type visualAnalysis struct {
-	SampledFrames       int            `json:"sampled_frames"`
-	MeanLuma            *float64       `json:"mean_luma,omitempty"`
-	MinLuma             *float64       `json:"min_luma,omitempty"`
-	MaxLuma             *float64       `json:"max_luma,omitempty"`
-	MeanSaturation      *float64       `json:"mean_saturation,omitempty"`
-	MeanBlurScore       *float64       `json:"mean_blur_score,omitempty"`
-	MeanBlockinessScore *float64       `json:"mean_blockiness_score,omitempty"`
-	BlackSegments       []timedSegment `json:"black_segments"`
-	FrozenSegments      []timedSegment `json:"frozen_segments"`
+	SampledFrames       int              `json:"sampled_frames"`
+	MeanLuma            *float64         `json:"mean_luma,omitempty"`
+	MinLuma             *float64         `json:"min_luma,omitempty"`
+	MaxLuma             *float64         `json:"max_luma,omitempty"`
+	MeanSaturation      *float64         `json:"mean_saturation,omitempty"`
+	MeanBlurScore       *float64         `json:"mean_blur_score,omitempty"`
+	MeanBlockinessScore *float64         `json:"mean_blockiness_score,omitempty"`
+	BlackSegments       []timedSegment   `json:"black_segments"`
+	FrozenSegments      []timedSegment   `json:"frozen_segments"`
+	FrameValidation     *frameValidation `json:"frame_validation,omitempty"`
 }
 
 type audioAnalysis struct {
@@ -441,12 +441,7 @@ func analyzeExistingSourceLocal(app *sdk.AppCtx, sourceURL string, row *MediaRow
 }
 
 func runAnalysisFFmpeg(ctx context.Context, path string, args []string) (string, error) {
-	cmd := exec.CommandContext(ctx, path, args...)
-	out, err := cmd.CombinedOutput()
-	if ctx.Err() != nil {
-		return string(out), fmt.Errorf("ffmpeg analysis timed out: %w", ctx.Err())
-	}
-	return string(out), err
+	return runCompactedFFmpeg(ctx, path, args)
 }
 
 func commonRangeArgs(sourceURL string, opts analysisOptions) []string {
@@ -467,7 +462,10 @@ func visualAnalysisArgs(sourceURL string, row *MediaRow, opts analysisOptions) [
 	if !row.IsImage {
 		// Continuity checks see every decoded frame. Expensive per-frame
 		// visual metrics run only on one representative sample every 5s.
-		filter = "blackdetect=d=0.5:pix_th=0.10,freezedetect=n=-60dB:d=2,fps=1/5," + filter
+		filter = "blackdetect=d=0:pix_th=0.10,metadata=mode=print:key=lavfi.black_end,showinfo=checksum=0,freezedetect=n=-60dB:d=2,fps=1/5," + filter
+		if opts.EndMs > opts.StartMs {
+			filter = "trim=duration=" + formatSeconds(opts.EndMs-opts.StartMs) + "," + filter
+		}
 	}
 	args = append(args, "-map", "0:v:0", "-vf", filter, "-an", "-sn", "-dn")
 	if row.IsImage {
@@ -497,11 +495,12 @@ func commandFailureIssue(code string, err error, _ string) analysisIssue {
 }
 
 var (
-	metadataNumberRE = regexp.MustCompile(`(?m)^.*?(lavfi\.(?:signalstats\.[A-Z]+|blur|block))=(-?(?:\d+(?:\.\d+)?|\.\d+))\s*$`)
-	blackRE          = regexp.MustCompile(`black_start:([0-9.]+)\s+black_end:([0-9.]+)\s+black_duration:([0-9.]+)`)
-	freezeStartRE    = regexp.MustCompile(`lavfi\.freezedetect\.freeze_start:\s*([0-9.]+)`)
-	freezeEndRE      = regexp.MustCompile(`lavfi\.freezedetect\.freeze_end:\s*([0-9.]+)`)
-	freezeDurationRE = regexp.MustCompile(`lavfi\.freezedetect\.freeze_duration:\s*([0-9.]+)`)
+	metadataNumberRE   = regexp.MustCompile(`(?m)^.*?(lavfi\.(?:signalstats\.[A-Z]+|blur|block))=(-?(?:\d+(?:\.\d+)?|\.\d+))\s*$`)
+	blackEndMetadataRE = regexp.MustCompile(`lavfi\.black_end=([0-9.]+)`)
+	blackRE            = regexp.MustCompile(`black_start:([0-9.]+)\s+black_end:([0-9.]+)\s+black_duration:([0-9.]+)`)
+	freezeStartRE      = regexp.MustCompile(`lavfi\.freezedetect\.freeze_start:\s*([0-9.]+)`)
+	freezeEndRE        = regexp.MustCompile(`lavfi\.freezedetect\.freeze_end:\s*([0-9.]+)`)
+	freezeDurationRE   = regexp.MustCompile(`lavfi\.freezedetect\.freeze_duration:\s*([0-9.]+)`)
 )
 
 func parseVisualAnalysis(log string, offsetMs, rangeEndMs int64) *visualAnalysis {
@@ -524,6 +523,31 @@ func parseVisualAnalysis(log string, offsetMs, rangeEndMs int64) *visualAnalysis
 	v.MeanBlockinessScore = meanPtr(values["lavfi.block"])
 	for _, m := range blackRE.FindAllStringSubmatch(log, -1) {
 		v.BlackSegments = append(v.BlackSegments, secondsSegment(m[1], m[2], m[3], offsetMs))
+	}
+	v.FrameValidation = parseFrameValidation(log, offsetMs)
+	if fv := v.FrameValidation; fv != nil {
+		endedOnLastPicture := false
+		for _, m := range blackEndMetadataRE.FindAllStringSubmatch(log, -1) {
+			if secondsToMs(m[1])+offsetMs == fv.LastFrameMs {
+				endedOnLastPicture = true
+			}
+		}
+		for i := range v.BlackSegments {
+			seg := &v.BlackSegments[i]
+			if seg.EndMs == fv.LastFrameMs && !endedOnLastPicture {
+				seg.EndMs += fv.LastFrameDurationMs
+				if rangeEndMs > 0 && seg.EndMs > rangeEndMs {
+					seg.EndMs = rangeEndMs
+				}
+				seg.DurationMs = seg.EndMs - seg.StartMs
+			}
+			if seg.StartMs <= fv.FirstFrameMs && (seg.EndMs > fv.FirstFrameMs || (seg.EndMs == fv.FirstFrameMs && !endedOnLastPicture)) {
+				fv.OpeningBlack = true
+			}
+			if seg.StartMs <= fv.LastFrameMs && (seg.EndMs > fv.LastFrameMs || (seg.EndMs == fv.LastFrameMs && !endedOnLastPicture)) {
+				fv.EndingBlack = true
+			}
+		}
 	}
 	v.FrozenSegments = parseFreezeSegments(log, offsetMs, rangeEndMs)
 	return v
@@ -615,6 +639,9 @@ func visualIssues(v *visualAnalysis) []analysisIssue {
 		return nil
 	}
 	out := make([]analysisIssue, 0, len(v.BlackSegments)+len(v.FrozenSegments))
+	if fv := v.FrameValidation; fv != nil && fv.FirstFrameMs-fv.RangeStartMs > 2 {
+		out = append(out, analysisIssue{Code: "VIDEO_START_GAP", Severity: "warning", Message: "The first decoded picture starts after the beginning of the analyzed timeline.", StartMs: fv.RangeStartMs, EndMs: fv.FirstFrameMs})
+	}
 	for _, s := range v.BlackSegments {
 		out = append(out, analysisIssue{Code: "BLACK_SEGMENT", Severity: "warning", Message: "Video contains a black or nearly black segment.", StartMs: s.StartMs, EndMs: s.EndMs})
 	}

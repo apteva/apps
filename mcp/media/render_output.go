@@ -116,6 +116,9 @@ func storeRenderOutputPlan(app *sdk.AppCtx, row *RenderRow, plan *opPlan) error 
 }
 
 func renderFailureCode(message string) string {
+	if strings.Contains(message, "trim_validation_failed:") {
+		return "trim_validation_failed"
+	}
 	if strings.Contains(message, "invalid_output_format:") ||
 		strings.Contains(message, "Unable to choose an output format") ||
 		strings.Contains(message, "Requested output format") {

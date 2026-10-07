@@ -34,7 +34,7 @@ func TestSelectExecutor_NoRemote_FallsThrough(t *testing.T) {
 	// nil remote → existing cloudinary/local branching is unchanged.
 	ctx := newTestCtxWithPlatform(t, boundCloudinary())
 	local := &localExecutor{ffmpegPath: "ffmpeg", scratchRoot: "/tmp", outputFolder: "/r/"}
-	row := &RenderRow{Operation: "trim"}
+	row := &RenderRow{Operation: "resize"}
 
 	got := selectExecutor(ctx, local, nil, row)
 	if got.Name() != "cloudinary" {

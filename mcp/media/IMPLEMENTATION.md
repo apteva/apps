@@ -47,7 +47,7 @@ The original 17 reproductions now pass. Additional tests cover manual-only fairn
 - Cache Smart Crop analysis by source/evidence, range, geometry, settings and algorithm version. Preview sends the actual end time; late preview responses are aborted when inputs change.
 - Reuse completed renders before downloading/encoding. Every hit rechecks source access, output identity and destination. Keys include project, source hashes, operation/parameters, crop evidence, encoder identity and output destination. Local keys include binary file identity/thread settings; remote/provider reuse is additionally limited to a process lifetime and host/connection identity. A source/config change during execution prevents storing under the old key.
 - Wake queued workers immediately, retaining the recovery poll. Weighted admission limits heavy jobs to two concurrent encodes at the default capacity; encoder threads default to two, filter threads to one. The budget is shared within a Media process for each selected host, not distributed across independent sidecars.
-- General **Video quality** control: **Legacy (default), Low, Medium, High**. Every new render explicitly starts on Legacy. Low uses x264 veryfast/CRF 28; Medium medium/23; High slow/18. This controls exported video quality and does not change resolution/frame rate. The earlier development names `preview`, `balanced`, and `quality` remain accepted for queued-job compatibility but are no longer advertised. The default and explicit Legacy plans exactly match the original planners. Stream-copy trim/concat and image/audio operations retain their relevant paths; the video quality selector is hidden for image/audio sources. Cloudinary rejects nonlegacy FFmpeg profiles rather than silently ignoring them.
+- General **Video quality** control: **Legacy (default), Low, Medium, High**. Every new render explicitly starts on Legacy. Low uses x264 veryfast/CRF 28; Medium medium/23; High slow/18. This controls exported video quality and does not change resolution/frame rate. The earlier development names `preview`, `balanced`, and `quality` remain accepted for queued-job compatibility but are no longer advertised. The default and explicit Legacy plans exactly match the original planners. Accurate trims re-encode with the selected profile (retaining source-compatible HEVC where appropriate); stream-copy concat and image/audio operations retain their relevant paths; the video quality selector is hidden for image/audio sources. Cloudinary rejects nonlegacy FFmpeg profiles rather than silently ignoring them.
 - Bounded concurrent upload chunks locally and remotely, respecting Storage's advertised concurrency, preserving checksums/finalization, and aborting failed uploads. Remote presigned direct upload remains the first choice.
 - Persist queue/admission times, local download/analysis/encode/hash/transfer/upload/finalization timings, cache hits and output size. Remote and provider execution have an aggregate stage; remote substage timings are not yet exposed separately. UI elapsed time uses server timestamps.
 - Debounced catalog updates, lazy image decoding, and CSS content visibility reduce work for offscreen tiles. This retains the existing pagination API; it is not a full virtual-list rewrite.
@@ -137,3 +137,34 @@ reset metadata is retained from headers. Successful provider responses reset
 consecutive rate-limit backoff. The worker does not sleep or issue immediate
 extra requests, and other models/connections remain available. Metadata already
 discarded upstream cannot be reconstructed by Media.
+
+
+## Frame-accurate trim (0.14.12)
+
+`media_trim` now decodes through the requested start and re-encodes the half-open
+source interval. The first retained source picture starts at output zero; audio
+uses the requested source origin, with padding for a genuine delayed audio
+stream. The interval can only retain pictures that exist in the source, so a
+non-frame-aligned request starts with the first picture at or after `start_ms`.
+Video-only and audio-only inputs and variable frame rate are supported.
+
+Local and remote FFmpeg use the same planner and decode every output picture
+before upload. Decode failure, a missing decoded stream, nonzero opening PTS,
+or a video ending materially before the requested interval fails with
+`trim_validation_failed`. Single-frame black openings/endings and interior
+black frames are reported under the defined near-black thresholds (98% pixels,
+10% pixel threshold), without silently deleting legitimate dark content.
+`media_analyze` uses the same every-frame checks before its five-second visual
+metric sampling, and reports `frame_validation` coverage and `VIDEO_START_GAP`.
+Terminal black intervals include the final picture's duration.
+
+Original `trim_diagnostics` and `trim_validation` remain in `resolved_params`
+on request-cache hits. The trim cache revision invalidates approximate results;
+other non-crop operations keep their cache revision. Cloudinary declines accurate
+trims in favor of the documented FFmpeg backend. This adds re-encoding and a
+validation pass; it is not a rendering-speed improvement.
+
+Indexed source precision and base-layer color signaling are retained. For the
+reported 10-bit HEVC/HLG phone source, the output is 10-bit HEVC/HLG. Dolby Vision
+dynamic metadata is not retained by this encoder and is called out in the saved
+trim limitations. No trial output is promoted to an approved master.

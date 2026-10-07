@@ -58,7 +58,7 @@ func (e *cloudinaryExecutor) Name() string { return "cloudinary" }
 // returning false stays on local ffmpeg.
 func (e *cloudinaryExecutor) supports(op string) bool {
 	switch op {
-	case "trim", "resize", "transcode", "crop", "extract_frame":
+	case "resize", "transcode", "crop", "extract_frame":
 		return true
 	}
 	return false

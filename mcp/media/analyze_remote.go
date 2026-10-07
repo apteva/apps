@@ -135,8 +135,8 @@ func buildRemoteAnalysisScript(ffmpegPath, sourceURL string, row *MediaRow, opts
 	// out of the Instances response, this bounds output for depth=full on long
 	// media: ebur128's verbose per-frame log can otherwise exceed command-output
 	// limits before the result marker arrives.
-	b.WriteString(`if [ -f visual.log ]; then grep -E 'lavfi\.(signalstats\.[A-Z]+|blur|block|freezedetect\.)|black_start:' visual.log > visual.safe || true; else : > visual.safe; fi` + "\n")
-	b.WriteString(`if [ -f audio.log ]; then grep -E '^[[:space:]]*(I:|LRA:|Peak:)|Peak level dB:|RMS level dB:|Dynamic range:|DC offset:|silence_start:|silence_end:' audio.log > audio.safe || true; else : > audio.safe; fi` + "\n")
+	b.WriteString("if [ -f visual.log ]; then awk " + shellQuote(compactFrameLogAWK) + " visual.log > visual.safe; else : > visual.safe; fi\n")
+	b.WriteString("if [ -f audio.log ]; then awk " + shellQuote(compactFrameLogAWK) + " audio.log > audio.safe; else : > audio.safe; fi\n")
 	b.WriteString(`VISUAL_B64=$(base64 -w0 visual.safe 2>/dev/null || base64 < visual.safe | tr -d '\n')` + "\n")
 	b.WriteString(`AUDIO_B64=$(base64 -w0 audio.safe 2>/dev/null || base64 < audio.safe | tr -d '\n')` + "\n")
 	b.WriteString(`printf 'APTEVA_ANALYZE:{"visual_ran":%s,"visual_exit":%s,"visual_log_b64":"%s","audio_ran":%s,"audio_exit":%s,"audio_log_b64":"%s"}\n' "$VISUAL_RAN" "$VISUAL_EXIT" "$VISUAL_B64" "$AUDIO_RAN" "$AUDIO_EXIT" "$AUDIO_B64"` + "\n")

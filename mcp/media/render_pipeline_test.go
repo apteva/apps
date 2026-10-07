@@ -217,8 +217,7 @@ func fixtureBytes(t *testing.T) []byte {
 		"-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000:duration=5",
 		"-c:a", "aac", "-shortest", "-movflags", "+faststart",
 	}
-	// Prefer the codec/keyframe shape the stream-copy trim assertions
-	// were written against, with a native-codec fallback for minimal
+	// Use a normal GOP, with a native-codec fallback for minimal
 	// ffmpeg builds that omit libx264.
 	args := append(append([]string{}, baseArgs...),
 		"-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "24", path)
@@ -318,6 +317,15 @@ func TestSidecar_RenderPipeline_Trim(t *testing.T) {
 		t.Fatalf("identical real render not reused: %+v", repeated)
 	}
 
+	// Validation must survive request-cache reuse with its original evidence.
+	for _, render := range []map[string]any{final, repeated} {
+		resolved, _ := render["resolved_params"].(map[string]any)
+		validation, _ := resolved["trim_validation"].(map[string]any)
+		video, _ := validation["video"].(map[string]any)
+		if validation["decode_ok"] != true || video["frames_checked"] != float64(48) || video["first_frame_ms"] != float64(0) || validation["audio_first_ms"] != float64(0) {
+			t.Fatalf("missing accurate trim validation: %+v", render)
+		}
+	}
 	// Validate the bytes are a real mp4 by ffprobe-ing them.
 	bytes := downloadFromStorage(t, sc, "test-proj", outputID)
 	if len(bytes) == 0 {
@@ -346,9 +354,8 @@ func TestSidecar_RenderPipeline_Trim(t *testing.T) {
 		t.Fatalf("parse ffprobe: %v", err)
 	}
 	d, _ := strconv.ParseFloat(probed.Format.Duration, 64)
-	// Stream-copy trim of an x264-ultrafast source: keyframe alignment
-	// can stretch the clip; just assert it shrunk vs the 5s source.
-	if d <= 0 || d >= 5.0 {
+	// Encoded trim must stay within one video frame of two seconds.
+	if d < 1.967 || d > 2.034 {
 		t.Errorf("trimmed duration=%.2fs (source is 5s); render didn't trim", d)
 	}
 

@@ -95,15 +95,15 @@ var ErrNotImplemented = errors.New("operation not implemented in this media vers
 
 // ─── trim ───────────────────────────────────────────────────────────
 //
-// `-ss <start> -to <end> -i <input> -c copy` does a stream copy when
-// possible (no re-encode → fast + lossless). For mid-frame cuts on
-// formats that don't tolerate that we'd fall back to re-encode; v0.2
-// keeps it simple — copy mode only, callers must align to keyframes
-// for accurate cuts.
+// Decode through the seek point and encode only the requested half-open
+// interval. Stream copy retains GOP preroll and can shift video relative to
+// audio. The first retained picture starts at zero; audio is trimmed on the
+// requested source timeline, with silence padding for genuine missing audio.
 
 type trimParams struct {
-	StartMs int64 `json:"start_ms"`
-	EndMs   int64 `json:"end_ms"`
+	StartMs     int64             `json:"start_ms"`
+	EndMs       int64             `json:"end_ms"`
+	SourceVideo trimVideoEncoding `json:"_trim_source_video"`
 }
 
 func planTrim(sources []string, raw json.RawMessage, outputName string) (*opPlan, error) {
@@ -121,20 +121,28 @@ func planTrim(sources []string, raw json.RawMessage, outputName string) (*opPlan
 		return nil, errors.New("trim: start_ms must be >= 0")
 	}
 
-	// Place -ss BEFORE -i so ffmpeg seeks via the demuxer (fast). We
-	// pass start/end as fractional seconds — ffmpeg accepts this
-	// portably; some old versions choke on hh:mm:ss.fff.
+	name, ct := defaultOutputName(outputName, sources[0], "trim", "")
+	duration := msToSeconds(p.EndMs - p.StartMs)
+	// Input seek is accurate with re-encoding (FFmpeg's default accurate_seek).
+	// trim runs before resetting PTS, so the end stays on the source timeline.
 	args := []string{
 		"-y",
 		"-loglevel", "error",
 		"-progress", "pipe:1",
 		"-ss", msToSeconds(p.StartMs),
-		"-to", msToSeconds(p.EndMs),
 		"-i", "{input}",
-		"-c", "copy",
-		"-avoid_negative_ts", "make_zero",
+		"-map", "0:v:0?", "-map", "0:a:0?", "-sn", "-dn",
+		"-t", duration,
 	}
-	name, ct := defaultOutputName(outputName, sources[0], "trim", "")
+	if !isAudioExt(filepath.Ext(name)) {
+		args = append(args, "-vf", "trim=duration="+duration+",setpts=PTS-STARTPTS", "-fps_mode", "vfr")
+	}
+	args = append(args, "-af", "atrim=duration="+duration+",aresample=async=1:first_pts=0")
+	encoding, err := trimEncodingArgs(name, p.SourceVideo)
+	if err != nil {
+		return nil, err
+	}
+	args = append(args, encoding...)
 	return &opPlan{Filename: name, ContentType: ct, Args: args}, nil
 }
 

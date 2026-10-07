@@ -183,6 +183,7 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 	// operation supports it. Mutates row.Params in place so buildPlan
 	// can see explicit crop_w/h/x/y. No-op for ops that don't crop.
 	row.Params = preprocessSmartCrop(ctx, app, sc, row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
+	row.Params = prepareTrimParams(app.AppDB(), row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
 	row.Params = prepareAudioFilterParams(db, row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
 	if err := renderUpdateResolvedParams(db, row.ID, row.Params); err != nil {
 		return 0, fmt.Errorf("store resolved params: %w", err)
@@ -215,6 +216,9 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 		folder = e.outputFolder
 	}
 	cacheKey := localRenderCacheKey(ctx, app, sc, row, plan, folder, e.ffmpegPath)
+	if row.Operation == "trim" {
+		cacheKey = ""
+	} // Request cache retains validation with the output.
 	if cacheKey != "" {
 		release, err := resultCacheLocks.acquire(ctx, cacheKey[0])
 		if err != nil {
@@ -264,6 +268,24 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 	// Per-render output folder takes precedence over the install
 	// default. Renders submitted before this column existed (or
 	// without an explicit folder) fall back to e.outputFolder.
+
+	if row.Operation == "trim" {
+		doneValidation := renderStage(app, row, "trim_validation")
+		log, err := runCompactedFFmpeg(ctx, e.ffmpegPath, trimValidationArgs(outputPath))
+		validation := parseTrimValidation(log)
+		validation.DecodeOK = err == nil
+		recordRenderMetric(app, row, "trim_validation", validation)
+		doneValidation()
+		if err != nil {
+			return 0, trimValidationError("output decode failed")
+		}
+		if err := checkTrimValidation(validation, expectedProgressDurationMs(db, row)); err != nil {
+			return 0, err
+		}
+		if err := persistTrimValidation(app, row, validation); err != nil {
+			return 0, err
+		}
+	}
 
 	doneUpload := renderStage(app, row, "upload")
 	defer doneUpload()
