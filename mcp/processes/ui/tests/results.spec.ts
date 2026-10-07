@@ -13,7 +13,7 @@ for (const width of [1440, 375]) {
     await request.post("/fixture/runs", {data: [entry()]});
     await openRun(page);
     const current = page.locator(".run-current-step");
-    await expect(current).toContainText("All steps completed");
+    await expect(current).toContainText("Step completed");
     await expect(current).not.toContainText("request_id");
     const progress = page.getByRole("progressbar", {name: "Run progress", exact: true});
     await expect(progress).toHaveAttribute("value", "100");

@@ -235,10 +235,13 @@ window.fetch = (async (url: unknown, init?: RequestInit) => {
       direct_runs: controlRun ? [controlRun] : [],
       runs: path.endsWith("/processes/runs") && controlRun ? [controlRun] : [],
     });
-  if (path.endsWith("/runs"))
-    return location.search.includes("live")
-      ? originalFetch("/fixture/runs")
-      : Response.json({ direct_runs: [], runs: [] });
+  if (path.endsWith("/runs")) {
+    if (!location.search.includes("live")) return Response.json({direct_runs: [], runs: []});
+    const response = await originalFetch("/fixture/runs");
+    if (!path.endsWith("/processes/runs")) return response;
+    const fixture = await response.json();
+    return Response.json({runs: [...fixture.runs, ...fixture.direct_runs]});
+  }
   if (path.endsWith("/assignments"))
     return Response.json({ assignments: process.assignments });
   if (path.endsWith("/weather"))

@@ -483,7 +483,7 @@ test("workflow history offers a generic human step after predecessor completion"
   await click("Runs");
   await clickContaining("Team workflow run");
   expect(document.body.textContent).toContain("Team workflow run");
-  expect(document.body.textContent).toContain("Draft evidence");
+
   expect(
     Array.from(document.querySelectorAll("button")).filter(
       (b) => b.textContent === "Complete human step",
@@ -491,6 +491,7 @@ test("workflow history offers a generic human step after predecessor completion"
   ).toBe(1);
   await click("Complete human step");
   expect(document.body.textContent).toContain("Completed inputs");
+  expect(document.body.textContent).toContain("Draft evidence");
   expect(
     document.querySelector<HTMLButtonElement>("button.primary:disabled"),
   ).toBeTruthy();

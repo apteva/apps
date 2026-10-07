@@ -183,7 +183,7 @@ export function ProcessFlow({
   executions,
   runExecutions,
   agents,
-  saveControls, sharedContext,
+  saveControls, sharedContext, selectedKey, onSelectStep,
 }: {
   steps: Step[];
   onChange?: (s: Step[]) => void;
@@ -193,14 +193,18 @@ export function ProcessFlow({
   agents?: { id: number; name: string }[];
   saveControls?: ReactNode;
   sharedContext?: ReactNode;
+  selectedKey?: string;
+  onSelectStep?: (key: string) => void;
 }) {
   const editable = !!onChange,
     instanceID = useId();
-  const [selected, setSelected] = useState(""),
+  const [localSelected, setSelected] = useState(""),
     [selectedEdge, setSelectedEdge] = useState<{
       source: string;
       target: string;
     } | null>(null);
+  const selected = selectedKey ?? localSelected;
+  const selectStep = (key: string) => onSelectStep ? onSelectStep(key) : setSelected(key);
   const [flow, setFlow] = useState<ReactFlowInstance | null>(null),
     [nodes, setNodes] = useState<Node[]>([]);
   const [notice, setNotice] = useState("");
@@ -247,7 +251,7 @@ export function ProcessFlow({
           index: i,
           editable,
           problem: editable ? stepProblem(s) : "",
-          select: () => setSelected(s.key),
+          select: () => selectStep(s.key),
         },
       };
     });
@@ -270,7 +274,7 @@ export function ProcessFlow({
         data: { label: "Run complete", end: true },
       },
     ]);
-  }, [positioned, editable, selected, executions, runExecutions, agents]);
+  }, [positioned, editable, selected, executions, runExecutions, agents, onSelectStep]);
   const edges: Edge[] = useMemo(() => {
     const byKey = new Map(positioned.map((s) => [s.key, s]));
     const used = new Set(steps.flatMap((s) => s.depends_on));
@@ -326,7 +330,7 @@ export function ProcessFlow({
   }, [positioned, selectedEdge, editable, executions]);
   // Refit when connections or available canvas width change. Positions are a
   // deterministic view of dependency semantics and are never procedure data.
-  const inspectorOpen = steps.some((s) => s.key === selected);
+  const inspectorOpen = !onSelectStep && steps.some((s) => s.key === selected);
   const dialogRef = useRef<HTMLDialogElement | null>(null);
   useEffect(() => {
     const opener = document.activeElement as HTMLElement | null;
@@ -353,7 +357,7 @@ export function ProcessFlow({
     );
     return () => clearTimeout(timer);
   }, [flow, topology, inspectorOpen]);
-  const active = steps.find((s) => s.key === selected),
+  const active = !onSelectStep ? steps.find((s) => s.key === selected) : undefined,
     activeIndex = steps.findIndex((s) => s.key === selected);
   const update = (patch: Partial<Step>) =>
     onChange?.(
@@ -413,7 +417,7 @@ export function ProcessFlow({
               ? saveControls
                 ? "Select a step, edit its settings, then save your changes."
                 : "Processes arranges the graph automatically. Connect steps to define execution order."
-              : "Follow the connections. Select any step to see its instructions."}
+              : onSelectStep ? "Select a step to see its output and activity in the details panel." : "Follow the connections. Select any step to see its instructions."}
           </p>
         </div>
         <div className="pf-actions">
@@ -457,7 +461,7 @@ export function ProcessFlow({
               onNodeClick={(event, node) => {
                 if ((event.target as Element).closest(".react-flow__handle")) return;
                 if (node.type === "step") {
-                  setSelected(node.id);
+                  selectStep(node.id);
                   setSelectedEdge(null);
                 }
               }}
@@ -467,7 +471,7 @@ export function ProcessFlow({
               }}
               onPaneClick={() => {
                 setSelectedEdge(null);
-                setSelected("");
+                if (!onSelectStep) setSelected("");
               }}
               onConnect={({ source, target }) => connect(source, target)}
               isValidConnection={(connection) =>

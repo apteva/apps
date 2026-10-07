@@ -21,9 +21,11 @@ test("step-by-step modal, selected branches, receipts and human approval", async
   await page
     .getByRole("button", { name: "Run selected steps", exact: true })
     .click();
+  await page.getByRole("button", {name: "Step 1: alpha", exact: true}).click();
   await expect(page.locator(".run-detail")).toContainText(
     "Exact receipt alpha.png",
   );
+  await page.getByRole("button", {name: "Step 2: beta", exact: true}).click();
   await expect(page.locator(".run-detail")).toContainText(
     "Exact receipt beta.png",
   );
@@ -35,6 +37,7 @@ test("step-by-step modal, selected branches, receipts and human approval", async
   await expect(
     page.getByRole("button", { name: "Complete human step", exact: true }),
   ).toHaveCount(0);
+  await page.getByRole("button", {name: "Follow current step", exact: true}).click();
   await page
     .getByRole("button", { name: "Run next step", exact: true })
     .click();

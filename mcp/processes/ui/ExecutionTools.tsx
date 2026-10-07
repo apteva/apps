@@ -185,7 +185,7 @@ export default function ExecutionTools({
           </li>
         ))}
       </ol>
-      {!loading && !error && !shown.length && <p className="small muted">{filter === "thoughts" ? "No reasoning events recorded yet." : "Waiting for worker activity. Tool calls and recorded reasoning will appear here."}</p>}
+      {!loading && !error && !shown.length && <p className="small muted">{filter === "thoughts" ? "No reasoning events were recorded for this step." : filter === "tools" ? "No tool calls were recorded for this step." : live ? "Waiting for worker activity. Tool calls and recorded reasoning will appear here." : "No worker activity was recorded for this step."}</p>}
     </details>
   );
 }

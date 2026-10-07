@@ -1,6 +1,6 @@
 import ResultContent from "./ResultContent";
 import { TimingDetails, type TimingRule } from "./Timing";
-import { useRef, useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { ProcessFlow } from "./ProcessFlow";
 import ExecutionTools, { type ToolSource } from "./ExecutionTools";
 export type Step = {
@@ -156,6 +156,7 @@ export function RunSteps({
   api,
   onChanged,
   toolSources = [],
+  selectedStepID, onSelectStep, renderSidePanel, onActivityStatus,
 }: {
   steps: StepRun[];
   runID: string;
@@ -168,6 +169,10 @@ export function RunSteps({
   api: (path: string, method?: string, body?: unknown) => Promise<any>;
   onChanged: () => Promise<void>;
   toolSources?: ToolSource[];
+  selectedStepID?: string;
+  onSelectStep?: (id: string) => void;
+  renderSidePanel?: (details: ReactNode) => ReactNode;
+  onActivityStatus?: (status: string) => void;
 }) {
   const [selected, setSelected] = useState(""),
     [output, setOutput] = useState(""),
@@ -216,268 +221,283 @@ export function RunSteps({
       setBusy(false);
     }
   };
-  return (
-    <div className="run-steps">
-      {controlMode === "step_by_step" && (
-        <section className="notice" aria-label="Step-by-step controls">
-          <strong>Step-by-step run</strong>
-          <p>
-            {isTerminal
-              ? `Run ${runState}.`
-              : waitingForAdvance
-                ? "Waiting for you to advance. Review saved outputs, then choose the next ready step."
-                : "Released work is active, or the run is waiting on dependencies or timing."}
-          </p>
-          {!isTerminal && eligibleSteps.length > 0 && (
-            <>
-              <div>
-                {eligibleSteps.map((item) => (
-                  <label
-                    key={item.id}
-                    style={{ display: "block", marginBottom: 8 }}
-                  >
-                    <input
-                      type="checkbox"
-                      disabled={busy}
-                      checked={chosen.includes(item.id)}
-                      onChange={(e) =>
-                        setChosen((ids) =>
-                          e.target.checked
-                            ? [...ids, item.id]
-                            : ids.filter((id) => id !== item.id),
-                        )
-                      }
-                    />{" "}
-                    {steps.find((s) => s.id === item.id)?.definition.name ||
-                      item.key}
-                  </label>
-                ))}
-              </div>
-              <button
-                disabled={busy}
-                onClick={() => advance([eligibleSteps[0].id])}
-              >
-                Run next step
-              </button>
-              <button
-                disabled={
-                  busy ||
-                  !chosen.some((id) => eligibleSteps.some((s) => s.id === id))
-                }
-                onClick={() =>
-                  advance(
-                    chosen.filter((id) =>
-                      eligibleSteps.some((s) => s.id === id),
-                    ),
-                  )
-                }
-              >
-                Run selected steps
-              </button>
-            </>
-          )}
+  const renderStep = (s: StepRun) => {
+    const human = s.executor.kind === "human",
+      actionable =
+        human &&
+        (controlMode !== "step_by_step" || !!s.released_at) &&
+        !isTerminal &&
+        ["ready", "waiting", "running", "blocked"].includes(s.state);
+    return (
+      <section
+        className="card run-step-details"
+        style={renderSidePanel ? undefined : { marginTop: 10, padding: 16 }}
+        key={s.id}
+      >
+        <div className="row between">
+          <strong>{s.definition.name}</strong>
+          <span className={`pill ${s.state}`}>{s.state}</span>
+        </div>
+        <p className="small muted">
+          {s.definition.role} ·{" "}
+          {human
+            ? "Human · project operator"
+            : agents.find((a) => a.id === s.executor.agent_id)?.name ||
+              `Agent ${s.executor.agent_id}`}
+        </p>
+        <p className="small muted">
+          {s.definition.depends_on.length
+            ? `Depends on: ${s.definition.depends_on.join(", ")}`
+            : "Starts with the run"}
+        </p>
+        <section className="step-copy">
+          <h3>Instructions</h3><ResultContent content={s.definition.instructions} />
+          <h3>Required output</h3><ResultContent content={s.definition.expected_output} />
         </section>
-      )}
-      <ProcessFlow
-        steps={steps.map((s) => s.definition)}
-        executions={steps}
-        agents={agents}
-      />
-      <div className="row between">
-        <h2>Step execution</h2>
-        {!isTerminal && (
-          <button
-            disabled={busy}
-            onClick={() => {
-              setSelected("cancel-run");
-              setOutput("");
-              setError("");
-            }}
-          >
-            Cancel run
+        {renderSidePanel && s.progress !== undefined && <div className="run-progress">
+          <div className="run-progress-label"><strong>Step progress</strong><span>{s.progress}%</span></div>
+          <progress aria-label="Step progress" max={100} value={s.progress} />
+        </div>}
+        <TimingDetails step={s} />
+        {s.delivery_warning && (
+          <div className="notice">
+            {s.delivery_suspended
+              ? "Delivery suspended—repair required"
+              : "Delivery retry pending"}
+            : {s.delivery_warning}
+          </div>
+        )}
+        {s.output && <section className="step-output"><h3>Step output</h3><ResultContent content={s.output} /></section>}
+        {s.error && <div className="notice">{s.error}</div>}
+        {s.updated_by && s.state === "completed" && (
+          <p className="small muted">
+            Recorded by {s.updated_by} ·{" "}
+            {new Date(s.updated_at).toLocaleString()}
+          </p>
+        )}
+        {!human && (
+          <ExecutionTools
+            agentID={s.executor.agent_id}
+            threadID={s.target_thread_id}
+            executionID={s.execution_id}
+            stepID={s.id}
+            completedAt={s.completed_at || (s.state === "completed" ? s.updated_at : undefined)}
+            live={!isTerminal && ["running", "ready", "waiting", "blocked"].includes(s.state)}
+            sources={toolSources}
+            defaultOpen={!!renderSidePanel}
+            onActivityStatus={onActivityStatus}
+          />
+        )}
+        {!isTerminal && eligibleSteps.some((item) => item.id === s.id) && (
+          <button disabled={busy} onClick={() => advance([s.id])}>
+            Run this step
           </button>
         )}
-      </div>
-      {selected === "cancel-run" && (
-        <form
-          className="notice"
-          onSubmit={async (e) => {
-            e.preventDefault();
-            setBusy(true);
-            setError("");
-            try {
-              await api(`/runs/${runID}/cancel`, "POST", { reason: output });
-              setSelected("");
-              await onChanged();
-            } catch (e) {
-              setError(e instanceof Error ? e.message : String(e));
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          <p>
-            Cancel future handoffs. Work already dispatched may still finish.
-          </p>
-          <label htmlFor={`cancel-${runID}`}>Reason</label>
-          <textarea
-            id={`cancel-${runID}`}
-            required
-            value={output}
-            onChange={(e) => setOutput(e.target.value)}
-          />
-          <div className="row" style={{ marginTop: 12 }}>
-            <button disabled={busy || !output.trim()}>
-              Confirm cancellation
-            </button>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => setSelected("")}
-            >
-              Keep running
-            </button>
-          </div>
-        </form>
-      )}
-      {error && (
-        <div className="notice" role="alert">
-          {error}
-        </div>
-      )}
-      {steps.map((s) => {
-        const human = s.executor.kind === "human",
-          actionable =
-            human &&
-            (controlMode !== "step_by_step" || !!s.released_at) &&
-            !isTerminal &&
-            ["ready", "waiting", "running", "blocked"].includes(s.state);
-        return (
-          <section
-            className="card"
-            style={{ marginTop: 10, padding: 16 }}
-            key={s.id}
-          >
-            <div className="row between">
-              <strong>{s.definition.name}</strong>
-              <span className={`pill ${s.state}`}>{s.state}</span>
-            </div>
-            <p className="small muted">
-              {s.definition.role} ·{" "}
-              {human
-                ? "Human · project operator"
-                : agents.find((a) => a.id === s.executor.agent_id)?.name ||
-                  `Agent ${s.executor.agent_id}`}
-            </p>
-            <p className="small muted">
-              {s.definition.depends_on.length
-                ? `Depends on: ${s.definition.depends_on.join(", ")}`
-                : "Starts with the run"}
-            </p>
-            <TimingDetails step={s} />
-            {s.delivery_warning && (
-              <div className="notice">
-                {s.delivery_suspended
-                  ? "Delivery suspended—repair required"
-                  : "Delivery retry pending"}
-                : {s.delivery_warning}
-              </div>
-            )}
-            {s.output && <ResultContent content={s.output} />}
-            {s.error && <div className="notice">{s.error}</div>}
-            {s.updated_by && s.state === "completed" && (
-              <p className="small muted">
-                Recorded by {s.updated_by} ·{" "}
-                {new Date(s.updated_at).toLocaleString()}
-              </p>
-            )}
-            {!human && (
-              <ExecutionTools
-                agentID={s.executor.agent_id}
-                threadID={s.target_thread_id}
-                executionID={s.execution_id}
-                stepID={s.id}
-                completedAt={s.completed_at || (s.state === "completed" ? s.updated_at : undefined)}
-                live={!isTerminal && ["running", "ready", "waiting", "blocked"].includes(s.state)}
-                sources={toolSources}
-              />
-            )}
-            {!isTerminal && eligibleSteps.some((item) => item.id === s.id) && (
-              <button disabled={busy} onClick={() => advance([s.id])}>
-                Run this step
+        {actionable && (
+          <>
+            {selected !== s.id ? (
+              <button
+                style={{ marginTop: 12 }}
+                onClick={() => {
+                  setSelected(s.id);
+                  setOutput("");
+                  setError("");
+                }}
+              >
+                Complete human step
               </button>
-            )}
-            {actionable && (
-              <>
-                {selected !== s.id ? (
+            ) : (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  submit(s);
+                }}
+              >
+                <div className="prose small" style={{ marginTop: 14 }}>
+                  {s.definition.instructions}
+                </div>
+                <p className="small muted">
+                  Required: {s.definition.expected_output}
+                </p>
+                <details open>
+                  <summary>Completed inputs</summary>
+                  {steps
+                    .filter((x) => x.state === "completed")
+                    .map((x) => (
+                      <div className="block" key={x.id}>
+                        <strong>{x.definition.name}</strong>
+                        <ResultContent content={x.output} />
+                      </div>
+                    ))}
+                </details>
+                <div className="field" style={{ marginTop: 12 }}>
+                  <label htmlFor={`result-${s.id}`}>
+                    Result and evidence
+                  </label>
+                  <textarea
+                    id={`result-${s.id}`}
+                    required
+                    rows={4}
+                    value={output}
+                    onChange={(e) => setOutput(e.target.value)}
+                  />
+                </div>
+                <div className="row">
                   <button
-                    style={{ marginTop: 12 }}
-                    onClick={() => {
-                      setSelected(s.id);
-                      setOutput("");
-                      setError("");
-                    }}
+                    className="primary"
+                    disabled={busy || !output.trim()}
                   >
-                    Complete human step
+                    Complete step
                   </button>
-                ) : (
-                  <form
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      submit(s);
-                    }}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => setSelected("")}
                   >
-                    <div className="prose small" style={{ marginTop: 14 }}>
-                      {s.definition.instructions}
-                    </div>
-                    <p className="small muted">
-                      Required: {s.definition.expected_output}
-                    </p>
-                    <details open>
-                      <summary>Completed inputs</summary>
-                      {steps
-                        .filter((x) => x.state === "completed")
-                        .map((x) => (
-                          <div className="block" key={x.id}>
-                            <strong>{x.definition.name}</strong>
-                            <ResultContent content={x.output} />
-                          </div>
-                        ))}
-                    </details>
-                    <div className="field" style={{ marginTop: 12 }}>
-                      <label htmlFor={`result-${s.id}`}>
-                        Result and evidence
-                      </label>
-                      <textarea
-                        id={`result-${s.id}`}
-                        required
-                        rows={4}
-                        value={output}
-                        onChange={(e) => setOutput(e.target.value)}
-                      />
-                    </div>
-                    <div className="row">
-                      <button
-                        className="primary"
-                        disabled={busy || !output.trim()}
-                      >
-                        Complete step
-                      </button>
-                      <button
-                        type="button"
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            )}
+          </>
+        )}
+      </section>
+    );
+  };
+  return (
+    <div className={renderSidePanel ? "run-detail-grid" : "run-steps"}>
+      <div className="run-flow-panel">
+        {controlMode === "step_by_step" && (
+          <section className="notice" aria-label="Step-by-step controls">
+            <strong>Step-by-step run</strong>
+            <p>
+              {isTerminal
+                ? `Run ${runState}.`
+                : waitingForAdvance
+                  ? "Waiting for you to advance. Review saved outputs, then choose the next ready step."
+                  : "Released work is active, or the run is waiting on dependencies or timing."}
+            </p>
+            {!isTerminal && eligibleSteps.length > 0 && (
+              <>
+                <div>
+                  {eligibleSteps.map((item) => (
+                    <label
+                      key={item.id}
+                      style={{ display: "block", marginBottom: 8 }}
+                    >
+                      <input
+                        type="checkbox"
                         disabled={busy}
-                        onClick={() => setSelected("")}
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </form>
-                )}
+                        checked={chosen.includes(item.id)}
+                        onChange={(e) =>
+                          setChosen((ids) =>
+                            e.target.checked
+                              ? [...ids, item.id]
+                              : ids.filter((id) => id !== item.id),
+                          )
+                        }
+                      />{" "}
+                      {steps.find((s) => s.id === item.id)?.definition.name ||
+                        item.key}
+                    </label>
+                  ))}
+                </div>
+                <button
+                  disabled={busy}
+                  onClick={() => advance([eligibleSteps[0].id])}
+                >
+                  Run next step
+                </button>
+                <button
+                  disabled={
+                    busy ||
+                    !chosen.some((id) => eligibleSteps.some((s) => s.id === id))
+                  }
+                  onClick={() =>
+                    advance(
+                      chosen.filter((id) =>
+                        eligibleSteps.some((s) => s.id === id),
+                      ),
+                    )
+                  }
+                >
+                  Run selected steps
+                </button>
               </>
             )}
           </section>
-        );
-      })}
+        )}
+        <ProcessFlow
+          selectedKey={renderSidePanel ? steps.find(s => s.id === selectedStepID)?.key : undefined}
+          onSelectStep={onSelectStep ? key => { const step = steps.find(s => s.key === key); if (step) onSelectStep(step.id); } : undefined}
+          steps={steps.map((s) => s.definition)}
+          executions={steps}
+          agents={agents}
+        />
+        <div className="row between">
+          {!renderSidePanel && <h2>Step execution</h2>}
+          {!isTerminal && (
+            <button
+              disabled={busy}
+              onClick={() => {
+                setSelected("cancel-run");
+                setOutput("");
+                setError("");
+              }}
+            >
+              Cancel run
+            </button>
+          )}
+        </div>
+        {selected === "cancel-run" && (
+          <form
+            className="notice"
+            onSubmit={async (e) => {
+              e.preventDefault();
+              setBusy(true);
+              setError("");
+              try {
+                await api(`/runs/${runID}/cancel`, "POST", { reason: output });
+                setSelected("");
+                await onChanged();
+              } catch (e) {
+                setError(e instanceof Error ? e.message : String(e));
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            <p>
+              Cancel future handoffs. Work already dispatched may still finish.
+            </p>
+            <label htmlFor={`cancel-${runID}`}>Reason</label>
+            <textarea
+              id={`cancel-${runID}`}
+              required
+              value={output}
+              onChange={(e) => setOutput(e.target.value)}
+            />
+            <div className="row" style={{ marginTop: 12 }}>
+              <button disabled={busy || !output.trim()}>
+                Confirm cancellation
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setSelected("")}
+              >
+                Keep running
+              </button>
+            </div>
+          </form>
+        )}
+        {error && (
+          <div className="notice" role="alert">
+            {error}
+          </div>
+        )}
+      </div>
+      {renderSidePanel ? renderSidePanel(steps.filter(s => s.id === selectedStepID).map(renderStep)) : steps.map(renderStep)}
     </div>
   );
 }

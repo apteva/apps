@@ -1,5 +1,5 @@
 import { LiveContext, useProcessEvents, useScopedRevision, type AppEvent } from "./live-events";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { ProcessFlow } from "./ProcessFlow";
 import ProjectMap from "./ProjectMap";
 import ResultContent, { ResultModal } from "./ResultContent";
@@ -299,6 +299,9 @@ const css = `
 .ap-processes .run-detail-page{width:100%;min-width:0}.ap-processes .run-detail-page .run-detail{padding:26px}.ap-processes .run-live{display:inline-flex;align-items:center;gap:6px;color:#62ccaa;font-size:12px;font-weight:600}.ap-processes .run-live.attention{color:#e3b86d}.ap-processes .run-live::before{content:"";width:7px;height:7px;border-radius:999px;background:#62ccaa;box-shadow:0 0 0 0 #62ccaa66;animation:pc-live-pulse 1.7s ease-out infinite}.ap-processes .run-live.attention::before{background:#e3b86d}.ap-processes .run-steps{margin-top:18px}.ap-processes .run-detail-grid .run-steps,.ap-processes .run-detail-grid .pf-shell{margin-top:0}.ap-processes .run-detail-grid{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(280px,.75fr);gap:20px;margin-top:20px}.ap-processes .run-current-step{align-self:start;position:sticky;top:18px}.ap-processes .run-current-step h2{margin-bottom:6px}.ap-processes .run-current-step .state-line{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:14px}.ap-processes .run-current-step .step-copy{border-top:1px solid var(--pc-line);padding-top:14px;margin-top:14px}.ap-processes .run-current-step .step-copy p{white-space:pre-wrap;overflow-wrap:anywhere}.ap-processes .run-activity-status{display:flex;align-items:center;gap:9px;color:var(--pc-muted);font-size:12px}.ap-processes .run-activity-status::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--pc-accent)}.ap-processes .run-activity-status.active::before{animation:pc-live-pulse 1.7s ease-out infinite}.ap-processes .run-detail-header{align-items:flex-start}.ap-processes .run-detail-header>div:first-child{min-width:0}.ap-processes .activity-filters{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px}.ap-processes .activity-filters button{font-size:11px;padding:5px 8px}.ap-processes .activity-filters button[aria-pressed="true"]{border-color:var(--pc-accent);color:var(--pc-accent)}.ap-processes .thought-detail{min-width:0}.ap-processes .activity-preview{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--pc-muted);font-size:12px;font-weight:400;margin-top:6px}.ap-processes .thought-detail summary{cursor:pointer;font-size:12px}.ap-processes .thought-detail .prose{max-height:280px;overflow:auto}.ap-processes .run-activity-status[data-state="ready"]{color:#78b9ff}.ap-processes .run-activity-status[data-state="waiting"]{color:#c5a1ff}.ap-processes .run-activity-status[data-state="waiting"]::before{background:#c5a1ff}.ap-processes .run-activity-status[data-state="ready"]::before{background:#78b9ff}@media(prefers-reduced-motion:reduce){.ap-processes .run-live::before,.ap-processes .run-activity-status.active::before{animation:none}}@keyframes pc-live-pulse{0%{box-shadow:0 0 0 0 #62ccaa66;opacity:1}70%{box-shadow:0 0 0 7px #62ccaa00;opacity:.75}100%{box-shadow:0 0 0 0 #62ccaa00;opacity:1}}@media(max-width:900px){.ap-processes .run-detail-grid{grid-template-columns:1fr}.ap-processes .run-current-step{position:static}}
 .ap-processes .process-publishing{max-width:520px}.ap-processes .process-publishing .row{justify-content:flex-end}.ap-processes .process-publishing p{text-align:right}@media(max-width:760px){.ap-processes .process-publishing .row{justify-content:flex-start}.ap-processes .process-publishing p{text-align:left}}
 .ap-processes .readiness{margin:0 0 20px}.ap-processes .readiness h2{margin:0}.ap-processes .readiness-counts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:16px}.ap-processes .readiness-counts span{padding:10px;border:1px solid var(--pc-line);border-radius:8px;color:var(--pc-muted);font-size:11px}.ap-processes .readiness-counts strong{display:block;color:var(--pc-text);font-size:18px}@media(max-width:700px){.ap-processes .readiness-counts{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+.ap-processes .run-current-step{max-height:calc(100dvh - 36px);overflow:auto}.ap-processes .run-current-step .run-step-details{border:0;border-radius:0;background:none;padding:0;margin-top:16px}.ap-processes .run-current-step .run-step-details .step-copy h3{font-size:12px;margin:12px 0 6px}.ap-processes .run-current-step .state-line button{font-size:11px;padding:5px 8px}.ap-processes .run-step-picker{margin:14px 0}.ap-processes .run-flow-panel{min-width:0}.ap-processes .run-current-step .run-progress{margin-top:0}.ap-processes .run-current-step .run-step-details .run-progress{margin-top:14px}
+@media(max-width:900px){.ap-processes .run-current-step{max-height:none;overflow:visible}}
 `;
 const Pill = ({ state }: { state: string }) => (
   <span className={`pill ${state}`}>{state}</span>
@@ -328,14 +331,47 @@ function RunDetailCard({
   toolSources: ToolSource[];
 }) {
   const run = entry.record;
-  const [workerActivityStatus, setWorkerActivityStatus] = useState("");
+  const [workerActivity, setWorkerActivity] = useState({stepID: "", status: ""});
   const [resultOpen, setResultOpen] = useState(false);
-  const active = run.steps ? currentStep(run.steps) : null;
+  const [selectedStepID, setSelectedStepID] = useState<string | null>(null);
+  const steps = run.steps || [];
+  const current = currentStep(steps);
+  const active = steps.find(step => step.id === selectedStepID) || current || steps.at(-1) || null;
   const live = !terminalRunStates.has(run.state);
-  useEffect(()=>setWorkerActivityStatus(""),[active?.id]);
-  const workerName = active?.executor.kind === "agent"
-    ? ownerName(active.executor.agent_id || 0)
-    : active?.executor.kind === "human" ? "Project operator" : "Owner agent";
+  const workerActivityStatus = active && live && !terminalRunStates.has(active.state) && workerActivity.stepID === active.id ? workerActivity.status : "";
+  const recordActivityStatus = useCallback((status: string) => {
+    const stepID = active?.id || "";
+    setWorkerActivity(previous => previous.stepID === stepID && previous.status === status ? previous : {stepID, status});
+  }, [active?.id]);
+  useEffect(() => { setSelectedStepID(null); setResultOpen(false); }, [run.id]);
+  const sidePanel = (details?: ReactNode) => (
+    <aside className="card run-current-step" aria-label="Run step details" aria-live="polite">
+      {run.progress !== undefined && <div className="run-progress">
+        <div className="run-progress-label"><strong>Run progress</strong><span>{run.progress}%</span></div>
+        <progress aria-label="Run progress" max={100} value={run.progress} />
+      </div>}
+      <div className="state-line">
+        <h2>{selectedStepID ? "Selected step" : live ? "Current step" : "Step details"}</h2>
+        {live && selectedStepID && <button type="button" onClick={() => setSelectedStepID(null)}>Follow current step</button>}
+      </div>
+      {steps.length > 0 && <div className="field run-step-picker">
+        <label htmlFor={`run-step-${run.id}`}>Select step</label>
+        <select id={`run-step-${run.id}`} value={active?.id || ""} onChange={event => setSelectedStepID(event.target.value)}>
+          {steps.map((step, index) => <option key={step.id} value={step.id}>{index + 1}. {step.definition.name || step.key} · {step.state}</option>)}
+        </select>
+      </div>}
+      {active ? <>
+        <div data-state={workerActivityStatus ? "waiting" : active.state} className={`run-activity-status ${live && ["running","ready","waiting"].includes(active.state) ? "active" : ""}`}>
+          {workerActivityStatus || (active.state === "running" ? "Worker is working" : active.state === "ready" ? "Ready to start" : active.state === "waiting" ? "Waiting for input, approval or timing" : active.state === "blocked" ? "Blocked — needs attention" : active.state === "completed" ? "Step completed" : active.state)}
+        </div>
+        {details}
+      </> : <>
+        <div className={`run-activity-status ${live ? "active" : ""}`}>{live ? "Waiting for worker activity" : run.state === "completed" ? "All steps completed" : "No active step"}</div>
+        <p className="small muted">{run.result ? "The saved process result is available from View result." : run.error || (live ? "The run has not exposed a current step." : "No result was recorded.")}</p>
+        {!run.workflow && <ExecutionTools agentID={entry.assignment?.owner_agent_id} threadID={run.target_thread_id} executionID={run.execution_id} live={live} sources={toolSources} defaultOpen={live} />}
+      </>}
+    </aside>
+  );
   return (
     <article id={`run-${run.id}`} className="card run run-detail">
       <style>{resultStyles}</style>
@@ -373,87 +409,24 @@ function RunDetailCard({
       </p>
       {run.delivery_warning && <p className="notice">{run.delivery_suspended ? "Delivery suspended—repair required" : "Delivery retry pending"}: {run.delivery_warning}</p>}
       {run.error && <div className="notice"><ResultContent content={run.error} /></div>}
-      <div className="run-detail-grid">
-        <div>
-          {run.workflow ? (
-            <RunSteps
-              steps={run.steps || []}
-              runID={run.id}
-              runState={run.state}
-              controlMode={run.control_mode}
-              waitingForAdvance={run.waiting_for_advance}
-              eligibleSteps={run.eligible_steps || []}
-              agents={agents}
-              projectId={projectId}
-              api={api}
-              onChanged={onChanged}
-              toolSources={toolSources}
-            />
-          ) : (
-            <div className="card">
-              <h2>Run activity</h2>
-              <p className="small muted">The owner worker receives the run and records its result here.</p>
-            </div>
-          )}
-        </div>
-        <aside className="card run-current-step" aria-live="polite">
-          {run.progress !== undefined && <div className="run-progress">
-            <div className="run-progress-label"><strong>Run progress</strong><span>{run.progress}%</span></div>
-            <progress aria-label="Run progress" max={100} value={run.progress} />
-          </div>}
-          <div className="state-line">
-            <h2>Current step</h2>
-            <span className={`pill ${active?.state || run.state}`}>{active?.state || run.state}</span>
-          </div>
-          {active ? (
-            <>
-              <strong>{active.definition.name || active.key}</strong>
-              <p className="small muted">{active.definition.role} · {workerName}</p>
-              <div className="step-copy">
-                <div data-state={workerActivityStatus ? "waiting" : active.state} className={`run-activity-status ${live && ["running","ready","waiting"].includes(active.state) ? "active" : ""}`}>
-                  {workerActivityStatus || (active.state === "running" ? "Worker is working" : active.state === "ready" ? "Ready to start" : active.state === "waiting" ? "Waiting for input, approval or timing" : active.state === "blocked" ? "Blocked — needs attention" : active.state)}
-                </div>
-                <p className="small">{active.definition.instructions}</p>
-                {active.progress > 0 && <div className="run-progress">
-                  <div className="run-progress-label"><strong>Step progress</strong><span>{active.progress}%</span></div>
-                  <progress aria-label="Step progress" max={100} value={active.progress} />
-                </div>}
-                {(active.delivery_warning || active.error) && (
-                  <div className="notice small">
-                    {active.delivery_suspended ? "Delivery suspended—repair required: " : active.delivery_warning ? "Delivery retry pending: " : "Worker error: "}
-                    {active.delivery_warning || active.error}
-                  </div>
-                )}
-              </div>
-              {active.output && <section className="step-output"><h3>Step output</h3><ResultContent content={active.output} /></section>}
-              {active.executor.kind === "agent" ? (
-                <ExecutionTools
-                  key={active.id}
-                  agentID={active.executor.agent_id}
-                  threadID={active.target_thread_id}
-                  executionID={active.execution_id}
-                  stepID={active.id}
-                  completedAt={active.completed_at || (active.state === "completed" ? active.updated_at : undefined)}
-                  live={live}
-                  onActivityStatus={setWorkerActivityStatus}
-                  sources={toolSources}
-                  defaultOpen={live}
-                />
-              ) : (
-                <p className="small muted">This step is assigned to a project operator.</p>
-              )}
-            </>
-          ) : (
-            <>
-              <div className={`run-activity-status ${live ? "active" : ""}`}>
-                {live ? "Waiting for worker activity" : run.state === "completed" ? "All steps completed" : "No active step"}
-              </div>
-              {run.result ? <p className="small muted">The saved process result is available from View result.</p> : <p className="small muted">{run.error || (live ? "The run has not exposed a current step." : "No result was recorded.")}</p>}
-              {!run.workflow && <ExecutionTools agentID={entry.assignment?.owner_agent_id} threadID={run.target_thread_id} executionID={run.execution_id} live={live} sources={toolSources} defaultOpen={live} />}
-            </>
-          )}
-        </aside>
-      </div>
+      {run.workflow ? <RunSteps
+        steps={steps}
+        runID={run.id}
+        runState={run.state}
+        controlMode={run.control_mode}
+        waitingForAdvance={run.waiting_for_advance}
+        eligibleSteps={run.eligible_steps || []}
+        agents={agents}
+        projectId={projectId}
+        api={api}
+        onChanged={onChanged}
+        toolSources={toolSources}
+        selectedStepID={active?.id}
+        onSelectStep={setSelectedStepID}
+        renderSidePanel={sidePanel}
+        onActivityStatus={recordActivityStatus}
+      /> : <div className="run-detail-grid"><div className="card"><h2>Run activity</h2><p className="small muted">The owner worker receives the run and records its result here.</p></div>{sidePanel()}</div>}
+
     </article>
   );
 }
