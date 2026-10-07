@@ -22,8 +22,16 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.14.12
+version: 0.14.13
 description: |
+  v0.14.13 adds guarded auto keyframe trimming with bounded drift, source
+  picture/timeline checks and accurate fallback. HEVC speed/quality profiles,
+  estimated per-job budgets and explicit HLG/Dolby Vision diagnostics make
+  export choices reviewable. Two-pass loudness normalization checks encoded
+  LUFS/true peak, sample rate, decode and timing before upload, and preserves
+  trim presentation cutoffs. Accurate cuts and every-frame validation remain
+  the default. Auto copy and normalization use a shared Python 3 standard-
+  library runtime on the execution host; auto falls back if it is unavailable.
   v0.14.12 makes trimming frame-accurate by decoding and re-encoding the
   requested interval, aligns retained pictures and audio at zero, and scans
   every output frame before upload. Read-only analysis detects single-frame
@@ -248,7 +256,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_audio_filter
-      description: "Normalize, clean, adjust, or mute audio in an audio/video source. Normalization preserves the indexed source sample rate and applies a lossy-codec-safe peak limiter. For video outputs, copies video and only re-encodes audio. Returns render_id."
+      description: "Normalize, clean, adjust, or mute audio in an audio/video source. Two-pass normalization measures first and validates finished loudness, true peak, sample rate and timing before upload. Requires Python 3 on the execution host. For video outputs, copies video and only re-encodes audio. Returns render_id."
       async_result:
         id_field: render_id
         notify:
@@ -314,7 +322,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.12
+    ref: media/v0.14.13
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -679,16 +687,22 @@ func (a *App) MCPTools() []sdk.Tool {
 		// asynchronously. Callers poll media_get_render for status.
 		{
 			Name:        "media_trim",
-			Description: "Frame-accurate cut from a video/audio file. Re-encodes [start_ms,end_ms), aligns retained pictures/audio at zero, and validates every output picture before upload. Source bit depth/base color signaling are retained; Dolby Vision dynamic metadata is not retained and appears in trim_diagnostics. Local/remote FFmpeg execution. Args: file_id (string), start_ms, end_ms (int), output_name (string, optional).",
+			Description: "Frame-accurate cut (default trim_mode=accurate) or bounded keyframe copy (trim_mode=auto) from a video/audio file. Re-encodes [start_ms,end_ms), aligns retained pictures/audio at zero, and validates every output picture before upload. Source bit depth/base color signaling are retained; Dolby Vision dynamic metadata is not retained and appears in trim_diagnostics. Local/remote FFmpeg execution. Args: file_id (string), start_ms, end_ms (int), output_name (string, optional).",
 			InputSchema: schemaObject(map[string]any{
-				"file_id":         map[string]any{"type": "string"},
-				"start_ms":        map[string]any{"type": "integer"},
-				"end_ms":          map[string]any{"type": "integer"},
-				"output_name":     map[string]any{"type": "string", "description": "Optional output filename. Extensionless names receive the operation/source extension; unsupported or conflicting formats are rejected before queuing."},
-				"output_folder":   map[string]any{"type": "string"},
-				"encoder_profile": encoderProfileSchema(),
+				"file_id":              map[string]any{"type": "string"},
+				"trim_mode":            map[string]any{"type": "string", "enum": []string{"accurate", "auto"}, "default": "accurate", "description": "auto copies H.264/HEVC video only when bounded keyframes, zero-start timestamps, source frame coverage and endpoint identity pass; otherwise accurately re-encodes. Auto requires Python 3 on the execution host. Actual times and fallback reason are returned in resolved_params.trim_diagnostics."},
+				"max_start_drift_ms":   map[string]any{"type": "integer", "minimum": 0, "maximum": 2000, "default": 250},
+				"max_end_drift_ms":     map[string]any{"type": "integer", "minimum": 0, "maximum": 2000, "default": 250},
+				"hevc_profile":         map[string]any{"type": "string", "enum": []string{"legacy", "fast", "balanced", "quality"}, "description": "HEVC re-encoding: legacy fast/CRF18, fast ultrafast/CRF23, balanced fast/CRF20, quality slow/CRF18. Retains source bit depth, dimensions and frame rate. Choose this or encoder_profile; actual codec/preset/CRF are persisted."},
+				"require_dolby_vision": map[string]any{"type": "boolean", "default": false, "description": "Reject before rendering when Dolby Vision preservation is required. Current trim workflows deliver source base-layer color (HLG/PQ), without guaranteed Dolby Vision metadata."},
+				"start_ms":             map[string]any{"type": "integer"},
+				"end_ms":               map[string]any{"type": "integer"},
+				"output_name":          map[string]any{"type": "string", "description": "Optional output filename. Extensionless names receive the operation/source extension; unsupported or conflicting formats are rejected before queuing."},
+				"output_folder":        map[string]any{"type": "string"},
+				"encoder_profile":      encoderProfileSchema(),
+				"timeout_seconds":      timeoutSchema(),
 			}, []string{"file_id", "start_ms", "end_ms"}),
-			Handler: a.toolSubmitRender("trim", []string{"start_ms", "end_ms"}, []string{"file_id"}),
+			Handler: a.toolSubmitRender("trim", []string{"start_ms", "end_ms", "trim_mode", "max_start_drift_ms", "max_end_drift_ms", "hevc_profile", "require_dolby_vision"}, []string{"file_id"}),
 		},
 		{
 			Name:        "media_resize",
@@ -701,6 +715,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"output_name":     map[string]any{"type": "string", "description": "Optional output filename. Extensionless names receive the operation/source extension; unsupported or conflicting formats are rejected before queuing."},
 				"output_folder":   map[string]any{"type": "string"},
 				"encoder_profile": encoderProfileSchema(),
+				"timeout_seconds": timeoutSchema(),
 			}, []string{"file_id", "width"}),
 			Handler: a.toolSubmitRender("resize", []string{"width", "height", "keep_aspect"}, []string{"file_id"}),
 		},
@@ -716,6 +731,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"output_name":     map[string]any{"type": "string", "description": "Optional output filename. Extensionless names receive the operation/source extension; unsupported or conflicting formats are rejected before queuing."},
 				"output_folder":   map[string]any{"type": "string"},
 				"encoder_profile": encoderProfileSchema(),
+				"timeout_seconds": timeoutSchema(),
 			}, []string{"file_id", "format"}),
 			Handler: a.toolSubmitRender("transcode", []string{"format", "video_codec", "audio_codec", "bitrate"}, []string{"file_id"}),
 		},
@@ -727,6 +743,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"output_name":     map[string]any{"type": "string", "description": "Optional output filename. Extensionless names receive the operation/source extension; unsupported or conflicting formats are rejected before queuing."},
 				"output_folder":   map[string]any{"type": "string"},
 				"encoder_profile": encoderProfileSchema(),
+				"timeout_seconds": timeoutSchema(),
 			}, []string{"file_ids", "output_name"}),
 			Handler: a.toolSubmitRender("concat", nil, []string{"file_ids"}),
 		},
@@ -746,6 +763,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"output_name":     map[string]any{"type": "string", "description": "Optional output filename. Extensionless names receive the operation/source extension; unsupported or conflicting formats are rejected before queuing."},
 				"output_folder":   map[string]any{"type": "string"},
 				"encoder_profile": encoderProfileSchema(),
+				"timeout_seconds": timeoutSchema(),
 			}, []string{"file_id"}),
 			Handler: a.toolSubmitRender("crop", []string{"x", "y", "width", "height", "target_ratio", "output_width", "crop_mode", "fit_mode"}, []string{"file_id"}),
 		},
@@ -763,6 +781,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"output_name":     map[string]any{"type": "string", "description": "Optional PNG filename. Extensionless names receive .png; other extensions are rejected. Use .png for every portrait frame."},
 				"output_folder":   map[string]any{"type": "string"},
 				"encoder_profile": encoderProfileSchema(),
+				"timeout_seconds": timeoutSchema(),
 			}, []string{"file_id", "at_ms"}),
 			Handler: a.toolSubmitRender("extract_frame", []string{"at_ms", "width", "target_ratio", "output_width", "crop_mode", "fit_mode"}, []string{"file_id"}),
 		},
@@ -775,22 +794,25 @@ func (a *App) MCPTools() []sdk.Tool {
 				"output_name":     map[string]any{"type": "string", "description": "Optional output filename. Extensionless names receive the operation/source extension; unsupported or conflicting formats are rejected before queuing."},
 				"output_folder":   map[string]any{"type": "string"},
 				"encoder_profile": encoderProfileSchema(),
+				"timeout_seconds": timeoutSchema(),
 			}, []string{"file_id", "format"}),
 			Handler: a.toolSubmitRender("audio_extract", []string{"format"}, []string{"file_id"}),
 		},
 		{
 			Name:        "media_audio_filter",
-			Description: "Modify audio in an audio or video file. Normalization preserves the indexed source sample rate and applies a lossy-codec-safe peak limiter. For videos, copies the video stream unchanged and only filters/re-encodes audio. Args: file_id, mode ('normalize' default | 'speech_clean' | 'volume' | 'mute'), target_lufs (optional, default -16 for normalize/speech_clean), gain_db (for volume), output_name?, output_folder?. Audio-only inputs keep their audio container; video inputs keep their video container unless output_name has an audio extension.",
+			Description: "Modify audio in an audio or video file. Two-pass normalization measures first and validates finished loudness, true peak, sample rate and timing before upload. Requires Python 3 on the execution host. For videos, copies the video stream unchanged and only filters/re-encodes audio. Args: file_id, mode ('normalize' default | 'speech_clean' | 'volume' | 'mute'), target_lufs (optional, default -16 for normalize/speech_clean), gain_db (for volume), output_name?, output_folder?. Audio-only inputs keep their audio container; video inputs keep their video container unless output_name has an audio extension.",
 			InputSchema: schemaObject(map[string]any{
-				"file_id":         map[string]any{"type": "string"},
-				"mode":            map[string]any{"type": "string", "description": "'normalize' (default), 'speech_clean', 'volume', or 'mute'."},
-				"target_lufs":     map[string]any{"type": "number", "description": "Target integrated loudness for normalize/speech_clean. Default -16."},
-				"gain_db":         map[string]any{"type": "number", "description": "Gain in dB for mode='volume', e.g. 3 or -2."},
-				"output_name":     map[string]any{"type": "string", "description": "Optional output filename. Extensionless names receive the operation/source extension; unsupported or conflicting formats are rejected before queuing."},
-				"output_folder":   map[string]any{"type": "string"},
-				"encoder_profile": encoderProfileSchema(),
+				"file_id":          map[string]any{"type": "string"},
+				"mode":             map[string]any{"type": "string", "description": "'normalize' (default), 'speech_clean', 'volume', or 'mute'."},
+				"target_peak_dbtp": map[string]any{"type": "number", "minimum": -9, "maximum": 0, "default": -1.5, "description": "Encoded true-peak ceiling for two-pass normalization. Finished loudness must be within 0.5 LU and peak within 0.1 dB or upload is rejected."},
+				"target_lufs":      map[string]any{"type": "number", "description": "Target integrated loudness for normalize/speech_clean. Default -16."},
+				"gain_db":          map[string]any{"type": "number", "description": "Gain in dB for mode='volume', e.g. 3 or -2."},
+				"output_name":      map[string]any{"type": "string", "description": "Optional output filename. Extensionless names receive the operation/source extension; unsupported or conflicting formats are rejected before queuing."},
+				"output_folder":    map[string]any{"type": "string"},
+				"encoder_profile":  encoderProfileSchema(),
+				"timeout_seconds":  timeoutSchema(),
 			}, []string{"file_id"}),
-			Handler: a.toolSubmitRender("audio_filter", []string{"mode", "target_lufs", "gain_db"}, []string{"file_id"}),
+			Handler: a.toolSubmitRender("audio_filter", []string{"mode", "target_lufs", "target_peak_dbtp", "gain_db"}, []string{"file_id"}),
 		},
 		{
 			Name:        "media_extract_reel",
@@ -2339,7 +2361,7 @@ func (a *App) toolIndexStatus(ctx *sdk.AppCtx, args map[string]any) (any, error)
 // "file_id" in sourceKeys; concat lists "file_ids".
 
 func (a *App) toolSubmitRender(operation string, paramKeys, sourceKeys []string) sdk.ToolHandler {
-	paramKeys = append(append([]string{}, paramKeys...), "encoder_profile")
+	paramKeys = append(append([]string{}, paramKeys...), "encoder_profile", "timeout_seconds")
 	return func(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		pid, err := resolveProjectFromArgs(args)
 		if err != nil {
@@ -2383,6 +2405,10 @@ func (a *App) toolSubmitRender(operation string, paramKeys, sourceKeys []string)
 			"operation":    operation,
 			"output_name":  plan.Filename,
 			"content_type": plan.ContentType,
+			"render_budget": func() renderBudget {
+				b, _ := describeRenderBudget(ctx, &RenderRow{ProjectID: pid, Operation: operation, SourceFileIDs: sources, Params: paramJSON}, parseConfigIntFallback(ctx.Config().Get("render_timeout_seconds"), 1800))
+				return b
+			}(),
 		}, nil
 	}
 }
@@ -2764,6 +2790,7 @@ func (a *App) handleRendersCollection(w http.ResponseWriter, r *http.Request) {
 		if body.Params == nil {
 			body.Params = map[string]any{}
 		}
+		body.Params = sanitizeSubmittedRenderParams(body.Params)
 		paramJSON, _ := json.Marshal(body.Params)
 		plan, err := prepareRenderSubmission(globalCtx, pid, body.Operation, sources, paramJSON, body.OutputName)
 		if err != nil {
@@ -2778,7 +2805,8 @@ func (a *App) handleRendersCollection(w http.ResponseWriter, r *http.Request) {
 		}
 		emitRenderQueued(globalCtx, id, pid, body.Operation, sources, body.RequestedBy)
 		w.WriteHeader(http.StatusAccepted)
-		writeJSON(w, map[string]any{"render_id": id, "status": "pending", "output_name": plan.Filename, "content_type": plan.ContentType})
+		budget, _ := describeRenderBudget(globalCtx, &RenderRow{ProjectID: pid, Operation: body.Operation, SourceFileIDs: sources, Params: paramJSON}, parseConfigIntFallback(globalCtx.Config().Get("render_timeout_seconds"), 1800))
+		writeJSON(w, map[string]any{"render_id": id, "status": "pending", "output_name": plan.Filename, "content_type": plan.ContentType, "render_budget": budget})
 	default:
 		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
 	}

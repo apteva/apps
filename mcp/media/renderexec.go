@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -115,6 +116,11 @@ type localExecutor struct {
 func (e *localExecutor) Name() string { return "local" }
 
 func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *RenderRow) (int64, error) {
+	if row.Operation == "audio_filter" && needsRenderRuntime(row.Operation, row.Params) {
+		if _, err := exec.LookPath("python3"); err != nil {
+			return 0, fmt.Errorf("render_runtime_unavailable: Python 3 is required for two-pass normalization")
+		}
+	}
 	db := app.AppDB()
 	ctx = context.WithValue(ctx, renderTraceKey{}, renderTrace{app, row})
 	ctx = context.WithValue(ctx, localSourceCacheRootKey{}, filepath.Join(e.scratchRoot, "sources"))
@@ -195,6 +201,9 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 		return 0, fmt.Errorf("build plan: %w", err)
 	}
 
+	if err := persistTrimEncodingSettings(app, row, plan); err != nil {
+		return 0, err
+	}
 	if err := storeRenderOutputPlan(app, row, plan); err != nil {
 		return 0, fmt.Errorf("store output plan: %w", err)
 	}
@@ -216,7 +225,7 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 		folder = e.outputFolder
 	}
 	cacheKey := localRenderCacheKey(ctx, app, sc, row, plan, folder, e.ffmpegPath)
-	if row.Operation == "trim" {
+	if row.Operation == "trim" || needsRenderRuntime(row.Operation, row.Params) {
 		cacheKey = ""
 	} // Request cache retains validation with the output.
 	if cacheKey != "" {
@@ -241,14 +250,55 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 
 	doneEncode := renderStage(app, row, "encode")
 	cmd := exec.CommandContext(ctx, e.ffmpegPath, args...)
+	useRuntime := needsRenderRuntime(row.Operation, row.Params)
+	if useRuntime && row.Operation == "trim" {
+		if _, pythonErr := exec.LookPath("python3"); pythonErr != nil {
+			useRuntime = false
+			var p map[string]any
+			_ = json.Unmarshal(row.Params, &p)
+			if d, ok := p["trim_diagnostics"].(map[string]any); ok {
+				d["fallback_reason"] = "python3_unavailable"
+			}
+			row.Params, _ = json.Marshal(p)
+			if storeErr := renderUpdateResolvedParams(db, row.ID, row.Params); storeErr != nil {
+				return 0, storeErr
+			}
+		}
+	}
+	if !useRuntime && row.Operation == "trim" {
+		if err := checkRemainingRenderBudget(ctx, row); err != nil {
+			return 0, err
+		}
+	}
+	if useRuntime {
+		cmd, err = localRuntimeCommand(ctx, row, jobDir, e.ffmpegPath, srcPaths[0], outputPath, args)
+		if err != nil {
+			return 0, err
+		}
+	}
 	stdout, _ := cmd.StdoutPipe()
 	var stderrBuf strings.Builder
 	cmd.Stderr = &stderrBuf
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("ffmpeg start: %w", err)
 	}
-	go forwardProgress(stdout, db, row.ID, app, row.ProjectID, expectedProgressDurationMs(db, row))
-	if err := cmd.Wait(); err != nil {
+	progressFinished := make(chan struct{})
+	go func() {
+		defer close(progressFinished)
+		forwardProgress(stdout, db, row.ID, app, row.ProjectID, expectedProgressDurationMs(db, row))
+	}()
+	encodeErr := cmd.Wait()
+	<-progressFinished
+	if useRuntime {
+		if raw, readErr := os.ReadFile(filepath.Join(jobDir, "runtime-result.json")); readErr == nil {
+			if persistErr := persistRuntimeResult(app, row, raw); persistErr != nil {
+				return 0, persistErr
+			}
+		} else if encodeErr == nil {
+			return 0, fmt.Errorf("missing render runtime diagnostics: %w", readErr)
+		}
+	}
+	if err := encodeErr; err != nil {
 		// Cancellation/timeout get the raw context error — the
 		// orchestrator distinguishes them via ctx.Err().
 		if ctx.Err() != nil {
@@ -308,6 +358,11 @@ func forwardProgress(r io.ReadCloser, db *sql.DB, id int64, app *sdk.AppCtx, pro
 	lastPct := 0
 	for scanner.Scan() {
 		line := scanner.Text()
+		if strings.HasPrefix(line, "speed=") {
+			if speed, err := strconv.ParseFloat(strings.TrimSuffix(strings.TrimPrefix(line, "speed="), "x"), 64); err == nil && speed > 0 {
+				recordRenderMetric(app, &RenderRow{ID: id}, "observed_encode_speed", speed)
+			}
+		}
 		if !strings.HasPrefix(line, "out_time_ms=") {
 			continue
 		}
@@ -350,10 +405,18 @@ func expectedProgressDurationMs(db *sql.DB, row *RenderRow) int64 {
 	}
 	if row.Operation == "trim" || row.Operation == "extract_reel" {
 		var p struct {
-			StartMs int64 `json:"start_ms"`
-			EndMs   int64 `json:"end_ms"`
+			StartMs     int64 `json:"start_ms"`
+			EndMs       int64 `json:"end_ms"`
+			Diagnostics struct {
+				Mode  string  `json:"mode"`
+				Start float64 `json:"actual_start_ms"`
+				End   float64 `json:"actual_end_ms"`
+			} `json:"trim_diagnostics"`
 		}
 		if err := json.Unmarshal(row.Params, &p); err == nil && p.EndMs > p.StartMs {
+			if p.Diagnostics.Mode == "keyframe_copy" && p.Diagnostics.End > p.Diagnostics.Start {
+				return int64(math.Round(p.Diagnostics.End - p.Diagnostics.Start))
+			}
 			return p.EndMs - p.StartMs
 		}
 	}

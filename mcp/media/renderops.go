@@ -101,9 +101,14 @@ var ErrNotImplemented = errors.New("operation not implemented in this media vers
 // requested source timeline, with silence padding for genuine missing audio.
 
 type trimParams struct {
-	StartMs     int64             `json:"start_ms"`
-	EndMs       int64             `json:"end_ms"`
-	SourceVideo trimVideoEncoding `json:"_trim_source_video"`
+	StartMs            int64             `json:"start_ms"`
+	EndMs              int64             `json:"end_ms"`
+	SourceVideo        trimVideoEncoding `json:"_trim_source_video"`
+	TrimMode           string            `json:"trim_mode"`
+	MaxStartDriftMs    *int64            `json:"max_start_drift_ms"`
+	MaxEndDriftMs      *int64            `json:"max_end_drift_ms"`
+	HEVCProfile        string            `json:"hevc_profile"`
+	RequireDolbyVision bool              `json:"require_dolby_vision"`
 }
 
 func planTrim(sources []string, raw json.RawMessage, outputName string) (*opPlan, error) {
@@ -121,6 +126,20 @@ func planTrim(sources []string, raw json.RawMessage, outputName string) (*opPlan
 		return nil, errors.New("trim: start_ms must be >= 0")
 	}
 
+	if p.TrimMode != "" && p.TrimMode != "accurate" && p.TrimMode != "auto" {
+		return nil, errors.New("trim_mode must be accurate or auto")
+	}
+	for _, drift := range []*int64{p.MaxStartDriftMs, p.MaxEndDriftMs} {
+		if drift != nil && (*drift < 0 || *drift > 2000) {
+			return nil, errors.New("trim drift limits must be 0..2000 ms")
+		}
+	}
+	if p.RequireDolbyVision {
+		return nil, errors.New("unsupported_color_preservation: Dolby Vision preservation is not supported by this trim workflow; HLG/PQ base color is retained")
+	}
+	if _, _, err := hevcProfileSettings(p.HEVCProfile); err != nil {
+		return nil, err
+	}
 	name, ct := defaultOutputName(outputName, sources[0], "trim", "")
 	duration := msToSeconds(p.EndMs - p.StartMs)
 	// Input seek is accurate with re-encoding (FFmpeg's default accurate_seek).
@@ -143,6 +162,13 @@ func planTrim(sources []string, raw json.RawMessage, outputName string) (*opPlan
 		return nil, err
 	}
 	args = append(args, encoding...)
+	if trimUsesHEVC(p.SourceVideo) && !isAudioExt(filepath.Ext(name)) && p.HEVCProfile != "" && p.HEVCProfile != "legacy" {
+		if ext := strings.ToLower(filepath.Ext(name)); ext != ".mp4" && ext != ".mov" && ext != ".mkv" {
+			return nil, fmt.Errorf("hevc_profile requires MP4, MOV or MKV output")
+		}
+		preset, crf, _ := hevcProfileSettings(p.HEVCProfile)
+		args = append(args, "-preset", preset, "-crf", crf)
+	}
 	return &opPlan{Filename: name, ContentType: ct, Args: args}, nil
 }
 
@@ -649,10 +675,11 @@ func planAudioExtract(sources []string, raw json.RawMessage, outputName string) 
 // only the filtered audio stream.
 
 type audioFilterParams struct {
-	Mode             string  `json:"mode"`                          // normalize|speech_clean|volume|mute
-	TargetLUFS       float64 `json:"target_lufs,omitempty"`         // default -16 for normalize/speech_clean
-	GainDB           float64 `json:"gain_db,omitempty"`             // used by volume mode
-	SourceSampleRate int     `json:"_source_sample_rate,omitempty"` // executor-injected; never agent-controlled
+	Mode             string   `json:"mode"` // normalize|speech_clean|volume|mute
+	TargetLUFS       float64  `json:"target_lufs,omitempty"`
+	TargetPeakDBTP   *float64 `json:"target_peak_dbtp,omitempty"`    // default -16 for normalize/speech_clean
+	GainDB           float64  `json:"gain_db,omitempty"`             // used by volume mode
+	SourceSampleRate int      `json:"_source_sample_rate,omitempty"` // executor-injected; never agent-controlled
 }
 
 func planAudioFilter(sources []string, raw json.RawMessage, outputName, sourceExt string) (*opPlan, error) {
@@ -720,6 +747,12 @@ func audioFilterChain(p audioFilterParams, lossyOutput bool) (string, error) {
 	target := p.TargetLUFS
 	if target == 0 {
 		target = -16
+	}
+	if target < -70 || target > -5 {
+		return "", fmt.Errorf("audio_filter: target_lufs must be -70..-5")
+	}
+	if p.TargetPeakDBTP != nil && (*p.TargetPeakDBTP < -9 || *p.TargetPeakDBTP > 0) {
+		return "", fmt.Errorf("audio_filter: target_peak_dbtp must be -9..0")
 	}
 	// loudnorm's dynamic mode internally upsamples to 192 kHz. Leaving
 	// that rate at the encoder boundary made AAC/MOV outputs land at

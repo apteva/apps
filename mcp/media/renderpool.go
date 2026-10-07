@@ -161,6 +161,13 @@ func renderWorker(app *sdk.AppCtx, id int) {
 func runOneRender(app *sdk.AppCtx, row *RenderRow, local *localExecutor, remote *remoteExecutor, timeoutSec int) {
 	log := app.Logger()
 	db := app.AppDB()
+	effectiveTimeout, budgetErr := prepareRenderBudget(app, row, timeoutSec)
+	if budgetErr != nil {
+		_ = renderMarkFailed(db, row.ID, budgetErr.Error())
+		emitRenderFailed(app, row.ID, row.ProjectID, row.Operation, budgetErr.Error())
+		return
+	}
+	timeoutSec = effectiveTimeout
 
 	// Wall-clock cap. Combined with the per-render cancel func so
 	// either timeout OR explicit cancel terminates work promptly.

@@ -2,8 +2,16 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.12
+version: 0.14.13
 description: |
+  v0.14.13 adds guarded auto keyframe trimming with bounded drift, source
+  picture/timeline checks and accurate fallback. HEVC speed/quality profiles,
+  estimated per-job budgets and explicit HLG/Dolby Vision diagnostics make
+  export choices reviewable. Two-pass loudness normalization checks encoded
+  LUFS/true peak, sample rate, decode and timing before upload, and preserves
+  trim presentation cutoffs. Accurate cuts and every-frame validation remain
+  the default. Auto copy and normalization use a shared Python 3 standard-
+  library runtime on the execution host; auto falls back if it is unavailable.
   v0.14.12 makes trimming frame-accurate by decoding and re-encoding the
   requested interval, aligns retained pictures and audio at zero, and scans
   every output frame before upload. Read-only analysis detects single-frame
@@ -549,7 +557,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.12
+    ref: media/v0.14.13
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -639,7 +647,17 @@ config_schema:
     type: text
     default: "1800"
     label: Render timeout (seconds)
-    description: Hard wall-clock cap per render. Wedged ffmpeg children are killed and the row marked failed.
+    description: Default wall-clock budget. HEVC trims can automatically increase it to the estimate, up to render_max_timeout_seconds. Explicit timeout_seconds is honored within that maximum.
+  - name: render_max_timeout_seconds
+    type: text
+    default: "14400"
+    label: Maximum job timeout (seconds)
+    description: Operator ceiling for automatic HEVC budgets and explicit per-job timeouts.
+  - name: render_hevc_estimated_speed
+    type: text
+    default: "0.2"
+    label: Estimated HEVC encoding speed
+    description: Conservative source seconds per wall second for this host; adjust from observed performance. Estimate also includes validation and transfer reserves. Applies conservatively to all HEVC quality profiles.
   - name: render_max_output_size_mb
     type: text
     default: "4096"

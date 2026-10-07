@@ -155,6 +155,9 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 		return 0, fmt.Errorf("build plan: %w", err)
 	}
 
+	if err := persistTrimEncodingSettings(app, row, plan); err != nil {
+		return 0, err
+	}
 	if err := storeRenderOutputPlan(app, row, plan); err != nil {
 		return 0, fmt.Errorf("store output plan: %w", err)
 	}
@@ -194,6 +197,17 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 		folder = e.outputFolder
 	}
 
+	if dl, ok := ctx.Deadline(); ok {
+		var params map[string]any
+		_ = json.Unmarshal(row.Params, &params)
+		params["_runtime_remaining_seconds"] = time.Until(dl).Seconds()
+		row.Params, _ = json.Marshal(params)
+	}
+	if row.Operation == "trim" && !needsRenderRuntime(row.Operation, row.Params) {
+		if err := checkRemainingRenderBudget(ctx, row); err != nil {
+			return 0, err
+		}
+	}
 	script, err := e.buildScript(row, plan, paths.FFmpeg, signedURLs, sourceNames, sourceSizes, sourceSHA256s, folder, publicURL)
 	if err != nil {
 		return 0, fmt.Errorf("build remote script: %w", err)
@@ -224,6 +238,11 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 	}
 
 	out, exit, runErr := runRemote(ctx, app, e.hostID, "setsid bash -c "+shellQuote(script), timeoutS)
+	if raw := runtimeResultFromLog(out); raw != nil {
+		if err := persistRuntimeResult(app, row, raw); err != nil {
+			return 0, err
+		}
+	}
 	primaryOutput, hits, misses := splitRemoteRenderDiagnostics(out)
 	recordRenderMetric(app, row, "source_cache_hits", hits)
 	recordRenderMetric(app, row, "source_cache_misses", misses)
@@ -338,6 +357,9 @@ func (e *remoteExecutor) buildScript(
 	// Always-rm cleanup. Runs on any exit including non-zero/abort.
 	b.WriteString(`trap 'cd "$WORK_ROOT" && rm -rf "$WORK"' EXIT` + "\n")
 	b.WriteString(`curl_retry() { curl -sS --retry 3 --retry-delay 1 --retry-max-time 120 --retry-connrefused --retry-all-errors "$@"; }` + "\n")
+	if row.Operation == "audio_filter" && needsRenderRuntime(row.Operation, row.Params) {
+		b.WriteString("command -v python3 >/dev/null || { echo 'render_runtime_unavailable: Python 3 is required for two-pass normalization'; exit 1; }\n")
+	}
 	b.WriteString(remoteSourceCacheScriptFragment)
 
 	// Materialize every source through the persistent remote cache.
@@ -360,16 +382,18 @@ func (e *remoteExecutor) buildScript(
 		b.WriteString("__CONCAT_LIST_EOF__\n")
 	}
 
-	// Run ffmpeg.
-	fmt.Fprintf(&b, "%s", shellQuote(ffmpegPath))
-	for _, a := range args {
-		b.WriteString(" ")
-		b.WriteString(shellQuote(a))
+	// Run FFmpeg, or the shared guarded runtime against cached local sources.
+	if needsRenderRuntime(row.Operation, row.Params) {
+		b.WriteString(remoteRuntimeScript(row, ffmpegPath, srcPaths[0], "./"+plan.Filename, args))
+	} else {
+		b.WriteString(shellCommand(ffmpegPath, args) + "\n")
 	}
-	b.WriteString("\n")
-
 	if row.Operation == "trim" {
-		b.WriteString(trimValidationScript(ffmpegPath, "./"+plan.Filename, expectedProgressDurationMs(nil, row)))
+		validationScript := trimValidationScript(ffmpegPath, "./"+plan.Filename, expectedProgressDurationMs(nil, row))
+		if needsRenderRuntime(row.Operation, row.Params) {
+			validationScript = strings.Replace(validationScript, "-v expected="+formatSeconds(expectedProgressDurationMs(nil, row)), "-v expected=\"$TRIM_EXPECTED\"", 1)
+		}
+		b.WriteString(validationScript)
 	}
 
 	// Stat + hash output before upload.

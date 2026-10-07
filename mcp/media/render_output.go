@@ -103,6 +103,11 @@ func prepareRenderSubmission(app *sdk.AppCtx, project, op string, sources []stri
 			return nil, invalidOutputFormat("cannot determine the source format; provide output_name with a supported extension")
 		}
 	}
+	row := &RenderRow{ProjectID: project, Operation: op, SourceFileIDs: sources, Params: params}
+	if _, err := describeRenderBudget(app, row, parseConfigIntFallback(app.Config().Get("render_timeout_seconds"), 1800)); err != nil {
+		return nil, err
+	}
+	params = prepareTrimParams(app.AppDB(), project, op, sources, params)
 	return buildPlan(op, sources, params, name, ext)
 }
 
@@ -116,6 +121,11 @@ func storeRenderOutputPlan(app *sdk.AppCtx, row *RenderRow, plan *opPlan) error 
 }
 
 func renderFailureCode(message string) string {
+	for _, code := range []string{"render_budget_exceeded", "audio_normalization_failed", "unsupported_color_preservation", "render_runtime_unavailable"} {
+		if strings.Contains(message, code+":") {
+			return code
+		}
+	}
 	if strings.Contains(message, "trim_validation_failed:") {
 		return "trim_validation_failed"
 	}
@@ -131,4 +141,20 @@ func writeRenderValidationError(w http.ResponseWriter, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadRequest)
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error(), "error_code": renderFailureCode(err.Error())})
+}
+
+// Runtime evidence belongs to the executor, not to HTTP request parameters.
+func sanitizeSubmittedRenderParams(params map[string]any) map[string]any {
+	out := make(map[string]any, len(params))
+	for k, v := range params {
+		if strings.HasPrefix(k, "_") {
+			continue
+		}
+		switch k {
+		case "trim_diagnostics", "trim_validation", "render_budget", "audio_normalization", "runtime_error":
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }

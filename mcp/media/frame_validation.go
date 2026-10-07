@@ -39,8 +39,18 @@ type trimValidation struct {
 // checksums never reach the remote response. showinfo checksum=0 is cheap.
 const compactFrameLogAWK = `
 function field(prefix, i) { for (i=1;i<=NF;i++) if (index($i,prefix)==1) return substr($i,length(prefix)+1); return 0 }
-/Parsed_showinfo_.* n:/ { if (vc==0) vf=field("pts_time:"); vc++; vl=field("pts_time:"); vd=field("duration_time:"); next }
-/Parsed_ashowinfo_.* n:/ { if (ac==0) af=field("pts_time:"); ac++; al=field("pts_time:"); ar=field("rate:"); an=field("nb_samples:"); next }
+{
+ original=$0;
+ if(match($0,/pts_time:[-0-9.e+]+[[:space:]]+fmt:[^ ]+[[:space:]]+channels:/)) {
+  $0=substr($0,RSTART); if(ac==0) af=field("pts_time:"); ac++; al=field("pts_time:"); ar=field("rate:"); an=field("nb_samples:");
+ }
+ $0=original;
+ if(match($0,/pts_time:[-0-9.e+]+[[:space:]]+duration:[[:space:]]*[-0-9]+[[:space:]]+duration_time:/)) {
+  $0=substr($0,RSTART); if(vc==0) vf=field("pts_time:"); vc++; vl=field("pts_time:"); vd=field("duration_time:");
+ }
+ $0=original;
+ if($0 ~ /Parsed_showinfo_.* n:/ && $0 !~ /duration:/) { if(vc==0) vf=field("pts_time:"); vc++; vl=field("pts_time:"); vd=field("duration_time:"); }
+}
 /lavfi\.(signalstats\.[A-Z]+|blur|block|freezedetect\.|black_end)|black_start:|^[[:space:]]*(I:|LRA:|Peak:)|Peak level dB:|RMS level dB:|Dynamic range:|DC offset:|silence_start:|silence_end:/ { print }
 END {
  if(vc>0) printf "APTEVA_VIDEO_SCAN count=%d first=%.9f last=%.9f duration=%.9f\n",vc,vf,vl,vd;
@@ -51,8 +61,8 @@ END {
 
 var videoScanRE = regexp.MustCompile(`APTEVA_VIDEO_SCAN count=(\d+) first=([-0-9.e+]+) last=([-0-9.e+]+) duration=([-0-9.e+]+)`)
 var audioScanRE = regexp.MustCompile(`APTEVA_AUDIO_SCAN count=(\d+) first=([-0-9.e+]+) end=([-0-9.e+]+)`)
-var showFrameRE = regexp.MustCompile(`Parsed_showinfo_.* n:\s*\d+.*?pts_time:([-0-9.e+]+).*?duration_time:([-0-9.e+]+)`)
-var showAudioRE = regexp.MustCompile(`Parsed_ashowinfo_.* n:\s*\d+.*?pts_time:([-0-9.e+]+).*?rate:(\d+).*?nb_samples:(\d+)`)
+var showFrameRE = regexp.MustCompile(`pts_time:([-0-9.e+]+)\s+(?:duration:\s*[-0-9]+\s+)?duration_time:([-0-9.e+]+)`)
+var showAudioRE = regexp.MustCompile(`pts_time:([-0-9.e+]+)\s+fmt:\S+\s+channels:.*?rate:(\d+).*?nb_samples:(\d+)`)
 
 type analysisLogCollector struct {
 	log                   strings.Builder
@@ -64,16 +74,15 @@ type analysisLogCollector struct {
 }
 
 func (c *analysisLogCollector) add(line string) {
-	if m := showFrameRE.FindStringSubmatch(line); m != nil {
+	for _, m := range showFrameRE.FindAllStringSubmatch(line, -1) {
 		if c.count == 0 {
 			c.first = m[1]
 		}
 		c.count++
 		c.last = m[1]
 		c.duration = m[2]
-		return
 	}
-	if m := showAudioRE.FindStringSubmatch(line); m != nil {
+	for _, m := range showAudioRE.FindAllStringSubmatch(line, -1) {
 		if c.audioCount == 0 {
 			c.audioFirst = m[1]
 		}
@@ -84,7 +93,6 @@ func (c *analysisLogCollector) add(line string) {
 		if rate > 0 {
 			c.audioEnd = start + samples/rate
 		}
-		return
 	}
 	if strings.Contains(line, "lavfi.") || strings.Contains(line, "black_start:") || strings.HasPrefix(line, "APTEVA_") || integratedLUFSRE.MatchString(line) || loudnessRangeRE.MatchString(line) || truePeakRE.MatchString(line) || samplePeakRE.MatchString(line) || rmsRE.MatchString(line) || dynamicRangeRE.MatchString(line) || dcOffsetRE.MatchString(line) || silenceStartRE.MatchString(line) || silenceEndRE.MatchString(line) {
 		c.log.WriteString(line)

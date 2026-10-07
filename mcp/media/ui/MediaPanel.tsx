@@ -1273,6 +1273,11 @@ interface RenderRow {
   started_at?: string;
   completed_at?: string;
   metrics?: { stage?: string; result_cache_hit?: boolean };
+ resolved_params?: {
+   render_budget?: { effective_timeout_seconds:number; estimated_seconds?:number; warning?:string };
+   trim_diagnostics?: { mode?:string; actual_start_ms?:number; actual_end_ms?:number; output_color?:string; fallback_reason?:string };
+   audio_normalization?: { validated?:boolean; encoded_lufs?:number; encoded_peak_dbtp?:number };
+ };
 }
 
 // RenderStatusCard polls the backend every 2s for one render's state
@@ -1382,6 +1387,27 @@ function RenderStatusCard({
             <span>{elapsedS}s elapsed</span>
           </div>
         </>
+      )}
+      {row.resolved_params?.render_budget && (
+        <div className="text-text-dim text-[10px]">
+          Timeout {Math.ceil(row.resolved_params.render_budget.effective_timeout_seconds / 60)} min
+          {row.resolved_params.render_budget.estimated_seconds ? ` · Estimated total ${Math.ceil(row.resolved_params.render_budget.estimated_seconds / 60)} min` : ""}
+          {row.started_at && row.resolved_params.render_budget.estimated_seconds && running ? ` · Estimated completion ${new Date(new Date(row.started_at).getTime() + row.resolved_params.render_budget.estimated_seconds * 1000).toLocaleTimeString()}` : ""}
+          {row.resolved_params.render_budget.warning && <div>{row.resolved_params.render_budget.warning}</div>}
+        </div>
+      )}
+      {row.resolved_params?.trim_diagnostics?.actual_start_ms != null && (
+        <div className="text-text-dim text-[10px]">
+          Cut {(row.resolved_params.trim_diagnostics.actual_start_ms / 1000).toFixed(3)}–{((row.resolved_params.trim_diagnostics.actual_end_ms ?? 0) / 1000).toFixed(3)} s
+          {row.resolved_params.trim_diagnostics.mode === "keyframe_copy" ? " · Keyframe copy" : " · Accurate encoding"}
+          {row.resolved_params.trim_diagnostics.output_color ? ` · ${row.resolved_params.trim_diagnostics.output_color}` : ""}
+          {row.resolved_params.trim_diagnostics.fallback_reason && <div>Copy fallback: {row.resolved_params.trim_diagnostics.fallback_reason}</div>}
+        </div>
+      )}
+      {row.resolved_params?.audio_normalization?.validated && (
+        <div className="text-text-dim text-[10px]">
+          Verified {row.resolved_params.audio_normalization.encoded_lufs?.toFixed(2)} LUFS · {row.resolved_params.audio_normalization.encoded_peak_dbtp?.toFixed(2)} dBTP
+        </div>
       )}
       {row.status === "ok" && row.output_file_id ? (
         <div className="space-y-1">
@@ -2541,7 +2567,7 @@ interface FieldDef {
 
 function opFieldDefs(op: OpName): FieldDef[] {
   const fields = opFieldDefsBase(op);
-  if (["resize", "transcode", "crop", "extract_reel"].includes(op)) {
+  if (["trim", "resize", "transcode", "crop", "extract_reel"].includes(op)) {
     fields.push({
       key: "encoder_profile", label: "Video quality", type: "select",
       options: ["legacy", "low", "medium", "high"],
@@ -2549,7 +2575,7 @@ function opFieldDefs(op: OpName): FieldDef[] {
         legacy: "Legacy (default)", low: "Low — smaller files",
         medium: "Medium — balanced", high: "High — more detail",
       },
-      hint: "Sets quality for the exported video. Legacy keeps existing settings. Higher quality generally means larger files and longer encoding. For H.264 MP4, MOV or MKV.",
+      hint: "Sets quality for the exported video. Legacy keeps existing settings. Higher quality generally means larger files and longer encoding. For H.264 or HEVC trim MP4, MOV or MKV.",
     });
   }
   return fields;
@@ -2560,6 +2586,12 @@ function opFieldDefsBase(op: OpName): FieldDef[] {
       return [
         { key: "start_ms", label: "Start (ms)",  type: "number", placeholder: "0" },
         { key: "end_ms",   label: "End (ms)",    type: "number", placeholder: "30000" },
+ { key: "trim_mode", label: "Cut mode", type: "select", options:["accurate","auto"], hint:"Auto uses validated nearby keyframes or falls back to an accurate cut. Actual boundaries are reported after rendering." },
+ { key: "max_start_drift_ms", label: "Start tolerance (ms)", type:"number", placeholder:"250" },
+ { key: "max_end_drift_ms", label: "End tolerance (ms)", type:"number", placeholder:"250" },
+ { key: "hevc_profile", label:"HEVC encoding", type:"select", options:["legacy","fast","balanced","quality"], hint:"Fast trades quality and file size for speed. Keep Video quality at Legacy when choosing an HEVC profile." },
+ { key: "timeout_seconds", label:"Timeout (seconds)", type:"number", hint:"Leave empty for the estimated HEVC job budget. Maximum is set by the operator." },
+ { key: "require_dolby_vision", label:"Require Dolby Vision", type:"select", options:["false","true"], hint:"Current trims retain HLG/PQ base color. Requiring Dolby Vision stops before rendering." },
       ];
     case "resize":
       return [
@@ -2594,7 +2626,8 @@ function opFieldDefsBase(op: OpName): FieldDef[] {
       return [
         { key: "mode",        label: "Mode",        type: "select", options: ["normalize", "speech_clean", "volume", "mute"] },
         { key: "target_lufs", label: "Target LUFS", type: "number", placeholder: "-16", hint: "Used by normalize and speech_clean." },
-        { key: "gain_db",     label: "Gain (dB)",   type: "number", placeholder: "3", hint: "Used by volume mode." },
+        { key: "target_peak_dbtp", label:"Peak ceiling (dBTP)", type:"number", placeholder:"-1.5" },
+ { key: "gain_db",     label: "Gain (dB)",   type: "number", placeholder: "3", hint: "Used by volume mode." },
       ];
     case "extract_reel":
       return [
@@ -2609,12 +2642,14 @@ function opFieldDefsBase(op: OpName): FieldDef[] {
 
 function defaultFields(op: OpName, row: MediaRow): Record<string, string> {
   const out: Record<string, string> = {};
-  if (["resize", "transcode", "crop", "extract_reel"].includes(op) && row.has_video && !row.is_image) {
+  if (["trim", "resize", "transcode", "crop", "extract_reel"].includes(op) && row.has_video && !row.is_image) {
     out.encoder_profile = "legacy";
   }
   switch (op) {
     case "trim":
-      out.start_ms = "0";
+      out.trim_mode = "accurate";
+ out.hevc_profile = "legacy";
+ out.start_ms = "0";
       if (row.duration_ms) out.end_ms = String(row.duration_ms);
       break;
     case "resize":

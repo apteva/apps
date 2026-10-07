@@ -199,6 +199,8 @@ func requestRenderCacheKey(ctx context.Context, app *sdk.AppCtx, sc *storageClie
 	}
 	revision := renderAlgorithmVersion
 	switch row.Operation {
+	case "audio_filter":
+		revision += ":" + audioNormalizationVersion
 	case "trim":
 		revision += ":" + trimAlgorithmVersion
 	case "crop", "extract_frame", "extract_reel":

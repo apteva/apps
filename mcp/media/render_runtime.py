@@ -1,0 +1,391 @@
+"""Guarded media runtime, embedded in the sidecar; Python 3 standard library only.
+
+Runs against materialized local sources on either executor. Never uploads bytes.
+The caller runs the common every-frame trim validator before uploading.
+"""
+import json
+import math
+import os
+import re
+import struct
+import subprocess
+import sys
+from fractions import Fraction
+
+
+def run(binary, args):
+    p = subprocess.run([binary] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if p.returncode:
+        raise ValueError("media_runtime_failed: " + p.stderr[-3000:])
+    return p.stdout, p.stderr
+
+
+def probe(binary, source, extra=None):
+    out, _ = run(binary, ["-v", "error"] + (extra or ["-show_streams", "-show_format"]) + ["-of", "json", source])
+    return json.loads(out)
+
+
+def encode(binary, args):
+    # The parent's progress reader (or remote progress.log) stays authoritative.
+    p = subprocess.run([binary] + args)
+    if p.returncode:
+        raise ValueError("media_runtime_failed: encoding exited " + str(p.returncode))
+
+
+def seconds(value):
+    return "%.9f" % value
+
+
+def patch_presentation_end(filename, duration, track_durations=None):
+    """Keep decoding dependencies; end the MOV/MP4 presentation at an edit boundary.
+
+    Only the bounded moov metadata is loaded, not the mdat. Reject ambiguous
+    edits/fragmentation instead of altering timestamps or compressed samples.
+    """
+    with open(filename, "r+b") as f:
+        size = os.fstat(f.fileno()).st_size
+        pos = 0
+        moov = None
+        while pos < size:
+            f.seek(pos)
+            header = f.read(8)
+            if len(header) != 8:
+                raise ValueError("incomplete container header")
+            length, kind = struct.unpack(">I4s", header)
+            hsize = 8
+            if length == 1:
+                length = struct.unpack(">Q", f.read(8))[0]
+                hsize = 16
+            if length == 0:
+                length = size - pos
+            if length < hsize or pos + length > size or kind == b"moof":
+                raise ValueError("unsupported fragmented or invalid container")
+            if kind == b"moov":
+                if moov or length > 32 * 1024 * 1024:
+                    raise ValueError("unsupported movie metadata")
+                moov = (pos, hsize, bytearray(f.read(length - hsize)))
+            pos += length
+        if not moov:
+            raise ValueError("missing movie metadata")
+        offset, header_size, data = moov
+
+        def boxes(start, end):
+            while start < end:
+                if start + 8 > end:
+                    raise ValueError("invalid child box")
+                n, t = struct.unpack_from(">I4s", data, start)
+                if n < 8 or start + n > end:
+                    raise ValueError("unsupported child box")
+                yield start + 8, start + n, t
+                start += n
+
+        children = list(boxes(0, len(data)))
+        mvhd = [x for x in children if x[2] == b"mvhd"]
+        if len(mvhd) != 1:
+            raise ValueError("missing movie clock")
+        o, _, _ = mvhd[0]
+        version = data[o]
+        if version not in (0, 1):
+            raise ValueError("unsupported movie clock")
+        scale_offset = o + (12 if version == 0 else 20)
+        scale = struct.unpack_from(">I", data, scale_offset)[0]
+        ticks = math.floor((duration - 1e-6) * scale + 1e-7)
+        if scale < 1000 or ticks <= 0:
+            raise ValueError("unsupported movie timescale")
+        struct.pack_into(">I" if version == 0 else ">Q", data, scale_offset + 4, ticks)
+        tracks = 0
+        for a, b, kind in children:
+            if kind != b"trak":
+                continue
+            tk = list(boxes(a, b))
+            track_ticks = ticks
+            if track_durations:
+                handler = None
+                for m, n, t in tk:
+                    if t == b"mdia":
+                        for h, _, k in boxes(m, n):
+                            if k == b"hdlr":
+                                handler = bytes(data[h + 8:h + 12]).decode("ascii")
+                if handler in track_durations:
+                    track_ticks = math.floor(float(track_durations[handler]) * scale + 1e-7)
+            headers = [x for x in tk if x[2] == b"tkhd"]
+            edits = [x for x in tk if x[2] == b"edts"]
+            if len(headers) != 1 or len(edits) != 1:
+                raise ValueError("missing track edit")
+            o, _, _ = headers[0]
+            v = data[o]
+            if v not in (0, 1):
+                raise ValueError("unsupported track header")
+            struct.pack_into(">I" if v == 0 else ">Q", data, o + (20 if v == 0 else 28), track_ticks)
+            a, b, _ = edits[0]
+            elst = [x for x in boxes(a, b) if x[2] == b"elst"]
+            if len(elst) != 1:
+                raise ValueError("ambiguous edits")
+            o, e, _ = elst[0]
+            v = data[o]
+            if v not in (0, 1) or struct.unpack_from(">I", data, o + 4)[0] != 1:
+                raise ValueError("unsupported edit list")
+            fmt = ">I" if v == 0 else ">Q"
+            # Require a normal forward edit, not a gap/dwell/rate change.
+            width = 4 if v == 0 else 8
+            media_time = struct.unpack_from(">i" if v == 0 else ">q", data, o + 8 + width)[0]
+            rate = struct.unpack_from(">hh", data, o + 8 + 2 * width)
+            if media_time < 0 or rate != (1, 0):
+                raise ValueError("unsupported presentation edit")
+            struct.pack_into(fmt, data, o + 8, track_ticks)
+            tracks += 1
+        if not tracks:
+            raise ValueError("missing movie tracks")
+        f.seek(offset + header_size)
+        f.write(data)
+
+
+def packets(binary, source, start, end):
+    return probe(binary, source, ["-select_streams", "v:0", "-read_intervals",
+        seconds(max(0, start)) + "%" + seconds(end), "-show_packets",
+        "-show_entries", "packet=pts_time,dts_time,duration_time,flags"]).get("packets", [])
+
+
+def frame_hashes(binary, source, start=None, duration=None):
+    args = ["-v", "error", "-xerror", "-threads", "2"]
+    if start is not None:
+        args += ["-ss", seconds(start)]
+    args += ["-i", source]
+    if duration is not None:
+        args += ["-t", seconds(duration)]
+    args += ["-map", "0:v:0", "-fps_mode", "passthrough", "-enc_time_base", "demux", "-f", "framemd5", "-"]
+    out, _ = run(binary, args)
+    return parse_frame_hashes(out)
+
+
+def source_window_hashes(binary, source, start, end):
+    preroll = max(0, start - 2)
+    out, _ = run(binary, ["-v", "error", "-xerror", "-threads", "2", "-copyts", "-ss", seconds(preroll),
+        "-t", seconds(end - preroll + 2), "-i", source, "-map", "0:v:0",
+        "-vf", "select=gte(t\\,%s)*lt(t\\,%s)" % (seconds(start - 1e-6), seconds(end - 1e-6)),
+        "-fps_mode", "passthrough", "-enc_time_base", "demux", "-f", "framemd5", "-"])
+    return parse_frame_hashes(out)
+
+
+def parse_frame_hashes(out):
+    tb = None
+    frames = []
+    for line in out.splitlines():
+        if line.startswith("#tb 0:"):
+            tb = float(Fraction(line.split(":", 1)[1].strip()))
+        elif line and not line.startswith("#"):
+            fields = line.split(",")
+            if len(fields) == 6 and tb is not None:
+                frames.append((int(fields[2]) * tb, fields[5].strip()))
+    return frames
+
+
+def color_args(video):
+    args = []
+    for key, flag in (("color_range", "-color_range"), ("color_space", "-colorspace"), ("color_transfer", "-color_trc"), ("color_primaries", "-color_primaries")):
+        if video.get(key) and video[key] not in ("unknown", "unspecified"):
+            args += [flag, video[key]]
+    return args
+
+
+def check_video_color(source, output):
+    for key in ("pix_fmt", "color_range", "color_space", "color_transfer", "color_primaries", "width", "height"):
+        if source.get(key) and source[key] not in ("unknown", "unspecified") and output.get(key) != source[key]:
+            raise ValueError("output_video_properties_changed: " + key)
+
+
+def copy_trim(req, info, diagnostics):
+    p = req["params"]
+    source, output = req["source"], req["output"]
+    start, end = p["start_ms"] / 1000, p["end_ms"] / 1000
+    if os.path.splitext(output)[1].lower() not in (".mp4", ".mov"):
+        raise ValueError("copy_requires_mp4_or_mov")
+    video = next((s for s in info["streams"] if s.get("codec_type") == "video"), None)
+    if not video or video.get("codec_name") not in ("hevc", "h264"):
+        raise ValueError("copy_requires_h264_or_hevc_video")
+    if video.get("side_data_list") and any("rotation" in d and abs(d["rotation"]) % 360 for d in video["side_data_list"]):
+        raise ValueError("rotated_video_requires_accurate_encoding")
+    chosen = []
+    for label, requested in (("start", start), ("end", end)):
+        drift = p.get("max_" + label + "_drift_ms", 250) / 1000
+        near = packets(req["ffprobe"], source, max(0, requested - drift - 2), requested + drift + 2)
+        keys = [float(x["pts_time"]) for x in near if "K" in x.get("flags", "") and "pts_time" in x]
+        candidates = [x for x in keys if abs(x - requested) <= drift + 1e-6]
+        if not candidates:
+            raise ValueError("no_" + label + "_keyframe_within_drift_limit")
+        chosen.append(min(candidates, key=lambda x: (abs(x - requested), x)))
+    first, last = chosen
+    if last <= first:
+        raise ValueError("keyframe_interval_is_empty")
+    duration = last - first
+    expected = sorted(float(x["pts_time"]) - first for x in packets(req["ffprobe"], source, max(0, first - 2), last + 2)
+                      if "pts_time" in x and first - 1e-6 <= float(x["pts_time"]) < last - 1e-6)
+    if not expected or abs(expected[0]) > .001:
+        raise ValueError("missing_source_opening_packet")
+    rate = next((int(s["sample_rate"]) for s in info["streams"] if s.get("codec_type") == "audio"), 48000)
+    args = ["-y", "-loglevel", "error", "-progress", req["progress"], "-ss", seconds(first), "-i", source,
+            "-t", seconds(duration), "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn", "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "192k", "-af", "atrim=duration=" + seconds(duration) + ",aresample=async=1:first_pts=0",
+            "-ar", str(rate), "-avoid_negative_ts", "disabled", "-movie_timescale", "1000000", "-movflags", "+faststart+write_colr"] + color_args(video) + [output]
+    encode(req["ffmpeg"], args)
+    patch_presentation_end(output, duration)
+    output_info = probe(req["ffprobe"], output)
+    check_video_color(video, next((s for s in output_info["streams"] if s.get("codec_type") == "video"), {}))
+    frames = frame_hashes(req["ffmpeg"], output)
+    if len(frames) != len(expected) or any(abs(f[0] - t) > .001 for f, t in zip(frames, expected)):
+        raise ValueError("copy_presentation_does_not_match_source_packet_timeline")
+    # Decode source windows with preroll and original PTS. A key packet in
+    # an open GOP may not be independently decodable: compare every opening
+    # and ending picture, rather than just the I pictures at either endpoint.
+    for a, b in ((first, min(last, first + 1)), (max(first, last - 2), last)):
+        source_frames = source_window_hashes(req["ffmpeg"], source, a, b)
+        output_frames = [(t + first, h) for t, h in frames if a - 1e-6 <= t + first < b - 1e-6]
+        if len(source_frames) != len(output_frames) or not source_frames or any(abs(x[0] - y[0]) > .001 or x[1] != y[1] for x, y in zip(source_frames, output_frames)):
+            raise ValueError("copy_opening_or_ending_pictures_differ_from_source")
+    diagnostics["trim_diagnostics"].update({"mode": "keyframe_copy", "reencoded": False,
+        "actual_start_ms": round(first * 1000, 6), "actual_end_ms": round(last * 1000, 6),
+        "start_drift_ms": round((first - start) * 1000, 6), "end_drift_ms": round((last - end) * 1000, 6),
+        "source_frames_expected": len(expected), "copy_frames_checked": len(frames),
+        "source_endpoint_hashes_match": True, "effective_video_encoding": {"codec":"copy", "source_codec":video["codec_name"]}, "audio_origin":"selected_start", "presentation_cutoff": "mp4_single_edit_duration"})
+    return duration
+
+
+def filter_prefix(mode):
+    return "highpass=f=80,lowpass=f=8000,acompressor=threshold=-18dB:ratio=3:attack=5:release=100," if mode == "speech_clean" else ""
+
+
+def measurement(req, source, prefix=""):
+    p = req["params"]
+    _, err = run(req["ffmpeg"], ["-hide_banner", "-nostats", "-v", "info", "-xerror", "-i", source, "-map", "0:a:0", "-vn",
+        "-af", prefix + "loudnorm=I=%s:TP=%s:LRA=11:print_format=json" % (p.get("target_lufs", -16) or -16, p.get("target_peak_dbtp", -1.5)), "-f", "null", "-"])
+    matches = re.findall(r'\{\s*"input_i".*?\}', err, re.S)
+    if not matches:
+        raise ValueError("audio_normalization_failed: no loudness measurement")
+    measured = json.loads(matches[-1])
+    if not all(math.isfinite(float(measured[k])) for k in ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")):
+        raise ValueError("audio_normalization_failed: source has no measurable programme loudness")
+    return measured
+
+
+def normalized_audio(req, info, diagnostics):
+    p = req["params"]
+    mode = (p.get("mode", "normalize") or "normalize").strip().lower()
+    audio = next((s for s in info["streams"] if s.get("codec_type") == "audio"), {})
+    extent = float(audio.get("duration", 0))
+    extent_filter = "atrim=duration=" + seconds(extent) + "," if extent > 0 else ""
+    prefix = extent_filter + filter_prefix(mode)
+    measured = measurement(req, req["source"], prefix)
+    target = p.get("target_lufs", -16) or -16
+    peak = p.get("target_peak_dbtp", -1.5)
+    rate = next((int(s["sample_rate"]) for s in info["streams"] if s.get("codec_type") == "audio"), None)
+    if not rate:
+        raise ValueError("audio_normalization_failed: no audio sample rate")
+    # Lossy encoders get headroom; the FINAL encoded signal is authoritative.
+    codec = next((req["args"][i + 1] for i, a in enumerate(req["args"][:-1]) if a == "-c:a"), "aac")
+    if codec == "libopus" and rate not in (8000, 12000, 16000, 24000, 48000):
+        raise ValueError("audio_normalization_failed: Opus does not support the source sample rate; choose WAV/FLAC/AAC to preserve it")
+    headroom = 2 if codec in ("aac", "libmp3lame", "libopus") else 0
+    internal_peak = max(-9, peak - headroom)
+    loudnorm = ("loudnorm=I=%s:TP=%s:LRA=11:measured_I=%s:measured_TP=%s:measured_LRA=%s:measured_thresh=%s:offset=%s:linear=true" %
+                (target, internal_peak, measured["input_i"], measured["input_tp"], measured["input_lra"], measured["input_thresh"], measured["target_offset"]))
+    chain = prefix + loudnorm + ",aresample=" + str(rate)
+    if extent > 0:
+        chain += ",atrim=duration=" + seconds(extent)
+    # Do not add a post-normalization gain-changing limiter. Validate the
+    # encoded peaks/loudness instead; failed delivery is never uploaded.
+    args = list(req["args"])
+    for flag, value in (("-af", chain), ("-ar", str(rate))):
+        args[args.index(flag) + 1] = value
+    source_video = next((s for s in info["streams"] if s.get("codec_type") == "video"), {})
+    if source_video and "-vn" not in args:
+        args[-1:-1] = color_args(source_video)
+        if os.path.splitext(req["output"])[1].lower() in (".mov", ".mp4"):
+            args[-1:-1] = ["-movflags", "+faststart+write_colr"]
+    encode(req["ffmpeg"], args)
+    # Remuxing a video copy can expose reference packets hidden beyond a MOV
+    # edit boundary. Keep the source's presentation durations after muxing.
+    if any(s.get("codec_type") == "video" for s in info["streams"]) and os.path.splitext(req["output"])[1].lower() in (".mov", ".mp4"):
+        durations = {"vide" if s["codec_type"] == "video" else "soun": float(s["duration"])
+                     for s in info["streams"] if s.get("codec_type") in ("video", "audio") and s.get("duration")}
+        if durations:
+            patch_presentation_end(req["output"], max(durations.values()), durations)
+    actual = measurement(req, req["output"])
+    actual_i, actual_tp = float(actual["input_i"]), float(actual["input_tp"])
+    diagnostics["audio_normalization"] = {"algorithm_version": "media-two-pass-loudnorm-1", "passes": 2,
+        "target_lufs": target, "target_peak_dbtp": peak, "internal_peak_dbtp": internal_peak,
+        "source_measurements": measured, "encoded_lufs": actual_i, "encoded_peak_dbtp": actual_tp,
+        "loudness_tolerance_lu": .5, "peak_tolerance_db": .1, "sample_rate": rate,
+        "effective_filter": chain, "validated": False}
+    if abs(actual_i - target) > .5 or actual_tp > peak + .1:
+        raise ValueError("audio_normalization_failed: encoded loudness %.2f LUFS / %.2f dBTP differs from requested %.2f LUFS / ceiling %.2f dBTP" % (actual_i, actual_tp, target, peak))
+    output_info = probe(req["ffprobe"], req["output"])
+    output_audio = next((s for s in output_info["streams"] if s.get("codec_type") == "audio"), {})
+    if source_video and "-vn" not in args:
+        check_video_color(source_video, next((s for s in output_info["streams"] if s.get("codec_type") == "video"), {}))
+    if int(output_audio.get("sample_rate", 0)) != rate:
+        raise ValueError("audio_normalization_failed: encoded sample rate changed")
+    # Video is copied with the source timestamps. Check each stream's start
+    # and duration, so an AAC/filter latency does not introduce a new gap.
+    for kind in ("video", "audio"):
+        src = next((s for s in info["streams"] if s.get("codec_type") == kind), None)
+        dst = next((s for s in output_info["streams"] if s.get("codec_type") == kind), None)
+        if src is None or (kind == "video" and "-vn" in args):
+            continue
+        start_tolerance = .002
+        duration_tolerance = .05
+        if kind == "audio" and "-vn" in args and codec in ("libmp3lame", "libopus"):
+            # Gapless MP3/Opus containers signal encoder priming differently
+            # from MOV. Preserve programme extent; report the container delay.
+            start_tolerance, duration_tolerance = .03, .08
+            diagnostics["audio_normalization"]["audio_container_start_delta_seconds"] = float(dst.get("start_time", 0)) - float(src.get("start_time", 0)) if dst else None
+        if dst is None or abs(float(src.get("start_time", 0)) - float(dst.get("start_time", 0))) > start_tolerance:
+            raise ValueError("audio_normalization_failed: %s start timeline changed" % kind)
+        if src.get("duration") and dst.get("duration") and abs(float(src["duration"]) - float(dst["duration"])) > duration_tolerance:
+            raise ValueError("audio_normalization_failed: %s duration changed" % kind)
+    run(req["ffmpeg"], ["-v", "error", "-xerror", "-i", req["output"], "-map", "0:v:0?", "-map", "0:a:0?", "-sn", "-dn", "-f", "null", "-"])
+    diagnostics["audio_normalization"]["decode_ok"] = True
+    diagnostics["audio_normalization"]["validated"] = True
+    diagnostics["audio_normalization"]["timeline_validated"] = True
+
+
+def main(req, diagnostics):
+    info = probe(req["ffprobe"], req["source"])
+    if req["operation"] == "trim":
+        p = req["params"]
+        diagnostics["trim_diagnostics"] = dict(p.get("trim_diagnostics", {}))
+        video = next((s for s in info["streams"] if s.get("codec_type") == "video"), {})
+        if p.get("require_dolby_vision"):
+            raise ValueError("unsupported_color_preservation: Dolby Vision preservation is not supported by this trim workflow")
+        if any(d.get("side_data_type") == "DOVI configuration record" for d in video.get("side_data_list", [])):
+            diagnostics["trim_diagnostics"]["limitations"] = ["Output carries the source base-layer color; Dolby Vision dynamic metadata and container signaling are not guaranteed by this workflow."]
+        if video.get("color_transfer") == "arib-std-b67":
+            diagnostics["trim_diagnostics"]["output_color"] = "HLG / BT.2020" if video.get("color_primaries") == "bt2020" else "HLG"
+        try:
+            copy_trim(req, info, diagnostics)
+        except (ValueError, OSError) as error:
+            diagnostics["trim_diagnostics"]["fallback_reason"] = str(error)
+            diagnostics["trim_diagnostics"]["mode"] = "accurate"
+            diagnostics["trim_diagnostics"]["reencoded"] = True
+            budget = p.get("render_budget", {})
+            if budget.get("estimated_seconds", 0) > req.get("remaining_seconds", 1e10):
+                raise ValueError("render_budget_exceeded: accurate fallback estimate exceeds remaining timeout")
+            encode(req["ffmpeg"], req["args"])
+    else:
+        normalized_audio(req, info, diagnostics)
+
+
+if __name__ == "__main__":
+    diagnostics = {}
+    try:
+        with open(sys.argv[1]) as f:
+            request = json.load(f)
+        main(request, diagnostics)
+    except Exception as error:
+        diagnostics["runtime_error"] = str(error)
+        print(str(error), file=sys.stderr)
+        sys.exitcode = 1
+    finally:
+        with open("runtime-result.json", "w") as f:
+            json.dump(diagnostics, f, allow_nan=False)
+        print("APTEVA_RUNTIME:" + json.dumps(diagnostics, allow_nan=False), flush=True)
+    sys.exit(getattr(sys, "exitcode", 0))

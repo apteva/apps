@@ -714,3 +714,42 @@ func TestSidecar_RenderPipeline_SmartCropProvenance(t *testing.T) {
 		}
 	}
 }
+
+func TestSidecar_RenderPipeline_GuardedTrimAndNormalize(t *testing.T) {
+	skipIfNoFFmpeg(t)
+	sc := spawnMediaWithStorage(t)
+	source := guardedFixture(t, false)
+	bytes, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srcID := uploadFixtureToStorage(t, sc, "test-proj", "source.mov", "video/quicktime", "/tests/", bytes)
+	args := map[string]any{"_project_id": "test-proj", "file_id": strconv.FormatInt(srcID, 10), "start_ms": 1005, "end_ms": 2990, "trim_mode": "auto", "output_name": "guarded.mov"}
+	submit := sc.MCP("media_trim", args)
+	final := pollUntilOk(t, sc, "test-proj", int64(submit["render_id"].(float64)), 35*time.Second)
+	if final["status"] != "ok" {
+		t.Fatal(final)
+	}
+	resolved := final["resolved_params"].(map[string]any)
+	d := resolved["trim_diagnostics"].(map[string]any)
+	if d["mode"] != "keyframe_copy" || d["actual_start_ms"] != float64(1000) || d["actual_end_ms"] != float64(3000) || resolved["trim_validation"].(map[string]any)["decode_ok"] != true {
+		t.Fatal(final)
+	}
+	// The subsequent job uses the real uploaded trim and must retain its timing.
+	normalize := sc.MCP("media_audio_filter", map[string]any{"_project_id": "test-proj", "file_id": final["output_file_id"], "mode": "normalize", "target_lufs": -20, "target_peak_dbtp": -3, "output_name": "normalized.mov"})
+	normalized := pollUntilOk(t, sc, "test-proj", int64(normalize["render_id"].(float64)), 35*time.Second)
+	if normalized["status"] != "ok" {
+		t.Fatal(normalized)
+	}
+	resolved = normalized["resolved_params"].(map[string]any)
+	audio := resolved["audio_normalization"].(map[string]any)
+	if audio["validated"] != true || audio["timeline_validated"] != true || audio["sample_rate"] != float64(44100) {
+		t.Fatal(normalized)
+	}
+	// A request-cache hit must retain the checked loudness and original app version.
+	repeat := sc.MCP("media_audio_filter", map[string]any{"_project_id": "test-proj", "file_id": final["output_file_id"], "mode": "normalize", "target_lufs": -20, "target_peak_dbtp": -3, "output_name": "normalized.mov"})
+	repeated := pollUntilOk(t, sc, "test-proj", int64(repeat["render_id"].(float64)), 35*time.Second)
+	if repeated["output_file_id"] != normalized["output_file_id"] || repeated["metrics"].(map[string]any)["result_cache_hit"] != true || repeated["resolved_params"].(map[string]any)["audio_normalization"].(map[string]any)["validated"] != true {
+		t.Fatal(repeated)
+	}
+}

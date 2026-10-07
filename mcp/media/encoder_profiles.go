@@ -12,7 +12,7 @@ import (
 func encoderProfileSchema() map[string]any {
 	return map[string]any{
 		"type": "string", "enum": []string{"legacy", "low", "medium", "high"}, "default": "legacy",
-		"description": "Export video quality: legacy (default, existing encoding settings), low (smaller files, less detail), medium (balanced size/detail), high (more detail, larger files and slower encoding). Applies to H.264 MP4/MOV/MKV video encoding; resolution and frame rate are unchanged by this setting. Stream-copy and image/audio operations retain their existing behavior.",
+		"description": "Export video quality: legacy (default, existing encoding settings), low (smaller files, less detail), medium (balanced size/detail), high (more detail, larger files and slower encoding). Applies to H.264 and HEVC trim MP4/MOV/MKV video encoding; resolution and frame rate are unchanged by this setting. Stream-copy and image/audio operations retain their existing behavior.",
 	}
 }
 
@@ -28,9 +28,13 @@ func buildPlan(op string, sources []string, params json.RawMessage, name, source
 	}
 	var opts struct {
 		EncoderProfile string `json:"encoder_profile"`
+		HEVCProfile    string `json:"hevc_profile"`
 	}
 	if err := json.Unmarshal(params, &opts); err != nil {
 		return nil, err
+	}
+	if op == "trim" && opts.HEVCProfile != "" && opts.HEVCProfile != "legacy" && opts.EncoderProfile != "" && opts.EncoderProfile != "legacy" {
+		return nil, fmt.Errorf("choose hevc_profile or encoder_profile, not both")
 	}
 	profile := opts.EncoderProfile
 	if profile == "" || profile == "legacy" {
@@ -69,4 +73,19 @@ func buildPlan(op string, sources []string, params json.RawMessage, name, source
 	}
 	plan.Args = append(plan.Args, "-c:v", codec, "-preset", preset, "-crf", crf)
 	return plan, nil
+}
+
+func hevcProfileSettings(profile string) (string, string, error) {
+	switch profile {
+	case "", "legacy":
+		return "fast", "18", nil
+	case "fast":
+		return "ultrafast", "23", nil
+	case "balanced":
+		return "fast", "20", nil
+	case "quality":
+		return "slow", "18", nil
+	default:
+		return "", "", fmt.Errorf("hevc_profile must be legacy, fast, balanced or quality")
+	}
 }
