@@ -1,10 +1,10 @@
 package monitor
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -20,6 +20,8 @@ const maxPoints = 3600
 
 type Engine struct {
 	mu            sync.Mutex
+	spoolMu       sync.Mutex
+	checkpoint    checkpointCache
 	Latest        *Metrics   `json:"latest"`
 	Points        []Point    `json:"points"`
 	Incidents     []Incident `json:"incidents"`
@@ -277,6 +279,8 @@ func Decode(data []byte, out any) error {
 	return json.NewDecoder(io.LimitReader(r, 64<<20)).Decode(out)
 }
 func (e *Engine) Save(path string) error {
+	e.spoolMu.Lock()
+	defer e.spoolMu.Unlock()
 	e.mu.Lock()
 	state := struct {
 		Latest    *Metrics   `json:"latest"`
@@ -284,23 +288,31 @@ func (e *Engine) Save(path string) error {
 		Incidents []Incident `json:"incidents"`
 	}{Latest: e.Latest, Points: append([]Point{}, e.Points...), Incidents: append([]Incident{}, e.Incidents...)}
 	for i := range state.Incidents {
-		state.Incidents[i].Recordings = append([]Reading{}, state.Incidents[i].Recordings...)
-		state.Incidents[i].Processes = append([]Process{}, state.Incidents[i].Processes...)
+		if state.Incidents[i].End == 0 {
+			state.Incidents[i].Recordings = append([]Reading{}, state.Incidents[i].Recordings...)
+		}
 	}
 	e.mu.Unlock()
-	data, err := Encode(state)
-	if err != nil {
-		return err
-	}
-	if len(data) > maxSpoolBytes {
-		return errors.New("collector spool exceeds 32MiB limit")
-	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
 	temporary := path + ".tmp"
-	if err := os.WriteFile(temporary, data, 0600); err != nil {
+	f, err := os.OpenFile(temporary, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil {
 		return err
+	}
+	defer os.Remove(temporary)
+	buffered := bufio.NewWriterSize(f, 64<<10)
+	err = e.checkpoint.write(&spoolLimitWriter{out: buffered, remaining: maxSpoolBytes}, state.Latest, state.Points, state.Incidents)
+	if err == nil {
+		err = buffered.Flush()
+	}
+	closeErr := f.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 	return os.Rename(temporary, path)
 }
@@ -310,7 +322,7 @@ func Load(path string) (*Engine, error) {
 		return nil, err
 	}
 	if len(data) > maxSpoolBytes {
-		return nil, errors.New("collector spool too large")
+		return nil, fmt.Errorf("collector spool too large")
 	}
 	e := NewEngine()
 	if err := Decode(data, e); err != nil {
