@@ -302,6 +302,8 @@ const css = `
 
 .ap-processes .run-current-step{max-height:calc(100dvh - 36px);overflow:auto}.ap-processes .run-current-step .run-step-details{border:0;border-radius:0;background:none;padding:0;margin-top:16px}.ap-processes .run-current-step .run-step-details .step-copy h3{font-size:12px;margin:12px 0 6px}.ap-processes .run-current-step .state-line button{font-size:11px;padding:5px 8px}.ap-processes .run-step-picker{margin:14px 0}.ap-processes .run-flow-panel{min-width:0}.ap-processes .run-current-step .run-progress{margin-top:0}.ap-processes .run-current-step .run-step-details .run-progress{margin-top:14px}
 @media(max-width:900px){.ap-processes .run-current-step{max-height:none;overflow:visible}}
+
+.ap-processes .run-current-step .state-line{margin-bottom:8px}.ap-processes .run-step-picker{margin:8px 0}.ap-processes .run-step-picker label{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.ap-processes .run-current-step .run-step-details{margin-top:12px}.ap-processes .step-summary{display:flex;align-items:center;gap:12px}.ap-processes .step-summary-preview{flex:1;min-width:0;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;line-height:1.5;font-size:12px;color:var(--pc-muted)}.ap-processes .step-details-button{flex:none;font-size:12px!important;padding:6px 10px!important}.ap-processes .run-worker-feed>h3{font-size:13px;margin:0}.ap-processes .run-current-step>.run-progress{margin:16px 0 0;padding-top:14px;border-top:1px solid var(--pc-line)}.ap-processes .run-step-full-details .step-copy h3,.ap-processes .run-step-full-details .step-output h3{font-size:13px;margin:18px 0 8px}.ap-processes .run-step-full-details .run-progress{margin-top:16px}
 `;
 const Pill = ({ state }: { state: string }) => (
   <span className={`pill ${state}`}>{state}</span>
@@ -346,12 +348,8 @@ function RunDetailCard({
   useEffect(() => { setSelectedStepID(null); setResultOpen(false); }, [run.id]);
   const sidePanel = (details?: ReactNode) => (
     <aside className="card run-current-step" aria-label="Run step details" aria-live="polite">
-      {run.progress !== undefined && <div className="run-progress">
-        <div className="run-progress-label"><strong>Run progress</strong><span>{run.progress}%</span></div>
-        <progress aria-label="Run progress" max={100} value={run.progress} />
-      </div>}
       <div className="state-line">
-        <h2>{selectedStepID ? "Selected step" : live ? "Current step" : "Step details"}</h2>
+        <h2>Step activity</h2>
         {live && selectedStepID && <button type="button" onClick={() => setSelectedStepID(null)}>Follow current step</button>}
       </div>
       {steps.length > 0 && <div className="field run-step-picker">
@@ -368,8 +366,12 @@ function RunDetailCard({
       </> : <>
         <div className={`run-activity-status ${live ? "active" : ""}`}>{live ? "Waiting for worker activity" : run.state === "completed" ? "All steps completed" : "No active step"}</div>
         <p className="small muted">{run.result ? "The saved process result is available from View result." : run.error || (live ? "The run has not exposed a current step." : "No result was recorded.")}</p>
-        {!run.workflow && <ExecutionTools agentID={entry.assignment?.owner_agent_id} threadID={run.target_thread_id} executionID={run.execution_id} live={live} sources={toolSources} defaultOpen={live} />}
+        {!run.workflow && <ExecutionTools agentID={entry.assignment?.owner_agent_id} threadID={run.target_thread_id} executionID={run.execution_id} live={live} sources={toolSources} inline />}
       </>}
+      {run.progress !== undefined && <div className="run-progress">
+        <div className="run-progress-label"><strong>Run progress</strong><span>{run.progress}%</span></div>
+        <progress aria-label="Run progress" max={100} value={run.progress} />
+      </div>}
     </aside>
   );
   return (

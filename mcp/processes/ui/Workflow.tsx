@@ -1,4 +1,4 @@
-import ResultContent from "./ResultContent";
+import ResultContent, { ContentModal } from "./ResultContent";
 import { TimingDetails, type TimingRule } from "./Timing";
 import { useRef, useState, type ReactNode } from "react";
 import { ProcessFlow } from "./ProcessFlow";
@@ -179,6 +179,7 @@ export function RunSteps({
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
   const [chosen, setChosen] = useState<string[]>([]);
+  const [detailsStepID, setDetailsStepID] = useState<string | null>(null);
   const releaseKeys = useRef<Record<string, string>>({});
   const advance = async (ids: string[]) => {
     setBusy(true);
@@ -221,6 +222,50 @@ export function RunSteps({
       setBusy(false);
     }
   };
+  const renderDetails = (s: StepRun, showIdentity = true) => (
+    <div className="run-step-full-details">
+      {showIdentity && <>
+        <div className="row between">
+          <strong>{s.definition.name}</strong>
+          <span className={`pill ${s.state}`}>{s.state}</span>
+        </div>
+        <p className="small muted">
+          {s.definition.role} · {s.executor.kind === "human"
+            ? "Human · project operator"
+            : agents.find(agent => agent.id === s.executor.agent_id)?.name || `Agent ${s.executor.agent_id}`}
+        </p>
+      </>}
+      <p className="small muted">
+        {s.definition.depends_on.length
+          ? `Depends on: ${s.definition.depends_on.join(", ")}`
+          : "Starts with the run"}
+      </p>
+      <section className="step-copy">
+        <h3>Instructions</h3><ResultContent content={s.definition.instructions} />
+        <h3>Required output</h3><ResultContent content={s.definition.expected_output} />
+      </section>
+      {renderSidePanel && s.progress !== undefined && <div className="run-progress">
+        <div className="run-progress-label"><strong>Step progress</strong><span>{s.progress}%</span></div>
+        <progress aria-label="Step progress" max={100} value={s.progress} />
+      </div>}
+      <TimingDetails step={s} />
+      {s.delivery_warning && (
+        <div className="notice">
+          {s.delivery_suspended
+            ? "Delivery suspended—repair required"
+            : "Delivery retry pending"}
+          : {s.delivery_warning}
+        </div>
+      )}
+      {s.output && <section className="step-output"><h3>Step output</h3><ResultContent content={s.output} /></section>}
+      {s.error && <div className="notice">{s.error}</div>}
+      {s.updated_by && s.state === "completed" && (
+        <p className="small muted">
+          Recorded by {s.updated_by} · {new Date(s.updated_at).toLocaleString()}
+        </p>
+      )}
+    </div>
+  );
   const renderStep = (s: StepRun) => {
     const human = s.executor.kind === "human",
       actionable =
@@ -245,36 +290,16 @@ export function RunSteps({
             : agents.find((a) => a.id === s.executor.agent_id)?.name ||
               `Agent ${s.executor.agent_id}`}
         </p>
-        <p className="small muted">
-          {s.definition.depends_on.length
-            ? `Depends on: ${s.definition.depends_on.join(", ")}`
-            : "Starts with the run"}
-        </p>
-        <section className="step-copy">
-          <h3>Instructions</h3><ResultContent content={s.definition.instructions} />
-          <h3>Required output</h3><ResultContent content={s.definition.expected_output} />
-        </section>
-        {renderSidePanel && s.progress !== undefined && <div className="run-progress">
-          <div className="run-progress-label"><strong>Step progress</strong><span>{s.progress}%</span></div>
-          <progress aria-label="Step progress" max={100} value={s.progress} />
-        </div>}
-        <TimingDetails step={s} />
-        {s.delivery_warning && (
-          <div className="notice">
-            {s.delivery_suspended
-              ? "Delivery suspended—repair required"
-              : "Delivery retry pending"}
-            : {s.delivery_warning}
+        {renderSidePanel ? <>
+          <div className="step-summary">
+            <p className="step-summary-preview">{s.definition.instructions}</p>
+            <button type="button" className="step-details-button" onClick={() => {
+              onSelectStep?.(s.id);
+              setDetailsStepID(s.id);
+            }}>View step details</button>
           </div>
-        )}
-        {s.output && <section className="step-output"><h3>Step output</h3><ResultContent content={s.output} /></section>}
-        {s.error && <div className="notice">{s.error}</div>}
-        {s.updated_by && s.state === "completed" && (
-          <p className="small muted">
-            Recorded by {s.updated_by} ·{" "}
-            {new Date(s.updated_at).toLocaleString()}
-          </p>
-        )}
+          {(s.delivery_warning || s.error) && <p className="notice small">{s.delivery_warning || s.error}</p>}
+        </> : renderDetails(s, false)}
         {!human && (
           <ExecutionTools
             agentID={s.executor.agent_id}
@@ -284,6 +309,7 @@ export function RunSteps({
             completedAt={s.completed_at || (s.state === "completed" ? s.updated_at : undefined)}
             live={!isTerminal && ["running", "ready", "waiting", "blocked"].includes(s.state)}
             sources={toolSources}
+            inline={!!renderSidePanel}
             defaultOpen={!!renderSidePanel}
             onActivityStatus={onActivityStatus}
           />
@@ -498,6 +524,9 @@ export function RunSteps({
         )}
       </div>
       {renderSidePanel ? renderSidePanel(steps.filter(s => s.id === selectedStepID).map(renderStep)) : steps.map(renderStep)}
+      {detailsStepID && steps.find(step => step.id === detailsStepID) && <ContentModal title="Step details" onClose={() => setDetailsStepID(null)}>
+        {renderDetails(steps.find(step => step.id === detailsStepID)!)}
+      </ContentModal>}
     </div>
   );
 }

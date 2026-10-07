@@ -111,17 +111,17 @@ export default function ExecutionTools({
   executionID,
   sources,
   defaultOpen = false,
-  live = false, stepID, completedAt, onActivityStatus,
+  live = false, stepID, completedAt, onActivityStatus, inline = false,
 }: {
   agentID?: number;
   threadID?: string;
   executionID?: string;
   sources: ToolSource[];
   defaultOpen?: boolean;
-  live?: boolean; stepID?: string; completedAt?: string;
+  live?: boolean; stepID?: string; completedAt?: string; inline?: boolean;
   onActivityStatus?: (status: string) => void;
 }) {
-  const [requested, setRequested] = useState(defaultOpen);
+  const [requested, setRequested] = useState(defaultOpen || inline);
   const [filter, setFilter] = useState("all");
   const {events,loading,error} = useWorkerActivity(agentID,threadID,requested,live);
   const scoped = useMemo(()=>eventsForStep(events,executionID || "",stepID,completedAt),[events,executionID,stepID,completedAt]);
@@ -142,17 +142,16 @@ export default function ExecutionTools({
         Tool activity was not tracked for this execution.
       </p>
     );
+  const Container = inline ? "section" : "details";
+  const Heading = inline ? "h3" : "summary";
   return (
-    <details
-      className="tool-activity"
-      open={requested}
-      onToggle={(event) => {
-        setRequested(event.currentTarget.open);
-      }}
+    <Container
+      className={`tool-activity ${inline ? "run-worker-feed" : ""}`}
+      {...(!inline ? {open: requested, onToggle: (event: {currentTarget: HTMLDetailsElement}) => setRequested(event.currentTarget.open)} : {})}
     >
-      <summary>
+      <Heading>
         Worker activity{requested && !loading ? ` · ${calls.length} tool calls` : ""}
-      </summary>
+      </Heading>
       <div className="activity-filters" role="group" aria-label="Worker activity filters">
         {["all","thoughts","tools"].map(value=><button type="button" key={value} aria-pressed={filter===value} onClick={()=>setFilter(value)}>{value === "all" ? "All activity" : value === "thoughts" ? "Thoughts" : "Tools"}</button>)}
       </div>
@@ -186,6 +185,6 @@ export default function ExecutionTools({
         ))}
       </ol>
       {!loading && !error && !shown.length && <p className="small muted">{filter === "thoughts" ? "No reasoning events were recorded for this step." : filter === "tools" ? "No tool calls were recorded for this step." : live ? "Waiting for worker activity. Tool calls and recorded reasoning will appear here." : "No worker activity was recorded for this step."}</p>}
-    </details>
+    </Container>
   );
 }

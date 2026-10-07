@@ -22,13 +22,13 @@ test("step-by-step modal, selected branches, receipts and human approval", async
     .getByRole("button", { name: "Run selected steps", exact: true })
     .click();
   await page.getByRole("button", {name: "Step 1: alpha", exact: true}).click();
-  await expect(page.locator(".run-detail")).toContainText(
-    "Exact receipt alpha.png",
-  );
+  await page.getByRole("button", {name: "View step details", exact: true}).click();
+  await expect(page.getByRole("dialog", {name: "Step details", exact: true})).toContainText("Exact receipt alpha.png");
+  await page.getByRole("dialog", {name: "Step details", exact: true}).getByRole("button", {name: "Close", exact: true}).click();
   await page.getByRole("button", {name: "Step 2: beta", exact: true}).click();
-  await expect(page.locator(".run-detail")).toContainText(
-    "Exact receipt beta.png",
-  );
+  await page.getByRole("button", {name: "View step details", exact: true}).click();
+  await expect(page.getByRole("dialog", {name: "Step details", exact: true})).toContainText("Exact receipt beta.png");
+  await page.getByRole("dialog", {name: "Step details", exact: true}).getByRole("button", {name: "Close", exact: true}).click();
   const releases = await page.evaluate(() =>
     JSON.parse(sessionStorage.getItem("releases")!),
   );
@@ -50,9 +50,9 @@ test("step-by-step modal, selected branches, receipts and human approval", async
   await page
     .getByRole("button", { name: "Complete step", exact: true })
     .click();
-  await expect(page.locator(".run-detail")).toContainText(
-    "Operator approved exact artifacts",
-  );
+  await page.getByRole("button", {name: "View step details", exact: true}).click();
+  await expect(page.getByRole("dialog", {name: "Step details", exact: true})).toContainText("Operator approved exact artifacts");
+  await page.getByRole("dialog", {name: "Step details", exact: true}).getByRole("button", {name: "Close", exact: true}).click();
   expect(
     await page.evaluate(
       () => JSON.parse(sessionStorage.getItem("approval")!).output,

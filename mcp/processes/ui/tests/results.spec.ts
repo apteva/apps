@@ -34,8 +34,11 @@ for (const width of [1440, 375]) {
     await expect(modal).toHaveCount(0);
     await expect(button).toBeFocused();
     expect(await page.evaluate(() => document.body.style.overflow)).not.toBe("hidden");
-    await expect(page.locator(".run-detail")).toContainText("9007199254740993");
-    await expect(page.locator(".run-detail .result-content strong")).toHaveText("Overcast");
+    await current.getByRole("button", {name: "View step details", exact: true}).click();
+    const details = page.getByRole("dialog", {name: "Step details", exact: true});
+    await expect(details).toContainText("9007199254740993");
+    await expect(details.locator(".result-content strong")).toHaveText("Overcast");
+    await details.getByRole("button", {name: "Close", exact: true}).click();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   });
 }
@@ -45,8 +48,11 @@ test("current step renders saved output and shows separate step progress", async
   await expect(page.getByRole("button", {name: "View result", exact: true})).toHaveCount(0);
   const current = page.locator(".run-current-step");
   await expect(current.getByRole("progressbar", {name: "Run progress", exact: true})).toHaveAttribute("value", "45");
-  await expect(current.getByRole("progressbar", {name: "Step progress", exact: true})).toHaveAttribute("value", "35");
-  await expect(current.locator(".step-output strong")).toHaveText("Overcast");
-  await expect(current.locator(".step-output")).toContainText("9007199254740993");
+  await expect(current.locator(".step-output")).toHaveCount(0);
+  await current.getByRole("button", {name: "View step details", exact: true}).click();
+  const details = page.getByRole("dialog", {name: "Step details", exact: true});
+  await expect(details.getByRole("progressbar", {name: "Step progress", exact: true})).toHaveAttribute("value", "35");
+  await expect(details.locator(".step-output strong")).toHaveText("Overcast");
+  await expect(details.locator(".step-output")).toContainText("9007199254740993");
   await page.screenshot({path: "/private/tmp/processes-current-step-result.png", fullPage: true});
 });

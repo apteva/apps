@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useId, useRef, type ReactNode } from "react";
 import { marked } from "marked";
 import createDOMPurify from "dompurify";
 import styles from "./result-content.css" with { type: "text" };
@@ -34,7 +34,8 @@ export default function ResultContent({ content }: { content: string }) {
   return <div className="result-content"><style>{styles}</style><StructuredValue value={value} /></div>;
 }
 
-export function ResultModal({ content, onClose }: { content: string; onClose: () => void }) {
+export function ContentModal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
+  const titleID = useId();
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     const previousFocus = document.activeElement as HTMLElement | null;
@@ -46,9 +47,13 @@ export function ResultModal({ content, onClose }: { content: string; onClose: ()
       previousFocus?.focus();
     };
   }, []);
-  return <dialog ref={dialog} className="run-result-modal" aria-labelledby="run-result-title" onCancel={onClose} onClose={onClose}>
+  return <dialog ref={dialog} className="run-result-modal" aria-labelledby={titleID} onCancel={onClose} onClose={onClose}>
     <style>{styles}</style>
-    <header><h2 id="run-result-title">Process result</h2><button type="button" onClick={onClose} autoFocus>Close</button></header>
-    <div className="run-result-body"><ResultContent content={content} /></div>
+    <header><h2 id={titleID}>{title}</h2><button type="button" onClick={onClose} autoFocus>Close</button></header>
+    <div className="run-result-body">{children}</div>
   </dialog>;
+}
+
+export function ResultModal({ content, onClose }: { content: string; onClose: () => void }) {
+  return <ContentModal title="Process result" onClose={onClose}><ResultContent content={content} /></ContentModal>;
 }

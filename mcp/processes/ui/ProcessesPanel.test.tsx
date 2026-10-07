@@ -180,7 +180,7 @@ test("active workflow runs open a live full-width detail with the current step",
   await clickContaining("Team workflow run");
   expect(document.querySelector(".run-detail-page")).toBeTruthy();
   expect(document.querySelector(".run-live")).toBeTruthy();
-  expect(document.body.textContent).toContain("Current step");
+  expect(document.querySelector(".run-current-step h2")?.textContent).toBe("Step activity");
   expect(document.body.textContent).toContain("Research");
   expect(document.body.textContent).toContain("Worker is working");
   await click("← Back to runs");

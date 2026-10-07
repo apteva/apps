@@ -139,13 +139,14 @@ test("timed live step shows waiting time and updates when dispatched", async ({
       exact: true,
     })
     .press("Enter");
-  await expect(
-    page.getByRole("complementary", { name: "Step details" }),
-  ).toContainText("Earliest start:");
+  await page.getByRole("button", {name: "View step details", exact: true}).click();
+  const details = page.getByRole("dialog", {name: "Step details", exact: true});
+  await expect(details).toContainText("Earliest start:");
   await page.screenshot({
     path: info.outputPath("timing-live.png"),
     fullPage: true,
   });
+  await details.getByRole("button", {name: "Close", exact: true}).click();
   run.state = "running";
   run.steps[1].state = "running";
   await request.post("/fixture/runs", { data: [run] });

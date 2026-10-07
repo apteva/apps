@@ -143,3 +143,11 @@
   .ap-processes .flow-status[data-state="waiting"] svg { animation: flow-status-pulse 1.8s ease-in-out infinite; }
   @keyframes flow-status-pulse { 50% { opacity: .4; } }
 }
+
+/* Selection uses the existing card border; status remains in the badge. */
+.ap-processes .pf-shell .pf-step.is-selected[data-state] {
+  border: 2px solid var(--pc-accent);
+  outline: none;
+  outline-offset: 0;
+  box-shadow: 0 4px 14px #0002;
+}

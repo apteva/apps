@@ -1,5 +1,5 @@
 import {expect,test} from "@playwright/test";
-const step=(id:string,state:string,depends_on:string[]=[])=>({id,run_id:"activity-run",key:id,definition:{key:id,name:id==="weather"?"Load weather":"Send notification",role:"worker",instructions:"Follow the exact instructions.",expected_output:"Exact receipt",depends_on},executor:{kind:"agent",agent_id:7},state,progress:0,output:"",error:"",execution_id:`exe-${id}`,target_thread_id:"activity-worker"});
+const step=(id:string,state:string,depends_on:string[]=[])=>({id,run_id:"activity-run",key:id,definition:{key:id,name:id==="weather"?"Load weather":"Send notification",role:"worker",instructions:"Follow the exact instructions. " + "Keep all frozen execution evidence available in the full step details. ".repeat(30),expected_output:"Exact receipt",depends_on},executor:{kind:"agent",agent_id:7},state,progress:0,output:"",error:"",execution_id:`exe-${id}`,target_thread_id:"activity-worker"});
 const run=(state="ready")=>({id:"activity-run",process_id:"weather",version:3,workflow:true,backend:"agent",state:"running",created_at:new Date().toISOString(),steps:[step("weather",state),step("notify","pending",["weather"])]});
 const event=(type:string,second:number,data:any,thread_id="activity-worker")=>({id:`${type}-${second}`,thread_id,instance_id:7,type,time:`2026-10-06T12:00:${String(second).padStart(2,"0")}Z`,data});
 test("run aligns graph, animates ready/waiting and respects reduced motion",async({page,request})=>{
@@ -15,6 +15,12 @@ test("current worker activity streams thoughts and tools and recovers missed eve
  await page.route("**/fixture/process-icon.svg",route=>route.fulfill({contentType:"image/svg+xml",body:'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="black" d="M3 3h18v18H3z"/></svg>'}));
  await request.post("/fixture/telemetry",{data:[]});await request.post("/fixture/runs",{data:[run("running")]});await page.goto("/?live&activity");await page.getByRole("button",{name:"Hourly weather alerts",exact:true}).click();await page.getByRole("button",{name:"Runs",exact:true}).click();await page.locator(".run-list > button").first().click();
  const panel=page.locator(".run-current-step");await expect(panel).toContainText("Waiting for worker activity");
+ await expect(panel.getByRole("heading",{name:/Worker activity/})).toBeVisible();
+ await expect(panel.locator("details.tool-activity,.step-copy,.step-output")).toHaveCount(0);
+ const preview=panel.locator(".step-summary-preview");
+ expect(await preview.evaluate(el=>el.clientHeight)).toBeLessThanOrEqual(36);
+ const feed=await panel.locator(".run-worker-feed").boundingBox();
+ expect(feed!.y-(await panel.boundingBox())!.y).toBeLessThan(330);
  const events=[event("tool.call",1,{id:"claim",name:"processes_step_claim",args:{step_id:"weather",_reason:"Claim weather"},execution_ids:["exe-weather"]}),event("llm.start",2,{iteration:2}),event("llm.thinking",3,{iteration:2,text:"Check the exact weather receipt."}),event("tool.call",4,{id:"fetch",name:"weather_get",reason:"Read live weather",execution_ids:["exe-weather"]})];
  await page.evaluate(events=>events.forEach(e=>(window as any).__emitWorkerTelemetry(e)),events);
  await expect(panel).toContainText("weather_get");await panel.getByText("Thinking · in progress",{exact:true}).click();await expect(panel).toContainText("Check the exact weather receipt.");
@@ -23,8 +29,17 @@ test("current worker activity streams thoughts and tools and recovers missed eve
  await request.post("/fixture/telemetry",{data:[...events,event("tool.result",6,{id:"fetch",name:"weather_get",execution_ids:["exe-weather"]}),event("llm.done",7,{iteration:2})]});await page.evaluate(()=>window.dispatchEvent(new Event("apteva.telemetry.reconnected")));
  await expect(panel).toContainText("Thought · completed");await expect(panel.locator(".tool-call-copy").filter({hasText:"weather_get"})).toContainText("finished");
  await page.evaluate(e=>(window as any).__emitWorkerTelemetry(e),event("tool.call",8,{id:"sleep",name:"pace",reason:"Await operator approval",execution_ids:["exe-weather"]}));await expect(panel.locator(".run-activity-status")).toContainText("Worker is waiting");
+ await page.screenshot({path:"/private/tmp/processes-live-worker-all-activity.png",fullPage:true});
  await panel.getByRole("button",{name:"Thoughts",exact:true}).click();await expect(panel).not.toContainText("weather_get");
  await page.screenshot({path:"/private/tmp/processes-live-worker-activity.png",fullPage:true});
+ await panel.getByRole("button",{name:"View step details",exact:true}).click();
+ const modal=page.getByRole("dialog",{name:"Step details",exact:true});
+ await expect(modal.locator(".step-copy")).toContainText("Keep all frozen execution evidence available in the full step details. ".repeat(30).trim());
+ await page.keyboard.press("Escape");
+ await page.setViewportSize({width:375,height:1000});
+ expect(await preview.evaluate(el=>el.clientHeight)).toBeLessThanOrEqual(36);
+ expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+ await page.screenshot({path:"/private/tmp/processes-live-worker-activity-mobile.png",fullPage:true});
 });
 test("step editor exposes process-wide approval policy",async({page})=>{
  await page.goto("/?activity");await page.getByRole("button",{name:"Hourly weather alerts",exact:true}).click();await page.getByRole("button",{name:"Step 2: Post alert in Conversations",exact:true}).click();const dialog=page.getByRole("dialog",{name:"Edit step"});await dialog.getByText("Process-wide rules also apply",{exact:true}).click();await expect(dialog).toContainText("Separate operator approval is required before notification.");
