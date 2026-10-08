@@ -1,3 +1,31 @@
+## 0.14.23 — selectable Smart Crop engines
+
+MediaPipe Pose Full is now the default for image crops, direct frame extraction
+and reel composition. `smart_crop_engine=legacy` retains the 0.14.22 planner;
+an app-wide setting and per-request selector allow immediate rollback.
+
+CPU inference uses native autorotated pixels, supported upper-body geometry and
+estimated head/hand margins. Reels retain fixed size/Y and smoothed X tracking.
+No padding is applied implicitly. Strict coverage rejection and explicit contain
+fallback remain available; wide and uncertain actions remain visibly guarded.
+
+An isolated managed Python 3.11 / MediaPipe 0.10.21 runtime is provisioned on the
+execution host; model and bootstrap artifacts are SHA-256 checked. Setup and
+inference respect host admission, bounded sampling/deadlines and process-group
+cancellation. Runtime/evidence failures persist a visible legacy fallback.
+
+Diagnostics record requested/effective engine, actual algorithm, model/runtime,
+confidence support, timestamps and effective crop/path. Engine decisions and
+render results have distinct cache identities. Transient pose fallbacks are not
+saved in the pose decision cache.
+
+Validation: standard/race Go suites, vet, retained Alexa/Loop regressions,
+legacy benchmarks, real Full inference and rendering on 13 native images and
+five reels (6,828 frames retained and decoded). Darwin arm64 and Linux amd64 CPU
+runtime checks; cross-platform Go builds. Private pixels remain outside release.
+
+See SMART_CROP_ENGINES.md for configuration, provisioning and limitations.
+
 ## 0.14.21 — stable seated reel composition
 
 - Extend tighter portrait composition to videos. A concentrated foreground and dense source evidence support one fixed crop across the requested interval. Preserve the combined supported head, upper pose, hands and movement envelope with margins; retain the source bottom edge and cap zoom at 1.5×. Cuts, wide actions and ambiguous or sparse evidence retain existing tracking. Closed eyes and lowered heads remain acceptable.

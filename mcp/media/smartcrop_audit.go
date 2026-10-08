@@ -48,6 +48,13 @@ type smartCropExtentEvidence struct {
 	Support          string                `json:"support"`
 }
 type smartCropAudit struct {
+	PoseLimitations []string     `json:"pose_limitations,omitempty"`
+	PoseSamples     []poseSample `json:"pose_samples,omitempty"`
+	RequestedEngine string       `json:"requested_engine,omitempty"`
+	EffectiveEngine string       `json:"effective_engine,omitempty"`
+	ModelSHA        string       `json:"model_sha256,omitempty"`
+	RuntimeVersion  string       `json:"runtime_version,omitempty"`
+
 	SceneSourceID    string `json:"scene_source_file_id,omitempty"`
 	SceneAtMs        *int64 `json:"scene_at_ms,omitempty"`
 	SceneRenderID    int64  `json:"scene_render_id,omitempty"`

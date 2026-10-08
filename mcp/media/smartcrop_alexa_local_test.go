@@ -85,7 +85,7 @@ func TestAlexaNativePortraitLocalRegression(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{"files": files})
 	}))
 	defer srv.Close()
-	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithConfig(map[string]string{"smart_crop_engine": "legacy"}), tk.WithProjectID(testProj))
 	sc := &storageClient{base: srv.URL, httpClient: srv.Client()}
 	probe := sampleVideoProbe()
 	probe.DurationMs = 575155

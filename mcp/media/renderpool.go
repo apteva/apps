@@ -227,7 +227,7 @@ func runOneRender(app *sdk.AppCtx, row *RenderRow, local *localExecutor, remote 
 			// Do not associate new bytes with an old source/config identity if
 			// Storage or crop evidence changed while this job was running.
 			currentKey, _, _ := requestRenderCacheKey(ctx, app, sc, &cacheRequest, executor)
-			if currentKey == cacheKey {
+			if currentKey == cacheKey && !smartCropUsedEngineFallback(row.Params) {
 				saveCachedRender(ctx, app, sc, cacheKey, row.ProjectID, outputFileID)
 				_, _ = db.Exec(`UPDATE render_result_cache SET resolved_params=? WHERE cache_key=? AND project_id=?`, string(row.Params), cacheKey, row.ProjectID)
 			}

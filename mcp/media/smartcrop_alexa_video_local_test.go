@@ -88,7 +88,7 @@ done
 	if e := os.WriteFile(bin, []byte(script), 0700); e != nil {
 		t.Fatal(e)
 	}
-	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithConfig(map[string]string{"ffmpeg_path": bin}))
+	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithConfig(map[string]string{"smart_crop_engine": "legacy", "ffmpeg_path": bin}))
 	p := sampleVideoProbe()
 	p.DurationMs = 575155
 	if e := upsertMedia(app.AppDB(), testProj, "90959", p, "fc4b65d963003c8ef4f07ec37fc39c1fe3d73f56788965a453228fdc75263500", "", "source.mov"); e != nil {

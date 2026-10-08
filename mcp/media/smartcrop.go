@@ -1277,7 +1277,7 @@ func preprocessSmartCropUncached(
 		return params
 	}
 	target := smartCropFocus(op, parsed)
-	audit := &smartCropAudit{AppVersion: app.Manifest().Version, AlgorithmVersion: smartCropAlgorithmVersion, SourceID: sources[0], Requested: smartCropAuditTarget{FocusMs: target.FocusMs, StartMs: target.StartMs, EndMs: target.EndMs, PreferKeyframe: target.PreferKeyframe}, Coverage: "unknown"}
+	audit := &smartCropAudit{AppVersion: app.Manifest().Version, AlgorithmVersion: legacySmartCropAlgorithmVersion, SourceID: sources[0], Requested: smartCropAuditTarget{FocusMs: target.FocusMs, StartMs: target.StartMs, EndMs: target.EndMs, PreferKeyframe: target.PreferKeyframe}, Coverage: "unknown"}
 	if row, e := getMedia(app.AppDB(), projectID, sources[0]); e == nil && row != nil {
 		audit.SourceSHA256 = row.SourceSHA256
 		audit.SourceWidth = row.Width
@@ -1286,6 +1286,38 @@ func preprocessSmartCropUncached(
 	}
 	ctx = context.WithValue(ctx, smartCropAuditKey{}, audit)
 	defer func() { out = attachSmartCropAudit(out, audit) }()
+
+	engine, engineErr := resolveSmartCropEngine(app, stringJSONValue(parsed["smart_crop_engine"]))
+	if engineErr != nil {
+		recordSmartCropFallback(ctx, "invalid_smart_crop_engine")
+		return params
+	}
+	audit.RequestedEngine = engine
+	audit.EffectiveEngine = "legacy"
+	if mode == "smart" && engine == "mediapipe_full" {
+		if win, path, poseErr := computeSmartCropPose(ctx, app, sc, projectID, sources[0], rw, rh, target); poseErr == nil {
+			parsed["crop_w"] = win.W
+			parsed["crop_h"] = win.H
+			parsed["crop_x"] = win.X
+			parsed["crop_y"] = win.Y
+			parsed["crop_mode"] = mode
+			parsed["crop_version"] = "pose_full"
+			parsed["smart_crop_engine"] = engine
+			if len(path) > 1 {
+				parsed["crop_path"] = path
+			}
+			encoded, e := json.Marshal(parsed)
+			if e == nil {
+				return encoded
+			}
+		} else {
+			recordSmartCropFallback(ctx, poseFailureReason(poseErr))
+			// Cancellation cannot start a second detector/renderer.
+			if ctx.Err() != nil {
+				return params
+			}
+		}
+	}
 
 	// V2 starts with bounded cached samples. Sparse indexes use temporary
 	// source samples; timed stills verify pose on the actual requested frame.

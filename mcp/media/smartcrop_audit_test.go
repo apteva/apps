@@ -26,7 +26,7 @@ func TestCropAuditEvidenceAndDecisionCache(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"files": []StorageFile{{ID: 2, Name: "1.png", Folder: "/.media/thumbnail/", ContentType: "image/png", Source: "media-derivation"}}})
 	}))
 	defer srv.Close()
-	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithConfig(map[string]string{"smart_crop_engine": "legacy"}), tk.WithProjectID(testProj))
 	sc := &storageClient{base: srv.URL, httpClient: srv.Client()}
 	p := sampleImageProbe()
 	p.Width, p.Height = 1920, 1080
@@ -45,7 +45,7 @@ func TestCropAuditEvidenceAndDecisionCache(t *testing.T) {
 		t.Fatal(e)
 	}
 	a := &resolved.Diagnostics
-	if a.AppVersion != app.Manifest().Version || a.AlgorithmVersion != smartCropAlgorithmVersion || a.Effective == nil || len(a.Evidence) != 1 || a.Evidence[0].FileID != "2" {
+	if a.AppVersion != app.Manifest().Version || a.AlgorithmVersion != legacySmartCropAlgorithmVersion || a.Effective == nil || len(a.Evidence) != 1 || a.Evidence[0].FileID != "2" {
 		t.Fatalf("missing provenance: %s", out)
 	}
 	for i := 0; i < 2; i++ {
@@ -107,7 +107,7 @@ func TestCropAuditConcurrentEvidenceAndFallback(t *testing.T) {
 }
 
 func TestCropAuditCenterFallback(t *testing.T) {
-	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithConfig(map[string]string{"smart_crop_engine": "legacy"}), tk.WithProjectID(testProj))
 	p := sampleImageProbe()
 	p.Width, p.Height = 1920, 1080
 	if e := upsertMedia(app.AppDB(), testProj, "1", p, "", "/", "1.png"); e != nil {

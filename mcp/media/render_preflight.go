@@ -159,8 +159,11 @@ func (a *App) toolPreviewCrop(app *sdk.AppCtx, args map[string]any) (any, error)
 	if op != "crop" && op != "extract_frame" && op != "extract_reel" {
 		return nil, fmt.Errorf("operation must be crop, extract_frame or extract_reel")
 	}
-	p := pickParams(args, []string{"target_ratio", "crop_mode", "fit_mode", "start_ms", "end_ms", "at_ms", "output_width"})
+	p := pickParams(args, []string{"target_ratio", "crop_mode", "smart_crop_engine", "fit_mode", "start_ms", "end_ms", "at_ms", "output_width"})
 	raw, _ := json.Marshal(p)
+	if e = validateSmartCropEngine(raw); e != nil {
+		return nil, e
+	}
 	if e = validateSourceTimestamp(app, project, op, []string{fid}, raw); e != nil {
 		return nil, e
 	}

@@ -1977,6 +1977,7 @@ function TimelinePreview({
           startMs={safeStart}
           endMs={safeEnd}
           ratio={fields.target_ratio || "9:16"}
+          engine={fields.smart_crop_engine || ""}
           apiBase={apiBase}
           previewBase={previewBase}
           storageQuery={storageQuery}
@@ -2163,6 +2164,7 @@ interface SmartCropPreviewResult {
 }
 
 function SmartCropCheck({
+  engine,
   row,
   startMs,
   endMs,
@@ -2180,6 +2182,7 @@ function SmartCropCheck({
   previewBase: string;
   storageQuery: string;
   onUseSmart: () => void;
+  engine: string;
 }) {
   const mediaQuery = useContext(MediaQueryContext);
   const frames = keyframesFor(row);
@@ -2198,7 +2201,7 @@ function SmartCropCheck({
     setOpen(false);
     setBusy(false);
     return () => requestRef.current?.abort();
-  }, [row.file_id, frame?.id, ratio, startMs, endMs]);
+  }, [row.file_id, frame?.id, ratio, startMs, endMs, engine]);
 
   if (!frame) {
     return (
@@ -2221,7 +2224,7 @@ function SmartCropCheck({
     setBusy(true);
     setError("");
     try {
-      const next = await fetchSmartCropPreview(apiBase, row, startMs, ratio, mediaQuery, endMs, controller.signal);
+      const next = await fetchSmartCropPreview(apiBase, row, startMs, ratio, mediaQuery, endMs, controller.signal, engine);
       if (!controller.signal.aborted) setResult(next);
     } catch (e) {
       if (controller.signal.aborted) return;
@@ -2446,6 +2449,7 @@ async function fetchSmartCropPreview(
   mediaQuery: string,
   endMs: number,
   signal?: AbortSignal,
+  engine?: string,
 ): Promise<SmartCropPreviewResult> {
   const r = await fetch(`${apiBase}/smartcrop?${mediaQuery}`, {
     method: "POST",
@@ -2459,6 +2463,7 @@ async function fetchSmartCropPreview(
       end_ms: Math.round(endMs),
       target_ratio: ratio || "9:16",
       crop_mode: "smart",
+      smart_crop_engine: engine || "",
     }),
   });
   if (!r.ok) throw new Error(await r.text().catch(() => `HTTP ${r.status}`));
@@ -2608,6 +2613,7 @@ function opFieldDefsBase(op: OpName): FieldDef[] {
       ];
     case "crop":
       return [
+ {key:"smart_crop_engine",label:"Smart Crop engine",type:"select",options:["mediapipe_full","legacy"]},
         { key: "x",      label: "X (px)",      type: "number", placeholder: "0" },
         { key: "y",      label: "Y (px)",      type: "number", placeholder: "0" },
         { key: "width",  label: "Width (px)",  type: "number", placeholder: "640" },
@@ -2615,6 +2621,7 @@ function opFieldDefsBase(op: OpName): FieldDef[] {
       ];
     case "extract_frame":
       return [
+ {key:"smart_crop_engine",label:"Smart Crop engine",type:"select",options:["mediapipe_full","legacy"]},
         { key: "at_ms", label: "At (ms)",    type: "number", placeholder: "1000" },
         { key: "width", label: "Width (px)", type: "number", placeholder: "1280 (optional)" },
       ];
@@ -2634,6 +2641,7 @@ function opFieldDefsBase(op: OpName): FieldDef[] {
         { key: "start_ms",     label: "Start (ms)",       type: "number", placeholder: "0" },
         { key: "end_ms",       label: "End (ms)",         type: "number", placeholder: "10000" },
         { key: "target_ratio", label: "Aspect ratio",     type: "select", options: ["9:16", "1:1", "4:5", "16:9"] },
+        {key:"smart_crop_engine",label:"Smart Crop engine",type:"select",options:["mediapipe_full","legacy"]},
         { key: "crop_mode",    label: "Crop mode",        type: "select", options: ["smart", "center"] },
         { key: "output_width", label: "Output width (px)",type: "number", placeholder: "1080" },
       ];

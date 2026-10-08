@@ -92,6 +92,9 @@ func validateRenderPlanOutput(op string, plan *opPlan) error {
 // Resolve the format before enqueuing, without downloading source bytes. Never
 // guess MP4 for an extensionless image crop when source metadata is unavailable.
 func prepareRenderSubmission(app *sdk.AppCtx, project, op string, sources []string, params json.RawMessage, name string) (*opPlan, error) {
+	if err := validateSmartCropEngine(params); err != nil {
+		return nil, err
+	}
 	if err := validateOutputName(name); err != nil {
 		return nil, err
 	}

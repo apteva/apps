@@ -77,7 +77,7 @@ done
 	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
-	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithConfig(map[string]string{"ffmpeg_path": binary}))
+	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithConfig(map[string]string{"smart_crop_engine": "legacy", "ffmpeg_path": binary}))
 	p := sampleVideoProbe()
 	p.DurationMs = 778941
 	if err := upsertMedia(app.AppDB(), testProj, "85686", p, "", "/holly/", "IMG_4899.mov"); err != nil {

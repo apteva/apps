@@ -2,8 +2,14 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.22
+version: 0.14.23
 description: |
+  v0.14.23 makes MediaPipe Pose Full the default Smart Crop engine, with
+  selectable legacy saliency/foreground planning. Native CPU pose geometry
+  supports stills, direct extraction and stable reel tracking. An isolated,
+  pinned Python/model runtime runs on the execution host. Saved diagnostics
+  expose engine/model identity, sampled geometry and visible fallback reasons;
+  incomplete or oversized actions retain strict coverage guards. No implicit padding.
   v0.14.22 shares exact-frame scene and pose planning between direct video
   extraction and verified native screenshots. Reposition fitting gestures;
   distinguish connected full-body pose from broader foreground evidence.
@@ -282,7 +288,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_crop
-      description: Crop or reframe an existing video/image. Exact mode args — file_id, x, y, width, height. With target_ratio, fit_mode=crop (default) uses content-agnostic Smart Crop v2 evidence (saliency, foreground change, motion, shape, and optional face geometry); fit_mode=contain preserves every source edge with black padding. Args — file_id, target_ratio, crop_mode? (smart default | center), fit_mode? (crop default | contain), output_width?. Native screenshots reuse verified parent scene evidence. require_action_preservation=true rejects unknown/too-wide sampled coverage before queueing; crop_fallback=contain explicitly preserves the full frame. Technical success does not approve composition.
+      description: Crop or reframe an existing video/image. Exact mode args — file_id, x, y, width, height. With target_ratio, fit_mode=crop (default) uses MediaPipe Pose Full native geometry by default; smart_crop_engine=legacy selects saliency/foreground planning; fit_mode=contain preserves every source edge with black padding. Args — file_id, target_ratio, crop_mode? (smart default | center), fit_mode? (crop default | contain), output_width?. Native screenshots reuse verified parent scene evidence. require_action_preservation=true rejects unknown/too-wide sampled coverage before queueing; crop_fallback=contain explicitly preserves the full frame. Technical success does not approve composition.
       async_result:
         id_field: render_id
         notify:
@@ -339,7 +345,7 @@ provides:
           expires_after: 24h
     - name: media_extract_reel
       description: |
-        Cut and reframe a clip in one ffmpeg pass. fit_mode=crop (default) uses content-agnostic Smart Crop v2 evidence and a smoothed crop path; fit_mode=contain preserves the complete source frame with black padding. Args — file_id, start_ms, end_ms, target_ratio? (default 9:16), output_width? (default 1080), crop_mode? (smart default | center), fit_mode? (crop default | contain). require_action_preservation=true preflights and rejects unknown/too-wide sampled action coverage before queuing; crop_fallback=contain explicitly requests full-frame fallback. Technical render success does not imply composition approval. Returns render_id and notifies the caller on completion.
+        Cut and reframe a clip in one ffmpeg pass. fit_mode=crop (default) uses MediaPipe Pose Full native geometry and a smoothed crop path; smart_crop_engine=legacy selects the retained engine; fit_mode=contain preserves the complete source frame with black padding. Args — file_id, start_ms, end_ms, target_ratio? (default 9:16), output_width? (default 1080), crop_mode? (smart default | center), fit_mode? (crop default | contain). require_action_preservation=true preflights and rejects unknown/too-wide sampled action coverage before queuing; crop_fallback=contain explicitly requests full-frame fallback. Technical render success does not imply composition approval. Returns render_id and notifies the caller on completion.
       async_result:
         id_field: render_id
         notify:
@@ -597,7 +603,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.22
+    ref: media/v0.14.23
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -668,6 +674,17 @@ config_schema:
     description: Hard wall-clock cap for one read-only media_analyze call. Full analysis of long or high-resolution files may need a larger value.
 
   # Renders (new in v0.2)
+  - name: smart_crop_engine
+    type: select
+    default: "mediapipe_full"
+    label: Smart Crop engine
+    options: [mediapipe_full, legacy]
+    description: MediaPipe Pose Full CPU landmarks by default. Legacy retains the previous saliency/foreground planner. Unavailable runtime or insufficient pose evidence falls back to legacy with saved diagnostics.
+  - name: smart_crop_python
+    type: text
+    default: ""
+    label: Local pose Python override
+    description: Optional isolated Python with MediaPipe 0.10.21 and NumPy 1.26.4. Blank provisions a managed Python 3.11 environment. Remote hosts always use the isolated managed runtime.
   - name: media_work_capacity
     type: text
     default: "4"

@@ -120,7 +120,7 @@ else:
 	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
-	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithConfig(map[string]string{"ffmpeg_path": binary}))
+	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithConfig(map[string]string{"smart_crop_engine": "legacy", "ffmpeg_path": binary}))
 	sc := &storageClient{base: srv.URL, httpClient: srv.Client()}
 	sources := map[string]string{}
 	for _, f := range fixtures {

@@ -97,7 +97,7 @@ done
 	if e := os.WriteFile(bin, []byte(script), 0700); e != nil {
 		t.Fatal(e)
 	}
-	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithConfig(map[string]string{"ffmpeg_path": bin}))
+	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithConfig(map[string]string{"smart_crop_engine": "legacy", "ffmpeg_path": bin}))
 	sc := &storageClient{base: srv.URL, httpClient: srv.Client()}
 	probe := sampleVideoProbe()
 	probe.DurationMs = 429498
