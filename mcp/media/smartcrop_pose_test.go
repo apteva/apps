@@ -59,10 +59,24 @@ func TestPoseSamplePlannerCoverageAndFixedGeometry(t *testing.T) {
 	if path[0].Y != path[1].Y {
 		t.Fatal("vertical jitter")
 	}
-	p := posePositions(smartCropTarget{StartMs: 0, EndMs: 600000}, 600000)
+	p := posePositions(smartCropTarget{StartMs: 0, EndMs: 600000}, 600000, 30)
 	if len(p) > 256 || p[0] != 0 || p[len(p)-1] >= 600000 {
 		t.Fatal(p)
 	}
+	for _, v := range []struct {
+		fps  float64
+		last int64
+	}{{60, 33549}, {30, 33516}, {0, 33503}} {
+		end := posePositions(smartCropTarget{StartMs: 0, EndMs: 33583}, 33583, v.fps)
+		if end[len(end)-1] != v.last {
+			t.Fatalf("end-of-source sampling: fps=%v positions=%v", v.fps, end)
+		}
+	}
+	mid := posePositions(smartCropTarget{StartMs: 1000, EndMs: 2000}, 33583, 30)
+	if mid[len(mid)-1] != 1999 {
+		t.Fatal("mid-source endpoint moved", mid)
+	}
+
 	if _, _, e := planPoseSamples([]poseSample{{Status: "no_pose_detected"}}, 1920, 1080, 9, 16); e == nil {
 		t.Fatal("unsupported pose accepted")
 	}
@@ -96,15 +110,18 @@ func TestMediaPipeFullLocalIntegration(t *testing.T) {
 	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithConfig(map[string]string{"smart_crop_python": python}))
 	sc := &storageClient{}
 	results := []json.RawMessage{}
-	run := func(name, source string, video bool) {
+	run := func(t *testing.T, name, source string, video bool) {
 		t.Helper()
-		probe, err := exec.Command("ffprobe", "-v", "error", "-show_entries", "stream=width,height:format=duration", "-of", "json", source).Output()
+		probe, err := exec.Command("ffprobe", "-v", "error", "-show_entries", "stream=width,height,r_frame_rate:format=duration", "-of", "json", source).Output()
 		if err != nil {
 			t.Fatal(err)
 		}
 		var meta struct {
-			Streams []struct{ Width, Height int }
-			Format  struct{ Duration string }
+			Streams []struct {
+				Width, Height int
+				FrameRate     string `json:"r_frame_rate"`
+			}
+			Format struct{ Duration string }
 		}
 		json.Unmarshal(probe, &meta)
 		p := sampleImageProbe()
@@ -118,6 +135,7 @@ func TestMediaPipeFullLocalIntegration(t *testing.T) {
 			var seconds float64
 			fmt.Sscan(meta.Format.Duration, &seconds)
 			p.DurationMs = int64(seconds * 1000)
+			p.FPS = parseRational(meta.Streams[0].FrameRate)
 			op = "extract_reel"
 			params["start_ms"] = 0
 			params["end_ms"] = p.DurationMs
@@ -160,10 +178,10 @@ func TestMediaPipeFullLocalIntegration(t *testing.T) {
 		t.Logf("%s coverage=%s crop=%+v samples=%d", name, parsed.Audit.Coverage, parsed.Audit.Effective, len(parsed.Audit.Evidence))
 	}
 	for _, i := range images {
-		run(i.Name, i.Path, false)
+		t.Run(i.Name, func(t *testing.T) { run(t, i.Name, i.Path, false) })
 	}
 	for _, r := range reels {
-		run(r.Name, r.Path, true)
+		t.Run(r.Name, func(t *testing.T) { run(t, r.Name, r.Path, true) })
 	}
 	encoded, _ := json.MarshalIndent(results, "", "  ")
 	os.WriteFile(filepath.Join(output, "results.json"), encoded, 0600)
@@ -211,5 +229,77 @@ func TestPoseFailureDiagnosticsDoNotExposePaths(t *testing.T) {
 	}
 	if got := poseFailureReason(context.DeadlineExceeded); got != "analysis_timeout" {
 		t.Fatal(got)
+	}
+}
+
+func TestPoseRuntimeFailureProtocol(t *testing.T) {
+	failure := parsePoseRuntimeFailure("decoder log\nAPTEVA_POSE_ERROR:{\"code\":\"pose_source_frame_unavailable\",\"at_ms\":343000,\"attempts\":3,\"source\":\"https://private.invalid/token\"}\n")
+	if failure == nil || failure.AtMs == nil || *failure.AtMs != 343000 || failure.Attempts != 3 || poseFailureReason(failure) != "pose_source_frame_unavailable" {
+		t.Fatalf("%+v", failure)
+	}
+	raw, _ := json.Marshal(failure)
+	if strings.Contains(string(raw), "private") {
+		t.Fatal(string(raw))
+	}
+	for _, output := range []string{
+		`APTEVA_POSE_ERROR:{"code":"private/customer/path"}`,
+		`APTEVA_POSE_ERROR:{"code":"pose_source_frame_unavailable","attempts":4}`,
+		`APTEVA_POSE_ERROR:{"code":"pose_source_frame_unavailable","at_ms":-1}`,
+		`APTEVA_POSE_ERROR:invalid`,
+	} {
+		if parsePoseRuntimeFailure(output) != nil {
+			t.Fatal(output)
+		}
+	}
+}
+
+func TestPoseFrameReadRetryRuntime(t *testing.T) {
+	// Execute the embedded extraction code with deterministic decoder failures.
+	// AST selection avoids requiring MediaPipe just to exercise transport retries.
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 unavailable")
+	}
+	script := `import ast,os,time,subprocess,tempfile
+from unittest.mock import patch
+source=ast.parse(open('smartcrop_pose_runtime.py').read())
+selected=[n for n in source.body if isinstance(n,(ast.FunctionDef,ast.ClassDef)) and n.name in ('extract_frame','PoseRuntimeFailure')]
+exec(compile(ast.Module(body=selected,type_ignores=[]),'embedded-runtime','exec'))
+req={'ffmpeg':'ffmpeg','source':'private-source'}
+with tempfile.TemporaryDirectory() as work:
+ path=os.path.join(work,'frame.png');open(path,'wb').write(b'old-frame')
+ calls=[]
+ def decoder(args,**kw):
+  assert not os.path.exists(path),'stale frame reused'
+  assert 0<kw['timeout']<=15
+  calls.append(args)
+  if len(calls)==1:
+   open(path,'wb').write(b'partial-frame')
+   return subprocess.CompletedProcess(args,1)
+  if len(calls)==2:return subprocess.CompletedProcess(args,0) # Empty output is failure.
+  open(path,'wb').write(b'fresh-frame')
+  return subprocess.CompletedProcess(args,0)
+ with patch('subprocess.run',decoder),patch('time.sleep'):
+  assert extract_frame(req,343000,path,time.monotonic()+60)==3
+  assert open(path,'rb').read()==b'fresh-frame'
+ with patch('subprocess.run',return_value=subprocess.CompletedProcess([],1)) as run,patch('time.sleep'):
+  try:extract_frame(req,343500,path,time.monotonic()+60)
+  except PoseRuntimeFailure as e:assert e.code=='pose_source_frame_unavailable' and e.at_ms==343500 and e.attempts==3
+  else:raise AssertionError('exhaustion accepted')
+  assert run.call_count==3
+ with patch('subprocess.run') as run:
+  try:extract_frame(req,344000,path,time.monotonic()-1)
+  except PoseRuntimeFailure as e:assert e.code=='pose_source_read_timeout' and e.attempts==0
+  else:raise AssertionError('deadline ignored')
+  run.assert_not_called()
+ with patch('subprocess.run',side_effect=subprocess.TimeoutExpired('ffmpeg',15)) as run,patch('time.sleep'):
+  try:extract_frame(req,344500,path,time.monotonic()+60)
+  except PoseRuntimeFailure as e:assert e.attempts==3
+  else:raise AssertionError('decoder timeout ignored')
+  assert run.call_count==3
+print('bounded retries, fresh-frame identity, empty outputs, exhaustion and deadlines verified')
+`
+	if out, err := exec.Command(python, "-c", script).CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
 	}
 }

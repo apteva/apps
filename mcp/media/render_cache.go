@@ -118,7 +118,7 @@ func preprocessSmartCrop(ctx context.Context, app *sdk.AppCtx, sc *storageClient
 		mode = "smart"
 	}
 	engine, _ := resolveSmartCropEngine(app, stringJSONValue(parsed["smart_crop_engine"]))
-	raw, _ := json.Marshal([]any{engine, poseRuntimeVersion, poseModelSHA256, smartCropAlgorithmVersion, app.Manifest().Version, sc.base, project, op, sources, row.SourceSHA256, row.Width, row.Height, row.Rotation, row.Derivations, nativeSmartCropSceneCacheIdentity(app, project, row), target, ratio, mode, parsed["fit_mode"], app.Config().Get("render_host_id")})
+	raw, _ := json.Marshal([]any{engine, poseRuntimeVersion, poseModelSHA256, smartCropAlgorithmVersion, app.Manifest().Version, sc.base, project, op, sources, row.SourceSHA256, row.Width, row.Height, row.Rotation, row.FPS, row.DurationMs, row.Derivations, nativeSmartCropSceneCacheIdentity(app, project, row), target, ratio, mode, parsed["fit_mode"], app.Config().Get("render_host_id")})
 	key := fmt.Sprintf("%x", sha256.Sum256(raw))
 	var cached string
 	if app.AppDB().QueryRow(`SELECT params FROM smartcrop_cache WHERE cache_key=?`, key).Scan(&cached) == nil {

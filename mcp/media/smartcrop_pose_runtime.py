@@ -96,6 +96,28 @@ def plan_pose(points,w,h,ratio=RATIO):
         'validation_scope':'Model landmarks and estimated head geometry only; requires visual review. Full body and legs are not required by this portrait experiment.'}
 
 
+class PoseRuntimeFailure(Exception):
+    def __init__(self,code,at_ms=None,attempts=0):
+        self.code=code;self.at_ms=at_ms;self.attempts=attempts
+
+def extract_frame(req,at,path,deadline):
+    # A failed or empty seek must never reuse the preceding frame.
+    for attempt in range(1,4):
+        if time.monotonic()>=deadline:
+            raise PoseRuntimeFailure('pose_source_read_timeout',at,attempt-1)
+        if os.path.exists(path):os.unlink(path)
+        args=[req['ffmpeg'],'-nostdin','-y','-loglevel','error','-threads','2','-ss',str(at/1000),'-i',req['source'],'-frames:v','1','-threads','2',path]
+        try:
+            run=subprocess.run(args,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=min(15,max(.01,deadline-time.monotonic())))
+            if run.returncode==0 and os.path.isfile(path) and os.path.getsize(path)>0:
+                return attempt
+        except subprocess.TimeoutExpired:
+            pass
+        if attempt<3:
+            time.sleep(min(.2*attempt,max(0,deadline-time.monotonic())))
+    code='pose_source_read_timeout' if time.monotonic()>=deadline else 'pose_source_frame_unavailable'
+    raise PoseRuntimeFailure(code,at,3)
+
 def main():
     if mp.__version__!='0.10.21':raise RuntimeError('pose_runtime_version_mismatch')
     if hashlib.sha256(open(req['model'],'rb').read()).hexdigest()!=req['model_sha256']:raise RuntimeError('pose_model_hash_mismatch')
@@ -106,16 +128,21 @@ def main():
     with tempfile.TemporaryDirectory(prefix='media-pose-frames-') as work,mp.tasks.vision.PoseLandmarker.create_from_options(options) as detector:
         for at in req['positions']:
             path=os.path.join(work,'frame.png')
-            args=[req['ffmpeg'],'-nostdin','-y','-loglevel','error','-threads','2','-ss',str(at/1000),'-i',req['source'],'-frames:v','1','-threads','2',path]
-            run=subprocess.run(args,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=max(.01,deadline-time.monotonic()))
-            if run.returncode:raise RuntimeError('pose_source_frame_unavailable')
+            attempts=extract_frame(req,at,path,deadline)
             image=mp.Image.create_from_file(path)
             if image.width!=req['width'] or image.height!=req['height']:raise RuntimeError('pose_source_geometry_mismatch')
             started=time.monotonic();result=detector.detect_for_video(image,at) if req["video"] else detector.detect(image)
-            sample={'at_ms':at,'inference_ms':(time.monotonic()-started)*1000,'status':'no_pose_detected'}
+            sample={'extraction_attempts':attempts,'at_ms':at,'inference_ms':(time.monotonic()-started)*1000,'status':'no_pose_detected'}
             if result.pose_landmarks:
                 p=np.array([[lm.x*image.width,lm.y*image.height,min(lm.visibility,lm.presence)] for lm in result.pose_landmarks[0]])
                 sample.update(plan_pose(p,image.width,image.height,req['ratio_w']/req['ratio_h']))
             samples.append(sample)
     print('APTEVA_POSE:'+json.dumps({'samples':samples,'runtime':'mediapipe-0.10.21','model_sha256':req['model_sha256']},default=lambda v:v.item() if isinstance(v,np.generic) else str(v)))
-if __name__=='__main__':main()
+if __name__=='__main__':
+    try:main()
+    except Exception as error:
+        # Only stable, allowlisted codes and numeric context cross the boundary.
+        codes={'pose_runtime_version_mismatch','pose_model_hash_mismatch','pose_sample_budget_exceeded','pose_source_geometry_mismatch'}
+        failure={'code':error.code,'at_ms':error.at_ms,'attempts':error.attempts} if isinstance(error,PoseRuntimeFailure) else {'code':str(error) if str(error) in codes else 'pose_inference_failed'}
+        print('APTEVA_POSE_ERROR:'+json.dumps(failure),flush=True)
+        sys.exit(1)

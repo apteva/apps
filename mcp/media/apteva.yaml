@@ -2,8 +2,12 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.23
+version: 0.14.24
 description: |
+  v0.14.24 retries transient native pose frame reads within the existing deadline,
+  rejects stale/empty frame evidence, samples safely near source endings, and
+  records extraction attempts and precise safe failure diagnostics. Engine
+  selection displays app defaults accurately. MediaPipe Full remains the default.
   v0.14.23 makes MediaPipe Pose Full the default Smart Crop engine, with
   selectable legacy saliency/foreground planning. Native CPU pose geometry
   supports stills, direct extraction and stable reel tracking. An isolated,
@@ -603,7 +607,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.23
+    ref: media/v0.14.24
     entry: mcp/media
   port: 8080
   health_check: /health

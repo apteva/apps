@@ -36,6 +36,13 @@ pip or venv. Model downloads are verified against the embedded model hash.
 First use needs network access to official package/model distributors and space
 for Python/dependencies; warm requests reuse the environment. Setup/inference
 share the caller's deadline, process cancellation and host work admission.
+Native frame extraction retries up to three times, with a 15-second per-attempt
+limit inside the 120-second extraction/inference budget. Each attempt removes
+the preceding temporary frame. Diagnostics retain extraction attempts per sample
+and a safe failure code/timestamp on exhaustion, without source URLs or stderr.
+End-of-source reel samples leave two nominal frame intervals before the reported
+duration, because forward seeks inside the final display interval can be empty.
+The actual requested seeks are saved; VFR evidence remains sampled.
 
 Linux glibc amd64 and Darwin arm64 are verified. Other wheel/platform combinations
 may be unsupported and use a visible legacy fallback. Windows and musl hosts

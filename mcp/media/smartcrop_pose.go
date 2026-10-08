@@ -75,9 +75,10 @@ type poseRequest struct {
 	Video     bool    `json:"video"`
 }
 type poseSample struct {
-	WeakWrists       []int  `json:"low_confidence_wrist_indices,omitempty"`
-	SupportedIndices []int  `json:"required_landmark_indices,omitempty"`
-	SourceClipped    []bool `json:"subject_extent_clipped_by_source,omitempty"`
+	ExtractionAttempts int    `json:"extraction_attempts,omitempty"`
+	WeakWrists         []int  `json:"low_confidence_wrist_indices,omitempty"`
+	SupportedIndices   []int  `json:"required_landmark_indices,omitempty"`
+	SourceClipped      []bool `json:"subject_extent_clipped_by_source,omitempty"`
 
 	AtMs   int64  `json:"at_ms"`
 	Status string `json:"status"`
@@ -97,13 +98,50 @@ type poseResult struct {
 	ModelSHA string       `json:"model_sha256"`
 }
 
-func posePositions(target smartCropTarget, duration int64) []int64 {
+type poseRuntimeFailure struct {
+	Code     string `json:"code"`
+	AtMs     *int64 `json:"at_ms,omitempty"`
+	Attempts int    `json:"attempts,omitempty"`
+}
+
+func (e *poseRuntimeFailure) Error() string { return e.Code }
+
+func parsePoseRuntimeFailure(output string) *poseRuntimeFailure {
+	for _, line := range strings.Split(output, "\n") {
+		if !strings.HasPrefix(line, "APTEVA_POSE_ERROR:") {
+			continue
+		}
+		var failure poseRuntimeFailure
+		if json.Unmarshal([]byte(strings.TrimPrefix(line, "APTEVA_POSE_ERROR:")), &failure) != nil {
+			continue
+		}
+		switch failure.Code {
+		case "pose_source_frame_unavailable", "pose_source_read_timeout", "pose_runtime_version_mismatch", "pose_model_hash_mismatch", "pose_sample_budget_exceeded", "pose_source_geometry_mismatch", "pose_inference_failed":
+		default:
+			continue
+		}
+		if failure.Attempts < 0 || failure.Attempts > 3 || (failure.AtMs != nil && *failure.AtMs < 0) {
+			continue
+		}
+		return &failure
+	}
+	return nil
+}
+
+func posePositions(target smartCropTarget, duration int64, fps float64) []int64 {
 	if !target.HasRange() {
 		return []int64{target.FocusMs}
 	}
 	end := target.EndMs - 1
 	if duration > 0 {
-		end = min(end, duration-1)
+		// Duration includes the last picture's display interval. FFmpeg seeks
+		// forward, so duration-1 can yield no picture. Leave two nominal
+		// frame intervals at the source edge and retain the actual seek in
+		// evidence. VFR or inaccurate duration can still fail visibly.
+		if fps <= 0 || math.IsNaN(fps) || math.IsInf(fps, 0) {
+			fps = 25
+		}
+		end = min(end, max(target.StartMs, duration-int64(math.Ceil(2000/fps))))
 	}
 	count := min(256, max(2, int((end-target.StartMs)/500)+2))
 	out := make([]int64, 0, count)
@@ -149,6 +187,9 @@ func runPose(ctx context.Context, app *sdk.AppCtx, host int64, req poseRequest) 
 			return nil, ctx.Err()
 		}
 		if err != nil || code != 0 {
+			if failure := parsePoseRuntimeFailure(out); failure != nil {
+				return nil, failure
+			}
 			return nil, fmt.Errorf("pose_runtime_unavailable")
 		}
 		output = out
@@ -188,6 +229,9 @@ func runPose(ctx context.Context, app *sdk.AppCtx, host int64, req poseRequest) 
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
+			}
+			if failure := parsePoseRuntimeFailure(string(out)); failure != nil {
+				return nil, failure
 			}
 			return nil, fmt.Errorf("pose_inference_failed")
 		}
@@ -256,8 +300,13 @@ func computeSmartCropPose(ctx context.Context, app *sdk.AppCtx, sc *storageClien
 		}
 		ffmpeg = paths.FFmpeg
 	}
-	result, err := runPose(ctx, app, host, poseRequest{Source: source, ModelSHA: poseModelSHA256, FFmpeg: ffmpeg, Positions: posePositions(target, row.DurationMs), Width: row.Width, Height: row.Height, RatioW: rw, RatioH: rh, Video: !row.IsImage})
+	result, err := runPose(ctx, app, host, poseRequest{Source: source, ModelSHA: poseModelSHA256, FFmpeg: ffmpeg, Positions: posePositions(target, row.DurationMs, row.FPS), Width: row.Width, Height: row.Height, RatioW: rw, RatioH: rh, Video: !row.IsImage})
 	if err != nil {
+		if failure, ok := err.(*poseRuntimeFailure); ok {
+			if a := cropAudit(ctx); a != nil {
+				a.PoseFailure = failure
+			}
+		}
 		return nil, nil, err
 	}
 	win, path, err := planPoseSamples(result.Samples, row.Width, row.Height, rw, rh)
@@ -272,7 +321,7 @@ func computeSmartCropPose(ctx context.Context, app *sdk.AppCtx, sc *storageClien
 		a.RuntimeVersion = poseRuntimeVersion
 		a.Coverage = "sampled_extent_fits"
 		a.PoseSamples = result.Samples
-		a.PoseLimitations = []string{"Head/hair and hand bounds are estimated from landmarks; pose confidence is not visual approval.", "Upper-body portrait policy does not require full legs; wider actions may not fit.", "Video coverage is sampled (up to 256 frames); extraction timestamps identify requested FFmpeg seeks and can differ from picture presentation by one frame."}
+		a.PoseLimitations = []string{"Head/hair and hand bounds are estimated from landmarks; pose confidence is not visual approval.", "Upper-body portrait policy does not require full legs; wider actions may not fit.", "Video coverage is sampled (up to 256 frames); extraction timestamps identify requested FFmpeg seeks and can differ from picture presentation by one frame. End-of-source samples leave two nominal frame intervals to avoid empty seeks."}
 		for _, s := range result.Samples {
 			recordSmartCropEvidence(ctx, "native_pose", s.AtMs, "")
 			b := poseBoundsWindow(s.Bounds, row.Width, row.Height)
@@ -361,6 +410,9 @@ func poseFailureReason(err error) string {
 	}
 	if err == context.DeadlineExceeded {
 		return "analysis_timeout"
+	}
+	if failure, ok := err.(*poseRuntimeFailure); ok {
+		return failure.Code
 	}
 	switch err.Error() {
 	case "pose_source_geometry_unavailable", "pose_source_unavailable", "pose_ffmpeg_unavailable", "pose_runtime_unavailable", "pose_inference_failed", "pose_cancellation_failed", "pose_evidence_identity_mismatch", "pose_timestamp_identity_mismatch", "pose_result_missing", "pose_no_samples", "pose_insufficient_evidence", "pose_invalid_geometry":

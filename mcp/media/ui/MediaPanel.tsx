@@ -2613,7 +2613,7 @@ function opFieldDefsBase(op: OpName): FieldDef[] {
       ];
     case "crop":
       return [
- {key:"smart_crop_engine",label:"Smart Crop engine",type:"select",options:["mediapipe_full","legacy"]},
+ {key:"smart_crop_engine",label:"Smart Crop engine",type:"select",options:["","mediapipe_full","legacy"],optionLabels:{"":"App default",mediapipe_full:"MediaPipe Pose Full",legacy:"Legacy"}},
         { key: "x",      label: "X (px)",      type: "number", placeholder: "0" },
         { key: "y",      label: "Y (px)",      type: "number", placeholder: "0" },
         { key: "width",  label: "Width (px)",  type: "number", placeholder: "640" },
@@ -2621,7 +2621,7 @@ function opFieldDefsBase(op: OpName): FieldDef[] {
       ];
     case "extract_frame":
       return [
- {key:"smart_crop_engine",label:"Smart Crop engine",type:"select",options:["mediapipe_full","legacy"]},
+ {key:"smart_crop_engine",label:"Smart Crop engine",type:"select",options:["","mediapipe_full","legacy"],optionLabels:{"":"App default",mediapipe_full:"MediaPipe Pose Full",legacy:"Legacy"}},
         { key: "at_ms", label: "At (ms)",    type: "number", placeholder: "1000" },
         { key: "width", label: "Width (px)", type: "number", placeholder: "1280 (optional)" },
       ];
@@ -2641,7 +2641,7 @@ function opFieldDefsBase(op: OpName): FieldDef[] {
         { key: "start_ms",     label: "Start (ms)",       type: "number", placeholder: "0" },
         { key: "end_ms",       label: "End (ms)",         type: "number", placeholder: "10000" },
         { key: "target_ratio", label: "Aspect ratio",     type: "select", options: ["9:16", "1:1", "4:5", "16:9"] },
-        {key:"smart_crop_engine",label:"Smart Crop engine",type:"select",options:["mediapipe_full","legacy"]},
+        {key:"smart_crop_engine",label:"Smart Crop engine",type:"select",options:["","mediapipe_full","legacy"],optionLabels:{"":"App default",mediapipe_full:"MediaPipe Pose Full",legacy:"Legacy"}},
         { key: "crop_mode",    label: "Crop mode",        type: "select", options: ["smart", "center"] },
         { key: "output_width", label: "Output width (px)",type: "number", placeholder: "1080" },
       ];
