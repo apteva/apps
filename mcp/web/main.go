@@ -166,19 +166,20 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "web_extract",
-			Description: "Open a URL in a browser session and extract rendered content. Omit backend to use Computer's configured default; otherwise use local, browserbase, steel, browser-engine, or service. Args: url, formats?, backend?, viewport?, max_chars?, store?, snapshot?, visibility? (private|signed|public; applies to stored snapshots and defaults to private). Browser metadata returns requested_backend and effective_backend.",
+			Description: "Open a URL in a browser session and extract rendered content. Omit backend to use Computer's configured default; otherwise use local, browserbase, steel, browser-engine, or service. Args: url, formats?, backend?, viewport?, max_chars?, readability? (default true; false includes headers and footers), store?, snapshot?, visibility? (private|signed|public; applies to stored snapshots and defaults to private). Browser metadata returns requested_backend and effective_backend.",
 			InputSchema: schemaObject(map[string]any{
-				"url":        map[string]any{"type": "string"},
-				"formats":    map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"text", "markdown", "html", "metadata", "structured_data", "json", "links", "images"}}},
-				"backend":    browserBackendSchema(),
-				"viewport":   viewportSchema(),
-				"max_chars":  map[string]any{"type": "integer"},
-				"store":      map[string]any{"type": "boolean"},
-				"snapshot":   map[string]any{"type": "boolean"},
-				"visibility": snapshotVisibilitySchema(),
-				"cache":      cacheModeSchema(),
-				"max_age":    cacheSecondsSchema("Maximum accepted cached page age in seconds. Default 86400 for extraction."),
-				"cache_ttl":  cacheSecondsSchema("How long to retain newly extracted page data in seconds. Default 86400."),
+				"url":         map[string]any{"type": "string"},
+				"formats":     map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"text", "markdown", "html", "metadata", "structured_data", "json", "links", "images"}}},
+				"backend":     browserBackendSchema(),
+				"viewport":    viewportSchema(),
+				"max_chars":   map[string]any{"type": "integer"},
+				"readability": map[string]any{"type": "boolean", "description": "Use main/article content (default true). Set false to include navigation, contact footers, and other body content."},
+				"store":       map[string]any{"type": "boolean"},
+				"snapshot":    map[string]any{"type": "boolean"},
+				"visibility":  snapshotVisibilitySchema(),
+				"cache":       cacheModeSchema(),
+				"max_age":     cacheSecondsSchema("Maximum accepted cached page age in seconds. Default 86400 for extraction."),
+				"cache_ttl":   cacheSecondsSchema("How long to retain newly extracted page data in seconds. Default 86400."),
 			}, []string{"url"}),
 			Handler: a.toolExtract,
 		},
@@ -2162,7 +2163,7 @@ func (a *App) extractBrowserDOM(ctx *sdk.AppCtx, sessionID string, args map[stri
 		"session_id":  sessionID,
 		"formats":     formats,
 		"max_chars":   boundedInt(intArg(args, "max_chars"), defaultMaxChars, 1000, 200000),
-		"readability": true,
+		"readability": boolArgDefault(args, "readability", true),
 	})
 	if waitMS := intArg(args, "wait_ms"); waitMS > 0 {
 		extractArgs["wait_ms"] = waitMS
@@ -2373,6 +2374,10 @@ func cacheKey(kind string, args map[string]any) (string, string, error) {
 	// Keep cached responses aligned with the browser audit schema and backend
 	// ownership rules introduced in Web v0.2.6.
 	cleaned := map[string]any{"kind": kind, "response_schema": "web-v0.2.6"}
+	if kind == "extract" && !boolArgDefault(args, "readability", true) {
+		// Discard entries produced before Computer honored full-body extraction.
+		cleaned["body_parser"] = "contacts-v1"
+	}
 	if kind == "search" || kind == "research" {
 		cleaned["search_parser"] = "google-organic-v0.2.9"
 	}

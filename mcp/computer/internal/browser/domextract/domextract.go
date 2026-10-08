@@ -16,7 +16,7 @@ import (
 const defaultMaxChars = 50000
 
 const extractScript = `(() => {
-  const formats = __FORMATS__, limit = __LIMIT__;
+  const formats = __FORMATS__, limit = __LIMIT__, readability = __READABILITY__;
   const want = (name) => !formats.length || formats.includes(name) || (name === 'structured_data' && formats.includes('json'));
   const needContent = want('text') || want('markdown') || want('html');
 
@@ -68,12 +68,12 @@ const extractScript = `(() => {
 
   const candidates = Array.from(clone.querySelectorAll('article,main,[role="main"],#content,.content,.article,.post'));
   let root = clone;
-  if (__READABILITY__ && candidates.length) {
+  if (readability && candidates.length) {
     root = candidates
       .map((el) => ({ el, len: cleanInline(el.innerText || el.textContent || '').length }))
       .sort((a, b) => b.len - a.len)[0].el;
   }
-  for (const el of Array.from(root.querySelectorAll('nav,header,footer,aside,script,style,noscript,svg,template'))) {
+  for (const el of Array.from(root.querySelectorAll(readability ? 'nav,header,footer,aside,script,style,noscript,svg,template' : 'script,style,noscript,svg,template'))) {
     el.remove();
   }
 
@@ -93,7 +93,7 @@ const extractScript = `(() => {
   const walkMarkdown = (node) => {
     if (!node || node.nodeType !== Node.ELEMENT_NODE || contentSize >= limit || ++visited > 20000) return;
     const tag = node.tagName.toLowerCase();
-    if (['script','style','noscript','svg','template','iframe','canvas','nav','header','footer','aside'].includes(tag)) return;
+    if (['script','style','noscript','svg','template','iframe','canvas'].includes(tag) || (readability && ['nav','header','footer','aside'].includes(tag))) return;
     if (/^h[1-6]$/.test(tag)) {
       const level = Number(tag.slice(1));
       const heading = node.innerText || node.textContent || '';
@@ -135,7 +135,7 @@ const extractScript = `(() => {
   const links = (want('links') ? Array.from(document.querySelectorAll('a[href]')).slice(0,1000) : []).map((a) => ({
     url: abs(a.getAttribute('href')),
     text: cleanInline(a.innerText || a.textContent || a.getAttribute('aria-label') || a.getAttribute('title') || '')
-  })).filter((x) => /^https?:\/\//i.test(x.url));
+  })).filter((x) => /^(https?:\/\/|mailto:|tel:)/i.test(x.url));
   const images = (want('images') ? Array.from(document.querySelectorAll('img[src],source[srcset]')).slice(0,500) : []).map((img) => {
     const raw = img.getAttribute('src') || String(img.getAttribute('srcset') || '').split(/\s+/)[0];
     return abs(raw);

@@ -24,6 +24,7 @@ type platformStub struct {
 	searchErrors   map[string]error
 	searchPayload  any
 	extractPages   map[string]any
+	extractErrors  map[string][]error
 	disableWeb     bool
 	disableCRM     bool
 }
@@ -64,6 +65,10 @@ func (p *platformStub) CallAppResult(app, tool string, input map[string]any, out
 		}
 	case "web/web_extract":
 		pageURL := fmt.Sprint(input["url"])
+		if failures := p.extractErrors[pageURL]; len(failures) > 0 {
+			p.extractErrors[pageURL] = failures[1:]
+			return failures[0]
+		}
 		page, ok := p.extractPages[pageURL]
 		if !ok {
 			return fmt.Errorf("missing extract fixture for %s", pageURL)
@@ -371,6 +376,73 @@ func TestContactExtractionRejectsThirdPartyEmailAndRepairsCollapsedMailbox(t *te
 	}
 	if got := normalizeQualifiedEmail("practice@gmail.com", "practice.example"); got != "practice@gmail.com" {
 		t.Fatalf("public mailbox=%q, want accepted", got)
+	}
+}
+
+func TestFrenchContactDiscoveryAndFreshQualification(t *testing.T) {
+	platform := &platformStub{extractPages: map[string]any{
+		"https://chezalbert.example/": map[string]any{
+			"url": "https://chezalbert.example/", "status": 200, "title": "Chez Albert",
+			"links": []map[string]any{{"url": "#contact", "text": "Contact"}, {"url": "/a-propos", "text": "À propos"}, {"url": "/politique.html", "text": "Mentions légales"}, {"url": "/reserver", "text": "Réservation"}},
+		},
+		"https://chezalbert.example/politique.html": map[string]any{
+			"url": "https://chezalbert.example/politique.html", "status": 200,
+			"text": "Propriétaire du site : Restaurant Chez Albert\nEmail : chezalbert@gmail.com",
+		},
+	}}
+	ctx := newTestContext(t, platform)
+	profile, err := createProfile(ctx.AppDB(), ctx.CurrentProject(), map[string]any{"name": "France contact regression", "locations": []any{"France"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, _, err := insertCandidate(ctx.AppDB(), ctx.CurrentProject(), candidateInput{ProfileID: profile.ID, CompanyName: "Chez Albert", CompanyDomain: "chezalbert.example", Website: "https://chezalbert.example/", Source: "google_places"}, profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := qualifyCandidate(ctx, candidate.ID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["candidate"].(*Candidate).Email != "chezalbert@gmail.com" {
+		t.Fatalf("missing legal-page email: %+v", result)
+	}
+	if len(platform.calls) != 2 || platform.calls[1].Input["url"] != "https://chezalbert.example/politique.html" {
+		t.Fatalf("unexpected crawl: %+v", platform.calls)
+	}
+	for _, call := range platform.calls {
+		if call.Input["readability"] != false {
+			t.Fatal("qualification must include the full body")
+		}
+	}
+}
+
+func TestParentGroupEmailRequiresNamedFirstPartyContactEvidence(t *testing.T) {
+	for _, test := range []struct{ name, pageURL, text, link, label, want string }{
+		{"espresso is not press", "https://espresso-paris.example/contact/", "", "mailto:restaurant.espresso@parent.example", "Email", "restaurant.espresso@parent.example"},
+		{"named contact mailbox", "https://albert-paris.example/contact/", "", "mailto:albert.contact@parent.example", "Email", "albert.contact@parent.example"},
+		{"restaurant mailto", "https://albert-paris.example/contact/", "", "MAILTO:restaurant.albert@parent.example?subject=Booking", "Email", "restaurant.albert@parent.example"},
+		{"visible contact", "https://albert-paris.example/contact/", "Restaurant : restaurant.albert@parent.example", "", "", "restaurant.albert@parent.example"},
+		{"generic parent", "https://albert-paris.example/contact/", "Email contact@parent.example", "", "", ""},
+		{"agency", "https://albert-paris.example/contact/", "Agence web : albert@agency.example", "mailto:albert@agency.example", "Réalisation agence", ""},
+		{"press", "https://albert-paris.example/contact/", "Presse : press.albert@parent.example", "mailto:press.albert@parent.example", "Presse", ""},
+		{"privacy", "https://albert-paris.example/contact/", "DPO : privacy.albert@parent.example", "mailto:privacy.albert@parent.example", "Privacy", ""},
+		{"unrelated page", "https://directory.example/contact/", "Email restaurant.albert@parent.example", "mailto:restaurant.albert@parent.example", "Email", ""},
+		{"no contact context", "https://albert-paris.example/", "restaurant.albert@parent.example", "", "", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			page := webExtractPage{URL: test.pageURL, Text: test.text, Links: []webLink{{URL: test.link, Text: test.label}}}
+			domain := "albert-paris.example"
+			if test.name == "espresso is not press" {
+				domain = "espresso-paris.example"
+			}
+			if got := extractBestEmail([]webExtractPage{page}, domain); got != test.want {
+				t.Fatalf("got %q, want %q", got, test.want)
+			}
+		})
+	}
+	page := webExtractPage{URL: "https://albert-paris.example/contact/", Text: "Event : event.albert@parent.example\nRestaurant : restaurant.albert@parent.example\nPresse : presse@parent.example", Metadata: map[string]any{"email": "albert@agency.example"}}
+	if got := extractBestEmail([]webExtractPage{page}, "albert-paris.example"); got != "restaurant.albert@parent.example" {
+		t.Fatalf("incorrect contact role %q", got)
 	}
 }
 
@@ -765,4 +837,47 @@ func (p *platformStub) CallAppContext(c context.Context, app, tool string, input
 }
 func (p *platformStub) CallAppBatchContext(c context.Context, app string, calls []sdk.AppCall, o sdk.AppBatchOptions) ([]sdk.AppCallResult, error) {
 	return nil, fmt.Errorf("unexpected batch app call")
+}
+
+func TestQualificationRetriesTransientFailuresAndCertifiedWWW(t *testing.T) {
+	for _, test := range []struct {
+		name, message, retryURL string
+		wantCalls               int
+		wantError               bool
+	}{
+		{"timeout", "context deadline exceeded", "https://albert.example/", 2, false},
+		{"www certificate", "navigate: net::ERR_CERT_COMMON_NAME_INVALID", "https://www.albert.example/", 2, false},
+		{"permanent failure", "permission denied", "https://albert.example/", 1, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			platform := &platformStub{extractErrors: map[string][]error{"https://albert.example/": {fmt.Errorf("%s", test.message)}}, extractPages: map[string]any{test.retryURL: map[string]any{"url": test.retryURL, "status": 200, "text": "Email contact@albert.example", "links": []map[string]any{{"url": "/mentions-legales", "text": "Mentions légales"}}}}}
+			ctx := newTestContext(t, platform)
+			profile, err := createProfile(ctx.AppDB(), ctx.CurrentProject(), map[string]any{"name": "Retry regression"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			candidate, _, err := insertCandidate(ctx.AppDB(), ctx.CurrentProject(), candidateInput{ProfileID: profile.ID, CompanyName: "Albert", CompanyDomain: "albert.example", Website: "https://albert.example/"}, profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := qualifyCandidate(ctx, candidate.ID, 1)
+			if (err != nil) != test.wantError {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			if len(platform.calls) != test.wantCalls {
+				t.Fatalf("calls=%+v", platform.calls)
+			}
+			if !test.wantError && result["candidate"].(*Candidate).Email != "contact@albert.example" {
+				t.Fatal("retry did not extract email")
+			}
+		})
+	}
+}
+
+func TestQualificationDoesNotVisitLegalPagesAfterFindingEmail(t *testing.T) {
+	page := webExtractPage{URL: "https://albert.example/", Links: []webLink{{URL: "/mentions-legales", Text: "Mentions légales"}, {URL: "/team", Text: "Team"}, {URL: "/contact", Text: "Contact"}}}
+	links := selectQualificationLinks(page, "albert.example", 3, false)
+	if len(links) != 2 || links[0] != "https://albert.example/contact" || links[1] != "https://albert.example/team" {
+		t.Fatalf("unnecessary legal crawl: %+v", links)
+	}
 }

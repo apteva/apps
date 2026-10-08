@@ -398,6 +398,35 @@ func TestExtractURLUsesComputerDOMParser(t *testing.T) {
 	}
 }
 
+func TestExtractFullBodyUsesSeparateCache(t *testing.T) {
+	plat := newFakePlatform()
+	plat.contactFooter = true
+	ctx, app := newTestCtx(t, plat)
+	args := map[string]any{"url": "https://restaurant.example/", "store": false}
+	readable, err := app.toolExtract(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(readable.(map[string]any)["page"].(pageDoc).Text, "footer@") || plat.lastCall("computer", "browser_extract")["readability"] != true {
+		t.Fatal("default extraction must retain readability")
+	}
+	args["readability"] = false
+	full, err := app.toolExtract(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if full.(map[string]any)["cache"].(cacheInfo).Hit || !strings.Contains(full.(map[string]any)["page"].(pageDoc).Text, "footer@restaurant.example") || plat.lastCall("computer", "browser_extract")["readability"] != false {
+		t.Fatal("full body reused trimmed cache or failed to forward readability=false")
+	}
+	cached, err := app.toolExtract(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cached.(map[string]any)["cache"].(cacheInfo).Hit {
+		t.Fatal("full body cache should be reusable")
+	}
+}
+
 func TestExtractUsesResponseCache(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -1269,6 +1298,7 @@ type fakeCall struct {
 }
 
 type fakePlatform struct {
+	contactFooter bool
 	tk.BasePlatformClient
 	mu                     sync.Mutex
 	calls                  []fakeCall
@@ -1485,6 +1515,9 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 			}}, regions...)
 		}
 		text := "Hello This page has useful text."
+		if p.contactFooter && in["readability"] == false {
+			text += "\nContact: footer@restaurant.example"
+		}
 		html := "<html><body><h1>Hello</h1><p>This page has useful text.</p></body></html>"
 		if p.cookiePolicyText {
 			text += " Privacy notice and cookies policy."

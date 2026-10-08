@@ -230,10 +230,12 @@ func qualifyCandidateContext(c context.Context, ctx *sdk.AppCtx, id int64, maxPa
 	}
 	queue := []string{startURL}
 	seen := map[string]bool{}
+	attempts := map[string]int{}
+	callCount := 0
 	queued := map[string]bool{startURL: true}
 	pages := make([]webExtractPage, 0, maxPages)
 	errorsByURL := map[string]string{}
-	for len(queue) > 0 && len(pages) < maxPages && len(seen) < maxPages*2 {
+	for len(queue) > 0 && len(pages) < maxPages && callCount < maxPages*2 {
 		if c.Err() != nil {
 			return nil, c.Err()
 		}
@@ -243,15 +245,31 @@ func qualifyCandidateContext(c context.Context, ctx *sdk.AppCtx, id int64, maxPa
 			continue
 		}
 		seen[pageURL] = true
+		attempts[pageURL]++
+		callCount++
 		var out webExtractOutput
 		deadline, cancel := context.WithTimeout(c, 45*time.Second)
 		callErr := sdk.CallAppResultContext(deadline, ctx.PlatformAPI(), "web", "web_extract", map[string]any{
 			"url": pageURL, "formats": []string{"links", "structured_data", "metadata", "text"},
-			"max_chars": 50000, "store": true, "snapshot": false,
+			"max_chars": 50000, "readability": false, "store": true, "snapshot": false,
 		}, &out)
 		cancel()
 		if callErr != nil {
 			errorsByURL[pageURL] = callErr.Error()
+			if attempts[pageURL] == 1 && c.Err() == nil && transientQualificationError(callErr.Error()) {
+				delete(seen, pageURL)
+				queue = append(queue, pageURL)
+			} else if strings.Contains(callErr.Error(), "ERR_CERT_COMMON_NAME_INVALID") {
+				// Some business certificates cover only the www hostname.
+				// Retry that same-domain HTTPS hostname without disabling TLS.
+				if u, err := url.Parse(pageURL); err == nil && u.Scheme == "https" && !strings.HasPrefix(u.Hostname(), "www.") {
+					u.Host = "www." + u.Host
+					if alternate := u.String(); !queued[alternate] {
+						queued[alternate] = true
+						queue = append(queue, alternate)
+					}
+				}
+			}
 			continue
 		}
 		page := out.Page
@@ -262,6 +280,7 @@ func qualifyCandidateContext(c context.Context, ctx *sdk.AppCtx, id int64, maxPa
 			errorsByURL[pageURL] = defaultString(page.Error, fmt.Sprintf("HTTP %d", page.Status))
 			continue
 		}
+		delete(errorsByURL, pageURL)
 		pages = append(pages, page)
 		artifactID := (*int64)(nil)
 		if page.Artifact != nil && page.Artifact.ID > 0 {
@@ -272,7 +291,7 @@ func qualifyCandidateContext(c context.Context, ctx *sdk.AppCtx, id int64, maxPa
 			CandidateID: id, SourceKind: "web_extract", Title: page.Title, URL: defaultString(page.FinalURL, page.URL),
 			Excerpt: qualificationExcerpt(page), ArtifactID: artifactID, RetrievedAt: nowUTC(),
 		})
-		links := selectQualificationLinks(page, candidate.CompanyDomain, maxPages*2)
+		links := selectQualificationLinks(page, candidate.CompanyDomain, maxPages*2, extractBestEmail(pages, candidate.CompanyDomain) == "")
 		toAdd := make([]string, 0, len(links)+1)
 		for _, link := range links {
 			if !seen[link] && !queued[link] {
@@ -364,12 +383,16 @@ func qualifyBatch(ctx *sdk.AppCtx, profileID int64, status string, limit, maxPag
 	return map[string]any{"results": results, "processed": len(results), "qualified": qualified, "rejected": rejected, "failed": failed, "skipped_enriched": skippedEnriched}, nil
 }
 
+func transientQualificationError(message string) bool {
+	return containsAny(strings.ToLower(message), []string{"deadline exceeded", "timeout", "timed out", "http 429", "http 502", "http 503", "http 504", "connection reset", "unexpected eof"})
+}
+
 func qualificationExcerpt(page webExtractPage) string {
 	text := compactWhitespace(defaultString(page.Description, page.Text))
 	return truncate(text, 700)
 }
 
-func selectQualificationLinks(page webExtractPage, domain string, limit int) []string {
+func selectQualificationLinks(page webExtractPage, domain string, limit int, needEmail bool) []string {
 	if limit <= 0 {
 		return nil
 	}
@@ -385,14 +408,25 @@ func selectQualificationLinks(page webExtractPage, domain string, limit int) []s
 		if website == "" || linkDomain == "" || (domain != "" && linkDomain != domain) {
 			continue
 		}
-		haystack := strings.ToLower(link.Text + " " + website)
+		// Fragment-only contact anchors have already been extracted with the body.
+		if website == strings.Split(defaultString(page.FinalURL, page.URL), "#")[0] {
+			continue
+		}
+		haystack := qualificationLinkText(link.Text + " " + website)
 		rank := 0
 		switch {
 		case containsAny(haystack, []string{"contact", "contact us", "get in touch", "location"}):
 			rank = 100
+		case containsAny(haystack, []string{"mentions legales", "mentions-legales", "legal", "politique", "impressum"}):
+			if !needEmail {
+				continue
+			}
+			rank = 95
+		case containsAny(haystack, []string{"reservation", "reserver", "test-resa", "booking", "informations pratiques"}):
+			rank = 92
 		case containsAny(haystack, []string{"team", "staff", "meet", "doctor", "dentist", "leadership", "owner"}):
 			rank = 90
-		case containsAny(haystack, []string{"about", "our practice", "our office"}):
+		case containsAny(haystack, []string{"about", "our practice", "our office", "a propos", "a-propos", "qui sommes"}):
 			rank = 80
 		case containsAny(haystack, []string{"appointment", "new patient", "patient form", "insurance"}):
 			rank = 70
@@ -420,6 +454,14 @@ func selectQualificationLinks(page webExtractPage, domain string, limit int) []s
 		}
 	}
 	return out
+}
+
+func qualificationLinkText(text string) string {
+	decoded, err := url.QueryUnescape(text)
+	if err == nil {
+		text = decoded
+	}
+	return strings.NewReplacer("é", "e", "è", "e", "ê", "e", "à", "a", "ô", "o").Replace(strings.ToLower(text))
 }
 
 func resolvePageLink(base, href string) string {
@@ -571,9 +613,12 @@ func extractBestEmail(pages []webExtractPage, domain string) string {
 	}
 	candidates := []rankedEmail{}
 	order := 0
-	add := func(raw string, score int) {
+	add := func(raw string, score int, publishedContact bool) {
 		email := normalizeQualifiedEmail(raw, domain)
-		if email == "" || containsAny(email, []string{"example.com", "sentry.io", "wixpress.com", "noreply@", "no-reply@", "privacy@", "abuse@"}) {
+		if email == "" && publishedContact && businessMailboxMatchesDomain(raw, domain) {
+			email = normalizeQualifiedEmail(raw, "")
+		}
+		if email == "" || containsAny(email, []string{"example.com", "sentry.io", "wixpress.com", "noreply@", "no-reply@", "privacy@", "abuse@", "presse@", "press@", "dpo@", "rgpd@", "webmaster@", "support@"}) {
 			return
 		}
 		if domain != "" && strings.HasSuffix(email, "@"+domain) {
@@ -591,14 +636,30 @@ func extractBestEmail(pages []webExtractPage, domain string) string {
 		if containsAny(strings.ToLower(page.URL+" "+page.FinalURL+" "+page.Title), []string{"contact", "location", "appointment"}) {
 			pageScore = 20
 		}
+		_, pageDomain := normalizeWebsite(defaultString(page.FinalURL, page.URL))
+		firstParty := domain != "" && pageDomain == domain
 		for _, link := range page.Links {
 			if strings.HasPrefix(strings.ToLower(link.URL), "mailto:") {
-				add(strings.TrimPrefix(strings.Split(link.URL, "?")[0], "mailto:"), 80+pageScore)
+				label := qualificationLinkText(link.Text)
+				if unrelatedEmailContext(label) {
+					continue
+				}
+				add(link.URL[len("mailto:"):strings.Index(link.URL+"?", "?")], 80+pageScore, firstParty)
+			}
+		}
+		if firstParty {
+			for _, line := range nonEmptyLines(deobfuscateEmailText(page.Text)) {
+				if unrelatedEmailContext(qualificationLinkText(line)) {
+					continue
+				}
+				for _, raw := range emailPattern.FindAllString(line, -1) {
+					add(raw, 40+pageScore, pageScore > 0 || containsAny(qualificationLinkText(line), []string{"email", "e-mail", "courriel", "contact", "reservation"}))
+				}
 			}
 		}
 		corpus := deobfuscateEmailText(strings.Join([]string{page.Text, page.Description, metadataText(page.Metadata), structuredDataText(page.StructuredData)}, " "))
 		for _, raw := range emailPattern.FindAllString(corpus, -1) {
-			add(raw, 40+pageScore)
+			add(raw, 40+pageScore, false)
 		}
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
@@ -611,6 +672,46 @@ func extractBestEmail(pages []webExtractPage, domain string) string {
 		return candidates[0].Value
 	}
 	return ""
+}
+
+// A named business mailbox published on the business's own page can belong
+// to its parent group. Generic group and vendor addresses still need review.
+func businessMailboxMatchesDomain(raw, domain string) bool {
+	email := normalizeQualifiedEmail(raw, "")
+	if email == "" || domain == "" {
+		return false
+	}
+	local := strings.SplitN(email, "@", 2)[0]
+	if unrelatedEmailContext(local) {
+		return false
+	}
+	host := strings.Split(strings.TrimPrefix(strings.ToLower(domain), "www."), ".")[0]
+	for _, term := range strings.FieldsFunc(host, func(r rune) bool { return r == '-' || r == '_' }) {
+		term = strings.TrimPrefix(strings.TrimPrefix(term, "restaurant"), "hotel")
+		if len(term) < 4 || containsAny(term, []string{"restaurant", "hotel", "paris", "lyon", "france", "group", "bistro", "cafe"}) {
+			continue
+		}
+		for _, mailboxTerm := range strings.FieldsFunc(local, func(r rune) bool { return r == '.' || r == '-' || r == '_' || r == '+' }) {
+			if mailboxTerm == term {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func unrelatedEmailContext(text string) bool {
+	text = qualificationLinkText(text)
+	if containsAny(text, []string{"web design", "site by"}) {
+		return true
+	}
+	for _, word := range strings.FieldsFunc(text, func(r rune) bool { return !unicode.IsLetter(r) }) {
+		switch word {
+		case "presse", "press", "privacy", "rgpd", "dpo", "webmaster", "webdesign", "agence", "agency", "hebergeur", "hebergement", "hosting", "realisation", "developpement", "support", "event", "events", "evenement", "evenements":
+			return true
+		}
+	}
+	return false
 }
 
 var publicMailboxDomains = map[string]bool{
@@ -630,8 +731,19 @@ func normalizeQualifiedEmail(raw, targetDomain string) string {
 	// recognized mailbox suffix, but never retain the concatenated prefix.
 	for _, mailbox := range []string{"appointments", "appointment", "reception", "frontdesk", "contact", "office", "hello", "schedule", "admin", "info"} {
 		if len(local) > len(mailbox) && strings.HasSuffix(local, mailbox) {
-			local = mailbox
-			break
+			prefix := strings.TrimSuffix(local, mailbox)
+			// Only repair phone-like prefixes. Named mailboxes such as
+			// albert.contact must remain intact, including at a parent group.
+			digits := strings.Map(func(r rune) rune {
+				if r >= '0' && r <= '9' {
+					return r
+				}
+				return -1
+			}, prefix)
+			if len(digits) >= 7 {
+				local = mailbox
+				break
+			}
 		}
 	}
 	if len(local) > 32 || regexp.MustCompile(`\d{5,}`).MatchString(local) {
