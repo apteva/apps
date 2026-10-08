@@ -4,13 +4,14 @@
 // shell exposes a Settings pane for the messaging coupling.
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { crmPanelInitialRoute, refreshedInboxSelection, type InboxItem, type InboxResponse } from "./inbox";
+import { crmPanelInitialRoute, inboxRowsWithSelection, refreshedInboxSelection, type InboxItem, type InboxResponse } from "./inbox";
 import { messageAddressLines, messageRecipientSummary, latestMessageAddresses, type MessageAddresses } from "./message_addresses";
 import { messageDisplayBody } from "./message_body";
 import { templateMessageDisplay, type TemplateSnapshot } from "./template_snapshot";
 import { channelPresentation, channelThemeCSS, conversationChannels, sessionFromResponse, whatsappWindowLabel, whatsappSessionRequiresTemplate, type WhatsAppSessionState, type WhatsAppSessionResponse } from "./channels";
 import { composerDraftContent, replyDraftCanSend, replyDraftEditable, replyDraftFingerprint, type SavedReplyDraft, type ReplyDraftSummary } from "./drafts";
 import { EmailUnsubscribeControl } from "./EmailUnsubscribeControl";
+import { messageSpeaker, type MessageParticipants } from "./message_speaker";
 
 function ChannelBadge({ channel }: { channel: string }) {
   const presentation = channelPresentation[channel];
@@ -401,6 +402,16 @@ function secondaryLine(c: Contact): string {
   if (c.job_title) bits.push(c.job_title);
   if (c.primary_email) bits.push(c.primary_email);
   return bits.join(" · ");
+}
+
+function messageParticipants(contact: Contact | null, senders: SenderOption[]): MessageParticipants {
+  return {
+    contact: contact ? { name: displayName(contact), addresses: [
+      contact.primary_email || "", contact.primary_phone || "",
+      ...(contact.channels || []).filter(channel => ["email", "phone", "sms", "whatsapp"].includes(channel.kind)).map(channel => channel.value),
+    ].filter(Boolean) } : undefined,
+    senders,
+  };
 }
 
 function formatTime(s: string | undefined): string {
@@ -1692,6 +1703,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
                           <ActivityGroup
                             key={`g${gi}`}
                             group={group}
+                            participants={messageParticipants(detail, verifiedSenders)}
                             busy={convoBusy}
                             onSetStatus={setConversationStatus}
                             emailUnsubscribe={group.kind === "conversation" && group.channel === "email" && detail ? <EmailUnsubscribeControl api={api} contactId={detail.id} conversationId={group.conversationId} refreshKey={detail.updated_at} /> : undefined}
@@ -1737,6 +1749,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
           </div>
         ) : tab === "inbox" ? (
           <InboxTab
+            key={`${projectId}:${installId}`}
             api={api}
             projectId={projectId}
             lists={lists}
@@ -2215,6 +2228,7 @@ function ActivityGroup({
   busy,
   drafts,
   emailUnsubscribe,
+  participants,
 }: {
   group: Group;
   onReply: (a: Activity) => void;
@@ -2222,11 +2236,12 @@ function ActivityGroup({
   busy: boolean;
   drafts?: React.ReactNode;
   emailUnsubscribe?: React.ReactNode;
+  participants?: MessageParticipants;
 }) {
   if (group.kind === "loose") {
     const a = group.activities[0]!;
     if (TEST_SENT_KINDS.has(a.kind)) return null; // hide tests by default
-    return <ActivityRow activity={a} onReply={onReply} />;
+    return <ActivityRow activity={a} onReply={onReply} participants={participants} />;
   }
   const isClosed = group.status === "closed";
   const messageCount = group.activities.filter(a => channelOfKind(a.kind) !== null).length;
@@ -2246,7 +2261,7 @@ function ActivityGroup({
       {drafts}
       <ul className="divide-y divide-border">
         {group.activities.map((a) => (
-          <ActivityRow key={a.id} activity={a} onReply={onReply} compact />
+          <ActivityRow key={a.id} activity={a} onReply={onReply} participants={participants} compact />
         ))}
       </ul>
     </li>
@@ -2333,19 +2348,32 @@ function MessageStatusPill({ status }: { status: MessageStatus }) {
   );
 }
 
-export function ActivityRow({ activity, onReply, compact }: { activity: Activity; onReply: (a: Activity) => void; compact?: boolean }) {
+export function ActivityRow({ activity, onReply, compact, participants }: { activity: Activity; onReply: (a: Activity) => void; compact?: boolean; participants?: MessageParticipants }) {
   const templateDisplay = templateMessageDisplay(activity.body, activity.template_snapshot);
   const isFailed = FAILED_KINDS.has(activity.kind);
   const isReceived = RECEIVED_KINDS.has(activity.kind);
+  const speaker = messageSpeaker(activity.kind, activity.message_addresses, participants);
+  const outgoing = speaker?.direction === "outgoing";
   return (
-    <li className={`${compact ? "p-2" : "border border-border rounded p-2"}`}>
-      <div className="flex items-center gap-2 text-xs text-text-dim mb-1">
+    <li data-message-direction={speaker?.direction} data-activity-kind={activity.kind} className={`${compact ? "p-2" : "border border-border rounded p-2"}`}>
+      <div className={speaker ? `min-w-0 rounded border p-3 ${outgoing ? "bg-accent/10 border-accent/30" : "bg-bg-input/30 border-border"}` : undefined}
+        style={speaker ? { marginLeft: outgoing ? "clamp(12px, 5%, 48px)" : 0, marginRight: outgoing ? 0 : "clamp(12px, 5%, 48px)", borderInlineStartWidth: 3 } : undefined}>
+      {speaker && <header className="mb-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm text-text font-semibold">{speaker.role}{speaker.name && ` · ${speaker.name}`}</span>
+          <span className={`text-xs font-medium ${outgoing ? "text-accent" : "text-text-muted"}`}>{speaker.directionLabel}</span>
+        </div>
+        <div className="text-xs text-text-muted break-all">{speaker.address || "Sender not recorded"}</div>
+      </header>}
+      <div className="flex flex-wrap items-center gap-2 text-xs text-text-dim mb-1">
+        {speaker ? <ChannelBadge channel={speaker.channel} /> : <>
         <span className="text-base leading-none">{iconForKind(activity.kind)}</span>
         <span style={!isFailed && channelOfKind(activity.kind) ? { color: channelPresentation[channelOfKind(activity.kind)!].color, backgroundColor: channelPresentation[channelOfKind(activity.kind)!].backgroundColor } : undefined} className={`text-[10px] px-1.5 py-0.5 rounded ${isFailed ? "bg-red/15 text-red" : "bg-accent/10 text-accent"}`}>
           {activity.kind}
         </span>
+        </>}
         {activity.message_status && <MessageStatusPill status={activity.message_status} />}
-        <span>{formatTime(activity.occurred_at)}{activity.source ? ` · ${activity.source}` : ""}</span>
+        <span>{formatTime(activity.occurred_at)}{activity.source ? ` · via ${activity.source}` : ""}</span>
         {isReceived && (
           <button
             type="button"
@@ -2370,6 +2398,7 @@ export function ActivityRow({ activity, onReply, compact }: { activity: Activity
       {activity.attachments && activity.attachments.length > 0 && (
         <ActivityAttachments attachments={activity.attachments} />
       )}
+      </div>
     </li>
   );
 }
@@ -3535,7 +3564,7 @@ function stripDomainPrefix(value: string): string {
   return value.trim().replace(/^@+/, "");
 }
 
-function InboxTab({ api, projectId, lists, senders, initialConversationId, initialStatus, onOpenContact, onReply, draftRevision, onOpenDraft }: {
+export function InboxTab({ api, projectId, lists, senders, initialConversationId, initialStatus, onOpenContact, onReply, draftRevision, onOpenDraft }: {
   api: <T,>(method: string, path: string, body?: any, params?: Record<string, string>, signal?: AbortSignal) => Promise<T>;
   projectId: string;
   lists: List[];
@@ -3551,6 +3580,11 @@ function InboxTab({ api, projectId, lists, senders, initialConversationId, initi
   const [total, setTotal] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
   const [selected, setSelected] = useState<InboxItem | null>(null);
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+  const [loadedThreadKey, setLoadedThreadKey] = useState("");
+  const activityCountRef = useRef(0);
+  const activityTotalRef = useRef(0);
   const [threadContact, setThreadContact] = useState<Contact | null>(null);
   const [threadConversation, setThreadConversation] = useState<Conversation | null>(null);
   const [waRoute, setWaRoute] = useState<{from: string; to: string; error?: string}>({from: "", to: ""});
@@ -3573,10 +3607,18 @@ function InboxTab({ api, projectId, lists, senders, initialConversationId, initi
   const inboxAbort=useRef<AbortController | null>(null);
   const threadAbort=useRef<AbortController | null>(null);
   const pendingInitialConversation = useRef(initialConversationId);
+  const inboxBusyRef = useRef(false);
+  const queuedInboxRefresh = useRef(false);
+  const inboxLoaderRef = useRef<() => Promise<void>>(async () => {});
+  const threadBusyRef = useRef(false);
+  const queuedThreadRefresh = useRef(false);
+  const threadLoaderRef = useRef<(item: InboxItem) => Promise<void>>(async () => {});
 
   const load = useCallback(async (offset = 0, resetOnMissing = false) => {
     const seq = ++listLoadSeq.current;
     inboxAbort.current?.abort();const controller=new AbortController();inboxAbort.current=controller;
+    inboxBusyRef.current = true;
+    queuedInboxRefresh.current = false;
     setErr(null);
     if (offset > 0) setLoadingMore(true);
     try {
@@ -3607,28 +3649,39 @@ function InboxTab({ api, projectId, lists, senders, initialConversationId, initi
         return next;
       });
     } catch (e) {
-      if (seq !== listLoadSeq.current) return;
+      if (seq !== listLoadSeq.current || controller.signal.aborted) return;
       setErr((e as Error).message);
-      if (offset === 0) {
-        itemsRef.current = [];
-        setItems([]);
-        setTotal(0);
-      }
+      // A failed background refresh must not erase the existing queue.
+      setItems(current => current ?? []);
     } finally {
-      if (seq === listLoadSeq.current) setLoadingMore(false);
+      if (seq === listLoadSeq.current) {
+        inboxBusyRef.current = false;
+        setLoadingMore(false);
+        if (queuedInboxRefresh.current) {
+          queuedInboxRefresh.current = false;
+          void inboxLoaderRef.current();
+        }
+      }
     }
   }, [api, statusFilter, channelFilter, fromFilter, toFilter, listFilter, tagFilter]);
+  inboxLoaderRef.current = load;
   // Only an intentional filter/scope change may replace a missing selection.
   // Send callbacks, live events, Refresh and pagination preserve the thread.
   useEffect(() => { load(0, true); }, [load]);
 
   const loadThreadFor = useCallback(async (item: InboxItem, activityOffset = 0) => {
+    const isCurrent = () => String(selectedRef.current?.id) === String(item.id)
+      && String(selectedRef.current?.contact_id) === String(item.contact_id);
+    if (!isCurrent()) return; // Ignore a late send/status callback for a previous thread.
     const seq = ++threadLoadSeq.current;
     threadAbort.current?.abort();const controller=new AbortController();threadAbort.current=controller;
+    threadBusyRef.current = true;
+    queuedThreadRefresh.current = false;
     if (activityOffset > 0) setThreadLoadingMore(true);
-    else setThreadLoading(true);
+    else { setThreadLoading(true); setThreadLoadingMore(false); }
     setThreadErr(null);
     try {
+      const activityLimit = activityOffset > 0 ? 200 : Math.min(500, Math.max(200, activityCountRef.current));
       const [contact, convo] = await Promise.all([
         api<{ contact: Contact }>("GET", `/contacts/${item.contact_id}`,undefined,{},controller.signal),
         api<{
@@ -3640,38 +3693,82 @@ function InboxTab({ api, projectId, lists, senders, initialConversationId, initi
           `/contacts/${item.contact_id}/conversations/${item.id}`,
           undefined,
           {
-            activity_limit: "200",
+            activity_limit: String(activityLimit),
             activity_offset: String(activityOffset),
           }, controller.signal,
         ),
       ]);
-      if (seq !== threadLoadSeq.current) return;
+      // Refresh the already-open history as well as the latest messages. The
+      // API caps each page at 500, so longer threads need bounded extra pages.
+      let nextActivities = convo.activities || [];
+      const total = convo.activity_total ?? nextActivities.length;
+      const newlyAdded = activityCountRef.current > 0 ? Math.max(0, total - activityTotalRef.current) : 0;
+      const refreshCount = Math.min(activityCountRef.current + newlyAdded, total);
+      if (activityOffset === 0 && nextActivities.length === activityLimit) {
+        for (let offset = activityLimit; offset < refreshCount; offset += 500) {
+          if (seq !== threadLoadSeq.current || controller.signal.aborted || !isCurrent()) return;
+          const older = await api<{ activities?: Activity[] }>(
+            "GET", `/contacts/${item.contact_id}/conversations/${item.id}`, undefined,
+            { activity_limit: String(Math.min(500, refreshCount - offset)), activity_offset: String(offset) }, controller.signal,
+          );
+          nextActivities = [...(older.activities || []), ...nextActivities];
+        }
+      }
+      if (seq !== threadLoadSeq.current || controller.signal.aborted || !isCurrent()) return;
+      setLoadedThreadKey(`${item.contact_id}:${item.id}`);
       setThreadContact(contact.contact);
       setThreadConversation(convo.conversation || null);
       setThreadActivities((previous) => activityOffset > 0
-        ? [...(convo.activities || []), ...previous]
-        : (convo.activities || []));
+        ? [...nextActivities, ...previous]
+        : nextActivities);
+      activityCountRef.current = activityOffset > 0
+        ? activityOffset + nextActivities.length
+        : nextActivities.length;
+      activityTotalRef.current = total;
       setThreadActivityTotal(typeof convo.activity_total === "number"
         ? convo.activity_total
         : (convo.activities || []).length);
+      // Retained sidebar rows need fresh status even when absent from /inbox.
+      if (convo.conversation) {
+        const conversation = convo.conversation;
+        setSelected(current => current && String(current.id) === String(item.id) ? {
+          ...current, status: conversation.status || current.status,
+          priority: conversation.priority || current.priority,
+          subject: conversation.subject || current.subject,
+          last_activity_at: conversation.last_activity_at || current.last_activity_at,
+        } : current);
+      }
     } catch (e) {
-      if (seq !== threadLoadSeq.current) return;
+      if (seq !== threadLoadSeq.current || controller.signal.aborted || !isCurrent()) return;
       setThreadErr((e as Error).message);
-      setThreadContact(null);
-      setThreadConversation(null);
-      setThreadActivities([]);
-      setThreadActivityTotal(0);
+      // Keep the last successful snapshot on refresh or pagination failure.
     } finally {
       if (seq === threadLoadSeq.current) {
+        threadBusyRef.current = false;
         setThreadLoading(false);
         setThreadLoadingMore(false);
+        if (queuedThreadRefresh.current && selectedRef.current) {
+          queuedThreadRefresh.current = false;
+          void threadLoaderRef.current(selectedRef.current);
+        }
       }
     }
   }, [api]);
+  threadLoaderRef.current = loadThreadFor;
 
   useEffect(() => {
+    // Navigation invalidates old requests, but same-ID metadata changes do not.
+    threadLoadSeq.current++;
+    threadAbort.current?.abort();
+    threadBusyRef.current = false;
+    queuedThreadRefresh.current = false;
+    activityCountRef.current = 0;
+    activityTotalRef.current = 0;
+    setThreadErr(null);
+    setThreadLoadingMore(false);
     if (!selected) {
-      threadLoadSeq.current++;
+      setLoadedThreadKey("");
+      setThreadLoading(false);
       setThreadContact(null);
       setThreadConversation(null);
       setThreadActivities([]);
@@ -3680,16 +3777,46 @@ function InboxTab({ api, projectId, lists, senders, initialConversationId, initi
       return;
     }
     loadThreadFor(selected);
-  }, [selected?.id, loadThreadFor]);
+  }, [selected?.id, selected?.contact_id, loadThreadFor]);
 
   const reloadSelectedThread = useCallback(async () => {
-    if (selected) await loadThreadFor(selected);
-    await load();
-  }, [load, loadThreadFor, selected]);
+    if (selectedRef.current) await loadThreadFor(selectedRef.current);
+    await inboxLoaderRef.current();
+  }, [loadThreadFor]);
 
   const eventRefresh = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshThreadPending = useRef(false);
-  useEffect(() => () => {if(eventRefresh.current) clearTimeout(eventRefresh.current);}, [api]);
+  const refreshListPending = useRef(false);
+  useEffect(() => () => {
+    if (eventRefresh.current) clearTimeout(eventRefresh.current);
+    eventRefresh.current = null;
+    refreshThreadPending.current = false;
+    refreshListPending.current = false;
+    queuedThreadRefresh.current = false;
+    queuedInboxRefresh.current = false;
+    ++listLoadSeq.current; ++threadLoadSeq.current;
+    inboxAbort.current?.abort(); threadAbort.current?.abort();
+  }, [api]);
+  // Both apps report the same sends/status changes. Batch those events, and
+  // queue one follow-up instead of repeatedly aborting an in-flight refresh.
+  const scheduleEventRefresh = (list: boolean, thread: boolean) => {
+    refreshListPending.current ||= list;
+    refreshThreadPending.current ||= thread;
+    if (eventRefresh.current) return;
+    eventRefresh.current = setTimeout(() => {
+      eventRefresh.current = null;
+      if (refreshListPending.current) {
+        if (inboxBusyRef.current) queuedInboxRefresh.current = true;
+        else void inboxLoaderRef.current();
+      }
+      refreshListPending.current = false;
+      if (refreshThreadPending.current && selectedRef.current) {
+        if (threadBusyRef.current) queuedThreadRefresh.current = true;
+        else void threadLoaderRef.current(selectedRef.current);
+      }
+      refreshThreadPending.current = false;
+    }, 150);
+  };
   useAppEvents("crm", projectId, (ev) => {
     if (
       ev.topic === "conversation.message.received" ||
@@ -3698,15 +3825,11 @@ function InboxTab({ api, projectId, lists, senders, initialConversationId, initi
       ev.topic === "contact.channel.deliverability.changed" ||
       ev.topic === "contact.merged"
     ) {
-      if (eventRefresh.current) clearTimeout(eventRefresh.current);
       const data = (ev.data || {}) as { conversation_id?: number; contact_id?: number };
-      refreshThreadPending.current ||= !!selected && (!data.conversation_id || String(data.conversation_id) === String(selected.id));
-      eventRefresh.current = setTimeout(() => {
-        load();
-        const refresh = refreshThreadPending.current;
-        refreshThreadPending.current = false;
-        if (selected && refresh) loadThreadFor(selected);
-      }, 150);
+      const relevant = !!selected && (data.conversation_id != null
+        ? String(data.conversation_id) === String(selected.id)
+        : data.contact_id == null || String(data.contact_id) === String(selected.contact_id));
+      scheduleEventRefresh(true, relevant);
     }
   });
 
@@ -3722,7 +3845,7 @@ function InboxTab({ api, projectId, lists, senders, initialConversationId, initi
         )
       : true;
     if (selected && isVisibleThreadMessage) {
-      loadThreadFor(selected);
+      scheduleEventRefresh(false, true);
     }
   });
 
@@ -3750,6 +3873,9 @@ function InboxTab({ api, projectId, lists, senders, initialConversationId, initi
     setTagFilter("");
   };
   const hasFilters = channelFilter || fromFilter.trim() || toFilter.trim() || listFilter || tagFilter.trim();
+  const sidebarItems = inboxRowsWithSelection(items || [], selected);
+  const retainedSelection = !!selected && !!items && !items.some(item => String(item.id) === String(selected.id));
+  const hasLoadedThread = !!selected && loadedThreadKey === `${selected.contact_id}:${selected.id}`;
   const inp = "bg-bg-input border border-border rounded px-2 py-1 text-xs";
   const selectedGroup: Extract<Group, { kind: "conversation" }> | null = threadConversation ? {
     kind: "conversation",
@@ -3842,16 +3968,18 @@ function InboxTab({ api, projectId, lists, senders, initialConversationId, initi
           {err && <div className="p-4 text-red text-xs">Error: {err}</div>}
           {items === null ? (
             <div className="p-4 text-text-muted text-sm">Loading…</div>
-          ) : items.length === 0 ? (
+          ) : sidebarItems.length === 0 ? (
             <div className="p-4 text-text-muted text-sm">Nothing here. New inbound conversations show up as they arrive.</div>
           ) : (
             <ul className="divide-y divide-border">
-              {items.map((it) => (
+              {sidebarItems.map((it) => (
                 <li
                   key={it.id}
-                  onClick={() => setSelected(it)}
+                  aria-current={String(selected?.id) === String(it.id) ? "true" : undefined}
+                  onClick={() => { selectedRef.current = it; setSelected(it); }}
                   className={`px-4 py-3 hover:bg-bg-input/40 cursor-pointer ${String(selected?.id) === String(it.id) ? "bg-bg-input" : ""}`}
                 >
+                  {retainedSelection && String(it.id) === String(selected?.id) && <div className="text-[10px] text-accent mb-1">Currently viewing · outside filters</div>}
                   <div className="flex items-center gap-2 mb-0.5">
                     <span className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${PRIORITY_DOT[it.priority] || PRIORITY_DOT.normal}`} title={`priority: ${it.priority}`} />
                     <span className="text-sm text-text font-medium truncate flex-1">
@@ -3888,10 +4016,10 @@ function InboxTab({ api, projectId, lists, senders, initialConversationId, initi
         <main className="min-h-0 overflow-auto p-4">
           {!selected ? (
             <div className="text-text-muted text-sm text-center mt-12">Select a conversation.</div>
-          ) : threadLoading ? (
+          ) : !hasLoadedThread && (threadLoading || !threadErr) ? (
             <div className="text-text-muted text-sm text-center mt-12">Loading thread…</div>
-          ) : threadErr ? (
-            <div className="text-red text-xs">Error: {threadErr}</div>
+          ) : !hasLoadedThread && threadErr ? (
+            <div className="text-red text-xs" role="alert">Error: {threadErr} <button type="button" onClick={() => loadThreadFor(selected)} className="text-accent underline">Retry</button></div>
           ) : !selectedGroup || !threadConversation ? (
             <div className="text-text-muted text-sm text-center mt-12">Thread not found.</div>
           ) : (
@@ -3913,7 +4041,7 @@ function InboxTab({ api, projectId, lists, senders, initialConversationId, initi
                   <p className="mt-1 text-xs text-text-dim break-all">
                     Latest message · {messageRecipientSummary(latestMessageAddresses(threadActivities))}
                   </p>
-                  {items && !items.some(item => String(item.id) === String(selected.id)) && (
+                  {retainedSelection && (
                     <p className="mt-1 text-xs text-text-muted" role="status">
                       This conversation is outside the current inbox filters. It stays here until you choose another conversation or change filters.
                     </p>
@@ -3935,6 +4063,7 @@ function InboxTab({ api, projectId, lists, senders, initialConversationId, initi
                   >Refresh</button>
                 </div>
               </header>
+              {threadErr && <div className="text-red text-xs" role="alert">Refresh failed: {threadErr}. Showing the last loaded messages. <button type="button" onClick={() => loadThreadFor(selected)} className="text-accent underline">Retry</button></div>}
               {hasWhatsApp && <WhatsAppWindowNotice session={threadSession} />}
               {threadActivities.length < threadActivityTotal && (
                 <button
@@ -3950,7 +4079,9 @@ function InboxTab({ api, projectId, lists, senders, initialConversationId, initi
               )}
               <ul>
                 <ActivityGroup
+                  key={threadConversation.id}
                   group={selectedGroup}
+                  participants={messageParticipants(threadContact, senders)}
                   drafts={threadContact && threadConversation ? <DraftShelf key={threadConversation.id} api={api} conversationId={threadConversation.id} revision={draftRevision} onOpen={id=>onOpenDraft(id,threadContact,threadConversation,reloadSelectedThread)} /> : undefined}
                   busy={statusBusy}
                   onSetStatus={setThreadStatus}
@@ -3965,7 +4096,7 @@ function InboxTab({ api, projectId, lists, senders, initialConversationId, initi
         </main>
 
         <aside className="min-h-0 border-l border-border overflow-auto p-4">
-          {!threadContact ? (
+          {!hasLoadedThread || !threadContact ? (
             <div className="text-text-muted text-xs">No contact selected.</div>
           ) : (
             <div className="space-y-4">

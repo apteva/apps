@@ -41,6 +41,13 @@ export function refreshedInboxSelection(
   return requested || rows[0] || null;
 }
 
+// Display-only retention: never include this extra row in queue totals/offsets.
+export function inboxRowsWithSelection(rows: InboxItem[], selected: InboxItem | null): InboxItem[] {
+  return selected && !rows.some(row => String(row.id) === String(selected.id))
+    ? [selected, ...rows]
+    : rows;
+}
+
 export interface CRMInboxHostProps {
   appName?: string;
   installId?: number;
