@@ -353,12 +353,14 @@ func (a *App) handleMessagingDeliveryEvent(ctx *sdk.AppCtx, event sdk.Event) err
 }
 
 type suppressionCheckResult struct {
-	Suppressed   bool   `json:"suppressed"`
-	Reason       string `json:"reason"`
-	Source       string `json:"source"`
-	Kind         string `json:"kind"`
-	Matched      string `json:"matched"`
-	SuppressedAt string `json:"suppressed_at"`
+	Direction      string `json:"direction"`
+	CheckDirection string `json:"check_direction"`
+	Suppressed     bool   `json:"suppressed"`
+	Reason         string `json:"reason"`
+	Source         string `json:"source"`
+	Kind           string `json:"kind"`
+	Matched        string `json:"matched"`
+	SuppressedAt   string `json:"suppressed_at"`
 }
 
 func suppressionCheckDetailed(ctx *sdk.AppCtx, pid, transport, address string) (suppressionCheckResult, error) {

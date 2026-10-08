@@ -6,6 +6,12 @@ export interface MessageAddresses {
   received_at?: string;
 }
 
+// Audit notes are not messages. Do not invent an unknown recipient when an
+// unsubscribe (or another system action) is the most recent thread activity.
+export function latestMessageAddresses(activities: {kind:string;message_addresses?:MessageAddresses}[]): MessageAddresses | undefined {
+  return [...activities].reverse().find(a => /^(email|sms|whatsapp)_(received|sent|send_failed|test_sent)$/.test(a.kind))?.message_addresses;
+}
+
 export function messageRecipientSummary(addresses?: MessageAddresses): string {
   const to = addresses?.to?.filter(Boolean).join(", ");
   if (to) return `To: ${to}`;

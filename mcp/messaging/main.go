@@ -380,14 +380,15 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "suppression_add",
-			Description: "Suppress an exact address or email domain. Suppressions are bidirectional: outbound sends are blocked and inbound messages are persisted but not dispatched. Args: address, channel? (auto-detected), kind? (address|domain; inferred for bare domains), reason?, source?, force? (required for common email domains).",
+			Description: "Suppress an exact address or email domain. direction=both (default) blocks outbound sends and inbound dispatch, preserving legacy behavior. direction=outbound stops sending while allowing incoming replies; use for operator-recorded email unsubscribe requests. Never weakens an existing both-direction block. Args: address, channel?, kind? (address|domain), direction? (both|outbound), reason?, source?, force? (required for common email domains).",
 			InputSchema: schemaObject(map[string]any{
-				"address": map[string]any{"type": "string"},
-				"channel": map[string]any{"type": "string"},
-				"kind":    map[string]any{"type": "string"},
-				"reason":  map[string]any{"type": "string"},
-				"source":  map[string]any{"type": "string"},
-				"force":   map[string]any{"type": "boolean"},
+				"address":   map[string]any{"type": "string"},
+				"channel":   map[string]any{"type": "string"},
+				"kind":      map[string]any{"type": "string"},
+				"direction": map[string]any{"type": "string", "enum": []string{"both", "outbound"}, "default": "both"},
+				"reason":    map[string]any{"type": "string"},
+				"source":    map[string]any{"type": "string"},
+				"force":     map[string]any{"type": "boolean"},
 			}, []string{"address"}),
 			Handler: a.toolSuppressionAdd,
 		},
@@ -403,10 +404,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "suppression_check",
-			Description: "Cheap suppression lookup for an address. Checks exact address and, for email, its domain. Returns {suppressed, kind, reason, source, channel, address, matched, suppressed_at}. Args: address, channel? (auto-detected if omitted).",
+			Description: "Cheap project-scoped suppression lookup for an address and email domain. direction=outbound (default) checks send eligibility; direction=inbound checks incoming dispatch and ignores outbound-only blocks. Returns suppressed, check_direction, and matched direction/kind/reason/source/address/suppressed_at when blocked. Args: address, channel?, direction? (outbound|inbound).",
 			InputSchema: schemaObject(map[string]any{
-				"address": map[string]any{"type": "string"},
-				"channel": map[string]any{"type": "string"},
+				"address":   map[string]any{"type": "string"},
+				"channel":   map[string]any{"type": "string"},
+				"direction": map[string]any{"type": "string", "enum": []string{"outbound", "inbound"}, "default": "outbound"},
 			}, []string{"address"}),
 			Handler: a.toolSuppressionCheck,
 		},
@@ -801,6 +803,7 @@ type Suppression struct {
 	ProjectID string `json:"project_id,omitempty"`
 	Channel   string `json:"channel"`
 	Kind      string `json:"kind"`
+	Direction string `json:"direction"`
 	Address   string `json:"address"`
 	Reason    string `json:"reason"`
 	Source    string `json:"source"`
@@ -2441,7 +2444,7 @@ func (a *App) toolSuppressionAdd(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if source == "" {
 		source = "manual"
 	}
-	row, err := upsertSuppressionAndEmit(ctx, pid, channel, kind, value, reason, source)
+	row, err := upsertSuppressionAndEmit(ctx, pid, channel, kind, value, reason, source, strArg(args, "direction"))
 	if err != nil {
 		return nil, err
 	}
@@ -2475,26 +2478,36 @@ func (a *App) toolSuppressionCheck(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if err != nil {
 		return nil, err
 	}
-	match, err := dbSuppressionMatch(ctx.AppDB(), pid, channel, addr)
+	checkDirection := strArg(args, "direction")
+	if checkDirection == "" {
+		checkDirection = "outbound"
+	}
+	if checkDirection != "outbound" && checkDirection != "inbound" {
+		return nil, errors.New("direction must be outbound or inbound")
+	}
+	match, err := dbSuppressionMatch(ctx.AppDB(), pid, channel, addr, checkDirection)
 	if err != nil {
 		return nil, err
 	}
 	if match == nil {
 		return map[string]any{
-			"suppressed": false,
-			"channel":    channel,
-			"address":    addr,
+			"suppressed":      false,
+			"check_direction": checkDirection,
+			"channel":         channel,
+			"address":         addr,
 		}, nil
 	}
 	return map[string]any{
-		"suppressed":    true,
-		"reason":        match.Reason,
-		"source":        match.Source,
-		"channel":       channel,
-		"address":       addr,
-		"kind":          match.Kind,
-		"matched":       match.Address,
-		"suppressed_at": match.FirstSeen,
+		"suppressed":      true,
+		"check_direction": checkDirection,
+		"direction":       match.Direction,
+		"reason":          match.Reason,
+		"source":          match.Source,
+		"channel":         channel,
+		"address":         addr,
+		"kind":            match.Kind,
+		"matched":         match.Address,
+		"suppressed_at":   match.FirstSeen,
 	}, nil
 }
 
@@ -2525,11 +2538,11 @@ func (a *App) toolSuppressionRemove(ctx *sdk.AppCtx, args map[string]any) (any, 
 	return map[string]any{"removed": removed > 0, "address": value, "channel": channel, "kind": kind}, nil
 }
 
-func upsertSuppressionAndEmit(ctx *sdk.AppCtx, pid, channel, kind, address, reason, source string) (*Suppression, error) {
+func upsertSuppressionAndEmit(ctx *sdk.AppCtx, pid, channel, kind, address, reason, source string, direction ...string) (*Suppression, error) {
 	if ctx == nil {
 		return nil, errors.New("messaging context not initialized")
 	}
-	if err := dbSuppressionUpsertKind(ctx.AppDB(), pid, channel, kind, address, reason, source); err != nil {
+	if err := dbSuppressionUpsertExec(ctx.AppDB(), pid, channel, kind, address, reason, source, direction...); err != nil {
 		return nil, err
 	}
 	row, err := dbSuppressionGetExact(ctx.AppDB(), pid, channel, kind, address)
@@ -2549,6 +2562,7 @@ func emitSuppressionChanged(ctx *sdk.AppCtx, pid, operation string, suppression 
 		"suppressed": operation != "remove",
 		"channel":    suppression.Channel,
 		"kind":       suppression.Kind,
+		"direction":  suppression.Direction,
 		"address":    suppression.Address,
 		"reason":     suppression.Reason,
 		"source":     suppression.Source,
@@ -3903,7 +3917,7 @@ func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 	}
 	sender := canonicalAddrForChannel(m.Channel, m.From)
 	if sender != "" {
-		match, err := dbSuppressionMatch(ctx.AppDB(), pid, m.Channel, sender)
+		match, err := dbSuppressionMatch(ctx.AppDB(), pid, m.Channel, sender, "inbound")
 		if err != nil {
 			return err
 		}
@@ -7120,30 +7134,38 @@ type suppressionExecer interface {
 	Exec(query string, args ...any) (sql.Result, error)
 }
 
-func dbSuppressionUpsertExec(exec suppressionExecer, pid, channel, kind, addr, reason, source string) error {
+func dbSuppressionUpsertExec(exec suppressionExecer, pid, channel, kind, addr, reason, source string, directions ...string) error {
+	direction := "both"
+	if len(directions) > 0 && directions[0] != "" {
+		direction = directions[0]
+	}
+	if direction != "both" && direction != "outbound" {
+		return errors.New("suppression direction must be both or outbound")
+	}
 	_, err := exec.Exec(
-		`INSERT INTO suppressions (project_id, channel, kind, address, reason, source, first_seen, last_seen)
-		 VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		`INSERT INTO suppressions (project_id, channel, kind, address, reason, source, direction, first_seen, last_seen)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		 ON CONFLICT(project_id, channel, address) DO UPDATE SET
 		   kind = excluded.kind,
-		   reason = excluded.reason,
-		   source = CASE WHEN suppressions.source = 'manual' THEN 'manual' ELSE excluded.source END,
+		   reason = CASE WHEN suppressions.direction='both' AND excluded.direction='outbound' THEN suppressions.reason ELSE excluded.reason END,
+		   source = CASE WHEN suppressions.direction='both' AND excluded.direction='outbound' THEN suppressions.source WHEN suppressions.source = 'manual' THEN 'manual' ELSE excluded.source END,
+		   direction = CASE WHEN suppressions.direction='both' OR excluded.direction='both' THEN 'both' ELSE 'outbound' END,
 		   last_seen = CURRENT_TIMESTAMP`,
-		pid, channel, kind, addr, reason, source,
+		pid, channel, kind, addr, reason, source, direction,
 	)
 	return err
 }
 
 func dbSuppressionGetExact(db *sql.DB, pid, channel, kind, address string) (*Suppression, error) {
 	row := db.QueryRow(
-		`SELECT project_id, channel, COALESCE(kind,'address'), address, reason, source,
+		`SELECT project_id, channel, COALESCE(kind,'address'), address, reason, source, direction,
 		        COALESCE(first_seen,''), COALESCE(last_seen,'')
 		 FROM suppressions
 		 WHERE project_id = ? AND channel = ? AND kind = ? AND address = ?`,
 		pid, channel, kind, address,
 	)
 	out := &Suppression{}
-	if err := row.Scan(&out.ProjectID, &out.Channel, &out.Kind, &out.Address, &out.Reason, &out.Source, &out.FirstSeen, &out.LastSeen); err != nil {
+	if err := row.Scan(&out.ProjectID, &out.Channel, &out.Kind, &out.Address, &out.Reason, &out.Source, &out.Direction, &out.FirstSeen, &out.LastSeen); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -7171,7 +7193,7 @@ func dbSuppressionListPage(db *sql.DB, pid, channel string, limit, offset int) (
 	}
 	args = append(args, limit, offset)
 	rows, err := db.Query(
-		`SELECT project_id, channel, COALESCE(kind,'address'), address, reason, source,
+		`SELECT project_id, channel, COALESCE(kind,'address'), address, reason, source, direction,
 		        COALESCE(first_seen,''), COALESCE(last_seen,'')
 		 FROM suppressions WHERE `+whereSQL+
 			` ORDER BY last_seen DESC, channel ASC, COALESCE(kind,'address') ASC, address ASC
@@ -7183,7 +7205,7 @@ func dbSuppressionListPage(db *sql.DB, pid, channel string, limit, offset int) (
 	out := []Suppression{}
 	for rows.Next() {
 		s := Suppression{}
-		if err := rows.Scan(&s.ProjectID, &s.Channel, &s.Kind, &s.Address, &s.Reason, &s.Source, &s.FirstSeen, &s.LastSeen); err != nil {
+		if err := rows.Scan(&s.ProjectID, &s.Channel, &s.Kind, &s.Address, &s.Reason, &s.Source, &s.Direction, &s.FirstSeen, &s.LastSeen); err != nil {
 			return nil, 0, err
 		}
 		out = append(out, s)
@@ -7194,7 +7216,14 @@ func dbSuppressionListPage(db *sql.DB, pid, channel string, limit, offset int) (
 	return out, total, nil
 }
 
-func dbSuppressionMatch(db *sql.DB, pid, channel, addr string) (*Suppression, error) {
+func dbSuppressionMatch(db *sql.DB, pid, channel, addr string, directions ...string) (*Suppression, error) {
+	checkDirection := "outbound"
+	if len(directions) > 0 {
+		checkDirection = directions[0]
+	}
+	if checkDirection != "outbound" && checkDirection != "inbound" {
+		return nil, errors.New("check direction must be outbound or inbound")
+	}
 	candidates := []struct {
 		kind  string
 		value string
@@ -7211,14 +7240,15 @@ func dbSuppressionMatch(db *sql.DB, pid, channel, addr string) (*Suppression, er
 	}
 	for _, c := range candidates {
 		row := db.QueryRow(
-			`SELECT project_id, channel, COALESCE(kind,'address'), address, reason, source,
+			`SELECT project_id, channel, COALESCE(kind,'address'), address, reason, source, direction,
 			        COALESCE(first_seen,''), COALESCE(last_seen,'')
 			 FROM suppressions
-			 WHERE project_id = ? AND channel = ? AND kind = ? AND address = ?`,
-			pid, channel, c.kind, c.value,
+			 WHERE project_id = ? AND channel = ? AND kind = ? AND address = ?
+			 AND (? = 'outbound' OR direction = 'both')`,
+			pid, channel, c.kind, c.value, checkDirection,
 		)
 		s := &Suppression{}
-		if err := row.Scan(&s.ProjectID, &s.Channel, &s.Kind, &s.Address, &s.Reason, &s.Source, &s.FirstSeen, &s.LastSeen); err != nil {
+		if err := row.Scan(&s.ProjectID, &s.Channel, &s.Kind, &s.Address, &s.Reason, &s.Source, &s.Direction, &s.FirstSeen, &s.LastSeen); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				continue
 			}

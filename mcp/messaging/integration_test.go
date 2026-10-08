@@ -4,8 +4,10 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -20,6 +22,28 @@ func TestSidecar_HealthOK(t *testing.T) {
 	resp := sc.GET("/health", &got)
 	if resp.Status != 200 || got["ok"] != true {
 		t.Fatalf("/health status=%d body=%v", resp.Status, got)
+	}
+}
+
+func TestSidecar_DirectionalSuppressionContract(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	sc.MCP("suppression_add", map[string]any{"address": "customer@example.net", "direction": "outbound", "reason": "unsubscribe"})
+	for _, direction := range []string{"outbound", "inbound"} {
+		got := sc.MCP("suppression_check", map[string]any{"address": "customer@example.net", "direction": direction})
+		if got["suppressed"] != (direction == "outbound") || got["check_direction"] != direction {
+			t.Fatalf("directional contract: %v", got)
+		}
+	}
+	var page map[string]any
+	resp := sc.GET("/suppressions?channel=email", &page)
+	if resp.Status != 200 || page["suppressions"].([]any)[0].(map[string]any)["direction"] != "outbound" {
+		t.Fatalf("HTTP direction missing: %d %v", resp.Status, page)
+	}
+	sc.MCP("suppression_add", map[string]any{"address": "customer@example.net", "reason": "complaint"})
+	sc.MCP("suppression_add", map[string]any{"address": "customer@example.net", "direction": "outbound", "reason": "unsubscribe"})
+	got := sc.MCP("suppression_check", map[string]any{"address": "customer@example.net", "direction": "inbound"})
+	if got["suppressed"] != true || got["reason"] != "complaint" || got["direction"] != "both" {
+		t.Fatalf("stronger block lost: %v", got)
 	}
 }
 
@@ -223,10 +247,21 @@ const inboundEml = "From: customer@example.com\r\n" +
 	"Where is my package?\r\n"
 
 func TestSidecar_InboundWebhook_PersistsAndAttemptsDispatch(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "owned-inbound.db")
 	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"), tk.WithConfig(map[string]string{
 		"webhook_signing_secret": testSNSSecret,
 		"ses_inbound_topic_arn":  testSNSTopicARN,
-	}))
+	}), tk.WithEnv("DB_PATH", dbPath))
+	// Ownership safeguards require a real owned SMTP recipient, not just an
+	// arbitrary visible To header and a catch-all route. Seed only the temp DB.
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err = dbUpsertSender(db, &senderUpsert{ProjectID: "test-proj", Channel: "email", Address: "support+t-9001@acme.com", Kind: "email_mailbox", Provider: "aws-ses", Verified: true}); err != nil {
+		t.Fatal(err)
+	}
 
 	// Register a route first so the dispatcher has a target.
 	sc.MCP("inbound_route_set", map[string]any{
@@ -239,6 +274,7 @@ func TestSidecar_InboundWebhook_PersistsAndAttemptsDispatch(t *testing.T) {
 		"notificationType": "Received",
 		"content":          inboundEml,
 		"mail":             map[string]any{"messageId": "ses-inbound-tier2"},
+		"receipt":          map[string]any{"recipients": []string{"support+t-9001@acme.com"}},
 	}
 	innerJSON, _ := json.Marshal(innerSES)
 	envelope := map[string]any{
@@ -274,6 +310,11 @@ func TestSidecar_InboundWebhook_PersistsAndAttemptsDispatch(t *testing.T) {
 		t.Fatalf("expected 1 inbound message, got %d", len(msgs))
 	}
 	m := msgs[0].(map[string]any)
+	// Inbound acknowledgement now queues durable work rather than dispatching
+	// synchronously. Trigger the persisted job instead of waiting 30s for a tick.
+	// A missing consumer gateway is expected after route selection in this test.
+	_, _ = sc.MCPRaw("tools/call", map[string]any{"name": "inbound_redispatch", "arguments": map[string]any{"id": m["id"]}})
+	m = sc.MCP("message_get", map[string]any{"id": m["id"]})["message"].(map[string]any)
 	if !strings.Contains(m["subject"].(string), "Order #9001") {
 		t.Errorf("subject=%v", m["subject"])
 	}

@@ -15,12 +15,28 @@ import (
 
 type browserPlatform struct {
 	crmRecordingPlatform
-	mu sync.Mutex
+	mu           sync.Mutex
+	unsubscribed map[string]bool
 }
 
 func (p *browserPlatform) CallAppResult(app, tool string, args map[string]any, out any) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if tool == "suppression_add" && args["direction"] == "outbound" {
+		if p.unsubscribed == nil {
+			p.unsubscribed = map[string]bool{}
+		}
+		p.unsubscribed[strArg(args, "address")] = true
+		return json.Unmarshal([]byte(`{"suppression":{"direction":"outbound"}}`), out)
+	}
+	if tool == "suppression_check" {
+		direction := strArg(args, "direction")
+		if direction == "" {
+			direction = "outbound"
+		}
+		body, _ := json.Marshal(map[string]any{"suppressed": direction == "outbound" && p.unsubscribed[strArg(args, "address")], "check_direction": direction, "direction": "outbound", "kind": "address", "matched": strArg(args, "address"), "reason": "unsubscribe", "source": "crm", "suppressed_at": "2026-10-08T08:00:00Z"})
+		return json.Unmarshal(body, out)
+	}
 	if tool == "senders_list" {
 		raw, _ := json.Marshal(map[string]any{"senders": []map[string]any{{"channel": "email", "address": "sales@example.test", "display_name": "Sales", "is_default": true}, {"channel": "email", "address": "support@example.test", "display_name": "Support"}, {"channel": "whatsapp", "address": "+15550001111", "display_name": "WhatsApp support", "is_default": true}, {"channel": "sms", "address": "+15550002222", "display_name": "SMS support", "is_default": true}}})
 		return json.Unmarshal(raw, out)

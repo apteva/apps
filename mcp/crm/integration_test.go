@@ -381,3 +381,82 @@ func TestSidecar_RealMessagingBindingAndRouting(t *testing.T) {
 	// Read-only sender lookup traverses the actual bound app's MCP endpoint.
 	crm.MCP("messaging_senders_list", map[string]any{"channel": "email"})
 }
+
+func TestSidecar_EmailUnsubscribeWithRealMessaging(t *testing.T) {
+	messaging := tk.SpawnSidecar(t, "../messaging", tk.WithProjectID("test-proj"))
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/apps/callback/whoami":
+			json.NewEncoder(w).Encode(map[string]any{"app_name": "crm", "install_id": 99, "project_id": "test-proj", "bindings": map[string]any{"messaging": 42}})
+		case "/api/apps/callback/agents/42":
+			json.NewEncoder(w).Encode(map[string]any{"id": 42, "name": "messaging", "status": "running", "project_id": "test-proj"})
+		case "/api/app-events/internal/emit":
+			json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		case "/api/apps/callback/apps/messaging/call":
+			var body struct {
+				Tool  string         `json:"tool"`
+				Input map[string]any `json:"input"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, err.Error(), 400)
+				return
+			}
+			var result map[string]any
+			var err error
+			// Only receiving ownership is a fixture; suppression writes/checks
+			// traverse the real Messaging binary and its migrated SQLite.
+			if body.Tool == "senders_list" {
+				result = map[string]any{"senders": []map[string]any{{"address": "support@example.test"}}}
+			} else {
+				result, err = messaging.MCPRaw("tools/call", map[string]any{"name": body.Tool, "arguments": body.Input})
+			}
+			if err != nil {
+				http.Error(w, err.Error(), 502)
+				return
+			}
+			payload, _ := json.Marshal(result)
+			json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"content": []any{map[string]any{"type": "text", "text": string(payload)}}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer gateway.Close()
+	crm := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"), tk.WithEnv("APTEVA_GATEWAY_URL", gateway.URL), tk.WithEnv("APTEVA_INSTALL_ID", "99"))
+	var inbound map[string]any
+	res := crm.POST("/inbound", map[string]any{"channel": "email", "from": "edbis@free.fr", "matched_recipient": "support@example.test", "body_text": "UNSUBSCRIBE!!!!", "message_id": 1800, "message_id_header": "<request@free.fr>"}, &inbound)
+	if res.Status != 200 {
+		t.Fatalf("inbound: %d %s", res.Status, res.Body)
+	}
+	path := "/contacts/" + anyString(inbound["contact_id"]) + "/conversations/" + anyString(inbound["conversation_id"]) + "/unsubscribe"
+	var preview emailUnsubscribeState
+	res = crm.GET(path, &preview)
+	if res.Status != 200 || preview.Address != "edbis@free.fr" || preview.OutboundBlocked {
+		t.Fatalf("preview: %d %+v %s", res.Status, preview, res.Body)
+	}
+	for i := 0; i < 2; i++ {
+		var saved emailUnsubscribeState
+		res = crm.POST(path, map[string]any{"expected_address": preview.Address}, &saved)
+		if res.Status != 200 || !saved.Confirmed || !saved.Unsubscribed || saved.InboundBlocked {
+			t.Fatalf("save: %d %+v %s", res.Status, saved, res.Body)
+		}
+	}
+	for _, direction := range []string{"outbound", "inbound"} {
+		check := messaging.MCP("suppression_check", map[string]any{"address": "edbis@free.fr", "direction": direction})
+		if check["suppressed"] != (direction == "outbound") || check["check_direction"] != direction {
+			t.Fatalf("direction mismatch: %v", check)
+		}
+	}
+	contact := crm.MCP("contacts_get", map[string]any{"id": inbound["contact_id"]})["contact"].(map[string]any)
+	if contact["status"] != "active" {
+		t.Fatalf("contact changed status: %v", contact)
+	}
+	read := crm.MCP("contacts_get_conversation", map[string]any{"id": inbound["contact_id"], "conversation_id": inbound["conversation_id"]})
+	if read["conversation"].(map[string]any)["status"] != "open" || len(read["activities"].([]any)) != 2 {
+		t.Fatalf("history changed or duplicate audit: %v", read)
+	}
+	res = crm.POST("/inbound", map[string]any{"channel": "email", "from": "edbis@free.fr", "matched_recipient": "support@example.test", "body_text": "Later reply", "message_id": 1801, "in_reply_to": "<request@free.fr>"}, &inbound)
+	if res.Status != 200 {
+		t.Fatalf("later inbound rejected: %d %s", res.Status, res.Body)
+	}
+}

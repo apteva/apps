@@ -150,7 +150,7 @@ func runInboundJob(ctx *sdk.AppCtx, pid string, id int64, kind, source string) e
 		if err != nil {
 			return err
 		}
-		if existing == nil {
+		if existing == nil || existing.Direction != "both" {
 			if _, err := upsertSuppressionAndEmit(ctx, pid, m.Channel, "address", address, "stop-keyword", "auto"); err != nil {
 				return err
 			}

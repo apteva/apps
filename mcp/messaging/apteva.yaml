@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.13.58
+version: 0.13.59
 description: |
   Sender domain setup publishes DMARC without requesting report emails.
   Send and receive email through AWS SES or Gmail and SMS/WhatsApp through
@@ -123,9 +123,9 @@ provides:
     - { name: template_delete,        description: "Remove a template from this project. Args: id, delete_provider? (default false)." }
     # suppression
     - { name: suppression_list,       description: "List suppressed exact addresses and domains with stable pagination. Args: channel?, limit?, offset?. Returns count, total, limit, offset, and has_more." }
-    - { name: suppression_add,        description: "Suppress an exact address or email domain for outbound sends and inbound dispatch. Args: address, channel?, kind? (address|domain), reason?, source?, force?." }
+    - { name: suppression_add,        description: "Suppress an exact address or domain. direction=both (default) preserves legacy blocking; direction=outbound stops sending but keeps incoming replies. Existing both-direction blocks are never weakened. Args: address, channel?, kind?, direction?, reason?, source?, force?." }
     - { name: suppression_remove,     description: "Remove an address or domain from suppression. Args: address, channel?, kind?." }
-    - { name: suppression_check,      description: "Suppression lookup. Args: address, channel?. Checks exact address plus email domain and returns {suppressed, kind?, reason?, source?, suppressed_at?}." }
+    - { name: suppression_check,      description: "Directional suppression lookup. Args: address, channel?, direction? (outbound default or inbound). Checks exact address plus email domain and returns suppressed, check_direction, and matching block direction/metadata." }
     # senders (outbound identities — channel-agnostic list/get/delete; channel-specific onboarding)
     - { name: senders_list,           description: "List sending identities (verified emails, domains; later phones, push apps). Args: channel?, verified_only?. Returns [{address, kind, verified, dkim_status?}]." }
     - { name: senders_get,            description: "Get a single identity's status — verification, DKIM, feedback forwarding. Args: address (URI or bare)." }

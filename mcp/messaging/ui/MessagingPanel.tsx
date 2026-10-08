@@ -177,6 +177,7 @@ interface InboundRoute {
 interface SuppressionRow {
   channel: string;
   kind?: string;
+  direction?: "both" | "outbound";
   address: string;
   reason: string;
   source: string;
@@ -3095,7 +3096,7 @@ function SuppressionsView({ rows, api, reload, notify, confirmAction }: { rows: 
       message: (
         <>
           <div>Remove <code>{stripScheme(row.address)}</code> from suppressions?</div>
-          <div className="mt-2 text-text-dim">Messaging will allow future {kind === "domain" ? "email to and from this domain" : "communication with this address"} again.</div>
+          <div className="mt-2 text-text-dim">Messaging will allow future {row.direction === "outbound" ? "outbound delivery to this address or domain" : kind === "domain" ? "email to and from this domain" : "communication with this address"} again, unless another suppression still applies.</div>
         </>
       ),
       onConfirm: async () => {
@@ -3116,7 +3117,8 @@ function SuppressionsView({ rows, api, reload, notify, confirmAction }: { rows: 
       <thead className="text-xs text-text-dim">
         <tr className="border-b border-border">
           <th className="text-left px-4 py-2">Address</th>
-          <th className="text-left px-4 py-2">Kind</th>
+        <th className="text-left px-4 py-2">Kind</th>
+        <th className="text-left px-4 py-2">Blocks</th>
           <th className="text-left px-4 py-2">Reason</th>
           <th className="text-left px-4 py-2">Source</th>
           <th className="text-left px-4 py-2">Last seen</th>
@@ -3128,6 +3130,7 @@ function SuppressionsView({ rows, api, reload, notify, confirmAction }: { rows: 
           <tr key={`${s.channel}:${s.kind || "address"}:${s.address}`} className="border-b border-border">
             <td className="px-4 py-2">{stripScheme(s.address)}</td>
             <td className="px-4 py-2 text-text-dim">{s.kind || "address"}</td>
+            <td className="px-4 py-2 text-text-dim">{s.direction === "outbound" ? "Outbound only" : "Outbound + inbound"}</td>
             <td className="px-4 py-2"><StatusPill status={s.reason} /></td>
             <td className="px-4 py-2 text-text-dim">{s.source}</td>
             <td className="px-4 py-2 text-text-dim">{shortTime(s.last_seen)}</td>

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.9.17
+version: 0.9.18
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -26,7 +26,7 @@ requires:
     - platform.apps.call
   apps:
     - name: messaging
-      version: ">=0.13.46"
+      version: ">=0.13.59"
       optional: true
       reason: "Delivers messages and attachments, and supplies delivery and suppression events for per-channel messageability."
       events:
@@ -47,7 +47,7 @@ requires:
       capabilities: [message.send]
       required: false
       label: "Messaging (optional)"
-      hint: "When bound, CRM gains Send/Reply tools with attachments, accepts inbound mail/SMS/WhatsApp media, and tracks per-channel delivery and suppression state. Messaging v0.13.46 or newer is required. Without it, CRM is a standalone contact store."
+      hint: "When bound, CRM gains Send/Reply tools, attachments, inbound media, delivery tracking, and safe outbound-only email unsubscribe. Messaging v0.13.59 or newer is required for unsubscribe. Without it, CRM is a standalone contact store."
     - role: email_verification
       kind: app
       compatible_app_names: [email-checker]
@@ -92,6 +92,8 @@ provides:
       description: Append to a contact's timeline.
     - name: contacts_set_attribute
       description: Write a typed custom attribute with provenance; recover legacy number/bool scalar strings using the project definition, preserve text, and verify readback before advancing workflow readiness.
+    - name: contacts_unsubscribe_email
+      description: Preview or confirm a project-scoped exact email unsubscribe; outbound only, with confirmed readback and audit, retaining inbound replies and existing stronger blocks. No send or automatic text parsing.
     - name: contacts_define_attribute
       description: Create or update an attribute definition.
     # Messaging-coupled tools — gate on the messaging dep being bound.
