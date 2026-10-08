@@ -2,8 +2,9 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.13.57
+version: 0.13.58
 description: |
+  Sender domain setup publishes DMARC without requesting report emails.
   Send and receive email through AWS SES or Gmail and SMS/WhatsApp through
   Twilio. Tracks
   delivery state, maintains a per-channel suppression list from

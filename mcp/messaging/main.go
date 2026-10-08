@@ -3098,8 +3098,10 @@ func dkimCNAMERecords(domain string, tokens []string) []map[string]string {
 	return out
 }
 
-func defaultDMARCRecord(domain string) string {
-	return "v=DMARC1; p=none; rua=mailto:dmarc@" + domain + "; adkim=s; aspf=r"
+func defaultDMARCRecord(_ string) string {
+	// Report mailboxes need a dedicated consumer. Do not request reports
+	// automatically: catch-all inbound routes would send them into CRM.
+	return "v=DMARC1; p=none; adkim=s; aspf=r"
 }
 
 func normaliseSenderKind(k string) string {
