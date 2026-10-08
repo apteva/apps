@@ -261,7 +261,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "message_get",
-			Description: "Fetch one message by id. Returns {message, events}; message.attachments contains normalized metadata and never raw bytes.",
+			Description: "Fetch one message by id. Returns {message, events}; message.attachments contains normalized metadata and never raw bytes. Template sends expose an immutable message.template_snapshot with content, supplied variables, template identity, availability and content_source (send_time_template or provider_response). Missing historical snapshots are never reconstructed from today's template.",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
 			Handler:     a.toolMessageGet,
 		},
@@ -759,6 +759,7 @@ type Message struct {
 	MatchedPattern       string              `json:"matched_pattern,omitempty"`
 	ToSubaddress         string              `json:"to_subaddress,omitempty"`
 	TemplateID           int64               `json:"template_id,omitempty"`
+	TemplateSnapshot     *TemplateSnapshot   `json:"template_snapshot,omitempty"`
 	// v0.5: verdicts (SES) and S3-mode raw .eml location.
 	Verdicts        json.RawMessage `json:"verdicts,omitempty"`
 	S3Key           string          `json:"s3_key,omitempty"`
@@ -900,6 +901,7 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	contentSid := strArg(args, "content_sid")
 	contentVars := strArg(args, "content_variables")
 	templateID := int64Arg(args, "template_id")
+	var snapshotTemplate *Template
 	if templateID > 0 {
 		tpl, err := dbTemplateGet(ctx.AppDB(), pid, templateID)
 		if err != nil {
@@ -908,6 +910,7 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		if tpl == nil {
 			return nil, fmt.Errorf("template_id %d not found", templateID)
 		}
+		snapshotTemplate = tpl
 		// Channel must match the template's channel (per-channel
 		// templates are the v0.3 contract). Fail-fast rather than
 		// silently picking the wrong template.
@@ -1049,6 +1052,14 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		}
 	}
 
+	if snapshotTemplate == nil && contentSid != "" {
+		// Resolve only project-owned content; this never changes the request.
+		snapshotTemplate, _ = dbTemplateGetByProviderID(ctx.AppDB(), pid, contentSid)
+	}
+	snapshot := captureTemplateSnapshot(snapshotTemplate, contentSid, contentVars, subject, body, bodyHTML)
+	if snapshot != nil && contentSid == "" {
+		snapshot.Variables = mapArg(args, "vars")
+	}
 	// Persist as pending first so a provider error still leaves a row.
 	toJSON, _ := json.Marshal(to)
 	ccJSON, _ := json.Marshal(cc)
@@ -1063,14 +1074,14 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			(project_id, channel, direction, from_addr, to_addrs, cc_addrs, bcc_addrs,
 			 subject, body_text, body_html, headers, attachment_storage_ids,
 			 message_id_header, in_reply_to, references_json,
-			 status, idempotency_key, template_id, provider_slug, provider_connection_id)
-		 VALUES (?, ?, 'out', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+			 status, idempotency_key, template_id, provider_slug, provider_connection_id, template_snapshot)
+		 VALUES (?, ?, 'out', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
 		pid, channel, from, string(toJSON), string(ccJSON), string(bccJSON),
 		subject, body, bodyHTML, string(headersJSON), string(attachJSON),
 		strArg(args, "message_id_header"),
 		inReplyTo,
 		string(referencesJSON),
-		idemNullable, nullableInt64(templateID), emailProviderSlug(emailBound), emailProviderConnection(emailBound),
+		idemNullable, nullableInt64(templateID), emailProviderSlug(emailBound), emailProviderConnection(emailBound), encodeTemplateSnapshot(snapshot),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert message: %w", err)
@@ -1097,6 +1108,7 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		Attachments:      attachments,
 		ContentSid:       contentSid,
 		ContentVariables: contentVars,
+		TemplateSnapshot: snapshot,
 		MessageID:        id,
 		ProjectID:        pid,
 	}
@@ -1161,8 +1173,8 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	_, saveErr := ctx.AppDB().Exec(
 		`UPDATE messages SET status='sent', provider_message_id=?, provider_thread_id=?,
 		 message_id_header=CASE WHEN ?<>'' THEN ? ELSE message_id_header END,
-		 sent_at=?, last_event_at=? WHERE id=?`,
-		providerMessageID, providerThreadID, messageIDHeader, messageIDHeader, now, now, id,
+		 sent_at=?, last_event_at=?, template_snapshot=? WHERE id=?`,
+		providerMessageID, providerThreadID, messageIDHeader, messageIDHeader, now, now, encodeTemplateSnapshot(snapshot), id,
 	)
 	if saveErr != nil {
 		return nil, fmt.Errorf("provider accepted message %s but local persistence failed; do not resend blindly: %w", providerMessageID, saveErr)
@@ -1224,6 +1236,7 @@ func sendResponse(m *Message) map[string]any {
 		"message_id_header":   m.MessageIDHeader,
 		"status_reason":       m.StatusReason,
 		"attachments":         consumerAttachmentMetadata(m.Attachments),
+		"template_snapshot":   m.TemplateSnapshot,
 	}
 }
 
@@ -1259,6 +1272,7 @@ type providerSendInput struct {
 	// SMS / WhatsApp only:
 	ContentSid       string
 	ContentVariables string
+	TemplateSnapshot *TemplateSnapshot
 }
 
 const sesEventConfigurationSetName = "apteva-messaging"
@@ -1709,6 +1723,15 @@ func sendViaTwilio(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 		// Twilio Messages.create returns { sid: "SMxxx", ... }.
 		var probe map[string]any
 		_ = json.Unmarshal(res.Data, &probe)
+		if firstSID == "" && in.TemplateSnapshot != nil {
+			if text, ok := probe["body"].(string); ok && strings.TrimSpace(text) != "" {
+				in.TemplateSnapshot.BodyText = text
+				in.TemplateSnapshot.BodyHTML = ""
+				in.TemplateSnapshot.ContentSource = "provider_response"
+				in.TemplateSnapshot.Availability = "complete"
+				in.TemplateSnapshot.MissingVariables = nil
+			}
+		}
 		if firstSID == "" {
 			for _, key := range []string{"sid", "Sid", "SID"} {
 				if v, ok := probe[key].(string); ok && v != "" {
@@ -6208,7 +6231,7 @@ const messageSelectColumns = `id, project_id, channel, direction, from_addr, to_
 	COALESCE(matched_recipient,''), COALESCE(matched_pattern,''), COALESCE(to_subaddress,''),
 	COALESCE(template_id,0), COALESCE(verdicts,'{}'), COALESCE(s3_key,''),
 	COALESCE(created_at,''), COALESCE(sent_at,''), COALESCE(received_at,''), COALESCE(last_event_at,''),
-	COALESCE(envelope_recipients,'[]'), COALESCE(receiving_identity,''), COALESCE(provider_slug,''), COALESCE(provider_connection_id,0)`
+	COALESCE(envelope_recipients,'[]'), COALESCE(receiving_identity,''), COALESCE(provider_slug,''), COALESCE(provider_connection_id,0), COALESCE(template_snapshot,'')`
 
 func dbMessageGet(db *sql.DB, pid string, id int64) (*Message, error) {
 	q := `SELECT ` + messageSelectColumns + ` FROM messages WHERE id = ?`
@@ -6361,6 +6384,8 @@ func dbMessageListPage(db *sql.DB, pid string, opts messageListOpts) ([]*Message
 	}
 	columns := messageSelectColumns
 	if opts.Summary {
+		// Snapshots include full original/rendered content. Keep summary reads compact.
+		columns = strings.Replace(columns, "COALESCE(template_snapshot,'')", "''", 1)
 		columns = strings.Replace(columns, "COALESCE(body_text,'')", "substr(COALESCE(body_text,''),1,300)", 1)
 		columns = strings.Replace(columns, "COALESCE(body_html,'')", "''", 1)
 		columns = strings.Replace(columns, "headers, attachment_storage_ids", "'{}', attachment_storage_ids", 1)
@@ -6412,6 +6437,7 @@ func scanMessage(row interface{ Scan(...any) error }) (*Message, error) {
 	m := &Message{}
 	var to, cc, bcc, headers, attachIDs, refs, verdicts, envelope string
 	var templateID sql.NullInt64
+	var snapshotJSON string
 	err := row.Scan(
 		&m.ID, &m.ProjectID, &m.Channel, &m.Direction, &m.From,
 		&to, &cc, &bcc,
@@ -6427,6 +6453,7 @@ func scanMessage(row interface{ Scan(...any) error }) (*Message, error) {
 		&verdicts, &m.S3Key,
 		&m.CreatedAt, &m.SentAt, &m.ReceivedAt, &m.LastEventAt,
 		&envelope, &m.ReceivingIdentity, &m.ProviderSlug, &m.ProviderConnectionID,
+		&snapshotJSON,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -6465,6 +6492,11 @@ func scanMessage(row interface{ Scan(...any) error }) (*Message, error) {
 	m.Verdicts = json.RawMessage(verdicts)
 	if templateID.Valid {
 		m.TemplateID = templateID.Int64
+	}
+	if snapshotJSON != "" {
+		if err := json.Unmarshal([]byte(snapshotJSON), &m.TemplateSnapshot); err != nil {
+			return nil, fmt.Errorf("invalid persisted template snapshot: %w", err)
+		}
 	}
 	return m, nil
 }
