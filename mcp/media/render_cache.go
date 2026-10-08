@@ -23,7 +23,7 @@ const renderAlgorithmVersion = "media-audit-1"
 // path, while unrelated render-result caches remain useful. Both decision and
 // pre-analysis request caches need it; resolved local plans already include the
 // changed coordinates in their result-cache key.
-const smartCropAlgorithmVersion = "media-smartcrop-subject-extent-4"
+const smartCropAlgorithmVersion = "media-smartcrop-native-scene-5"
 
 // Remote binaries/provider settings are not immutable. Restrict reuse to this
 // process lifetime as well as host/connection identity until they expose a
@@ -116,7 +116,7 @@ func preprocessSmartCrop(ctx context.Context, app *sdk.AppCtx, sc *storageClient
 	if mode == "" {
 		mode = "smart"
 	}
-	raw, _ := json.Marshal([]any{smartCropAlgorithmVersion, app.Manifest().Version, sc.base, project, op, sources, row.SourceSHA256, row.Width, row.Height, row.Rotation, row.Derivations, target, ratio, mode, parsed["fit_mode"], app.Config().Get("render_host_id")})
+	raw, _ := json.Marshal([]any{smartCropAlgorithmVersion, app.Manifest().Version, sc.base, project, op, sources, row.SourceSHA256, row.Width, row.Height, row.Rotation, row.Derivations, nativeSmartCropSceneCacheIdentity(app, project, row), target, ratio, mode, parsed["fit_mode"], app.Config().Get("render_host_id")})
 	key := fmt.Sprintf("%x", sha256.Sum256(raw))
 	var cached string
 	if app.AppDB().QueryRow(`SELECT params FROM smartcrop_cache WHERE cache_key=?`, key).Scan(&cached) == nil {
@@ -182,7 +182,7 @@ func requestRenderCacheKey(ctx context.Context, app *sdk.AppCtx, sc *storageClie
 		}
 		var evidence any
 		if media, err := getMedia(app.AppDB(), row.ProjectID, fid); err == nil {
-			evidence = []any{media.Width, media.Height, media.Rotation, media.Derivations}
+			evidence = []any{media.Width, media.Height, media.Rotation, media.Derivations, nativeSmartCropSceneCacheIdentity(app, row.ProjectID, media)}
 		}
 		sources = append(sources, []any{fid, file.SHA256, file.SizeBytes, evidence})
 	}

@@ -275,6 +275,37 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 	maxTokens := parseConfigIntFallback(cfg.Get("describe_max_tokens"), 8000)
 	timeout := time.Duration(parseConfigIntFallback(cfg.Get("describe_timeout_seconds"), 120)) * time.Second
 
+	claimed, claimErr := claimDescriptionRecovery(db, media, proseRevision, audienceRevision, time.Now(), timeout)
+	if claimErr != nil {
+		log.Warn("description recovery claim", "err", claimErr)
+		return
+	}
+	if !claimed {
+		return
+	}
+	var recoveryFailure *askAttempt
+	var recoveryUpstream time.Time
+	defer func() {
+		latest, e := getMedia(db, projectID, fileID)
+		if e != nil || latest.SourceSHA256 != media.SourceSHA256 {
+			return
+		}
+		complete := strings.TrimSpace(latest.Description) != "" && latest.AudienceRating != "" && latest.AudienceRating != "unrated"
+		if !complete && recoveryFailure == nil {
+			if latest.DescriptionError != "" {
+				recoveryFailure = descriptionRecoveryFailure(fmt.Errorf("%s", latest.DescriptionError))
+			} else {
+				recoveryFailure = descriptionRecoveryMissing()
+			}
+		}
+		if complete {
+			recoveryFailure = nil
+			_, _ = db.Exec(`UPDATE media SET description_error='' WHERE project_id=? AND file_id=? AND source_sha256=? AND prose_revision=? AND audience_revision=?`, projectID, fileID, media.SourceSHA256, proseRevision, audienceRevision)
+		}
+		if e := finishDescriptionRecovery(db, media, proseRevision, audienceRevision, recoveryFailure, recoveryUpstream, time.Now()); e != nil {
+			log.Warn("description recovery result", "err", e)
+		}
+	}()
 	requestTool, args := observationRequest(bound, model, messages, maxTokens, 0.3)
 
 	res, err := executeIntegrationToolWithTimeout(app,
@@ -283,6 +314,11 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 		args,
 		timeout,
 	)
+	if err != nil || res == nil || !res.Success {
+		entry, until := classifyAskFailure(res, err)
+		recoveryFailure = &entry
+		recoveryUpstream = until
+	}
 	if info, upstream, limited := descriptionRateLimitInfo(res, err, time.Now()); limited {
 		info, backoffErr := recordDescriptionBackoff(db, bound.ConnectionID, tool, model, info, upstream, time.Now(), parseConfigIntFallback(cfg.Get("describe_retry_cooldown_seconds"), 600))
 		if backoffErr != nil {

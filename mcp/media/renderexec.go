@@ -188,7 +188,18 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 	// Resolve subject-aware crop window before planning, when the
 	// operation supports it. Mutates row.Params in place so buildPlan
 	// can see explicit crop_w/h/x/y. No-op for ops that don't crop.
+	if len(row.ResolvedParams) > 0 {
+		row.Params = row.ResolvedParams
+	}
 	row.Params = preprocessSmartCrop(ctx, app, sc, row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
+	if err := validateSourceTimestamp(app, row.ProjectID, row.Operation, row.SourceFileIDs, row.Params); err != nil {
+		return 0, err
+	}
+	policyParams, policyErr := applyCropCompositionPolicy(row.Params)
+	if policyErr != nil {
+		return 0, policyErr
+	}
+	row.Params = policyParams
 	row.Params = prepareTrimParams(app.AppDB(), row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
 	row.Params = prepareAudioFilterParams(db, row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
 	if len(row.SourceFileIDs) == 1 {

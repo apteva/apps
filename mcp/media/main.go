@@ -20,10 +20,15 @@ import (
 // ─── Manifest (also lives in apteva.yaml) ──────────────────────────
 
 const manifestYAML = `schema: apteva-app/v1
+
 name: media
 display_name: Media
-version: 0.14.18
+version: 0.14.19
 description: |
+  v0.14.19 restores native screenshot scene evidence for image Smart Crop,
+  exposes crop preflight and explicit action-preservation policies, validates
+  extraction timestamps before queueing, supplies full images for review,
+  and persists bounded per-file description recovery with visible retry state.
   v0.14.18 explicitly uses low Codex reasoning for observations and media_ask.
   Raw Responses requests preserve the selected model, prompts and evidence;
   completed answers must confirm low effort. Existing retry and cooldown
@@ -63,58 +68,88 @@ description: |
   survive cache reuse. Source bit depth and base color signaling are retained;
   Dolby Vision dynamic metadata is not retained and is reported explicitly.
   Accurate trim uses FFmpeg locally or on the configured remote host.
-  Catalog + derivations + renders + transcripts + auto-descriptions
-  for media files in storage. Indexes uploads (probe, thumbnail,
-  waveform), runs on-demand edits (trim/resize/transcode/concat/
-  crop/extract_frame/audio_extract/audio_filter) via local ffmpeg by default or
-  Cloudinary when bound, auto-transcribes audio + video via Deepgram,
-  and auto-generates descriptions via OpenCode Go, OpenAI API, or
-  OpenAI Codex when integrations are bound. Outputs all flow
-  through storage. v0.14.11 protects reclining head geometry, contains
-  supported subject extent when it fits, reports sampled action wider than
-  the crop, and persists crop versions, evidence and effective geometry.
-  Previews share the render planner and cache hits retain original provenance.
-  v0.14.10 improves standalone portrait framing using
-  cached-thumbnail head/torso evidence: recentres profile poses and reduces
-  excessive headroom when the subject fits. Wide gestures retain scale;
-  use fit_mode=contain to preserve every edge. Video tracking and explicit
-  center/contain stay unchanged. v0.14.9 normalizes render filenames before queuing,
-  validates output formats, separates remote cache telemetry from failures,
-  and persists description rate-limit backoff with upstream retry/reset hints.
-  v0.14.8 preserves subjects during stationary Smart Crop
-  tracking and invalidates old crop decisions and outputs while retaining
-  unrelated render caches. Uses app-sdk v0.96.0. v0.14.7 adds compact/planning/bounded-full search,
-  projections, explicit expansions, stable cursors, release-readiness fields,
-  planning sorts, and record-free media_inventory counts. v0.14.5 fixes a
-  Media indexing queue defect that could leave
-  valid files permanently pending, including files in hidden Storage folders.
-  Explicit reindex requests now dispatch immediately; stale claims are
-  reclaimed, retries are durable, and queue diagnostics expose attempts and
-  failures. v0.14.4 fixes processing, worker lifecycle, catalog,
-  and rendering issues. Adds verified source and render-result caches,
-  bounded processing and uploads, and video quality levels with Legacy
-  as the default. Improves Smart Crop and reliable completion delivery.
+  Catalog + cheap derivations + parameterised renders for media files
+  in storage. Probes uploads with ffprobe (duration, dimensions,
+  codecs, bitrate, sample rate), generates canonical thumbnails for
+  video/image and waveforms for audio, and runs on-demand edits
+  (trim, resize, transcode, concat, crop, extract_frame,
+  audio_extract, audio_filter). Outputs land back in storage as new files so they
+  inherit the same visibility + signed-URL machinery.
+
+  Two independent workstreams share the process: a light indexer
+  that sweeps storage for new media, and a bounded render pool with
+  per-job timeouts + cancellation. The render backend is pluggable
+  via the optional ` + "`" + `render_executor` + "`" + ` integration role — local ffmpeg
+  by default, Cloudinary when bound. A wedged encode releases its
+  slot without disturbing the indexer.
+
+  v0.14.11 protects reclining head geometry with background-supported
+  foreground evidence, contains supported subject extent when it fits, and
+  reports actions wider than the crop with a fit_mode: contain recommendation.
+  Saved crop diagnostics include app/algorithm versions, source identity,
+  evidence timestamps and effective geometry, including on cache hits.
+  Smart Crop previews use the same planner as renders.
+
+  v0.14.10 improves standalone portrait framing using cached-thumbnail
+  head/torso evidence: recentres profile poses and reduces excessive headroom
+  when the subject fits. Wide gestures retain scale; use fit_mode=contain
+  to preserve every edge. Video tracking and explicit center/contain stay unchanged.
+
+  v0.14.9 normalizes render filenames before queuing, rejects unsupported
+  or conflicting output formats, and keeps renderer/upload metadata consistent.
+  Separates normal remote cache diagnostics from failures and persists bounded
+  description rate-limit backoff with upstream retry/reset information.
+
+  v0.14.8 prevents stationary Smart Crop tracking from replacing the subject
+  with a disconnected background feature. Cropping requests recompute old
+  decisions and outputs; unrelated render-result caches remain reusable.
+  Uses app-sdk v0.96.0.
+
+  v0.14.7 makes safe catalog discovery the default: compact, planning, and
+  bounded full detail levels; field projection; explicit large expansions;
+  stable filter-bound cursors; unmistakable completion metadata; planning
+  sorts and normalized release readiness; and media_inventory counts grouped
+  by editorial dimensions without returning records.
+  v0.14.5 fixes a Media indexing queue defect that could leave valid files
+  permanently pending, including files in hidden Storage folders. Explicit
+  reindex requests now dispatch immediately; stale claims are reclaimed,
+  retries are durable, and queue diagnostics expose attempts and failures.
+  v0.14.4 fixes processing, worker lifecycle, catalog, and rendering issues.
+  Adds verified source and render-result caches, bounded processing and uploads,
+  and a general video quality setting with Legacy as the default. Improves
+  Smart Crop, derivative repair, transcription completion, and live UI updates.
+
 author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/media
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [media, video, audio, ffmpeg, catalog, edit, render]
+
 scopes: [project, global]
 min_apteva_version: "0.25.9"
+
 requires:
   permissions:
     - db.write.app
     - net.egress
     - platform.connections.execute
+    # platform.apps.call lets media use the SDK's CallApp() to reach
+    # sibling apps (e.g. storage's files_create_folder, files_move).
+    # Required for both SDK CallAppResult calls and the binding-gated
+    # streaming proxy used for large Storage downloads/uploads.
     - platform.apps.call
   apps:
     - name: storage
       version: ">=0.10.26"
-      reason: reads source bytes; writes destination-preserving thumbnails, waveforms, and render outputs back to storage
+      reason: reads source bytes, writes destination-preserving render outputs, batch-resolves response metadata, and mints explicit proxy, Apteva, or direct external ingestion URLs
     - name: jobs
       version: ">=0.1.0"
       optional: true
-      reason: optional — schedule recurring or delayed renders against media's HTTP routes
+      reason: optional — recurring or delayed renders schedule via jobs against media's HTTP routes
     - name: instances
       version: ">=0.2.0"
       optional: true
-      reason: optional — when render_host_id > 0, renders, indexing, and read-only analysis run on that instances host via SSH
+      reason: optional — when render_host_id config > 0, renders, indexing, and read-only analysis are offloaded to that instances host via SSH (ffmpeg auto-installed there on first use)
   integrations:
     - role: transcripts
       kind: integration
@@ -125,7 +160,7 @@ requires:
         transcribe: listen
       required: false
       label: "Speech-to-text provider"
-      hint: "Connect Deepgram to auto-transcribe audio + video. Without it, transcripts stay manual (media_set_transcript)."
+      hint: "Connect Deepgram to auto-transcribe audio + video. Without it, transcripts stay manual."
     - role: descriptions
       kind: integration
       compatible_slugs: [opencode-go, openai-api, openai-codex]
@@ -135,7 +170,7 @@ requires:
         vision.describe: chat_completion
       required: false
       label: "Auto-description provider"
-      hint: "Connect OpenCode Go, OpenAI API, or OpenAI Codex to auto-generate descriptions and answer media_ask questions from existing thumbnails, keyframes, and transcripts. Defaults: kimi-k2.6 on OpenCode Go, gpt-4o-mini on OpenAI API, gpt-5.5 on OpenAI Codex."
+      hint: "Connect OpenCode Go, OpenAI API, or OpenAI Codex for auto-descriptions and grounded media_ask questions over existing images, thumbnails, keyframes, and transcripts."
     - role: render_executor
       kind: integration
       compatible_slugs: [cloudinary]
@@ -151,7 +186,7 @@ requires:
       version: "7.0.2"
       executables: [ffmpeg, ffprobe]
       required: true
-      hint: "Auto-fetched on install."
+      hint: "Auto-fetched on install. Override via config.ffmpeg_path / config.ffprobe_path to point at a system or vendored binary."
       sources:
         linux-amd64:
           url: https://johnvansickle.com/ffmpeg/releases/ffmpeg-7.0.2-amd64-static.tar.xz
@@ -163,26 +198,46 @@ requires:
           sha256: f4149bb2b0784e30e99bdda85471c9b5930d3402014e934a5098b41d0f7201b1
           archive: tar.xz
           strip_root: 1
+
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: media_get,             description: "Fetch one media record by storage file_id, including arbitrary metadata and metadata_version. External ingestion URL delivery defaults to apteva/inline; callers can explicitly request proxy, direct, or attachment disposition. Returned delivery, disposition, and expires_at are Storage-confirmed." }
-    - { name: media_analyze,         description: "Read-only technical and quality analysis for an image, video, or audio file. Follows render_host_id when configured, reports the effective executor, and never silently falls back to local execution. Returns encoding metadata, decode integrity, visual measurements and timeline anomalies, and audio loudness/peak/silence measurements where applicable. Creates no artifacts." }
-    - { name: media_ask,             description: "Ask a grounded question using only existing source images, cached thumbnails/keyframes, and completed transcripts. Never runs ffmpeg, creates derivations, or writes files." }
-    - { name: media_get_batch, description: "Read descriptions, status, rating and duration for up to 100 explicit file_ids without scanning or signing URLs." }
-    - { name: media_search,          description: "Safe compact/planning/bounded-full catalog discovery with field projection, explicit expansions, stable cursors, planning sorts, totals, and unmistakable completion metadata." }
-    - { name: media_inventory,       description: "Count matching media by bounded editorial dimensions without returning records." }
-    - { name: media_list_folders,    description: "List immediate child folders of parent that contain media." }
-    - { name: media_create_folder,   description: "Create an empty folder in storage that media files can later land in. Idempotent. Args - path." }
-    - { name: media_move,            description: "Move and/or rename a media file in storage. Media's row auto-updates via the file.updated event handler. Args - file_id, folder?, name?." }
-    - { name: media_delete,          description: "Delete a media file and its backing storage file. Hard-deletes storage plus media's catalog data and derivations. Args - file_id." }
-    - { name: media_get_thumbnail,   description: "Get the thumbnail derivation pointer (storage file_id) — generates if missing." }
-    - { name: media_get_waveform,    description: "Get the waveform derivation pointer (audio only)." }
-    - { name: media_reindex,         description: "Queue one atomic re-probe + re-derive for a file_id, or requeue all failed rows. Exact file IDs are fetched directly from Storage, so reindexing does not depend on catalog position or inventory size. A queued response is asynchronous; wait for media.derived or poll media_get/media_get_keyframes. Do not submit a second force request merely because keyframes are still being generated." }
-    - { name: media_index_status,    description: "Counts of pending / ok / failed / unsupported / skipped_size." }
+    # Catalog (existing)
+    - name: media_get
+      description: Fetch one media record by storage file_id, including arbitrary metadata + metadata_version, probe fields, and derivation pointers. External ingestion URL delivery defaults to apteva/inline; callers can explicitly request delivery=proxy, delivery=direct, or disposition=attachment. Returned delivery, disposition, and expires_at are Storage-confirmed effective values.
+    - name: media_analyze
+      description: Analyze an existing image, video, or audio source without modifying it. Returns encoding metadata, decode integrity, visual measurements, every-frame black/frozen checks and opening/ending coverage, plus LUFS/peak/RMS/silence audio measurements where applicable. When render_host_id is configured, analysis runs on that remote host without silent local fallback and reports the effective executor. depth=standard analyzes at most 60 seconds; depth=full analyzes the requested/full duration. Creates no render, derivation, or Storage object. Args — file_id, depth? (standard|full), start_ms?, end_ms?, silence_threshold_db?, silence_min_ms?.
+    - name: media_preview_crop
+      description: Inspect sampled crop geometry and composition suitability before rendering. Args — file_id, operation? (crop|extract_frame|extract_reel), target_ratio?, crop_mode?, fit_mode?, at_ms?, start_ms?, end_ms?. Creates no output. Sampled evidence still requires visual review. Strict renders use require_action_preservation=true, with crop_fallback=reject (default) or explicit contain fallback.
+    - name: media_ask
+      description: Ask a grounded question using the configured descriptions vision/chat integration and only artifacts that already exist. Images use the actual existing source by default; image_detail=thumbnail explicitly uses reduced evidence. Returns supplied dimensions, representation, output render identity and provider-resolution limitations; videos use the canonical thumbnail and cached storyboard keyframes; at_ms selects the nearest existing keyframe and reports the actual timestamp; audio uses an existing completed transcript. Codex requests explicitly use low reasoning and report reasoning_effort. Retries transient vision/chat failures up to three attempts within one timeout; returns request_diagnostics. Explicit auth/quota/invalid-input errors stop immediately. Never runs ffmpeg, generates frames/derivations, or writes files. Args — file_id, question, at_ms?, frame_count? (1-8), include_transcript?, image_detail? (source default|thumbnail).
+    - name: media_get_batch
+      description: Read descriptions, status, rating and duration for up to 100 explicit file_ids without scanning or signing URLs.
+    - name: media_search
+      description: Safe catalog search with compact (default), planning, and full detail levels. Full searches default to 5 and reject limits above 10; raw probes and keyframes require explicit expand values. Supports field projection, planning-oriented sorting, exact totals, and stable filter-bound next_cursor pagination. Responses include complete, incomplete, must_continue, returned, and estimated_remaining. Use media_inventory for counts and media_get for selected full records.
+    - name: media_inventory
+      description: Count matching media without returning records. Groups by content type, audience rating, Patreon status, model, session, hosting readiness, and recording month. Uses the same core filters as media_search; bounded buckets include other_count.
+    - name: media_list_folders
+      description: List immediate child folders of ` + "`" + `parent` + "`" + ` that contain media. Args - parent (default "/"). Mirrors storage's files_list_folders semantics; only folders with at least one audio/video/image row appear.
+    - name: media_create_folder
+      description: Create an empty folder in storage so media uploads can land in it later. Thin pass-through to storage's files_create_folder. Idempotent — silently no-ops when the folder already has content. Args - path (e.g. "/raw-footage/2026-05/").
+    - name: media_move
+      description: Move and/or rename a media file in storage. Pass-through to storage's files_move; media's row auto-updates via the file.updated event handler. Args - file_id (string), folder? (new folder, e.g. "/clips/archived/"), name? (new filename). At least one of folder / name must be set.
+    - name: media_delete
+      description: Delete a media file and its backing storage file. Hard-deletes the storage row/blob, then removes media's catalog row, transcript, thumbnails, waveform, and keyframes. Args - file_id.
+    - name: media_get_thumbnail
+      description: Return the storage file_id (and signed URL) of the cached thumbnail. Generates on demand if missing.
+    - name: media_get_waveform
+      description: Same for the waveform PNG. Audio files only.
+    - name: media_reindex
+      description: Queue one atomic re-probe + re-derive for a file_id, or requeue all failed rows. Exact file IDs are fetched directly from Storage, so reindexing does not depend on catalog position or inventory size. A queued response is asynchronous; wait for media.derived or poll media_get/media_get_keyframes. Do not submit a second force request merely because keyframes are still being generated. Args — file_id and force?, or failed_only=true.
+    - name: media_index_status
+      description: Ops summary — counts of pending / ok / failed / unsupported / skipped_size.
+
+    # Renders — submit (returns render_id; poll media_get_render for status)
     - name: media_trim
-      description: "Frame-accurate cut from a video/audio source. Re-encodes the requested interval and validates every output picture before upload. Returns render_id."
+      description: Frame-accurate cut from a video/audio source. Re-encodes [start_ms,end_ms), starts retained pictures/audio at zero, validates every output picture before upload, and returns persisted trim diagnostics. Args — file_id, start_ms, end_ms, output_name?.
       async_result:
         id_field: render_id
         notify:
@@ -196,7 +251,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_resize
-      description: "Scale a video/image to new dimensions. Returns render_id."
+      description: Scale a video/image to new dimensions. Args — file_id, width, height, keep_aspect?, output_name?.
       async_result:
         id_field: render_id
         notify:
@@ -210,7 +265,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_transcode
-      description: "Re-encode to a new container/codec. Returns render_id."
+      description: Re-encode a media file to a new container/codec. Args — file_id, format, video_codec?, audio_codec?, bitrate?.
       async_result:
         id_field: render_id
         notify:
@@ -224,7 +279,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_concat
-      description: "Join multiple sources end-to-end. Returns render_id."
+      description: Join multiple sources end-to-end. Args — file_ids[], output_name. Inputs must share codec/format.
       async_result:
         id_field: render_id
         notify:
@@ -238,7 +293,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_crop
-      description: "Crop or reframe an image/video. fit_mode=crop uses content-agnostic Smart Crop v2 evidence; fit_mode=contain preserves the complete source frame with padding. Returns render_id."
+      description: Crop or reframe an existing video/image. Exact mode args — file_id, x, y, width, height. With target_ratio, fit_mode=crop (default) uses content-agnostic Smart Crop v2 evidence (saliency, foreground change, motion, shape, and optional face geometry); fit_mode=contain preserves every source edge with black padding. Args — file_id, target_ratio, crop_mode? (smart default | center), fit_mode? (crop default | contain), output_width?. Native screenshots reuse verified parent scene evidence. require_action_preservation=true rejects unknown/too-wide sampled coverage before queueing; crop_fallback=contain explicitly preserves the full frame. Technical success does not approve composition.
       async_result:
         id_field: render_id
         notify:
@@ -252,7 +307,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_extract_frame
-      description: "Save a frame as PNG; fit_mode=crop uses generic cached/source visual evidence and fit_mode=contain preserves the complete frame. Returns render_id."
+      description: Save a video frame as PNG. Validates at_ms against indexed authoritative duration before queueing; timestamp_out_of_range returns requested and valid timestamps. With target_ratio, fit_mode=crop uses generic cached/source visual evidence around at_ms; fit_mode=contain preserves the complete frame with padding. Args — file_id, at_ms, width?, target_ratio?, output_width?, crop_mode?, fit_mode?.
       async_result:
         id_field: render_id
         notify:
@@ -266,7 +321,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_audio_extract
-      description: "Strip audio from a video into a standalone file. Returns render_id."
+      description: Strip the audio track from a video into a standalone file. Args — file_id, format (mp3|wav|m4a|opus).
       async_result:
         id_field: render_id
         notify:
@@ -280,7 +335,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_audio_filter
-      description: "Normalize, clean, adjust, or mute audio in an audio/video source. Two-pass normalization measures first and validates finished loudness, true peak, sample rate and timing before upload. Requires Python 3 on the execution host. For video outputs, copies video and only re-encodes audio. Returns render_id."
+      description: Normalize, speech-clean, adjust volume, or mute audio in an audio/video source. Normalization preserves the indexed source sample rate and applies a lossy-codec-safe peak limiter. For video outputs, copies video unchanged and only re-encodes audio. Args — file_id, mode? (normalize|speech_clean|volume|mute), target_lufs?, gain_db?, output_name?.
       async_result:
         id_field: render_id
         notify:
@@ -294,7 +349,8 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_extract_reel
-      description: "Trim + reframe in one pass. fit_mode=crop uses content-agnostic evidence and a stable path; fit_mode=contain preserves every source edge with padding. Returns render_id."
+      description: |
+        Cut and reframe a clip in one ffmpeg pass. fit_mode=crop (default) uses content-agnostic Smart Crop v2 evidence and a smoothed crop path; fit_mode=contain preserves the complete source frame with black padding. Args — file_id, start_ms, end_ms, target_ratio? (default 9:16), output_width? (default 1080), crop_mode? (smart default | center), fit_mode? (crop default | contain). require_action_preservation=true preflights and rejects unknown/too-wide sampled action coverage before queuing; crop_fallback=contain explicitly requests full-frame fallback. Technical render success does not imply composition approval. Returns render_id and notifies the caller on completion.
       async_result:
         id_field: render_id
         notify:
@@ -307,17 +363,39 @@ provides:
           match:
             render_id: "$result.render_id"
           expires_after: 24h
-    - { name: media_get_render,      description: "Status of one render, with original params and effective resolved_params once execution starts." }
-    - { name: media_list_renders,    description: "List renders filtered by status / operation." }
-    - { name: media_cancel_render,   description: "Request cancellation. Running jobs remain active until cleanup is confirmed; poll media_get_render. Remote stop failures are reported." }
-    - { name: media_set_description, description: "Set title / description / alt_text on a media row. Partial update; omitted fields preserved." }
-    - { name: media_patch_metadata,  description: "Atomically merge-patch arbitrary workflow metadata with optional path conditions and metadata-version compare-and-swap." }
-    - { name: media_set_audience_rating, description: "Override audience rating (general | mature | adult | unrated). 'unrated' clears and re-queues for the describer." }
-    - { name: media_get_keyframes,   description: "Storyboard frames for a video as [{position_ms, storage_file_id, url}, …]." }
-    - { name: media_transcribe,      description: "Queue a transcription for one media file. Returns transcript_id; poll media_get_transcript." }
-    - { name: media_get_transcript,  description: "Status + text + segments of one file's transcript." }
-    - { name: media_set_transcript,  description: "Upsert an externally-produced transcript (imported / manual). Skips the auto pipeline." }
-    - { name: media_describe,        description: "Queue an auto-generated description for one media file. force=true reattempts even after success / cooldown." }
+
+    # Renders — manage
+    - name: media_get_render
+      description: Status of one render, including original params and executor-resolved params (effective Smart Crop rectangle/path) once execution starts.
+    - name: media_list_renders
+      description: Filter renders by status, operation, or limit.
+    - name: media_cancel_render
+      description: Request cancellation of a pending or running render. Active jobs return cancellation_requested=true and remain running until worker cleanup is confirmed; poll media_get_render. Remote stop failures are reported as remote_cancellation_failed. Already-terminal rows are idempotent no-ops.
+
+    # Catalog metadata — agent/user-supplied prose on media rows.
+    - name: media_set_description
+      description: Set title / description / alt_text on a media row. Partial update (omitted fields preserved). Empty string clears.
+    - name: media_patch_metadata
+      description: Atomically apply an RFC 7396 merge patch to arbitrary workflow metadata. Optional metadata.* path conditions and expected_metadata_version provide compare-and-swap updates; failed conditions never overwrite concurrent state.
+
+    # Audience rating + keyframes (v0.13.0+)
+    - name: media_set_audience_rating
+      description: Override the audience rating (general | mature | adult | unrated). Rating='unrated' clears + re-queues for the describer.
+    - name: media_get_keyframes
+      description: Storyboard frames for a video as [{position_ms, storage_file_id, url}, …] ordered by position. Empty for non-video files or before the keyframe step has run.
+
+    # Transcripts — speech-to-text for audio + video (Deepgram-powered).
+    - name: media_transcribe
+      description: Queue a transcription. force=true re-queues already-ok rows. Returns immediately; transcriber drains the queue async.
+    - name: media_get_transcript
+      description: Status / language / text / segments for one file's transcript.
+    - name: media_set_transcript
+      description: Upsert a hand-supplied transcript (imported / manual). Bypasses the auto pipeline entirely.
+
+    # Auto-description — generates 2-3 sentence descriptions via the LLM integration.
+    - name: media_describe
+      description: Queue an auto-description for one media file. Transient failures recover automatically with up to three persisted attempts per source/metadata revision, provider reset-aware waits, and visible description_recovery state. Authentication, billing/quota and invalid-input failures stop. force=true clears the cooldown; a manual request resets failed/exhausted recovery. Metadata readiness is separate from decodability.
+
   workers:
     - name: indexer
       schedule: "@every 30s"
@@ -325,35 +403,457 @@ provides:
     - slot: project.page
       label: Media
       icon: video
+      # ESM module — dashboard dynamically imports it, mounts the
+      # default export as a React component inside its own tree.
+      # Iframe fallback (older platforms) lands on the .html sibling.
       entry: /ui/MediaPanel.mjs
   ui_components:
+    # Inline media tile the agent can attach to chat messages via
+    # respond(components=[{app:"media", name:"media-card", props:{file_id:N}}]).
+    # Renders thumbnail/waveform + filename + duration + Open link;
+    # live-updates on media events (described, transcribed, deleted).
     - name: media-card
       entry: /ui/MediaCard.mjs
-      slots: [chat.message_attachment]
-      props_schema: {type: object, required: [file_id], properties: {file_id: {type: [string, integer]}}}
-      preview_props: {preview: true}
+      slots:
+        - chat.message_attachment
+      props_schema:
+        type: object
+        required: [file_id]
+        properties:
+          file_id:
+            type: [string, integer]
+      preview_props:
+        preview: true
+    # Live-updating render progress card. Polls /renders/<id> every
+    # 1.5s while pending/running and silently promotes itself to a
+    # MediaCard once the render hits status=ok. Use this immediately
+    # after media_trim / media_resize / media_extract_frame etc.
     - name: render-card
       entry: /ui/RenderCard.mjs
-      slots: [chat.message_attachment]
-      props_schema: {type: object, required: [render_id], properties: {render_id: {type: integer}}}
-      preview_props: {preview: true}
+      slots:
+        - chat.message_attachment
+      props_schema:
+        type: object
+        required: [render_id]
+        properties:
+          render_id:
+            type: integer
+      preview_props:
+        preview: true
+    # Transcript with language badge, scrollable up to ~24rem; "Show
+    # more" reveals the rest. Reacts to media.transcribed so a
+    # still-pending transcript fills in the moment Deepgram finishes.
     - name: transcript-card
       entry: /ui/TranscriptCard.mjs
-      slots: [chat.message_attachment]
-      props_schema: {type: object, required: [file_id], properties: {file_id: {type: [string, integer]}, max_lines: {type: integer}}}
-      preview_props: {preview: true}
+      slots:
+        - chat.message_attachment
+      props_schema:
+        type: object
+        required: [file_id]
+        properties:
+          file_id:
+            type: [string, integer]
+          max_lines:
+            type: integer
+      preview_props:
+        preview: true
+
+  # Events emitted on the AppBus via ctx.Emit. Subscribers (other apps,
+  # platform subscriptions) match on the topic name. Each entry's
+  # payload is documentation-only — the platform doesn't validate
+  # emit shapes, but the dashboard surfaces it in the subscription
+  # form's event picker so operators know what they'll receive.
+  publishes:
+    - name: media.indexed
+      description: A storage file was probed and added (or refreshed) in media's catalog. NOTE — on the local indexer this fires BEFORE thumbnail/waveform derivation; on the remote indexer it fires AFTER (the remote shell does probe + derive in one pass). Use media.derived for the unambiguous "fully indexed" signal.
+      payload:
+        file_id: string
+        status: string                  # ok | failed | unsupported | skipped_size
+        kind: string                    # video | audio | image
+        duration_ms: integer
+        codec: string
+
+    - name: media.derived
+      description: The indexer has finished all derive work for this file (probe + thumbnail/waveform/keyframes upload). Fires regardless of whether the transcripts or descriptions integrations are bound, so subscribers can treat this as "file is ready for consumption" without waiting on optional LLM steps. Cross-path consistent — same payload shape from local and remote indexers.
+      payload:
+        file_id: string
+        name: string
+        has_video: boolean
+        has_audio: boolean
+        is_image: boolean
+        duration_ms: integer
+        has_thumbnail: boolean
+        has_waveform: boolean
+        keyframe_count: integer         # 0 for non-video; up to keyframe_max_count for long videos (v0.13.0+)
+        executor: string                # "" for local, "remote-instance" for remote
+
+    - name: media.described
+      description: An LLM-generated description was attached to a media row (via media's auto-describe pipeline). v0.13.0+ the same describer call also writes audience_rating.
+      payload:
+        file_id: string
+        chars: integer
+        source: string                  # always "ai-generated"
+        audience_rating: string         # general | mature | adult (empty when LLM omitted the field)
+
+    - name: media.transcribed
+      description: A Deepgram-powered transcription finished for an audio or video file.
+      payload:
+        file_id: string
+        language: string
+        duration_ms: integer
+        text_chars: integer
+
+    - name: media.updated
+      description: A media row was updated (move, rename, re-index, manual description edit, workflow metadata patch, etc.).
+      payload:
+        file_id: string
+        change: string                  # moved | renamed | reindexed | described | transcript_set | metadata_patched
+        metadata_version: integer       # present for metadata_patched
+
+    - name: media.deleted
+      description: A media row was removed because the underlying storage file is gone.
+      payload:
+        file_id: string
+
+    - name: media.completed
+      description: |
+        Single "everything that was going to happen has happened" event,
+        regardless of install configuration. Fires AT MOST ONCE per file
+        (idempotent via media.completed_at column).
+
+        Subscribe to this when you want one signal that says "ready to
+        consume" without caring which combination of integrations
+        (transcripts / descriptions) is bound on this install. The
+        has_transcript / has_description payload fields tell you which
+        optional enrichments actually ran — false means the integration
+        isn't bound, the stage was skipped, or it terminally failed.
+
+        Use this INSTEAD of subscribing to media.derived + media.transcribed
+        + media.described and reconciling them yourself.
+      payload:
+        file_id: string
+        name: string                    # storage filename, e.g. "ballerina.MOV" — populated by upsertMedia at probe time
+        folder: string                  # storage folder, e.g. "/clips/" — same shape storage uses
+        origin: string                  # storage_file | render_output
+        output_of_render_id: integer    # present when origin=render_output
+        render_operation: string        # present when origin=render_output
+        render_source_file_ids: array   # present when origin=render_output
+        has_video: boolean
+        has_audio: boolean
+        is_image: boolean
+        duration_ms: integer
+        width: integer                  # 0 for audio-only sources
+        height: integer                 # 0 for audio-only sources
+        has_thumbnail: boolean
+        has_waveform: boolean
+        has_transcript: boolean         # transcripts integration bound AND transcript stored at status=ok
+        has_description: boolean        # descriptions integration bound AND description column non-empty
+        audience_rating: string         # general | mature | adult | unrated (v0.13.0+; populated by describer)
+
+    - name: render.queued
+      description: A new render was submitted via a media_* tool (or POST /renders) and is awaiting a worker.
+      payload:
+        render_id: integer
+        operation: string               # trim | resize | transcode | crop | concat | extract_frame | extract_reel | audio_extract | audio_filter
+        source_file_ids: array
+        requested_by: string            # "agent:<id>" | "human:<id>" | integration name
+        status: string                  # always "pending"
+
+    - name: render.started
+      description: A worker claimed a pending render and is now executing it.
+      payload:
+        render_id: integer
+        operation: string
+        source_file_ids: array
+        executor: string                # local | remote-instance | cloudinary
+        status: string                  # always "running"
+
+    - name: render.progress
+      description: A running render's progress_pct moved. Today executors bump to 50 when ffmpeg actually starts producing output; finer-grained progress is a future enhancement.
+      payload:
+        render_id: integer
+        progress_pct: integer
+        status: string                  # always "running"
+
+    - name: render.stage
+      description: A render entered a processing stage; stage timings are stored in its metrics.
+      payload:
+        render_id: integer
+        stage: string
+
+    - name: render.completed
+      description: A render finished successfully and produced an output_file_id in storage.
+      payload:
+        render_id: integer
+        operation: string
+        output_file_id: string
+        status: string                  # always "ok"
+
+    - name: render.failed
+      description: A render terminated with an error — backend failure, ffmpeg exit non-zero, storage upload error, or timeout.
+      payload:
+        render_id: integer
+        operation: string
+        error: string                   # verbatim error message (panel surfaces the head of this)
+        status: string                  # always "failed"
+
+    - name: render.cancelled
+      description: A render was aborted via media_cancel_render (operator/agent) or a wall-clock timeout that the worker translated into a cancel.
+      payload:
+        render_id: integer
+        operation: string
+        status: string                  # always "cancelled"
+
 runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.18
+    ref: media/v0.14.19
     entry: mcp/media
   port: 8080
   health_check: /health
+
 db:
   driver: sqlite
   path: /data/media.db
   migrations: migrations/
+
+config_schema:
+  # Indexer (existing)
+  - name: poll_interval_seconds
+    type: text
+    default: "30"
+    label: Poll interval (seconds)
+    description: How often the indexer scans storage for new media files.
+  - name: max_probe_size_mb
+    type: text
+    default: "0"
+    label: Max probe size (MB)
+    description: Files larger than this are marked skipped_size and not probed automatically — current implementation downloads the full file before running ffprobe/ffmpeg, so the cap protects against runaway local-disk fill on multi-GB sources. 0 = unlimited (default — most installs prefer "always index" over disk safety). Set per host if your scratch volume is small. Pass force=true to media_reindex (or via the panel) to override per file regardless of size.
+  - name: thumbnail_seek_seconds
+    type: text
+    default: "1.0"
+    label: Thumbnail seek (seconds)
+    description: Where in a video to grab the thumbnail. 1.0 lands a stable frame past most fade-ins.
+  - name: thumbnail_width
+    type: text
+    default: "320"
+    label: Thumbnail width (px)
+    description: Generated thumbnails are scaled to this width, height auto.
+  - name: keyframes_enabled
+    type: text
+    default: "true"
+    label: Generate storyboard frames
+    description: Generate small timeline frames used by descriptions, scrubbing, and Smart Crop v2.
+  - name: keyframe_interval_seconds
+    type: text
+    default: "5"
+    label: Storyboard interval (seconds)
+    description: Target spacing for 320px storyboard frames. Long videos are automatically stretched to the maximum count.
+  - name: keyframe_max_count
+    type: text
+    default: "120"
+    label: Maximum storyboard frames
+    description: Storage and indexing cap per video. Smart Crop v2 falls back safely when an older storyboard is too sparse.
+  - name: waveform_width
+    type: text
+    default: "800"
+    label: Waveform width (px)
+  - name: waveform_height
+    type: text
+    default: "100"
+    label: Waveform height (px)
+  - name: ffmpeg_path
+    type: text
+    default: "ffmpeg"
+    label: ffmpeg binary
+    description: PATH lookup by default. Override to vendor a static binary.
+  - name: ffprobe_path
+    type: text
+    default: "ffprobe"
+    label: ffprobe binary
+  - name: analyze_timeout_seconds
+    type: text
+    default: "300"
+    label: Media analysis timeout (seconds)
+    description: Hard wall-clock cap for one read-only media_analyze call. Full analysis of long or high-resolution files may need a larger value.
+
+  # Renders (new in v0.2)
+  - name: media_work_capacity
+    type: text
+    default: "4"
+    label: Media processing capacity
+    description: Shared per-host work budget. Video renders use two units; indexing and previews use one.
+  - name: render_encoder_threads
+    type: text
+    default: "2"
+    label: Encoder threads per FFmpeg render
+    description: Caps CPU use per encoder to keep simultaneous renders responsive.
+  - name: render_pool_size
+    type: text
+    default: "4"
+    label: Render pool size
+    description: Concurrent ffmpeg renders. Each render can use multiple CPU cores; size for available CPUs.
+  - name: render_timeout_seconds
+    type: text
+    default: "1800"
+    label: Render timeout (seconds)
+    description: Default wall-clock budget. HEVC trims can automatically increase it to the estimate, up to render_max_timeout_seconds. Explicit timeout_seconds is honored within that maximum.
+  - name: render_max_timeout_seconds
+    type: text
+    default: "14400"
+    label: Maximum job timeout (seconds)
+    description: Operator ceiling for automatic HEVC budgets and explicit per-job timeouts.
+  - name: render_hevc_estimated_speed
+    type: text
+    default: "0.2"
+    label: Estimated HEVC encoding speed
+    description: Conservative source seconds per wall second for this host; adjust from observed performance. Estimate also includes validation and transfer reserves. Applies conservatively to all HEVC quality profiles.
+  - name: render_max_output_size_mb
+    type: text
+    default: "4096"
+    label: Render max output size (MB)
+    description: Refuse renders whose output exceeds this (post-encode size check). Guards disk + storage upload.
+  - name: render_scratch_dir
+    type: text
+    default: ""
+    label: Render scratch dir
+    description: |
+      Working directory for downloaded sources + ffmpeg outputs.
+      Cleaned per render on terminal status. Leave empty to default
+      to <APTEVA_DATA_DIR>/renders/ (the per-install writable dir
+      the platform provisions). Set explicitly only when you want
+      a different volume — e.g. a fast NVMe scratch on a server
+      where the platform data dir lives on slower disk.
+  - name: render_output_folder
+    type: text
+    default: "/renders/"
+    label: Render output folder
+    description: Storage folder where finished renders are uploaded.
+  - name: render_host_id
+    type: select_from_app
+    app: instances
+    discovery:
+      route: /api/instances
+      response_path: instances
+      value_field: id
+      label_field: name
+    fallback: text
+    default: "0"
+    label: Remote render host
+    description: |
+      Pick a host from the Instances app's inventory to offload renders,
+      indexing, and read-only media analysis to. The dropdown populates
+      from /api/apps/instances/api/instances
+      at config-render time. Picking the local host (id 0) means
+      "no remote — render here", which is the default.
+
+      On first remote render: ffmpeg auto-installs into
+      ~/.apteva-render/ on the host (no sudo). Source bytes come from
+      a signed storage URL; output uploads back to storage via the
+      presigned-PUT fast path (S3 backends) or multipart fallback.
+
+      Indexing also follows this setting (v0.11.2): probe + thumbnail
+      + waveform run on the host via HTTP-range-seek against the
+      signed source URL, so giant videos are never downloaded to the
+      Apteva machine. Indexing falls back to local on a remote error.
+      media_analyze follows the configured host too, but fails closed instead
+      of silently using local CPU when the selected host is unavailable.
+
+      If the Instances app isn't installed the field collapses to a
+      plain text input where you can type a host id manually.
+
+  - name: render_source_cache_max_bytes
+    type: text
+    default: "21474836480"
+    label: Source cache max bytes
+    description: |
+      Maximum persistent cache size for source files downloaded on the
+      local or remote render host. Defaults to 20 GiB. Cached sources are keyed
+      by storage file_id and sha256 so repeated reel renders reuse the
+      same remote bytes instead of downloading the source again.
+
+  # Transcripts (new in v0.4)
+  - name: transcribe_auto
+    type: text
+    default: "true"
+    label: Auto-transcribe
+    description: When true, the transcriber sweeps every transcribe_poll_seconds and queues new audio/video files. Set false for manual-only (media_transcribe still works).
+  - name: transcribe_poll_seconds
+    type: text
+    default: "60"
+    label: Transcriber poll interval (seconds)
+    description: How often to scan media for new candidates. Don't set under 30s — Deepgram bills per request.
+  - name: transcribe_batch_size
+    type: text
+    default: "10"
+    label: Transcriber batch size
+    description: Maximum new pending rows queued per sweep tick. Drains the queue one row at a time afterwards.
+  - name: transcribe_model
+    type: text
+    default: "nova-3"
+    label: Deepgram model
+    description: Speech-to-text model. nova-3 = latest, nova-2 = cheaper, whisper-cloud = OpenAI Whisper via Deepgram. See https://developers.deepgram.com/docs/models-languages-overview.
+  - name: transcribe_language
+    type: text
+    default: "auto"
+    label: Language
+    description: BCP-47 language tag (en, fr, es, de, ja, zh, …) or "auto" to detect.
+  - name: transcribe_diarize
+    type: text
+    default: "false"
+    label: Speaker diarisation
+    description: Mark each segment with a speaker number. Useful for multi-speaker content but bloats the response — leave off otherwise.
+  - name: transcribe_max_duration_minutes
+    type: text
+    default: "120"
+    label: Max source duration (minutes)
+    description: Files longer than this are marked status=skipped, not transcribed automatically. Manual media_transcribe ignores this cap.
+  - name: transcribe_timeout_seconds
+    type: text
+    default: "600"
+    label: Transcription timeout (seconds)
+    description: Hard wall-clock cap per Deepgram call. Failed mid-call rows are marked failed.
+
+  # Auto-description (new in v0.5)
+  - name: auto_describe_enabled
+    type: text
+    default: "true"
+    label: Auto-describe
+    description: Master switch for the auto-describer. When false, the worker doesn't sweep — manual media_describe still works.
+  - name: describe_model
+    type: text
+    default: ""
+    label: Description model
+    description: |
+      Optional model override. Leave empty for provider defaults: kimi-k2.6 on OpenCode Go, gpt-4o-mini on OpenAI API, gpt-5.5 on OpenAI Codex. Faster non-reasoning OpenCode models like glm-5.1 / qwen3.6-plus may work depending on vision support.
+  - name: describe_max_tokens
+    type: text
+    default: "4000"
+    label: Description max_tokens
+    description: |
+      Token budget per call. Reasoning models (Kimi K2.6, DeepSeek V4 Pro) burn most of this on internal thinking before emitting the final answer — 4000 leaves comfortable headroom for both. If you see "response truncated (finish_reason=length)" errors, bump this further or switch to a non-reasoning vision model. Non-reasoning models can run on ~200 since they emit the answer directly.
+  - name: describe_poll_seconds
+    type: text
+    default: "60"
+    label: Describer poll interval (seconds)
+    description: Sweep interval. Each sweep handles up to describe_batch_size files.
+  - name: describe_batch_size
+    type: text
+    default: "5"
+    label: Describer batch size
+    description: Maximum candidate rows processed per sweep tick. Workers run sequentially within a sweep — Kimi is slow.
+  - name: describe_retry_cooldown_seconds
+    type: text
+    default: "600"
+    label: Describer retry cooldown (seconds)
+    description: After a failed attempt, wait at least this long before re-queueing a row. Prevents tight retry loops against a misconfigured integration.
+  - name: describe_timeout_seconds
+    type: text
+    default: "120"
+    label: Describer call timeout (seconds)
+    description: Hard wall-clock cap per LLM call. Reasoning models can be slow on vision; bump this if you see widespread timeouts.
+
 upgrade_policy: auto-patch
 `
 
@@ -540,12 +1040,19 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolAnalyze,
 		},
 		{
+			Name:        "media_preview_crop",
+			Description: "Inspect crop geometry and sampled action coverage before rendering. Returns resolved_params and composition with no new output; sampled coverage still requires visual review. operation=crop|extract_frame|extract_reel. For strict render requests use require_action_preservation=true; crop_fallback=contain is explicit full-frame fallback.",
+			InputSchema: schemaObject(map[string]any{"file_id": map[string]any{"type": "string"}, "operation": map[string]any{"type": "string", "enum": []string{"crop", "extract_frame", "extract_reel"}}, "at_ms": map[string]any{"type": "integer"}, "start_ms": map[string]any{"type": "integer"}, "end_ms": map[string]any{"type": "integer"}, "target_ratio": map[string]any{"type": "string"}, "crop_mode": map[string]any{"type": "string"}, "fit_mode": map[string]any{"type": "string"}}, []string{"file_id"}),
+			Handler:     a.toolPreviewCrop,
+		},
+		{
 			Name:        "media_ask",
-			Description: "Ask a grounded question about a media file using the configured descriptions vision/chat integration. Images use an existing thumbnail or source object. Videos use the existing canonical thumbnail plus cached storyboard keyframes; at_ms selects the nearest existing keyframe and reports its actual timestamp. Audio uses an existing completed transcript. Codex requests explicitly use low reasoning and report reasoning_effort. Transient vision/chat failures get up to three attempts within one timeout; request_diagnostics reports attempts and upstream failures. Explicit auth/quota/invalid-input failures stop without retry. This tool never runs ffmpeg, generates frames/derivations, or writes files.",
+			Description: "Ask a grounded question about a media file using the configured descriptions vision/chat integration. Images use the actual existing source by default; image_detail=thumbnail selects reduced evidence. Returns supplied dimensions, representation, output render identity and provider-resolution limitations. Videos use the existing canonical thumbnail plus cached storyboard keyframes; at_ms selects the nearest existing keyframe and reports its actual timestamp. Audio uses an existing completed transcript. Codex requests explicitly use low reasoning and report reasoning_effort. Transient vision/chat failures get up to three attempts within one timeout; request_diagnostics reports attempts and upstream failures. Explicit auth/quota/invalid-input failures stop without retry. This tool never runs ffmpeg, generates frames/derivations, or writes files.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":            map[string]any{"type": "string"},
 				"question":           map[string]any{"type": "string", "maxLength": maxAskQuestionChars},
 				"at_ms":              map[string]any{"type": "integer", "minimum": 0, "description": "Video only. Selects the nearest cached keyframe; does not extract an exact frame."},
+				"image_detail":       map[string]any{"type": "string", "enum": []string{"source", "thumbnail"}, "default": "source", "description": "Images use the actual existing source by default for crop review. Thumbnail mode reports reduced-resolution limitations. Provider-side resolution is unknown."},
 				"frame_count":        map[string]any{"type": "integer", "minimum": 1, "maximum": maxAskFrameCount, "default": defaultAskFrameCount},
 				"include_transcript": map[string]any{"type": "boolean", "default": true},
 			}, []string{"file_id", "question"}),
@@ -775,19 +1282,21 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "media_crop",
 			Description: "Crop or reframe an existing video/image. Exact mode: file_id, x, y, width, height. With target_ratio, fit_mode='crop' (default) uses content-agnostic Smart Crop v2 evidence—saliency, foreground change, motion, shape and optional face geometry—while fit_mode='contain' preserves the complete source frame with black padding. Args: file_id, target_ratio, crop_mode? ('smart' default|'center'), fit_mode? ('crop' default|'contain'), output_width?. Use media_extract_frame for a video timestamp.",
 			InputSchema: schemaObject(map[string]any{
-				"file_id":         map[string]any{"type": "string"},
-				"x":               map[string]any{"type": "integer", "description": "Exact crop left offset in pixels. Used with y, width, and height when target_ratio is not set."},
-				"y":               map[string]any{"type": "integer", "description": "Exact crop top offset in pixels. Used with x, width, and height when target_ratio is not set."},
-				"width":           map[string]any{"type": "integer", "description": "Exact crop width in pixels. Required for exact mode; optional fallback when target_ratio is set."},
-				"height":          map[string]any{"type": "integer", "description": "Exact crop height in pixels. Required for exact mode; optional fallback when target_ratio is set."},
-				"target_ratio":    map[string]any{"type": "string", "description": "When set, crop/reframe to this aspect ratio ('W:H'), e.g. '9:16', '1:1', '4:5'. Enables smart/center mode for existing images and full video clips."},
-				"output_width":    map[string]any{"type": "integer", "description": "Optional scale width after target_ratio crop. Omit to preserve the computed crop dimensions."},
-				"crop_mode":       map[string]any{"type": "string", "description": "'smart' (default) for subject-aware crop via the source's cached thumbnail/keyframe saliency, or 'center' for geometric center. Smart falls back to center when derivations are unavailable."},
-				"fit_mode":        map[string]any{"type": "string", "description": "'crop' (default) fills the target canvas and may remove source edges; 'contain' preserves the complete frame and pads unused canvas area."},
-				"output_name":     map[string]any{"type": "string", "description": "Optional output filename. Extensionless names receive the operation/source extension; unsupported or conflicting formats are rejected before queuing."},
-				"output_folder":   map[string]any{"type": "string"},
-				"encoder_profile": encoderProfileSchema(),
-				"timeout_seconds": timeoutSchema(),
+				"file_id":                     map[string]any{"type": "string"},
+				"x":                           map[string]any{"type": "integer", "description": "Exact crop left offset in pixels. Used with y, width, and height when target_ratio is not set."},
+				"y":                           map[string]any{"type": "integer", "description": "Exact crop top offset in pixels. Used with x, width, and height when target_ratio is not set."},
+				"width":                       map[string]any{"type": "integer", "description": "Exact crop width in pixels. Required for exact mode; optional fallback when target_ratio is set."},
+				"height":                      map[string]any{"type": "integer", "description": "Exact crop height in pixels. Required for exact mode; optional fallback when target_ratio is set."},
+				"target_ratio":                map[string]any{"type": "string", "description": "When set, crop/reframe to this aspect ratio ('W:H'), e.g. '9:16', '1:1', '4:5'. Enables smart/center mode for existing images and full video clips."},
+				"output_width":                map[string]any{"type": "integer", "description": "Optional scale width after target_ratio crop. Omit to preserve the computed crop dimensions."},
+				"require_action_preservation": map[string]any{"type": "boolean", "default": false, "description": "Preflight before queueing; reject unknown/too-wide sampled action coverage. Visual review remains required."},
+				"crop_fallback":               map[string]any{"type": "string", "enum": []string{"reject", "contain"}, "default": "reject", "description": "Explicit fallback if action cannot fit or coverage is unknown."},
+				"crop_mode":                   map[string]any{"type": "string", "description": "'smart' (default) for subject-aware crop via the source's cached thumbnail/keyframe saliency, or 'center' for geometric center. Smart falls back to center when derivations are unavailable."},
+				"fit_mode":                    map[string]any{"type": "string", "description": "'crop' (default) fills the target canvas and may remove source edges; 'contain' preserves the complete frame and pads unused canvas area."},
+				"output_name":                 map[string]any{"type": "string", "description": "Optional output filename. Extensionless names receive the operation/source extension; unsupported or conflicting formats are rejected before queuing."},
+				"output_folder":               map[string]any{"type": "string"},
+				"encoder_profile":             encoderProfileSchema(),
+				"timeout_seconds":             timeoutSchema(),
 			}, []string{"file_id"}),
 			Handler: a.toolSubmitRender("crop", []string{"x", "y", "width", "height", "target_ratio", "output_width", "crop_mode", "fit_mode"}, []string{"file_id"}),
 		},
@@ -795,17 +1304,19 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "media_extract_frame",
 			Description: "Save a video frame as PNG. With target_ratio, fit_mode='crop' uses generic cached/source visual evidence to reframe at at_ms; fit_mode='contain' preserves the complete frame with padding. Args: file_id, at_ms, width?, target_ratio?, output_width?, crop_mode?, fit_mode?.",
 			InputSchema: schemaObject(map[string]any{
-				"file_id":         map[string]any{"type": "string"},
-				"at_ms":           map[string]any{"type": "integer"},
-				"width":           map[string]any{"type": "integer", "description": "Output width when target_ratio is NOT set (pure scale, keeps aspect)."},
-				"target_ratio":    map[string]any{"type": "string", "description": "When set, crop + scale to this aspect ratio (\"W:H\"). E.g. \"1:1\", \"9:16\", \"4:5\"."},
-				"output_width":    map[string]any{"type": "integer", "description": "Output width when target_ratio is set. Default 1080; height derives from ratio."},
-				"crop_mode":       map[string]any{"type": "string", "description": "\"smart\" (default) for subject-aware crop via the nearest cached keyframe for timed operations, or \"center\" for geometric center. Smart falls back to thumbnail/center when keyframes are not ready."},
-				"fit_mode":        map[string]any{"type": "string", "description": "'crop' (default) fills the target canvas; 'contain' preserves the complete frame with black padding."},
-				"output_name":     map[string]any{"type": "string", "description": "Optional PNG filename. Extensionless names receive .png; other extensions are rejected. Use .png for every portrait frame."},
-				"output_folder":   map[string]any{"type": "string"},
-				"encoder_profile": encoderProfileSchema(),
-				"timeout_seconds": timeoutSchema(),
+				"file_id":                     map[string]any{"type": "string"},
+				"at_ms":                       map[string]any{"type": "integer"},
+				"width":                       map[string]any{"type": "integer", "description": "Output width when target_ratio is NOT set (pure scale, keeps aspect)."},
+				"target_ratio":                map[string]any{"type": "string", "description": "When set, crop + scale to this aspect ratio (\"W:H\"). E.g. \"1:1\", \"9:16\", \"4:5\"."},
+				"output_width":                map[string]any{"type": "integer", "description": "Output width when target_ratio is set. Default 1080; height derives from ratio."},
+				"require_action_preservation": map[string]any{"type": "boolean", "default": false, "description": "Preflight before queueing; reject unknown/too-wide sampled action coverage. Visual review remains required."},
+				"crop_fallback":               map[string]any{"type": "string", "enum": []string{"reject", "contain"}, "default": "reject", "description": "Explicit fallback if action cannot fit or coverage is unknown."},
+				"crop_mode":                   map[string]any{"type": "string", "description": "\"smart\" (default) for subject-aware crop via the nearest cached keyframe for timed operations, or \"center\" for geometric center. Smart falls back to thumbnail/center when keyframes are not ready."},
+				"fit_mode":                    map[string]any{"type": "string", "description": "'crop' (default) fills the target canvas; 'contain' preserves the complete frame with black padding."},
+				"output_name":                 map[string]any{"type": "string", "description": "Optional PNG filename. Extensionless names receive .png; other extensions are rejected. Use .png for every portrait frame."},
+				"output_folder":               map[string]any{"type": "string"},
+				"encoder_profile":             encoderProfileSchema(),
+				"timeout_seconds":             timeoutSchema(),
 			}, []string{"file_id", "at_ms"}),
 			Handler: a.toolSubmitRender("extract_frame", []string{"at_ms", "width", "target_ratio", "output_width", "crop_mode", "fit_mode"}, []string{"file_id"}),
 		},
@@ -842,15 +1353,17 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "media_extract_reel",
 			Description: "Cut and reframe a clip in one ffmpeg pass. fit_mode='crop' (default) uses content-agnostic Smart Crop v2 evidence and a smoothed path; fit_mode='contain' preserves every source edge with black padding when the composition cannot fit a destructive crop. Args: file_id, start_ms, end_ms, target_ratio? (default '9:16'), output_width?, crop_mode?, fit_mode?.",
 			InputSchema: schemaObject(map[string]any{
-				"file_id":       map[string]any{"type": "string", "description": "Storage file_id of the source video."},
-				"start_ms":      map[string]any{"type": "integer", "description": "Clip start, milliseconds from start of source. Same convention as media_trim."},
-				"end_ms":        map[string]any{"type": "integer", "description": "Clip end, milliseconds from start of source. Must be > start_ms."},
-				"target_ratio":  map[string]any{"type": "string", "description": "Output aspect ratio as 'W:H'. Default '9:16'. Common: '9:16' (vertical reels), '1:1' (square), '4:5' (Instagram portrait), '16:9' (passthrough crop)."},
-				"output_width":  map[string]any{"type": "integer", "description": "Output width in pixels. Default 1080. Height auto-derives from target_ratio (rounded to even for codec compatibility)."},
-				"crop_mode":     map[string]any{"type": "string", "description": "\"smart\" (default) keeps the most interesting subject in frame using the nearest cached keyframe for the reel/frame; \"center\" uses a geometric center crop. Smart falls back to thumbnail/center when keyframes are not ready."},
-				"fit_mode":      map[string]any{"type": "string", "description": "'crop' (default) fills the canvas with a tracked crop; 'contain' preserves the complete frame and pads unused canvas area."},
-				"output_name":   map[string]any{"type": "string", "description": "Optional output filename. Extensionless names receive .mp4; conflicting extensions are rejected."},
-				"output_folder": map[string]any{"type": "string", "description": "Optional storage folder for the rendered output. Defaults to install's render_output_folder (typically /renders/)."},
+				"file_id":                     map[string]any{"type": "string", "description": "Storage file_id of the source video."},
+				"start_ms":                    map[string]any{"type": "integer", "description": "Clip start, milliseconds from start of source. Same convention as media_trim."},
+				"end_ms":                      map[string]any{"type": "integer", "description": "Clip end, milliseconds from start of source. Must be > start_ms."},
+				"target_ratio":                map[string]any{"type": "string", "description": "Output aspect ratio as 'W:H'. Default '9:16'. Common: '9:16' (vertical reels), '1:1' (square), '4:5' (Instagram portrait), '16:9' (passthrough crop)."},
+				"output_width":                map[string]any{"type": "integer", "description": "Output width in pixels. Default 1080. Height auto-derives from target_ratio (rounded to even for codec compatibility)."},
+				"require_action_preservation": map[string]any{"type": "boolean", "default": false, "description": "Preflight before queueing; reject unknown/too-wide sampled action coverage. Visual review remains required."},
+				"crop_fallback":               map[string]any{"type": "string", "enum": []string{"reject", "contain"}, "default": "reject", "description": "Explicit fallback if action cannot fit or coverage is unknown."},
+				"crop_mode":                   map[string]any{"type": "string", "description": "\"smart\" (default) keeps the most interesting subject in frame using the nearest cached keyframe for the reel/frame; \"center\" uses a geometric center crop. Smart falls back to thumbnail/center when keyframes are not ready."},
+				"fit_mode":                    map[string]any{"type": "string", "description": "'crop' (default) fills the canvas with a tracked crop; 'contain' preserves the complete frame and pads unused canvas area."},
+				"output_name":                 map[string]any{"type": "string", "description": "Optional output filename. Extensionless names receive .mp4; conflicting extensions are rejected."},
+				"output_folder":               map[string]any{"type": "string", "description": "Optional storage folder for the rendered output. Defaults to install's render_output_folder (typically /renders/)."},
 			}, []string{"file_id", "start_ms", "end_ms"}),
 			Handler: a.toolSubmitRender("extract_reel", []string{"start_ms", "end_ms", "target_ratio", "output_width", "crop_mode", "fit_mode"}, []string{"file_id"}),
 		},
@@ -1249,6 +1762,11 @@ func (a *App) toolDescribe(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			`UPDATE media SET description='', description_source='', description_attempted_at=NULL, description_error=''
 			   WHERE project_id=? AND file_id=?`, pid, fid,
 		); err != nil {
+			return nil, err
+		}
+	}
+	if force || media.DescriptionRecovery == nil || media.DescriptionRecovery.State == "failed" || media.DescriptionRecovery.State == "exhausted" {
+		if err := resetDescriptionRecovery(ctx.AppDB(), pid, fid); err != nil {
 			return nil, err
 		}
 	}
@@ -2385,7 +2903,7 @@ func (a *App) toolIndexStatus(ctx *sdk.AppCtx, args map[string]any) (any, error)
 // "file_id" in sourceKeys; concat lists "file_ids".
 
 func (a *App) toolSubmitRender(operation string, paramKeys, sourceKeys []string) sdk.ToolHandler {
-	paramKeys = append(append([]string{}, paramKeys...), "encoder_profile", "timeout_seconds")
+	paramKeys = append(append([]string{}, paramKeys...), "encoder_profile", "timeout_seconds", "require_action_preservation", "crop_fallback")
 	return func(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		pid, err := resolveProjectFromArgs(args)
 		if err != nil {
@@ -2418,7 +2936,7 @@ func (a *App) toolSubmitRender(operation string, paramKeys, sourceKeys []string)
 		}
 		outputName = plan.Filename
 
-		id, err := insertRender(ctx.AppDB(), pid, operation, sources, params, outputName, outputFolder, requestedBy)
+		id, err := insertPreparedRender(ctx.AppDB(), pid, operation, sources, params, plan.SubmissionParams, outputName, outputFolder, requestedBy)
 		if err != nil {
 			return nil, err
 		}
@@ -2429,6 +2947,7 @@ func (a *App) toolSubmitRender(operation string, paramKeys, sourceKeys []string)
 			"operation":    operation,
 			"output_name":  plan.Filename,
 			"content_type": plan.ContentType,
+			"composition":  cropCompositionForParams(plan.SubmissionParams),
 			"render_budget": func() renderBudget {
 				b, _ := describeRenderBudget(ctx, &RenderRow{ProjectID: pid, Operation: operation, SourceFileIDs: sources, Params: paramJSON}, parseConfigIntFallback(ctx.Config().Get("render_timeout_seconds"), 1800))
 				return b
@@ -2830,7 +3349,7 @@ func (a *App) handleRendersCollection(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		body.OutputName = plan.Filename
-		id, err := insertRender(globalCtx.AppDB(), pid, body.Operation, sources, body.Params, body.OutputName, body.OutputFolder, body.RequestedBy)
+		id, err := insertPreparedRender(globalCtx.AppDB(), pid, body.Operation, sources, body.Params, plan.SubmissionParams, body.OutputName, body.OutputFolder, body.RequestedBy)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -2838,7 +3357,7 @@ func (a *App) handleRendersCollection(w http.ResponseWriter, r *http.Request) {
 		emitRenderQueued(globalCtx, id, pid, body.Operation, sources, body.RequestedBy)
 		w.WriteHeader(http.StatusAccepted)
 		budget, _ := describeRenderBudget(globalCtx, &RenderRow{ProjectID: pid, Operation: body.Operation, SourceFileIDs: sources, Params: paramJSON}, parseConfigIntFallback(globalCtx.Config().Get("render_timeout_seconds"), 1800))
-		writeJSON(w, map[string]any{"render_id": id, "status": "pending", "output_name": plan.Filename, "content_type": plan.ContentType, "render_budget": budget})
+		writeJSON(w, map[string]any{"render_id": id, "status": "pending", "output_name": plan.Filename, "content_type": plan.ContentType, "render_budget": budget, "composition": cropCompositionForParams(plan.SubmissionParams)})
 	default:
 		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
 	}

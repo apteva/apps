@@ -18,13 +18,14 @@ import (
 // stores ISO8601 already; we don't round-trip to time.Time so panels
 // can render strings as-is).
 type RenderRow struct {
-	WorkDir       string          `json:"-"`
-	Metrics       json.RawMessage `json:"metrics,omitempty"`
-	ID            int64           `json:"id"`
-	ProjectID     string          `json:"project_id"`
-	Operation     string          `json:"operation"`
-	SourceFileIDs []string        `json:"source_file_ids"`
-	Params        json.RawMessage `json:"params"`
+	Composition   *cropComposition `json:"composition,omitempty"`
+	WorkDir       string           `json:"-"`
+	Metrics       json.RawMessage  `json:"metrics,omitempty"`
+	ID            int64            `json:"id"`
+	ProjectID     string           `json:"project_id"`
+	Operation     string           `json:"operation"`
+	SourceFileIDs []string         `json:"source_file_ids"`
+	Params        json.RawMessage  `json:"params"`
 	// ResolvedParams is populated when an executor has converted symbolic
 	// options into the effective ffmpeg inputs. For Smart Crop this includes
 	// crop_w/h/x/y and, for tracked reels, crop_path. Params remains the
@@ -51,6 +52,11 @@ type RenderRow struct {
 // outputFolder is optional — empty means "use the install's
 // render_output_folder config at execution time".
 func insertRender(db *sql.DB, projectID, operation string, sourceFileIDs []string, params map[string]any, outputName, outputFolder, requestedBy string) (int64, error) {
+	return insertPreparedRender(db, projectID, operation, sourceFileIDs, params, nil, outputName, outputFolder, requestedBy)
+}
+
+// Persist preflight geometry atomically with the job, before a worker can claim it.
+func insertPreparedRender(db *sql.DB, projectID, operation string, sourceFileIDs []string, params map[string]any, resolved json.RawMessage, outputName, outputFolder, requestedBy string) (int64, error) {
 	if projectID == "" {
 		return 0, errors.New("project_id required")
 	}
@@ -71,10 +77,14 @@ func insertRender(db *sql.DB, projectID, operation string, sourceFileIDs []strin
 	if err != nil {
 		return 0, fmt.Errorf("marshal params: %w", err)
 	}
+	var prepared any
+	if len(resolved) > 0 {
+		prepared = string(resolved)
+	}
 	res, err := db.Exec(`
-		INSERT INTO renders (project_id, operation, source_file_ids, params, output_name, output_folder, requested_by)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		projectID, operation, string(srcJSON), string(paramJSON), outputName, outputFolder, requestedBy,
+		INSERT INTO renders (project_id, operation, source_file_ids, params, resolved_params, output_name, output_folder, requested_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		projectID, operation, string(srcJSON), string(paramJSON), prepared, outputName, outputFolder, requestedBy,
 	)
 	if err != nil {
 		return 0, err
@@ -418,6 +428,7 @@ func scanRender(row *sql.Row) (*RenderRow, error) {
 	if resolvedParamsRaw != "" {
 		r.ResolvedParams = json.RawMessage(resolvedParamsRaw)
 	}
+	r.Composition = cropCompositionForParams(r.ResolvedParams)
 	return &r, nil
 }
 
@@ -442,5 +453,6 @@ func scanRenderFromRows(rows *sql.Rows) (*RenderRow, error) {
 	if resolvedParamsRaw != "" {
 		r.ResolvedParams = json.RawMessage(resolvedParamsRaw)
 	}
+	r.Composition = cropCompositionForParams(r.ResolvedParams)
 	return &r, nil
 }

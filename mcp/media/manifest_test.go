@@ -39,9 +39,9 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	// v0.13.97 surface: 6 catalog read + analyze/ask + 2 folder ops + move/delete + 9
 	// render submit + 3 render manage + 1 description setter + 1 metadata patcher + 1
 	// audience-rating setter + 1 keyframes getter + 3 transcript
-	// tools + 1 describe + 1 inventory summary = 34.
-	if len(m.Provides.MCPTools) != 34 {
-		t.Errorf("expected 34 MCP tools, got %d", len(m.Provides.MCPTools))
+	// tools + 1 describe + 1 inventory summary = 35.
+	if len(m.Provides.MCPTools) != 35 {
+		t.Errorf("expected 35 MCP tools, got %d", len(m.Provides.MCPTools))
 	}
 	if len(m.Provides.Workers) != 1 {
 		t.Errorf("expected 1 worker, got %d", len(m.Provides.Workers))

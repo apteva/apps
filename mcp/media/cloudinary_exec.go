@@ -90,7 +90,18 @@ func (e *cloudinaryExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *
 	}
 
 	sc := newStorageClient()
+	if len(row.ResolvedParams) > 0 {
+		row.Params = row.ResolvedParams
+	}
 	row.Params = preprocessSmartCrop(ctx, app, sc, row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
+	if err := validateSourceTimestamp(app, row.ProjectID, row.Operation, row.SourceFileIDs, row.Params); err != nil {
+		return 0, err
+	}
+	policyParams, policyErr := applyCropCompositionPolicy(row.Params)
+	if policyErr != nil {
+		return 0, policyErr
+	}
+	row.Params = policyParams
 	if err := renderUpdateResolvedParams(app.AppDB(), row.ID, row.Params); err != nil {
 		return 0, fmt.Errorf("store resolved params: %w", err)
 	}

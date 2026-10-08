@@ -87,3 +87,17 @@ retains those geometries and exposes the two dance cases as
 `fit_mode=contain` is the rendering solution for wide actions. Coverage describes
 supported geometry at sampled timestamps; `sampled_extent_fits` does not certify
 that an entire unsampled action fits. Missing/ambiguous evidence remains unknown.
+
+
+`TestAlexaNativePortraitLocalRegression` replays production screenshots 94319,
+94339, 94341, 94345 and 94347 from source 90959, their exact 320×180 thumbnails,
+and the existing parent storyboard. Set `ALEXA_CROP_FIXTURE_DIR` to the external
+capture containing `derivations.json`, `<native_id>.png`, `<thumbnail_id>.jpg`
+and every `<keyframe_id>.jpg` named in the derivation manifest. The entire capture
+is hash-pinned. It runs the complete planner, checks subject/defining-pose bounds,
+scene provenance, and rejects transformed screenshots as native evidence.
+`ALEXA_CROP_PREVIEW_DIR` optionally writes real 540×960 FFmpeg outputs for review.
+Parent footage is never downloaded or decoded by the new scene refinement; it
+uses at most 12 existing distributed background frames. No customer pixels or
+credentials are included in the public release. Coverage remains sampled and
+can conservatively flag wide foreground estimates; visual approval is required.

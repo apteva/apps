@@ -2,8 +2,12 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.18
+version: 0.14.19
 description: |
+  v0.14.19 restores native screenshot scene evidence for image Smart Crop,
+  exposes crop preflight and explicit action-preservation policies, validates
+  extraction timestamps before queueing, supplies full images for review,
+  and persists bounded per-file description recovery with visible retry state.
   v0.14.18 explicitly uses low Codex reasoning for observations and media_ask.
   Raw Responses requests preserve the selected model, prompts and evidence;
   completed answers must confirm low effort. Existing retry and cooldown
@@ -183,8 +187,10 @@ provides:
       description: Fetch one media record by storage file_id, including arbitrary metadata + metadata_version, probe fields, and derivation pointers. External ingestion URL delivery defaults to apteva/inline; callers can explicitly request delivery=proxy, delivery=direct, or disposition=attachment. Returned delivery, disposition, and expires_at are Storage-confirmed effective values.
     - name: media_analyze
       description: Analyze an existing image, video, or audio source without modifying it. Returns encoding metadata, decode integrity, visual measurements, every-frame black/frozen checks and opening/ending coverage, plus LUFS/peak/RMS/silence audio measurements where applicable. When render_host_id is configured, analysis runs on that remote host without silent local fallback and reports the effective executor. depth=standard analyzes at most 60 seconds; depth=full analyzes the requested/full duration. Creates no render, derivation, or Storage object. Args — file_id, depth? (standard|full), start_ms?, end_ms?, silence_threshold_db?, silence_min_ms?.
+    - name: media_preview_crop
+      description: Inspect sampled crop geometry and composition suitability before rendering. Args — file_id, operation? (crop|extract_frame|extract_reel), target_ratio?, crop_mode?, fit_mode?, at_ms?, start_ms?, end_ms?. Creates no output. Sampled evidence still requires visual review. Strict renders use require_action_preservation=true, with crop_fallback=reject (default) or explicit contain fallback.
     - name: media_ask
-      description: Ask a grounded question using the configured descriptions vision/chat integration and only artifacts that already exist. Images use an existing thumbnail or source object; videos use the canonical thumbnail and cached storyboard keyframes; at_ms selects the nearest existing keyframe and reports the actual timestamp; audio uses an existing completed transcript. Codex requests explicitly use low reasoning and report reasoning_effort. Retries transient vision/chat failures up to three attempts within one timeout; returns request_diagnostics. Explicit auth/quota/invalid-input errors stop immediately. Never runs ffmpeg, generates frames/derivations, or writes files. Args — file_id, question, at_ms?, frame_count? (1-8), include_transcript?.
+      description: Ask a grounded question using the configured descriptions vision/chat integration and only artifacts that already exist. Images use the actual existing source by default; image_detail=thumbnail explicitly uses reduced evidence. Returns supplied dimensions, representation, output render identity and provider-resolution limitations; videos use the canonical thumbnail and cached storyboard keyframes; at_ms selects the nearest existing keyframe and reports the actual timestamp; audio uses an existing completed transcript. Codex requests explicitly use low reasoning and report reasoning_effort. Retries transient vision/chat failures up to three attempts within one timeout; returns request_diagnostics. Explicit auth/quota/invalid-input errors stop immediately. Never runs ffmpeg, generates frames/derivations, or writes files. Args — file_id, question, at_ms?, frame_count? (1-8), include_transcript?, image_detail? (source default|thumbnail).
     - name: media_get_batch
       description: Read descriptions, status, rating and duration for up to 100 explicit file_ids without scanning or signing URLs.
     - name: media_search
@@ -266,7 +272,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_crop
-      description: Crop or reframe an existing video/image. Exact mode args — file_id, x, y, width, height. With target_ratio, fit_mode=crop (default) uses content-agnostic Smart Crop v2 evidence (saliency, foreground change, motion, shape, and optional face geometry); fit_mode=contain preserves every source edge with black padding. Args — file_id, target_ratio, crop_mode? (smart default | center), fit_mode? (crop default | contain), output_width?.
+      description: Crop or reframe an existing video/image. Exact mode args — file_id, x, y, width, height. With target_ratio, fit_mode=crop (default) uses content-agnostic Smart Crop v2 evidence (saliency, foreground change, motion, shape, and optional face geometry); fit_mode=contain preserves every source edge with black padding. Args — file_id, target_ratio, crop_mode? (smart default | center), fit_mode? (crop default | contain), output_width?. Native screenshots reuse verified parent scene evidence. require_action_preservation=true rejects unknown/too-wide sampled coverage before queueing; crop_fallback=contain explicitly preserves the full frame. Technical success does not approve composition.
       async_result:
         id_field: render_id
         notify:
@@ -280,7 +286,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_extract_frame
-      description: Save a video frame as PNG. With target_ratio, fit_mode=crop uses generic cached/source visual evidence around at_ms; fit_mode=contain preserves the complete frame with padding. Args — file_id, at_ms, width?, target_ratio?, output_width?, crop_mode?, fit_mode?.
+      description: Save a video frame as PNG. Validates at_ms against indexed authoritative duration before queueing; timestamp_out_of_range returns requested and valid timestamps. With target_ratio, fit_mode=crop uses generic cached/source visual evidence around at_ms; fit_mode=contain preserves the complete frame with padding. Args — file_id, at_ms, width?, target_ratio?, output_width?, crop_mode?, fit_mode?.
       async_result:
         id_field: render_id
         notify:
@@ -323,7 +329,7 @@ provides:
           expires_after: 24h
     - name: media_extract_reel
       description: |
-        Cut and reframe a clip in one ffmpeg pass. fit_mode=crop (default) uses content-agnostic Smart Crop v2 evidence and a smoothed crop path; fit_mode=contain preserves the complete source frame with black padding. Args — file_id, start_ms, end_ms, target_ratio? (default 9:16), output_width? (default 1080), crop_mode? (smart default | center), fit_mode? (crop default | contain). Returns render_id and notifies the caller on completion.
+        Cut and reframe a clip in one ffmpeg pass. fit_mode=crop (default) uses content-agnostic Smart Crop v2 evidence and a smoothed crop path; fit_mode=contain preserves the complete source frame with black padding. Args — file_id, start_ms, end_ms, target_ratio? (default 9:16), output_width? (default 1080), crop_mode? (smart default | center), fit_mode? (crop default | contain). require_action_preservation=true preflights and rejects unknown/too-wide sampled action coverage before queuing; crop_fallback=contain explicitly requests full-frame fallback. Technical render success does not imply composition approval. Returns render_id and notifies the caller on completion.
       async_result:
         id_field: render_id
         notify:
@@ -367,7 +373,7 @@ provides:
 
     # Auto-description — generates 2-3 sentence descriptions via the LLM integration.
     - name: media_describe
-      description: Queue an auto-description for one media file. force=true clears the cooldown so the next sweep re-attempts.
+      description: Queue an auto-description for one media file. Transient failures recover automatically with up to three persisted attempts per source/metadata revision, provider reset-aware waits, and visible description_recovery state. Authentication, billing/quota and invalid-input failures stop. force=true clears the cooldown; a manual request resets failed/exhausted recovery. Metadata readiness is separate from decodability.
 
   workers:
     - name: indexer
@@ -581,7 +587,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.18
+    ref: media/v0.14.19
     entry: mcp/media
   port: 8080
   health_check: /health

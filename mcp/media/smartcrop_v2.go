@@ -47,6 +47,7 @@ type cropPathPoint struct {
 }
 
 type smartCropV2Sample struct {
+	sceneForeground   bool
 	point             cropPathPoint
 	img               image.Image
 	face              *smartCropFace
@@ -327,6 +328,12 @@ func computeSmartCropStillV2(
 	}
 	win := cropWindow{W: cw, H: ch, X: x, Y: y}
 	if row.IsImage && !target.PreferKeyframe {
+		if sample := nearestSmartCropSample(samples, target.FocusMs); sample != nil {
+			if corrected, ok := refineSmartCropNativeImage(ctx, app, sc, projectID, row, sample, win.X, cw); ok {
+				win.X = corrected
+				method += "+native-scene-foreground"
+			}
+		}
 		if sample := nearestSmartCropSample(samples, target.FocusMs); sample != nil {
 			if composed, changed := composeSmartCropPortrait(sample.img, win, row.Width, row.Height); changed && smartCropPortraitPreservesFace(composed, sample.face) {
 				win = composed

@@ -34,6 +34,7 @@ type MediaEssentialDerivatives struct {
 }
 
 type MediaReleaseReadiness struct {
+	MetadataReady              bool   `json:"metadata_ready"`
 	MediaReady                 bool   `json:"media_ready"`
 	ProbeReady                 bool   `json:"probe_ready"`
 	PatreonPublicationStatus   string `json:"patreon_publication_status,omitempty"`
@@ -425,6 +426,7 @@ func mediaReleaseReadiness(row MediaRow) MediaReleaseReadiness {
 	lineage := mediaLineageSummary(row.Metadata)
 	required := mediaRequiredDerivativesPresent(row)
 	return MediaReleaseReadiness{
+		MetadataReady:              row.Description != "" && row.AudienceRating != "" && row.AudienceRating != "unrated",
 		MediaReady:                 row.ProbeStatus == "ok" && required,
 		ProbeReady:                 row.ProbeStatus == "ok",
 		PatreonPublicationStatus:   patreon.Status,

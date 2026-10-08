@@ -20,9 +20,10 @@ import (
 // what /media and media_get expose; raw_probe stays a string so
 // callers that want it pretty-print client-side.
 type MediaRow struct {
-	FileID       string `json:"file_id"`
-	ProjectID    string `json:"project_id"`
-	SourceSHA256 string `json:"source_sha256"`
+	DescriptionRecovery *descriptionRecoveryState `json:"description_recovery,omitempty"`
+	FileID              string                    `json:"file_id"`
+	ProjectID           string                    `json:"project_id"`
+	SourceSHA256        string                    `json:"source_sha256"`
 	// Folder mirrors storage.files.folder on the row so media's own
 	// queries can filter + paginate by folder without joining to
 	// storage. Populated by upsertMedia at probe time + by the
@@ -672,7 +673,9 @@ func describeCandidatesMode(db *sql.DB, projectID string, limit int, cooldownSec
 		   AND probe_status = 'ok'
 		   AND ((description = '' AND description_source NOT IN ('human','agent')) OR audience_rating = 'unrated')
 		   AND (has_audio = 0 OR EXISTS (SELECT 1 FROM transcripts t WHERE t.project_id=media.project_id AND t.file_id=media.file_id AND t.status='ok'))
-		   AND (description_attempted_at IS NULL OR description_attempted_at <= ?)
+		   AND (
+     EXISTS (SELECT 1 FROM description_recovery r WHERE r.project_id=media.project_id AND r.file_id=media.file_id AND r.source_sha256=media.source_sha256 AND r.prose_revision=media.prose_revision AND r.audience_revision=media.audience_revision AND r.attempts<3 AND r.state IN ('pending','retry_wait','running') AND r.next_attempt_at<=strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+     OR (NOT EXISTS (SELECT 1 FROM description_recovery r WHERE r.project_id=media.project_id AND r.file_id=media.file_id AND r.source_sha256=media.source_sha256 AND r.prose_revision=media.prose_revision AND r.audience_revision=media.audience_revision) AND (description_attempted_at IS NULL OR description_attempted_at <= ?)))
 		   AND (? = 0 OR describe_requested = 1)
 		 ORDER BY describe_requested DESC, created_at ASC
 		 LIMIT ?`,
@@ -737,6 +740,7 @@ func getMedia(db *sql.DB, projectID, fileID string) (*MediaRow, error) {
 	if derivs, derr := listDerivations(db, projectID, fileID); derr == nil {
 		m.Derivations = visibleDerivations(derivs)
 	}
+	m.DescriptionRecovery = getDescriptionRecovery(db, m)
 	return m, nil
 }
 

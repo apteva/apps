@@ -27,9 +27,10 @@ import (
 // render pool. Outpath is filled in by the caller (it's the scratch
 // dir + Filename); the builder only owns Filename + Args.
 type opPlan struct {
-	Filename    string   // basename, e.g. "trim-12.mp4"
-	ContentType string   // e.g. "video/mp4"
-	Args        []string // ffmpeg args excluding the binary name and the final output path
+	SubmissionParams json.RawMessage `json:"-"`
+	Filename         string          // basename, e.g. "trim-12.mp4"
+	ContentType      string          // e.g. "video/mp4"
+	Args             []string        // ffmpeg args excluding the binary name and the final output path
 }
 
 // buildPlan dispatches to the per-op builder. Returns ErrNotImplemented

@@ -143,7 +143,18 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 	// download the cached thumbnail and into the media DB for source
 	// dimensions, so it can only run after sc exists. No-op for ops
 	// that don't crop (trim, concat, audio_extract, …).
+	if len(row.ResolvedParams) > 0 {
+		row.Params = row.ResolvedParams
+	}
 	row.Params = preprocessSmartCrop(ctx, app, sc, row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
+	if err := validateSourceTimestamp(app, row.ProjectID, row.Operation, row.SourceFileIDs, row.Params); err != nil {
+		return 0, err
+	}
+	policyParams, policyErr := applyCropCompositionPolicy(row.Params)
+	if policyErr != nil {
+		return 0, policyErr
+	}
+	row.Params = policyParams
 	row.Params = prepareTrimParams(app.AppDB(), row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
 	row.Params = prepareAudioFilterParams(app.AppDB(), row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
 	if err := renderUpdateResolvedParams(app.AppDB(), row.ID, row.Params); err != nil {

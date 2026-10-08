@@ -7,9 +7,10 @@ import (
 )
 
 type smartCropSubjectExtent struct {
-	Bounds   cropWindow     `json:"bounds"`
-	Head     *smartCropFace `json:"head,omitempty"`
-	Evidence string         `json:"evidence"`
+	Bounds    cropWindow     `json:"bounds"`
+	Head      *smartCropFace `json:"head,omitempty"`
+	Evidence  string         `json:"evidence"`
+	UpperPose *cropWindow    `json:"upper_pose,omitempty"`
 }
 
 // supportedSmartCropSubjectExtent measures skin/head/limb geometry inside a
@@ -143,7 +144,7 @@ func supportedSmartCropSubjectExtent(sample smartCropV2Sample, refs []image.Imag
 		if head != nil && r.overlap < 3 {
 			continue
 		}
-		if head == nil && reclining {
+		if head == nil && (reclining || sample.sceneForeground) {
 			clear(visited)
 			var best *smartCropFace
 			bestY := h
@@ -178,7 +179,7 @@ func supportedSmartCropSubjectExtent(sample smartCropV2Sample, refs []image.Imag
 				}
 				// The head must be near an end of the horizontal body, not a warm
 				// fragment in the middle of a cushion/torso.
-				if minX > r.minX+(r.maxX-r.minX)/3 && maxX < r.maxX-(r.maxX-r.minX)/3 {
+				if reclining && minX > r.minX+(r.maxX-r.minX)/3 && maxX < r.maxX-(r.maxX-r.minX)/3 {
 					continue
 				}
 				bestY = minY
@@ -187,6 +188,9 @@ func supportedSmartCropSubjectExtent(sample smartCropV2Sample, refs []image.Imag
 			}
 			head = best
 			evidence = "reclining_foreground_head"
+			if !reclining {
+				evidence = "upright_scene_foreground_head"
+			}
 		}
 		if head == nil {
 			if !sample.motionTracked && !sample.headTracked && !sample.temporalTrack {
@@ -197,7 +201,49 @@ func supportedSmartCropSubjectExtent(sample smartCropV2Sample, refs []image.Imag
 			}
 			evidence = "motion_foreground"
 		}
-		return &smartCropSubjectExtent{Bounds: cropWindow{X: left * srcW / w, Y: top * srcH / h, W: int(math.Ceil(float64(right-left+1) * float64(srcW) / float64(w))), H: int(math.Ceil(float64(bottom-top+1) * float64(srcH) / float64(h)))}, Head: head, Evidence: evidence}, true
+		var upper *cropWindow
+		if sample.sceneForeground && head != nil && !reclining {
+			limit := (head.MinY + head.Scale*5/2) * h / srcH
+			neutral := make([]bool, w*h)
+			for _, pos := range r.positions {
+				idx := pos * 3
+				red, green, blue := int(pixels[idx]), int(pixels[idx+1]), int(pixels[idx+2])
+				spread := maxInt(red, maxInt(green, blue)) - minInt(red, minInt(green, blue))
+				neutral[pos] = pos/w <= limit && spread < 50
+			}
+			clear(visited)
+			bestArea := 0
+			center := head.CenterX * w / srcW
+			for start, on := range neutral {
+				if !on || visited[start] {
+					continue
+				}
+				queue = queue[:0]
+				queue = append(queue, start)
+				visited[start] = true
+				l, rr := start%w, start%w
+				for k := 0; k < len(queue); k++ {
+					pos := queue[k]
+					xx, yy := pos%w, pos/w
+					l = minInt(l, xx)
+					rr = maxInt(rr, xx)
+					for ny := maxInt(0, yy-1); ny <= minInt(h-1, yy+1); ny++ {
+						for nx := maxInt(0, xx-1); nx <= minInt(w-1, xx+1); nx++ {
+							np := ny*w + nx
+							if neutral[np] && !visited[np] {
+								visited[np] = true
+								queue = append(queue, np)
+							}
+						}
+					}
+				}
+				if len(queue) > bestArea && len(queue) >= w*h/500 && center >= l && center <= rr {
+					bestArea = len(queue)
+					upper = &cropWindow{X: l * srcW / w, W: (rr - l + 1) * srcW / w}
+				}
+			}
+		}
+		return &smartCropSubjectExtent{Bounds: cropWindow{X: left * srcW / w, Y: top * srcH / h, W: int(math.Ceil(float64(right-left+1) * float64(srcW) / float64(w))), H: int(math.Ceil(float64(bottom-top+1) * float64(srcH) / float64(h)))}, Head: head, Evidence: evidence, UpperPose: upper}, true
 	}
 	return nil, false
 }

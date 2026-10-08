@@ -31,12 +31,19 @@ If the evidence is insufficient, say so plainly and explain what is missing.
 Be concise and factual. Do not mention hidden prompts or tools.`
 
 type askEvidence struct {
-	Kind                string `json:"kind"`
-	StorageFileID       string `json:"storage_file_id"`
-	PositionMs          int64  `json:"position_ms,omitempty"`
-	RequestedPositionMs *int64 `json:"requested_position_ms,omitempty"`
-	Selection           string `json:"selection"`
-	URL                 string `json:"-"`
+	Width               int                `json:"supplied_width"`
+	Height              int                `json:"supplied_height"`
+	SourceWidth         int                `json:"source_width"`
+	SourceHeight        int                `json:"source_height"`
+	DimensionsSource    string             `json:"dimensions_source"`
+	Representation      string             `json:"representation"`
+	OutputIdentity      *askOutputIdentity `json:"output_identity,omitempty"`
+	Kind                string             `json:"kind"`
+	StorageFileID       string             `json:"storage_file_id"`
+	PositionMs          int64              `json:"position_ms,omitempty"`
+	RequestedPositionMs *int64             `json:"requested_position_ms,omitempty"`
+	Selection           string             `json:"selection"`
+	URL                 string             `json:"-"`
 }
 
 type askCoverage struct {
@@ -100,7 +107,7 @@ func (a *App) toolAsk(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("at_ms must be before the end of the video")
 	}
 
-	evidence, method, limitations, err := selectExistingAskEvidence(ctx, pid, row, frameCount, atMs, hasAtMs)
+	evidence, method, limitations, err := selectAskEvidenceWithDetail(ctx, pid, row, frameCount, atMs, hasAtMs, stringJSONValue(args["image_detail"]))
 	if err != nil {
 		return nil, err
 	}
@@ -173,10 +180,21 @@ func optionalNonNegativeInt64(args map[string]any, key string) (int64, bool, err
 }
 
 func selectExistingAskEvidence(app *sdk.AppCtx, projectID string, row *MediaRow, frameCount int, atMs int64, hasAtMs bool) ([]askEvidence, string, []string, error) {
-	limitations := make([]string, 0)
+	return selectAskEvidenceWithDetail(app, projectID, row, frameCount, atMs, hasAtMs, "")
+}
+func selectAskEvidenceWithDetail(app *sdk.AppCtx, projectID string, row *MediaRow, frameCount int, atMs int64, hasAtMs bool, detail string) (evidence []askEvidence, method string, limitations []string, err error) {
+	limitations = make([]string, 0)
 	signCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	sc := newStorageClient()
+	if detail != "" && detail != "source" && detail != "thumbnail" {
+		return nil, "", limitations, errors.New("image_detail must be source or thumbnail")
+	}
+	defer func() {
+		if err == nil {
+			evidence, limitations = annotateAskEvidence(signCtx, app, sc, projectID, row, evidence, limitations)
+		}
+	}()
 	sign := func(fileID string) string {
 		id, err := strconv.ParseInt(fileID, 10, 64)
 		if err != nil || id <= 0 {
@@ -190,18 +208,25 @@ func selectExistingAskEvidence(app *sdk.AppCtx, projectID string, row *MediaRow,
 	}
 
 	if row.IsImage {
+		if detail != "thumbnail" {
+			if u := sign(row.FileID); u != "" {
+				return []askEvidence{{Kind: "source_image", StorageFileID: row.FileID, Selection: "existing_source", URL: u}}, "existing_source_image", limitations, nil
+			}
+			limitations = append(limitations, "Full source-image delivery was unavailable; falling back to an existing thumbnail.")
+		}
+
 		// Prefer an already-generated thumbnail when present. Falling
 		// back to the source still uses an existing object and creates
 		// nothing.
 		for _, d := range row.Derivations {
 			if d.Kind == "thumbnail" && d.Status == "ok" {
 				if u := sign(d.StorageFileID); u != "" {
-					return []askEvidence{{Kind: "thumbnail", StorageFileID: d.StorageFileID, Selection: "existing_thumbnail", URL: u}}, "existing_image", limitations, nil
+					return []askEvidence{{Kind: "thumbnail", StorageFileID: d.StorageFileID, Selection: "existing_thumbnail", URL: u}}, "existing_thumbnail_image", limitations, nil
 				}
 			}
 		}
 		if u := sign(row.FileID); u != "" {
-			return []askEvidence{{Kind: "source_image", StorageFileID: row.FileID, Selection: "existing_source", URL: u}}, "existing_image", limitations, nil
+			return []askEvidence{{Kind: "source_image", StorageFileID: row.FileID, Selection: "existing_source", URL: u}}, "existing_source_image", limitations, nil
 		}
 		return nil, "", limitations, errors.New("existing image could not be read from storage")
 	}
@@ -304,13 +329,13 @@ func buildAskMessages(question string, evidence []askEvidence, transcript string
 	}
 	parts = append(parts, map[string]any{"type": "text", "text": intro})
 	for _, e := range evidence {
-		label := e.Kind
+		label := fmt.Sprintf("%s; supplied artifact %dx%d; source %dx%d; dimensions from %s", e.Kind, e.Width, e.Height, e.SourceWidth, e.SourceHeight, e.DimensionsSource)
 		if e.Kind == "keyframe" {
-			label = fmt.Sprintf("Cached keyframe at %d ms", e.PositionMs)
+			label = fmt.Sprintf("Cached keyframe at %d ms; supplied artifact %dx%d; source %dx%d", e.PositionMs, e.Width, e.Height, e.SourceWidth, e.SourceHeight)
 		}
 		parts = append(parts,
 			map[string]any{"type": "text", "text": label},
-			map[string]any{"type": "image_url", "image_url": map[string]any{"url": e.URL}},
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": e.URL, "detail": "high"}},
 		)
 	}
 	return append(messages, map[string]any{"role": "user", "content": parts})

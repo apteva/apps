@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -94,6 +95,9 @@ func prepareRenderSubmission(app *sdk.AppCtx, project, op string, sources []stri
 	if err := validateOutputName(name); err != nil {
 		return nil, err
 	}
+	if err := validateSourceTimestamp(app, project, op, sources, params); err != nil {
+		return nil, err
+	}
 	ext := ""
 	if (op == "crop" || op == "resize" || op == "audio_filter") && filepath.Ext(name) == "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -108,7 +112,16 @@ func prepareRenderSubmission(app *sdk.AppCtx, project, op string, sources []stri
 		return nil, err
 	}
 	params = prepareTrimParams(app.AppDB(), project, op, sources, params)
-	return buildPlan(op, sources, params, name, ext)
+	plan, err := buildPlan(op, sources, params, name, ext)
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := prepareCropPreflight(app, project, op, sources, params)
+	if err != nil {
+		return nil, err
+	}
+	plan.SubmissionParams = resolved
+	return plan, nil
 }
 
 // Executors also persist effective names for jobs queued by older releases.
@@ -124,8 +137,8 @@ func renderFailureCode(message string) string {
 	if strings.Contains(message, "REMOTE_CANCELLATION_FAILED") {
 		return "remote_cancellation_failed"
 	}
-	for _, code := range []string{"storage_upload_quota_exhausted", "storage_upload_rate_limited", "storage_upload_failed", "render_budget_exceeded", "audio_normalization_failed", "unsupported_color_preservation", "render_runtime_unavailable"} {
-		if strings.Contains(message, code+":") {
+	for _, code := range []string{"timestamp_out_of_range", "source_duration_unavailable", "crop_subject_unverified", "crop_action_exceeds_width", "invalid_crop_policy", "storage_upload_quota_exhausted", "storage_upload_rate_limited", "storage_upload_failed", "render_budget_exceeded", "audio_normalization_failed", "unsupported_color_preservation", "render_runtime_unavailable"} {
+		if strings.Contains(message, code+":") || strings.Contains(message, `"error_code":"`+code+`"`) {
 			return code
 		}
 	}
@@ -143,6 +156,11 @@ func renderFailureCode(message string) string {
 func writeRenderValidationError(w http.ResponseWriter, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadRequest)
+	var input *renderInputError
+	if errors.As(err, &input) {
+		_ = json.NewEncoder(w).Encode(input)
+		return
+	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error(), "error_code": renderFailureCode(err.Error())})
 }
 
@@ -154,7 +172,7 @@ func sanitizeSubmittedRenderParams(params map[string]any) map[string]any {
 			continue
 		}
 		switch k {
-		case "trim_diagnostics", "trim_validation", "render_budget", "audio_normalization", "runtime_error", "video_evidence", "trim_validation_log":
+		case "trim_diagnostics", "trim_validation", "render_budget", "audio_normalization", "runtime_error", "video_evidence", "trim_validation_log", "crop_diagnostics":
 			continue
 		}
 		out[k] = v
