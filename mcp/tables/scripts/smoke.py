@@ -95,7 +95,36 @@ with tempfile.TemporaryDirectory(prefix="tables-smoke-") as temp:
         assert upgraded["at"] == "2026-01-01T00:00:00.000000000Z", upgraded
         assert upgraded["revision"] == "patched"
         assert upgraded["payload"]["id"] == 9007199254740993
-        print("PASS: real HTTP/MCP authentication (including sig query), exact input/default numbers, cursors, projected optimistic update, restart migration and first write")
+        # Exercise watched dependencies through the public MCP API and actual
+        # background worker, then restart the sidecar with captured dirty work.
+        mcp("tables_create", {"name":"measurements", "columns":[
+            {"name":"centre_id","type":"text"}, {"name":"value","type":"number"},
+            {"name":"metadata","type":"text"}]})
+        measurement_id=mcp("rows_insert", {"table":"measurements","rows":[{"centre_id":"a","value":2}]})["ids"][0]
+        mcp("projections_create", {"name":"measurement_totals","version":1,
+            "sql":"SELECT centre_id,SUM(value) AS total FROM {measurements} GROUP BY centre_id",
+            "source_tables":["measurements"],"scope_columns":["centre_id"],
+            "result_columns":[{"name":"centre_id","type":"text"},{"name":"total","type":"number"}],
+            "source_dependencies":[{"table":"measurements","watched_columns":["centre_id","value"]}]})
+        def await_projection(total):
+            for _ in range(200):
+                status=mcp("projections_status", {"name":"measurement_totals"})
+                if status["ready"]:
+                    rows=mcp("tables_query", {"sql":"SELECT total FROM {measurement_totals}"})["rows"]
+                    if len(rows)==1 and rows[0]["total"]==total:
+                        return status
+                time.sleep(.05)
+            raise AssertionError(f"Projection did not publish {total}: {status}")
+        initial=await_projection(2)
+        mcp("rows_update", {"table":"measurements","id":measurement_id,"fields":{"metadata":"synced"}})
+        clean=mcp("projections_status", {"name":"measurement_totals"})
+        assert clean["ready"] and clean["latest_relevant_change"]==initial["latest_relevant_change"], clean
+        mcp("rows_update", {"table":"measurements","id":measurement_id,"fields":{"value":7}})
+        stop()
+        start()
+        await_projection(7)
+        assert mcp("projections_describe", {"name":"measurement_totals"})["source_dependencies"][0]["watched_columns"]==["centre_id","value"]
+        print("PASS: real HTTP/MCP authentication, exact numbers, cursors, optimistic updates, automatic restart migration and watched projection capture/publication/recovery")
     finally:
         stop()
         log.close()

@@ -1,3 +1,44 @@
+# Tables 0.2.11 verification cache and watched dependencies
+
+Validated on 2026-10-08 in an isolated checkout using disposable databases,
+Darwin arm64 / Apple M1 Pro, Go 1.25.12, SDK v0.97.0, SQLite v1.50.0.
+
+Release checks passed: `GOWORK=off go test -race ./...`, focused race
+regressions, `go vet ./...`, standalone Darwin arm64 and Linux amd64 builds,
+16 Bun UI tests, UI type checking with the shared workspace ui-kit path,
+production UI bundle build, and `scripts/smoke.py` against the compiled sidecar.
+All checks used the pinned public SDK with the workspace Go overlay disabled.
+
+New regression coverage in `sql_verification_cache_test.go` and
+`projection_watched_test.go` checks ordinary/JSON verification reuse, caller and
+projection permission revocation after warming, DDL/index/projection lifecycle
+invalidation, bounded caches, failed verification rejection, and database/epoch
+changes. Watched dependency coverage includes unrelated metadata/no-op updates,
+NULL transitions, same-scope aggregate changes, old/new scopes, inserts/deletes,
+remapping, independent building/current watch lists, legacy defaults, in-flight
+follow-up work, closing/reopening SQLite, and migration from migrations 001–014
+with a pending legacy change record.
+
+The five-source joined test uses 10,000 historical calls, skips metadata updates
+across all five sources without changing readiness, coalesces 2,000 relevant sale
+updates into one scope, applies prospect/offer dependency changes, and compares
+all published aggregates with a forced full rebuild. The existing 100,000-call,
+10,000-event regression still checks indexed inner scopes and full correctness.
+The real sidecar HTTP/MCP smoke test exercises saved watch configuration,
+metadata skipping, actual worker publication and process restart recovery.
+
+`BenchmarkOrdinarySQLVerification`, three one-second samples per mode:
+
+| Verification mode | Time per operation |
+|---|---:|
+| Cold successful program verification | 58.7–61.4 µs |
+| Warm successful verification | 13.2–14.7 µs |
+
+This measures validation only, including current placeholder checks and physical
+root lookup. It does not execute the aggregation or measure end-to-end refresh
+latency. The fixture is an ordinary grouped SELECT with a bound predicate; these
+numbers do not quantify the reported 1.4-second spike on the user's workload.
+
 # Tables 0.2.0 projection validation
 
 Validated on 2026-10-05, Darwin arm64 / Apple M1 Pro, Go 1.25.12,

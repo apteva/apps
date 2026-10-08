@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.2.10
+version: 0.2.11
 description: |
+  v0.2.11 Fixes ordinary SQL verification caching and adds opt-in watched
+  dependency columns with durable per-version invalidation and accurate freshness.
   v0.2.10 Adds diagnostics outcome filters, bounded row lists and live SSE updates.
   v0.2.9 Compacts diagnostics rows and fixes responsive column layout in the
   Tables panel and dashboard widget.
@@ -243,7 +245,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.2.10
+    ref: tables/v0.2.11
     entry: mcp/tables
   port: 8080
   health_check: /health

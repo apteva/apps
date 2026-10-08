@@ -66,18 +66,19 @@ func (a *App) invalidateSQLCaches() {
 	a.plans.invalidateAll()
 }
 
-func (a *App) authorizationCached(ctx *sdk.AppCtx, resolved string) bool {
+func (a *App) authorizationKey(ctx *sdk.AppCtx, resolved string) string {
 	digest := sha256.Sum256([]byte(resolved))
-	key := fmt.Sprintf("%d:%d:%x", ctx.AppDBGeneration(), atomic.LoadUint64(&a.projectionSQLEpoch), digest[:])
+	return fmt.Sprintf("%d:%d:%x", ctx.AppDBGeneration(), atomic.LoadUint64(&a.projectionSQLEpoch), digest[:])
+}
+
+func (a *App) authorizationCached(key string) bool {
 	a.authorizationMu.RLock()
 	_, ok := a.authorizationCache[key]
 	a.authorizationMu.RUnlock()
 	return ok
 }
 
-func (a *App) rememberAuthorization(ctx *sdk.AppCtx, resolved string) {
-	digest := sha256.Sum256([]byte(resolved))
-	key := fmt.Sprintf("%d:%d:%x", ctx.AppDBGeneration(), atomic.LoadUint64(&a.projectionSQLEpoch), digest[:])
+func (a *App) rememberAuthorization(key string) {
 	a.authorizationMu.Lock()
 	if a.authorizationCache == nil {
 		a.authorizationCache = make(map[string]struct{})

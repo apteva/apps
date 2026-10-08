@@ -131,6 +131,9 @@ func placeholderNames(s string) ([]string, error) {
 // Other virtual tables and dynamic roots fail closed.
 // query_only remains enabled as an independent write barrier.
 func authorizeQuery(qctx context.Context, conn *sql.Conn, ctx *sdk.AppCtx, a *App, pid, raw, resolved string, args []any) error {
+	// Keep verification tied to the generation/epoch observed before compilation.
+	// Invalidation during verification must not populate the newer epoch.
+	key := a.authorizationKey(ctx, resolved)
 	tokens, err := a.cachedProjectionSQL(ctx, raw)
 	if err != nil {
 		return err
@@ -170,7 +173,7 @@ func authorizeQuery(qctx context.Context, conn *sql.Conn, ctx *sdk.AppCtx, a *Ap
 	// those checks pass, a successful SQLite program verification can be reused
 	// until a schema or projection epoch changes. This removes repeated EXPLAIN
 	// work while keeping revocations immediate.
-	if a.authorizationCached(ctx, resolved) {
+	if a.authorizationCached(key) {
 		return nil
 	}
 	plan, err := conn.QueryContext(qctx, "EXPLAIN "+resolved, args...)
@@ -215,6 +218,7 @@ func authorizeQuery(qctx context.Context, conn *sql.Conn, ctx *sdk.AppCtx, a *Ap
 		return err
 	}
 	if len(virtualReaders) == 0 {
+		a.rememberAuthorization(key)
 		return nil
 	}
 	allowedReaders, err := jsonReaderIdentities(qctx, conn)
@@ -226,7 +230,7 @@ func authorizeQuery(qctx context.Context, conn *sql.Conn, ctx *sdk.AppCtx, a *Ap
 			return errf("only built-in json_each and json_tree virtual tables are available in tables_query")
 		}
 	}
-	a.rememberAuthorization(ctx, resolved)
+	a.rememberAuthorization(key)
 	return nil
 }
 func stringValue(v any) string {

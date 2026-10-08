@@ -1,4 +1,4 @@
-# SQL projections in Tables 0.2.7
+# SQL projections in Tables 0.2.11
 
 A projection stores a complete published result in Tables. Source writes append
 small transactional change records; a worker consumes them and recalculates dirty
@@ -100,6 +100,54 @@ Use `event_at >= ? AND event_at < ?` in `scope_sql`. Bounds use normalized UTC t
 Tables datetime storage. They use the next local calendar day, including
 23/25-hour daylight-saving days. The saved full SQL owns
 the matching timezone-aware grouping logic; Tables does not rewrite SQL dates.
+
+## Watched source columns
+
+Optionally supply `source_dependencies` when creating an immutable projection
+version. Keep `source_tables` as the complete list of sources.
+
+```json
+{
+  "source_dependencies": [
+    {"table": "calls", "watched_columns": ["prospect_id", "centre_id", "started_at", "duration_seconds", "status"]},
+    {"table": "sales", "watched_columns": ["prospect_id", "amount"]}
+  ]
+}
+```
+
+An UPDATE invalidates this version only when a watched value actually changes
+(NULL transitions count). Unrelated metadata changes and assignments of the same
+watched value do not enqueue work or advance `latest_relevant_change`. Changes to
+amount/duration still invalidate unchanged scopes. INSERT and DELETE always
+apply dependency rules; scope moves invalidate both old and new scopes.
+Different versions may watch different columns on the same source.
+
+**The SQL author must include every source input affecting calculations,
+filters, joins, and dependency lookup results.** Tables validates column names,
+rejects empty/duplicate lists and undeclared sources, and requires direct scope
+inputs, derived scope inputs, and mapping parameters in each configured list.
+It does not infer arbitrary SQL dependencies. Include `id` for join keys/mapping
+parameters where needed, and `_revision`, `created_at` or `updated_at` only if
+those fields affect the result. An incomplete SQL watch list can leave results
+stale. A source with no watch entry retains existing all-column invalidation.
+
+Describe/list expose the saved configuration. To change it, create and build a
+replacement version, then activate it using the normal readiness checks.
+The source transaction stores affected version IDs alongside captured old/new
+mapping values. Queue coalescing, in-flight follow-up work, intervals and restart
+recovery remain durable. Migration 015 only adds a nullable log column; pending
+records from previous versions are conservatively relevant, and startup rebuilds
+triggers automatically. No source/result row rewrite is required.
+
+## SQL verification reuse
+
+Ordinary SELECTs, projection calculations and dependency queries now reuse
+successful SQLite program verification as well as parsing/prepared statements.
+Current project/placeholder access and projection permissions are checked on
+every request before a verification hit is accepted. Failed verifications are
+never saved. The bounded cache is keyed by resolved SQL, database generation and
+schema/projection epoch; table/index and projection lifecycle changes invalidate
+it. In-flight verification cannot populate a newer epoch after invalidation.
 
 ## Scheduling and forced work
 

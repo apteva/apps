@@ -1,3 +1,11 @@
+# Tables v0.2.11 — SQL verification reuse and watched dependencies
+
+- Cache successful ordinary SQL program verification before its early return, keeping caller/project checks on every request, bounded storage and schema/index/projection invalidation. Keep in-flight verification tied to its original epoch.
+- Add optional `source_dependencies` / `watched_columns` on projection creation and description. Metadata-only/no-op updates do not dirty configured versions; relevant same-scope values, old/new scope moves, inserts/deletes and mappings retain durable coalescing and freshness.
+- Persist affected version IDs in source transactions through additive migration 015. Existing definitions and pending legacy changes keep conservative behavior; startup automatically recreates capture triggers.
+- Validate watch lists and require known scope/mapping inputs. SQL authors remain responsible for including calculation/filter/join inputs; configuration changes use immutable replacement versions.
+- Add cache security/lifecycle tests, watched dependency aggregate/mapping/burst/restart/in-flight/migration regressions and a cold/warm verification benchmark. Pin SDK v0.97.0, verified by commit ancestry.
+
 # Tables v0.2.10 — filtered live diagnostics
 
 - Add errors-only, timeout and cancellation filters, with 10/25/50 row limits

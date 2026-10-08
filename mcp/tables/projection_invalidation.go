@@ -57,6 +57,26 @@ func (a *App) validateProjection(ctx *sdk.AppCtx, p *projectionDefinition) error
 		sources[name] = table
 		p.SourceIDs = append(p.SourceIDs, table.ID)
 	}
+	// Watch lists are opt-in. Mapping inputs are mandatory; callers must also
+	// include every calculation/filter/join input used by their SQL.
+	watched := map[string]map[string]bool{}
+	for _, dependency := range p.Options.SourceDependencies {
+		source := sources[dependency.Table]
+		if source == nil || watched[dependency.Table] != nil {
+			return errf("source_dependencies must reference unique declared sources: %q", dependency.Table)
+		}
+		if len(dependency.WatchedColumns) == 0 || len(dependency.WatchedColumns) > 260 {
+			return errf("watched_columns requires 1..260 columns")
+		}
+		set := map[string]bool{}
+		for _, col := range dependency.WatchedColumns {
+			if set[col] || (columnIndex(source.Columns, col) < 0 && !reservedColumns[col]) {
+				return errf("duplicate or unknown watched column %q on %q", col, dependency.Table)
+			}
+			set[col] = true
+		}
+		watched[dependency.Table] = set
+	}
 	queries := []struct {
 		text   string
 		bound  []any
@@ -144,6 +164,28 @@ func (a *App) validateProjection(ctx *sdk.AppCtx, p *projectionDefinition) error
 			}
 		}
 	}
+	for name, set := range watched {
+		required := []string{}
+		if !mapped[name] {
+			required = append(required, p.ScopeCols...)
+		}
+		for _, rule := range p.Options.ScopeRules {
+			if rule.Source != name {
+				continue
+			}
+			required = append(required, rule.Params...)
+			if rule.SQL == "" {
+				for _, value := range rule.Values {
+					required = append(required, value.Column)
+				}
+			}
+		}
+		for _, col := range required {
+			if !set[col] {
+				return errf("watched_columns for %q must include scope/mapping input %q", name, col)
+			}
+		}
+	}
 	for _, q := range queries {
 		tokens, err := a.cachedProjectionSQL(ctx, q.text)
 		if err != nil {
@@ -210,15 +252,21 @@ func rebuildProjectionTriggersTx(tx *writeTx, tableID int64) error {
 			return err
 		}
 	}
-	rows, err := tx.Query(`SELECT p.scope_columns,p.options,t.name,p.sql_text FROM projection_definitions p JOIN projection_sources s ON s.projection_id=p.id JOIN tables_meta t ON t.id=s.table_id WHERE s.table_id=? AND p.status IN ('active','paused','building')`, tableID)
+	rows, err := tx.Query(`SELECT p.id,p.scope_columns,p.options,t.name,p.sql_text FROM projection_definitions p JOIN projection_sources s ON s.projection_id=p.id JOIN tables_meta t ON t.id=s.table_id WHERE s.table_id=? AND p.status IN ('active','paused','building')`, tableID)
 	if err != nil {
 		return err
 	}
 	fields := map[string]bool{"id": true}
 	dependent := false
+	type dependencyPredicate struct {
+		id      int64
+		columns []string
+	}
+	var dependencies []dependencyPredicate
 	for rows.Next() {
 		var raw, opts, name, sqlText string
-		if err := rows.Scan(&raw, &opts, &name, &sqlText); err != nil {
+		var id int64
+		if err := rows.Scan(&id, &raw, &opts, &name, &sqlText); err != nil {
 			rows.Close()
 			return err
 		}
@@ -233,6 +281,13 @@ func rebuildProjectionTriggersTx(tx *writeTx, tableID int64) error {
 			return err
 		}
 		dependent = true
+		dep := dependencyPredicate{id: id}
+		for _, config := range options.SourceDependencies {
+			if config.Table == name {
+				dep.columns = config.WatchedColumns
+			}
+		}
+		dependencies = append(dependencies, dep)
 		queries := []string{sqlText, options.ScopeSQL}
 		for _, r := range options.ScopeRules {
 			queries = append(queries, r.SQL)
@@ -308,21 +363,41 @@ func rebuildProjectionTriggersTx(tx *writeTx, tableID int64) error {
 	if err != nil {
 		return err
 	}
+	// Persist relevance per immutable version, in the same transaction as the
+	// source mutation. Different watch lists can share one source trigger without
+	// making each other's freshness stale. Old log records use NULL and remain
+	// conservatively relevant after an automatic upgrade.
+	predicates := []string{}
+	cases := []string{}
+	for _, dep := range dependencies {
+		checks := parts
+		if dep.columns != nil {
+			checks = nil
+			for _, col := range dep.columns {
+				checks = append(checks, "OLD."+quote(col)+" IS NOT NEW."+quote(col))
+			}
+		}
+		predicate := "(" + strings.Join(checks, " OR ") + ")"
+		predicates = append(predicates, predicate)
+		cases = append(cases, fmt.Sprintf("WHEN %d THEN %s", dep.id, predicate))
+	}
 	for _, op := range []string{"insert", "update", "delete"} {
 		old, next, rowID := "NULL", jsonExpr("NEW"), "NEW.id"
 		when := ""
 		if op == "update" {
 			old = jsonExpr("OLD")
-			when = " WHEN " + strings.Join(parts, " OR ")
-			if len(parts) == 0 {
-				when = " WHEN 0"
-			}
+			when = " WHEN " + strings.Join(predicates, " OR ")
 		}
 		if op == "delete" {
 			old, next, rowID = jsonExpr("OLD"), "NULL", "OLD.id"
 		}
-		capture := fmt.Sprintf(`INSERT INTO projection_changes(project_id,table_id,row_id,operation,old_values,new_values) VALUES('%s',%d,%s,'%s',%s,%s);`, strings.ReplaceAll(pid, "'", "''"), tableID, rowID, op, old, next)
-		relevant := fmt.Sprintf(`UPDATE projection_definitions SET latest_relevant_change=(SELECT MAX(change_id) FROM projection_changes WHERE table_id=%d) WHERE id IN (SELECT projection_id FROM projection_sources WHERE table_id=%d) AND status IN ('active','paused','building');`, tableID, tableID)
+		filter := "1"
+		if op == "update" {
+			filter = "CASE p.id " + strings.Join(cases, " ") + " ELSE 0 END"
+		}
+		relevance := fmt.Sprintf(`(SELECT json_group_array(p.id) FROM projection_definitions p JOIN projection_sources s ON s.projection_id=p.id WHERE s.table_id=%d AND p.status IN ('active','paused','building') AND (%s))`, tableID, filter)
+		capture := fmt.Sprintf(`INSERT INTO projection_changes(project_id,table_id,row_id,operation,old_values,new_values,relevant_projection_ids) VALUES('%s',%d,%s,'%s',%s,%s,%s);`, strings.ReplaceAll(pid, "'", "''"), tableID, rowID, op, old, next, relevance)
+		relevant := fmt.Sprintf(`UPDATE projection_definitions SET latest_relevant_change=(SELECT MAX(change_id) FROM projection_changes WHERE table_id=%d) WHERE id IN (SELECT value FROM json_each((SELECT relevant_projection_ids FROM projection_changes WHERE table_id=%d ORDER BY change_id DESC LIMIT 1)));`, tableID, tableID)
 		q := fmt.Sprintf("CREATE TRIGGER %s AFTER %s ON %s%s BEGIN %s %s END", quote(fmt.Sprintf("projection_change_%d_%s", tableID, op)), strings.ToUpper(op), quote(physical), when, capture, relevant)
 		if _, err := tx.Exec(q); err != nil {
 			return err
@@ -468,7 +543,7 @@ func (a *App) consumeProjectionChanges(ctx context.Context, app *sdk.AppCtx, pid
 		if err := app.AppReadDB().QueryRowContext(ctx, `SELECT last_change_id FROM projection_cursors WHERE projection_id=?`, p.ID).Scan(&cursor); err != nil {
 			return err
 		}
-		rows, err := app.AppReadDB().QueryContext(ctx, `SELECT c.change_id,t.name,c.old_values,c.new_values,EXISTS(SELECT 1 FROM projection_sources s WHERE s.projection_id=? AND s.table_id=c.table_id) FROM projection_changes c LEFT JOIN tables_meta t ON t.id=c.table_id WHERE c.project_id=? AND c.change_id>? ORDER BY c.change_id LIMIT ?`, p.ID, pid, cursor, projectionChangeBatch)
+		rows, err := app.AppReadDB().QueryContext(ctx, `SELECT c.change_id,t.name,c.old_values,c.new_values,EXISTS(SELECT 1 FROM projection_sources s WHERE s.projection_id=? AND s.table_id=c.table_id) AND (c.relevant_projection_ids IS NULL OR EXISTS(SELECT 1 FROM json_each(c.relevant_projection_ids) WHERE value=?)) FROM projection_changes c LEFT JOIN tables_meta t ON t.id=c.table_id WHERE c.project_id=? AND c.change_id>? ORDER BY c.change_id LIMIT ?`, p.ID, p.ID, pid, cursor, projectionChangeBatch)
 		if err != nil {
 			return err
 		}

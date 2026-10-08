@@ -21,20 +21,26 @@ type projectionScopeRule struct {
 	Params []string                        `json:"params,omitempty"`
 	Values map[string]projectionScopeValue `json:"values"`
 }
+type projectionSourceDependency struct {
+	Table          string   `json:"table"`
+	WatchedColumns []string `json:"watched_columns"`
+}
+
 type projectionOptions struct {
-	Params       []any                      `json:"params,omitempty"`
-	ScopeSQL     string                     `json:"scope_sql,omitempty"`
-	ScopeParams  []projectionScopeParameter `json:"scope_params,omitempty"`
-	ScopeRules   []projectionScopeRule      `json:"scope_rules,omitempty"`
-	Interval     int64                      `json:"min_refresh_interval_seconds"`
-	MaxMs        int                        `json:"max_refresh_ms"`
-	MaxRows      int                        `json:"max_result_rows"`
-	MaxBytes     int64                      `json:"max_result_bytes"`
-	PublishMs    int                        `json:"max_publication_ms"`
-	BatchRows    int                        `json:"publication_batch_rows"`
-	BatchBytes   int64                      `json:"publication_batch_bytes"`
-	CoverageFrom string                     `json:"coverage_from,omitempty"`
-	CoverageTo   string                     `json:"coverage_to,omitempty"`
+	SourceDependencies []projectionSourceDependency `json:"source_dependencies,omitempty"`
+	Params             []any                        `json:"params,omitempty"`
+	ScopeSQL           string                       `json:"scope_sql,omitempty"`
+	ScopeParams        []projectionScopeParameter   `json:"scope_params,omitempty"`
+	ScopeRules         []projectionScopeRule        `json:"scope_rules,omitempty"`
+	Interval           int64                        `json:"min_refresh_interval_seconds"`
+	MaxMs              int                          `json:"max_refresh_ms"`
+	MaxRows            int                          `json:"max_result_rows"`
+	MaxBytes           int64                        `json:"max_result_bytes"`
+	PublishMs          int                          `json:"max_publication_ms"`
+	BatchRows          int                          `json:"publication_batch_rows"`
+	BatchBytes         int64                        `json:"publication_batch_bytes"`
+	CoverageFrom       string                       `json:"coverage_from,omitempty"`
+	CoverageTo         string                       `json:"coverage_to,omitempty"`
 }
 
 func defaultProjectionOptions(ctx *sdk.AppCtx) projectionOptions {
@@ -96,7 +102,7 @@ func parseProjectionOptions(ctx *sdk.AppCtx, args map[string]any, sqlText string
 	o := defaultProjectionOptions(ctx)
 	// Copy only declared option fields; _request_context is deliberately excluded.
 	picked := map[string]any{}
-	for _, k := range []string{"params", "scope_sql", "scope_params", "scope_rules", "min_refresh_interval_seconds", "max_refresh_ms", "max_result_rows", "max_result_bytes", "max_publication_ms", "publication_batch_rows", "publication_batch_bytes", "coverage_from", "coverage_to"} {
+	for _, k := range []string{"params", "scope_sql", "scope_params", "scope_rules", "source_dependencies", "min_refresh_interval_seconds", "max_refresh_ms", "max_result_rows", "max_result_bytes", "max_publication_ms", "publication_batch_rows", "publication_batch_bytes", "coverage_from", "coverage_to"} {
 		if v, ok := args[k]; ok {
 			picked[k] = v
 		}
@@ -117,7 +123,7 @@ func parseProjectionOptions(ctx *sdk.AppCtx, args map[string]any, sqlText string
 	if o.PublishMs < 1 || o.PublishMs > 5000 || o.BatchRows < 1 || o.BatchRows > 512 || o.BatchBytes < 1024 || o.BatchBytes > 1<<20 {
 		return o, errf("publication limits exceed bounds")
 	}
-	if len(o.Params) > 1000 || len(o.ScopeRules) > 64 {
+	if len(o.Params) > 1000 || len(o.ScopeRules) > 64 || len(o.SourceDependencies) > 64 {
 		return o, errf("projection options exceed bounds")
 	}
 	o.Params, err = projectionBoundValues(o.Params)

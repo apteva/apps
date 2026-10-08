@@ -253,7 +253,7 @@ func (a *App) projectionTools() []sdk.Tool {
 	update := projectionNameSchema()
 	update["min_refresh_interval_seconds"] = map[string]any{"type": "integer", "minimum": 0, "maximum": 86400}
 	return []sdk.Tool{
-		{Name: "projections_create", Description: "Create an immutable SQL projection version. Replacements build alongside current readers. Supports scoped SQL parameters, generic source mappings, coverage and limits.", InputSchema: schemaObject(create, []string{"name", "version", "sql", "source_tables", "result_columns"}), Handler: a.toolProjectionsCreate},
+		{Name: "projections_create", Description: "Create an immutable SQL projection version. Replacements build alongside current readers. Supports scoped SQL parameters, generic source mappings, watched source columns, coverage and limits. Include all calculation, filter, join and mapping inputs in watched_columns; omitted dependencies retain all-column invalidation.", InputSchema: schemaObject(create, []string{"name", "version", "sql", "source_tables", "result_columns"}), Handler: a.toolProjectionsCreate},
 		{Name: "projections_list", Description: "List project projection versions and readiness.", InputSchema: schemaObject(map[string]any{}, nil), Handler: a.toolProjectionsList},
 		{Name: "projections_describe", Description: "Describe a current or specified version and options.", InputSchema: schemaObject(projectionNameSchema(), []string{"name"}), Handler: a.toolProjectionsDescribe},
 		{Name: "projections_refresh", Description: "Queue a scope or full rebuild. force=true bypasses the persisted interval, without bypassing pause or resource limits.", InputSchema: schemaObject(refresh, []string{"name"}), Handler: a.toolProjectionsRefresh},
@@ -266,6 +266,19 @@ func (a *App) projectionTools() []sdk.Tool {
 }
 func projectionOptionSchema() map[string]any {
 	out := map[string]any{"params": map[string]any{"type": "array"}, "scope_sql": map[string]any{"type": "string"}, "scope_params": map[string]any{"type": "array", "items": map[string]any{"oneOf": []any{map[string]any{"type": "string"}, map[string]any{"type": "object", "properties": map[string]any{"scope_column": map[string]any{"type": "string"}, "boundary": map[string]any{"type": "string", "enum": []string{"start", "end"}}, "timezone": map[string]any{"type": "string"}}, "required": []string{"scope_column", "boundary", "timezone"}}}}}, "scope_rules": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}, "coverage_from": map[string]any{"type": "string"}, "coverage_to": map[string]any{"type": "string"}}
+	out["source_dependencies"] = map[string]any{
+		"type": "array", "maxItems": 64,
+		"description": "Optional watched inputs per declared source; omitted sources keep all-column invalidation. Include every calculation, filter, join and scope/mapping input. Changes require a replacement projection version.",
+		"items": map[string]any{
+			"type": "object", "additionalProperties": false,
+			"required": []string{"table", "watched_columns"},
+			"properties": map[string]any{
+				"table":           map[string]any{"type": "string"},
+				"watched_columns": map[string]any{"type": "array", "minItems": 1, "maxItems": 260, "uniqueItems": true, "items": map[string]any{"type": "string"}},
+			},
+		},
+	}
+
 	for _, k := range []string{"min_refresh_interval_seconds", "max_refresh_ms", "max_result_rows", "max_result_bytes", "max_publication_ms", "publication_batch_rows", "publication_batch_bytes"} {
 		out[k] = map[string]any{"type": "integer", "minimum": 0}
 	}

@@ -214,7 +214,7 @@ func (a *App) beginOperation(ctx *sdk.AppCtx, args map[string]any, operation str
 }
 
 func validateArguments(args map[string]any) error {
-	for _, key := range []string{"where", "params", "select", "columns", "key", "rows", "metrics", "group_by", "source_tables", "result_columns", "scope_columns", "scope_params", "scope_rules"} {
+	for _, key := range []string{"where", "params", "select", "columns", "key", "rows", "metrics", "group_by", "source_tables", "result_columns", "scope_columns", "scope_params", "scope_rules", "source_dependencies"} {
 		if v, ok := args[key]; ok && v != nil {
 			if _, ok := v.([]any); !ok {
 				return errf("%s must be an array", key)
