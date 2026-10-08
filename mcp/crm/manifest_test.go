@@ -8,6 +8,31 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
+// The installer builds runtime.source.ref, not the advertised version. Keep
+// the immutable release tag aligned so an upgrade cannot silently run old code.
+func TestReleaseSourceMatchesManifestVersion(t *testing.T) {
+	raw, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk, err := sdk.ParseManifest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for origin, manifest := range map[string]sdk.Manifest{
+		"disk": *disk, "embedded": (&App{}).Manifest(),
+	} {
+		if manifest.Runtime.Kind != "source" || manifest.Runtime.Source == nil {
+			t.Fatalf("%s: release must use source runtime", origin)
+		}
+		source := manifest.Runtime.Source
+		wantRef := manifest.Name + "/v" + manifest.Version
+		if source.Repo != "github.com/apteva/apps" || source.Entry != "mcp/crm" || source.Ref != wantRef {
+			t.Errorf("%s: source=%+v, want github.com/apteva/apps at %s, entry mcp/crm", origin, source, wantRef)
+		}
+	}
+}
+
 // The embedded manifest must always parse — it's our single source of
 // truth for the manifest the binary advertises. If this test fails,
 // the binary won't survive sdk.Run's ValidateManifest at boot.

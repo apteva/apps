@@ -1,4 +1,12 @@
-# CRM v0.9.19
+# CRM v0.9.20
+
+Release `crm/v0.9.20`: Corrects the source-install pin to the matching release
+tag. Versions 0.9.17–0.9.19 advertised newer features but mistakenly instructed
+source installers to build 0.9.16. This release delivers the existing typed
+attribute, exact-email unsubscribe, and persistent inbox selection fixes.
+A release-contract regression test checks both disk and embedded manifests
+against the advertised version, repository and entry; the plugin identity is
+also checked by the existing tests. No Messaging changes or database migrations.
 
 Release `crm/v0.9.19`: Replying still changes an open conversation to pending,
 but the inbox keeps that conversation selected so its sent message and delivery
