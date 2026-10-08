@@ -351,3 +351,52 @@ func TestInboundWithoutTelemetrySettlesOnDurableReply(t *testing.T) {
 		t.Fatal("fallback reply left Thinking active")
 	}
 }
+
+// Replay the scheduled check reported at 19:49 on 2026-10-08. A final
+// confirmation closes visible work before the housekeeping model chooses
+// pace; the five-minute wake must still start fresh visible work.
+func TestScheduledCheckFinalConfirmationSettlesBeforePaceAndResumesOnWake(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+	boundConversationCaller(t, app, conv, 41)
+	thread := conversationThreadID(conv.ID)
+	s := app.streamer
+	s.resolve = func(agent int64, candidate string) string {
+		if agent == 41 && candidate == thread {
+			return conv.ID
+		}
+		return ""
+	}
+	s.emitAck(conv.ID, thread, 41, 1449)
+	start := time.Now()
+	s.Ingest("llm.start", 41, thread, `{}`, start)
+	sent, err := app.toolSend(callerCtxCall(41, thread, "timed-confirmation"), ctx, map[string]any{
+		"conversation_id": conv.ID, "text": "I'll check in five minutes.", "phase": "final",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent.(map[string]any)["phase"] != "final" {
+		t.Fatal("confirmation lost final phase")
+	}
+	idle := func() {
+		t.Helper()
+		if got := s.snapshot(conv.ID); len(got.Frames) != 0 {
+			t.Fatalf("idle confirmation still has progress: %+v", got.Frames)
+		}
+	}
+	idle()
+	s.Ingest("llm.start", 41, thread, `{}`, start.Add(time.Second))
+	idle()
+	s.Ingest("llm.tool_chunk", 41, thread, `{"tool":"pace","id":"wait","chunk":"{\"sleep\":\"5m\"}"}`, start.Add(3*time.Second))
+	idle()
+	s.Ingest("tool.call", 41, thread, `{"name":"pace","id":"wait","args":{"sleep":"5m"}}`, start.Add(4*time.Second))
+	idle()
+	s.Ingest("tool.result", 41, thread, `{"name":"pace","id":"wait","success":true}`, start.Add(4*time.Second))
+	idle()
+	s.Ingest("llm.start", 41, thread, `{}`, start.Add(5*time.Minute))
+	snapshot := s.snapshot(conv.ID)
+	if len(snapshot.Frames) != 1 || snapshot.Frames[0].Progress == nil || snapshot.Frames[0].Progress.Phase != "thinking" || snapshot.Frames[0].Progress.AfterMessageID != 0 {
+		t.Fatalf("timer wake did not start a fresh response: %+v", snapshot.Frames)
+	}
+}

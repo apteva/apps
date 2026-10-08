@@ -790,3 +790,21 @@ test("Manager Test trace keeps the between-call wait and next preparation inside
  expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
  expect(element.querySelector("[data-response-waiting]")).toBeNull();
 });
+
+test("scheduled final confirmation hides housekeeping immediately and the timer wake shows fresh Thinking", async () => {
+ const user={...message(1449,"a","Check on it in 5 mins"),created_at:"2026-10-08T17:48:56.452641Z"};
+ const confirmation={...message(1450,"a","I'll check in five minutes."),role:"agent",agent_id:41,phase:"final",created_at:"2026-10-08T17:49:04.689729Z"};
+ fetcher=url=>url.includes("/activity")||url.includes("/deliveries")?json([]):json({messages:[user,confirmation],cursor:1450,before:1449,has_more:false});
+ await render();
+ const stream=FakeEvents.instances[0].listeners.get("stream")!;
+ const progress=(phase:string,revision:number,extra={})=>({chat_id:"a",agent_id:41,thread_id:"chat-a",response_progress:{phase,run_id:"scheduled-check",revision,after_message_id:1449,started_at:user.created_at,...extra}});
+ for(const phase of ["thinking","preparing_tool","idle"]) {
+  await act(async()=>stream({data:JSON.stringify(progress(phase,1+["thinking","preparing_tool","idle"].indexOf(phase),{tool_name:phase==="preparing_tool"?"pace":"",call_id:phase==="preparing_tool"?"wait":""}))}));
+  expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+  expect(element.querySelector(".chat-tool-activity")).toBeNull();
+ }
+ await act(async()=>stream({data:JSON.stringify(progress("thinking",4,{run_id:"timer-wake",after_message_id:0,started_at:"2026-10-08T17:54:08.337181Z"}))}));
+ expect(element.querySelectorAll('[aria-label="Thinking"]')).toHaveLength(1);
+ await act(async()=>FakeEvents.instances[0].emit({...message(1451,"a","Checked. The run is blocked at verification."),role:"agent",agent_id:41,phase:"final",created_at:"2026-10-08T17:54:28.456117Z"}));
+ expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+});
