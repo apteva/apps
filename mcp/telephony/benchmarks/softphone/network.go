@@ -23,6 +23,8 @@ type Link struct {
 	OutageMS            float64 `json:"outage_ms"`
 }
 type Profile struct {
+	RTCUDP               bool    `json:"rtc_udp,omitempty"`
+	MediaTransport       string  `json:"media_transport,omitempty"`
 	CarrierDown          *Link   `json:"carrier_down,omitempty"`
 	CarrierMissing       bool    `json:"carrier_missing,omitempty"`
 	MuteMicrophone       bool    `json:"mute_microphone,omitempty"`
@@ -48,6 +50,12 @@ func Profiles(path string) ([]Profile, error) {
 		return nil, err
 	}
 	for _, p := range profiles {
+		if p.RTCUDP && p.MediaTransport != "webrtc" {
+			return nil, fmt.Errorf("UDP shaping requires webrtc: %s", p.Name)
+		}
+		if p.MediaTransport != "" && p.MediaTransport != "websocket" && p.MediaTransport != "webrtc" && p.MediaTransport != "auto" {
+			return nil, fmt.Errorf("invalid transport %s", p.Name)
+		}
 		if p.MainThreadPauseMS < 0 || p.MainThreadPauseMS > 10000 || (p.AudioContextRate != 0 && p.AudioContextRate != 44100 && p.AudioContextRate != 48000) {
 			return nil, fmt.Errorf("invalid browser scenario %s", p.Name)
 		}
@@ -110,15 +118,19 @@ type Proxy struct {
 	connections map[net.Conn]bool
 	up, down    LinkStats
 	epoch       time.Time
+	budgets     *WireBudgets
 }
 
 func NewProxy(target string, profile Profile, seed int64) (*Proxy, error) {
+	return NewProxyWithBudget(target, profile, seed, nil)
+}
+func NewProxyWithBudget(target string, profile Profile, seed int64, budgets *WireBudgets) (*Proxy, error) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	p := &Proxy{listener: l, cancel: cancel, connections: map[net.Conn]bool{}}
+	p := &Proxy{listener: l, cancel: cancel, connections: map[net.Conn]bool{}, budgets: budgets}
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
@@ -225,6 +237,15 @@ func (p *Proxy) pipe(ctx context.Context, src, dst net.Conn, link Link, up bool,
 				schedule.Epoch = p.epoch
 				p.mu.Unlock()
 				due, recovery := schedule.Due(now, n)
+				if p.budgets != nil {
+					budget := p.budgets.Down
+					if up {
+						budget = p.budgets.Up
+					}
+					// Conservative 52-byte IPv4/TCP header allowance per proxy read chunk.
+					// Kernel ACKs/retransmissions are outside this userspace fixture.
+					due, _ = budget.reserve(now, n+52, 0)
+				}
 				p.mu.Lock()
 				stats := &p.down
 				if up {

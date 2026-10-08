@@ -254,3 +254,12 @@ coaching share lease renewal; coaching never automatically retargets an adviser.
 events. Adviser `onDiagnostics` includes bounded session events and directional
 frame-drop samples. See [media session resilience](../docs/media-session-resilience.md)
 for clock handling, authorization boundaries and diagnostic fields.
+
+## Optional browser transport
+
+`createSoftphone({ mediaTransport: "websocket" | "webrtc" | "auto" })` selects
+media for the shared browser runtime. WebSocket remains the default. WebRTC
+requires an enabled Telephony server and reachable ICE/UDP or TURN; explicit
+WebRTC reports setup failure, while `auto` can fall back during initial setup.
+See [softphone transports](../docs/softphone-transports.md) for configuration,
+recovery, provider independence, diagnostics and verification limits.

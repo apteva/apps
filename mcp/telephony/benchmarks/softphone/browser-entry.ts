@@ -1,5 +1,6 @@
 import {outputWallTimeMS} from './audio-clock';
 import {SoftphoneSession, DEFAULT_SOFTPHONE_AUDIO_OPTIONS} from '../../ui/softphone-audio';
+import {WebRTCAudioConnection} from '../../frontend/src/webrtc-audio';
 
 function tone(frame:Float32Array,rate:number):[number,number]{
  const energy=frame.reduce((n,x)=>n+x*x,0);if(energy/frame.length<(100/32768)**2)return[-1,-120];
@@ -14,58 +15,74 @@ function tone(frame:Float32Array,rate:number):[number,number]{
  const source=new AudioWorkletNode(sourceContext,'benchmark-source'),destination=sourceContext.createMediaStreamDestination();source.connect(destination);
  const original=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
  const OriginalAudioContext=window.AudioContext;
+ const OriginalPeerConnection=window.RTCPeerConnection;
+ if(config.rtc_force_relay)window.RTCPeerConnection=class extends OriginalPeerConnection {
+  constructor(options?:RTCConfiguration){super({...options,iceServers:config.rtc_ice_servers,iceTransportPolicy:'relay'});}
+ };
  // Force the production fallback resampler without changing the app or source.
  if(config.audio_context_rate)window.AudioContext=class extends OriginalAudioContext {
   constructor(options?:AudioContextOptions){super({...options,sampleRate:config.audio_context_rate});}
  };
  // Controlled signal replaces the hardware microphone only. Capture DSP,
  // framing, worker, WebSockets, Go bridge and carrier codec still execute.
- navigator.mediaDevices.getUserMedia=async()=>destination.stream;
- const session:any=new SoftphoneSession({refreshMediaURL:async()=>{
+ navigator.mediaDevices.getUserMedia=async()=>destination.stream.clone();
+ const rtc=config.media_transport==='webrtc';
+ const Session=rtc?WebRTCAudioConnection:SoftphoneSession;
+ const session:any=new Session({refreshMediaURL:async()=>{
   const response=await fetch('/refresh-media',{method:'POST'});
   if(!response.ok)throw Object.assign(new Error('Local media attach failed'),{status:response.status});
   return (await response.json()).media_url;
  },onNotice:detail=>notices.push({detail,at:Date.now()}),onState:(state,detail)=>states.push({state,detail,at:Date.now()}),onDiagnostics:d=>diagnostics.push({at:Date.now(),...d})});
  const wireDiagnostics:unknown[]=[];
- const sendText=session.sendText.bind(session);
- session.sendText=(data:string)=>{
-  const message=JSON.parse(data);
+ const sendText=(rtc?session.send:session.sendText).bind(session);
+ session[rtc?'send':'sendText']=(data:any)=>{
+  const message=rtc?data:JSON.parse(data);
   if(message.type==='diagnostics'){wireDiagnostics.push(message);if(wireDiagnostics.length>4)wireDiagnostics.shift();}
   sendText(data);
  };
  let probe:AudioWorkletNode|undefined;
  try{
-  await session.start(config.media_url,'/worklet.js','/worker.js',DEFAULT_SOFTPHONE_AUDIO_OPTIONS);
+  if(rtc) await session.start(config.media_url,DEFAULT_SOFTPHONE_AUDIO_OPTIONS,'/worklet.js');
+  else await session.start(config.media_url,'/worklet.js','/worker.js',DEFAULT_SOFTPHONE_AUDIO_OPTIONS);
   const deadline=Date.now()+10000;
   while(!states.some(x=>x.state==='live')&&Date.now()<deadline)await new Promise(r=>setTimeout(r,20));
   if(!states.some(x=>x.state==='live'))throw new Error('carrier media did not connect');
-  const ctx:AudioContext=session.ctx;
-  await ctx.audioWorklet.addModule('/probe.js');probe=new AudioWorkletNode(ctx,'benchmark-output');
-  const silent=ctx.createGain();silent.gain.value=0;session.playback.connect(probe);probe.connect(silent);silent.connect(ctx.destination);
+  let ctx:AudioContext=rtc?session.context:session.ctx;
   const markers:any[]=[];let last=-2,stable=0,segment=false,symbols:number[]=[],start=-1000,level=-120;
   const arm=await(await fetch('/arm',{method:'POST'})).json();
   const sourceStart=sourceContext.currentTime+(arm.start_at-Date.now())/1000;
   source.port.postMessage({start:sourceStart});
-  probe.port.onmessage=event=>{
-   const [symbol,db]=tone(event.data.frame,ctx.sampleRate),end=outputWallTimeMS(ctx,event.data.end,performance.timeOrigin,performance.now());
+  const installProbe=async(context:AudioContext)=>{
+   probe?.disconnect();await context.audioWorklet.addModule('/probe.js');probe=new AudioWorkletNode(context,'benchmark-output');
+   const silent=context.createGain();silent.gain.value=0;(rtc?session.speaker:session.playback).connect(probe);probe.connect(silent);silent.connect(context.destination);
+   last=-2;stable=0;segment=false;symbols=[];start=-1000;
+   probe.port.onmessage=event=>{
+   const [symbol,db]=tone(event.data.frame,context.sampleRate),end=outputWallTimeMS(context,event.data.end,performance.timeOrigin,performance.now());
    if(symbol<0){segment=false;stable=0;last=-2;return;}
    stable=symbol===last?stable+1:1;last=symbol;
    if(stable<2||segment)return;segment=true;
    if(symbol===16){symbols=[];start=end-20;level=db;}else if(end-start<260){symbols.push(symbol);if(symbols.length===3){
     const [hi,lo,check]=symbols;if((hi^lo^10)===check)markers.push({id:hi*16+lo,at_ms:start,level_dbfs:level});symbols=[];start=-1000;
    }}
+   };
   };
+  await installProbe(ctx);
   // Report render-clock stalls separately from nominal marker latency. A
   // synthetic source can emit its tone late before the softphone sees it.
   const clockBase={wall:performance.now(),source:sourceContext.currentTime,playback:ctx.currentTime};
+  let priorPlaybackMS=0;
   const clockProgress={wall_elapsed_ms:0,source_elapsed_ms:0,playback_elapsed_ms:0,max_source_lag_ms:0,max_playback_lag_ms:0};
   const finish=arm.start_at+config.duration_ms+config.drain_ms;
   let muted=false,unmuted=false,reconnected=false,mainThreadPaused=false;
   while(Date.now()<finish) {
     const elapsed=Date.now()-arm.start_at;
+    const current:AudioContext|undefined=rtc?session.context:session.ctx;
+    if(current&&current!==ctx){
+      priorPlaybackMS+=(ctx.currentTime-clockBase.playback)*1000;ctx=current;clockBase.playback=ctx.currentTime;await installProbe(ctx);
+    }
     clockProgress.wall_elapsed_ms=performance.now()-clockBase.wall;
     clockProgress.source_elapsed_ms=(sourceContext.currentTime-clockBase.source)*1000;
-    clockProgress.playback_elapsed_ms=(ctx.currentTime-clockBase.playback)*1000;
+    clockProgress.playback_elapsed_ms=priorPlaybackMS+(ctx.currentTime-clockBase.playback)*1000;
     clockProgress.max_source_lag_ms=Math.max(clockProgress.max_source_lag_ms,clockProgress.wall_elapsed_ms-clockProgress.source_elapsed_ms);
     clockProgress.max_playback_lag_ms=Math.max(clockProgress.max_playback_lag_ms,clockProgress.wall_elapsed_ms-clockProgress.playback_elapsed_ms);
     if(config.mute_microphone && elapsed>=4000 && !muted) {session.setMuted(true);muted=true;}
@@ -79,6 +96,9 @@ function tone(frame:Float32Array,rate:number):[number,number]{
     await new Promise(r=>setTimeout(r,100));
   }
   const result={clock_progress:clockProgress,wire_diagnostics:wireDiagnostics,markers,states,notices,diagnostics:diagnostics.slice(-8),audio_context_rate:ctx.sampleRate,source_context_rate:sourceContext.sampleRate,start_at:arm.start_at,output_clock_mapping_uncertainty_ms:20,errors};
-  session.sendDiagnostics();return result;
- }finally{window.AudioContext=OriginalAudioContext;navigator.mediaDevices.getUserMedia=original;probe?.disconnect();session.stop();source.disconnect();await sourceContext.close();}
+  if(rtc){await session.statistics(session.generation);
+ const stats=await session.pc.getStats(), candidates:any[]=[];
+ stats.forEach((s:any)=>{if(s.type==='transport'&&s.selectedCandidatePairId){const pair=stats.get(s.selectedCandidatePairId);if(pair){const candidate=stats.get(pair.localCandidateId);if(candidate)candidates.push({candidateType:candidate.candidateType,protocol:candidate.protocol});}}});
+ (result as any).rtc_candidates=candidates;(result as any).rtc_stats=Array.from((await session.pc.getStats()).values()).filter((s:any)=>s.type==='inbound-rtp'||s.type==='outbound-rtp'||s.type==='codec');}else session.sendDiagnostics();return result;
+ }finally{window.RTCPeerConnection=OriginalPeerConnection;window.AudioContext=OriginalAudioContext;navigator.mediaDevices.getUserMedia=original;probe?.disconnect();session.stop();source.disconnect();await sourceContext.close();}
 };

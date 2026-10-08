@@ -33,6 +33,8 @@ export interface SoftphoneSnapshot {
   readonly capabilities?: Call["capabilities"];
 }
 export interface SoftphoneOptions {
+	/** Applied to the shared browser runtime; defaults to websocket. */
+	mediaTransport?: "websocket" | "webrtc" | "auto";
   audio?: Partial<SoftphoneAudioOptions>;
   /** 0 disables automatic status reconciliation; the host then calls observeCall. */
   pollIntervalMs?: number;
@@ -72,7 +74,7 @@ export class HeadlessSoftphone {
 
   constructor(readonly client: TelephonyClient, private readonly options: SoftphoneOptions = {}) {
     this.runtime = options.audioRuntime ?? createBrowserAudio(client.app);
-    this.audioOptions = { ...DEFAULT_SOFTPHONE_AUDIO_OPTIONS, ...options.audio };
+    this.audioOptions = { ...DEFAULT_SOFTPHONE_AUDIO_OPTIONS, ...options.audio, ...(options.mediaTransport ? { mediaTransport: options.mediaTransport } : {}) };
     playbackBufferOptions(this.audioOptions);
     this.interval = options.pollIntervalMs ?? 2000;
     if (!Number.isFinite(this.interval) || (this.interval !== 0 && this.interval < 100)) throw new Error("Call poll interval must be 0 or at least 100 ms");

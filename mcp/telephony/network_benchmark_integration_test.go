@@ -47,6 +47,7 @@ type benchmarkDirection struct {
 	TailReceived    int     `json:"final_two_seconds_markers"`
 }
 type benchmarkBrowserResult struct {
+	RTCCandidates   []map[string]any   `json:"rtc_candidates,omitempty"`
 	ClockProgress   map[string]float64 `json:"clock_progress,omitempty"`
 	WireDiagnostics []json.RawMessage  `json:"wire_diagnostics"`
 	Markers         []bench.Marker     `json:"markers"`
@@ -58,15 +59,17 @@ type benchmarkBrowserResult struct {
 	StartAt         int64              `json:"start_at"`
 }
 type benchmarkResult struct {
-	Profile           bench.Profile              `json:"profile"`
-	Outcome           string                     `json:"outcome"`
-	Errors            []string                   `json:"errors,omitempty"`
-	Up                benchmarkDirection         `json:"adviser_to_carrier"`
-	Down              benchmarkDirection         `json:"carrier_to_adviser"`
-	Network           map[string]bench.LinkStats `json:"network"`
-	Browser           benchmarkBrowserResult     `json:"browser"`
-	CarrierMarkers    []bench.Marker             `json:"carrier_markers"`
-	ServerDiagnostics map[string]any             `json:"server_diagnostics,omitempty"`
+	Profile           bench.Profile                    `json:"profile"`
+	Outcome           string                           `json:"outcome"`
+	Errors            []string                         `json:"errors,omitempty"`
+	Up                benchmarkDirection               `json:"adviser_to_carrier"`
+	Down              benchmarkDirection               `json:"carrier_to_adviser"`
+	ConnectionBudget  map[string]bench.WireBudgetStats `json:"connection_budget,omitempty"`
+	UDPNetwork        map[string]bench.DatagramStats   `json:"udp_network,omitempty"`
+	Network           map[string]bench.LinkStats       `json:"network"`
+	Browser           benchmarkBrowserResult           `json:"browser"`
+	CarrierMarkers    []bench.Marker                   `json:"carrier_markers"`
+	ServerDiagnostics map[string]any                   `json:"server_diagnostics,omitempty"`
 }
 
 func benchmarkPercentile(values []float64, p float64) float64 {
@@ -168,14 +171,14 @@ func TestSoftphoneNetworkBenchmark(t *testing.T) {
 	}
 	git := exec.Command("git", "rev-parse", "HEAD")
 	revision, _ := git.Output()
-	report := map[string]any{"schema": "telephony-softphone-network-benchmark/v1", "created_at": time.Now().UTC().Format(time.RFC3339), "revision": strings.TrimSpace(string(revision)), "source": metadata, "seed": seed, "duration_ms": seconds * 1000, "clock_uncertainty_ms": 20, "scope": "real Chromium + production SoftphoneSession/worklets + compiled Telephony + local Telnyx L16 carrier substitute; shaped browser and optional carrier TCP links; synthetic acoustic markers; no live provider", "results": results}
+	report := map[string]any{"schema": "telephony-softphone-network-benchmark/v1", "created_at": time.Now().UTC().Format(time.RFC3339), "revision": strings.TrimSpace(string(revision)), "source": metadata, "seed": seed, "duration_ms": seconds * 1000, "clock_uncertainty_ms": 20, "scope": "real Chromium + production SoftphoneSession/worklets + compiled Telephony + local Telnyx L16 carrier substitute; shaped browser TCP, optional carrier TCP and forced-relay UDP profiles; synthetic acoustic markers; no live provider", "results": results}
 	raw, _ := json.MarshalIndent(report, "", "  ")
 	if err = os.WriteFile(filepath.Join(output, "results.json"), append(raw, '\n'), 0600); err != nil {
 		t.Fatal(err)
 	}
 	var md strings.Builder
 	fmt.Fprintf(&md, "# Softphone network benchmark\n\nLocal run: %s. Source revision: `%s` plus local changes. Seed: %d. Measurement: %ds/profile, plus warmup/drain.\n\n", time.Now().Format(time.RFC3339), strings.TrimSpace(string(revision)), seed, seconds)
-	md.WriteString("Actual Chromium, production audio pipeline, compiled Telephony and a local Telnyx L16 substitute. Browser TCP links and carrier links are impaired as specified per profile. Carrier catch-up, missing media, intentional microphone mute and browser reconnect scenarios are included. No production/staging traffic or real calls. Timing uncertainty is approximately ±20ms.\n\n| Profile | Outcome | Adviser → carrier p95 | Missing markers | Carrier → adviser p95 | Missing markers |\n|---|---|---:|---:|---:|---:|\n")
+	md.WriteString("Actual Chromium, production audio pipeline, compiled Telephony and a local Telnyx L16 substitute. Browser TCP links and carrier links are impaired as specified per profile. WebRTC profiles with `rtc_udp: true` force the selected browser candidate through a local TURN relay and shape its actual encrypted UDP traffic, including SRTP, RTCP, TURN encapsulation/control and 28 bytes IPv4/UDP overhead per datagram. Signaling TCP shares the same per-direction capacity with a conservative 52-byte header allowance per proxy chunk; kernel TCP ACK/retransmission and Ethernet overhead are excluded. Setup before the measurement epoch is unrestricted. Other WebRTC profiles shape signaling TCP only. The 200ms network queue drops excess datagrams instead of storing seconds of speech. Rates are separate per direction, per call; unrelated application traffic is excluded. Carrier catch-up, missing media, intentional microphone mute and browser reconnect scenarios are included. No production/staging traffic or real calls. Timing uncertainty is approximately ±20ms.\n\n| Profile | Outcome | Adviser → carrier p95 | Missing markers | Carrier → adviser p95 | Missing markers |\n|---|---|---:|---:|---:|---:|\n")
 	for _, r := range results {
 		fmt.Fprintf(&md, "| %s | %s | %.0f ms | %.1f%% | %.0f ms | %.1f%% |\n", r.Profile.Name, r.Outcome, r.Up.P95, r.Up.MissingPct, r.Down.P95, r.Down.MissingPct)
 	}
@@ -194,7 +197,7 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 	t.Helper()
 	result := benchmarkResult{Profile: profile, Outcome: "error"}
 	platform := newTier2PlatformGateway(t)
-	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID(tier2Project), tk.WithEnv("APTEVA_GATEWAY_URL", platform.server.URL))
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID(tier2Project), tk.WithEnv("APTEVA_GATEWAY_URL", platform.server.URL), tk.WithConfig(map[string]string{"softphone_webrtc_enabled": "true"}))
 	created := tier2MCPAs(t, sc, "telephony_routes_create", map[string]any{"phone_number": tier2Number, "answer_mode": "human_browser", "recording_mode": "off"})
 	route := created["route"].(map[string]any)
 	tier2MCPAs(t, sc, "telephony_routes_configure_carrier", map[string]any{"route_id": route["id"]})
@@ -215,8 +218,28 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 	if status != 200 {
 		t.Fatalf("benchmark answer: %d %s", status, body)
 	}
+	var relay *bench.TURNFixture
+	var iceServers []map[string]any
+	if profile.RTCUDP {
+		var relayErr error
+		relay, relayErr = bench.NewTURNFixture(profile.Up, profile.Down, seed)
+		if relayErr != nil {
+			t.Fatal(relayErr)
+		}
+		defer relay.Close()
+		iceServers = []map[string]any{{"urls": []string{relay.URL()}, "username": relay.Username, "credential": relay.Password}}
+	}
 	target, _ := url.Parse(sc.URL())
-	proxy, err := bench.NewProxy(target.Host, profile, seed)
+	tcpProfile := profile
+	if profile.RTCUDP {
+		tcpProfile.Up = bench.Link{Kbps: 10000}
+		tcpProfile.Down = bench.Link{Kbps: 10000}
+	}
+	var budgets *bench.WireBudgets
+	if relay != nil {
+		budgets = relay.Budgets
+	}
+	proxy, err := bench.NewProxyWithBudget(target.Host, tcpProfile, seed, budgets)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +260,7 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 		case "/":
 			io.WriteString(w, `<!doctype html><title>Local Telephony network benchmark</title><script type="module" src="/entry.js"></script>`)
 		case "/config":
-			writeTier2JSON(w, map[string]any{"media_url": "ws://" + proxy.Addr() + "/softphone/media/" + id + "/" + session.SessionToken, "duration_ms": duration, "drain_ms": 2500, "mute_microphone": profile.MuteMicrophone, "reconnect_browser": profile.ReconnectBrowser, "main_thread_pause_ms": profile.MainThreadPauseMS, "audio_context_rate": profile.AudioContextRate})
+			writeTier2JSON(w, map[string]any{"media_url": "ws://" + proxy.Addr() + "/softphone/media/" + id + "/" + session.SessionToken, "duration_ms": duration, "drain_ms": 2500, "mute_microphone": profile.MuteMicrophone, "reconnect_browser": profile.ReconnectBrowser, "main_thread_pause_ms": profile.MainThreadPauseMS, "audio_context_rate": profile.AudioContextRate, "media_transport": profile.MediaTransport, "rtc_ice_servers": iceServers, "rtc_force_relay": profile.RTCUDP})
 		case "/refresh-media":
 			if r.Method != "POST" {
 				w.WriteHeader(405)
@@ -265,6 +288,9 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 			at := time.Now().Add(time.Second).Truncate(time.Millisecond)
 			if epoch.CompareAndSwap(0, at.UnixMilli()) {
 				proxy.Arm(at)
+				if relay != nil {
+					relay.Arm(at)
+				}
 				if carrierProxy != nil {
 					carrierProxy.Arm(at)
 				}
@@ -433,6 +459,32 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 	default:
 	}
 	result.Network = proxy.Stats()
+	if relay != nil {
+		result.UDPNetwork = relay.Stats()
+		result.ConnectionBudget = relay.Budgets.Stats()
+		for direction, budget := range result.ConnectionBudget {
+			kbps := profile.Down.Kbps
+			if direction == "up" {
+				kbps = profile.Up.Kbps
+			}
+			allowance := kbps / 8 * (budget.WindowMS + budget.MaxBacklogMS + 1)
+			if float64(budget.ChargedWireBytes) > allowance {
+				result.Errors = append(result.Errors, "shared connection budget exceeded: "+direction)
+			}
+		}
+		verifiedRelay := false
+		for _, candidate := range result.Browser.RTCCandidates {
+			verifiedRelay = verifiedRelay || candidate["candidateType"] == "relay" && candidate["protocol"] == "udp"
+		}
+		if !verifiedRelay {
+			result.Errors = append(result.Errors, "RTC selected path did not use relay")
+		}
+		for direction, stats := range result.UDPNetwork {
+			if stats.DeliveredPackets < 100 || stats.DeliveredWireBytes < 10000 {
+				result.Errors = append(result.Errors, "UDP shaping not exercised: "+direction)
+			}
+		}
+	}
 	if carrierProxy != nil {
 		for key, value := range carrierProxy.Stats() {
 			result.Network["carrier_"+key] = value
@@ -454,6 +506,10 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 	}
 	result.Errors = append(result.Errors, result.Browser.PageErrors...)
 	result.Outcome, result.Errors = benchmarkEvaluate(profile, result.Up, result.Down, result.Errors)
+	if failures := benchmarkRTCLevels(profile, result.Up, result.Down); len(failures) > 0 {
+		result.Outcome = "failed"
+		result.Errors = append(result.Errors, failures...)
+	}
 	if failures := benchmarkInterruptionChecks(result); len(failures) > 0 {
 		result.Outcome = "failed"
 		result.Errors = append(result.Errors, failures...)
@@ -461,6 +517,21 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 
 	t.Logf("%s: %s up p95 %.0fms missing %.1f%%; down p95 %.0fms missing %.1f%%", profile.Name, result.Outcome, result.Up.P95, result.Up.MissingPct, result.Down.P95, result.Down.MissingPct)
 	return result
+}
+
+// The synthetic 0.25-amplitude tone is about -15.05 dBFS RMS. Opus may
+// change it slightly; a six-decibel downmix attenuation is a regression.
+func benchmarkRTCLevels(profile bench.Profile, up, down benchmarkDirection) []string {
+	if profile.MediaTransport != "webrtc" {
+		return nil
+	}
+	var failures []string
+	for i, direction := range []benchmarkDirection{up, down} {
+		if direction.Received > 0 && math.Abs(direction.MedianLevelDBFS+15.05) > 2.5 {
+			failures = append(failures, fmt.Sprintf("RTC direction %d signal level %.2f dBFS differs from source", i, direction.MedianLevelDBFS))
+		}
+	}
+	return failures
 }
 
 // Snapshot source before the run so the report identifies uncommitted app and
@@ -577,7 +648,7 @@ func benchmarkInterruptionChecks(r benchmarkResult) []string {
 			muted = muted || event.Action == "microphone" && event.Outcome == "muted"
 			unmuted = unmuted || event.Action == "microphone" && event.Outcome == "unmuted"
 		}
-		if d.Server.CaptureSequenceGaps != 0 || d.Server.CaptureMutedMS < 1500 || d.Server.CaptureMutedMS > 2500 || !muted || !unmuted {
+		if d.Server.CaptureSequenceGaps != 0 || (r.Profile.MediaTransport != "webrtc" && (d.Server.CaptureMutedMS < 1500 || d.Server.CaptureMutedMS > 2500)) || !muted || !unmuted {
 			errors = append(errors, "intentional mute not separated from unexpected capture loss or missing transition events")
 		}
 	}
@@ -708,5 +779,17 @@ func TestBenchmarkBrowserIncidentGates(t *testing.T) {
 				t.Fatalf("unexpected gate result: %v", errors)
 			}
 		})
+	}
+}
+
+func TestBenchmarkRTCLevelGateRejectsStereoDownmixAttenuation(t *testing.T) {
+	profile := bench.Profile{MediaTransport: "webrtc"}
+	good := benchmarkDirection{Received: 38, MedianLevelDBFS: -15.2}
+	quiet := benchmarkDirection{Received: 38, MedianLevelDBFS: -21.2}
+	if len(benchmarkRTCLevels(profile, good, good)) != 0 {
+		t.Fatal("normal Opus level rejected")
+	}
+	if len(benchmarkRTCLevels(profile, quiet, good)) != 1 || len(benchmarkRTCLevels(profile, good, quiet)) != 1 {
+		t.Fatal("six-decibel attenuation went undetected")
 	}
 }

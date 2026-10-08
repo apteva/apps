@@ -138,7 +138,7 @@ func phoneAction(r *http.Request) string {
 	if r.Method == "GET" && strings.HasPrefix(path, "/softphone/listen-audit/") {
 		return "call.listen"
 	}
-	if r.Method == "GET" && path == "/softphone/access" {
+	if r.Method == "GET" && (path == "/softphone/access" || path == "/softphone/numbers") {
 		return "call.read"
 	}
 	if r.Method == "GET" && strings.HasPrefix(path, "/calls/") && strings.Count(strings.Trim(path, "/"), "/") == 1 && path != "/calls/events" {

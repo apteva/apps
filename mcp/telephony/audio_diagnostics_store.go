@@ -111,6 +111,9 @@ type mediaSessionEvent struct {
 }
 
 type browserAudioDiagnostics struct {
+	MediaTransport         string                  `json:"media_transport,omitempty"`
+	Codec                  string                  `json:"codec,omitempty"`
+	WebRTC                 *browserWebRTCStats     `json:"webrtc,omitempty"`
 	ConnectionID           string                  `json:"connection_id,omitempty"`
 	ClientEpoch            string                  `json:"client_epoch,omitempty"`
 	SessionEvents          []mediaSessionEvent     `json:"session_events,omitempty"`
@@ -144,6 +147,18 @@ type browserAudioDiagnostics struct {
 	CaptureSequenceGaps    int                     `json:"capture_sequence_gaps"`
 	PlaybackSequenceGaps   int                     `json:"playback_sequence_gaps"`
 	DropEvents             []audioDropEvent        `json:"drop_events,omitempty"`
+}
+
+type browserWebRTCStats struct {
+	Protocol          string  `json:"protocol,omitempty"`
+	CandidateType     string  `json:"candidateType,omitempty"`
+	SendBitrateBPS    float64 `json:"sendBitrateBps"`
+	ReceiveBitrateBPS float64 `json:"receiveBitrateBps"`
+	PacketsLost       float64 `json:"packetsLost"`
+	JitterMS          float64 `json:"jitterMs"`
+	ConcealedMS       float64 `json:"concealedMs"`
+	PacketsDiscarded  float64 `json:"packetsDiscarded"`
+	JitterBufferMS    float64 `json:"jitterBufferMs"`
 }
 
 type audioDropEvent struct {
@@ -276,6 +291,20 @@ func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics) browserAudi
 		return ""
 	}
 	value.ConnectionState = enum(value.ConnectionState, "connected", "reconnecting", "closed")
+	value.MediaTransport = enum(value.MediaTransport, "websocket", "webrtc")
+	value.Codec = enum(value.Codec, "pcm16", "opus")
+	if value.WebRTC != nil {
+		r := value.WebRTC
+		r.Protocol = enum(r.Protocol, "udp", "tcp")
+		r.CandidateType = enum(r.CandidateType, "host", "srflx", "prflx", "relay")
+		for _, field := range []*float64{&r.SendBitrateBPS, &r.ReceiveBitrateBPS, &r.PacketsLost, &r.JitterMS, &r.ConcealedMS, &r.PacketsDiscarded, &r.JitterBufferMS} {
+			if math.IsNaN(*field) || math.IsInf(*field, 0) {
+				*field = 0
+			} else {
+				*field = math.Max(0, math.Min(*field, 1e9))
+			}
+		}
+	}
 	value.AudioContextState = enum(value.AudioContextState, "running", "suspended", "interrupted", "closed")
 	value.MicrophoneTrackState = enum(value.MicrophoneTrackState, "live", "ended")
 	value.ClientEpoch = limitDiagnosticText(value.ClientEpoch, 64)

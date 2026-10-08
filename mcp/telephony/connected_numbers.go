@@ -52,19 +52,23 @@ type connectedRouteView struct {
 }
 
 type connectedNumberView struct {
-	PhoneNumber         string                `json:"phone_number"`
-	Provider            string                `json:"provider"`
-	ProviderNumberID    string                `json:"provider_number_id,omitempty"`
-	FriendlyName        string                `json:"friendly_name,omitempty"`
-	Capabilities        []string              `json:"capabilities"`
-	CarrierStatus       string                `json:"carrier_status,omitempty"`
-	RouteStatus         string                `json:"route_status"`
-	Route               *connectedRouteView   `json:"route,omitempty"`
-	VoiceWebhookStatus  string                `json:"voice_webhook_status"`
-	StatusCallbackState string                `json:"status_callback_status"`
-	RoutingHealth       string                `json:"routing_health"`
-	HealthMessage       string                `json:"health_message,omitempty"`
-	Outbound            outboundReadinessView `json:"outbound"`
+	OutboundNumberEnabled  bool                  `json:"outbound_number_enabled"`
+	CarrierConnectionID    int64                 `json:"carrier_connection_id"`
+	OutboundEnabled        bool                  `json:"outbound_enabled"`
+	OutboundDisabledReason string                `json:"outbound_disabled_reason,omitempty"`
+	PhoneNumber            string                `json:"phone_number"`
+	Provider               string                `json:"provider"`
+	ProviderNumberID       string                `json:"provider_number_id,omitempty"`
+	FriendlyName           string                `json:"friendly_name,omitempty"`
+	Capabilities           []string              `json:"capabilities"`
+	CarrierStatus          string                `json:"carrier_status,omitempty"`
+	RouteStatus            string                `json:"route_status"`
+	Route                  *connectedRouteView   `json:"route,omitempty"`
+	VoiceWebhookStatus     string                `json:"voice_webhook_status"`
+	StatusCallbackState    string                `json:"status_callback_status"`
+	RoutingHealth          string                `json:"routing_health"`
+	HealthMessage          string                `json:"health_message,omitempty"`
+	Outbound               outboundReadinessView `json:"outbound"`
 }
 
 // resolveOutboundFrom selects and validates the caller ID independently of a
@@ -219,66 +223,125 @@ func (a *App) resolveTelnyxApplicationID(
 	return applicationID, nil
 }
 
-func (a *App) connectedNumbers(ctx *sdk.AppCtx) (map[string]any, error) {
-	bindings := ctx.IntegrationsFor("carrier")
-	if len(bindings) == 0 {
-		return nil, errors.New("no carrier bound")
-	}
-	if len(bindings) == 1 {
-		provider, err := a.numberProviderForBinding(ctx, bindings[0])
-		if err != nil {
-			return nil, err
-		}
-		return a.connectedNumbersForProvider(ctx, provider)
-	}
+type numberInventoryWarning struct {
+	Provider     string `json:"provider"`
+	ConnectionID int64  `json:"carrier_connection_id"`
+	Code         string `json:"code"`
+	Message      string `json:"message"`
+}
 
-	projectID := currentProject(ctx)
-	if projectID == "" {
+func (a *App) connectedNumbers(ctx *sdk.AppCtx, requests ...context.Context) (map[string]any, error) {
+	bindings := ctx.IntegrationsFor("carrier")
+	project := currentProject(ctx)
+	if project == "" {
 		return nil, errors.New("project context required for connected numbers")
 	}
-	allNumbers := make([]connectedNumberView, 0)
-	providerNames := make([]string, 0, len(bindings))
+	request := context.Background()
+	if len(requests) > 0 && requests[0] != nil {
+		request = requests[0]
+	}
+	request, cancel := context.WithTimeout(request, numberInventoryTimeout)
+	defer cancel()
+	inventories := a.accountNumberInventories(ctx, bindings, request)
+
+	numbers := []connectedNumberView{}
+	providers := []string{}
+	warnings := []numberInventoryWarning{}
+	statuses := []map[string]any{}
 	var directSIP map[string]any
-	for _, bound := range bindings {
-		provider, err := a.numberProviderForBinding(ctx, bound)
+	successes := 0
+	for i, bound := range bindings {
+		if bound == nil {
+			continue
+		}
+		inventory := inventories[i]
+		err := inventory.err
+		slug := strings.ToLower(bound.AppSlug)
+		if inventory.provider != nil {
+			slug = inventory.provider.Slug
+		}
+		result := inventory.result
+
+		providers = append(providers, slug)
+		admissionErr := a.checkOutboundAdmission(project, slug, bound.ConnectionID, "")
+		if admissionErr != nil && !errors.Is(admissionErr, errOutboundDisabled) {
+			return nil, admissionErr
+		}
+		providerEnabled, e := a.outboundScopeEnabled(project, "provider", slug)
+		if e != nil {
+			return nil, e
+		}
+		connectionEnabled, e := a.outboundScopeEnabled(project, "connection", strconv.FormatInt(bound.ConnectionID, 10))
+		if e != nil {
+			return nil, e
+		}
+		var draining int
+		if e = a.db().db.QueryRow(`SELECT COUNT(*) FROM carrier_binding_drains WHERE connection_id=?`, bound.ConnectionID).Scan(&draining); e != nil {
+			return nil, e
+		}
+		bindingState := "active"
+		if draining > 0 {
+			bindingState = "draining_or_removed"
+		}
+
+		status := map[string]any{"binding_state": bindingState, "connection_outbound_enabled": connectionEnabled, "provider_outbound_enabled": providerEnabled, "provider": slug, "carrier_connection_id": bound.ConnectionID, "outbound_enabled": admissionErr == nil, "inventory_status": "available"}
 		if err != nil {
-			return nil, err
-		}
-		result, err := a.connectedNumbersForProvider(ctx, provider)
-		if err != nil {
-			return nil, fmt.Errorf("list %s connected numbers: %w", provider.Slug, err)
-		}
-		if numbers, ok := result["numbers"].([]connectedNumberView); ok {
-			allNumbers = append(allNumbers, numbers...)
-		}
-		providerNames = append(providerNames, provider.Slug)
-		if directSIP == nil {
-			if value, ok := result["direct_sip"].(map[string]any); ok {
-				directSIP = value
+			code := "inventory_unavailable"
+			if errors.Is(err, context.DeadlineExceeded) {
+				code = "inventory_timeout"
+			}
+			warnings = append(warnings, numberInventoryWarning{slug, bound.ConnectionID, code, "Carrier account number inventory is unavailable; other accounts remain usable"})
+			status["inventory_status"] = "unavailable"
+		} else {
+			successes++
+			for _, n := range result["numbers"].([]connectedNumberView) {
+				n.CarrierConnectionID = bound.ConnectionID
+				e := a.checkOutboundAdmission(project, slug, bound.ConnectionID, n.PhoneNumber)
+				if e != nil && !errors.Is(e, errOutboundDisabled) {
+					return nil, e
+				}
+				n.OutboundEnabled = e == nil
+				if e != nil {
+					n.OutboundDisabledReason = "outbound_disabled"
+				}
+				n.OutboundNumberEnabled, e = a.outboundScopeEnabled(project, "number", n.PhoneNumber)
+				if e != nil {
+					return nil, e
+				}
+				numbers = append(numbers, n)
+			}
+			if directSIP == nil {
+				directSIP, _ = result["direct_sip"].(map[string]any)
 			}
 		}
+		statuses = append(statuses, status)
 	}
-	sort.SliceStable(allNumbers, func(i, j int) bool {
-		leftRouted := allNumbers[i].Route != nil && allNumbers[i].Route.Enabled
-		rightRouted := allNumbers[j].Route != nil && allNumbers[j].Route.Enabled
-		if leftRouted != rightRouted {
-			return leftRouted
+	sort.SliceStable(numbers, func(i, j int) bool {
+		li := numbers[i].Route != nil && numbers[i].Route.Enabled
+		lj := numbers[j].Route != nil && numbers[j].Route.Enabled
+		if li != lj {
+			return li
 		}
-		if allNumbers[i].PhoneNumber != allNumbers[j].PhoneNumber {
-			return allNumbers[i].PhoneNumber < allNumbers[j].PhoneNumber
+		if numbers[i].PhoneNumber != numbers[j].PhoneNumber {
+			return numbers[i].PhoneNumber < numbers[j].PhoneNumber
 		}
-		return allNumbers[i].Provider < allNumbers[j].Provider
+		return numbers[i].Provider < numbers[j].Provider
 	})
 	if directSIP == nil {
 		directSIP = map[string]any{"supported": false, "enabled": false, "ready": false, "managed": true}
 	}
-	return map[string]any{
-		"provider":   "multiple",
-		"providers":  providerNames,
-		"count":      len(allNumbers),
-		"numbers":    allNumbers,
-		"direct_sip": directSIP,
-	}, nil
+	providerName := "multiple"
+	if len(providers) == 1 {
+		providerName = providers[0]
+	}
+	state := "available"
+	if successes == 0 {
+		state = "unavailable"
+	} else if len(warnings) > 0 {
+		state = "partial"
+	}
+	a.outboundHints.remember(project, numbers)
+	return map[string]any{"provider": providerName, "providers": providers, "provider_statuses": statuses, "inventory_status": state, "warnings": warnings, "count": len(numbers), "numbers": numbers, "direct_sip": directSIP}, nil
 }
 
 func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvider) (map[string]any, error) {
@@ -360,7 +423,7 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 		numbers = append(numbers, a.connectedNumberView(ctx, provider.Slug, number, route, resolveAgentName))
 	}
 	if provider.Slug == "telnyx" {
-		profiles, profileErr := listTelnyxOutboundProfiles(ctx, provider.ConnID)
+		profiles, profileErr := listTelnyxOutboundProfiles(ctx, provider.ConnID, provider.inventoryContext)
 		readinessCache := map[string]outboundReadinessView{}
 		for i := range numbers {
 			phone := compactPhoneNumber(numbers[i].PhoneNumber)
@@ -376,7 +439,7 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 				numbers[i].Outbound = cached
 				continue
 			}
-			readiness, readinessErr := a.telnyxOutboundReadiness(ctx, provider.ConnID, applicationID, profiles)
+			readiness, readinessErr := a.telnyxOutboundReadiness(ctx, provider.ConnID, applicationID, profiles, provider.inventoryContext)
 			if readinessErr != nil {
 				readiness.Status = outboundConfigError
 				readiness.Message = readinessErr.Error()
@@ -436,8 +499,8 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 // toolNumbersConnected exposes the same carrier-owned inventory used by the
 // Numbers panel. Unlike telephony_routes_list, it includes purchased numbers
 // that have not been configured with an inbound Telephony route yet.
-func (a *App) toolNumbersConnected(_ context.Context, ctx *sdk.AppCtx, _ map[string]any) (any, error) {
-	result, err := a.connectedNumbers(ctx)
+func (a *App) toolNumbersConnected(request context.Context, ctx *sdk.AppCtx, _ map[string]any) (any, error) {
+	result, err := a.connectedNumbers(ctx, request)
 	if err != nil {
 		return mcpError(err.Error()), nil
 	}
@@ -473,6 +536,14 @@ func (a *App) configureNumberOutboundProfile(ctx *sdk.AppCtx, phoneNumber, profi
 const maxOwnedNumberPages = 100
 
 func listOwnedCarrierNumbers(ctx *sdk.AppCtx, provider *numberProvider) ([]ownedNumber, error) {
+	if provider.inventoryContext == nil {
+		request, cancel := context.WithTimeout(context.Background(), numberInventoryTimeout)
+		defer cancel()
+		copy := *provider
+		provider = &copy
+		provider.inventoryContext = request
+	}
+
 	var tool string
 	var input map[string]any
 	switch provider.Slug {
@@ -493,7 +564,7 @@ func listOwnedCarrierNumbers(ctx *sdk.AppCtx, provider *numberProvider) ([]owned
 	default:
 		return nil, fmt.Errorf("owned phone-number listing is unsupported for provider %s", provider.Slug)
 	}
-	raw, err := executeCarrierTool(ctx, provider.ConnID, tool, input)
+	raw, err := executeNumberInventoryTool(ctx, provider, tool, input)
 	if err != nil {
 		return nil, err
 	}
@@ -512,7 +583,7 @@ func listPaginatedSinchNumbers(ctx *sdk.AppCtx, provider *numberProvider) ([]own
 		if pageToken != "" {
 			input["pageToken"] = pageToken
 		}
-		raw, err := executeCarrierTool(ctx, provider.ConnID, "list_active_numbers", input)
+		raw, err := executeNumberInventoryTool(ctx, provider, "list_active_numbers", input)
 		if err != nil {
 			return nil, err
 		}
@@ -542,7 +613,7 @@ func listPaginatedDIDWWNumbers(ctx *sdk.AppCtx, provider *numberProvider) ([]own
 	const pageSize = 100
 	var owned []ownedNumber
 	for page := 1; page <= maxOwnedNumberPages; page++ {
-		raw, err := executeCarrierTool(ctx, provider.ConnID, "list_dids", map[string]any{"page_number": page, "page_size": pageSize})
+		raw, err := executeNumberInventoryTool(ctx, provider, "list_dids", map[string]any{"page_number": page, "page_size": pageSize})
 		if err != nil {
 			return nil, err
 		}
@@ -571,7 +642,7 @@ func listPaginatedTelnyxNumbers(ctx *sdk.AppCtx, provider *numberProvider) ([]ow
 	const pageSize = 250
 	var owned []ownedNumber
 	for page := 1; page <= maxOwnedNumberPages; page++ {
-		raw, err := executeCarrierTool(ctx, provider.ConnID, "list_phone_numbers", map[string]any{
+		raw, err := executeNumberInventoryTool(ctx, provider, "list_phone_numbers", map[string]any{
 			"page[number]": page,
 			"page[size]":   pageSize,
 		})
@@ -610,7 +681,7 @@ func listPaginatedPlivoNumbers(ctx *sdk.AppCtx, provider *numberProvider) ([]own
 	var owned []ownedNumber
 	offset := 0
 	for page := 0; page < maxOwnedNumberPages; page++ {
-		raw, err := executeCarrierTool(ctx, provider.ConnID, "list_owned_phone_numbers", map[string]any{
+		raw, err := executeNumberInventoryTool(ctx, provider, "list_owned_phone_numbers", map[string]any{
 			"limit": pageSize, "offset": offset,
 		})
 		if err != nil {

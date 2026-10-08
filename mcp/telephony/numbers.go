@@ -90,13 +90,14 @@ type numberPurchaseIntent struct {
 }
 
 type numberProvider struct {
-	Slug     string
-	ConnID   int64
-	Fields   map[string]string
-	Search   bool
-	Purchase bool
-	Types    []string
-	Reason   string
+	inventoryContext context.Context
+	Slug             string
+	ConnID           int64
+	Fields           map[string]string
+	Search           bool
+	Purchase         bool
+	Types            []string
+	Reason           string
 }
 
 func (a *App) numberProviderFor(ctx *sdk.AppCtx) (*numberProvider, error) {
@@ -1218,8 +1219,16 @@ func (a *App) handleNumbers(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimSuffix(r.URL.Path, "/")
 	var result map[string]any
 	switch path {
+	case "/numbers/outbound-policy":
+		result, err = a.outboundPolicy(ctx, body)
+	case "/numbers/routes/enable":
+		var route *routeRow
+		route, err = a.routeForCaller(ctx, strArg(body, "route_id", ""), 0)
+		if err == nil {
+			result, err = a.setInboundRouteEnabled(route, true)
+		}
 	case "/numbers/connected":
-		result, err = a.connectedNumbers(ctx)
+		result, err = a.connectedNumbers(ctx, r.Context())
 	case "/numbers/outbound-profile":
 		result, err = a.configureNumberOutboundProfile(ctx,
 			strings.TrimSpace(strArg(body, "phone_number", "")),

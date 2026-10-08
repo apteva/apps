@@ -67,6 +67,7 @@ type softphoneHub struct {
 	captureWorkerAgeMS      float64
 	completedBrowser        liveAudioQueueSnapshot
 	completedPeer           liveAudioQueueSnapshot
+	completedRTC            rtcMediaSnapshot
 
 	mu      sync.Mutex
 	peer    *websocketWriterPump
@@ -233,6 +234,9 @@ func (h *softphoneHub) clearBrowser(w *websocketWriterPump) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.completedBrowser = mergeLiveAudioSnapshots(h.completedBrowser, w.audioSnapshot())
+	if c, ok := w.conn.(*rtcHubConn); ok {
+		h.completedRTC = mergeRTCSnapshots(h.completedRTC, c.stats.snapshot())
+	}
 	if h.browser == w {
 		h.stopCoachLocked(nil, "adviser_disconnected")
 		h.browserEpoch = newSecret()
@@ -567,10 +571,51 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	transport := r.URL.Query().Get("transport")
+	if transport != "" && transport != "websocket" && transport != "webrtc" {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]any{"code": "unsupported_media_transport"})
+		return
+	}
+	var rtcConfig softphoneRTCConfig
+	if transport == "webrtc" {
+		config := map[string]string{}
+		if globalCtx != nil {
+			config = globalCtx.WithProject(row.ProjectID).Config()
+		}
+		rtcConfig, err = parseSoftphoneRTCConfig(config)
+		if err != nil || !rtcConfig.Enabled {
+			writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{"code": "webrtc_unavailable"})
+			return
+		}
+	}
+
 	conn, readConn, err := upgradeBuffered(w, r)
 	if err != nil {
 		logSoftphone("browser ws upgrade failed", "call", callID, "err", err)
 		return
+	}
+	if transport == "webrtc" {
+		// Negotiate before replacing the browser or answering the carrier. Failed
+		// setup leaves the existing hub/carrier untouched, including auto fallback.
+		var stopRTC func()
+		unlock()
+		unlock = nil
+		conn, stopRTC, err = connectSoftphoneRTC(conn, readConn, rtcConfig)
+		if err != nil {
+			return
+		}
+		defer stopRTC()
+		readConn = conn
+		unlock = a.softphones.lockClaim(callID)
+		current, findErr := a.db().findCall(callID)
+		if findErr != nil || current == nil || isTerminalStatus(current.Status) {
+			return
+		}
+		reason, verifiedExpiry, identity = a.phoneMediaCheckDetails(current, token)
+		if reason != "" {
+			return
+		}
+		row = current
 	}
 	writer := newWebSocketWriterPump(conn, ws.StateServerSide)
 	closer := newGracefulWebSocket(conn, writer)
@@ -869,7 +914,7 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if r.Method != http.MethodPost && !(r.Method == http.MethodGet && (r.URL.Path == "/softphone/access" || strings.HasPrefix(r.URL.Path, "/softphone/listen-audit/"))) {
+	if r.Method != http.MethodPost && !(r.Method == http.MethodGet && (r.URL.Path == "/softphone/access" || r.URL.Path == "/softphone/numbers" || strings.HasPrefix(r.URL.Path, "/softphone/listen-audit/"))) {
 		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -881,6 +926,10 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 	project, err := a.panelProject(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	if r.URL.Path == "/softphone/numbers" {
+		a.handleSoftphoneNumbers(w, r, project)
 		return
 	}
 	if r.URL.Path == "/softphone/access" {
@@ -982,6 +1031,13 @@ func (a *App) softphonePlace(w http.ResponseWriter, r *http.Request, project str
 	session, err := a.placeHumanCallForUserWithOptions(ctx, p, project, to, strings.TrimSpace(body.From), body.TimeoutSec, body.Recording,
 		outboundCallOptions{MachineDetection: body.MachineDetection, MachineDetectionAction: body.MachineDetectionAction}, body.IdempotencyKey)
 	if err != nil {
+		if errors.Is(err, errOutboundDisabled) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			writeJSON(w, map[string]any{"code": "outbound_disabled", "message": "Outbound use is disabled"})
+			return
+		}
+
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}

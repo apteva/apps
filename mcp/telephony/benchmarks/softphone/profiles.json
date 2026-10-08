@@ -3,8 +3,14 @@
     "name": "browser-seven-second-catchup",
     "expectation": "recovery",
     "browser_delivery_pause": true,
-    "down": {"kbps": 10000, "outage_at_ms": 4000, "outage_ms": 7230},
-    "up": {"kbps": 10000},
+    "down": {
+      "kbps": 10000,
+      "outage_at_ms": 4000,
+      "outage_ms": 7230
+    },
+    "up": {
+      "kbps": 10000
+    },
     "max_p95_ms": 500,
     "max_missing_pct": 50
   },
@@ -12,8 +18,12 @@
     "name": "main-thread-two-second-pause",
     "expectation": "usable",
     "main_thread_pause_ms": 2000,
-    "down": {"kbps": 10000},
-    "up": {"kbps": 10000},
+    "down": {
+      "kbps": 10000
+    },
+    "up": {
+      "kbps": 10000
+    },
     "max_p95_ms": 350,
     "max_missing_pct": 5
   },
@@ -21,8 +31,12 @@
     "name": "browser-48k-fallback",
     "expectation": "usable",
     "audio_context_rate": 48000,
-    "down": {"kbps": 10000},
-    "up": {"kbps": 10000},
+    "down": {
+      "kbps": 10000
+    },
+    "up": {
+      "kbps": 10000
+    },
     "max_p95_ms": 350,
     "max_missing_pct": 5
   },
@@ -228,5 +242,153 @@
     "max_p95_ms": 500,
     "max_missing_pct": 20,
     "reconnect_browser": true
+  },
+  {
+    "name": "webrtc-baseline",
+    "media_transport": "webrtc",
+    "expectation": "usable",
+    "down": {
+      "kbps": 10000
+    },
+    "up": {
+      "kbps": 10000
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 5
+  },
+  {
+    "name": "webrtc-microphone-mute",
+    "media_transport": "webrtc",
+    "expectation": "recovery",
+    "down": {
+      "kbps": 10000
+    },
+    "up": {
+      "kbps": 10000
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 20,
+    "mute_microphone": true
+  },
+  {
+    "name": "webrtc-reconnect",
+    "media_transport": "webrtc",
+    "expectation": "recovery",
+    "down": {
+      "kbps": 10000
+    },
+    "up": {
+      "kbps": 10000
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 20,
+    "reconnect_browser": true
+  },
+  {
+    "name": "webrtc-udp-128k",
+    "media_transport": "webrtc",
+    "rtc_udp": true,
+    "expectation": "usable",
+    "up": {
+      "kbps": 128,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "down": {
+      "kbps": 128,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 5
+  },
+  {
+    "name": "webrtc-udp-96k",
+    "media_transport": "webrtc",
+    "rtc_udp": true,
+    "expectation": "usable",
+    "up": {
+      "kbps": 96,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "down": {
+      "kbps": 96,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 5
+  },
+  {
+    "name": "webrtc-udp-64k",
+    "media_transport": "webrtc",
+    "rtc_udp": true,
+    "expectation": "usable",
+    "up": {
+      "kbps": 64,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "down": {
+      "kbps": 64,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 5
+  },
+  {
+    "name": "webrtc-udp-48k",
+    "media_transport": "webrtc",
+    "rtc_udp": true,
+    "expectation": "degradation",
+    "up": {
+      "kbps": 48,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "down": {
+      "kbps": 48,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 5
+  },
+  {
+    "name": "webrtc-udp-32k",
+    "media_transport": "webrtc",
+    "rtc_udp": true,
+    "expectation": "degradation",
+    "up": {
+      "kbps": 32,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "down": {
+      "kbps": 32,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 5
+  },
+  {
+    "name": "websocket-64k",
+    "media_transport": "websocket",
+    "expectation": "degradation",
+    "up": {
+      "kbps": 64,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "down": {
+      "kbps": 64,
+      "latency_ms": 20,
+      "jitter_ms": 5
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 5
   }
 ]

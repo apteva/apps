@@ -634,6 +634,7 @@ function AudioProcessingSettings({
     <div className="rounded border border-border/70 p-3">
       <div className="text-xs font-medium">Audio devices and processing</div>
       <div className="grid gap-2 mt-2 text-xs">
+        <label>Audio transport <select disabled={disabled} value={value.mediaTransport ?? "websocket"} onChange={e=>onChange({...value,mediaTransport:e.target.value as SoftphoneAudioOptions["mediaTransport"]})} className="max-w-full border border-border bg-bg rounded p-2"><option value="websocket">WebSocket (default)</option><option value="webrtc">WebRTC / Opus</option><option value="auto">Automatic (WebRTC, then WebSocket)</option></select></label>
         <label>Microphone <select disabled={disabled} value={value.inputDeviceId || ""} onChange={e=>onChange({...value,inputDeviceId:e.target.value})} className="max-w-full border border-border bg-bg rounded p-2"><option value="">System default</option>{devices.filter(d=>d.kind==="audioinput").map((d,i)=><option key={d.deviceId || i} value={d.deviceId}>{d.label || `Microphone ${i+1}`}</option>)}</select></label>
         {typeof AudioContext!=="undefined" && "setSinkId" in AudioContext.prototype ? <label>Speaker <select disabled={disabled} value={value.outputDeviceId || ""} onChange={e=>onChange({...value,outputDeviceId:e.target.value})} className="max-w-full border border-border bg-bg rounded p-2"><option value="">System default</option>{devices.filter(d=>d.kind==="audiooutput").map((d,i)=><option key={d.deviceId || i} value={d.deviceId}>{d.label || `Speaker ${i+1}`}</option>)}</select></label> : <span>Speaker output follows your system settings in this browser.</span>}
         <label>Speaker volume <input type="range" min="0" max="1" step="0.05" disabled={disabled} value={value.outputVolume ?? 1} onChange={e=>onChange({...value,outputVolume:Number(e.target.value)})}/></label>
@@ -1057,7 +1058,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
       const data = await postJSON<ConnectedNumbersResponse>(withProject("/numbers/connected"), {});
       const seen = new Set<string>();
       const available = (data.numbers ?? []).filter((number) => {
-        if (!E164_RE.test(number.phone_number) || number.carrier_status === "not_found" || seen.has(number.phone_number)) return false;
+        if (number.outbound_enabled === false || !E164_RE.test(number.phone_number) || number.carrier_status === "not_found" || seen.has(number.phone_number)) return false;
         if ((number.capabilities?.length ?? 0) > 0 && !number.capabilities?.includes("voice")) return false;
         seen.add(number.phone_number);
         return true;
@@ -1069,7 +1070,8 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
         if (available.some((number) => number.phone_number === saved)) return saved;
         return available.length === 1 ? available[0].phone_number : "";
       });
-      if (available.length === 0) setFromError("No voice-capable numbers are connected to this carrier.");
+      if (available.length === 0) setFromError(data.inventory_status === "unavailable" ? "Carrier inventory unavailable." : "No enabled voice-capable caller IDs.");
+      else if (data.warnings?.length) setFromError(data.warnings.map(w => `${w.provider}: ${w.message}`).join("; "));
     } catch (error) {
       setFromNumbers([]);
       setFromNumber("");
@@ -1625,6 +1627,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                   <LiveLevels sink={levelsSink} />
                   {diagnostics ? (
                     <div className="text-xs text-text-dim tabular-nums">
+                      {diagnostics.mediaTransport === "webrtc" ? `WebRTC / Opus · ${diagnostics.webrtc?.protocol ?? "negotiating"} · ` : "WebSocket / PCM · "}
                       Browser ↔ app RTT {diagnostics.rttMs === null ? "–" : `${diagnostics.rttMs} ms`}
                       {` · buffer ${diagnostics.queueMs}/${diagnostics.targetMs} ms (max ${diagnostics.maxQueueMs})`}
                       {` · underruns ${diagnostics.underruns}`}
@@ -1830,6 +1833,10 @@ interface ProjectAgent {
 }
 
 interface ConnectedNumber {
+ carrier_connection_id: number;
+ outbound_enabled: boolean;
+ outbound_number_enabled: boolean;
+ outbound_disabled_reason?: string;
   phone_number: string;
   provider: string;
   provider_number_id?: string;
@@ -1865,6 +1872,9 @@ interface OutboundReadiness {
 }
 
 interface ConnectedNumbersResponse {
+ inventory_status?: string;
+ warnings?: Array<{provider:string;carrier_connection_id:number;message:string}>;
+ provider_statuses?: Array<{provider:string;carrier_connection_id:number;outbound_enabled:boolean;connection_outbound_enabled:boolean;binding_state:string;provider_outbound_enabled:boolean;inventory_status:string}>;
   provider: string;
   count: number;
   numbers: ConnectedNumber[];
@@ -1965,6 +1975,9 @@ function NumbersView({ projectId }: NativePanelProps) {
   const [connectedProvider, setConnectedProvider] = useState("");
   const [connectedLoading, setConnectedLoading] = useState(false);
   const [connectedError, setConnectedError] = useState("");
+  const [inventoryWarnings, setInventoryWarnings] = useState<NonNullable<ConnectedNumbersResponse["warnings"]>>([]);
+  const [providerStatuses,setProviderStatuses] = useState<NonNullable<ConnectedNumbersResponse["provider_statuses"]>>([]);
+  const [outboundSaving,setOutboundSaving] = useState("");
   const [directSIP, setDirectSIP] = useState<ConnectedNumbersResponse["direct_sip"]>();
   const [transportDrafts, setTransportDrafts] = useState<Record<string, string>>({});
   const [transportSaving, setTransportSaving] = useState("");
@@ -2001,7 +2014,10 @@ function NumbersView({ projectId }: NativePanelProps) {
     try {
       const data = await postJSON<ConnectedNumbersResponse>(endpoint("/numbers/connected"), {});
       if (requestId !== connectedRequestRef.current) return;
+      setInventoryWarnings(data.warnings ?? []);
+      setProviderStatuses(data.provider_statuses ?? []);
       setConnectedProvider(data.provider || "");
+      if (data.inventory_status === "unavailable") setConnectedError("Carrier inventories are unavailable. Check the provider warnings below.");
       setConnectedNumbers(data.numbers ?? []);
       setDirectSIP(data.direct_sip);
       setTransportDrafts(Object.fromEntries(
@@ -2019,6 +2035,8 @@ function NumbersView({ projectId }: NativePanelProps) {
       }
     } catch (e) {
       if (requestId !== connectedRequestRef.current) return;
+      setProviderStatuses([]);
+      setInventoryWarnings([]);
       setConnectedNumbers([]);
       setConnectedProvider("");
       setDirectSIP(undefined);
@@ -2209,14 +2227,24 @@ function NumbersView({ projectId }: NativePanelProps) {
     setRouteSaving(routeId);
     setTransportStatus("");
     try {
-      await postJSON(endpoint("/numbers/routes/disable"), { route_id: routeId });
-      setTransportStatus(`${number.phone_number} route disabled; the carrier webhook was restored`);
+      await postJSON(endpoint(number.route.enabled ? "/numbers/routes/disable" : "/numbers/routes/enable"), { route_id: routeId });
+      setTransportStatus(`${number.phone_number}: inbound ${number.route.enabled ? "disabled" : "enabled"}. Existing calls continue.`);
     } catch (e) {
       setTransportStatus((e as Error).message || "Could not disable the inbound route");
     } finally {
       await loadConnected();
       setRouteSaving("");
     }
+  };
+
+  const setOutboundEnabled = async (scope: "number" | "connection" | "provider", value: string, enabled: boolean) => {
+    const key = `${scope}:${value}`;
+    setOutboundSaving(key);setTransportStatus("");
+    try {
+      await postJSON(endpoint("/numbers/outbound-policy"),{scope,value,enabled});
+      setTransportStatus(`Outbound ${enabled ? "enabled" : "disabled"} for ${value}. Existing calls and inbound routes continue.`);
+    } catch(error) {setTransportStatus((error as Error).message)}
+    finally {await loadConnected();setOutboundSaving("")}
   };
 
   return (
@@ -2254,6 +2282,25 @@ function NumbersView({ projectId }: NativePanelProps) {
             </button>
           </header>
 
+          <div className="px-4 py-2 flex flex-wrap gap-2">
+            {providerStatuses.filter((p,i,list) => list.findIndex(item => item.provider === p.provider) === i).map(p => <button key={p.provider} type="button"
+              disabled={connectedLoading || outboundSaving !== ""}
+              onClick={() => void setOutboundEnabled("provider",p.provider,!p.provider_outbound_enabled)}
+              className="rounded border border-border px-2 py-1 text-xs hover:bg-bg-muted disabled:opacity-40">
+              All {p.provider} outbound · {p.provider_outbound_enabled ? "disable" : "enable"}
+            </button>)}
+
+            {providerStatuses.map(p => <button key={p.carrier_connection_id} type="button"
+              disabled={connectedLoading || outboundSaving !== "" || p.binding_state !== "active"}
+              onClick={() => void setOutboundEnabled("connection",String(p.carrier_connection_id),!p.connection_outbound_enabled)}
+              className="rounded border border-border px-2 py-1 text-xs hover:bg-bg-muted disabled:opacity-40">
+              {p.provider} · connection {p.carrier_connection_id} · outbound {p.binding_state !== "active" ? p.binding_state : p.connection_outbound_enabled ? "enabled — disable" : "disabled — enable"}
+            </button>)}
+          </div>
+          <p className="px-4 pb-2 text-xs text-text-muted">Inbound and outbound controls are independent. Existing calls continue. Provider and account rules also apply to individual numbers.</p>
+          {inventoryWarnings.map(w => <div key={w.carrier_connection_id} role="status" className="px-4 py-2 text-xs text-warning">{w.provider}: {w.message}</div>)}
+
+
           {connectedLoading && connectedNumbers.length === 0 ? (
             <div className="flex items-center justify-center px-6 text-sm text-text-muted" style={{ minHeight: "10rem" }}>
               Loading connected numbers...
@@ -2289,6 +2336,13 @@ function NumbersView({ projectId }: NativePanelProps) {
                     <div className="min-w-0">
                       <div className="truncate font-medium">{number.phone_number}</div>
                       <div className="truncate text-xs text-text-muted">{number.friendly_name || "-"}</div>
+                      <button type="button" disabled={connectedLoading || outboundSaving !== ""}
+                        onClick={() => void setOutboundEnabled("number",number.phone_number,!number.outbound_number_enabled)}
+                        className="mt-1 rounded border border-border px-2 py-1 text-xs hover:bg-bg-muted disabled:opacity-40">
+                        {number.outbound_number_enabled ? "Disable outbound" : "Enable outbound"}
+                      </button>
+                      {number.outbound_disabled_reason ? <div className="text-xs text-warning">Outbound disabled by policy</div> : null}
+
                       <div className="truncate font-mono text-xs text-text-dim" title={number.provider_number_id}>{compactId(number.provider_number_id || "")}</div>
                     </div>
                     <div className="min-w-0">
@@ -2304,16 +2358,16 @@ function NumbersView({ projectId }: NativePanelProps) {
                             <span className={`inline-flex rounded border px-2 py-0.5 text-xs ${number.route.enabled ? "border-success/30 bg-success/10 text-success" : "border-border bg-bg-muted text-text-muted"}`}>
                               {number.route.enabled ? "Enabled" : "Disabled"}
                             </span>
-                            {number.route.enabled ? (
+                            {(
                               <button
                                 type="button"
                                 disabled={routeSaving === number.route.id}
                                 onClick={() => void disableRoute(number)}
                                 className="h-7 rounded border border-border px-2 text-xs hover:bg-bg-muted disabled:opacity-40"
                               >
-                                Disable
+                                {number.route.enabled ? "Disable inbound" : "Enable inbound"}
                               </button>
-                            ) : null}
+                            )}
                           </div>
                         </>
                       ) : (

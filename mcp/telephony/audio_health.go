@@ -515,6 +515,14 @@ func (a *App) sampleAudioHealth(row *callRow, h *softphoneHub, w *websocketWrite
 		{"telephony_to_browser", "playback_delivery_over_budget", false, active, playback + float64(s.ToBrowser.StaleBytes+s.ToBrowser.SourceStaleBytes+s.ToBrowser.OverflowBytes)/48},
 		{"browser_to_telephony", "capture_delivery_over_budget", false, browserActive && !b.MicrophoneMuted && !b.MicrophoneDeviceMuted, capture + float64(s.CaptureStaleBytes)/48},
 	}
+	if b.MediaTransport == "webrtc" {
+		observations[1].Counter += float64(s.WebRTC.OutboundDroppedMS + s.WebRTC.PacingSkippedMS)
+		observations[2].Counter += float64(s.WebRTC.IngressRejectedPackets + s.WebRTC.IngressQueueDrops + s.WebRTC.DecodeErrors)
+		if b.WebRTC != nil {
+			observations[1].Bad = b.WebRTC.JitterBufferMS > 320
+			observations[1].Counter += b.WebRTC.PacketsLost + b.WebRTC.PacketsDiscarded
+		}
+	}
 	changes := h.telemetry.observeHealth(now, observations)
 	h.telemetry.mu.Lock()
 	first := h.telemetry.healthWriter != w

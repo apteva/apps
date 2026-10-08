@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.10.5
+version: 0.11.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -65,6 +65,7 @@ provides:
     - { prefix: /recording-settings }
     - { prefix: /call-control-settings }
     - { prefix: /numbers/ }
+    - { method: POST, prefix: /_runtime/bindings }
     - { prefix: /routing/ }
     - { prefix: /access/ }
     - { prefix: /user/, no_auth: true }
@@ -83,7 +84,9 @@ provides:
     - { name: telephony_routes_set_recording_policy, description: "Set recording behavior for future calls on an inbound route." }
     - { name: telephony_routes_set_transport, description: "Select programmable WebSocket or direct SIP transport for an inbound route." }
     - { name: telephony_routes_configure_carrier, description: "Configure carrier routing for an inbound route. Args: route_id." }
-    - { name: telephony_routes_disable, description: "Disable an inbound route and restore its previous carrier webhook. Args: route_id." }
+    - { name: telephony_routes_set_enabled, description: "Enable or disable new inbound admission without changing active calls or carrier resources. Args: route_id, enabled." }
+    - { name: telephony_outbound_policy, description: "Read or change project outbound admission controls for a number, provider or connection; platform principals only." }
+    - { name: telephony_routes_disable, description: "Disable new inbound admission on a route without changing carrier resources or active calls. Args: route_id." }
     - { name: telephony_routes_list,  description: "List inbound call routes. Agents see their own; platform callers see the whole project." }
     - { name: telephony_flows_create, description: "Create a draft carrier-neutral IVR/routing flow." }
     - { name: telephony_flows_list, description: "List routing flows." }
@@ -297,6 +300,11 @@ db:
 config_schema:
   - { name: audio_alert_min_calls, type: text, default: "3", label: "Audio alert minimum distinct calls", description: "2–256 affected calls per project/provider/stage within 30 seconds. 0 disables alerts; invalid values use 3." }
   - { name: audio_alert_cooldown_seconds, type: text, default: "120", label: "Audio alert cooldown (seconds)", description: "30–3600 seconds between correlated alerts for the same project/provider/stage." }
+  - { name: softphone_webrtc_enabled, type: boolean, default: false, label: "Enable optional WebRTC softphone", description: "Enable browser Opus/RTP media. WebSocket remains the client default. Requires reachable ICE/UDP or configured TURN." }
+  - { name: softphone_webrtc_ice_servers, type: text, label: "WebRTC ICE servers (JSON)", description: "Optional ICE server array with urls, username and credential. Sent only to authenticated media sessions; use restricted TURN credentials. Empty uses host candidates." }
+  - { name: softphone_webrtc_public_ips, type: text, label: "WebRTC public addresses", description: "Optional comma-separated public IPv4/IPv6 addresses for host candidates behind NAT." }
+  - { name: softphone_webrtc_udp_port_min, type: text, label: "WebRTC UDP range start", description: "Optional range 1024–65535. Configure both bounds and forward the range to the sidecar. Empty uses ephemeral ports." }
+  - { name: softphone_webrtc_udp_port_max, type: text, label: "WebRTC UDP range end", description: "Inclusive UDP range end; must be greater than or equal to the start." }
   - { name: audio_telemetry_trusted_proxy_cidrs, type: text, label: "Trusted proxy CIDRs for audio telemetry", description: "Optional comma-separated CIDRs. Only these immediate proxies may supply X-Forwarded-For; otherwise telemetry hashes the socket peer address. Hashes are scoped to this process and contain no raw IP." }
   - { name: audio_telemetry_known_vpn_exits, type: text, label: "Known office VPN exits", description: "Optional comma-separated IPv4/IPv6 addresses or CIDRs. Observational known_vpn_exit/unknown labels only; never blocks calls or media." }
   - { name: audio_telemetry_network_retention_days, type: text, default: "7", label: "Browser network event retention (days)", description: "1–31 days, snapshotted per connection. Raw IP connection events are operator-only; expired events are hidden and purged in background batches. No effect on calls." }

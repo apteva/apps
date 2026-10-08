@@ -32,6 +32,7 @@ func (c *callsDB) updateRouteTransport(id, transport, config string) error {
 func (c *callsDB) findDirectSIPRouteByNumber(phone string) (*routeRow, error) {
 	rows, err := c.db.Query(`SELECT id FROM inbound_routes
 		WHERE inbound_transport = ? AND enabled = 1 AND phone_number = ?
+ AND NOT EXISTS (SELECT 1 FROM carrier_binding_drains d WHERE d.connection_id=inbound_routes.carrier_connection_id)
 		ORDER BY updated_at DESC LIMIT 2`, inboundTransportSIPDirect, phone)
 	if err != nil {
 		return nil, err

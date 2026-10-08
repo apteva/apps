@@ -3,6 +3,7 @@ export type { TelephonyClientOptions, Call, CallSession, CallTermination, DialRe
 export { HeadlessSoftphone, phaseForStatus } from "./softphone";
 export type { SoftphoneSnapshot, SoftphoneOptions, SoftphonePhase, RingbackOptions } from "./softphone";
 export type { AudioRuntime, AudioConnection, MicrophoneDevice, MicrophonePreview } from "./audio";
+export type { MediaTransport } from "./webrtc-audio";
 export { DEFAULT_SOFTPHONE_AUDIO_OPTIONS } from "../../ui/softphone-audio";
 export type { SoftphoneAudioHealth, SoftphoneAudioOptions, SoftphoneDiagnostics, SoftphoneCallbacks, SoftphoneCallStatus } from "../../ui/softphone-audio";
 export { DEFAULT_RINGBACK_COUNTRY, RINGBACK_PATTERNS, ringbackPattern, ringbackTimeline } from "../../ui/ringback";

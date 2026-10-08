@@ -13,6 +13,7 @@ export function usePanelSoftphone(projectId: string, installId: number, options:
   useEffect(() => {
     const controller = client.createSoftphone({
       audio: callbacks.current.audio,
+      mediaTransport: callbacks.current.mediaTransport,
       pollIntervalMs: 0, // CallsView already watches the call list.
       ringback: callbacks.current.ringback ?? true, // The bundled panel plays ringback; the SDK default stays off.
       onLevels: (mic, speaker) => callbacks.current.onLevels?.(mic, speaker),
