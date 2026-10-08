@@ -22,8 +22,13 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.14.16
+version: 0.14.17
 description: |
+  v0.14.17 adds bounded media_ask retries for transient vision/chat failures,
+  including generic Codex stream errors. Three attempts share one timeout,
+  respect retry/reset hints and never overlap a still-running call. Explicit
+  auth, quota/billing and invalid-input failures stop without retry. Returned
+  diagnostics retain attempt counts and the available upstream failure detail.
   v0.14.16 retries encoded audio peak overshoots with bounded adaptive
   headroom while preserving the loudness target and validated video evidence.
   Upload quota and rate-limit errors retain their Storage phase/cause; only
@@ -337,7 +342,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.16
+    ref: media/v0.14.17
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -532,7 +537,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_ask",
-			Description: "Ask a grounded question about a media file using the configured descriptions vision/chat integration. Images use an existing thumbnail or source object. Videos use the existing canonical thumbnail plus cached storyboard keyframes; at_ms selects the nearest existing keyframe and reports its actual timestamp. Audio uses an existing completed transcript. This tool never runs ffmpeg, generates frames/derivations, or writes files.",
+			Description: "Ask a grounded question about a media file using the configured descriptions vision/chat integration. Images use an existing thumbnail or source object. Videos use the existing canonical thumbnail plus cached storyboard keyframes; at_ms selects the nearest existing keyframe and reports its actual timestamp. Audio uses an existing completed transcript. Transient vision/chat failures get up to three attempts within one timeout; request_diagnostics reports attempts and upstream failures. Explicit auth/quota/invalid-input failures stop without retry. This tool never runs ffmpeg, generates frames/derivations, or writes files.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":            map[string]any{"type": "string"},
 				"question":           map[string]any{"type": "string", "maxLength": maxAskQuestionChars},

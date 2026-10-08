@@ -134,20 +134,17 @@ func (a *App) toolAsk(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		callArgs["temperature"] = 0
 	}
 	timeout := time.Duration(parseConfigIntFallback(ctx.Config().Get("describe_timeout_seconds"), 120)) * time.Second
-	res, err := executeIntegrationToolWithTimeoutKey(ctx, "media_ask", bound.ConnectionID, bound.ToolFor("chat.complete"), callArgs, timeout)
+	res, requestDiagnostics, err := executeAskIntegrationWithRetry(ctx, bound.ConnectionID, bound.ToolFor("chat.complete"), callArgs, timeout)
 	if err != nil {
 		return nil, fmt.Errorf("media_ask integration call: %w", err)
 	}
-	if res == nil || !res.Success {
-		body := ""
-		if res != nil {
-			body = string(res.Data)
-		}
-		return nil, fmt.Errorf("media_ask integration returned an error: %s", truncate(body, 500))
-	}
 	answer, err := extractChatContent(res.Data)
-	if err != nil {
-		return nil, fmt.Errorf("media_ask response: %w", err)
+	if err != nil || strings.TrimSpace(answer) == "" {
+		if err == nil {
+			err = errors.New("provider returned empty answer")
+		}
+		requestDiagnostics.StopReason = "invalid_provider_response"
+		return nil, &askIntegrationError{Diagnostics: requestDiagnostics, Cause: fmt.Errorf("media_ask response: %w", err)}
 	}
 
 	publicEvidence := make([]askEvidence, len(evidence))
@@ -160,8 +157,9 @@ func (a *App) toolAsk(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"coverage": askCoverage{
 			Method: method, FramesAnalyzed: len(evidence), TranscriptUsed: transcriptUsed, ArtifactsCreated: false,
 		},
-		"model":       model,
-		"limitations": limitations,
+		"model":               model,
+		"limitations":         limitations,
+		"request_diagnostics": requestDiagnostics,
 	}, nil
 }
 
