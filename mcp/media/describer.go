@@ -189,6 +189,8 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 	cfg := app.Config()
 	model := defaultDescribeModel(bound.AppSlug, strings.TrimSpace(cfg.Get("describe_model")))
 	tool := bound.ToolFor("chat.complete")
+	// Keep the logical chat capability as the persisted backoff key, including
+	// cooldowns recorded before Codex switched to raw Responses requests.
 	active, err := descriptionBackoffActive(db, bound.ConnectionID, tool, model, time.Now())
 	if err != nil {
 		log.Warn("describer retry state unavailable", "err", err)
@@ -273,21 +275,11 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 	maxTokens := parseConfigIntFallback(cfg.Get("describe_max_tokens"), 8000)
 	timeout := time.Duration(parseConfigIntFallback(cfg.Get("describe_timeout_seconds"), 120)) * time.Second
 
-	args := map[string]any{
-		"model":      model,
-		"messages":   messages,
-		"max_tokens": maxTokens,
-	}
-	if bound.AppSlug != "openai-codex" {
-		// Mostly factual; a hair of creativity for nicer prose. The
-		// ChatGPT subscription-backed Codex Responses runtime rejects
-		// this parameter, so omit it for openai-codex bindings.
-		args["temperature"] = 0.3
-	}
+	requestTool, args := observationRequest(bound, model, messages, maxTokens, 0.3)
 
 	res, err := executeIntegrationToolWithTimeout(app,
 		bound.ConnectionID,
-		bound.ToolFor("chat.complete"),
+		requestTool,
 		args,
 		timeout,
 	)
@@ -324,7 +316,7 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 		log.Warn("clear description backoff", "err", err)
 	}
 
-	rawContent, err := extractChatContent(res.Data)
+	rawContent, err := extractObservationContent(bound.AppSlug, res.Data)
 	if err != nil {
 		_ = markDescribeAttempt(db, projectID, fileID, "parse describe: "+err.Error())
 		return

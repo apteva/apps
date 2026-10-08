@@ -284,7 +284,7 @@ func TestRunOneDescription_OpenAICodexBindingUsesCodexModel(t *testing.T) {
 	stub := boundOpenAICodex()
 	stub.executeResp = &sdk.ExecuteResult{
 		Success: true, Status: 200,
-		Data: canonOK(`{"description":"A short meeting summary.","audience_rating":"general","audience_reasoning":""}`),
+		Data: codexOK(`{"description":"A short meeting summary.","audience_rating":"general","audience_reasoning":""}`),
 	}
 	ctx := newTestCtxWithPlatform(t, stub)
 
@@ -300,14 +300,21 @@ func TestRunOneDescription_OpenAICodexBindingUsesCodexModel(t *testing.T) {
 	if len(stub.ExecuteCalls) != 1 {
 		t.Fatalf("expected 1 ExecuteIntegrationTool call, got %d", len(stub.ExecuteCalls))
 	}
-	if stub.ExecuteCalls[0].Tool != "chat_completion" {
-		t.Errorf("tool=%q want chat_completion", stub.ExecuteCalls[0].Tool)
+	if stub.ExecuteCalls[0].Tool != "responses_create" {
+		t.Errorf("tool=%q want responses_create", stub.ExecuteCalls[0].Tool)
 	}
 	if model, _ := stub.ExecuteCalls[0].Input["model"].(string); model != "gpt-5.5" {
 		t.Errorf("model=%q want gpt-5.5", model)
 	}
 	if _, ok := stub.ExecuteCalls[0].Input["temperature"]; ok {
 		t.Errorf("openai-codex payload must omit temperature")
+	}
+	if got := stub.ExecuteCalls[0].Input["reasoning"].(map[string]any)["effort"]; got != "low" {
+		t.Fatalf("effort=%v", got)
+	}
+	got, _ := getMedia(ctx.AppDB(), testProj, "1")
+	if got.Description != "A short meeting summary." {
+		t.Fatalf("description=%q", got.Description)
 	}
 }
 

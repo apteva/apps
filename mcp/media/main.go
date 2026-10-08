@@ -22,8 +22,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.14.17
+version: 0.14.18
 description: |
+  v0.14.18 explicitly uses low Codex reasoning for observations and media_ask.
+  Raw Responses requests preserve the selected model, prompts and evidence;
+  completed answers must confirm low effort. Existing retry and cooldown
+  protections remain in place. Other providers retain their existing settings.
   v0.14.17 adds bounded media_ask retries for transient vision/chat failures,
   including generic Codex stream errors. Three attempts share one timeout,
   respect retry/reset hints and never overlap a still-running call. Explicit
@@ -342,7 +346,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.17
+    ref: media/v0.14.18
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -537,7 +541,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_ask",
-			Description: "Ask a grounded question about a media file using the configured descriptions vision/chat integration. Images use an existing thumbnail or source object. Videos use the existing canonical thumbnail plus cached storyboard keyframes; at_ms selects the nearest existing keyframe and reports its actual timestamp. Audio uses an existing completed transcript. Transient vision/chat failures get up to three attempts within one timeout; request_diagnostics reports attempts and upstream failures. Explicit auth/quota/invalid-input failures stop without retry. This tool never runs ffmpeg, generates frames/derivations, or writes files.",
+			Description: "Ask a grounded question about a media file using the configured descriptions vision/chat integration. Images use an existing thumbnail or source object. Videos use the existing canonical thumbnail plus cached storyboard keyframes; at_ms selects the nearest existing keyframe and reports its actual timestamp. Audio uses an existing completed transcript. Codex requests explicitly use low reasoning and report reasoning_effort. Transient vision/chat failures get up to three attempts within one timeout; request_diagnostics reports attempts and upstream failures. Explicit auth/quota/invalid-input failures stop without retry. This tool never runs ffmpeg, generates frames/derivations, or writes files.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":            map[string]any{"type": "string"},
 				"question":           map[string]any{"type": "string", "maxLength": maxAskQuestionChars},

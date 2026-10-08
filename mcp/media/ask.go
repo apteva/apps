@@ -125,20 +125,13 @@ func (a *App) toolAsk(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 	messages := buildAskMessages(question, evidence, transcriptText)
 	model := defaultDescribeModel(bound.AppSlug, strings.TrimSpace(ctx.Config().Get("describe_model")))
-	callArgs := map[string]any{
-		"model":      model,
-		"messages":   messages,
-		"max_tokens": parseConfigIntFallback(ctx.Config().Get("describe_max_tokens"), 8_000),
-	}
-	if bound.AppSlug != "openai-codex" {
-		callArgs["temperature"] = 0
-	}
+	tool, callArgs := observationRequest(bound, model, messages, parseConfigIntFallback(ctx.Config().Get("describe_max_tokens"), 8_000), 0)
 	timeout := time.Duration(parseConfigIntFallback(ctx.Config().Get("describe_timeout_seconds"), 120)) * time.Second
-	res, requestDiagnostics, err := executeAskIntegrationWithRetry(ctx, bound.ConnectionID, bound.ToolFor("chat.complete"), callArgs, timeout)
+	res, requestDiagnostics, err := executeAskIntegrationWithRetry(ctx, bound.ConnectionID, tool, callArgs, timeout)
 	if err != nil {
 		return nil, fmt.Errorf("media_ask integration call: %w", err)
 	}
-	answer, err := extractChatContent(res.Data)
+	answer, err := extractObservationContent(bound.AppSlug, res.Data)
 	if err != nil || strings.TrimSpace(answer) == "" {
 		if err == nil {
 			err = errors.New("provider returned empty answer")
@@ -149,7 +142,7 @@ func (a *App) toolAsk(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 	publicEvidence := make([]askEvidence, len(evidence))
 	copy(publicEvidence, evidence)
-	return map[string]any{
+	result := map[string]any{
 		"found":    true,
 		"file_id":  fid,
 		"answer":   answer,
@@ -160,7 +153,11 @@ func (a *App) toolAsk(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"model":               model,
 		"limitations":         limitations,
 		"request_diagnostics": requestDiagnostics,
-	}, nil
+	}
+	if bound.AppSlug == "openai-codex" {
+		result["reasoning_effort"] = codexObservationEffort
+	}
+	return result, nil
 }
 
 func optionalNonNegativeInt64(args map[string]any, key string) (int64, bool, error) {

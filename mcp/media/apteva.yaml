@@ -2,8 +2,12 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.17
+version: 0.14.18
 description: |
+  v0.14.18 explicitly uses low Codex reasoning for observations and media_ask.
+  Raw Responses requests preserve the selected model, prompts and evidence;
+  completed answers must confirm low effort. Existing retry and cooldown
+  protections remain in place. Other providers retain their existing settings.
   v0.14.17 adds bounded media_ask retries for transient vision/chat failures,
   including generic Codex stream errors. Three attempts share one timeout,
   respect retry/reset hints and never overlap a still-running call. Explicit
@@ -180,7 +184,7 @@ provides:
     - name: media_analyze
       description: Analyze an existing image, video, or audio source without modifying it. Returns encoding metadata, decode integrity, visual measurements, every-frame black/frozen checks and opening/ending coverage, plus LUFS/peak/RMS/silence audio measurements where applicable. When render_host_id is configured, analysis runs on that remote host without silent local fallback and reports the effective executor. depth=standard analyzes at most 60 seconds; depth=full analyzes the requested/full duration. Creates no render, derivation, or Storage object. Args — file_id, depth? (standard|full), start_ms?, end_ms?, silence_threshold_db?, silence_min_ms?.
     - name: media_ask
-      description: Ask a grounded question using the configured descriptions vision/chat integration and only artifacts that already exist. Images use an existing thumbnail or source object; videos use the canonical thumbnail and cached storyboard keyframes; at_ms selects the nearest existing keyframe and reports the actual timestamp; audio uses an existing completed transcript. Retries transient vision/chat failures up to three attempts within one timeout; returns request_diagnostics. Explicit auth/quota/invalid-input errors stop immediately. Never runs ffmpeg, generates frames/derivations, or writes files. Args — file_id, question, at_ms?, frame_count? (1-8), include_transcript?.
+      description: Ask a grounded question using the configured descriptions vision/chat integration and only artifacts that already exist. Images use an existing thumbnail or source object; videos use the canonical thumbnail and cached storyboard keyframes; at_ms selects the nearest existing keyframe and reports the actual timestamp; audio uses an existing completed transcript. Codex requests explicitly use low reasoning and report reasoning_effort. Retries transient vision/chat failures up to three attempts within one timeout; returns request_diagnostics. Explicit auth/quota/invalid-input errors stop immediately. Never runs ffmpeg, generates frames/derivations, or writes files. Args — file_id, question, at_ms?, frame_count? (1-8), include_transcript?.
     - name: media_get_batch
       description: Read descriptions, status, rating and duration for up to 100 explicit file_ids without scanning or signing URLs.
     - name: media_search
@@ -577,7 +581,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.17
+    ref: media/v0.14.18
     entry: mcp/media
   port: 8080
   health_check: /health

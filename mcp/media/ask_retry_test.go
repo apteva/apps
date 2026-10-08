@@ -138,7 +138,7 @@ func (s *askSequencePlatform) ExecuteIntegrationTool(conn int64, tool string, in
 	if call == 1 {
 		return &sdk.ExecuteResult{Status: 200, Data: json.RawMessage(`{"error":"Codex stream ended with error"}`)}, nil
 	}
-	return &sdk.ExecuteResult{Success: true, Status: 200, Data: canonOK("Face and hands are visible.")}, nil
+	return &sdk.ExecuteResult{Success: true, Status: 200, Data: codexOK("Face and hands are visible.")}, nil
 }
 
 func TestMediaAskRetriesSameEvidenceWithoutWrites(t *testing.T) {
@@ -154,6 +154,14 @@ func TestMediaAskRetriesSameEvidenceWithoutWrites(t *testing.T) {
 	d := result["request_diagnostics"].(askRetryDiagnostics)
 	if d.Attempts != 2 || result["answer"] != "Face and hands are visible." || result["coverage"].(askCoverage).ArtifactsCreated {
 		t.Fatal(result)
+	}
+	if result["reasoning_effort"] != "low" {
+		t.Fatal(result)
+	}
+	for _, call := range stub.ExecuteCalls {
+		if call.Tool != "responses_create" || call.Input["reasoning"].(map[string]any)["effort"] != "low" {
+			t.Fatalf("wrong Codex request: %s", call.Tool)
+		}
 	}
 	a, _ := json.Marshal(stub.ExecuteCalls[0].Input)
 	b, _ := json.Marshal(stub.ExecuteCalls[1].Input)
