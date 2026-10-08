@@ -1,4 +1,22 @@
-# CRM v0.9.21
+# CRM v0.9.22
+
+Release `crm/v0.9.22`: background refreshes preserve the loaded thread,
+scroll position and draft shelf instead of replacing them with a loading screen.
+CRM/Messaging live updates are coalesced and slow requests get one queued
+follow-up rather than repeated cancellation. The selected conversation remains
+highlighted as "Currently viewing · outside filters" when it leaves the queue;
+choosing another conversation removes that retained row. Queue counts and
+pagination exclude the retained row. Failed refreshes keep the last snapshot
+with an inline retry, and navigation rejects stale thread responses. UI-only:
+no Messaging changes, schema migrations or production data mutations.
+
+Email, WhatsApp and SMS message rows show
+explicit Contact/Your team and Incoming/Outgoing labels, distinct left/right
+alignment and an outgoing tint in both inbox and contact timelines. Names are
+shown only when the recorded From matches the contact or the channel-specific
+sender. Actual addresses, delivery status, attachments and template snapshots
+remain visible. Integration source is labelled "via", not treated as an author;
+unknown historical senders are not guessed. Failed/test sends remain explicit.
 
 Release `crm/v0.9.21`: Conversation messages display immutable template content
 captured by Messaging v0.13.60+, together with the template name/ID and whether
