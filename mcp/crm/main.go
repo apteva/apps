@@ -164,6 +164,8 @@ func (a *App) handleHTTPContactItem(w http.ResponseWriter, r *http.Request) {
 			// /<cid> apart from /<cid>/status.
 			cp := contactsPathParts(r)
 			switch {
+			case len(cp) == 4 && cp[3] == "unsubscribe":
+				a.handleHTTPUnsubscribeEmail(w, r)
 			case len(cp) >= 4 && cp[3] == "status":
 				a.handleHTTPSetConversationStatus(w, r)
 			case len(cp) >= 3 && cp[2] != "":
@@ -414,6 +416,18 @@ func (a *App) MCPTools() []sdk.Tool {
 				"source":      map[string]any{"type": "string"},
 			}, []string{"contact_id", "kind", "body"}),
 			Handler: a.toolLogActivity,
+		},
+		{
+			Name:        "contacts_unsubscribe_email",
+			Description: "Record an operator-approved email unsubscribe without sending, deleting, closing, or marking spam. Targets the latest inbound email's exact From address belonging to this contact in the current project. Stops all outbound email to that address, including campaigns and manual replies, while preserving incoming replies unless another inbound block exists. Requires Messaging v0.13.59+. dry_run=true (default) previews address and directional blocks; after confirmation pass dry_run=false and that exact expected_address. Readback must confirm the block before success/audit is recorded. Existing spam/domain/bounce blocks are never weakened. Does not parse unsubscribe text automatically or change other projects, domains, addresses, or transports.",
+			InputSchema: schemaObject(map[string]any{
+				"conversation_id":  map[string]any{"type": "integer", "minimum": 1},
+				"id":               map[string]any{"type": "integer", "minimum": 1, "description": "Optional contact ID safety check."},
+				"dry_run":          map[string]any{"type": "boolean", "default": true},
+				"expected_address": map[string]any{"type": "string", "description": "Exact address from the preview; required when dry_run=false."},
+				"source":           map[string]any{"type": "string"},
+			}, []string{"conversation_id"}),
+			Handler: a.toolUnsubscribeEmail,
 		},
 		{
 			Name:        "contacts_set_attribute",
@@ -3175,7 +3189,7 @@ func dbActivities(db *sql.DB, pid string, contactID int64, limit int) ([]*Activi
 	// agents log to the same microsecond.
 	rows, err := db.Query(
 		`SELECT id, contact_id, kind, body, occurred_at, COALESCE(source,''),
-				COALESCE(conversation_id, 0)
+				COALESCE(conversation_id, 0), COALESCE(source_detail,'')
 		 FROM contact_activities
 		 WHERE project_id = ? AND contact_id = ?
 		 ORDER BY julianday(occurred_at) DESC, id DESC LIMIT ?`,
@@ -3187,7 +3201,7 @@ func dbActivities(db *sql.DB, pid string, contactID int64, limit int) ([]*Activi
 	out := []*Activity{}
 	for rows.Next() {
 		a := &Activity{}
-		if err := rows.Scan(&a.ID, &a.ContactID, &a.Kind, &a.Body, &a.OccurredAt, &a.Source, &a.ConversationID); err != nil {
+		if err := rows.Scan(&a.ID, &a.ContactID, &a.Kind, &a.Body, &a.OccurredAt, &a.Source, &a.ConversationID, &a.SourceDetail); err != nil {
 			rows.Close()
 			return nil, err
 		}

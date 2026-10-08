@@ -1,4 +1,22 @@
-# CRM v0.9.17
+# CRM v0.9.18
+
+Release `crm/v0.9.18`: Inbox and contact-conversation headers offer an explicit
+"Unsubscribe this email" confirmation and an Unsubscribed/Email blocked badge.
+The target is the latest inbound message's recorded From, verified against a
+project-owned contact channel; never guessed from To, Reply-To or primary email.
+`contacts_unsubscribe_email` previews by default and requires that exact
+`expected_address` to apply. Matching HTTP GET/POST endpoints live at
+`/contacts/{id}/conversations/{conversation_id}/unsubscribe`.
+
+Messaging v0.13.59+ is required and capability-checked before any mutation.
+The action blocks all outbound email to the exact address in this project,
+including campaigns and manual replies, while preserving incoming replies and
+existing stronger blocks. Confirmed readback updates channel eligibility and
+adds an idempotent system audit activity. It does not send, delete, mark spam,
+close a conversation, set contact-wide do_not_contact, or alter other projects,
+addresses or transports. Failures/uncertain writes are shown, never hidden as
+success. Email text requests are not parsed automatically. No migration or
+production contact repair is performed by this release.
 
 Release `crm/v0.9.17`: `contacts_set_attribute` recovers numeric and boolean
 JSON scalars sent as strings by legacy agent adapters, using the project-owned

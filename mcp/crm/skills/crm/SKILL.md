@@ -4,7 +4,7 @@ description: Use CRM tools for contacts, customer conversations, lists, segments
 compatibility: Requires the CRM MCP tools supplied by an Apteva app installation.
 metadata:
   author: apteva
-  version: "1.3"
+  version: "1.4"
 ---
 
 # CRM
@@ -94,6 +94,20 @@ customer conversations, lists, segments, opportunities, and pipelines.
   rule must also be followed by the workflow driving those labels.
 
 ## Messaging safety
+
+- An email saying "unsubscribe" is a request, not proof of a saved opt-out.
+  For an authorized operator action, use `contacts_unsubscribe_email` with
+  `conversation_id` (and optional `id` contact safety check) to preview first.
+  After confirmation, pass `dry_run:false` and the exact `expected_address`
+  returned by that preview. It stops ALL outbound email to that address in the
+  current project, including campaigns and manual replies; it is not a
+  marketing-only preference. No email is sent and history/status stay intact.
+- Unsubscribe requires Messaging v0.13.59+ and confirmed suppression readback.
+  Incoming replies remain allowed unless an existing inbound/domain/spam block
+  already applies. Existing stronger blocks are never weakened. If a request
+  fails or its result is uncertain, do not claim success: refresh/retry the same
+  pinned address. Never substitute Spam, block a mailbox-provider domain, set
+  contact-wide do_not_contact, or unsubscribe other projects/addresses.
 
 - To draft a reply, use `conversation_drafts_create` with `conversation_id`,
   optional `reply_to_activity_id`, and proposed `body`/`body_html`/attachments.

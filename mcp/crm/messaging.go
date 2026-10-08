@@ -2779,11 +2779,13 @@ func dbInboxConversations(db *sql.DB, pid, status string, limit, offset int, fil
 				COALESCE(cc.priority,'normal'), cc.last_activity_at,
 				COALESCE((SELECT a.body FROM contact_activities a
 						  WHERE a.project_id = cc.project_id AND a.conversation_id = cc.id
+						  AND a.kind IN ('email_received','email_sent','email_send_failed','email_test_sent','sms_received','sms_sent','sms_send_failed','sms_test_sent','whatsapp_received','whatsapp_sent','whatsapp_send_failed','whatsapp_test_sent')
 						  ORDER BY julianday(a.occurred_at) DESC, a.id DESC LIMIT 1), ''),
 				EXISTS (SELECT 1 FROM contact_tags t
 						WHERE t.contact_id = cc.contact_id AND t.tag_name = ?),
 				COALESCE((SELECT json_object('kind', a.kind, 'source_detail', a.source_detail)
 					FROM contact_activities a WHERE a.project_id = cc.project_id AND a.conversation_id = cc.id
+					AND a.kind IN ('email_received','email_sent','email_send_failed','email_test_sent','sms_received','sms_sent','sms_send_failed','sms_test_sent','whatsapp_received','whatsapp_sent','whatsapp_send_failed','whatsapp_test_sent')
 					ORDER BY julianday(a.occurred_at) DESC, a.id DESC LIMIT 1), ''),
 				COALESCE((SELECT GROUP_CONCAT(DISTINCT substr(a.kind,1,instr(a.kind,'_')-1)) FROM contact_activities a WHERE a.project_id=cc.project_id AND a.conversation_id=cc.id AND a.kind IN ('email_received','email_sent','sms_received','sms_sent','whatsapp_received','whatsapp_sent')), '')
 		 FROM contact_conversations cc

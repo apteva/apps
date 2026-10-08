@@ -60,6 +60,10 @@ func TestInboxRecipientsUseLatestMessageNotContactOrThreadUnion(t *testing.T) {
 	if !reflect.DeepEqual(rows[0].LastMessageAddresses, want) {
 		t.Fatalf("inbox=%+v", rows[0].LastMessageAddresses)
 	}
+	contactActivities, err := dbActivities(ctx.AppDB(), "test-proj", rows[0].ContactID, 50)
+	if err != nil || len(contactActivities) != 1 || !reflect.DeepEqual(messageAddresses(contactActivities[0].Kind, contactActivities[0].SourceDetail), want) {
+		t.Fatalf("contact-detail message addresses lost: %+v %v", contactActivities, err)
+	}
 	_, err = logMessageActivity(ctx.AppDB(), logMessageActivityInput{ProjectID: "test-proj", ContactID: rows[0].ContactID, ConversationID: rows[0].ID, Kind: ActivityKindEmailSent, Body: "Reply", OccurredAt: "2026-10-02T12:00:00Z", SourceDetail: map[string]any{"from": "sales@example.test", "to": "alternate@example.test"}})
 	if err != nil {
 		t.Fatal(err)

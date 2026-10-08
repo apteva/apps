@@ -5,10 +5,11 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { crmPanelInitialRoute, type InboxItem, type InboxResponse } from "./inbox";
-import { messageAddressLines, messageRecipientSummary, type MessageAddresses } from "./message_addresses";
+import { messageAddressLines, messageRecipientSummary, latestMessageAddresses, type MessageAddresses } from "./message_addresses";
 import { messageDisplayBody } from "./message_body";
 import { channelPresentation, channelThemeCSS, conversationChannels, sessionFromResponse, whatsappWindowLabel, whatsappSessionRequiresTemplate, type WhatsAppSessionState, type WhatsAppSessionResponse } from "./channels";
 import { composerDraftContent, replyDraftCanSend, replyDraftEditable, replyDraftFingerprint, type SavedReplyDraft, type ReplyDraftSummary } from "./drafts";
+import { EmailUnsubscribeControl } from "./EmailUnsubscribeControl";
 
 function ChannelBadge({ channel }: { channel: string }) {
   const presentation = channelPresentation[channel];
@@ -1691,6 +1692,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
                             group={group}
                             busy={convoBusy}
                             onSetStatus={setConversationStatus}
+                            emailUnsubscribe={group.kind === "conversation" && group.channel === "email" && detail ? <EmailUnsubscribeControl api={api} contactId={detail.id} conversationId={group.conversationId} refreshKey={detail.updated_at} /> : undefined}
                             onReply={(act) => openCompose({
                               mode: "reply",
                               channel: channelOfKind(act.kind) || undefined,
@@ -2158,7 +2160,7 @@ function groupActivitiesByConversation(activities: Activity[], conversations: Co
     }
     if (seen.has(cid)) continue;
     seen.add(cid);
-    const inSameConvo = activities.filter((x) => String(x.conversation_id || "") === cid);
+    const inSameConvo = activities.filter((x) => String(x.conversation_id || "") === cid && MESSAGE_KINDS.has(x.kind));
     inSameConvo.sort((p, q) => {
       const t = p.occurred_at.localeCompare(q.occurred_at);
       if (t !== 0) return t;
@@ -2210,12 +2212,14 @@ function ActivityGroup({
   onSetStatus,
   busy,
   drafts,
+  emailUnsubscribe,
 }: {
   group: Group;
   onReply: (a: Activity) => void;
   onSetStatus: (conversationId: string, patch: { status?: string; priority?: string; spam_scope?: string; force?: boolean }) => void;
   busy: boolean;
   drafts?: React.ReactNode;
+  emailUnsubscribe?: React.ReactNode;
 }) {
   if (group.kind === "loose") {
     const a = group.activities[0]!;
@@ -2223,17 +2227,19 @@ function ActivityGroup({
     return <ActivityRow activity={a} onReply={onReply} />;
   }
   const isClosed = group.status === "closed";
+  const messageCount = group.activities.filter(a => channelOfKind(a.kind) !== null).length;
   return (
     <li className={`border border-border rounded ${isClosed ? "opacity-70" : ""}`}>
-      <div className="px-2 py-1 border-b border-border bg-bg-input/30 flex items-center gap-2 text-xs">
+      <div className="px-2 py-1 border-b border-border bg-bg-input/30 flex flex-wrap items-center gap-2 text-xs">
         <span
           className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${PRIORITY_DOT[group.priority] || PRIORITY_DOT.normal}`}
           title={`priority: ${group.priority}`}
         />
         {conversationChannels(group.channel, group.activities.map(a => a.kind)).map(channel => <ChannelBadge key={channel} channel={channel} />)}
         <span className="text-text font-medium truncate flex-1">{group.subject || "(no subject)"}</span>
-        <span className="text-text-dim">{group.activities.length} msg{group.activities.length === 1 ? "" : "s"}</span>
+        <span className="text-text-dim">{messageCount} msg{messageCount === 1 ? "" : "s"}</span>
         <ConversationStatusControl group={group} onSetStatus={onSetStatus} busy={busy} />
+        {emailUnsubscribe}
       </div>
       {drafts}
       <ul className="divide-y divide-border">
@@ -3905,7 +3911,7 @@ function InboxTab({ api, projectId, lists, senders, initialConversationId, initi
                     {threadConversation.subject || selected.snippet || "Conversation"}
                   </p>
                   <p className="mt-1 text-xs text-text-dim break-all">
-                    Latest message · {messageRecipientSummary(threadActivities.at(-1)?.message_addresses)}
+                    Latest message · {messageRecipientSummary(latestMessageAddresses(threadActivities))}
                   </p>
                 </div>
                 <div className="flex items-center gap-2 flex-wrap">
@@ -3943,6 +3949,7 @@ function InboxTab({ api, projectId, lists, senders, initialConversationId, initi
                   drafts={threadContact && threadConversation ? <DraftShelf key={threadConversation.id} api={api} conversationId={threadConversation.id} revision={draftRevision} onOpen={id=>onOpenDraft(id,threadContact,threadConversation,reloadSelectedThread)} /> : undefined}
                   busy={statusBusy}
                   onSetStatus={setThreadStatus}
+                  emailUnsubscribe={threadContact && threadConversation?.channel === "email" ? <EmailUnsubscribeControl api={api} contactId={threadContact.id} conversationId={threadConversation.id} refreshKey={threadContact.updated_at} /> : undefined}
                   onReply={(act) => {
                     if (threadContact && threadConversation) onReply(threadContact, act, threadConversation, reloadSelectedThread);
                   }}
@@ -3999,7 +4006,7 @@ function InboxTab({ api, projectId, lists, senders, initialConversationId, initi
                 <dl className="space-y-1 text-xs">
                   <div className="flex justify-between gap-2"><dt className="text-text-dim">Started</dt><dd className="text-text text-right">{threadConversation ? formatTime(threadConversation.started_at) : "—"}</dd></div>
                   <div className="flex justify-between gap-2"><dt className="text-text-dim">Last activity</dt><dd className="text-text text-right">{threadConversation ? formatTime(threadConversation.last_activity_at) : "—"}</dd></div>
-                  <div className="flex justify-between gap-2"><dt className="text-text-dim">Messages</dt><dd className="text-text">{threadActivities.length}</dd></div>
+                  <div className="flex justify-between gap-2"><dt className="text-text-dim">Messages</dt><dd className="text-text">{threadActivities.filter(a => channelOfKind(a.kind) !== null).length}</dd></div>
                 </dl>
               </section>
             </div>

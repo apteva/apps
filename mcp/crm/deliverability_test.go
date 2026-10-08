@@ -446,7 +446,7 @@ func TestCRMManifestRequiresMessagingDeliveryEvents(t *testing.T) {
 				continue
 			}
 			found = true
-			if dependency.Version != ">=0.13.46" || !dependency.Optional ||
+			if dependency.Version != ">=0.13.59" || !dependency.Optional ||
 				!reflect.DeepEqual(dependency.Events, []string{"message.event", "suppression.changed"}) {
 				t.Fatalf("%s messaging dependency=%+v", source, dependency)
 			}
