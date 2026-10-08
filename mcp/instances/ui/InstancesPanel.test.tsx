@@ -95,3 +95,27 @@ test("bucket setup asks for credentials and rotates only with explicit selection
  expect(container.textContent).toContain("returned-secret");
  expect(container.textContent).not.toContain("S3 connection");
 });
+
+test("historical CPU spikes remain visible and incident detail loads",async()=>{
+ const {MonitoringHistory}=await import("./MonitoringHistory");const now=Date.now();const event={id:"spike-1",start:now-60000,end:now-1000,peak:100,peak_at:now-59000,core_peak:100,reason:"CPU ≥90%"};
+ const calls:string[]=[];
+ globalThis.fetch=(async(input:any)=>{const path=String(input);calls.push(path);
+  if(path.includes("incident_id="))return response({incident:{...event,recordings:[{time:now-60000,cpu:10,core:10,memory:20,interval_ms:250},{time:now-59750,cpu:100,core:100,memory:20,interval_ms:250}],processes:[{pid:42,name:"worker",cpu_pct:99,memory_bytes:1024}]}});
+  if(path.includes("/metrics/incidents"))return response({incidents:[event]});
+  if(path.includes("/monitoring"))return response({monitoring:{enabled:false,state:"disabled"}});
+  return response({points:[{time:now-60000,step_ms:60000,observed_ms:60000,values:{cpu:{sum:600000,observed_ms:60000,min:10,max:100,peak_at:now-59000},core:{sum:600000,observed_ms:60000,min:10,max:100,peak_at:now-59000}}}],resolution:"1m",from:now-3600000,to:now,monitoring:{enabled:true,state:"running",version:"0.6.0"}});
+ }) as unknown as typeof fetch;
+ await render(<MonitoringHistory id={8} withParams={params}/>);
+ expect(container.textContent).toContain("Peak 100.0%");expect(container.querySelector('svg title')?.textContent).toContain("100.0% CPU");
+ const incident=Array.from(container.querySelectorAll("button")).find(button=>button.textContent?.includes("CPU ≥90%"))!;
+ await act(async()=>incident.click());expect(calls.some(path=>path.includes("incident_id=spike-1"))).toBe(true);expect(container.textContent).toContain("worker · PID 42");expect(container.querySelectorAll("svg").length).toBe(2);
+ const disable=Array.from(container.querySelectorAll("button")).find(button=>button.textContent==="Disable monitoring")!;await act(async()=>disable.click());expect(calls.some(path=>path.includes("/monitoring"))).toBe(true);
+});
+
+test("history paths do not bridge outages and averages use observed coverage",async()=>{
+ const {chartPath,metricAverage}=await import("./MonitoringHistory");
+ const point=(time:number)=>({time,step_ms:1000,observed_ms:1000,values:{cpu:{sum:10000,observed_ms:1000,min:10,max:100,peak_at:time}}});
+ const path=chartPath([point(0),point(1000),point(5000)],"cpu",true,0,6000);
+ expect(path.match(/M/g)?.length).toBe(2);expect(path.match(/L/g)?.length).toBe(1);
+ const p=point(0);p.observed_ms=500;p.values.cpu.observed_ms=100;p.values.cpu.sum=1000;expect(metricAverage(p,"cpu")).toBe(10);
+});

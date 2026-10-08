@@ -417,11 +417,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_set_attribute",
-			Description: "Write one custom-attribute value. Args: contact_id, key, value, source.",
+			Description: "Write one project-defined custom attribute with provenance. Match value to its definition: text/url/date/select use strings, number uses a finite JSON number, bool uses a JSON boolean, multi_select uses an array of allowed strings. For legacy string-based agent adapters only, number and bool definitions also accept their JSON scalar encoded as text; text attributes are never auto-converted. Examples: {\"contact_id\":123,\"key\":\"opportunity_score\",\"value\":88}, {\"contact_id\":123,\"key\":\"do_not_contact\",\"value\":false}. Explicit JSON null clears an optional attribute; omitting value is an error. Read back using contacts_get and verify every workflow-required attribute before marking a dossier solution_ready; a failed write must not advance readiness.",
 			InputSchema: schemaObject(map[string]any{
 				"contact_id": map[string]any{"type": "integer"},
 				"key":        map[string]any{"type": "string"},
-				"value":      map[string]any{},
+				"value":      attributeValueInputSchema(),
 				"source":     map[string]any{"type": "string"},
 			}, []string{"contact_id", "key", "value"}),
 			Handler: a.toolSetAttribute,
@@ -1668,8 +1668,16 @@ func (a *App) toolSetAttribute(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if cid == 0 || key == "" {
 		return nil, errors.New("contact_id and key required")
 	}
+	rawValue, present := args["value"]
+	if !present {
+		return nil, errors.New("value required; use explicit JSON null to clear an optional attribute")
+	}
+	value, err := normalizeMCPAttributeValue(ctx.AppDB(), pid, key, rawValue)
+	if err != nil {
+		return nil, err
+	}
 	source, _ := args["source"].(string)
-	if err := dbSetAttribute(ctx.AppDB(), pid, cid, key, args["value"], source); err != nil {
+	if err := dbSetAttribute(ctx.AppDB(), pid, cid, key, value, source); err != nil {
 		return nil, err
 	}
 	if c, err := dbGetByID(ctx.AppDB(), pid, cid); err == nil && c != nil {

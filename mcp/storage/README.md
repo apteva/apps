@@ -1,8 +1,8 @@
-# Storage 0.12.8
+# Storage 0.12.9
 
 Storage provides project-scoped file metadata, virtual folders, uploads, search,
 and sharing. Bytes live on disk or in a bound S3-compatible bucket. The Go
-sidecar uses app-sdk v0.79.0; the build requires Go 1.26.8 or newer. The React
+sidecar uses app-sdk v0.96.0; the build requires Go 1.26.8 or newer. The React
 panel, file card, and native mobile surface share the HTTP API.
 
 Direct multipart completions expose `checksum_status=pending` while a durable
@@ -10,6 +10,23 @@ background job streams the stored object through SHA-256. `files_get` reports
 the state; `files_ensure_checksum` queues an exact-file repair. Verification
 persists the backend object key separately, so repairs keep existing file IDs,
 URLs, and physical locations unchanged.
+
+Pending-upload quota covers unfinished uploads only. Completion releases the
+reservation in the same database transaction as the file and completion
+receipt. Completion replay retries stale cleanup; failed releases are logged
+and queued for repair. Startup, periodic sweeps, and new upload admission
+reconcile reservations against completion receipts and cleanup jobs without
+changing saved files or genuine unfinished uploads.
+
+## Version 0.12.9: reliable pending-upload quota release
+
+Successful completion releases its quota reservation in the same transaction
+as the saved file and completion receipt. Completion replay clears stale
+reservations, and failed releases are logged and queued for durable repair.
+Startup, periodic sweeps, and new upload admission reconcile completed
+reservations while preserving saved files and genuine unfinished uploads.
+Leftover completed scratch cannot recreate reservations after a restart, and
+completion receipts remain available until cleanup is safe.
 
 ## Version 0.12.8: verified whole-file checksums
 

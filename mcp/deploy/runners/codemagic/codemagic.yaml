@@ -83,8 +83,43 @@ workflows:
               extension="pkg"
             fi
             if [[ -f project.yml ]] && \
-              ! find . -maxdepth 1 \( -name '*.xcodeproj' -o -name '*.xcworkspace' \) -print -quit | grep -q .; then
-              xcodegen generate
+              [[ ! -d "${APTEVA_XCODE_PROJECT:-}" && ! -d "${APTEVA_XCODE_WORKSPACE:-}" ]] && \
+              ! find . -maxdepth 2 \( -name '*.xcodeproj' -o -name '*.xcworkspace' \) -print -quit | grep -q .; then
+              # Use the same release on every runner, including machines with
+              # an unrelated XcodeGen already on PATH. Keep its bundled presets.
+              xcodegen_version="2.46.0"
+              xcodegen_sha256="4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806"
+              tools="$CM_BUILD_DIR/apteva-tools/xcodegen-$xcodegen_version"
+              mkdir -p "$tools"
+              echo "Installing XcodeGen $xcodegen_version for project.yml"
+              if ! curl --fail --location --retry 3 \
+                --output "$tools/xcodegen.zip" \
+                "https://github.com/yonaskolb/XcodeGen/releases/download/$xcodegen_version/xcodegen.zip"; then
+                echo "XcodeGen $xcodegen_version installation failed: download failed" >&2
+                exit 1
+              fi
+              if ! printf '%s  %s\n' "$xcodegen_sha256" "$tools/xcodegen.zip" | shasum -a 256 -c -; then
+                echo "XcodeGen $xcodegen_version installation failed: checksum mismatch" >&2
+                exit 1
+              fi
+              if ! unzip -q -o "$tools/xcodegen.zip" -d "$tools"; then
+                echo "XcodeGen $xcodegen_version installation failed: extraction failed" >&2
+                exit 1
+              fi
+              xcodegen="$tools/xcodegen/bin/xcodegen"
+              if ! installed_version="$("$xcodegen" --version)"; then
+                echo "XcodeGen $xcodegen_version installation failed: binary cannot run" >&2
+                exit 1
+              fi
+              echo "$installed_version"
+              if [[ "$installed_version" != "Version: $xcodegen_version" ]]; then
+                echo "XcodeGen installation failed: expected $xcodegen_version, got $installed_version" >&2
+                exit 1
+              fi
+              if ! "$xcodegen" generate; then
+                echo "XcodeGen $xcodegen_version failed to generate project.yml" >&2
+                exit 1
+              fi
             fi
             if [[ -z "${APTEVA_XCODE_SCHEME:-}" ]]; then
               echo "target_config_json.scheme is required" >&2
@@ -96,9 +131,16 @@ workflows:
             elif [[ -n "${APTEVA_XCODE_PROJECT:-}" ]]; then
               input=(-project "$APTEVA_XCODE_PROJECT")
             else
+              workspace="$(find . -maxdepth 2 -name '*.xcworkspace' -print -quit)"
               project="$(find . -maxdepth 2 -name '*.xcodeproj' -print -quit)"
-              test -n "$project" || { echo "no Xcode project or workspace found" >&2; exit 1; }
-              input=(-project "$project")
+              if [[ -n "$workspace" ]]; then
+                input=(-workspace "$workspace")
+              elif [[ -n "$project" ]]; then
+                input=(-project "$project")
+              else
+                echo "no Xcode project or workspace found" >&2
+                exit 1
+              fi
             fi
 
             keychain initialize

@@ -160,6 +160,8 @@ func (a *App) handleInstanceItem(w http.ResponseWriter, r *http.Request) {
 		a.httpDownload(w, r, id)
 	case "wait-ready":
 		a.httpWaitReady(w, r, id)
+	case "metrics/history", "metrics/incidents", "monitoring":
+		a.httpMonitoring(w, r, id, tail)
 	case "metrics":
 		a.httpMetrics(w, r, id)
 	case "upgrade":
@@ -509,19 +511,5 @@ func (a *App) httpWaitReady(w http.ResponseWriter, r *http.Request, id int64) {
 }
 
 func (a *App) httpMetrics(w http.ResponseWriter, r *http.Request, id int64) {
-	if r.Method != http.MethodGet {
-		httpErr(w, http.StatusMethodNotAllowed, "GET")
-		return
-	}
-	inst, err := dbGetInstance(globalCtx.AppDB(), id)
-	if err != nil {
-		httpErr(w, http.StatusNotFound, "instance not found")
-		return
-	}
-	m, err := collectMetrics(inst)
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	httpJSON(w, map[string]any{"instance_id": id, "metrics": m})
+	a.httpMonitoring(w, r, id, "metrics")
 }

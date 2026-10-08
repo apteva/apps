@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.5.2
+version: 0.6.2
 description: |
   Compute-host inventory + lifecycle for Apteva. The local Apteva
   machine is always available as a built-in instance (id 0); remote
@@ -136,8 +136,14 @@ provides:
       description: Close a loopback TCP tunnel for an instance target port.
     - name: instance_wait_ready
       description: Wait for SSH access and requested host setup. Optional retry rechecks or repairs setup; setup changes desired capabilities; async returns progress immediately.
+    - name: instance_metrics_history
+      description: Bounded CPU/memory/I/O history with preserved 250ms peaks, threshold durations and coverage.
+    - name: instance_metrics_incidents
+      description: List spike incidents or retrieve a bounded recording and best-effort process attribution.
+    - name: instance_monitoring
+      description: Read collector health/version or enable/disable automatic background monitoring.
     - name: instance_metrics
-      description: CPU / memory / disk / network / load / uptime (local gopsutil, remote Linux or macOS collector). 5s cache.
+      description: Continuously collected CPU, memory, disk, network, I/O, load and uptime with collector health and sample freshness.
     - name: instance_list_server_types
       description: |
         Live list of VPS server types (sizes) from the bound provider, pulled from upstream at call time.
@@ -228,7 +234,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.5.2
+    ref: instances/v0.6.2
     entry: mcp/instances
   port: 8080
   health_check: /health

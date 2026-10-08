@@ -566,3 +566,12 @@ integration publishers and release policies are described in
 [Steamworks configuration example](examples/steamworks-target.json) uses the
 existing integration catalog tools; Deploy contains no Steam HTTP client or game
 engine-specific build implementation.
+
+### Codemagic build logs
+
+`deploy_logs` and the build-log REST endpoint combine Deploy's local summary
+with authenticated Codemagic step output, including nested script logs and
+historical failed builds. A 15-second cache avoids repeated provider requests
+from dashboard polling. If the provider is unavailable, the local summary is
+returned with an explicit provider-log warning. Provider tokens and signed log
+URLs are not included in returned logs.

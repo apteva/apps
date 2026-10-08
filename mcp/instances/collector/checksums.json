@@ -1,0 +1,6 @@
+{
+  "instances-collector-darwin-amd64": "7dd18a612b382001329c70de1d4d859c56234a6643aff90b5c60c014162dc7c2",
+  "instances-collector-darwin-arm64": "4ea627fdeba86f040ea498cd3349acf9c2f3e965be7822e44c53017fcc5b368c",
+  "instances-collector-linux-amd64": "a33b902723c2bba43dbcac16b0fd153a9705fafb7b2cbb9272ac53ba91e15116",
+  "instances-collector-linux-arm64": "c782f22de9246fb258f4fac5001e4827bd53f023649dcb562472047eca824046"
+}
