@@ -64,6 +64,8 @@ use the version pinned in `go.mod`.
    `web_extract(readability=false)` and a Computer build that retains footers
    in that mode. Transient extraction failures retry once within the crawl
    budget; legal pages are skipped when a usable email has already been found.
+   If browser pages still provide no usable email, one public HTML source
+   check automates the fallback, retaining its own URL and evidence artifact.
 5. Review the candidate, rule explanations, and saved source evidence.
 6. Optionally use `prospecting_candidates_research` for broader cited research.
 7. Add or correct decision-maker details, then reject or defer.

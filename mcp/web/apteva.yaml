@@ -130,6 +130,7 @@ provides:
         metadata, structured data, links, images, and optionally store the
         artifact. Args: url, formats?, backend?, viewport?, max_chars?,
         readability? (default true; false includes headers and footers),
+        source_only? (default false; public HTML source with HTTP provenance),
         store? bool, snapshot? bool, visibility? (private|signed|public;
         defaults to private for snapshots), cache?, max_age?, cache_ttl?.
         Omit backend to use Computer's configured default; explicit overrides are

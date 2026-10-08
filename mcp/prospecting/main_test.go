@@ -25,6 +25,7 @@ type platformStub struct {
 	searchPayload  any
 	extractPages   map[string]any
 	extractErrors  map[string][]error
+	sourcePages    map[string]any
 	disableWeb     bool
 	disableCRM     bool
 }
@@ -65,6 +66,12 @@ func (p *platformStub) CallAppResult(app, tool string, input map[string]any, out
 		}
 	case "web/web_extract":
 		pageURL := fmt.Sprint(input["url"])
+		if input["source_only"] == true {
+			if page, ok := p.sourcePages[pageURL]; ok {
+				payload = map[string]any{"page": page}
+				break
+			}
+		}
 		if failures := p.extractErrors[pageURL]; len(failures) > 0 {
 			p.extractErrors[pageURL] = failures[1:]
 			return failures[0]
@@ -875,9 +882,37 @@ func TestQualificationRetriesTransientFailuresAndCertifiedWWW(t *testing.T) {
 }
 
 func TestQualificationDoesNotVisitLegalPagesAfterFindingEmail(t *testing.T) {
-	page := webExtractPage{URL: "https://albert.example/", Links: []webLink{{URL: "/mentions-legales", Text: "Mentions légales"}, {URL: "/team", Text: "Team"}, {URL: "/contact", Text: "Contact"}}}
+	page := webExtractPage{URL: "https://albert.example/", Links: []webLink{{URL: "/mentions-legales", Text: "Mentions légales"}, {URL: "/team", Text: "Team"}, {URL: "/contact", Text: "Contact"}, {URL: "mailto:contact@albert.example", Text: "Email contact"}, {URL: "tel:+33123456789", Text: "Contact phone"}}}
 	links := selectQualificationLinks(page, "albert.example", 3, false)
 	if len(links) != 2 || links[0] != "https://albert.example/contact" || links[1] != "https://albert.example/team" {
 		t.Fatalf("unnecessary legal crawl: %+v", links)
+	}
+}
+
+func TestQualificationAutomaticallyChecksPublicSourceForMissingBrowserEmail(t *testing.T) {
+	platform := &platformStub{extractPages: map[string]any{"https://albert.example/": map[string]any{"url": "https://albert.example/", "final_url": "https://albert.example/en/", "status": 200, "text": "English menu without a mailbox"}}, sourcePages: map[string]any{"https://albert.example/": map[string]any{"url": "https://albert.example/", "status": 200, "text": "Restaurant Albert. Email albert@gmail.com", "artifact": map[string]any{"id": 123}}}}
+	ctx := newTestContext(t, platform)
+	profile, err := createProfile(ctx.AppDB(), ctx.CurrentProject(), map[string]any{"name": "Source fallback"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, _, err := insertCandidate(ctx.AppDB(), ctx.CurrentProject(), candidateInput{ProfileID: profile.ID, CompanyName: "Albert", CompanyDomain: "albert.example", Website: "https://albert.example/"}, profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := qualifyCandidate(ctx, candidate.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["candidate"].(*Candidate).Email != "albert@gmail.com" || len(platform.calls) != 2 || platform.calls[1].Input["source_only"] != true {
+		t.Fatalf("source fallback failed: %+v", result)
+	}
+	evidence := result["evidence"].([]Evidence)
+	foundSource := false
+	for _, item := range evidence {
+		foundSource = foundSource || (item.SourceKind == "web_source" && item.URL == "https://albert.example/" && item.ArtifactID != nil)
+	}
+	if len(evidence) != 2 || !foundSource {
+		t.Fatalf("source provenance missing: %+v", evidence)
 	}
 }

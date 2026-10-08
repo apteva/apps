@@ -1834,3 +1834,44 @@ func TestSearchRetriesPartialAndNavigationOnlyDOM(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractPublicSourcePreservesHTTPProvenanceAndSeparateCache(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			http.Redirect(w, r, "/fr/", http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><main><p>French restaurant</p></main><footer>Email footer@restaurant.example</footer><script>vendor@fake.example</script></html>`)
+	}))
+	defer srv.Close()
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat)
+	args := map[string]any{"url": srv.URL, "source_only": true, "store": false}
+	out, err := app.toolExtract(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := out.(map[string]any)["page"].(pageDoc)
+	if !strings.Contains(page.Text, "footer@restaurant.example") || strings.Contains(page.Text, "vendor@") || page.ExtractionBackend != "http_source" || page.Browser != nil || page.FinalURL != srv.URL+"/fr/" {
+		t.Fatalf("incorrect source extraction: %+v", page)
+	}
+	if len(plat.callLog()) != 0 {
+		t.Fatal("source verification opened a browser")
+	}
+	cached, err := app.toolExtract(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cached.(map[string]any)["cache"].(cacheInfo).Hit {
+		t.Fatal("source cache missed")
+	}
+	delete(args, "source_only")
+	rendered, err := app.toolExtract(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rendered.(map[string]any)["cache"].(cacheInfo).Hit || rendered.(map[string]any)["page"].(pageDoc).ExtractionBackend != "browser_dom" {
+		t.Fatal("rendered page reused source cache")
+	}
+}

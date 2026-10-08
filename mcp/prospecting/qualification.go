@@ -311,6 +311,39 @@ func qualifyCandidateContext(c context.Context, ctx *sdk.AppCtx, id int64, maxPa
 			queue = append(queue, toAdd...)
 		}
 	}
+	// One source check automates the public-HTML follow-up when rendering
+	// times out or serves a language variant without the business mailbox.
+	if c.Err() != nil {
+		return nil, c.Err()
+	}
+	sourceCheck := len(pages) > 0
+	for _, message := range errorsByURL {
+		sourceCheck = sourceCheck || transientQualificationError(message) || strings.Contains(message, "ERR_CERT_COMMON_NAME_INVALID")
+	}
+	if sourceCheck && extractBestEmail(pages, candidate.CompanyDomain) == "" {
+		var source webExtractOutput
+		deadline, cancel := context.WithTimeout(c, 25*time.Second)
+		err := sdk.CallAppResultContext(deadline, ctx.PlatformAPI(), "web", "web_extract", map[string]any{
+			"url": startURL, "source_only": true, "readability": false,
+			"max_chars": 50000, "store": true, "snapshot": false,
+		}, &source)
+		cancel()
+		if err == nil && source.Page.Error == "" && source.Page.Status < 400 {
+			page := source.Page
+			if page.URL == "" {
+				page.URL = startURL
+			}
+			pages = append(pages, page)
+			var artifactID *int64
+			if page.Artifact != nil && page.Artifact.ID > 0 {
+				v := page.Artifact.ID
+				artifactID = &v
+			}
+			_ = addEvidence(ctx.AppDB(), pid, Evidence{CandidateID: id, SourceKind: "web_source", Title: page.Title, URL: defaultString(page.FinalURL, page.URL), Excerpt: qualificationExcerpt(page), ArtifactID: artifactID, RetrievedAt: nowUTC()})
+		} else if err != nil {
+			errorsByURL[startURL+" (HTML source)"] = err.Error()
+		}
+	}
 	if len(pages) == 0 {
 		return nil, fmt.Errorf("web qualification could not extract a candidate page: %v", errorsByURL)
 	}
@@ -404,6 +437,10 @@ func selectQualificationLinks(page webExtractPage, domain string, limit int, nee
 	ranked := []rankedLink{}
 	for i, link := range page.Links {
 		resolved := resolvePageLink(defaultString(page.FinalURL, page.URL), link.URL)
+		parsed, err := url.Parse(resolved)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil {
+			continue
+		}
 		website, linkDomain := normalizeWebsite(resolved)
 		if website == "" || linkDomain == "" || (domain != "" && linkDomain != domain) {
 			continue

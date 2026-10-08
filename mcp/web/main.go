@@ -166,13 +166,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "web_extract",
-			Description: "Open a URL in a browser session and extract rendered content. Omit backend to use Computer's configured default; otherwise use local, browserbase, steel, browser-engine, or service. Args: url, formats?, backend?, viewport?, max_chars?, readability? (default true; false includes headers and footers), store?, snapshot?, visibility? (private|signed|public; applies to stored snapshots and defaults to private). Browser metadata returns requested_backend and effective_backend.",
+			Description: "Open a URL in a browser session and extract rendered content. Omit backend to use Computer's configured default; otherwise use local, browserbase, steel, browser-engine, or service. Args: url, formats?, backend?, viewport?, max_chars?, source_only? (default false; retrieves public HTML without rendering), readability? (default true; false includes headers and footers), store?, snapshot?, visibility? (private|signed|public; applies to stored snapshots and defaults to private). Browser metadata returns requested_backend and effective_backend.",
 			InputSchema: schemaObject(map[string]any{
 				"url":         map[string]any{"type": "string"},
 				"formats":     map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"text", "markdown", "html", "metadata", "structured_data", "json", "links", "images"}}},
 				"backend":     browserBackendSchema(),
 				"viewport":    viewportSchema(),
 				"max_chars":   map[string]any{"type": "integer"},
+				"source_only": map[string]any{"type": "boolean", "description": "Fetch public HTML source instead of rendering. Use for static source verification or a bounded fallback; preserves HTTP source provenance."},
 				"readability": map[string]any{"type": "boolean", "description": "Use main/article content (default true). Set false to include navigation, contact footers, and other body content."},
 				"store":       map[string]any{"type": "boolean"},
 				"snapshot":    map[string]any{"type": "boolean"},
@@ -632,6 +633,9 @@ func (a *App) toolExtract(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if target == "" {
 		return nil, errors.New("url required")
 	}
+	if boolArg(args, "source_only") && boolArg(args, "snapshot") {
+		return nil, errors.New("source_only extraction does not support snapshots")
+	}
 	if boolArg(args, "snapshot") {
 		if _, err := snapshotVisibility(args); err != nil {
 			return nil, err
@@ -660,10 +664,14 @@ func (a *App) toolExtract(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		completeRun(ctx, runID, "failed", nil, err)
 		return nil, err
 	}
-	doc := a.extractURL(ctx, runID, target, mapMerge(args, map[string]any{
-		"store":           false,
-		"_snapshot_store": boolArgDefault(args, "store", storeDefault(ctx)),
-	}), true)
+	var doc pageDoc
+	if boolArg(args, "source_only") {
+		doc = extractHTTPSource(ctx, target, args)
+	} else {
+		doc = a.extractURL(ctx, runID, target, mapMerge(args, map[string]any{
+			"store": false, "_snapshot_store": boolArgDefault(args, "store", storeDefault(ctx)),
+		}), true)
+	}
 	out := map[string]any{"page": doc}
 	applyCacheAfterFetch(ctx, policy, out)
 	if doc.Error != "" {
@@ -965,6 +973,26 @@ func (a *App) toolSnapshot(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	completeRun(ctx, runID, status, out, err)
 	return out, err
+}
+
+func extractHTTPSource(ctx *sdk.AppCtx, target string, args map[string]any) pageDoc {
+	doc := pageDoc{URL: target, FinalURL: target, ExtractionBackend: "http_source"}
+	body, meta, err := fetchURL(ctx, target)
+	doc.Status = intFromMap(meta, "status")
+	doc.ContentType = stringFromMap(meta, "content_type")
+	doc.Bytes = intFromMap(meta, "bytes")
+	doc.FinalURL = firstNonEmpty(stringFromMap(meta, "final_url"), target)
+	if err != nil {
+		doc.Error = err.Error()
+		return doc
+	}
+	parsed := parseHTMLDoc(body, doc.FinalURL)
+	doc.Title, doc.Description = parsed.Title, parsed.Description
+	doc.Links, doc.Images, doc.Metadata = parsed.Links, parsed.Images, parsed.Metadata
+	maxChars := boundedInt(intArg(args, "max_chars"), defaultMaxChars, 1000, 200000)
+	doc.Text, doc.Markdown = truncateString(parsed.Text, maxChars), truncateString(parsed.Markdown, maxChars)
+	doc.Truncated = boolFromMap(meta, "truncated") || len(parsed.Text) > maxChars || len(parsed.Markdown) > maxChars
+	return doc
 }
 
 func (a *App) extractURL(ctx *sdk.AppCtx, runID int64, target string, args map[string]any, includeText bool) pageDoc {
