@@ -39,13 +39,19 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{Name: "prospecting-runs", Schedule: "@every 2s", Run: pipelineWorker}}
+}
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
+		{Pattern: "/settings", Handler: a.handleDiscoverySettings},
+		{Pattern: "/connections", Handler: a.handlePlacesConnections},
+		{Pattern: "/pipeline/runs", Handler: a.handlePipelineRuns},
+		{Pattern: "/pipeline/runs/", Handler: a.handlePipelineRunItem},
 		{Pattern: "/overview", Handler: a.handleOverview},
 		{Pattern: "/capabilities", Handler: a.handleCapabilities},
 		{Pattern: "/profiles", Handler: a.handleProfiles},
@@ -87,15 +93,15 @@ func (a *App) MCPTools() []sdk.Tool {
 		"summary":             sString(),
 		"source_url":          sString(),
 	}
-	return []sdk.Tool{
+	return append([]sdk.Tool{
 		{Name: "prospecting_overview", Description: "Summarize target profiles, runs, candidate statuses, evidence, and exclusions. Args: none.", InputSchema: schemaObject(nil, nil), Handler: a.toolOverview},
-		{Name: "prospecting_capabilities", Description: "Report whether optional Web discovery and CRM-backed outreach are currently connected. Args: none.", InputSchema: schemaObject(nil, nil), Handler: a.toolCapabilities},
+		{Name: "prospecting_capabilities", Description: "Report whether Google Places, optional Web discovery and CRM-backed outreach are currently connected. Args: none.", InputSchema: schemaObject(nil, nil), Handler: a.toolCapabilities},
 		{Name: "prospecting_profiles_create", Description: "Create a target profile. Args: name, description?, industries?, locations?, employee_min?, employee_max?, target_titles?, keywords?.", InputSchema: schemaObject(profileFields, []string{"name"}), Handler: a.toolProfilesCreate},
 		{Name: "prospecting_profiles_list", Description: "List target profiles. Args: status? (active default, archived, all).", InputSchema: schemaObject(map[string]any{"status": sString()}, nil), Handler: a.toolProfilesList},
 		{Name: "prospecting_profiles_get", Description: "Get one target profile. Args: id.", InputSchema: schemaObject(map[string]any{"id": sInteger()}, []string{"id"}), Handler: a.toolProfilesGet},
 		{Name: "prospecting_profiles_update", Description: "Patch a target profile. Args: id and any editable profile fields.", InputSchema: schemaObject(mergeSchemas(map[string]any{"id": sInteger()}, profileFields), []string{"id"}), Handler: a.toolProfilesUpdate},
 		{Name: "prospecting_profiles_archive", Description: "Archive a target profile. Args: id.", InputSchema: schemaObject(map[string]any{"id": sInteger()}, []string{"id"}), Handler: a.toolProfilesArchive},
-		{Name: "prospecting_search_run", Description: "Run a bounded Web search, fall back to another engine when blocked, filter deterministic noise, and persist new company candidates. Args: profile_id, query?, limit? (default 20, max 50), engine? (default google), fallback_engine? (default duckduckgo). Does not contact anyone.", InputSchema: schemaObject(map[string]any{"profile_id": sInteger(), "query": sString(), "limit": sInteger(), "engine": sString(), "fallback_engine": sString()}, []string{"profile_id"}), Handler: a.toolSearchRun},
+		{Name: "prospecting_search_run", Description: "Discover and save prospects. source=web (default) performs a bounded Web search with fallback, max 50; source=google_places starts a saved discovery-only run, max 20. Args: profile_id, source?, query?, limit?, engine?, fallback_engine?. For Places poll prospecting_run_get. Does not contact anyone.", InputSchema: schemaObject(map[string]any{"profile_id": sInteger(), "query": sString(), "limit": sInteger(), "engine": sString(), "fallback_engine": sString(), "source": sString()}, []string{"profile_id"}), Handler: a.toolSearchRun},
 		{Name: "prospecting_runs_list", Description: "List discovery runs. Args: profile_id?, limit?.", InputSchema: schemaObject(map[string]any{"profile_id": sInteger(), "limit": sInteger()}, nil), Handler: a.toolRunsList},
 		{Name: "prospecting_candidates_create", Description: "Create a candidate manually without Web or CRM. Args: profile_id? (uses the newest active profile or creates Imported leads), company_name, website?, person fields?, email?, phone?, summary?, source_url?.", InputSchema: schemaObject(mergeSchemas(map[string]any{"profile_id": sInteger()}, candidateFields), []string{"company_name"}), Handler: a.toolCandidatesCreate},
 		{Name: "prospecting_candidates_import", Description: "Bulk seed candidates without Web or CRM. Args: profile_id?; candidates? array of candidate objects, or data string plus format auto|csv|json. Maximum 1000 rows.", InputSchema: schemaObject(map[string]any{"profile_id": sInteger(), "candidates": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}, "data": sString(), "format": sString()}, nil), Handler: a.toolCandidatesImport},
@@ -115,7 +121,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "prospecting_candidate_outreach_send", Description: "REAL EXTERNAL SEND through CRM and its bound Messaging app. Sends email, SMS, or WhatsApp and records the CRM conversation. Requires confirm=true. Args: id, channel, body? or template_id, subject?, conversation_id?, from?, template_vars?, idempotency_key?, confirm.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "channel": sString(), "body": sString(), "subject": sString(), "conversation_id": sInteger(), "from": sString(), "template_id": sInteger(), "template_vars": map[string]any{"type": "object"}, "idempotency_key": sString(), "confirm": sBoolean()}, []string{"id", "channel", "confirm"}), Handler: a.toolCandidateOutreachSend},
 		{Name: "prospecting_exclusions_list", Description: "List exclusions. Args: kind? (domain|company|email|phone), limit?.", InputSchema: schemaObject(map[string]any{"kind": sString(), "limit": sInteger()}, nil), Handler: a.toolExclusionsList},
 		{Name: "prospecting_exclusions_remove", Description: "Remove one exclusion. Args: id.", InputSchema: schemaObject(map[string]any{"id": sInteger()}, []string{"id"}), Handler: a.toolExclusionsRemove},
-	}
+	}, a.pipelineTools()...)
 }
 
 func (a *App) toolOverview(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
@@ -158,6 +164,15 @@ func (a *App) toolProfilesArchive(ctx *sdk.AppCtx, args map[string]any) (any, er
 }
 
 func (a *App) toolSearchRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if stringArg(args, "source") == "google_places" {
+		argsCopy := map[string]any{}
+		for k, v := range args {
+			argsCopy[k] = v
+		}
+		argsCopy["qualify"] = false
+		argsCopy["crm_mode"] = "review"
+		return a.toolRun(ctx, argsCopy)
+	}
 	return runDiscoveryWithOptions(ctx, int64Arg(args, "profile_id"), stringArg(args, "query"), intArg(args, "limit", 20), stringArg(args, "engine"), stringArg(args, "fallback_engine"))
 }
 
@@ -209,7 +224,11 @@ func (a *App) toolCandidatesGet(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return nil, err
 	}
 	handoff, err := getHandoff(ctx.AppDB(), ctx.CurrentProject(), id)
-	return map[string]any{"candidate": candidate, "evidence": evidence, "handoff": handoff}, err
+	if err != nil {
+		return nil, err
+	}
+	place, err := candidatePlace(ctx.AppDB(), ctx.CurrentProject(), id)
+	return map[string]any{"candidate": candidate, "evidence": evidence, "handoff": handoff, "place": place}, err
 }
 
 func (a *App) toolCandidatesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {

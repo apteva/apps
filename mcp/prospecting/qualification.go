@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	sdk "github.com/apteva/app-sdk"
@@ -143,11 +145,17 @@ func parseDuckDuckGoText(text string, limit int) []webSearchResult {
 }
 
 func executeWebSearch(ctx *sdk.AppCtx, query string, limit int, engine, fallbackEngine string) (webSearchOutput, string, bool, error) {
+	return executeWebSearchContext(context.Background(), ctx, query, limit, engine, fallbackEngine)
+}
+
+func executeWebSearchContext(c context.Context, ctx *sdk.AppCtx, query string, limit int, engine, fallbackEngine string) (webSearchOutput, string, bool, error) {
 	engine = strings.ToLower(defaultString(engine, "google"))
 	fallbackEngine = strings.ToLower(defaultString(fallbackEngine, "duckduckgo"))
 	call := func(selected string) (webSearchOutput, error) {
 		var out webSearchOutput
-		err := ctx.PlatformAPI().CallAppResult("web", "web_search", map[string]any{
+		deadline, cancel := context.WithTimeout(c, 45*time.Second)
+		defer cancel()
+		err := sdk.CallAppResultContext(deadline, ctx.PlatformAPI(), "web", "web_search", map[string]any{
 			"query": query, "limit": limit, "engine": selected, "visit_top": false, "store": true,
 		}, &out)
 		if len(out.Results) == 0 && selected == "duckduckgo" && strings.TrimSpace(out.Page.Text) != "" {
@@ -187,6 +195,10 @@ func searchShouldFallback(err error) bool {
 }
 
 func qualifyCandidate(ctx *sdk.AppCtx, id int64, maxPages int) (map[string]any, error) {
+	return qualifyCandidateContext(context.Background(), ctx, id, maxPages)
+}
+
+func qualifyCandidateContext(c context.Context, ctx *sdk.AppCtx, id int64, maxPages int) (map[string]any, error) {
 	if ctx == nil || ctx.AppDB() == nil {
 		return nil, errors.New("prospecting context unavailable")
 	}
@@ -201,8 +213,8 @@ func qualifyCandidate(ctx *sdk.AppCtx, id int64, maxPages int) (map[string]any, 
 	if candidate == nil {
 		return nil, sql.ErrNoRows
 	}
-	if candidate.Status == "accepted" {
-		return nil, errors.New("accepted candidates are immutable in Prospecting")
+	if candidate.Status == "accepted" || candidate.Status == "rejected" || candidate.Status == "deferred" {
+		return nil, fmt.Errorf("%s candidates cannot be automatically requalified", candidate.Status)
 	}
 	profile, err := getProfile(ctx.AppDB(), pid, candidate.ProfileID)
 	if err != nil || profile == nil {
@@ -210,6 +222,9 @@ func qualifyCandidate(ctx *sdk.AppCtx, id int64, maxPages int) (map[string]any, 
 	}
 	maxPages = clamp(maxPages, 1, 5)
 	startURL := defaultString(candidate.SourceURL, candidate.Website)
+	if candidate.Source == "google_places" {
+		startURL = candidate.Website
+	}
 	if startURL == "" {
 		return nil, errors.New("candidate needs a website or source_url for qualification")
 	}
@@ -218,7 +233,10 @@ func qualifyCandidate(ctx *sdk.AppCtx, id int64, maxPages int) (map[string]any, 
 	queued := map[string]bool{startURL: true}
 	pages := make([]webExtractPage, 0, maxPages)
 	errorsByURL := map[string]string{}
-	for len(queue) > 0 && len(pages) < maxPages {
+	for len(queue) > 0 && len(pages) < maxPages && len(seen) < maxPages*2 {
+		if c.Err() != nil {
+			return nil, c.Err()
+		}
 		pageURL := queue[0]
 		queue = queue[1:]
 		if seen[pageURL] {
@@ -226,10 +244,12 @@ func qualifyCandidate(ctx *sdk.AppCtx, id int64, maxPages int) (map[string]any, 
 		}
 		seen[pageURL] = true
 		var out webExtractOutput
-		callErr := ctx.PlatformAPI().CallAppResult("web", "web_extract", map[string]any{
+		deadline, cancel := context.WithTimeout(c, 45*time.Second)
+		callErr := sdk.CallAppResultContext(deadline, ctx.PlatformAPI(), "web", "web_extract", map[string]any{
 			"url": pageURL, "formats": []string{"links", "structured_data", "metadata", "text"},
 			"max_chars": 50000, "store": true, "snapshot": false,
 		}, &out)
+		cancel()
 		if callErr != nil {
 			errorsByURL[pageURL] = callErr.Error()
 			continue
@@ -275,7 +295,9 @@ func qualifyCandidate(ctx *sdk.AppCtx, id int64, maxPages int) (map[string]any, 
 	if len(pages) == 0 {
 		return nil, fmt.Errorf("web qualification could not extract a candidate page: %v", errorsByURL)
 	}
+	original := *candidate
 	applyDeterministicQualification(profile, candidate, pages)
+	preserveOperatorFields(candidate, &original)
 	updated, err := saveCandidateQualification(ctx.AppDB(), pid, candidate)
 	if err != nil {
 		return nil, err
@@ -1178,4 +1200,14 @@ func parsePositiveInt(value string) int {
 		return 0
 	}
 	return n
+}
+
+func preserveOperatorFields(candidate, original *Candidate) {
+	fields := map[string]*string{"company_name": &candidate.CompanyName, "company_domain": &candidate.CompanyDomain, "website": &candidate.Website, "person_first_name": &candidate.PersonFirstName, "person_last_name": &candidate.PersonLastName, "person_display_name": &candidate.PersonDisplayName, "job_title": &candidate.JobTitle, "email": &candidate.Email, "phone": &candidate.Phone, "summary": &candidate.Summary, "source_url": &candidate.SourceURL}
+	old := map[string]string{"company_name": original.CompanyName, "company_domain": original.CompanyDomain, "website": original.Website, "person_first_name": original.PersonFirstName, "person_last_name": original.PersonLastName, "person_display_name": original.PersonDisplayName, "job_title": original.JobTitle, "email": original.Email, "phone": original.Phone, "summary": original.Summary, "source_url": original.SourceURL}
+	for _, key := range original.OperatorFields {
+		if field := fields[key]; field != nil {
+			*field = old[key]
+		}
+	}
 }

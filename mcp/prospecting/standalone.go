@@ -14,8 +14,9 @@ import (
 )
 
 type prospectingCapabilities struct {
-	Web bool `json:"web"`
-	CRM bool `json:"crm"`
+	Web          bool `json:"web"`
+	CRM          bool `json:"crm"`
+	GooglePlaces bool `json:"google_places"`
 }
 
 func capabilitiesFor(ctx *sdk.AppCtx) prospectingCapabilities {
@@ -29,6 +30,9 @@ func capabilitiesFor(ctx *sdk.AppCtx) prospectingCapabilities {
 	}
 	capabilities.Web = appBindingPresent(identity.Bindings["web"])
 	capabilities.CRM = appBindingPresent(identity.Bindings["crm"])
+	if settings, e := loadDiscoverySettings(ctx); e == nil {
+		capabilities.GooglePlaces = settings.PlacesConnectionID > 0 && validatePlacesConnection(ctx, settings.PlacesConnectionID) == nil
+	}
 	return capabilities
 }
 

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: prospecting
 display_name: Prospecting
-version: 0.3.2
+version: 0.4.0
 description: |
   A standalone lead workspace for Apteva. Seed companies manually or in bulk,
   organize them with target profiles, explore and update the catalog, record
@@ -12,8 +12,13 @@ description: |
   extraction, deterministic qualification, and cited research. Optional CRM
   integration adds duplicate-safe contact linking plus explicitly confirmed
   one-to-one email, SMS, and WhatsApp outreach through CRM's Messaging binding.
-  Prospecting never runs campaigns, makes calls, creates opportunities, or
-  calls paid lead-data providers.
+  Optional Google Places integration adds business discovery with bounded
+  paid API requests. Prospecting never runs campaigns, makes calls, or
+  creates opportunities.
+
+  v0.4.0 adds Google Places as an optional discovery source, saved business
+  listing details, resumable qualification runs, and automatic CRM handoff
+  for prospects meeting configured eligibility and score thresholds.
 
   v0.3.2 requires name/role evidence for decision-makers, rejects navigation
   labels and role substrings, and commits candidate edits and scores atomically.
@@ -34,6 +39,8 @@ requires:
   permissions:
     - db.write.app
     - platform.apps.call
+    - platform.connections.execute
+    - platform.connections.manage
   apps:
     - name: web
       version: ">=0.2.7"
@@ -43,18 +50,30 @@ requires:
       optional: true
       reason: Optional duplicate-safe contact linking and explicitly confirmed one-to-one outreach through CRM and its Messaging binding. Prospecting retains its own working catalog without CRM.
 
+  integrations:
+    - role: google-places
+      kind: integration
+      required: false
+      compatible_slugs: [google-places]
+
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - { name: prospecting_run, description: "Start a resumable discovery and qualification run. source: web or google_places. crm_mode: review or auto; auto writes matching prospects to CRM." }
+    - { name: prospecting_run_get, description: "Read saved run progress, prospect ids, failures and CRM contact ids. Args: id." }
+    - { name: prospecting_run_list, description: "List pipeline runs for the current project." }
+    - { name: prospecting_run_resume, description: "Resume an interrupted run or retry failed steps without repeating completed handoffs. Args: id." }
+    - { name: prospecting_settings, description: "Read or update Places connection and daily request limit." }
+    - { name: prospecting_places_connections, description: "List accessible Google Places connections." }
     - { name: prospecting_overview, description: "Summarize target profiles, runs, and candidate statuses for the current project." }
-    - { name: prospecting_capabilities, description: "Report whether optional Web discovery and CRM-backed outreach are connected." }
+    - { name: prospecting_capabilities, description: "Report whether Google Places, Web discovery and CRM-backed outreach are connected." }
     - { name: prospecting_profiles_create, description: "Create a target profile. Args: name, description?, industries?, locations?, employee_min?, employee_max?, target_titles?, keywords?." }
     - { name: prospecting_profiles_list, description: "List target profiles. Args: status? (active|archived|all)." }
     - { name: prospecting_profiles_get, description: "Get one target profile. Args: id." }
     - { name: prospecting_profiles_update, description: "Patch a target profile. Args: id and any editable profile fields." }
     - { name: prospecting_profiles_archive, description: "Archive a target profile. Args: id." }
-    - { name: prospecting_search_run, description: "Run a bounded Web search with provider fallback and deterministic noise filtering. Args: profile_id, query?, limit? (1-50), engine?, fallback_engine?." }
+    - { name: prospecting_search_run, description: "Run a bounded Web search with provider fallback and deterministic noise filtering. Args: profile_id, source? (web|google_places), query?, limit?, engine?, fallback_engine?. Places discovery returns a queued run." }
     - { name: prospecting_runs_list, description: "List discovery runs. Args: profile_id?, limit?." }
     - { name: prospecting_candidates_create, description: "Create a candidate manually. Args: company_name, profile_id? (an Imported leads profile is created when omitted), website?, person fields?, email?, phone?, summary?, source_url?." }
     - { name: prospecting_candidates_import, description: "Bulk seed up to 1000 candidates from CSV, JSON, or candidate objects without Web or CRM." }
@@ -89,7 +108,11 @@ provides:
         one-to-one outreach through CRM.
       metadata:
         category: sales
+  workers:
+    - name: prospecting-runs
+      schedule: "@every 2s"
   publishes:
+    - { name: prospecting.run.completed, description: "A discovery and qualification pipeline completed." }
     - { name: prospecting.profile.created, description: "A target profile was created." }
     - { name: prospecting.search.completed, description: "A bounded Web discovery run completed." }
     - { name: prospecting.candidate.created, description: "A candidate was discovered or created manually." }
@@ -104,7 +127,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: prospecting/v0.3.2
+    ref: prospecting/v0.4.0
     entry: mcp/prospecting
   port: 8080
   health_check: /health

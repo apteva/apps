@@ -100,6 +100,7 @@ interface Overview {
 interface Capabilities {
   web: boolean;
   crm: boolean;
+  google_places?: boolean;
 }
 
 interface CRMSender {
@@ -319,7 +320,7 @@ export default function ProspectingPanel({ projectId }: NativePanelProps) {
           <OverviewView overview={overview} profiles={profiles} candidates={candidates} runs={runs} capabilities={capabilities} onDiscover={() => setTab("discover")} onCandidates={() => setTab("candidates")} />
         )}
         {tab === "discover" && (
-          <DiscoverView profiles={profiles.filter((profile) => profile.status === "active")} runs={runs} webAvailable={capabilities.web} busy={busy} api={api} onDone={async (text) => { setMessage(text); await load(); setTab("candidates"); }} onError={setMessage} setBusy={setBusy} />
+          <DiscoverView profiles={profiles.filter((profile) => profile.status === "active")} capabilities={capabilities} busy={busy} api={api} onDone={async (text) => { setMessage(text); await load(); setTab("candidates"); }} onError={setMessage} setBusy={setBusy} />
         )}
         {tab === "candidates" && (
           <CandidatesView
@@ -378,9 +379,9 @@ function OverviewView({ overview, profiles, candidates, runs, capabilities, onDi
         <div>
           <h2 className="font-medium">Your standalone lead workspace</h2>
           <p className="mt-1 text-sm text-text-muted">Add or discover leads, qualify them, and start one-to-one outreach without leaving the workspace.</p>
-          <div className="mt-2 flex gap-2 text-[11px]"><CapabilityBadge label="Web discovery" available={capabilities.web} /><CapabilityBadge label="CRM outreach" available={capabilities.crm} /></div>
+          <div className="mt-2 flex gap-2 text-[11px]"><CapabilityBadge label="Google Places" available={!!capabilities.google_places} /><CapabilityBadge label="Web discovery" available={capabilities.web} /><CapabilityBadge label="CRM outreach" available={capabilities.crm} /></div>
         </div>
-        <button type="button" onClick={capabilities.web ? onDiscover : onCandidates} className="ml-auto px-4 py-2 text-sm bg-accent text-bg rounded font-medium">{capabilities.web ? "Discover companies" : "Seed leads"}</button>
+        <button type="button" onClick={capabilities.web || capabilities.google_places ? onDiscover : onCandidates} className="ml-auto px-4 py-2 text-sm bg-accent text-bg rounded font-medium">{capabilities.web || capabilities.google_places ? "Discover companies" : "Seed leads"}</button>
       </section>
       <div className="grid lg:grid-cols-2 gap-5">
         <section className="border border-border rounded-lg overflow-hidden">
@@ -425,95 +426,135 @@ function OverviewView({ overview, profiles, candidates, runs, capabilities, onDi
   );
 }
 
-function DiscoverView({ profiles, runs, webAvailable, busy, api, onDone, onError, setBusy }: {
-  profiles: Profile[];
-  runs: Run[];
-  webAvailable: boolean;
-  busy: boolean;
+interface PipelineRun {
+  id: number;
+  status: string;
+  error?: string;
+  options: { query: string; source: string; crm_mode: string };
+  progress: { phase: string; places_requests: number };
+  counts: Record<string, number>;
+  items: Array<{ source_key: string; candidate_id?: number; crm_contact_id?: number; status: string; reason?: string }>;
+}
+
+function DiscoverView({ profiles, capabilities, busy, api, onDone, onError, setBusy }: {
+  profiles: Profile[]; capabilities: Capabilities; busy: boolean;
   api: (path: string, init?: RequestInit) => Promise<any>;
-  onDone: (message: string) => Promise<void>;
-  onError: (message: string) => void;
-  setBusy: (busy: boolean) => void;
+  onDone: (message: string) => Promise<void>; onError: (message: string) => void; setBusy: (busy: boolean) => void;
 }) {
   const [profileId, setProfileId] = useState(profiles[0]?.id || 0);
+  const [source, setSource] = useState(capabilities.google_places ? "google_places" : "web");
   const [customQuery, setCustomQuery] = useState("");
+  const [area, setArea] = useState("");
   const [limit, setLimit] = useState(20);
+  const [qualify, setQualify] = useState(capabilities.web);
+  const [crmMode, setCRMMode] = useState("review");
+  const [minFit, setMinFit] = useState(70);
+  const [minConfidence, setMinConfidence] = useState(60);
+  const [lists, setLists] = useState("");
+  const [jobs, setJobs] = useState<PipelineRun[]>([]);
+  const [selectedJob, setSelectedJob] = useState(0);
+  const [bounds, setBounds] = useState({ south: "", west: "", north: "", east: "" });
+  const [requestKey, setRequestKey] = useState("");
+  const profile = profiles.find(p => p.id === profileId);
+  const generated = source === "google_places"
+    ? `${profile?.industries.join(", ") || "businesses"} in ${area.trim() || profile?.locations.join(", ") || "United States"}`
+    : profile ? queryPreview(profile) : "";
+  const available = source === "google_places" ? capabilities.google_places : capabilities.web;
+  const current = jobs.find(j => j.id === selectedJob);
+  const refreshJobs = useCallback(async () => {
+    const data = await api("/pipeline/runs?limit=20");
+    setJobs(data.runs || []);
+    setSelectedJob(id => id || data.runs?.[0]?.id || 0);
+  }, [api]);
   useEffect(() => {
-    if (!profiles.some((profile) => profile.id === profileId)) setProfileId(profiles[0]?.id || 0);
-  }, [profileId, profiles]);
-  const profile = profiles.find((item) => item.id === profileId);
-  const generated = profile ? queryPreview(profile) : "";
+    let active = true;
+    const refresh = () => refreshJobs().catch(e => { if (active) onError(e.message); });
+    refresh(); const timer = setInterval(refresh, 4000);
+    return () => { active = false; clearInterval(timer); };
+  }, [refreshJobs, onError]);
+  useEffect(() => { if (!profiles.some(p => p.id === profileId)) setProfileId(profiles[0]?.id || 0); }, [profiles, profileId]);
+  useEffect(() => { setRequestKey(""); }, [profileId, source, customQuery, area, limit, qualify, crmMode, minFit, minConfidence, lists, bounds]);
   const run = async () => {
     if (!profileId) return;
-    setBusy(true);
-    onError("");
+    setBusy(true); onError("");
+    const key = requestKey || crypto.randomUUID(); setRequestKey(key);
     try {
-      const data = await api("/discover", { method: "POST", body: JSON.stringify({ profile_id: profileId, query: customQuery.trim(), limit }) });
-      await onDone(`${data.created || 0} new candidates via ${data.engine || "Web"}; ${data.duplicates || 0} duplicates and ${data.excluded || 0} noisy or excluded results skipped${data.fallback_used ? " (fallback search used)" : ""}.`);
-    } catch (error) {
-      onError((error as Error).message);
-    } finally {
-      setBusy(false);
-    }
+      let locationRestriction;
+      if (source === "google_places" && Object.values(bounds).some(Boolean)) {
+        if (!Object.values(bounds).every(Boolean)) throw new Error("Fill all four geographic boundary coordinates.");
+        locationRestriction = { rectangle: { low: { latitude: Number(bounds.south), longitude: Number(bounds.west) }, high: { latitude: Number(bounds.north), longitude: Number(bounds.east) } } };
+      }
+      const data = await api("/pipeline/runs", { method: "POST", body: JSON.stringify({
+        profile_id: profileId, source, query: customQuery.trim() || generated, limit,
+        qualify: qualify && capabilities.web, crm_mode: crmMode,
+        min_fit_score: minFit, min_confidence_score: minConfidence, list_ids: split(lists),
+        location_restriction: locationRestriction, idempotency_key: key,
+      }) });
+      setSelectedJob(data.run.id); setRequestKey(""); await refreshJobs();
+    } catch (e) { onError((e as Error).message); } finally { setBusy(false); }
   };
-  return (
-    <div className="prospecting-full-width prospecting-discover-grid w-full p-5 lg:p-6 gap-5">
-      <section className="border border-border rounded-lg p-5 space-y-5">
-        <div>
-          <h2 className="font-medium">Discover companies</h2>
-          <p className="mt-1 text-sm text-text-muted">Run a bounded browser-backed search with automatic provider fallback and deterministic noise filtering. No messages are sent.</p>
-        </div>
-        {!webAvailable ? (
-          <div className="rounded border border-border bg-bg-input/40 p-4 text-sm">
-            <div className="font-medium">Web discovery is optional and not connected</div>
-            <p className="mt-1 text-text-muted">You can continue using the Leads tab to add, import, explore, and export leads. Connect the Web app only when you want browser-backed discovery and enrichment.</p>
-          </div>
-        ) : profiles.length === 0 ? <Empty text="Create an active target profile in Settings first." /> : (
-          <>
-            <Field label="Target profile">
-              <select value={profileId} onChange={(event) => setProfileId(Number(event.target.value))} className={controlClass}>
-                {profiles.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-              </select>
-            </Field>
-            {profile && (
-              <div className="rounded border border-border bg-bg-input/40 p-4 text-sm">
-                <div className="grid sm:grid-cols-2 gap-3">
-                  <ProfileFact label="Industries" values={profile.industries} />
-                  <ProfileFact label="Locations" values={profile.locations} />
-                  <ProfileFact label="Target roles" values={profile.target_titles} />
-                  <ProfileFact label="Keywords" values={profile.keywords} />
-                </div>
-              </div>
-            )}
-            <Field label="Search query" hint="Leave blank to use the generated query shown below.">
-              <textarea value={customQuery} onChange={(event) => setCustomQuery(event.target.value)} rows={3} placeholder={generated} className={controlClass} />
-            </Field>
-            <div className="text-xs text-text-muted"><span className="font-medium text-text">Planned query:</span> {customQuery.trim() || generated}</div>
-            <Field label={`Maximum results: ${limit}`}>
-              <input type="range" min={5} max={50} step={5} value={limit} onChange={(event) => setLimit(Number(event.target.value))} className="w-full" />
-            </Field>
-            <button type="button" onClick={run} disabled={busy || !profileId} className="px-4 py-2 bg-accent text-bg rounded text-sm font-medium disabled:opacity-50">
-              {busy ? "Searching the Web…" : "Run discovery"}
-            </button>
-          </>
-        )}
-      </section>
-      <section className="border border-border rounded-lg overflow-hidden self-start">
-        <div className="px-4 py-3 border-b border-border"><h2 className="text-sm font-medium">Recent runs</h2></div>
-        {runs.length === 0 ? <Empty text="No runs yet." /> : (
-          <ul className="divide-y divide-border max-h-[520px] overflow-auto">
-            {runs.slice(0, 15).map((item) => (
-              <li key={item.id} className="px-4 py-3">
-                <div className="flex gap-2 items-center"><span className="text-xs truncate">{item.query}</span><Status value={item.status} /></div>
-                <div className="mt-1 text-[11px] text-text-muted">{item.result_count} new · {dateLabel(item.started_at)}</div>
-                {item.error && <div className="mt-1 text-xs text-red">{item.error}</div>}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-    </div>
-  );
+  const resume = async (id: number) => {
+    setBusy(true); onError("");
+    try { await api(`/pipeline/runs/${id}/resume`, { method: "POST", body: "{}" }); await refreshJobs(); }
+    catch (e) { onError((e as Error).message); } finally { setBusy(false); }
+  };
+  return <div className="prospecting-full-width prospecting-discover-grid w-full p-5 lg:p-6 gap-5">
+    <section className="border border-border rounded-lg p-5 space-y-4 self-start">
+      <div><h2 className="font-medium">Discover and qualify prospects</h2><p className="mt-1 text-sm text-text-muted">Add businesses to your lead workspace, check their websites, and optionally add matching prospects to CRM.</p></div>
+      <Field label="Discovery source"><select value={source} onChange={e => setSource(e.target.value)} className={controlClass}><option value="google_places">Google Places</option><option value="web">Web search</option></select></Field>
+      {!available && <p className="text-sm text-text-muted">{source === "google_places" ? "Connect Google Places in Settings to use this source." : "Connect the optional Web app to use Web search."}</p>}
+      {profiles.length === 0 ? <Empty text="Create an active target profile in Settings first." /> : <>
+        <Field label="Target profile"><select value={profileId} onChange={e => setProfileId(Number(e.target.value))} className={controlClass}>{profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></Field>
+        {source === "google_places" && <Field label="City or area" hint="For example Dallas, Texas, United States"><input value={area} onChange={e => setArea(e.target.value)} placeholder={profile?.locations.join(", ")} className={controlClass} /></Field>}
+        <Field label="Search query" hint="Leave blank to use the planned query."><textarea value={customQuery} onChange={e => setCustomQuery(e.target.value)} placeholder={generated} rows={2} className={controlClass} /></Field>
+        <p className="text-xs text-text-muted">Planned query: {customQuery.trim() || generated}</p>
+        {source === "google_places" && <details><summary className="text-xs cursor-pointer">Restrict to geographic boundaries (optional)</summary><div className="grid grid-cols-2 gap-2 mt-3">{(["south", "west", "north", "east"] as const).map(k => <Field key={k} label={`${k[0].toUpperCase() + k.slice(1)} ${k === "south" || k === "north" ? "latitude" : "longitude"}`}><input type="number" step="any" value={bounds[k]} onChange={e => setBounds({ ...bounds, [k]: e.target.value })} className={controlClass} /></Field>)}</div></details>}
+        <Field label="Maximum prospects"><input type="number" min={1} max={20} value={limit} onChange={e => setLimit(Number(e.target.value))} className={controlClass} /></Field>
+        <label className="text-sm flex items-center gap-2"><input type="checkbox" checked={qualify && capabilities.web} disabled={!capabilities.web || crmMode === "auto"} onChange={e => setQualify(e.target.checked)} />Qualify using first-party websites</label>
+        {!capabilities.web && <p className="text-xs text-text-muted">Connect Web to qualify prospects. Places discovery can still add businesses for review.</p>}
+        <Field label="CRM handoff"><select value={crmMode} onChange={e => { setCRMMode(e.target.value); if (e.target.value === "auto") setQualify(true); }} className={controlClass}><option value="review">Save for review</option><option value="auto" disabled={!capabilities.crm || !capabilities.web}>Automatically add matching prospects to CRM</option></select></Field>
+        {crmMode === "auto" && <div className="rounded border border-border p-3 space-y-3"><p className="text-xs text-text-muted">Only eligible prospects meeting both thresholds with an email or business phone will be added. Others stay in Prospecting.</p><div className="grid grid-cols-2 gap-3"><Field label="Minimum fit"><input type="number" min={0} max={100} value={minFit} onChange={e => setMinFit(Number(e.target.value))} className={controlClass} /></Field><Field label="Minimum confidence"><input type="number" min={0} max={100} value={minConfidence} onChange={e => setMinConfidence(Number(e.target.value))} className={controlClass} /></Field></div><Field label="CRM lists" hint="Optional comma-separated list IDs or slugs"><input value={lists} onChange={e => setLists(e.target.value)} className={controlClass} /></Field></div>}
+        <button type="button" disabled={busy || !available || !profileId} onClick={run} className="px-4 py-2 bg-accent text-bg rounded text-sm font-medium disabled:opacity-50">{busy ? "Starting…" : "Start prospecting run"}</button>
+      </>}
+    </section>
+    <section className="border border-border rounded-lg p-4 space-y-4 self-start min-w-0">
+      <h2 className="text-sm font-medium">Saved runs</h2>
+      {jobs.length === 0 ? <Empty text="No pipeline runs yet." /> : <>
+        <select aria-label="Saved run" value={selectedJob} onChange={e => setSelectedJob(Number(e.target.value))} className={controlClass}>{jobs.map(j => <option key={j.id} value={j.id}>#{j.id} · {j.options.query} · {j.status}</option>)}</select>
+        {current && <>
+          <div className="flex flex-wrap items-center gap-2"><Status value={current.status} /><span className="text-xs text-text-muted">{current.options.source} · {current.progress.phase}</span></div>
+          <div className="grid grid-cols-2 gap-2">{["created", "existing", "excluded", "qualified", "transferred", "retained", "failed", "pending"].map(k => <div key={k} className="border border-border rounded px-3 py-2 text-xs"><span className="capitalize">{k}</span><strong className="float-right">{current.counts[k] || 0}</strong></div>)}</div>
+          {current.error && <p className="text-xs text-red">{current.error}</p>}
+          {current.items.length > 0 && <ul className="divide-y divide-border max-h-[480px] overflow-auto">{current.items.map(i => <li key={i.source_key} className="py-3 text-xs"><div className="flex gap-2 flex-wrap"><strong>{i.candidate_id ? `Prospect #${i.candidate_id}` : "Excluded result"}</strong><Status value={i.status} />{i.crm_contact_id && <span className="text-accent">CRM #{i.crm_contact_id}</span>}</div>{i.reason && <p className="mt-1 text-text-muted">{i.reason}</p>}</li>)}</ul>}
+          <div className="flex gap-2"><button className={secondaryButton} onClick={() => onDone(`Run #${current.id}: ${current.counts.created || 0} new prospects; ${current.counts.transferred || 0} in CRM.`)}>Open leads</button>{["failed", "completed_with_errors"].includes(current.status) && <button className={secondaryButton} disabled={busy} onClick={() => resume(current.id)}>Retry failed steps</button>}</div>
+        </>}
+      </>}
+    </section>
+  </div>;
+}
+
+function PlacesSettings({ api, runAction, busy }: { api: (path: string, init?: RequestInit) => Promise<any>; runAction: (action: () => Promise<unknown>, success: string) => Promise<void>; busy: boolean }) {
+  const [connection, setConnection] = useState(0);
+  const [dailyLimit, setDailyLimit] = useState(100);
+  const [connections, setConnections] = useState<Array<{ id: number; name: string; status: string }>>([]);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let active = true;
+    Promise.all([api("/settings"), api("/connections")]).then(([s, cs]) => { if (active) { setConnection(s.places_connection_id || 0); setDailyLimit(s.daily_places_request_limit || 100); setConnections(cs.connections || []); } }).catch(e => { if (active) setError(e.message); });
+    return () => { active = false; };
+  }, [api]);
+  const save = () => runAction(() => api("/settings", { method: "PATCH", body: JSON.stringify({ places_connection_id: connection, daily_places_request_limit: dailyLimit }) }), "Google Places settings saved.");
+  return <section className="border border-border rounded-lg p-4 space-y-3"><h2 className="text-sm font-medium">Google Places discovery</h2><p className="text-xs text-text-muted">Connect a Google Cloud API key with Places API (New) enabled in Integrations, then select that connection here. Searches use paid API requests.</p>{error && <p className="text-xs text-red">{error}</p>}<Field label="Google Places connection"><select value={connection} onChange={e => setConnection(Number(e.target.value))} className={controlClass}><option value={0}>Disconnected</option>{connections.map(c => <option key={c.id} value={c.id}>{c.name} · {c.status}</option>)}</select></Field><Field label="Daily Places request limit"><input type="number" min={1} max={1000} value={dailyLimit} onChange={e => setDailyLimit(Number(e.target.value))} className={controlClass} /></Field><button type="button" disabled={busy || !!error} onClick={save} className={secondaryButton}>Save connection</button></section>;
+}
+
+function PlacesInfo({ id, api }: { id: number; api: (path: string, init?: RequestInit) => Promise<any> }) {
+  const [place, setPlace] = useState<any>(null);
+  const [error, setError] = useState("");
+  useEffect(() => { let active = true; setPlace(null); setError(""); api(`/candidates/${id}`).then(d => { if (active) setPlace(d.place); }).catch(e => { if (active) setError(e.message); }); return () => { active = false; }; }, [api, id]);
+  if (error) return <p className="text-xs text-red">{error}</p>;
+  if (!place) return null;
+  const p = place.details;
+  return <section className="border border-border rounded-lg p-4 space-y-2"><div className="flex gap-2 items-center"><h3 className="text-sm font-medium">Google Maps</h3><a href={p.googleMapsUri || `https://www.google.com/maps/search/?api=1&query=business&query_place_id=${encodeURIComponent(p.id)}`} target="_blank" rel="noreferrer" className="ml-auto text-xs text-accent">View business listing</a></div><p className="text-sm">{p.displayName?.text}</p><p className="text-xs text-text-muted">{p.formattedAddress}</p><p className="text-xs text-text-muted">Business phone: {p.internationalPhoneNumber || p.nationalPhoneNumber || "Unknown"} · {p.businessStatus || "Status unknown"}</p><p className="text-xs text-text-muted">{p.primaryType?.replaceAll("_", " ")} · Retrieved {dateLabel(place.fetched_at)}</p>{p.attributions?.map((a: any, i: number) => <a key={i} href={a.providerUri} target="_blank" rel="noreferrer" className="block text-xs text-accent">{a.provider}</a>)}</section>;
 }
 
 function CandidatesView({ profiles, candidates, selected, evidence, handoff, outreach, selectedId, setSelectedId, query, setQuery, statusFilter, setStatusFilter, profileFilter, setProfileFilter, capabilities, projectId, busy, api, runAction }: {
@@ -693,6 +734,7 @@ function CandidateDetail({ candidate, profile, evidence, handoff, outreach, capa
       <div className="grid md:grid-cols-2 gap-5">
         <section className="border border-border rounded-lg p-4 space-y-3">
           <h3 className="text-sm font-medium">Company</h3>
+          <PlacesInfo id={candidate.id} api={api} />
           <Field label="Company name"><input value={draft.company_name} onChange={(event) => setDraft({ ...draft, company_name: event.target.value })} className={controlClass} /></Field>
           <Field label="Website"><input value={draft.website} onChange={(event) => setDraft({ ...draft, website: event.target.value })} className={controlClass} /></Field>
           <Field label="Domain"><input value={draft.company_domain} onChange={(event) => setDraft({ ...draft, company_domain: event.target.value })} className={controlClass} /></Field>
@@ -914,6 +956,7 @@ function SettingsView({ profiles, exclusions, busy, api, runAction }: {
         </div>
       </section>
       <div className="space-y-5">
+        <PlacesSettings api={api} runAction={runAction} busy={busy} />
         <section className="border border-border rounded-lg p-4">
 		  <h2 className="text-sm font-medium">Standalone by default</h2>
 		  <ul className="mt-3 space-y-2 text-xs text-text-muted">

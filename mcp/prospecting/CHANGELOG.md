@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.4.0
+
+- Reuse the optional Google Places connector for structured business discovery with bounded field masks and request limits.
+- Save business listing details, attribution, and retrieval time alongside prospects; preserve distinct Place IDs for branches.
+- Add `prospecting_run`, saved progress, resume/retry, and a supervised worker for discovery, qualification, and optional automatic CRM handoff.
+- Add Places connection settings, source/area controls, qualification options, CRM thresholds/lists, and per-prospect run outcomes.
+- Preserve explicit operator corrections during qualification, prevent cross-source duplicates, and attach evidence URLs to CRM qualification notes.
+- Pin app-sdk v0.96.0.
+
 ## v0.3.0
 
 - Add CRM-backed one-to-one email, SMS, and WhatsApp outreach without a direct Messaging dependency.

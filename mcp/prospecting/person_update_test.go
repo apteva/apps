@@ -72,7 +72,7 @@ func TestConcurrentCandidateEditsPreserveClearsAndScores(t *testing.T) {
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(8)
-	for _, file := range []string{"001_init.sql", "002_deterministic_qualification.sql"} {
+	for _, file := range []string{"001_init.sql", "002_deterministic_qualification.sql", "003_places_pipeline.sql"} {
 		b, err := os.ReadFile(filepath.Join("migrations", file))
 		if err != nil {
 			t.Fatal(err)

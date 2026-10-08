@@ -47,6 +47,8 @@ type SearchRun struct {
 }
 
 type Candidate struct {
+	EditRevision       int64              `json:"-"`
+	OperatorFields     []string           `json:"-"`
 	ID                 int64              `json:"id"`
 	ProjectID          string             `json:"project_id,omitempty"`
 	ProfileID          int64              `json:"profile_id"`

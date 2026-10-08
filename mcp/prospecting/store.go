@@ -301,7 +301,7 @@ func purgeRejectedCandidates(db *sql.DB, pid string) (int64, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
-	for _, table := range []string{"candidate_evidence", "crm_handoffs"} {
+	for _, table := range []string{"candidate_evidence", "crm_handoffs", "candidate_places"} {
 		if _, err := tx.Exec(`DELETE FROM `+table+` WHERE project_id=? AND candidate_id IN (
 			SELECT id FROM candidates WHERE project_id=? AND status='rejected'
 		)`, pid, pid); err != nil {
@@ -326,7 +326,7 @@ const candidateSelect = `SELECT id,project_id,profile_id,run_id,canonical_key,co
     person_first_name,person_last_name,person_display_name,job_title,email,phone,summary,
     location,employee_estimate,location_count,eligibility,eligibility_reasons_json,automation_signals_json,
     fit_score,confidence_score,score_reasons_json,status,source,source_url,decision_reason,crm_contact_id,
-    COALESCE(researched_at,''),COALESCE(accepted_at,''),COALESCE(rejected_at,''),COALESCE(deferred_at,''),COALESCE(enriched_at,''),created_at,updated_at FROM candidates`
+    COALESCE(researched_at,''),COALESCE(accepted_at,''),COALESCE(rejected_at,''),COALESCE(deferred_at,''),COALESCE(enriched_at,''),created_at,updated_at,edit_revision,operator_fields_json FROM candidates`
 
 func getCandidate(db rowQuerier, pid string, id int64) (*Candidate, error) {
 	c, err := scanCandidateRow(db.QueryRow(candidateSelect+` WHERE project_id=? AND id=?`, pid, id))
@@ -339,15 +339,16 @@ func getCandidate(db rowQuerier, pid string, id int64) (*Candidate, error) {
 func scanCandidateRow(row scanner) (*Candidate, error) {
 	var c Candidate
 	var runID, crmID, employeeEstimate sql.NullInt64
-	var reasons, eligibilityReasons, automationSignals string
+	var reasons, eligibilityReasons, automationSignals, operatorFields string
 	err := row.Scan(&c.ID, &c.ProjectID, &c.ProfileID, &runID, &c.CanonicalKey, &c.CompanyName, &c.CompanyDomain, &c.Website,
 		&c.PersonFirstName, &c.PersonLastName, &c.PersonDisplayName, &c.JobTitle, &c.Email, &c.Phone, &c.Summary,
 		&c.Location, &employeeEstimate, &c.LocationCount, &c.Eligibility, &eligibilityReasons, &automationSignals,
 		&c.FitScore, &c.ConfidenceScore, &reasons, &c.Status, &c.Source, &c.SourceURL, &c.DecisionReason, &crmID,
-		&c.ResearchedAt, &c.AcceptedAt, &c.RejectedAt, &c.DeferredAt, &c.EnrichedAt, &c.CreatedAt, &c.UpdatedAt)
+		&c.ResearchedAt, &c.AcceptedAt, &c.RejectedAt, &c.DeferredAt, &c.EnrichedAt, &c.CreatedAt, &c.UpdatedAt, &c.EditRevision, &operatorFields)
 	if err != nil {
 		return nil, err
 	}
+	c.OperatorFields = decodeStrings(operatorFields)
 	if runID.Valid {
 		v := runID.Int64
 		c.RunID = &v
@@ -455,6 +456,15 @@ func updateCandidateTx(db *sql.Tx, pid string, id int64, args map[string]any) (*
 	}
 	setString := func(key string, dest *string) {
 		if _, ok := args[key]; ok {
+			found := false
+			for _, k := range c.OperatorFields {
+				if k == key {
+					found = true
+				}
+			}
+			if !found {
+				c.OperatorFields = append(c.OperatorFields, key)
+			}
 			*dest = stringArg(args, key)
 		}
 	}
@@ -499,9 +509,9 @@ func updateCandidateTx(db *sql.Tx, pid string, id int64, args map[string]any) (*
 		return nil, err
 	}
 	fit, confidence, reasons := scoreCandidate(p, c, evidenceCount)
-	_, err = db.Exec(`UPDATE candidates SET company_name=?,company_domain=?,website=?,person_first_name=?,person_last_name=?,person_display_name=?,job_title=?,email=?,phone=?,summary=?,source_url=?,fit_score=?,confidence_score=?,score_reasons_json=?,updated_at=? WHERE project_id=? AND id=?`,
+	_, err = db.Exec(`UPDATE candidates SET company_name=?,company_domain=?,website=?,person_first_name=?,person_last_name=?,person_display_name=?,job_title=?,email=?,phone=?,summary=?,source_url=?,fit_score=?,confidence_score=?,score_reasons_json=?,updated_at=?,edit_revision=edit_revision+1,operator_fields_json=? WHERE project_id=? AND id=?`,
 		c.CompanyName, c.CompanyDomain, c.Website, c.PersonFirstName, c.PersonLastName, c.PersonDisplayName, c.JobTitle, c.Email, c.Phone,
-		truncate(c.Summary, 5000), c.SourceURL, fit, confidence, mustJSON(reasons), nowUTC(), pid, id)
+		truncate(c.Summary, 5000), c.SourceURL, fit, confidence, mustJSON(reasons), nowUTC(), mustJSON(c.OperatorFields), pid, id)
 	if err != nil {
 		return nil, err
 	}
@@ -529,18 +539,21 @@ func saveCandidateQualification(db *sql.DB, pid string, candidate *Candidate) (*
 	} else if status == "discovered" || status == "researching" {
 		status = "ready"
 	}
-	_, err = db.Exec(`UPDATE candidates SET
+	result, err := db.Exec(`UPDATE candidates SET
         company_name=?,company_domain=?,website=?,person_first_name=?,person_last_name=?,person_display_name=?,job_title=?,email=?,phone=?,summary=?,
         location=?,employee_estimate=?,location_count=?,eligibility=?,eligibility_reasons_json=?,automation_signals_json=?,
-        fit_score=?,confidence_score=?,score_reasons_json=?,status=?,decision_reason=?,rejected_at=?,enriched_at=?,updated_at=?
-        WHERE project_id=? AND id=?`,
+        fit_score=?,confidence_score=?,score_reasons_json=?,status=?,decision_reason=?,rejected_at=?,enriched_at=?,updated_at=?,edit_revision=edit_revision+1
+        WHERE project_id=? AND id=? AND edit_revision=? AND status NOT IN ('accepted','rejected','deferred')`,
 		candidate.CompanyName, candidate.CompanyDomain, candidate.Website, candidate.PersonFirstName, candidate.PersonLastName,
 		candidate.PersonDisplayName, candidate.JobTitle, normalizeEmail(candidate.Email), normalizePhone(candidate.Phone), truncate(candidate.Summary, 5000),
 		candidate.Location, nullableInt(candidate.EmployeeEstimate), candidate.LocationCount, defaultString(candidate.Eligibility, "review"),
 		mustJSON(candidate.EligibilityReasons), mustJSON(candidate.AutomationSignals), fit, confidence, mustJSON(reasons), status,
-		truncate(decisionReason, 1000), nullableText(rejectedAt), now, now, pid, candidate.ID)
+		truncate(decisionReason, 1000), nullableText(rejectedAt), now, now, pid, candidate.ID, candidate.EditRevision)
 	if err != nil {
 		return nil, err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return nil, errors.New("prospect was edited or its decision changed during qualification; retry against current fields")
 	}
 	return getCandidate(db, pid, candidate.ID)
 }
@@ -577,7 +590,7 @@ func setCandidateDecision(db *sql.DB, pid string, id int64, status, reason strin
 	if status == "rejected" {
 		column = "rejected_at"
 	}
-	result, err := db.Exec(`UPDATE candidates SET status=?,decision_reason=?,`+column+`=?,updated_at=? WHERE project_id=? AND id=? AND status!='accepted'`,
+	result, err := db.Exec(`UPDATE candidates SET status=?,decision_reason=?,`+column+`=?,updated_at=?,edit_revision=edit_revision+1 WHERE project_id=? AND id=? AND status!='accepted'`,
 		status, truncate(reason, 1000), now, now, pid, id)
 	if err != nil {
 		return nil, err
