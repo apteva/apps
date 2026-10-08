@@ -107,3 +107,29 @@ can conservatively flag wide foreground estimates; visual approval is required.
 headroom, retained supported pose bounds and the unchanged source bottom edge.
 The generic native foreground geometry tests also reject unsupported/ambiguous
 head evidence and retain wide-gesture scale. Closed eyes are not an exclusion.
+
+
+`TestAlexaSeatedReelsLocalRegression` replays outputs 94308, 94349 and 94398
+(source 90959, intervals 324575–355155, 391245–427660 and 436025–461160 ms).
+Set `ALEXA_VIDEO_CROP_FIXTURE_DIR` to the external capture containing the
+parent `derivations.json`, all `<keyframe_id>.jpg`, and paired
+`tracking/<position_ms>.analysis.jpg` / `.detail.jpg`. Both capture manifests
+are hash-pinned. Sampling, background validation and the full render planner
+run production code. `ALEXA_VIDEO_CROP_OUTPUT_DIR` writes resolved parameters.
+Assertions protect independently reviewed head/body/pose bounds, sampled
+geometry, a fixed crop and the source bottom edge. Customer pixels remain
+outside the public repository.
+
+0.14.21 adds conservative whole-reel composition. Existing distributed
+backgrounds must support a concentrated foreground; sampled movement, upper
+pose and padded head geometry determine one fixed portrait rectangle. Existing
+tracking samples are reused; otherwise at most the existing 32-frame adaptive
+budget supplies temporary source samples. Missing boundary coverage, gaps
+above 2.5 seconds, wide movement, cuts or ambiguous evidence retain the released
+tracking geometry. Composition-only samples cannot mutate the original track.
+Coverage remains sampled and requires visual review. The new synthetic tests
+cover moving hands, cut/camera/sparse/no-head fallbacks and disconnected
+head/body evidence against two adjacent foreground subjects.
+
+`BenchmarkComposeStableReel4Samples` measures the new evidence/geometry pass
+separately from the retained analyzer, temporal and stationary benchmarks.

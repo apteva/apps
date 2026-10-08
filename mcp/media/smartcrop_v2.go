@@ -48,6 +48,7 @@ type cropPathPoint struct {
 
 type smartCropV2Sample struct {
 	sceneForeground   bool
+	scenePoseGroup    bool
 	point             cropPathPoint
 	img               image.Image
 	face              *smartCropFace
@@ -614,6 +615,22 @@ func computeSmartCropReelV2(
 	}
 
 	recordSmartCropMethod(ctx, "reel:"+sampleSource)
+	compositionSamples := samples
+	compositionSource := sampleSource
+	if trackingFrames == 0 && smartCropReelCompositionCandidate(samples, backgroundImages, row.Width, row.Height, cw, ch) {
+		positions := smartCropAdaptiveTrackingPositions(samples, target, row.DurationMs, row.Width, cw)
+		if extra, err := analyzeSmartCropV2Source(ctx, app, sc, projectID, sourceFileID, positions, row.Width, row.Height, targetW, targetH); err == nil {
+			compositionSamples = mergeSmartCropSamples(append([]smartCropV2Sample(nil), samples...), extra)
+			markSmartCropSceneCuts(compositionSamples)
+			compositionSource += "+composition-tracking"
+		} else {
+			recordSmartCropFallback(ctx, "stable_composition_sampling_unavailable")
+		}
+	}
+	if composed, ok := composeSmartCropReel(ctx, cropWindow{W: cw, H: ch, X: path[0].X, Y: y}, compositionSamples, backgroundImages, row.Width, row.Height, target); ok {
+		recordSmartCropMethod(ctx, "reel:"+compositionSource+"+stable-composition")
+		return &composed, nil, nil
+	}
 	if x, ok := staticSmartCropPathX(path, cw); ok && smartCropStaticRetainsSupportedHeads(x, samples, row.Width, cw) {
 		app.Logger().Info("smartcrop v2 resolved static reel",
 			"file_id", sourceFileID, "samples", len(samples),

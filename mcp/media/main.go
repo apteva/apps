@@ -23,8 +23,11 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.20
+version: 0.14.21
 description: |
+  v0.14.21 adds stable whole-reel portrait composition for supported seated
+  foregrounds. A fixed crop retains sampled head/pose/movement and source
+  bottom; uncertain or wide actions retain the existing tracking geometry.
   v0.14.20 recognizes flattened HTTP/2 and nested transient provider errors
   within bounded vision retries. Verified upright screenshot foreground
   supports tighter framing while retaining supported pose and source bottom.
@@ -611,7 +614,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.20
+    ref: media/v0.14.21
     entry: mcp/media
   port: 8080
   health_check: /health

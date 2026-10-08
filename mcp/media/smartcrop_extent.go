@@ -114,6 +114,23 @@ func supportedSmartCropSubjectExtent(sample smartCropV2Sample, refs []image.Imag
 		}
 		return len(regions[i].positions) > len(regions[j].positions)
 	})
+	// A verified video foreground may split at clothing that matches the room.
+	// Join only two overlapping envelopes inside one portrait-width column;
+	// side-by-side subjects and disconnected furniture remain ambiguous.
+	if sample.scenePoseGroup && sample.face == nil && len(regions) == 2 {
+		a, b := regions[0], regions[1]
+		overlapX := minInt(a.maxX, b.maxX) - maxInt(a.minX, b.minX) + 1
+		overlapY := minInt(a.maxY, b.maxY) - maxInt(a.minY, b.minY) + 1
+		width := maxInt(a.maxX, b.maxX) - minInt(a.minX, b.minX) + 1
+		if overlapX*2 >= minInt(a.maxX-a.minX+1, b.maxX-b.minX+1) && overlapY > 0 && width*srcW/w <= cropW*9/10 {
+			a.minX = minInt(a.minX, b.minX)
+			a.maxX = maxInt(a.maxX, b.maxX)
+			a.minY = minInt(a.minY, b.minY)
+			a.maxY = maxInt(a.maxY, b.maxY)
+			a.positions = append(a.positions, b.positions...)
+			regions = []region{a}
+		}
+	}
 	// Without a face identity, similarly substantial foreground components
 	// remain ambiguous; colour alone cannot select between two subjects.
 	if sample.face == nil && len(regions) > 1 && len(regions[1].positions)*10 >= len(regions[0].positions)*6 {
