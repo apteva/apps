@@ -7,6 +7,11 @@ output, evidence, retry metadata, and revision.
 
 ## Execution
 
+Before configuring or starting an assignment, ensure each executing agent has
+any apps required by its assigned steps attached and configured. Processes
+automatically attaches its coordination tools before dispatch. If that attachment
+fails, dispatch is blocked and the failure is recorded for recovery.
+
 Define procedures semantically: step keys, instructions, roles, outputs, and
 dependencies. Never supply graph coordinates; Processes lays out every graph
 automatically. Use `validate_definition` for a read-only readiness check, then

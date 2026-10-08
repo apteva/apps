@@ -36,6 +36,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		descriptions[name] = "Manage saved process assignments: separate owners, parameters, schedules, and execution modes. Update requires a paused assignment and expected_revision. Activate only after the process is active."
 	}
 	descriptions["assignment_create"] = "After creating a procedure, configure an executor, parameters, and optional schedule. The assignment is always created paused and does not run. Activate it only with explicit user authorization after the process is active."
+	executorRequirements := " Processes automatically attaches its coordination tools to executing agents before dispatch. Executors must also have any apps required by their steps attached and configured."
+	for _, name := range []string{"assignment_create", "assignment_update", "start"} {
+		descriptions[name] += executorRequirements
+	}
+
 	descriptions["assignment_activate"] = "Enable a paused assignment only with explicit user authorization and only after the reviewed process is active."
 	descriptions["run_advance"] = "Controller/operator only: release one eligible step of a step_by_step run. Workers cannot advance steps. Read run_get eligible_steps, use an exact step_id and stable idempotency_key; separate calls may release independent branches. Does not complete or approve work."
 	descriptions["run_cancel"] = "Coordinator or operator: cancel a structured run and stop future handoffs. Already dispatched external work may continue."

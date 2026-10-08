@@ -2,7 +2,7 @@ schema: apteva-app/v1
 name: processes
 display_name: Processes
 version: 0.16.19
-description: Visual company procedures with generic connected steps, independent assignments, multi-agent execution, recurring runs, event triggers, and durable native run history.
+description: Create and run company procedures. Processes automatically attaches its coordination tools to executing agents before dispatch. Executors must also have any apps required by their steps attached and configured.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/processes
 icon: /ui/icon.svg
@@ -61,14 +61,14 @@ provides:
     - { name: pause, description: Stop future scheduled runs without interrupting current work. }
     - { name: draft, description: Return a procedure to draft and stop new runs while preserving current work and history. }
     - { name: archive, description: Retire a procedure and stop future scheduled runs. }
-    - { name: start, description: Start one execution of an active assignment. }
+    - { name: start, description: "Start one execution of an active assignment. Processes automatically attaches its coordination tools to executing agents before dispatch. Executors must also have any apps required by their steps attached and configured." }
     - { name: runs, description: Inspect native process execution history. }
     - { name: run_get, description: "Read the immutable procedure once and exact run and step evidence; includes reread references." }
     - { name: run_update, description: "Save direct run progress or outcome; receive a compact receipt and exact reread reference." }
     - { name: assignments, description: List saved process assignments. }
     - { name: assignment_get, description: Read assignment settings. }
-    - { name: assignment_create, description: "Configure a new assignment with agents, parameter values, and schedule." }
-    - { name: assignment_update, description: Revise a paused assignment. }
+    - { name: assignment_create, description: "Configure a new assignment with agents, parameter values, and schedule. Processes automatically attaches its coordination tools to executing agents before dispatch. Executors must also have any apps required by their steps attached and configured." }
+    - { name: assignment_update, description: "Revise a paused assignment. Processes automatically attaches its coordination tools to executing agents before dispatch. Executors must also have any apps required by their steps attached and configured." }
     - { name: assignment_activate, description: Enable an assignment. }
     - { name: assignment_pause, description: Pause one assignment. }
     - { name: assignment_archive, description: Archive one assignment. }
