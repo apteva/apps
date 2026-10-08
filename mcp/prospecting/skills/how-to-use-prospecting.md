@@ -8,7 +8,7 @@ run campaigns.
 
 ## Workflow
 
-1. Call `prospecting_capabilities` to learn whether optional Web discovery and
+1. Call `prospecting_capabilities` to learn whether Google Places, optional Web discovery and
    optional CRM handoff are connected.
 2. Read existing target profiles with `prospecting_profiles_list` before
    creating another one.
@@ -71,3 +71,42 @@ run campaigns.
 
 Prospecting remains the working lead catalog. After a CRM handoff, use CRM tools
 for changes to the accepted contact record.
+
+## Bounded automated prospecting
+
+When the user asks to discover and qualify a batch, use `prospecting_run` rather
+than chaining individual tools for every company. The agent only needs
+Prospecting tools; Prospecting calls Places, Web, and CRM internally.
+
+- Use `source=google_places` for local businesses by industry and location, or
+  `source=web` for broader company discovery.
+- Check capabilities and select an active target profile. To configure Places,
+  list `prospecting_places_connections` and save the chosen accessible connection
+  with `prospecting_settings`. Never request or expose the raw API key.
+- Default to `limit=20`, `qualify=true`, and `crm_mode=review`. If the user has
+  requested automatic CRM addition, use `crm_mode=auto` with their target list and
+  fit/confidence thresholds (defaults 70/60). This creates or links CRM contacts
+  and records notes; it does not contact anyone. The user's existing authorization
+  to add matching leads to CRM applies to the bounded run.
+- Set an `idempotency_key` unique to this intended run and reuse it only for
+  retries of the same request. Changing options with the same key is rejected.
+- The tool returns immediately with a queued run ID. Poll `prospecting_run_get`
+  at sensible intervals, then report created/existing/excluded/qualified/retained/
+  transferred/failed counts with candidate and CRM IDs. Do not repeatedly restart
+  discovery while the run is still processing.
+- Use `prospecting_run_resume` to retry failed steps or resume after interruption.
+  Completed qualification and handoffs are preserved. Abrupt process crashes can
+  leave a lease active for up to five minutes. Respect per-run/daily request limits.
+- Preserve branch identity and operator edits. Places provides company listing
+  details and business phone numbers; it does not confirm executive identities,
+  direct emails, company size, or buying intent. Do not invent them. Ratings and
+  review counts are not buying signals. Google Maps/provider attribution remains
+  attached to listing details.
+- Prospects without a website, with incomplete qualification, below thresholds,
+  rejected, deferred, or excluded remain outside automatic CRM transfer. Explain
+  their saved reasons instead of lowering thresholds silently.
+- Search returns ranked results, not every business in a city. Geographic query
+  text and optional location restriction define the target area; US region bias
+  alone does not guarantee US-only results.
+- Sending email, SMS, or WhatsApp still requires the separate exact-message
+  authorization described above. Never use a send to test this pipeline.

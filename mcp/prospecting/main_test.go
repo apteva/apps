@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -751,4 +752,17 @@ func TestAcceptRequiresContactChannel(t *testing.T) {
 	if len(platform.calls) != 0 {
 		t.Fatalf("invalid accept made platform calls: %d", len(platform.calls))
 	}
+}
+
+func (p *platformStub) CallAppResultContext(c context.Context, app, tool string, input map[string]any, out any) error {
+	if err := c.Err(); err != nil {
+		return err
+	}
+	return p.CallAppResult(app, tool, input, out)
+}
+func (p *platformStub) CallAppContext(c context.Context, app, tool string, input map[string]any) (json.RawMessage, error) {
+	return nil, fmt.Errorf("unexpected raw app call")
+}
+func (p *platformStub) CallAppBatchContext(c context.Context, app string, calls []sdk.AppCall, o sdk.AppBatchOptions) ([]sdk.AppCallResult, error) {
+	return nil, fmt.Errorf("unexpected batch app call")
 }

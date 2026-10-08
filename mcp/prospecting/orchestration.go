@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -119,6 +121,14 @@ func runDiscoveryWithOptions(ctx *sdk.AppCtx, profileID int64, query string, lim
 		}
 		if blocked {
 			excluded++
+			continue
+		}
+		existing, ambiguous, e := existingPlaceCompany(ctx.AppDB(), pid, profileID, domain)
+		if e != nil {
+			return nil, e
+		}
+		if existing != nil || ambiguous {
+			duplicates++
 			continue
 		}
 		candidate, wasCreated, err := insertCandidate(ctx.AppDB(), pid, input, profile)
@@ -450,6 +460,12 @@ func startCandidateOutreach(ctx *sdk.AppCtx, id int64, listIDs any) (map[string]
 }
 
 func linkCandidateToCRM(ctx *sdk.AppCtx, id int64, listIDs any, markAccepted bool) (map[string]any, error) {
+	return linkCandidateToCRMContext(context.Background(), ctx, id, listIDs, markAccepted)
+}
+
+func linkCandidateToCRMContext(c context.Context, ctx *sdk.AppCtx, id int64, listIDs any, markAccepted bool) (map[string]any, error) {
+	deadline, cancel := context.WithTimeout(c, 80*time.Second)
+	defer cancel()
 	if ctx == nil || ctx.AppDB() == nil {
 		return nil, errors.New("prospecting context unavailable")
 	}
@@ -509,7 +525,7 @@ func linkCandidateToCRM(ctx *sdk.AppCtx, id int64, listIDs any, markAccepted boo
 		input["list_ids"] = listIDs
 	}
 	var crmOut crmUpsertOutput
-	if err := ctx.PlatformAPI().CallAppResult("crm", "contacts_upsert_by_channel", input, &crmOut); err != nil {
+	if err := sdk.CallAppResultContext(deadline, ctx.PlatformAPI(), "crm", "contacts_upsert_by_channel", input, &crmOut); err != nil {
 		return nil, fmt.Errorf("CRM handoff: %w", err)
 	}
 	if crmOut.Contact.ID <= 0 {
@@ -523,7 +539,21 @@ func linkCandidateToCRM(ctx *sdk.AppCtx, id int64, listIDs any, markAccepted boo
 	}
 	activityBody := fmt.Sprintf("%s Prospecting target profile %q. Fit %d/100, confidence %d/100. %s",
 		actionLabel, profile.Name, candidate.FitScore, candidate.ConfidenceScore, truncate(candidate.Summary, 800))
-	if err := ctx.PlatformAPI().CallAppResult("crm", "contacts_log_activity", map[string]any{
+	evidence, e := listEvidence(ctx.AppDB(), pid, id)
+	if e != nil {
+		return nil, e
+	}
+	for index, item := range evidence {
+		if index >= 5 {
+			break
+		}
+		activityBody += "\nSource: " + item.URL
+	}
+	if place, e := candidatePlace(ctx.AppDB(), pid, id); e == nil && place != nil {
+		details := place["details"].(placeDetails)
+		activityBody += "\nGoogle Maps business listing: " + details.Address + ". Business phone: " + defaultString(details.Phone, details.NationalPhone) + ". Website: " + candidate.Website
+	}
+	if err := sdk.CallAppResultContext(deadline, ctx.PlatformAPI(), "crm", "contacts_log_activity", map[string]any{
 		"contact_id": crmOut.Contact.ID,
 		"kind":       "note",
 		"body":       strings.TrimSpace(activityBody),
