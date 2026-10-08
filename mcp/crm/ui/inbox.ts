@@ -27,6 +27,20 @@ export interface InboxResponse {
   offset?: number;
 }
 
+// A filtered/paginated queue is not the current conversation. A reply moves
+// open -> pending, but refreshing that queue must not navigate away from it.
+export function refreshedInboxSelection(
+  rows: InboxItem[], current: InboxItem | null, requestedId?: number, resetOnMissing = false,
+): InboxItem | null {
+  if (current) {
+    const refreshed = rows.find(row => String(row.id) === String(current.id));
+    if (refreshed) return refreshed;
+    if (!resetOnMissing) return current;
+  }
+  const requested = requestedId == null ? undefined : rows.find(row => String(row.id) === String(requestedId));
+  return requested || rows[0] || null;
+}
+
 export interface CRMInboxHostProps {
   appName?: string;
   installId?: number;

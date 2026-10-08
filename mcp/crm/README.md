@@ -1,4 +1,14 @@
-# CRM v0.9.18
+# CRM v0.9.19
+
+Release `crm/v0.9.19`: Replying still changes an open conversation to pending,
+but the inbox keeps that conversation selected so its sent message and delivery
+status remain visible. Live events, manual refresh and pagination likewise
+preserve the viewed thread even when it leaves the current queue. A notice
+explains why the conversation is absent from the filtered list. Clicking another
+conversation or deliberately changing filters still navigates normally.
+Regression coverage includes an empty open queue and deep-link selection.
+All v0.9.18 unsubscribe features are retained. No backend status semantics,
+Messaging changes, data migration or production data repair.
 
 Release `crm/v0.9.18`: Inbox and contact-conversation headers offer an explicit
 "Unsubscribe this email" confirmation and an Unsubscribed/Email blocked badge.

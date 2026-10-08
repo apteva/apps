@@ -4,7 +4,7 @@
 // shell exposes a Settings pane for the messaging coupling.
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { crmPanelInitialRoute, type InboxItem, type InboxResponse } from "./inbox";
+import { crmPanelInitialRoute, refreshedInboxSelection, type InboxItem, type InboxResponse } from "./inbox";
 import { messageAddressLines, messageRecipientSummary, latestMessageAddresses, type MessageAddresses } from "./message_addresses";
 import { messageDisplayBody } from "./message_body";
 import { channelPresentation, channelThemeCSS, conversationChannels, sessionFromResponse, whatsappWindowLabel, whatsappSessionRequiresTemplate, type WhatsAppSessionState, type WhatsAppSessionResponse } from "./channels";
@@ -3569,7 +3569,7 @@ function InboxTab({ api, projectId, lists, senders, initialConversationId, initi
   const threadAbort=useRef<AbortController | null>(null);
   const pendingInitialConversation = useRef(initialConversationId);
 
-  const load = useCallback(async (offset = 0) => {
+  const load = useCallback(async (offset = 0, resetOnMissing = false) => {
     const seq = ++listLoadSeq.current;
     inboxAbort.current?.abort();const controller=new AbortController();inboxAbort.current=controller;
     setErr(null);
@@ -3595,18 +3595,11 @@ function InboxTab({ api, projectId, lists, senders, initialConversationId, initi
       setItems(nextRows);
       setTotal(typeof r.total === "number" ? r.total : nextRows.length);
       setSelected((cur) => {
-        if (cur) {
-          const stillHere = nextRows.find((row) => String(row.id) === String(cur.id));
-          if (stillHere) return stillHere;
-        }
-        const requested = pendingInitialConversation.current
-          ? nextRows.find((row) => String(row.id) === String(pendingInitialConversation.current))
-          : undefined;
-        if (requested) {
+        const next = refreshedInboxSelection(nextRows, cur, pendingInitialConversation.current, resetOnMissing);
+        if (next && String(next.id) === String(pendingInitialConversation.current)) {
           pendingInitialConversation.current = undefined;
-          return requested;
         }
-        return nextRows[0] || null;
+        return next;
       });
     } catch (e) {
       if (seq !== listLoadSeq.current) return;
@@ -3620,7 +3613,9 @@ function InboxTab({ api, projectId, lists, senders, initialConversationId, initi
       if (seq === listLoadSeq.current) setLoadingMore(false);
     }
   }, [api, statusFilter, channelFilter, fromFilter, toFilter, listFilter, tagFilter]);
-  useEffect(() => { load(); }, [load]);
+  // Only an intentional filter/scope change may replace a missing selection.
+  // Send callbacks, live events, Refresh and pagination preserve the thread.
+  useEffect(() => { load(0, true); }, [load]);
 
   const loadThreadFor = useCallback(async (item: InboxItem, activityOffset = 0) => {
     const seq = ++threadLoadSeq.current;
@@ -3913,6 +3908,11 @@ function InboxTab({ api, projectId, lists, senders, initialConversationId, initi
                   <p className="mt-1 text-xs text-text-dim break-all">
                     Latest message · {messageRecipientSummary(latestMessageAddresses(threadActivities))}
                   </p>
+                  {items && !items.some(item => String(item.id) === String(selected.id)) && (
+                    <p className="mt-1 text-xs text-text-muted" role="status">
+                      This conversation is outside the current inbox filters. It stays here until you choose another conversation or change filters.
+                    </p>
+                  )}
                 </div>
                 <div className="flex items-center gap-2 flex-wrap">
                   {threadContact && lastReceived && (
