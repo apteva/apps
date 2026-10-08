@@ -195,7 +195,16 @@ else:
 			}
 
 			if c.name == "portrait-78221" {
-				if !strings.Contains(audit.Diagnostics.Method, "exact-extent") || len(audit.Diagnostics.Extents) != 1 || audit.Diagnostics.Extents[0].AtMs != c.at {
+				exactEvidence := false
+				for _, e := range audit.Diagnostics.Evidence {
+					if e.Origin == "source" && e.AtMs == c.at {
+						exactEvidence = true
+					}
+				}
+				if !exactEvidence {
+					t.Fatal("missing exact source frame evidence")
+				}
+				if (!strings.Contains(audit.Diagnostics.Method, "exact-extent") && !strings.Contains(audit.Diagnostics.Method, "exact-scene-foreground")) || len(audit.Diagnostics.Extents) != 1 || audit.Diagnostics.Extents[0].AtMs != c.at {
 					t.Fatalf("requested instant silently fell back to storyboard: %s", resolved)
 				}
 			}

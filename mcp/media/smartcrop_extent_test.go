@@ -111,3 +111,86 @@ func BenchmarkSupportedSmartCropExtent(b *testing.B) {
 		supportedSmartCropSubjectExtent(sample, refs, 1920, 1080, 606)
 	}
 }
+
+func TestConnectedUprightPoseRequiresBodyAndRetainsLimbs(t *testing.T) {
+	head := &smartCropFace{MinX: 960, MaxX: 1050, MinY: 60, MaxY: 180, CenterX: 1005, Scale: 120}
+	for _, c := range []struct {
+		name      string
+		fill      func(*image.RGBA)
+		wantWidth int
+	}{
+		{"whole neutral body", func(im *image.RGBA) {}, 180},
+		{"wide neutral arm", func(im *image.RGBA) { extentTestFill(im, image.Rect(100, 50, 235, 65), color.RGBA{200, 200, 200, 255}) }, 810},
+		{"coloured arm unresolved", func(im *image.RGBA) { extentTestFill(im, image.Rect(178, 50, 235, 65), color.RGBA{205, 145, 125, 255}) }, 0},
+		{"disconnected lower body", func(im *image.RGBA) {
+			extentTestFill(im, image.Rect(150, 80, 180, 100), color.RGBA{130, 130, 130, 255})
+		}, 0},
+		{"upper pose only", func(im *image.RGBA) {
+			extentTestFill(im, image.Rect(150, 90, 180, 175), color.RGBA{130, 130, 130, 255})
+		}, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			im := extentTestImage()
+			extentTestFill(im, image.Rect(150, 10, 180, 175), color.RGBA{200, 200, 200, 255})
+			c.fill(im)
+			pixels := normalizedSmartCropRGB(im, 320, 180)
+			var positions []int
+			for pos := 0; pos < 320*180; pos++ {
+				if pixels[pos*3] != 130 || pixels[pos*3+1] != 130 || pixels[pos*3+2] != 130 {
+					positions = append(positions, pos)
+				}
+			}
+			pose := connectedSmartCropUprightPose(pixels, positions, head, 320, 180, 1920, 1080)
+			if c.wantWidth == 0 {
+				if pose != nil {
+					t.Fatalf("incomplete/coloured pose accepted: %+v", pose)
+				}
+				return
+			}
+			if pose == nil || pose.W != c.wantWidth || pose.Y > head.MinY || pose.Y+pose.H < 1000 {
+				t.Fatalf("full supported geometry lost: %+v", pose)
+			}
+			if c.wantWidth > 606 {
+				a := &smartCropAudit{Coverage: "unknown"}
+				ctx := context.WithValue(context.Background(), smartCropAuditKey{}, a)
+				recordSmartCropExtent(ctx, smartCropV2Sample{}, &smartCropSubjectExtent{Bounds: *pose, Head: head}, 606)
+				a.Effective = &smartCropAuditWindow{X: 800, W: 606, H: 1080}
+				if a.Coverage != "exceeds_crop_width" || cropRetainsSampledExtents(a) {
+					t.Fatal("wide gesture incorrectly certified")
+				}
+			}
+		})
+	}
+}
+
+func TestSupportedStillHeadDoesNotSelectRaisedHand(t *testing.T) {
+	bg := extentTestImage()
+	refs := []image.Image{bg, bg, bg, bg}
+	im := extentTestImage()
+	extentTestFill(im, image.Rect(130, 65, 205, 179), color.RGBA{55, 60, 65, 255})
+	extentTestFill(im, image.Rect(130, 50, 150, 80), color.RGBA{210, 165, 145, 255}) // peripheral hand, higher than head
+	extentTestFill(im, image.Rect(166, 60, 184, 85), color.RGBA{210, 165, 145, 255})
+	s := smartCropV2Sample{img: im, sceneForeground: true, sceneStill: true, motionTracked: true, point: cropPathPoint{X: 780}}
+	e, ok := supportedSmartCropSubjectExtent(s, refs, 1920, 1080, 606)
+	if !ok || e.Head == nil || e.Head.CenterX < 990 {
+		t.Fatalf("raised hand displaced supported head: %+v", e)
+	}
+}
+
+func BenchmarkConnectedUprightPose320(b *testing.B) {
+	im := extentTestImage()
+	extentTestFill(im, image.Rect(150, 10, 180, 175), color.RGBA{200, 200, 200, 255})
+	pixels := normalizedSmartCropRGB(im, 320, 180)
+	positions := make([]int, 0, 30*165)
+	for y := 10; y < 175; y++ {
+		for x := 150; x < 180; x++ {
+			positions = append(positions, y*320+x)
+		}
+	}
+	head := &smartCropFace{MinX: 960, MaxX: 1050, MinY: 60, MaxY: 180, CenterX: 1005, Scale: 120}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		connectedSmartCropUprightPose(pixels, positions, head, 320, 180, 1920, 1080)
+	}
+}

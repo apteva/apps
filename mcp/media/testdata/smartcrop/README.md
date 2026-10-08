@@ -133,3 +133,24 @@ head/body evidence against two adjacent foreground subjects.
 
 `BenchmarkComposeStableReel4Samples` measures the new evidence/geometry pass
 separately from the retained analyzer, temporal and stationary benchmarks.
+
+
+`TestLoopNativeAndDirectPoseLocalRegression` replays source 91905 at 101000 and
+221000 ms and native screenshots 94482/94490 through both complete planner paths.
+Set `LOOP_CROP_FIXTURE_DIR` to the external 0.14.22 capture with its hash-pinned
+`manifest.json`, derivations, native PNGs, thumbnails and paired exact source
+samples. `LOOP_CROP_PREVIEW_DIR` optionally renders actual 540×960 previews.
+Assertions retain independently reviewed raised hands, body and source bottom,
+exact evidence provenance and strict `require_action_preservation` without
+padding. Source/video and PNG thumbnail colour conversions differ slightly;
+geometry has bounded sampling tolerance, while gesture preservation is absolute.
+
+0.14.22 uses native scene refinement on actual requested video frames, never a
+storyboard's representative frame as exact pose evidence. A connected head and
+full-body neutral foreground can distinguish a fitting pose from broad warm
+scene changes. The broad estimate remains in `foreground_bounds`; an upper-only
+pose cannot authorize this refinement. Compact coloured limb evidence, missing
+lower-body connectivity and genuinely wide actions remain conservative. Margins
+adapt to available crop space, and positioning precedes the strict policy check.
+These refinements apply to still outputs; whole-reel tracking/composition remains
+unchanged. Sampled coverage still requires visual review.

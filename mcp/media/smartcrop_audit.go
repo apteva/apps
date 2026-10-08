@@ -40,11 +40,12 @@ type smartCropEvidence struct {
 	FileID string `json:"file_id,omitempty"`
 }
 type smartCropExtentEvidence struct {
-	UpperPose *smartCropAuditWindow `json:"upper_pose,omitempty"`
-	AtMs      int64                 `json:"at_ms"`
-	Bounds    smartCropAuditWindow  `json:"bounds"`
-	Head      *smartCropAuditHead   `json:"head,omitempty"`
-	Support   string                `json:"support"`
+	ForegroundBounds *smartCropAuditWindow `json:"foreground_bounds,omitempty"`
+	UpperPose        *smartCropAuditWindow `json:"upper_pose,omitempty"`
+	AtMs             int64                 `json:"at_ms"`
+	Bounds           smartCropAuditWindow  `json:"bounds"`
+	Head             *smartCropAuditHead   `json:"head,omitempty"`
+	Support          string                `json:"support"`
 }
 type smartCropAudit struct {
 	SceneSourceID    string `json:"scene_source_file_id,omitempty"`
@@ -106,7 +107,12 @@ func recordSmartCropExtent(ctx context.Context, sample smartCropV2Sample, extent
 			v := auditCropWindow(*extent.UpperPose)
 			upper = &v
 		}
-		a.Extents = append(a.Extents, smartCropExtentEvidence{AtMs: sample.point.AtMs, Bounds: auditCropWindow(extent.Bounds), Head: head, Support: extent.Evidence, UpperPose: upper})
+		var raw *smartCropAuditWindow
+		if extent.ForegroundBounds != nil {
+			v := auditCropWindow(*extent.ForegroundBounds)
+			raw = &v
+		}
+		a.Extents = append(a.Extents, smartCropExtentEvidence{ForegroundBounds: raw, AtMs: sample.point.AtMs, Bounds: auditCropWindow(extent.Bounds), Head: head, Support: extent.Evidence, UpperPose: upper})
 		if extent.Bounds.W > cropW {
 			a.Coverage = "exceeds_crop_width"
 			a.Recommendation = "Use fit_mode: contain to preserve the full source frame."

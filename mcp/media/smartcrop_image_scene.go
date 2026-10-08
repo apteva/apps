@@ -47,9 +47,18 @@ func nativeSmartCropImageScene(app *sdk.AppCtx, project string, row *MediaRow) *
 }
 
 func refineSmartCropNativeImage(ctx context.Context, app *sdk.AppCtx, sc *storageClient, project string, row *MediaRow, sample *smartCropV2Sample, win cropWindow) (cropWindow, bool) {
-	x, cropW := win.X, win.W
 	scene := nativeSmartCropImageScene(app, project, row)
-	if scene == nil || sample == nil {
+	if scene == nil {
+		return win, false
+	}
+	return refineSmartCropSceneStill(ctx, app, sc, project, row, scene, sample, win)
+}
+
+// Native screenshots and exact source frames share scene/pose analysis. The
+// caller must establish the requested frame identity before borrowing evidence.
+func refineSmartCropSceneStill(ctx context.Context, app *sdk.AppCtx, sc *storageClient, project string, row *MediaRow, scene *smartCropImageScene, sample *smartCropV2Sample, win cropWindow) (cropWindow, bool) {
+	x, cropW := win.X, win.W
+	if sample == nil || scene == nil {
 		return win, false
 	}
 	ds, e := resolveValidDerivations(ctx, sc, project, scene.Source.Derivations)
@@ -72,20 +81,29 @@ func refineSmartCropNativeImage(ctx context.Context, app *sdk.AppCtx, sc *storag
 	s.point.AtMs = scene.AtMs
 	s.motionTracked = true
 	s.sceneForeground = true
+	s.sceneStill = true
 	if a := cropAudit(ctx); a != nil {
 		a.SceneSourceID = scene.Source.FileID
 		a.SceneAtMs = &scene.AtMs
 		a.SceneRenderID = scene.RenderID
 	}
 	if extent, ok := supportedSmartCropSubjectExtent(s, refs, row.Width, row.Height, cropW); ok {
+		// A full, head-connected pose may exclude broad warm background changes.
+		// An upper-pose estimate alone can never replace lower-body evidence.
+		if pose := extent.Pose; extent.Bounds.W > cropW && pose != nil && pose.W <= cropW {
+			raw := extent.Bounds
+			extent.ForegroundBounds = &raw
+			extent.Bounds = *pose
+			extent.Evidence += "+connected_full_pose"
+		}
 		recordSmartCropExtent(ctx, s, extent, cropW)
 		if extent.Bounds.W > cropW && extent.Head != nil && extent.Head.Quality == 0 {
 			x = clampInt(roundEven(extent.Head.CenterX-cropW/2), 0, row.Width-cropW)
 		}
 		x = containSmartCropSubjectExtentX(x, extent, row.Width, cropW)
 		if upper := extent.UpperPose; upper != nil {
-			margin := maxInt(12, cropW/16)
-			if upper.W+2*margin <= cropW {
+			margin := minInt(maxInt(12, cropW/16), (cropW-upper.W)/2)
+			if upper.W <= cropW {
 				x = clampInt(x, upper.X+upper.W+margin-cropW, upper.X-margin)
 			}
 		}

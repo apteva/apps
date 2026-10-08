@@ -7,10 +7,12 @@ import (
 )
 
 type smartCropSubjectExtent struct {
-	Bounds    cropWindow     `json:"bounds"`
-	Head      *smartCropFace `json:"head,omitempty"`
-	Evidence  string         `json:"evidence"`
-	UpperPose *cropWindow    `json:"upper_pose,omitempty"`
+	Bounds           cropWindow     `json:"bounds"`
+	Head             *smartCropFace `json:"head,omitempty"`
+	Evidence         string         `json:"evidence"`
+	UpperPose        *cropWindow    `json:"upper_pose,omitempty"`
+	Pose             *cropWindow    `json:"pose,omitempty"`
+	ForegroundBounds *cropWindow    `json:"foreground_bounds,omitempty"`
 }
 
 // supportedSmartCropSubjectExtent measures skin/head/limb geometry inside a
@@ -199,6 +201,11 @@ func supportedSmartCropSubjectExtent(sample smartCropV2Sample, refs []image.Imag
 				if reclining && minX > r.minX+(r.maxX-r.minX)/3 && maxX < r.maxX-(r.maxX-r.minX)/3 {
 					continue
 				}
+				// A raised peripheral hand can resemble an inferred head. Upright
+				// heads need central body support; reclining heads use the end test.
+				if sample.sceneStill && !reclining && ((minX+maxX)/2 < r.minX+(r.maxX-r.minX)/4 || (minX+maxX)/2 > r.maxX-(r.maxX-r.minX)/4) {
+					continue
+				}
 				bestY = minY
 				scale := maxInt(rw*srcW/w, rh*srcH/h)
 				best = &smartCropFace{MinX: minX * srcW / w, MaxX: (maxX + 1) * srcW / w, MinY: minY * srcH / h, MaxY: (maxY + 1) * srcH / h, CenterX: (minX + maxX + 1) * srcW / (2 * w), CenterY: (minY + maxY + 1) * srcH / (2 * h), Scale: scale}
@@ -238,12 +245,14 @@ func supportedSmartCropSubjectExtent(sample smartCropV2Sample, refs []image.Imag
 				queue = queue[:0]
 				queue = append(queue, start)
 				visited[start] = true
-				l, rr := start%w, start%w
+				l, rr, upperTop, upperBottom := start%w, start%w, start/w, start/w
 				for k := 0; k < len(queue); k++ {
 					pos := queue[k]
 					xx, yy := pos%w, pos/w
 					l = minInt(l, xx)
 					rr = maxInt(rr, xx)
+					upperTop = minInt(upperTop, yy)
+					upperBottom = maxInt(upperBottom, yy)
 					for ny := maxInt(0, yy-1); ny <= minInt(h-1, yy+1); ny++ {
 						for nx := maxInt(0, xx-1); nx <= minInt(w-1, xx+1); nx++ {
 							np := ny*w + nx
@@ -256,11 +265,15 @@ func supportedSmartCropSubjectExtent(sample smartCropV2Sample, refs []image.Imag
 				}
 				if len(queue) > bestArea && len(queue) >= w*h/500 && center >= l && center <= rr {
 					bestArea = len(queue)
-					upper = &cropWindow{X: l * srcW / w, W: (rr - l + 1) * srcW / w}
+					upper = &cropWindow{X: l * srcW / w, W: (rr - l + 1) * srcW / w, Y: upperTop * srcH / h, H: (upperBottom - upperTop + 1) * srcH / h}
 				}
 			}
 		}
-		return &smartCropSubjectExtent{Bounds: cropWindow{X: left * srcW / w, Y: top * srcH / h, W: int(math.Ceil(float64(right-left+1) * float64(srcW) / float64(w))), H: int(math.Ceil(float64(bottom-top+1) * float64(srcH) / float64(h)))}, Head: head, Evidence: evidence, UpperPose: upper}, true
+		var pose *cropWindow
+		if sample.sceneStill && head != nil && !reclining {
+			pose = connectedSmartCropUprightPose(pixels, r.positions, head, w, h, srcW, srcH)
+		}
+		return &smartCropSubjectExtent{Pose: pose, Bounds: cropWindow{X: left * srcW / w, Y: top * srcH / h, W: int(math.Ceil(float64(right-left+1) * float64(srcW) / float64(w))), H: int(math.Ceil(float64(bottom-top+1) * float64(srcH) / float64(h)))}, Head: head, Evidence: evidence, UpperPose: upper}, true
 	}
 	return nil, false
 }
@@ -279,4 +292,119 @@ func containSmartCropSubjectExtentX(currentX int, extent *smartCropSubjectExtent
 		x = containSmartCropFaceX(x, *extent.Head, srcW, cropW)
 	}
 	return roundEven(clampInt(x, 0, srcW-cropW))
+}
+
+// A neutral-colour foreground connected to the head can separate clothing,
+// hands and legs from warm scene changes. Require actual head overlap and a
+// continuous full-body component reaching the lower frame, not just an upper
+// pose envelope. Missing, disconnected or coloured limbs stay conservative.
+func connectedSmartCropUprightPose(pixels []uint8, positions []int, head *smartCropFace, w, h, srcW, srcH int) *cropWindow {
+	mask := make([]bool, w*h)
+	for _, pos := range positions {
+		i := pos * 3
+		r, g, b := int(pixels[i]), int(pixels[i+1]), int(pixels[i+2])
+		mask[pos] = maxInt(r, maxInt(g, b))-minInt(r, minInt(g, b)) < 50
+	}
+	visited := make([]bool, w*h)
+	queue := make([]int, 0, len(positions))
+	var best *cropWindow
+	var bestPositions []int
+	bestCount := 0
+	for start, on := range mask {
+		if !on || visited[start] {
+			continue
+		}
+		queue = queue[:0]
+		queue = append(queue, start)
+		visited[start] = true
+		l, rr, t, bottom, overlap := start%w, start%w, start/w, start/w, 0
+		for k := 0; k < len(queue); k++ {
+			pos := queue[k]
+			x, y := pos%w, pos/w
+			l = minInt(l, x)
+			rr = maxInt(rr, x)
+			t = minInt(t, y)
+			bottom = maxInt(bottom, y)
+			if x*srcW/w >= head.MinX && x*srcW/w <= head.MaxX && y*srcH/h >= head.MinY && y*srcH/h <= head.MaxY {
+				overlap++
+			}
+			for ny := maxInt(0, y-1); ny <= minInt(h-1, y+1); ny++ {
+				for nx := maxInt(0, x-1); nx <= minInt(w-1, x+1); nx++ {
+					n := ny*w + nx
+					if mask[n] && !visited[n] {
+						visited[n] = true
+						queue = append(queue, n)
+					}
+				}
+			}
+		}
+		if overlap < 3 || len(queue) < w*h/100 || len(queue) <= bestCount || t*srcH/h > head.MinY || bottom < h*4/5 || bottom-t < h*7/10 {
+			continue
+		}
+		bestCount = len(queue)
+		bestPositions = append(bestPositions[:0], queue...)
+		best = &cropWindow{X: l * srcW / w, Y: t * srcH / h, W: (rr - l + 1) * srcW / w, H: (bottom - t + 1) * srcH / h}
+	}
+	if best != nil && smartCropPoseHasUnresolvedColour(pixels, positions, bestPositions, *best, maxInt(4, head.Scale*w/srcW/4), w, h, srcW, srcH) {
+		return nil
+	}
+	return best
+}
+
+// Compact coloured foreground touching the pose can be a sleeve, hand or leg.
+// Do not let a neutral-colour body estimate silently discard those fragments.
+// Broad or frame-edge scene changes remain raw foreground evidence. A few
+// isolated JPEG bridges are insufficient evidence of a limb connection.
+func smartCropPoseHasUnresolvedColour(pixels []uint8, positions, posePositions []int, pose cropWindow, minimumContact, w, h, srcW, srcH int) bool {
+	mask := make([]bool, w*h)
+	for _, pos := range positions {
+		i := pos * 3
+		r, g, b := int(pixels[i]), int(pixels[i+1]), int(pixels[i+2])
+		mask[pos] = maxInt(r, maxInt(g, b))-minInt(r, minInt(g, b)) >= 50
+	}
+	selected := make([]bool, w*h)
+	for _, pos := range posePositions {
+		selected[pos] = true
+	}
+	visited := make([]bool, w*h)
+	q := make([]int, 0, len(positions))
+	pl, pr := pose.X*w/srcW, (pose.X+pose.W)*w/srcW
+	for start, on := range mask {
+		if !on || visited[start] {
+			continue
+		}
+		q = q[:0]
+		q = append(q, start)
+		visited[start] = true
+		l, r, top, bottom := start%w, start%w, start/w, start/w
+		touches := 0
+		for k := 0; k < len(q); k++ {
+			pos := q[k]
+			x, y := pos%w, pos/w
+			touchingPixel := false
+			l = minInt(l, x)
+			r = maxInt(r, x)
+			top = minInt(top, y)
+			bottom = maxInt(bottom, y)
+			for ny := maxInt(0, y-1); ny <= minInt(h-1, y+1); ny++ {
+				for nx := maxInt(0, x-1); nx <= minInt(w-1, x+1); nx++ {
+					n := ny*w + nx
+					if selected[n] {
+						touchingPixel = true
+					}
+					if mask[n] && !visited[n] {
+						visited[n] = true
+						q = append(q, n)
+					}
+				}
+			}
+			if touchingPixel {
+				touches++
+			}
+		}
+		if touches >= minimumContact && len(q) >= 20 && top > 1 && bottom < h-2 && bottom-top < h/2 && (l < pl || r >= pr) && r >= pl-2 && l <= pr+2 {
+			return true
+		}
+	}
+	return false
 }

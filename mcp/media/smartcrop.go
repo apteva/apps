@@ -1287,8 +1287,8 @@ func preprocessSmartCropUncached(
 	ctx = context.WithValue(ctx, smartCropAuditKey{}, audit)
 	defer func() { out = attachSmartCropAudit(out, audit) }()
 
-	// V2 uses a bounded sample set. Dense storyboards stay on the cached fast
-	// path; sparse indexes are supplemented with temporary source screenshots.
+	// V2 starts with bounded cached samples. Sparse indexes use temporary
+	// source samples; timed stills verify pose on the actual requested frame.
 	// Source-sampling failures still fall through safely to v1.
 	if op == "extract_reel" && mode == "smart" {
 		if win, path, v2Err := computeSmartCropReelV2(ctx, app, sc, projectID, sources[0], rw, rh, target); v2Err == nil {

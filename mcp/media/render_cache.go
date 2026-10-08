@@ -23,7 +23,7 @@ const renderAlgorithmVersion = "media-audit-1"
 // path, while unrelated render-result caches remain useful. Both decision and
 // pre-analysis request caches need it; resolved local plans already include the
 // changed coordinates in their result-cache key.
-const smartCropAlgorithmVersion = "media-smartcrop-stable-video-composition-7"
+const smartCropAlgorithmVersion = "media-smartcrop-exact-frame-pose-8"
 
 // Remote binaries/provider settings are not immutable. Restrict reuse to this
 // process lifetime as well as host/connection identity until they expose a

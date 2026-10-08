@@ -18,6 +18,7 @@ import (
 	"image"
 	"math"
 	"sort"
+	"strings"
 	"sync"
 
 	sdk "github.com/apteva/app-sdk"
@@ -47,6 +48,7 @@ type cropPathPoint struct {
 }
 
 type smartCropV2Sample struct {
+	sceneStill        bool
 	sceneForeground   bool
 	scenePoseGroup    bool
 	point             cropPathPoint
@@ -69,8 +71,9 @@ type smartCropV2Sample struct {
 
 // computeSmartCropStillV2 reframes both ordinary images and exact video
 // frames. Images need one canonical thumbnail. Timed video frames use the
-// storyboard frames bracketing the requested timestamp and interpolate their
-// crop positions. Up to nine nearby cached frames also provide a conservative
+// storyboard frames bracketing the requested timestamp for initial positioning,
+// then exact source pixels for pose/scene coverage. Up to nine nearby cached
+// frames also provide a conservative
 // temporal subject consensus. It suppresses static, high-saliency backgrounds
 // (for example blinds) but only overrides a large, high-confidence disagreement.
 func computeSmartCropStillV2(
@@ -292,33 +295,39 @@ func computeSmartCropStillV2(
 		x = containSmartCropFaceX(x, *sample.face, row.Width, cw)
 	}
 
+	var sceneStillWindow cropWindow
+	var exactStillSample *smartCropV2Sample
+	sceneStillResolved := false
 	if target.PreferKeyframe {
-		if sample := nearestSmartCropSample(samples, target.FocusMs); sample != nil {
-			refs := extentReferences
-			if refs == nil {
-				refs = downloadSmartCropBackgroundImages(ctx, sc, projectID, selectSmartCropBackgroundDerivations(row.Derivations, target.FocusMs-30000, target.FocusMs+30000, 12))
+		sample := nearestSmartCropSample(samples, target.FocusMs)
+		if sample == nil || sample.point.AtMs != target.FocusMs || !strings.HasPrefix(sampleSource, "source") {
+			exact, e := analyzeSmartCropV2Source(ctx, app, sc, projectID, sourceFileID, smartCropStillTrackingPositions(target.FocusMs, row.DurationMs), row.Width, row.Height, targetW, targetH)
+			if e == nil {
+				sample = nearestSmartCropSample(exact, target.FocusMs)
+			} else {
+				sample = nil
+				recordSmartCropFallback(ctx, "exact_scene_frame_unavailable")
 			}
-			extent, ok := supportedSmartCropSubjectExtent(*sample, refs, row.Width, row.Height, cw)
-			// Cached geometry can precede a pose change by several seconds. Resolve
-			// the actual requested instant before protecting inferred reclining heads.
-			if extent != nil && sample.face == nil && sample.point.AtMs != target.FocusMs && !trackingStill {
-				exact, e := analyzeSmartCropV2Source(ctx, app, sc, projectID, sourceFileID, smartCropStillTrackingPositions(target.FocusMs, row.DurationMs), row.Width, row.Height, targetW, targetH)
-				exactFocus := nearestSmartCropSample(exact, target.FocusMs)
-				if e == nil && exactFocus != nil && exactFocus.point.AtMs == target.FocusMs {
-					sample = exactFocus
-					method += "+exact-extent"
-					extent, ok = supportedSmartCropSubjectExtent(*sample, refs, row.Width, row.Height, cw)
-				} else {
-					recordSmartCropFallback(ctx, "exact_extent_unavailable")
-				}
+		}
+		if sample != nil && sample.point.AtMs == target.FocusMs {
+			exactStillSample = sample
+			scene := &smartCropImageScene{Source: row, AtMs: target.FocusMs}
+			sceneStillWindow, sceneStillResolved = refineSmartCropSceneStill(ctx, app, sc, projectID, row, scene, sample, cropWindow{X: x, W: cw, H: ch})
+			if sceneStillResolved {
+				method += "+exact-scene-foreground"
 			}
-			if ok {
-				recordSmartCropExtent(ctx, *sample, extent, cw)
-				corrected := containSmartCropSubjectExtentX(x, extent, row.Width, cw)
-				if corrected != x {
-					x = corrected
-					method += "+supported-extent"
-				}
+		}
+	}
+	if target.PreferKeyframe && !sceneStillResolved && exactStillSample != nil {
+		refs := extentReferences
+		if refs == nil {
+			refs = downloadSmartCropBackgroundImages(ctx, sc, projectID, selectSmartCropBackgroundDerivations(row.Derivations, target.FocusMs-30000, target.FocusMs+30000, 12))
+		}
+		if extent, ok := supportedSmartCropSubjectExtent(*exactStillSample, refs, row.Width, row.Height, cw); ok {
+			recordSmartCropExtent(ctx, *exactStillSample, extent, cw)
+			if corrected := containSmartCropSubjectExtentX(x, extent, row.Width, cw); corrected != x {
+				x = corrected
+				method += "+supported-extent"
 			}
 		}
 	}
@@ -328,6 +337,9 @@ func computeSmartCropStillV2(
 		y = clampInt(roundEven(sample.point.Y), 0, row.Height-ch)
 	}
 	win := cropWindow{W: cw, H: ch, X: x, Y: y}
+	if sceneStillResolved {
+		win = sceneStillWindow
+	}
 	if row.IsImage && !target.PreferKeyframe {
 		if sample := nearestSmartCropSample(samples, target.FocusMs); sample != nil {
 			if corrected, ok := refineSmartCropNativeImage(ctx, app, sc, projectID, row, sample, win); ok {

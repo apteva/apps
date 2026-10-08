@@ -23,8 +23,12 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.21
+version: 0.14.22
 description: |
+  v0.14.22 shares exact-frame scene and pose planning between direct video
+  extraction and verified native screenshots. Reposition fitting gestures;
+  distinguish connected full-body pose from broader foreground evidence.
+  No padding is applied implicitly; incomplete and wide actions stay guarded.
   v0.14.21 adds stable whole-reel portrait composition for supported seated
   foregrounds. A fixed crop retains sampled head/pose/movement and source
   bottom; uncertain or wide actions retain the existing tracking geometry.
@@ -614,7 +618,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.21
+    ref: media/v0.14.22
     entry: mcp/media
   port: 8080
   health_check: /health
