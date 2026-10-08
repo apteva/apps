@@ -452,6 +452,7 @@ type messagingMessageForCRM struct {
 	LastEventAt       string                `json:"last_event_at"`
 	EventCounts       map[string]int        `json:"event_counts"`
 	Attachments       []messagingAttachment `json:"attachments"`
+	TemplateSnapshot  *TemplateSnapshot     `json:"template_snapshot"`
 }
 
 type messagingEventForCRM struct {
@@ -462,6 +463,11 @@ type messagingEventForCRM struct {
 }
 
 func enrichActivitiesWithMessagingStatus(ctx *sdk.AppCtx, pid string, activities []*Activity) {
+	for _, a := range activities {
+		if a != nil {
+			a.TemplateSnapshot = recordedTemplateSnapshot(a)
+		}
+	}
 	if ctx == nil || messagingBound(ctx) == nil || len(activities) == 0 {
 		return
 	}
@@ -492,6 +498,7 @@ func enrichActivitiesWithMessagingStatus(ctx *sdk.AppCtx, pid string, activities
 	}
 	statuses := map[int64]*MessageStatus{}
 	attachments := map[int64][]messagingAttachment{}
+	snapshots := map[int64]*TemplateSnapshot{}
 	var statusesMu sync.Mutex
 	jobs := make(chan int64)
 	var workers sync.WaitGroup
@@ -533,6 +540,9 @@ func enrichActivitiesWithMessagingStatus(ctx *sdk.AppCtx, pid string, activities
 				statusesMu.Lock()
 				statuses[id] = ms
 				attachments[id] = out.Message.Attachments
+				if out.Message.ID == id && out.Message.Direction == "out" {
+					snapshots[id] = out.Message.TemplateSnapshot
+				}
 				statusesMu.Unlock()
 			}
 		}()
@@ -545,6 +555,9 @@ func enrichActivitiesWithMessagingStatus(ctx *sdk.AppCtx, pid string, activities
 	for _, a := range activities {
 		if eligible(a) {
 			a.MessageStatus = statuses[a.MessagingID]
+			if a.TemplateSnapshot == nil {
+				a.TemplateSnapshot = snapshots[a.MessagingID]
+			}
 			if len(a.Attachments) == 0 && len(attachments[a.MessagingID]) > 0 {
 				if err := upsertActivityAttachments(ctx.AppDB(), pid, a.ID, attachments[a.MessagingID]); err != nil {
 					ctx.Logger().Warn("crm attachment metadata backfill failed", "activity_id", a.ID, "err", err)
@@ -1496,6 +1509,7 @@ func outboundSendResult(
 	channel, to, providerMessageID, idempotencyKey string,
 	deduped bool,
 ) map[string]any {
+	act.TemplateSnapshot = recordedTemplateSnapshot(act)
 	return map[string]any{
 		"activity":            act,
 		"channel":             channel,
@@ -1909,11 +1923,15 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 		kind = testSentKindForChannel(addr.Channel)
 	}
 	activityBody := body
+	templateSnapshot := templateSnapshotFromAny(resp["template_snapshot"])
+	if templateSnapshot != nil && templateSnapshot.Availability == "complete" && templateSnapshot.BodyText != "" {
+		activityBody = templateSnapshot.BodyText
+	}
 	if activityBody == "" && templateID != 0 {
 		activityBody = fmt.Sprintf("(template #%d)", templateID)
 	}
 	if subj := strArg(args, "subject"); subj != "" && addr.Channel == channelEmail {
-		activityBody = subj + "\n\n" + body
+		activityBody = subj + "\n\n" + activityBody
 	}
 	var convoIDForLog int64
 	if convo != nil && !isTest {
@@ -1935,6 +1953,8 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 			"test":                 isTest,
 			"idempotency_key":      idempotencyKey,
 			"reply_channel_switch": channelSwitch,
+			"template_snapshot":    templateSnapshot,
+			"template_id":          templateID,
 		},
 		ConversationID:     convoIDForLog,
 		MessageIDHeader:    messageIDHeader,

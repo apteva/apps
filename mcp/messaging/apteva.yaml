@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.13.59
+version: 0.13.60
 description: |
+  Template sends retain immutable content and variable snapshots; message_get
+  and message_list expose template_snapshot with availability and provenance.
+  Historical content is not reconstructed from current templates.
   Sender domain setup publishes DMARC without requesting report emails.
   Send and receive email through AWS SES or Gmail and SMS/WhatsApp through
   Twilio. Tracks
@@ -187,7 +190,7 @@ runtime:
   startup_timeout_seconds: 600
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: messaging/v0.13.60
     entry: mcp/messaging
   port: 8080
   health_check: /health

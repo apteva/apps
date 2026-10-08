@@ -7,6 +7,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { crmPanelInitialRoute, refreshedInboxSelection, type InboxItem, type InboxResponse } from "./inbox";
 import { messageAddressLines, messageRecipientSummary, latestMessageAddresses, type MessageAddresses } from "./message_addresses";
 import { messageDisplayBody } from "./message_body";
+import { templateMessageDisplay, type TemplateSnapshot } from "./template_snapshot";
 import { channelPresentation, channelThemeCSS, conversationChannels, sessionFromResponse, whatsappWindowLabel, whatsappSessionRequiresTemplate, type WhatsAppSessionState, type WhatsAppSessionResponse } from "./channels";
 import { composerDraftContent, replyDraftCanSend, replyDraftEditable, replyDraftFingerprint, type SavedReplyDraft, type ReplyDraftSummary } from "./drafts";
 import { EmailUnsubscribeControl } from "./EmailUnsubscribeControl";
@@ -217,6 +218,7 @@ interface Activity {
   message_id_header?: string;
   messaging_id?: number | string;
   message_status?: MessageStatus;
+  template_snapshot?: TemplateSnapshot;
   message_addresses?: MessageAddresses;
   attachments?: ActivityAttachment[];
 }
@@ -2331,7 +2333,8 @@ function MessageStatusPill({ status }: { status: MessageStatus }) {
   );
 }
 
-function ActivityRow({ activity, onReply, compact }: { activity: Activity; onReply: (a: Activity) => void; compact?: boolean }) {
+export function ActivityRow({ activity, onReply, compact }: { activity: Activity; onReply: (a: Activity) => void; compact?: boolean }) {
+  const templateDisplay = templateMessageDisplay(activity.body, activity.template_snapshot);
   const isFailed = FAILED_KINDS.has(activity.kind);
   const isReceived = RECEIVED_KINDS.has(activity.kind);
   return (
@@ -2361,7 +2364,9 @@ function ActivityRow({ activity, onReply, compact }: { activity: Activity; onRep
           ))}
         </dl>
       )}
-      {activity.body && <div className="text-sm text-text whitespace-pre-wrap">{messageDisplayBody(activity.kind, activity.body)}</div>}
+      {templateDisplay.label && <div className="mb-1 text-xs text-text-muted">{templateDisplay.label}</div>}
+      {templateDisplay.notice && <div className="mb-2 text-xs text-text-dim">{templateDisplay.notice}</div>}
+      {templateDisplay.body && <div className="text-sm text-text whitespace-pre-wrap">{messageDisplayBody(activity.kind, templateDisplay.body)}</div>}
       {activity.attachments && activity.attachments.length > 0 && (
         <ActivityAttachments attachments={activity.attachments} />
       )}

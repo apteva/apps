@@ -1,4 +1,15 @@
-# CRM v0.9.20
+# CRM v0.9.21
+
+Release `crm/v0.9.21`: Conversation messages display immutable template content
+captured by Messaging v0.13.60+, together with the template name/ID and whether
+the body was confirmed by the provider or captured locally at send time. CRM
+records the returned snapshot alongside the sent activity and can retain it
+when Messaging is unavailable. Existing snapshots are never replaced by current
+template definitions. Incomplete and historical template messages explicitly
+report unavailable sent text; no fabricated backfill or historical data repair.
+Preserves unsubscribe, typed attributes, drafts and persistent inbox selection.
+No CRM schema migration. Messaging adds one nullable snapshot column, without
+rewriting legacy messages or changing ContentSid provider request semantics.
 
 Release `crm/v0.9.20`: Corrects the source-install pin to the matching release
 tag. Versions 0.9.17–0.9.19 advertised newer features but mistakenly instructed

@@ -1066,19 +1066,20 @@ type Attribute struct {
 }
 
 type Activity struct {
-	ID              int64                `json:"id"`
-	ContactID       int64                `json:"contact_id"`
-	Kind            string               `json:"kind"`
-	Body            string               `json:"body"`
-	OccurredAt      string               `json:"occurred_at"`
-	Source          string               `json:"source,omitempty"`
-	SourceDetail    string               `json:"-"`
-	ConversationID  int64                `json:"conversation_id,omitempty"`
-	MessageIDHeader string               `json:"message_id_header,omitempty"`
-	MessagingID     int64                `json:"messaging_id,omitempty"`
-	IdempotencyKey  string               `json:"idempotency_key,omitempty"`
-	MessageStatus   *MessageStatus       `json:"message_status,omitempty"`
-	Attachments     []ActivityAttachment `json:"attachments"`
+	ID               int64                `json:"id"`
+	ContactID        int64                `json:"contact_id"`
+	Kind             string               `json:"kind"`
+	Body             string               `json:"body"`
+	OccurredAt       string               `json:"occurred_at"`
+	Source           string               `json:"source,omitempty"`
+	SourceDetail     string               `json:"-"`
+	ConversationID   int64                `json:"conversation_id,omitempty"`
+	MessageIDHeader  string               `json:"message_id_header,omitempty"`
+	MessagingID      int64                `json:"messaging_id,omitempty"`
+	IdempotencyKey   string               `json:"idempotency_key,omitempty"`
+	MessageStatus    *MessageStatus       `json:"message_status,omitempty"`
+	TemplateSnapshot *TemplateSnapshot    `json:"template_snapshot,omitempty"`
+	Attachments      []ActivityAttachment `json:"attachments"`
 }
 
 type MessageStatus struct {
