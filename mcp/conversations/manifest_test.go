@@ -219,7 +219,7 @@ func TestManifestDeclaresConversationsMobileSurface(t *testing.T) {
 }
 
 func TestReleaseVersionArtifactsAgree(t *testing.T) {
-	const releaseVersion = "0.24.45"
+	const releaseVersion = "0.24.46"
 	manifest := (&App{}).Manifest()
 	if manifest.Version != releaseVersion {
 		t.Fatalf("manifest version=%q want=%q", manifest.Version, releaseVersion)
@@ -247,8 +247,8 @@ func TestReleaseVersionArtifactsAgree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(module), "github.com/apteva/app-sdk v0.96.0") {
-		t.Fatal("go.mod must pin the release SDK v0.96.0, which includes shared file references and presentation passthrough")
+	if !strings.Contains(string(module), "github.com/apteva/app-sdk v0.97.0") {
+		t.Fatal("go.mod must pin the release SDK v0.97.0, which includes shared file references and presentation passthrough")
 	}
 }
 

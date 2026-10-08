@@ -2,6 +2,7 @@ import type { ComposerSuggestion } from "./composerHost";
 export type ConversationDisplayMode = "browser" | "single";
 
 export interface AgentConversationWidgetSettings {
+  agent_avatars?: import("./agentAppearance").AgentAvatarMode;
   composer_layout?: "auto" | "compact" | "expanded";
   display_mode?: ConversationDisplayMode;
   show_page_context?: boolean;

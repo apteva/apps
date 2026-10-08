@@ -1,3 +1,5 @@
+import { agentAvatarMode, showsAgentAvatar, ConversationIdentity } from "./agentAppearance";
+import type { AgentInfo } from "./types";
 import type { ComposerOptions } from "./composer";
 import type { ConversationComposerHandle } from "./composerHost";
 import { useConversationLocalization, type ConversationLocalization } from "./i18n";
@@ -48,6 +50,22 @@ interface UnreadEntry {
 }
 
 const EMPTY_CONVERSATION_REFRESH_MS = 8_000;
+function useAgentDirectory(projectId: string, instanceId: number, enabled: boolean) {
+  const { conversationsClient } = useConversationAPI();
+  const [directory, setDirectory] = useState<{scope: string; agents: AgentInfo[]}>({scope: "", agents: []});
+  const scope = `${projectId}:${instanceId}`;
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => { if (enabled && projectId && instanceId > 0) void conversationsClient.agents().then(agents => {
+      if (!cancelled) setDirectory({scope, agents});
+    }, () => { if (!cancelled) setDirectory({scope, agents: []}); }); };
+    load();
+    const timer = enabled ? window.setInterval(load, 8000) : undefined;
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [conversationsClient, scope, enabled]);
+  return directory.scope === scope ? directory.agents : [];
+}
+
 
 function useWideWidgetLayout(allowWide: boolean): boolean {
   const query = "(min-width: 768px)";
@@ -78,6 +96,8 @@ function ConversationBrowser({
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const validAgent = Number.isInteger(instanceId) && instanceId > 0;
   const showCreate = showNewConversation(widgetSettings);
+  const avatarMode = agentAvatarMode(widgetSettings?.agent_avatars);
+  const appearanceAgents = useAgentDirectory(projectId, instanceId, showsAgentAvatar(avatarMode, "threads"));
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [unread, setUnread] = useState<Map<string, UnreadEntry>>(new Map());
   const [selectedId, setSelectedId] = useState("");
@@ -237,6 +257,7 @@ function ConversationBrowser({
                       className={`w-full border-l-2 px-3 py-2.5 text-left ${conversation.id === selectedId ? "border-accent bg-bg-hover" : "border-transparent hover:bg-bg-hover"}`}
                     >
                       <div className="flex items-center gap-2">
+                        {showsAgentAvatar(avatarMode, "threads") && <ConversationIdentity conversation={conversation} agents={appearanceAgents}/>}
                         <span className="min-w-0 flex-1 truncate text-sm font-medium text-text">{conversation.title}</span>
                         <ConversationActivityIndicator active={activeConversations.has(conversation.id)} />
                         {conversation.id !== selectedId && <ConversationUnreadIndicator unread={shouldShowConversationUnreadIndicator(unreadCount > 0, activeConversations.has(conversation.id))} />}
@@ -257,6 +278,7 @@ function ConversationBrowser({
       {selected ? (
         <ConversationChat ref={composerRef} key={`${selected.project_id}:${selected.id}`}
           conversation={selected}
+          agentAvatars={avatarMode}
           archived={archived}
           onActed={load}
           onRemoved={() => {
@@ -282,10 +304,6 @@ function ConversationBrowser({
   );
 }
 
-interface AgentInfo {
-  id: number;
-  name: string;
-}
 
 function SingleConversation({
   projectId,
@@ -299,6 +317,8 @@ function SingleConversation({
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const validAgent = Number.isInteger(instanceId) && instanceId > 0;
   const showCreate = showNewConversation(widgetSettings);
+  const avatarMode = agentAvatarMode(widgetSettings?.agent_avatars);
+  const appearanceAgents = useAgentDirectory(projectId, instanceId, showsAgentAvatar(avatarMode, "threads"));
   const requestGeneration = useRef(0);
   const historyGeneration = useRef(0);
   const emptyRefreshInFlight = useRef(false);
@@ -453,6 +473,7 @@ function SingleConversation({
       ) : selected ? (
         <ConversationChat ref={composerRef} key={`${selected.project_id}:${selected.id}`}
           conversation={selected}
+          agentAvatars={avatarMode}
           archived={false}
           emptyMessage={widgetSettings?.empty_message}
           welcomeText={widgetSettings?.welcome_text}
@@ -560,6 +581,7 @@ function SingleConversation({
                         className={`w-full px-4 py-3 text-left hover:bg-bg-hover ${conversation.id === selected?.id ? "bg-bg-hover" : ""}`}
                       >
                         <span className="flex items-center gap-2 text-sm font-medium text-text">
+                          {showsAgentAvatar(avatarMode, "threads") && <ConversationIdentity conversation={conversation} agents={appearanceAgents}/>}
                           <span className="min-w-0 flex-1 truncate">{conversation.title}</span>
                           <ConversationActivityIndicator active={activeHistory.has(conversation.id)} />
                         </span>

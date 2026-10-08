@@ -1480,7 +1480,7 @@ func TestSendStillRequiresConversation(t *testing.T) {
 // app's MCP bound, 42 does not (the annotation the panel filters on).
 func (p *recordingPlatform) ListAgents(projectID string) ([]sdk.PlatformAgent, error) {
 	return []sdk.PlatformAgent{
-		{ID: 41, Name: "Research", Status: "running", ProjectID: projectID, AttachedToCaller: true},
+		{ID: 41, Name: "Research", Status: "running", ProjectID: projectID, AttachedToCaller: true, Icon: "research", IconColor: "accent"},
 		{ID: 42, Name: "Ops", Status: "stopped", ProjectID: projectID},
 		{ID: 43, Name: "Comms", Status: "running", ProjectID: projectID, AttachedToCaller: true},
 		{ID: 55, Name: "Finance", Status: "running", ProjectID: projectID, AttachedToCaller: true},
@@ -1902,16 +1902,21 @@ func TestAgentsEndpointServesDirectory(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	var agents []struct {
-		ID       int64  `json:"id"`
-		Name     string `json:"name"`
-		Status   string `json:"status"`
-		Attached bool   `json:"attached"`
+		ID        int64  `json:"id"`
+		Name      string `json:"name"`
+		Status    string `json:"status"`
+		Attached  bool   `json:"attached"`
+		Icon      string `json:"icon"`
+		IconColor string `json:"icon_color"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &agents); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if len(agents) != 4 || agents[0].Name != "Research" || agents[1].Status != "stopped" {
 		t.Fatalf("agents = %+v", agents)
+	}
+	if agents[0].Icon != "research" || agents[0].IconColor != "accent" || agents[1].Icon != "" {
+		t.Fatalf("appearance metadata / old-server compatibility = %+v", agents)
 	}
 	// The binding annotation must survive the trip — the panel scopes
 	// its pickers to attached agents.

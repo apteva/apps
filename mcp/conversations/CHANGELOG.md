@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.24.46 — 2026-10-08
+
+- Show agent icons by default in the full Conversations panel's header, thread list, and participant views.
+- Add `agent_avatars` widget setting / `agentAvatars` React prop (`hidden`, `header`, `threads`, `both`), preserving embedded defaults.
+- Reuse the dashboard agent artwork and Apteva theme tokens, with group icons for rooms and a generic fallback on older servers.
+- Forward optional authorized agent appearance metadata from Server using app SDK v0.97.0; existing unread, online, and working indicators stay independent.
+- Cover appearance modes, selected-agent identity, rooms, fallback, draft preservation, and backend metadata compatibility.
+
 ## 0.24.45 — 2026-10-07
 
 - Keep transcript progress and thread-list activity idle during post-reply model work that decides to pace. New input and subsequent timer wakes still start visible activity.

@@ -245,3 +245,13 @@ const composer = { layout: "single-line" } satisfies ComposerOptions;
 The named React export checks all props without an `any` component cast. The
 package and dashboard use the same `ConversationChatView` and scoped stylesheet.
 Keep the installed Conversations backend current for attachment/tool APIs.
+
+Agent icons are optional in embedded React surfaces: set `agentAvatars` to
+`"header"`, `"threads"`, or `"both"` (`"hidden"` is the embedded default).
+The full `ConversationsPanel` defaults to `"both"`. Dashboard widget settings
+use the equivalent `agent_avatars` property. Direct chats use Server's agent
+appearance metadata; rooms use a group symbol. Older servers fall back to the
+generic robot. Icons follow the active Apteva theme and do not change activity
+or unread indicators. The renderer is a checked-in snapshot of the shared UI
+kit so apps remain compatible with older hosts; refresh it explicitly using
+`bun run sync-agent-mark.ts /path/to/ui-kit/src/AgentMark.tsx`.

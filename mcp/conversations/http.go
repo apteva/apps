@@ -686,10 +686,12 @@ func (a *App) handleAgents(w http.ResponseWriter, r *http.Request) {
 	// report false for everyone, which the panel treats as "unknown"
 	// rather than "none".
 	type agentInfo struct {
-		ID       int64  `json:"id"`
-		Name     string `json:"name"`
-		Status   string `json:"status"`
-		Attached bool   `json:"attached"`
+		ID        int64  `json:"id"`
+		Name      string `json:"name"`
+		Status    string `json:"status"`
+		Attached  bool   `json:"attached"`
+		Icon      string `json:"icon,omitempty"`
+		IconColor string `json:"icon_color,omitempty"`
 	}
 	out := make([]agentInfo, 0, len(agents))
 	for _, agent := range agents {
@@ -697,7 +699,7 @@ func (a *App) handleAgents(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		out = append(out, agentInfo{ID: agent.ID, Name: agent.Name, Status: agent.Status,
-			Attached: agent.AttachedToCaller})
+			Attached: agent.AttachedToCaller, Icon: agent.Icon, IconColor: agent.IconColor})
 	}
 	writeJSON(w, out)
 }

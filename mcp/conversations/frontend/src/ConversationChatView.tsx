@@ -22,6 +22,7 @@ export interface ConversationChatViewProps {
   suggestions?: ComposerSuggestion[];
   onSuggestion?: (suggestion: ComposerSuggestion) => void;
   leadingAction?: ReactNode;
+  agentIdentity?: ReactNode;
   headerActions?: ReactNode;
   bottomRef: RefObject<HTMLDivElement | null>;
   inputRef: RefObject<HTMLTextAreaElement | null>;
@@ -105,6 +106,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
     <section className="min-h-0 flex-1 flex flex-col">
       <div className="shrink-0 border-b border-border px-4 py-3 flex flex-wrap items-center gap-3">
         {props.leadingAction}
+        {props.agentIdentity}
         <div className="min-w-0 flex-1 basis-32">
           <div className="flex items-center gap-2 min-w-0">
             <h2 className="text-sm font-semibold text-text truncate">{props.title}</h2>

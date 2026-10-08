@@ -88,6 +88,8 @@ export interface UnreadEntry {
 }
 
 export interface AgentInfo {
+  icon?: string;
+  icon_color?: string;
   id: number;
   name: string;
   status: string;

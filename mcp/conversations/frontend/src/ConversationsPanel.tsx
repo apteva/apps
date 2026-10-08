@@ -80,6 +80,7 @@ function closeOpenMarkdown(s: string): string {
 // ─── types (mirror the app's wire shapes) ────────────────────────────
 
 export interface NativePanelProps extends ConversationLocalization {
+  agentAvatars?: AgentAvatarMode;
  composer?:ComposerOptions;
   appName: string;
   installId: number;
@@ -104,6 +105,7 @@ export interface WorkspaceRailProps {
   children: ReactNode;
 }
 
+import { agentAvatarMode, showsAgentAvatar, ConversationIdentity, type AgentAvatarMode } from "./agentAppearance";
 import type { Conversation, Message, StreamFrame, InboxPage, InboxItem, UnreadEntry, AgentInfo, ChangePage, MessageDelivery, ToolActivity } from "./types";
 import { ConversationActivityIndicator, ConversationUnreadIndicator, shouldShowConversationUnreadIndicator, useConversationActivity } from "./conversationActivity";
 export type { Conversation, Message } from "./types";
@@ -704,7 +706,9 @@ function DetailsDialog({
   onChanged,
   onRemoved,
   emptyMessage,
+  showAvatars = false,
 }: {
+  showAvatars?: boolean;
   open: boolean;
   conversation: Conversation;
   agents: AgentInfo[] | null;
@@ -889,6 +893,7 @@ function DetailsDialog({
             <div className="space-y-1.5">
               {participants.agent_ids.map((id) => (
                 <div key={id} className="flex items-center gap-2 text-sm">
+                  {showAvatars && <ConversationIdentity conversation={{kind:"direct",lead_agent_id:id}} agents={agents || []}/>}
                   <span className="min-w-0 flex-1 truncate text-text-muted">{agentName(id)}</span>
                   {id === participants.lead_agent_id ? (
                     <span className="text-xs uppercase text-accent">{t("chat.lead")}</span>
@@ -994,7 +999,9 @@ function ContextColumn({
   onManage,
   refreshHold,
   embedded = false,
+  showAvatars = false,
 }: {
+  showAvatars?: boolean;
   conversation: Conversation;
   agents: AgentInfo[] | null;
   onEnsureAgents: () => void;
@@ -1063,6 +1070,7 @@ function ContextColumn({
             <div className="space-y-1.5">
               {participants.agent_ids.map((id) => (
                 <div key={id} className="flex items-center gap-2 text-xs">
+                  {showAvatars && <ConversationIdentity conversation={{kind:"direct",lead_agent_id:id}} agents={agents || []}/>}
                   <span className="min-w-0 flex-1 truncate text-text-muted">{agentName(id)}</span>
                   {id === participants.lead_agent_id && (
                     <span className="uppercase text-accent">{t("chat.lead")}</span>
@@ -1441,6 +1449,7 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
   conversation: Conversation;
   archived: boolean;
   agentOnline?: boolean;
+  agentAvatars?: AgentAvatarMode;
   emptyMessage?: string;
   welcomeText?: string;
   suggestions?: ComposerSuggestion[];
@@ -1458,6 +1467,7 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
   conversation,
   archived,
   agentOnline,
+  agentAvatars = "hidden",
   emptyMessage,
   welcomeText,
   suggestions,
@@ -1733,6 +1743,7 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
       voiceActive={voiceActive}
       contextChip={showPageContext ? <PageContextChip context={sharedPage.context} prefix={contextLabel || "Using context"} onRemove={sharedPage.dismiss} /> : undefined}
       attachments={attachments}
+      agentIdentity={showsAgentAvatar(agentAvatars, "header") ? <ConversationIdentity conversation={conversation} agents={agentDirectory} size="md"/> : undefined}
       title={conversation.title}
       subtitle={`${conversation.lead_agent_name || t("chat.agentName", { id: String(conversation.lead_agent_id) })}${conversation.origin !== "web" ? t("chat.via", { origin: conversation.origin }) : ""}`}
       publicAudience={conversation.audience === "public"}
@@ -2197,7 +2208,8 @@ function readToolDisplayPreferences(): ToolDisplayPreferences {
   } catch { return defaults; }
 }
 
-export default function ConversationsPanel({ projectId, instanceId, workspaceRail: WorkspaceRail }: NativePanelProps) {
+export default function ConversationsPanel({ projectId, instanceId, workspaceRail: WorkspaceRail, agentAvatars: requestedAvatars }: NativePanelProps) {
+  const agentAvatars = agentAvatarMode(requestedAvatars, "both");
   const { t, relativeTime } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const [tab, setTab] = useState<"chats" | "inbox" | "telegram">("chats");
@@ -2289,6 +2301,19 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
       (err) => setAgentsError(err instanceof Error ? err.message : String(err)),
     );
   }, [agents, projectId]);
+
+  // Icons also need the directory when no Details column is visible.
+  useEffect(() => {
+    if (!showsAgentAvatar(agentAvatars, "threads")) return;
+    const abort = new AbortController();
+    setAgents(null);
+    const load = () => void conversationsClient.agents({signal: abort.signal}).then(list => {
+      if (!abort.signal.aborted) { setAgents(list); setAgentsError(""); }
+    }).catch(() => {});
+    load();
+    const timer = window.setInterval(load, 8000);
+    return () => { abort.abort(); window.clearInterval(timer); };
+  }, [conversationsClient, projectId, agentAvatars]);
 
   const selected = useMemo(
     () => conversations.find((c) => c.id === selectedId) ?? null,
@@ -2509,6 +2534,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                               <Glyph d={GLYPH_ALERT} size={14} />
                             </span>
                           )}
+                          {showsAgentAvatar(agentAvatars, "threads") && <ConversationIdentity conversation={c} agents={agents || []}/>}
                           <span className="min-w-0 flex-1 truncate text-sm font-medium text-text">{c.title}</span>
                           <ConversationActivityIndicator active={activeConversations.has(c.id)} />
                           {!(c.id === selectedId && (!isMobile || mobileDetail) && tab === "chats") && <ConversationUnreadIndicator unread={shouldShowConversationUnreadIndicator(unreadCount > 0, activeConversations.has(c.id))} />}
@@ -2540,6 +2566,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
           {selected && (!isMobile || mobileDetail) ? (
             <ConversationChat key={`${selected.project_id}:${selected.id}`}
               conversation={selected}
+              agentAvatars={agentAvatars}
               archived={showArchived}
               showToolCompletion={toolDisplay.showCompletion}
               showToolDuration={toolDisplay.showDuration}
@@ -2585,6 +2612,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                   context={{ app: "conversations", kind: "conversation", id: selected.id }}
                 >
                   <ContextColumn
+                    showAvatars={agentAvatars !== "hidden"}
                     conversation={selected}
                     agents={agents}
                     onEnsureAgents={ensureAgents}
@@ -2595,6 +2623,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                 </WorkspaceRail>
               ) : (
                 <ContextColumn
+                    showAvatars={agentAvatars !== "hidden"}
                   conversation={selected}
                   agents={agents}
                   onEnsureAgents={ensureAgents}
@@ -2640,6 +2669,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                 context={{ app: "conversations", kind: "conversation", id: selected.id }}
               >
                 <ContextColumn
+                    showAvatars={agentAvatars !== "hidden"}
                   conversation={selected}
                   agents={agents}
                   onEnsureAgents={ensureAgents}
@@ -2675,6 +2705,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
 
       {selected && (
         <DetailsDialog
+          showAvatars={agentAvatars !== "hidden"}
           open={detailsOpen}
           conversation={selected}
           agents={agents}

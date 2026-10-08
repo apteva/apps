@@ -1,5 +1,5 @@
 import { type ConversationLocalization } from "../frontend/src/i18n";
-import { ConversationThread, ReportCard, AlertCard, ConversationLocalizationProvider } from "../frontend/src/react";
+import { ConversationsPanel as PublicPanel, AgentConversations, ConversationThread, ReportCard, AlertCard, ConversationLocalizationProvider } from "../frontend/src/react";
 import "./testDom";
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
@@ -703,4 +703,52 @@ for (const order of ["card-first", "completion-first", "reconnect"] as const) te
  await frame({response_progress:{...progress,phase:"thinking",run_id:"verdict-turn",revision:5,after_message_id:302}}); thinking();
  await act(async()=>events.emit({...card(302),revision:2})); thinking();
  await frame({response_progress:{...progress,phase:"idle",revision:6,after_message_id:302}}); noThinking();
+});
+
+test("header icons use the selected agent, preserve draft/status, and rooms have a group icon", async () => {
+ fetcher = url => url.includes("/agents") ? json([{id:41,name:"Coder",status:"running",icon:"code"},{id:42,name:"Writer",status:"running",icon:"writer"}]) : url.includes("/deliveries") || url.includes("/activity") ? json([]) : json({messages:[],cursor:0,has_more:false,before:0});
+ const draw = async (mode: "hidden" | "header" | "threads" | "both", conversation = conv("a")) => {
+  await act(async()=>root.render(<ConversationChat conversation={conversation} agentAvatars={mode} archived={false} onActed={()=>{}} onRemoved={()=>{}}/>)); await settle();
+ };
+ await draw("hidden"); expect(element.querySelector('[data-agent-icon]')).toBeNull();
+ await type("preserve me");
+ for (const mode of ["header", "threads", "both"] as const) {
+  await draw(mode);
+  expect(Boolean(element.querySelector('[data-agent-icon="code"]'))).toBe(mode !== "threads");
+  expect(element.querySelectorAll('span[role="img"]')).toHaveLength(1);
+  expect((element.querySelector("textarea") as HTMLTextAreaElement).value).toBe("preserve me");
+ }
+ await draw("both", {...conv("b"),lead_agent_id:42});
+ expect(element.querySelector('[data-agent-icon="writer"]')).not.toBeNull();
+ expect(element.querySelector('[data-agent-icon="code"]')).toBeNull();
+ await draw("header", {...conv("b"),kind:"room"});
+ expect(element.querySelector('[data-conversation-icon="room"]')).not.toBeNull();
+ expect(element.querySelector('[data-agent-icon]')).toBeNull();
+ await draw("header", {...conv("b"),lead_agent_id:999});
+ expect(element.querySelector('[data-agent-icon="robot"]')).not.toBeNull();
+});
+
+test("full panel enables header and thread icons by default; embedded browser respects all four modes", async () => {
+ const rows = [conv("a"), {...conv("b"), lead_agent_id:42, title:"Writer chat"}, {...conv("room"), kind:"room"}];
+ fetcher = url => {
+  const path = new URL(url, "http://localhost").pathname;
+  if (path.endsWith("/agents")) return json([{id:41,name:"Coder",status:"running",icon:"code"},{id:42,name:"Writer",status:"running",icon:"writer"}]);
+  if (path.endsWith("/chats")) return json(new URL(url,"http://localhost").searchParams.has("page") ? {conversations:rows,next_cursor:""} : rows);
+  if (path.endsWith("/participants")) return json({agent_ids:[41,42],lead_agent_id:41});
+  if (path.endsWith("/inbox")) return json({items:[],total:0,attention:{}});
+  if (path.endsWith("/unread-summary") || path.endsWith("/deliveries") || path.endsWith("/activity")) return json([]);
+  return json({messages:[],cursor:0,has_more:false,before:0});
+ };
+ await act(async()=>root.render(<PublicPanel conversations={conversations}/>)); await settle();
+ expect(element.querySelector('button[data-conversation-id="a"] [data-agent-icon="code"]')).not.toBeNull();
+ expect(element.querySelector('button[data-conversation-id="b"] [data-agent-icon="writer"]')).not.toBeNull();
+ expect(element.querySelector('button[data-conversation-id="room"] [data-conversation-icon="room"]')).not.toBeNull();
+ expect(element.querySelector('section [data-agent-icon="code"]')).not.toBeNull();
+ await act(async()=>root.render(<PublicPanel conversations={conversations} agentAvatars="hidden"/>)); await settle();
+ expect(element.querySelector('[data-agent-icon], [data-conversation-icon]')).toBeNull();
+ for (const mode of [undefined, "hidden", "header", "threads", "both"] as const) {
+  await act(async()=>root.render(<AgentConversations conversations={conversations} agentId={41} agentAvatars={mode}/>)); await settle();
+  expect(Boolean(element.querySelector('aside [data-agent-icon="code"]'))).toBe(mode === "threads" || mode === "both");
+  expect(Boolean(element.querySelector('section [data-agent-icon="code"]'))).toBe(mode === "header" || mode === "both");
+ }
 });
