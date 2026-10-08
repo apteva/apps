@@ -125,6 +125,14 @@ func TestAlexaNativePortraitLocalRegression(t *testing.T) {
 			if out.Audit.SceneSourceID != "90959" || out.Audit.SceneAtMs == nil || *out.Audit.SceneAtMs != f.at || !strings.Contains(out.Audit.Method, "native-scene-foreground") {
 				t.Fatalf("missing scene provenance: %s", resolved)
 			}
+			if f.id == "94319" {
+				if params.CropH >= 1080 || params.CropY+params.CropH != 1080 || float64(402-params.CropY)/float64(params.CropH) >= 0.25 {
+					t.Fatalf("P01 excessive headroom or bottom clipping: %s", resolved)
+				}
+				if !cropRetainsSampledExtents(&out.Audit) {
+					t.Fatalf("composition displaced supported pose: %s", resolved)
+				}
+			}
 			if out.Audit.Coverage == "unknown" {
 				t.Fatalf("scene evidence not diagnosed: %s", resolved)
 			}

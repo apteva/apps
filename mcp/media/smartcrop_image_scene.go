@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"strings"
 
 	sdk "github.com/apteva/app-sdk"
@@ -45,14 +46,15 @@ func nativeSmartCropImageScene(app *sdk.AppCtx, project string, row *MediaRow) *
 	return &smartCropImageScene{Source: parent, AtMs: p.AtMs, RenderID: id}
 }
 
-func refineSmartCropNativeImage(ctx context.Context, app *sdk.AppCtx, sc *storageClient, project string, row *MediaRow, sample *smartCropV2Sample, x, cropW int) (int, bool) {
+func refineSmartCropNativeImage(ctx context.Context, app *sdk.AppCtx, sc *storageClient, project string, row *MediaRow, sample *smartCropV2Sample, win cropWindow) (cropWindow, bool) {
+	x, cropW := win.X, win.W
 	scene := nativeSmartCropImageScene(app, project, row)
 	if scene == nil || sample == nil {
-		return x, false
+		return win, false
 	}
 	ds, e := resolveValidDerivations(ctx, sc, project, scene.Source.Derivations)
 	if e != nil {
-		return x, false
+		return win, false
 	}
 	refs := downloadSmartCropBackgroundImages(ctx, sc, project, selectSmartCropBackgroundDerivations(ds, scene.AtMs-30000, scene.AtMs+30000, 12))
 	bg, result, changed := backgroundAwareNarrowSmartCropX(sample.img, refs, x, row.Width, cropW)
@@ -60,7 +62,7 @@ func refineSmartCropNativeImage(ctx context.Context, app *sdk.AppCtx, sc *storag
 	supported := result.References >= 4 && result.Concentration >= 0.68 && result.RowCoverage >= 0.24
 	if !supported {
 		recordSmartCropFallback(ctx, "native_scene_foreground_unresolved")
-		return x, false
+		return win, false
 	}
 	if changed {
 		x = bg
@@ -94,11 +96,55 @@ func refineSmartCropNativeImage(ctx context.Context, app *sdk.AppCtx, sc *storag
 		if extent.Head != nil {
 			x = containSmartCropFaceX(x, *extent.Head, row.Width, cropW)
 		}
+		win.X = clampInt(roundEven(x), 0, row.Width-cropW)
+		if composed, changed := composeSmartCropNativePortrait(win, extent, sample.face, row.Width, row.Height); changed {
+			return composed, true
+		}
 	}
 	if sample.face != nil {
 		x = containSmartCropFaceX(x, *sample.face, row.Width, cropW)
 	}
-	return clampInt(roundEven(x), 0, row.Width-cropW), true
+	win.X = clampInt(roundEven(x), 0, row.Width-cropW)
+	return win, true
+}
+
+// Verified upright scene foreground can support tighter still framing even
+// against a patterned or warm wall. Keep the full supported horizontal extent,
+// padded head geometry, and the source's bottom edge (dark feet may not be in
+// the skin mask). Wide/ambiguous poses keep their existing full-height crop.
+func composeSmartCropNativePortrait(current cropWindow, extent *smartCropSubjectExtent, face *smartCropFace, srcW, srcH int) (cropWindow, bool) {
+	if extent == nil || extent.Head == nil || (extent.Evidence != "upright_scene_foreground_head" && extent.Evidence != "face_foreground") ||
+		current.W <= 0 || current.H != srcH || current.W >= current.H || srcW <= current.W*2 || extent.Bounds.Y < srcH/4 || extent.Bounds.W <= 0 || extent.Bounds.H <= 0 {
+		return current, false
+	}
+	margin := maxInt(12, current.W/50)
+	b := extent.Bounds
+	left, right, top := b.X-margin, b.X+b.W+margin, b.Y-margin
+	if upper := extent.UpperPose; upper != nil {
+		left = minInt(left, upper.X-margin)
+		right = maxInt(right, upper.X+upper.W+margin)
+	}
+	for _, head := range []*smartCropFace{extent.Head, face} {
+		if head != nil {
+			padding := head.Scale / 2
+			left = minInt(left, head.MinX-padding)
+			right = maxInt(right, head.MaxX+padding)
+			top = minInt(top, head.MinY-padding)
+		}
+	}
+	neededH := maxInt(srcH*2/3, srcH-top)
+	neededH = maxInt(neededH, int(math.Ceil(float64(right-left)*float64(current.H)/float64(current.W))))
+	ch := (neededH + 1) &^ 1
+	cw := (int(math.Ceil(float64(ch)*float64(current.W)/float64(current.H))) + 1) &^ 1
+	if ch >= current.H || cw > current.W || left < 0 || right > srcW {
+		return current, false
+	}
+	x := clampInt((b.X+b.X+b.W-cw)/2, right-cw, left)
+	win := cropWindow{W: cw, H: ch, X: roundEven(clampInt(x, 0, srcW-cw)), Y: srcH - ch}
+	if win.X > left || win.X+win.W < right || win.Y > top || !smartCropPortraitPreservesFace(win, extent.Head) || !smartCropPortraitPreservesFace(win, face) {
+		return current, false
+	}
+	return win, true
 }
 
 func nativeSmartCropSceneCacheIdentity(app *sdk.AppCtx, project string, row *MediaRow) any {

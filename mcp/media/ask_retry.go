@@ -19,6 +19,7 @@ const maxAskAttempts = 3
 const maxAskRetryDelay = 10 * time.Second
 
 var askHTTPStatusPattern = regexp.MustCompile(`(?i)(?:http\s+|status\s*[=:]?\s*)([45]\d{2})\b`)
+var askStreamTransportPattern = regexp.MustCompile(`(?i)\bstream error:\s*stream ID \d+;\s*(?:INTERNAL_ERROR|REFUSED_STREAM)\b`)
 
 type askAttempt struct {
 	Attempt   int                   `json:"attempt"`
@@ -210,6 +211,18 @@ func classifyAskFailure(res *sdk.ExecuteResult, err error) (askAttempt, time.Tim
 		entry.Retryable = true
 		return entry, time.Time{}
 	}
+	// The integration adapter can flatten HTTP/2 stream failures into text,
+	// losing their net.Error identity even though the response began with 200.
+	if askStreamTransportPattern.MatchString(text) {
+		entry.Code = "transport_error"
+		entry.Retryable = true
+		return entry, time.Time{}
+	}
+	if res != nil && transientAskProviderError(res.Data) {
+		entry.Code = "transient_upstream_error"
+		entry.Retryable = true
+		return entry, time.Time{}
+	}
 	for _, marker := range []string{"codex stream ended with error", "codex stream ended with response.failed", "codex stream ended without response.completed", "connection reset by peer", "broken pipe", "unexpected eof", "connection refused", "tls handshake timeout", "connection timed out"} {
 		if strings.Contains(text, marker) {
 			entry.Code = "transport_error"
@@ -221,4 +234,53 @@ func classifyAskFailure(res *sdk.ExecuteResult, err error) (askAttempt, time.Tim
 		}
 	}
 	return entry, time.Time{}
+}
+
+// Look only at structured error envelopes: a code mentioned in output text or
+// unrelated metadata must not turn an otherwise unknown failure into a retry.
+func transientAskProviderError(raw []byte) bool {
+	var root any
+	if json.Unmarshal(raw, &root) != nil {
+		return false
+	}
+	var visit func(any, bool, int) bool
+	visit = func(value any, inError bool, depth int) bool {
+		if depth > 12 {
+			return false
+		}
+		switch v := value.(type) {
+		case map[string]any:
+			if v["type"] == "error" {
+				inError = true // Codex/Responses stream error event.
+			}
+			for key, child := range v {
+				if inError && (key == "code" || key == "type") {
+					code, _ := child.(string)
+					switch strings.ToLower(code) {
+					case "internal_error", "server_error", "service_unavailable", "overloaded_error":
+						return true
+					}
+				}
+				if visit(child, inError || key == "error", depth+1) {
+					return true
+				}
+			}
+		case []any:
+			for _, child := range v {
+				if visit(child, inError, depth+1) {
+					return true
+				}
+			}
+		case string:
+			v = strings.TrimSpace(v)
+			if inError && len(v) > 0 && v[0] == '{' {
+				var nested any
+				if json.Unmarshal([]byte(v), &nested) == nil {
+					return visit(nested, true, depth+1)
+				}
+			}
+		}
+		return false
+	}
+	return visit(root, false, 0)
 }

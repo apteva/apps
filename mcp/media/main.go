@@ -23,8 +23,11 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.19
+version: 0.14.20
 description: |
+  v0.14.20 recognizes flattened HTTP/2 and nested transient provider errors
+  within bounded vision retries. Verified upright screenshot foreground
+  supports tighter framing while retaining supported pose and source bottom.
   v0.14.19 restores native screenshot scene evidence for image Smart Crop,
   exposes crop preflight and explicit action-preservation policies, validates
   extraction timestamps before queueing, supplies full images for review,
@@ -608,7 +611,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.19
+    ref: media/v0.14.20
     entry: mcp/media
   port: 8080
   health_check: /health

@@ -101,3 +101,9 @@ Parent footage is never downloaded or decoded by the new scene refinement; it
 uses at most 12 existing distributed background frames. No customer pixels or
 credentials are included in the public release. Coverage remains sampled and
 can conservatively flag wide foreground estimates; visual approval is required.
+
+
+0.14.20 adds a P01 full-planner composition assertion: less than 25% source-space
+headroom, retained supported pose bounds and the unchanged source bottom edge.
+The generic native foreground geometry tests also reject unsupported/ambiguous
+head evidence and retain wide-gesture scale. Closed eyes are not an exclusion.

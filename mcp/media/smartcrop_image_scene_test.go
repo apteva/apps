@@ -46,3 +46,31 @@ func TestNativeSmartCropLineageRejectsUnsafeEvidence(t *testing.T) {
 		t.Fatal("source change did not invalidate scene identity")
 	}
 }
+
+func TestNativePortraitCompositionPreservesPoseAndSourceBottom(t *testing.T) {
+	current := cropWindow{X: 826, W: 606, H: 1080}
+	e := &smartCropSubjectExtent{Bounds: cropWindow{X: 864, Y: 402, W: 468, H: 612}, Head: &smartCropFace{MinX: 996, MaxX: 1092, MinY: 456, MaxY: 606, Scale: 150}, Evidence: "upright_scene_foreground_head"}
+	win, ok := composeSmartCropNativePortrait(current, e, nil, 1920, 1080)
+	if !ok || win.H >= current.H || win.Y+win.H != 1080 || win.H < 720 || win.X > 864 || win.X+win.W < 1332 || win.Y > 402 || !smartCropPortraitPreservesFace(win, e.Head) {
+		t.Fatalf("head/body/source bottom lost: %+v changed=%v", win, ok)
+	}
+	if float64(402-win.Y)/float64(win.H) >= 0.25 {
+		t.Fatalf("excessive headroom remains: %+v", win)
+	}
+	for _, evidence := range []string{"reclining_foreground_head", "motion_foreground", ""} {
+		e.Evidence = evidence
+		if win, ok := composeSmartCropNativePortrait(current, e, nil, 1920, 1080); ok || win != current {
+			t.Fatalf("unsupported upright composition: %+v", win)
+		}
+	}
+	e.Evidence = "upright_scene_foreground_head"
+	e.Bounds.W = 750
+	if win, ok := composeSmartCropNativePortrait(current, e, nil, 1920, 1080); ok || win != current {
+		t.Fatalf("wide pose zoomed: %+v", win)
+	}
+	e.Bounds.W = 468
+	e.Head = nil
+	if _, ok := composeSmartCropNativePortrait(current, e, nil, 1920, 1080); ok {
+		t.Fatal("missing head authorized composition")
+	}
+}

@@ -329,8 +329,11 @@ func computeSmartCropStillV2(
 	win := cropWindow{W: cw, H: ch, X: x, Y: y}
 	if row.IsImage && !target.PreferKeyframe {
 		if sample := nearestSmartCropSample(samples, target.FocusMs); sample != nil {
-			if corrected, ok := refineSmartCropNativeImage(ctx, app, sc, projectID, row, sample, win.X, cw); ok {
-				win.X = corrected
+			if corrected, ok := refineSmartCropNativeImage(ctx, app, sc, projectID, row, sample, win); ok {
+				if corrected.H < win.H {
+					method += "+native-portrait-composition"
+				}
+				win = corrected
 				method += "+native-scene-foreground"
 			}
 		}

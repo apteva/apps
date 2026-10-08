@@ -22,6 +22,16 @@ func TestAskFailureClassification(t *testing.T) {
 		retry  bool
 		code   string
 	}{
+		{"http2Flattened", 200, `{"error":"read Codex response: stream error: stream ID 1; INTERNAL_ERROR; received from peer"}`, nil, true, "transport_error"},
+		{"http2GoError", 0, "", errors.New("read Codex response: stream error: stream ID 1; INTERNAL_ERROR; received from peer"), true, "transport_error"},
+		{"http2Refused", 200, `{"error":"stream error: stream ID 3; REFUSED_STREAM; received from peer"}`, nil, true, "transport_error"},
+		{"nestedInternal", 200, `{"type":"response.failed","response":{"error":{"code":"INTERNAL_ERROR","message":"provider failed"}}}`, nil, true, "transient_upstream_error"},
+		{"streamEventInternal", 200, `{"type":"error","code":"INTERNAL_ERROR","message":"provider failed"}`, nil, true, "transient_upstream_error"},
+		{"encodedNestedInternal", 200, `{"error":"{\"error\":{\"code\":\"INTERNAL_ERROR\"}}"}`, nil, true, "transient_upstream_error"},
+		{"internalMention", 200, `{"output":[{"code":"INTERNAL_ERROR"}],"error":"unknown"}`, nil, false, "upstream_error"},
+		{"nestedInternalQuota", 200, `{"error":{"code":"INTERNAL_ERROR","cause":{"type":"insufficient_quota"}}}`, nil, false, "quota_or_billing"},
+		{"nestedInternalAuth", 200, `{"error":{"code":"INTERNAL_ERROR","cause":{"type":"authentication_error"}}}`, nil, false, "authentication"},
+		{"http2Cancelled", 200, `{"error":"stream error: stream ID 1; INTERNAL_ERROR"}`, context.Canceled, false, "cancelled_or_timed_out"},
 		{"reported", 200, `{"error":"Codex stream ended with error"}`, nil, true, "stream_failure_unknown"},
 		{"truncated", 200, `{"error":"Codex stream ended without response.completed"}`, nil, true, "stream_failure_unknown"},
 		{"incomplete", 200, `{"error":"Codex stream ended with response.incomplete"}`, nil, false, "upstream_error"},
@@ -136,7 +146,7 @@ func (s *askSequencePlatform) ExecuteIntegrationTool(conn int64, tool string, in
 		<-s.block
 	}
 	if call == 1 {
-		return &sdk.ExecuteResult{Status: 200, Data: json.RawMessage(`{"error":"Codex stream ended with error"}`)}, nil
+		return &sdk.ExecuteResult{Status: 200, Data: json.RawMessage(`{"error":"read Codex response: stream error: stream ID 1; INTERNAL_ERROR; received from peer"}`)}, nil
 	}
 	return &sdk.ExecuteResult{Success: true, Status: 200, Data: codexOK("Face and hands are visible.")}, nil
 }
@@ -261,5 +271,30 @@ func TestMediaAskLegacyProjectScopeCompatibility(t *testing.T) {
 	_, err := (&App{}).toolAsk(app, map[string]any{"file_id": "1", "question": "Is the face visible?"})
 	if err != nil || len(stub.ExecuteCalls) != 1 {
 		t.Fatalf("%v calls=%d", err, len(stub.ExecuteCalls))
+	}
+}
+
+func TestAskRetriesReportedHTTP2StreamError(t *testing.T) {
+	for _, success := range []bool{false, true} {
+		calls, waits := 0, 0
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		res, d, err := runAskIntegrationAttempts(ctx, func(context.Context) (*sdk.ExecuteResult, error) {
+			calls++
+			if success && calls == 2 {
+				return &sdk.ExecuteResult{Success: true, Status: 200, Data: codexOK("Pose reviewed.")}, nil
+			}
+			return &sdk.ExecuteResult{Status: 200, Data: json.RawMessage(`{"error":"read Codex response: stream error: stream ID 1; INTERNAL_ERROR; received from peer"}`)}, nil
+		}, func(context.Context, time.Duration) error { waits++; return nil })
+		cancel()
+		if success {
+			if err != nil || res == nil || d.Attempts != 2 || calls != 2 || waits != 1 {
+				t.Fatalf("retry failed: %+v %v", d, err)
+			}
+		} else if err == nil || calls != 3 || waits != 2 || d.StopReason != "attempts_exhausted" {
+			t.Fatalf("retry limits changed: %+v %v", d, err)
+		}
+		if !d.History[0].Retryable || d.History[0].Code != "transport_error" {
+			t.Fatalf("lost transport classification: %+v", d)
+		}
 	}
 }

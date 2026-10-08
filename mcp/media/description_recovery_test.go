@@ -80,3 +80,10 @@ func TestDescriptionRecoveryHonorsProviderResetAndSourceChange(t *testing.T) {
 		t.Fatal("new source inherited retries", e)
 	}
 }
+
+func TestDescriptionRecoveryClassifiesFlattenedStreamFailure(t *testing.T) {
+	f := descriptionRecoveryFailure(errors.New("read Codex response: stream error: stream ID 1; INTERNAL_ERROR; received from peer"))
+	if !f.Retryable || f.Code != "transport_error" {
+		t.Fatalf("description recovery missed stream failure: %+v", f)
+	}
+}
