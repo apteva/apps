@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -202,8 +203,21 @@ func (c *bandwidthCarrier) Hangup(ctx *sdk.AppCtx, row *callRow) error {
 	return err
 }
 
-func executeCarrierTool(ctx *sdk.AppCtx, connID int64, tool string, input map[string]any) (json.RawMessage, error) {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, tool, input)
+func executeCarrierTool(ctx *sdk.AppCtx, connID int64, tool string, input map[string]any, requests ...context.Context) (json.RawMessage, error) {
+	var res *sdk.ExecuteResult
+	var err error
+	if len(requests) > 0 && requests[0] != nil {
+		if err = requests[0].Err(); err != nil {
+			return nil, err
+		}
+		if inventoryRequestsCancelable(ctx) {
+			res, err = sdk.ExecuteIntegrationToolContext(requests[0], ctx.PlatformAPI(), connID, tool, input)
+		} else {
+			res, err = ctx.PlatformAPI().ExecuteIntegrationTool(connID, tool, input)
+		}
+	} else {
+		res, err = ctx.PlatformAPI().ExecuteIntegrationTool(connID, tool, input)
+	}
 	if res != nil {
 		recordCarrierCommand(ctx, connID, tool, input, res.Status, err == nil && res.Success)
 	} else {

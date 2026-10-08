@@ -437,16 +437,26 @@ func TestReliabilityDisabledBandwidthRouteSettlesExistingCall(t *testing.T) {
 	if _, _, err := a.db().insertInboundCallWithEvent(row, "pending"); err != nil {
 		t.Fatal(err)
 	}
-	send := func(phase, event string) *httptest.ResponseRecorder {
-		body, _ := json.Marshal(map[string]any{"eventType": event, "accountId": "account-1", "applicationId": "application-1", "direction": "inbound", "callId": row.CarrierSID, "to": row.ToNumber, "from": row.FromNumber})
+	send := func(phase, event string, carrierIDs ...string) *httptest.ResponseRecorder {
+		sid := row.CarrierSID
+		if len(carrierIDs) > 0 {
+			sid = carrierIDs[0]
+		}
+		body, _ := json.Marshal(map[string]any{"eventType": event, "accountId": "account-1", "applicationId": "application-1", "direction": "inbound", "callId": sid, "to": row.ToNumber, "from": row.FromNumber})
 		r := httptest.NewRequest("POST", "/inbound/bandwidth/"+route.ID+phase+"?project_id="+route.ProjectID+"&secret=secret", strings.NewReader(string(body)))
 		r.SetBasicAuth("apteva", "secret")
 		w := httptest.NewRecorder()
 		a.handleBandwidthInbound(w, r)
 		return w
 	}
-	if w := send("", "initiate"); w.Code != 404 {
-		t.Fatalf("disabled route admitted a call: %d", w.Code)
+	if w := send("", "initiate"); w.Code != 200 {
+		t.Fatalf("disabled route rejected existing ingress replay: %d", w.Code)
+	}
+	if w := send("", "initiate", "new-disabled-bw"); w.Code != 200 || !strings.Contains(w.Body.String(), "<Hangup") {
+		t.Fatalf("new disabled ingress not rejected: %d %s", w.Code, w.Body)
+	}
+	if denied, _ := a.db().findInboundCallByCarrierSID(route.ID, route.CarrierConnectionID, "new-disabled-bw"); denied != nil {
+		t.Fatal("disabled session created a call")
 	}
 	if w := send("/status", "disconnect"); w.Code != 204 {
 		t.Fatalf("existing disconnect rejected: %d %s", w.Code, w.Body)
@@ -590,9 +600,13 @@ func TestReliabilityDisabledXMLRoutesKeepExistingCallbacks(t *testing.T) {
 			if err := a.db().insertCall(row); err != nil {
 				t.Fatal(err)
 			}
-			send := func(suffix string, want int) {
+			send := func(suffix string, want int, carrierIDs ...string) {
 				t.Helper()
-				form := url.Values{"CallSid": {row.CarrierSID}, "CallUUID": {row.CarrierSID}, "CallStatus": {"completed"}, "To": {row.ToNumber}, "From": {row.FromNumber}}
+				sid := row.CarrierSID
+				if len(carrierIDs) > 0 {
+					sid = carrierIDs[0]
+				}
+				form := url.Values{"CallSid": {sid}, "CallUUID": {sid}, "CallStatus": {"completed"}, "To": {row.ToNumber}, "From": {row.FromNumber}}
 				req := httptest.NewRequest("POST", "/inbound/"+provider+"/"+route.ID+suffix+"?project_id=project-a&secret=secret&call_id="+row.ID, strings.NewReader(form.Encode()))
 				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 				if provider == "twilio" {
@@ -610,7 +624,11 @@ func TestReliabilityDisabledXMLRoutesKeepExistingCallbacks(t *testing.T) {
 					t.Fatalf("%s: %d %s", suffix, rec.Code, rec.Body)
 				}
 			}
-			send("", 404)
+			send("", 200) // Existing ingress replay must survive an admission toggle.
+			send("", 200, "new-disabled-xml")
+			if denied, _ := a.db().findInboundCallByCarrierSID(route.ID, route.CarrierConnectionID, "new-disabled-xml"); denied != nil {
+				t.Fatal("disabled session created a call")
+			}
 			send("/wait", 200)
 			send("/status", 204)
 			current, err := a.db().findCall(row.ID)

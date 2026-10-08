@@ -60,6 +60,18 @@ export interface CallSession {
   lease_started_ms?: number;
   coaching?: boolean;
 }
+export interface OutboundNumberChoice {
+ phone_number: string;
+ provider: string;
+ carrier_connection_id: number;
+ outbound_enabled: boolean;
+ outbound: { required: boolean; status: string; message?: string };
+}
+export interface OutboundNumbersResult {
+ numbers: OutboundNumberChoice[];
+ inventory_status: "available" | "partial" | "unavailable";
+ warnings: Array<{ provider: string; carrier_connection_id: number; code: string; message: string }>;
+}
 export interface DialRequest {
   to: string;
   from?: string;
@@ -261,6 +273,9 @@ export class TelephonyClient {
   async renewListening(session: CallSession): Promise<{lease_seconds?: number}> { return this.app.post(this.path(`/softphone/${session.coaching ? "coach-renew" : "listen-renew"}/${callID(session.call_id)}`), { session_token: session.session_token }); }
   async stopListening(session: CallSession): Promise<void> { await this.app.post(this.path(`/softphone/${session.coaching ? "coach-stop" : "listen-stop"}/${callID(session.call_id)}`), { session_token: session.session_token }); }
   async listenerAudit(id: string): Promise<{ listeners: Array<{ id: string; principal: unknown; joined_at: string; left_at: string; reason: string; diagnostics: unknown; mode: "listen"|"coach" }>; coaching: Array<{id:string;listener_audit_id:string;principal:unknown;started_at:string;ended_at:string;reason:string}> }> { return this.app.get(this.path(`/softphone/listen-audit/${callID(id)}`)); }
+
+  /** Authorized choices for new calls; disabling never changes existing media grants. */
+  outboundNumbers(): Promise<OutboundNumbersResult> { return this.app.get(this.path("/softphone/numbers")); }
 
   async renew(session: CallSession): Promise<{lease_seconds?: number}> {
     return this.app.post(this.path(`/softphone/renew/${callID(session.call_id)}`), { session_token: session.session_token });

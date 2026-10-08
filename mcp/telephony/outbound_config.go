@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -57,7 +58,7 @@ func (a *App) outboundReadiness(ctx *sdk.AppCtx, provider string, connectionID i
 	return a.telnyxOutboundReadiness(ctx, connectionID, applicationID, profiles)
 }
 
-func (a *App) telnyxOutboundReadiness(ctx *sdk.AppCtx, connectionID int64, applicationID string, profiles []outboundProfileOption) (outboundReadinessView, error) {
+func (a *App) telnyxOutboundReadiness(ctx *sdk.AppCtx, connectionID int64, applicationID string, profiles []outboundProfileOption, requests ...context.Context) (outboundReadinessView, error) {
 	view := outboundReadinessView{
 		Required: true, ApplicationID: strings.TrimSpace(applicationID), Profiles: profiles,
 	}
@@ -67,7 +68,7 @@ func (a *App) telnyxOutboundReadiness(ctx *sdk.AppCtx, connectionID int64, appli
 		return view, nil
 	}
 
-	raw, err := executeCarrierTool(ctx, connectionID, "get_call_control_application", map[string]any{"id": view.ApplicationID})
+	raw, err := executeCarrierTool(ctx, connectionID, "get_call_control_application", map[string]any{"id": view.ApplicationID}, requests...)
 	if err != nil {
 		view.Status = outboundConfigError
 		return view, fmt.Errorf("inspect Telnyx Call Control application: %w", err)
@@ -108,7 +109,7 @@ func (a *App) telnyxOutboundReadiness(ctx *sdk.AppCtx, connectionID int64, appli
 	return view, nil
 }
 
-func listTelnyxOutboundProfiles(ctx *sdk.AppCtx, connectionID int64) ([]outboundProfileOption, error) {
+func listTelnyxOutboundProfiles(ctx *sdk.AppCtx, connectionID int64, requests ...context.Context) ([]outboundProfileOption, error) {
 	const pageSize = 100
 	profiles := make([]outboundProfileOption, 0)
 	for page := 1; page <= maxOwnedNumberPages; page++ {
@@ -116,7 +117,7 @@ func listTelnyxOutboundProfiles(ctx *sdk.AppCtx, connectionID int64) ([]outbound
 			"page[number]": page,
 			"page[size]":   pageSize,
 			"sort":         "name",
-		})
+		}, requests...)
 		if err != nil {
 			return nil, fmt.Errorf("list Telnyx outbound voice profiles: %w", err)
 		}

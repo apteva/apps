@@ -135,15 +135,15 @@ func (a *App) handleBandwidthInbound(w http.ResponseWriter, r *http.Request) {
 	}
 	switch phase {
 	case "initiate":
-		if !route.Enabled {
-			http.NotFound(w, r)
-			return
-		}
 		if event.EventType != "initiate" {
 			http.Error(w, "invalid Bandwidth initiate event", http.StatusBadRequest)
 			return
 		}
 		call, _, err := a.recordInboundCall(route, event.CallID, event.From, event.To)
+		if errors.Is(err, errInboundDisabled) {
+			writeBandwidthEnd(w, "")
+			return
+		}
 		if err != nil {
 			http.Error(w, "persist inbound call", http.StatusServiceUnavailable)
 			return

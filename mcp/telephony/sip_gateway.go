@@ -395,6 +395,11 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 	call, created, err := g.app.recordInboundCall(&routeForCall, providerCallID, caller, calledNumber, inboundCallMetadata{
 		IngressPath: "sip_direct",
 	})
+	if errors.Is(err, errInboundDisabled) {
+		_ = dialog.Respond(sipStatusDecline, "Route Disabled", nil)
+		_ = dialog.Close()
+		return
+	}
 	if err != nil {
 		_ = dialog.Respond(sip.StatusInternalServerError, "Call Setup Failed", nil)
 		_ = dialog.Close()

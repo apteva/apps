@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.10.5
+version: 0.11.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -65,6 +65,7 @@ provides:
     - { prefix: /recording-settings }
     - { prefix: /call-control-settings }
     - { prefix: /numbers/ }
+    - { method: POST, prefix: /_runtime/bindings }
     - { prefix: /routing/ }
     - { prefix: /access/ }
     - { prefix: /user/, no_auth: true }
@@ -83,7 +84,9 @@ provides:
     - { name: telephony_routes_set_recording_policy, description: "Set recording behavior for future calls on an inbound route." }
     - { name: telephony_routes_set_transport, description: "Select programmable WebSocket or direct SIP transport for an inbound route." }
     - { name: telephony_routes_configure_carrier, description: "Configure carrier routing for an inbound route. Args: route_id." }
-    - { name: telephony_routes_disable, description: "Disable an inbound route and restore its previous carrier webhook. Args: route_id." }
+    - { name: telephony_routes_set_enabled, description: "Enable or disable new inbound admission without changing active calls or carrier resources. Args: route_id, enabled." }
+    - { name: telephony_outbound_policy, description: "Read or change project outbound admission controls for a number, provider or connection; platform principals only." }
+    - { name: telephony_routes_disable, description: "Disable new inbound admission on a route without changing carrier resources or active calls. Args: route_id." }
     - { name: telephony_routes_list,  description: "List inbound call routes. Agents see their own; platform callers see the whole project." }
     - { name: telephony_flows_create, description: "Create a draft carrier-neutral IVR/routing flow." }
     - { name: telephony_flows_list, description: "List routing flows." }

@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.10.5
+version: 0.11.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -94,6 +94,7 @@ provides:
     - { prefix: /recording-settings }
     - { prefix: /call-control-settings }
     - { prefix: /numbers/ }
+    - { method: POST, prefix: /_runtime/bindings }
     - { prefix: /routing/ }
     - { prefix: /access/ }
     - { prefix: /user/, no_auth: true }
@@ -112,7 +113,9 @@ provides:
     - { name: telephony_routes_set_recording_policy, description: "Set recording behavior for future calls on an inbound route." }
     - { name: telephony_routes_set_transport, description: "Select programmable WebSocket or direct SIP transport for an inbound route." }
     - { name: telephony_routes_configure_carrier, description: "Configure carrier routing for an inbound route." }
-    - { name: telephony_routes_disable, description: "Disable an inbound route and restore the prior carrier webhook." }
+    - { name: telephony_routes_set_enabled, description: "Enable or disable new inbound admission without changing active calls or carrier resources. Args: route_id, enabled." }
+    - { name: telephony_outbound_policy, description: "Read or change project outbound admission controls for a number, provider or connection; platform principals only." }
+    - { name: telephony_routes_disable, description: "Disable new inbound admission; retain carrier resources and existing calls." }
     - { name: telephony_routes_list,  description: "List inbound call routes. Agents see their own; platform callers see the whole project." }
     - { name: telephony_flows_create, description: "Create a draft carrier-neutral IVR/routing flow." }
     - { name: telephony_flows_list, description: "List routing flows." }
@@ -361,6 +364,8 @@ upgrade_policy: auto-patch
 var globalCtx *sdk.AppCtx
 
 type App struct {
+	outboundHints    outboundInventoryHints
+	admissionMu      sync.RWMutex
 	audioPeerHasher  audioPeerHasher
 	audioNetworks    audioNetworkCollector
 	audioAlerts      audioAlertCorrelator
@@ -520,6 +525,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/call-control-settings", Handler: a.handleCallControlSettings},
 		// Provider-neutral phone-number discovery and confirmed purchase.
 		{Pattern: "/numbers/", Handler: a.handleNumbers},
+		{Pattern: runtimeBindingsPath, Handler: a.handleRuntimeBindings},
 		{Pattern: "/routing/", Handler: a.handleRouting},
 		{Pattern: "/access/", Handler: a.handlePhoneAccess},
 		{Pattern: "/user/", Handler: a.handleApplicationSession, NoAuth: true},
@@ -532,7 +538,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/peer/", Handler: a.handlePeerSocket, NoAuth: true},
 	}
 	for i := range routes {
-		if !routes[i].NoAuth {
+		if !routes[i].NoAuth && routes[i].Pattern != runtimeBindingsPath {
 			routes[i].Handler = a.applicationUserHTTP(routes[i].Handler)
 		}
 	}
@@ -630,9 +636,12 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{}, nil),
 			HandlerCtx:  a.toolRoutesList,
 		},
+		{Name: "telephony_routes_set_enabled", Description: "Enable or disable new inbound admission without changing active calls or carrier resources. Args: route_id, enabled.", InputSchema: schemaObject(map[string]any{"route_id": map[string]any{"type": "string"}, "enabled": map[string]any{"type": "boolean"}}, []string{"route_id", "enabled"}), HandlerCtx: a.toolRoutesSetEnabled},
+		{Name: "telephony_outbound_policy", Description: "Read or change project outbound admission controls. Platform principals only. Args: scope? (number|provider|connection), value?, enabled?. Disable affects new outbound calls only.", InputSchema: schemaObject(map[string]any{"scope": map[string]any{"type": "string", "enum": []string{"number", "provider", "connection"}}, "value": map[string]any{"type": "string"}, "enabled": map[string]any{"type": "boolean"}}, nil), HandlerCtx: a.toolOutboundPolicy},
+
 		{
 			Name:        "telephony_routes_disable",
-			Description: "Disable an inbound route and restore the carrier phone number's previous webhook when available. Args: route_id (required).",
+			Description: "Disable new inbound admission without altering carrier resources or existing calls. Args: route_id (required).",
 			InputSchema: schemaObject(map[string]any{
 				"route_id": map[string]any{"type": "string", "description": "Inbound route id."},
 			}, []string{"route_id"}),
@@ -1223,6 +1232,13 @@ func (a *App) placeOutboundLeg(ctx *sdk.AppCtx, carrier carrierAdapter, row *cal
 			onUnwind()
 		}
 	}
+	a.admissionMu.RLock()
+	defer a.admissionMu.RUnlock()
+	if err := a.checkOutboundPlacement(row); err != nil {
+		unwind()
+		return err
+	}
+
 	if err := a.db().insertCall(*row, true); err != nil {
 		unwind()
 		return errors.New("persist call before carrier placement: " + err.Error())
@@ -1299,6 +1315,9 @@ func (a *App) resolveCarrierBinding(ctx *sdk.AppCtx, projectID, requestedFrom st
 	if err != nil {
 		return nil, nil, "", err
 	}
+	if err = a.checkOutboundAdmission(projectID, firstNonEmpty(creds.Slug, bound.AppSlug), bound.ConnectionID, from); err != nil {
+		return nil, nil, "", err
+	}
 	creds, err = a.resolveOutboundCarrierCredentials(ctx, projectID, bound, creds, from)
 	if err != nil {
 		return nil, nil, "", err
@@ -1323,7 +1342,7 @@ func (a *App) selectCarrierBinding(ctx *sdk.AppCtx, projectID, requestedFrom str
 		if !validE164(requestedFrom) {
 			return nil, nil, "", errors.New("from must be a valid E.164 number (+ followed by 8-15 digits)")
 		}
-		for _, candidate := range bindings {
+		for _, candidate := range a.outboundHints.candidates(projectID, requestedFrom, bindings) {
 			if candidate == nil {
 				continue
 			}
@@ -1821,41 +1840,10 @@ func (a *App) toolRoutesDisable(callerCtx context.Context, ctx *sdk.AppCtx, args
 	return result, nil
 }
 
-// disableInboundRoute restores the carrier's previous configuration and
+// disableInboundRoute stops new admission while retaining carrier resources and
 // disables the route. The MCP tool and the panel HTTP endpoint share it.
 func (a *App) disableInboundRoute(ctx *sdk.AppCtx, route *routeRow) (map[string]any, error) {
-	if !route.Enabled {
-		return map[string]any{"ok": true, "route_id": route.ID, "already_disabled": true}, nil
-	}
-	var err error
-	if route.InboundTransport == inboundTransportSIPDirect {
-		err = a.deconfigureDirectSIPCarrierRoute(ctx, route)
-	} else {
-		switch route.CarrierSlug {
-		case "twilio":
-			err = a.disableTwilioRoute(ctx, route)
-		case "telnyx":
-			err = a.disableTelnyxRoute(ctx, route)
-		case "plivo":
-			err = a.disablePlivoRoute(ctx, route)
-		case "bandwidth":
-			err = nil // The operator owns the shared Bandwidth Location assignment.
-		default:
-			err = fmt.Errorf("route cannot be safely disabled for provider %s", route.CarrierSlug)
-		}
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := a.db().disableRoute(route.ID); err != nil {
-		return nil, fmt.Errorf("persist disabled route: %w", err)
-	}
-	route.Enabled = false
-	result := map[string]any{"ok": true, "route_id": route.ID, "carrier": route.CarrierSlug}
-	if route.CarrierSlug == "bandwidth" {
-		result["manual_restore_required"] = true
-	}
-	return result, nil
+	return a.setInboundRouteEnabled(route, false)
 }
 
 func (a *App) toolRoutesList(callerCtx context.Context, ctx *sdk.AppCtx, _ map[string]any) (any, error) {
@@ -2669,7 +2657,7 @@ func (a *App) handleTwilioInbound(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if route == nil || !route.Enabled || route.Secret == "" || !secureEqual(r.URL.Query().Get("secret"), route.Secret) {
+	if route == nil || route.Secret == "" || !secureEqual(r.URL.Query().Get("secret"), route.Secret) {
 		http.Error(w, "route not found", http.StatusNotFound)
 		return
 	}
@@ -2697,6 +2685,11 @@ func (a *App) handleTwilioInbound(w http.ResponseWriter, r *http.Request) {
 		ForwardedFrom: boundedContextValue(forwardedFrom),
 		IngressPath:   ingressPath,
 	})
+	if errors.Is(err, errInboundDisabled) {
+		writeSuppressedTwilioCall(w)
+		return
+	}
+
 	if err != nil {
 		http.Error(w, "persist call: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -2846,6 +2839,12 @@ func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, me
 		applyRoutingPlanToRoute(route, plan)
 		return existing, false, nil
 	}
+	a.admissionMu.RLock()
+	defer a.admissionMu.RUnlock()
+	if err := a.checkInboundAdmission(route); err != nil {
+		return nil, false, err
+	}
+
 	policy := loadInboundBurstPolicy(nil)
 	if globalCtx != nil {
 		policy = loadInboundBurstPolicy(globalCtx.WithProject(route.ProjectID).Config())
@@ -3059,10 +3058,6 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "webhook connection does not match route", http.StatusForbidden)
 		return
 	}
-	if event.Data.EventType == "call.initiated" && !route.Enabled {
-		http.NotFound(w, r)
-		return
-	}
 	carrierSID := event.Data.Payload.CallControlID
 	if carrierSID == "" {
 		http.Error(w, "missing call control id", http.StatusBadRequest)
@@ -3199,6 +3194,16 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stored, created, err := a.recordInboundCall(route, carrierSID, event.Data.Payload.From, to, inboundCallMetadata{CarrierLegID: boundedCarrierID(event.Data.Payload.CallLegID), CarrierSessionID: boundedCarrierID(event.Data.Payload.CallSessionID), CarrierSignalingJSON: filteredCarrierSignaling(event.Data.Payload.SIPHeaders), ProviderEventID: boundedCarrierID(event.Data.ID), ProviderOccurredAt: normalizedEventTime(event.Data.OccurredAt, time.Now().UTC())})
+	if errors.Is(err, errInboundDisabled) {
+		denied := &callRow{ID: "disabled_" + phoneHash(route.ID+":"+carrierSID), RouteID: route.ID, ProjectID: route.ProjectID, CarrierSlug: route.CarrierSlug, CarrierConnectionID: route.CarrierConnectionID, CarrierSID: carrierSID, Direction: "inbound"}
+		if rejectErr := a.rejectInboundCarrierCall(globalCtx.WithProject(route.ProjectID), denied); rejectErr != nil {
+			http.Error(w, "carrier rejection pending; retry", 503)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	if err != nil {
 		http.Error(w, "persist call: "+err.Error(), http.StatusInternalServerError)
 		return

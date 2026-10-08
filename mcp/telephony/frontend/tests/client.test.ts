@@ -55,6 +55,18 @@ function deferred() {
 }
 
 describe("Telephony extension", () => {
+  test("outbound choices use the authorized headless endpoint and preserve provider warnings", async () => {
+    const f=fixture();
+    const result={numbers:[{phone_number:"+33123456789",provider:"generic-carrier",carrier_connection_id:7,outbound_enabled:true,outbound:{required:false,status:"ready"}}],inventory_status:"partial" as const,warnings:[{provider:"unavailable-carrier",carrier_connection_id:8,code:"inventory_unavailable",message:"Unavailable"}]};
+    f.setResponse(async () => result);
+    expect(await f.client.outboundNumbers()).toEqual(result);
+    const request=f.requests[0];
+    expect(request.url.pathname).toEndWith("/softphone/numbers");
+    expect(request.url.searchParams.get("project_id")).toBe("p1");
+    expect(request.url.searchParams.get("install_id")).toBe("42");
+    expect(request.headers.get("Authorization")).toBe("Bearer first");
+  });
+
   test("call controls use the same authenticated project-scoped client", async () => {
     const f = fixture();
     const state: CallControlResult = { call_id: "call-1", hold_state: "held", recording_state: "pause_requested", control_error: "",

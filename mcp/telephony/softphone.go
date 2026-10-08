@@ -914,7 +914,7 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if r.Method != http.MethodPost && !(r.Method == http.MethodGet && (r.URL.Path == "/softphone/access" || strings.HasPrefix(r.URL.Path, "/softphone/listen-audit/"))) {
+	if r.Method != http.MethodPost && !(r.Method == http.MethodGet && (r.URL.Path == "/softphone/access" || r.URL.Path == "/softphone/numbers" || strings.HasPrefix(r.URL.Path, "/softphone/listen-audit/"))) {
 		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -926,6 +926,10 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 	project, err := a.panelProject(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	if r.URL.Path == "/softphone/numbers" {
+		a.handleSoftphoneNumbers(w, r, project)
 		return
 	}
 	if r.URL.Path == "/softphone/access" {
@@ -1027,6 +1031,13 @@ func (a *App) softphonePlace(w http.ResponseWriter, r *http.Request, project str
 	session, err := a.placeHumanCallForUserWithOptions(ctx, p, project, to, strings.TrimSpace(body.From), body.TimeoutSec, body.Recording,
 		outboundCallOptions{MachineDetection: body.MachineDetection, MachineDetectionAction: body.MachineDetectionAction}, body.IdempotencyKey)
 	if err != nil {
+		if errors.Is(err, errOutboundDisabled) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			writeJSON(w, map[string]any{"code": "outbound_disabled", "message": "Outbound use is disabled"})
+			return
+		}
+
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}

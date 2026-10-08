@@ -161,10 +161,6 @@ func (a *App) handlePlivoInbound(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if !route.Enabled {
-		http.NotFound(w, r)
-		return
-	}
 	callUUID := strings.TrimSpace(r.FormValue("CallUUID"))
 	from := strings.TrimSpace(r.FormValue("From"))
 	to := strings.TrimSpace(firstNonEmpty(r.FormValue("To"), route.PhoneNumber))
@@ -181,6 +177,10 @@ func (a *App) handlePlivoInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stored, _, err := a.recordInboundCall(route, callUUID, from, route.PhoneNumber)
+	if errors.Is(err, errInboundDisabled) {
+		writePlivoHangup(w)
+		return
+	}
 	if err != nil {
 		http.Error(w, "persist call: "+err.Error(), http.StatusInternalServerError)
 		return
