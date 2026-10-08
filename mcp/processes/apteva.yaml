@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: processes
 display_name: Processes
-version: 0.16.19
+version: 0.16.20
 description: Create and run company procedures. Processes automatically attaches its coordination tools to executing agents before dispatch. Executors must also have any apps required by their steps attached and configured.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/processes
@@ -126,7 +126,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: processes/v0.16.19
+    ref: processes/v0.16.20
     entry: mcp/processes
   port: 8080
   health_check: /health
