@@ -269,7 +269,7 @@ func stepUsesTasks(r Run, s StepRun) bool {
 // Every Process worker needs the native read/update and run-control surface.
 // Claims are only valid for a persistent sequential worker; independently
 // dispatched steps are already assigned and must use step_get/step_update.
-const processWorkerTools = "processes_step_get,processes_step_update,processes_run_get,processes_run_update,processes_run_cancel"
+const processWorkerTools = "processes_step_get,processes_step_update,processes_run_get,processes_run_update,processes_run_cancel,processes_run_evidence,processes_runs,processes_summary_get,processes_summary_update,processes_memory_list,processes_memory_upsert"
 const processSequentialWorkerTools = "processes_step_claim," + processWorkerTools
 const staleStepReminderAfter = 10 * time.Minute
 const staleStepReminderCooldown = 10 * time.Minute
@@ -335,6 +335,14 @@ func (a *App) staleStepReminder(p *Process, r Run, s StepRun, all []StepRun, now
 }
 
 func (a *App) stepContext(p *Process, r Run, s StepRun, all []StepRun) (message string) {
+	defer func() {
+		for _, previous := range all {
+			if previous.ID != s.ID && previous.Executor == s.Executor && previous.DeliveredAt != "" {
+				return
+			}
+		}
+		message += "\n" + memoryExecutionContract
+	}()
 	// Keep the release contract on every worker delivery, including isolated
 	// workers and later events to an existing persistent worker.
 	if controlMode(r) == "step_by_step" && s.Origin == "process_step" {
@@ -1028,9 +1036,12 @@ func (a *App) stepAction(project, actor, process, run, id, action string, args m
 			result["instructions"], result["required_inputs"], result["default_inputs"] = d.Instructions, d.RequiredInputs, d.DefaultInputs
 			result["completion_criteria"], result["approval_requirements"], result["inputs"] = d.CompletionCriteria, d.ApprovalRequirements, r.Inputs
 			result["parameters"] = r.Binding.Parameters
+			if len(d.SummaryFields) > 0 {
+				result["summary_fields"] = d.SummaryFields
+			}
 			result["assignment"] = WorkerAssignment{ID: r.AssignmentID, Revision: r.AssignmentRevision, Name: r.Binding.Name, OwnerAgentID: r.Binding.OwnerAgentID}
 		}
-		return result, nil
+		return a.boundWorkerResponse(process, r, s, result, all)
 	}
 	d, e := a.runDefinition(r)
 	if e != nil {

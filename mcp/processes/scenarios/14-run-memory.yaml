@@ -1,0 +1,77 @@
+name: processes-run-memory
+description: Two real runs reuse scoped checkpoints and exact ledger references without repeating completed discovery, preserving human approval.
+timeout: 12m
+settle_for: 5s
+max_iterations: 110
+setup:
+  mode: autonomous
+  app:
+    path: ./
+    spawnable: true
+directive: |
+  Test Processes cross-run memory in this isolated project. Your agent ID is
+  ${APTEVA_TEST_AGENT_ID}. Only Processes and Core coordination tools are allowed.
+  This is a local simulation; no external services or communications.
+  Create exactly ONE procedure named "Cross-run memory", with summary_fields
+  [{key:campaign,label:Campaign},{key:checked,label:Checked areas}], shared
+  instructions "Use scoped cross-run memory to rotate discovery. Evidence and
+  human approval are authoritative. Never repeat a searched area.", completion
+  criteria "Two runs with different area receipts and operator approval."
+  and approval_requirements "The human approve step must complete before record."
+  Define THREE steps in this exact order:
+  1. discover, role=research, depends_on=[]: Read runs filtered by this assignment
+     and status=completed, limit=1. Follow the previous completed run's reread
+     reference and summary_get if one exists. Then read memory_list in scope
+     campaign-october, assignment_id from the frozen run. Select the first unsearched
+     area in the ordered list north, south. For this simulation exact source receipts
+     are north=source:9007199254740993, south=source:9007199254740995. Save exactly
+     "Area: <area>; receipt: <source receipt>" as step output. Before completing,
+     save a summary checkpoint with attempted/findings, fields={campaign:"October",
+     checked:1}, exact source and step references, and next_actions naming the next
+     unsearched area. Save one memory_upsert entry with scope=campaign-october,
+     key=area:<area>, kind=searched, content="Checked <area>", and exact receipt
+     reference; expected_revision=0. Retry that same upsert once to exercise
+     idempotency. Do not write an entry for an area already searched. Summary and
+     ledger are not approval. Save summary before step_update completed.
+  2. approve, role=operator, depends_on=[discover]: Human reviews exact area and
+     receipt. This role MUST be {kind:human}. Never self-approve. The runner will
+     complete it with the exact approval receipt "MEMORY-APPROVED" via HTTP.
+  3. record, role=research, depends_on=[approve]: Check exact discover output and
+     approval receipt MEMORY-APPROVED in dependencies. Save output exactly
+     "Recorded <area>; receipt: <source receipt>; approval: MEMORY-APPROVED".
+     Update summary with completed/outcome and exact receipt/approval references,
+     retaining fields, using the previous revision and a new idempotency_key.
+     Then complete this step. Do not modify the ledger again.
+  Each step needs key, name, instructions and expected_output.
+  Create ONE assignment owned by yourself, follow_latest=true, no schedule,
+  worker_continuity=per_executor, roles={operator:{kind:human}}. Activate process
+  and assignment. Execution of this test is explicitly authorized.
+  Start once with idempotency_key=memory-1. Processes provisions a persistent
+  worker. Main must not execute steps, write summaries or ledger entries, or
+  spawn workers. Keep worker alive through the approval event; do not poll.
+  After its worker finishes, main reads run_get ONCE to verify completed, then
+  starts the SAME assignment with idempotency_key=memory-2. The new worker must
+  recover first-run checkpoint/ledger and choose the next area. After the second
+  worker finishes, main reads runs filtered by assignment and completed to verify
+  two different results, then stops. No third run or repeated area work.
+assert:
+  - tool_called: processes_summary_get
+  - tool_called: processes_summary_update
+  - tool_called: processes_memory_list
+  - tool_called: processes_memory_upsert
+  - tool_called: processes_step_claim
+  - tool_called_with:
+      tool: processes_step_update
+      args: {state: completed, output: "Recorded south; receipt: source:9007199254740995; approval: MEMORY-APPROVED"}
+      count: 1
+      success: true
+  - tool_called_with:
+      tool: processes_runs
+      args: {status: completed}
+      count: 3
+      success: true
+  - tool_not_called: spawn
+  - tool_not_called: processes_run_update
+budget:
+  total_tokens: 5000000
+  cost_usd: 7.50

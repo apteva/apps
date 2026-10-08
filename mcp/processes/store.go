@@ -21,21 +21,26 @@ type Schedule struct {
 	Cron     string `json:"cron,omitempty"`
 	Timezone string `json:"timezone,omitempty"`
 }
+type SummaryField struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+}
 type Definition struct {
-	Steps                []Step      `json:"steps,omitempty"`
-	Parameters           []Parameter `json:"parameters,omitempty"`
-	ExecutionMode        string      `json:"-"`
-	Name                 string      `json:"name"`
-	Description          string      `json:"description"`
-	Instructions         string      `json:"instructions"`
-	RequiredInputs       string      `json:"required_inputs"`
-	DefaultInputs        string      `json:"default_inputs"`
-	CompletionCriteria   string      `json:"completion_criteria"`
-	ApprovalRequirements string      `json:"approval_requirements"`
-	Category             string      `json:"category,omitempty"`
-	Tags                 []string    `json:"tags,omitempty"`
-	OwnerAgentID         int64       `json:"owner_agent_id,omitempty"`
-	Schedule             *Schedule   `json:"schedule,omitempty"`
+	SummaryFields        []SummaryField `json:"summary_fields,omitempty"`
+	Steps                []Step         `json:"steps,omitempty"`
+	Parameters           []Parameter    `json:"parameters,omitempty"`
+	ExecutionMode        string         `json:"-"`
+	Name                 string         `json:"name"`
+	Description          string         `json:"description"`
+	Instructions         string         `json:"instructions"`
+	RequiredInputs       string         `json:"required_inputs"`
+	DefaultInputs        string         `json:"default_inputs"`
+	CompletionCriteria   string         `json:"completion_criteria"`
+	ApprovalRequirements string         `json:"approval_requirements"`
+	Category             string         `json:"category,omitempty"`
+	Tags                 []string       `json:"tags,omitempty"`
+	OwnerAgentID         int64          `json:"owner_agent_id,omitempty"`
+	Schedule             *Schedule      `json:"schedule,omitempty"`
 }
 type Process struct {
 	Assignment       *Assignment  `json:"-"`
@@ -113,6 +118,16 @@ func newID(prefix string) string {
 	return prefix + hex.EncodeToString(b)
 }
 func (d *Definition) validate() error {
+	if len(d.SummaryFields) > 12 {
+		return errors.New("at most 12 summary fields")
+	}
+	seenSummary := map[string]bool{}
+	for _, f := range d.SummaryFields {
+		if f.Key == "" || len(f.Key) > 64 || f.Label == "" || len(f.Label) > 80 || seenSummary[f.Key] {
+			return errors.New("summary fields need unique keys (64 bytes) and labels (80 bytes)")
+		}
+		seenSummary[f.Key] = true
+	}
 	if e := validateSteps(d.Steps); e != nil {
 		return e
 	}

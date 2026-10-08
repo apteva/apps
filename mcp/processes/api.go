@@ -22,9 +22,10 @@ func textField(description string) map[string]any {
 }
 func definitionSchema() map[string]any {
 	return object([]string{"name", "instructions", "completion_criteria"}, map[string]any{
-		"steps":      map[string]any{"type": "array", "maxItems": 30, "items": stepSchema()},
-		"parameters": map[string]any{"type": "array", "maxItems": 50, "items": object([]string{"key", "type"}, map[string]any{"key": textField("Unique parameter key"), "label": textField("Human-readable label"), "type": map[string]any{"type": "string", "enum": []string{"string", "number", "boolean"}}, "required": map[string]any{"type": "boolean"}, "default": map[string]any{}, "options": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}})},
-		"name":       textField("Procedure name"), "description": textField("Purpose"), "instructions": textField("Shared instructions for the procedure"), "required_inputs": textField("Inputs or sources execution requires"), "default_inputs": textField("Standing procedure context"), "completion_criteria": textField("Required outcomes and evidence"), "approval_requirements": textField("Approval requirements the assigned agents must follow during execution"), "category": textField("Optional project organization category"), "tags": map[string]any{"type": "array", "maxItems": 20, "items": textField("Organization tag")},
+		"summary_fields": map[string]any{"type": "array", "maxItems": 12, "items": object([]string{"key", "label"}, map[string]any{"key": textField("Generic summary metric or context field key"), "label": textField("Human-readable history label")})},
+		"steps":          map[string]any{"type": "array", "maxItems": 30, "items": stepSchema()},
+		"parameters":     map[string]any{"type": "array", "maxItems": 50, "items": object([]string{"key", "type"}, map[string]any{"key": textField("Unique parameter key"), "label": textField("Human-readable label"), "type": map[string]any{"type": "string", "enum": []string{"string", "number", "boolean"}}, "required": map[string]any{"type": "boolean"}, "default": map[string]any{}, "options": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}})},
+		"name":           textField("Procedure name"), "description": textField("Purpose"), "instructions": textField("Shared instructions for the procedure"), "required_inputs": textField("Inputs or sources execution requires"), "default_inputs": textField("Standing procedure context"), "completion_criteria": textField("Required outcomes and evidence"), "approval_requirements": textField("Approval requirements the assigned agents must follow during execution"), "category": textField("Optional project organization category"), "tags": map[string]any{"type": "array", "maxItems": 20, "items": textField("Organization tag")},
 	})
 }
 func (a *App) MCPTools() []sdk.Tool {
@@ -47,12 +48,19 @@ func (a *App) MCPTools() []sdk.Tool {
 	descriptions["step_claim"] = "Claim and read an assigned ready step as the persistent run worker, including per-executor branches and joins. Marks ready work running. Reuse this worker for later steps; finish only when the top-level done field is true."
 	descriptions["step_get"] = "Read the assigned step, frozen context and one dependencies manifest with exact ancestor receipts. No full procedure snapshot. After retaining shared policy, include_context=false omits it; omit this flag for recovery."
 	descriptions["step_update"] = "Assigned executor only: save progress or output; returns only a compact saved-state acknowledgement, not instructions or receipts. A persistent worker must inspect the returned done field: follow next_action to finish when true, otherwise follow next_action and any ready_steps/active_steps; auto parallel owners may continue other eligible work and await child results. Never poll."
+	descriptions["runs"] = "Read compact recent run metadata and agent-authored checkpoints (default 10, max 50, response budget 16 KB). Filter assignment/status/dates; follow next_cursor and exact reread references. Never returns full nested history."
+	descriptions["run_get"] = "Read one immutable run, optionally section=run/definition/steps. Bounded to 48 KB; complete=false means exact sections must be fetched via run_evidence before relying on them."
+	descriptions["run_evidence"] = "Recover exact saved run, frozen definition, shared execution context, steps or one step as paged JSON UTF-8. Follow next offsets and sha256, concatenate data to reconstruct JSON. A changed hash requires restart. No truncation or summaries."
+	descriptions["summary_get"] = "Read an agent-authored run checkpoint, latest or exact revision. Missing historical summaries are unavailable. Memory is not approval or execution evidence."
+	descriptions["summary_update"] = "Owner or assigned step executor: save a compact semantic checkpoint at meaningful milestones, blockers and completion. Include exact references. Does not change run/step/approval state. Use expected_revision (0 initially) and stable idempotency_key; retry identical arguments."
+	descriptions["memory_list"] = "Read scoped cross-run knowledge for one process, assignment and campaign/scope. Search/filter and page entries. Use before repeating discovery; evidence and source-app records remain authoritative."
+	descriptions["memory_upsert"] = "Run owner or assigned step executor: save one bounded ledger entry with stable key, kind, findings and exact source references. Scope is explicit and assignment comes from the frozen run. expected_revision=0 creates; identical retries are idempotent. Does not create leads or grant approval."
 	out := []sdk.Tool{}
-	for _, name := range []string{"list", "get", "validate_definition", "create", "update", "activate", "pause", "draft", "archive", "start", "runs", "run_get", "run_update", "assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive", "step_get", "step_claim", "step_update", "run_cancel", "run_advance"} {
+	for _, name := range []string{"list", "get", "validate_definition", "create", "update", "activate", "pause", "draft", "archive", "start", "runs", "run_get", "run_update", "run_evidence", "summary_get", "summary_update", "memory_list", "memory_upsert", "assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive", "step_get", "step_claim", "step_update", "run_cancel", "run_advance"} {
 		name := name
 		props := map[string]any{}
 		required := []string{}
-		workerCoordination := name == "run_get" || name == "run_update" || name == "step_get" || name == "step_claim" || name == "step_update"
+		workerCoordination := name == "run_evidence" || name == "summary_get" || name == "summary_update" || name == "memory_upsert" || name == "run_get" || name == "run_update" || name == "step_get" || name == "step_claim" || name == "step_update"
 		if name != "list" && name != "create" && name != "validate_definition" {
 			props["process_id"] = textField("Process ID")
 			if !workerCoordination {
@@ -60,6 +68,53 @@ func (a *App) MCPTools() []sdk.Tool {
 			}
 		}
 		switch name {
+		case "runs", "memory_list":
+			props["limit"] = map[string]any{"type": "integer", "minimum": 1, "maximum": 50, "default": 10}
+			props["cursor"] = textField("Opaque next_cursor from the previous page; keep all filters unchanged")
+			props["assignment_id"] = textField("Exact assignment ID")
+			if name == "runs" {
+				props["owner_agent_id"] = map[string]any{"type": "integer", "minimum": 1, "description": "Run owner or assigned step executor"}
+				props["status"] = textField("Exact run state, or ongoing/attention group")
+				props["after"] = textField("Inclusive RFC3339 start date")
+				props["before"] = textField("Inclusive RFC3339 end date")
+			} else {
+				props["scope"] = textField("Exact campaign or knowledge scope")
+				props["search"] = textField("Search knowledge content")
+				props["key"] = textField("Exact stable entry key")
+				props["kind"] = textField("Exact entry kind")
+				required = append(required, "assignment_id", "scope")
+			}
+		case "summary_get", "summary_update", "memory_upsert", "run_evidence":
+			props["run_id"] = textField("Exact run ID")
+			required = append(required, "run_id")
+			props["step_id"] = textField("Exact source step ID; required for a step executor other than the run owner")
+			switch name {
+			case "summary_get":
+				props["revision"] = map[string]any{"type": "integer", "minimum": 1}
+			case "summary_update", "memory_upsert":
+				props["expected_revision"] = map[string]any{"type": "integer", "minimum": 0}
+				required = append(required, "expected_revision")
+				refs := map[string]any{"type": "array", "maxItems": 20, "items": map[string]any{"type": "string", "maxLength": 256}}
+				if name == "summary_update" {
+					fields := map[string]any{"references": refs, "fields": map[string]any{"type": "object", "maxProperties": 12, "additionalProperties": true, "description": "Procedure-configured compact labels/metrics; use strings for exact external IDs"}}
+					for _, k := range []string{"attempted", "completed", "findings", "outcome", "blocker", "next_actions"} {
+						fields[k] = textField(k)
+					}
+					props["summary"] = object([]string{"references"}, fields)
+					props["idempotency_key"] = textField("Stable checkpoint key; reuse on retries")
+					required = append(required, "summary", "idempotency_key")
+				} else {
+					props["scope"] = textField("Exact campaign or knowledge scope")
+					props["key"] = textField("Stable source-derived entry key")
+					props["entry"] = object([]string{"kind", "content", "references"}, map[string]any{"kind": textField("Category such as searched, checked or deferred"), "content": textField("Short findings; max entry JSON 2048 bytes"), "references": refs})
+					required = append(required, "scope", "key", "entry")
+				}
+			case "run_evidence":
+				props["section"] = map[string]any{"type": "string", "enum": []string{"run", "definition", "context", "steps", "step"}}
+				props["offset"] = map[string]any{"type": "integer", "minimum": 0}
+				props["sha256"] = textField("Hash from first page or reference; detects changes between reads")
+				required = append(required, "section")
+			}
 		case "assignment_get", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive":
 			props["assignment_id"] = textField("Assignment ID")
 			required = append(required, "assignment_id")
@@ -110,6 +165,9 @@ func (a *App) MCPTools() []sdk.Tool {
 				required = append(required, "state")
 			}
 		case "run_get", "run_update":
+			if name == "run_get" {
+				props["section"] = map[string]any{"type": "string", "enum": []string{"all", "run", "definition", "steps"}}
+			}
 			props["run_id"] = textField("Run ID")
 			required = append(required, "run_id")
 			if name == "run_update" {
@@ -160,7 +218,7 @@ func (a *App) executeResponse(project, actor, action string, args map[string]any
 		return a.executeTrigger(project, action, args)
 	}
 	id := str(args, "process_id")
-	if action == "run_get" || action == "run_update" || action == "step_get" || action == "step_claim" || action == "step_update" {
+	if action == "run_evidence" || action == "summary_get" || action == "summary_update" || action == "memory_upsert" || action == "run_get" || action == "run_update" || action == "step_get" || action == "step_claim" || action == "step_update" {
 		resolved, err := a.resolveWorkerProcess(project, id, str(args, "run_id"), str(args, "step_id"))
 		if err != nil {
 			return nil, err
@@ -332,9 +390,29 @@ func (a *App) executeResponse(project, actor, action string, args map[string]any
 		return a.cancelWorkflow(project, actor, id, str(args, "run_id"), str(args, "reason"))
 	case "step_get", "step_claim", "step_update":
 		return a.stepAction(project, actor, id, str(args, "run_id"), str(args, "step_id"), action, args)
+	case "summary_get", "summary_update":
+		return a.summaryAction(project, actor, id, args, action == "summary_update")
+	case "memory_list":
+		return a.memoryList(project, id, args)
+	case "memory_upsert":
+		return a.memoryUpsert(project, actor, id, args)
+	case "run_evidence":
+		return a.runEvidence(project, id, args)
 	case "runs":
+		if !mcp && str(args, "view") == "export" {
+			return a.exportHistory(project, id, args)
+		}
+		if mcp || str(args, "view") == "compact" {
+			return a.historyPage(project, id, args)
+		}
 		return a.runs(project, id)
 	case "project_runs":
+		if str(args, "view") == "export" {
+			return a.exportHistory(project, "", args)
+		}
+		if str(args, "view") == "compact" {
+			return a.historyPage(project, "", args)
+		}
 		return a.projectRuns(project)
 	case "run_get", "run_update":
 		return a.directRunResponse(project, actor, id, str(args, "run_id"), action, args, mcp)
@@ -488,6 +566,41 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 				case "activate", "pause", "preview", "test_run", "event_retry":
 					action = "trigger_" + parts[3]
 				}
+			}
+		}
+	}
+	if len(parts) == 2 && parts[1] == "memory" && r.Method == "GET" {
+		args["process_id"] = parts[0]
+		action = "memory_list"
+	}
+	if len(parts) == 4 && parts[1] == "runs" && parts[3] == "summary" {
+		args["process_id"] = parts[0]
+		args["run_id"] = parts[2]
+		if r.Method == "GET" {
+			action = "summary_get"
+		} else if r.Method == "POST" {
+			action = "summary_update"
+		}
+	}
+	if len(parts) == 4 && parts[1] == "runs" && parts[3] == "memory" && r.Method == "POST" {
+		args["process_id"] = parts[0]
+		args["run_id"] = parts[2]
+		action = "memory_upsert"
+	}
+	if r.Method == "GET" {
+		for _, key := range []string{"view", "cursor", "assignment_id", "status", "after", "before", "scope", "search", "key", "kind"} {
+			if v := r.URL.Query().Get(key); v != "" {
+				args[key] = v
+			}
+		}
+		for _, key := range []string{"limit", "revision", "owner_agent_id"} {
+			if v := r.URL.Query().Get(key); v != "" {
+				n, e := strconv.Atoi(v)
+				if e != nil {
+					http.Error(w, "invalid "+key, 400)
+					return
+				}
+				args[key] = float64(n)
 			}
 		}
 	}

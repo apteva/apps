@@ -59,7 +59,11 @@ directive: |
   Main must not perform domain work or spawn the run worker: Processes provisions
   it. The runner advances the remaining steps through HTTP and confirms the human step over HTTP after validation. Keep the owner
   alive through approval, settle children before done, and then have main inspect
-  runs once to verify all eight completed steps. Main must not finish early.
+  runs once to verify the completed occurrence, then follow its reread reference
+  with run_get to inspect all eight exact step receipts. runs is compact discovery
+  metadata; it intentionally omits step outputs. Once the run is completed, make
+  this final history read and stop immediately; do not call pace or wait for more
+  events from an already completed run. Main must not finish early.
 assert:
   - tool_called: spawn
   - tool_called: processes_step_claim

@@ -555,3 +555,52 @@ Returning to draft does not create a version; **Save draft** creates the next
 immutable version. The same action is available as MCP `draft` and HTTP
 `POST /processes/{process}/draft`. **Pause process** remains available for
 temporarily stopping new runs without returning to draft.
+
+### Bounded history and cross-run memory
+
+MCP `runs` returns one compact `runs` collection: default 10 rows, maximum 50,
+with a 16 KiB response budget, exact IDs/frozen version/assignment/state,
+agent-authored checkpoints and drill-down references. It queries metadata rather
+than hydrating all executions. Filters include assignment, status (including
+ongoing/attention groups), inclusive RFC3339 dates and an opaque keyset cursor.
+Cursors bind to the filters and normalize fractional timestamps without changing
+stored dates. Count and byte limits can both end a page; follow `next_cursor`.
+
+`summary_get` and `summary_update` recover/save versioned semantic checkpoints
+(4 KiB JSON maximum). Checkpoints capture progress, findings, outcomes, blockers,
+next actions and exact evidence references; the app records author and revision.
+Stable checkpoint keys make identical retries idempotent and optimistic revisions
+prevent overwrites. Frozen procedure `summary_fields` configure optional labels
+and metrics through MCP or the procedure editor. Missing historical checkpoints
+are explicitly unavailable. Summaries never complete steps or provide approval.
+
+`memory_list` and `memory_upsert` provide scoped, searchable, paginated ledger
+entries (2 KiB maximum each), keyed by process, frozen assignment, campaign/scope
+and stable source key. Each records its source run/step and author. Identical
+retries preserve provenance, conflicting revisions fail, and other step executors
+must name their assigned source step. Actual leads/assets stay in their source
+apps; ledger entries reference them. New revisions publish compact app events
+without including semantic contents or repeating evidence.
+
+`run_get` supports `section=run|definition|steps|all` and a 48 KiB budget. Large
+sections return `complete=false` and exact `run_evidence` references. Evidence
+also supports `section=context` for exact shared execution fields without unrelated
+step definitions or run aggregates. It uses UTF-8 byte offsets, a SHA-256, completion flags and a next reference; concatenate
+JSON pages in order and restart if the hash changes. Oversized worker claims/reads
+preserve a complete dependency manifest and deferred frozen context references.
+All required instructions, receipts and approval evidence must be retrieved before
+action. There is no model-generated replacement or silently shortened evidence.
+
+HTTP full run inspection objects retain their previous shape. The UI opts into
+`view=compact`, pages lightweight history, and loads the selected run on demand;
+checkpoints and scoped knowledge render separately from activity. Explicit HTTP
+`view=export` returns full inspection objects page by page with the same filters
+and cursor. Legacy HTTP history remains available to existing inspection clients.
+
+Tests cover multi-MB history, size limits, exact numeric IDs and Unicode evidence,
+keyset dates/pagination/filter isolation, frozen configuration, restart recovery,
+optimistic concurrent updates, retry/event deduplication and migration fidelity.
+The tier 3 `14-run-memory.yaml` scenario runs two real GPT-6.1 Sol workers: the
+second reads the first checkpoint/ledger, rotates discovery, preserves exact
+receipts, and passes independent HTTP human approval. The verifier checks saved
+state and telemetry independently of the model's final message.

@@ -29,6 +29,7 @@ type Schedule = {
   timezone?: string;
 };
 type Definition = {
+  summary_fields?: {key: string; label: string}[];
   steps?: Step[];
   parameters?: Parameter[];
   name: string;
@@ -64,7 +65,10 @@ type Entry = {
   version: number;
   record: {
     id: string;
+    metadata_only?: boolean;
+    summary?: {revision: number; author: string; created_at: string; attempted?: string; completed?: string; findings?: string; outcome?: string; blocker?: string; next_actions?: string; references?: string[]; fields?: Record<string, unknown>};
     trigger_event_id?: string;
+    executor_agent_ids?: number[];
     workflow?: boolean;
     control_mode?: "automatic" | "step_by_step";
     waiting_for_advance?: boolean;
@@ -77,6 +81,7 @@ type Entry = {
     next_run_at?: string;
     scheduled_for?: string;
     delivery_warning?: string;
+    delivery_attention?: boolean;
     delivery_suspended?: boolean;
     progress?: number;
     current_step?: string;
@@ -210,6 +215,8 @@ const empty: Definition = {
   tags: [],
 };
 type History = {
+  runs?: NonNullable<History["direct_runs"]>;
+  next_cursor?: string;
   direct_runs?: (Entry["record"] & {
     version: number;
     assignment_id?: string;
@@ -217,7 +224,7 @@ type History = {
   })[];
 };
 const historyEntries = (r: History): Entry[] =>
-  (r.direct_runs || []).map((e) => ({
+  (r.direct_runs ?? r.runs ?? []).map((e) => ({
       backend: "agent" as const,
       version: e.version,
       process_id: (e as typeof e & { process_id?: string }).process_id,
@@ -279,7 +286,7 @@ const matchesProjectRunFilter = (run: Entry, filter: string) => {
   if (filter === "ongoing") return !terminalRunStates.has(state);
   if (filter === "attention")
     return ["waiting", "blocked", "failed"].includes(state) ||
-      !!run.record.delivery_warning;
+      !!run.record.delivery_warning || !!run.record.delivery_attention;
   return state === filter;
 };
 const fields = [
@@ -332,7 +339,32 @@ function RunDetailCard({
   onBack?: () => void;
   toolSources: ToolSource[];
 }) {
-  const run = entry.record;
+  const [loaded, setLoaded] = useState<Entry | null>(null);
+  const [detailError, setDetailError] = useState("");
+  const [memoryOpen, setMemoryOpen] = useState(false);
+  const [memoryScope, setMemoryScope] = useState("");
+  const [memoryEntries, setMemoryEntries] = useState<any[]>([]);
+  const [memoryCursor, setMemoryCursor] = useState("");
+  const [summaryLabels, setSummaryLabels] = useState<{key: string; label: string}[]>([]);
+  useEffect(() => {
+    if (!entry.record.metadata_only) {setLoaded(null);return;}
+    let alive=true;
+    const refresh=async () => {
+      try {
+        const result=await api(`/runs/${encodeURIComponent(entry.record.id)}`);
+        const checkpoint=await api(`/runs/${encodeURIComponent(entry.record.id)}/summary`);
+        if(alive){setLoaded({...entry, assignment:result.run.assignment, record:{...result.run,steps:result.steps || result.run.steps,title:entry.record.title,summary:checkpoint.summary}});setSummaryLabels(result.definition?.summary_fields || []);setDetailError("");}
+      } catch(error) {if(alive)setDetailError((error as Error).message);}
+    };
+    setLoaded(null);refresh();
+    const timer=terminalRunStates.has(entry.record.state)?undefined:window.setInterval(refresh,2000);
+    return () => {alive=false;window.clearInterval(timer);};
+  },[entry.record.id,entry.record.metadata_only,entry.record.state,entry.record.summary?.revision]);
+  const fullEntry=loaded?.record.id===entry.record.id?loaded:entry;
+  const run = fullEntry.record;
+  const loadMemory=async (append=false) => {
+    try {const query=new URLSearchParams({assignment_id:entry.assignment_id || "",scope:memoryScope,limit:"10"});if(append&&memoryCursor)query.set("cursor",memoryCursor);const response=await api(`/memory?${query}`);setMemoryEntries(previous=>append?[...previous,...response.entries]:response.entries);setMemoryCursor(response.next_cursor || "");setDetailError("");}catch(error){setDetailError((error as Error).message);}
+  };
   const [workerActivity, setWorkerActivity] = useState({stepID: "", status: ""});
   const [resultOpen, setResultOpen] = useState(false);
   const [selectedStepID, setSelectedStepID] = useState<string | null>(null);
@@ -410,6 +442,12 @@ function RunDetailCard({
         · {run.scheduled_for ? "Scheduled" : "Manual"}
       </p>
       {run.delivery_warning && <p className="notice">{run.delivery_suspended ? "Delivery suspended—repair required" : "Delivery retry pending"}: {run.delivery_warning}</p>}
+      {detailError && <p className="notice" role="alert">{detailError}</p>}
+      {entry.record.metadata_only && !loaded && !detailError && <p role="status">Loading run details…</p>}
+      <details className="block"><summary>Run checkpoint {run.summary ? `· revision ${run.summary.revision}` : "· unavailable"}</summary>
+        {run.summary ? <><p className="small muted">Agent-authored · {run.summary.author} · {date(run.summary.created_at)}. Verify exact evidence before relying on findings.</p>{["attempted","completed","findings","outcome","blocker","next_actions"].map(key=>{const value=run.summary?.[key as keyof typeof run.summary];return typeof value==="string"&&value?<div key={key}><strong>{key.replaceAll("_"," ")}</strong><ResultContent content={value}/></div>:null;})}{Object.entries(run.summary.fields || {}).map(([key,value])=><p key={key}><strong>{summaryLabels.find(f=>f.key===key)?.label || key}:</strong> {String(value)}</p>)}{run.summary.references?.map(reference=><p className="small" key={reference}>{reference}</p>)}</> : <p className="small muted">No checkpoint was saved for this run. Its original results and step receipts remain available.</p>}
+      </details>
+      <details className="block" onToggle={event=>setMemoryOpen(event.currentTarget.open)}><summary>Cross-run knowledge</summary>{memoryOpen&&<><div className="row"><input style={{flex:1,minWidth:160,maxWidth:360}} aria-label="Knowledge scope" placeholder="Campaign / scope" value={memoryScope} onChange={event=>{setMemoryScope(event.target.value);setMemoryEntries([]);setMemoryCursor("");}}/><button disabled={!memoryScope.trim()} onClick={()=>loadMemory()}>Search knowledge</button></div>{memoryEntries.map(item=><div className="block" key={item.key}><strong>{item.kind} · {item.key}</strong><ResultContent content={item.content}/><p className="small muted">Source run {item.run_id}{item.step_id?` · step ${item.step_id}`:""} · revision {item.revision}</p>{item.references?.map((ref:string)=><p className="small" key={ref}>{ref}</p>)}</div>)}{memoryCursor&&<button onClick={()=>loadMemory(true)}>Load more knowledge</button>}</>}</details>
       {run.error && <div className="notice"><ResultContent content={run.error} /></div>}
       {run.workflow ? <RunSteps
         steps={steps}
@@ -472,12 +510,19 @@ function Panel(props: Props) {
     [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
     [notice, setNotice] = useState("");
+  const [runsPage,setRunsPage]=useState({cursor:"",expanded:false});
+  const [projectRunsPage,setProjectRunsPage]=useState({cursor:"",expanded:false});
+  const runsCursor=runsPage.cursor, projectRunsCursor=projectRunsPage.cursor;
+  const setRunsCursor=(cursor:string,append=false,reset=false)=>setRunsPage(previous=>reset||append||!previous.expanded?{cursor,expanded:append}:previous);
+  const setProjectRunsCursor=(cursor:string,append=false,reset=false)=>setProjectRunsPage(previous=>reset||append||!previous.expanded?{cursor,expanded:append}:previous);
   const [runAssignment, setRunAssignment] = useState<Assignment | null>(null),
     [runParameters, setRunParameters] = useState<Record<string, unknown>>({}),
     [assignmentFilter, setAssignmentFilter] = useState(""),
     [runStateFilter, setRunStateFilter] = useState(""),
     [runOwnerFilter, setRunOwnerFilter] = useState(0),
     [projectRunStateFilter, setProjectRunStateFilter] = useState("");
+  useEffect(()=>{if(selected&&props.projectId){setRuns(previous=>previous.filter(run=>run.record.id===selectedRunID));setRunsCursor("",false,true);loadRuns(selected).catch(e=>setError(e.message));}},[assignmentFilter,runStateFilter,runOwnerFilter]);
+  useEffect(()=>{if(props.projectId){setProjectRuns(previous=>previous.filter(run=>run.record.id===selectedProjectRunID));setProjectRunsCursor("",false,true);loadProjectRuns().catch(e=>setError(e.message));}},[projectRunStateFilter]);
   const categories = Array.from(new Set(items.map((p) => p.category).filter(Boolean) as string[])).sort();
   useEffect(() => {
     const id = new URLSearchParams(window.location.search).get("run_id");
@@ -527,13 +572,15 @@ function Panel(props: Props) {
     const r = await api(`/${encodeURIComponent(id)}`);
     setDetail(r);
   };
-  const loadRuns = async (id: string) => {
-    const r = await api(`/${encodeURIComponent(id)}/runs`);
-    setRuns(historyEntries(r));
+  const loadRuns = async (id: string, append=false) => {
+    const query=new URLSearchParams({view:"compact",limit:"10"});if(assignmentFilter)query.set("assignment_id",assignmentFilter);if(runStateFilter)query.set("status",runStateFilter);if(runOwnerFilter)query.set("owner_agent_id",String(runOwnerFilter));if(append&&runsCursor)query.set("cursor",runsCursor);
+    const r = await api(`/${encodeURIComponent(id)}/runs?${query}`);
+    setRuns(previous=>{const next=historyEntries(r);return append?[...previous,...next.filter(run=>!previous.some(item=>item.record.id===run.record.id))]:[...next,...previous.filter(run=>!next.some(item=>item.record.id===run.record.id))];});setRunsCursor(r.next_cursor || "",append);
   };
-  const loadProjectRuns = async () => {
-    const history = await api("/runs");
-    setProjectRuns(projectHistoryEntries(history));
+  const loadProjectRuns = async (append=false) => {
+    const query=new URLSearchParams({view:"compact",limit:"10"});if(projectRunStateFilter)query.set("status",projectRunStateFilter);if(append&&projectRunsCursor)query.set("cursor",projectRunsCursor);
+    const history = await api(`/runs?${query}`);
+    setProjectRuns(previous=>{const next=projectHistoryEntries(history);return append?[...previous,...next.filter(run=>!previous.some(item=>item.record.id===run.record.id))]:[...next,...previous.filter(run=>!next.some(item=>item.record.id===run.record.id))];});setProjectRunsCursor(history.next_cursor || "",append);
   };
   useEffect(() => {
     let live = true;
@@ -549,7 +596,7 @@ function Panel(props: Props) {
     }
     Promise.all([
       api(),
-      api("/runs"),
+      api("/runs?view=compact&limit=10"),
       fetch(`/api/agents?project_id=${encodeURIComponent(props.projectId)}`, {
         credentials: "same-origin",
       }).then(async (r) => {
@@ -560,7 +607,7 @@ function Panel(props: Props) {
       .then(([data, history, owners]) => {
         if (live) {
           setItems(data.processes || []);
-          setProjectRuns(projectHistoryEntries(history));
+          setProjectRuns(projectHistoryEntries(history));setProjectRunsCursor(history.next_cursor || "");
           setAgents(owners);
         }
       })
@@ -604,7 +651,7 @@ function Panel(props: Props) {
   useEffect(() => {
     let live = true;
     setDetail(null);
-    setRuns([]);
+    setRuns([]);setRunsCursor("",false,true);
     if (!selected || !props.projectId) return;
     api(`/${encodeURIComponent(selected)}`)
       .then((r) => live && setDetail(r))
@@ -618,13 +665,13 @@ function Panel(props: Props) {
     if (!selected || !detail) return;
     const refresh = () =>
       Promise.all([
-        api(`/${encodeURIComponent(selected)}/runs`),
+        api(`/${encodeURIComponent(selected)}/runs?view=compact&limit=10`),
         api(`/${encodeURIComponent(selected)}`),
       ])
         .then(([r, current]) => {
           if (live) {
             setDetail(current);
-            setRuns(historyEntries(r));
+            setRuns(historyEntries(r));setRunsCursor(r.next_cursor || "");
           }
         })
         .catch((e) => live && setError(e.message));
@@ -735,6 +782,7 @@ function Panel(props: Props) {
       (!runStateFilter || r.record.state === runStateFilter) &&
       (!runOwnerFilter ||
         r.assignment?.owner_agent_id === runOwnerFilter ||
+        r.record.executor_agent_ids?.includes(runOwnerFilter) ||
         r.record.steps?.some(
           (s) =>
             s.executor.kind === "agent" &&
@@ -746,6 +794,10 @@ function Panel(props: Props) {
       !run.record.schedule_kind &&
       matchesProjectRunFilter(run, projectRunStateFilter),
   );
+  useEffect(()=>{
+    if(!selected||!selectedRunID||runs.some(run=>run.record.id===selectedRunID))return;
+    let alive=true;api(`/${encodeURIComponent(selected)}/runs/${encodeURIComponent(selectedRunID)}`).then(data=>{if(alive)setRuns(previous=>previous.some(run=>run.record.id===selectedRunID)?previous:[...previous,...historyEntries({runs:[{...data.run,steps:data.steps,metadata_only:true,title:"Process run"}]})]);}).catch(e=>alive&&setError(e.message));return()=>{alive=false;};
+  },[selected,selectedRunID,runs.length]);
   const selectedExecution =
     executions.find((run) => run.record.id === selectedRunID) || null;
   const selectedProjectRun =
@@ -907,6 +959,7 @@ function Panel(props: Props) {
               <option value="cancelled">Cancelled</option>
             </select>
           </div>
+          {projectRunsCursor && !selectedProjectRun && <button disabled={busy} onClick={()=>work(()=>loadProjectRuns(true))}>Load older runs</button>}
           {filteredProjectRuns.length || selectedProjectRun ? (
             selectedProjectRun ? (
               <div className="run-detail-page">
@@ -952,7 +1005,7 @@ function Panel(props: Props) {
                         {run.assignment?.name || run.record.title} · {date(run.record.created_at)}
                       </span>
                       <span className="sub">
-                        {run.record.current_step ||
+                        {run.record.summary?.outcome || run.record.summary?.blocker || run.record.error || run.record.delivery_warning || run.record.current_step ||
                           (run.record.workflow ? "Team workflow" : "Direct run")}
                       </span>
                     </button>
@@ -1094,6 +1147,7 @@ function Panel(props: Props) {
                     </div>
                   ))}
 
+                <details className="block"><summary>Run summary fields</summary><p className="small muted">Optional labels for compact history, such as campaign or completed items. Agents record the values in checkpoints.</p>{(draft.summary_fields || []).map((field,index)=><div className="row" key={index} style={{marginBottom:8,flexWrap:"nowrap"}}><input aria-label={`Summary field ${index+1} key`} placeholder="Key" maxLength={64} value={field.key} onChange={e=>setField("summary_fields",draft.summary_fields?.map((item,i)=>i===index?{...item,key:e.target.value}:item))}/><input aria-label={`Summary field ${index+1} label`} placeholder="Label" maxLength={80} value={field.label} onChange={e=>setField("summary_fields",draft.summary_fields?.map((item,i)=>i===index?{...item,label:e.target.value}:item))}/><button type="button" aria-label={`Remove summary field ${index+1}`} onClick={()=>setField("summary_fields",draft.summary_fields?.filter((_,i)=>i!==index))}>Remove</button></div>)}<button type="button" disabled={(draft.summary_fields?.length || 0)>=12} onClick={()=>setField("summary_fields",[...(draft.summary_fields || []),{key:"",label:""}])}>Add summary field</button></details>
                 <ParameterEditor
                   fields={draft.parameters || []}
                   onChange={(v) => setField("parameters", v)}
@@ -1601,6 +1655,7 @@ function Panel(props: Props) {
                   ))}
                 </select>
               </div>
+              {runsCursor && !selectedExecution && <button disabled={busy} onClick={()=>work(()=>loadRuns(p.id,true))}>Load older runs</button>}
               {filteredExecutions.length || selectedExecution ? (
                 selectedExecution ? (
                   <div className="run-detail-page">

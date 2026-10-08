@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 	"net/http"
@@ -324,4 +325,77 @@ func serveExecutorAttachment(w http.ResponseWriter, r *http.Request) bool {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(sdk.EnsureAppToolsResult{AgentID: req.AgentID, Applied: true, MCPServerIDs: []int64{394}, AttachedInstallIDs: []int64{52804}})
 	return true
+}
+
+func TestSidecarCompactHistoryCheckpointsAndLedger(t *testing.T) {
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveExecutorAttachment(w, r) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/agents/7") {
+			json.NewEncoder(w).Encode(sdk.PlatformInstance{ID: 7, ProjectID: "project-a", DefaultThreadID: "owner"})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/event") {
+			json.NewEncoder(w).Encode(sdk.AgentEventReceipt{Accepted: true, ExecutionID: "memory-test"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer gateway.Close()
+	app := tk.SpawnSidecar(t, ".", tk.WithProjectID("project-a"), tk.WithEnv("APTEVA_GATEWAY_URL", gateway.URL))
+	var p Process
+	app.POST("/processes?project_id=project-a", map[string]any{"definition": def().procedureOnly()}, &p)
+	x := sidecarAssignment(t, app, p, AssignmentConfig{Name: "History", OwnerAgentID: 7, FollowLatest: true})
+	base := "/processes/" + p.ID
+	app.POST(base+"/activate?project_id=project-a", map[string]any{}, nil)
+	app.POST(base+"/assignments/"+x.ID+"/activate?project_id=project-a", map[string]any{}, nil)
+	for i := 0; i < 12; i++ {
+		var started struct {
+			Run Run `json:"run"`
+		}
+		app.POST(base+"/start?project_id=project-a", map[string]any{"idempotency_key": fmt.Sprint(i)}, &started)
+		app.MCPAs("run_update", map[string]any{"process_id": p.ID, "run_id": started.Run.ID, "state": "completed", "result": strings.Repeat("receipt ", 4000)}, 7, "owner", "project-a")
+		checkpoint := map[string]any{"process_id": p.ID, "run_id": started.Run.ID, "expected_revision": 0, "idempotency_key": "saved", "summary": map[string]any{"outcome": "Checked north", "references": []string{"catalog:9007199254740993"}}}
+		result := app.MCPAs("summary_update", checkpoint, 7, "owner", "project-a")
+		if strings.Contains(jsonText(result), `"isError":true`) {
+			t.Fatal(result)
+		}
+		app.MCPAs("summary_update", checkpoint, 7, "owner", "project-a")
+		app.MCPAs("memory_upsert", map[string]any{"process_id": p.ID, "run_id": started.Run.ID, "scope": "campaign-a", "key": fmt.Sprint("query:", i), "expected_revision": 0, "entry": map[string]any{"kind": "searched", "content": "North checked", "references": []string{"catalog:9007199254740993"}}}, 7, "owner", "project-a")
+	}
+	response := app.MCPAs("runs", map[string]any{"process_id": p.ID}, 7, "owner", "project-a")
+	if len(jsonText(response)) > 16*1024 || strings.Contains(jsonText(response), "receipt receipt") {
+		t.Fatal("MCP history oversized", len(jsonText(response)))
+	}
+	var compact struct {
+		Runs    []HistoryRow `json:"runs"`
+		HasMore bool         `json:"has_more"`
+		Next    string       `json:"next_cursor"`
+	}
+	resp := app.GET(base+"/runs?project_id=project-a&view=compact", &compact)
+	if resp.Status != 200 || len(compact.Runs) != 10 || !compact.HasMore || compact.Next == "" {
+		t.Fatalf("UI compact page: %s", resp.Body)
+	}
+	var original struct {
+		Runs []Run `json:"direct_runs"`
+	}
+	resp = app.GET(base+"/runs?project_id=project-a", &original)
+	if resp.Status != 200 || len(original.Runs) != 12 || !strings.Contains(original.Runs[0].Result, "receipt") {
+		t.Fatal("full HTTP inspection changed")
+	}
+	var ledger struct {
+		Entries []SavedMemory `json:"entries"`
+		HasMore bool          `json:"has_more"`
+	}
+	resp = app.GET(base+"/memory?project_id=project-a&assignment_id="+x.ID+"&scope=campaign-a", &ledger)
+	if resp.Status != 200 || len(ledger.Entries) != 10 || !ledger.HasMore {
+		t.Fatalf("ledger pagination: %s", resp.Body)
+	}
+	var denied map[string]any
+	app.RequestWithHeaders("POST", "/mcp", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "summary_update", "arguments": map[string]any{"process_id": p.ID, "run_id": original.Runs[0].ID, "expected_revision": 1, "idempotency_key": "denied", "summary": map[string]any{"outcome": "Forged", "references": []string{}}}}}, &denied, map[string]string{"X-Apteva-Caller-Agent": "8", "X-Apteva-Caller-Thread": "other", "X-Apteva-Project-ID": "project-a"})
+	if !strings.Contains(jsonText(denied), "only the run owner") {
+		t.Fatal("unauthorized write accepted", denied)
+	}
 }

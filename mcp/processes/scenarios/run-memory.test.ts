@@ -1,0 +1,13 @@
+import {test,expect} from "bun:test";
+import {verifyRunMemory} from "./run-memory";
+function fixture(){
+ const runs=["north","south"].map((area,i)=>({id:`run-${i}`,assignment_id:"assignment",state:"completed",created_at:`2026-10-08T10:00:0${i}Z`,steps:[{key:"discover",output:`Area: ${area}; receipt: source:${i?"9007199254740995":"9007199254740993"}`,executor:{agent_id:7},target_thread_id:`worker-${i}`,completed_at:"2026-10-08T10:00:00Z"},{key:"approve",updated_by:"operator",output:"MEMORY-APPROVED",completed_at:"2026-10-08T10:00:01Z"},{key:"record",output:`Recorded ${area}; receipt: source:${i?"9007199254740995":"9007199254740993"}; approval: MEMORY-APPROVED`,completed_at:"2026-10-08T10:00:02Z"}]}));
+ const summaries=runs.flatMap((run,i)=>[1,2].map(revision=>({run_id:run.id,revision,author:`agent:7:worker-${i}`,body_json:JSON.stringify({references:[`source:${i?"9007199254740995":"9007199254740993"}`]})})));
+ const entries=["north","south"].map(area=>({entry_key:`area:${area}`,revision:1}));const approvals=runs.map(run=>({step:{run_id:run.id}}));
+ const call=(name:string,args:any,thread_id:string)=>({name,args,thread_id,ok:true,completed:true,result_original_bytes:1695,result_truncated:true});
+ const calls=runs.flatMap((run,i)=>[call("processes_runs",{status:"completed"},`worker-${i}`),...(i?[call("processes_run_get",{run_id:"run-0"},"worker-1"),call("processes_summary_get",{run_id:"run-0"},"worker-1")]:[]),call("processes_memory_list",{assignment_id:"assignment"},`worker-${i}`),...Array.from({length:2},()=>call("processes_memory_upsert",{run_id:run.id,scope:"campaign-october",key:`area:${i?"south":"north"}`},`worker-${i}`))]);
+ return {calls,runs,summaries,entries,approvals};
+}
+const verify=(f:ReturnType<typeof fixture>)=>verifyRunMemory(f.calls,f.runs,f.summaries,f.entries,f.approvals);
+test("accepts exact stored evidence with bounded tool responses even when telemetry previews are shortened",()=>expect(()=>verify(fixture())).not.toThrow());
+for(const [name,change] of Object.entries({"repeated area":(f:any)=>f.runs[1].steps[0].output=f.runs[0].steps[0].output,"self approval":(f:any)=>f.runs[1].steps[1].updated_by="agent:7:worker-1","lost ID":(f:any)=>f.summaries[2].body_json=JSON.stringify({references:["source:9007199254740992"]}),"oversized read":(f:any)=>f.calls[0].result_original_bytes=20000,"retry revised ledger":(f:any)=>f.entries[0].revision=2,"missing recovery":(f:any)=>f.calls=f.calls.filter((c:any)=>c.name!=="processes_summary_get"),"approval bypass":(f:any)=>f.runs[1].steps[1].completed_at="2026-10-08T10:00:03Z"}))test(`rejects ${name}`,()=>{const f=fixture();change(f);expect(()=>verify(f)).toThrow()});

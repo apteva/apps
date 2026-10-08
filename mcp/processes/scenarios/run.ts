@@ -1,3 +1,4 @@
+import { RUN_MEMORY, verifyRunMemory } from "./run-memory";
 import { STEP_BY_STEP, controlStepByStep, verifyControlEvidence } from "./step-by-step";
 /** Real Codex/Terra scenarios with independent checks of the sidecar's saved state. */
 import { AI_PARALLEL, PARALLEL_APPROVAL, verifyAIParallel } from "./ai-parallel-steps";
@@ -160,6 +161,8 @@ const controlReport = controlledDb
   ? controlStepByStep(controlledDb, operatorAbort.signal, message => console.log(message))
       .catch((e:Error) => { console.error(`Step-by-step controller failed: ${e.stack}`); return e; })
   : Promise.resolve(null);
+const memoryDb=databases.get(RUN_MEMORY);
+const memoryApprovals=memoryDb?(async()=>{const approvals:ConfirmationReport[]=[];for(let i=0;i<2;i++)approvals.push(await confirmWhenWaiting(memoryDb,{stepKey:"approve",output:"MEMORY-APPROVED",signal:operatorAbort.signal,log:message=>console.log(message)}));return approvals;})().catch((error:Error)=>error):Promise.resolve(null);
 const stdout = await new Response(child.stdout).text();
 const exit = await child.exited;
 operatorAbort.abort();
@@ -167,6 +170,7 @@ const confirmed = await operatorConfirmation;
 const continuityConfirmed = await continuityConfirmation;
 const parallelConfirmed = await parallelConfirmation;
 const controlled = await controlReport;
+const memoryConfirmed=await memoryApprovals;
 await Bun.write(resolve(outputDir, "results.json"), stdout);
 check(exit === 0, `Tier 3 runner failed (${exit}); see ${outputDir}`);
 const report = JSON.parse(stdout);
@@ -246,6 +250,18 @@ for (const scenario of report.results) {
       }
       observed[scenario.scenario] = evidence;
       console.log(`PASS ${scenario.scenario}: real child overlap, owner receipts, thread-bound sessions and HTTP approval verified (${scenario.iterations} iterations, ${scenario.tokens.total} tokens)`);
+      continue;
+    }
+    if (scenario.scenario === RUN_MEMORY) {
+      check(memoryConfirmed && !(memoryConfirmed instanceof Error),`Memory approvals failed: ${memoryConfirmed}`);
+      check(PROVIDER==="openai-codex"&&MODEL==="gpt-6.1-sol"&&scenario.observed_models?.includes(MODEL),"Memory tier 3 must observe GPT-6.1 Sol");
+      const summaries=db.query("SELECT * FROM process_run_summaries ORDER BY run_id,revision").all() as any[];
+      const entries=db.query("SELECT * FROM process_memory ORDER BY entry_key").all() as any[];
+      const evidence={...history,summaries,entries,approvals:memoryConfirmed};
+      await Bun.write(resolve(outputDir,"memory-evidence.json"),JSON.stringify(evidence,null,2));
+      verifyRunMemory(scenario.tool_calls,runs,summaries,entries,memoryConfirmed as ConfirmationReport[]);
+      observed[scenario.scenario]=evidence;
+      console.log(`PASS ${scenario.scenario}: two worker runs recovered checkpoint/ledger, distinct exact receipts, bounded reads and HTTP approval (${scenario.iterations} iterations, ${scenario.tokens.total} tokens)`);
       continue;
     }
     if (scenario.scenario === MCP_RESPONSE_RECOVERY) {

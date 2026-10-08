@@ -88,6 +88,7 @@ if (location.search.includes("activity")) {
 const originalFetch = window.fetch.bind(window);
 window.fetch = (async (url: unknown, init?: RequestInit) => {
   const path = String(url).split("?")[0];
+  if(location.search.includes("compact_history") && path.startsWith("/api/apps/processes/processes"))return originalFetch(String(url),init);
   if (
     path === "/api/apps/processes/processes" &&
     location.search.includes("map")

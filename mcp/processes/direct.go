@@ -145,7 +145,7 @@ func (a *App) directRunResponse(project, actor, process, id, action string, args
 		}
 		setRunControl(&r, steps)
 		if mcp {
-			return mcpRunRead(process, r, d, steps), nil
+			return boundedRunRead(process, r, d, steps, args)
 		}
 		return map[string]any{"run": r, "definition": d, "steps": steps}, nil
 	}
@@ -208,7 +208,7 @@ func (a *App) directRunResponse(project, actor, process, id, action string, args
 		if action == "run_update" {
 			return mcpRunAcknowledgement(process, r), nil
 		}
-		return mcpRunRead(process, r, d, nil), nil
+		return boundedRunRead(process, r, d, nil, args)
 	}
 	p, err := a.get(project, process)
 	if err != nil {

@@ -31,6 +31,10 @@ provides:
       description: Assignment configuration or schedule changed.
     - name: assignment.state_changed
       description: Assignment status changed.
+    - name: run.summary_updated
+      description: A durable agent-authored run checkpoint was saved.
+    - name: run.memory_updated
+      description: One scoped cross-run ledger entry was saved.
     - name: run.created
       description: A run was created.
     - name: run.updated
@@ -62,8 +66,13 @@ provides:
     - { name: draft, description: Return a procedure to draft and stop new runs while preserving current work and history. }
     - { name: archive, description: Retire a procedure and stop future scheduled runs. }
     - { name: start, description: "Start one execution of an active assignment. Processes automatically attaches its coordination tools to executing agents before dispatch. Executors must also have any apps required by their steps attached and configured." }
-    - { name: runs, description: Inspect native process execution history. }
-    - { name: run_get, description: "Read the immutable procedure once and exact run and step evidence; includes reread references." }
+    - { name: runs, description: Read compact paginated history with checkpoint summaries and exact detail references. }
+    - { name: run_evidence, description: Recover exact oversized run sections in bounded JSON pages. }
+    - { name: summary_get, description: Read a durable agent-authored run checkpoint. }
+    - { name: summary_update, description: Save a bounded versioned semantic checkpoint with evidence references. }
+    - { name: memory_list, description: Search scoped paginated cross-run knowledge. }
+    - { name: memory_upsert, description: Save one idempotent scoped ledger entry with exact provenance. }
+    - { name: run_get, description: "Read one bounded immutable run and step state; follow exact paged evidence references when incomplete." }
     - { name: run_update, description: "Save direct run progress or outcome; receive a compact receipt and exact reread reference." }
     - { name: assignments, description: List saved process assignments. }
     - { name: assignment_get, description: Read assignment settings. }
