@@ -2,7 +2,7 @@ import { useComposerAttachments, type ComposerOptions } from "./composer";
 import type { SendMessage } from "./client";
 import { splitActivityPaint } from "./toolActivityPaint";
 import type { ResponseProgress } from "./types";
-import { pendingResponsePhase, responseToolGroup } from "./responseActivity";
+import { pendingResponsePhase, responseToolGroup, responseWaitingToolGroup } from "./responseActivity";
 import { ChatToolActivity } from "./ToolActivity";
 import { buildChatTimeline, isVisibleChatTool, type ToolActivity as TimelineTool } from "./toolActivityModel";
 import { toChatToolActivity, useToolVisualRegistry } from "./toolActivityAdapter";
@@ -1526,6 +1526,30 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
   const visibleMessages = messages.filter(message => message.queue_state !== "cancelled");
   const timeline = buildChatTimeline(visibleMessages,[...activities.map(toChatToolActivity),...preparingTools],Date.now(),bubbles.filter(b=>b.text).map(b=>({id:`${b.agentId}:${b.callId}:${b.runId}`,text:b.text,agentId:b.agentId,startedAt:b.createdAt ?? Date.now()}))).filter(item => item.kind !== "day" && item.kind !== "time");
   const ownsToolGroup = (response: Parameters<typeof responseToolGroup>[0]) => Boolean(responseToolGroup(response,timeline,messages));
+  const progressShowsThinking = (p: LiveResponseProgress) => {
+    const belongsToResponse = (m: Message) => m.id > p.after_message_id
+      && (p.after_message_id > 0 || Date.parse(m.created_at) >= Date.parse(p.started_at));
+    if (messages.some(m => m.role === "agent" && !m.component_kind && m.phase === "final" && m.agent_id === p.agent_id && belongsToResponse(m))) return false;
+    if (awaitingProgressMessage(p)) return true;
+    const approvalDelivered = messages.some(m => m.role === "agent" && m.component_kind === "approval" && m.agent_id === p.agent_id && belongsToResponse(m));
+    return p.phase !== "idle" && !approvalDelivered
+      && !ownsToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)})
+      && !bubbles.some(b=>b.agentId===p.agent_id && b.text && !b.done);
+  };
+  const waitingToolGroups = new Set<string>();
+  for (const p of progresses) if (progressShowsThinking(p) && !awaitingProgressMessage(p)) {
+    const key = responseWaitingToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)},timeline,messages);
+    if (key) waitingToolGroups.add(key);
+  }
+  for (const b of bubbles) if (!b.text && pendingResponsePhase(b, activities, messages) !== null && !progresses.some(p=>p.agent_id===b.agentId)) {
+    const key = responseWaitingToolGroup(b,timeline,messages);
+    if (key) waitingToolGroups.add(key);
+  }
+  const waitsInToolGroup = (response: Parameters<typeof responseToolGroup>[0]) => {
+    const key = responseWaitingToolGroup(response,timeline,messages);
+    return Boolean(key && waitingToolGroups.has(key));
+  };
+
   const [expandedToolGroups,setExpandedToolGroups]=useState<Set<string>>(()=>new Set());
   const toggleToolGroup=(key:string)=>setExpandedToolGroups(current=>{
     const next=new Set(current);if(next.has(key))next.delete(key);else next.add(key);return next;
@@ -1756,6 +1780,7 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
           key={item.key} tools={item.kind === "toolGroup" ? item.tools : [item.tool]}
           parallel={item.kind === "toolGroup" && item.parallel}
           expanded={expandedToolGroups.has(item.key)} onToggle={()=>toggleToolGroup(item.key)}
+          waitingForModel={waitingToolGroups.has(item.key)}
           registry={toolVisualRegistry} detailsId={`tools-${conversation.id}-${item.key.replace(/[^a-zA-Z0-9_-]/g,"-")}`}
           showCompletion={showToolCompletion} showDuration={showToolDuration}
         /> : item.kind === "stream" ? <div key={item.key}>{agentName(item.stream.agentId) && <p className="mb-2 text-[10px] font-semibold uppercase text-text-muted">{agentName(item.stream.agentId)}</p>}<StreamingBubble text={item.stream.text}/></div> : (() => {const message=item.message;return <div key={message.id}><fieldset disabled={archived} className="min-w-0"><MessageRow message={message} agentName={message.role === "agent" ? agentName(message.agent_id) : undefined} onAction={onAction} onQueueEdit={onQueueEdit} onQueueRemove={onQueueRemove} onQueueSteer={onQueueSteer}/></fieldset>
@@ -1766,25 +1791,10 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
  </div>;})())}
       </>}
       hasMessages={timeline.length > 0}
-      streamNode={bubbles.length || progresses.some(p=>p.phase!=="idle" || awaitingProgressMessage(p)) ? <>{bubbles.map(b => { const phase = pendingResponsePhase(b, activities, messages); if (b.text || phase === null || ownsToolGroup(b) || progresses.some(p=>p.agent_id===b.agentId)) return null; return <ThinkingMessagePlaceholder key={`${b.agentId}:${b.callId}:${b.runId}`} preparing={b.optimistic}/>; })}
+      streamNode={bubbles.length || progresses.some(p=>p.phase!=="idle" || awaitingProgressMessage(p)) ? <>{bubbles.map(b => { const phase = pendingResponsePhase(b, activities, messages); if (b.text || phase === null || ownsToolGroup(b) || waitsInToolGroup(b) || progresses.some(p=>p.agent_id===b.agentId)) return null; return <ThinkingMessagePlaceholder key={`${b.agentId}:${b.callId}:${b.runId}`} preparing={b.optimistic}/>; })}
         {progresses.map(p => {
-          // Proactive turns have no inbound message ID. Their start time is
-          // the boundary; history from a completed turn must not hide them.
-          const belongsToResponse = (m: Message) => m.id > p.after_message_id
-            && (p.after_message_id > 0 || Date.parse(m.created_at) >= Date.parse(p.started_at));
-          // Hidden approval calls still own a response until their card is
-          // rendered. Old cards and verdict edits cannot settle a later turn.
-          const approvalDelivered = messages.some(m => m.role === "agent" && m.component_kind === "approval"
-            && m.agent_id === p.agent_id && belongsToResponse(m));
-          // An acknowledgement or progress message is not completion. Keep
-          // Thinking until a live text stream or pulsing tool owns feedback.
-          const finalDelivered = messages.some(m => m.role === "agent" && !m.component_kind
-            && m.phase === "final" && m.agent_id === p.agent_id && belongsToResponse(m));
-          if (finalDelivered) return null;
-          if (awaitingProgressMessage(p)) return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`}/>;
-          // Continuing is model work after a result, not an executing tool.
-          // Only an actual preparation/execution owns the pulsing tool card.
-          if (p.phase === "idle" || approvalDelivered || ownsToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)}) || bubbles.some(b=>b.agentId===p.agent_id && b.text && !b.done)) return null;
+          if (!progressShowsThinking(p)) return null;
+          if (!awaitingProgressMessage(p) && waitsInToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)})) return null;
           return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`}/>;
         })}
       </> : null}

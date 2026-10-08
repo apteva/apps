@@ -19,6 +19,7 @@ interface ToolActivityProps {
   detailsId?: string;
   showCompletion?: boolean;
   showDuration?: boolean;
+  waitingForModel?: boolean;
 }
 
 type VisualState = "preparing" | "running" | "done" | "failed" | "interrupted";
@@ -98,6 +99,7 @@ export function ChatToolActivity({
   detailsId,
   showCompletion = false,
   showDuration = false,
+  waitingForModel = false,
 }: ToolActivityProps) {
   const { t } = useTranslation();
   const running = showDuration && tools.some(tool => tool.state === "running");
@@ -132,12 +134,13 @@ export function ChatToolActivity({
   const allSucceeded = tools.every((tool) => visualState(tool) === "done");
   const remainingCount = tools.length - 1;
   const resolvedDetailsId = detailsId || `chat-tool-details-${tools[0]!.id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
-  const accessibleSummary = `${title}, ${focusReason}, ${status.text}`;
+  const accessibleSummary = `${title}, ${focusReason}, ${status.text}${waitingForModel ? `, ${t("chat.thinkingLabel")}` : ""}`;
 
   return (
     <section
       className="chat-tool-activity min-w-0 shrink-0"
       aria-label={accessibleSummary}
+      data-response-waiting={waitingForModel || undefined}
     >
       <button
         type="button"
@@ -157,12 +160,15 @@ export function ChatToolActivity({
         <ToolIconStack tools={tools} focusTool={focusTool} registry={registry} />
         <span className="flex min-w-0 flex-col gap-0.5 sm:flex-row sm:items-center sm:gap-2">
           <span className="flex min-w-0 items-center gap-1.5">
-            <span
+            {waitingForModel && !copyIsActive ? <span role="status" aria-live="polite" aria-label={t("chat.thinkingLabel")}
+              className="chat-tool-copy chat-tool-copy-continuing truncate text-[13px] font-medium leading-5">
+              {t("chat.thinking")}
+            </span> : <span
               className={`chat-tool-copy truncate text-[13px] font-medium leading-5 ${copyIsActive ? "chat-tool-copy-running" : ""}`}
               title={focusReason}
             >
               {focusReason}
-            </span>
+            </span>}
             {remainingCount > 0 && (
               <span className="shrink-0 text-[11px] font-medium text-text-muted sm:text-xs">+{remainingCount}</span>
             )}

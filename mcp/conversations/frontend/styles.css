@@ -177,7 +177,8 @@
   color: var(--text-muted, #aaaaaa);
 }
 
-.chat-tool-copy-running {
+.chat-tool-copy-running,
+.chat-tool-copy-continuing {
   animation: chat-tool-copy-breathe 1.9s ease-in-out infinite;
   will-change: color, opacity;
 }
@@ -221,7 +222,8 @@
     opacity: 1;
   }
 
-  .chat-tool-copy-running {
+  .chat-tool-copy-running,
+.chat-tool-copy-continuing {
     animation: none;
     color: var(--chat-tool-running, #f97316);
     opacity: 1;

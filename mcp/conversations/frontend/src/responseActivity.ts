@@ -33,3 +33,14 @@ export function responseToolGroup(response: PendingResponse, timeline: ChatTimel
       && (!response.threadId || tool.threadId === response.threadId) && tool.startedAt >= since)) return item.key;
   }
 }
+
+// Keep a model wait in the current batch, without changing completed tool
+// states. Never borrow a group across a newer message/stream or another turn.
+export function responseWaitingToolGroup(response: PendingResponse, timeline: ChatTimelineItem[], messages: Message[]): string | undefined {
+  const item = timeline.at(-1);
+  const tools = item?.kind === "toolGroup" ? item.tools : item?.kind === "tool" ? [item.tool] : [];
+  if (!tools.length || tools.some(tool => tool.state === "running" || tool.state === "preparing")) return;
+  const anchor = messages.find(message => message.id === response.afterMessageId);
+  const since = !response.optimistic && anchor?.role === "user" ? Date.parse(anchor.created_at) : response.createdAt ?? Infinity;
+  if (tools.some(tool => tool.agentId === response.agentId && (!response.threadId || tool.threadId === response.threadId) && tool.startedAt >= since)) return item!.key;
+}

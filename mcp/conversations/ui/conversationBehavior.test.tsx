@@ -752,3 +752,41 @@ test("full panel enables header and thread icons by default; embedded browser re
   expect(Boolean(element.querySelector('section [data-agent-icon="code"]'))).toBe(mode === "header" || mode === "both");
  }
 });
+
+test("Manager Test trace keeps the between-call wait and next preparation inside the same group", async () => {
+ const user={...message(1441,"a","Improve the process and rerun"),created_at:"2026-10-08T17:42:58.843972Z"};
+ const acknowledgement={...message(1442,"a","I will strengthen the process and rerun."),role:"agent",agent_id:41,phase:"acknowledgement",created_at:"2026-10-08T17:43:14.080305Z"};
+ const times=[
+  ["processes_draft","Opening process for verification gate","17:43:17.418834","17:43:17.439330"],
+  ["processes_update","Adding independent verification gate","17:43:52.215225","17:43:52.245414"],
+  ["processes_activate","Publishing verification-gated process","17:43:55.880570","17:43:55.906584"],
+  ["processes_assignment_create","Creating verification-gated retry assignment","17:44:04.170317","17:44:04.250127"],
+  ["processes_assignment_activate","Activating verification-gated assignment","17:44:08.801444","17:44:08.840007"],
+ ];
+ const activities=times.map(([name,reason,start,end],i)=>({id:540+i,chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:`call-${i}`,name,reason,status:"completed",started_at:`2026-10-08T${start}Z`,ended_at:`2026-10-08T${end}Z`,revision:2}));
+ fetcher=url=>url.includes("/activity")?json(activities):url.includes("/deliveries")?json([]):json({messages:url.includes("/messages")?[user,acknowledgement]:[],cursor:1442,before:1441,has_more:false});
+ await render();
+ const stream=FakeEvents.instances[0].listeners.get("stream")!;
+ const frame=async(value:unknown)=>{await act(async()=>stream({data:JSON.stringify({chat_id:"a",agent_id:41,thread_id:"chat-a",...value as object})}));await settle();};
+ const progress=(phase:string,revision:number,extra={})=>({response_progress:{phase,run_id:"manager-run",revision,after_message_id:1441,started_at:user.created_at,...extra}});
+ await frame(progress("continuing",1));
+ const group=element.querySelector(".chat-tool-activity")!;
+ expect(group.textContent).toContain("+4");
+ expect(element.querySelectorAll('[aria-label="Thinking"]')).toHaveLength(1);
+ expect(element.querySelector('[aria-label="Thinking"]')!.closest(".chat-tool-activity")).toBe(group);
+ expect(group.querySelector(".chat-tool-copy-running")).toBeNull();
+ expect(group.querySelector(".chat-tool-copy-continuing")).not.toBeNull();
+ expect(group.querySelector("button")?.getAttribute("aria-busy")).toBeNull();
+ // At 19:44:11.569 local time the next call starts producing arguments.
+ await frame(progress("preparing_tool",2,{call_id:"next-start",tool_name:"processes_start",tool_started_at:"2026-10-08T17:44:11.569683Z"}));
+ expect(element.querySelectorAll(".chat-tool-activity")).toHaveLength(1);
+ expect(element.querySelector(".chat-tool-activity")).toBe(group);
+ expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+ expect(group.querySelector(".chat-tool-copy-running")).not.toBeNull();
+ await frame({tool_activity:{id:545,chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"next-start",name:"processes_start",reason:"Starting verification-gated rebuild",status:"completed",started_at:"2026-10-08T17:44:13.806577Z",ended_at:"2026-10-08T17:44:13.877650Z",revision:2}});
+ await frame(progress("continuing",3));
+ expect(element.querySelector('[aria-label="Thinking"]')!.closest(".chat-tool-activity")).toBe(group);
+ await act(async()=>FakeEvents.instances[0].emit({...message(1443,"a","Done."),role:"agent",agent_id:41,phase:"final",created_at:"2026-10-08T17:44:20.372980Z"}));
+ expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+ expect(element.querySelector("[data-response-waiting]")).toBeNull();
+});
