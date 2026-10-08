@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.47 — 2026-10-08
+
+- Keep model waiting feedback between related tool calls inside the latest tool group without changing completed tool states or durations.
+- Clarify that confirmations followed only by Core timed waiting use `phase=final`, so housekeeping before `pace` does not leave Thinking visible; timer wakes start fresh activity.
+- Add trace replay and regression coverage for tool-group boundaries and scheduled-wait settling.
+
 ## 0.24.46 — 2026-10-08
 
 - Show agent icons by default in the full Conversations panel's header, thread list, and participant views.
