@@ -43,7 +43,7 @@ function tone(frame:Float32Array,rate:number):[number,number]{
  let probe:AudioWorkletNode|undefined;
  try{
   if(rtc) await session.start(config.media_url,DEFAULT_SOFTPHONE_AUDIO_OPTIONS,'/worklet.js');
-  else await session.start(config.media_url,'/worklet.js','/worker.js',DEFAULT_SOFTPHONE_AUDIO_OPTIONS);
+  else await session.start(config.media_url,'/worklet.js','/worker.js',{...DEFAULT_SOFTPHONE_AUDIO_OPTIONS,...(config.playback_ceiling_ms ? {playbackMaxMs:config.playback_ceiling_ms}: {})});
   const deadline=Date.now()+10000;
   while(!states.some(x=>x.state==='live')&&Date.now()<deadline)await new Promise(r=>setTimeout(r,20));
   if(!states.some(x=>x.state==='live'))throw new Error('carrier media did not connect');

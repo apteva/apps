@@ -103,6 +103,8 @@ interface BrowserAudioDiagnostics {
   playback_target_ms?: number;
   playback_max_queue_ms?: number;
   playback_underruns?: number;
+  playback_underrun_ms?: number;
+  playback_underrun_events?: Array<{id:string;connection_id?:string;started_at:string;ended_at?:string;observed_until?:string;duration_ms:number;end_reason:string;complete:boolean}>;
   playback_dropped_ms?: number;
   websocket_buffered_bytes?: number;
   audio_context_rate?: number;
@@ -896,7 +898,7 @@ function PersistedAudioDiagnostics({ call }: { call: Call }) {
           {typeof browser.mic_limiter_reduction_db === "number" ? ` · limiter ${browser.mic_limiter_reduction_db.toFixed(1)} dB` : ""}
           {` · RTT ${browser.rtt_ms ?? "–"} ms`}
           {` · playback buffer ${browser.playback_queue_ms ?? 0}/${browser.playback_target_ms ?? 0} ms`}
-          {` · underruns ${browser.playback_underruns ?? 0}`}
+          {` · underruns ${browser.playback_underruns ?? 0} (${(browser.playback_underrun_ms ?? 0).toFixed(1)} ms missing)`}
           {` · dropped ${browser.playback_dropped_ms ?? 0} ms`}
           {` · WS pending ${browser.websocket_buffered_bytes ?? 0} B`}
           {` · AGC ${appliedSetting(browser.auto_gain_control ?? null)}`}
@@ -911,6 +913,17 @@ function PersistedAudioDiagnostics({ call }: { call: Call }) {
           {` · stale dropped ${carrier.dropped_stale_ms ?? 0} ms`}
           {` · pre-answer mic held ${carrier.pre_answer_microphone_dropped_ms ?? 0} ms`}
           {` · sequence gaps ${carrier.sequence_gaps ?? 0}`}
+        </div>
+      ) : null}
+      {(browser.playback_underrun_events?.length ?? 0) > 0 ? (
+        <div className="space-y-1 text-text-dim tabular-nums">
+          <div className="font-medium text-text-muted">Recent playback buffer gaps</div>
+          {browser.playback_underrun_events!.slice(-5).map(event => (
+            <div key={`${event.connection_id ?? ""}:${event.id}`} title={`${event.started_at} → ${event.ended_at ?? event.observed_until ?? "ongoing"}`}>
+              {new Date(event.started_at).toLocaleTimeString(undefined, {hour:"2-digit",minute:"2-digit",second:"2-digit",fractionalSecondDigits:3})} → {event.ended_at ? new Date(event.ended_at).toLocaleTimeString(undefined, {hour:"2-digit",minute:"2-digit",second:"2-digit",fractionalSecondDigits:3}) : "ongoing"}
+              {` · ${event.duration_ms.toLocaleString(undefined, {maximumFractionDigits:3})} ms missing · ${event.end_reason}${event.complete ? "" : " (incomplete observation)"}`}
+            </div>
+          ))}
         </div>
       ) : null}
       {dropEvents.length > 0 ? (

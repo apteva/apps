@@ -2,8 +2,9 @@
 
 Local changes based on Telephony 0.10.1. Applies to supported carrier bridges
 with human browser audio, the shared headless client and bundled Calls panel.
-No carrier-specific routing, DSP/resampling, latency budgets, call classification,
-answer permissions or carrier-call termination behavior is changed.
+Carrier routing, microphone DSP/resampling, call classification, answer permissions
+and carrier-call termination remain unchanged. Generic PCM live reserve adjustment
+is described in [adaptive-playback.md](adaptive-playback.md).
 
 ## What is recorded
 
@@ -242,3 +243,39 @@ installation were changed. Evidence is in
 `/private/tmp/telephony-mute-diagnostics-20261007/` and
 `/private/tmp/telephony-mute-sdk096-20261007/`, plus the local test logs prefixed
 `/private/tmp/telephony-mute-`.
+
+## Timestamped playback buffer gaps (PCM/WebSocket)
+
+`playback_underrun_ms` measures samples the renderer could not play because caller
+PCM was unavailable. `playback_underrun_events` retains the latest 100 intervals:
+
+- `id`, authoritative server `connection_id`, `started_at`, `observed_until`, and
+  optional `ended_at` locate the observation. Sequence numbers before starvation
+  and on recovery provide correlation with delivery diagnostics.
+- `missing_samples`, `sample_rate`, and fractional `duration_ms` include the
+  first partial render block and subsequent rebuffering until actual PCM resumes.
+  Duration is sample based, independent of wall-clock changes. UTC correlation
+  anchors the browser wall clock to its audio clock at the first missing sample;
+  `timestamp_basis` is `browser_wall_audio_clock`. Browser clock skew remains a
+  limitation; this is not a synchronized end-to-end latency measurement.
+- `end_reason` distinguishes recovery from flush, hold, AudioContext pause,
+  transport/carrier disconnection and observation ending. If the renderer stops
+  before its last report arrives, the interval ends at its last `observed_until`
+  with `complete:false`; no missing duration or successful recovery is invented.
+- Initial startup and actual silence-valued PCM do not generate gap events.
+  Intentional microphone mute does not itself stop caller playback. Hold and
+  suspended/disconnected observations are gated without changing audio behavior.
+
+Intervals and cumulative duration survive reconnection and diagnostic restoration.
+They are separate from discarded-frame events and must not be summed as a loss
+estimate. Audio Health exposes a `playback_underrun` filter and missing-playback
+metric; saved call diagnostics display the latest five gap intervals. Legacy
+underrun counts alone do not generate this new issue classification.
+
+The renderer sends small start/end observations and its existing one-second
+snapshots; network and storage retain their existing coalesced reporting schedule.
+No per-frame network or database operation is added. The interval observer itself does not alter playback. Generic live reserve
+adjustment is a separate part of this change; stale-frame protection and carrier
+lifecycle remain unchanged.
+Native WebRTC/Opus uses browser jitter/concealment metrics; exact native underrun
+start/end times are unavailable and are not fabricated by this PCM observer.

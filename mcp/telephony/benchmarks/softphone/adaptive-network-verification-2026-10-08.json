@@ -1,0 +1,1759 @@
+{
+  "schema": "telephony-adaptive-network-verification/v1",
+  "scope": "Local Chromium + actual shared client, worklets, Go bridge and carrier substitute. No staging/production calls. Original gates retained.",
+  "source_sha256": {
+    "ui/softphone-worklet.js": "375bb661fb8bc6672f151244e2d6e65c298a206a87f991f2a8e137a3cc1feff6",
+    "ui/softphone-audio.ts": "23bd32f807337d40b1be52f9a89af3f9902c9924a6cc764589bcc6058f837eae",
+    "benchmarks/softphone/profiles.json": "0cd9460be8d810c3b5f328cda8205db0dce77d8d6d428fd0986fe200af1e215a"
+  },
+  "first_pass": {
+    "created_at": "2026-10-08T16:28:51Z",
+    "seed": 20260929,
+    "duration_ms": 20000,
+    "results": [
+      {
+        "profile": {
+          "browser_delivery_pause": true,
+          "name": "browser-seven-second-catchup",
+          "expectation": "recovery",
+          "down": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 4000,
+            "outage_ms": 7230
+          },
+          "up": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 50
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 98.84912109375,
+          "p95_ms": 102.797119140625,
+          "p99_ms": 107.925048828125,
+          "max_ms": 107.925048828125,
+          "median_level_dbfs": -15.145195455923997,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 24,
+          "missing_markers_pct": 36.8421052631579,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 305.09130859375,
+          "p95_ms": 315.1728515625,
+          "p99_ms": 315.21044921875,
+          "max_ms": 315.21044921875,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "main_thread_pause_ms": 2000,
+          "name": "main-thread-two-second-pause",
+          "expectation": "usable",
+          "down": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 350,
+          "max_missing_pct": 5
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 50.865966796875,
+          "p95_ms": 53.65087890625,
+          "p99_ms": 53.905029296875,
+          "max_ms": 53.905029296875,
+          "median_level_dbfs": -15.145145882172859,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 89.099365234375,
+          "p95_ms": 119.1396484375,
+          "p99_ms": 119.1875,
+          "max_ms": 119.1875,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "audio_context_rate": 48000,
+          "name": "browser-48k-fallback",
+          "expectation": "usable",
+          "down": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 350,
+          "max_missing_pct": 5
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 58.22998046875,
+          "p95_ms": 61.876953125,
+          "p99_ms": 61.969970703125,
+          "max_ms": 61.969970703125,
+          "median_level_dbfs": -15.10019267034899,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 94.84375,
+          "p95_ms": 94.900390625,
+          "p99_ms": 94.943603515625,
+          "max_ms": 94.943603515625,
+          "median_level_dbfs": -15.052759968380375,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "name": "local-baseline",
+          "expectation": "usable",
+          "down": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 250,
+          "max_missing_pct": 5
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 48.987060546875,
+          "p95_ms": 53.574951171875,
+          "p99_ms": 66.23291015625,
+          "max_ms": 66.23291015625,
+          "median_level_dbfs": -15.145145882172859,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 133.9892578125,
+          "p95_ms": 144.0849609375,
+          "p99_ms": 144.128662109375,
+          "max_ms": 144.128662109375,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "name": "broadband",
+          "expectation": "usable",
+          "down": {
+            "kbps": 5000,
+            "latency_ms": 20,
+            "jitter_ms": 5,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 1000,
+            "latency_ms": 20,
+            "jitter_ms": 5,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 350,
+          "max_missing_pct": 5
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 74.070068359375,
+          "p95_ms": 78.26904296875,
+          "p99_ms": 78.339111328125,
+          "max_ms": 78.339111328125,
+          "median_level_dbfs": -15.145297773472073,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 111.94140625,
+          "p95_ms": 111.999267578125,
+          "p99_ms": 112.00830078125,
+          "max_ms": 112.00830078125,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "name": "wifi-jitter",
+          "expectation": "usable",
+          "down": {
+            "kbps": 2000,
+            "latency_ms": 35,
+            "jitter_ms": 40,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 1000,
+            "latency_ms": 35,
+            "jitter_ms": 40,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 450,
+          "max_missing_pct": 10
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 115.5869140625,
+          "p95_ms": 229.118896484375,
+          "p99_ms": 229.1279296875,
+          "max_ms": 229.1279296875,
+          "median_level_dbfs": -15.145374694863158,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 155.41552734375,
+          "p95_ms": 245.4306640625,
+          "p99_ms": 245.436767578125,
+          "max_ms": 245.436767578125,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "name": "mobile-latency",
+          "expectation": "usable",
+          "down": {
+            "kbps": 2000,
+            "latency_ms": 100,
+            "jitter_ms": 30,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 1000,
+            "latency_ms": 100,
+            "jitter_ms": 30,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 10
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 183.375,
+          "p95_ms": 197.340087890625,
+          "p99_ms": 198.02197265625,
+          "max_ms": 198.02197265625,
+          "median_level_dbfs": -15.145156206856935,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 224.8466796875,
+          "p95_ms": 264.916748046875,
+          "p99_ms": 264.94482421875,
+          "max_ms": 264.94482421875,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "name": "512k-symmetric",
+          "expectation": "usable",
+          "down": {
+            "kbps": 512,
+            "latency_ms": 30,
+            "jitter_ms": 10,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 512,
+            "latency_ms": 30,
+            "jitter_ms": 10,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 450,
+          "max_missing_pct": 10
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 94.0810546875,
+          "p95_ms": 112.4169921875,
+          "p99_ms": 114.531005859375,
+          "max_ms": 114.531005859375,
+          "median_level_dbfs": -15.14516266072684,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 139.940673828125,
+          "p95_ms": 140.01025390625,
+          "p99_ms": 140.04052734375,
+          "max_ms": 140.04052734375,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "name": "tcp-recovery-1pct",
+          "expectation": "degradation",
+          "down": {
+            "kbps": 2000,
+            "latency_ms": 30,
+            "jitter_ms": 15,
+            "recovery_probability": 0.01,
+            "recovery_ms": 180,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 1000,
+            "latency_ms": 30,
+            "jitter_ms": 15,
+            "recovery_probability": 0.01,
+            "recovery_ms": 180,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 700,
+          "max_missing_pct": 25
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 35,
+          "missing_markers_pct": 7.894736842105263,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 184.81396484375,
+          "p95_ms": 208.073974609375,
+          "p99_ms": 208.428955078125,
+          "max_ms": 208.428955078125,
+          "median_level_dbfs": -15.145214447428748,
+          "final_two_seconds_markers": 3
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 340.392822265625,
+          "p95_ms": 340.528564453125,
+          "p99_ms": 340.532470703125,
+          "max_ms": 340.532470703125,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "name": "upload-256k",
+          "expectation": "degradation",
+          "down": {
+            "kbps": 2000,
+            "latency_ms": 20,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 256,
+            "latency_ms": 20,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 700,
+          "max_missing_pct": 25
+        },
+        "outcome": "degraded",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 0,
+          "missing_markers_pct": 100,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 0,
+          "p95_ms": 0,
+          "p99_ms": 0,
+          "max_ms": 0,
+          "median_level_dbfs": 0,
+          "final_two_seconds_markers": 0
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 161.5791015625,
+          "p95_ms": 181.597412109375,
+          "p99_ms": 181.6435546875,
+          "max_ms": 181.6435546875,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "name": "download-256k",
+          "expectation": "degradation",
+          "down": {
+            "kbps": 256,
+            "latency_ms": 20,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 2000,
+            "latency_ms": 20,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 700,
+          "max_missing_pct": 25
+        },
+        "outcome": "degraded",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 107.955078125,
+          "p95_ms": 126.7529296875,
+          "p99_ms": 128.22412109375,
+          "max_ms": 128.22412109375,
+          "median_level_dbfs": -15.145143582658863,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 0,
+          "missing_markers_pct": 100,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 0,
+          "p95_ms": 0,
+          "p99_ms": 0,
+          "max_ms": 0,
+          "median_level_dbfs": 0,
+          "final_two_seconds_markers": 0
+        }
+      },
+      {
+        "profile": {
+          "name": "two-second-outage",
+          "expectation": "recovery",
+          "down": {
+            "kbps": 2000,
+            "latency_ms": 20,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 4000,
+            "outage_ms": 2000
+          },
+          "up": {
+            "kbps": 1000,
+            "latency_ms": 20,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 4000,
+            "outage_ms": 2000
+          },
+          "max_p95_ms": 700,
+          "max_missing_pct": 40
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 34,
+          "missing_markers_pct": 10.526315789473685,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 176.43310546875,
+          "p95_ms": 193.125,
+          "p99_ms": 194.285888671875,
+          "max_ms": 194.285888671875,
+          "median_level_dbfs": -15.145374694863158,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 34,
+          "missing_markers_pct": 10.526315789473685,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 341.1083984375,
+          "p95_ms": 351.175048828125,
+          "p99_ms": 351.175048828125,
+          "max_ms": 351.175048828125,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "carrier_down": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 3000,
+            "outage_ms": 10000
+          },
+          "name": "carrier-ten-second-catchup",
+          "expectation": "recovery",
+          "down": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 65
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 47.593017578125,
+          "p95_ms": 49.705078125,
+          "p99_ms": 49.820068359375,
+          "max_ms": 49.820068359375,
+          "median_level_dbfs": -15.145145882172859,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 18,
+          "missing_markers_pct": 52.63157894736842,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 321.035888671875,
+          "p95_ms": 321.1357421875,
+          "p99_ms": 321.1357421875,
+          "max_ms": 321.1357421875,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "carrier_down": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 3000,
+            "outage_ms": 10000
+          },
+          "carrier_missing": true,
+          "name": "carrier-ten-second-missing",
+          "expectation": "recovery",
+          "down": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 65
+        },
+        "outcome": "failed",
+        "errors": [
+          "caller stall disrupted healthy adviser direction"
+        ],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 36,
+          "missing_markers_pct": 5.2631578947368425,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 67.568115234375,
+          "p95_ms": 234.178955078125,
+          "p99_ms": 263.282958984375,
+          "max_ms": 263.282958984375,
+          "median_level_dbfs": -15.145145882172859,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 18,
+          "missing_markers_pct": 52.63157894736842,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 316.305419921875,
+          "p95_ms": 326.41552734375,
+          "p99_ms": 326.41552734375,
+          "max_ms": 326.41552734375,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "mute_microphone": true,
+          "name": "intentional-microphone-mute",
+          "expectation": "recovery",
+          "down": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 20
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 33,
+          "missing_markers_pct": 13.157894736842104,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 24.527099609375,
+          "p95_ms": 68.153076171875,
+          "p99_ms": 69.23193359375,
+          "max_ms": 69.23193359375,
+          "median_level_dbfs": -15.14524363413454,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 148.27490234375,
+          "p95_ms": 158.31640625,
+          "p99_ms": 158.35888671875,
+          "max_ms": 158.35888671875,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "reconnect_browser": true,
+          "name": "browser-reconnect",
+          "expectation": "recovery",
+          "down": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 20
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 37,
+          "missing_markers_pct": 2.6315789473684212,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 64.02392578125,
+          "p95_ms": 84.178955078125,
+          "p99_ms": 86.68994140625,
+          "max_ms": 86.68994140625,
+          "median_level_dbfs": -15.145155588581991,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 37,
+          "missing_markers_pct": 2.6315789473684212,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 91.472900390625,
+          "p95_ms": 151.615478515625,
+          "p99_ms": 151.633544921875,
+          "max_ms": 151.633544921875,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "media_transport": "webrtc",
+          "name": "webrtc-baseline",
+          "expectation": "usable",
+          "down": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 5
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 123.166015625,
+          "p95_ms": 124.22802734375,
+          "p99_ms": 125.25,
+          "max_ms": 125.25,
+          "median_level_dbfs": -14.866582555371696,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 142.288330078125,
+          "p95_ms": 142.35400390625,
+          "p99_ms": 142.369873046875,
+          "max_ms": 142.369873046875,
+          "median_level_dbfs": -15.787653887920058,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "media_transport": "webrtc",
+          "mute_microphone": true,
+          "name": "webrtc-microphone-mute",
+          "expectation": "recovery",
+          "down": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 20
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 33,
+          "missing_markers_pct": 13.157894736842104,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 101.577880859375,
+          "p95_ms": 120.282958984375,
+          "p99_ms": 120.8759765625,
+          "max_ms": 120.8759765625,
+          "median_level_dbfs": -14.86045681694973,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 130.943603515625,
+          "p95_ms": 131.010498046875,
+          "p99_ms": 131.013427734375,
+          "max_ms": 131.013427734375,
+          "median_level_dbfs": -15.779442263575856,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "media_transport": "webrtc",
+          "reconnect_browser": true,
+          "name": "webrtc-reconnect",
+          "expectation": "recovery",
+          "down": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 20
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 37,
+          "missing_markers_pct": 2.6315789473684212,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 121.39990234375,
+          "p95_ms": 126.416015625,
+          "p99_ms": 155.81494140625,
+          "max_ms": 155.81494140625,
+          "median_level_dbfs": -15.058775032799634,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 37,
+          "missing_markers_pct": 2.6315789473684212,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 144.467041015625,
+          "p95_ms": 174.534912109375,
+          "p99_ms": 174.55908203125,
+          "max_ms": 174.55908203125,
+          "median_level_dbfs": -15.724790213272822,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "rtc_udp": true,
+          "media_transport": "webrtc",
+          "name": "webrtc-udp-128k",
+          "expectation": "usable",
+          "down": {
+            "kbps": 128,
+            "latency_ms": 20,
+            "jitter_ms": 5,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 128,
+            "latency_ms": 20,
+            "jitter_ms": 5,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 5
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 138.553955078125,
+          "p95_ms": 148.487060546875,
+          "p99_ms": 170.737060546875,
+          "max_ms": 170.737060546875,
+          "median_level_dbfs": -14.8852230285451,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 204.475830078125,
+          "p95_ms": 204.538818359375,
+          "p99_ms": 204.5537109375,
+          "max_ms": 204.5537109375,
+          "median_level_dbfs": -15.161157789746298,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "rtc_udp": true,
+          "media_transport": "webrtc",
+          "name": "webrtc-udp-96k",
+          "expectation": "usable",
+          "down": {
+            "kbps": 96,
+            "latency_ms": 20,
+            "jitter_ms": 5,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 96,
+            "latency_ms": 20,
+            "jitter_ms": 5,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 5
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 142.56494140625,
+          "p95_ms": 155.94091796875,
+          "p99_ms": 156.950927734375,
+          "max_ms": 156.950927734375,
+          "median_level_dbfs": -14.788699876208833,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 213.73046875,
+          "p95_ms": 223.772705078125,
+          "p99_ms": 223.852783203125,
+          "max_ms": 223.852783203125,
+          "median_level_dbfs": -15.596779257229123,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "rtc_udp": true,
+          "media_transport": "webrtc",
+          "name": "webrtc-udp-64k",
+          "expectation": "usable",
+          "down": {
+            "kbps": 64,
+            "latency_ms": 20,
+            "jitter_ms": 5,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 64,
+            "latency_ms": 20,
+            "jitter_ms": 5,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 5
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 206.35400390625,
+          "p95_ms": 225.875,
+          "p99_ms": 225.907958984375,
+          "max_ms": 225.907958984375,
+          "median_level_dbfs": -14.316601018452344,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 262.114501953125,
+          "p95_ms": 272.228271484375,
+          "p99_ms": 272.230224609375,
+          "max_ms": 272.230224609375,
+          "median_level_dbfs": -15.745150302729465,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "rtc_udp": true,
+          "media_transport": "webrtc",
+          "name": "webrtc-udp-48k",
+          "expectation": "degradation",
+          "down": {
+            "kbps": 48,
+            "latency_ms": 20,
+            "jitter_ms": 5,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 48,
+            "latency_ms": 20,
+            "jitter_ms": 5,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 5
+        },
+        "outcome": "degraded",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 15,
+          "missing_markers_pct": 60.526315789473685,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 228.91796875,
+          "p95_ms": 260.469970703125,
+          "p99_ms": 260.469970703125,
+          "max_ms": 260.469970703125,
+          "median_level_dbfs": -14.316601018452344,
+          "final_two_seconds_markers": 1
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 9,
+          "missing_markers_pct": 76.3157894736842,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 414.1435546875,
+          "p95_ms": 484.114013671875,
+          "p99_ms": 484.114013671875,
+          "max_ms": 484.114013671875,
+          "median_level_dbfs": -15.064399184870243,
+          "final_two_seconds_markers": 1
+        }
+      },
+      {
+        "profile": {
+          "rtc_udp": true,
+          "media_transport": "webrtc",
+          "name": "webrtc-udp-32k",
+          "expectation": "degradation",
+          "down": {
+            "kbps": 32,
+            "latency_ms": 20,
+            "jitter_ms": 5,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 32,
+            "latency_ms": 20,
+            "jitter_ms": 5,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 5
+        },
+        "outcome": "degraded",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 0,
+          "missing_markers_pct": 100,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 0,
+          "p95_ms": 0,
+          "p99_ms": 0,
+          "max_ms": 0,
+          "median_level_dbfs": 0,
+          "final_two_seconds_markers": 0
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 0,
+          "missing_markers_pct": 100,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 0,
+          "p95_ms": 0,
+          "p99_ms": 0,
+          "max_ms": 0,
+          "median_level_dbfs": 0,
+          "final_two_seconds_markers": 0
+        }
+      },
+      {
+        "profile": {
+          "media_transport": "websocket",
+          "name": "websocket-64k",
+          "expectation": "degradation",
+          "down": {
+            "kbps": 64,
+            "latency_ms": 20,
+            "jitter_ms": 5,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 64,
+            "latency_ms": 20,
+            "jitter_ms": 5,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 5
+        },
+        "outcome": "degraded",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 0,
+          "missing_markers_pct": 100,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 0,
+          "p95_ms": 0,
+          "p99_ms": 0,
+          "max_ms": 0,
+          "median_level_dbfs": 0,
+          "final_two_seconds_markers": 0
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 0,
+          "missing_markers_pct": 100,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 0,
+          "p95_ms": 0,
+          "p99_ms": 0,
+          "max_ms": 0,
+          "median_level_dbfs": 0,
+          "final_two_seconds_markers": 0
+        }
+      },
+      {
+        "profile": {
+          "playback_ceiling_ms": 160,
+          "name": "adaptive-160-280ms-jitter",
+          "expectation": "usable",
+          "down": {
+            "kbps": 2000,
+            "latency_ms": 20,
+            "jitter_ms": 0,
+            "recovery_probability": 0.01,
+            "recovery_ms": 280,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 2000,
+            "latency_ms": 20,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 10
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 67.25,
+          "p95_ms": 71.695068359375,
+          "p99_ms": 76.64404296875,
+          "max_ms": 76.64404296875,
+          "median_level_dbfs": -15.145143582658863,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 340.8447265625,
+          "p95_ms": 340.95068359375,
+          "p99_ms": 340.958740234375,
+          "max_ms": 340.958740234375,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "playback_ceiling_ms": 220,
+          "name": "adaptive-220-280ms-jitter",
+          "expectation": "usable",
+          "down": {
+            "kbps": 2000,
+            "latency_ms": 20,
+            "jitter_ms": 0,
+            "recovery_probability": 0.01,
+            "recovery_ms": 280,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 2000,
+            "latency_ms": 20,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 10
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 72.322998046875,
+          "p95_ms": 77.238037109375,
+          "p99_ms": 79.366943359375,
+          "max_ms": 79.366943359375,
+          "median_level_dbfs": -15.14514839907581,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 340.770751953125,
+          "p95_ms": 340.845703125,
+          "p99_ms": 340.8466796875,
+          "max_ms": 340.8466796875,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "playback_ceiling_ms": 280,
+          "name": "adaptive-280-280ms-jitter",
+          "expectation": "usable",
+          "down": {
+            "kbps": 2000,
+            "latency_ms": 20,
+            "jitter_ms": 0,
+            "recovery_probability": 0.01,
+            "recovery_ms": 280,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 2000,
+            "latency_ms": 20,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 10
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 67.99609375,
+          "p95_ms": 71.946044921875,
+          "p99_ms": 72.028076171875,
+          "max_ms": 72.028076171875,
+          "median_level_dbfs": -15.145185149331294,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 342.646728515625,
+          "p95_ms": 342.737548828125,
+          "p99_ms": 342.7470703125,
+          "max_ms": 342.7470703125,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        }
+      }
+    ]
+  },
+  "isolated_repeat": {
+    "created_at": "2026-10-08T16:31:13Z",
+    "seed": 20260929,
+    "duration_ms": 20000,
+    "results": [
+      {
+        "profile": {
+          "audio_context_rate": 48000,
+          "name": "browser-48k-fallback",
+          "expectation": "usable",
+          "down": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 350,
+          "max_missing_pct": 5
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 112.611083984375,
+          "p95_ms": 118.24609375,
+          "p99_ms": 118.426025390625,
+          "max_ms": 118.426025390625,
+          "median_level_dbfs": -15.100132233514067,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 131.99365234375,
+          "p95_ms": 132.096435546875,
+          "p99_ms": 132.1064453125,
+          "max_ms": 132.1064453125,
+          "median_level_dbfs": -15.052759968380375,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "name": "wifi-jitter",
+          "expectation": "usable",
+          "down": {
+            "kbps": 2000,
+            "latency_ms": 35,
+            "jitter_ms": 40,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 1000,
+            "latency_ms": 35,
+            "jitter_ms": 40,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 450,
+          "max_missing_pct": 10
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 119.751953125,
+          "p95_ms": 136.093994140625,
+          "p99_ms": 141.47705078125,
+          "max_ms": 141.47705078125,
+          "median_level_dbfs": -15.145301324537602,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 154.34130859375,
+          "p95_ms": 164.40185546875,
+          "p99_ms": 164.442626953125,
+          "max_ms": 164.442626953125,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        }
+      },
+      {
+        "profile": {
+          "carrier_down": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 3000,
+            "outage_ms": 10000
+          },
+          "carrier_missing": true,
+          "name": "carrier-ten-second-missing",
+          "expectation": "recovery",
+          "down": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "up": {
+            "kbps": 10000,
+            "latency_ms": 0,
+            "jitter_ms": 0,
+            "recovery_probability": 0,
+            "recovery_ms": 0,
+            "outage_at_ms": 0,
+            "outage_ms": 0
+          },
+          "max_p95_ms": 500,
+          "max_missing_pct": 65
+        },
+        "outcome": "pass",
+        "errors": [],
+        "adviser_to_carrier": {
+          "expected_markers": 38,
+          "received_markers": 38,
+          "missing_markers_pct": 0,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 146.375,
+          "p95_ms": 151.02294921875,
+          "p99_ms": 154.1630859375,
+          "max_ms": 154.1630859375,
+          "median_level_dbfs": -15.145145882172859,
+          "final_two_seconds_markers": 4
+        },
+        "carrier_to_adviser": {
+          "expected_markers": 38,
+          "received_markers": 18,
+          "missing_markers_pct": 52.63157894736842,
+          "duplicate_markers": 0,
+          "out_of_order_markers": 0,
+          "p50_ms": 316.56298828125,
+          "p95_ms": 326.685302734375,
+          "p99_ms": 326.685302734375,
+          "max_ms": 326.685302734375,
+          "median_level_dbfs": -15.052743814492999,
+          "final_two_seconds_markers": 4
+        }
+      }
+    ]
+  },
+  "notes": [
+    "First broad run overlapped local unit/simulation work; carrier-ten-second-missing exceeded the adviser missing-marker gate (2 of 38 markers missing). This alone does not establish the cause.",
+    "Carrier-ten-second-missing, 48k fallback and Wi-Fi jitter passed an isolated repeat without reducing thresholds. Adverse bandwidth profiles correctly report degradation.",
+    "The worklet was refined during early broad profiles; final-source 48k and Wi-Fi profiles were repeated in isolation. Final adaptive ceiling profiles exercised the final source.",
+    "These synthetic acoustic markers do not establish perceptual quality or zero cuts on production networks."
+  ]
+}

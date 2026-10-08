@@ -23,6 +23,7 @@ type Link struct {
 	OutageMS            float64 `json:"outage_ms"`
 }
 type Profile struct {
+	PlaybackCeilingMS    int     `json:"playback_ceiling_ms,omitempty"`
 	RTCUDP               bool    `json:"rtc_udp,omitempty"`
 	MediaTransport       string  `json:"media_transport,omitempty"`
 	CarrierDown          *Link   `json:"carrier_down,omitempty"`
@@ -50,6 +51,9 @@ func Profiles(path string) ([]Profile, error) {
 		return nil, err
 	}
 	for _, p := range profiles {
+		if p.PlaybackCeilingMS != 0 && (p.PlaybackCeilingMS < 40 || p.PlaybackCeilingMS > 280) {
+			return nil, fmt.Errorf("invalid playback ceiling %s", p.Name)
+		}
 		if p.RTCUDP && p.MediaTransport != "webrtc" {
 			return nil, fmt.Errorf("UDP shaping requires webrtc: %s", p.Name)
 		}
