@@ -13,6 +13,7 @@ export const audioStages = {
 export const audioIssues = {
   audio_degraded: "Audio degradation",
   dropped_audio: "Dropped audio",
+  playback_underrun: "Playback buffer gaps",
   carrier_stall: "Carrier delivery gaps",
   sequence_gaps: "Sequence gaps",
   browser_error: "Browser / media errors",
@@ -173,6 +174,7 @@ export function audioWidgetPreferences(value: Record<string, unknown> = {}) {
 export const metricLabel: Record<string, string> = {
   playback_dropped_ms: "Browser playback dropped (ms)",
   playback_underruns: "Playback underruns",
+  playback_underrun_ms: "Missing playback audio (ms)",
   browser_queue_ms: "Browser queue (ms)",
   browser_max_queue_ms: "Max browser queue (ms)",
   rtt_ms: "Latest browser RTT (ms)",

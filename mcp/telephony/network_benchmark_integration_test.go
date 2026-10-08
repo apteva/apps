@@ -260,7 +260,7 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 		case "/":
 			io.WriteString(w, `<!doctype html><title>Local Telephony network benchmark</title><script type="module" src="/entry.js"></script>`)
 		case "/config":
-			writeTier2JSON(w, map[string]any{"media_url": "ws://" + proxy.Addr() + "/softphone/media/" + id + "/" + session.SessionToken, "duration_ms": duration, "drain_ms": 2500, "mute_microphone": profile.MuteMicrophone, "reconnect_browser": profile.ReconnectBrowser, "main_thread_pause_ms": profile.MainThreadPauseMS, "audio_context_rate": profile.AudioContextRate, "media_transport": profile.MediaTransport, "rtc_ice_servers": iceServers, "rtc_force_relay": profile.RTCUDP})
+			writeTier2JSON(w, map[string]any{"media_url": "ws://" + proxy.Addr() + "/softphone/media/" + id + "/" + session.SessionToken, "duration_ms": duration, "drain_ms": 2500, "mute_microphone": profile.MuteMicrophone, "reconnect_browser": profile.ReconnectBrowser, "main_thread_pause_ms": profile.MainThreadPauseMS, "audio_context_rate": profile.AudioContextRate, "playback_ceiling_ms": profile.PlaybackCeilingMS, "media_transport": profile.MediaTransport, "rtc_ice_servers": iceServers, "rtc_force_relay": profile.RTCUDP})
 		case "/refresh-media":
 			if r.Method != "POST" {
 				w.WriteHeader(405)

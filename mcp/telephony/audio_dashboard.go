@@ -15,7 +15,7 @@ import (
 )
 
 // Values describe observation boundaries, not a diagnosis of the network or carrier.
-var audioDashboardIssues = map[string]bool{"dropped_audio": true, "sequence_gaps": true, "carrier_stall": true, "browser_error": true, "reconnect": true, "context_suspended": true, "scheduling_pause": true, "write_delay": true, "high_rtt": true, "audio_degraded": true}
+var audioDashboardIssues = map[string]bool{"playback_underrun": true, "dropped_audio": true, "sequence_gaps": true, "carrier_stall": true, "browser_error": true, "reconnect": true, "context_suspended": true, "scheduling_pause": true, "write_delay": true, "high_rtt": true, "audio_degraded": true}
 var audioDashboardStages = map[string]bool{"carrier_to_telephony": true, "telephony_to_browser": true, "browser_to_telephony": true}
 
 type audioDashboardSummary struct {
@@ -72,6 +72,7 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 	m := s.Metrics
 	m["playback_dropped_ms"] = float64(b.PlaybackDroppedMS)
 	m["playback_underruns"] = float64(b.PlaybackUnderruns)
+	m["playback_underrun_ms"] = b.PlaybackUnderrunMS
 	m["browser_queue_ms"] = float64(b.PlaybackQueueMS)
 	m["browser_max_queue_ms"] = float64(b.PlaybackMaxQueueMS)
 	m["playback_sequence_gaps"] = float64(b.PlaybackSequenceGaps)
@@ -84,6 +85,7 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 		add("dropped_audio", "telephony_to_browser", b.WebRTC.PacketsDiscarded > 0)
 		add("audio_degraded", "telephony_to_browser", b.WebRTC.JitterBufferMS > 320)
 	}
+	add("playback_underrun", "telephony_to_browser", b.PlaybackUnderrunMS > 0)
 	if b.RTTMS != nil {
 		m["rtt_ms"] = float64(*b.RTTMS)
 		m["max_rtt_ms"] = float64(*b.RTTMS)
@@ -156,10 +158,11 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 				m["context_suspensions"] = max(m["context_suspensions"], n)
 			case "audio_context_suspended_ms":
 				m["context_suspended_ms"] = max(m["context_suspended_ms"], n)
-			case "reconnect_attempts", "reconnect_successes", "capture_muted_ms", "capture_muted_frames":
+			case "playback_underrun_ms", "reconnect_attempts", "reconnect_successes", "capture_muted_ms", "capture_muted_frames":
 				m[k] = max(m[k], n)
 			}
 		}
+		add("playback_underrun", "telephony_to_browser", m["playback_underrun_ms"] > 0)
 		m["carrier_max_gap_ms"] = max(v.Reception.MaxGapMS, float64(c.InputAudio.MaxGapMS))
 		m["carrier_stalls"] = float64(v.Reception.Stalls)
 		m["carrier_source_dropped_ms"] = v.Reception.StaleDroppedMS

@@ -151,6 +151,7 @@ type audioCallTelemetry struct {
 	collectNetwork func(audioNetworkEvent)
 	clientEpoch    string
 	clientCounters map[string]float64
+	underrunEvents []playbackUnderrunEvent
 	browser        browserAudioDiagnostics
 	health         audioHealthSnapshot
 	counters       map[string]float64
@@ -165,7 +166,10 @@ func (t *audioCallTelemetry) restore(raw string) {
 	}
 	t.restored = true
 	var prior browserAudioDiagnostics
-	if json.Unmarshal([]byte(raw), &prior) == nil && prior.Server != nil {
+	if json.Unmarshal([]byte(raw), &prior) == nil {
+		t.underrunEvents = normalizePlaybackUnderruns(prior.PlaybackUnderrunEvents)
+	}
+	if prior.Server != nil {
 		t.socket = prior.Server.Socket
 		t.health = prior.Server.Health
 		t.clientEpoch = prior.ClientEpoch
@@ -225,6 +229,12 @@ func (t *audioCallTelemetry) closed(w *websocketWriterPump, reason string, err e
 		return
 	}
 	delete(t.sockets, w)
+	for i := range t.underrunEvents {
+		e := &t.underrunEvents[i]
+		if e.ConnectionID == network.ConnectionID && e.EndedAt == "" {
+			e.EndedAt, e.EndReason, e.Complete = e.ObservedUntil, "transport_disconnected", false
+		}
+	}
 	code := 0
 	var closed wsutil.ClosedError
 	if errors.As(err, &closed) {
@@ -276,6 +286,9 @@ func (t *audioCallTelemetry) observeBrowserConnection(w *websocketWriterPump, v 
 	for i := range v.DropEvents {
 		v.DropEvents[i].ConnectionID = t.connectionAtLocked(v.DropEvents[i].Timestamp)
 	}
+	for i := range v.PlaybackUnderrunEvents {
+		v.PlaybackUnderrunEvents[i].ConnectionID = t.connectionAtLocked(v.PlaybackUnderrunEvents[i].StartedAt)
+	}
 	for i := range v.SessionEvents {
 		v.SessionEvents[i].ConnectionID = t.connectionAtLocked(v.SessionEvents[i].Timestamp)
 	}
@@ -321,6 +334,8 @@ func (t *audioCallTelemetry) connectionAtLocked(timestamp string) string {
 	return ""
 }
 func (t *audioCallTelemetry) observeBrowserLocked(v browserAudioDiagnostics) {
+	t.underrunEvents = mergePlaybackUnderruns(t.underrunEvents, normalizePlaybackUnderruns(v.PlaybackUnderrunEvents))
+	v.PlaybackUnderrunEvents = append([]playbackUnderrunEvent(nil), t.underrunEvents...)
 	t.browser = v
 	t.browserSeen = true
 	t.dirty = true
@@ -625,7 +640,7 @@ func audioBrowserCounters(v browserAudioDiagnostics) map[string]float64 {
 	}
 	tr, rt := v.Timing.Transport, v.Timing.Runtime
 	return map[string]float64{"reconnect_attempts": tr.ReconnectAttempts, "reconnect_successes": tr.ReconnectSuccesses, "worker_pause_count": tr.WorkerPauseCount, "main_thread_pause_count": rt.MainThreadPauseCount, "audio_context_suspend_count": rt.AudioContextSuspendCount, "audio_context_suspended_ms": rt.AudioContextSuspendedMS,
-		"playback_transport_dropped_ms": tr.PlaybackTransportDroppedMS, "playback_source_dropped_ms": tr.PlaybackSourceDroppedMS, "capture_worker_dropped_ms": tr.CaptureDroppedMS, "capture_muted_ms": tr.CaptureMutedMS, "capture_muted_frames": tr.CaptureMutedFrames, "playback_worklet_dropped_ms": float64(v.PlaybackDroppedMS), "playback_transport_sequence_gaps": tr.PlaybackSequenceGaps, "playback_worklet_sequence_gaps": float64(v.PlaybackSequenceGaps),
+		"playback_underrun_ms": v.PlaybackUnderrunMS, "playback_transport_dropped_ms": tr.PlaybackTransportDroppedMS, "playback_source_dropped_ms": tr.PlaybackSourceDroppedMS, "capture_worker_dropped_ms": tr.CaptureDroppedMS, "capture_muted_ms": tr.CaptureMutedMS, "capture_muted_frames": tr.CaptureMutedFrames, "playback_worklet_dropped_ms": float64(v.PlaybackDroppedMS), "playback_transport_sequence_gaps": tr.PlaybackSequenceGaps, "playback_worklet_sequence_gaps": float64(v.PlaybackSequenceGaps),
 		"playback_latency_discard_ms": tr.DropTotalsMS["playback_transport_age"] + tr.DropTotalsMS["playback_delivery_excess"] + tr.DropTotalsMS["playback_source_age"] + v.Timing.Playback.DropTotalsMS["playback_hard_limit"] + v.Timing.Playback.DropTotalsMS["playback_age_limit"],
 		"capture_latency_discard_ms":  tr.DropTotalsMS["capture_age_limit"] + tr.DropTotalsMS["websocket_backpressure"]}
 }
@@ -637,6 +652,7 @@ func (a *App) persistAudioTelemetry(callID string, h *softphoneHub) (err error) 
 	defer h.telemetry.persistMu.Unlock()
 	h.telemetry.mu.Lock()
 	browser, seen := h.telemetry.browser, h.telemetry.browserSeen
+	browser.PlaybackUnderrunEvents = append([]playbackUnderrunEvent(nil), h.telemetry.underrunEvents...)
 	h.telemetry.dirty = false
 	h.telemetry.mu.Unlock()
 	defer func() {
@@ -648,7 +664,7 @@ func (a *App) persistAudioTelemetry(callID string, h *softphoneHub) (err error) 
 	}()
 	server := h.serverAudioSnapshot()
 	if !seen {
-		return a.db().updateServerAudioDiagnostics(callID, server)
+		return a.db().updateServerAudioDiagnostics(callID, server, browser.PlaybackUnderrunEvents)
 	}
 	browser.Server = &server
 	return a.db().updateBrowserAudioDiagnostics(callID, browser)

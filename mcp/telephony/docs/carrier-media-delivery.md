@@ -36,9 +36,9 @@ unchanged.
 Browser filtering uses clock uncertainty, then carries the accepted source age
 into the worklet's render clock. When a slow link prevents clock probes, growing
 delay relative to the fastest delivery on that socket is still bounded. That
-fallback cannot measure unknown fixed latency on its first packet. Existing
-60 ms startup, 60–160 ms adaptation, 320 ms hard backlog, and crossfade behavior
-remain. No buffer is increased to accommodate ten seconds of stale speech.
+fallback cannot measure unknown fixed latency on its first packet. The current local engine keeps 60 ms startup and the 320 ms hard backlog/source-age
+limit; generic live reserve adaptation has a 280 ms ceiling and waveform matching
+(see [adaptive-playback.md](adaptive-playback.md)). No buffer is increased to accommodate ten seconds of stale speech.
 
 ## Reception monitoring and notices
 

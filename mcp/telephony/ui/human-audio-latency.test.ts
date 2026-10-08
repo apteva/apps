@@ -62,14 +62,19 @@ test("compare 40/60/80 ms playback and retain adaptive recovery after a delivery
   expect(steady[1].firstMS - steady[0].firstMS).toBeGreaterThan(15);
   expect(moderate[0].underruns).toBeGreaterThan(0);
   expect(moderate[1].underruns).toBe(0);
-  for (const result of stalled) { expect(result.peakTarget).toBeGreaterThan(result.target); expect(result.peakTarget).toBeLessThanOrEqual(160); }
+  for (const result of stalled) { expect(result.peakTarget).toBeGreaterThan(result.target); expect(result.peakTarget).toBeLessThanOrEqual(280); }
 });
 
 test("playback options support safe A/B profiles and reject invalid bounds", () => {
-  expect(playbackBufferOptions({})).toEqual({ initialTargetMs: 60, minTargetMs: 60, maxTargetMs: 160, hardMaxMs: 320 });
+  expect(playbackBufferOptions({})).toEqual({ initialTargetMs: 60, minTargetMs: 60, maxTargetMs: 280, hardMaxMs: 320, adaptiveReserve:true });
   expect(playbackBufferOptions({ playbackTargetMs: 40 }).minTargetMs).toBe(40);
-  expect(playbackBufferOptions({ playbackTargetMs: 80, playbackMinMs: 40, playbackMaxMs: 120 })).toEqual({ initialTargetMs: 80, minTargetMs: 40, maxTargetMs: 120, hardMaxMs: 320 });
-  for (const value of [NaN, Infinity, 0, 39, 161]) expect(() => playbackBufferOptions({ playbackTargetMs: value })).toThrow();
+  expect(playbackBufferOptions({ playbackTargetMs: 80, playbackMinMs: 40, playbackMaxMs: 120 })).toEqual({ initialTargetMs: 80, minTargetMs: 40, maxTargetMs: 120, hardMaxMs: 320, adaptiveReserve:true });
+  for (const value of [NaN, Infinity, 0, 39, 281]) expect(() => playbackBufferOptions({ playbackTargetMs: value })).toThrow();
   expect(() => playbackBufferOptions({ playbackTargetMs: 60, playbackMinMs: 80 })).toThrow();
   expect(() => playbackBufferOptions({ playbackTargetMs: 80, playbackMaxMs: 60 })).toThrow();
+});
+
+test("live reserve adaptation has a generic fallback and stays within the hard cap",()=>{
+ expect(playbackBufferOptions({playbackMaxMs:280,playbackAdaptive:false})).toEqual({initialTargetMs:60,minTargetMs:60,maxTargetMs:280,hardMaxMs:320,adaptiveReserve:false});
+ expect(()=>playbackBufferOptions({playbackAdaptive:"yes" as any})).toThrow();
 });

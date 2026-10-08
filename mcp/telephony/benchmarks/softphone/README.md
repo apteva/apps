@@ -223,3 +223,12 @@ they do not prove speech intelligibility, a MOS score, or lossless Opus encoding
 Use shared-network planning headroom above the lowest passing laboratory point.
 No staging/production route, carrier account, operating-system traffic shaper or
 real call is used or modified by this benchmark.
+
+## Adaptive reserve comparison
+
+`bun benchmarks/softphone/adaptive-playback.ts /tmp/adaptive.json` runs the actual
+PCM worklet with source timestamps and compares 160/220/280 ms ceilings against
+ordered catch-up, missing frames, progressive gaps and constrained bandwidth.
+`adaptive-160-280ms-jitter`, `adaptive-220-280ms-jitter` and
+`adaptive-280-280ms-jitter` exercise these ceilings in real Chromium with 280 ms
+TCP recovery. The same audio gates apply; this is not a perceptual MOS test.

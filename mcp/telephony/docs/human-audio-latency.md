@@ -64,9 +64,10 @@ const phone = telephony.createSoftphone({
     noiseSuppression: false,
     autoGainControl: false,
     playbackTargetMs: 60,            // try 40, 60, or 80
-    // Optional adaptive bounds, each 40–160 ms:
+    // Optional adaptive bounds, each 40–280 ms:
     playbackMinMs: 40,
-    playbackMaxMs: 160,
+    playbackMaxMs: 280,
+    playbackAdaptive: true,
   },
 });
 
@@ -74,9 +75,9 @@ const phone = telephony.createSoftphone({
 await phone.reconnect({ playbackTargetMs: 80, inputGainDB: -6 });
 ```
 
-Without overrides the initial/minimum/maximum are 60/60/160 ms. An explicit
+Without overrides the current initial/minimum/maximum are 60/60/280 ms. An explicit
 40 ms target automatically gets a 40 ms minimum unless a minimum is provided.
-Bounds must satisfy min <= target <= max, each finite and between 40 and 160 ms.
+Bounds must satisfy min <= target <= max, each finite and between 40 and 280 ms.
 Invalid settings fail before dialing or replacing a working connection. Adaptation,
 backlog limits and the limiter remain enabled; only the chosen parameters change.
 The built-in Telephony panel also provides microphone gain and playback choices,
@@ -95,3 +96,5 @@ Queue caps and stale-audio disposal remain fixed safety limits.
 No Flexylead-specific authorization or behavior is added, and no server or Web SDK
 release is required. Consuming apps only need configuration changes if they want
 to override defaults or expose their own A/B controls.
+
+Current local reserve policy: [adaptive-playback.md](adaptive-playback.md). Historical measurements above retain their original 160 ms ceiling.

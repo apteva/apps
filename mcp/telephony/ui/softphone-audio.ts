@@ -107,12 +107,14 @@ export interface SoftphoneAudioOptions {
   noiseSuppression: boolean;
   autoGainControl: boolean;
   inputGainDB: number;
-  /** Initial playback cushion in ms (40–160). Default 60. Applied on start/reconnect. */
+  /** Initial playback cushion in ms (40–280). Default 60. Applied on start/reconnect. */
   playbackTargetMs?: number;
-  /** Adaptive lower bound (40–160). Default min(60, target). */
+  /** Adaptive lower bound (40–280). Default min(60, target). */
   playbackMinMs?: number;
-  /** Adaptive upper bound (40–160). Default 160. */
+  /** Adaptive upper bound (40–280). Default 280. */
   playbackMaxMs?: number;
+  /** Build/drain the PCM reserve with bounded waveform-matched adjustments. Default true. */
+  playbackAdaptive?: boolean;
   highpassFilter: boolean;
 }
 
@@ -126,7 +128,44 @@ export interface AudioDropEvent {
   sequence?: number | null;
 }
 
+/** Missing caller playback samples, separate from received audio discarded. */
+export interface PlaybackUnderrunEvent {
+  id: string;
+  started_at: string;
+  ended_at?: string;
+  observed_until: string;
+  duration_ms: number;
+  missing_samples: number;
+  sample_rate: number;
+  start_audio_ms: number;
+  end_audio_ms: number;
+  last_sequence?: number | null;
+  resume_sequence?: number | null;
+  end_reason: string;
+  complete: boolean;
+  timestamp_basis: "browser_wall_audio_clock";
+  connection_id?: string;
+}
+
+export function mergePlaybackUnderruns(previous: PlaybackUnderrunEvent[], incoming: PlaybackUnderrunEvent[]): PlaybackUnderrunEvent[] {
+  const events = new Map(previous.map(event => [event.id, event]));
+  for (const event of incoming) {
+    const prior = events.get(event.id);
+    if (!prior || (!prior.complete || event.complete) && (!prior.ended_at || !!event.ended_at) && event.duration_ms >= prior.duration_ms) events.set(event.id, {...event});
+  }
+  return [...events.values()].sort((a, b) => a.started_at.localeCompare(b.started_at)).slice(-100);
+}
+
+// The renderer may stop before delivering its last snapshot. Preserve the
+// measured interval and mark it incomplete rather than inventing missing time.
+export function endPlaybackObservation(events: PlaybackUnderrunEvent[], reason: string): PlaybackUnderrunEvent[] {
+  return events.map(event => event.ended_at ? event : {...event, ended_at:event.observed_until, end_reason:reason, complete:false});
+}
+
 export interface SoftphoneDiagnostics {
+  /** Playback starvation, separate from discarded received frames. */
+  underrunDurationMs?: number;
+  underrunEvents?: PlaybackUnderrunEvent[];
 	mediaTransport?: "websocket" | "webrtc";
 	codec?: "pcm16" | "opus";
 	webrtc?: { protocol?: string; candidateType?: string; sendBitrateBps?: number; receiveBitrateBps?: number; packetsLost?: number; jitterMs?: number; concealedMs?: number; packetsDiscarded?: number; jitterBufferMs?: number };
@@ -170,12 +209,13 @@ export function playbackBufferOptions(options: Partial<SoftphoneAudioOptions>) {
 	if (options.mediaTransport !== undefined && !["websocket", "webrtc", "auto"].includes(options.mediaTransport)) throw new RangeError("Unsupported softphone media transport");
   const initialTargetMs = options.playbackTargetMs ?? JITTER_TARGET_MS;
   const minTargetMs = options.playbackMinMs ?? Math.min(JITTER_TARGET_MS, initialTargetMs);
-  const maxTargetMs = options.playbackMaxMs ?? 160;
+  const maxTargetMs = options.playbackMaxMs ?? 280;
   for (const value of [initialTargetMs, minTargetMs, maxTargetMs]) {
-    if (!Number.isFinite(value) || value < 40 || value > 160) throw new RangeError("Playback buffers must be between 40 and 160 ms");
+    if (!Number.isFinite(value) || value < 40 || value > 280) throw new RangeError("Playback buffers must be between 40 and 280 ms");
   }
   if (minTargetMs > initialTargetMs || initialTargetMs > maxTargetMs) throw new RangeError("Playback buffers require min <= target <= max");
-  return { initialTargetMs, minTargetMs, maxTargetMs, hardMaxMs: 320 };
+  if (options.playbackAdaptive !== undefined && typeof options.playbackAdaptive !== "boolean") throw new RangeError("playbackAdaptive must be boolean");
+  return { initialTargetMs, minTargetMs, maxTargetMs, hardMaxMs: 320, adaptiveReserve:options.playbackAdaptive !== false };
 }
 
 export function microphoneConstraints(options: SoftphoneAudioOptions): MediaTrackConstraints {
@@ -395,6 +435,7 @@ export class SoftphoneSession {
   private opened = false;
   private cancelWorkerStart?: () => void;
   private microphoneTransportReady = false;
+  private playbackHeld = false;
   private mediaSocketConnected = false;
   private ringback: (() => void) | null = null;
   private transportTiming: Record<string, unknown> = {};
@@ -459,7 +500,7 @@ export class SoftphoneSession {
       });
       this.playback = new AudioWorkletNode(this.ctx, "softphone-playback", {
         numberOfInputs: 0, outputChannelCount: [1],
-        processorOptions: playbackOptions,
+        processorOptions: {...playbackOptions, telemetryEpoch:this.clientEpoch, telemetryEnabled:false},
       });
       // A headless host can reconnect an already-muted call. Apply the gate
       // before capture starts, rather than after the socket has connected.
@@ -479,6 +520,7 @@ export class SoftphoneSession {
         if (this.closed) return;
         this.runtimeTelemetry.context(this.ctx?.state ?? "closed");
         this.worker?.postMessage({type:"clock.reset",paused:this.ctx?.state !== "running"});
+        this.setPlaybackObservation(this.ctx?.state === "running" && this.microphoneTransportReady && !this.playbackHeld, "audio_context_paused");
         if (this.ctx?.state === "suspended" || (this.ctx?.state as string) === "interrupted") this.callbacks.onState?.("reconnecting", "Browser paused audio. Reconnect audio to continue.");
         else if (this.ctx?.state === "running" && this.microphoneTransportReady) this.callbacks.onState?.("live");
       };
@@ -522,12 +564,20 @@ export class SoftphoneSession {
     };
     this.playback.port.onmessage = (event: MessageEvent) => {
       const stats = event.data;
+      if (stats?.type === "playback.underrun") {
+        this.diagnostics.underrunEvents = mergePlaybackUnderruns(this.diagnostics.underrunEvents ?? [], [stats.event]);
+        this.diagnostics.underrunDurationMs = stats.underrun_ms;
+        this.diagnostics.underruns = stats.underruns;
+        return;
+      }
       if (stats?.type !== "stats") return;
-      this.playbackTiming = {played_ms:stats.played_ms,max_residence_ms:stats.max_residence_ms,drop_totals_ms:stats.drop_totals_ms,coaching:{played_ms:stats.whisper_played_ms,dropped_ms:stats.whisper_dropped_ms,max_queue_ms:stats.whisper_max_queue_ms}};
+      this.playbackTiming = {reserve_expanded_ms:stats.reserve_expanded_ms,reserve_compressed_ms:stats.reserve_compressed_ms,reserve_adjustments:stats.reserve_adjustments,reserve_match_rejections:stats.reserve_match_rejections,played_ms:stats.played_ms,max_residence_ms:stats.max_residence_ms,drop_totals_ms:stats.drop_totals_ms,coaching:{played_ms:stats.whisper_played_ms,dropped_ms:stats.whisper_dropped_ms,max_queue_ms:stats.whisper_max_queue_ms}};
       this.speakerLevel = Math.max(this.speakerLevel, stats.speaker_level ?? 0);
       this.diagnostics = {
         ...this.diagnostics, coachingPlayedMs:stats.whisper_played_ms ?? 0, coachingDroppedMs:stats.whisper_dropped_ms ?? 0, coachingMaxQueueMs:stats.whisper_max_queue_ms ?? 0, queueMs: stats.queue_ms ?? 0, targetMs: stats.target_ms ?? JITTER_TARGET_MS,
         underruns: stats.underruns ?? 0, droppedMs: stats.dropped_ms ?? 0,
+        underrunDurationMs: stats.underrun_ms ?? 0,
+        underrunEvents: mergePlaybackUnderruns(this.diagnostics.underrunEvents ?? [], stats.underrun_events ?? []),
         maxQueueMs: stats.max_queue_ms ?? 0, playbackSequenceGaps: stats.playback_sequence_gaps ?? 0,
         dropEvents: this.mergeDropEvents(undefined, stats.drop_events ?? []),
       };
@@ -584,6 +634,7 @@ export class SoftphoneSession {
           this.stopRTTProbe();
           this.mediaSocketConnected = false;
           this.microphoneTransportReady = false;
+          this.setPlaybackObservation(false, "transport_disconnected");
           if (this.opened && !this.closed) this.callbacks.onState?.("reconnecting", "Connection interrupted; retrying…");
           else finish(new Error("audio connection closed before it was ready"));
         } else if (message?.type === "socket.failed") {
@@ -628,10 +679,15 @@ export class SoftphoneSession {
         if (typeof parsed.nonce === "number" && parsed.nonce >= 0) this.diagnostics.rttMs = Math.max(0, Math.round(performance.now() - parsed.nonce));
         this.callbacks.onDiagnostics?.({ ...this.diagnostics });
       } else if (parsed.type === "call.ended" || parsed.type === "session.replaced") {
+        this.setPlaybackObservation(false, parsed.type === "call.ended" ? "call_ended" : "observation_ended");
         this.closed = true;
         try { this.callbacks.onState?.("ended", parsed.type); }
         finally { this.teardown(); }
       } else if (parsed.type === "call.status" && typeof parsed.call_id === "string" && typeof parsed.status === "string") {
+        if ((parsed as SoftphoneCallStatus).hold_state) {
+          this.playbackHeld = (parsed as SoftphoneCallStatus).hold_state !== "active";
+          this.setPlaybackObservation(!this.playbackHeld && this.microphoneTransportReady && this.ctx?.state === "running", this.playbackHeld ? "hold" : "observation_resumed");
+        }
         if ((parsed as SoftphoneCallStatus).hold_state && (parsed as SoftphoneCallStatus).hold_state !== "active") {
           this.worker?.postMessage({ type: "flush" });
         }
@@ -661,11 +717,13 @@ export class SoftphoneSession {
         this.carrierDeliveryStalled = state === "stalled";
       } else if (parsed.type === "peer.disconnected") {
         this.microphoneTransportReady = false;
+        this.setPlaybackObservation(false, "carrier_disconnected");
         this.worker?.postMessage({ type: "microphone.ready", value: false });
         this.worker?.postMessage({ type: "flush" });
         this.callbacks.onState?.("reconnecting", "Carrier audio interrupted; reconnecting…");
       } else if (parsed.type === "peer.connected") {
         this.microphoneTransportReady = true;
+        this.setPlaybackObservation(this.ctx?.state === "running" && !this.playbackHeld, "carrier_connected");
         this.worker?.postMessage({ type: "microphone.ready", value: true });
         this.callbacks.onState?.("live", this.opened ? undefined : "Audio reconnected");
       }
@@ -704,6 +762,7 @@ export class SoftphoneSession {
       microphone_device_muted: this.stream?.getAudioTracks()[0]?.muted ?? false,
       rtt_ms: value.rttMs, playback_queue_ms: value.queueMs, playback_target_ms: value.targetMs,
       playback_max_queue_ms: value.maxQueueMs, playback_underruns: value.underruns,
+      playback_underrun_ms: value.underrunDurationMs, playback_underrun_events:value.underrunEvents,
       playback_dropped_ms: value.droppedMs, websocket_buffered_bytes: value.websocketBufferedBytes,
       audio_context_rate: value.audioContextRate, microphone_sample_rate: value.microphoneSampleRate,
       microphone_channel_count: value.microphoneChannelCount, echo_cancellation: value.echoCancellation,
@@ -719,6 +778,13 @@ export class SoftphoneSession {
   private stopRTTProbe(): void {
     if (this.pingTimer !== null) clearInterval(this.pingTimer);
     this.pingTimer = null;
+  }
+
+  private setPlaybackObservation(active: boolean, reason: string): void {
+    try {
+      this.playback?.port.postMessage({type:"playback.telemetry.boundary",active,reason,audio_time_ms:(this.ctx?.currentTime ?? 0)*1000});
+      if (!active) this.diagnostics.underrunEvents = endPlaybackObservation(this.diagnostics.underrunEvents ?? [], reason);
+    } catch { /* observation cannot affect audio or recovery */ }
   }
 
   setMuted(muted: boolean): void {
@@ -745,6 +811,7 @@ export class SoftphoneSession {
   }
 
   private teardown(): void {
+    this.setPlaybackObservation(false, "observation_ended");
     this.stopRingback();
     this.microphoneTransportReady = false;
     this.cancelWorkerStart?.();
