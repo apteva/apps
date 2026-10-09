@@ -232,20 +232,24 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "indexes_create",
-			Description: "Create a safe composite index. Args: table, name, columns ([name | {col, order?}]), unique?. Arbitrary SQL expressions are not accepted. Returns {index}.",
+			Description: "Create a safe composite index. Args: table, name, columns ([name | {col, order?}]), unique?. Projection indexes also accept version?, layout? (generation_first/filter_first) and replace? for nonunique indexes. Arbitrary SQL expressions are not accepted. Returns {index}.",
 			InputSchema: schemaObject(map[string]any{
 				"table":   map[string]any{"type": "string"},
 				"name":    map[string]any{"type": "string"},
 				"columns": map[string]any{"type": "array", "items": indexColumnSchema},
 				"unique":  map[string]any{"type": "boolean"},
+				"version": map[string]any{"type": "integer", "minimum": 1},
+				"layout":  map[string]any{"type": "string", "enum": []string{"generation_first", "filter_first"}},
+				"replace": map[string]any{"type": "boolean", "description": "Projection nonunique indexes only: build replacement before removing the previous index; failures retain the previous index."},
 			}, []string{"table", "name", "columns"}),
 			Handler: a.toolIndexesCreate,
 		},
 		{
 			Name:        "indexes_list",
-			Description: "List user and rows_upsert-managed indexes for one table. Args: table. Returns {indexes}.",
+			Description: "List user and rows_upsert-managed indexes for one table; projections report layout and physical column order. Args: table, version?. Returns {indexes}.",
 			InputSchema: schemaObject(map[string]any{
-				"table": map[string]any{"type": "string"},
+				"table":   map[string]any{"type": "string"},
+				"version": map[string]any{"type": "integer", "minimum": 1},
 			}, []string{"table"}),
 			Handler: a.toolIndexesList,
 		},
@@ -255,6 +259,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{
 				"table":           map[string]any{"type": "string"},
 				"name":            map[string]any{"type": "string"},
+				"version":         map[string]any{"type": "integer", "minimum": 1},
 				"release_managed": map[string]any{"type": "boolean"},
 				"confirm":         map[string]any{"type": "boolean"},
 			}, []string{"table", "name", "confirm"}),

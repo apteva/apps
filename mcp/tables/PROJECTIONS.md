@@ -1,4 +1,4 @@
-# SQL projections in Tables 0.2.11
+# SQL projections in Tables 0.2.12
 
 A projection stores a complete published result in Tables. Source writes append
 small transactional change records; a worker consumes them and recalculates dirty
@@ -171,18 +171,57 @@ restart; crashed claims become eligible after their fenced lease expires.
 ## Indexes and protection
 
 Use `indexes_create`, `indexes_list` and `indexes_drop` with the logical projection
-`table` name. Add `version` to manage a replacement before activation. For example:
+`table` name. Add `version` to manage a replacement before activation.
+
+For selective centre/date or relationship filters, nonunique projection indexes
+can preserve the requested leading columns and append generation:
 
 ```json
-{"table":"call_stats","name":"by_centre_prospect","columns":["centre_id","prospect_id"],"version":2}
+{"table":"call_stats","name":"by_centre_date","columns":["centre_id","event_at"],"layout":"filter_first"}
 ```
 
-Indexes belong to physical result storage and survive scope/full refreshes.
-Unique indexes on scoped projections must include every scope column; their
-internal generation prefix permits a replacement result to stage safely.
+This creates `(centre_id, event_at, _projection_generation)`. Column direction
+(`{col, order}`) is preserved. Omitting `layout` keeps the legacy
+`generation_first` layout, which prefixes `_projection_generation`; existing
+indexes are never automatically rebuilt. `indexes_list` and create responses
+report both `layout` and `physical_columns` in their actual index order.
+Normal table indexes do not accept projection layout/replacement options.
+
+To convert an existing **nonunique** index without first removing it:
+
+```json
+{"table":"call_stats","name":"by_centre_date","columns":["centre_id","event_at"],"layout":"filter_first","replace":true}
+```
+
+Tables creates a distinct physical index while retaining the previous one, then
+atomically records the new definition and removes the old index. A failed or
+canceled replacement rolls back completely. `replace` requires an existing index;
+omitting `layout` on replacement preserves its selected layout. SQLite index
+creation holds the writer lock and may delay source writes. Builds respect the
+existing `max_write_ms` operation budget (default 30 seconds), including queue
+wait and calculation; it is not an online/batched SQLite index build.
+
+Indexes survive scope/full refreshes and database restarts. Replacement
+**projection versions** can use `inherit_indexes: true` on `projections_create`
+to copy current index columns, directions, uniqueness and layouts into their empty
+result table before building/activation. Incompatible columns or unique scope
+constraints reject creation atomically. Inheritance defaults to false, preserving
+existing workflows that create indexes explicitly on each version. New physical
+identities belong to the new version; the current version remains unchanged.
+
+Unique indexes retain their existing generation prefix and must include every
+scope column. `filter_first` and `replace` are rejected for unique indexes.
+Internal generation/scope indexes remain available for staging, publication and
+bounded cleanup. The visible view still checks both scope and generation against
+published heads, excluding staged and obsolete rows for all layouts. Index order
+allows filter seeks; it does not itself exclude obsolete rows, and the planner's
+choice still depends on SQL predicates and data distribution.
+
 Ordinary row tools, including writes inside batches, cannot modify projections.
 The same `projections.read`/`projections.manage` permissions apply to inspection
 and modification of projection indexes. Raw storage names remain inaccessible.
+Migration 016 only adds defaulted index metadata; existing index storage and rows
+are untouched. Automatic backward-compatible upgrades remain supported.
 
 ## Freshness, readiness and coverage
 

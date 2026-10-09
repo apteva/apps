@@ -22,7 +22,7 @@ func TestProjectionBackgroundBudgetAndBoundedAtomicPublication(t *testing.T) {
 	mustCall(t, a, ctx, "projections_create", map[string]any{"name": "event_copy", "version": 1, "sql": "SELECT centre_id,value FROM {events}", "source_tables": []any{"events"}, "result_columns": []any{map[string]any{"name": "centre_id", "type": "text"}, map[string]any{"name": "value", "type": "number"}}, "publication_batch_rows": 8})
 	runProjectionWorker(t, a, ctx)
 	p, _ := a.loadProjection(ctx, "test-proj", "event_copy")
-	mustCall(t, a, ctx, "indexes_create", map[string]any{"table": "event_copy", "name": "by_centre", "columns": []any{"centre_id"}})
+	mustCall(t, a, ctx, "indexes_create", map[string]any{"table": "event_copy", "name": "by_centre", "columns": []any{"centre_id"}, "layout": "filter_first"})
 	// Holding the only background connection must not consume the four SDK
 	// interactive read connections. Concurrent ticks are rejected by the mutex.
 	bg, err := a.backgroundReader(context.Background(), ctx)

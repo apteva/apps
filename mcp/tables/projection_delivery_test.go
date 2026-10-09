@@ -55,6 +55,7 @@ func TestProjectionMixedWorkloadKeepsReadsAndInvalidationsBounded(t *testing.T) 
 	if err := a.projectionWorker(context.Background(), ctx); err != nil {
 		t.Fatal(err)
 	}
+	mustCall(t, a, ctx, "indexes_create", map[string]any{"table": "mixed_stats", "name": "by_centre", "columns": []any{"centre_id"}, "layout": "filter_first"})
 	seed := make([]any, 900)
 	for i := range seed {
 		seed[i] = map[string]any{"centre_id": fmt.Sprintf("centre-%d", i%4), "value": i}
@@ -70,6 +71,9 @@ func TestProjectionMixedWorkloadKeepsReadsAndInvalidationsBounded(t *testing.T) 
 			defer reads.Done()
 			for i := 0; i < 8; i++ {
 				sql := "SELECT COUNT(*) AS n FROM {events}"
+				if worker%4 == 3 {
+					sql = "SELECT total FROM {mixed_stats} WHERE centre_id='centre-0'"
+				}
 				if worker%2 == 0 {
 					// Exercise the large-list path while the projection worker is
 					// calculating and publishing generations.

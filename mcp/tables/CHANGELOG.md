@@ -1,3 +1,11 @@
+# Tables v0.2.12 — filter-leading projection indexes
+
+- Add opt-in `layout: filter_first` for nonunique projection indexes, preserving requested columns/directions before the generation suffix. Default/legacy and unique indexes retain their generation-leading layout.
+- Add `replace: true` for existing nonunique projection indexes: create the new physical index before the transactional metadata swap/drop, retain the old index on failure/cancellation, and invalidate SQL caches after successful changes. Builds use the existing bounded write operation deadline.
+- Expose `layout` and `physical_columns`; persist physical identities across restarts/drop. Add `inherit_indexes: true` to copy validated layouts/definitions into replacement versions before build/activation; explicit per-version management remains the default.
+- Add additive migration 016 without rebuilding old indexes or changing the published scope/generation visibility join and internal cleanup indexes.
+- Add indexed-search, multi-generation visibility, staged/obsolete exclusion, rollback, deadline, direction/unique, inheritance/restart and legacy migration coverage. Exercise filter-leading indexes in the mixed workload and 20k-row concurrent staging/cancellation regressions; benchmark reads, index replacement and publication/cleanup costs by layout.
+
 # Tables v0.2.11 — SQL verification reuse and watched dependencies
 
 - Cache successful ordinary SQL program verification before its early return, keeping caller/project checks on every request, bounded storage and schema/index/projection invalidation. Keep in-flight verification tied to its original epoch.

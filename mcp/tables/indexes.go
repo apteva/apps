@@ -17,11 +17,13 @@ type IndexColumn struct {
 }
 
 type TableIndex struct {
-	Name      string        `json:"name"`
-	Columns   []IndexColumn `json:"columns"`
-	Unique    bool          `json:"unique"`
-	Managed   bool          `json:"managed"`
-	CreatedAt string        `json:"created_at,omitempty"`
+	Layout          string        `json:"layout,omitempty"`
+	PhysicalColumns []IndexColumn `json:"physical_columns,omitempty"`
+	Name            string        `json:"name"`
+	Columns         []IndexColumn `json:"columns"`
+	Unique          bool          `json:"unique"`
+	Managed         bool          `json:"managed"`
+	CreatedAt       string        `json:"created_at,omitempty"`
 }
 
 func (a *App) toolIndexesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -49,6 +51,12 @@ func (a *App) toolIndexesCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	table, err := a.loadTableSchema(ctx, pid, tableName)
 	if err != nil {
 		return a.projectionIndexTool(ctx, pid, args, "create", err)
+	}
+	if _, ok := args["layout"]; ok {
+		return nil, errf("layout is only supported for projection indexes")
+	}
+	if _, ok := args["replace"]; ok {
+		return nil, errf("replace is only supported for projection indexes")
 	}
 	columns, err := parseIndexColumns(table, sliceArg(args, "columns"))
 	if err != nil {

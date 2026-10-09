@@ -229,7 +229,7 @@ func validateArguments(args map[string]any) error {
 			}
 		}
 	}
-	for _, key := range []string{"confirm", "include_total", "hydrate_files", "unique", "summary", "release_managed", "rebuild", "paused", "activate", "force"} {
+	for _, key := range []string{"confirm", "include_total", "hydrate_files", "unique", "summary", "release_managed", "rebuild", "paused", "activate", "force", "replace", "inherit_indexes"} {
 		if v, ok := args[key]; ok {
 			if _, ok := v.(bool); !ok {
 				return errf("%s must be boolean", key)

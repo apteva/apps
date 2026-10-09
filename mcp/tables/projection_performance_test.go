@@ -67,8 +67,9 @@ func BenchmarkProjectionJoinedScopedRefresh100k(b *testing.B) {
 	}
 }
 func BenchmarkProjectionGenerationPublication20k(b *testing.B) {
-	for _, indexed := range []bool{false, true} {
-		b.Run(fmt.Sprintf("result_indexes_%t", indexed), func(b *testing.B) {
+	for _, layout := range []string{"none", "generation_first", "filter_first"} {
+		indexed := layout != "none"
+		b.Run("result_indexes_"+layout, func(b *testing.B) {
 			ctx, _, _ := newFileBackedTestCtx(b, "bench")
 			a := &App{}
 			b.Cleanup(a.closeProjectionReader)
@@ -83,8 +84,8 @@ func BenchmarkProjectionGenerationPublication20k(b *testing.B) {
 			}
 			p, _ := a.loadProjection(ctx, "bench", "event_copy")
 			if indexed {
-				benchmarkCall(b, a, ctx, "indexes_create", map[string]any{"table": "event_copy", "name": "by_value", "columns": []any{"value"}})
-				benchmarkCall(b, a, ctx, "indexes_create", map[string]any{"table": "event_copy", "name": "by_centre_value", "columns": []any{"centre_id", "value"}})
+				benchmarkCall(b, a, ctx, "indexes_create", map[string]any{"table": "event_copy", "name": "by_value", "columns": []any{"value"}, "layout": layout})
+				benchmarkCall(b, a, ctx, "indexes_create", map[string]any{"table": "event_copy", "name": "by_centre_value", "columns": []any{"centre_id", "value"}, "layout": layout})
 			}
 			b.ReportAllocs()
 			b.ResetTimer()

@@ -1,3 +1,59 @@
+# Tables 0.2.12 projection index ordering
+
+Validated locally on 2026-10-09, Darwin arm64 / Apple M1 Pro, Go 1.25.12,
+SDK v0.97.0, SQLite v1.50.0, in an isolated checkout and disposable WAL databases.
+No production instance or database was accessed.
+
+Release checks passed: `GOWORK=off go test -race ./...` (230 seconds),
+focused race regressions, `go vet ./...`, standalone Darwin arm64 and Linux
+amd64 builds, 16 Bun UI tests (74 assertions), UI type checking with the shared
+workspace ui-kit path, production UI bundle build, and `scripts/smoke.py`
+against the compiled sidecar. The smoke test covers public HTTP/MCP index
+replacement, restart, inherited replacement builds, activation and index drop.
+Go checks used the pinned public SDK with the workspace overlay disabled.
+
+`projection_index_layout_test.go` checks 10,000 source rows, 50 scopes and 11
+simultaneously published generations. The default generation-leading indexes
+produce `SCAN d`; replacements using `filter_first` produce indexed searches on
+`centre_id` plus timestamp bounds, and on `sale_id,call_id`. Results are identical
+before/after, including untouched and partially refreshed scopes. Explicit staged
+rows and obsolete scoped rows remain invisible. Internal generation searches
+continue to support bounded cleanup; source changes invalidate and publish normally.
+
+Coverage also checks actual SQLite index column ordering/directions against API
+metadata, legacy blank physical identities, failed swaps after new-index creation
+(complete rollback), unique scope/generation constraints, unsupported options,
+replacement preserving layout, inheritance before activation, incompatible schema
+and unique scope inheritance failures, SQLite file reopen, index drop after
+restart, and additive migration from the exact migrations 001–015 without reindexing.
+A one-millisecond write-budget test cancels a 10k-row replacement, retains the old
+index, and permits the next ordinary source write (14.7 ms observed cancellation
+return time locally; context interruption is not a real-time deadline guarantee).
+
+The mixed workload now includes indexed projection API reads alongside source
+list reads, background calculation/publication and an event burst. The existing
+20k-row staging/cancellation/atomic-publication regression maintains a filter-leading
+index, checks that readers see complete generations, and observes a source update
+during staging. That source update completed in 6.1 ms in the local race run.
+
+Fixed-size benchmark samples (three trials each):
+
+| Workload | Generation first | Filter first |
+|---|---:|---:|
+| API centre/date query, 10k rows / 11 published generations | 1.12–1.16 ms | 0.28–0.30 ms |
+| API sale/call identifier query, same fixture | 1.20–1.24 ms | 0.24–0.25 ms |
+| Transactional index replacement, 10k rows | 14.3–16.0 ms | 9.8–11.5 ms |
+| 20k-row full refresh with two result indexes and retired-generation cleanup | 0.87–1.55 s | 0.78–0.85 s |
+
+Reads use 100 iterations per trial; index builds use 10. Publication uses two
+iterations per trial, includes calculation, index maintenance, staging, publication
+and cleanup, and keeps source/retained storage fixed. With no user result indexes,
+publication measured 0.70–1.01 s. Small trial counts and host activity limit inference:
+these are local controlled observations, not production latency/capacity guarantees.
+SQLite index builds hold the writer lock and use `max_write_ms`; the layout option
+does not make index creation online. For large datasets, build inherited indexes
+on the empty replacement version before its result is populated when practical.
+
 # Tables 0.2.11 verification cache and watched dependencies
 
 Validated on 2026-10-08 in an isolated checkout using disposable databases,

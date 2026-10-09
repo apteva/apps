@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.2.11
+version: 0.2.12
 description: |
+  v0.2.12 Adds opt-in filter-leading nonunique projection indexes, safe index
+  replacement, physical layout reporting and replacement-version index inheritance.
   v0.2.11 Fixes ordinary SQL verification caching and adds opt-in watched
   dependency columns with durable per-version invalidation and accurate freshness.
   v0.2.10 Adds diagnostics outcome filters, bounded row lists and live SSE updates.
@@ -104,9 +106,9 @@ provides:
     - name: tables_drop
       description: 'Delete a table and all its rows. Args: name, confirm. Idempotent only when confirm=true.'
     - name: indexes_create
-      description: 'Create a validated composite index. Args: table, name, columns ([name or {col, order?}]), unique?. Arbitrary SQL expressions are not accepted.'
+      description: 'Create a validated composite index. Args: table, name, columns ([name or {col, order?}]), unique?. Projection indexes also accept version?, layout? (generation_first/filter_first), replace? (nonunique only). Arbitrary SQL expressions are not accepted.'
     - name: indexes_list
-      description: 'List user and rows_upsert-managed indexes for a table. Args: table.'
+      description: 'List user and rows_upsert-managed indexes for a table; projection indexes include layout and physical column order. Args: table, version?.'
     - name: indexes_drop
       description: 'Drop a user-managed index. Args: table, name, confirm=true. Pass release_managed=true to deliberately remove a managed uniqueness guarantee.'
     - name: rows_insert
@@ -245,7 +247,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.2.11
+    ref: tables/v0.2.12
     entry: mcp/tables
   port: 8080
   health_check: /health

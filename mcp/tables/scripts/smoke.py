@@ -116,6 +116,11 @@ with tempfile.TemporaryDirectory(prefix="tables-smoke-") as temp:
                 time.sleep(.05)
             raise AssertionError(f"Projection did not publish {total}: {status}")
         initial=await_projection(2)
+        mcp("indexes_create", {"table":"measurement_totals","name":"by_centre","columns":["centre_id"]})
+        index=mcp("indexes_create", {"table":"measurement_totals","name":"by_centre","columns":["centre_id"],"layout":"filter_first","replace":True})["index"]
+        assert index["layout"]=="filter_first"
+        assert [c["col"] for c in index["physical_columns"]]==["centre_id","_projection_generation"]
+
         mcp("rows_update", {"table":"measurements","id":measurement_id,"fields":{"metadata":"synced"}})
         clean=mcp("projections_status", {"name":"measurement_totals"})
         assert clean["ready"] and clean["latest_relevant_change"]==initial["latest_relevant_change"], clean
@@ -123,8 +128,27 @@ with tempfile.TemporaryDirectory(prefix="tables-smoke-") as temp:
         stop()
         start()
         await_projection(7)
+        index=mcp("indexes_list", {"table":"measurement_totals"})["indexes"][0]
+        assert index["layout"]=="filter_first" and [c["col"] for c in index["physical_columns"]]==["centre_id","_projection_generation"]
+
+        definition=mcp("projections_describe", {"name":"measurement_totals"})
+        mcp("projections_create", {"name":"measurement_totals","version":2,"activate":False,"inherit_indexes":True,
+            "sql":definition["sql"],"source_tables":definition["source_tables"],"result_columns":definition["result_columns"],
+            "scope_columns":definition["scope_columns"],"source_dependencies":definition["source_dependencies"]})
+        assert mcp("indexes_list", {"table":"measurement_totals","version":2})["indexes"][0]["layout"]=="filter_first"
+        for _ in range(200):
+            if mcp("projections_status", {"name":"measurement_totals","version":2})["ready"]:
+                break
+            time.sleep(.05)
+        else:
+            raise AssertionError("Inherited replacement never became ready")
+        mcp("projections_activate", {"name":"measurement_totals","version":2})
+        await_projection(7)
+        mcp("indexes_drop", {"table":"measurement_totals","name":"by_centre","confirm":True})
+        assert mcp("indexes_list", {"table":"measurement_totals"})["indexes"]==[]
+
         assert mcp("projections_describe", {"name":"measurement_totals"})["source_dependencies"][0]["watched_columns"]==["centre_id","value"]
-        print("PASS: real HTTP/MCP authentication, exact numbers, cursors, optimistic updates, automatic restart migration and watched projection capture/publication/recovery")
+        print("PASS: real HTTP/MCP authentication, exact numbers, cursors, optimistic updates, automatic restart migration and watched projection recovery, filter-leading index replacement/restart/inheritance/drop")
     finally:
         stop()
         log.close()

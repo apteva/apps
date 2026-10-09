@@ -236,6 +236,7 @@ func (a *App) projectionTools() []sdk.Tool {
 	create["source_tables"] = map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
 	create["result_columns"] = columns
 	create["scope_columns"] = map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
+	create["inherit_indexes"] = map[string]any{"type": "boolean", "description": "Copy the current version's index definitions and layouts to this replacement before building. Incompatible columns/unique scope constraints fail atomically. Default false."}
 	create["activate"] = map[string]any{"type": "boolean", "description": "First version becomes readable; replacements require projections_activate after building."}
 	for k, v := range projectionOptionSchema() {
 		create[k] = v
@@ -385,6 +386,11 @@ func (a *App) toolProjectionsCreate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	}
 	if err := createProjectionStorage(tx, p); err != nil {
 		return nil, err
+	}
+	if boolArg(args, "inherit_indexes") {
+		if err := inheritProjectionIndexesTx(tx, p, ctx); err != nil {
+			return nil, err
+		}
 	}
 	for _, id := range p.SourceIDs {
 		if _, err := tx.Exec(`INSERT INTO projection_sources(projection_id,table_id) VALUES(?,?)`, p.ID, id); err != nil {
