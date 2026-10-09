@@ -19,6 +19,39 @@ import (
 const websocketCloseGracePeriod = 200 * time.Millisecond
 const websocketWriteTimeout = 5 * time.Second
 
+// Queue freshness and network write completion are independent budgets.
+const liveAudioWriteTimeout = 250 * time.Millisecond
+const websocketForcedCloseTimeout = 500 * time.Millisecond
+const maxWriteDiagnosticEvents = 32
+
+type websocketWriteEvent struct {
+	LocalShutdown     bool    `json:"local_shutdown,omitempty"`
+	ConnectionID      string  `json:"connection_id,omitempty"`
+	At                string  `json:"at"`
+	Reason            string  `json:"reason"`
+	PCMBytes          int     `json:"pcm_bytes,omitempty"`
+	QueueAgeMS        float64 `json:"queue_age_ms"`
+	SourceAgeMS       float64 `json:"source_age_ms,omitempty"`
+	SourceClockMS     float64 `json:"source_clock_ms,omitempty"`
+	SourceTimestampMS float64 `json:"source_timestamp_ms,omitempty"`
+	SourceSequence    uint64  `json:"source_sequence,omitempty"`
+	WriteMS           float64 `json:"write_ms,omitempty"`
+	DeadlineMS        int64   `json:"deadline_ms,omitempty"`
+	WrittenBytes      int     `json:"written_bytes,omitempty"`
+	Opcode            int     `json:"opcode,omitempty"`
+}
+type websocketTransportSnapshot struct {
+	MaxQueueMS    float64               `json:"max_queue_ms"`
+	Writes        int64                 `json:"writes"`
+	WriteErrors   int64                 `json:"write_errors"`
+	WriteTimeouts int64                 `json:"write_timeouts"`
+	MaxWriteMS    float64               `json:"max_write_ms"`
+	ForcedCloses  int64                 `json:"forced_closes"`
+	LastCloseAt   string                `json:"last_close_at,omitempty"`
+	CloseMS       float64               `json:"close_ms"`
+	Events        []websocketWriteEvent `json:"events,omitempty"`
+}
+
 type mediaCloseLeg string
 
 const (
@@ -57,21 +90,24 @@ func (w *websocketCountingWriter) Write(data []byte) (int, error) {
 // websocketWriterPump is the sole writer for a WebSocket connection. Data,
 // control, and close frames all pass through the same queue.
 type websocketWriterPump struct {
-	whisperDropped atomic.Int64
-	whisperSent    atomic.Int64
-	whisperMu      sync.Mutex
-	whisper        chan websocketWriteRequest
-	audioDropped   atomic.Int64
-	audioMu        sync.Mutex
-	audioBytes     int
-	audioStats     liveAudioQueueSnapshot
-	conn           net.Conn
-	state          ws.State
-	requests       chan websocketWriteRequest
-	audio          chan websocketWriteRequest
-	stop           chan struct{}
-	done           chan struct{}
-	stopOnce       sync.Once
+	whisperDropped  atomic.Int64
+	whisperSent     atomic.Int64
+	whisperMu       sync.Mutex
+	whisper         chan websocketWriteRequest
+	audioDropped    atomic.Int64
+	audioMu         sync.Mutex
+	audioBytes      int
+	audioStats      liveAudioQueueSnapshot
+	transportStats  websocketTransportSnapshot
+	diagnosticID    string
+	conn            net.Conn
+	state           ws.State
+	requests        chan websocketWriteRequest
+	audio           chan websocketWriteRequest
+	stop            chan struct{}
+	done            chan struct{}
+	stopOnce        sync.Once
+	forcedCloseOnce sync.Once
 
 	enqueueMu sync.Mutex
 	stateMu   sync.Mutex
@@ -191,11 +227,13 @@ func (p *websocketWriterPump) run() {
 			}
 			if sourceRemaining <= 0 {
 				p.audioStats.SourceStaleBytes += int64(request.pcmBytes)
+				p.recordWriteEventLocked(request, "source_expired", 0, 0, 0)
 				p.audioMu.Unlock()
 				continue
 			}
 			if age >= liveAudioMaxAge {
 				p.audioStats.StaleBytes += int64(request.pcmBytes)
+				p.recordWriteEventLocked(request, "queue_expired", 0, 0, 0)
 				p.audioMu.Unlock()
 				continue
 			}
@@ -204,13 +242,17 @@ func (p *websocketWriterPump) run() {
 			// a socket write to a near-zero source deadline: a partial WebSocket
 			// write would force a healthy media leg closed. The next stage checks
 			// the SAME source age again after any in-flight transport delay.
-			request.timeout = min(request.timeout, liveAudioMaxAge-age)
+			request.timeout = liveAudioWriteTimeout
 		}
 		if request.pcmBytes > 0 && sourceAudioHeader(request.payload) > 0 {
 			binary.LittleEndian.PutUint64(request.payload[16:], math.Float64bits(mediaClockMS()))
 			binary.LittleEndian.PutUint64(request.payload[24:], math.Float64bits(float64(time.Since(request.enqueued))/float64(time.Millisecond)))
 		}
 		started := time.Now()
+		queuedFor := time.Duration(0)
+		if !request.enqueued.IsZero() {
+			queuedFor = started.Sub(request.enqueued)
+		}
 		timeout := request.timeout
 		if timeout <= 0 {
 			timeout = websocketWriteTimeout
@@ -221,25 +263,38 @@ func (p *websocketWriterPump) run() {
 		if err == nil {
 			err = wsutil.WriteMessage(&counted, p.state, request.op, request.payload)
 		}
-		var timeoutError net.Error
-		expiredUnsentAudio := attempted && request.pcmBytes > 0 && counted.bytes == 0 && errors.As(err, &timeoutError) && timeoutError.Timeout()
+		var timedOut net.Error
+		socketTimeout := errors.As(err, &timedOut) && timedOut.Timeout()
+		expiredUnsentAudio := attempted && request.pcmBytes > 0 && counted.bytes == 0 && socketTimeout
+		p.audioMu.Lock()
 		if request.pcmBytes > 0 {
-			p.audioMu.Lock()
 			p.audioStats.MaxWriteMS = max(p.audioStats.MaxWriteMS, time.Since(started).Milliseconds())
 			if err == nil {
 				p.audioStats.SentBytes += int64(request.pcmBytes)
 			} else {
 				p.audioStats.WriteErrors++
 				if expiredUnsentAudio {
-					p.audioStats.StaleBytes += int64(request.pcmBytes)
+					p.audioStats.WriteTimeoutBytes += int64(request.pcmBytes)
 					p.audioStats.WriteTimeoutDrops++
 				} else {
 					p.audioStats.FailedBytes += int64(request.pcmBytes)
 				}
 			}
 			p.audioStats.LastWriteAt = time.Now().UTC().Format(time.RFC3339Nano)
-			p.audioMu.Unlock()
 		}
+		p.transportStats.Writes++
+		p.transportStats.MaxQueueMS = max(p.transportStats.MaxQueueMS, float64(queuedFor)/float64(time.Millisecond))
+		p.transportStats.MaxWriteMS = max(p.transportStats.MaxWriteMS, float64(time.Since(started))/float64(time.Millisecond))
+		if err != nil {
+			p.transportStats.WriteErrors++
+			reason := "socket_write_error"
+			if socketTimeout {
+				p.transportStats.WriteTimeouts++
+				reason = "socket_write_timeout"
+			}
+			p.recordWriteEventLocked(request, reason, timeout, time.Since(started), counted.bytes)
+		}
+		p.audioMu.Unlock()
 		if expiredUnsentAudio {
 			// A scheduling pause or backpressure may consume the live frame's
 			// deadline before a single byte is written. Drop that old frame;
@@ -266,22 +321,25 @@ const liveAudioMaxBytes = 24000 * 2 * 120 / 1000
 const liveAudioMaxAge = 250 * time.Millisecond
 
 type liveAudioQueueSnapshot struct {
-	QueuedMS             int    `json:"queued_ms"`
-	MaxQueuedMS          int    `json:"max_queued_ms"`
-	MaxResidenceMS       int64  `json:"max_residence_ms"`
-	MaxWriteMS           int64  `json:"max_write_ms"`
-	EnqueuedBytes        int64  `json:"enqueued_bytes"`
-	WhisperSentFrames    int64  `json:"coaching_sent_frames"`
-	WhisperDroppedFrames int64  `json:"coaching_dropped_frames"`
-	SentBytes            int64  `json:"sent_bytes"`
-	OverflowBytes        int64  `json:"overflow_bytes"`
-	SourceStaleBytes     int64  `json:"source_stale_bytes"`
-	StaleBytes           int64  `json:"stale_bytes"`
-	FlushedBytes         int64  `json:"flushed_bytes"`
-	FailedBytes          int64  `json:"failed_bytes"`
-	WriteErrors          int64  `json:"write_errors"`
-	WriteTimeoutDrops    int64  `json:"write_timeout_drops"`
-	LastWriteAt          string `json:"last_write_at,omitempty"`
+	QueuedMS             int                        `json:"queued_ms"`
+	MaxQueuedMS          int                        `json:"max_queued_ms"`
+	MaxResidenceMS       int64                      `json:"max_residence_ms"`
+	MaxWriteMS           int64                      `json:"max_write_ms"`
+	EnqueuedBytes        int64                      `json:"enqueued_bytes"`
+	WhisperSentFrames    int64                      `json:"coaching_sent_frames"`
+	WhisperDroppedFrames int64                      `json:"coaching_dropped_frames"`
+	SentBytes            int64                      `json:"sent_bytes"`
+	OverflowBytes        int64                      `json:"overflow_bytes"`
+	SourceStaleBytes     int64                      `json:"source_stale_bytes"`
+	StaleBytes           int64                      `json:"stale_bytes"`
+	FlushedBytes         int64                      `json:"flushed_bytes"`
+	FailedBytes          int64                      `json:"failed_bytes"`
+	WriteErrors          int64                      `json:"write_errors"`
+	WriteTimeoutBytes    int64                      `json:"write_timeout_bytes"`
+	DropEvents           []websocketWriteEvent      `json:"drop_events,omitempty"`
+	Transport            websocketTransportSnapshot `json:"transport"`
+	WriteTimeoutDrops    int64                      `json:"write_timeout_drops"`
+	LastWriteAt          string                     `json:"last_write_at,omitempty"`
 }
 
 func (p *websocketWriterPump) audioSnapshot() liveAudioQueueSnapshot {
@@ -291,6 +349,9 @@ func (p *websocketWriterPump) audioSnapshot() liveAudioQueueSnapshot {
 	p.audioMu.Lock()
 	defer p.audioMu.Unlock()
 	s := p.audioStats
+	s.DropEvents = append([]websocketWriteEvent(nil), s.DropEvents...)
+	s.Transport = p.transportStats
+	s.Transport.Events = append([]websocketWriteEvent(nil), p.transportStats.Events...)
 	s.WhisperSentFrames = p.whisperSent.Load()
 	s.WhisperDroppedFrames = p.whisperDropped.Load()
 	s.QueuedMS = p.audioBytes * 1000 / 48000
@@ -349,7 +410,7 @@ func (p *websocketWriterPump) queueAudio(data []byte, headerBytes int) {
 			return
 		}
 	}
-	p.audio <- websocketWriteRequest{op: ws.OpBinary, payload: append([]byte(nil), data...), timeout: liveAudioMaxAge, enqueued: time.Now(), pcmBytes: pcmBytes}
+	p.audio <- websocketWriteRequest{op: ws.OpBinary, payload: append([]byte(nil), data...), timeout: liveAudioWriteTimeout, enqueued: time.Now(), pcmBytes: pcmBytes}
 	p.audioBytes += pcmBytes
 	p.audioStats.MaxQueuedMS = max(p.audioStats.MaxQueuedMS, p.audioBytes*1000/48000)
 }
@@ -404,7 +465,7 @@ func (p *websocketWriterPump) queueControlFrame(op ws.OpCode, data []byte) bool 
 	default:
 	}
 	select {
-	case p.requests <- websocketWriteRequest{op: op, payload: append([]byte(nil), data...), timeout: liveAudioMaxAge}:
+	case p.requests <- websocketWriteRequest{op: op, payload: append([]byte(nil), data...), timeout: liveAudioWriteTimeout, enqueued: time.Now()}:
 		return true
 	default:
 		return false
@@ -418,6 +479,14 @@ func (p *websocketWriterPump) Write(op ws.OpCode, payload []byte) error {
 func (p *websocketWriterPump) write(op ws.OpCode, payload []byte, timeout time.Duration) error {
 	if p == nil {
 		return net.ErrClosed
+	}
+	// Close replies (including protocol errors) cannot wait behind an active
+	// data write or a full control queue for the ordinary five-second budget.
+	if op == ws.OpClose {
+		started := time.Now()
+		timer := time.AfterFunc(websocketForcedCloseTimeout, func() { p.forceClose(started) })
+		defer timer.Stop()
+		timeout = min(timeout, liveAudioWriteTimeout)
 	}
 	p.enqueueMu.Lock()
 	p.stateMu.Lock()
@@ -438,6 +507,7 @@ func (p *websocketWriterPump) write(op ws.OpCode, payload []byte, timeout time.D
 		payload:  append([]byte(nil), payload...),
 		timeout:  timeout,
 		complete: make(chan error, 1),
+		enqueued: time.Now(),
 	}
 	select {
 	case p.requests <- request:
@@ -481,13 +551,37 @@ func (c *gracefulWebSocket) Close(code ws.StatusCode, reason string) {
 		if len(reason) > 120 {
 			reason = reason[:120]
 		}
+		started := time.Now()
+		forced := make(chan struct{})
+		timer := time.AfterFunc(websocketForcedCloseTimeout, func() {
+			if c.writer != nil {
+				c.writer.forceClose(started)
+			} else {
+				_ = c.conn.SetDeadline(time.Now())
+				_ = c.conn.Close()
+			}
+			close(forced)
+		})
 		if c.writer != nil {
-			_ = c.writer.write(ws.OpClose, ws.NewCloseFrameBody(code, reason), time.Second)
+			_ = c.writer.write(ws.OpClose, ws.NewCloseFrameBody(code, reason), liveAudioWriteTimeout)
 		}
-		time.Sleep(websocketCloseGracePeriod)
+		select {
+		case <-time.After(websocketCloseGracePeriod):
+		case <-forced:
+		}
 		_ = c.conn.Close()
 		if c.writer != nil {
 			c.writer.Stop()
+		}
+		wasForced := !timer.Stop()
+		if wasForced {
+			<-forced
+		}
+		if c.writer != nil {
+			c.writer.audioMu.Lock()
+			c.writer.transportStats.CloseMS = float64(time.Since(started)) / float64(time.Millisecond)
+			c.writer.transportStats.LastCloseAt = time.Now().UTC().Format(time.RFC3339Nano)
+			c.writer.audioMu.Unlock()
 		}
 	})
 }
@@ -591,7 +685,7 @@ func (p *websocketWriterPump) queueWhisper(data []byte, valid func() bool) bool 
 		return false
 	default:
 	}
-	request := websocketWriteRequest{op: ws.OpBinary, payload: append([]byte(nil), data...), enqueued: time.Now(), timeout: liveAudioMaxAge, whisper: true, valid: valid}
+	request := websocketWriteRequest{op: ws.OpBinary, payload: append([]byte(nil), data...), enqueued: time.Now(), timeout: liveAudioWriteTimeout, whisper: true, valid: valid}
 	select {
 	case p.whisper <- request:
 		return true
@@ -621,4 +715,57 @@ func (p *websocketWriterPump) clearWhisper() {
 			return
 		}
 	}
+}
+
+// Bounded in-memory evidence only: no logging/SQL or audio payloads on the writer.
+func (p *websocketWriterPump) recordWriteEventLocked(r websocketWriteRequest, reason string, deadline, elapsed time.Duration, written int) {
+	p.stateMu.Lock()
+	localShutdown := p.closeSent
+	p.stateMu.Unlock()
+	e := websocketWriteEvent{LocalShutdown: localShutdown, ConnectionID: p.diagnosticID, At: time.Now().UTC().Format(time.RFC3339Nano), Reason: reason, PCMBytes: r.pcmBytes, DeadlineMS: deadline.Milliseconds(), WriteMS: float64(elapsed) / float64(time.Millisecond), WrittenBytes: written, Opcode: int(r.op)}
+	if !r.enqueued.IsZero() {
+		e.QueueAgeMS = float64(max(time.Duration(0), time.Since(r.enqueued)-elapsed)) / float64(time.Millisecond)
+	}
+	if sourceAudioHeader(r.payload) == sourceAudioHeaderBytes {
+		v := math.Float64frombits(binary.LittleEndian.Uint64(r.payload[48:]))
+		if !math.IsNaN(v) && !math.IsInf(v, 0) {
+			e.SourceClockMS = v
+			e.SourceAgeMS = mediaClockMS() - v
+		}
+		original := math.Float64frombits(binary.LittleEndian.Uint64(r.payload[32:]))
+		if !math.IsNaN(original) && !math.IsInf(original, 0) {
+			e.SourceTimestampMS = original
+		}
+		e.SourceSequence = binary.LittleEndian.Uint64(r.payload[40:])
+	}
+	p.transportStats.Events = append(p.transportStats.Events, e)
+	if len(p.transportStats.Events) > maxWriteDiagnosticEvents {
+		p.transportStats.Events = p.transportStats.Events[len(p.transportStats.Events)-maxWriteDiagnosticEvents:]
+	}
+	if r.pcmBytes > 0 {
+		p.audioStats.DropEvents = append(p.audioStats.DropEvents, e)
+		if len(p.audioStats.DropEvents) > maxWriteDiagnosticEvents {
+			p.audioStats.DropEvents = p.audioStats.DropEvents[len(p.audioStats.DropEvents)-maxWriteDiagnosticEvents:]
+		}
+	}
+}
+
+func (p *websocketWriterPump) setDiagnosticID(id string) {
+	p.audioMu.Lock()
+	defer p.audioMu.Unlock()
+	p.diagnosticID = id
+}
+
+func (p *websocketWriterPump) forceClose(started time.Time) {
+	p.forcedCloseOnce.Do(func() {
+		// Socket interruption always precedes diagnostics locks.
+		_ = p.conn.SetDeadline(time.Now())
+		_ = p.conn.Close()
+		p.Stop()
+		p.audioMu.Lock()
+		defer p.audioMu.Unlock()
+		p.transportStats.ForcedCloses++
+		p.transportStats.LastCloseAt = time.Now().UTC().Format(time.RFC3339Nano)
+		p.recordWriteEventLocked(websocketWriteRequest{op: ws.OpClose}, "forced_close", websocketForcedCloseTimeout, time.Since(started), 0)
+	})
 }

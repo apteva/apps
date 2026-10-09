@@ -186,6 +186,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		return
 	}
 	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
+	bridge.trackWriter(mediaCloseLegCore, coreWriter)
 	coreCloser := newGracefulWebSocket(core, coreWriter)
 	defer func() {
 		code, reason := closeState.Details()
@@ -702,6 +703,7 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
+	bridge.trackWriter(mediaCloseLegCore, coreWriter)
 	coreCloser := newGracefulWebSocket(core, coreWriter)
 	defer func() {
 		code, reason := closeState.Details()

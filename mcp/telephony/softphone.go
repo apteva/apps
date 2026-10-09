@@ -499,8 +499,8 @@ func (a *App) handlePeerSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	defer func() {
-		wasCurrent := hub.clearPeer(writer)
 		closer.Close(ws.StatusNormalClosure, "softphone peer closed")
+		wasCurrent := hub.clearPeer(writer)
 		// A peer socket can disappear because the carrier network blipped or a
 		// blue-green app handoff moved the bridge. Keep the browser attached and
 		// let the replacement peer rejoin this hub. The durable call status poll
@@ -633,13 +633,14 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 	hub.telemetry.restore(row.BrowserAudioDiagnostics)
 	hash, hashEpoch, addressSource := a.audioPeerHasher.hashAddress(networkAddress.Client, networkAddress.Source)
 	connectionID := hub.telemetry.openedWithNetwork(writer, hash, hashEpoch, addressSource, newAudioNetworkContextWithAddress(row, identity, networkAddress, networkConfig), a.audioNetworks.enqueue)
+	writer.setDiagnosticID(connectionID)
 	defer func() {
 		hub.telemetry.closed(writer, "handler_closed", nil)
+		closer.Close(ws.StatusNormalClosure, "softphone browser closed")
 		hub.clearBrowser(writer)
 		if err := a.persistAudioTelemetry(callID, hub); err != nil {
 			logSoftphone("persist audio telemetry failed", "call", callID, "err", err)
 		}
-		closer.Close(ws.StatusNormalClosure, "softphone browser closed")
 		a.softphones.dropIfEmpty(callID, hub)
 		logSoftphone("softphone browser detached", "call", callID)
 	}()
@@ -713,6 +714,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		ticks := 0
+		lastCheckReason := ""
 		for {
 			select {
 			case <-done:
@@ -728,8 +730,21 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 				}
 				reason, expiry := a.phoneMediaCheck(row, token)
 				if reason == "" {
+					if lastCheckReason != "" {
+						hub.telemetry.leaseCheckEvent(writer, "lease_check_recovered", "", expiry)
+					}
+					lastCheckReason = ""
 					verifiedExpiry = expiry
 					continue
+				}
+				reason = establishedMediaLeaseReason(reason, verifiedExpiry, time.Now().Unix())
+				if reason != lastCheckReason {
+					action := "lease_check_failed"
+					if temporaryMediaFailure(reason) {
+						action = "lease_check_deferred"
+					}
+					hub.telemetry.leaseCheckEvent(writer, action, reason, verifiedExpiry)
+					lastCheckReason = reason
 				}
 				if temporaryMediaFailure(reason) && verifiedExpiry > time.Now().Unix() {
 					continue

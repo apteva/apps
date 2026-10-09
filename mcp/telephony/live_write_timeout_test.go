@@ -76,11 +76,14 @@ func TestLiveAudioUnsentTimeoutDropsOnlyExpiredFrameAndRecovers(t *testing.T) {
 				t.Fatal(err)
 			}
 			s := writer.audioSnapshot()
-			if s.StaleBytes != 960 || s.SentBytes != 960 || s.FailedBytes != 0 || s.WriteErrors != 1 || s.WriteTimeoutDrops != 1 || s.EnqueuedBytes != s.StaleBytes+s.SentBytes {
+			if s.WriteTimeoutBytes != 960 || s.StaleBytes != 0 || s.SentBytes != 960 || s.FailedBytes != 0 || s.WriteErrors != 1 || s.WriteTimeoutDrops != 1 || s.EnqueuedBytes != s.WriteTimeoutBytes+s.StaleBytes+s.SentBytes {
 				t.Fatalf("loss accounting: %+v", s)
 			}
+			if s.Transport.WriteTimeouts != 1 || len(s.DropEvents) != 1 || s.DropEvents[0].Reason != "socket_write_timeout" || s.DropEvents[0].At == "" || s.DropEvents[0].WrittenBytes != 0 || s.DropEvents[0].DeadlineMS != liveAudioWriteTimeout.Milliseconds() {
+				t.Fatalf("timeout misclassified: %+v", s)
+			}
 			merged := mergeLiveAudioSnapshots(s, s)
-			if merged.WriteTimeoutDrops != 2 || merged.StaleBytes != 1920 {
+			if merged.WriteTimeoutDrops != 2 || merged.WriteTimeoutBytes != 1920 || merged.StaleBytes != 0 {
 				t.Fatal("reconnect aggregation lost recovery accounting")
 			}
 		})

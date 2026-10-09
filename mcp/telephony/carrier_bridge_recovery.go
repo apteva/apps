@@ -42,16 +42,17 @@ type carrierBridgeRegistry struct {
 	current map[string]*carrierBridgeLease
 }
 type carrierBridgeEvidence struct {
-	At                string `json:"at"`
-	OccurredAt        string `json:"occurred_at,omitempty"`
-	Kind              string `json:"kind"`
-	Leg               string `json:"leg,omitempty"`
-	Detail            string `json:"detail,omitempty"`
-	EventID           string `json:"provider_event_id,omitempty"`
-	StreamID          string `json:"stream_id,omitempty"`
-	ActualCloseCode   int    `json:"actual_close_code,omitempty"`
-	ActualCloseReason string `json:"actual_close_reason,omitempty"`
-	LocalCloseCode    int    `json:"local_close_code,omitempty"`
+	Transport         *websocketTransportSnapshot `json:"transport,omitempty"`
+	At                string                      `json:"at"`
+	OccurredAt        string                      `json:"occurred_at,omitempty"`
+	Kind              string                      `json:"kind"`
+	Leg               string                      `json:"leg,omitempty"`
+	Detail            string                      `json:"detail,omitempty"`
+	EventID           string                      `json:"provider_event_id,omitempty"`
+	StreamID          string                      `json:"stream_id,omitempty"`
+	ActualCloseCode   int                         `json:"actual_close_code,omitempty"`
+	ActualCloseReason string                      `json:"actual_close_reason,omitempty"`
+	LocalCloseCode    int                         `json:"local_close_code,omitempty"`
 }
 type carrierBridgeLease struct {
 	app           *App
@@ -63,6 +64,7 @@ type carrierBridgeLease struct {
 	closeState    *websocketCloseState
 	mu            sync.Mutex
 	sockets       []net.Conn
+	writers       map[mediaCloseLeg]*websocketWriterPump
 	stream        string
 	connected     bool
 	recovered     bool
@@ -353,7 +355,17 @@ func (b *carrierBridgeLease) received(op ws.OpCode, data []byte) {
 func (b *carrierBridgeLease) protocolHealthy(now time.Time) bool {
 	return now.Sub(time.Unix(0, b.lastRead.Load())) <= carrierProtocolTimeout
 }
+func (b *carrierBridgeLease) trackWriter(leg mediaCloseLeg, writer *websocketWriterPump) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.writers == nil {
+		b.writers = map[mediaCloseLeg]*websocketWriterPump{}
+	}
+	b.writers[leg] = writer
+	writer.setDiagnosticID(b.generation + ":" + string(leg))
+}
 func (b *carrierBridgeLease) watch(writer *websocketWriterPump) {
+	b.trackWriter(mediaCloseLegCarrier, writer)
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -401,6 +413,10 @@ func (b *carrierBridgeLease) finish() {
 	}
 	if b.first != nil {
 		state = "recovering"
+	}
+	for leg, writer := range b.writers {
+		snapshot := writer.audioSnapshot().Transport
+		b.appendLocked(carrierBridgeEvidence{Kind: "socket_summary", Leg: string(leg), Transport: &snapshot})
 	}
 	b.appendLocked(carrierBridgeEvidence{Kind: "local_cleanup", Leg: string(leg), Detail: reason, LocalCloseCode: int(code)})
 	_ = b.persistLocked(state)

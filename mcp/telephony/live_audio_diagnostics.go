@@ -158,6 +158,12 @@ func mergeLiveAudioSnapshots(a, b liveAudioQueueSnapshot) liveAudioQueueSnapshot
 	a.FailedBytes += b.FailedBytes
 	a.WriteErrors += b.WriteErrors
 	a.WriteTimeoutDrops += b.WriteTimeoutDrops
+	a.WriteTimeoutBytes += b.WriteTimeoutBytes
+	a.DropEvents = append(append([]websocketWriteEvent(nil), a.DropEvents...), b.DropEvents...)
+	if len(a.DropEvents) > maxWriteDiagnosticEvents {
+		a.DropEvents = a.DropEvents[len(a.DropEvents)-maxWriteDiagnosticEvents:]
+	}
+	a.Transport = mergeWebsocketTransport(a.Transport, b.Transport)
 	if b.LastWriteAt > a.LastWriteAt {
 		a.LastWriteAt = b.LastWriteAt
 	}
@@ -244,7 +250,7 @@ func (h *softphoneHub) finishCarrierForward(w *websocketWriterPump) {
 }
 func carrierMediaWriteTimeout(row *callRow) time.Duration {
 	if row.PeerKind == peerKindHuman || row.PeerKind == peerKindExternal {
-		return liveAudioMaxAge
+		return liveAudioWriteTimeout
 	}
 	return websocketWriteTimeout
 }
@@ -360,4 +366,22 @@ func (h *softphoneHub) setPacerStats(p *livePacerStats) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.pacerStats = p
+}
+
+func mergeWebsocketTransport(a, b websocketTransportSnapshot) websocketTransportSnapshot {
+	a.Writes += b.Writes
+	a.WriteErrors += b.WriteErrors
+	a.WriteTimeouts += b.WriteTimeouts
+	a.ForcedCloses += b.ForcedCloses
+	a.MaxWriteMS = max(a.MaxWriteMS, b.MaxWriteMS)
+	a.MaxQueueMS = max(a.MaxQueueMS, b.MaxQueueMS)
+	if b.LastCloseAt > a.LastCloseAt {
+		a.LastCloseAt = b.LastCloseAt
+		a.CloseMS = b.CloseMS
+	}
+	a.Events = append(append([]websocketWriteEvent(nil), a.Events...), b.Events...)
+	if len(a.Events) > maxWriteDiagnosticEvents {
+		a.Events = a.Events[len(a.Events)-maxWriteDiagnosticEvents:]
+	}
+	return a
 }

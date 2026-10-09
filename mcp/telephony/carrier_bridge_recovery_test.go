@@ -644,3 +644,54 @@ func TestCarrierRecoveryNetworkAttemptDoesNotBlockReplacementOrHangup(t *testing
 		})
 	}
 }
+
+func TestCarrierRecoveryRetainsSocketWriteAndCleanupTelemetry(t *testing.T) {
+	a, _ := withTelephonyTestContext(t, &answerPlatform{})
+	row := recoveryCall(t, a, "write-evidence", "telnyx")
+	b, err := a.claimCarrierBridge(row, t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(a.stopCarrierBridges)
+	server, client := net.Pipe()
+	defer client.Close()
+	b.bind(server)
+	p := newWebSocketWriterPump(server, ws.StateServerSide)
+	b.trackWriter(mediaCloseLegCarrier, p)
+	// A complete carrier frame cannot be written to a stalled peer within the
+	// stable transport budget; teardown retains evidence separately from expiry.
+	err = p.write(ws.OpText, []byte("carrier-media"), liveAudioWriteTimeout)
+	if err == nil {
+		t.Fatal("stalled socket accepted write")
+	}
+	b.socketError(mediaCloseLegCarrier, "write", err)
+	newGracefulWebSocket(server, p).Close(ws.StatusGoingAway, "recovering")
+	b.finish()
+	var encoded string
+	if err = a.db().db.QueryRow(`SELECT events_json FROM carrier_media_bridges WHERE generation=?`, b.generation).Scan(&encoded); err != nil {
+		t.Fatal(err)
+	}
+	var events []carrierBridgeEvidence
+	if json.Unmarshal([]byte(encoded), &events) != nil {
+		t.Fatal("invalid evidence")
+	}
+	found := false
+	for _, e := range events {
+		if e.Kind == "socket_summary" && e.Leg == "carrier" {
+			found = true
+			if e.Transport == nil || e.Transport.WriteTimeouts != 1 || e.Transport.LastCloseAt == "" || len(e.Transport.Events) == 0 {
+				t.Fatalf("lost transport evidence: %+v", e)
+			}
+			first := e.Transport.Events[0]
+			if first.Reason != "socket_write_timeout" || first.ConnectionID != b.generation+":carrier" || first.DeadlineMS != 250 || first.WriteMS < 200 {
+				t.Fatalf("wrong timeout evidence: %+v", first)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("generation lacks socket summary")
+	}
+	if strings.Contains(encoded, row.CallbackSecret) || strings.Contains(encoded, row.PeerToken) {
+		t.Fatal("diagnostic contains credentials")
+	}
+}

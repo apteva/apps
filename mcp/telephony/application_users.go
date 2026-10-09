@@ -495,6 +495,14 @@ func (a *App) validPhoneMedia(row *callRow, token string) bool {
 func temporaryMediaFailure(reason string) bool {
 	return reason == "media_session_lookup_failed" || reason == "policy_lookup_failed" || reason == "owner_lookup_failed"
 }
+
+// Applies only to an established socket. An outage cannot create or extend a lease.
+func establishedMediaLeaseReason(reason string, verifiedExpiry, now int64) string {
+	if temporaryMediaFailure(reason) && verifiedExpiry <= now {
+		return "media_lease_expired"
+	}
+	return reason
+}
 func (a *App) phoneMediaDenialReason(row *callRow, token string) string {
 	reason, _ := a.phoneMediaCheck(row, token)
 	return reason

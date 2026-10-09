@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
 	"math"
 	"net/http"
@@ -294,5 +296,149 @@ func TestMediaOwnershipLookupFailureIsTemporary(t *testing.T) {
 	w := phoneTestRequest(app, &alice, "POST", "/softphone/renew/"+row.ID, map[string]any{"session_token": session.SessionToken})
 	if w.Code != 503 || !strings.Contains(w.Body.String(), "owner_lookup_failed") {
 		t.Fatalf("owner lookup failure misclassified: %d %s", w.Code, w.Body)
+	}
+}
+
+func TestEstablishedLeaseFailureCannotExtendExpiry(t *testing.T) {
+	for _, reason := range []string{"media_session_lookup_failed", "policy_lookup_failed", "owner_lookup_failed"} {
+		if got := establishedMediaLeaseReason(reason, 101, 100); got != reason {
+			t.Fatalf("valid lease lost: %s", got)
+		}
+		if got := establishedMediaLeaseReason(reason, 100, 100); got != "media_lease_expired" {
+			t.Fatalf("expired lease survived: %s", got)
+		}
+	}
+	if got := establishedMediaLeaseReason("media_token_replaced", 101, 100); got != "media_token_replaced" {
+		t.Fatal("revocation hidden")
+	}
+}
+func TestLiveSessionLookupOutageRecordsDeferredRecoveryAndExpiry(t *testing.T) {
+	for _, expire := range []bool{false, true} {
+		t.Run(map[bool]string{false: "recovery", true: "expiry"}[expire], func(t *testing.T) {
+			softphoneTestCtx(t)
+			app := &App{installID: 42}
+			phoneTestPolicy(t, app)
+			row := phoneTestCall(t, app, "session-outage", "in-progress")
+			session, err := app.issuePhoneSession(&row, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if expire {
+				if _, err = app.db().db.Exec(`UPDATE telephony_media_sessions SET expires_at=? WHERE call_id=?`, time.Now().Unix()+3, row.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			server := softphoneTestServer(t, app)
+			browser := dialWS(t, server.URL+strings.TrimPrefix(session.MediaURL, "/api/apps/telephony/_install/42"))
+			defer browser.Close()
+			readSoftphoneEventWithin(t, browser, "ready", time.Second)
+			if _, err = app.db().db.Exec(`ALTER TABLE telephony_media_sessions RENAME TO unavailable_sessions`); err != nil {
+				t.Fatal(err)
+			}
+			restored := false
+			defer func() {
+				if !restored {
+					app.db().db.Exec(`ALTER TABLE unavailable_sessions RENAME TO telephony_media_sessions`)
+				}
+			}()
+			hub := app.softphones.lookup(row.ID)
+			until := time.Now().Add(2 * time.Second)
+			found := false
+			for !found && time.Now().Before(until) {
+				socket, _ := hub.telemetry.snapshots()
+				for _, e := range socket.LeaseEvents {
+					if e.Action == "lease_check_deferred" && e.Reason == "media_session_lookup_failed" && e.ConnectionID != "" && e.At != "" && e.RemainingLeaseMS > 0 {
+						found = true
+					}
+				}
+				if !found {
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+			if !found || hub.browserWriter() == nil {
+				t.Fatal("lookup outage lost live lease or evidence")
+			}
+			// Actual media continues during the lookup outage, on the existing socket.
+			pcm := make([]byte, 960)
+			for i := range pcm {
+				pcm[i] = byte(i)
+			}
+			hub.toBrowser(ws.OpBinary, pcm)
+			_ = browser.SetReadDeadline(time.Now().Add(time.Second))
+			for {
+				data, op, e := wsutil.ReadServerData(browser)
+				if e != nil {
+					t.Fatal(e)
+				}
+				if op == ws.OpBinary {
+					if !bytes.Equal(data, pcm) {
+						t.Fatal("audio changed during lookup outage")
+					}
+					break
+				}
+			}
+			if expire {
+				_ = browser.SetReadDeadline(time.Now().Add(4 * time.Second))
+				for {
+					_, _, e := wsutil.ReadServerData(browser)
+					if e != nil {
+						if !strings.Contains(e.Error(), "media_lease_expired") {
+							t.Fatalf("wrong expiry: %v", e)
+						}
+						break
+					}
+				}
+			} else {
+				if _, err = app.db().db.Exec(`ALTER TABLE unavailable_sessions RENAME TO telephony_media_sessions`); err != nil {
+					t.Fatal(err)
+				}
+				restored = true
+				until = time.Now().Add(2 * time.Second)
+				found = false
+				for !found && time.Now().Before(until) {
+					socket, _ := hub.telemetry.snapshots()
+					for _, e := range socket.LeaseEvents {
+						if e.Action == "lease_check_recovered" {
+							found = true
+						}
+					}
+					if !found {
+						time.Sleep(10 * time.Millisecond)
+					}
+				}
+				if !found || hub.browserWriter() == nil {
+					t.Fatal("session did not recover")
+				}
+			}
+			current, e := app.db().findCall(row.ID)
+			if e != nil || current.Status != row.Status {
+				t.Fatal("lease handling changed carrier call")
+			}
+		})
+	}
+}
+
+func TestLeaseEvidencePreservesNetworkConnectionAttribution(t *testing.T) {
+	var tracker audioCallTelemetry
+	writer := idleAudioWriter()
+	identity := phoneTestIdentity("alice")
+	id := tracker.openedWithNetwork(writer, "hash", "epoch", "socket_peer", audioNetworkEvent{AdviserIdentity: identity, IdentitySource: "verified_session"}, nil)
+	for i := 0; i < 80; i++ {
+		tracker.leaseCheckEvent(writer, "lease_check_deferred", "policy_lookup_failed", time.Now().Unix()+60)
+	}
+	snapshot, _ := tracker.snapshots()
+	if len(snapshot.Events) != 1 || len(snapshot.LeaseEvents) != 64 || snapshot.LeaseEvents[0].AdviserIdentity != identity {
+		t.Fatal("lease evidence changed connection history or lost attribution")
+	}
+	tracker.mu.Lock()
+	attributed := tracker.connectionAtLocked(time.Now().UTC().Format(time.RFC3339Nano))
+	tracker.mu.Unlock()
+	if attributed != id {
+		t.Fatal("observational lease events ended the connection interval")
+	}
+	snapshot.LeaseEvents[0].Reason = "modified"
+	fresh, _ := tracker.snapshots()
+	if fresh.LeaseEvents[0].Reason != "policy_lookup_failed" {
+		t.Fatal("lease snapshot aliases telemetry")
 	}
 }

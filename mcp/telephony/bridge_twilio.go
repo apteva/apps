@@ -262,6 +262,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
+	bridge.trackWriter(mediaCloseLegCore, coreWriter)
 	coreCloser := newGracefulWebSocket(core, coreWriter)
 	defer func() {
 		code, reason := closeState.Details()
