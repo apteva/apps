@@ -1,6 +1,6 @@
-# Functions 1.17.0
+# Functions 1.17.1
 
-**Pending history performance patch:** project-wide cursor reads use a dedicated
+**Fixed in 1.17.1:** project-wide cursor reads use a dedicated
 project/ID index and fetch telemetry only after selecting the page. First index
 creation requires a maintenance window; see [query behavior, rollout and measured
 validation](HISTORY_PERFORMANCE.md).
