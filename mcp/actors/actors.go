@@ -150,6 +150,7 @@ type actorField struct {
 	Pattern            string `json:"pattern,omitempty"`
 	PreserveLineBreaks bool   `json:"preserve_line_breaks,omitempty"`
 	All                bool   `json:"all,omitempty"`
+	Separator          string `json:"separator,omitempty"`
 }
 
 type actorRecord struct {

@@ -64,3 +64,17 @@ Last  paragraph.\E$`}}
 		t.Fatal("missing paragraphs passed required check")
 	}
 }
+
+func TestExplicitParagraphSeparatorRetainsSoftBreaks(t *testing.T) {
+	root, _ := html.Parse(strings.NewReader(`<div id="editor"><p>First paragraph.</p><p>Second paragraph.<br>Soft break.</p></div>`))
+	want := "First paragraph.\n\nSecond paragraph.\nSoft break."
+	fields := map[string]actorField{"body": {Selector: "#editor p", Type: "text", Required: true, All: true, PreserveLineBreaks: true, Separator: "\n\n", Pattern: "^" + regexp.QuoteMeta(want) + "$"}}
+	got, err := extractNodeItem(root, fields, "https://example.com")
+	if err != nil || got["body"] != want {
+		t.Fatalf("got=%#v err=%v", got, err)
+	}
+	fields["body"] = actorField{Selector: "#editor p", Type: "text", Required: true, All: true, PreserveLineBreaks: true, Separator: "\n\n", Pattern: "^" + regexp.QuoteMeta(strings.ReplaceAll(want, "\n\n", "\n")) + "$"}
+	if _, err := extractNodeItem(root, fields, "https://example.com"); err == nil {
+		t.Fatal("missing paragraph boundary passed exact-copy check")
+	}
+}

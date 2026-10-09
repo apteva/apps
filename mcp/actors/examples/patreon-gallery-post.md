@@ -1,6 +1,6 @@
 # Two-original Patreon gallery
 
-This optional user-definition example requires Actors 0.2.10 and Computer
+This optional user-definition example requires Actors 0.2.11 and Computer
 0.7.93 or later. It is not installed or seeded by the app.
 
 `gallery_post` supports exactly two original images, in the supplied order,

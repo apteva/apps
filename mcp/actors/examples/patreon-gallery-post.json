@@ -73,13 +73,15 @@
         },
         {
           "text": "{{post_body}}",
-          "action": "fill",
+          "action": "set_text",
           "locator": {
             "text": "Text input field for post content",
             "role": "textbox",
             "exact": true,
             "som_only": true
-          }
+          },
+          "mode": "replace",
+          "newline_mode": "preserve"
         },
         {
           "action": "set_checked",
@@ -327,6 +329,22 @@
         },
         {
           "action": "extract",
+          "items": "body:has(input[value=\"paid\"][aria-checked=\"true\"]) [data-tag=\"image-layout\"] img[class*=\"__blurred\"],body:has(input[value=\"public\"][aria-checked=\"true\"]) [data-tag=\"image-layout\"] img:not([class*=\"__blurred\"])",
+          "fields": {
+            "attachment_id": {
+              "selector": "",
+              "type": "text",
+              "required": true,
+              "attribute": "src",
+              "pattern": "^https://c[0-9]+\\.patreonusercontent\\.com/[^?]*/post/[0-9]+/([0-9a-f]{32})/"
+            }
+          },
+          "readability": false,
+          "min_items": 2,
+          "max_items": 2
+        },
+        {
+          "action": "extract",
           "items": "body",
           "fields": {
             "gallery_exactly_two": {
@@ -362,7 +380,8 @@
               "required": true,
               "pattern": "^\\Q{{post_body}}\\E$",
               "all": true,
-              "preserve_line_breaks": true
+              "preserve_line_breaks": true,
+              "separator": "\n\n"
             },
             "audience": {
               "selector": "input[type=\"radio\"][value=\"{{audience}}\"][aria-checked=\"true\"]",

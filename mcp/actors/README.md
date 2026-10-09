@@ -41,7 +41,7 @@ Use `wait_for` with Computer's declarative `conditions`, `match: any|all`, and a
 
 ## Verify saved copy
 
-Text extraction normally normalizes whitespace. For exact editor copy, a text field may set `all: true` to collect every matching paragraph in document order and `preserve_line_breaks: true` to retain paragraph boundaries, blank paragraphs and inline text spacing. Select content paragraphs to exclude editor controls. Combine this with a required anchored pattern before a consequential action. Missing paragraphs or mismatched copy fail the run. Existing definitions keep their previous extraction behavior.
+Text extraction normally normalizes whitespace. For exact editor copy, a text field may set `all: true` to collect every matching paragraph in document order and `preserve_line_breaks: true` to retain paragraph boundaries, blank paragraphs and inline text spacing. Use an explicit `separator` when the editor represents paragraph boundaries differently from inline line breaks (for example, `"\n\n"` for ProseMirror paragraphs). Select content paragraphs to exclude editor controls. Combine this with a required anchored pattern before a consequential action. Missing paragraphs or mismatched copy fail the run. Existing definitions keep their previous extraction behavior.
 
 `examples/patreon-gallery-post.json` is an optional two-original gallery example. It is never seeded into an install. Contexts, sources, copy and access settings are runtime inputs.
 

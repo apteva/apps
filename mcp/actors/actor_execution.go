@@ -1240,7 +1240,11 @@ func extractNodeItem(node *html.Node, fields map[string]actorField, baseURL stri
 					parts = append(parts, htmlNodeText(selected))
 				}
 			}
-			raw = strings.Join(parts, "\n")
+			separator := field.Separator
+			if separator == "" {
+				separator = "\n"
+			}
+			raw = strings.Join(parts, separator)
 		} else if field.PreserveLineBreaks {
 			raw = htmlNodeTextLines(target)
 		} else {
