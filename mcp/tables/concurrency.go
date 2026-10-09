@@ -21,6 +21,7 @@ type projectionTimingKey struct{}
 type projectionCapacityHeldKey struct{}
 type interactiveCapacityHeldKey struct{}
 type projectionTimingState struct {
+	sqlExecution                                            time.Duration
 	workerQueue, readQueue, writeLock, staging, publication time.Duration
 }
 

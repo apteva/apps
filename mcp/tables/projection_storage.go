@@ -270,6 +270,8 @@ func publicationTx(parent context.Context, app *sdk.AppCtx, p *projectionDefinit
 	return publicationTxPhase(parent, app, p, "publication", fn)
 }
 
+type projectionStagingLeaseKey struct{}
+
 func publicationTxPhase(parent context.Context, app *sdk.AppCtx, p *projectionDefinition, phase string, fn func(context.Context, *sql.Tx) error) error {
 	ctx, cancel := context.WithTimeout(parent, time.Duration(p.Options.PublishMs)*time.Millisecond)
 	defer cancel()
@@ -283,8 +285,27 @@ func publicationTxPhase(parent context.Context, app *sdk.AppCtx, p *projectionDe
 	// acquisition explicitly so write_lock_ms describes the real contention,
 	// rather than only the inexpensive BeginTx call.
 	lockStarted := started
-	if _, err := tx.ExecContext(ctx, `UPDATE projection_definitions SET updated_at=updated_at WHERE id=?`, p.ID); err != nil {
+	lockSQL := `UPDATE projection_definitions SET updated_at=updated_at WHERE id=?`
+	lockArgs := []any{p.ID}
+	item, staging := parent.Value(projectionStagingLeaseKey{}).(projectionQueueItem)
+	if phase == "staging" && staging {
+		// Fence under the same writer statement, avoiding a separate compiled
+		// lease query for every tiny batch. Retirement/pause cannot race this tx.
+		lockSQL += ` AND status IN ('active','building') AND EXISTS(SELECT 1 FROM projection_queue q WHERE q.projection_id=projection_definitions.id AND q.scope_key=? AND q.lease_token=? AND q.claimed_until>CURRENT_TIMESTAMP)`
+		lockArgs = append(lockArgs, item.ScopeKey, item.LeaseToken)
+	}
+	locked, err := tx.ExecContext(ctx, lockSQL, lockArgs...)
+	if err != nil {
 		return err
+	}
+	if phase == "staging" && staging {
+		n, err := locked.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return errf("projection staging lost its lease or was paused")
+		}
 	}
 	if timing, ok := parent.Value(projectionTimingKey{}).(*projectionTimingState); ok && timing != nil {
 		timing.writeLock += time.Since(lockStarted)
@@ -410,7 +431,7 @@ func publishProjectionGeneration(ctx context.Context, app *sdk.AppCtx, p *projec
 		if len(batch) == 0 {
 			return nil
 		}
-		err := publicationTxPhase(ctx, app, p, "staging", func(c context.Context, tx *sql.Tx) error {
+		err := publicationTxPhase(context.WithValue(ctx, projectionStagingLeaseKey{}, item), app, p, "staging", func(c context.Context, tx *sql.Tx) error {
 			stmt, err := tx.PrepareContext(c, q)
 			if err != nil {
 				return err
@@ -532,6 +553,20 @@ func publishProjectionGeneration(ctx context.Context, app *sdk.AppCtx, p *projec
 // Reclaim invisible generations in small writer batches, including abandoned
 // staging work. Published scopes and live worker leases are never reclaimed.
 func (a *App) cleanupProjectionGenerations(ctx context.Context, app *sdk.AppCtx, p *projectionDefinition) (bool, error) {
+	scoped, finish, err := a.beginOperation(app, map[string]any{"name": p.Name, "_project_id": p.ProjectID, "_request_context": ctx}, "projection_cleanup", false)
+	if err != nil {
+		return false, err
+	}
+	defer finish()
+	app = scoped
+	var exists bool
+	if err := app.AppReadDB().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM projection_definitions WHERE id=?)`, p.ID).Scan(&exists); err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, nil
+	}
+
 	// Find a retired (generation,scope) using the background reader, outside the
 	// writer transaction. The deletion itself visits at most one bounded batch.
 	readCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
@@ -541,31 +576,29 @@ func (a *App) cleanupProjectionGenerations(ctx context.Context, app *sdk.AppCtx,
 		return false, err
 	}
 	var gen string
-	err = db.QueryRowContext(readCtx, `SELECT g.generation FROM projection_generations g WHERE g.projection_id=? AND NOT EXISTS(SELECT 1 FROM `+quote(projectionHeads(p))+` h WHERE h.generation=g.generation) AND NOT EXISTS(SELECT 1 FROM projection_queue q WHERE q.projection_id=g.projection_id AND q.lease_token=g.lease_token AND q.claimed_until>CURRENT_TIMESTAMP) ORDER BY g.created_at_ms,g.generation LIMIT 1`, p.ID).Scan(&gen)
+	err = db.QueryRowContext(readCtx, `SELECT g.generation FROM projection_generations g WHERE g.projection_id=? AND NOT EXISTS(SELECT 1 FROM `+quote(projectionHeads(p))+` h WHERE h.generation=g.generation) AND NOT EXISTS(SELECT 1 FROM projection_queue q WHERE q.projection_id=g.projection_id AND q.lease_token=g.lease_token AND q.claimed_until>CURRENT_TIMESTAMP) AND NOT EXISTS(SELECT 1 FROM projection_retired_leases l WHERE l.projection_id=g.projection_id AND l.lease_token=g.lease_token AND l.claimed_until>CURRENT_TIMESTAMP) ORDER BY g.created_at_ms,g.generation LIMIT 1`, p.ID).Scan(&gen)
 	if readCtx.Err() != nil {
 		return false, nil
 	}
 	if err == sql.ErrNoRows {
-		// Empty generations have no data row to drive normal reclamation. Remove
-		// a bounded number of orphan records while retaining published empty heads.
-		err = publicationTx(ctx, app, p, func(c context.Context, tx *sql.Tx) error {
-			_, err := tx.ExecContext(c, `DELETE FROM projection_generations WHERE projection_id=? AND generation IN (SELECT g.generation FROM projection_generations g WHERE g.projection_id=? AND NOT EXISTS(SELECT 1 FROM `+quote(projectionData(p))+` d WHERE d._projection_generation=g.generation) AND NOT EXISTS(SELECT 1 FROM `+quote(projectionHeads(p))+` h WHERE h.generation=g.generation) AND NOT EXISTS(SELECT 1 FROM projection_queue q WHERE q.projection_id=g.projection_id AND q.lease_token=g.lease_token AND q.claimed_until>CURRENT_TIMESTAMP) LIMIT 32)`, p.ID, p.ID)
-			return err
-		})
-		return false, err
+		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
 	removed := false
 	err = publicationTx(ctx, app, p, func(c context.Context, tx *sql.Tx) error {
-		result, err := tx.ExecContext(c, `DELETE FROM `+quote(projectionData(p))+` WHERE id IN (SELECT id FROM `+quote(projectionData(p))+` WHERE _projection_generation=? LIMIT ?) AND NOT EXISTS(SELECT 1 FROM `+quote(projectionHeads(p))+` WHERE generation=?) AND NOT EXISTS(SELECT 1 FROM projection_generations g JOIN projection_queue q ON q.projection_id=g.projection_id AND q.lease_token=g.lease_token WHERE g.projection_id=? AND g.generation=? AND q.claimed_until>CURRENT_TIMESTAMP)`, gen, p.Options.BatchRows, gen, p.ID, gen)
+		result, err := tx.ExecContext(c, `DELETE FROM `+quote(projectionData(p))+` WHERE id IN (SELECT id FROM `+quote(projectionData(p))+` WHERE _projection_generation=? LIMIT ?) AND NOT EXISTS(SELECT 1 FROM `+quote(projectionHeads(p))+` WHERE generation=?) AND NOT EXISTS(SELECT 1 FROM projection_generations g JOIN projection_queue q ON q.projection_id=g.projection_id AND q.lease_token=g.lease_token WHERE g.projection_id=? AND g.generation=? AND q.claimed_until>CURRENT_TIMESTAMP) AND NOT EXISTS(SELECT 1 FROM projection_generations g JOIN projection_retired_leases l ON l.projection_id=g.projection_id AND l.lease_token=g.lease_token WHERE g.projection_id=? AND g.generation=? AND l.claimed_until>CURRENT_TIMESTAMP)`, gen, p.Options.BatchRows, gen, p.ID, gen, p.ID, gen)
 		if err != nil {
 			return err
 		}
 		n, _ := result.RowsAffected()
 		removed = n > 0
-		_, err = tx.ExecContext(c, `DELETE FROM projection_generations WHERE projection_id=? AND generation=? AND NOT EXISTS(SELECT 1 FROM `+quote(projectionData(p))+` WHERE _projection_generation=?) AND NOT EXISTS(SELECT 1 FROM projection_queue q WHERE q.projection_id=? AND q.lease_token=projection_generations.lease_token AND q.claimed_until>CURRENT_TIMESTAMP)`, p.ID, gen, gen, p.ID)
+		result, err = tx.ExecContext(c, `DELETE FROM projection_generations WHERE projection_id=? AND generation=? AND NOT EXISTS(SELECT 1 FROM `+quote(projectionData(p))+` WHERE _projection_generation=?) AND NOT EXISTS(SELECT 1 FROM `+quote(projectionHeads(p))+` WHERE generation=?) AND NOT EXISTS(SELECT 1 FROM projection_queue q WHERE q.projection_id=? AND q.lease_token=projection_generations.lease_token AND q.claimed_until>CURRENT_TIMESTAMP) AND NOT EXISTS(SELECT 1 FROM projection_retired_leases l WHERE l.projection_id=projection_generations.projection_id AND l.lease_token=projection_generations.lease_token AND l.claimed_until>CURRENT_TIMESTAMP)`, p.ID, gen, gen, gen, p.ID)
+		if err == nil {
+			n, _ := result.RowsAffected()
+			removed = removed || n > 0
+		}
 		return err
 	})
 	return removed, err

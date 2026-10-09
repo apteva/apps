@@ -35,6 +35,8 @@ type App struct {
 	projectionNow              func() time.Time
 	projectionGeneration       uint64
 	projectionWorkerMu         sync.Mutex
+	projectionCleanupMu        sync.Mutex
+	scheduler                  projectionSchedulerState
 	capacityMu                 sync.Mutex
 	capacity                   *capacityState
 	projectionReaderMu         sync.Mutex
@@ -71,7 +73,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := a.upgradeAll(ctx); err != nil {
 		return err
 	}
-	if err := a.ensureProjectionStorage(ctx); err != nil {
+	if err := a.ensureWorkerStorage(ctx); err != nil {
 		return err
 	}
 	if err := a.rebuildAllProjectionTriggers(ctx); err != nil {
@@ -105,7 +107,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 func (a *App) OnUnmount(*sdk.AppCtx) error    { a.closeProjectionReader(); return a.plans.close() }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{{Name: "tables-projections", Schedule: projectionWorkerEvery, Run: a.projectionWorker}}
+	return []sdk.Worker{
+		{Name: "tables-projections", Schedule: projectionWorkerEvery, Run: a.projectionWorker},
+		{Name: "tables-projection-wakeups", Run: a.projectionWakeWorker},
+		{Name: "tables-projection-cleanup", Schedule: projectionCleanupEvery, Run: a.projectionCleanupWorker},
+	}
 }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
@@ -113,6 +119,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/tables", Handler: a.handleTablesCollection},
 		{Pattern: "/tables/", Handler: a.handleTablesItem},
+		{Pattern: "/projections/worker-status", Handler: a.handleProjectionWorkerStatus},
 		{Pattern: "/projections", Handler: a.handleProjectionsCollection},
 		{Pattern: "/projections/", Handler: a.handleProjectionsItem},
 		{Pattern: "/diagnostics", Handler: a.handleDiagnostics},

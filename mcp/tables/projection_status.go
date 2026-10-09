@@ -28,7 +28,7 @@ func (a *App) projectionStatus(app *sdk.AppCtx, p *projectionDefinition, key str
 		return nil, err
 	}
 	unconsumed := p.Latest > cursor
-	ready := p.Built && pending == 0 && p.Latest <= p.Published
+	ready := p.Status != "retired" && p.Built && pending == 0 && p.Latest <= p.Published
 	out := map[string]any{"name": p.Name, "version": p.Version, "status": p.Status, "is_current": p.Current, "built": p.Built, "ready": ready, "stale": p.Built && !ready, "latest_relevant_change": p.Latest, "latest_change_id": p.Latest, "consumed_change_id": cursor, "published_change_id": p.Published, "pending_scopes": pending, "refresh_running": running > 0, "lag": max(int64(0), p.Latest-p.Published), "unconsumed_relevant_changes": unconsumed, "min_refresh_interval_seconds": p.Options.Interval, "last_failure": nil, "last_successful_publication_at": nil, "next_scheduled_refresh": nil, "coverage_from": nil, "coverage_to": nil}
 	out["phase_timings_ms"] = map[string]any{"queue": p.QueueMs, "worker_queue": p.WorkerQueueMs, "read_queue": p.ReadQueueMs, "calculation": p.CalculationMs, "write_lock": p.WriteLockMs, "staging": p.StagingMs, "publication": p.PublicationMs, "cleanup": p.CleanupMs}
 	out["queue_ms"] = p.QueueMs
@@ -39,6 +39,14 @@ func (a *App) projectionStatus(app *sdk.AppCtx, p *projectionDefinition, key str
 	out["staging_ms"] = p.StagingMs
 	out["publication_ms"] = p.PublicationMs
 	out["cleanup_ms"] = p.CleanupMs
+	out["runnable_pending_scopes"] = pending
+	if p.Status == "paused" || p.Status == "retired" {
+		out["runnable_pending_scopes"] = 0
+	}
+	out["paused_scopes"] = 0
+	if p.Status == "paused" {
+		out["paused_scopes"] = pending
+	}
 	out["queued"] = pending
 	out["failed"] = failed
 	out["change_cursor"] = cursor
@@ -52,7 +60,7 @@ func (a *App) projectionStatus(app *sdk.AppCtx, p *projectionDefinition, key str
 	if p.PublishedAt.Valid {
 		out["last_successful_publication_at"] = projectionTimestamp(p.PublishedAt.Int64)
 	}
-	if due.Valid && p.Status != "paused" {
+	if due.Valid && p.Status != "paused" && p.Status != "retired" {
 		out["next_scheduled_refresh"] = projectionTimestamp(due.Int64)
 	}
 	queueSQL := `SELECT scope_key FROM projection_queue WHERE projection_id=?`
@@ -116,7 +124,7 @@ func (a *App) projectionStatus(app *sdk.AppCtx, p *projectionDefinition, key str
 	if key != "" {
 		// Unmapped changes make a scope conservatively stale only when they are
 		// newer than both its published snapshot and the complete result watermark.
-		out["ready"] = p.Built && pending == 0 && p.Latest <= max(cursor, p.Published, published)
+		out["ready"] = p.Status != "retired" && p.Built && pending == 0 && p.Latest <= max(cursor, p.Published, published)
 		out["stale"] = p.Built && out["ready"] != true
 		out["requested_scope_ready"] = out["ready"]
 	} else {

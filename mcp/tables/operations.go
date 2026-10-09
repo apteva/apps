@@ -102,7 +102,7 @@ func (a *App) beginOperation(ctx *sdk.AppCtx, args map[string]any, operation str
 	}
 	if strings.HasPrefix(operation, "projections_") {
 		permission := "projections.manage"
-		if operation == "projections_status" || operation == "projections_list" || operation == "projections_describe" {
+		if operation == "projections_status" || operation == "projections_list" || operation == "projections_describe" || operation == "projections_worker_status" {
 			permission = "projections.read"
 		}
 		if !sdk.CallerFrom(parent).Allows(permission, strArg(args, "name")) {
@@ -210,6 +210,9 @@ func (a *App) beginOperation(ctx *sdk.AppCtx, args map[string]any, operation str
 			ctx.Logger().Info("tables operation", "operation", operation, "project_id", pid, "elapsed_ms", elapsed.Milliseconds())
 		}
 		cleanup()
+		if operation == "rows_insert" || operation == "rows_upsert" || operation == "rows_update" || operation == "rows_delete" || (strings.HasPrefix(operation, "projections_") && operation != "projections_worker_status" && operation != "projections_status" && operation != "projections_describe" && operation != "projections_list") {
+			a.wakeProjectionWorker()
+		}
 	}, nil
 }
 

@@ -29,8 +29,12 @@ type projectionReadyBatch struct {
 // deliberately acknowledges outside the write transaction: a slow platform
 // cannot hold the Tables writer, while a failed delivery remains retryable.
 func (a *App) deliverProjectionEvents(parent context.Context, app *sdk.AppCtx) error {
+	started := time.Now()
+	defer func() {
+		a.updateWorkerMetrics(app.CurrentProject(), func(m *projectionWorkerMetrics) { m.EventNs += time.Since(started).Nanoseconds() })
+	}()
 	deadline := time.Now().Add(projectionEventBudget)
-	rows, err := app.AppReadDB().QueryContext(parent, `SELECT event_id,project_id,projection_id,topic,payload,attempts FROM projection_event_outbox WHERE next_attempt_ms<=? ORDER BY next_attempt_ms,created_at_ms LIMIT ?`, time.Now().UnixMilli(), projectionEventBatch)
+	rows, err := app.AppReadDB().QueryContext(parent, `SELECT event_id,project_id,projection_id,topic,payload,attempts FROM projection_event_outbox WHERE next_attempt_ms<=? AND (?='' OR project_id=?) ORDER BY next_attempt_ms,created_at_ms LIMIT ?`, time.Now().UnixMilli(), app.CurrentProject(), app.CurrentProject(), projectionEventBatch)
 	if err != nil {
 		return err
 	}
@@ -73,6 +77,7 @@ func (a *App) deliverProjectionEvents(parent context.Context, app *sdk.AppCtx) e
 		return err
 	}
 	for _, batch := range groups {
+		batchStarted := time.Now()
 		if time.Now().After(deadline) {
 			break
 		}
@@ -104,6 +109,9 @@ func (a *App) deliverProjectionEvents(parent context.Context, app *sdk.AppCtx) e
 			for _, id := range batch.IDs {
 				_, _ = app.AppDB().ExecContext(parent, `DELETE FROM projection_event_outbox WHERE event_id=?`, id)
 			}
+		}
+		if app.CurrentProject() == "" {
+			a.updateWorkerMetrics(batch.ProjectID, func(m *projectionWorkerMetrics) { m.EventNs += time.Since(batchStarted).Nanoseconds() })
 		}
 	}
 	return nil

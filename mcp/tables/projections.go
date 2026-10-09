@@ -85,11 +85,17 @@ func (a *App) projectionMetricsFor(id int64) projectionPhaseMetrics {
 }
 
 func (a *App) recordProjectionMetrics(ctx *sdk.AppCtx, id int64, m projectionPhaseMetrics) {
-	a.setProjectionMetrics(id, m)
+	a.projectionMetricsMu.Lock()
+	if a.projectionMetrics == nil {
+		a.projectionMetrics = map[int64]projectionPhaseMetrics{}
+	}
+	m.Cleanup = a.projectionMetrics[id].Cleanup
+	a.projectionMetrics[id] = m
+	a.projectionMetricsMu.Unlock()
 	// 0.2.4 databases may be inspected before migration 011 has run. The
 	// in-memory value remains available in that case; upgraded databases retain
 	// the latest timings across restarts.
-	_, _ = ctx.AppDB().ExecContext(requestContext(ctx), `UPDATE projection_definitions SET last_queue_ms=?,last_worker_queue_ms=?,last_read_queue_ms=?,last_calculation_ms=?,last_write_lock_ms=?,last_staging_ms=?,last_publication_ms=?,last_cleanup_ms=? WHERE id=?`, m.Queue, m.WorkerQueue, m.ReadQueue, m.Calculation, m.WriteLock, m.Staging, m.Publication, m.Cleanup, id)
+	_, _ = ctx.AppDB().ExecContext(requestContext(ctx), `UPDATE projection_definitions SET last_queue_ms=?,last_worker_queue_ms=?,last_read_queue_ms=?,last_calculation_ms=?,last_write_lock_ms=?,last_staging_ms=?,last_publication_ms=? WHERE id=?`, m.Queue, m.WorkerQueue, m.ReadQueue, m.Calculation, m.WriteLock, m.Staging, m.Publication, id)
 }
 
 func (a *App) loadStoredProjectionMetrics(ctx *sdk.AppCtx, id int64) projectionPhaseMetrics {
@@ -254,6 +260,7 @@ func (a *App) projectionTools() []sdk.Tool {
 	update := projectionNameSchema()
 	update["min_refresh_interval_seconds"] = map[string]any{"type": "integer", "minimum": 0, "maximum": 86400}
 	return []sdk.Tool{
+		{Name: "projections_worker_status", Description: "Inspect project worker counters and phase durations since process start. Requires project-wide projections.read. Includes idle checks, definition cache use, consumption, capacity/read wait, SQL, refresh, cleanup and event delivery.", InputSchema: schemaObject(map[string]any{}, nil), Handler: a.toolProjectionWorkerStatus},
 		{Name: "projections_create", Description: "Create an immutable SQL projection version. Replacements build alongside current readers. Supports scoped SQL parameters, generic source mappings, watched source columns, coverage and limits. Include all calculation, filter, join and mapping inputs in watched_columns; omitted dependencies retain all-column invalidation.", InputSchema: schemaObject(create, []string{"name", "version", "sql", "source_tables", "result_columns"}), Handler: a.toolProjectionsCreate},
 		{Name: "projections_list", Description: "List project projection versions and readiness.", InputSchema: schemaObject(map[string]any{}, nil), Handler: a.toolProjectionsList},
 		{Name: "projections_describe", Description: "Describe a current or specified version and options.", InputSchema: schemaObject(projectionNameSchema(), []string{"name"}), Handler: a.toolProjectionsDescribe},
@@ -518,6 +525,9 @@ func (a *App) toolProjectionsRefresh(ctx *sdk.AppCtx, args map[string]any) (any,
 	if err != nil {
 		return nil, err
 	}
+	if p.Status == "retired" {
+		return nil, errf("retired versions cannot be refreshed; create a replacement version")
+	}
 	key := projectionAllScope
 	if !boolArg(args, "rebuild") {
 		if scope := mapArg(args, "scope"); scope != nil {
@@ -547,7 +557,7 @@ func (a *App) toolProjectionsPause(ctx *sdk.AppCtx, args map[string]any) (any, e
 		return nil, err
 	}
 	if p.Status == "retired" {
-		return nil, errf("retired versions must be rebuilt before resuming")
+		return nil, errf("retired versions cannot be resumed; create a replacement version")
 	}
 	status := "paused"
 	if !boolArg(args, "paused") {

@@ -1,3 +1,47 @@
+# Tables 0.2.13 worker efficiency validation
+
+Validated locally on 2026-10-09, Darwin arm64 / Apple M1 Pro, Go 1.25.12,
+SDK v0.99.0 and SQLite v1.50.0 using disposable file-backed WAL databases.
+No production instance or database was accessed.
+
+Release checks passed: `GOWORK=off go test -race ./...` (233.8 seconds),
+focused scheduler/staging/mixed-workload regressions, `go vet ./...`, standalone
+Darwin arm64 and Linux amd64 builds, and `scripts/smoke.py` against the compiled
+sidecar. The smoke test includes authenticated worker metrics, an actual paused
+source update across process restart, resume publication and replacement/index
+lifecycle checks. All Go checks used the pinned public SDK with the workspace
+overlay disabled. UI code and assets are unchanged.
+
+`projection_scheduler_test.go` checks 100 warm idle ticks with zero SQLite writer
+changes, no definition decoding and no calculation. Separate cleanup also performs
+no writes when idle, then reclaims generations produced by a forced refresh.
+Published rows, empty heads, valid staging leases and retired in-flight leases stay
+protected; expired and empty abandoned generations are reclaimed. Cache tests cover
+configuration and lifecycle changes, an external SQLite connection, database
+identity changes, and exclusion of publication/metric fields from cached state.
+Queue tests cover retirement fencing, paused invalidations, resume with a new App,
+old/new scope moves in a 30-update wakeup burst, raw SQL detected by periodic
+fallback, project-confined counters and permission denial. The migration regression
+applies exact migrations 001–016 then 017 and checks result/index preservation,
+active/paused queues, retired lease protection and stale insertions from previous
+sidecars. A 10,000-entry log test verifies bounded pruning, retention of unconsumed
+changes and eventual draining; per-batch staging tests fence pause and retirement
+through the existing writer statement. Independent cleanup timings survive refresh.
+
+Paired `BenchmarkProjectionIdleTick100Definitions` samples, three trials of 100
+idle iterations against unchanged released 0.2.12 and the new worker:
+
+| Worker | Time per idle tick | Bytes allocated | Allocations |
+|---|---:|---:|---:|
+| 0.2.12 | 16.15–16.54 ms | ~2.03 MB | ~24,675 |
+| 0.2.13 | 0.159–0.164 ms | 3,450 B | 73 |
+
+The fixture has 100 successfully built projections and no pending changes or
+notifications. The released-source comparison uses a disposable Go test overlay;
+the old checkout is unchanged. These samples measure the idle tick, excluding the
+separate scheduled maintenance pass. They do not measure active refresh latency,
+production CPU/capacity, or prove cleanup can keep up with every sustained workload.
+
 # Tables 0.2.12 projection index ordering
 
 Validated locally on 2026-10-09, Darwin arm64 / Apple M1 Pro, Go 1.25.12,

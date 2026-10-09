@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.2.12
+version: 0.2.13
 description: |
+  v0.2.13 Separates bounded cleanup from responsive projection refreshes, skips
+  idle writes, caches definition fields with a durable epoch, cancels retired
+  queues while preserving paused work and valid leases, and exposes worker metrics.
   v0.2.12 Adds opt-in filter-leading nonunique projection indexes, safe index
   replacement, physical layout reporting and replacement-version index inheritance.
   v0.2.11 Fixes ordinary SQL verification caching and adds opt-in watched
@@ -133,6 +136,8 @@ provides:
       description: 'Execute a bounded list of validated Tables operations. Modes: read_snapshot, write_transaction, best_effort. Supports dependency references with {$ref: operation.path}; returns per-operation status and errors.'
     - name: tables_capabilities
       description: 'Return versioned generic Tables capabilities, including the recursive filter AST contract and enforced limits.'
+    - name: projections_worker_status
+      description: Project worker metrics since process start, including idle, cache, capacity, SQL, refresh, cleanup and delivery.
     - name: projections_create
       description: 'Create a versioned read-only SQL projection. Args: name, sql, source_tables, result_columns, scope_columns?. Projection SQL is validated read-only SQL and may use {table_name} placeholders.'
       requires: projections.manage
@@ -247,7 +252,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.2.12
+    ref: tables/v0.2.13
     entry: mcp/tables
   port: 8080
   health_check: /health

@@ -270,7 +270,12 @@ func (a *App) readProjectionRows(parent context.Context, app *sdk.AppCtx, p *pro
 		return nil, 0, err
 	}
 	defer aggregateStmt.Close()
-	if err := aggregateStmt.QueryRowContext(parent, bound...).Scan(&encoded); err != nil {
+	sqlStarted := time.Now()
+	err = aggregateStmt.QueryRowContext(parent, bound...).Scan(&encoded)
+	if timing, ok := parent.Value(projectionTimingKey{}).(*projectionTimingState); ok && timing != nil {
+		timing.sqlExecution += time.Since(sqlStarted)
+	}
+	if err != nil {
 		if parent.Err() != nil {
 			return nil, 0, parent.Err()
 		}
@@ -452,17 +457,34 @@ func (a *App) refreshProjectionScope(parent context.Context, app *sdk.AppCtx, it
 }
 
 func (a *App) runProjectionRefresh(parent context.Context, app *sdk.AppCtx, item projectionQueueItem) error {
+	started := time.Now()
+	timing := &projectionTimingState{}
+	failed := true
+	defer func() {
+		a.updateWorkerMetrics(item.ProjectID, func(m *projectionWorkerMetrics) {
+			m.RefreshJobs++
+			if failed {
+				m.FailedRefreshes++
+			}
+			m.RefreshNs += time.Since(started).Nanoseconds()
+			m.CapacityWaitNs += timing.workerQueue.Nanoseconds()
+			m.ReadWaitNs += timing.readQueue.Nanoseconds()
+			m.SQLNs += timing.sqlExecution.Nanoseconds()
+		})
+	}()
 	release, wait, err := a.acquireCapacity(parent, app, projectionCapacityKind)
+	timing.workerQueue = wait
 	if err != nil {
 		return err
 	}
 	defer release()
-	timing := &projectionTimingState{workerQueue: wait}
+	timing.workerQueue = wait
 	ctx := context.WithValue(parent, projectionCapacityHeldKey{}, true)
 	ctx = context.WithValue(ctx, projectionTimingKey{}, timing)
 	if err := a.refreshProjectionScope(ctx, app, item); err != nil {
 		return err
 	}
+	failed = false
 	return nil
 }
 
@@ -498,38 +520,42 @@ func (a *App) projectionWorker(ctx context.Context, app *sdk.AppCtx) error {
 		return nil
 	}
 	defer a.projectionWorkerMu.Unlock()
-	if err := a.ensureProjectionStorage(app); err != nil {
+	return a.projectionWorkerTick(ctx, app)
+}
+func (a *App) projectionWorkerTick(ctx context.Context, app *sdk.AppCtx) error {
+	if err := a.ensureWorkerStorage(app); err != nil {
 		return err
 	}
-	rows, err := app.AppReadDB().QueryContext(ctx, `SELECT DISTINCT project_id FROM projection_definitions WHERE status IN ('active','paused','building')`)
+	checkStarted := time.Now()
+	projects, err := a.projectionWorkProjects(ctx, app)
+	checkElapsed := time.Since(checkStarted)
 	if err != nil {
 		return err
 	}
-	var projects []string
-	for rows.Next() {
-		var pid string
-		if err := rows.Scan(&pid); err != nil {
-			rows.Close()
-			return err
+	// Project-scoped counters never expose another project's workload.
+	a.updateWorkerMetrics(app.CurrentProject(), func(m *projectionWorkerMetrics) {
+		m.Ticks++
+		m.IdleCheckNs += checkElapsed.Nanoseconds()
+		if len(projects) == 0 {
+			m.IdleTicks++
 		}
-		projects = append(projects, pid)
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return err
-	}
+	})
 	globalStart := time.Now()
 	for _, pid := range projects {
 		start := time.Now()
 		scoped := app.WithProject(pid)
 		activeContexts.Store(scoped, ctx)
-		consumeRelease, _, acquireErr := a.acquireCapacity(ctx, app, projectionCapacityKind)
+		consumeRelease, consumeWait, acquireErr := a.acquireCapacity(ctx, app, projectionCapacityKind)
 		if acquireErr != nil {
 			activeContexts.Delete(scoped)
 			return acquireErr
 		}
+		consumeStarted := time.Now()
 		err := a.consumeProjectionChanges(ctx, scoped, pid)
+		a.updateWorkerMetrics(pid, func(m *projectionWorkerMetrics) {
+			m.ConsumptionNs += time.Since(consumeStarted).Nanoseconds()
+			m.CapacityWaitNs += consumeWait.Nanoseconds()
+		})
 		consumeRelease()
 		activeContexts.Delete(scoped)
 		if err != nil {
@@ -559,29 +585,6 @@ func (a *App) projectionWorker(ctx context.Context, app *sdk.AppCtx) error {
 			processed += len(batch)
 			if time.Since(start) >= projectionWorkerBudget {
 				break
-			}
-		}
-		defs, err := loadActiveProjections(app, pid)
-		if err != nil {
-			return err
-		}
-		gcStart := time.Now()
-		for _, p := range defs {
-			cleanupStarted := time.Now()
-			for i := 0; i < 32 && time.Since(gcStart) < 100*time.Millisecond; i++ {
-				removed, err := a.cleanupProjectionGenerations(ctx, app, p)
-				if err != nil {
-					return err
-				}
-				if !removed {
-					break
-				}
-			}
-			cleanupMs := time.Since(cleanupStarted).Milliseconds()
-			if cleanupMs > 0 {
-				m := a.projectionMetricsFor(p.ID)
-				m.Cleanup = cleanupMs
-				a.recordProjectionMetrics(app, p.ID, m)
 			}
 		}
 	}

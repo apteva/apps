@@ -234,6 +234,7 @@ func (a *App) toolTablesBatch(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		} else if err := shared.Tx.Commit(); err != nil {
 			return nil, err
 		} else if eventBuffer != nil {
+			a.wakeProjectionWorker()
 			for _, event := range eventBuffer.snapshot() {
 				ctx.Emit(event.topic, event.data)
 			}

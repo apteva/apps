@@ -66,6 +66,8 @@ with tempfile.TemporaryDirectory(prefix="tables-smoke-") as temp:
             except urllib.error.HTTPError as error:
                 assert error.code == 401, (path, error.code)
         assert "tables" in request("GET", "/tables?sig=untrusted")
+        assert request("GET", "/projections/worker-status")["cleanup_interval_seconds"] == 45
+        assert mcp("projections_worker_status", {})["refresh_fallback_interval_seconds"] == 1
         created = mcp("tables_create", {"name":"records", "columns":[
             {"name":"revision","type":"text"}, {"name":"at","type":"datetime"},
             {"name":"payload","type":"json","default":{"id":9007199254740993}}]})
@@ -116,6 +118,8 @@ with tempfile.TemporaryDirectory(prefix="tables-smoke-") as temp:
                 time.sleep(.05)
             raise AssertionError(f"Projection did not publish {total}: {status}")
         initial=await_projection(2)
+        metrics=mcp("projections_worker_status", {})["metrics"]
+        assert metrics["refresh_jobs"] > 0 and metrics["sql_execution_ns"] > 0, metrics
         mcp("indexes_create", {"table":"measurement_totals","name":"by_centre","columns":["centre_id"]})
         index=mcp("indexes_create", {"table":"measurement_totals","name":"by_centre","columns":["centre_id"],"layout":"filter_first","replace":True})["index"]
         assert index["layout"]=="filter_first"
@@ -124,9 +128,13 @@ with tempfile.TemporaryDirectory(prefix="tables-smoke-") as temp:
         mcp("rows_update", {"table":"measurements","id":measurement_id,"fields":{"metadata":"synced"}})
         clean=mcp("projections_status", {"name":"measurement_totals"})
         assert clean["ready"] and clean["latest_relevant_change"]==initial["latest_relevant_change"], clean
+        mcp("projections_pause", {"name":"measurement_totals","paused":True})
         mcp("rows_update", {"table":"measurements","id":measurement_id,"fields":{"value":7}})
         stop()
         start()
+        paused=mcp("projections_status", {"name":"measurement_totals"})
+        assert paused["status"]=="paused" and not paused["ready"], paused
+        mcp("projections_pause", {"name":"measurement_totals","paused":False})
         await_projection(7)
         index=mcp("indexes_list", {"table":"measurement_totals"})["indexes"][0]
         assert index["layout"]=="filter_first" and [c["col"] for c in index["physical_columns"]]==["centre_id","_projection_generation"]
@@ -148,7 +156,7 @@ with tempfile.TemporaryDirectory(prefix="tables-smoke-") as temp:
         assert mcp("indexes_list", {"table":"measurement_totals"})["indexes"]==[]
 
         assert mcp("projections_describe", {"name":"measurement_totals"})["source_dependencies"][0]["watched_columns"]==["centre_id","value"]
-        print("PASS: real HTTP/MCP authentication, exact numbers, cursors, optimistic updates, automatic restart migration and watched projection recovery, filter-leading index replacement/restart/inheritance/drop")
+        print("PASS: real HTTP/MCP authentication, exact numbers, cursors, optimistic updates, automatic restart migration and watched projection recovery, filter-leading indexes, worker metrics and coalesced wakeups/restart recovery")
     finally:
         stop()
         log.close()

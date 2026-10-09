@@ -1,3 +1,13 @@
+# Tables v0.2.13 — responsive refresh and inexpensive idle work
+
+- Move generation cleanup and consumed-change pruning into a separate 45-second worker with a 150 ms maintenance budget, small writer batches, rotating projection selection and reserved background capacity. Skip writer transactions when nothing is reclaimable.
+- Run storage/index setup once per mounted database identity/generation instead of on every refresh tick. Use indexed durable work checks before decoding definitions or attempting queue claims; retain the one-second fallback.
+- Coalesce local writes and administrative projection changes through a buffered wakeup worker, retaining a follow-up pass when a change arrives during work. Atomic write batches notify after commit. External changes and restarts remain covered by durable queue/log state and the fallback.
+- Cache immutable worker definition fields with a bounded cache and a persisted epoch updated transactionally by definition/configuration/lifecycle changes, including changes from older sidecars. Read cursors, watermarks, built state and queue state fresh, and check the epoch again before committing invalidation mappings.
+- Cancel retired queues/outbox work; preserve valid retired staging leases until expiry. Keep paused queues durable for resume, expose paused versus runnable scope counts, and fence every staging batch against pause/retirement.
+- Add project-confined `projections_worker_status` and `GET /projections/worker-status` counters for idle checks, definition cache use, change consumption, capacity/read wait, SQL execution, refresh, cleanup and event delivery. Metrics are cumulative since process start; submillisecond phases retain nanosecond precision.
+- Add idle/no-write, cache/external-change, lease/publication protection, retirement, pause/resume, wakeup burst, fallback, permissions and exact 001–016 migration regressions. Pin SDK v0.99.0 after verifying tag ancestry.
+
 # Tables v0.2.12 — filter-leading projection indexes
 
 - Add opt-in `layout: filter_first` for nonunique projection indexes, preserving requested columns/directions before the generation suffix. Default/legacy and unique indexes retain their generation-leading layout.

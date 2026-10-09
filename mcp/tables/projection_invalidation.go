@@ -534,15 +534,47 @@ func loadActiveProjections(app *sdk.AppCtx, pid string) ([]*projectionDefinition
 	return out, rows.Err()
 }
 func (a *App) consumeProjectionChanges(ctx context.Context, app *sdk.AppCtx, pid string) error {
-	defs, err := loadActiveProjections(app, pid)
+	// Read only live cursors with actual new data before decoding any definition.
+	rows, err := app.AppReadDB().QueryContext(ctx, `SELECT p.id,c.last_change_id,p.published_change,p.built,p.latest_relevant_change FROM projection_definitions p JOIN projection_cursors c ON c.projection_id=p.id WHERE p.project_id=? AND p.status IN ('active','paused','building') AND EXISTS(SELECT 1 FROM projection_changes x WHERE x.project_id=p.project_id AND x.change_id>c.last_change_id)`, pid)
 	if err != nil {
 		return err
 	}
-	for _, p := range defs {
-		var cursor int64
-		if err := app.AppReadDB().QueryRowContext(ctx, `SELECT last_change_id FROM projection_cursors WHERE projection_id=?`, p.ID).Scan(&cursor); err != nil {
+	type runtimeState struct {
+		id, cursor, published, latest int64
+		built                         bool
+	}
+	var states []runtimeState
+	for rows.Next() {
+		var state runtimeState
+		if err := rows.Scan(&state.id, &state.cursor, &state.published, &state.built, &state.latest); err != nil {
+			rows.Close()
 			return err
 		}
+		states = append(states, state)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	if len(states) == 0 {
+		return nil
+	}
+	defs, epoch, err := a.workerDefinitions(ctx, app, pid)
+	if err != nil {
+		return err
+	}
+	byID := map[int64]*projectionDefinition{}
+	for _, p := range defs {
+		byID[p.ID] = p
+	}
+	for _, state := range states {
+		p := byID[state.id]
+		if p == nil || (p.Status != "active" && p.Status != "paused" && p.Status != "building") {
+			continue
+		}
+		p.Built, p.Published, p.Latest = state.built, state.published, state.latest
+		cursor := state.cursor
 		rows, err := app.AppReadDB().QueryContext(ctx, `SELECT c.change_id,t.name,c.old_values,c.new_values,EXISTS(SELECT 1 FROM projection_sources s WHERE s.projection_id=? AND s.table_id=c.table_id) AND (c.relevant_projection_ids IS NULL OR EXISTS(SELECT 1 FROM json_each(c.relevant_projection_ids) WHERE value=?)) FROM projection_changes c LEFT JOIN tables_meta t ON t.id=c.table_id WHERE c.project_id=? AND c.change_id>? ORDER BY c.change_id LIMIT ?`, p.ID, p.ID, pid, cursor, projectionChangeBatch)
 		if err != nil {
 			return err
@@ -626,6 +658,16 @@ func (a *App) consumeProjectionChanges(ctx context.Context, app *sdk.AppCtx, pid
 			tx.Rollback()
 			continue
 		}
+		var currentEpoch int64
+		if err := tx.QueryRowContext(ctx, `SELECT epoch FROM projection_definition_epoch WHERE singleton=1`).Scan(&currentEpoch); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if currentEpoch != epoch {
+			tx.Rollback()
+			continue
+		}
+
 		if mappingFailure != "" {
 			if _, err := tx.ExecContext(ctx, `UPDATE projection_definitions SET last_failure=? WHERE id=?`, mappingFailure, p.ID); err != nil {
 				tx.Rollback()
@@ -664,6 +706,5 @@ func (a *App) consumeProjectionChanges(ctx context.Context, app *sdk.AppCtx, pid
 			return err
 		}
 	}
-	_, err = app.AppDB().ExecContext(ctx, `DELETE FROM projection_changes WHERE change_id IN (SELECT change_id FROM projection_changes WHERE project_id=? AND change_id <= (SELECT MIN(c.last_change_id) FROM projection_cursors c JOIN projection_definitions p ON p.id=c.projection_id WHERE c.project_id=? AND p.status IN ('active','paused','building')) LIMIT 2048)`, pid, pid)
-	return err
+	return nil
 }

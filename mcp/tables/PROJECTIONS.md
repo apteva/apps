@@ -344,3 +344,49 @@ table for the previous worker and serves current readers from an atomic
 `database_upgrade: backward_compatible` and allows normal blue-green
 activation. Releasing a source version does not install or deploy it to
 production.
+
+## Worker scheduling and operational metrics
+
+Refresh detection retains a one-second periodic fallback. Local row mutations and
+projection management operations also notify a bounded wakeup channel; bursts
+coalesce and a change during a running pass retains one follow-up pass. Atomic
+write batches notify after commit. Notifications are hints: durable SQLite changes
+and queue entries remain authoritative across process restarts and external writes.
+Intervals, retry backoff and paused definitions still govern when jobs may run.
+
+Generation reclamation and consumed-change pruning run separately every 45 seconds.
+A maintenance pass has a 150 ms total budget, reserves background capacity, rotates
+through projections and deletes at most one configured publication batch per
+transaction (up to 32 batches per visited projection). Published generations,
+published empty heads, active staging leases and valid retired staging leases stay
+protected. An empty candidate lookup performs no writer transaction. Pruning checks
+for eligible records before writing, retains changes needed by paused consumers,
+and removes up to 32 batches of 512 change records within a separate 100 ms
+share of the maintenance budget, or 256 expired retired leases per pass.
+For a sustained backlog, cleanup throughput remains bounded; capacity planning must
+account for refresh rate and result size. Cleanup does not delay refresh detection
+until its next scheduled pass.
+
+Worker setup runs once per database identity/generation. A bounded definition cache
+uses a durable metadata epoch, including lifecycle/configuration changes from other
+sidecars. Publication watermarks, cursors, built state and queues are never cached.
+An epoch check inside the invalidation transaction prevents a configuration change
+during mapping from advancing a stale cursor. Public SQL permission checks remain
+in place. Retiring a version cancels its work and delivery queue; published
+historical data remains readable. Pausing retains work, and resume processes it.
+Status includes `paused_scopes` and `runnable_pending_scopes`; retired versions are
+not operationally ready and cannot be refreshed or resumed directly.
+
+Use `projections_worker_status` or authenticated `GET /projections/worker-status`
+for project worker counters. MCP inspection requires project-wide
+`projections.read`. `metrics_since: process_start` distinguishes these in-memory
+counters from durable per-projection publication timings. Durations use nanoseconds
+so cheap idle work does not round down to zero: idle check, change consumption,
+capacity wait, read-connection wait, SQL execution, complete refresh, cleanup and
+event delivery. SQL execution measures the prepared aggregate's execution/scan;
+refresh includes validation, decoding, publication and waits. Those totals overlap,
+so do not sum SQL/wait durations with complete refresh duration. Counters include
+idle ticks, definition loads/hits, refresh jobs/failures and successful cleanup
+batches and confirmed pruned change records. A deadline may race a committed
+SQLite deletion, so the latter counts acknowledged deletions and can conservatively
+undercount actual reclamation. No SQL text, parameters or row data appear in worker metrics.
