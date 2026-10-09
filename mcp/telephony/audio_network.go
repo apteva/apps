@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 const audioNetworkQueueLimit = 1024
@@ -40,6 +42,7 @@ type audioNetworkEvent struct {
 	AdviserIdentity phoneIdentity `json:"adviser_identity"`
 	IdentitySource  string        `json:"identity_source"`
 	ClientIP        string        `json:"client_ip,omitempty"`
+	SocketPeerIP    string        `json:"socket_peer_ip,omitempty"`
 	AddressSource   string        `json:"address_source"`
 	Classification  string        `json:"network_classification"`
 	OccurredAt      string        `json:"occurred_at"`
@@ -95,18 +98,45 @@ func audioNetworkClassification(addr netip.Addr, exits string) string {
 	return "unknown"
 }
 func newAudioNetworkContext(row *callRow, identity phoneIdentity, r *http.Request, config map[string]string) audioNetworkEvent {
-	addr, source := audioPeerAddress(r, config["audio_telemetry_trusted_proxy_cidrs"])
-	ip := ""
-	if addr.IsValid() {
-		ip = addr.String()
+	address, _ := resolveAudioNetworkAddress(r)
+	return newAudioNetworkContextWithAddress(row, identity, address, config)
+}
+
+type audioNetworkAddress struct {
+	Client     netip.Addr
+	SocketPeer netip.Addr
+	Source     string
+}
+
+// Resolve once at the authenticated handshake, before upgrading or rewriting
+// the request. Missing/invalid platform metadata falls back only to the socket
+// peer; unsigned forwarded headers cannot override a rejected assertion.
+func resolveAudioNetworkAddress(r *http.Request) (audioNetworkAddress, error) {
+	peer, source := audioPeerAddress(r, "")
+	address := audioNetworkAddress{Client: peer, SocketPeer: peer, Source: source}
+	ip, err := sdk.ClientIPFromRequest(r)
+	if err == nil && ip != "" {
+		address.Client, _ = netip.ParseAddr(ip)
+		address.Source = "trusted_proxy"
+	}
+	return address, err
+}
+
+func newAudioNetworkContextWithAddress(row *callRow, identity phoneIdentity, address audioNetworkAddress, config map[string]string) audioNetworkEvent {
+	ip, peer := "", ""
+	if address.Client.IsValid() {
+		ip = address.Client.String()
+	}
+	if address.SocketPeer.IsValid() {
+		peer = address.SocketPeer.String()
 	}
 	identitySource := "unattributed"
 	if identity.valid() {
 		identitySource = "validated_media_session"
 	}
 	return audioNetworkEvent{CallID: row.ID, ProjectID: row.ProjectID, AdviserIdentity: identity,
-		IdentitySource: identitySource, ClientIP: ip, AddressSource: source,
-		Classification: audioNetworkClassification(addr, config["audio_telemetry_known_vpn_exits"]),
+		IdentitySource: identitySource, ClientIP: ip, SocketPeerIP: peer, AddressSource: address.Source,
+		Classification: audioNetworkClassification(address.Client, config["audio_telemetry_known_vpn_exits"]),
 		Retention:      time.Duration(durationSetting(config, "audio_telemetry_network_retention_days", 7, 1, 31)) * 24 * time.Hour}
 }
 

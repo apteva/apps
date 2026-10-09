@@ -47,16 +47,17 @@ type benchmarkDirection struct {
 	TailReceived    int     `json:"final_two_seconds_markers"`
 }
 type benchmarkBrowserResult struct {
-	RTCCandidates   []map[string]any   `json:"rtc_candidates,omitempty"`
-	ClockProgress   map[string]float64 `json:"clock_progress,omitempty"`
-	WireDiagnostics []json.RawMessage  `json:"wire_diagnostics"`
-	Markers         []bench.Marker     `json:"markers"`
-	Notices         []map[string]any   `json:"notices"`
-	States          []map[string]any   `json:"states"`
-	Diagnostics     []map[string]any   `json:"diagnostics"`
-	PageErrors      []string           `json:"page_errors"`
-	BrowserVersion  string             `json:"browser_version"`
-	StartAt         int64              `json:"start_at"`
+	IndependentClocks map[string]any     `json:"independent_render_clocks,omitempty"`
+	RTCCandidates     []map[string]any   `json:"rtc_candidates,omitempty"`
+	ClockProgress     map[string]float64 `json:"clock_progress,omitempty"`
+	WireDiagnostics   []json.RawMessage  `json:"wire_diagnostics"`
+	Markers           []bench.Marker     `json:"markers"`
+	Notices           []map[string]any   `json:"notices"`
+	States            []map[string]any   `json:"states"`
+	Diagnostics       []map[string]any   `json:"diagnostics"`
+	PageErrors        []string           `json:"page_errors"`
+	BrowserVersion    string             `json:"browser_version"`
+	StartAt           int64              `json:"start_at"`
 }
 type benchmarkResult struct {
 	Profile           bench.Profile                    `json:"profile"`
@@ -297,7 +298,7 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 			}
 			writeTier2JSON(w, map[string]any{"start_at": epoch.Load()})
 		default:
-			files := map[string]string{"/entry.js": filepath.Join(output, "browser-entry.js"), "/probe.js": "benchmarks/softphone/probe-worklet.js", "/worklet.js": "ui/softphone-worklet.js", "/worker.js": "ui/softphone-worker.js"}
+			files := map[string]string{"/entry.js": filepath.Join(output, "browser-entry.js"), "/probe.js": "benchmarks/softphone/probe-worklet.js", "/clock-observer.js": "benchmarks/softphone/clock-observer.js", "/worklet.js": "ui/softphone-worklet.js", "/worker.js": "ui/softphone-worker.js"}
 			path, ok := files[r.URL.Path]
 			if !ok {
 				http.NotFound(w, r)

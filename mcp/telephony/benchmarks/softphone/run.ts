@@ -1,5 +1,6 @@
 import {resolve, join} from 'node:path';
 import {mkdir} from 'node:fs/promises';
+import {cpus, freemem, totalmem, loadavg} from 'node:os';
 
 const root = resolve(import.meta.dir, '../..');
 const args = process.argv.slice(2);
@@ -41,9 +42,26 @@ const env: NodeJS.ProcessEnv = {
 };
 delete env.TELEPHONY_DEPLOYED_FRONTEND;
 delete env.RUN_TELEPHONY_LIVE_CARRIER;
+// Host observations are kept separately from audio scores. A busy machine does
+// not turn a failed gate into a pass or justify subtracting audio delay.
+let previousCPU=cpus().map(cpu=>cpu.times);
+const hostSamples:unknown[]=[];
+const hostTimer=setInterval(()=>{
+  const current=cpus().map(cpu=>cpu.times);
+  let elapsed=0,idle=0;
+  current.forEach((cpu,i)=>{const prior=previousCPU[i];if(!prior)return;
+    for(const key of ['user','nice','sys','idle','irq'] as const)elapsed+=cpu[key]-prior[key];
+    idle+=cpu.idle-prior.idle;
+  });
+  previousCPU=current;
+  hostSamples.push({timestamp:new Date().toISOString(),cpu_busy_pct:elapsed ? 100*(elapsed-idle)/elapsed : null,
+    load_average:loadavg(),logical_cpus:current.length,free_memory_bytes:freemem(),total_memory_bytes:totalmem()});
+},1000);
 const child = Bun.spawn(['go', 'test', '-tags', 'integration', '-run', '^TestSoftphoneNetworkBenchmark$', '-count=1', '-timeout', '30m', '-v', '.'], {
   cwd: root, env, stdout: 'inherit', stderr: 'inherit',
 });
 const code = await child.exited;
+clearInterval(hostTimer);
+await Bun.write(join(output,'host-load.json'),JSON.stringify({samples:hostSamples},null,2)+'\n');
 console.log(`Benchmark artifacts: ${output}`);
 process.exit(code);

@@ -15,14 +15,12 @@ is described in [adaptive-playback.md](adaptive-playback.md).
   to avoid recounting the same Worker after reattachment; reconnect attempts and
   successful upgrades are separate. Browser-tab/session replacement is also
   counted as a new connection, not assumed to be a network failure.
-- Socket peer address uses a process-scoped HMAC hash, without IP or port storage.
-  `peer_hash_epoch` must match before hashes are compared. The process key is not
-  exported; restart changes hashes. Separate operator-only browser network
-  records now retain resolved raw addresses (see below). `address_source` distinguishes socket peer,
-  trusted forwarded peer and unavailable. By default an app behind a proxy hashes
-  the proxy. Optional `audio_telemetry_trusted_proxy_cidrs` permits a strictly
-  parsed X-Forwarded-For chain from trusted immediate peers only, walked right to
-  left up to the first untrusted hop. Client-provided prefixes are not trusted.
+- Browser peer hashes use the SDK-validated client IP when available, otherwise
+  the socket peer, with a process-scoped HMAC. `peer_hash_epoch` must match before
+  hashes are compared; restart changes hashes. `address_source` is `trusted_proxy`,
+  `socket_peer` or `unavailable`. Raw client and socket-peer addresses are stored
+  only in separate operator-only network records (see below). Telephony never
+  accepts unsigned X-Forwarded-For as an alternative to the signed assertion.
 - `timing.transport`: Worker-measured application ping RTT (latest/max and latest
   32 timestamped samples), maximum WebSocket `bufferedAmount`, reconnect attempts/
   successes, worker scheduling-gap count and maximum tick gap. The ping crosses
@@ -138,13 +136,19 @@ explicitly `unattributed`; the latest call owner is never used to guess identity
   or CIDRs. Matches are `known_vpn_exit`; all other results are `unknown`. Invalid
   entries and /0 ranges are ignored. An empty list classifies every connection as
   unknown. Neither label proves that a VPN caused an audio interruption.
-- `audio_telemetry_trusted_proxy_cidrs`: existing explicit trust configuration.
-  The socket peer is authoritative unless it is a configured trusted proxy;
-  forwarded addresses are walked from right to left until the first untrusted
-  hop. Browser-supplied prefixes cannot override that hop. Without the complete
-  deployment proxy chain configured, the recorded address can be a proxy, not
-  the browser's public exit. Inspect `address_source`; no automatic VPN detection
-  or proxy trust expansion is performed.
+- Client IP comes from `sdk.ClientIPFromRequest` (SDK v0.98.0), verified once
+  before the WebSocket upgrade and retained for that connection. Server must
+  forward signed metadata after rewriting the destination URI, and trust only
+  its configured proxy chain. Each reconnect resolves a fresh address. Invalid
+  assertions produce a sanitized warning and fall back to the socket peer;
+  missing assertions also fall back. Neither interrupts media. `socket_peer_ip`
+  is retained separately for operator debugging.
+- `audio_telemetry_trusted_proxy_cidrs` is retained as a legacy setting but no
+  longer overrides the SDK result or socket fallback. Configure the trusted
+  chain in Server with `APTEVA_TRUSTED_PROXY_CIDRS` instead. Old Servers without
+  forwarding still work, but record the socket peer rather than the browser's
+  public exit. For WebRTC this address identifies the signaling handshake, not
+  necessarily the separate UDP media route.
 - `audio_telemetry_network_retention_days`: 1–31 days, default seven, captured
   on attachment. Expired events are immediately excluded from reads and purged
   in bounded background batches. Failed writes/cleanup retry on later ticks.

@@ -22,7 +22,7 @@ func TestBrowserNetworkTrustedAddressesAndClassification(t *testing.T) {
 	identity := phoneTestIdentity("alice")
 	for _, tc := range []struct{ remote, forwarded, proxies, exits, ip, classification, source string }{
 		{"198.51.100.7:1234", "203.0.113.8", "", "198.51.100.7", "198.51.100.7", "known_vpn_exit", "socket_peer"},
-		{"192.0.2.4:1234", "203.0.113.8,198.51.100.7", "192.0.2.0/24", "198.51.100.7", "198.51.100.7", "known_vpn_exit", "trusted_forwarded_peer"},
+		{"192.0.2.4:1234", "203.0.113.8,198.51.100.7", "192.0.2.0/24", "198.51.100.7", "192.0.2.4", "unknown", "socket_peer"},
 		{"192.0.2.4:1234", "invalid,198.51.100.7", "192.0.2.0/24", "198.51.100.7", "192.0.2.4", "unknown", "socket_peer"},
 		{"[2001:db8:2::7]:1234", "", "", "2001:db8:2::/64", "2001:db8:2::7", "known_vpn_exit", "socket_peer"},
 		{"[::ffff:198.51.100.7]:1234", "", "", "198.51.100.7", "198.51.100.7", "known_vpn_exit", "socket_peer"},

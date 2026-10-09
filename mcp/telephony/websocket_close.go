@@ -41,6 +41,19 @@ type websocketWriteRequest struct {
 	valid    func() bool
 }
 
+// Count the entire frame, including its header. Once any bytes enter a TCP
+// WebSocket, abandoning that frame would corrupt the next frame's boundary.
+type websocketCountingWriter struct {
+	io.Writer
+	bytes int
+}
+
+func (w *websocketCountingWriter) Write(data []byte) (int, error) {
+	n, err := w.Writer.Write(data)
+	w.bytes += n
+	return n, err
+}
+
 // websocketWriterPump is the sole writer for a WebSocket connection. Data,
 // control, and close frames all pass through the same queue.
 type websocketWriterPump struct {
@@ -203,9 +216,13 @@ func (p *websocketWriterPump) run() {
 			timeout = websocketWriteTimeout
 		}
 		err := p.conn.SetWriteDeadline(time.Now().Add(timeout))
+		counted := websocketCountingWriter{Writer: p.conn}
+		attempted := err == nil
 		if err == nil {
-			err = wsutil.WriteMessage(p.conn, p.state, request.op, request.payload)
+			err = wsutil.WriteMessage(&counted, p.state, request.op, request.payload)
 		}
+		var timeoutError net.Error
+		expiredUnsentAudio := attempted && request.pcmBytes > 0 && counted.bytes == 0 && errors.As(err, &timeoutError) && timeoutError.Timeout()
 		if request.pcmBytes > 0 {
 			p.audioMu.Lock()
 			p.audioStats.MaxWriteMS = max(p.audioStats.MaxWriteMS, time.Since(started).Milliseconds())
@@ -213,10 +230,21 @@ func (p *websocketWriterPump) run() {
 				p.audioStats.SentBytes += int64(request.pcmBytes)
 			} else {
 				p.audioStats.WriteErrors++
-				p.audioStats.FailedBytes += int64(request.pcmBytes)
+				if expiredUnsentAudio {
+					p.audioStats.StaleBytes += int64(request.pcmBytes)
+					p.audioStats.WriteTimeoutDrops++
+				} else {
+					p.audioStats.FailedBytes += int64(request.pcmBytes)
+				}
 			}
 			p.audioStats.LastWriteAt = time.Now().UTC().Format(time.RFC3339Nano)
 			p.audioMu.Unlock()
+		}
+		if expiredUnsentAudio {
+			// A scheduling pause or backpressure may consume the live frame's
+			// deadline before a single byte is written. Drop that old frame;
+			// the next request gets a fresh deadline on the same healthy socket.
+			continue
 		}
 		if request.whisper && err == nil {
 			p.whisperSent.Add(1)
@@ -252,6 +280,7 @@ type liveAudioQueueSnapshot struct {
 	FlushedBytes         int64  `json:"flushed_bytes"`
 	FailedBytes          int64  `json:"failed_bytes"`
 	WriteErrors          int64  `json:"write_errors"`
+	WriteTimeoutDrops    int64  `json:"write_timeout_drops"`
 	LastWriteAt          string `json:"last_write_at,omitempty"`
 }
 

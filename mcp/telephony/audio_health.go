@@ -32,6 +32,11 @@ type audioPeerHasher struct {
 }
 
 func (p *audioPeerHasher) hash(r *http.Request, proxies string) (string, string, string) {
+	addr, source := audioPeerAddress(r, proxies)
+	return p.hashAddress(addr, source)
+}
+
+func (p *audioPeerHasher) hashAddress(addr netip.Addr, source string) (string, string, string) {
 	p.once.Do(func() {
 		if _, err := rand.Read(p.key[:]); err != nil {
 			return
@@ -42,7 +47,6 @@ func (p *audioPeerHasher) hash(r *http.Request, proxies string) (string, string,
 	if p.epoch == "" {
 		return "", "", "unavailable"
 	}
-	addr, source := audioPeerAddress(r, proxies)
 	if !addr.IsValid() {
 		return "", p.epoch, "unavailable"
 	}
