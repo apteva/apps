@@ -61,6 +61,8 @@ type releaseSearchHit struct {
 type searchOptions struct {
 	ProjectID, EntityType, Query, BrandID, SessionID, DateFrom, DateTo       string
 	Kind, Lineage, Sort, ReviewStatus, Destination, AccountRef, Availability string
+	SourceAssetID                                                            string
+	IncludeDescendants                                                       bool
 	Lifecycle                                                                string
 	Tag                                                                      string
 	Favorite                                                                 *bool
@@ -69,7 +71,17 @@ type searchOptions struct {
 }
 
 func parseSearchOptions(pid string, args map[string]any) (searchOptions, error) {
-	o := searchOptions{ProjectID: pid, EntityType: str(args, "entity_type"), Query: strings.TrimSpace(str(args, "query")), BrandID: str(args, "brand_id"), SessionID: str(args, "session_id"), DateFrom: str(args, "date_from"), DateTo: str(args, "date_to"), Kind: str(args, "kind"), Lineage: str(args, "lineage"), Sort: str(args, "sort"), ReviewStatus: str(args, "review_status"), Destination: str(args, "destination"), AccountRef: str(args, "account_ref"), Availability: str(args, "availability"), Tag: strings.ToLower(strings.TrimSpace(str(args, "tag"))), PatreonIntent: str(args, "patreon_intent"), Limit: 30}
+	o := searchOptions{ProjectID: pid, EntityType: str(args, "entity_type"), Query: strings.TrimSpace(str(args, "query")), BrandID: str(args, "brand_id"), SessionID: str(args, "session_id"), DateFrom: str(args, "date_from"), DateTo: str(args, "date_to"), Kind: str(args, "kind"), Lineage: str(args, "lineage"), Sort: str(args, "sort"), ReviewStatus: str(args, "review_status"), Destination: str(args, "destination"), AccountRef: str(args, "account_ref"), Availability: str(args, "availability"), Tag: strings.ToLower(strings.TrimSpace(str(args, "tag"))), PatreonIntent: str(args, "patreon_intent"), SourceAssetID: strings.TrimSpace(str(args, "source_asset_id")), Limit: 30}
+	if raw, ok := args["include_descendants"]; ok {
+		v, ok := raw.(bool)
+		if !ok {
+			return o, errors.New("include_descendants must be boolean")
+		}
+		o.IncludeDescendants = v
+	}
+	if o.IncludeDescendants && o.SourceAssetID == "" {
+		return o, errors.New("include_descendants requires source_asset_id")
+	}
 	var err error
 	o.Lifecycle, err = lifecycleScope(args)
 	if err != nil {
@@ -214,6 +226,11 @@ func (a *App) search(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if o.SourceAssetID != "" {
+		if _, err := assetByID(ctx.AppDB(), pid, o.SourceAssetID); err != nil {
+			return nil, err
+		}
+	}
 	out := map[string]any{"assets": searchPage[assetSearchHit]{Items: []assetSearchHit{}}, "sessions": searchPage[sessionSearchHit]{Items: []sessionSearchHit{}}}
 	if o.EntityType == "all" || o.EntityType == "assets" {
 		cursor, err := decodeSearchCursor(searchCursorArg(args, "assets"))
@@ -227,7 +244,7 @@ func (a *App) search(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		out["assets"] = page
 	}
 	// Asset-only filters do not silently change the meaning of a session or release result.
-	assetOnly := o.Kind != "" || o.Lineage != "" || o.ReviewStatus != "" || o.Availability != "any" || o.SessionID != "" || o.Tag != "" || o.Favorite != nil || o.PatreonIntent != ""
+	assetOnly := o.SourceAssetID != "" || o.Kind != "" || o.Lineage != "" || o.ReviewStatus != "" || o.Availability != "any" || o.SessionID != "" || o.Tag != "" || o.Favorite != nil || o.PatreonIntent != ""
 	if assetOnly && (o.EntityType == "sessions" || o.EntityType == "releases") {
 		return nil, errors.New("file filters require entity_type assets or all")
 	}
@@ -264,6 +281,25 @@ func (a *App) searchAssets(db *sql.DB, o searchOptions, cursor searchCursor) (se
 		FROM assets a JOIN sessions s ON s.id=a.session_id AND s.project_id=a.project_id WHERE a.project_id=?`
 	q += lifecyclePredicate(o.Lifecycle, "a", "s")
 	values := []any{o.ProjectID}
+	if o.SourceAssetID != "" {
+		if o.IncludeDescendants {
+			// UNION on IDs makes multiple paths and malformed historical cycles finite.
+			// Validate every traversed asset in this project, including intermediates.
+			q = `WITH RECURSIVE descendants(id) AS (
+                SELECT id FROM assets WHERE project_id=? AND id=?
+                UNION
+                SELECT child.id FROM descendants d
+                JOIN asset_sources src ON src.source_asset_id=d.id AND src.project_id=?
+                JOIN assets child ON child.id=src.child_asset_id AND child.project_id=src.project_id
+            ) ` + q + ` AND a.id IN (SELECT id FROM descendants) AND a.id<>?`
+			values = []any{o.ProjectID, o.SourceAssetID, o.ProjectID, o.ProjectID, o.SourceAssetID}
+		} else {
+			q += ` AND a.id<>? AND EXISTS (SELECT 1 FROM asset_sources src
+                JOIN assets parent ON parent.id=src.source_asset_id AND parent.project_id=src.project_id
+                WHERE src.project_id=a.project_id AND src.child_asset_id=a.id AND src.source_asset_id=?)`
+			values = append(values, o.SourceAssetID, o.SourceAssetID)
+		}
+	}
 	if o.BrandID != "" {
 		q += ` AND s.brand_id=?`
 		values = append(values, o.BrandID)
