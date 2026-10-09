@@ -650,10 +650,37 @@ func (a *App) finalizeCloudBuild(ctx context.Context, backend cloudBuildBackend,
 	var manifestJSON string
 	switch mode {
 	case "store_upload":
+		pipeline, err := pipelineConfig(build.TargetConfigJSON)
+		if err != nil {
+			a.failBuild(build, err.Error())
+			return nil
+		}
 		manifest, err := externalStoreArtifactManifest(d, build)
 		if err != nil {
 			a.failBuild(build, err.Error())
 			return nil
+		}
+		if pipeline != nil {
+			artifact, err := backend.Artifact(ctx, bound, cfg, build, status)
+			if err != nil {
+				a.failBuild(build, "collect uploaded artifact evidence: "+err.Error())
+				return nil
+			}
+			if err = a.downloadAndStageCloudArtifact(bound, d, build, artifact, "file", distDir); err != nil {
+				a.failBuild(build, err.Error())
+				return nil
+			}
+			if err = a.verifyStagedCloudMobileArtifact(d, build, distDir); err != nil {
+				a.failBuild(build, err.Error())
+				return nil
+			}
+			returned, err := readArtifactManifestFile(filepath.Join(distDir, artifactManifestFilename))
+			if err != nil {
+				a.failBuild(build, err.Error())
+				return nil
+			}
+			returned.Channel, returned.ExternalProvider, returned.ExternalID, returned.ExternalStatus = manifest.Channel, manifest.ExternalProvider, manifest.ExternalID, manifest.ExternalStatus
+			manifest = returned
 		}
 		if err := writeArtifactManifest(distDir, manifest); err != nil {
 			a.failBuild(build, err.Error())
@@ -852,8 +879,14 @@ func (codemagicBuildBackend) Submit(_ context.Context, bound *sdk.BoundIntegrati
 	if len(cfg.Groups) > 0 {
 		environment["groups"] = cfg.Groups
 	}
-	if len(cfg.SoftwareVersions) > 0 {
-		environment["softwareVersions"] = cfg.SoftwareVersions
+	// Bun/Rust are provisioned by the generic recipe adapter rather than
+	// Codemagic's limited softwareVersions API.
+	providerVersions := cloneStringMap(cfg.SoftwareVersions)
+	for _, key := range []string{"bun", "rust", "rust_targets", "python"} {
+		delete(providerVersions, key)
+	}
+	if len(providerVersions) > 0 {
+		environment["softwareVersions"] = providerVersions
 	}
 	input["environment"] = environment
 	data, err := executeIntegration(bound, "start_build", input)
@@ -1334,6 +1367,17 @@ func (a *App) downloadAndStageCloudArtifact(bound *sdk.BoundIntegration, d *Depl
 	defer os.Remove(tmpPath)
 	if err := downloadCloudArtifact(bound, artifact, tmpPath); err != nil {
 		return err
+	}
+	targetJSON := defaultStr(build.TargetConfigJSON, d.TargetConfigJSON)
+	pipeline, err := pipelineConfig(targetJSON)
+	if err != nil {
+		return err
+	}
+	if pipeline != nil {
+		if mode != "bundle" && !artifact.Archive {
+			return errors.New("pipeline artifact must include its tree and evidence in a zip archive")
+		}
+		return importPipelineArchive(tmpPath, distDir, pipeline, artifact.FileName)
 	}
 	if mode == "bundle" {
 		zr, err := zip.OpenReader(tmpPath)

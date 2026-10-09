@@ -139,23 +139,15 @@ func buildWithPipeline(builder Builder, src, dist string, ov BuildOverrides, log
 	if p == nil {
 		return builder.Build(src, dist, ov, log)
 	}
-	if p.OS != "" && p.OS != runtime.GOOS {
-		return "", fmt.Errorf("pipeline requires OS %s; runner is %s", p.OS, runtime.GOOS)
+	src, e = pipelinePath(src, "")
+	if e != nil {
+		return "", e
 	}
-	if p.Arch != "" && p.Arch != runtime.GOARCH {
-		return "", fmt.Errorf("pipeline requires architecture %s", p.Arch)
+	dist, e = pipelinePath(dist, "")
+	if e != nil {
+		return "", e
 	}
-	src, _ = filepath.EvalSymlinks(src)
-	dist, _ = filepath.EvalSymlinks(dist)
-	src, _ = filepath.Abs(src)
-	dist, _ = filepath.Abs(dist)
-	ctx := buildContext(ov)
-	for _, stage := range p.Prepare {
-		if e = runCommandStage(ctx, stage, src, src, dist, ov.Env, log); e != nil {
-			return "", e
-		}
-	}
-	buildDir, e := pipelinePath(src, p.BuildDirectory)
+	buildDir, e := prepareCommandPipeline(buildContext(ov), p, src, dist, ov.Env, log)
 	if e != nil {
 		return "", e
 	}
@@ -163,43 +155,83 @@ func buildWithPipeline(builder Builder, src, dist string, ov BuildOverrides, log
 	if e != nil {
 		return "", e
 	}
+	if e = finalizeCommandPipeline(buildContext(ov), p, src, dist, ov.Env, log); e != nil {
+		return "", e
+	}
+	return entry, nil
+}
+
+// Native providers use these same functions around their archive/sign/export step.
+func prepareCommandPipeline(ctx context.Context, p *commandPipeline, src, dist string, env map[string]string, log io.Writer) (string, error) {
+	if p.OS != "" && p.OS != runtime.GOOS {
+		return "", fmt.Errorf("pipeline requires OS %s; runner is %s", p.OS, runtime.GOOS)
+	}
+	if p.Arch != "" && p.Arch != runtime.GOARCH {
+		return "", fmt.Errorf("pipeline requires architecture %s; runner is %s", p.Arch, runtime.GOARCH)
+	}
+	for _, stage := range p.Prepare {
+		if e := runCommandStage(ctx, stage, src, src, dist, env, log); e != nil {
+			return "", e
+		}
+	}
+	return pipelinePath(src, p.BuildDirectory)
+}
+
+func finalizeCommandPipeline(ctx context.Context, p *commandPipeline, src, dist string, env map[string]string, log io.Writer) error {
 	if len(p.Outputs) == 0 {
-		return "", errors.New("pipeline must declare artifact outputs")
+		return errors.New("pipeline must declare artifact outputs")
 	}
 	for _, output := range p.Outputs {
-		if _, e = pipelinePath(dist, output); e != nil {
-			return "", fmt.Errorf("missing artifact output %s: %w", output, e)
+		if _, e := pipelinePath(dist, output); e != nil {
+			return fmt.Errorf("missing artifact output %s: %w", output, e)
 		}
 	}
 	before, e := artifactTreeDigest(dist)
 	if e != nil {
-		return "", e
+		return e
+	}
+	manifestPath := filepath.Join(dist, artifactManifestFilename)
+	manifestInfo, statErr := os.Lstat(manifestPath)
+	if statErr == nil && !manifestInfo.Mode().IsRegular() {
+		return errors.New("artifact manifest must be a regular file")
+	}
+	originalManifest, readErr := os.ReadFile(manifestPath)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return readErr
 	}
 	tests := []string{}
 	for _, stage := range p.Tests {
-		if e = runCommandStage(ctx, stage, dist, src, dist, ov.Env, log); e != nil {
-			return "", e
+		if e = runCommandStage(ctx, stage, dist, src, dist, env, log); e != nil {
+			return e
 		}
 		tests = append(tests, stage.Name)
 	}
 	after, e := artifactTreeDigest(dist)
 	if e != nil {
-		return "", e
+		return e
+	}
+	currentInfo, currentStatErr := os.Lstat(manifestPath)
+	if (statErr == nil) != (currentStatErr == nil) || (statErr == nil && currentStatErr == nil && manifestInfo.Mode() != currentInfo.Mode()) {
+		return errors.New("tests modified release artifact manifest")
+	}
+	currentManifest, currentErr := os.ReadFile(manifestPath)
+	if (readErr == nil) != (currentErr == nil) || string(originalManifest) != string(currentManifest) || (currentErr != nil && !errors.Is(currentErr, os.ErrNotExist)) {
+		return errors.New("tests modified release artifact manifest")
 	}
 	if before != after {
-		return "", errors.New("tests modified release artifacts; produce test reports outside DEPLOY_ARTIFACT_DIR")
+		return errors.New("tests modified release artifacts; produce test reports outside DEPLOY_ARTIFACT_DIR")
 	}
 	var manifest artifactManifest
 	if body, e := os.ReadFile(filepath.Join(dist, artifactManifestFilename)); e == nil {
 		if e = json.Unmarshal(body, &manifest); e != nil {
-			return "", e
+			return e
 		}
 	}
 	manifest.Pipeline = &pipelineEvidence{ArtifactSHA256: after, ConfigSHA256: jsonDigest(p), Tests: tests, CompletedAt: nowUTC()}
-	if e = writeArtifactManifest(dist, manifest); e != nil {
-		return "", e
+	if e := writeArtifactManifest(dist, manifest); e != nil {
+		return e
 	}
-	return entry, nil
+	return nil
 }
 func jsonDigest(v any) string {
 	b, _ := json.Marshal(v)

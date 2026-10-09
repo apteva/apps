@@ -177,7 +177,7 @@ func (p *mobileSigningPlatform) ExecuteIntegrationTool(_ int64, tool string, inp
 		if p.bundleID == "" {
 			data = json.RawMessage(`{"data":[]}`)
 		} else {
-			data = json.RawMessage(fmt.Sprintf(`{"data":[{"id":%q}]}`, p.bundleID))
+			data = json.RawMessage(fmt.Sprintf(`{"data":[{"id":%q,"attributes":{"identifier":%q}}]}`, p.bundleID, input["identifier"]))
 		}
 	case "register_bundle_id":
 		p.bundleID = "bundle-resource-1"
@@ -790,4 +790,53 @@ func lastSigningCallIndex(calls []integrationCall, tool string) int {
 		}
 	}
 	return -1
+}
+
+func TestIncompleteAppleSigningBundleCorrection(t *testing.T) {
+	platform := &mobileSigningPlatform{appExists: false}
+	_, d := newIOSSigningDeployment(t, platform)
+	app := &App{}
+	first, err := app.setupMobileSigning(t.Context(), d, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Ready {
+		t.Fatal("expected incomplete signing")
+	}
+	// Simulate stale identity-dependent state from an interrupted setup.
+	first.Setup.AppleProfileID = "old-profile"
+	first.Setup.AppleCertificateID = "unrelated-certificate"
+	first.Setup.ProviderSecretRef = "old-secrets"
+	if _, err = dbUpsertMobileSigningSetup(globalCtx.AppDB(), first.Setup); err != nil {
+		t.Fatal(err)
+	}
+	d.TargetConfigJSON = `{"bundle_id":"com.example.corrected","scheme":"Example"}`
+	platform.bundleID = "corrected-bundle-resource"
+	platform.appExists = true
+	corrected, err := app.setupMobileSigning(t.Context(), d, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !corrected.Ready || corrected.Setup.AppleBundleResourceID != "corrected-bundle-resource" || corrected.Setup.BundleID != "com.example.corrected" || corrected.Setup.AppleProfileID == "old-profile" {
+		t.Fatalf("corrected=%+v", corrected)
+	}
+	profile := lastSigningCall(platform.calls, "create_profile")
+	if profile == nil || profile.Input["bundle_id"] != "corrected-bundle-resource" {
+		t.Fatalf("profile=%+v", profile)
+	}
+	if signingCallCount(platform.calls, "revoke_certificate") != 0 || signingCallCount(platform.calls, "delete_profile") != 0 {
+		t.Fatal("correction revoked unrelated resources")
+	}
+	d.TargetConfigJSON = `{"bundle_id":"com.example.another","scheme":"Example"}`
+	if _, err = app.setupMobileSigning(t.Context(), d, "", false); err == nil || !strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("ready identity changed: %v", err)
+	}
+}
+
+func TestAppleBundleResourceRequiresMatchingIdentifier(t *testing.T) {
+	for _, raw := range []string{`{"data":[{"id":"wrong","attributes":{"identifier":"com.other"}}]}`, `{"data":[{"id":"unknown"}]}`} {
+		if _, err := matchingAppleBundleResource(json.RawMessage(raw), "com.expected"); err == nil {
+			t.Fatal("accepted mismatched Apple resource")
+		}
+	}
 }
