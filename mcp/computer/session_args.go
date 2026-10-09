@@ -42,7 +42,7 @@ var browserSessionSupportedArguments = map[string]struct{}{
 	"url": {}, "context_id": {}, "context_name": {}, "provider_context_id": {},
 	"auto_create_context": {}, "persist": {}, "timeout": {}, "proxy_mode": {},
 	"proxy_profile": {}, "proxy_country": {}, "proxy_sticky": {}, "environment": {},
-	"environment_override": {}, "viewport": {},
+	"environment_override": {}, "viewport": {}, "extraction_only": {},
 
 	// Accepted compatibility aliases are intentionally not advertised in the
 	// public schema, but remain supported for existing programmatic clients.

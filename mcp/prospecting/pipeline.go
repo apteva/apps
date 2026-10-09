@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -32,6 +33,9 @@ type runOptions struct {
 	Bias              map[string]any `json:"location_bias,omitempty"`
 	Engine            string         `json:"engine,omitempty"`
 	FallbackEngine    string         `json:"fallback_engine,omitempty"`
+	Concurrency       int            `json:"concurrency,omitempty"`
+	TargetLeads       int            `json:"target_leads,omitempty"`
+	NewOnly           bool           `json:"new_only,omitempty"`
 }
 
 type runState struct {
@@ -133,6 +137,15 @@ func (a *App) toolRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("active target profile required")
 	}
 	o := runOptions{ProfileID: p.ID, Source: defaultString(stringArg(args, "source"), "web"), Query: stringArg(args, "query"), Limit: intArg(args, "limit", 20), Qualify: boolArg(args, "qualify", true), CRMMode: defaultString(stringArg(args, "crm_mode"), "review"), MaxPages: intArg(args, "max_pages", 2), MaxPlacesRequests: intArg(args, "max_places_requests", 3), IncludedType: stringArg(args, "included_type"), Engine: defaultString(stringArg(args, "engine"), "google"), FallbackEngine: defaultString(stringArg(args, "fallback_engine"), "duckduckgo")}
+	o.Concurrency = intArg(args, "concurrency", 3)
+	o.TargetLeads = intArg(args, "target_leads", 0)
+	o.NewOnly = boolArg(args, "new_only", false)
+	if o.Concurrency < 1 || o.Concurrency > 4 {
+		return nil, errors.New("concurrency must be 1–4")
+	}
+	if o.TargetLeads < 0 || o.TargetLeads > o.Limit || (o.TargetLeads > 0 && !o.Qualify) {
+		return nil, errors.New("target_leads requires qualification and must be between 1 and limit")
+	}
 	if o.Limit < 1 || o.Limit > 20 {
 		return nil, errors.New("runs are limited to 1–20 prospects")
 	}
@@ -253,7 +266,16 @@ func getProspectingJob(ctx *sdk.AppCtx, id int64) (*prospectingJob, error) {
 			j.Counts["qualified"]++
 		}
 	}
-	return j, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	var complete int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(DISTINCT lower(c.email)) FROM prospecting_job_items i JOIN candidates c ON c.id=i.candidate_id WHERE i.run_id=? AND c.project_id=? AND i.status IN ('qualified','transferred') AND c.website<>'' AND c.email<>'' AND c.status NOT IN ('rejected','deferred')`, id, ctx.CurrentProject()).Scan(&complete); err != nil {
+		return nil, err
+	}
+	j.Counts["complete_leads"] = complete
+	return j, nil
 }
 
 func (a *App) toolRunGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -411,11 +433,40 @@ func advanceProspectingJob(c context.Context, ctx *sdk.AppCtx, j *prospectingJob
 		}
 		return discoverPlacesJob(c, ctx, j, p)
 	}
+	if j.Options.TargetLeads > 0 && j.Counts["complete_leads"] >= j.Options.TargetLeads {
+		_, err := ctx.AppDB().Exec(`UPDATE prospecting_job_items SET status='skipped',reason='complete lead target reached' WHERE run_id=? AND status='pending'`, j.ID)
+		j.Status = "completed"
+		return err
+	}
+	batch := []runItem{}
+	batchSize := clamp(j.Options.Concurrency, 1, 4)
+	if j.Options.TargetLeads > 0 && j.Options.TargetLeads-j.Counts["complete_leads"] < batchSize {
+		batchSize = j.Options.TargetLeads - j.Counts["complete_leads"]
+	}
 	for _, item := range j.Items {
 		if item.Status != "pending" {
 			continue
 		}
-		return qualifyRunItem(c, ctx, j, item)
+		batch = append(batch, item)
+		if len(batch) == batchSize {
+			break
+		}
+	}
+	if len(batch) > 0 {
+		var wg sync.WaitGroup
+		errs := make(chan error, len(batch))
+		for _, item := range batch {
+			wg.Add(1)
+			go func(item runItem) { defer wg.Done(); errs <- qualifyRunItem(c, ctx, j, item) }(item)
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	j.Status = "completed"
 	for _, i := range j.Items {
@@ -470,6 +521,20 @@ func discoverPlacesJob(c context.Context, ctx *sdk.AppCtx, j *prospectingJob, p 
 			return c.Err()
 		}
 		place := j.State.Page[j.State.Index]
+		if j.Options.NewOnly {
+			_, domain := normalizeWebsite(place.Website)
+			var represented int
+			if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM candidates c LEFT JOIN candidate_places cp ON cp.candidate_id=c.id WHERE c.project_id=? AND c.profile_id<>? AND (cp.place_id=? OR (?<>'' AND c.company_domain=?))`, ctx.CurrentProject(), p.ID, place.ID, domain, domain).Scan(&represented); err != nil {
+				return err
+			}
+			if represented > 0 {
+				if err := recordRunItem(ctx, j, place.ID, nil, false, "already represented in another target profile"); err != nil {
+					return err
+				}
+				j.State.Index++
+				continue
+			}
+		}
 		candidate, created, reason, err := ingestPlace(ctx, p, place)
 		if err != nil {
 			return err
@@ -488,7 +553,7 @@ func discoverPlacesJob(c context.Context, ctx *sdk.AppCtx, j *prospectingJob, p 
 			return err
 		}
 	}
-	if j.Counts["discovered"] >= j.Options.Limit || j.State.NextPageToken == "" || j.State.SearchPages >= 3 {
+	if j.Counts["discovered"] >= j.Options.Limit || j.State.NextPageToken == "" || j.State.SearchPages >= 3 || j.State.PlacesRequests >= j.Options.MaxPlacesRequests {
 		j.State.Phase = "qualify"
 		j.State.Page = nil
 		j.State.Index = 0

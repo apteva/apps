@@ -180,18 +180,23 @@ type webLink struct {
 	Text string `json:"text"`
 }
 
+type webExtractBrowser struct {
+	SessionID string `json:"session_id"`
+}
+
 type webExtractPage struct {
-	URL            string           `json:"url"`
-	FinalURL       string           `json:"final_url"`
-	Title          string           `json:"title"`
-	Description    string           `json:"description"`
-	Text           string           `json:"text"`
-	Links          []webLink        `json:"links"`
-	Metadata       map[string]any   `json:"metadata"`
-	StructuredData any              `json:"structured_data"`
-	Status         int              `json:"status"`
-	Artifact       *webPageArtifact `json:"artifact"`
-	Error          string           `json:"error"`
+	Browser        *webExtractBrowser `json:"browser"`
+	URL            string             `json:"url"`
+	FinalURL       string             `json:"final_url"`
+	Title          string             `json:"title"`
+	Description    string             `json:"description"`
+	Text           string             `json:"text"`
+	Links          []webLink          `json:"links"`
+	Metadata       map[string]any     `json:"metadata"`
+	StructuredData any                `json:"structured_data"`
+	Status         int                `json:"status"`
+	Artifact       *webPageArtifact   `json:"artifact"`
+	Error          string             `json:"error"`
 }
 
 type webExtractOutput struct {
