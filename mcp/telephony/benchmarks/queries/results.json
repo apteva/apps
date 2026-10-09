@@ -1,0 +1,1717 @@
+{
+  "baseline_commit": "75f4e031c32d6f11c1a65ba9f03b33320b77ccb3",
+  "baseline_version": "0.11.2",
+  "benchmark_driver_sha256": "aa1c8189aee5901865dac334273e47d7b52b73a0461857763385e3463ed7c69d",
+  "measured_at": "2026-10-09",
+  "database": "SDK modernc SQLite in memory, one connection",
+  "raw_trials": {
+    "baseline": [
+      {
+        "go_version": "go1.25.1",
+        "Calls": 6020,
+        "Recordings": 5906,
+        "CapacitySlots": 10,
+        "results": [
+          {
+            "name": "call_list_changing",
+            "iterations": 300,
+            "wall_ms_per_operation": 17.097850416666667,
+            "cpu_ms_per_operation": 20.50255333333333,
+            "allocated_bytes_per_operation": 7190763,
+            "allocations_per_operation": 62589
+          },
+          {
+            "name": "call_list_repeated",
+            "iterations": 300,
+            "wall_ms_per_operation": 17.32850764,
+            "cpu_ms_per_operation": 20.43858,
+            "allocated_bytes_per_operation": 7227235,
+            "allocations_per_operation": 62581
+          },
+          {
+            "name": "single_call_recording_summary",
+            "iterations": 300,
+            "wall_ms_per_operation": 6.446925276666667,
+            "cpu_ms_per_operation": 6.942049999999999,
+            "allocated_bytes_per_operation": 1030758,
+            "allocations_per_operation": 29593
+          },
+          {
+            "name": "sse_changing",
+            "iterations": 300,
+            "wall_ms_per_operation": 9.74929403,
+            "cpu_ms_per_operation": 11.835653333333333,
+            "allocated_bytes_per_operation": 4346027,
+            "allocations_per_operation": 15084
+          },
+          {
+            "name": "sse_heartbeat",
+            "iterations": 300,
+            "wall_ms_per_operation": 9.409893473333334,
+            "cpu_ms_per_operation": 11.603480000000006,
+            "allocated_bytes_per_operation": 4347055,
+            "allocations_per_operation": 15074
+          },
+          {
+            "name": "capacity_cleanup",
+            "iterations": 300,
+            "wall_ms_per_operation": 4.910121526666667,
+            "cpu_ms_per_operation": 4.743156666666667,
+            "allocated_bytes_per_operation": 966,
+            "allocations_per_operation": 21
+          },
+          {
+            "name": "call_state_write",
+            "iterations": 3000,
+            "wall_ms_per_operation": 0.03274468033333334,
+            "cpu_ms_per_operation": 0.03248500000000058,
+            "allocated_bytes_per_operation": 191,
+            "allocations_per_operation": 10
+          },
+          {
+            "name": "audio_diagnostics_write",
+            "iterations": 3000,
+            "wall_ms_per_operation": 0.032637638999999996,
+            "cpu_ms_per_operation": 0.03222933333333397,
+            "allocated_bytes_per_operation": 213,
+            "allocations_per_operation": 10
+          }
+        ]
+      },
+      {
+        "go_version": "go1.25.1",
+        "Calls": 6020,
+        "Recordings": 5906,
+        "CapacitySlots": 10,
+        "results": [
+          {
+            "name": "call_list_changing",
+            "iterations": 300,
+            "wall_ms_per_operation": 17.547572776666666,
+            "cpu_ms_per_operation": 21.669316666666667,
+            "allocated_bytes_per_operation": 7283968,
+            "allocations_per_operation": 62597
+          },
+          {
+            "name": "call_list_repeated",
+            "iterations": 300,
+            "wall_ms_per_operation": 18.445857636666666,
+            "cpu_ms_per_operation": 21.80932333333333,
+            "allocated_bytes_per_operation": 7318678,
+            "allocations_per_operation": 62588
+          },
+          {
+            "name": "single_call_recording_summary",
+            "iterations": 300,
+            "wall_ms_per_operation": 7.29319486,
+            "cpu_ms_per_operation": 7.444206666666669,
+            "allocated_bytes_per_operation": 1030681,
+            "allocations_per_operation": 29593
+          },
+          {
+            "name": "sse_changing",
+            "iterations": 300,
+            "wall_ms_per_operation": 10.97490375,
+            "cpu_ms_per_operation": 12.82614666666667,
+            "allocated_bytes_per_operation": 4354433,
+            "allocations_per_operation": 15088
+          },
+          {
+            "name": "sse_heartbeat",
+            "iterations": 300,
+            "wall_ms_per_operation": 9.495487083333334,
+            "cpu_ms_per_operation": 12.044266666666664,
+            "allocated_bytes_per_operation": 4350900,
+            "allocations_per_operation": 15076
+          },
+          {
+            "name": "capacity_cleanup",
+            "iterations": 300,
+            "wall_ms_per_operation": 4.188702363333333,
+            "cpu_ms_per_operation": 4.158776666666672,
+            "allocated_bytes_per_operation": 872,
+            "allocations_per_operation": 21
+          },
+          {
+            "name": "call_state_write",
+            "iterations": 3000,
+            "wall_ms_per_operation": 0.03387255533333333,
+            "cpu_ms_per_operation": 0.031187999999999494,
+            "allocated_bytes_per_operation": 191,
+            "allocations_per_operation": 10
+          },
+          {
+            "name": "audio_diagnostics_write",
+            "iterations": 3000,
+            "wall_ms_per_operation": 0.035953875,
+            "cpu_ms_per_operation": 0.032209333333333534,
+            "allocated_bytes_per_operation": 213,
+            "allocations_per_operation": 10
+          }
+        ]
+      },
+      {
+        "go_version": "go1.25.1",
+        "Calls": 6020,
+        "Recordings": 5906,
+        "CapacitySlots": 10,
+        "results": [
+          {
+            "name": "call_list_changing",
+            "iterations": 300,
+            "wall_ms_per_operation": 46.29744541666667,
+            "cpu_ms_per_operation": 22.66243,
+            "allocated_bytes_per_operation": 7315261,
+            "allocations_per_operation": 62598
+          },
+          {
+            "name": "call_list_repeated",
+            "iterations": 300,
+            "wall_ms_per_operation": 19.82182236,
+            "cpu_ms_per_operation": 22.539546666666666,
+            "allocated_bytes_per_operation": 7376377,
+            "allocations_per_operation": 62591
+          },
+          {
+            "name": "single_call_recording_summary",
+            "iterations": 300,
+            "wall_ms_per_operation": 6.9938633333333335,
+            "cpu_ms_per_operation": 7.41253333333334,
+            "allocated_bytes_per_operation": 1030677,
+            "allocations_per_operation": 29593
+          },
+          {
+            "name": "sse_changing",
+            "iterations": 300,
+            "wall_ms_per_operation": 28.409891386666665,
+            "cpu_ms_per_operation": 13.06726,
+            "allocated_bytes_per_operation": 4354951,
+            "allocations_per_operation": 15088
+          },
+          {
+            "name": "sse_heartbeat",
+            "iterations": 300,
+            "wall_ms_per_operation": 13.26637625,
+            "cpu_ms_per_operation": 12.695739999999994,
+            "allocated_bytes_per_operation": 4355241,
+            "allocations_per_operation": 15079
+          },
+          {
+            "name": "capacity_cleanup",
+            "iterations": 300,
+            "wall_ms_per_operation": 4.28913264,
+            "cpu_ms_per_operation": 4.268483333333339,
+            "allocated_bytes_per_operation": 849,
+            "allocations_per_operation": 21
+          },
+          {
+            "name": "call_state_write",
+            "iterations": 3000,
+            "wall_ms_per_operation": 0.030869152666666663,
+            "cpu_ms_per_operation": 0.030587000000000746,
+            "allocated_bytes_per_operation": 191,
+            "allocations_per_operation": 10
+          },
+          {
+            "name": "audio_diagnostics_write",
+            "iterations": 3000,
+            "wall_ms_per_operation": 0.030768625,
+            "cpu_ms_per_operation": 0.03054533333333287,
+            "allocated_bytes_per_operation": 213,
+            "allocations_per_operation": 10
+          }
+        ]
+      }
+    ],
+    "optimized": [
+      {
+        "go_version": "go1.25.1",
+        "Calls": 6020,
+        "Recordings": 5906,
+        "CapacitySlots": 10,
+        "results": [
+          {
+            "name": "call_list_changing",
+            "iterations": 300,
+            "wall_ms_per_operation": 8.3048075,
+            "cpu_ms_per_operation": 9.286916666666668,
+            "allocated_bytes_per_operation": 2812643,
+            "allocations_per_operation": 24206
+          },
+          {
+            "name": "call_list_repeated",
+            "iterations": 300,
+            "wall_ms_per_operation": 1.8022201366666666,
+            "cpu_ms_per_operation": 2.6115166666666663,
+            "allocated_bytes_per_operation": 1548632,
+            "allocations_per_operation": 16373
+          },
+          {
+            "name": "single_call_recording_summary",
+            "iterations": 300,
+            "wall_ms_per_operation": 0.014812363333333333,
+            "cpu_ms_per_operation": 0.01509666666666817,
+            "allocated_bytes_per_operation": 1144,
+            "allocations_per_operation": 26
+          },
+          {
+            "name": "sse_changing",
+            "iterations": 300,
+            "wall_ms_per_operation": 4.606606526666667,
+            "cpu_ms_per_operation": 5.218803333333332,
+            "allocated_bytes_per_operation": 1170521,
+            "allocations_per_operation": 5437
+          },
+          {
+            "name": "sse_heartbeat",
+            "iterations": 300,
+            "wall_ms_per_operation": 0.049255553333333334,
+            "cpu_ms_per_operation": 0.06814333333333404,
+            "allocated_bytes_per_operation": 33860,
+            "allocations_per_operation": 39
+          },
+          {
+            "name": "capacity_cleanup",
+            "iterations": 300,
+            "wall_ms_per_operation": 0.04749680666666666,
+            "cpu_ms_per_operation": 0.06289000000000063,
+            "allocated_bytes_per_operation": 906,
+            "allocations_per_operation": 21
+          },
+          {
+            "name": "call_state_write",
+            "iterations": 3000,
+            "wall_ms_per_operation": 0.039873375,
+            "cpu_ms_per_operation": 0.03960766666666647,
+            "allocated_bytes_per_operation": 191,
+            "allocations_per_operation": 10
+          },
+          {
+            "name": "audio_diagnostics_write",
+            "iterations": 3000,
+            "wall_ms_per_operation": 0.031779764,
+            "cpu_ms_per_operation": 0.031053333333333284,
+            "allocated_bytes_per_operation": 213,
+            "allocations_per_operation": 10
+          }
+        ]
+      },
+      {
+        "go_version": "go1.25.1",
+        "Calls": 6020,
+        "Recordings": 5906,
+        "CapacitySlots": 10,
+        "results": [
+          {
+            "name": "call_list_changing",
+            "iterations": 300,
+            "wall_ms_per_operation": 7.528582500000001,
+            "cpu_ms_per_operation": 9.300163333333334,
+            "allocated_bytes_per_operation": 2837677,
+            "allocations_per_operation": 24209
+          },
+          {
+            "name": "call_list_repeated",
+            "iterations": 300,
+            "wall_ms_per_operation": 1.8415137499999998,
+            "cpu_ms_per_operation": 2.933313333333332,
+            "allocated_bytes_per_operation": 1540047,
+            "allocations_per_operation": 16372
+          },
+          {
+            "name": "single_call_recording_summary",
+            "iterations": 300,
+            "wall_ms_per_operation": 0.015300556666666666,
+            "cpu_ms_per_operation": 0.0153733333333336,
+            "allocated_bytes_per_operation": 1144,
+            "allocations_per_operation": 26
+          },
+          {
+            "name": "sse_changing",
+            "iterations": 300,
+            "wall_ms_per_operation": 4.678343473333333,
+            "cpu_ms_per_operation": 5.494593333333335,
+            "allocated_bytes_per_operation": 1171457,
+            "allocations_per_operation": 5438
+          },
+          {
+            "name": "sse_heartbeat",
+            "iterations": 300,
+            "wall_ms_per_operation": 0.04687,
+            "cpu_ms_per_operation": 0.06491666666666789,
+            "allocated_bytes_per_operation": 33857,
+            "allocations_per_operation": 39
+          },
+          {
+            "name": "capacity_cleanup",
+            "iterations": 300,
+            "wall_ms_per_operation": 0.044565969999999996,
+            "cpu_ms_per_operation": 0.056896666666668046,
+            "allocated_bytes_per_operation": 970,
+            "allocations_per_operation": 21
+          },
+          {
+            "name": "call_state_write",
+            "iterations": 3000,
+            "wall_ms_per_operation": 0.044787069666666665,
+            "cpu_ms_per_operation": 0.04162166666666659,
+            "allocated_bytes_per_operation": 191,
+            "allocations_per_operation": 10
+          },
+          {
+            "name": "audio_diagnostics_write",
+            "iterations": 3000,
+            "wall_ms_per_operation": 0.035066444333333335,
+            "cpu_ms_per_operation": 0.03289500000000013,
+            "allocated_bytes_per_operation": 213,
+            "allocations_per_operation": 10
+          }
+        ]
+      },
+      {
+        "go_version": "go1.25.1",
+        "Calls": 6020,
+        "Recordings": 5906,
+        "CapacitySlots": 10,
+        "results": [
+          {
+            "name": "call_list_changing",
+            "iterations": 300,
+            "wall_ms_per_operation": 9.008535416666668,
+            "cpu_ms_per_operation": 10.025103333333334,
+            "allocated_bytes_per_operation": 2881354,
+            "allocations_per_operation": 24211
+          },
+          {
+            "name": "call_list_repeated",
+            "iterations": 300,
+            "wall_ms_per_operation": 2.0596719466666666,
+            "cpu_ms_per_operation": 2.9029999999999987,
+            "allocated_bytes_per_operation": 1555776,
+            "allocations_per_operation": 16373
+          },
+          {
+            "name": "single_call_recording_summary",
+            "iterations": 300,
+            "wall_ms_per_operation": 0.018729306666666667,
+            "cpu_ms_per_operation": 0.018383333333334424,
+            "allocated_bytes_per_operation": 1144,
+            "allocations_per_operation": 26
+          },
+          {
+            "name": "sse_changing",
+            "iterations": 300,
+            "wall_ms_per_operation": 6.319754443333334,
+            "cpu_ms_per_operation": 6.323563333333334,
+            "allocated_bytes_per_operation": 1173831,
+            "allocations_per_operation": 5439
+          },
+          {
+            "name": "sse_heartbeat",
+            "iterations": 300,
+            "wall_ms_per_operation": 0.054232499999999996,
+            "cpu_ms_per_operation": 0.07459666666666635,
+            "allocated_bytes_per_operation": 33857,
+            "allocations_per_operation": 39
+          },
+          {
+            "name": "capacity_cleanup",
+            "iterations": 300,
+            "wall_ms_per_operation": 0.06496708333333333,
+            "cpu_ms_per_operation": 0.07280999999999949,
+            "allocated_bytes_per_operation": 929,
+            "allocations_per_operation": 21
+          },
+          {
+            "name": "call_state_write",
+            "iterations": 3000,
+            "wall_ms_per_operation": 0.06103616666666666,
+            "cpu_ms_per_operation": 0.05092499999999988,
+            "allocated_bytes_per_operation": 191,
+            "allocations_per_operation": 10
+          },
+          {
+            "name": "audio_diagnostics_write",
+            "iterations": 3000,
+            "wall_ms_per_operation": 0.05539794433333334,
+            "cpu_ms_per_operation": 0.04423333333333327,
+            "allocated_bytes_per_operation": 213,
+            "allocations_per_operation": 10
+          }
+        ]
+      }
+    ]
+  },
+  "comparison": [
+    {
+      "name": "call_list_changing",
+      "median": {
+        "baseline": {
+          "wall_ms_per_operation": 17.547572776666666,
+          "cpu_ms_per_operation": 21.669316666666667,
+          "allocated_bytes_per_operation": 7283968,
+          "allocations_per_operation": 62597
+        },
+        "optimized": {
+          "wall_ms_per_operation": 8.3048075,
+          "cpu_ms_per_operation": 9.300163333333334,
+          "allocated_bytes_per_operation": 2837677,
+          "allocations_per_operation": 24209
+        }
+      },
+      "wall_speedup": 2.1129415433972025,
+      "cpu_reduction_percent": 57.08141850342919
+    },
+    {
+      "name": "call_list_repeated",
+      "median": {
+        "baseline": {
+          "wall_ms_per_operation": 18.445857636666666,
+          "cpu_ms_per_operation": 21.80932333333333,
+          "allocated_bytes_per_operation": 7318678,
+          "allocations_per_operation": 62588
+        },
+        "optimized": {
+          "wall_ms_per_operation": 1.8415137499999998,
+          "cpu_ms_per_operation": 2.9029999999999987,
+          "allocated_bytes_per_operation": 1548632,
+          "allocations_per_operation": 16373
+        }
+      },
+      "wall_speedup": 10.016682002329153,
+      "cpu_reduction_percent": 86.6891789551166
+    },
+    {
+      "name": "single_call_recording_summary",
+      "median": {
+        "baseline": {
+          "wall_ms_per_operation": 6.9938633333333335,
+          "cpu_ms_per_operation": 7.41253333333334,
+          "allocated_bytes_per_operation": 1030681,
+          "allocations_per_operation": 29593
+        },
+        "optimized": {
+          "wall_ms_per_operation": 0.015300556666666666,
+          "cpu_ms_per_operation": 0.0153733333333336,
+          "allocated_bytes_per_operation": 1144,
+          "allocations_per_operation": 26
+        }
+      },
+      "wall_speedup": 457.09861972342185,
+      "cpu_reduction_percent": 99.79260351836528
+    },
+    {
+      "name": "sse_changing",
+      "median": {
+        "baseline": {
+          "wall_ms_per_operation": 10.97490375,
+          "cpu_ms_per_operation": 12.82614666666667,
+          "allocated_bytes_per_operation": 4354433,
+          "allocations_per_operation": 15088
+        },
+        "optimized": {
+          "wall_ms_per_operation": 4.678343473333333,
+          "cpu_ms_per_operation": 5.494593333333335,
+          "allocated_bytes_per_operation": 1171457,
+          "allocations_per_operation": 5438
+        }
+      },
+      "wall_speedup": 2.345895253855816,
+      "cpu_reduction_percent": 57.160997171403
+    },
+    {
+      "name": "sse_heartbeat",
+      "median": {
+        "baseline": {
+          "wall_ms_per_operation": 9.495487083333334,
+          "cpu_ms_per_operation": 12.044266666666664,
+          "allocated_bytes_per_operation": 4350900,
+          "allocations_per_operation": 15076
+        },
+        "optimized": {
+          "wall_ms_per_operation": 0.049255553333333334,
+          "cpu_ms_per_operation": 0.06814333333333404,
+          "allocated_bytes_per_operation": 33857,
+          "allocations_per_operation": 39
+        }
+      },
+      "wall_speedup": 192.78003069163233,
+      "cpu_reduction_percent": 99.43422596643492
+    },
+    {
+      "name": "capacity_cleanup",
+      "median": {
+        "baseline": {
+          "wall_ms_per_operation": 4.28913264,
+          "cpu_ms_per_operation": 4.268483333333339,
+          "allocated_bytes_per_operation": 872,
+          "allocations_per_operation": 21
+        },
+        "optimized": {
+          "wall_ms_per_operation": 0.04749680666666666,
+          "cpu_ms_per_operation": 0.06289000000000063,
+          "allocated_bytes_per_operation": 929,
+          "allocations_per_operation": 21
+        }
+      },
+      "wall_speedup": 90.30360019992924,
+      "cpu_reduction_percent": 98.52664295280525
+    },
+    {
+      "name": "call_state_write",
+      "median": {
+        "baseline": {
+          "wall_ms_per_operation": 0.03274468033333334,
+          "cpu_ms_per_operation": 0.031187999999999494,
+          "allocated_bytes_per_operation": 191,
+          "allocations_per_operation": 10
+        },
+        "optimized": {
+          "wall_ms_per_operation": 0.044787069666666665,
+          "cpu_ms_per_operation": 0.04162166666666659,
+          "allocated_bytes_per_operation": 191,
+          "allocations_per_operation": 10
+        }
+      },
+      "wall_speedup": 0.7311190613058567,
+      "cpu_reduction_percent": -33.45410628019516
+    },
+    {
+      "name": "audio_diagnostics_write",
+      "median": {
+        "baseline": {
+          "wall_ms_per_operation": 0.032637638999999996,
+          "cpu_ms_per_operation": 0.032209333333333534,
+          "allocated_bytes_per_operation": 213,
+          "allocations_per_operation": 10
+        },
+        "optimized": {
+          "wall_ms_per_operation": 0.035066444333333335,
+          "cpu_ms_per_operation": 0.03289500000000013,
+          "allocated_bytes_per_operation": 213,
+          "allocations_per_operation": 10
+        }
+      },
+      "wall_speedup": 0.9307370513461334,
+      "cpu_reduction_percent": -2.1287825475015287
+    }
+  ],
+  "verification": {
+    "go_checks_passed": 762,
+    "frontend_audio_tests_passed": 212,
+    "go_live_carrier_tests_skipped": 2,
+    "go_benchmark_opt_in_skip": 1,
+    "race": "passed: read cache, SSE, permissions, capacity",
+    "typechecks": "passed: frontend and network benchmark",
+    "go_vet": "passed",
+    "linux_amd64_cgo0_build": "passed",
+    "real_browser_surfaces": "passed: headless, panel, application-user, coaching at 512k and jitter",
+    "protocol_integration": "passed: full final run, 34 checks including five real-browser calling surfaces; original asynchronous telemetry assertion corrected after reproducing on unchanged 0.11.2",
+    "local_demo": "passed after serving current hashed audio assets, fresh attach sessions, and waiting for reconnect completion",
+    "network_matrix": {
+      "profiles": 28,
+      "passing_gates": 27,
+      "failing_profiles": [
+        "main-thread-two-second-pause"
+      ],
+      "original_failures_retained": true,
+      "thresholds_changed": false,
+      "gate_results": [
+        {
+          "profile": "browser-seven-second-catchup",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 70.2939453125,
+            "p95_ms": 72.740966796875,
+            "p99_ms": 72.77392578125,
+            "max_ms": 72.77392578125,
+            "median_level_dbfs": -15.145145882172859,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 24,
+            "missing_markers_pct": 36.8421052631579,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 320.435302734375,
+            "p95_ms": 320.506103515625,
+            "p99_ms": 320.510009765625,
+            "max_ms": 320.510009765625,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": "main-thread-two-second-pause",
+          "outcome": "failed",
+          "errors": [
+            "usable-profile audio thresholds exceeded"
+          ],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 36,
+            "missing_markers_pct": 5.2631578947368425,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 45.23388671875,
+            "p95_ms": 188.2041015625,
+            "p99_ms": 263.593017578125,
+            "max_ms": 263.593017578125,
+            "median_level_dbfs": -15.145155588581991,
+            "final_two_seconds_markers": 3
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 37,
+            "missing_markers_pct": 2.6315789473684212,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 142.849609375,
+            "p95_ms": 252.927490234375,
+            "p99_ms": 252.939453125,
+            "max_ms": 252.939453125,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 3
+          }
+        },
+        {
+          "profile": "browser-48k-fallback",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 138.0400390625,
+            "p95_ms": 144.14599609375,
+            "p99_ms": 181.19091796875,
+            "max_ms": 181.19091796875,
+            "median_level_dbfs": -15.100347023325664,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 217.462646484375,
+            "p95_ms": 217.57421875,
+            "p99_ms": 217.575927734375,
+            "max_ms": 217.575927734375,
+            "median_level_dbfs": -15.052759968380375,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": "local-baseline",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 43.1630859375,
+            "p95_ms": 45.68505859375,
+            "p99_ms": 46.72607421875,
+            "max_ms": 46.72607421875,
+            "median_level_dbfs": -15.145145882172859,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 93.23779296875,
+            "p95_ms": 133.263671875,
+            "p99_ms": 133.27001953125,
+            "max_ms": 133.27001953125,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": "broadband",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 70.159912109375,
+            "p95_ms": 73.674072265625,
+            "p99_ms": 79.84912109375,
+            "max_ms": 79.84912109375,
+            "median_level_dbfs": -15.145374694863158,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 112.93212890625,
+            "p95_ms": 113.008544921875,
+            "p99_ms": 113.021484375,
+            "max_ms": 113.021484375,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": "wifi-jitter",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 108.06005859375,
+            "p95_ms": 119.68603515625,
+            "p99_ms": 130.719970703125,
+            "max_ms": 130.719970703125,
+            "median_level_dbfs": -15.145374694863158,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 159.73876953125,
+            "p95_ms": 209.7880859375,
+            "p99_ms": 209.814453125,
+            "max_ms": 209.814453125,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": "mobile-latency",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 37,
+            "missing_markers_pct": 2.6315789473684212,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 180.089111328125,
+            "p95_ms": 362.910888671875,
+            "p99_ms": 374.924072265625,
+            "max_ms": 374.924072265625,
+            "median_level_dbfs": -15.145145882172859,
+            "final_two_seconds_markers": 3
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 36,
+            "missing_markers_pct": 5.2631578947368425,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 225.249755859375,
+            "p95_ms": 345.2529296875,
+            "p99_ms": 405.26806640625,
+            "max_ms": 405.26806640625,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 2
+          }
+        },
+        {
+          "profile": "512k-symmetric",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 130.14208984375,
+            "p95_ms": 138.93896484375,
+            "p99_ms": 140.052978515625,
+            "max_ms": 140.052978515625,
+            "median_level_dbfs": -15.145214447428748,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 193.708251953125,
+            "p95_ms": 193.81103515625,
+            "p99_ms": 193.836669921875,
+            "max_ms": 193.836669921875,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": "tcp-recovery-1pct",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 32,
+            "missing_markers_pct": 15.789473684210526,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 176.22509765625,
+            "p95_ms": 234.861083984375,
+            "p99_ms": 239.77392578125,
+            "max_ms": 239.77392578125,
+            "median_level_dbfs": -15.145157632691866,
+            "final_two_seconds_markers": 3
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 341.898193359375,
+            "p95_ms": 342.010498046875,
+            "p99_ms": 342.037841796875,
+            "max_ms": 342.037841796875,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": "upload-256k",
+          "outcome": "degraded",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 0,
+            "missing_markers_pct": 100,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 0,
+            "p95_ms": 0,
+            "p99_ms": 0,
+            "max_ms": 0,
+            "median_level_dbfs": 0,
+            "final_two_seconds_markers": 0
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 111.12939453125,
+            "p95_ms": 161.127685546875,
+            "p99_ms": 161.1669921875,
+            "max_ms": 161.1669921875,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": "download-256k",
+          "outcome": "degraded",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 37,
+            "missing_markers_pct": 2.6315789473684212,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 131.10205078125,
+            "p95_ms": 152.366943359375,
+            "p99_ms": 154.47509765625,
+            "max_ms": 154.47509765625,
+            "median_level_dbfs": -15.145161589489573,
+            "final_two_seconds_markers": 3
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 0,
+            "missing_markers_pct": 100,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 0,
+            "p95_ms": 0,
+            "p99_ms": 0,
+            "max_ms": 0,
+            "median_level_dbfs": 0,
+            "final_two_seconds_markers": 0
+          }
+        },
+        {
+          "profile": "two-second-outage",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 33,
+            "missing_markers_pct": 13.157894736842104,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 191.197021484375,
+            "p95_ms": 195.846923828125,
+            "p99_ms": 195.9609375,
+            "max_ms": 195.9609375,
+            "median_level_dbfs": -15.145301324537602,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 34,
+            "missing_markers_pct": 10.526315789473685,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 343.713134765625,
+            "p95_ms": 343.779296875,
+            "p99_ms": 343.79736328125,
+            "max_ms": 343.79736328125,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": "carrier-ten-second-catchup",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 49.303955078125,
+            "p95_ms": 51.126953125,
+            "p99_ms": 53.260009765625,
+            "max_ms": 53.260009765625,
+            "median_level_dbfs": -15.145145882172859,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 18,
+            "missing_markers_pct": 52.63157894736842,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 322.95654296875,
+            "p95_ms": 323.067138671875,
+            "p99_ms": 323.067138671875,
+            "max_ms": 323.067138671875,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": "carrier-ten-second-missing",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 39.095947265625,
+            "p95_ms": 41.283935546875,
+            "p99_ms": 41.294921875,
+            "max_ms": 41.294921875,
+            "median_level_dbfs": -15.145233362970679,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 18,
+            "missing_markers_pct": 52.63157894736842,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 316.2001953125,
+            "p95_ms": 326.334716796875,
+            "p99_ms": 326.334716796875,
+            "max_ms": 326.334716796875,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": "intentional-microphone-mute",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 33,
+            "missing_markers_pct": 13.157894736842104,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 18.531005859375,
+            "p95_ms": 45.5859375,
+            "p99_ms": 45.6240234375,
+            "max_ms": 45.6240234375,
+            "median_level_dbfs": -15.14524363413454,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 93.406005859375,
+            "p95_ms": 133.465087890625,
+            "p99_ms": 133.483642578125,
+            "max_ms": 133.483642578125,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": "browser-reconnect",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 35,
+            "missing_markers_pct": 7.894736842105263,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 77.60205078125,
+            "p95_ms": 93.381103515625,
+            "p99_ms": 273.83203125,
+            "max_ms": 273.83203125,
+            "median_level_dbfs": -15.145145882172859,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 36,
+            "missing_markers_pct": 5.2631578947368425,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 186.5498046875,
+            "p95_ms": 266.6044921875,
+            "p99_ms": 286.599365234375,
+            "max_ms": 286.599365234375,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": "webrtc-baseline",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 134.577880859375,
+            "p95_ms": 136.198974609375,
+            "p99_ms": 144.698974609375,
+            "max_ms": 144.698974609375,
+            "median_level_dbfs": -14.834122539278145,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 214.34423828125,
+            "p95_ms": 214.433349609375,
+            "p99_ms": 214.434814453125,
+            "max_ms": 214.434814453125,
+            "median_level_dbfs": -15.661298645476435,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": "webrtc-microphone-mute",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 33,
+            "missing_markers_pct": 13.157894736842104,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 117.427001953125,
+            "p95_ms": 120.376953125,
+            "p99_ms": 132.491943359375,
+            "max_ms": 132.491943359375,
+            "median_level_dbfs": -14.948066574919121,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 144.167724609375,
+            "p95_ms": 174.23486328125,
+            "p99_ms": 174.248291015625,
+            "max_ms": 174.248291015625,
+            "median_level_dbfs": -15.171123641641746,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": "webrtc-reconnect",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 37,
+            "missing_markers_pct": 2.6315789473684212,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 117.43701171875,
+            "p95_ms": 120.907958984375,
+            "p99_ms": 120.944091796875,
+            "max_ms": 120.944091796875,
+            "median_level_dbfs": -15.108911020383562,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 37,
+            "missing_markers_pct": 2.6315789473684212,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 140.390869140625,
+            "p95_ms": 140.495361328125,
+            "p99_ms": 140.519287109375,
+            "max_ms": 140.519287109375,
+            "median_level_dbfs": -15.776198779620618,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": "webrtc-udp-128k",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 118.0458984375,
+            "p95_ms": 123.325927734375,
+            "p99_ms": 123.737060546875,
+            "max_ms": 123.737060546875,
+            "median_level_dbfs": -15.047056804092778,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 179.9267578125,
+            "p95_ms": 179.990966796875,
+            "p99_ms": 180.020263671875,
+            "max_ms": 180.020263671875,
+            "median_level_dbfs": -15.779835742416733,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": "webrtc-udp-96k",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 147.910888671875,
+            "p95_ms": 158.583984375,
+            "p99_ms": 158.613037109375,
+            "max_ms": 158.613037109375,
+            "median_level_dbfs": -15.047056804092778,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 200.069580078125,
+            "p95_ms": 220.146728515625,
+            "p99_ms": 220.158935546875,
+            "max_ms": 220.158935546875,
+            "median_level_dbfs": -15.366144973072997,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": "webrtc-udp-64k",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 261.01806640625,
+            "p95_ms": 276.409912109375,
+            "p99_ms": 283.742919921875,
+            "max_ms": 283.742919921875,
+            "median_level_dbfs": -16.289748362104604,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 37,
+            "missing_markers_pct": 2.6315789473684212,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 323.0556640625,
+            "p95_ms": 323.1650390625,
+            "p99_ms": 333.100341796875,
+            "max_ms": 333.100341796875,
+            "median_level_dbfs": -15.563633173701422,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": "webrtc-udp-48k",
+          "outcome": "degraded",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 18,
+            "missing_markers_pct": 52.63157894736842,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 211.10791015625,
+            "p95_ms": 230.87890625,
+            "p99_ms": 230.87890625,
+            "max_ms": 230.87890625,
+            "median_level_dbfs": -15.577281098262548,
+            "final_two_seconds_markers": 1
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 12,
+            "missing_markers_pct": 68.42105263157895,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 382.633544921875,
+            "p95_ms": 472.7265625,
+            "p99_ms": 472.7265625,
+            "max_ms": 472.7265625,
+            "median_level_dbfs": -16.134608249541603,
+            "final_two_seconds_markers": 2
+          }
+        },
+        {
+          "profile": "webrtc-udp-32k",
+          "outcome": "degraded",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 0,
+            "missing_markers_pct": 100,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 0,
+            "p95_ms": 0,
+            "p99_ms": 0,
+            "max_ms": 0,
+            "median_level_dbfs": 0,
+            "final_two_seconds_markers": 0
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 2,
+            "missing_markers_pct": 94.73684210526316,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 350.301513671875,
+            "p95_ms": 440.2080078125,
+            "p99_ms": 440.2080078125,
+            "max_ms": 440.2080078125,
+            "median_level_dbfs": -17.02062911346722,
+            "final_two_seconds_markers": 0
+          }
+        },
+        {
+          "profile": "websocket-64k",
+          "outcome": "degraded",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 0,
+            "missing_markers_pct": 100,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 0,
+            "p95_ms": 0,
+            "p99_ms": 0,
+            "max_ms": 0,
+            "median_level_dbfs": 0,
+            "final_two_seconds_markers": 0
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 0,
+            "missing_markers_pct": 100,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 0,
+            "p95_ms": 0,
+            "p99_ms": 0,
+            "max_ms": 0,
+            "median_level_dbfs": 0,
+            "final_two_seconds_markers": 0
+          }
+        },
+        {
+          "profile": "adaptive-160-280ms-jitter",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 73.053955078125,
+            "p95_ms": 75.635986328125,
+            "p99_ms": 75.87890625,
+            "max_ms": 75.87890625,
+            "median_level_dbfs": -15.145213723343042,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 343.6162109375,
+            "p95_ms": 343.70458984375,
+            "p99_ms": 343.71923828125,
+            "max_ms": 343.71923828125,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": "adaptive-220-280ms-jitter",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 64.611083984375,
+            "p95_ms": 67.241943359375,
+            "p99_ms": 67.533935546875,
+            "max_ms": 67.533935546875,
+            "median_level_dbfs": -15.145162921923621,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 344.07763671875,
+            "p95_ms": 344.1689453125,
+            "p99_ms": 344.170654296875,
+            "max_ms": 344.170654296875,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "profile": "adaptive-280-280ms-jitter",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 64.6669921875,
+            "p95_ms": 67.001953125,
+            "p99_ms": 67.137939453125,
+            "max_ms": 67.137939453125,
+            "median_level_dbfs": -15.145374694863158,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 343.767822265625,
+            "p95_ms": 343.85791015625,
+            "p99_ms": 343.863525390625,
+            "max_ms": 343.863525390625,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          }
+        }
+      ],
+      "paired_replays": [
+        {
+          "run": "network-pause-baseline-1",
+          "outcome": "failed",
+          "errors": [
+            "usable-profile audio thresholds exceeded"
+          ],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 658.89111328125,
+            "p95_ms": 662.383056640625,
+            "p99_ms": 669.673095703125,
+            "max_ms": 669.673095703125,
+            "median_level_dbfs": -15.145155588581991,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 230.595703125,
+            "p95_ms": 230.677001953125,
+            "p99_ms": 230.681640625,
+            "max_ms": 230.681640625,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "run": "network-pause-baseline-2",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 44.93408203125,
+            "p95_ms": 47.51806640625,
+            "p99_ms": 48.097900390625,
+            "max_ms": 48.097900390625,
+            "median_level_dbfs": -15.145145882172859,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 94.14990234375,
+            "p95_ms": 94.233154296875,
+            "p99_ms": 94.252685546875,
+            "max_ms": 94.252685546875,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "run": "network-pause-baseline-3",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 49.735107421875,
+            "p95_ms": 51.98291015625,
+            "p99_ms": 53.430908203125,
+            "max_ms": 53.430908203125,
+            "median_level_dbfs": -15.145145882172859,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 88.7119140625,
+            "p95_ms": 88.798828125,
+            "p99_ms": 88.8173828125,
+            "max_ms": 88.8173828125,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "run": "network-pause-optimized-1",
+          "outcome": "failed",
+          "errors": [
+            "usable-profile audio thresholds exceeded"
+          ],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 36,
+            "missing_markers_pct": 5.2631578947368425,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 571.2958984375,
+            "p95_ms": 576.72412109375,
+            "p99_ms": 1190.719970703125,
+            "max_ms": 1190.719970703125,
+            "median_level_dbfs": -15.145145882172859,
+            "final_two_seconds_markers": 2
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 36,
+            "missing_markers_pct": 5.2631578947368425,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 232.969482421875,
+            "p95_ms": 233.0205078125,
+            "p99_ms": 233.0439453125,
+            "max_ms": 233.0439453125,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 2
+          }
+        },
+        {
+          "run": "network-pause-optimized-2",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 50.068115234375,
+            "p95_ms": 54.85400390625,
+            "p99_ms": 57.041015625,
+            "max_ms": 57.041015625,
+            "median_level_dbfs": -15.145145882172859,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 89.10791015625,
+            "p95_ms": 89.19384765625,
+            "p99_ms": 89.198486328125,
+            "max_ms": 89.198486328125,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          }
+        },
+        {
+          "run": "network-pause-optimized-3",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 44.507080078125,
+            "p95_ms": 46.97802734375,
+            "p99_ms": 50.73291015625,
+            "max_ms": 50.73291015625,
+            "median_level_dbfs": -15.145155588581991,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 93.427490234375,
+            "p95_ms": 93.521484375,
+            "p99_ms": 93.526611328125,
+            "max_ms": 93.526611328125,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          }
+        }
+      ]
+    },
+    "staging_or_production_changes": false,
+    "live_carrier_calls_placed": false
+  },
+  "audio_sources_unchanged_from_baseline": {
+    "frontend/src/softphone.ts": {
+      "identical": true,
+      "sha256": "12015fd21487f2fa85802c3d7747663d40e1424c5fb6e4c53aa26f779079ac91"
+    },
+    "ui/softphone-worker.js": {
+      "identical": true,
+      "sha256": "218fe0ecdafd8a143e696cccba6813c02c876538849eae64e0f4eb1f165922cc"
+    },
+    "ui/softphone-worklet.js": {
+      "identical": true,
+      "sha256": "ad43d0670984e760ff80ed5f0009ea99877cebd0675e771ee85a73da2afd667a"
+    },
+    "ui/softphone-audio.ts": {
+      "identical": true,
+      "sha256": "16a03d4aa2080cfe2840367df7d24f940de2b722964118a09f43a798483a211b"
+    },
+    "softphone.go": {
+      "identical": true,
+      "sha256": "b138c6bfe629272d27ad44850fdf718f3542bfa2b4b5ef3f10877c1cc489fb36"
+    },
+    "live_audio_diagnostics.go": {
+      "identical": true,
+      "sha256": "31dcd0536658058138c3acec32301d77d67fe875345835d8fc4bd2ac2ade2f5f"
+    },
+    "audio_resampler.go": {
+      "identical": true,
+      "sha256": "e5deb19e91fcbff0f9d58648cb062f503e214b47e741eae2cb511499c0b69612"
+    }
+  }
+}

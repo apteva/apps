@@ -252,10 +252,14 @@ func (c *callsDB) listRecordings(projectID, callID string, limit int) ([]recordi
 }
 
 func (c *callsDB) attachRecordingSummaries(projectID string, calls []callRow) error {
+	ids, args := callReadIDs(projectID, calls)
+	if len(ids) == 0 {
+		return nil
+	}
 	rows, err := c.db.Query(`SELECT call_id, COUNT(*),
 		MAX(CASE storage_status WHEN 'stored' THEN 5 WHEN 'provider_only' THEN 4 WHEN 'importing' THEN 3
 			WHEN 'pending' THEN 2 WHEN 'failed' THEN 1 ELSE 0 END)
-        FROM recordings WHERE project_id = ? AND deleted_at = '' GROUP BY call_id`, projectID)
+        FROM recordings WHERE project_id = ? AND deleted_at = '' AND call_id IN (`+phonePlaceholders(len(ids))+`) GROUP BY call_id`, args...)
 	if err != nil {
 		return err
 	}

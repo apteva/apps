@@ -604,7 +604,9 @@ func (c *callsDB) attachRingOffers(project string, calls []callRow) error {
 	if len(indices) == 0 {
 		return nil
 	}
-	rows, err := c.db.Query(`SELECT o.call_id,o.id,o.destination_id,o.destination_name,o.kind,o.agent_id,o.expires_at FROM call_offers o JOIN call_ring_runs r ON r.id=o.run_id WHERE o.project_id=? AND o.status='offered' AND r.status='ringing' AND o.expires_at>? ORDER BY o.position`, project, ringTime(time.Now()))
+	ids, args := callReadIDs(project, calls)
+	args = append(args, ringTime(time.Now()))
+	rows, err := c.db.Query(`SELECT o.call_id,o.id,o.destination_id,o.destination_name,o.kind,o.agent_id,o.expires_at FROM call_offers o JOIN call_ring_runs r ON r.id=o.run_id WHERE o.project_id=? AND o.call_id IN (`+phonePlaceholders(len(ids))+`) AND o.status='offered' AND r.status='ringing' AND o.expires_at>? ORDER BY o.position`, args...)
 	if err != nil {
 		return err
 	}

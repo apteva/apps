@@ -66,7 +66,7 @@ func (h *callChangeHub) notify(project string) {
 // Fingerprint only the visible call/offer state. Unrelated users' changes never
 // produce events, and hints carry no call data or global sequence counters.
 func (a *App) callNotificationSnapshot(r *http.Request, project string) ([32]byte, error) {
-	rows, err := a.recentPhoneCalls(r, project, 100)
+	model, checked, err := a.phoneCallRead(r, project, 100, true)
 	if err != nil {
 		return [32]byte{}, err
 	}
@@ -75,16 +75,13 @@ func (a *App) callNotificationSnapshot(r *http.Request, project string) ([32]byt
 		ID, Status, Peer, Destination, Media, Hold, Recording string
 		Offers                                                []offer
 	}
-	entries := make([]entry, 0, len(rows))
-	for _, row := range rows {
+	entries := make([]entry, 0, len(model.rows))
+	for _, row := range model.rows {
 		e := entry{ID: row.ID, Status: row.Status, Peer: row.PeerKind, Destination: row.RoutingDestinationID, Media: row.MediaStatus, Hold: row.HoldState, Recording: effectiveRecordingControlState(row)}
-		offers, err := a.db().activeRingOffers(row.ID, project)
-		if err != nil {
-			return [32]byte{}, err
-		}
-		p := phoneUserFrom(r)
+		offers := model.permissions.offers[row.ID]
+		p := phoneUserFrom(checked)
 		for _, o := range offers {
-			if p != nil && (!p.Destinations[o.DestinationID] || !a.destinationAllowsIdentity(project, o.DestinationID, p.Identity)) {
+			if p != nil && (!p.Destinations[o.DestinationID] || !a.phoneReadDestination(p, project, o.DestinationID)) {
 				continue
 			}
 			e.Offers = append(e.Offers, offer{o.ID, o.DestinationID, o.Kind, o.ExpiresAt})
@@ -144,6 +141,23 @@ func (a *App) handleCallNotifications(w http.ResponseWriter, r *http.Request) {
 		case <-lease.C:
 			return // reconnect through the gateway with current credentials
 		case <-changes:
+			// Fixed, bounded coalescing window. Continuous writes cannot keep
+			// postponing an offer notification or its authorization check.
+			timer := time.NewTimer(20 * time.Millisecond)
+		drain:
+			for {
+				select {
+				case <-r.Context().Done():
+					timer.Stop()
+					return
+				case <-lease.C:
+					timer.Stop()
+					return
+				case <-changes:
+				case <-timer.C:
+					break drain
+				}
+			}
 		case <-heartbeat.C:
 			heartbeatDue = true
 		}

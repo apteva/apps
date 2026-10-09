@@ -34,8 +34,10 @@ func readDestinationCapacity(raw string) (destinationCapacity, error) {
 	return c, nil
 }
 
+const capacityCleanupSQL = `DELETE FROM phone_capacity WHERE EXISTS (SELECT 1 FROM calls c WHERE c.id=phone_capacity.call_id AND c.status IN ('completed','failed','busy','no-answer','canceled')) OR (expires_at<>'' AND EXISTS (SELECT 1 FROM calls c WHERE c.id=phone_capacity.call_id AND c.status='pending') AND NOT EXISTS(SELECT 1 FROM call_offers o WHERE o.call_id=phone_capacity.call_id AND o.capacity_principal=phone_capacity.principal AND o.status='offered' AND o.expires_at>?) AND (expires_at<=? OR EXISTS(SELECT 1 FROM call_offers o WHERE o.call_id=phone_capacity.call_id AND o.capacity_principal=phone_capacity.principal AND o.status IN ('failed','expired','canceled'))))`
+
 func cleanupCapacityTx(tx *sql.Tx, now time.Time) error {
-	_, err := tx.Exec(`DELETE FROM phone_capacity WHERE call_id IN (SELECT id FROM calls WHERE status IN ('completed','failed','busy','no-answer','canceled')) OR (expires_at<>'' AND call_id IN (SELECT id FROM calls WHERE status='pending') AND NOT EXISTS(SELECT 1 FROM call_offers o WHERE o.call_id=phone_capacity.call_id AND o.capacity_principal=phone_capacity.principal AND o.status='offered' AND o.expires_at>?) AND (expires_at<=? OR EXISTS(SELECT 1 FROM call_offers o WHERE o.call_id=phone_capacity.call_id AND o.capacity_principal=phone_capacity.principal AND o.status IN ('failed','expired','canceled'))))`, ringTime(now), ringTime(now))
+	_, err := tx.Exec(capacityCleanupSQL, ringTime(now), ringTime(now))
 	return err
 }
 
