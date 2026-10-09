@@ -215,7 +215,7 @@ func TestPlivoImmediateInboundSpawnsRealtimeAndRecords(t *testing.T) {
 		t.Fatalf("inbound XML lacks realtime stream or recording: %s", response.Body.String())
 	}
 	if len(platform.spawned) != 1 ||
-		platform.spawned[0].Directive != route.AutoDirective ||
+		platform.spawned[0].Directive != aiPolicyDirective(route.AutoDirective, projectAICallPolicy(globalCtx)) ||
 		platform.spawned[0].CapabilityMode != sdk.RealtimeCapabilitiesInheritAgent ||
 		platform.spawned[0].CallContext == nil ||
 		platform.spawned[0].CallContext.Direction != "inbound" ||

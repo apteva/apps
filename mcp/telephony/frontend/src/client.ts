@@ -6,7 +6,9 @@ import { HeadlessSoftphone, type SoftphoneOptions } from "./softphone";
 
 /** Translate stable termination reasons without presenting duration expiry as a fault. */
 export function callTerminationLabel(termination: CallTermination | undefined, locale = "en"): string {
-  if (termination?.reason === "time_limit") return locale.toLowerCase().startsWith("fr") ? "Durée maximale atteinte" : "Maximum call duration reached";
+  if (termination?.reason === "ai_inactivity") return locale.toLowerCase().startsWith("fr") ? "Fin de l’appel : aucune réponse" : "Call ended: no response";
+  if (termination?.reason === "ai_policy_failure") return locale.toLowerCase().startsWith("fr") ? "Échec du rappel d’inactivité IA" : "AI inactivity reminder failed";
+  if (termination?.reason === "time_limit" || termination?.reason === "ai_max_duration") return locale.toLowerCase().startsWith("fr") ? "Durée maximale atteinte" : "Maximum call duration reached";
   return termination?.reason?.replaceAll("_", " ") ?? "";
 }
 

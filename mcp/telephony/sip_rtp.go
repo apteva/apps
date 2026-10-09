@@ -647,16 +647,19 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		pacerPolicy = liveHumanCarrierPacerPolicy()
 		pacerMode = "live_human"
 	}
+	policyGeneration := newSecret()
 	pacer := newSIPRTPPacerWithPolicy(ctx, media, playback, pacerPolicy, func(progress twilioPlaybackProgress) error {
 		control, _ := json.Marshal(realtimeBridgeControl{
 			Type: "playback.progress", ItemID: progress.ItemID, AudioEndMS: progress.AudioEndMS,
 		})
 		return coreWriter.Write(ws.OpText, control)
 	}, func(payload []byte) {
+		a.observeAIOutput(row, time.Now().UTC(), policyGeneration)
 		if tap.hasListeners() {
 			tap.publish(1, pcm16ToBytes(listenResampler.Process(decodeSIPG711(payload, media.offer.Codec))))
 		}
 	})
+	a.bindAIPlayback(row, policyGeneration, playback.hasPending)
 	if humanHub != nil {
 		humanHub.setPacerStats(&pacer.diagnostics)
 	}
@@ -742,6 +745,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 				}
 				pcm := decodeSIPG711(payload, media.offer.Codec)
 				processed := processCarrierInput(row, audioFrontend, pcm)
+				a.observeAICaller(row, processed.SpeechActive, time.Now().UTC(), policyGeneration)
 				localSpeechStarted := processed.SpeechStarted && playback.hasPending()
 				if localSpeechStarted {
 					audioFrontend.markLocalSignal()
@@ -816,6 +820,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 			case "audio.frame":
 				nextFrame = control
 			case "interrupt":
+				a.observeAICaller(row, true, time.Now().UTC(), policyGeneration)
 				nextFrame = realtimeBridgeControl{}
 				audioFrontend.markInterrupt(control.Source)
 				if _, err := pacer.clear(ctx); err != nil {

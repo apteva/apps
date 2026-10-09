@@ -65,6 +65,9 @@ type twilioFrame struct {
 		Chunk     string `json:"chunk,omitempty"`
 		Track     string `json:"track,omitempty"`
 	} `json:"media,omitempty"`
+	DTMF *struct {
+		Digit string `json:"digit"`
+	} `json:"dtmf,omitempty"`
 	Mark *struct {
 		Name string `json:"name"`
 	} `json:"mark,omitempty"`
@@ -408,6 +411,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				processed := processCarrierInput(row, audioFrontend, ulawToPCM16(mu))
+				a.observeAICaller(row, processed.SpeechActive, time.Now().UTC(), bridge.generation)
 				localSpeechStarted := processed.SpeechStarted && playback.hasPending()
 				if localSpeechStarted {
 					audioFrontend.markLocalSignal()
@@ -434,6 +438,10 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 				}
 				if localSpeechStarted {
 					logLocalBargeIn(globalCtx.Logger(), "twilio", callID, processed)
+				}
+			case "dtmf":
+				if f.DTMF != nil && validDTMFDigits(f.DTMF.Digit) {
+					a.observeAICaller(row, true, time.Now().UTC(), bridge.generation)
 				}
 			case "mark":
 				if f.Mark == nil {
@@ -481,6 +489,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		err := twWriter.write(ws.OpText, payload, carrierMediaWriteTimeout(row))
 		if err == nil {
 			observeSent(payload)
+			a.observeAIJSONOutput(row, payload, time.Now().UTC(), bridge.generation)
 		}
 		if humanHub != nil {
 			stage := "carrier_send"
@@ -496,6 +505,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		closeState.SetLeg(mediaCloseLegCarrier, ws.StatusInternalServerError, "Twilio media writer failed")
 		cancel()
 	})
+	a.bindAIPlayback(row, bridge.generation, func() bool { return pacer.pendingSamples.Load() > 0 || playback.hasPending() })
 	if humanHub != nil {
 		humanHub.setPacerStats(&pacer.diagnostics)
 	}
@@ -547,6 +557,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 			case "audio.frame":
 				nextFrame = control
 			case "interrupt":
+				a.observeAICaller(row, true, time.Now().UTC(), bridge.generation)
 				nextFrame = realtimeBridgeControl{}
 				interruptSource := audioFrontend.markInterrupt(control.Source)
 				clearedMS, err := pacer.clear(ctx)

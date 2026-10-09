@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.11.4
+version: 0.11.5
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -63,6 +63,7 @@ requires:
     - platform.connections.read_credentials
     - platform.instances.read
     - platform.realtime.spawn
+    - platform.telemetry.read
   apps:
     - name: functions
       optional: true
@@ -335,6 +336,9 @@ config_schema:
   - { name: connected_call_max_duration_seconds, type: text, default: "14400", label: "Connected call duration limit (seconds)", description: "60–14400 seconds, measured from first confirmed carrier answer or connected media. Snapshotted for each new call." }
   - { name: call_setup_timeout_seconds, type: text, default: "3600", label: "Call setup safety timeout (seconds)", description: "60–3600 seconds. Separate from shorter ringing, routing and AI preparation deadlines." }
   - { name: call_media_recovery_timeout_seconds, type: text, default: "120", label: "Media recovery timeout (seconds)", description: "30–600 seconds after a media transport failure/disconnection. Silence, mute and hold do not trigger this timer." }
+  - { name: ai_call_max_duration_seconds, type: text, default: "1200", label: "AI handling duration limit (seconds)", description: "60–14400 seconds from AI media activation. New AI calls only; destination ai_call_policy may override. Reconnects do not reset it." }
+  - { name: ai_call_inactivity_timeout_seconds, type: text, default: "30", label: "AI caller inactivity timeout (seconds)", description: "0–300 seconds while listening for the caller; 0 disables reminders. AI speech, tools, hold, unknown phase and media recovery pause it." }
+  - { name: ai_call_response_window_seconds, type: text, default: "15", label: "AI inactivity reminder response window (seconds)", description: "5–120 seconds after reminder playback completes. Caller speech or DTMF cancels the pending inactivity termination." }
   - { name: ai_startup_max_attempts, type: text, default: "3", label: "AI startup maximum attempts", description: "Call-wide budget, 1–5. Only explicit temporary failures are retried." }
   - { name: ai_startup_timeout_seconds, type: text, default: "15", label: "AI startup total timeout (seconds)", description: "1–120 seconds, capped by the remaining call deadline." }
   - { name: inbound_burst_window_seconds, type: text, default: "60", label: "Inbound burst window (seconds)" }
@@ -364,6 +368,7 @@ upgrade_policy: auto-patch
 var globalCtx *sdk.AppCtx
 
 type App struct {
+	aiPolicies       aiPolicyRegistry
 	mediaBridges     carrierBridgeRegistry
 	callReads        callReadCache
 	outboundHints    outboundInventoryHints
@@ -448,6 +453,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	_, _ = ctx.AppDB().Exec(`UPDATE recordings SET storage_status = 'failed',
         last_error = 'recording import interrupted by app restart', import_started_at = '',
         next_attempt_at = ? WHERE storage_status = 'importing'`, time.Now().UTC().Format(time.RFC3339))
+	if err := a.restoreAIPolicyRuntimes(); err != nil {
+		return fmt.Errorf("restore AI call policies: %w", err)
+	}
 	if err := a.startSIPGateway(ctx); err != nil {
 		return fmt.Errorf("start direct SIP gateway: %w", err)
 	}
@@ -457,6 +465,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 }
 
 func (a *App) OnUnmount(*sdk.AppCtx) error {
+	a.stopAIPolicies()
 	a.stopCarrierBridges()
 	a.stopRoutingDispatcher()
 	a.stopSIPGateway()
@@ -465,6 +474,7 @@ func (a *App) OnUnmount(*sdk.AppCtx) error {
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{
+		{Name: "ai-call-policies", Schedule: "@every 1s", Run: a.runAICallPolicies},
 		{Name: "carrier-media-recovery", Schedule: "@every 1s", Run: a.runCarrierMediaRecovery},
 		{Name: "audio-telemetry", Schedule: "@every 5s", Run: a.runAudioTelemetryTick},
 		{Name: "carrier-activations", Schedule: "@every 1s", Run: a.runCarrierActivations},
@@ -1149,7 +1159,8 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 		FromNumber:  from,
 		IngressPath: "outbound",
 	}
-	effectiveDirective := strings.TrimSpace(directive)
+	aiPolicy := projectAICallPolicy(ctx)
+	effectiveDirective := aiPolicyDirective(directive, aiPolicy)
 
 	rt, err := ctx.PlatformAPI().SpawnRealtimeThread(sdk.RealtimeSpawnRequest{
 		AgentID:                    agentID,
@@ -1206,6 +1217,7 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 		RecordingStorageMode:   recordingPolicy.StorageMode,
 		RecordingRetentionDays: recordingPolicy.RetentionDays,
 		PeerKind:               peerKindRealtime,
+		AIPolicy:               &aiPolicy,
 		MachineDetection:       machineDetection,
 		MachineDetectionAction: machineDetectionAction,
 	}
@@ -1247,6 +1259,13 @@ func (a *App) placeOutboundLeg(ctx *sdk.AppCtx, carrier carrierAdapter, row *cal
 	if err := a.db().insertCall(*row, true); err != nil {
 		unwind()
 		return errors.New("persist call before carrier placement: " + err.Error())
+	}
+	if row.PeerKind == peerKindRealtime && row.AIPolicy != nil {
+		if err := a.registerAIPolicy(ctx, row, row.ThreadID, *row.AIPolicy, time.Now().UTC()); err != nil {
+			_ = a.db().updateStatus(row.ID, "failed", "could not persist AI call policy")
+			unwind()
+			return fmt.Errorf("persist AI call policy: %w", err)
+		}
 	}
 	if row.ApplicationUser != nil {
 		if err := a.setPhoneOwner(row, row.ApplicationUser, ""); err != nil {
@@ -3051,6 +3070,7 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 				HangupCause   string          `json:"hangup_cause"`
 				HangupSource  string          `json:"hangup_source"`
 				SIPCode       string          `json:"sip_hangup_cause"`
+				Digit         string          `json:"digit"`
 				Digits        string          `json:"digits"`
 				GatherID      string          `json:"gather_id"`
 			} `json:"payload"`
@@ -3167,6 +3187,10 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 				if err := a.completeTelnyxAnnouncementEvent(ctx, row); err != nil {
 					http.Error(w, "terminal hangup pending; retry", 503)
 					return
+				}
+			case "call.dtmf.received":
+				if validDTMFDigits(event.Data.Payload.Digit) {
+					a.observeAICaller(row, true, time.Now().UTC())
 				}
 			case "call.gather.ended":
 				defer lockRoutingCall(row.ID)()
@@ -4060,6 +4084,7 @@ func newSecret() string {
 // ─── DB layer ──────────────────────────────────────────────────────
 
 type callRow struct {
+	AIPolicy        *aiCallPolicy   // transient, frozen before carrier placement
 	ApplicationUser *phonePrincipal // transient placement context, persisted separately before dialing
 
 	RingOffers               []ringOffer

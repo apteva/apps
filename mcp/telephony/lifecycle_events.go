@@ -76,14 +76,30 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
 		return false, nil
 	}
 
+	// A failed AI hangup must not classify the later human owner's completion
+	// as an AI policy ending, even if the callback beats the policy worker.
+	if !isTerminalStatus(current.Status) && current.PeerKind != peerKindRealtime && current.TerminationInitiator == "telephony" && (current.TerminationReason == terminationAIMaxDuration || current.TerminationReason == terminationAIInactivity || current.TerminationReason == terminationAIPolicyFailure) {
+		current.TerminationReason = ""
+		current.TerminationCause = ""
+		current.TerminationInitiator = ""
+	}
 	// Carrier completion can race our intentional duration-limit hangup.
 	// Keep its durable reason and completed classification through late callbacks.
-	durationEnded := current.TerminationReason == terminationTimeLimit && current.TerminationInitiator == "telephony"
+	durationEnded := (current.TerminationReason == terminationTimeLimit || current.TerminationReason == terminationAIInactivity || current.TerminationReason == terminationAIMaxDuration) && current.TerminationInitiator == "telephony"
 	if durationEnded && isTerminalStatus(status) {
 		status = "completed"
-		facts.TerminationCause = "max_duration"
+		facts.TerminationCause = current.TerminationReason
+		if current.TerminationReason == terminationTimeLimit {
+			facts.TerminationCause = "max_duration"
+		}
 		facts.TerminationInitiator = "telephony"
 		errMsg = ""
+	}
+	if current.TerminationReason == terminationAIPolicyFailure && current.TerminationInitiator == "telephony" && isTerminalStatus(status) {
+		status = "failed"
+		facts.TerminationCause = terminationAIPolicyFailure
+		facts.TerminationInitiator = "telephony"
+		errMsg = firstNonEmpty(current.ErrorMessage, "AI inactivity reminder could not be delivered")
 	}
 	now := time.Now().UTC()
 	occurredAt := normalizedEventTime(facts.OccurredAt, now)

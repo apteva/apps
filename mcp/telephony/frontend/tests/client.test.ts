@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { AptevaClient } from "@apteva/web-sdk";
-import { TelephonyClient, telephonyExtension, type CallControlResult, type CallSession } from "../src/client";
+import { TelephonyClient, telephonyExtension, callTerminationLabel, type CallControlResult, type CallSession } from "../src/client";
 import type { AudioRuntime } from "../src/audio";
 import type { SoftphoneCallbacks } from "../../ui/softphone-audio";
 
@@ -481,4 +481,12 @@ test("late automatic authorization cannot revive a terminated call",async()=>{
  const pending=f.callbacks.refreshMediaURL!();
  f.phone.observeCall({id:"call-1",status:"completed"});resolve(f.session);
  await expect(pending).rejects.toThrow("cancelled");expect(f.phone.getSnapshot().callId).toBeUndefined();expect(f.started).toBe(1);f.phone.dispose();
+});
+
+
+test("AI policy endings have intentional, localized labels", () => {
+ expect(callTerminationLabel({reason:"ai_max_duration"}, "fr")).toBe("Durée maximale atteinte");
+ expect(callTerminationLabel({reason:"ai_inactivity"}, "en")).toBe("Call ended: no response");
+ expect(callTerminationLabel({reason:"ai_inactivity"}, "fr")).toBe("Fin de l’appel : aucune réponse");
+ expect(callTerminationLabel({reason:"ai_policy_failure"}, "en")).toBe("AI inactivity reminder failed");
 });

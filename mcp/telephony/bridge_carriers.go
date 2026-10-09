@@ -69,6 +69,9 @@ type carrierMediaFrame struct {
 		Timestamp any    `json:"timestamp,omitempty"`
 		Chunk     any    `json:"chunk,omitempty"`
 	} `json:"media,omitempty"`
+	DTMF *struct {
+		Digit string `json:"digit"`
+	} `json:"dtmf,omitempty"`
 	Mark *struct {
 		Name string `json:"name"`
 	} `json:"mark,omitempty"`
@@ -335,6 +338,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 					}
 				}
 				processed := processCarrierInput(row, audioFrontend, pcm)
+				a.observeAICaller(row, processed.SpeechActive, time.Now().UTC(), bridge.generation)
 				localSpeechStarted := processed.SpeechStarted && playback.hasPending()
 				if localSpeechStarted {
 					audioFrontend.markLocalSignal()
@@ -364,6 +368,10 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 				}
 				if localSpeechStarted {
 					logLocalBargeIn(globalCtx.Logger(), cfg.Provider, callID, processed)
+				}
+			case "dtmf":
+				if f.DTMF != nil && validDTMFDigits(f.DTMF.Digit) {
+					a.observeAICaller(row, true, time.Now().UTC(), bridge.generation)
 				}
 			case "mark":
 				if f.Mark == nil {
@@ -420,6 +428,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			err := carrierWriter.write(ws.OpText, payload, carrierMediaWriteTimeout(row))
 			if err == nil {
 				observeSent(payload)
+				a.observeAIJSONOutput(row, payload, time.Now().UTC(), bridge.generation)
 			}
 			if humanHub != nil {
 				stage := "carrier_send"
@@ -441,6 +450,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			cancel()
 		},
 	)
+	a.bindAIPlayback(row, bridge.generation, func() bool { return pacer.pendingSamples.Load() > 0 || playback.hasPending() })
 	if humanHub != nil {
 		humanHub.setPacerStats(&pacer.diagnostics)
 	}
@@ -494,6 +504,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			case "audio.frame":
 				nextFrame = control
 			case "interrupt":
+				a.observeAICaller(row, true, time.Now().UTC(), bridge.generation)
 				nextFrame = realtimeBridgeControl{}
 				interruptSource := audioFrontend.markInterrupt(control.Source)
 				packetizer.clear()
@@ -806,6 +817,7 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 			}
 			bridge.media()
 			processed := processCarrierInput(row, audioFrontend, bytesToPCM16(data))
+			a.observeAICaller(row, processed.SpeechActive, time.Now().UTC(), bridge.generation)
 			pcm24 := inputResampler.Process(processed.PCM)
 			if len(pcm24) == 0 {
 				continue
@@ -820,6 +832,7 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 		}
 	}()
 
+	a.bindAIPlayback(row, bridge.generation, func() bool { return false })
 	outputResampler := newPCMResampler(24000, 16000)
 	listenResampler := newPCMResampler(16000, 24000)
 	for {
@@ -838,6 +851,7 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 		if op == ws.OpText {
 			control, ok := parseRealtimeBridgeControl(data)
 			if ok && control.Type == "interrupt" {
+				a.observeAICaller(row, true, time.Now().UTC(), bridge.generation)
 				audioFrontend.markInterrupt(control.Source)
 				if provider == "sinch" {
 					if err := vonageWriter.Write(ws.OpText, []byte(`{"command":"clear"}`)); err != nil {
@@ -853,6 +867,7 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 		}
 		pcm16 := outputResampler.Process(bytesToPCM16(data))
 		err = writeVonageFramesObserved(vonageWriter, pcm16ToBytes(pcm16), func(frame []byte) {
+			a.observeAIOutput(row, time.Now().UTC(), bridge.generation)
 			if tap.hasListeners() {
 				tap.publish(1, pcm16ToBytes(listenResampler.Process(bytesToPCM16(frame))))
 			}

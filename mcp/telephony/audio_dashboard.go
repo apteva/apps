@@ -452,7 +452,12 @@ func (a *App) handleAudioDashboard(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "load carrier bridge diagnostics", 500)
 			return
 		}
-		writeJSON(w, map[string]any{"carrier_bridges": bridges, "transport_samples": samples, "browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "network_events": network})
+		policy, err := a.aiPolicyDiagnostics(project, id)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "load AI policy diagnostics", 500)
+			return
+		}
+		writeJSON(w, map[string]any{"ai_call_policy": policy, "carrier_bridges": bridges, "transport_samples": samples, "browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "network_events": network})
 		return
 	}
 	now := time.Now()
