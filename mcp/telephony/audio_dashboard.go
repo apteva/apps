@@ -173,6 +173,11 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 		m["browser_max_write_ms"] = float64(v.ToBrowser.MaxWriteMS)
 		m["browser_max_queue_delay_ms"] = float64(v.ToBrowser.MaxResidenceMS)
 		m["server_browser_dropped_ms"] = float64(v.ToBrowser.StaleBytes+v.ToBrowser.SourceStaleBytes+v.ToBrowser.OverflowBytes) / 48
+		for _, e := range v.CaptureDropEvents {
+			if e.BrowserDropTimestamp != "" {
+				m["capture_correlated_missing_ms"] += float64(e.DurationMS)
+			}
+		}
 		m["server_capture_dropped_ms"] = float64(v.CaptureStaleBytes) / 48
 		m["capture_muted_frames"] = max(m["capture_muted_frames"], float64(v.CaptureMutedFrames))
 		m["capture_muted_ms"] = max(m["capture_muted_ms"], float64(v.CaptureMutedMS))
@@ -187,13 +192,13 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 			add("audio_degraded", stage, h.State == "audio_degraded" || h.LastBadAt != "")
 		}
 		for _, e := range v.Socket.Events {
-			add("browser_error", "", e.Code != 0 && e.Code != 1000 && e.Code != 1001)
+			add("browser_error", "", audioBrowserCloseError(row, e.Code, e.At, e.ShutdownIntent))
 		}
 	}
 	for _, e := range b.SessionEvents {
 		add("browser_error", "", e.Outcome == "audio_error" || e.Outcome == "error" || e.Outcome == "transport_error" || e.Status >= 400 || e.Outcome == "failed" || e.Outcome == "revoked" || e.Outcome == "expired")
 	}
-	add("browser_error", "", row.MediaErrorMessage != "" || row.MediaCloseCode != 0 && row.MediaCloseCode != 1000 && row.MediaCloseCode != 1001)
+	add("browser_error", "", row.MediaErrorMessage != "" || audioBrowserCloseError(row, row.MediaCloseCode, row.MediaDisconnectedAt, ""))
 	add("dropped_audio", "telephony_to_browser", m["playback_dropped_ms"]+m["browser_transport_dropped_ms"]+m["browser_source_dropped_ms"] > 0)
 	add("dropped_audio", "browser_to_telephony", m["capture_dropped_ms"] > 0)
 	add("sequence_gaps", "telephony_to_browser", m["playback_sequence_gaps"]+m["browser_transport_sequence_gaps"] > 0)

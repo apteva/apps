@@ -778,6 +778,8 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			switch control.Type {
+			case "media.shutdown":
+				hub.telemetry.shutdown(writer, control.Reason)
 			case "capture.omitted":
 				if control.Reason == "muted" {
 					hub.observeMutedCaptureRange(writer, control.FirstSequence, control.LastSequence, control.Frames, connectionID)

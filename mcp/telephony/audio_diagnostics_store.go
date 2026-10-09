@@ -116,44 +116,46 @@ type mediaSessionEvent struct {
 }
 
 type browserAudioDiagnostics struct {
-	PlaybackUnderrunMS     float64                 `json:"playback_underrun_ms,omitempty"`
-	PlaybackUnderrunEvents []playbackUnderrunEvent `json:"playback_underrun_events,omitempty"`
-	MediaTransport         string                  `json:"media_transport,omitempty"`
-	Codec                  string                  `json:"codec,omitempty"`
-	WebRTC                 *browserWebRTCStats     `json:"webrtc,omitempty"`
-	ConnectionID           string                  `json:"connection_id,omitempty"`
-	ClientEpoch            string                  `json:"client_epoch,omitempty"`
-	SessionEvents          []mediaSessionEvent     `json:"session_events,omitempty"`
-	CarrierPeerConnected   bool                    `json:"carrier_peer_connected"`
-	ConnectionState        string                  `json:"connection_state,omitempty"`
-	AudioContextState      string                  `json:"audio_context_state,omitempty"`
-	MicrophoneMuted        bool                    `json:"microphone_muted"`
-	MicrophoneTrackState   string                  `json:"microphone_track_state,omitempty"`
-	MicrophoneDeviceMuted  bool                    `json:"microphone_device_muted"`
-	Timing                 *browserAudioTiming     `json:"timing,omitempty"`
-	Server                 *serverAudioDiagnostics `json:"server,omitempty"`
-	ReceivedAt             string                  `json:"received_at,omitempty"`
-	RTTMS                  *int                    `json:"rtt_ms,omitempty"`
-	PlaybackQueueMS        int                     `json:"playback_queue_ms"`
-	PlaybackTargetMS       int                     `json:"playback_target_ms"`
-	PlaybackMaxQueueMS     int                     `json:"playback_max_queue_ms"`
-	PlaybackUnderruns      int                     `json:"playback_underruns"`
-	PlaybackDroppedMS      int                     `json:"playback_dropped_ms"`
-	WebSocketBufferedBytes int                     `json:"websocket_buffered_bytes"`
-	AudioContextRate       int                     `json:"audio_context_rate"`
-	MicrophoneSampleRate   int                     `json:"microphone_sample_rate,omitempty"`
-	MicrophoneChannelCount int                     `json:"microphone_channel_count,omitempty"`
-	EchoCancellation       *bool                   `json:"echo_cancellation,omitempty"`
-	NoiseSuppression       *bool                   `json:"noise_suppression,omitempty"`
-	AutoGainControl        *bool                   `json:"auto_gain_control,omitempty"`
-	MicActiveRMSDBFS       *float64                `json:"mic_active_rms_dbfs,omitempty"`
-	MicPeakDBFS            *float64                `json:"mic_peak_dbfs,omitempty"`
-	MicPostPeakDBFS        *float64                `json:"mic_post_peak_dbfs,omitempty"`
-	MicInputGainDB         *float64                `json:"mic_input_gain_db,omitempty"`
-	MicLimiterReductionDB  *float64                `json:"mic_limiter_reduction_db,omitempty"`
-	CaptureSequenceGaps    int                     `json:"capture_sequence_gaps"`
-	PlaybackSequenceGaps   int                     `json:"playback_sequence_gaps"`
-	DropEvents             []audioDropEvent        `json:"drop_events,omitempty"`
+	PlaybackEvents         []browserAudioObservation `json:"playback_events,omitempty"`
+	CaptureQueueEvents     []browserAudioObservation `json:"capture_queue_events,omitempty"`
+	PlaybackUnderrunMS     float64                   `json:"playback_underrun_ms,omitempty"`
+	PlaybackUnderrunEvents []playbackUnderrunEvent   `json:"playback_underrun_events,omitempty"`
+	MediaTransport         string                    `json:"media_transport,omitempty"`
+	Codec                  string                    `json:"codec,omitempty"`
+	WebRTC                 *browserWebRTCStats       `json:"webrtc,omitempty"`
+	ConnectionID           string                    `json:"connection_id,omitempty"`
+	ClientEpoch            string                    `json:"client_epoch,omitempty"`
+	SessionEvents          []mediaSessionEvent       `json:"session_events,omitempty"`
+	CarrierPeerConnected   bool                      `json:"carrier_peer_connected"`
+	ConnectionState        string                    `json:"connection_state,omitempty"`
+	AudioContextState      string                    `json:"audio_context_state,omitempty"`
+	MicrophoneMuted        bool                      `json:"microphone_muted"`
+	MicrophoneTrackState   string                    `json:"microphone_track_state,omitempty"`
+	MicrophoneDeviceMuted  bool                      `json:"microphone_device_muted"`
+	Timing                 *browserAudioTiming       `json:"timing,omitempty"`
+	Server                 *serverAudioDiagnostics   `json:"server,omitempty"`
+	ReceivedAt             string                    `json:"received_at,omitempty"`
+	RTTMS                  *int                      `json:"rtt_ms,omitempty"`
+	PlaybackQueueMS        int                       `json:"playback_queue_ms"`
+	PlaybackTargetMS       int                       `json:"playback_target_ms"`
+	PlaybackMaxQueueMS     int                       `json:"playback_max_queue_ms"`
+	PlaybackUnderruns      int                       `json:"playback_underruns"`
+	PlaybackDroppedMS      int                       `json:"playback_dropped_ms"`
+	WebSocketBufferedBytes int                       `json:"websocket_buffered_bytes"`
+	AudioContextRate       int                       `json:"audio_context_rate"`
+	MicrophoneSampleRate   int                       `json:"microphone_sample_rate,omitempty"`
+	MicrophoneChannelCount int                       `json:"microphone_channel_count,omitempty"`
+	EchoCancellation       *bool                     `json:"echo_cancellation,omitempty"`
+	NoiseSuppression       *bool                     `json:"noise_suppression,omitempty"`
+	AutoGainControl        *bool                     `json:"auto_gain_control,omitempty"`
+	MicActiveRMSDBFS       *float64                  `json:"mic_active_rms_dbfs,omitempty"`
+	MicPeakDBFS            *float64                  `json:"mic_peak_dbfs,omitempty"`
+	MicPostPeakDBFS        *float64                  `json:"mic_post_peak_dbfs,omitempty"`
+	MicInputGainDB         *float64                  `json:"mic_input_gain_db,omitempty"`
+	MicLimiterReductionDB  *float64                  `json:"mic_limiter_reduction_db,omitempty"`
+	CaptureSequenceGaps    int                       `json:"capture_sequence_gaps"`
+	PlaybackSequenceGaps   int                       `json:"playback_sequence_gaps"`
+	DropEvents             []audioDropEvent          `json:"drop_events,omitempty"`
 }
 
 // Duration measures samples rendered without caller data. UTC/audio-clock
@@ -266,14 +268,20 @@ type browserWebRTCStats struct {
 }
 
 type audioDropEvent struct {
-	ConnectionID  string `json:"connection_id,omitempty"`
-	Timestamp     string `json:"timestamp"`
-	Direction     string `json:"direction"`
-	Reason        string `json:"reason"`
-	DurationMS    int    `json:"duration_ms"`
-	QueueBeforeMS int    `json:"queue_before_ms,omitempty"`
-	QueueAfterMS  int    `json:"queue_after_ms,omitempty"`
-	Sequence      uint64 `json:"sequence,omitempty"`
+	BrowserDropTimestamp string  `json:"browser_drop_timestamp,omitempty"`
+	BrowserDropReason    string  `json:"browser_drop_reason,omitempty"`
+	FrameAgeMS           float64 `json:"frame_age_ms,omitempty"`
+	WorkerDelayMS        float64 `json:"worker_delay_ms,omitempty"`
+	ClockUncertaintyMS   float64 `json:"clock_uncertainty_ms,omitempty"`
+	QueueBytes           int     `json:"queue_bytes,omitempty"`
+	ConnectionID         string  `json:"connection_id,omitempty"`
+	Timestamp            string  `json:"timestamp"`
+	Direction            string  `json:"direction"`
+	Reason               string  `json:"reason"`
+	DurationMS           int     `json:"duration_ms"`
+	QueueBeforeMS        int     `json:"queue_before_ms,omitempty"`
+	QueueAfterMS         int     `json:"queue_after_ms,omitempty"`
+	Sequence             uint64  `json:"sequence,omitempty"`
 }
 
 // Browser clocks report fractional milliseconds. Accept them at the wire
@@ -343,6 +351,8 @@ func clampDiagnosticDBFS(value *float64) *float64 {
 }
 
 func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics) browserAudioDiagnostics {
+	value.PlaybackEvents = normalizeAudioObservations(value.PlaybackEvents)
+	value.CaptureQueueEvents = normalizeAudioObservations(value.CaptureQueueEvents)
 	if value.Timing != nil {
 		finite := func(n float64, cap float64) float64 {
 			if math.IsNaN(n) || math.IsInf(n, 0) {
@@ -474,6 +484,12 @@ func normalizeAudioDropEvents(events []audioDropEvent) []audioDropEvent {
 		events = events[len(events)-100:]
 	}
 	for i := range events {
+		events[i].BrowserDropTimestamp = ""
+		events[i].BrowserDropReason = ""
+		events[i].FrameAgeMS = finiteAudioObservation(events[i].FrameAgeMS, 60000)
+		events[i].WorkerDelayMS = finiteAudioObservation(events[i].WorkerDelayMS, 60000)
+		events[i].ClockUncertaintyMS = finiteAudioObservation(events[i].ClockUncertaintyMS, 60000)
+		events[i].QueueBytes = clampDiagnosticInt(events[i].QueueBytes, 64*1024*1024)
 		events[i].DurationMS = clampDiagnosticInt(events[i].DurationMS, 60000)
 		events[i].QueueBeforeMS = clampDiagnosticInt(events[i].QueueBeforeMS, 60000)
 		events[i].QueueAfterMS = clampDiagnosticInt(events[i].QueueAfterMS, 60000)
