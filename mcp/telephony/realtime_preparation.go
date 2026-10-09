@@ -214,10 +214,14 @@ func (a *App) runInboundPreparation(ctx *sdk.AppCtx, row *callRow, directive, vo
 			return fail(errors.New("AI agent and directive are required"))
 		}
 		ctx.Logger().Info("realtime answer preparation started", "call", row.ID, "thread", threadID, "agent", row.AgentID)
+		turnDetection, err := a.turnDetectionForNewSession(row)
+		if err != nil {
+			return fail(fmt.Errorf("invalid turn detection configuration: %w", err))
+		}
 		rt, err := ctx.PlatformAPI().SpawnRealtimeThread(sdk.RealtimeSpawnRequest{
 			AgentID: row.AgentID, ThreadID: threadID, Directive: strings.TrimSpace(directive), Voice: voice,
 			CapabilityMode: sdk.RealtimeCapabilitiesInheritAgent, CallContext: realtimeCallContext(*row),
-			TurnDetection: telephonyTurnDetection(), Ephemeral: true, InitialMessage: greeting, BridgeDisconnectTTLSeconds: 30,
+			TurnDetection: turnDetection, Ephemeral: true, InitialMessage: greeting, BridgeDisconnectTTLSeconds: 30,
 		})
 		if err != nil {
 			return fail(fmt.Errorf("spawn realtime thread: %w", err))

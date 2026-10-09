@@ -114,6 +114,7 @@ type inboundRoutingPlan struct {
 	DecisionNotBefore                                           string
 	RoutingResolution                                           string
 	CallbackOnAI                                                bool
+	TurnDetection                                               *sdk.RealtimeTurnDetection `json:",omitempty"`
 }
 
 var routingIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
@@ -969,6 +970,9 @@ func (a *App) saveRoutingDestination(project, id, name, kind string, config any,
 	if capacity.Limit > 0 && kind != "browser" {
 		return nil, errors.New("individual capacity is only supported for browser destinations")
 	}
+	if _, err := destinationTurnDetection(kind, string(raw)); err != nil {
+		return nil, err
+	}
 	switch kind {
 	case "agent", "ai":
 		if routingConfigInt(decoded, "agent_id", 0) <= 0 {
@@ -1368,7 +1372,16 @@ func (a *App) resolveRoutingDefinition(route *routeRow, caller string, digits ma
 				copy := *destination
 				destination = &copy
 				destination.Kind = map[string]string{answerModeHumanBrowser: "browser", answerModeRealtimeImmediate: "ai", answerModeAgent: "agent"}[route.AnswerMode]
-				raw, _ := json.Marshal(map[string]any{"agent_id": route.AgentID, "directive": route.AutoDirective, "voice": route.AutoVoice, "greeting": route.AutoGreeting, "hold_prompt": route.HoldPrompt, "timeout_sec": route.TimeoutSec})
+				config := map[string]any{"agent_id": route.AgentID, "directive": route.AutoDirective, "voice": route.AutoVoice, "greeting": route.AutoGreeting, "hold_prompt": route.HoldPrompt, "timeout_sec": route.TimeoutSec}
+				// Legacy route fields remain authoritative, but turn detection is
+				// destination-only and may have been explicitly added to its snapshot.
+				var destinationConfig map[string]json.RawMessage
+				if json.Unmarshal([]byte(destination.ConfigJSON), &destinationConfig) == nil {
+					if turn, ok := destinationConfig["turn_detection"]; ok {
+						config["turn_detection"] = turn
+					}
+				}
+				raw, _ := json.Marshal(config)
 				destination.ConfigJSON = string(raw)
 			}
 		}
@@ -1386,6 +1399,14 @@ func (a *App) resolveRoutingDefinition(route *routeRow, caller string, digits ma
 		plan.HoldPrompt = routingConfigString(config, "hold_prompt")
 		plan.TimeoutSec = routingConfigInt(config, "timeout_sec", plan.TimeoutSec)
 		plan.AgentID = int64(routingConfigInt(config, "agent_id", int(plan.AgentID)))
+		configJSON, err := json.Marshal(config)
+		if err != nil {
+			return nil, err
+		}
+		plan.TurnDetection, err = destinationTurnDetection(destination.Kind, string(configJSON))
+		if err != nil {
+			return nil, err
+		}
 		switch destination.Kind {
 		case "browser":
 			plan.AnswerMode = answerModeHumanBrowser
@@ -1598,6 +1619,12 @@ func (a *App) routingPlanForCall(row *callRow, digits map[string]string) (*route
 		plan.AgentID = row.AgentID
 		plan.Directive = row.Directive
 		plan.Voice = row.Voice
+		if dest, ok := plan.GroupDestinations[row.RoutingDestinationID]; ok {
+			plan.TurnDetection, err = destinationTurnDetection(dest.Kind, dest.ConfigJSON)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
 		if row.PeerKind == peerKindHuman {
 			plan.AnswerMode = answerModeHumanBrowser
 		} else {
