@@ -30,9 +30,12 @@ interface Diagnostic {
 
 interface DiagnosticsResponse {
   diagnostics: Diagnostic[];
-  total: number;
-  error_count: number;
-  slow_count: number;
+  total?: number;
+  error_count?: number;
+  slow_count?: number;
+  next_cursor?: string;
+  slow_query_ms?: number;
+  page_summary?: { recorded: number; failures: number; slow: number };
   has_more: boolean;
 }
 
@@ -41,11 +44,14 @@ function apiURL(
   installId: number,
   outcome: string,
   limit: number,
+  cursor: string,
 ): string {
   const url = new URL(`${API}/diagnostics`, window.location.origin);
   url.searchParams.set("project_id", projectId);
   url.searchParams.set("install_id", String(installId));
   url.searchParams.set("limit", String(limit));
+  url.searchParams.set("include_summary", "false");
+  if (cursor) url.searchParams.set("cursor", cursor);
   if (outcome) url.searchParams.set("outcome", outcome);
   return url.pathname + url.search;
 }
@@ -100,6 +106,17 @@ export default function TablesDiagnosticsWidget({
   const [loading, setLoading] = useState(true);
   const [outcome, setOutcome] = useState("");
   const [limit, setLimit] = useState(10);
+  const historyKey = `${projectId}:${installId}:${outcome}:${limit}`;
+  const [pagination, setPagination] = useState<{ key: string; cursors: string[]; page: number }>({ key: "", cursors: [""], page: 0 });
+  const page = pagination.key === historyKey ? pagination.page : 0;
+  const cursor = pagination.key === historyKey ? pagination.cursors[page] ?? "" : "";
+  const nextPage = () => {
+    if (!data?.next_cursor) return;
+    const cursors = pagination.key === historyKey ? pagination.cursors.slice(0, page + 1) : [""];
+    setPagination({ key: historyKey, cursors: [...cursors, data.next_cursor], page: page + 1 });
+  };
+  const previousPage = () => setPagination((value) => ({ ...value, page: Math.max(0, value.page - 1) }));
+  const newestPage = () => setPagination({ key: historyKey, cursors: [""], page: 0 });
   const invalidate = useRef<() => void>(() => {});
   useAppEvents("tables", projectId, (event) => {
     if (event.project_id !== projectId) return;
@@ -135,9 +152,10 @@ export default function TablesDiagnosticsWidget({
       if (disposed || !projectId) return;
       running = true;
       dirty = false;
+      setLoading(true);
       try {
         const response = await fetch(
-          apiURL(projectId, installId, outcome, limit),
+          apiURL(projectId, installId, outcome, limit, cursor),
           {
             credentials: "same-origin",
             signal: controller.signal,
@@ -189,7 +207,7 @@ export default function TablesDiagnosticsWidget({
       window.removeEventListener("focus", recover);
       document.removeEventListener("visibilitychange", visible);
     };
-  }, [installId, projectId, outcome, limit]);
+  }, [installId, projectId, outcome, limit, cursor]);
 
   const records = (data?.diagnostics ?? []).slice(0, limit);
   const p95 = useMemo(
@@ -200,6 +218,8 @@ export default function TablesDiagnosticsWidget({
       ),
     [records],
   );
+  const pageFailures = records.filter((record) => record.outcome !== "ok").length;
+  const pageSlow = records.filter((record) => record.total_ms >= (data?.slow_query_ms ?? 250)).length;
   const shell = compact
     ? "flex h-full min-h-0 flex-col overflow-hidden rounded border border-border bg-bg-card"
     : "min-h-full overflow-auto bg-bg p-4";
@@ -276,23 +296,27 @@ export default function TablesDiagnosticsWidget({
                 : "repeat(auto-fit, minmax(min(100%, 130px), 1fr))",
             }}
           >
-            <Metric label="Recorded" value={String(data?.total ?? 0)} />
+            <Metric label="On this page" value={String(records.length)} />
             <Metric
-              label="Failures"
-              value={String(data?.error_count ?? 0)}
-              tone={(data?.error_count ?? 0) > 0 ? "error" : "neutral"}
+              label="Page failures"
+              value={String(pageFailures)}
+              tone={pageFailures > 0 ? "error" : "neutral"}
             />
             <Metric
-              label="Slow"
-              value={String(data?.slow_count ?? 0)}
-              tone={(data?.slow_count ?? 0) > 0 ? "warn" : "neutral"}
+              label="Page slow"
+              value={String(pageSlow)}
+              tone={pageSlow > 0 ? "warn" : "neutral"}
             />
-            <Metric label="Recent p95" value={`${Math.round(p95)} ms`} />
+            <Metric label="Page p95" value={`${Math.round(p95)} ms`} />
           </div>
-          <p className="mt-3 text-[10px] text-text-dim">
-            Showing {records.length} of {data?.total ?? 0}{" "}
-            {outcome ? "matching " : ""}records · latest first
-          </p>
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[10px] text-text-dim">
+            <p>Showing {records.length} {outcome ? "matching " : ""}records · page {page + 1} · latest first</p>
+            <div className="flex gap-2">
+              {page > 0 && <button type="button" onClick={newestPage} disabled={loading} className="rounded border border-border px-2 py-1 disabled:opacity-40">Newest</button>}
+              <button type="button" onClick={previousPage} disabled={page === 0 || loading} className="rounded border border-border px-2 py-1 disabled:opacity-40">Previous</button>
+              <button type="button" onClick={nextPage} disabled={!data?.has_more || !data.next_cursor || loading} className="rounded border border-border px-2 py-1 disabled:opacity-40">Next</button>
+            </div>
+          </div>
           {records.length === 0 ? (
             <div className="mt-4 rounded-lg border border-dashed border-border p-6 text-center text-xs text-text-dim">
               {outcome

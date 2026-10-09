@@ -109,6 +109,9 @@ func (a *App) beginOperation(ctx *sdk.AppCtx, args map[string]any, operation str
 			return nil, nil, &statusError{403, "projection permission denied"}
 		}
 	}
+	if strings.HasPrefix(operation, "diagnostics_") && !sdk.CallerFrom(parent).Allows("diagnostics.read", "") {
+		return nil, nil, &statusError{403, "diagnostics permission denied"}
+	}
 	duration := maxQueryMs(ctx) + maxReadQueueMs(ctx)
 	if schemaWrite || operation == "rows_insert" || operation == "rows_upsert" || operation == "rows_update" || operation == "rows_delete" {
 		duration = int(cfgInt64Range(ctx, "max_write_ms", 30000, 1, 300000))
@@ -125,6 +128,12 @@ func (a *App) beginOperation(ctx *sdk.AppCtx, args map[string]any, operation str
 	if err != nil {
 		cancel()
 		return nil, nil, err
+	}
+	if strings.HasPrefix(operation, "diagnostics_") {
+		if caller := sdk.CallerFrom(parent); caller != nil && caller.ProjectID != "" && caller.ProjectID != pid {
+			cancel()
+			return nil, nil, &statusError{403, "diagnostics project mismatch"}
+		}
 	}
 	scoped := ctx.WithProject(pid)
 	activeContexts.Store(scoped, callCtx)

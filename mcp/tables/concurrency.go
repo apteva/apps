@@ -114,7 +114,7 @@ func operationNeedsInteractiveCapacity(operation string) bool {
 	switch operation {
 	case "tables_list", "tables_describe", "tables_query",
 		"rows_get", "rows_search", "rows_count", "rows_aggregate",
-		"indexes_list", "projections_list", "projections_describe", "projections_status", "diagnostics_list":
+		"indexes_list", "projections_list", "projections_describe", "projections_status", "diagnostics_list", "diagnostics_get":
 		return true
 	default:
 		return false

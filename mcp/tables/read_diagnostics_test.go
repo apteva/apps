@@ -77,7 +77,7 @@ func TestReadDiagnosticsPersistAndServePanelData(t *testing.T) {
 	previous := globalCtx
 	globalCtx = ctx
 	t.Cleanup(func() { globalCtx = previous })
-	req := httptest.NewRequest(http.MethodGet, "/diagnostics?project_id=diagnostics&limit=10", nil)
+	req := httptest.NewRequest(http.MethodGet, "/diagnostics?project_id=diagnostics&limit=10&include_summary=true", nil)
 	res := httptest.NewRecorder()
 	app.handleDiagnostics(res, req)
 	if res.Code != http.StatusOK {
@@ -460,7 +460,7 @@ func TestDiagnosticsFiltersLimitsIsolationAndNoReadEventLoop(t *testing.T) {
 	} {
 		t.Run(tc.query, func(t *testing.T) {
 			w := httptest.NewRecorder()
-			(&App{}).handleDiagnostics(w, httptest.NewRequest("GET", "/diagnostics?project_id=test-proj&"+tc.query, nil))
+			(&App{}).handleDiagnostics(w, httptest.NewRequest("GET", "/diagnostics?project_id=test-proj&include_summary=true&"+tc.query, nil))
 			if w.Code != 200 {
 				t.Fatalf("status=%d: %s", w.Code, w.Body.String())
 			}

@@ -42,20 +42,62 @@ Do not add a second read semaphore on top of the existing connection limit.
 
 ## Completion records
 
-The Tables project panel now includes a **Diagnostics** surface, and Tables
-registers a suggested `dashboard.home` diagnostics widget. It reads the same
-redacted records through `GET /diagnostics`, showing error and slow-read
-counts, recent p95 duration, operation, phase, queue time, and outcome. The
-list defaults to 10 newest rows, with 25/50-row options and server-side
-filters for errors, timeouts or cancellations. Counts follow the selected
-filter; recent p95 covers only the displayed rows. The shared app SSE stream
-reloads on `diagnostics.recorded` for the current install/project, coalescing
-bursts and retaining one follow-up during an in-flight request. There is no
-Refresh button or periodic polling. Reconnect, focus and visibility recovery
-reload authoritative data; fetch failures retry at 1/2/4 seconds, then wait
-for another event or recovery trigger. Events are best-effort invalidations;
-the durable list remains authoritative. The sidecar keeps the newest 10,000
-records per project; raw SQL, parameters, row values, and raw database error text are never stored.
+Tables 0.2.15 exposes redacted timing history directly through the Apteva server:
+
+```text
+GET /api/apps/tables/diagnostics?project_id=PROJECT&install_id=INSTALL&limit=50
+GET /api/apps/tables/diagnostics/ID?project_id=PROJECT&install_id=INSTALL
+```
+
+The MCP equivalents are `diagnostics_list` and `diagnostics_get`. Agent/app
+callers need `diagnostics.read`; operator HTTP access uses the server's normal
+project/install authentication. Permissions and authenticated project scope are
+checked on every request, including cursor continuation and record details.
+
+List responses include `diagnostics`, `has_more`, `next_cursor` when another
+page exists, `slow_query_ms`, and `page_summary` (`recorded`, `failures`, `slow`).
+Limits default to 50 and are capped at 100. Continue with `cursor=NEXT_CURSOR`,
+keeping the same filters. Cursors bind the project, normalized filters and
+`(recorded_at_ms,id)` boundary, so ties are deterministic and deletion of a
+boundary row does not invalidate paging. This is live retained history: new
+head entries appear when restarting at the newest page; backdated inserts may
+appear in subsequent pages, and retention can remove older entries. Legacy
+`offset`/`next_offset` remain supported, but deep offsets do more work. Do not
+combine a nonzero offset with a cursor.
+
+Filters are `outcome` (`ok`, `error`, `timeout`, `canceled`), `operation`,
+`request_id`, `query_id` (redacted fingerprint), `call_id`, `from` (inclusive
+RFC3339 timestamp), and `to` (exclusive). Equality filter indexes lead the
+project/time/id ordering. A cursor cannot be reused after changing filters.
+`X-Request-ID` identifies the history API request; it does not filter records.
+
+**Full-history totals are opt-in in 0.2.15.** Set `include_summary=true` to
+receive `total`, `error_count`, `slow_count` and
+`summary_scope: "filtered_history"`. These counts cover all matching retained
+history, excluding the pagination boundary, in the same read snapshot as the
+page. Clients that previously relied on always-present totals must request
+this option. Default pages fetch at most `limit+1` rows and calculate page
+summaries without a history-wide count. Summary queries remain subject to the
+interactive admission, connection wait and execution deadlines.
+
+The project panel and dashboard Home widget use the cheap page path, with
+10/25/50-row limits, outcome filters, Next/Previous/Newest cursor navigation,
+and explicitly labeled page counts and p95. The shared SSE stream reloads on
+`diagnostics.recorded` for the current install/project, coalescing bursts and
+retaining one follow-up during an in-flight request. Browsing an older page
+preserves its cursor; filter/limit/project changes start at the newest page.
+There is no manual Refresh button or periodic polling. Reconnect, focus and
+visibility recovery reload authoritative data; fetch failures retry at
+1/2/4 seconds, then wait for another event or recovery trigger. Events are
+best-effort invalidations; the durable list remains authoritative.
+
+Recording coverage remains the eight instrumented read tools. Slow and failed
+reads are recorded by default; `log_all_reads=true` records fast observed reads
+as well. Background phase metrics are separate. This API is not a complete
+statement audit, CPU profiler or physical disk-I/O meter. Persistence remains
+best-effort with a short write deadline; the existing pruning policy targets
+10,000 records per project. Raw SQL, parameters, row values and raw database
+error text are never stored.
 
 `tables read completed` is emitted once per observed read after its rows,
 explicit connection, and operation locks have been released. All eight read

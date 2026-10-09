@@ -1,3 +1,11 @@
+# Tables v0.2.15 — efficient diagnostics history
+
+- Add indexed timestamp/id cursor pagination to the server diagnostics API, with request/query/call/operation/outcome/time filters and a redacted single-record endpoint. Keep legacy offsets; bind cursors to project/filter context and check permissions on every request.
+- Make full-history totals opt-in with `include_summary=true`. Default pages fetch `limit+1` and return page summaries; optional history totals use the same read snapshot and configured read deadlines.
+- Add `diagnostics_list` / `diagnostics_get` MCP tools and the `diagnostics.read` permission. Keep history reads outside diagnostic recording to prevent feedback loops.
+- Add compact cursor navigation to the panel/widget, preserve older pages through SSE refreshes, and label page-level counts/p95 clearly. Reset pagination when filter, row limit or project changes.
+- Add additive migration 019, authorization/paging/filter/query-plan regressions, a 20,000-record history fixture, page/write-maintenance benchmarks, and real HTTP/MCP restart-migration coverage. Existing recording coverage and default sampling policy are preserved.
+
 # Tables v0.2.14 — bounded projection notifications
 
 - Cap publication and coalesced `projection.ready` payloads at 16 KiB of serialized UTF-8 JSON. Send projection-wide refresh flags when scope details are omitted; keep precise small scopes and exact union counts.

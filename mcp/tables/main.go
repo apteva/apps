@@ -123,6 +123,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/projections", Handler: a.handleProjectionsCollection},
 		{Pattern: "/projections/", Handler: a.handleProjectionsItem},
 		{Pattern: "/diagnostics", Handler: a.handleDiagnostics},
+		{Pattern: "/diagnostics/", Handler: a.handleDiagnosticItem},
 	}
 }
 
@@ -407,6 +408,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		}
 	}
 	tools = append(tools, a.projectionTools()...)
+	tools = append(tools, a.diagnosticTools()...)
 	for i := range tools {
 		switch tools[i].Name {
 		case "tables_query", "rows_get", "rows_search", "rows_count", "rows_aggregate", "tables_list", "tables_describe", "indexes_list":

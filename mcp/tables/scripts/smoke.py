@@ -59,7 +59,7 @@ with tempfile.TemporaryDirectory(prefix="tables-smoke-") as temp:
         return json.loads(reply["result"]["content"][0]["text"])
     try:
         start()
-        for path in ("/tables", "/tables?sig=untrusted"):
+        for path in ("/tables", "/tables?sig=untrusted", "/diagnostics", "/diagnostics/1"):
             try:
                 with urllib.request.urlopen(base + path, timeout=5) as response:
                     raise AssertionError(f"Unauthenticated request accepted: {path}: {response.status}")
@@ -156,7 +156,30 @@ with tempfile.TemporaryDirectory(prefix="tables-smoke-") as temp:
         assert mcp("indexes_list", {"table":"measurement_totals"})["indexes"]==[]
 
         assert mcp("projections_describe", {"name":"measurement_totals"})["source_dependencies"][0]["watched_columns"]==["centre_id","value"]
-        print("PASS: real HTTP/MCP authentication, exact numbers, cursors, optimistic updates, automatic restart migration and watched projection recovery, filter-leading indexes, worker metrics and coalesced wakeups/restart recovery")
+        # Rehearse the additive 0.2.14 -> 0.2.15 diagnostics index migration
+        # against the actual SDK ledger, preserving pre-existing observations.
+        stop()
+        with sqlite3.connect(env["DB_PATH"]) as db:
+            for key in ("outcome", "request", "query", "operation", "call"):
+                db.execute(f"DROP INDEX read_diagnostics_project_{key}_time")
+            db.execute("DELETE FROM _migrations WHERE filename='019_diagnostics_history_indexes.sql'")
+            db.executemany("INSERT INTO read_diagnostics(project_id,recorded_at_ms,operation,call_id,request_id,query_id,outcome,total_ms) VALUES('smoke-project',1000,'tables_query',?,'history-smoke','fingerprint','error',300)", [(f"history-{i}",) for i in range(3)])
+        start()
+        tools=request("POST", "/mcp", {"jsonrpc":"2.0", "id":1, "method":"tools/list", "params":{}})["result"]["tools"]
+        assert {"diagnostics_list", "diagnostics_get"} <= {tool["name"] for tool in tools}
+        history=mcp("diagnostics_list", {"limit":2,"request_id":"history-smoke"})
+        assert len(history["diagnostics"])==2 and history["has_more"] and "total" not in history, history
+        assert history["page_summary"]["failures"]==2
+        second=mcp("diagnostics_list", {"limit":2,"request_id":"history-smoke","cursor":history["next_cursor"]})
+        assert len(second["diagnostics"])==1 and not second["has_more"], second
+        summary=request("GET", "/diagnostics?request_id=history-smoke&include_summary=true")
+        assert summary["total"]==3 and summary["error_count"]==3, summary
+        item=history["diagnostics"][0]
+        assert request("GET", f"/diagnostics/{item['id']}")["diagnostic"]==item
+        assert mcp("diagnostics_get", {"id":item["id"]})["diagnostic"]==item
+        with sqlite3.connect(env["DB_PATH"]) as db:
+            assert db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='read_diagnostics_project_request_time'").fetchone()[0]==1
+        print("PASS: real HTTP/MCP authentication, exact numbers, cursors, optimistic updates, automatic restart migration and watched projection recovery, filter-leading indexes, worker metrics, diagnostics cursor/detail/summary APIs and additive history migration")
     finally:
         stop()
         log.close()

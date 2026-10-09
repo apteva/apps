@@ -269,3 +269,34 @@ The complete local Go race suite passed in 208.6 seconds. All five Tables
 bundles passed the host React import check. SDK v0.99.0 remains the latest
 remote main tag by ancestry and is pinned without a local overlay. The source
 tag CI runs the complete Go race suite and portable builds.
+
+## Tables 0.2.15 diagnostics history validation
+
+A 20,000-observation WAL fixture verifies indexed searches for cursor pages and
+outcome/request/query/operation/call filters without a temporary sort. Tests cover
+timestamp ties, arrivals while paging, retention removing the boundary row,
+project/filter cursor binding, permission revocation, detail isolation, time
+bounds, HTTP/MCP parity, optional summaries, legacy offsets and no recursive
+recording. UI regressions cover cursor navigation, filter resets and SSE refresh
+of older pages. The real sidecar smoke removes migration 019 from a disposable
+SDK ledger, preserves old observations, then verifies automatic index creation
+and authenticated list/detail/summary APIs after restart.
+
+Local benchmarks on Apple M1 Pro, 100 page reads per case:
+
+| 20,000-record history, 25-row page near depth 16,000 | Mean time |
+|---|---:|
+| Cursor seek | 0.129 ms |
+| Legacy offset | 1.302 ms |
+| Cursor with full-history summary | 9.651 ms |
+
+A separate 1,000-insert diagnostic recording benchmark measured 0.101 ms per
+record with the legacy index and 0.173 ms with the additional filter indexes.
+These are local hot-cache measurements; they describe read/write tradeoffs, not
+production throughput. Ordinary UI pages opt out of summary scans, and default
+recording still captures slow/failed reads rather than every successful read.
+
+The final complete local Go race suite passed in 215 seconds; all 18 UI tests,
+type checking, vet, standalone Darwin/Linux builds, five host React bundle
+checks and the real sidecar smoke passed. SDK v0.99.0 is the latest tag on
+remote main by ancestry and remains pinned; validation uses GOWORK=off.

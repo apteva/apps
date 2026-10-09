@@ -506,7 +506,7 @@ test("diagnostics filter errors on the server, cap rows, and have no manual refr
     expect(urls.at(-1)!.searchParams.get("limit")).toBe("25");
     expect(ui.getAllByText("tables_query")).toHaveLength(25);
     expect(
-      ui.getByText("Showing 25 of 60 matching records · latest first"),
+      ui.getByText("Showing 25 matching records · page 1 · latest first"),
     ).toBeTruthy();
   } finally {
     window.setInterval = originalInterval;
@@ -696,4 +696,40 @@ test("compact projection-ready events refresh rows and readiness with empty scop
     await new Promise((resolve) => setTimeout(resolve, 160));
   });
   expect(statusReads).toBe(beforeWrongInstall);
+});
+
+test("diagnostics use cursor pages and page counts without full-history scans", async () => {
+  const urls: URL[] = [];
+  let notify: (event: any) => void = () => {};
+  (window as any).__aptevaAppEvents = { subscribe: (_app: string, _project: string, fn: any) => { notify = fn; return () => {}; } };
+  globalThis.fetch = (async (input: any) => {
+    const url = new URL(String(input), window.location.origin);
+    urls.push(url);
+    const older = url.searchParams.get("cursor") === "older-page";
+    const payload = diagnosticPayload(older ? "older_read" : "tables_query", 10) as any;
+    delete payload.total; delete payload.error_count; delete payload.slow_count;
+    payload.has_more = !older;
+    payload.next_cursor = older ? undefined : "older-page";
+    return response(payload);
+  }) as typeof fetch;
+  const ui = render(<TablesDiagnosticsWidget projectId="proj" installId={7} />);
+  await flush();
+  expect(urls[0]!.searchParams.get("include_summary")).toBe("false");
+  expect(ui.getByText("Showing 10 records · page 1 · latest first")).toBeTruthy();
+  fireEvent.click(ui.getByRole("button", { name: "Next" })); await flush();
+  expect(urls.at(-1)!.searchParams.get("cursor")).toBe("older-page");
+  expect(ui.getAllByText("older_read")).toHaveLength(10);
+  expect(ui.getByRole("button", { name: "Next" }).hasAttribute("disabled")).toBe(true);
+  await act(async () => {
+    notify({ topic: "diagnostics.recorded", project_id: "proj", install_id: 7 });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  });
+  await flush();
+  expect(urls.at(-1)!.searchParams.get("cursor")).toBe("older-page");
+  fireEvent.click(ui.getByRole("button", { name: "Previous" })); await flush();
+  expect(urls.at(-1)!.searchParams.get("cursor")).toBeNull();
+  fireEvent.click(ui.getByRole("button", { name: "Next" })); await flush();
+  fireEvent.change(ui.getByLabelText("Diagnostic outcome"), { target: { value: "error" } }); await flush();
+  expect(urls.at(-1)!.searchParams.get("cursor")).toBeNull();
+  expect(ui.getByText("Showing 10 matching records · page 1 · latest first")).toBeTruthy();
 });

@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.2.14
+version: 0.2.15
 description: |
+  v0.2.15 Adds indexed cursor diagnostics history, request/query/time filters,
+  MCP history/detail tools and cheap page summaries; full-history counts are opt-in.
   v0.2.14 Bounds projection-ready notifications to 16 KiB, automatically repairs
   oversized queued events, preserves retry snapshots and refreshes readiness via SSE.
   v0.2.13 Separates bounded cleanup from responsive projection refreshes, skips
@@ -95,11 +97,17 @@ provides:
   http_routes:
     - prefix: /
   permissions:
+    - name: diagnostics.read
+      description: Inspect redacted project read diagnostics and timing history.
     - name: projections.read
       description: Inspect projection definitions and refresh state.
     - name: projections.manage
       description: Create, refresh, pause, activate, or delete SQL projections.
   mcp_tools:
+    - name: diagnostics_list
+      description: Indexed cursor timing history with request/query/operation/outcome/time filters and optional full-history summaries.
+    - name: diagnostics_get
+      description: Inspect one redacted project diagnostic by id.
     - name: tables_create
       description: 'Create a project-confined table with typed columns. Args: name, columns (array of {name, type, nullable?, default?}). Returns the created table''s id + name.'
     - name: tables_list
@@ -256,7 +264,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.2.14
+    ref: tables/v0.2.15
     entry: mcp/tables
   port: 8080
   health_check: /health
