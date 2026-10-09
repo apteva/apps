@@ -1,5 +1,5 @@
-github.com/apteva/app-sdk v0.82.0 h1:SrPV8R42RCGLXC9QMGalk+l7wfSk3Sj83cYcLMjpn6U=
-github.com/apteva/app-sdk v0.82.0/go.mod h1:9+UMOOLTkKFf88SZHD/fxYHtByoJa/t2/EHi5gTtWKc=
+github.com/apteva/app-sdk v0.97.0 h1:+28A2EFFFj+fAhO2QWbh7A+NxBhwved0wjzLE7qJ3tQ=
+github.com/apteva/app-sdk v0.97.0/go.mod h1:9+UMOOLTkKFf88SZHD/fxYHtByoJa/t2/EHi5gTtWKc=
 github.com/chromedp/cdproto v0.0.0-20260321001828-e3e3800016bc h1:wkN/LMi5vc60pBRWx6qpbk/aEvq3/ZVNpnMvsw8PVVU=
 github.com/chromedp/cdproto v0.0.0-20260321001828-e3e3800016bc/go.mod h1:cbyjALe67vDvlvdiG9369P8w5U2w6IshwtyD2f2Tvag=
 github.com/chromedp/chromedp v0.15.1 h1:EJWiPm7BNqDqjYy6U0lTSL5wNH+iNt9GjC3a4gfjNyQ=

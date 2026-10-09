@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS game_studio_identity (id INTEGER PRIMARY KEY CHECK(id
 `
 
 func initializeStudio(ctx *sdk.AppCtx) error {
-	if _, err := ctx.AppDB().Exec(studioSchema); err != nil {
+	if _, err := ctx.AppDB().Exec(studioSchema + setupSchema); err != nil {
 		return err
 	}
 	_, err := ctx.AppDB().Exec(`INSERT OR IGNORE INTO game_studio_identity(id,namespace) VALUES(1,?)`, randomID())
@@ -492,7 +492,7 @@ func studioAction(ctx *sdk.AppCtx, action string, args map[string]any) (any, err
 		return nil, e
 	}
 	switch action {
-	case "source_set", "target_set", "build", "release", "promote", "halt", "rollout", "reconcile", "metric_source_set", "metrics_sync", "store_update":
+	case "setup", "setup_reconcile", "recipe_save", "source_pin", "configure", "source_set", "target_set", "build", "release", "promote", "halt", "rollout", "reconcile", "metric_source_set", "metrics_sync", "store_update":
 		if e = checkActiveGame(ctx.AppDB(), s); e != nil {
 			return nil, e
 		}
@@ -508,6 +508,20 @@ func studioAction(ctx *sdk.AppCtx, action string, args map[string]any) (any, err
 		return linksList(ctx, s, "target")
 	case "history":
 		return studioHistory(ctx, s, boundedArg(args, "limit", 25, 1, 100), boundedArg(args, "offset", 0, 0, 100000))
+	case "setup_options":
+		return studioSetupOptions(ctx, s)
+	case "setup_history":
+		return setupHistory(ctx, s)
+	case "setup":
+		return studioSetup(ctx, s, args)
+	case "setup_reconcile":
+		return studioSetupReconcile(ctx, s, args)
+	case "recipe_save":
+		return recipeSave(ctx, s, args)
+	case "source_pin":
+		return studioPin(ctx, s, args)
+	case "configure":
+		return studioConfigure(ctx, s, args)
 	case "build", "release", "promote", "halt", "rollout":
 		return studioDispatch(ctx, s, action, args)
 	case "reconcile":
@@ -557,6 +571,7 @@ func studioAction(ctx *sdk.AppCtx, action string, args map[string]any) (any, err
 					out["store_error"] = err.Error()
 				}
 			}
+			out["readiness"] = studioReadiness(ctx, s, link, out, args)
 			return out, nil
 		}
 		if action == "release_sync" {
@@ -637,7 +652,7 @@ func studioPortfolio(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 func (a *App) handleStudio(w http.ResponseWriter, r *http.Request) {
 	args := map[string]any{}
 	action := r.PathValue("action")
-	if r.Method == "GET" && !(action == "portfolio" || action == "sources" || action == "targets" || action == "history" || action == "release_status" || action == "release_plan" || action == "store_get" || action == "metric_sources" || action == "metrics_query" || action == "discovery" || action == "logs") {
+	if r.Method == "GET" && !(action == "setup_options" || action == "setup_history" || action == "portfolio" || action == "sources" || action == "targets" || action == "history" || action == "release_status" || action == "release_plan" || action == "store_get" || action == "metric_sources" || action == "metrics_query" || action == "discovery" || action == "logs") {
 		httpErr(w, 405, "use POST for this action")
 		return
 	}
@@ -658,12 +673,12 @@ func (a *App) handleStudio(w http.ResponseWriter, r *http.Request) {
 	}
 	args["_project_id"] = p
 	args["game_id"] = r.PathValue("game_id")
-	for _, k := range []string{"target_id", "source_id", "app"} {
+	for _, k := range []string{"target_id", "source_id", "app", "channel"} {
 		if v := r.URL.Query().Get(k); v != "" {
 			args[k] = v
 		}
 	}
-	for _, k := range []string{"limit", "offset"} {
+	for _, k := range []string{"limit", "offset", "build_id", "release_id"} {
 		if v, e := strconv.Atoi(r.URL.Query().Get(k)); e == nil {
 			args[k] = v
 		}
@@ -677,6 +692,13 @@ func (a *App) handleStudio(w http.ResponseWriter, r *http.Request) {
 }
 func studioTools() []sdk.Tool {
 	specs := []struct{ name, action, description string }{
+		{"games_setup_options", "setup_options", "Discover recipes, repositories and configured Deploy runners without exposing credentials."},
+		{"games_setup", "setup", "Configure a game deployment with durable setup progress. Requires request_key and setup."},
+		{"games_setup_history", "setup_history", "Read saved setup progress and exact created resource IDs."},
+		{"games_setup_reconcile", "setup_reconcile", "Resolve uncertain setup with verified receipt or confirm no resource was created."},
+		{"games_recipe_save", "recipe_save", "Save an immutable reusable project build recipe version."},
+		{"games_source_pin", "source_pin", "Capture an immutable Code source snapshot for a sibling dependency."},
+		{"games_target_configure", "configure", "Apply a recipe and configured runner to an existing game target in Deploy."},
 		{"games_source_set", "source_set", "Link an existing Code repository to this game."}, {"games_sources_list", "sources", "List this game's source links."},
 		{"games_target_set", "target_set", "Link an existing Deploy environment to the game's source."}, {"games_targets_list", "targets", "List this game's platform targets."},
 		{"games_release_plan", "release_plan", "Read target configuration, build evidence and store readiness."}, {"games_build", "build", "Request a build once using request_key; unknown results require reconciliation."},
@@ -705,6 +727,8 @@ func studioTools() []sdk.Tool {
 		props["submit_for_review"] = map[string]any{"type": "boolean"}
 		props["release_notes"] = map[string]any{"type": "object"}
 		props["config"] = map[string]any{"type": "object"}
+		props["setup"] = map[string]any{"type": "object"}
+		props["recipe"] = map[string]any{"type": "object"}
 		props["where"] = map[string]any{"type": "object"}
 		req := []string{"game_id"}
 		if s.action == "portfolio" {

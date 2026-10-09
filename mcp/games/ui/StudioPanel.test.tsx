@@ -114,11 +114,19 @@ test("Google Play reporting maps a package and selects an exact report month", a
   let connected = false;
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = new URL(String(input), "http://local").pathname;
-    if (path.endsWith("/sources") || path.endsWith("/targets")) return reply([]);
+    if (path.endsWith("/sources") || path.endsWith("/targets"))
+      return reply([]);
     if (path.endsWith("/metric_sources"))
       return reply(
         connected
-          ? [{ id: "play-sales", provider: "google-play-developer", family: "earnings", external_id: "com.example.game" }]
+          ? [
+              {
+                id: "play-sales",
+                provider: "google-play-developer",
+                family: "earnings",
+                external_id: "com.example.game",
+              },
+            ]
           : [],
       );
     if (path.endsWith("/discovery"))
@@ -136,18 +144,40 @@ test("Google Play reporting maps a package and selects an exact report month", a
   }) as typeof fetch;
   render(<StudioPanel projectId="p" gameId="a" view="metrics" />);
   fireEvent.click(screen.getByText("Discover reporting connections"));
-  await waitFor(() => expect(screen.getByText("google-play-developer · #10")).toBeTruthy());
-  fireEvent.change(screen.getByLabelText("Reporting connection"), { target: { value: "10" } });
-  fireEvent.change(screen.getByLabelText("Android package ID"), { target: { value: "com.example.game" } });
-  fireEvent.change(screen.getByLabelText("Google Play report family"), { target: { value: "earnings" } });
+  await waitFor(() =>
+    expect(screen.getByText("google-play-developer · #10")).toBeTruthy(),
+  );
+  fireEvent.change(screen.getByLabelText("Reporting connection"), {
+    target: { value: "10" },
+  });
+  fireEvent.change(screen.getByLabelText("Android package ID"), {
+    target: { value: "com.example.game" },
+  });
+  fireEvent.change(screen.getByLabelText("Google Play report family"), {
+    target: { value: "earnings" },
+  });
   fireEvent.click(screen.getByText("Connect reporting source"));
   await waitFor(() => expect(requests.length).toBe(1));
-  expect(requests[0]).toMatchObject({ provider: "google-play-developer", external_id: "com.example.game", family: "earnings" });
-  await waitFor(() => expect(screen.getByLabelText("Exact report month (optional, YYYYMM)")).toBeTruthy());
-  fireEvent.change(screen.getByLabelText("Exact report month (optional, YYYYMM)"), { target: { value: "202608" } });
+  expect(requests[0]).toMatchObject({
+    provider: "google-play-developer",
+    external_id: "com.example.game",
+    family: "earnings",
+  });
+  await waitFor(() =>
+    expect(
+      screen.getByLabelText("Exact report month (optional, YYYYMM)"),
+    ).toBeTruthy(),
+  );
+  fireEvent.change(
+    screen.getByLabelText("Exact report month (optional, YYYYMM)"),
+    { target: { value: "202608" } },
+  );
   fireEvent.click(screen.getByText("Refresh reports"));
   await waitFor(() => expect(requests.length).toBe(2));
-  expect(requests[1]).toMatchObject({ source_id: "play-sales", month: "202608" });
+  expect(requests[1]).toMatchObject({
+    source_id: "play-sales",
+    month: "202608",
+  });
 });
 test("monetary micros retain precision beyond JavaScript safe integers", () => {
   expect(formatMicros("9007199254740993")).toBe("9007199254.740993");
@@ -196,4 +226,239 @@ test("disabled telemetry sends no request and stores no new events", async () =>
   client.track(event("x"));
   await client.flush();
   expect(client.pending).toBe(0);
+});
+
+test("guided setup creates a reviewed association without pipeline JSON", async () => {
+  let created: Record<string, any> | undefined;
+  const options = {
+    recipes: [
+      {
+        id: "kiln-ios",
+        version: "1",
+        name: "Kiln iOS",
+        platform: "ios",
+        os: "darwin",
+        prepare: [],
+        tests: [{ name: "ios-artifact" }],
+        outputs: ["Moonhorde.ipa"],
+      },
+    ],
+    repositories: [
+      { id: 1, slug: "moonhorde", name: "Moonhorde" },
+      { id: 2, slug: "kiln", name: "Kiln" },
+    ],
+    deployments: [],
+    runners: [],
+    issues: [],
+  };
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = new URL(String(input), "http://local").pathname;
+    if (path.endsWith("setup_options")) return reply(options);
+    if (path.endsWith("source_pin"))
+      return reply({
+        snapshot_id: "engine-pin",
+        source_revision: "engine-revision",
+        expires_at: "2026-10-10T10:00:00Z",
+      });
+    if (path.endsWith("/setup")) {
+      created = JSON.parse(String(init?.body));
+      return reply({
+        status: "complete",
+        stage: "association",
+        results: {
+          source: { id: 1 },
+          target: { name: "moonhorde-ios", environment: "production" },
+        },
+      });
+    }
+    return reply([]);
+  }) as typeof fetch;
+  render(<StudioPanel projectId="p" gameId="moon" view="source" />);
+  fireEvent.click(screen.getByText("Set up deployment"));
+  await waitFor(() =>
+    expect(screen.getByText("Moonhorde (moonhorde)")).toBeTruthy(),
+  );
+  fireEvent.change(screen.getByLabelText("Setup repository"), {
+    target: { value: "moonhorde" },
+  });
+  fireEvent.change(screen.getByLabelText("Deployment name"), {
+    target: { value: "moonhorde-ios" },
+  });
+  fireEvent.change(screen.getByLabelText("Capsule runner URL"), {
+    target: { value: "https://runner.example" },
+  });
+  fireEvent.change(screen.getByLabelText("Bundle ID"), {
+    target: { value: "com.moonhorde.game" },
+  });
+  fireEvent.change(screen.getByLabelText("Xcode scheme"), {
+    target: { value: "Moonhorde" },
+  });
+  // The setup and existing-target forms both expose dependencies; select the setup form.
+  fireEvent.change(screen.getAllByLabelText("Dependency repository")[0], {
+    target: { value: "kiln" },
+  });
+  fireEvent.click(screen.getAllByText("Capture dependency pin")[0]);
+  await waitFor(() =>
+    expect(screen.getByText("Use pinned dependency")).toBeTruthy(),
+  );
+  fireEvent.click(screen.getByText("Use pinned dependency"));
+  fireEvent.click(screen.getByText("Review association"));
+  expect(created).toBeUndefined();
+  fireEvent.click(screen.getByText("Confirm setup"));
+  await waitFor(() => expect(created).toBeTruthy());
+  expect(created!.setup).toMatchObject({
+    repo_slug: "moonhorde",
+    platform: "ios",
+    recipe_id: "kiln-ios",
+    runner_backend: "runner",
+    dependencies: [{ slug: "kiln", path: "engine", snapshot_id: "engine-pin" }],
+  });
+  expect(created!.setup.target_config_json).toBeUndefined();
+  expect(
+    screen.getByText("Target linked: moonhorde-ios · production"),
+  ).toBeTruthy();
+});
+
+test("readiness sends the selected build and channel and separates evidence", async () => {
+  const requests: Record<string, any>[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = new URL(String(input), "http://local").pathname;
+    if (path.endsWith("targets"))
+      return reply([
+        {
+          id: "20:production",
+          name: "Moonhorde",
+          platform: "ios",
+          environment: "production",
+        },
+      ]);
+    if (path.endsWith("release_status"))
+      return reply({
+        builds: [
+          {
+            id: 42,
+            status: "succeeded",
+            artifact_download_url: "/artifacts/42",
+            artifact_manifest_json: JSON.stringify({
+              pipeline: {
+                tests: ["ios-artifact"],
+                completed_at: "2026-10-09T10:00:00Z",
+                artifact_sha256: "digest",
+              },
+            }),
+          },
+        ],
+        releases: [],
+      });
+    if (path.endsWith("release_plan")) {
+      const a = JSON.parse(String(init?.body));
+      requests.push(a);
+      return reply({
+        readiness: {
+          build_id: a.build_id,
+          channel: a.channel,
+          checked_at: "2026-10-09T10:30:00Z",
+          checks: [
+            {
+              id: "tests",
+              name: "Artifact tests",
+              kind: "evidence",
+              status: "ready",
+              reason: "Selected build passed",
+              action: "Inspect logs",
+              evidence_at: "2026-10-09T10:00:00Z",
+            },
+          ],
+        },
+      });
+    }
+    return reply([]);
+  }) as typeof fetch;
+  render(<StudioPanel projectId="p" gameId="moon" view="releases" />);
+  await waitFor(() => expect(screen.getByText("#42 · succeeded")).toBeTruthy());
+  fireEvent.change(screen.getByLabelText("Build"), { target: { value: "42" } });
+  fireEvent.click(screen.getByText("Check readiness"));
+  await waitFor(() =>
+    expect(screen.getByLabelText("Deployment readiness")).toBeTruthy(),
+  );
+  expect(requests[0]).toMatchObject({
+    target_id: "20:production",
+    build_id: 42,
+    channel: "internal",
+  });
+  expect(
+    screen.getByText(/Build evidence · Selected build passed/),
+  ).toBeTruthy();
+  expect(
+    screen.getByText("Download build #42 artifacts").getAttribute("href"),
+  ).toBe("/artifacts/42");
+  fireEvent.change(screen.getByLabelText("Release channel"), {
+    target: { value: "production" },
+  });
+  expect(screen.queryByLabelText("Deployment readiness")).toBeNull();
+});
+
+test("partial setup edits reuse the completed repository and deployment", async () => {
+  let submitted: Record<string, any> | undefined;
+  const input = {
+    repo_slug: "moonhorde",
+    create_repo: true,
+    deployment_name: "moonhorde-ios",
+    deployment_id: 0,
+    platform: "ios",
+    environment: "production",
+  };
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    const path = new URL(String(url), "http://local").pathname;
+    if (path.endsWith("setup_options"))
+      return reply({
+        repositories: [{ slug: "moonhorde", name: "Moonhorde" }],
+        deployments: [
+          {
+            id: 7,
+            name: "moonhorde-ios",
+            target_kind: "ios",
+            environments: [{ name: "production" }],
+          },
+        ],
+        recipes: [],
+        runners: [],
+        issues: [],
+      });
+    if (path.endsWith("setup_history"))
+      return reply([
+        {
+          request_key: "original",
+          input,
+          status: "blocked",
+          stage: "association",
+          results: {
+            repository: { repository: { slug: "moonhorde" } },
+            deployment: { deployment: { id: 7 } },
+          },
+        },
+      ]);
+    if (path.endsWith("/setup")) {
+      submitted = JSON.parse(String(init?.body));
+      return reply({ status: "complete", results: {} });
+    }
+    return reply([]);
+  }) as typeof fetch;
+  render(<StudioPanel projectId="p" gameId="moon" view="source" />);
+  await waitFor(() =>
+    expect(screen.getByText("Open saved setup")).toBeTruthy(),
+  );
+  fireEvent.click(screen.getByText("Open saved setup"));
+  fireEvent.click(
+    screen.getByText("Edit remaining setup using completed resources"),
+  );
+  fireEvent.click(screen.getByText("Review association"));
+  fireEvent.click(screen.getByText("Confirm setup"));
+  await waitFor(() => expect(submitted).toBeTruthy());
+  expect(submitted!.request_key).not.toBe("original");
+  expect(submitted!.setup).toMatchObject({
+    repo_slug: "moonhorde",
+    create_repo: false,
+    deployment_id: 7,
+  });
 });

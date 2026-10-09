@@ -228,68 +228,110 @@ func qualifyCandidateContext(c context.Context, ctx *sdk.AppCtx, id int64, maxPa
 	if startURL == "" {
 		return nil, errors.New("candidate needs a website or source_url for qualification")
 	}
-	queue := []string{startURL}
-	seen := map[string]bool{}
-	queued := map[string]bool{startURL: true}
-	pages := make([]webExtractPage, 0, maxPages)
+	pages := make([]webExtractPage, 0, maxPages*2)
 	errorsByURL := map[string]string{}
-	for len(queue) > 0 && len(pages) < maxPages && len(seen) < maxPages*2 {
-		if c.Err() != nil {
-			return nil, c.Err()
-		}
-		pageURL := queue[0]
-		queue = queue[1:]
-		if seen[pageURL] {
-			continue
-		}
-		seen[pageURL] = true
-		var out webExtractOutput
-		deadline, cancel := context.WithTimeout(c, 45*time.Second)
-		callErr := sdk.CallAppResultContext(deadline, ctx.PlatformAPI(), "web", "web_extract", map[string]any{
-			"url": pageURL, "formats": []string{"links", "structured_data", "metadata", "text"},
-			"max_chars": 50000, "store": true, "snapshot": false,
-		}, &out)
-		cancel()
-		if callErr != nil {
-			errorsByURL[pageURL] = callErr.Error()
-			continue
-		}
-		page := out.Page
-		if page.URL == "" {
-			page.URL = pageURL
-		}
-		if page.Error != "" || page.Status >= 400 {
-			errorsByURL[pageURL] = defaultString(page.Error, fmt.Sprintf("HTTP %d", page.Status))
-			continue
-		}
-		pages = append(pages, page)
-		artifactID := (*int64)(nil)
-		if page.Artifact != nil && page.Artifact.ID > 0 {
-			v := page.Artifact.ID
-			artifactID = &v
-		}
-		_ = addEvidence(ctx.AppDB(), pid, Evidence{
-			CandidateID: id, SourceKind: "web_extract", Title: page.Title, URL: defaultString(page.FinalURL, page.URL),
-			Excerpt: qualificationExcerpt(page), ArtifactID: artifactID, RetrievedAt: nowUTC(),
-		})
-		links := selectQualificationLinks(page, candidate.CompanyDomain, maxPages*2)
-		toAdd := make([]string, 0, len(links)+1)
-		for _, link := range links {
-			if !seen[link] && !queued[link] {
-				queued[link] = true
-				toAdd = append(toAdd, link)
+	var browserID string
+	defer func() {
+		if browserID != "" {
+			cleanup, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			var out map[string]any
+			if err := sdk.CallAppResultContext(cleanup, ctx.PlatformAPI(), "web", "web_session_close", map[string]any{"session_id": browserID}, &out); err != nil {
+				ctx.Logger().Warn("qualification browser cleanup failed", "session_id", browserID, "err", err.Error())
 			}
 		}
-		if len(pages) == 1 {
-			if root := rootURL(defaultString(candidate.Website, startURL)); root != "" && !seen[root] && !queued[root] {
-				queued[root] = true
-				toAdd = append(toAdd, root)
+	}()
+	// Public source is cheap and preserves contacts in footers/legal notices.
+	// Render only when the bounded source crawl did not find a suitable mailbox.
+	for _, sourceOnly := range []bool{true, false} {
+		if qualificationContactComplete(pages, candidate.CompanyDomain, profile) {
+			break
+		}
+		queue := []string{startURL}
+		seen, queued := map[string]bool{}, map[string]bool{qualificationURLKey(startURL): true}
+		attempts := map[string]int{}
+		successes, calls := 0, 0
+		for len(queue) > 0 && successes < maxPages && calls < maxPages*2 {
+			if c.Err() != nil {
+				return nil, c.Err()
 			}
-			// Contact/team/about links from the search result page are more
-			// likely to contain identity and contact facts than its homepage.
-			queue = append(toAdd, queue...)
-		} else {
-			queue = append(queue, toAdd...)
+			pageURL := queue[0]
+			queue = queue[1:]
+			key := qualificationURLKey(pageURL)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			attempts[key]++
+			calls++
+			args := map[string]any{"url": pageURL, "formats": []string{"links", "structured_data", "metadata", "text"}, "max_chars": 50000, "readability": false, "store": true, "snapshot": false, "source_only": sourceOnly}
+			if !sourceOnly {
+				args["keep_session"] = true
+				if browserID != "" {
+					args["session_id"] = browserID
+				}
+			}
+			var out webExtractOutput
+			deadline, cancel := context.WithTimeout(c, 45*time.Second)
+			callErr := sdk.CallAppResultContext(deadline, ctx.PlatformAPI(), "web", "web_extract", args, &out)
+			cancel()
+			if out.Page.Browser != nil && out.Page.Browser.SessionID != "" {
+				browserID = out.Page.Browser.SessionID
+			}
+			if callErr == nil && (out.Page.Error != "" || out.Page.Status >= 400) {
+				callErr = fmt.Errorf("%s", defaultString(out.Page.Error, fmt.Sprintf("HTTP %d", out.Page.Status)))
+			}
+			if callErr != nil {
+				errorsByURL[pageURL] = callErr.Error()
+				if containsAny(strings.ToLower(callErr.Error()), []string{"permission denied", "not authorized"}) {
+					return nil, callErr
+				}
+				if attempts[key] == 1 && transientQualificationError(callErr.Error()) {
+					delete(seen, key)
+					queue = append(queue, pageURL)
+				} else if strings.Contains(callErr.Error(), "ERR_CERT_COMMON_NAME_INVALID") || strings.Contains(callErr.Error(), "certificate is valid for") {
+					if u, err := url.Parse(pageURL); err == nil && u.Scheme == "https" && !strings.HasPrefix(u.Hostname(), "www.") {
+						u.Host = "www." + u.Host
+						if alt := u.String(); !queued[qualificationURLKey(alt)] {
+							queued[qualificationURLKey(alt)] = true
+							queue = append(queue, alt)
+						}
+					}
+				}
+				continue
+			}
+			page := out.Page
+			if page.URL == "" {
+				page.URL = pageURL
+			}
+			seen[qualificationURLKey(defaultString(page.FinalURL, page.URL))] = true
+			delete(errorsByURL, pageURL)
+			pages = append(pages, page)
+			successes++
+			var artifactID *int64
+			if page.Artifact != nil && page.Artifact.ID > 0 {
+				v := page.Artifact.ID
+				artifactID = &v
+			}
+			kind := "web_extract"
+			if sourceOnly {
+				kind = "web_source"
+			}
+			_ = addEvidence(ctx.AppDB(), pid, Evidence{CandidateID: id, SourceKind: kind, Title: page.Title, URL: defaultString(page.FinalURL, page.URL), Excerpt: qualificationExcerpt(page), ArtifactID: artifactID, RetrievedAt: nowUTC()})
+			if qualificationContactComplete(pages, candidate.CompanyDomain, profile) {
+				break
+			}
+			links := selectQualificationLinks(page, candidate.CompanyDomain, maxPages*2, true)
+			if successes == 1 {
+				links = append(links, rootURL(defaultString(page.FinalURL, startURL)))
+			}
+			for _, link := range links {
+				k := qualificationURLKey(link)
+				if link != "" && !seen[k] && !queued[k] {
+					queued[k] = true
+					queue = append(queue, link)
+				}
+			}
 		}
 	}
 	if len(pages) == 0 {
@@ -297,6 +339,11 @@ func qualifyCandidateContext(c context.Context, ctx *sdk.AppCtx, id int64, maxPa
 	}
 	original := *candidate
 	applyDeterministicQualification(profile, candidate, pages)
+	if original.Source == "google_places" {
+		candidate.Location = original.Location
+		candidate.Website, candidate.CompanyDomain = original.Website, original.CompanyDomain
+		candidate.CompanyName = original.CompanyName
+	}
 	preserveOperatorFields(candidate, &original)
 	updated, err := saveCandidateQualification(ctx.AppDB(), pid, candidate)
 	if err != nil {
@@ -364,12 +411,16 @@ func qualifyBatch(ctx *sdk.AppCtx, profileID int64, status string, limit, maxPag
 	return map[string]any{"results": results, "processed": len(results), "qualified": qualified, "rejected": rejected, "failed": failed, "skipped_enriched": skippedEnriched}, nil
 }
 
+func transientQualificationError(message string) bool {
+	return containsAny(strings.ToLower(message), []string{"deadline exceeded", "timeout", "timed out", "http 429", "http 502", "http 503", "http 504", "connection reset", "unexpected eof"})
+}
+
 func qualificationExcerpt(page webExtractPage) string {
 	text := compactWhitespace(defaultString(page.Description, page.Text))
 	return truncate(text, 700)
 }
 
-func selectQualificationLinks(page webExtractPage, domain string, limit int) []string {
+func selectQualificationLinks(page webExtractPage, domain string, limit int, needEmail bool) []string {
 	if limit <= 0 {
 		return nil
 	}
@@ -381,18 +432,36 @@ func selectQualificationLinks(page webExtractPage, domain string, limit int) []s
 	ranked := []rankedLink{}
 	for i, link := range page.Links {
 		resolved := resolvePageLink(defaultString(page.FinalURL, page.URL), link.URL)
+		parsed, err := url.Parse(resolved)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil {
+			continue
+		}
 		website, linkDomain := normalizeWebsite(resolved)
 		if website == "" || linkDomain == "" || (domain != "" && linkDomain != domain) {
 			continue
 		}
-		haystack := strings.ToLower(link.Text + " " + website)
+		// Fragment-only contact anchors have already been extracted with the body.
+		if qualificationURLKey(website) == qualificationURLKey(defaultString(page.FinalURL, page.URL)) {
+			continue
+		}
+		haystack := qualificationLinkText(link.Text + " " + website)
 		rank := 0
 		switch {
 		case containsAny(haystack, []string{"contact", "contact us", "get in touch", "location"}):
 			rank = 100
+		case containsAny(haystack, []string{"mentions legales", "mentions-legales", "legal", "politique", "impressum"}):
+			if !needEmail {
+				continue
+			}
+			rank = 95
+			if containsAny(haystack, []string{"cookie", "confidentialite", "privacy"}) {
+				rank = 60
+			}
+		case containsAny(haystack, []string{"reservation", "reserver", "test-resa", "booking", "informations pratiques"}):
+			rank = 92
 		case containsAny(haystack, []string{"team", "staff", "meet", "doctor", "dentist", "leadership", "owner"}):
 			rank = 90
-		case containsAny(haystack, []string{"about", "our practice", "our office"}):
+		case containsAny(haystack, []string{"about", "our practice", "our office", "a propos", "a-propos", "qui sommes"}):
 			rank = 80
 		case containsAny(haystack, []string{"appointment", "new patient", "patient form", "insurance"}):
 			rank = 70
@@ -410,16 +479,24 @@ func selectQualificationLinks(page webExtractPage, domain string, limit int) []s
 	seen := map[string]bool{}
 	out := make([]string, 0, limit)
 	for _, item := range ranked {
-		if seen[item.URL] {
+		if seen[qualificationURLKey(item.URL)] {
 			continue
 		}
-		seen[item.URL] = true
+		seen[qualificationURLKey(item.URL)] = true
 		out = append(out, item.URL)
 		if len(out) >= limit {
 			break
 		}
 	}
 	return out
+}
+
+func qualificationLinkText(text string) string {
+	decoded, err := url.QueryUnescape(text)
+	if err == nil {
+		text = decoded
+	}
+	return strings.NewReplacer("é", "e", "è", "e", "ê", "e", "à", "a", "ô", "o").Replace(strings.ToLower(text))
 }
 
 func resolvePageLink(base, href string) string {
@@ -571,15 +648,24 @@ func extractBestEmail(pages []webExtractPage, domain string) string {
 	}
 	candidates := []rankedEmail{}
 	order := 0
-	add := func(raw string, score int) {
+	add := func(raw string, score int, publishedContact bool) {
 		email := normalizeQualifiedEmail(raw, domain)
-		if email == "" || containsAny(email, []string{"example.com", "sentry.io", "wixpress.com", "noreply@", "no-reply@", "privacy@", "abuse@"}) {
+		if email == "" && publishedContact && businessMailboxMatchesDomain(raw, domain) {
+			email = normalizeQualifiedEmail(raw, "")
+		}
+		if email == "" || containsAny(email, []string{"example.com", "sentry.io", "wixpress.com", "noreply@", "no-reply@", "privacy@", "abuse@", "presse@", "press@", "dpo@", "rgpd@", "webmaster@", "support@"}) {
 			return
 		}
 		if domain != "" && strings.HasSuffix(email, "@"+domain) {
 			score += 100
 		}
 		local := strings.SplitN(email, "@", 2)[0]
+		if unrelatedEmailContext(local) {
+			return
+		}
+		if containsAny(local, []string{"food", "restaurant", "reservation", "booking", "commercial"}) {
+			score += 60
+		}
 		if containsAny(local, []string{"info", "contact", "office", "hello", "reception", "frontdesk", "schedule", "appointment", "admin"}) {
 			score += 20
 		}
@@ -587,18 +673,72 @@ func extractBestEmail(pages []webExtractPage, domain string) string {
 		order++
 	}
 	for _, page := range pages {
+		// Preserve occurrence context before links and flattened metadata can
+		// reintroduce addresses published only in vendor/recruitment credits.
+		text := emailExtractionText(page.Text, domain)
+		blocked, allowed := map[string]bool{}, map[string]bool{}
+		previousEnd := 0
+		for _, match := range emailPattern.FindAllStringIndex(text, -1) {
+			start := strings.LastIndex(text[:match[0]], "\n") + 1
+			for _, boundary := range []string{". ", "! ", "? "} {
+				if end := strings.LastIndex(text[:match[0]], boundary); end >= start {
+					start = end + len(boundary)
+				}
+			}
+			if previousEnd > start {
+				start = previousEnd
+			}
+			if match[0]-start > 180 {
+				start = match[0] - 180
+			}
+			raw := strings.ToLower(text[match[0]:match[1]])
+			if unrelatedEmailContext(text[start:match[0]]) {
+				blocked[raw] = true
+			} else {
+				allowed[raw] = true
+			}
+			previousEnd = match[1]
+		}
+		pageAdd := func(raw string, score int, publishedContact bool) {
+			key := strings.ToLower(raw)
+			if blocked[key] && !allowed[key] {
+				return
+			}
+			add(raw, score, publishedContact)
+		}
 		pageScore := 0
 		if containsAny(strings.ToLower(page.URL+" "+page.FinalURL+" "+page.Title), []string{"contact", "location", "appointment"}) {
 			pageScore = 20
 		}
+		_, pageDomain := normalizeWebsite(defaultString(page.FinalURL, page.URL))
+		firstParty := domain != "" && pageDomain == domain
 		for _, link := range page.Links {
 			if strings.HasPrefix(strings.ToLower(link.URL), "mailto:") {
-				add(strings.TrimPrefix(strings.Split(link.URL, "?")[0], "mailto:"), 80+pageScore)
+				label := qualificationLinkText(link.Text)
+				if unrelatedEmailContext(label) {
+					continue
+				}
+				pageAdd(link.URL[len("mailto:"):strings.Index(link.URL+"?", "?")], 80+pageScore, firstParty)
 			}
 		}
-		corpus := deobfuscateEmailText(strings.Join([]string{page.Text, page.Description, metadataText(page.Metadata), structuredDataText(page.StructuredData)}, " "))
+		if firstParty {
+			// A restaurant entity tied to this page identifies its own mailbox,
+			// even when the hotel's generic reservation link is in the footer.
+			for _, raw := range restaurantEntityEmails(page.StructuredData, defaultString(page.FinalURL, page.URL)) {
+				pageAdd(raw, 180+pageScore, true)
+			}
+			for _, line := range nonEmptyLines(emailExtractionText(page.Text, domain)) {
+				if unrelatedEmailContext(qualificationLinkText(line)) {
+					continue
+				}
+				for _, raw := range emailPattern.FindAllString(line, -1) {
+					pageAdd(raw, 40+pageScore, pageScore > 0 || containsAny(qualificationLinkText(line), []string{"email", "e-mail", "courriel", "contact", "reservation"}))
+				}
+			}
+		}
+		corpus := emailExtractionText(strings.Join([]string{page.Text, page.Description, metadataText(page.Metadata), structuredDataText(page.StructuredData)}, " "), domain)
 		for _, raw := range emailPattern.FindAllString(corpus, -1) {
-			add(raw, 40+pageScore)
+			pageAdd(raw, 40+pageScore, false)
 		}
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
@@ -611,6 +751,58 @@ func extractBestEmail(pages []webExtractPage, domain string) string {
 		return candidates[0].Value
 	}
 	return ""
+}
+
+// A named business mailbox published on the business's own page can belong
+// to its parent group. Generic group and vendor addresses still need review.
+func businessMailboxMatchesDomain(raw, domain string) bool {
+	email := normalizeQualifiedEmail(raw, "")
+	if email == "" || domain == "" {
+		return false
+	}
+	local := strings.SplitN(email, "@", 2)[0]
+	if unrelatedEmailContext(local) {
+		return false
+	}
+	host := strings.Split(strings.TrimPrefix(strings.ToLower(domain), "www."), ".")[0]
+	for _, term := range strings.FieldsFunc(host, func(r rune) bool { return r == '-' || r == '_' }) {
+		term = strings.TrimPrefix(strings.TrimPrefix(term, "restaurant"), "hotel")
+		if len(term) < 4 || containsAny(term, []string{"restaurant", "hotel", "paris", "lyon", "france", "group", "bistro", "cafe"}) {
+			continue
+		}
+		for _, mailboxTerm := range strings.FieldsFunc(local, func(r rune) bool { return r == '.' || r == '-' || r == '_' || r == '+' }) {
+			if mailboxTerm == term {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func emailExtractionText(text, domain string) string {
+	// Body text can join a mailbox and the next French/English label without
+	// whitespace. Split after a known first-party domain before matching emails.
+	parts := strings.Split(domain, ".")
+	for len(parts) >= 2 {
+		pattern := regexp.MustCompile("((?i:" + regexp.QuoteMeta(strings.Join(parts, ".")) + "))([A-ZÀ-ÖØ-Ý])")
+		text = pattern.ReplaceAllString(text, "${1} ${2}")
+		parts = parts[1:]
+	}
+	return deobfuscateEmailText(text)
+}
+
+func unrelatedEmailContext(text string) bool {
+	text = qualificationLinkText(text)
+	if containsAny(text, []string{"web design", "site by"}) {
+		return true
+	}
+	for _, word := range strings.FieldsFunc(text, func(r rune) bool { return !unicode.IsLetter(r) }) {
+		switch word {
+		case "candidat", "candidate", "candidature", "recrutement", "recruitment", "recruiting", "careers", "jobs", "rh", "hr", "presse", "press", "privacy", "rgpd", "dpo", "webmaster", "webdesign", "agence", "agency", "hebergeur", "hebergement", "hosting", "realisation", "developpement", "development", "developer", "photographe", "photographer", "support", "event", "events", "evenement", "evenements":
+			return true
+		}
+	}
+	return false
 }
 
 var publicMailboxDomains = map[string]bool{
@@ -630,8 +822,19 @@ func normalizeQualifiedEmail(raw, targetDomain string) string {
 	// recognized mailbox suffix, but never retain the concatenated prefix.
 	for _, mailbox := range []string{"appointments", "appointment", "reception", "frontdesk", "contact", "office", "hello", "schedule", "admin", "info"} {
 		if len(local) > len(mailbox) && strings.HasSuffix(local, mailbox) {
-			local = mailbox
-			break
+			prefix := strings.TrimSuffix(local, mailbox)
+			// Only repair phone-like prefixes. Named mailboxes such as
+			// albert.contact must remain intact, including at a parent group.
+			digits := strings.Map(func(r rune) rune {
+				if r >= '0' && r <= '9' {
+					return r
+				}
+				return -1
+			}, prefix)
+			if len(digits) >= 7 {
+				local = mailbox
+				break
+			}
 		}
 	}
 	if len(local) > 32 || regexp.MustCompile(`\d{5,}`).MatchString(local) {
@@ -777,6 +980,36 @@ func structuredDataText(value any) string {
 	}
 	walk(value)
 	return strings.Join(parts, " ")
+}
+
+func restaurantEntityEmails(value any, pageURL string) []string {
+	values := []string{}
+	var walk func(any)
+	walk = func(item any) {
+		switch typed := item.(type) {
+		case map[string]any:
+			types := structuredDataText(typed["@type"])
+			entityURL, _ := typed["url"].(string)
+			isRestaurant := false
+			for _, kind := range strings.Fields(types) {
+				if kind == "Restaurant" || kind == "https://schema.org/Restaurant" || kind == "http://schema.org/Restaurant" {
+					isRestaurant = true
+				}
+			}
+			if isRestaurant && entityURL != "" && qualificationURLKey(entityURL) == qualificationURLKey(pageURL) {
+				values = append(values, emailPattern.FindAllString(structuredDataText(typed["email"]), -1)...)
+			}
+			for _, child := range typed {
+				walk(child)
+			}
+		case []any:
+			for _, child := range typed {
+				walk(child)
+			}
+		}
+	}
+	walk(value)
+	return values
 }
 
 func structuredPhoneValues(value any) []string {
@@ -1184,6 +1417,26 @@ func titleWords(value string) string {
 		parts[i] = string(runes)
 	}
 	return strings.Join(parts, " ")
+}
+
+// Contact crawling treats slash variants and fragments as the same document.
+func qualificationContactComplete(pages []webExtractPage, domain string, profile *TargetProfile) bool {
+	if extractBestEmail(pages, domain) == "" {
+		return false
+	}
+	return len(profile.TargetTitles) == 0 || extractDecisionMaker(pages, profile.TargetTitles).DisplayName != ""
+}
+
+func qualificationURLKey(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	u.Fragment = ""
+	u.Scheme, u.Host = strings.ToLower(u.Scheme), strings.ToLower(u.Host)
+	u.Path = strings.TrimRight(u.Path, "/")
+	u.RawPath = ""
+	return u.String()
 }
 
 func rootURL(raw string) string {

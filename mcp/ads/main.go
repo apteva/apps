@@ -22,6 +22,7 @@ package main
 
 import (
 	"database/sql"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,58 +39,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const manifestYAML = `schema: apteva-app/v1
-name: ads
-display_name: Ads
-version: 0.1.46
-scopes: [project, global]
-requires:
-  permissions:
-    - db.write.app
-    - net.egress
-    - platform.connections.execute
-    - platform.oauth.start
-    - platform.apps.call
-  apps:
-    - name: storage
-      version: ">=0.1.0"
-      optional: true
-      reason: "Resolve stored image and video files for creative uploads."
-    - name: crm
-      version: ">=0.5.0"
-      optional: true
-      reason: "Resolve saved CRM segments for privacy-safe audience member sync."
-provides:
-  http_routes:
-    - prefix: /
-  workers:
-    - name: performance_collector
-      schedule: "@every 1m"
-  publishes:
-    - name: account.changed
-      description: "An ad-account binding was added or removed."
-    - name: entity.changed
-      description: "A campaign, ad group, or ad was created, updated, or deleted."
-    - name: performance.updated
-      description: "Normalized performance cache was refreshed for an account and level."
-    - name: performance.sync_failed
-      description: "A performance refresh failed and was scheduled for retry."
-    - name: tracking_source.created
-      description: "A provider tracking source was created and normalized."
-db:
-  driver: sqlite
-  path: /data/ads.db
-  migrations: migrations/
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: ads/v0.1.46
-    entry: mcp/ads
-  port: 8080
-  health_check: /health
-upgrade_policy: auto-patch
-`
+//go:embed apteva.yaml
+var manifestYAML string
 
 // platformDef captures per-network metadata. Behavior lives in the
 // platformAdapter implementations below so platform-specific API
@@ -322,6 +273,8 @@ var platformAdapters = map[string]platformAdapter{
 var globalCtx *sdk.AppCtx
 
 type App struct {
+	createDispatches sync.Map // per-call contexts; never global request state
+
 	retryDelay        func(retry int) time.Duration
 	sleep             func(ctx *sdk.AppCtx, delay time.Duration) bool
 	analyticsMu       sync.Mutex
@@ -492,7 +445,7 @@ setTimeout(function(){ window.location.href = "/apps/ads/page?project_id=%s&pend
 // ─── MCP tools ──────────────────────────────────────────────────────
 
 func (a *App) MCPTools() []sdk.Tool {
-	return []sdk.Tool{
+	return a.extendConversionTools([]sdk.Tool{
 		// ── Accounts ──
 		{
 			Name: "account_add",
@@ -1508,7 +1461,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"ad_account_id", "name", "source_audience_id", "country"}),
 			Handler: a.toolAudienceCreateLookalike,
 		},
-	}
+	})
 }
 
 // ─── Account tools ──────────────────────────────────────────────────
@@ -2471,16 +2424,24 @@ func safeProviderID(value string) bool {
 	return true
 }
 
-func (a *App) toolCampaignCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolCampaignCreateOnce(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+
+	args, errOut = a.prepareMobileArgs(ctx, acct, args, "campaign")
 	if errOut != nil {
 		return errOut, nil
 	}
 	out, err := platformAdapters[acct.Platform].CampaignCreate(a, ctx, acct, def, args)
 	if err == nil && successfulProviderResult(out) {
 		if id := createdProviderID(out, "campaign"); id != "" {
-			campaign := cloneMap(args)
+			campaign := mobilePublicArgs(args)
 			campaign["id"] = id
+			if err := a.persistMobileCampaign(ctx, acct, id, args); err != nil {
+				return nil, err
+			}
 			if persistErr := a.upsertManagedCampaign(ctx, acct, campaign, "created"); persistErr != nil {
 				return nil, persistErr
 			}
@@ -2555,6 +2516,13 @@ func (a *App) toolCampaignUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	acct, def, errOut := a.resolveAdAccount(ctx, args)
 	if errOut != nil {
 		return errOut, nil
+	}
+
+	if mobileActivationRequested(args) {
+		campaignID := firstString(args, "campaign_id")
+		if out := a.checkMobileActivation(ctx, acct, args, campaignID); out != nil {
+			return out, nil
+		}
 	}
 	if scopeErr := a.requireManagedCampaign(ctx, acct, stringArgAny(args, "campaign_id")); scopeErr != nil {
 		return scopeErr, nil
@@ -3652,6 +3620,9 @@ func (googleAdapter) CampaignPerformance(a *App, ctx *sdk.AppCtx, acct *adAccoun
 }
 
 func (googleAdapter) CampaignCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	if strings.EqualFold(stringArgAny(args, "channel_type"), "app") {
+		return a.googleAppCampaignCreate(ctx, acct, args)
+	}
 	name, _ := args["name"].(string)
 	if name == "" {
 		return mcpError("name required"), nil
@@ -4027,6 +3998,21 @@ func (googleAdapter) AdSetCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *
 			}
 		}
 	}
+	if intArg(args, "mobile_app_resource_id", 0) > 0 {
+		app, _ := args["_mobile_app"].(*adResource)
+		appCampaign, out := a.googleCampaignIsApp(ctx, acct, cid, app)
+		if out != nil {
+			return out, nil
+		}
+		if !appCampaign {
+			return mcpError("mobile ad group requires an App campaign"), nil
+		}
+		for _, field := range []string{"type", "cpcBidMicros", "cpc_bid_micros", "targetCpaMicros", "target_cpa_micros"} {
+			if adGroup[field] != nil {
+				return mcpError("App install campaign ad groups cannot override type or bidding"), nil
+			}
+		}
+	}
 	return a.execOrErr(ctx, acct, def.AdSetCreateTool, map[string]any{
 		"customer_id": acct.NativeAccountID,
 		"operations":  []any{map[string]any{"create": adGroup}},
@@ -4116,6 +4102,19 @@ func (googleAdapter) AdCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pla
 	}
 	ad, _ := opts["ad"].(map[string]any)
 	asid, _ := args["adset_id"].(string)
+	if stringArgAny(args, "ad_format") == "app" {
+		if len(ad) > 0 || len(opts) > 0 {
+			return mcpError("app ads use normalized assets; native overrides conflict with ad_format=app"), nil
+		}
+		built, err := googleAppAd(args, acct.NativeAccountID)
+		if err != nil {
+			return mcpError(err.Error()), nil
+		}
+		ad = built
+		if out := a.validateGoogleAppAdParent(ctx, acct, asid, args); out != nil {
+			return out, nil
+		}
+	}
 	if len(ad) == 0 && responsiveSearchAdRequested(args) {
 		built, rsaErr := googleResponsiveSearchAd(args)
 		if rsaErr != nil {
@@ -4284,7 +4283,30 @@ func (googleAdapter) CreativeUpload(a *App, ctx *sdk.AppCtx, acct *adAccount, de
 	opts, _ := args["platform_options"].(map[string]any)
 	asset, _ := opts["asset"].(map[string]any)
 	if len(asset) == 0 {
-		return mcpError("google creative_upload requires platform_options.asset with a native Google Ads asset create payload"), nil
+		source, out := resolveSourceURL(ctx, args)
+		if out != nil {
+			return out, nil
+		}
+		switch firstString(args, "kind") {
+		case "image":
+			data, err := fetchAsDataURL(source, 5*1024*1024)
+			if err != nil {
+				return mcpError(err.Error()), nil
+			}
+			_, encoded, ok := strings.Cut(data, ",")
+			if !ok {
+				return mcpError("image data could not be encoded"), nil
+			}
+			asset = map[string]any{"imageAsset": map[string]any{"data": encoded}}
+		case "video":
+			id, err := googleYouTubeID(source)
+			if err != nil {
+				return mcpError(err.Error()), nil
+			}
+			asset = map[string]any{"youtubeVideoAsset": map[string]any{"youtubeVideoId": id}}
+		default:
+			return mcpError("Google creative_upload requires kind=image or a YouTube video URL, or native platform_options.asset"), nil
+		}
 	}
 	if name, _ := args["name"].(string); name != "" {
 		asset["name"] = name
@@ -4349,8 +4371,13 @@ func (googleAdapter) AudienceCreateLookalike(a *App, ctx *sdk.AppCtx, acct *adAc
 	return mcpError("google audience_create_lookalike is not exposed as a generic operation; use audience_create_custom with platform_options.user_list"), nil
 }
 
-func (a *App) toolAdSetCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolAdSetCreateOnce(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+
+	args, errOut = a.prepareMobileArgs(ctx, acct, args, "ad_group")
 	if errOut != nil {
 		return errOut, nil
 	}
@@ -4386,7 +4413,10 @@ func (a *App) toolAdSetCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err == nil && successfulProviderResult(out) {
 		if id := createdProviderID(out, "ad_group"); id != "" {
 			annotateCreatedID(out, id)
-			row := cloneMap(args)
+			if persistErr := a.persistMobileCampaign(ctx, acct, campaignID, args); persistErr != nil {
+				return nil, persistErr
+			}
+			row := mobilePublicArgs(args)
 			row["id"] = id
 			if persistErr := a.upsertDeliveryEntities(ctx, acct, "ad_group", []map[string]any{row}, campaignID); persistErr != nil {
 				return nil, persistErr
@@ -4433,6 +4463,16 @@ func (a *App) toolAdSetUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if errOut != nil {
 		return errOut, nil
 	}
+
+	if mobileActivationRequested(args) {
+		campaignID := firstString(args, "campaign_id")
+		if campaignID == "" {
+			campaignID, _ = a.campaignIDForEntity(ctx, acct, "ad_group", firstString(args, "adset_id"))
+		}
+		if out := a.checkMobileActivation(ctx, acct, args, campaignID); out != nil {
+			return out, nil
+		}
+	}
 	if scopeErr := a.requireManagedEntity(ctx, acct, def, "ad_group", stringArgAny(args, "adset_id")); scopeErr != nil {
 		return scopeErr, nil
 	}
@@ -4460,8 +4500,13 @@ func (a *App) toolAdSetDelete(ctx *sdk.AppCtx, args map[string]any) (any, error)
 
 // ─── Ad tools ───────────────────────────────────────────────────────
 
-func (a *App) toolAdCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolAdCreateOnce(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+
+	args, errOut = a.prepareMobileArgs(ctx, acct, args, "ad")
 	if errOut != nil {
 		return errOut, nil
 	}
@@ -4477,7 +4522,7 @@ func (a *App) toolAdCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err == nil && successfulProviderResult(out) {
 		if id := createdProviderID(out, "ad"); id != "" {
 			annotateCreatedID(out, id)
-			row := cloneMap(args)
+			row := mobilePublicArgs(args)
 			row["id"] = id
 			row["adset_id"] = adSetID
 			if persistErr := a.upsertDeliveryEntities(ctx, acct, "ad", []map[string]any{row}, campaignID); persistErr != nil {
@@ -4526,6 +4571,16 @@ func (a *App) toolAdUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if errOut != nil {
 		return errOut, nil
 	}
+
+	if mobileActivationRequested(args) {
+		campaignID := firstString(args, "campaign_id")
+		if campaignID == "" {
+			campaignID, _ = a.campaignIDForEntity(ctx, acct, "ad", firstString(args, "ad_id"))
+		}
+		if out := a.checkMobileActivation(ctx, acct, args, campaignID); out != nil {
+			return out, nil
+		}
+	}
 	if scopeErr := a.requireManagedEntity(ctx, acct, def, "ad", stringArgAny(args, "ad_id")); scopeErr != nil {
 		return scopeErr, nil
 	}
@@ -4556,8 +4611,13 @@ func (a *App) toolAdDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 // ─── Creative tools ────────────────────────────────────────────────
 
-func (a *App) toolCreativeCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolCreativeCreateOnce(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+
+	args, errOut = a.prepareMobileArgs(ctx, acct, args, "creative")
 	if errOut != nil {
 		return errOut, nil
 	}
@@ -4621,7 +4681,7 @@ func (a *App) toolCreativeCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 			creativeID = createdProviderID(out, "creative")
 		}
 		if creativeID != "" {
-			creative := cloneMap(args)
+			creative := mobilePublicArgs(args)
 			creative["id"] = creativeID
 			if persistErr := a.upsertManagedCreative(ctx, acct, creative, "", "created"); persistErr != nil {
 				return nil, persistErr

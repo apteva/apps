@@ -60,12 +60,14 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.93
+version: 0.7.95
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.93 shows live sessions
-  first, loads past sessions on demand in pages, folds browser settings away
-  from the session list, and supports bounded rendered DOM responses up to 1 MB
-  for large structured crawls.
+  v0.7.95 adds an opt-in extraction lifecycle that skips automatic final
+  screenshots while preserving provider release, history and usage accounting.
+  Watch, steer, and replay hosted browser sessions. v0.7.94 preserves headers,
+  footers and sidebars when readability is disabled, and retains mailto and tel
+  links in rendered DOM extraction. Existing browser controls and media upload
+  behavior are preserved.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
 icon: /ui/icon.svg
@@ -317,6 +319,7 @@ type session struct {
 	contextName          string
 	initialURL           string
 	persist              bool
+	extractionOnly       bool
 	timeout              int
 	proxy                SessionProxyState
 	environment          backends.EnvironmentOptions
@@ -631,6 +634,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				},
 				"auto_create_context":  map[string]any{"type": "boolean", "description": "Create an app-managed context if no context_id/name/provider_context_id matches. For reusable contexts, also pass context_name; omitted names are auto-generated fallback names."},
 				"persist":              map[string]any{"type": "boolean"},
+				"extraction_only":      map[string]any{"type": "boolean", "description": "Read-only extraction lifecycle: skip automatic final screenshots on close; cleanup and usage accounting remain enabled."},
 				"timeout":              map[string]any{"type": "integer", "minimum": minimumCloudSessionTimeoutSeconds, "maximum": maximumCloudSessionTimeoutSeconds, "default": defaultCloudSessionTimeoutSeconds, "description": "Entire cloud browser session's maximum wall-clock lifetime in seconds, including while actively used. Omit unless the user explicitly requested this exact provider lifetime. Never infer it from estimated task duration: a one-minute task still omits timeout. This is not a page-load, action, wait, or task timeout; use computer_use timeout_ms for action waits. Default 1800 (30 minutes); accepted range 60-21600 (6 hours)."},
 				"proxy_mode":           map[string]any{"type": "string", "enum": []string{"auto", "direct", "managed", "profile"}, "description": "Advanced routing override only. Omit this and all proxy_* fields for normal browsing. profile uses a configured profile; managed uses the browser backend's proxy; direct disables proxies."},
 				"proxy_profile":        map[string]any{"type": "string", "description": "Only for proxy_mode=profile. Configured profile id or unique name from computer_proxy_profile_list. Never guess or synthesize this value."},
@@ -811,6 +815,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				},
 				"auto_create_context":  map[string]any{"type": "boolean", "description": "Create an app-managed context if no context_id/name/provider_context_id matches. For reusable contexts, also pass context_name; omitted names are auto-generated fallback names."},
 				"persist":              map[string]any{"type": "boolean"},
+				"extraction_only":      map[string]any{"type": "boolean", "description": "Skip automatic final screenshots for read-only extraction; provider release and accounting remain enabled."},
 				"timeout":              map[string]any{"type": "integer", "minimum": minimumCloudSessionTimeoutSeconds, "maximum": maximumCloudSessionTimeoutSeconds, "default": defaultCloudSessionTimeoutSeconds, "description": "Entire cloud browser session's maximum wall-clock lifetime in seconds, including while actively used. Omit unless explicitly requested. Default 1800 (30 minutes)."},
 				"proxy_mode":           map[string]any{"type": "string", "enum": []string{"auto", "direct", "managed", "profile"}, "description": "Advanced routing override only. Omit this and all proxy_* fields for normal browsing."},
 				"proxy_profile":        map[string]any{"type": "string", "description": "Only for proxy_mode=profile. Never guess or synthesize this value."},
@@ -849,7 +854,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"session_id":  map[string]any{"type": "string"},
 				"formats":     map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"text", "markdown", "html", "metadata", "structured_data", "json", "links", "images", "regions"}}},
 				"max_chars":   map[string]any{"type": "integer", "description": "Maximum aggregate response characters. Default 50000; maximum 1000000."},
-				"readability": map[string]any{"type": "boolean", "description": "Prefer the primary article/content region. Defaults true."},
+				"readability": map[string]any{"type": "boolean", "description": "Prefer the primary article/content region. Defaults true; false retains headers, footers and sidebars."},
 				"wait_ms":     map[string]any{"type": "integer", "description": "Optional wait before extraction for client-rendered pages; maximum 10000."},
 			}, []string{"session_id"}),
 			Handler: a.toolBrowserExtract,
@@ -1724,6 +1729,7 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		contextName:      rc.ContextName,
 		initialURL:       openOpts.URL,
 		persist:          rc.Persist,
+		extractionOnly:   boolArgDefault(args, "extraction_only", false),
 		timeout:          effectiveTimeout,
 		proxy:            proxyPolicy.State,
 		environment:      environmentOptions,
@@ -4421,11 +4427,13 @@ func (a *App) finalizeSession(ctx *sdk.AppCtx, id string, s *session, status, cl
 	}
 	payload := a.sessionEventPayload(id, s)
 	active := sessionRecord(id, s, "active", "", nil)
-	if shot, err := screenshotWithOptions(s.comp, false); err == nil && len(shot) > 0 {
-		active.FinalScreenshot = shot
-		active.FinalScreenshotMIME = imageMIME(shot)
-	} else if err != nil && ctx != nil {
-		ctx.Logger().Warn("final browser screenshot failed", "session_id", id, "err", err.Error())
+	if !s.extractionOnly {
+		if shot, err := screenshotWithOptions(s.comp, false); err == nil && len(shot) > 0 {
+			active.FinalScreenshot = shot
+			active.FinalScreenshotMIME = imageMIME(shot)
+		} else if err != nil && ctx != nil {
+			ctx.Logger().Warn("final browser screenshot failed", "session_id", id, "err", err.Error())
+		}
 	}
 	snapshotCancel()
 	unbind()

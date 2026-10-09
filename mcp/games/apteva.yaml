@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: games
 display_name: Games
-version: 0.6.0
+version: 0.7.1
 description: |
+  Guided source and deployment setup, versioned build recipes, runner selection
+  and actionable readiness checks with exact-build artifact evidence.
   Per-game logos reference retained sprite asset versions and ship in content builds.
   Versioned game assets and content for thirteen asset kinds, with Media Studio
   generation, deterministic sprite baking and Unity/Godot importers.
@@ -39,7 +41,7 @@ requires:
       optional: true
       reason: Owns repositories and immutable source snapshots for game builds.
     - name: deploy
-      version: ">=0.26.0"
+      version: ">=0.27.2"
       optional: true
       reason: Owns command pipelines, artifacts, store releases and release policies.
     - name: storage
@@ -126,6 +128,20 @@ provides:
       description: Change an Android rollout fraction through Deploy policy.
     - name: games_logs
       description: Read recent logs for a linked build or release.
+    - name: games_setup_options
+      description: Discover build recipes, sources, targets and configured Deploy runners.
+    - name: games_setup
+      description: Guided deployment setup with persistent progress and request_key recovery.
+    - name: games_setup_history
+      description: Read setup progress and retained resource IDs.
+    - name: games_setup_reconcile
+      description: Reconcile uncertain setup mutations using verified receipts.
+    - name: games_recipe_save
+      description: Save an immutable reusable build recipe version.
+    - name: games_source_pin
+      description: Capture an immutable Code source snapshot.
+    - name: games_target_configure
+      description: Apply a recipe and configured runner through Deploy.
     - name: games_source_set
       description: Link an existing Code repository to this game.
     - name: games_sources_list
@@ -328,7 +344,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: games/v0.6.0
+    ref: games/v0.7.1
     entry: mcp/games
   port: 8080
   health_check: /health

@@ -1,9 +1,9 @@
-// Web v0.2.9 - browser-backed web intelligence and reusable extractors.
+// Web v0.2.10 - browser-backed web intelligence and reusable extractors.
 //
 // The app requires computer for session lifecycle, rendered extraction, and
-// screenshots. It opens a browser before search/extract/crawl/map/research page
-// visits, prefers live browser DOM extraction when available, and falls back to
-// HTTP retrieval when the active backend cannot expose rendered content.
+// screenshots. Rendered visits prefer live browser DOM extraction. Optional
+// source_only extraction retrieves public HTML with HTTP provenance; other
+// extraction uses HTTP as a fallback when the browser cannot expose content.
 package main
 
 import (
@@ -166,21 +166,39 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "web_extract",
-			Description: "Open a URL in a browser session and extract rendered content. Omit backend to use Computer's configured default; otherwise use local, browserbase, steel, browser-engine, or service. Args: url, formats?, backend?, viewport?, max_chars?, store?, snapshot?, visibility? (private|signed|public; applies to stored snapshots and defaults to private). Browser metadata returns requested_backend and effective_backend.",
+			Description: "Open a URL in a browser session and extract rendered content. Omit backend to use Computer's configured default; otherwise use local, browserbase, steel, browser-engine, or service. Args: url, formats?, backend?, viewport?, max_chars?, source_only? (default false; retrieves public HTML without rendering), readability? (default true; false includes headers and footers), store?, snapshot?, visibility? (private|signed|public; applies to stored snapshots and defaults to private). Browser metadata returns requested_backend and effective_backend.",
 			InputSchema: schemaObject(map[string]any{
-				"url":        map[string]any{"type": "string"},
-				"formats":    map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"text", "markdown", "html", "metadata", "structured_data", "json", "links", "images"}}},
-				"backend":    browserBackendSchema(),
-				"viewport":   viewportSchema(),
-				"max_chars":  map[string]any{"type": "integer"},
-				"store":      map[string]any{"type": "boolean"},
-				"snapshot":   map[string]any{"type": "boolean"},
-				"visibility": snapshotVisibilitySchema(),
-				"cache":      cacheModeSchema(),
-				"max_age":    cacheSecondsSchema("Maximum accepted cached page age in seconds. Default 86400 for extraction."),
-				"cache_ttl":  cacheSecondsSchema("How long to retain newly extracted page data in seconds. Default 86400."),
+				"url":          map[string]any{"type": "string"},
+				"formats":      map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"text", "markdown", "html", "metadata", "structured_data", "json", "links", "images"}}},
+				"backend":      browserBackendSchema(),
+				"viewport":     viewportSchema(),
+				"max_chars":    map[string]any{"type": "integer"},
+				"source_only":  map[string]any{"type": "boolean", "description": "Fetch public HTML source instead of rendering. Use for static source verification or a bounded fallback; preserves HTTP source provenance."},
+				"session_id":   map[string]any{"type": "string", "description": "Reuse a live Web-owned browser session returned by an earlier keep_session extraction."},
+				"keep_session": map[string]any{"type": "boolean", "description": "Keep the browser alive for subsequent extractions; close with web_session_close. Defaults false."},
+				"readability":  map[string]any{"type": "boolean", "description": "Use main/article content (default true). Set false to include navigation, contact footers, and other body content."},
+				"store":        map[string]any{"type": "boolean"},
+				"snapshot":     map[string]any{"type": "boolean"},
+				"visibility":   snapshotVisibilitySchema(),
+				"cache":        cacheModeSchema(),
+				"max_age":      cacheSecondsSchema("Maximum accepted cached page age in seconds. Default 86400 for extraction."),
+				"cache_ttl":    cacheSecondsSchema("How long to retain newly extracted page data in seconds. Default 86400."),
 			}, []string{"url"}),
 			Handler: a.toolExtract,
+		},
+		{
+			Name:        "web_session_close",
+			Description: "Release a browser retained by web_extract(keep_session=true). Args: session_id. Releases the provider session and preserves usage accounting.",
+			InputSchema: schemaObject(map[string]any{"session_id": map[string]any{"type": "string"}}, []string{"session_id"}),
+			Handler: func(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+				id := stringArg(args, "session_id")
+				if id == "" {
+					return nil, errors.New("session_id required")
+				}
+				var out map[string]any
+				err := ctx.PlatformAPI().CallAppResult("computer", "browser_close", withProjectID(ctx, map[string]any{"session_id": id}), &out)
+				return out, err
+			},
 		},
 		{
 			Name:        "web_crawl",
@@ -631,6 +649,9 @@ func (a *App) toolExtract(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if target == "" {
 		return nil, errors.New("url required")
 	}
+	if boolArg(args, "source_only") && boolArg(args, "snapshot") {
+		return nil, errors.New("source_only extraction does not support snapshots")
+	}
 	if boolArg(args, "snapshot") {
 		if _, err := snapshotVisibility(args); err != nil {
 			return nil, err
@@ -659,10 +680,14 @@ func (a *App) toolExtract(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		completeRun(ctx, runID, "failed", nil, err)
 		return nil, err
 	}
-	doc := a.extractURL(ctx, runID, target, mapMerge(args, map[string]any{
-		"store":           false,
-		"_snapshot_store": boolArgDefault(args, "store", storeDefault(ctx)),
-	}), true)
+	var doc pageDoc
+	if boolArg(args, "source_only") {
+		doc = extractHTTPSource(ctx, target, args)
+	} else {
+		doc = a.extractURL(ctx, runID, target, mapMerge(args, map[string]any{
+			"store": false, "_snapshot_store": boolArgDefault(args, "store", storeDefault(ctx)),
+		}), true)
+	}
 	out := map[string]any{"page": doc}
 	applyCacheAfterFetch(ctx, policy, out)
 	if doc.Error != "" {
@@ -671,6 +696,9 @@ func (a *App) toolExtract(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return out, err
 	}
 	if err := a.applyResponseEffects(ctx, runID, "extract", args, out); err != nil {
+		if doc.Browser != nil && boolArg(args, "keep_session") {
+			a.closeBrowser(ctx, doc.Browser.SessionID)
+		}
 		completeRun(ctx, runID, "failed", out, err)
 		return out, err
 	}
@@ -966,6 +994,26 @@ func (a *App) toolSnapshot(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return out, err
 }
 
+func extractHTTPSource(ctx *sdk.AppCtx, target string, args map[string]any) pageDoc {
+	doc := pageDoc{URL: target, FinalURL: target, ExtractionBackend: "http_source"}
+	body, meta, err := fetchURL(ctx, target)
+	doc.Status = intFromMap(meta, "status")
+	doc.ContentType = stringFromMap(meta, "content_type")
+	doc.Bytes = intFromMap(meta, "bytes")
+	doc.FinalURL = firstNonEmpty(stringFromMap(meta, "final_url"), target)
+	if err != nil {
+		doc.Error = err.Error()
+		return doc
+	}
+	parsed := parseHTMLDoc(body, doc.FinalURL)
+	doc.Title, doc.Description = parsed.Title, parsed.Description
+	doc.Links, doc.Images, doc.Metadata = parsed.Links, parsed.Images, parsed.Metadata
+	maxChars := boundedInt(intArg(args, "max_chars"), defaultMaxChars, 1000, 200000)
+	doc.Text, doc.Markdown = truncateString(parsed.Text, maxChars), truncateString(parsed.Markdown, maxChars)
+	doc.Truncated = boolFromMap(meta, "truncated") || len(parsed.Text) > maxChars || len(parsed.Markdown) > maxChars
+	return doc
+}
+
 func (a *App) extractURL(ctx *sdk.AppCtx, runID int64, target string, args map[string]any, includeText bool) pageDoc {
 	doc := pageDoc{URL: target, FinalURL: target, ExtractionBackend: "browser_dom"}
 	if err := validateHTTPURL(target); err != nil {
@@ -978,7 +1026,15 @@ func (a *App) extractURL(ctx *sdk.AppCtx, runID int64, target string, args map[s
 		return doc
 	}
 	doc.Browser = browser
-	defer a.closeBrowser(ctx, browser.SessionID)
+	defer func() {
+		if r := recover(); r != nil {
+			a.closeBrowser(ctx, browser.SessionID)
+			panic(r)
+		}
+		if !boolArg(args, "keep_session") || doc.Error != "" {
+			a.closeBrowser(ctx, browser.SessionID)
+		}
+	}()
 
 	if extracted, err := a.extractBrowserDOM(ctx, browser.SessionID, args, includeText); err == nil {
 		doc.FinalURL = firstNonEmpty(extracted.CurrentURL, extracted.URL, browser.CurrentURL, target)
@@ -2103,7 +2159,24 @@ func (a *App) openBrowser(ctx *sdk.AppCtx, target string, args map[string]any) (
 	if err := validateBrowserTarget(ctx, target); err != nil {
 		return nil, err
 	}
+	if id := stringArg(args, "session_id"); id != "" {
+		var existing browserSession
+		if err := ctx.PlatformAPI().CallAppResult("computer", "browser_session", withProjectID(ctx, map[string]any{"action": "status", "session_id": id}), &existing); err != nil {
+			return nil, err
+		}
+		var nav map[string]any
+		if err := ctx.PlatformAPI().CallAppResult("computer", "computer_use", withProjectID(ctx, map[string]any{"session_id": id, "action": "navigate", "url": target, "observation": "none"}), &nav); err != nil {
+			return nil, err
+		}
+		existing.SessionID = id
+		existing.CurrentURL = target
+		existing.EffectiveBackend = existing.Backend
+		return &existing, nil
+	}
 	openArgs := map[string]any{"url": target}
+	if !boolArg(args, "snapshot") {
+		openArgs["extraction_only"] = true
+	}
 	requestedBackend := ""
 	if rawBackend := stringArg(args, "backend"); rawBackend != "" {
 		b := strings.ToLower(strings.TrimSpace(rawBackend))
@@ -2162,7 +2235,7 @@ func (a *App) extractBrowserDOM(ctx *sdk.AppCtx, sessionID string, args map[stri
 		"session_id":  sessionID,
 		"formats":     formats,
 		"max_chars":   boundedInt(intArg(args, "max_chars"), defaultMaxChars, 1000, 200000),
-		"readability": true,
+		"readability": boolArgDefault(args, "readability", true),
 	})
 	if waitMS := intArg(args, "wait_ms"); waitMS > 0 {
 		extractArgs["wait_ms"] = waitMS
@@ -2236,6 +2309,10 @@ func newCachePolicy(kind string, args map[string]any) (cachePolicy, error) {
 		if p.Reason == "" {
 			p.Reason = "snapshot cache requires max_age"
 		}
+	}
+	if stringArg(args, "session_id") != "" {
+		p.Read, p.Write, p.ForceOnly = false, false, false
+		p.Reason = "live session extraction"
 	}
 	if kind == "snapshot" && !boolArgDefault(args, "store", true) {
 		p.Read = false
@@ -2325,6 +2402,7 @@ func applyCacheAfterFetch(ctx *sdk.AppCtx, p cachePolicy, out map[string]any) {
 			info.Reason = "cache store failed: " + err.Error()
 		} else {
 			info.Stored = true
+			storeRedirectCacheAlias(ctx, p, out)
 		}
 	}
 	out["cache"] = info
@@ -2373,6 +2451,10 @@ func cacheKey(kind string, args map[string]any) (string, string, error) {
 	// Keep cached responses aligned with the browser audit schema and backend
 	// ownership rules introduced in Web v0.2.6.
 	cleaned := map[string]any{"kind": kind, "response_schema": "web-v0.2.6"}
+	if kind == "extract" && !boolArgDefault(args, "readability", true) {
+		// Discard entries produced before Computer honored full-body extraction.
+		cleaned["body_parser"] = "contacts-v1"
+	}
 	if kind == "search" || kind == "research" {
 		cleaned["search_parser"] = "google-organic-v0.2.9"
 	}
@@ -2381,7 +2463,7 @@ func cacheKey(kind string, args map[string]any) (string, string, error) {
 			continue
 		}
 		switch k {
-		case "cache", "max_age", "cache_ttl":
+		case "cache", "max_age", "cache_ttl", "session_id", "keep_session":
 			continue
 		case "store":
 			if kind != "snapshot" {
@@ -2413,6 +2495,11 @@ func cacheKey(kind string, args map[string]any) (string, string, error) {
 }
 
 func normalizeCacheValue(key string, v any) any {
+	if key == "url" {
+		if raw, ok := v.(string); ok {
+			return canonicalCacheURL(raw)
+		}
+	}
 	switch x := v.(type) {
 	case []string:
 		cp := append([]string(nil), x...)
