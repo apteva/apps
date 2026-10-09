@@ -2,7 +2,7 @@
 import os
 os.environ.setdefault('OMP_NUM_THREADS','2')
 os.environ.setdefault('OPENBLAS_NUM_THREADS','2')
-import sys,json,math,time,subprocess,tempfile,hashlib
+import sys,json,math,time,subprocess,tempfile,hashlib,contextlib
 import numpy as np
 import mediapipe as mp
 THRESHOLD=0.5
@@ -56,7 +56,7 @@ def plan_pose(points,w,h,ratio=RATIO):
     base_h=max(bh/0.92,bw/ratio/0.94,h*0.63)
     ch=min(max_h,base_h)
     cw=ch*ratio
-    if not width_fits or not height_fits:
+    if not width_fits or not height_fits or req.get('framing')=='widest_valid':
         ch=max_h; cw=max_w
     # Favor the head when an impossible crop must be shown for diagnosis.
     face_center=np.mean(face,axis=0)
@@ -72,10 +72,12 @@ def plan_pose(points,w,h,ratio=RATIO):
     if unit_w%2 or unit_h%2:unit_w*=2;unit_h*=2
     unit=max(1,min(int(ch/unit_h),int(cw/unit_w)))
     iw=unit*unit_w;ih=unit*unit_h
+    if req.get('framing')=='widest_valid':
+        iw=2*int(max_w/2);ih=2*int(max_h/2)
     if width_fits and height_fits:
         # Rounding must not destroy feasible coverage: increase one unit if
         # necessary and still inside the source.
-        if (iw<bw or ih<bh) and (unit+1)*unit_h<=h and (unit+1)*unit_w<=w:
+        if req.get('framing')!='widest_valid' and (iw<bw or ih<bh) and (unit+1)*unit_h<=h and (unit+1)*unit_w<=w:
             unit+=1; iw=unit*unit_w; ih=unit*unit_h
         lo=max(0,math.ceil(bb[2]-iw)); hi=min(w-iw,math.floor(bb[0]))
         x=int(np.clip(round(x),lo,hi)) if lo<=hi else int(np.clip(round(x),0,w-iw))
@@ -95,6 +97,33 @@ def plan_pose(points,w,h,ratio=RATIO):
         'head_margin_pixels':head_pad,'hand_margin_pixels':hand_pad,
         'validation_scope':'Model landmarks and estimated head geometry only; requires visual review. Full body and legs are not required by this portrait experiment.'}
 
+
+def landmark_evidence(points,indices=range(23)):
+    return [{'index':i,'x':round(float(points[i,0]),2),'y':round(float(points[i,1]),2),'visibility':round(float(points[i,2]),6),'presence':round(float(points[i,3]),6)} for i in indices]
+
+def hand_refresh(points,fresh):
+    # Refresh only a weak hand on the same native frame. Never interpolate
+    # confidence or carry a hand through an occlusion from another timestamp.
+    good=lambda p,i:min(p[i,2:])>=THRESHOLD
+    if not all(good(p,i) for p in (points,fresh) for i in (11,12)):
+        return points,[],'identity_unverified'
+    span=max(30,float(np.linalg.norm(points[11,:2]-points[12,:2])))
+    if any(np.linalg.norm(points[i,:2]-fresh[i,:2])>span*.25 for i in (11,12)):
+        return points,[],'identity_unverified'
+    face=[i for i in range(11) if good(points,i) and good(fresh,i)]
+    if len(face)<3 or np.linalg.norm(np.mean(points[face,:2],axis=0)-np.mean(fresh[face,:2],axis=0))>span*.35:
+        return points,[],'identity_unverified'
+    merged=points.copy();accepted=[]
+    for wrist,elbow,hand in [(15,13,[15,17,19,21]),(16,14,[16,18,20,22])]:
+        if good(points,wrist) or not good(fresh,wrist):continue
+        if not good(fresh,elbow):continue
+        if good(points,elbow) and np.linalg.norm(points[elbow,:2]-fresh[elbow,:2])>span*.35:continue
+        # Conflicting confident finger geometry is not evidence of recovery.
+        if any(good(points,i) and good(fresh,i) and np.linalg.norm(points[i,:2]-fresh[i,:2])>span*.35 for i in hand):continue
+        for i in hand:
+            if good(fresh,i) and not good(points,i):merged[i]=fresh[i]
+        accepted.append(wrist)
+    return merged,accepted,'same_frame_hand_recovered' if accepted else 'no_additional_hand_support'
 
 class PoseRuntimeFailure(Exception):
     def __init__(self,code,at_ms=None,attempts=0):
@@ -125,7 +154,9 @@ def main():
     deadline=time.monotonic()+min(120,float(req['remaining_seconds']))
     options=mp.tasks.vision.PoseLandmarkerOptions(base_options=mp.tasks.BaseOptions(model_asset_path=req['model'],delegate=mp.tasks.BaseOptions.Delegate.CPU),running_mode=mp.tasks.vision.RunningMode.VIDEO if req["video"] else mp.tasks.vision.RunningMode.IMAGE,num_poses=1,min_pose_detection_confidence=.5,min_pose_presence_confidence=.5)
     samples=[]
-    with tempfile.TemporaryDirectory(prefix='media-pose-frames-') as work,mp.tasks.vision.PoseLandmarker.create_from_options(options) as detector:
+    with tempfile.TemporaryDirectory(prefix='media-pose-frames-') as work,contextlib.ExitStack() as stack:
+        detector=stack.enter_context(mp.tasks.vision.PoseLandmarker.create_from_options(options))
+        refresh_detector=None
         for at in req['positions']:
             path=os.path.join(work,'frame.png')
             attempts=extract_frame(req,at,path,deadline)
@@ -134,8 +165,26 @@ def main():
             started=time.monotonic();result=detector.detect_for_video(image,at) if req["video"] else detector.detect(image)
             sample={'extraction_attempts':attempts,'at_ms':at,'inference_ms':(time.monotonic()-started)*1000,'status':'no_pose_detected'}
             if result.pose_landmarks:
-                p=np.array([[lm.x*image.width,lm.y*image.height,min(lm.visibility,lm.presence)] for lm in result.pose_landmarks[0]])
-                sample.update(plan_pose(p,image.width,image.height,req['ratio_w']/req['ratio_h']))
+                points=np.array([[lm.x*image.width,lm.y*image.height,lm.visibility,lm.presence] for lm in result.pose_landmarks[0]])
+                to_plan=lambda v:np.column_stack((v[:,:2],np.min(v[:,2:],axis=1)))
+                planned=plan_pose(to_plan(points),image.width,image.height,req['ratio_w']/req['ratio_h'])
+                if req['video'] and planned['status']=='uncertain_hand_evidence':
+                    sample['initial_status']=planned['status']
+                    sample['tracked_wrist_evidence']=landmark_evidence(points,[15,16])
+                    if refresh_detector is None:
+                        refresh_options=mp.tasks.vision.PoseLandmarkerOptions(base_options=mp.tasks.BaseOptions(model_asset_path=req['model'],delegate=mp.tasks.BaseOptions.Delegate.CPU),running_mode=mp.tasks.vision.RunningMode.IMAGE,num_poses=1,min_pose_detection_confidence=.5,min_pose_presence_confidence=.5)
+                        refresh_detector=stack.enter_context(mp.tasks.vision.PoseLandmarker.create_from_options(refresh_options))
+                    fresh=refresh_detector.detect(image)
+                    sample['hand_refresh_status']='no_pose_detected'
+                    if fresh.pose_landmarks:
+                        new=np.array([[lm.x*image.width,lm.y*image.height,lm.visibility,lm.presence] for lm in fresh.pose_landmarks[0]])
+                        points,accepted,status=hand_refresh(points,new)
+                        sample['hand_refresh_status']=status
+                        sample['refreshed_hand_indices']=accepted
+                        planned=plan_pose(to_plan(points),image.width,image.height,req['ratio_w']/req['ratio_h'])
+                sample['landmark_evidence']=landmark_evidence(points)
+                sample.update(planned)
+                sample['inference_ms']=(time.monotonic()-started)*1000
             samples.append(sample)
     print('APTEVA_POSE:'+json.dumps({'samples':samples,'runtime':'mediapipe-0.10.21','model_sha256':req['model_sha256']},default=lambda v:v.item() if isinstance(v,np.generic) else str(v)))
 if __name__=='__main__':

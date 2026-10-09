@@ -32,6 +32,22 @@ const poseRuntimeVersion = "mediapipe-0.10.21-full-1"
 func smartCropEngineSchema() map[string]any {
 	return map[string]any{"type": "string", "enum": []string{"mediapipe_full", "legacy"}, "description": "Smart Crop engine. Defaults to app configuration (MediaPipe Pose Full). legacy retains the previous saliency/foreground engine. Runtime or insufficient pose evidence falls back visibly to legacy; sampled coverage requires visual review."}
 }
+func smartCropFramingSchema() map[string]any {
+	return map[string]any{"type": "string", "enum": []string{"upper_body", "widest_valid"}, "description": "Framing preference for MediaPipe Full. upper_body keeps tighter head/upper-pose framing (default). widest_valid uses the largest native crop at the requested ratio, positioned to retain supported pose; no padding or automatic scaling. Coverage guards still apply."}
+}
+func resolveSmartCropFraming(app *sdk.AppCtx, requested string) (string, error) {
+	framing := strings.TrimSpace(strings.ToLower(requested))
+	if framing == "" && app != nil {
+		framing = strings.TrimSpace(strings.ToLower(app.Config().Get("smart_crop_framing")))
+	}
+	if framing == "" {
+		framing = "upper_body"
+	}
+	if framing != "upper_body" && framing != "widest_valid" {
+		return "", &renderInputError{Code: "invalid_smart_crop_framing", Message: "smart_crop_framing must be upper_body or widest_valid."}
+	}
+	return framing, nil
+}
 func resolveSmartCropEngine(app *sdk.AppCtx, requested string) (string, error) {
 	engine := strings.TrimSpace(strings.ToLower(requested))
 	if engine == "" && app != nil {
@@ -50,6 +66,15 @@ func validateSmartCropEngine(raw []byte) error {
 	if json.Unmarshal(raw, &p) != nil {
 		return nil
 	}
+	if p["smart_crop_framing"] != nil {
+		value, ok := p["smart_crop_framing"].(string)
+		if !ok {
+			return &renderInputError{Code: "invalid_smart_crop_framing", Message: "smart_crop_framing must be a string."}
+		}
+		if _, err := resolveSmartCropFraming(nil, value); err != nil {
+			return err
+		}
+	}
 	if p["smart_crop_engine"] == nil {
 		return nil
 	}
@@ -62,6 +87,7 @@ func validateSmartCropEngine(raw []byte) error {
 }
 
 type poseRequest struct {
+	Framing   string  `json:"framing"`
 	Source    string  `json:"source"`
 	Model     string  `json:"model"`
 	ModelSHA  string  `json:"model_sha256"`
@@ -74,7 +100,20 @@ type poseRequest struct {
 	Remaining float64 `json:"remaining_seconds"`
 	Video     bool    `json:"video"`
 }
+type poseLandmarkEvidence struct {
+	Index      int     `json:"index"`
+	X          float64 `json:"x"`
+	Y          float64 `json:"y"`
+	Visibility float64 `json:"visibility"`
+	Presence   float64 `json:"presence"`
+}
 type poseSample struct {
+	Landmarks            []poseLandmarkEvidence `json:"landmark_evidence,omitempty"`
+	TrackedWristEvidence []poseLandmarkEvidence `json:"tracked_wrist_evidence,omitempty"`
+	RefreshedHands       []int                  `json:"refreshed_hand_indices,omitempty"`
+	RefreshStatus        string                 `json:"hand_refresh_status,omitempty"`
+	InitialStatus        string                 `json:"initial_status,omitempty"`
+
 	ExtractionAttempts int    `json:"extraction_attempts,omitempty"`
 	WeakWrists         []int  `json:"low_confidence_wrist_indices,omitempty"`
 	SupportedIndices   []int  `json:"required_landmark_indices,omitempty"`
@@ -257,7 +296,7 @@ func runPose(ctx context.Context, app *sdk.AppCtx, host int64, req poseRequest) 
 	return nil, fmt.Errorf("pose_result_missing")
 }
 
-func computeSmartCropPose(ctx context.Context, app *sdk.AppCtx, sc *storageClient, project, fid string, rw, rh int, target smartCropTarget) (*cropWindow, []cropPathPoint, error) {
+func computeSmartCropPose(ctx context.Context, app *sdk.AppCtx, sc *storageClient, project, fid string, rw, rh int, target smartCropTarget, framing string) (*cropWindow, []cropPathPoint, error) {
 	ctx, release, err := acquireMediaWork(ctx, app, 1)
 	if err != nil {
 		return nil, nil, err
@@ -300,8 +339,18 @@ func computeSmartCropPose(ctx context.Context, app *sdk.AppCtx, sc *storageClien
 		}
 		ffmpeg = paths.FFmpeg
 	}
-	result, err := runPose(ctx, app, host, poseRequest{Source: source, ModelSHA: poseModelSHA256, FFmpeg: ffmpeg, Positions: posePositions(target, row.DurationMs, row.FPS), Width: row.Width, Height: row.Height, RatioW: rw, RatioH: rh, Video: !row.IsImage})
+	positions := posePositions(target, row.DurationMs, row.FPS)
+	recordPoseAttempt(ctx, &poseResult{}, framing)
+	if a := cropAudit(ctx); a != nil {
+		a.PoseAttempt.Status = "inference"
+		a.PoseAttempt.Requested = len(positions)
+	}
+	result, err := runPose(ctx, app, host, poseRequest{Framing: framing, Source: source, ModelSHA: poseModelSHA256, FFmpeg: ffmpeg, Positions: positions, Width: row.Width, Height: row.Height, RatioW: rw, RatioH: rh, Video: !row.IsImage})
 	if err != nil {
+		if a := cropAudit(ctx); a != nil {
+			a.PoseAttempt.Status = "inference_failed"
+			a.PoseAttempt.FailureCode = poseFailureReason(err)
+		}
 		if failure, ok := err.(*poseRuntimeFailure); ok {
 			if a := cropAudit(ctx); a != nil {
 				a.PoseFailure = failure
@@ -309,9 +358,17 @@ func computeSmartCropPose(ctx context.Context, app *sdk.AppCtx, sc *storageClien
 		}
 		return nil, nil, err
 	}
+	recordPoseAttempt(ctx, result, framing)
 	win, path, err := planPoseSamples(result.Samples, row.Width, row.Height, rw, rh)
 	if err != nil {
+		if a := cropAudit(ctx); a != nil {
+			a.PoseAttempt.Status = "planning_failed"
+			a.PoseAttempt.FailureCode = poseFailureReason(err)
+		}
 		return nil, nil, err
+	}
+	if a := cropAudit(ctx); a != nil {
+		a.PoseAttempt.Status = "planned"
 	}
 	if a := cropAudit(ctx); a != nil {
 		a.AlgorithmVersion = smartCropAlgorithmVersion
@@ -345,12 +402,108 @@ func computeSmartCropPose(ctx context.Context, app *sdk.AppCtx, sc *storageClien
 	}
 	return win, path, nil
 }
+
+type poseFailedSample struct {
+	AtMs     int64  `json:"at_ms"`
+	Category string `json:"category"`
+}
+type poseAttemptAudit struct {
+	CountScope  string             `json:"count_scope"`
+	Requested   int                `json:"requested_samples"`
+	Analysed    int                `json:"analysed_samples"`
+	Engine      string             `json:"engine"`
+	Algorithm   string             `json:"algorithm_version"`
+	ModelSHA    string             `json:"model_sha256"`
+	Runtime     string             `json:"runtime_version"`
+	Framing     string             `json:"framing"`
+	Status      string             `json:"status"`
+	FailureCode string             `json:"failure_code,omitempty"`
+	Valid       int                `json:"valid_samples"`
+	Invalid     int                `json:"invalid_samples"`
+	Uncertain   int                `json:"uncertain_samples"`
+	Failed      []poseFailedSample `json:"failed_samples"`
+}
+
+func recordPoseAttempt(ctx context.Context, result *poseResult, framing string) {
+	a := cropAudit(ctx)
+	if a == nil {
+		return
+	}
+	a.PoseSamples = result.Samples
+	attempt := &poseAttemptAudit{Engine: "mediapipe_full", Algorithm: smartCropAlgorithmVersion, ModelSHA: poseModelSHA256, Runtime: poseRuntimeVersion, Framing: framing, CountScope: "Valid/invalid counts describe usable pose geometry; they do not establish hand coverage, crop fit or visual approval.", Requested: len(result.Samples), Analysed: len(result.Samples), Status: "planning", Failed: []poseFailedSample{}}
+	for _, s := range result.Samples {
+		if poseSampleHasGeometry(s, a.SourceWidth, a.SourceHeight) {
+			attempt.Valid++
+		} else {
+			attempt.Invalid++
+		}
+		if s.Status == "uncertain_hand_evidence" {
+			attempt.Uncertain++
+		}
+		if s.Status != "fits_detected_upper_pose" {
+			attempt.Failed = append(attempt.Failed, poseFailedSample{AtMs: s.AtMs, Category: s.Status})
+		}
+	}
+	a.PoseAttempt = attempt
+}
+
+// Expanding a legacy fallback retains its original rectangle at each sample.
+// Existing unknown/too-wide coverage remains guarded; this is a preference,
+// never an automatic composition approval or a padding request.
+func expandSmartCropFraming(raw []byte, a *smartCropAudit, rw, rh int) []byte {
+	var p map[string]any
+	if json.Unmarshal(raw, &p) != nil || a.SourceWidth <= 0 || a.SourceHeight <= 0 {
+		return raw
+	}
+	ow, oh := int(int64FromJSONValue(p["crop_w"])), int(int64FromJSONValue(p["crop_h"]))
+	if ow <= 0 || oh <= 0 {
+		return raw
+	}
+	w, h := cropDimsForRatio(a.SourceWidth, a.SourceHeight, rw, rh)
+	if w < ow || h < oh {
+		return raw
+	}
+	position := func(x, y int) (int, int) {
+		return clampInt(x+ow/2-w/2, max(0, x+ow-w), min(x, a.SourceWidth-w)), clampInt(y+oh/2-h/2, max(0, y+oh-h), min(y, a.SourceHeight-h))
+	}
+	x, y := position(int(int64FromJSONValue(p["crop_x"])), int(int64FromJSONValue(p["crop_y"])))
+	p["crop_x"] = x
+	p["crop_y"] = y
+	p["crop_w"] = w
+	p["crop_h"] = h
+	if value, ok := p["crop_path"]; ok {
+		encoded, _ := json.Marshal(value)
+		var path []cropPathPoint
+		if json.Unmarshal(encoded, &path) == nil {
+			for i := range path {
+				path[i].X, path[i].Y = position(path[i].X, path[i].Y)
+			}
+			p["crop_path"] = path
+		}
+	}
+	encoded, err := json.Marshal(p)
+	if err != nil {
+		return raw
+	}
+	return encoded
+}
 func poseBoundsWindow(b []float64, w, h int) cropWindow {
 	if len(b) != 4 {
 		return cropWindow{}
 	}
 	x, y := max(0, int(math.Floor(b[0]))), max(0, int(math.Floor(b[1])))
 	return cropWindow{X: x, Y: y, W: min(w, int(math.Ceil(b[2]))) - x, H: min(h, int(math.Ceil(b[3]))) - y}
+}
+func poseSampleHasGeometry(s poseSample, w, h int) bool {
+	if len(s.Bounds) != 4 || s.Crop.Width <= 0 || s.Crop.Height <= 0 || s.Crop.Width > w || s.Crop.Height > h {
+		return false
+	}
+	for _, v := range s.Bounds {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return false
+		}
+	}
+	return s.Bounds[0] >= 0 && s.Bounds[1] >= 0 && s.Bounds[2] <= float64(w) && s.Bounds[3] <= float64(h) && s.Bounds[2] > s.Bounds[0] && s.Bounds[3] > s.Bounds[1]
 }
 func planPoseSamples(samples []poseSample, w, h, rw, rh int) (*cropWindow, []cropPathPoint, error) {
 	if len(samples) == 0 {
@@ -362,7 +515,7 @@ func planPoseSamples(samples []poseSample, w, h, rw, rh int) (*cropWindow, []cro
 		if len(s.Bounds) != 4 || s.Crop.Width <= 0 || s.Crop.Height <= 0 {
 			return nil, nil, fmt.Errorf("pose_insufficient_evidence")
 		}
-		if s.Bounds[0] < 0 || s.Bounds[1] < 0 || s.Bounds[2] > float64(w) || s.Bounds[3] > float64(h) || s.Bounds[2] <= s.Bounds[0] || s.Bounds[3] <= s.Bounds[1] || s.Crop.Width > w || s.Crop.Height > h {
+		if !poseSampleHasGeometry(s, w, h) {
 			return nil, nil, fmt.Errorf("pose_invalid_geometry")
 		}
 		cw = max(cw, s.Crop.Width)

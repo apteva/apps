@@ -23,8 +23,12 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.24
+version: 0.14.25
 description: |
+  v0.14.25 preserves attempted pose samples, confidence and failed timestamps
+  through legacy fallback; retries weak tracked hands on the same frame with
+  subject-identity checks; and adds smart_crop_framing=widest_valid for larger
+  native captures. Unresolved occlusion and genuinely wide poses remain guarded.
   v0.14.24 retries transient native pose frame reads within the existing deadline,
   rejects stale/empty frame evidence, samples safely near source endings, and
   records extraction attempts and precise safe failure diagnostics. Engine
@@ -313,7 +317,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_crop
-      description: Crop or reframe an existing video/image. Exact mode args — file_id, x, y, width, height. With target_ratio, fit_mode=crop (default) uses MediaPipe Pose Full native geometry by default; smart_crop_engine=legacy selects saliency/foreground planning; fit_mode=contain preserves every source edge with black padding. Args — file_id, target_ratio, crop_mode? (smart default | center), fit_mode? (crop default | contain), output_width?. Native screenshots reuse verified parent scene evidence. require_action_preservation=true rejects unknown/too-wide sampled coverage before queueing; crop_fallback=contain explicitly preserves the full frame. Technical success does not approve composition.
+      description: Crop or reframe an existing video/image. Exact mode args — file_id, x, y, width, height. With target_ratio, fit_mode=crop (default) uses MediaPipe Pose Full native geometry by default; smart_crop_framing=widest_valid selects the largest native crop at the requested ratio; smart_crop_engine=legacy selects saliency/foreground planning; fit_mode=contain preserves every source edge with black padding. Args — file_id, target_ratio, crop_mode? (smart default | center), fit_mode? (crop default | contain), output_width?. Native screenshots reuse verified parent scene evidence. require_action_preservation=true rejects unknown/too-wide sampled coverage before queueing; crop_fallback=contain explicitly preserves the full frame. Technical success does not approve composition.
       async_result:
         id_field: render_id
         notify:
@@ -370,7 +374,7 @@ provides:
           expires_after: 24h
     - name: media_extract_reel
       description: |
-        Cut and reframe a clip in one ffmpeg pass. fit_mode=crop (default) uses MediaPipe Pose Full native geometry and a smoothed crop path; smart_crop_engine=legacy selects the retained engine; fit_mode=contain preserves the complete source frame with black padding. Args — file_id, start_ms, end_ms, target_ratio? (default 9:16), output_width? (default 1080), crop_mode? (smart default | center), fit_mode? (crop default | contain). require_action_preservation=true preflights and rejects unknown/too-wide sampled action coverage before queuing; crop_fallback=contain explicitly requests full-frame fallback. Technical render success does not imply composition approval. Returns render_id and notifies the caller on completion.
+        Cut and reframe a clip in one ffmpeg pass. fit_mode=crop (default) uses MediaPipe Pose Full native geometry and a smoothed crop path; smart_crop_framing=widest_valid selects the largest native crop at the requested ratio; smart_crop_engine=legacy selects the retained engine; fit_mode=contain preserves the complete source frame with black padding. Args — file_id, start_ms, end_ms, target_ratio? (default 9:16), output_width? (default 1080), crop_mode? (smart default | center), fit_mode? (crop default | contain). require_action_preservation=true preflights and rejects unknown/too-wide sampled action coverage before queuing; crop_fallback=contain explicitly requests full-frame fallback. Technical render success does not imply composition approval. Returns render_id and notifies the caller on completion.
       async_result:
         id_field: render_id
         notify:
@@ -628,7 +632,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.24
+    ref: media/v0.14.25
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -705,6 +709,12 @@ config_schema:
     label: Smart Crop engine
     options: [mediapipe_full, legacy]
     description: MediaPipe Pose Full CPU landmarks by default. Legacy retains the previous saliency/foreground planner. Unavailable runtime or insufficient pose evidence falls back to legacy with saved diagnostics.
+  - name: smart_crop_framing
+    type: select
+    default: "upper_body"
+    label: Smart Crop framing
+    options: [upper_body, widest_valid]
+    description: Upper body keeps the current tighter framing. Widest valid selects the largest native rectangle at the requested ratio for MediaPipe Full, while preserving pose checks. No implicit padding or output scaling.
   - name: smart_crop_python
     type: text
     default: ""
@@ -1073,7 +1083,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name:        "media_preview_crop",
 			Description: "Inspect crop geometry and sampled action coverage before rendering. Returns resolved_params and composition with no new output; sampled coverage still requires visual review. operation=crop|extract_frame|extract_reel. For strict render requests use require_action_preservation=true; crop_fallback=contain is explicit full-frame fallback.",
-			InputSchema: schemaObject(map[string]any{"file_id": map[string]any{"type": "string"}, "operation": map[string]any{"type": "string", "enum": []string{"crop", "extract_frame", "extract_reel"}}, "at_ms": map[string]any{"type": "integer"}, "start_ms": map[string]any{"type": "integer"}, "end_ms": map[string]any{"type": "integer"}, "target_ratio": map[string]any{"type": "string"}, "crop_mode": map[string]any{"type": "string"}, "smart_crop_engine": smartCropEngineSchema(), "fit_mode": map[string]any{"type": "string"}}, []string{"file_id"}),
+			InputSchema: schemaObject(map[string]any{"file_id": map[string]any{"type": "string"}, "operation": map[string]any{"type": "string", "enum": []string{"crop", "extract_frame", "extract_reel"}}, "at_ms": map[string]any{"type": "integer"}, "start_ms": map[string]any{"type": "integer"}, "end_ms": map[string]any{"type": "integer"}, "target_ratio": map[string]any{"type": "string"}, "crop_mode": map[string]any{"type": "string"}, "smart_crop_engine": smartCropEngineSchema(), "smart_crop_framing": smartCropFramingSchema(), "fit_mode": map[string]any{"type": "string"}}, []string{"file_id"}),
 			Handler:     a.toolPreviewCrop,
 		},
 		{
@@ -1324,6 +1334,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"crop_fallback":               map[string]any{"type": "string", "enum": []string{"reject", "contain"}, "default": "reject", "description": "Explicit fallback if action cannot fit or coverage is unknown."},
 				"crop_mode":                   map[string]any{"type": "string", "enum": []string{"smart", "center"}, "description": "smart (default) uses the selected Smart Crop engine on source evidence; center uses geometric center. Requested/effective engine and fallback reasons are persisted in crop_diagnostics."},
 				"smart_crop_engine":           smartCropEngineSchema(),
+				"smart_crop_framing":          smartCropFramingSchema(),
 				"fit_mode":                    map[string]any{"type": "string", "description": "'crop' (default) fills the target canvas and may remove source edges; 'contain' preserves the complete frame and pads unused canvas area."},
 				"output_name":                 map[string]any{"type": "string", "description": "Optional output filename. Extensionless names receive the operation/source extension; unsupported or conflicting formats are rejected before queuing."},
 				"output_folder":               map[string]any{"type": "string"},
@@ -1345,6 +1356,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"crop_fallback":               map[string]any{"type": "string", "enum": []string{"reject", "contain"}, "default": "reject", "description": "Explicit fallback if action cannot fit or coverage is unknown."},
 				"crop_mode":                   map[string]any{"type": "string", "enum": []string{"smart", "center"}, "description": "smart (default) uses the selected Smart Crop engine on source evidence; center uses geometric center. Requested/effective engine and fallback reasons are persisted in crop_diagnostics."},
 				"smart_crop_engine":           smartCropEngineSchema(),
+				"smart_crop_framing":          smartCropFramingSchema(),
 				"fit_mode":                    map[string]any{"type": "string", "description": "'crop' (default) fills the target canvas; 'contain' preserves the complete frame with black padding."},
 				"output_name":                 map[string]any{"type": "string", "description": "Optional PNG filename. Extensionless names receive .png; other extensions are rejected. Use .png for every portrait frame."},
 				"output_folder":               map[string]any{"type": "string"},
@@ -1384,7 +1396,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_extract_reel",
-			Description: "Cut and reframe a clip in one ffmpeg pass. fit_mode='crop' (default) uses MediaPipe Pose Full native geometry and a smoothed path; smart_crop_engine=legacy selects the retained engine; fit_mode='contain' preserves every source edge with black padding when the composition cannot fit a destructive crop. Args: file_id, start_ms, end_ms, target_ratio? (default '9:16'), output_width?, crop_mode?, fit_mode?.",
+			Description: "Cut and reframe a clip in one ffmpeg pass. fit_mode='crop' (default) uses MediaPipe Pose Full native geometry and a smoothed path; smart_crop_framing=widest_valid selects the largest native crop at the requested ratio; smart_crop_engine=legacy selects the retained engine; fit_mode='contain' preserves every source edge with black padding when the composition cannot fit a destructive crop. Args: file_id, start_ms, end_ms, target_ratio? (default '9:16'), output_width?, crop_mode?, fit_mode?.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":                     map[string]any{"type": "string", "description": "Storage file_id of the source video."},
 				"start_ms":                    map[string]any{"type": "integer", "description": "Clip start, milliseconds from start of source. Same convention as media_trim."},
@@ -1395,6 +1407,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"crop_fallback":               map[string]any{"type": "string", "enum": []string{"reject", "contain"}, "default": "reject", "description": "Explicit fallback if action cannot fit or coverage is unknown."},
 				"crop_mode":                   map[string]any{"type": "string", "enum": []string{"smart", "center"}, "description": "smart (default) uses the selected Smart Crop engine on source evidence; center uses geometric center. Requested/effective engine and fallback reasons are persisted in crop_diagnostics."},
 				"smart_crop_engine":           smartCropEngineSchema(),
+				"smart_crop_framing":          smartCropFramingSchema(),
 				"fit_mode":                    map[string]any{"type": "string", "description": "'crop' (default) fills the canvas with a tracked crop; 'contain' preserves the complete frame and pads unused canvas area."},
 				"output_name":                 map[string]any{"type": "string", "description": "Optional output filename. Extensionless names receive .mp4; conflicting extensions are rejected."},
 				"output_folder":               map[string]any{"type": "string", "description": "Optional storage folder for the rendered output. Defaults to install's render_output_folder (typically /renders/)."},
@@ -2937,7 +2950,7 @@ func (a *App) toolIndexStatus(ctx *sdk.AppCtx, args map[string]any) (any, error)
 // "file_id" in sourceKeys; concat lists "file_ids".
 
 func (a *App) toolSubmitRender(operation string, paramKeys, sourceKeys []string) sdk.ToolHandler {
-	paramKeys = append(append([]string{}, paramKeys...), "encoder_profile", "timeout_seconds", "require_action_preservation", "crop_fallback", "smart_crop_engine")
+	paramKeys = append(append([]string{}, paramKeys...), "encoder_profile", "timeout_seconds", "require_action_preservation", "crop_fallback", "smart_crop_engine", "smart_crop_framing")
 	return func(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		pid, err := resolveProjectFromArgs(args)
 		if err != nil {
@@ -3207,14 +3220,15 @@ func (a *App) handleSmartCropPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		FileID          string `json:"file_id"`
-		Operation       string `json:"operation"`
-		TargetRatio     string `json:"target_ratio"`
-		CropMode        string `json:"crop_mode"`
-		SmartCropEngine string `json:"smart_crop_engine"`
-		StartMs         int64  `json:"start_ms"`
-		EndMs           int64  `json:"end_ms"`
-		AtMs            int64  `json:"at_ms"`
+		FileID           string `json:"file_id"`
+		Operation        string `json:"operation"`
+		TargetRatio      string `json:"target_ratio"`
+		CropMode         string `json:"crop_mode"`
+		SmartCropEngine  string `json:"smart_crop_engine"`
+		SmartCropFraming string `json:"smart_crop_framing"`
+		StartMs          int64  `json:"start_ms"`
+		EndMs            int64  `json:"end_ms"`
+		AtMs             int64  `json:"at_ms"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
@@ -3277,7 +3291,7 @@ func (a *App) handleSmartCropPreview(w http.ResponseWriter, r *http.Request) {
 	}
 	defer release()
 	if mode == "smart" && (op == "extract_reel" || op == "extract_frame" || op == "crop") {
-		params, _ := json.Marshal(map[string]any{"start_ms": body.StartMs, "end_ms": body.EndMs, "at_ms": body.AtMs, "target_ratio": ratio, "crop_mode": mode, "smart_crop_engine": body.SmartCropEngine})
+		params, _ := json.Marshal(map[string]any{"start_ms": body.StartMs, "end_ms": body.EndMs, "at_ms": body.AtMs, "target_ratio": ratio, "crop_mode": mode, "smart_crop_engine": body.SmartCropEngine, "smart_crop_framing": body.SmartCropFraming})
 		resolved := preprocessSmartCrop(cctx, globalCtx, newStorageClient(), pid, op, []string{body.FileID}, params)
 		var crop struct {
 			W           int             `json:"crop_w"`

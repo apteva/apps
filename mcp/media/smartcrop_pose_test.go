@@ -218,7 +218,7 @@ func TestPoseSchemasAndFallbackCacheIsolation(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, e := computeSmartCropPose(ctx, app, sc, testProj, "1", 9, 16, smartCropTarget{}); e == nil {
+	if _, _, e := computeSmartCropPose(ctx, app, sc, testProj, "1", 9, 16, smartCropTarget{}, "upper_body"); e == nil {
 		t.Fatal("cancelled inference succeeded")
 	}
 }
@@ -301,5 +301,195 @@ print('bounded retries, fresh-frame identity, empty outputs, exhaustion and dead
 `
 	if out, err := exec.Command(python, "-c", script).CombinedOutput(); err != nil {
 		t.Fatalf("%v: %s", err, out)
+	}
+}
+
+func TestPoseAttemptDiagnosticsSurvivePlanningFailure(t *testing.T) {
+	a := &smartCropAudit{SourceWidth: 1920, SourceHeight: 1080, EffectiveEngine: "legacy"}
+	ctx := context.WithValue(context.Background(), smartCropAuditKey{}, a)
+	valid := poseSample{AtMs: 500, Status: "uncertain_hand_evidence", Bounds: []float64{900, 300, 1200, 900}, Landmarks: []poseLandmarkEvidence{{Index: 15, Visibility: .2, Presence: .9}}}
+	valid.Crop.Width = 378
+	valid.Crop.Height = 672
+	r := &poseResult{Samples: []poseSample{{AtMs: 0, Status: "no_pose_detected"}, valid}}
+	recordPoseAttempt(ctx, r, "upper_body")
+	if _, _, err := planPoseSamples(r.Samples, 1920, 1080, 9, 16); err == nil {
+		t.Fatal("incomplete pose accepted")
+	}
+	a.AlgorithmVersion = legacySmartCropAlgorithmVersion
+	out := attachSmartCropAudit([]byte(`{"crop_w":606,"crop_h":1080,"crop_x":656,"crop_y":0}`), a)
+	var decoded struct {
+		Audit smartCropAudit `json:"crop_diagnostics"`
+	}
+	json.Unmarshal(out, &decoded)
+	got := &decoded.Audit
+	if got.PoseAttempt == nil || got.PoseAttempt.Valid != 1 || got.PoseAttempt.Invalid != 1 || got.PoseAttempt.Uncertain != 1 || len(got.PoseAttempt.Failed) != 2 || got.PoseAttempt.Failed[0].AtMs != 0 || len(got.PoseSamples) != 2 || got.PoseSamples[1].Landmarks[0].Visibility != .2 || got.AlgorithmVersion != legacySmartCropAlgorithmVersion || got.PoseAttempt.Algorithm != smartCropAlgorithmVersion {
+		t.Fatalf("lost attempted evidence: %s", out)
+	}
+}
+
+func TestPoseFramingSelectionAndExpansion(t *testing.T) {
+	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithConfig(map[string]string{"smart_crop_framing": "widest_valid"}))
+	if got, err := resolveSmartCropFraming(app, ""); err != nil || got != "widest_valid" {
+		t.Fatal(got, err)
+	}
+	if got, err := resolveSmartCropFraming(nil, ""); err != nil || got != "upper_body" {
+		t.Fatal(got, err)
+	}
+	for _, raw := range []string{`{"smart_crop_framing":123}`, `{"smart_crop_framing":"bad"}`} {
+		if validateSmartCropEngine([]byte(raw)) == nil {
+			t.Fatal(raw)
+		}
+	}
+	a := &smartCropAudit{SourceWidth: 1920, SourceHeight: 1080, Coverage: "unknown"}
+	raw := []byte(`{"crop_x":795,"crop_y":378,"crop_w":378,"crop_h":672,"crop_path":[{"at_ms":0,"x":795,"y":378},{"at_ms":500,"x":1000,"y":378}]}`)
+	out := expandSmartCropFraming(raw, a, 9, 16)
+	var p struct {
+		X    int             `json:"crop_x"`
+		Y    int             `json:"crop_y"`
+		W    int             `json:"crop_w"`
+		H    int             `json:"crop_h"`
+		Path []cropPathPoint `json:"crop_path"`
+	}
+	json.Unmarshal(out, &p)
+	if p.W != 606 || p.H != 1080 || p.Y != 0 || p.X > 795 || p.X+p.W < 795+378 || p.Path[1].X > 1000 || p.Path[1].X+p.W < 1378 || a.Coverage != "unknown" {
+		t.Fatalf("expansion lost pixels or relaxed guard: %s", out)
+	}
+	for _, tool := range (&App{}).MCPTools() {
+		if tool.Name == "media_crop" || tool.Name == "media_extract_frame" || tool.Name == "media_extract_reel" || tool.Name == "media_preview_crop" {
+			if tool.InputSchema["properties"].(map[string]any)["smart_crop_framing"] == nil {
+				t.Fatal(tool.Name)
+			}
+		}
+	}
+}
+
+func TestPoseSameFrameHandRefreshGuards(t *testing.T) {
+	python := os.Getenv("MEDIAPIPE_TEST_PYTHON")
+	if python == "" {
+		python = "python3"
+	}
+	if err := exec.Command(python, "-c", "import numpy").Run(); err != nil {
+		t.Skip("numpy unavailable; set MEDIAPIPE_TEST_PYTHON")
+	}
+	script := `import ast,numpy as np
+source=ast.parse(open('smartcrop_pose_runtime.py').read())
+selected=[n for n in source.body if isinstance(n,ast.FunctionDef) and n.name in ('hand_refresh','plan_pose','bounds','midpoint')]
+THRESHOLD=.5;RATIO=9/16;req={'ratio_w':9,'ratio_h':16};import math
+exec(compile(ast.Module(body=selected,type_ignores=[]),'embedded-runtime','exec'))
+p=np.ones((33,4));p[:,:2]=[1000,400];p[:,2:]=.9
+p[11,:2]=[900,500];p[12,:2]=[1100,500];p[13,:2]=[850,650];p[14,:2]=[1150,650]
+for i in [15,17,19,21]:p[i,:2]=[800,800]
+for i in [16,18,20,22]:p[i,:2]=[1200,800]
+p[15,2]=.2
+fresh=p.copy();fresh[15,2]=.95;fresh[16,:2]=[1300,820]
+merged,hands,status=hand_refresh(p,fresh)
+assert hands==[15] and status=='same_frame_hand_recovered'
+assert merged[15,2]==.95 and np.array_equal(merged[16],p[16]),'changed supported gesture'
+for mutation in ['shoulder','face','elbow','finger','low_confidence']:
+ candidate=fresh.copy()
+ if mutation=='shoulder':candidate[11,0]+=300
+ if mutation=='face':candidate[:11,0]+=300
+ if mutation=='elbow':candidate[13,0]+=200
+ if mutation=='finger':candidate[17,0]+=200
+ if mutation=='low_confidence':candidate[15,2]=.4
+ guarded,accepted,_=hand_refresh(p,candidate)
+ assert not accepted and np.array_equal(guarded,p),mutation
+plan=lambda v:plan_pose(np.column_stack((v[:,:2],np.min(v[:,2:],axis=1))),1920,1080)
+req['framing']='widest_valid'
+wide=plan(merged);assert wide['crop']['width']==606 and wide['crop']['height']==1080
+broad=merged.copy()
+for i in [15,17,19,21]:broad[i,0]=650
+for i in [16,18,20,22]:broad[i,0]=1480
+assert plan(broad)['status']=='upper_pose_exceeds_crop','wide-hand guard relaxed'
+assert plan(p)['status']=='uncertain_hand_evidence','occlusion guard relaxed'
+print('same-frame confidence, identity/gesture conflicts, unresolved occlusion and wide-pose guards verified')
+`
+	if out, err := exec.Command(python, "-c", script).CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+}
+
+func TestMediaPipeReportNativeRegression(t *testing.T) {
+	root := os.Getenv("MEDIAPIPE_REPORT_FIXTURE_DIR")
+	python := os.Getenv("MEDIAPIPE_TEST_PYTHON")
+	if root == "" || python == "" {
+		t.Skip("set private report fixture directory and isolated Python")
+	}
+	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithConfig(map[string]string{"smart_crop_python": python}))
+	sc := &storageClient{}
+	for _, c := range []struct {
+		name, file, framing, coverage string
+		w, h                          int
+		fallback                      bool
+	}{
+		{"native-tight", "94532.png", "upper_body", "sampled_extent_fits", 378, 672, false},
+		{"native-widest", "94532.png", "widest_valid", "sampled_extent_fits", 606, 1080, false},
+		{"wide-hand-control", "94687.png", "widest_valid", "exceeds_crop_width", 606, 1080, false},
+		{"no-pose-fallback", "92078-127385.png", "upper_body", "unknown", 606, 1080, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			source := filepath.Join(root, "native", c.file)
+			p := sampleImageProbe()
+			p.Width = 1920
+			p.Height = 1080
+			upsertMedia(app.AppDB(), testProj, c.name, p, strings.Repeat("a", 64), "/", c.file)
+			ctx := context.WithValue(context.Background(), renderSourcesKey{}, map[string]string{c.name: source})
+			params, _ := json.Marshal(map[string]any{"target_ratio": "9:16", "crop_mode": "smart", "fit_mode": "crop", "smart_crop_framing": c.framing})
+			resolved := preprocessSmartCrop(ctx, app, sc, testProj, "crop", []string{c.name}, params)
+			var r struct {
+				W     int            `json:"crop_w"`
+				H     int            `json:"crop_h"`
+				Audit smartCropAudit `json:"crop_diagnostics"`
+			}
+			json.Unmarshal(resolved, &r)
+			if r.W != c.w || r.H != c.h || r.Audit.Coverage != c.coverage || r.Audit.Framing != c.framing || r.Audit.PoseAttempt == nil {
+				t.Fatalf("unexpected crop: %s", resolved)
+			}
+			if c.fallback {
+				if r.Audit.EffectiveEngine != "legacy" || r.Audit.PoseAttempt.Invalid != 1 || r.Audit.PoseAttempt.Status != "planning_failed" || len(r.Audit.PoseSamples) != 1 || len(r.Audit.PoseAttempt.Failed) != 1 || r.Audit.PoseAttempt.Failed[0].Category != "no_pose_detected" {
+					t.Fatalf("fallback lost evidence: %s", resolved)
+				}
+			} else if r.Audit.EffectiveEngine != "mediapipe_full" || len(r.Audit.PoseSamples[0].Landmarks) != 23 {
+				t.Fatalf("missing confidence: %s", resolved)
+			}
+			if c.coverage == "sampled_extent_fits" && !cropRetainsSampledExtents(&r.Audit) {
+				t.Fatal("false fit")
+			}
+			strict := map[string]any{}
+			json.Unmarshal(resolved, &strict)
+			strict["require_action_preservation"] = true
+			raw, _ := json.Marshal(strict)
+			_, err := applyCropCompositionPolicy(raw)
+			if (c.coverage == "sampled_extent_fits") != (err == nil) {
+				t.Fatalf("guard changed: %v", err)
+			}
+			if c.name == "native-widest" {
+				plan, err := buildPlan("crop", []string{c.name}, resolved, "native-widest.png", ".png")
+				if err != nil {
+					t.Fatal(err)
+				}
+				output := filepath.Join(root, "native-widest-output.png")
+				args := append([]string{}, plan.Args...)
+				for i, a := range args {
+					if a == "{input}" {
+						args[i] = source
+					}
+				}
+				if out, err := exec.Command("ffmpeg", append(args, output)...).CombinedOutput(); err != nil {
+					t.Fatalf("render %v %s", err, out)
+				}
+				probe, err := runProbe(context.Background(), "ffprobe", output)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if probe.Width != 606 || probe.Height != 1080 {
+					t.Fatalf("unrequested scaling: %+v", probe)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(root, c.name+".json"), resolved, 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("%s: engine=%s coverage=%s native=%dx%d", c.name, r.Audit.EffectiveEngine, r.Audit.Coverage, r.W, r.H)
+		})
 	}
 }

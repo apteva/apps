@@ -1285,17 +1285,29 @@ func preprocessSmartCropUncached(
 		audit.SourceRotation = row.Rotation
 	}
 	ctx = context.WithValue(ctx, smartCropAuditKey{}, audit)
-	defer func() { out = attachSmartCropAudit(out, audit) }()
+	defer func() {
+		if audit.Framing == "widest_valid" {
+			out = expandSmartCropFraming(out, audit, rw, rh)
+		}
+		out = attachSmartCropAudit(out, audit)
+	}()
 
 	engine, engineErr := resolveSmartCropEngine(app, stringJSONValue(parsed["smart_crop_engine"]))
 	if engineErr != nil {
 		recordSmartCropFallback(ctx, "invalid_smart_crop_engine")
 		return params
 	}
+	framing, framingErr := resolveSmartCropFraming(app, stringJSONValue(parsed["smart_crop_framing"]))
+	if framingErr != nil {
+		recordSmartCropFallback(ctx, "invalid_smart_crop_framing")
+		return params
+	}
+	audit.Framing = framing
+	parsed["smart_crop_framing"] = framing
 	audit.RequestedEngine = engine
 	audit.EffectiveEngine = "legacy"
 	if mode == "smart" && engine == "mediapipe_full" {
-		if win, path, poseErr := computeSmartCropPose(ctx, app, sc, projectID, sources[0], rw, rh, target); poseErr == nil {
+		if win, path, poseErr := computeSmartCropPose(ctx, app, sc, projectID, sources[0], rw, rh, target, framing); poseErr == nil {
 			parsed["crop_w"] = win.W
 			parsed["crop_h"] = win.H
 			parsed["crop_x"] = win.X

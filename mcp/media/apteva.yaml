@@ -2,8 +2,12 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.24
+version: 0.14.25
 description: |
+  v0.14.25 preserves attempted pose samples, confidence and failed timestamps
+  through legacy fallback; retries weak tracked hands on the same frame with
+  subject-identity checks; and adds smart_crop_framing=widest_valid for larger
+  native captures. Unresolved occlusion and genuinely wide poses remain guarded.
   v0.14.24 retries transient native pose frame reads within the existing deadline,
   rejects stale/empty frame evidence, samples safely near source endings, and
   records extraction attempts and precise safe failure diagnostics. Engine
@@ -292,7 +296,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_crop
-      description: Crop or reframe an existing video/image. Exact mode args — file_id, x, y, width, height. With target_ratio, fit_mode=crop (default) uses MediaPipe Pose Full native geometry by default; smart_crop_engine=legacy selects saliency/foreground planning; fit_mode=contain preserves every source edge with black padding. Args — file_id, target_ratio, crop_mode? (smart default | center), fit_mode? (crop default | contain), output_width?. Native screenshots reuse verified parent scene evidence. require_action_preservation=true rejects unknown/too-wide sampled coverage before queueing; crop_fallback=contain explicitly preserves the full frame. Technical success does not approve composition.
+      description: Crop or reframe an existing video/image. Exact mode args — file_id, x, y, width, height. With target_ratio, fit_mode=crop (default) uses MediaPipe Pose Full native geometry by default; smart_crop_framing=widest_valid selects the largest native crop at the requested ratio; smart_crop_engine=legacy selects saliency/foreground planning; fit_mode=contain preserves every source edge with black padding. Args — file_id, target_ratio, crop_mode? (smart default | center), fit_mode? (crop default | contain), output_width?. Native screenshots reuse verified parent scene evidence. require_action_preservation=true rejects unknown/too-wide sampled coverage before queueing; crop_fallback=contain explicitly preserves the full frame. Technical success does not approve composition.
       async_result:
         id_field: render_id
         notify:
@@ -349,7 +353,7 @@ provides:
           expires_after: 24h
     - name: media_extract_reel
       description: |
-        Cut and reframe a clip in one ffmpeg pass. fit_mode=crop (default) uses MediaPipe Pose Full native geometry and a smoothed crop path; smart_crop_engine=legacy selects the retained engine; fit_mode=contain preserves the complete source frame with black padding. Args — file_id, start_ms, end_ms, target_ratio? (default 9:16), output_width? (default 1080), crop_mode? (smart default | center), fit_mode? (crop default | contain). require_action_preservation=true preflights and rejects unknown/too-wide sampled action coverage before queuing; crop_fallback=contain explicitly requests full-frame fallback. Technical render success does not imply composition approval. Returns render_id and notifies the caller on completion.
+        Cut and reframe a clip in one ffmpeg pass. fit_mode=crop (default) uses MediaPipe Pose Full native geometry and a smoothed crop path; smart_crop_framing=widest_valid selects the largest native crop at the requested ratio; smart_crop_engine=legacy selects the retained engine; fit_mode=contain preserves the complete source frame with black padding. Args — file_id, start_ms, end_ms, target_ratio? (default 9:16), output_width? (default 1080), crop_mode? (smart default | center), fit_mode? (crop default | contain). require_action_preservation=true preflights and rejects unknown/too-wide sampled action coverage before queuing; crop_fallback=contain explicitly requests full-frame fallback. Technical render success does not imply composition approval. Returns render_id and notifies the caller on completion.
       async_result:
         id_field: render_id
         notify:
@@ -607,7 +611,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.24
+    ref: media/v0.14.25
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -684,6 +688,12 @@ config_schema:
     label: Smart Crop engine
     options: [mediapipe_full, legacy]
     description: MediaPipe Pose Full CPU landmarks by default. Legacy retains the previous saliency/foreground planner. Unavailable runtime or insufficient pose evidence falls back to legacy with saved diagnostics.
+  - name: smart_crop_framing
+    type: select
+    default: "upper_body"
+    label: Smart Crop framing
+    options: [upper_body, widest_valid]
+    description: Upper body keeps the current tighter framing. Widest valid selects the largest native rectangle at the requested ratio for MediaPipe Full, while preserving pose checks. No implicit padding or output scaling.
   - name: smart_crop_python
     type: text
     default: ""
