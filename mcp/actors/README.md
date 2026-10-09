@@ -39,6 +39,12 @@ For a saved login, add `browser.context_id` using a context created through Comp
 
 Use `wait_for` with Computer's declarative `conditions`, `match: any|all`, and a bounded `timeout_ms` (500–30000). A timeout or unmatched result fails the actor before subsequent actions. `media_present` verifies a rendered audio/video player; combine it with a saved-draft text condition when needed. Successful embeds return provider, iframe and thumbnail URLs under run output `media`. This confirms the rendered embed, not continuous video playback. The same action supports URL, text, selector and semantic-target conditions for other sites.
 
+## Verify saved copy
+
+Text extraction normally normalizes whitespace. For exact editor copy, a text field may set `all: true` to collect every matching paragraph in document order and `preserve_line_breaks: true` to retain paragraph boundaries, blank paragraphs and inline text spacing. Select content paragraphs to exclude editor controls. Combine this with a required anchored pattern before a consequential action. Missing paragraphs or mismatched copy fail the run. Existing definitions keep their previous extraction behavior.
+
+`examples/patreon-gallery-post.json` is an optional two-original gallery example. It is never seeded into an install. Contexts, sources, copy and access settings are runtime inputs.
+
 ## Crawl a site
 
 For a concrete test fixture, `examples/ufcstats.json` shows how a site-specific definition can model events, fights and fighters. It is optional example data only. Save a definition's `definition` with `actors_crawl_save`, then pass the returned actor ID to `actors_crawl_run`. The run creates a durable URL frontier, follows configured URL fields into their routes, upserts keyed records into named datasets, and can be inspected with `actors_crawl_status`, `actors_frontier_list`, and `actors_dataset_query`. `actors_crawl_resume` continues pending work after a budget limit or restart.

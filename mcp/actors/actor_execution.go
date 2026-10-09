@@ -1230,10 +1230,25 @@ func extractNodeItem(node *html.Node, fields map[string]actorField, baseURL stri
 			raw, _ = htmlAttribute(target, field.Attribute)
 		} else if strings.HasPrefix(field.Type, "attr:") {
 			raw, _ = htmlAttribute(target, strings.TrimPrefix(field.Type, "attr:"))
+		} else if field.All && field.Selector != "" {
+			matcher, _ := cascadia.Compile(field.Selector) // already checked above
+			var parts []string
+			for _, selected := range cascadia.QueryAll(node, matcher) {
+				if field.PreserveLineBreaks {
+					parts = append(parts, htmlNodeTextLines(selected))
+				} else {
+					parts = append(parts, htmlNodeText(selected))
+				}
+			}
+			raw = strings.Join(parts, "\n")
+		} else if field.PreserveLineBreaks {
+			raw = htmlNodeTextLines(target)
 		} else {
 			raw = htmlNodeText(target)
 		}
-		raw = strings.TrimSpace(raw)
+		if !field.PreserveLineBreaks {
+			raw = strings.TrimSpace(raw)
+		}
 		if field.Pattern != "" {
 			pattern, err := regexp.Compile(field.Pattern)
 			if err != nil {
@@ -1285,6 +1300,59 @@ func htmlNodeText(node *html.Node) string {
 	}
 	walk(node)
 	return strings.Join(strings.Fields(b.String()), " ")
+}
+
+// Preserve the text of editor blocks, including empty paragraphs and inline
+// formatting boundaries. The final block delimiter is structural, not copy.
+// Existing extraction keeps its whitespace-normalizing behavior by default.
+func htmlNodeTextLines(node *html.Node) string {
+	var b strings.Builder
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.TextNode {
+			b.WriteString(strings.ReplaceAll(n.Data, "\ufeff", ""))
+			return
+		}
+		if n.Type == html.ElementNode {
+			if n.Data == "script" || n.Data == "style" || n.Data == "noscript" {
+				return
+			}
+			if _, editorPlaceholder := htmlAttribute(n, "data-slate-zero-width"); editorPlaceholder {
+				return
+			}
+			if n.Data == "br" {
+				// A lone br is an empty editor block's placeholder. Its block
+				// boundary already contributes the appropriate newline.
+				block := n.Parent
+				for block != nil && block.Data != "p" && block.Data != "div" && block.Data != "li" {
+					block = block.Parent
+				}
+				if block == nil || strings.TrimSpace(htmlNodeText(block)) != "" {
+					b.WriteByte('\n')
+				}
+				return
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+		if n == node || n.Type != html.ElementNode {
+			return
+		}
+		switch n.Data {
+		case "p", "h1", "h2", "h3", "h4", "h5", "h6":
+			b.WriteByte('\n')
+		case "div", "li", "blockquote", "ul", "ol":
+			if b.Len() > 0 && !strings.HasSuffix(b.String(), "\n") {
+				b.WriteByte('\n')
+			}
+		}
+	}
+	walk(node)
+	if node.Data == "p" || node.Data == "li" || strings.HasPrefix(node.Data, "h") && len(node.Data) == 2 {
+		return b.String()
+	}
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 func htmlAttribute(node *html.Node, name string) (string, bool) {

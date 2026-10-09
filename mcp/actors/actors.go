@@ -143,11 +143,13 @@ type actorLocator struct {
 }
 
 type actorField struct {
-	Selector  string `json:"selector,omitempty"`
-	Type      string `json:"type,omitempty"`
-	Attribute string `json:"attribute,omitempty"`
-	Required  bool   `json:"required,omitempty"`
-	Pattern   string `json:"pattern,omitempty"`
+	Selector           string `json:"selector,omitempty"`
+	Type               string `json:"type,omitempty"`
+	Attribute          string `json:"attribute,omitempty"`
+	Required           bool   `json:"required,omitempty"`
+	Pattern            string `json:"pattern,omitempty"`
+	PreserveLineBreaks bool   `json:"preserve_line_breaks,omitempty"`
+	All                bool   `json:"all,omitempty"`
 }
 
 type actorRecord struct {
