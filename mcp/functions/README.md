@@ -1,4 +1,9 @@
-# Functions 1.17.0
+# Functions 1.17.1
+
+**Fixed in 1.17.1:** project-wide cursor reads use a dedicated
+project/ID index and fetch telemetry only after selecting the page. First index
+creation requires a maintenance window; see [query behavior, rollout and measured
+validation](HISTORY_PERFORMANCE.md).
 
 **New in 1.17.0:** project-wide Live logs with error and function filters,
 expandable invocation details, live/pause controls, and a configurable Function
