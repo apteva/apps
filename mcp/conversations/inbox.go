@@ -35,19 +35,23 @@ func defaultApprovalActions() []approvalAction {
 }
 
 func approvalCard(title, body string, actions []approvalAction) Component {
-	return Component{App: appName, Name: "approval-card", Props: map[string]any{
+	x := &ComponentInteraction{Blocking: true, Status: "pending", Fields: []InteractionField{{ID: "note", Label: "Note", Type: "text"}}}
+	for _, action := range actions {
+		x.Actions = append(x.Actions, InteractionAction{ID: action.ID, Label: action.Label, Style: action.Style})
+	}
+	return Component{ID: "approval", Version: 1, Interaction: x, App: appName, Name: "approval-card", Props: map[string]any{
 		"title": title, "body": body, "status": "pending", "actions": actions,
 	}}
 }
 
 func reportCard(title, summary, period string, sections []map[string]any) Component {
-	return Component{App: appName, Name: "report-card", Props: map[string]any{
+	return Component{ID: "report", Version: 1, App: appName, Name: "report-card", Props: map[string]any{
 		"title": title, "summary": summary, "period": period, "sections": sections, "status": "sent",
 	}}
 }
 
 func alertCard(text, severity string) Component {
-	return Component{App: appName, Name: "alert-card", Props: map[string]any{
+	return Component{ID: "alert", Version: 1, App: appName, Name: "alert-card", Props: map[string]any{
 		"text": text, "severity": severity,
 	}}
 }
@@ -67,7 +71,7 @@ type InboxItem struct {
 // separate strip (latest per agent), not ranked here.
 func inboxPriority(m *Message) int {
 	switch m.ComponentKind {
-	case kindApproval:
+	case kindApproval, kindInteractive:
 		return 0
 	case kindAlert:
 		switch m.Severity {
@@ -111,7 +115,7 @@ type InboxProject struct {
 	Name string `json:"name"`
 }
 
-const inboxPrioritySQL = `CASE m.component_kind WHEN 'approval' THEN 0 WHEN 'alert' THEN CASE m.severity WHEN 'error' THEN 1 WHEN 'warn' THEN 2 ELSE 3 END WHEN 'report' THEN 4 ELSE 9 END`
+const inboxPrioritySQL = `CASE m.component_kind WHEN 'approval' THEN 0 WHEN 'interactive' THEN 0 WHEN 'alert' THEN CASE m.severity WHEN 'error' THEN 1 WHEN 'warn' THEN 2 ELSE 3 END WHEN 'report' THEN 4 ELSE 9 END`
 
 func (s *store) InboxPage(projectID string, userID, agentID int64, limit int, cursor string, allowedAgents ...int64) (InboxPage, error) {
 	page, err := s.InboxPageAcrossProjects([]string{projectID}, userID, agentID, limit, cursor, allowedAgents...)
@@ -163,7 +167,7 @@ func (s *store) InboxPageAcrossProjects(projectIDs []string, userID, agentID int
  WHERE c.project_id IN (` + strings.Join(projectMarks, ",") + `) AND c.archived_at IS NULL
  AND ((c.owner_user_id=0 AND ?>0) OR c.owner_user_id=? OR EXISTS(SELECT 1 FROM participants p WHERE p.conversation_id=c.id AND p.user_id=?))
  AND (?=0 OR EXISTS(SELECT 1 FROM participants p WHERE p.conversation_id=c.id AND p.agent_id=?))
- AND m.component_kind IN('approval','alert','report') AND (m.component_kind!='approval' OR m.action_status='pending') AND m.dismissed=0
+ AND m.component_kind IN('approval','alert','report','interactive') AND (m.component_kind NOT IN ('approval','interactive') OR m.action_status='pending') AND m.dismissed=0
  AND (m.component_kind!='alert' OR m.inbox_only=1 OR m.id>COALESCE((SELECT r.last_seen_id FROM read_marks r WHERE r.user_id=? AND r.conversation_id=c.id),0))` + allowedConversationSQL(allowedAgents)
 	// Reading an alert clears this reader's notification, not the durable card
 	// or another reader's inbox. Inbox-only alerts cannot be read in a chat;
@@ -178,7 +182,7 @@ func (s *store) InboxPageAcrossProjects(projectIDs []string, userID, agentID int
 		return out, err
 	}
 	out.Attention = map[string]int{}
-	attentionRows, err := tx.Query(`SELECT c.id,MAX(CASE WHEN m.component_kind='alert' AND m.severity='error' THEN 4 WHEN m.component_kind='alert' AND m.severity='warn' THEN 3 WHEN m.component_kind='approval' THEN 2 WHEN m.component_kind='alert' THEN 1 ELSE 0 END)`+base+` GROUP BY c.id`, args...)
+	attentionRows, err := tx.Query(`SELECT c.id,MAX(CASE WHEN m.component_kind='alert' AND m.severity='error' THEN 4 WHEN m.component_kind='alert' AND m.severity='warn' THEN 3 WHEN m.component_kind IN ('approval','interactive') THEN 2 WHEN m.component_kind='alert' THEN 1 ELSE 0 END)`+base+` GROUP BY c.id`, args...)
 	if err != nil {
 		return out, err
 	}
@@ -319,7 +323,17 @@ func applyInboxActionActor(m *Message, actionID, note string, userID int64, exte
 		if note != "" {
 			props["note"] = note
 		}
-		updated[i] = Component{App: c.App, Name: c.Name, Props: props}
+		c.Props = props
+		if c.Interaction != nil {
+			x := *c.Interaction
+			x.Status = "answered"
+			x.ActionID = actionID
+			x.Values = map[string]any{"note": note}
+			x.ResolvedBy = userID
+			x.ResolvedAt = time.Now().UTC().Format(time.RFC3339Nano)
+			c.Interaction = &x
+		}
+		updated[i] = c
 		return updated, map[string]any{"status": actionID, "note": note}, nil
 	}
 	return nil, nil, errors.New("no approval card on message")
@@ -521,6 +535,9 @@ func (a *App) DismissMessage(messageID int64) (*Message, error) {
 	if m.ComponentKind == "" {
 		return nil, fmt.Errorf("message %d is not an inbox item", messageID)
 	}
+	if m.ComponentKind == kindInteractive && m.ActionStatus == "pending" {
+		return nil, errors.New("pending interactive components must be answered or skipped")
+	}
 	if m.ComponentKind == kindApproval && cardStatus(m) == "pending" {
 		return nil, errors.New("pending approvals cannot be dismissed — approve or deny them")
 	}
@@ -535,7 +552,8 @@ func (a *App) DismissMessage(messageID int64) (*Message, error) {
 			props[k] = v
 		}
 		props["dismissed"] = true
-		updated[i] = Component{App: c.App, Name: c.Name, Props: props}
+		c.Props = props
+		updated[i] = c
 	}
 	return a.store.UpdateMessageComponents(m.ID, updated)
 }

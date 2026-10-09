@@ -60,6 +60,7 @@ export function createConversationLocalization(options: ConversationLocalization
   };
   // Translate known app-owned status values only. Unknown/custom values remain intact.
   const statusKeys: Record<string, ConversationMessageKey> = {
+    question:"component.question", interactive:"component.question", answered:"component.answered", cancelled:"component.cancelled", expired:"component.expired",
     public: "chat.public", operator: "chat.operator", private: "chat.private", room: "chat.room", direct: "chat.direct", manual: "telegram.manual", pairing: "telegram.pairing",
     approve: "status.approved", approved: "status.approved", deny: "status.denied", denied: "status.denied",
     pending: "status.pending", info: "status.info", warn: "status.warn", warning: "status.warn",

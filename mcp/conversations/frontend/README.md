@@ -255,3 +255,86 @@ generic robot. Icons follow the active Apteva theme and do not change activity
 or unread indicators. The renderer is a checked-in snapshot of the shared UI
 kit so apps remain compatible with older hosts; refresh it explicitly using
 `bun run sync-agent-mark.ts /path/to/ui-kit/src/AgentMark.tsx`.
+
+## Interactive message components
+
+Agents use the existing `conversations_send.components` argument. No extra tool
+is required. A component has an ID unique within its message, `version: 1`, an
+`app/name` renderer identity, display `props`, and an optional `interaction`.
+For example:
+
+```json
+{
+  "id": "tone",
+  "version": 1,
+  "app": "conversations",
+  "name": "question-card",
+  "props": {"title": "Which tone?", "body": "I will use concise and continue."},
+  "interaction": {
+    "blocking": false,
+    "inbox": true,
+    "fields": [{
+      "id": "tone", "label": "Tone", "type": "choice", "required": true,
+      "allow_custom": true,
+      "options": [{"id": "concise", "label": "Concise"}, {"id": "detailed", "label": "Detailed"}]
+    }]
+  }
+}
+```
+
+`blocking` defaults to false and `inbox` defaults to true. Optional questions
+remain answerable after the agent's final reply; they do not keep Thinking or
+thread activity active. The agent continues using an explicit assumption.
+Blocking input requires a final-phase send followed by waiting; its card says
+“Waiting for your answer.” It does not keep the response animation active.
+This version supports interactive components in operator conversations.
+
+Fields support `text`, `textarea`, `choice`, and `multichoice`. Free-text choices
+are available for single-choice fields. Up to 12 fields, 8 actions, and 20
+components are accepted. If actions are omitted, Submit and Skip are added.
+Explicit actions use `{id,label,style?,cancel?}`; `cancel: true` skips without
+requiring field values. Optional `expires_at` uses a future RFC3339 timestamp;
+the delivery worker persists expiry and notifies the requester.
+
+The app owns pending/answered/cancelled/expired state, values, and resolution
+actor/time. Chat and inbox read the same durable message. Submit through the
+existing `/message-action` route with `{message_id,component_id,action_id,values}`
+or `client.actComponent(messageId, componentId, actionId, values)`. Identical
+retries return the saved result; changed answers or conflicting concurrent
+writes return a conflict. Reload before retrying a concurrent conflict.
+The last inbox-visible pending component must resolve before the inbox row
+clears. A question with `inbox: false` is still actionable in chat.
+
+Results enter the durable delivery ledger and return as `[component.result]`
+to the original agent/thread, including conversation/message/component IDs,
+status, action, values, and actor. The stable source event identity deduplicates
+transport retries. Values are user data; answers never authorize gated actions.
+Existing approval tools retain their authorization and verdict behavior.
+Approvals, reports, alerts, and forms share `MessageComponents` rendering;
+previously saved cards without IDs or versions remain supported. Pending form
+drafts use the existing client storage scope, survive pane/layout remounts, and
+are cleared after a successful answer or skip.
+
+Hosts using the React package can register future widgets:
+
+```tsx
+import {
+  ConversationChat, ConversationComponentProvider,
+  type ConversationComponentProps,
+} from "@apteva/conversations/react";
+
+function Picker({component, submit}: ConversationComponentProps) {
+  return <button onClick={() => void submit("submit", {tone: "concise"})}>
+    {String(component.props.title)}
+  </button>;
+}
+
+<ConversationComponentProvider renderers={{"example/picker": Picker}}>
+  <ConversationChat conversations={conversations} agentId={agentId} />
+</ConversationComponentProvider>
+```
+
+Custom renderers reuse the same submission/lifecycle contract; they must handle
+pending/resolved display and submission errors. Unknown interactive names fall
+back to the built-in form renderer. Unsupported component versions are displayed
+read-only. Display-only unknown components remain inspectable as details.

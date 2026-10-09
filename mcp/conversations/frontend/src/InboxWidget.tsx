@@ -1,3 +1,5 @@
+import { MessageComponents } from "./messageComponents";
+import type { Message } from "./types";
 import { useConversationLocalization, type ConversationLocalization } from "./i18n";
 import { reportSectionsText } from "./messageContent";
 // InboxWidget — the conversations app's dashboard.home widget, a
@@ -12,8 +14,6 @@ import { reportSectionsText } from "./messageContent";
 // `bun run scripts/build-panels.ts --app conversations`.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import createDOMPurify from "dompurify";
-import { marked } from "marked";
 
 export interface HostProps extends ConversationLocalization {
   agentId?: number;
@@ -31,32 +31,6 @@ export interface HostProps extends ConversationLocalization {
 
 import { useConversationAPI } from "./context";
 
-// ─── markdown (same pipeline as the panel / dashboard) ───────────────
-
-marked.setOptions({ breaks: true, gfm: true });
-let purifier: ReturnType<typeof createDOMPurify> | null = null;
-function renderSafeMarkdown(source: string): string {
-  const parsed = marked.parse(source, { async: false }) as string;
-  if (!purifier) purifier = createDOMPurify(window);
-  return purifier.isSupported
-    ? purifier.sanitize(parsed, {
-        USE_PROFILES: { html: true },
-        FORBID_TAGS: ["base", "form", "iframe", "object", "embed", "style", "template"],
-        FORBID_ATTR: ["style", "srcdoc"],
-      })
-    : "";
-}
-
-function InboxMarkdown({ source }: { source: string }) {
-  const html = useMemo(() => renderSafeMarkdown(source), [source]);
-  return (
-    <div
-      className="chat-md text-sm text-text-muted leading-relaxed break-words"
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
-  );
-}
-
 // flattenPreview: one-line plain-text preview of model-authored
 // markdown — raw pipes and heading hashes read as garbage in a row.
 function flattenPreview(source: string): string {
@@ -71,21 +45,7 @@ function flattenPreview(source: string): string {
 
 // ─── wire shapes ─────────────────────────────────────────────────────
 
-interface CardComponent {
-  name: string;
-  props: Record<string, unknown>;
-}
-
-interface InboxMessage {
-  id: number;
-  conversation_id: string;
-  agent_id?: number;
-  content: string;
-  component_kind?: string;
-  severity?: string;
-  components: CardComponent[];
-  created_at: string;
-}
+type InboxMessage = Message;
 
 interface InboxItem {
   priority: number;
@@ -115,7 +75,7 @@ interface InboxTone {
 }
 
 function inboxTone(kind: string, severity: string): InboxTone {
-  if (kind === "approval") {
+  if (kind === "approval" || kind === "interactive") {
     return {
       row: "border-blue/25 bg-blue/5",
       rail: "bg-blue/80",
@@ -175,6 +135,7 @@ function card(message: InboxMessage, name: string): Record<string, unknown> {
 
 function itemTitle(message: InboxMessage): string {
   const kind = message.component_kind;
+  if (kind === "interactive") return String(message.components.find(c=>c.interaction)?.props.title ?? message.content);
   if (kind === "approval") return String(card(message, "approval-card").title ?? message.content);
   if (kind === "report") return String(card(message, "report-card").title ?? message.content);
   return String(card(message, "alert-card").text ?? message.content);
@@ -182,6 +143,7 @@ function itemTitle(message: InboxMessage): string {
 
 function itemBody(message: InboxMessage): string {
   const kind = message.component_kind;
+  if (kind === "interactive") return String(message.components.find(c=>c.interaction)?.props.body ?? "");
   if (kind === "approval") return String(card(message, "approval-card").body ?? "");
   if (kind === "report") return [String(card(message, "report-card").summary ?? ""),reportSectionsText(card(message,"report-card").sections)].filter(Boolean).join("\n\n");
   return String(card(message, "alert-card").text ?? "");
@@ -227,147 +189,13 @@ function Overlay({
 
 // ─── detail modals ───────────────────────────────────────────────────
 
-function DetailModal({
-  open,
-  label,
-  title,
-  meta,
-  body,
-  onClose,
-  onDismiss,
-}: {
-  open: boolean;
-  label: string;
-  title: string;
-  meta?: string;
-  body: string;
-  onClose: () => void;
-  onDismiss?: () => void;
-}) {
-  const { t } = useConversationLocalization();
-  return (
-    <Overlay open={open} onClose={onClose} ariaLabel={label}>
-      <div className="px-5 py-4 border-b border-border flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <div className="text-[10px] uppercase tracking-wide text-accent font-bold">{label}</div>
-          <h2 className="mt-1 text-lg font-bold text-text break-words">{title}</h2>
-          {meta && <div className="mt-1 text-xs text-text-dim">{meta}</div>}
-        </div>
-        <div className="shrink-0 flex items-center gap-2">
-          {onDismiss && (
-            <button
-              type="button"
-              onClick={() => {
-                onDismiss();
-                onClose();
-              }}
-              className="text-text-muted hover:text-text border border-border rounded px-2 py-1 text-xs"
-            >
-              {t("common.dismiss")}
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-text-muted hover:text-text border border-border rounded px-2 py-1 text-xs"
-          >
-            {t("common.close")}
-          </button>
-        </div>
-      </div>
-      <div className="overflow-auto px-5 py-4">
-        {body ? <InboxMarkdown source={body} /> : <p className="text-sm text-text-dim">{t("common.noDetail")}</p>}
-      </div>
-    </Overlay>
-  );
-}
-
-function ApprovalModal({
-  open,
-  message,
-  agentName,
-  onClose,
-  onActed,
-  projectId,
-}: {
-  open: boolean;
-  message: InboxMessage;
-  agentName: string;
-  onClose: () => void;
-  onActed: () => void;
-  projectId: string;
-}) {
-  const { t } = useConversationLocalization();
-  const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
-  const props = card(message, "approval-card");
-  const [note, setNote] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const actions = Array.isArray(props.actions)
-    ? (props.actions as Array<{ id: string; label: string; style?: string }>)
-    : [];
-
-  const act = async (actionId: string) => {
-    setBusy(true);
-    setError("");
-    try {
-      await apiPost(`/message-action`, { message_id: message.id, action_id: actionId, note }, projectId);
-      onActed();
-      onClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Overlay open={open} onClose={onClose} ariaLabel={t("approval.review")}>
-      <div className="px-5 py-4 border-b border-border">
-        <div className="text-[10px] uppercase tracking-wide text-blue font-bold">{t("card.approval")}</div>
-        <h2 className="mt-1 text-lg font-bold text-text break-words">{String(props.title ?? "")}</h2>
-        <div className="mt-1 text-xs text-text-dim">{agentName}</div>
-      </div>
-      <div className="overflow-auto px-5 py-4 space-y-4">
-        {props.body ? <InboxMarkdown source={String(props.body)} /> : null}
-        <input
-          type="text"
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
-          placeholder={t("approval.notePlaceholder")}
-          className="w-full bg-bg-input border border-border rounded px-3 py-2 text-sm text-text focus:border-accent focus:outline-none"
-        />
-        {error && <p className="text-xs text-error">{error}</p>}
-      </div>
-      <div className="flex justify-end gap-2 border-t border-border px-5 py-4">
-        <button
-          type="button"
-          onClick={onClose}
-          disabled={busy}
-          className="rounded border border-border px-3 py-1.5 text-xs text-text-muted hover:text-text"
-        >
-          {t("common.cancel")}
-        </button>
-        {actions.map((a) => (
-          <button
-            key={a.id}
-            type="button"
-            disabled={busy}
-            onClick={() => act(a.id)}
-            className={`rounded px-3 py-1.5 text-xs font-semibold disabled:opacity-50 ${
-              a.style === "danger"
-                ? "bg-error text-bg"
-                : a.style === "primary"
-                  ? "bg-success text-bg"
-                  : "border border-border text-text hover:bg-bg-input"
-            }`}
-          >
-            {a.label}
-          </button>
-        ))}
-      </div>
-    </Overlay>
-  );
+function ComponentModal({open,message,agentName,onClose,onActed,projectId}:{open:boolean;message:InboxMessage;agentName:string;onClose:()=>void;onActed:()=>void;projectId:string}) {
+ const {t}=useConversationLocalization();
+ return <Overlay open={open} onClose={onClose} ariaLabel={itemTitle(message)}>
+  <div className="border-b border-border px-5 py-3 text-xs text-text-muted">{agentName}</div>
+  <div className="overflow-auto px-5 py-4"><MessageComponents message={message} projectId={projectId} onChanged={()=>{onActed();onClose()}}/></div>
+  <div className="flex justify-end gap-2 border-t border-border px-5 py-3"><button type="button" className="rounded border border-border px-3 py-1.5 text-xs text-text" onClick={onClose}>{t("common.close")}</button></div>
+ </Overlay>;
 }
 
 // ─── rows ────────────────────────────────────────────────────────────
@@ -388,17 +216,16 @@ function InboxRow({
   projectName?: string;
 }) {
   const { t, relativeTime, dateTime, statusLabel } = useConversationLocalization();
-  const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
+  const { apiPost } = useConversationAPI();
   const [detailOpen, setDetailOpen] = useState(false);
  const [actionError,setActionError]=useState("");
-  const [approvalOpen, setApprovalOpen] = useState(false);
   const m = item.message;
   const kind = m.component_kind || "report";
   const severity = m.severity || "";
   const tone = inboxTone(kind, severity);
-  const label = kind === "approval" ? t("card.approval") : kind === "report" ? t("card.report") : t("card.alert");
+  const label = kind === "interactive" ? t("component.question") : kind === "approval" ? t("card.approval") : kind === "report" ? t("card.report") : t("card.alert");
   const meta =
-    kind === "approval"
+    kind === "interactive" ? "pending" : kind === "approval"
       ? String(card(m, "approval-card").status ?? "pending")
       : kind === "report"
         ? String(card(m, "report-card").period ?? "") || "report"
@@ -454,12 +281,12 @@ function InboxRow({
           <div className="flex items-center gap-1.5">
             <button
               type="button"
-              onClick={() => (kind === "approval" ? setApprovalOpen(true) : setDetailOpen(true))}
+              onClick={() => setDetailOpen(true)}
               className={`rounded border px-2.5 py-1 text-[11px] ${tone.action}`}
             >
-              {kind === "approval" ? t("common.review") : t("common.open")}
+              {kind === "approval" || kind === "interactive" ? t("common.review") : t("common.open")}
             </button>
-            {kind !== "approval" && (
+            {kind !== "approval" && kind !== "interactive" && (
               <button
                 type="button"
                 onClick={() => void dismiss()}
@@ -472,26 +299,8 @@ function InboxRow({
         </div>
       </article>
       {actionError&&<p role="alert" className="text-xs text-error">{actionError}</p>}
-      {kind === "approval" ? (
-        <ApprovalModal
-          open={approvalOpen}
-          message={m}
-          agentName={agentName}
-          onClose={() => setApprovalOpen(false)}
-          onActed={onChanged}
-          projectId={projectId}
-        />
-      ) : (
-        <DetailModal
-          open={detailOpen}
-          label={label}
-          title={itemTitle(m)}
-          meta={`${agentName}${projectName ? ` · ${projectName}` : ""}${meta ? ` · ${kind === "report" && card(m, "report-card").period ? meta : statusLabel(meta)}` : ""}`}
-          body={itemBody(m)}
-          onClose={() => setDetailOpen(false)}
-          onDismiss={() => void dismiss()}
-        />
-      )}
+      <ComponentModal open={detailOpen} message={m} agentName={agentName} onClose={()=>setDetailOpen(false)} onActed={onChanged} projectId={projectId}/>
+
     </>
   );
 }

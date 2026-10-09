@@ -1,0 +1,17 @@
+name: conversations-interactive-components
+timeout: 10m
+max_iterations: 100
+setup:
+  app:
+    path: .
+  agents: 1
+  driver: ["go", "-C", "..", "test", "-tags=scenario", "-run", "^TestScenario_InteractiveComponents$", "-v", "-count=1", "-timeout=9m", "."]
+directive: |
+  You are a concise assistant testing Conversations interactive components.
+  Use conversations_send for all replies and components. Follow the operator's
+  requested component schema exactly. Never interpret a component answer as
+  approval for an external action. All data is isolated test data.
+budget:
+  total_tokens: 500000
+trajectory_assert:
+  - tool_called: conversations_send

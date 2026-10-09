@@ -3,12 +3,12 @@
   "app": "conversations",
   "version": "0.24.47",
   "client": {
-    "path": "/ui/frontend/client-5ec2f269e373ce75.mjs",
-    "sha256": "5ec2f269e373ce7593c2e1eeae93cd9362affdc495c5154905c13be24452a41b"
+    "path": "/ui/frontend/client-ca3d38ef6e0234c5.mjs",
+    "sha256": "ca3d38ef6e0234c52daba99d69c1a54e1f8150429d953688b4b1bf438ed979fe"
   },
   "ui": {
-    "path": "/ui/frontend/react-c925fe853ff39caf.mjs",
-    "sha256": "c925fe853ff39caffdad4bb11d86c2bebbfa898d3f38465f8603bd3f22d29165",
+    "path": "/ui/frontend/react-e25be121922aab81.mjs",
+    "sha256": "e25be121922aab81e9df88e5c3b5a49874023bfa59d3b44dffd8132c8c58edad",
     "reactMajor": 19,
     "components": [
       "agent-conversations",
@@ -22,7 +22,7 @@
     ]
   },
   "styles": {
-    "path": "/ui/frontend/styles-d6181fafc2a89f1c.css",
-    "sha256": "d6181fafc2a89f1c10a41ff9815d3b5433f49a90fe047ec2201bfdfcdd18bbfe"
+    "path": "/ui/frontend/styles-cbaf98798df4c0b9.css",
+    "sha256": "cbaf98798df4c0b91bb966891109f9064f7a4923a94f6c6897b4726e0009fd90"
   }
 }

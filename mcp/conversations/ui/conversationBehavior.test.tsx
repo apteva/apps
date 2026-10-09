@@ -808,3 +808,13 @@ test("scheduled final confirmation hides housekeeping immediately and the timer 
  await act(async()=>FakeEvents.instances[0].emit({...message(1451,"a","Checked. The run is blocked at verification."),role:"agent",agent_id:41,phase:"final",created_at:"2026-10-08T17:54:28.456117Z"}));
  expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
 });
+
+test("pending non-blocking widget remains accessible after final reply without keeping Thinking active", async()=>{
+ const user=message(1,"a","Draft this while asking an optional question");
+ const optional={...message(2,"a","I'll continue using concise."),role:"agent",agent_id:41,phase:"progress",component_kind:"interactive",components:[{id:"tone",version:1,app:"conversations",name:"question-card",props:{title:"Which tone?"},interaction:{blocking:false,status:"pending",fields:[{id:"tone",label:"Tone",type:"text"}],actions:[{id:"submit",label:"Submit"}]}}]};
+ const final={...message(3,"a","Draft finished."),role:"agent",agent_id:41,phase:"final"};
+ fetcher=url=>url.includes("/activity")||url.includes("/deliveries")?json([]):json({messages:[user,optional,final],cursor:3,before:1,has_more:false});await render();
+ expect(element.textContent).toContain("Optional — work can continue");expect(element.textContent).toContain("Draft finished.");
+ await act(async()=>FakeEvents.instances[0].listeners.get("stream")!({data:JSON.stringify({chat_id:"a",agent_id:41,thread_id:"chat-a",response_progress:{phase:"continuing",run_id:"optional-work",revision:1,after_message_id:1,started_at:user.created_at}})}));
+ expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();expect(element.querySelector("[data-response-waiting]")).toBeNull();expect(element.querySelector("[data-component-id=tone]")).not.toBeNull();
+});

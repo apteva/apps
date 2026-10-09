@@ -43,7 +43,8 @@ test("a reply to a chat left on mobile becomes unread immediately from the list 
   await page.getByRole("button", { name: "Back to conversations" }).click();
   await expect(row).toBeVisible();
   await request.post("/seed-unread", { data: { chat_id: "mobile-one", count: 1 } });
-  await expect(row.getByText("1", { exact: true })).toBeVisible({ timeout: 3_000 });
+  await expect(row.getByRole("img", { name: "Unread messages", exact: true })).toBeVisible({ timeout: 3_000 });
+  await expect(row.getByText("1", { exact: true })).toHaveCount(0);
 });
 
 test("the agent widget marks an unselected chat unread from the same SSE", async ({ page, request }) => {
@@ -51,7 +52,8 @@ test("the agent widget marks an unselected chat unread from the same SSE", async
   const row = page.getByRole("button", { name: /Weather via Pushover/ });
   await expect(row).toBeVisible();
   await request.post("/seed-unread", { data: { chat_id: "mobile-two", count: 1 } });
-  await expect(row.getByText("1", { exact: true })).toBeVisible({ timeout: 3_000 });
+  await expect(row.getByRole("img", { name: "Unread messages", exact: true })).toBeVisible({ timeout: 3_000 });
+  await expect(row.getByText("1", { exact: true })).toHaveCount(0);
 });
 
 for (const surface of ["panel", "widget-browser"] as const) {

@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	sdk "github.com/apteva/app-sdk"
+	"strconv"
+	"strings"
 )
 
 // Lifecycle is execution telemetry, not proof that the approved business action
@@ -11,6 +13,26 @@ func (a *App) handleApprovalLifecycle(_ *sdk.AppCtx, event sdk.Event) error {
 	life, err := sdk.DecodeAgentEventLifecycle(event)
 	if err != nil {
 		return err
+	}
+	if strings.HasPrefix(life.SourceEventID, "conversation:component:") {
+		parts := strings.Split(life.SourceEventID, ":")
+		if len(parts) != 5 || parts[4] != "result" {
+			return fmt.Errorf("unknown component event identity")
+		}
+		id, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return err
+		}
+		m, err := a.store.GetMessage(id)
+		if err != nil {
+			return err
+		}
+		for _, c := range m.Components {
+			if c.ID == parts[3] && c.Interaction != nil && c.Interaction.Status != "pending" {
+				return nil
+			}
+		}
+		return fmt.Errorf("unknown component event identity")
 	}
 	var messageID int64
 	if _, err := fmt.Sscanf(life.SourceEventID, "conversation:approval:%d:result", &messageID); err != nil || messageID <= 0 || life.SourceEventID != fmt.Sprintf("conversation:approval:%d:result", messageID) {

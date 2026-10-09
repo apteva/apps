@@ -118,3 +118,42 @@ live run, not a measured reliability rate across repeated runs.
 Old `go test -tags live` commands and manual install/agent bootstrap scripts are
 superseded. Historical release validation documents retain their original run
 results; they are not instructions for the current suite.
+
+## Interactive components
+
+```sh
+GOWORK=off apteva test --tier 3 --provider openai-codex --model gpt-6.1-sol \
+  --json scenarios/19-interactive-components.yaml
+```
+
+This provisions an isolated agent and tests an optional question followed by a
+final reply without answering it, idle activity while the question stays in the
+inbox, a later answer delivered to the same thread, saved results, identical
+retries and conflicting answers, and a blocking form that resumes after input.
+No additional agent tool is introduced. Unit/race checks additionally cover
+concurrent card updates, missing/invalid values, skip retries, private access,
+archiving, durable delivery recovery, expiry, and inbox opt-out. Browser checks
+cover widget/panel submission, mobile widths, reload, inbox clearing and skipping
+required fields, alongside the existing approval/report/alert tests.
+
+Local validation on 2026-10-09: the real `openai-codex` / `gpt-6.1-sol` scenario
+passed in 113.2 seconds, with 10 iterations and 146,625 total tokens. Actual
+telemetry verified the provider/model. This is one successful run, not a
+reliability-rate estimate.
+
+The first attempt found a Server subscription startup limitation: app telemetry
+caches eligible agents and refreshes them every 60 seconds
+(`server/apps_telemetry.go`, `telemetryOwnedAgentsRefresh`). The runner installs
+Conversations before creating the agent, so its first turn can occur before the
+app receives that agent's `event.received` and completion events. The question
+and final reply were saved, but activity remained active. This scenario waits
+65 seconds for freshly provisioned agents to enter the subscription before its
+first user turn. The Server limitation remains; no Server code was changed.
+
+Final checks for this implementation passed: the full pinned-SDK Go suite,
+interactive-component race checks, sidecar integration tests, 106 Bun UI/client
+tests, 90 Playwright browser tests, frontend builds, and public consumer type
+checks. Older browser assertions were aligned with the already-shipped tool-row
+Thinking animation and unread dots. The spacing regression checks caught an
+empty component wrapper; it now renders nothing for ordinary messages without
+components.

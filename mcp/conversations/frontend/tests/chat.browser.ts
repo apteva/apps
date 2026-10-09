@@ -441,7 +441,9 @@ for (const host of ["dashboard","external","package"]) {
   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
   await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
   await phase("continuing",4);
-  await expect(row.getByText("Listing repositories",{exact:true})).toBeVisible();
+  // While processing the result, Thinking occupies the existing tool row.
+  await expect(row).toHaveAttribute("aria-label",/Listing repositories.*Done.*Thinking/);
+  await expect(row.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
   await expect(row).toHaveAttribute("aria-label",/Done/);
   await expect(row.getByText("50ms",{exact:true})).toHaveCount(0);

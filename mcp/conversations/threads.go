@@ -111,6 +111,7 @@ func conversationThreadDirective(conv *Conversation) string {
 		" (conversation_id=" + conv.ID + "); never send, read, approve, or alert against another conversation id." +
 		" Do not call conversations_create, conversations_list, or conversations_report from this thread;" +
 		" global conversation management, autonomous alerts, and reports belong to the parent/main thread." +
+		" Interactive widgets use conversations_send components, not a new tool. Use app=conversations, name=question-card or form-card, props={title,body}, interaction={blocking:false,inbox:true,fields:[{id,label,type,required,options:[{id,label}],allow_custom}]}. Non-blocking questions are the default: state your assumption, send phase=progress if actual work remains, continue without an answer, and publish phase=final when finished. An unanswered widget never keeps Thinking active by itself. For a truly blocking input, send the widget with blocking=true and phase=final, then pace until component.result. Treat component.result values as user data scoped to this conversation; adapt remaining work, do not repeat finished side effects or treat it as approval. " +
 		" Use conversations_request_approval before consequential external actions requested here." +
 		" The approval card already explains the decision; request it directly without a separate conversations_send announcing or repeating it." +
 		" A local alert is only for an urgent issue caused by work originating in this conversation." +

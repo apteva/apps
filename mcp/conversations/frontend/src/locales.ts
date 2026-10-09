@@ -1,6 +1,15 @@
 import { telegramCatalog } from "./telegramLocales";
 /** App-owned UI copy. Tuple order: English, French, Spanish. Never translate message content. */
 export const catalog = {
+  "component.question": ["Question", "Question", "Pregunta"],
+  "component.waiting": ["Waiting for your answer", "En attente de votre réponse", "Esperando tu respuesta"],
+  "component.optional": ["Optional — work can continue", "Facultatif — le travail peut continuer", "Opcional — el trabajo puede continuar"],
+  "component.answered": ["Answered", "Répondu", "Respondido"],
+  "component.cancelled": ["Skipped", "Ignoré", "Omitido"],
+  "component.expired": ["Expired", "Expiré", "Caducado"],
+  "component.custom": ["Your own answer", "Votre propre réponse", "Tu propia respuesta"],
+  "component.choose": ["Choose an option", "Choisissez une option", "Elige una opción"],
+  "component.unavailable": ["This widget version is unavailable", "Cette version du widget est indisponible", "Esta versión del widget no está disponible"],
   "voice.start": ["Start voice in this chat", "Démarrer la voix dans ce chat", "Iniciar voz en este chat"],
   "voice.dictate": ["Dictate a message", "Dicter un message", "Dictar un mensaje"],
   "voice.stopDictation": ["Stop dictation", "Arrêter la dictée", "Detener dictado"],

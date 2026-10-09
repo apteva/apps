@@ -37,6 +37,7 @@ func newAdapterRegistry(app *App, h *hub) *adapterRegistry {
 	r := &adapterRegistry{byID: map[string]adapter{}}
 	r.register(&webAdapter{hub: h})
 	r.register(&agentAdapter{app: app})
+	r.register(&componentAdapter{app: app})
 	r.register(&agentInboundAdapter{app: app})
 	r.register(&appCallbackAdapter{})
 	r.register(&telegramAdapter{app: app})

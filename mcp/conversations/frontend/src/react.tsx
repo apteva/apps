@@ -89,3 +89,7 @@ export const conversationsComponents = {
   "agent-conversations": AgentConversations,
   "inbox-overview": Inbox,
 };
+
+export { MessageComponents, ConversationComponentProvider } from "./messageComponents";
+export type { ConversationComponentRenderer, ConversationComponentRenderers, ConversationComponentProps } from "./messageComponents";
+export type { CardComponent, ComponentInteraction, InteractionField, InteractionAction } from "./types";

@@ -152,6 +152,9 @@ func (a *App) Workers() []sdk.Worker {
 			Name:     "delivery-retry",
 			Schedule: "@every 10s",
 			Run: func(_ context.Context, app *sdk.AppCtx) error {
+				if err := a.expireComponents(app); err != nil {
+					return err
+				}
 				if a.deliveryWorker != nil {
 					a.wakeDeliveries()
 					return nil
@@ -189,6 +192,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "send",
 			Description: "Reply from the originating conversation thread to that exact conversation. Authenticated visitor " +
 				"work stays there; never rewrite an app-owned chat with Core update/evolve or delegate its identity-dependent calls. " +
+				"Use components for interactive widgets: app=conversations, name=question-card or form-card, props={title,body}, interaction={blocking:false,inbox:true,fields:[{id,label,type,required,options:[{id,label}],allow_custom}],actions:[{id,label,cancel}]}. Non-blocking is the default: keep working using a stated assumption, and send your final outcome without waiting for an answer. Blocking components need phase=final, then pace until component.result; an unanswered widget never authorizes an approval. Results return asynchronously as component.result to this exact thread. Do not keep a response open only for unanswered widgets. " +
 				"Main returns escalated decisions/results to the originating thread; generic workers report to their parent and are " +
 				"never granted Conversations tools. Delivery updates every bound surface. Set phase to " +
 				"acknowledgement, progress, or final. For a confirmation followed only by Core pace/timed waiting, use phase=final before pace; the later timer wake is a fresh response. Do not use acknowledgement/progress just to keep a future follow-up open. If sending a pre-work acknowledgement, call this tool alone and wait for its result before calling work tools; do not batch them. For short flows, including several related tool calls, keep working through to the final outcome without a progress update. Tool count or a routine stage boundary alone is not a reason to send an update. For longer work, complete a substantial batch before sending a concise progress update, and only when meaningful work remains. Combine nearby milestones; normally leave about a minute between updates unless the user needs to know about a blocker, material plan change, or decision sooner. Do not narrate individual tool calls, routine retries, or unchanged waits. If completion is near, finish and send the final outcome instead. Exception: main may acknowledge its own resolved approval " +
@@ -199,7 +203,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"idempotency_key":     map[string]any{"type": "string"},
 				"phase":               map[string]any{"type": "string", "enum": []string{"acknowledgement", "progress", "final"}, "description": "final completes the current visible response without cancelling future work. Use final for a confirmation followed only by pace/timed waiting; acknowledgement/progress mean work remains now."},
 				"approval_message_id": map[string]any{"type": "integer", "minimum": 1, "description": "Resolved approval being acknowledged by its originating main thread."},
-				"components":          map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+				"components":          componentsSchema(),
 				"attachments":         map[string]any{"type": "array", "items": sdk.FileReferencePassthroughSchema("Optional image or file handles produced by the platform. Pass the complete _file handle unchanged; Conversations stores it and presents it to authorized viewers.")},
 			}, []string{"conversation_id"}),
 			HandlerCtx: a.toolSend,
@@ -458,10 +462,33 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 	if err := a.authorizeAgentReferenceAttachments(ctx, app, conv, attachments); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(text) == "" && len(attachments) == 0 {
+	if err := normalizeInteractions(components, time.Now()); err != nil {
+		return nil, err
+	}
+	hasInteraction, blocking := false, false
+	for _, c := range components {
+		if c.Interaction != nil {
+			hasInteraction = true
+			blocking = blocking || c.Interaction.Blocking
+		}
+	}
+	if blocking && phase != "final" {
+		return nil, errors.New("blocking components require phase=final before waiting")
+	}
+	if hasInteraction {
+		if err := requireOperatorAudience(conv, "interactive components"); err != nil {
+			return nil, err
+		}
+	}
+	if strings.TrimSpace(text) == "" && len(attachments) == 0 && len(components) == 0 {
 		return nil, errors.New("text or attachments required")
 	}
+	kind, actionStatus := "", ""
+	if hasInteraction {
+		kind, actionStatus = kindInteractive, interactionMessageState(components)
+	}
 	msg, inserted, err := a.appendAndDeliver(app, conv, &Message{
+		ComponentKind: kind, ActionStatus: actionStatus,
 		ConversationID: conv.ID, Role: "agent", Content: text,
 		AgentID: from.AgentID, ThreadID: from.ThreadID,
 		ClientID: clientID, Phase: phase,
@@ -472,7 +499,7 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 	}
 	// The durable reply supersedes any pending thinking bubble.
 	a.streamer.settleAck(conv.ID, from.AgentID)
-	if phase == "final" {
+	if phase == "final" || blocking {
 		a.streamer.finishResponse(conv.ID, from.AgentID)
 	} else {
 		a.streamer.intermediateReply(conv.ID, from.AgentID)
@@ -725,18 +752,18 @@ func componentsArg(args map[string]any, key string) ([]Component, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Component, 0, len(objects))
-	for _, obj := range objects {
-		app, _ := obj["app"].(string)
-		name, _ := obj["name"].(string)
-		if strings.TrimSpace(app) == "" || strings.TrimSpace(name) == "" {
+	raw, err := json.Marshal(objects)
+	if err != nil {
+		return nil, err
+	}
+	var out []Component
+	if err = json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("invalid components: %w", err)
+	}
+	for _, c := range out {
+		if strings.TrimSpace(c.App) == "" || strings.TrimSpace(c.Name) == "" {
 			return nil, errors.New("each component requires app and name")
 		}
-		props, _ := obj["props"].(map[string]any)
-		if props == nil {
-			props = map[string]any{}
-		}
-		out = append(out, Component{App: app, Name: name, Props: props})
 	}
 	return out, nil
 }

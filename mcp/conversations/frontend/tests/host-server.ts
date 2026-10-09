@@ -70,8 +70,17 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  const path=url.pathname.replace("/api/apps/conversations","");
  if(path==="/ui/frontend.json")return new Response(Bun.file(join(root,"../ui/frontend.json")),{headers:{"Content-Type":"application/json"}});
  if(/^\/ui\/frontend\/[a-z]+-[a-f0-9]{16}\.(mjs|css)$/.test(path))return new Response(Bun.file(join(root,"..",path.slice(1))),{headers:{"Content-Type":path.endsWith(".css")?"text/css":"text/javascript"}});
- if(path==="/inbox") {const items=[{message:report(user),priority:2},...(!resolved.has(user)?[{message:approval(user),priority:0}]:[])];return Response.json({items,total:items.length,next_cursor:""});}
- if(path==="/message-action"){const body=await req.json();if(body.message_id!==92)return new Response("missing",{status:404});resolved.add(user);return Response.json({message:approval(user)});}
+ if(path==="/inbox") {const questions=(rows.get(user)??[]).filter(m=>m.component_kind==="interactive"&&m.components.some((c:any)=>c.interaction?.status==="pending"&&c.interaction.inbox!==false)).map(message=>({message,priority:0}));const items=[...questions,{message:report(user),priority:2},...(!resolved.has(user)?[{message:approval(user),priority:0}]:[])];return Response.json({items,total:items.length,next_cursor:""});}
+ if(path==="/message-action"){const body=await req.json();calls.at(-1).body=body;
+  if(body.component_id){
+   const m=(rows.get(user)??[]).find(m=>m.id===body.message_id);const c=m?.components.find((c:any)=>c.id===body.component_id);
+   if(!c?.interaction)return new Response("missing",{status:404});
+   const action=c.interaction.actions.find((a:any)=>a.id===body.action_id);if(!action)return new Response("invalid action",{status:400});
+   c.interaction.status=action.cancel?"cancelled":"answered";c.interaction.action_id=action.id;c.interaction.values=action.cancel?{}:body.values;m.revision=(m.revision??0)+1;
+   for(const stream of streams){try{stream.enqueue(new TextEncoder().encode(`event: message\ndata: ${JSON.stringify(m)}\n\n`));}catch{streams.delete(stream);}}
+   return Response.json({message:m});
+  }
+  if(body.message_id!==92)return new Response("missing",{status:404});resolved.add(user);return Response.json({message:approval(user)});}
  if(path==="/message-dismiss")return Response.json({ok:true});
  if(path==="/attachments"){
   const chat=url.searchParams.get("chat_id");
@@ -80,7 +89,7 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  }
  if(path==="/activity")return Response.json(activityRows.get(`chat-${user}`)??[]);
  if(path==="/activity-summary")return Response.json({active_conversation_ids:activeConversations});
- if(path==="/agents")return Response.json([{id:41,name:"Assistant",attached:true},{id:42,name:"Scheduling assistant",attached:true}]);
+ if(path==="/agents")return Response.json([{id:41,name:"Assistant",status:"running",attached:true},{id:42,name:"Scheduling assistant",status:"running",attached:true}]);
  if(path==="/unread-summary")return Response.json([...unreadConversations].map(([conversation_id,unread])=>({conversation_id,unread,latest_id:101})));
  if(path==="/chats"&&req.method==="POST") {const body=await req.json();calls.at(-1).body=body;const created={...conversation(user),id:"new-operator-chat",title:body.title||"New conversation",lead_agent_id:body.lead_agent_id,audience:body.audience};panelRows=[created,...panelRows];return Response.json(created);}
  if(path==="/chats"&&url.searchParams.has("id"))return Response.json(panelRows.find(item=>item.id===url.searchParams.get("id"))??conversation(user));

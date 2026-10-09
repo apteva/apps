@@ -17,7 +17,9 @@ for (const host of ["dashboard", "panel", "external", "package"]) {
    const message=(offset:number,role:string,phase:string,content:string)=>request.post("/append-message",{data:{id:id+offset,conversation_id:chat,role,agent_id:role==="agent"?41:0,phase,content,components:[],created_at:new Date().toISOString()}});
    const animatedThinking=async()=>{
     await expect(thinking).toHaveCount(1); await expect(thinking).toBeVisible();
-    await expect.poll(()=>thinking.locator(".chat-thinking-dots > span").first().evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-thinking-dot");
+    // Thinking may be the standalone dots or the existing tool row's
+    // continuing label; both must stay visibly animated through refresh.
+    await expect.poll(()=>thinking.evaluate(el=>getComputedStyle(el.matches(".chat-tool-copy-continuing")?el:el.querySelector(".chat-thinking-dots > span")!).animationName)).toMatch(/chat-(thinking-dot|tool-copy-breathe)/);
    };
    await message(0,"user","final",`Request ${round}`); await progress("thinking"); await animatedThinking();
    await message(1,"agent","acknowledgement",`I will check request ${round}.`); await animatedThinking();
@@ -105,7 +107,9 @@ for (const host of ["dashboard", "panel", "external", "package"]) {
   const thinking=page.getByRole("status",{name:"Thinking",exact:true});
   const animatedThinking=async()=>{
    await expect(thinking).toBeVisible();
-   await expect.poll(()=>thinking.locator(".chat-thinking-dots > span").first().evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-thinking-dot");
+   // Thinking may be the standalone dots or the existing tool row's
+    // continuing label; both must stay visibly animated through refresh.
+    await expect.poll(()=>thinking.evaluate(el=>getComputedStyle(el.matches(".chat-tool-copy-continuing")?el:el.querySelector(".chat-thinking-dots > span")!).animationName)).toMatch(/chat-(thinking-dot|tool-copy-breathe)/);
   };
   const animatedTool=async()=>{
    await expect(page.locator(".chat-tool-copy-running")).toHaveCount(1);

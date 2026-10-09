@@ -1467,3 +1467,149 @@ func TestScenario_ConversationApprovalDestination(t *testing.T) {
 	}
 	t.Fatal("no bound-thread verdict acknowledgement within 120s")
 }
+
+// A pending optional question must not stall useful work; its later answer
+// resumes the exact same thread, with the original card updated in place.
+func TestScenario_InteractiveComponents(t *testing.T) {
+	c := newScenarioClient(t)
+	agent, _ := c.ensureAgent()
+	// The isolated runner installs the app before creating this agent. Server
+	// refreshes app-telemetry ownership every 60s; wait for that subscription
+	// prerequisite so early event.received/final events reach Conversations.
+	t.Log("waiting for freshly created agent to join app telemetry ownership")
+	time.Sleep(65 * time.Second)
+	var conv struct {
+		ID string `json:"id"`
+	}
+	if status := c.do("POST", "/api/apps/conversations/chats", map[string]any{"agent_id": agent, "title": "Interactive component lifecycle"}, &conv); status != 200 || conv.ID == "" {
+		t.Fatalf("create: %d", status)
+	}
+	defer c.deleteConversation(conv.ID)
+	path := "/api/apps/conversations/messages?chat_id=" + conv.ID
+	send := func(text, key string) {
+		if status := c.do("POST", path, map[string]any{"content": text, "client_message_id": key}, nil); status != 200 {
+			t.Fatalf("send %d", status)
+		}
+	}
+	rows := func() []Message {
+		var out []Message
+		if status := c.do("GET", path, nil, &out); status != 200 {
+			t.Fatalf("history %d", status)
+		}
+		return out
+	}
+	waitFinal := func(token string) Message {
+		deadline := time.Now().Add(150 * time.Second)
+		for time.Now().Before(deadline) {
+			for _, m := range rows() {
+				if m.Role == "agent" && m.Phase == "final" && strings.Contains(m.Content, token) {
+					return m
+				}
+			}
+			time.Sleep(time.Second)
+		}
+		t.Fatalf("no final containing %q", token)
+		return Message{}
+	}
+	idle := func() {
+		deadline := time.Now().Add(40 * time.Second)
+		for time.Now().Before(deadline) {
+			var entries struct {
+				Active []string `json:"active_conversation_ids"`
+			}
+			if code := c.do("GET", "/api/apps/conversations/activity-summary", nil, &entries); code != 200 {
+				t.Fatalf("activity %d", code)
+			}
+			active := false
+			for _, id := range entries.Active {
+				active = active || id == conv.ID
+			}
+			if !active {
+				return
+			}
+			time.Sleep(time.Second)
+		}
+		t.Fatal("pending widget kept thread active")
+	}
+	send(`Use conversations_send to send exactly one optional question widget in this conversation with phase=progress, text="I will use concise and keep working.", and components=[{"id":"tone","version":1,"app":"conversations","name":"question-card","props":{"title":"Which tone?"},"interaction":{"blocking":false,"inbox":true,"fields":[{"id":"tone","label":"Tone","type":"choice","required":true,"allow_custom":true,"options":[{"id":"concise","label":"Concise"},{"id":"detailed","label":"Detailed"}]}]}}]. Then WITHOUT waiting for my answer prepare a three-item plan and send a separate final reply containing exactly NONBLOCK_WORK_DONE. You must finish even if I never answer. When a component.result later contains tone=detailed, reply with phase=final containing LATE_ANSWER_DETAILED without reposting a widget or repeating the plan.`, "interactive-nonblocking")
+	waitFinal("NONBLOCK_WORK_DONE")
+	var card Message
+	for _, m := range rows() {
+		if m.ComponentKind == kindInteractive {
+			card = m
+			break
+		}
+	}
+	if card.ID == 0 || len(card.Components) != 1 || card.Components[0].Interaction == nil || card.Components[0].Interaction.Blocking || card.Components[0].Interaction.Status != "pending" {
+		t.Fatalf("optional card %+v", card)
+	}
+	idle()
+	// Reload through the inbox; both surfaces must identify the same saved row.
+	var inbox struct {
+		Items []struct {
+			Message Message `json:"message"`
+		} `json:"items"`
+	}
+	c.do("GET", "/api/apps/conversations/inbox?page=1", nil, &inbox)
+	found := false
+	for _, i := range inbox.Items {
+		found = found || i.Message.ID == card.ID
+	}
+	if !found {
+		t.Fatal("optional question missing from inbox after completion")
+	}
+	body := map[string]any{"message_id": card.ID, "component_id": "tone", "action_id": "submit", "values": map[string]any{"tone": "detailed"}}
+	var result struct {
+		Message Message `json:"message"`
+	}
+	if status := c.do("POST", "/api/apps/conversations/message-action", body, &result); status != 200 {
+		t.Fatalf("late answer %d", status)
+	}
+	if result.Message.Components[0].Interaction.Status != "answered" {
+		t.Fatal("late answer not persisted")
+	}
+	waitFinal("LATE_ANSWER_DETAILED")
+	idle()
+	if status := c.do("POST", "/api/apps/conversations/message-action", body, nil); status != 200 {
+		t.Fatalf("identical answer retry %d", status)
+	}
+	body["values"] = map[string]any{"tone": "concise"}
+	if status := c.do("POST", "/api/apps/conversations/message-action", body, nil); status < 400 {
+		t.Fatal("conflicting answer overwrote saved decision")
+	}
+	send(`Send exactly one blocking form using conversations_send phase=final with text="Please choose before I continue.", components=[{"id":"required-choice","version":1,"app":"conversations","name":"form-card","props":{"title":"Required preference"},"interaction":{"blocking":true,"inbox":true,"fields":[{"id":"choice","label":"Required preference","type":"text","required":true}]}}]. Then call pace to wait. Do not do more work until component.result arrives. On choice=blue, send phase=final containing BLOCKING_ANSWER_BLUE.`, "interactive-blocking")
+	deadline := time.Now().Add(150 * time.Second)
+	var blocked Message
+	for time.Now().Before(deadline) {
+		for _, m := range rows() {
+			for _, cmp := range m.Components {
+				if cmp.ID == "required-choice" {
+					blocked = m
+				}
+			}
+		}
+		if blocked.ID > 0 {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	if blocked.ID == 0 || !blocked.Components[0].Interaction.Blocking {
+		t.Fatal("blocking form missing")
+	}
+	idle()
+	if status := c.do("POST", "/api/apps/conversations/message-action", map[string]any{"message_id": blocked.ID, "component_id": "required-choice", "action_id": "submit", "values": map[string]any{"choice": "blue"}}, nil); status != 200 {
+		t.Fatalf("blocking answer %d", status)
+	}
+	waitFinal("BLOCKING_ANSWER_BLUE")
+	idle()
+	count := 0
+	for _, m := range rows() {
+		if m.Role == "agent" && m.Phase == "final" && strings.Contains(m.Content, "LATE_ANSWER_DETAILED") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("late result delivered more than once: %d", count)
+	}
+	t.Log("optional question survived completion, late answer resumed its owner, retries were safe, blocking form waited and resumed")
+}

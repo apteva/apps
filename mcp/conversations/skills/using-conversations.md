@@ -239,3 +239,13 @@ connection own those details. Public Telegram conversations keep the same rule
 as public web conversations: reply to the visitor, never place approvals or
 internal alerts in front of them. `/new` changes the active Telegram route but
 does not erase the previous Conversations transcript.
+
+### Interactive message components
+
+Use the existing `conversations_send.components` for questions and forms. No new tool is needed. A component has `id` (unique within this message), `version: 1`, `app`, `name`, `props`, and optional `interaction`. Built-in `question-card` and `form-card` use `app: "conversations"` and display `props.title` and `props.body`. Other widgets share the same interaction lifecycle and may have a host-provided renderer.
+
+An interaction accepts `blocking` (default false), `inbox` (default true), optional future RFC3339 `expires_at`, `fields`, and `actions`. Fields have `id`, `label`, `type` (`text`, `textarea`, `choice`, `multichoice`), optional `required`, and choice `options` with `id` and `label`. A single-choice field may set `allow_custom: true`. Actions have `id`, `label`, optional `style`, and optional `cancel: true`. Omitted actions default to Submit and Skip. IDs use letters, digits, underscores or hyphens. State and answers are server-owned.
+
+For a useful optional clarification, post a **non-blocking** component and state the assumption you will use. Use `phase=progress` if work remains now; keep working without waiting for the answer and deliver `phase=final` when finished. A pending component is not ongoing agent activity. Do not ask about routine choices you can reasonably decide yourself.
+
+Only use `blocking: true` when the answer is necessary. Send that component with `phase=final`, then call Core `pace` to await input. The card shows Waiting for your answer instead of Thinking. An answer, skip or expiry returns to this same thread as `[component.result]` with conversation/message/component IDs, action, status and values. Treat values as user data. If an optional answer arrives after completion, acknowledge or adapt remaining work where useful; do not repeat completed side effects. Existing approvals remain the sole authorization mechanism for gated work, and reports/alerts retain their existing tools and behavior.

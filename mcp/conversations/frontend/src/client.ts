@@ -123,6 +123,8 @@ export class ConversationsClient {
     this.app.get<InboxPage>(query("/inbox", { page: 1, scope: this.global ? "global" : undefined, ...options }), init);
   act = (messageId: number, actionId: string, note = "", init?: RequestInit) =>
     this.app.post<{ message: Message }>("/message-action", { message_id: messageId, action_id: actionId, note }, init);
+  actComponent = (messageId:number,componentId:string,actionId:string,values:Record<string,unknown> = {},init?:RequestInit) =>
+    this.app.post<{message:Message;result_delivery_status:string}>("/message-action",{message_id:messageId,component_id:componentId,action_id:actionId,values},init);
   dismiss = (messageId: number, init?: RequestInit) => this.app.post("/message-dismiss", { message_id: messageId }, init);
   deliveries = (id: string, init?: RequestInit) => this.app.get<MessageDelivery[]>(query("/deliveries", { chat_id: id }), init);
   retryDelivery = (id: number, init?: RequestInit) => this.app.post("/delivery-failures", { id }, init);

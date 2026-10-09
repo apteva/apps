@@ -15,7 +15,13 @@ export interface Conversation {
   archived_at?: string | null;
 }
 
+export interface InteractionField {id:string;label:string;type:"text"|"textarea"|"choice"|"multichoice";required?:boolean;options?:Array<{id:string;label:string}>;allow_custom?:boolean}
+export interface InteractionAction {id:string;label:string;style?:"primary"|"secondary"|"danger";cancel?:boolean}
+export interface ComponentInteraction {blocking:boolean;inbox?:boolean;expires_at?:string;fields?:InteractionField[];actions:InteractionAction[];status:"pending"|"answered"|"cancelled"|"expired";action_id?:string;values?:Record<string,unknown>;resolved_by?:number;resolved_at?:string}
 export interface CardComponent {
+  id?:string;
+  version?:number;
+  interaction?:ComponentInteraction;
   app: string;
   name: string;
   props: Record<string, unknown>;

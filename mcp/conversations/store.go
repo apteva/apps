@@ -51,9 +51,12 @@ type Conversation struct {
 // report-card, alert-card, status-card). Kept schema-compatible with
 // channel-chat's shape so the dashboard's existing renderers port over.
 type Component struct {
-	App   string         `json:"app"`
-	Name  string         `json:"name"`
-	Props map[string]any `json:"props"`
+	ID          string                `json:"id,omitempty"`
+	Version     int                   `json:"version,omitempty"`
+	Interaction *ComponentInteraction `json:"interaction,omitempty"`
+	App         string                `json:"app"`
+	Name        string                `json:"name"`
+	Props       map[string]any        `json:"props"`
 }
 
 type Message struct {

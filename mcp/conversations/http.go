@@ -1409,9 +1409,11 @@ func (a *App) handleGlobalInbox(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		MessageID int64  `json:"message_id"`
-		ActionID  string `json:"action_id"`
-		Note      string `json:"note"`
+		MessageID   int64          `json:"message_id"`
+		ActionID    string         `json:"action_id"`
+		ComponentID string         `json:"component_id"`
+		Values      map[string]any `json:"values"`
+		Note        string         `json:"note"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&body); err != nil ||
 		body.MessageID == 0 || strings.TrimSpace(body.ActionID) == "" {
@@ -1421,6 +1423,10 @@ func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {
 	msg, _, err := a.authorizeMessage(r, body.MessageID)
 	if err != nil {
 		http.Error(w, "message not found", http.StatusNotFound)
+		return
+	}
+	if body.ComponentID != "" && msg.ComponentKind != kindApproval {
+		a.componentActionHTTP(w, r, msg, body.ComponentID, body.ActionID, body.Values)
 		return
 	}
 	updated, err := a.resolveApproval(a.appCtx(r), msg, body.ActionID, body.Note, requestUser(r))
