@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.11.3
+version: 0.11.4
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -364,6 +364,7 @@ upgrade_policy: auto-patch
 var globalCtx *sdk.AppCtx
 
 type App struct {
+	mediaBridges     carrierBridgeRegistry
 	callReads        callReadCache
 	outboundHints    outboundInventoryHints
 	admissionMu      sync.RWMutex
@@ -456,6 +457,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 }
 
 func (a *App) OnUnmount(*sdk.AppCtx) error {
+	a.stopCarrierBridges()
 	a.stopRoutingDispatcher()
 	a.stopSIPGateway()
 	return nil
@@ -463,6 +465,7 @@ func (a *App) OnUnmount(*sdk.AppCtx) error {
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{
+		{Name: "carrier-media-recovery", Schedule: "@every 1s", Run: a.runCarrierMediaRecovery},
 		{Name: "audio-telemetry", Schedule: "@every 5s", Run: a.runAudioTelemetryTick},
 		{Name: "carrier-activations", Schedule: "@every 1s", Run: a.runCarrierActivations},
 		{Name: "ai-handoffs", Schedule: "@every 1s", Run: a.runAIHandoffs},
@@ -2394,6 +2397,9 @@ func (a *App) rejectInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 }
 
 func (a *App) killCallThread(ctx *sdk.AppCtx, row *callRow) error {
+	if row != nil {
+		a.cancelCarrierBridge(row.ID)
+	}
 	// Human softphone calls use a synthetic thread ID for call persistence but
 	// do not spawn a Core agent thread. Avoid asking the platform to kill agent
 	// zero when their carrier leg ends.
@@ -2507,7 +2513,7 @@ func (a *App) handleStatusCallback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if update.MediaStatus != "" {
+	if update.MediaStatus != "" && !a.carrierStreamEvent(row, update) {
 		closeCode := 0
 		closeReason := update.MediaError
 		closeLeg := ""
@@ -2516,8 +2522,8 @@ func (a *App) handleStatusCallback(w http.ResponseWriter, r *http.Request) {
 			closeLeg = string(mediaCloseLegCarrier)
 		}
 		if update.MediaStatus == "error" {
-			closeCode = 1011
-			closeLeg = string(mediaCloseLegCarrier)
+			closeCode = 0 // Provider callbacks are not WebSocket close frames.
+			closeLeg = "provider_event"
 		}
 		if err := a.db().updateMediaStatusWithLeg(callID, update.MediaStatus, update.MediaError, closeCode, closeReason, closeLeg); err != nil {
 			http.Error(w, "persist media status", http.StatusInternalServerError)
@@ -2625,6 +2631,7 @@ func (a *App) handleTwilioStreamStatus(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "persist stream notification", http.StatusInternalServerError)
 			return
 		}
+		a.recordCarrierBridgeObservation(row, carrierBridgeEvidence{Kind: "provider_" + event, Leg: "provider", StreamID: strings.TrimSpace(r.FormValue("StreamSid")), Detail: strings.TrimSpace(r.FormValue("StreamError"))})
 		// Do not log request URLs, callback credentials, or provider error text.
 		globalCtx.Logger().Info("twilio provider stream notification", "call", callID,
 			"event", event, "recorded", recorded)
@@ -3079,9 +3086,14 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 		}
 		if row != nil {
 			if media := telnyxMediaStatusFromEvent(event.Data.EventType); media != "" {
-				if err := a.db().updateMediaStatusWithLeg(row.ID, media, "", 0, "", string(mediaCloseLegCarrier)); err != nil {
-					http.Error(w, "persist carrier media", 500)
-					return
+				// Inbound routes and outbound status callbacks use the same parser
+				// and generation checks, including failure_reason and stream_id.
+				u := telnyxCallbackUpdate(&http.Request{Body: io.NopCloser(strings.NewReader(string(body)))})
+				if !a.carrierStreamEvent(row, u) {
+					if err := a.db().updateMediaStatusWithLeg(row.ID, media, u.MediaError, 0, u.MediaError, "provider_event"); err != nil {
+						http.Error(w, "persist carrier media", 500)
+						return
+					}
 				}
 			}
 		}
@@ -3101,8 +3113,11 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 			if created && globalCtx != nil {
 				_ = a.publishLifecycleEvents(globalCtx.WithProject(row.ProjectID), row.ID)
 			}
-			if isTerminalStatus(status) && globalCtx != nil {
-				_ = a.killCallThread(globalCtx.WithProject(row.ProjectID), row)
+			if isTerminalStatus(status) {
+				_, _ = a.db().reconcileTerminalCarrierMediaStop(row.ID, event.Data.OccurredAt, true)
+				if globalCtx != nil {
+					_ = a.killCallThread(globalCtx.WithProject(row.ProjectID), row)
+				}
 			}
 		}
 		if row != nil {
@@ -4580,9 +4595,14 @@ func (c *callsDB) updateMediaStatus(id, status, errMsg string, closeCode int, cl
 	return c.updateMediaStatusWithLeg(id, status, errMsg, closeCode, closeReason, "")
 }
 
-// Media status never grants or releases the exclusive socket claim. The owning
-// handler retains it until releaseMedia, including during error/close cleanup.
-func (c *callsDB) updateMediaStatusWithLeg(id, status, errMsg string, closeCode int, closeReason, closeLeg string) error {
+// Status writes never grant or release a socket claim. The managed bridge
+// lifecycle performs generation-scoped claims/releases; legacy SIP owns its
+// explicit releaseMedia call.
+func (c *callsDB) updateMediaStatusWithLeg(id, status, errMsg string, closeCode int, closeReason, closeLeg string, generations ...string) error {
+	generation := ""
+	if len(generations) > 0 {
+		generation = generations[0]
+	}
 	switch status {
 	case "idle", "connecting", "connected", "disconnected", "degraded", "error":
 	default:
@@ -4618,10 +4638,10 @@ func (c *callsDB) updateMediaStatusWithLeg(id, status, errMsg string, closeCode 
 		    WHEN ? <> '' THEN ? ELSE media_close_leg
 		END,
         updated_at = ?
-        WHERE id = ? AND (? <> 'connected' OR status NOT IN ('completed','failed','busy','no-answer','canceled'))`,
+        WHERE id = ? AND (?='' OR (media_generation=? AND (status NOT IN ('completed','failed','busy','no-answer','canceled') OR ?='disconnected'))) AND (? <> 'connected' OR status NOT IN ('completed','failed','busy','no-answer','canceled'))`,
 		status, status, errMsg, errMsg, status,
 		status, now, status, terminalMedia, now, status, closeCode, closeCode,
-		status, closeReason, closeReason, status, closeLeg, closeLeg, now, id, status)
+		status, closeReason, closeReason, status, closeLeg, closeLeg, now, id, generation, generation, status, status)
 	return err
 }
 
@@ -4637,9 +4657,24 @@ func (c *callsDB) reconcileTerminalCarrierMediaStop(id, occurredAt string, termi
 	if !terminalEvent && !isTerminalStatus(row.Status) {
 		return false, nil
 	}
-	if row.MediaStatus != "error" || row.MediaCloseLeg != string(mediaCloseLegCarrier) ||
-		row.MediaCloseCode != 1011 || row.MediaCloseReason != "media bridge transport error" {
+	if row.MediaStatus != "error" || row.MediaCloseLeg != string(mediaCloseLegCarrier) {
 		return false, nil
+	}
+	legacy := row.MediaCloseCode == 1011 && row.MediaCloseReason == "media bridge transport error"
+	if !legacy {
+		var raw string
+		if err := c.db.QueryRow(`SELECT b.first_failure_json FROM carrier_media_bridges b JOIN calls x ON x.id=b.call_id AND x.media_generation=b.generation WHERE x.id=?`, id).Scan(&raw); err != nil {
+			return false, nil
+		}
+		var cause carrierBridgeEvidence
+		if json.Unmarshal([]byte(raw), &cause) != nil {
+			return false, nil
+		}
+		normal := cause.ActualCloseCode == 1000 || cause.ActualCloseCode == 1001 || (cause.Kind == "bridge_ended" && cause.LocalCloseCode == 1000)
+		eof := cause.Kind == "socket_read" && (strings.HasSuffix(cause.Detail, ": EOF") || strings.HasSuffix(cause.Detail, ": unexpected EOF"))
+		if !normal && !eof {
+			return false, nil
+		}
 	}
 	mediaEnded, err := time.Parse(time.RFC3339Nano, row.MediaDisconnectedAt)
 	if err != nil {
@@ -4666,7 +4701,7 @@ func (c *callsDB) reconcileTerminalCarrierMediaStop(id, occurredAt string, termi
         media_close_reason = 'carrier stream ended with call', media_close_leg = 'carrier',
         state_expires_at = '', updated_at = ?
         WHERE id = ? AND media_status = 'error' AND media_close_leg = 'carrier'
-          AND media_close_code = 1011 AND media_close_reason = 'media bridge transport error'`, now, id)
+          AND media_close_code = ? AND media_close_reason = ? AND media_error_message=?`, now, id, row.MediaCloseCode, row.MediaCloseReason, row.MediaErrorMessage)
 	if err != nil {
 		return false, err
 	}

@@ -482,6 +482,7 @@ export class SoftphoneSession {
     const playbackOptions = playbackBufferOptions(options);
     this.diagnostics.targetMs = playbackOptions.initialTargetMs;
     this.callbacks.onState?.("connecting");
+    this.runtimeTelemetry.observeEnvironment();
     this.runtimeTelemetry.tick();
     this.telemetryTimer = setInterval(() => this.runtimeTelemetry.tick(), 1000);
     try {
@@ -490,8 +491,8 @@ export class SoftphoneSession {
       const track = this.stream.getAudioTracks()[0];
       if (!track) throw new Error("No microphone audio track was returned.");
       if (track.readyState === "ended") throw new Error("Microphone disconnected before audio setup.");
-      track.onmute = () => this.callbacks.onNotice?.("Microphone input was interrupted by the device or browser.");
-      track.onunmute = () => this.callbacks.onNotice?.("Microphone input restored.");
+      track.onmute = () => { this.recordSessionEvent({timestamp:new Date().toISOString(),action:"microphone",outcome:"device_muted"}); this.callbacks.onNotice?.("Microphone input was interrupted by the device or browser."); };
+      track.onunmute = () => { this.recordSessionEvent({timestamp:new Date().toISOString(),action:"microphone",outcome:"device_unmuted"}); this.callbacks.onNotice?.("Microphone input restored."); };
       track.onended = () => { if (!this.closed) this.fail("Microphone disconnected. Select a microphone and reconnect audio."); };
       const applied = appliedMicrophoneSettings(track);
       this.diagnostics = {
@@ -851,6 +852,7 @@ export class SoftphoneSession {
   }
 
   private teardown(): void {
+    this.runtimeTelemetry.stopEnvironment();
     this.transportSender.stop();
     this.setPlaybackObservation(false, "observation_ended");
     this.stopRingback();

@@ -793,6 +793,7 @@ func decodeLifecycleCursor(raw string) (lifecycleCursor, error) {
 }
 
 type callbackUpdate struct {
+	StreamID      string
 	Status        string
 	ProviderEvent string
 	Error         string
@@ -926,6 +927,8 @@ func telnyxCallbackUpdate(r *http.Request) callbackUpdate {
 			Payload    struct {
 				CallControlID string `json:"call_control_id"`
 				HangupCause   string `json:"hangup_cause"`
+				FailureReason string `json:"failure_reason"`
+				StreamID      string `json:"stream_id"`
 				HangupSource  string `json:"hangup_source"`
 				SIPCode       string `json:"sip_hangup_cause"`
 				Result        string `json:"result"`
@@ -944,9 +947,10 @@ func telnyxCallbackUpdate(r *http.Request) callbackUpdate {
 	mediaStatus := telnyxMediaStatusFromEvent(body.Data.EventType)
 	mediaError := ""
 	if mediaStatus == "error" {
-		mediaError = firstNonEmpty(body.Data.Payload.HangupCause, "Telnyx media stream failed")
+		mediaError = firstNonEmpty(body.Data.Payload.FailureReason, body.Data.Payload.HangupCause, "Telnyx media stream failed")
 	}
 	return callbackUpdate{
+		StreamID: body.Data.Payload.StreamID, ProviderEvent: body.Data.EventType,
 		Status: status, Error: providerCallbackError(status, "", body.Data.Payload.HangupCause, body.Data.Payload.HangupSource),
 		MediaStatus: mediaStatus, MediaError: mediaError,
 		CarrierSID: body.Data.Payload.CallControlID, AnsweredBy: answeredBy,

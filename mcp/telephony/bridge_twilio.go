@@ -31,7 +31,6 @@ package main
 //      Twilio reports the call ended.
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -204,8 +203,9 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		a.rejectTwilioHandshake(w, callID, "bridge_unavailable_or_call_terminal", "no audio bridge for this call", http.StatusGone)
 		return
 	}
-	claimed, err := a.db().claimMedia(callID)
-	if err != nil {
+	bridge, err := a.claimCarrierBridge(row, r.Context())
+	claimed := bridge != nil
+	if err != nil && !errors.Is(err, errCarrierBridgeBusy) {
 		a.rejectTwilioHandshake(w, callID, "claim_database_error", "claim media", http.StatusInternalServerError)
 		return
 	}
@@ -213,22 +213,26 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		a.rejectTwilioHandshake(w, callID, "socket_claim_unavailable", "media bridge already active", http.StatusConflict)
 		return
 	}
-	defer a.db().releaseMedia(callID)
+	defer bridge.finish()
 	bridgeURL, err := a.mediaBridgeURL(row)
 	if err != nil {
-		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "audio bridge unavailable", string(mediaCloseLegLocalError))
+		bridge.fail(carrierBridgeEvidence{Kind: "bridge_setup_error", Leg: string(mediaCloseLegLocalError), Detail: transportEvidenceError(err)})
 		a.rejectTwilioHandshake(w, callID, "audio_bridge_unavailable", "audio bridge unavailable", http.StatusBadGateway)
 		return
 	}
 
 	tw, twReadConn, err := upgradeBuffered(w, r)
 	if err != nil {
-		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "Twilio websocket upgrade failed", string(mediaCloseLegCarrier))
+		bridge.fail(carrierBridgeEvidence{Kind: "bridge_setup_error", Leg: string(mediaCloseLegCarrier), Detail: transportEvidenceError(err)})
 		globalCtx.Logger().Warn("twilio ws upgrade", "err", err, "call", callID)
 		return
 	}
-	closeState := &websocketCloseState{}
+	if !bridge.bind(tw) {
+		return
+	}
+	closeState := bridge.closeState
 	twWriter := newWebSocketWriterPump(tw, ws.StateServerSide)
+	bridge.watch(twWriter)
 	twCloser := newGracefulWebSocket(tw, twWriter)
 	defer func() {
 		code, reason := closeState.Details()
@@ -239,20 +243,23 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 	coreURL, err := url.Parse(bridgeURL)
 	if err != nil {
 		closeState.SetLeg(mediaCloseLegLocalError, ws.StatusInternalServerError, "invalid realtime bridge URL")
-		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "invalid realtime bridge URL", string(mediaCloseLegLocalError))
+		bridge.fail(carrierBridgeEvidence{Kind: "bridge_setup_error", Leg: string(mediaCloseLegLocalError), Detail: transportEvidenceError(err)})
 		globalCtx.Logger().Warn("parse audio bridge url", "err", err, "url", redactURL(row.AudioBridgeURL))
 		return
 	}
 	dialer := ws.Dialer{}
-	core, buffered, _, err := dialer.Dial(r.Context(), coreURL.String())
+	core, buffered, _, err := dialer.Dial(bridge.ctx, coreURL.String())
 	if err != nil {
 		closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "realtime bridge rejected")
-		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "core audio bridge rejected", string(mediaCloseLegCore))
+		bridge.fail(carrierBridgeEvidence{Kind: "bridge_setup_error", Leg: string(mediaCloseLegCore), Detail: transportEvidenceError(err)})
 		globalCtx.Logger().Warn("dial core audio bridge", "err", err, "url", redactURL(coreURL.String()))
 		return
 	}
 	if buffered != nil {
 		core = hijackedConn{Conn: core, reader: buffered}
+	}
+	if !bridge.bind(core) {
+		return
 	}
 	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
 	coreCloser := newGracefulWebSocket(core, coreWriter)
@@ -262,15 +269,9 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	globalCtx.Logger().Info("bridge up", "call", callID, "thread", row.ThreadID)
-	_ = a.db().updateMediaStatus(callID, "connected", "", 0, "")
-	_ = a.db().clearStateExpiry(callID)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := bridge.ctx, bridge.cancel
 	defer cancel()
-	defer func() {
-		leg, code, reason := closeState.Cause()
-		a.finishMediaBridge(callID, leg, code, reason)
-	}()
 	go func() {
 		select {
 		case <-r.Context().Done():
@@ -317,10 +318,14 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer cancel()
 		for {
-			data, op, err := readWebSocketData(twReadConn, ws.StateServerSide, twWriter)
+			data, op, err := readWebSocketData(twReadConn, ws.StateServerSide, twWriter, bridge.received)
 			if err != nil {
+				bridge.socketError(mediaCloseLegCarrier, "read", err)
 				code, reason := websocketCloseDetails(err)
 				closeState.SetLeg(mediaCloseLegCarrier, code, reason)
+				return
+			}
+			if ctx.Err() != nil {
 				return
 			}
 			if len(data) > maxCarrierFrameBytes {
@@ -332,14 +337,14 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 			}
 			readAt, receiptClock := time.Now(), mediaClockMS()
 			if humanHub != nil {
-				humanHub.timeline.observe("carrier_socket_read", len(data), time.Time{}, "", "")
+				humanHub.timeline.observe("carrier_socket_read", len(data), time.Time{}, "", "", bridge.generation)
 			}
 			var f twilioFrame
 			if err := json.Unmarshal(data, &f); err != nil {
 				continue
 			}
 			if humanHub != nil {
-				humanHub.timeline.observe("carrier_json_decoded", len(data), readAt, "", "")
+				humanHub.timeline.observe("carrier_json_decoded", len(data), readAt, "", "", bridge.generation)
 			}
 
 			if sequence, err := strconv.ParseUint(f.SequenceNumber, 10, 64); err == nil {
@@ -359,6 +364,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 					_ = a.db().updateCarrierIdentity(callID, f.Start.CallSID, row.CarrierRequestID)
 				}
 				if f.StreamSID != "" {
+					bridge.setStream(f.StreamSID)
 					select {
 					case streamSidCh <- f.StreamSID:
 					default:
@@ -376,7 +382,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 				}
 				decodeStarted := time.Now()
 				if humanHub != nil {
-					humanHub.timeline.observe("carrier_media_read", len(data), time.Time{}, "", f.SequenceNumber)
+					humanHub.timeline.observe("carrier_media_read", len(data), time.Time{}, "", f.SequenceNumber, bridge.generation)
 				}
 				if f.Media == nil || f.Media.Payload == "" {
 					continue
@@ -385,6 +391,10 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					continue
 				}
+				if len(mu) == 0 {
+					continue
+				}
+				bridge.media()
 				src := carrierSource{}
 				mapped, receipt := 0.0, receiptClock
 				if humanHub != nil {
@@ -407,7 +417,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 				}
 				tap.publishPCM(0, pcm24)
 				if humanHub != nil {
-					humanHub.timeline.observe("carrier_decoded", len(pcm24)*2, decodeStarted, f.Media.Timestamp, f.Media.Chunk)
+					humanHub.timeline.observe("carrier_decoded", len(pcm24)*2, decodeStarted, f.Media.Timestamp, f.Media.Chunk, bridge.generation)
 					coreWriter.queueAudio(encodeSourceAudio(pcm16ToBytes(pcm24), src, mapped, receipt, humanHub.reception.snapshot(receipt, false).Epoch), sourceAudioHeaderBytes)
 				} else {
 					err = coreWriter.Write(ws.OpBinary, pcm16ToBytes(pcm24))
@@ -417,6 +427,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 					err = coreWriter.Write(ws.OpText, control)
 				}
 				if err != nil {
+					bridge.socketError(mediaCloseLegCore, "write", err)
 					closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "write caller audio to realtime bridge")
 					return
 				}
@@ -436,6 +447,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 				})
 				err := coreWriter.Write(ws.OpText, control)
 				if err != nil {
+					bridge.socketError(mediaCloseLegCore, "write", err)
 					closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "write playback progress to realtime bridge")
 					return
 				}
@@ -474,11 +486,12 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				stage = "carrier_send_error"
 			}
-			humanHub.timeline.observe(stage, len(payload), started, "", "")
+			humanHub.timeline.observe(stage, len(payload), started, "", "", bridge.generation)
 		}
 		return err
 	}, func(err error) {
 		globalCtx.Logger().Warn("twilio media writer failed", "call", callID, "err", err)
+		bridge.socketError(mediaCloseLegCarrier, "write", err)
 		closeState.SetLeg(mediaCloseLegCarrier, ws.StatusInternalServerError, "Twilio media writer failed")
 		cancel()
 	})
@@ -507,7 +520,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 			PreAnswerMicrophoneDroppedMS: preAnswerDroppedMS,
 			CarrierSequenceGaps:          carrierGaps, CaptureSequenceGaps: captureGapCount,
 			SequenceGaps: sequenceGaps, DropEvents: dropEvents,
-		})
+		}, bridge.generation)
 	}()
 
 	var nextFrame realtimeBridgeControl
@@ -519,6 +532,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		}
 		data, op, err := readWebSocketData(core, ws.StateClientSide, coreWriter)
 		if err != nil {
+			bridge.socketError(mediaCloseLegCore, "read", err)
 			code, reason := websocketCloseDetails(err)
 			closeState.SetLeg(mediaCloseLegCore, code, reason)
 			return
@@ -560,6 +574,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 			control, _ := json.Marshal(realtimeBridgeControl{Type: "playback.overflow", ItemID: frame.ItemID})
 			err = coreWriter.Write(ws.OpText, control)
 			if err != nil {
+				bridge.socketError(mediaCloseLegCore, "write", err)
 				closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "report playback overflow to realtime bridge")
 				return
 			}

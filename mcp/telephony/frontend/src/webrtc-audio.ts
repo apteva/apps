@@ -146,6 +146,7 @@ export class WebRTCAudioConnection implements AudioConnection {
   private current(generation:number){return !this.stopped && this.generation===generation;}
   private guard(generation:number){if(!this.current(generation)) throw new Error("Audio session cancelled");}
   private async connect(url:string):Promise<void> {
+    this.runtime.observeEnvironment();
     const generation=++this.generation,options=this.options!;
     this.ready=this.peer=false;this.previous=undefined;this.reportedLoss=this.completedCounts.packetsLost;
     const stream=await navigator.mediaDevices.getUserMedia({audio:microphoneConstraints(options)});
@@ -344,6 +345,7 @@ export class WebRTCAudioConnection implements AudioConnection {
   startRingback(country?:string){this.stopRingback();if(this.context&&this.speaker)this.ringback=playRingback(this.context,this.speaker,ringbackPattern(country));}
   stopRingback(){this.ringback?.();this.ringback=undefined;}
   private cleanup(){
+    this.runtime.stopEnvironment();
     this.transportSender.stop();
     if(this.nativeCounts){for(const key of ["packetsLost","packetsDiscarded","concealedMs"] as const)this.completedCounts[key]+=this.nativeCounts[key];this.nativeCounts=undefined;}
     ++this.generation;this.ready=this.peer=false;this.stopRingback();clearInterval(this.timer);this.timer=undefined;

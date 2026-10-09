@@ -492,7 +492,7 @@ func (c *gracefulWebSocket) Close(code ws.StatusCode, reason string) {
 	})
 }
 
-func readWebSocketData(conn net.Conn, state ws.State, writer *websocketWriterPump) ([]byte, ws.OpCode, error) {
+func readWebSocketData(conn net.Conn, state ws.State, writer *websocketWriterPump, observations ...func(ws.OpCode, []byte)) ([]byte, ws.OpCode, error) {
 	reader := wsutil.Reader{
 		Source:          conn,
 		State:           state,
@@ -507,6 +507,9 @@ func readWebSocketData(conn net.Conn, state ws.State, writer *websocketWriterPum
 		}
 		if len(data) > maxControlFramePayload {
 			return closeWebSocketProtocolError(writer, "control frame payload exceeds 125 bytes")
+		}
+		for _, observe := range observations {
+			observe(header.OpCode, data)
 		}
 		switch header.OpCode {
 		case ws.OpPing:
@@ -559,6 +562,11 @@ func readWebSocketData(conn net.Conn, state ws.State, writer *websocketWriterPum
 		if len(data) > maxCarrierFrameBytes {
 			_ = writer.Write(ws.OpClose, ws.NewCloseFrameBody(ws.StatusMessageTooBig, "message exceeds limit"))
 			return nil, 0, errors.New("websocket message exceeds limit")
+		}
+		if err == nil {
+			for _, observe := range observations {
+				observe(header.OpCode, data)
+			}
 		}
 		return data, header.OpCode, err
 	}

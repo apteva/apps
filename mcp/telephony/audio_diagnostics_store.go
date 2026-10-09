@@ -516,7 +516,11 @@ func (c *callsDB) updateBrowserAudioDiagnostics(id string, value browserAudioDia
 	return err
 }
 
-func (c *callsDB) updateCarrierAudioDiagnostics(id string, value carrierAudioDiagnostics) error {
+func (c *callsDB) updateCarrierAudioDiagnostics(id string, value carrierAudioDiagnostics, generations ...string) error {
+	generation := ""
+	if len(generations) > 0 {
+		generation = generations[0]
+	}
 	value.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	value.MaxQueuedMS = clampDiagnosticInt(value.MaxQueuedMS, 60000)
 	value.DroppedStaleMS = clampDiagnosticInt(value.DroppedStaleMS, 24*60*60*1000)
@@ -536,7 +540,7 @@ func (c *callsDB) updateCarrierAudioDiagnostics(id string, value carrierAudioDia
 		return err
 	}
 	_, err = c.db.Exec(`UPDATE calls SET carrier_audio_diagnostics = ?, updated_at = ?
-		WHERE id = ? AND peer_kind = 'human'`, string(encoded), value.UpdatedAt, id)
+		WHERE id = ? AND peer_kind = 'human' AND (?='' OR media_generation=?)`, string(encoded), value.UpdatedAt, id, generation, generation)
 	return err
 }
 
