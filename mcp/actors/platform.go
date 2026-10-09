@@ -169,7 +169,10 @@ func (e *actorExecution) dispatchSemantic(step actorStep, args map[string]any) e
 	if shot.SOMRevision != nil {
 		args["som_revision"] = shot.SOMRevision
 	}
-	if name := firstNonEmpty(match.AccessibleName, match.Text); name != "" {
+	// Metadata names may differ in whitespace between SOM and the native
+	// accessible-name implementation. Keep the fresh target/revision and role
+	// guards; the actor must verify the saved selection independently.
+	if name := firstNonEmpty(match.AccessibleName, match.Text); name != "" && locator.TextSuffixPattern == "" {
 		args["expected_name"] = name
 	}
 	if match.Role != "" {

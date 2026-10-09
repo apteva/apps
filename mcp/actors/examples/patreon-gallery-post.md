@@ -12,6 +12,6 @@ The actor verifies Sell this post off before switching audience and again after 
 
 A failed/uncertain run must be reconciled read-only before another attempt. Never fall back to generic run, change the key, drop attachments or loosen tier/copy checks to bypass failure. Original hashes/lineage and editorial approval/due checks belong in the caller process before invoking this action. This operation does not add scheduling or choose creator-specific pricing policy.
 
-Requires Actors 0.2.14 or later and a current Computer version with semantic uploads/forms and preserved newlines. Site markup can change; failures must remain blocked until reviewed.
+Requires Actors 0.2.15 or later and a current Computer version with semantic uploads/forms and preserved newlines. Site markup can change; failures must remain blocked until reviewed.
 
 Exact SOM names allow only the configured numeric member-count suffix. Similar tier names remain distinct; saved selection verification uses canonical labels from the DOM.

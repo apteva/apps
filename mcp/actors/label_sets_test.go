@@ -61,7 +61,7 @@ func TestLabelListUsesFreshSemanticObservation(t *testing.T) {
 		"schema_version": 1, "allowed_hosts": []any{"example.com"},
 		"steps": []any{
 			map[string]any{"action": "goto", "url": "https://example.com"},
-			map[string]any{"action": "set_checked", "locator": map[string]any{"exact": true, "som_only": true}, "labels": "{{labels}}", "checked": true},
+			map[string]any{"action": "set_checked", "locator": map[string]any{"exact": true, "som_only": true, "text_suffix_pattern": `(?:\s+[0-9]+\s+members?)?`}, "labels": "{{labels}}", "checked": true},
 		}, "output_schema": map[string]any{},
 	})
 	if _, err := app.toolActorRun(ctx, map[string]any{"actor_id": rec.ID, "input": map[string]any{"labels": []any{"Notifications", "Tier"}}}); err != nil {
@@ -81,6 +81,9 @@ func TestLabelListUsesFreshSemanticObservation(t *testing.T) {
 		}
 		if call.args["action"] == "set_checked" {
 			actions++
+			if call.args["expected_name"] != nil {
+				t.Fatal("metadata locator forwarded an unstable accessible name")
+			}
 			if call.args["target_id"] == nil || call.args["som_revision"] != "form-1" || call.args["coordinate"] != nil || call.args["selector"] != nil {
 				t.Fatalf("unguarded action %#v", call.args)
 			}
