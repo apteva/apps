@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.11.2
+version: 0.11.3
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -364,6 +364,7 @@ upgrade_policy: auto-patch
 var globalCtx *sdk.AppCtx
 
 type App struct {
+	callReads        callReadCache
 	outboundHints    outboundInventoryHints
 	admissionMu      sync.RWMutex
 	audioPeerHasher  audioPeerHasher
@@ -3403,20 +3404,12 @@ func (a *App) handleListCalls(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"calls": a.callsPanelForRequest(r, detail, phoneUserFrom(r) == nil)})
 		return
 	}
-	rows, err := a.recentPhoneCalls(r, project, 100)
+	model, checked, err := a.phoneCallRead(r, project, 100, false)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "call state unavailable", http.StatusInternalServerError)
 		return
 	}
-	if err := a.db().attachRingOffers(project, rows); err != nil {
-		http.Error(w, "load ring offers", 500)
-		return
-	}
-	if err := a.db().attachRecordingSummaries(project, rows); err != nil {
-		http.Error(w, "load recording summaries", http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, map[string]any{"calls": a.callsPanelForRequest(r, a.filterPhoneCalls(r, rows), false)})
+	writeJSON(w, map[string]any{"calls": a.callsPanelForRequest(checked, model.rows, false)})
 }
 
 func (a *App) handleCallAction(w http.ResponseWriter, r *http.Request) {

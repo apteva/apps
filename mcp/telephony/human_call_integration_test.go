@@ -547,13 +547,24 @@ func TestTier2HumanBrowserCallEndToEnd(t *testing.T) {
 	var detail struct {
 		Calls []map[string]any `json:"calls"`
 	}
-	status, body := tier2Request(t, sc, http.MethodGet, "/calls?project_id="+tier2Project+"&call_id="+callID, nil, &detail, tier2Headers())
-	if status != http.StatusOK || len(detail.Calls) != 1 {
-		t.Fatalf("call detail=%d %s", status, body)
-	}
-	completed = detail.Calls[0]
-	if diagnostics, _ := completed["browser_audio_diagnostics"].(map[string]any); diagnostics["auto_gain_control"] != false || diagnostics["rtt_ms"] != float64(42) {
-		t.Fatalf("persisted browser diagnostics=%v", completed["browser_audio_diagnostics"])
+	// Telemetry is coalesced by the socket watcher, independently of HTTP
+	// and media. Fast list reads can finish this call before its first flush.
+	// Wait for the durable detail, not for an arbitrary sleep or a list cache.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		status, body := tier2Request(t, sc, http.MethodGet, "/calls?project_id="+tier2Project+"&call_id="+callID, nil, &detail, tier2Headers())
+		if status != http.StatusOK || len(detail.Calls) != 1 {
+			t.Fatalf("call detail=%d %s", status, body)
+		}
+		completed = detail.Calls[0]
+		diagnostics, _ := completed["browser_audio_diagnostics"].(map[string]any)
+		if diagnostics["auto_gain_control"] == false && diagnostics["rtt_ms"] == float64(42) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("persisted browser diagnostics=%v", diagnostics)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	events := tier2MCPAs(t, sc, "telephony_call_events_list", map[string]any{"call_id": callID})
 	if !strings.Contains(fmt.Sprint(events), "completed") || !strings.Contains(fmt.Sprint(events), "answered") {

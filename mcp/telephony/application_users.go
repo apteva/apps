@@ -55,17 +55,18 @@ type phonePolicy struct {
 	Groups    []phoneGroup        `json:"groups"`
 }
 type phonePrincipal struct {
-	Identity     phoneIdentity
-	Project      string
-	Revision     int64
-	Listen       bool
-	ListenScope  bool
-	Coach        bool
-	CoachScope   bool
-	AuthProvider *phoneAuthProvider
-	Supervisor   bool
-	Destinations map[string]bool
-	Numbers      map[string]bool
+	readPermissions *phoneReadPermissions // only attached to read requests; never answer/control requests
+	Identity        phoneIdentity
+	Project         string
+	Revision        int64
+	Listen          bool
+	ListenScope     bool
+	Coach           bool
+	CoachScope      bool
+	AuthProvider    *phoneAuthProvider
+	Supervisor      bool
+	Destinations    map[string]bool
+	Numbers         map[string]bool
 }
 type phonePrincipalKey struct{}
 
@@ -311,7 +312,7 @@ func (a *App) phoneCallAllowed(p *phonePrincipal, row *callRow, shared bool) boo
 	if row.ProjectID != p.Project {
 		return false
 	}
-	owner, dest, err := a.phoneOwner(row.ID)
+	owner, dest, err := a.phoneReadOwner(p, row)
 	if err != nil {
 		return false
 	}
@@ -333,22 +334,18 @@ func (a *App) phoneOfferDestination(p *phonePrincipal, row *callRow, requested s
 	if row.Status != "pending" || row.Direction != "inbound" || isSuppressedHandlingReason(row.HandlingReason) {
 		return ""
 	}
-	offers, err := a.db().activeRingOffers(row.ID, row.ProjectID)
+	offers, ringRuns, err := a.phoneReadOffers(p, row)
 	if err != nil {
 		return ""
 	}
 	for _, offer := range offers {
-		if offer.Kind == "browser" && p.Destinations[offer.DestinationID] && a.destinationAllowsIdentity(row.ProjectID, offer.DestinationID, p.Identity) && (requested == "" || requested == offer.DestinationID) {
+		if offer.Kind == "browser" && p.Destinations[offer.DestinationID] && a.phoneReadDestination(p, row.ProjectID, offer.DestinationID) && (requested == "" || requested == offer.DestinationID) {
 			return offer.DestinationID
 		}
 	}
 	// A ring-group offer can expire while the call remains pending. Only a
 	// direct destination may use the fallback when no offer is active.
-	var ringRuns int
-	if err := a.db().db.QueryRow(`SELECT COUNT(*) FROM call_ring_runs WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID).Scan(&ringRuns); err != nil {
-		return ""
-	}
-	if len(offers) == 0 && ringRuns == 0 && row.PeerKind == peerKindHuman && p.Destinations[row.RoutingDestinationID] && a.destinationAllowsIdentity(row.ProjectID, row.RoutingDestinationID, p.Identity) && (requested == "" || requested == row.RoutingDestinationID) {
+	if len(offers) == 0 && ringRuns == 0 && row.PeerKind == peerKindHuman && p.Destinations[row.RoutingDestinationID] && a.phoneReadDestination(p, row.ProjectID, row.RoutingDestinationID) && (requested == "" || requested == row.RoutingDestinationID) {
 		return row.RoutingDestinationID
 	}
 	return ""
@@ -883,27 +880,8 @@ func phoneCallCandidates(p *phonePrincipal, project string) (string, []any) {
 // Apply visibility before the result limit. Paging here traverses only calls
 // with an indexed ownership, offer, or destination candidate for this user.
 func (a *App) recentPhoneCalls(r *http.Request, project string, limit int) ([]callRow, error) {
-	p := phoneUserFrom(r)
-	if p == nil {
-		return a.db().recent(project, limit)
-	}
-	candidates, args := phoneCallCandidates(p, project)
-	out := []callRow{}
-	for offset := 0; len(out) < limit; offset += 200 {
-		queryArgs := append(append([]any{}, args...), project)
-		rows, err := a.db().listWhere(`id IN (`+candidates+`) AND project_id=? AND ingress_path<>'ring_group' ORDER BY placed_at DESC,id DESC LIMIT 200 OFFSET `+fmt.Sprint(offset), queryArgs...)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, a.filterPhoneCalls(r, rows)...)
-		if len(rows) < 200 {
-			break
-		}
-	}
-	if len(out) > limit {
-		out = out[:limit]
-	}
-	return out, nil
+	model, _, err := a.phoneCallRead(r, project, limit, false)
+	return model.rows, err
 }
 
 func writePhoneSessionFailure(w http.ResponseWriter, err error) {

@@ -26,7 +26,7 @@ const server = Bun.serve<{ call: DemoCall; timer?: ReturnType<typeof setInterval
     if (path === "/demo/incoming" && request.method === "POST") return json(createCall("inbound"));
     const prefix = "/api/apps/telephony";
     if (!path.startsWith(prefix + "/")) return new Response("Not found", { status: 404 });
-    const appPath = path.slice(prefix.length);
+    const appPath = path.slice(prefix.length).replace(/^\/_install\/42(?=\/ui\/)/, "");
     const media = appPath.match(/^\/_install\/42\/softphone\/media\/([^/]+)\/([^/]+)$/);
     if (media) {
       const call = calls.get(media[1]);
@@ -36,7 +36,7 @@ const server = Bun.serve<{ call: DemoCall; timer?: ReturnType<typeof setInterval
     }
     if (url.searchParams.get("project_id") !== "demo" || url.searchParams.get("install_id") !== "42") return new Response("Wrong demo scope", { status: 403 });
     if (appPath === "/ui/frontend.json") return new Response(Bun.file(join(ui, "frontend.json")), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
-    if (/^\/ui\/frontend\/client-[a-f0-9]{16}\.mjs$/.test(appPath)) return new Response(Bun.file(join(ui, appPath.slice(4))), { headers: { "Content-Type": "text/javascript", "Cache-Control": "public,max-age=31536000,immutable" } });
+    if (/^\/ui\/frontend\/(?:client-[a-f0-9]{16}\.mjs|(?:worklet|worker)-[a-f0-9]{64}\.js)$/.test(appPath)) return new Response(Bun.file(join(ui, appPath.slice(4))), { headers: { "Content-Type": "text/javascript", "Cache-Control": "public,max-age=31536000,immutable" } });
     if (appPath === "/calls") {
       let rows = [...calls.values()].reverse();
       if (url.searchParams.has("call_id")) rows = rows.filter(c => c.id === url.searchParams.get("call_id"));
@@ -53,6 +53,11 @@ const server = Bun.serve<{ call: DemoCall; timer?: ReturnType<typeof setInterval
     const id = appPath.startsWith("/calls/") ? appPath.split("/")[2] : appPath.split("/")[3];
     const call = calls.get(id);
     if (!call) return new Response("Unknown call", { status: 404 });
+    if (appPath.startsWith("/softphone/attach/")) {
+      if (call.status === "completed") return new Response("Call ended", { status: 409 });
+      call.token = crypto.randomUUID();
+      return json(session(call));
+    }
     if (appPath.startsWith("/softphone/answer/")) {
       if (call.status === "completed") return new Response("Call ended", { status: 409 });
       if (call.status === "pending") call.status = "answering";
