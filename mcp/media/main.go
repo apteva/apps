@@ -23,8 +23,11 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.26
+version: 0.14.27
 description: |
+  v0.14.27 provisions the isolated hybrid runtime on disk-backed /var/tmp
+  on remote hosts, preserving the existing Full cache and avoiding small
+  memory-backed /tmp exhaustion. Hybrid Smart Crop remains the default.
   v0.14.26 defaults Smart Crop to a hybrid engine: MediaPipe Full first,
   independent same-frame YOLO Pose Nano / RTMPose recovery on difficult samples,
   and bounded position-only tracking through short detection gaps. Recovery
@@ -637,7 +640,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.26
+    ref: media/v0.14.27
     entry: mcp/media
   port: 8080
   health_check: /health

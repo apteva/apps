@@ -43,6 +43,15 @@ func poseRuntimeIdentity(engine string) string {
 	}
 	return poseRuntimeVersion
 }
+
+// The additional isolated hybrid runtime must not consume a small host's
+// memory-backed /tmp. Pure Full retains its existing cache unchanged.
+func poseRemoteRuntimeRoot(hybrid bool) string {
+	if hybrid {
+		return "/var/tmp/apteva-media-pose/" + poseHybridRuntimeVersion
+	}
+	return "/tmp/apteva-media-pose/" + poseRuntimeVersion
+}
 func poseAlgorithmIdentity(engine string) string {
 	if engine == "hybrid" {
 		return smartCropAlgorithmVersion
@@ -253,9 +262,10 @@ func runPose(ctx context.Context, app *sdk.AppCtx, host int64, req poseRequest) 
 		setupMode = " hybrid"
 	}
 	if host > 0 {
-		req.Model = "/tmp/apteva-media-pose/" + runtimeVersion + "/model.task"
+		remoteRoot := poseRemoteRuntimeRoot(req.Hybrid)
+		req.Model = remoteRoot + "/model.task"
 		if req.Hybrid {
-			req.RecoveryRoot = "/tmp/apteva-media-pose/" + runtimeVersion
+			req.RecoveryRoot = remoteRoot
 		}
 		raw, _ := json.Marshal(req)
 		work := uniqueRemoteWorkDir(0) + "-pose"
@@ -267,7 +277,7 @@ func runPose(ctx context.Context, app *sdk.AppCtx, host int64, req poseRequest) 
 		}{{"runtime.py", []byte(poseRuntime)}, {"smartcrop_pose_recovery.py", []byte(poseRecoveryRuntime)}, {"setup.py", []byte(poseSetup)}, {"request.json", raw}} {
 			script += fmt.Sprintf("printf '%%s' %s | base64 -d > \"$WORK/%s\"\n", shellQuote(base64.StdEncoding.EncodeToString(file.data)), file.name)
 		}
-		script += "POSE_ROOT=/tmp/apteva-media-pose/" + runtimeVersion + "\npython3 \"$WORK/setup.py\" \"$POSE_ROOT\"" + setupMode + "\n"
+		script += "POSE_ROOT=" + shellQuote(remoteRoot) + "\npython3 \"$WORK/setup.py\" \"$POSE_ROOT\"" + setupMode + "\n"
 		// The model is verified in the persistent runtime directory.
 		script += "\"$POSE_ROOT/venv/bin/python\" \"$WORK/runtime.py\" \"$WORK/request.json\""
 		finish := registerRemoteKill(ctx, app, host, 0, work)
