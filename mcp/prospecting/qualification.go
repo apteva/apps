@@ -722,6 +722,11 @@ func extractBestEmail(pages []webExtractPage, domain string) string {
 			}
 		}
 		if firstParty {
+			// A restaurant entity tied to this page identifies its own mailbox,
+			// even when the hotel's generic reservation link is in the footer.
+			for _, raw := range restaurantEntityEmails(page.StructuredData, defaultString(page.FinalURL, page.URL)) {
+				pageAdd(raw, 180+pageScore, true)
+			}
 			for _, line := range nonEmptyLines(emailExtractionText(page.Text, domain)) {
 				if unrelatedEmailContext(qualificationLinkText(line)) {
 					continue
@@ -975,6 +980,36 @@ func structuredDataText(value any) string {
 	}
 	walk(value)
 	return strings.Join(parts, " ")
+}
+
+func restaurantEntityEmails(value any, pageURL string) []string {
+	values := []string{}
+	var walk func(any)
+	walk = func(item any) {
+		switch typed := item.(type) {
+		case map[string]any:
+			types := structuredDataText(typed["@type"])
+			entityURL, _ := typed["url"].(string)
+			isRestaurant := false
+			for _, kind := range strings.Fields(types) {
+				if kind == "Restaurant" || kind == "https://schema.org/Restaurant" || kind == "http://schema.org/Restaurant" {
+					isRestaurant = true
+				}
+			}
+			if isRestaurant && entityURL != "" && qualificationURLKey(entityURL) == qualificationURLKey(pageURL) {
+				values = append(values, emailPattern.FindAllString(structuredDataText(typed["email"]), -1)...)
+			}
+			for _, child := range typed {
+				walk(child)
+			}
+		case []any:
+			for _, child := range typed {
+				walk(child)
+			}
+		}
+	}
+	walk(value)
+	return values
 }
 
 func structuredPhoneValues(value any) []string {
