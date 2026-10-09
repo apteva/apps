@@ -1,3 +1,25 @@
+## 0.14.30 — verify final B-frame presentation coverage
+
+Production extraction revealed FFmpeg 7.1 can omit the final decoded picture's
+duration while the MP4 video track correctly presents that picture through the
+requested endpoint. Media 0.14.29 rejected Chicken R2 before upload despite
+retaining its 757 pictures and zero-start timing.
+
+Local, remote and shared-runtime validation now read the actual video track
+endpoint when decoded duration is absent. The inferred final hold is bounded to
+two typical pictures and at most 100 ms; missing or inconsistent metadata, real
+opening gaps and unsupported holds remain rejected. The requested endpoint is
+never used as evidence. Diagnostics identify video_stream_endpoint as the
+inference source. Header inspection adds no second full-video decode. Passthrough decode progress
+provides authoritative picture counts, avoiding duplicate/interleaved showinfo
+log fields; shared runtime counts remain based on its existing frame hashes.
+
+Accurate cuts, source-time crop paths, every-frame checks, independent pose
+models and strict composition guards remain unchanged. Regression checks cover
+bounded inference, absent/far metadata, explicit short pictures and opening gaps.
+Production source-picture/timestamp and API/queue/upload verification remains
+separate from action-preserving composition approval.
+
 ## 0.14.29 — accurate reel extraction and pre-upload validation
 
 Production QA of Chicken's exact R1/R2 intervals exposed presentation offsets in

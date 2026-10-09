@@ -23,8 +23,11 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.29
+version: 0.14.30
 description: |
+  v0.14.30 verifies missing decoded B-frame durations against the actual video
+  track endpoint, with bounded inference and traceable evidence. Correct outputs
+  no longer fail ending coverage; unsupported holds and real gaps stay rejected.
   v0.14.29 aligns reel video/audio at zero with accurate source cuts, sample-level
   audio trimming and every-frame decode/timeline validation before upload. Crop
   paths retain source-time alignment; genuine wide and uncertain actions remain
@@ -650,7 +653,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.29
+    ref: media/v0.14.30
     entry: mcp/media
   port: 8080
   health_check: /health

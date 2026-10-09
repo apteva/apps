@@ -342,6 +342,9 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 		} else {
 			log, err = runCompactedFFmpeg(ctx, e.ffmpegPath, trimValidationArgs(outputPath))
 		}
+		if err == nil {
+			log, err = enrichTrimValidationLog(ctx, e.ffmpegPath, outputPath, log)
+		}
 		validation := parseTrimValidation(log)
 		validation.DecodeOK = err == nil
 		recordRenderMetric(app, row, "trim_validation", validation)

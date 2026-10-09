@@ -270,9 +270,24 @@ def scan_video(req, source, duration):
     # picture durations; do not count FFmpeg's possibly interleaved log lines.
     shown = re.findall(r"pts_time:([-0-9.e+]+)\s+duration:\s*[-0-9]+\s+duration_time:([-0-9.e+]+)", log)
     last_duration = float(shown[-1][1]) if shown else 0
+    duration_source = None
+    if last_duration <= 0 and len(frames)>1:
+        streams=probe(req["ffprobe"],source,["-select_streams","v:0","-show_entries","stream=start_time,duration"]).get("streams",[])
+        if streams:
+            try: endpoint=float(streams[0].get("start_time",0))+float(streams[0]["duration"])
+            except (KeyError,TypeError,ValueError): endpoint=0
+            delta=endpoint-frames[-1][0]
+            bound=min(.1,max(.05,2*(frames[-1][0]-frames[0][0])/(len(frames)-1)))
+            if 0 < delta <= bound+1e-6:
+                last_duration=delta
+                duration_source="video_stream_endpoint"
+
     audio = re.findall(r"pts_time:([-0-9.e+]+)\s+fmt:\S+\s+channels:.*?rate:(\d+).*?nb_samples:(\d+)", log)
     compact = [line for line in log.splitlines() if "black_start:" in line or "lavfi.black_end=" in line]
+    if duration_source:
+        compact.append("APTEVA_VIDEO_DURATION_SOURCE "+duration_source)
     if frames:
+        compact.append("APTEVA_VIDEO_COUNT_SOURCE decoded_frame_hashes")
         compact.append("APTEVA_VIDEO_SCAN count=%d first=%.9f last=%.9f duration=%.9f" %
                        (len(frames), frames[0][0], frames[-1][0], last_duration))
     if audio:
