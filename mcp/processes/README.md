@@ -604,3 +604,25 @@ The tier 3 `14-run-memory.yaml` scenario runs two real GPT-6.1 Sol workers: the
 second reads the first checkpoint/ledger, rotates discovery, preserves exact
 receipts, and passes independent HTTP human approval. The verifier checks saved
 state and telemetry independently of the model's final message.
+
+
+### Targeted edits
+
+MCP `patch` creates a new immutable draft revision from only the fields that
+change. Supply `process_id`, `expected_version` and `changes`. Existing process
+pause/synchronization checks, full-definition validation and version conflicts
+apply. Omitted fields remain unchanged. Arrays/nested fields replace their whole
+value. Steps and parameters support `add`, `update`, and `remove` by stable key;
+new items append without reordering unchanged items. Remove referenced steps
+only with explicit dependency edits in the same patch. Each key may occur once.
+
+```json
+{"process_id":"…","expected_version":3,"changes":{"steps":{"update":[{"key":"research","instructions":"Updated research instructions"}]}}}
+```
+
+The receipt returns saved version/status, changed field/key names and an exact
+`processes_get` reference. Historical definitions and in-flight runs stay frozen;
+follow-latest assignments adopt the new draft version and pinned assignments
+keep their selected version. Use `update` for intentional full replacements.
+The tier 3 `15-process-patch.yaml` scenario verifies real GPT-6.1 Sol partial
+edits, stale rejection, preserved history and compact receipt recovery.
