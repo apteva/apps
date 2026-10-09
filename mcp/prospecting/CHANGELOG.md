@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.4.1
+
+- Include rendered contact footers and retain email and phone links through Web and Computer.
+- Prioritize French contact, reservation and legal pages; skip legal follow-ups after finding an email.
+- Accept business-specific parent-company mailboxes with first-party evidence while filtering unrelated agency, press and privacy contacts.
+- Retry transient extraction failures once within the crawl budget and retry the certified www hostname without disabling TLS checks.
+- Automate one public HTML source check when rendering provides no usable email, preserving source URLs and artifacts.
+- Preserve named contact mailboxes and exclude mailto/tel links from website crawling.
+- Require Web 0.2.10 and its Computer 0.7.94 dependency.
+
 ## v0.4.0
 
 - Reuse the optional Google Places connector for structured business discovery with bounded field masks and request limits.

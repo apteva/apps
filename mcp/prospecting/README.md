@@ -54,9 +54,18 @@ use the version pinned in `go.mod`.
    templates are filtered.
 4. Run `prospecting_candidates_qualify` or the bounded batch variant. The app
    prioritizes contact and identity pages across up to five first-party pages,
+   includes rendered footers and French contact, reservation and legal pages,
    extracts structured facts, detects automation opportunities, classifies
    eligibility, and recalculates scores. Repeated batch calls advance through
    candidates that have not yet been enriched.
+   A restaurant-specific mailbox on its own site can use a parent-company
+   domain; generic group, agency, press and privacy addresses are excluded
+   from that exception. Full-body extraction requires a Web build supporting
+   `web_extract(readability=false)` and a Computer build that retains footers
+   in that mode. Transient extraction failures retry once within the crawl
+   budget; legal pages are skipped when a usable email has already been found.
+   If browser pages still provide no usable email, one public HTML source
+   check automates the fallback, retaining its own URL and evidence artifact.
 5. Review the candidate, rule explanations, and saved source evidence.
 6. Optionally use `prospecting_candidates_research` for broader cited research.
 7. Add or correct decision-maker details, then reject or defer.

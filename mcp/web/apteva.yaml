@@ -2,11 +2,15 @@ schema: apteva-app/v1
 
 name: web
 display_name: Web
-version: 0.2.9
+version: 0.2.10
 description: |
   Browser-native web intelligence and reusable Apify-style extractors for
   agents. Provides JSON-first search, extraction, crawl, map, research,
   snapshots, durable extractor runs, and Jobs-backed schedules.
+
+  v0.2.10 exposes full-body extraction and optional public HTML source checks
+  with separate cache identities and HTTP provenance, preserving browser-backed
+  extraction as the default.
 
   v0.2.9 selects organic Google result headings from rendered HTML, excludes
   sponsored containers and citation links, budgets HTML separately, and retries
@@ -103,7 +107,7 @@ requires:
     - platform.apps.call
   apps:
     - name: computer
-      version: ">=0.7.66"
+      version: ">=0.7.94"
       reason: "Browser session lifecycle, rendered navigation, screenshots, and browser environments."
     - name: storage
       reason: "Persists screenshots, extracted pages, crawl maps, and research JSON."
@@ -129,6 +133,8 @@ provides:
         Open a URL in a browser session, extract readable text, markdown,
         metadata, structured data, links, images, and optionally store the
         artifact. Args: url, formats?, backend?, viewport?, max_chars?,
+        readability? (default true; false includes headers and footers),
+        source_only? (default false; public HTML source with HTTP provenance),
         store? bool, snapshot? bool, visibility? (private|signed|public;
         defaults to private for snapshots), cache?, max_age?, cache_ttl?.
         Omit backend to use Computer's configured default; explicit overrides are
@@ -240,7 +246,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: web/v0.2.9
+    ref: web/v0.2.10
     entry: mcp/web
   port: 8080
   health_check: /health

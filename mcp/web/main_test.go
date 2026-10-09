@@ -398,6 +398,35 @@ func TestExtractURLUsesComputerDOMParser(t *testing.T) {
 	}
 }
 
+func TestExtractFullBodyUsesSeparateCache(t *testing.T) {
+	plat := newFakePlatform()
+	plat.contactFooter = true
+	ctx, app := newTestCtx(t, plat)
+	args := map[string]any{"url": "https://restaurant.example/", "store": false}
+	readable, err := app.toolExtract(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(readable.(map[string]any)["page"].(pageDoc).Text, "footer@") || plat.lastCall("computer", "browser_extract")["readability"] != true {
+		t.Fatal("default extraction must retain readability")
+	}
+	args["readability"] = false
+	full, err := app.toolExtract(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if full.(map[string]any)["cache"].(cacheInfo).Hit || !strings.Contains(full.(map[string]any)["page"].(pageDoc).Text, "footer@restaurant.example") || plat.lastCall("computer", "browser_extract")["readability"] != false {
+		t.Fatal("full body reused trimmed cache or failed to forward readability=false")
+	}
+	cached, err := app.toolExtract(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cached.(map[string]any)["cache"].(cacheInfo).Hit {
+		t.Fatal("full body cache should be reusable")
+	}
+}
+
 func TestExtractUsesResponseCache(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -1269,6 +1298,7 @@ type fakeCall struct {
 }
 
 type fakePlatform struct {
+	contactFooter bool
 	tk.BasePlatformClient
 	mu                     sync.Mutex
 	calls                  []fakeCall
@@ -1485,6 +1515,9 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 			}}, regions...)
 		}
 		text := "Hello This page has useful text."
+		if p.contactFooter && in["readability"] == false {
+			text += "\nContact: footer@restaurant.example"
+		}
 		html := "<html><body><h1>Hello</h1><p>This page has useful text.</p></body></html>"
 		if p.cookiePolicyText {
 			text += " Privacy notice and cookies policy."
@@ -1799,5 +1832,46 @@ func TestSearchRetriesPartialAndNavigationOnlyDOM(t *testing.T) {
 				t.Fatalf("search HTML budget=%v", got)
 			}
 		})
+	}
+}
+
+func TestExtractPublicSourcePreservesHTTPProvenanceAndSeparateCache(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			http.Redirect(w, r, "/fr/", http.StatusFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><main><p>French restaurant</p></main><footer>Email footer@restaurant.example</footer><script>vendor@fake.example</script></html>`)
+	}))
+	defer srv.Close()
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat)
+	args := map[string]any{"url": srv.URL, "source_only": true, "store": false}
+	out, err := app.toolExtract(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := out.(map[string]any)["page"].(pageDoc)
+	if !strings.Contains(page.Text, "footer@restaurant.example") || strings.Contains(page.Text, "vendor@") || page.ExtractionBackend != "http_source" || page.Browser != nil || page.FinalURL != srv.URL+"/fr/" {
+		t.Fatalf("incorrect source extraction: %+v", page)
+	}
+	if len(plat.callLog()) != 0 {
+		t.Fatal("source verification opened a browser")
+	}
+	cached, err := app.toolExtract(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cached.(map[string]any)["cache"].(cacheInfo).Hit {
+		t.Fatal("source cache missed")
+	}
+	delete(args, "source_only")
+	rendered, err := app.toolExtract(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rendered.(map[string]any)["cache"].(cacheInfo).Hit || rendered.(map[string]any)["page"].(pageDoc).ExtractionBackend != "browser_dom" {
+		t.Fatal("rendered page reused source cache")
 	}
 }
