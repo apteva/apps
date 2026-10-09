@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -144,21 +145,22 @@ func (p *carrierAudioPacketizer) clear() {
 }
 
 type jsonCarrierAudioPacer struct {
-	diagnostics   livePacerStats
-	ctx           context.Context
-	commands      chan carrierPacerCommand
-	clearCommands chan carrierPacerCommand
-	done          chan struct{}
-	sampleRate    int
-	codec         string
-	shape         string
-	streamID      string
-	marks         bool
-	playback      *twilioPlaybackTracker
-	write         func([]byte) error
-	onProgress    func(twilioPlaybackProgress) error
-	onError       func(error)
-	policy        carrierPacerPolicy
+	pendingSamples atomic.Int64
+	diagnostics    livePacerStats
+	ctx            context.Context
+	commands       chan carrierPacerCommand
+	clearCommands  chan carrierPacerCommand
+	done           chan struct{}
+	sampleRate     int
+	codec          string
+	shape          string
+	streamID       string
+	marks          bool
+	playback       *twilioPlaybackTracker
+	write          func([]byte) error
+	onProgress     func(twilioPlaybackProgress) error
+	onError        func(error)
+	policy         carrierPacerPolicy
 
 	errMu  sync.Mutex
 	err    error
@@ -349,6 +351,7 @@ func (p *jsonCarrierAudioPacer) run() {
 		packet := queue[0]
 		queue = queue[1:]
 		queuedSamples -= len(packet.PCM)
+		p.pendingSamples.Store(int64(queuedSamples))
 		if p.policy.dropStale && !packet.EnqueuedAt.IsZero() && time.Since(packet.EnqueuedAt) >= liveAudioMaxAge {
 			droppedSamples += len(packet.PCM)
 			needsCrossfade = true
@@ -405,6 +408,7 @@ func (p *jsonCarrierAudioPacer) run() {
 		cleared := queuedSamples
 		queue = nil
 		queuedSamples = 0
+		p.pendingSamples.Store(int64(queuedSamples))
 		bufferedThrough = time.Time{}
 		estimated = nil
 		p.playback.clear()
@@ -419,6 +423,7 @@ func (p *jsonCarrierAudioPacer) run() {
 		for queuedSamples > targetSamples && len(queue) > 0 {
 			droppedSamples += len(queue[0].PCM)
 			queuedSamples -= len(queue[0].PCM)
+			p.pendingSamples.Store(int64(queuedSamples))
 			queue = queue[1:]
 		}
 		if dropped := before - queuedSamples; dropped > 0 {
@@ -454,6 +459,7 @@ func (p *jsonCarrierAudioPacer) run() {
 		}
 		queue = append(queue, command.packets...)
 		queuedSamples += incoming
+		p.pendingSamples.Store(int64(queuedSamples))
 		if p.policy.dropStale && queuedSamples > activeMaxQueuedSamples {
 			dropOldest(trimToSamples)
 			activeMaxQueuedSamples = adaptiveMaxQueuedSamples

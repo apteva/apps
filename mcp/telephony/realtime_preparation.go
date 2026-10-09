@@ -218,8 +218,16 @@ func (a *App) runInboundPreparation(ctx *sdk.AppCtx, row *callRow, directive, vo
 		if err != nil {
 			return fail(fmt.Errorf("invalid turn detection configuration: %w", err))
 		}
+		aiPolicy, err := a.aiPolicyForNewSession(ctx, row)
+		if err != nil {
+			return fail(fmt.Errorf("invalid AI call policy: %w", err))
+		}
+		if err = a.registerAIPolicy(ctx, row, threadID, aiPolicy, time.Now().UTC()); err != nil {
+			return fail(fmt.Errorf("persist AI call policy: %w", err))
+		}
+		effectiveDirective := aiPolicyDirective(directive, aiPolicy)
 		rt, err := ctx.PlatformAPI().SpawnRealtimeThread(sdk.RealtimeSpawnRequest{
-			AgentID: row.AgentID, ThreadID: threadID, Directive: strings.TrimSpace(directive), Voice: voice,
+			AgentID: row.AgentID, ThreadID: threadID, Directive: effectiveDirective, Voice: voice,
 			CapabilityMode: sdk.RealtimeCapabilitiesInheritAgent, CallContext: realtimeCallContext(*row),
 			TurnDetection: turnDetection, Ephemeral: true, InitialMessage: greeting, BridgeDisconnectTTLSeconds: 30,
 		})

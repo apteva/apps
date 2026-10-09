@@ -5,12 +5,42 @@ export class AudioRuntimeTelemetry {
   private lastTick?: number;
   private suspendedAt?: number;
   private contextState?: string;
+  private environmentCleanup: (() => void)[] = [];
   readonly counters = {
     main_thread_pause_count: 0, main_thread_max_pause_ms: 0,
     audio_context_suspend_count: 0, audio_context_suspended_ms: 0,
   };
   constructor(private emit: (event: MediaSessionEvent) => void,
     private now = () => performance.now(), private timestamp = () => new Date().toISOString()) {}
+  observeEnvironment(): void {
+    this.stopEnvironment();
+    // Events only; no polling, device enumeration, permissions or audio changes.
+    const listen = (target: EventTarget | undefined, name: string, observe: () => void) => {
+      if (!target) return;
+      try {
+        target.addEventListener(name, observe);
+        this.environmentCleanup.push(() => target.removeEventListener(name, observe));
+      } catch { /* Monitoring is optional in embedded/headless environments. */ }
+    };
+    try {
+    if (typeof document !== "undefined") {
+      listen(document, "visibilitychange", () => this.report("tab_visibility", document.visibilityState));
+      for (const name of ["freeze", "resume"]) listen(document, name, () => this.report("page_lifecycle", name));
+      this.report("tab_visibility", document.visibilityState);
+    }
+    if (typeof window !== "undefined") {
+      for (const name of ["pagehide", "pageshow"]) listen(window, name, () => this.report("page_lifecycle", name));
+    }
+    if (typeof navigator !== "undefined") {
+      listen(navigator.mediaDevices, "devicechange", () => this.report("microphone", "devices_changed"));
+    }
+    } catch { /* Restricted environment getters cannot affect audio startup. */ }
+  }
+  stopEnvironment(): void {
+    for (const cleanup of this.environmentCleanup.splice(0)) {
+      try { cleanup(); } catch { /* Cleanup must not prevent media cleanup. */ }
+    }
+  }
   tick(): void {
     const now = this.now();
     if (this.lastTick !== undefined) {

@@ -82,6 +82,16 @@ func TestCarrierActivationUnansweredThenConfirmedMedia(t *testing.T) {
 		t.Fatal(rec.Body.String())
 	}
 	current = activationRow(t, a, row.ID)
+	if current.MediaConnectedAt != "" {
+		t.Fatal("provider acknowledgement falsely confirms media")
+	}
+	bridge, e := a.claimCarrierBridge(current, t.Context())
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(a.stopCarrierBridges)
+	bridge.media() // The real handler confirms only decoded media, including silence.
+	current = activationRow(t, a, row.ID)
 	if current.MediaConnectedAt == "" || current.StateExpiresAt != "" {
 		t.Fatalf("media not confirmed or activation timeout retained: %+v", current)
 	}

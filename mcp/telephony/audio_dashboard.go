@@ -172,12 +172,14 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 		m["server_browser_max_queue_ms"] = float64(v.ToBrowser.MaxQueuedMS)
 		m["browser_max_write_ms"] = float64(v.ToBrowser.MaxWriteMS)
 		m["browser_max_queue_delay_ms"] = float64(v.ToBrowser.MaxResidenceMS)
-		m["server_browser_dropped_ms"] = float64(v.ToBrowser.StaleBytes+v.ToBrowser.SourceStaleBytes+v.ToBrowser.OverflowBytes) / 48
+		m["server_browser_dropped_ms"] = float64(v.ToBrowser.StaleBytes+v.ToBrowser.SourceStaleBytes+v.ToBrowser.OverflowBytes+v.ToBrowser.WriteTimeoutBytes) / 48
 		for _, e := range v.CaptureDropEvents {
 			if e.BrowserDropTimestamp != "" {
 				m["capture_correlated_missing_ms"] += float64(e.DurationMS)
 			}
 		}
+		m["browser_socket_write_timeouts"] = float64(v.ToBrowser.Transport.WriteTimeouts)
+		m["browser_socket_write_timeout_dropped_ms"] = float64(v.ToBrowser.WriteTimeoutBytes) / 48
 		m["server_capture_dropped_ms"] = float64(v.CaptureStaleBytes) / 48
 		m["capture_muted_frames"] = max(m["capture_muted_frames"], float64(v.CaptureMutedFrames))
 		m["capture_muted_ms"] = max(m["capture_muted_ms"], float64(v.CaptureMutedMS))
@@ -445,7 +447,17 @@ func (a *App) handleAudioDashboard(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "load transport diagnostics", 500)
 			return
 		}
-		writeJSON(w, map[string]any{"transport_samples": samples, "browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "network_events": network})
+		bridges, err := a.db().carrierBridgeHistory(project, id)
+		if err != nil {
+			http.Error(w, "load carrier bridge diagnostics", 500)
+			return
+		}
+		policy, err := a.aiPolicyDiagnostics(project, id)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "load AI policy diagnostics", 500)
+			return
+		}
+		writeJSON(w, map[string]any{"ai_call_policy": policy, "carrier_bridges": bridges, "transport_samples": samples, "browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "network_events": network})
 		return
 	}
 	now := time.Now()

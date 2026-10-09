@@ -94,20 +94,23 @@ func audioPeerAddress(r *http.Request, proxies string) (netip.Addr, string) {
 }
 
 type audioSocketEvent struct {
-	ShutdownIntent  string        `json:"shutdown_intent,omitempty"`
-	At              string        `json:"at"`
-	ConnectionID    string        `json:"connection_id"`
-	Action          string        `json:"action"`
-	Reason          string        `json:"reason,omitempty"`
-	Code            int           `json:"close_code,omitempty"`
-	PeerHash        string        `json:"peer_address_hash,omitempty"`
-	HashEpoch       string        `json:"peer_hash_epoch,omitempty"`
-	AddressSource   string        `json:"address_source,omitempty"`
-	AdviserIdentity phoneIdentity `json:"adviser_identity"`
-	IdentitySource  string        `json:"identity_source,omitempty"`
-	Classification  string        `json:"network_classification,omitempty"`
+	VerifiedLeaseExpiresAt int64         `json:"verified_lease_expires_at,omitempty"`
+	RemainingLeaseMS       int64         `json:"remaining_lease_ms,omitempty"`
+	ShutdownIntent         string        `json:"shutdown_intent,omitempty"`
+	At                     string        `json:"at"`
+	ConnectionID           string        `json:"connection_id"`
+	Action                 string        `json:"action"`
+	Reason                 string        `json:"reason,omitempty"`
+	Code                   int           `json:"close_code,omitempty"`
+	PeerHash               string        `json:"peer_address_hash,omitempty"`
+	HashEpoch              string        `json:"peer_hash_epoch,omitempty"`
+	AddressSource          string        `json:"address_source,omitempty"`
+	AdviserIdentity        phoneIdentity `json:"adviser_identity"`
+	IdentitySource         string        `json:"identity_source,omitempty"`
+	Classification         string        `json:"network_classification,omitempty"`
 }
 type audioSocketSnapshot struct {
+	LeaseEvents      []audioSocketEvent `json:"lease_events,omitempty"`
 	ConnectionID     string             `json:"connection_id,omitempty"`
 	Connections      int64              `json:"connections"`
 	Reconnects       int64              `json:"reconnects"`
@@ -415,6 +418,7 @@ func (t *audioCallTelemetry) snapshots() (audioSocketSnapshot, audioHealthSnapsh
 	defer t.mu.Unlock()
 	s, h := t.socket, t.health
 	s.Events = append([]audioSocketEvent(nil), s.Events...)
+	s.LeaseEvents = append([]audioSocketEvent(nil), s.LeaseEvents...)
 	s.BrowserTotals = map[string]float64{}
 	for k, v := range t.socket.BrowserTotals {
 		s.BrowserTotals[k] = v
@@ -575,7 +579,7 @@ func (a *App) sampleAudioHealth(row *callRow, h *softphoneHub, w *websocketWrite
 
 	observations := []audioHealthObservation{
 		{"carrier_to_telephony", "carrier_delivery_gap_or_age", s.Reception.Stalled, active, float64(s.Reception.Stalls+s.Reception.GapsOverBudget) + s.Reception.StaleDroppedMS},
-		{"telephony_to_browser", "playback_delivery_over_budget", false, active, playback + float64(s.ToBrowser.StaleBytes+s.ToBrowser.SourceStaleBytes+s.ToBrowser.OverflowBytes)/48},
+		{"telephony_to_browser", "playback_delivery_over_budget", false, active, playback + float64(s.ToBrowser.StaleBytes+s.ToBrowser.SourceStaleBytes+s.ToBrowser.OverflowBytes+s.ToBrowser.WriteTimeoutBytes)/48},
 		{"browser_to_telephony", "capture_delivery_over_budget", false, browserActive && !b.MicrophoneMuted && !b.MicrophoneDeviceMuted, capture + float64(s.CaptureStaleBytes)/48},
 	}
 	if b.MediaTransport == "webrtc" {
@@ -727,3 +731,18 @@ func (a *App) persistAudioTelemetry(callID string, h *softphoneHub) (err error) 
 	return a.db().updateBrowserAudioDiagnostics(callID, browser)
 }
 func (t *audioCallTelemetry) pending() bool { t.mu.Lock(); defer t.mu.Unlock(); return t.dirty }
+
+// Called only on transitions, outside media processing; never includes credentials.
+func (t *audioCallTelemetry) leaseCheckEvent(w *websocketWriterPump, action, reason string, expiry int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	network, ok := t.sockets[w]
+	if !ok {
+		return
+	}
+	t.dirty = true
+	t.socket.LeaseEvents = append(t.socket.LeaseEvents, audioSocketEvent{At: time.Now().UTC().Format(time.RFC3339Nano), ConnectionID: network.ConnectionID, AdviserIdentity: network.AdviserIdentity, IdentitySource: network.IdentitySource, Classification: network.Classification, Action: action, Reason: reason, VerifiedLeaseExpiresAt: expiry, RemainingLeaseMS: max(int64(0), expiry*1000-time.Now().UnixMilli())})
+	if len(t.socket.LeaseEvents) > 64 {
+		t.socket.LeaseEvents = t.socket.LeaseEvents[len(t.socket.LeaseEvents)-64:]
+	}
+}

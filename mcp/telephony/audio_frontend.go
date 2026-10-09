@@ -49,6 +49,7 @@ func noiseSuppressionEnabled() bool {
 
 type audioFrontendResult struct {
 	PCM             []int16
+	SpeechActive    bool // observational; does not change the VAD or waveform
 	SpeechStarted   bool
 	RMS             float64
 	NoiseFloor      float64
@@ -170,6 +171,7 @@ func (f *carrierAudioFrontend) process(pcm []int16) audioFrontendResult {
 		f.recordFrame(rms, vadSpeech, suppressed, started)
 
 		out = append(out, frame...)
+		result.SpeechActive = result.SpeechActive || speechLike
 		result.SpeechStarted = result.SpeechStarted || started
 		result.RMS = rms
 		result.NoiseFloor = f.noiseFloor

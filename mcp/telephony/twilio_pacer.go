@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -51,6 +52,7 @@ type twilioPacerCommand struct {
 // carrier sees it. A short carrier lead absorbs network jitter; later packets
 // replenish that lead at absolute media deadlines.
 type twilioAudioPacer struct {
+	pendingSamples           atomic.Int64
 	diagnostics              livePacerStats
 	ctx                      context.Context
 	commands                 chan twilioPacerCommand
@@ -226,6 +228,7 @@ func (p *twilioAudioPacer) run() {
 		bufferedThrough = time.Time{}
 		queue = nil
 		queuedSamples = 0
+		p.pendingSamples.Store(int64(queuedSamples))
 		p.playback.clear()
 		payload, _ := json.Marshal(map[string]string{"event": "clear", "streamSid": p.streamSID})
 		return samplesToMS(clearedSamples), p.write(payload)
@@ -246,6 +249,7 @@ func (p *twilioAudioPacer) run() {
 		packet := queue[0]
 		queue = queue[1:]
 		queuedSamples -= len(packet.PCM)
+		p.pendingSamples.Store(int64(queuedSamples))
 
 		if p.dropStale && !packet.EnqueuedAt.IsZero() && time.Since(packet.EnqueuedAt) >= liveAudioMaxAge {
 			droppedSamples += len(packet.PCM)
@@ -330,11 +334,13 @@ func (p *twilioAudioPacer) run() {
 		}
 		queue = append(queue, command.packets...)
 		queuedSamples += incomingSamples
+		p.pendingSamples.Store(int64(queuedSamples))
 		if p.dropStale && queuedSamples > activeMaxQueuedSamples {
 			before := queuedSamples
 			for queuedSamples > p.trimToSamples && len(queue) > 0 {
 				droppedSamples += len(queue[0].PCM)
 				queuedSamples -= len(queue[0].PCM)
+				p.pendingSamples.Store(int64(queuedSamples))
 				queue = queue[1:]
 			}
 			if dropped := before - queuedSamples; dropped > 0 {

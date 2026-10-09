@@ -973,6 +973,9 @@ func (a *App) saveRoutingDestination(project, id, name, kind string, config any,
 	if _, err := destinationTurnDetection(kind, string(raw)); err != nil {
 		return nil, err
 	}
+	if _, err := destinationAICallPolicy(kind, string(raw), projectAICallPolicy(nil)); err != nil {
+		return nil, err
+	}
 	switch kind {
 	case "agent", "ai":
 		if routingConfigInt(decoded, "agent_id", 0) <= 0 {
@@ -1377,6 +1380,9 @@ func (a *App) resolveRoutingDefinition(route *routeRow, caller string, digits ma
 				// destination-only and may have been explicitly added to its snapshot.
 				var destinationConfig map[string]json.RawMessage
 				if json.Unmarshal([]byte(destination.ConfigJSON), &destinationConfig) == nil {
+					if policy, ok := destinationConfig["ai_call_policy"]; ok {
+						config["ai_call_policy"] = policy
+					}
 					if turn, ok := destinationConfig["turn_detection"]; ok {
 						config["turn_detection"] = turn
 					}

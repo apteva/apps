@@ -453,7 +453,7 @@ func TestImmediateAnswerSpawnsRealtimeThreadAndAnswersCarrier(t *testing.T) {
 		t.Fatalf("spawn count=%d, want 1", len(platform.spawned))
 	}
 	spawn := platform.spawned[0]
-	if spawn.AgentID != route.AgentID || spawn.Directive != route.AutoDirective || spawn.Voice != route.AutoVoice || spawn.InitialMessage != route.AutoGreeting ||
+	if spawn.AgentID != route.AgentID || spawn.Directive != aiPolicyDirective(route.AutoDirective, projectAICallPolicy(ctx)) || spawn.Voice != route.AutoVoice || spawn.InitialMessage != route.AutoGreeting ||
 		spawn.CapabilityMode != sdk.RealtimeCapabilitiesInheritAgent || spawn.CallContext == nil || spawn.CallContext.CallID != call.ID {
 		t.Fatalf("unexpected realtime spawn: %+v", spawn)
 	}

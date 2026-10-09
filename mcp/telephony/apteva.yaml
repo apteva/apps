@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.11.4
+version: 0.11.5
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -28,6 +28,7 @@ requires:
     - platform.connections.read_credentials  # read carrier phone_number to fill From=
     - platform.instances.read             # resolve assigned agent names in the routing panel
     - platform.realtime.spawn             # open realtime threads in core
+    - platform.telemetry.read             # observe scoped AI conversation phases
   apps:
     - name: functions
       optional: true
@@ -311,6 +312,9 @@ config_schema:
   - { name: connected_call_max_duration_seconds, type: text, default: "14400", label: "Connected call duration limit (seconds)", description: "60–14400 seconds, measured from first confirmed carrier answer or connected media. Snapshotted for each new call." }
   - { name: call_setup_timeout_seconds, type: text, default: "3600", label: "Call setup safety timeout (seconds)", description: "60–3600 seconds. Separate from shorter ringing, routing and AI preparation deadlines." }
   - { name: call_media_recovery_timeout_seconds, type: text, default: "120", label: "Media recovery timeout (seconds)", description: "30–600 seconds after a media transport failure/disconnection. Silence, mute and hold do not trigger this timer." }
+  - { name: ai_call_max_duration_seconds, type: text, default: "1200", label: "AI handling duration limit (seconds)", description: "60–14400 seconds from AI media activation. New AI calls only; destination ai_call_policy may override. Reconnects do not reset it." }
+  - { name: ai_call_inactivity_timeout_seconds, type: text, default: "30", label: "AI caller inactivity timeout (seconds)", description: "0–300 seconds while listening for the caller; 0 disables reminders. AI speech, tools, hold, unknown phase and media recovery pause it." }
+  - { name: ai_call_response_window_seconds, type: text, default: "15", label: "AI inactivity reminder response window (seconds)", description: "5–120 seconds after reminder playback completes. Caller speech or DTMF cancels the pending inactivity termination." }
   - { name: ai_startup_max_attempts, type: text, default: "3", label: "AI startup maximum attempts", description: "Call-wide budget, 1–5. Only explicit temporary failures are retried." }
   - { name: ai_startup_timeout_seconds, type: text, default: "15", label: "AI startup total timeout (seconds)", description: "1–120 seconds, capped by the remaining call deadline." }
   - { name: inbound_burst_window_seconds, type: text, default: "60", label: "Inbound burst window (seconds)" }
