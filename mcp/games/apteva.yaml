@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: games
 display_name: Games
-version: 0.7.0
+version: 0.7.1
 description: |
   Guided source and deployment setup, versioned build recipes, runner selection
   and actionable readiness checks with exact-build artifact evidence.
@@ -344,7 +344,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: games/v0.6.0
+    ref: games/v0.7.1
     entry: mcp/games
   port: 8080
   health_check: /health
