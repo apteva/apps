@@ -94,7 +94,7 @@ bun run scripts/build-panels.ts --app actors
 bun test mcp/actors/ui/ActorsPanel.test.ts
 ```
 
-The app-sdk pin was derived from local SDK HEAD and fetched tags: `950b91d` / `v0.82.0`. `GOWORK=off` verifies the app against its published dependency rather than the workspace overlay.
+The app-sdk pin is `v0.97.0`, derived from fetched tag ancestry (including v0.96.0 and v0.82.0). `GOWORK=off` verifies the app against its published dependency rather than the workspace overlay.
 
 The release manifest pins source to the matching immutable Actors tag. The registry references the same tag for the manifest and icon. Publishing a release makes Actors available for installation; it does not install the app into existing projects.
 
@@ -107,3 +107,9 @@ Web's search, extraction, crawl, map, research and snapshot tools remain indepen
 Semantic `set_checked`, `select_option`, and `set_temporal` support access toggles, dropdowns and schedule fields. Use `readability: false` on extract/assert steps when controls live outside the primary content. An extracted field may supply `pattern` to capture a labelled value before type conversion.
 
 For sends, payments or deletions, add `once_key: "{{request_id}}"` to the acknowledged consequential click. Reservations persist across run retries, restarts and actor revisions. The same actor operation cannot attempt that key again, even if its prior outcome is uncertain. Inspect the referenced original run before deliberately issuing a new key. This guards duplicate attempts; it does not provide exactly-once execution on an external site.
+
+## Exact selections from runtime lists
+
+`set_checked` accepts `labels: "{{tier_labels}}"` with an exact `som_only` locator and optional role. The input must be a unique array of single-line names, at most 50 entries. Each target is resolved using a fresh SOM observation; missing or ambiguous targets stop the operation. An empty list performs no selections. Clear existing choices in an earlier step when replacing a selection.
+
+`assert_values` supports `equals_set: "{{tier_labels}}"` to compare the exact set of selected labels, ignoring order but rejecting duplicates, omissions and extra entries. An aggregated text field should use `all: true, separator: "\n"`; absent optional fields represent an empty set. No creator names, prices or tier policy live in the engine.

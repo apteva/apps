@@ -86,6 +86,25 @@ func (e *actorExecution) interact(step actorStep) error {
 				return errors.New("set_checked requires a boolean checked value")
 			}
 			args["checked"] = checked
+			if step.Labels != nil {
+				labels, err := actorLabelList(step.Labels)
+				if err != nil {
+					return err
+				}
+				for _, label := range labels {
+					if err := e.checkpoint(); err != nil {
+						return err
+					}
+					one := step
+					one.Labels = nil
+					one.Locator.Text = label
+					oneArgs := map[string]any{"session_id": e.session.SessionID, "action": step.Action, "checked": checked}
+					if err := e.dispatchSemantic(one, oneArgs); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
 		} else if len(step.Values) > 0 && step.Action == "select_option" {
 			args["values"] = step.Values
 		} else {

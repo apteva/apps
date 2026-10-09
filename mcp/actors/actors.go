@@ -100,6 +100,7 @@ type actorStep struct {
 	Match       string               `json:"match,omitempty"`
 	TimeoutMS   any                  `json:"timeout_ms,omitempty"`
 	Checked     any                  `json:"checked,omitempty"`
+	Labels      any                  `json:"labels,omitempty"`
 	Value       string               `json:"value,omitempty"`
 	Values      []string             `json:"values,omitempty"`
 	Readability *bool                `json:"readability,omitempty"`
@@ -119,6 +120,7 @@ type actorStep struct {
 type actorAssertion struct {
 	Equals       any      `json:"equals,omitempty"`
 	EqualsField  string   `json:"equals_field,omitempty"`
+	EqualsSet    any      `json:"equals_set,omitempty"`
 	Contains     string   `json:"contains,omitempty"`
 	SumOf        []string `json:"sum_of,omitempty"`
 	DifferenceOf []string `json:"difference_of,omitempty"`
@@ -383,10 +385,20 @@ func validateActorDefinition(def actorDefinition) error {
 				return fmt.Errorf("steps[%d].locator is required for set_text", i)
 			}
 		case "set_checked", "select_option", "set_temporal":
-			if !locatorHasTarget(step.Locator) {
+			if !locatorHasTarget(step.Locator) && !(step.Action == "set_checked" && step.Labels != nil) {
 				return fmt.Errorf("steps[%d].locator is required for %s", i, step.Action)
 			}
 			if step.Action == "set_checked" {
+				if step.Labels != nil {
+					if step.Locator.Selector != "" || !step.Locator.Exact || !step.Locator.SOMOnly || step.Locator.Text != "" {
+						return fmt.Errorf("steps[%d].labels requires an exact som_only locator without text or selector", i)
+					}
+					if !actorListTemplate(step.Labels) {
+						if _, err := actorLabelList(step.Labels); err != nil {
+							return fmt.Errorf("steps[%d].labels: %w", i, err)
+						}
+					}
+				}
 				if _, ok := step.Checked.(bool); !ok && !actorTemplateValue(stringFromAny(step.Checked)) {
 					return fmt.Errorf("steps[%d].checked must be a boolean or template", i)
 				}
@@ -450,8 +462,13 @@ func validateActorDefinition(def actorDefinition) error {
 				return fmt.Errorf("steps[%d].assertions is required", i)
 			}
 			for field, assertion := range step.Assertions {
-				if strings.TrimSpace(field) == "" || (assertion.Equals == nil && assertion.EqualsField == "" && assertion.Contains == "" && len(assertion.SumOf) == 0 && len(assertion.DifferenceOf) == 0) {
+				if strings.TrimSpace(field) == "" || (assertion.Equals == nil && assertion.EqualsSet == nil && assertion.EqualsField == "" && assertion.Contains == "" && len(assertion.SumOf) == 0 && len(assertion.DifferenceOf) == 0) {
 					return fmt.Errorf("steps[%d].assertions[%q] has no comparison", i, field)
+				}
+				if assertion.EqualsSet != nil && !actorListTemplate(assertion.EqualsSet) {
+					if _, err := actorLabelList(assertion.EqualsSet); err != nil {
+						return fmt.Errorf("steps[%d].assertions[%q].equals_set: %w", i, field, err)
+					}
 				}
 				if len(assertion.SumOf) > 0 && len(assertion.DifferenceOf) > 0 {
 					return fmt.Errorf("steps[%d].assertions[%q] cannot combine sum_of and difference_of", i, field)

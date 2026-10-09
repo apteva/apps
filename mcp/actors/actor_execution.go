@@ -679,6 +679,11 @@ func (e *actorExecution) assertValues(step actorStep) error {
 		if assertion.Equals != nil && !actorValuesEqual(actual, assertion.Equals, assertion.Tolerance) {
 			return fmt.Errorf("assertion failed for %q: got %v, want %v", field, actual, assertion.Equals)
 		}
+		if assertion.EqualsSet != nil {
+			if err := actorAssertLabelSet(actual, assertion.EqualsSet); err != nil {
+				return fmt.Errorf("assertion failed for %q: %w", field, err)
+			}
+		}
 		if assertion.EqualsField != "" {
 			reference, exists := e.lastValues[assertion.EqualsField]
 			if !exists {
@@ -1515,10 +1520,11 @@ func renderActorDefinition(def actorDefinition, vars map[string]any) (actorDefin
 		return def, err
 	}
 	b, _ = json.Marshal(rendered)
-	if err := json.Unmarshal(b, &def); err != nil {
+	var resolved actorDefinition
+	if err := json.Unmarshal(b, &resolved); err != nil {
 		return def, err
 	}
-	return def, validateActorDefinition(def)
+	return resolved, validateActorDefinition(resolved)
 }
 
 func renderActorValue(value any, vars map[string]any) (any, error) {
