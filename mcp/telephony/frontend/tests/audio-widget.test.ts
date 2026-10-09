@@ -11,3 +11,10 @@ test("drop boundaries stay separate and values have honest units", () => {
 test("zero and invalid counters do not present fabricated errors", () => {
  expect(audioWidgetMeasurements({...report,metrics:{playback_dropped_ms:0,carrier_max_gap_ms:NaN,reconnects:-1}})).toEqual([]);expect(audioWidgetProblems({...report,issues:[]})).toEqual([]);
 });
+test("buffer gaps remain distinct from discarded audio in the widget", () => {
+ const value={...report,issues:["playback_underrun"],metrics:{playback_underrun_ms:125.5,playback_dropped_ms:20}};
+ expect(audioWidgetProblems(value)).toEqual([{code:"playback_underrun",label:"Playback buffer gaps",tone:"error"}]);
+ const measurements=audioWidgetMeasurements(value);
+ expect(measurements.map(v=>v.key)).toEqual(["playback_underrun_ms","playback_dropped_ms"]);
+ expect(measurements[0].value).toBe("126 ms");
+});

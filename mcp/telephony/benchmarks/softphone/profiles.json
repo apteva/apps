@@ -390,5 +390,56 @@
     },
     "max_p95_ms": 500,
     "max_missing_pct": 5
+  },
+  {
+    "name": "adaptive-160-280ms-jitter",
+    "playback_ceiling_ms": 160,
+    "expectation": "usable",
+    "down": {
+      "kbps": 2000,
+      "latency_ms": 20,
+      "recovery_probability": 0.01,
+      "recovery_ms": 280
+    },
+    "up": {
+      "kbps": 2000,
+      "latency_ms": 20
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 10
+  },
+  {
+    "name": "adaptive-220-280ms-jitter",
+    "playback_ceiling_ms": 220,
+    "expectation": "usable",
+    "down": {
+      "kbps": 2000,
+      "latency_ms": 20,
+      "recovery_probability": 0.01,
+      "recovery_ms": 280
+    },
+    "up": {
+      "kbps": 2000,
+      "latency_ms": 20
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 10
+  },
+  {
+    "name": "adaptive-280-280ms-jitter",
+    "playback_ceiling_ms": 280,
+    "expectation": "usable",
+    "down": {
+      "kbps": 2000,
+      "latency_ms": 20,
+      "recovery_probability": 0.01,
+      "recovery_ms": 280
+    },
+    "up": {
+      "kbps": 2000,
+      "latency_ms": 20
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 10
   }
 ]

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"math"
+	"sort"
 	"sync"
 	"time"
 )
@@ -90,10 +91,14 @@ type browserAudioTiming struct {
 		DropTotalsMS                map[string]float64 `json:"drop_totals_ms,omitempty"`
 	} `json:"transport"`
 	Playback struct {
-		Coaching       *coachingPlaybackTiming `json:"coaching,omitempty"`
-		PlayedMS       float64                 `json:"played_ms"`
-		MaxResidenceMS float64                 `json:"max_residence_ms"`
-		DropTotalsMS   map[string]float64      `json:"drop_totals_ms,omitempty"`
+		ReserveExpandedMS      float64                 `json:"reserve_expanded_ms,omitempty"`
+		ReserveCompressedMS    float64                 `json:"reserve_compressed_ms,omitempty"`
+		ReserveAdjustments     float64                 `json:"reserve_adjustments,omitempty"`
+		ReserveMatchRejections float64                 `json:"reserve_match_rejections,omitempty"`
+		Coaching               *coachingPlaybackTiming `json:"coaching,omitempty"`
+		PlayedMS               float64                 `json:"played_ms"`
+		MaxResidenceMS         float64                 `json:"max_residence_ms"`
+		DropTotalsMS           map[string]float64      `json:"drop_totals_ms,omitempty"`
 	} `json:"playback"`
 }
 
@@ -111,6 +116,8 @@ type mediaSessionEvent struct {
 }
 
 type browserAudioDiagnostics struct {
+	PlaybackUnderrunMS     float64                 `json:"playback_underrun_ms,omitempty"`
+	PlaybackUnderrunEvents []playbackUnderrunEvent `json:"playback_underrun_events,omitempty"`
 	MediaTransport         string                  `json:"media_transport,omitempty"`
 	Codec                  string                  `json:"codec,omitempty"`
 	WebRTC                 *browserWebRTCStats     `json:"webrtc,omitempty"`
@@ -147,6 +154,103 @@ type browserAudioDiagnostics struct {
 	CaptureSequenceGaps    int                     `json:"capture_sequence_gaps"`
 	PlaybackSequenceGaps   int                     `json:"playback_sequence_gaps"`
 	DropEvents             []audioDropEvent        `json:"drop_events,omitempty"`
+}
+
+// Duration measures samples rendered without caller data. UTC/audio-clock
+// bounds locate the observation; incomplete intervals never invent a recovery.
+type playbackUnderrunEvent struct {
+	ID             string  `json:"id"`
+	ConnectionID   string  `json:"connection_id,omitempty"`
+	StartedAt      string  `json:"started_at"`
+	EndedAt        string  `json:"ended_at,omitempty"`
+	ObservedUntil  string  `json:"observed_until"`
+	DurationMS     float64 `json:"duration_ms"`
+	MissingSamples float64 `json:"missing_samples"`
+	SampleRate     int     `json:"sample_rate"`
+	StartAudioMS   float64 `json:"start_audio_ms"`
+	EndAudioMS     float64 `json:"end_audio_ms"`
+	LastSequence   *uint64 `json:"last_sequence,omitempty"`
+	ResumeSequence *uint64 `json:"resume_sequence,omitempty"`
+	EndReason      string  `json:"end_reason"`
+	Complete       bool    `json:"complete"`
+	TimestampBasis string  `json:"timestamp_basis"`
+}
+
+func normalizePlaybackUnderruns(events []playbackUnderrunEvent) []playbackUnderrunEvent {
+	if len(events) > 100 {
+		events = events[len(events)-100:]
+	}
+	out := make([]playbackUnderrunEvent, 0, len(events))
+	finite := func(n, cap float64) float64 {
+		if math.IsNaN(n) || math.IsInf(n, 0) {
+			return 0
+		}
+		return math.Max(0, math.Min(n, cap))
+	}
+	for _, e := range events {
+		started, err := time.Parse(time.RFC3339Nano, e.StartedAt)
+		if err != nil || e.ID == "" || e.SampleRate < 8000 || e.SampleRate > 384000 {
+			continue
+		}
+		observed, err := time.Parse(time.RFC3339Nano, e.ObservedUntil)
+		if err != nil || observed.Before(started) {
+			continue
+		}
+		if e.EndedAt != "" {
+			ended, err := time.Parse(time.RFC3339Nano, e.EndedAt)
+			if err != nil || ended.Before(started) || ended.Before(observed) {
+				continue
+			}
+			e.EndedAt = ended.UTC().Format(time.RFC3339Nano)
+		} else {
+			e.Complete = false
+		}
+		e.ID = limitDiagnosticText(e.ID, 96)
+		e.StartedAt, e.ObservedUntil = started.UTC().Format(time.RFC3339Nano), observed.UTC().Format(time.RFC3339Nano)
+		e.StartAudioMS = finite(e.StartAudioMS, 86400000)
+		e.EndAudioMS = math.Max(e.StartAudioMS, finite(e.EndAudioMS, 86400000))
+		e.MissingSamples = math.Floor(finite(e.MissingSamples, float64(e.SampleRate)*86400))
+		e.DurationMS = e.MissingSamples * 1000 / float64(e.SampleRate)
+		e.TimestampBasis = "browser_wall_audio_clock"
+		switch e.EndReason {
+		case "ongoing":
+			e.Complete = false
+		case "recovered", "flush", "audio_context_paused", "transport_disconnected", "carrier_disconnected", "observation_ended", "carrier_connected", "hold", "call_ended":
+		default:
+			e.EndReason, e.Complete = "observation_ended", false
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+func mergePlaybackUnderruns(previous, incoming []playbackUnderrunEvent) []playbackUnderrunEvent {
+	out := append([]playbackUnderrunEvent(nil), previous...)
+	indices := make(map[string]int, len(out))
+	key := func(e playbackUnderrunEvent) string { return e.ConnectionID + ":" + e.ID }
+	for i, e := range out {
+		indices[key(e)] = i
+	}
+	for _, e := range incoming {
+		if i, ok := indices[key(e)]; ok {
+			prior := out[i]
+			if (!prior.Complete || e.Complete) && (prior.EndedAt == "" || e.EndedAt != "") && e.DurationMS >= prior.DurationMS {
+				out[i] = e
+			}
+		} else {
+			indices[key(e)] = len(out)
+			out = append(out, e)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		a, _ := time.Parse(time.RFC3339Nano, out[i].StartedAt)
+		b, _ := time.Parse(time.RFC3339Nano, out[j].StartedAt)
+		return a.Before(b)
+	})
+	if len(out) > 100 {
+		out = out[len(out)-100:]
+	}
+	return out
 }
 
 type browserWebRTCStats struct {
@@ -247,6 +351,11 @@ func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics) browserAudi
 			return math.Max(0, math.Min(n, cap))
 		}
 		tr, rt := &value.Timing.Transport, &value.Timing.Runtime
+		pb := &value.Timing.Playback
+		pb.ReserveExpandedMS = finite(pb.ReserveExpandedMS, 86400000)
+		pb.ReserveCompressedMS = finite(pb.ReserveCompressedMS, 86400000)
+		pb.ReserveAdjustments = finite(pb.ReserveAdjustments, 1e9)
+		pb.ReserveMatchRejections = finite(pb.ReserveMatchRejections, 1e9)
 		tr.CaptureMutedFrames = finite(tr.CaptureMutedFrames, 1e9)
 		tr.CaptureMutedMS = finite(tr.CaptureMutedMS, 86400000)
 		tr.ReconnectAttempts = finite(tr.ReconnectAttempts, 1e9)
@@ -317,6 +426,11 @@ func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics) browserAudi
 	value.PlaybackTargetMS = clampDiagnosticInt(value.PlaybackTargetMS, 5000)
 	value.PlaybackMaxQueueMS = clampDiagnosticInt(value.PlaybackMaxQueueMS, 60000)
 	value.PlaybackUnderruns = clampDiagnosticInt(value.PlaybackUnderruns, 1000000000)
+	if math.IsNaN(value.PlaybackUnderrunMS) || math.IsInf(value.PlaybackUnderrunMS, 0) {
+		value.PlaybackUnderrunMS = 0
+	}
+	value.PlaybackUnderrunMS = math.Max(0, math.Min(value.PlaybackUnderrunMS, 86400000))
+	value.PlaybackUnderrunEvents = normalizePlaybackUnderruns(value.PlaybackUnderrunEvents)
 	value.PlaybackDroppedMS = clampDiagnosticInt(value.PlaybackDroppedMS, 24*60*60*1000)
 	value.WebSocketBufferedBytes = clampDiagnosticInt(value.WebSocketBufferedBytes, 64*1024*1024)
 	value.AudioContextRate = clampDiagnosticInt(value.AudioContextRate, 384000)
