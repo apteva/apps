@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: content-catalog
 display_name: Content Catalog
-version: 0.6.5
+version: 0.6.6
 description: |
   Coordinate brands, production sessions, Storage assets, Media derivatives,
   optional Gigs, cloud hosting, and shared platform posts.
@@ -58,7 +58,7 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: content_catalog_overview, description: "Counts of brands, sessions, assets, asset publications, and hosting work for the current project." }
-    - { name: content_catalog_search, description: "Search linked sessions and assets with text including live Media descriptions, brand, date, review, and per-platform availability filters. Read-only; no folder scan." }
+    - { name: content_catalog_search, description: "Search linked sessions and assets with text including live Media descriptions, brand, exact source asset and optional descendants, date, review, and per-platform availability filters. Follow next_cursor until empty. Read-only; no folder scan." }
     - { name: content_catalog_brands_create, description: "Create a brand and its Storage path policy. Optional Bunny connection and collection." }
     - { name: content_catalog_brands_list, description: "List brands in the current project." }
     - { name: content_catalog_brands_update, description: "Update a brand name, Storage root, or video host settings." }
@@ -111,7 +111,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: content-catalog/v0.6.5
+    ref: content-catalog/v0.6.6
     entry: mcp/content-catalog
   port: 8080
   health_check: /health

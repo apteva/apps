@@ -58,6 +58,13 @@ func TestCatalogToolsListEmitsReadOnlyAnnotations(t *testing.T) {
 	for _, item := range listed["tools"].([]any) {
 		tool := item.(map[string]any)
 		name := tool["name"].(string)
+		if name == "content_catalog_search" {
+			schema := tool["inputSchema"].(map[string]any)
+			properties := schema["properties"].(map[string]any)
+			if properties["source_asset_id"].(map[string]any)["type"] != "string" || properties["include_descendants"].(map[string]any)["type"] != "boolean" || properties["include_descendants"].(map[string]any)["default"] != false {
+				t.Fatalf("search must advertise exact source and optional descendants: %#v", schema)
+			}
+		}
 		if name == "content_catalog_hosting_list" {
 			// Verify the actual MCP wire schema, not just the unused schema helper.
 			schema := tool["inputSchema"].(map[string]any)

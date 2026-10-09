@@ -1,5 +1,55 @@
 # Content Catalog
 
+## Version 0.6.6: exact source search
+
+`content_catalog_search` and HTTP `/search` accept `source_asset_id` (an exact
+Catalog asset ID) and optional boolean `include_descendants`, default false.
+Direct mode returns assets whose recorded sources include that ID. Descendant
+mode follows recorded links through all intermediate assets in the same project.
+The source itself is excluded. Each result appears once with its source links;
+filenames and descriptions never establish ancestry. Unknown or inaccessible
+source IDs fail explicitly. Descendant mode requires a source ID.
+
+These are asset filters: use `entity_type=assets` (or `all`, which returns only
+asset matches for this query). Existing brand, session, date, lifecycle, review,
+text and publication filters continue to apply to returned assets before
+pagination. Intermediate nodes are not restricted by result filters; for
+example an image query can traverse a video intermediate, and active crops can
+still be inspected when a parent has been archived. Active remains the default
+lifecycle for returned assets and their sessions.
+
+### Generic planning workflow
+
+1. Resolve the source's exact Catalog ID; do not identify its images by filename.
+2. Search with `source_asset_id`, `kind=image`, and the required review/lifecycle
+   filters. Enable descendants when linked crops or other nested outputs are needed.
+3. Collect every page: a nonempty `assets.next_cursor` means more matches remain.
+   Pass that value as `cursors.assets` with the same filters until no cursor is
+   returned. The limit of 100 is a page size, never an inventory count.
+4. Exclude published or otherwise unavailable assets using recorded publication
+   evidence, then check the planning app's reservations separately. Catalog
+   publication filters cannot see reservations stored only in Editorial or
+   another planner. Treat related crops of a reserved frame as the same moment.
+5. Recheck Catalog eligibility before processing or publishing selected assets.
+   Missing lineage or failed searches are uncertainty, not proof of exhaustion.
+
+Example (replace the source ID with the selected source):
+
+```json
+{
+  "entity_type": "assets",
+  "source_asset_id": "<catalog-source-id>",
+  "include_descendants": true,
+  "kind": "image",
+  "review_status": "approved",
+  "lifecycle": "active",
+  "limit": 100
+}
+```
+
+This release adds a source lookup index and read-only search behavior. It does
+not create source links, scan folders, reserve assets, or change other apps.
+
 ## Version 0.6.5: session hosting tool discovery
 
 The read-only hosting list advertises both asset and session queries with an

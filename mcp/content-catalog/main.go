@@ -99,25 +99,27 @@ func searchSchema() map[string]any {
 	return map[string]any{
 		"type": "object", "additionalProperties": false,
 		"properties": map[string]any{
-			"lifecycle":      map[string]any{"type": "string", "enum": []string{"active", "archived", "all"}, "description": "Default active; archived includes assets in archived sessions. Explicit inspection only."},
-			"entity_type":    map[string]any{"type": "string", "enum": []string{"all", "assets", "sessions"}, "description": "Result type; default all."},
-			"query":          field("Text in file names, session notes/titles and current Media descriptions."),
-			"brand_id":       field("Limit results to one explicit Catalog brand ID."),
-			"session_id":     field("Limit asset results to one session ID."),
-			"date_from":      field("Inclusive YYYY-MM-DD session date."),
-			"date_to":        field("Inclusive YYYY-MM-DD session date."),
-			"kind":           field("Asset kind, such as video, image, or audio."),
-			"lineage":        map[string]any{"type": "string", "enum": []string{"source", "derivative"}, "description": "Asset without or with linked parent sources."},
-			"sort":           map[string]any{"type": "string", "enum": []string{"session_newest", "asset_newest"}, "description": "Asset order; default session_newest. Other result types sort by their own date."},
-			"review_status":  map[string]any{"type": "string", "enum": []string{"pending", "approved", "rejected"}},
-			"tag":            field("One exact generic asset tag, such as share-next or best-take."),
-			"favorite":       map[string]any{"type": "boolean", "description": "Limit assets to favorites."},
-			"patreon_intent": map[string]any{"type": "string", "enum": []string{"unset", "free", "paid"}, "description": "Catalog intent only; does not publish to Patreon."},
-			"destination":    field("Network or channel, such as instagram. Required for destination availability filters."),
-			"account_ref":    field("Specific destination account or tier reference; requires destination."),
-			"availability":   map[string]any{"type": "string", "enum": []string{"any", "never_used", "not_published", "ready_to_publish", "scheduled", "published", "failed"}, "description": "Asset publication state. published means verified live; ready_to_publish requires approved review and no active publication for the destination/account."},
-			"limit":          map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum items per result type; default 30."},
-			"cursors":        map[string]any{"type": "object", "properties": map[string]any{"assets": field("next_cursor for assets"), "sessions": field("next_cursor for sessions")}, "additionalProperties": false},
+			"lifecycle":           map[string]any{"type": "string", "enum": []string{"active", "archived", "all"}, "description": "Default active; archived includes assets in archived sessions. Explicit inspection only."},
+			"entity_type":         map[string]any{"type": "string", "enum": []string{"all", "assets", "sessions"}, "description": "Result type; default all."},
+			"query":               field("Text in file names, session notes/titles and current Media descriptions."),
+			"brand_id":            field("Limit results to one explicit Catalog brand ID."),
+			"session_id":          field("Limit asset results to one session ID."),
+			"source_asset_id":     field("Return assets directly derived from this exact Catalog asset ID using recorded source links. Excludes the source itself; asset results only."),
+			"include_descendants": map[string]any{"type": "boolean", "default": false, "description": "Include indirect derivatives through recorded source links. Requires source_asset_id. Filters apply to returned assets, not intermediate ancestors."},
+			"date_from":           field("Inclusive YYYY-MM-DD session date."),
+			"date_to":             field("Inclusive YYYY-MM-DD session date."),
+			"kind":                field("Asset kind, such as video, image, or audio."),
+			"lineage":             map[string]any{"type": "string", "enum": []string{"source", "derivative"}, "description": "Asset without or with linked parent sources."},
+			"sort":                map[string]any{"type": "string", "enum": []string{"session_newest", "asset_newest"}, "description": "Asset order; default session_newest. Other result types sort by their own date."},
+			"review_status":       map[string]any{"type": "string", "enum": []string{"pending", "approved", "rejected"}},
+			"tag":                 field("One exact generic asset tag, such as share-next or best-take."),
+			"favorite":            map[string]any{"type": "boolean", "description": "Limit assets to favorites."},
+			"patreon_intent":      map[string]any{"type": "string", "enum": []string{"unset", "free", "paid"}, "description": "Catalog intent only; does not publish to Patreon."},
+			"destination":         field("Network or channel, such as instagram. Required for destination availability filters."),
+			"account_ref":         field("Specific destination account or tier reference; requires destination."),
+			"availability":        map[string]any{"type": "string", "enum": []string{"any", "never_used", "not_published", "ready_to_publish", "scheduled", "published", "failed"}, "description": "Asset publication state. published means verified live; ready_to_publish requires approved review and no active publication for the destination/account."},
+			"limit":               map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum items per result type; default 30."},
+			"cursors":             map[string]any{"type": "object", "properties": map[string]any{"assets": field("Pass assets.next_cursor here with the same filters while nonempty; more matching assets remain."), "sessions": field("Pass sessions.next_cursor here with the same filters while nonempty; more matching sessions remain.")}, "additionalProperties": false},
 		},
 	}
 }
@@ -125,7 +127,7 @@ func searchSchema() map[string]any {
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{Name: "content_catalog_overview", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Count brands, sessions, assets, per-asset publication records, and hosting records.", InputSchema: schema(), Handler: a.overview},
-		{Name: "content_catalog_search", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Read-only search of linked sessions and assets. Use brand_id, destination, account_ref, availability=ready_to_publish, entity_type=assets to find approved assets with no active publication for that account. Published means verified live. No Storage scan or external write.", InputSchema: searchSchema(), Handler: a.search},
+		{Name: "content_catalog_search", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Read-only search of linked sessions and assets. Use brand_id, destination, account_ref, availability=ready_to_publish, entity_type=assets to find approved assets with no active publication for that account. Use source_asset_id for exact direct derivatives; include_descendants=true includes nested derivatives. Follow assets.next_cursor via cursors.assets until empty before declaring inventory exhausted. Published means verified live. Publication filters do not detect reservations held only in planning apps; check those separately, including related crops of reserved moments. No Storage scan or external write.", InputSchema: searchSchema(), Handler: a.search},
 		{Name: "content_catalog_brands_create", Description: "Create a brand. Args: slug, name, storage_root; optional host_provider, host_connection_id, host_library_id, host_collection_id. Writes only Catalog.", InputSchema: schema("slug", "name", "storage_root"), Handler: a.brandCreate},
 		{Name: "content_catalog_brands_list", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "List brands.", InputSchema: schema(), Handler: a.brandsList},
 		{Name: "content_catalog_brands_update", Description: "Update a brand's name, storage_root, or host settings. Args: id and fields to change. Writes only Catalog.", InputSchema: schema("id"), Handler: a.brandUpdate},
@@ -220,12 +222,12 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	args := map[string]any{}
-	for _, key := range []string{"entity_type", "query", "brand_id", "session_id", "date_from", "date_to", "kind", "lineage", "sort", "review_status", "destination", "account_ref", "availability", "tag", "favorite", "patreon_intent", "limit", "assets_cursor", "sessions_cursor", "releases_cursor"} {
+	for _, key := range []string{"entity_type", "query", "brand_id", "session_id", "source_asset_id", "include_descendants", "date_from", "date_to", "kind", "lineage", "sort", "review_status", "destination", "account_ref", "availability", "tag", "favorite", "patreon_intent", "limit", "assets_cursor", "sessions_cursor", "releases_cursor"} {
 		if v := r.URL.Query().Get(key); v != "" {
-			if key == "favorite" {
+			if key == "favorite" || key == "include_descendants" {
 				parsed, err := strconv.ParseBool(v)
 				if err != nil {
-					http.Error(w, "favorite must be boolean", http.StatusBadRequest)
+					http.Error(w, key+" must be boolean", http.StatusBadRequest)
 					return
 				}
 				args[key] = parsed
