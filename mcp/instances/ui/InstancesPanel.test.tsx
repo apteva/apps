@@ -119,3 +119,35 @@ test("history paths do not bridge outages and averages use observed coverage",as
  expect(path.match(/M/g)?.length).toBe(2);expect(path.match(/L/g)?.length).toBe(1);
  const p=point(0);p.observed_ms=500;p.values.cpu.observed_ms=100;p.values.cpu.sum=1000;expect(metricAverage(p,"cpu")).toBe(10);
 });
+
+test("I/O wait history shows weighted averages, original peaks and incident samples",async()=>{
+ const {MonitoringHistory}=await import("./MonitoringHistory");const now=Date.now();
+ const event={id:"io-spike",start:now-60000,end:now-1000,peak:10,core_peak:20,reason:"Memory pressure or I/O wait for 1s"};
+ const peakAt=now-59250;
+ globalThis.fetch=(async(input:any)=>{const path=String(input);
+  if(path.includes("incident_id="))return response({incident:{...event,recordings:[{time:now-60000,cpu:10,core:20,iowait:0,interval_ms:250},{time:peakAt,cpu:10,core:20,iowait:35,interval_ms:250}]}});
+  if(path.includes("/metrics/incidents"))return response({incidents:[event]});
+  return response({points:[
+   {time:now-60000,step_ms:60000,observed_ms:10000,values:{iowait:{sum:100000,observed_ms:10000,min:0,max:30,peak_at:peakAt}}},
+   {time:now-30000,step_ms:1000,observed_ms:1000,values:{iowait:{sum:0,observed_ms:1000,min:0,max:0,peak_at:now-30000}}},
+  ],resolution:"1m",from:now-3600000,to:now,monitoring:{enabled:true,state:"running",version:"0.6.3"}});
+ }) as unknown as typeof fetch;
+ await render(<MonitoringHistory id={6} withParams={params}/>);
+ const chart=container.querySelector('svg[aria-label="I/O wait average and recorded peaks over time"]')!;
+ expect(chart).not.toBeNull();expect(chart.querySelectorAll("path").length).toBe(2);
+ expect(chart.querySelector("title")?.textContent).toContain(`30.00% I/O wait peak at ${new Date(peakAt).toLocaleString()}`);
+ expect(chart.querySelectorAll("title")[1].textContent).toContain("0.00% I/O wait peak");
+ expect(container.textContent).toContain("Average 9.09% · Peak 30.00%");
+ const incident=Array.from(container.querySelectorAll("button")).find(b=>b.textContent?.includes(event.reason))!;
+ await act(async()=>incident.click());
+ expect(container.querySelectorAll('svg[aria-label="I/O wait average and recorded peaks over time"]').length).toBe(2);
+ expect(container.textContent).toContain("Average 17.50% · Peak 35.00%");
+});
+
+test("missing I/O wait observations are not shown as zero",async()=>{
+ const {MonitoringHistory}=await import("./MonitoringHistory");const now=Date.now();
+ globalThis.fetch=(async(input:any)=>String(input).includes("/metrics/incidents")?response({incidents:[]}):response({points:[{time:now-1000,step_ms:1000,observed_ms:1000,values:{}}],from:now-3600000,to:now,resolution:"1s",monitoring:{enabled:true,state:"running"}})) as unknown as typeof fetch;
+ await render(<MonitoringHistory id={6} withParams={params}/>);
+ expect(container.textContent).toContain("No I/O wait observations in this range.");
+ expect(container.querySelector('svg[aria-label="I/O wait average and recorded peaks over time"]')).toBeNull();
+});

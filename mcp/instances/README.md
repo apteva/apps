@@ -364,6 +364,13 @@ result.
 
 ## Continuous monitoring (v0.6.0)
 
+v0.6.3 adds a separate **I/O wait history** chart below the CPU/memory chart,
+using the selected history range. It shows observed-time weighted averages,
+recorded peaks with their original timestamps, and a labeled percentage scale
+that adjusts to make small spikes visible. Detailed spike recordings also show
+I/O wait at the original 250ms sampling interval. Missing observations stay gaps.
+This uses existing stored measurements without adding samples or changing retention.
+
 v0.6.2 reduces checkpoint CPU and allocation cost by caching compressed completed
 seconds and closed incident records. The cache is capped at 8 MiB and expires with
 its source data. Checkpoints keep the same JSON/gzip format, including compatibility
@@ -385,7 +392,7 @@ Monitoring is enabled by default for every instance. On app mount, and every
 five seconds afterward, Instances reconciles the inventory. Ready Linux/macOS
 AMD64/ARM64 SSH hosts receive the version-pinned Go collector automatically;
 new and temporarily unreachable hosts are retried without recreating them.
-Collectors are downloaded by the app from the `instances/v0.6.2` GitHub release,
+Collectors are downloaded by the app from the `instances/v0.6.3` GitHub release,
 verified against the SHA-256 values embedded in this source, and uploaded over
 SSH. No compiler, public listening port, or platform credential is installed
 on the host. Linux requires systemd; macOS uses a launch daemon. Service
