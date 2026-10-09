@@ -319,7 +319,7 @@ export default function TablesPanel({
       setSelected(null);
       setEditing(null);
     }
-    if (ev.topic.startsWith("table.") || ev.topic.startsWith("row.")) {
+    if (ev.topic.startsWith("table.") || ev.topic.startsWith("row.") || ev.topic === "projection.ready") {
       refresh();
       if (ev.topic === "table.altered" && ev.data.name === selected) {
         setCursors([undefined]);
@@ -524,7 +524,7 @@ export default function TablesPanel({
           </div>
         )}
         {surface === "projections" ? (
-          <ProjectionWorkspace api={api} />
+          <ProjectionWorkspace key={scope} api={api} invalidationEpoch={epoch} />
         ) : surface === "diagnostics" ? (
           <TablesDiagnosticsWidget projectId={projectId} installId={installId} compact={false} />
         ) : selectedTable && gridTable ? (
@@ -726,12 +726,12 @@ function projectionTone(projection: ProjectionStatus): string {
   return "bg-amber-500/15 text-amber-600 dark:text-amber-400";
 }
 
-function ProjectionWorkspace({ api }: { api: PanelApi }) {
+function ProjectionWorkspace({ api, invalidationEpoch }: { api: PanelApi; invalidationEpoch: number }) {
   const [epoch, setEpoch] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("");
-  const list = useResource<{ projections: ProjectionStatus[] }>("projections", epoch, (signal) => api("GET", "/projections", {}, undefined, signal));
+  const list = useResource<{ projections: ProjectionStatus[] }>("projections", epoch + invalidationEpoch, (signal) => api("GET", "/projections", {}, undefined, signal));
   const projections = list.data?.projections ?? [];
   const active = projections.find((projection) => `${projection.name}:${projection.version}` === selected) ?? projections[0];
   useEffect(() => {

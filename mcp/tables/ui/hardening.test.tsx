@@ -648,3 +648,52 @@ test("diagnostics retry failed fetches with bounded backoff", async () => {
     window.clearTimeout = originalClear;
   }
 });
+
+test("compact projection-ready events refresh rows and readiness with empty scope keys", async () => {
+  let notify: (event: any) => void = () => {};
+  (window as any).__aptevaAppEvents = {
+    subscribe: (_app: string, _project: string, handler: (event: any) => void) => {
+      notify = handler;
+      return () => {};
+    },
+  };
+  let rowReads = 0;
+  let statusReads = 0;
+  globalThis.fetch = (async (input: any) => {
+    const url = new URL(String(input), "http://localhost");
+    if (url.pathname.endsWith("/tables")) return response({ tables: [table], has_more: false });
+    if (url.pathname.endsWith("/rows")) {
+      rowReads++;
+      return response({ rows: [{ id: 1, title: `publication-${rowReads}` }], has_more: false });
+    }
+    if (url.pathname.endsWith("/projections")) {
+      statusReads++;
+      return response({ projections: [{ name: "event_totals", version: 1, status: "active", ready: true }] });
+    }
+    return response(table);
+  }) as typeof fetch;
+  const ui = render(<TablesPanel appName="tables" projectId="p" installId={9} />);
+  await flush();
+  const initialRows = rowReads;
+  await act(async () => {
+    notify({ topic: "projection.ready", install_id: 9, data: { name: "books", scope_keys: [], all_scopes: true, scopes_truncated: true } });
+    await new Promise((resolve) => setTimeout(resolve, 160));
+  });
+  await flush();
+  expect(rowReads).toBeGreaterThan(initialRows);
+  fireEvent.click(ui.getByText("Projections"));
+  await flush();
+  const initialStatus = statusReads;
+  await act(async () => {
+    notify({ topic: "projection.ready", install_id: 9, data: { name: "event_totals", scope_keys: [], all_scopes: true, scopes_truncated: true } });
+    await new Promise((resolve) => setTimeout(resolve, 160));
+  });
+  await flush();
+  expect(statusReads).toBeGreaterThan(initialStatus);
+  const beforeWrongInstall = statusReads;
+  await act(async () => {
+    notify({ topic: "projection.ready", install_id: 10, data: { scope_keys: [], all_scopes: true, scopes_truncated: true } });
+    await new Promise((resolve) => setTimeout(resolve, 160));
+  });
+  expect(statusReads).toBe(beforeWrongInstall);
+});

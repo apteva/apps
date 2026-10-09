@@ -256,14 +256,28 @@ Initial projections report not ready until the first complete successful build.
 A missing scope in a complete build represents an empty result.
 
 After a successful publication Tables emits `projection.ready` with the
-projection version, included scope keys, generation and included source
-watermark. A single scope also has the legacy `scope_key` field; coalesced
-delivery always includes `scope_keys` and `scope_count`. The event is an
-invalidation hint; consumers should use status or their next read for
-authoritative data. Publications are persisted in an outbox in the same
-transaction as the generation switch, delivered in bounded batches, and retried
-with exponential backoff after a gateway failure. Stable event IDs make
-ambiguous retries idempotent when the platform event API is available.
+projection version, generation, publication time and included source watermark.
+Small scoped notifications retain precise `scope_keys`, an exact deduplicated
+`scope_count`, and `scope_key` for a single scope. Payloads are capped at **16 KiB
+of serialized UTF-8 JSON**, including escaping and all metadata, at publication
+and after coalescing. If details exceed the budget, Tables sends
+`all_scopes: true`, `scopes_truncated: true`, and `scope_keys: []`, omitting
+`scope_key` and `scope_count`. Full rebuilds use this projection-wide form too,
+since they may remove old scopes even when the new result is empty. Consumers
+must **refresh this projection** when either flag is true; empty keys do not
+mean nothing changed. Optional generation history may be omitted to meet the
+budget; `generation`, `watermark`, `published_at` and coverage describe the newest
+publication. Scope counts are never summed across overlapping or unknown sets.
+
+The event is an invalidation hint; status or a subsequent read supplies
+authoritative data. Publication and outbox enqueue commit together. Delivery
+coalesces bounded batches and atomically persists a frozen payload under its
+original event ID before sending. Gateway failures use exponential backoff;
+restart retries preserve that snapshot and ID for platform deduplication. Later
+publications remain separate from a batch already attempted. Existing oversized
+outbox entries are automatically compacted and persisted before their next due
+retry, without resetting their identities or requiring manual repair. Tables'
+UI refreshes rows and projection readiness for compact events as well.
 
 Declare both coverage bounds as RFC3339 timestamps when SQL covers a fixed window
 `[coverage_from, coverage_to)`. Match the SQL's actual restrictions. Coverage is

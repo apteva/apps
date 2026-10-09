@@ -243,3 +243,29 @@ Coverage is declared for the SQL's actual fixed window and becomes visible only
 with successful publication. Rolling-window inference and arbitrary-SQL query
 plan optimization are not automatic. See PROJECTIONS.md for configuration and
 restore-required downgrade instructions.
+
+## Tables 0.2.14 notification regression coverage
+
+Notification tests exercise serialized JSON limits with ASCII, multibyte UTF-8
+and escaped strings; 5,000-scope payloads and oversized optional generation
+history; 20 individually small publications with overlapping scopes; exact
+watermarks above JavaScript's safe integer range; precise single-scope events;
+and a full 1,500-scope publication with unchanged readable results. Empty full
+rebuilds also emit projection-wide invalidation hints.
+
+A file-backed recovery test starts with a 30,000-scope legacy outbox entry and
+1,100 attempts. A size-limited, deduplicating test gateway accepts the compact
+payload but loses its acknowledgement. The test closes and reopens SQLite,
+adds a later publication, and verifies identical retry bytes/event ID, separate
+new delivery, and an empty acknowledged outbox. Another test covers freezing a
+coalesced batch before an ambiguous acknowledgement. No live project data is
+used or modified.
+
+The Tables UI regression feeds compact SSE events with empty scope lists and
+checks that both result rows and projection readiness reload; events from a
+different install are ignored. All 17 UI tests, type checking, rebuilt bundles,
+standalone Linux/Darwin builds, vet and real localhost sidecar smoke checks pass.
+The complete local Go race suite passed in 208.6 seconds. All five Tables
+bundles passed the host React import check. SDK v0.99.0 remains the latest
+remote main tag by ancestry and is pinned without a local overlay. The source
+tag CI runs the complete Go race suite and portable builds.

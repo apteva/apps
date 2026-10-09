@@ -367,6 +367,11 @@ func publishProjectionGeneration(ctx context.Context, app *sdk.AppCtx, p *projec
 		"published_at":  projectionTimestamp(now),
 		"ready":         true,
 	}
+	if item.ScopeKey == projectionAllScope {
+		// A full rebuild can also remove formerly published scopes. Consumers
+		// must refresh the projection even when the new result has no scopes.
+		readyPayload["all_scopes"] = true
+	}
 	if len(scopes) == 1 {
 		readyPayload["scope_key"] = scopes[0]
 	}
@@ -388,7 +393,7 @@ func publishProjectionGeneration(ctx context.Context, app *sdk.AppCtx, p *projec
 		readyPayload["coverage_from"] = p.Options.CoverageFrom
 		readyPayload["coverage_to"] = p.Options.CoverageTo
 	}
-	readyJSON, err := json.Marshal(readyPayload)
+	readyJSON, err := boundedProjectionReadyPayload(readyPayload)
 	if err != nil {
 		return err
 	}

@@ -1,3 +1,10 @@
+# Tables v0.2.14 — bounded projection notifications
+
+- Cap publication and coalesced `projection.ready` payloads at 16 KiB of serialized UTF-8 JSON. Send projection-wide refresh flags when scope details are omitted; keep precise small scopes and exact union counts.
+- Automatically compact legacy oversized outbox entries before retry. Freeze delivery batches durably before sending so ambiguous acknowledgements and restarts retain event IDs and payloads; new publications keep separate identities.
+- Preserve newest publication, coverage and exact integer watermarks during coalescing. Refresh Tables rows and readiness through SSE for compact events, including empty full rebuilds.
+- Add byte-budget, multibyte/escaping, full-publication, overlapping coalescing, legacy recovery, database reopen, acknowledgement/deduplication and UI regressions. Migration 018 is additive and backward compatible.
+
 # Tables v0.2.13 — responsive refresh and inexpensive idle work
 
 - Move generation cleanup and consumed-change pruning into a separate 45-second worker with a 150 ms maintenance budget, small writer batches, rotating projection selection and reserved background capacity. Skip writer transactions when nothing is reclaimable.

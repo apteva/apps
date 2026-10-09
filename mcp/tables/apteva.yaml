@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.2.13
+version: 0.2.14
 description: |
+  v0.2.14 Bounds projection-ready notifications to 16 KiB, automatically repairs
+  oversized queued events, preserves retry snapshots and refreshes readiness via SSE.
   v0.2.13 Separates bounded cleanup from responsive projection refreshes, skips
   idle writes, caches definition fields with a durable epoch, cancels retired
   queues while preserving paused work and valid leases, and exposes worker metrics.
@@ -233,7 +235,7 @@ provides:
         id: integer
         deleted: integer
     - name: projection.ready
-      description: One or more projection scopes were successfully published and are ready for selective UI refresh. scope_key is included for a single scope; scope_keys is always present for coalesced delivery.
+      description: Published projection invalidation, bounded to 16 KiB of serialized JSON. Refresh this projection when all_scopes or scopes_truncated is true, even with empty scope_keys. Exact scope_count is omitted for compact events.
       payload:
         projection_id: integer
         name: string
@@ -241,6 +243,8 @@ provides:
         scope_key: string
         scope_keys: array
         scope_count: integer
+        all_scopes: boolean
+        scopes_truncated: boolean
         watermark: integer
         generation: string
         published_at: string
@@ -252,7 +256,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.2.13
+    ref: tables/v0.2.14
     entry: mcp/tables
   port: 8080
   health_check: /health
