@@ -180,7 +180,7 @@ func (a *App) setupAppleMobileSigning(ctx context.Context, d *Deployment, provid
 		RequiredFeaturesJSON: mobileFeaturesJSON(requirements.Features),
 		RequirementsHash:     requirements.Hash,
 	}
-	if previous != nil {
+	if previous != nil && previous.BundleID == target.BundleID {
 		setup.IdentityID = previous.IdentityID
 		setup.PreparedRevision = previous.PreparedRevision
 		setup.AppleBundleResourceID = previous.AppleBundleResourceID
@@ -233,15 +233,30 @@ func (a *App) setupAppleMobileSigning(ctx context.Context, d *Deployment, provid
 		return a.failMobileSigningSetup(setup, cause)
 	}
 
-	bundleResourceID := setup.AppleBundleResourceID
-	if bundleResourceID == "" {
-		listed, callErr := executeIntegration(appleBound, "list_bundle_ids", map[string]any{
-			"identifier": target.BundleID, "platform": platform.ApplePlatform, "limit": 2,
-		})
-		if callErr != nil {
-			return nil, failSetup(callErr)
+	// Apple resource IDs are opaque. Resolve the configured identifier every
+	// time, even when an incomplete setup has a cached resource.
+	listed, callErr := executeIntegration(appleBound, "list_bundle_ids", map[string]any{
+		"identifier": target.BundleID, "platform": platform.ApplePlatform, "limit": 2,
+	})
+	if callErr != nil {
+		return nil, failSetup(callErr)
+	}
+	bundleResourceID, resolveErr := matchingAppleBundleResource(listed, target.BundleID)
+	if resolveErr != nil {
+		return nil, failSetup(resolveErr)
+	}
+	if setup.AppleBundleResourceID != "" && setup.AppleBundleResourceID != bundleResourceID {
+		if previous != nil && previous.Status == mobileSigningStatusReady {
+			return nil, failSetup(errors.New("configured Apple bundle resource differs from ready signing identity"))
 		}
-		bundleResourceID = firstJSONAPIID(listed)
+		setup.AppleProfileID = ""
+		setup.AppStoreAppID = ""
+		setup.PreparedRevision = 0
+		setup.ProviderSecretRef = ""
+		setup.ProviderConfigJSON = ""
+		setup.ManagedFeaturesJSON = ""
+		setup.ProvisionedFeaturesJSON = ""
+		setup.PlatformStateJSON = ""
 	}
 	if bundleResourceID == "" {
 		created, callErr := executeIntegration(appleBound, "register_bundle_id", map[string]any{
@@ -908,4 +923,30 @@ func uniqueStrings(values []string) []string {
 		out = append(out, value)
 	}
 	return out
+}
+
+// Do not trust a filtered response that contains a different identifier.
+func matchingAppleBundleResource(raw json.RawMessage, identifier string) (string, error) {
+	var response struct {
+		Data []struct {
+			ID         string `json:"id"`
+			Attributes struct {
+				Identifier string `json:"identifier"`
+			} `json:"attributes"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return "", err
+	}
+	var found string
+	for _, item := range response.Data {
+		if item.Attributes.Identifier != identifier || item.ID == "" {
+			return "", errors.New("Apple returned a bundle resource that does not match configured bundle_id")
+		}
+		if found != "" {
+			return "", errors.New("Apple returned multiple resources for configured bundle_id")
+		}
+		found = item.ID
+	}
+	return found, nil
 }
