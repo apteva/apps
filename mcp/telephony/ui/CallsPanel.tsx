@@ -5,6 +5,7 @@ import {
   type MicrophoneTestResult,
   type SoftphoneAudioOptions,
   type SoftphoneDiagnostics,
+  type AudioObservationEvent,
 } from "./softphone-audio";
 import {
   loadAudioOptions,
@@ -97,6 +98,8 @@ interface RawCall {
 }
 
 interface BrowserAudioDiagnostics {
+  playback_events?: AudioObservationEvent[];
+  capture_queue_events?: AudioObservationEvent[];
   received_at?: string;
   rtt_ms?: number;
   playback_queue_ms?: number;
@@ -922,6 +925,20 @@ function PersistedAudioDiagnostics({ call }: { call: Call }) {
             <div key={`${event.connection_id ?? ""}:${event.id}`} title={`${event.started_at} → ${event.ended_at ?? event.observed_until ?? "ongoing"}`}>
               {new Date(event.started_at).toLocaleTimeString(undefined, {hour:"2-digit",minute:"2-digit",second:"2-digit",fractionalSecondDigits:3})} → {event.ended_at ? new Date(event.ended_at).toLocaleTimeString(undefined, {hour:"2-digit",minute:"2-digit",second:"2-digit",fractionalSecondDigits:3}) : "ongoing"}
               {` · ${event.duration_ms.toLocaleString(undefined, {maximumFractionDigits:3})} ms missing · ${event.end_reason}${event.complete ? "" : " (incomplete observation)"}`}
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {[...(browser.playback_events ?? []), ...(browser.capture_queue_events ?? [])].length > 0 ? (
+        <div className="space-y-1 text-text-dim tabular-nums">
+          <div className="font-medium text-text-muted">Recent buffer observations</div>
+          {[...(browser.playback_events ?? []), ...(browser.capture_queue_events ?? [])].sort((a,b)=>Date.parse(a.timestamp)-Date.parse(b.timestamp)).slice(-5).map(event => (
+            <div key={`${event.connection_id ?? ""}:${event.id}`} title={event.timestamp}>
+              {new Date(event.timestamp).toLocaleTimeString(undefined, {hour:"2-digit",minute:"2-digit",second:"2-digit",fractionalSecondDigits:3})}
+              {` · ${event.kind} · ${event.reason} · queue ${event.queue_ms.toFixed(1)} ms`}
+              {event.target_ms ? ` · target ${event.target_ms} ms` : ""}
+              {event.wait_ms ? ` · wait ${event.wait_ms.toFixed(1)} ms` : ""}
+              {event.frame_age_ms !== undefined ? ` · frame age estimate ${event.frame_age_ms.toFixed(1)} ms` : ""}
             </div>
           ))}
         </div>

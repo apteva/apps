@@ -30,6 +30,7 @@ func audioNetworkTimestamp(at time.Time) string {
 
 // No token, URL, authorization header or carrier control is accepted here.
 type audioNetworkEvent struct {
+	ShutdownIntent  string        `json:"shutdown_intent,omitempty"`
 	ID              string        `json:"id"`
 	Event           string        `json:"event"`
 	Action          string        `json:"action"`
