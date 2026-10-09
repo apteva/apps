@@ -51,9 +51,15 @@
           "expected_text": "Post"
         },
         {
-          "action": "wait",
-          "locator": {},
-          "duration_ms": 2500
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "textarea[aria-label=\"Title\"]"
+            }
+          ],
+          "match": "all",
+          "timeout_ms": 30000
         },
         {
           "text": "{{post_title}}",
@@ -129,7 +135,8 @@
           "locator": {
             "role": "menuitemcheckbox",
             "exact": true,
-            "som_only": true
+            "som_only": true,
+            "text_suffix_pattern": "(?:\\s+[0-9]+\\s+members?)?"
           },
           "labels": "{{tier_labels}}",
           "checked": true

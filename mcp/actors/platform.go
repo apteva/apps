@@ -169,6 +169,12 @@ func (e *actorExecution) dispatchSemantic(step actorStep, args map[string]any) e
 	if shot.SOMRevision != nil {
 		args["som_revision"] = shot.SOMRevision
 	}
+	if name := firstNonEmpty(match.AccessibleName, match.Text); name != "" {
+		args["expected_name"] = name
+	}
+	if match.Role != "" {
+		args["expected_role"] = match.Role
+	}
 	var out map[string]any
 	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, args), &out); err != nil {
 		return err

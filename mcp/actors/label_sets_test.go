@@ -98,3 +98,19 @@ func TestLabelMismatchStopsBeforeCommit(t *testing.T) {
 		t.Fatalf("mismatched tier accepted: %v", err)
 	}
 }
+
+func TestExactNamesAllowOnlyConfiguredMetadataSuffix(t *testing.T) {
+	loc := actorLocator{Text: "Elite", Role: "menuitemcheckbox", Exact: true, SOMOnly: true, TextSuffixPattern: `(?:\s+[0-9]+\s+members?)?`}
+	for _, tc := range []struct {
+		text  string
+		valid bool
+	}{{"Elite", true}, {"Elite 42 members", true}, {"Elite 1 member", true}, {"Elite Member", false}, {"Elite Member 42 members", false}, {"Elite anything", false}, {"Legacy Elite 42 members", false}} {
+		if got := somTargetMatches(loc, setOfMarkTarget{AccessibleName: tc.text, Role: "menuitemcheckbox"}); got != tc.valid {
+			t.Fatalf("name %q match=%t want=%t", tc.text, got, tc.valid)
+		}
+	}
+	loc.Text = "$1/month"
+	if !somTargetMatches(loc, setOfMarkTarget{AccessibleName: "$1/month 0 members", Role: "menuitemcheckbox"}) {
+		t.Fatal("literal price label treated as regex")
+	}
+}

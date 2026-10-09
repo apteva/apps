@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -137,11 +138,12 @@ type actorWaitCondition struct {
 }
 
 type actorLocator struct {
-	Text     string `json:"text,omitempty"`
-	Role     string `json:"role,omitempty"`
-	Selector string `json:"selector,omitempty"`
-	Exact    bool   `json:"exact,omitempty"`
-	SOMOnly  bool   `json:"som_only,omitempty"`
+	Text              string `json:"text,omitempty"`
+	Role              string `json:"role,omitempty"`
+	Selector          string `json:"selector,omitempty"`
+	Exact             bool   `json:"exact,omitempty"`
+	SOMOnly           bool   `json:"som_only,omitempty"`
+	TextSuffixPattern string `json:"text_suffix_pattern,omitempty"`
 }
 
 type actorField struct {
@@ -375,6 +377,14 @@ func validateActorDefinition(def actorDefinition) error {
 		return fmt.Errorf("definition.browser.environment: %w", err)
 	}
 	for i, step := range def.Steps {
+		if suffix := step.Locator.TextSuffixPattern; suffix != "" {
+			if !step.Locator.Exact || !step.Locator.SOMOnly {
+				return fmt.Errorf("steps[%d].locator.text_suffix_pattern requires exact som_only", i)
+			}
+			if _, err := regexp.Compile("^(?:" + suffix + ")$"); err != nil {
+				return fmt.Errorf("steps[%d].locator.text_suffix_pattern: %w", i, err)
+			}
+		}
 		switch step.Action {
 		case "fill":
 			if !locatorHasTarget(step.Locator) {

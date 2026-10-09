@@ -989,8 +989,15 @@ func (e *actorExecution) validateResolvedProxy(proxy browserProxyState) error {
 }
 
 func locatorMatches(locator actorLocator, text, role, selector string) bool {
-	if locator.Exact && locator.Text != "" && !strings.EqualFold(strings.TrimSpace(text), strings.TrimSpace(locator.Text)) {
-		return false
+	if locator.Exact && locator.Text != "" {
+		if locator.TextSuffixPattern != "" {
+			matcher, err := regexp.Compile("(?i)^" + regexp.QuoteMeta(strings.TrimSpace(locator.Text)) + "(?:" + locator.TextSuffixPattern + ")$")
+			if err != nil || !matcher.MatchString(strings.TrimSpace(text)) {
+				return false
+			}
+		} else if !strings.EqualFold(strings.TrimSpace(text), strings.TrimSpace(locator.Text)) {
+			return false
+		}
 	}
 	if locator.Text != "" && !strings.Contains(strings.ToLower(strings.TrimSpace(text)), strings.ToLower(strings.TrimSpace(locator.Text))) {
 		return false
