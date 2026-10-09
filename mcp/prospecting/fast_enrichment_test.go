@@ -15,8 +15,12 @@ func TestBusinessMailboxRoles(t *testing.T) {
 		name, domain, text, want string
 		links                    []webLink
 	}{
+		{name: "recruiting business description is not mailbox purpose", domain: "staffing.fr", text: "Staffing and recruiting services for businesses. Contact office@staffing.fr.", want: "office@staffing.fr"},
 		{name: "commercial before recruitment", domain: "auxpiedssouslatable.fr", text: "Service commercial : contact@auxpiedssouslatable.frPôle recrutement : candidat@auxpiedssouslatable.fr", want: "contact@auxpiedssouslatable.fr"},
 		{name: "restaurant before hotel reception", domain: "fr.mamashelter.com", want: "food.lille@mamashelter.com", links: []webLink{{URL: "mailto:reception.lille@mamashelter.com", Text: "Reception"}, {URL: "mailto:food.lille@mamashelter.com", Text: "Restaurant Email"}}},
+		{name: "vendor credits cannot return through corpus or mailto", domain: "parisbrest.bzh", text: "Développement : Mr Nicolas Tranne – Contact : nictranne@gmail.com\nCrédit photos : Photographe freelance – thomas.pellan@yahoo.fr", links: []webLink{{URL: "mailto:nictranne@gmail.com", Text: "Contact"}}, want: ""},
+		{name: "business gmail remains valid beside vendor credits", domain: "restaurant.fr", text: "Réservations : restaurant@gmail.com\nDéveloppement : Contact : developer@gmail.com", want: "restaurant@gmail.com"},
+		{name: "labeled recruitment gmail cannot return through corpus", domain: "restaurant.fr", text: "Recrutement : hiring@gmail.com", want: ""},
 		{name: "recruitment alone is not a lead", domain: "example.fr", text: "candidat@example.fr careers@example.fr", want: ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
