@@ -32,7 +32,7 @@ func TestPlanTrim_Valid(t *testing.T) {
 		t.Error("filename empty")
 	}
 	// Accurate cuts require encoding and a zero video origin.
-	if argPair(plan.Args, "-c", "copy") || !argPair(plan.Args, "-vf", "trim=duration=2.000,setpts=PTS-STARTPTS") {
+	if argPair(plan.Args, "-c", "copy") || !argPair(plan.Args, "-vf", "trim=start=0:end=2.000,setpts=PTS-STARTPTS") {
 		t.Errorf("inaccurate trim: %v", plan.Args)
 	}
 }
@@ -569,13 +569,9 @@ func TestPlanExtractReel_Defaults(t *testing.T) {
 	if plan.ContentType != "video/mp4" {
 		t.Errorf("content_type=%q want video/mp4", plan.ContentType)
 	}
-	// Reel extraction uses a short preroll before the input and an
-	// output-side seek to land on the requested first frame.
-	if !argPair(plan.Args, "-ss", "58.000") {
-		t.Errorf("missing preroll -ss 58.000: %v", plan.Args)
-	}
-	if !argPair(plan.Args, "-ss", "2.000") {
-		t.Errorf("missing output -ss 2.000: %v", plan.Args)
+	// Decode the requested interval with accurate seeking and zero-based PTS.
+	if !argPair(plan.Args, "-ss", "60.000") {
+		t.Errorf("missing accurate input seek: %v", plan.Args)
 	}
 	if !argPair(plan.Args, "-t", "30.000") {
 		t.Errorf("missing -t 30.000: %v", plan.Args)
@@ -583,9 +579,9 @@ func TestPlanExtractReel_Defaults(t *testing.T) {
 	if contains(plan.Args, "-to") {
 		t.Errorf("extract_reel should use duration, not absolute -to: %v", plan.Args)
 	}
-	// Audio passthrough — no re-encode needed.
-	if !argPair(plan.Args, "-c:a", "copy") {
-		t.Errorf("missing -c:a copy: %v", plan.Args)
+	// Audio is trimmed at sample precision instead of retaining packet preroll.
+	if !argPair(plan.Args, "-c:a", "aac") || contains(plan.Args, "-avoid_negative_ts") {
+		t.Errorf("unsafe reel audio/timestamps: %v", plan.Args)
 	}
 	// Filter chain encodes 9:16 default + exact 1080x1920 scale.
 	vfIdx := -1
@@ -608,7 +604,7 @@ func TestPlanExtractReel_Defaults(t *testing.T) {
 	}
 }
 
-func TestPlanExtractReel_DynamicCropPathAccountsForPreroll(t *testing.T) {
+func TestPlanExtractReel_DynamicCropPathAccountsForAccurateSeek(t *testing.T) {
 	plan, err := buildPlan("extract_reel", []string{"42"}, raw(t, map[string]any{
 		"start_ms": 60_000, "end_ms": 70_000,
 		"target_ratio": "9:16", "output_width": 404,
@@ -628,10 +624,9 @@ func TestPlanExtractReel_DynamicCropPathAccountsForPreroll(t *testing.T) {
 			break
 		}
 	}
-	// Filter t=2 is the first emitted frame because of the preroll, so the
-	// sample five seconds into the reel is t=7 on the filter timeline.
-	if !strings.Contains(vf, `lt(t\,7.000)`) {
-		t.Fatalf("dynamic path is not aligned with preroll: %s", vf)
+	// The sample five seconds into the reel is t=5 on the input filter clock.
+	if !strings.Contains(vf, `lt(t\,5.000)`) || !strings.HasSuffix(vf, "setpts=PTS-STARTPTS") {
+		t.Fatalf("dynamic path is not aligned with accurate seek: %s", vf)
 	}
 }
 

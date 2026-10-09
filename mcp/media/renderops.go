@@ -155,14 +155,17 @@ func planTrim(sources []string, raw json.RawMessage, outputName string) (*opPlan
 		"-t", duration,
 	}
 	if !isAudioExt(filepath.Ext(name)) {
-		args = append(args, "-vf", "trim=duration="+duration+",setpts=PTS-STARTPTS", "-fps_mode", "vfr")
+		args = append(args, "-vf", "trim=start=0:end="+duration+",setpts=PTS-STARTPTS", "-fps_mode", "vfr")
 	}
-	args = append(args, "-af", "atrim=duration="+duration+",aresample=async=1:first_pts=0")
+	args = append(args, "-af", "atrim=start=0:end="+duration+",aresample=async=1:first_pts=0")
 	encoding, err := trimEncodingArgs(name, p.SourceVideo)
 	if err != nil {
 		return nil, err
 	}
 	args = append(args, encoding...)
+	if !isAudioExt(filepath.Ext(name)) {
+		args = append(args, videoEndDurationArgs(duration)...)
+	}
 	if trimUsesHEVC(p.SourceVideo) && !isAudioExt(filepath.Ext(name)) && p.HEVCProfile != "" && p.HEVCProfile != "legacy" {
 		if ext := strings.ToLower(filepath.Ext(name)); ext != ".mp4" && ext != ".mov" && ext != ".mkv" {
 			return nil, fmt.Errorf("hevc_profile requires MP4, MOV or MKV output")
@@ -469,12 +472,10 @@ func planExtractFrame(sources []string, raw json.RawMessage, outputName string) 
 // `gt(iw/ih, target_aspect)` test inside the expression picks the
 // branch at render time.
 //
-// Audio: copied through. The trim uses a short demuxer-level preroll
-// and then an output seek. That avoids the black leading frames some
-// phone MOVs produce when a reframe starts exactly at a non-keyframe,
-// while still avoiding a decode from the beginning of long sources.
-
-const extractReelSeekPrerollMs int64 = 2000
+// Accurate input seeking decodes GOP preroll internally. Pictures are retained
+// on the requested source interval, then reset to zero. Audio is trimmed at
+// sample precision and re-encoded so packet boundaries and B-frame DTS cannot
+// shift the output presentation timeline.
 
 type extractReelParams struct {
 	StartMs     int64  `json:"start_ms"`
@@ -538,32 +539,40 @@ func planExtractReel(sources []string, raw json.RawMessage, outputName string) (
 		scaleExpr := fmt.Sprintf("scale=%d:%d,setsar=1", outputWidth, outputHeight)
 		videoFilter = cropExpr + "," + scaleExpr
 	}
-	seekStartMs := p.StartMs - extractReelSeekPrerollMs
-	if seekStartMs < 0 {
-		seekStartMs = 0
-	}
-	outputSeekMs := p.StartMs - seekStartMs
 	durationMs := p.EndMs - p.StartMs
 	if fitMode == "crop" && p.CropW > 0 && p.CropH > 0 && len(p.CropPath) > 1 {
-		// The input clock starts at seekStartMs because of the preroll. Shift
-		// the source-timeline path to that clock before building x(t).
-		cropExpr := cropFilterForPath(p.CropW, p.CropH, p.CropY, seekStartMs, p.CropPath)
+		// Evaluate source-time geometry before resetting the retained picture PTS.
+		cropExpr := cropFilterForPath(p.CropW, p.CropH, p.CropY, p.StartMs, p.CropPath)
 		videoFilter = cropExpr + "," + fmt.Sprintf("scale=%d:%d,setsar=1", outputWidth, outputHeight)
 	}
+	duration := msToSeconds(durationMs)
+	videoFilter += ",trim=start=0:end=" + duration + ",setpts=PTS-STARTPTS"
+	// Packet-copy AAC and make_zero shift presentation by encoder reorder delay.
+	// Trim decoded audio on the requested timeline, filling only genuine gaps,
+	// and let the muxer's edit list handle encoder priming/B-frame DTS.
 	args := []string{
 		"-y",
 		"-loglevel", "error",
 		"-progress", "pipe:1",
-		"-ss", msToSeconds(seekStartMs),
+		"-ss", msToSeconds(p.StartMs),
 		"-i", "{input}",
-		"-ss", msToSeconds(outputSeekMs),
-		"-t", msToSeconds(durationMs),
-		"-vf", videoFilter,
-		"-c:a", "copy", // audio passthrough — no re-encode
-		"-avoid_negative_ts", "make_zero",
+		"-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn",
+		"-t", duration,
+		"-vf", videoFilter, "-fps_mode", "vfr",
+		"-af", "atrim=start=0:end=" + duration + ",aresample=async=1:first_pts=0",
+		"-c:a", "aac", "-b:a", "192k",
 	}
+	args = append(args, videoEndDurationArgs(duration)...)
 	name, ct := defaultOutputName(outputName, sources[0], "reel", ".mp4")
 	return &opPlan{Filename: name, ContentType: ct, Args: args}, nil
+}
+
+// A VFR encoder can leave the final packet duration unset after an explicit
+// trim end. Fill missing duration through the requested presentation endpoint
+// without duplicating a picture or changing PTS/DTS. MP4 derives intermediate
+// sample durations from timestamps; only its final duration needs this hint.
+func videoEndDurationArgs(duration string) []string {
+	return []string{"-bsf:v", "setts=pts=PTS:dts=DTS:duration=if(lte(DURATION\\,0)\\,max(1\\,ceil(" + duration + "/TB-PTS))\\,DURATION)"}
 }
 
 func ratioOutputDimensions(width, ratioW, ratioH int) (int, int) {

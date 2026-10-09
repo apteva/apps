@@ -23,8 +23,12 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.28
+version: 0.14.29
 description: |
+  v0.14.29 aligns reel video/audio at zero with accurate source cuts, sample-level
+  audio trimming and every-frame decode/timeline validation before upload. Crop
+  paths retain source-time alignment; genuine wide and uncertain actions remain
+  guarded with no implicit padding.
   v0.14.28 independently grounds hybrid pose tracking before fit/overflow decisions.
   Confident wrong head/torso or ghost limbs trigger bounded same-frame full-pose
   reacquisition and tracking resets. Verified fresh Full or independent YOLO/RTMPose
@@ -646,7 +650,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.28
+    ref: media/v0.14.29
     entry: mcp/media
   port: 8080
   health_check: /health

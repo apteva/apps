@@ -291,7 +291,7 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 		return 0, fmt.Errorf("parse remote result: %w (output=%s)", err, truncateRenderFailure(primaryOutput, 500))
 	}
 	recordRenderMetric(app, row, "output_bytes", res.Size)
-	if row.Operation == "trim" {
+	if row.Operation == "trim" || row.Operation == "extract_reel" {
 		validation := parseTrimValidation(out)
 		if err := checkTrimValidation(validation, expectedProgressDurationMs(app.AppDB(), row)); err != nil {
 			return 0, err
@@ -412,7 +412,7 @@ func (e *remoteExecutor) buildScript(
 	} else {
 		b.WriteString(shellCommand(ffmpegPath, args) + "\n")
 	}
-	if row.Operation == "trim" {
+	if row.Operation == "trim" || row.Operation == "extract_reel" {
 		b.WriteString("printf '%s\\n' '{\"stage\":\"validation\"}' > runtime-status.json.tmp; mv runtime-status.json.tmp runtime-status.json; : > progress.log\n")
 		validationScript := trimValidationScript(ffmpegPath, "./"+plan.Filename, expectedProgressDurationMs(nil, row))
 		if needsRenderRuntime(row.Operation, row.Params) {

@@ -15,7 +15,12 @@ import (
 // Unlike the old all-intra fixture, this contains long GOPs and B frames.
 // Each picture encodes its index into luma, so preroll and off-by-one end
 // pictures are visible independently of container duration/seek metadata.
-func TestTrimAccurateNonKeyframeInterval(t *testing.T) {
+func TestTrimAccurateNonKeyframeInterval(t *testing.T) { testAccurateNonKeyframeInterval(t, "trim") }
+func TestReelAccurateNonKeyframeInterval(t *testing.T) {
+	testAccurateNonKeyframeInterval(t, "extract_reel")
+}
+
+func testAccurateNonKeyframeInterval(t *testing.T, operation string) {
 	skipIfNoFFmpeg(t)
 	dir := t.TempDir()
 	src := filepath.Join(dir, "long-gop.mp4")
@@ -30,9 +35,10 @@ func TestTrimAccurateNonKeyframeInterval(t *testing.T) {
 	}{
 		{"aligned", 14000, 15000, 420, 449, 30},
 		{"fractional", 14017, 15233, 421, 456, 36},
+		{"just_after_frame", 14001, 15233, 421, 456, 36},
 	} {
 		t.Run(span.name, func(t *testing.T) {
-			out := runOpAgainstFile(t, "trim", []string{src}, map[string]any{"start_ms": span.start, "end_ms": span.end}, span.name+".mp4", dir)
+			out := runOpAgainstFile(t, operation, []string{src}, map[string]any{"start_ms": span.start, "end_ms": span.end, "target_ratio": "1:1", "output_width": 64}, span.name+".mp4", dir)
 			pixels, err := exec.Command("ffmpeg", "-v", "error", "-i", out, "-map", "0:v:0", "-f", "rawvideo", "-pix_fmt", "gray", "-").Output()
 			if err != nil {
 				t.Fatal(err)

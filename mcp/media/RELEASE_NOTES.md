@@ -1,3 +1,28 @@
+## 0.14.29 — accurate reel extraction and pre-upload validation
+
+Production QA of Chicken's exact R1/R2 intervals exposed presentation offsets in
+extract_reel's packet-copy audio / make_zero path. Reel cuts now use accurate
+input seeking, retain the requested picture interval and reset video PTS to zero.
+Audio is trimmed at sample precision and encoded as AAC at 192 kbps; source
+sample rate and channels are retained. Dynamic crops use the requested source
+start as their filter clock. Explicit start/end bounds exclude pictures beyond the
+requested endpoint; missing final packet duration is filled through that endpoint
+with PTS/DTS preserved, retaining the final picture without duplicating it.
+Silent sources remain supported.
+
+Local and remote reel execution run the existing every-frame decode, opening/
+ending black-frame diagnostics and zero-start/end-coverage gate before upload.
+Validation is persisted in resolved parameters and reported as a separate stage.
+Hybrid pose models and composition guards are unchanged. A successful technical
+render does not imply action-preserving composition: Chicken R1 still contains
+true overflow, and R2 has unresolved hand/identity evidence.
+
+Validation: indexed long-GOP fractional-cut picture/audio regression, HEVC and
+silent-source timeline tests, remote validation gate, full standard/race suites,
+vet, and exact private R1/R2 replay on the production render host. Production
+queue/upload QA results are recorded separately; no composition approvals,
+process retries or original archiving are performed.
+
 ## 0.14.28 — independently grounded pose recovery
 
 Hybrid Smart Crop checks the unique same-frame subject with YOLO Pose before

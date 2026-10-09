@@ -333,7 +333,7 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 	// default. Renders submitted before this column existed (or
 	// without an explicit folder) fall back to e.outputFolder.
 
-	if row.Operation == "trim" {
+	if row.Operation == "trim" || row.Operation == "extract_reel" {
 		doneValidation := renderStage(app, row, "trim_validation")
 		var log string
 		var err error
