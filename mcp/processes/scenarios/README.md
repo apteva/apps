@@ -428,3 +428,36 @@ requires actual operation overlap and preserved owner-only session checkpoints.
 rows. Configure `APTEVA_TEST_PROVIDER=openai-codex` and
 `APTEVA_TEST_MODEL=gpt-6.1-sol` before invoking `bun run scenarios/run.ts
 scenarios/13-step-by-step.yaml` with the existing authenticated test environment.
+
+## Targeted process edits
+
+```sh
+APTEVA_TEST_PROVIDER=openai-codex APTEVA_TEST_MODEL=gpt-6.1-sol bun run scenarios/run.ts scenarios/15-process-patch.yaml
+```
+
+This case creates one draft, edits only a single step's instructions with `patch`,
+intentionally submits a stale version, then atomically edits a description and
+adds/updates/removes steps and parameters. The agent follows both compact
+receipts' exact version references and reads the original immutable version.
+No workflow is activated and no assignment/run is created.
+
+The independent verifier compares all three stored definitions, checks untouched
+policy/dependency/default fidelity and exact source identity, requires stale
+rejection, rejects full-replacement requests and oversized receipts, and checks
+actual reread calls. Negative verifier tests cover lost content, stale acceptance,
+extra versions, missing rereads and unintended execution. Go regressions also
+check invalid-patch atomicity, state/project/version guards, full HTTP inspection,
+follow-latest versus pinned assignments, and frozen in-flight run definitions.
+
+Recorded on 2026-10-09 with `openai-codex` / `gpt-6.1-sol`: the final live
+case and independent saved-state/tool-trace verifier passed in 7 iterations,
+50.862 seconds, with 148,204 reported tokens. Both successful patch receipts
+were 292 and 419 bytes. Exactly three immutable versions were saved; the stale
+request failed without saving a fourth. Report:
+`/private/tmp/processes-patch-verified-tier3/run-tagQfl`.
+An initial attempt failed before model actions because optional schema objects
+encoded `required` as null; this was fixed to an empty array and covered by a
+schema regression. Two fresh live runs subsequently passed. A deterministic
+large-definition regression measures 40,940 bytes of full definition versus a
+173-byte single-step patch request and 291-byte receipt; this measures payload
+reduction rather than overall execution speed.

@@ -1,0 +1,54 @@
+name: processes-process-patch
+description: A real agent edits only changed fields, preserves exact immutable history, rejects stale edits, and follows compact patch receipts.
+timeout: 6m
+settle_for: 3s
+max_iterations: 45
+setup:
+  mode: autonomous
+  app: {path: ./}
+directive: |
+  Test targeted Processes editing in this isolated project. Use only Processes
+  tools. No external actions, assignments or runs. Create exactly ONE draft
+  named "Targeted patch test" with description "Keep this description",
+  shared instructions "SHARED-POLICY: Preserve exact evidence and operator approval.",
+  completion_criteria "Publish the operator-approved result", approval_requirements
+  "Human approval is required before publish", tags [patch-test], summary_fields
+  [{key:campaign,label:Campaign}], and parameters:
+  [{key:campaign,label:Campaign,type:string,default:October},
+   {key:obsolete,label:Obsolete,type:boolean,default:false}].
+  Define three steps in order:
+  - prepare, name Prepare, role worker, depends_on [], instructions "KEEP-PREPARE:
+    Prepare exact receipt source:9007199254740993", expected_output "Prepared receipt".
+  - review, name Review, role reviewer, depends_on [prepare], instructions
+    "REVIEW-V1: Review prepared receipt", expected_output "Operator approval receipt".
+  - publish, name Publish, role worker, depends_on [review], instructions
+    "KEEP-PUBLISH: Publish only after operator approval", expected_output "Publication receipt".
+  Save this as v1. Do not send graphical coordinates.
+  Use processes_patch, expected_version=1, changes containing ONLY
+  {steps:{update:[{key:review,instructions:"REVIEW-V2: Check exact receipt and request operator approval"}]}}.
+  Follow the successful receipt's exact reread tool/arguments to inspect v2.
+  Check all other fields are preserved.
+  Intentionally attempt processes_patch ONCE with expected_version=1 and changes
+  {description:"STALE EDIT MUST NOT SAVE"}. It must fail; do not retry it.
+  Then use processes_patch with expected_version=2 to make these changes together:
+  description="Targeted edits saved";
+  steps: remove publish; add archive (name Archive, role worker, depends_on [review],
+  instructions "Archive approved receipt", expected_output "Archive receipt");
+  parameters: remove obsolete; update campaign label to "Campaign name" without
+  resending its type/default; add count (label Count, type number, default 3).
+  Do not send unchanged fields or the whole definition. Follow the second success
+  receipt's exact reread tool/arguments to inspect v3. Then read get with version=1
+  to confirm the original review instructions, original publish step and parameter
+  labels/defaults remain intact. Finish after verifying these three versions.
+  Do not use processes_update, activate, start, or create additional processes.
+assert:
+  - tool_called: processes_patch
+  - tool_called_with: {tool: processes_get, args: {version: 1}}
+  - tool_called_with: {tool: processes_get, args: {version: 2}}
+  - tool_called_with: {tool: processes_get, args: {version: 3}}
+  - tool_not_called: processes_update
+  - tool_not_called: processes_start
+  - tool_not_called: processes_activate
+budget:
+  total_tokens: 1500000
+  cost_usd: 3.00

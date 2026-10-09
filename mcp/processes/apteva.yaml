@@ -60,7 +60,8 @@ provides:
     - { name: get, description: "Read current content and version metadata, or one requested immutable definition." }
     - { name: validate_definition, description: Validate and normalize a semantic procedure without saving it. }
     - { name: create, description: Create an unassigned draft company procedure. }
-    - { name: update, description: Create an immutable procedure revision while paused or draft. }
+    - { name: update, description: Replace the complete definition with an immutable draft revision. }
+    - { name: patch, description: "Edit selected fields or steps/parameters by key; receive a compact immutable draft revision receipt." }
     - { name: activate, description: Activate a procedure for use by its assignments. }
     - { name: pause, description: Stop future scheduled runs without interrupting current work. }
     - { name: draft, description: Return a procedure to draft and stop new runs while preserving current work and history. }

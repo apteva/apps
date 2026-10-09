@@ -42,6 +42,26 @@ task, forward work manually, or poll another app for step status. For structured
 runs, wait for the Process event that delivers the next ready step after its
 dependencies and timing rules are satisfied.
 
+## Editing procedures
+
+Use `patch` for everyday edits instead of resending the complete definition with
+`update`. Supply `process_id`, the current `expected_version`, and `changes` with
+only changed definition fields. Steps and parameters use `add`, `update`, and
+`remove` operations by stable key. An update requires a key and at least one
+changed field; add requires a complete new item; remove lists existing keys.
+Each key can occur only once per patch. Omitted values remain unchanged. Arrays
+and nested fields replace their entire value; use empty strings/arrays to clear
+optional values, and null to clear a parameter default or step timing rule.
+
+The process must be draft or paused and synchronized. The server validates the
+whole resulting definition and saves one immutable draft version atomically.
+Include dependency changes when removing referenced steps; invalid graphs save
+nothing. The compact receipt lists changed fields/keys and an exact `get` reread
+reference. Follow that reference to verify saved content. A version conflict
+requires reading current state and reconsidering edits, never blind retries.
+Existing runs retain their frozen definitions. `update` remains available for
+intentional full replacements.
+
 ## Testing revisions
 
 Evals is optional. When installed, use the Process revision evaluation action

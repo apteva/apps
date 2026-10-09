@@ -1,3 +1,4 @@
+import { PROCESS_PATCH, verifyProcessPatch } from "./process-patch";
 import { RUN_MEMORY, verifyRunMemory } from "./run-memory";
 import { STEP_BY_STEP, controlStepByStep, verifyControlEvidence } from "./step-by-step";
 /** Real Codex/Terra scenarios with independent checks of the sidecar's saved state. */
@@ -262,6 +263,17 @@ for (const scenario of report.results) {
       verifyRunMemory(scenario.tool_calls,runs,summaries,entries,memoryConfirmed as ConfirmationReport[]);
       observed[scenario.scenario]=evidence;
       console.log(`PASS ${scenario.scenario}: two worker runs recovered checkpoint/ledger, distinct exact receipts, bounded reads and HTTP approval (${scenario.iterations} iterations, ${scenario.tokens.total} tokens)`);
+      continue;
+    }
+    if (scenario.scenario === PROCESS_PATCH) {
+      check(PROVIDER === "openai-codex" && MODEL === "gpt-6.1-sol" && scenario.observed_models?.includes(MODEL), "Patch tier 3 must observe GPT-6.1 Sol");
+      const versions = db.query("SELECT version,body_json FROM process_versions WHERE process_id=? ORDER BY version").all(processes[0].id) as any[];
+      const process = db.query("SELECT * FROM processes WHERE id=?").get(processes[0].id) as any;
+      const evidence = {process, versions, runs};
+      await Bun.write(resolve(outputDir, "patch-evidence.json"), JSON.stringify(evidence, null, 2));
+      verifyProcessPatch(scenario.tool_calls, versions, process, runs);
+      observed[scenario.scenario] = evidence;
+      console.log(`PASS ${scenario.scenario}: partial edits, exact immutable history, stale rejection and compact receipt rereads verified (${scenario.iterations} iterations, ${scenario.tokens.total} tokens)`);
       continue;
     }
     if (scenario.scenario === MCP_RESPONSE_RECOVERY) {
