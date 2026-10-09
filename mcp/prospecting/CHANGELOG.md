@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.4.3
+
+- Preserve email occurrence context so flattened page scans and mailto links cannot reintroduce vendor or recruitment addresses rejected from page text.
+- Exclude developer and photographer credits while keeping published business mailboxes and recruiting-industry business contacts.
+
+## v0.4.2
+
+- Crawl public HTML first, stop at suitable contacts, deduplicate destinations, and reuse rendered fallback sessions.
+- Add bounded parallel qualification, target lead stopping, and new-only discovery while preserving Places business identity.
+- Exclude recruitment mailboxes and prioritize restaurant contacts over hotel reception.
+- Require Web 0.2.11 and pin app-sdk v0.97.0.
+
 ## v0.4.1
 
 - Include rendered contact footers and retain email and phone links through Web and Computer.
