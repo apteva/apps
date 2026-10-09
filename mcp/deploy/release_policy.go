@@ -41,15 +41,11 @@ func sealBuildArtifact(b *Build) error {
 	}
 	if p != nil {
 		var m artifactManifest
-		if json.Unmarshal([]byte(b.ArtifactManifestJSON), &m) != nil || m.Pipeline == nil || m.Pipeline.ArtifactSHA256 != digest || m.Pipeline.ConfigSHA256 != jsonDigest(p) {
-			return errors.New("build pipeline evidence is missing or does not match artifact/configuration")
+		if err = json.Unmarshal([]byte(b.ArtifactManifestJSON), &m); err != nil {
+			return err
 		}
-		expected := []string{}
-		for _, test := range p.Tests {
-			expected = append(expected, test.Name)
-		}
-		if !slices.Equal(expected, m.Pipeline.Tests) {
-			return errors.New("build pipeline test evidence does not match declared tests")
+		if err = validatePipelineEvidence(p, b.ArtifactPath, m); err != nil {
+			return err
 		}
 	}
 	_, e = globalCtx.AppDB().Exec(`INSERT INTO build_attestations(build_id,artifact_sha256,manifest_json,target_json,created_at) VALUES(?,?,?,?,?) ON CONFLICT(build_id) DO NOTHING`, b.ID, digest, b.ArtifactManifestJSON, b.TargetConfigJSON, nowUTC())
@@ -72,9 +68,18 @@ func verifiedBuildEvidence(b *Build) (string, *pipelineEvidence, error) {
 	if e = json.Unmarshal([]byte(manifest), &m); e != nil {
 		return "", nil, e
 	}
-	if m.Pipeline != nil && m.Pipeline.ArtifactSHA256 != digest {
-		return "", nil, errors.New("test evidence does not match release artifact")
+	p, err := pipelineConfig(b.TargetConfigJSON)
+	if err != nil {
+		return "", nil, err
 	}
+	if p != nil {
+		if err = validatePipelineEvidence(p, b.ArtifactPath, m); err != nil {
+			return "", nil, err
+		}
+	} else if m.Pipeline != nil {
+		return "", nil, errors.New("test evidence does not match build configuration")
+	}
+
 	return digest, m.Pipeline, nil
 }
 func releaseChannel(d *Deployment, opts releaseOptions) string {
@@ -98,6 +103,27 @@ func checkReleasePolicy(d *Deployment, b *Build, opts releaseOptions, ignoreAppr
 	if e != nil {
 		return "", e
 	}
+	// A pipeline's integrity gate applies independently of an optional
+	// promotion policy. Every native release still needs matching evidence.
+	buildPipeline, e := pipelineConfig(b.TargetConfigJSON)
+	if e != nil {
+		return "", e
+	}
+	currentPipeline, e := pipelineConfig(d.TargetConfigJSON)
+	if e != nil {
+		return "", e
+	}
+	var digest string
+	var ev *pipelineEvidence
+	if buildPipeline != nil || currentPipeline != nil {
+		digest, ev, e = verifiedBuildEvidence(b)
+		if e != nil {
+			return "", e
+		}
+		if buildPipeline == nil || currentPipeline == nil || ev == nil || ev.ConfigSHA256 != jsonDigest(currentPipeline) {
+			return "", errors.New("pipeline changed since tested build")
+		}
+	}
 	p := t.ReleasePolicy
 	if p == nil {
 		return "", nil
@@ -113,9 +139,11 @@ func checkReleasePolicy(d *Deployment, b *Build, opts releaseOptions, ignoreAppr
 	if d.AutomaticRelease && !rule.Automatic {
 		return "", errors.New("policy requires an explicit release request for this channel")
 	}
-	digest, ev, e := verifiedBuildEvidence(b)
-	if e != nil {
-		return "", e
+	if digest == "" {
+		digest, ev, e = verifiedBuildEvidence(b)
+		if e != nil {
+			return "", e
+		}
 	}
 	for _, name := range rule.RequiredTests {
 		if ev == nil || !slices.Contains(ev.Tests, name) {

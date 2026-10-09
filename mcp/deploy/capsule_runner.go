@@ -353,16 +353,21 @@ func (r *capsuleRunner) runJob(ctx context.Context, job *runnerJob, input runner
 		return
 	}
 
+	appDir, err := pipelinePath(sourceDir, input.Build.BuildSubdir)
+	if err != nil {
+		r.finishJob(job.Response.ID, "failed", fmt.Errorf("source build subdirectory: %w", err))
+		return
+	}
 	framework := strings.TrimSpace(input.Build.Framework)
 	if framework == "" {
-		framework = detectFramework(sourceDir)
+		framework = detectFramework(appDir)
 	}
 	builder, err := builderFor(framework)
 	if err != nil {
 		r.finishJob(job.Response.ID, "failed", err)
 		return
 	}
-	_, err = buildWithPipeline(builder, sourceDir, distDir, BuildOverrides{
+	_, err = buildWithPipeline(builder, appDir, distDir, BuildOverrides{
 		BuildCmd: input.Build.BuildCmd, Env: input.Build.Env,
 		TargetConfigJSON: input.Build.TargetConfigJSON,
 		Credentials:      input.Credentials, Context: ctx,

@@ -10,7 +10,7 @@ import (
 // values are allowed, except the platform namespace reserved for the sidecar.
 func workloadEnv(user map[string]string, extra ...string) []string {
 	values := map[string]string{}
-	for _, key := range []string{"PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TZ", "SYSTEMROOT", "USER", "SHELL", "GOPATH", "GOCACHE", "GOMODCACHE", "GOROOT", "JAVA_HOME", "ANDROID_HOME", "ANDROID_SDK_ROOT", "DEVELOPER_DIR", "SDKROOT", "BUN_INSTALL", "PNPM_HOME"} {
+	for _, key := range []string{"PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TZ", "SYSTEMROOT", "USER", "SHELL", "GOPATH", "GOCACHE", "GOMODCACHE", "GOROOT", "JAVA_HOME", "ANDROID_HOME", "ANDROID_SDK_ROOT", "DEVELOPER_DIR", "SDKROOT", "BUN_INSTALL", "PNPM_HOME", "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"} {
 		if v, ok := os.LookupEnv(key); ok {
 			values[key] = v
 		}
