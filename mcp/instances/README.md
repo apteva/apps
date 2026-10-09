@@ -364,6 +364,11 @@ result.
 
 ## Continuous monitoring (v0.6.0)
 
+v0.6.4 fixes the native panel failing to load with a missing `jsxDEV` export.
+The panel build explicitly uses production JSX and validates the shipped bundle
+against the dashboard's shared React runtime contract. I/O wait charts and all
+existing monitoring data remain available with the same sampling and limits.
+
 v0.6.3 adds a separate **I/O wait history** chart below the CPU/memory chart,
 using the selected history range. It shows observed-time weighted averages,
 recorded peaks with their original timestamps, and a labeled percentage scale
@@ -392,7 +397,7 @@ Monitoring is enabled by default for every instance. On app mount, and every
 five seconds afterward, Instances reconciles the inventory. Ready Linux/macOS
 AMD64/ARM64 SSH hosts receive the version-pinned Go collector automatically;
 new and temporarily unreachable hosts are retried without recreating them.
-Collectors are downloaded by the app from the `instances/v0.6.3` GitHub release,
+Collectors are downloaded by the app from the `instances/v0.6.4` GitHub release,
 verified against the SHA-256 values embedded in this source, and uploaded over
 SSH. No compiler, public listening port, or platform credential is installed
 on the host. Linux requires systemd; macOS uses a launch daemon. Service
