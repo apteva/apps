@@ -2,11 +2,14 @@ schema: apteva-app/v1
 
 name: web
 display_name: Web
-version: 0.2.10
+version: 0.2.11
 description: |
   Browser-native web intelligence and reusable Apify-style extractors for
   agents. Provides JSON-first search, extraction, crawl, map, research,
   snapshots, durable extractor runs, and Jobs-backed schedules.
+
+  v0.2.11 adds browser-session reuse for multi-page extraction, lightweight
+  browser lifecycles, canonical root cache URLs and observed redirect aliases.
 
   v0.2.10 exposes full-body extraction and optional public HTML source checks
   with separate cache identities and HTTP provenance, preserving browser-backed
@@ -107,7 +110,7 @@ requires:
     - platform.apps.call
   apps:
     - name: computer
-      version: ">=0.7.94"
+      version: ">=0.7.95"
       reason: "Browser session lifecycle, rendered navigation, screenshots, and browser environments."
     - name: storage
       reason: "Persists screenshots, extracted pages, crawl maps, and research JSON."
@@ -135,11 +138,15 @@ provides:
         artifact. Args: url, formats?, backend?, viewport?, max_chars?,
         readability? (default true; false includes headers and footers),
         source_only? (default false; public HTML source with HTTP provenance),
+        session_id? (reuse a retained browser), keep_session? (close explicitly
+        with web_session_close),
         store? bool, snapshot? bool, visibility? (private|signed|public;
         defaults to private for snapshots), cache?, max_age?, cache_ttl?.
         Omit backend to use Computer's configured default; explicit overrides are
         limited to local, browserbase, steel, browser-engine, and service.
         Browser metadata reports requested_backend and effective_backend.
+    - name: web_session_close
+      description: Release a browser retained by web_extract with keep_session=true. Args session_id.
     - name: web_crawl
       description: |
         Browser-backed bounded crawl from one or more seed URLs. Args: url or
@@ -246,7 +253,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: web/v0.2.10
+    ref: web/v0.2.11
     entry: mcp/web
   port: 8080
   health_check: /health

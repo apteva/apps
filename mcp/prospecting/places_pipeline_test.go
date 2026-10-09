@@ -14,6 +14,7 @@ import (
 
 type placesPlatform struct {
 	platformStub
+	countsMu         sync.Mutex
 	pages            map[string]any
 	integrationCalls []map[string]any
 	searchError      bool
@@ -55,9 +56,11 @@ func (p *placesPlatform) CallAppResultContext(c context.Context, app, tool strin
 	if err := c.Err(); err != nil {
 		return err
 	}
+	p.countsMu.Lock()
 	if tool == "contacts_upsert_by_channel" {
 		p.crmCalls++
 		if p.failCRM {
+			p.countsMu.Unlock()
 			return errors.New("CRM temporarily unavailable")
 		}
 	}
@@ -67,6 +70,7 @@ func (p *placesPlatform) CallAppResultContext(c context.Context, app, tool strin
 			p.onExtract()
 		}
 	}
+	p.countsMu.Unlock()
 	return p.platformStub.CallAppResult(app, tool, input, out)
 }
 func placeFixture(id, name, website, phone string) map[string]any {

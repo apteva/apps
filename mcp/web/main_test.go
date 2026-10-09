@@ -1343,6 +1343,8 @@ func (p *fakePlatform) CallAppResult(app, tool string, in map[string]any, out an
 
 func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]any {
 	switch app + "." + tool {
+	case "computer.browser_session":
+		return map[string]any{"session_id": in["session_id"], "backend": "local", "current_url": p.openURL}
 	case "computer.browser_open":
 		if u, ok := in["url"].(string); ok {
 			p.openURL = u
@@ -1549,6 +1551,9 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 	case "computer.browser_close":
 		return map[string]any{"closed": true}
 	case "computer.computer_use":
+		if in["action"] == "navigate" {
+			p.openURL = stringFromAny(in["url"])
+		}
 		if in["action"] == "scroll" {
 			amount := intFromAny(in["amount"])
 			if stringFromAny(in["direction"]) == "up" {

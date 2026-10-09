@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -19,6 +20,7 @@ type recordedCall struct {
 
 type platformStub struct {
 	tk.BasePlatformClient
+	mu             sync.Mutex
 	calls          []recordedCall
 	blockedEngines map[string]bool
 	searchErrors   map[string]error
@@ -42,9 +44,13 @@ func (p *platformStub) WhoAmI() (*sdk.InstallIdentity, error) {
 }
 
 func (p *platformStub) CallAppResult(app, tool string, input map[string]any, out any) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.calls = append(p.calls, recordedCall{App: app, Tool: tool, Input: input})
 	var payload any
 	switch app + "/" + tool {
+	case "web/web_session_close":
+		payload = map[string]any{"closed": true}
 	case "web/web_search":
 		engine := fmt.Sprint(input["engine"])
 		if err := p.searchErrors[engine]; err != nil {
@@ -889,7 +895,7 @@ func TestQualificationDoesNotVisitLegalPagesAfterFindingEmail(t *testing.T) {
 	}
 }
 
-func TestQualificationAutomaticallyChecksPublicSourceForMissingBrowserEmail(t *testing.T) {
+func TestQualificationReadsPublicSourceBeforeOpeningBrowser(t *testing.T) {
 	platform := &platformStub{extractPages: map[string]any{"https://albert.example/": map[string]any{"url": "https://albert.example/", "final_url": "https://albert.example/en/", "status": 200, "text": "English menu without a mailbox"}}, sourcePages: map[string]any{"https://albert.example/": map[string]any{"url": "https://albert.example/", "status": 200, "text": "Restaurant Albert. Email albert@gmail.com", "artifact": map[string]any{"id": 123}}}}
 	ctx := newTestContext(t, platform)
 	profile, err := createProfile(ctx.AppDB(), ctx.CurrentProject(), map[string]any{"name": "Source fallback"})
@@ -904,7 +910,7 @@ func TestQualificationAutomaticallyChecksPublicSourceForMissingBrowserEmail(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result["candidate"].(*Candidate).Email != "albert@gmail.com" || len(platform.calls) != 2 || platform.calls[1].Input["source_only"] != true {
+	if result["candidate"].(*Candidate).Email != "albert@gmail.com" || len(platform.calls) != 1 || platform.calls[0].Input["source_only"] != true {
 		t.Fatalf("source fallback failed: %+v", result)
 	}
 	evidence := result["evidence"].([]Evidence)
@@ -912,7 +918,7 @@ func TestQualificationAutomaticallyChecksPublicSourceForMissingBrowserEmail(t *t
 	for _, item := range evidence {
 		foundSource = foundSource || (item.SourceKind == "web_source" && item.URL == "https://albert.example/" && item.ArtifactID != nil)
 	}
-	if len(evidence) != 2 || !foundSource {
+	if len(evidence) != 1 || !foundSource {
 		t.Fatalf("source provenance missing: %+v", evidence)
 	}
 }
