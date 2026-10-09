@@ -151,3 +151,53 @@ test("missing I/O wait observations are not shown as zero",async()=>{
  expect(container.textContent).toContain("No I/O wait observations in this range.");
  expect(container.querySelector('svg[aria-label="I/O wait average and recorded peaks over time"]')).toBeNull();
 });
+
+test("chart hover shows weighted values and original peak times across the plot",async()=>{
+ const {MetricHistoryChart}=await import("./MonitoringHistory");
+ const time=Date.now()-60000,peakAt=time+3750;
+ const aggregate=(sum:number,max:number)=>({sum,observed_ms:1000,min:0,max,peak_at:peakAt});
+ const points=[{time,step_ms:60000,observed_ms:1000,values:{cpu:aggregate(12345,87.6),core:aggregate(0,99.9),memory:aggregate(23456,30)}}];
+ await render(<MetricHistoryChart kind="cpu" points={points} from={time} to={time+60000}/>);
+ const svg=container.querySelector("svg")!;
+ svg.getBoundingClientRect=()=>({left:100,width:1600,height:135} as DOMRect);
+ await act(async()=>{svg.dispatchEvent(new win.PointerEvent("pointermove",{clientX:530,clientY:10,bubbles:true,pointerType:"mouse"}) as any);});
+ const tooltip=container.querySelector('[role="tooltip"]')!;
+ expect(tooltip.textContent).toContain("CPU average: 12.3%");
+ expect(tooltip.textContent).toContain(`CPU peak: 87.6% at ${new Date(peakAt).toLocaleString()}`);
+ expect(tooltip.textContent).toContain("Busiest core peak: 99.9%");expect(tooltip.textContent).toContain("Memory average: 23.5%");
+ expect(tooltip.textContent).toContain("Partial observations: 2% coverage");
+ expect(svg.getAttribute("aria-describedby")).toBe(tooltip.id);
+ await act(async()=>{svg.dispatchEvent(new win.PointerEvent("pointerout",{bubbles:true,pointerType:"mouse"}) as any);});
+ expect(container.querySelector('[role="tooltip"]')===null).toBe(true);
+});
+
+test("hover leaves outages empty while keyboard and touch expose zero I/O wait",async()=>{
+ const {MetricHistoryChart}=await import("./MonitoringHistory");
+ const aggregate=(value:number,time:number)=>({sum:value*1000,observed_ms:1000,min:value,max:value,peak_at:time+250});
+ const points=[{time:0,step_ms:1000,observed_ms:1000,values:{iowait:aggregate(0,0)}},{time:5000,step_ms:1000,observed_ms:1000,values:{iowait:aggregate(10,5000)}}];
+ await render(<MetricHistoryChart kind="iowait" points={points} from={0} to={6000} max={10}/>);
+ const svg=container.querySelector("svg")!;svg.getBoundingClientRect=()=>({left:0,width:800,height:135} as DOMRect);
+ await act(async()=>{svg.dispatchEvent(new win.PointerEvent("pointermove",{clientX:20+760*2/6,bubbles:true,pointerType:"mouse"}) as any);});
+ expect(container.querySelector('[role="tooltip"]')===null).toBe(true);
+ await act(async()=>{svg.dispatchEvent(new win.KeyboardEvent("keydown",{key:"Home",bubbles:true}) as any);});
+ expect(container.querySelector('[role="tooltip"]')?.textContent).toContain("I/O wait average: 0.00%");
+ await act(async()=>{svg.dispatchEvent(new win.KeyboardEvent("keydown",{key:"ArrowRight",bubbles:true}) as any);});
+ expect(container.querySelector('[role="tooltip"]')?.textContent).toContain("I/O wait peak: 10.00%");
+ await act(async()=>{svg.dispatchEvent(new win.KeyboardEvent("keydown",{key:"Escape",bubbles:true}) as any);});
+ expect(container.querySelector('[role="tooltip"]')===null).toBe(true);
+ await act(async()=>{svg.dispatchEvent(new win.PointerEvent("pointerdown",{clientX:20,bubbles:true,pointerType:"touch"}) as any);svg.dispatchEvent(new win.PointerEvent("pointerout",{bubbles:true,pointerType:"touch"}) as any);});
+ expect(container.querySelector('[role="tooltip"]')?.textContent).toContain("I/O wait peak: 0.00%");
+});
+
+test("chart pointer mapping handles letterboxing and missing series stay missing",async()=>{
+ const {MetricHistoryChart,pointerChartTime}=await import("./MonitoringHistory");
+ expect(pointerChartTime(520,{left:100,width:1600,height:135},0,6000)).toBe(0);
+ expect(pointerChartTime(1280,{left:100,width:1600,height:135},0,6000)).toBe(6000);
+ expect(pointerChartTime(100,{left:100,width:1600,height:135},0,6000)).toBeUndefined();
+ expect(pointerChartTime(20,{left:0,width:0,height:0},0,6000)).toBeUndefined();
+ await render(<MetricHistoryChart kind="cpu" from={0} to={1000} points={[{time:0,step_ms:1000,observed_ms:1000,values:{cpu:{sum:0,observed_ms:1000,min:0,max:0,peak_at:0}}}]}/>);
+ const svg=container.querySelector("svg")!;
+ await act(async()=>{svg.dispatchEvent(new win.KeyboardEvent("keydown",{key:"Home",bubbles:true}) as any);});
+ expect(container.querySelector('[role="tooltip"]')?.textContent).toContain("CPU average: 0.0%");
+ expect(container.querySelector('[role="tooltip"]')?.textContent).toContain("Memory average: No observation");
+});
