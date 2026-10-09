@@ -1,9 +1,9 @@
-// Web v0.2.9 - browser-backed web intelligence and reusable extractors.
+// Web v0.2.10 - browser-backed web intelligence and reusable extractors.
 //
 // The app requires computer for session lifecycle, rendered extraction, and
-// screenshots. It opens a browser before search/extract/crawl/map/research page
-// visits, prefers live browser DOM extraction when available, and falls back to
-// HTTP retrieval when the active backend cannot expose rendered content.
+// screenshots. Rendered visits prefer live browser DOM extraction. Optional
+// source_only extraction retrieves public HTML with HTTP provenance; other
+// extraction uses HTTP as a fallback when the browser cannot expose content.
 package main
 
 import (

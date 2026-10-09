@@ -60,12 +60,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.93
+version: 0.7.94
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.93 shows live sessions
-  first, loads past sessions on demand in pages, folds browser settings away
-  from the session list, and supports bounded rendered DOM responses up to 1 MB
-  for large structured crawls.
+  Watch, steer, and replay hosted browser sessions. v0.7.94 preserves headers,
+  footers and sidebars when readability is disabled, and retains mailto and tel
+  links in rendered DOM extraction. Existing browser controls and media upload
+  behavior are preserved.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
 icon: /ui/icon.svg
@@ -849,7 +849,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"session_id":  map[string]any{"type": "string"},
 				"formats":     map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"text", "markdown", "html", "metadata", "structured_data", "json", "links", "images", "regions"}}},
 				"max_chars":   map[string]any{"type": "integer", "description": "Maximum aggregate response characters. Default 50000; maximum 1000000."},
-				"readability": map[string]any{"type": "boolean", "description": "Prefer the primary article/content region. Defaults true."},
+				"readability": map[string]any{"type": "boolean", "description": "Prefer the primary article/content region. Defaults true; false retains headers, footers and sidebars."},
 				"wait_ms":     map[string]any{"type": "integer", "description": "Optional wait before extraction for client-rendered pages; maximum 10000."},
 			}, []string{"session_id"}),
 			Handler: a.toolBrowserExtract,
