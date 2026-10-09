@@ -53,7 +53,9 @@ than the dirty workspace overlay.
 - Telephony: full Go suite, 779 checks passed and 3 opt-in checks skipped.
 - Frontend: 96 headless/client checks and 116 UI/audio checks passed. An initial
   simulation hit Bun's five-second execution timeout; the full replay passed
-  with a 30-second execution timeout and identical audio assertions.
+  with a 30-second execution timeout and identical audio assertions. The repeated
+  jitter simulations now declare this timeout explicitly, like the existing
+  long-call simulation, without changing virtual timing or quality limits.
 - New network and write-recovery tests passed under the race detector against
   published v0.98.0, including changed IPs on real WebSocket reconnects, forged
   metadata fallback, exact full-duplex PCM and uninterrupted carrier attachment.
@@ -72,6 +74,41 @@ than the dirty workspace overlay.
 
 Original SDK and Server tracked diffs and untracked-file hashes were verified
 unchanged after implementation. All prior Telephony changes are retained.
+
+## Fresh browser/network results after recovery fix
+
+The 13-profile network run passed its command gate: 11 scenarios passed and two
+insufficient-bandwidth PCM profiles correctly reported degradation. Broadband,
+Wi-Fi jitter, 512 kbit/s PCM and forced-relay Opus at 128/64 kbit/s had zero missing
+tone markers in either direction. Outage/catch-up and reconnect scenarios passed
+recovery checks; lost speech during the artificial outage is still counted.
+Intentional microphone mute did not cause incoming playback loss.
+
+| Scenario | Adviser → carrier p95 | Carrier → adviser p95 | Result |
+|---|---:|---:|---|
+| Broadband | 86 ms | 114 ms | Pass, zero missing markers |
+| Wi-Fi jitter | 124 ms | 163 ms | Pass, zero missing markers |
+| 512 kbit/s PCM each way | 121 ms | 142 ms | Pass, zero missing markers |
+| Opus, forced-relay UDP, 128 kbit/s each way | 117 ms | 171 ms | Pass, zero missing markers |
+| Opus, forced-relay UDP, 64 kbit/s each way | 224 ms | 270 ms | Pass, zero missing markers |
+| Final 60-second baseline | 101 ms | 179 ms | Pass, zero missing markers, drops or underruns |
+
+An earlier 60-second pair retained a failure: UI-pause passed, but baseline
+playback p95 was 293 ms against its 250 ms target. Its 55 ms playback discard at
+11:12:07 UTC coincided with 100% host CPU at 11:12:06–07 UTC. Independent render
+clocks continued advancing, server writes stayed bounded, and neither internal
+PCM writer recorded a write error. In the final baseline, sampled CPU peaked at
+74%, with no drops or underruns. This establishes environment sensitivity, not
+proof of which process caused the saturation, a guarantee against production
+cuts, or a reason to discard the failed result.
+
+The measurements have approximately ±20 ms clock uncertainty. Markers are
+synthetic tones, not a speech/MOS assessment. Bit-exact steady PCM and unchanged
+production DSP are covered by the functional tests. Full raw runs remain in
+`/private/tmp/telephony-audio-stress-20261009`; the tracked
+[audio stress results](audio-stress-results-20261009.json) retain outcomes,
+including failures, directional scores, clock observations, queue counters,
+host saturation timestamps and raw-result hashes.
 
 ## Deployment dependency
 

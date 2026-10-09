@@ -51,7 +51,7 @@ for(const rate of [24000,44100,48000]) {
    expect(s.maxAge).toBeLessThan(320);
    expect(s.underruns).toBeLessThanOrEqual(5);
   }
- });
+ },30000);
  test(`500ms and 6.7s outage ${rate} Hz recover to live audio`,()=>{
   for(const stall of [500,6700]) {
    const s=simulate(rate,stall,90000);
