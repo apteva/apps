@@ -415,7 +415,7 @@
             "saved_tiers": {
               "selector": "[role=\"menuitemcheckbox\"][aria-checked=\"true\"]:not(:contains(\"Select all tiers\")),input[value=\"public\"][aria-checked=\"true\"]",
               "type": "text",
-              "required": true,
+              "required": false,
               "all": true,
               "separator": "\n"
             },
@@ -481,6 +481,155 @@
               "type": "text",
               "required": true,
               "pattern": "Your post is live and ready to share!"
+            }
+          },
+          "readability": false
+        }
+      ],
+      "output_schema": {}
+    },
+    "list_tiers": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{tiers_url}}",
+          "locator": {}
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 3500
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "text_present",
+              "value": "Paid membership tiers"
+            }
+          ],
+          "match": "all",
+          "timeout_ms": 15000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "creator_heading": {
+              "selector": "h1",
+              "type": "text"
+            },
+            "creator_name": {
+              "selector": "input[name=\"name\"]",
+              "type": "text",
+              "attribute": "value"
+            },
+            "page_text": {
+              "type": "text",
+              "required": true
+            }
+          },
+          "readability": false
+        },
+        {
+          "action": "extract",
+          "items": "div[class*=\"Card-module\"][class*=\"__root\"]:has(a[href*=\"/membership/\"])",
+          "readability": false,
+          "max_items": 50,
+          "fields": {
+            "tier_id": {
+              "selector": "a[href*=\"/membership/\"]",
+              "attribute": "href",
+              "type": "text",
+              "required": true,
+              "pattern": "/membership/([0-9]+)"
+            },
+            "edit_url": {
+              "selector": "a[href*=\"/membership/\"]",
+              "attribute": "href",
+              "type": "url",
+              "required": true
+            },
+            "tier_name": {
+              "selector": "[class*=\"TierCardHeader\"][class*=\"__styledHeader\"]",
+              "type": "text",
+              "pattern": "^(.*?)\\s*(?:Unpublished\\s+)?(?:US\\$|\\$|\u20ac|\u00a3|USD|EUR|GBP)\\s*[0-9]+(?:[.,][0-9]+)?\\s*/\\s*month"
+            },
+            "price_display": {
+              "selector": "[class*=\"TierCardHeader\"][class*=\"__styledHeader\"]",
+              "type": "text",
+              "required": true,
+              "pattern": "(?:US\\$|\\$|\u20ac|\u00a3|USD|EUR|GBP)\\s*[0-9]+(?:[.,][0-9]+)?\\s*/\\s*month"
+            },
+            "monthly_price": {
+              "selector": "[class*=\"TierCardHeader\"][class*=\"__styledHeader\"]",
+              "type": "number",
+              "pattern": "(?:US\\$|\\$|\u20ac|\u00a3|USD|EUR|GBP)\\s*([0-9]+(?:\\.[0-9]+)?)\\s*/\\s*month"
+            },
+            "currency_symbol": {
+              "selector": "[class*=\"TierCardHeader\"][class*=\"__styledHeader\"]",
+              "type": "text",
+              "required": true,
+              "pattern": "(US\\$|\\$|\u20ac|\u00a3|USD|EUR|GBP)\\s*[0-9]"
+            },
+            "member_count": {
+              "selector": "[class*=\"TierCardHeader\"][class*=\"__styledHeader\"]",
+              "type": "integer",
+              "pattern": "([0-9]+)\\s+members?"
+            },
+            "status_label": {
+              "selector": "[class*=\"TierCardHeader\"][class*=\"__styledHeader\"]",
+              "type": "text",
+              "pattern": "(Unpublished)"
+            },
+            "plan_text": {
+              "type": "text",
+              "required": true
+            }
+          }
+        }
+      ],
+      "output_schema": {}
+    },
+    "get_tier": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{tier_edit_url}}",
+          "locator": {}
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 3500
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "free_trial": {
+              "selector": "button[role=\"switch\"]",
+              "type": "boolean",
+              "attribute": "aria-checked",
+              "required": true
+            },
+            "monthly_price": {
+              "selector": "input[name=\"product-price\"]",
+              "type": "number",
+              "attribute": "value",
+              "required": true
+            },
+            "tier_description": {
+              "selector": "[role=\"textbox\"]",
+              "type": "text"
+            },
+            "tier_name": {
+              "selector": "#tier-title-name",
+              "type": "text",
+              "attribute": "value"
             }
           },
           "readability": false
