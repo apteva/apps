@@ -99,7 +99,7 @@ func (a *App) toolAccountContextGet(ctx *sdk.AppCtx, args map[string]any) (any, 
 		"ad_account_id":  acct.ID,
 		"platform":       acct.Platform,
 		"capabilities":   accountResourceCapabilities(acct.Platform),
-		"resource_kinds": platformResourceKinds[acct.Platform],
+		"resource_kinds": append(append([]string{}, platformResourceKinds[acct.Platform]...), resourceMobileApp, resourceMeasurementSource, resourceConversionEvent),
 		"resources":      items,
 		"defaults":       defaults,
 		"refresh_errors": errorsByKind,
@@ -136,6 +136,7 @@ func accountResourceCapabilities(platform string) map[string]any {
 		operations = append(operations, "install_config")
 	}
 	return map[string]any{
+		"mobile_app": mobileCapabilities(platform),
 		"tracking_source": map[string]any{
 			"supported":                  supported,
 			"create":                     create,
@@ -202,6 +203,9 @@ func (a *App) toolResourceList(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 func platformCanListResourceKind(platform, kind string) bool {
+	if platforms[platform].Platform != "" && (kind == resourceMobileApp || kind == resourceMeasurementSource || kind == resourceConversionEvent) {
+		return true
+	}
 	// Creative assets are created and maintained by this app rather than
 	// discovered through a provider list endpoint.
 	return (kind == resourceCreativeAsset && platformResourceKinds[platform] != nil) ||
@@ -269,8 +273,14 @@ func resourceMatchesPurpose(resource *adResource, purpose string) bool {
 		return resource.Kind == resourceIdentity && resource.ProviderType != "instagram_business"
 	case "instagram_identity":
 		return resource.Kind == resourceIdentity && resource.ProviderType == "instagram_business"
+	case "mobile_app":
+		return resource.Kind == resourceMobileApp
+	case "measurement_source":
+		return resource.Kind == resourceMeasurementSource
+	case "conversion_event":
+		return resource.Kind == resourceConversionEvent || resource.Kind == resourceConversionAction
 	case "conversion_source":
-		return resource.Kind == resourceTrackingSource || resource.Kind == resourceConversionAction
+		return resource.Kind == resourceTrackingSource || (resource.Kind == resourceConversionAction && firstString(resource.Metadata, "app_id") == "")
 	case "lead_form":
 		return resource.Kind == resourceLeadForm
 	case "audience":
@@ -285,7 +295,7 @@ func resourceMatchesPurpose(resource *adResource, purpose string) bool {
 func requestedResourceKinds(args map[string]any, platform string) ([]string, string) {
 	available := platformResourceKinds[platform]
 	allowed := make(map[string]bool, len(available))
-	for _, kind := range available {
+	for _, kind := range append(append([]string{}, available...), resourceMobileApp, resourceMeasurementSource, resourceConversionEvent) {
 		allowed[kind] = true
 	}
 	raw, exists := args["kinds"]
@@ -337,6 +347,17 @@ func mcpErrorMessage(value map[string]any) string {
 }
 
 func (a *App) discoverResources(ctx *sdk.AppCtx, acct *adAccount, kind string) ([]discoveredResource, map[string]any) {
+	if kind == resourceMobileApp || kind == resourceMeasurementSource || kind == resourceConversionEvent {
+		rows, err := a.listResources(ctx, acct, kind)
+		if err != nil {
+			return nil, mcpError(err.Error())
+		}
+		out := []discoveredResource{}
+		for _, r := range rows {
+			out = append(out, discoveredResource{Kind: r.Kind, ProviderType: r.ProviderType, NativeID: r.NativeID, DisplayName: r.DisplayName, Status: r.Status, ManagedByApp: r.ManagedByApp, Metadata: r.Metadata, Capabilities: r.Capabilities})
+		}
+		return out, nil
+	}
 	if acct.Platform == "meta" {
 		return a.discoverMetaResources(ctx, acct, kind)
 	}
@@ -654,7 +675,7 @@ func (a *App) discoverGoogleResources(ctx *sdk.AppCtx, acct *adAccount, kind str
 	var query string
 	switch kind {
 	case resourceConversionAction:
-		query = "SELECT conversion_action.id, conversion_action.name, conversion_action.status, conversion_action.type, conversion_action.category, conversion_action.owner_customer FROM conversion_action ORDER BY conversion_action.id"
+		query = "SELECT conversion_action.id, conversion_action.name, conversion_action.status, conversion_action.type, conversion_action.category, conversion_action.owner_customer, conversion_action.app_id, conversion_action.primary_for_goal FROM conversion_action ORDER BY conversion_action.id"
 	case resourceLeadForm:
 		query = "SELECT asset.id, asset.name, asset.resource_name, asset.type, asset.lead_form_asset.business_name, asset.lead_form_asset.headline, asset.lead_form_asset.description, asset.lead_form_asset.privacy_policy_url, asset.lead_form_asset.fields, asset.lead_form_asset.call_to_action_type, asset.lead_form_asset.call_to_action_description, asset.lead_form_asset.desired_intent, asset.lead_form_asset.post_submit_headline, asset.lead_form_asset.post_submit_description, asset.lead_form_asset.post_submit_call_to_action_type FROM asset WHERE asset.type = LEAD_FORM ORDER BY asset.id"
 	case resourceAudience:
@@ -681,7 +702,7 @@ func (a *App) discoverGoogleResources(ctx *sdk.AppCtx, acct *adAccount, kind str
 				Kind: kind, ProviderType: "google_conversion_action", NativeID: id,
 				DisplayName: firstString(item, "name"), Status: normalizedResourceStatus(firstString(item, "status")),
 				Capabilities: []string{"conversion_tracking"},
-				Metadata:     map[string]any{"type": item["type"], "category": item["category"]},
+				Metadata:     a.googleConversionMetadata(ctx, acct, item),
 			})
 			continue
 		}
@@ -748,6 +769,9 @@ func googleDiscoveredLeadQuestions(raw any) []any {
 
 func (a *App) upsertResource(ctx *sdk.AppCtx, acct *adAccount, resource discoveredResource) (*adResource, error) {
 	pid := strings.TrimSpace(ctx.CurrentProject())
+	if pid == "" {
+		pid = strings.TrimSpace(acct.ProjectID)
+	}
 	capabilities, _ := json.Marshal(resource.Capabilities)
 	metadata, _ := json.Marshal(resource.Metadata)
 	status := resource.Status
@@ -826,6 +850,9 @@ func (a *App) googleResourceRows(ctx *sdk.AppCtx, acct *adAccount, query string)
 
 func (a *App) replaceResources(ctx *sdk.AppCtx, acct *adAccount, kind string, resources []discoveredResource) error {
 	pid := strings.TrimSpace(ctx.CurrentProject())
+	if pid == "" {
+		pid = strings.TrimSpace(acct.ProjectID)
+	}
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
 		return err
@@ -904,6 +931,9 @@ func (a *App) replaceResources(ctx *sdk.AppCtx, acct *adAccount, kind string, re
 
 func (a *App) listResources(ctx *sdk.AppCtx, acct *adAccount, kind string) ([]adResource, error) {
 	pid := strings.TrimSpace(ctx.CurrentProject())
+	if pid == "" {
+		pid = strings.TrimSpace(acct.ProjectID)
+	}
 	query := `SELECT id, ad_account_id, kind, provider_type, native_asset_id,
 	                 COALESCE(parent_resource_id,0), display_name, status,
 	                 capabilities_json, metadata_json, managed_by_app,
@@ -965,6 +995,9 @@ func (a *App) getResource(ctx *sdk.AppCtx, acct *adAccount, resourceID int64) (*
 		return nil, sql.ErrNoRows
 	}
 	pid := strings.TrimSpace(ctx.CurrentProject())
+	if pid == "" {
+		pid = strings.TrimSpace(acct.ProjectID)
+	}
 	resource, err := scanResource(ctx.AppDB().QueryRow(
 		`SELECT id, ad_account_id, kind, provider_type, native_asset_id,
 		        COALESCE(parent_resource_id,0), display_name, status,
@@ -981,6 +1014,9 @@ func (a *App) getResource(ctx *sdk.AppCtx, acct *adAccount, resourceID int64) (*
 
 func (a *App) linkedInstagramIdentity(ctx *sdk.AppCtx, acct *adAccount, pageResourceID int64) (*adResource, error) {
 	pid := strings.TrimSpace(ctx.CurrentProject())
+	if pid == "" {
+		pid = strings.TrimSpace(acct.ProjectID)
+	}
 	resource, err := scanResource(ctx.AppDB().QueryRow(
 		`SELECT id, ad_account_id, kind, provider_type, native_asset_id,
 		        COALESCE(parent_resource_id,0), display_name, status,
@@ -1000,6 +1036,9 @@ func (a *App) linkedInstagramIdentity(ctx *sdk.AppCtx, acct *adAccount, pageReso
 
 func (a *App) resourceDefaults(ctx *sdk.AppCtx, acct *adAccount) (map[string]any, error) {
 	pid := strings.TrimSpace(ctx.CurrentProject())
+	if pid == "" {
+		pid = strings.TrimSpace(acct.ProjectID)
+	}
 	rows, err := ctx.AppDB().Query(
 		`SELECT d.purpose, r.id, r.ad_account_id, r.kind, r.provider_type, r.native_asset_id,
 		        COALESCE(r.parent_resource_id,0), r.display_name, r.status,
@@ -1044,6 +1083,9 @@ func (a *App) resolveResourceChoice(ctx *sdk.AppCtx, acct *adAccount, purpose, k
 		return resource, nil
 	}
 	pid := strings.TrimSpace(ctx.CurrentProject())
+	if pid == "" {
+		pid = strings.TrimSpace(acct.ProjectID)
+	}
 	var defaultID int64
 	_ = ctx.AppDB().QueryRow(
 		`SELECT resource_id FROM ad_resource_defaults WHERE project_id=? AND ad_account_id=? AND purpose=?`,

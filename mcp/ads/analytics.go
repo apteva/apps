@@ -42,6 +42,8 @@ type analyticsSyncState struct {
 }
 
 type genericPerformanceRequest struct {
+	IncludeEvents bool
+
 	Level     string
 	DateFrom  string
 	DateTo    string
@@ -199,7 +201,7 @@ func (a *App) scopePerformanceRequest(
 
 func (a *App) syncAnalytics(ctx *sdk.AppCtx, pid string, acct *adAccount, request *genericPerformanceRequest, source string) ([]analyticsPoint, map[string]any, error, bool) {
 	key := fmt.Sprintf("%s:%d:%s", pid, acct.ID, request.Level)
-	signature := request.DateFrom + ":" + request.DateTo + ":" + strings.Join(request.EntityIDs, ",")
+	signature := fmt.Sprintf("%t:%s:%s:%s", request.IncludeEvents, request.DateFrom, request.DateTo, strings.Join(request.EntityIDs, ","))
 
 	a.analyticsMu.Lock()
 	if a.analyticsInFlight == nil {
@@ -257,6 +259,9 @@ func (a *App) syncAnalytics(ctx *sdk.AppCtx, pid string, acct *adAccount, reques
 			"message":         "could not store provider performance",
 		})
 		return nil, nil, call.err, true
+	}
+	if source == "worker" {
+		a.collectMobileConversions(ctx, acct, request, call.points)
 	}
 	_, _ = recordAnalyticsSync(ctx, pid, acct.ID, request, "ok", "")
 	fetchedAt := time.Now().UTC().Format(time.RFC3339)
@@ -416,8 +421,9 @@ func normalizeMetaAnalyticsPoint(acct *adAccount, level string, row map[string]a
 	}
 	entityID, entityName := metaAnalyticsIdentity(acct, level, row)
 	providerMetrics := map[string]any{
-		"frequency": numericArgAny(row["frequency"]),
-		"actions":   actionValues(row["actions"]),
+		"frequency":     numericArgAny(row["frequency"]),
+		"actions":       actionValues(row["actions"]),
+		"action_values": actionValues(row["action_values"]),
 	}
 	return analyticsPoint{
 		Platform:              acct.Platform,
@@ -934,6 +940,9 @@ func (a *App) runPerformanceSyncJob(app *sdk.AppCtx, pid string, accountID int64
 	if empty {
 		return
 	}
+	var mobileCampaigns int
+	_ = app.AppDB().QueryRow(`SELECT COUNT(*) FROM ad_mobile_campaigns WHERE project_id=? AND ad_account_id=?`, pid, acct.ID).Scan(&mobileCampaigns)
+	request.IncludeEvents = mobileCampaigns > 0
 	_, providerErr, err, _ := a.syncAnalytics(app, pid, acct, request, "worker")
 	if err != nil {
 		app.Logger().Warn("performance_collector: sync failed", "project", pid, "account", accountID, "level", level, "err", err)

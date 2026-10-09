@@ -1,3 +1,4 @@
+import ConversionsWorkspace from "./ConversionsWorkspace";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Area,
@@ -1307,7 +1308,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
   const [platforms, setPlatforms] = useState<PlatformInfo[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
-  const [activeView, setActiveView] = useState<"overview" | "campaigns" | "audiences">("overview");
+  const [activeView, setActiveView] = useState<"overview" | "campaigns" | "audiences" | "conversions">("overview");
   const [performance, setPerformance] = useState<PerformanceResponse | null>(null);
   const [comparison, setComparison] = useState<PerformanceResponse | null>(null);
   const [loadingPerformance, setLoadingPerformance] = useState(false);
@@ -1315,6 +1316,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
   const [performanceSync, setPerformanceSync] = useState<PerformanceSyncState>({ status: "live" });
   const [workspaceRefreshKey, setWorkspaceRefreshKey] = useState(0);
   const [audienceRefreshKey, setAudienceRefreshKey] = useState(0);
+  const [conversionCacheKey, setConversionCacheKey] = useState(0);
   const [dateFrom, setDateFrom] = useState(initialRange.from);
   const [dateTo, setDateTo] = useState(initialRange.to);
   const [compareEnabled, setCompareEnabled] = useState(false);
@@ -1715,7 +1717,9 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
       return;
     }
     if (!selected || event.data?.ad_account_id !== selected.id) return;
-    if (event.topic === "performance.updated") {
+    if (event.topic === "conversion.updated") {
+      setConversionCacheKey((current) => current + 1);
+    } else if (event.topic === "performance.updated") {
       setPerformanceSync({ status: "updated", at: event.data.fetched_at || event.time });
       if (eventRefreshTimer.current) window.clearTimeout(eventRefreshTimer.current);
       eventRefreshTimer.current = window.setTimeout(() => {
@@ -2288,7 +2292,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                   </button>
                   <button
                     type="button"
-                    onClick={() => activeView === "audiences" ? setAudienceRefreshKey((current) => current + 1) : Promise.all([refreshCampaigns(selected), refreshPerformance(selected, true)])}
+                    onClick={() => (activeView === "audiences" || activeView === "conversions") ? setAudienceRefreshKey((current) => current + 1) : Promise.all([refreshCampaigns(selected), refreshPerformance(selected, true)])}
                     disabled={loadingCampaigns || loadingPerformance}
                     aria-label="Refresh account data"
                     title="Refresh account data"
@@ -2307,7 +2311,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
               </header>
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-2">
                 <div className="inline-flex h-8 rounded border border-border bg-bg-input p-0.5">
-                  {(["overview", "campaigns", "audiences"] as const).map((view) => (
+                  {(["overview", "campaigns", "audiences", "conversions"] as const).map((view) => (
                     <button
                       key={view}
                       type="button"
@@ -2348,7 +2352,9 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                 <div role="alert" className="border-b border-red/30 bg-red/10 px-4 py-2 text-sm text-red">{performanceError}</div>
               )}
               <div className="min-h-0 flex-1 overflow-auto">
-                {activeView === "audiences" ? (
+                {activeView === "conversions" ? (
+                  <ConversionsWorkspace key={selected.id} scopeKey={`${installId}:${scopedProject}`} account={selected} callTool={callTool} dateFrom={dateFrom} dateTo={dateTo} refreshKey={audienceRefreshKey} cacheRefreshKey={conversionCacheKey} />
+                ) : activeView === "audiences" ? (
                   <AudienceWorkspace account={selected} callTool={callTool} refreshKey={audienceRefreshKey} />
                 ) : activeView === "overview" ? (
                   loadingPerformance && !performance ? (
