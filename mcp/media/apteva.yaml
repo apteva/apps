@@ -2,8 +2,14 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.27
+version: 0.14.28
 description: |
+  v0.14.28 independently grounds hybrid pose tracking before fit/overflow decisions.
+  Confident wrong head/torso or ghost limbs trigger bounded same-frame full-pose
+  reacquisition and tracking resets. Verified fresh Full or independent YOLO/RTMPose
+  geometry replaces the discarded skeleton atomically. Occlusions, conflicting
+  identities and genuine wide actions stay guarded; mixed causes and margins
+  remain traceable. Pure Full and legacy remain selectable; no implicit padding.
   v0.14.27 provisions the isolated hybrid runtime on disk-backed /var/tmp
   on remote hosts, preserving the existing Full cache and avoiding small
   memory-backed /tmp exhaustion. Hybrid Smart Crop remains the default.
@@ -619,7 +625,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.27
+    ref: media/v0.14.28
     entry: mcp/media
   port: 8080
   health_check: /health

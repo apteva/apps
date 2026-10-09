@@ -1,6 +1,6 @@
 # Smart Crop engines
 
-`smart_crop_engine` selects `mediapipe_full` (default) or `legacy` in app
+`smart_crop_engine` selects `hybrid` (default), `mediapipe_full` or `legacy` in app
 configuration and on `media_crop`, `media_extract_frame`, `media_extract_reel`
 and `media_preview_crop`. An omitted request value follows app configuration.
 `crop_mode=center`, explicit pixel crops and `fit_mode=contain` bypass detection.
@@ -25,12 +25,27 @@ Reels sample approximately every 500 ms, capped at 256 samples, use VIDEO mode
 tracking, fixed size/vertical origin and median-smoothed horizontal positions
 projected into feasible pose bounds. Longer reels have a wider sample interval.
 Sampled retention does not guarantee every-frame composition or human approval.
-Weak tracked wrists trigger an independent Full IMAGE detection on the same
-native frame. Reliable shoulders/face/elbows must agree before any weak hand
-landmarks are replaced, and conflicting confident finger evidence rejects the
-refresh. Already supported hands stay unchanged. Confidence thresholds remain
-0.5 for both visibility and presence; no temporal confidence is interpolated,
-no hand is carried across timestamps, and unresolved occlusions stay unknown.
+Hybrid checks the unique same-frame subject with YOLO11n Pose, including native
+head/torso/arm coordinates, before accepting tracked coverage or geometric
+impossibility. Contradictions, unsupported hands, missing head grounding and
+width failures trigger bounded fresh Full IMAGE and RTMPose checks. Independent
+head/torso agreement allows atomic whole-pose replacement; a corrupted primary
+torso cannot veto it, and its old bounds are discarded rather than unioned.
+Supported ears also ground back-facing subjects. Comparisons use the independent
+subject scale without assuming an upright body, open eyes or a visible front face.
+When person detection fails, three bounded rotated views provide additional
+same-frame evidence; all coordinates return to native space and the output
+remains unrotated. Pose/identity disagreement remains guarded.
+Fresh Full retains detailed fingers; independent RTMPose/YOLO replacement uses
+conservative wrist/hand and head-top estimates. Conflicting or missing support
+stays unknown. No model is selected because its width fits. Head/torso disagreement
+can reset the tracker up to eight times. All grounding/recovery shares a 30-second
+CPU budget inside the 120-second extraction/inference deadline; exhaustion cannot
+certify geometry or be cached as a successful pose decision.
+
+Pure Full retains its earlier guarded same-frame weak-hand refresh. Visibility
+and presence thresholds remain 0.5; confidence is never interpolated or carried
+across occlusion. Model localization scores have separate meanings.
 
 No padding is added implicitly. Incomplete wrists yield unknown coverage;
 actions wider than the crop yield a coverage warning. Existing
@@ -39,6 +54,13 @@ queueing. `crop_fallback=contain` is the explicit full-frame fallback.
 Unavailable runtime, failed source extraction or insufficient head/shoulder
 geometry use the retained engine and persist the fallback reason. Such fallback
 decisions are not saved in the pose decision cache.
+
+Saved `pose_failure_summary` separates trusted geometric overflow, uncertain hands,
+rejected primary skeletons, unresolved identity, source clipping and recovery limits
+with timestamps and a mixed-failure classification. Samples retain original/fresh/
+independent evidence, accepted bounds model, agreement tolerance, head/hand margin
+contributions and the landmark span separately from the estimated required width.
+A margin contribution does not prove those pixels are safe to remove.
 
 Saved `crop_diagnostics` identify requested/effective engine, app/algorithm,
 MediaPipe runtime, Full model SHA-256, source/evidence timestamps and effective
@@ -70,8 +92,9 @@ Linux glibc amd64 and Darwin arm64 are verified. Other wheel/platform combinatio
 may be unsupported and use a visible legacy fallback. Windows and musl hosts
 are not supported by this POSIX setup. Local operators can set
 `smart_crop_python` to an existing isolated compatible Python interpreter;
-version and model hashes are checked on every invocation. Remote runtimes live
-in `/tmp/apteva-media-pose/mediapipe-0.10.21-full-1`; local managed runtimes live
+version and model hashes are checked on every invocation. Remote hybrid runtimes live
+in disk-backed `/var/tmp/apteva-media-pose/mediapipe-0.10.21-hybrid-1`; pure Full
+retains `/tmp/apteva-media-pose/mediapipe-0.10.21-full-1`; local managed runtimes live
 under the OS user cache directory. Media pixels are never sent to an inference
 service.
 

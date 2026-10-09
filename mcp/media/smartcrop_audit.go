@@ -48,6 +48,7 @@ type smartCropExtentEvidence struct {
 	Support          string                `json:"support"`
 }
 type smartCropAudit struct {
+	PoseFailures    *poseFailureSummary `json:"pose_failure_summary,omitempty"`
 	Framing         string              `json:"framing,omitempty"`
 	PoseAttempt     *poseAttemptAudit   `json:"pose_attempt,omitempty"`
 	PoseFailure     *poseRuntimeFailure `json:"pose_failure,omitempty"`

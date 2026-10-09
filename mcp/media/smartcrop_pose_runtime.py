@@ -95,6 +95,7 @@ def plan_pose(points,w,h,ratio=RATIO):
         'subject_extent_clipped_by_source':source_clipped,
         'max_possible_crop_width':max_w,'required_upper_pose_width':bw,
         'head_margin_pixels':head_pad,'hand_margin_pixels':hand_pad,
+        'landmark_span_width':float(np.ptp(np.vstack([face]+[p[None] for _,p in required])[:,0])),
         'validation_scope':'Model landmarks and estimated head geometry only; requires visual review. Full body and legs are not required by this portrait experiment.'}
 
 
@@ -154,9 +155,10 @@ def main():
     deadline=time.monotonic()+min(120,float(req['remaining_seconds']))
     options=mp.tasks.vision.PoseLandmarkerOptions(base_options=mp.tasks.BaseOptions(model_asset_path=req['model'],delegate=mp.tasks.BaseOptions.Delegate.CPU),running_mode=mp.tasks.vision.RunningMode.VIDEO if req["video"] else mp.tasks.vision.RunningMode.IMAGE,num_poses=1,min_pose_detection_confidence=.5,min_pose_presence_confidence=.5)
     samples=[]
-    recovery=None;recovery_unavailable=False;recovery_seconds=0
+    recovery=None;recovery_unavailable=False;recovery_seconds=0;tracker_resets=0
     with tempfile.TemporaryDirectory(prefix='media-pose-frames-') as work,contextlib.ExitStack() as stack:
-        detector=stack.enter_context(mp.tasks.vision.PoseLandmarker.create_from_options(options))
+        detector_stack=stack.enter_context(contextlib.ExitStack())
+        detector=detector_stack.enter_context(mp.tasks.vision.PoseLandmarker.create_from_options(options))
         refresh_detector=None
         for at in req['positions']:
             path=os.path.join(work,'frame.png')
@@ -169,7 +171,7 @@ def main():
                 points=np.array([[lm.x*image.width,lm.y*image.height,lm.visibility,lm.presence] for lm in result.pose_landmarks[0]])
                 to_plan=lambda v:np.column_stack((v[:,:2],np.min(v[:,2:],axis=1)))
                 planned=plan_pose(to_plan(points),image.width,image.height,req['ratio_w']/req['ratio_h'])
-                if req['video'] and planned['status']=='uncertain_hand_evidence':
+                if not req.get('hybrid') and req['video'] and planned['status']=='uncertain_hand_evidence':
                     sample['initial_status']=planned['status']
                     sample['tracked_wrist_evidence']=landmark_evidence(points,[15,16])
                     if refresh_detector is None:
@@ -186,12 +188,14 @@ def main():
                 sample['landmark_evidence']=landmark_evidence(points)
                 sample.update(planned)
                 sample['inference_ms']=(time.monotonic()-started)*1000
-            if req.get('hybrid') and sample['status'] not in ('fits_detected_upper_pose','upper_pose_exceeds_crop'):
+            if req.get('hybrid'):
                 recovery_start=time.monotonic()
                 if recovery_unavailable:
                     sample['recovery']={'status':'runtime_unavailable','mode':'same_frame'}
+                    sample['geometry_trust']='unverified';sample['status']='uncertain_person_extent';sample['extent_scope']='full_person_recovery'
                 elif recovery_seconds>=30 or deadline-time.monotonic()<2:
                     sample['recovery']={'status':'budget_exhausted','mode':'same_frame'}
+                    sample['geometry_trust']='unverified';sample['status']='uncertain_person_extent';sample['extent_scope']='full_person_recovery'
                 else:
                     try:
                         if recovery is None:
@@ -199,11 +203,25 @@ def main():
                             recovery=Recovery(req['recovery_root'])
                         import cv2
                         frame=cv2.imread(path)
-                        sample=recovery.recover(frame,sample,req.get('framing','upper_body'),req['ratio_w']/req['ratio_h'])
+                        def fresh_points():
+                            nonlocal refresh_detector
+                            if refresh_detector is None:
+                                fresh_options=mp.tasks.vision.PoseLandmarkerOptions(base_options=mp.tasks.BaseOptions(model_asset_path=req['model'],delegate=mp.tasks.BaseOptions.Delegate.CPU),running_mode=mp.tasks.vision.RunningMode.IMAGE,num_poses=1,min_pose_detection_confidence=.5,min_pose_presence_confidence=.5)
+                                refresh_detector=stack.enter_context(mp.tasks.vision.PoseLandmarker.create_from_options(fresh_options))
+                            fresh=refresh_detector.detect(image)
+                            return np.array([[lm.x*image.width,lm.y*image.height,lm.visibility,lm.presence] for lm in fresh.pose_landmarks[0]]) if fresh.pose_landmarks else None
+                        sample=recovery.arbitrate(frame,sample,fresh_points,lambda v:plan_pose(np.column_stack((v[:,:2],np.min(v[:,2:],axis=1))),image.width,image.height,req['ratio_w']/req['ratio_h']),req.get('framing','upper_body'),req['ratio_w']/req['ratio_h'])
+                        if req['video'] and any(i<13 for i in sample['recovery'].get('conflicting_primary_indices',[])) and tracker_resets<8:
+                            detector_stack.close()
+                            detector=detector_stack.enter_context(mp.tasks.vision.PoseLandmarker.create_from_options(options))
+                            tracker_resets+=1
+                            sample['recovery']['tracker_reset']='independent_head_or_torso_disagreement'
+                            sample['recovery']['tracker_resets']=tracker_resets
                     except Exception as recovery_error:
                         recovery_unavailable=True
                         code=str(recovery_error) if str(recovery_error) in {'recovery_model_hash_mismatch','recovery_runtime_version_mismatch'} else ('recovery_model_missing' if isinstance(recovery_error,FileNotFoundError) else 'recovery_inference_failed')
                         sample['recovery']={'status':'runtime_unavailable','mode':'same_frame','failure_code':code}
+                        sample['geometry_trust']='unverified';sample['status']='uncertain_person_extent';sample['extent_scope']='full_person_recovery'
                     recovery_seconds+=time.monotonic()-recovery_start
                 sample['recovery']['elapsed_ms']=(time.monotonic()-recovery_start)*1000
             samples.append(sample)

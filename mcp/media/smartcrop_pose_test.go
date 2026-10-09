@@ -113,6 +113,9 @@ func TestMediaPipeFullLocalIntegration(t *testing.T) {
 	if engine == "hybrid" {
 		outputName = "integrated-hybrid"
 	}
+	if name := os.Getenv("MEDIAPIPE_TEST_OUTPUT_NAME"); name != "" {
+		outputName = name
+	}
 	output := filepath.Join(root, outputName)
 	os.MkdirAll(output, 0700)
 	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithConfig(map[string]string{"smart_crop_python": python}))

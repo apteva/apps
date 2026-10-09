@@ -170,19 +170,36 @@ func TestHybridPrivateChickenReels(t *testing.T) {
 				t.Fatal(err)
 			}
 			if r.Version != "pose_hybrid" || r.Audit.EffectiveEngine != "hybrid" || r.Audit.PoseAttempt == nil || len(r.Audit.PoseSamples) < 40 {
-				t.Fatalf("unexpected fallback: %s", out)
+				t.Fatalf("unexpected fallback: engine=%s version=%s pose_attempt=%+v", r.Audit.EffectiveEngine, r.Version, r.Audit.PoseAttempt)
 			}
-			// These deliberately difficult clips are not granted visual approval.
-			if r.Audit.Coverage == "sampled_extent_fits" {
-				t.Fatal("unresolved chicken evidence falsely cleared")
+			// New independent recovery may support formerly unresolved samples;
+			// incomplete evidence must still never become a preservation pass.
+			for _, sample := range r.Audit.PoseSamples {
+				if r.Audit.Coverage == "sampled_extent_fits" && (sample.Status != "fits_detected_upper_pose" && sample.EffectiveStatus != "fits_supported_extent_after_reposition" || len(sample.WeakWrists) > 0 || sample.GeometryTrust != "independently_grounded") {
+					t.Fatal("unresolved evidence falsely cleared")
+				}
+			}
+			if r.Audit.Coverage == "sampled_extent_fits" && !cropRetainsSampledExtents(&r.Audit) {
+				t.Fatal("sampled extents lost")
 			}
 			for _, s := range r.Audit.PoseSamples {
 				if s.Recovery != nil && s.Recovery.Status == "runtime_unavailable" {
 					t.Fatal("recovery runtime missing")
 				}
 			}
-			if err := os.WriteFile(filepath.Join(root, "local-"+c.name+"-resolved.json"), out, 0600); err != nil {
+			outputRoot := root
+			if override := os.Getenv("MEDIAPIPE_REPORT_OUTPUT_DIR"); override != "" {
+				outputRoot = override
+				if err := os.MkdirAll(outputRoot, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(outputRoot, "local-"+c.name+"-resolved.json"), out, 0600); err != nil {
 				t.Fatal(err)
+			}
+			if os.Getenv("MEDIAPIPE_PREVIEW_ONLY") == "1" {
+				t.Logf("%s: engine=%s coverage=%s valid=%d invalid=%d", c.name, r.Audit.EffectiveEngine, r.Audit.Coverage, r.Audit.PoseAttempt.Valid, r.Audit.PoseAttempt.Invalid)
+				return
 			}
 			plan, err := buildPlan("extract_reel", []string{id}, out, c.name+".mp4", ".mp4")
 			if err != nil {

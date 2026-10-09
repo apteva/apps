@@ -136,14 +136,60 @@ class Recovery:
                 boxes[int(i)][0] + boxes[int(i)][2],
                 boxes[int(i)][1] + boxes[int(i)][3],
                 scores[int(i)],
+                *self.native_keypoints(rows[int(i)][5:], scale, dx, dy),
             ]
             for i in indices
         ]
 
+    @staticmethod
+    def native_keypoints(values, scale, dx, dy):
+        points = np.asarray(values).reshape(17, 3).copy()
+        points[:, 0] = (points[:, 0] - dx) / scale
+        points[:, 1] = (points[:, 1] - dy) / scale
+        return points.reshape(-1).tolist()
+
+    @staticmethod
+    def transform_keypoints(box, offset=0, flip_width=None):
+        for i in range(5, len(box), 3):
+            box[i] += offset
+            if flip_width is not None:
+                box[i] = flip_width - box[i]
+        if flip_width is not None and len(box) == 56:
+            points = np.asarray(box[5:]).reshape(17, 3)
+            box[5:] = (
+                points[[0, 2, 1, 4, 3, 6, 5, 8, 7, 10, 9, 12, 11, 14, 13, 16, 15]]
+                .reshape(-1)
+                .tolist()
+            )
+
+    @staticmethod
+    def unrotate(box, angle, w, h):
+        def point(x, y):
+            if angle == 90:
+                return y, h - x
+            if angle == 180:
+                return w - x, h - y
+            return w - y, x
+
+        corners = [point(box[x], box[y]) for x, y in [(0, 1), (0, 3), (2, 1), (2, 3)]]
+        box[:4] = [
+            min(p[0] for p in corners),
+            min(p[1] for p in corners),
+            max(p[0] for p in corners),
+            max(p[1] for p in corners),
+        ]
+        for i in range(5, len(box), 3):
+            box[i], box[i + 1] = point(box[i], box[i + 1])
+
     def person_box(self, im):
         h, w = im.shape[:2]
+        self.detector_views = ["native"]
+        self.person_view = "native"
         boxes = self.detect(im)
+        if len(boxes) > 1:
+            return None, "multiple_people_unresolved"
         if len(boxes) != 1 or boxes[0][4] < 0.65:
+            self.detector_views.append("native_tiles")
             side = min(w, h)
             for x in sorted(set([0, (w - side) // 2, w - side])):
                 for b in self.detect(im[:, x : x + side]):
@@ -151,11 +197,14 @@ class Recovery:
                         continue
                     b[0] += x
                     b[2] += x
+                    self.transform_keypoints(b, offset=x)
                     boxes.append(b)
         if not boxes:
+            self.detector_views.append("flipped")
             flip = cv2.flip(im, 1)
             for b in self.detect(flip):
                 b[0], b[2] = w - b[2], w - b[0]
+                self.transform_keypoints(b, flip_width=w)
                 boxes.append(b)
             if not boxes:
                 for x in sorted(set([0, (w - side) // 2, w - side])):
@@ -165,10 +214,43 @@ class Recovery:
                         b[0] += x
                         b[2] += x
                         b[0], b[2] = w - b[2], w - b[0]
+                        self.transform_keypoints(b, offset=x, flip_width=w)
                         boxes.append(b)
+        if not boxes:
+            # Upright-trained detection can miss bent/reclining poses. Re-detect
+            # bounded rotated views; all boxes and keypoints return to native
+            # coordinates before same-frame identity checks. Never rotate output.
+            best = -1
+            for angle, mode in [
+                (90, cv2.ROTATE_90_CLOCKWISE),
+                (180, cv2.ROTATE_180),
+                (270, cv2.ROTATE_90_COUNTERCLOCKWISE),
+            ]:
+                self.detector_views.append("rotated_" + str(angle))
+                for b in self.detect(cv2.rotate(im, mode)):
+                    self.unrotate(b, angle, w, h)
+                    boxes.append(b)
+                    if b[4] > best:
+                        best = b[4]
+                        self.person_view = "rotated_" + str(angle)
         groups = []
         for b in sorted(boxes, key=lambda b: -b[4]):
-            matches = [g for g in groups if overlap(g, b) > 0.35]
+            # Merge tiled views only when overlapping geometry agrees on identity;
+            # overlapping distinct people must not collapse to a single subject.
+            def same_person(g):
+                if overlap(g, b) <= 0.35 or len(g) != 56 or len(b) != 56:
+                    return False
+                a = np.asarray(g[5:]).reshape(17, 3)
+                c = np.asarray(b[5:]).reshape(17, 3)
+                reliable = [i for i in range(7) if min(a[i, 2], c[i, 2]) >= 0.5]
+                tolerance = max(
+                    45, max(g[3] - g[1], g[2] - g[0], b[3] - b[1], b[2] - b[0]) * 0.12
+                )
+                return len(reliable) >= 2 and all(
+                    np.linalg.norm(a[i, :2] - c[i, :2]) <= tolerance for i in reliable
+                )
+
+            matches = [g for g in groups if same_person(g)]
             if matches:
                 g = matches[0]
                 g[:4] = [
@@ -211,9 +293,316 @@ class Recovery:
             (xs * w / 192 + cx - w / 2, ys * h / 256 + cy - h / 2, scores)
         )
 
-    def recover(self, im, s, framing="upper_body", ratio=9 / 16):
+    @staticmethod
+    def agreement(primary, secondary, mapping, span):
+        """Compare corresponding native points, independent of body orientation."""
+        used, conflicts = [], []
+        for a, b in mapping:
+            if a not in primary or min(primary[a][2:]) < 0.5 or secondary[b, 2] < 0.5:
+                continue
+            used.append(a)
+            if np.linalg.norm(np.asarray(primary[a][:2]) - secondary[b, :2]) > max(
+                45, span * 0.5
+            ):
+                conflicts.append(a)
+        return used, conflicts
+
+    def arbitrate(self, im, s, fresh, planner, framing="upper_body", ratio=9 / 16):
+        """Ground tracking before using fit/overflow. Never select by crop width."""
         h, w = im.shape[:2]
-        box, det_status = self.person_box(im)
+        box, status = self.person_box(im)
+        e = {
+            "status": status,
+            "mode": "same_frame",
+            "initial_status": s["status"],
+            "person_model": "yolo11n-pose",
+            "person_model_sha256": PERSON_SHA,
+            "pose_model": "rtmpose-m-halpe26",
+            "pose_model_sha256": RTM_SHA,
+            "confidence_scope": "Independent localization scores are not MediaPipe visibility/presence probabilities.",
+        }
+        e["detector_views"] = getattr(self, "detector_views", ["native"])
+        e["person_detection_view"] = getattr(self, "person_view", "native")
+        result = dict(s)
+        result["recovery"] = e
+        if box is None or len(box) != 56:
+            # Without independent identity, discard geometry; preserve it in diagnostics.
+            e["original_pose"] = {k: v for k, v in s.items() if k != "recovery"}
+            result = {
+                k: v
+                for k, v in s.items()
+                if k in ("at_ms", "inference_ms", "extraction_attempts")
+            }
+            result.update(
+                recovery=e, status="no_pose_detected", geometry_trust="unverified"
+            )
+            return result
+        yolo = np.asarray(box[5:]).reshape(17, 3)
+        span = max(
+            90 * w / 1920,
+            max(box[3] - box[1], box[2] - box[0]) * 0.15,
+            float(np.linalg.norm(yolo[5, :2] - yolo[6, :2])),
+        )
+        mapping = [
+            (0, 0),
+            (2, 1),
+            (5, 2),
+            (7, 3),
+            (8, 4),
+            (11, 5),
+            (12, 6),
+            (13, 7),
+            (14, 8),
+            (15, 9),
+            (16, 10),
+        ]
+        primary = {
+            v["index"]: [v["x"], v["y"], v["visibility"], v["presence"]]
+            for v in s.get("landmark_evidence", [])
+        }
+        used, conflicts = self.agreement(primary, yolo, mapping, span)
+        e.update(
+            person_bounds=box[:4],
+            person_score=box[4],
+            independent_landmarks=[
+                {
+                    "index": i,
+                    "x": float(v[0]),
+                    "y": float(v[1]),
+                    "confidence": float(v[2]),
+                }
+                for i, v in enumerate(yolo)
+            ],
+            compared_primary_indices=used,
+            conflicting_primary_indices=conflicts,
+            agreement_tolerance_pixels=max(45, span * 0.5),
+        )
+        body_grounded = (
+            all(i in used for i in (11, 12)) and len(set(used) & {0, 2, 5, 7, 8}) >= 2
+        )
+        suspicious = (
+            bool(conflicts)
+            or s["status"] != "fits_detected_upper_pose"
+            or not body_grounded
+            or not all(i in used for i in (15, 16))
+        )
+        if not suspicious:
+            e["status"] = "primary_pose_grounded"
+            result["geometry_trust"] = "independently_grounded"
+            result["bounds_model"] = "mediapipe_full_tracked"
+            return result
+        e["original_pose"] = {k: v for k, v in s.items() if k != "recovery"}
+        p = self.infer(im, box)
+        e["landmarks"] = [
+            {"index": i, "x": float(v[0]), "y": float(v[1]), "confidence": float(v[2])}
+            for i, v in enumerate(p)
+        ]
+        # Two independent networks must support the same unique head and torso.
+        rtm_ev = {i: v.tolist() for i, v in enumerate(p)}
+        independent_used, independent_conflicts = self.agreement(
+            rtm_ev, yolo, [(i, i) for i in range(11)], span
+        )
+        identity = (
+            all(i in independent_used for i in (5, 6))
+            and len(set(independent_used) & set(range(5))) >= 2
+            and not any(i <= 6 for i in independent_conflicts)
+        )
+        e["independent_identity_verified"] = bool(identity)
+        e["independent_conflicting_indices"] = independent_conflicts
+        new = fresh()
+        if new is not None:
+            e["fresh_landmark_evidence"] = [
+                {
+                    "index": i,
+                    "x": float(v[0]),
+                    "y": float(v[1]),
+                    "visibility": float(v[2]),
+                    "presence": float(v[3]),
+                }
+                for i, v in enumerate(new[:23])
+            ]
+            new_ev = {i: v.tolist() for i, v in enumerate(new)}
+            ny, cy = self.agreement(new_ev, yolo, mapping, span)
+            nr, cr = self.agreement(new_ev, p, mapping, span)
+            grounded = (
+                identity
+                and not cy
+                and not cr
+                and all(i in nr and i in ny for i in (11, 12))
+                and len(set(nr) & {0, 2, 5, 7, 8}) >= 2
+            )
+            if grounded:
+                result = {
+                    k: v
+                    for k, v in s.items()
+                    if k in ("at_ms", "inference_ms", "extraction_attempts")
+                }
+                result.update(planner(new))
+                result["landmark_evidence"] = e["fresh_landmark_evidence"]
+                unsupported = [i for i in (15, 16) if i not in ny and i not in nr]
+                result["low_confidence_wrist_indices"] = sorted(
+                    set(result.get("low_confidence_wrist_indices", []) + unsupported)
+                )
+                if unsupported:
+                    result["hand_support_status"] = "independent_hand_support_missing"
+                    if result["status"] == "fits_detected_upper_pose":
+                        result["status"] = "uncertain_hand_evidence"
+                result.update(
+                    recovery=e,
+                    geometry_trust="independently_grounded",
+                    bounds_model="mediapipe_full_fresh",
+                )
+                e["status"] = "whole_pose_reacquired_full"
+                if result.get("low_confidence_wrist_indices"):
+                    supported_pose = p.copy()
+                    for i in (9, 10):
+                        if (
+                            i not in independent_used
+                            or i in independent_conflicts
+                            or i - 2 in independent_conflicts
+                        ):
+                            supported_pose[i, 2] = 0
+                    repaired = self.recover(
+                        im, result, framing, ratio, box, supported_pose
+                    )
+                    if repaired["recovery"]["status"] == "same_frame_hands_recovered":
+                        e["hand_repair"] = repaired["recovery"]
+                        repaired["recovery"] = e
+                        result = repaired
+                return result
+        # Primary identity is rejected. Build an entirely new conservative pose,
+        # without unioning the discarded skeleton's head or ghost limbs.
+        if identity:
+            face = p[[i for i in range(5) if p[i, 2] >= 0.5], :2]
+            pad = max(28 * w / 1920, span * 0.22)
+            head = [
+                face[:, 0].min() - pad,
+                face[:, 1].min() - pad,
+                face[:, 0].max() + pad,
+                face[:, 1].max() + pad,
+            ]
+            if p[17, 2] >= 0.5:
+                head = [
+                    min(head[0], p[17, 0] - pad),
+                    min(head[1], p[17, 1] - pad),
+                    max(head[2], p[17, 0] + pad),
+                    max(head[3], p[17, 1] + pad),
+                ]
+            supported = [i for i in range(5, 11) if p[i, 2] >= 0.5]
+            hand_pad = max(
+                40 * w / 1920,
+                max(
+                    [
+                        float(np.linalg.norm(p[a, :2] - p[b, :2])) * 0.20
+                        for a, b in [(7, 9), (8, 10)]
+                        if a in supported and b in supported
+                    ],
+                    default=0,
+                ),
+            )
+            b = head[:]
+            for i in supported:
+                margin = hand_pad if i in (9, 10) else 28 * w / 1920
+                b = [
+                    min(b[0], p[i, 0] - margin),
+                    min(b[1], p[i, 1] - margin),
+                    max(b[2], p[i, 0] + margin),
+                    max(b[3], p[i, 1] + margin),
+                ]
+            weak = [
+                15 if i == 9 else 16
+                for i in (9, 10)
+                if i not in independent_used
+                or p[i, 2] < 0.5
+                or i in independent_conflicts
+                or i - 2 in independent_conflicts
+            ]
+            raw = b[:]
+            plan = box_plan(b, head, w, h, ratio, framing)
+            result = {
+                k: v
+                for k, v in s.items()
+                if k in ("at_ms", "inference_ms", "extraction_attempts")
+            }
+            result.update(
+                plan,
+                recovery=e,
+                geometry_trust="independently_grounded",
+                bounds_model="rtmpose_yolo_whole",
+                head_margin_pixels=pad,
+                hand_margin_pixels=hand_pad,
+                landmark_span_width=float(
+                    np.ptp(p[[i for i in range(11) if p[i, 2] >= 0.5], 0])
+                ),
+                low_confidence_wrist_indices=weak,
+                required_upper_pose_width=plan["required_bounds"][2]
+                - plan["required_bounds"][0],
+                max_possible_crop_width=min(h * ratio, w),
+                subject_extent_clipped_by_source=[
+                    raw[0] < 0,
+                    raw[1] < 0,
+                    raw[2] > w,
+                    raw[3] > h,
+                ],
+            )
+            result["status"] = (
+                "uncertain_hand_evidence"
+                if weak
+                else (
+                    "fits_detected_upper_pose"
+                    if plan["fits_bounds"]
+                    else "upper_pose_exceeds_crop"
+                )
+            )
+            e["status"] = "whole_pose_reacquired_independent"
+            return result
+        # A bounded independent person box guides position, never certifies pose.
+        # Position-only fallback still retains independently supported head
+        # geometry, including reclining/inverted subjects. A wide coarse body
+        # box must never displace a verified head outside the crop.
+        supported_head = None
+        if len(set(used) & {0, 2, 5, 7, 8}) >= 2 and not any(
+            i in {0, 2, 5, 7, 8} for i in conflicts
+        ):
+            supported_head = s.get("head_bounds_estimate")
+        elif len(set(independent_used) & set(range(5))) >= 2 and not any(
+            i < 5 for i in independent_conflicts
+        ):
+            hp = p[[i for i in range(5) if p[i, 2] >= 0.5], :2]
+            hp_pad = max(40 * w / 1920, float(np.ptp(hp, axis=0).max()) * 0.60)
+            supported_head = [
+                hp[:, 0].min() - hp_pad,
+                hp[:, 1].min() - hp_pad,
+                hp[:, 0].max() + hp_pad,
+                hp[:, 1].max() + hp_pad,
+            ]
+        e["position_head_grounded"] = bool(supported_head)
+        plan = box_plan(box[:4], supported_head, w, h, ratio, framing)
+        result = {
+            k: v
+            for k, v in s.items()
+            if k in ("at_ms", "inference_ms", "extraction_attempts")
+        }
+        result.update(
+            plan,
+            recovery=e,
+            status="uncertain_person_extent",
+            extent_scope="full_person_recovery",
+            geometry_trust="unverified",
+            bounds_model="yolo_person_position_only",
+        )
+        e["status"] = "whole_pose_identity_unresolved"
+        return result
+
+    def recover(
+        self, im, s, framing="upper_body", ratio=9 / 16, detected=None, inferred=None
+    ):
+        h, w = im.shape[:2]
+        box, det_status = (
+            (detected, "single_person_detected")
+            if detected is not None
+            else self.person_box(im)
+        )
         e = {
             "status": det_status,
             "initial_status": s["status"],
@@ -228,7 +617,7 @@ class Recovery:
         result["recovery"] = e
         if box is None:
             return result
-        p = self.infer(im, box)
+        p = inferred if inferred is not None else self.infer(im, box)
         e["person_bounds"] = box[:4]
         e["person_score"] = box[4]
         e["landmarks"] = [
@@ -324,6 +713,10 @@ class Recovery:
                 if i not in accepted
             ]
             result.update(plan)
+            result["required_upper_pose_width"] = (
+                plan["required_bounds"][2] - plan["required_bounds"][0]
+            )
+            result["hand_margin_pixels"] = max(result.get("hand_margin_pixels", 0), pad)
             result["low_confidence_wrist_indices"] = weak
             result["status"] = (
                 "fits_detected_upper_pose"

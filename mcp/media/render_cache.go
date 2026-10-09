@@ -24,7 +24,7 @@ const renderAlgorithmVersion = "media-audit-1"
 // pre-analysis request caches need it; resolved local plans already include the
 // changed coordinates in their result-cache key.
 const legacySmartCropAlgorithmVersion = "media-smartcrop-exact-frame-pose-8"
-const smartCropAlgorithmVersion = "media-smartcrop-hybrid-native-11"
+const smartCropAlgorithmVersion = "media-smartcrop-hybrid-grounded-12"
 
 // Remote binaries/provider settings are not immutable. Restrict reuse to this
 // process lifetime as well as host/connection identity until they expose a

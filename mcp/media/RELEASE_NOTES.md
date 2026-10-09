@@ -1,3 +1,35 @@
+## 0.14.28 — independently grounded pose recovery
+
+Hybrid Smart Crop checks the unique same-frame subject with YOLO Pose before
+using tracked geometry. Confident wrong heads/torso and ghost limbs trigger
+bounded fresh Full/RTMPose reacquisition; independently supported whole poses
+replace the discarded skeleton atomically. Bounded tracker resets and rotated
+detector views improve difficult poses without assuming an upright body.
+
+Fresh Full retains detailed hand landmarks; independent whole-pose estimates
+remain conservative. Unsupported hands, conflicting identity and genuine wide
+actions remain guarded. Coarse positioning preserves supported head geometry,
+including reclining subjects. Full and legacy engines remain selectable; no
+implicit padding, scaling policy change or production approval is introduced.
+
+Diagnostics retain original/fresh/independent evidence, accepted bounds model,
+margin/landmark span contributions, detector views, reset reasons and recovery
+budget outcomes. Interval summaries distinguish trusted overflow from rejected
+tracking and unresolved/occluded evidence. Algorithm/cache identity advances to
+media-smartcrop-hybrid-grounded-12. Models/runtime hashes remain unchanged.
+SDK is pinned to v0.99.0, verified as the latest tag by commit topology.
+
+Validation: exact Chicken R1/R2 private regressions and local diagnostic renders;
+positive whole-pose recovery at 351056/368397 ms, skirt-head rejection at 349570,
+genuine wing-width guard at 88230; 150 dense transition observations; six older
+Chicken/resting previews; 13 native benchmark images and five rendered reels.
+Seven local outputs decode (8,625 frames), with the benchmark's 6,828 frames
+preserved, no detected black frames and Chicken audio retained. Native tight/
+widest controls, wide-hand rejection, standard/race tests, vet and three platform
+builds pass. Sampled/dense model evidence is not visual approval: R1 still has a
+real width limit and R2 retains unresolved samples. Private pixels stay external.
+Production verification uses read-only previews, creating no jobs or approvals.
+
 ## 0.14.23 — selectable Smart Crop engines
 
 MediaPipe Pose Full is now the default for image crops, direct frame extraction

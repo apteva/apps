@@ -140,6 +140,15 @@ type poseLandmarkEvidence struct {
 	Presence   float64 `json:"presence"`
 }
 type poseSample struct {
+	LandmarkSpanWidth    float64                `json:"landmark_span_width,omitempty"`
+	HandSupportStatus    string                 `json:"hand_support_status,omitempty"`
+	GeometryTrust        string                 `json:"geometry_trust,omitempty"`
+	BoundsModel          string                 `json:"bounds_model,omitempty"`
+	HeadMargin           float64                `json:"head_margin_pixels,omitempty"`
+	HandMargin           float64                `json:"hand_margin_pixels,omitempty"`
+	RequiredWidth        float64                `json:"required_upper_pose_width,omitempty"`
+	MaxWidth             float64                `json:"max_possible_crop_width,omitempty"`
+	OutsideIndices       []int                  `json:"required_landmarks_outside_crop,omitempty"`
 	EffectiveStatus      string                 `json:"effective_status,omitempty"`
 	Recovery             *poseRecoveryEvidence  `json:"recovery,omitempty"`
 	ExtentScope          string                 `json:"extent_scope,omitempty"`
@@ -173,20 +182,34 @@ type poseRecoveryPoint struct {
 	Confidence float64 `json:"confidence"`
 }
 type poseRecoveryEvidence struct {
-	Status          string              `json:"status"`
-	FailureCode     string              `json:"failure_code,omitempty"`
-	Mode            string              `json:"mode"`
-	InitialStatus   string              `json:"initial_status,omitempty"`
-	PersonModel     string              `json:"person_model,omitempty"`
-	PersonSHA       string              `json:"person_model_sha256,omitempty"`
-	PoseModel       string              `json:"pose_model,omitempty"`
-	PoseSHA         string              `json:"pose_model_sha256,omitempty"`
-	ConfidenceScope string              `json:"confidence_scope,omitempty"`
-	PersonBounds    []float64           `json:"person_bounds,omitempty"`
-	PersonScore     float64             `json:"person_score,omitempty"`
-	Landmarks       []poseRecoveryPoint `json:"landmarks,omitempty"`
-	RecoveredWrists []int               `json:"recovered_wrist_indices,omitempty"`
-	ElapsedMs       float64             `json:"elapsed_ms"`
+	DetectorViews        []string               `json:"detector_views,omitempty"`
+	PersonView           string                 `json:"person_detection_view,omitempty"`
+	PositionHeadGrounded bool                   `json:"position_head_grounded,omitempty"`
+	AgreementTolerance   float64                `json:"agreement_tolerance_pixels,omitempty"`
+	HandRepair           json.RawMessage        `json:"hand_repair,omitempty"`
+	TrackerReset         string                 `json:"tracker_reset,omitempty"`
+	TrackerResets        int                    `json:"tracker_resets,omitempty"`
+	OriginalPose         json.RawMessage        `json:"original_pose,omitempty"`
+	FreshEvidence        []poseLandmarkEvidence `json:"fresh_landmark_evidence,omitempty"`
+	IndependentLandmarks []poseRecoveryPoint    `json:"independent_landmarks,omitempty"`
+	ComparedPrimary      []int                  `json:"compared_primary_indices,omitempty"`
+	ConflictingPrimary   []int                  `json:"conflicting_primary_indices,omitempty"`
+	IndependentConflicts []int                  `json:"independent_conflicting_indices,omitempty"`
+	IdentityVerified     bool                   `json:"independent_identity_verified,omitempty"`
+	Status               string                 `json:"status"`
+	FailureCode          string                 `json:"failure_code,omitempty"`
+	Mode                 string                 `json:"mode"`
+	InitialStatus        string                 `json:"initial_status,omitempty"`
+	PersonModel          string                 `json:"person_model,omitempty"`
+	PersonSHA            string                 `json:"person_model_sha256,omitempty"`
+	PoseModel            string                 `json:"pose_model,omitempty"`
+	PoseSHA              string                 `json:"pose_model_sha256,omitempty"`
+	ConfidenceScope      string                 `json:"confidence_scope,omitempty"`
+	PersonBounds         []float64              `json:"person_bounds,omitempty"`
+	PersonScore          float64                `json:"person_score,omitempty"`
+	Landmarks            []poseRecoveryPoint    `json:"landmarks,omitempty"`
+	RecoveredWrists      []int                  `json:"recovered_wrist_indices,omitempty"`
+	ElapsedMs            float64                `json:"elapsed_ms"`
 }
 type poseResult struct {
 	Samples  []poseSample `json:"samples"`
@@ -483,13 +506,16 @@ func computeSmartCropPose(ctx context.Context, app *sdk.AppCtx, sc *storageClien
 			if s.Recovery != nil && (s.Recovery.Status == "runtime_unavailable" || s.Recovery.Status == "budget_exhausted") {
 				recordSmartCropFallback(ctx, "hybrid_recovery_"+s.Recovery.Status)
 			}
-			if b.W > win.W && s.ExtentScope != "full_person_recovery" {
+			if b.W > win.W && s.ExtentScope != "full_person_recovery" && (engine != "hybrid" || (s.GeometryTrust == "independently_grounded" && len(s.WeakWrists) == 0)) {
 				a.Coverage = "exceeds_crop_width"
 				a.Recommendation = "Use a wider ratio or explicitly request fit_mode: contain to preserve the full action."
 			} else if status != "fits_detected_upper_pose" && a.Coverage != "exceeds_crop_width" {
 				a.Coverage = "unknown"
 				a.Recommendation = "Pose evidence is incomplete; review the source and crop."
 			}
+		}
+		if engine == "hybrid" && a.PoseFailures != nil && a.PoseFailures.Classification == "mixed_trusted_overflow_and_unresolved_evidence" {
+			a.Recommendation = "Some independently supported poses exceed the crop width; other timestamps have unresolved pose/hand evidence. Review pose_failure_summary before choosing a wider crop or another interval."
 		}
 		if len(gaps) > 0 && a.Coverage != "exceeds_crop_width" {
 			a.Coverage = "unknown"
@@ -505,6 +531,56 @@ func computeSmartCropPose(ctx context.Context, app *sdk.AppCtx, sc *storageClien
 		}
 	}
 	return win, path, nil
+}
+
+// Keep geometric impossibility separate from missing or rejected evidence.
+type poseFailureSummary struct {
+	TrustedOverflow    []int64 `json:"trusted_overflow_timestamps_ms"`
+	UncertainHands     []int64 `json:"uncertain_hands_timestamps_ms"`
+	RejectedPrimary    []int64 `json:"rejected_primary_timestamps_ms"`
+	UnresolvedIdentity []int64 `json:"unresolved_identity_timestamps_ms"`
+	SourceClipped      []int64 `json:"source_clipped_timestamps_ms"`
+	RecoveryLimited    []int64 `json:"recovery_limited_timestamps_ms"`
+	Classification     string  `json:"classification"`
+}
+
+func summarizePoseFailures(samples []poseSample) *poseFailureSummary {
+	f := &poseFailureSummary{TrustedOverflow: []int64{}, UncertainHands: []int64{}, RejectedPrimary: []int64{}, UnresolvedIdentity: []int64{}, SourceClipped: []int64{}, RecoveryLimited: []int64{}}
+	for _, s := range samples {
+		if s.Status == "upper_pose_exceeds_crop" && len(s.WeakWrists) == 0 && s.ExtentScope == "" && (s.GeometryTrust == "" || s.GeometryTrust == "independently_grounded") {
+			f.TrustedOverflow = append(f.TrustedOverflow, s.AtMs)
+		}
+		if len(s.WeakWrists) > 0 || s.Status == "uncertain_hand_evidence" {
+			f.UncertainHands = append(f.UncertainHands, s.AtMs)
+		}
+		if s.Recovery != nil && len(s.Recovery.ConflictingPrimary) > 0 {
+			f.RejectedPrimary = append(f.RejectedPrimary, s.AtMs)
+		}
+		if s.GeometryTrust == "unverified" || s.Status == "no_pose_detected" || s.Status == "uncertain_person_extent" {
+			f.UnresolvedIdentity = append(f.UnresolvedIdentity, s.AtMs)
+		}
+		for _, clipped := range s.SourceClipped {
+			if clipped {
+				f.SourceClipped = append(f.SourceClipped, s.AtMs)
+				break
+			}
+		}
+		if s.Recovery != nil && (s.Recovery.Status == "budget_exhausted" || s.Recovery.Status == "runtime_unavailable") {
+			f.RecoveryLimited = append(f.RecoveryLimited, s.AtMs)
+		}
+	}
+	unknown := len(f.UncertainHands)+len(f.UnresolvedIdentity)+len(f.RecoveryLimited) > 0
+	switch {
+	case len(f.TrustedOverflow) > 0 && unknown:
+		f.Classification = "mixed_trusted_overflow_and_unresolved_evidence"
+	case len(f.TrustedOverflow) > 0:
+		f.Classification = "trusted_geometric_overflow"
+	case unknown:
+		f.Classification = "unresolved_evidence"
+	default:
+		f.Classification = "supported_sampled_geometry"
+	}
+	return f
 }
 
 type poseFailedSample struct {
@@ -541,6 +617,7 @@ func recordPoseAttempt(ctx context.Context, result *poseResult, framing string) 
 		return
 	}
 	a.PoseSamples = result.Samples
+	a.PoseFailures = summarizePoseFailures(result.Samples)
 	engine := "mediapipe_full"
 	if a.RequestedEngine == "hybrid" {
 		engine = "hybrid"
