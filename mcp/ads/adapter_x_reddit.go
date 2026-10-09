@@ -402,6 +402,9 @@ func (xRedditAdapter) AdSetCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def 
 		putString(input, "start_time", args, "start_time")
 		putString(input, "end_time", args, "end_time")
 		mergeOptions(input, args)
+		if intArg(args, "mobile_app_resource_id", 0) > 0 {
+			return a.xMobileAdSetCreate(ctx, acct, def.AdSetCreateTool, args, input)
+		}
 		return a.execOrErr(ctx, acct, def.AdSetCreateTool, input)
 	}
 	goal := redditOptimizationGoal(stringArgAny(args, "optimization_goal"))
@@ -743,31 +746,45 @@ func (xRedditAdapter) CreativeCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, d
 			text = stringArgAny(args, "headline")
 		}
 		input := map[string]any{"account_id": acct.NativeAccountID, "text": text, "nullcast": true}
-		format := strings.ToLower(stringArgAny(args, "format"))
-		if format == "video" {
-			input["media_ids"] = stringArgAny(args, "video_id")
-		} else if format == "carousel" {
-			cards, _ := args["cards"].([]any)
-			mediaIDs := make([]string, 0, len(cards))
-			for _, value := range cards {
-				card := asMap(value)
-				if mediaID := firstString(card, "image_hash"); mediaID != "" {
-					mediaIDs = append(mediaIDs, mediaID)
+		if intArg(args, "mobile_app_resource_id", 0) == 0 {
+			format := strings.ToLower(stringArgAny(args, "format"))
+			if format == "video" {
+				input["media_ids"] = stringArgAny(args, "video_id")
+			} else if format == "carousel" {
+				cards, _ := args["cards"].([]any)
+				mediaIDs := make([]string, 0, len(cards))
+				for _, value := range cards {
+					card := asMap(value)
+					if mediaID := firstString(card, "image_hash"); mediaID != "" {
+						mediaIDs = append(mediaIDs, mediaID)
+					}
 				}
+				if len(mediaIDs) < 2 || len(mediaIDs) > 4 {
+					return mcpError("X multi-image creatives require 2 to 4 cards with provider media IDs in image_hash"), nil
+				}
+				input["media_ids"] = strings.Join(mediaIDs, ",")
+			} else if media := stringArgAny(args, "image_hash"); media != "" {
+				input["media_ids"] = media
 			}
-			if len(mediaIDs) < 2 || len(mediaIDs) > 4 {
-				return mcpError("X multi-image creatives require 2 to 4 cards with provider media IDs in image_hash"), nil
+		}
+		if intArg(args, "mobile_app_resource_id", 0) > 0 {
+			card, out := a.xAppCard(ctx, acct, args)
+			if out != nil {
+				return out, nil
 			}
-			input["media_ids"] = strings.Join(mediaIDs, ",")
-		} else if media := stringArgAny(args, "image_hash"); media != "" {
-			input["media_ids"] = media
+			input["card_uri"] = card
+			delete(input, "media_ids")
 		}
 		if cardURI := stringArgAny(asMap(args["platform_options"]), "card_uri"); cardURI != "" {
 			input["card_uri"] = cardURI
-		} else if destination := stringArgAny(args, "destination_url"); destination != "" && !strings.Contains(text, destination) {
+		} else if destination := stringArgAny(args, "destination_url"); destination != "" && !strings.Contains(text, destination) && input["card_uri"] == nil {
 			input["text"] = strings.TrimSpace(text + " " + destination)
 		}
 		mergeOptions(input, args)
+		if intArg(args, "mobile_app_resource_id", 0) > 0 {
+			delete(input, "media_keys")
+			delete(input, "app_country_code")
+		}
 		parsed, callErr := a.execIntegrationTool(ctx, acct, def.CreativeCreateTool, input)
 		if callErr != nil {
 			return callErr, nil

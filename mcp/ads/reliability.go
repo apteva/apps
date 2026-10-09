@@ -63,6 +63,11 @@ func (a *App) execIntegrationToolOnce(
 	tool string,
 	input map[string]any,
 ) (any, map[string]any) {
+	if integrationToolMutates(tool) {
+		if value, ok := a.createDispatches.Load(ctx); ok {
+			value.(*createDispatch).started.Store(true)
+		}
+	}
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(acct.ConnectionID, tool, input)
 	if err != nil {
 		return nil, mcpError(tool + ": " + err.Error())
