@@ -1,40 +1,15 @@
-# Two-original Patreon gallery
+# Two-original-image Patreon post example
 
-This optional user-definition example requires Actors 0.2.11 and Computer
-0.7.93 or later. It is not installed or seeded by the app.
+This optional actor definition is user configuration, not a built-in workflow or seeded creator. Import it and supply your saved Computer context and Patreon creator URL.
 
-`gallery_post` supports exactly two original images, in the supplied order,
-with Public (`audience: "public"`) or all paid tiers (`audience: "paid"`).
-Other sizes and tier subsets must remain blocked instead of losing assets or
-changing access. Both sources are uploaded independently; the actor does not
-resize, merge or substitute the pictures.
+`gallery_post` is a named publishing operation alongside text, single-image and video operations. It currently supports exactly two distinct approved originals in their provided order.
 
-Required runtime input:
+Inputs: `context_id`, `creator_url`, `post_title`, `post_body`, `audience` (`public` or `paid`), `tier_labels` (array of exact creator menu names; empty for Public and nonempty for Paid), `image_1_source_url`, `image_2_source_url`, each `image_N_filename` and `image_N_mime_type`, and a stable `request_id`. Supply the identical stable Actors idempotency key. Source URLs must resolve to the approved original files and remain valid for the whole run.
 
-- `context_id`, `creator_url`: verified saved creator configuration.
-- `image_1_source_url`, `image_2_source_url`: ready HTTPS URLs for the exact
-  approved original Storage files; use sufficiently long-lived signed URLs.
-- `image_1_filename`, `image_2_filename`, `image_1_mime_type`,
-  `image_2_mime_type`: original file metadata.
-- `post_title`, `post_body`: exact approved plain text, including paragraphs.
-- `audience`: `public` or `paid`.
-- `gallery_paid_tiers_text`: complete verified tier-menu text in display order,
-  including `Select all tiers`. Example only: `Select all tiers Basic $3/month
-  Premium $8/month`. Obtain the real labels for the selected creator; do not
-  infer them from this example or another creator.
-- `request_id`: a stable, persisted per-release key. Pass the same value as
-  Actors `idempotency_key` and retain the accepted run ID.
+Read the creator's current plans through `list_tiers` and, where needed, `get_tier` before choosing access. Names and prices are caller/creator configuration. Do not infer an audience from the number of tiers or use another creator's labels. Reconcile a live price/name mismatch before writing. The posting action clears prior choices, selects exact runtime labels through fresh SOM targets, and verifies the complete selected set after saving and reloading. Legacy/unrequested tiers fail verification. Free/Public uses an empty array; Paid without a verified selection fails closed.
 
-The actor selects and verifies every paid tier, establishes Sell this post off
-before switching audience, and accepts Public's absent sale control only with
-that prior evidence and a verified Public radio. It captures Patreon asset IDs
-after each successful upload, reloads the saved editor, requires exactly two
-attachments, and compares their persisted IDs in order. Required exact title
-and paragraph-preserving body patterns gate Publish. The commit uses a durable
-`once_key`, then requires Patreon's live-post confirmation.
+The actor verifies Sell this post off before switching audience and again after reload, accepting the hidden sale control on Public posts only when Public is verified. It uploads each original separately, captures Patreon attachment IDs, reloads, and verifies exactly two images, original ID order, image access, exact title/body including paragraph breaks, and audience. Only then does it click Publish with a durable once-key guard and require Patreon’s live-post confirmation.
 
-The publishing process must independently verify the exact live post, creator,
-copy, access and original-source lineage, then reconcile Editorial records.
-Any failed guard or unknown result stops writes. Reconcile through read-only
-operations; never switch to generic `run`, change the request key to bypass a
-guard, or publish again to repair bookkeeping.
+A failed/uncertain run must be reconciled read-only before another attempt. Never fall back to generic run, change the key, drop attachments or loosen tier/copy checks to bypass failure. Original hashes/lineage and editorial approval/due checks belong in the caller process before invoking this action. This operation does not add scheduling or choose creator-specific pricing policy.
+
+Requires Actors 0.2.12 or later and a current Computer version with semantic uploads/forms and preserved newlines. Site markup can change; failures must remain blocked until reviewed.
