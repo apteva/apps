@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.4
+
+- Prioritize published Restaurant structured-data emails whose entity URL matches the extracted page, ahead of generic hotel reservation links in shared footers.
+- Preserve hotel-page contacts and exclude unrelated restaurant entities from the priority.
+
 ## v0.4.3
 
 - Preserve email occurrence context so flattened page scans and mailto links cannot reintroduce vendor or recruitment addresses rejected from page text.

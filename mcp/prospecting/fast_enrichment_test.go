@@ -168,3 +168,18 @@ func TestNewOnlySkipsExistingBusinessesWithoutChangingOldProspects(t *testing.T)
 		t.Fatal("old lead changed")
 	}
 }
+
+func TestRestaurantEntityEmailOutranksHotelReservations(t *testing.T) {
+	page := webExtractPage{URL: "https://hotel.fr/restaurant", Text: "Emaillepatio@hotel.fr\nContact\nreservation@hotel.fr", Links: []webLink{{URL: "mailto:reservation@hotel.fr", Text: "Contact"}}, StructuredData: []any{
+		map[string]any{"@type": "Hotel", "url": "https://hotel.fr/", "email": "reservation@hotel.fr"},
+		map[string]any{"@type": "Restaurant", "url": "https://hotel.fr/restaurant/", "email": "lepatio@hotel.fr"},
+		map[string]any{"@type": "Restaurant", "url": "https://hotel.fr/another-venue", "email": "another@hotel.fr"},
+	}}
+	if got := extractBestEmail([]webExtractPage{page}, "hotel.fr"); got != "lepatio@hotel.fr" {
+		t.Fatalf("restaurant page got %q", got)
+	}
+	page.URL = "https://hotel.fr/"
+	if got := extractBestEmail([]webExtractPage{page}, "hotel.fr"); got != "reservation@hotel.fr" {
+		t.Fatalf("hotel page got %q", got)
+	}
+}

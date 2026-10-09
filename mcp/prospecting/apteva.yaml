@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: prospecting
 display_name: Prospecting
-version: 0.4.3
+version: 0.4.4
 description: |
   A standalone lead workspace for Apteva. Seed companies manually or in bulk,
   organize them with target profiles, explore and update the catalog, record
@@ -15,6 +15,9 @@ description: |
   Optional Google Places integration adds business discovery with bounded
   paid API requests. Prospecting never runs campaigns, makes calls, or
   creates opportunities.
+
+  v0.4.4 prioritizes restaurant entity emails tied to the current page
+  over generic hotel reservation mailboxes published in shared footers.
 
   v0.4.3 preserves mailbox occurrence context across links and page scans,
   excluding developer, photographer and recruitment emails from business leads.
@@ -141,7 +144,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: prospecting/v0.4.3
+    ref: prospecting/v0.4.4
     entry: mcp/prospecting
   port: 8080
   health_check: /health
