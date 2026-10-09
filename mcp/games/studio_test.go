@@ -218,8 +218,10 @@ func TestStudioConcurrentDispatchAndArchive(t *testing.T) {
 	if _, e := gameAction(ctx, "archive", map[string]any{"game_id": s.GameID}); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := studioAction(ctx, "build", map[string]any{"game_id": s.GameID, "target_id": target["id"], "request_key": "archived"}); e == nil {
-		t.Fatal("archived game built")
+	for _, action := range []string{"build", "setup", "setup_reconcile", "recipe_save", "source_pin", "configure"} {
+		if _, e := studioAction(ctx, action, map[string]any{"game_id": s.GameID, "target_id": target["id"], "request_key": "archived"}); e == nil || !strings.Contains(e.Error(), "archived") {
+			t.Fatalf("archived game action %s: %v", action, e)
+		}
 	}
 	var n int
 	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM game_delivery_requests`).Scan(&n)
