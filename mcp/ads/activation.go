@@ -46,6 +46,9 @@ func (a *App) toolDeliveryActivate(ctx *sdk.AppCtx, args map[string]any) (any, e
 		return scopeErr, nil
 	}
 
+	if out := a.checkMobileActivation(ctx, acct, args, campaignID); out != nil {
+		return out, nil
+	}
 	states, preflightErr := a.loadDeliveryHierarchy(ctx, acct, def, campaignID, adSetID, adID)
 	if preflightErr != nil {
 		return preflightErr, nil

@@ -89,7 +89,18 @@ func normalizeXAnalytics(acct *adAccount, level string, start, end time.Time, pa
 			for _, rawSegment := range idData {
 				metrics := asMap(asMap(rawSegment)["metrics"])
 				for key, raw := range metrics {
-					combined[key] = numericArgAny(combined[key]) + metricAt(raw, dateIndex)
+					if attributed := asMap(raw); len(attributed) > 0 {
+						values := asMap(combined[key])
+						if values == nil {
+							values = map[string]any{}
+						}
+						for window, series := range attributed {
+							values[window] = numericArgAny(values[window]) + metricAt(series, dateIndex)
+						}
+						combined[key] = values
+					} else {
+						combined[key] = numericArgAny(combined[key]) + metricAt(raw, dateIndex)
+					}
 				}
 			}
 			point := analyticsPoint{
@@ -158,6 +169,21 @@ func (a *App) fetchRedditAnalytics(ctx *sdk.AppCtx, acct *adAccount, request *ge
 		"fields":     []any{"IMPRESSIONS", "REACH", "CLICKS", "SPEND", "VIDEO_STARTED", "VIDEO_COMPLETED", "CONVERSION_PURCHASE_CLICKS", "CONVERSION_PURCHASE_VIEWS", "CONVERSION_PURCHASE_TOTAL_VALUE"},
 		"starts_at":  from.Format("2006-01-02") + "T00:00:00Z",
 		"ends_at":    to.AddDate(0, 0, 1).Format("2006-01-02") + "T00:00:00Z",
+	}
+	if request.IncludeEvents {
+		fields := data["fields"].([]any)
+		for _, prefix := range []string{"APP_INSTALL_", "APP_INSTALL_MMP_", "APP_INSTALL_SKAN_"} {
+			for _, event := range []string{"INSTALL", "APP_LAUNCH", "SIGN_UP", "PURCHASE", "ADD_TO_CART", "LEVEL_ACHIEVED"} {
+				fields = append(fields, prefix+event+"_COUNT")
+			}
+			fields = append(fields, prefix+"REVENUE")
+		}
+		for _, prefix := range []string{"APP_INSTALL_MMP_", "APP_INSTALL_SKAN_"} {
+			for _, event := range []string{"REINSTALL", "TOTAL_INSTALL", "START_TRIAL", "SUBSCRIBE", "FIRST_TIME_PURCHASE"} {
+				fields = append(fields, prefix+event+"_COUNT")
+			}
+		}
+		data["fields"] = fields
 	}
 	if acct.Timezone != "" {
 		data["time_zone_id"] = acct.Timezone

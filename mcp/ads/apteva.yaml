@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.49
+version: 0.1.50
 description: |
   Manage paid advertising across networks behind one MCP surface.
   v0.1 supports Meta Ads, Google Ads, X Ads, and Reddit Ads behind the
@@ -110,6 +110,11 @@ description: |
   from a list that never returned. ad_extension_list now also returns sitelink
   descriptions and final URLs.
 
+  v0.1.50 extends existing resources and campaign APIs with mobile apps,
+  measurement bindings, provider capabilities and event readiness; adds Google
+  App campaigns and App ads, Meta/X/Reddit app wiring, source-separated
+  conversion reports, CPI, and durable campaign creation request keys.
+
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads
 icon: /ui/icon.svg
@@ -145,6 +150,10 @@ provides:
     - name: audience_sync_processor
       schedule: "@every 30s"
   publishes:
+    - name: conversion.updated
+      description: "Event conversion cache refreshed; read cached event reports without another provider sync."
+    - name: mobile_app.changed
+      description: "A mobile app or measurement binding changed."
     - name: account.changed
       description: "An ad-account binding was added or removed."
     - name: entity.changed
@@ -243,6 +252,13 @@ provides:
     - { name: audience_refresh,             description: "Refresh normalized audiences from the provider." }
     - { name: audience_source_list,         description: "List Storage CSV or CRM segment sources for audience sync." }
     - { name: targeting_catalog_search,     description: "Search normalized provider targeting values without manually locating native IDs." }
+    - { name: conversion_capabilities_get, description: "Provider-specific app goals, events and measurement requirements." }
+    - { name: mobile_app_bind, description: "Bind an existing mobile app using its store URL and provider app id." }
+    - { name: measurement_source_bind, description: "Record an existing measurement source without claiming SDK installation." }
+    - { name: conversion_event_list, description: "Discover mobile conversion events for a selected app." }
+    - { name: conversion_event_enable, description: "Enable an existing imported Google mobile conversion action." }
+    - { name: conversion_readiness_get, description: "Check measurement setup, observation and optimization eligibility." }
+    - { name: conversion_performance_get, description: "Report conversions by event, source and attribution window without duplicating spend." }
   ui_panels:
     - slot: project.page
       label: Ads
@@ -253,7 +269,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: ads/v0.1.49
+    ref: ads/v0.1.50
     entry: mcp/ads
   port: 8080
   health_check: /health
