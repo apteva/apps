@@ -503,6 +503,13 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "--cloud-pipeline" {
+		if err := runCloudPipeline(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "cloud pipeline:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	app := &App{}
 	wrapped := wrapApp{app: app}
 	sdk.Run(&wrapped)

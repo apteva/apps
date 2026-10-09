@@ -1,0 +1,10 @@
+{
+  "darwin-arm64": {
+    "url": "https://github.com/apteva/apps/releases/download/deploy%2Fv0.28.0/deploy-pipeline-darwin-arm64",
+    "sha256": "3ce0679b83ab321cce389e792e68f371e6cc9fa8697d0b69032fb5410fa0d16a"
+  },
+  "darwin-amd64": {
+    "url": "https://github.com/apteva/apps/releases/download/deploy%2Fv0.28.0/deploy-pipeline-darwin-amd64",
+    "sha256": "d037bd8de9f29bdf6014f2c7741c30dfd200108050d1b8c112e0f13aa1e87f0b"
+  }
+}

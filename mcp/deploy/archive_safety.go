@@ -27,6 +27,10 @@ func extractBoundedZip(zr *zip.Reader, destination string, budget int64, allowLi
 	defer root.Close()
 	seen := map[string]bool{}
 	var links []struct{ name, target string }
+	var directories []struct {
+		name string
+		mode os.FileMode
+	}
 	var created []string
 	success := false
 	defer func() {
@@ -54,6 +58,10 @@ func extractBoundedZip(zr *zip.Reader, destination string, budget int64, allowLi
 			if err = root.MkdirAll(name, 0755); err != nil {
 				return err
 			}
+			directories = append(directories, struct {
+				name string
+				mode os.FileMode
+			}{name, mode.Perm()})
 			continue
 		}
 		if entry.UncompressedSize64 > uint64(budget-total) {
@@ -97,7 +105,11 @@ func extractBoundedZip(zr *zip.Reader, destination string, budget int64, allowLi
 		created = append(created, name)
 		n, copyErr := io.Copy(file, io.LimitReader(reader, budget-total+1))
 		reader.Close()
+		chmodErr := file.Chmod(mode.Perm())
 		closeErr := file.Close()
+		if chmodErr != nil {
+			return chmodErr
+		}
 		total += n
 		if copyErr != nil {
 			return copyErr
@@ -122,6 +134,11 @@ func extractBoundedZip(zr *zip.Reader, destination string, budget int64, allowLi
 	for _, link := range links {
 		if _, err = root.Stat(link.name); err != nil {
 			return fmt.Errorf("invalid archive symlink %q: %w", link.name, err)
+		}
+	}
+	for i := len(directories) - 1; i >= 0; i-- {
+		if err = root.Chmod(directories[i].name, directories[i].mode); err != nil {
+			return err
 		}
 	}
 	success = true

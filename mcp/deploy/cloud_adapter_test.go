@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -94,7 +95,14 @@ func TestCodemagicAdapterTemplateIsGenericAndValidYAML(t *testing.T) {
 }
 
 func TestCodemagicAppleProjectGeneration(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "deploy-pipeline")
+	build := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-o", binary, ".")
+	build.Env = append(os.Environ(), "GOWORK=off", "CGO_ENABLED=0")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("compile pipeline runner: %v\n%s", err, output)
+	}
 	command := exec.Command("python3", "-B", "-m", "unittest", "discover", "-s", "runners/codemagic/tests", "-v")
+	command.Env = append(os.Environ(), "TEST_DEPLOY_PIPELINE_RUNNER="+binary)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("Apple runner regression tests: %v\n%s", err, output)
 	}
