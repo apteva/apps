@@ -1,4 +1,4 @@
-# Games v0.7
+# Games v0.7.1
 
 See [Assets and content](ASSETS.md) for all thirteen asset kinds, Media Studio generation, immutable manifests and Unity/Godot importers.
 

@@ -1,7 +1,7 @@
-# Games studio: v0.7.0
+# Games studio: v0.7.1
 
 Games connects each game's existing backend to source, delivery and measurement.
-Install or upgrade Games to v0.7.0 to use these features. Existing installations
+Install or upgrade Games to v0.7.1 to use these features. Existing installations
 keep their player administration behavior; source, delivery and reporting need
 the optional bindings described below.
 
