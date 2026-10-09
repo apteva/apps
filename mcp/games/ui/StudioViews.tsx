@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import {
+  DeploymentSetup,
+  ReadinessChecklist,
+  BuildEvidence,
+} from "./DeploymentSetup";
+
 type Item = Record<string, any>;
 const input =
   "bg-bg-input border border-border rounded px-2 py-1 text-sm w-full";
@@ -304,9 +310,16 @@ function SourceView({
   const [platform, setPlatform] = useState("android");
   return (
     <>
-      <h3 className="font-medium">Source and platform targets</h3>
+      <DeploymentSetup
+        call={call}
+        run={run}
+        busy={busy}
+        reload={reload}
+        targets={targets}
+      />
+      <h3 className="font-medium">Link an existing deployment</h3>
       <p className="text-text-muted">
-        Connect Code 0.10.0+ and Deploy 0.26.0+ in Games settings. Create
+        Connect Code 0.10.0+ and Deploy 0.27.2.0+ in Games settings. Create
         repositories in Code and configure build commands, runners and
         publishing in Deploy.
       </p>
@@ -436,6 +449,9 @@ function Releases({
   const [history, setHistory] = useState<Item[]>([]);
   const [channel, setChannel] = useState("internal");
   const [build, setBuild] = useState("");
+  useEffect(() => {
+    setPlan(undefined);
+  }, [build, channel, target]);
   const [release, setRelease] = useState("");
   const [offset, setOffset] = useState(0);
   const [reconcile, setReconcile] = useState("");
@@ -501,7 +517,13 @@ function Releases({
           disabled={busy}
           onClick={() =>
             run(async () =>
-              setPlan(await call("release_plan", { target_id: target })),
+              setPlan(
+                await call("release_plan", {
+                  target_id: target,
+                  build_id: Number(build),
+                  channel,
+                }),
+              ),
             )
           }
         >
@@ -515,7 +537,11 @@ function Releases({
           Build game
         </button>
       </div>
-      {plan && <Detail title="Readiness and configuration" value={plan} />}
+      {plan?.readiness &&
+        Number(plan.readiness.build_id || 0) === Number(build || 0) &&
+        plan.readiness.channel === channel && (
+          <ReadinessChecklist value={plan.readiness} />
+        )}
       <div className={card}>
         <h4>Publish a tested build</h4>
         <Field label="Release channel" value={channel} onChange={setChannel} />
@@ -583,10 +609,9 @@ function Releases({
       </div>
       {state && (
         <>
-          <Detail
-            title="Build artifacts and test evidence"
-            value={state.builds}
-          />
+          {state.builds?.map((b: Item) => (
+            <BuildEvidence key={b.id} build={b} />
+          ))}
           <Detail title="Publication and availability" value={state.releases} />
           <div className="flex gap-2">
             <button
@@ -622,7 +647,14 @@ function Releases({
               Read selected release logs
             </button>
           </div>
-          {logs && <Detail title="Recent logs" value={logs.log} />}
+          {logs && (
+            <section className={card}>
+              <h4>Selected build or release logs</h4>
+              <pre className="text-xs whitespace-pre-wrap break-words max-h-96 overflow-auto">
+                {logs.log || "No logs reported yet."}
+              </pre>
+            </section>
+          )}
           {["android", "ios"].includes(state.deployment?.target_kind) && (
             <details className={card}>
               <summary>Rollout controls</summary>
@@ -978,7 +1010,8 @@ function Metrics({
                   <option value="earnings">Earnings (merchant currency)</option>
                 </select>
                 <p className="text-text-muted text-xs">
-                  Configure the report bucket and report permissions on the Google Play connection.
+                  Configure the report bucket and report permissions on the
+                  Google Play connection.
                 </p>
               </>
             )}
@@ -1130,8 +1163,8 @@ function Metrics({
           return (
             <article className={card} key={e.id}>
               <p>
-                {p?.date || p?.month || p?.event_time} · {p?.provider || "Gameplay"} ·{" "}
-                {p?.family || e.topic}
+                {p?.date || p?.month || p?.event_time} ·{" "}
+                {p?.provider || "Gameplay"} · {p?.family || e.topic}
               </p>
               {p?.facts?.map((f: Item, i: number) => (
                 <dl key={i} className="grid grid-cols-2 gap-1 text-xs">

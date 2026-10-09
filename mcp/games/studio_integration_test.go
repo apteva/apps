@@ -150,8 +150,53 @@ func TestIntegration_StudioCodeDeploy(t *testing.T) {
 				if !strings.Contains(manifest, "artifact-content") {
 					t.Fatal("test evidence missing", manifest)
 				}
+				checklist := studioReadiness(ctx, s, target.(map[string]any), state, map[string]any{"build_id": b["id"], "channel": "internal"})
+				for _, check := range checklist["checks"].([]readinessCheck) {
+					if (check.ID == "tests" || check.ID == "runner") && check.Status != "ready" {
+						t.Fatal("real build evidence not recognized", check)
+					}
+				}
 				t.Logf("Verified build %v with retained artifact and test evidence", b["id"])
-				return
+				pipeline["release_policy"] = map[string]any{"version": "1", "channels": map[string]any{"internal": map[string]any{"required_tests": []string{"artifact-content"}}}}
+				deploy.MCP("deploy_update", map[string]any{"id": d["id"], "target_config_json": contentJSON(pipeline)})
+				denied, err := studioDispatch(ctx, s, "release", map[string]any{"target_id": target.(map[string]any)["id"], "build_id": b["id"], "channel": "production", "request_key": "denied-release"})
+				if err != nil || !strings.Contains(txt(object(denied)["error"]), "does not permit channel production") {
+					t.Fatal("Deploy policy was not enforced for the selected build", denied, err)
+				}
+				state, err = studioDeployment(ctx, s, number(d["id"]), "production")
+				if err != nil || len(records(state["releases"])) != 0 {
+					t.Fatal("denied release created a resource", state, err)
+				}
+				if _, err = studioReconcile(ctx, s, map[string]any{"request_key": "denied-release", "resolution": "not_created", "reason": "Deploy rejected the channel and release history is empty", "confirm": true}); err != nil {
+					t.Fatal(err)
+				}
+				object(pipeline["pipeline"])["prepare"] = []any{map[string]any{"name": "export-rejected", "command": []string{"sh", "-ec", "echo intentional export failure; exit 23"}}}
+				deploy.MCP("deploy_update", map[string]any{"id": d["id"], "target_config_json": contentJSON(pipeline)})
+				failed, err := studioDispatch(ctx, s, "build", map[string]any{"target_id": target.(map[string]any)["id"], "request_key": "failed-export"})
+				if err != nil || object(failed)["status"] != "accepted" {
+					t.Fatal(failed, err)
+				}
+				failedID := number(object(object(object(failed)["result"])["build"])["id"])
+				for end := time.Now().Add(30 * time.Second); time.Now().Before(end); time.Sleep(100 * time.Millisecond) {
+					state, err = studioDeployment(ctx, s, number(d["id"]), "production")
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, failedBuild := range records(state["builds"]) {
+						if number(failedBuild["id"]) == failedID && failedBuild["status"] == "failed" {
+							if failingBuildStage(failedBuild) != "export-rejected" {
+								t.Fatal("failed stage missing", failedBuild)
+							}
+							logs, err := studioAction(ctx, "logs", map[string]any{"_project_id": s.ProjectID, "game_id": s.GameID, "target_id": target.(map[string]any)["id"], "build_id": failedID})
+							if err != nil || !strings.Contains(contentJSON(logs), "intentional export failure") {
+								t.Fatal("failure logs missing", logs, err)
+							}
+							t.Log("Verified selected-build policy rejection and failing-stage logs")
+							return
+						}
+					}
+				}
+				t.Fatal("failed build did not finish")
 			}
 			if b["status"] == "failed" {
 				t.Fatal(b)

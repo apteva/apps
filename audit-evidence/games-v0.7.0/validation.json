@@ -1,0 +1,28 @@
+{
+  "version": "0.7.0",
+  "validation_date": "2026-10-09",
+  "checks": {
+    "go_full_suite": "passed (12.225s)",
+    "go_race_short": "passed (51.536s)",
+    "react_tests": "24 passed, 0 failed, 122 assertions",
+    "typescript": "passed",
+    "panel_build_and_host_react_imports": "passed",
+    "real_code_deploy_regression": "passed: >8 MiB immutable source transfer, selected-build release-policy denial, failed export stage and logs",
+    "moonhorde": "passed (208.81s): captured real Moonhorde and Kiln sources, pinned engine sibling, replayed Games setup, exported iOS project, compiled unsigned iphoneos archive and checked artifact contents and evidence digest"
+  },
+  "ownership": {
+    "games": "setup UI, project recipes and game associations",
+    "code": "repositories and immutable source snapshots",
+    "deploy": "build execution, canonical runner/signing/store configuration, artifact attestation and release policy"
+  },
+  "limitations": [
+    "The Moonhorde native test uses an unsigned iOS archive on a local macOS runner. It does not validate distribution signing, signed IPA export, Apple upload or store publication.",
+    "Signed iOS acceptance still requires the selected macOS runner and Moonhorde Apple signing/store configuration in Deploy.",
+    "The attached screenshot uses synthetic UI preview data."
+  ],
+  "safety": [
+    "Unknown setup creations require verified receipt reconciliation before retry.",
+    "Setup journals retain resource identities and exclude Deploy configuration/credentials.",
+    "Existing source links, targets and delivery history use unchanged tables and additive setup schema."
+  ]
+}

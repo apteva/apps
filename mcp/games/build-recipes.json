@@ -1,0 +1,88 @@
+[
+  {
+    "id": "kiln-ios",
+    "version": "1",
+    "name": "Kiln \u00b7 iOS",
+    "platform": "ios",
+    "framework": "ios",
+    "os": "darwin",
+    "tools": [
+      "Bun 1.3.13",
+      "Rust with Apple targets",
+      "Xcode",
+      "XcodeGen",
+      "Python 3"
+    ],
+    "dependency_path": "engine",
+    "build_directory": "generated/ios",
+    "outputs": [
+      "{{scheme}}.ipa"
+    ],
+    "prepare": [
+      {
+        "name": "dependencies",
+        "command": [
+          "sh",
+          "-ec",
+          "(cd ../engine && bun install --frozen-lockfile); bun install --frozen-lockfile"
+        ]
+      },
+      {
+        "name": "source-tests",
+        "command": [
+          "sh",
+          "-ec",
+          "bun test; bun run typecheck"
+        ]
+      },
+      {
+        "name": "export",
+        "command": [
+          "sh",
+          "-ec",
+          "export LOGNAME=\"$(id -un)\"; bun ../engine/cli/kiln.ts export ios --out generated/ios --signing external"
+        ],
+        "outputs": [
+          "generated/ios/kiln-export.json"
+        ]
+      }
+    ],
+    "tests": [
+      {
+        "name": "ios-artifact",
+        "command": [
+          "python3",
+          "-c",
+          "import zipfile,plistlib,os,glob; files=glob.glob('*.ipa'); assert len(files)==1; z=zipfile.ZipFile(files[0]); p=next(n for n in z.namelist() if n.startswith('Payload/') and n.count('/')==2 and n.endswith('/Info.plist')); info=plistlib.loads(z.read(p)); root=p[:-len('Info.plist')]; assert root+'Kiln/game.js' in z.namelist(); assert info['CFBundleIdentifier']=='{{bundle_id}}'; assert info['CFBundleShortVersionString']; assert int(info['CFBundleVersion'])>0; assert any(n.startswith(root+'_CodeSignature/') for n in z.namelist()); assert root+'embedded.mobileprovision' in z.namelist()"
+        ]
+      }
+    ],
+    "description": "Export a self-contained Xcode project, then let Deploy archive, sign and export an IPA. Requires a pinned engine sibling."
+  },
+  {
+    "id": "command-artifact",
+    "version": "1",
+    "name": "Generic artifact",
+    "platform": "desktop",
+    "framework": "command",
+    "os": "",
+    "tools": [],
+    "build_cmd": "cp README.md \"$DEPLOY_ARTIFACT_DIR/README.md\"",
+    "build_directory": "",
+    "outputs": [
+      "README.md"
+    ],
+    "prepare": [],
+    "tests": [
+      {
+        "name": "artifact-present",
+        "command": [
+          "sh",
+          "-ec",
+          "test -s README.md"
+        ]
+      }
+    ],
+    "description": "Starting recipe for command builds. Save a project-specific recipe with its commands, outputs and artifact tests before using it."
+  }
+]
