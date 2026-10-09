@@ -154,6 +154,7 @@ def main():
     deadline=time.monotonic()+min(120,float(req['remaining_seconds']))
     options=mp.tasks.vision.PoseLandmarkerOptions(base_options=mp.tasks.BaseOptions(model_asset_path=req['model'],delegate=mp.tasks.BaseOptions.Delegate.CPU),running_mode=mp.tasks.vision.RunningMode.VIDEO if req["video"] else mp.tasks.vision.RunningMode.IMAGE,num_poses=1,min_pose_detection_confidence=.5,min_pose_presence_confidence=.5)
     samples=[]
+    recovery=None;recovery_unavailable=False;recovery_seconds=0
     with tempfile.TemporaryDirectory(prefix='media-pose-frames-') as work,contextlib.ExitStack() as stack:
         detector=stack.enter_context(mp.tasks.vision.PoseLandmarker.create_from_options(options))
         refresh_detector=None
@@ -185,6 +186,26 @@ def main():
                 sample['landmark_evidence']=landmark_evidence(points)
                 sample.update(planned)
                 sample['inference_ms']=(time.monotonic()-started)*1000
+            if req.get('hybrid') and sample['status'] not in ('fits_detected_upper_pose','upper_pose_exceeds_crop'):
+                recovery_start=time.monotonic()
+                if recovery_unavailable:
+                    sample['recovery']={'status':'runtime_unavailable','mode':'same_frame'}
+                elif recovery_seconds>=30 or deadline-time.monotonic()<2:
+                    sample['recovery']={'status':'budget_exhausted','mode':'same_frame'}
+                else:
+                    try:
+                        if recovery is None:
+                            from smartcrop_pose_recovery import Recovery
+                            recovery=Recovery(req['recovery_root'])
+                        import cv2
+                        frame=cv2.imread(path)
+                        sample=recovery.recover(frame,sample,req.get('framing','upper_body'),req['ratio_w']/req['ratio_h'])
+                    except Exception as recovery_error:
+                        recovery_unavailable=True
+                        code=str(recovery_error) if str(recovery_error) in {'recovery_model_hash_mismatch','recovery_runtime_version_mismatch'} else ('recovery_model_missing' if isinstance(recovery_error,FileNotFoundError) else 'recovery_inference_failed')
+                        sample['recovery']={'status':'runtime_unavailable','mode':'same_frame','failure_code':code}
+                    recovery_seconds+=time.monotonic()-recovery_start
+                sample['recovery']['elapsed_ms']=(time.monotonic()-recovery_start)*1000
             samples.append(sample)
     print('APTEVA_POSE:'+json.dumps({'samples':samples,'runtime':'mediapipe-0.10.21','model_sha256':req['model_sha256']},default=lambda v:v.item() if isinstance(v,np.generic) else str(v)))
 if __name__=='__main__':

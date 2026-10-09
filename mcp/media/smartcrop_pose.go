@@ -23,17 +23,38 @@ var poseRuntime string
 //go:embed smartcrop_pose_setup.py
 var poseSetup string
 
+//go:embed smartcrop_pose_recovery.py
+var poseRecoveryRuntime string
+
 //go:embed smartcrop_model/pose_landmarker_full.task
 var poseModel []byte
 
 const poseModelSHA256 = "4eaa5eb7a98365221087693fcc286334cf0858e2eb6e15b506aa4a7ecdcec4ad"
 const poseRuntimeVersion = "mediapipe-0.10.21-full-1"
+const poseHybridRuntimeVersion = "mediapipe-0.10.21-hybrid-1"
+const posePersonModelSHA256 = "eb9543a3f625fc19e7d6134cf33e801542a81b34a15aaa9bdc25cdd1ec741309"
+const poseRecoveryModelSHA256 = "26f3a19e61304a600dfb82d1001d41d24343b89fc70a33ffc84657e0b0bf2ecf"
+
+type poseRecoveryModelsKey struct{}
+
+func poseRuntimeIdentity(engine string) string {
+	if engine == "hybrid" {
+		return poseHybridRuntimeVersion
+	}
+	return poseRuntimeVersion
+}
+func poseAlgorithmIdentity(engine string) string {
+	if engine == "hybrid" {
+		return smartCropAlgorithmVersion
+	}
+	return "media-smartcrop-mediapipe-full-hands-10"
+}
 
 func smartCropEngineSchema() map[string]any {
-	return map[string]any{"type": "string", "enum": []string{"mediapipe_full", "legacy"}, "description": "Smart Crop engine. Defaults to app configuration (MediaPipe Pose Full). legacy retains the previous saliency/foreground engine. Runtime or insufficient pose evidence falls back visibly to legacy; sampled coverage requires visual review."}
+	return map[string]any{"type": "string", "enum": []string{"hybrid", "mediapipe_full", "legacy"}, "description": "Smart Crop engine. hybrid uses MediaPipe Full first, with independent same-frame YOLO Pose/RTMPose recovery on difficult samples. Short unsupported position gaps remain composition-unknown. mediapipe_full retains pure Full; legacy retains saliency/foreground. No implicit padding; sampled coverage needs visual review."}
 }
 func smartCropFramingSchema() map[string]any {
-	return map[string]any{"type": "string", "enum": []string{"upper_body", "widest_valid"}, "description": "Framing preference for MediaPipe Full. upper_body keeps tighter head/upper-pose framing (default). widest_valid uses the largest native crop at the requested ratio, positioned to retain supported pose; no padding or automatic scaling. Coverage guards still apply."}
+	return map[string]any{"type": "string", "enum": []string{"upper_body", "widest_valid"}, "description": "Framing preference for pose engines. upper_body keeps tighter head/upper-pose framing (default). widest_valid uses the largest native crop at the requested ratio, positioned to retain supported pose; no padding or automatic scaling. Coverage guards still apply."}
 }
 func resolveSmartCropFraming(app *sdk.AppCtx, requested string) (string, error) {
 	framing := strings.TrimSpace(strings.ToLower(requested))
@@ -54,10 +75,10 @@ func resolveSmartCropEngine(app *sdk.AppCtx, requested string) (string, error) {
 		engine = strings.TrimSpace(strings.ToLower(app.Config().Get("smart_crop_engine")))
 	}
 	if engine == "" {
-		engine = "mediapipe_full"
+		engine = "hybrid"
 	}
-	if engine != "mediapipe_full" && engine != "legacy" {
-		return "", &renderInputError{Code: "invalid_smart_crop_engine", Message: "smart_crop_engine must be mediapipe_full or legacy."}
+	if engine != "hybrid" && engine != "mediapipe_full" && engine != "legacy" {
+		return "", &renderInputError{Code: "invalid_smart_crop_engine", Message: "smart_crop_engine must be hybrid, mediapipe_full or legacy."}
 	}
 	return engine, nil
 }
@@ -87,18 +108,20 @@ func validateSmartCropEngine(raw []byte) error {
 }
 
 type poseRequest struct {
-	Framing   string  `json:"framing"`
-	Source    string  `json:"source"`
-	Model     string  `json:"model"`
-	ModelSHA  string  `json:"model_sha256"`
-	FFmpeg    string  `json:"ffmpeg"`
-	Positions []int64 `json:"positions"`
-	Width     int     `json:"width"`
-	Height    int     `json:"height"`
-	RatioW    int     `json:"ratio_w"`
-	RatioH    int     `json:"ratio_h"`
-	Remaining float64 `json:"remaining_seconds"`
-	Video     bool    `json:"video"`
+	Hybrid       bool    `json:"hybrid"`
+	RecoveryRoot string  `json:"recovery_root,omitempty"`
+	Framing      string  `json:"framing"`
+	Source       string  `json:"source"`
+	Model        string  `json:"model"`
+	ModelSHA     string  `json:"model_sha256"`
+	FFmpeg       string  `json:"ffmpeg"`
+	Positions    []int64 `json:"positions"`
+	Width        int     `json:"width"`
+	Height       int     `json:"height"`
+	RatioW       int     `json:"ratio_w"`
+	RatioH       int     `json:"ratio_h"`
+	Remaining    float64 `json:"remaining_seconds"`
+	Video        bool    `json:"video"`
 }
 type poseLandmarkEvidence struct {
 	Index      int     `json:"index"`
@@ -108,6 +131,9 @@ type poseLandmarkEvidence struct {
 	Presence   float64 `json:"presence"`
 }
 type poseSample struct {
+	EffectiveStatus      string                 `json:"effective_status,omitempty"`
+	Recovery             *poseRecoveryEvidence  `json:"recovery,omitempty"`
+	ExtentScope          string                 `json:"extent_scope,omitempty"`
 	Landmarks            []poseLandmarkEvidence `json:"landmark_evidence,omitempty"`
 	TrackedWristEvidence []poseLandmarkEvidence `json:"tracked_wrist_evidence,omitempty"`
 	RefreshedHands       []int                  `json:"refreshed_hand_indices,omitempty"`
@@ -130,6 +156,28 @@ type poseSample struct {
 	Bounds      []float64 `json:"required_bounds"`
 	Head        []float64 `json:"head_bounds_estimate"`
 	InferenceMs float64   `json:"inference_ms"`
+}
+type poseRecoveryPoint struct {
+	Index      int     `json:"index"`
+	X          float64 `json:"x"`
+	Y          float64 `json:"y"`
+	Confidence float64 `json:"confidence"`
+}
+type poseRecoveryEvidence struct {
+	Status          string              `json:"status"`
+	FailureCode     string              `json:"failure_code,omitempty"`
+	Mode            string              `json:"mode"`
+	InitialStatus   string              `json:"initial_status,omitempty"`
+	PersonModel     string              `json:"person_model,omitempty"`
+	PersonSHA       string              `json:"person_model_sha256,omitempty"`
+	PoseModel       string              `json:"pose_model,omitempty"`
+	PoseSHA         string              `json:"pose_model_sha256,omitempty"`
+	ConfidenceScope string              `json:"confidence_scope,omitempty"`
+	PersonBounds    []float64           `json:"person_bounds,omitempty"`
+	PersonScore     float64             `json:"person_score,omitempty"`
+	Landmarks       []poseRecoveryPoint `json:"landmarks,omitempty"`
+	RecoveredWrists []int               `json:"recovered_wrist_indices,omitempty"`
+	ElapsedMs       float64             `json:"elapsed_ms"`
 }
 type poseResult struct {
 	Samples  []poseSample `json:"samples"`
@@ -198,8 +246,17 @@ func runPose(ctx context.Context, app *sdk.AppCtx, host int64, req poseRequest) 
 		req.Remaining = min(120, time.Until(deadline).Seconds())
 	}
 	var output string
+	runtimeVersion := poseRuntimeVersion
+	setupMode := ""
+	if req.Hybrid {
+		runtimeVersion = poseHybridRuntimeVersion
+		setupMode = " hybrid"
+	}
 	if host > 0 {
-		req.Model = "/tmp/apteva-media-pose/" + poseRuntimeVersion + "/model.task"
+		req.Model = "/tmp/apteva-media-pose/" + runtimeVersion + "/model.task"
+		if req.Hybrid {
+			req.RecoveryRoot = "/tmp/apteva-media-pose/" + runtimeVersion
+		}
 		raw, _ := json.Marshal(req)
 		work := uniqueRemoteWorkDir(0) + "-pose"
 		script := "set -eu\numask 077\nWORK=" + shellQuote(work) + "\nmkdir -p \"$WORK\"\necho $$ > \"$WORK/pid\"\n[ ! -f \"$WORK/cancel.requested\" ] || exit 1\ntrap 'rm -rf \"$WORK\"' EXIT\n"
@@ -207,10 +264,10 @@ func runPose(ctx context.Context, app *sdk.AppCtx, host int64, req poseRequest) 
 		for _, file := range []struct {
 			name string
 			data []byte
-		}{{"runtime.py", []byte(poseRuntime)}, {"setup.py", []byte(poseSetup)}, {"request.json", raw}} {
+		}{{"runtime.py", []byte(poseRuntime)}, {"smartcrop_pose_recovery.py", []byte(poseRecoveryRuntime)}, {"setup.py", []byte(poseSetup)}, {"request.json", raw}} {
 			script += fmt.Sprintf("printf '%%s' %s | base64 -d > \"$WORK/%s\"\n", shellQuote(base64.StdEncoding.EncodeToString(file.data)), file.name)
 		}
-		script += "POSE_ROOT=/tmp/apteva-media-pose/" + poseRuntimeVersion + "\npython3 \"$WORK/setup.py\" \"$POSE_ROOT\"\n"
+		script += "POSE_ROOT=/tmp/apteva-media-pose/" + runtimeVersion + "\npython3 \"$WORK/setup.py\" \"$POSE_ROOT\"" + setupMode + "\n"
 		// The model is verified in the persistent runtime directory.
 		script += "\"$POSE_ROOT/venv/bin/python\" \"$WORK/runtime.py\" \"$WORK/request.json\""
 		finish := registerRemoteKill(ctx, app, host, 0, work)
@@ -239,20 +296,30 @@ func runPose(ctx context.Context, app *sdk.AppCtx, host int64, req poseRequest) 
 		}
 		defer os.RemoveAll(dir)
 		req.Model = filepath.Join(dir, "model.task")
-		raw, _ := json.Marshal(req)
-		for name, data := range map[string][]byte{"runtime.py": []byte(poseRuntime), "setup.py": []byte(poseSetup), "model.task": poseModel, "request.json": raw} {
-			if err := os.WriteFile(filepath.Join(dir, name), data, 0600); err != nil {
-				return nil, err
-			}
-		}
 		root, err := os.UserCacheDir()
 		if err != nil {
 			return nil, err
 		}
-		root = filepath.Join(root, "apteva-media-pose", poseRuntimeVersion)
+		root = filepath.Join(root, "apteva-media-pose", runtimeVersion)
+		if req.Hybrid {
+			req.RecoveryRoot = root
+			if override, ok := ctx.Value(poseRecoveryModelsKey{}).(string); ok {
+				req.RecoveryRoot = override
+			}
+		}
+		raw, _ := json.Marshal(req)
+		for name, data := range map[string][]byte{"runtime.py": []byte(poseRuntime), "smartcrop_pose_recovery.py": []byte(poseRecoveryRuntime), "setup.py": []byte(poseSetup), "model.task": poseModel, "request.json": raw} {
+			if err := os.WriteFile(filepath.Join(dir, name), data, 0600); err != nil {
+				return nil, err
+			}
+		}
 		python := strings.TrimSpace(app.Config().Get("smart_crop_python"))
 		if python == "" {
-			setup := exec.CommandContext(ctx, "python3", filepath.Join(dir, "setup.py"), root)
+			args := []string{filepath.Join(dir, "setup.py"), root}
+			if req.Hybrid {
+				args = append(args, "hybrid")
+			}
+			setup := exec.CommandContext(ctx, "python3", args...)
 			configureRuntimeProcess(setup)
 			if err := setup.Run(); err != nil {
 				if ctx.Err() != nil {
@@ -288,6 +355,9 @@ func runPose(ctx context.Context, app *sdk.AppCtx, host int64, req poseRequest) 
 			for i, s := range result.Samples {
 				if s.AtMs != req.Positions[i] {
 					return nil, fmt.Errorf("pose_timestamp_identity_mismatch")
+				}
+				if r := s.Recovery; r != nil && (!req.Hybrid || (r.PersonSHA != "" && r.PersonSHA != posePersonModelSHA256) || (r.PoseSHA != "" && r.PoseSHA != poseRecoveryModelSHA256)) {
+					return nil, fmt.Errorf("pose_evidence_identity_mismatch")
 				}
 			}
 			return &result, nil
@@ -340,12 +410,16 @@ func computeSmartCropPose(ctx context.Context, app *sdk.AppCtx, sc *storageClien
 		ffmpeg = paths.FFmpeg
 	}
 	positions := posePositions(target, row.DurationMs, row.FPS)
+	engine := "mediapipe_full"
+	if a := cropAudit(ctx); a != nil && a.RequestedEngine == "hybrid" {
+		engine = "hybrid"
+	}
 	recordPoseAttempt(ctx, &poseResult{}, framing)
 	if a := cropAudit(ctx); a != nil {
 		a.PoseAttempt.Status = "inference"
 		a.PoseAttempt.Requested = len(positions)
 	}
-	result, err := runPose(ctx, app, host, poseRequest{Framing: framing, Source: source, ModelSHA: poseModelSHA256, FFmpeg: ffmpeg, Positions: positions, Width: row.Width, Height: row.Height, RatioW: rw, RatioH: rh, Video: !row.IsImage})
+	result, err := runPose(ctx, app, host, poseRequest{Hybrid: engine == "hybrid", Framing: framing, Source: source, ModelSHA: poseModelSHA256, FFmpeg: ffmpeg, Positions: positions, Width: row.Width, Height: row.Height, RatioW: rw, RatioH: rh, Video: !row.IsImage})
 	if err != nil {
 		if a := cropAudit(ctx); a != nil {
 			a.PoseAttempt.Status = "inference_failed"
@@ -360,6 +434,10 @@ func computeSmartCropPose(ctx context.Context, app *sdk.AppCtx, sc *storageClien
 	}
 	recordPoseAttempt(ctx, result, framing)
 	win, path, err := planPoseSamples(result.Samples, row.Width, row.Height, rw, rh)
+	var gaps []posePathGap
+	if engine == "hybrid" {
+		win, path, gaps, err = planHybridPoseSamples(result.Samples, row.Width, row.Height, rw, rh)
+	}
 	if err != nil {
 		if a := cropAudit(ctx); a != nil {
 			a.PoseAttempt.Status = "planning_failed"
@@ -371,25 +449,41 @@ func computeSmartCropPose(ctx context.Context, app *sdk.AppCtx, sc *storageClien
 		a.PoseAttempt.Status = "planned"
 	}
 	if a := cropAudit(ctx); a != nil {
-		a.AlgorithmVersion = smartCropAlgorithmVersion
-		a.Method = "mediapipe_full:exact_source_pose"
-		a.EffectiveEngine = "mediapipe_full"
+		a.AlgorithmVersion = poseAlgorithmIdentity(engine)
+		a.Method = engine + ":exact_source_pose"
+		a.EffectiveEngine = engine
 		a.ModelSHA = poseModelSHA256
-		a.RuntimeVersion = poseRuntimeVersion
+		a.RuntimeVersion = poseRuntimeIdentity(engine)
+		a.PosePathGaps = gaps
 		a.Coverage = "sampled_extent_fits"
 		a.PoseSamples = result.Samples
 		a.PoseLimitations = []string{"Head/hair and hand bounds are estimated from landmarks; pose confidence is not visual approval.", "Upper-body portrait policy does not require full legs; wider actions may not fit.", "Video coverage is sampled (up to 256 frames); extraction timestamps identify requested FFmpeg seeks and can differ from picture presentation by one frame. End-of-source samples leave two nominal frame intervals to avoid empty seeks."}
-		for _, s := range result.Samples {
+		if engine == "hybrid" {
+			a.PoseLimitations = append(a.PoseLimitations, "Recovery models have different confidence meanings. Coarse person boxes and interpolated crop positions do not verify head/hand coverage; gaps remain unknown.")
+		}
+		for i, s := range result.Samples {
 			recordSmartCropEvidence(ctx, "native_pose", s.AtMs, "")
 			b := poseBoundsWindow(s.Bounds, row.Width, row.Height)
+			status := s.Status
+			if engine == "hybrid" && status == "upper_pose_exceeds_crop" && len(s.WeakWrists) == 0 && s.ExtentScope == "" && i < len(path) && b.W <= win.W && b.H <= win.H && path[i].X <= b.X && path[i].X+win.W >= b.X+b.W && win.Y <= b.Y && win.Y+win.H >= b.Y+b.H {
+				status = "fits_detected_upper_pose"
+				a.PoseSamples[i].EffectiveStatus = "fits_supported_extent_after_reposition"
+			}
 			a.Extents = append(a.Extents, smartCropExtentEvidence{AtMs: s.AtMs, Bounds: auditCropWindow(b), Support: s.Status})
-			if b.W > win.W {
+			if s.Recovery != nil && (s.Recovery.Status == "runtime_unavailable" || s.Recovery.Status == "budget_exhausted") {
+				recordSmartCropFallback(ctx, "hybrid_recovery_"+s.Recovery.Status)
+			}
+			if b.W > win.W && s.ExtentScope != "full_person_recovery" {
 				a.Coverage = "exceeds_crop_width"
 				a.Recommendation = "Use a wider ratio or explicitly request fit_mode: contain to preserve the full action."
-			} else if s.Status != "fits_detected_upper_pose" && a.Coverage != "exceeds_crop_width" {
+			} else if status != "fits_detected_upper_pose" && a.Coverage != "exceeds_crop_width" {
 				a.Coverage = "unknown"
 				a.Recommendation = "Pose evidence is incomplete; review the source and crop."
 			}
+		}
+		if len(gaps) > 0 && a.Coverage != "exceeds_crop_width" {
+			a.Coverage = "unknown"
+			a.Recommendation = "Short detection gaps use interpolated crop positions only. Review these timestamps; head and hand coverage is unverified."
 		}
 		if a.Coverage == "sampled_extent_fits" {
 			a.Effective = func() *smartCropAuditWindow { v := auditCropWindow(*win); return &v }()
@@ -424,20 +518,31 @@ type poseAttemptAudit struct {
 	Failed      []poseFailedSample `json:"failed_samples"`
 }
 
+type posePathGap struct {
+	AtMs     int64  `json:"at_ms"`
+	BeforeMs int64  `json:"before_ms"`
+	AfterMs  int64  `json:"after_ms"`
+	Method   string `json:"method"`
+}
+
 func recordPoseAttempt(ctx context.Context, result *poseResult, framing string) {
 	a := cropAudit(ctx)
 	if a == nil {
 		return
 	}
 	a.PoseSamples = result.Samples
-	attempt := &poseAttemptAudit{Engine: "mediapipe_full", Algorithm: smartCropAlgorithmVersion, ModelSHA: poseModelSHA256, Runtime: poseRuntimeVersion, Framing: framing, CountScope: "Valid/invalid counts describe usable pose geometry; they do not establish hand coverage, crop fit or visual approval.", Requested: len(result.Samples), Analysed: len(result.Samples), Status: "planning", Failed: []poseFailedSample{}}
+	engine := "mediapipe_full"
+	if a.RequestedEngine == "hybrid" {
+		engine = "hybrid"
+	}
+	attempt := &poseAttemptAudit{Engine: engine, Algorithm: poseAlgorithmIdentity(engine), ModelSHA: poseModelSHA256, Runtime: poseRuntimeIdentity(engine), Framing: framing, CountScope: "Valid/invalid counts describe usable positioning geometry, including conservative recovery boxes; they do not establish hand coverage, crop fit or visual approval. Missing samples retain their original status; position interpolation never increases confidence.", Requested: len(result.Samples), Analysed: len(result.Samples), Status: "planning", Failed: []poseFailedSample{}}
 	for _, s := range result.Samples {
 		if poseSampleHasGeometry(s, a.SourceWidth, a.SourceHeight) {
 			attempt.Valid++
 		} else {
 			attempt.Invalid++
 		}
-		if s.Status == "uncertain_hand_evidence" {
+		if s.Status == "uncertain_hand_evidence" || s.Status == "uncertain_person_extent" {
 			attempt.Uncertain++
 		}
 		if s.Status != "fits_detected_upper_pose" {
@@ -445,6 +550,90 @@ func recordPoseAttempt(ctx context.Context, result *poseResult, framing string) 
 		}
 	}
 	a.PoseAttempt = attempt
+}
+
+// Preserve good native geometry when bounded gaps prevent a complete pose
+// estimate. Only the position is interpolated; samples/confidence remain intact.
+// Strict composition policy sees unknown, never an invented fit.
+func planHybridPoseSamples(samples []poseSample, w, h, rw, rh int) (*cropWindow, []cropPathPoint, []posePathGap, error) {
+	valid := []poseSample{}
+	for i, s := range samples {
+		if i > 0 && s.AtMs <= samples[i-1].AtMs {
+			return nil, nil, nil, fmt.Errorf("pose_timestamp_identity_mismatch")
+		}
+		if poseSampleHasGeometry(s, w, h) {
+			valid = append(valid, s)
+		}
+	}
+	if len(valid) == 0 || len(valid)*4 < len(samples)*3 {
+		return nil, nil, nil, fmt.Errorf("pose_insufficient_evidence")
+	}
+	win, supported, err := planPoseSamples(valid, w, h, rw, rh)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	// Chroma alignment need not discard a feasible edge strip merely to keep
+	// an exact integer ratio unit (e.g. 594x1056 versus 606x1080). Expand before
+	// declaring an action too wide, preserving a fixed size throughout a reel.
+	maxW, maxH := cropDimsForRatio(w, h, rw, rh)
+	neededW, top, bottom := 0, h, 0
+	for _, s := range valid {
+		b := poseBoundsWindow(s.Bounds, w, h)
+		neededW = max(neededW, b.W)
+		top = min(top, b.Y)
+		bottom = max(bottom, b.Y+b.H)
+	}
+	if neededW > win.W || bottom-top > win.H {
+		oldW := win.W
+		win.H = min(maxH, max(win.H, (int(math.Ceil(float64(min(neededW, maxW))*float64(rh)/float64(rw)))+1)&^1, bottom-top))
+		win.H = (win.H + 1) &^ 1
+		win.W = min(maxW, (int(math.Ceil(float64(win.H)*float64(rw)/float64(rh)))+1)&^1)
+		win.Y = clampInt(top-int(float64(win.H)*.055), max(0, bottom-win.H), min(h-win.H, top))
+		for i, s := range valid {
+			b := poseBoundsWindow(s.Bounds, w, h)
+			x := supported[i].X + (oldW-win.W)/2
+			if b.W <= win.W {
+				x = clampInt(x, max(0, b.X+b.W-win.W), min(w-win.W, b.X))
+			}
+			supported[i].X = clampInt(x, 0, w-win.W)
+			supported[i].Y = win.Y
+		}
+	}
+	// A too-wide action should still keep its supported visible head in-frame.
+	for i, s := range valid {
+		if len(s.Head) == 4 && poseBoundsWindow(s.Bounds, w, h).W > win.W {
+			head := poseBoundsWindow(s.Head, w, h)
+			if head.W > 0 && head.W <= win.W {
+				supported[i].X = clampInt(supported[i].X, max(0, head.X+head.W-win.W), min(w-win.W, head.X))
+			}
+		}
+	}
+	path := make([]cropPathPoint, 0, len(samples))
+	gaps := []posePathGap{}
+	for _, s := range samples {
+		i := sort.Search(len(supported), func(i int) bool { return supported[i].AtMs >= s.AtMs })
+		if i < len(supported) && supported[i].AtMs == s.AtMs {
+			path = append(path, supported[i])
+			continue
+		}
+		left, right := max(0, i-1), min(len(supported)-1, i)
+		a, b := supported[left], supported[right]
+		if a.AtMs == b.AtMs {
+			if absInt64(s.AtMs-a.AtMs) > 1000 {
+				return nil, nil, nil, fmt.Errorf("pose_insufficient_evidence")
+			}
+		} else if b.AtMs-a.AtMs > 2500 {
+			return nil, nil, nil, fmt.Errorf("pose_insufficient_evidence")
+		}
+		x := a.X
+		if a.AtMs != b.AtMs {
+			x = int(math.Round(float64(a.X) + float64(b.X-a.X)*float64(s.AtMs-a.AtMs)/float64(b.AtMs-a.AtMs)))
+		}
+		path = append(path, cropPathPoint{AtMs: s.AtMs, X: clampInt(x, 0, w-win.W), Y: win.Y})
+		gaps = append(gaps, posePathGap{AtMs: s.AtMs, BeforeMs: a.AtMs, AfterMs: b.AtMs, Method: "interpolated_position_only"})
+	}
+	win.X = path[0].X
+	return win, path, gaps, nil
 }
 
 // Expanding a legacy fallback retains its original rectangle at each sample.

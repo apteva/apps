@@ -53,6 +53,7 @@ type smartCropAudit struct {
 	PoseFailure     *poseRuntimeFailure `json:"pose_failure,omitempty"`
 	PoseLimitations []string            `json:"pose_limitations,omitempty"`
 	PoseSamples     []poseSample        `json:"pose_samples,omitempty"`
+	PosePathGaps    []posePathGap       `json:"pose_position_gaps,omitempty"`
 	RequestedEngine string              `json:"requested_engine,omitempty"`
 	EffectiveEngine string              `json:"effective_engine,omitempty"`
 	ModelSHA        string              `json:"model_sha256,omitempty"`

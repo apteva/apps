@@ -24,7 +24,7 @@ const renderAlgorithmVersion = "media-audit-1"
 // pre-analysis request caches need it; resolved local plans already include the
 // changed coordinates in their result-cache key.
 const legacySmartCropAlgorithmVersion = "media-smartcrop-exact-frame-pose-8"
-const smartCropAlgorithmVersion = "media-smartcrop-mediapipe-full-hands-10"
+const smartCropAlgorithmVersion = "media-smartcrop-hybrid-native-11"
 
 // Remote binaries/provider settings are not immutable. Restrict reuse to this
 // process lifetime as well as host/connection identity until they expose a
@@ -119,7 +119,7 @@ func preprocessSmartCrop(ctx context.Context, app *sdk.AppCtx, sc *storageClient
 	}
 	engine, _ := resolveSmartCropEngine(app, stringJSONValue(parsed["smart_crop_engine"]))
 	framing, _ := resolveSmartCropFraming(app, stringJSONValue(parsed["smart_crop_framing"]))
-	raw, _ := json.Marshal([]any{framing, engine, poseRuntimeVersion, poseModelSHA256, smartCropAlgorithmVersion, app.Manifest().Version, sc.base, project, op, sources, row.SourceSHA256, row.Width, row.Height, row.Rotation, row.FPS, row.DurationMs, row.Derivations, nativeSmartCropSceneCacheIdentity(app, project, row), target, ratio, mode, parsed["fit_mode"], app.Config().Get("render_host_id")})
+	raw, _ := json.Marshal([]any{framing, engine, poseRuntimeIdentity(engine), poseModelSHA256, posePersonModelSHA256, poseRecoveryModelSHA256, poseAlgorithmIdentity(engine), app.Manifest().Version, sc.base, project, op, sources, row.SourceSHA256, row.Width, row.Height, row.Rotation, row.FPS, row.DurationMs, row.Derivations, nativeSmartCropSceneCacheIdentity(app, project, row), target, ratio, mode, parsed["fit_mode"], app.Config().Get("render_host_id")})
 	key := fmt.Sprintf("%x", sha256.Sum256(raw))
 	var cached string
 	if app.AppDB().QueryRow(`SELECT params FROM smartcrop_cache WHERE cache_key=?`, key).Scan(&cached) == nil {
@@ -135,9 +135,23 @@ func preprocessSmartCrop(ctx context.Context, app *sdk.AppCtx, sc *storageClient
 	}
 	out := preprocessSmartCropUncached(ctx, app, sc, project, op, sources, params)
 	var resolved map[string]any
-	if ctx.Err() == nil && json.Unmarshal(out, &resolved) == nil && (resolved["crop_version"] == "v2" || resolved["crop_version"] == "pose_full") {
+	if ctx.Err() == nil && json.Unmarshal(out, &resolved) == nil && (resolved["crop_version"] == "v2" || resolved["crop_version"] == "pose_full" || resolved["crop_version"] == "pose_hybrid") {
 		if engine == "mediapipe_full" && resolved["crop_version"] != "pose_full" {
 			return out
+		}
+		if engine == "hybrid" {
+			if resolved["crop_version"] != "pose_hybrid" {
+				return out
+			}
+			var p struct {
+				Audit smartCropAudit `json:"crop_diagnostics"`
+			}
+			json.Unmarshal(out, &p)
+			for _, s := range p.Audit.PoseSamples {
+				if s.Recovery != nil && (s.Recovery.Status == "runtime_unavailable" || s.Recovery.Status == "budget_exhausted") {
+					return out
+				}
+			}
 		}
 		crop := map[string]any{}
 		for _, k := range []string{"crop_w", "crop_h", "crop_x", "crop_y", "crop_path", "crop_mode", "crop_version", "crop_diagnostics", "smart_crop_engine", "smart_crop_framing"} {
@@ -231,5 +245,5 @@ func smartCropUsedEngineFallback(raw []byte) bool {
 	if json.Unmarshal(raw, &p) != nil || p.Audit == nil {
 		return false
 	}
-	return p.Audit.RequestedEngine == "mediapipe_full" && p.Audit.EffectiveEngine != "mediapipe_full"
+	return (p.Audit.RequestedEngine == "mediapipe_full" || p.Audit.RequestedEngine == "hybrid") && p.Audit.EffectiveEngine != p.Audit.RequestedEngine
 }

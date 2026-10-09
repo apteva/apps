@@ -1306,7 +1306,7 @@ func preprocessSmartCropUncached(
 	parsed["smart_crop_framing"] = framing
 	audit.RequestedEngine = engine
 	audit.EffectiveEngine = "legacy"
-	if mode == "smart" && engine == "mediapipe_full" {
+	if mode == "smart" && (engine == "mediapipe_full" || engine == "hybrid") {
 		if win, path, poseErr := computeSmartCropPose(ctx, app, sc, projectID, sources[0], rw, rh, target, framing); poseErr == nil {
 			parsed["crop_w"] = win.W
 			parsed["crop_h"] = win.H
@@ -1314,6 +1314,9 @@ func preprocessSmartCropUncached(
 			parsed["crop_y"] = win.Y
 			parsed["crop_mode"] = mode
 			parsed["crop_version"] = "pose_full"
+			if engine == "hybrid" {
+				parsed["crop_version"] = "pose_hybrid"
+			}
 			parsed["smart_crop_engine"] = engine
 			if len(path) > 1 {
 				parsed["crop_path"] = path

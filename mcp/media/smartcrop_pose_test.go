@@ -16,7 +16,7 @@ import (
 
 func TestPoseEngineSelectionAndModelIdentity(t *testing.T) {
 	app := tk.NewAppCtx(t, "apteva.yaml")
-	for _, v := range []struct{ input, want string }{{"", "mediapipe_full"}, {"legacy", "legacy"}, {"mediapipe_full", "mediapipe_full"}} {
+	for _, v := range []struct{ input, want string }{{"", "hybrid"}, {"hybrid", "hybrid"}, {"legacy", "legacy"}, {"mediapipe_full", "mediapipe_full"}} {
 		got, e := resolveSmartCropEngine(app, v.input)
 		if e != nil || got != v.want {
 			t.Fatalf("%q: %s %v", v.input, got, e)
@@ -105,7 +105,15 @@ func TestMediaPipeFullLocalIntegration(t *testing.T) {
 		Path string `json:"clip_path"`
 	}
 	json.Unmarshal(raw, &reels)
-	output := filepath.Join(root, "integrated-full")
+	engine := os.Getenv("MEDIAPIPE_TEST_ENGINE")
+	if engine == "" {
+		engine = "mediapipe_full"
+	}
+	outputName := "integrated-full"
+	if engine == "hybrid" {
+		outputName = "integrated-hybrid"
+	}
+	output := filepath.Join(root, outputName)
 	os.MkdirAll(output, 0700)
 	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithConfig(map[string]string{"smart_crop_python": python}))
 	sc := &storageClient{}
@@ -130,7 +138,7 @@ func TestMediaPipeFullLocalIntegration(t *testing.T) {
 		p.IsImage = !video
 		p.HasVideo = video
 		op := "crop"
-		params := map[string]any{"target_ratio": "9:16", "crop_mode": "smart", "output_width": 540}
+		params := map[string]any{"target_ratio": "9:16", "crop_mode": "smart", "output_width": 540, "smart_crop_engine": engine}
 		if video {
 			var seconds float64
 			fmt.Sscan(meta.Format.Duration, &seconds)
@@ -142,6 +150,7 @@ func TestMediaPipeFullLocalIntegration(t *testing.T) {
 		}
 		upsertMedia(app.AppDB(), testProj, name, p, strings.Repeat("a", 64), "/", name)
 		ctx := context.WithValue(context.Background(), renderSourcesKey{}, map[string]string{name: source})
+		ctx = context.WithValue(ctx, poseRecoveryModelsKey{}, os.Getenv("MEDIAPIPE_RECOVERY_MODEL_DIR"))
 		raw, _ := json.Marshal(params)
 		resolved := preprocessSmartCrop(ctx, app, sc, testProj, op, []string{name}, raw)
 		var parsed struct {
@@ -149,7 +158,11 @@ func TestMediaPipeFullLocalIntegration(t *testing.T) {
 			Audit   smartCropAudit `json:"crop_diagnostics"`
 		}
 		json.Unmarshal(resolved, &parsed)
-		if parsed.Version != "pose_full" || parsed.Audit.EffectiveEngine != "mediapipe_full" {
+		version := "pose_full"
+		if engine == "hybrid" {
+			version = "pose_hybrid"
+		}
+		if parsed.Version != version || parsed.Audit.EffectiveEngine != engine {
 			t.Fatalf("%s fallback: %s", name, resolved)
 		}
 		if parsed.Audit.Coverage == "sampled_extent_fits" && !cropRetainsSampledExtents(&parsed.Audit) {
@@ -205,7 +218,7 @@ func TestPoseSchemasAndFallbackCacheIsolation(t *testing.T) {
 		Audit smartCropAudit `json:"crop_diagnostics"`
 	}
 	json.Unmarshal(out, &parsed)
-	if parsed.Audit.RequestedEngine != "mediapipe_full" || parsed.Audit.EffectiveEngine != "legacy" || len(parsed.Audit.Fallbacks) == 0 {
+	if parsed.Audit.RequestedEngine != "hybrid" || parsed.Audit.EffectiveEngine != "legacy" || len(parsed.Audit.Fallbacks) == 0 {
 		t.Fatalf("hidden fallback: %s", out)
 	}
 	if !smartCropUsedEngineFallback(out) {
@@ -305,7 +318,7 @@ print('bounded retries, fresh-frame identity, empty outputs, exhaustion and dead
 }
 
 func TestPoseAttemptDiagnosticsSurvivePlanningFailure(t *testing.T) {
-	a := &smartCropAudit{SourceWidth: 1920, SourceHeight: 1080, EffectiveEngine: "legacy"}
+	a := &smartCropAudit{SourceWidth: 1920, SourceHeight: 1080, EffectiveEngine: "legacy", RequestedEngine: "hybrid"}
 	ctx := context.WithValue(context.Background(), smartCropAuditKey{}, a)
 	valid := poseSample{AtMs: 500, Status: "uncertain_hand_evidence", Bounds: []float64{900, 300, 1200, 900}, Landmarks: []poseLandmarkEvidence{{Index: 15, Visibility: .2, Presence: .9}}}
 	valid.Crop.Width = 378
@@ -417,6 +430,10 @@ func TestMediaPipeReportNativeRegression(t *testing.T) {
 	}
 	app := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithConfig(map[string]string{"smart_crop_python": python}))
 	sc := &storageClient{}
+	engine := os.Getenv("MEDIAPIPE_TEST_ENGINE")
+	if engine == "" {
+		engine = "mediapipe_full"
+	}
 	for _, c := range []struct {
 		name, file, framing, coverage string
 		w, h                          int
@@ -428,13 +445,17 @@ func TestMediaPipeReportNativeRegression(t *testing.T) {
 		{"no-pose-fallback", "92078-127385.png", "upper_body", "unknown", 606, 1080, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			if engine == "hybrid" && c.fallback {
+				t.Skip("Full-only fallback baseline; hybrid has independent same-frame recovery")
+			}
 			source := filepath.Join(root, "native", c.file)
 			p := sampleImageProbe()
 			p.Width = 1920
 			p.Height = 1080
 			upsertMedia(app.AppDB(), testProj, c.name, p, strings.Repeat("a", 64), "/", c.file)
 			ctx := context.WithValue(context.Background(), renderSourcesKey{}, map[string]string{c.name: source})
-			params, _ := json.Marshal(map[string]any{"target_ratio": "9:16", "crop_mode": "smart", "fit_mode": "crop", "smart_crop_framing": c.framing})
+			ctx = context.WithValue(ctx, poseRecoveryModelsKey{}, os.Getenv("MEDIAPIPE_RECOVERY_MODEL_DIR"))
+			params, _ := json.Marshal(map[string]any{"target_ratio": "9:16", "crop_mode": "smart", "fit_mode": "crop", "smart_crop_framing": c.framing, "smart_crop_engine": engine})
 			resolved := preprocessSmartCrop(ctx, app, sc, testProj, "crop", []string{c.name}, params)
 			var r struct {
 				W     int            `json:"crop_w"`
@@ -449,7 +470,7 @@ func TestMediaPipeReportNativeRegression(t *testing.T) {
 				if r.Audit.EffectiveEngine != "legacy" || r.Audit.PoseAttempt.Invalid != 1 || r.Audit.PoseAttempt.Status != "planning_failed" || len(r.Audit.PoseSamples) != 1 || len(r.Audit.PoseAttempt.Failed) != 1 || r.Audit.PoseAttempt.Failed[0].Category != "no_pose_detected" {
 					t.Fatalf("fallback lost evidence: %s", resolved)
 				}
-			} else if r.Audit.EffectiveEngine != "mediapipe_full" || len(r.Audit.PoseSamples[0].Landmarks) != 23 {
+			} else if r.Audit.EffectiveEngine != engine || len(r.Audit.PoseSamples[0].Landmarks) != 23 {
 				t.Fatalf("missing confidence: %s", resolved)
 			}
 			if c.coverage == "sampled_extent_fits" && !cropRetainsSampledExtents(&r.Audit) {
