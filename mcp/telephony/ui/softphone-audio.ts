@@ -1,3 +1,4 @@
+import { TransportTelemetry, TransportTelemetrySender, type TransportSample } from "./transport-telemetry";
 import { AudioRuntimeTelemetry } from "./audio-runtime-telemetry";
 import { mediaFailure, type MediaSessionEvent } from "../frontend/src/media-lease";
 // Browser audio engine for the Telephony softphone.
@@ -170,6 +171,7 @@ export interface AudioObservationEvent {
   clock_uncertainty_ms?:number; sequence?:number;
 }
 export interface SoftphoneDiagnostics {
+  transportSamples?: TransportSample[];
   playbackEvents?: AudioObservationEvent[];
   captureQueueEvents?: AudioObservationEvent[];
   /** Playback starvation, separate from discarded received frames. */
@@ -426,6 +428,11 @@ export class MicrophoneTestSession {
 
 export class SoftphoneSession {
   private clientEpoch = crypto.randomUUID();
+  private transportTelemetry=new TransportTelemetry("websocket");
+  private transportSender=new TransportTelemetrySender(sample=>{
+    if(!this.mediaSocketConnected||!this.worker||this.diagnostics.websocketBufferedBytes>1920)return false;
+    this.worker.postMessage({type:"send.telemetry",data:JSON.stringify({type:"transport.samples",diagnostics:{client_epoch:this.clientEpoch,transport_samples:[sample]}})});return true;
+  });
   private worker: Worker | null = null;
   private ctx: AudioContext | null = null;
   private stream: MediaStream | null = null;
@@ -658,6 +665,9 @@ export class SoftphoneSession {
           this.diagnostics.websocketBufferedBytes = message.buffered_bytes ?? 0;
           this.diagnostics.captureQueueEvents=message.capture_queue_events;
           this.transportTiming = message.timing ?? {};
+          if(message.observation)this.transportTelemetry.observe({...this.transportTiming,...message.observation,rtt_ms:message.timing?.rtt_ms,queue_ms:this.diagnostics.queueMs,target_ms:this.diagnostics.targetMs,buffered_bytes:message.buffered_bytes,underruns:this.diagnostics.underruns,dropped_ms:this.diagnostics.droppedMs,capture_sequence_gaps:this.diagnostics.captureSequenceGaps,playback_sequence_gaps:this.diagnostics.playbackSequenceGaps,main_thread_max_pause_ms:this.runtimeTelemetry.counters.main_thread_max_pause_ms},
+            {connection:this.mediaSocketConnected?"connected":"reconnecting",context:this.ctx?.state,muted:String(this.muted),device_muted:String(this.stream?.getAudioTracks()[0]?.muted),track:this.stream?.getAudioTracks()[0]?.readyState,codec:"pcm16"},performance.now(),message.observation?.timestamp,message.observation?.window_ms);
+          this.diagnostics.transportSamples=this.transportTelemetry.recent();
           if (typeof message.timing?.rtt_ms === "number") this.diagnostics.rttMs = Math.round(message.timing.rtt_ms);
         }
       };
@@ -799,6 +809,7 @@ export class SoftphoneSession {
       mic_limiter_reduction_db: value.micLimiterReductionDb, capture_sequence_gaps: value.captureSequenceGaps,
       playback_sequence_gaps: value.playbackSequenceGaps, drop_events: value.dropEvents,
     }}));
+    if(this.mediaSocketConnected)this.transportSender.enqueue(this.transportTelemetry.drain());
     this.callbacks.onDiagnostics?.({ ...value });
   }
 
@@ -840,6 +851,7 @@ export class SoftphoneSession {
   }
 
   private teardown(): void {
+    this.transportSender.stop();
     this.setPlaybackObservation(false, "observation_ended");
     this.stopRingback();
     this.microphoneTransportReady = false;

@@ -369,6 +369,7 @@ type App struct {
 	admissionMu      sync.RWMutex
 	audioPeerHasher  audioPeerHasher
 	audioNetworks    audioNetworkCollector
+	audioTransports  audioTransportCollector
 	audioAlerts      audioAlertCorrelator
 	decisionWG       sync.WaitGroup
 	decisionStopping bool

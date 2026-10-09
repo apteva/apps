@@ -452,6 +452,25 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 	if row, ok := detail["call"].(map[string]any); ok {
 		result.ServerDiagnostics = map[string]any{"browser": row["browser_audio_diagnostics"], "carrier": row["carrier_audio_diagnostics"]}
 	}
+	var health map[string]any
+	if status, body := tier2Request(t, sc, "GET", "/audio-health?call_id="+id+"&project_id="+tier2Project, nil, &health, tier2Headers()); status != 200 {
+		result.Errors = append(result.Errors, fmt.Sprintf("transport history read: %d %s", status, body))
+	} else {
+		result.ServerDiagnostics["transport_samples"] = health["transport_samples"]
+		history, ok := health["transport_samples"].([]any)
+		if !ok || len(history) == 0 {
+			result.Errors = append(result.Errors, "transport history not persisted")
+		}
+		complete := false
+		for _, entry := range history {
+			if sample, ok := entry.(map[string]any); ok && sample["complete"] == true {
+				complete = true
+			}
+		}
+		if !complete {
+			result.Errors = append(result.Errors, "no complete paced transport sample persisted")
+		}
+	}
 	cancel()
 	<-carrierDone
 	select {
@@ -503,6 +522,18 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 		if err := json.Unmarshal(wire, &control); err != nil {
 			result.Errors = append(result.Errors, "browser diagnostics protocol: "+err.Error())
 			break
+		}
+		if control.Diagnostics != nil {
+			samples := control.Diagnostics.TransportSamples
+			raw, _ := json.Marshal(samples)
+			if len(samples) > 2 || len(raw) > 8192 {
+				result.Errors = append(result.Errors, "transport history wire budget exceeded")
+			}
+			for _, sample := range samples {
+				if sample.Timestamp == "" || sample.ID == "" {
+					result.Errors = append(result.Errors, "transport sample missing source time or identity")
+				}
+			}
 		}
 	}
 	result.Errors = append(result.Errors, result.Browser.PageErrors...)

@@ -453,13 +453,6 @@ self.onmessage = (event) => {
       microphoneReady = Boolean(message.value);
       captureGateOpenedAt=monotonicEpochMS();
       break;
-    case "send.telemetry":
-      // Monitoring parts may be lost under pressure; microphone audio is
-      // authoritative and must never wait behind a diagnostic backlog.
-      if(socket?.readyState===WebSocket.OPEN && socket.bufferedAmount<=1920) {
-        try{socket.send(message.data);}catch{/* observational only */}
-      }
-      break;
     case "send.text":
       if (socket?.readyState === WebSocket.OPEN) {
         socket.send(message.data);

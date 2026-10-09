@@ -838,10 +838,17 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				_ = writer.Write(ws.OpText, softphoneEvent("dtmf.sent", callID))
+			case "transport.samples":
+				if control.Diagnostics != nil && hub.readyBrowserWriter() == writer {
+					parts := normalizeTransportSamples(control.Diagnostics.TransportSamples, time.Now())
+					parts = hub.telemetry.attributeTransportSamples(writer, control.Diagnostics.ClientEpoch, parts)
+					a.audioTransports.enqueue(parts, row)
+				}
 			case "diagnostics":
 				if control.Diagnostics != nil && hub.readyBrowserWriter() == writer {
 					normalized := normalizeBrowserAudioDiagnostics(*control.Diagnostics)
-					hub.telemetry.observeBrowserConnection(writer, normalized)
+					samples := hub.telemetry.observeBrowserConnection(writer, normalized)
+					a.audioTransports.enqueue(samples, row)
 					// Coalesce reports in memory; the watcher persists off the frame path.
 				}
 			}

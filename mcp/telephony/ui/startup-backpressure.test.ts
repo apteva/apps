@@ -105,3 +105,25 @@ test('short-tail completion cannot suppress a later real live underrun',()=>{
  expect(r.p.underruns).toBe(1);expect(r.p.underrunSamples).toBeGreaterThan(0);
  expect(r.p.playedSamples+r.p.queued+r.p.droppedSamples).toBe(2400);
 });
+
+test('interval transport observations measure wire rates and rejected-frame delay before discard without changing PCM',()=>{
+ const t=transport();t.socket.onmessage({data:JSON.stringify({type:'media.capabilities',version:3})});
+ function packet(seq:number,sent:number){const data=new ArrayBuffer(64+960),v=new DataView(data);v.setUint32(0,0x33545041,true);v.setUint32(4,seq,true);v.setFloat64(16,sent,true);v.setFloat64(24,5,true);v.setFloat64(48,sent,true);return data;}
+ t.socket.onmessage({data:packet(1,10000)});
+ t.setNow(17230);t.socket.onmessage({data:packet(2,10020)});
+ t.frame(7230,1);t.intervals[0]();
+ const stats=t.events.findLast(e=>e.type==='transport.stats');
+ expect(stats.observation.window_ms).toBe(7230);expect(stats.observation.receive_gap_ms).toBe(7230);expect(stats.observation.delivery_excess_ms).toBe(7210);
+ expect(stats.observation.server_queue_ms).toBe(5);expect(stats.observation.receive_bitrate_bps).toBeCloseTo(2048*8000/7230,4);
+ expect(stats.timing.playback_transport_dropped_ms+stats.timing.playback_source_dropped_ms).toBe(20);
+ // Repeat reports within the same interval must not create inflated rates.
+ t.cmd({type:'send.text',data:'{}'});expect(t.events.findLast(e=>e.type==='transport.stats').observation).toBeUndefined();
+ t.setNow(18230);t.intervals[0]();const empty=t.events.findLast(e=>e.type==='transport.stats').observation;
+ expect(empty.receive_bitrate_bps).toBe(0);expect(empty.delivery_excess_ms).toBeNull();
+});
+
+ test('monitoring pieces skip a backed-up socket without delaying capture or changing its limits',()=>{
+  const t=transport();t.socket.bufferedAmount=2000;t.cmd({type:'send.telemetry',data:'diagnostic-part'});
+  expect(t.socket.sent).not.toContain('diagnostic-part');t.frame();expect(t.socket.sent.some((v:any)=>v instanceof ArrayBuffer)).toBe(true);
+  t.socket.bufferedAmount=0;t.cmd({type:'send.telemetry',data:'diagnostic-part'});expect(t.socket.sent).toContain('diagnostic-part');
+ });

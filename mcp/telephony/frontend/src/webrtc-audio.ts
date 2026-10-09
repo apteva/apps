@@ -1,4 +1,5 @@
 import { microphoneConstraints, playbackBufferOptions, PreviewResampler, type SoftphoneAudioOptions, type SoftphoneCallbacks, type SoftphoneDiagnostics } from "../../ui/softphone-audio";
+import { TransportTelemetry, TransportTelemetrySender, transportMetrics, transportStates } from "../../ui/transport-telemetry";
 import { AudioRuntimeTelemetry } from "../../ui/audio-runtime-telemetry";
 import { playRingback, ringbackPattern } from "../../ui/ringback";
 import { mediaFailure, type MediaSessionEvent } from "./media-lease";
@@ -21,32 +22,66 @@ export function permanentRTCFailure(error: unknown): boolean {
   return failure.denied || failure.expired || ["NotAllowedError","NotFoundError","SecurityError","OverconstrainedError"].includes((error as Error)?.name);
 }
 
-/** RTP counters are separate from PCM drops; concealment is not discarded audio. */
-export function rtcStatistics(report: RTCStatsReport, previous?: { at: number; sent: number; received: number }) {
-  let sent=0, received=0, lost=0, jitter=0, concealed=0, discarded=0, delay=0, emitted=0;
-  let rtt: number | null=null, protocol: string | undefined, candidateType: string | undefined;
-  let at=0;
-  report.forEach((s: any) => {
-    // RTCStats timestamps use milliseconds since the Unix epoch; 1e12
-    // would clamp every present-day sample and make bitrate deltas zero.
+type RTCPrevious = { at:number;sent:number;received:number; counters?:Record<string,Record<string,number>>; pairID?:string;pathRevision?:number };
+/** RTP counters are directional. Missing native fields stay absent. Delta
+ * calculations require the same stats identity and a nondecreasing counter. */
+export function rtcStatistics(report: RTCStatsReport, previous?: RTCPrevious) {
+  let sent=0, received=0, lost=0, jitter=0, concealed=0, discarded=0, delay=0, emitted=0, at=0;
+  let rtt:number|null=null, pairID:string|undefined, protocol:string|undefined, candidateType:string|undefined;
+  const counters:Record<string,Record<string,number>>={}, metrics:Record<string,number>={}, states:Record<string,string>={};
+  const numeric=(s:any,k:string)=>typeof s?.[k]==="number" && Number.isFinite(s[k]) ? Math.max(0,s[k]) : undefined;
+  const copy=(s:any,prefix:string,keys:string[])=>{for(const k of keys){const n=numeric(s,k);if(n!==undefined)metrics[prefix+k]=n;}};
+  const interval=(s:any,id:string,numerator:string,denominator:string,key:string)=>{
+    const n=numeric(s,numerator), d=numeric(s,denominator), old=previous?.counters?.[id];
+    if(n!==undefined && d!==undefined){counters[id]??={};counters[id][numerator]=n;counters[id][denominator]=d;
+      if(old && n>=old[numerator] && d>old[denominator]) metrics[key]=(n-old[numerator])/(d-old[denominator])*1000;}
+  };
+  let identities=0;
+  report.forEach((s:any,id:string)=>{
     at=Math.max(at,finite(s.timestamp,1e15));
-    if (s.type === "outbound-rtp" && (s.kind ?? s.mediaType)==="audio") sent+=finite(s.bytesSent);
-    if (s.type === "inbound-rtp" && (s.kind ?? s.mediaType)==="audio") {
-      received+=finite(s.bytesReceived); lost+=finite(s.packetsLost); jitter=Math.max(jitter,finite(s.jitter)*1000);
-      concealed+=finite(s.concealedSamples)*1000/48000; discarded+=finite(s.packetsDiscarded);
-      delay+=finite(s.jitterBufferDelay); emitted+=finite(s.jitterBufferEmittedCount);
+    if((s.kind??s.mediaType??report.get(s.localId)?.kind)==="audio" && identities++<32){
+      if(s.type==="outbound-rtp"){
+        sent+=finite(s.bytesSent);copy(s,"sender_",["bytesSent","packetsSent","headerBytesSent","retransmittedPacketsSent","retransmittedBytesSent","nackCount","targetBitrate"]);
+        interval(s,id,"totalPacketSendDelay","packetsSent","sender_send_delay_interval_ms");
+      }
+      if(s.type==="inbound-rtp"){
+        received+=finite(s.bytesReceived);lost+=finite(s.packetsLost);jitter=Math.max(jitter,finite(s.jitter)*1000);
+        const codec=report.get(s.codecId);const rate=numeric(codec,"clockRate")??48000;
+        concealed+=finite(s.concealedSamples)*1000/rate;discarded+=finite(s.packetsDiscarded);delay+=finite(s.jitterBufferDelay);emitted+=finite(s.jitterBufferEmittedCount);
+        copy(s,"receiver_",["bytesReceived","packetsReceived","packetsLost","jitter","packetsDiscarded","concealedSamples","silentConcealedSamples","concealmentEvents","insertedSamplesForDeceleration","removedSamplesForAcceleration","totalSamplesReceived","audioLevel","totalAudioEnergy","totalSamplesDuration","nackCount","fecPacketsReceived","fecPacketsDiscarded"]);
+        interval(s,id,"jitterBufferDelay","jitterBufferEmittedCount","receiver_jitter_buffer_interval_ms");
+        interval(s,id,"jitterBufferTargetDelay","jitterBufferEmittedCount","receiver_jitter_target_interval_ms");
+        interval(s,id,"jitterBufferMinimumDelay","jitterBufferEmittedCount","receiver_jitter_minimum_interval_ms");
+        interval(s,id,"totalProcessingDelay","packetsReceived","receiver_processing_interval_ms");
+        if(numeric(s,"lastPacketReceivedTimestamp")!==undefined)metrics.receiver_last_packet_age_ms=Math.max(0,s.timestamp-s.lastPacketReceivedTimestamp);
+        if(codec){states.codec=codec.mimeType;metrics.codec_clock_rate=rate;if(numeric(codec,"channels")!==undefined)metrics.codec_channels=codec.channels;}
+      }
+      if(s.type==="remote-inbound-rtp")copy(s,"remote_receiver_",["packetsLost","fractionLost","jitter","roundTripTime","totalRoundTripTime","roundTripTimeMeasurements"]);
+      if(s.type==="remote-outbound-rtp")copy(s,"remote_sender_",["packetsSent","bytesSent"]);
+      const bytesKey=s.type==="outbound-rtp"?"bytesSent":s.type==="inbound-rtp"?"bytesReceived":undefined;
+      if(bytesKey && numeric(s,bytesKey)!==undefined){counters[id]??={};counters[id][bytesKey]=s[bytesKey];counters[id].at=s.timestamp;}
     }
-    if (s.type==="transport" && s.selectedCandidatePairId) {
-      const pair=report.get(s.selectedCandidatePairId);
-      if (pair) { rtt=typeof pair.currentRoundTripTime==="number" ? finite(pair.currentRoundTripTime)*1000 : null;
-        const local=report.get(pair.localCandidateId); if(local){protocol=local.protocol;candidateType=local.candidateType;} }
+    if(s.type==="transport" && s.selectedCandidatePairId){
+      pairID=s.selectedCandidatePairId;states.dtls=s.dtlsState;
+      const pair=report.get(pairID!);if(pair){
+        rtt=numeric(pair,"currentRoundTripTime")!==undefined?pair.currentRoundTripTime*1000:null;
+        copy(pair,"pair_",["availableOutgoingBitrate","availableIncomingBitrate","currentRoundTripTime","totalRoundTripTime","bytesSent","bytesReceived","requestsSent","requestsReceived","responsesSent","responsesReceived","consentRequestsSent"]);states.pair=pair.state;
+        const local=report.get(pair.localCandidateId),remote=report.get(pair.remoteCandidateId);
+        if(local){protocol=local.protocol;candidateType=local.candidateType;states.protocol=protocol!;states.local_candidate=candidateType!;states.relay_protocol=local.relayProtocol;}
+        if(remote)states.remote_candidate=remote.candidateType;
+      }
     }
   });
-  const seconds=previous && at>previous.at ? (at-previous.at)/1000 : 0;
-  return { previous:{at,sent,received}, rtt:rtt as number|null, queueMs:emitted>0 ? delay/emitted*1000 : 0,
-    webrtc:{protocol,candidateType,sendBitrateBps:seconds ? Math.max(0,sent-(previous?.sent ?? 0))*8/seconds : 0,
-      receiveBitrateBps:seconds ? Math.max(0,received-(previous?.received ?? 0))*8/seconds : 0,
-      packetsLost:lost,jitterMs:jitter,concealedMs:concealed,packetsDiscarded:discarded,jitterBufferMs:emitted>0 ? delay/emitted*1000 : 0} };
+  const bitrate=(key:string,fallback:number)=>{
+    if(previous?.counters){let total=0;for(const [id,c] of Object.entries(counters)){const old=previous.counters[id];if(old && c[key]>=old[key] && c.at>old.at)total+=(c[key]-old[key])*8000/(c.at-old.at);}return total;}
+    const seconds=previous && at>previous.at?(at-previous.at)/1000:0;return seconds?Math.max(0,fallback-(key==="bytesSent"?previous!.sent:previous!.received))*8/seconds:0;
+  };
+  const pathRevision=(previous?.pathRevision??0)+(pairID && pairID!==previous?.pairID?1:0);
+  metrics.path_revision=pathRevision;
+  const sendBitrateBps=bitrate("bytesSent",sent),receiveBitrateBps=bitrate("bytesReceived",received);
+  return {previous:{at,sent,received,counters,pairID,pathRevision},rtt:rtt as number|null,queueMs:emitted>0?delay/emitted*1000:0,
+    metrics:transportMetrics({...metrics,send_bitrate_bps:sendBitrateBps,receive_bitrate_bps:receiveBitrateBps}),states:transportStates(states),
+    webrtc:{protocol,candidateType,sendBitrateBps,receiveBitrateBps,packetsLost:lost,jitterMs:jitter,concealedMs:concealed,packetsDiscarded:discarded,jitterBufferMs:emitted>0?delay/emitted*1000:0}};
 }
 
 /** Native WebRTC media; the socket carries authenticated signaling/control only. */
@@ -81,7 +116,18 @@ export class WebRTCAudioConnection implements AudioConnection {
   private options?: SoftphoneAudioOptions;
   private workletURL?: string;
   private events: MediaSessionEvent[]=[];
-  private previous?: {at:number;sent:number;received:number};
+  private previous?: RTCPrevious;
+  private sampling=new WeakSet<RTCPeerConnection>();
+  private transportTelemetry=new TransportTelemetry("webrtc");
+  private transportSender=new TransportTelemetrySender(sample=>{
+    if(this.socket?.readyState!==WebSocket.OPEN||this.socket.bufferedAmount>1024)return false;
+    this.send({type:"transport.samples",diagnostics:{client_epoch:this.clientEpoch,transport_samples:[sample]}});return true;
+  },report=>{
+    if(this.socket?.readyState!==WebSocket.OPEN||this.socket.bufferedAmount>1024)return false;
+    this.send(report);return true;
+  });
+  private statsErrors=0;
+  private lastStatsSend=-Infinity;
   private reportedLoss=0;
   private clientEpoch=crypto.randomUUID();
   private nativeCounts?: {packetsLost:number;packetsDiscarded:number;concealedMs:number};
@@ -224,9 +270,10 @@ export class WebRTCAudioConnection implements AudioConnection {
   private send(value:unknown){if(this.socket?.readyState===WebSocket.OPEN && this.socket.bufferedAmount<65536)try{this.socket.send(JSON.stringify(value));}catch{/* reconnect handles failure */}}
   private gate(){const open=this.ready&&this.peer&&!this.muted;this.capture?.port.postMessage({type:"muted",value:!open});this.destination?.stream.getAudioTracks().forEach(t=>t.enabled=open);}
   private async statistics(generation:number){
-    if(!this.current(generation)||!this.pc)return;
+    if(!this.current(generation)||!this.pc||this.sampling.has(this.pc))return;
+    const pc=this.pc,started=performance.now();this.sampling.add(pc);
     try{
-      const result=rtcStatistics(await this.pc.getStats(),this.previous);if(!this.current(generation))return;
+      const result=rtcStatistics(await pc.getStats(),this.previous);if(!this.current(generation)||this.pc!==pc)return;
       this.previous=result.previous;
       this.nativeCounts={packetsLost:result.webrtc.packetsLost,packetsDiscarded:result.webrtc.packetsDiscarded,concealedMs:result.webrtc.concealedMs};
       result.webrtc.packetsLost+=this.completedCounts.packetsLost;
@@ -235,9 +282,25 @@ export class WebRTCAudioConnection implements AudioConnection {
       if(result.webrtc.packetsLost>this.reportedLoss){this.diagnostics.dropEvents=[...this.diagnostics.dropEvents,{timestamp:new Date().toISOString(),direction:"carrier_to_operator",reason:"webrtc_packet_loss",duration_ms:0}].slice(-100);this.reportedLoss=result.webrtc.packetsLost;}
       this.diagnostics={...this.diagnostics,rttMs:result.rtt,queueMs:result.queueMs,maxQueueMs:Math.max(this.diagnostics.maxQueueMs,result.queueMs),targetMs:this.options?.playbackTargetMs??60,webrtc:result.webrtc,playbackSequenceGaps:result.webrtc.packetsLost,sessionEvents:this.events.slice(),websocketBufferedBytes:this.socket?.bufferedAmount??0};
       const track=this.stream?.getAudioTracks()[0];
-      this.send({type:"diagnostics",diagnostics:{client_epoch:this.clientEpoch,media_transport:"webrtc",codec:"opus",webrtc:result.webrtc,connection_state:"connected",carrier_peer_connected:this.peer,audio_context_state:this.context?.state,microphone_muted:this.muted,microphone_track_state:track?.readyState,microphone_device_muted:track?.muted,session_events:this.events,rtt_ms:result.rtt===null?null:Math.round(result.rtt),playback_queue_ms:Math.round(result.queueMs),playback_target_ms:this.diagnostics.targetMs,audio_context_rate:this.context?.sampleRate,playback_sequence_gaps:result.webrtc.packetsLost,drop_events:this.diagnostics.dropEvents,timing:{runtime:this.runtime.counters}}});
+      this.transportTelemetry.observe({...result.metrics,rtt_ms:result.rtt,queue_ms:result.queueMs,target_ms:this.diagnostics.targetMs,buffered_bytes:this.socket?.bufferedAmount??0,stats_errors:this.statsErrors,stats_duration_ms:performance.now()-started,main_thread_max_pause_ms:this.runtime.counters.main_thread_max_pause_ms},
+        {...result.states,ice:pc.iceConnectionState,connection:"connected",context:this.context?.state,muted:String(this.muted),device_muted:String(track?.muted),track:track?.readyState});
+      this.diagnostics.transportSamples=this.transportTelemetry.recent();
+      this.sendStatistics();
       safe(()=>this.callbacks.onDiagnostics?.({...this.diagnostics}));
-    }catch{/* statistics must not affect media */}
+    }catch{
+      if(this.current(generation)&&this.pc===pc){
+        this.statsErrors++;
+        this.transportTelemetry.observe({stats_errors:this.statsErrors,stats_duration_ms:performance.now()-started},{ice:pc.iceConnectionState,context:this.context?.state,muted:String(this.muted)});
+        this.diagnostics.transportSamples=this.transportTelemetry.recent();this.sendStatistics();
+        safe(()=>this.callbacks.onDiagnostics?.({...this.diagnostics}));
+      }
+    }
+    finally{this.sampling.delete(pc);}
+  }
+  private sendStatistics(){
+    const track=this.stream?.getAudioTracks()[0];
+      if(performance.now()-this.lastStatsSend>=5000){this.lastStatsSend=performance.now();
+      this.transportSender.enqueueReport({type:"diagnostics",diagnostics:{client_epoch:this.clientEpoch,media_transport:"webrtc",codec:"opus",webrtc:this.diagnostics.webrtc,connection_state:"connected",carrier_peer_connected:this.peer,audio_context_state:this.context?.state,microphone_muted:this.muted,microphone_track_state:track?.readyState,microphone_device_muted:track?.muted,session_events:this.events,rtt_ms:this.diagnostics.rttMs===null?null:Math.round(this.diagnostics.rttMs),playback_queue_ms:Math.round(this.diagnostics.queueMs),playback_target_ms:this.diagnostics.targetMs,audio_context_rate:this.context?.sampleRate,playback_sequence_gaps:this.diagnostics.webrtc?.packetsLost,drop_events:this.diagnostics.dropEvents,timing:{runtime:this.runtime.counters}}});this.transportSender.enqueue(this.transportTelemetry.drain());}
   }
   private playWhisper(data:ArrayBuffer){
     if(data.byteLength<17||data.byteLength>176||this.whisperEpoch===null||!this.context)return;
@@ -281,6 +344,7 @@ export class WebRTCAudioConnection implements AudioConnection {
   startRingback(country?:string){this.stopRingback();if(this.context&&this.speaker)this.ringback=playRingback(this.context,this.speaker,ringbackPattern(country));}
   stopRingback(){this.ringback?.();this.ringback=undefined;}
   private cleanup(){
+    this.transportSender.stop();
     if(this.nativeCounts){for(const key of ["packetsLost","packetsDiscarded","concealedMs"] as const)this.completedCounts[key]+=this.nativeCounts[key];this.nativeCounts=undefined;}
     ++this.generation;this.ready=this.peer=false;this.stopRingback();clearInterval(this.timer);this.timer=undefined;
     const socket=this.socket;this.socket=undefined;if(socket){socket.onclose=socket.onmessage=socket.onerror=null;socket.close();}
