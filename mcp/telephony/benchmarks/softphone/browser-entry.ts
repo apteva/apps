@@ -13,6 +13,14 @@ function tone(frame:Float32Array,rate:number):[number,number]{
  const errors:string[]=[],states:any[]=[],diagnostics:any[]=[],notices:any[]=[];
  const sourceContext=new AudioContext({sampleRate:24000});await sourceContext.audioWorklet.addModule('/probe.js');await sourceContext.resume();
  const source=new AudioWorkletNode(sourceContext,'benchmark-source'),destination=sourceContext.createMediaStreamDestination();source.connect(destination);
+ const clockObserver=new Worker('/clock-observer.js');
+ let playbackClockSerial=0;
+ const observeClock=(node:AudioWorkletNode,stage:string)=>{
+  const channel=new MessageChannel();
+  node.port.postMessage({clock_port:channel.port1},[channel.port1]);
+  clockObserver.postMessage({type:'attach',stage,port:channel.port2},[channel.port2]);
+ };
+ observeClock(source,'synthetic_microphone');
  const original=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
  const OriginalAudioContext=window.AudioContext;
  const OriginalPeerConnection=window.RTCPeerConnection;
@@ -54,6 +62,7 @@ function tone(frame:Float32Array,rate:number):[number,number]{
   source.port.postMessage({start:sourceStart});
   const installProbe=async(context:AudioContext)=>{
    probe?.disconnect();await context.audioWorklet.addModule('/probe.js');probe=new AudioWorkletNode(context,'benchmark-output');
+   observeClock(probe,`playback:${playbackClockSerial++}`);
    const silent=context.createGain();silent.gain.value=0;(rtc?session.speaker:session.playback).connect(probe);probe.connect(silent);silent.connect(context.destination);
    last=-2;stable=0;segment=false;symbols=[];start=-1000;
    probe.port.onmessage=event=>{
@@ -95,10 +104,15 @@ function tone(frame:Float32Array,rate:number):[number,number]{
     }
     await new Promise(r=>setTimeout(r,100));
   }
-  const result={clock_progress:clockProgress,wire_diagnostics:wireDiagnostics,markers,states,notices,diagnostics:diagnostics.slice(-8),audio_context_rate:ctx.sampleRate,source_context_rate:sourceContext.sampleRate,start_at:arm.start_at,output_clock_mapping_uncertainty_ms:20,errors};
+  const independentClocks=await new Promise<any>((resolve,reject)=>{
+   const timeout=setTimeout(()=>reject(new Error('Benchmark clock observer did not finish')),2000);
+   clockObserver.onmessage=e=>{clearTimeout(timeout);resolve(e.data);};
+   clockObserver.postMessage({type:'finish'});
+  });
+  const result={clock_progress:clockProgress,independent_render_clocks:independentClocks,wire_diagnostics:wireDiagnostics,markers,states,notices,diagnostics:diagnostics.slice(-8),audio_context_rate:ctx.sampleRate,source_context_rate:sourceContext.sampleRate,start_at:arm.start_at,output_clock_mapping_uncertainty_ms:20,errors};
   if(rtc){await session.statistics(session.generation);
  const stats=await session.pc.getStats(), candidates:any[]=[];
  stats.forEach((s:any)=>{if(s.type==='transport'&&s.selectedCandidatePairId){const pair=stats.get(s.selectedCandidatePairId);if(pair){const candidate=stats.get(pair.localCandidateId);if(candidate)candidates.push({candidateType:candidate.candidateType,protocol:candidate.protocol});}}});
  (result as any).rtc_candidates=candidates;(result as any).rtc_stats=Array.from((await session.pc.getStats()).values()).filter((s:any)=>s.type==='inbound-rtp'||s.type==='outbound-rtp'||s.type==='codec');}else session.sendDiagnostics();return result;
- }finally{window.RTCPeerConnection=OriginalPeerConnection;window.AudioContext=OriginalAudioContext;navigator.mediaDevices.getUserMedia=original;probe?.disconnect();session.stop();source.disconnect();await sourceContext.close();}
+ }finally{clockObserver.terminate();window.RTCPeerConnection=OriginalPeerConnection;window.AudioContext=OriginalAudioContext;navigator.mediaDevices.getUserMedia=original;probe?.disconnect();session.stop();source.disconnect();await sourceContext.close();}
 };

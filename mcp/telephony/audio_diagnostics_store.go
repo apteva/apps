@@ -116,6 +116,7 @@ type mediaSessionEvent struct {
 }
 
 type browserAudioDiagnostics struct {
+	TransportSamples       []browserTransportSample  `json:"transport_samples,omitempty"`
 	PlaybackEvents         []browserAudioObservation `json:"playback_events,omitempty"`
 	CaptureQueueEvents     []browserAudioObservation `json:"capture_queue_events,omitempty"`
 	PlaybackUnderrunMS     float64                   `json:"playback_underrun_ms,omitempty"`
@@ -351,6 +352,7 @@ func clampDiagnosticDBFS(value *float64) *float64 {
 }
 
 func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics) browserAudioDiagnostics {
+	value.TransportSamples = normalizeTransportSamples(value.TransportSamples, time.Now())
 	value.PlaybackEvents = normalizeAudioObservations(value.PlaybackEvents)
 	value.CaptureQueueEvents = normalizeAudioObservations(value.CaptureQueueEvents)
 	if value.Timing != nil {

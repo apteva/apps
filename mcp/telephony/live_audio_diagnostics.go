@@ -157,6 +157,7 @@ func mergeLiveAudioSnapshots(a, b liveAudioQueueSnapshot) liveAudioQueueSnapshot
 	a.FlushedBytes += b.FlushedBytes
 	a.FailedBytes += b.FailedBytes
 	a.WriteErrors += b.WriteErrors
+	a.WriteTimeoutDrops += b.WriteTimeoutDrops
 	if b.LastWriteAt > a.LastWriteAt {
 		a.LastWriteAt = b.LastWriteAt
 	}

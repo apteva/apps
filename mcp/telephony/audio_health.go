@@ -32,6 +32,11 @@ type audioPeerHasher struct {
 }
 
 func (p *audioPeerHasher) hash(r *http.Request, proxies string) (string, string, string) {
+	addr, source := audioPeerAddress(r, proxies)
+	return p.hashAddress(addr, source)
+}
+
+func (p *audioPeerHasher) hashAddress(addr netip.Addr, source string) (string, string, string) {
 	p.once.Do(func() {
 		if _, err := rand.Read(p.key[:]); err != nil {
 			return
@@ -42,7 +47,6 @@ func (p *audioPeerHasher) hash(r *http.Request, proxies string) (string, string,
 	if p.epoch == "" {
 		return "", "", "unavailable"
 	}
-	addr, source := audioPeerAddress(r, proxies)
 	if !addr.IsValid() {
 		return "", p.epoch, "unavailable"
 	}
@@ -284,12 +288,12 @@ func (t *audioCallTelemetry) observeBrowser(v browserAudioDiagnostics) {
 	defer t.mu.Unlock()
 	t.observeBrowserLocked(v)
 }
-func (t *audioCallTelemetry) observeBrowserConnection(w *websocketWriterPump, v browserAudioDiagnostics) {
+func (t *audioCallTelemetry) observeBrowserConnection(w *websocketWriterPump, v browserAudioDiagnostics) []browserTransportSample {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	network, ok := t.sockets[w]
 	if !ok || network.ConnectionID != t.socket.ConnectionID {
-		return
+		return nil
 	}
 	v.ConnectionID = network.ConnectionID
 	for i := range v.PlaybackEvents {
@@ -312,7 +316,32 @@ func (t *audioCallTelemetry) observeBrowserConnection(w *websocketWriterPump, v 
 			v.Timing.Transport.RTTSamples[i].ConnectionID = t.connectionAtLocked(v.Timing.Transport.RTTSamples[i].At)
 		}
 	}
+	samples := t.attributeTransportSamplesLocked(network, v.ClientEpoch, v.TransportSamples)
+	v.TransportSamples = nil
 	t.observeBrowserLocked(v)
+	return samples
+}
+func (t *audioCallTelemetry) attributeTransportSamples(w *websocketWriterPump, epoch string, samples []browserTransportSample) []browserTransportSample {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	network, ok := t.sockets[w]
+	if !ok || network.ConnectionID != t.socket.ConnectionID {
+		return nil
+	}
+	return t.attributeTransportSamplesLocked(network, limitDiagnosticText(epoch, 64), samples)
+}
+func (t *audioCallTelemetry) attributeTransportSamplesLocked(network audioNetworkEvent, epoch string, samples []browserTransportSample) []browserTransportSample {
+	for i := range samples {
+		samples[i].ConnectionID = t.connectionAtLocked(samples[i].Timestamp)
+		samples[i].ReceivingConnectionID = network.ConnectionID
+		samples[i].ID = transportSampleID(network.ConnectionID, epoch, samples[i].ID)
+		retention := network.Retention
+		if retention <= 0 {
+			retention = 7 * 24 * time.Hour
+		}
+		samples[i].ExpiresAt = audioNetworkTimestamp(time.Now().Add(retention))
+	}
+	return samples
 }
 
 // Delayed browser reports may contain samples from a previous socket. Attribute
@@ -630,6 +659,12 @@ func (a *audioAlertCorrelator) expire(now time.Time) []audioAlert {
 	return out
 }
 func (a *App) runAudioTelemetryTick(c context.Context, ctx *sdk.AppCtx) error {
+	if err := a.audioTransports.flush(c, a.db(), time.Now()); err != nil {
+		ctx.Logger().Warn("browser transport telemetry write failed", "error", err)
+	}
+	if dropped := a.audioTransports.dropped.Swap(0); dropped > 0 {
+		ctx.Logger().Warn("browser transport telemetry overflow", "samples_dropped", dropped)
+	}
 	if changed, err := a.audioNetworks.flush(c, a.db(), time.Now()); err != nil {
 		ctx.Logger().Warn("browser network telemetry write failed", "error", err)
 	} else {

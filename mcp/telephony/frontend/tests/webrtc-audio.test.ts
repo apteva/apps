@@ -71,3 +71,47 @@ test("a hung fresh-authorization request is bounded and late completion cannot r
   expect(connections).toBe(0);audio.stop();
  }finally{timer.mockRestore();}
 });
+
+function richReport(time:number,inboundID="in",pairID="pair",base=0):RTCStatsReport {
+ return new Map<string,any>([
+ ["out",{type:"outbound-rtp",kind:"audio",timestamp:time,bytesSent:base+1000,packetsSent:base+100,totalPacketSendDelay:base+1,retransmittedPacketsSent:2,nackCount:1}],
+ [inboundID,{type:"inbound-rtp",kind:"audio",timestamp:time,bytesReceived:base+2000,packetsReceived:base+100,packetsLost:2,jitter:.01,codecId:"codec",jitterBufferDelay:base+2,jitterBufferTargetDelay:base+3,jitterBufferMinimumDelay:base+1,jitterBufferEmittedCount:base+100,totalProcessingDelay:base+.5,lastPacketReceivedTimestamp:time-30,concealmentEvents:3,silentConcealedSamples:100,insertedSamplesForDeceleration:50}],
+ ["remote-in",{type:"remote-inbound-rtp",kind:"audio",packetsLost:7,fractionLost:.04,jitter:.02,roundTripTime:.1}],
+ ["remote-out",{type:"remote-outbound-rtp",kind:"audio",packetsSent:400,bytesSent:3000}],
+ ["transport",{type:"transport",selectedCandidatePairId:pairID,dtlsState:"connected"}],
+ [pairID,{type:"candidate-pair",state:"succeeded",localCandidateId:"local",remoteCandidateId:"remote",availableOutgoingBitrate:128000,availableIncomingBitrate:256000,currentRoundTripTime:.04,requestsSent:100}],
+ ["local",{type:"local-candidate",protocol:"udp",candidateType:"relay",relayProtocol:"tls",address:"SECRET-IP",url:"SECRET-TURN"}],
+ ["remote",{type:"remote-candidate",candidateType:"srflx",address:"SECRET-REMOTE"}],
+ ["codec",{type:"codec",mimeType:"audio/opus",clockRate:48000,channels:1,sdpFmtpLine:"SECRET-SDP"}],
+ ]) as unknown as RTCStatsReport;
+}
+test("rich native stats separate remote receiver loss, expose bandwidth and interval delays without raw identifiers",()=>{
+ const at=Date.UTC(2026,9,9), first=rtcStatistics(richReport(at));
+ expect(first.metrics.receiver_jitter_buffer_interval_ms).toBeUndefined();
+ const next=rtcStatistics(richReport(at+1000,"in","pair",100),first.previous);
+ expect(next.metrics.remote_receiver_packetsLost).toBe(7);expect(next.metrics.receiver_packetsLost).toBe(2);
+ expect(next.metrics.receiver_jitter_buffer_interval_ms).toBe(1000);expect(next.metrics.sender_send_delay_interval_ms).toBe(1000);
+ expect(next.metrics.pair_availableOutgoingBitrate).toBe(128000);expect(next.metrics.receiver_last_packet_age_ms).toBe(30);
+ expect(next.states.remote_candidate).toBe("srflx");expect(next.states.relay_protocol).toBe("tls");expect(next.states.codec).toBe("audio/opus");
+ expect(JSON.stringify({metrics:next.metrics,states:next.states,webrtc:next.webrtc})).not.toContain("SECRET");
+ const moved=rtcStatistics(richReport(at+2000,"in","pair2",200),next.previous);expect(moved.metrics.path_revision).toBe(2);
+});
+test("missing stats, counter resets and new RTP identities do not fabricate rates or delay deltas",()=>{
+ const at=Date.UTC(2026,9,9), first=rtcStatistics(richReport(at,"in","pair",1000));
+ const reset=rtcStatistics(richReport(at+1000),first.previous);
+ expect(reset.webrtc.sendBitrateBps).toBe(0);expect(reset.webrtc.receiveBitrateBps).toBe(0);expect(reset.metrics.receiver_jitter_buffer_interval_ms).toBeUndefined();
+ const replaced=rtcStatistics(richReport(at+2000,"new-ssrc","pair",2000),first.previous);
+ expect(replaced.webrtc.receiveBitrateBps).toBe(0);expect(replaced.metrics.receiver_jitter_buffer_interval_ms).toBeUndefined();
+ const absent=rtcStatistics(new Map() as any);expect(absent.rtt).toBeNull();expect(absent.metrics.pair_availableOutgoingBitrate).toBeUndefined();expect(absent.metrics.remote_receiver_packetsLost).toBeUndefined();
+});
+test("overlapping getStats, failed sampling and late completions never stop or revive media",async()=>{
+ let resolve!:(v:RTCStatsReport)=>void,reads=0;const published:any[]=[];
+ const audio:any=new WebRTCAudioConnection({onDiagnostics:d=>published.push(d)});
+ const pc={getStats:()=>{reads++;return new Promise<RTCStatsReport>(r=>resolve=r);},iceConnectionState:"connected",connectionState:"connected"};
+ audio.pc=pc;audio.generation=1;
+ const pending=audio.statistics(1);await audio.statistics(1);expect(reads).toBe(1);
+ resolve(richReport(Date.now()));await pending;expect(published).toHaveLength(1);
+ pc.getStats=async()=>{throw new Error("stats unavailable")};await audio.statistics(1);expect(audio.statsErrors).toBe(1);expect(audio.pc).toBe(pc);expect(audio.stopped).toBe(false);
+ pc.getStats=()=>new Promise<RTCStatsReport>(r=>resolve=r);
+ const late=audio.statistics(1);audio.generation=2;resolve(richReport(Date.now()));await late;expect(published).toHaveLength(2);audio.transportSender.stop();
+});

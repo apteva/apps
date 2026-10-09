@@ -47,16 +47,17 @@ type benchmarkDirection struct {
 	TailReceived    int     `json:"final_two_seconds_markers"`
 }
 type benchmarkBrowserResult struct {
-	RTCCandidates   []map[string]any   `json:"rtc_candidates,omitempty"`
-	ClockProgress   map[string]float64 `json:"clock_progress,omitempty"`
-	WireDiagnostics []json.RawMessage  `json:"wire_diagnostics"`
-	Markers         []bench.Marker     `json:"markers"`
-	Notices         []map[string]any   `json:"notices"`
-	States          []map[string]any   `json:"states"`
-	Diagnostics     []map[string]any   `json:"diagnostics"`
-	PageErrors      []string           `json:"page_errors"`
-	BrowserVersion  string             `json:"browser_version"`
-	StartAt         int64              `json:"start_at"`
+	IndependentClocks map[string]any     `json:"independent_render_clocks,omitempty"`
+	RTCCandidates     []map[string]any   `json:"rtc_candidates,omitempty"`
+	ClockProgress     map[string]float64 `json:"clock_progress,omitempty"`
+	WireDiagnostics   []json.RawMessage  `json:"wire_diagnostics"`
+	Markers           []bench.Marker     `json:"markers"`
+	Notices           []map[string]any   `json:"notices"`
+	States            []map[string]any   `json:"states"`
+	Diagnostics       []map[string]any   `json:"diagnostics"`
+	PageErrors        []string           `json:"page_errors"`
+	BrowserVersion    string             `json:"browser_version"`
+	StartAt           int64              `json:"start_at"`
 }
 type benchmarkResult struct {
 	Profile           bench.Profile                    `json:"profile"`
@@ -297,7 +298,7 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 			}
 			writeTier2JSON(w, map[string]any{"start_at": epoch.Load()})
 		default:
-			files := map[string]string{"/entry.js": filepath.Join(output, "browser-entry.js"), "/probe.js": "benchmarks/softphone/probe-worklet.js", "/worklet.js": "ui/softphone-worklet.js", "/worker.js": "ui/softphone-worker.js"}
+			files := map[string]string{"/entry.js": filepath.Join(output, "browser-entry.js"), "/probe.js": "benchmarks/softphone/probe-worklet.js", "/clock-observer.js": "benchmarks/softphone/clock-observer.js", "/worklet.js": "ui/softphone-worklet.js", "/worker.js": "ui/softphone-worker.js"}
 			path, ok := files[r.URL.Path]
 			if !ok {
 				http.NotFound(w, r)
@@ -451,6 +452,25 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 	if row, ok := detail["call"].(map[string]any); ok {
 		result.ServerDiagnostics = map[string]any{"browser": row["browser_audio_diagnostics"], "carrier": row["carrier_audio_diagnostics"]}
 	}
+	var health map[string]any
+	if status, body := tier2Request(t, sc, "GET", "/audio-health?call_id="+id+"&project_id="+tier2Project, nil, &health, tier2Headers()); status != 200 {
+		result.Errors = append(result.Errors, fmt.Sprintf("transport history read: %d %s", status, body))
+	} else {
+		result.ServerDiagnostics["transport_samples"] = health["transport_samples"]
+		history, ok := health["transport_samples"].([]any)
+		if !ok || len(history) == 0 {
+			result.Errors = append(result.Errors, "transport history not persisted")
+		}
+		complete := false
+		for _, entry := range history {
+			if sample, ok := entry.(map[string]any); ok && sample["complete"] == true {
+				complete = true
+			}
+		}
+		if !complete {
+			result.Errors = append(result.Errors, "no complete paced transport sample persisted")
+		}
+	}
 	cancel()
 	<-carrierDone
 	select {
@@ -502,6 +522,18 @@ func runSoftphoneBenchmark(t *testing.T, profile bench.Profile, seed int64, dura
 		if err := json.Unmarshal(wire, &control); err != nil {
 			result.Errors = append(result.Errors, "browser diagnostics protocol: "+err.Error())
 			break
+		}
+		if control.Diagnostics != nil {
+			samples := control.Diagnostics.TransportSamples
+			raw, _ := json.Marshal(samples)
+			if len(samples) > 2 || len(raw) > 8192 {
+				result.Errors = append(result.Errors, "transport history wire budget exceeded")
+			}
+			for _, sample := range samples {
+				if sample.Timestamp == "" || sample.ID == "" {
+					result.Errors = append(result.Errors, "transport sample missing source time or identity")
+				}
+			}
 		}
 	}
 	result.Errors = append(result.Errors, result.Browser.PageErrors...)

@@ -589,6 +589,16 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	networkConfig := map[string]string{}
+	if globalCtx != nil {
+		networkConfig = globalCtx.WithProject(row.ProjectID).Config()
+	}
+	networkAddress, metadataErr := resolveAudioNetworkAddress(r)
+	if metadataErr != nil {
+		// SDK error messages are fixed reason strings: never log assertion values,
+		// media URLs or credentials. Observational failures do not reject media.
+		logSoftphone("browser client IP assertion rejected", "call", callID, "reason", metadataErr.Error())
+	}
 	conn, readConn, err := upgradeBuffered(w, r)
 	if err != nil {
 		logSoftphone("browser ws upgrade failed", "call", callID, "err", err)
@@ -621,12 +631,8 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 	closer := newGracefulWebSocket(conn, writer)
 	hub := a.softphones.hubFor(callID)
 	hub.telemetry.restore(row.BrowserAudioDiagnostics)
-	networkConfig := map[string]string{}
-	if globalCtx != nil {
-		networkConfig = globalCtx.WithProject(row.ProjectID).Config()
-	}
-	hash, hashEpoch, addressSource := a.audioPeerHasher.hash(r, networkConfig["audio_telemetry_trusted_proxy_cidrs"])
-	connectionID := hub.telemetry.openedWithNetwork(writer, hash, hashEpoch, addressSource, newAudioNetworkContext(row, identity, r, networkConfig), a.audioNetworks.enqueue)
+	hash, hashEpoch, addressSource := a.audioPeerHasher.hashAddress(networkAddress.Client, networkAddress.Source)
+	connectionID := hub.telemetry.openedWithNetwork(writer, hash, hashEpoch, addressSource, newAudioNetworkContextWithAddress(row, identity, networkAddress, networkConfig), a.audioNetworks.enqueue)
 	defer func() {
 		hub.telemetry.closed(writer, "handler_closed", nil)
 		hub.clearBrowser(writer)
@@ -832,10 +838,17 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				_ = writer.Write(ws.OpText, softphoneEvent("dtmf.sent", callID))
+			case "transport.samples":
+				if control.Diagnostics != nil && hub.readyBrowserWriter() == writer {
+					parts := normalizeTransportSamples(control.Diagnostics.TransportSamples, time.Now())
+					parts = hub.telemetry.attributeTransportSamples(writer, control.Diagnostics.ClientEpoch, parts)
+					a.audioTransports.enqueue(parts, row)
+				}
 			case "diagnostics":
 				if control.Diagnostics != nil && hub.readyBrowserWriter() == writer {
 					normalized := normalizeBrowserAudioDiagnostics(*control.Diagnostics)
-					hub.telemetry.observeBrowserConnection(writer, normalized)
+					samples := hub.telemetry.observeBrowserConnection(writer, normalized)
+					a.audioTransports.enqueue(samples, row)
 					// Coalesce reports in memory; the watcher persists off the frame path.
 				}
 			}

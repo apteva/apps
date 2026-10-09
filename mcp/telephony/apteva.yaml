@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.11.3
+version: 0.11.4
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -305,7 +305,7 @@ config_schema:
   - { name: softphone_webrtc_public_ips, type: text, label: "WebRTC public addresses", description: "Optional comma-separated public IPv4/IPv6 addresses for host candidates behind NAT." }
   - { name: softphone_webrtc_udp_port_min, type: text, label: "WebRTC UDP range start", description: "Optional range 1024–65535. Configure both bounds and forward the range to the sidecar. Empty uses ephemeral ports." }
   - { name: softphone_webrtc_udp_port_max, type: text, label: "WebRTC UDP range end", description: "Inclusive UDP range end; must be greater than or equal to the start." }
-  - { name: audio_telemetry_trusted_proxy_cidrs, type: text, label: "Trusted proxy CIDRs for audio telemetry", description: "Optional comma-separated CIDRs. Only these immediate proxies may supply X-Forwarded-For; otherwise telemetry hashes the socket peer address. Hashes are scoped to this process and contain no raw IP." }
+  - { name: audio_telemetry_trusted_proxy_cidrs, type: text, label: "Trusted proxy CIDRs for audio telemetry", description: "Legacy setting; client IP now uses Server-signed SDK metadata, with socket-peer fallback. Configure trusted proxies in Server. This setting no longer accepts unsigned forwarded addresses." }
   - { name: audio_telemetry_known_vpn_exits, type: text, label: "Known office VPN exits", description: "Optional comma-separated IPv4/IPv6 addresses or CIDRs. Observational known_vpn_exit/unknown labels only; never blocks calls or media." }
   - { name: audio_telemetry_network_retention_days, type: text, default: "7", label: "Browser network event retention (days)", description: "1–31 days, snapshotted per connection. Raw IP connection events are operator-only; expired events are hidden and purged in background batches. No effect on calls." }
   - { name: connected_call_max_duration_seconds, type: text, default: "14400", label: "Connected call duration limit (seconds)", description: "60–14400 seconds, measured from first confirmed carrier answer or connected media. Snapshotted for each new call." }

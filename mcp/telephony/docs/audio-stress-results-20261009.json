@@ -1,0 +1,1984 @@
+{
+  "scope": "Local synthetic fixtures only; failures retained, no audio gates relaxed. Tone-marker loss is not percentage of speech loss.",
+  "runs": [
+    {
+      "run": "fresh-control",
+      "created_at": "2026-10-09T10:26:46Z",
+      "duration_ms": 20000,
+      "raw_result_sha256": "2b29bce717454507baec756c861d40426f729fce2a85b7b414d50bbb87ab91b3",
+      "host": {
+        "sample_count": 0,
+        "max_cpu_busy_pct": null,
+        "cpu_over_95_samples": []
+      },
+      "profiles": [
+        {
+          "name": "main-thread-two-second-pause",
+          "expectation": "usable",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 176.2890625,
+            "p95_ms": 183.341064453125,
+            "p99_ms": 186.070068359375,
+            "max_ms": 186.070068359375,
+            "median_level_dbfs": -15.145161589489573,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 95.452880859375,
+            "p95_ms": 95.5146484375,
+            "p99_ms": 95.54150390625,
+            "max_ms": 95.54150390625,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "independent_render_clock_stages": {},
+          "to_browser": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1081870,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T10:26:22.365381Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 1,
+            "max_write_ms": 1,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1081870,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0
+          },
+          "to_carrier_bridge": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1121280,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T10:26:22.339914Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 5,
+            "max_write_ms": 2,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1121280,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0
+          }
+        },
+        {
+          "name": "local-baseline",
+          "expectation": "usable",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 46.654052734375,
+            "p95_ms": 49.008056640625,
+            "p99_ms": 49.5048828125,
+            "max_ms": 49.5048828125,
+            "median_level_dbfs": -15.145145882172859,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 90.94140625,
+            "p95_ms": 91.03076171875,
+            "p99_ms": 91.041748046875,
+            "max_ms": 91.041748046875,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "independent_render_clock_stages": {},
+          "to_browser": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1081870,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T10:26:46.873155Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 0,
+            "max_write_ms": 6,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1081870,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0
+          },
+          "to_carrier_bridge": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1128960,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T10:26:46.86575Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 2,
+            "max_write_ms": 1,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1128960,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0
+          }
+        }
+      ]
+    },
+    {
+      "run": "observed-20s-1",
+      "created_at": "2026-10-09T10:30:01Z",
+      "duration_ms": 20000,
+      "raw_result_sha256": "6840baa1f6cf42b2f87821d73490760d6a2745a9063e8ef2b037b3df2f6a74db",
+      "host": {
+        "sample_count": 56,
+        "max_cpu_busy_pct": 100,
+        "cpu_over_95_samples": [
+          {
+            "timestamp": "2026-10-09T10:29:32.848Z",
+            "cpu_busy_pct": 99.70817120622569
+          },
+          {
+            "timestamp": "2026-10-09T10:29:33.895Z",
+            "cpu_busy_pct": 100
+          },
+          {
+            "timestamp": "2026-10-09T10:29:34.869Z",
+            "cpu_busy_pct": 100
+          }
+        ]
+      },
+      "profiles": [
+        {
+          "name": "main-thread-two-second-pause",
+          "expectation": "usable",
+          "outcome": "failed",
+          "errors": [
+            "usable-profile audio thresholds exceeded"
+          ],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 36,
+            "missing_markers_pct": 5.2631578947368425,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 38.943115234375,
+            "p95_ms": 55.6220703125,
+            "p99_ms": 142.5009765625,
+            "max_ms": 142.5009765625,
+            "median_level_dbfs": -15.145233362970679,
+            "final_two_seconds_markers": 2
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 36,
+            "missing_markers_pct": 5.2631578947368425,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 90.48291015625,
+            "p95_ms": 90.58837890625,
+            "p99_ms": 200.521728515625,
+            "max_ms": 200.521728515625,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 2
+          },
+          "independent_render_clock_stages": {
+            "playback:0": {
+              "max_lag_ms": 0.099853515625,
+              "max_rtt_ms": 0.7001953125,
+              "samples": 95
+            },
+            "synthetic_microphone": {
+              "max_lag_ms": 5.800048828125,
+              "max_rtt_ms": 0.60009765625,
+              "samples": 95
+            }
+          },
+          "to_browser": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1057870,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T10:29:36.870288Z",
+            "max_queued_ms": 120,
+            "max_residence_ms": 28,
+            "max_write_ms": 33,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1053070,
+            "source_stale_bytes": 4800,
+            "stale_bytes": 0,
+            "write_errors": 0
+          },
+          "to_carrier_bridge": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1111680,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T10:29:36.848835Z",
+            "max_queued_ms": 120,
+            "max_residence_ms": 47,
+            "max_write_ms": 6,
+            "overflow_bytes": 9600,
+            "queued_ms": 0,
+            "sent_bytes": 1102080,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0
+          }
+        },
+        {
+          "name": "local-baseline",
+          "expectation": "usable",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 48.89208984375,
+            "p95_ms": 51.0859375,
+            "p99_ms": 57.9599609375,
+            "max_ms": 57.9599609375,
+            "median_level_dbfs": -15.145147308004404,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 93.848876953125,
+            "p95_ms": 93.94482421875,
+            "p99_ms": 93.94775390625,
+            "max_ms": 93.94775390625,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "independent_render_clock_stages": {
+            "playback:0": {
+              "max_lag_ms": 4.38338216145803,
+              "max_rtt_ms": 0.5,
+              "samples": 95
+            },
+            "synthetic_microphone": {
+              "max_lag_ms": 28.28352864583394,
+              "max_rtt_ms": 0.5,
+              "samples": 95
+            }
+          },
+          "to_browser": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1080910,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T10:30:01.234431Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 0,
+            "max_write_ms": 0,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1080910,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0
+          },
+          "to_carrier_bridge": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1128960,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T10:30:01.239748Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 0,
+            "max_write_ms": 1,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1128960,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0
+          }
+        }
+      ]
+    },
+    {
+      "run": "observed-60s-1",
+      "created_at": "2026-10-09T10:33:41Z",
+      "duration_ms": 60000,
+      "raw_result_sha256": "d96c4a6bf822bcaf061b631034b1abfa761bdb0909cdda847746d23704f131e2",
+      "host": {
+        "sample_count": 133,
+        "max_cpu_busy_pct": 76.40562248995984,
+        "cpu_over_95_samples": []
+      },
+      "profiles": [
+        {
+          "name": "main-thread-two-second-pause",
+          "expectation": "usable",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 118,
+            "received_markers": 118,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 72.366943359375,
+            "p95_ms": 76.490966796875,
+            "p99_ms": 77.742919921875,
+            "max_ms": 78.927001953125,
+            "median_level_dbfs": -15.145145882172859,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 118,
+            "received_markers": 118,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 131.434814453125,
+            "p95_ms": 131.6083984375,
+            "p99_ms": 131.635498046875,
+            "max_ms": 131.640625,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "independent_render_clock_stages": {
+            "playback:0": {
+              "max_lag_ms": 21.51676432291424,
+              "max_rtt_ms": 3.5,
+              "samples": 255
+            },
+            "synthetic_microphone": {
+              "max_lag_ms": 63.46647135417152,
+              "max_rtt_ms": 3.39990234375,
+              "samples": 255
+            }
+          },
+          "to_browser": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 3004750,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T10:32:36.927829Z",
+            "max_queued_ms": 40,
+            "max_residence_ms": 1,
+            "max_write_ms": 4,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 3004750,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0
+          },
+          "to_carrier_bridge": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 3050880,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T10:32:36.92929Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 7,
+            "max_write_ms": 5,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 3050880,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0
+          }
+        },
+        {
+          "name": "local-baseline",
+          "expectation": "usable",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 118,
+            "received_markers": 118,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 45.916015625,
+            "p95_ms": 47.717041015625,
+            "p99_ms": 48.301025390625,
+            "max_ms": 48.419921875,
+            "median_level_dbfs": -15.145155588581991,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 118,
+            "received_markers": 118,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 95.081787109375,
+            "p95_ms": 135.17724609375,
+            "p99_ms": 135.22412109375,
+            "max_ms": 135.2255859375,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "independent_render_clock_stages": {
+            "playback:0": {
+              "max_lag_ms": 0,
+              "max_rtt_ms": 0.900146484375,
+              "samples": 255
+            },
+            "synthetic_microphone": {
+              "max_lag_ms": 34.31681315104652,
+              "max_rtt_ms": 0.900146484375,
+              "samples": 255
+            }
+          },
+          "to_browser": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 3002830,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T10:33:41.42414Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 0,
+            "max_write_ms": 4,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 3002830,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0
+          },
+          "to_carrier_bridge": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 3049920,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T10:33:41.417767Z",
+            "max_queued_ms": 40,
+            "max_residence_ms": 0,
+            "max_write_ms": 3,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 3049920,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0
+          }
+        }
+      ]
+    },
+    {
+      "run": "observed-60s-2",
+      "created_at": "2026-10-09T10:35:19Z",
+      "duration_ms": 60000,
+      "raw_result_sha256": "eb3c81ea1352f28d3cab8a2cc07fb386aa49817d52dbb0b77861ef8e8efb4816",
+      "host": {
+        "sample_count": 68,
+        "max_cpu_busy_pct": 100,
+        "cpu_over_95_samples": [
+          {
+            "timestamp": "2026-10-09T10:34:19.710Z",
+            "cpu_busy_pct": 100
+          },
+          {
+            "timestamp": "2026-10-09T10:34:20.837Z",
+            "cpu_busy_pct": 99.53660797034291
+          },
+          {
+            "timestamp": "2026-10-09T10:34:21.774Z",
+            "cpu_busy_pct": 100
+          }
+        ]
+      },
+      "profiles": [
+        {
+          "name": "main-thread-two-second-pause",
+          "expectation": "usable",
+          "outcome": "failed",
+          "errors": [
+            "usable-profile audio thresholds exceeded"
+          ],
+          "adviser_to_carrier": {
+            "expected_markers": 118,
+            "received_markers": 3,
+            "missing_markers_pct": 97.45762711864407,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 56.22509765625,
+            "p95_ms": 165.237060546875,
+            "p99_ms": 165.237060546875,
+            "max_ms": 165.237060546875,
+            "median_level_dbfs": -15.145177397705227,
+            "final_two_seconds_markers": 0
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 118,
+            "received_markers": 3,
+            "missing_markers_pct": 97.45762711864407,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 95.401123046875,
+            "p95_ms": 275.30322265625,
+            "p99_ms": 275.30322265625,
+            "max_ms": 275.30322265625,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 0
+          },
+          "independent_render_clock_stages": {
+            "playback:0": {
+              "max_lag_ms": 33.249755859375,
+              "max_rtt_ms": 3.199951171875,
+              "samples": 255
+            },
+            "synthetic_microphone": {
+              "max_lag_ms": 18.03328450521076,
+              "max_rtt_ms": 3.099853515625,
+              "samples": 255
+            }
+          },
+          "to_browser": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 129550,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T10:34:19.861602Z",
+            "max_queued_ms": 120,
+            "max_residence_ms": 83,
+            "max_write_ms": 83,
+            "overflow_bytes": 960,
+            "queued_ms": 0,
+            "sent_bytes": 125710,
+            "source_stale_bytes": 2880,
+            "stale_bytes": 0,
+            "write_errors": 0
+          },
+          "to_carrier_bridge": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 182400,
+            "failed_bytes": 960,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T10:34:20.771583Z",
+            "max_queued_ms": 120,
+            "max_residence_ms": 116,
+            "max_write_ms": 476,
+            "overflow_bytes": 2880,
+            "queued_ms": 0,
+            "sent_bytes": 173760,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 1
+          }
+        }
+      ]
+    },
+    {
+      "run": "recovery-60s-1",
+      "created_at": "2026-10-09T11:13:04Z",
+      "duration_ms": 60000,
+      "raw_result_sha256": "87941b050a90392f2aa80abd53c728380ff56dfa45c3f5c667bccd77e0cfa28b",
+      "host": {
+        "sample_count": 133,
+        "max_cpu_busy_pct": 100,
+        "cpu_over_95_samples": [
+          {
+            "timestamp": "2026-10-09T11:11:17.817Z",
+            "cpu_busy_pct": 100
+          },
+          {
+            "timestamp": "2026-10-09T11:11:18.800Z",
+            "cpu_busy_pct": 100
+          },
+          {
+            "timestamp": "2026-10-09T11:12:06.913Z",
+            "cpu_busy_pct": 100
+          },
+          {
+            "timestamp": "2026-10-09T11:12:07.920Z",
+            "cpu_busy_pct": 100
+          }
+        ]
+      },
+      "profiles": [
+        {
+          "name": "main-thread-two-second-pause",
+          "expectation": "usable",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 118,
+            "received_markers": 116,
+            "missing_markers_pct": 1.694915254237288,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 119.56201171875,
+            "p95_ms": 124.282958984375,
+            "p99_ms": 126.676025390625,
+            "max_ms": 197.259033203125,
+            "median_level_dbfs": -15.145237635593352,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 118,
+            "received_markers": 116,
+            "missing_markers_pct": 1.694915254237288,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 321.83837890625,
+            "p95_ms": 321.996826171875,
+            "p99_ms": 322.037841796875,
+            "max_ms": 322.042724609375,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "independent_render_clock_stages": {
+            "playback:0": {
+              "max_lag_ms": 2.1831868489607587,
+              "max_rtt_ms": 2.89990234375,
+              "samples": 255
+            },
+            "synthetic_microphone": {
+              "max_lag_ms": 11.033528645835759,
+              "max_rtt_ms": 3,
+              "samples": 255
+            }
+          },
+          "to_browser": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 2996110,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:11:59.253138Z",
+            "max_queued_ms": 120,
+            "max_residence_ms": 8,
+            "max_write_ms": 15,
+            "overflow_bytes": 5760,
+            "queued_ms": 0,
+            "sent_bytes": 2990350,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          },
+          "to_carrier_bridge": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 3050880,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:11:59.243012Z",
+            "max_queued_ms": 120,
+            "max_residence_ms": 63,
+            "max_write_ms": 37,
+            "overflow_bytes": 5760,
+            "queued_ms": 0,
+            "sent_bytes": 3045120,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          }
+        },
+        {
+          "name": "local-baseline",
+          "expectation": "usable",
+          "outcome": "failed",
+          "errors": [
+            "usable-profile audio thresholds exceeded"
+          ],
+          "adviser_to_carrier": {
+            "expected_markers": 118,
+            "received_markers": 116,
+            "missing_markers_pct": 1.694915254237288,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 186.887939453125,
+            "p95_ms": 189.883056640625,
+            "p99_ms": 190.631103515625,
+            "max_ms": 190.882080078125,
+            "median_level_dbfs": -15.145236665181102,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 118,
+            "received_markers": 117,
+            "missing_markers_pct": 0.847457627118644,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 263.3154296875,
+            "p95_ms": 293.306396484375,
+            "p99_ms": 293.330322265625,
+            "max_ms": 293.342529296875,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "independent_render_clock_stages": {
+            "playback:0": {
+              "max_lag_ms": 3.4166666666678793,
+              "max_rtt_ms": 2.5,
+              "samples": 255
+            },
+            "synthetic_microphone": {
+              "max_lag_ms": 25.35009765625,
+              "max_rtt_ms": 2.5,
+              "samples": 255
+            }
+          },
+          "to_browser": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 3002830,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:13:03.862406Z",
+            "max_queued_ms": 120,
+            "max_residence_ms": 35,
+            "max_write_ms": 3,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 3002830,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          },
+          "to_carrier_bridge": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 3050880,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:13:03.850346Z",
+            "max_queued_ms": 120,
+            "max_residence_ms": 12,
+            "max_write_ms": 31,
+            "overflow_bytes": 2880,
+            "queued_ms": 0,
+            "sent_bytes": 3048000,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          }
+        }
+      ]
+    },
+    {
+      "run": "recovery-network-matrix",
+      "created_at": "2026-10-09T11:19:00Z",
+      "duration_ms": 20000,
+      "raw_result_sha256": "622c569e650665375f97a395465b999851e40abdef3fb32c63991c9d976af6cd",
+      "host": {
+        "sample_count": 326,
+        "max_cpu_busy_pct": 100,
+        "cpu_over_95_samples": [
+          {
+            "timestamp": "2026-10-09T11:14:51.622Z",
+            "cpu_busy_pct": 98.40319361277444
+          },
+          {
+            "timestamp": "2026-10-09T11:14:52.685Z",
+            "cpu_busy_pct": 99.81481481481481
+          },
+          {
+            "timestamp": "2026-10-09T11:14:53.668Z",
+            "cpu_busy_pct": 98.69739478957916
+          },
+          {
+            "timestamp": "2026-10-09T11:14:54.671Z",
+            "cpu_busy_pct": 98.70646766169155
+          },
+          {
+            "timestamp": "2026-10-09T11:16:18.804Z",
+            "cpu_busy_pct": 98.61248761149653
+          },
+          {
+            "timestamp": "2026-10-09T11:16:19.808Z",
+            "cpu_busy_pct": 100
+          },
+          {
+            "timestamp": "2026-10-09T11:16:20.809Z",
+            "cpu_busy_pct": 97.5
+          },
+          {
+            "timestamp": "2026-10-09T11:16:21.810Z",
+            "cpu_busy_pct": 96.61016949152543
+          }
+        ]
+      },
+      "profiles": [
+        {
+          "name": "browser-seven-second-catchup",
+          "expectation": "recovery",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 49.76708984375,
+            "p95_ms": 53.806884765625,
+            "p99_ms": 53.864990234375,
+            "max_ms": 53.864990234375,
+            "median_level_dbfs": -15.145155588581991,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 24,
+            "missing_markers_pct": 36.8421052631579,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 319.451416015625,
+            "p95_ms": 319.575927734375,
+            "p99_ms": 319.586669921875,
+            "max_ms": 319.586669921875,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "independent_render_clock_stages": {
+            "playback:0": {
+              "max_lag_ms": 0,
+              "max_rtt_ms": 0.5,
+              "samples": 95
+            },
+            "synthetic_microphone": {
+              "max_lag_ms": 32.91666666666788,
+              "max_rtt_ms": 0.39990234375,
+              "samples": 95
+            }
+          },
+          "to_browser": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1083790,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:14:02.071417Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 0,
+            "max_write_ms": 0,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1083790,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          },
+          "to_carrier_bridge": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1128960,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:14:02.028707Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 0,
+            "max_write_ms": 0,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1128960,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          }
+        },
+        {
+          "name": "broadband",
+          "expectation": "usable",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 81.617919921875,
+            "p95_ms": 85.700927734375,
+            "p99_ms": 92.27392578125,
+            "max_ms": 92.27392578125,
+            "median_level_dbfs": -15.145167339127259,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 114.395263671875,
+            "p95_ms": 114.478271484375,
+            "p99_ms": 114.48193359375,
+            "max_ms": 114.48193359375,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "independent_render_clock_stages": {
+            "playback:0": {
+              "max_lag_ms": 4.38362630208394,
+              "max_rtt_ms": 0.300048828125,
+              "samples": 95
+            },
+            "synthetic_microphone": {
+              "max_lag_ms": 32.85009765625,
+              "max_rtt_ms": 0.2001953125,
+              "samples": 95
+            }
+          },
+          "to_browser": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 958990,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:14:23.89551Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 0,
+            "max_write_ms": 0,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 958990,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          },
+          "to_carrier_bridge": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1006080,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:14:23.895977Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 1,
+            "max_write_ms": 0,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1006080,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          }
+        },
+        {
+          "name": "wifi-jitter",
+          "expectation": "usable",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 106.180908203125,
+            "p95_ms": 123.756103515625,
+            "p99_ms": 128.573974609375,
+            "max_ms": 128.573974609375,
+            "median_level_dbfs": -15.145301324537602,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 153.14111328125,
+            "p95_ms": 163.198974609375,
+            "p99_ms": 163.206298828125,
+            "max_ms": 163.206298828125,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "independent_render_clock_stages": {
+            "playback:0": {
+              "max_lag_ms": 3.2332356770821207,
+              "max_rtt_ms": 4.800048828125,
+              "samples": 95
+            },
+            "synthetic_microphone": {
+              "max_lag_ms": 30.39990234375,
+              "max_rtt_ms": 4.800048828125,
+              "samples": 95
+            }
+          },
+          "to_browser": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1087630,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:14:51.229923Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 0,
+            "max_write_ms": 1,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1087630,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          },
+          "to_carrier_bridge": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1128960,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:14:51.128671Z",
+            "max_queued_ms": 60,
+            "max_residence_ms": 1,
+            "max_write_ms": 1,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1128960,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          }
+        },
+        {
+          "name": "512k-symmetric",
+          "expectation": "usable",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 112.43701171875,
+            "p95_ms": 121.324951171875,
+            "p99_ms": 122.85888671875,
+            "max_ms": 122.85888671875,
+            "median_level_dbfs": -15.14515701441672,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 141.74658203125,
+            "p95_ms": 141.83154296875,
+            "p99_ms": 141.8447265625,
+            "max_ms": 141.8447265625,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "independent_render_clock_stages": {
+            "playback:0": {
+              "max_lag_ms": 1.5665690104142413,
+              "max_rtt_ms": 0.300048828125,
+              "samples": 95
+            },
+            "synthetic_microphone": {
+              "max_lag_ms": 23.48323567708212,
+              "max_rtt_ms": 0.2001953125,
+              "samples": 95
+            }
+          },
+          "to_browser": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1083790,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:15:20.162392Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 0,
+            "max_write_ms": 0,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1083790,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          },
+          "to_carrier_bridge": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1128960,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:15:20.161059Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 0,
+            "max_write_ms": 0,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1128960,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          }
+        },
+        {
+          "name": "upload-256k",
+          "expectation": "degradation",
+          "outcome": "degraded",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 0,
+            "missing_markers_pct": 100,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 0,
+            "p95_ms": 0,
+            "p99_ms": 0,
+            "max_ms": 0,
+            "median_level_dbfs": 0,
+            "final_two_seconds_markers": 0
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 115.059814453125,
+            "p95_ms": 115.1396484375,
+            "p99_ms": 115.140625,
+            "max_ms": 115.140625,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "independent_render_clock_stages": {
+            "playback:0": {
+              "max_lag_ms": 4.51652018229106,
+              "max_rtt_ms": 0.39990234375,
+              "samples": 95
+            },
+            "synthetic_microphone": {
+              "max_lag_ms": 36.35009765625,
+              "max_rtt_ms": 0.300048828125,
+              "samples": 95
+            }
+          },
+          "to_browser": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1083790,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:15:44.691416Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 0,
+            "max_write_ms": 0,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1083790,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          },
+          "to_carrier_bridge": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 24960,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:15:21.978539Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 0,
+            "max_write_ms": 0,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 24960,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          }
+        },
+        {
+          "name": "download-256k",
+          "expectation": "degradation",
+          "outcome": "degraded",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 119.764892578125,
+            "p95_ms": 125.68505859375,
+            "p99_ms": 127.39794921875,
+            "max_ms": 127.39794921875,
+            "median_level_dbfs": -15.145374694863158,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 0,
+            "missing_markers_pct": 100,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 0,
+            "p95_ms": 0,
+            "p99_ms": 0,
+            "max_ms": 0,
+            "median_level_dbfs": 0,
+            "final_two_seconds_markers": 0
+          },
+          "independent_render_clock_stages": {
+            "playback:0": {
+              "max_lag_ms": 0.5665690104160603,
+              "max_rtt_ms": 1.39990234375,
+              "samples": 95
+            },
+            "synthetic_microphone": {
+              "max_lag_ms": 27.18343098958212,
+              "max_rtt_ms": 1.300048828125,
+              "samples": 95
+            }
+          },
+          "to_browser": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 958030,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:16:06.458883Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 3,
+            "max_write_ms": 0,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 958030,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          },
+          "to_carrier_bridge": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1006080,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:16:06.466998Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 1,
+            "max_write_ms": 0,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1006080,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          }
+        },
+        {
+          "name": "two-second-outage",
+          "expectation": "recovery",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 34,
+            "missing_markers_pct": 10.526315789473685,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 215.89501953125,
+            "p95_ms": 254.177001953125,
+            "p99_ms": 270.97412109375,
+            "max_ms": 270.97412109375,
+            "median_level_dbfs": -15.145301324537602,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 33,
+            "missing_markers_pct": 13.157894736842104,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 328.5517578125,
+            "p95_ms": 348.7158203125,
+            "p99_ms": 352.21142578125,
+            "max_ms": 352.21142578125,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "independent_render_clock_stages": {
+            "playback:0": {
+              "max_lag_ms": 8.18343098958394,
+              "max_rtt_ms": 2.099853515625,
+              "samples": 95
+            },
+            "synthetic_microphone": {
+              "max_lag_ms": 32.9501953125,
+              "max_rtt_ms": 2,
+              "samples": 95
+            }
+          },
+          "to_browser": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1084750,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:16:33.512475Z",
+            "max_queued_ms": 120,
+            "max_residence_ms": 8,
+            "max_write_ms": 6,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1084750,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          },
+          "to_carrier_bridge": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1046400,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:16:33.454406Z",
+            "max_queued_ms": 120,
+            "max_residence_ms": 19,
+            "max_write_ms": 19,
+            "overflow_bytes": 5760,
+            "queued_ms": 0,
+            "sent_bytes": 1040640,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          }
+        },
+        {
+          "name": "carrier-ten-second-catchup",
+          "expectation": "recovery",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 46.18896484375,
+            "p95_ms": 49.6708984375,
+            "p99_ms": 50.8779296875,
+            "max_ms": 50.8779296875,
+            "median_level_dbfs": -15.145155588581991,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 18,
+            "missing_markers_pct": 52.63157894736842,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 319.736083984375,
+            "p95_ms": 319.793212890625,
+            "p99_ms": 319.793212890625,
+            "max_ms": 319.793212890625,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "independent_render_clock_stages": {
+            "playback:0": {
+              "max_lag_ms": 0,
+              "max_rtt_ms": 0.89990234375,
+              "samples": 95
+            },
+            "synthetic_microphone": {
+              "max_lag_ms": 29.16666666666606,
+              "max_rtt_ms": 0.89990234375,
+              "samples": 95
+            }
+          },
+          "to_browser": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 616270,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:16:58.019818Z",
+            "max_queued_ms": 40,
+            "max_residence_ms": 0,
+            "max_write_ms": 0,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 616270,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          },
+          "to_carrier_bridge": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1128960,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:16:58.011317Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 0,
+            "max_write_ms": 0,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1128960,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          }
+        },
+        {
+          "name": "carrier-ten-second-missing",
+          "expectation": "recovery",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 43.35009765625,
+            "p95_ms": 46.44091796875,
+            "p99_ms": 50.278076171875,
+            "max_ms": 50.278076171875,
+            "median_level_dbfs": -15.145145882172859,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 18,
+            "missing_markers_pct": 52.63157894736842,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 312.569091796875,
+            "p95_ms": 322.63134765625,
+            "p99_ms": 322.63134765625,
+            "max_ms": 322.63134765625,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "independent_render_clock_stages": {
+            "playback:0": {
+              "max_lag_ms": 0,
+              "max_rtt_ms": 0.800048828125,
+              "samples": 95
+            },
+            "synthetic_microphone": {
+              "max_lag_ms": 29.36686197916788,
+              "max_rtt_ms": 0.699951171875,
+              "samples": 95
+            }
+          },
+          "to_browser": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 602830,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:17:22.617832Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 0,
+            "max_write_ms": 3,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 602830,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          },
+          "to_carrier_bridge": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1129920,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:17:22.609164Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 2,
+            "max_write_ms": 5,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1129920,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          }
+        },
+        {
+          "name": "intentional-microphone-mute",
+          "expectation": "recovery",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 33,
+            "missing_markers_pct": 13.157894736842104,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 20.695068359375,
+            "p95_ms": 48.133056640625,
+            "p99_ms": 48.757080078125,
+            "max_ms": 48.757080078125,
+            "median_level_dbfs": -15.14527057187742,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 95.787109375,
+            "p95_ms": 95.867919921875,
+            "p99_ms": 95.874755859375,
+            "max_ms": 95.874755859375,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "independent_render_clock_stages": {
+            "playback:0": {
+              "max_lag_ms": 0,
+              "max_rtt_ms": 0.7001953125,
+              "samples": 95
+            },
+            "synthetic_microphone": {
+              "max_lag_ms": 32.63338216145712,
+              "max_rtt_ms": 0.5,
+              "samples": 95
+            }
+          },
+          "to_browser": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1081870,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:17:47.104357Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 0,
+            "max_write_ms": 2,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1081870,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          },
+          "to_carrier_bridge": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1031040,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:17:47.103382Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 0,
+            "max_write_ms": 4,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1031040,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          }
+        },
+        {
+          "name": "browser-reconnect",
+          "expectation": "recovery",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 37,
+            "missing_markers_pct": 2.6315789473684212,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 44.091064453125,
+            "p95_ms": 47.035888671875,
+            "p99_ms": 47.302978515625,
+            "max_ms": 47.302978515625,
+            "median_level_dbfs": -15.145145882172859,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 37,
+            "missing_markers_pct": 2.6315789473684212,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 73.71826171875,
+            "p95_ms": 93.708740234375,
+            "p99_ms": 93.711669921875,
+            "max_ms": 93.711669921875,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "independent_render_clock_stages": {
+            "playback:0": {
+              "max_lag_ms": 0,
+              "max_rtt_ms": 1.5,
+              "samples": 95
+            },
+            "synthetic_microphone": {
+              "max_lag_ms": 30.16666666666606,
+              "max_rtt_ms": 1.39990234375,
+              "samples": 95
+            }
+          },
+          "to_browser": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1069390,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:18:11.434367Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 0,
+            "max_write_ms": 0,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1069390,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          },
+          "to_carrier_bridge": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1116480,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:18:11.424737Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 0,
+            "max_write_ms": 0,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1116480,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          }
+        },
+        {
+          "name": "webrtc-udp-128k",
+          "expectation": "usable",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 111.18310546875,
+            "p95_ms": 117.080078125,
+            "p99_ms": 121.0009765625,
+            "max_ms": 121.0009765625,
+            "median_level_dbfs": -14.93611998096485,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 170.929443359375,
+            "p95_ms": 171.009521484375,
+            "p99_ms": 171.037109375,
+            "max_ms": 171.037109375,
+            "median_level_dbfs": -15.773853348575312,
+            "final_two_seconds_markers": 4
+          },
+          "independent_render_clock_stages": {
+            "playback:0": {
+              "max_lag_ms": 0.949951171873181,
+              "max_rtt_ms": 1.2998046875,
+              "samples": 95
+            },
+            "synthetic_microphone": {
+              "max_lag_ms": 29.81681315104106,
+              "max_rtt_ms": 1.2998046875,
+              "samples": 95
+            }
+          },
+          "to_browser": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1055950,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:18:35.403982Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 2,
+            "max_write_ms": 0,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1055950,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          },
+          "to_carrier_bridge": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1100160,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:18:35.398854Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 0,
+            "max_write_ms": 1,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1100160,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          }
+        },
+        {
+          "name": "webrtc-udp-64k",
+          "expectation": "usable",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 204.04296875,
+            "p95_ms": 223.59912109375,
+            "p99_ms": 223.614013671875,
+            "max_ms": 223.614013671875,
+            "median_level_dbfs": -14.316601018452344,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 38,
+            "received_markers": 38,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 239.519775390625,
+            "p95_ms": 269.601318359375,
+            "p99_ms": 279.539794921875,
+            "max_ms": 279.539794921875,
+            "median_level_dbfs": -15.735434144551446,
+            "final_two_seconds_markers": 4
+          },
+          "independent_render_clock_stages": {
+            "playback:0": {
+              "max_lag_ms": 0.2835286458321207,
+              "max_rtt_ms": 1.2001953125,
+              "samples": 95
+            },
+            "synthetic_microphone": {
+              "max_lag_ms": 30.10009765625,
+              "max_rtt_ms": 0.60009765625,
+              "samples": 95
+            }
+          },
+          "to_browser": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1055950,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:18:59.860731Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 1,
+            "max_write_ms": 2,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1055950,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          },
+          "to_carrier_bridge": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 1101120,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:18:59.873099Z",
+            "max_queued_ms": 20,
+            "max_residence_ms": 0,
+            "max_write_ms": 3,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 1101120,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          }
+        }
+      ]
+    },
+    {
+      "run": "recovery-baseline-60s-2",
+      "created_at": "2026-10-09T11:21:36Z",
+      "duration_ms": 60000,
+      "raw_result_sha256": "a9c8d1c37d43c7672712fc6c7c6fece8387b350f0242bd5427d71d8c87ff726b",
+      "host": {
+        "sample_count": 69,
+        "max_cpu_busy_pct": 73.89558232931726,
+        "cpu_over_95_samples": []
+      },
+      "profiles": [
+        {
+          "name": "local-baseline",
+          "expectation": "usable",
+          "outcome": "pass",
+          "errors": [],
+          "adviser_to_carrier": {
+            "expected_markers": 118,
+            "received_markers": 118,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 94.447021484375,
+            "p95_ms": 100.60595703125,
+            "p99_ms": 106.4169921875,
+            "max_ms": 117.1669921875,
+            "median_level_dbfs": -15.145145882172859,
+            "final_two_seconds_markers": 4
+          },
+          "carrier_to_adviser": {
+            "expected_markers": 118,
+            "received_markers": 118,
+            "missing_markers_pct": 0,
+            "duplicate_markers": 0,
+            "out_of_order_markers": 0,
+            "p50_ms": 178.79541015625,
+            "p95_ms": 178.924072265625,
+            "p99_ms": 178.940673828125,
+            "max_ms": 178.954345703125,
+            "median_level_dbfs": -15.052743814492999,
+            "final_two_seconds_markers": 4
+          },
+          "playback_dropped_ms": 0,
+          "playback_underruns": 0,
+          "independent_render_clock_stages": {
+            "playback:0": {
+              "max_lag_ms": 0.41666666666424135,
+              "max_rtt_ms": 4.89990234375,
+              "samples": 255
+            },
+            "synthetic_microphone": {
+              "max_lag_ms": 63.5498046875,
+              "max_rtt_ms": 4.800048828125,
+              "samples": 255
+            }
+          },
+          "to_browser": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 3004750,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:21:36.710536Z",
+            "max_queued_ms": 60,
+            "max_residence_ms": 3,
+            "max_write_ms": 10,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 3004750,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          },
+          "to_carrier_bridge": {
+            "coaching_dropped_frames": 0,
+            "coaching_sent_frames": 0,
+            "enqueued_bytes": 3051840,
+            "failed_bytes": 0,
+            "flushed_bytes": 0,
+            "last_write_at": "2026-10-09T11:21:36.711482Z",
+            "max_queued_ms": 60,
+            "max_residence_ms": 4,
+            "max_write_ms": 6,
+            "overflow_bytes": 0,
+            "queued_ms": 0,
+            "sent_bytes": 3051840,
+            "source_stale_bytes": 0,
+            "stale_bytes": 0,
+            "write_errors": 0,
+            "write_timeout_drops": 0
+          }
+        }
+      ]
+    }
+  ]
+}
