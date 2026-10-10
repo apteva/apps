@@ -270,11 +270,14 @@ func TestCarrierActivationCancellationDuringPreparation(t *testing.T) {
 	a.preparations.wait = 20 * time.Millisecond
 	_, err := a.prepareAndActivateTelnyxAI(ctx, row, "Help.", "", "")
 	activationPending(t, err)
+	// Exercise an in-flight spawn, not cancellation before the worker reaches
+	// Core (which correctly needs neither a spawn nor cleanup).
+	waitPreparationEntered(t, p)
 	if err = a.db().updateStatus(row.ID, "canceled", ""); err != nil {
 		t.Fatal(err)
 	}
 	unblock()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		_, killed, _ := p.counts()
 		if killed > 0 {

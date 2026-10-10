@@ -71,11 +71,21 @@ configuration invalidation, expiration and simultaneous fresh refreshes.
   passing tests/subtests, zero failures**, three opt-in skips.
 - Frontend/audio suites: **225 passed, zero failures** (102 client, 123 audio).
 - TypeScript client/benchmark checks, Go vet/build and whitespace checks pass.
-- Focused race validation is the final publication gate.
+- Repeated activation/human socket race checks pass (`-race`, two repetitions).
+  The initial broad repeated race run reported no data races, but its old
+  cancellation fixture canceled before Core startup and incorrectly expected
+  one startup/cleanup. The test now waits for the startup entry before canceling
+  and checks the intended late-completion case deterministically.
 
-Raw evidence: `/private/tmp/telephony-0116-release-go.jsonl`,
+One existing source-timing audio test timed out in a full-suite rerun conducted
+alongside CPU-intensive race instrumentation. Its first full-suite run passed.
+The final full-suite gate runs sequentially; media freshness caps are unchanged.
+The failed concurrent-run evidence is retained in
+`/private/tmp/telephony-0116-release-go-final.jsonl`.
+
+Raw evidence: `/private/tmp/telephony-0116-release-go-sequential.jsonl`,
 `/private/tmp/telephony-0116-release-frontend.log`,
-`/private/tmp/telephony-0116-release-race.log`.
+`/private/tmp/telephony-0116-release-race-final.log`.
 
 ## Limits and installation
 
