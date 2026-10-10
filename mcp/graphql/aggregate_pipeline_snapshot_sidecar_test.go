@@ -86,6 +86,9 @@ func TestRealSnapshotPipelineSeparateStagesAndConcurrentWrite(t *testing.T) {
 		return out
 	}
 	c := snapshotConfig()
+	for _, stage := range c["stages"].([]any) {
+		stage.(map[string]any)["max_bytes"] = 2097152
+	}
 	c["stages"].([]any)[0].(map[string]any)["params"] = []any{map[string]any{"from": "$args.centre", "type": "string"}}
 	publish(c)
 	out := read()

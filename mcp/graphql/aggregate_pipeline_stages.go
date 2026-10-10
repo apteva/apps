@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -29,13 +30,29 @@ func pipelineStageLimit(raw any, fallback int) (int, error) {
 	if raw == nil {
 		return fallback, nil
 	}
-	switch raw.(type) {
-	case int, int64, float64, json.Number:
+	var n int64
+	switch value := raw.(type) {
+	case int:
+		n = int64(value)
+	case int64:
+		n = value
+	case float64:
+		// JSON decoding produces float64 values. Validate before converting;
+		// formatting an integral value can turn 2097152 into "2.097152e+06".
+		if math.IsNaN(value) || math.IsInf(value, 0) || math.Trunc(value) != value || value < math.MinInt32 || value > math.MaxInt32 {
+			return 0, invalid("stage limits must be integers")
+		}
+		n = int64(value)
+	case json.Number:
+		var err error
+		n, err = value.Int64()
+		if err != nil {
+			return 0, invalid("stage limits must be integers")
+		}
 	default:
 		return 0, invalid("stage limits must be integers")
 	}
-	n, err := strconv.ParseInt(fmt.Sprint(raw), 10, 32)
-	if err != nil {
+	if n < math.MinInt32 || n > math.MaxInt32 {
 		return 0, invalid("stage limits must be integers")
 	}
 	return int(n), nil
