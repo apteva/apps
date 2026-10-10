@@ -64,7 +64,8 @@ The bootstrap installs Bun when a Bun lockfile/package-manager declaration or
 `software_versions.bun` requires it (default pinned version `1.3.13`). Rust is
 installed when Cargo/toolchain manifests or `software_versions.rust` require it;
 the source's exact toolchain version is honored (fallback `1.98.1`). iOS adds
-`aarch64-apple-ios`; macOS adds both Darwin architectures. Requested Rust
+`aarch64-apple-ios`, `aarch64-apple-ios-sim` and `x86_64-apple-ios` for device
+and simulator XCFrameworks; macOS adds both Darwin architectures. Requested Rust
 components/targets are honored, with additional comma-separated targets from
 `software_versions.rust_targets`. Explicit versions override source defaults.
 Bun and Rust versions must be exact; conflicting source pins require an

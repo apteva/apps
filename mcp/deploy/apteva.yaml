@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.28.0
+version: 0.28.2
 description: |
   Build and release services, mobile apps, and arbitrary artifacts from Code
   or local sources using local and external build backends. Generic command
@@ -11,6 +11,9 @@ description: |
 
   Supports source kinds {code, local} and frameworks
   {go, node, bun, static, blank, android, ios, macos, command}.
+  v0.28.2 pins the installed source to the matching release tag.
+  v0.28.1 provisions iOS Rust device and simulator targets and bounds
+  missing cloud jobs when a provider returns an invalid HTTP 200 response.
   v0.28.0 executes generic source and artifact pipelines on native cloud
   runners, preserves cloud artifact evidence, and repairs incomplete Apple
   signing identity changes without revoking unrelated certificates.
@@ -189,7 +192,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: deploy/v0.27.2
+    ref: deploy/v0.28.2
     entry: mcp/deploy
   port: 8080
   health_check: /health

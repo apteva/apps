@@ -910,6 +910,18 @@ func (codemagicBuildBackend) Inspect(_ context.Context, bound *sdk.BoundIntegrat
 				Reason: "provider returned HTTP 404 not_found", NotFound: true,
 			}
 		}
+		if errors.As(err, &toolErr) && toolErr.Status >= 200 && toolErr.Status < 300 {
+			var contract struct {
+				Error  string `json:"error"`
+				Detail string `json:"detail"`
+			}
+			if json.Unmarshal(toolErr.Data, &contract) == nil && contract.Error == "response contract violation" {
+				return nil, &externalJobUnavailableError{
+					Provider: buildBackendCodemagic, JobID: build.ExternalJobID,
+					Reason: "get_build response contract violation: " + contract.Detail,
+				}
+			}
+		}
 		return nil, err
 	}
 	payload, err := codemagicBuildPayload(data)

@@ -1,4 +1,14 @@
-# CRM v0.9.22
+# CRM v0.9.23
+
+Release `crm/v0.9.23`: save first-outreach drafts for existing contacts and
+outbound follow-ups without requiring an inbound conversation. New messages
+have Save draft / Save & close and reopen from the contact's Saved message
+drafts; outbound-only inbox threads offer Follow up. Saving creates no inbox
+conversation or message. All composer sends use the same durable saved-draft
+workflow. Recipients stay pinned, send eligibility is rechecked, and uncertain
+delivery retries keep the original operation key. Migration 023 preserves every
+existing draft field; no message or conversation history is rewritten.
+Messaging is unchanged. CRM pins app-sdk v0.99.0.
 
 Release `crm/v0.9.22`: background refreshes preserve the loaded thread,
 scroll position and draft shelf instead of replacing them with a loading screen.
@@ -231,6 +241,26 @@ saves before closing; existing drafts autosave after edits. Reopen them from
 are supported, with source labels, last-editor timestamps and pinned From/To.
 These are CRM-local drafts, not drafts synchronized to Gmail or another mailbox.
 
+Since v0.9.23, **Send message → Save draft** also saves first outreach without
+any incoming message. Reopen from the contact's **Saved message drafts** shelf.
+For outbound-only conversations, **Follow up** opens a draft in the same thread,
+using the historical recipient/sender instead of today's primary contact route.
+
+MCP examples (all save only):
+
+```json
+{"mode":"message","contact_id":42,"channel":"email","subject":"Introduction","body":"Hello"}
+{"mode":"message","conversation_id":123,"body":"Following up"}
+{"mode":"reply","conversation_id":123,"body":"Proposed reply"}
+```
+
+With no conversation, `contact_id` and `channel` are required; mode defaults to
+`message`. An optional `to` must be an existing contact channel, otherwise the
+primary channel is pinned. With a conversation, mode defaults to `reply` and
+requires inbound; explicitly use `message` for an outbound follow-up. Message
+drafts cannot change recipient/channel/conversation/mode after creation. Use a
+new draft for a different destination. Only explicit send creates a new thread.
+
 `conversation_drafts_create/get/list/update/discard` never send. The separate
 `conversation_drafts_send` is a real external send and requires explicit approval.
 For example, save with `{"conversation_id":123,"body":"Proposed reply"}`;
@@ -248,7 +278,7 @@ those notes. Sending rechecks recipient, ownership, Messaging binding, verified
 sender, contact eligibility, suppression and WhatsApp window.
 
 REST: `GET/POST /drafts`, `GET/PATCH/DELETE /drafts/<id>`, and
-`POST /drafts/<id>/send`. List accepts `conversation_id`, `limit`, `offset` and
+`POST /drafts/<id>/send`. List accepts `conversation_id` OR `contact_id`, `limit`, `offset` and
 `include_finished`; it returns summaries, not attachment payloads. Discard is
 soft: content is retained for audit. Draft changes publish
 `conversation.draft.changed` separately from message/activity events; saves do
@@ -261,7 +291,9 @@ replacement send. In-progress sends use a five-minute lease; reopen after lease
 expiry to retry a crashed send. A committed message is recovered without another
 dispatch, and repeated successful sends return the original result. Contact
 merges preserve drafts/anchors and reject in-progress or uncertain sends.
-The additive migration does not rewrite existing messages or conversations.
+The atomic draft-table upgrade preserves all legacy drafts, including their
+anchors, status, revision, authorship, attachments and durable retry state;
+it does not rewrite existing messages or conversations.
 
 ### Delivery and routing
 
