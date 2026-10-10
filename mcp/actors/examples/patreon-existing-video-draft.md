@@ -1,6 +1,6 @@
 # Optional existing Patreon video draft operations
 
-Requires Actors 0.2.20+ and Computer 0.7.94+. This is an editable definition;
+Requires Actors 0.2.21+ and Computer 0.7.94+. This is an editable definition;
 accounts, post IDs, video hosts and tier policy are runtime inputs.
 
 `inspect_video_draft` is read-only. It verifies creator identity in the assigned
