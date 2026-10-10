@@ -1,6 +1,6 @@
 # Optional Patreon post inspection example
 
-Requires Actors 0.2.16+. This is a user-editable actor definition, not a built-in
+Requires Actors 0.2.17+ and Computer 0.7.94+. This is a user-editable actor definition, not a built-in
 site workflow. Supply the assigned `context_id`, explicit `creator_url` and,
 for `inspect_page`, exact `page_url`. No creator, account or tier is fixed.
 

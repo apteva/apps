@@ -116,6 +116,11 @@ For sends, payments or deletions, add `once_key: "{{request_id}}"` to the acknow
 
 An exact SOM locator may declare `text_suffix_pattern`, for example `(?:\s+[0-9]+\s+members?)?`, to allow a known metadata suffix while retaining the exact literal name. The regex is anchored after the escaped name. It cannot silently match another name that starts with the same word. Semantic dispatch retains the fresh target ID, SOM revision and role checks. Ordinary locators also pass the observed name; metadata-suffix locators omit that extra name check because native accessible names can concatenate whitespace differently. Authors must verify the saved values before committing.
 
+### Raw extraction dependency (0.2.17)
+
+Computer 0.7.94 or later is required so `readability:false` preserves navigation,
+headers and sidebars used for creator verification and observed view links.
+
 ### Read-only view coverage (0.2.16)
 
 Named operations can set `read_only:true` and optional `limits` to override their
