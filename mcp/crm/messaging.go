@@ -1571,6 +1571,12 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 	preferChannel := strings.ToLower(strings.TrimSpace(strArg(args, "channel")))
 	convoID := int64Arg(args, "conversation_id")
 	var addr *resolvedAddress
+	if resolve, ok := args["_draft_resolve_address"].(func() (*resolvedAddress, error)); ok {
+		addr, err = resolve()
+		if err != nil {
+			return nil, err
+		}
+	}
 	if convoID > 0 {
 		convo, err := dbConversationGet(ctx.AppDB(), pid, convoID)
 		if err != nil {
@@ -1585,25 +1591,27 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 		if err := validateReplyTransport(convo.Channel, preferChannel); err != nil {
 			return nil, err
 		}
-		route, sender, err := replyRoute(ctx.AppDB(), pid, cid, convoID, preferChannel, int64Arg(args, "reply_to_activity_id"))
-		if err != nil {
-			return nil, err
-		}
-		if preferChannel != convo.Channel && route == "" {
-			return nil, errors.New("a channel switch requires an inbound phone message in this conversation")
-		}
-		if route != "" {
-			addr = &resolvedAddress{Channel: preferChannel, Address: route}
-			var blocked int
-			err = ctx.AppDB().QueryRow(`SELECT ch.id,EXISTS(SELECT 1 FROM contact_channel_delivery_state ds WHERE ds.project_id=ch.project_id AND ds.channel_id=ch.id AND ds.transport=? AND (ds.suppressed=1 OR ds.quarantined=1 OR ds.status IN ('hard_bounced','complained','unsubscribed'))) FROM contact_channels ch WHERE ch.project_id=? AND ch.contact_id=? AND ch.kind=? AND ch.value=?`, preferChannel, pid, cid, contactChannelKindFor(preferChannel), route).Scan(&addr.ChannelID, &blocked)
-			if err != nil && err != sql.ErrNoRows {
+		if addr == nil {
+			route, sender, err := replyRoute(ctx.AppDB(), pid, cid, convoID, preferChannel, int64Arg(args, "reply_to_activity_id"))
+			if err != nil {
 				return nil, err
 			}
-			if blocked != 0 {
-				return nil, errors.New("reply address is not messageable")
+			if preferChannel != convo.Channel && route == "" {
+				return nil, errors.New("a channel switch requires an inbound phone message in this conversation")
 			}
-			if strArg(args, "from") == "" && sender != "" {
-				args["from"] = sender
+			if route != "" {
+				addr = &resolvedAddress{Channel: preferChannel, Address: route}
+				var blocked int
+				err = ctx.AppDB().QueryRow(`SELECT ch.id,EXISTS(SELECT 1 FROM contact_channel_delivery_state ds WHERE ds.project_id=ch.project_id AND ds.channel_id=ch.id AND ds.transport=? AND (ds.suppressed=1 OR ds.quarantined=1 OR ds.status IN ('hard_bounced','complained','unsubscribed'))) FROM contact_channels ch WHERE ch.project_id=? AND ch.contact_id=? AND ch.kind=? AND ch.value=?`, preferChannel, pid, cid, contactChannelKindFor(preferChannel), route).Scan(&addr.ChannelID, &blocked)
+				if err != nil && err != sql.ErrNoRows {
+					return nil, err
+				}
+				if blocked != 0 {
+					return nil, errors.New("reply address is not messageable")
+				}
+				if strArg(args, "from") == "" && sender != "" {
+					args["from"] = sender
+				}
 			}
 		}
 	}
@@ -1637,7 +1645,7 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 				break
 			}
 			blockedAddress := addr.Address
-			if convoID > 0 {
+			if convoID > 0 || strArg(args, "_draft_expected_to") != "" {
 				return nil, fmt.Errorf("reply address suppressed (%s): %s", check.Reason, blockedAddress)
 			}
 			next, resolveErr := resolveContactAddress(ctx.AppDB(), pid, c, preferChannel)
@@ -3826,6 +3834,13 @@ func (a *App) handleHTTPReplyRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	to, from, err := replyRoute(globalCtx.AppDB(), pid, cid, convoID, channel, activityID)
+	if r.URL.Query().Get("mode") == "message" {
+		if channel != convo.Channel {
+			httpErr(w, 400, "follow-up must use the conversation channel")
+			return
+		}
+		to, from, err = messageDraftRoute(globalCtx.AppDB(), pid, cid, convoID, channel, "")
+	}
 	if err != nil {
 		httpErr(w, 400, err.Error())
 		return
