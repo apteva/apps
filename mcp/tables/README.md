@@ -1,4 +1,4 @@
-# Tables (v0.2.4)
+# Tables (v0.2.16)
 
 Typed-row database for Apteva agents and human teams. The row-shaped
 sibling to the `storage` app.
@@ -34,6 +34,8 @@ and keeps operational refresh work separate from ordinary row editing.
   writes with explicit `read_snapshot`, `write_transaction`, and
   `best_effort` modes. Operations can reference earlier results with
   `{"$ref":"operation.path"}` and receive independent status/error entries.
+  Paths support object keys and zero-based array positions, including
+  `{"$ref":"facts.rows.0.payload"}`.
 - **Strict typed columns** — `text`, `number`, `bool`, `datetime`,
   `json`, `file_id` (FK into the `storage` app)
 - **Read-only SQL escape hatch** — `tables_query` runs on a SQLite
@@ -47,6 +49,44 @@ and keeps operational refresh work separate from ordinary row editing.
 - **Composite indexes** — validated column-based indexes can be created,
   inspected, and dropped without exposing physical SQLite names
 - **Skill** — `how-to-use-tables` (`/tables`)
+
+## Batch result references
+
+References start with an operation ID, followed by dot-separated result keys
+and array positions. The dependency scheduler runs the referenced operation
+first, even when it appears later in the operation list. In `read_snapshot`,
+dependent reads use the same transaction.
+
+```json
+{
+  "mode": "read_snapshot",
+  "operations": [
+    {
+      "id": "facts",
+      "operation": "rows_search",
+      "args": {"table": "facts", "order_by": "id asc", "limit": 1}
+    },
+    {
+      "id": "selected",
+      "operation": "rows_get",
+      "args": {"table": "facts", "id": {"$ref": "facts.rows.0.id"}}
+    }
+  ]
+}
+```
+
+Array positions are nonnegative decimal integers; object keys such as `"0"`
+remain object keys. Whole values retain their types, and paths can continue
+through nested JSON objects/arrays, e.g. `facts.rows.0.payload.items.0.label`.
+JSON text returned by raw SQL remains text; references do not implicitly parse it.
+Use explicit ordering when the identity of the first row matters.
+
+An empty array, invalid/out-of-range position or missing path fails the consuming
+operation. Operations depending on that failure are skipped. In
+`write_transaction`, a reference failure rolls back the entire write batch.
+Existing authorization and batch limits apply in every mode. References use
+direct access without additional queries or serialization. No migration is
+needed for this extension.
 
 ## Reserved columns
 

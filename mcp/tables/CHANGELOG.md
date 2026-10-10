@@ -1,3 +1,9 @@
+# Tables v0.2.16 — array positions in batch references
+
+- Extend `$ref` result paths with zero-based array positions, including `facts.rows.0.payload`, nested JSON arrays, typed query/search rows and inserted ID lists. Resolve directly without copying/serializing result collections or adding database calls.
+- Preserve numeric object keys, typed/null leaf values, dependency ordering, snapshot transactions, per-operation authorization and batch limits. Return clear invalid/out-of-range index errors; retain dependency skipping and write-transaction rollback.
+- Add resolver, dependent snapshot/best-effort reads, projection permission, write commit/rollback and real MCP/restart regressions. No schema or SDK changes are required.
+
 # Tables v0.2.15 — efficient diagnostics history
 
 - Add indexed timestamp/id cursor pagination to the server diagnostics API, with request/query/call/operation/outcome/time filters and a redacted single-record endpoint. Keep legacy offsets; bind cursors to project/filter context and check permissions on every request.

@@ -57,6 +57,18 @@ with tempfile.TemporaryDirectory(prefix="tables-smoke-") as temp:
         reply = request("POST", "/mcp", {"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":tool, "arguments":args}})
         assert "error" not in reply, reply
         return json.loads(reply["result"]["content"][0]["text"])
+    def check_batch_array_references():
+        out = mcp("tables_batch", {"mode":"read_snapshot", "operations":[
+            {"id":"facts", "operation":"rows_search", "args":{"table":"records", "order_by":"id asc", "limit":1}},
+            {"id":"selected", "operation":"rows_get", "args":{"table":"records", "id":{"$ref":"facts.rows.0.id"}}},
+            {"id":"matching", "operation":"rows_search", "args":{"table":"records", "where":[{"col":"payload", "op":"eq", "value":{"$ref":"facts.rows.0.payload"}}]}},
+            {"id":"invalid", "operation":"rows_get", "args":{"table":"records", "id":{"$ref":"facts.rows.99.id"}}}
+        ]})["results"]
+        for name in ("facts", "selected", "matching"):
+            assert out[name]["status"] == "ok", out
+        assert out["selected"]["result"]["row"]["id"] == out["facts"]["result"]["rows"][0]["id"], out
+        assert out["matching"]["result"]["rows"], out
+        assert out["invalid"]["status"] == "error", out
     try:
         start()
         for path in ("/tables", "/tables?sig=untrusted", "/diagnostics", "/diagnostics/1"):
@@ -80,6 +92,7 @@ with tempfile.TemporaryDirectory(prefix="tables-smoke-") as temp:
         first = mcp("rows_search", {"table":"records","limit":1,"include_total":False})
         second = mcp("rows_search", {"table":"records","limit":1,"include_total":False,"cursor":first["next_cursor"]})
         assert first["rows"][0]["id"] != second["rows"][0]["id"]
+        check_batch_array_references()
         out = request("PATCH", f"/tables/records/rows/{ids[0]}?expected_revision=1&expected_table_id={created['id']}&select=id,_revision", {"revision":"patched"})
         assert out["row"] == {"id":ids[0],"_revision":2}, out
         stop()
@@ -97,6 +110,7 @@ with tempfile.TemporaryDirectory(prefix="tables-smoke-") as temp:
         assert upgraded["at"] == "2026-01-01T00:00:00.000000000Z", upgraded
         assert upgraded["revision"] == "patched"
         assert upgraded["payload"]["id"] == 9007199254740993
+        check_batch_array_references()
         # Exercise watched dependencies through the public MCP API and actual
         # background worker, then restart the sidecar with captured dirty work.
         mcp("tables_create", {"name":"measurements", "columns":[
@@ -179,7 +193,7 @@ with tempfile.TemporaryDirectory(prefix="tables-smoke-") as temp:
         assert mcp("diagnostics_get", {"id":item["id"]})["diagnostic"]==item
         with sqlite3.connect(env["DB_PATH"]) as db:
             assert db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='read_diagnostics_project_request_time'").fetchone()[0]==1
-        print("PASS: real HTTP/MCP authentication, exact numbers, cursors, optimistic updates, automatic restart migration and watched projection recovery, filter-leading indexes, worker metrics, diagnostics cursor/detail/summary APIs and additive history migration")
+        print("PASS: real HTTP/MCP authentication, exact numbers, cursors, batch array references before/after restart, optimistic updates, automatic restart migration and watched projection recovery, filter-leading indexes, worker metrics, diagnostics cursor/detail/summary APIs and additive history migration")
     finally:
         stop()
         log.close()

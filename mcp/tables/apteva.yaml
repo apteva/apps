@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.2.15
+version: 0.2.16
 description: |
+  v0.2.16 Supports zero-based array positions in batch result references,
+  preserving typed values, dependency scheduling and snapshot/write transactions.
   v0.2.15 Adds indexed cursor diagnostics history, request/query/time filters,
   MCP history/detail tools and cheap page summaries; full-history counts are opt-in.
   v0.2.14 Bounds projection-ready notifications to 16 KiB, automatically repairs
@@ -143,7 +145,7 @@ provides:
     - name: tables_query
       description: 'Read-only SELECT escape hatch. Args: sql, params? (array of bound values). User tables must use {table_name}; internal and physical tables are inaccessible. SQLite read-only mode plus row, byte, and duration caps are enforced.'
     - name: tables_batch
-      description: 'Execute a bounded list of validated Tables operations. Modes: read_snapshot, write_transaction, best_effort. Supports dependency references with {$ref: operation.path}; returns per-operation status and errors.'
+      description: 'Execute a bounded list of validated Tables operations. Modes: read_snapshot, write_transaction, best_effort. Supports object keys and zero-based array positions in dependency references, e.g. {$ref: facts.rows.0.payload}; returns per-operation status and errors.'
     - name: tables_capabilities
       description: 'Return versioned generic Tables capabilities, including the recursive filter AST contract and enforced limits.'
     - name: projections_worker_status
@@ -264,7 +266,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.2.15
+    ref: tables/v0.2.16
     entry: mcp/tables
   port: 8080
   health_check: /health

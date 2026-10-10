@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -573,14 +575,31 @@ func resolveBatchValue(value any, results map[string]batchResult) (any, error) {
 			}
 			current := item.value
 			for _, part := range parts[1:] {
-				obj, ok := current.(map[string]any)
-				if !ok {
-					return nil, errf("reference %q traverses a non-object", ref)
+				if obj, ok := current.(map[string]any); ok {
+					// Numeric object keys remain keys; only arrays interpret indexes.
+					current, ok = obj[part]
+					if !ok {
+						return nil, errf("reference %q path not found", ref)
+					}
+					continue
 				}
-				current, ok = obj[part]
-				if !ok {
-					return nil, errf("reference %q path not found", ref)
+				// Handlers return typed slices (e.g. []map[string]any and []int64)
+				// as well as JSON []any. Index directly, without a JSON round trip.
+				array := reflect.ValueOf(current)
+				if !array.IsValid() || (array.Kind() != reflect.Slice && array.Kind() != reflect.Array) {
+					return nil, errf("reference %q traverses a non-object/non-array", ref)
 				}
+				if part == "" || strings.IndexFunc(part, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+					return nil, errf("reference %q has invalid array index %q; expected a nonnegative decimal integer", ref, part)
+				}
+				index, err := strconv.Atoi(part)
+				if err != nil {
+					return nil, errf("reference %q has invalid array index %q", ref, part)
+				}
+				if index >= array.Len() {
+					return nil, errf("reference %q array index %q is out of range (length %d)", ref, part, array.Len())
+				}
+				current = array.Index(index).Interface()
 			}
 			return current, nil
 		}
