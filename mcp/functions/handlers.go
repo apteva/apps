@@ -383,7 +383,7 @@ func (a *App) handleHTTPInvocationsCollection(w http.ResponseWriter, r *http.Req
 		Limit:      limit,
 		Cursor:     parseInt64(r.URL.Query().Get("cursor")),
 	}
-	out, err := dbRecentInvocationsContext(r.Context(), globalCtx.AppDB(), pid, query)
+	out, err := dbRecentInvocationsContext(r.Context(), globalCtx.AppReadDB(), pid, query)
 	if err != nil {
 		if strings.HasPrefix(err.Error(), "invalid invocation status") {
 			httpErr(w, http.StatusBadRequest, err.Error())
