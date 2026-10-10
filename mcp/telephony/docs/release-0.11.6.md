@@ -79,7 +79,8 @@ configuration invalidation, expiration and simultaneous fresh refreshes.
 
 One existing source-timing audio test timed out in a full-suite rerun conducted
 alongside CPU-intensive race instrumentation. Its first full-suite run passed.
-The final full-suite gate runs sequentially; media freshness caps are unchanged.
+The final sequential full-suite run passed all 940 tests/subtests; media freshness
+caps are unchanged.
 The failed concurrent-run evidence is retained in
 `/private/tmp/telephony-0116-release-go-final.jsonl`.
 
