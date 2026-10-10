@@ -269,6 +269,9 @@ type browserWebRTCStats struct {
 }
 
 type audioDropEvent struct {
+	PacketCount          int     `json:"packet_count,omitempty"`
+	SSRC                 uint32  `json:"ssrc,omitempty"`
+	WindowMS             float64 `json:"window_ms,omitempty"`
 	Trigger              string  `json:"trigger,omitempty"`
 	QueueResidenceMS     float64 `json:"queue_residence_ms,omitempty"`
 	BrowserDropTimestamp string  `json:"browser_drop_timestamp,omitempty"`
@@ -488,6 +491,8 @@ func normalizeAudioDropEvents(events []audioDropEvent) []audioDropEvent {
 		events = events[len(events)-100:]
 	}
 	for i := range events {
+		events[i].PacketCount = clampDiagnosticInt(events[i].PacketCount, 1000000)
+		events[i].WindowMS = finiteAudioObservation(events[i].WindowMS, 86400000)
 		events[i].BrowserDropTimestamp = ""
 		events[i].BrowserDropReason = ""
 		events[i].FrameAgeMS = finiteAudioObservation(events[i].FrameAgeMS, 60000)

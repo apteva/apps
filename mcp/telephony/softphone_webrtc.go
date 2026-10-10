@@ -26,6 +26,9 @@ import (
 const rtcSetupTimeout = 18 * time.Second
 
 type softphoneRTCConfig struct {
+	NetworkContext   audioNetworkEvent
+	KnownVPNExits    string
+	CollectNetwork   func(audioNetworkEvent)
 	Enabled          bool
 	ICEServers       []webrtc.ICEServer
 	PublicIPs        []string
@@ -114,6 +117,7 @@ func (c *rtcHubConn) queueWhisper(data []byte, valid func() bool) bool {
 }
 
 type rtcMediaSnapshot struct {
+	RTP                    rtcSendSnapshot  `json:"rtp_send"`
 	IngressRejectedPackets int64            `json:"ingress_rejected_packets"`
 	IngressQueueDrops      int64            `json:"ingress_queue_drops"`
 	IngressPaddingPackets  int64            `json:"ingress_padding_packets"`
@@ -124,6 +128,7 @@ type rtcMediaSnapshot struct {
 	Events                 []audioDropEvent `json:"events,omitempty"`
 }
 type rtcMediaStats struct {
+	rtp   rtcSendTelemetry
 	mu    sync.Mutex
 	value rtcMediaSnapshot
 }
@@ -132,6 +137,7 @@ func (s *rtcMediaStats) snapshot() rtcMediaSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v := s.value
+	v.RTP = s.rtp.snapshot()
 	v.Events = append([]audioDropEvent(nil), v.Events...)
 	return v
 }
@@ -156,6 +162,7 @@ func (s *rtcMediaStats) drop(reason, direction string, sequence uint64, duration
 	}
 }
 func mergeRTCSnapshots(a, b rtcMediaSnapshot) rtcMediaSnapshot {
+	a.RTP = mergeRTCSends(a.RTP, b.RTP)
 	a.IngressRejectedPackets += b.IngressRejectedPackets
 	a.IngressQueueDrops += b.IngressQueueDrops
 	a.IngressPaddingPackets += b.IngressPaddingPackets
@@ -270,6 +277,7 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 	input := newWebSocketWriterPump(bridge, ws.StateClientSide)
 	done := make(chan struct{})
 	stats := &rtcMediaStats{}
+	stats.rtp.connectionID = c.NetworkContext.ConnectionID
 	var once sync.Once
 	stop := func() {
 		once.Do(func() {
@@ -303,6 +311,18 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 	if err != nil {
 		return fail(err)
 	}
+	parameters := sender.GetParameters()
+	if len(parameters.Encodings) > 0 {
+		stats.rtp.ssrc = uint32(parameters.Encodings[0].SSRC)
+	}
+	sender.Transport().ICETransport().OnSelectedCandidatePairChange(func(pair *webrtc.ICECandidatePair) {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		stats.rtp.selectedPath(pair, c.NetworkContext, c.KnownVPNExits, c.CollectNetwork)
+	})
 	go func() {
 		b := make([]byte, 1500)
 		for {
@@ -574,7 +594,7 @@ func sendSoftphoneRTP(bridge net.Conn, input, signal *websocketWriterPump, track
 			if skipped > 0 {
 				stats.drop("webrtc_pacing_gap", "carrier_to_operator", 0, skipped)
 			}
-			if err := track.WriteRTP(&rtp.Packet{Header: rtp.Header{Version: 2, SequenceNumber: sequence.NextSequenceNumber(), Timestamp: timestamp}, Payload: append([]byte(nil), out[:n]...)}); err != nil {
+			if err := writeObservedRTP(track.WriteRTP, &rtp.Packet{Header: rtp.Header{Version: 2, SequenceNumber: sequence.NextSequenceNumber(), Timestamp: timestamp}, Payload: append([]byte(nil), out[:n]...)}, &stats.rtp); err != nil {
 				stop()
 				return
 			}

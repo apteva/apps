@@ -604,7 +604,12 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		logSoftphone("browser ws upgrade failed", "call", callID, "err", err)
 		return
 	}
+	networkContext := newAudioNetworkContextWithAddress(row, identity, networkAddress, networkConfig)
+	networkContext.ConnectionID = newAudioConnectionID()
 	if transport == "webrtc" {
+		rtcConfig.NetworkContext = networkContext
+		rtcConfig.KnownVPNExits = networkConfig["audio_telemetry_known_vpn_exits"]
+		rtcConfig.CollectNetwork = a.audioNetworks.enqueue
 		// Negotiate before replacing the browser or answering the carrier. Failed
 		// setup leaves the existing hub/carrier untouched, including auto fallback.
 		var stopRTC func()
@@ -632,7 +637,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 	hub := a.softphones.hubFor(callID)
 	hub.telemetry.restore(row.BrowserAudioDiagnostics)
 	hash, hashEpoch, addressSource := a.audioPeerHasher.hashAddress(networkAddress.Client, networkAddress.Source)
-	connectionID := hub.telemetry.openedWithNetwork(writer, hash, hashEpoch, addressSource, newAudioNetworkContextWithAddress(row, identity, networkAddress, networkConfig), a.audioNetworks.enqueue)
+	connectionID := hub.telemetry.openedWithNetwork(writer, hash, hashEpoch, addressSource, networkContext, a.audioNetworks.enqueue)
 	writer.setDiagnosticID(connectionID)
 	defer func() {
 		hub.telemetry.closed(writer, "handler_closed", nil)

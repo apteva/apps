@@ -120,6 +120,9 @@ export interface SoftphoneAudioOptions {
 }
 
 export interface AudioDropEvent {
+  packet_count?: number;
+  ssrc?: number;
+  window_ms?: number;
   timestamp: string;
   direction: string;
   reason: string;

@@ -212,7 +212,10 @@ func (t *audioCallTelemetry) openedWithNetwork(w *websocketWriterPump, hash, epo
 		t.socket.Reconnects++
 	}
 	t.socket.PeerHash, t.socket.HashEpoch, t.socket.AddressSource = hash, epoch, source
-	id := newAudioConnectionID()
+	id := network.ConnectionID
+	if id == "" {
+		id = newAudioConnectionID()
+	}
 	network.ConnectionID = id
 	network.ID = id + ":connected"
 	network.OccurredAt = time.Now().UTC().Format(time.RFC3339Nano)

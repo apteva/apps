@@ -1,5 +1,5 @@
 import {expect,test,spyOn} from "bun:test";
-import {mediaTransport,rtcMediaURL,rtcStatistics,selectableAudio,permanentRTCFailure,WebRTCAudioConnection} from "../src/webrtc-audio";
+import {mediaTransport,rtcMediaURL,rtcStatistics,rtcLossEvents,selectableAudio,permanentRTCFailure,WebRTCAudioConnection} from "../src/webrtc-audio";
 import {DEFAULT_SOFTPHONE_AUDIO_OPTIONS,playbackBufferOptions} from "../../ui/softphone-audio";
 import type {AudioConnection} from "../src/audio";
 
@@ -114,4 +114,29 @@ test("overlapping getStats, failed sampling and late completions never stop or r
  pc.getStats=async()=>{throw new Error("stats unavailable")};await audio.statistics(1);expect(audio.statsErrors).toBe(1);expect(audio.pc).toBe(pc);expect(audio.stopped).toBe(false);
  pc.getStats=()=>new Promise<RTCStatsReport>(r=>resolve=r);
  const late=audio.statistics(1);audio.generation=2;resolve(richReport(Date.now()));await late;expect(published).toHaveLength(2);audio.transportSender.stop();
+});
+
+test("timestamped loss deltas retain SSRC and reset safely across streams and reconnections",()=>{
+ const report=(at:number,lost:number,id="in",ssrc=123)=>new Map([
+ [id,{type:"inbound-rtp",kind:"audio",timestamp:at,packetsLost:lost,packetsReceived:100,ssrc}],
+ ["remote",{type:"remote-inbound-rtp",kind:"audio",timestamp:at,packetsLost:lost+2,ssrc:456}]
+ ]) as unknown as RTCStatsReport;
+ const first=rtcStatistics(report(1000,2));expect(first.metrics.receiver_loss_delta).toBeUndefined();
+ const next=rtcStatistics(report(2000,5),first.previous);
+ expect(next.metrics.receiver_ssrc).toBe(123);expect(next.metrics.receiver_loss_delta).toBe(3);expect(next.metrics.receiver_loss_window_ms).toBe(1000);
+ expect(next.metrics.remote_receiver_ssrc).toBe(456);expect(next.metrics.remote_receiver_loss_delta).toBe(3);
+ const clean=rtcStatistics(report(3000,5),next.previous);expect(clean.metrics.receiver_loss_delta).toBe(0);
+ for(const r of [report(3000,1),report(3000,8,"new-id"),report(3000,8,"in",999),report(1500,8)]){
+  expect(rtcStatistics(r,next.previous).metrics.receiver_loss_delta).toBeUndefined();
+ }
+ expect(rtcStatistics(report(3000,8)).metrics.receiver_loss_delta).toBeUndefined();
+});
+
+
+test("loss events are sampled directional deltas with timestamp and SSRC, never fabricated duration",()=>{
+ const stamp="2026-10-10T09:00:00.000Z";
+ const events=rtcLossEvents({receiver_loss_delta:3,receiver_loss_window_ms:1000,receiver_ssrc:123,remote_receiver_loss_delta:2,remote_receiver_loss_window_ms:2000,remote_receiver_ssrc:456},stamp);
+ expect(events).toHaveLength(2);expect(events[0]).toEqual({timestamp:stamp,direction:"carrier_to_operator",reason:"webrtc_packet_loss",duration_ms:0,packet_count:3,ssrc:123,window_ms:1000});
+ expect(events[1].direction).toBe("operator_to_carrier");expect(events[1].ssrc).toBe(456);
+ expect(rtcLossEvents({receiver_loss_delta:0,remote_receiver_loss_delta:-1})).toEqual([]);
 });

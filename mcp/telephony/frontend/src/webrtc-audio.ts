@@ -1,4 +1,4 @@
-import { microphoneConstraints, playbackBufferOptions, PreviewResampler, type SoftphoneAudioOptions, type SoftphoneCallbacks, type SoftphoneDiagnostics } from "../../ui/softphone-audio";
+import { microphoneConstraints, playbackBufferOptions, PreviewResampler, type AudioDropEvent, type SoftphoneAudioOptions, type SoftphoneCallbacks, type SoftphoneDiagnostics } from "../../ui/softphone-audio";
 import { TransportTelemetry, TransportTelemetrySender, transportMetrics, transportStates } from "../../ui/transport-telemetry";
 import { AudioRuntimeTelemetry } from "../../ui/audio-runtime-telemetry";
 import { playRingback, ringbackPattern } from "../../ui/ringback";
@@ -36,6 +36,18 @@ export function rtcStatistics(report: RTCStatsReport, previous?: RTCPrevious) {
     if(n!==undefined && d!==undefined){counters[id]??={};counters[id][numerator]=n;counters[id][denominator]=d;
       if(old && n>=old[numerator] && d>old[denominator]) metrics[key]=(n-old[numerator])/(d-old[denominator])*1000;}
   };
+  // Loss is an interval observation, not a list of missing RTP sequences.
+  const loss=(s:any,id:string,prefix:string)=>{
+    const count=numeric(s,"packetsLost"),ssrc=numeric(s,"ssrc"),time=numeric(s,"timestamp"),old=previous?.counters?.[id];
+    if(ssrc!==undefined)metrics[prefix+"ssrc"]=ssrc;
+    if(count===undefined || time===undefined)return;
+    counters[id]??={};counters[id].packetsLost=count;counters[id].at=time;
+    if(ssrc!==undefined)counters[id].ssrc=ssrc;
+    if(old && old.ssrc===ssrc && count>=old.packetsLost && time>old.at){
+      metrics[prefix+"loss_delta"]=(metrics[prefix+"loss_delta"]??0)+(count-old.packetsLost);
+      metrics[prefix+"loss_window_ms"]=time-old.at;
+    }
+  };
   let identities=0;
   report.forEach((s:any,id:string)=>{
     at=Math.max(at,finite(s.timestamp,1e15));
@@ -45,6 +57,7 @@ export function rtcStatistics(report: RTCStatsReport, previous?: RTCPrevious) {
         interval(s,id,"totalPacketSendDelay","packetsSent","sender_send_delay_interval_ms");
       }
       if(s.type==="inbound-rtp"){
+        loss(s,id,"receiver_");
         received+=finite(s.bytesReceived);lost+=finite(s.packetsLost);jitter=Math.max(jitter,finite(s.jitter)*1000);
         const codec=report.get(s.codecId);const rate=numeric(codec,"clockRate")??48000;
         concealed+=finite(s.concealedSamples)*1000/rate;discarded+=finite(s.packetsDiscarded);delay+=finite(s.jitterBufferDelay);emitted+=finite(s.jitterBufferEmittedCount);
@@ -56,7 +69,7 @@ export function rtcStatistics(report: RTCStatsReport, previous?: RTCPrevious) {
         if(numeric(s,"lastPacketReceivedTimestamp")!==undefined)metrics.receiver_last_packet_age_ms=Math.max(0,s.timestamp-s.lastPacketReceivedTimestamp);
         if(codec){states.codec=codec.mimeType;metrics.codec_clock_rate=rate;if(numeric(codec,"channels")!==undefined)metrics.codec_channels=codec.channels;}
       }
-      if(s.type==="remote-inbound-rtp")copy(s,"remote_receiver_",["packetsLost","fractionLost","jitter","roundTripTime","totalRoundTripTime","roundTripTimeMeasurements"]);
+      if(s.type==="remote-inbound-rtp"){copy(s,"remote_receiver_",["packetsLost","fractionLost","jitter","roundTripTime","totalRoundTripTime","roundTripTimeMeasurements"]);loss(s,id,"remote_receiver_");}
       if(s.type==="remote-outbound-rtp")copy(s,"remote_sender_",["packetsSent","bytesSent"]);
       const bytesKey=s.type==="outbound-rtp"?"bytesSent":s.type==="inbound-rtp"?"bytesReceived":undefined;
       if(bytesKey && numeric(s,bytesKey)!==undefined){counters[id]??={};counters[id][bytesKey]=s[bytesKey];counters[id].at=s.timestamp;}
@@ -82,6 +95,15 @@ export function rtcStatistics(report: RTCStatsReport, previous?: RTCPrevious) {
   return {previous:{at,sent,received,counters,pairID,pathRevision},rtt:rtt as number|null,queueMs:emitted>0?delay/emitted*1000:0,
     metrics:transportMetrics({...metrics,send_bitrate_bps:sendBitrateBps,receive_bitrate_bps:receiveBitrateBps}),states:transportStates(states),
     webrtc:{protocol,candidateType,sendBitrateBps,receiveBitrateBps,packetsLost:lost,jitterMs:jitter,concealedMs:concealed,packetsDiscarded:discarded,jitterBufferMs:emitted>0?delay/emitted*1000:0}};
+}
+
+export function rtcLossEvents(metrics:Record<string,number>,timestamp=new Date().toISOString()):AudioDropEvent[] {
+  const out:AudioDropEvent[]=[];
+  for(const [prefix,direction] of [["receiver_","carrier_to_operator"],["remote_receiver_","operator_to_carrier"]]){
+    const count=metrics[prefix+"loss_delta"];
+    if(count>0)out.push({timestamp,direction,reason:"webrtc_packet_loss",duration_ms:0,packet_count:count,ssrc:metrics[prefix+"ssrc"],window_ms:metrics[prefix+"loss_window_ms"]});
+  }
+  return out;
 }
 
 /** Native WebRTC media; the socket carries authenticated signaling/control only. */
@@ -128,7 +150,6 @@ export class WebRTCAudioConnection implements AudioConnection {
   });
   private statsErrors=0;
   private lastStatsSend=-Infinity;
-  private reportedLoss=0;
   private clientEpoch=crypto.randomUUID();
   private nativeCounts?: {packetsLost:number;packetsDiscarded:number;concealedMs:number};
   private completedCounts={packetsLost:0,packetsDiscarded:0,concealedMs:0};
@@ -148,7 +169,7 @@ export class WebRTCAudioConnection implements AudioConnection {
   private async connect(url:string):Promise<void> {
     this.runtime.observeEnvironment();
     const generation=++this.generation,options=this.options!;
-    this.ready=this.peer=false;this.previous=undefined;this.reportedLoss=this.completedCounts.packetsLost;
+    this.ready=this.peer=false;this.previous=undefined;
     const stream=await navigator.mediaDevices.getUserMedia({audio:microphoneConstraints(options)});
     if(!this.current(generation)){stream.getTracks().forEach(t=>t.stop());throw new Error("Audio session cancelled");}
     this.stream=stream;
@@ -280,7 +301,7 @@ export class WebRTCAudioConnection implements AudioConnection {
       result.webrtc.packetsLost+=this.completedCounts.packetsLost;
       result.webrtc.packetsDiscarded+=this.completedCounts.packetsDiscarded;
       result.webrtc.concealedMs+=this.completedCounts.concealedMs;
-      if(result.webrtc.packetsLost>this.reportedLoss){this.diagnostics.dropEvents=[...this.diagnostics.dropEvents,{timestamp:new Date().toISOString(),direction:"carrier_to_operator",reason:"webrtc_packet_loss",duration_ms:0}].slice(-100);this.reportedLoss=result.webrtc.packetsLost;}
+      this.diagnostics.dropEvents=[...this.diagnostics.dropEvents,...rtcLossEvents(result.metrics)].slice(-100);
       this.diagnostics={...this.diagnostics,rttMs:result.rtt,queueMs:result.queueMs,maxQueueMs:Math.max(this.diagnostics.maxQueueMs,result.queueMs),targetMs:this.options?.playbackTargetMs??60,webrtc:result.webrtc,playbackSequenceGaps:result.webrtc.packetsLost,sessionEvents:this.events.slice(),websocketBufferedBytes:this.socket?.bufferedAmount??0};
       const track=this.stream?.getAudioTracks()[0];
       this.transportTelemetry.observe({...result.metrics,rtt_ms:result.rtt,queue_ms:result.queueMs,target_ms:this.diagnostics.targetMs,buffered_bytes:this.socket?.bufferedAmount??0,stats_errors:this.statsErrors,stats_duration_ms:performance.now()-started,main_thread_max_pause_ms:this.runtime.counters.main_thread_max_pause_ms},

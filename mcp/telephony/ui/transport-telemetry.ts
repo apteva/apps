@@ -10,6 +10,7 @@ export const TRANSPORT_METRICS = [
   "capture_sent_ms", "capture_muted_ms", "capture_dropped_ms", "playback_ingress_ms", "playback_transport_dropped_ms",
   "playback_source_dropped_ms", "clock_uncertainty_ms", "clock_sample_age_ms", "stats_errors", "stats_duration_ms",
   "send_bitrate_bps", "receive_bitrate_bps", "receive_gap_ms", "capture_age_ms", "transit_ms", "delivery_excess_ms", "server_queue_ms",
+  "receiver_ssrc", "receiver_loss_delta", "receiver_loss_window_ms", "remote_receiver_ssrc", "remote_receiver_loss_delta", "remote_receiver_loss_window_ms",
   "receiver_bytesReceived", "receiver_packetsReceived", "receiver_packetsLost", "receiver_jitter", "receiver_packetsDiscarded",
   "receiver_concealedSamples", "receiver_silentConcealedSamples", "receiver_concealmentEvents", "receiver_insertedSamplesForDeceleration", "receiver_removedSamplesForAcceleration",
   "receiver_totalSamplesReceived", "receiver_audioLevel", "receiver_totalAudioEnergy", "receiver_totalSamplesDuration", "receiver_nackCount", "receiver_fecPacketsReceived", "receiver_fecPacketsDiscarded",
