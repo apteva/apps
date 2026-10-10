@@ -472,8 +472,7 @@ func sendSoftphoneRTP(bridge net.Conn, input, signal *websocketWriterPump, track
 	frames := make(chan rtcPCMFrame, 6)
 	go func() {
 		defer close(frames)
-		pending := make([]int16, 0, 480)
-		var pendingExpires time.Time
+		var pending rtcPCMFramer
 		for {
 			data, op, err := readWebSocketData(bridge, ws.StateClientSide, input)
 			if err != nil {
@@ -521,37 +520,13 @@ func sendSoftphoneRTP(bridge net.Conn, input, signal *websocketWriterPump, track
 			if len(data) < header || (len(data)-header)%2 != 0 || len(data) > 24000*2 {
 				continue
 			}
-			if len(pending) > 0 && !pendingExpires.After(now) {
-				stats.drop("webrtc_playback_partial_age", "carrier_to_operator", 0, len(pending)*1000/24000)
-				pending = pending[:0]
+			if dropped := pending.discardExpired(now); dropped > 0 {
+				stats.drop("webrtc_playback_partial_age", "carrier_to_operator", 0, dropped*1000/24000)
 			}
-			if len(pending) == 0 || expires.Before(pendingExpires) {
-				pendingExpires = expires
-			}
-			for k := header; k < len(data); k += 2 {
-				pending = append(pending, int16(binary.LittleEndian.Uint16(data[k:])))
-			}
-			for len(pending) >= 480 {
-				frame := rtcPCMFrame{pcm: append([]int16(nil), pending[:480]...), expires: pendingExpires}
-				pending = pending[480:]
-				select {
-				case frames <- frame:
-				case <-done:
-					return
-				default:
-					select {
-					case <-frames:
-						stats.drop("webrtc_playback_overflow", "carrier_to_operator", 0, 20)
-					default:
-					}
-					select {
-					case frames <- frame:
-					default:
-					}
-				}
-				stats.mu.Lock()
-				stats.value.MaxQueueMS = max(stats.value.MaxQueueMS, len(frames)*20)
-				stats.mu.Unlock()
+			if !pending.push(data[header:], expires, func(frame rtcPCMFrame) bool {
+				return queueRTCFrame(frames, frame, done, stats)
+			}) {
+				return
 			}
 		}
 	}()
