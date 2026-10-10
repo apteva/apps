@@ -456,7 +456,7 @@ func (a *App) filterPhoneCalls(r *http.Request, rows []callRow) []callRow {
 // grant per call prevents stale tabs and explicit takeovers replaying old URLs.
 const phoneLeaseSeconds = 60
 
-func (a *App) issuePhoneSession(row *callRow, p *phonePrincipal) (*softphoneSession, error) {
+func (a *App) issuePhoneSession(row *callRow, p *phonePrincipal, diagnostic ...audioSessionCorrelation) (*softphoneSession, error) {
 	principal := ""
 	revision := int64(0)
 	if p != nil {
@@ -473,15 +473,39 @@ func (a *App) issuePhoneSession(row *callRow, p *phonePrincipal) (*softphoneSess
 		principal = p.Identity.key()
 		revision = fresh.Revision
 	}
+	s := audioSessionCorrelation{}
+	if len(diagnostic) > 0 {
+		s = diagnostic[0]
+	}
+	s = normalizeAudioSessionCorrelation(s)
+	s.SessionID = newAudioSessionID()
+	s.PreviousSessionID = ""
+	s.IssuedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	raw, _ := json.Marshal(s)
 	token := newSecret()
-	_, err := a.db().db.Exec(`INSERT INTO telephony_media_sessions(call_id,project_id,token_hash,principal,policy_revision,expires_at) VALUES(?,?,?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET token_hash=excluded.token_hash,principal=excluded.principal,policy_revision=excluded.policy_revision,expires_at=excluded.expires_at`, row.ID, row.ProjectID, phoneHash(token), principal, revision, time.Now().Unix()+phoneLeaseSeconds)
+	var saved string
+	err := a.db().db.QueryRow(`INSERT INTO telephony_media_sessions(call_id,project_id,token_hash,principal,policy_revision,expires_at,diagnostic_json) VALUES(?,?,?,?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET token_hash=excluded.token_hash,principal=excluded.principal,policy_revision=excluded.policy_revision,expires_at=excluded.expires_at,diagnostic_json=json_set(excluded.diagnostic_json,'$.previous_session_id',json_extract(CASE WHEN json_valid(telephony_media_sessions.diagnostic_json) THEN telephony_media_sessions.diagnostic_json ELSE '{}' END,'$.session_id')) RETURNING diagnostic_json`, row.ID, row.ProjectID, phoneHash(token), principal, revision, time.Now().Unix()+phoneLeaseSeconds, string(raw)).Scan(&saved)
+	_ = json.Unmarshal([]byte(saved), &s)
 	if err != nil {
 		return nil, err
 	}
 	if h := a.softphones.lookup(row.ID); h != nil {
 		h.invalidateCoaching()
+		identity := phoneIdentity{}
+		if p != nil {
+			identity = p.Identity
+		}
+		h.telemetry.sessionIssued(row, s, identity, a.audioNetworks.enqueue)
+	} else {
+		network := audioNetworkEvent{CallID: row.ID, ProjectID: row.ProjectID, Retention: 7 * 24 * time.Hour}
+		if p != nil {
+			network.AdviserIdentity = p.Identity
+			network.SessionIssuerIdentity = &p.Identity
+			network.IdentitySource = "authorized_http_session"
+		}
+		enqueueAudioSessionIssued(network, s, a.audioNetworks.enqueue)
 	}
-	return &softphoneSession{CallID: row.ID, MediaURL: a.softphoneMediaURL(row.ID, token), SessionToken: token, To: row.ToNumber, From: row.FromNumber, LeaseSeconds: phoneLeaseSeconds}, nil
+	return &softphoneSession{CallID: row.ID, MediaURL: a.softphoneMediaURL(row.ID, token), SessionToken: token, SessionGeneration: s.SessionID, To: row.ToNumber, From: row.FromNumber, LeaseSeconds: phoneLeaseSeconds}, nil
 }
 func (a *App) validPhoneMedia(row *callRow, token string) bool {
 	return a.phoneMediaDenialReason(row, token) == ""
@@ -512,55 +536,74 @@ func (a *App) phoneMediaCheck(row *callRow, token string) (string, int64) {
 	return reason, expiry
 }
 func (a *App) phoneMediaCheckDetails(row *callRow, token string) (string, int64, phoneIdentity) {
-	var hash, principal string
+	reason, expiry, identity, _ := a.phoneMediaCheckState(row, token)
+	return reason, expiry, identity
+}
+func (a *App) phoneMediaCheckState(row *callRow, token string, includeCorrelation ...bool) (string, int64, phoneIdentity, audioSessionCorrelation) {
+	var hash, principal, raw string
+	var session audioSessionCorrelation
 	var revision, expires int64
-	err := a.db().db.QueryRow(`SELECT token_hash,principal,policy_revision,expires_at FROM telephony_media_sessions WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID).Scan(&hash, &principal, &revision, &expires)
+	var err error
+	if len(includeCorrelation) > 0 && includeCorrelation[0] {
+		err = a.db().db.QueryRow(`SELECT token_hash,principal,policy_revision,expires_at,diagnostic_json FROM telephony_media_sessions WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID).Scan(&hash, &principal, &revision, &expires, &raw)
+		_ = json.Unmarshal([]byte(raw), &session)
+	} else {
+		// Lease watchdogs retain their existing compact query; generation decoding
+		// is needed only at an attachment boundary, never on each media tick.
+		err = a.db().db.QueryRow(`SELECT token_hash,principal,policy_revision,expires_at FROM telephony_media_sessions WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID).Scan(&hash, &principal, &revision, &expires)
+	}
 	if err == sql.ErrNoRows {
 		owner, _, e := a.phoneOwner(row.ID)
 		if e != nil {
-			return "owner_lookup_failed", expires, phoneIdentity{}
+			return "owner_lookup_failed", expires, phoneIdentity{}, session
 		}
 		if owner == "" && row.PeerToken != "" && secureEqual(token, row.PeerToken) {
-			return "", expires, phoneIdentity{}
+			return "", expires, phoneIdentity{}, session
 		}
-		return "media_session_missing", expires, phoneIdentity{}
+		return "media_session_missing", expires, phoneIdentity{}, session
 	}
 	if err != nil {
-		return "media_session_lookup_failed", expires, phoneIdentity{}
+		return "media_session_lookup_failed", expires, phoneIdentity{}, session
 	}
 	if expires <= time.Now().Unix() {
-		return "media_lease_expired", expires, phoneIdentity{}
+		return "media_lease_expired", expires, phoneIdentity{}, session
 	}
 	if !secureEqual(phoneHash(token), hash) {
-		return "media_token_replaced", expires, phoneIdentity{}
+		return "media_token_replaced", expires, phoneIdentity{}, session
 	}
 	if principal == "" {
-		return "", expires, phoneIdentity{}
+		return "", expires, phoneIdentity{}, session
 	}
 	var identity phoneIdentity
 	if json.Unmarshal([]byte(principal), &identity) != nil || !identity.valid() {
-		return "media_principal_invalid", expires, phoneIdentity{}
+		return "media_principal_invalid", expires, phoneIdentity{}, session
 	}
 	p, err := a.phonePrincipal(row.ProjectID, identity)
 	if err != nil {
 		if errors.Is(err, errPhoneAccessDenied) {
-			return "user_access_revoked", expires, phoneIdentity{}
+			return "user_access_revoked", expires, phoneIdentity{}, session
 		}
-		return "policy_lookup_failed", expires, phoneIdentity{}
+		return "policy_lookup_failed", expires, phoneIdentity{}, session
 	}
 	if !a.phoneCallAllowed(p, row, false) {
 		owner, _, ownerErr := a.phoneOwner(row.ID)
 		if ownerErr != nil {
-			return "owner_lookup_failed", expires, phoneIdentity{}
+			return "owner_lookup_failed", expires, phoneIdentity{}, session
 		}
 		if owner != identity.key() {
-			return "call_ownership_changed", expires, phoneIdentity{}
+			return "call_ownership_changed", expires, phoneIdentity{}, session
 		}
-		return "call_permission_revoked", expires, phoneIdentity{}
+		return "call_permission_revoked", expires, phoneIdentity{}, session
 	}
-	return "", expires, identity
+	return "", expires, identity, session
 }
 func (a *App) handlePhoneSession(w http.ResponseWriter, r *http.Request, project, action, id string) {
+	// Optional HTTP metadata may await request bytes. Never hold the media claim
+	// while reading it; authorization and issuance remain authoritative below.
+	var diagnostic audioSessionCorrelation
+	if action != "renew" {
+		diagnostic = audioSessionRequest(r, action)
+	}
 	unlock := a.softphones.lockClaim(id)
 	defer unlock()
 	row, err := a.db().findCall(id)
@@ -640,8 +683,18 @@ func (a *App) handlePhoneSession(w http.ResponseWriter, r *http.Request, project
 		writeJSON(w, map[string]any{"lease_seconds": phoneLeaseSeconds})
 		return
 	}
-	session, err := a.issuePhoneSession(row, p)
+	session, err := a.issuePhoneSession(row, p, diagnostic)
 	if err != nil {
+		status := http.StatusServiceUnavailable
+		if errors.Is(err, errPhoneAccessDenied) {
+			status = http.StatusForbidden
+		}
+		identity := phoneIdentity{}
+		if p != nil {
+			identity = p.Identity
+		}
+		network := audioNetworkEvent{CallID: row.ID, ProjectID: row.ProjectID, AdviserIdentity: identity, IdentitySource: "authorized_http_session", Session: diagnostic, Retention: 7 * 24 * time.Hour}
+		enqueueAudioAttachmentFailure(network, "softphone.media.session_issue_failed", status, "media_session_unavailable", nil, a.audioNetworks.enqueue)
 		writePhoneSessionFailure(w, err)
 		return
 	}

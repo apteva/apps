@@ -255,6 +255,44 @@ events. Adviser `onDiagnostics` includes bounded session events and directional
 frame-drop samples. See [media session resilience](../docs/media-session-resilience.md)
 for clock handling, authorization boundaries and diagnostic fields.
 
+## Connection and recovery correlation
+
+Both browser transports and the headless backbone retain bounded structured
+session events. `recovery_id` identifies one recovery chain; `attempt_id`
+identifies an individual authorization/connection attempt. A coalesced refresh
+also reports `shared_attempt_id`. Outcomes include started, failed, connected,
+timed out, revoked and cancelled. These IDs confer no access permissions.
+
+`/softphone/attach` and `/softphone/takeover` accept optional `media_diagnostics`
+with those IDs and an `initiating_action`. The response includes a nonsecret
+`session_generation`. Server events link previous/new generations, issuance
+UTC time, issuer identity and the affected browser connection. The generation
+can appear in an attachment query for correlating a rejected stale credential;
+it never replaces token validation. Existing clients remain compatible.
+
+```ts
+await phone.reconnect(undefined, "manual_reconnect");
+await phone.reconnect({ inputDeviceId: selectedMicrophone }, "audio_device_change");
+await phone.attach(callId, "component_recreation");
+```
+
+Server disconnect events include canonical error class/detail (EOF, reset,
+timeout, local closure or protocol error), close code, shutdown intent, last
+socket/audio read and write, ping/pong UTC times, recent browser measurements
+and pre-cleanup WebRTC states. `last_browser_sample_at` makes snapshot age
+explicit. A WebRTC signaling failure is preserved before its internal media
+pipe is closed. Session replacement/rejection and setup failure are separate
+events. Selected media endpoints remain linked by `connection_id`.
+
+Collection uses the existing 1,024-event nonblocking background queue. Socket
+history is capped at 64 events; session history at 50. Persistence is batched
+and has a two-second budget. Queue pressure increments the skipped counter;
+it cannot reject a call or delay audio for a database write. Frame activity
+uses only atomic timestamps. No new media timers or carrier operations are
+introduced. Tokens, token hashes, headers, SDP, request URLs and arbitrary
+underlying error strings are excluded; canonical error details are retained.
+This is observational evidence, not proof of which network hop failed.
+
 ## Optional browser transport
 
 `createSoftphone({ mediaTransport: "websocket" | "webrtc" | "auto" })` selects

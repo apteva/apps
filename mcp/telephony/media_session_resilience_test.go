@@ -140,7 +140,7 @@ func TestMediaSessionDiagnosticsAreRetainedAndBounded(t *testing.T) {
 		d.SessionEvents = append(d.SessionEvents, mediaSessionEvent{Detail: strings.Repeat("x", 1000), RemainingMS: 99999999})
 	}
 	d = normalizeBrowserAudioDiagnostics(d)
-	if len(d.SessionEvents) != 50 || len(d.SessionEvents[0].Detail) != 160 || d.SessionEvents[0].RemainingMS != 3600000 {
+	if len(d.SessionEvents) != 50 || d.SessionEvents[0].Detail != "detail_redacted" || d.SessionEvents[0].RemainingMS != 3600000 {
 		t.Fatal("unbounded diagnostics")
 	}
 }

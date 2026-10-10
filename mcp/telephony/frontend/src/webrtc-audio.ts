@@ -2,7 +2,7 @@ import { microphoneConstraints, playbackBufferOptions, PreviewResampler, type Au
 import { TransportTelemetry, TransportTelemetrySender, transportMetrics, transportStates } from "../../ui/transport-telemetry";
 import { AudioRuntimeTelemetry } from "../../ui/audio-runtime-telemetry";
 import { playRingback, ringbackPattern } from "../../ui/ringback";
-import { mediaFailure, type MediaSessionEvent } from "./media-lease";
+import { mediaFailure, mediaDiagnosticID, mediaRecoveryContext, safeMediaSessionEvent, type MediaRecoveryContext, type MediaSessionEvent } from "./media-lease";
 import type { AudioConnection } from "./audio";
 import { RTCQualityPolicy, RTCControlBudget } from "./webrtc-quality";
 
@@ -152,6 +152,7 @@ export class WebRTCAudioConnection implements AudioConnection {
   private cancelSetup?: () => void;
   private recovering=false;
   private recoveryGeneration=0;
+  private recoveryContext?:MediaRecoveryContext;
   private recoveryExpiry?: ReturnType<typeof setTimeout>;
   private ringback?: () => void;
   private options?: SoftphoneAudioOptions;
@@ -393,31 +394,38 @@ export class WebRTCAudioConnection implements AudioConnection {
   }
   private disconnected(generation:number,cause:string){
     if(!this.current(generation)||this.recovering)return;
-    this.recovering=true;this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:cause});this.cleanup();
+    this.recovering=true;
+    const recovery=mediaRecoveryContext("automatic_retry");this.recoveryContext=recovery;
+    this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:"started",code:cause,...recovery});this.cleanup();
     safe(()=>this.callbacks.onState?.("reconnecting","Reconnecting WebRTC audio; the carrier call stays connected."));
-    const recovery=++this.recoveryGeneration;
-    const recovering=()=>!this.stopped&&this.recovering&&this.recoveryGeneration===recovery;
+    const recoveryGeneration=++this.recoveryGeneration;
+    const recovering=()=>!this.stopped&&this.recovering&&this.recoveryGeneration===recoveryGeneration;
     this.recoveryExpiry=setTimeout(()=>{
       if(!recovering())return;
+      this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:"timed_out",...this.recoveryContext});
       ++this.recoveryGeneration;this.recovering=false;clearTimeout(this.retry);this.cancelSetup?.();this.cleanup();
       safe(()=>this.callbacks.onState?.("error","WebRTC audio recovery timed out; reconnect audio to the existing call."));
     },30000);
     const attempt=async()=>{
       if(!recovering())return;
+      const context={...recovery,attempt_id:mediaDiagnosticID("attempt")};this.recoveryContext=context;
+      this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:"attempt_started",code:cause,...context});
       try{
         if(!this.callbacks.refreshMediaURL)throw new Error("Fresh media authorization is required");
-        const url=await this.callbacks.refreshMediaURL();if(!recovering())return;await this.connect(url);if(!recovering())return;
+        const url=await this.callbacks.refreshMediaURL(context);if(!recovering())return;await this.connect(url);if(!recovering())return;
         if(this.pc?.connectionState!=="connected")throw new Error("WebRTC disconnected during recovery");
         clearTimeout(this.recoveryExpiry);
-        this.recovering=false;this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:"connected"});
+        this.recovering=false;this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:"connected",...context});
       }catch(error){
         if(!recovering())return;this.cleanup();
+        const failure=mediaFailure(error);
+        this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:permanentRTCFailure(error)?"revoked":"attempt_failed",...context,status:failure.status,code:failure.code});
         if(permanentRTCFailure(error)){clearTimeout(this.recoveryExpiry);this.recovering=false;safe(()=>this.callbacks.onState?.("error","Media authorization or microphone access ended"));return;}
         this.retry=setTimeout(()=>void attempt(),1000);
       }
     };void attempt();
   }
-  recordSessionEvent(event:MediaSessionEvent){this.events=[...this.events,event].slice(-100);this.enqueueRTCEvents({session_events:[event]});safe(()=>this.callbacks.onSessionEvent?.(event));}
+  recordSessionEvent(event:MediaSessionEvent){try{event={...this.callbacks.sessionDiagnostics?.(),...event};}catch{/* observer isolation */}event=safeMediaSessionEvent(event);this.events=[...this.events,event].slice(-100);this.enqueueRTCEvents({session_events:[event]});safe(()=>this.callbacks.onSessionEvent?.(event));}
   setMuted(value:boolean){if(this.muted!==value)this.recordSessionEvent({timestamp:new Date().toISOString(),action:"microphone",outcome:value?"muted":"unmuted"});this.muted=value;this.gate();if(value)this.send({type:"interrupt"});}
   sendDTMF(digits:string){if(!/^[0-9*#]+$/.test(digits))throw new Error("Invalid DTMF digits");this.send({type:"dtmf",digits});}
   setOutputVolume(value:number){if(!Number.isFinite(value)||value<0||value>1)throw new RangeError("Volume must be between 0 and 1");if(this.speaker)this.speaker.gain.value=value;if(this.options)this.options.outputVolume=value;}
@@ -428,7 +436,9 @@ export class WebRTCAudioConnection implements AudioConnection {
     this.transportSender.stop();
     if(this.nativeCounts){for(const key of ["packetsLost","packetsDiscarded","concealedMs"] as const)this.completedCounts[key]+=this.nativeCounts[key]??0;this.nativeCounts=undefined;}
     ++this.generation;this.ready=this.peer=false;this.stopRingback();clearInterval(this.timer);this.timer=undefined;
-    const socket=this.socket;this.socket=undefined;if(socket){socket.onclose=socket.onmessage=socket.onerror=null;socket.close();}
+    const socket=this.socket;this.socket=undefined;if(socket){
+      if(socket.readyState===WebSocket.OPEN)try{socket.send(JSON.stringify({type:"media.shutdown",reason:this.stopped?"session_cleanup":"audio_error"}));}catch{/* observational only */}
+      socket.onclose=socket.onmessage=socket.onerror=null;socket.close(1000,"client_shutdown");}
     this.playbackReceiver=undefined;this.uploadSender=undefined;const pc=this.pc;this.pc=undefined;if(pc){pc.onconnectionstatechange=pc.ontrack=null;pc.close();}
     if(this.remoteAudio){this.remoteAudio.pause();this.remoteAudio.srcObject=null;this.remoteAudio=undefined;}
     this.stream?.getTracks().forEach(t=>{t.onended=null;t.stop();});this.stream=undefined;
@@ -436,7 +446,7 @@ export class WebRTCAudioConnection implements AudioConnection {
     this.capture?.disconnect();this.capture=undefined;this.whisper?.disconnect();this.whisper=undefined;this.whisperEpoch=null;this.whisperBase=null;this.whisperResampler=new PreviewResampler();
     const context=this.context;this.context=undefined;if(context){context.onstatechange=null;void context.close().catch(()=>{});}this.speaker=undefined;this.speakerMeter=undefined;
   }
-  stop(){if(this.stopped)return;this.stopped=true;++this.recoveryGeneration;clearTimeout(this.recoveryExpiry);clearTimeout(this.retry);this.cancelSetup?.();this.cleanup();}
+  stop(){if(this.stopped)return;if(this.recovering)this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:"cancelled",...this.recoveryContext});this.stopped=true;++this.recoveryGeneration;clearTimeout(this.recoveryExpiry);clearTimeout(this.retry);this.cancelSetup?.();this.cleanup();}
 }
 
 /** Try one transport at a time; failed setup releases all resources first. */

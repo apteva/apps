@@ -112,6 +112,7 @@ func softphoneRTCAPI(c softphoneRTCConfig, settings ...func(*webrtc.SettingEngin
 }
 
 type rtcHubConn struct {
+	disconnect *rtcDisconnectTracker
 	net.Conn
 	stop    func()
 	stats   *rtcMediaStats
@@ -296,9 +297,11 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 	done := make(chan struct{})
 	stats := &rtcMediaStats{}
 	stats.rtp.connectionID = c.NetworkContext.ConnectionID
+	disconnect := &rtcDisconnectTracker{writer: signalWriter, pc: pc}
 	var once sync.Once
 	stop := func() {
 		once.Do(func() {
+			disconnect.capture(nil, "rtc_bridge_closed")
 			close(done)
 			signal.Close()
 			hub.Close()
@@ -308,7 +311,23 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 			pc.Close()
 		})
 	}
-	fail := func(err error) (net.Conn, func(), error) { stop(); return nil, nil, err }
+	fail := func(err error) (net.Conn, func(), error) {
+		disconnect.capture(err, "")
+		if c.CollectNetwork != nil {
+			event := c.NetworkContext
+			event.ID = event.ConnectionID + ":setup_failed"
+			event.Event = "softphone.browser.setup_failed"
+			event.Action = "setup_failed"
+			info := disconnect.snapshot(err)
+			event.Disconnect = &info
+			event.CloseCode = disconnect.closeCode()
+			event.OccurredAt = time.Now().UTC().Format(time.RFC3339Nano)
+			event.ExpiresAt = time.Now().Add(event.Retention).UTC().Format(time.RFC3339Nano)
+			c.CollectNetwork(event)
+		}
+		stop()
+		return nil, nil, err
+	}
 	connected := make(chan struct{}, 1)
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		if state == webrtc.PeerConnectionStateConnected {
@@ -318,6 +337,9 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 			}
 		}
 		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
+			if state == webrtc.PeerConnectionStateFailed {
+				disconnect.capture(nil, "rtc_connection_failed")
+			}
 			go stop()
 		}
 	})
@@ -417,10 +439,12 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 		for {
 			data, op, err := readWebSocketData(signalRead, ws.StateServerSide, signalWriter)
 			if err != nil {
+				disconnect.capture(err, "")
 				stop()
 				return
 			}
 			if op != ws.OpText || len(data) > 65536 {
+				disconnect.capture(ws.ProtocolError("invalid signaling frame"), "")
 				stop()
 				return
 			}
@@ -439,7 +463,7 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 	}
 	signal.SetReadDeadline(time.Time{})
 	go sendSoftphoneRTP(bridge, input, signalWriter, track, c.Bitrate, stats, done, stop, c.fecEnabled())
-	return &rtcHubConn{Conn: hub, stop: stop, stats: stats, whisper: signalWriter.queueWhisper}, stop, nil
+	return &rtcHubConn{Conn: hub, stop: stop, stats: stats, whisper: signalWriter.queueWhisper, disconnect: disconnect}, stop, nil
 }
 
 func receiveSoftphoneRTP(remote *webrtc.TrackRemote, input *websocketWriterPump, stats *rtcMediaStats, done <-chan struct{}, stop func(), fec bool) {

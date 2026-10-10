@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -47,5 +48,47 @@ func TestRTCEventHistoryBoundedAndIndependent(t *testing.T) {
 	copy[0].Sequence = 0
 	if events[0].Sequence != 900 {
 		t.Fatal("history snapshot aliases observations")
+	}
+}
+
+func TestPCMPacedSessionEventsSurvivePeriodicReportsAndReconnect(t *testing.T) {
+	tracker := audioCallTelemetry{}
+	w := &websocketWriterPump{}
+	tracker.opened(w, "hash", "epoch", "socket_peer")
+	event := mediaSessionEvent{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Action: "reconnect", Outcome: "attempt_started", RecoveryID: "recovery-a", AttemptID: "attempt-b", SessionID: "session-c"}
+	tracker.observeRTCEventsConnection(w, browserAudioDiagnostics{SessionEvents: []mediaSessionEvent{event}})
+	tracker.observeBrowserConnection(w, browserAudioDiagnostics{MediaTransport: "websocket", PlaybackQueueMS: 60})
+	if len(tracker.browser.SessionEvents) != 1 || tracker.browser.SessionEvents[0].AttemptID != "attempt-b" || tracker.browser.PlaybackQueueMS != 60 {
+		t.Fatal("periodic PCM report erased paced events")
+	}
+	second := &websocketWriterPump{}
+	tracker.opened(second, "hash2", "epoch", "socket_peer")
+	if len(tracker.browser.SessionEvents) != 1 || tracker.browser.PlaybackQueueMS != 0 {
+		t.Fatal("reconnect erased history or inherited old measurements")
+	}
+}
+
+func TestSparseSessionEventsPersistBeforeFirstBrowserReport(t *testing.T) {
+	app, row, _, _ := listenerFixture(t)
+	hub := app.softphones.hubFor(row.ID)
+	w := &websocketWriterPump{}
+	hub.telemetry.opened(w, "hash", "epoch", "socket_peer")
+	hub.telemetry.observeRTCEventsConnection(w, browserAudioDiagnostics{SessionEvents: []mediaSessionEvent{{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Action: "reconnect", Outcome: "connected", AttemptID: "attempt-a"}}})
+	if hub.telemetry.browserSeen {
+		t.Fatal("sparse events invented cumulative measurements")
+	}
+	if err := app.persistAudioTelemetry(row.ID, hub); err != nil {
+		t.Fatal(err)
+	}
+	current, err := app.db().findCall(row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var diagnostics browserAudioDiagnostics
+	if err = json.Unmarshal([]byte(current.BrowserAudioDiagnostics), &diagnostics); err != nil {
+		t.Fatal(err)
+	}
+	if len(diagnostics.SessionEvents) != 1 || diagnostics.SessionEvents[0].AttemptID != "attempt-a" {
+		t.Fatal("sparse history lost before first report")
 	}
 }

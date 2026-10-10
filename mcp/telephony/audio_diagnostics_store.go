@@ -103,16 +103,22 @@ type browserAudioTiming struct {
 }
 
 type mediaSessionEvent struct {
-	ConnectionID string `json:"connection_id,omitempty"`
-	DurationMS   int    `json:"duration_ms,omitempty"`
-	Timestamp    string `json:"timestamp"`
-	Action       string `json:"action"`
-	Outcome      string `json:"outcome"`
-	Status       int    `json:"status,omitempty"`
-	Code         string `json:"code,omitempty"`
-	Detail       string `json:"detail,omitempty"`
-	RemainingMS  int    `json:"remaining_ms,omitempty"`
-	WasClean     bool   `json:"was_clean,omitempty"`
+	SharedAttemptID   string `json:"shared_attempt_id,omitempty"`
+	RecoveryID        string `json:"recovery_id,omitempty"`
+	AttemptID         string `json:"attempt_id,omitempty"`
+	SessionID         string `json:"session_id,omitempty"`
+	PreviousSessionID string `json:"previous_session_id,omitempty"`
+	InitiatingAction  string `json:"initiating_action,omitempty"`
+	ConnectionID      string `json:"connection_id,omitempty"`
+	DurationMS        int    `json:"duration_ms,omitempty"`
+	Timestamp         string `json:"timestamp"`
+	Action            string `json:"action"`
+	Outcome           string `json:"outcome"`
+	Status            int    `json:"status,omitempty"`
+	Code              string `json:"code,omitempty"`
+	Detail            string `json:"detail,omitempty"`
+	RemainingMS       int    `json:"remaining_ms,omitempty"`
+	WasClean          bool   `json:"was_clean,omitempty"`
 }
 
 type browserAudioDiagnostics struct {
@@ -474,11 +480,23 @@ func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics) browserAudi
 	}
 	for i := range value.SessionEvents {
 		e := &value.SessionEvents[i]
-		e.Action = limitDiagnosticText(e.Action, 40)
-		e.Outcome = limitDiagnosticText(e.Outcome, 40)
-		e.Code = limitDiagnosticText(e.Code, 80)
-		e.Detail = limitDiagnosticText(e.Detail, 160)
-		e.Timestamp = limitDiagnosticText(e.Timestamp, 40)
+		e.SharedAttemptID = safeAudioDiagnosticID(e.SharedAttemptID)
+		e.RecoveryID = safeAudioDiagnosticID(e.RecoveryID)
+		e.AttemptID = safeAudioDiagnosticID(e.AttemptID)
+		e.SessionID = safeAudioDiagnosticID(e.SessionID)
+		e.PreviousSessionID = safeAudioDiagnosticID(e.PreviousSessionID)
+		if e.InitiatingAction != "" {
+			e.InitiatingAction = audioInitiatingAction(e.InitiatingAction)
+		}
+		e.Action = safeAudioDiagnosticLabel(e.Action, 40)
+		e.Outcome = safeAudioDiagnosticLabel(e.Outcome, 40)
+		e.Code = safeAudioDiagnosticLabel(e.Code, 80)
+		e.Detail = safeAudioDiagnosticDetail(e.Detail)
+		if at, err := time.Parse(time.RFC3339Nano, e.Timestamp); err == nil {
+			e.Timestamp = at.UTC().Format(time.RFC3339Nano)
+		} else {
+			e.Timestamp = ""
+		}
 		e.DurationMS = clampDiagnosticInt(e.DurationMS, 86400000)
 		e.Status = clampDiagnosticInt(e.Status, 599)
 		e.RemainingMS = clampDiagnosticInt(e.RemainingMS, 3600000)

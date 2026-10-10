@@ -1,6 +1,6 @@
 package main
 
-// Small paced RTC event messages append only observations. They never replace
+// Small paced browser event messages append only observations for both transports. They never replace
 // call state, authorization, cumulative media measurements or browser ownership.
 func mergeRTCEventHistory[T comparable](old, incoming []T, limit int) []T {
 	out := make([]T, 0, min(limit, len(old)+len(incoming)))

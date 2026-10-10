@@ -556,9 +556,17 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "call is not a softphone call", http.StatusConflict)
 		return
 	}
-	reason, verifiedExpiry, identity := a.phoneMediaCheckDetails(row, token)
+	reason, verifiedExpiry, identity, sessionCorrelation := a.phoneMediaCheckState(row, token, true)
 	if reason != "" {
 		logSoftphone("softphone browser media session rejected", "call", callID, "reason", reason)
+		if reason == "media_token_replaced" {
+			network := audioNetworkEvent{ID: newAudioConnectionID() + ":rejected", CallID: row.ID, ProjectID: row.ProjectID,
+				Event: "softphone.browser.attachment_rejected", Action: "rejected", Reason: reason, CurrentSessionID: sessionCorrelation.SessionID,
+				Session: audioSessionCorrelation{SessionID: safeAudioDiagnosticID(r.URL.Query().Get("session_generation"))}, Retention: 7 * 24 * time.Hour}
+			network.OccurredAt = time.Now().UTC().Format(time.RFC3339Nano)
+			network.ExpiresAt = time.Now().Add(network.Retention).UTC().Format(time.RFC3339Nano)
+			a.audioNetworks.enqueue(network)
+		}
 		status := http.StatusForbidden
 		if temporaryMediaFailure(reason) {
 			status = http.StatusServiceUnavailable
@@ -604,13 +612,16 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		// media URLs or credentials. Observational failures do not reject media.
 		logSoftphone("browser client IP assertion rejected", "call", callID, "reason", metadataErr.Error())
 	}
-	conn, readConn, err := upgradeBuffered(w, r)
-	if err != nil {
-		logSoftphone("browser ws upgrade failed", "call", callID, "err", err)
-		return
-	}
 	networkContext := newAudioNetworkContextWithAddress(row, identity, networkAddress, networkConfig)
 	networkContext.ConnectionID = newAudioConnectionID()
+	networkContext.Session = sessionCorrelation
+	conn, readConn, err := upgradeBuffered(w, r)
+	if err != nil {
+		class, detail := audioSocketError(err)
+		logSoftphone("browser ws upgrade failed", "call", callID, "error_class", class)
+		enqueueAudioAttachmentFailure(networkContext, "softphone.browser.attachment_failed", 0, "websocket_upgrade_failed", &audioDisconnectInfo{ErrorClass: class, ErrorDetail: detail, Transport: "websocket"}, a.audioNetworks.enqueue)
+		return
+	}
 	if transport == "webrtc" {
 		rtcConfig.NetworkContext = networkContext
 		rtcConfig.KnownVPNExits = networkConfig["audio_telemetry_known_vpn_exits"]
@@ -848,9 +859,16 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 				reply, _ := json.Marshal(map[string]any{"type": "media.clock", "nonce": control.Nonce, "received_ms": received, "sent_ms": mediaClockMS()})
 				_ = writer.Write(ws.OpText, reply)
 			case "ping":
+				activityWriter := writer
+				if rtc, ok := writer.conn.(*rtcHubConn); ok && rtc.disconnect != nil {
+					activityWriter = rtc.disconnect.writer
+				}
+				activityWriter.activity.ping.Store(time.Now().UnixNano())
 				gaps, _ := hub.captureDiagnostics()
 				pong, _ := json.Marshal(map[string]any{"type": "pong", "nonce": control.Nonce, "capture_sequence_gaps": gaps})
-				_ = writer.Write(ws.OpText, pong)
+				if writer.Write(ws.OpText, pong) == nil {
+					activityWriter.activity.pong.Store(time.Now().UnixNano())
+				}
 			case "interrupt":
 				payload, _ := json.Marshal(realtimeBridgeControl{Type: "interrupt", Source: "operator"})
 				hub.toPeer(ws.OpText, payload)
@@ -1022,12 +1040,13 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 }
 
 type softphoneSession struct {
-	CallID       string `json:"call_id"`
-	MediaURL     string `json:"media_url"`
-	SessionToken string `json:"session_token,omitempty"`
-	LeaseSeconds int    `json:"lease_seconds,omitempty"`
-	To           string `json:"to,omitempty"`
-	From         string `json:"from,omitempty"`
+	SessionGeneration string `json:"session_generation,omitempty"`
+	CallID            string `json:"call_id"`
+	MediaURL          string `json:"media_url"`
+	SessionToken      string `json:"session_token,omitempty"`
+	LeaseSeconds      int    `json:"lease_seconds,omitempty"`
+	To                string `json:"to,omitempty"`
+	From              string `json:"from,omitempty"`
 }
 
 // softphoneMediaURL is the install-scoped path the operator's browser dials.
@@ -1107,7 +1126,7 @@ func (a *App) softphonePlace(w http.ResponseWriter, r *http.Request, project str
 			http.Error(w, "call ownership unavailable", 500)
 			return
 		}
-		session, e = a.issuePhoneSession(row, p)
+		session, e = a.issuePhoneSession(row, p, audioSessionCorrelation{InitiatingAction: "dial"})
 		if e != nil {
 			writePhoneSessionFailure(w, e)
 			return
@@ -1190,7 +1209,7 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 			return
 		}
 		if p != nil {
-			session, e := a.issuePhoneSession(row, p)
+			session, e := a.issuePhoneSession(row, p, audioSessionCorrelation{InitiatingAction: "answer"})
 			if e != nil {
 				writePhoneSessionFailure(w, e)
 				return
@@ -1202,7 +1221,7 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		var managed int
 		_ = a.db().db.QueryRow(`SELECT COUNT(*) FROM telephony_media_sessions WHERE call_id=?`, row.ID).Scan(&managed)
 		if owner, _, _ := a.phoneOwner(row.ID); owner != "" || managed > 0 {
-			session, e := a.issuePhoneSession(row, nil)
+			session, e := a.issuePhoneSession(row, nil, audioSessionCorrelation{InitiatingAction: "attach"})
 			if e != nil {
 				http.Error(w, "session unavailable", 500)
 				return
@@ -1269,7 +1288,7 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 			http.Error(w, "ownership unavailable", 500)
 			return
 		}
-		session, e := a.issuePhoneSession(row, p)
+		session, e := a.issuePhoneSession(row, p, audioSessionCorrelation{InitiatingAction: "answer"})
 		if e != nil {
 			_ = a.db().resetAnswerClaim(callID, peerToken)
 			writePhoneSessionFailure(w, e)

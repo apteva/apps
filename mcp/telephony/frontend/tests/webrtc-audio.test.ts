@@ -152,3 +152,20 @@ test("loss events are sampled directional deltas with timestamp and SSRC, never 
  expect(events[1].direction).toBe("operator_to_carrier");expect(events[1].ssrc).toBe(456);
  expect(rtcLossEvents({receiver_loss_delta:0,remote_receiver_loss_delta:-1})).toEqual([]);
 });
+
+test("RTC retries retain one recovery chain with distinct attempts and terminal outcomes",async()=>{
+ const events:any[]=[],contexts:any[]=[];let retry!:()=>void;
+ const audio:any=new WebRTCAudioConnection({onSessionEvent:e=>events.push(e),refreshMediaURL:async c=>{contexts.push(c);if(contexts.length===1)throw new Error("temporary network issue");return "ws://local/fresh";}});
+ audio.connect=async()=>{audio.pc={connectionState:"connected",close(){}};};
+ const original=setTimeout;const timer=spyOn(globalThis,"setTimeout").mockImplementation(((fn:any,ms:any,...args:any[])=>{
+   if(ms===1000){retry=fn;return 0;}return original(fn,ms,...args);
+ }) as typeof setTimeout);
+ try{
+  audio.disconnected(0,"signaling_closed");await new Promise(r=>original(r,0));
+  expect(events.some(e=>e.outcome==="attempt_failed")).toBe(true);retry();await new Promise(r=>original(r,0));
+  expect(contexts).toHaveLength(2);expect(contexts[0].recovery_id).toBe(contexts[1].recovery_id);
+  expect(contexts[0].attempt_id).not.toBe(contexts[1].attempt_id);
+  expect(events.filter(e=>e.outcome==="connected").at(-1).attempt_id).toBe(contexts[1].attempt_id);
+  expect(audio.recovering).toBe(false);
+ }finally{audio.stop();timer.mockRestore();}
+});

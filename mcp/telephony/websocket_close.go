@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
 	"math"
 	"net"
@@ -92,6 +91,7 @@ func (w *websocketCountingWriter) Write(data []byte) (int, error) {
 // websocketWriterPump is the sole writer for a WebSocket connection. Data,
 // control, and close frames all pass through the same queue.
 type websocketWriterPump struct {
+	activity        audioSocketActivity
 	whisperDropped  atomic.Int64
 	whisperSent     atomic.Int64
 	whisperMu       sync.Mutex
@@ -284,6 +284,12 @@ func (p *websocketWriterPump) run() {
 				}
 			}
 			p.audioStats.LastWriteAt = time.Now().UTC().Format(time.RFC3339Nano)
+		}
+		if err == nil {
+			p.activity.write.Store(time.Now().UnixNano())
+			if request.op == ws.OpBinary {
+				p.activity.audioWrite.Store(p.activity.write.Load())
+			}
 		}
 		p.transportStats.Writes++
 		p.transportStats.MaxQueueMS = max(p.transportStats.MaxQueueMS, float64(queuedFor)/float64(time.Millisecond))
@@ -622,6 +628,7 @@ func readWebSocketData(conn net.Conn, state ws.State, writer *websocketWriterPum
 		if len(data) > maxControlFramePayload {
 			return closeWebSocketProtocolError(writer, "control frame payload exceeds 125 bytes")
 		}
+		writer.activity.observe(header.OpCode, data)
 		for _, observe := range observations {
 			observe(header.OpCode, data)
 		}
@@ -675,9 +682,10 @@ func readWebSocketData(conn net.Conn, state ws.State, writer *websocketWriterPum
 		data, err := io.ReadAll(io.LimitReader(&reader, maxCarrierFrameBytes+1))
 		if len(data) > maxCarrierFrameBytes {
 			_ = writer.Write(ws.OpClose, ws.NewCloseFrameBody(ws.StatusMessageTooBig, "message exceeds limit"))
-			return nil, 0, errors.New("websocket message exceeds limit")
+			return nil, 0, wsutil.ErrFrameTooLarge
 		}
 		if err == nil {
+			writer.activity.observe(header.OpCode, data)
 			for _, observe := range observations {
 				observe(header.OpCode, data)
 			}
@@ -688,7 +696,7 @@ func readWebSocketData(conn net.Conn, state ws.State, writer *websocketWriterPum
 
 func closeWebSocketProtocolError(writer *websocketWriterPump, reason string) error {
 	_ = writer.Write(ws.OpClose, ws.NewCloseFrameBody(ws.StatusProtocolError, reason))
-	return fmt.Errorf("websocket protocol error: %s", reason)
+	return ws.ProtocolError("websocket protocol error: " + reason)
 }
 
 // Coaching has its own small, lower-priority queue; it cannot evict caller PCM.

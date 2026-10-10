@@ -98,7 +98,7 @@ test('delayed playback MessagePort frames expire and flush clears adaptation epo
  expect(p.targetMs).toBe(60);expect(p.stableSamples).toBe(0);expect(p.expectedSequence).toBe(null);
 });
 
-function worker() {
+function worker(refreshCredentials=false) {
  let now=10000;const messages:any[]=[];const sockets:any[]=[];const intervals:Function[]=[];const timeouts:Function[]=[];
  const port=()=>({postMessage(){},start(){},close(){},onmessage:null as any});
  const capturePort=port(),playbackPort=port();const received:any[]=[];
@@ -107,7 +107,7 @@ function worker() {
  const context=vm.createContext({ArrayBuffer,DataView,Uint8Array,Int16Array,Float32Array,performance:{timeOrigin:0,now:()=>now},WebSocket:Socket,postMessage:(x:any)=>messages.push(x),self:{},setInterval:(f:Function)=>{intervals.push(f);return intervals.length;},clearInterval(){},setTimeout(f:Function){timeouts.push(f);return timeouts.length;},clearTimeout(){},close(){}});
  vm.runInContext(readFileSync(new URL('./softphone-worker.js',import.meta.url),'utf8'),context);
  const command=(x:any)=>context.self.onmessage({data:x});
- command({type:'init',mediaURL:'ws://local',capturePort,playbackPort,contextRate:24000,audioClockMS:0,monotonicEpochMS:now});
+ command({type:'init',mediaURL:'ws://local',refreshCredentials,capturePort,playbackPort,contextRate:24000,audioClockMS:0,monotonicEpochMS:now});
  sockets[0].onopen();received.length=0;command({type:'microphone.ready',value:true});
  const frame=(timestamp:number,sequence=1)=>capturePort.onmessage({data:{type:'capture',frame:new Float32Array(480).fill(.2),timestamp_ms:timestamp,sequence,sample_rate:24000}});
  return {context,command,frame,socket:sockets[0],messages,received,intervals,timeouts,sockets,setNow:(n:number)=>{now=n;}};
@@ -403,9 +403,25 @@ test('worker records reconnect cause, successful socket recovery and maximum buf
  const w=worker();w.socket.bufferedAmount=8000;w.frame(0);w.intervals[0]();
  expect(w.messages.filter(x=>x.type==='transport.stats').at(-1).timing.websocket_max_buffered_bytes).toBe(8000);
  w.socket.onclose({code:1006,reason:'',wasClean:false});w.timeouts.at(-1)!();
- expect(w.messages.some(x=>x.type==='runtime.event'&&x.event.action==='reconnect'&&x.event.outcome==='websocket_close_1006')).toBe(true);
+ expect(w.messages.some(x=>x.type==='runtime.event'&&x.event.action==='reconnect'&&x.event.outcome==='attempt_started'&&x.event.code==='websocket_close_1006'&&x.event.recovery_id&&x.event.attempt_id)).toBe(true);
  expect(w.sockets.length).toBe(2);w.sockets[1].onopen();
  w.frame(0,2);w.intervals.at(-1)!();
  const stats=w.messages.filter(x=>x.type==='transport.stats').at(-1);
  expect(stats.timing.reconnect_attempts).toBe(1);expect(stats.timing.reconnect_successes).toBe(1);
+});
+
+test('worker recovery correlates authorization timeout and successive attempts without accepting late credentials',()=>{
+ const w=worker(true);w.socket.onclose({code:1006,reason:'',wasClean:false});w.timeouts.at(-1)!();
+ const first=w.messages.findLast(x=>x.type==='socket.reconnect');
+ w.timeouts.at(-1)!();w.timeouts.at(-1)!();
+ const second=w.messages.findLast(x=>x.type==='socket.reconnect');
+ expect(second.recovery.recovery_id).toBe(first.recovery.recovery_id);
+ expect(second.recovery.attempt_id).not.toBe(first.recovery.attempt_id);
+ w.command({type:'socket.credentials',id:first.id,mediaURL:'ws://local/obsolete'});expect(w.sockets).toHaveLength(1);
+ w.command({type:'socket.credentials',id:second.id,mediaURL:'ws://local/current'});expect(w.sockets).toHaveLength(2);
+ w.sockets[1].onopen();
+ const success=w.messages.findLast(x=>x.type==='runtime.event'&&x.event.outcome==='connected');
+ expect(success.event.attempt_id).toBe(second.recovery.attempt_id);
+ expect(w.messages.some(x=>x.type==='runtime.event'&&x.event.outcome==='authorization_timed_out'&&x.event.attempt_id===first.recovery.attempt_id)).toBe(true);
+ w.command({type:'close'});
 });

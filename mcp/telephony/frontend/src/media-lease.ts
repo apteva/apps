@@ -1,5 +1,41 @@
 /** No credentials or media URLs are included in session diagnostics. */
+export type MediaInitiatingAction = "attach" | "takeover" | "automatic_retry" | "manual_reconnect" | "audio_device_change" | "component_recreation";
+export interface MediaRecoveryContext {
+ recovery_id: string;
+ attempt_id: string;
+ initiating_action: MediaInitiatingAction;
+}
+export interface MediaAttachmentDiagnostics extends Partial<MediaRecoveryContext> { previous_session_id?: string }
+export function mediaDiagnosticID(kind: "recovery" | "attempt"): string {
+ const suffix=globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
+ return `${kind}-${suffix}`;
+}
+export function mediaRecoveryContext(action:MediaInitiatingAction): MediaRecoveryContext {
+ return {recovery_id:mediaDiagnosticID("recovery"),attempt_id:mediaDiagnosticID("attempt"),initiating_action:action};
+}
+export function safeMediaDiagnosticID(value?:string): string | undefined {
+ return typeof value==="string" && value.length<=80 && /^(browser|session|recovery|attempt)-[a-f0-9-]{1,64}$/.test(value) ? value : undefined;
+}
+export function safeMediaSessionEvent(event:MediaSessionEvent):MediaSessionEvent {
+ const label=(v:string|undefined,max:number)=>typeof v==="string" && v.length<=max && /^[a-zA-Z0-9_-]*$/.test(v)?v:undefined;
+ const knownDetails=["WebSocket transport error","WebRTC signaling error","Audio worker failed","WebRTC signaling unavailable"];
+ const actions:MediaInitiatingAction[]=["attach","takeover","automatic_retry","manual_reconnect","audio_device_change","component_recreation"];
+ const numeric=(v:number|undefined,max:number)=>typeof v==="number" && Number.isFinite(v) ? Math.max(0,Math.min(max,v)) : undefined;
+ const timestamp=Number.isFinite(Date.parse(event.timestamp)) ? new Date(event.timestamp).toISOString() : new Date().toISOString();
+ return {timestamp,action:label(event.action,40)??"diagnostic",outcome:label(event.outcome,40)??"unknown",code:label(event.code,80),
+  detail:event.detail ? knownDetails.includes(event.detail) ? event.detail : "detail_redacted" : undefined,
+  recovery_id:safeMediaDiagnosticID(event.recovery_id),attempt_id:safeMediaDiagnosticID(event.attempt_id),
+  shared_attempt_id:safeMediaDiagnosticID(event.shared_attempt_id),session_id:safeMediaDiagnosticID(event.session_id),previous_session_id:safeMediaDiagnosticID(event.previous_session_id),
+  initiating_action:actions.includes(event.initiating_action!) ? event.initiating_action : undefined,
+  status:numeric(event.status,599),remaining_ms:numeric(event.remaining_ms,3600000),was_clean:typeof event.was_clean==="boolean" ? event.was_clean : undefined,duration_ms:numeric(event.duration_ms,86400000)};
+}
 export interface MediaSessionEvent {
+  recovery_id?: string;
+  attempt_id?: string;
+  shared_attempt_id?: string;
+  session_id?: string;
+  previous_session_id?: string;
+  initiating_action?: MediaInitiatingAction;
   timestamp: string;
   action: string;
   outcome: string;

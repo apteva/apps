@@ -94,20 +94,23 @@ func audioPeerAddress(r *http.Request, proxies string) (netip.Addr, string) {
 }
 
 type audioSocketEvent struct {
-	VerifiedLeaseExpiresAt int64         `json:"verified_lease_expires_at,omitempty"`
-	RemainingLeaseMS       int64         `json:"remaining_lease_ms,omitempty"`
-	ShutdownIntent         string        `json:"shutdown_intent,omitempty"`
-	At                     string        `json:"at"`
-	ConnectionID           string        `json:"connection_id"`
-	Action                 string        `json:"action"`
-	Reason                 string        `json:"reason,omitempty"`
-	Code                   int           `json:"close_code,omitempty"`
-	PeerHash               string        `json:"peer_address_hash,omitempty"`
-	HashEpoch              string        `json:"peer_hash_epoch,omitempty"`
-	AddressSource          string        `json:"address_source,omitempty"`
-	AdviserIdentity        phoneIdentity `json:"adviser_identity"`
-	IdentitySource         string        `json:"identity_source,omitempty"`
-	Classification         string        `json:"network_classification,omitempty"`
+	ReplacedBy             *audioSessionCorrelation `json:"replaced_by,omitempty"`
+	Disconnect             *audioDisconnectInfo     `json:"disconnect,omitempty"`
+	Session                audioSessionCorrelation  `json:"session,omitempty"`
+	VerifiedLeaseExpiresAt int64                    `json:"verified_lease_expires_at,omitempty"`
+	RemainingLeaseMS       int64                    `json:"remaining_lease_ms,omitempty"`
+	ShutdownIntent         string                   `json:"shutdown_intent,omitempty"`
+	At                     string                   `json:"at"`
+	ConnectionID           string                   `json:"connection_id"`
+	Action                 string                   `json:"action"`
+	Reason                 string                   `json:"reason,omitempty"`
+	Code                   int                      `json:"close_code,omitempty"`
+	PeerHash               string                   `json:"peer_address_hash,omitempty"`
+	HashEpoch              string                   `json:"peer_hash_epoch,omitempty"`
+	AddressSource          string                   `json:"address_source,omitempty"`
+	AdviserIdentity        phoneIdentity            `json:"adviser_identity"`
+	IdentitySource         string                   `json:"identity_source,omitempty"`
+	Classification         string                   `json:"network_classification,omitempty"`
 }
 type audioSocketSnapshot struct {
 	LeaseEvents      []audioSocketEvent `json:"lease_events,omitempty"`
@@ -148,25 +151,26 @@ type audioHealthObservation struct {
 	Counter       float64
 }
 type audioCallTelemetry struct {
-	persistMu          sync.Mutex
-	dirty              bool
-	browserSeen        bool
-	healthWriter       *websocketWriterPump
-	mu                 sync.Mutex
-	restored           bool
-	socket             audioSocketSnapshot
-	sockets            map[*websocketWriterPump]audioNetworkEvent
-	collectNetwork     func(audioNetworkEvent)
-	clientEpoch        string
-	clientCounters     map[string]float64
-	underrunEvents     []playbackUnderrunEvent
-	playbackEvents     []browserAudioObservation
-	captureQueueEvents []browserAudioObservation
-	shutdownIntents    map[*websocketWriterPump]string
-	browser            browserAudioDiagnostics
-	health             audioHealthSnapshot
-	counters           map[string]float64
-	lastBad            map[string]time.Time
+	persistMu           sync.Mutex
+	dirty               bool
+	lastBrowserSampleAt string
+	browserSeen         bool
+	healthWriter        *websocketWriterPump
+	mu                  sync.Mutex
+	restored            bool
+	socket              audioSocketSnapshot
+	sockets             map[*websocketWriterPump]audioNetworkEvent
+	collectNetwork      func(audioNetworkEvent)
+	clientEpoch         string
+	clientCounters      map[string]float64
+	underrunEvents      []playbackUnderrunEvent
+	playbackEvents      []browserAudioObservation
+	captureQueueEvents  []browserAudioObservation
+	shutdownIntents     map[*websocketWriterPump]string
+	browser             browserAudioDiagnostics
+	health              audioHealthSnapshot
+	counters            map[string]float64
+	lastBad             map[string]time.Time
 }
 
 func (t *audioCallTelemetry) restore(raw string) {
@@ -182,6 +186,7 @@ func (t *audioCallTelemetry) restore(raw string) {
 		t.playbackEvents = normalizeAudioObservations(prior.PlaybackEvents)
 		t.captureQueueEvents = normalizeAudioObservations(prior.CaptureQueueEvents)
 	}
+	t.browser.SessionEvents = normalizeBrowserAudioDiagnostics(prior).SessionEvents
 	if prior.Server != nil {
 		t.socket = prior.Server.Socket
 		t.health = prior.Server.Health
@@ -231,13 +236,15 @@ func (t *audioCallTelemetry) openedWithNetwork(w *websocketWriterPump, hash, epo
 		collect(network)
 	}
 	t.dirty = true
-	t.event(audioSocketEvent{At: time.Now().UTC().Format(time.RFC3339Nano), ConnectionID: id, Action: "attached", PeerHash: hash, HashEpoch: epoch, AddressSource: source, AdviserIdentity: network.AdviserIdentity, IdentitySource: network.IdentitySource, Classification: network.Classification})
+	t.event(audioSocketEvent{At: time.Now().UTC().Format(time.RFC3339Nano), ConnectionID: id, Action: "attached", Session: network.Session, PeerHash: hash, HashEpoch: epoch, AddressSource: source, AdviserIdentity: network.AdviserIdentity, IdentitySource: network.IdentitySource, Classification: network.Classification})
 	// New browser diagnostics cannot be inferred from the previous tab/worker.
-	t.browser = browserAudioDiagnostics{}
+	t.browser = browserAudioDiagnostics{SessionEvents: t.browser.SessionEvents}
+	t.lastBrowserSampleAt = ""
 	t.browserSeen = false
 	return id
 }
 func (t *audioCallTelemetry) closed(w *websocketWriterPump, reason string, err error) {
+	disconnect := w.disconnectInfo(err)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	network, ok := t.sockets[w]
@@ -263,10 +270,26 @@ func (t *audioCallTelemetry) closed(w *websocketWriterPump, reason string, err e
 	} else if err != nil {
 		reason = "transport_read_error"
 	}
+	if c, ok := w.conn.(*rtcHubConn); ok && c.disconnect != nil {
+		code = c.disconnect.closeCode()
+	}
+	disconnect.LastBrowserSampleAt = network.lastBrowser.LastBrowserSampleAt
+	disconnect.RTTMS = network.lastBrowser.RTTMS
+	disconnect.PlaybackQueueMS = network.lastBrowser.PlaybackQueueMS
+	disconnect.BrowserBufferedBytes = network.lastBrowser.BrowserBufferedBytes
+	disconnect.AudioContextState = network.lastBrowser.AudioContextState
+	disconnect.MicrophoneMuted = network.lastBrowser.MicrophoneMuted
+	disconnect.MicrophoneTrackState = network.lastBrowser.MicrophoneTrackState
+	disconnect.BrowserConnectionState = network.lastBrowser.BrowserConnectionState
+	disconnect.BrowserICEState = network.lastBrowser.BrowserICEState
+	disconnect.BrowserDTLSState = network.lastBrowser.BrowserDTLSState
+	if disconnect.ErrorClass == "peer_close" && reason == "transport_read_error" {
+		reason = "peer_close"
+	}
 	t.socket.Disconnects++
 	reason = audioNetworkCloseReason(reason)
 	at := time.Now().UTC()
-	t.event(audioSocketEvent{At: at.Format(time.RFC3339Nano), ConnectionID: network.ConnectionID, Action: "detached", Reason: reason, Code: code, ShutdownIntent: intent, AdviserIdentity: network.AdviserIdentity, IdentitySource: network.IdentitySource, Classification: network.Classification})
+	t.event(audioSocketEvent{At: at.Format(time.RFC3339Nano), ConnectionID: network.ConnectionID, Action: "detached", Reason: reason, Code: code, ShutdownIntent: intent, Disconnect: &disconnect, Session: network.Session, ReplacedBy: network.ReplacedBy, AdviserIdentity: network.AdviserIdentity, IdentitySource: network.IdentitySource, Classification: network.Classification})
 	if t.socket.ConnectionID == network.ConnectionID {
 		t.socket.ConnectionID = ""
 	}
@@ -274,6 +297,7 @@ func (t *audioCallTelemetry) closed(w *websocketWriterPump, reason string, err e
 	network.OccurredAt = at.Format(time.RFC3339Nano)
 	network.ExpiresAt = at.Add(network.Retention).Format(time.RFC3339Nano)
 	network.ShutdownIntent = intent
+	network.Disconnect = &disconnect
 	network.Event, network.Action, network.Reason, network.CloseCode = "softphone.browser.disconnected", "detached", reason, code
 	if reason == "session_replaced" {
 		network.Action = "replaced"
@@ -301,6 +325,7 @@ func (t *audioCallTelemetry) observeBrowserConnection(w *websocketWriterPump, v 
 	if !ok || network.ConnectionID != t.socket.ConnectionID {
 		return nil
 	}
+	t.lastBrowserSampleAt = time.Now().UTC().Format(time.RFC3339Nano)
 	v.ConnectionID = network.ConnectionID
 	for i := range v.PlaybackEvents {
 		v.PlaybackEvents[i].ConnectionID = t.connectionAtLocked(v.PlaybackEvents[i].Timestamp)
@@ -325,6 +350,15 @@ func (t *audioCallTelemetry) observeBrowserConnection(w *websocketWriterPump, v 
 	samples := t.attributeTransportSamplesLocked(network, v.ClientEpoch, v.TransportSamples)
 	v.TransportSamples = nil
 	t.observeBrowserLocked(v)
+	network.lastBrowser.LastBrowserSampleAt = t.lastBrowserSampleAt
+	network.lastBrowser.BrowserConnectionState = t.browser.ConnectionState
+	network.lastBrowser.RTTMS = t.browser.RTTMS
+	network.lastBrowser.PlaybackQueueMS = t.browser.PlaybackQueueMS
+	network.lastBrowser.BrowserBufferedBytes = t.browser.WebSocketBufferedBytes
+	network.lastBrowser.AudioContextState = t.browser.AudioContextState
+	network.lastBrowser.MicrophoneMuted = t.browser.MicrophoneMuted
+	network.lastBrowser.MicrophoneTrackState = t.browser.MicrophoneTrackState
+	t.sockets[w] = network
 	return samples
 }
 func (t *audioCallTelemetry) attributeTransportSamples(w *websocketWriterPump, epoch string, samples []browserTransportSample) []browserTransportSample {
@@ -334,6 +368,28 @@ func (t *audioCallTelemetry) attributeTransportSamples(w *websocketWriterPump, e
 	if !ok || network.ConnectionID != t.socket.ConnectionID {
 		return nil
 	}
+	for _, sample := range samples {
+		if attributed := t.connectionAtLocked(sample.Timestamp); attributed != "" && attributed != network.ConnectionID {
+			continue
+		}
+		if value, ok := sample.Metrics["rtt_ms"]; ok {
+			rtt := int(value)
+			network.lastBrowser.RTTMS = &rtt
+		}
+		if value, ok := sample.Metrics["queue_ms"]; ok {
+			network.lastBrowser.PlaybackQueueMS = int(value)
+		}
+		if value, ok := sample.Metrics["buffered_bytes"]; ok {
+			network.lastBrowser.BrowserBufferedBytes = int(value)
+		}
+		if value := sample.States["ice"]; value != "" {
+			network.lastBrowser.BrowserICEState = value
+		}
+		if value := sample.States["dtls"]; value != "" {
+			network.lastBrowser.BrowserDTLSState = value
+		}
+	}
+	t.sockets[w] = network
 	return t.attributeTransportSamplesLocked(network, limitDiagnosticText(epoch, 64), samples)
 }
 func (t *audioCallTelemetry) attributeTransportSamplesLocked(network audioNetworkEvent, epoch string, samples []browserTransportSample) []browserTransportSample {
@@ -384,9 +440,9 @@ func (t *audioCallTelemetry) connectionAtLocked(timestamp string) string {
 	return ""
 }
 func (t *audioCallTelemetry) observeBrowserLocked(v browserAudioDiagnostics) {
+	v.SessionEvents = mergeRTCEventHistory(t.browser.SessionEvents, v.SessionEvents, 50)
 	if v.MediaTransport == "webrtc" {
 		v.DropEvents = mergeRTCEventHistory(t.browser.DropEvents, v.DropEvents, 100)
-		v.SessionEvents = mergeRTCEventHistory(t.browser.SessionEvents, v.SessionEvents, 50)
 		if v.Timing == nil {
 			v.Timing = t.browser.Timing
 		}
@@ -735,7 +791,7 @@ func (a *App) persistAudioTelemetry(callID string, h *softphoneHub) (err error) 
 	server := h.serverAudioSnapshot()
 	correlateBrowserCaptureLoss(&server, browser.DropEvents)
 	if !seen {
-		return a.db().updateServerAudioDiagnostics(callID, server, browser.PlaybackUnderrunEvents)
+		return a.db().updateServerAudioDiagnosticEvents(callID, server, browser.PlaybackUnderrunEvents, browser.SessionEvents)
 	}
 	browser.Server = &server
 	return a.db().updateBrowserAudioDiagnostics(callID, browser)
