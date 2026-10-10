@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 // View traversal is site-neutral. It only follows observed anchors, scrolls,
 // and optionally clicks pagination controls whose fresh SOM effect is navigation_only.
 var errReadCollectionBound = errors.New("read collection bound reached")
+var errReadPaginationStalled = errors.New("pagination did not advance after verified wait")
 
 type actorReadViews struct {
 	AllowPartial bool              `json:"allow_partial,omitempty"`
@@ -54,6 +56,9 @@ type actorReadRewrite struct {
 	Equals      string `json:"equals,omitempty"`
 }
 type actorReadPagination struct {
+	OnStall           string       `json:"on_stall,omitempty"`
+	AdvanceTimeoutMS  int          `json:"advance_timeout_ms,omitempty"`
+	RevealFrom        string       `json:"reveal_from,omitempty"`
 	EndWhenNextAbsent bool         `json:"end_when_next_absent,omitempty"`
 	Mode              string       `json:"mode"`
 	Next              actorLocator `json:"next,omitempty"`
@@ -110,6 +115,18 @@ func validateReadViews(c *actorReadViews) error {
 	}
 	names := map[string]bool{}
 	for _, v := range c.Views {
+		if v.Pagination.RevealFrom != "" && v.Pagination.RevealFrom != "start" && v.Pagination.RevealFrom != "end" {
+			return errors.New("pagination reveal_from must be start or end")
+		}
+		if v.Pagination.OnStall != "" && v.Pagination.OnStall != "fail" && v.Pagination.OnStall != "partial" {
+			return errors.New("pagination on_stall must be fail or partial")
+		}
+		if v.Pagination.OnStall == "partial" && !c.AllowPartial {
+			return errors.New("partial stalled pagination requires allow_partial")
+		}
+		if v.Pagination.AdvanceTimeoutMS != 0 && (v.Pagination.AdvanceTimeoutMS < 500 || v.Pagination.AdvanceTimeoutMS > 60000) {
+			return errors.New("pagination advance_timeout_ms must be between 500 and 60000")
+		}
 		if v.Name == "" || names[v.Name] || len(v.Covers) == 0 || len(v.Covers) > 20 || v.KeyField == "" || len(v.Fields) == 0 || len(v.Fields) > maxActorFields {
 			return errors.New("read view requires unique name, covers, key_field and bounded fields")
 		}
@@ -358,7 +375,8 @@ func (e *actorExecution) inspectViews(c actorReadViews) error {
 		if err != nil {
 			result.Error = err.Error()
 			failed = true
-			if !errors.Is(err, errReadCollectionBound) || !result.Checked {
+			verifiedPartial := errors.Is(err, errReadCollectionBound) || (errors.Is(err, errReadPaginationStalled) && v.Pagination.OnStall == "partial" && result.Items > 0)
+			if !verifiedPartial || !result.Checked {
 				partialOnly = false
 			}
 			e.addTrace("inspect_views.view", "incomplete", err.Error(), map[string]any{"view": v.Name})
@@ -420,6 +438,7 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 	lastSignature := ""
 	lastGeometry := ""
 	pendingNextSignature := ""
+	var pendingNextDeadline time.Time
 	for page := 0; page < limit; page++ {
 		if e.pageCount >= e.maxPages {
 			return fmt.Errorf("%w: global page limit; more results may remain", errReadCollectionBound)
@@ -437,6 +456,7 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 		}
 		var keys []string
 		var newItems []map[string]any
+		collectionBound := false
 		for _, node := range nodes {
 			item, err := extractNodeItem(node, v.Fields, e.currentURL)
 			if err != nil {
@@ -466,13 +486,13 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 				return errors.New("empty deduplication key")
 			}
 			keys = append(keys, key)
-			viewSeen[key] = true
 			if old, ok := seen[key]; ok {
 				oldJSON, _ := json.Marshal(old)
 				newJSON, _ := json.Marshal(item)
 				if string(oldJSON) != string(newJSON) {
 					return errors.New("collection changed during inspection; reconcile overlapping statuses before writing")
 				}
+				viewSeen[key] = true
 				continue
 			}
 			item, err = validateOutputItem(item, e.definition.OutputSchema)
@@ -484,15 +504,31 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 				return errors.New("item byte limit reached")
 			}
 			if len(e.items)+len(newItems) >= e.maxItems || e.datasetBytes+len(b)+1 > maxActorDatasetBytes {
-				return errors.New("dataset limit reached; more results remain")
+				collectionBound = true
+				break
 			}
+			viewSeen[key] = true
 			e.datasetBytes += len(b) + 1
 			seen[key] = item
 			newItems = append(newItems, item)
 		}
+		sort.Strings(keys) // DOM reordering alone is not pagination progress
 		if pendingNextSignature != "" {
 			if strings.Join(keys, ",") == pendingNextSignature {
-				return errors.New("pagination did not advance; coverage incomplete")
+				// An unchanged first AJAX response is not an exhausted collection.
+				// Re-read the verified identity/view without clicking again. Explicit
+				// terminal DOM evidence takes precedence over a stalled signature.
+				ended := (v.Pagination.EndSelector != "" && readHas(root, v.Pagination.EndSelector)) || (v.Pagination.Mode == "next" && v.Pagination.EndWhenNextAbsent && !readHas(root, v.Pagination.Next.Selector))
+				if !ended {
+					if !time.Now().Before(pendingNextDeadline) {
+						return fmt.Errorf("%w; coverage incomplete", errReadPaginationStalled)
+					}
+					if err := e.readPause(500); err != nil {
+						return err
+					}
+					page-- // waiting does not consume a dataset page or page bound
+					continue
+				}
 			}
 			pendingNextSignature = ""
 		}
@@ -504,6 +540,9 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 		result.Pages++
 		result.Items = len(viewSeen)
 		e.persistProgress("inspecting " + v.Name)
+		if collectionBound {
+			return fmt.Errorf("%w: dataset limit; more results remain", errReadCollectionBound)
+		}
 		if v.Pagination.EndSelector != "" && readHas(root, v.Pagination.EndSelector) {
 			return completeReadView(v, result, root, len(viewSeen), e.currentURL, "explicit_end_selector")
 		}
@@ -528,9 +567,10 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 			}
 			stable = 0
 			pendingNextSignature = strings.Join(keys, ",")
-			if err := e.clickReadNavigation(v.Pagination.Next); err != nil {
+			if err := e.clickReadNavigation(v.Pagination.Next, v.Pagination.RevealFrom); err != nil {
 				return err
 			}
+			pendingNextDeadline = time.Now().Add(time.Duration(boundedInt(v.Pagination.AdvanceTimeoutMS, 10000, 500, 60000)) * time.Millisecond)
 		} else {
 			shot, err := e.readScrollSnapshot()
 			if err != nil {
@@ -563,10 +603,11 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 					return errors.New("ambiguous pagination control; coverage incomplete")
 				}
 				if len(matches) == 1 && !matches[0].Disabled {
-					if err := e.clickReadNavigation(v.Pagination.Next); err != nil {
+					if err := e.clickReadNavigation(v.Pagination.Next, v.Pagination.RevealFrom); err != nil {
 						return err
 					}
 					pendingNextSignature = signature
+					pendingNextDeadline = time.Now().Add(time.Duration(boundedInt(v.Pagination.AdvanceTimeoutMS, 10000, 500, 60000)) * time.Millisecond)
 					stable, lastSignature, lastGeometry = 0, "", ""
 					if err := e.readPause(v.Pagination.SettleMS); err != nil {
 						return err
@@ -606,11 +647,12 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 }
 
 type readScrollRegion struct {
-	ID   string  `json:"id"`
-	Name string  `json:"name"`
-	Role string  `json:"role"`
-	Top  float64 `json:"scroll_top"`
-	MaxY float64 `json:"max_scroll_y"`
+	ID     string  `json:"id"`
+	Name   string  `json:"name"`
+	Role   string  `json:"role"`
+	Top    float64 `json:"scroll_top"`
+	MaxY   float64 `json:"max_scroll_y"`
+	Height float64 `json:"h"`
 }
 type readScrollShot struct {
 	MediaIframeSrc     string             `json:"media_iframe_src"`
@@ -635,12 +677,16 @@ func (e *actorExecution) readScrollSnapshot() (*readScrollShot, error) {
 	}
 	return &shot, err
 }
-func (e *actorExecution) clickReadNavigation(locator actorLocator) error {
+func (e *actorExecution) clickReadNavigation(locator actorLocator, revealFrom ...string) error {
 	// The selector supplies DOM end evidence; fresh SOM identity uses exact name/role.
 	locator.Selector = ""
 	var matches []setOfMarkTarget
 	var shot *readScrollShot
 	direction := "up"
+	if len(revealFrom) > 0 && revealFrom[0] == "end" {
+		direction = "down"
+	}
+	scanning := false
 	for attempts := 0; attempts < 40; attempts++ {
 		var err error
 		shot, err = e.readScrollSnapshot()
@@ -668,14 +714,25 @@ func (e *actorExecution) clickReadNavigation(locator actorLocator) error {
 		if region == nil {
 			break
 		}
-		if direction == "up" && region.Top <= 0 {
-			direction = "down"
-		}
-		if direction == "down" && region.Top >= region.MaxY-1 {
-			break
+		atBoundary := (direction == "up" && region.Top <= 0) || (direction == "down" && region.Top >= region.MaxY-1)
+		if atBoundary {
+			if scanning {
+				break
+			}
+			scanning = true
+			if direction == "up" {
+				direction = "down"
+			} else {
+				direction = "up"
+			}
 		}
 		amount := 600
-		if direction == "up" {
+		if region.Height > 0 {
+			// Overlap successive viewports so a short control cannot fall
+			// into a gap between semantic observations.
+			amount = max(1, min(600, int(region.Height*0.65)))
+		}
+		if !scanning {
 			amount = 10000
 		}
 		var out map[string]any

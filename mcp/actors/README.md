@@ -192,3 +192,5 @@ configured origin/path, and every present source parameter must match the
 approved source. Repeated/empty/conflicting source parameters fail. Provider
 hosts are definition policy, never built into the engine. See the optional
 `examples/patreon-existing-video-draft.json` recovery operations (Actors 0.2.21+).
+
+Read collection pagination supports `advance_timeout_ms` (500–60000; default 10000) to wait for a verified AJAX response without another click. `reveal_from:"start"|"end"` chooses the document boundary used to reveal controls through verified scroll regions and overlapping viewports. `on_stall:"partial"` requires `allow_partial:true` and a read-only operation; only an unchanged, identity-verified collection after the wait may return partial success. It retains incomplete coverage and a stall reason; unsafe targets, inaccessible views, changed records and truncation remain errors. Page/item bounds preserve the verified dataset prefix.

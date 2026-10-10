@@ -215,7 +215,10 @@
                   }
                 },
                 "field_defaults": {
-                  "direction": "incoming"
+                  "direction": "incoming",
+                  "record_type": "message",
+                  "model_id": "{{model_id}}",
+                  "model_url": "{{model_url}}"
                 },
                 "field_rewrites": {
                   "direction": {
@@ -238,7 +241,10 @@
                   },
                   "max_pages": "{{read_pages}}",
                   "stable_rounds": 2,
-                  "settle_ms": 5000
+                  "settle_ms": 5000,
+                  "on_stall": "partial",
+                  "advance_timeout_ms": 20000,
+                  "reveal_from": "start"
                 }
               }
             ],
@@ -444,7 +450,13 @@
                   },
                   "max_pages": "{{read_pages}}",
                   "stable_rounds": 2,
-                  "settle_ms": 1000
+                  "settle_ms": 1000,
+                  "on_stall": "partial",
+                  "advance_timeout_ms": 20000,
+                  "reveal_from": "end"
+                },
+                "field_defaults": {
+                  "record_type": "conversation"
                 }
               }
             ],
@@ -595,7 +607,10 @@
                   }
                 },
                 "field_defaults": {
-                  "direction": "incoming"
+                  "direction": "incoming",
+                  "record_type": "message",
+                  "model_id": "{{model_id}}",
+                  "model_url": "{{model_url}}"
                 },
                 "field_rewrites": {
                   "direction": {
@@ -618,7 +633,10 @@
                   },
                   "max_pages": "{{read_pages}}",
                   "stable_rounds": 2,
-                  "settle_ms": 5000
+                  "settle_ms": 5000,
+                  "on_stall": "partial",
+                  "advance_timeout_ms": 20000,
+                  "reveal_from": "start"
                 }
               }
             ],
@@ -710,7 +728,13 @@
                   },
                   "max_pages": "{{read_pages}}",
                   "stable_rounds": 2,
-                  "settle_ms": 1000
+                  "settle_ms": 1000,
+                  "on_stall": "partial",
+                  "advance_timeout_ms": 20000,
+                  "reveal_from": "end"
+                },
+                "field_defaults": {
+                  "record_type": "conversation"
                 }
               }
             ],
@@ -1213,7 +1237,10 @@
                   "amount": 600,
                   "max_pages": "{{read_pages}}",
                   "stable_rounds": 3,
-                  "settle_ms": 1500
+                  "settle_ms": 1500,
+                  "on_stall": "partial",
+                  "advance_timeout_ms": 20000,
+                  "reveal_from": "end"
                 }
               }
             ],
@@ -1455,7 +1482,7 @@
     "backend": "browserbase",
     "persist": true,
     "viewport": {
-      "height": 800,
+      "height": 400,
       "width": 1600
     }
   },
