@@ -2,8 +2,13 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.30
+version: 0.14.31
 description: |
+  v0.14.31 repairs transcription audio: explicit 16 kHz double-precision
+  speech filtering uses a 7.5 kHz cutoff below Nyquist. MP3 and PCM fallback
+  must pass full floating-point decode/signal/duration checks before upload.
+  New recipe and file-bound validation prevent corrupted cache reuse. Saved
+  provider metadata distinguishes API success from unverified speech coverage.
   v0.14.30 verifies missing decoded B-frame durations against the actual video
   track endpoint, with bounded inference and traceable evidence. Correct outputs
   no longer fail ending coverage; unsupported holds and real gaps stay rejected.
@@ -632,7 +637,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.30
+    ref: media/v0.14.31
     entry: mcp/media
   port: 8080
   health_check: /health

@@ -44,7 +44,7 @@ func TestBuildRemoteTranscriptAudioScript_NormalizesAndUploadsHiddenProxy(t *tes
 	for _, marker := range []string{
 		"-vn -map 0:a:0",
 		"-ac 1 -ar 16000",
-		"loudnorm=I=-16:TP=-1.5:LRA=11,highpass=f=80,lowpass=f=8000",
+		transcriptAudioFilter,
 		"-c:a libmp3lame -b:a 64k",
 		"-F \"folder=/.media/transcript-audio/\"",
 		"-F \"source=media-transcript-audio\"",

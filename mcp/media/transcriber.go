@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -267,7 +268,7 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 	defer cancel()
 
 	sc := newStorageClient()
-	signedURL, err := signedURLForDeepgram(ctx, app, sc, media)
+	signedURL, audioEvidence, err := deepgramInput(ctx, app, sc, media)
 	if err != nil {
 		_ = markFailure("prepare transcript audio: " + err.Error())
 		return
@@ -326,12 +327,20 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 		return
 	}
 
+	// Provider success does not certify that all speech was recognized. Keep
+	// actual provider metadata and last-word timing separate from source duration.
+	if parsed.ProviderDurationMs > 0 && audioEvidence != nil && math.Abs(float64(parsed.ProviderDurationMs-audioEvidence.Validation.DurationMs)) > transcriptAudioDurationTolerance(audioEvidence.Validation.DurationMs) {
+		_ = markFailure(fmt.Sprintf("transcript_provider_duration_mismatch: provider=%dms validated_audio=%dms request_id=%s", parsed.ProviderDurationMs, audioEvidence.Validation.DurationMs, parsed.RequestID))
+		return
+	}
+	diagnostics, _ := json.Marshal(map[string]any{"status_semantics": "provider_response_parsed", "speech_coverage": "unverified", "provider_metadata": parsed.Metadata, "provider_duration_ms": parsed.ProviderDurationMs, "word_count": parsed.WordCount, "last_word_end_ms": parsed.LastWordEndMs, "audio_preparation": audioEvidence})
 	// Persist.
 	final := &TranscriptRow{
 		FileID:             row.FileID,
 		ProjectID:          row.ProjectID,
 		SourceSHA256:       media.SourceSHA256,
 		Status:             "ok",
+		Diagnostics:        diagnostics,
 		Language:           parsed.Language,
 		Text:               parsed.Text,
 		Provider:           "deepgram",
@@ -377,9 +386,14 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 // channels[] → alternatives[]); we walk it once and lift only the
 // fields we persist.
 type parsedTranscript struct {
-	Text     string
-	Language string
-	Segments []TranscriptSegment
+	Text               string
+	Language           string
+	Segments           []TranscriptSegment
+	Metadata           json.RawMessage
+	ProviderDurationMs int64
+	RequestID          string
+	WordCount          int
+	LastWordEndMs      int64
 }
 
 // parseDeepgramResponse handles Deepgram's listen response shape.
@@ -408,13 +422,18 @@ type parsedTranscript struct {
 func parseDeepgramResponse(data json.RawMessage) (*parsedTranscript, error) {
 	var env struct {
 		Metadata struct {
-			DetectedLanguage string `json:"detected_language"`
+			DetectedLanguage string  `json:"detected_language"`
+			Duration         float64 `json:"duration"`
+			RequestID        string  `json:"request_id"`
 		} `json:"metadata"`
 		Results struct {
 			Channels []struct {
 				DetectedLanguage string `json:"detected_language"`
 				Alternatives     []struct {
 					Transcript string `json:"transcript"`
+					Words      []struct {
+						End float64 `json:"end"`
+					} `json:"words"`
 					Paragraphs struct {
 						Paragraphs []struct {
 							Sentences []struct {
@@ -437,8 +456,20 @@ func parseDeepgramResponse(data json.RawMessage) (*parsedTranscript, error) {
 	alt := env.Results.Channels[0].Alternatives[0]
 
 	out := &parsedTranscript{
-		Text:     strings.TrimSpace(alt.Transcript),
-		Language: env.Metadata.DetectedLanguage,
+		Text:               strings.TrimSpace(alt.Transcript),
+		Language:           env.Metadata.DetectedLanguage,
+		ProviderDurationMs: int64(math.Round(env.Metadata.Duration * 1000)),
+		RequestID:          env.Metadata.RequestID,
+		WordCount:          len(alt.Words),
+	}
+	var meta map[string]json.RawMessage
+	if json.Unmarshal(data, &meta) == nil {
+		out.Metadata = meta["metadata"]
+	}
+	for _, w := range alt.Words {
+		if n := int64(math.Round(w.End * 1000)); n > out.LastWordEndMs {
+			out.LastWordEndMs = n
+		}
 	}
 	if out.Language == "" {
 		out.Language = env.Results.Channels[0].DetectedLanguage

@@ -319,6 +319,12 @@ func TestTranscriberSweep_VideoUsesCachedTranscriptAudioProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	validation := &transcriptAudioValidation{Method: "full_decode_float_astats", Recipe: transcriptAudioRecipe, DecodeOK: true, Samples: 48000, DurationMs: 3000}
+	_, err := ctx.AppDB().Exec(`INSERT INTO transcript_audio_checks(project_id,file_id,kind,storage_file_id,evidence) VALUES(?,?,?,?,?)`, testProj, "1", transcriptAudioKind(sourceSHA), 9001, transcriptAudioEvidenceJSON(&transcriptAudioEvidence{StorageFileID: 9001, Validation: validation}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	transcriberSweep(ctx)
 
 	if len(stub.ExecuteCalls) != 1 {

@@ -23,8 +23,13 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.30
+version: 0.14.31
 description: |
+  v0.14.31 repairs transcription audio: explicit 16 kHz double-precision
+  speech filtering uses a 7.5 kHz cutoff below Nyquist. MP3 and PCM fallback
+  must pass full floating-point decode/signal/duration checks before upload.
+  New recipe and file-bound validation prevent corrupted cache reuse. Saved
+  provider metadata distinguishes API success from unverified speech coverage.
   v0.14.30 verifies missing decoded B-frame durations against the actual video
   track endpoint, with bounded inference and traceable evidence. Correct outputs
   no longer fail ending coverage; unsupported holds and real gaps stay rejected.
@@ -653,7 +658,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.30
+    ref: media/v0.14.31
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -1508,10 +1513,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_transcribe",
-			Description: "Queue a transcription for one media file. Inserts a pending row that the transcriber picks up on its next tick. force=true also re-queues already-ok rows (useful when you want a re-run after model upgrades or to retry a failed attempt). Args: file_id, force?.",
+			Description: "Queue a transcription for one media file. force=true re-queues completed rows. prepare_only=true prepares/reuses fully validated transcription audio and returns its evidence without changing the transcript or calling the provider; cannot be combined with force. Args: file_id, force?, prepare_only?.",
 			InputSchema: schemaObject(map[string]any{
-				"file_id": map[string]any{"type": "string"},
-				"force":   map[string]any{"type": "boolean"},
+				"file_id":      map[string]any{"type": "string"},
+				"force":        map[string]any{"type": "boolean"},
+				"prepare_only": map[string]any{"type": "boolean"},
 			}, []string{"file_id"}),
 			Handler: a.toolTranscribe,
 		},
@@ -1858,6 +1864,35 @@ func (a *App) toolTranscribe(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, errors.New("file_id required")
 	}
 	force, _ := args["force"].(bool)
+	prepareOnly, _ := args["prepare_only"].(bool)
+	if prepareOnly {
+		if force {
+			return nil, errors.New("prepare_only cannot be combined with force")
+		}
+		media, err := getMedia(ctx.AppDB(), pid, fid)
+		if err != nil {
+			return nil, err
+		}
+		if !media.HasAudio {
+			return nil, errors.New("source has no audio")
+		}
+		if !media.HasVideo {
+			return map[string]any{"file_id": fid, "prepared": false, "reason": "audio source is sent directly", "transcript_changed": false}, nil
+		}
+		id, err := strconv.ParseInt(fid, 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		parent, stop := mediaContext(context.Background(), ctx)
+		defer stop()
+		work, cancel := context.WithTimeout(parent, transcriptAudioTimeoutSec*time.Second)
+		defer cancel()
+		evidence, err := ensureTranscriptAudioEvidence(work, ctx, newStorageClient(), media, id)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"file_id": fid, "prepared": true, "audio_preparation": evidence, "transcript_changed": false}, nil
+	}
 	if force {
 		// Wipe any existing row so insertPendingTranscript treats this
 		// as a fresh queue entry. The auto-policy uses ON CONFLICT to

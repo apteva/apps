@@ -1,3 +1,22 @@
+## 0.14.31 — stable, validated transcription audio
+
+Transcription proxies used an 8 kHz low-pass at the 16 kHz Nyquist boundary.
+Recursive filtering could produce runaway samples despite a successful encode
+and a successful partial Deepgram response. Both local and remote paths now
+resample explicitly and filter at 7.5 kHz with double precision.
+
+MP3 and PCM fallback outputs must fully decode as floating-point samples and
+pass finite-signal, peak/saturation and duration checks before upload/cache.
+A new recipe invalidates old proxies. Reuse additionally requires saved validation
+bound to the uploaded file and source recipe. Silent audio remains supported;
+provider success does not certify complete speech recognition.
+
+Transcript diagnostics persist proxy validation, actual provider duration,
+request ID, source hash, model version and last-word timing. Existing imported
+transcripts remain until explicitly replaced; `media_transcribe` supports
+`prepare_only` to repair proxies without replacing transcripts or billing ASR.
+The release does not queue a project-wide paid retranscription. Cropping and rendering behavior is unchanged.
+
 ## 0.14.30 — verify final B-frame presentation coverage
 
 Production extraction revealed FFmpeg 7.1 can omit the final decoded picture's

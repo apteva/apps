@@ -28,10 +28,9 @@ import (
 
 const (
 	transcriptAudioFolder = "/.media/transcript-audio/"
-	// Keep the existing recipe key so already-prepared MP3 derivations remain
-	// reusable. New preparations still prefer MP3, but may store WAV when LAME
-	// rejects an otherwise valid source.
-	transcriptAudioRecipe      = "v1_loudnorm_16k_mono_mp3"
+	// Never reuse v1 proxies: the Nyquist-cutoff filter could corrupt the
+	// full signal while FFmpeg and the provider both returned success.
+	transcriptAudioRecipe      = "v2_stable_7500hz_f64_validated_16k_mono"
 	transcriptAudioKindPrefix  = "transcript_audio:"
 	transcriptAudioMP3Type     = "audio/mpeg"
 	transcriptAudioWAVType     = "audio/wav"
@@ -40,53 +39,75 @@ const (
 	remoteAudioLogTailBytes    = 16 << 10
 )
 
-const transcriptAudioFilter = "loudnorm=I=-16:TP=-1.5:LRA=11,highpass=f=80,lowpass=f=8000"
+const transcriptAudioFilter = "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=16000,aformat=sample_fmts=dbl:channel_layouts=mono,highpass=f=80:precision=f64,lowpass=f=7500:precision=f64"
 
 func signedURLForDeepgram(ctx context.Context, app *sdk.AppCtx, sc *storageClient, media *MediaRow) (string, error) {
-	fileID, err := strconv.ParseInt(media.FileID, 10, 64)
-	if err != nil {
-		return "", fmt.Errorf("file_id not numeric: %w", err)
-	}
-	if !media.HasVideo {
-		return sc.GetSignedURL(ctx, media.ProjectID, fileID, 30*60)
-	}
-	audioID, err := ensureTranscriptAudio(ctx, app, sc, media, fileID)
-	if err != nil {
-		return "", err
-	}
-	return sc.GetSignedURL(ctx, media.ProjectID, audioID, 30*60)
+	url, _, err := deepgramInput(ctx, app, sc, media)
+	return url, err
 }
 
-func ensureTranscriptAudio(ctx context.Context, app *sdk.AppCtx, sc *storageClient, media *MediaRow, sourceFileID int64) (int64, error) {
+func deepgramInput(ctx context.Context, app *sdk.AppCtx, sc *storageClient, media *MediaRow) (string, *transcriptAudioEvidence, error) {
+	fileID, err := strconv.ParseInt(media.FileID, 10, 64)
+	if err != nil {
+		return "", nil, fmt.Errorf("file_id not numeric: %w", err)
+	}
+	if !media.HasVideo {
+		url, err := sc.GetSignedURL(ctx, media.ProjectID, fileID, 30*60)
+		return url, nil, err
+	}
+	evidence, err := ensureTranscriptAudioEvidence(ctx, app, sc, media, fileID)
+	if err != nil {
+		return "", nil, err
+	}
+	url, err := sc.GetSignedURL(ctx, media.ProjectID, evidence.StorageFileID, 30*60)
+	return url, evidence, err
+}
+
+func ensureTranscriptAudioEvidence(ctx context.Context, app *sdk.AppCtx, sc *storageClient, media *MediaRow, sourceFileID int64) (*transcriptAudioEvidence, error) {
 	kind := transcriptAudioKind(media.SourceSHA256)
 	if d, ok := findTranscriptAudioDerivation(app.AppDB(), media.ProjectID, media.FileID, kind); ok {
-		if storageID, err := strconv.ParseInt(d.StorageFileID, 10, 64); err == nil && storageID > 0 {
-			if transcriptAudioStorageExists(ctx, sc, media.ProjectID, d.StorageFileID) {
-				return storageID, nil
+		var raw string
+		if app.AppDB().QueryRow(`SELECT evidence FROM transcript_audio_checks WHERE project_id=? AND file_id=? AND kind=? AND storage_file_id=?`, media.ProjectID, media.FileID, kind, d.StorageFileID).Scan(&raw) == nil {
+			var e transcriptAudioEvidence
+			if json.Unmarshal([]byte(raw), &e) == nil && strconv.FormatInt(e.StorageFileID, 10) == d.StorageFileID && e.Validation.check(media.DurationMs) == nil && transcriptAudioStorageExists(ctx, sc, media.ProjectID, d.StorageFileID) {
+				return &e, nil
 			}
 		}
 	}
-
 	sourceURL, err := sc.GetSignedURL(ctx, media.ProjectID, sourceFileID, 30*60)
 	if err != nil {
-		return 0, fmt.Errorf("source signed URL: %w", err)
+		return nil, fmt.Errorf("source signed URL: %w", err)
 	}
-
-	var storageID int64
+	var evidence *transcriptAudioEvidence
 	hostID := int64(parseConfigIntFallback(app.Config().Get("render_host_id"), 0))
 	if hostID > 0 {
-		storageID, err = prepareTranscriptAudioRemote(ctx, app, media.ProjectID, hostID, sourceURL, media.FileID)
+		evidence, err = prepareTranscriptAudioRemote(ctx, app, media.ProjectID, hostID, sourceURL, media.FileID, media.DurationMs)
 	} else {
-		storageID, err = prepareTranscriptAudioLocal(ctx, app, sc, media.ProjectID, sourceURL, media.FileID)
+		evidence, err = prepareTranscriptAudioLocal(ctx, app, sc, media.ProjectID, sourceURL, media.FileID, media.DurationMs)
 	}
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	if err := upsertDerivation(app.AppDB(), media.ProjectID, media.FileID, kind, storageID, 0, 0, 0); err != nil {
-		return 0, fmt.Errorf("cache transcript audio derivation: %w", err)
+	if err = evidence.Validation.check(media.DurationMs); err != nil {
+		return nil, err
+	}
+	tx, err := app.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if err = upsertDerivation(tx, media.ProjectID, media.FileID, kind, evidence.StorageFileID, 0, 0, 0); err != nil {
+		return nil, err
+	}
+	_, err = tx.Exec(`INSERT INTO transcript_audio_checks(project_id,file_id,kind,storage_file_id,evidence) VALUES(?,?,?,?,?) ON CONFLICT(project_id,file_id,kind) DO UPDATE SET storage_file_id=excluded.storage_file_id,evidence=excluded.evidence`, media.ProjectID, media.FileID, kind, evidence.StorageFileID, transcriptAudioEvidenceJSON(evidence))
+	if err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
 	}
 	cleanupStaleTranscriptAudioDerivations(ctx, app, sc, media.ProjectID, media.FileID, kind)
-	return storageID, nil
+	return evidence, nil
 }
 
 func transcriptAudioKind(sourceSHA256 string) string {
@@ -155,6 +176,7 @@ func cleanupStaleTranscriptAudioDerivations(ctx context.Context, app *sdk.AppCtx
 					"file_id", fileID, "storage_file_id", storageID, "err", err)
 			}
 		}
+		_, _ = app.AppDB().Exec(`DELETE FROM transcript_audio_checks WHERE project_id=? AND file_id=? AND kind=?`, projectID, fileID, d.Kind)
 		if _, err := app.AppDB().Exec(`DELETE FROM derivations WHERE id = ?`, d.ID); err != nil {
 			app.Logger().Warn("delete stale transcript audio derivation row failed",
 				"file_id", fileID, "derivation_id", d.ID, "err", err)
@@ -162,7 +184,7 @@ func cleanupStaleTranscriptAudioDerivations(ctx context.Context, app *sdk.AppCtx
 	}
 }
 
-func prepareTranscriptAudioLocal(ctx context.Context, app *sdk.AppCtx, sc *storageClient, projectID, sourceURL, fileID string) (int64, error) {
+func prepareTranscriptAudioLocal(ctx context.Context, app *sdk.AppCtx, sc *storageClient, projectID, sourceURL, fileID string, expectedMs int64) (*transcriptAudioEvidence, error) {
 	ffmpegPath := strings.TrimSpace(app.Config().Get("ffmpeg_path"))
 	if ffmpegPath == "" {
 		ffmpegPath = "ffmpeg"
@@ -173,14 +195,14 @@ func prepareTranscriptAudioLocal(ctx context.Context, app *sdk.AppCtx, sc *stora
 	}
 	work, err := os.MkdirTemp(scratchRoot, "transcript-audio-*")
 	if err != nil {
-		return 0, fmt.Errorf("create transcript audio scratch: %w", err)
+		return nil, fmt.Errorf("create transcript audio scratch: %w", err)
 	}
 	defer os.RemoveAll(work)
 
 	mp3Path := filepath.Join(work, fileID+".mp3")
-	usedPCMFallback, err := runTranscriptAudioFFmpeg(ctx, ffmpegPath, sourceURL, mp3Path)
+	usedPCMFallback, validation, err := runValidatedTranscriptAudioFFmpeg(ctx, ffmpegPath, sourceURL, mp3Path, expectedMs)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	outPath := mp3Path
 	outputName := fileID + ".mp3"
@@ -194,16 +216,16 @@ func prepareTranscriptAudioLocal(ctx context.Context, app *sdk.AppCtx, sc *stora
 	}
 	f, err := os.Open(outPath)
 	if err != nil {
-		return 0, fmt.Errorf("open transcript audio output: %w", err)
+		return nil, fmt.Errorf("open transcript audio output: %w", err)
 	}
 	defer f.Close()
 	storageID, err := sc.UploadInternalFile(ctx, projectID,
 		transcriptAudioFolder, outputName, contentType, f,
 		"media-transcript-audio", "internal,transcript-audio")
 	if err != nil {
-		return 0, fmt.Errorf("upload transcript audio: %w", err)
+		return nil, fmt.Errorf("upload transcript audio: %w", err)
 	}
-	return storageID, nil
+	return &transcriptAudioEvidence{StorageFileID: storageID, Validation: validation}, nil
 }
 
 func transcriptAudioFFmpegArgs(sourceURL, outPath string) []string {
@@ -254,29 +276,41 @@ func transcriptAudioWAVPath(mp3Path string) string {
 // partial MP3 and retries with encoder-independent 16-bit PCM WAV. The caller
 // uses the boolean to select the fallback path and correct Storage MIME type.
 func runTranscriptAudioFFmpeg(ctx context.Context, ffmpegPath, sourceURL, outPath string) (bool, error) {
+	fallback, _, err := runValidatedTranscriptAudioFFmpeg(ctx, ffmpegPath, sourceURL, outPath, 0)
+	return fallback, err
+}
+
+func runValidatedTranscriptAudioFFmpeg(ctx context.Context, ffmpegPath, sourceURL, outPath string, expectedMs int64) (bool, *transcriptAudioValidation, error) {
 	primaryOut, primaryErr := executeTranscriptAudioFFmpeg(ctx, ffmpegPath, transcriptAudioFFmpegArgs(sourceURL, outPath), outPath)
+	var validation *transcriptAudioValidation
 	if primaryErr == nil {
-		return false, nil
+		validation, primaryErr = validateTranscriptAudio(ctx, ffmpegPath, outPath, expectedMs)
+	}
+	if primaryErr == nil {
+		return false, validation, nil
 	}
 	primaryFailure := transcriptAudioFFmpegFailure(primaryErr, primaryOut)
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return false, fmt.Errorf("ffmpeg transcript audio CBR: %w: %s", ctxErr, primaryFailure)
+		return false, nil, fmt.Errorf("ffmpeg transcript audio CBR: %w: %s", ctxErr, primaryFailure)
 	}
 	if err := os.Remove(outPath); err != nil && !os.IsNotExist(err) {
-		return false, fmt.Errorf("remove partial transcript audio after CBR failure: %w (CBR: %s)", err, primaryFailure)
+		return false, nil, fmt.Errorf("remove partial transcript audio after CBR failure: %w (CBR: %s)", err, primaryFailure)
 	}
 
 	fallbackPath := transcriptAudioWAVPath(outPath)
 	if err := os.Remove(fallbackPath); err != nil && !os.IsNotExist(err) {
-		return true, fmt.Errorf("remove stale PCM transcript audio before retry: %w (CBR: %s)", err, primaryFailure)
+		return true, nil, fmt.Errorf("remove stale PCM transcript audio before retry: %w (CBR: %s)", err, primaryFailure)
 	}
 	fallbackOut, fallbackErr := executeTranscriptAudioFFmpeg(ctx, ffmpegPath, transcriptAudioPCMFFmpegArgs(sourceURL, fallbackPath), fallbackPath)
+	if fallbackErr == nil {
+		validation, fallbackErr = validateTranscriptAudio(ctx, ffmpegPath, fallbackPath, expectedMs)
+	}
 	if fallbackErr != nil {
 		_ = os.Remove(fallbackPath)
-		return true, fmt.Errorf("ffmpeg transcript audio failed (CBR: %s; PCM WAV retry: %s)",
+		return true, nil, fmt.Errorf("ffmpeg transcript audio failed (CBR: %s; PCM WAV retry: %s)",
 			primaryFailure, transcriptAudioFFmpegFailure(fallbackErr, fallbackOut))
 	}
-	return true, nil
+	return true, validation, nil
 }
 
 func executeTranscriptAudioFFmpeg(ctx context.Context, ffmpegPath string, args []string, outPath string) ([]byte, error) {
@@ -338,70 +372,76 @@ func transcriptAudioFFmpegFailure(err error, out []byte) string {
 	if detail == "" {
 		return err.Error()
 	}
-	return fmt.Sprintf("%v: %s", err, truncate(detail, 1200))
+	return fmt.Sprintf("%v: %s", err, transcriptAudioFailureTail(detail, 1200))
 }
 
 type remoteTranscriptAudioResult struct {
-	StorageFileID int64 `json:"storage_file_id"`
+	StorageFileID int64                      `json:"storage_file_id"`
+	Validation    *transcriptAudioValidation `json:"validation"`
 }
 
-func prepareTranscriptAudioRemote(ctx context.Context, app *sdk.AppCtx, projectID string, hostID int64, sourceURL, fileID string) (int64, error) {
+func prepareTranscriptAudioRemote(ctx context.Context, app *sdk.AppCtx, projectID string, hostID int64, sourceURL, fileID string, expectedMs int64) (*transcriptAudioEvidence, error) {
 	publicURL, err := resolvePublicURL(app)
 	if err != nil {
-		return 0, fmt.Errorf("remote transcript audio requires a public storage URL: %w", err)
+		return nil, fmt.Errorf("remote transcript audio requires a public storage URL: %w", err)
 	}
 	storageToken := os.Getenv("APTEVA_OUTBOUND_TOKEN")
 	if storageToken == "" {
 		storageToken = os.Getenv("APTEVA_APP_TOKEN")
 	}
 	if storageToken == "" {
-		return 0, errors.New("no outbound storage token (APTEVA_OUTBOUND_TOKEN/APP_TOKEN); remote transcript audio requires it")
+		return nil, errors.New("no outbound storage token (APTEVA_OUTBOUND_TOKEN/APP_TOKEN); remote transcript audio requires it")
 	}
 	paths, err := sharedRemoteInstaller().Ensure(ctx, app, hostID)
 	if err != nil {
-		return 0, fmt.Errorf("ffmpeg unavailable on host_id=%d: %w", hostID, err)
+		return nil, fmt.Errorf("ffmpeg unavailable on host_id=%d: %w", hostID, err)
 	}
 	script := buildRemoteTranscriptAudioScript(remoteTranscriptAudioScriptInputs{
-		FFmpeg:       paths.FFmpeg,
-		SignedURL:    sourceURL,
-		FileID:       fileID,
-		PublicURL:    publicURL,
-		StorageToken: storageToken,
-		ProjectID:    projectID,
+		FFmpeg:             paths.FFmpeg,
+		SignedURL:          sourceURL,
+		FileID:             fileID,
+		ExpectedDurationMs: expectedMs,
+		PublicURL:          publicURL,
+		StorageToken:       storageToken,
+		ProjectID:          projectID,
 	})
 	out, exit, err := runRemote(ctx, app, hostID, script, transcriptAudioTimeoutSec)
 	if err != nil {
 		if out != "" {
-			return 0, fmt.Errorf("remote transcript audio ssh: %w (output: %s)", err, truncate(out, 600))
+			return nil, fmt.Errorf("remote transcript audio ssh: %w (output: %s)", err, transcriptAudioFailureTail(out, 600))
 		}
-		return 0, fmt.Errorf("remote transcript audio ssh: %w", err)
+		return nil, fmt.Errorf("remote transcript audio ssh: %w", err)
 	}
 	if exit != 0 {
-		return 0, fmt.Errorf("remote transcript audio script exit=%d: %s", exit, truncate(out, 800))
+		return nil, fmt.Errorf("remote transcript audio script exit=%d: %s", exit, transcriptAudioFailureTail(out, 800))
 	}
 	res, err := parseRemoteTranscriptAudio(out)
 	if err != nil {
-		return 0, fmt.Errorf("parse remote transcript audio result after successful remote exit: %w (output may have been truncated; output=%s)", err, truncate(out, 400))
+		return nil, fmt.Errorf("parse remote transcript audio result after successful remote exit: %w (output may have been truncated; output=%s)", err, truncate(out, 400))
 	}
 	if res.StorageFileID <= 0 {
-		return 0, errors.New("remote transcript audio returned empty storage_file_id")
+		return nil, errors.New("remote transcript audio returned empty storage_file_id")
 	}
-	return res.StorageFileID, nil
+	if err := res.Validation.check(expectedMs); err != nil {
+		return nil, err
+	}
+	return &transcriptAudioEvidence{StorageFileID: res.StorageFileID, Validation: res.Validation}, nil
 }
 
 type remoteTranscriptAudioScriptInputs struct {
-	FFmpeg       string
-	SignedURL    string
-	FileID       string
-	PublicURL    string
-	StorageToken string
-	ProjectID    string
+	FFmpeg             string
+	ExpectedDurationMs int64
+	SignedURL          string
+	FileID             string
+	PublicURL          string
+	StorageToken       string
+	ProjectID          string
 }
 
 func buildRemoteTranscriptAudioScript(in remoteTranscriptAudioScriptInputs) string {
 	var b strings.Builder
 	b.WriteString("set -euo pipefail\n")
-	fmt.Fprintf(&b, "WORK=%s\n", shellQuote(fmt.Sprintf("/tmp/apteva-media-transcript-audio-%s-$$", in.FileID)))
+	fmt.Fprintf(&b, "WORK=$(mktemp -d %s)\n", shellQuote(fmt.Sprintf("/var/tmp/apteva-media-transcript-audio-%s-XXXXXX", in.FileID)))
 	b.WriteString(`mkdir -p "$WORK"; cd "$WORK"` + "\n")
 	b.WriteString(`trap 'cd /tmp && rm -rf "$WORK"' EXIT` + "\n")
 	fmt.Fprintf(&b, "export STORAGE_TOKEN=%s\n", shellQuote(in.StorageToken))
@@ -412,9 +452,11 @@ func buildRemoteTranscriptAudioScript(in remoteTranscriptAudioScriptInputs) stri
 	fmt.Fprintf(&b, "export FFMPEG=%s\n", shellQuote(in.FFmpeg))
 	fmt.Fprintf(&b, "export AUDIO_FILTER=%s\n", shellQuote(transcriptAudioFilter))
 	fmt.Fprintf(&b, "export AUDIO_LOG_TAIL_BYTES=%d\n", remoteAudioLogTailBytes)
+	fmt.Fprintf(&b, "export EXPECTED_DURATION_MS=%d\n", in.ExpectedDurationMs)
+	b.WriteString(remoteTranscriptAudioValidator())
 	b.WriteString(`CBR_STATUS=0` + "\n")
 	b.WriteString(`"$FFMPEG" -y -loglevel error -nostdin -i "$SIGNED_URL" -vn -map 0:a:0 -ac 1 -ar 16000 -af "$AUDIO_FILTER" -c:a libmp3lame -b:a 64k audio.mp3 >cbr.log 2>&1 || CBR_STATUS=$?` + "\n")
-	b.WriteString(`if [ "$CBR_STATUS" -eq 0 ] && [ -s audio.mp3 ]; then` + "\n")
+	b.WriteString(`if [ "$CBR_STATUS" -eq 0 ] && [ -s audio.mp3 ] && validate_audio audio.mp3; then` + "\n")
 	b.WriteString(`  AUDIO_PATH=audio.mp3` + "\n")
 	b.WriteString(`  AUDIO_CONTENT_TYPE=audio/mpeg` + "\n")
 	b.WriteString(`  AUDIO_FILENAME="$SRC_ID.mp3"` + "\n")
@@ -425,7 +467,7 @@ func buildRemoteTranscriptAudioScript(in remoteTranscriptAudioScriptInputs) stri
 	b.WriteString(`  rm -f audio.mp3 audio.wav` + "\n")
 	b.WriteString(`  PCM_STATUS=0` + "\n")
 	b.WriteString(`  "$FFMPEG" -y -loglevel error -nostdin -i "$SIGNED_URL" -vn -map 0:a:0 -ac 1 -ar 16000 -af "$AUDIO_FILTER" -c:a pcm_s16le -f wav audio.wav >pcm.log 2>&1 || PCM_STATUS=$?` + "\n")
-	b.WriteString(`  if [ "$PCM_STATUS" -ne 0 ] || [ ! -s audio.wav ]; then` + "\n")
+	b.WriteString(`  if [ "$PCM_STATUS" -ne 0 ] || [ ! -s audio.wav ] || ! validate_audio audio.wav; then` + "\n")
 	b.WriteString(`    if [ "$PCM_STATUS" -eq 0 ]; then PCM_STATUS=1; fi` + "\n")
 	b.WriteString(`    echo "ffmpeg PCM WAV transcript audio failed (exit=$PCM_STATUS)" >&2` + "\n")
 	b.WriteString(`    tail -c "$AUDIO_LOG_TAIL_BYTES" pcm.log >&2 2>/dev/null || true` + "\n")
@@ -446,7 +488,7 @@ func buildRemoteTranscriptAudioScript(in remoteTranscriptAudioScriptInputs) stri
 	b.WriteString(`AUDIO_FILE_ID=$(echo "$RESP" | sed -n 's/.*"id":[[:space:]]*\([0-9]*\).*/\1/p' | head -1)` + "\n")
 	b.WriteString(`: "${AUDIO_FILE_ID:=0}"` + "\n")
 	b.WriteString(`if [ "$AUDIO_FILE_ID" -le 0 ]; then echo "storage transcript audio upload returned no file id: $(printf '%.400s' "$RESP")" >&2; exit 1; fi` + "\n")
-	b.WriteString(`printf 'APTEVA_TRANSCRIPT_AUDIO:{"storage_file_id":%s}\n' "$AUDIO_FILE_ID"` + "\n")
+	b.WriteString(`printf 'APTEVA_TRANSCRIPT_AUDIO:{"storage_file_id":%s,"validation":%s}\n' "$AUDIO_FILE_ID" "$(cat validation.json)"` + "\n")
 	return b.String()
 }
 
@@ -462,4 +504,11 @@ func parseRemoteTranscriptAudio(stdout string) (*remoteTranscriptAudioResult, er
 		return nil, fmt.Errorf("decode marker: %w (raw=%s)", err, truncate(m[1], 300))
 	}
 	return &r, nil
+}
+
+func transcriptAudioFailureTail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return "..." + s[len(s)-n:]
 }

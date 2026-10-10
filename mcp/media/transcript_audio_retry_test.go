@@ -355,7 +355,20 @@ func hasAdjacentArgs(args []string, key, value string) bool {
 func writeFakeFFmpeg(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ffmpeg")
-	writeExecutable(t, path, body)
+	writeExecutable(t, path, `
+case " $* " in
+ *" -af aformat=sample_fmts=dbl,astats="*)
+ cat >&2 <<'STATS'
+[Parsed_astats_1 @ fake] Peak level dB: -2.0
+[Parsed_astats_1 @ fake] RMS level dB: -16.0
+[Parsed_astats_1 @ fake] Peak count: 2
+[Parsed_astats_1 @ fake] Number of samples: 48000
+[Parsed_astats_1 @ fake] Number of NaNs: 0
+[Parsed_astats_1 @ fake] Number of Infs: 0
+STATS
+ exit 0;;
+esac
+`+body)
 	return path
 }
 
