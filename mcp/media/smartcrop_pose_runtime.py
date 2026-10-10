@@ -4,11 +4,17 @@ os.environ['OMP_NUM_THREADS']='1'
 os.environ['OPENBLAS_NUM_THREADS']='1'
 os.environ['MKL_NUM_THREADS']='1'
 import sys,json,math,time,subprocess,tempfile,hashlib,contextlib
+runtime_started=time.monotonic()
 import numpy as np
 import mediapipe as mp
 THRESHOLD=0.5
 RATIO=9/16
 req=json.load(open(sys.argv[1]))
+timings={'import_ms':(time.monotonic()-runtime_started)*1000,'model_setup_ms':0,'frame_extraction_ms':0,'pose_inference_ms':0,'recovery_ms':0,'total_ms':0,'budget_seconds':float(req['remaining_seconds']),'source_kind':'remote_url' if req['source'].startswith(('http://','https://')) else 'local_disk','failure_stage':'initialization'}
+report={'samples':[],'runtime':'mediapipe-'+mp.__version__,'model_sha256':'','timings':timings}
+def report_payload():
+    timings['total_ms']=(time.monotonic()-runtime_started)*1000
+    return report
 def bounds(points):
     return [min(p[0] for p in points),min(p[1] for p in points),max(p[0] for p in points),max(p[1] for p in points)]
 
@@ -137,7 +143,7 @@ def extract_frame(req,at,path,deadline):
         if time.monotonic()>=deadline:
             raise PoseRuntimeFailure('pose_source_read_timeout',at,attempt-1)
         if os.path.exists(path):os.unlink(path)
-        args=[req['ffmpeg'],'-nostdin','-y','-filter_threads','1','-filter_complex_threads','1','-loglevel','error','-threads','1','-ss',str(at/1000),'-i',req['source'],'-frames:v','1','-threads','1',path]
+        args=[req['ffmpeg'],'-nostdin','-y','-filter_threads','1','-filter_complex_threads','1','-loglevel','error','-threads','1','-ss',str(at/1000),'-i',req['source'],'-frames:v','1','-threads','1','-compression_level','1',path]
         try:
             run=subprocess.run(args,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=min(15,max(.01,deadline-time.monotonic())))
             if run.returncode in (-9,137) or any(x in (run.stderr or b'').lower() for x in (b'cannot allocate memory',b'out of memory')):
@@ -153,20 +159,30 @@ def extract_frame(req,at,path,deadline):
 
 def main():
     if mp.__version__!='0.10.21':raise RuntimeError('pose_runtime_version_mismatch')
-    if hashlib.sha256(open(req['model'],'rb').read()).hexdigest()!=req['model_sha256']:raise RuntimeError('pose_model_hash_mismatch')
+    report['model_sha256']=hashlib.sha256(open(req['model'],'rb').read()).hexdigest()
+    if report['model_sha256']!=req['model_sha256']:raise RuntimeError('pose_model_hash_mismatch')
     if not 0<len(req['positions'])<=256:raise RuntimeError('pose_sample_budget_exceeded')
-    deadline=time.monotonic()+min(120,float(req['remaining_seconds']))
+    remaining=min(1200,float(req['remaining_seconds']))
+    if req.get('expires_at'):remaining=min(remaining,max(0,req['expires_at']-time.time()))
+    timings['budget_seconds']=remaining
+    deadline=time.monotonic()+remaining
     options=mp.tasks.vision.PoseLandmarkerOptions(base_options=mp.tasks.BaseOptions(model_asset_path=req['model'],delegate=mp.tasks.BaseOptions.Delegate.CPU),running_mode=mp.tasks.vision.RunningMode.VIDEO if req["video"] else mp.tasks.vision.RunningMode.IMAGE,num_poses=1,min_pose_detection_confidence=.5,min_pose_presence_confidence=.5)
-    samples=[]
+    samples=report['samples']
     recovery=None;recovery_unavailable=False;recovery_seconds=0;tracker_resets=0
     with tempfile.TemporaryDirectory(prefix='media-pose-frames-') as work,contextlib.ExitStack() as stack:
+        timings['failure_stage']='model_setup';setup_started=time.monotonic()
         detector_stack=stack.enter_context(contextlib.ExitStack())
         detector=detector_stack.enter_context(mp.tasks.vision.PoseLandmarker.create_from_options(options))
+        timings['model_setup_ms']=(time.monotonic()-setup_started)*1000
         refresh_detector=None
         for at in req['positions']:
             path=os.path.join(work,'frame.png')
-            attempts=extract_frame(req,at,path,deadline)
+            timings['failure_stage']='frame_extraction';extract_started=time.monotonic()
+            try:attempts=extract_frame(req,at,path,deadline)
+            finally:timings['frame_extraction_ms']+=(time.monotonic()-extract_started)*1000
             image=mp.Image.create_from_file(path)
+            if time.monotonic()>=deadline:raise PoseRuntimeFailure('pose_analysis_timeout',at,attempts)
+            timings['failure_stage']='pose_inference'
             if image.width!=req['width'] or image.height!=req['height']:raise RuntimeError('pose_source_geometry_mismatch')
             started=time.monotonic();result=detector.detect_for_video(image,at) if req["video"] else detector.detect(image)
             sample={'extraction_attempts':attempts,'at_ms':at,'inference_ms':(time.monotonic()-started)*1000,'status':'no_pose_detected'}
@@ -191,7 +207,9 @@ def main():
                 sample['landmark_evidence']=landmark_evidence(points)
                 sample.update(planned)
                 sample['inference_ms']=(time.monotonic()-started)*1000
+            timings['pose_inference_ms']+=(time.monotonic()-started)*1000
             if req.get('hybrid'):
+                timings['failure_stage']='hybrid_recovery'
                 recovery_start=time.monotonic()
                 if recovery_unavailable:
                     sample['recovery']={'status':'runtime_unavailable','mode':'same_frame'}
@@ -229,13 +247,17 @@ def main():
                         sample['geometry_trust']='unverified';sample['status']='uncertain_person_extent';sample['extent_scope']='full_person_recovery'
                     recovery_seconds+=time.monotonic()-recovery_start
                 sample['recovery']['elapsed_ms']=(time.monotonic()-recovery_start)*1000
+                timings['recovery_ms']+=(time.monotonic()-recovery_start)*1000
             samples.append(sample)
-    print('APTEVA_POSE:'+json.dumps({'samples':samples,'runtime':'mediapipe-0.10.21','model_sha256':req['model_sha256']},default=lambda v:v.item() if isinstance(v,np.generic) else str(v)))
+            if time.monotonic()>=deadline:raise PoseRuntimeFailure('pose_analysis_timeout',at,attempts)
+    timings.pop('failure_stage',None)
+    print('APTEVA_POSE:'+json.dumps(report_payload(),default=lambda v:v.item() if isinstance(v,np.generic) else str(v)),flush=True)
 if __name__=='__main__':
     try:main()
     except Exception as error:
         # Only stable, allowlisted codes and numeric context cross the boundary.
         codes={'pose_runtime_version_mismatch','pose_model_hash_mismatch','pose_sample_budget_exceeded','pose_source_geometry_mismatch'}
         failure={'code':error.code,'at_ms':error.at_ms,'attempts':error.attempts} if isinstance(error,PoseRuntimeFailure) else {'code':'media_resource_exhausted' if isinstance(error,MemoryError) else (str(error) if str(error) in codes else 'pose_inference_failed')}
-        print('APTEVA_POSE_ERROR:'+json.dumps(failure),flush=True)
+        failure['partial_result']=report_payload()
+        print('APTEVA_POSE_ERROR:'+json.dumps(failure,default=lambda v:v.item() if isinstance(v,np.generic) else str(v)),flush=True)
         sys.exit(1)

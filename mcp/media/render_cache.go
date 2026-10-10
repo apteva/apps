@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"time"
 )
 
 var resultCacheLocks keyedGate
@@ -93,9 +94,20 @@ func saveCachedRender(ctx context.Context, app *sdk.AppCtx, sc *storageClient, k
 	_, _ = app.AppDB().Exec(`INSERT OR REPLACE INTO render_result_cache(cache_key,project_id,storage_file_id,sha256,size_bytes) VALUES(?,?,?,?,?)`, key, project, id, f.SHA256, f.SizeBytes)
 	_, _ = app.AppDB().Exec(`DELETE FROM render_result_cache WHERE cache_key IN (SELECT cache_key FROM render_result_cache ORDER BY created_at DESC LIMIT -1 OFFSET 1000)`)
 }
+
+type cropPlanCacheKey struct{}
+type cropPlanCacheOutcome struct{ Hit bool }
+type cropPlanAdmissionKey struct{}
+type cropPlanWaits struct{ AdmissionMs, PlanMs float64 }
+
+var cropPlanLocks keyedGate
+
 func preprocessSmartCrop(ctx context.Context, app *sdk.AppCtx, sc *storageClient, project, op string, sources []string, params []byte) []byte {
 	if app == nil || ctx == nil || sc == nil || len(sources) != 1 {
 		return preprocessSmartCropUncached(ctx, app, sc, project, op, sources, params)
+	}
+	if ctx.Err() != nil {
+		return cropWorkError(params, ctx.Err())
 	}
 	row, err := getMedia(app.AppDB(), project, sources[0])
 	if err != nil || row == nil || row.SourceSHA256 == "" {
@@ -119,20 +131,58 @@ func preprocessSmartCrop(ctx context.Context, app *sdk.AppCtx, sc *storageClient
 	}
 	engine, _ := resolveSmartCropEngine(app, stringJSONValue(parsed["smart_crop_engine"]))
 	framing, _ := resolveSmartCropFraming(app, stringJSONValue(parsed["smart_crop_framing"]))
-	raw, _ := json.Marshal([]any{framing, engine, poseRuntimeIdentity(engine), poseModelSHA256, posePersonModelSHA256, poseRecoveryModelSHA256, poseAlgorithmIdentity(engine), app.Manifest().Version, sc.base, project, op, sources, row.SourceSHA256, row.Width, row.Height, row.Rotation, row.FPS, row.DurationMs, row.Derivations, nativeSmartCropSceneCacheIdentity(app, project, row), target, ratio, mode, parsed["fit_mode"], app.Config().Get("render_host_id")})
-	key := fmt.Sprintf("%x", sha256.Sum256(raw))
-	var cached string
-	if app.AppDB().QueryRow(`SELECT params FROM smartcrop_cache WHERE cache_key=?`, key).Scan(&cached) == nil {
-		var crop map[string]any
-		if json.Unmarshal([]byte(cached), &crop) == nil {
-			for k, v := range crop {
-				parsed[k] = v
-			}
-			if out, err := json.Marshal(parsed); err == nil {
-				return out
+	var derivationIdentity, sceneIdentity any
+	if engine == "legacy" {
+		derivationIdentity = row.Derivations
+		sceneIdentity = nativeSmartCropSceneCacheIdentity(app, project, row)
+	}
+	// Native pose plans depend on source/model identity, not unrelated index
+	// thumbnails. Legacy fallback plans are deliberately not cached for ML.
+	raw, _ := json.Marshal([]any{framing, engine, poseRuntimeIdentity(engine), poseModelSHA256, posePersonModelSHA256, poseRecoveryModelSHA256, poseAlgorithmIdentity(engine), app.Manifest().Version, sc.base, project, op, sources, row.SourceSHA256, row.Width, row.Height, row.Rotation, row.FPS, row.DurationMs, derivationIdentity, sceneIdentity, target, ratio, mode, parsed["fit_mode"], app.Config().Get("render_host_id")})
+	digest := sha256.Sum256(raw)
+	key := fmt.Sprintf("%x", digest)
+	load := func() []byte {
+		var cached string
+		if app.AppDB().QueryRow(`SELECT params FROM smartcrop_cache WHERE cache_key=?`, key).Scan(&cached) == nil {
+			var crop map[string]any
+			if json.Unmarshal([]byte(cached), &crop) == nil {
+				for k, v := range crop {
+					parsed[k] = v
+				}
+				if out, err := json.Marshal(parsed); err == nil {
+					if state, ok := ctx.Value(cropPlanCacheKey{}).(*cropPlanCacheOutcome); ok {
+						state.Hit = true
+					}
+					return out
+				}
 			}
 		}
+		return nil
 	}
+	// Cache hits need no host work. Misses always admit before taking the
+	// plan gate, including render/HTTP callers with existing leases. Reversing
+	// this order deadlocks a preview against an admitted heavy render.
+	if cached := load(); cached != nil {
+		return cached
+	}
+	start := time.Now()
+	ctx, releaseAdmission, err := acquireMediaWork(ctx, app, 1)
+	if err != nil {
+		return cropWorkError(params, err)
+	}
+	defer releaseAdmission()
+	waits := cropPlanWaits{AdmissionMs: float64(time.Since(start).Microseconds()) / 1000}
+	start = time.Now()
+	release, err := cropPlanLocks.acquire(ctx, digest[0])
+	if err != nil {
+		return cropWorkError(params, err)
+	}
+	defer release()
+	waits.PlanMs = float64(time.Since(start).Microseconds()) / 1000
+	if cached := load(); cached != nil {
+		return cached
+	}
+	ctx = context.WithValue(ctx, cropPlanAdmissionKey{}, waits)
 	out := preprocessSmartCropUncached(ctx, app, sc, project, op, sources, params)
 	var resolved map[string]any
 	if ctx.Err() == nil && json.Unmarshal(out, &resolved) == nil && (resolved["crop_version"] == "v2" || resolved["crop_version"] == "pose_full" || resolved["crop_version"] == "pose_hybrid") {

@@ -86,7 +86,7 @@ func applyCropCompositionPolicy(raw []byte) ([]byte, error) {
 		return raw, nil
 	}
 	if code := stringJSONValue(p["runtime_error"]); code != "" {
-		return nil, &renderInputError{Code: code, Message: "Media processing stopped; no further fallback or render was started. Retry after resolving the reported worker failure."}
+		return nil, cropProcessingError(raw)
 	}
 	preserve, _ := p["require_action_preservation"].(bool)
 	fallback := stringJSONValue(p["crop_fallback"])
@@ -140,7 +140,7 @@ func prepareCropPreflight(app *sdk.AppCtx, project, op string, sources []string,
 	if op != "crop" && op != "extract_frame" && op != "extract_reel" {
 		return nil, &renderInputError{Code: "invalid_crop_policy", Message: "Action preservation applies only to crop, extract_frame and extract_reel."}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), smartCropTimeout(app, project, op, sources[0], raw))
 	defer cancel()
 	resolved := preprocessSmartCrop(ctx, app, newStorageClient(), project, op, sources, raw)
 	return applyCropCompositionPolicy(resolved)
@@ -174,13 +174,16 @@ func (a *App) toolPreviewCrop(app *sdk.AppCtx, args map[string]any) (any, error)
 	if e != nil {
 		return nil, e
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), smartCropTimeout(app, project, op, fid, raw))
 	defer cancel()
+	started := time.Now()
+	cache := &cropPlanCacheOutcome{}
+	ctx = context.WithValue(ctx, cropPlanCacheKey{}, cache)
 	resolved := preprocessSmartCrop(ctx, app, newStorageClient(), project, op, []string{fid}, raw)
 	if failure := cropProcessingError(resolved); failure != nil {
 		return nil, failure
 	}
-	return map[string]any{"file_id": fid, "source_width": row.Width, "source_height": row.Height, "resolved_params": json.RawMessage(resolved), "composition": cropCompositionForParams(resolved), "artifacts_created": false}, nil
+	return map[string]any{"file_id": fid, "source_width": row.Width, "source_height": row.Height, "resolved_params": json.RawMessage(resolved), "composition": cropCompositionForParams(resolved), "artifacts_created": false, "crop_plan_cache_hit": cache.Hit, "preview_elapsed_ms": float64(time.Since(started).Microseconds()) / 1000}, nil
 }
 
 func cropRetainsSampledExtents(a *smartCropAudit) bool {

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	_ "embed"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	sdk "github.com/apteva/app-sdk"
@@ -116,20 +115,23 @@ func validateSmartCropEngine(raw []byte) error {
 }
 
 type poseRequest struct {
-	Hybrid       bool    `json:"hybrid"`
-	RecoveryRoot string  `json:"recovery_root,omitempty"`
-	Framing      string  `json:"framing"`
-	Source       string  `json:"source"`
-	Model        string  `json:"model"`
-	ModelSHA     string  `json:"model_sha256"`
-	FFmpeg       string  `json:"ffmpeg"`
-	Positions    []int64 `json:"positions"`
-	Width        int     `json:"width"`
-	Height       int     `json:"height"`
-	RatioW       int     `json:"ratio_w"`
-	RatioH       int     `json:"ratio_h"`
-	Remaining    float64 `json:"remaining_seconds"`
-	Video        bool    `json:"video"`
+	SourceFile          *StorageFile `json:"-"`
+	SourceCacheMaxBytes int64        `json:"-"`
+	ExpiresAt           float64      `json:"expires_at,omitempty"`
+	Hybrid              bool         `json:"hybrid"`
+	RecoveryRoot        string       `json:"recovery_root,omitempty"`
+	Framing             string       `json:"framing"`
+	Source              string       `json:"source"`
+	Model               string       `json:"model"`
+	ModelSHA            string       `json:"model_sha256"`
+	FFmpeg              string       `json:"ffmpeg"`
+	Positions           []int64      `json:"positions"`
+	Width               int          `json:"width"`
+	Height              int          `json:"height"`
+	RatioW              int          `json:"ratio_w"`
+	RatioH              int          `json:"ratio_h"`
+	Remaining           float64      `json:"remaining_seconds"`
+	Video               bool         `json:"video"`
 }
 type poseLandmarkEvidence struct {
 	Index      int     `json:"index"`
@@ -211,15 +213,29 @@ type poseRecoveryEvidence struct {
 	ElapsedMs            float64                `json:"elapsed_ms"`
 }
 type poseResult struct {
-	Samples  []poseSample `json:"samples"`
-	Runtime  string       `json:"runtime"`
-	ModelSHA string       `json:"model_sha256"`
+	Samples  []poseSample        `json:"samples"`
+	Runtime  string              `json:"runtime"`
+	ModelSHA string              `json:"model_sha256"`
+	Timings  *poseRuntimeTimings `json:"timings,omitempty"`
+}
+
+type poseRuntimeTimings struct {
+	ImportMs      float64 `json:"import_ms"`
+	ModelSetupMs  float64 `json:"model_setup_ms"`
+	ExtractionMs  float64 `json:"frame_extraction_ms"`
+	InferenceMs   float64 `json:"pose_inference_ms"`
+	RecoveryMs    float64 `json:"recovery_ms"`
+	TotalMs       float64 `json:"total_ms"`
+	BudgetSeconds float64 `json:"budget_seconds"`
+	SourceKind    string  `json:"source_kind"`
+	FailureStage  string  `json:"failure_stage,omitempty"`
 }
 
 type poseRuntimeFailure struct {
-	Code     string `json:"code"`
-	AtMs     *int64 `json:"at_ms,omitempty"`
-	Attempts int    `json:"attempts,omitempty"`
+	Code     string      `json:"code"`
+	AtMs     *int64      `json:"at_ms,omitempty"`
+	Attempts int         `json:"attempts,omitempty"`
+	Partial  *poseResult `json:"partial_result,omitempty"`
 }
 
 func (e *poseRuntimeFailure) Error() string { return e.Code }
@@ -234,7 +250,7 @@ func parsePoseRuntimeFailure(output string) *poseRuntimeFailure {
 			continue
 		}
 		switch failure.Code {
-		case "media_resource_exhausted", "pose_source_frame_unavailable", "pose_source_read_timeout", "pose_runtime_version_mismatch", "pose_model_hash_mismatch", "pose_sample_budget_exceeded", "pose_source_geometry_mismatch", "pose_inference_failed":
+		case "media_resource_exhausted", "pose_source_frame_unavailable", "pose_source_read_timeout", "pose_analysis_timeout", "pose_source_preparation_failed", "pose_runtime_unavailable", "pose_runtime_version_mismatch", "pose_model_hash_mismatch", "pose_sample_budget_exceeded", "pose_source_geometry_mismatch", "pose_inference_failed":
 		default:
 			continue
 		}
@@ -269,13 +285,20 @@ func posePositions(target smartCropTarget, duration int64, fps float64) []int64 
 	return uniqueSortedSmartCropPositions(out)
 }
 func runPose(ctx context.Context, app *sdk.AppCtx, host int64, req poseRequest) (*poseResult, error) {
-	// One deadline includes provisioning, extraction and inference.
-	ctx, cancel := context.WithTimeout(ctx, 300*time.Second)
+	// Reserve preparation and cleanup separately; samples stay serial.
+	analysisBudget := poseAnalysisBudget(len(req.Positions), req.Hybrid)
+	ctx, cancel := context.WithTimeout(ctx, 195*time.Second+analysisBudget)
 	defer cancel()
-	req.Remaining = 120
+	req.Remaining = analysisBudget.Seconds()
 	if deadline, ok := ctx.Deadline(); ok {
-		req.Remaining = min(120, time.Until(deadline).Seconds())
+		req.ExpiresAt = float64(deadline.Add(-10*time.Second).UnixMilli()) / 1000
+		req.Remaining = min(req.Remaining, max(.01, time.Until(deadline).Seconds()-10))
 	}
+	if a := cropAudit(ctx); a != nil && a.PoseAttempt != nil {
+		a.PoseAttempt.AnalysisBudgetSeconds = req.Remaining
+	}
+	finishStage := cropStage(ctx, "pose_execution")
+	defer finishStage()
 	var output string
 	runtimeVersion := poseRuntimeVersion
 	setupMode := ""
@@ -289,32 +312,21 @@ func runPose(ctx context.Context, app *sdk.AppCtx, host int64, req poseRequest) 
 		if req.Hybrid {
 			req.RecoveryRoot = remoteRoot
 		}
-		raw, _ := json.Marshal(req)
 		work := uniqueRemoteWorkDir(0) + "-pose"
-		script := "set -eu\numask 077\nWORK=" + shellQuote(work) + "\nmkdir -p \"$WORK\"\necho $$ > \"$WORK/pid\"\n[ ! -f \"$WORK/cancel.requested\" ] || exit 1\ntrap 'rm -rf \"$WORK\"' EXIT\n"
-		// Base64 avoids shell interpolation of private source URLs and request data.
-		for _, file := range []struct {
-			name string
-			data []byte
-		}{{"runtime.py", []byte(poseRuntime)}, {"smartcrop_pose_recovery.py", []byte(poseRecoveryRuntime)}, {"setup.py", []byte(poseSetup)}, {"request.json", raw}} {
-			script += fmt.Sprintf("printf '%%s' %s | base64 -d > \"$WORK/%s\"\n", shellQuote(base64.StdEncoding.EncodeToString(file.data)), file.name)
-		}
-		script += "export TMPDIR=\"$WORK\" OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1\n"
-		script += "POSE_ROOT=" + shellQuote(remoteRoot) + "\npython3 \"$WORK/setup.py\" \"$POSE_ROOT\"" + setupMode + "\n"
-		// The model is verified in the persistent runtime directory.
-		script += "\"$POSE_ROOT/venv/bin/python\" \"$WORK/runtime.py\" \"$WORK/request.json\""
+		script := buildPoseRemoteScript(req, remoteRoot, work, setupMode)
 		finish := registerRemoteKill(ctx, app, host, 0, work)
-		timeout := 300
+		timeout := int((195*time.Second + analysisBudget).Seconds())
 		if deadline, ok := ctx.Deadline(); ok {
 			timeout = max(1, int(math.Ceil(time.Until(deadline).Seconds())))
 		}
 		out, code, err := runRemote(ctx, app, host, "setsid bash -c "+shellQuote(script), timeout)
+		recordPoseStages(ctx, out)
 		if stopErr := finish(); stopErr != nil {
 			return nil, fmt.Errorf("pose_cancellation_failed")
 		}
 		if failure := parsePoseRuntimeFailure(out); failure != nil && failure.Code == "media_resource_exhausted" {
 			markMediaResourceFailure(ctx, failure, "", code)
-			return nil, failure
+			return verifiedPartialPose(failure.Partial, req), failure
 		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -324,7 +336,7 @@ func runPose(ctx context.Context, app *sdk.AppCtx, host int64, req poseRequest) 
 		}
 		if err != nil || code != 0 {
 			if failure := parsePoseRuntimeFailure(out); failure != nil {
-				return nil, failure
+				return verifiedPartialPose(failure.Partial, req), failure
 			}
 			return nil, fmt.Errorf("pose_runtime_unavailable")
 		}
@@ -377,7 +389,7 @@ func runPose(ctx context.Context, app *sdk.AppCtx, host int64, req poseRequest) 
 		out, err := cmd.Output()
 		if failure := parsePoseRuntimeFailure(string(out)); failure != nil && failure.Code == "media_resource_exhausted" {
 			markMediaResourceFailure(ctx, failure, "", 0)
-			return nil, failure
+			return verifiedPartialPose(failure.Partial, req), failure
 		}
 		if failure := markMediaResourceFailure(ctx, err, string(out), 0); failure != nil {
 			return nil, failure
@@ -387,7 +399,7 @@ func runPose(ctx context.Context, app *sdk.AppCtx, host int64, req poseRequest) 
 				return nil, ctx.Err()
 			}
 			if failure := parsePoseRuntimeFailure(string(out)); failure != nil {
-				return nil, failure
+				return verifiedPartialPose(failure.Partial, req), failure
 			}
 			return nil, fmt.Errorf("pose_inference_failed")
 		}
@@ -428,6 +440,9 @@ func computeSmartCropPose(ctx context.Context, app *sdk.AppCtx, sc *storageClien
 	}
 	host := remoteIndexerHostID(app)
 	source := ""
+	var sourceFile *StorageFile
+	positions := posePositions(target, row.DurationMs, row.FPS)
+	finishSource := cropStage(ctx, "source_resolution")
 	if paths, ok := ctx.Value(renderSourcesKey{}).(map[string]string); ok && paths[fid] != "" {
 		source = paths[fid]
 		host = 0
@@ -440,26 +455,60 @@ func computeSmartCropPose(ctx context.Context, app *sdk.AppCtx, sc *storageClien
 		}
 		if host > 0 {
 			if meta, e := sc.GetFile(ctx, project, id); e == nil && len(meta.SHA256) == 64 {
-				cached := filepath.Join(remoteSourceCacheRoot, remoteSourceCacheName(fid, sanitizeFilename(meta.Name), meta.SHA256, meta.SizeBytes))
-				check := remoteSourceCacheScriptFragment + fmt.Sprintf("\nif cache_valid %s %d %s; then echo CACHE_READY; fi\n", shellQuote(cached), meta.SizeBytes, shellQuote(meta.SHA256))
-				if out, _, e := runRemote(ctx, app, host, check, 10); e == nil && strings.Contains(out, "CACHE_READY") {
-					source = cached
+				if row.SourceSHA256 != "" && !strings.EqualFold(meta.SHA256, row.SourceSHA256) {
+					return nil, nil, fmt.Errorf("pose_evidence_identity_mismatch")
+				}
+				// Repeated native seeks use one verified local source. Hold a
+				// hardlink throughout inference so cache eviction cannot remove it.
+				if len(positions) > 1 && remoteCacheIdentityRE.MatchString(strings.ToLower(meta.SHA256)) {
+					sourceFile = meta
+				}
+			}
+		} else if len(positions) > 1 {
+			meta, e := sc.GetFile(ctx, project, id)
+			if e != nil {
+				return nil, nil, fmt.Errorf("pose_source_unavailable")
+			}
+			if row.SourceSHA256 != "" && !strings.EqualFold(meta.SHA256, row.SourceSHA256) {
+				return nil, nil, fmt.Errorf("pose_evidence_identity_mismatch")
+			}
+			scratch := resolveScratchRoot(app, app.Config().Get("render_scratch_dir"))
+			if e := os.MkdirAll(scratch, 0700); e != nil {
+				return nil, nil, fmt.Errorf("pose_source_preparation_failed")
+			}
+			dir, e := os.MkdirTemp(scratch, "pose-source-")
+			if e != nil {
+				return nil, nil, fmt.Errorf("pose_source_preparation_failed")
+			}
+			defer os.RemoveAll(dir)
+			source = filepath.Join(dir, "source")
+			hit, e := materializeLocalSource(ctx, app, sc, project, meta, source)
+			if e != nil {
+				return nil, nil, fmt.Errorf("pose_source_preparation_failed")
+			}
+			if a := cropAudit(ctx); a != nil {
+				if hit {
+					a.SourceCache = "hit"
+				} else {
+					a.SourceCache = "miss"
 				}
 			}
 		}
 	}
+	finishSource()
 	ffmpeg := strings.TrimSpace(app.Config().Get("ffmpeg_path"))
 	if ffmpeg == "" {
 		ffmpeg = "ffmpeg"
 	}
 	if host > 0 {
+		finishInstall := cropStage(ctx, "ffmpeg_setup")
 		paths, e := sharedRemoteInstaller().Ensure(ctx, app, host)
+		finishInstall()
 		if e != nil {
 			return nil, nil, fmt.Errorf("pose_ffmpeg_unavailable")
 		}
 		ffmpeg = paths.FFmpeg
 	}
-	positions := posePositions(target, row.DurationMs, row.FPS)
 	engine := "mediapipe_full"
 	if a := cropAudit(ctx); a != nil && a.RequestedEngine == "hybrid" {
 		engine = "hybrid"
@@ -469,20 +518,35 @@ func computeSmartCropPose(ctx context.Context, app *sdk.AppCtx, sc *storageClien
 		a.PoseAttempt.Status = "inference"
 		a.PoseAttempt.Requested = len(positions)
 	}
-	result, err := runPose(ctx, app, host, poseRequest{Hybrid: engine == "hybrid", Framing: framing, Source: source, ModelSHA: poseModelSHA256, FFmpeg: ffmpeg, Positions: positions, Width: row.Width, Height: row.Height, RatioW: rw, RatioH: rh, Video: !row.IsImage})
+	result, err := runPose(ctx, app, host, poseRequest{SourceFile: sourceFile, SourceCacheMaxBytes: parseConfigInt64Fallback(app.Config().Get("render_source_cache_max_bytes"), remoteSourceCacheDefaultMaxBytes), Hybrid: engine == "hybrid", Framing: framing, Source: source, ModelSHA: poseModelSHA256, FFmpeg: ffmpeg, Positions: positions, Width: row.Width, Height: row.Height, RatioW: rw, RatioH: rh, Video: !row.IsImage})
 	if err != nil {
+		if result != nil {
+			recordPoseAttempt(ctx, result, framing)
+		}
 		if a := cropAudit(ctx); a != nil {
+			a.PoseAttempt.Requested = len(positions)
 			a.PoseAttempt.Status = "inference_failed"
 			a.PoseAttempt.FailureCode = poseFailureReason(err)
+			a.PoseFailures.Classification = "incomplete_analysis"
+			if a.PoseAttempt.Analysed == len(positions) {
+				a.PoseFailures.Classification = "analysis_failed"
+			}
+			if a.PoseAttempt.Analysed == 0 {
+				a.PoseFailures.Classification = "no_pose_evidence"
+			}
 		}
 		if failure, ok := err.(*poseRuntimeFailure); ok {
 			if a := cropAudit(ctx); a != nil {
-				a.PoseFailure = failure
+				copyFailure := *failure
+				copyFailure.Partial = nil
+				a.PoseFailure = &copyFailure
 			}
 		}
 		return nil, nil, err
 	}
 	recordPoseAttempt(ctx, result, framing)
+	finishPlanning := cropStage(ctx, "pose_planning")
+	defer finishPlanning()
 	win, path, err := planPoseSamples(result.Samples, row.Width, row.Height, rw, rh)
 	var gaps []posePathGap
 	if engine == "hybrid" {
@@ -492,6 +556,9 @@ func computeSmartCropPose(ctx context.Context, app *sdk.AppCtx, sc *storageClien
 		if a := cropAudit(ctx); a != nil {
 			a.PoseAttempt.Status = "planning_failed"
 			a.PoseAttempt.FailureCode = poseFailureReason(err)
+			if a.PoseFailures.Classification == "supported_sampled_geometry" {
+				a.PoseFailures.Classification = "unresolved_evidence"
+			}
 		}
 		return nil, nil, err
 	}
@@ -573,7 +640,7 @@ func summarizePoseFailures(samples []poseSample) *poseFailureSummary {
 		if s.Recovery != nil && len(s.Recovery.ConflictingPrimary) > 0 {
 			f.RejectedPrimary = append(f.RejectedPrimary, s.AtMs)
 		}
-		if s.GeometryTrust == "unverified" || s.Status == "no_pose_detected" || s.Status == "uncertain_person_extent" {
+		if s.GeometryTrust == "unverified" || s.Status == "no_pose_detected" || s.Status == "uncertain_person_extent" || s.Status == "insufficient_head_or_shoulder_evidence" {
 			f.UnresolvedIdentity = append(f.UnresolvedIdentity, s.AtMs)
 		}
 		for _, clipped := range s.SourceClipped {
@@ -588,6 +655,8 @@ func summarizePoseFailures(samples []poseSample) *poseFailureSummary {
 	}
 	unknown := len(f.UncertainHands)+len(f.UnresolvedIdentity)+len(f.RecoveryLimited) > 0
 	switch {
+	case len(samples) == 0:
+		f.Classification = "no_pose_evidence"
 	case len(f.TrustedOverflow) > 0 && unknown:
 		f.Classification = "mixed_trusted_overflow_and_unresolved_evidence"
 	case len(f.TrustedOverflow) > 0:
@@ -605,20 +674,22 @@ type poseFailedSample struct {
 	Category string `json:"category"`
 }
 type poseAttemptAudit struct {
-	CountScope  string             `json:"count_scope"`
-	Requested   int                `json:"requested_samples"`
-	Analysed    int                `json:"analysed_samples"`
-	Engine      string             `json:"engine"`
-	Algorithm   string             `json:"algorithm_version"`
-	ModelSHA    string             `json:"model_sha256"`
-	Runtime     string             `json:"runtime_version"`
-	Framing     string             `json:"framing"`
-	Status      string             `json:"status"`
-	FailureCode string             `json:"failure_code,omitempty"`
-	Valid       int                `json:"valid_samples"`
-	Invalid     int                `json:"invalid_samples"`
-	Uncertain   int                `json:"uncertain_samples"`
-	Failed      []poseFailedSample `json:"failed_samples"`
+	AnalysisBudgetSeconds float64             `json:"analysis_budget_seconds"`
+	Timings               *poseRuntimeTimings `json:"timings,omitempty"`
+	CountScope            string              `json:"count_scope"`
+	Requested             int                 `json:"requested_samples"`
+	Analysed              int                 `json:"analysed_samples"`
+	Engine                string              `json:"engine"`
+	Algorithm             string              `json:"algorithm_version"`
+	ModelSHA              string              `json:"model_sha256"`
+	Runtime               string              `json:"runtime_version"`
+	Framing               string              `json:"framing"`
+	Status                string              `json:"status"`
+	FailureCode           string              `json:"failure_code,omitempty"`
+	Valid                 int                 `json:"valid_samples"`
+	Invalid               int                 `json:"invalid_samples"`
+	Uncertain             int                 `json:"uncertain_samples"`
+	Failed                []poseFailedSample  `json:"failed_samples"`
 }
 
 type posePathGap struct {
@@ -640,6 +711,10 @@ func recordPoseAttempt(ctx context.Context, result *poseResult, framing string) 
 		engine = "hybrid"
 	}
 	attempt := &poseAttemptAudit{Engine: engine, Algorithm: poseAlgorithmIdentity(engine), ModelSHA: poseModelSHA256, Runtime: poseRuntimeIdentity(engine), Framing: framing, CountScope: "Valid/invalid counts describe usable positioning geometry, including conservative recovery boxes; they do not establish hand coverage, crop fit or visual approval. Missing samples retain their original status; position interpolation never increases confidence.", Requested: len(result.Samples), Analysed: len(result.Samples), Status: "planning", Failed: []poseFailedSample{}}
+	if a.PoseAttempt != nil {
+		attempt.AnalysisBudgetSeconds = a.PoseAttempt.AnalysisBudgetSeconds
+	}
+	attempt.Timings = result.Timings
 	for _, s := range result.Samples {
 		if poseSampleHasGeometry(s, a.SourceWidth, a.SourceHeight) {
 			attempt.Valid++
@@ -861,7 +936,7 @@ func poseFailureReason(err error) string {
 		return failure.Code
 	}
 	switch err.Error() {
-	case "pose_source_geometry_unavailable", "pose_source_unavailable", "pose_ffmpeg_unavailable", "pose_runtime_unavailable", "pose_inference_failed", "pose_cancellation_failed", "pose_evidence_identity_mismatch", "pose_timestamp_identity_mismatch", "pose_result_missing", "pose_no_samples", "pose_insufficient_evidence", "pose_invalid_geometry":
+	case "pose_source_preparation_failed", "pose_source_geometry_unavailable", "pose_source_unavailable", "pose_ffmpeg_unavailable", "pose_runtime_unavailable", "pose_inference_failed", "pose_cancellation_failed", "pose_evidence_identity_mismatch", "pose_timestamp_identity_mismatch", "pose_result_missing", "pose_no_samples", "pose_insufficient_evidence", "pose_invalid_geometry":
 		return err.Error()
 	}
 	return "pose_analysis_unavailable"

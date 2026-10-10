@@ -38,6 +38,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	"github.com/muesli/smartcrop"
@@ -1276,6 +1277,7 @@ func preprocessSmartCropUncached(
 	if mode != "smart" && mode != "center" {
 		return params
 	}
+	admissionStarted := time.Now()
 	ctx, release, admissionErr := acquireMediaWork(ctx, app, 1)
 	if admissionErr != nil {
 		return cropWorkError(params, admissionErr)
@@ -1288,6 +1290,11 @@ func preprocessSmartCropUncached(
 	}()
 	target := smartCropFocus(op, parsed)
 	audit := &smartCropAudit{AppVersion: app.Manifest().Version, AlgorithmVersion: legacySmartCropAlgorithmVersion, SourceID: sources[0], Requested: smartCropAuditTarget{FocusMs: target.FocusMs, StartMs: target.StartMs, EndMs: target.EndMs, PreferKeyframe: target.PreferKeyframe}, Coverage: "unknown"}
+	audit.StageTimings = append(audit.StageTimings, cropStageTiming{Stage: "admission_wait", ElapsedMs: float64(time.Since(admissionStarted).Microseconds()) / 1000, Status: "completed"})
+	if waits, ok := ctx.Value(cropPlanAdmissionKey{}).(cropPlanWaits); ok {
+		audit.StageTimings[0].ElapsedMs += waits.AdmissionMs
+		audit.StageTimings = append(audit.StageTimings, cropStageTiming{Stage: "crop_plan_wait", ElapsedMs: waits.PlanMs, Status: "completed"})
+	}
 	if row, e := getMedia(app.AppDB(), projectID, sources[0]); e == nil && row != nil {
 		audit.SourceSHA256 = row.SourceSHA256
 		audit.SourceWidth = row.Width
@@ -1315,7 +1322,7 @@ func preprocessSmartCropUncached(
 	audit.Framing = framing
 	parsed["smart_crop_framing"] = framing
 	audit.RequestedEngine = engine
-	audit.EffectiveEngine = "legacy"
+	audit.EffectiveEngine = "none"
 	if mode == "smart" && (engine == "mediapipe_full" || engine == "hybrid") {
 		if win, path, poseErr := computeSmartCropPose(ctx, app, sc, projectID, sources[0], rw, rh, target, framing); poseErr == nil {
 			parsed["crop_w"] = win.W
@@ -1339,13 +1346,17 @@ func preprocessSmartCropUncached(
 			recordSmartCropFallback(ctx, poseFailureReason(poseErr))
 			// Cancellation cannot start a second detector/renderer.
 			if resourceFailure := markMediaResourceFailure(ctx, poseErr, "", 0); resourceFailure != nil {
-				return params
+				return cropWorkError(params, resourceFailure)
 			}
 			if ctx.Err() != nil {
-				return params
+				return cropWorkError(params, ctx.Err())
+			}
+			if poseTimeout(poseErr) || poseFailureReason(poseErr) == "pose_source_preparation_failed" {
+				return cropWorkError(params, poseErr)
 			}
 		}
 	}
+	audit.EffectiveEngine = "legacy"
 
 	// V2 starts with bounded cached samples. Sparse indexes use temporary
 	// source samples; timed stills verify pose on the actual requested frame.

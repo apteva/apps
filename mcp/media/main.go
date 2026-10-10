@@ -23,8 +23,14 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.32
+version: 0.14.33
 description: |
+  v0.14.33 reuses a verified disk source for multi-frame pose previews,
+  avoiding repeated HTTPS seeks. Sample-based bounded analysis budgets reserve
+  admission/preparation/cleanup time and expose stage timings. Timeouts retain
+  verified partial pose evidence, return an explicit failure, stop fallback and
+  never claim supported geometry without samples. Existing crop-plan caching,
+  two-unit worker admission, native pose geometry and coverage guards remain.
   v0.14.32 bounds host memory pressure: previews, sampling, indexing,
   transcription audio and renders share admission with a conservative two-unit
   default. Decoder/filter and model thread budgets are reduced; thumbnails
@@ -664,7 +670,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.32
+    ref: media/v0.14.33
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -752,6 +758,11 @@ config_schema:
     default: ""
     label: Local pose Python override
     description: Optional isolated Python with MediaPipe 0.10.21, NumPy 1.26.4 and (for hybrid) ONNX Runtime 1.22.1 plus verified recovery models. Blank provisions a managed Python 3.11 environment. Remote hosts always use the isolated managed runtime.
+  - name: smart_crop_timeout_seconds
+    type: text
+    default: "900"
+    label: Smart Crop maximum timeout
+    description: Maximum preview/preflight budget including admission and preparation (30–1800 seconds). Actual budget scales with sample count; pose inference has its own bounded budget. Does not increase concurrency. Timings and partial failure evidence are returned in crop diagnostics.
   - name: media_work_capacity
     type: text
     default: "2"
@@ -3346,6 +3357,9 @@ func (a *App) handleSmartCropPreview(w http.ResponseWriter, r *http.Request) {
 	var diagnostics json.RawMessage
 	parent, cancel := mediaContext(r.Context(), globalCtx)
 	defer cancel()
+	budgetParams, _ := json.Marshal(map[string]any{"start_ms": body.StartMs, "end_ms": body.EndMs, "at_ms": body.AtMs, "smart_crop_engine": body.SmartCropEngine})
+	parent, timeoutCancel := context.WithTimeout(parent, smartCropTimeout(globalCtx, pid, op, body.FileID, budgetParams))
+	defer timeoutCancel()
 	cctx, release, budgetErr := acquireMediaWork(parent, globalCtx, 1)
 	if budgetErr != nil {
 		http.Error(w, budgetErr.Error(), http.StatusRequestTimeout)
@@ -3355,6 +3369,10 @@ func (a *App) handleSmartCropPreview(w http.ResponseWriter, r *http.Request) {
 	if mode == "smart" && (op == "extract_reel" || op == "extract_frame" || op == "crop") {
 		params, _ := json.Marshal(map[string]any{"start_ms": body.StartMs, "end_ms": body.EndMs, "at_ms": body.AtMs, "target_ratio": ratio, "crop_mode": mode, "smart_crop_engine": body.SmartCropEngine, "smart_crop_framing": body.SmartCropFraming})
 		resolved := preprocessSmartCrop(cctx, globalCtx, newStorageClient(), pid, op, []string{body.FileID}, params)
+		if failure := cropProcessingError(resolved); failure != nil {
+			http.Error(w, failure.Error(), http.StatusRequestTimeout)
+			return
+		}
 		var crop struct {
 			W           int             `json:"crop_w"`
 			H           int             `json:"crop_h"`

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -66,6 +67,12 @@ func cropWorkError(raw []byte, err error) []byte {
 	code := "media_processing_interrupted"
 	if resourceFailure(err, "", 0) != nil {
 		code = "media_resource_exhausted"
+	} else if errors.Is(err, context.DeadlineExceeded) || poseTimeout(err) {
+		code = "analysis_timeout"
+	} else if errors.Is(err, context.Canceled) {
+		code = "analysis_cancelled"
+	} else if poseFailureReason(err) == "pose_source_preparation_failed" {
+		code = "pose_source_preparation_failed"
 	}
 	p["runtime_error"] = code
 	for _, k := range []string{"crop_w", "crop_h", "crop_x", "crop_y", "crop_path", "crop_version"} {
@@ -78,7 +85,12 @@ func cropProcessingError(raw []byte) error {
 	var p map[string]any
 	_ = json.Unmarshal(raw, &p)
 	if code := stringJSONValue(p["runtime_error"]); code != "" {
-		return &renderInputError{Code: code, Message: "Media processing stopped; no further fallback or render was started."}
+		diagnostics, _ := json.Marshal(p["crop_diagnostics"])
+		message := "Media processing stopped; no further fallback or render was started."
+		if code == "analysis_timeout" {
+			message = "Smart Crop analysis exceeded its bounded processing budget. No crop was approved or render started; inspect crop_diagnostics for stage timings and partial evidence."
+		}
+		return &renderInputError{Code: code, Message: message, Diagnostics: diagnostics}
 	}
 	return nil
 }
