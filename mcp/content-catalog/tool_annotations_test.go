@@ -61,7 +61,7 @@ func TestCatalogToolsListEmitsReadOnlyAnnotations(t *testing.T) {
 		if name == "content_catalog_search" {
 			schema := tool["inputSchema"].(map[string]any)
 			properties := schema["properties"].(map[string]any)
-			if properties["source_asset_id"].(map[string]any)["type"] != "string" || properties["include_descendants"].(map[string]any)["type"] != "boolean" || properties["include_descendants"].(map[string]any)["default"] != false {
+			if properties["source_asset_id"].(map[string]any)["type"] != "string" || properties["include_descendants"].(map[string]any)["type"] != "boolean" || properties["include_descendants"].(map[string]any)["default"] != false || properties["include_intermediates"].(map[string]any)["default"] != false || properties["role"] == nil || properties["output_type"] == nil {
 				t.Fatalf("search must advertise exact source and optional descendants: %#v", schema)
 			}
 		}

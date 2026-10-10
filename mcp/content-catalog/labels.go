@@ -122,8 +122,26 @@ func (a *App) assetLabelsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	hasTags := args["tags"] != nil
 	hasFav := args["favorite"] != nil
 	hasIntent := args["patreon_intent"] != nil
-	if !hasTags && !hasFav && !hasIntent {
-		return nil, errors.New("provide tags, favorite, or patreon_intent")
+	hasRole := args["role"] != nil
+	hasOutput := args["output_type"] != nil
+	if !hasTags && !hasFav && !hasIntent && !hasRole && !hasOutput {
+		return nil, errors.New("provide purpose role, output_type, tags, favorite, or patreon_intent")
+	}
+	role, output := "", ""
+	if hasRole {
+		role = str(args, "role")
+		if !oneOf(role, "unspecified", "main", "derivative", "intermediate") {
+			return nil, errors.New("invalid purpose role")
+		}
+	}
+	if hasOutput {
+		output, err = normalizeOutputType(args["output_type"])
+		if err != nil {
+			return nil, err
+		}
+	}
+	if (hasRole || hasOutput) && args["expected_revisions"] == nil {
+		return nil, errors.New("purpose edits require expected_revisions")
 	}
 	var tags []string
 	if hasTags {
@@ -148,8 +166,8 @@ func (a *App) assetLabelsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	for _, id := range ids {
 		var rev int64
 		var current int
-		var currentIntent string
-		if err = tx.QueryRow(`SELECT revision,favorite,patreon_intent FROM assets WHERE project_id=? AND id=?`, pid, id).Scan(&rev, &current, &currentIntent); err != nil {
+		var currentIntent, currentRole, currentOutput string
+		if err = tx.QueryRow(`SELECT revision,favorite,patreon_intent,role,output_type FROM assets WHERE project_id=? AND id=?`, pid, id).Scan(&rev, &current, &currentIntent, &currentRole, &currentOutput); err != nil {
 			return nil, err
 		}
 		if raw := args["expected_revisions"]; raw != nil {
@@ -177,9 +195,24 @@ func (a *App) assetLabelsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		if hasIntent {
 			in = intent
 		}
-		_, err = tx.Exec(`UPDATE assets SET favorite=?,patreon_intent=?,revision=revision+1,updated_at=? WHERE project_id=? AND id=? AND revision=?`, f, in, time.Now().UTC().Format(time.RFC3339Nano), pid, id, rev)
-		if err != nil {
-			return nil, err
+		nextRole, nextOutput := currentRole, currentOutput
+		if hasRole {
+			nextRole = role
+		}
+		if hasOutput {
+			nextOutput = output
+		}
+		if nextRole != currentRole || nextOutput != currentOutput {
+			if _, err = tx.Exec(`INSERT INTO asset_purpose_events(id,project_id,asset_id,previous_role,role,previous_output_type,output_type,created_at) VALUES(?,?,?,?,?,?,?,?)`, newID(), pid, id, currentRole, nextRole, currentOutput, nextOutput, now()); err != nil {
+				return nil, err
+			}
+		}
+		res, updateErr := tx.Exec(`UPDATE assets SET favorite=?,patreon_intent=?,role=?,output_type=?,revision=revision+1,updated_at=? WHERE project_id=? AND id=? AND revision=?`, f, in, nextRole, nextOutput, time.Now().UTC().Format(time.RFC3339Nano), pid, id, rev)
+		if updateErr != nil {
+			return nil, updateErr
+		}
+		if n, e := res.RowsAffected(); e != nil || n != 1 {
+			return nil, errors.New("revision conflict; reload the assets")
 		}
 		asset := &Asset{ID: id, AssetLabelFields: AssetLabelFields{Favorite: f != 0, PatreonIntent: in, Tags: append([]string(nil), tags...)}}
 		updated = append(updated, asset)
@@ -195,6 +228,12 @@ func (a *App) assetLabelsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		}
 	}
 	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	if err = loadAssetLifecycle(ctx.AppDB(), pid, updated); err != nil {
+		return nil, err
+	}
+	if err = loadAssetLabels(ctx.AppDB(), pid, updated); err != nil {
 		return nil, err
 	}
 	return map[string]any{"assets": updated}, nil
@@ -213,6 +252,8 @@ func assetLabelsSchema() map[string]any {
 		"expected_revisions": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "integer", "minimum": 1}},
 		"tags":               map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 25},
 		"favorite":           map[string]any{"type": "boolean"},
+		"role":               map[string]any{"type": "string", "enum": []string{"unspecified", "main", "derivative", "intermediate"}, "description": "Purpose independent of source links. Requires expected_revisions."},
+		"output_type":        map[string]any{"type": "string", "description": "Generic output category such as reel, screenshot, portrait; empty clears it. Requires expected_revisions."},
 		"patreon_intent":     map[string]any{"type": "string", "enum": []string{"unset", "free", "paid"}},
 	}}
 }

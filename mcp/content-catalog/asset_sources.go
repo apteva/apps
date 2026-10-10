@@ -44,5 +44,11 @@ func loadAssetSources(db *sql.DB, pid string, assets []*Asset) error {
 		}
 		byID[child].Sources = append(byID[child].Sources, source)
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	return loadAssetAncestors(db, pid, assets)
 }

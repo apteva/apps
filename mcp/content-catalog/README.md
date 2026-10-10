@@ -1,5 +1,50 @@
 # Content Catalog
 
+## Version 0.6.7: content purpose and hidden provenance
+
+Assets have an explicit `role`: `unspecified`, `main`, `derivative`, or
+`intermediate`, independent of their source links, media type, review and
+lifecycle. A cleaned master can be Main and keep its archived original as a
+source. Existing records default to Unclassified; migration does not infer roles,
+classify historical files, or rewrite business records. Optional `output_type`
+is a generic lowercase category token, such as reel, screenshot, portrait or
+trailer. Categories drive the grouped card counts; unspecified categories show
+media kinds instead of guessing from filenames.
+
+The asset modal and bulk editor set purpose/category through
+`content_catalog_assets_labels_update`, with required expected revisions for
+purpose changes. Updates are transactional, append purpose audit events and
+preserve files, source links, hosting and publications. Stale batches fail with
+no partial changes. Exact source search, global search, asset lists and session
+reads accept `role`, `output_type` and `include_intermediates` (default false).
+An explicit `role=intermediate` also enables inspection of that role. Lifecycle
+remains independent: seeing intermediates does not expose archived cards.
+
+Default cards and agent selection exclude intermediates. Direct reads expose
+them and their provenance; eligibility is false and new hosting/publication
+requests reject them. Recorded hosting checks and historical reads remain
+available. Descendant and ancestor traversal still follows intermediates and
+archived ancestors; only result cards are filtered. This changes Catalog only.
+Media is unchanged, and Catalog cannot intercept direct calls to other apps.
+
+**Grouped by main** is the default for browsers without a saved display choice.
+It follows project-scoped recorded ancestry through hidden or archived context
+nodes to a visible main asset, returning each selected output once. Main assets
+stay roots even when they have parents. Context never becomes a card or counts
+as an output. Main-only filtering keeps the selected main's outputs accessible.
+Grid and search also guard lifecycle before rendering to avoid stale archived
+cards after changing scope. Archive/All and intermediate inspection are explicit.
+
+An asset's `ancestors` array contains thin provenance nodes (identity, purpose,
+category, lifecycle and source links), batched across the page. These nodes are
+context only, not extra content results. The original `sources` are unchanged.
+
+For the reported collection, assign the eight masters Main, the four supporting
+frames Intermediate, and the 104 selected outputs Derivative with their output
+categories. The result is eight main cards, each with 3 reels, 5 screenshots and
+5 portraits. These counts are data-driven; they are not coded into the app.
+
+
 ## Version 0.6.6: exact source search
 
 `content_catalog_search` and HTTP `/search` accept `source_asset_id` (an exact
