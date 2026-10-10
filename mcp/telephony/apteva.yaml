@@ -53,6 +53,7 @@ requires:
 
 provides:
   http_routes:
+    - { prefix: /media-diagnostics }
     - { prefix: /media/, no_auth: true }
     - { prefix: /webhook/, no_auth: true }
     - { prefix: /inbound/, no_auth: true }
