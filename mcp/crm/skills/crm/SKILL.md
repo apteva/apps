@@ -113,12 +113,24 @@ customer conversations, lists, segments, opportunities, and pipelines.
   optional `reply_to_activity_id`, and proposed `body`/`body_html`/attachments.
   Saving never sends, creates message activities, or changes thread status.
   Multiple CRM-local drafts are supported; they are not synchronized to Gmail.
+- First outreach does NOT require an inbound conversation: save with
+  `{"mode":"message","contact_id":42,"channel":"email","subject":"Introduction","body":"Hello"}`.
+  The contact must already exist. Optional `to` must be a stored contact channel;
+  otherwise its primary channel is pinned. Saving creates no conversation.
+- For an outbound-only follow-up use
+  `{"mode":"message","conversation_id":123,"body":"Following up"}`. This pins
+  the original outgoing recipient/sender and keeps email threading at send.
+  With conversation_id, omitted mode still defaults to reply and requires an
+  inbound anchor. Message draft recipient/channel/mode/conversation cannot be
+  changed; create a separate draft for a different destination.
 - Inspect full content with `conversation_drafts_get`; `conversation_drafts_list`
-  returns paged summaries only. Use the returned `revision` as
+  returns paged summaries by conversation_id OR contact_id (including first
+  outreach drafts without a conversation). Use the returned `revision` as
   `expected_revision` for update/discard/send. Conflicts require reloading and
   reviewing the newer content, never blindly overwriting it.
 - `conversation_drafts_send` is a real external send, only after explicit user
-  approval. A draft's recipient and inbound reply anchor are pinned. Sending
+  approval. A draft's recipient is pinned; reply drafts also pin an inbound
+  anchor. First outreach creates a thread only when sent. Sending
   rechecks verified sender, Messaging binding, ownership, contact eligibility,
   suppression and WhatsApp reply window. Never silently redirect or switch
   transport. Freeform WhatsApp text can be drafted outside the 24-hour window
