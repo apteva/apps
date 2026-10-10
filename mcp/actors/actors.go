@@ -163,6 +163,7 @@ type actorField struct {
 	Required           bool   `json:"required,omitempty"`
 	Pattern            string `json:"pattern,omitempty"`
 	PreserveLineBreaks bool   `json:"preserve_line_breaks,omitempty"`
+	OwnText            bool   `json:"own_text,omitempty"`
 	All                bool   `json:"all,omitempty"`
 	Separator          string `json:"separator,omitempty"`
 }
@@ -463,6 +464,10 @@ func validateActorDefinition(def actorDefinition) error {
 				if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 					return fmt.Errorf("steps[%d].source_url must be http or https", i)
 				}
+			}
+		case "type":
+			if step.Text == "" || (len(step.Text) > 256 && !actorTemplateValue(step.Text)) {
+				return fmt.Errorf("steps[%d].text must contain 1-256 bytes for literal typing; use set_text for longer fields", i)
 			}
 		case "key":
 			if step.Key == "" {

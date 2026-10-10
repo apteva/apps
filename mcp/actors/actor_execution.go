@@ -629,7 +629,7 @@ func (e *actorExecution) runStep(step actorStep) error {
 		return e.clickOnce(step)
 	case "click_verified":
 		return e.clickVerified(step)
-	case "fill", "set_text", "set_checked", "select_option", "set_temporal", "key", "scroll":
+	case "fill", "set_text", "set_checked", "select_option", "set_temporal", "type", "key", "scroll":
 		return e.interact(step)
 	case "upload_file":
 		return e.upload(step)
@@ -1281,6 +1281,9 @@ func (e *actorExecution) storeCurrentScreenshot(title string) (*artifactSummary,
 func extractNodeItem(node *html.Node, fields map[string]actorField, baseURL string) (map[string]any, error) {
 	item := make(map[string]any, len(fields))
 	for name, field := range fields {
+		if field.OwnText && (field.Attribute != "" || strings.HasPrefix(field.Type, "attr:") || field.PreserveLineBreaks) {
+			return nil, fmt.Errorf("field %s: own_text cannot be combined with attributes or preserve_line_breaks", name)
+		}
 		if field.Many {
 			if field.Selector == "" {
 				return nil, fmt.Errorf("field %s many requires a selector", name)
@@ -1337,7 +1340,9 @@ func extractNodeItem(node *html.Node, fields map[string]actorField, baseURL stri
 			matcher, _ := cascadia.Compile(field.Selector) // already checked above
 			var parts []string
 			for _, selected := range cascadia.QueryAll(node, matcher) {
-				if field.PreserveLineBreaks {
+				if field.OwnText {
+					parts = append(parts, htmlNodeOwnText(selected))
+				} else if field.PreserveLineBreaks {
 					parts = append(parts, htmlNodeTextLines(selected))
 				} else {
 					parts = append(parts, htmlNodeText(selected))
@@ -1348,6 +1353,8 @@ func extractNodeItem(node *html.Node, fields map[string]actorField, baseURL stri
 				separator = "\n"
 			}
 			raw = strings.Join(parts, separator)
+		} else if field.OwnText {
+			raw = htmlNodeOwnText(target)
 		} else if field.PreserveLineBreaks {
 			raw = htmlNodeTextLines(target)
 		} else {
@@ -1383,6 +1390,17 @@ func extractNodeItem(node *html.Node, fields map[string]actorField, baseURL stri
 		item[name] = value
 	}
 	return item, nil
+}
+
+// Own text excludes nested badges/controls without assuming their labels.
+func htmlNodeOwnText(node *html.Node) string {
+	var parts []string
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		if child.Type == html.TextNode {
+			parts = append(parts, strings.ReplaceAll(child.Data, "\ufeff", ""))
+		}
+	}
+	return strings.Join(strings.Fields(strings.Join(parts, " ")), " ")
 }
 
 func htmlNodeText(node *html.Node) string {

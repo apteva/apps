@@ -120,6 +120,8 @@ func (e *actorExecution) interact(step actorStep) error {
 	}
 	args := map[string]any{"session_id": e.session.SessionID, "action": step.Action}
 	switch step.Action {
+	case "type":
+		args["text"] = step.Text
 	case "key":
 		args["key"] = step.Key
 	case "scroll":
