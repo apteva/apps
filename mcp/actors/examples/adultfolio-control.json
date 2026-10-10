@@ -1566,12 +1566,6 @@
           "action": "extract",
           "items": "body",
           "fields": {
-            "search_input": {
-              "selector": "#basic-url",
-              "type": "text",
-              "required": true,
-              "attribute": "value"
-            },
             "account_url": {
               "selector": ".navbar a:containsown(\"Your Profile\")",
               "type": "url",
@@ -1584,11 +1578,18 @@
           "max_items": 1
         },
         {
+          "action": "click",
+          "locator": {
+            "text": "{{model_query}}",
+            "role": "input",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "{{model_query}}"
+        },
+        {
           "action": "assert_values",
           "assertions": {
-            "search_input": {
-              "equals_exact": "{{model_query}}"
-            },
             "suggestion_name": {
               "equals_exact": "{{model_query}}"
             },
@@ -1654,7 +1655,7 @@
         },
         {
           "action": "observe_page",
-          "items": "html",
+          "items": "body",
           "readability": false,
           "fields": {
             "account_url": {
@@ -1675,12 +1676,6 @@
               "required": true,
               "attribute": "onclick",
               "pattern": "/message\\.php\\?user=([0-9]+)(?:&|[\\'\\\"])"
-            },
-            "profile_url": {
-              "selector": "link[rel=\"canonical\"]",
-              "type": "url",
-              "required": true,
-              "attribute": "href"
             },
             "role": {
               "selector": "h1.MainTitle + p",
@@ -1712,7 +1707,7 @@
               "equals_field": "suggestion_id"
             },
             "current_url": {
-              "equals_field": "profile_url"
+              "matches": "^https://www\\.adultfolio\\.com/[A-Za-z0-9_-]+/?$"
             }
           }
         }
