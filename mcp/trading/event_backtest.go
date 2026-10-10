@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"embed"
@@ -16,6 +17,7 @@ import (
 
 	sdk "github.com/apteva/app-sdk"
 	sim "github.com/apteva/apps/mcp/trading/internal/backtest"
+	rules "github.com/apteva/apps/mcp/trading/internal/ruleengine"
 )
 
 type simulationSpec struct {
@@ -35,12 +37,16 @@ type simulationSpec struct {
 
 // Pin local builds as well as release builds in portable artifacts.
 //
-//go:embed validation_runtime.go agent_event_backtest.go internal/backtest/engine.go event_backtest.go strategy.go strategy_indicators.go strategy_catalog.go strategy_replay.go market_calendar.go pricing.go integrity.go exec.go
+//go:embed validation_runtime.go agent_event_backtest.go internal/backtest/engine.go internal/backtest/contracts.go internal/backtest/protection.go internal/ruleengine/schema.go internal/ruleengine/market.go internal/ruleengine/runtime.go internal/ruleengine/schedule.go strategy_rules.go rule_examples/*.json event_backtest.go strategy.go strategy_indicators.go strategy_catalog.go strategy_replay.go market_calendar.go pricing.go integrity.go exec.go
 var simulationSources embed.FS
 
 func simulationSourceHash() string {
 	files := map[string]string{}
-	for _, name := range []string{"validation_runtime.go", "agent_event_backtest.go", "internal/backtest/engine.go", "event_backtest.go", "strategy.go", "strategy_indicators.go", "strategy_catalog.go", "strategy_replay.go", "market_calendar.go", "pricing.go", "integrity.go", "exec.go"} {
+	for _, name := range []string{"validation_runtime.go", "agent_event_backtest.go", "internal/backtest/engine.go", "internal/backtest/contracts.go", "internal/backtest/protection.go", "internal/ruleengine/schema.go", "internal/ruleengine/market.go", "internal/ruleengine/runtime.go", "internal/ruleengine/schedule.go", "strategy_rules.go", "event_backtest.go", "strategy.go", "strategy_indicators.go", "strategy_catalog.go", "strategy_replay.go", "market_calendar.go", "pricing.go", "integrity.go", "exec.go"} {
+		data, _ := simulationSources.ReadFile(name)
+		files[name] = string(data)
+	}
+	for _, name := range []string{"rule_examples/donchian.json", "rule_examples/atr_candle.json", "rule_examples/session_range.json"} {
 		data, _ := simulationSources.ReadFile(name)
 		files[name] = string(data)
 	}
@@ -128,6 +134,12 @@ func enableSimulation(db *sql.DB, project string, id int64, options *sim.Config,
 		p := policy.Risk
 		config.Risk = sim.RiskLimits{MaxOrderPct: p.MaxOrderPct, MaxPositionPct: p.MaxPositionPct, MaxGrossExposurePct: p.MaxGrossExposurePct, MaxDailyLossPct: p.MaxDailyLossPct, MaxDrawdownPct: p.MaxDrawdownPct}
 	}
+	if def.Engine == "rules" {
+		config.NotifyFills = true
+		if _, err := rules.Strategy(def.Program, config); err != nil {
+			return err
+		}
+	}
 	config.SymbolCosts = map[string]sim.Costs{}
 	if policy != nil {
 		for symbol, p := range policy.Profiles {
@@ -158,7 +170,7 @@ func enableSimulation(db *sql.DB, project string, id int64, options *sim.Config,
 		if bar.Step > 0 {
 			inputs = append(inputs, sim.Input{ID: fmt.Sprintf("bar/%09d/%s/open", bar.Step, bar.Symbol), Type: "market.quote", Symbol: bar.Symbol, Source: bar.Source, EventTime: at, AvailableAt: at, Data: map[string]float64{"price": bar.O, "volume": previousVolume[bar.Symbol], "step": float64(bar.Step)}, Metadata: map[string]string{"liquidity_model": "previous_completed_bar_volume"}})
 		}
-		inputs = append(inputs, sim.Input{ID: fmt.Sprintf("bar/%09d/%s/close", bar.Step, bar.Symbol), Type: "market.bar.close", Symbol: bar.Symbol, Source: bar.Source, EventTime: at, AvailableAt: closeAt, Data: map[string]float64{"price": bar.C, "volume": bar.V, "step": float64(bar.Step)}})
+		inputs = append(inputs, sim.Input{ID: fmt.Sprintf("bar/%09d/%s/close", bar.Step, bar.Symbol), Type: "market.bar.close", Symbol: bar.Symbol, Source: bar.Source, EventTime: at, AvailableAt: closeAt, Data: map[string]float64{"price": bar.C, "open": bar.O, "high": bar.H, "low": bar.L, "volume": bar.V, "step": float64(bar.Step)}, Metadata: map[string]string{"timeframe": run.Interval}})
 		previousVolume[bar.Symbol] = bar.V
 	}
 	for _, in := range extra {
@@ -172,6 +184,9 @@ func enableSimulation(db *sql.DB, project string, id int64, options *sim.Config,
 
 // Describe the actual tape rather than implying millisecond market resolution.
 func simulationExecutionNotes(spec simulationSpec, inputs []sim.Input) string {
+	if spec.Strategy["engine"] == "rules" {
+		return "Rules execute on captured completed candles, clock and quote events. Protective orders require subsequent observed quotes; no intrabar price path is invented. Linked OCO groups model atomic venue cancellation. Linear contracts use explicit multiplier, fixed currency conversion and margin; financing and automatic margin liquidation are not modeled."
+	}
 	barQuotes, otherQuotes := 0, 0
 	for _, in := range inputs {
 		if in.Type == "market.quote" {
@@ -256,6 +271,15 @@ func storeSimulation(db *sql.DB, run *BacktestRun, spec simulationSpec, inputs [
 		return err
 	}
 	inputs = engine.Inputs
+	if def, _, err := validateStrategyDefinition(spec.Strategy); err == nil && def.Engine == "rules" && spec.DecisionMode != "recorded_orders" && spec.DecisionMode != "agent" {
+		if _, err := rules.Strategy(def.Program, spec.Config); err != nil {
+			return err
+		}
+		if err := validateRuleTape(def.Program, inputs); err != nil {
+			return err
+		}
+		spec.Config.NotifyFills = true
+	}
 	if err := validateSimulationWarmup(spec, inputs); err != nil {
 		return err
 	}
@@ -358,6 +382,7 @@ func updateSimulationInputs(db *sql.DB, run *BacktestRun, options *sim.Config, e
 		options.Risk = r.Spec.Config.Risk
 		options.StartingCash = r.Spec.Config.StartingCash
 		options.SymbolCosts = r.Spec.Config.SymbolCosts
+		options.Contracts = r.Spec.Config.Contracts
 		r.Spec.Config = *options
 	}
 	if !contains(r.Spec.Symbols, r.Spec.Config.BenchmarkSymbol) {
@@ -365,7 +390,7 @@ func updateSimulationInputs(db *sql.DB, run *BacktestRun, options *sim.Config, e
 	}
 	inputs := []sim.Input{}
 	for _, in := range r.Inputs {
-		if strings.HasPrefix(in.Type, "market.") {
+		if strings.HasPrefix(in.Type, "market.") || (r.Spec.Strategy["engine"] == "rules" && in.Type == "clock") {
 			inputs = append(inputs, in)
 		}
 	}
@@ -382,6 +407,13 @@ func simulationStrategy(spec simulationSpec) sim.Strategy {
 	def, _, _ := validateStrategyDefinition(spec.Strategy)
 	if def == nil {
 		def = &StrategyDefinition{Universe: spec.Symbols, Cadence: spec.Interval}
+	}
+	if def.Engine == "rules" && spec.DecisionMode != "recorded_orders" {
+		evaluator, err := rules.Strategy(def.Program, spec.Config)
+		if err != nil {
+			return func(*sim.State, sim.Input) ([]sim.Command, error) { return nil, err }
+		}
+		return evaluator
 	}
 	symbols := append([]string(nil), spec.Symbols...)
 	sort.Strings(symbols)
@@ -543,7 +575,7 @@ func commitSimulation(db *sql.DB, run *BacktestRun, r *simulationRecord, e *sim.
 	var strategyState simulationStrategyState
 	_ = json.Unmarshal(e.State.StrategyState, &strategyState)
 	step := strategyState.Step
-	if r.Spec.DecisionMode == "agent" {
+	if r.Spec.DecisionMode == "agent" || r.Spec.Strategy["engine"] == "rules" {
 		step = e.State.Cursor
 	}
 	status := "running"
@@ -568,7 +600,7 @@ func commitSimulation(db *sql.DB, run *BacktestRun, r *simulationRecord, e *sim.
 			}
 		}
 	}
-	if r.Spec.DecisionMode == "agent" {
+	if r.Spec.DecisionMode == "agent" || r.Spec.Strategy["engine"] == "rules" {
 		step = e.State.Cursor
 		closedBar = true
 	}
@@ -599,9 +631,30 @@ func simulationSnapshot(run *BacktestRun, e *sim.Engine, step int) *BacktestSnap
 	}
 	orders := []*Order{}
 	for _, o := range e.State.Orders {
-		orders = append(orders, &Order{ID: o.ID, PortfolioID: run.PortfolioID, Symbol: o.Symbol, AssetClass: inferAssetClass(o.Symbol), Side: o.Side, Type: o.Type, Qty: o.Qty, FilledQty: o.FilledQty, AvgFillPrice: o.AvgFillPrice, Status: o.Status, TIF: o.TIF, PlacedAt: o.SubmittedAt.Format(time.RFC3339Nano), ResolvedAt: o.ResolvedAt.Format(time.RFC3339Nano), Source: "strategy"})
+		var limitPrice, stopPrice *float64
+		if o.Type == "limit" {
+			v := o.LimitPrice
+			limitPrice = &v
+		}
+		if o.Type == "stop" {
+			v := o.StopPrice
+			stopPrice = &v
+		}
+		orders = append(orders, &Order{ID: o.ID, LimitPrice: limitPrice, StopPrice: stopPrice, PortfolioID: run.PortfolioID, Symbol: o.Symbol, AssetClass: inferAssetClass(o.Symbol), Side: o.Side, Type: o.Type, Qty: o.Qty, FilledQty: o.FilledQty, AvgFillPrice: o.AvgFillPrice, Status: o.Status, TIF: o.TIF, PlacedAt: o.SubmittedAt.Format(time.RFC3339Nano), ResolvedAt: o.ResolvedAt.Format(time.RFC3339Nano), Source: "strategy"})
 	}
 	valueBacktestPositions(e.State.Cash, positions, nil)
+	for _, position := range positions {
+		if contract, ok := e.Config.Contracts[position.Symbol]; ok {
+			multiplier := contract.Multiplier * contract.CurrencyRate
+			position.AssetClass = "linear_contract"
+			position.MarketValue = position.Qty * position.MarketPrice * multiplier
+			position.UnrealizedPnL = (position.MarketPrice - position.AvgCost) * position.Qty * multiplier
+			position.WeightPct = position.MarketValue / e.Metrics()["equity"] * 100
+			if position.AvgCost > 0 {
+				position.UnrealizedPnLPct = (position.MarketPrice/position.AvgCost - 1) * math.Copysign(100, position.Qty)
+			}
+		}
+	}
 	return &BacktestSnapshot{RunID: run.ID, Step: step, Cash: e.State.Cash, BuyingPower: e.State.Cash, Equity: e.Metrics()["equity"], OpenPnL: e.Metrics()["open_pnl"], RealizedPnL: e.State.RealizedPnL, Exposure: e.Metrics()["exposure"], Positions: positions, Orders: orders}
 }
 
@@ -791,12 +844,29 @@ func simulationBundle(db *sql.DB, run *BacktestRun) (*simulationArtifact, error)
 		a.Result = (&sim.Engine{Config: r.Spec.Config, State: r.State}).Metrics()
 	}
 	if r.State != nil && r.State.Finished {
-		a.ResultHash = sim.Hash(struct {
-			Outputs []sim.Output       `json:"outputs"`
-			Result  map[string]float64 `json:"result"`
-		}{a.Outputs, a.Result})
+		a.ResultHash = simulationResultHash(a.Outputs, a.Result)
 	}
 	return a, nil
+}
+
+// MCP clients parse and re-encode JSON, including RawMessage event payloads.
+// Hash their contents independently of object key order, preserving numeric
+// precision. Input/ledger fingerprints retain their original byte identity.
+func simulationResultHash(outputs []sim.Output, result map[string]float64) string {
+	raw, err := json.Marshal(struct {
+		Outputs []sim.Output       `json:"outputs"`
+		Result  map[string]float64 `json:"result"`
+	}{outputs, result})
+	if err != nil {
+		return ""
+	}
+	var value any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return ""
+	}
+	return sim.Hash(value)
 }
 
 func (a *App) handleSimulationArtifact(w http.ResponseWriter, r *http.Request, run *BacktestRun) {
@@ -822,7 +892,7 @@ func importSimulation(db *sql.DB, project string, portfolioID int64, name string
 	}{a.Spec, a.Inputs}) {
 		return nil, errors.New("artifact input hash mismatch")
 	}
-	if a.ResultHash != "" && a.ResultHash != sim.Hash(struct {
+	if a.ResultHash != "" && a.ResultHash != simulationResultHash(a.Outputs, a.Result) && a.ResultHash != sim.Hash(struct {
 		Outputs []sim.Output       `json:"outputs"`
 		Result  map[string]float64 `json:"result"`
 	}{a.Outputs, a.Result}) {
@@ -858,7 +928,13 @@ func importSimulation(db *sql.DB, project string, portfolioID int64, name string
 	for _, in := range a.Inputs {
 		steps = maxInt(steps, int(in.Data["step"]))
 	}
-	run := &BacktestRun{ProjectID: project, PortfolioID: portfolioID, RunKind: "strategy", StrategyVersion: a.Spec.StrategyVersion, Name: nonEmpty(name, "Reproduced backtest"), Symbols: a.Spec.Symbols, Interval: a.Spec.Interval, StartingCash: a.Spec.Config.StartingCash, TotalSteps: steps, Status: "queued", StartAt: a.Inputs[0].EventTime.Format("2006-01-02"), EndAt: a.Inputs[len(a.Inputs)-1].AvailableAt.Format("2006-01-02"), Summary: map[string]any{"expected_result_sha256": a.ResultHash}}
+	expectedResultHash := ""
+	if a.ResultHash != "" {
+		// Legacy byte-ordered hashes accepted above also need to compare with
+		// the canonical identity emitted by the new completed replay.
+		expectedResultHash = simulationResultHash(a.Outputs, a.Result)
+	}
+	run := &BacktestRun{ProjectID: project, PortfolioID: portfolioID, RunKind: "strategy", StrategyVersion: a.Spec.StrategyVersion, Name: nonEmpty(name, "Reproduced backtest"), Symbols: a.Spec.Symbols, Interval: a.Spec.Interval, StartingCash: a.Spec.Config.StartingCash, TotalSteps: steps, Status: "queued", StartAt: a.Inputs[0].EventTime.Format("2006-01-02"), EndAt: a.Inputs[len(a.Inputs)-1].AvailableAt.Format("2006-01-02"), Summary: map[string]any{"expected_result_sha256": expectedResultHash}}
 	if a.Spec.DecisionMode == "agent" {
 		run.RunKind = "agent"
 		run.SourceAgentID = a.Spec.Agent.SourceAgentID

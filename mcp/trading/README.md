@@ -22,6 +22,12 @@ dashboard panel, two dashboard widgets, and a rich trader-terminal SPA.
 Version 0.14 attributes realized and open P&L to the strategy that traded it.
 See [Strategy P&L attribution](#strategy-pl-attribution).
 
+Version 0.15 adds generic trade programs, a visual rule editor, sourced CSV
+quote/bar import and real-agent strategy research acceptance tests.
+
+Generic event-driven trade programs, the three screenshot examples, offline
+backtesting and proof commands are documented in [RULE_ENGINE.md](RULE_ENGINE.md).
+
 Version 0.11 adds out-of-sample and walk-forward selection, robustness grids,
 stress scenarios, and seeded Monte Carlo execution uncertainty with persisted
 progress, isolated runs, and replayable artifacts. See [Validation suites](VALIDATION.md).
@@ -30,7 +36,7 @@ progress, isolated runs, and replayable artifacts. See [Validation suites](VALID
 
 ```
 apps/mcp/trading/
-├── apteva.yaml             # manifest — kind: source, declares 63 mcp_tools
+├── apteva.yaml             # manifest — kind: source, declares 64 mcp_tools
 ├── go.mod / go.sum
 ├── main.go                 # App impl, HTTP routes, Workers wiring
 ├── tools.go                # MCP tools (the agent's surface)
@@ -263,6 +269,16 @@ setting and otherwise permissive 100% limits until a risk profile is selected.
 | **1** in-process | Every MCP handler exercised against in-memory SQLite | `go test ./...` | < 0.1s |
 | **2** real binary | Spawned sidecar talked to via JSON-RPC + REST; engine ticks for real | `go test -tags integration ./...` | ~8s |
 | **3** live agent | YAML scenarios run by `apteva test ./scenarios/` — real agent, real LLM | `apteva test ./scenarios/` | tens of seconds + LLM cost |
+
+Strategy Tier 3 coverage lives in `scenarios/strategies/`, with entry links in
+`scenarios/` so the normal Tier 3 command also includes it. Run it explicitly
+with `apteva test --tier 3 ./scenarios/strategies/`. It checks real agent
+creation of the three screenshot strategies, fresh EMA/SMA strategy authoring,
+completed winning and losing synthetic backtests, persisted scorecard verdicts,
+cost robustness, evidence export and versioned revision. These are acceptance
+fixtures, not historical profitability results. Tests use clean installations
+and assert saved state as well as successful tool calls. Provider/model choices
+belong to the test invocation rather than the strategy definitions.
 
 ## Pricing provider
 

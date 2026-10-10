@@ -1,0 +1,81 @@
+name: author-screenshot-strategies
+description: |
+  A real agent discovers the generic rule language, validates and saves all
+  three screenshot strategies, then versions a revision. No definitions or
+  strategies are seeded by the runner. Persisted programs are the outcome.
+timeout: 8m
+max_iterations: 24
+setup:
+  mode: autonomous
+  app:
+    path: ./
+    config:
+      bootstrap_demo: "false"
+      pricing_provider: "mock"
+directive: |
+  This is a synthetic strategy-authoring acceptance test. Use Trading MCP.
+  Discover strategy_catalog and its generic rules syntax. Validate and save
+  exactly these three engine=rules strategies, in this order, using the complete
+  matching catalog definition objects exactly, without rearranging their expression
+  trees. Copy only each preset.definition, never put its id/name/description or
+  simulation fields into program. Do not change the numerical trading rules:
+
+  1. Name "Tier 3 Donchian": XAUUSD, 175 completed H1 channel, M1 close
+     breakout long/short, 0.5% stop, 1% target, trailing arms at 0.5% profit
+     and follows at 0.1%, $100 fixed stop risk, midpoint reset per direction.
+  2. Name "Tier 3 ATR": XAUUSD, H1 range > 2.5 times ATR200, outer-quarter
+     close and candle direction, market entry, signal-close 0.5% stop and
+     3.5% target, $100 fixed stop risk.
+  3. Name "Tier 3 Session": DE40, Europe/Helsinki 08:00-11:00 range,
+     11:00 OCO stop entries, opposite range stop, no target, one trade/day,
+     18:00 flatten/cancel, $100 fixed stop risk.
+
+  Validate each complete definition before creating it. Fetch each saved
+  strategy and confirm its engine and program. Use returned IDs.
+  Finally update the Donchian definition by adding initial.agent_revision=1,
+  preserving the complete original program, and fetch it to verify version 2.
+  Leave ATR and Session at version 1. Keep all strategies in draft status.
+  Do not create portfolios, assign strategies, place orders or arm execution.
+  Report which strategies were saved and that this tests authoring, not profits.
+assert:
+  - tool_called_with:
+      tool: strategy_catalog
+      success: true
+  - tool_called_with:
+      tool: strategy_validate
+      success: true
+      min_count: 3
+  - tool_called_with:
+      tool: strategy_create
+      success: true
+      count: 3
+  - tool_called_with:
+      tool: strategy_update
+      success: true
+      count: 1
+  - tool_called_with:
+      tool: strategy_get
+      success: true
+      min_count: 3
+  - http: GET /api/apps/trading/strategies
+    expect_count_at: strategies
+    expect_count: 3
+  - http: GET /api/apps/trading/strategies/1
+    expect_field_at: strategy.version
+    expect_field_eq: 2
+  - http: GET /api/apps/trading/strategies/1
+    expect_field_at: strategy.definition.program.initial.agent_revision
+    expect_field_eq: 1
+  - http: GET /api/apps/trading/strategies/1
+    expect_field_at: strategy.definition.engine
+    expect_field_eq: rules
+  - http: GET /api/apps/trading/strategies/2
+    expect_field_at: strategy.definition.program.rules.0.when.args.1.args.0.args.1.args.1.period
+    expect_field_eq: 200
+  - http: GET /api/apps/trading/strategies/3
+    expect_field_at: strategy.definition.program.timezone
+    expect_field_eq: Europe/Helsinki
+  - tool_not_called: strategy_assign | order_place | portfolio_arm_live
+budget:
+  total_tokens: 500000
+  cost_usd: 3.00

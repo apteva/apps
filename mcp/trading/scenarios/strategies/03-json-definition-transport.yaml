@@ -1,0 +1,56 @@
+name: agent-json-definition-transport
+description: A real agent validates, saves and versions a rule definition supplied as JSON text, exercising transport compatibility without weakening program validation.
+timeout: 4m
+max_iterations: 24
+setup:
+  mode: autonomous
+  app:
+    path: ./
+    config:
+      bootstrap_demo: "false"
+      pricing_provider: "mock"
+directive: |
+  Exercise Trading MCP's JSON-text strategy definition transport yourself in
+  the main thread. Do not spawn or delegate. This is a synthetic wire test.
+  Use the following exact definition, passed as JSON TEXT (a string value in
+  the definition argument) rather than as a nested object:
+  {"engine":"rules","universe":["AAPL"],"cadence":"1m","program":{"version":"trading-rules/1","symbol":"AAPL","timeframe":"1m","timezone":"UTC","rules":[{"id":"observe_only","on":"quote","when":{"value":0},"actions":[{"kind":"cancel"}]}]}}
+  First validate it with strategy_validate; confirm valid=true. Create one
+  draft strategy named "Tier 3 JSON transport" with this same JSON-text
+  definition. Confirm the create response has version=1 and use its returned ID.
+  Update it through strategy_update with the same JSON-text definition plus
+  program.initial={"transport_revision":1}. Preserve all other fields.
+  Fetch with strategy_get and confirm version=2 and the persisted transport_revision=1.
+  Do not create portfolios, backtests, orders, assignments or promotions.
+  Do not call pace, sleep or wait. After the final fetch, finish with a plain
+  final response; the test runner will verify the persisted outcomes.
+assert:
+  - tool_called_with:
+      tool: strategy_validate
+      success: true
+      count: 1
+  - tool_called_with:
+      tool: strategy_create
+      success: true
+      count: 1
+  - tool_called_with:
+      tool: strategy_update
+      success: true
+      count: 1
+  - tool_called_with:
+      tool: strategy_get
+      success: true
+      min_count: 1
+  - http: GET /api/apps/trading/strategies
+    expect_count_at: strategies
+    expect_count: 1
+  - http: GET /api/apps/trading/strategies/1
+    expect_field_at: strategy.version
+    expect_field_eq: 2
+  - http: GET /api/apps/trading/strategies/1
+    expect_field_at: strategy.definition.program.initial.transport_revision
+    expect_field_eq: 1
+  - tool_not_called: spawn | portfolio_create | strategy_backtest_create | strategy_assign | order_place | portfolio_arm_live
+budget:
+  total_tokens: 400000
+  cost_usd: 2.00

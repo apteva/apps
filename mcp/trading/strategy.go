@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -16,10 +17,13 @@ import (
 
 	sdk "github.com/apteva/app-sdk"
 	sim "github.com/apteva/apps/mcp/trading/internal/backtest"
+	rules "github.com/apteva/apps/mcp/trading/internal/ruleengine"
 	"github.com/google/uuid"
 )
 
 type StrategyDefinition struct {
+	Engine         string         `json:"engine,omitempty"`
+	Program        *rules.Program `json:"program,omitempty"`
 	Universe       []string       `json:"universe"`
 	Cadence        string         `json:"cadence,omitempty"`
 	RebalanceEvery int            `json:"rebalance_every,omitempty"`
@@ -115,6 +119,34 @@ func parseStrategyDefinition(raw map[string]any) (*StrategyDefinition, error) {
 	if err := json.Unmarshal(buf, &def); err != nil {
 		return nil, err
 	}
+	if def.Engine != "" && def.Engine != "allocation" && def.Engine != "rules" {
+		return nil, errors.New("unknown strategy engine")
+	}
+	if def.Engine == "rules" {
+		programJSON, err := json.Marshal(raw["program"])
+		if err != nil {
+			return nil, err
+		}
+		decoder := json.NewDecoder(bytes.NewReader(programJSON))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&def.Program); err != nil {
+			return nil, fmt.Errorf("program: %w", err)
+		}
+		if err := rules.Validate(def.Program); err != nil {
+			return nil, err
+		}
+		def.Universe = cleanSymbols(def.Universe)
+		if len(def.Universe) != 1 || def.Universe[0] != def.Program.Symbol || def.Cadence != def.Program.Timeframe {
+			return nil, errors.New("rule universe/cadence must match program symbol/base timeframe")
+		}
+		if len(def.Rules) > 0 {
+			return nil, errors.New("allocation and rule programs cannot be mixed in one definition")
+		}
+		return &def, nil
+	}
+	if def.Program != nil {
+		return nil, errors.New("program requires engine=rules")
+	}
 	def.Universe = cleanSymbols(def.Universe)
 	for i := range def.Rules {
 		def.Rules[i].Allocate = cleanAllocations(def.Rules[i].Allocate)
@@ -172,6 +204,9 @@ func validateStrategyDefinition(raw map[string]any) (*StrategyDefinition, []stri
 		return nil, nil, err
 	}
 	warnings := []string{}
+	if def.Engine == "rules" {
+		return def, []string{"Rule programs require event-driven evaluation; live adapters must explicitly support their execution capabilities."}, nil
+	}
 	universe := make(map[string]bool, len(def.Universe))
 	for _, symbol := range def.Universe {
 		universe[symbol] = true
@@ -229,6 +264,9 @@ func evaluateStrategy(strategy *Strategy, market strategyMarket) (*StrategyEvalu
 	def, warnings, err := validateStrategyDefinition(strategy.Definition)
 	if err != nil {
 		return nil, err
+	}
+	if def.Engine == "rules" {
+		return nil, errors.New("rule strategies must be evaluated through an event backtest with their market tape and state")
 	}
 	out := &StrategyEvaluation{
 		StrategyID:      strategy.ID,
@@ -653,6 +691,8 @@ func strategyRebalanceEvery(def *StrategyDefinition, interval string) int {
 
 func strategyCadenceDuration(cadence string) (time.Duration, bool) {
 	switch cadence {
+	case "1m":
+		return time.Minute, true
 	case "5m":
 		return 5 * time.Minute, true
 	case "15m":
@@ -837,6 +877,9 @@ func strategyHistoryInterval(def *StrategyDefinition) string {
 }
 
 func strategyRequiredBars(def *StrategyDefinition) int {
+	if def != nil && def.Engine == "rules" {
+		return rules.RequiredBaseBars(def.Program)
+	}
 	maxBars := 1
 	if def != nil {
 		for _, rule := range def.Rules {
@@ -870,6 +913,22 @@ func indicatorRequiredBars(indicator string) int {
 
 // ─── Strategy MCP tools ────────────────────────────────────────────
 
+// Some agent transports preserve object arguments as JSON text. Both wire
+// forms must reach the same validator and durable definition, never a silent
+// no-op during updates. This does not relax the trading-program schema.
+func strategyDefinitionArgument(value any) (map[string]any, error) {
+	if object, ok := value.(map[string]any); ok && object != nil {
+		return object, nil
+	}
+	if text, ok := value.(string); ok {
+		var object map[string]any
+		if err := json.Unmarshal([]byte(text), &object); err == nil && object != nil {
+			return object, nil
+		}
+	}
+	return nil, errors.New("definition must be an object or JSON object text")
+}
+
 func (a *App) toolStrategyCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
@@ -879,9 +938,9 @@ func (a *App) toolStrategyCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if name == "" {
 		return nil, errors.New("name required")
 	}
-	defRaw, ok := args["definition"].(map[string]any)
-	if !ok {
-		return nil, errors.New("definition object required")
+	defRaw, err := strategyDefinitionArgument(args["definition"])
+	if err != nil {
+		return nil, err
 	}
 	if _, _, err := validateStrategyDefinition(defRaw); err != nil {
 		return nil, err
@@ -913,7 +972,11 @@ func (a *App) toolStrategyUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, errors.New("strategy_id required")
 	}
 	patch := &Strategy{Name: strArg(args, "name"), Description: strArg(args, "description"), Status: strArg(args, "status")}
-	if def, ok := args["definition"].(map[string]any); ok {
+	if raw, supplied := args["definition"]; supplied {
+		def, err := strategyDefinitionArgument(raw)
+		if err != nil {
+			return nil, err
+		}
 		if _, _, err := validateStrategyDefinition(def); err != nil {
 			return nil, err
 		}
@@ -1098,9 +1161,9 @@ func nextStockStrategyCheck(def *StrategyDefinition, slot time.Time, session usE
 }
 
 func (a *App) toolStrategyValidate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	defRaw, ok := args["definition"].(map[string]any)
-	if !ok {
-		return nil, errors.New("definition object required")
+	defRaw, err := strategyDefinitionArgument(args["definition"])
+	if err != nil {
+		return nil, err
 	}
 	def, warnings, err := validateStrategyDefinition(defRaw)
 	if err != nil {
@@ -1155,6 +1218,9 @@ func (a *App) toolStrategyAssign(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
+	if def.Engine == "rules" {
+		return nil, errors.New("rule programs are available in event backtests; current live adapters do not support protected rule execution or linear contracts")
+	}
 	if err := validateStrategyUniverseForPortfolio(ctx.AppDB(), portfolio, def); err != nil {
 		return nil, err
 	}
@@ -1200,6 +1266,28 @@ func (a *App) toolStrategyBacktestCreate(ctx *sdk.AppCtx, args map[string]any) (
 	def, _, err := validateStrategyDefinition(strategy.Definition)
 	if err != nil {
 		return nil, err
+	}
+	if def.Engine == "rules" {
+		if raw, ok := args["inputs"]; ok {
+			data, _ := json.Marshal(raw)
+			var inputs []sim.Input
+			if err := json.Unmarshal(data, &inputs); err != nil {
+				return nil, err
+			}
+			var config *sim.Config
+			if raw, ok := args["simulation"]; ok {
+				data, _ := json.Marshal(raw)
+				if err := json.Unmarshal(data, &config); err != nil {
+					return nil, err
+				}
+			}
+			run, err := createRuleEventBacktest(ctx, pf, strategy, strArg(args, "name"), floatArg(args, "starting_cash", 0), config, inputs)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"backtest": run}, nil
+		}
+		return nil, errors.New("rule backtests require a sourced OHLC and quote event tape in inputs")
 	}
 	interval, err := normalizeStrategyReplayInterval(def, strArg(args, "interval"))
 	if err != nil {

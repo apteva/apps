@@ -23,3 +23,12 @@ test("next-open timing resets all three latency fields and preserves costs and i
  await act(async()=>button("Use idealized next-open timing (zero latency)").click());await act(async()=>button("Save simulation settings").click());
  expect(writes[0].simulation).toEqual({...config,submission_latency_ms:0,cancellation_latency_ms:0,latency_jitter_ms:0});expect(writes[0].inputs).toEqual(inputs);
 });
+
+test("generic trade examples load into the draft with their execution configuration",async()=>{
+ mount();const selected:any[]=[];
+ const preset={id:"session_range",name:"Session range",description:"Sourced event tape required",definition:{engine:"rules",program:{version:"trading-rules/1"}},simulation:{contracts:{DE40:{multiplier:1,currency_rate:1,margin_fraction:.1}}}};
+ const api:any=async()=>({presets:[],rule_presets:[preset],indicators:[],conditions:"",limitations:"",sources:[]});
+ await act(async()=>root.render(<StrategyPresetPicker api={api} symbols={[]} onSelect={p=>selected.push(p)}/>));
+ await act(async()=>container.querySelector("button")!.click());
+ expect(selected).toEqual([preset]);expect(container.textContent).toContain("sourced event tape");
+});

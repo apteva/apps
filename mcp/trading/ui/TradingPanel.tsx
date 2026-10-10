@@ -1,3 +1,4 @@
+import { RuleProgramEditor } from "./RuleProgramEditor";
 import { ValidationControls } from "./ValidationControls";
 // TradingPanel — native React panel for the trading app. Styled with
 // the dashboard's Tailwind theme tokens (bg-bg, text-text, border-border,
@@ -2859,6 +2860,9 @@ function StrategiesTab({ portfolio, api, projectId, setError }: {
   const [definitionText, setDefinitionText] = useState("");
   const [evaluation, setEvaluation] = useState<StrategyEvaluation | null>(null);
   const [validation, setValidation] = useState<StrategyValidation | null>(null);
+  const [ruleTape,setRuleTape]=useState("[]");
+  const [ruleSimulation,setRuleSimulation]=useState("{}");
+  const draftDefinition=useMemo(()=>{try{return JSON.parse(definitionText)}catch{return null}},[definitionText]);
   const [scorecard, setScorecard] = useState<StrategyScorecardPolicy | null>(null);
   const [scorecardHistory, setScorecardHistory] = useState<StrategyScorecardEvaluation[]>([]);
   const [busy, setBusy] = useState(false);
@@ -2990,6 +2994,12 @@ function StrategiesTab({ portfolio, api, projectId, setError }: {
     if (!portfolio) return;
     setBusy(true);
     try {
+      if(strategy.definition?.engine === "rules") {
+        const inputs=JSON.parse(ruleTape);const simulation=JSON.parse(ruleSimulation);
+        if(!Array.isArray(inputs)||inputs.length===0)throw new Error("Import an OHLC and quote event tape first.");
+        await api("POST",`/portfolios/${portfolio.id}/backtests`,undefined,{name:`${strategy.name} rule replay`,strategy_id:strategy.id,starting_cash:portfolio.starting_cash||100000,inputs,simulation});
+        setError(null);return;
+      }
       const symbols = cleanSymbolList(strategy.definition?.universe || portfolio.watchlist || []);
       await api<{ backtest: BacktestRun }>("POST", `/portfolios/${portfolio.id}/backtests`, undefined, {
         name: `${strategy.name} replay`,
@@ -3039,19 +3049,25 @@ function StrategiesTab({ portfolio, api, projectId, setError }: {
         {selected && (
           <div className="mt-3">
             <div className="flex flex-wrap gap-2">
-            <button disabled={busy} onClick={() => evaluate(selected)} className="px-2 py-1 text-xs rounded bg-accent text-bg font-medium disabled:opacity-50">
+            <button disabled={busy || selected.definition?.engine === "rules"} onClick={() => evaluate(selected)} className="px-2 py-1 text-xs rounded bg-accent text-bg font-medium disabled:opacity-50">
               Evaluate
             </button>
-            <button disabled={busy} onClick={() => assign(selected)} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">
+            <button disabled={busy || selected.definition?.engine === "rules"} onClick={() => assign(selected)} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">
               Assign
             </button>
             <button disabled={busy} onClick={() => createBacktest(selected)} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">
               Backtest
             </button>
-            <button disabled={busy} onClick={() => validate(selected)} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">
+            <button disabled={busy || selected.definition?.engine === "rules"} onClick={() => validate(selected)} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">
               Validate
             </button>
             </div>
+            {selected.definition?.engine === "rules" && <div className="mt-3 grid gap-2 text-xs">
+              <p>Rule strategy backtests use completed OHLC candles and executable quotes. Import sourced events, then configure costs and instrument specifications. Live assignment is unavailable for this execution model.</p>
+              <label>Import event tape or result bundle<input type="file" accept=".json,application/json" className="block mt-1" onChange={async(e)=>{const file=e.target.files?.[0];if(!file)return;try{const raw=JSON.parse(await file.text());const inputs=Array.isArray(raw)?raw:raw.inputs;if(!Array.isArray(inputs))throw new Error("File must contain an event array or inputs field.");setRuleTape(JSON.stringify(inputs,null,2));if(raw.simulation||raw.spec?.config)setRuleSimulation(JSON.stringify(raw.simulation||raw.spec.config,null,2));setError(null);}catch(error){setError((error as Error).message)}}}/></label>
+              <label>Market and clock events<textarea rows={6} className={`${inputClass} font-mono mt-1`} value={ruleTape} onChange={e=>setRuleTape(e.target.value)}/></label>
+              <label>Execution configuration (contract multiplier, currency conversion, margin and costs)<textarea rows={5} className={`${inputClass} font-mono mt-1`} value={ruleSimulation} onChange={e=>setRuleSimulation(e.target.value)}/></label>
+            </div>}
             {(selected.assignments || []).length > 0 && (
               <div className="mt-3 border border-border rounded overflow-hidden">
                 {(selected.assignments || []).map((assignment) => (
@@ -3078,7 +3094,7 @@ function StrategiesTab({ portfolio, api, projectId, setError }: {
 
       <div className="grid gap-4">
         <Section title="New strategy">
-          <StrategyPresetPicker api={api} symbols={portfolio?.watchlist || []} onSelect={(preset)=>{setName(preset.name);setDescription(preset.description);setDefinitionText(JSON.stringify(preset.definition,null,2));}} />
+          <StrategyPresetPicker api={api} symbols={portfolio?.watchlist || []} onSelect={(preset)=>{setName(preset.name);setDescription(preset.description);setDefinitionText(JSON.stringify(preset.definition,null,2));if(preset.simulation)setRuleSimulation(JSON.stringify(preset.simulation,null,2));}} />
           <div className="grid gap-3" style={{ gridTemplateColumns: "minmax(180px, 1fr) minmax(180px, 1fr)" }}>
             <label className="text-xs">
               <FieldLabel>Name</FieldLabel>
@@ -3089,6 +3105,8 @@ function StrategiesTab({ portfolio, api, projectId, setError }: {
               <input value={description} onChange={(e) => setDescription(e.target.value)} className={inputClass} />
             </label>
           </div>
+          <button type="button" className="mt-2 px-2 py-1 text-xs rounded border border-border" onClick={()=>setDefinitionText(JSON.stringify({engine:"rules",universe:[portfolio.watchlist?.[0]||"SPY"],cadence:"1h",program:{version:"trading-rules/1",symbol:portfolio.watchlist?.[0]||"SPY",timeframe:"1h",timezone:"UTC",rules:[{id:"entry",on:"bar.close",when:{op:"crosses_above",args:[{metric:"ema",period:20},{metric:"sma",period:50}]},actions:[{kind:"enter",side:"buy",stop_pct:.01,sizing:{mode:"fixed_risk",amount:100}}]}]}},null,2))}>New trade rule strategy</button>
+          {draftDefinition?.engine==="rules" && draftDefinition.program && <details open className="mt-3"><summary className="cursor-pointer text-sm font-semibold">Visual rule builder</summary><div className="mt-2"><RuleProgramEditor program={draftDefinition.program} onChange={program=>setDefinitionText(JSON.stringify({...draftDefinition,universe:[program.symbol],cadence:program.timeframe,program},null,2))}/></div></details>}
           <label className="block mt-3 text-xs">
             <FieldLabel>Definition JSON</FieldLabel>
             <textarea
@@ -3188,17 +3206,17 @@ function StrategyValidationPeriodCard({ title, period }: { title: string; period
   );
 }
 
-type IndicatorPreset = {id:string;name:string;description:string;definition:Record<string,unknown>};
-type IndicatorCatalog = {presets:IndicatorPreset[];indicators:{name:string;description:string}[];conditions:string;limitations:string;sources:string[]};
+type IndicatorPreset = {id:string;name:string;description:string;definition:Record<string,unknown>;simulation?:Record<string,unknown>};
+type IndicatorCatalog = {presets:IndicatorPreset[];rule_presets?:IndicatorPreset[];indicators:{name:string;description:string}[];conditions:string;limitations:string;sources:string[]};
 export function StrategyPresetPicker({api,symbols,onSelect}:{api:<T>(m:string,p:string,q?:Record<string,string>,b?:unknown)=>Promise<T>;symbols:string[];onSelect:(preset:IndicatorPreset)=>void}) {
  const [catalog,setCatalog]=useState<IndicatorCatalog|null>(null);
  const [error,setCatalogError]=useState("");
  useEffect(()=>{let active=true;api<IndicatorCatalog>("GET","/strategies/catalog",{symbols:symbols.join(",")}).then(r=>{if(active){setCatalog(r);setCatalogError("")}}).catch(e=>{if(active)setCatalogError(e.message)});return()=>{active=false}},[api,symbols.join(",")]);
  return <div className="mb-3 p-3 rounded border border-border bg-bg-input">
-  <div className="text-sm font-semibold">Indicator strategy templates</div>
-  <p className="my-2 text-xs text-text-muted">Hourly signals for your watchlist. Load a draft, review its rules, then backtest against a benchmark.</p>
+  <div className="text-sm font-semibold">Strategy templates</div>
+  <p className="my-2 text-xs text-text-muted">Allocation templates use your watchlist. Trade-rule examples use an explicit instrument and sourced event tape. Load a draft, review the rules and execution assumptions, then backtest.</p>
   {error&&<p className="text-xs text-red">{error}</p>}
-  <div className="flex flex-wrap gap-2">{catalog?.presets.map(p=><button type="button" key={p.id} title={p.description} onClick={()=>onSelect(p)} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-hover">{p.name}</button>)}</div>
+  <div className="flex flex-wrap gap-2">{[...(catalog?.presets||[]),...(catalog?.rule_presets||[])].map(p=><button type="button" key={p.id} title={p.description} onClick={()=>onSelect(p)} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-hover">{p.name}</button>)}</div>
   {catalog&&<details className="mt-3 text-xs"><summary className="cursor-pointer">Indicators, formulas and rule syntax</summary><dl className="space-y-2 my-2">{catalog.indicators.map(i=><div key={i.name}><dt className="font-mono font-semibold">{i.name}</dt><dd className="text-text-muted">{i.description}</dd></div>)}</dl><p className="my-2">{catalog.conditions}</p><p className="my-2 text-text-muted">{catalog.limitations}</p><div className="flex flex-wrap gap-2">{catalog.sources.map((url,i)=><a key={url} href={url} target="_blank" rel="noreferrer" className="underline">{["EMA guide","RSI guide","MACD guide","Bollinger guide"][i]}</a>)}</div></details>}
  </div>
 }
@@ -3282,7 +3300,7 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
       if (selectedRun.summary?.engine_version) {
         setLiveEvents((r.events||[]).filter(ev=>ev.kind==="fill"||ev.kind==="strategy.decision"||ev.kind.startsWith("order.")).map((ev):BacktestLiveEvent=>{
           const data=(ev.data||{}) as Record<string,any>;
-          return {id:`simulation:${ev.id}`,kind:ev.kind==="strategy.decision"?"thinking":"order",summary:ev.kind==="strategy.decision"?(data.decisions||[]).join("; "):`${ev.kind} · ${[data.side,data.qty,data.symbol].filter(x=>x!==undefined).join(" ")}${data.price?` @ ${formatUSD(data.price)}`:""}`,detail:ev.message.split(" · ")[0],time:ev.created_at};
+          return {id:`simulation:${ev.id}`,kind:ev.kind==="strategy.decision"?"thinking":"order",summary:ev.kind==="strategy.decision"?(data.decisions||[data.rule&&`${data.rule}: ${data.status}`].filter(Boolean)).join("; "):`${ev.kind} · ${[data.side,data.qty,data.symbol].filter(x=>x!==undefined).join(" ")}${data.price?` @ ${formatUSD(data.price)}`:""}`,detail:ev.message.split(" · ")[0],time:ev.created_at};
         }));
       }
     } catch (e) { setError((e as Error).message); }

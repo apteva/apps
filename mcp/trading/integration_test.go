@@ -33,6 +33,19 @@ func TestSidecar_BootsAndHealthOK(t *testing.T) {
 	}
 }
 
+func TestSidecar_ImportsObservedBidAskCSV(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"), tk.WithConfig(map[string]string{"pricing_provider": "mock", "bootstrap_demo": "false"}))
+	out := sc.MCP("market_data_import", map[string]any{"symbol": "XAUUSD", "streams": []map[string]any{{"kind": "quotes", "source": "synthetic_integration", "csv": "timestamp,bid,ask\n2025-01-02T10:00:00Z,2600,2600.2\n"}}})
+	inputs, ok := out["inputs"].([]any)
+	if !ok || len(inputs) != 1 || out["input_sha256"] == "" {
+		t.Fatal("binary MCP import lacks sourced observations", out)
+	}
+	data := inputs[0].(map[string]any)["data"].(map[string]any)
+	if data["bid"] != float64(2600) || data["ask"] != 2600.2 {
+		t.Fatal("binary MCP import changed executable prices", data)
+	}
+}
+
 // Full path: create portfolio via REST → place order via MCP → wait one
 // tick → assert order is filled, position opened, fill journal landed.
 func TestSidecar_OrderFillRoundTrip(t *testing.T) {

@@ -270,6 +270,15 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 				httpErr(w, 400, err.Error())
 				return
 			}
+			if def.Engine == "rules" {
+				run, err := createRuleEventBacktest(globalCtx, pf, strategy, body.Name, body.StartingCash, body.Simulation, body.Inputs)
+				if err != nil {
+					httpErr(w, 400, err.Error())
+					return
+				}
+				httpJSON(w, 201, map[string]any{"backtest": run})
+				return
+			}
 			strategyVersion = strategy.Version
 			if len(symbols) == 0 {
 				symbols = def.Universe
@@ -1260,6 +1269,8 @@ func backtestPeriodsPerYearForRun(run *BacktestRun) float64 {
 		return backtestPeriodsPerYear(run.Interval)
 	}
 	switch strings.ToLower(strings.TrimSpace(run.Interval)) {
+	case "1m":
+		return 252 * 390
 	case "5m":
 		return 252 * 78
 	case "15m":
@@ -1277,6 +1288,8 @@ func backtestPeriodsPerYearForRun(run *BacktestRun) float64 {
 
 func backtestPeriodsPerYear(interval string) float64 {
 	switch strings.ToLower(strings.TrimSpace(interval)) {
+	case "1m":
+		return 365 * 24 * 60
 	case "5m":
 		return 365 * 24 * 12
 	case "15m":
@@ -1783,7 +1796,7 @@ func summarizeBacktestMarketCapture(bars []*BacktestMarketBar, symbols []string,
 
 func inclusiveBacktestEnd(endAt time.Time, interval string) time.Time {
 	switch strings.ToLower(strings.TrimSpace(interval)) {
-	case "5m", "15m", "1h", "4h":
+	case "1m", "5m", "15m", "1h", "4h":
 		return time.Date(endAt.Year(), endAt.Month(), endAt.Day(), 23, 59, 59, 0, time.UTC)
 	default:
 		return endAt
@@ -1843,7 +1856,7 @@ func estimateBacktestSteps(start, end time.Time, interval string) int {
 	}
 	days := int(end.Sub(start).Hours()/24) + 1
 	switch strings.ToLower(strings.TrimSpace(interval)) {
-	case "5m", "15m", "1h", "4h":
+	case "1m", "5m", "15m", "1h", "4h":
 		return days * backtestStepsPerSession(interval)
 	case "1w":
 		return int(math.Ceil(float64(days) / 7))
@@ -1858,15 +1871,17 @@ func normalizeBacktestInterval(interval string) (string, error) {
 		v = "1d"
 	}
 	switch v {
-	case "5m", "15m", "1h", "4h", "1d", "1w":
+	case "1m", "5m", "15m", "1h", "4h", "1d", "1w":
 		return v, nil
 	default:
-		return "", fmt.Errorf("unsupported backtest interval %q; use 5m, 15m, 1h, 4h, 1d, or 1w", interval)
+		return "", fmt.Errorf("unsupported backtest interval %q; use 1m, 5m, 15m, 1h, 4h, 1d, or 1w", interval)
 	}
 }
 
 func backtestStepsPerSession(interval string) int {
 	switch strings.ToLower(strings.TrimSpace(interval)) {
+	case "1m":
+		return 390
 	case "5m":
 		return 78 // 6.5h US-style regular session.
 	case "15m":
@@ -1891,7 +1906,7 @@ func backtestReplayTime(run *BacktestRun, step int) time.Time {
 		step = 1
 	}
 	switch strings.ToLower(strings.TrimSpace(run.Interval)) {
-	case "5m", "15m", "1h", "4h":
+	case "1m", "5m", "15m", "1h", "4h":
 		return start.Add(time.Duration(step-1) * backtestIntervalDuration(run.Interval))
 	case "1w":
 		return time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, (step-1)*7)
@@ -1902,6 +1917,8 @@ func backtestReplayTime(run *BacktestRun, step int) time.Time {
 
 func backtestIntervalDuration(interval string) time.Duration {
 	switch strings.ToLower(strings.TrimSpace(interval)) {
+	case "1m":
+		return time.Minute
 	case "5m":
 		return 5 * time.Minute
 	case "15m":
