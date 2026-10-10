@@ -1956,7 +1956,7 @@ func (a *App) startTelnyxGather(ctx *sdk.AppCtx, row *callRow, plan *inboundRout
 	return err
 }
 
-func (a *App) startTelnyxStream(ctx *sdk.AppCtx, row *callRow) error {
+func (a *App) startTelnyxStream(ctx *sdk.AppCtx, row *callRow, requests ...context.Context) error {
 	input := map[string]any{
 		"call_control_id": row.CarrierSID,
 		"stream_url":      a.publicWSStreamURL("telnyx", row.ID, row.CallbackSecret),
@@ -1968,7 +1968,7 @@ func (a *App) startTelnyxStream(ctx *sdk.AppCtx, row *callRow) error {
 	// L16 bridge and caused an endless reconnect loop after the operator
 	// accepted the routed call.
 	applyTelnyxMediaProfile(input)
-	_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "start_streaming", input)
+	_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "start_streaming", input, requests...)
 	return err
 }
 

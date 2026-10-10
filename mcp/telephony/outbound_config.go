@@ -59,6 +59,9 @@ func (a *App) outboundReadiness(ctx *sdk.AppCtx, provider string, connectionID i
 }
 
 func (a *App) telnyxOutboundReadiness(ctx *sdk.AppCtx, connectionID int64, applicationID string, profiles []outboundProfileOption, requests ...context.Context) (outboundReadinessView, error) {
+	return a.telnyxOutboundReadinessWithLoader(ctx, connectionID, applicationID, profiles, nil, requests...)
+}
+func (a *App) telnyxOutboundReadinessWithLoader(ctx *sdk.AppCtx, connectionID int64, applicationID string, profiles []outboundProfileOption, loader *inventoryReadSession, requests ...context.Context) (outboundReadinessView, error) {
 	view := outboundReadinessView{
 		Required: true, ApplicationID: strings.TrimSpace(applicationID), Profiles: profiles,
 	}
@@ -68,7 +71,13 @@ func (a *App) telnyxOutboundReadiness(ctx *sdk.AppCtx, connectionID int64, appli
 		return view, nil
 	}
 
-	raw, err := executeCarrierTool(ctx, connectionID, "get_call_control_application", map[string]any{"id": view.ApplicationID}, requests...)
+	var raw []byte
+	var err error
+	if loader != nil {
+		raw, err = loader.read("get_call_control_application", map[string]any{"id": view.ApplicationID})
+	} else {
+		raw, err = executeCarrierTool(ctx, connectionID, "get_call_control_application", map[string]any{"id": view.ApplicationID}, requests...)
+	}
 	if err != nil {
 		view.Status = outboundConfigError
 		return view, fmt.Errorf("inspect Telnyx Call Control application: %w", err)
@@ -110,14 +119,20 @@ func (a *App) telnyxOutboundReadiness(ctx *sdk.AppCtx, connectionID int64, appli
 }
 
 func listTelnyxOutboundProfiles(ctx *sdk.AppCtx, connectionID int64, requests ...context.Context) ([]outboundProfileOption, error) {
+	return listTelnyxOutboundProfilesWithLoader(ctx, connectionID, nil, requests...)
+}
+func listTelnyxOutboundProfilesWithLoader(ctx *sdk.AppCtx, connectionID int64, loader *inventoryReadSession, requests ...context.Context) ([]outboundProfileOption, error) {
 	const pageSize = 100
 	profiles := make([]outboundProfileOption, 0)
 	for page := 1; page <= maxOwnedNumberPages; page++ {
-		raw, err := executeCarrierTool(ctx, connectionID, "list_outbound_voice_profiles", map[string]any{
-			"page[number]": page,
-			"page[size]":   pageSize,
-			"sort":         "name",
-		}, requests...)
+		input := map[string]any{"page[number]": page, "page[size]": pageSize, "sort": "name"}
+		var raw []byte
+		var err error
+		if loader != nil {
+			raw, err = loader.read("list_outbound_voice_profiles", input)
+		} else {
+			raw, err = executeCarrierTool(ctx, connectionID, "list_outbound_voice_profiles", input, requests...)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("list Telnyx outbound voice profiles: %w", err)
 		}
@@ -181,6 +196,8 @@ func soleEnabledOutboundProfileID(profiles []outboundProfileOption) string {
 }
 
 func (a *App) applyOutboundProfile(ctx *sdk.AppCtx, provider string, connectionID int64, applicationID, profileID string) (outboundReadinessView, error) {
+	a.inventoryReads.invalidate()
+	defer a.inventoryReads.invalidate()
 	if strings.ToLower(strings.TrimSpace(provider)) != "telnyx" {
 		return outboundReadinessView{}, fmt.Errorf("outbound profile selection is not required for provider %s", provider)
 	}

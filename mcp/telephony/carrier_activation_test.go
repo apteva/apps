@@ -199,12 +199,16 @@ func TestCarrierActivationConfirmationTimeout(t *testing.T) {
 	row = activationRow(t, a, row.ID)
 	_, err := a.prepareAndActivateTelnyxAI(ctx, row, "Help.", "", "")
 	activationPending(t, err)
+	for range 2 {
+		activationExec(t, a, `UPDATE carrier_activations SET next_attempt_at=? WHERE call_id=?`, ringTime(time.Now().Add(-time.Second)), row.ID)
+		activationPending(t, a.driveCarrierActivation(ctx, row.ID))
+	}
 	activationExec(t, a, `UPDATE carrier_activations SET next_attempt_at=? WHERE call_id=?`, ringTime(time.Now().Add(-time.Second)), row.ID)
 	if err = a.driveCarrierActivation(ctx, row.ID); err != nil {
 		t.Fatal(err)
 	}
 	a.stopRoutingDispatcher()
-	activationCommands(t, p, "answer_call", "reject_call")
+	activationCommands(t, p, "answer_call", "answer_call", "answer_call", "reject_call")
 	if activationRow(t, a, row.ID).Status != "failed" {
 		t.Fatal("unconfirmed answer left ringing")
 	}

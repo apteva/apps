@@ -598,6 +598,16 @@ func (a *App) restartCarrierMedia(ctx *sdk.AppCtx, id, generation string) error 
 	if row == nil || isTerminalStatus(row.Status) {
 		return nil
 	}
+	// Initial activation owns its retry budget. A reconnect watchdog must not
+	// dispatch an additional start command while activation is still pending.
+	var activating bool
+	if err := a.db().db.QueryRow(`SELECT EXISTS(SELECT 1 FROM carrier_activations WHERE call_id=? AND status IN ('pending','waiting','failed')) OR EXISTS(SELECT 1 FROM call_carrier_commands WHERE call_id=? AND lease_until>?)`, id, id, ringTime(time.Now())).Scan(&activating); err != nil {
+		return err
+	}
+	if activating {
+		_, err := a.db().db.Exec(`UPDATE carrier_media_bridges SET next_attempt_at=? WHERE generation=? AND state IN ('connecting','recovering')`, ringTime(time.Now().Add(2*time.Second)), generation)
+		return err
+	}
 	var state, deadline, next string
 	var attempts int
 	err = a.db().db.QueryRow(`SELECT b.state,b.deadline_at,b.next_attempt_at,b.attempts FROM carrier_media_bridges b JOIN calls c ON c.id=b.call_id AND c.media_generation=b.generation WHERE b.generation=?`, generation).Scan(&state, &deadline, &next, &attempts)

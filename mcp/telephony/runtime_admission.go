@@ -50,6 +50,8 @@ func (a *App) outboundPolicy(ctx *sdk.AppCtx, body map[string]any) (map[string]a
 		return nil, errors.New("project context required")
 	}
 	if scope := strArg(body, "scope", ""); scope != "" {
+		a.inventoryReads.invalidate()
+		defer a.inventoryReads.invalidate()
 		enabled, ok := body["enabled"].(bool)
 		if !ok {
 			return nil, errors.New("enabled must be a boolean")
@@ -124,6 +126,8 @@ func (a *App) outboundPolicy(ctx *sdk.AppCtx, body map[string]any) (map[string]a
 // Runtime route toggles retain carrier resources and route snapshots. Restoring
 // or deleting external resources is a separate deconfiguration operation.
 func (a *App) setInboundRouteEnabled(route *routeRow, enabled bool) (map[string]any, error) {
+	a.inventoryReads.invalidate()
+	defer a.inventoryReads.invalidate()
 	a.admissionMu.Lock()
 	defer a.admissionMu.Unlock()
 	if enabled {
@@ -148,7 +152,7 @@ func (a *App) handleSoftphoneNumbers(w http.ResponseWriter, r *http.Request, pro
 		http.Error(w, "GET only", 405)
 		return
 	}
-	result, err := a.connectedNumbers(globalCtx.WithProject(project), r.Context())
+	result, err := a.connectedNumbers(globalCtx.WithProject(project), inventoryFreshContext(r.Context(), r.URL.Query().Get("fresh") == "true"))
 	if err != nil {
 		http.Error(w, err.Error(), 503)
 		return

@@ -672,15 +672,22 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ctx := globalCtx.WithProject(row.ProjectID)
-		if err := a.answerInboundCarrierCall(ctx, row); err != nil {
-			_ = a.db().resetAnswerClaim(callID)
-			logSoftphone("softphone carrier answer failed", "call", callID, "provider", row.CarrierSlug, "err", err)
+		// Carrier APIs may open their media socket before returning. Reserve under
+		// the claim lock, then perform network work with that lock released.
+		unlock()
+		unlock = nil
+		current, activationErr := a.activateHumanCarrier(r.Context(), ctx, row)
+		unlock = a.softphones.lockClaim(callID)
+		if activationErr != nil {
+			logSoftphone("softphone carrier answer failed", "call", callID, "provider", row.CarrierSlug, "err", activationErr)
 			_ = writer.Write(ws.OpText, softphoneEventDetail("call.error", callID, "The carrier could not answer the call."))
 			return
 		}
-		if err := a.db().updateStatus(callID, "answered", ""); err != nil {
-			logSoftphone("softphone answered status failed", "call", callID, "err", err)
-			_ = writer.Write(ws.OpText, softphoneEventDetail("call.error", callID, "The call connected, but Telephony could not save its status."))
+		row, err = a.db().findCall(callID)
+		if err != nil || row == nil || isTerminalStatus(row.Status) || row.PeerToken != current.PeerToken {
+			return
+		}
+		if reason, _, _ := a.phoneMediaCheckDetails(row, token); reason != "" {
 			return
 		}
 		if a.callUsesDirectSIP(row) {
@@ -1286,7 +1293,11 @@ func (a *App) softphoneReleaseAnswer(w http.ResponseWriter, r *http.Request, pro
 		return
 	}
 	unlock := a.softphones.lockClaim(callID)
-	defer unlock()
+	defer func() {
+		if unlock != nil {
+			unlock()
+		}
+	}()
 	row, err := a.db().findCall(callID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1305,6 +1316,21 @@ func (a *App) softphoneReleaseAnswer(w http.ResponseWriter, r *http.Request, pro
 	}
 	if phoneUserFrom(r) == nil && a.validPhoneMedia(row, body.SessionToken) {
 		body.SessionToken = row.PeerToken
+	}
+	if row.Status == "answering" && secureEqual(body.SessionToken, row.PeerToken) {
+		// Wait for the existing command's outcome, with the socket claim lock free.
+		unlock()
+		unlock = nil
+		if err := a.waitCarrierCommand(r.Context(), callID); err != nil {
+			http.Error(w, "carrier answer is still pending", http.StatusConflict)
+			return
+		}
+		unlock = a.softphones.lockClaim(callID)
+		row, err = a.db().findCall(callID)
+		if err != nil || row == nil {
+			http.Error(w, "reload answer claim", http.StatusServiceUnavailable)
+			return
+		}
 	}
 	if row.Status != "answering" || row.PeerKind != peerKindHuman ||
 		row.PeerToken == "" || !secureEqual(body.SessionToken, row.PeerToken) {

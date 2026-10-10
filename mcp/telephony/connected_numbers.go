@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -52,6 +53,7 @@ type connectedRouteView struct {
 }
 
 type connectedNumberView struct {
+	VerifiedAt             string                `json:"verified_at,omitempty"`
 	OutboundNumberEnabled  bool                  `json:"outbound_number_enabled"`
 	CarrierConnectionID    int64                 `json:"carrier_connection_id"`
 	OutboundEnabled        bool                  `json:"outbound_enabled"`
@@ -294,6 +296,7 @@ func (a *App) connectedNumbers(ctx *sdk.AppCtx, requests ...context.Context) (ma
 			status["inventory_status"] = "unavailable"
 		} else {
 			successes++
+			status["verified_at"] = result["verified_at"]
 			for _, n := range result["numbers"].([]connectedNumberView) {
 				n.CarrierConnectionID = bound.ConnectionID
 				e := a.checkOutboundAdmission(project, slug, bound.ConnectionID, n.PhoneNumber)
@@ -349,15 +352,30 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 	if projectID == "" {
 		return nil, errors.New("project context required for connected numbers")
 	}
-	owned, err := listOwnedCarrierNumbers(ctx, provider)
-	if err != nil {
-		return nil, err
-	}
 	routes, err := a.db().listRoutesForProjectConnection(projectID, provider.ConnID)
 	if err != nil {
 		return nil, fmt.Errorf("list project routes: %w", err)
 	}
 	routes = currentRoutesByNumber(routes)
+	request := provider.inventoryContext
+	if request == nil {
+		request = context.Background()
+	}
+	scope, err := inventoryScope(a.installID, projectID, provider, routes, ctx.IntegrationsFor("carrier"))
+	if err != nil {
+		return nil, err
+	}
+	freshAfter, fresh := request.Value(inventoryFreshKey{}).(time.Time)
+	publicKey, keyErr := decodeTelnyxSignatureValue(strings.TrimSpace(provider.Fields["public_key"]))
+	loader := &inventoryReadSession{app: a, ctx: ctx, request: request, provider: provider,
+		scope: scope,
+		fresh: fresh, freshAfter: freshAfter, results: map[string]inventoryReadResult{},
+		publicKeyValid: keyErr == nil && len(publicKey) == ed25519.PublicKeySize}
+	provider.inventoryReads = loader
+	owned, err := listOwnedCarrierNumbers(ctx, provider)
+	if err != nil {
+		return nil, err
+	}
 
 	routesByID := make(map[string]*routeRow, len(routes))
 	routesByPhone := make(map[string]*routeRow, len(routes))
@@ -377,6 +395,26 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 		}
 	}
 
+	if provider.Slug == "telnyx" {
+		seen := map[string]bool{}
+		ids := []string{}
+		add := func(id string) {
+			if validProviderResourceID(id) && !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+		for _, n := range owned {
+			add(telnyxRouteApplicationID(routesByPhone[compactPhoneNumber(n.PhoneNumber)], n.ConnectionID))
+		}
+		for _, r := range routes {
+			add(telnyxRouteApplicationID(&r, ""))
+		}
+		loader.prefetchApplications(ids)
+	}
+	if err := request.Err(); err != nil {
+		return nil, err
+	}
 	agentNames := make(map[int64]string)
 	resolveAgentName := func(agentID int64) string {
 		if name, ok := agentNames[agentID]; ok {
@@ -400,7 +438,7 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 		if route == nil {
 			route = routesByPhone[compactPhoneNumber(number.PhoneNumber)]
 		}
-		view := a.connectedNumberView(ctx, provider.Slug, number, route, resolveAgentName)
+		view := a.connectedNumberView(ctx, provider.Slug, number, route, resolveAgentName, loader)
 		if route != nil {
 			usedRoutes[route.ID] = true
 		}
@@ -420,10 +458,10 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 			Capabilities:     []string{},
 			CarrierStatus:    "not_found",
 		}
-		numbers = append(numbers, a.connectedNumberView(ctx, provider.Slug, number, route, resolveAgentName))
+		numbers = append(numbers, a.connectedNumberView(ctx, provider.Slug, number, route, resolveAgentName, loader))
 	}
 	if provider.Slug == "telnyx" {
-		profiles, profileErr := listTelnyxOutboundProfiles(ctx, provider.ConnID, provider.inventoryContext)
+		profiles, profileErr := listTelnyxOutboundProfilesWithLoader(ctx, provider.ConnID, loader, provider.inventoryContext)
 		readinessCache := map[string]outboundReadinessView{}
 		for i := range numbers {
 			phone := compactPhoneNumber(numbers[i].PhoneNumber)
@@ -439,7 +477,7 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 				numbers[i].Outbound = cached
 				continue
 			}
-			readiness, readinessErr := a.telnyxOutboundReadiness(ctx, provider.ConnID, applicationID, profiles, provider.inventoryContext)
+			readiness, readinessErr := a.telnyxOutboundReadinessWithLoader(ctx, provider.ConnID, applicationID, profiles, loader, provider.inventoryContext)
 			if readinessErr != nil {
 				readiness.Status = outboundConfigError
 				readiness.Message = readinessErr.Error()
@@ -457,6 +495,9 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 		}
 		return numbers[i].PhoneNumber < numbers[j].PhoneNumber
 	})
+	if err := request.Err(); err != nil {
+		return nil, err
+	}
 	directSIP := map[string]any{
 		"supported": provider.Slug == "twilio" || provider.Slug == "telnyx",
 		"enabled":   false,
@@ -488,19 +529,25 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 			directSIP["srtp"] = cfg.SRTPMode
 		}
 	}
+	for i := range numbers {
+		if !loader.verifiedAt.IsZero() {
+			numbers[i].VerifiedAt = loader.verifiedAt.Format(time.RFC3339Nano)
+		}
+	}
 	return map[string]any{
-		"provider":   provider.Slug,
-		"count":      len(numbers),
-		"numbers":    numbers,
-		"direct_sip": directSIP,
+		"provider":    provider.Slug,
+		"count":       len(numbers),
+		"numbers":     numbers,
+		"direct_sip":  directSIP,
+		"verified_at": loader.verifiedAt.Format(time.RFC3339Nano),
 	}, nil
 }
 
 // toolNumbersConnected exposes the same carrier-owned inventory used by the
 // Numbers panel. Unlike telephony_routes_list, it includes purchased numbers
 // that have not been configured with an inbound Telephony route yet.
-func (a *App) toolNumbersConnected(request context.Context, ctx *sdk.AppCtx, _ map[string]any) (any, error) {
-	result, err := a.connectedNumbers(ctx, request)
+func (a *App) toolNumbersConnected(request context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	result, err := a.connectedNumbers(ctx, inventoryFreshContext(request, boolArg(args, "fresh", false)))
 	if err != nil {
 		return mcpError(err.Error()), nil
 	}
@@ -822,7 +869,7 @@ func parseOwnedCarrierNumbers(provider string, raw json.RawMessage) ([]ownedNumb
 	return out, nil
 }
 
-func (a *App) connectedNumberView(ctx *sdk.AppCtx, provider string, number ownedNumber, route *routeRow, agentName func(int64) string) connectedNumberView {
+func (a *App) connectedNumberView(ctx *sdk.AppCtx, provider string, number ownedNumber, route *routeRow, agentName func(int64) string, loaders ...*inventoryReadSession) connectedNumberView {
 	view := connectedNumberView{
 		PhoneNumber:      number.PhoneNumber,
 		Provider:         provider,
@@ -905,7 +952,7 @@ func (a *App) connectedNumberView(ctx *sdk.AppCtx, provider string, number owned
 		}
 		return view
 	}
-	view.VoiceWebhookStatus, view.StatusCallbackState, view.HealthMessage = a.routeWebhookHealth(ctx, provider, number, *route)
+	view.VoiceWebhookStatus, view.StatusCallbackState, view.HealthMessage = a.routeWebhookHealth(ctx, provider, number, *route, loaders...)
 	switch {
 	case view.VoiceWebhookStatus == webhookConfigured && view.StatusCallbackState == webhookConfigured:
 		view.RoutingHealth = "healthy"
@@ -917,18 +964,34 @@ func (a *App) connectedNumberView(ctx *sdk.AppCtx, provider string, number owned
 	return view
 }
 
-func (a *App) routeWebhookHealth(ctx *sdk.AppCtx, provider string, number ownedNumber, route routeRow) (string, string, string) {
+func (a *App) routeWebhookHealth(ctx *sdk.AppCtx, provider string, number ownedNumber, route routeRow, loaders ...*inventoryReadSession) (string, string, string) {
+	var loader *inventoryReadSession
+	if len(loaders) > 0 {
+		loader = loaders[0]
+	}
+	read := func(tool string, input map[string]any) ([]byte, error) {
+		if loader != nil && loader.provider.ConnID == route.CarrierConnectionID {
+			return loader.read(tool, input)
+		}
+		return executeCarrierTool(ctx, route.CarrierConnectionID, tool, input)
+	}
 	switch provider {
 	case "twilio":
 		return webhookURLState(number.VoiceURL, a.inboundRouteURL(route), number.VoiceMethod),
 			webhookURLState(number.StatusCallback, a.twilioRouteStatusURL(route), number.StatusMethod), ""
 	case "telnyx":
-		creds, err := ctx.PlatformAPI().GetConnectionCredentials(route.CarrierConnectionID)
-		if err != nil {
-			return webhookUnknown, webhookUnknown, "Could not verify the Telnyx webhook signing key."
+		validKey := false
+		if loader != nil && loader.provider.ConnID == route.CarrierConnectionID {
+			validKey = loader.publicKeyValid
+		} else {
+			creds, err := ctx.PlatformAPI().GetConnectionCredentials(route.CarrierConnectionID)
+			if err != nil {
+				return webhookUnknown, webhookUnknown, "Could not verify the Telnyx webhook signing key."
+			}
+			publicKey, keyErr := decodeTelnyxSignatureValue(strings.TrimSpace(creds.Fields["public_key"]))
+			validKey = keyErr == nil && len(publicKey) == ed25519.PublicKeySize
 		}
-		publicKey, keyErr := decodeTelnyxSignatureValue(strings.TrimSpace(creds.Fields["public_key"]))
-		if keyErr != nil || len(publicKey) != ed25519.PublicKeySize {
+		if !validKey {
 			return webhookMissing, webhookMissing, "A valid Telnyx webhook public key is required before this route can receive calls."
 		}
 		var config telnyxRouteConfig
@@ -941,7 +1004,7 @@ func (a *App) routeWebhookHealth(ctx *sdk.AppCtx, provider string, number ownedN
 		if number.ConnectionID != config.ApplicationID {
 			return webhookMismatch, webhookMismatch, "The Telnyx number is assigned to a different voice application."
 		}
-		raw, err := executeCarrierTool(ctx, route.CarrierConnectionID, "get_call_control_application", map[string]any{"id": config.ApplicationID})
+		raw, err := read("get_call_control_application", map[string]any{"id": config.ApplicationID})
 		if err != nil {
 			return webhookUnknown, webhookUnknown, "Could not verify the Telnyx application."
 		}
@@ -963,7 +1026,7 @@ func (a *App) routeWebhookHealth(ctx *sdk.AppCtx, provider string, number ownedN
 		if number.ApplicationID != config.ApplicationID {
 			return webhookMismatch, webhookMismatch, "The Plivo number is assigned to a different voice application."
 		}
-		raw, err := executeCarrierTool(ctx, route.CarrierConnectionID, "get_application", map[string]any{"app_id": config.ApplicationID})
+		raw, err := read("get_application", map[string]any{"app_id": config.ApplicationID})
 		if err != nil {
 			return webhookUnknown, webhookUnknown, "Could not verify the Plivo application."
 		}

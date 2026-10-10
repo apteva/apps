@@ -91,6 +91,7 @@ type numberPurchaseIntent struct {
 
 type numberProvider struct {
 	inventoryContext context.Context
+	inventoryReads   *inventoryReadSession
 	Slug             string
 	ConnID           int64
 	Fields           map[string]string
@@ -831,6 +832,8 @@ func searchSignalWireNumbers(ctx *sdk.AppCtx, connID int64, request numberSearch
 }
 
 func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressID, complianceID string) (map[string]any, error) {
+	a.inventoryReads.invalidate()
+	defer a.inventoryReads.invalidate()
 	token = strings.TrimSpace(token)
 	addressID = strings.TrimSpace(addressID)
 	complianceID = strings.TrimSpace(complianceID)
@@ -1228,7 +1231,7 @@ func (a *App) handleNumbers(w http.ResponseWriter, r *http.Request) {
 			result, err = a.setInboundRouteEnabled(route, true)
 		}
 	case "/numbers/connected":
-		result, err = a.connectedNumbers(ctx, r.Context())
+		result, err = a.connectedNumbers(ctx, inventoryFreshContext(r.Context(), boolArg(body, "fresh", false)))
 	case "/numbers/outbound-profile":
 		result, err = a.configureNumberOutboundProfile(ctx,
 			strings.TrimSpace(strArg(body, "phone_number", "")),

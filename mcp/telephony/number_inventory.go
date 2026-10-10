@@ -93,6 +93,9 @@ func (a *App) accountNumberInventories(ctx *sdk.AppCtx, bindings []*sdk.BoundInt
 }
 
 func executeNumberInventoryTool(ctx *sdk.AppCtx, p *numberProvider, tool string, input map[string]any) ([]byte, error) {
+	if p.inventoryReads != nil {
+		return p.inventoryReads.read(tool, input)
+	}
 	return executeCarrierTool(ctx, p.ConnID, tool, input, p.inventoryContext)
 }
 

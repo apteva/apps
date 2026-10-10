@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -146,7 +147,8 @@ func TestRuntimeInventoryFailureIsolation(t *testing.T) {
 				t.Fatalf("partial result: %+v", result)
 			}
 			p.failIDs[10] = true
-			result, err = a.connectedNumbers(ctx)
+			// Explicitly verify the new carrier failure rather than the 25-second snapshot.
+			result, err = a.connectedNumbers(ctx, inventoryFreshContext(context.Background(), true))
 			if err != nil || result["inventory_status"] != "unavailable" || len(result["numbers"].([]connectedNumberView)) != 0 || len(result["warnings"].([]numberInventoryWarning)) != 2 {
 				t.Fatalf("all failures hidden: %+v %v", result, err)
 			}
