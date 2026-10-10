@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.11.5
+version: 0.11.6
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -371,6 +371,7 @@ type App struct {
 	aiPolicies       aiPolicyRegistry
 	mediaBridges     carrierBridgeRegistry
 	callReads        callReadCache
+	inventoryReads   inventoryReadCache
 	outboundHints    outboundInventoryHints
 	admissionMu      sync.RWMutex
 	audioPeerHasher  audioPeerHasher
@@ -822,7 +823,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "telephony_numbers_connected",
 			Description: "List every phone number owned by the bound carrier, including purchased numbers that do not have a Telephony route. " +
 				"Returns normalized capabilities, carrier status, inbound route and routing health, outbound readiness, and direct-SIP status. This operation is read-only.",
-			InputSchema: schemaObject(map[string]any{}, nil),
+			InputSchema: schemaObject(map[string]any{"fresh": map[string]any{"type": "boolean", "description": "Bypass the 25-second carrier read cache; simultaneous refreshes still share reads."}}, nil),
 			HandlerCtx:  a.toolNumbersConnected,
 		},
 		{
@@ -1816,6 +1817,8 @@ func (a *App) toolRoutesConfigureCarrier(callerCtx context.Context, ctx *sdk.App
 }
 
 func (a *App) configureRouteCarrier(ctx *sdk.AppCtx, route *routeRow) error {
+	a.inventoryReads.invalidate()
+	defer a.inventoryReads.invalidate()
 	if route == nil {
 		return errors.New("route required")
 	}
@@ -2320,7 +2323,7 @@ func (a *App) disableTelnyxRoute(ctx *sdk.AppCtx, route *routeRow) error {
 	return nil
 }
 
-func (a *App) answerInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
+func (a *App) answerInboundCarrierCall(ctx *sdk.AppCtx, row *callRow, requests ...context.Context) error {
 	if a.callUsesDirectSIP(row) {
 		gateway := a.directSIPGateway()
 		if gateway == nil {
@@ -2333,7 +2336,7 @@ func (a *App) answerInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 		twiml := a.twilioStreamTwiML(row)
 		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "update_call", map[string]any{
 			"CallSid": row.CarrierSID, "Twiml": twiml,
-		})
+		}, requests...)
 		return err
 	case "telnyx":
 		// A Telnyx IVR answers the carrier leg before it offers the selected
@@ -2341,7 +2344,7 @@ func (a *App) answerInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 		// the already-answered leg; issuing answer_call twice is rejected by the
 		// carrier and leaves the browser stuck in "answering".
 		if carrierAnswerObserved(row) {
-			return a.startTelnyxStream(ctx, row)
+			return a.startTelnyxStream(ctx, row, requests...)
 		}
 		input := map[string]any{
 			"call_control_id":    row.CarrierSID,
@@ -2358,19 +2361,19 @@ func (a *App) answerInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 			input["record_format"] = "wav"
 			input["record_track"] = "both"
 		}
-		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "answer_call", input)
+		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "answer_call", input, requests...)
 		return err
 	case "plivo":
 		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "update_call", map[string]any{
 			"call_uuid":   row.CarrierSID,
 			"aleg_url":    plivoReliableCallbackURL(a.plivoXMLURL(row.ID, row.CallbackSecret, row.ProjectID)),
 			"aleg_method": "POST",
-		})
+		}, requests...)
 		return err
 	case "bandwidth":
 		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "update_call", map[string]any{
 			"callId": row.CarrierSID, "state": "active", "redirectUrl": a.bandwidthXMLURL(row.ID, row.CallbackSecret, row.ProjectID), "redirectMethod": "POST",
-		})
+		}, requests...)
 		return err
 	default:
 		return fmt.Errorf("unsupported inbound provider %s", row.CarrierSlug)

@@ -129,7 +129,11 @@ func (a *App) runCarrierActivations(_ context.Context, ctx *sdk.AppCtx) error {
 // means accepted; answer confirmation and media connection are separate facts.
 func (a *App) driveCarrierActivation(ctx *sdk.AppCtx, id string) error {
 	unlock := a.softphones.lockClaim(id)
-	defer unlock()
+	defer func() {
+		if unlock != nil {
+			unlock()
+		}
+	}()
 	var status, phase, thread, deadline, next, code string
 	var attempts int
 	err := a.db().db.QueryRow(`SELECT status,phase,thread_id,deadline_at,next_attempt_at,attempts,error_code FROM carrier_activations WHERE call_id=? AND project_id=?`, id, ctx.CurrentProject()).Scan(&status, &phase, &thread, &deadline, &next, &attempts, &code)
@@ -149,63 +153,108 @@ func (a *App) driveCarrierActivation(ctx *sdk.AppCtx, id string) error {
 	if err != nil {
 		return err
 	}
-	if row == nil || isTerminalStatus(row.Status) || row.ThreadID != thread {
-		_, err = a.db().db.Exec(`UPDATE carrier_activations SET status='canceled' WHERE call_id=?`, id)
+	if row == nil || isTerminalStatus(row.Status) || row.ThreadID != thread || row.PeerKind != peerKindRealtime {
+		_, err = a.db().db.Exec(`UPDATE carrier_activations SET status='canceled' WHERE call_id=? AND thread_id=?`, id, thread)
 		if err != nil {
 			return err
 		}
 		return errAnswerCallEnded
 	}
-	if row.MediaConnectedAt != "" && status != "failed" {
-		_, err = a.db().db.Exec(`UPDATE carrier_activations SET status='connected',error_code='' WHERE call_id=?`, id)
+	if row.MediaConnectedAt != "" && row.MediaStatus == "connected" && status != "failed" {
+		_, err = a.db().db.Exec(`UPDATE carrier_activations SET status='connected',error_code='' WHERE call_id=? AND thread_id=?`, id, thread)
 		if err != nil {
 			return err
 		}
 		return a.db().clearStateExpiry(id)
+	}
+	// Socket claims and carrier callbacks use the ordinary call lock; never wait
+	// here for a network dispatch already in progress.
+	pending, err := a.carrierCommandPending(id)
+	if err != nil {
+		return err
+	}
+	if pending {
+		return errAnswerPreparationInProgress
 	}
 	now := ringTime(time.Now())
 	desired := "answer"
 	if carrierAnswerObserved(row) {
 		desired = "stream"
 	}
-	if status != "failed" && (deadline <= now || (phase == desired && status == "waiting" && next <= now) || (phase == desired && attempts >= 3 && status == "pending" && next <= now) || row.MediaStatus == "error") {
+	if status != "failed" && (deadline <= now || (phase == desired && attempts >= 3 && next <= now)) {
 		code = "carrier_activation_failed"
-		_, err = a.db().db.Exec(`UPDATE carrier_activations SET status='failed',error_code=?,next_attempt_at=? WHERE call_id=?`, code, now, id)
+		_, err = a.db().db.Exec(`UPDATE carrier_activations SET status='failed',error_code=?,next_attempt_at=? WHERE call_id=? AND thread_id=?`, code, now, id, thread)
 		if err != nil {
 			return err
 		}
 		status = "failed"
 		next = now
 	}
-	if status == "failed" {
-		if _, err = a.db().db.Exec(`UPDATE calls SET routing_resolution='ai_activation_failed',error_message='AI carrier activation failed',state_expires_at=? WHERE id=?`, now, id); err != nil {
+	// A failed stream or missed confirmation is an unsuccessful activation attempt,
+	// not an instruction to hang up after the first carrier command.
+	if status == "waiting" && row.MediaStatus == "error" {
+		status = "pending"
+		next = ringTime(time.Now().Add(2 * time.Second))
+		_, err = a.db().db.Exec(`UPDATE carrier_activations SET status='pending',error_code='media_confirmation_failed',next_attempt_at=? WHERE call_id=? AND thread_id=?`, next, id, thread)
+		if err != nil {
 			return err
 		}
+	}
+	if status == "failed" {
 		if next > now {
 			return errAnswerPreparationInProgress
 		}
-		_, err = a.db().db.Exec(`UPDATE carrier_activations SET next_attempt_at=? WHERE call_id=?`, ringTime(time.Now().Add(5*time.Second)), id)
+		token, err := a.reserveCarrierCommand(row, "ai-terminate", thread)
 		if err != nil {
 			return err
 		}
+		if _, err = a.db().db.Exec(`UPDATE calls SET routing_resolution='ai_activation_failed',error_message='AI carrier activation failed',state_expires_at=? WHERE id=? AND thread_id=?`, now, id, thread); err != nil {
+			a.releaseCarrierCommand(id, token)
+			return err
+		}
+		_, err = a.db().db.Exec(`UPDATE carrier_activations SET next_attempt_at=? WHERE call_id=? AND thread_id=?`, ringTime(time.Now().Add(5*time.Second)), id, thread)
+		if err != nil {
+			a.releaseCarrierCommand(id, token)
+			return err
+		}
+		unlock()
+		unlock = nil
+		// Release ownership serialization before carrier I/O, including termination.
 		err = a.terminateCarrierCall(ctx, row)
 		if err != nil && phase == "answer" && attempts > 0 {
-			// The answer may have succeeded while its callback was lost. An
-			// established leg rejects reject_call; try ending that same leg.
 			carrier, carrierErr := a.carrierForRow(ctx, nil, row)
-			if carrierErr != nil {
-				return carrierErr
+			if carrierErr == nil {
+				err = carrier.Hangup(ctx, row)
+			} else {
+				err = carrierErr
 			}
-			err = carrier.Hangup(ctx, row)
+		}
+		unlock = a.softphones.lockClaim(id)
+		owns, ownErr := a.ownsCarrierCommand(id, token)
+		a.releaseCarrierCommand(id, token)
+		if ownErr != nil {
+			return ownErr
+		}
+		if !owns {
+			return errAnswerPreparationInProgress
 		}
 		if err != nil {
 			return err
 		}
-		_, err = a.db().updateStatusWithFacts(id, "failed", "AI carrier activation failed", lifecycleFacts{Source: "telephony", ExpectedThreadID: thread, TerminationInitiator: "telephony"})
+		current, err := a.db().findCall(id)
 		if err != nil {
 			return err
 		}
-		_, err = a.db().db.Exec(`UPDATE carrier_activations SET status='ended' WHERE call_id=?`, id)
+		if current == nil || current.ThreadID != thread || current.PeerKind != peerKindRealtime {
+			return errAnswerCallEnded
+		}
+		if !isTerminalStatus(current.Status) {
+			_, err = a.db().updateStatusWithFacts(id, "failed", "AI carrier activation failed", lifecycleFacts{Source: "telephony", ExpectedThreadID: thread, TerminationInitiator: "telephony"})
+			if err != nil {
+				return err
+			}
+		}
+		_, err = a.db().db.Exec(`UPDATE carrier_activations SET status='ended' WHERE call_id=? AND thread_id=?`, id, thread)
 		a.launchAIRecovery("activation-cleanup/"+id, func() { _ = a.killCallThread(ctx, row) })
 		return err
 	}
@@ -215,11 +264,25 @@ func (a *App) driveCarrierActivation(ctx *sdk.AppCtx, id string) error {
 	if phase != desired {
 		attempts = 0
 	}
-	// Persist before dispatch, so restarts never reset the phase's attempt count.
-	_, err = a.db().db.Exec(`UPDATE carrier_activations SET phase=?,attempts=?,status='pending',next_attempt_at=? WHERE call_id=?`, desired, attempts+1, ringTime(time.Now().Add(2*time.Second)), id)
+	token, err := a.reserveCarrierCommand(row, "ai-"+desired, thread)
 	if err != nil {
 		return err
 	}
+	_, err = a.db().db.Exec(`UPDATE carrier_activations SET phase=?,attempts=?,status='pending',next_attempt_at=? WHERE call_id=? AND thread_id=?`, desired, attempts+1, ringTime(time.Now().Add(2*time.Second)), id, thread)
+	if err != nil {
+		a.releaseCarrierCommand(id, token)
+		return err
+	}
+	// Retain failed media evidence until the replacement handler confirms media.
+	// Its bridge URL resolver also needs that state to renew the Core lease.
+	limit := carrierActivationCommandTimeout
+	if end, e := time.Parse(time.RFC3339Nano, deadline); e == nil && time.Until(end) < limit {
+		limit = time.Until(end)
+	}
+	request, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+	unlock()
+	unlock = nil
 	if desired == "answer" {
 		input := map[string]any{"call_control_id": row.CarrierSID, "command_id": telnyxCommandID(id, "ai-answer"), "webhook_url": a.statusCallbackURL(row.ID, row.CallbackSecret, row.ProjectID), "webhook_url_method": "POST"}
 		if row.RecordingMode == recordingModeAlways {
@@ -228,18 +291,46 @@ func (a *App) driveCarrierActivation(ctx *sdk.AppCtx, id string) error {
 			input["record_format"] = "wav"
 			input["record_track"] = "both"
 		}
-		_, err = executeCarrierTool(ctx, row.CarrierConnectionID, "answer_call", input)
+		_, err = executeCarrierTool(ctx, row.CarrierConnectionID, "answer_call", input, request)
 	} else {
-		err = a.startTelnyxStream(ctx, row)
+		err = a.startTelnyxStream(ctx, row, request)
 	}
+	commandErr := err
+	unlock = a.softphones.lockClaim(id)
+	owns, err := a.ownsCarrierCommand(id, token)
 	if err != nil {
-		_, saveErr := a.db().db.Exec(`UPDATE carrier_activations SET error_code=?,next_attempt_at=? WHERE call_id=?`, desired+"_command_failed", ringTime(time.Now().Add(time.Duration(1<<min(attempts+1, 3))*time.Second)), id)
-		if saveErr != nil {
-			return saveErr
+		return err
+	}
+	defer a.releaseCarrierCommand(id, token)
+	current, err := a.db().findCall(id)
+	if err != nil {
+		return err
+	}
+	if current == nil || isTerminalStatus(current.Status) || current.ThreadID != thread || current.PeerKind != peerKindRealtime {
+		return errAnswerCallEnded
+	}
+	if !owns {
+		return errAnswerPreparationInProgress
+	}
+	if current.MediaConnectedAt != "" && current.MediaStatus == "connected" {
+		_, err = a.db().db.Exec(`UPDATE carrier_activations SET status='connected',error_code='' WHERE call_id=? AND thread_id=?`, id, thread)
+		if err != nil {
+			return err
+		}
+		return a.db().clearStateExpiry(id)
+	}
+	if commandErr != nil || current.MediaStatus == "error" {
+		code = desired + "_command_failed"
+		if commandErr == nil {
+			code = "media_confirmation_failed"
+		}
+		_, err = a.db().db.Exec(`UPDATE carrier_activations SET status='pending',error_code=?,next_attempt_at=? WHERE call_id=? AND thread_id=? AND phase=? AND status NOT IN ('connected','canceled','ended','failed')`, code, ringTime(time.Now().Add(time.Duration(1<<min(attempts+1, 3))*time.Second)), id, thread, desired)
+		if err != nil {
+			return err
 		}
 		return errAnswerPreparationInProgress
 	}
-	_, err = a.db().db.Exec(`UPDATE carrier_activations SET status='waiting',error_code='',next_attempt_at=? WHERE call_id=?`, ringTime(time.Now().Add(10*time.Second)), id)
+	_, err = a.db().db.Exec(`UPDATE carrier_activations SET status='waiting',error_code='',next_attempt_at=? WHERE call_id=? AND thread_id=? AND phase=? AND status NOT IN ('connected','canceled','ended','failed')`, ringTime(time.Now().Add(10*time.Second)), id, thread, desired)
 	if err != nil {
 		return err
 	}

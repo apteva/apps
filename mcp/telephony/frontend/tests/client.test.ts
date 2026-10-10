@@ -67,6 +67,17 @@ describe("Telephony extension", () => {
     expect(request.headers.get("Authorization")).toBe("Bearer first");
   });
 
+  test("fresh inventory keeps authorization and project scoping", async () => {
+    const f = fixture();
+    f.setResponse(async () => ({ numbers: [], inventory_status: "available", warnings: [] }));
+    await f.client.outboundNumbers({ fresh: true });
+    const request = f.requests[0];
+    expect(request.url.searchParams.get("fresh")).toBe("true");
+    expect(request.url.searchParams.get("project_id")).toBe("p1");
+    expect(request.url.searchParams.get("install_id")).toBe("42");
+    expect(request.headers.get("Authorization")).toBe("Bearer first");
+  });
+
   test("call controls use the same authenticated project-scoped client", async () => {
     const f = fixture();
     const state: CallControlResult = { call_id: "call-1", hold_state: "held", recording_state: "pause_requested", control_error: "",

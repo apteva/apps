@@ -1081,11 +1081,11 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     if (value) localStorage.setItem(`apteva.telephony.softphone.from.v1:${projectId}`, value);
   }, [projectId]);
 
-  const loadOutboundNumbers = useCallback(async () => {
+  const loadOutboundNumbers = useCallback(async (fresh = false) => {
     setFromLoading(true);
     setFromError("");
     try {
-      const data = await postJSON<ConnectedNumbersResponse>(withProject("/numbers/connected"), {});
+      const data = await postJSON<ConnectedNumbersResponse>(withProject("/numbers/connected"), { fresh });
       const seen = new Set<string>();
       const available = (data.numbers ?? []).filter((number) => {
         if (number.outbound_enabled === false || !E164_RE.test(number.phone_number) || number.carrier_status === "not_found" || seen.has(number.phone_number)) return false;
@@ -1540,7 +1540,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                 onTimeoutChange={setDialTimeoutSec}
                 onCall={() => void placeSoftphoneCall()}
                 onApplyProfile={(profileId) => void configureOutboundProfile(profileId)}
-                onRefreshNumbers={() => void loadOutboundNumbers()}
+                onRefreshNumbers={() => void loadOutboundNumbers(true)}
                 profileBusy={profileBusy}
                 busy={softphoneBusy}
                 disabled={Boolean(softphoneCallId)}
@@ -1879,6 +1879,7 @@ interface ConnectedNumber {
   status_callback_status: string;
   routing_health: string;
   health_message?: string;
+  verified_at?: string;
   outbound: OutboundReadiness;
 }
 
@@ -2037,12 +2038,12 @@ function NumbersView({ projectId }: NativePanelProps) {
     return `${API}${path}${query}`;
   }, [projectId]);
 
-  const loadConnected = useCallback(async () => {
+  const loadConnected = useCallback(async (fresh = false) => {
     const requestId = ++connectedRequestRef.current;
     setConnectedLoading(true);
     setConnectedError("");
     try {
-      const data = await postJSON<ConnectedNumbersResponse>(endpoint("/numbers/connected"), {});
+      const data = await postJSON<ConnectedNumbersResponse>(endpoint("/numbers/connected"), { fresh });
       if (requestId !== connectedRequestRef.current) return;
       setInventoryWarnings(data.warnings ?? []);
       setProviderStatuses(data.provider_statuses ?? []);
@@ -2304,7 +2305,7 @@ function NumbersView({ projectId }: NativePanelProps) {
             </div>
             <button
               type="button"
-              onClick={loadConnected}
+              onClick={() => void loadConnected(true)}
               disabled={connectedLoading}
               className="h-8 px-3 rounded border border-border text-xs hover:bg-bg-muted disabled:opacity-50"
             >
@@ -2338,7 +2339,7 @@ function NumbersView({ projectId }: NativePanelProps) {
           ) : connectedError ? (
             <div className="flex items-center justify-between gap-4 px-4 py-6">
               <div className="min-w-0 text-sm text-error whitespace-pre-wrap">{connectedError}</div>
-              <button type="button" onClick={loadConnected} className="h-8 shrink-0 px-3 rounded border border-border text-xs hover:bg-bg-muted">Retry</button>
+              <button type="button" onClick={() => void loadConnected(true)} className="h-8 shrink-0 px-3 rounded border border-border text-xs hover:bg-bg-muted">Retry</button>
             </div>
           ) : connectedNumbers.length === 0 ? (
             <div className="flex items-center justify-center px-6 text-center text-sm text-text-muted" style={{ minHeight: "10rem" }}>
@@ -2510,6 +2511,7 @@ function NumbersView({ projectId }: NativePanelProps) {
                         <span className="text-text-dim">Events</span>
                         <span className={`rounded border px-1.5 py-0.5 ${healthClass(number.status_callback_status)}`}>{healthLabel(number.status_callback_status)}</span>
                       </div>
+                      {number.verified_at ? <div className="mt-1 text-xs text-text-dim" title={number.verified_at}>Checked {new Date(number.verified_at).toLocaleTimeString()}</div> : null}
                       {number.health_message ? (
                         <div className="mt-1 truncate text-xs text-text-muted" title={number.health_message}>{number.health_message}</div>
                       ) : null}

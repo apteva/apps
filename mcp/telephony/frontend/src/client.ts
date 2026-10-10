@@ -63,6 +63,7 @@ export interface CallSession {
   coaching?: boolean;
 }
 export interface OutboundNumberChoice {
+ verified_at?: string;
  phone_number: string;
  provider: string;
  carrier_connection_id: number;
@@ -277,7 +278,7 @@ export class TelephonyClient {
   async listenerAudit(id: string): Promise<{ listeners: Array<{ id: string; principal: unknown; joined_at: string; left_at: string; reason: string; diagnostics: unknown; mode: "listen"|"coach" }>; coaching: Array<{id:string;listener_audit_id:string;principal:unknown;started_at:string;ended_at:string;reason:string}> }> { return this.app.get(this.path(`/softphone/listen-audit/${callID(id)}`)); }
 
   /** Authorized choices for new calls; disabling never changes existing media grants. */
-  outboundNumbers(): Promise<OutboundNumbersResult> { return this.app.get(this.path("/softphone/numbers")); }
+  outboundNumbers(options: { fresh?: boolean } = {}): Promise<OutboundNumbersResult> { return this.app.get(this.path(options.fresh ? "/softphone/numbers?fresh=true" : "/softphone/numbers")); }
 
   async renew(session: CallSession): Promise<{lease_seconds?: number}> {
     return this.app.post(this.path(`/softphone/renew/${callID(session.call_id)}`), { session_token: session.session_token });

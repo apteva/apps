@@ -96,6 +96,8 @@ func (a *App) handleRuntimeBindings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) applyRuntimeBindingRequest(req runtimeBindingRequest) (map[string]any, error) {
+	a.inventoryReads.invalidate()
+	defer a.inventoryReads.invalidate()
 	if err := validateRuntimeBindingChange(req); err != nil {
 		return nil, err
 	}
