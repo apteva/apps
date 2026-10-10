@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import uuid
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +34,21 @@ def run_steps(steps, root, env):
         load_environment(env_file, env)
 
 
+def cleanup_profiles(signing_root, home=None):
+    marker = signing_root / 'installed-profile-files.json'
+    if not marker.exists():
+        return
+    home = Path.home() if home is None else home
+    allowed = {home / 'Library/Developer/Xcode/UserData/Provisioning Profiles',
+               home / 'Library/MobileDevice/Provisioning Profiles'}
+    for value in json.loads(marker.read_text()):
+        path = Path(value)
+        if path.parent not in allowed or path.suffix not in {'.mobileprovision', '.provisionprofile'}:
+            raise ValueError('invalid managed provisioning profile cleanup path')
+        uuid.UUID(path.stem)
+        path.unlink(missing_ok=True)
+
+
 def main():
     root = ROOT
     env = dict(os.environ)
@@ -50,15 +66,18 @@ def main():
             destination.mkdir(parents=True, exist_ok=True)
             shutil.copy2(root / (env.get('APTEVA_ARTIFACT_NAME', 'apteva-build') + '.zip'), destination / (env.get('APTEVA_ARTIFACT_NAME', 'apteva-build') + '.zip'))
     finally:
-        shutil.rmtree(root / 'apteva-signing', ignore_errors=True)
-        (root / '.apteva-env').unlink(missing_ok=True)
-        for key in root.glob('AuthKey_*.p8'):
-            key.unlink(missing_ok=True)
-        for key in ('ANDROID_UPLOAD_KEYSTORE_BASE64', 'ANDROID_UPLOAD_STORE_PASSWORD',
-                    'ANDROID_UPLOAD_KEY_PASSWORD', 'CERTIFICATE_PRIVATE_KEY',
-                    'APTEVA_CERTIFICATE_PEM', 'APTEVA_PROVISIONING_PROFILE_BASE64',
-                    'APP_STORE_CONNECT_PRIVATE_KEY'):
-            env.pop(key, None)
+        try:
+            cleanup_profiles(root / 'apteva-signing')
+        finally:
+            shutil.rmtree(root / 'apteva-signing', ignore_errors=True)
+            (root / '.apteva-env').unlink(missing_ok=True)
+            for key in root.glob('AuthKey_*.p8'):
+                key.unlink(missing_ok=True)
+            for key in ('ANDROID_UPLOAD_KEYSTORE_BASE64', 'ANDROID_UPLOAD_STORE_PASSWORD',
+                        'ANDROID_UPLOAD_KEY_PASSWORD', 'CERTIFICATE_PRIVATE_KEY',
+                        'APTEVA_CERTIFICATE_PEM', 'APTEVA_PROVISIONING_PROFILE_BASE64',
+                        'APP_STORE_CONNECT_PRIVATE_KEY'):
+                env.pop(key, None)
 
 
 if __name__ == '__main__':
