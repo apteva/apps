@@ -410,6 +410,9 @@ func validateActorDefinition(def actorDefinition) error {
 			if err := validateReadViews(step.ReadViews); err != nil {
 				return fmt.Errorf("steps[%d]: %w", i, err)
 			}
+			if step.ReadViews.AllowPartial && !def.ReadOnly {
+				return fmt.Errorf("steps[%d]: allow_partial requires a read_only operation", i)
+			}
 		case "fill":
 			if !locatorHasTarget(step.Locator) {
 				return fmt.Errorf("steps[%d].locator is required for fill", i)
@@ -417,6 +420,9 @@ func validateActorDefinition(def actorDefinition) error {
 		case "set_text":
 			if !locatorHasTarget(step.Locator) {
 				return fmt.Errorf("steps[%d].locator is required for set_text", i)
+			}
+			if step.NewlineMode != "" && !actorTemplateValue(step.NewlineMode) && step.NewlineMode != "preserve" && step.NewlineMode != "compact" {
+				return fmt.Errorf("steps[%d].newline_mode must be preserve or compact", i)
 			}
 		case "set_checked", "select_option", "set_temporal":
 			if !locatorHasTarget(step.Locator) && !(step.Action == "set_checked" && step.Labels != nil) {

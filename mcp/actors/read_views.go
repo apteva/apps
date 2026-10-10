@@ -16,13 +16,16 @@ import (
 
 // View traversal is site-neutral. It only follows observed anchors, scrolls,
 // and optionally clicks pagination controls whose fresh SOM effect is navigation_only.
+var errReadCollectionBound = errors.New("read collection bound reached")
+
 type actorReadViews struct {
-	EntryQuery  map[string]string `json:"entry_query,omitempty"`
-	EntryURL    string            `json:"entry_url"`
-	IdentityURL string            `json:"identity_url"`
-	Identity    actorField        `json:"identity"`
-	Views       []actorReadView   `json:"views"`
-	TimeoutMS   int               `json:"timeout_ms,omitempty"`
+	AllowPartial bool              `json:"allow_partial,omitempty"`
+	EntryQuery   map[string]string `json:"entry_query,omitempty"`
+	EntryURL     string            `json:"entry_url"`
+	IdentityURL  string            `json:"identity_url"`
+	Identity     actorField        `json:"identity"`
+	Views        []actorReadView   `json:"views"`
+	TimeoutMS    int               `json:"timeout_ms,omitempty"`
 }
 type actorReadView struct {
 	UseEntryPage     bool                        `json:"use_entry_page,omitempty"`
@@ -57,7 +60,7 @@ type actorReadPagination struct {
 	EndSelector       string       `json:"end_selector,omitempty"`
 	ScrollTargetName  string       `json:"scroll_target_name,omitempty"`
 	Amount            int          `json:"amount,omitempty"`
-	MaxPages          int          `json:"max_pages,omitempty"`
+	MaxPages          any          `json:"max_pages,omitempty"`
 	StableRounds      int          `json:"stable_rounds,omitempty"`
 	SettleMS          int          `json:"settle_ms,omitempty"`
 }
@@ -200,7 +203,7 @@ func validateReadViews(c *actorReadViews) error {
 				return err
 			}
 		}
-		if v.Pagination.MaxPages < 1 || v.Pagination.MaxPages > maxActorPages || v.Pagination.StableRounds < 2 || v.Pagination.StableRounds > 10 || v.Pagination.SettleMS < 500 || v.Pagination.SettleMS > 10000 {
+		if (!actorTemplateValue(stringFromAny(v.Pagination.MaxPages)) && (templateInt(v.Pagination.MaxPages) < 1 || templateInt(v.Pagination.MaxPages) > maxActorPages)) || v.Pagination.StableRounds < 2 || v.Pagination.StableRounds > 10 || v.Pagination.SettleMS < 500 || v.Pagination.SettleMS > 10000 {
 			return errors.New("invalid read view pagination bounds")
 		}
 	}
@@ -348,12 +351,16 @@ func (e *actorExecution) inspectViews(c actorReadViews) error {
 	}
 	seen := map[string]map[string]any{}
 	failed := false
+	partialOnly := true
 	for i, v := range c.Views {
 		result := cov.Views[i]
 		err := e.inspectOneView(c, v, result, seen)
 		if err != nil {
 			result.Error = err.Error()
 			failed = true
+			if !errors.Is(err, errReadCollectionBound) || !result.Checked {
+				partialOnly = false
+			}
 			e.addTrace("inspect_views.view", "incomplete", err.Error(), map[string]any{"view": v.Name})
 			if errors.Is(err, errActorCancelled) || e.workerCtx.Err() != nil {
 				return err
@@ -369,7 +376,7 @@ func (e *actorExecution) inspectViews(c actorReadViews) error {
 		cov.Complete = cov.Complete && v.Complete
 		cov.MoreRemaining = cov.MoreRemaining || v.MoreRemaining
 	}
-	if !cov.Complete {
+	if !cov.Complete && !(c.AllowPartial && partialOnly) {
 		return errors.New("read-only view coverage incomplete; do not infer absence or create new content")
 	}
 	return nil
@@ -407,7 +414,7 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 		}
 	}
 	result.URL = e.currentURL
-	limit := minInt(v.Pagination.MaxPages, e.maxPages)
+	limit := minInt(templateInt(v.Pagination.MaxPages), e.maxPages)
 	viewSeen := map[string]bool{}
 	stable := 0
 	lastSignature := ""
@@ -415,7 +422,7 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 	pendingNextSignature := ""
 	for page := 0; page < limit; page++ {
 		if e.pageCount >= e.maxPages {
-			return errors.New("global page limit reached; more results may remain")
+			return fmt.Errorf("%w: global page limit; more results may remain", errReadCollectionBound)
 		}
 		root, err = e.readViewDOM(c, v)
 		if err != nil {
@@ -516,6 +523,9 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 				}
 				continue
 			}
+			if page+1 >= limit {
+				return fmt.Errorf("%w: pagination limit; more results may remain", errReadCollectionBound)
+			}
 			stable = 0
 			pendingNextSignature = strings.Join(keys, ",")
 			if err := e.clickReadNavigation(v.Pagination.Next); err != nil {
@@ -592,7 +602,7 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 			return err
 		}
 	}
-	return errors.New("pagination limit reached; more results may remain")
+	return fmt.Errorf("%w: pagination limit; more results may remain", errReadCollectionBound)
 }
 
 type readScrollRegion struct {
@@ -630,8 +640,8 @@ func (e *actorExecution) clickReadNavigation(locator actorLocator) error {
 	locator.Selector = ""
 	var matches []setOfMarkTarget
 	var shot *readScrollShot
-	direction := "down"
-	for attempts := 0; attempts < 30; attempts++ {
+	direction := "up"
+	for attempts := 0; attempts < 40; attempts++ {
 		var err error
 		shot, err = e.readScrollSnapshot()
 		if err != nil {
@@ -658,14 +668,18 @@ func (e *actorExecution) clickReadNavigation(locator actorLocator) error {
 		if region == nil {
 			break
 		}
-		if direction == "down" && region.Top >= region.MaxY-1 {
-			direction = "up"
-		}
 		if direction == "up" && region.Top <= 0 {
+			direction = "down"
+		}
+		if direction == "down" && region.Top >= region.MaxY-1 {
 			break
 		}
+		amount := 600
+		if direction == "up" {
+			amount = 10000
+		}
 		var out map[string]any
-		args := withProjectID(e.ctx, map[string]any{"session_id": e.session.SessionID, "action": "scroll", "target_id": region.ID, "som_revision": shot.Revision, "expected_name": region.Name, "expected_role": region.Role, "direction": direction, "amount": 600})
+		args := withProjectID(e.ctx, map[string]any{"session_id": e.session.SessionID, "action": "scroll", "target_id": region.ID, "som_revision": shot.Revision, "expected_name": region.Name, "expected_role": region.Role, "direction": direction, "amount": amount})
 		if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", args, &out); err != nil {
 			return err
 		}

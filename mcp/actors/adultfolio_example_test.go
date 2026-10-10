@@ -8,7 +8,7 @@ import (
 )
 
 func TestEditableReplyExamplePrecommitAndPersistence(t *testing.T) {
-	for _, mode := range []string{"success", "wrong_account", "wrong_recipient", "wrong_composer", "unchanged_id", "wrong_sender", "missing_saved_body"} {
+	for _, mode := range []string{"success", "fast_reply", "wrong_account", "wrong_recipient", "wrong_composer", "unchanged_id", "wrong_sender", "missing_saved_body"} {
 		t.Run(mode, func(t *testing.T) {
 			plat := newFakePlatform()
 			current := ""
@@ -24,6 +24,9 @@ func TestEditableReplyExamplePrecommitAndPersistence(t *testing.T) {
 						current = stringFromAny(in["url"])
 						return map[string]any{"current_url": current}
 					case "set_text":
+						if in["newline_mode"] != "preserve" {
+							t.Fatal("invalid live newline policy")
+						}
 						composer = "<p>Hello</p><p>World</p>"
 						if mode == "wrong_composer" {
 							composer = "<p>hello</p><p>World</p>"
@@ -61,7 +64,10 @@ func TestEditableReplyExamplePrecommitAndPersistence(t *testing.T) {
 						if mode == "missing_saved_body" {
 							body = "Previous"
 						}
-						h += `<div id="` + id + `" class="messageContainer message-modern-wrap"><a class="thumbnailPic" href="/` + sender + `"></a><div class="message-modern-meta"><span class="timeago" title="2026-10-10T00:01:00Z"></span></div><div class="message-modern-body">` + body + `</div></div>`
+						h += `<div id="` + id + `" class="messageContainer message-modern-wrap"><a class="thumbnailPic" href="/` + sender + `"></a><div class="message-modern-meta"><span class="timeago" title="2026-10-10T00:01:00Z"></span></div><div class="message-modern-body">` + body + `</div><span class="message-delete-action"></span></div>`
+					}
+					if commits > 0 && mode == "fast_reply" {
+						h += `<div id="12" class="messageContainer message-modern-wrap"><a class="thumbnailPic" href="/model"></a><div class="message-modern-meta"><span class="timeago" title="2026-10-10T00:02:00Z"></span></div><div class="message-modern-body">A quick response</div></div>`
 					}
 					return map[string]any{"html": h + `</div></body>`, "current_url": current, "rendered": true}
 				}
@@ -84,7 +90,7 @@ func TestEditableReplyExamplePrecommitAndPersistence(t *testing.T) {
 			run, _ := claimActorRun(ctx)
 			app.executeActorRun(context.Background(), ctx, run)
 			r, _ := getActorRun(ctx, queued.(map[string]any)["run_id"].(int64))
-			if (r["status"] == "completed") != (mode == "success") {
+			if (r["status"] == "completed") != (mode == "success" || mode == "fast_reply") {
 				t.Fatalf("%s: %v", mode, r["error"])
 			}
 			want := 1
