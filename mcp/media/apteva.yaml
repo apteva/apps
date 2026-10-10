@@ -2,8 +2,13 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.33
+version: 0.14.34
 description: |
+  v0.14.34 returns compact crop preview receipts by default. Complete native
+  pose, recovery and failure evidence is retained in immutable project-scoped
+  references, with bounded explicit retrieval and authenticated JSON downloads.
+  Crop geometry, coverage warnings, sample counts, versions and timings remain
+  in the receipt; internal render plans and crop caches retain complete evidence.
   v0.14.33 reuses a verified disk source for multi-frame pose previews,
   avoiding repeated HTTPS seeks. Sample-based bounded analysis budgets reserve
   admission/preparation/cleanup time and expose stage timings. Timeouts retain
@@ -250,7 +255,9 @@ provides:
     - name: media_analyze
       description: Analyze an existing image, video, or audio source without modifying it. Returns encoding metadata, decode integrity, visual measurements, every-frame black/frozen checks and opening/ending coverage, plus LUFS/peak/RMS/silence audio measurements where applicable. When render_host_id is configured, analysis runs on that remote host without silent local fallback and reports the effective executor. depth=standard analyzes at most 60 seconds; depth=full analyzes the requested/full duration. Creates no render, derivation, or Storage object. Args — file_id, depth? (standard|full), start_ms?, end_ms?, silence_threshold_db?, silence_min_ms?.
     - name: media_preview_crop
-      description: Inspect sampled crop geometry and composition suitability before rendering. Args — file_id, operation? (crop|extract_frame|extract_reel), target_ratio?, crop_mode?, fit_mode?, at_ms?, start_ms?, end_ms?. Creates no output. Sampled evidence still requires visual review. Strict renders use require_action_preservation=true, with crop_fallback=reject (default) or explicit contain fallback.
+      description: Inspect crop geometry and sampled coverage before rendering. Compact resolved_params and composition retain geometry, warnings, counts and timings; diagnostics_ref retains full immutable evidence. Use media_get_crop_diagnostics for bounded detail or authenticated download_path for complete JSON. Crop paths are summarized, not executable plans. Creates no media output; sampled coverage still requires visual review.
+    - name: media_get_crop_diagnostics
+      description: Retrieve crop evidence by diagnostics_ref in the current project without reanalysis. Defaults to summary. Explicit sections return at most four samples and 24 KiB, with next_offset pagination or download_required for large sections. Complete evidence uses the authenticated attachment download.
     - name: media_ask
       description: Ask a grounded question using the configured descriptions vision/chat integration and only artifacts that already exist. Images use the actual existing source by default; image_detail=thumbnail explicitly uses reduced evidence. Returns supplied dimensions, representation, output render identity and provider-resolution limitations; videos use the canonical thumbnail and cached storyboard keyframes; at_ms selects the nearest existing keyframe and reports the actual timestamp; audio uses an existing completed transcript. Codex requests explicitly use low reasoning and report reasoning_effort. Retries transient vision/chat failures up to three attempts within one timeout; returns request_diagnostics. Explicit auth/quota/invalid-input errors stop immediately. Never runs ffmpeg, generates frames/derivations, or writes files. Args — file_id, question, at_ms?, frame_count? (1-8), include_transcript?, image_detail? (source default|thumbnail).
     - name: media_get_batch
@@ -649,7 +656,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.33
+    ref: media/v0.14.34
     entry: mcp/media
   port: 8080
   health_check: /health

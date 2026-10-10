@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	sdk "github.com/apteva/app-sdk"
 	"net/url"
@@ -13,13 +14,14 @@ import (
 )
 
 type renderInputError struct {
-	Code         string          `json:"error_code"`
-	Message      string          `json:"error"`
-	FileID       string          `json:"file_id,omitempty"`
-	RequestedMs  *int64          `json:"requested_timestamp_ms,omitempty"`
-	ValidStartMs int64           `json:"valid_start_ms"`
-	ValidEndMs   int64           `json:"valid_end_ms_exclusive,omitempty"`
-	Diagnostics  json.RawMessage `json:"crop_diagnostics,omitempty"`
+	Code           string           `json:"error_code"`
+	Message        string           `json:"error"`
+	FileID         string           `json:"file_id,omitempty"`
+	RequestedMs    *int64           `json:"requested_timestamp_ms,omitempty"`
+	ValidStartMs   int64            `json:"valid_start_ms"`
+	ValidEndMs     int64            `json:"valid_end_ms_exclusive,omitempty"`
+	Diagnostics    json.RawMessage  `json:"crop_diagnostics,omitempty"`
+	DiagnosticsRef *cropEvidenceRef `json:"diagnostics_ref,omitempty"`
 }
 
 func (e *renderInputError) Error() string { b, _ := json.Marshal(e); return string(b) }
@@ -143,7 +145,11 @@ func prepareCropPreflight(app *sdk.AppCtx, project, op string, sources []string,
 	ctx, cancel := context.WithTimeout(context.Background(), smartCropTimeout(app, project, op, sources[0], raw))
 	defer cancel()
 	resolved := preprocessSmartCrop(ctx, app, newStorageClient(), project, op, sources, raw)
-	return applyCropCompositionPolicy(resolved)
+	result, err := applyCropCompositionPolicy(resolved)
+	if err != nil {
+		return nil, compactCropInputError(app, project, resolved, err)
+	}
+	return result, nil
 }
 
 func (a *App) toolPreviewCrop(app *sdk.AppCtx, args map[string]any) (any, error) {
@@ -181,9 +187,30 @@ func (a *App) toolPreviewCrop(app *sdk.AppCtx, args map[string]any) (any, error)
 	ctx = context.WithValue(ctx, cropPlanCacheKey{}, cache)
 	resolved := preprocessSmartCrop(ctx, app, newStorageClient(), project, op, []string{fid}, raw)
 	if failure := cropProcessingError(resolved); failure != nil {
-		return nil, failure
+		return nil, compactCropInputError(app, project, resolved, failure)
 	}
-	return map[string]any{"file_id": fid, "source_width": row.Width, "source_height": row.Height, "resolved_params": json.RawMessage(resolved), "composition": cropCompositionForParams(resolved), "artifacts_created": false, "crop_plan_cache_hit": cache.Hit, "preview_elapsed_ms": float64(time.Since(started).Microseconds()) / 1000}, nil
+	ref, err := storeCropEvidence(app.AppDB(), project, resolved)
+	if err != nil {
+		return nil, &renderInputError{Code: "crop_evidence_store_failed", Message: "Crop analysis completed but detailed evidence could not be retained. Retry the preview."}
+	}
+	return map[string]any{"file_id": fid, "source_width": row.Width, "source_height": row.Height, "resolved_params": compactCropParams(resolved), "diagnostics_ref": ref, "composition": cropCompositionForParams(resolved), "artifacts_created": false, "crop_plan_cache_hit": cache.Hit, "preview_elapsed_ms": float64(time.Since(started).Microseconds()) / 1000}, nil
+}
+
+func compactCropInputError(app *sdk.AppCtx, project string, resolved []byte, err error) error {
+	var input *renderInputError
+	if !errors.As(err, &input) || len(input.Diagnostics) == 0 {
+		return err
+	}
+	copy := *input
+	b, _ := json.Marshal(compactCropAudit(input.Diagnostics))
+	copy.Diagnostics = b
+	ref, storeErr := storeCropEvidence(app.AppDB(), project, resolved)
+	if storeErr == nil {
+		copy.DiagnosticsRef = ref
+	} else {
+		copy.Message += " Detailed evidence storage failed; retry the preview to retain the audit."
+	}
+	return &copy
 }
 
 func cropRetainsSampledExtents(a *smartCropAudit) bool {

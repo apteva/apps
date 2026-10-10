@@ -23,8 +23,13 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.33
+version: 0.14.34
 description: |
+  v0.14.34 returns compact crop preview receipts by default. Complete native
+  pose, recovery and failure evidence is retained in immutable project-scoped
+  references, with bounded explicit retrieval and authenticated JSON downloads.
+  Crop geometry, coverage warnings, sample counts, versions and timings remain
+  in the receipt; internal render plans and crop caches retain complete evidence.
   v0.14.33 reuses a verified disk source for multi-frame pose previews,
   avoiding repeated HTTPS seeks. Sample-based bounded analysis budgets reserve
   admission/preparation/cleanup time and expose stage timings. Timeouts retain
@@ -271,7 +276,9 @@ provides:
     - name: media_analyze
       description: Analyze an existing image, video, or audio source without modifying it. Returns encoding metadata, decode integrity, visual measurements, every-frame black/frozen checks and opening/ending coverage, plus LUFS/peak/RMS/silence audio measurements where applicable. When render_host_id is configured, analysis runs on that remote host without silent local fallback and reports the effective executor. depth=standard analyzes at most 60 seconds; depth=full analyzes the requested/full duration. Creates no render, derivation, or Storage object. Args — file_id, depth? (standard|full), start_ms?, end_ms?, silence_threshold_db?, silence_min_ms?.
     - name: media_preview_crop
-      description: Inspect sampled crop geometry and composition suitability before rendering. Args — file_id, operation? (crop|extract_frame|extract_reel), target_ratio?, crop_mode?, fit_mode?, at_ms?, start_ms?, end_ms?. Creates no output. Sampled evidence still requires visual review. Strict renders use require_action_preservation=true, with crop_fallback=reject (default) or explicit contain fallback.
+      description: Inspect crop geometry and sampled coverage before rendering. Compact resolved_params and composition retain geometry, warnings, counts and timings; diagnostics_ref retains full immutable evidence. Use media_get_crop_diagnostics for bounded detail or authenticated download_path for complete JSON. Crop paths are summarized, not executable plans. Creates no media output; sampled coverage still requires visual review.
+    - name: media_get_crop_diagnostics
+      description: Retrieve crop evidence by diagnostics_ref in the current project without reanalysis. Defaults to summary. Explicit sections return at most four samples and 24 KiB, with next_offset pagination or download_required for large sections. Complete evidence uses the authenticated attachment download.
     - name: media_ask
       description: Ask a grounded question using the configured descriptions vision/chat integration and only artifacts that already exist. Images use the actual existing source by default; image_detail=thumbnail explicitly uses reduced evidence. Returns supplied dimensions, representation, output render identity and provider-resolution limitations; videos use the canonical thumbnail and cached storyboard keyframes; at_ms selects the nearest existing keyframe and reports the actual timestamp; audio uses an existing completed transcript. Codex requests explicitly use low reasoning and report reasoning_effort. Retries transient vision/chat failures up to three attempts within one timeout; returns request_diagnostics. Explicit auth/quota/invalid-input errors stop immediately. Never runs ffmpeg, generates frames/derivations, or writes files. Args — file_id, question, at_ms?, frame_count? (1-8), include_transcript?, image_detail? (source default|thumbnail).
     - name: media_get_batch
@@ -670,7 +677,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.33
+    ref: media/v0.14.34
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -1052,6 +1059,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/status", Handler: a.handleStatus},
 		{Pattern: "/reindex", Handler: a.handleReindex},
 		{Pattern: "/smartcrop", Handler: a.handleSmartCropPreview},
+		{Pattern: "/crop-evidence", Handler: a.handleCropEvidence},
 		// Renders. /renders accepts POST {operation, ...} for
 		// jobs-app-style scheduled triggers; GET lists. /renders/{id}
 		// supports GET (status) + DELETE (cancel).
@@ -1125,9 +1133,20 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_preview_crop",
-			Description: "Inspect crop geometry and sampled action coverage before rendering. Returns resolved_params and composition with no new output; sampled coverage still requires visual review. operation=crop|extract_frame|extract_reel. For strict render requests use require_action_preservation=true; crop_fallback=contain is explicit full-frame fallback.",
+			Description: "Inspect crop geometry and sampled action coverage before rendering. Returns a compact receipt: resolved_params has crop geometry and diagnostic summaries, with complete immutable evidence behind diagnostics_ref. Crop paths are summarized, not executable plans. Use media_get_crop_diagnostics for bounded detail, or download_path through the authenticated Media HTTP gateway for the complete JSON. No media output is created; sampled coverage still requires visual review. operation=crop|extract_frame|extract_reel. For strict render requests use require_action_preservation=true; crop_fallback=contain is explicit full-frame fallback.",
 			InputSchema: schemaObject(map[string]any{"file_id": map[string]any{"type": "string"}, "operation": map[string]any{"type": "string", "enum": []string{"crop", "extract_frame", "extract_reel"}}, "at_ms": map[string]any{"type": "integer"}, "start_ms": map[string]any{"type": "integer"}, "end_ms": map[string]any{"type": "integer"}, "target_ratio": map[string]any{"type": "string"}, "crop_mode": map[string]any{"type": "string"}, "smart_crop_engine": smartCropEngineSchema(), "smart_crop_framing": smartCropFramingSchema(), "fit_mode": map[string]any{"type": "string"}}, []string{"file_id"}),
 			Handler:     a.toolPreviewCrop,
+		},
+		{
+			Name:        "media_get_crop_diagnostics",
+			Description: "Retrieve preserved crop preview evidence in the current project without rerunning analysis. Defaults to a compact summary. Select a section for explicit bounded detail (limit 1–4 samples, at most 24 KiB per response), following next_offset. download_required means use the receipt's authenticated download_path for complete evidence. References also retain failed/partial analyses; they do not authorize a render or imply visual approval.",
+			InputSchema: schemaObject(map[string]any{
+				"diagnostics_ref": map[string]any{"type": "string"},
+				"section":         map[string]any{"type": "string", "enum": []string{"summary", "pose_samples", "subject_extents", "evidence", "effective_path", "pose_position_gaps", "pose_failure_summary", "pose_attempt", "pose_failure"}, "default": "summary"},
+				"offset":          map[string]any{"type": "integer", "minimum": 0, "default": 0},
+				"limit":           map[string]any{"type": "integer", "minimum": 1, "maximum": 4, "default": 1},
+			}, []string{"diagnostics_ref"}),
+			Handler: a.toolGetCropDiagnostics,
 		},
 		{
 			Name:        "media_ask",
