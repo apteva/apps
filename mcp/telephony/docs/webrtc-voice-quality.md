@@ -150,6 +150,9 @@ Go allocations per frame. Native FEC therefore costs about twice as much
 encoder CPU; its measured work is approximately one percent of a single CPU
 at 50 frames/second. The sampled adaptation check measured 4.28–4.43 ns with
 no allocations. These are local microbenchmarks, not server capacity promises.
+The subsequent [CPU check](webrtc-fec-cpu.md) includes French speech, decoding,
+resampling and paced concurrent workloads; its full codec cost is higher than
+the encoder-only measurement above.
 
 The real-browser network results are **mixed**, and should not be advertised
 as universal smoothness. Early 20-second runs passed ordinary WebRTC and the

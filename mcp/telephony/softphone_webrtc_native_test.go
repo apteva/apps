@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"math"
 	"testing"
 )
@@ -67,7 +68,18 @@ func BenchmarkRTCVoiceEncoding(b *testing.B) {
 	for _, factory := range []struct {
 		name string
 		make func(int) (rtcOpusEncoder, error)
-	}{{"portable", newRTCGoEncoder}, {"native_fec", newRTCNativeEncoder}} {
+	}{{"portable", newRTCGoEncoder}, {"native_no_fec", func(bitrate int) (rtcOpusEncoder, error) {
+		e, err := newRTCNativeEncoder(bitrate)
+		if err != nil {
+			return nil, err
+		}
+		native := e.(*rtcNativeEncoder)
+		if native.lib.set(native.state, 4012, 0) != 0 {
+			e.Close()
+			return nil, errors.New("cannot disable FEC for benchmark control")
+		}
+		return e, nil
+	}}, {"native_fec", newRTCNativeEncoder}} {
 		b.Run(factory.name, func(b *testing.B) {
 			e, err := factory.make(32000)
 			if err != nil {
