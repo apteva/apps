@@ -32,6 +32,7 @@ type cloudBuildPlatform struct {
 	status         string
 	actionName     string
 	getBuildData   []byte
+	getBuildFailed bool
 	getBuildStatus int
 	cancelStatus   int
 	calls          []integrationCall
@@ -60,7 +61,7 @@ func (p *cloudBuildPlatform) ExecuteIntegrationTool(_ int64, tool string, input 
 			if status == 0 {
 				status = http.StatusOK
 			}
-			return &sdk.ExecuteResult{Success: status < 400, Status: status, Data: p.getBuildData}, nil
+			return &sdk.ExecuteResult{Success: status < 400 && !p.getBuildFailed, Status: status, Data: p.getBuildData}, nil
 		}
 		status := p.status
 		if status == "" {
@@ -773,57 +774,66 @@ func TestCodemagicInspectAcceptsWrappedBuildObject(t *testing.T) {
 }
 
 func TestUnavailableCodemagicJobIsBounded(t *testing.T) {
-	platform := &cloudBuildPlatform{
-		provider: "codemagic", getBuildData: []byte(`"<!doctype html><html>Codemagic</html>"`),
-	}
-	ctx := withCloudBuildContext(t, platform)
-	d, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
-		Name: "android-unavailable", TargetKind: "android", SourceKind: "code", SourceRef: "repo-1",
-		Framework: "android", BuildBackend: "codemagic",
-		BuildBackendJSON: `{"app_id":"cm-app","workflow_id":"android","branch":"main"}`,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	build, err := dbCreateBuildForEnvBackend(ctx.AppDB(), d.ID, 0, "android", "", "codemagic", d.BuildBackendJSON)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := dbUpdateBuild(ctx.AppDB(), build.ID, map[string]any{
-		"status": "running", "external_job_id": "cm-ghost",
-		"external_submitted_at": nowUTC(),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	build, _ = dbGetBuild(ctx.AppDB(), build.ID)
-	app := &App{dataDir: t.TempDir()}
-	if err := app.syncCloudBuild(context.Background(), build); err != nil {
-		t.Fatal(err)
-	}
-	fresh, _ := dbGetBuild(ctx.AppDB(), build.ID)
-	if fresh.Status != "running" || fresh.ExternalStatus != "propagating" ||
-		fresh.ExternalPollAttempts != 1 || fresh.ExternalNextPollAt == "" || fresh.ExternalLastPollErr == "" {
-		t.Fatalf("propagating build=%+v", fresh)
-	}
+	for _, tc := range []struct {
+		name   string
+		data   []byte
+		failed bool
+	}{
+		{"raw HTML", []byte(`"<!doctype html><html>Codemagic</html>"`), false},
+		{"connector contract error", []byte(`{"error":"response contract violation","detail":"Expected a JSON object containing response_path data"}`), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			platform := &cloudBuildPlatform{provider: "codemagic", getBuildData: tc.data, getBuildFailed: tc.failed}
+			ctx := withCloudBuildContext(t, platform)
+			d, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
+				Name: "android-unavailable", TargetKind: "android", SourceKind: "code", SourceRef: "repo-1",
+				Framework: "android", BuildBackend: "codemagic",
+				BuildBackendJSON: `{"app_id":"cm-app","workflow_id":"android","branch":"main"}`,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			build, err := dbCreateBuildForEnvBackend(ctx.AppDB(), d.ID, 0, "android", "", "codemagic", d.BuildBackendJSON)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := dbUpdateBuild(ctx.AppDB(), build.ID, map[string]any{
+				"status": "running", "external_job_id": "cm-ghost",
+				"external_submitted_at": nowUTC(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			build, _ = dbGetBuild(ctx.AppDB(), build.ID)
+			app := &App{dataDir: t.TempDir()}
+			if err := app.syncCloudBuild(context.Background(), build); err != nil {
+				t.Fatal(err)
+			}
+			fresh, _ := dbGetBuild(ctx.AppDB(), build.ID)
+			if fresh.Status != "running" || fresh.ExternalStatus != "propagating" ||
+				fresh.ExternalPollAttempts != 1 || fresh.ExternalNextPollAt == "" || fresh.ExternalLastPollErr == "" {
+				t.Fatalf("propagating build=%+v", fresh)
+			}
 
-	old := time.Now().UTC().Add(-cloudBuildPropagationWait - time.Second).Format(time.RFC3339)
-	if err := dbUpdateBuild(ctx.AppDB(), build.ID, map[string]any{
-		"external_submitted_at": old, "external_next_poll_at": "",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	fresh, _ = dbGetBuild(ctx.AppDB(), build.ID)
-	if err := app.syncCloudBuild(context.Background(), fresh); err != nil {
-		t.Fatal(err)
-	}
-	fresh, _ = dbGetBuild(ctx.AppDB(), build.ID)
-	if fresh.Status != "failed" || fresh.ExternalStatus != "provider_job_unavailable" ||
-		!strings.Contains(fresh.Error, "Codemagic returned build ID cm-ghost") {
-		t.Fatalf("terminal build=%+v", fresh)
-	}
-	pending, err := dbListPendingCloudBuilds(ctx.AppDB(), 10)
-	if err != nil || len(pending) != 0 {
-		t.Fatalf("pending=%+v err=%v", pending, err)
+			old := time.Now().UTC().Add(-cloudBuildPropagationWait - time.Second).Format(time.RFC3339)
+			if err := dbUpdateBuild(ctx.AppDB(), build.ID, map[string]any{
+				"external_submitted_at": old, "external_next_poll_at": "",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			fresh, _ = dbGetBuild(ctx.AppDB(), build.ID)
+			if err := app.syncCloudBuild(context.Background(), fresh); err != nil {
+				t.Fatal(err)
+			}
+			fresh, _ = dbGetBuild(ctx.AppDB(), build.ID)
+			if fresh.Status != "failed" || fresh.ExternalStatus != "provider_job_unavailable" ||
+				!strings.Contains(fresh.Error, "Codemagic returned build ID cm-ghost") {
+				t.Fatalf("terminal build=%+v", fresh)
+			}
+			pending, err := dbListPendingCloudBuilds(ctx.AppDB(), 10)
+			if err != nil || len(pending) != 0 {
+				t.Fatalf("pending=%+v err=%v", pending, err)
+			}
+		})
 	}
 }
 
@@ -896,5 +906,19 @@ func TestCloudBuildPollingUsesPersistentDueTimeAndLease(t *testing.T) {
 	acquired, err = dbTryAcquireCloudBuildPoll(ctx.AppDB(), build.ID, now.Format(time.RFC3339), now.Add(time.Minute).Format(time.RFC3339))
 	if err != nil || acquired {
 		t.Fatalf("duplicate acquire=%v err=%v", acquired, err)
+	}
+}
+
+func TestCodemagicInspectDoesNotTreatTransientOrAuthErrorsAsMissingJobs(t *testing.T) {
+	for _, statusCode := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests, http.StatusInternalServerError} {
+		t.Run(strconv.Itoa(statusCode), func(t *testing.T) {
+			platform := &cloudBuildPlatform{provider: "codemagic", getBuildStatus: statusCode, getBuildData: []byte(`{"error":"temporary or credential error"}`)}
+			withCloudBuildContext(t, platform)
+			_, err := (codemagicBuildBackend{}).Inspect(context.Background(), &sdk.BoundIntegration{ConnectionID: 77, AppSlug: "codemagic"}, cloudBuildConfig{}, &Build{ExternalJobID: "cm-error"})
+			var unavailable *externalJobUnavailableError
+			if err == nil || errors.As(err, &unavailable) {
+				t.Fatalf("error=%T %v", err, err)
+			}
+		})
 	}
 }
