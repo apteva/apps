@@ -103,16 +103,22 @@ type browserAudioTiming struct {
 }
 
 type mediaSessionEvent struct {
-	ConnectionID string `json:"connection_id,omitempty"`
-	DurationMS   int    `json:"duration_ms,omitempty"`
-	Timestamp    string `json:"timestamp"`
-	Action       string `json:"action"`
-	Outcome      string `json:"outcome"`
-	Status       int    `json:"status,omitempty"`
-	Code         string `json:"code,omitempty"`
-	Detail       string `json:"detail,omitempty"`
-	RemainingMS  int    `json:"remaining_ms,omitempty"`
-	WasClean     bool   `json:"was_clean,omitempty"`
+	SharedAttemptID   string `json:"shared_attempt_id,omitempty"`
+	RecoveryID        string `json:"recovery_id,omitempty"`
+	AttemptID         string `json:"attempt_id,omitempty"`
+	SessionID         string `json:"session_id,omitempty"`
+	PreviousSessionID string `json:"previous_session_id,omitempty"`
+	InitiatingAction  string `json:"initiating_action,omitempty"`
+	ConnectionID      string `json:"connection_id,omitempty"`
+	DurationMS        int    `json:"duration_ms,omitempty"`
+	Timestamp         string `json:"timestamp"`
+	Action            string `json:"action"`
+	Outcome           string `json:"outcome"`
+	Status            int    `json:"status,omitempty"`
+	Code              string `json:"code,omitempty"`
+	Detail            string `json:"detail,omitempty"`
+	RemainingMS       int    `json:"remaining_ms,omitempty"`
+	WasClean          bool   `json:"was_clean,omitempty"`
 }
 
 type browserAudioDiagnostics struct {
@@ -257,18 +263,23 @@ func mergePlaybackUnderruns(previous, incoming []playbackUnderrunEvent) []playba
 }
 
 type browserWebRTCStats struct {
-	Protocol          string  `json:"protocol,omitempty"`
-	CandidateType     string  `json:"candidateType,omitempty"`
-	SendBitrateBPS    float64 `json:"sendBitrateBps"`
-	ReceiveBitrateBPS float64 `json:"receiveBitrateBps"`
-	PacketsLost       float64 `json:"packetsLost"`
-	JitterMS          float64 `json:"jitterMs"`
-	ConcealedMS       float64 `json:"concealedMs"`
-	PacketsDiscarded  float64 `json:"packetsDiscarded"`
-	JitterBufferMS    float64 `json:"jitterBufferMs"`
+	Protocol          string   `json:"protocol,omitempty"`
+	CandidateType     string   `json:"candidateType,omitempty"`
+	SendBitrateBPS    float64  `json:"sendBitrateBps"`
+	ReceiveBitrateBPS float64  `json:"receiveBitrateBps"`
+	PacketsLost       float64  `json:"packetsLost"`
+	JitterMS          float64  `json:"jitterMs"`
+	ConcealedMS       *float64 `json:"concealedMs,omitempty"`
+	PacketsDiscarded  float64  `json:"packetsDiscarded"`
+	JitterBufferMS    float64  `json:"jitterBufferMs"`
 }
 
 type audioDropEvent struct {
+	PacketCount          int     `json:"packet_count,omitempty"`
+	SSRC                 uint32  `json:"ssrc,omitempty"`
+	WindowMS             float64 `json:"window_ms,omitempty"`
+	Trigger              string  `json:"trigger,omitempty"`
+	QueueResidenceMS     float64 `json:"queue_residence_ms,omitempty"`
 	BrowserDropTimestamp string  `json:"browser_drop_timestamp,omitempty"`
 	BrowserDropReason    string  `json:"browser_drop_reason,omitempty"`
 	FrameAgeMS           float64 `json:"frame_age_ms,omitempty"`
@@ -418,7 +429,15 @@ func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics) browserAudi
 		r := value.WebRTC
 		r.Protocol = enum(r.Protocol, "udp", "tcp")
 		r.CandidateType = enum(r.CandidateType, "host", "srflx", "prflx", "relay")
-		for _, field := range []*float64{&r.SendBitrateBPS, &r.ReceiveBitrateBPS, &r.PacketsLost, &r.JitterMS, &r.ConcealedMS, &r.PacketsDiscarded, &r.JitterBufferMS} {
+		if r.ConcealedMS != nil {
+			if math.IsNaN(*r.ConcealedMS) || math.IsInf(*r.ConcealedMS, 0) {
+				r.ConcealedMS = nil
+			} else {
+				v := math.Max(0, math.Min(*r.ConcealedMS, 1e9))
+				r.ConcealedMS = &v
+			}
+		}
+		for _, field := range []*float64{&r.SendBitrateBPS, &r.ReceiveBitrateBPS, &r.PacketsLost, &r.JitterMS, &r.PacketsDiscarded, &r.JitterBufferMS} {
 			if math.IsNaN(*field) || math.IsInf(*field, 0) {
 				*field = 0
 			} else {
@@ -461,11 +480,23 @@ func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics) browserAudi
 	}
 	for i := range value.SessionEvents {
 		e := &value.SessionEvents[i]
-		e.Action = limitDiagnosticText(e.Action, 40)
-		e.Outcome = limitDiagnosticText(e.Outcome, 40)
-		e.Code = limitDiagnosticText(e.Code, 80)
-		e.Detail = limitDiagnosticText(e.Detail, 160)
-		e.Timestamp = limitDiagnosticText(e.Timestamp, 40)
+		e.SharedAttemptID = safeAudioDiagnosticID(e.SharedAttemptID)
+		e.RecoveryID = safeAudioDiagnosticID(e.RecoveryID)
+		e.AttemptID = safeAudioDiagnosticID(e.AttemptID)
+		e.SessionID = safeAudioDiagnosticID(e.SessionID)
+		e.PreviousSessionID = safeAudioDiagnosticID(e.PreviousSessionID)
+		if e.InitiatingAction != "" {
+			e.InitiatingAction = audioInitiatingAction(e.InitiatingAction)
+		}
+		e.Action = safeAudioDiagnosticLabel(e.Action, 40)
+		e.Outcome = safeAudioDiagnosticLabel(e.Outcome, 40)
+		e.Code = safeAudioDiagnosticLabel(e.Code, 80)
+		e.Detail = safeAudioDiagnosticDetail(e.Detail)
+		if at, err := time.Parse(time.RFC3339Nano, e.Timestamp); err == nil {
+			e.Timestamp = at.UTC().Format(time.RFC3339Nano)
+		} else {
+			e.Timestamp = ""
+		}
 		e.DurationMS = clampDiagnosticInt(e.DurationMS, 86400000)
 		e.Status = clampDiagnosticInt(e.Status, 599)
 		e.RemainingMS = clampDiagnosticInt(e.RemainingMS, 3600000)
@@ -486,6 +517,8 @@ func normalizeAudioDropEvents(events []audioDropEvent) []audioDropEvent {
 		events = events[len(events)-100:]
 	}
 	for i := range events {
+		events[i].PacketCount = clampDiagnosticInt(events[i].PacketCount, 1000000)
+		events[i].WindowMS = finiteAudioObservation(events[i].WindowMS, 86400000)
 		events[i].BrowserDropTimestamp = ""
 		events[i].BrowserDropReason = ""
 		events[i].FrameAgeMS = finiteAudioObservation(events[i].FrameAgeMS, 60000)

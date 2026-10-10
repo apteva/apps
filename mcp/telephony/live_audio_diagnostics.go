@@ -170,19 +170,42 @@ func mergeLiveAudioSnapshots(a, b liveAudioQueueSnapshot) liveAudioQueueSnapshot
 	return a
 }
 func (c *callsDB) updateServerAudioDiagnostics(id string, s serverAudioDiagnostics, underruns ...[]playbackUnderrunEvent) error {
+	var events []playbackUnderrunEvent
+	if len(underruns) > 0 {
+		events = underruns[0]
+	}
+	return c.updateServerAudioDiagnosticEvents(id, s, events, nil)
+}
+
+// Preserve sparse events received before the first cumulative browser report,
+// without inventing zero browser measurements or adding another database write.
+func (c *callsDB) updateServerAudioDiagnosticEvents(id string, s serverAudioDiagnostics, underruns []playbackUnderrunEvent, sessions []mediaSessionEvent) error {
 	encoded, err := json.Marshal(s)
 	if err != nil {
 		return err
 	}
-	if len(underruns) > 0 && len(underruns[0]) > 0 {
-		events, encodeErr := json.Marshal(normalizePlaybackUnderruns(underruns[0]))
-		if encodeErr != nil {
-			return encodeErr
+	query := `UPDATE calls SET browser_audio_diagnostics=json_set(CASE WHEN json_valid(browser_audio_diagnostics) THEN browser_audio_diagnostics ELSE '{}' END, '$.server', json(?)`
+	args := []any{string(encoded)}
+	if len(underruns) > 0 {
+		encoded, err = json.Marshal(normalizePlaybackUnderruns(underruns))
+		if err != nil {
+			return err
 		}
-		_, err = c.db.Exec(`UPDATE calls SET browser_audio_diagnostics=json_set(CASE WHEN json_valid(browser_audio_diagnostics) THEN browser_audio_diagnostics ELSE '{}' END, '$.server', json(?), '$.playback_underrun_events', json(?)) WHERE id=? AND peer_kind='human'`, string(encoded), string(events), id)
-		return err
+		query += `, '$.playback_underrun_events', json(?)`
+		args = append(args, string(encoded))
 	}
-	_, err = c.db.Exec(`UPDATE calls SET browser_audio_diagnostics=json_set(CASE WHEN json_valid(browser_audio_diagnostics) THEN browser_audio_diagnostics ELSE '{}' END, '$.server', json(?)) WHERE id=? AND peer_kind='human'`, string(encoded), id)
+	if len(sessions) > 0 {
+		normalized := normalizeBrowserAudioDiagnostics(browserAudioDiagnostics{SessionEvents: sessions})
+		encoded, err = json.Marshal(normalized.SessionEvents)
+		if err != nil {
+			return err
+		}
+		query += `, '$.session_events', json(?)`
+		args = append(args, string(encoded))
+	}
+	query += `) WHERE id=? AND peer_kind='human'`
+	args = append(args, id)
+	_, err = c.db.Exec(query, args...)
 	return err
 }
 func (h *softphoneHub) observeCaptureTiming(data []byte, connectionIDs ...string) (stale bool) {
@@ -372,6 +395,8 @@ func mergeWebsocketTransport(a, b websocketTransportSnapshot) websocketTransport
 	a.Writes += b.Writes
 	a.WriteErrors += b.WriteErrors
 	a.WriteTimeouts += b.WriteTimeouts
+	a.CleanupWriteErrors += b.CleanupWriteErrors
+	a.CleanupWriteTimeouts += b.CleanupWriteTimeouts
 	a.ForcedCloses += b.ForcedCloses
 	a.MaxWriteMS = max(a.MaxWriteMS, b.MaxWriteMS)
 	a.MaxQueueMS = max(a.MaxQueueMS, b.MaxQueueMS)

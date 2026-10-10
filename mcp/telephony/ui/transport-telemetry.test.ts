@@ -51,3 +51,18 @@ test("WebRTC summaries and history share one pacing slot; latest summary replace
   sender.tick();expect(sent).toEqual(["latest-summary","history"]);
  }finally{sender.stop();}
 });
+
+test("congested refreshes preserve one complete sample and auxiliary events cannot starve it",async()=>{
+ const {TransportTelemetrySender,transportSampleParts}=await import("./transport-telemetry");const sent:any[]=[];
+ const sample=(id:string)=>({id,timestamp:timestamp(0),transport:"webrtc" as const,reason:"periodic" as const,window_ms:1000,metrics:Object.fromEntries(TRANSPORT_METRICS.map(k=>[k,1e12])),states:{}});
+ const first=sample("first"),parts=transportSampleParts(first);
+ const sender=new TransportTelemetrySender(p=>{sent.push(p);return true;},()=>true);
+ try{
+  sender.enqueue([first]);sender.tick();
+  for(let i=0;i<100;i++){sender.enqueue([sample(`s${i}`)]);sender.enqueueAuxiliary({id:i});}
+  for(let i=0;i<parts.length*2;i++)sender.tick();
+  const retained=sent.filter(p=>p.id==="first");expect(retained).toHaveLength(parts.length);
+  expect(retained.map(p=>p.part_index)).toEqual(parts.map(p=>p.part_index));
+  expect(sender.skippedSamples).toBeGreaterThan(0);expect(sender.skippedAuxiliary).toBeGreaterThan(0);
+ }finally{sender.stop();}
+});

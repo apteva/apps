@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
 	"math"
 	"net"
@@ -41,15 +40,17 @@ type websocketWriteEvent struct {
 	Opcode            int     `json:"opcode,omitempty"`
 }
 type websocketTransportSnapshot struct {
-	MaxQueueMS    float64               `json:"max_queue_ms"`
-	Writes        int64                 `json:"writes"`
-	WriteErrors   int64                 `json:"write_errors"`
-	WriteTimeouts int64                 `json:"write_timeouts"`
-	MaxWriteMS    float64               `json:"max_write_ms"`
-	ForcedCloses  int64                 `json:"forced_closes"`
-	LastCloseAt   string                `json:"last_close_at,omitempty"`
-	CloseMS       float64               `json:"close_ms"`
-	Events        []websocketWriteEvent `json:"events,omitempty"`
+	MaxQueueMS           float64               `json:"max_queue_ms"`
+	Writes               int64                 `json:"writes"`
+	WriteErrors          int64                 `json:"write_errors"`
+	WriteTimeouts        int64                 `json:"write_timeouts"`
+	CleanupWriteErrors   int64                 `json:"cleanup_write_errors"`
+	CleanupWriteTimeouts int64                 `json:"cleanup_write_timeouts"`
+	MaxWriteMS           float64               `json:"max_write_ms"`
+	ForcedCloses         int64                 `json:"forced_closes"`
+	LastCloseAt          string                `json:"last_close_at,omitempty"`
+	CloseMS              float64               `json:"close_ms"`
+	Events               []websocketWriteEvent `json:"events,omitempty"`
 }
 
 type mediaCloseLeg string
@@ -90,6 +91,7 @@ func (w *websocketCountingWriter) Write(data []byte) (int, error) {
 // websocketWriterPump is the sole writer for a WebSocket connection. Data,
 // control, and close frames all pass through the same queue.
 type websocketWriterPump struct {
+	activity        audioSocketActivity
 	whisperDropped  atomic.Int64
 	whisperSent     atomic.Int64
 	whisperMu       sync.Mutex
@@ -109,10 +111,11 @@ type websocketWriterPump struct {
 	stopOnce        sync.Once
 	forcedCloseOnce sync.Once
 
-	enqueueMu sync.Mutex
-	stateMu   sync.Mutex
-	err       error
-	closeSent bool
+	enqueueMu           sync.Mutex
+	stateMu             sync.Mutex
+	err                 error
+	closeSent           bool
+	normalLocalShutdown bool
 }
 
 type gracefulWebSocket struct {
@@ -282,15 +285,35 @@ func (p *websocketWriterPump) run() {
 			}
 			p.audioStats.LastWriteAt = time.Now().UTC().Format(time.RFC3339Nano)
 		}
+		if err == nil {
+			p.activity.write.Store(time.Now().UnixNano())
+			if request.op == ws.OpBinary {
+				p.activity.audioWrite.Store(p.activity.write.Load())
+			}
+		}
 		p.transportStats.Writes++
 		p.transportStats.MaxQueueMS = max(p.transportStats.MaxQueueMS, float64(queuedFor)/float64(time.Millisecond))
 		p.transportStats.MaxWriteMS = max(p.transportStats.MaxWriteMS, float64(time.Since(started))/float64(time.Millisecond))
 		if err != nil {
-			p.transportStats.WriteErrors++
+			p.stateMu.Lock()
+			cleanupClose := request.op == ws.OpClose && p.normalLocalShutdown && len(request.payload) >= 2 &&
+				(ws.StatusCode(binary.BigEndian.Uint16(request.payload[:2])) == ws.StatusNormalClosure ||
+					ws.StatusCode(binary.BigEndian.Uint16(request.payload[:2])) == ws.StatusGoingAway)
+			p.stateMu.Unlock()
 			reason := "socket_write_error"
-			if socketTimeout {
-				p.transportStats.WriteTimeouts++
-				reason = "socket_write_timeout"
+			if cleanupClose {
+				p.transportStats.CleanupWriteErrors++
+				reason = "local_close_write_error"
+				if socketTimeout {
+					p.transportStats.CleanupWriteTimeouts++
+					reason = "local_close_write_timeout"
+				}
+			} else {
+				p.transportStats.WriteErrors++
+				if socketTimeout {
+					p.transportStats.WriteTimeouts++
+					reason = "socket_write_timeout"
+				}
 			}
 			p.recordWriteEventLocked(request, reason, timeout, time.Since(started), counted.bytes)
 		}
@@ -563,6 +586,9 @@ func (c *gracefulWebSocket) Close(code ws.StatusCode, reason string) {
 			close(forced)
 		})
 		if c.writer != nil {
+			c.writer.stateMu.Lock()
+			c.writer.normalLocalShutdown = code == ws.StatusNormalClosure || code == ws.StatusGoingAway
+			c.writer.stateMu.Unlock()
 			_ = c.writer.write(ws.OpClose, ws.NewCloseFrameBody(code, reason), liveAudioWriteTimeout)
 		}
 		select {
@@ -602,6 +628,7 @@ func readWebSocketData(conn net.Conn, state ws.State, writer *websocketWriterPum
 		if len(data) > maxControlFramePayload {
 			return closeWebSocketProtocolError(writer, "control frame payload exceeds 125 bytes")
 		}
+		writer.activity.observe(header.OpCode, data)
 		for _, observe := range observations {
 			observe(header.OpCode, data)
 		}
@@ -655,9 +682,10 @@ func readWebSocketData(conn net.Conn, state ws.State, writer *websocketWriterPum
 		data, err := io.ReadAll(io.LimitReader(&reader, maxCarrierFrameBytes+1))
 		if len(data) > maxCarrierFrameBytes {
 			_ = writer.Write(ws.OpClose, ws.NewCloseFrameBody(ws.StatusMessageTooBig, "message exceeds limit"))
-			return nil, 0, errors.New("websocket message exceeds limit")
+			return nil, 0, wsutil.ErrFrameTooLarge
 		}
 		if err == nil {
+			writer.activity.observe(header.OpCode, data)
 			for _, observe := range observations {
 				observe(header.OpCode, data)
 			}
@@ -668,7 +696,7 @@ func readWebSocketData(conn net.Conn, state ws.State, writer *websocketWriterPum
 
 func closeWebSocketProtocolError(writer *websocketWriterPump, reason string) error {
 	_ = writer.Write(ws.OpClose, ws.NewCloseFrameBody(ws.StatusProtocolError, reason))
-	return fmt.Errorf("websocket protocol error: %s", reason)
+	return ws.ProtocolError("websocket protocol error: " + reason)
 }
 
 // Coaching has its own small, lower-priority queue; it cannot evict caller PCM.

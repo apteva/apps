@@ -10,6 +10,7 @@ export const TRANSPORT_METRICS = [
   "capture_sent_ms", "capture_muted_ms", "capture_dropped_ms", "playback_ingress_ms", "playback_transport_dropped_ms",
   "playback_source_dropped_ms", "clock_uncertainty_ms", "clock_sample_age_ms", "stats_errors", "stats_duration_ms",
   "send_bitrate_bps", "receive_bitrate_bps", "receive_gap_ms", "capture_age_ms", "transit_ms", "delivery_excess_ms", "server_queue_ms",
+  "receiver_concealed_delta_ms", "receiver_silent_concealed_delta_ms", "receiver_concealed_window_ms", "requested_playback_target_ms", "requested_upload_bitrate_bps", "receiver_ssrc", "receiver_loss_delta", "receiver_loss_window_ms", "remote_receiver_ssrc", "remote_receiver_loss_delta", "remote_receiver_loss_window_ms",
   "receiver_bytesReceived", "receiver_packetsReceived", "receiver_packetsLost", "receiver_jitter", "receiver_packetsDiscarded",
   "receiver_concealedSamples", "receiver_silentConcealedSamples", "receiver_concealmentEvents", "receiver_insertedSamplesForDeceleration", "receiver_removedSamplesForAcceleration",
   "receiver_totalSamplesReceived", "receiver_audioLevel", "receiver_totalAudioEnergy", "receiver_totalSamplesDuration", "receiver_nackCount", "receiver_fecPacketsReceived", "receiver_fecPacketsDiscarded",
@@ -87,23 +88,40 @@ export function transportSampleParts(sample:TransportSample):TransportWireSample
   return parts.map((part,i)=>({...part,part_index:i,part_count:parts.length}));
 }
 export class TransportTelemetrySender {
+
+  private auxiliary:unknown[]=[];
+  skippedAuxiliary=0;
+  skippedSamples=0;
+  private auxiliaryTurn=false;
   private pending:TransportWireSample[]=[];
   private timer?:ReturnType<typeof setInterval>;
   private report?:unknown;
   constructor(private send:(sample:TransportWireSample)=>boolean,private sendReport?:(report:unknown)=>boolean) {}
   enqueueReport(report:unknown):void {this.report=report;this.start();}
+  enqueueAuxiliary(report:unknown):void {this.auxiliary.push(report);if(this.auxiliary.length>32){this.auxiliary.shift();this.skippedAuxiliary++;}this.start();}
   private start():void {if(!this.timer)this.timer=setInterval(()=>this.tick(),250);}
   enqueue(samples:TransportSample[]):void {
-    for(const sample of samples)this.pending.push(...transportSampleParts(sample));
-    if(this.pending.length>32)this.pending=this.pending.slice(-32);
+    for(const sample of samples){
+      const parts=transportSampleParts(sample);
+      // Preserve the in-flight sample. Dropping its leading parts on every
+      // refresh otherwise prevents any complete record on a slow connection.
+      while(this.pending.length+parts.length>32){
+        const tail=this.pending.at(-1);if(!tail||tail.id===this.pending[0]?.id)break;
+        this.pending=this.pending.filter(p=>p.id!==tail.id);this.skippedSamples++;
+      }
+      if(this.pending.length+parts.length<=32)this.pending.push(...parts);else this.skippedSamples++;
+    }
     if(this.pending.length)this.start();
   }
   tick():void {
     try{
       if(this.report!==undefined && this.sendReport){if(this.sendReport(this.report))this.report=undefined;}
-      else if(this.pending.length && this.send(this.pending[0]))this.pending.shift();
+      else if(this.auxiliary.length && this.sendReport && (!this.pending.length||this.auxiliaryTurn)){
+        if(this.sendReport(this.auxiliary[0])){this.auxiliary.shift();this.auxiliaryTurn=false;}
+      }
+      else if(this.pending.length && this.send(this.pending[0])){this.pending.shift();this.auxiliaryTurn=true;}
     }catch{/* observer failure never changes media */}
-    if(!this.pending.length&&this.report===undefined){clearInterval(this.timer);this.timer=undefined;}
+    if(!this.pending.length&&!this.auxiliary.length&&this.report===undefined){clearInterval(this.timer);this.timer=undefined;}
   }
-  stop():void {clearInterval(this.timer);this.timer=undefined;this.pending=[];this.report=undefined;}
+  stop():void {clearInterval(this.timer);this.timer=undefined;this.pending=[];this.auxiliary=[];this.report=undefined;}
 }

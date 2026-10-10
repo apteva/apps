@@ -501,3 +501,25 @@ test("AI policy endings have intentional, localized labels", () => {
  expect(callTerminationLabel({reason:"ai_inactivity"}, "fr")).toBe("Fin de l’appel : aucune réponse");
  expect(callTerminationLabel({reason:"ai_policy_failure"}, "en")).toBe("AI inactivity reminder failed");
 });
+
+test("headless recovery carries attempt IDs and session generations without changing call control",async()=>{
+ const f=fixture();let generation=0;
+ f.setResponse(async(url)=>{
+  if(url.pathname.endsWith("/calls"))return {calls:[{id:"call-1",status:"answered"}]};
+  return {...f.session,session_generation:`session-${(++generation).toString(16)}`,session_token:`secret-${generation}`,media_url:f.session.media_url};
+ });
+ await f.phone.dial({to:"+33123456789",from:"+33912345678"});
+ await f.phone.reconnect(undefined,"audio_device_change");
+ const explicit=f.requests.filter(r=>r.url.pathname.includes("/attach/")).at(-1)!.body.media_diagnostics;
+ expect(explicit.initiating_action).toBe("audio_device_change");expect(explicit.previous_session_id).toBe("session-1");
+ expect(explicit.recovery_id).toStartWith("recovery-");expect(explicit.attempt_id).toStartWith("attempt-");
+ const context={recovery_id:"recovery-a",attempt_id:"attempt-b",initiating_action:"automatic_retry" as const};
+ const refresh=f.callbacks.refreshMediaURL!;const first=refresh(context),second=refresh({...context,attempt_id:"attempt-c"});
+ expect(first).toBe(second);await first;
+ const automatic=f.requests.filter(r=>r.url.pathname.includes("/attach/")).at(-1)!.body.media_diagnostics;
+ expect(automatic).toMatchObject(context);expect(automatic.previous_session_id).toBe("session-2");
+ expect(JSON.stringify(automatic)).not.toContain("secret");
+ expect(f.requests.filter(r=>r.url.pathname.includes("/place")).length).toBe(1);
+ expect(f.requests.filter(r=>r.url.pathname.includes("/answer/")||r.url.pathname.endsWith("/hangup"))).toHaveLength(0);
+ f.phone.dispose();
+});

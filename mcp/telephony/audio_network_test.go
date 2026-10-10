@@ -273,9 +273,17 @@ func TestBrowserNetworkRejectsDoNotCreateAttachmentEvents(t *testing.T) {
 		r := httptest.NewRequest("GET", "/softphone/media/"+row.ID+"/"+token, nil)
 		w := httptest.NewRecorder()
 		app.handleSoftphoneMedia(w, r)
-		if len(app.audioNetworks.pending) != 0 {
-			t.Fatal("failed validation or upgrade recorded an attachment")
+		if token == "invalid" && len(app.audioNetworks.pending) != 0 {
+			t.Fatal("failed authentication recorded network details")
 		}
+		for _, event := range app.audioNetworks.pending {
+			if event.Event != "softphone.browser.attachment_failed" || event.Action != "failed" {
+				t.Fatal("failed upgrade recorded a successful attachment")
+			}
+		}
+	}
+	if len(app.audioNetworks.pending) != 1 {
+		t.Fatal("authorized upgrade failure not observed")
 	}
 }
 
@@ -345,6 +353,9 @@ func TestBrowserNetworkFailedMonitoringKeepsBothMediaDirectionsAndReconnect(t *t
 	app.audioNetworks.mu.Lock()
 	defer app.audioNetworks.mu.Unlock()
 	for _, e := range app.audioNetworks.pending {
+		if e.Event != "softphone.browser.connected" && e.Event != "softphone.browser.disconnected" {
+			continue
+		}
 		if e.AdviserIdentity != alice || e.IdentitySource != "validated_media_session" || e.ClientIP != "127.0.0.1" {
 			t.Fatalf("incorrect browser attribution: %+v", e)
 		}

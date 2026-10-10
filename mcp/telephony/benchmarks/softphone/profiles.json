@@ -441,5 +441,47 @@
     },
     "max_p95_ms": 500,
     "max_missing_pct": 10
+  },
+  {
+    "name": "webrtc-udp-96k-jitter-loss",
+    "media_transport": "webrtc",
+    "rtc_udp": true,
+    "expectation": "usable",
+    "up": {
+      "kbps": 96,
+      "latency_ms": 20,
+      "jitter_ms": 20,
+      "udp_loss_probability": 0.01
+    },
+    "down": {
+      "kbps": 96,
+      "latency_ms": 20,
+      "jitter_ms": 20,
+      "udp_loss_probability": 0.01
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 5
+  },
+  {
+    "name": "webrtc-udp-96k-120ms-burst",
+    "media_transport": "webrtc",
+    "rtc_udp": true,
+    "expectation": "recovery",
+    "up": {
+      "kbps": 96,
+      "latency_ms": 20,
+      "jitter_ms": 5,
+      "udp_burst_at_ms": 4000,
+      "udp_burst_ms": 120
+    },
+    "down": {
+      "kbps": 96,
+      "latency_ms": 20,
+      "jitter_ms": 5,
+      "udp_burst_at_ms": 4000,
+      "udp_burst_ms": 120
+    },
+    "max_p95_ms": 500,
+    "max_missing_pct": 5
   }
 ]

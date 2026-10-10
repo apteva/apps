@@ -18,7 +18,7 @@ import (
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
 	"github.com/pion/interceptor"
-	"github.com/pion/opus"
+	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 )
@@ -26,12 +26,18 @@ import (
 const rtcSetupTimeout = 18 * time.Second
 
 type softphoneRTCConfig struct {
+	NetworkContext   audioNetworkEvent
+	KnownVPNExits    string
+	CollectNetwork   func(audioNetworkEvent)
 	Enabled          bool
 	ICEServers       []webrtc.ICEServer
 	PublicIPs        []string
 	PortMin, PortMax uint16
 	Bitrate          int
+	FEC              *bool // nil retains the existing enabled preference.
 }
+
+func (c softphoneRTCConfig) fecEnabled() bool { return c.FEC == nil || *c.FEC }
 
 func parseSoftphoneRTCConfig(values map[string]string) (softphoneRTCConfig, error) {
 	c := softphoneRTCConfig{Enabled: values["softphone_webrtc_enabled"] == "true", Bitrate: 32000}
@@ -77,7 +83,11 @@ func parseSoftphoneRTCConfig(values map[string]string) (softphoneRTCConfig, erro
 
 func softphoneRTCAPI(c softphoneRTCConfig, settings ...func(*webrtc.SettingEngine)) (*webrtc.API, error) {
 	m := &webrtc.MediaEngine{}
-	if err := m.RegisterCodec(webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2, SDPFmtpLine: "minptime=10;useinbandfec=1;stereo=0;sprop-stereo=0;maxaveragebitrate=32000"}, PayloadType: 111}, webrtc.RTPCodecTypeAudio); err != nil {
+	fec := "1"
+	if !c.fecEnabled() {
+		fec = "0"
+	}
+	if err := m.RegisterCodec(webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2, SDPFmtpLine: "minptime=10;useinbandfec=" + fec + ";stereo=0;sprop-stereo=0;maxaveragebitrate=32000"}, PayloadType: 111}, webrtc.RTPCodecTypeAudio); err != nil {
 		return nil, err
 	}
 	i := &interceptor.Registry{}
@@ -102,6 +112,7 @@ func softphoneRTCAPI(c softphoneRTCConfig, settings ...func(*webrtc.SettingEngin
 }
 
 type rtcHubConn struct {
+	disconnect *rtcDisconnectTracker
 	net.Conn
 	stop    func()
 	stats   *rtcMediaStats
@@ -114,6 +125,10 @@ func (c *rtcHubConn) queueWhisper(data []byte, valid func() bool) bool {
 }
 
 type rtcMediaSnapshot struct {
+	IngressConcealedMS     int64            `json:"ingress_concealed_ms"`
+	Encoder                *rtcEncoderState `json:"encoder,omitempty"`
+	EncoderControlErrors   uint64           `json:"encoder_control_errors"`
+	RTP                    rtcSendSnapshot  `json:"rtp_send"`
 	IngressRejectedPackets int64            `json:"ingress_rejected_packets"`
 	IngressQueueDrops      int64            `json:"ingress_queue_drops"`
 	IngressPaddingPackets  int64            `json:"ingress_padding_packets"`
@@ -124,6 +139,8 @@ type rtcMediaSnapshot struct {
 	Events                 []audioDropEvent `json:"events,omitempty"`
 }
 type rtcMediaStats struct {
+	voice rtcVoiceControl
+	rtp   rtcSendTelemetry
 	mu    sync.Mutex
 	value rtcMediaSnapshot
 }
@@ -132,6 +149,9 @@ func (s *rtcMediaStats) snapshot() rtcMediaSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v := s.value
+	v.Encoder = s.voice.codec.Load()
+	v.EncoderControlErrors = s.voice.configurationErrors.Load()
+	v.RTP = s.rtp.snapshot()
 	v.Events = append([]audioDropEvent(nil), v.Events...)
 	return v
 }
@@ -156,6 +176,12 @@ func (s *rtcMediaStats) drop(reason, direction string, sequence uint64, duration
 	}
 }
 func mergeRTCSnapshots(a, b rtcMediaSnapshot) rtcMediaSnapshot {
+	a.IngressConcealedMS += b.IngressConcealedMS
+	if b.Encoder != nil {
+		a.Encoder = b.Encoder
+	}
+	a.EncoderControlErrors += b.EncoderControlErrors
+	a.RTP = mergeRTCSends(a.RTP, b.RTP)
 	a.IngressRejectedPackets += b.IngressRejectedPackets
 	a.IngressQueueDrops += b.IngressQueueDrops
 	a.IngressPaddingPackets += b.IngressPaddingPackets
@@ -270,9 +296,12 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 	input := newWebSocketWriterPump(bridge, ws.StateClientSide)
 	done := make(chan struct{})
 	stats := &rtcMediaStats{}
+	stats.rtp.connectionID = c.NetworkContext.ConnectionID
+	disconnect := &rtcDisconnectTracker{writer: signalWriter, pc: pc}
 	var once sync.Once
 	stop := func() {
 		once.Do(func() {
+			disconnect.capture(nil, "rtc_bridge_closed")
 			close(done)
 			signal.Close()
 			hub.Close()
@@ -282,7 +311,23 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 			pc.Close()
 		})
 	}
-	fail := func(err error) (net.Conn, func(), error) { stop(); return nil, nil, err }
+	fail := func(err error) (net.Conn, func(), error) {
+		disconnect.capture(err, "")
+		if c.CollectNetwork != nil {
+			event := c.NetworkContext
+			event.ID = event.ConnectionID + ":setup_failed"
+			event.Event = "softphone.browser.setup_failed"
+			event.Action = "setup_failed"
+			info := disconnect.snapshot(err)
+			event.Disconnect = &info
+			event.CloseCode = disconnect.closeCode()
+			event.OccurredAt = time.Now().UTC().Format(time.RFC3339Nano)
+			event.ExpiresAt = time.Now().Add(event.Retention).UTC().Format(time.RFC3339Nano)
+			c.CollectNetwork(event)
+		}
+		stop()
+		return nil, nil, err
+	}
 	connected := make(chan struct{}, 1)
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		if state == webrtc.PeerConnectionStateConnected {
@@ -292,6 +337,9 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 			}
 		}
 		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
+			if state == webrtc.PeerConnectionStateFailed {
+				disconnect.capture(nil, "rtc_connection_failed")
+			}
 			go stop()
 		}
 	})
@@ -303,11 +351,32 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 	if err != nil {
 		return fail(err)
 	}
+	parameters := sender.GetParameters()
+	if len(parameters.Encodings) > 0 {
+		stats.rtp.ssrc = uint32(parameters.Encodings[0].SSRC)
+	}
+	sender.Transport().ICETransport().OnSelectedCandidatePairChange(func(pair *webrtc.ICECandidatePair) {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		stats.rtp.selectedPath(pair, c.NetworkContext, c.KnownVPNExits, c.CollectNetwork)
+	})
 	go func() {
-		b := make([]byte, 1500)
 		for {
-			if _, _, err := sender.Read(b); err != nil {
+			packets, _, err := sender.ReadRTCP()
+			if err != nil {
 				return
+			}
+			for _, packet := range packets {
+				if report, ok := packet.(*rtcp.ReceiverReport); ok {
+					for _, r := range report.Reports {
+						if r.SSRC == stats.rtp.ssrc {
+							stats.voice.observe(r.LastSequenceNumber, r.FractionLost, time.Now())
+						}
+					}
+				}
 			}
 		}
 	}()
@@ -317,9 +386,9 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 			go stop()
 			return
 		}
-		trackOnce.Do(func() { go receiveSoftphoneRTP(remote, input, stats, done, stop) })
+		trackOnce.Do(func() { go receiveSoftphoneRTP(remote, input, stats, done, stop, c.fecEnabled()) })
 	})
-	config, _ := json.Marshal(map[string]any{"type": "webrtc.config", "ice_servers": c.ICEServers, "bitrate": c.Bitrate})
+	config, _ := json.Marshal(map[string]any{"type": "webrtc.config", "ice_servers": c.ICEServers, "bitrate": c.Bitrate, "fec_requested": c.fecEnabled()})
 	if err := signalWriter.Write(ws.OpText, config); err != nil {
 		return fail(err)
 	}
@@ -335,6 +404,12 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 	}
 	if op != ws.OpText || len(data) > 65536 || json.Unmarshal(data, &offer) != nil || offer.Type != "webrtc.offer" || len(offer.SDP) > 60000 || strings.Contains(offer.SDP, "m=video ") || strings.Contains(offer.SDP, "m=application ") {
 		return fail(errors.New("invalid audio SDP offer"))
+	}
+	if !c.fecEnabled() {
+		offer.SDP, err = disableRTCSDPFEC(offer.SDP)
+		if err != nil {
+			return fail(errors.New("invalid audio SDP offer"))
+		}
 	}
 	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offer.SDP}); err != nil {
 		return fail(errors.New("invalid remote description"))
@@ -364,10 +439,12 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 		for {
 			data, op, err := readWebSocketData(signalRead, ws.StateServerSide, signalWriter)
 			if err != nil {
+				disconnect.capture(err, "")
 				stop()
 				return
 			}
 			if op != ws.OpText || len(data) > 65536 {
+				disconnect.capture(ws.ProtocolError("invalid signaling frame"), "")
 				stop()
 				return
 			}
@@ -385,16 +462,17 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 		return fail(errors.New("WebRTC connection timed out"))
 	}
 	signal.SetReadDeadline(time.Time{})
-	go sendSoftphoneRTP(bridge, input, signalWriter, track, c.Bitrate, stats, done, stop)
-	return &rtcHubConn{Conn: hub, stop: stop, stats: stats, whisper: signalWriter.queueWhisper}, stop, nil
+	go sendSoftphoneRTP(bridge, input, signalWriter, track, c.Bitrate, stats, done, stop, c.fecEnabled())
+	return &rtcHubConn{Conn: hub, stop: stop, stats: stats, whisper: signalWriter.queueWhisper, disconnect: disconnect}, stop, nil
 }
 
-func receiveSoftphoneRTP(remote *webrtc.TrackRemote, input *websocketWriterPump, stats *rtcMediaStats, done <-chan struct{}, stop func()) {
-	decoder, err := opus.NewDecoderWithOutput(24000, 1)
+func receiveSoftphoneRTP(remote *webrtc.TrackRemote, input *websocketWriterPump, stats *rtcMediaStats, done <-chan struct{}, stop func(), fec bool) {
+	decoder, err := newRTCOpusDecoderWithFEC(fec)
 	if err != nil {
 		stop()
 		return
 	}
+	defer decoder.Close()
 	packets := make(chan *rtp.Packet, 16)
 	go func() {
 		defer close(packets)
@@ -421,6 +499,14 @@ func receiveSoftphoneRTP(remote *webrtc.TrackRemote, input *websocketWriterPump,
 		stats.drop("webrtc_rtp_rejected", "operator_to_carrier", uint64(p.SequenceNumber), 0)
 	}}
 	pcm := make([]int16, 24000*120/1000)
+	var timeline rtcDecodeTimeline
+	forward := func(samples []int16) {
+		data := make([]byte, len(samples)*2)
+		for k, v := range samples {
+			binary.LittleEndian.PutUint16(data[k*2:], uint16(v))
+		}
+		input.QueueAudio(data)
+	}
 	for {
 		select {
 		case <-done:
@@ -434,16 +520,22 @@ func receiveSoftphoneRTP(remote *webrtc.TrackRemote, input *websocketWriterPump,
 			}
 		case now := <-tick.C:
 			for p := j.pop(now); p != nil; p = j.pop(now) {
-				n, err := decoder.DecodeToInt16(p.Payload, pcm)
+				for gap := timeline.missing(p.SequenceNumber, p.Timestamp); gap > 0; gap-- {
+					if n, err := decoder.recover(p.Payload, pcm[:480], fec && gap == 1); err == nil && n == 480 {
+						forward(pcm[:n])
+						stats.mu.Lock()
+						stats.value.IngressConcealedMS += 20
+						stats.mu.Unlock()
+					}
+				}
+				n, err := decoder.decode(p.Payload, pcm)
 				if err != nil {
+					timeline.valid = false
 					stats.drop("webrtc_decode_error", "operator_to_carrier", uint64(p.SequenceNumber), 0)
 					continue
 				}
-				data := make([]byte, n*2)
-				for k := 0; k < n; k++ {
-					binary.LittleEndian.PutUint16(data[k*2:], uint16(pcm[k]))
-				}
-				input.QueueAudio(data)
+				timeline = rtcDecodeTimeline{valid: true, seq: p.SequenceNumber, ts: p.Timestamp, samples: n}
+				forward(pcm[:n])
 			}
 		}
 	}
@@ -461,19 +553,21 @@ func ignoreRTCPadding(p *rtp.Packet, stats *rtcMediaStats) bool {
 	return true
 }
 
-func sendSoftphoneRTP(bridge net.Conn, input, signal *websocketWriterPump, track *webrtc.TrackLocalStaticRTP, bitrate int, stats *rtcMediaStats, done <-chan struct{}, stop func()) {
-	encoder, err := opus.NewEncoder(opus.WithChannels(1), opus.WithBitrate(bitrate))
+func sendSoftphoneRTP(bridge net.Conn, input, signal *websocketWriterPump, track *webrtc.TrackLocalStaticRTP, bitrate int, stats *rtcMediaStats, done <-chan struct{}, stop func(), fec bool) {
+	encoder, err := newRTCOpusEncoderWithFEC(bitrate, fec)
 	if err != nil {
 		stop()
 		return
 	}
+	defer encoder.Close()
+	policy := newRTCVoicePolicy(bitrate)
+	stats.voice.codec.Store(&rtcEncoderState{FECRequested: fec, Capability: encoder.capability(), Bitrate: bitrate, ExpectedLoss: 10, FEC: encoder.capability() == "libopus_fec", UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
 	// Keep 20ms frame boundaries and a bounded 120ms outgoing queue. Encoding
 	// and RTP writes are paced outside the hub's carrier receive loop.
 	frames := make(chan rtcPCMFrame, 6)
 	go func() {
 		defer close(frames)
-		pending := make([]int16, 0, 480)
-		var pendingExpires time.Time
+		var pending rtcPCMFramer
 		for {
 			data, op, err := readWebSocketData(bridge, ws.StateClientSide, input)
 			if err != nil {
@@ -521,37 +615,13 @@ func sendSoftphoneRTP(bridge net.Conn, input, signal *websocketWriterPump, track
 			if len(data) < header || (len(data)-header)%2 != 0 || len(data) > 24000*2 {
 				continue
 			}
-			if len(pending) > 0 && !pendingExpires.After(now) {
-				stats.drop("webrtc_playback_partial_age", "carrier_to_operator", 0, len(pending)*1000/24000)
-				pending = pending[:0]
+			if dropped := pending.discardExpired(now); dropped > 0 {
+				stats.drop("webrtc_playback_partial_age", "carrier_to_operator", 0, dropped*1000/24000)
 			}
-			if len(pending) == 0 || expires.Before(pendingExpires) {
-				pendingExpires = expires
-			}
-			for k := header; k < len(data); k += 2 {
-				pending = append(pending, int16(binary.LittleEndian.Uint16(data[k:])))
-			}
-			for len(pending) >= 480 {
-				frame := rtcPCMFrame{pcm: append([]int16(nil), pending[:480]...), expires: pendingExpires}
-				pending = pending[480:]
-				select {
-				case frames <- frame:
-				case <-done:
-					return
-				default:
-					select {
-					case <-frames:
-						stats.drop("webrtc_playback_overflow", "carrier_to_operator", 0, 20)
-					default:
-					}
-					select {
-					case frames <- frame:
-					default:
-					}
-				}
-				stats.mu.Lock()
-				stats.value.MaxQueueMS = max(stats.value.MaxQueueMS, len(frames)*20)
-				stats.mu.Unlock()
+			if !pending.push(data[header:], expires, func(frame rtcPCMFrame) bool {
+				return queueRTCFrame(frames, frame, done, stats)
+			}) {
+				return
 			}
 		}
 	}()
@@ -568,6 +638,13 @@ func sendSoftphoneRTP(bridge net.Conn, input, signal *websocketWriterPump, track
 			return
 		case <-tick.C:
 			now := time.Now()
+			if rate, loss, changed := policy.next(now, stats.voice.feedback.Load()); changed {
+				if err := encoder.configure(rate, loss); err != nil {
+					stats.voice.configurationErrors.Add(1)
+				} else {
+					stats.voice.codec.Store(&rtcEncoderState{FECRequested: fec, Capability: encoder.capability(), Bitrate: rate, ExpectedLoss: loss, FEC: encoder.capability() == "libopus_fec", UpdatedAt: now.UTC().Format(time.RFC3339Nano)})
+				}
+			}
 			if clock.sent && clock.slot(now) <= clock.lastSlot {
 				continue
 			}
@@ -599,7 +676,7 @@ func sendSoftphoneRTP(bridge net.Conn, input, signal *websocketWriterPump, track
 			if skipped > 0 {
 				stats.drop("webrtc_pacing_gap", "carrier_to_operator", 0, skipped)
 			}
-			if err := track.WriteRTP(&rtp.Packet{Header: rtp.Header{Version: 2, SequenceNumber: sequence.NextSequenceNumber(), Timestamp: timestamp}, Payload: append([]byte(nil), out[:n]...)}); err != nil {
+			if err := writeObservedRTP(track.WriteRTP, &rtp.Packet{Header: rtp.Header{Version: 2, SequenceNumber: sequence.NextSequenceNumber(), Timestamp: timestamp}, Payload: append([]byte(nil), out[:n]...)}, &stats.rtp); err != nil {
 				stop()
 				return
 			}

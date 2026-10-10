@@ -1,6 +1,6 @@
 import { TransportTelemetry, TransportTelemetrySender, type TransportSample } from "./transport-telemetry";
 import { AudioRuntimeTelemetry } from "./audio-runtime-telemetry";
-import { mediaFailure, type MediaSessionEvent } from "../frontend/src/media-lease";
+import { mediaFailure, safeMediaSessionEvent, type MediaRecoveryContext, type MediaSessionEvent } from "../frontend/src/media-lease";
 // Browser audio engine for the Telephony softphone.
 //
 // Wire format on both directions of the media socket is the same one every
@@ -88,8 +88,9 @@ export interface SoftphoneAudioHealth {
 }
 export interface SoftphoneCallbacks {
   onAudioHealth?: (health: SoftphoneAudioHealth) => void;
-  refreshMediaURL?: () => Promise<string>;
+  refreshMediaURL?: (recovery?: MediaRecoveryContext) => Promise<string>;
   onSessionEvent?: (event: MediaSessionEvent) => void;
+  sessionDiagnostics?: () => {session_id?: string; previous_session_id?: string};
   onState?: (state: SoftphoneState, detail?: string) => void;
   onNotice?: (detail:string) => void;
   onLevels?: (mic: number, speaker: number) => void;
@@ -101,6 +102,8 @@ export interface SoftphoneCallbacks {
 export interface SoftphoneAudioOptions {
 	/** Optional browser transport; existing PCM WebSocket remains the default. */
 	mediaTransport?: "websocket" | "webrtc" | "auto";
+  /** WebRTC Opus redundancy. Default true when supported; false uses the portable codec. Applied on start/reconnect. */
+  webrtcFec?: boolean;
   inputDeviceId?: string;
   outputDeviceId?: string;
   outputVolume?: number;
@@ -120,6 +123,9 @@ export interface SoftphoneAudioOptions {
 }
 
 export interface AudioDropEvent {
+  packet_count?: number;
+  ssrc?: number;
+  window_ms?: number;
   timestamp: string;
   direction: string;
   reason: string;
@@ -188,7 +194,8 @@ export interface SoftphoneDiagnostics {
   rttMs: number | null;
   queueMs: number;
   targetMs: number;
-  underruns: number;
+  /** Native WebRTC does not expose our PCM underrun counter. */
+  underruns: number | null;
   droppedMs: number;
   maxQueueMs: number;
   audioContextRate: number;
@@ -218,6 +225,7 @@ export const DEFAULT_SOFTPHONE_AUDIO_OPTIONS: SoftphoneAudioOptions = {
 
 export function playbackBufferOptions(options: Partial<SoftphoneAudioOptions>) {
 	if (options.mediaTransport !== undefined && !["websocket", "webrtc", "auto"].includes(options.mediaTransport)) throw new RangeError("Unsupported softphone media transport");
+  if (options.webrtcFec !== undefined && typeof options.webrtcFec !== "boolean") throw new RangeError("webrtcFec must be boolean");
   const initialTargetMs = options.playbackTargetMs ?? JITTER_TARGET_MS;
   const minTargetMs = options.playbackMinMs ?? Math.min(JITTER_TARGET_MS, initialTargetMs);
   const maxTargetMs = options.playbackMaxMs ?? 280;
@@ -432,6 +440,9 @@ export class SoftphoneSession {
   private transportSender=new TransportTelemetrySender(sample=>{
     if(!this.mediaSocketConnected||!this.worker||this.diagnostics.websocketBufferedBytes>1920)return false;
     this.worker.postMessage({type:"send.telemetry",data:JSON.stringify({type:"transport.samples",diagnostics:{client_epoch:this.clientEpoch,transport_samples:[sample]}})});return true;
+  },report=>{
+    if(!this.mediaSocketConnected||!this.worker||this.diagnostics.websocketBufferedBytes>1920)return false;
+    this.worker.postMessage({type:"send.telemetry",data:JSON.stringify(report)});return true;
   });
   private worker: Worker | null = null;
   private ctx: AudioContext | null = null;
@@ -638,12 +649,12 @@ export class SoftphoneSession {
         } else if (message?.type === "socket.message") {
           this.handleControl(message.data);
         } else if (message?.type === "socket.reconnect") {
-          if(this.callbacks.refreshMediaURL) void this.callbacks.refreshMediaURL().then(mediaURL=>{
+          if(this.callbacks.refreshMediaURL) void this.callbacks.refreshMediaURL(message.recovery).then(mediaURL=>{
             if(!this.closed && this.worker===worker) worker.postMessage({type:"socket.credentials",id:message.id,mediaURL});
           },error=>{
             if(this.closed || this.worker!==worker) return;
             const failure=mediaFailure(error);
-            this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:failure.denied ? "revoked" : "retrying",status:failure.status,code:failure.code});
+            this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:failure.denied ? "revoked" : "retrying",...message.recovery,status:failure.status,code:failure.code});
             worker.postMessage({type:"socket.credentials",id:message.id,denied:failure.denied});
           });
         } else if (message?.type === "socket.error") {
@@ -770,9 +781,17 @@ export class SoftphoneSession {
   private sendText(data: string): void { this.worker?.postMessage({ type: "send.text", data }); }
 
   recordSessionEvent(event: MediaSessionEvent): void {
+    try{event={...this.callbacks.sessionDiagnostics?.(),...event};}catch{/* observer isolation */}
+    event=safeMediaSessionEvent(event);
     this.diagnostics.sessionEvents=[...(this.diagnostics.sessionEvents ?? []),event].slice(-50);
     try { this.callbacks.onSessionEvent?.(event); } catch { /* host observer isolation */ }
-    try { this.sendDiagnostics(); } catch { /* diagnostics cannot interrupt media recovery */ }
+    // Sparse events share the existing paced, bounded telemetry sender. Never
+    // push a full diagnostics history synchronously for a recovery callback.
+    try {
+      const report={type:"diagnostics.events",diagnostics:{client_epoch:this.clientEpoch,session_events:[event]}};
+      if(new TextEncoder().encode(JSON.stringify(report)).byteLength<=1100)this.transportSender.enqueueAuxiliary(report);
+      else this.transportSender.skippedAuxiliary++;
+    } catch { /* diagnostics cannot interrupt media recovery */ }
   }
 
   private sendDiagnostics(): void {
@@ -789,7 +808,7 @@ export class SoftphoneSession {
     const captureQueueEvents=fresh(value.captureQueueEvents,this.reportedCaptureQueueIDs);
     this.sendText(JSON.stringify({ type: "diagnostics", diagnostics: {
       media_transport: "websocket", codec: "pcm16",
-      client_epoch:this.clientEpoch, session_events:value.sessionEvents,
+      client_epoch:this.clientEpoch,
       playback_events:playbackEvents, capture_queue_events:captureQueueEvents,
       timing: {transport:this.transportTiming, playback:this.playbackTiming, runtime:this.runtimeTelemetry.counters},
       connection_state: this.mediaSocketConnected ? "connected" : this.closed ? "closed" : "reconnecting",

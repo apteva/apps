@@ -1,4 +1,4 @@
-import { leaseClock } from "./media-lease";
+import { type MediaAttachmentDiagnostics, safeMediaDiagnosticID, leaseClock } from "./media-lease";
 import { defineAppExtension, type AppHandle } from "@apteva/web-sdk";
 import { createMicrophonePreview, listMicrophones } from "./audio";
 import { HeadlessCallListener, type CallListenerOptions } from "./listener";
@@ -56,6 +56,7 @@ export interface CallControlResult {
 export interface CallSession {
   call_id: string;
   media_url: string;
+  session_generation?: string;
   session_token?: string;
   lease_seconds?: number;
   /** Local monotonic request start; never supplied by the server. */
@@ -259,14 +260,14 @@ export class TelephonyClient {
   }
 
   /** Attach an assigned human call; never dials or takes another user's call. */
-  async attach(id: string): Promise<CallSession> {
+  async attach(id: string, diagnostics?: MediaAttachmentDiagnostics): Promise<CallSession> {
     const started = leaseClock();
-    return this.session(await this.app.post(this.path(`/softphone/attach/${callID(id)}`), {}), id, "media", started);
+    return this.session(await this.app.post(this.path(`/softphone/attach/${callID(id)}`), diagnostics ? {media_diagnostics:diagnostics} : {}), id, "media", started);
   }
 
-  async takeover(id: string): Promise<CallSession> {
+  async takeover(id: string, diagnostics?: MediaAttachmentDiagnostics): Promise<CallSession> {
     const started = leaseClock();
-    return this.session(await this.app.post(this.path(`/softphone/takeover/${callID(id)}`), {}), id, "media", started);
+    return this.session(await this.app.post(this.path(`/softphone/takeover/${callID(id)}`), diagnostics ? {media_diagnostics:diagnostics} : {}), id, "media", started);
   }
 
   createCallListener(options: CallListenerOptions = {}): HeadlessCallListener { return new HeadlessCallListener(this, options); }
@@ -328,6 +329,7 @@ export class TelephonyClient {
       throw new Error("Invalid Telephony media endpoint");
     }
     if (kind === "listen-media" && url.pathname.slice(prefix.length) !== session.session_token) throw new Error("Listener credential mismatch");
+    if(kind==="media" && safeMediaDiagnosticID(session.session_generation)) url.searchParams.set("session_generation",session.session_generation!);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     return url.href;
   }

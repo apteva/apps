@@ -1,4 +1,4 @@
-import { MediaLease, type MediaSessionEvent } from "./media-lease";
+import { MediaLease, mediaRecoveryContext, safeMediaSessionEvent, type MediaInitiatingAction, type MediaRecoveryContext, type MediaSessionEvent } from "./media-lease";
 import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, playbackBufferOptions, type SoftphoneAudioHealth, type SoftphoneAudioOptions, type SoftphoneCallStatus, type SoftphoneDiagnostics, type SoftphoneState } from "../../ui/softphone-audio";
 import { createBrowserAudio, type AudioConnection, type AudioRuntime } from "./audio";
 import { isTerminalCall, type AnswerRequest, type Call, type CallControlResult, type CallSession, type CallTermination, type DialRequest, type TelephonyClient } from "./client";
@@ -191,17 +191,18 @@ export class HeadlessSoftphone {
   async join(id: string): Promise<void> { await this.answer(id, { rejoin: true }); }
 
   /** Resume a backend-assigned call without placing a new carrier leg. */
-  async attach(id: string): Promise<void> { await this.acquireSession(id, false); }
+  async attach(id: string, action: MediaInitiatingAction = "attach"): Promise<void> { await this.acquireSession(id, false, action); }
 
   /** Explicit supervisor action; normal attach/join cannot displace another user. */
   async takeover(id: string): Promise<void> { await this.acquireSession(id, true); }
 
-  private async acquireSession(id: string, takeover: boolean): Promise<void> {
+  private async acquireSession(id: string, takeover: boolean, action: MediaInitiatingAction = "takeover"): Promise<void> {
     const generation = this.begin(true);
     try {
       await this.cancellable(this.runtime.preflight(this.audioOptions), generation);
       this.assertCurrent(generation);
-      const session = await (takeover ? this.client.takeover(id) : this.client.attach(id));
+      const recovery=mediaRecoveryContext(takeover ? "takeover" : action);
+      const session = await (takeover ? this.client.takeover(id,recovery) : this.client.attach(id,recovery));
       this.assertCurrent(generation);
       await this.attachAudio(session, generation);
       // The call was placed elsewhere, so its direction and current status are
@@ -213,20 +214,24 @@ export class HeadlessSoftphone {
     } finally { this.finish(generation); }
   }
 
-  async reconnect(audio?: Partial<SoftphoneAudioOptions>): Promise<void> {
+  async reconnect(audio?: Partial<SoftphoneAudioOptions>, action: MediaInitiatingAction = "manual_reconnect"): Promise<void> {
     if (!this.session) throw new Error("No call to reconnect");
     const nextOptions = { ...this.audioOptions, ...audio };
     playbackBufferOptions(nextOptions);
     const generation = this.begin(false);
     this.audioOptions = nextOptions;
     const id = this.session.call_id;
+    const recovery=mediaRecoveryContext(action),previous_session_id=this.session.session_generation;
+    const report=(outcome:string,extra:Partial<MediaSessionEvent>={})=>this.reportSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome,...recovery,previous_session_id,...extra});
+    report("started");
     try {
-      const session = await this.client.attach(id);
+      const session = await this.client.attach(id,{...recovery,previous_session_id});
       this.assertCurrent(generation);
       await this.attachAudio(session, generation);
       await this.reconcileAttachedCall(session, generation);
+      report("connected",{session_id:session.session_generation});
     }
-    catch (error) { if (this.current(generation)) this.update({ detail: message(error) }); throw error; }
+    catch (error) { report(this.current(generation)?"failed":"cancelled"); if (this.current(generation)) this.update({ detail: message(error) }); throw error; }
     finally { this.finish(generation); }
   }
 
@@ -367,26 +372,34 @@ export class HeadlessSoftphone {
     const current = () => !this.disposed && audio !== undefined && this.audio === audio;
     const notify = (callback: () => void) => { if (current()) { try { callback(); } catch { /* isolate host callbacks */ } } };
     let refreshing: Promise<string> | undefined;
+    let refreshingContext: MediaRecoveryContext | undefined;
     try {
       this.assertCurrent(generation);
       audio = this.runtime.create({
-        refreshMediaURL: () => {
-          if (refreshing) return refreshing;
+        refreshMediaURL: (requested) => {
+          const recovery=requested ?? mediaRecoveryContext("automatic_retry");
+          if (refreshing) {
+            this.reportSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:"coalesced",...recovery,shared_attempt_id:refreshingContext?.attempt_id});
+            return refreshing;
+          }
           if (!current() || this.snapshot.busy) return Promise.reject(new Error("Audio recovery is not currently available"));
           const refreshGeneration = this.generation;
           const pending = (async () => {
-            const fresh = await this.client.attach(session.call_id);
+            const previous_session_id=session.session_generation;
+            const fresh = await this.client.attach(session.call_id,{...recovery,previous_session_id});
             this.assertCurrent(refreshGeneration);
             if (!current()) throw new Error("Audio connection no longer active");
             session = fresh; this.session = fresh; this.startLease(fresh);
+            this.reportSessionEvent({timestamp:new Date().toISOString(),action:"media_session",outcome:"replaced",...recovery,previous_session_id,session_id:fresh.session_generation});
             return this.client.mediaURL(fresh);
           })();
-          refreshing = pending;
-          const reset = () => { if (refreshing === pending) refreshing = undefined; };
+          refreshing = pending; refreshingContext=recovery;
+          const reset = () => { if (refreshing === pending) {refreshing = undefined;refreshingContext=undefined;} };
           void pending.then(reset, reset);
           return pending;
         },
-        onSessionEvent: event => notify(() => this.options.onSessionEvent?.(event)),
+        sessionDiagnostics: () => ({session_id:session.session_generation}),
+        onSessionEvent: event => notify(() => this.options.onSessionEvent?.(safeMediaSessionEvent({...event,session_id:event.session_id??session.session_generation}))),
         onState: (audioState, detail) => {
           if (!current()) return;
           if (audioState === "ended" && detail === "call.ended") {
@@ -461,6 +474,11 @@ export class HeadlessSoftphone {
     }, session.lease_started_ms);
   }
 
+  private reportSessionEvent(event:MediaSessionEvent) {
+    event=safeMediaSessionEvent(event);
+    if(this.audio?.recordSessionEvent) {try{this.audio.recordSessionEvent(event);}catch{/* observer isolation */}}
+    else {try{this.options.onSessionEvent?.(event);}catch{/* observer isolation */}}
+  }
   private stopAudio() {
     this.lease?.stop(); this.lease = undefined;
     const audio = this.audio;

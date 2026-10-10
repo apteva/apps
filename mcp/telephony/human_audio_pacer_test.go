@@ -29,7 +29,7 @@ func TestJSONHumanAudioPacerBoundsLatencyAndDropsOnlyStaleAudio(t *testing.T) {
 		t.Fatalf("stale audio dropped=%dms, want at least 300ms from a 400ms burst", droppedMS)
 	}
 	events := pacer.dropEvents()
-	if len(events) != 1 || events[0].Direction != "operator_to_carrier" || events[0].Timestamp == "" || events[0].DurationMS < 300 {
+	if len(events) != 1 || events[0].Direction != "operator_to_carrier" || events[0].Timestamp == "" || events[0].Trigger != "queue_depth" || events[0].QueueResidenceMS < 0 || events[0].DurationMS < 300 {
 		t.Fatalf("JSON pacer drop events = %#v", events)
 	}
 }

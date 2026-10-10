@@ -1,4 +1,4 @@
-import {outputWallTimeMS} from './audio-clock';
+import {outputWallTimeMS,waitForAudioClockProgress} from './audio-clock';
 import {SoftphoneSession, DEFAULT_SOFTPHONE_AUDIO_OPTIONS} from '../../ui/softphone-audio';
 import {WebRTCAudioConnection} from '../../frontend/src/webrtc-audio';
 
@@ -42,11 +42,11 @@ function tone(frame:Float32Array,rate:number):[number,number]{
   return (await response.json()).media_url;
  },onNotice:detail=>notices.push({detail,at:Date.now()}),onState:(state,detail)=>states.push({state,detail,at:Date.now()}),onDiagnostics:d=>diagnostics.push({at:Date.now(),...d})});
  const wireDiagnostics:unknown[]=[];
- const sendText=(rtc?session.send:session.sendText).bind(session);
- session[rtc?'send':'sendText']=(data:any)=>{
+ const sendText=(rtc?session.sendTelemetry:session.sendText).bind(session);
+ session[rtc?'sendTelemetry':'sendText']=(data:any)=>{
   const message=rtc?data:JSON.parse(data);
   if(message.type==='diagnostics'){wireDiagnostics.push(message);if(wireDiagnostics.length>4)wireDiagnostics.shift();}
-  sendText(data);
+  return sendText(data);
  };
  let probe:AudioWorkletNode|undefined;
  try{
@@ -57,6 +57,7 @@ function tone(frame:Float32Array,rate:number):[number,number]{
   if(!states.some(x=>x.state==='live'))throw new Error('carrier media did not connect');
   let ctx:AudioContext=rtc?session.context:session.ctx;
   const markers:any[]=[];let last=-2,stable=0,segment=false,symbols:number[]=[],start=-1000,level=-120;
+  const audioSetupWarmupMS=await waitForAudioClockProgress([sourceContext,ctx]);
   const arm=await(await fetch('/arm',{method:'POST'})).json();
   const sourceStart=sourceContext.currentTime+(arm.start_at-Date.now())/1000;
   source.port.postMessage({start:sourceStart});
@@ -109,8 +110,9 @@ function tone(frame:Float32Array,rate:number):[number,number]{
    clockObserver.onmessage=e=>{clearTimeout(timeout);resolve(e.data);};
    clockObserver.postMessage({type:'finish'});
   });
-  const result={clock_progress:clockProgress,independent_render_clocks:independentClocks,wire_diagnostics:wireDiagnostics,markers,states,notices,diagnostics:diagnostics.slice(-8),audio_context_rate:ctx.sampleRate,source_context_rate:sourceContext.sampleRate,start_at:arm.start_at,output_clock_mapping_uncertainty_ms:20,errors};
+  const result={audio_setup_warmup_ms:audioSetupWarmupMS,clock_progress:clockProgress,independent_render_clocks:independentClocks,wire_diagnostics:wireDiagnostics,markers,states,notices,diagnostics:diagnostics.slice(-8),audio_context_rate:ctx.sampleRate,source_context_rate:sourceContext.sampleRate,start_at:arm.start_at,output_clock_mapping_uncertainty_ms:20,errors};
   if(rtc){await session.statistics(session.generation);
+ if(!session.pc){errors.push('RTC media disconnected before final measurement');return result;}
  const stats=await session.pc.getStats(), candidates:any[]=[];
  stats.forEach((s:any)=>{if(s.type==='transport'&&s.selectedCandidatePairId){const pair=stats.get(s.selectedCandidatePairId);if(pair){const candidate=stats.get(pair.localCandidateId);if(candidate)candidates.push({candidateType:candidate.candidateType,protocol:candidate.protocol});}}});
  (result as any).rtc_candidates=candidates;(result as any).rtc_stats=Array.from((await session.pc.getStats()).values()).filter((s:any)=>s.type==='inbound-rtp'||s.type==='outbound-rtp'||s.type==='codec');}else session.sendDiagnostics();return result;

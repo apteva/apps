@@ -32,24 +32,32 @@ func audioNetworkTimestamp(at time.Time) string {
 
 // No token, URL, authorization header or carrier control is accepted here.
 type audioNetworkEvent struct {
-	ShutdownIntent  string        `json:"shutdown_intent,omitempty"`
-	ID              string        `json:"id"`
-	Event           string        `json:"event"`
-	Action          string        `json:"action"`
-	CallID          string        `json:"call_id"`
-	ProjectID       string        `json:"project_id"`
-	ConnectionID    string        `json:"connection_id"`
-	AdviserIdentity phoneIdentity `json:"adviser_identity"`
-	IdentitySource  string        `json:"identity_source"`
-	ClientIP        string        `json:"client_ip,omitempty"`
-	SocketPeerIP    string        `json:"socket_peer_ip,omitempty"`
-	AddressSource   string        `json:"address_source"`
-	Classification  string        `json:"network_classification"`
-	OccurredAt      string        `json:"occurred_at"`
-	Reason          string        `json:"reason,omitempty"`
-	CloseCode       int           `json:"close_code,omitempty"`
-	ExpiresAt       string        `json:"-"`
-	Retention       time.Duration `json:"-"`
+	HTTPStatus            int            `json:"http_status,omitempty"`
+	SessionIssuerIdentity *phoneIdentity `json:"session_issuer_identity,omitempty"`
+	lastBrowser           audioDisconnectInfo
+	ReplacedBy            *audioSessionCorrelation `json:"replaced_by,omitempty"`
+	Disconnect            *audioDisconnectInfo     `json:"disconnect,omitempty"`
+	Session               audioSessionCorrelation  `json:"session,omitempty"`
+	CurrentSessionID      string                   `json:"current_session_id,omitempty"`
+	MediaPath             *rtcMediaEndpoint        `json:"media_path,omitempty"`
+	ShutdownIntent        string                   `json:"shutdown_intent,omitempty"`
+	ID                    string                   `json:"id"`
+	Event                 string                   `json:"event"`
+	Action                string                   `json:"action"`
+	CallID                string                   `json:"call_id"`
+	ProjectID             string                   `json:"project_id"`
+	ConnectionID          string                   `json:"connection_id"`
+	AdviserIdentity       phoneIdentity            `json:"adviser_identity"`
+	IdentitySource        string                   `json:"identity_source"`
+	ClientIP              string                   `json:"client_ip,omitempty"`
+	SocketPeerIP          string                   `json:"socket_peer_ip,omitempty"`
+	AddressSource         string                   `json:"address_source"`
+	Classification        string                   `json:"network_classification"`
+	OccurredAt            string                   `json:"occurred_at"`
+	Reason                string                   `json:"reason,omitempty"`
+	CloseCode             int                      `json:"close_code,omitempty"`
+	ExpiresAt             string                   `json:"-"`
+	Retention             time.Duration            `json:"-"`
 }
 
 // Socket handlers only attempt a bounded in-memory append. A slow database or
