@@ -587,6 +587,11 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{"code": "webrtc_unavailable"})
 			return
 		}
+		rtcConfig.FEC, err = parseRTCFECPreference(r.URL.Query())
+		if err != nil {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]any{"code": "invalid_webrtc_fec"})
+			return
+		}
 	}
 
 	networkConfig := map[string]string{}

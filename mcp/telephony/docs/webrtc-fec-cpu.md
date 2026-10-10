@@ -75,6 +75,11 @@ Only WebRTC uses these Opus codecs. The default PCM/WebSocket audio engine
 has not acquired this encoding cost. No quality setting was reduced to make
 the benchmarks look faster.
 
+The per-softphone `audio.webrtcFec: false` option restores the **portable**
+encoder/decoder. Its expected cost corresponds to the portable control above,
+not the native-without-FEC control, which was measured only to isolate FEC's
+share of the native codec cost. Actual capacity still needs target-host tests.
+
 ## Reproduce
 
 ```sh

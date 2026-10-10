@@ -12,8 +12,12 @@ export function mediaTransport(value?: MediaTransport): MediaTransport {
   if (!["websocket", "webrtc", "auto"].includes(value)) throw new RangeError("Unsupported softphone media transport");
   return value;
 }
-export function rtcMediaURL(url: string): string {
-  const parsed = new URL(url); parsed.searchParams.set("transport", "webrtc"); return parsed.toString();
+export function rtcMediaURL(url: string, fec?: boolean): string {
+  if(fec!==undefined&&typeof fec!=="boolean")throw new RangeError("webrtcFec must be boolean");
+  const parsed = new URL(url); parsed.searchParams.set("transport", "webrtc");
+  parsed.searchParams.delete("webrtc_fec");
+  if(fec!==undefined)parsed.searchParams.set("webrtc_fec",String(fec));
+  return parsed.toString();
 }
 
 const safe = (callback: (() => void) | undefined) => { try { callback?.(); } catch { /* observers never gate media */ } };
@@ -228,7 +232,7 @@ export class WebRTCAudioConnection implements AudioConnection {
     this.whisper=new AudioWorkletNode(context,"softphone-playback",{numberOfInputs:0,outputChannelCount:[1],processorOptions:playbackBufferOptions(options)});
     this.whisper.connect(this.speaker);
     this.gate();
-    const socket=new WebSocket(rtcMediaURL(url));socket.binaryType="arraybuffer";this.socket=socket;
+    const socket=new WebSocket(rtcMediaURL(url,options.webrtcFec));socket.binaryType="arraybuffer";this.socket=socket;
     let connected=false,finished=false;
     await new Promise<void>((resolve,reject)=>{
       const finish=(err?:Error)=>{if(finished)return;finished=true;clearTimeout(timeout);this.cancelSetup=undefined;err?reject(err):resolve();};

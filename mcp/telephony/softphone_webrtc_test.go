@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"math"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -477,12 +478,21 @@ func rtcTestCtx(t *testing.T) {
 }
 
 func TestRTCExistingHubMediaHoldAndReplacement(t *testing.T) {
+	for _, query := range []string{"", "&webrtc_fec=false"} {
+		t.Run("fec"+query, func(t *testing.T) { testRTCExistingHubMediaHoldAndReplacement(t, query) })
+	}
+}
+
+func testRTCExistingHubMediaHoldAndReplacement(t *testing.T, query string) {
 	rtcTestCtx(t)
 	app := &App{installID: 42}
 	insertSoftphoneCall(t, app, "in-progress")
 	server := softphoneTestServer(t, app)
 	peer := dialWS(t, server.URL+"/peer/call-soft-1/cb-secret")
-	b := rtcTestConnect(t, server.URL+"/softphone/media/call-soft-1/peer-secret?transport=webrtc")
+	b := rtcTestConnect(t, server.URL+"/softphone/media/call-soft-1/peer-secret?transport=webrtc"+query)
+	if query != "" && !strings.Contains(b.pc.RemoteDescription().SDP, "useinbandfec=0") {
+		t.Fatal("browser was still asked to send FEC", b.pc.RemoteDescription().SDP)
+	}
 	encoder, _ := opus.NewEncoder(opus.WithChannels(1), opus.WithBitrate(32000))
 	pcm := make([]float32, 960)
 	packet := make([]byte, 1275)
@@ -535,6 +545,12 @@ func TestRTCExistingHubMediaHoldAndReplacement(t *testing.T) {
 	}
 	hub := app.softphones.lookup("call-soft-1")
 	old := hub.browserWriter()
+	if query != "" {
+		state := old.conn.(*rtcHubConn).stats.snapshot().Encoder
+		if state == nil || state.FEC || state.FECRequested || state.Capability != "go_opus_plc" {
+			t.Fatal("FEC opt-out did not retain the portable encoder", state)
+		}
+	}
 	hub.setHeld(true)
 	hub.forwardMicrophone(old, []byte{1, 0})
 	if !hub.held {

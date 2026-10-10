@@ -34,7 +34,10 @@ type softphoneRTCConfig struct {
 	PublicIPs        []string
 	PortMin, PortMax uint16
 	Bitrate          int
+	FEC              *bool // nil retains the existing enabled preference.
 }
+
+func (c softphoneRTCConfig) fecEnabled() bool { return c.FEC == nil || *c.FEC }
 
 func parseSoftphoneRTCConfig(values map[string]string) (softphoneRTCConfig, error) {
 	c := softphoneRTCConfig{Enabled: values["softphone_webrtc_enabled"] == "true", Bitrate: 32000}
@@ -80,7 +83,11 @@ func parseSoftphoneRTCConfig(values map[string]string) (softphoneRTCConfig, erro
 
 func softphoneRTCAPI(c softphoneRTCConfig, settings ...func(*webrtc.SettingEngine)) (*webrtc.API, error) {
 	m := &webrtc.MediaEngine{}
-	if err := m.RegisterCodec(webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2, SDPFmtpLine: "minptime=10;useinbandfec=1;stereo=0;sprop-stereo=0;maxaveragebitrate=32000"}, PayloadType: 111}, webrtc.RTPCodecTypeAudio); err != nil {
+	fec := "1"
+	if !c.fecEnabled() {
+		fec = "0"
+	}
+	if err := m.RegisterCodec(webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2, SDPFmtpLine: "minptime=10;useinbandfec=" + fec + ";stereo=0;sprop-stereo=0;maxaveragebitrate=32000"}, PayloadType: 111}, webrtc.RTPCodecTypeAudio); err != nil {
 		return nil, err
 	}
 	i := &interceptor.Registry{}
@@ -357,9 +364,9 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 			go stop()
 			return
 		}
-		trackOnce.Do(func() { go receiveSoftphoneRTP(remote, input, stats, done, stop) })
+		trackOnce.Do(func() { go receiveSoftphoneRTP(remote, input, stats, done, stop, c.fecEnabled()) })
 	})
-	config, _ := json.Marshal(map[string]any{"type": "webrtc.config", "ice_servers": c.ICEServers, "bitrate": c.Bitrate})
+	config, _ := json.Marshal(map[string]any{"type": "webrtc.config", "ice_servers": c.ICEServers, "bitrate": c.Bitrate, "fec_requested": c.fecEnabled()})
 	if err := signalWriter.Write(ws.OpText, config); err != nil {
 		return fail(err)
 	}
@@ -375,6 +382,12 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 	}
 	if op != ws.OpText || len(data) > 65536 || json.Unmarshal(data, &offer) != nil || offer.Type != "webrtc.offer" || len(offer.SDP) > 60000 || strings.Contains(offer.SDP, "m=video ") || strings.Contains(offer.SDP, "m=application ") {
 		return fail(errors.New("invalid audio SDP offer"))
+	}
+	if !c.fecEnabled() {
+		offer.SDP, err = disableRTCSDPFEC(offer.SDP)
+		if err != nil {
+			return fail(errors.New("invalid audio SDP offer"))
+		}
 	}
 	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: offer.SDP}); err != nil {
 		return fail(errors.New("invalid remote description"))
@@ -425,12 +438,12 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 		return fail(errors.New("WebRTC connection timed out"))
 	}
 	signal.SetReadDeadline(time.Time{})
-	go sendSoftphoneRTP(bridge, input, signalWriter, track, c.Bitrate, stats, done, stop)
+	go sendSoftphoneRTP(bridge, input, signalWriter, track, c.Bitrate, stats, done, stop, c.fecEnabled())
 	return &rtcHubConn{Conn: hub, stop: stop, stats: stats, whisper: signalWriter.queueWhisper}, stop, nil
 }
 
-func receiveSoftphoneRTP(remote *webrtc.TrackRemote, input *websocketWriterPump, stats *rtcMediaStats, done <-chan struct{}, stop func()) {
-	decoder, err := newRTCOpusDecoder()
+func receiveSoftphoneRTP(remote *webrtc.TrackRemote, input *websocketWriterPump, stats *rtcMediaStats, done <-chan struct{}, stop func(), fec bool) {
+	decoder, err := newRTCOpusDecoderWithFEC(fec)
 	if err != nil {
 		stop()
 		return
@@ -484,7 +497,7 @@ func receiveSoftphoneRTP(remote *webrtc.TrackRemote, input *websocketWriterPump,
 		case now := <-tick.C:
 			for p := j.pop(now); p != nil; p = j.pop(now) {
 				for gap := timeline.missing(p.SequenceNumber, p.Timestamp); gap > 0; gap-- {
-					if n, err := decoder.recover(p.Payload, pcm[:480], gap == 1); err == nil && n == 480 {
+					if n, err := decoder.recover(p.Payload, pcm[:480], fec && gap == 1); err == nil && n == 480 {
 						forward(pcm[:n])
 						stats.mu.Lock()
 						stats.value.IngressConcealedMS += 20
@@ -516,15 +529,15 @@ func ignoreRTCPadding(p *rtp.Packet, stats *rtcMediaStats) bool {
 	return true
 }
 
-func sendSoftphoneRTP(bridge net.Conn, input, signal *websocketWriterPump, track *webrtc.TrackLocalStaticRTP, bitrate int, stats *rtcMediaStats, done <-chan struct{}, stop func()) {
-	encoder, err := newRTCOpusEncoder(bitrate)
+func sendSoftphoneRTP(bridge net.Conn, input, signal *websocketWriterPump, track *webrtc.TrackLocalStaticRTP, bitrate int, stats *rtcMediaStats, done <-chan struct{}, stop func(), fec bool) {
+	encoder, err := newRTCOpusEncoderWithFEC(bitrate, fec)
 	if err != nil {
 		stop()
 		return
 	}
 	defer encoder.Close()
 	policy := newRTCVoicePolicy(bitrate)
-	stats.voice.codec.Store(&rtcEncoderState{Capability: encoder.capability(), Bitrate: bitrate, ExpectedLoss: 10, FEC: encoder.capability() == "libopus_fec", UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
+	stats.voice.codec.Store(&rtcEncoderState{FECRequested: fec, Capability: encoder.capability(), Bitrate: bitrate, ExpectedLoss: 10, FEC: encoder.capability() == "libopus_fec", UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
 	// Keep 20ms frame boundaries and a bounded 120ms outgoing queue. Encoding
 	// and RTP writes are paced outside the hub's carrier receive loop.
 	frames := make(chan rtcPCMFrame, 6)
@@ -605,7 +618,7 @@ func sendSoftphoneRTP(bridge net.Conn, input, signal *websocketWriterPump, track
 				if err := encoder.configure(rate, loss); err != nil {
 					stats.voice.configurationErrors.Add(1)
 				} else {
-					stats.voice.codec.Store(&rtcEncoderState{Capability: encoder.capability(), Bitrate: rate, ExpectedLoss: loss, FEC: encoder.capability() == "libopus_fec", UpdatedAt: now.UTC().Format(time.RFC3339Nano)})
+					stats.voice.codec.Store(&rtcEncoderState{FECRequested: fec, Capability: encoder.capability(), Bitrate: rate, ExpectedLoss: loss, FEC: encoder.capability() == "libopus_fec", UpdatedAt: now.UTC().Format(time.RFC3339Nano)})
 				}
 			}
 			if clock.sent && clock.slot(now) <= clock.lastSlot {

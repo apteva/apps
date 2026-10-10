@@ -50,3 +50,8 @@ describe("softphone audio setting migration", () => {
  test("preserves a saved explicit microphone gain", () => {
   expect(resolveAudioOptions(JSON.stringify({ inputGainDB: -6 }), null, null).inputGainDB).toBe(-6);
  });
+
+test("preserves the saved WebRTC FEC opt-out without changing existing defaults",()=>{
+ expect(resolveAudioOptions(JSON.stringify({mediaTransport:"webrtc",webrtcFec:false}),null,null).webrtcFec).toBe(false);
+ expect(resolveAudioOptions(null,null,null).webrtcFec).toBeUndefined();
+});

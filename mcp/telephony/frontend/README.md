@@ -263,3 +263,30 @@ requires an enabled Telephony server and reachable ICE/UDP or TURN; explicit
 WebRTC reports setup failure, while `auto` can fall back during initial setup.
 See [softphone transports](../docs/softphone-transports.md) for configuration,
 recovery, provider independence, diagnostics and verification limits.
+
+### Optional WebRTC packet recovery
+
+Opus FEC is enabled by default when the server has a compatible native codec.
+It can be disabled for one softphone through the existing audio options:
+
+```ts
+const phone = telephony.createSoftphone({
+  mediaTransport: "webrtc",
+  audio: { webrtcFec: false },
+});
+
+// Change the next call's preference without altering active audio.
+phone.configureAudio({ webrtcFec: true });
+
+// Or explicitly reconnect the browser audio on the existing carrier call.
+await phone.reconnect({ webrtcFec: false });
+```
+
+The preference is retained through automatic audio recovery and is scoped to
+each media attachment. Opting out restores Telephony's original portable Opus
+encoder/decoder, disables SDP requests for redundant audio in both directions,
+and retains bounded buffering, ordinary packet-loss concealment, bitrate
+adaptation and diagnostics. It does not change PCM/WebSocket audio or another
+softphone's codec. The Telephony audio settings also expose this preference
+when WebRTC or automatic transport is selected. Updating the saved preference
+does not restart the app or modify an already established audio session.

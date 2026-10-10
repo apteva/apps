@@ -101,6 +101,8 @@ export interface SoftphoneCallbacks {
 export interface SoftphoneAudioOptions {
 	/** Optional browser transport; existing PCM WebSocket remains the default. */
 	mediaTransport?: "websocket" | "webrtc" | "auto";
+  /** WebRTC Opus redundancy. Default true when supported; false uses the portable codec. Applied on start/reconnect. */
+  webrtcFec?: boolean;
   inputDeviceId?: string;
   outputDeviceId?: string;
   outputVolume?: number;
@@ -222,6 +224,7 @@ export const DEFAULT_SOFTPHONE_AUDIO_OPTIONS: SoftphoneAudioOptions = {
 
 export function playbackBufferOptions(options: Partial<SoftphoneAudioOptions>) {
 	if (options.mediaTransport !== undefined && !["websocket", "webrtc", "auto"].includes(options.mediaTransport)) throw new RangeError("Unsupported softphone media transport");
+  if (options.webrtcFec !== undefined && typeof options.webrtcFec !== "boolean") throw new RangeError("webrtcFec must be boolean");
   const initialTargetMs = options.playbackTargetMs ?? JITTER_TARGET_MS;
   const minTargetMs = options.playbackMinMs ?? Math.min(JITTER_TARGET_MS, initialTargetMs);
   const maxTargetMs = options.playbackMaxMs ?? 280;

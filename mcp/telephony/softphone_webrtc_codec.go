@@ -35,6 +35,13 @@ func newRTCGoEncoder(bitrate int) (rtcOpusEncoder, error) {
 	return &rtcGoOpusEncoder{e}, nil
 }
 func newRTCOpusEncoder(bitrate int) (rtcOpusEncoder, error) {
+	return newRTCOpusEncoderWithFEC(bitrate, true)
+}
+func newRTCOpusEncoderWithFEC(bitrate int, fec bool) (rtcOpusEncoder, error) {
+	if !fec {
+		// Opt-out restores the original encoder and avoids native FEC codec cost.
+		return selectRTCOpusEncoder(bitrate, newRTCGoEncoder)
+	}
 	return selectRTCOpusEncoder(bitrate, newRTCNativeEncoder)
 }
 func selectRTCOpusEncoder(bitrate int, native func(int) (rtcOpusEncoder, error)) (rtcOpusEncoder, error) {
@@ -61,8 +68,13 @@ func (d *rtcGoOpusDecoder) recover(_ []byte, out []int16, _ bool) (int, error) {
 }
 func (d *rtcGoOpusDecoder) Close() {}
 func newRTCOpusDecoder() (rtcOpusDecoder, error) {
-	if d, err := newRTCNativeDecoder(); err == nil {
-		return d, nil
+	return newRTCOpusDecoderWithFEC(true)
+}
+func newRTCOpusDecoderWithFEC(fec bool) (rtcOpusDecoder, error) {
+	if fec {
+		if d, err := newRTCNativeDecoder(); err == nil {
+			return d, nil
+		}
 	}
 	d, err := opus.NewDecoderWithOutput(24000, 1)
 	if err != nil {

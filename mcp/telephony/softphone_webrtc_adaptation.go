@@ -16,6 +16,7 @@ type rtcVoiceControl struct {
 	configurationErrors atomic.Uint64
 }
 type rtcEncoderState struct {
+	FECRequested bool   `json:"fec_requested"`
 	Capability   string `json:"capability"`
 	Bitrate      int    `json:"bitrate_bps"`
 	ExpectedLoss int    `json:"expected_loss_percent"`

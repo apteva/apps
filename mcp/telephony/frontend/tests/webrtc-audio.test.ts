@@ -10,6 +10,18 @@ test("existing WebSocket remains the default, invalid options fail before media"
  expect(mediaTransport()).toBe("websocket");expect(()=>mediaTransport("bad" as any)).toThrow();expect(()=>playbackBufferOptions({mediaTransport:"bad" as any})).toThrow();
  expect(rtcMediaURL("wss://example.test/softphone/media/id/token?project_id=p")).toBe("wss://example.test/softphone/media/id/token?project_id=p&transport=webrtc");
 });
+test("per-softphone FEC preference survives refreshed authorization URLs and rejects malformed options",()=>{
+ const url="wss://example.test/softphone/media/id/fresh-token?project_id=p";
+ expect(new URL(rtcMediaURL(url,false)).searchParams.get("webrtc_fec")).toBe("false");
+ expect(new URL(rtcMediaURL(url,true)).searchParams.get("webrtc_fec")).toBe("true");
+ expect(new URL(rtcMediaURL(url+"&webrtc_fec=false",true)).searchParams.getAll("webrtc_fec")).toEqual(["true"]);
+ expect(new URL(rtcMediaURL(url+"&webrtc_fec=false")).searchParams.has("webrtc_fec")).toBe(false);
+ expect(new URL(rtcMediaURL(url,false)).pathname).toBe("/softphone/media/id/fresh-token");
+ for(const value of ["false",0,null]){
+  expect(()=>playbackBufferOptions({webrtcFec:value as any})).toThrow();
+  expect(()=>rtcMediaURL(url,value as any)).toThrow();
+ }
+});
 test("default does not create a peer connection; explicit RTC never silently falls back",async()=>{
  const events:string[]=[];
  const normal=selectableAudio({},()=>connection("ws",events),()=>{throw Error("RTC must not run");});

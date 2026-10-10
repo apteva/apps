@@ -6,6 +6,24 @@ optional; PCM/WebSocket remains the default.
 
 ## Recovery and codec capabilities
 
+FEC is optional per softphone: `audio: { webrtcFec: false }` opts out, while
+omitting the option preserves the existing enabled preference. The Telephony
+audio settings offer the same switch for WebRTC/automatic transport. The
+preference is applied on a new call or explicit audio reconnect and retained
+through automatic recovery; it does not affect another call or restart the
+application. Opt-out selects the original portable encoder/decoder and asks
+the browser not to send Opus redundancy, while keeping ordinary PLC and the
+existing queue bounds. Server codec diagnostics separate `fec_requested` from
+actual `fec_enabled`; requesting FEC cannot make an unsupported codec provide
+it. PCM/WebSocket audio remains unchanged.
+
+Opt-out verification: the full Go suite passed 1,002 tests/subtests, with five
+optional tests skipped; 236 frontend tests passed. Focused race checks covered
+FEC selection, two-way WebRTC audio, hold, replacement, caller cancellation,
+native fallback and rejection of malformed options while another socket stays
+attached. Typechecking, `go vet`, the headless client build and Telephony-only
+panel builds passed. No staging/production installation or call was made.
+
 On Linux/macOS amd64/arm64, Telephony tries the system libopus once. An available
 library is used for voice encoding with in-band FEC, 20 ms frames, mono,
 32 kbit/s initial bitrate, a 24 kHz maximum audio bandwidth matching the input
