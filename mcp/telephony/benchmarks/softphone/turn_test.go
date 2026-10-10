@@ -8,6 +8,36 @@ import (
 	"time"
 )
 
+func TestUDPRandomLossAndBurstAreSeededAndRecover(t *testing.T) {
+	now := time.Unix(100, 0)
+	a := datagramSchedule{link: Link{Kbps: 10000, UDPLossProbability: .1}, rng: rand.New(rand.NewPCG(42, 43))}
+	b := datagramSchedule{link: a.link, rng: rand.New(rand.NewPCG(42, 43))}
+	loss := 0
+	for i := 0; i < 1000; i++ {
+		at := now.Add(time.Duration(i) * 20 * time.Millisecond)
+		_, x := a.due(at, 100)
+		_, y := b.due(at, 100)
+		if x != y {
+			t.Fatal("loss not seeded")
+		}
+		if !x {
+			loss++
+		}
+	}
+	if loss < 60 || loss > 140 {
+		t.Fatal("incorrect loss rate", loss)
+	}
+	a = datagramSchedule{epoch: now, link: Link{Kbps: 10000, UDPBurstAtMS: 1000, UDPBurstMS: 120}, rng: rand.New(rand.NewPCG(1, 2))}
+	for _, test := range []struct {
+		ms       int
+		accepted bool
+	}{{980, true}, {1000, false}, {1100, false}, {1120, true}} {
+		if _, ok := a.due(now.Add(time.Duration(test.ms)*time.Millisecond), 100); ok != test.accepted {
+			t.Fatal(test)
+		}
+	}
+}
+
 func TestDatagramScheduleCountsOverheadAndBoundsQueue(t *testing.T) {
 	now := time.Unix(100, 0)
 	s := datagramSchedule{link: Link{Kbps: 64}, rng: rand.New(rand.NewPCG(1, 2))}

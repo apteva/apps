@@ -15,7 +15,7 @@ import (
 )
 
 // Values describe observation boundaries, not a diagnosis of the network or carrier.
-var audioDashboardIssues = map[string]bool{"playback_underrun": true, "dropped_audio": true, "sequence_gaps": true, "carrier_stall": true, "browser_error": true, "reconnect": true, "context_suspended": true, "scheduling_pause": true, "write_delay": true, "high_rtt": true, "audio_degraded": true}
+var audioDashboardIssues = map[string]bool{"concealed_audio": true, "playback_underrun": true, "dropped_audio": true, "sequence_gaps": true, "carrier_stall": true, "browser_error": true, "reconnect": true, "context_suspended": true, "scheduling_pause": true, "write_delay": true, "high_rtt": true, "audio_degraded": true}
 var audioDashboardStages = map[string]bool{"carrier_to_telephony": true, "telephony_to_browser": true, "browser_to_telephony": true}
 
 type audioDashboardSummary struct {
@@ -71,8 +71,10 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 	}
 	m := s.Metrics
 	m["playback_dropped_ms"] = float64(b.PlaybackDroppedMS)
-	m["playback_underruns"] = float64(b.PlaybackUnderruns)
-	m["playback_underrun_ms"] = b.PlaybackUnderrunMS
+	if b.MediaTransport != "webrtc" {
+		m["playback_underruns"] = float64(b.PlaybackUnderruns)
+		m["playback_underrun_ms"] = b.PlaybackUnderrunMS
+	}
 	m["browser_queue_ms"] = float64(b.PlaybackQueueMS)
 	m["browser_max_queue_ms"] = float64(b.PlaybackMaxQueueMS)
 	m["playback_sequence_gaps"] = float64(b.PlaybackSequenceGaps)
@@ -80,7 +82,10 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 	if b.WebRTC != nil {
 		m["webrtc_packets_lost"] = b.WebRTC.PacketsLost
 		m["webrtc_packets_discarded"] = b.WebRTC.PacketsDiscarded
-		m["webrtc_concealed_ms"] = b.WebRTC.ConcealedMS
+		if b.WebRTC.ConcealedMS != nil {
+			m["webrtc_concealed_ms"] = *b.WebRTC.ConcealedMS
+			add("concealed_audio", "telephony_to_browser", *b.WebRTC.ConcealedMS > 0)
+		}
 		m["webrtc_jitter_buffer_ms"] = b.WebRTC.JitterBufferMS
 		add("dropped_audio", "telephony_to_browser", b.WebRTC.PacketsDiscarded > 0)
 		add("audio_degraded", "telephony_to_browser", b.WebRTC.JitterBufferMS > 320)
@@ -127,6 +132,8 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 		m["server_webrtc_pacing_skipped_ms"] = float64(v.WebRTC.PacingSkippedMS)
 		add("audio_degraded", "telephony_to_browser", v.WebRTC.PacingSkippedMS > 0)
 		m["server_webrtc_ingress_rejected_packets"] = float64(v.WebRTC.IngressRejectedPackets + v.WebRTC.IngressQueueDrops + v.WebRTC.DecodeErrors)
+		m["server_webrtc_ingress_concealed_ms"] = float64(v.WebRTC.IngressConcealedMS)
+		add("concealed_audio", "browser_to_telephony", v.WebRTC.IngressConcealedMS > 0)
 		add("dropped_audio", "telephony_to_browser", v.WebRTC.OutboundDroppedMS > 0)
 		add("dropped_audio", "browser_to_telephony", m["server_webrtc_ingress_rejected_packets"] > 0)
 		observed = max(observed, audioDashboardTime(v.UpdatedAt))

@@ -257,15 +257,15 @@ func mergePlaybackUnderruns(previous, incoming []playbackUnderrunEvent) []playba
 }
 
 type browserWebRTCStats struct {
-	Protocol          string  `json:"protocol,omitempty"`
-	CandidateType     string  `json:"candidateType,omitempty"`
-	SendBitrateBPS    float64 `json:"sendBitrateBps"`
-	ReceiveBitrateBPS float64 `json:"receiveBitrateBps"`
-	PacketsLost       float64 `json:"packetsLost"`
-	JitterMS          float64 `json:"jitterMs"`
-	ConcealedMS       float64 `json:"concealedMs"`
-	PacketsDiscarded  float64 `json:"packetsDiscarded"`
-	JitterBufferMS    float64 `json:"jitterBufferMs"`
+	Protocol          string   `json:"protocol,omitempty"`
+	CandidateType     string   `json:"candidateType,omitempty"`
+	SendBitrateBPS    float64  `json:"sendBitrateBps"`
+	ReceiveBitrateBPS float64  `json:"receiveBitrateBps"`
+	PacketsLost       float64  `json:"packetsLost"`
+	JitterMS          float64  `json:"jitterMs"`
+	ConcealedMS       *float64 `json:"concealedMs,omitempty"`
+	PacketsDiscarded  float64  `json:"packetsDiscarded"`
+	JitterBufferMS    float64  `json:"jitterBufferMs"`
 }
 
 type audioDropEvent struct {
@@ -423,7 +423,15 @@ func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics) browserAudi
 		r := value.WebRTC
 		r.Protocol = enum(r.Protocol, "udp", "tcp")
 		r.CandidateType = enum(r.CandidateType, "host", "srflx", "prflx", "relay")
-		for _, field := range []*float64{&r.SendBitrateBPS, &r.ReceiveBitrateBPS, &r.PacketsLost, &r.JitterMS, &r.ConcealedMS, &r.PacketsDiscarded, &r.JitterBufferMS} {
+		if r.ConcealedMS != nil {
+			if math.IsNaN(*r.ConcealedMS) || math.IsInf(*r.ConcealedMS, 0) {
+				r.ConcealedMS = nil
+			} else {
+				v := math.Max(0, math.Min(*r.ConcealedMS, 1e9))
+				r.ConcealedMS = &v
+			}
+		}
+		for _, field := range []*float64{&r.SendBitrateBPS, &r.ReceiveBitrateBPS, &r.PacketsLost, &r.JitterMS, &r.PacketsDiscarded, &r.JitterBufferMS} {
 			if math.IsNaN(*field) || math.IsInf(*field, 0) {
 				*field = 0
 			} else {

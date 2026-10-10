@@ -4,6 +4,7 @@ import { AudioRuntimeTelemetry } from "../../ui/audio-runtime-telemetry";
 import { playRingback, ringbackPattern } from "../../ui/ringback";
 import { mediaFailure, type MediaSessionEvent } from "./media-lease";
 import type { AudioConnection } from "./audio";
+import { RTCQualityPolicy, RTCControlBudget } from "./webrtc-quality";
 
 export type MediaTransport = "websocket" | "webrtc" | "auto";
 export function mediaTransport(value?: MediaTransport): MediaTransport {
@@ -48,7 +49,19 @@ export function rtcStatistics(report: RTCStatsReport, previous?: RTCPrevious) {
       metrics[prefix+"loss_window_ms"]=time-old.at;
     }
   };
-  let identities=0;
+  const concealment=(s:any,id:string,rate:number)=>{
+    const count=numeric(s,"concealedSamples"),silent=numeric(s,"silentConcealedSamples"),time=numeric(s,"timestamp"),ssrc=numeric(s,"ssrc"),old=previous?.counters?.[id];
+    if(count===undefined||time===undefined)return;
+    counters[id]??={};Object.assign(counters[id],{concealedSamples:count,at:time});
+    if(ssrc!==undefined)counters[id].ssrc=ssrc;
+    if(silent!==undefined)counters[id].silentConcealedSamples=silent;
+    if(old&&old.ssrc===ssrc&&count>=old.concealedSamples&&time>old.at){
+      metrics.receiver_concealed_delta_ms=(metrics.receiver_concealed_delta_ms??0)+(count-old.concealedSamples)*1000/rate;
+      metrics.receiver_concealed_window_ms=time-old.at;
+      if(silent!==undefined&&silent>=old.silentConcealedSamples)metrics.receiver_silent_concealed_delta_ms=(metrics.receiver_silent_concealed_delta_ms??0)+(silent-old.silentConcealedSamples)*1000/rate;
+    }
+  };
+  let concealmentSupported=false, identities=0;
   report.forEach((s:any,id:string)=>{
     at=Math.max(at,finite(s.timestamp,1e15));
     if((s.kind??s.mediaType??report.get(s.localId)?.kind)==="audio" && identities++<32){
@@ -60,6 +73,7 @@ export function rtcStatistics(report: RTCStatsReport, previous?: RTCPrevious) {
         loss(s,id,"receiver_");
         received+=finite(s.bytesReceived);lost+=finite(s.packetsLost);jitter=Math.max(jitter,finite(s.jitter)*1000);
         const codec=report.get(s.codecId);const rate=numeric(codec,"clockRate")??48000;
+        concealment(s,id,rate);concealmentSupported ||= numeric(s,"concealedSamples")!==undefined;
         concealed+=finite(s.concealedSamples)*1000/rate;discarded+=finite(s.packetsDiscarded);delay+=finite(s.jitterBufferDelay);emitted+=finite(s.jitterBufferEmittedCount);
         copy(s,"receiver_",["bytesReceived","packetsReceived","packetsLost","jitter","packetsDiscarded","concealedSamples","silentConcealedSamples","concealmentEvents","insertedSamplesForDeceleration","removedSamplesForAcceleration","totalSamplesReceived","audioLevel","totalAudioEnergy","totalSamplesDuration","nackCount","fecPacketsReceived","fecPacketsDiscarded"]);
         interval(s,id,"jitterBufferDelay","jitterBufferEmittedCount","receiver_jitter_buffer_interval_ms");
@@ -94,7 +108,7 @@ export function rtcStatistics(report: RTCStatsReport, previous?: RTCPrevious) {
   const sendBitrateBps=bitrate("bytesSent",sent),receiveBitrateBps=bitrate("bytesReceived",received);
   return {previous:{at,sent,received,counters,pairID,pathRevision},rtt:rtt as number|null,queueMs:emitted>0?delay/emitted*1000:0,
     metrics:transportMetrics({...metrics,send_bitrate_bps:sendBitrateBps,receive_bitrate_bps:receiveBitrateBps}),states:transportStates(states),
-    webrtc:{protocol,candidateType,sendBitrateBps,receiveBitrateBps,packetsLost:lost,jitterMs:jitter,concealedMs:concealed,packetsDiscarded:discarded,jitterBufferMs:emitted>0?delay/emitted*1000:0}};
+    webrtc:{protocol,candidateType,sendBitrateBps,receiveBitrateBps,packetsLost:lost,jitterMs:jitter,concealedMs:concealmentSupported?concealed:undefined,packetsDiscarded:discarded,jitterBufferMs:emitted>0?delay/emitted*1000:0}};
 }
 
 export function rtcLossEvents(metrics:Record<string,number>,timestamp=new Date().toISOString()):AudioDropEvent[] {
@@ -103,6 +117,7 @@ export function rtcLossEvents(metrics:Record<string,number>,timestamp=new Date()
     const count=metrics[prefix+"loss_delta"];
     if(count>0)out.push({timestamp,direction,reason:"webrtc_packet_loss",duration_ms:0,packet_count:count,ssrc:metrics[prefix+"ssrc"],window_ms:metrics[prefix+"loss_window_ms"]});
   }
+  if(metrics.receiver_concealed_delta_ms>0)out.push({timestamp,direction:"carrier_to_operator",reason:"webrtc_concealment",duration_ms:Math.round(metrics.receiver_concealed_delta_ms),ssrc:metrics.receiver_ssrc,window_ms:metrics.receiver_concealed_window_ms});
   return out;
 }
 
@@ -143,18 +158,24 @@ export class WebRTCAudioConnection implements AudioConnection {
   private transportTelemetry=new TransportTelemetry("webrtc");
   private transportSender=new TransportTelemetrySender(sample=>{
     if(this.socket?.readyState!==WebSocket.OPEN||this.socket.bufferedAmount>1024)return false;
-    this.send({type:"transport.samples",diagnostics:{client_epoch:this.clientEpoch,transport_samples:[sample]}});return true;
+    return this.sendTelemetry({type:"transport.samples",diagnostics:{client_epoch:this.clientEpoch,transport_samples:[sample]}});
   },report=>{
     if(this.socket?.readyState!==WebSocket.OPEN||this.socket.bufferedAmount>1024)return false;
-    this.send(report);return true;
+    return this.sendTelemetry(report);
   });
+  private controlBudget=new RTCControlBudget();
+  private quality?:RTCQualityPolicy;
+  private playbackReceiver?:RTCRtpReceiver;
+  private uploadSender?:RTCRtpSender;
+  private applyingBitrate=false;
+  private appliedBitrate?:number;
   private statsErrors=0;
   private lastStatsSend=-Infinity;
   private clientEpoch=crypto.randomUUID();
-  private nativeCounts?: {packetsLost:number;packetsDiscarded:number;concealedMs:number};
+  private nativeCounts?: {packetsLost:number;packetsDiscarded:number;concealedMs?:number};
   private completedCounts={packetsLost:0,packetsDiscarded:0,concealedMs:0};
   private runtime=new AudioRuntimeTelemetry(e=>this.recordSessionEvent(e));
-  private diagnostics: SoftphoneDiagnostics={mediaTransport:"webrtc",codec:"opus",rttMs:null,queueMs:0,targetMs:60,underruns:0,droppedMs:0,maxQueueMs:0,audioContextRate:48000,websocketBufferedBytes:0,microphoneSampleRate:0,microphoneChannelCount:0,echoCancellation:null,noiseSuppression:null,autoGainControl:null,micActiveRmsDbfs:null,micPeakDbfs:null,micPostPeakDbfs:null,micInputGainDb:0,micLimiterReductionDb:0,captureSequenceGaps:0,playbackSequenceGaps:0,dropEvents:[]};
+  private diagnostics: SoftphoneDiagnostics={mediaTransport:"webrtc",codec:"opus",rttMs:null,queueMs:0,targetMs:60,underruns:null,droppedMs:0,maxQueueMs:0,audioContextRate:48000,websocketBufferedBytes:0,microphoneSampleRate:0,microphoneChannelCount:0,echoCancellation:null,noiseSuppression:null,autoGainControl:null,micActiveRmsDbfs:null,micPeakDbfs:null,micPostPeakDbfs:null,micInputGainDb:0,micLimiterReductionDb:0,captureSequenceGaps:0,playbackSequenceGaps:0,dropEvents:[]};
 
   constructor(private callbacks: SoftphoneCallbacks) {}
   async start(url:string,options:SoftphoneAudioOptions,workletURL?:string):Promise<void> {
@@ -169,7 +190,9 @@ export class WebRTCAudioConnection implements AudioConnection {
   private async connect(url:string):Promise<void> {
     this.runtime.observeEnvironment();
     const generation=++this.generation,options=this.options!;
-    this.ready=this.peer=false;this.previous=undefined;
+    for(const event of this.events.slice(-8))this.enqueueRTCEvents({session_events:[event]});
+    for(const event of this.diagnostics.dropEvents.slice(-8))this.enqueueRTCEvents({drop_events:[event]});
+    this.ready=this.peer=false;this.previous=undefined;this.quality=new RTCQualityPolicy(options);this.appliedBitrate=undefined;
     const stream=await navigator.mediaDevices.getUserMedia({audio:microphoneConstraints(options)});
     if(!this.current(generation)){stream.getTracks().forEach(t=>t.stop());throw new Error("Audio session cancelled");}
     this.stream=stream;
@@ -223,10 +246,10 @@ export class WebRTCAudioConnection implements AudioConnection {
             const pc=new RTCPeerConnection({iceServers:value.ice_servers??[]});this.pc=pc;
             this.destination!.stream.getAudioTracks().forEach(track=>{
               const sender=pc.addTrack(track,this.destination!.stream);
-              const parameters=sender.getParameters();if(parameters.encodings?.length){parameters.encodings[0].maxBitrate=32000;void sender.setParameters(parameters).catch(()=>{});}
+              this.uploadSender=sender;void this.applyUploadBitrate(sender,32000,generation);
             });
             pc.ontrack=e=>{if(!this.current(generation))return;
-              if("jitterBufferTarget" in e.receiver) try{(e.receiver as RTCRtpReceiver & {jitterBufferTarget:number}).jitterBufferTarget=options.playbackTargetMs??60;}catch{ /* browser hint only */ }
+              this.playbackReceiver=e.receiver;this.applyPlaybackTarget();
               const remote=new MediaStream([e.track]);
               // Chromium requires a media-element consumer to start the RTP
               // playout clock. Its output is muted: the AudioContext graph is
@@ -300,9 +323,16 @@ export class WebRTCAudioConnection implements AudioConnection {
       this.nativeCounts={packetsLost:result.webrtc.packetsLost,packetsDiscarded:result.webrtc.packetsDiscarded,concealedMs:result.webrtc.concealedMs};
       result.webrtc.packetsLost+=this.completedCounts.packetsLost;
       result.webrtc.packetsDiscarded+=this.completedCounts.packetsDiscarded;
-      result.webrtc.concealedMs+=this.completedCounts.concealedMs;
-      this.diagnostics.dropEvents=[...this.diagnostics.dropEvents,...rtcLossEvents(result.metrics)].slice(-100);
-      this.diagnostics={...this.diagnostics,rttMs:result.rtt,queueMs:result.queueMs,maxQueueMs:Math.max(this.diagnostics.maxQueueMs,result.queueMs),targetMs:this.options?.playbackTargetMs??60,webrtc:result.webrtc,playbackSequenceGaps:result.webrtc.packetsLost,sessionEvents:this.events.slice(),websocketBufferedBytes:this.socket?.bufferedAmount??0};
+      if(result.webrtc.concealedMs!==undefined)result.webrtc.concealedMs+=this.completedCounts.concealedMs;
+      this.quality?.observe(result.metrics);this.applyPlaybackTarget();
+      if(this.uploadSender&&this.quality)void this.applyUploadBitrate(this.uploadSender,this.quality.bitrate,generation);
+      result.metrics.requested_playback_target_ms=this.quality?.target??60;
+      if(this.appliedBitrate!==undefined)result.metrics.requested_upload_bitrate_bps=this.appliedBitrate;
+      this.controlBudget.observeAvailableBitrate(result.metrics.pair_availableOutgoingBitrate);
+      const lossEvents=rtcLossEvents(result.metrics);
+      for(const event of lossEvents)this.enqueueRTCEvents({drop_events:[event]});
+      this.diagnostics.dropEvents=[...this.diagnostics.dropEvents,...lossEvents].slice(-100);
+      this.diagnostics={...this.diagnostics,rttMs:result.rtt,queueMs:result.queueMs,maxQueueMs:Math.max(this.diagnostics.maxQueueMs,result.queueMs),targetMs:this.quality?.target??this.options?.playbackTargetMs??60,webrtc:result.webrtc,playbackSequenceGaps:result.webrtc.packetsLost,sessionEvents:this.events.slice(),websocketBufferedBytes:this.socket?.bufferedAmount??0};
       const track=this.stream?.getAudioTracks()[0];
       this.transportTelemetry.observe({...result.metrics,rtt_ms:result.rtt,queue_ms:result.queueMs,target_ms:this.diagnostics.targetMs,buffered_bytes:this.socket?.bufferedAmount??0,stats_errors:this.statsErrors,stats_duration_ms:performance.now()-started,main_thread_max_pause_ms:this.runtime.counters.main_thread_max_pause_ms},
         {...result.states,ice:pc.iceConnectionState,connection:"connected",context:this.context?.state,muted:String(this.muted),device_muted:String(track?.muted),track:track?.readyState});
@@ -319,10 +349,34 @@ export class WebRTCAudioConnection implements AudioConnection {
     }
     finally{this.sampling.delete(pc);}
   }
+  private applyPlaybackTarget(){
+    const receiver=this.playbackReceiver;if(!receiver||!this.quality)return;
+    if("jitterBufferTarget" in receiver)try{(receiver as RTCRtpReceiver&{jitterBufferTarget:number}).jitterBufferTarget=this.quality.target;}catch{/* unsupported hints never gate audio */}
+  }
+  private async applyUploadBitrate(sender:RTCRtpSender,bitrate:number,generation:number){
+    if(this.applyingBitrate||this.appliedBitrate===bitrate)return;
+    this.applyingBitrate=true;
+    try{const parameters=sender.getParameters();if(parameters.encodings?.length){parameters.encodings[0].maxBitrate=bitrate;await sender.setParameters(parameters);if(this.current(generation)&&this.uploadSender===sender)this.appliedBitrate=bitrate;}}
+    catch{/* native congestion control continues if a hint is rejected */}
+    finally{this.applyingBitrate=false;}
+  }
+  private sendTelemetry(value:unknown):boolean {
+    if(!this.ready||this.socket?.readyState!==WebSocket.OPEN||this.socket.bufferedAmount>1024)return false;
+    const text=JSON.stringify(value),bytes=new TextEncoder().encode(text).byteLength+58;
+    if(!this.controlBudget.consume(bytes))return false;
+    try{this.socket.send(text);return true;}catch{return false;}
+  }
+  private enqueueRTCEvents(diagnostics:unknown){
+    try{
+      const value={type:"diagnostics.events",diagnostics:{client_epoch:this.clientEpoch,...diagnostics as object}};
+      if(new TextEncoder().encode(JSON.stringify(value)).byteLength+58>1100){this.transportSender.skippedAuxiliary++;return;}
+      this.transportSender.enqueueAuxiliary(value);
+    }catch{this.transportSender.skippedAuxiliary++;}
+  }
   private sendStatistics(){
     const track=this.stream?.getAudioTracks()[0];
       if(performance.now()-this.lastStatsSend>=5000){this.lastStatsSend=performance.now();
-      this.transportSender.enqueueReport({type:"diagnostics",diagnostics:{client_epoch:this.clientEpoch,media_transport:"webrtc",codec:"opus",webrtc:this.diagnostics.webrtc,connection_state:"connected",carrier_peer_connected:this.peer,audio_context_state:this.context?.state,microphone_muted:this.muted,microphone_track_state:track?.readyState,microphone_device_muted:track?.muted,session_events:this.events,rtt_ms:this.diagnostics.rttMs===null?null:Math.round(this.diagnostics.rttMs),playback_queue_ms:Math.round(this.diagnostics.queueMs),playback_target_ms:this.diagnostics.targetMs,audio_context_rate:this.context?.sampleRate,playback_sequence_gaps:this.diagnostics.webrtc?.packetsLost,drop_events:this.diagnostics.dropEvents,timing:{runtime:this.runtime.counters}}});this.transportSender.enqueue(this.transportTelemetry.drain());}
+      this.transportSender.enqueueReport({type:"diagnostics",diagnostics:{client_epoch:this.clientEpoch,media_transport:"webrtc",codec:"opus",webrtc:Object.fromEntries(Object.entries(this.diagnostics.webrtc??{}).map(([k,v])=>[k,typeof v==="number"?Math.round(v*10)/10:v])),connection_state:"connected",carrier_peer_connected:this.peer,audio_context_state:this.context?.state,microphone_muted:this.muted,microphone_track_state:track?.readyState,microphone_device_muted:track?.muted,rtt_ms:this.diagnostics.rttMs===null?null:Math.round(this.diagnostics.rttMs),playback_queue_ms:Math.round(this.diagnostics.queueMs),playback_target_ms:this.diagnostics.targetMs,audio_context_rate:this.context?.sampleRate,playback_sequence_gaps:this.diagnostics.webrtc?.packetsLost, }});this.transportSender.enqueue(this.transportTelemetry.drain());this.enqueueRTCEvents({timing:{runtime:this.runtime.counters}});}
   }
   private playWhisper(data:ArrayBuffer){
     if(data.byteLength<17||data.byteLength>176||this.whisperEpoch===null||!this.context)return;
@@ -359,7 +413,7 @@ export class WebRTCAudioConnection implements AudioConnection {
       }
     };void attempt();
   }
-  recordSessionEvent(event:MediaSessionEvent){this.events=[...this.events,event].slice(-100);safe(()=>this.callbacks.onSessionEvent?.(event));}
+  recordSessionEvent(event:MediaSessionEvent){this.events=[...this.events,event].slice(-100);this.enqueueRTCEvents({session_events:[event]});safe(()=>this.callbacks.onSessionEvent?.(event));}
   setMuted(value:boolean){if(this.muted!==value)this.recordSessionEvent({timestamp:new Date().toISOString(),action:"microphone",outcome:value?"muted":"unmuted"});this.muted=value;this.gate();if(value)this.send({type:"interrupt"});}
   sendDTMF(digits:string){if(!/^[0-9*#]+$/.test(digits))throw new Error("Invalid DTMF digits");this.send({type:"dtmf",digits});}
   setOutputVolume(value:number){if(!Number.isFinite(value)||value<0||value>1)throw new RangeError("Volume must be between 0 and 1");if(this.speaker)this.speaker.gain.value=value;if(this.options)this.options.outputVolume=value;}
@@ -368,10 +422,10 @@ export class WebRTCAudioConnection implements AudioConnection {
   private cleanup(){
     this.runtime.stopEnvironment();
     this.transportSender.stop();
-    if(this.nativeCounts){for(const key of ["packetsLost","packetsDiscarded","concealedMs"] as const)this.completedCounts[key]+=this.nativeCounts[key];this.nativeCounts=undefined;}
+    if(this.nativeCounts){for(const key of ["packetsLost","packetsDiscarded","concealedMs"] as const)this.completedCounts[key]+=this.nativeCounts[key]??0;this.nativeCounts=undefined;}
     ++this.generation;this.ready=this.peer=false;this.stopRingback();clearInterval(this.timer);this.timer=undefined;
     const socket=this.socket;this.socket=undefined;if(socket){socket.onclose=socket.onmessage=socket.onerror=null;socket.close();}
-    const pc=this.pc;this.pc=undefined;if(pc){pc.onconnectionstatechange=pc.ontrack=null;pc.close();}
+    this.playbackReceiver=undefined;this.uploadSender=undefined;const pc=this.pc;this.pc=undefined;if(pc){pc.onconnectionstatechange=pc.ontrack=null;pc.close();}
     if(this.remoteAudio){this.remoteAudio.pause();this.remoteAudio.srcObject=null;this.remoteAudio=undefined;}
     this.stream?.getTracks().forEach(t=>{t.onended=null;t.stop();});this.stream=undefined;
     this.destination?.stream.getTracks().forEach(t=>t.stop());this.destination=undefined;

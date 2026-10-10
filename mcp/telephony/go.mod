@@ -4,6 +4,7 @@ go 1.25.1
 
 require (
 	github.com/apteva/app-sdk v0.99.0
+	github.com/ebitengine/purego v0.11.1
 	github.com/emiago/sipgo v1.4.3
 	github.com/gobwas/ws v1.4.0
 	github.com/osgochina/webrtcvad-go v0.0.2
@@ -11,6 +12,7 @@ require (
 	github.com/pion/interceptor v0.1.49
 	github.com/pion/logging v0.2.4
 	github.com/pion/opus v0.1.1-0.20261005072002-44637de087b3
+	github.com/pion/rtcp v1.2.18
 	github.com/pion/rtp v1.10.5
 	github.com/pion/sdp/v3 v3.0.20
 	github.com/pion/srtp/v3 v3.1.0
@@ -34,7 +36,6 @@ require (
 	github.com/pion/dtls/v3 v3.1.9 // indirect
 	github.com/pion/mdns/v2 v2.2.1 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
-	github.com/pion/rtcp v1.2.18 // indirect
 	github.com/pion/sctp v1.11.3 // indirect
 	github.com/pion/stun/v4 v4.0.1 // indirect
 	github.com/pkg/errors v0.9.1 // indirect

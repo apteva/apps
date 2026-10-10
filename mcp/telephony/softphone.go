@@ -878,6 +878,10 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 					a.audioTransports.enqueue(samples, row)
 					// Coalesce reports in memory; the watcher persists off the frame path.
 				}
+			case "diagnostics.events":
+				if control.Diagnostics != nil && hub.readyBrowserWriter() == writer {
+					hub.telemetry.observeRTCEventsConnection(writer, normalizeBrowserAudioDiagnostics(*control.Diagnostics))
+				}
 			}
 		}
 	}

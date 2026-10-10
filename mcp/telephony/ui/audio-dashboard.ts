@@ -14,6 +14,7 @@ export const audioIssues = {
   audio_degraded: "Audio degradation",
   dropped_audio: "Dropped audio",
   playback_underrun: "Playback buffer gaps",
+  concealed_audio: "WebRTC replacement audio",
   carrier_stall: "Carrier delivery gaps",
   sequence_gaps: "Sequence gaps",
   browser_error: "Browser / media errors",
@@ -172,6 +173,11 @@ export function audioWidgetPreferences(value: Record<string, unknown> = {}) {
   };
 }
 export const metricLabel: Record<string, string> = {
+  server_webrtc_ingress_concealed_ms: "Microphone replacement audio (ms)",
+  webrtc_concealed_ms: "WebRTC replacement audio (ms)",
+  webrtc_packets_lost: "WebRTC packets lost",
+  webrtc_packets_discarded: "WebRTC packets discarded",
+  webrtc_jitter_buffer_ms: "WebRTC average playback buffer (ms)",
   playback_dropped_ms: "Browser playback dropped (ms)",
   playback_underruns: "Playback underruns",
   playback_underrun_ms: "Missing playback audio (ms)",

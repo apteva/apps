@@ -606,7 +606,7 @@ func TestRTCDiagnosticsPersistenceAndLossAccounting(t *testing.T) {
 	a := &App{installID: 42}
 	insertSoftphoneCall(t, a, "in-progress")
 	b := browserAudioDiagnostics{MediaTransport: "webrtc", Codec: "opus", MicrophoneMuted: true,
-		WebRTC: &browserWebRTCStats{Protocol: "udp", CandidateType: "relay", PacketsLost: 3, PacketsDiscarded: 2, ConcealedMS: 20, JitterMS: math.NaN(), SendBitrateBPS: math.Inf(1)},
+		WebRTC: &browserWebRTCStats{Protocol: "udp", CandidateType: "relay", PacketsLost: 3, PacketsDiscarded: 2, ConcealedMS: func() *float64 { v := 20.; return &v }(), JitterMS: math.NaN(), SendBitrateBPS: math.Inf(1)},
 		Server: &serverAudioDiagnostics{WebRTC: rtcMediaSnapshot{OutboundDroppedMS: 40, IngressRejectedPackets: 1}}}
 	if e := a.db().updateBrowserAudioDiagnostics("call-soft-1", b); e != nil {
 		t.Fatal(e)

@@ -191,7 +191,8 @@ export interface SoftphoneDiagnostics {
   rttMs: number | null;
   queueMs: number;
   targetMs: number;
-  underruns: number;
+  /** Native WebRTC does not expose our PCM underrun counter. */
+  underruns: number | null;
   droppedMs: number;
   maxQueueMs: number;
   audioContextRate: number;

@@ -10,7 +10,7 @@ export function audioWidgetProblems(report: AudioReport) {
 export function audioWidgetMeasurements(report: AudioReport) {
   const metrics = report.metrics;
   // Boundaries are displayed separately: summing their drops may double-count audio.
-  const important = ["playback_underrun_ms", "playback_dropped_ms", "carrier_max_gap_ms", "carrier_source_dropped_ms", "reconnects", "playback_sequence_gaps", "capture_sequence_gaps", "context_suspended_ms", "max_rtt_ms"];
+  const important = ["server_webrtc_ingress_concealed_ms", "webrtc_concealed_ms", "webrtc_packets_lost", "webrtc_packets_discarded", "playback_underrun_ms", "playback_dropped_ms", "carrier_max_gap_ms", "carrier_source_dropped_ms", "reconnects", "playback_sequence_gaps", "capture_sequence_gaps", "context_suspended_ms", "max_rtt_ms"];
   return important.filter((key) => Number.isFinite(metrics[key]) && metrics[key] > 0)
     .map((key) => ({ key, label: (metricLabel[key] || key.replace(/_/g, " ")).replace(/ \(ms\)$/, ""), value: key.endsWith("_ms") ? (metrics[key] >= 1000 ? `${(metrics[key] / 1000).toLocaleString(undefined, { maximumFractionDigits: 2 })} s` : `${Math.round(metrics[key])} ms`) : String(metrics[key]) }));
 }

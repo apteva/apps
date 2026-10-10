@@ -384,6 +384,13 @@ func (t *audioCallTelemetry) connectionAtLocked(timestamp string) string {
 	return ""
 }
 func (t *audioCallTelemetry) observeBrowserLocked(v browserAudioDiagnostics) {
+	if v.MediaTransport == "webrtc" {
+		v.DropEvents = mergeRTCEventHistory(t.browser.DropEvents, v.DropEvents, 100)
+		v.SessionEvents = mergeRTCEventHistory(t.browser.SessionEvents, v.SessionEvents, 50)
+		if v.Timing == nil {
+			v.Timing = t.browser.Timing
+		}
+	}
 	t.playbackEvents = mergeAudioObservations(t.playbackEvents, v.PlaybackEvents)
 	t.captureQueueEvents = mergeAudioObservations(t.captureQueueEvents, v.CaptureQueueEvents)
 	v.PlaybackEvents = append([]browserAudioObservation(nil), t.playbackEvents...)
