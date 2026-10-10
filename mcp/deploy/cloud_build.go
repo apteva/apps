@@ -69,6 +69,7 @@ type cloudBuildConfig struct {
 	ArtifactFile        string            `json:"artifact_file,omitempty"`
 	StoreChannel        string            `json:"store_channel,omitempty"`
 	Preflight           string            `json:"preflight,omitempty"`
+	ContractInput       string            `json:"contract_input,omitempty"`
 	ContractInputs      bool              `json:"contract_inputs,omitempty"`
 	Inputs              map[string]any    `json:"inputs,omitempty"`
 	Variables           map[string]string `json:"variables,omitempty"`
@@ -245,8 +246,8 @@ func parseCloudBuildConfig(backend, raw string) (cloudBuildConfig, error) {
 			return cfg, errors.New("codemagic backend accepts branch or tag, not both")
 		}
 	case buildBackendGitHubActions:
-		if cfg.SourceMode == "bundle" && !cfg.ContractInputs {
-			return cfg, errors.New("github_actions source_mode=bundle requires contract_inputs=true and matching workflow_dispatch inputs")
+		if cfg.SourceMode == "bundle" && !cfg.ContractInputs && cfg.ContractInput == "" {
+			return cfg, errors.New("github_actions source_mode=bundle requires contract_input or contract_inputs=true and matching workflow_dispatch inputs")
 		}
 		if strings.TrimSpace(cfg.Owner) == "" || strings.TrimSpace(cfg.Repo) == "" || cfg.WorkflowID == "" || strings.TrimSpace(cfg.Ref) == "" {
 			return cfg, errors.New("github_actions backend requires owner, repo, workflow_id, and ref")
@@ -1162,15 +1163,38 @@ func (githubActionsBuildBackend) Name() string { return buildBackendGitHubAction
 
 func (githubActionsBuildBackend) Submit(_ context.Context, bound *sdk.BoundIntegration, cfg cloudBuildConfig, d *Deployment, build *Build, capsule *sourceCapsule) (*externalBuildJob, error) {
 	inputs := cloneAnyMap(cfg.Inputs)
-	if cfg.ContractInputs {
+	if cfg.ContractInputs || cfg.ContractInput != "" {
 		contract, err := cloudBuildContractVariables(cfg, d, build, capsule)
 		if err != nil {
 			return nil, err
 		}
-		for key, value := range contract {
-			inputs[strings.ToLower(key)] = value
+		if cfg.ContractInput != "" {
+			body, err := json.Marshal(contract)
+			if err != nil {
+				return nil, err
+			}
+			inputs[cfg.ContractInput] = string(body)
+		} else {
+			for key, value := range contract {
+				inputs[strings.ToLower(key)] = value
+			}
 		}
 	}
+	target, err := parseMobileTargetConfig(d.TargetConfigJSON)
+	if err != nil {
+		return nil, err
+	}
+	if isAppPlatform(d.TargetKind) && !target.SmokeOnly {
+		setup, err := dbGetMobileSigningSetup(globalCtx.AppDB(), d.ID, d.EnvironmentID, buildBackendGitHubActions)
+		if err != nil {
+			return nil, err
+		}
+		if setup == nil || setup.Status != mobileSigningStatusReady || setup.ProviderSecretRef == "" {
+			return nil, errors.New("configure managed signing for the selected GitHub Actions repository before building")
+		}
+		inputs["apteva_signing_prefix"] = setup.ProviderSecretRef
+	}
+
 	correlation := fmt.Sprintf("apteva-deploy-%d-%d", build.ID, time.Now().UnixNano())
 	inputs["apteva_deploy_run_id"] = correlation
 	data, err := executeIntegration(bound, "trigger_workflow", map[string]any{

@@ -1,0 +1,52 @@
+name: Deploy native capsule
+run-name: ${{ inputs.apteva_deploy_run_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      apteva_deploy_run_id:
+        required: true
+        type: string
+      apteva_contract:
+        required: true
+        type: string
+      apteva_signing_prefix:
+        required: false
+        type: string
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ${{ fromJSON(inputs.apteva_contract).APTEVA_TARGET_KIND == 'android' && 'ubuntu-latest' || 'macos-latest' }}
+    timeout-minutes: 90
+    env:
+      APTEVA_CONTRACT: ${{ inputs.apteva_contract }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets[format('{0}APP_STORE_CONNECT_ISSUER_ID', inputs.apteva_signing_prefix)] }}
+      APP_STORE_CONNECT_KEY_IDENTIFIER: ${{ secrets[format('{0}APP_STORE_CONNECT_KEY_IDENTIFIER', inputs.apteva_signing_prefix)] }}
+      APP_STORE_CONNECT_PRIVATE_KEY: ${{ secrets[format('{0}APP_STORE_CONNECT_PRIVATE_KEY', inputs.apteva_signing_prefix)] }}
+      CERTIFICATE_PRIVATE_KEY: ${{ secrets[format('{0}CERTIFICATE_PRIVATE_KEY', inputs.apteva_signing_prefix)] }}
+      APTEVA_CERTIFICATE_PEM: ${{ secrets[format('{0}APTEVA_CERTIFICATE_PEM', inputs.apteva_signing_prefix)] }}
+      APTEVA_PROVISIONING_PROFILE_BASE64: ${{ secrets[format('{0}APTEVA_PROVISIONING_PROFILE_BASE64', inputs.apteva_signing_prefix)] }}
+      APTEVA_APPLE_CERT_SHA256: ${{ secrets[format('{0}APTEVA_APPLE_CERT_SHA256', inputs.apteva_signing_prefix)] }}
+      ANDROID_UPLOAD_KEYSTORE_BASE64: ${{ secrets[format('{0}ANDROID_UPLOAD_KEYSTORE_BASE64', inputs.apteva_signing_prefix)] }}
+      ANDROID_UPLOAD_KEY_ALIAS: ${{ secrets[format('{0}ANDROID_UPLOAD_KEY_ALIAS', inputs.apteva_signing_prefix)] }}
+      ANDROID_UPLOAD_STORE_PASSWORD: ${{ secrets[format('{0}ANDROID_UPLOAD_STORE_PASSWORD', inputs.apteva_signing_prefix)] }}
+      ANDROID_UPLOAD_KEY_PASSWORD: ${{ secrets[format('{0}ANDROID_UPLOAD_KEY_PASSWORD', inputs.apteva_signing_prefix)] }}
+      ANDROID_UPLOAD_CERT_SHA256: ${{ secrets[format('{0}ANDROID_UPLOAD_CERT_SHA256', inputs.apteva_signing_prefix)] }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Deploy native pipeline
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          contract = json.loads(os.environ['APTEVA_CONTRACT'])
+          if not isinstance(contract, dict) or any(not re.fullmatch(r'APTEVA_[A-Z0-9_]+', key) or not isinstance(value, str) for key, value in contract.items()):
+              raise SystemExit('Invalid Deploy build contract')
+          subprocess.run(['python3', 'scripts/run_mobile.py'], env={**os.environ, **contract}, check=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ fromJSON(inputs.apteva_contract).APTEVA_ARTIFACT_NAME }}
+          path: ${{ format('{0}.zip', fromJSON(inputs.apteva_contract).APTEVA_ARTIFACT_NAME) }}
+          if-no-files-found: error
+          retention-days: 7

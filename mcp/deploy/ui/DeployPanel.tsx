@@ -1046,15 +1046,15 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
 			title: platform === "android" ? "Rotate Android upload key" : "Rotate Apple signing",
 			body: platform === "android"
 				? "Replace the managed Android upload key? Google Play must accept the new upload certificate before builds signed with it can be published."
-				: "Create a replacement Apple distribution certificate and profile, update the build provider secrets, then revoke the previous resources?",
+				: "Create a replacement Apple distribution certificate and profile, update the build provider secrets, and keep shared certificates available for other apps?",
       confirmLabel: "Rotate",
       tone: "warning",
       onConfirm: () => runMobileSigningSetup(true),
 		});
 	};
 
-	const importAndroidSigning = async () => {
-		if (!detail || !signingImportFile || !signingStorePassword) return;
+	const importMobileSigning = async () => {
+		if (!detail || !signingImportFile || (detail.deployment.target_kind === "android" && !signingStorePassword)) return;
 		setSigningBusy(true);
 		try {
 			const submit = async (commit: boolean) => {
@@ -1073,9 +1073,9 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
 			if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "")}`);
 			const preview = await response.json() as { identity: MobileSigningIdentity; replacement_required: boolean };
 			setConfirmState({
-				title: preview.replacement_required ? "Replace Android upload key" : "Import Android upload key",
-				body: `${preview.identity.application_identifier} · alias ${preview.identity.key_alias || "1"} · SHA-1 ${preview.identity.certificate_sha1 || "-"} · SHA-256 ${preview.identity.certificate_sha256 || "-"}`,
-				confirmLabel: preview.replacement_required ? "Replace keystore" : "Import keystore",
+				title: `${preview.replacement_required ? "Replace" : "Import"} ${detail.deployment.target_kind === "android" ? "Android upload key" : "Apple signing identity"}`,
+				body: `${preview.identity.application_identifier} ${preview.identity.key_alias ? `· alias ${preview.identity.key_alias}` : ""} · SHA-1 ${preview.identity.certificate_sha1 || "-"} · SHA-256 ${preview.identity.certificate_sha256 || "-"}`,
+				confirmLabel: preview.replacement_required ? "Replace identity" : "Import identity",
 				tone: preview.replacement_required ? "warning" : undefined,
 				onConfirm: async () => {
 					const committed = await submit(true);
@@ -1567,12 +1567,10 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                 <button
                   type="button"
                   onClick={handleMobileSigningSetup}
-								disabled={signingBusy || detail.deployment.build_backend === "github_actions"}
+								disabled={signingBusy}
                   className="ml-auto px-2 py-0.5 border border-border rounded hover:bg-bg-input disabled:opacity-40 shrink-0"
                   title={
-									detail.deployment.build_backend !== "github_actions"
-										? "Prepare the managed signing identity for this build provider."
-                      : "This build provider does not yet expose a signing-secret adapter."
+									"Prepare the managed signing identity for this build provider."
                   }
                 >
                   {signingBusy
@@ -1609,14 +1607,14 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
 										Certificate
 									</button>
 								)}
-								{detail.deployment.target_kind === "android" && (
+								{(detail.deployment.target_kind === "android" || detail.deployment.target_kind === "ios" || detail.deployment.target_kind === "macos") && (
 									<div className="basis-full flex items-center gap-2 pt-1 flex-wrap">
-										<input type="file" accept=".p12,.pfx,application/x-pkcs12" onChange={(event) => setSigningImportFile(event.target.files?.[0] || null)} className="text-xs max-w-[14rem]" />
-										<input type="password" value={signingStorePassword} onChange={(event) => setSigningStorePassword(event.target.value)} placeholder="Store password" className="bg-bg-input border border-border rounded px-2 py-1 w-32" />
-										<input type="password" value={signingKeyPassword} onChange={(event) => setSigningKeyPassword(event.target.value)} placeholder="Key password" className="bg-bg-input border border-border rounded px-2 py-1 w-32" />
-										<input value={signingKeyAlias} onChange={(event) => setSigningKeyAlias(event.target.value)} placeholder="Alias (default 1)" className="bg-bg-input border border-border rounded px-2 py-1 w-32" />
-										<button type="button" onClick={() => void importAndroidSigning()} disabled={signingBusy || !signingImportFile || !signingStorePassword} className="px-2 py-1 border border-border rounded hover:bg-bg-input disabled:opacity-40">
-											{mobileSigningIdentity ? "Replace keystore" : "Import keystore"}
+										<input type="file" accept={detail.deployment.target_kind === "android" ? ".p12,.pfx,application/x-pkcs12" : ".p12,.pfx,.zip,application/x-pkcs12,application/zip"} onChange={(event) => setSigningImportFile(event.target.files?.[0] || null)} className="text-xs max-w-[14rem]" />
+										<input type="password" value={signingStorePassword} onChange={(event) => setSigningStorePassword(event.target.value)} placeholder={detail.deployment.target_kind === "android" ? "Store password" : "PKCS#12 password (if any)"} className="bg-bg-input border border-border rounded px-2 py-1 w-32" />
+										{detail.deployment.target_kind === "android" && <input type="password" value={signingKeyPassword} onChange={(event) => setSigningKeyPassword(event.target.value)} placeholder="Key password" className="bg-bg-input border border-border rounded px-2 py-1 w-32" />}
+										{detail.deployment.target_kind === "android" && <input value={signingKeyAlias} onChange={(event) => setSigningKeyAlias(event.target.value)} placeholder="Alias (default 1)" className="bg-bg-input border border-border rounded px-2 py-1 w-32" />}
+										<button type="button" onClick={() => void importMobileSigning()} disabled={signingBusy || !signingImportFile || (detail.deployment.target_kind === "android" && !signingStorePassword)} className="px-2 py-1 border border-border rounded hover:bg-bg-input disabled:opacity-40">
+											{mobileSigningIdentity ? "Replace identity" : "Import identity"}
 										</button>
 									</div>
 								)}

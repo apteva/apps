@@ -1,4 +1,4 @@
-"""Run Deploy's shared native contract on Bitrise or Appcircle workers."""
+"""Run Deploy's shared native contract on native CI workers."""
 import json
 import os
 import re

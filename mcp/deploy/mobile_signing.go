@@ -72,6 +72,8 @@ func mobileSigningProviderFor(name string) (mobileSigningProvider, error) {
 		return transientSigningProvider{name: buildBackendBitrise}, nil
 	case buildBackendAppcircle:
 		return appcircleSigningProvider{}, nil
+	case buildBackendGitHubActions:
+		return githubSigningProvider{}, nil
 	default:
 		return nil, fmt.Errorf(
 			"build provider %q does not expose a Deploy signing-secret adapter; configure signing in that provider or add an adapter implementing mobileSigningProvider",
@@ -164,6 +166,15 @@ func (a *App) setupAppleMobileSigning(ctx context.Context, d *Deployment, provid
 		return nil, err
 	}
 
+	setups, err := dbListMobileSigningSetups(globalCtx.AppDB(), d.ID, d.EnvironmentID)
+	if err != nil {
+		return nil, err
+	}
+	for _, prepared := range setups {
+		if prepared.Status == mobileSigningStatusReady && prepared.BundleID != target.BundleID {
+			return nil, fmt.Errorf("bundle_id is immutable after signing is configured (%s); create a new deployment for %s", prepared.BundleID, target.BundleID)
+		}
+	}
 	existing, err := dbGetMobileSigningSetup(globalCtx.AppDB(), d.ID, d.EnvironmentID, providerName)
 	if err != nil {
 		return nil, err
@@ -173,6 +184,13 @@ func (a *App) setupAppleMobileSigning(ctx context.Context, d *Deployment, provid
 			"bundle_id is immutable after signing is configured (%s); create a new deployment for %s",
 			existing.BundleID, target.BundleID,
 		)
+	}
+	if identity == nil && !rotate && (existing == nil || existing.Status != mobileSigningStatusReady) {
+		identity, err = a.reuseAppleDistributionIdentity(d, issuerID, target.BundleID, appleBound, platform.Certificate)
+		if err != nil {
+			return nil, err
+		}
+		identityState = iosSigningIdentityStateFrom(identity)
 	}
 	previous := existing
 	providerConnectionID := int64(0)
@@ -201,6 +219,13 @@ func (a *App) setupAppleMobileSigning(ctx context.Context, d *Deployment, provid
 		setup.PlatformStateJSON = previous.PlatformStateJSON
 	}
 	if identity != nil {
+		if previous == nil || previous.IdentityID != identity.ID || previous.PreparedRevision != identity.Revision {
+			setup.AppleCertificateID = identityState.CertificateID
+			setup.AppleProfileID = identityState.ProfileID
+			setup.KeyFingerprint = identityState.KeyFingerprint
+			setup.ProviderSecretRef = ""
+			setup.ProviderConfigJSON = "{}"
+		}
 		setup.IdentityID = identity.ID
 		setup.PreparedRevision = identity.Revision
 		if setup.AppleBundleResourceID == "" {
@@ -406,7 +431,7 @@ func (a *App) setupAppleMobileSigning(ctx context.Context, d *Deployment, provid
 			providerResult := &mobileSigningProviderResult{
 				SecretRef: setup.ProviderSecretRef, ConfigJSON: defaultStr(setup.ProviderConfigJSON, "{}"),
 			}
-			if previous == nil || !providerMatches || (providerName == buildBackendAppcircle && createdProfile) {
+			if previous == nil || !providerMatches || previous.IdentityID != identity.ID || previous.PreparedRevision != identity.Revision || (createdProfile && (providerName == buildBackendAppcircle || providerName == buildBackendGitHubActions)) {
 				secretPayload, decryptErr := a.decryptMobileSigningPayload(identity)
 				if decryptErr != nil {
 					if createdProfile {
@@ -632,9 +657,8 @@ func (a *App) setupAppleMobileSigning(ctx context.Context, d *Deployment, provid
 		if previous.AppleProfileID != "" && previous.AppleProfileID != setup.AppleProfileID {
 			_, _ = executeIntegration(appleBound, "delete_profile", map[string]any{"profile_id": previous.AppleProfileID})
 		}
-		if previous.AppleCertificateID != "" && previous.AppleCertificateID != setup.AppleCertificateID {
-			_, _ = executeIntegration(appleBound, "revoke_certificate", map[string]any{"certificate_id": previous.AppleCertificateID})
-		}
+		// Certificates may also sign other apps or exist outside Deploy. Rotation
+		// replaces this identity without revoking a shared Apple certificate.
 	}
 	emit("deploy.mobile_signing.ready", map[string]any{
 		"deployment_id": d.ID, "environment_id": d.EnvironmentID,
