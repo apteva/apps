@@ -123,17 +123,18 @@ func TestAndroidMobileSigningSetupProvisionsCodemagic(t *testing.T) {
 
 type mobileSigningPlatform struct {
 	tk.BasePlatformClient
-	calls          []integrationCall
-	appExists      bool
-	bundleID       string
-	groupID        string
-	groupName      string
-	variables      map[string]string
-	certificateSeq int
-	profileSeq     int
-	failTool       string
-	capabilities   map[string]string
-	certificates   map[string]bool
+	calls              []integrationCall
+	appExists          bool
+	bundleID           string
+	groupID            string
+	groupName          string
+	variables          map[string]string
+	certificateSeq     int
+	profileSeq         int
+	failTool           string
+	capabilities       map[string]string
+	certificates       map[string]bool
+	certificateContent map[string]string
 }
 
 func (p *mobileSigningPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
@@ -226,13 +227,16 @@ func (p *mobileSigningPlatform) ExecuteIntegrationTool(_ int64, tool string, inp
 			NotBefore: now.Add(-time.Hour), NotAfter: now.AddDate(2, 0, 0), IsCA: true,
 			KeyUsage: x509.KeyUsageCertSign, PublicKey: &caKey.PublicKey,
 		}, csr.PublicKey, caKey)
-		data = json.RawMessage(fmt.Sprintf(`{"data":{"id":%q,"attributes":{"certificateContent":%q}}}`,
-			id, base64.StdEncoding.EncodeToString(certificateDER)))
+		if p.certificateContent == nil {
+			p.certificateContent = map[string]string{}
+		}
+		p.certificateContent[id] = base64.StdEncoding.EncodeToString(certificateDER)
+		data = json.RawMessage(fmt.Sprintf(`{"data":{"id":%q,"attributes":{"certificateContent":%q}}}`, id, p.certificateContent[id]))
 	case "list_certificates":
 		items := make([]map[string]any, 0, len(p.certificates))
 		for id, available := range p.certificates {
 			if available {
-				items = append(items, map[string]any{"id": id, "attributes": map[string]any{}})
+				items = append(items, map[string]any{"id": id, "attributes": map[string]any{"certificateContent": p.certificateContent[id]}})
 			}
 		}
 		data, _ = json.Marshal(map[string]any{"data": items})
@@ -652,7 +656,7 @@ func TestMobileSigningSetupPausesForManualAppRecordThenResumes(t *testing.T) {
 	}
 }
 
-func TestMobileSigningRotationReplacesThenCleansOldAppleResources(t *testing.T) {
+func TestMobileSigningRotationPreservesSharedAppleCertificate(t *testing.T) {
 	platform := &mobileSigningPlatform{appExists: true}
 	_, d := newIOSSigningDeployment(t, platform)
 	app := &App{}
@@ -674,7 +678,7 @@ func TestMobileSigningRotationReplacesThenCleansOldAppleResources(t *testing.T) 
 	if deleteProfile == nil || deleteProfile.Input["profile_id"] != first.Setup.AppleProfileID {
 		t.Fatalf("delete profile=%#v", deleteProfile)
 	}
-	if revokeCertificate == nil || revokeCertificate.Input["certificate_id"] != first.Setup.AppleCertificateID {
+	if revokeCertificate != nil {
 		t.Fatalf("revoke certificate=%#v", revokeCertificate)
 	}
 	if signingCallCount(platform.calls, "update_group_variable") < 6 {

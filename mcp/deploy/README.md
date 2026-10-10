@@ -297,9 +297,9 @@ be automated:
 1. Register or reuse the Apple Bundle ID.
 2. Wait with `action_required` until the operator creates the App Store
    Connect app record for that Bundle ID.
-3. Generate a new RSA key and CSR in memory.
-4. Create an Apple Distribution certificate and App Store provisioning
-   profile.
+3. Reuse an active certificate and private key from the same project and Apple
+   account, or generate a new key and CSR when no compatible identity exists.
+4. Create an App Store provisioning profile for this app.
 5. Deliver the App Store Connect API key and certificate private key directly
    to the selected build provider's secure secret store.
 6. Add the provider secret group to this environment's build configuration.
@@ -309,12 +309,14 @@ app database. The encryption key is a separate `0600` file in Deploy's DataDir;
 backups require both. Provider setup records contain resource IDs, the provider
 secret reference, the public-key fingerprint, and status. Calling setup again
 is idempotent; pass `rotate: true` to create and activate a replacement before
-removing the old Apple profile and certificate.
+removing the old Apple profile. Existing Apple certificates are retained because
+other apps may use them.
 
 Codemagic is the first `mobileSigningProvider` adapter. Additional build
 providers implement the same secret-delivery interface while reusing the
-provider-independent Apple lifecycle. A provider must expose secure secret
-CRUD through its integration before Deploy can automate signing for it.
+provider-independent Apple lifecycle. The provider adapter delivers managed signing material through secure stored
+secrets or masked per-build credentials. Local and capsule runners receive
+the same managed identity.
 
 Apple still requires an operator to accept agreements, create/download the
 initial App Store Connect API key, and create the App Store app record. App
@@ -627,3 +629,31 @@ logs and deployment build-log HTTP routes include provider step output.
 
 A real signed build and store upload still require connected provider accounts
 and the platform toolchains; hermetic adapter tests do not certify those services.
+
+### Portable Apple signing
+
+Deploy's `app_store` integration owns Apple provisioning and publishing; build
+providers receive the certificate/private key and the app-specific profile.
+Setup reuses a compatible active certificate within the same project, Apple
+issuer, and platform before requesting another Apple certificate. Private keys
+are retained in the encrypted Deploy vault and never retrieved from Apple.
+Import an existing `.p12`/`.pfx` or Deploy signing-recovery `.zip` in the signing
+panel. The import endpoint accepts multipart `keystore` and optional
+`store_password`, with `inspect_only=true` for a public preview. Replacing a
+key requires `confirm_replace=true`. Imports verify key/certificate matching,
+validity, and membership in the selected Apple account; profiles in recovery
+archives are ignored and regenerated for the selected app.
+
+Managed signing works with local, capsule runner, Codemagic, Bitrise, Appcircle,
+and GitHub Actions backends. GitHub uses sealed, revision-scoped repository
+secrets and requires repository Actions secrets write permission. Its adapter
+workflow accepts a JSON contract rather than a long list of dispatch inputs:
+
+```json
+{"owner":"YOUR_OWNER","repo":"deploy-build-adapter","workflow_id":"apteva-mobile-capsule.yml","ref":"main","source_mode":"bundle","contract_input":"apteva_contract","artifact_mode":"file","artifact_file":"app.ipa"}
+```
+
+Use `runners/github-actions/apteva-mobile-capsule.yml` or the corresponding
+workflow in the shared adapter repository. Changing `build_backend` and its
+account/config does not change the Apple identity; run signing setup to prepare
+it for the newly selected provider. Already-ready Bundle IDs remain immutable.
