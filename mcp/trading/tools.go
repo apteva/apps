@@ -25,7 +25,7 @@ var brokerHistoryMu sync.Mutex
 
 func (a *App) MCPTools() []sdk.Tool {
 	definitions := []sdk.Tool{
-		{Name: "strategy_catalog", Description: "Discover indicator formulas, logical conditions and hourly multi-symbol research templates. Call before composing a strategy.", InputSchema: schemaObject(map[string]any{"symbols": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, nil), Handler: a.toolStrategyCatalog},
+		{Name: "strategy_catalog", Description: "Discover allocation and generic trading-rule syntax, capabilities, workflow and complete examples. Call before composing a strategy; rule_presets include the three trade examples and simulation specifications.", InputSchema: schemaObject(map[string]any{"symbols": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, nil), Handler: a.toolStrategyCatalog},
 		// ─── Lifecycle ────────────────────────────────────────────
 		{Name: "portfolio_create", Description: "Create a portfolio. execution_environment is simulation, broker_paper, or broker_live. Legacy mode=paper|live remains accepted. Broker portfolios pull balances from the bound broker.",
 			InputSchema: schemaObject(map[string]any{
@@ -302,12 +302,12 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolPortfolioArmLive},
 
 		// ─── Strategies ───────────────────────────────────────────
-		{Name: "strategy_create", Description: "Create a deterministic strategy definition. Supports indicator conditions, ranking, and allocation rules.",
+		{Name: "strategy_create", Description: "Create a versioned strategy: allocation rules or engine=rules with a trading-rules/1 program. Call strategy_catalog for generic trade examples and syntax, and strategy_validate to check a definition before saving.",
 			InputSchema: schemaObject(map[string]any{
 				"name":                map[string]any{"type": "string"},
 				"description":         map[string]any{"type": "string"},
 				"status":              map[string]any{"type": "string"},
-				"definition":          map[string]any{"type": "object"},
+				"definition":          map[string]any{"type": "object", "description": "For trade rules: engine=rules, universe=[program.symbol], cadence=program.timeframe, program={version:trading-rules/1,symbol,timeframe,timezone,rules,...}. Complete examples and authoring guidance are returned by strategy_catalog."},
 				"created_by_agent_id": map[string]any{"type": "integer"},
 			}, []string{"name", "definition"}),
 			Handler: a.toolStrategyCreate},
@@ -340,7 +340,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"definition"}),
 			Handler: a.toolStrategyValidate},
 
-		{Name: "strategy_evaluate", Description: "Evaluate a saved strategy against current market data and return target allocations.",
+		{Name: "strategy_evaluate", Description: "Evaluate an allocation strategy against current market data and return target allocations. For engine=rules historical performance use completed strategy_backtest_create runs, strategy_scorecard_evaluate and validation suites.",
 			InputSchema: schemaObject(map[string]any{
 				"strategy_id": map[string]any{"type": "integer"},
 			}, []string{"strategy_id"}),
@@ -355,10 +355,12 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"portfolio_id", "strategy_id"}),
 			Handler: a.toolStrategyAssign},
 
-		{Name: "strategy_backtest_create", Description: "Create a deterministic event-driven strategy backtest with optional simulation settings and generic additional inputs.",
+		{Name: "market_data_import", Description: "Normalize supplied historical CSV exports into sourced inputs for rule backtests. Supports any symbol, observed bid/ask quotes and closed OHLC bars, explicit column maps, timestamp units/layouts/timezones, and price basis. Reports gaps and byte hashes; never fabricates prices. No download or broker connection. Use returned inputs with strategy_backtest_create; contract/fee/FX configuration remains explicit.", InputSchema: schemaObject(map[string]any{"symbol": map[string]any{"type": "string"}, "streams": map[string]any{"type": "array", "items": map[string]any{"type": "object", "description": "kind=quotes|bars, csv with header, source; optional columns field-to-header map, delimiter, timestamp_format (RFC3339, unix_s/ms/us or Go layout), timezone. Bars require timeframe and price_basis=bid|ask|mid|last; timestamp is candle start. Quotes require timestamp,bid,ask; bars timestamp,open,high,low,close; optional volume."}}}, []string{"symbol", "streams"}), Handler: a.toolMarketDataImport},
+
+		{Name: "strategy_backtest_create", Description: "Create a deterministic event-driven strategy backtest. engine=rules requires a complete sourced OHLC/quote tape; allocation strategies can add feature events to fetched history.",
 			InputSchema: schemaObject(map[string]any{
-				"simulation":      map[string]any{"type": "object", "description": "Execution configuration: seed, submission_latency_ms, cancellation_latency_ms, latency_jitter_ms, max_fill_qty, participation_rate, benchmark_symbol, costs."},
-				"inputs":          map[string]any{"type": "array", "items": map[string]any{"type": "object"}, "description": "Additional events with id, type, symbol, event_time, available_at and data. Sentiment uses feature.sentiment with data.score."},
+				"simulation":      map[string]any{"type": "object", "description": "Execution configuration: seed, latency, fill limits, benchmark_symbol, costs, symbol_costs and explicit contracts (multiplier, currency_rate, margin_fraction)."},
+				"inputs":          map[string]any{"type": "array", "items": map[string]any{"type": "object"}, "description": "Events with id, type, symbol, source, event_time, available_at and data. Rule strategies require complete market.bar.close OHLC candles (metadata.timeframe) and executable market.quote events. Sentiment uses feature.sentiment with data.score."},
 				"portfolio_id":    map[string]any{"type": "integer"},
 				"strategy_id":     map[string]any{"type": "integer"},
 				"name":            map[string]any{"type": "string"},

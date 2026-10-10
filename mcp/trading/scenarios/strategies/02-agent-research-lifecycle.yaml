@@ -1,0 +1,157 @@
+name: agent-research-lifecycle
+description: |
+  A real agent authors a new EMA/SMA trade program, creates winning and losing
+  synthetic event backtests, persists pass/fail scorecards, runs a cost
+  robustness suite, exports evidence and versions a strategy revision.
+  Assertions check completed durable state, not only tool calls.
+timeout: 6m
+max_iterations: 36
+setup:
+  mode: autonomous
+  app:
+    path: ./
+    config:
+      bootstrap_demo: "false"
+      pricing_provider: "mock"
+directive: |
+  Perform a synthetic research acceptance test entirely with Trading MCP.
+  Discover strategy_catalog, then author a NEW engine=rules strategy called
+  "Tier 3 EMA SMA research" (do not copy a screenshot preset): symbol AAPL,
+  timeframe 1m, timezone UTC. On a completed base candle, while position_qty
+  equals zero, buy at market only if close > EMA2 AND close > SMA3. Use
+  sizing fixed_risk amount 100, stop_pct 0.01, target_pct 0.01, and
+  repeat once_per_bar. Validate the complete definition, then save as draft.
+
+  Create one simulation portfolio, "Tier 3 Research", allowed_classes [equity],
+  starting_cash 100000. Build the following small, SYNTHETIC event tape.
+  Each input needs a unique id, source synthetic_tier3, event_time and
+  available_at in UTC. For i=0 through 9, create market.bar.close inputs with
+  event_time 2026-09-14T12:00:00Z + i minutes and available_at one minute later;
+  symbol AAPL; metadata.timeframe 1m; data open=100, high=101, low=99,
+  price=100, volume=100000. After each of these ten flat candles, add a
+  market.quote at its available_at timestamp, price=100 and volume=100000,
+  with event_time=available_at. This keeps the complete warmup inside the
+  quoted market window used by validation suites. Then add a signal candle at 12:10:00Z, available
+  at 12:11:00Z, open=100, high=106, low=99, price=105, volume=100000.
+  Add market.quote at 12:11:00Z, price=105, volume=100000, then a quote at
+  12:12:00Z, price=107. Quotes have available_at equal to event_time.
+  No candles are future-known; quotes are synthetic executable price samples.
+
+  Create backtest "Tier 3 Winning" using this tape and returned portfolio and
+  strategy IDs. Explicit simulation: seed=42, starting_cash=100000,
+  benchmark_symbol=AAPL, contracts.AAPL multiplier=1 currency_rate=1
+  margin_fraction=1, costs fee_bps=0 slippage_bps=0 spread_bps=0 qty_step=0.
+  Run with backtest_control, then poll status until completed (do not mistake
+  queued/running for finished). Inspect the measured metrics.
+  Create and run "Tier 3 Losing" with the identical tape and configuration,
+  except the LAST quote's price is 103. Wait until completed.
+
+  Configure the strategy scorecard: one REQUIRED criterion total_pnl,
+  operator min, threshold 0; min_completed_runs=1; require_out_of_sample=false;
+  enforcement_enabled=true. This policy is only for the synthetic fixture.
+  Evaluate BOTH completed backtest IDs and read the saved scorecard history.
+  The winning run must pass and the losing run must fail. Never weaken the
+  criterion or relabel either run out_of_sample to make it pass.
+
+  From the winning run create "Tier 3 Cost robustness" with validation_create:
+  config mode=robustness, seed=42, scenarios=[{name: expensive_fills,
+  extra_fee_bps: 100}]. Run the suite with validation_control and poll until
+  completed; read validation_report and export it with artifact=true.
+  Compare the measured baseline and cost scenario. Export the winning
+  backtest through backtest_artifact. These are synthetic mechanical tests,
+  not historical profitability evidence or out-of-sample validation.
+
+  AFTER evaluating/exporting everything, update the strategy definition with
+  initial.agent_revision=1, preserving the original trading rules. Fetch it
+  and the scorecard; confirm version 2 and that old evaluations still record
+  version 1. Write one journal note kind=note, body including "SYNTHETIC ONLY",
+  with observed pass/fail results, cost sensitivity and version distinction.
+  Do not assign the strategy, promote it, place portfolio orders, or arm live.
+assert:
+  - tool_called_with:
+      tool: strategy_validate
+      success: true
+  - tool_called_with:
+      tool: strategy_create
+      success: true
+      count: 1
+  - tool_called_with:
+      tool: strategy_backtest_create
+      success: true
+      count: 2
+  - tool_called_with:
+      tool: strategy_scorecard_evaluate
+      success: true
+      count: 2
+  - tool_called_with:
+      tool: validation_create
+      success: true
+      count: 1
+  - tool_called_with:
+      tool: validation_report
+      success: true
+      args:
+        artifact: true
+  - tool_called_with:
+      tool: backtest_artifact
+      success: true
+  - tool_called_with:
+      tool: strategy_update
+      success: true
+      count: 1
+  - http: GET /api/apps/trading/strategies/1
+    expect_field_at: strategy.version
+    expect_field_eq: 2
+  - http: GET /api/apps/trading/strategies/1
+    expect_field_at: strategy.definition.program.initial.agent_revision
+    expect_field_eq: 1
+  - http: GET /api/apps/trading/backtests/1
+    expect_field_at: backtest.status
+    expect_field_eq: completed
+  - http: GET /api/apps/trading/backtests/2
+    expect_field_at: backtest.status
+    expect_field_eq: completed
+  - http: GET /api/apps/trading/strategies/1/scorecard?portfolio_id=1
+    expect_count_at: evaluations
+    expect_count: 2
+  - http: GET /api/apps/trading/strategies/1/scorecard?portfolio_id=1
+    expect_item_at: evaluations
+    expect_item:
+      backtest_run_id: 1
+      strategy_version: 1
+      verdict: pass
+      passed: true
+  - http: GET /api/apps/trading/strategies/1/scorecard?portfolio_id=1
+    expect_item_at: evaluations
+    expect_item:
+      backtest_run_id: 2
+      strategy_version: 1
+      verdict: fail
+      passed: false
+  - http: GET /api/apps/trading/strategies/1/scorecard?portfolio_id=1
+    expect_field_at: policy.promotion_stage
+    expect_field_eq: research
+  - http: GET /api/apps/trading/validations/1
+    expect_field_at: suite.status
+    expect_field_eq: completed
+  - http: GET /api/apps/trading/validations/1
+    expect_field_at: suite.report.completed
+    expect_field_eq: 2
+  - http: GET /api/apps/trading/validations/1
+    expect_field_at: suite.report.failed
+    expect_field_eq: 0
+  - http: GET /api/apps/trading/validations/1
+    expect_field_at: suite.report.groups.Source.baseline_return_pct
+    expect_field_matches: '^0\.[1-9]'
+  - http: GET /api/apps/trading/validations/1
+    expect_field_at: suite.report.groups.Source.return_pct.mean
+    expect_field_matches: '^-[0-9]'
+  - http: GET /api/apps/trading/portfolios/1/journal?kind=note
+    expect_item_at: entries
+    expect_item:
+      kind: note
+  - tool_not_called: strategy_assign | strategy_promotion_update | order_place | portfolio_arm_live
+budget:
+  # Includes full backtest and suite artifact exports plus their context reuse.
+  total_tokens: 1200000
+  cost_usd: 4.00

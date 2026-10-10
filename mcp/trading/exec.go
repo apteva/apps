@@ -397,6 +397,10 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 			e.logger.Warn("strategy definition invalid", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
 			continue
 		}
+		if def.Engine == "rules" {
+			e.logger.Warn("rule execution adapter unavailable", "assignment_id", a.ID)
+			continue
+		}
 		var pendingTargets string
 		if err := e.db.QueryRow(`SELECT targets_json FROM strategy_rebalances WHERE assignment_id=? AND strategy_version=? AND status='pending'`, a.ID, strategy.Version).Scan(&pendingTargets); err == nil {
 			var targets []StrategyAllocation

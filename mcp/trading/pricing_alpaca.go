@@ -296,6 +296,8 @@ func alpacaRange(rng string, now time.Time) (string, time.Time) {
 
 func alpacaTimeframe(interval string) (string, bool, error) {
 	switch strings.ToLower(strings.TrimSpace(interval)) {
+	case "1m":
+		return "1Min", false, nil
 	case "5m":
 		return "5Min", false, nil
 	case "15m":

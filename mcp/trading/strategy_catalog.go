@@ -36,7 +36,9 @@ func strategyPresets(symbols []string) []strategyPreset {
 }
 func strategyCatalog(symbols []string) map[string]any {
 	return map[string]any{
-		"presets": strategyPresets(symbols),
+		"presets":      strategyPresets(symbols),
+		"rule_presets": ruleExamplePresets(),
+		"rule_engine":  ruleEngineCatalog(),
 		"indicators": []map[string]string{
 			{"name": "sma_N", "description": "Simple mean of N completed closes."},
 			{"name": "ema_sma_N", "description": "EMA with SMA seed; fixed 5×N closed-bar history for live/replay parity."},
@@ -49,13 +51,37 @@ func strategyCatalog(symbols []string) map[string]any {
 			{"name": "feature:name.field", "description": "Latest feature known at event availability time (news, sentiment, or custom numeric input)."},
 		},
 		"conditions":  "Use all or any arrays to combine comparisons. Operators: >, >=, <, <=, crosses_above, crosses_below. Crossovers are one-bar events, not a persistent holding instruction. rank.where evaluates omitted symbols for each candidate. rank.direction is asc/desc; rank.weight also supports inverse_volatility with explicit volatility_period (2–999) and volatility_floor (1e-8–1, per-bar log-return SD). Weights normalize within the eligible top set, then position caps leave excess in cash without redistribution. rank.budget sets total target exposure (0 omitted = 100%). First matching rule wins; no match means cash.",
-		"limitations": "Research templates, not proven profitable strategies. ATR/ADX and volume-based indicators are not yet in this catalog. Indicators consume completed closes; periods are bars, not days. New recursive indicators deliberately use bounded history, so values can differ slightly from charts with longer initialization histories. Validate costs, benchmarks and out-of-sample stability before promotion.",
+		"limitations": "Research templates, not proven profitable strategies. Allocation indicators consume completed closes; rule-engine examples separately support OHLC, ATR and volume. ADX is not implemented. Allocation periods are bars; periods are bars, not days. New recursive indicators deliberately use bounded history, so values can differ slightly from charts with longer initialization histories. Validate costs, benchmarks and out-of-sample stability before promotion.",
 		"sources": []string{
 			"https://www.fidelity.com/learning-center/trading-investing/technical-analysis/technical-indicator-guide/ema",
 			"https://www.fidelity.com/learning-center/trading-investing/technical-analysis/technical-indicator-guide/RSI",
 			"https://www.fidelity.com/learning-center/trading-investing/technical-analysis/technical-indicator-guide/macd",
 			"https://www.fidelity.com/learning-center/trading-investing/technical-analysis/technical-indicator-guide/bollinger-bands",
 		},
+	}
+}
+
+func ruleEngineCatalog() map[string]any {
+	return map[string]any{
+		"version": "trading-rules/1", "execution": "event_backtest", "live_assignment_supported": false,
+		"documentation": "RULE_ENGINE.md",
+		"capabilities":  []string{"OHLC expressions", "multiple timeframes", "SMA/EMA/RSI/ATR", "nested series", "persistent state", "reset latches", "session windows", "fixed stop risk", "long/short linear contracts", "OCO", "protective exits", "activated trailing stops"},
+		"authoring": map[string]any{
+			"definition":       "engine=rules; universe=[program.symbol]; cadence=program.timeframe; program requires version=trading-rules/1, symbol, timeframe, IANA timezone and rules. See complete rule_presets.",
+			"expressions":      []map[string]any{{"value": 100}, {"metric": "ema", "period": 20, "timeframe": "1h", "offset": 0}, {"name": "my_calculation"}, {"op": ">", "args": []map[string]any{{"metric": "close"}, {"value": 100}}}},
+			"metrics":          []string{"open", "high", "low", "close", "volume", "range", "body", "close_fraction", "sma", "ema", "stddev", "volatility", "rsi", "atr", "highest_high", "lowest_low", "return", "feature", "price", "bid", "ask", "position_qty", "entry_count", "minute", "weekday", "window_high", "window_low", "window_complete", "equity"},
+			"operators":        []string{"+", "-", "*", "/", "min", "max", ">", ">=", "<", "<=", "==", "!=", "and", "or", "crosses_above", "crosses_below", "not", "abs"},
+			"timeframes":       []string{"1m", "5m", "15m", "1h", "4h", "1d"},
+			"rule":             "id, on=bar.close|quote|clock|fill|any, optional timeframe/when/reset/schedule, repeat=once_per_bar|once_per_day|until_reset|always, actions. until_reset requires reset. clock schedule names reference program.schedules.",
+			"actions":          "enter (side=buy|sell, order_type=market|limit|stop, price for pending orders, sizing), flatten, cancel (optional group), set (declared variable name and value expression). An opposing entry pair must share one nonempty OCO group.",
+			"sizing":           "{mode:fixed_risk|quantity|notional|equity_pct,amount:number}; fixed_risk requires a stop. equity_pct is a fraction in (0,1]. Risk and notional use account currency.",
+			"protection":       "stop/target are absolute-price expressions; stop_pct/target_pct and trail_activation_pct/trail_distance_pct are fractions (0.005 means 0.5%). Do not combine absolute and percent for the same boundary.",
+			"state_and_series": "program.calculations maps names to expressions; initial declares numeric variables. sma/ema/stddev accept input expressions from the same candle timeframe. feature requires feature and field. Historical offset is completed candles; higher frames must be multiples of base.",
+			"sessions":         "windows maps names to {start:HH:MM,end:HH:MM}; schedules maps names to HH:MM. Both use program.timezone. Same-day windows require complete base candles.",
+			"limits":           "One instrument per program; no implicit pyramiding; bounded indicator seeds; fixed contract FX; no financing or automatic margin liquidation. Source labels are caller-supplied provenance.",
+		},
+		"mcp_workflow":        []string{"strategy_catalog: discover examples/syntax", "strategy_validate: validate definition without saving", "strategy_create: save definition and return strategy.id", "market_data_import: normalize supplied bid/ask quote and closed-bar CSV exports with explicit provenance; inspect gaps and hashes, then pass returned inputs", "strategy_backtest_create: supply portfolio_id, strategy_id, inputs and simulation", "backtest_control: run then poll status until completed; inspect summary.metrics", "strategy_scorecard_update: define required metric thresholds and evaluation scope before judging results", "strategy_scorecard_evaluate: persist a pass/fail evaluation for the completed backtest; strategy_scorecard_get reads its captured policy, metrics and strategy version", "validation_create/control/report: evaluate captured inputs with chronological holdouts, walk-forward or cost/stress scenarios; no automatic promotion", "backtest_artifact: export results or import a reproducible replay", "strategy_update: revise the definition as a new version; previous runs/evaluations retain their captured version"},
+		"evaluation_guidance": "strategy_evaluate returns allocation targets and does not evaluate a trade program's historical performance. Use completed event-backtest metrics, scorecards and validation suites for engine=rules. Synthetic fixtures prove mechanics, not profitability. Preserve a losing verdict; never weaken a policy or relabel in-sample results to manufacture a pass. Rule programs currently cannot be assigned to live portfolios.",
 	}
 }
 func (a *App) toolStrategyCatalog(ctx *sdk.AppCtx, args map[string]any) (any, error) {

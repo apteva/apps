@@ -283,7 +283,7 @@ func (b *binancePublic) klinesContext(ctx context.Context, wire, interval string
 
 func binanceIntervalForBacktest(interval string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(interval)) {
-	case "5m", "15m", "1h", "4h", "1d", "1w":
+	case "1m", "5m", "15m", "1h", "4h", "1d", "1w":
 		return strings.ToLower(strings.TrimSpace(interval)), nil
 	default:
 		return "", fmt.Errorf("unsupported Binance backtest interval %q", interval)

@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	sdk "github.com/apteva/app-sdk"
+	"os"
+	"testing"
+)
 
 // The embedded manifest must always parse — it's our single source of
 // truth for the manifest the binary advertises.
@@ -13,8 +17,19 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Version == "" {
 		t.Error("manifest.Version is empty")
 	}
-	if len(m.Provides.MCPTools) != 63 {
-		t.Errorf("expected 63 MCP tools, got %d", len(m.Provides.MCPTools))
+	raw, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileManifest, err := sdk.ParseManifest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Version != "0.15.0" || fileManifest.Version != m.Version {
+		t.Fatal("release and embedded versions differ")
+	}
+	if len(m.Provides.MCPTools) != 64 {
+		t.Errorf("expected 64 MCP tools, got %d", len(m.Provides.MCPTools))
 	}
 }
 

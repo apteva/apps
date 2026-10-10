@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	sim "github.com/apteva/apps/mcp/trading/internal/backtest"
+	rules "github.com/apteva/apps/mcp/trading/internal/ruleengine"
 )
 
 // Warm history advances indicators and feature/quote observations only. It
@@ -15,8 +16,15 @@ func newSimulationEngine(r *simulationRecord, strategy sim.Strategy) (*sim.Engin
 	}
 	var observe sim.Strategy
 	if r.Spec.DecisionMode != "agent" {
-		rules := simulationStrategy(r.Spec)
-		observe = func(s *sim.State, in sim.Input) ([]sim.Command, error) { _, err := rules(s, in); return nil, err }
+		evaluate := simulationStrategy(r.Spec)
+		if def, _, err := validateStrategyDefinition(r.Spec.Strategy); err == nil && def.Engine == "rules" {
+			observe, err = rules.ObserveOnly(def.Program)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			observe = func(s *sim.State, in sim.Input) ([]sim.Command, error) { _, err := evaluate(s, in); return nil, err }
+		}
 	}
 	config := r.Spec.Config
 	config.NotifyFills = false

@@ -1,0 +1,242 @@
+{
+  "id": "atr_candle_breakout",
+  "name": "ATR candle breakout",
+  "description": "Rule-engine example from the supplied screenshots. Explicit instrument specification and sourced OHLC/quote tape required; no profitability claim.",
+  "definition": {
+    "engine": "rules",
+    "universe": [
+      "XAUUSD"
+    ],
+    "cadence": "1h",
+    "program": {
+      "version": "trading-rules/1",
+      "symbol": "XAUUSD",
+      "timeframe": "1h",
+      "timezone": "UTC",
+      "rules": [
+        {
+          "id": "buy_large_candle",
+          "on": "bar.close",
+          "when": {
+            "op": "and",
+            "args": [
+              {
+                "op": "==",
+                "args": [
+                  {
+                    "metric": "position_qty"
+                  },
+                  {
+                    "value": 0
+                  }
+                ]
+              },
+              {
+                "op": "and",
+                "args": [
+                  {
+                    "op": ">",
+                    "args": [
+                      {
+                        "metric": "range"
+                      },
+                      {
+                        "op": "*",
+                        "args": [
+                          {
+                            "value": 2.5
+                          },
+                          {
+                            "metric": "atr",
+                            "period": 200
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "and",
+                    "args": [
+                      {
+                        "op": ">=",
+                        "args": [
+                          {
+                            "metric": "close_fraction"
+                          },
+                          {
+                            "value": 0.75
+                          }
+                        ]
+                      },
+                      {
+                        "op": ">",
+                        "args": [
+                          {
+                            "metric": "body"
+                          },
+                          {
+                            "value": 0
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "actions": [
+            {
+              "kind": "enter",
+              "side": "buy",
+              "stop": {
+                "op": "*",
+                "args": [
+                  {
+                    "metric": "close"
+                  },
+                  {
+                    "value": 0.995
+                  }
+                ]
+              },
+              "target": {
+                "op": "*",
+                "args": [
+                  {
+                    "metric": "close"
+                  },
+                  {
+                    "value": 1.035
+                  }
+                ]
+              },
+              "sizing": {
+                "mode": "fixed_risk",
+                "amount": 100
+              }
+            }
+          ]
+        },
+        {
+          "id": "sell_large_candle",
+          "on": "bar.close",
+          "when": {
+            "op": "and",
+            "args": [
+              {
+                "op": "==",
+                "args": [
+                  {
+                    "metric": "position_qty"
+                  },
+                  {
+                    "value": 0
+                  }
+                ]
+              },
+              {
+                "op": "and",
+                "args": [
+                  {
+                    "op": ">",
+                    "args": [
+                      {
+                        "metric": "range"
+                      },
+                      {
+                        "op": "*",
+                        "args": [
+                          {
+                            "value": 2.5
+                          },
+                          {
+                            "metric": "atr",
+                            "period": 200
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "and",
+                    "args": [
+                      {
+                        "op": "<=",
+                        "args": [
+                          {
+                            "metric": "close_fraction"
+                          },
+                          {
+                            "value": 0.25
+                          }
+                        ]
+                      },
+                      {
+                        "op": "<",
+                        "args": [
+                          {
+                            "metric": "body"
+                          },
+                          {
+                            "value": 0
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "actions": [
+            {
+              "kind": "enter",
+              "side": "sell",
+              "stop": {
+                "op": "*",
+                "args": [
+                  {
+                    "metric": "close"
+                  },
+                  {
+                    "value": 1.005
+                  }
+                ]
+              },
+              "target": {
+                "op": "*",
+                "args": [
+                  {
+                    "metric": "close"
+                  },
+                  {
+                    "value": 0.965
+                  }
+                ]
+              },
+              "sizing": {
+                "mode": "fixed_risk",
+                "amount": 100
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "simulation": {
+    "seed": 1,
+    "starting_cash": 100000,
+    "contracts": {
+      "XAUUSD": {
+        "multiplier": 1,
+        "currency_rate": 1,
+        "margin_fraction": 0.1
+      }
+    },
+    "costs": {
+      "qty_step": 0.001
+    }
+  }
+}
