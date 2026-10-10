@@ -61,6 +61,7 @@ type releaseSearchHit struct {
 type searchOptions struct {
 	ProjectID, EntityType, Query, BrandID, SessionID, DateFrom, DateTo       string
 	Kind, Lineage, Sort, ReviewStatus, Destination, AccountRef, Availability string
+	Purpose                                                                  purposeOptions
 	SourceAssetID                                                            string
 	IncludeDescendants                                                       bool
 	Lifecycle                                                                string
@@ -83,6 +84,10 @@ func parseSearchOptions(pid string, args map[string]any) (searchOptions, error) 
 		return o, errors.New("include_descendants requires source_asset_id")
 	}
 	var err error
+	o.Purpose, err = parsePurposeOptions(args)
+	if err != nil {
+		return o, err
+	}
 	o.Lifecycle, err = lifecycleScope(args)
 	if err != nil {
 		return o, err
@@ -244,7 +249,7 @@ func (a *App) search(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		out["assets"] = page
 	}
 	// Asset-only filters do not silently change the meaning of a session or release result.
-	assetOnly := o.SourceAssetID != "" || o.Kind != "" || o.Lineage != "" || o.ReviewStatus != "" || o.Availability != "any" || o.SessionID != "" || o.Tag != "" || o.Favorite != nil || o.PatreonIntent != ""
+	assetOnly := o.Purpose.Role != "" || o.Purpose.OutputType != "" || o.Purpose.IncludeIntermediates || o.SourceAssetID != "" || o.Kind != "" || o.Lineage != "" || o.ReviewStatus != "" || o.Availability != "any" || o.SessionID != "" || o.Tag != "" || o.Favorite != nil || o.PatreonIntent != ""
 	if assetOnly && (o.EntityType == "sessions" || o.EntityType == "releases") {
 		return nil, errors.New("file filters require entity_type assets or all")
 	}
@@ -279,7 +284,7 @@ func (a *App) searchAssets(db *sql.DB, o searchOptions, cursor searchCursor) (se
 	page := searchPage[assetSearchHit]{Items: []assetSearchHit{}}
 	q := `SELECT a.id,a.session_id,a.storage_install_id,a.storage_file_id,a.name,a.kind,a.content_type,a.sha256,a.size_bytes,a.review_status,a.media_status,a.media_rating,a.favorite,a.patreon_intent,s.brand_id,s.title,s.session_date,a.created_at,s.notes,EXISTS(SELECT 1 FROM asset_sources src WHERE src.project_id=a.project_id AND src.child_asset_id=a.id)
 		FROM assets a JOIN sessions s ON s.id=a.session_id AND s.project_id=a.project_id WHERE a.project_id=?`
-	q += lifecyclePredicate(o.Lifecycle, "a", "s")
+	q += lifecyclePredicate(o.Lifecycle, "a", "s") + o.Purpose.predicate("a")
 	values := []any{o.ProjectID}
 	if o.SourceAssetID != "" {
 		if o.IncludeDescendants {

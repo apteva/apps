@@ -19,6 +19,9 @@ type Asset struct {
 	SessionLifecycle     string           `json:"session_lifecycle"`
 	SessionRevision      int64            `json:"session_revision"`
 	Eligible             bool             `json:"eligible"`
+	Role                 string           `json:"role"`
+	OutputType           string           `json:"output_type"`
+	Ancestors            []LineageNode    `json:"ancestors"`
 	Sources              []AssetSource    `json:"sources"`
 	ID                   string           `json:"id"`
 	SessionID            string           `json:"session_id"`
@@ -215,7 +218,11 @@ func (a *App) assetsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := ctx.AppDB().Query(`SELECT a.id,a.session_id,a.storage_install_id,a.storage_file_id,a.name,a.kind,a.content_type,a.sha256,a.size_bytes,a.review_status,a.media_status,a.media_rating,a.favorite,a.patreon_intent FROM assets a JOIN sessions s ON s.project_id=a.project_id AND s.id=a.session_id WHERE a.project_id=? AND a.session_id=?`+lifecyclePredicate(scope, "a", "s")+` ORDER BY a.created_at DESC,a.id DESC LIMIT 200`, pid, str(args, "session_id"))
+	purpose, err := parsePurposeOptions(args)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := ctx.AppDB().Query(`SELECT a.id,a.session_id,a.storage_install_id,a.storage_file_id,a.name,a.kind,a.content_type,a.sha256,a.size_bytes,a.review_status,a.media_status,a.media_rating,a.favorite,a.patreon_intent FROM assets a JOIN sessions s ON s.project_id=a.project_id AND s.id=a.session_id WHERE a.project_id=? AND a.session_id=?`+lifecyclePredicate(scope, "a", "s")+purpose.predicate("a")+` ORDER BY a.created_at DESC,a.id DESC LIMIT 200`, pid, str(args, "session_id"))
 	if err != nil {
 		return nil, err
 	}
@@ -282,7 +289,11 @@ func (a *App) assetGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err = loadAssetHostings(ctx.AppDB(), pid, []*Asset{asset}); err != nil {
 		return nil, err
 	}
-	out := map[string]any{"asset": asset, "sources": asset.Sources, "hostings": hostingsAny.(map[string]any)["hostings"], "hosting_intents": hostingsAny.(map[string]any)["hosting_intents"], "publications": asset.Publications}
+	history, err := purposeHistory(ctx.AppDB(), pid, asset.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{"asset": asset, "purpose_history": history, "sources": asset.Sources, "hostings": hostingsAny.(map[string]any)["hostings"], "hosting_intents": hostingsAny.(map[string]any)["hosting_intents"], "publications": asset.Publications}
 	asset.MediaStatus, asset.MediaRating = "unavailable", ""
 	if ctx.IntegrationFor("media") != nil {
 		var media struct {

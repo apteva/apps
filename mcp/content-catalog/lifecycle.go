@@ -56,7 +56,7 @@ func loadAssetLifecycle(db *sql.DB, pid string, assets []*Asset) error {
 		marks = append(marks, "?")
 		byID[a.ID] = a
 	}
-	rows, err := db.Query(`SELECT a.id,a.lifecycle,a.archive_reason,a.archived_at,a.original_session_id,a.revision,s.lifecycle,s.revision FROM assets a JOIN sessions s ON s.project_id=a.project_id AND s.id=a.session_id WHERE a.project_id=? AND a.id IN (`+strings.Join(marks, ",")+`)`, values...)
+	rows, err := db.Query(`SELECT a.id,a.lifecycle,a.archive_reason,a.archived_at,a.original_session_id,a.revision,s.lifecycle,s.revision,a.role,a.output_type FROM assets a JOIN sessions s ON s.project_id=a.project_id AND s.id=a.session_id WHERE a.project_id=? AND a.id IN (`+strings.Join(marks, ",")+`)`, values...)
 	if err != nil {
 		return err
 	}
@@ -64,9 +64,9 @@ func loadAssetLifecycle(db *sql.DB, pid string, assets []*Asset) error {
 	for rows.Next() {
 		var id string
 		var f LifecycleFields
-		var original, sessionState string
+		var original, sessionState, role, outputType string
 		var sessionRevision int64
-		if err = rows.Scan(&id, &f.Lifecycle, &f.ArchiveReason, &f.ArchivedAt, &original, &f.Revision, &sessionState, &sessionRevision); err != nil {
+		if err = rows.Scan(&id, &f.Lifecycle, &f.ArchiveReason, &f.ArchivedAt, &original, &f.Revision, &sessionState, &sessionRevision, &role, &outputType); err != nil {
 			return err
 		}
 		a := byID[id]
@@ -74,14 +74,19 @@ func loadAssetLifecycle(db *sql.DB, pid string, assets []*Asset) error {
 		a.OriginalSessionID = original
 		a.SessionLifecycle = sessionState
 		a.SessionRevision = sessionRevision
-		a.Eligible = f.Lifecycle == "active" && sessionState == "active"
+		a.Role = role
+		a.OutputType = outputType
+		a.Eligible = role != "intermediate" && f.Lifecycle == "active" && sessionState == "active"
 	}
 	return rows.Err()
 }
 func requireActiveAsset(db *sql.DB, pid, id string) error {
-	var state, parent string
-	if err := db.QueryRow(`SELECT a.lifecycle,s.lifecycle FROM assets a JOIN sessions s ON s.project_id=a.project_id AND s.id=a.session_id WHERE a.project_id=? AND a.id=?`, pid, id).Scan(&state, &parent); err != nil {
+	var state, parent, role string
+	if err := db.QueryRow(`SELECT a.lifecycle,s.lifecycle,a.role FROM assets a JOIN sessions s ON s.project_id=a.project_id AND s.id=a.session_id WHERE a.project_id=? AND a.id=?`, pid, id).Scan(&state, &parent, &role); err != nil {
 		return err
+	}
+	if role == "intermediate" {
+		return errors.New("intermediate asset is not eligible for content selection; change its purpose explicitly first")
 	}
 	if state != "active" || parent != "active" {
 		return errors.New("asset or its session is archived; restore it to an active session first")
@@ -352,18 +357,18 @@ func (a *App) assetsEligibility(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		if e != nil {
 			return nil, e
 		}
-		out = append(out, map[string]any{"asset_id": id, "file_id": asset.StorageFileID, "storage_install_id": asset.StorageInstallID, "eligible": asset.Eligible, "lifecycle": asset.Lifecycle, "session_lifecycle": asset.SessionLifecycle, "revision": asset.Revision, "session_revision": asset.SessionRevision})
+		out = append(out, map[string]any{"asset_id": id, "file_id": asset.StorageFileID, "storage_install_id": asset.StorageInstallID, "eligible": asset.Eligible, "role": asset.Role, "lifecycle": asset.Lifecycle, "session_lifecycle": asset.SessionLifecycle, "revision": asset.Revision, "session_revision": asset.SessionRevision})
 	}
 	for _, file := range files {
 		if storage <= 0 {
 			return nil, errors.New("storage_install_id required for file lookup")
 		}
-		var active, archived int
-		err = ctx.AppDB().QueryRow(`SELECT COALESCE(SUM(CASE WHEN a.lifecycle='active' AND s.lifecycle='active' THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN a.lifecycle!='active' OR s.lifecycle!='active' THEN 1 ELSE 0 END),0) FROM assets a JOIN sessions s ON s.project_id=a.project_id AND s.id=a.session_id WHERE a.project_id=? AND a.storage_install_id=? AND a.storage_file_id=?`, pid, storage, file).Scan(&active, &archived)
+		var active, ineligible int
+		err = ctx.AppDB().QueryRow(`SELECT COALESCE(SUM(CASE WHEN a.lifecycle='active' AND s.lifecycle='active' AND a.role<>'intermediate' THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN a.lifecycle!='active' OR s.lifecycle!='active' OR a.role='intermediate' THEN 1 ELSE 0 END),0) FROM assets a JOIN sessions s ON s.project_id=a.project_id AND s.id=a.session_id WHERE a.project_id=? AND a.storage_install_id=? AND a.storage_file_id=?`, pid, storage, file).Scan(&active, &ineligible)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, map[string]any{"file_id": file, "storage_install_id": storage, "managed": active+archived > 0, "eligible": archived == 0, "requires_asset_context": active > 0 && archived > 0})
+		out = append(out, map[string]any{"file_id": file, "storage_install_id": storage, "managed": active+ineligible > 0, "eligible": ineligible == 0, "requires_asset_context": active > 0 && ineligible > 0})
 	}
 	return map[string]any{"items": out}, nil
 }

@@ -1,11 +1,11 @@
 schema: apteva-app/v1
 name: content-catalog
 display_name: Content Catalog
-version: 0.6.6
+version: 0.6.7
 description: |
   Coordinate brands, production sessions, Storage assets, Media derivatives,
   optional Gigs, cloud hosting, and shared platform posts.
-  Catalog assets can also carry generic favorites, tags, and one Patreon intent
+  Catalog assets can also carry generic purpose roles, output categories, favorites, tags, and one Patreon intent
   (unset, free, or paid) for filtering and coordination; labels never publish
   externally or modify Media.
   Storage owns bytes, Media owns processing, Gigs owns assignments, and Social
@@ -58,7 +58,7 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: content_catalog_overview, description: "Counts of brands, sessions, assets, asset publications, and hosting work for the current project." }
-    - { name: content_catalog_search, description: "Search linked sessions and assets with text including live Media descriptions, brand, exact source asset and optional descendants, date, review, and per-platform availability filters. Follow next_cursor until empty. Read-only; no folder scan." }
+    - { name: content_catalog_search, description: "Search linked sessions and assets with text including live Media descriptions, brand, purpose role, exact source asset and optional descendants, date, review, and per-platform availability filters. Follow next_cursor until empty. Read-only; no folder scan." }
     - { name: content_catalog_brands_create, description: "Create a brand and its Storage path policy. Optional Bunny connection and collection." }
     - { name: content_catalog_brands_list, description: "List brands in the current project." }
     - { name: content_catalog_brands_update, description: "Update a brand name, Storage root, or video host settings." }
@@ -75,7 +75,7 @@ provides:
     - { name: content_catalog_assets_get, description: "Get an asset with source lineage, hosting, and publication records." }
     - { name: content_catalog_assets_link_source, description: "Record a derivative's source asset. Supports multiple source assets." }
     - { name: content_catalog_assets_review, description: "Set editorial review state on a Catalog asset." }
-    - { name: content_catalog_assets_labels_update, description: "Set generic asset tags, Favorite, and Patreon intent (unset/free/paid) on up to 100 Catalog assets. Does not modify Media or publish externally." }
+    - { name: content_catalog_assets_labels_update, description: "Set purpose role, generic output category, asset tags, Favorite, and Patreon intent (unset/free/paid) on up to 100 Catalog assets. Does not modify Media or publish externally." }
     - { name: content_catalog_asset_publications_list, description: "List the platform publication records on one asset." }
     - { name: content_catalog_asset_publications_record, description: "Create or update one asset's platform status with explicit evidence. Does not publish externally." }
     - { name: content_catalog_posts_list, description: "List posts shared by one or more assets, optionally filtered by session, asset, or brand." }
@@ -111,7 +111,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: content-catalog/v0.6.6
+    ref: content-catalog/v0.6.7
     entry: mcp/content-catalog
   port: 8080
   health_check: /health
