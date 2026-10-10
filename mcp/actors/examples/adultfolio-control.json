@@ -159,7 +159,7 @@
                 "ready_selector": "#MessageResult[class=\"conversation-{{model_id}}\"]",
                 "empty_text_pattern": "(?i)no messages",
                 "empty_selector": "#MessageResult",
-                "loading_selector": ".loading-overlay[aria-busy=\"true\"],#messaging_btf[aria-busy=\"true\"],#MessageResult[aria-busy=\"true\"]",
+                "loading_selector": ".loading-overlay[aria-busy=\"true\"],#messaging_btf[aria-busy=\"true\"],#MessageResult[aria-busy=\"true\"],#oldMessage:contains(\"Loading\"),#oldMessage:contains(\"loading\")",
                 "items": "#MessageResult .messageContainer.message-modern-wrap",
                 "fields": {
                   "attachment_url": {
@@ -237,7 +237,7 @@
                   },
                   "max_pages": "{{read_pages}}",
                   "stable_rounds": 2,
-                  "settle_ms": 1000
+                  "settle_ms": 5000
                 }
               }
             ],
@@ -538,7 +538,7 @@
                 "ready_selector": "#MessageResult[class=\"conversation-{{model_id}}\"]",
                 "empty_text_pattern": "(?i)no messages",
                 "empty_selector": "#MessageResult",
-                "loading_selector": ".loading-overlay[aria-busy=\"true\"],#messaging_btf[aria-busy=\"true\"],#MessageResult[aria-busy=\"true\"]",
+                "loading_selector": ".loading-overlay[aria-busy=\"true\"],#messaging_btf[aria-busy=\"true\"],#MessageResult[aria-busy=\"true\"],#oldMessage:contains(\"Loading\"),#oldMessage:contains(\"loading\")",
                 "items": "#MessageResult .messageContainer.message-modern-wrap",
                 "fields": {
                   "attachment_url": {
@@ -616,7 +616,7 @@
                   },
                   "max_pages": "{{read_pages}}",
                   "stable_rounds": 2,
-                  "settle_ms": 1000
+                  "settle_ms": 5000
                 }
               }
             ],
@@ -1154,7 +1154,7 @@
                 ],
                 "link_selector": "",
                 "url_pattern": "^https://www\\.adultfolio\\.com/search(?:[?#]|$)",
-                "ready_selector": "#member_search_results",
+                "ready_selector": "#member_search_results:has([id$=\"_member_card\"]),#member_search_results_intro:contains(\"No results\"),#member_search_results_intro:contains(\"No members\")",
                 "empty_text_pattern": "(?i)no (members|results)|0 results",
                 "empty_selector": "#member_search_results_intro",
                 "loading_selector": ".loading-overlay[aria-busy=\"true\"],#messaging_btf[aria-busy=\"true\"],#MessageResult[aria-busy=\"true\"]",
@@ -1248,7 +1248,7 @@
                 ],
                 "link_selector": "",
                 "url_pattern": "^https://www\\.adultfolio\\.com/search(?:[?#]|$)",
-                "ready_selector": ".website_search_results",
+                "ready_selector": ".website_search_results:has([id$=\"_member_card\"]),.website_search_results:contains(\"There are no results for your query\")",
                 "empty_text_pattern": "There are no results for your query",
                 "empty_selector": ".website_search_results",
                 "loading_selector": ".loading-overlay[aria-busy=\"true\"],#messaging_btf[aria-busy=\"true\"],#MessageResult[aria-busy=\"true\"]",
