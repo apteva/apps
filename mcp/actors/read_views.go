@@ -166,6 +166,9 @@ func validateReadViews(c *actorReadViews) error {
 		}
 		switch v.Pagination.Mode {
 		case "scroll":
+			if v.Pagination.Next.Text != "" && (!v.Pagination.Next.SOMOnly || !v.Pagination.Next.Exact) {
+				return errors.New("scroll next requires exact som_only locator")
+			}
 			if v.Pagination.ScrollTargetName == "" {
 				return errors.New("scroll pagination requires scroll_target_name")
 			}
@@ -360,6 +363,7 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 	stable := 0
 	lastSignature := ""
 	lastGeometry := ""
+	pendingNextSignature := ""
 	for page := 0; page < limit; page++ {
 		if e.pageCount >= e.maxPages {
 			return errors.New("global page limit reached; more results may remain")
@@ -430,6 +434,12 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 			seen[key] = item
 			newItems = append(newItems, item)
 		}
+		if pendingNextSignature != "" {
+			if strings.Join(keys, ",") == pendingNextSignature {
+				return errors.New("pagination did not advance; coverage incomplete")
+			}
+			pendingNextSignature = ""
+		}
 		if err := persistDatasetPage(e.ctx, e.run.ID, newItems); err != nil {
 			return err
 		}
@@ -466,6 +476,28 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 			signature := strings.Join(keys, ",")
 			geometry := fmt.Sprintf("%.0f:%.0f", target.Top, target.MaxY)
 			atEnd := target.Top >= target.MaxY-1
+			if atEnd && v.Pagination.Next.Text != "" {
+				var matches []setOfMarkTarget
+				for _, t := range shot.SOM {
+					if somTargetMatches(v.Pagination.Next, t) {
+						matches = append(matches, t)
+					}
+				}
+				if len(matches) > 1 {
+					return errors.New("ambiguous pagination control; coverage incomplete")
+				}
+				if len(matches) == 1 && !matches[0].Disabled {
+					if err := e.clickReadNavigation(v.Pagination.Next); err != nil {
+						return err
+					}
+					pendingNextSignature = signature
+					stable, lastSignature, lastGeometry = 0, "", ""
+					if err := e.readPause(v.Pagination.SettleMS); err != nil {
+						return err
+					}
+					continue
+				}
+			}
 			if atEnd && signature == lastSignature && geometry == lastGeometry && len(newItems) == 0 {
 				stable++
 			} else {

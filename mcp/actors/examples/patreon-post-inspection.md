@@ -1,6 +1,6 @@
 # Optional Patreon post inspection example
 
-Requires Actors 0.2.17+ and Computer 0.7.94+. This is a user-editable actor definition, not a built-in
+Requires Actors 0.2.18+ and Computer 0.7.94+. This is a user-editable actor definition, not a built-in
 site workflow. Supply the assigned `context_id`, explicit `creator_url` and,
 for `inspect_page`, exact `page_url`. No creator, account or tier is fixed.
 
@@ -13,7 +13,8 @@ and form state for read-only verification. It performs no form changes.
 current Library UI, published and scheduled posts share Posts; Scheduled rows
 are explicitly identified by their status. Drafts has a separate verified view.
 It verifies the account's Your page link against the requested creator on each
-batch, scrolls the freshly observed Document region, deduplicates by ID, and
+batch, scrolls the freshly observed Document region, follows a fresh navigation-only
+Go To Next Page control at its end when enabled, deduplicates by ID, and
 returns each title/status/edit URL. Only published rows have a derived live URL;
 a scheduled/draft editor must not be represented as a live publication.
 

@@ -116,6 +116,13 @@ For sends, payments or deletions, add `once_key: "{{request_id}}"` to the acknow
 
 An exact SOM locator may declare `text_suffix_pattern`, for example `(?:\s+[0-9]+\s+members?)?`, to allow a known metadata suffix while retaining the exact literal name. The regex is anchored after the escaped name. It cannot silently match another name that starts with the same word. Semantic dispatch retains the fresh target ID, SOM revision and role checks. Ordinary locators also pass the observed name; metadata-suffix locators omit that extra name check because native accessible names can concatenate whitespace differently. Authors must verify the saved values before committing.
 
+### Scroll and paginated views (0.2.18)
+
+Scroll traversal can also follow an optional exact `som_only` Next locator at
+the bottom. Only a fresh `navigation_only` control can be clicked, and its
+record signature must advance. Disabled or missing controls do not override
+the required collected-count check.
+
 ### Raw extraction dependency (0.2.17)
 
 Computer 0.7.94 or later is required so `readability:false` preserves navigation,

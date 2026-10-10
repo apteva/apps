@@ -247,3 +247,94 @@ func TestReadEndMustMatchAuthoritativeTotal(t *testing.T) {
 		}
 	}
 }
+
+func TestReadScrollThenNextCoverage(t *testing.T) {
+	for _, mode := range []string{"complete", "unsafe", "ambiguous", "stalled", "missing"} {
+		t.Run(mode, func(t *testing.T) {
+			plat := newFakePlatform()
+			url, page, top, clicks := "", 0, 0, 0
+			plat.readViewsResponse = func(tool string, in map[string]any) map[string]any {
+				if tool == "computer.browser_open" {
+					url = stringFromAny(in["url"])
+				}
+				if tool == "computer.computer_use" {
+					switch in["action"] {
+					case "navigate":
+						url, page, top = stringFromAny(in["url"]), 0, 0
+						return map[string]any{"current_url": url}
+					case "scroll":
+						top = 600
+						return map[string]any{"scroll": map[string]any{"actual_target_id": "scroll_document"}}
+					case "screenshot":
+						targets := []any{}
+						if top == 600 && mode != "missing" {
+							effect := "navigation_only"
+							if mode == "unsafe" {
+								effect = "immediate_external_commit"
+							}
+							targets = append(targets, map[string]any{"id": "next", "tag": "button", "accessible_name": "Next", "effect": effect, "disabled": page == 2})
+							if mode == "ambiguous" {
+								targets = append(targets, targets[0])
+							}
+						}
+						return map[string]any{"current_url": url, "som_revision": clicks + 1, "som": targets, "scroll_regions": []any{map[string]any{"id": "scroll_document", "name": "Document", "role": "document", "scroll_top": top, "max_scroll_y": 600}}}
+					case "click":
+						clicks++
+						if in["coordinate"] != nil || in["target_id"] != "next" || in["expected_effect"] != "navigation_only" {
+							t.Fatalf("unguarded click: %#v", in)
+						}
+						if mode != "stalled" {
+							page++
+							top = 0
+						}
+						return map[string]any{"current_url": url}
+					}
+				}
+				if tool == "computer.browser_extract" {
+					h := readFixtureHTML(page + 1)
+					return map[string]any{"html": strings.Replace(h, "</body>", "<footer>of 3</footer></body>", 1), "rendered": true, "current_url": url}
+				}
+				return nil
+			}
+			ctx, app := newTestCtx(t, plat)
+			c := fixtureReadViews()
+			c.Views = c.Views[:1]
+			c.Views[0].Pagination.Next = actorLocator{Text: "Next", Exact: true, SOMOnly: true}
+			c.Views[0].Total = &actorField{Selector: "footer", Type: "number", Required: true, Pattern: `of (\d+)`}
+			b, _ := json.Marshal(c)
+			var conf map[string]any
+			json.Unmarshal(b, &conf)
+			rec := saveFixtureActor(t, ctx, app, map[string]any{"schema_version": 1, "read_only": true, "allowed_hosts": []any{"example.com"}, "limits": map[string]any{"max_pages": 40, "max_items": 100, "max_duration_seconds": 60, "step_retries": 0}, "steps": []any{map[string]any{"action": "inspect_views", "read_views": conf}}, "output_schema": map[string]any{}})
+			queued, err := app.toolActorRun(ctx, map[string]any{"actor_id": rec.ID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := claimActorRun(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := app.executeActorRun(context.Background(), ctx, run); err != nil {
+				t.Fatal(err)
+			}
+			r, err := getActorRun(ctx, queued.(map[string]any)["run_id"].(int64))
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := r["output"].(map[string]any)
+			cov := out["coverage"].(map[string]any)
+			want := mode == "complete"
+			if cov["inspection_complete"] != want || (r["status"] == "completed") != want {
+				t.Fatalf("mode=%s status=%v coverage=%#v error=%v", mode, r["status"], cov, r["error"])
+			}
+			if want && (clicks != 2 || intFromAny(out["item_count"]) != 3) {
+				t.Fatalf("clicks=%d output=%#v", clicks, out)
+			}
+			if (mode == "unsafe" || mode == "ambiguous" || mode == "missing") && clicks != 0 {
+				t.Fatalf("unsafe click count=%d", clicks)
+			}
+			if !want && cov["more_results_remaining"] != true {
+				t.Fatal("incomplete coverage lost")
+			}
+		})
+	}
+}

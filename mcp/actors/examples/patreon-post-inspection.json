@@ -64,7 +64,7 @@
             "creator_identity": {
               "selector": "a[aria-label=\"Your page\"]",
               "attribute": "href",
-              "pattern": "^https://www\\.patreon\\.com/(?:c/)?([^/?]+)(?:[/?]|$)"
+              "pattern": "^https://www\\.patreon\\.com/(?:(?:c|cw)/)?([^/?]+)(?:[/?]|$)"
             },
             "account_label": {
               "selector": "button[aria-label=\"Account menu\"]",
@@ -154,7 +154,7 @@
               "type": "url",
               "attribute": "href",
               "required": true,
-              "pattern": "^https://www\\.patreon\\.com/(?:c/)?([^/?]+)(?:[/?]|$)"
+              "pattern": "^https://www\\.patreon\\.com/(?:(?:c|cw)/)?([^/?]+)(?:[/?]|$)"
             },
             "views": [
               {
@@ -222,8 +222,14 @@
                 },
                 "pagination": {
                   "mode": "scroll",
+                  "next": {
+                    "text": "Go To Next Page",
+                    "role": "button",
+                    "exact": true,
+                    "som_only": true
+                  },
                   "scroll_target_name": "Document",
-                  "amount": 650,
+                  "amount": 5000,
                   "max_pages": 100,
                   "stable_rounds": 3,
                   "settle_ms": 1500
@@ -276,8 +282,14 @@
                 },
                 "pagination": {
                   "mode": "scroll",
+                  "next": {
+                    "text": "Go To Next Page",
+                    "role": "button",
+                    "exact": true,
+                    "som_only": true
+                  },
                   "scroll_target_name": "Document",
-                  "amount": 650,
+                  "amount": 5000,
                   "max_pages": 100,
                   "stable_rounds": 3,
                   "settle_ms": 1500
