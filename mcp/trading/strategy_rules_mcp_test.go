@@ -207,3 +207,29 @@ func TestSimulationResultHashIgnoresKeyOrderAndPreservesNumbers(t *testing.T) {
 		t.Fatal("numeric precision was lost when validating artifact contents")
 	}
 }
+
+func TestRuleMCPDefinitionJSONText(t *testing.T) {
+	ctx := newTestCtx(t)
+	definition := ruleExamplePresets()[0]["definition"]
+	raw, _ := json.Marshal(definition)
+	if callRuleMCP(t, ctx, "strategy_validate", map[string]any{"definition": string(raw)})["valid"] != true {
+		t.Fatal("JSON text did not use program validation")
+	}
+	created := callRuleMCP(t, ctx, "strategy_create", map[string]any{"name": "JSON transport", "definition": string(raw)})["strategy"].(map[string]any)
+	id := created["id"]
+	var revised map[string]any
+	if err := json.Unmarshal(raw, &revised); err != nil {
+		t.Fatal(err)
+	}
+	revised["program"].(map[string]any)["initial"] = map[string]any{"transport_revision": 1}
+	raw, _ = json.Marshal(revised)
+	updated := callRuleMCP(t, ctx, "strategy_update", map[string]any{"strategy_id": id, "definition": string(raw)})["strategy"].(map[string]any)
+	if updated["version"] != float64(2) || sim.Hash(updated["definition"]) != sim.Hash(revised) {
+		t.Fatal("JSON text update was ignored or changed")
+	}
+	for _, invalid := range []any{nil, 3, "null", "[]", "{} {}", "invalid"} {
+		if _, err := strategyDefinitionArgument(invalid); err == nil {
+			t.Fatal("accepted invalid object argument", invalid)
+		}
+	}
+}

@@ -48,9 +48,9 @@ profitability for those instruments remains unverified.
   checks including the CSV importer.
 - Fifteen UI tests, TypeScript checks and rebuilt panel bundles.
 - Nine independent screenshot-case replays.
-- Two Tier 3 real-LLM scenarios for screenshot strategy authoring and a new
-  EMA/SMA research lifecycle, including winning/losing scorecards, cost
-  robustness, artifacts and durable versioned revision.
+- Tier 3 real-LLM scenarios for screenshot strategy authoring, a new EMA/SMA
+  research lifecycle and JSON-text definition transport. They cover
+  winning/losing scorecards, cost robustness, artifacts and versioned revision.
 - Embedded and install manifests share one source, report 0.15.0, and pin the
   install source to `trading/v0.15.0`; the public SDK pin is v0.99.0.
 

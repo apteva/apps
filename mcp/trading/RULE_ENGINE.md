@@ -180,8 +180,13 @@ Tier 3 scenarios under `scenarios/strategies/` exercise real LLM authoring of
 all three screenshot programs and a new EMA/SMA program, followed by synthetic
 winning/losing backtests, durable pass/fail evaluations, a cost robustness suite,
 artifact export and versioned revision. They use isolated test installations
-and assert persisted outcomes. Run them with `apteva test --tier 3
+and assert persisted outcomes. A third scenario checks JSON-text definition
+validation, saving, revision and retrieval through a real agent. Run them with `apteva test --tier 3
 ./scenarios/strategies/`; choose a provider/model supported by your test setup.
+
+Strategy create/validate/update accept a definition object or JSON object text,
+using the same strict program validator. Malformed definition updates fail
+without silently preserving an old version.
 
 No UI interaction or custom strategy code is required. MCP workflow tests create,
 validate, update and retrieve all three catalog programs, then run and reproduce

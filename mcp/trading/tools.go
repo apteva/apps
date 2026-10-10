@@ -307,7 +307,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"name":                map[string]any{"type": "string"},
 				"description":         map[string]any{"type": "string"},
 				"status":              map[string]any{"type": "string"},
-				"definition":          map[string]any{"type": "object", "description": "For trade rules: engine=rules, universe=[program.symbol], cadence=program.timeframe, program={version:trading-rules/1,symbol,timeframe,timezone,rules,...}. Complete examples and authoring guidance are returned by strategy_catalog."},
+				"definition":          map[string]any{"type": []string{"object", "string"}, "description": "For trade rules: engine=rules, universe=[program.symbol], cadence=program.timeframe, program={version:trading-rules/1,symbol,timeframe,timezone,rules,...}. Complete examples and authoring guidance are returned by strategy_catalog."},
 				"created_by_agent_id": map[string]any{"type": "integer"},
 			}, []string{"name", "definition"}),
 			Handler: a.toolStrategyCreate},
@@ -318,7 +318,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"name":        map[string]any{"type": "string"},
 				"description": map[string]any{"type": "string"},
 				"status":      map[string]any{"type": "string"},
-				"definition":  map[string]any{"type": "object"},
+				"definition":  map[string]any{"type": []string{"object", "string"}, "description": "Complete definition object or JSON object text; both use the same strict program validation."},
 			}, []string{"strategy_id"}),
 			Handler: a.toolStrategyUpdate},
 
@@ -336,7 +336,7 @@ func (a *App) MCPTools() []sdk.Tool {
 
 		{Name: "strategy_validate", Description: "Validate a deterministic strategy definition without saving it.",
 			InputSchema: schemaObject(map[string]any{
-				"definition": map[string]any{"type": "object"},
+				"definition": map[string]any{"type": []string{"object", "string"}, "description": "Complete definition object or JSON object text; both use the same strict program validation."},
 			}, []string{"definition"}),
 			Handler: a.toolStrategyValidate},
 

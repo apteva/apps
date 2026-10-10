@@ -913,6 +913,22 @@ func indicatorRequiredBars(indicator string) int {
 
 // ─── Strategy MCP tools ────────────────────────────────────────────
 
+// Some agent transports preserve object arguments as JSON text. Both wire
+// forms must reach the same validator and durable definition, never a silent
+// no-op during updates. This does not relax the trading-program schema.
+func strategyDefinitionArgument(value any) (map[string]any, error) {
+	if object, ok := value.(map[string]any); ok && object != nil {
+		return object, nil
+	}
+	if text, ok := value.(string); ok {
+		var object map[string]any
+		if err := json.Unmarshal([]byte(text), &object); err == nil && object != nil {
+			return object, nil
+		}
+	}
+	return nil, errors.New("definition must be an object or JSON object text")
+}
+
 func (a *App) toolStrategyCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
@@ -922,9 +938,9 @@ func (a *App) toolStrategyCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if name == "" {
 		return nil, errors.New("name required")
 	}
-	defRaw, ok := args["definition"].(map[string]any)
-	if !ok {
-		return nil, errors.New("definition object required")
+	defRaw, err := strategyDefinitionArgument(args["definition"])
+	if err != nil {
+		return nil, err
 	}
 	if _, _, err := validateStrategyDefinition(defRaw); err != nil {
 		return nil, err
@@ -956,7 +972,11 @@ func (a *App) toolStrategyUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, errors.New("strategy_id required")
 	}
 	patch := &Strategy{Name: strArg(args, "name"), Description: strArg(args, "description"), Status: strArg(args, "status")}
-	if def, ok := args["definition"].(map[string]any); ok {
+	if raw, supplied := args["definition"]; supplied {
+		def, err := strategyDefinitionArgument(raw)
+		if err != nil {
+			return nil, err
+		}
 		if _, _, err := validateStrategyDefinition(def); err != nil {
 			return nil, err
 		}
@@ -1141,9 +1161,9 @@ func nextStockStrategyCheck(def *StrategyDefinition, slot time.Time, session usE
 }
 
 func (a *App) toolStrategyValidate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	defRaw, ok := args["definition"].(map[string]any)
-	if !ok {
-		return nil, errors.New("definition object required")
+	defRaw, err := strategyDefinitionArgument(args["definition"])
+	if err != nil {
+		return nil, err
 	}
 	def, warnings, err := validateStrategyDefinition(defRaw)
 	if err != nil {
