@@ -141,3 +141,19 @@ class ToolchainVersionTest(unittest.TestCase):
             for versions in ({'bun': 'latest'}, {'rust': 'stable'}, {'unknown': '1.0'}):
                 with self.subTest(versions=versions), self.assertRaises(ValueError):
                     module.provision({'software_versions': versions}, Path(folder), Path(folder))
+
+    def test_ios_provisions_device_and_simulator_targets_before_recipe(self):
+        module = self.module()
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            # Toolchain metadata may be in a sibling dependency, not app/.
+            (root / 'app').mkdir()
+            (root / 'dependency').mkdir()
+            (root / 'dependency/rust-toolchain.toml').write_text('[toolchain]\nchannel = "1.98.1"\n')
+            with patch.object(module, 'download'), patch.object(module, 'emit'), \
+                 patch.object(module.subprocess, 'run') as commands, \
+                 patch.object(module.subprocess, 'check_output', return_value='rustc 1.98.1 (test)'):
+                env = module.provision({'target_kind': 'ios', 'software_versions': {'rust_targets': 'thumbv7em-none-eabi'}}, root, root)
+            targets = next(call.args[0] for call in commands.call_args_list if call.args[0][:3] == ['rustup', 'target', 'add'])
+            self.assertEqual(set(targets[5:]), {'aarch64-apple-ios', 'aarch64-apple-ios-sim', 'x86_64-apple-ios', 'thumbv7em-none-eabi'})
+            self.assertEqual(env['RUSTUP_TOOLCHAIN'], '1.98.1')

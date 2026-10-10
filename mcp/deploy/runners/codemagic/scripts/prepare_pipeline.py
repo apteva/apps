@@ -127,7 +127,8 @@ def provision(spec, capsule, tools):
         if actual != version:
             raise ValueError(f'Rust version mismatch: expected {version}, got {actual}')
         if spec['target_kind'] == 'ios':
-            rust_targets.add('aarch64-apple-ios')
+            # Native exporters may produce device + simulator XCFrameworks.
+            rust_targets.update({'aarch64-apple-ios', 'aarch64-apple-ios-sim', 'x86_64-apple-ios'})
         elif spec['target_kind'] == 'macos':
             rust_targets.update({'aarch64-apple-darwin', 'x86_64-apple-darwin'})
         if rust_targets:
