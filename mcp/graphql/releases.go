@@ -198,6 +198,9 @@ func validateReleaseSnapshot(schemaRow *schemaRecord, sources []sourceRecord, re
 				if plan.MaxRows > limits.MaxRows {
 					return invalid("resolver %s.%s: aggregate_pipeline max_rows %d exceeds release max_rows %d", resolver.ParentType, resolver.FieldName, plan.MaxRows, limits.MaxRows)
 				}
+				if err := plan.validateStageLimits(limits); err != nil {
+					return invalid("resolver %s.%s: %s", resolver.ParentType, resolver.FieldName, err)
+				}
 				if len(policy.RowFilters[resolver.ParentType+"."+resolver.FieldName]) > 0 {
 					return invalid("resolver %s.%s: aggregate_pipeline cannot be combined with automatic row_filters", resolver.ParentType, resolver.FieldName)
 				}

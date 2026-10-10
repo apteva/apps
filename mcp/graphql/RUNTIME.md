@@ -179,3 +179,6 @@ changing existing data. Earlier logs have no runtime diagnostics. Request bodies
 query text, variables, credentials and snapshot handles are not logged.
 Telemetry remains asynchronous and can drop under overload/storage failure.
 Subscriptions remain outside HTTP request diagnostics.
+
+See [STAGED_PIPELINES.md](STAGED_PIPELINES.md) for version 2 fixed dependent SQL stages,
+executed through one Tables snapshot batch with intermediate data kept inside SQLite.

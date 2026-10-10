@@ -554,3 +554,6 @@ admission queues. Deploy controls configure the immutable release. Logs and the
 existing dashboard widget show queue/shared execution views, source metadata,
 loader/backend counts and per-resolver timing details. See [RUNTIME.md](RUNTIME.md)
 for configuration, capability contracts and backend consistency boundaries.
+
+See [STAGED_PIPELINES.md](STAGED_PIPELINES.md) for version 2 fixed dependent SQL stages,
+executed through one Tables snapshot batch with intermediate data kept inside SQLite.

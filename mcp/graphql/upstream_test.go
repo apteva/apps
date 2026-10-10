@@ -17,6 +17,7 @@ import (
 
 type runtimeBackend struct {
 	sdk.PlatformClient
+	sdk.AppContextClient
 	mu                                       sync.Mutex
 	generation                               int
 	snapshots                                map[string]int

@@ -39,6 +39,9 @@ type standardRequest struct {
 	limits             releaseLimits
 	resolverCount      atomic.Int64
 	rowCount           int
+	pipelineRows       int
+	pipelineBytes      int
+	pipelineCost       int
 	upstreamNanos      atomic.Int64
 	tablesNanos        atomic.Int64
 	databaseNanos      atomic.Int64
@@ -59,6 +62,7 @@ func (a *App) executeStandard(ctx context.Context, project, api, key string, sch
 	}
 	limits = runtimeLimits(limits)
 	state := &standardRequest{project: project, api: api, bindings: bindings, policy: policy, mutation: op.Operation == ast.Mutation, limits: limits}
+	state.pipelineCost, _, _ = cardinalityCost(op.SelectionSet, req.Variables, limits.DefaultListSize)
 	ctx = context.WithValue(ctx, standardRequestKey{}, state)
 	state.loader = newResolverLoader(a, ctx, project)
 	defer state.reads.close(ctx)
@@ -478,6 +482,16 @@ func (a *App) standardResolve(p gql.ResolveParams) (any, error) {
 			input, err := buildAggregatePipelineInput(p.Context, plan, p.Args, p.Source, state.project)
 			if err != nil {
 				return nil, resolverError{err}
+			}
+			if len(plan.Stages) > 0 {
+				if err := plan.validateStageLimits(state.limits); err != nil {
+					return nil, resolverError{err}
+				}
+				read := trackResolverError(state, p, state.loader.loadStagedPipeline(plan, input))
+				if state.synchronous {
+					return read()
+				}
+				return read, nil
 			}
 			baseRead := state.loader.load("tables_query", input, r.Operation)
 			read := trackResolverError(state, p, func() (any, error) {

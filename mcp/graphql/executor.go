@@ -931,6 +931,9 @@ func (a *App) callTables(ctx context.Context, operation string, config map[strin
 			return nil, err
 		}
 		var out any
+		if len(plan.Stages) > 0 {
+			return a.callStagedPipeline(ctx, config["_project_id"].(string), plan, input)
+		}
 		if err := sdk.CallAppResultContext(ctx, a.ctx.WithProject(config["_project_id"].(string)).PlatformAPI(), "tables", "tables_query", input, &out); err != nil {
 			return nil, err
 		}

@@ -15,12 +15,14 @@ const aggregatePipelineOperation = "aggregate_pipeline"
 var aggregatePipelinePlaceholder = regexp.MustCompile(`\{([a-z][a-z0-9_]*)\}`)
 
 type aggregatePipelinePlan struct {
-	SQL         string
-	Params      []aggregatePipelineParam
-	Result      string
-	MaxRows     int
-	OnTruncated string
-	Tables      map[string]bool
+	SQL          string
+	Params       []aggregatePipelineParam
+	Result       string
+	MaxRows      int
+	OnTruncated  string
+	Tables       map[string]bool
+	Stages       []aggregatePipelineStage
+	FinalColumns []string
 }
 
 type aggregatePipelineParam struct {
@@ -37,6 +39,9 @@ type aggregatePipelineParam struct {
 func validateAggregatePipeline(operation string, config map[string]any, sources []sourceRecord, currentSourceID int64) (*aggregatePipelinePlan, error) {
 	if operation != aggregatePipelineOperation {
 		return nil, nil
+	}
+	if intValue(config["version"]) == 2 {
+		return validateStagedPipeline(config, sources, currentSourceID)
 	}
 	version := intValue(config["version"])
 	if version != 1 {
@@ -60,7 +65,11 @@ func validateAggregatePipeline(operation string, config map[string]any, sources 
 		!strings.HasPrefix(lower, "with\n") && !strings.HasPrefix(lower, "with\t") {
 		return nil, invalid("aggregate_pipeline SQL must be a SELECT or WITH query")
 	}
-	if index := strings.Index(sqlText, ";"); index >= 0 && strings.TrimSpace(sqlText[index+1:]) != "" {
+	maskedSQL, err := pipelineSQLMask(sqlText)
+	if err != nil {
+		return nil, err
+	}
+	if index := strings.Index(maskedSQL, ";"); index >= 0 && strings.TrimSpace(maskedSQL[index+1:]) != "" {
 		return nil, invalid("aggregate_pipeline SQL must contain one statement")
 	}
 
@@ -101,7 +110,7 @@ func validateAggregatePipeline(operation string, config map[string]any, sources 
 	if currentSourceID > 0 && !currentDeclared {
 		return nil, invalid("aggregate_pipeline sources must include its bound Tables source")
 	}
-	matches := aggregatePipelinePlaceholder.FindAllStringSubmatch(sqlText, -1)
+	matches := aggregatePipelinePlaceholder.FindAllStringSubmatch(maskedSQL, -1)
 	if len(matches) == 0 {
 		return nil, invalid("aggregate_pipeline SQL must use at least one {table_name} placeholder")
 	}
@@ -231,7 +240,21 @@ func validAggregatePipelinePath(path string) bool {
 }
 
 func aggregatePipelineParentDependencies(config map[string]any) []string {
-	params, err := parseAggregatePipelineParams(config["params"])
+	raw := config["params"]
+	if intValue(config["version"]) == 2 {
+		combined := []any{}
+		if stages, ok := config["stages"].([]any); ok {
+			for _, stage := range stages {
+				if s, ok := stage.(map[string]any); ok {
+					if p, ok := s["params"].([]any); ok {
+						combined = append(combined, p...)
+					}
+				}
+			}
+		}
+		raw = combined
+	}
+	params, err := parseAggregatePipelineParams(raw)
 	if err != nil {
 		return nil
 	}
