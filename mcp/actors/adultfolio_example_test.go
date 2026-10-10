@@ -50,7 +50,7 @@ func TestEditableReplyExamplePrecommitAndPersistence(t *testing.T) {
 					if mode == "wrong_recipient" {
 						recipient = "other"
 					}
-					h := `<body><div class="navbar"><a href="/` + account + `">Your Profile</a></div><div class="MainTitle"><a class="a4" href="/` + recipient + `">Model</a></div><div class="note-editable panel-body" contenteditable="true">` + composer + `</div><div id="MessageResult" class="conversation-42"><div id="10" class="messageContainer message-modern-wrap"><a class="thumbnailPic" href="/model"></a><div class="message-modern-meta"><span class="timeago" title="2026-10-10T00:00:00Z"></span></div><div class="message-modern-body">Previous</div></div>`
+					h := `<body><div class="navbar"><a href="/` + account + `">Your Profile</a></div><div class="MainTitle"><a class="a4" href="/` + recipient + `">Model</a></div><div class="note-editable panel-body" contenteditable="true">` + composer + `</div><div id="MessageResult" class="conversation-42"><div id="10" class="messageContainer message-modern-wrap"><a class="thumbnailPic" href="/model"></a><div class="message-modern-meta"><span class="timeago" title="2026-10-10T00:00:00Z"></span></div><div class="message-modern-body">Previous</div><span class="message-delete-action"></span></div>`
 					if commits > 0 {
 						id := "11"
 						sender := "owner"
@@ -64,10 +64,12 @@ func TestEditableReplyExamplePrecommitAndPersistence(t *testing.T) {
 						if mode == "missing_saved_body" {
 							body = "Previous"
 						}
-						h += `<div id="` + id + `" class="messageContainer message-modern-wrap"><a class="thumbnailPic" href="/` + sender + `"></a><div class="message-modern-meta"><span class="timeago" title="2026-10-10T00:01:00Z"></span></div><div class="message-modern-body">` + body + `</div><span class="message-delete-action"></span></div>`
+						h += `<div id="` + id + `" class="messageContainer message-modern-wrap"><a class="thumbnailPic" href="/` + sender + `"></a><div class="message-modern-meta"><span class="timeago" title="2026-10-10T00:01:00Z"></span></div><div class="message-modern-body">
+		` + body + `
+		</div><span class="message-delete-action"></span></div>`
 					}
 					if commits > 0 && mode == "fast_reply" {
-						h += `<div id="12" class="messageContainer message-modern-wrap"><a class="thumbnailPic" href="/model"></a><div class="message-modern-meta"><span class="timeago" title="2026-10-10T00:02:00Z"></span></div><div class="message-modern-body">A quick response</div></div>`
+						h += `<div id="12" class="messageContainer message-modern-wrap"><a class="thumbnailPic" href="/model"></a><div class="message-modern-meta"><span class="timeago" title="2026-10-10T00:02:00Z"></span></div><div class="message-modern-body">A quick response</div><span class="message-delete-action"></span></div>`
 					}
 					return map[string]any{"html": h + `</div></body>`, "current_url": current, "rendered": true}
 				}
@@ -82,7 +84,7 @@ func TestEditableReplyExamplePrecommitAndPersistence(t *testing.T) {
 			json.Unmarshal(raw, &def)
 			def["browser"].(map[string]any)["context_id"] = ""
 			rec := saveFixtureActor(t, ctx, app, def)
-			input := map[string]any{"account_url": "https://www.adultfolio.com/owner", "model_url": "https://www.adultfolio.com/model", "model_id": "42", "message": "Hello\nWorld", "request_id": "reply-test", "max_duration_seconds": 60}
+			input := map[string]any{"account_url": "https://www.adultfolio.com/owner", "account_profile_path": "/owner", "model_url": "https://www.adultfolio.com/model", "model_id": "42", "message": "Hello\nWorld", "request_id": "reply-test", "max_duration_seconds": 60}
 			queued, err := app.toolActorRun(ctx, map[string]any{"actor_id": rec.ID, "operation": "reply", "input": input})
 			if err != nil {
 				t.Fatal(err)

@@ -1,6 +1,6 @@
 # Editable AdultFolio actor
 
-Import `adultfolio-control.json`, then set `defaults.context_id` to the saved Computer login context and `defaults.account_url` to the authenticated account's canonical profile URL. All provider selectors and workflow policy are in this editable example. No credentials or real account IDs are shipped.
+Import `adultfolio-control.json`, then set `defaults.context_id` to the saved Computer login context and `defaults.account_url` to the authenticated account's canonical profile URL, and `defaults.account_profile_path` to that URL's path (for example `/YOUR_ACCOUNT_PROFILE`). All provider selectors and workflow policy are in this editable example. No credentials or real account IDs are shipped.
 
 Operations:
 
@@ -20,3 +20,7 @@ This example intentionally has no sample recipient or message. Live sends requir
 `search_filtered_models` accepts an explicitly constructed `search_results_url`, using values returned by `get_search_options` (the profile value for models is `model`, not `models`). The default bounded reads are suitable for recent conversations/messages; a complete historical crawl may reach provider or HTML limits and must never be described as complete.
 
 Keyword and filtered search readiness waits for result cards or explicit empty-state text, rather than the initially empty AJAX container. Message pagination waits five seconds after navigation and checks loading text. Some site histories leave their older-message control present after returning no new records; stalled reads retain the retrieved dataset but fail with incomplete coverage. Consumers must not interpret that failure as a complete conversation.
+
+Message bodies exclude the provider's outer HTML indentation, preserving internal copy, case, spacing and line breaks. Reply preparation rejects leading/trailing whitespace in the requested copy before Send; saved verification applies the same boundary normalization.
+
+Saved-reply verification uses the configured account profile path to select messages by the authenticated sender profile link and then reasserts its exact canonical URL. Delete controls are present on incoming messages too, so they are never used as evidence of outgoing direction.

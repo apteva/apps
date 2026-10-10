@@ -176,7 +176,8 @@
                   "body": {
                     "selector": ".message-modern-body",
                     "type": "text",
-                    "preserve_line_breaks": true
+                    "preserve_line_breaks": true,
+                    "pattern": "(?s)^\\s*(.*?)\\s*$"
                   },
                   "image_url": {
                     "selector": ".message-modern-body img[src]",
@@ -555,7 +556,8 @@
                   "body": {
                     "selector": ".message-modern-body",
                     "type": "text",
-                    "preserve_line_breaks": true
+                    "preserve_line_breaks": true,
+                    "pattern": "(?s)^\\s*(.*?)\\s*$"
                   },
                   "image_url": {
                     "selector": ".message-modern-body img[src]",
@@ -820,7 +822,8 @@
               "selector": ".note-editable.panel-body[contenteditable=\"true\"]",
               "type": "text",
               "required": true,
-              "preserve_line_breaks": true
+              "preserve_line_breaks": true,
+              "pattern": "(?s)^\\s*(.*?)\\s*$"
             },
             "recipient_url": {
               "selector": ".MainTitle a.a4",
@@ -963,7 +966,8 @@
               "selector": ".note-editable.panel-body[contenteditable=\"true\"]",
               "type": "text",
               "required": true,
-              "preserve_line_breaks": true
+              "preserve_line_breaks": true,
+              "pattern": "(?s)^\\s*(.*?)\\s*$"
             },
             "recipient_url": {
               "selector": ".MainTitle a.a4",
@@ -1081,13 +1085,14 @@
         {
           "action": "extract",
           "locator": {},
-          "items": "#MessageResult .messageContainer.message-modern-wrap:has(.message-delete-action)",
+          "items": "#MessageResult .messageContainer.message-modern-wrap:has(a.thumbnailPic[href$=\"{{account_profile_path}}\"])",
           "fields": {
             "saved_body": {
               "selector": ".message-modern-body",
               "type": "text",
               "required": true,
-              "preserve_line_breaks": true
+              "preserve_line_breaks": true,
+              "pattern": "(?s)^\\s*(.*?)\\s*$"
             },
             "saved_message_id": {
               "type": "number",
@@ -1381,13 +1386,14 @@
         {
           "action": "extract",
           "locator": {},
-          "items": "#MessageResult .messageContainer.message-modern-wrap:has(.message-delete-action)",
+          "items": "#MessageResult .messageContainer.message-modern-wrap:has(a.thumbnailPic[href$=\"{{account_profile_path}}\"])",
           "fields": {
             "saved_body": {
               "selector": ".message-modern-body",
               "type": "text",
               "required": true,
-              "preserve_line_breaks": true
+              "preserve_line_breaks": true,
+              "pattern": "(?s)^\\s*(.*?)\\s*$"
             },
             "saved_message_id": {
               "type": "number",
@@ -1441,7 +1447,8 @@
     "max_items": 5000,
     "max_pages": 250,
     "page_url": "https://www.adultfolio.com/messaging.php",
-    "read_pages": 5
+    "read_pages": 5,
+    "account_profile_path": "/YOUR_ACCOUNT_PROFILE"
   },
   "browser": {
     "context_id": "{{context_id}}",
