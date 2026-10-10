@@ -180,5 +180,5 @@ query text, variables, credentials and snapshot handles are not logged.
 Telemetry remains asynchronous and can drop under overload/storage failure.
 Subscriptions remain outside HTTP request diagnostics.
 
-See [STAGED_PIPELINES.md](STAGED_PIPELINES.md) for version 2 fixed dependent SQL stages,
+See [STAGED_PIPELINES.md](STAGED_PIPELINES.md) for version 3 separate-statement snapshot stages and legacy version 2 stages,
 executed through one Tables snapshot batch with intermediate data kept inside SQLite.

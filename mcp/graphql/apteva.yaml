@@ -2,14 +2,14 @@ schema: apteva-app/v1
 
 name: graphql
 display_name: GraphQL
-version: 0.9.0
+version: 0.10.0
 description: |
   Standalone multi-API GraphQL and realtime runtime. Define multiple named
   endpoints with independent schemas, resolver bindings, environments,
   aggregation, source adapters and subscriptions without depending on the API
   gateway app.
 author: Apteva
-homepage: https://github.com/apteva/apps/tree/graphql/v0.9.0/mcp/graphql
+homepage: https://github.com/apteva/apps/tree/graphql/v0.10.0/mcp/graphql
 icon: /ui/icon.svg
 icon_style: monochrome
 tags: [graphql, realtime, subscriptions, aggregation, api]
@@ -34,7 +34,7 @@ requires:
       optional: true
       reason: Provides collection queries, writes and native aggregation.
     - name: tables
-      version: ">=0.2.8"
+      version: ">=0.2.16"
       optional: true
       reason: Provides typed table rows, aggregation, and safe read-only multi-table queries.
       events: [row.inserted, row.updated, row.deleted]
@@ -165,7 +165,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: graphql/v0.9.0
+    ref: graphql/v0.10.0
     entry: mcp/graphql
   port: 8080
   health_check: /health

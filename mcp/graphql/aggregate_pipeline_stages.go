@@ -192,11 +192,18 @@ func stagedSQL(raw string, names map[string]string) (string, []string, int, erro
 }
 
 func validateStagedPipeline(config map[string]any, sources []sourceRecord, currentID int64) (*aggregatePipelinePlan, error) {
+	separate := intValue(config["version"]) == 3
 	if config["engine"] != "tables_batch" {
-		return nil, invalid("aggregate_pipeline version 2 requires engine tables_batch")
+		return nil, invalid("staged aggregate_pipeline requires engine tables_batch")
+	}
+	if separate && config["mode"] != "read_snapshot" {
+		return nil, invalid("aggregate_pipeline version 3 requires mode read_snapshot")
+	}
+	if separate && config["on_truncated"] != nil && config["on_truncated"] != "error" {
+		return nil, invalid("snapshot stages always fail on truncated results")
 	}
 	if config["sql"] != nil || config["params"] != nil {
-		return nil, invalid("version 2 SQL and params belong to stages")
+		return nil, invalid("staged pipeline SQL and params belong to stages")
 	}
 	raw, ok := config["stages"].([]any)
 	if !ok || len(raw) == 0 || len(raw) > 16 {
@@ -234,7 +241,7 @@ func validateStagedPipeline(config map[string]any, sources []sourceRecord, curre
 		if !(strings.HasPrefix(lower, "select ") || strings.HasPrefix(lower, "select\n") || strings.HasPrefix(lower, "select\t") || strings.HasPrefix(lower, "with ") || strings.HasPrefix(lower, "with\n") || strings.HasPrefix(lower, "with\t")) {
 			return nil, invalid("pipeline stage must be SELECT or WITH")
 		}
-		params, err := parseAggregatePipelineParams(s["params"])
+		params, err := parsePipelineParams(s["params"], separate)
 		if err != nil {
 			return nil, err
 		}
@@ -258,7 +265,11 @@ func validateStagedPipeline(config map[string]any, sources []sourceRecord, curre
 		indices[id] = i
 	}
 	for i := range stages {
-		sql, deps, count, err := stagedSQL(stages[i].SQL, names)
+		stageNames := names
+		if separate {
+			stageNames = map[string]string{} // Separate statements cannot share relations.
+		}
+		sql, deps, count, err := stagedSQL(stages[i].SQL, stageNames)
 		if err != nil {
 			return nil, err
 		}
@@ -266,6 +277,33 @@ func validateStagedPipeline(config map[string]any, sources []sourceRecord, curre
 			return nil, invalid("stage %s binding count does not match params", stages[i].ID)
 		}
 		stages[i].SQL, stages[i].Dependencies = sql, deps
+		if separate {
+			params, _ := parsePipelineParams(stages[i].Params, true)
+			for _, p := range params {
+				if !strings.HasPrefix(p.From, "$stage.") {
+					continue
+				}
+				parts := strings.Split(strings.TrimPrefix(p.From, "$stage."), ".")
+				index, exists := indices[parts[0]]
+				if !exists {
+					return nil, invalid("unknown pipeline stage %q", parts[0])
+				}
+				row, _ := strconv.Atoi(parts[2])
+				if row >= stages[index].MaxRows {
+					return nil, invalid("stage reference row exceeds declared budget")
+				}
+				found := false
+				for _, col := range stages[index].Columns {
+					if col == parts[3] {
+						found = true
+					}
+				}
+				if !found {
+					return nil, invalid("stage reference column is not declared")
+				}
+				stages[i].Dependencies = append(stages[i].Dependencies, parts[0])
+			}
+		}
 	}
 	final, _ := config["final_stage"].(string)
 	if names[final] == "" {
@@ -296,6 +334,9 @@ func validateStagedPipeline(config map[string]any, sources []sourceRecord, curre
 	}
 	if len(order) != len(stages) {
 		return nil, invalid("every stage must contribute to final_stage")
+	}
+	if separate {
+		return compileSnapshotPipeline(config, sources, currentID, stages, order, final)
 	}
 	ctes, checks, params := []string{}, []string{}, []any{}
 	for _, i := range order {
@@ -388,7 +429,7 @@ func decodeStagedPipeline(plan *aggregatePipelinePlan, value any) (any, error) {
 }
 
 func (l *resolverLoader) loadStagedPipeline(plan *aggregatePipelinePlan, input map[string]any) func() (any, error) {
-	return l.deferCall(runtimeDigest([]any{"staged-pipeline", input, plan.Result, plan.MaxRows, plan.OnTruncated}), func() (any, error) {
+	return l.deferCall(runtimeDigest([]any{"staged-pipeline", input, plan}), func() (any, error) {
 		started := time.Now()
 		ctx := l.ctx
 		if state, ok := l.ctx.Value(standardRequestKey{}).(*standardRequest); ok {
@@ -401,11 +442,7 @@ func (l *resolverLoader) loadStagedPipeline(plan *aggregatePipelinePlan, input m
 			defer cancel()
 		}
 		l.backendMetrics(1, len(plan.Stages))
-		out, err := (&tablesUpstream{app: l.app, project: l.project, consistency: "batch"}).Read(ctx, nil, []upstreamRead{{ID: "final", Operation: "tables_query", Arguments: input}})
-		if err != nil {
-			return nil, err
-		}
-		value, err := decodeStagedPipeline(plan, out["final"].Value)
+		value, err := l.app.readPipelineStages(ctx, l.project, plan, input)
 		if err != nil {
 			return nil, err
 		}
@@ -451,11 +488,7 @@ func (a *App) callStagedPipeline(ctx context.Context, project string, plan *aggr
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(limits.MaxSnapshotMS)*time.Millisecond)
 	defer cancel()
-	out, err := (&tablesUpstream{app: a, project: project, consistency: "batch"}).Read(ctx, nil, []upstreamRead{{ID: "final", Operation: "tables_query", Arguments: input}})
-	if err != nil {
-		return nil, err
-	}
-	value, err := decodeStagedPipeline(plan, out["final"].Value)
+	value, err := a.readPipelineStages(ctx, project, plan, input)
 	if err != nil {
 		return nil, err
 	}

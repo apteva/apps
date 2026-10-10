@@ -202,9 +202,6 @@ func (p *stagedPlatform) CallAppResultContext(ctx context.Context, app, tool str
 		return fmt.Errorf("unexpected call %s %s %v", app, tool, input["mode"])
 	}
 	ops := input["operations"].([]map[string]any)
-	if len(ops) != 1 || ops[0]["operation"] != "tables_query" {
-		return fmt.Errorf("stages crossed app boundary")
-	}
 	p.mu.Lock()
 	p.calls++
 	p.mu.Unlock()
@@ -220,6 +217,14 @@ func (p *stagedPlatform) CallAppResultContext(ctx context.Context, app, tool str
 	}
 	if p.fail {
 		return fmt.Errorf("backend failure")
+	}
+	if len(ops) != 1 || ops[0]["id"] != "final" {
+		results, err := runSnapshotBatch(ctx, p.db, ops, nil)
+		if err != nil {
+			return err
+		}
+		raw, _ := json.Marshal(map[string]any{"results": results})
+		return json.Unmarshal(raw, out)
 	}
 	value, err := runStagedSQL(ctx, p.db, ops[0]["args"].(map[string]any))
 	if err != nil {

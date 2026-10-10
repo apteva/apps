@@ -15,14 +15,16 @@ const aggregatePipelineOperation = "aggregate_pipeline"
 var aggregatePipelinePlaceholder = regexp.MustCompile(`\{([a-z][a-z0-9_]*)\}`)
 
 type aggregatePipelinePlan struct {
-	SQL          string
-	Params       []aggregatePipelineParam
-	Result       string
-	MaxRows      int
-	OnTruncated  string
-	Tables       map[string]bool
-	Stages       []aggregatePipelineStage
-	FinalColumns []string
+	SQL            string
+	Params         []aggregatePipelineParam
+	Result         string
+	MaxRows        int
+	OnTruncated    string
+	Tables         map[string]bool
+	Stages         []aggregatePipelineStage
+	FinalColumns   []string
+	SeparateStages bool
+	FinalStage     string
 }
 
 type aggregatePipelineParam struct {
@@ -37,15 +39,19 @@ type aggregatePipelineParam struct {
 // public GraphQL document can supply values only; SQL, identifiers and source
 // selection always come from the versioned resolver release.
 func validateAggregatePipeline(operation string, config map[string]any, sources []sourceRecord, currentSourceID int64) (*aggregatePipelinePlan, error) {
+	return validatePipelineConfig(operation, config, sources, currentSourceID, true)
+}
+
+func validatePipelineConfig(operation string, config map[string]any, sources []sourceRecord, currentSourceID int64, requireTable bool) (*aggregatePipelinePlan, error) {
 	if operation != aggregatePipelineOperation {
 		return nil, nil
 	}
-	if intValue(config["version"]) == 2 {
+	if intValue(config["version"]) == 2 || intValue(config["version"]) == 3 {
 		return validateStagedPipeline(config, sources, currentSourceID)
 	}
 	version := intValue(config["version"])
 	if version != 1 {
-		return nil, invalid("aggregate_pipeline requires version 1")
+		return nil, invalid("aggregate_pipeline requires version 1, 2, or 3")
 	}
 	engine, _ := config["engine"].(string)
 	if engine != "tables_query" {
@@ -111,7 +117,7 @@ func validateAggregatePipeline(operation string, config map[string]any, sources 
 		return nil, invalid("aggregate_pipeline sources must include its bound Tables source")
 	}
 	matches := aggregatePipelinePlaceholder.FindAllStringSubmatch(maskedSQL, -1)
-	if len(matches) == 0 {
+	if requireTable && len(matches) == 0 {
 		return nil, invalid("aggregate_pipeline SQL must use at least one {table_name} placeholder")
 	}
 	for _, match := range matches {
@@ -171,6 +177,10 @@ func pipelineStringList(raw any) ([]string, error) {
 }
 
 func parseAggregatePipelineParams(raw any) ([]aggregatePipelineParam, error) {
+	return parsePipelineParams(raw, false)
+}
+
+func parsePipelineParams(raw any, stageRefs bool) ([]aggregatePipelineParam, error) {
 	if raw == nil {
 		return nil, nil
 	}
@@ -194,7 +204,7 @@ func parseAggregatePipelineParams(raw any) ([]aggregatePipelineParam, error) {
 		}
 		if from, exists := value["from"]; exists {
 			param.From, ok = from.(string)
-			if !ok || !validAggregatePipelinePath(param.From) {
+			if !ok || !(validAggregatePipelinePath(param.From) || stageRefs && validPipelineStagePath(param.From)) {
 				return nil, invalid("aggregate_pipeline param has an invalid source path")
 			}
 		}
@@ -240,23 +250,25 @@ func validAggregatePipelinePath(path string) bool {
 }
 
 func aggregatePipelineParentDependencies(config map[string]any) []string {
-	raw := config["params"]
-	if intValue(config["version"]) == 2 {
-		combined := []any{}
+	var params []aggregatePipelineParam
+	if intValue(config["version"]) == 2 || intValue(config["version"]) == 3 {
 		if stages, ok := config["stages"].([]any); ok {
 			for _, stage := range stages {
 				if s, ok := stage.(map[string]any); ok {
-					if p, ok := s["params"].([]any); ok {
-						combined = append(combined, p...)
+					p, err := parsePipelineParams(s["params"], intValue(config["version"]) == 3)
+					if err != nil {
+						return nil
 					}
+					params = append(params, p...)
 				}
 			}
 		}
-		raw = combined
-	}
-	params, err := parseAggregatePipelineParams(raw)
-	if err != nil {
-		return nil
+	} else {
+		var err error
+		params, err = parseAggregatePipelineParams(config["params"])
+		if err != nil {
+			return nil
+		}
 	}
 	seen := map[string]bool{}
 	var out []string
@@ -274,6 +286,9 @@ func aggregatePipelineParentDependencies(config map[string]any) []string {
 }
 
 func buildAggregatePipelineInput(ctx context.Context, plan *aggregatePipelinePlan, args map[string]any, parent any, project string) (map[string]any, error) {
+	if plan.SeparateStages {
+		return buildSnapshotPipelineInput(ctx, plan, args, parent, project)
+	}
 	params := make([]any, 0, len(plan.Params))
 	for _, binding := range plan.Params {
 		value, found := binding.Literal, binding.HasValue
