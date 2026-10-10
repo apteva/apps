@@ -53,6 +53,15 @@ with five opt-in skips. Frontend/audio suites passed **241 tests**. Focused race
 checks, Go vet/build, TypeScript checks, headless/panel builds and whitespace
 checks passed. The final corruption guard also passed focused race coverage.
 
+The final 0.11.7 release gate, after merging current upstream changes and
+bumping both manifests and frontend metadata, again passed **1,025 Go
+tests/subtests (five opt-in skips)** and **241 frontend/audio tests**, with zero
+failures. Go vet, TypeScript client/benchmark checks, deterministic Telephony
+panel/headless rebuilds, native build and Linux amd64/arm64 builds with
+`CGO_ENABLED=0` passed. All builds/tests use the published SDK with `GOWORK=off`.
+Release evidence: `/private/tmp/telephony-0117-release-go.jsonl` and
+`/private/tmp/telephony-0117-release-frontend.log`.
+
 One existing Twilio cadence assertion failed once (47.9 ms against a 45 ms
 threshold), then passed ten focused repetitions and the final complete suite.
 Its in-memory writer does not exercise the new WebSocket observation path.
