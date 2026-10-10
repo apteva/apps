@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.11.7
+version: 0.11.8
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -82,6 +82,7 @@ requires:
       label: "Voice carrier"
 provides:
   http_routes:
+    - { prefix: /media-diagnostics }
     - { prefix: /media/, no_auth: true }
     - { prefix: /webhook/, no_auth: true }
     - { prefix: /inbound/, no_auth: true }
@@ -368,6 +369,7 @@ upgrade_policy: auto-patch
 var globalCtx *sdk.AppCtx
 
 type App struct {
+	mediaDiagnostics mediaDiagnosticRegistry
 	aiPolicies       aiPolicyRegistry
 	mediaBridges     carrierBridgeRegistry
 	callReads        callReadCache
@@ -421,6 +423,7 @@ func (a *App) Manifest() sdk.Manifest {
 }
 
 func (a *App) OnMount(ctx *sdk.AppCtx) error {
+	a.mediaDiagnostics.start()
 	if ctx.AppDB() == nil {
 		return errors.New("telephony requires a db block")
 	}
@@ -461,11 +464,13 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return fmt.Errorf("start direct SIP gateway: %w", err)
 	}
 	a.startRoutingDispatcher(ctx)
+	a.startCarrierMediaRecovery(ctx)
 	ctx.Logger().Info("telephony mounted")
 	return nil
 }
 
 func (a *App) OnUnmount(*sdk.AppCtx) error {
+	a.mediaDiagnostics.stop()
 	a.stopAIPolicies()
 	a.stopCarrierBridges()
 	a.stopRoutingDispatcher()
@@ -506,6 +511,9 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	routes := []sdk.Route{
+		{Pattern: "/media-diagnostics", Handler: a.handleMediaDiagnostics},
+		{Pattern: "/media-diagnostics/", Handler: a.handleMediaDiagnostics},
+		{Pattern: "/media/diagnostic/echo", Handler: a.handleDiagnosticEcho, NoAuth: true},
 		// Carrier media stream WS — opened by the carrier when the call connects.
 		{Pattern: "/media/twilio/", Handler: a.handleTwilioMediaStream, NoAuth: true},
 		{Pattern: "/media/signalwire/", Handler: a.handleSignalWireMediaStream, NoAuth: true},

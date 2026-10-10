@@ -38,9 +38,61 @@ const carrierProtocolTimeout = 20 * time.Second
 var errCarrierBridgeBusy = errors.New("media bridge already active")
 
 type carrierBridgeRegistry struct {
-	mu      sync.Mutex
-	current map[string]*carrierBridgeLease
+	mu          sync.Mutex
+	current     map[string]*carrierBridgeLease
+	recoveryCtx *sdk.AppCtx
+	stopped     bool
 }
+
+// Keep the mounted installation context separate from the failed socket's
+// canceled context. Recovery is project-scoped and uses the same bounded,
+// per-call dispatcher as the durable worker; no network work runs inline.
+func (a *App) startCarrierMediaRecovery(ctx *sdk.AppCtx) {
+	a.mediaBridges.mu.Lock()
+	a.mediaBridges.recoveryCtx = ctx
+	a.mediaBridges.stopped = false
+	a.mediaBridges.mu.Unlock()
+}
+
+func carrierRecoveryBackoff(generation string, attempts int) time.Duration {
+	// Persisted attempts are untrusted after an interrupted or older process.
+	// Keep the shift bounded even if the stored value is corrupt.
+	attempts = min(max(attempts, 1), carrierRecoveryAttempts)
+	jitter := fnv.New32a()
+	_, _ = jitter.Write([]byte(generation))
+	return time.Duration(3*(1<<uint(attempts-1)))*time.Second + time.Duration(jitter.Sum32()%7)*100*time.Millisecond
+}
+
+func (b *carrierBridgeLease) scheduleRecovery() {
+	b.mu.Lock()
+	attempts := b.attempts
+	b.mu.Unlock()
+	next := time.Now()
+	if attempts > 0 {
+		// A failed replacement inherits its retry count. It must not turn a
+		// subsequent failure into a new immediate first attempt.
+		next = next.Add(carrierRecoveryBackoff(b.generation, attempts))
+	}
+	res, err := b.app.db().db.Exec(`UPDATE carrier_media_bridges SET next_attempt_at=? WHERE generation=? AND state='recovering' AND next_attempt_at='' AND EXISTS(SELECT 1 FROM calls c WHERE c.id=carrier_media_bridges.call_id AND c.media_generation=carrier_media_bridges.generation AND c.status NOT IN ('completed','failed','no-answer','busy','canceled'))`, ringTime(next), b.generation)
+	if err != nil {
+		return // The durable worker also reconciles rows with no due cursor.
+	}
+	n, err := res.RowsAffected()
+	if err != nil || n != 1 || attempts > 0 {
+		return // Repeated callbacks/cleanup never advance an existing backoff.
+	}
+	b.app.mediaBridges.mu.Lock()
+	ctx := b.app.mediaBridges.recoveryCtx
+	b.app.mediaBridges.mu.Unlock()
+	if ctx == nil {
+		return // Unmounted contexts and exhausted dispatch slots use the worker.
+	}
+	ctx = ctx.WithProject(b.row.ProjectID)
+	b.app.launchAIRecovery("media-recovery/"+b.row.ID, func() {
+		_ = b.app.restartCarrierMedia(ctx, b.row.ID, b.generation)
+	})
+}
+
 type carrierBridgeEvidence struct {
 	Transport         *websocketTransportSnapshot `json:"transport,omitempty"`
 	At                string                      `json:"at"`
@@ -282,7 +334,7 @@ func (b *carrierBridgeLease) fail(e carrierBridgeEvidence) {
 	// replacement arriving before deferred cleanup can claim immediately.
 	_ = b.app.db().updateMediaStatusWithLeg(b.row.ID, "error", first.Detail, 0, "", first.Leg, b.generation)
 	_, _ = b.app.db().db.Exec(`UPDATE calls SET media_active=0 WHERE id=? AND media_generation=?`, b.row.ID, b.generation)
-	_, _ = b.app.db().db.Exec(`UPDATE carrier_media_bridges SET next_attempt_at=? WHERE generation=? AND next_attempt_at=''`, ringTime(time.Now().Add(2*time.Second)), b.generation)
+	b.scheduleRecovery()
 }
 func (b *carrierBridgeLease) socketError(leg mediaCloseLeg, operation string, err error) {
 	if b.ctx.Err() != nil {
@@ -426,12 +478,14 @@ func (b *carrierBridgeLease) finish() {
 		if newFailure {
 			_ = b.app.db().updateMediaStatusWithLeg(b.row.ID, "error", b.first.Detail, 0, "", b.first.Leg, b.generation)
 		}
-		_, _ = b.app.db().db.Exec(`UPDATE carrier_media_bridges SET next_attempt_at=? WHERE generation=? AND next_attempt_at=''`, ringTime(time.Now().Add(2*time.Second)), b.generation)
 	}
 	if state == "disconnected" {
 		_ = b.app.db().updateMediaStatusWithLeg(b.row.ID, "disconnected", "", int(code), reason, string(leg), b.generation)
 	}
 	_, _ = b.app.db().db.Exec(`UPDATE calls SET media_active=0 WHERE id=? AND media_generation=?`, b.row.ID, b.generation)
+	if state == "recovering" {
+		b.scheduleRecovery()
+	}
 }
 func (a *App) cancelCarrierBridge(id string) {
 	a.mediaBridges.mu.Lock()
@@ -626,7 +680,11 @@ func (a *App) restartCarrierMedia(ctx *sdk.AppCtx, id, generation string) error 
 	}
 	a.mediaBridges.mu.Lock()
 	b := a.mediaBridges.current[id]
+	stopped := a.mediaBridges.stopped
 	a.mediaBridges.mu.Unlock()
+	if stopped {
+		return nil
+	}
 	if deadline == "" {
 		return nil
 	}
@@ -655,11 +713,9 @@ func (a *App) restartCarrierMedia(ctx *sdk.AppCtx, id, generation string) error 
 		return err
 	}
 	attempts++
-	// Reserve before dispatch, persist across ticks, and give provider reconnection
-	// time to win. Deterministic bounded jitter staggers simultaneous failures.
-	jitter := fnv.New32a()
-	_, _ = jitter.Write([]byte(generation))
-	delay := time.Duration(3*(1<<uint(attempts-1)))*time.Second + time.Duration(jitter.Sum32()%7)*100*time.Millisecond
+	// The first confirmed failure is dispatched immediately. Reserve the next
+	// attempt before I/O; later retries remain bounded and staggered.
+	delay := carrierRecoveryBackoff(generation, attempts)
 	_, err = a.db().db.Exec(`UPDATE carrier_media_bridges SET attempts=?,next_attempt_at=? WHERE generation=?`, attempts, ringTime(time.Now().Add(delay)), generation)
 	if err != nil {
 		return err
@@ -747,6 +803,8 @@ func (c *callsDB) carrierBridgeHistory(project, call string) ([]map[string]any, 
 }
 func (a *App) stopCarrierBridges() {
 	a.mediaBridges.mu.Lock()
+	a.mediaBridges.recoveryCtx = nil
+	a.mediaBridges.stopped = true
 	all := a.mediaBridges.current
 	a.mediaBridges.current = nil
 	a.mediaBridges.mu.Unlock()

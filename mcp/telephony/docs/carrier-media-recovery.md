@@ -42,6 +42,33 @@ deadlines capped by the remaining budget. Command IDs are distinct and stable
 per attempt. A replacement cancels an outstanding request. The claim lock is
 released before the API call so a provider can connect before its API returns.
 
+After a confirmed transport failure, the first restart is now eligible
+immediately and wakes the bounded background dispatcher directly. There is no
+initial two-second wait or requirement to wait for the next worker tick. The
+one-second worker remains a durable fallback after transient database errors,
+dispatch-capacity exhaustion or runtime interruption. API latency, database
+contention and scheduling can still delay dispatch or actual media restoration;
+immediate eligibility is not a zero-time reconnection guarantee.
+
+Failure handling and the worker share one admission key per call. Repeated
+callbacks and old deferred cleanup cannot advance an already reserved retry.
+Later attempts keep the existing three/six/twelve-second backoff plus bounded
+jitter, three-request ceiling and recovery deadline. A replacement that fails
+before producing media inherits those limits and does not regain an immediate
+first attempt. Healthy/provider-recovered streams and ended calls remain
+excluded. Shutdown clears the event-dispatch context and cancels in-flight work.
+Initial AI/human activation retains its separate command reservation/retry path;
+the recovery worker still defers while that activation owns the call.
+
+This is an application recovery policy. Telnyx's documented
+[command retry guidance](https://developers.telnyx.com/docs/voice/programmable-voice/command-retries)
+recommends immediate retries after HTTP 500 and identical command replay if an
+HTTP response takes over 500 ms. Identical HTTP replays reuse their `command_id`;
+a separate stream restart after confirmed failure has its own command ID. This
+change removes the initial application wait; it does not introduce HTTP hedging
+or change the existing five-second command deadline. TeXML's `enableReconnect`
+option is not a parameter of the Call Control `streaming_start` API we use.
+
 No Telnyx integration JSON changes are required. Other adapters retain safe
 provider-driven replacement and bounded failure handling; no unsupported
 restart commands are invented. Twilio status notifications remain advisory
@@ -89,6 +116,27 @@ failure/actual close preservation, three restart attempts, unsupported adapters,
 silent/muted/held protocol liveness, seven concurrent failures, replacement or
 hangup during a blocked API call, a live replacement without media, normal-end
 reconciliation, and established frames under a held reporting lock.
+
+Immediate-recovery regressions cover socket errors, authenticated provider
+failures and unexpected handler completion; dispatch without a worker tick;
+duplicate failures/ticks during a blocked command; replacement/hangup/shutdown
+while dispatch is in flight; inherited backoff after a failed replacement;
+durable recovery when dispatch slots are full; and zero restart commands for
+healthy media. The actual local Telnyx/browser socket regression also exercises
+immediate dispatch before restoring duplex audio on the same call.
+
+Local verification of the immediate-dispatch change on 10 October 2026:
+**1,033 Go tests/subtests passed**, five opt-in skips; **241 frontend/audio
+tests passed**. Three repeated focused recovery/ownership race runs and the
+updated actual-socket race check passed. TypeScript checks, Go vet/build and
+whitespace checks passed, using the published SDK v0.99.0 with `GOWORK=off`.
+The new first-attempt regression failed against the previous two-second delay
+for all three failure paths before the correction. Evidence is retained in
+`/private/tmp/telephony-immediate-recovery-before.log`,
+`/private/tmp/telephony-immediate-recovery-race.log`,
+`/private/tmp/telephony-immediate-recovery-socket-race.log`,
+`/private/tmp/telephony-immediate-recovery-go.jsonl` and
+`/private/tmp/telephony-immediate-recovery-frontend.log`.
 
 The local tests prove ownership/protocol behavior against a simulated Telnyx
 stream and integration API. A controlled real carrier call and edge traces are

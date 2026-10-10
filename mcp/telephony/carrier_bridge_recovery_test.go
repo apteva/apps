@@ -51,6 +51,45 @@ func bridgeState(t *testing.T, b *carrierBridgeLease) string {
 	return state
 }
 
+func TestCarrierRecoveryFirstFailureIsImmediatelyDue(t *testing.T) {
+	for _, cause := range []string{"socket_error", "provider_failure", "handler_ended"} {
+		t.Run(cause, func(t *testing.T) {
+			p := &answerPlatform{}
+			a, ctx := withTelephonyTestContext(t, p)
+			t.Cleanup(func() { a.stopCarrierBridges(); a.stopRoutingDispatcher() })
+			row := recoveryCall(t, a, "immediate-"+cause, "telnyx")
+			b, err := a.claimCarrierBridge(row, t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.setStream("original-stream")
+			b.media()
+			switch cause {
+			case "socket_error":
+				b.socketError(mediaCloseLegCarrier, "read", io.EOF)
+			case "provider_failure":
+				a.carrierStreamEvent(row, callbackUpdate{MediaStatus: "error", MediaError: "disconnected", StreamID: "original-stream"})
+			case "handler_ended":
+				b.finish()
+			}
+			var due string
+			if err := a.db().db.QueryRow(`SELECT next_attempt_at FROM carrier_media_bridges WHERE generation=?`, b.generation).Scan(&due); err != nil {
+				t.Fatal(err)
+			}
+			if due == "" || due > ringTime(time.Now()) {
+				t.Fatalf("confirmed failure still waits before first restart: %s", due)
+			}
+			if err := a.runCarrierMediaRecovery(t.Context(), ctx); err != nil {
+				t.Fatal(err)
+			}
+			a.decisionWG.Wait()
+			if len(p.integrationCalls) != 1 || p.integrationCalls[0].Tool != "start_streaming" || p.integrationCalls[0].Input["call_control_id"] != row.CarrierSID {
+				t.Fatalf("first eligible tick did not restart the same call: %+v", p.integrationCalls)
+			}
+		})
+	}
+}
+
 func TestCarrierRecoveryReplacementOwnsClaimBeforeOldCleanup(t *testing.T) {
 	a, _ := withTelephonyTestContext(t, &answerPlatform{})
 	row := recoveryCall(t, a, "generation-race", "telnyx")
@@ -400,7 +439,9 @@ func TestCarrierRecoverySimultaneousFailuresRemainIsolated(t *testing.T) {
 }
 
 func TestTelnyxRecoveryActualSocketsKeepAdviserAndBrowser(t *testing.T) {
-	a, _ := withTelephonyTestContext(t, &answerPlatform{})
+	p := &answerPlatform{}
+	a, ctx := withTelephonyTestContext(t, p)
+	a.startCarrierMediaRecovery(ctx)
 	row := recoveryCall(t, a, "socket-recovery", "telnyx")
 	var handlers sync.WaitGroup
 	track := func(h http.HandlerFunc) http.HandlerFunc {
@@ -415,6 +456,7 @@ func TestTelnyxRecoveryActualSocketsKeepAdviserAndBrowser(t *testing.T) {
 	t.Setenv("APTEVA_APP_PORT", parsed.Port())
 	t.Cleanup(func() {
 		a.stopCarrierBridges()
+		a.stopRoutingDispatcher()
 		server.Close()
 		done := make(chan struct{})
 		go func() { handlers.Wait(); close(done) }()
@@ -438,6 +480,10 @@ func TestTelnyxRecoveryActualSocketsKeepAdviserAndBrowser(t *testing.T) {
 	a.mediaBridges.mu.Unlock()
 	if !a.carrierStreamEvent(row, callbackUpdate{MediaStatus: "error", MediaError: "disconnected", StreamID: "first-stream"}) {
 		t.Fatal("failure unhandled")
+	}
+	a.decisionWG.Wait()
+	if len(p.integrationCalls) != 1 || p.integrationCalls[0].Tool != "start_streaming" || p.integrationCalls[0].Input["call_control_id"] != row.CarrierSID {
+		t.Fatal("socket failure did not immediately restart the original carrier leg", p.integrationCalls)
 	}
 	readSoftphoneEventWithin(t, browser, "peer.disconnected", 2*time.Second)
 	second := dialWS(t, path)
@@ -588,7 +634,7 @@ func (p *recoveryGatePlatform) ExecuteIntegrationToolContext(request context.Con
 }
 
 func TestCarrierRecoveryNetworkAttemptDoesNotBlockReplacementOrHangup(t *testing.T) {
-	for _, action := range []string{"replace", "hangup"} {
+	for _, action := range []string{"replace", "hangup", "shutdown"} {
 		t.Run(action, func(t *testing.T) {
 			p := &recoveryGatePlatform{answerPlatform: &answerPlatform{}, started: make(chan struct{}), finished: make(chan struct{})}
 			ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(p))
@@ -596,35 +642,66 @@ func TestCarrierRecoveryNetworkAttemptDoesNotBlockReplacementOrHangup(t *testing
 			globalCtx = ctx
 			t.Cleanup(func() { globalCtx = prev })
 			a := &App{installID: 42}
-			t.Cleanup(a.stopCarrierBridges)
+			t.Cleanup(func() { a.stopCarrierBridges(); a.stopRoutingDispatcher() })
+			a.startCarrierMediaRecovery(ctx)
 			row := recoveryCall(t, a, "blocked-"+action, "telnyx")
 			b, err := a.claimCarrierBridge(row, t.Context())
 			if err != nil {
 				t.Fatal(err)
 			}
 			b.fail(carrierBridgeEvidence{Kind: "socket_read", Detail: "EOF"})
-			_, _ = a.db().db.Exec(`UPDATE carrier_media_bridges SET next_attempt_at='' WHERE generation=?`, b.generation)
-			done := make(chan error, 1)
-			go func() { done <- a.restartCarrierMedia(ctx, row.ID, b.generation) }()
 			select {
 			case <-p.started:
 			case <-time.After(time.Second):
-				t.Fatal("restart not started")
+				t.Fatal("first restart waited for the worker instead of immediate dispatch")
 			}
+			// Duplicate failures, deferred cleanup and worker ticks must not
+			// dispatch another request while this one awaits the carrier.
+			b.fail(carrierBridgeEvidence{Kind: "provider_error", Detail: "disconnected"})
+			b.finish()
+			for i := 0; i < 5; i++ {
+				if err := a.runCarrierMediaRecovery(t.Context(), ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var attempts int
+			var next string
+			if err := a.db().db.QueryRow(`SELECT attempts,next_attempt_at FROM carrier_media_bridges WHERE generation=?`, b.generation).Scan(&attempts, &next); err != nil {
+				t.Fatal(err)
+			}
+			if attempts != 1 || next <= ringTime(time.Now()) {
+				t.Fatal("duplicate failure bypassed retry backoff", attempts, next)
+			}
+			// Model the retry cursor becoming due while the API is still in
+			// flight. Worker/event dispatch share one admission key per call.
+			_, _ = a.db().db.Exec(`UPDATE carrier_media_bridges SET next_attempt_at='' WHERE generation=?`, b.generation)
+			for i := 0; i < 5; i++ {
+				if err := a.runCarrierMediaRecovery(t.Context(), ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := a.db().db.QueryRow(`SELECT attempts FROM carrier_media_bridges WHERE generation=?`, b.generation).Scan(&attempts); err != nil || attempts != 1 {
+				t.Fatal("worker competed with the immediate request", attempts, err)
+			}
+			_, _ = a.db().db.Exec(`UPDATE carrier_media_bridges SET next_attempt_at=? WHERE generation=?`, next, b.generation)
 			if action == "replace" {
 				fresh, err := a.claimCarrierBridge(row, t.Context())
 				if err != nil {
 					t.Fatal("network request blocked replacement", err)
 				}
 				fresh.media()
-			} else {
+			} else if action == "hangup" {
 				if err = a.db().updateStatus(row.ID, "completed", ""); err != nil {
 					t.Fatal(err)
 				}
 				if err = a.killCallThread(ctx, row); err != nil {
 					t.Fatal(err)
 				}
+			} else {
+				a.stopCarrierBridges()
 			}
+			done := make(chan struct{})
+			go func() { a.decisionWG.Wait(); close(done) }()
 			select {
 			case <-done:
 			case <-time.After(time.Second):
@@ -641,7 +718,119 @@ func TestCarrierRecoveryNetworkAttemptDoesNotBlockReplacementOrHangup(t *testing
 			if action == "hangup" && bridgeState(t, b) != "ended" {
 				t.Fatal("late API result revived ended call")
 			}
+			if action == "shutdown" {
+				// Even an explicitly due cursor cannot send during teardown.
+				_, _ = a.db().db.Exec(`UPDATE carrier_media_bridges SET next_attempt_at='' WHERE generation=?`, b.generation)
+				if err := a.restartCarrierMedia(ctx, row.ID, b.generation); err != nil {
+					t.Fatal(err)
+				}
+			}
 		})
+	}
+}
+
+func TestCarrierRecoveryFailedReplacementRetainsBackoff(t *testing.T) {
+	p := &answerPlatform{}
+	a, ctx := withTelephonyTestContext(t, p)
+	t.Cleanup(func() { a.stopCarrierBridges(); a.stopRoutingDispatcher() })
+	row := recoveryCall(t, a, "failed-replacement-backoff", "telnyx")
+	b, err := a.claimCarrierBridge(row, t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.fail(carrierBridgeEvidence{Kind: "socket_read", Detail: "EOF"})
+	if err := a.restartCarrierMedia(ctx, row.ID, b.generation); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := a.claimCarrierBridge(row, t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.attempts != 1 || fresh.deadline != b.deadline {
+		t.Fatal("replacement lost the existing retry budget")
+	}
+	before := time.Now()
+	fresh.fail(carrierBridgeEvidence{Kind: "socket_read", Detail: "replacement failed before audio"})
+	var due string
+	if err := a.db().db.QueryRow(`SELECT next_attempt_at FROM carrier_media_bridges WHERE generation=?`, fresh.generation).Scan(&due); err != nil {
+		t.Fatal(err)
+	}
+	at, err := time.Parse(time.RFC3339Nano, due)
+	if err != nil || at.Sub(before) < 3*time.Second || at.Sub(before) > 4*time.Second {
+		t.Fatal("failed replacement bypassed bounded backoff", due, err)
+	}
+	if err := a.runCarrierMediaRecovery(t.Context(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	a.decisionWG.Wait()
+	if len(p.integrationCalls) != 1 {
+		t.Fatal("failed replacement restarted immediately", len(p.integrationCalls))
+	}
+}
+
+func TestCarrierRecoveryImmediateDispatchFallsBackWhenCapacityIsFull(t *testing.T) {
+	p := &answerPlatform{}
+	a, ctx := withTelephonyTestContext(t, p)
+	t.Cleanup(func() { a.stopCarrierBridges(); a.stopRoutingDispatcher() })
+	a.startCarrierMediaRecovery(ctx)
+	row := recoveryCall(t, a, "immediate-dispatch-full", "telnyx")
+	b, err := a.claimCarrierBridge(row, t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exhaust the shared bounded dispatcher without starting any goroutines.
+	// Always release the reserved slots, including on an early test failure.
+	slots := 0
+	defer func() {
+		for slots > 0 {
+			<-aiRecoverySlots
+			slots--
+		}
+	}()
+	for slots < cap(aiRecoverySlots) {
+		aiRecoverySlots <- struct{}{}
+		slots++
+	}
+	b.fail(carrierBridgeEvidence{Kind: "socket_read", Detail: "EOF"})
+	var due string
+	var attempts int
+	if err := a.db().db.QueryRow(`SELECT next_attempt_at,attempts FROM carrier_media_bridges WHERE generation=?`, b.generation).Scan(&due, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if due == "" || due > ringTime(time.Now()) || attempts != 0 || len(p.integrationCalls) != 0 {
+		t.Fatal("full dispatcher lost the due first attempt", due, attempts)
+	}
+	for slots > 0 {
+		<-aiRecoverySlots
+		slots--
+	}
+	if err := a.runCarrierMediaRecovery(t.Context(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	a.decisionWG.Wait()
+	if len(p.integrationCalls) != 1 {
+		t.Fatal("worker did not recover the deferred first attempt", len(p.integrationCalls))
+	}
+}
+
+func TestCarrierRecoveryHealthyStreamDoesNotDispatch(t *testing.T) {
+	p := &answerPlatform{}
+	a, ctx := withTelephonyTestContext(t, p)
+	t.Cleanup(func() { a.stopCarrierBridges(); a.stopRoutingDispatcher() })
+	a.startCarrierMediaRecovery(ctx)
+	row := recoveryCall(t, a, "healthy-no-restart", "telnyx")
+	b, err := a.claimCarrierBridge(row, t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.media()
+	b.scheduleRecovery() // A stale wakeup cannot turn a live stream into repair.
+	if err := a.runCarrierMediaRecovery(t.Context(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	a.decisionWG.Wait()
+	if len(p.integrationCalls) != 0 || bridgeState(t, b) != "connected" {
+		t.Fatal("healthy media triggered recovery")
 	}
 }
 
