@@ -575,3 +575,55 @@ historical failed builds. A 15-second cache avoids repeated provider requests
 from dashboard polling. If the provider is unavailable, the local summary is
 returned with an explicit provider-log warning. Provider tokens and signed log
 URLs are not included in returned logs.
+
+## Switching mobile build providers
+
+Deploy supports Codemagic, Bitrise and Appcircle through the same native source
+capsule contract. `requires.integrations.cloud_build` declares `mode: multiple`
+and compatible slugs `codemagic`, `github`, `bitrise`, `appcircle`. Bind as many
+accounts as needed, then set `build_backend` and `build_backend_config_json` per
+deployment environment. `connection_id` selects an exact bound account; it is
+required when multiple accounts for the selected provider are bound. Builds
+freeze that selection, so rebinding cannot redirect polling or cancellation.
+
+Bitrise configuration:
+
+```json
+{"connection_id":123,"app_id":"APP_SLUG","workflow_id":"apteva-mobile-capsule","branch":"main","source_mode":"bundle","artifact_mode":"file","artifact_file":"Moonhorde.ipa"}
+```
+
+Appcircle configuration:
+
+```json
+{"connection_id":456,"profile_id":"PROFILE_UUID","configuration_id":"CONFIG_UUID","workflow_id":"WORKFLOW_UUID","branch_id":"ADAPTER_BRANCH_UUID","source_mode":"bundle","artifact_mode":"file","artifact_file":"Moonhorde.ipa"}
+```
+
+Both use the maintained [adapter repository](https://github.com/apteva/deploy-build-adapter).
+Bitrise loads `bitrise.yml`; Appcircle uses the documented Git Clone → Custom
+Script → Export Build Artifacts workflow in `runners/appcircle/README.md`.
+Create/authorize the provider's adapter app or profile first, then
+`deploy_cloud_backend_setup` validates and saves its configuration. Supply
+`provider`, `connection_id`, and `build_backend_config_json`. Appcircle's updated
+connector catalog must include `update_build_configuration` and `get_last_commit`.
+
+Run `deploy_mobile_signing_setup` after changing providers. Existing managed
+Apple/Android identities are reused. Bitrise receives masked per-build signing
+secrets; Appcircle receives a versioned secret group attached to a dedicated
+configuration, preserving unrelated settings and previous groups. Provider
+metadata and public build variables never store private signing values. Apple
+workers install the exact certificate and matching profile; they do not create
+new identities. `artifact_mode: file` returns the signed IPA/AAB; Deploy's store
+release flow uses the bound App Store Connect or Google Play account afterward.
+
+The recipe remains in `target_config_json.pipeline`: preparation, toolchain
+versions, build directory, outputs and tests are identical across providers.
+Bun/Rust and pinned XcodeGen are prepared before recipe commands. XcodeGen is
+also available to export commands that generate Xcode projects themselves.
+Apple builds need macOS; Android supports macOS/Linux. Configure requested
+Xcode/Java/etc. versions on the provider runner; mismatches fail preparation.
+Declared native filenames, final-artifact tests, immutable evidence, and Deploy
+attestation retain the same validation on every backend. `deploy_logs`, build
+logs and deployment build-log HTTP routes include provider step output.
+
+A real signed build and store upload still require connected provider accounts
+and the platform toolchains; hermetic adapter tests do not certify those services.

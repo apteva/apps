@@ -99,7 +99,7 @@ interface Deployment {
   source_extra_json?: string;
   framework: string;
   build_cmd: string;
-  build_backend: "local" | "runner" | "codemagic" | "github_actions";
+  build_backend: "local" | "runner" | "codemagic" | "github_actions" | "bitrise" | "appcircle";
   build_backend_config_json: string;
   start_cmd: string;
   port_hint: number;
@@ -132,7 +132,7 @@ interface Build {
   deployment_id: number;
   source_sha: string;
   framework: string;
-  build_backend: "local" | "runner" | "codemagic" | "github_actions";
+  build_backend: "local" | "runner" | "codemagic" | "github_actions" | "bitrise" | "appcircle";
   external_job_id: string;
   external_status: string;
   status: "pending" | "running" | "succeeded" | "failed" | "cancelled";
@@ -510,7 +510,15 @@ const API = "/api/apps/deploy/api";
 const FRAMEWORKS = ["command", "", "go", "node", "bun", "static", "blank", "android", "ios", "macos"] as const;
 const SOURCE_KINDS = ["code", "local"] as const;
 const TARGET_KINDS = ["service", "android", "ios", "macos", "artifact"] as const;
-const BUILD_BACKENDS = ["local", "runner", "codemagic", "github_actions"] as const;
+const BUILD_BACKENDS = ["local", "runner", "codemagic", "github_actions", "bitrise", "appcircle"] as const;
+const BUILD_BACKEND_EXAMPLES: Record<string, string> = {
+  runner: '{"runner_url":"https://runner.example","source_mode":"bundle","artifact_mode":"file"}',
+  codemagic: '{"connection_id":1,"app_id":"...","workflow_id":"apteva-mobile-capsule","branch":"main","source_mode":"bundle","artifact_mode":"file"}',
+  bitrise: '{"connection_id":1,"app_id":"app-slug","workflow_id":"apteva-mobile-capsule","branch":"main","source_mode":"bundle","artifact_mode":"file"}',
+  appcircle: '{"connection_id":2,"profile_id":"...","configuration_id":"...","workflow_id":"...","branch_id":"...","source_mode":"bundle","artifact_mode":"file"}',
+  github_actions: '{"connection_id":3,"owner":"acme","repo":"app","workflow_id":"build.yml","ref":"main","artifact_mode":"file"}',
+};
+
 
 function statusColor(s: string): string {
   if (s === "live" || s === "succeeded") return "text-green";
@@ -2326,17 +2334,18 @@ function CreateDeploymentDialog({
               <option value="runner">Capsule runner</option>
               <option value="codemagic">Codemagic</option>
               <option value="github_actions">GitHub Actions</option>
+              <option value="bitrise">Bitrise</option>
+              <option value="appcircle">Appcircle</option>
             </select>
           </div>
           {buildBackend !== "local" && (
             <div className="col-span-2">
               <label className="text-xs text-text-muted block mb-1">Build backend config (JSON)</label>
+              <p className="text-xs text-text-muted mb-1">Select a bound account with connection_id. The source recipe and signing identity follow the deployment.</p>
               <textarea
                 value={buildBackendConfig}
                 onChange={(e) => setBuildBackendConfig(e.target.value)}
-                placeholder={buildBackend === "codemagic"
-                  ? '{"app_id":"...","workflow_id":"apteva-mobile-capsule","branch":"main","source_mode":"bundle","artifact_mode":"file"}'
-                  : '{"owner":"acme","repo":"app","workflow_id":"build.yml","ref":"main","artifact_mode":"file"}'}
+                placeholder={BUILD_BACKEND_EXAMPLES[buildBackend]}
                 rows={4}
                 className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
               />
@@ -3888,14 +3897,18 @@ function EditConfigDialog({
               <option value="runner">Capsule runner</option>
               <option value="codemagic">Codemagic</option>
               <option value="github_actions">GitHub Actions</option>
+              <option value="bitrise">Bitrise</option>
+              <option value="appcircle">Appcircle</option>
             </select>
           </div>
           {buildBackend !== "local" && (
             <div className="col-span-2">
               <label className="text-xs text-text-muted block mb-1">Build backend config (JSON)</label>
+              <p className="text-xs text-text-muted mb-1">Select a bound account with connection_id. The source recipe and signing identity follow the deployment.</p>
               <textarea
                 value={buildBackendConfig}
                 onChange={(e) => setBuildBackendConfig(e.target.value)}
+                placeholder={BUILD_BACKEND_EXAMPLES[buildBackend]}
                 rows={4}
                 className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
               />
