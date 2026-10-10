@@ -1640,9 +1640,9 @@
         {
           "action": "click",
           "locator": {
-            "selector": "#eac-container-basic-url li.selected"
+            "selector": "#eac-container-basic-url li.selected .eac-item > span"
           },
-          "expected_text": "{{model_query}} - model",
+          "expected_text": "- model",
           "expected_effect": "navigation_only"
         },
         {

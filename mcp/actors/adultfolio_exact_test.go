@@ -43,7 +43,7 @@ func TestEditableExactModelLookupGuards(t *testing.T) {
 							t.Fatal("coordinate lookup")
 						}
 						if in["selector"] != nil {
-							if in["expected_effect"] != "navigation_only" || in["expected_text"] != "Studio Pro - model" || in["selector"] != "#eac-container-basic-url li.selected" {
+							if in["expected_effect"] != "navigation_only" || in["expected_text"] != "- model" || in["selector"] != "#eac-container-basic-url li.selected .eac-item > span" {
 								t.Fatal("unguarded suggestion")
 							}
 							visits++
