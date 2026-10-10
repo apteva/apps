@@ -71,6 +71,7 @@ type actorLimits struct {
 }
 
 type actorStep struct {
+	ReadOnly           bool                  `json:"read_only,omitempty"`
 	ReadViews          *actorReadViews       `json:"read_views,omitempty"`
 	Text               string                `json:"text,omitempty"`
 	Key                string                `json:"key,omitempty"`
@@ -121,6 +122,7 @@ type actorStep struct {
 // validation declarative and site-neutral: values may be compared directly,
 // checked for containment, or reconciled arithmetically before a click.
 type actorAssertion struct {
+	Matches      string   `json:"matches,omitempty"`
 	Equals       any      `json:"equals,omitempty"`
 	EqualsField  string   `json:"equals_field,omitempty"`
 	EqualsSet    any      `json:"equals_set,omitempty"`
@@ -295,8 +297,8 @@ func validateActorDefinition(def actorDefinition) error {
 		return nil
 	}
 	if len(def.Operations) > 0 {
-		if len(def.Steps) > 0 || len(def.Operations) > 50 {
-			return errors.New("use either steps or up to 50 named operations")
+		if len(def.Steps) > 0 || len(def.Operations) > 100 {
+			return errors.New("use either steps or up to 100 named operations")
 		}
 		for name, operation := range def.Operations {
 			if !operationNamePattern.MatchString(name) {
@@ -383,7 +385,7 @@ func validateActorDefinition(def actorDefinition) error {
 		return fmt.Errorf("definition.browser.environment: %w", err)
 	}
 	for i, step := range def.Steps {
-		if def.ReadOnly && !readOnlyActorAction(step.Action) {
+		if (def.ReadOnly || step.ReadOnly) && !readOnlyActorAction(step.Action) {
 			return fmt.Errorf("steps[%d]: %s is not allowed in a read_only operation", i, step.Action)
 		}
 		if suffix := step.Locator.TextSuffixPattern; suffix != "" {
@@ -396,8 +398,8 @@ func validateActorDefinition(def actorDefinition) error {
 		}
 		switch step.Action {
 		case "inspect_views":
-			if !def.ReadOnly || step.Optional {
-				return errors.New("inspect_views requires read_only=true and cannot be optional")
+			if (!def.ReadOnly && !step.ReadOnly) || step.Optional {
+				return errors.New("inspect_views requires a read_only operation or step and cannot be optional")
 			}
 			if err := validateReadViews(step.ReadViews); err != nil {
 				return fmt.Errorf("steps[%d]: %w", i, err)
@@ -483,13 +485,22 @@ func validateActorDefinition(def actorDefinition) error {
 			if step.MinItems < 0 || step.MaxItems < 0 || (step.MaxItems > 0 && step.MinItems > step.MaxItems) {
 				return fmt.Errorf("steps[%d] has invalid min_items/max_items", i)
 			}
+		case "select_record":
+			if step.VerifiedField == "" || step.Value == "" {
+				return errors.New("select_record requires verified_field and value")
+			}
 		case "assert_values":
 			if len(step.Assertions) == 0 {
 				return fmt.Errorf("steps[%d].assertions is required", i)
 			}
 			for field, assertion := range step.Assertions {
-				if strings.TrimSpace(field) == "" || (assertion.Equals == nil && assertion.EqualsSet == nil && assertion.EqualsField == "" && assertion.Contains == "" && len(assertion.SumOf) == 0 && len(assertion.DifferenceOf) == 0) {
+				if strings.TrimSpace(field) == "" || (assertion.Equals == nil && assertion.EqualsSet == nil && assertion.EqualsField == "" && assertion.Contains == "" && assertion.Matches == "" && len(assertion.SumOf) == 0 && len(assertion.DifferenceOf) == 0) {
 					return fmt.Errorf("steps[%d].assertions[%q] has no comparison", i, field)
+				}
+				if assertion.Matches != "" {
+					if _, err := regexp.Compile(assertion.Matches); err != nil {
+						return fmt.Errorf("invalid assertion pattern: %w", err)
+					}
 				}
 				if assertion.EqualsSet != nil && !actorListTemplate(assertion.EqualsSet) {
 					if _, err := actorLabelList(assertion.EqualsSet); err != nil {

@@ -338,3 +338,51 @@ func TestReadScrollThenNextCoverage(t *testing.T) {
 		})
 	}
 }
+
+func TestSelectRecordRequiresCompleteUniqueCoverage(t *testing.T) {
+	for _, mode := range []string{"complete", "incomplete", "missing", "ambiguous"} {
+		t.Run(mode, func(t *testing.T) {
+			e := &actorExecution{coverage: &actorReadCoverage{Complete: mode != "incomplete", ReadOnly: true, MoreRemaining: mode == "incomplete"}, lastValues: map[string]any{}, items: []map[string]any{{"id": "1", "status": "draft", "edit_url": "https://example.com/1/edit"}, {"id": "2", "status": "draft", "edit_url": "https://example.com/2/edit"}}}
+			if mode == "missing" {
+				e.items = e.items[:1]
+			}
+			if mode == "ambiguous" {
+				e.items = append(e.items, e.items[1])
+			}
+			err := e.selectRecord(actorStep{VerifiedField: "id", Value: "2"})
+			if (err == nil) != (mode == "complete") {
+				t.Fatalf("%s: %v", mode, err)
+			}
+			if mode == "complete" && e.lastValues["edit_url"] != "https://example.com/2/edit" {
+				t.Fatal("wrong paginated record selected")
+			}
+			if mode != "complete" && len(e.lastValues) != 0 {
+				t.Fatal("failed selection exposed an unverified record")
+			}
+		})
+	}
+}
+
+func TestObservedMediaSourcePattern(t *testing.T) {
+	for _, tc := range []struct {
+		url string
+		ok  bool
+	}{{"https://video.example/embed/abc", true}, {"https://video.example/embed/abc?autoplay=false", true}, {"https://video.example/embed/abcd", false}, {"https://other.example/embed/abc", false}, {"", false}} {
+		e := &actorExecution{lastValues: map[string]any{"media_iframe_src": tc.url}}
+		err := e.assertValues(actorStep{Assertions: map[string]actorAssertion{"media_iframe_src": {Matches: `^\Qhttps://video.example/embed/abc\E(?:\?.*)?$`}}})
+		if (err == nil) != tc.ok {
+			t.Fatalf("url=%q err=%v", tc.url, err)
+		}
+	}
+}
+
+func TestScopedReadOnlyStepRejectsWrite(t *testing.T) {
+	d := actorDefinition{SchemaVersion: 1, AllowedHosts: []string{"example.com"}, Steps: []actorStep{{Action: "click", ReadOnly: true, Locator: actorLocator{Text: "Publish"}}}}
+	if err := validateActorDefinition(d); err == nil {
+		t.Fatal("scoped read-only click accepted")
+	}
+	e := &actorExecution{}
+	if err := e.runStep(d.Steps[0]); err == nil {
+		t.Fatal("scoped read-only execution dispatched write")
+	}
+}

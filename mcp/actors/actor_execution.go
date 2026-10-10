@@ -602,7 +602,7 @@ func retryableActorError(err error) bool {
 }
 
 func (e *actorExecution) runStep(step actorStep) error {
-	if e.definition.ReadOnly && !readOnlyActorAction(step.Action) {
+	if (e.definition.ReadOnly || step.ReadOnly) && !readOnlyActorAction(step.Action) {
 		return errors.New("write action rejected in read_only operation")
 	}
 	switch step.Action {
@@ -651,6 +651,8 @@ func (e *actorExecution) runStep(step actorStep) error {
 	case "extract":
 		e.lastExtract = &step
 		return e.extractPage(step)
+	case "select_record":
+		return e.selectRecord(step)
 	case "assert_values":
 		return e.assertValues(step)
 	case "paginate":
@@ -687,6 +689,9 @@ func (e *actorExecution) assertValues(step actorStep) error {
 		actual, ok := e.lastValues[field]
 		if !ok {
 			return fmt.Errorf("assertion field %q was not extracted", field)
+		}
+		if assertion.Matches != "" && !regexp.MustCompile(assertion.Matches).MatchString(stringFromAny(actual)) {
+			return fmt.Errorf("assertion pattern failed for %q", field)
 		}
 		if assertion.Equals != nil && !actorValuesEqual(actual, assertion.Equals, assertion.Tolerance) {
 			return fmt.Errorf("assertion failed for %q: got %v, want %v", field, actual, assertion.Equals)

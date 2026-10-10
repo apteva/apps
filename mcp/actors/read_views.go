@@ -84,7 +84,7 @@ type actorViewCoverage struct {
 
 func readOnlyActorAction(action string) bool {
 	switch action {
-	case "goto", "wait", "wait_for", "extract", "assert_element", "assert_url", "assert_values", "screenshot", "inspect_views", "observe_page":
+	case "goto", "wait", "wait_for", "extract", "assert_element", "assert_url", "assert_values", "screenshot", "inspect_views", "observe_page", "select_record":
 		return true
 	}
 	return false
@@ -537,10 +537,18 @@ type readScrollRegion struct {
 	MaxY float64 `json:"max_scroll_y"`
 }
 type readScrollShot struct {
-	CurrentURL string             `json:"current_url"`
-	SOM        []setOfMarkTarget  `json:"som"`
-	Revision   any                `json:"som_revision"`
-	Regions    []readScrollRegion `json:"scroll_regions"`
+	MediaIframeSrc     string             `json:"media_iframe_src"`
+	MediaEmbedStatus   string             `json:"media_embed_status"`
+	MediaProvider      string             `json:"media_provider"`
+	MediaErrorText     string             `json:"media_error_text"`
+	MediaPlayerVisible bool               `json:"media_player_visible"`
+	MediaIframeVisible bool               `json:"media_iframe_visible"`
+	DraftSaveState     string             `json:"draft_save_state"`
+	DraftSaveText      string             `json:"draft_save_text"`
+	CurrentURL         string             `json:"current_url"`
+	SOM                []setOfMarkTarget  `json:"som"`
+	Revision           any                `json:"som_revision"`
+	Regions            []readScrollRegion `json:"scroll_regions"`
 }
 
 func (e *actorExecution) readScrollSnapshot() (*readScrollShot, error) {
@@ -621,6 +629,14 @@ func (e *actorExecution) observePage(step actorStep) error {
 	}
 	item["current_url"] = e.currentURL
 	item["page_title"] = doc.Title
+	item["media_iframe_src"] = shot.MediaIframeSrc
+	item["media_embed_status"] = shot.MediaEmbedStatus
+	item["media_provider"] = shot.MediaProvider
+	item["media_error_text"] = shot.MediaErrorText
+	item["media_player_visible"] = shot.MediaPlayerVisible
+	item["media_iframe_visible"] = shot.MediaIframeVisible
+	item["draft_save_state"] = shot.DraftSaveState
+	item["draft_save_text"] = shot.DraftSaveText
 	controls := []map[string]any{}
 	links := []map[string]any{}
 	linkSeen := map[string]bool{}
@@ -692,5 +708,26 @@ func completeReadView(v actorReadView, result *actorViewCoverage, root *html.Nod
 	result.Complete = true
 	result.MoreRemaining = false
 	result.EndEvidence = evidence
+	return nil
+}
+
+// Select exactly one record from a complete verified collection, including
+// records no longer present in the DOM after pagination. No navigation or writes.
+func (e *actorExecution) selectRecord(step actorStep) error {
+	if e.coverage == nil || !e.coverage.Complete || !e.coverage.ReadOnly || e.coverage.MoreRemaining {
+		return errors.New("select_record requires complete verified read coverage")
+	}
+	var matches []map[string]any
+	for _, item := range e.items {
+		if stringFromAny(item[step.VerifiedField]) == step.Value {
+			matches = append(matches, item)
+		}
+	}
+	if len(matches) != 1 {
+		return fmt.Errorf("select_record expected one match, got %d", len(matches))
+	}
+	for k, v := range matches[0] {
+		e.lastValues[k] = v
+	}
 	return nil
 }

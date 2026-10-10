@@ -166,3 +166,19 @@ read through `actors_dataset_read`; the run preview is deliberately bounded.
 The optional Patreon inspection example documents combined published/scheduled
 Posts and separate Drafts navigation; it is not engine behavior or an account
 preset.
+
+## Verified record and media recovery (0.2.19)
+
+Definitions support up to 100 named operations within the existing byte limit.
+A write operation may declare an `inspect_views` step with `read_only:true`;
+scoped read-only steps reject writes at validation and execution.
+`select_record` requires complete `inspect_views` coverage and selects exactly
+one collected record by `verified_field` and `value`, including earlier pages.
+Its fields feed subsequent `assert_values` checks. Missing/ambiguous/incomplete
+records fail. `observe_page` returns fresh Computer media source, player/error
+and draft-save observations. `assert_values.matches` accepts a declared regex
+for exact identity checks with known optional URL query parameters.
+
+The optional `examples/patreon-existing-video-draft.json` separates read-only
+inspection, attachment and publication of the same existing draft. It preserves
+copy, requires exact saved media/access checks and never creates a replacement.
