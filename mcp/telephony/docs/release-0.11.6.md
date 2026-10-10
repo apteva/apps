@@ -67,7 +67,15 @@ Inventory tests cover unchanged result fields, request counts, concurrency,
 cancellation, partial failures, invalid signing keys, permission/project scope,
 configuration invalidation, expiration and simultaneous fresh refreshes.
 
-Final complete-suite and race-check results are recorded below before publication.
+- Complete Go suite with the published SDK v0.99.0 and `GOWORK=off`: **940
+  passing tests/subtests, zero failures**, three opt-in skips.
+- Frontend/audio suites: **225 passed, zero failures** (102 client, 123 audio).
+- TypeScript client/benchmark checks, Go vet/build and whitespace checks pass.
+- Focused race validation is the final publication gate.
+
+Raw evidence: `/private/tmp/telephony-0116-release-go.jsonl`,
+`/private/tmp/telephony-0116-release-frontend.log`,
+`/private/tmp/telephony-0116-release-race.log`.
 
 ## Limits and installation
 
