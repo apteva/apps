@@ -461,6 +461,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return fmt.Errorf("start direct SIP gateway: %w", err)
 	}
 	a.startRoutingDispatcher(ctx)
+	a.startCarrierMediaRecovery(ctx)
 	ctx.Logger().Info("telephony mounted")
 	return nil
 }
