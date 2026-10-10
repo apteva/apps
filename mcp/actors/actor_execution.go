@@ -611,7 +611,20 @@ func (e *actorExecution) runStep(step actorStep) error {
 	case "observe_page":
 		return e.observePage(step)
 	case "goto":
-		return e.gotoURL(step.URL)
+		target := step.URL
+		if len(step.URLQuery) > 0 {
+			u, err := url.Parse(target)
+			if err != nil {
+				return err
+			}
+			q := u.Query()
+			for k, v := range step.URLQuery {
+				q.Set(k, v)
+			}
+			u.RawQuery = q.Encode()
+			target = u.String()
+		}
+		return e.gotoURL(target)
 	case "click":
 		return e.clickOnce(step)
 	case "click_verified":
@@ -689,6 +702,23 @@ func (e *actorExecution) assertValues(step actorStep) error {
 		actual, ok := e.lastValues[field]
 		if !ok {
 			return fmt.Errorf("assertion field %q was not extracted", field)
+		}
+		if assertion.EqualsExact != nil && stringFromAny(actual) != stringFromAny(assertion.EqualsExact) {
+			return fmt.Errorf("exact assertion failed for %q", field)
+		}
+		if assertion.GreaterThan != nil {
+			a, aok := actorNumber(actual)
+			b, bok := actorNumber(assertion.GreaterThan)
+			if !aok || !bok || a <= b {
+				return fmt.Errorf("assertion %q must exceed the supplied baseline", field)
+			}
+		}
+		if assertion.GreaterThanField != "" {
+			a, aok := actorNumber(actual)
+			b, bok := actorNumber(e.lastValues[assertion.GreaterThanField])
+			if !aok || !bok || a <= b {
+				return fmt.Errorf("assertion %q must be greater than %q", field, assertion.GreaterThanField)
+			}
 		}
 		if assertion.EqualsURL != nil {
 			if err := assertion.EqualsURL.compare(stringFromAny(actual)); err != nil {
@@ -1251,6 +1281,39 @@ func (e *actorExecution) storeCurrentScreenshot(title string) (*artifactSummary,
 func extractNodeItem(node *html.Node, fields map[string]actorField, baseURL string) (map[string]any, error) {
 	item := make(map[string]any, len(fields))
 	for name, field := range fields {
+		if field.Many {
+			if field.Selector == "" {
+				return nil, fmt.Errorf("field %s many requires a selector", name)
+			}
+			matcher, err := cascadia.Compile(field.Selector)
+			if err != nil {
+				return nil, err
+			}
+			nodes := cascadia.QueryAll(node, matcher)
+			if len(nodes) == 0 && field.Required {
+				return nil, fmt.Errorf("required field %s was not found", name)
+			}
+			values := []any{}
+			inner := field
+			inner.Many = false
+			inner.All = false
+			inner.Selector = ""
+			inner.Required = false
+			for _, selected := range nodes {
+				one, err := extractNodeItem(selected, map[string]actorField{name: inner}, baseURL)
+				if err != nil {
+					return nil, err
+				}
+				if v, ok := one[name]; ok {
+					values = append(values, v)
+				}
+			}
+			if field.Required && len(values) == 0 {
+				return nil, fmt.Errorf("required field %s has no matching values", name)
+			}
+			item[name] = values
+			continue
+		}
 		target := node
 		if field.Selector != "" {
 			matcher, err := cascadia.Compile(field.Selector)

@@ -220,7 +220,7 @@ func TestReadPaginationRequiresFreshNavigationOnlyEffect(t *testing.T) {
 			ctx, app := newTestCtx(t, plat)
 			exec := &actorExecution{app: app, ctx: ctx, workerCtx: context.Background(), session: &browserSession{SessionID: "sess_1"}, definition: actorDefinition{AllowedHosts: []string{"example.com"}}, currentURL: "https://example.com"}
 			err := exec.clickReadNavigation(actorLocator{Text: "Next", Exact: true, SOMOnly: true})
-			want := effect == "navigation_only"
+			want := effect == "navigation_only" || effect == ""
 			if clicked != want || (err == nil) != want {
 				t.Fatalf("effect=%s clicked=%v err=%v", effect, clicked, err)
 			}

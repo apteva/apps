@@ -43,3 +43,7 @@ truncated, stalled or budget-limited scan preserves partial rows and incomplete
 coverage. An empty partial list never authorizes a new write. Reconcile any
 existing exact record URLs and prior accepted write runs independently. Never
 switch contexts or use a generic run to bypass a failed inspection.
+
+Collection reads can use `read_views.entry_query` for safely encoded URL parameters and `views[].use_entry_page:true` for a URL that is already the desired collection. `empty_text_pattern` verifies an empty-state message. Next-control pagination can use `end_when_next_absent:true` with an exact SOM name and DOM `next.selector`; absence must remain stable after the verified view is ready. Read pagination reveals controls through verified document scroll targets and revalidates `navigation_only` in Computer before clicking.
+
+Fields with `many:true` and a selector return ordered arrays, including attributes and resolved URLs. `assert_values.equals_exact` preserves case and whitespace; `greater_than` and `greater_than_field` can establish that a saved server record is newer than a pre-action baseline. See `examples/adultfolio-control.json` for an editable messaging workflow with identity, recipient, idempotency and saved-message checks.

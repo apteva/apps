@@ -17,28 +17,31 @@ import (
 // View traversal is site-neutral. It only follows observed anchors, scrolls,
 // and optionally clicks pagination controls whose fresh SOM effect is navigation_only.
 type actorReadViews struct {
-	EntryURL    string          `json:"entry_url"`
-	IdentityURL string          `json:"identity_url"`
-	Identity    actorField      `json:"identity"`
-	Views       []actorReadView `json:"views"`
-	TimeoutMS   int             `json:"timeout_ms,omitempty"`
+	EntryQuery  map[string]string `json:"entry_query,omitempty"`
+	EntryURL    string            `json:"entry_url"`
+	IdentityURL string            `json:"identity_url"`
+	Identity    actorField        `json:"identity"`
+	Views       []actorReadView   `json:"views"`
+	TimeoutMS   int               `json:"timeout_ms,omitempty"`
 }
 type actorReadView struct {
-	Total           *actorField                 `json:"total,omitempty"`
-	Name            string                      `json:"name"`
-	Covers          []string                    `json:"covers"`
-	LinkSelector    string                      `json:"link_selector"`
-	URLPattern      string                      `json:"url_pattern"`
-	ReadySelector   string                      `json:"ready_selector"`
-	EmptySelector   string                      `json:"empty_selector"`
-	LoadingSelector string                      `json:"loading_selector"`
-	ErrorSelector   string                      `json:"error_selector,omitempty"`
-	Items           string                      `json:"items"`
-	Fields          map[string]actorField       `json:"fields"`
-	Defaults        map[string]any              `json:"field_defaults,omitempty"`
-	Rewrites        map[string]actorReadRewrite `json:"field_rewrites,omitempty"`
-	KeyField        string                      `json:"key_field"`
-	Pagination      actorReadPagination         `json:"pagination"`
+	UseEntryPage     bool                        `json:"use_entry_page,omitempty"`
+	Total            *actorField                 `json:"total,omitempty"`
+	Name             string                      `json:"name"`
+	Covers           []string                    `json:"covers"`
+	LinkSelector     string                      `json:"link_selector"`
+	URLPattern       string                      `json:"url_pattern"`
+	ReadySelector    string                      `json:"ready_selector"`
+	EmptyTextPattern string                      `json:"empty_text_pattern,omitempty"`
+	EmptySelector    string                      `json:"empty_selector"`
+	LoadingSelector  string                      `json:"loading_selector"`
+	ErrorSelector    string                      `json:"error_selector,omitempty"`
+	Items            string                      `json:"items"`
+	Fields           map[string]actorField       `json:"fields"`
+	Defaults         map[string]any              `json:"field_defaults,omitempty"`
+	Rewrites         map[string]actorReadRewrite `json:"field_rewrites,omitempty"`
+	KeyField         string                      `json:"key_field"`
+	Pagination       actorReadPagination         `json:"pagination"`
 }
 type actorReadRewrite struct {
 	From        string `json:"from"`
@@ -48,14 +51,15 @@ type actorReadRewrite struct {
 	Equals      string `json:"equals,omitempty"`
 }
 type actorReadPagination struct {
-	Mode             string       `json:"mode"`
-	Next             actorLocator `json:"next,omitempty"`
-	EndSelector      string       `json:"end_selector,omitempty"`
-	ScrollTargetName string       `json:"scroll_target_name,omitempty"`
-	Amount           int          `json:"amount,omitempty"`
-	MaxPages         int          `json:"max_pages,omitempty"`
-	StableRounds     int          `json:"stable_rounds,omitempty"`
-	SettleMS         int          `json:"settle_ms,omitempty"`
+	EndWhenNextAbsent bool         `json:"end_when_next_absent,omitempty"`
+	Mode              string       `json:"mode"`
+	Next              actorLocator `json:"next,omitempty"`
+	EndSelector       string       `json:"end_selector,omitempty"`
+	ScrollTargetName  string       `json:"scroll_target_name,omitempty"`
+	Amount            int          `json:"amount,omitempty"`
+	MaxPages          int          `json:"max_pages,omitempty"`
+	StableRounds      int          `json:"stable_rounds,omitempty"`
+	SettleMS          int          `json:"settle_ms,omitempty"`
 }
 type actorReadCoverage struct {
 	Complete      bool                 `json:"inspection_complete"`
@@ -110,7 +114,11 @@ func validateReadViews(c *actorReadViews) error {
 		if f, ok := v.Fields[v.KeyField]; !ok || !f.Required {
 			return errors.New("read view key field must be required")
 		}
-		for _, sel := range []string{c.Identity.Selector, v.LinkSelector, v.ReadySelector, v.EmptySelector, v.LoadingSelector, v.Items} {
+		requiredSelectors := []string{c.Identity.Selector, v.ReadySelector, v.EmptySelector, v.LoadingSelector, v.Items}
+		if !v.UseEntryPage {
+			requiredSelectors = append(requiredSelectors, v.LinkSelector)
+		}
+		for _, sel := range requiredSelectors {
 			if sel == "" {
 				return errors.New("read view requires link, ready, empty, loading and items selectors")
 			}
@@ -130,6 +138,11 @@ func validateReadViews(c *actorReadViews) error {
 		}
 		if _, err := regexp.Compile(v.URLPattern); err != nil {
 			return err
+		}
+		if v.EmptyTextPattern != "" {
+			if _, err := regexp.Compile(v.EmptyTextPattern); err != nil {
+				return err
+			}
 		}
 		validationFields := map[string]actorField{}
 		for k, f := range v.Fields {
@@ -173,11 +186,19 @@ func validateReadViews(c *actorReadViews) error {
 				return errors.New("scroll pagination requires scroll_target_name")
 			}
 		case "next":
-			if !v.Pagination.Next.SOMOnly || !v.Pagination.Next.Exact || v.Pagination.Next.Text == "" || v.Pagination.EndSelector == "" {
-				return errors.New("next pagination requires exact som_only next and explicit end_selector")
+			if !v.Pagination.Next.SOMOnly || !v.Pagination.Next.Exact || v.Pagination.Next.Text == "" || (v.Pagination.EndSelector == "" && !v.Pagination.EndWhenNextAbsent) {
+				return errors.New("next pagination requires exact som_only next and explicit end evidence")
 			}
 		default:
 			return errors.New("read view pagination mode must be scroll or next")
+		}
+		if v.Pagination.EndWhenNextAbsent {
+			if v.Pagination.Mode != "next" || v.Pagination.Next.Selector == "" {
+				return errors.New("end_when_next_absent requires next pagination with a DOM selector")
+			}
+			if _, err := cascadia.Compile(v.Pagination.Next.Selector); err != nil {
+				return err
+			}
 		}
 		if v.Pagination.MaxPages < 1 || v.Pagination.MaxPages > maxActorPages || v.Pagination.StableRounds < 2 || v.Pagination.StableRounds > 10 || v.Pagination.SettleMS < 500 || v.Pagination.SettleMS > 10000 {
 			return errors.New("invalid read view pagination bounds")
@@ -194,6 +215,18 @@ func readHas(root *html.Node, selector string) bool {
 	}
 	sel, err := cascadia.Compile(selector)
 	return err == nil && cascadia.Query(root, sel) != nil
+}
+func readVerifiedEmpty(root *html.Node, v actorReadView) bool {
+	sel, err := cascadia.Compile(v.EmptySelector)
+	if err != nil {
+		return false
+	}
+	for _, node := range cascadia.QueryAll(root, sel) {
+		if v.EmptyTextPattern == "" || regexp.MustCompile(v.EmptyTextPattern).MatchString(htmlNodeText(node)) {
+			return true
+		}
+	}
+	return false
 }
 func identityToken(raw, pattern, base string) (string, error) {
 	u, err := url.Parse(raw)
@@ -295,6 +328,18 @@ func (e *actorExecution) readPause(ms int) error {
 	}
 }
 func (e *actorExecution) inspectViews(c actorReadViews) error {
+	if len(c.EntryQuery) > 0 {
+		u, err := url.Parse(c.EntryURL)
+		if err != nil {
+			return err
+		}
+		q := u.Query()
+		for k, v := range c.EntryQuery {
+			q.Set(k, v)
+		}
+		u.RawQuery = q.Encode()
+		c.EntryURL = u.String()
+	}
 	cov := &actorReadCoverage{ReadOnly: true, MoreRemaining: true, Views: []*actorViewCoverage{}, CheckedViews: []string{}, RequiredViews: []string{}, ContextID: e.definition.Browser.ContextID, IdentityURL: c.IdentityURL}
 	e.coverage = cov
 	for _, v := range c.Views {
@@ -333,29 +378,33 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 	if err := e.gotoURL(c.EntryURL); err != nil {
 		return err
 	}
-	// Navigation links must be observed in the assigned context, never guessed.
-	entry := v
-	entry.URLPattern = "^" + regexp.QuoteMeta(c.EntryURL) + "/?$"
-	root, err := e.readViewDOM(c, entry)
-	if err != nil {
-		return err
-	}
-	sel, _ := cascadia.Compile(v.LinkSelector)
-	links := cascadia.QueryAll(root, sel)
-	if len(links) != 1 || links[0].Data != "a" {
-		return fmt.Errorf("verified navigation link matched %d anchors", len(links))
-	}
-	href, _ := htmlAttribute(links[0], "href")
-	if href == "" {
-		return errors.New("view navigation href missing")
-	}
-	targetAny, err := coerceActorValue(href, "url", e.currentURL)
-	if err != nil {
-		return err
-	}
-	target := stringFromAny(targetAny)
-	if err := e.gotoURL(target); err != nil {
-		return err
+	var root *html.Node
+	var err error
+	if !v.UseEntryPage {
+		// Navigation links must be observed in the assigned context, never guessed.
+		entry := v
+		entry.URLPattern = "^" + regexp.QuoteMeta(c.EntryURL) + "/?$"
+		root, err = e.readViewDOM(c, entry)
+		if err != nil {
+			return err
+		}
+		sel, _ := cascadia.Compile(v.LinkSelector)
+		links := cascadia.QueryAll(root, sel)
+		if len(links) != 1 || links[0].Data != "a" {
+			return fmt.Errorf("verified navigation link matched %d anchors", len(links))
+		}
+		href, _ := htmlAttribute(links[0], "href")
+		if href == "" {
+			return errors.New("view navigation href missing")
+		}
+		targetAny, err := coerceActorValue(href, "url", e.currentURL)
+		if err != nil {
+			return err
+		}
+		target := stringFromAny(targetAny)
+		if err := e.gotoURL(target); err != nil {
+			return err
+		}
 	}
 	result.URL = e.currentURL
 	limit := minInt(v.Pagination.MaxPages, e.maxPages)
@@ -376,7 +425,7 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 		result.URL = e.currentURL
 		selector, _ := cascadia.Compile(v.Items)
 		nodes := cascadia.QueryAll(root, selector)
-		if len(nodes) == 0 && !readHas(root, v.EmptySelector) {
+		if len(nodes) == 0 && !readVerifiedEmpty(root, v) {
 			return errors.New("empty collection has no verified empty-state marker")
 		}
 		var keys []string
@@ -452,6 +501,23 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 			return completeReadView(v, result, root, len(viewSeen), e.currentURL, "explicit_end_selector")
 		}
 		if v.Pagination.Mode == "next" {
+			if v.Pagination.EndWhenNextAbsent && !readHas(root, v.Pagination.Next.Selector) {
+				if strings.Join(keys, ",") == lastSignature {
+					stable++
+				} else {
+					stable = 0
+				}
+				lastSignature = strings.Join(keys, ",")
+				if stable >= v.Pagination.StableRounds {
+					return completeReadView(v, result, root, len(viewSeen), e.currentURL, "verified_next_absent_stable_no_loading")
+				}
+				if err := e.readPause(v.Pagination.SettleMS); err != nil {
+					return err
+				}
+				continue
+			}
+			stable = 0
+			pendingNextSignature = strings.Join(keys, ",")
 			if err := e.clickReadNavigation(v.Pagination.Next); err != nil {
 				return err
 			}
@@ -560,14 +626,52 @@ func (e *actorExecution) readScrollSnapshot() (*readScrollShot, error) {
 	return &shot, err
 }
 func (e *actorExecution) clickReadNavigation(locator actorLocator) error {
-	shot, err := e.readScrollSnapshot()
-	if err != nil {
-		return err
-	}
+	// The selector supplies DOM end evidence; fresh SOM identity uses exact name/role.
+	locator.Selector = ""
 	var matches []setOfMarkTarget
-	for _, t := range shot.SOM {
-		if !t.Disabled && somTargetMatches(locator, t) {
-			matches = append(matches, t)
+	var shot *readScrollShot
+	direction := "down"
+	for attempts := 0; attempts < 30; attempts++ {
+		var err error
+		shot, err = e.readScrollSnapshot()
+		if err != nil {
+			return err
+		}
+		matches = nil
+		for _, t := range shot.SOM {
+			if !t.Disabled && somTargetMatches(locator, t) {
+				matches = append(matches, t)
+			}
+		}
+		if len(matches) > 0 {
+			break
+		}
+		var region *readScrollRegion
+		for j := range shot.Regions {
+			if shot.Regions[j].Name == "Document" {
+				if region != nil {
+					return errors.New("ambiguous pagination scroll region")
+				}
+				region = &shot.Regions[j]
+			}
+		}
+		if region == nil {
+			break
+		}
+		if direction == "down" && region.Top >= region.MaxY-1 {
+			direction = "up"
+		}
+		if direction == "up" && region.Top <= 0 {
+			break
+		}
+		var out map[string]any
+		args := withProjectID(e.ctx, map[string]any{"session_id": e.session.SessionID, "action": "scroll", "target_id": region.ID, "som_revision": shot.Revision, "expected_name": region.Name, "expected_role": region.Role, "direction": direction, "amount": 600})
+		if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", args, &out); err != nil {
+			return err
+		}
+		sc := mapFromAny(out["scroll"])
+		if sc["wrong_target"] == true || sc["ambiguous"] == true || stringFromAny(sc["actual_target_id"]) != region.ID {
+			return errors.New("pagination reveal scroll target was not verified")
 		}
 	}
 	if len(matches) != 1 {
@@ -575,12 +679,14 @@ func (e *actorExecution) clickReadNavigation(locator actorLocator) error {
 	}
 
 	target := matches[0]
-	if target.Dangerous || target.Loading || target.Effect != "navigation_only" {
+	if target.Dangerous || target.Loading || (target.Effect != "" && target.Effect != "navigation_only") {
 		return errors.New("pagination control is not verified navigation_only")
 	}
 
+	// Computer revalidates the live target and expected navigation effect before clicking,
+	// including clickable non-button elements whose SOM omits an effect.
 	var out map[string]any
-	err = sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, map[string]any{"session_id": e.session.SessionID, "action": "click", "target_id": matches[0].ID, "som_revision": shot.Revision, "expected_text": locator.Text, "expected_effect": "navigation_only"}), &out)
+	err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, map[string]any{"session_id": e.session.SessionID, "action": "click", "target_id": matches[0].ID, "som_revision": shot.Revision, "expected_text": locator.Text, "expected_effect": "navigation_only"}), &out)
 	if err != nil {
 		return err
 	}
