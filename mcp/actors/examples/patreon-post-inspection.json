@@ -1,0 +1,294 @@
+{
+  "schema_version": 1,
+  "browser": {
+    "context_id": "{{context_id}}",
+    "backend": "browserbase",
+    "persist": true,
+    "viewport": {
+      "width": 1600,
+      "height": 800
+    }
+  },
+  "allowed_hosts": [
+    "www.patreon.com",
+    "patreon.com"
+  ],
+  "defaults": {
+    "library_url": "https://www.patreon.com/library"
+  },
+  "limits": {
+    "max_pages": 100,
+    "max_items": 500,
+    "max_duration_seconds": 360,
+    "step_retries": 0
+  },
+  "operations": {
+    "inspect_page": {
+      "read_only": true,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{page_url}}"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "body"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "action": "wait",
+          "duration_ms": 1500
+        },
+        {
+          "action": "observe_page",
+          "readability": false,
+          "items": "body",
+          "fields": {
+            "page_text": {
+              "type": "text"
+            },
+            "creator_url": {
+              "selector": "a[aria-label=\"Your page\"]",
+              "type": "url",
+              "attribute": "href"
+            },
+            "page_heading": {
+              "selector": "h1",
+              "type": "text"
+            },
+            "creator_identity": {
+              "selector": "a[aria-label=\"Your page\"]",
+              "attribute": "href",
+              "pattern": "^https://www\\.patreon\\.com/(?:c/)?([^/?]+)(?:[/?]|$)"
+            },
+            "account_label": {
+              "selector": "button[aria-label=\"Account menu\"]",
+              "type": "text"
+            }
+          }
+        },
+        {
+          "action": "extract",
+          "readability": false,
+          "items": "a[href]",
+          "fields": {
+            "link_text": {
+              "type": "text"
+            },
+            "aria_label": {
+              "attribute": "aria-label"
+            },
+            "url": {
+              "type": "url",
+              "attribute": "href"
+            }
+          }
+        },
+        {
+          "action": "extract",
+          "readability": false,
+          "items": "[role=tab],button,[role=button],input,select,textarea,[role=textbox]",
+          "fields": {
+            "control_id": {
+              "attribute": "id"
+            },
+            "control_label": {
+              "attribute": "aria-label"
+            },
+            "control_name": {
+              "attribute": "name"
+            },
+            "control_placeholder": {
+              "attribute": "placeholder"
+            },
+            "control_role": {
+              "attribute": "role"
+            },
+            "control_testid": {
+              "attribute": "data-testid"
+            },
+            "control_type": {
+              "attribute": "type"
+            },
+            "control_value": {
+              "attribute": "value"
+            },
+            "selected": {
+              "attribute": "aria-selected"
+            },
+            "checked": {
+              "attribute": "aria-checked"
+            },
+            "disabled": {
+              "attribute": "disabled"
+            },
+            "control_text": {
+              "type": "text"
+            }
+          }
+        }
+      ],
+      "output_schema": {}
+    },
+    "fetch_posts": {
+      "read_only": true,
+      "limits": {
+        "max_pages": 200,
+        "max_items": 5000,
+        "max_duration_seconds": 900,
+        "step_retries": 0
+      },
+      "steps": [
+        {
+          "action": "inspect_views",
+          "read_views": {
+            "entry_url": "{{library_url}}",
+            "identity_url": "{{creator_url}}",
+            "identity": {
+              "selector": "a[aria-label=\"Your page\"]",
+              "type": "url",
+              "attribute": "href",
+              "required": true,
+              "pattern": "^https://www\\.patreon\\.com/(?:c/)?([^/?]+)(?:[/?]|$)"
+            },
+            "views": [
+              {
+                "name": "posts",
+                "covers": [
+                  "published",
+                  "scheduled"
+                ],
+                "link_selector": "a[class*=\"subNavLink\"][href=\"https://www.patreon.com/posts/published\"]",
+                "url_pattern": "^https://www\\.patreon\\.com/(?:library/?|posts/published/?)$",
+                "ready_selector": "[class*=\"Table-module\"][class*=\"__headerRow\"]",
+                "empty_selector": "main:contains(\"No posts\"),main:contains(\"You haven\u2019t published\"),main:contains(\"Create your first post\"),[class*=\"EmptyState\"]",
+                "loading_selector": "[class*=\"Table-module\"][class*=\"__row\"][class*=\"__clickable\"]:not(:has(a[href*=\"/posts/\"])),[class*=\"Skeleton\"],[aria-busy=\"true\"]",
+                "error_selector": "main [role=\"alert\"],[role=\"dialog\"]",
+                "items": "[class*=\"Table-module\"][class*=\"__row\"][class*=\"__clickable\"]:has(a[href*=\"/posts/\"])",
+                "fields": {
+                  "id": {
+                    "selector": "a[href*=\"/posts/\"]",
+                    "attribute": "href",
+                    "required": true,
+                    "pattern": "/posts/(?:[^/?]*-)?(\\d+)(?:/edit)?(?:\\?|$)"
+                  },
+                  "title": {
+                    "selector": "a[href*=\"/posts/\"]",
+                    "type": "text",
+                    "required": true
+                  },
+                  "edit_url": {
+                    "selector": "a[href*=\"/posts/\"]",
+                    "type": "url",
+                    "attribute": "href",
+                    "required": true
+                  },
+                  "status": {
+                    "type": "text",
+                    "pattern": "\\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \\d{1,2}, \\d{4} (Scheduled)\\b"
+                  },
+                  "row_text": {
+                    "type": "text"
+                  }
+                },
+                "field_defaults": {
+                  "status": "published"
+                },
+                "field_rewrites": {
+                  "status": {
+                    "from": "status",
+                    "pattern": "^Scheduled$",
+                    "replacement": "scheduled"
+                  },
+                  "live_url": {
+                    "from": "edit_url",
+                    "pattern": "/edit(?:\\?.*)?$",
+                    "replacement": "",
+                    "when_field": "status",
+                    "equals": "published"
+                  }
+                },
+                "key_field": "id",
+                "total": {
+                  "selector": "body",
+                  "type": "number",
+                  "required": true,
+                  "pattern": "\\d+ - \\d+ of (\\d+)\\s*$"
+                },
+                "pagination": {
+                  "mode": "scroll",
+                  "scroll_target_name": "Document",
+                  "amount": 650,
+                  "max_pages": 100,
+                  "stable_rounds": 3,
+                  "settle_ms": 1500
+                }
+              },
+              {
+                "name": "drafts",
+                "covers": [
+                  "draft"
+                ],
+                "link_selector": "a[class*=\"subNavLink\"][href=\"https://www.patreon.com/posts/drafts\"]",
+                "url_pattern": "^https://www\\.patreon\\.com/posts/drafts/?$",
+                "ready_selector": "[class*=\"Table-module\"][class*=\"__headerRow\"]",
+                "empty_selector": "main:contains(\"No drafts\"),main:contains(\"You don\u2019t have any drafts\"),[class*=\"EmptyState\"]",
+                "loading_selector": "[class*=\"Table-module\"][class*=\"__row\"][class*=\"__clickable\"]:not(:has(a[href*=\"/posts/\"])),[class*=\"Skeleton\"],[aria-busy=\"true\"]",
+                "error_selector": "main [role=\"alert\"],[role=\"dialog\"]",
+                "items": "[class*=\"Table-module\"][class*=\"__row\"][class*=\"__clickable\"]:has(a[href*=\"/posts/\"])",
+                "fields": {
+                  "id": {
+                    "selector": "a[href*=\"/posts/\"]",
+                    "attribute": "href",
+                    "required": true,
+                    "pattern": "/posts/(?:[^/?]*-)?(\\d+)(?:/edit)?(?:\\?|$)"
+                  },
+                  "title": {
+                    "selector": "a[href*=\"/posts/\"]",
+                    "type": "text",
+                    "required": true
+                  },
+                  "edit_url": {
+                    "selector": "a[href*=\"/posts/\"]",
+                    "type": "url",
+                    "attribute": "href",
+                    "required": true
+                  },
+                  "row_text": {
+                    "type": "text"
+                  }
+                },
+                "field_defaults": {
+                  "status": "draft"
+                },
+                "field_rewrites": {},
+                "key_field": "id",
+                "total": {
+                  "selector": "body",
+                  "type": "number",
+                  "required": true,
+                  "pattern": "\\d+ - \\d+ of (\\d+)\\s*$"
+                },
+                "pagination": {
+                  "mode": "scroll",
+                  "scroll_target_name": "Document",
+                  "amount": 650,
+                  "max_pages": 100,
+                  "stable_rounds": 3,
+                  "settle_ms": 1500
+                }
+              }
+            ],
+            "timeout_ms": 30000
+          }
+        }
+      ],
+      "output_schema": {}
+    }
+  }
+}

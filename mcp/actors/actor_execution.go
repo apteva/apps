@@ -27,6 +27,7 @@ import (
 var actorNumberPattern = regexp.MustCompile(`[-+]?\d[\d\s.,]*`)
 
 type actorExecution struct {
+	coverage       *actorReadCoverage
 	app            *App
 	ctx            *sdk.AppCtx
 	run            *actorQueuedRun
@@ -414,6 +415,10 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 	out["items"] = previewActorItems(exec.items)
 	out["trace_preview"] = previewActorTrace(exec.trace)
 	out["current_url"] = exec.currentURL
+	if exec.coverage != nil {
+		out["coverage"] = exec.coverage
+		out["inspection_complete"] = exec.coverage.Complete
+	}
 	if len(exec.media) > 0 {
 		out["media"] = exec.media
 	}
@@ -541,7 +546,7 @@ func (e *actorExecution) runSteps() (map[string]any, error) {
 		var err error
 		for attempt := 0; attempt <= e.retries; attempt++ {
 			err = e.runStep(step)
-			if err == nil || errors.Is(err, errActorCancelled) || !retryableActorError(err) || step.Action == "click" || step.Action == "key" || step.Action == "paginate" {
+			if err == nil || errors.Is(err, errActorCancelled) || !retryableActorError(err) || step.Action == "click" || step.Action == "key" || step.Action == "paginate" || step.Action == "inspect_views" {
 				break
 			}
 			if attempt < e.retries {
@@ -597,7 +602,14 @@ func retryableActorError(err error) bool {
 }
 
 func (e *actorExecution) runStep(step actorStep) error {
+	if e.definition.ReadOnly && !readOnlyActorAction(step.Action) {
+		return errors.New("write action rejected in read_only operation")
+	}
 	switch step.Action {
+	case "inspect_views":
+		return e.inspectViews(*step.ReadViews)
+	case "observe_page":
+		return e.observePage(step)
 	case "goto":
 		return e.gotoURL(step.URL)
 	case "click":
@@ -1037,6 +1049,9 @@ func (e *actorExecution) extractDOM() (*browserExtractResult, error) {
 }
 
 func (e *actorExecution) extractStepDOM(step actorStep) (*browserExtractResult, error) {
+	if step.Readability != nil && !*step.Readability {
+		return e.completeRawDOM()
+	}
 	options := map[string]any{"formats": []string{"html", "regions", "metadata"}, "max_chars": 200000, "wait_ms": 250}
 	if step.Readability != nil {
 		options["readability"] = *step.Readability
@@ -1081,6 +1096,9 @@ func (e *actorExecution) extractPage(step actorStep) error {
 	doc, err := e.extractStepDOM(step)
 	if err != nil {
 		return err
+	}
+	if doc.Truncated {
+		return errors.New("rendered HTML extraction was truncated; inspection is incomplete")
 	}
 	root, err := html.Parse(strings.NewReader(doc.HTML))
 	if err != nil {

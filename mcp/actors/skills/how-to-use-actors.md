@@ -25,3 +25,21 @@ All site-specific behavior belongs in user definitions. Examples are optional an
 For hosted video posts, enter `{{video_url}}` using semantic `fill` in the site's embed URL control. Use `wait_for` with `conditions: [{"type":"media_present"}]`, optional `match: "all"` and additional URL/text/selector/target conditions, and `timeout_ms` between 500 and 30000. Unmatched or timed-out waits fail the run before publishing. A successful media wait returns embed provider, iframe URL and thumbnail URL under `media`. See `examples/video-url-publisher.json`; video providers and site controls remain user inputs. For Bunny Stream, construct the player URL from `videoLibraryId` and `guid` returned by the Bunny integration: `https://iframe.mediadelivery.net/embed/{videoLibraryId}/{guid}`. No provider-specific defaults are installed.
 
 Form operations support semantic `set_checked` (`checked` boolean), `select_option` (`value` or `values`), and `set_temporal` (`value` ISO date or displayed time). Extraction accepts `readability: false` to include navigation/dialogs and an optional field `pattern` (Go regexp; first capture becomes the extracted value before numeric conversion). A consequential `click` may include `once_key: "{{request_id}}"`. The key is reserved durably for that actor and operation before the attempt. Completed or uncertain attempts block later attempts using the same key, including explicit run retries; inspect the original run before intentionally issuing a different key. Keys do not guarantee the external site committed a click; use outcome waits.
+
+For library/account duplicate inspection, prefer named `read_only:true`
+operations using `observe_page` and `inspect_views` (Actors 0.2.16+). The engine
+rejects write actions in read-only operations. Sites and account/tier rules
+remain in definitions and caller input. `observe_page` returns current URL,
+configured account fields, visible navigation with observed URLs and semantic
+control labels. Raw extraction retries a larger HTML budget and refuses
+remaining truncation.
+
+An `inspect_views` run must be completed AND return
+`coverage.inspection_complete=true`, `more_results_remaining=false`, all
+required checked views, matching context/account and complete per-view end
+(and configured total-count) evidence before claiming absence. Read the full
+dataset with cursors; the run preview is bounded. A failed, inaccessible,
+truncated, stalled or budget-limited scan preserves partial rows and incomplete
+coverage. An empty partial list never authorizes a new write. Reconcile any
+existing exact record URLs and prior accepted write runs independently. Never
+switch contexts or use a generic run to bypass a failed inspection.

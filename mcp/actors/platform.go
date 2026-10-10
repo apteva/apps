@@ -28,6 +28,8 @@ func (e *actorExecution) lockContext() error {
 }
 
 type actorOperation struct {
+	Limits       *actorLimits      `json:"limits,omitempty"`
+	ReadOnly     bool              `json:"read_only,omitempty"`
 	Steps        []actorStep       `json:"steps"`
 	OutputSchema map[string]string `json:"output_schema"`
 }
@@ -44,6 +46,10 @@ func selectOperation(def actorDefinition, name string) (actorDefinition, error) 
 		return def, fmt.Errorf("operation %q not found", name)
 	}
 	def.Operations = nil
+	def.ReadOnly = def.ReadOnly || op.ReadOnly
+	if op.Limits != nil {
+		def.Limits = *op.Limits
+	}
 	def.Steps = op.Steps
 	def.OutputSchema = op.OutputSchema
 	return def, nil

@@ -139,6 +139,9 @@ type computerSOMScreenshot struct {
 }
 
 type setOfMarkTarget struct {
+	Effect         string `json:"effect"`
+	Dangerous      bool   `json:"dangerous"`
+	Loading        bool   `json:"loading"`
 	ID             string `json:"id"`
 	AccessibleName string `json:"accessible_name"`
 	Disabled       bool   `json:"disabled"`

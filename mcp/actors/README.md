@@ -115,3 +115,42 @@ For sends, payments or deletions, add `once_key: "{{request_id}}"` to the acknow
 `assert_values` supports `equals_set: "{{tier_labels}}"` to compare the exact set of selected labels, ignoring order but rejecting duplicates, omissions and extra entries. An aggregated text field should use `all: true, separator: "\n"`; absent optional fields represent an empty set. No creator names, prices or tier policy live in the engine.
 
 An exact SOM locator may declare `text_suffix_pattern`, for example `(?:\s+[0-9]+\s+members?)?`, to allow a known metadata suffix while retaining the exact literal name. The regex is anchored after the escaped name. It cannot silently match another name that starts with the same word. Semantic dispatch retains the fresh target ID, SOM revision and role checks. Ordinary locators also pass the observed name; metadata-suffix locators omit that extra name check because native accessible names can concatenate whitespace differently. Authors must verify the saved values before committing.
+
+### Read-only view coverage (0.2.16)
+
+Named operations can set `read_only:true` and optional `limits` to override their
+own page/item/duration budgets. Read-only operations reject form changes,
+uploads, generic clicks and consequential actions at validation and execution.
+`observe_page` takes a raw DOM extraction plus a fresh semantic observation and
+returns `current_url`, `page_title`, configured fields, `visible_navigation`
+(with observed URLs) and `visible_controls` (labels/roles). Raw extractions
+retry a larger HTML budget and fail explicitly if still truncated at 1 MB.
+
+`inspect_views` is a generic read-only collection traversal. Its `read_views`
+configuration declares an entry URL, required creator/account identity link,
+expected identity URL, and named views. Each view declares `covers`, an observed
+navigation anchor selector, verified URL pattern, ready/empty/loading/error
+selectors, item fields, required deduplication key, and bounded pagination.
+Sites, accounts, labels and statuses belong entirely to user definitions.
+
+Pagination supports fresh semantic Next controls verified by Computer as
+`navigation_only`, with an explicit end selector, or a named scroll region.
+Scroll traversal records every overlapping batch and requires repeated unchanged
+DOM keys and scroll geometry at the verified end, with no loading indicators.
+It never treats a missing control, silent empty list, inaccessible view,
+truncated HTML, item/page/time budget, changed identity or conflicting record as
+exhaustive. It retains partial dataset rows and returns a failed run with
+`coverage.inspection_complete:false` and `more_results_remaining:true` when
+results may remain. A completed run has per-view URL, checked/completion flags,
+page count, unique count and end evidence. A configured required numeric `total` field additionally requires the deduplicated count to match the UI total before completion; missing totals and mismatches fail closed. Coverage is a point-in-time UI scan;
+workers must also reconcile previously recorded exact post references and
+repeat the check if another publisher can change the library.
+
+`field_defaults` supply missing values and `field_rewrites` derive fields with a
+regular expression (`from`, `pattern`, `replacement`, optional `when_field` and
+`equals`). Rewrites read the original extracted/defaulted values, independently
+of map order. Conflicting copies of an ID fail closed. Large datasets must be
+read through `actors_dataset_read`; the run preview is deliberately bounded.
+The optional Patreon inspection example documents combined published/scheduled
+Posts and separate Drafts navigation; it is not engine behavior or an account
+preset.

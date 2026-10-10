@@ -38,6 +38,7 @@ const (
 )
 
 type actorDefinition struct {
+	ReadOnly      bool                      `json:"read_only,omitempty"`
 	Operations    map[string]actorOperation `json:"operations,omitempty"`
 	SchemaVersion int                       `json:"schema_version"`
 	Crawl         *crawlDefinition          `json:"crawl,omitempty"`
@@ -70,6 +71,7 @@ type actorLimits struct {
 }
 
 type actorStep struct {
+	ReadViews          *actorReadViews       `json:"read_views,omitempty"`
 	Text               string                `json:"text,omitempty"`
 	Key                string                `json:"key,omitempty"`
 	Direction          string                `json:"direction,omitempty"`
@@ -302,6 +304,10 @@ func validateActorDefinition(def actorDefinition) error {
 			}
 			selected := def
 			selected.Operations = nil
+			selected.ReadOnly = selected.ReadOnly || operation.ReadOnly
+			if operation.Limits != nil {
+				selected.Limits = *operation.Limits
+			}
 			selected.Steps = operation.Steps
 			selected.OutputSchema = operation.OutputSchema
 			if err := validateActorDefinition(selected); err != nil {
@@ -377,6 +383,9 @@ func validateActorDefinition(def actorDefinition) error {
 		return fmt.Errorf("definition.browser.environment: %w", err)
 	}
 	for i, step := range def.Steps {
+		if def.ReadOnly && !readOnlyActorAction(step.Action) {
+			return fmt.Errorf("steps[%d]: %s is not allowed in a read_only operation", i, step.Action)
+		}
 		if suffix := step.Locator.TextSuffixPattern; suffix != "" {
 			if !step.Locator.Exact || !step.Locator.SOMOnly {
 				return fmt.Errorf("steps[%d].locator.text_suffix_pattern requires exact som_only", i)
@@ -386,6 +395,13 @@ func validateActorDefinition(def actorDefinition) error {
 			}
 		}
 		switch step.Action {
+		case "inspect_views":
+			if !def.ReadOnly || step.Optional {
+				return errors.New("inspect_views requires read_only=true and cannot be optional")
+			}
+			if err := validateReadViews(step.ReadViews); err != nil {
+				return fmt.Errorf("steps[%d]: %w", i, err)
+			}
 		case "fill":
 			if !locatorHasTarget(step.Locator) {
 				return fmt.Errorf("steps[%d].locator is required for fill", i)
@@ -457,7 +473,7 @@ func validateActorDefinition(def actorDefinition) error {
 			if step.OnceKey != "" && (step.Action != "click" || step.ExpectedEffect == "" || step.ConfirmConsequence != step.ExpectedEffect) {
 				return fmt.Errorf("steps[%d].once_key requires a click with an acknowledged expected_effect", i)
 			}
-		case "extract":
+		case "observe_page", "extract":
 			if strings.TrimSpace(step.Items) == "" || len(step.Fields) == 0 {
 				return fmt.Errorf("steps[%d] requires items and fields", i)
 			}
