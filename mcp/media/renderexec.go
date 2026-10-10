@@ -259,11 +259,11 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 	if err != nil {
 		return 0, fmt.Errorf("materialise args: %w", err)
 	}
-	args = append(args, "-threads", strconv.Itoa(parseConfigIntFallback(app.Config().Get("render_encoder_threads"), 2)), outputPath)
-	args = append([]string{"-filter_threads", "1", "-filter_complex_threads", "1"}, args...)
+	args = append(args, "-threads", strconv.Itoa(parseConfigIntFallback(app.Config().Get("render_encoder_threads"), 1)), outputPath)
+	args = limitedFFmpegArgs(args)
 
 	doneEncode := renderStage(app, row, "encode")
-	cmd := exec.CommandContext(ctx, e.ffmpegPath, args...)
+	cmd := mediaFFmpegCommand(ctx, e.ffmpegPath, args)
 	useRuntime := needsRenderRuntime(row.Operation, row.Params)
 	if useRuntime && row.Operation == "trim" {
 		if _, pythonErr := exec.LookPath("python3"); pythonErr != nil {
@@ -311,6 +311,9 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 		} else if encodeErr == nil {
 			return 0, fmt.Errorf("missing render runtime diagnostics: %w", readErr)
 		}
+	}
+	if failure := markMediaResourceFailure(ctx, encodeErr, stderrBuf.String(), 0); failure != nil {
+		return 0, failure
 	}
 	if err := encodeErr; err != nil {
 		// Cancellation/timeout get the raw context error — the

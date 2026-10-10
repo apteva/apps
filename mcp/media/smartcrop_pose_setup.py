@@ -1,6 +1,8 @@
 """Provision a versioned isolated runtime; never modify system Python packages."""
 import sys,os,subprocess,pathlib,fcntl,hashlib,urllib.request,platform,zipfile,io,time
 root=pathlib.Path(sys.argv[1]);root.mkdir(parents=True,exist_ok=True)
+os.environ['UV_PYTHON_INSTALL_DIR']=str(root/'python')
+os.environ['UV_CACHE_DIR']=str(root/'uv-cache')
 hybrid=len(sys.argv)>2 and sys.argv[2]=='hybrid'
 def prepare_recovery():
     if not hybrid:return
@@ -21,6 +23,7 @@ def prepare_recovery():
                     data=archive.read(members[0])
             if hashlib.sha256(data).hexdigest()!=digest:raise RuntimeError('recovery_model_hash_mismatch')
             temp=root/(name+'.tmp');temp.write_bytes(data);temp.replace(dest)
+    except MemoryError:raise
     except Exception:
         print('POSE_RECOVERY_SETUP_UNAVAILABLE',file=sys.stderr)
 # Cross-process locking also protects concurrent sidecars on one host.

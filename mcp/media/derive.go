@@ -26,7 +26,6 @@ import (
 	"image/jpeg"
 	"math"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 )
@@ -69,9 +68,12 @@ func extractImageThumbnail(ctx context.Context, ffmpegPath, inFile, outFile stri
 		"-q:v", "3",
 		outFile,
 	}
-	cmd := exec.CommandContext(cctx, ffmpegPath, args...)
+	cmd := mediaFFmpegCommand(cctx, ffmpegPath, args)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if failure := markMediaResourceFailure(ctx, err, string(out), 0); failure != nil {
+			return failure
+		}
 		return fmt.Errorf("ffmpeg image thumbnail: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
@@ -91,6 +93,9 @@ func extractVideoThumbnail(ctx context.Context, ffmpegPath, inFile, outFile stri
 	for i, seek := range seeks {
 		if err := extractVideoFrame(ctx, ffmpegPath, inFile, outFile, seek, width); err != nil {
 			lastFFErr = err
+			if failure := markMediaResourceFailure(ctx, err, "", 0); failure != nil {
+				return failure
+			}
 			continue
 		}
 		luma, err := meanLumaJPEG(outFile)
@@ -174,14 +179,17 @@ func extractVideoFrame(ctx context.Context, ffmpegPath, inFile, outFile string, 
 		// keyframe-aligned) rather than decoding from frame 0.
 		"-ss", fmt.Sprintf("%.2f", seekSeconds),
 		"-i", inFile,
-		"-vf", fmt.Sprintf("thumbnail=30,scale=%d:-2", width),
+		"-vf", fmt.Sprintf("scale=%d:-2,thumbnail=30", width),
 		"-frames:v", "1",
 		"-q:v", "3",
 		outFile,
 	}
-	cmd := exec.CommandContext(cctx, ffmpegPath, args...)
+	cmd := mediaFFmpegCommand(cctx, ffmpegPath, args)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if failure := markMediaResourceFailure(ctx, err, string(out), 0); failure != nil {
+			return failure
+		}
 		return fmt.Errorf("ffmpeg thumbnail @%.2fs: %w: %s",
 			seekSeconds, err, strings.TrimSpace(string(out)))
 	}
@@ -244,14 +252,17 @@ func extractKeyframe(ctx context.Context, ffmpegPath, inFile, outFile string, se
 		"-loglevel", "error",
 		"-ss", fmt.Sprintf("%.2f", seekSeconds),
 		"-i", inFile,
-		"-vf", fmt.Sprintf("thumbnail=30,scale=%d:-2", width),
+		"-vf", fmt.Sprintf("scale=%d:-2,thumbnail=30", width),
 		"-frames:v", "1",
 		"-q:v", "3",
 		outFile,
 	}
-	cmd := exec.CommandContext(cctx, ffmpegPath, args...)
+	cmd := mediaFFmpegCommand(cctx, ffmpegPath, args)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if failure := markMediaResourceFailure(ctx, err, string(out), 0); failure != nil {
+			return failure
+		}
 		return fmt.Errorf("ffmpeg keyframe @%.2fs: %w: %s",
 			seekSeconds, err, strings.TrimSpace(string(out)))
 	}
@@ -264,7 +275,7 @@ func extractKeyframe(ctx context.Context, ffmpegPath, inFile, outFile string, se
 func makeWaveform(ctx context.Context, ffmpegPath, inFile, outFile string, width, height int) error {
 	cctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, ffmpegPath,
+	cmd := mediaFFmpegCommand(cctx, ffmpegPath, []string{
 		"-y",
 		"-loglevel", "error",
 		"-i", inFile,
@@ -272,9 +283,12 @@ func makeWaveform(ctx context.Context, ffmpegPath, inFile, outFile string, width
 		fmt.Sprintf("showwavespic=s=%dx%d:colors=#888888", width, height),
 		"-frames:v", "1",
 		outFile,
-	)
+	})
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if failure := markMediaResourceFailure(ctx, err, string(out), 0); failure != nil {
+			return failure
+		}
 		return fmt.Errorf("ffmpeg waveform: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil

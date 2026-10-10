@@ -85,11 +85,14 @@ func TestBuildRemoteSmartCropSampleScript(t *testing.T) {
 		remoteSmartCropMarker,
 		remoteSmartCropDetailMarker,
 		"for POS_MS in 162495 174000 187410",
-		"ACTIVE=0",
+		"mktemp -d /var/tmp/apteva-smartcrop-samples-",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("remote sample script missing %q:\n%s", want, script)
 		}
+	}
+	if strings.Contains(script, `extract_one "$POS_MS" &`) {
+		t.Fatal("remote sampling started parallel decoders")
 	}
 	if _, err := buildRemoteSmartCropSampleScript("ffmpeg", url, []int64{1}, 1920); err == nil {
 		t.Fatal("one remote sample position should be rejected")

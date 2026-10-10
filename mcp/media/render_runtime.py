@@ -15,8 +15,23 @@ import sys
 from fractions import Fraction
 
 
+class MediaResourceFailure(RuntimeError):
+    pass
+
+def check_resources(code, log=""):
+    if code in (-9,137) or any(x in log.lower() for x in ("cannot allocate memory","out of memory","media_resource_exhausted")):
+        raise MediaResourceFailure("media_resource_exhausted: process was killed or exhausted memory; fallback stopped")
+
+def bounded_args(args):
+    result=["-filter_threads","1","-filter_complex_threads","1"]
+    for arg in args:
+        if arg=="-i":result.extend(["-threads","1"])
+        result.append(arg)
+    return result
+
 def run(binary, args):
-    p = subprocess.run([binary] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    p = subprocess.run([binary] + (bounded_args(args) if "ffprobe" not in os.path.basename(binary) else args), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    check_resources(p.returncode,p.stderr)
     if p.returncode:
         raise ValueError("media_runtime_failed: " + p.stderr[-3000:])
     return p.stdout, p.stderr
@@ -29,7 +44,8 @@ def probe(binary, source, extra=None):
 
 def encode(binary, args):
     # The parent's progress reader (or remote progress.log) stays authoritative.
-    p = subprocess.run([binary] + args)
+    p = subprocess.run([binary] + bounded_args(args))
+    check_resources(p.returncode)
     if p.returncode:
         raise ValueError("media_runtime_failed: encoding exited " + str(p.returncode))
 
@@ -230,7 +246,7 @@ def packet_signature(binary, source):
 
 
 def run_with_progress(binary, args, progress):
-    p = subprocess.Popen([binary] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    p = subprocess.Popen([binary] + bounded_args(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     log = []
     def read_log():
         target = open(progress, "w") if progress != "pipe:1" else None
@@ -253,6 +269,7 @@ def run_with_progress(binary, args, progress):
     p.wait()
     reader.join()
     err = "".join(log)
+    check_resources(p.returncode,err)
     if p.returncode:
         raise ValueError("media_runtime_failed: " + err[-3000:])
     return out, err

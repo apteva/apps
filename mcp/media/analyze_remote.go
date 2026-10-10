@@ -63,6 +63,9 @@ func analyzeExistingSourceRemote(app *sdk.AppCtx, sourceURL string, row *MediaRo
 		timeoutS = 1
 	}
 	out, exit, runErr := runRemoteAnalysisCommand(cctx, app, hostID, script, timeoutS)
+	if failure := mediaWorkFailure(cctx); failure != nil {
+		return result, failure
+	}
 	if runErr != nil {
 		if cctx.Err() != nil {
 			return result, fmt.Errorf("ANALYSIS_EXECUTOR_UNAVAILABLE: remote analysis host_id=%d timed out: %w", hostID, cctx.Err())
@@ -115,19 +118,19 @@ func analyzeExistingSourceRemote(app *sdk.AppCtx, sourceURL string, row *MediaRo
 func buildRemoteAnalysisScript(ffmpegPath, sourceURL string, row *MediaRow, opts analysisOptions) string {
 	var b strings.Builder
 	b.WriteString("set -u\n")
-	b.WriteString(`WORK=$(mktemp -d /tmp/apteva-media-analyze.XXXXXX)` + "\n")
+	b.WriteString(`WORK=$(mktemp -d /var/tmp/apteva-media-analyze.XXXXXX)` + "\n")
 	b.WriteString(`trap 'rm -rf "$WORK"' EXIT` + "\n")
 	b.WriteString(`cd "$WORK"` + "\n")
 	b.WriteString("VISUAL_RAN=false\nVISUAL_EXIT=0\nAUDIO_RAN=false\nAUDIO_EXIT=0\n")
 
 	if row.HasVideo || row.IsImage {
 		b.WriteString("VISUAL_RAN=true\n")
-		b.WriteString(shellCommand(ffmpegPath, visualAnalysisArgs(sourceURL, row, opts)))
-		b.WriteString(" > visual.log 2>&1\nVISUAL_EXIT=$?\n")
+		b.WriteString(shellCommand(ffmpegPath, limitedFFmpegArgs(visualAnalysisArgs(sourceURL, row, opts))))
+		b.WriteString(" > visual.log 2>&1\nVISUAL_EXIT=$?\nif [ \"$VISUAL_EXIT\" -eq 137 ] || grep -qiE 'out of memory|cannot allocate memory' visual.log; then echo media_resource_exhausted; exit 137; fi\n")
 	}
 	if row.HasAudio {
 		b.WriteString("AUDIO_RAN=true\n")
-		b.WriteString(shellCommand(ffmpegPath, audioAnalysisArgs(sourceURL, opts)))
+		b.WriteString(shellCommand(ffmpegPath, limitedFFmpegArgs(audioAnalysisArgs(sourceURL, opts))))
 		b.WriteString(" > audio.log 2>&1\nAUDIO_EXIT=$?\n")
 	}
 

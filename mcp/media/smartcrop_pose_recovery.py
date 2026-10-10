@@ -85,7 +85,7 @@ class Recovery:
         if ort.__version__ != "1.22.1":
             raise RuntimeError("recovery_runtime_version_mismatch")
         opts = ort.SessionOptions()
-        opts.intra_op_num_threads = 2
+        opts.intra_op_num_threads = 1
         opts.inter_op_num_threads = 1
         self.person = ort.InferenceSession(
             str(self.root / "yolo11n-pose.onnx"),

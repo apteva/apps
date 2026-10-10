@@ -1276,6 +1276,16 @@ func preprocessSmartCropUncached(
 	if mode != "smart" && mode != "center" {
 		return params
 	}
+	ctx, release, admissionErr := acquireMediaWork(ctx, app, 1)
+	if admissionErr != nil {
+		return cropWorkError(params, admissionErr)
+	}
+	defer release()
+	defer func() {
+		if failure := mediaWorkFailure(ctx); failure != nil {
+			out = cropWorkError(out, failure)
+		}
+	}()
 	target := smartCropFocus(op, parsed)
 	audit := &smartCropAudit{AppVersion: app.Manifest().Version, AlgorithmVersion: legacySmartCropAlgorithmVersion, SourceID: sources[0], Requested: smartCropAuditTarget{FocusMs: target.FocusMs, StartMs: target.StartMs, EndMs: target.EndMs, PreferKeyframe: target.PreferKeyframe}, Coverage: "unknown"}
 	if row, e := getMedia(app.AppDB(), projectID, sources[0]); e == nil && row != nil {
@@ -1328,6 +1338,9 @@ func preprocessSmartCropUncached(
 		} else {
 			recordSmartCropFallback(ctx, poseFailureReason(poseErr))
 			// Cancellation cannot start a second detector/renderer.
+			if resourceFailure := markMediaResourceFailure(ctx, poseErr, "", 0); resourceFailure != nil {
+				return params
+			}
 			if ctx.Err() != nil {
 				return params
 			}
@@ -1352,6 +1365,12 @@ func preprocessSmartCropUncached(
 				return out
 			}
 		} else {
+			if failure := markMediaResourceFailure(ctx, v2Err, "", 0); failure != nil {
+				return params
+			}
+			if ctx.Err() != nil {
+				return cropWorkError(params, ctx.Err())
+			}
 			recordSmartCropFallback(ctx, "v2_unavailable")
 			recordSmartCropFallback(ctx, smartCropFailureReason(v2Err))
 			app.Logger().Info("smartcrop v2 fallback to v1",
@@ -1370,6 +1389,12 @@ func preprocessSmartCropUncached(
 				return out
 			}
 		} else {
+			if failure := markMediaResourceFailure(ctx, v2Err, "", 0); failure != nil {
+				return params
+			}
+			if ctx.Err() != nil {
+				return cropWorkError(params, ctx.Err())
+			}
 			recordSmartCropFallback(ctx, "v2_unavailable")
 			recordSmartCropFallback(ctx, smartCropFailureReason(v2Err))
 			app.Logger().Info("smartcrop v2 fallback to v1",

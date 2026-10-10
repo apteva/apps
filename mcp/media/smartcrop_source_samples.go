@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"image"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -118,6 +117,11 @@ func analyzeSmartCropV2Source(
 	positions []int64,
 	srcW, srcH, targetW, targetH int,
 ) (result []smartCropV2Sample, resultErr error) {
+	ctx, release, err := acquireMediaWork(ctx, app, 1)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	defer func() {
 		for _, sample := range result {
 			recordSmartCropEvidence(ctx, "source", sample.point.AtMs, "")
@@ -265,28 +269,23 @@ func buildRemoteSmartCropSampleScript(ffmpegPath, signedURL string, positions []
 	var b strings.Builder
 	detailWidth, detailQuality := smartCropDetailSpec(srcW)
 	b.WriteString("set -u\n")
-	b.WriteString("WORK=$(mktemp -d /tmp/apteva-smartcrop-samples-XXXXXX)\n")
+	b.WriteString(remoteFFmpegResourceGuard)
+	b.WriteString("WORK=$(mktemp -d /var/tmp/apteva-smartcrop-samples-XXXXXX)\n")
 	b.WriteString("trap 'rm -rf \"$WORK\"' EXIT\n")
 	fmt.Fprintf(&b, "FFMPEG=%s\n", shellQuote(ffmpegPath))
 	fmt.Fprintf(&b, "SIGNED_URL=%s\n", shellQuote(signedURL))
 	b.WriteString("extract_one() {\n")
 	b.WriteString("  POS_MS=$1\n")
 	b.WriteString("  POS_SEC=$(awk -v p=\"$POS_MS\" 'BEGIN{printf \"%.3f\", p/1000}')\n")
-	fmt.Fprintf(&b, "  \"$FFMPEG\" -nostdin -y -loglevel error -ss \"$POS_SEC\" -i \"$SIGNED_URL\" -filter_complex '[0:v]split=2[a][b];[a]scale=%d:-2[analysis];[b]scale=%d:-2[detail]' -map '[analysis]' -frames:v 1 -q:v %d \"$WORK/$POS_MS.analysis.jpg\" -map '[detail]' -frames:v 1 -q:v %d \"$WORK/$POS_MS.detail.jpg\" >/dev/null 2>&1 || true\n",
+	fmt.Fprintf(&b, "  media_ffmpeg -nostdin -y -loglevel error -ss \"$POS_SEC\" -i \"$SIGNED_URL\" -filter_complex '[0:v]split=2[a][b];[a]scale=%d:-2[analysis];[b]scale=%d:-2[detail]' -map '[analysis]' -threads 1 -frames:v 1 -q:v %d \"$WORK/$POS_MS.analysis.jpg\" -map '[detail]' -threads 1 -frames:v 1 -q:v %d \"$WORK/$POS_MS.detail.jpg\" >/dev/null || true\n",
 		remoteSmartCropAnalysisWidth, detailWidth,
 		remoteSmartCropAnalysisQuality, detailQuality)
 	b.WriteString("}\n")
-	b.WriteString("ACTIVE=0\n")
 	b.WriteString("for POS_MS in")
 	for _, position := range positions {
 		fmt.Fprintf(&b, " %d", position)
 	}
-	b.WriteString("; do\n")
-	b.WriteString("  extract_one \"$POS_MS\" &\n")
-	b.WriteString("  ACTIVE=$((ACTIVE+1))\n")
-	b.WriteString("  if [ \"$ACTIVE\" -ge 4 ]; then wait || true; ACTIVE=0; fi\n")
-	b.WriteString("done\n")
-	b.WriteString("wait || true\n")
+	b.WriteString("; do\n  extract_one \"$POS_MS\"\ndone\n")
 	// Instances caps command output at roughly 1 MiB. The released 320px/q3
 	// analysis frame must never be recompressed because that would change generic
 	// saliency decisions. Only the supplemental detail frame is compressed more
@@ -298,7 +297,7 @@ func buildRemoteSmartCropSampleScript(ffmpegPath, signedURL string, positions []
 	b.WriteString("    SMALL=\"$SOURCE.small.jpg\"\n")
 	// Retain the pixels needed by the face detector; reducing JPEG quality is
 	// safer than shrinking back below the resolution that triggered this pass.
-	b.WriteString("    \"$FFMPEG\" -nostdin -y -loglevel error -i \"$SOURCE\" -frames:v 1 -q:v 14 \"$SMALL\" >/dev/null 2>&1 && mv \"$SMALL\" \"$SOURCE\"\n")
+	b.WriteString("    media_ffmpeg -nostdin -y -loglevel error -i \"$SOURCE\" -threads 1 -frames:v 1 -q:v 14 \"$SMALL\" >/dev/null && mv \"$SMALL\" \"$SOURCE\"\n")
 	b.WriteString("  done\n")
 	b.WriteString("fi\n")
 	b.WriteString("COUNT=0\n")
@@ -415,7 +414,7 @@ func analyzeSmartCropV2Input(
 
 	results := make([]*smartCropV2Sample, len(positions))
 	errs := make([]error, len(positions))
-	sem := make(chan struct{}, smartCropV2MaxParallelDownloads)
+	sem := make(chan struct{}, 1)
 	var wg sync.WaitGroup
 	for i, pos := range positions {
 		i, pos := i, pos
@@ -467,6 +466,9 @@ func analyzeSmartCropV2Input(
 		if result != nil {
 			samples = append(samples, *result)
 			continue
+		}
+		if failure := resourceFailure(errs[i], "", 0); failure != nil {
+			return nil, failure
 		}
 		if firstErr == nil {
 			firstErr = errs[i]
@@ -540,11 +542,14 @@ func extractSmartCropFramePair(
 	args := []string{
 		"-y", "-loglevel", "error", "-ss", fmt.Sprintf("%.3f", seekSeconds), "-i", input,
 		"-filter_complex", filter,
-		"-map", "[analysis]", "-frames:v", "1", "-q:v", strconv.Itoa(remoteSmartCropAnalysisQuality), analysisOutput,
-		"-map", "[detail]", "-frames:v", "1", "-q:v", strconv.Itoa(detailQuality), detailOutput,
+		"-map", "[analysis]", "-threads", "1", "-frames:v", "1", "-q:v", strconv.Itoa(remoteSmartCropAnalysisQuality), analysisOutput,
+		"-map", "[detail]", "-threads", "1", "-frames:v", "1", "-q:v", strconv.Itoa(detailQuality), detailOutput,
 	}
-	out, err := exec.CommandContext(cctx, ffmpegPath, args...).CombinedOutput()
+	out, err := mediaFFmpegCommand(cctx, ffmpegPath, args).CombinedOutput()
 	if err != nil {
+		if failure := markMediaResourceFailure(ctx, err, string(out), 0); failure != nil {
+			return failure
+		}
 		return fmt.Errorf("ffmpeg smart crop frame pair @%.3fs: %w: %s", seekSeconds, err, strings.TrimSpace(string(out)))
 	}
 	return nil
@@ -562,12 +567,15 @@ func extractSmartCropFrame(ctx context.Context, ffmpegPath, input, output string
 		"-ss", fmt.Sprintf("%.3f", seekSeconds),
 		"-i", input,
 		"-vf", fmt.Sprintf("scale=%d:-2", width),
-		"-frames:v", "1",
+		"-threads", "1", "-frames:v", "1",
 		"-q:v", "3",
 		output,
 	}
-	out, err := exec.CommandContext(cctx, ffmpegPath, args...).CombinedOutput()
+	out, err := mediaFFmpegCommand(cctx, ffmpegPath, args).CombinedOutput()
 	if err != nil {
+		if failure := markMediaResourceFailure(ctx, err, string(out), 0); failure != nil {
+			return failure
+		}
 		return fmt.Errorf("ffmpeg smart crop frame @%.3fs: %w: %s", seekSeconds, err, strings.TrimSpace(string(out)))
 	}
 	return nil

@@ -1,7 +1,8 @@
 """Bounded local CPU pose inference. No external inference or uploads."""
 import os
-os.environ.setdefault('OMP_NUM_THREADS','2')
-os.environ.setdefault('OPENBLAS_NUM_THREADS','2')
+os.environ['OMP_NUM_THREADS']='1'
+os.environ['OPENBLAS_NUM_THREADS']='1'
+os.environ['MKL_NUM_THREADS']='1'
 import sys,json,math,time,subprocess,tempfile,hashlib,contextlib
 import numpy as np
 import mediapipe as mp
@@ -136,9 +137,11 @@ def extract_frame(req,at,path,deadline):
         if time.monotonic()>=deadline:
             raise PoseRuntimeFailure('pose_source_read_timeout',at,attempt-1)
         if os.path.exists(path):os.unlink(path)
-        args=[req['ffmpeg'],'-nostdin','-y','-loglevel','error','-threads','2','-ss',str(at/1000),'-i',req['source'],'-frames:v','1','-threads','2',path]
+        args=[req['ffmpeg'],'-nostdin','-y','-filter_threads','1','-filter_complex_threads','1','-loglevel','error','-threads','1','-ss',str(at/1000),'-i',req['source'],'-frames:v','1','-threads','1',path]
         try:
             run=subprocess.run(args,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=min(15,max(.01,deadline-time.monotonic())))
+            if run.returncode in (-9,137) or any(x in (run.stderr or b'').lower() for x in (b'cannot allocate memory',b'out of memory')):
+                raise PoseRuntimeFailure('media_resource_exhausted',at,attempt)
             if run.returncode==0 and os.path.isfile(path) and os.path.getsize(path)>0:
                 return attempt
         except subprocess.TimeoutExpired:
@@ -218,6 +221,8 @@ def main():
                             sample['recovery']['tracker_reset']='independent_head_or_torso_disagreement'
                             sample['recovery']['tracker_resets']=tracker_resets
                     except Exception as recovery_error:
+                        if isinstance(recovery_error,MemoryError) or any(x in str(recovery_error).lower() for x in ("out of memory","cannot allocate memory","bad_alloc")):
+                            raise PoseRuntimeFailure("media_resource_exhausted",at,1)
                         recovery_unavailable=True
                         code=str(recovery_error) if str(recovery_error) in {'recovery_model_hash_mismatch','recovery_runtime_version_mismatch'} else ('recovery_model_missing' if isinstance(recovery_error,FileNotFoundError) else 'recovery_inference_failed')
                         sample['recovery']={'status':'runtime_unavailable','mode':'same_frame','failure_code':code}
@@ -231,6 +236,6 @@ if __name__=='__main__':
     except Exception as error:
         # Only stable, allowlisted codes and numeric context cross the boundary.
         codes={'pose_runtime_version_mismatch','pose_model_hash_mismatch','pose_sample_budget_exceeded','pose_source_geometry_mismatch'}
-        failure={'code':error.code,'at_ms':error.at_ms,'attempts':error.attempts} if isinstance(error,PoseRuntimeFailure) else {'code':str(error) if str(error) in codes else 'pose_inference_failed'}
+        failure={'code':error.code,'at_ms':error.at_ms,'attempts':error.attempts} if isinstance(error,PoseRuntimeFailure) else {'code':'media_resource_exhausted' if isinstance(error,MemoryError) else (str(error) if str(error) in codes else 'pose_inference_failed')}
         print('APTEVA_POSE_ERROR:'+json.dumps(failure),flush=True)
         sys.exit(1)

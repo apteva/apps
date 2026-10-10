@@ -16,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -185,6 +184,11 @@ func cleanupStaleTranscriptAudioDerivations(ctx context.Context, app *sdk.AppCtx
 }
 
 func prepareTranscriptAudioLocal(ctx context.Context, app *sdk.AppCtx, sc *storageClient, projectID, sourceURL, fileID string, expectedMs int64) (*transcriptAudioEvidence, error) {
+	ctx, release, admissionErr := acquireMediaWork(ctx, app, 1)
+	if admissionErr != nil {
+		return nil, admissionErr
+	}
+	defer release()
 	ffmpegPath := strings.TrimSpace(app.Config().Get("ffmpeg_path"))
 	if ffmpegPath == "" {
 		ffmpegPath = "ffmpeg"
@@ -289,6 +293,9 @@ func runValidatedTranscriptAudioFFmpeg(ctx context.Context, ffmpegPath, sourceUR
 	if primaryErr == nil {
 		return false, validation, nil
 	}
+	if failure := markMediaResourceFailure(ctx, primaryErr, string(primaryOut), 0); failure != nil {
+		return false, nil, failure
+	}
 	primaryFailure := transcriptAudioFFmpegFailure(primaryErr, primaryOut)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return false, nil, fmt.Errorf("ffmpeg transcript audio CBR: %w: %s", ctxErr, primaryFailure)
@@ -314,7 +321,7 @@ func runValidatedTranscriptAudioFFmpeg(ctx context.Context, ffmpegPath, sourceUR
 }
 
 func executeTranscriptAudioFFmpeg(ctx context.Context, ffmpegPath string, args []string, outPath string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	cmd := mediaFFmpegCommand(ctx, ffmpegPath, args)
 	logs := &transcriptAudioLogBuffer{max: transcriptAudioLogMaxBytes}
 	cmd.Stdout = logs
 	cmd.Stderr = logs
@@ -381,6 +388,11 @@ type remoteTranscriptAudioResult struct {
 }
 
 func prepareTranscriptAudioRemote(ctx context.Context, app *sdk.AppCtx, projectID string, hostID int64, sourceURL, fileID string, expectedMs int64) (*transcriptAudioEvidence, error) {
+	ctx, release, admissionErr := acquireMediaWork(ctx, app, 1)
+	if admissionErr != nil {
+		return nil, admissionErr
+	}
+	defer release()
 	publicURL, err := resolvePublicURL(app)
 	if err != nil {
 		return nil, fmt.Errorf("remote transcript audio requires a public storage URL: %w", err)
@@ -441,6 +453,7 @@ type remoteTranscriptAudioScriptInputs struct {
 func buildRemoteTranscriptAudioScript(in remoteTranscriptAudioScriptInputs) string {
 	var b strings.Builder
 	b.WriteString("set -euo pipefail\n")
+	b.WriteString(remoteFFmpegResourceGuard)
 	fmt.Fprintf(&b, "WORK=$(mktemp -d %s)\n", shellQuote(fmt.Sprintf("/var/tmp/apteva-media-transcript-audio-%s-XXXXXX", in.FileID)))
 	b.WriteString(`mkdir -p "$WORK"; cd "$WORK"` + "\n")
 	b.WriteString(`trap 'cd /tmp && rm -rf "$WORK"' EXIT` + "\n")
@@ -455,7 +468,7 @@ func buildRemoteTranscriptAudioScript(in remoteTranscriptAudioScriptInputs) stri
 	fmt.Fprintf(&b, "export EXPECTED_DURATION_MS=%d\n", in.ExpectedDurationMs)
 	b.WriteString(remoteTranscriptAudioValidator())
 	b.WriteString(`CBR_STATUS=0` + "\n")
-	b.WriteString(`"$FFMPEG" -y -loglevel error -nostdin -i "$SIGNED_URL" -vn -map 0:a:0 -ac 1 -ar 16000 -af "$AUDIO_FILTER" -c:a libmp3lame -b:a 64k audio.mp3 >cbr.log 2>&1 || CBR_STATUS=$?` + "\n")
+	b.WriteString(`media_ffmpeg -y -loglevel error -nostdin -i "$SIGNED_URL" -vn -map 0:a:0 -ac 1 -ar 16000 -af "$AUDIO_FILTER" -threads 1 -c:a libmp3lame -b:a 64k audio.mp3 >cbr.log 2>&1 || CBR_STATUS=$?` + "\n")
 	b.WriteString(`if [ "$CBR_STATUS" -eq 0 ] && [ -s audio.mp3 ] && validate_audio audio.mp3; then` + "\n")
 	b.WriteString(`  AUDIO_PATH=audio.mp3` + "\n")
 	b.WriteString(`  AUDIO_CONTENT_TYPE=audio/mpeg` + "\n")
@@ -466,7 +479,7 @@ func buildRemoteTranscriptAudioScript(in remoteTranscriptAudioScriptInputs) stri
 	b.WriteString(`  tail -c "$AUDIO_LOG_TAIL_BYTES" cbr.log >&2 2>/dev/null || true` + "\n")
 	b.WriteString(`  rm -f audio.mp3 audio.wav` + "\n")
 	b.WriteString(`  PCM_STATUS=0` + "\n")
-	b.WriteString(`  "$FFMPEG" -y -loglevel error -nostdin -i "$SIGNED_URL" -vn -map 0:a:0 -ac 1 -ar 16000 -af "$AUDIO_FILTER" -c:a pcm_s16le -f wav audio.wav >pcm.log 2>&1 || PCM_STATUS=$?` + "\n")
+	b.WriteString(`  media_ffmpeg -y -loglevel error -nostdin -i "$SIGNED_URL" -vn -map 0:a:0 -ac 1 -ar 16000 -af "$AUDIO_FILTER" -threads 1 -c:a pcm_s16le -f wav audio.wav >pcm.log 2>&1 || PCM_STATUS=$?` + "\n")
 	b.WriteString(`  if [ "$PCM_STATUS" -ne 0 ] || [ ! -s audio.wav ] || ! validate_audio audio.wav; then` + "\n")
 	b.WriteString(`    if [ "$PCM_STATUS" -eq 0 ]; then PCM_STATUS=1; fi` + "\n")
 	b.WriteString(`    echo "ffmpeg PCM WAV transcript audio failed (exit=$PCM_STATUS)" >&2` + "\n")

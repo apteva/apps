@@ -180,7 +180,7 @@ func persistTrimEncodingSettings(app *sdk.AppCtx, row *RenderRow, plan *opPlan) 
 // Explicit VUI avoids relying on decoder/filter side data when a source's
 // colour signaling exists only in its container.
 func trimX265Params(video trimVideoEncoding) string {
-	params := "pools=2:frame-threads=2:log-level=error"
+	params := "pools=1:frame-threads=1:log-level=error"
 	for _, entry := range []struct {
 		name, value string
 		codes       map[string]string

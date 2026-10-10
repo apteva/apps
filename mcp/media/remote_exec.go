@@ -266,6 +266,9 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 	primaryOutput, hits, misses := splitRemoteRenderDiagnostics(out)
 	recordRenderMetric(app, row, "source_cache_hits", hits)
 	recordRenderMetric(app, row, "source_cache_misses", misses)
+	if failure := mediaWorkFailure(ctx); failure != nil {
+		return 0, failure
+	}
 	if runErr != nil {
 		if ctx.Err() != nil {
 			return 0, ctx.Err()
@@ -351,9 +354,9 @@ func (e *remoteExecutor) buildScript(
 	}
 	threads := e.encoderThreads
 	if threads <= 0 {
-		threads = 2
+		threads = 1
 	}
-	args = append([]string{"-filter_threads", "1", "-filter_complex_threads", "1"}, args...)
+	args = limitedFFmpegArgs(args)
 	args = append(args, "-threads", strconv.Itoa(threads), "./"+plan.Filename)
 
 	sourceCacheMaxBytes := e.sourceCacheMaxBytes

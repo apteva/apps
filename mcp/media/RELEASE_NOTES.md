@@ -1,3 +1,26 @@
+## 0.14.32 — bounded Media worker memory
+
+Previews (including legacy), source sampling, indexing, transcription audio
+preparation and renders now share host admission. The default capacity and render
+pool are two: two one-unit operations can overlap, or one video render uses
+both units. Nested operations reuse admission without deadlocking. Operator
+capacity overrides remain available for hosts with more memory. Local/remote
+supplemental sampling launches one decoder at a time.
+
+FFmpeg decoders and filters use one thread; encoder defaults and x265 pools are
+reduced to one. ONNX/BLAS work is bounded. Thumbnail selection resizes before
+buffering its 30-frame window, avoiding large UHD frame buffers. Both Full and
+hybrid pose environments/package caches and remote scratch use disk-backed
+`/var/tmp` instead of tmpfs. Existing Full caches can be retired after the new
+runtime has been verified and old workers have stopped.
+
+Killed workers (possible OOM), allocation failures and model memory errors stop
+candidate/codec/engine recovery. Crop previews return `media_resource_exhausted`;
+failed planning cannot queue a render, including explicit contain fallback.
+Ordinary codec failures retain bounded recovery. No crop geometry, originals,
+transcripts or approval state are changed by this release. Accurate trim timing,
+frame validation and the 0.14.31 transcription signal guards are retained.
+
 ## 0.14.31 — stable, validated transcription audio
 
 Transcription proxies used an 8 kHz low-pass at the 16 kHz Nyquist boundary.

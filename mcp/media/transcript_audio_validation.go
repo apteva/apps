@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -42,9 +41,12 @@ func transcriptAudioValidationArgs(path string) []string {
 
 func validateTranscriptAudio(ctx context.Context, ffmpeg, path string, expectedMs int64) (*transcriptAudioValidation, error) {
 	logs := &transcriptAudioLogBuffer{max: transcriptAudioLogMaxBytes}
-	cmd := exec.CommandContext(ctx, ffmpeg, transcriptAudioValidationArgs(path)...)
+	cmd := mediaFFmpegCommand(ctx, ffmpeg, transcriptAudioValidationArgs(path))
 	cmd.Stdout, cmd.Stderr = logs, logs
 	if err := cmd.Run(); err != nil {
+		if failure := markMediaResourceFailure(ctx, err, string(logs.Bytes()), 0); failure != nil {
+			return nil, failure
+		}
 		return nil, fmt.Errorf("transcript_audio_invalid: decode: %s", transcriptAudioFFmpegFailure(err, logs.Bytes()))
 	}
 	v, err := parseTranscriptAudioValidation(string(logs.Bytes()))
@@ -126,7 +128,7 @@ func (v *transcriptAudioValidation) check(expectedMs int64) error {
 // is a separate review, not something signal validation can prove.
 func remoteTranscriptAudioValidator() string {
 	return fmt.Sprintf(`validate_audio() {
-  "$FFMPEG" -hide_banner -nostats -nostdin -v info -xerror -err_detect explode -i "$1" -map 0:a:0 -vn -af %s -f null - >validation.log 2>&1 || { tail -c "$AUDIO_LOG_TAIL_BYTES" validation.log >&2; return 1; }
+  "$FFMPEG" -threads 1 -filter_threads 1 -filter_complex_threads 1 -hide_banner -nostats -nostdin -v info -xerror -err_detect explode -i "$1" -map 0:a:0 -vn -af %s -f null - >validation.log 2>&1 || { AUDIO_VALIDATE_STATUS=$?; if [ "$AUDIO_VALIDATE_STATUS" -eq 137 ] || grep -qiE 'out of memory|cannot allocate memory' validation.log; then echo media_resource_exhausted >&2; exit 137; fi; tail -c "$AUDIO_LOG_TAIL_BYTES" validation.log >&2; return 1; }
   awk -v expected="$EXPECTED_DURATION_MS" '
   /Parsed_astats_/ {
     sub(/^.*\] /, ""); i=index($0, ": "); if(i) { k=substr($0,1,i-1); v=substr($0,i+2); seen[k]=1; stats[k]=v; }

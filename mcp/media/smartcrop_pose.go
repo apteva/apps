@@ -44,13 +44,12 @@ func poseRuntimeIdentity(engine string) string {
 	return poseRuntimeVersion
 }
 
-// The additional isolated hybrid runtime must not consume a small host's
-// memory-backed /tmp. Pure Full retains its existing cache unchanged.
+// Both isolated runtimes live on disk, including models and package caches.
 func poseRemoteRuntimeRoot(hybrid bool) string {
 	if hybrid {
 		return "/var/tmp/apteva-media-pose/" + poseHybridRuntimeVersion
 	}
-	return "/tmp/apteva-media-pose/" + poseRuntimeVersion
+	return "/var/tmp/apteva-media-pose/" + poseRuntimeVersion
 }
 func poseAlgorithmIdentity(engine string) string {
 	if engine == "hybrid" {
@@ -235,7 +234,7 @@ func parsePoseRuntimeFailure(output string) *poseRuntimeFailure {
 			continue
 		}
 		switch failure.Code {
-		case "pose_source_frame_unavailable", "pose_source_read_timeout", "pose_runtime_version_mismatch", "pose_model_hash_mismatch", "pose_sample_budget_exceeded", "pose_source_geometry_mismatch", "pose_inference_failed":
+		case "media_resource_exhausted", "pose_source_frame_unavailable", "pose_source_read_timeout", "pose_runtime_version_mismatch", "pose_model_hash_mismatch", "pose_sample_budget_exceeded", "pose_source_geometry_mismatch", "pose_inference_failed":
 		default:
 			continue
 		}
@@ -300,6 +299,7 @@ func runPose(ctx context.Context, app *sdk.AppCtx, host int64, req poseRequest) 
 		}{{"runtime.py", []byte(poseRuntime)}, {"smartcrop_pose_recovery.py", []byte(poseRecoveryRuntime)}, {"setup.py", []byte(poseSetup)}, {"request.json", raw}} {
 			script += fmt.Sprintf("printf '%%s' %s | base64 -d > \"$WORK/%s\"\n", shellQuote(base64.StdEncoding.EncodeToString(file.data)), file.name)
 		}
+		script += "export TMPDIR=\"$WORK\" OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1\n"
 		script += "POSE_ROOT=" + shellQuote(remoteRoot) + "\npython3 \"$WORK/setup.py\" \"$POSE_ROOT\"" + setupMode + "\n"
 		// The model is verified in the persistent runtime directory.
 		script += "\"$POSE_ROOT/venv/bin/python\" \"$WORK/runtime.py\" \"$WORK/request.json\""
@@ -312,8 +312,15 @@ func runPose(ctx context.Context, app *sdk.AppCtx, host int64, req poseRequest) 
 		if stopErr := finish(); stopErr != nil {
 			return nil, fmt.Errorf("pose_cancellation_failed")
 		}
+		if failure := parsePoseRuntimeFailure(out); failure != nil && failure.Code == "media_resource_exhausted" {
+			markMediaResourceFailure(ctx, failure, "", code)
+			return nil, failure
+		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
+		}
+		if failure := markMediaResourceFailure(ctx, err, out, code); failure != nil {
+			return nil, failure
 		}
 		if err != nil || code != 0 {
 			if failure := parsePoseRuntimeFailure(out); failure != nil {
@@ -355,6 +362,9 @@ func runPose(ctx context.Context, app *sdk.AppCtx, host int64, req poseRequest) 
 			setup := exec.CommandContext(ctx, "python3", args...)
 			configureRuntimeProcess(setup)
 			if err := setup.Run(); err != nil {
+				if failure := markMediaResourceFailure(ctx, err, "", 0); failure != nil {
+					return nil, failure
+				}
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
@@ -365,6 +375,13 @@ func runPose(ctx context.Context, app *sdk.AppCtx, host int64, req poseRequest) 
 		cmd := exec.CommandContext(ctx, python, filepath.Join(dir, "runtime.py"), filepath.Join(dir, "request.json"))
 		configureRuntimeProcess(cmd)
 		out, err := cmd.Output()
+		if failure := parsePoseRuntimeFailure(string(out)); failure != nil && failure.Code == "media_resource_exhausted" {
+			markMediaResourceFailure(ctx, failure, "", 0)
+			return nil, failure
+		}
+		if failure := markMediaResourceFailure(ctx, err, string(out), 0); failure != nil {
+			return nil, failure
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()

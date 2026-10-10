@@ -23,8 +23,14 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.31
+version: 0.14.32
 description: |
+  v0.14.32 bounds host memory pressure: previews, sampling, indexing,
+  transcription audio and renders share admission with a conservative two-unit
+  default. Decoder/filter and model thread budgets are reduced; thumbnails
+  resize before buffering frames. Both pose runtimes use disk-backed /var/tmp.
+  Killed/allocation-failed workers stop fallback and return a resource error.
+  Existing crop engines, accurate timing and audio validation remain available.
   v0.14.31 repairs transcription audio: explicit 16 kHz double-precision
   speech filtering uses a 7.5 kHz cutoff below Nyquist. MP3 and PCM fallback
   must pass full floating-point decode/signal/duration checks before upload.
@@ -658,7 +664,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.31
+    ref: media/v0.14.32
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -748,17 +754,17 @@ config_schema:
     description: Optional isolated Python with MediaPipe 0.10.21, NumPy 1.26.4 and (for hybrid) ONNX Runtime 1.22.1 plus verified recovery models. Blank provisions a managed Python 3.11 environment. Remote hosts always use the isolated managed runtime.
   - name: media_work_capacity
     type: text
-    default: "4"
+    default: "2"
     label: Media processing capacity
-    description: Shared per-host work budget. Video renders use two units; indexing and previews use one.
+    description: Shared per-host budget for previews, sampling, indexing, audio preparation and renders. Default 2 permits two one-unit operations or one two-unit video render. Sampling is serial within each operation. Increase only with sufficient host RAM.
   - name: render_encoder_threads
     type: text
-    default: "2"
+    default: "1"
     label: Encoder threads per FFmpeg render
-    description: Caps CPU use per encoder to keep simultaneous renders responsive.
+    description: Encoder thread limit; default 1. Decoders and filters are capped at one thread independently to bound memory.
   - name: render_pool_size
     type: text
-    default: "4"
+    default: "2"
     label: Render pool size
     description: Concurrent ffmpeg renders. Each render can use multiple CPU cores; size for available CPUs.
   - name: render_timeout_seconds
@@ -961,7 +967,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// Render pool runs alongside the indexer worker. Pool size is
 	// independent: the indexer is a single scheduled tick, the pool
 	// is N hot goroutines.
-	poolSize := readConfigInt("render_pool_size", 4)
+	poolSize := readConfigInt("render_pool_size", 2)
 	startRenderPool(ctx, poolSize)
 	// Transcription workers consume manual requests even with automatic
 	// discovery disabled; provider availability gates execution.

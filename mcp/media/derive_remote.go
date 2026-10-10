@@ -188,7 +188,8 @@ type remoteIndexScriptInputs struct {
 func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 	var b strings.Builder
 	b.WriteString("set -euo pipefail\n")
-	b.WriteString("WORK=$(mktemp -d /tmp/apteva-media-index-XXXXXXXXXXXX)\n")
+	b.WriteString(remoteFFmpegResourceGuard)
+	b.WriteString("WORK=$(mktemp -d /var/tmp/apteva-media-index-XXXXXXXXXXXX)\n")
 	b.WriteString(`mkdir -p "$WORK"; cd "$WORK"` + "\n")
 	b.WriteString(`trap 'cd /tmp && rm -rf "$WORK"' EXIT` + "\n")
 
@@ -255,7 +256,7 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 	// the local sidecar produces.
 	fmt.Fprintf(&b, `if [ "$HAS_VIDEO" -gt 0 ]; then`+"\n")
 	fmt.Fprintf(&b, `  if [ "$IS_IMAGE" = "1" ]; then`+"\n")
-	fmt.Fprintf(&b, `    "$FFMPEG" -y -loglevel error -i "$SIGNED_URL" -frames:v 1 -vf "scale=$THUMB_WIDTH:-2" -q:v 2 thumb.jpg`+"\n")
+	fmt.Fprintf(&b, `    media_ffmpeg -y -loglevel error -i "$SIGNED_URL" -threads 1 -frames:v 1 -vf "scale=$THUMB_WIDTH:-2" -q:v 2 thumb.jpg`+"\n")
 	fmt.Fprintf(&b, `  else`+"\n")
 	// Parse duration from probe.json — first numeric "duration":"…" we
 	// find (the format-level one). Empty → DUR_SEC=0 → only the
@@ -266,7 +267,7 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 	// output (parse fail / corrupt JPEG) becomes 0, which is treated
 	// as "too dark" and triggers the next attempt.
 	b.WriteString(`    luma_of() {` + "\n")
-	b.WriteString(`      "$FFMPEG" -hide_banner -nostats -i "$1" -vf "signalstats,metadata=print:file=-" -f null /dev/null 2>&1 \` + "\n")
+	b.WriteString(`      media_ffmpeg -hide_banner -nostats -i "$1" -vf "signalstats,metadata=print:file=-" -f null /dev/null 2>&1 \` + "\n")
 	b.WriteString(`        | sed -n 's/.*signalstats\.YAVG=\([0-9.]*\).*/\1/p' | head -1` + "\n")
 	b.WriteString(`    }` + "\n")
 	// Build seek list: configured THUMB_SEEK first, then 5/15/30/50/
@@ -286,7 +287,7 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 	// ffmpeg call with "|| continue" — codec/seek failure on one
 	// attempt mustn't abort the whole script.
 	b.WriteString(`    for S in $SEEKS; do` + "\n")
-	b.WriteString(`      "$FFMPEG" -y -loglevel error -ss "$S" -i "$SIGNED_URL" -vf "thumbnail=30,scale=$THUMB_WIDTH:-2" -frames:v 1 -q:v 3 thumb.jpg 2>/dev/null || continue` + "\n")
+	b.WriteString(`      media_ffmpeg -y -loglevel error -ss "$S" -i "$SIGNED_URL" -vf "scale=$THUMB_WIDTH:-2,thumbnail=30" -threads 1 -frames:v 1 -q:v 3 thumb.jpg || continue` + "\n")
 	b.WriteString(`      [ ! -s thumb.jpg ] && continue` + "\n")
 	b.WriteString(`      L=$(luma_of thumb.jpg)` + "\n")
 	b.WriteString(`      [ -z "$L" ] && continue` + "\n")
@@ -312,7 +313,7 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 	// Waveform for audio-only sources (skip if there's a video stream
 	// — that gets the thumbnail above).
 	fmt.Fprintf(&b, `if [ "$HAS_AUDIO" -gt 0 ] && [ "$HAS_VIDEO" -eq 0 ]; then`+"\n")
-	fmt.Fprintf(&b, `  "$FFMPEG" -y -loglevel error -i "$SIGNED_URL" -filter_complex "showwavespic=s=%dx%d:colors=#7f7f7f" -frames:v 1 waveform.png`+"\n",
+	fmt.Fprintf(&b, `  media_ffmpeg -y -loglevel error -i "$SIGNED_URL" -filter_complex "showwavespic=s=%dx%d:colors=#7f7f7f" -threads 1 -frames:v 1 waveform.png`+"\n",
 		in.WaveW, in.WaveH)
 	// Same guard as the thumbnail branch — empty output would crash
 	// curl's -F upload with the unhelpful exit 26 "read error".
@@ -373,7 +374,7 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 		// Extract with the smart-frame filter — same as thumbnail. If
 		// ffmpeg fails for this position, skip and continue to the
 		// next; one failed frame mustn't kill the whole loop.
-		b.WriteString(`    "$FFMPEG" -y -loglevel error -ss "$POS_SEC" -i "$SIGNED_URL" -vf "thumbnail=30,scale=$THUMB_WIDTH:-2" -frames:v 1 -q:v 3 "$KF_FILE" 2>/dev/null || { POS_SEC=$(awk -v p="$POS_SEC" -v iv="$EFFECTIVE_INTERVAL" 'BEGIN{printf "%.3f", p+iv}'); continue; }` + "\n")
+		b.WriteString(`    media_ffmpeg -y -loglevel error -ss "$POS_SEC" -i "$SIGNED_URL" -vf "scale=$THUMB_WIDTH:-2,thumbnail=30" -threads 1 -frames:v 1 -q:v 3 "$KF_FILE" || { POS_SEC=$(awk -v p="$POS_SEC" -v iv="$EFFECTIVE_INTERVAL" 'BEGIN{printf "%.3f", p+iv}'); continue; }` + "\n")
 		b.WriteString(`    [ ! -s "$KF_FILE" ] && { POS_SEC=$(awk -v p="$POS_SEC" -v iv="$EFFECTIVE_INTERVAL" 'BEGIN{printf "%.3f", p+iv}'); continue; }` + "\n")
 		// Upload the keyframe to storage under /.media/keyframe/.
 		// Position-tagged filename so storage's per-folder uniqueness

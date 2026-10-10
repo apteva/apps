@@ -121,7 +121,7 @@ func renderWorker(app *sdk.AppCtx, id int) {
 		if err != nil {
 			log.Warn("render worker: remote backend disabled", "host_id", hostID, "err", err)
 		} else {
-			remote.encoderThreads = parseConfigIntFallback(cfg.Get("render_encoder_threads"), 2)
+			remote.encoderThreads = parseConfigIntFallback(cfg.Get("render_encoder_threads"), 1)
 			log.Info("render worker: remote backend enabled", "host_id", hostID, "source_cache_max_bytes", sourceCacheMaxBytes)
 		}
 	}
@@ -234,6 +234,14 @@ func runOneRender(app *sdk.AppCtx, row *RenderRow, local *localExecutor, remote 
 		}
 	} else if err == nil {
 		recordRenderMetric(app, row, "result_cache_hit", true)
+	}
+	if failure := mediaWorkFailure(ctx); failure != nil {
+		if outputFileID > 0 {
+			retainUncommittedRenderOutput(app, row, outputFileID, failure.Error())
+		}
+		_ = renderMarkFailed(db, row.ID, failure.Error())
+		emitRenderFailed(app, row.ID, row.ProjectID, row.Operation, failure.Error())
+		return
 	}
 	if err != nil {
 		if errors.Is(err, errRemoteCancellation) {

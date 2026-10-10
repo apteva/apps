@@ -420,6 +420,9 @@ func analyzeExistingSourceLocal(app *sdk.AppCtx, sourceURL string, row *MediaRow
 		}
 		result.Issues = append(result.Issues, visualIssues(result.Visual)...)
 	}
+	if failure := mediaWorkFailure(cctx); failure != nil {
+		return result, failure
+	}
 	if row.HasAudio {
 		commandsRun++
 		log, runErr := runAnalysisFFmpeg(cctx, ffmpegPath, audioAnalysisArgs(sourceURL, opts))

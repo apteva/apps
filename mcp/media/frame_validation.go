@@ -180,7 +180,7 @@ func (c *analysisLogCollector) result() string {
 }
 
 func runCompactedFFmpeg(ctx context.Context, binary string, args []string) (string, error) {
-	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd := mediaFFmpegCommand(ctx, binary, args)
 	reader, writer := io.Pipe()
 	cmd.Stdout = writer
 	cmd.Stderr = writer
@@ -201,6 +201,9 @@ func runCompactedFFmpeg(ctx context.Context, binary string, args []string) (stri
 	err := <-done
 	if scan.Err() != nil {
 		return logs.result(), scan.Err()
+	}
+	if failure := markMediaResourceFailure(ctx, err, logs.result(), 0); failure != nil {
+		return logs.result(), failure
 	}
 	if ctx.Err() != nil {
 		return logs.result(), fmt.Errorf("ffmpeg analysis timed out: %w", ctx.Err())
@@ -360,7 +363,7 @@ func enrichTrimValidationLog(ctx context.Context, binary, output, log string) (s
 }
 
 func trimValidationScript(binary, output string, durationMs int64) string {
-	return shellCommand(binary, trimValidationArgs(output)) + " > trim-validation.log 2>&1 || { echo 'trim_validation_failed: output decode failed'; exit 1; }\n" +
+	return shellCommand(binary, limitedFFmpegArgs(trimValidationArgs(output))) + " > trim-validation.log 2>&1 || { echo 'trim_validation_failed: output decode failed'; exit 1; }\n" +
 		shellCommand(ffprobeForFFmpeg(binary), videoEndpointProbeArgs(output)) + " | awk -F= " + shellQuote(videoEndpointAWK) + " >> trim-validation.log\n" +
 		"awk -v strict=1 -v expected=" + formatSeconds(durationMs) + " " + shellQuote(compactFrameLogAWK) + " trim-validation.log\n"
 }

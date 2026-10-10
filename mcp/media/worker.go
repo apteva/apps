@@ -460,6 +460,10 @@ func processOne(
 			hasThumb = true
 		}
 	}
+	if mediaWorkFailure(ctx) != nil {
+		_ = markFailed(app.AppDB(), projectID, fid, f.SHA256, "failed", mediaWorkFailure(ctx).Error())
+		return
+	}
 	if probe.HasAudio && !probe.HasVideo {
 		wavePath := filepath.Join(tmpDir, "waveform.png")
 		if err := makeWaveform(ctx, ffmpegPath, srcPath, wavePath, toInt(waveW), toInt(waveH)); err != nil {
@@ -479,6 +483,9 @@ func processOne(
 	if probe.HasVideo && !probe.IsImage && keyframesEnabled(app) {
 		positions := keyframePositions(probe.DurationMs, app)
 		for _, posMs := range positions {
+			if mediaWorkFailure(ctx) != nil || ctx.Err() != nil {
+				break
+			}
 			framePath := filepath.Join(tmpDir, fmt.Sprintf("kf-%d.jpg", posMs))
 			if err := extractKeyframe(ctx, ffmpegPath, srcPath, framePath, float64(posMs)/1000.0, toInt(thumbWidth)); err != nil {
 				logger.Warn("keyframe failed", "position_ms", posMs, "err", err)
@@ -494,6 +501,10 @@ func processOne(
 		}
 	}
 
+	if failure := mediaWorkFailure(ctx); failure != nil {
+		_ = markFailed(app.AppDB(), projectID, fid, f.SHA256, "failed", failure.Error())
+		return
+	}
 	if err := commitDerivationStage(ctx, app, sc, projectID, fid, stage, previous); err != nil {
 		logger.Error("commit derivations", "file_id", fid, "err", err)
 		return

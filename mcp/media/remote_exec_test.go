@@ -152,7 +152,7 @@ func TestBuildScript_TrimShape(t *testing.T) {
 		`REMOTE_SOURCE_CACHE_LOCK_TIMEOUT file_id=$fid`,
 		`curl_retry --fail -L -o "$tmp" "$url"`,
 		`materialize_source '100' 'https://signed.example.com/file/100?sig=abc' 'src-100.mp4' 'file-100-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.mp4' 123456 '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'`,
-		"'/root/.apteva-render/ffmpeg-7.0.2/ffmpeg' '-filter_threads' '1' '-filter_complex_threads' '1' '-y' '-i' 'src-100.mp4'",
+		"'/root/.apteva-render/ffmpeg-7.0.2/ffmpeg' '-filter_threads' '1' '-filter_complex_threads' '1' '-y' '-threads' '1' '-i' 'src-100.mp4'",
 		`OUT='clip.mp4'`,
 		`file_size_bytes()`,
 		`stat -c '%s' "$1"`,

@@ -490,6 +490,9 @@ func runRemote(ctx context.Context, app *sdk.AppCtx, hostID int64, cmd string, t
 	if err != nil {
 		return "", 0, fmt.Errorf("instance_run_command host_id=%d: %w", hostID, err)
 	}
+	if failure := markMediaResourceFailure(ctx, nil, resp.Output+" "+resp.Err, resp.ExitCode); failure != nil {
+		return resp.Output, resp.ExitCode, failure
+	}
 	if resp.Err != "" {
 		return resp.Output, resp.ExitCode, errors.New(resp.Err)
 	}

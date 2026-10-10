@@ -85,6 +85,9 @@ func applyCropCompositionPolicy(raw []byte) ([]byte, error) {
 	if json.Unmarshal(raw, &p) != nil {
 		return raw, nil
 	}
+	if code := stringJSONValue(p["runtime_error"]); code != "" {
+		return nil, &renderInputError{Code: code, Message: "Media processing stopped; no further fallback or render was started. Retry after resolving the reported worker failure."}
+	}
 	preserve, _ := p["require_action_preservation"].(bool)
 	fallback := stringJSONValue(p["crop_fallback"])
 	if fallback != "" && fallback != "reject" && fallback != "contain" {
@@ -174,6 +177,9 @@ func (a *App) toolPreviewCrop(app *sdk.AppCtx, args map[string]any) (any, error)
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	resolved := preprocessSmartCrop(ctx, app, newStorageClient(), project, op, []string{fid}, raw)
+	if failure := cropProcessingError(resolved); failure != nil {
+		return nil, failure
+	}
 	return map[string]any{"file_id": fid, "source_width": row.Width, "source_height": row.Height, "resolved_params": json.RawMessage(resolved), "composition": cropCompositionForParams(resolved), "artifacts_created": false}, nil
 }
 

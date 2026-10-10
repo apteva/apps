@@ -24,7 +24,7 @@ func TestBuildRemoteIndexScript_HasSmartThumbnailLoop(t *testing.T) {
 	for _, marker := range []string{
 		"luma_of()",                          // helper defined
 		`signalstats\.YAVG`,                  // ffmpeg luma probe (sed-escaped period in source)
-		"thumbnail=30,scale=$THUMB_WIDTH:-2", // smart-frame filter, not just scale
+		"scale=$THUMB_WIDTH:-2,thumbnail=30", // smart-frame filter, not just scale
 		"0.05 0.15 0.30 0.50 0.75",           // percentage-based seek schedule
 		"export THUMB_SEEK=",                 // first attempt = user-configured seek
 		`'BEGIN{exit !(l >= 25)}'`,           // 25/255 luma threshold (matches local path)
