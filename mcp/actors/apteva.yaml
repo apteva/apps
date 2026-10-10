@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.2.19
+version: 0.2.20
 description: |
   Reusable browser actors with named operations, crawl queues, URL fan-out,
   revisioned definitions, structured datasets, durable run history, Jobs schedules,

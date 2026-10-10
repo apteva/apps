@@ -182,3 +182,13 @@ for exact identity checks with known optional URL query parameters.
 The optional `examples/patreon-existing-video-draft.json` separates read-only
 inspection, attachment and publication of the same existing draft. It preserves
 copy, requires exact saved media/access checks and never creates a replacement.
+
+## Verify embedded URL identity
+
+`assert_values` supports `equals_url` with `url`, optional `allow_extra_query`
+keys and explicit `wrappers` (`url` and source `parameters`). It checks the exact
+source origin/path and all expected query values. A wrapper must match its
+configured origin/path, and every present source parameter must match the
+approved source. Repeated/empty/conflicting source parameters fail. Provider
+hosts are definition policy, never built into the engine. See the optional
+`examples/patreon-existing-video-draft.json` recovery operations (Actors 0.2.20+).

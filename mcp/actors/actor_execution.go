@@ -690,6 +690,11 @@ func (e *actorExecution) assertValues(step actorStep) error {
 		if !ok {
 			return fmt.Errorf("assertion field %q was not extracted", field)
 		}
+		if assertion.EqualsURL != nil {
+			if err := assertion.EqualsURL.compare(stringFromAny(actual)); err != nil {
+				return fmt.Errorf("assertion failed for %q: %w", field, err)
+			}
+		}
 		if assertion.Matches != "" && !regexp.MustCompile(assertion.Matches).MatchString(stringFromAny(actual)) {
 			return fmt.Errorf("assertion pattern failed for %q", field)
 		}

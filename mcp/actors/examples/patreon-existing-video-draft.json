@@ -489,7 +489,8 @@
             "som_only": true
           },
           "text": "{{video_url}}",
-          "mode": "replace"
+          "mode": "replace",
+          "optional": true
         },
         {
           "action": "wait_for",
@@ -614,7 +615,21 @@
               "equals": "{{post_body}}"
             },
             "media_iframe_src": {
-              "matches": "^\\Q{{video_url}}\\E(?:\\?.*)?$"
+              "equals_url": {
+                "url": "{{video_url}}",
+                "allow_extra_query": [
+                  "autoplay"
+                ],
+                "wrappers": [
+                  {
+                    "url": "https://cdn.embedly.com/widgets/media.html",
+                    "parameters": [
+                      "url",
+                      "src"
+                    ]
+                  }
+                ]
+              }
             },
             "media_embed_status": {
               "equals": "loaded"
@@ -944,7 +959,21 @@
               "equals": "{{post_body}}"
             },
             "media_iframe_src": {
-              "matches": "^\\Q{{video_url}}\\E(?:\\?.*)?$"
+              "equals_url": {
+                "url": "{{video_url}}",
+                "allow_extra_query": [
+                  "autoplay"
+                ],
+                "wrappers": [
+                  {
+                    "url": "https://cdn.embedly.com/widgets/media.html",
+                    "parameters": [
+                      "url",
+                      "src"
+                    ]
+                  }
+                ]
+              }
             },
             "media_embed_status": {
               "equals": "loaded"

@@ -1,6 +1,6 @@
 # Optional existing Patreon video draft operations
 
-Requires Actors 0.2.19+ and Computer 0.7.94+. This is an editable definition;
+Requires Actors 0.2.20+ and Computer 0.7.94+. This is an editable definition;
 accounts, post IDs, video hosts and tier policy are runtime inputs.
 
 `inspect_video_draft` is read-only. It verifies creator identity in the assigned
@@ -12,8 +12,12 @@ Publish control. Scheduled or published records cannot satisfy the draft gate.
 `attach_video_to_draft` preserves the existing copy and post ID, requires no
 existing media, selects the exact requested audience/tier set with sale disabled,
 and attaches the supplied `video_url`. It reloads and verifies the saved player
-source, exact title/body, audience, tier combination and sale setting. It stops
-without publishing. An uncertain result requires inspection, not blind reattach.
+source (direct or an explicitly allowed Embedly wrapper), exact title/body, audience, tier combination and sale setting. It stops
+without publishing. Patreon can replace the URL textbox immediately after input;
+that input step is optional and has zero retries, while the following media/save
+wait, reload and exact video/copy/access assertions are mandatory. A dispatched
+input is never enough to report success. An uncertain final result requires
+inspection, not blind reattach.
 
 `publish_video_draft` independently repeats draft/account/ID checks and saved
 copy/media/access checks. It publishes only that existing draft with a guarded
@@ -37,3 +41,9 @@ outcomes block. Do not call video_post or a generic fallback to replace the draf
 This operation does not approve content, change a release date or authorize early
 production publication. It preserves existing copy; a copy mismatch requires
 separate reviewed draft editing rather than silently rewriting text.
+
+The video assertion compares the exact source origin/path and required query
+values. Only the explicitly allowed `autoplay` query may be added. For the
+configured Embedly wrapper, each present `url` and `src` parameter must resolve
+to that approved video; conflicting, missing or repeated sources fail closed.
+Wrapper policy is editable and no provider host is built into the engine.

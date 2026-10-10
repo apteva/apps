@@ -122,14 +122,15 @@ type actorStep struct {
 // validation declarative and site-neutral: values may be compared directly,
 // checked for containment, or reconciled arithmetically before a click.
 type actorAssertion struct {
-	Matches      string   `json:"matches,omitempty"`
-	Equals       any      `json:"equals,omitempty"`
-	EqualsField  string   `json:"equals_field,omitempty"`
-	EqualsSet    any      `json:"equals_set,omitempty"`
-	Contains     string   `json:"contains,omitempty"`
-	SumOf        []string `json:"sum_of,omitempty"`
-	DifferenceOf []string `json:"difference_of,omitempty"`
-	Tolerance    float64  `json:"tolerance,omitempty"`
+	EqualsURL    *actorURLAssertion `json:"equals_url,omitempty"`
+	Matches      string             `json:"matches,omitempty"`
+	Equals       any                `json:"equals,omitempty"`
+	EqualsField  string             `json:"equals_field,omitempty"`
+	EqualsSet    any                `json:"equals_set,omitempty"`
+	Contains     string             `json:"contains,omitempty"`
+	SumOf        []string           `json:"sum_of,omitempty"`
+	DifferenceOf []string           `json:"difference_of,omitempty"`
+	Tolerance    float64            `json:"tolerance,omitempty"`
 }
 
 type actorWaitCondition struct {
@@ -494,8 +495,13 @@ func validateActorDefinition(def actorDefinition) error {
 				return fmt.Errorf("steps[%d].assertions is required", i)
 			}
 			for field, assertion := range step.Assertions {
-				if strings.TrimSpace(field) == "" || (assertion.Equals == nil && assertion.EqualsSet == nil && assertion.EqualsField == "" && assertion.Contains == "" && assertion.Matches == "" && len(assertion.SumOf) == 0 && len(assertion.DifferenceOf) == 0) {
+				if strings.TrimSpace(field) == "" || (assertion.EqualsURL == nil && assertion.Equals == nil && assertion.EqualsSet == nil && assertion.EqualsField == "" && assertion.Contains == "" && assertion.Matches == "" && len(assertion.SumOf) == 0 && len(assertion.DifferenceOf) == 0) {
 					return fmt.Errorf("steps[%d].assertions[%q] has no comparison", i, field)
+				}
+				if assertion.EqualsURL != nil {
+					if err := assertion.EqualsURL.validate(); err != nil {
+						return fmt.Errorf("steps[%d].assertions[%q]: %w", i, field, err)
+					}
 				}
 				if assertion.Matches != "" {
 					if _, err := regexp.Compile(assertion.Matches); err != nil {
