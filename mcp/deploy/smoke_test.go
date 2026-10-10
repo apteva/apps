@@ -40,6 +40,9 @@ func TestEmbeddedManifestMatchesSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	embedded := (&App{}).Manifest()
+	if source.Runtime.Source == nil || source.Runtime.Source.Ref != "deploy/v"+source.Version {
+		t.Fatalf("runtime source must point to deploy/v%s, got %+v", source.Version, source.Runtime.Source)
+	}
 	if embedded.Name != source.Name || embedded.Version != source.Version {
 		t.Fatalf("embedded manifest %s@%s != source %s@%s",
 			embedded.Name, embedded.Version, source.Name, source.Version)
