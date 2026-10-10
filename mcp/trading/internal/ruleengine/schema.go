@@ -290,7 +290,11 @@ func Validate(p *Program) error {
 			if unary {
 				n = 1
 			}
-			if len(e.Args) != n {
+			if e.Op == "and" || e.Op == "or" {
+				if len(e.Args) < 2 || len(e.Args) > 64 {
+					return fmt.Errorf("%s requires 2–64 operands", e.Op)
+				}
+			} else if len(e.Args) != n {
 				return fmt.Errorf("%s requires %d operands", e.Op, n)
 			}
 		} else if len(e.Args) > 0 {

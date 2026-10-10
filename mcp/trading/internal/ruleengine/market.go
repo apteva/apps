@@ -364,11 +364,20 @@ func (c context) eval(e Expr, depth int) (float64, error) {
 	}
 	// Short circuit guards (window_complete, flat, etc.) deliberately avoid
 	// evaluating indicators with missing warmup on the inactive branch.
-	if e.Op == "and" && a == 0 {
-		return 0, nil
-	}
-	if e.Op == "or" && a != 0 {
-		return 1, nil
+	if e.Op == "and" || e.Op == "or" {
+		for _, arg := range e.Args[1:] {
+			if e.Op == "and" && a == 0 {
+				return 0, nil
+			}
+			if e.Op == "or" && a != 0 {
+				return 1, nil
+			}
+			a, err = c.eval(arg, depth+1)
+			if err != nil {
+				return 0, err
+			}
+		}
+		return truth(a != 0), nil
 	}
 	b, err := c.eval(e.Args[1], depth+1)
 	if err != nil {
@@ -403,10 +412,6 @@ func (c context) eval(e Expr, depth int) (float64, error) {
 		v = truth(a == b)
 	case "!=":
 		v = truth(a != b)
-	case "and":
-		v = truth(a != 0 && b != 0)
-	case "or":
-		v = truth(a != 0 || b != 0)
 	default:
 		return 0, errors.New("unknown operation")
 	}

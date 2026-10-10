@@ -4,7 +4,7 @@ description: |
   synthetic event backtests, persists pass/fail scorecards, runs a cost
   robustness suite, exports evidence and versions a strategy revision.
   Assertions check completed durable state, not only tool calls.
-timeout: 6m
+timeout: 8m
 max_iterations: 36
 setup:
   mode: autonomous
@@ -15,6 +15,11 @@ setup:
       pricing_provider: "mock"
 directive: |
   Perform a synthetic research acceptance test entirely with Trading MCP.
+  First exercise market_data_import on an illustrative CSV export: symbol AAPL,
+  one stream kind quotes, source synthetic_tier3_import, csv
+  "Time,Bid,Ask\n2026-09-14T12:00:00Z,99,101\n", columns mapping timestamp to
+  Time, bid to Bid, ask to Ask. Inspect the returned bid=99, ask=101 and input
+  hash. This isolated import fixture is separate from the backtest tapes below.
   Discover strategy_catalog, then author a NEW engine=rules strategy called
   "Tier 3 EMA SMA research" (do not copy a screenshot preset): symbol AAPL,
   timeframe 1m, timezone UTC. On a completed base candle, while position_qty
@@ -68,6 +73,10 @@ directive: |
   with observed pass/fail results, cost sensitivity and version distinction.
   Do not assign the strategy, promote it, place portfolio orders, or arm live.
 assert:
+  - tool_called_with:
+      tool: market_data_import
+      success: true
+      count: 1
   - tool_called_with:
       tool: strategy_validate
       success: true
@@ -153,5 +162,5 @@ assert:
   - tool_not_called: strategy_assign | strategy_promotion_update | order_place | portfolio_arm_live
 budget:
   # Includes full backtest and suite artifact exports plus their context reuse.
-  total_tokens: 1200000
+  total_tokens: 1500000
   cost_usd: 4.00

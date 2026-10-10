@@ -65,6 +65,8 @@ Expressions contain exactly one of `value`, `metric`, `name`, or `op`.
 `op` takes `args`; comparisons produce 0/1. Division by zero, a flat candle's
 close fraction, unavailable feature fields, and incomplete warmup do not invent
 values. AND/OR short circuit to allow explicit availability guards.
+AND/OR accept 2–64 operands; arithmetic and comparisons accept two, while
+`not` and `abs` accept one. Place availability guards before their dependents.
 
 A metric can specify `timeframe`, `period` and `offset`. Higher candle frames
 must be multiples of the base. Named calculations are resolved with cycle and

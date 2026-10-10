@@ -47,6 +47,41 @@ func TestExpressionsRejectInvalidAndCyclicDefinitions(t *testing.T) {
 }
 func ptrFloat(v float64) *float64 { return &v }
 
+func TestLogicalListsAndShortCircuitAvailability(t *testing.T) {
+	p := testProgram()
+	c := context{program: p, runtime: newRuntime(p), state: state()}
+	missing := Expr{Metric: "sma", Period: 20}
+	for _, tc := range []struct {
+		expr Expr
+		want float64
+	}{
+		{Operation("and", Number(1), Number(2), Number(3), Number(0)), 0},
+		{Operation("and", Number(1), Number(2), Number(3)), 1},
+		{Operation("or", Number(0), Number(0), Number(2)), 1},
+		{Operation("or", Number(0), Number(0), Number(0)), 0},
+		{Operation("and", Number(1), Number(0), missing), 0},
+		{Operation("or", Number(0), Number(1), missing), 1},
+	} {
+		p.Rules[0].When = ptr(tc.expr)
+		if err := Validate(p); err != nil {
+			t.Fatal(err)
+		}
+		got, err := c.eval(tc.expr, 0)
+		if err != nil || got != tc.want {
+			t.Fatal(tc.expr, got, err)
+		}
+	}
+	for _, args := range [][]Expr{{Number(1)}, make([]Expr, 65)} {
+		p.Rules[0].When = ptr(Operation("and", args...))
+		if Validate(p) == nil {
+			t.Fatal("logical operand budget not enforced")
+		}
+	}
+	if _, err := c.eval(Operation("and", Number(1), Number(1), missing), 0); err != ErrUnavailable {
+		t.Fatal("availability failure lost", err)
+	}
+}
+
 func TestEntryPlanningPreventsImplicitPyramiding(t *testing.T) {
 	p := testProgram()
 	entry := Action{Kind: "enter", Side: "buy", StopPct: .01, Sizing: Sizing{Mode: "quantity", Amount: 1}}

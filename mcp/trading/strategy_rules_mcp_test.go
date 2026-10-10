@@ -112,7 +112,7 @@ func TestRuleMCPAgentWorkflow(t *testing.T) {
 			fmt.Fprintf(&quotesCSV, "%s,%g,%g\n", in.EventTime.Format(time.RFC3339), in.Data["price"], in.Data["price"])
 		}
 	}
-	datasetImported := callRuleMCP(t, ctx, "market_data_import", map[string]any{"symbol": "DE40", "streams": []map[string]any{
+	datasetImported := callRuleMCP(t, ctx, "market_data_import", map[string]any{"symbol": "DE40", "_apteva_caller_thread": "main", "_apteva_tool_call_id": "fixture-call", "_reason": "Importing historical exports", "streams": []map[string]any{
 		{"kind": "bars", "csv": barsCSV.String(), "source": "synthetic_acceptance", "timeframe": "1m", "price_basis": "bid"},
 		{"kind": "quotes", "csv": quotesCSV.String(), "source": "synthetic_acceptance", "columns": map[string]string{"timestamp": "Time", "bid": "Bid", "ask": "Ask"}},
 	}})

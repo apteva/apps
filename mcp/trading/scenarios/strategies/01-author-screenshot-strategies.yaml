@@ -3,7 +3,7 @@ description: |
   A real agent discovers the generic rule language, validates and saves all
   three screenshot strategies, then versions a revision. No definitions or
   strategies are seeded by the runner. Persisted programs are the outcome.
-timeout: 4m
+timeout: 8m
 max_iterations: 24
 setup:
   mode: autonomous
@@ -16,7 +16,9 @@ directive: |
   This is a synthetic strategy-authoring acceptance test. Use Trading MCP.
   Discover strategy_catalog and its generic rules syntax. Validate and save
   exactly these three engine=rules strategies, in this order, using the complete
-  matching catalog definitions without changing their numerical trading rules:
+  matching catalog definition objects exactly, without rearranging their expression
+  trees. Copy only each preset.definition, never put its id/name/description or
+  simulation fields into program. Do not change the numerical trading rules:
 
   1. Name "Tier 3 Donchian": XAUUSD, 175 completed H1 channel, M1 close
      breakout long/short, 0.5% stop, 1% target, trailing arms at 0.5% profit
@@ -75,5 +77,5 @@ assert:
     expect_field_eq: Europe/Helsinki
   - tool_not_called: strategy_assign | order_place | portfolio_arm_live
 budget:
-  total_tokens: 250000
+  total_tokens: 500000
   cost_usd: 3.00

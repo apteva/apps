@@ -68,6 +68,7 @@ func ruleEngineCatalog() map[string]any {
 		"capabilities":  []string{"OHLC expressions", "multiple timeframes", "SMA/EMA/RSI/ATR", "nested series", "persistent state", "reset latches", "session windows", "fixed stop risk", "long/short linear contracts", "OCO", "protective exits", "activated trailing stops"},
 		"authoring": map[string]any{
 			"definition":       "engine=rules; universe=[program.symbol]; cadence=program.timeframe; program requires version=trading-rules/1, symbol, timeframe, IANA timezone and rules. See complete rule_presets.",
+			"operand_counts":   "and/or accept 2–64 expressions and short circuit left to right; comparisons and arithmetic take 2, not/abs take 1. Availability guards precede their dependent indicators.",
 			"expressions":      []map[string]any{{"value": 100}, {"metric": "ema", "period": 20, "timeframe": "1h", "offset": 0}, {"name": "my_calculation"}, {"op": ">", "args": []map[string]any{{"metric": "close"}, {"value": 100}}}},
 			"metrics":          []string{"open", "high", "low", "close", "volume", "range", "body", "close_fraction", "sma", "ema", "stddev", "volatility", "rsi", "atr", "highest_high", "lowest_low", "return", "feature", "price", "bid", "ask", "position_qty", "entry_count", "minute", "weekday", "window_high", "window_low", "window_complete", "equity"},
 			"operators":        []string{"+", "-", "*", "/", "min", "max", ">", ">=", "<", "<=", "==", "!=", "and", "or", "crosses_above", "crosses_below", "not", "abs"},
