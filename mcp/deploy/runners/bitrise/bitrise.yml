@@ -14,4 +14,4 @@ workflows:
       - deploy-to-bitrise-io@2:
           is_always_run: false
           inputs:
-            - deploy_path: "$BITRISE_SOURCE_DIR/${APTEVA_ARTIFACT_NAME:-apteva-build}.zip"
+            - deploy_path: "$BITRISE_SOURCE_DIR/$APTEVA_ARTIFACT_NAME.zip"
