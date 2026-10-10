@@ -26,6 +26,8 @@ const (
 	buildBackendRunner                   = "runner"
 	buildBackendCodemagic                = "codemagic"
 	buildBackendGitHubActions            = "github_actions"
+	buildBackendBitrise                  = "bitrise"
+	buildBackendAppcircle                = "appcircle"
 	defaultCloudArtifactName             = "apteva-build"
 	maxCloudArtifactBytes                = int64(2 << 30)
 	cloudBuildPollLease                  = 2 * time.Minute
@@ -45,6 +47,12 @@ func (e *externalJobUnavailableError) Error() string {
 }
 
 type cloudBuildConfig struct {
+	ConnectionID        int64             `json:"connection_id,omitempty"`
+	ProfileID           string            `json:"profile_id,omitempty"`
+	ConfigurationID     string            `json:"configuration_id,omitempty"`
+	CommitID            string            `json:"commit_id,omitempty"`
+	BranchID            string            `json:"branch_id,omitempty"`
+	Stack               string            `json:"stack,omitempty"`
 	Owner               string            `json:"owner,omitempty"`
 	Repo                string            `json:"repo,omitempty"`
 	WorkflowID          string            `json:"workflow_id"`
@@ -88,6 +96,7 @@ type externalBuildStatus struct {
 }
 
 type cloudArtifact struct {
+	ArchiveEntry    string
 	Name            string
 	URL             string
 	NeedsGitHubAuth bool
@@ -148,6 +157,14 @@ func parseCloudBuildConfig(backend, raw string) (cloudBuildConfig, error) {
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 		return cfg, fmt.Errorf("build_backend_config_json: %w", err)
 	}
+	if cfg.ConnectionID < 0 {
+		return cfg, errors.New("connection_id must be positive")
+	}
+	for name := range cfg.Variables {
+		if managedSigningVariable(name) {
+			return cfg, fmt.Errorf("%s is managed signing material; use deploy_mobile_signing_setup instead of variables", name)
+		}
+	}
 	cfg.WorkflowID = strings.TrimSpace(cfg.WorkflowID)
 	cfg.ArtifactName = strings.TrimSpace(cfg.ArtifactName)
 	cfg.ArtifactMode = strings.ToLower(strings.TrimSpace(cfg.ArtifactMode))
@@ -175,6 +192,9 @@ func parseCloudBuildConfig(backend, raw string) (cloudBuildConfig, error) {
 	if cfg.ArtifactName == "" {
 		cfg.ArtifactName = defaultCloudArtifactName
 	}
+	if strings.ContainsAny(cfg.ArtifactName, "/\\\r\n") || cfg.ArtifactName == "." || cfg.ArtifactName == ".." {
+		return cfg, errors.New("artifact_name must be a filename without directory components")
+	}
 	if cfg.SourceMode != "repository" && cfg.SourceMode != "bundle" {
 		return cfg, errors.New("source_mode must be repository or bundle")
 	}
@@ -191,6 +211,17 @@ func parseCloudBuildConfig(backend, raw string) (cloudBuildConfig, error) {
 		return cfg, fmt.Errorf("source_url_ttl_seconds must be 0 (default) or between 1 and %d", maxTTLSeconds)
 	}
 	switch normalizeBuildBackend(backend) {
+	case buildBackendBitrise:
+		if cfg.AppID == "" || cfg.WorkflowID == "" || (cfg.Branch == "" && cfg.Tag == "") {
+			return cfg, errors.New("bitrise backend requires app_id (app slug), workflow_id, and branch or tag")
+		}
+		if cfg.Branch != "" && cfg.Tag != "" {
+			return cfg, errors.New("bitrise backend accepts branch or tag, not both")
+		}
+	case buildBackendAppcircle:
+		if cfg.ProfileID == "" || cfg.ConfigurationID == "" || cfg.WorkflowID == "" || (cfg.CommitID == "" && cfg.BranchID == "") {
+			return cfg, errors.New("appcircle backend requires profile_id, configuration_id, workflow_id, and commit_id or branch_id")
+		}
 	case buildBackendRunner:
 		if cfg.SourceMode != "bundle" {
 			return cfg, errors.New("runner backend requires source_mode=bundle")
@@ -250,12 +281,20 @@ func cloudBackendFor(name string) (cloudBuildBackend, error) {
 		return codemagicBuildBackend{}, nil
 	case buildBackendGitHubActions:
 		return githubActionsBuildBackend{}, nil
+	case buildBackendBitrise:
+		return bitriseBuildBackend{}, nil
+	case buildBackendAppcircle:
+		return appcircleBuildBackend{}, nil
 	default:
 		return nil, fmt.Errorf("unsupported build_backend %q", name)
 	}
 }
 
 func cloudIntegrationFor(backend string) (*sdk.BoundIntegration, error) {
+	return cloudIntegrationForConfig(backend, cloudBuildConfig{})
+}
+
+func cloudIntegrationForConfig(backend string, cfg cloudBuildConfig) (*sdk.BoundIntegration, error) {
 	if normalizeBuildBackend(backend) == buildBackendRunner {
 		return nil, nil
 	}
@@ -265,11 +304,29 @@ func cloudIntegrationFor(backend string) (*sdk.BoundIntegration, error) {
 	wantSlug := map[string]string{
 		buildBackendCodemagic:     "codemagic",
 		buildBackendGitHubActions: "github",
+		buildBackendBitrise:       "bitrise",
+		buildBackendAppcircle:     "appcircle",
 	}[normalizeBuildBackend(backend)]
+	var selected *sdk.BoundIntegration
 	for _, bound := range globalCtx.IntegrationsFor("cloud_build") {
 		if bound != nil && bound.Kind == "integration" && bound.ConnectionID > 0 && bound.AppSlug == wantSlug {
-			return bound, nil
+			if cfg.ConnectionID > 0 {
+				if bound.ConnectionID == cfg.ConnectionID {
+					return bound, nil
+				}
+				continue
+			}
+			if selected != nil {
+				return nil, fmt.Errorf("multiple %s connections are bound; select connection_id in build_backend_config_json", wantSlug)
+			}
+			selected = bound
 		}
+	}
+	if selected != nil {
+		return selected, nil
+	}
+	if cfg.ConnectionID > 0 {
+		return nil, fmt.Errorf("connection_id %d is not a bound %s cloud_build connection", cfg.ConnectionID, wantSlug)
 	}
 	return nil, fmt.Errorf("no %s connection is bound to Deploy's cloud_build role", wantSlug)
 }
@@ -308,9 +365,14 @@ func (a *App) submitCloudBuildWithOptions(ctx context.Context, d *Deployment, re
 	if err != nil {
 		return nil, err
 	}
-	bound, err := cloudIntegrationFor(backendName)
+	bound, err := cloudIntegrationForConfig(backendName, cfg)
 	if err != nil {
 		return nil, err
+	}
+	// Freeze the chosen connection so later binding changes cannot redirect a running job.
+	if bound != nil {
+		cfg.ConnectionID = bound.ConnectionID
+		buildBackendJSON = mustJSON(cfg)
 	}
 	build, err := dbCreateBuildForEnvBackend(
 		globalCtx.AppDB(), d.ID, d.EnvironmentID, d.Framework, d.BuildCmd,
@@ -451,7 +513,7 @@ func (a *App) syncCloudBuild(ctx context.Context, build *Build) error {
 		a.failBuild(build, err.Error())
 		return nil
 	}
-	bound, err := cloudIntegrationFor(build.BuildBackend)
+	bound, err := cloudIntegrationForConfig(build.BuildBackend, cfg)
 	if err != nil {
 		a.scheduleCloudBuildPoll(build, err)
 		return nil
@@ -624,6 +686,10 @@ func providerDisplayName(provider string) string {
 		return "Codemagic"
 	case buildBackendGitHubActions:
 		return "GitHub Actions"
+	case buildBackendBitrise:
+		return "Bitrise"
+	case buildBackendAppcircle:
+		return "Appcircle"
 	default:
 		return provider
 	}
@@ -823,7 +889,7 @@ func (a *App) finishCloudCancellation(ctx context.Context, build *Build) error {
 	if err != nil {
 		return err
 	}
-	bound, err := cloudIntegrationFor(build.BuildBackend)
+	bound, err := cloudIntegrationForConfig(build.BuildBackend, cfg)
 	if err != nil {
 		return err
 	}
@@ -1379,6 +1445,14 @@ func (a *App) downloadAndStageCloudArtifact(bound *sdk.BoundIntegration, d *Depl
 	defer os.Remove(tmpPath)
 	if err := downloadCloudArtifact(bound, artifact, tmpPath); err != nil {
 		return err
+	}
+	if artifact.ArchiveEntry != "" {
+		inner, err := extractProviderArtifactArchive(tmpPath, artifact.ArchiveEntry)
+		if err != nil {
+			return err
+		}
+		defer os.Remove(inner)
+		tmpPath = inner
 	}
 	targetJSON := defaultStr(build.TargetConfigJSON, d.TargetConfigJSON)
 	pipeline, err := pipelineConfig(targetJSON)

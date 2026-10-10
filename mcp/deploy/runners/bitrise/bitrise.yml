@@ -1,0 +1,17 @@
+format_version: "13"
+default_step_lib_source: https://github.com/bitrise-io/bitrise-steplib.git
+workflows:
+  apteva-mobile-capsule:
+    steps:
+      - git-clone@8: {}
+      - script@1:
+          title: Run Deploy native pipeline
+          inputs:
+            - content: |-
+                set -euo pipefail
+                cd "$BITRISE_SOURCE_DIR"
+                python3 scripts/run_mobile.py
+      - deploy-to-bitrise-io@2:
+          is_always_run: false
+          inputs:
+            - deploy_path: "$BITRISE_SOURCE_DIR/${APTEVA_ARTIFACT_NAME:-apteva-build}.zip"

@@ -26,7 +26,7 @@ def script_named(name):
 
 
 class NativePipelineTest(unittest.TestCase):
-    def run_pipeline(self, test_command=None, prepare_command=None, store=False):
+    def run_pipeline(self, test_command=None, prepare_command=None, store=False, shared=False):
         runner = os.environ.get('TEST_DEPLOY_PIPELINE_RUNNER')
         if not runner:
             self.skipTest('Set TEST_DEPLOY_PIPELINE_RUNNER to the compiled Deploy binary')
@@ -62,6 +62,7 @@ done''',
             for name, body in scripts.items():
                 file = bin_dir / name; file.write_text('#!/bin/bash\nset -e\n' + body + '\n'); file.chmod(0o755)
             env = dict(os.environ, PATH=str(bin_dir) + ':' + os.environ['PATH'],
+                       APTEVA_BUILD_DIR=str(root), APTEVA_ENV_FILE=str(root / 'env'),
                        CM_BUILD_DIR=str(root), CM_ENV=str(root / 'env'), APTEVA_CAPSULE_DIR=str(capsule),
                        APTEVA_SOURCE_BUILD_SUBDIR='app', APTEVA_BUILD_SPEC_B64=base64.b64encode(json.dumps(spec).encode()).decode(),
                        APTEVA_TARGET_KIND='ios', APTEVA_BUNDLE_ID='com.example', APTEVA_XCODE_SCHEME='Example',
@@ -78,16 +79,20 @@ done''',
             real_read = Path.read_text
             def read(path, *args, **kwargs):
                 return json.dumps(pins) if path.name == 'pipeline-runner.json' else real_read(path, *args, **kwargs)
-            with patch.dict(os.environ, env, clear=True), patch.object(module, 'download', download), patch.object(Path, 'read_text', read):
+            with patch.dict(os.environ, env, clear=True), patch.object(module, 'download', download), patch.object(module, 'provision_xcodegen', return_value={}), patch.object(Path, 'read_text', read):
                 try:
                     module.main()
                 except subprocess.CalledProcessError:
                     return 1, calls.read_text() if calls.exists() else '', None, False
             for line in (root / 'env').read_text().splitlines():
                 key, value = line.split('=', 1); env[key] = value
-            result = subprocess.run(['/bin/bash'], input=build_script(ROOT / 'codemagic.yaml'), text=True, env=env, capture_output=True)
+            if shared:
+                (root / 'scripts').mkdir()
+                (root / 'scripts/install_managed_signing.py').write_text('import os; open(os.environ["CALLS"], "a").write("managed signing\\n")')
+            shared_steps = {step['name']: step['script'] for step in json.loads((ROOT.parent / 'shared/scripts/mobile_steps.json').read_text())} if shared else {}
+            result = subprocess.run(['/bin/bash'], input=shared_steps.get('Build mobile artifact', build_script(ROOT / 'codemagic.yaml')), text=True, env=env, capture_output=True)
             if result.returncode == 0:
-                result = subprocess.run(['/bin/bash'], input=script_named('Publish or package result'), text=True, env=env, capture_output=True)
+                result = subprocess.run(['/bin/bash'], input=shared_steps.get('Publish or package result', script_named('Publish or package result')), text=True, env=env, capture_output=True)
             manifest_path = root / 'apteva-output/.apteva-artifact.json'
             manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else None
             return result.returncode, calls.read_text() if calls.exists() else '', manifest, (root / 'apteva-build.zip').exists()
@@ -150,10 +155,14 @@ class ToolchainVersionTest(unittest.TestCase):
             (root / 'app').mkdir()
             (root / 'dependency').mkdir()
             (root / 'dependency/rust-toolchain.toml').write_text('[toolchain]\nchannel = "1.98.1"\n')
-            with patch.object(module, 'download'), patch.object(module, 'emit'), \
+            with patch.object(module, 'download'), patch.object(module, 'emit'), patch.object(module, 'provision_xcodegen', return_value={}), \
                  patch.object(module.subprocess, 'run') as commands, \
                  patch.object(module.subprocess, 'check_output', return_value='rustc 1.98.1 (test)'):
                 env = module.provision({'target_kind': 'ios', 'software_versions': {'rust_targets': 'thumbv7em-none-eabi'}}, root, root)
             targets = next(call.args[0] for call in commands.call_args_list if call.args[0][:3] == ['rustup', 'target', 'add'])
             self.assertEqual(set(targets[5:]), {'aarch64-apple-ios', 'aarch64-apple-ios-sim', 'x86_64-apple-ios', 'thumbv7em-none-eabi'})
             self.assertEqual(env['RUSTUP_TOOLCHAIN'], '1.98.1')
+
+class SharedNativePipelineTest(NativePipelineTest):
+    def run_pipeline(self, **kwargs):
+        return super().run_pipeline(shared=True, **kwargs)

@@ -84,6 +84,19 @@ func validateMobileCloudContract(d *Deployment, cloudCfg cloudBuildConfig) error
 	if err != nil {
 		return err
 	}
+	pipeline, err := pipelineConfig(d.TargetConfigJSON)
+	if err != nil {
+		return err
+	}
+	if pipeline != nil {
+		primary, err := cloudPipelinePrimary(pipeline, d.TargetKind)
+		if err != nil {
+			return err
+		}
+		if cloudCfg.ArtifactFile != "" && cloudCfg.ArtifactFile != primary {
+			return fmt.Errorf("artifact_file must match pipeline primary %q", primary)
+		}
+	}
 	mode := resolvedCloudArtifactMode(cloudCfg, d)
 	switch d.TargetKind {
 	case "ios", "macos":

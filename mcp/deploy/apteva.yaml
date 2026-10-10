@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.28.2
+version: 0.29.0
 description: |
   Build and release services, mobile apps, and arbitrary artifacts from Code
   or local sources using local and external build backends. Generic command
@@ -11,6 +11,8 @@ description: |
 
   Supports source kinds {code, local} and frameworks
   {go, node, bun, static, blank, android, ios, macos, command}.
+  v0.29.0 adds Bitrise and Appcircle with multiple bound build accounts,
+  generic source recipes, managed signing, provider logs and verified artifacts.
   v0.28.2 pins the installed source to the matching release tag.
   v0.28.1 provisions iOS Rust device and simulator targets and bounds
   missing cloud jobs when a provider returns an invalid HTTP 200 response.
@@ -85,10 +87,10 @@ requires:
       kind: integration
       mode: multiple
       required: false
-      compatible_slugs: [codemagic, github]
+      compatible_slugs: [codemagic, github, bitrise, appcircle]
       capabilities: [build.submit, build.status, build.cancel, build.artifacts]
       label: Cloud build providers
-      hint: Optional Codemagic or GitHub connections. Git-independent capsule runners do not require an integration.
+      hint: Bind build provider accounts and select a provider and connection per environment. Git-independent capsule runners do not require an integration.
 
 provides:
   http_routes:
@@ -192,7 +194,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: deploy/v0.28.2
+    ref: deploy/v0.29.0
     entry: mcp/deploy
   port: 8080
   health_check: /health

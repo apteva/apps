@@ -322,6 +322,7 @@ func (a *App) httpDeploymentCloudBackendSetup(w http.ResponseWriter, r *http.Req
 		return
 	}
 	result, err := a.setupCloudBackend(r.Context(), d, cloudBackendSetupInput{
+		ConnectionID: int64(intArg(body, "connection_id")), ConfigJSON: strArg(body, "build_backend_config_json"),
 		Provider: strArg(body, "provider"), RepositoryURL: strArg(body, "repository_url"),
 		TeamID: strArg(body, "team_id"), WorkflowID: strArg(body, "workflow_id"),
 		Branch: strArg(body, "branch"), ArtifactMode: strArg(body, "artifact_mode"),
@@ -962,7 +963,7 @@ func (a *App) httpDeploymentLogs(w http.ResponseWriter, r *http.Request, d *Depl
 			httpErr(w, http.StatusNotFound, "build not found")
 			return
 		}
-		body, _ := tailFile(b.LogPath, tail)
+		body, _ := a.buildLog(r.Context(), b, tail)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte(body))
 		return

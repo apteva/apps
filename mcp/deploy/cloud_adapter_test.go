@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -105,5 +107,50 @@ func TestCodemagicAppleProjectGeneration(t *testing.T) {
 	command.Env = append(os.Environ(), "TEST_DEPLOY_PIPELINE_RUNNER="+binary)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("Apple runner regression tests: %v\n%s", err, output)
+	}
+}
+
+func TestSharedNativeStagesStayInSyncWithMaintainedWorkflow(t *testing.T) {
+	body, err := os.ReadFile("runners/codemagic/codemagic.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var source struct {
+		Workflows map[string]struct {
+			Scripts []struct {
+				Name   string `yaml:"name"`
+				Script string `yaml:"script"`
+			} `yaml:"scripts"`
+		} `yaml:"workflows"`
+	}
+	if err := yaml.Unmarshal(body, &source); err != nil {
+		t.Fatal(err)
+	}
+	body, err = os.ReadFile("runners/shared/scripts/mobile_steps.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shared []struct {
+		Name   string `json:"name"`
+		Script string `json:"script"`
+	}
+	if err := json.Unmarshal(body, &shared); err != nil {
+		t.Fatal(err)
+	}
+	canonical := source.Workflows["apteva-mobile-capsule"].Scripts
+	if len(canonical) != len(shared) {
+		t.Fatal("native stage count differs")
+	}
+	replacement := regexp.MustCompile(`(?m)^( +)app-store-connect fetch-signing-files[^\n]+\n +keychain add-certificates\n +xcode-project use-profiles`)
+	for index, stage := range canonical {
+		script := strings.ReplaceAll(strings.ReplaceAll(stage.Script, "CM_BUILD_DIR", "APTEVA_BUILD_DIR"), "CM_ENV", "APTEVA_ENV_FILE")
+		script = replacement.ReplaceAllStringFunc(script, func(match string) string {
+			indent := replacement.FindStringSubmatch(match)[1]
+			return indent + `python3 "$APTEVA_BUILD_DIR/scripts/install_managed_signing.py"` + "\n" + indent + `xcode-project use-profiles --profile "$APTEVA_BUILD_DIR/apteva-signing/profile.mobileprovision"`
+		})
+		script = strings.ReplaceAll(script, `zip -qry "$APTEVA_BUILD_DIR/apteva-build.zip" .`, `zip -qry "$APTEVA_BUILD_DIR/${APTEVA_ARTIFACT_NAME:-apteva-build}.zip" .`)
+		if shared[index].Name != stage.Name || shared[index].Script != script {
+			t.Fatalf("shared native stage %q differs; regenerate mobile_steps.json", stage.Name)
+		}
 	}
 }

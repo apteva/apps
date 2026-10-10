@@ -25,24 +25,26 @@ const (
 )
 
 type mobileSigningSecrets struct {
-	Platform              string
-	IdentityID            int64
-	IdentityRevision      int
-	ApplicationIdentifier string
-	AppStoreIssuerID      string
-	AppStoreKeyID         string
-	AppStorePrivateKey    string
-	CertificatePrivateKey string
-	BundleID              string
-	AppStoreAppID         string
-	Scheme                string
-	WorkspacePath         string
-	ProjectPath           string
-	AndroidKeystoreBase64 string
-	AndroidKeyAlias       string
-	AndroidStorePassword  string
-	AndroidKeyPassword    string
-	CertificateSHA256     string
+	Platform                  string
+	IdentityID                int64
+	IdentityRevision          int
+	ApplicationIdentifier     string
+	AppStoreIssuerID          string
+	AppStoreKeyID             string
+	AppStorePrivateKey        string
+	CertificatePEM            string
+	ProvisioningProfileBase64 string
+	CertificatePrivateKey     string
+	BundleID                  string
+	AppStoreAppID             string
+	Scheme                    string
+	WorkspacePath             string
+	ProjectPath               string
+	AndroidKeystoreBase64     string
+	AndroidKeyAlias           string
+	AndroidStorePassword      string
+	AndroidKeyPassword        string
+	CertificateSHA256         string
 }
 
 type mobileSigningProviderResult struct {
@@ -66,6 +68,10 @@ func mobileSigningProviderFor(name string) (mobileSigningProvider, error) {
 		return transientSigningProvider{name: normalizeBuildBackend(name)}, nil
 	case buildBackendCodemagic:
 		return codemagicSigningProvider{}, nil
+	case buildBackendBitrise:
+		return transientSigningProvider{name: buildBackendBitrise}, nil
+	case buildBackendAppcircle:
+		return appcircleSigningProvider{}, nil
 	default:
 		return nil, fmt.Errorf(
 			"build provider %q does not expose a Deploy signing-secret adapter; configure signing in that provider or add an adapter implementing mobileSigningProvider",
@@ -130,7 +136,7 @@ func (a *App) setupAppleMobileSigning(ctx context.Context, d *Deployment, provid
 	if err != nil {
 		return nil, err
 	}
-	providerBound, err := mobileSigningProviderBinding(providerName)
+	providerBound, err := cloudIntegrationForSigning(providerName, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -400,7 +406,7 @@ func (a *App) setupAppleMobileSigning(ctx context.Context, d *Deployment, provid
 			providerResult := &mobileSigningProviderResult{
 				SecretRef: setup.ProviderSecretRef, ConfigJSON: defaultStr(setup.ProviderConfigJSON, "{}"),
 			}
-			if previous == nil || !providerMatches {
+			if previous == nil || !providerMatches || (providerName == buildBackendAppcircle && createdProfile) {
 				secretPayload, decryptErr := a.decryptMobileSigningPayload(identity)
 				if decryptErr != nil {
 					if createdProfile {
@@ -408,11 +414,15 @@ func (a *App) setupAppleMobileSigning(ctx context.Context, d *Deployment, provid
 					}
 					return nil, failSetup(decryptErr)
 				}
+				if newProfileContent != "" {
+					secretPayload.ProvisioningProfileBase64 = newProfileContent
+				}
 				providerResult, err = provider.ProvisionSigningSecrets(ctx, providerBound, cfg, d, mobileSigningSecrets{
 					Platform: d.TargetKind, IdentityID: identity.ID, IdentityRevision: identity.Revision,
 					ApplicationIdentifier: target.BundleID,
 					AppStoreIssuerID:      issuerID, AppStoreKeyID: keyID, AppStorePrivateKey: apiPrivateKey,
 					CertificatePrivateKey: secretPayload.PrivateKeyPEM, BundleID: target.BundleID,
+					CertificatePEM: secretPayload.CertificatePEM, ProvisioningProfileBase64: secretPayload.ProvisioningProfileBase64, CertificateSHA256: identity.CertificateSHA256,
 					AppStoreAppID: appStoreAppID, Scheme: target.Scheme,
 					WorkspacePath: target.WorkspacePath, ProjectPath: target.ProjectPath,
 				})
@@ -543,10 +553,12 @@ func (a *App) setupAppleMobileSigning(ctx context.Context, d *Deployment, provid
 		return nil, failSetup(err)
 	}
 
+	certificatePEM, certificateSHA1, certificateSHA256, certificateExpiresAt := appleCertificateMetadata(certificate)
 	providerResult, err := provider.ProvisionSigningSecrets(ctx, providerBound, cfg, d, mobileSigningSecrets{
 		Platform: d.TargetKind, ApplicationIdentifier: target.BundleID,
 		AppStoreIssuerID: issuerID, AppStoreKeyID: keyID, AppStorePrivateKey: apiPrivateKey,
 		CertificatePrivateKey: certificatePrivateKey, BundleID: target.BundleID,
+		CertificatePEM: certificatePEM, ProvisioningProfileBase64: profileContent, CertificateSHA256: certificateSHA256,
 		AppStoreAppID: appStoreAppID, Scheme: target.Scheme,
 		WorkspacePath: target.WorkspacePath, ProjectPath: target.ProjectPath,
 	})
@@ -589,7 +601,6 @@ func (a *App) setupAppleMobileSigning(ctx context.Context, d *Deployment, provid
 	setup.RequirementsHash = requirements.Hash
 	setup.PlatformStateJSON = capabilities.StateJSON
 	setup.LastError = ""
-	certificatePEM, certificateSHA1, certificateSHA256, certificateExpiresAt := appleCertificateMetadata(certificate)
 	identityInput := mobileSigningIdentityInput{
 		ProjectID: d.ProjectID, Platform: d.TargetKind, AuthorityScope: issuerID,
 		ApplicationIdentifier: target.BundleID, Format: "pem", Source: "generated",
