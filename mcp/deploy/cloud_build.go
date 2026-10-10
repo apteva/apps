@@ -1298,12 +1298,19 @@ func (githubActionsBuildBackend) Artifact(_ context.Context, bound *sdk.BoundInt
 		if item.Expired || (cfg.ArtifactName != "" && item.Name != cfg.ArtifactName) {
 			continue
 		}
+		archiveEntry := ""
+		if cfg.ContractInput != "" {
+			// The shared capsule workflow uploads its sealed ZIP as one file;
+			// GitHub's artifact API adds an outer container around that file.
+			archiveEntry = item.Name + ".zip"
+		}
 		return &cloudArtifact{
 			Name: item.Name + ".zip",
 			URL: fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/artifacts/%d/zip",
 				url.PathEscape(cfg.Owner), url.PathEscape(cfg.Repo), item.ID),
 			NeedsGitHubAuth: true,
 			Archive:         true,
+			ArchiveEntry:    archiveEntry,
 			FileName:        cfg.ArtifactFile,
 		}, nil
 	}

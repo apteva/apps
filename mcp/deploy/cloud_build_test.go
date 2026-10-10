@@ -922,3 +922,69 @@ func TestCodemagicInspectDoesNotTreatTransientOrAuthErrorsAsMissingJobs(t *testi
 		})
 	}
 }
+
+type githubSealedArtifactPlatform struct{ cloudBuildPlatform }
+
+func (p *githubSealedArtifactPlatform) ExecuteIntegrationTool(id int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+	if tool == "list_workflow_run_artifacts" {
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"artifacts":[{"id":123,"name":"apteva-build","expired":false}]}`)}, nil
+	}
+	return p.cloudBuildPlatform.ExecuteIntegrationTool(id, tool, input)
+}
+
+func TestGitHubCompactContractUnwrapsSealedArchiveAndRetainsNativeEvidence(t *testing.T) {
+	platform := &githubSealedArtifactPlatform{cloudBuildPlatform: cloudBuildPlatform{provider: "github"}}
+	withCloudBuildContext(t, platform)
+	bound := &sdk.BoundIntegration{ConnectionID: 77, AppSlug: "github"}
+	for _, compact := range []bool{false, true} {
+		cfg := cloudBuildConfig{ArtifactName: "apteva-build", ArtifactFile: "app.ipa", Owner: "owner", Repo: "adapter"}
+		if compact {
+			cfg.ContractInput = "apteva_contract"
+		}
+		artifact, err := (githubActionsBuildBackend{}).Artifact(t.Context(), bound, cfg, &Build{ExternalJobID: "11"}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !compact {
+			if artifact.ArchiveEntry != "" {
+				t.Fatal("changed existing direct GitHub artifact contract")
+			}
+			continue
+		}
+		if artifact.ArchiveEntry != "apteva-build.zip" {
+			t.Fatal("missing sealed-archive selection")
+		}
+		var inner bytes.Buffer
+		sealed := zip.NewWriter(&inner)
+		for name, body := range map[string]string{"app.ipa": "signed-ipa-bytes", artifactManifestFilename: `{"platform":"ios","primary":"app.ipa","signing_contract":"test-contract","certificate_sha256":"managed-certificate","signing_verified":true}`} {
+			file, err := sealed.Create(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			file.Write([]byte(body))
+		}
+		sealed.Close()
+		var outer bytes.Buffer
+		container := zip.NewWriter(&outer)
+		file, _ := container.Create("apteva-build.zip")
+		file.Write(inner.Bytes())
+		container.Close()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(outer.Bytes()) }))
+		defer server.Close()
+		artifact.URL = server.URL
+		artifact.NeedsGitHubAuth = false
+		dist := t.TempDir()
+		err = (&App{dataDir: t.TempDir()}).downloadAndStageCloudArtifact(bound, &Deployment{TargetKind: "ios", TargetConfigJSON: `{"bundle_id":"com.example.app","device_families":["iphone"]}`}, &Build{}, artifact, "file", dist)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := os.ReadFile(filepath.Join(dist, "app.ipa"))
+		if err != nil || string(body) != "signed-ipa-bytes" {
+			t.Fatalf("lost artifact bytes: %v", err)
+		}
+		manifest, err := readArtifactManifestFile(filepath.Join(dist, artifactManifestFilename))
+		if err != nil || manifest.Primary != "app.ipa" || manifest.CertificateSHA256 != "managed-certificate" || !manifest.SigningVerified {
+			t.Fatalf("lost signing evidence: %+v %v", manifest, err)
+		}
+	}
+}

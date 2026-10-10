@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 )
 
-// Appcircle exports a ZIP of all provider outputs. Select our single sealed
-// archive without importing provider logs or other files into the artifact tree.
+// Providers can wrap the sealed runner archive in their own ZIP container.
+// Select that archive without importing logs or changing the attested tree.
 func extractProviderArtifactArchive(file, name string) (string, error) {
 	z, err := zip.OpenReader(file)
 	if err != nil {
