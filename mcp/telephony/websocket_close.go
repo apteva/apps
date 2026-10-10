@@ -41,15 +41,17 @@ type websocketWriteEvent struct {
 	Opcode            int     `json:"opcode,omitempty"`
 }
 type websocketTransportSnapshot struct {
-	MaxQueueMS    float64               `json:"max_queue_ms"`
-	Writes        int64                 `json:"writes"`
-	WriteErrors   int64                 `json:"write_errors"`
-	WriteTimeouts int64                 `json:"write_timeouts"`
-	MaxWriteMS    float64               `json:"max_write_ms"`
-	ForcedCloses  int64                 `json:"forced_closes"`
-	LastCloseAt   string                `json:"last_close_at,omitempty"`
-	CloseMS       float64               `json:"close_ms"`
-	Events        []websocketWriteEvent `json:"events,omitempty"`
+	MaxQueueMS           float64               `json:"max_queue_ms"`
+	Writes               int64                 `json:"writes"`
+	WriteErrors          int64                 `json:"write_errors"`
+	WriteTimeouts        int64                 `json:"write_timeouts"`
+	CleanupWriteErrors   int64                 `json:"cleanup_write_errors"`
+	CleanupWriteTimeouts int64                 `json:"cleanup_write_timeouts"`
+	MaxWriteMS           float64               `json:"max_write_ms"`
+	ForcedCloses         int64                 `json:"forced_closes"`
+	LastCloseAt          string                `json:"last_close_at,omitempty"`
+	CloseMS              float64               `json:"close_ms"`
+	Events               []websocketWriteEvent `json:"events,omitempty"`
 }
 
 type mediaCloseLeg string
@@ -109,10 +111,11 @@ type websocketWriterPump struct {
 	stopOnce        sync.Once
 	forcedCloseOnce sync.Once
 
-	enqueueMu sync.Mutex
-	stateMu   sync.Mutex
-	err       error
-	closeSent bool
+	enqueueMu           sync.Mutex
+	stateMu             sync.Mutex
+	err                 error
+	closeSent           bool
+	normalLocalShutdown bool
 }
 
 type gracefulWebSocket struct {
@@ -286,11 +289,25 @@ func (p *websocketWriterPump) run() {
 		p.transportStats.MaxQueueMS = max(p.transportStats.MaxQueueMS, float64(queuedFor)/float64(time.Millisecond))
 		p.transportStats.MaxWriteMS = max(p.transportStats.MaxWriteMS, float64(time.Since(started))/float64(time.Millisecond))
 		if err != nil {
-			p.transportStats.WriteErrors++
+			p.stateMu.Lock()
+			cleanupClose := request.op == ws.OpClose && p.normalLocalShutdown && len(request.payload) >= 2 &&
+				(ws.StatusCode(binary.BigEndian.Uint16(request.payload[:2])) == ws.StatusNormalClosure ||
+					ws.StatusCode(binary.BigEndian.Uint16(request.payload[:2])) == ws.StatusGoingAway)
+			p.stateMu.Unlock()
 			reason := "socket_write_error"
-			if socketTimeout {
-				p.transportStats.WriteTimeouts++
-				reason = "socket_write_timeout"
+			if cleanupClose {
+				p.transportStats.CleanupWriteErrors++
+				reason = "local_close_write_error"
+				if socketTimeout {
+					p.transportStats.CleanupWriteTimeouts++
+					reason = "local_close_write_timeout"
+				}
+			} else {
+				p.transportStats.WriteErrors++
+				if socketTimeout {
+					p.transportStats.WriteTimeouts++
+					reason = "socket_write_timeout"
+				}
 			}
 			p.recordWriteEventLocked(request, reason, timeout, time.Since(started), counted.bytes)
 		}
@@ -563,6 +580,9 @@ func (c *gracefulWebSocket) Close(code ws.StatusCode, reason string) {
 			close(forced)
 		})
 		if c.writer != nil {
+			c.writer.stateMu.Lock()
+			c.writer.normalLocalShutdown = code == ws.StatusNormalClosure || code == ws.StatusGoingAway
+			c.writer.stateMu.Unlock()
 			_ = c.writer.write(ws.OpClose, ws.NewCloseFrameBody(code, reason), liveAudioWriteTimeout)
 		}
 		select {

@@ -113,7 +113,7 @@ func TestGracefulCleanupInterruptsActiveWriteAndConcurrentClosers(t *testing.T) 
 			forcedEvents++
 		}
 	}
-	if s.ForcedCloses != 1 || s.LastCloseAt == "" || s.CloseMS < 450 || forcedEvents != 1 {
+	if s.WriteErrors != 1 || s.CleanupWriteErrors != 0 || s.ForcedCloses != 1 || s.LastCloseAt == "" || s.CloseMS < 450 || forcedEvents != 1 {
 		t.Fatalf("missing forced cleanup evidence: %+v", s)
 	}
 	select {

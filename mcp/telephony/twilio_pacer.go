@@ -335,8 +335,23 @@ func (p *twilioAudioPacer) run() {
 		queue = append(queue, command.packets...)
 		queuedSamples += incomingSamples
 		p.pendingSamples.Store(int64(queuedSamples))
+		p.diagnostics.queued(samplesToMS(queuedSamples))
+		leadFilled := false
+		// Use only the existing carrier lead for a near-limit startup batch.
+		// Large bursts retain the trim-first policy and bounded local queue.
+		if p.dropStale && queuedSamples > activeMaxQueuedSamples && queuedSamples <= activeMaxQueuedSamples+p.targetBufferedSamples {
+			if err := fillCarrierLead(); err != nil {
+				command.response <- twilioPacerResult{err: err}
+				return err
+			}
+			leadFilled = true
+		}
 		if p.dropStale && queuedSamples > activeMaxQueuedSamples {
 			before := queuedSamples
+			residence := 0.0
+			if len(queue) > 0 && !queue[0].EnqueuedAt.IsZero() {
+				residence = max(0.0, float64(time.Since(queue[0].EnqueuedAt))/float64(time.Millisecond))
+			}
 			for queuedSamples > p.trimToSamples && len(queue) > 0 {
 				droppedSamples += len(queue[0].PCM)
 				queuedSamples -= len(queue[0].PCM)
@@ -347,16 +362,18 @@ func (p *twilioAudioPacer) run() {
 				needsCrossfade = true
 				p.recordDrop(audioDropEvent{
 					Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier",
-					Reason: "stale_live_audio", DurationMS: samplesToMS(dropped),
+					Reason: "stale_live_audio", Trigger: "queue_depth", QueueResidenceMS: residence, DurationMS: samplesToMS(dropped),
 					QueueBeforeMS: samplesToMS(before), QueueAfterMS: samplesToMS(queuedSamples),
 				})
 				activeMaxQueuedSamples = p.adaptiveMaxQueuedSamples
 				adaptiveUntil = time.Now().Add(5 * time.Second)
 			}
 		}
-		p.diagnostics.queued(carrierSamplesToMS(queuedSamples, twilioMediaSampleRate))
 		queuedAtEnqueue := queuedSamples
-		err := fillCarrierLead()
+		var err error
+		if !leadFilled {
+			err = fillCarrierLead()
+		}
 		command.response <- twilioPacerResult{queuedMS: samplesToMS(queuedAtEnqueue), droppedMS: samplesToMS(droppedSamples), err: err}
 		if err != nil {
 			return err

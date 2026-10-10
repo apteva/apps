@@ -269,6 +269,8 @@ type browserWebRTCStats struct {
 }
 
 type audioDropEvent struct {
+	Trigger              string  `json:"trigger,omitempty"`
+	QueueResidenceMS     float64 `json:"queue_residence_ms,omitempty"`
 	BrowserDropTimestamp string  `json:"browser_drop_timestamp,omitempty"`
 	BrowserDropReason    string  `json:"browser_drop_reason,omitempty"`
 	FrameAgeMS           float64 `json:"frame_age_ms,omitempty"`

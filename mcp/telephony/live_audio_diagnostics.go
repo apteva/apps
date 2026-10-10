@@ -372,6 +372,8 @@ func mergeWebsocketTransport(a, b websocketTransportSnapshot) websocketTransport
 	a.Writes += b.Writes
 	a.WriteErrors += b.WriteErrors
 	a.WriteTimeouts += b.WriteTimeouts
+	a.CleanupWriteErrors += b.CleanupWriteErrors
+	a.CleanupWriteTimeouts += b.CleanupWriteTimeouts
 	a.ForcedCloses += b.ForcedCloses
 	a.MaxWriteMS = max(a.MaxWriteMS, b.MaxWriteMS)
 	a.MaxQueueMS = max(a.MaxQueueMS, b.MaxQueueMS)

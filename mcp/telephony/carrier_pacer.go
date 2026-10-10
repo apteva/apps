@@ -420,6 +420,10 @@ func (p *jsonCarrierAudioPacer) run() {
 	}
 	dropOldest := func(targetSamples int) {
 		before := queuedSamples
+		residence := 0.0
+		if len(queue) > 0 && !queue[0].EnqueuedAt.IsZero() {
+			residence = max(0.0, float64(time.Since(queue[0].EnqueuedAt))/float64(time.Millisecond))
+		}
 		for queuedSamples > targetSamples && len(queue) > 0 {
 			droppedSamples += len(queue[0].PCM)
 			queuedSamples -= len(queue[0].PCM)
@@ -430,7 +434,7 @@ func (p *jsonCarrierAudioPacer) run() {
 			needsCrossfade = true
 			p.recordDrop(audioDropEvent{
 				Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier",
-				Reason: "stale_live_audio", DurationMS: carrierSamplesToMS(dropped, p.sampleRate),
+				Reason: "stale_live_audio", Trigger: "queue_depth", QueueResidenceMS: residence, DurationMS: carrierSamplesToMS(dropped, p.sampleRate),
 				QueueBeforeMS: carrierSamplesToMS(before, p.sampleRate), QueueAfterMS: carrierSamplesToMS(queuedSamples, p.sampleRate),
 			})
 		}
@@ -460,14 +464,30 @@ func (p *jsonCarrierAudioPacer) run() {
 		queue = append(queue, command.packets...)
 		queuedSamples += incoming
 		p.pendingSamples.Store(int64(queuedSamples))
+		p.diagnostics.queued(carrierSamplesToMS(queuedSamples, p.sampleRate))
+		leadFilled := false
+		// A small startup/recovery batch may fit within the existing carrier
+		// lead plus the local queue. Fill that lead before deciding to trim;
+		// oversized bursts still trim first, without sending their oldest head.
+		if p.policy.dropStale && queuedSamples > activeMaxQueuedSamples && queuedSamples <= activeMaxQueuedSamples+bufferSamples {
+			if err := fillLead(); err != nil {
+				command.response <- carrierPacerResult{err: err}
+				return err
+			}
+			leadFilled = true
+		}
 		if p.policy.dropStale && queuedSamples > activeMaxQueuedSamples {
 			dropOldest(trimToSamples)
 			activeMaxQueuedSamples = adaptiveMaxQueuedSamples
 			adaptiveUntil = time.Now().Add(5 * time.Second)
 		}
-		p.diagnostics.queued(carrierSamplesToMS(queuedSamples, p.sampleRate))
 		queuedAtEnqueue := queuedSamples
-		err := fillLead()
+		var err error
+		if !leadFilled {
+			err = fillLead()
+		} else {
+			reschedule()
+		}
 		command.response <- carrierPacerResult{
 			queuedMS:  carrierSamplesToMS(queuedAtEnqueue, p.sampleRate),
 			droppedMS: carrierSamplesToMS(droppedSamples, p.sampleRate),
