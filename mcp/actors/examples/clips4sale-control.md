@@ -45,9 +45,11 @@ through the appropriate operation. Preserve the returned clip ID and saved
 filename, which may differ from the uploaded filename.
 
 This first example requires an explicit `asset_class: "no_real_person"`.
-Real-person footage is rejected: selecting verified registered performers and
-associated records is a different workflow and is not implemented here. Never
-use this declaration to bypass performer registration.
+The original publishing operations still reject real-person footage. Performer
+registration, document storage and clip-specific consent requests are separate operations;
+a contact record or uploaded file must never be treated as approved identity
+or signed consent. Never use the no-real-person declaration to bypass these
+requirements.
 
 New uploads first save the metadata, inspect the catalog, select the unique
 new draft and reopen its verified edit URL. They then wait up to 90 seconds for
@@ -86,3 +88,75 @@ collection rather than combining old and new statuses. Moderation may arrive
 after submission, so run `verify_clip_submission` again before treating a
 validation/under-review/pending clip as ready for customers. Public availability requires an
 actual active/published state.
+
+## Performer records and documents
+
+Supply the same account/context inputs for every operation. Names, email
+addresses, IDs and genuine documents are caller inputs, never bundled presets.
+
+| Operation | Inputs and result |
+| --- | --- |
+| `list_performers` | Paginates All Performers and reports explicit coverage. Returns numeric `performer_id`, exact `stage_name`, store ID, native legal-name/DOB labels, clip count and verified edit URL. This covers registered records, not document approval. |
+| `get_performer` | `performer_id`, `expected_stage_name`. Selects the unique collected record and rereads its identity, email, legal-name/DOB fields and document count. Blank identity details remain blank. |
+| `get_performer_requirements` | Reads the native Action Required page and its document-action labels. This page is account-wide; it is not a proven mapping of each warning to a performer ID or a complete paginated document inventory. |
+| `register_performer` | `stage_name`, lowercase `email`, stable `request_id`. Checks complete performer coverage, rejects an existing exact stage name, saves a hidden contact record with no documents, then independently rereads its saved stage name/email. Returns the assigned ID. Registration itself does not send an invitation or approve the performer. |
+| `upload_performer_document` / `upload_performer_document_base64` | `performer_id`, `expected_stage_name`, `document_type` (`id` or `consent`), corresponding `document_label` (`Performer ID` or `Consent Form`), stable `request_id`, safe `filename`, `genuine_document: true`, and `source_url` or `document_base64`. `document_mime_type` defaults to `application/pdf`; use the appropriate image MIME type for images. Checks the selected type and pending filename before Save Documents, then reloads and verifies the persisted filename and increased document count. |
+
+Digital consent is a **clip-editor** flow. Select the saved performer, choose
+Request Digital Consent, enter the email, then use Send Consent Request.
+Saving an email in Performer Management alone does not send anything. Never
+manufacture identification or signatures; Clips4Sale must still accept the
+genuine records.
+
+- `preflight_clip_consent` checks the store, saved performer email and exact
+  owned draft ID/title/body/filename, selects the numeric performer ID through
+  its verified native menu, then verifies the exact confirmation dialog.
+  It stops before the final Request Consent button. Supply
+  `real_person_appears: true` only for footage that actually represents that person.
+  The unsaved composer changes mean this is not marked strictly read-only.
+- `request_clip_consent` requires that same explicit person declaration. It
+  rejects an existing matching association/request, checks the email and dialog,
+  confirms Request Consent once, then requires the exact native performer row
+  to show Consent Requested. It verifies metadata, saves the association through
+  Save and Exit, reloads and checks saved person mode and the same pending row.
+  Supply `performer_id`, `expected_stage_name`, lowercase `email`, `clip_id`,
+  `title`, `description`, `expected_saved_filename`, exact `audience` and
+  `category`, plus account/context inputs. It never clicks Publish.
+- `request_clip_consent_test` is an **explicit email-only test** for a no-person
+  draft. It requires `allow_unsaved_test_request: true` and
+  `real_person_appears: false`, checks saved mode `2`, and verifies the immediate
+  native request result. It sends a real invitation but does not save a false
+  person classification or claim a persisted clip association. Its recipient
+  and all identities remain caller inputs. Use this only for an authorized test.
+- `get_clip_performers` independently reads the draft and returns the native
+  performer evidence without changing controls. With saved `performer_mode: "2"`,
+  Clips4Sale hides the section; an empty visible view does not prove that no
+  pending invitations exist.
+- `verify_clip_consent` is strictly read-only. It verifies the store, performer,
+  email, exact draft, saved person mode `0` and the exact Consent Requested row.
+  A hidden, missing or ambiguous row fails; it never reveals, sends or saves.
+
+The opener, final send and draft save use separate effect keys. The opener is
+acknowledged as an email action because of its native Send label; opening the
+confirmation dialog is never treated as success. Never resend after an
+uncertain send or save. Reconcile the original run, performer documents and
+saved clip instead. Similar stage-name matches stop safely.
+
+Sending a request does not prove email delivery, a signature, identity approval
+or publication readiness. A failed or ambiguous request must be reconciled
+against its original run and the clip; do not use a new actor or request key to
+send again. These operations do not click Publish.
+
+Document upload reserves separate opener and final-save keys for the logical
+request. A successful or ambiguous save cannot be replayed. Reconcile through
+`get_performer` and the original run before issuing any new request identity.
+A saved filename and document count prove storage, not approval or legal
+validity. Read the native document evidence before deciding publication readiness.
+
+Live checks exercised registration with the owner's supplied email, exact
+performer reads and one accepted digital consent request. The no-person test
+draft retained its original saved classification and was not published. Its
+pending row was transient until Save; no saved real-person association was
+claimed. Email delivery and signing are not inferred. Genuine ID/consent files
+and real-person test footage were not supplied: document uploads and the final
+association-save/reload workflow have fixture coverage, not live success coverage.
