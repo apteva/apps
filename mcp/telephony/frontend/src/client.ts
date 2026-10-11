@@ -71,9 +71,19 @@ export interface OutboundTransport {
  transport:"programmable_websocket"|"sip_direct";scope:"default"|"account"|"number";
  config?:OutboundSIPConfig;credentials_configured:boolean;verified_at?:string;
 }
+export interface OutboundSIPSetupOptions {
+ automatic_supported:boolean;
+ profiles:Array<{id:string;name:string;enabled:boolean;destinations:string[];daily_spend_limit_enabled:boolean;daily_spend_limit?:string}>;
+ warning?:string;
+}
+export interface OutboundTransportResult {ok:boolean;outbound_transport?:OutboundTransport;setup_options?:OutboundSIPSetupOptions;applies_to?:"new_calls"}
 export interface OutboundTransportRequest {
  carrier_connection_id:number;phone_number?:string;transport?:OutboundTransport["transport"];inherit?:boolean;
  config?:OutboundSIPConfig;username?:string;password?:string;
+ /** Provision a dedicated outbound resource with managed, write-only credentials. */
+ provision?:boolean;setup_options?:boolean;outbound_profile_id?:string;
+ /** Explicit policy when creating a Telnyx outbound profile; USD daily limit. */
+ profile_policy?:{destinations:string[];daily_spend_limit:string};
 }
 export interface OutboundNumberChoice {
  outbound_transport?:OutboundTransport;
@@ -293,7 +303,7 @@ export class TelephonyClient {
 
   /** Operator-only configuration. Never available through adviser app-user grants.
    * Transport changes affect new calls; credentials are write-only. */
-  outboundTransport(request:OutboundTransportRequest):Promise<{ok:boolean;outbound_transport?:OutboundTransport}> {
+  outboundTransport(request:OutboundTransportRequest):Promise<OutboundTransportResult> {
     return this.app.post(this.path("/numbers/outbound-transport"),request);
   }
   /** Authorized choices for new calls; disabling never changes existing media grants. */

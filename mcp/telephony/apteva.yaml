@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.12.5
+version: 0.12.6
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -18,7 +18,7 @@ icon_style: monochrome
 tags: [voice, telephony, communication]
 
 scopes: [project, global]
-min_apteva_version: "0.25.12"
+min_apteva_version: "0.87.4"
 
 requires:
   permissions:
@@ -122,7 +122,7 @@ provides:
     - { name: telephony_call_events_list, description: "List durable lifecycle events for one call." }
     - { name: telephony_recording_settings_get, description: "Get the project's recording and durable-storage policy." }
     - { name: telephony_recording_settings_set, description: "Set recording policy for future calls. Args: default_mode?, channels?, storage_mode?, retention_days?." }
-    - { name: telephony_outbound_transport, description: "Read or configure outbound account/number transport for new calls. Platform principal only; SIP credentials are write-only." }
+    - { name: telephony_outbound_transport, description: "Read or configure outbound account/number transport for new calls, including automatic SIP setup. Platform principal only; SIP credentials are write-only." }
     - { name: telephony_outbound_settings_get, description: "Get outbound call defaults: answering machine detection mode and action." }
     - { name: telephony_outbound_settings_set, description: "Set outbound call defaults for future calls. Args: machine_detection? (off|detect|premium), machine_detection_action? (notify|hangup), default_timeout_sec? (0 keeps built-in defaults)." }
     - { name: telephony_recordings_list, description: "List call recordings. Args: call_id?, limit?." }
@@ -295,9 +295,12 @@ provides:
 
 runtime:
   kind: source
+  activation_strategy: exclusive
+  startup_timeout_seconds: 60
+  database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.12.5
+    ref: telephony/v0.12.6
     entry: mcp/telephony
   port: 8080
   health_check: /health

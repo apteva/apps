@@ -8,6 +8,7 @@
     "example": "bun frontend/example/server.ts",
     "test:example": "bunx --no-install playwright test -c frontend/example/playwright.config.ts",
     "benchmark:softphone": "bun benchmarks/softphone/run.ts",
+    "benchmark:internal-audio": "bun benchmarks/internal-audio/run.ts",
     "typecheck:benchmark": "tsc -p benchmarks/softphone/tsconfig.json --noEmit"
   },
   "devDependencies": {
