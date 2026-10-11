@@ -23,6 +23,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -74,8 +75,9 @@ type remoteIndexResult struct {
 // remoteKeyframe is one entry in the storyboard returned by the
 // remote indexer.
 type remoteKeyframe struct {
-	PositionMs    int64 `json:"position_ms"`
-	StorageFileID int64 `json:"storage_file_id"`
+	PositionMs    int64  `json:"position_ms"`
+	StorageFileID int64  `json:"storage_file_id"`
+	Error         string `json:"error,omitempty"`
 }
 
 // runRemoteIndexing executes the whole indexer pipeline on the
@@ -149,6 +151,13 @@ func runRemoteIndexStage(
 		return nil, 0, 0, nil, fmt.Errorf("parse remote index result: %w (output=%s)", err, truncate(out, 400))
 	}
 
+	if params.Stage == "keyframe" && len(res.Keyframes) == 0 {
+		detail := strings.Split(out, "APTEVA_INDEX:")[0]
+		if strings.TrimSpace(detail) == "" {
+			detail = "no keyframe produced or uploaded"
+		}
+		return nil, 0, 0, nil, fmt.Errorf("remote_index_keyframe_failed at %dms: %s", params.PositionMs, truncate(detail, 800))
+	}
 	probeBytes, err := base64.StdEncoding.DecodeString(res.ProbeBase64)
 	if err != nil {
 		return nil, 0, 0, nil, fmt.Errorf("decode probe base64: %w", err)
@@ -416,6 +425,9 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 		b.WriteString(`  while awk -v p="$POS_SEC" -v d="$DUR_SEC" -v c="$KF_INDEX" -v mx="$KEYFRAME_MAX_COUNT" 'BEGIN{exit !(p < d && c < mx)}'; do` + "\n")
 		// Position in milliseconds (integer, for filename + JSON).
 		b.WriteString(`    POS_MS=$(awk -v p="$POS_SEC" 'BEGIN{printf "%d", p*1000}')` + "\n")
+		if in.Stage == "keyframe" {
+			fmt.Fprintf(&b, "    POS_MS=%d\n", in.PositionMs)
+		}
 		b.WriteString(`    KF_FILE="kf-${POS_MS}.jpg"` + "\n")
 		// Extract with the smart-frame filter — same as thumbnail. If
 		// ffmpeg fails for this position, skip and continue to the
@@ -425,7 +437,7 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 		// Upload the keyframe to storage under /.media/keyframe/.
 		// Position-tagged filename so storage's per-folder uniqueness
 		// doesn't clobber prior frames.
-		b.WriteString(`    KF_RESP=$(curl -sS --fail -X POST \
+		b.WriteString(`    KF_RESP=$(curl -sS --fail-with-body -w '\nhttp %{http_code}\n' -X POST \
       -H "Authorization: Bearer $STORAGE_TOKEN" \
       -F "folder=/.media/keyframe/" \
       -F "visibility=private" \
@@ -434,6 +446,7 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
       -F "file=@${KF_FILE};type=image/jpeg;filename=${SRC_ID}-${POS_MS}.jpg" \
       "$STORAGE_BASE/files?project_id=$PROJECT_ID" || true)` + "\n")
 		b.WriteString(`    KF_ID=$(echo "$KF_RESP" | sed -n 's/.*"id":[[:space:]]*\([0-9]*\).*/\1/p' | head -1)` + "\n")
+		b.WriteString(`    if [ -z "$KF_ID" ]; then printf 'remote_index_upload_failed: %s\n' "$KF_RESP" >&2; fi` + "\n")
 		// Append {position_ms, storage_file_id} to JSON array.
 		b.WriteString(`    if [ -n "$KF_ID" ]; then` + "\n")
 		b.WriteString(`      if [ -z "$KEYFRAMES_JSON" ]; then` + "\n")
@@ -540,15 +553,47 @@ func runRemoteIndexing(ctx context.Context, app *sdk.AppCtx, project string, par
 			continue
 		}
 		params.PositionMs = pos
-		_, _, _, ks, e := runRemoteIndexStage(ctx, app, project, params)
-		if e != nil {
+		var ks []remoteKeyframe
+		var e error
+		for attempt := 1; attempt <= 3; attempt++ {
+			_, _, _, ks, e = runRemoteIndexStage(ctx, app, project, params)
+			if e == nil {
+				break
+			}
 			if resourceFailure(e, "", 0) != nil || ctx.Err() != nil {
 				return nil, 0, 0, nil, e
 			}
+			if !retryRemoteIndexStage(e, attempt) {
+				break
+			}
+			timer := time.NewTimer(time.Duration(attempt) * time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, 0, 0, nil, ctx.Err()
+			case <-timer.C:
+			}
+		}
+		if e != nil {
 			app.Logger().Warn("remote index keyframe failed", "file_id", params.FileID, "position_ms", pos, "err", e)
+			frames = append(frames, remoteKeyframe{PositionMs: pos, Error: e.Error()})
 			continue
 		}
+
 		frames = append(frames, ks...)
 	}
 	return probe, thumb, wave, frames, nil
+}
+
+func retryRemoteIndexStage(err error, attempt int) bool {
+	if err == nil || attempt >= 3 || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || resourceFailure(err, "", 0) != nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, permanent := range []string{"quota", "unauthorized", "forbidden", "http 401", "http 403", "http 404", "source_not_found"} {
+		if strings.Contains(message, permanent) {
+			return false
+		}
+	}
+	return true
 }

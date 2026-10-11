@@ -23,8 +23,13 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.35
+version: 0.14.36
 description: |
+  v0.14.36 retains exact integer storyboard timestamps rather than truncating
+  floating-point seconds. Missing-frame stages retry within three attempts;
+  cancellation, OOM and permanent quota/auth failures stop immediate retry.
+  Partial retry diagnostics retain the stage failure. Existing FIFO admission,
+  source-bound artifact reuse, atomic retry commits and four-unit settings remain.
   v0.14.35 atomically commits source-bound index generations and retry state,
   preserving transcription audio and usable partial outputs. Legacy stale retries
   require verified source/artifact identity and complete post-probe evidence.
@@ -684,7 +689,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.35
+    ref: media/v0.14.36
     entry: mcp/media
   port: 8080
   health_check: /health

@@ -723,13 +723,16 @@ func replaceRemoteDerivations(
 	}
 	for _, k := range keyframes {
 		add("keyframe", k.StorageFileID, thumbWidth, 0, k.PositionMs)
+		if k.Error != "" {
+			stage.rows[len(stage.rows)-1].Error = k.Error
+		}
 	}
 	if len(policy) > 0 {
 		stage.sourceSHA = policy[0].sourceSHA
 		for _, pos := range policy[0].expected {
 			found := false
 			for _, k := range keyframes {
-				if k.PositionMs == pos && k.StorageFileID > 0 {
+				if k.PositionMs == pos {
 					found = true
 				}
 			}
@@ -1047,7 +1050,7 @@ func reuseRemoteIndexGeneration(ctx context.Context, app *sdk.AppCtx, sc *storag
 			params.ReuseWaveform = id
 		case "keyframe":
 			if expected[d.PositionMs] {
-				params.ReuseKeyframes = append(params.ReuseKeyframes, remoteKeyframe{d.PositionMs, id})
+				params.ReuseKeyframes = append(params.ReuseKeyframes, remoteKeyframe{PositionMs: d.PositionMs, StorageFileID: id})
 			}
 		}
 	}

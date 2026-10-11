@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	tk "github.com/apteva/app-sdk/testkit"
 	"net/http"
@@ -27,13 +28,13 @@ func TestRemoteGenerationClearsRetryPreservesAudioAndCooldown(t *testing.T) {
 	_ = upsertDerivation(db, testProj, "45", "transcript_audio", 102, 0, 0, 0)
 	_, _ = db.Exec(`UPDATE media SET derivation_retry_at=datetime('now','-1 day') WHERE file_id='45'`)
 	policy := remoteGenerationPolicy{sourceSHA: "sha", expected: []int64{1000, 6000}}
-	if err := replaceRemoteDerivations(db, testProj, "45", probe, 103, 0, []remoteKeyframe{{1000, 104}}, 320, 800, 120, policy); err != nil {
+	if err := replaceRemoteDerivations(db, testProj, "45", probe, 103, 0, []remoteKeyframe{{PositionMs: 1000, StorageFileID: 104}, {PositionMs: 6000, Error: "remote_index_upload_failed: exhausted pending quota"}}, 320, 800, 120, policy); err != nil {
 		t.Fatal(err)
 	}
 	var future bool
 	var reason string
 	_ = db.QueryRow(`SELECT julianday(derivation_retry_at)>julianday('now'),derivation_retry_reason FROM media WHERE file_id='45'`).Scan(&future, &reason)
-	if !future || reason == "" {
+	if !future || !strings.Contains(reason, "exhausted pending quota") {
 		t.Fatal("partial retry missing cooldown/reason")
 	}
 	ds, _ := listDerivations(db, testProj, "45")
@@ -56,7 +57,7 @@ func TestRemoteGenerationClearsRetryPreservesAudioAndCooldown(t *testing.T) {
 			t.Fatal("partial lost usable thumbnail")
 		}
 	}
-	if err := replaceRemoteDerivations(db, testProj, "45", probe, 103, 0, []remoteKeyframe{{1000, 104}, {6000, 105}}, 320, 800, 120, policy); err != nil {
+	if err := replaceRemoteDerivations(db, testProj, "45", probe, 103, 0, []remoteKeyframe{{PositionMs: 1000, StorageFileID: 104}, {PositionMs: 6000, StorageFileID: 105}}, 320, 800, 120, policy); err != nil {
 		t.Fatal(err)
 	}
 	var cleared bool
@@ -308,9 +309,9 @@ func TestRemoteIndexStagesExecuteAndLegacyRepairIsSourceVerified(t *testing.T) {
 	in.Summary = probe
 	in.Stage = "keyframe"
 	in.KeyframesEnabled = true
-	in.PositionMs = 1000
+	in.PositionMs = 1015
 	r = run()
-	if len(r.Keyframes) != 1 || r.Keyframes[0].PositionMs != 1000 {
+	if len(r.Keyframes) != 1 || r.Keyframes[0].PositionMs != 1015 {
 		t.Fatal("keyframe stage wrong", r)
 	}
 	app := newTestCtx(t)
@@ -441,5 +442,33 @@ func TestStoryboardDoesNotRequireEmptyEndSeek(t *testing.T) {
 		if len(positions) == 0 || positions[len(positions)-1] >= duration-250 {
 			t.Fatalf("unsafe end seek duration=%d positions=%v", duration, positions)
 		}
+	}
+}
+
+func TestRemoteIndexStageRetriesAreBoundedAndRespectPermanentFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"transient", errors.New("remote_index_upload_failed: http 503"), true},
+		{"limited", errors.New("remote_index_upload_failed: http 429"), true},
+		{"missing frame", errors.New("remote_index_keyframe_failed: no keyframe produced"), true},
+		{"quota", errors.New("remote_index_upload_failed: exhausted pending quota http 429"), false},
+		{"auth", errors.New("remote_index_upload_failed: http 401"), false},
+		{"forbidden", errors.New("remote_index_upload_failed: http 403"), false},
+		{"missing source", errors.New("http 404"), false},
+		{"oom", errors.New("exit status 137"), false},
+		{"cancelled", fmt.Errorf("remote index: %w", context.Canceled), false},
+		{"deadline", context.DeadlineExceeded, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := retryRemoteIndexStage(tc.err, 1); got != tc.want {
+				t.Fatalf("retry=%v want %v", got, tc.want)
+			}
+			if retryRemoteIndexStage(tc.err, 3) {
+				t.Fatal("retry exceeded three attempts")
+			}
+		})
 	}
 }
