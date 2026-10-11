@@ -1491,6 +1491,10 @@ func (a *App) placeHumanCallForUserWithOptions(ctx *sdk.AppCtx, principal *phone
 	if err != nil {
 		return nil, err
 	}
+	if creds.Fields["outbound_transport"] == inboundTransportSIPDirect && machineDetection != machineDetectionOff {
+		return nil, errors.New("direct SIP does not support provider answering machine detection")
+	}
+
 	if timeoutSec == 0 {
 		timeoutSec = a.outboundTimeoutDefault(projectID, 60)
 	}

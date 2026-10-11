@@ -557,7 +557,7 @@ func (c *callsDB) failRecordingImport(id string, importErr error, leases ...stri
 
 func (a *App) reconcileProviderRecording(ctx *sdk.AppCtx) error {
 	now := time.Now().UTC()
-	row, err := a.db().listWhere(`project_id = ? AND carrier_slug IN ('twilio','telnyx','plivo') AND recording_mode = 'always'
+	row, err := a.db().listWhere(`project_id = ? AND carrier_slug IN ('twilio','telnyx','plivo') AND ingress_path <> 'sip_direct' AND recording_mode = 'always'
         AND status IN ('completed','failed') AND carrier_sid <> '' AND ended_at <> '' AND ended_at <= ?
         AND ended_at >= ? AND (recording_checked_at = '' OR recording_checked_at <= ?)
         AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.call_id = calls.id)

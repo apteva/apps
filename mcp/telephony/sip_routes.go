@@ -101,6 +101,9 @@ func (a *App) setRouteTransport(ctx *sdk.AppCtx, routeID, transport string, agen
 }
 
 func (a *App) callUsesDirectSIP(row *callRow) bool {
+	if rowUsesOutboundSIP(row) {
+		return true
+	}
 	if row == nil || row.Direction != "inbound" {
 		return false
 	}

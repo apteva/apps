@@ -136,6 +136,9 @@ func (a *App) handleTelnyxRecordingEvent(call *callRow, body []byte) (bool, erro
 }
 
 func (a *App) reconcileCallRecordings(ctx *sdk.AppCtx, call *callRow) error {
+	if a.callUsesDirectSIP(call) {
+		return nil
+	} // Native recordings are owned by the local recorder, not Voice API IDs.
 	input := map[string]any{}
 	switch call.CarrierSlug {
 	case "twilio":

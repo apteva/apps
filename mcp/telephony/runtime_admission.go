@@ -169,6 +169,10 @@ func (a *App) handleSoftphoneNumbers(w http.ResponseWriter, r *http.Request, pro
 		if len(n.Capabilities) > 0 && !containsString(n.Capabilities, "voice") {
 			continue
 		}
+		if principal != nil {
+			n.OutboundTransport.Config = nil
+			n.OutboundTransport.CredentialsConfigured = false
+		}
 		filtered = append(filtered, n)
 	}
 	result["numbers"] = filtered

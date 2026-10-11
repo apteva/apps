@@ -42,7 +42,7 @@ func effectiveRecordingControlState(row callRow) string {
 func callControlCapabilities(row callRow) map[string]bool {
 	features := carrierControlFeaturesForSlug(row.CarrierSlug)
 	carrier := row.CarrierSID != ""
-	if row.IngressPath == inboundTransportSIPDirect || row.CarrierSlug == "didww" && row.Direction == "outbound" {
+	if row.IngressPath == inboundTransportSIPDirect || rowUsesOutboundSIP(&row) {
 		features.HoldMusic = true
 		features.RecordingPause = true
 	}

@@ -239,7 +239,7 @@ func TestRuntimeAuthorizedChoicesAndAdministrativeDenial(t *testing.T) {
 	if !strings.Contains(access.Body.String(), "+33189313432") {
 		t.Fatal("existing permission was revoked")
 	}
-	for _, path := range []string{"/numbers/outbound-policy", "/numbers/routes/enable", "/_runtime/bindings"} {
+	for _, path := range []string{"/numbers/outbound-transport", "/numbers/outbound-policy", "/numbers/routes/enable", "/_runtime/bindings"} {
 		response := phoneTestRequest(a, &alice, "POST", path, map[string]any{"scope": "provider", "value": "twilio", "enabled": false})
 		if response.Code != 403 && response.Code != 401 {
 			t.Fatalf("admin exposed: %s %d", path, response.Code)

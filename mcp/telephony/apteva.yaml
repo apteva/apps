@@ -122,6 +122,7 @@ provides:
     - { name: telephony_call_events_list, description: "List durable lifecycle events for one call." }
     - { name: telephony_recording_settings_get, description: "Get the project's recording and durable-storage policy." }
     - { name: telephony_recording_settings_set, description: "Set recording policy for future calls. Args: default_mode?, channels?, storage_mode?, retention_days?." }
+    - { name: telephony_outbound_transport, description: "Read or configure outbound account/number transport for new calls. Platform principal only; SIP credentials are write-only." }
     - { name: telephony_outbound_settings_get, description: "Get outbound call defaults: answering machine detection mode and action." }
     - { name: telephony_outbound_settings_set, description: "Set outbound call defaults for future calls. Args: machine_detection? (off|detect|premium), machine_detection_action? (notify|hangup), default_timeout_sec? (0 keeps built-in defaults)." }
     - { name: telephony_recordings_list, description: "List call recordings. Args: call_id?, limit?." }

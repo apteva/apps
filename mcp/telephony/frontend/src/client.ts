@@ -63,7 +63,20 @@ export interface CallSession {
   lease_started_ms?: number;
   coaching?: boolean;
 }
+export interface OutboundSIPConfig {
+ host:string; resource_id:string; resource_type?:"credential_connection"|"ip_connection"|"fqdn_connection"|"elastic_sip_trunk";
+ auth_mode:"digest"|"ip"; media_encryption:"srtp_sdes"|"disabled"; codecs?:Array<"G722"|"PCMU"|"PCMA">;
+}
+export interface OutboundTransport {
+ transport:"programmable_websocket"|"sip_direct";scope:"default"|"account"|"number";
+ config?:OutboundSIPConfig;credentials_configured:boolean;verified_at?:string;
+}
+export interface OutboundTransportRequest {
+ carrier_connection_id:number;phone_number?:string;transport?:OutboundTransport["transport"];inherit?:boolean;
+ config?:OutboundSIPConfig;username?:string;password?:string;
+}
 export interface OutboundNumberChoice {
+ outbound_transport?:OutboundTransport;
  verified_at?: string;
  phone_number: string;
  provider: string;
@@ -278,6 +291,11 @@ export class TelephonyClient {
   async stopListening(session: CallSession): Promise<void> { await this.app.post(this.path(`/softphone/${session.coaching ? "coach-stop" : "listen-stop"}/${callID(session.call_id)}`), { session_token: session.session_token }); }
   async listenerAudit(id: string): Promise<{ listeners: Array<{ id: string; principal: unknown; joined_at: string; left_at: string; reason: string; diagnostics: unknown; mode: "listen"|"coach" }>; coaching: Array<{id:string;listener_audit_id:string;principal:unknown;started_at:string;ended_at:string;reason:string}> }> { return this.app.get(this.path(`/softphone/listen-audit/${callID(id)}`)); }
 
+  /** Operator-only configuration. Never available through adviser app-user grants.
+   * Transport changes affect new calls; credentials are write-only. */
+  outboundTransport(request:OutboundTransportRequest):Promise<{ok:boolean;outbound_transport?:OutboundTransport}> {
+    return this.app.post(this.path("/numbers/outbound-transport"),request);
+  }
   /** Authorized choices for new calls; disabling never changes existing media grants. */
   outboundNumbers(options: { fresh?: boolean } = {}): Promise<OutboundNumbersResult> { return this.app.get(this.path(options.fresh ? "/softphone/numbers?fresh=true" : "/softphone/numbers")); }
 

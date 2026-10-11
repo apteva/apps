@@ -17,9 +17,9 @@ default to `programmable_websocket`; direct SIP is opt-in.
 | Telnyx | Telephony creates an FQDN connection and assigns the number | G.722 or G.711 PCMU/PCMA over RTP or SDES SRTP |
 | DIDWW | Telephony creates an inbound voice trunk and assigns the DID, retaining the previous trunk for restoration | G.711 provisioning; gateway also accepts offered G.722 over RTP/SRTP |
 
-Twilio and Telnyx outbound calls continue to use their programmable voice
-APIs. DIDWW outbound calls use its configured SIP trunk. Direct SIP inbound
-transport targets the high-volume inbound cost path.
+Twilio and Telnyx outbound calls default to their programmable voice APIs;
+operators can select direct SIP for an account or a specific owned number.
+DIDWW outbound calls use its configured SIP trunk.
 Bandwidth uses the programmable inbound callback adapter with a manually
 assigned Voice Application and dedicated Location; it does not use this direct
 SIP gateway.
@@ -107,8 +107,8 @@ Select the carrier account when creating a route with `carrier_connection_id`.
 Only accounts bound to the installation are accepted. Different numbers can use
 different supported carriers and inbound transports concurrently. Outbound
 caller-ID permissions and runtime enablement remain independent of inbound
-transport; Telnyx outbound uses its programmable application, not the FQDN
-connection. Provider configuration is never assumed healthy merely because
+transport; outbound transport is configured separately for the selected account
+or number. Provider configuration is never assumed healthy merely because
 another account is healthy.
 
 ## Operational behavior
@@ -130,7 +130,8 @@ another account is healthy.
   digits or follows the next routing action. Caller cancellation stops pending
   synthesis; late completion cannot answer a canceled call.
 - External PSTN/SIP destinations use the existing ring-leg adapters. Twilio and
-  Telnyx use their programmable outbound APIs; DIDWW uses its outbound SIP trunk.
+  Telnyx external ring-leg adapters use their programmable outbound APIs; DIDWW
+  uses its outbound SIP trunk.
   A switched route retains the provider context captured for the existing call.
 - Recording is local because the provider Voice API is bypassed. The existing
   project recording policy selects mono/dual WAV, private Storage import,
@@ -241,3 +242,70 @@ signaling, TLS/SRTP provisioning and network reachability still require a
 controlled deployment verification; no staging or production instance is changed
 by these local tests. Browser PCM/WebSocket and WebRTC transports are independent
 of the number's inbound SIP/programmable selection.
+
+## Outbound Telnyx and Twilio SIP
+
+The Numbers panel exposes **Outbound transport** for each account and number.
+Settings affect new human and AI calls, including the headless softphone API.
+The browser can still use either PCM/WebSocket or WebRTC independently.
+No carrier configuration is changed by saving these settings.
+
+Prepare an existing **Telnyx SIP connection** (credential, IP or FQDN) with an
+enabled outbound voice profile, or a **Twilio Elastic SIP Trunk** with termination
+and credentials/IP ACL configured. A Twilio Programmable Voice application is
+not an Elastic SIP Trunk. Telnyx Call Control application IDs are likewise not
+SIP connection IDs. Ensure destination country permissions, spending/concurrency
+limits, caller-ID permissions, firewall/NAT and media settings permit the call.
+
+TLS signaling on port 5061 is required. SRTP/SDES is the default; explicit plain
+RTP must also be permitted by the local gateway. Telnyx supports G.722, PCMU and
+PCMA here; Twilio termination uses PCMU/PCMA. Setup verifies the authorized
+carrier's existing resource through read-only API requests. New call admission
+rechecks it and still requires number ownership, user permissions and runtime
+outbound enablement. Provider failure blocks that selection without falling back
+to an unrelated account. Saved verification time is not proof of a successful
+real call or current reachability.
+
+Operator endpoint: `POST /numbers/outbound-transport?project_id=<project>`.
+The equivalent operator MCP tool is `telephony_outbound_transport`:
+
+```json
+{
+  "carrier_connection_id": 10,
+  "phone_number": "+33123456780",
+  "transport": "sip_direct",
+  "config": {
+    "host": "sip.telnyx.com",
+    "resource_id": "<existing-SIP-connection-ID>",
+    "resource_type": "credential_connection",
+    "auth_mode": "digest",
+    "media_encryption": "srtp_sdes",
+    "codecs": ["G722", "PCMU", "PCMA"]
+  },
+  "username": "<SIP-username>",
+  "password": "<SIP-password>"
+}
+```
+
+For Twilio use the trunk's `TK...` resource ID and
+`<trunk>.pstn.twilio.com` (or the regional termination hostname), with
+`codecs: ["PCMU", "PCMA"]`. Use `auth_mode: "ip"` without credentials for a
+provider-configured IP ACL. Omit `phone_number` for the account default; a number
+override takes priority. Select `programmable_websocket` to retain Voice API use
+for one number. Send `inherit: true` to delete an override. Omit `transport` to
+read safe configuration; SIP passwords/usernames are never returned.
+
+Credentials are encrypted with an install-local key in
+`<app data directory>/outbound-sip.key` (0600). Back up this key with the app's
+persistent data. Losing it blocks digest admission until restored or credentials
+are supplied again. Existing live dialogs keep their in-memory context and saved
+transport; no setting change reconnects, stops or migrates them.
+
+Native SIP recording uses Telephony's existing local recording policy and
+Storage import. Disable Twilio trunk recording to avoid a second carrier
+recording charge. Provider AMD is unsupported on direct SIP and rejected
+explicitly; use `machine_detection: "off"` or retain the programmable transport.
+TLS negotiation, authenticated re-INVITE refreshes, encrypted two-way audio,
+recording pause/resume, codec negotiation, cancellation and BYE are covered by
+local mock-carrier tests for both adapters. Real carrier/account interoperability
+and actual pricing require controlled verification before switching a live number.

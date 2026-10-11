@@ -111,6 +111,10 @@ func (g *sipGateway) handleACK(req *sip.Request, tx sip.ServerTransaction) {
 	if !g.cfg.sourceAllowed(req.Source()) || req.CSeq() == nil {
 		return
 	}
+	if outbound := g.outboundSessionByProviderCall(sipCallID(req)); outbound != nil {
+		outbound.handleACK(req)
+		return
+	}
 	dialog, err := g.dialogs.MatchDialogRequest(req)
 	if err != nil {
 		return
@@ -163,6 +167,10 @@ func (g *sipGateway) handleRefresh(req *sip.Request, tx sip.ServerTransaction) {
 	}
 	if !g.cfg.sourceAllowed(req.Source()) {
 		reply(403, "Forbidden")
+		return
+	}
+	if outbound := g.outboundSessionByProviderCall(sipCallID(req)); outbound != nil {
+		outbound.handleRefresh(req, tx)
 		return
 	}
 	dialog, err := g.dialogs.MatchDialogRequest(req)
@@ -253,10 +261,16 @@ func (g *sipGateway) handleRefresh(req *sip.Request, tx sip.ServerTransaction) {
 	s.answerMu.Unlock()
 }
 func (s *sipSession) respondRefresh(tx sip.ServerTransaction, res *sip.Response, ack <-chan struct{}) error {
+	return respondSIPRefresh(s.ctx, s.gateway.ackTimeout, tx, res, ack)
+}
+func respondSIPRefresh(ctx context.Context, timeout time.Duration, tx sip.ServerTransaction, res *sip.Response, ack <-chan struct{}) error {
 	if err := tx.Respond(res); err != nil {
 		return err
 	}
-	deadline := time.NewTimer(s.gateway.ackTimeout)
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	retry := time.NewTimer(sip.T1)
 	defer retry.Stop()
@@ -265,8 +279,8 @@ func (s *sipSession) respondRefresh(tx sip.ServerTransaction, res *sip.Response,
 		select {
 		case <-ack:
 			return nil
-		case <-s.ctx.Done():
-			return s.ctx.Err()
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-deadline.C:
 			return errors.New("SIP refresh ACK timed out")
 		case <-retry.C:

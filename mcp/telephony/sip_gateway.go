@@ -40,6 +40,7 @@ type sipGateway struct {
 	outboundByCall         map[string]*outboundSIPSession
 	outboundByProviderCall map[string]*outboundSIPSession
 	outboundReserved       map[string]bool
+	outboundPending        map[string]context.CancelFunc
 	reserved               map[string]bool
 	ackTimeout             time.Duration
 	work                   sync.WaitGroup
@@ -504,6 +505,9 @@ func (g *sipGateway) Answer(row *callRow) error {
 		return errors.New("SIP gateway stopping")
 	}
 	defer g.work.Done()
+	if rowUsesOutboundSIP(row) {
+		return errors.New("outbound SIP is answered by the remote party")
+	}
 	session := g.sessionByCall(row.ID)
 	if session == nil {
 		return errors.New("direct SIP dialog is no longer active")
@@ -546,6 +550,12 @@ func (g *sipGateway) Hangup(row *callRow) error {
 		return errors.New("SIP gateway stopping")
 	}
 	defer g.work.Done()
+	if rowUsesOutboundSIP(row) {
+		if s := g.outboundSessionByCall(row.ID); s != nil {
+			return s.hangup()
+		}
+		return hangupOutboundSIP(g.app, row)
+	}
 	session := g.sessionByCall(row.ID)
 	if session == nil {
 		return errors.New("direct SIP dialog is no longer active")

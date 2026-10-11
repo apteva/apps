@@ -168,6 +168,7 @@ provides:
     - { name: telephony_call_events_list, description: "List durable lifecycle events for one call." }
     - { name: telephony_recording_settings_get, description: "Get the project's recording and durable-storage policy." }
     - { name: telephony_recording_settings_set, description: "Set recording policy for future calls. Args: default_mode?, channels?, storage_mode?, retention_days?." }
+    - { name: telephony_outbound_transport, description: "Read or configure outbound account/number transport for new calls. Platform principal only; SIP credentials are write-only." }
     - { name: telephony_outbound_settings_get, description: "Get outbound call defaults: answering machine detection mode and action." }
     - { name: telephony_outbound_settings_set, description: "Set outbound call defaults for future calls. Args: machine_detection? (off|detect|premium), machine_detection_action? (notify|hangup), default_timeout_sec? (0 keeps built-in defaults)." }
     - { name: telephony_recordings_list, description: "List call recordings. Args: call_id?, limit?." }
@@ -830,6 +831,23 @@ func (a *App) MCPTools() []sdk.Tool {
 			HandlerCtx: a.toolRecordingSettingsSet,
 		},
 		{
+			Name:        "telephony_outbound_transport",
+			Description: "Read/configure outbound transport for a bound carrier account or one owned number. Platform principal only. Changes affect new human and AI calls; existing calls and inbound routes remain unchanged. SIP requires an existing authorized Telnyx connection or Twilio Elastic trunk, TLS, and separate SIP digest credentials or IP authentication. Password is write-only. Omit transport to read; inherit=true removes an override.",
+			InputSchema: schemaObject(map[string]any{
+				"carrier_connection_id": map[string]any{"type": "integer"},
+				"phone_number":          map[string]any{"type": "string"},
+				"transport":             map[string]any{"type": "string", "enum": []string{inboundTransportProgrammable, inboundTransportSIPDirect}},
+				"inherit":               map[string]any{"type": "boolean"},
+				"config": map[string]any{"type": "object", "properties": map[string]any{
+					"host": map[string]any{"type": "string"}, "resource_id": map[string]any{"type": "string"}, "resource_type": map[string]any{"type": "string"},
+					"auth_mode": map[string]any{"type": "string", "enum": []string{"digest", "ip"}}, "media_encryption": map[string]any{"type": "string", "enum": []string{"srtp_sdes", "disabled"}},
+					"codecs": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				}},
+				"username": map[string]any{"type": "string"}, "password": map[string]any{"type": "string"},
+			}, []string{"carrier_connection_id"}),
+			HandlerCtx: a.toolOutboundTransport,
+		},
+		{
 			Name:        "telephony_outbound_settings_get",
 			Description: "Get outbound call defaults for this project: answering machine detection mode and action.",
 			InputSchema: schemaObject(map[string]any{}, nil),
@@ -1201,6 +1219,10 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 		return mcpError(err.Error()), nil
 	}
 
+	if creds.Fields["outbound_transport"] == inboundTransportSIPDirect && machineDetection != machineDetectionOff {
+		return mcpError("direct SIP does not support provider answering machine detection"), nil
+	}
+
 	callID := newCallID()
 	threadID := "tel-" + callID
 	callbackSecret := newSecret()
@@ -1294,6 +1316,9 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 // caller passes a KillThread closure; the softphone caller passes nil, because
 // a human call has no thread.
 func (a *App) placeOutboundLeg(ctx *sdk.AppCtx, carrier carrierAdapter, row *callRow, timeout, maxDuration int, onUnwind func()) error {
+	if _, ok := carrier.(*sipOutboundCarrier); ok {
+		row.IngressPath = inboundTransportSIPDirect
+	}
 	if row.MaxDurationSec == 0 {
 		configureCallDuration(ctx, row, maxDuration)
 	}
@@ -1313,6 +1338,14 @@ func (a *App) placeOutboundLeg(ctx *sdk.AppCtx, carrier carrierAdapter, row *cal
 	if err := a.db().insertCall(*row, true); err != nil {
 		unwind()
 		return errors.New("persist call before carrier placement: " + err.Error())
+	}
+	if native, ok := carrier.(*sipOutboundCarrier); ok {
+		_, err := a.db().db.Exec(`INSERT INTO outbound_sip_calls(call_id,resource_id,host,codecs_json) VALUES(?,?,?,?)`, row.ID, native.fields["sip_resource_id"], native.fields["sip_host"], native.fields["sip_codecs"])
+		if err != nil {
+			_ = a.db().updateStatus(row.ID, "failed", "persist SIP carrier context")
+			unwind()
+			return errors.New("persist SIP carrier context")
+		}
 	}
 	if row.PeerKind == peerKindRealtime && row.AIPolicy != nil {
 		if err := a.registerAIPolicy(ctx, row, row.ThreadID, *row.AIPolicy, time.Now().UTC()); err != nil {

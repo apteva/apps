@@ -104,10 +104,16 @@ func (a *App) carrierForRow(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, row *c
 	if slug == "" && bound != nil {
 		slug = bound.AppSlug
 	}
+	if rowUsesOutboundSIP(row) && slug != "didww" {
+		return &sipOutboundCarrier{app: a, provider: slug}, nil
+	}
 	return a.carrierForSlug(slug, connID, nil)
 }
 
 func (a *App) carrierForSlug(slug string, connID int64, fields map[string]string) (carrierAdapter, error) {
+	if fields["outbound_transport"] == inboundTransportSIPDirect && (slug == "telnyx" || slug == "twilio") {
+		return &sipOutboundCarrier{app: a, provider: slug, fields: fields}, nil
+	}
 	switch slug {
 	case "twilio":
 		return &twilioCarrier{app: a, connID: connID}, nil

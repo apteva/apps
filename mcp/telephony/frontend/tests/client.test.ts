@@ -523,3 +523,14 @@ test("headless recovery carries attempt IDs and session generations without chan
  expect(f.requests.filter(r=>r.url.pathname.includes("/answer/")||r.url.pathname.endsWith("/hangup"))).toHaveLength(0);
  f.phone.dispose();
 });
+
+test("outbound transport configuration uses the installation and project scope",async()=>{
+ const f=fixture();
+ f.setResponse(async()=>({ok:true,outbound_transport:{transport:"sip_direct",scope:"number",credentials_configured:true}}));
+ const r=await f.client.outboundTransport({carrier_connection_id:10,phone_number:"+33123456780",transport:"sip_direct",config:{host:"sip.telnyx.com",resource_id:"sip-1",auth_mode:"ip",media_encryption:"srtp_sdes"}});
+ expect(r.outbound_transport?.transport).toBe("sip_direct");
+ expect(f.requests[0].url.pathname).toBe("/api/apps/telephony/numbers/outbound-transport");
+ expect(f.requests[0].url.searchParams.get("project_id")).toBe("p1");
+ expect(f.requests[0].url.searchParams.get("install_id")).toBe("42");
+ expect(f.requests[0].body.carrier_connection_id).toBe(10);
+});

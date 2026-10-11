@@ -231,6 +231,7 @@ func TestInventoryReadsDeduplicateAndPreserveChecks(t *testing.T) {
 		before[i].OutboundEnabled = true
 		before[i].OutboundNumberEnabled = true
 		before[i].CarrierConnectionID = 10
+		before[i].OutboundTransport = outboundTransportView{Transport: inboundTransportProgrammable, Scope: "default"}
 		if after[i].VerifiedAt == "" {
 			t.Fatal("verification time missing")
 		}
