@@ -204,6 +204,65 @@ func outboundSetupGatewayFixture(t *testing.T) {
 func automaticOutboundArgs() map[string]any {
 	return map[string]any{"carrier_connection_id": 10, "transport": "sip_direct", "provision": true}
 }
+func TestAutomaticOutboundSIPTelnyxCredentialFormats(t *testing.T) {
+	for _, tc := range []struct {
+		name, token, legacy string
+	}{
+		{name: "integration_token", token: "api-secret"},
+		{name: "legacy_api_key", legacy: "api-secret"},
+		{name: "integration_token_precedes_legacy", token: "api-secret", legacy: "outdated-key"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, ctx, p, _ := outboundSIPFixture(t, "telnyx")
+			delete(p.credentials.Fields, "token")
+			if tc.token != "" {
+				p.credentials.Fields["token"] = tc.token
+			}
+			if tc.legacy != "" {
+				p.credentials.Fields["api_key"] = tc.legacy
+			}
+			before, _ := json.Marshal(p.credentials.Fields)
+			outboundSetupGatewayFixture(t)
+			s := newSIPSetupProvider(t, "telnyx")
+			// Complete setup, then reuse and reverify the saved selection.
+			for i := 0; i < 2; i++ {
+				if _, err := a.configureOutboundTransport(ctx, automaticOutboundArgs()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// New-call admission must verify using the same integration format.
+			resolved, selected, err := a.resolveOutboundSIPCredentials(ctx, "project-a", ctx.IntegrationFor("carrier"), p.credentials, "+33123456780")
+			if err != nil || !selected || resolved == nil || resolved.Fields["outbound_transport"] != inboundTransportSIPDirect {
+				t.Fatalf("outbound SIP admission failed: selected=%v err=%v", selected, err)
+			}
+			if s.writes["/credential_connections"] != 1 {
+				t.Fatal("setup retry created a second SIP connection")
+			}
+			after, _ := json.Marshal(p.credentials.Fields)
+			if string(before) != string(after) {
+				t.Fatal("setup modified shared integration credentials")
+			}
+		})
+	}
+}
+
+func TestOutboundSIPTelnyxMissingCredentials(t *testing.T) {
+	a, ctx, p, _ := outboundSIPFixture(t, "telnyx")
+	delete(p.credentials.Fields, "token")
+	outboundSetupGatewayFixture(t)
+	s := newSIPSetupProvider(t, "telnyx")
+	if _, err := a.configureOutboundTransport(ctx, automaticOutboundArgs()); err == nil || err.Error() != "Telnyx API credentials unavailable" {
+		t.Fatalf("expected sanitized missing-credential error, got %v", err)
+	}
+	if len(s.writes) != 0 {
+		t.Fatal("missing credentials allowed carrier writes")
+	}
+	v, _, _, err := a.outboundTransport("project-a", 10, "")
+	if err != nil || v.Transport != inboundTransportProgrammable {
+		t.Fatal("failed setup changed outbound transport")
+	}
+}
+
 func TestAutomaticOutboundSIPProvisionAndRetry(t *testing.T) {
 	for _, provider := range []string{"telnyx", "twilio"} {
 		t.Run(provider, func(t *testing.T) {

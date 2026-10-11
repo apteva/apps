@@ -156,10 +156,13 @@ func sipProviderRequest(ctx context.Context, creds *sdk.ConnectionCredentials, a
 		}
 		req.SetBasicAuth(creds.Fields["account_sid"], creds.Fields["auth_token"])
 	} else {
-		if creds.Fields["api_key"] == "" {
+		// Apteva's Telnyx integration stores its bearer key as token. Retain
+		// api_key for older credentials, without modifying the shared fields.
+		token := firstNonEmpty(creds.Fields["token"], creds.Fields["api_key"])
+		if token == "" {
 			return nil, errors.New("Telnyx API credentials unavailable")
 		}
-		req.Header.Set("Authorization", "Bearer "+creds.Fields["api_key"])
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", contentType)
