@@ -328,3 +328,80 @@ adaptation and diagnostics. It does not change PCM/WebSocket audio or another
 softphone's codec. The Telephony audio settings also expose this preference
 when WebRTC or automatic transport is selected. Updating the saved preference
 does not restart the app or modify an already established audio session.
+
+## Automatic outbound SIP setup
+
+Operators can select **Direct SIP / RTP → Automatic setup** under a carrier
+account or one owned number in Telephony. The same operation is available
+through the headless client and `telephony_outbound_transport`:
+
+```ts
+const options = await telephony.outboundTransport({
+  carrier_connection_id: 10,
+  setup_options: true,
+});
+
+await telephony.outboundTransport({
+  carrier_connection_id: 10,
+  // Optional: omit to set the account default.
+  phone_number: "+33123456789",
+  transport: "sip_direct",
+  provision: true,
+  // Telnyx only; omit when the account has exactly one enabled profile.
+  outbound_profile_id: "existing-enabled-profile-id",
+});
+```
+
+Telnyx setup creates a dedicated TLS credential connection, attaches the chosen
+Outbound Voice Profile, and translates codecs to the provisioning API's names.
+Twilio setup creates a secure termination trunk, a SIP credential list and its
+credential, then attaches that list to the trunk. Both generate separate SIP
+credentials and persist them encrypted; passwords are never returned. Carrier
+API credentials remain in the authorized integration account.
+
+When creating a Telnyx profile, supply `profile_policy` instead of
+`outbound_profile_id`:
+
+```ts
+await telephony.outboundTransport({
+  carrier_connection_id: 10,
+  transport: "sip_direct",
+  provision: true,
+  profile_policy: { destinations: ["FR", "ES"], daily_spend_limit: "20.00" },
+});
+```
+
+The spending limit is in USD. Telephony never chooses between multiple enabled
+profiles or invents a destination/spending policy. A missing or disabled profile
+fails setup. Country codes are normalized and validated locally; the carrier
+also validates supported countries.
+
+The SIP gateway needs TLS configuration, a usable hostname certificate, SRTP
+support and reachable signaling/media ports. Setup validates local configuration
+and the certificate before provisioning; it does not test external reachability
+or bind/restart the listener. A carrier signaling and two-way audio test is still
+needed to validate a deployment.
+
+Configuration requests share a cancellable 30-second setup budget. Setup is
+serialized per project/account independently of media handling. A persisted
+journal records generated credentials, intended calling policy and intermediate
+resource IDs. Retry resumes completed steps. If a create response is lost, setup
+reconciles the exact managed resource before continuing; if it is not yet visible,
+setup waits for a later retry instead of issuing another create. Restore the
+persisted `outbound-sip.key` if it is lost; setup does not rotate credentials to
+hide a key failure.
+
+Only successful verification changes outbound admission settings. Existing
+calls retain their transport. Setup neither assigns inbound numbers nor changes
+inbound routes, provider recording or shared third-party authentication settings.
+Number ownership, permissions and provider readiness remain checked on new
+calls. Resetting to Voice API retains the managed SIP resources for later reuse;
+it does not delete resources potentially used by active calls.
+
+The advanced existing-resource form remains supported: use `config`, plus
+write-only `username`/`password` for digest authentication, without `provision`.
+Omitted credentials retain the existing exact scope's encrypted credentials.
+Automatic setup can reuse a saved verified selection, including an inherited
+account selection, without creating or rotating credentials. To change the
+profile on an already managed connection, configure that resource explicitly
+through advanced settings; automatic setup does not rewrite existing policy.

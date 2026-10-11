@@ -10,8 +10,6 @@ import (
 	"errors"
 	"fmt"
 	sdk "github.com/apteva/app-sdk"
-	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -205,39 +203,7 @@ func (a *App) outboundTransport(project string, connection int64, number string)
 // Provider reads use only the authorized binding's credentials, fixed HTTPS
 // hosts, a single bounded deadline, no redirects, and sanitized errors.
 func sipProviderGET(request context.Context, creds *sdk.ConnectionCredentials, path string) (map[string]any, error) {
-	host := "https://api.telnyx.com/v2"
-	if creds.Slug == "twilio" {
-		host = "https://trunking.twilio.com/v1"
-	}
-	req, err := http.NewRequestWithContext(request, http.MethodGet, host+path, nil)
-	if err != nil {
-		return nil, err
-	}
-	if creds.Slug == "twilio" {
-		if creds.Fields["account_sid"] == "" || creds.Fields["auth_token"] == "" {
-			return nil, errors.New("Twilio API credentials unavailable")
-		}
-		req.SetBasicAuth(creds.Fields["account_sid"], creds.Fields["auth_token"])
-	} else {
-		if creds.Fields["api_key"] == "" {
-			return nil, errors.New("Telnyx API credentials unavailable")
-		}
-		req.Header.Set("Authorization", "Bearer "+creds.Fields["api_key"])
-	}
-	client := http.Client{Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	res, err := client.Do(req)
-	if err != nil {
-		return nil, errors.New("SIP provider verification request failed")
-	}
-	defer res.Body.Close()
-	if res.StatusCode != 200 {
-		return nil, fmt.Errorf("SIP provider verification failed: HTTP %d", res.StatusCode)
-	}
-	var data map[string]any
-	if err = json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&data); err != nil {
-		return nil, errors.New("invalid SIP provider verification response")
-	}
-	return data, nil
+	return sipProviderRequest(request, creds, "", "GET", path, nil)
 }
 func verifyOutboundSIPProvider(request context.Context, creds *sdk.ConnectionCredentials, cfg outboundSIPConfig) error {
 	if creds.Slug == "twilio" {
@@ -280,7 +246,17 @@ func verifyOutboundSIPProvider(request context.Context, creds *sdk.ConnectionCre
 	return nil
 }
 
-func (a *App) configureOutboundTransport(ctx *sdk.AppCtx, args map[string]any) (map[string]any, error) {
+func (a *App) configureOutboundTransport(ctx *sdk.AppCtx, args map[string]any, callers ...context.Context) (map[string]any, error) {
+	parent := context.Background()
+	if len(callers) > 0 && callers[0] != nil {
+		parent = callers[0]
+	}
+	budget := 8 * time.Second
+	if boolArg(args, "provision", false) {
+		budget = 30 * time.Second
+	}
+	request, cancel := context.WithTimeout(parent, budget)
+	defer cancel()
 	project := currentProject(ctx)
 	connection := intArg(args, "carrier_connection_id", 0)
 	number := strings.TrimSpace(strArg(args, "phone_number", ""))
@@ -311,18 +287,38 @@ func (a *App) configureOutboundTransport(ctx *sdk.AppCtx, args map[string]any) (
 	if number != "" && !validE164(number) {
 		return nil, errors.New("phone_number must be E.164")
 	}
-	if number != "" && !a.outboundNumberBelongsToBinding(ctx, project, bound, creds, number) {
+	if number != "" && !a.outboundNumberBelongsToBinding(ctx, project, bound, creds, number, request) {
 		return nil, errors.New("caller ID is not owned by this carrier account")
 	}
 	transport := strArg(args, "transport", "")
+	if transport != "" || boolArg(args, "inherit", false) {
+		unlock, e := lockOutboundSetup(request, fmt.Sprintf("%s:%d:%s:%d", ctx.DataDir(), a.installID, project, connection))
+		if e != nil {
+			return nil, e
+		}
+		defer unlock()
+	}
 	if boolArg(args, "inherit", false) {
-		_, err = a.db().db.Exec(`DELETE FROM outbound_transports WHERE project_id=? AND connection_id=? AND phone_number=?`, project, connection, number)
+		_, err = a.db().db.ExecContext(request, `DELETE FROM outbound_transports WHERE project_id=? AND connection_id=? AND phone_number=?`, project, connection, number)
 		a.inventoryReads.invalidate()
 		return map[string]any{"ok": err == nil}, err
 	}
 	if transport == "" {
 		v, _, _, e := a.outboundTransport(project, int64(connection), number)
-		return map[string]any{"ok": e == nil, "outbound_transport": v}, e
+		if e != nil {
+			return nil, e
+		}
+		result := map[string]any{"ok": true, "outbound_transport": v}
+		if boolArg(args, "setup_options", false) {
+			profiles, err := automaticSIPProfiles(request, creds)
+			options := map[string]any{"profiles": profiles, "automatic_supported": true}
+			if err != nil {
+				options["profiles"] = []outboundProfileOption{}
+				options["warning"] = err.Error()
+			}
+			result["setup_options"] = options
+		}
+		return result, nil
 	}
 	if transport != inboundTransportSIPDirect && transport != inboundTransportProgrammable {
 		return nil, errors.New("invalid outbound transport")
@@ -331,45 +327,56 @@ func (a *App) configureOutboundTransport(ctx *sdk.AppCtx, args map[string]any) (
 	var encrypted []byte
 	verified := ""
 	if transport == inboundTransportSIPDirect {
-		raw, _ := json.Marshal(args["config"])
-		if err = json.Unmarshal(raw, &cfg); err != nil {
-			return nil, errors.New("invalid outbound SIP config")
-		}
-		if err = validateOutboundSIPConfig(provider, &cfg); err != nil {
-			return nil, err
-		}
-		// Omitted credentials retain only this exact scope's encrypted secret.
-		var old []byte
-		_ = a.db().db.QueryRow(`SELECT credentials_cipher FROM outbound_transports WHERE project_id=? AND connection_id=? AND phone_number=?`, project, connection, number).Scan(&old)
-		credentials := outboundSIPCredentials{Username: strArg(args, "username", ""), Password: strArg(args, "password", "")}
-		if cfg.AuthMode == "digest" {
-			if credentials.Username == "" && credentials.Password == "" {
-				encrypted = old
-			} else {
-				if !validSIPDigestCredentials(credentials) {
-					return nil, errors.New("SIP digest username and password required")
+		if boolArg(args, "provision", false) {
+			if args["config"] != nil || strArg(args, "username", "") != "" || strArg(args, "password", "") != "" {
+				return nil, errors.New("automatic setup manages SIP settings and credentials; use advanced setup for an existing resource")
+			}
+			cfg, encrypted, err = a.provisionOutboundSIP(request, ctx, creds, int64(connection), number, args)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			raw, _ := json.Marshal(args["config"])
+			if err = json.Unmarshal(raw, &cfg); err != nil {
+				return nil, errors.New("invalid outbound SIP config")
+			}
+			if err = validateOutboundSIPConfig(provider, &cfg); err != nil {
+				return nil, err
+			}
+			// Omitted credentials retain only this exact scope's encrypted secret.
+			var old []byte
+			_ = a.db().db.QueryRow(`SELECT credentials_cipher FROM outbound_transports WHERE project_id=? AND connection_id=? AND phone_number=?`, project, connection, number).Scan(&old)
+			credentials := outboundSIPCredentials{Username: strArg(args, "username", ""), Password: strArg(args, "password", "")}
+			if cfg.AuthMode == "digest" {
+				if credentials.Username == "" && credentials.Password == "" {
+					encrypted = old
+				} else {
+					if !validSIPDigestCredentials(credentials) {
+						return nil, errors.New("SIP digest username and password required")
+					}
+					encrypted, err = sealOutboundSIPCredentials(ctx, project, int64(connection), number, credentials)
+					if err != nil {
+						return nil, err
+					}
 				}
-				encrypted, err = sealOutboundSIPCredentials(ctx, project, int64(connection), number, credentials)
-				if err != nil {
-					return nil, err
+				if len(encrypted) == 0 {
+					return nil, errors.New("SIP digest credentials required")
+				}
+				if _, err = openOutboundSIPCredentials(ctx, project, int64(connection), number, encrypted); err != nil {
+					return nil, errors.New("saved SIP credentials unavailable; restore credential key or supply credentials")
 				}
 			}
-			if len(encrypted) == 0 {
-				return nil, errors.New("SIP digest credentials required")
+			if err = verifyOutboundSIPProvider(request, creds, cfg); err != nil {
+				return nil, err
 			}
-			if _, err = openOutboundSIPCredentials(ctx, project, int64(connection), number, encrypted); err != nil {
-				return nil, errors.New("saved SIP credentials unavailable; restore credential key or supply credentials")
-			}
-		}
-		request, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-		defer cancel()
-		if err = verifyOutboundSIPProvider(request, creds, cfg); err != nil {
-			return nil, err
 		}
 		verified = time.Now().UTC().Format(time.RFC3339Nano)
 	}
+	if err = request.Err(); err != nil {
+		return nil, err
+	}
 	raw, _ := json.Marshal(cfg)
-	_, err = a.db().db.Exec(`INSERT INTO outbound_transports(project_id,connection_id,phone_number,provider,transport,config_json,credentials_cipher,verified_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(project_id,connection_id,phone_number) DO UPDATE SET provider=excluded.provider,transport=excluded.transport,config_json=excluded.config_json,credentials_cipher=excluded.credentials_cipher,verified_at=excluded.verified_at`, project, connection, number, provider, transport, string(raw), encrypted, verified)
+	_, err = a.db().db.ExecContext(request, `INSERT INTO outbound_transports(project_id,connection_id,phone_number,provider,transport,config_json,credentials_cipher,verified_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(project_id,connection_id,phone_number) DO UPDATE SET provider=excluded.provider,transport=excluded.transport,config_json=excluded.config_json,credentials_cipher=excluded.credentials_cipher,verified_at=excluded.verified_at`, project, connection, number, provider, transport, string(raw), encrypted, verified)
 	a.inventoryReads.invalidate()
 	if err != nil {
 		return nil, err
@@ -439,7 +446,7 @@ func (a *App) toolOutboundTransport(caller context.Context, ctx *sdk.AppCtx, arg
 	if callerAgentID(caller) != 0 {
 		return mcpError("outbound transport settings require a platform principal"), nil
 	}
-	result, err := a.configureOutboundTransport(ctx, args)
+	result, err := a.configureOutboundTransport(ctx, args, caller)
 	if err != nil {
 		return mcpError(err.Error()), nil
 	}

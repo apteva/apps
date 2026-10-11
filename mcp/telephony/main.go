@@ -48,7 +48,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.12.5
+version: 0.12.6
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -64,7 +64,7 @@ icon_style: monochrome
 tags: [voice, telephony, communication]
 
 scopes: [project, global]
-min_apteva_version: "0.25.12"
+min_apteva_version: "0.87.4"
 
 requires:
   permissions:
@@ -168,7 +168,7 @@ provides:
     - { name: telephony_call_events_list, description: "List durable lifecycle events for one call." }
     - { name: telephony_recording_settings_get, description: "Get the project's recording and durable-storage policy." }
     - { name: telephony_recording_settings_set, description: "Set recording policy for future calls. Args: default_mode?, channels?, storage_mode?, retention_days?." }
-    - { name: telephony_outbound_transport, description: "Read or configure outbound account/number transport for new calls. Platform principal only; SIP credentials are write-only." }
+    - { name: telephony_outbound_transport, description: "Read or configure outbound account/number transport for new calls, including automatic SIP setup. Platform principal only; SIP credentials are write-only." }
     - { name: telephony_outbound_settings_get, description: "Get outbound call defaults: answering machine detection mode and action." }
     - { name: telephony_outbound_settings_set, description: "Set outbound call defaults for future calls. Args: machine_detection? (off|detect|premium), machine_detection_action? (notify|hangup), default_timeout_sec? (0 keeps built-in defaults)." }
     - { name: telephony_recordings_list, description: "List call recordings. Args: call_id?, limit?." }
@@ -341,9 +341,12 @@ provides:
 
 runtime:
   kind: source
+  activation_strategy: exclusive
+  startup_timeout_seconds: 60
+  database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.12.5
+    ref: telephony/v0.12.6
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -832,12 +835,19 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "telephony_outbound_transport",
-			Description: "Read/configure outbound transport for a bound carrier account or one owned number. Platform principal only. Changes affect new human and AI calls; existing calls and inbound routes remain unchanged. SIP requires an existing authorized Telnyx connection or Twilio Elastic trunk, TLS, and separate SIP digest credentials or IP authentication. Password is write-only. Omit transport to read; inherit=true removes an override.",
+			Description: "Read/configure outbound transport for a bound carrier account or one owned number. Platform principal only. Changes affect new human and AI calls; existing calls and inbound routes remain unchanged. Set provision=true to automatically create/reuse a dedicated Telnyx SIP connection or Twilio Elastic trunk with encrypted SIP credentials. TLS/SRTP gateway configuration is required. Telnyx reuses the sole enabled profile; otherwise select outbound_profile_id or supply profile_policy. Advanced config supports existing resources. Password is write-only. Omit transport to read; inherit=true removes an override.",
 			InputSchema: schemaObject(map[string]any{
 				"carrier_connection_id": map[string]any{"type": "integer"},
 				"phone_number":          map[string]any{"type": "string"},
 				"transport":             map[string]any{"type": "string", "enum": []string{inboundTransportProgrammable, inboundTransportSIPDirect}},
 				"inherit":               map[string]any{"type": "boolean"},
+				"provision":             map[string]any{"type": "boolean", "description": "Automatically provision and verify outbound SIP before selecting it for new calls."},
+				"setup_options":         map[string]any{"type": "boolean", "description": "Include available profiles when reading settings."},
+				"outbound_profile_id":   map[string]any{"type": "string"},
+				"profile_policy": map[string]any{"type": "object", "properties": map[string]any{
+					"destinations":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"daily_spend_limit": map[string]any{"type": "string", "description": "Positive USD daily limit for a new Telnyx profile."},
+				}, "required": []string{"destinations", "daily_spend_limit"}},
 				"config": map[string]any{"type": "object", "properties": map[string]any{
 					"host": map[string]any{"type": "string"}, "resource_id": map[string]any{"type": "string"}, "resource_type": map[string]any{"type": "string"},
 					"auth_mode": map[string]any{"type": "string", "enum": []string{"digest", "ip"}}, "media_encryption": map[string]any{"type": "string", "enum": []string{"srtp_sdes", "disabled"}},
@@ -1492,13 +1502,17 @@ func (a *App) selectCarrierBinding(ctx *sdk.AppCtx, projectID, requestedFrom str
 // used before selecting an explicit caller ID. Routes and the legacy
 // phone_number credential are accepted as local durable evidence; when the
 // provider inventory is available it is authoritative and must report voice.
-func (a *App) outboundNumberBelongsToBinding(ctx *sdk.AppCtx, projectID string, bound *sdk.BoundIntegration, creds *sdk.ConnectionCredentials, requested string) bool {
+func (a *App) outboundNumberBelongsToBinding(ctx *sdk.AppCtx, projectID string, bound *sdk.BoundIntegration, creds *sdk.ConnectionCredentials, requested string, requests ...context.Context) bool {
 	if bound == nil || creds == nil || !validE164(requested) {
 		return false
 	}
 	requestedKey := compactPhoneNumber(requested)
 	slug := strings.ToLower(firstNonEmpty(creds.Slug, bound.AppSlug))
-	owned, err := listOwnedCarrierNumbers(ctx, &numberProvider{Slug: slug, ConnID: bound.ConnectionID, Fields: creds.Fields})
+	provider := &numberProvider{Slug: slug, ConnID: bound.ConnectionID, Fields: creds.Fields}
+	if len(requests) > 0 {
+		provider.inventoryContext = requests[0]
+	}
+	owned, err := listOwnedCarrierNumbers(ctx, provider)
 	if err == nil {
 		for _, number := range owned {
 			if compactPhoneNumber(number.PhoneNumber) == requestedKey {

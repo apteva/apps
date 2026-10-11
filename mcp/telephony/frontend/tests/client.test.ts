@@ -534,3 +534,15 @@ test("outbound transport configuration uses the installation and project scope",
  expect(f.requests[0].url.searchParams.get("install_id")).toBe("42");
  expect(f.requests[0].body.carrier_connection_id).toBe(10);
 });
+
+test("automatic SIP setup and profile policy use the same headless account scope",async()=>{
+ const f=fixture();
+ f.setResponse(async()=>({ok:true,setup_options:{automatic_supported:true,profiles:[{id:"profile-1",name:"France",enabled:true,destinations:["FR"],daily_spend_limit_enabled:true,daily_spend_limit:"20.00"}]}}));
+ const options=await f.client.outboundTransport({carrier_connection_id:10,setup_options:true});
+ expect(options.setup_options?.profiles[0]?.destinations).toEqual(["FR"]);
+ await f.client.outboundTransport({carrier_connection_id:10,phone_number:"+33123456780",transport:"sip_direct",provision:true,profile_policy:{destinations:["FR"],daily_spend_limit:"20.00"}});
+ expect(f.requests[1].body).toEqual({carrier_connection_id:10,phone_number:"+33123456780",transport:"sip_direct",provision:true,profile_policy:{destinations:["FR"],daily_spend_limit:"20.00"}});
+ expect(f.requests[1].headers.get("Authorization")).toBe("Bearer first");
+ expect(f.requests[1].url.searchParams.get("project_id")).toBe("p1");
+ expect(f.requests[1].url.searchParams.get("install_id")).toBe("42");
+});

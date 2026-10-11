@@ -46,6 +46,7 @@ type sipGateway struct {
 	work                   sync.WaitGroup
 	stopping               bool
 	stopDeadline           time.Time
+	listenerDone           chan struct{}
 }
 
 type sipSession struct {
@@ -84,7 +85,11 @@ func (a *App) startSIPGateway(ctx *sdk.AppCtx) error {
 	if err != nil {
 		return fmt.Errorf("count direct SIP routes: %w", err)
 	}
-	eager := configBool(ctx.Config(), "sip_enabled", "TELEPHONY_SIP_ENABLED", false) || routeCount > 0
+	var outboundCount int
+	if err := a.db().db.QueryRow(`SELECT COUNT(*) FROM outbound_transports WHERE transport='sip_direct'`).Scan(&outboundCount); err != nil {
+		return fmt.Errorf("count direct SIP outbound selections: %w", err)
+	}
+	eager := configBool(ctx.Config(), "sip_enabled", "TELEPHONY_SIP_ENABLED", false) || routeCount > 0 || outboundCount > 0
 	if !eager {
 		return nil
 	}
@@ -207,10 +212,15 @@ func newSIPGateway(app *App, appCtx *sdk.AppCtx, cfg sipGatewayConfig) (*sipGate
 }
 
 func (g *sipGateway) Start() error {
+	g.mu.Lock()
+	g.listenerDone = make(chan struct{})
+	listenerDone := g.listenerDone
+	g.mu.Unlock()
 	ready := make(chan struct{})
 	listenCtx := context.WithValue(g.ctx, sipgo.ListenReadyCtxKey, sipgo.ListenReadyCtxValue(ready))
 	errCh := make(chan error, 1)
 	go func() {
+		defer close(listenerDone)
 		var err error
 		if g.cfg.Transport == "tls" {
 			tlsConfig, tlsErr := g.cfg.tlsConfig()
@@ -289,6 +299,22 @@ func (g *sipGateway) Stop() {
 		_ = g.ua.Close()
 	}
 	g.work.Wait()
+	// ListenAndServe owns the socket and releases it asynchronously on cancel.
+	// Do not report shutdown complete before its accept loop has exited.
+	g.mu.RLock()
+	listenerDone, deadline := g.listenerDone, g.stopDeadline
+	g.mu.RUnlock()
+	if listenerDone != nil {
+		timer := time.NewTimer(max(0, time.Until(deadline)))
+		defer timer.Stop()
+		select {
+		case <-listenerDone:
+		case <-timer.C:
+			if g.appCtx != nil {
+				g.appCtx.Logger().Warn("SIP listener did not stop within shutdown budget")
+			}
+		}
+	}
 }
 
 func (g *sipGateway) registerHandlers() {

@@ -15,3 +15,5 @@ export type { CallListenerOptions, ListenerSnapshot, ListenerState } from "./lis
 export type { ListenerDiagnostics, ListenerPlaybackOptions, ListenerAudioRuntime, ListenerAudioConnection } from "./listener-audio";
 
 export type { MediaSessionEvent, MediaRecoveryContext, MediaAttachmentDiagnostics, MediaInitiatingAction } from "./media-lease";
+
+export type { OutboundSIPConfig, OutboundTransport, OutboundTransportRequest, OutboundTransportResult, OutboundSIPSetupOptions, OutboundNumberChoice, OutboundNumbersResult } from "./client";

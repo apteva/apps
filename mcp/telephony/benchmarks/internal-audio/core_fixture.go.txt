@@ -1,0 +1,300 @@
+package core
+
+// Injected only by go test -overlay. The handler and its queues are production
+// code; the timed PCM producer/consumer replaces a paid realtime provider.
+import (
+	"bufio"
+	"encoding/binary"
+	"encoding/json"
+	"hash/fnv"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+type internalProbeConfig struct {
+	ID           string `json:"id"`
+	StartNS      int64  `json:"start_ns"`
+	DurationMS   int    `json:"duration_ms"`
+	PauseAtMS    int    `json:"pause_at_ms"`
+	InputPauseMS int    `json:"input_pause_ms"`
+	WritePauseMS int    `json:"write_pause_ms"`
+	ResetAtMS    int    `json:"reset_at_ms"`
+}
+type internalProbeReceipt struct {
+	Sequence uint32  `json:"sequence"`
+	AgeMS    float64 `json:"age_ms"`
+	AtNS     int64   `json:"at_ns"`
+	Corrupt  bool    `json:"corrupt"`
+}
+type internalProbeStream struct {
+	mu                            sync.Mutex
+	cfg                           internalProbeConfig
+	input                         chan []byte
+	output                        chan RealtimeAudioFrame
+	control                       chan string
+	receipts                      []internalProbeReceipt
+	attempts, producerDrops       int
+	schedulingMaxMS               float64
+	maxInputQueue, maxOutputQueue int
+	conns                         []net.Conn
+	resetScheduled                bool
+	done                          chan struct{}
+}
+
+func internalProbePositiveDuration(d time.Duration) time.Duration {
+	if d < 0 {
+		return 0
+	}
+	return d
+}
+func internalProbeSignature(id string) uint32 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(id))
+	return h.Sum32()
+}
+func internalProbePCM(sequence uint32, at time.Time, id string) []byte {
+	p := make([]byte, 960)
+	binary.LittleEndian.PutUint32(p, 0x50424d41)
+	binary.LittleEndian.PutUint32(p[4:], sequence)
+	binary.LittleEndian.PutUint64(p[8:], uint64(at.UnixNano()))
+	binary.LittleEndian.PutUint32(p[16:], internalProbeSignature(id))
+	for i := 20; i < len(p); i++ {
+		p[i] = byte((int(sequence)*31 + i) % 251)
+	}
+	return p
+}
+func (s *internalProbeStream) run() {
+	start := time.Unix(0, s.cfg.StartNS)
+	wait := time.NewTimer(internalProbePositiveDuration(time.Until(start)))
+	defer wait.Stop()
+	select {
+	case <-wait.C:
+	case <-s.done:
+		return
+	}
+	go func() {
+		paused := false
+		for {
+			if !paused && s.cfg.InputPauseMS > 0 && time.Since(start) >= time.Duration(s.cfg.PauseAtMS)*time.Millisecond {
+				paused = true
+				timer := time.NewTimer(time.Duration(s.cfg.InputPauseMS) * time.Millisecond)
+				select {
+				case <-timer.C:
+				case <-s.done:
+					timer.Stop()
+					return
+				}
+			}
+			select {
+			case p := <-s.input:
+				if len(p) < 16 {
+					continue
+				}
+				seq := binary.LittleEndian.Uint32(p[4:])
+				stamp := int64(binary.LittleEndian.Uint64(p[8:]))
+				corrupt := len(p) != 960 || binary.LittleEndian.Uint32(p) != 0x50424d41 || (len(p) >= 20 && binary.LittleEndian.Uint32(p[16:]) != internalProbeSignature(s.cfg.ID+"/up"))
+				if !corrupt {
+					for i := 20; i < len(p); i++ {
+						if p[i] != byte((int(seq)*31+i)%251) {
+							corrupt = true
+							break
+						}
+					}
+				}
+				s.mu.Lock()
+				s.receipts = append(s.receipts, internalProbeReceipt{seq, float64(time.Now().UnixNano()-stamp) / 1e6, time.Now().UnixNano(), corrupt})
+				s.maxInputQueue = max(s.maxInputQueue, len(s.input))
+				s.mu.Unlock()
+			case <-s.done:
+				return
+			}
+		}
+	}()
+	for seq := uint32(0); seq < uint32(s.cfg.DurationMS/20); seq++ {
+		due := start.Add(time.Duration(seq) * 20 * time.Millisecond)
+		timer := time.NewTimer(internalProbePositiveDuration(time.Until(due)))
+		select {
+		case <-timer.C:
+		case <-s.done:
+			timer.Stop()
+			return
+		}
+		at := time.Now()
+		frame := RealtimeAudioFrame{Audio: internalProbePCM(seq, at, s.cfg.ID+"/down"), ItemID: s.cfg.ID, AudioEndMS: int(seq+1) * 20}
+		s.mu.Lock()
+		s.attempts++
+		if delay := float64(at.Sub(due)) / float64(time.Millisecond); delay > s.schedulingMaxMS {
+			s.schedulingMaxMS = delay
+		}
+		s.maxOutputQueue = max(s.maxOutputQueue, len(s.output))
+		s.mu.Unlock()
+		select {
+		case s.output <- frame:
+		default:
+			s.mu.Lock()
+			s.producerDrops++
+			s.mu.Unlock()
+		}
+	}
+}
+
+type internalProbeConn struct {
+	net.Conn
+	stream   *internalProbeStream
+	mu       sync.Mutex
+	deadline time.Time
+	done     chan struct{}
+	once     sync.Once
+}
+
+func (c *internalProbeConn) SetWriteDeadline(at time.Time) error {
+	c.mu.Lock()
+	c.deadline = at
+	c.mu.Unlock()
+	return c.Conn.SetWriteDeadline(at)
+}
+func (c *internalProbeConn) Write(p []byte) (int, error) {
+	cfg := c.stream.cfg
+	now := time.Now()
+	begin := time.Unix(0, cfg.StartNS).Add(time.Duration(cfg.PauseAtMS) * time.Millisecond)
+	end := begin.Add(time.Duration(cfg.WritePauseMS) * time.Millisecond)
+	if cfg.WritePauseMS > 0 && !now.Before(begin) && now.Before(end) {
+		c.mu.Lock()
+		deadline := c.deadline
+		c.mu.Unlock()
+		until := end
+		if !deadline.IsZero() && deadline.Before(until) {
+			until = deadline
+		}
+		timer := time.NewTimer(internalProbePositiveDuration(time.Until(until)))
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-c.done:
+			return 0, net.ErrClosed
+		}
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			return 0, os.ErrDeadlineExceeded
+		}
+	}
+	return c.Conn.Write(p)
+}
+func (c *internalProbeConn) Close() error { c.once.Do(func() { close(c.done) }); return c.Conn.Close() }
+
+type internalProbeHijacker struct {
+	http.ResponseWriter
+	stream *internalProbeStream
+}
+
+func (w internalProbeHijacker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	c, b, err := w.ResponseWriter.(http.Hijacker).Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	wrapped := &internalProbeConn{Conn: c, stream: w.stream, done: make(chan struct{})}
+	w.stream.mu.Lock()
+	w.stream.conns = append(w.stream.conns, wrapped)
+	scheduleReset := w.stream.cfg.ResetAtMS > 0 && !w.stream.resetScheduled
+	w.stream.resetScheduled = true
+	w.stream.mu.Unlock()
+	if cfg := w.stream.cfg; scheduleReset {
+		time.AfterFunc(internalProbePositiveDuration(time.Until(time.Unix(0, cfg.StartNS).Add(time.Duration(cfg.ResetAtMS)*time.Millisecond))), func() { _ = wrapped.Close() })
+	}
+	return wrapped, b, nil
+}
+func TestTelephonyInternalAudioCoreFixture(t *testing.T) {
+	ready := os.Getenv("TELEPHONY_INTERNAL_READY")
+	if ready == "" {
+		t.Skip("local benchmark helper")
+	}
+	t.Setenv("TELEMETRY_URL", "")
+	t.Setenv("TELEMETRY_LIVE_URL", "")
+	t.Setenv("SERVER_URL", "")
+	telemetry := NewTelemetry()
+	defer telemetry.Stop()
+	api := &APIServer{thinker: &Thinker{telemetry: telemetry}}
+	var mu sync.Mutex
+	streams := map[string]*internalProbeStream{}
+	stop := make(chan struct{})
+	var once sync.Once
+	mux := http.NewServeMux()
+	mux.HandleFunc("/new", func(w http.ResponseWriter, r *http.Request) {
+		var cfg internalProbeConfig
+		if json.NewDecoder(r.Body).Decode(&cfg) != nil || cfg.ID == "" || cfg.DurationMS < 1000 || cfg.DurationMS > 60000 {
+			http.Error(w, "invalid fixture config", 400)
+			return
+		}
+		s := &internalProbeStream{cfg: cfg, input: make(chan []byte, 64), output: make(chan RealtimeAudioFrame, 64), control: make(chan string, 8), done: make(chan struct{})}
+		mu.Lock()
+		if streams[cfg.ID] != nil {
+			mu.Unlock()
+			http.Error(w, "duplicate", 409)
+			return
+		}
+		streams[cfg.ID] = s
+		mu.Unlock()
+		token := registerAudioBridge(cfg.ID, s.input, s.output, s.control)
+		go s.run()
+		_ = json.NewEncoder(w).Encode(map[string]string{"thread": cfg.ID, "token": token})
+	})
+	mux.HandleFunc("/renew", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		s := streams[r.URL.Query().Get("id")]
+		mu.Unlock()
+		if s == nil {
+			http.NotFound(w, r)
+			return
+		}
+		token := renewAudioBridge(s.cfg.ID, s.input, s.output, s.control)
+		_ = json.NewEncoder(w).Encode(map[string]string{"thread": s.cfg.ID, "token": token})
+	})
+	mux.HandleFunc("/realtime/audio", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		s := streams[r.URL.Query().Get("thread")]
+		mu.Unlock()
+		if s == nil {
+			http.NotFound(w, r)
+			return
+		}
+		api.realtimeAudioHandler(internalProbeHijacker{w, s}, r)
+	})
+	mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		s := streams[r.URL.Query().Get("id")]
+		mu.Unlock()
+		if s == nil {
+			http.NotFound(w, r)
+			return
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"receipts": s.receipts, "output_attempts": s.attempts, "fixture_producer_drops": s.producerDrops, "producer_scheduling_max_ms": s.schedulingMaxMS, "max_input_queue_frames": s.maxInputQueue, "max_output_queue_frames": s.maxOutputQueue})
+	})
+	mux.HandleFunc("/shutdown", func(w http.ResponseWriter, r *http.Request) { once.Do(func() { close(stop) }); w.WriteHeader(204) })
+	srv := httptest.NewServer(mux)
+	if !strings.HasPrefix(srv.URL, "http://127.0.0.1:") {
+		t.Fatal("fixture must be loopback")
+	}
+	if err := os.WriteFile(ready, []byte(srv.URL), 0600); err != nil {
+		t.Fatal(err)
+	}
+	<-stop
+	mu.Lock()
+	for id, s := range streams {
+		close(s.done)
+		unregisterAudioBridge(id)
+		s.mu.Lock()
+		for _, c := range s.conns {
+			_ = c.Close()
+		}
+		s.mu.Unlock()
+	}
+	mu.Unlock()
+	srv.Close()
+}

@@ -2044,7 +2044,7 @@ function NumbersView({ projectId }: NativePanelProps) {
   }, [projectId]);
 
  const [outboundTransportDialog,setOutboundTransportDialog]=useState<{provider:string;connection:number;number?:string}>();
- const outboundTransportRequest=useCallback((body:Record<string,unknown>)=>postJSON<{outbound_transport?:import("../frontend/src/client").OutboundTransport}>(endpoint("/numbers/outbound-transport"),body),[endpoint]);
+ const outboundTransportRequest=useCallback((body:Record<string,unknown>)=>postJSON<import("../frontend/src/client").OutboundTransportResult>(endpoint("/numbers/outbound-transport"),body),[endpoint]);
  const mediaRequest=useCallback((body:Record<string,unknown>)=>postJSON<{config?:any}>(endpoint("/numbers/local-media"),body),[endpoint]);
 
   const loadConnected = useCallback(async (fresh = false) => {

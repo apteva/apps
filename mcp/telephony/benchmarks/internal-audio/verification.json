@@ -1,0 +1,471 @@
+{
+  "date": "2026-10-11",
+  "scope": "production Telephony writer and human socket handlers, actual Apteva realtime/app proxies and actual Core audio handler; synthetic PCM and fake AI provider; no real carrier/browser/AI provider; local source versions recorded separately",
+  "limits": "transport/component benchmark, not total call latency or a production capacity proof; same-host wall timestamps; producer fixture drops tracked separately; pauses are injected at consumer or Core socket writer, not attributed to a real network",
+  "full_run": {
+    "passed_profiles": 9,
+    "failed_profiles": 2,
+    "report_path": "/private/tmp/telephony-internal-audio-20261011-final/results.json",
+    "profiles": [
+      {
+        "profile": "human_loopback",
+        "calls": 24,
+        "duration_ms": 6000,
+        "expectation": "healthy",
+        "directions": {
+          "browser_to_peer": {
+            "expected_frames": 7200,
+            "received_frames": 7200,
+            "missing_frames": 0,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 2.872,
+            "maximum_ms": 15.443,
+            "frames_older_than_250_ms": 0
+          },
+          "peer_to_browser": {
+            "expected_frames": 7200,
+            "received_frames": 7200,
+            "missing_frames": 0,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 2.903,
+            "maximum_ms": 11.708,
+            "frames_older_than_250_ms": 0
+          }
+        }
+      },
+      {
+        "profile": "human_server_proxy",
+        "calls": 24,
+        "duration_ms": 6000,
+        "expectation": "healthy",
+        "directions": {
+          "browser_to_peer": {
+            "expected_frames": 7200,
+            "received_frames": 7200,
+            "missing_frames": 0,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 4.602,
+            "maximum_ms": 13.866,
+            "frames_older_than_250_ms": 0
+          },
+          "peer_to_browser": {
+            "expected_frames": 7200,
+            "received_frames": 7200,
+            "missing_frames": 0,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 4.575,
+            "maximum_ms": 23.511,
+            "frames_older_than_250_ms": 0
+          }
+        }
+      },
+      {
+        "profile": "human_browser_pause_400ms",
+        "calls": 2,
+        "duration_ms": 8000,
+        "expectation": "fault_observation",
+        "findings": [
+          "browser receiver pause can accumulate old audio outside Telephony queues; receipt age exposes it before browser playback protection"
+        ],
+        "directions": {
+          "browser_to_peer": {
+            "expected_frames": 800,
+            "received_frames": 800,
+            "missing_frames": 0,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 1.007,
+            "maximum_ms": 7.1,
+            "frames_older_than_250_ms": 0
+          },
+          "peer_to_browser": {
+            "expected_frames": 800,
+            "received_frames": 800,
+            "missing_frames": 0,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 6.959,
+            "maximum_ms": 380.376,
+            "frames_older_than_250_ms": 7
+          }
+        }
+      },
+      {
+        "profile": "human_browser_pause_3000ms",
+        "calls": 2,
+        "duration_ms": 8000,
+        "expectation": "fault_observation",
+        "findings": [
+          "browser receiver pause can accumulate old audio outside Telephony queues; receipt age exposes it before browser playback protection"
+        ],
+        "directions": {
+          "browser_to_peer": {
+            "expected_frames": 800,
+            "received_frames": 800,
+            "missing_frames": 0,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 2.866,
+            "maximum_ms": 18.577,
+            "frames_older_than_250_ms": 0
+          },
+          "peer_to_browser": {
+            "expected_frames": 800,
+            "received_frames": 800,
+            "missing_frames": 0,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 2600.557,
+            "maximum_ms": 2980.277,
+            "frames_older_than_250_ms": 137
+          }
+        }
+      },
+      {
+        "profile": "ai_direct_core",
+        "calls": 24,
+        "duration_ms": 6000,
+        "expectation": "healthy",
+        "directions": {
+          "telephony_to_core": {
+            "expected_frames": 7200,
+            "received_frames": 7200,
+            "missing_frames": 0,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 3.313,
+            "maximum_ms": 23.606,
+            "frames_older_than_250_ms": 0
+          },
+          "core_to_telephony": {
+            "expected_frames": 7200,
+            "received_frames": 7200,
+            "missing_frames": 0,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 2.671,
+            "maximum_ms": 23.144,
+            "frames_older_than_250_ms": 0
+          }
+        },
+        "fixture_producer_drops": 0,
+        "max_sender_scheduling_ms": 19.291875,
+        "max_core_producer_scheduling_ms": 26.176
+      },
+      {
+        "profile": "ai_server_proxy",
+        "calls": 24,
+        "duration_ms": 6000,
+        "expectation": "healthy",
+        "directions": {
+          "telephony_to_core": {
+            "expected_frames": 7200,
+            "received_frames": 7200,
+            "missing_frames": 0,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 2.417,
+            "maximum_ms": 4.614,
+            "frames_older_than_250_ms": 0
+          },
+          "core_to_telephony": {
+            "expected_frames": 7200,
+            "received_frames": 7200,
+            "missing_frames": 0,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 2.599,
+            "maximum_ms": 4.481,
+            "frames_older_than_250_ms": 0
+          }
+        },
+        "fixture_producer_drops": 0,
+        "max_sender_scheduling_ms": 1.962917,
+        "max_core_producer_scheduling_ms": 1.799
+      },
+      {
+        "profile": "core_input_pause_400ms",
+        "calls": 2,
+        "duration_ms": 8000,
+        "expectation": "fault_observation",
+        "findings": [
+          "frames older than 250 ms reached a consumer; Telephony writer limits alone do not bound the entire path"
+        ],
+        "directions": {
+          "telephony_to_core": {
+            "expected_frames": 800,
+            "received_frames": 800,
+            "missing_frames": 0,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 20.864,
+            "maximum_ms": 399.972,
+            "frames_older_than_250_ms": 6
+          },
+          "core_to_telephony": {
+            "expected_frames": 800,
+            "received_frames": 800,
+            "missing_frames": 0,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 4.165,
+            "maximum_ms": 35.465,
+            "frames_older_than_250_ms": 0
+          }
+        },
+        "fixture_producer_drops": 0,
+        "max_sender_scheduling_ms": 48.5645,
+        "max_core_producer_scheduling_ms": 29.447
+      },
+      {
+        "profile": "core_input_pause_3000ms",
+        "calls": 2,
+        "duration_ms": 8000,
+        "expectation": "fault_observation",
+        "findings": [
+          "frames older than 250 ms reached a consumer; Telephony writer limits alone do not bound the entire path"
+        ],
+        "gate_failures": [
+          "healthy parallel stream affected by fault"
+        ],
+        "directions": {
+          "telephony_to_core": {
+            "expected_frames": 800,
+            "received_frames": 679,
+            "missing_frames": 121,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 2700.408,
+            "maximum_ms": 2980.057,
+            "frames_older_than_250_ms": 64
+          },
+          "core_to_telephony": {
+            "expected_frames": 800,
+            "received_frames": 759,
+            "missing_frames": 41,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 1741.77,
+            "maximum_ms": 2082.24,
+            "frames_older_than_250_ms": 64
+          }
+        },
+        "fixture_producer_drops": 41,
+        "max_sender_scheduling_ms": 142.231833,
+        "max_core_producer_scheduling_ms": 56.252
+      },
+      {
+        "profile": "core_write_pause_400ms",
+        "calls": 2,
+        "duration_ms": 8000,
+        "expectation": "fault_observation",
+        "findings": [
+          "frames older than 250 ms reached a consumer; Telephony writer limits alone do not bound the entire path"
+        ],
+        "gate_failures": [
+          "healthy parallel stream affected by fault"
+        ],
+        "directions": {
+          "telephony_to_core": {
+            "expected_frames": 800,
+            "received_frames": 689,
+            "missing_frames": 111,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 28.418,
+            "maximum_ms": 90.318,
+            "frames_older_than_250_ms": 0
+          },
+          "core_to_telephony": {
+            "expected_frames": 800,
+            "received_frames": 794,
+            "missing_frames": 6,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 1030.309,
+            "maximum_ms": 1108.657,
+            "frames_older_than_250_ms": 59
+          }
+        },
+        "fixture_producer_drops": 6,
+        "max_sender_scheduling_ms": 1230.256416,
+        "max_core_producer_scheduling_ms": 1195.656
+      },
+      {
+        "profile": "core_write_pause_3000ms",
+        "calls": 2,
+        "duration_ms": 8000,
+        "expectation": "fault_observation",
+        "findings": [
+          "frames older than 250 ms reached a consumer; Telephony writer limits alone do not bound the entire path"
+        ],
+        "directions": {
+          "telephony_to_core": {
+            "expected_frames": 800,
+            "received_frames": 800,
+            "missing_frames": 0,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 0.377,
+            "maximum_ms": 5.349,
+            "frames_older_than_250_ms": 0
+          },
+          "core_to_telephony": {
+            "expected_frames": 800,
+            "received_frames": 714,
+            "missing_frames": 86,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 2702.626,
+            "maximum_ms": 3000.414,
+            "frames_older_than_250_ms": 65
+          }
+        },
+        "fixture_producer_drops": 86,
+        "max_sender_scheduling_ms": 4.935834,
+        "max_core_producer_scheduling_ms": 3.668
+      },
+      {
+        "profile": "core_transport_reset",
+        "calls": 2,
+        "duration_ms": 8000,
+        "expectation": "fault_observation",
+        "findings": [
+          "frames older than 250 ms reached a consumer; Telephony writer limits alone do not bound the entire path"
+        ],
+        "directions": {
+          "telephony_to_core": {
+            "expected_frames": 800,
+            "received_frames": 724,
+            "missing_frames": 76,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 0.367,
+            "maximum_ms": 4.217,
+            "frames_older_than_250_ms": 0
+          },
+          "core_to_telephony": {
+            "expected_frames": 800,
+            "received_frames": 788,
+            "missing_frames": 12,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 1108.159,
+            "maximum_ms": 1482.495,
+            "frames_older_than_250_ms": 62
+          }
+        },
+        "fixture_producer_drops": 11,
+        "max_sender_scheduling_ms": 1.208417,
+        "max_core_producer_scheduling_ms": 1.183
+      }
+    ]
+  },
+  "targeted_rerun": {
+    "passed_profiles": 2,
+    "failed_profiles": 0,
+    "report_path": "/private/tmp/telephony-internal-audio-20261011-targeted/results.json",
+    "profiles": [
+      {
+        "profile": "core_input_pause_3000ms",
+        "calls": 2,
+        "duration_ms": 8000,
+        "expectation": "fault_observation",
+        "findings": [
+          "frames older than 250 ms reached a consumer; Telephony writer limits alone do not bound the entire path"
+        ],
+        "directions": {
+          "telephony_to_core": {
+            "expected_frames": 800,
+            "received_frames": 689,
+            "missing_frames": 111,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 2700.689,
+            "maximum_ms": 2980.024,
+            "frames_older_than_250_ms": 64
+          },
+          "core_to_telephony": {
+            "expected_frames": 800,
+            "received_frames": 759,
+            "missing_frames": 41,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 1743.649,
+            "maximum_ms": 2081.632,
+            "frames_older_than_250_ms": 64
+          }
+        },
+        "fixture_producer_drops": 41,
+        "max_sender_scheduling_ms": 26.409917,
+        "max_core_producer_scheduling_ms": 26.597
+      },
+      {
+        "profile": "core_write_pause_400ms",
+        "calls": 2,
+        "duration_ms": 8000,
+        "expectation": "fault_observation",
+        "findings": [
+          "frames older than 250 ms reached a consumer; Telephony writer limits alone do not bound the entire path"
+        ],
+        "directions": {
+          "telephony_to_core": {
+            "expected_frames": 800,
+            "received_frames": 800,
+            "missing_frames": 0,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 0.867,
+            "maximum_ms": 46.248,
+            "frames_older_than_250_ms": 0
+          },
+          "core_to_telephony": {
+            "expected_frames": 800,
+            "received_frames": 800,
+            "missing_frames": 0,
+            "corrupt_frames": 0,
+            "duplicates": 0,
+            "out_of_order": 0,
+            "worst_stream_p95_ms": 41.188,
+            "maximum_ms": 401.328,
+            "frames_older_than_250_ms": 8
+          }
+        },
+        "fixture_producer_drops": 0,
+        "max_sender_scheduling_ms": 37.828625,
+        "max_core_producer_scheduling_ms": 30.927
+      }
+    ]
+  },
+  "first_run_retained": "/private/tmp/telephony-internal-audio-20261011/results.json",
+  "interpretation": "Healthy baselines passed. Injected pauses confirm seconds-old audio beyond Telephony writer queues. Full-run companion losses correlated with host saturation and scheduling delay; targeted reruns passed, without relaxing gates. This does not prove a production incident cause."
+}
