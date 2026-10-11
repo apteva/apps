@@ -11,6 +11,7 @@ import (
 )
 
 const aggregatePipelineOperation = "aggregate_pipeline"
+const maxAggregatePipelineSources = 64
 
 var aggregatePipelinePlaceholder = regexp.MustCompile(`\{([a-z][a-z0-9_]*)\}`)
 
@@ -80,8 +81,8 @@ func validatePipelineConfig(operation string, config map[string]any, sources []s
 	}
 
 	names, err := pipelineStringList(config["sources"])
-	if err != nil || len(names) == 0 || len(names) > 32 {
-		return nil, invalid("aggregate_pipeline sources must contain 1 to 32 source names")
+	if err != nil || len(names) == 0 || len(names) > maxAggregatePipelineSources {
+		return nil, invalid("aggregate_pipeline sources must contain 1 to %d source names", maxAggregatePipelineSources)
 	}
 	byName := make(map[string]sourceRecord, len(sources))
 	for _, source := range sources {

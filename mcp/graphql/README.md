@@ -456,6 +456,12 @@ declares active Tables sources, one read-only `SELECT`/`WITH` query using
 }
 ```
 
+All resolver versions (1, 2 and 3) permit 1 to 64 declared Tables sources.
+The list is a fixed SQL access allowlist, including configured table/projection
+mappings. Every declaration must be active, valid and unique; the bound source
+must be included. Extra declarations do not fetch extra data or add queries.
+Stage, SQL, row, byte, time and concurrency limits are independent and unchanged.
+
 `result` is `rows`, `single`, or `envelope`. Truncation fails closed by
 default. SQL, identifiers, source names, and ordering can never come from the
 client. Automatic `row_filters` and pre-scoped Tables sources are rejected for

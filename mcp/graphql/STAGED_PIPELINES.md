@@ -61,6 +61,13 @@ supply only values through `$args`, `$parent`, or verified `$identity` mappings.
 Identity is taken exclusively from the authenticated request context. Request
 values and JSON literals cannot inject dependency objects or SQL. Source checks
 apply to every statement, including value-only stages with no table access.
+The shared validator permits 1 to 64 declared Tables sources across the entire
+pipeline, consistently for versions 1, 2 and 3. Each source must exist, be active,
+and have a fixed valid table/projection mapping. Duplicate names are rejected and
+the resolver's bound source must be included. These checks apply even to unused
+declarations. The list is an SQL access allowlist: declaring more sources does
+not read them, add batch operations, or increase parallelism. Stage, SQL, row,
+byte, deadline and concurrency limits remain independent and unchanged.
 Every table placeholder must be among the declared sources; Tables applies its
 native read-only authorization to each statement. Implicit scoped sources and
 automatic `row_filters` remain rejected, so mandatory verified identity predicates

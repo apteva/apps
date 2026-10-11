@@ -182,3 +182,9 @@ Subscriptions remain outside HTTP request diagnostics.
 
 See [STAGED_PIPELINES.md](STAGED_PIPELINES.md) for version 3 separate-statement snapshot stages and legacy version 2 stages,
 executed through one Tables snapshot batch with intermediate data kept inside SQLite.
+
+Aggregate pipelines accept 1..64 fixed source declarations in all resolver
+versions (1, 2 and 3). Every declaration retains the existing active Tables,
+fixed mapping, uniqueness, bound-source, scope and SQL access checks. Declarations
+do not schedule reads; the configured SQL stages determine backend work. This
+configuration ceiling is independent of row/byte/deadline/concurrency limits.

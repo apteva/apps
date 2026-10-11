@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,9 +15,11 @@ import (
 	tk "github.com/apteva/app-sdk/testkit"
 )
 
-// Released Tables executes native dependent array references; all data and
+// A pipeline with 33 configured Tables sources executes only its 2 or 3
+// fixed dependent statements in one snapshot. Released Tables applies native
+// SQL authorization and array references; all data and
 // sidecars are disposable. No production gateway or installation is contacted.
-func TestRealSnapshotPipelineSeparateStagesAndConcurrentWrite(t *testing.T) {
+func TestRealSnapshotPipeline33SourcesSeparateStagesAndConcurrentWrite(t *testing.T) {
 	directory := os.Getenv("GRAPHQL_TEST_TABLES_DIR")
 	if testing.Short() || directory == "" {
 		t.Skip("set GRAPHQL_TEST_TABLES_DIR")
@@ -25,7 +28,7 @@ func TestRealSnapshotPipelineSeparateStagesAndConcurrentWrite(t *testing.T) {
 	tables := tk.SpawnSidecar(t, directory, tk.WithProjectID(project), tk.WithConfig(map[string]string{"max_query_ms": "10000", "max_query_rows": "2"}), tk.WithEnv("APTEVA_GATEWAY_URL", ""), tk.WithEnv("APTEVA_OUTBOUND_TOKEN", ""))
 	tables.MCP("tables_create", map[string]any{"name": "prospects", "columns": []any{map[string]any{"name": "centre_id", "type": "text"}}})
 	tables.MCP("rows_insert", map[string]any{"table": "prospects", "rows": []any{map[string]any{"centre_id": "north"}, map[string]any{"centre_id": "north"}, map[string]any{"centre_id": "south"}}})
-	var batches atomic.Int64
+	var batches, nativeAuthorizationRejections atomic.Int64
 	entered := make(chan struct{}, 1)
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var call struct {
@@ -37,7 +40,7 @@ func TestRealSnapshotPipelineSeparateStagesAndConcurrentWrite(t *testing.T) {
 			return
 		}
 		ops := call.Input["operations"].([]any)
-		if len(ops) < 2 {
+		if len(ops) != 2 && len(ops) != 3 {
 			http.Error(w, "expected separate operations", 400)
 			return
 		}
@@ -64,16 +67,35 @@ func TestRealSnapshotPipelineSeparateStagesAndConcurrentWrite(t *testing.T) {
 			return
 		}
 		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		if err != nil {
+			http.Error(w, "invalid Tables response", 502)
+			return
+		}
+		if bytes.Contains(body, []byte("direct access to internal")) && bytes.Contains(body, []byte("sqlite_master")) {
+			nativeAuthorizationRejections.Add(1)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(response.StatusCode)
-		_, _ = io.Copy(w, response.Body)
+		_, _ = w.Write(body)
 	}))
 	defer proxy.Close()
 	graph := tk.SpawnSidecar(t, ".", tk.WithProjectID(project), tk.WithEnv("APTEVA_GATEWAY_URL", proxy.URL), tk.WithEnv("APTEVA_OUTBOUND_TOKEN", "snapshot-test"))
+	names := []any{"prospects"}
 	graph.MCP("graphql_source_add", map[string]any{"name": "prospects", "kind": "tables", "config": map[string]any{"table": "prospects"}})
+	for i := 2; i <= 33; i++ {
+		name := fmt.Sprintf("source_%02d", i)
+		tables.MCP("tables_create", map[string]any{"name": name, "columns": []any{map[string]any{"name": "value", "type": "text"}}})
+		graph.MCP("graphql_source_add", map[string]any{"name": name, "kind": "tables", "config": map[string]any{"table": name}})
+		names = append(names, name)
+	}
+	if len(names) != 33 {
+		t.Fatal(names)
+	}
 	schema := graph.MCP("graphql_schema_create", map[string]any{"environment": "development", "sdl": `type Query {summary(centre:String!,extra:Int=3): Metric} type Metric{total:Int!}`})
 	version := schema["schema"].(map[string]any)["version"]
 	publish := func(c map[string]any) {
+		c["sources"] = names
 		graph.MCP("graphql_resolver_set", map[string]any{"parent_type": "Query", "field_name": "summary", "source": "prospects", "operation": aggregatePipelineOperation, "config": c})
 		graph.MCP("graphql_release_publish", map[string]any{"environment": "development", "schema_version": version})
 	}
@@ -130,6 +152,9 @@ func TestRealSnapshotPipelineSeparateStagesAndConcurrentWrite(t *testing.T) {
 			c["stages"].([]any)[0].(map[string]any)["sql"] = "SELECT json_object('n',id) FROM {prospects} WHERE centre_id=?"
 		},
 		"bytes": func(c map[string]any) { c["stages"].([]any)[0].(map[string]any)["max_bytes"] = 1 },
+		"native authorization": func(c map[string]any) {
+			c["stages"].([]any)[0].(map[string]any)["sql"] = "SELECT json_object('n',(SELECT COUNT(*) FROM sqlite_master)) FROM {prospects} WHERE centre_id=? LIMIT 1"
+		},
 		"failure": func(c map[string]any) {
 			c["stages"].([]any)[0].(map[string]any)["sql"] = "SELECT missing_column FROM {prospects} WHERE centre_id=?"
 		},
@@ -149,6 +174,9 @@ func TestRealSnapshotPipelineSeparateStagesAndConcurrentWrite(t *testing.T) {
 			out := read()
 			if out["errors"] == nil || out["data"].(map[string]any)["summary"] != nil {
 				t.Fatal("partial field succeeded", out)
+			}
+			if name == "native authorization" && nativeAuthorizationRejections.Load() != 1 {
+				t.Fatal("expected native Tables SQL access denial", nativeAuthorizationRejections.Load())
 			}
 		})
 	}
