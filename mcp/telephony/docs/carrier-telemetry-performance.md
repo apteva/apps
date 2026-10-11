@@ -20,6 +20,9 @@ second). Audio codecs, packet validation/security and queue limits are retained.
 | SRTP | 50 | 1324.0 | 1378.0 | 54.0 |
 | SRTP | 100 | 1334.0 | 1380.0 | 46.0 |
 
+Negative differences reflect local benchmark variability, not a telemetry
+speedup. The raw repetitions are retained for inspection.
+
 The packet pipeline retains **3 allocations for RTP / 7 for SRTP** in both
 variants: telemetry adds no per-packet allocation. The standalone send-counter
 and duration bookkeeping takes about **113 ns/frame**, with zero allocations.
