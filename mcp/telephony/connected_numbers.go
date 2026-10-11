@@ -70,6 +70,7 @@ type connectedNumberView struct {
 	StatusCallbackState    string                `json:"status_callback_status"`
 	RoutingHealth          string                `json:"routing_health"`
 	HealthMessage          string                `json:"health_message,omitempty"`
+	OutboundTransport      outboundTransportView `json:"outbound_transport"`
 	Outbound               outboundReadinessView `json:"outbound"`
 }
 
@@ -160,6 +161,13 @@ func (a *App) resolveOutboundCarrierCredentials(
 	creds *sdk.ConnectionCredentials,
 	from string,
 ) (*sdk.ConnectionCredentials, error) {
+	sipCreds, selected, err := a.resolveOutboundSIPCredentials(ctx, projectID, bound, creds, from)
+	if err != nil {
+		return nil, err
+	}
+	if selected {
+		return sipCreds, nil
+	}
 	slug := strings.ToLower(firstNonEmpty(creds.Slug, bound.AppSlug))
 	if slug != "telnyx" {
 		return creds, nil
@@ -319,6 +327,7 @@ func (a *App) connectedNumbers(ctx *sdk.AppCtx, requests ...context.Context) (ma
 		}
 		statuses = append(statuses, status)
 	}
+
 	sort.SliceStable(numbers, func(i, j int) bool {
 		li := numbers[i].Route != nil && numbers[i].Route.Enabled
 		lj := numbers[j].Route != nil && numbers[j].Route.Enabled
@@ -405,7 +414,13 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 			}
 		}
 		for _, n := range owned {
-			add(telnyxRouteApplicationID(routesByPhone[compactPhoneNumber(n.PhoneNumber)], n.ConnectionID))
+			v, _, _, e := a.outboundTransport(projectID, provider.ConnID, n.PhoneNumber)
+			if e != nil {
+				return nil, e
+			}
+			if v.Transport != inboundTransportSIPDirect {
+				add(telnyxRouteApplicationID(routesByPhone[compactPhoneNumber(n.PhoneNumber)], n.ConnectionID))
+			}
 		}
 		for _, r := range routes {
 			add(telnyxRouteApplicationID(&r, ""))
@@ -432,6 +447,14 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 	}
 
 	usedRoutes := make(map[string]bool, len(routes))
+	transportByPhone := map[string]outboundTransportView{}
+	for _, n := range owned {
+		v, _, _, e := a.outboundTransport(projectID, provider.ConnID, n.PhoneNumber)
+		if e != nil {
+			return nil, e
+		}
+		transportByPhone[n.PhoneNumber] = v
+	}
 	numbers := make([]connectedNumberView, 0, len(owned)+len(routes))
 	for _, number := range owned {
 		route := routesByID[strings.TrimSpace(number.ProviderNumberID)]
@@ -464,6 +487,9 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 		profiles, profileErr := listTelnyxOutboundProfilesWithLoader(ctx, provider.ConnID, loader, provider.inventoryContext)
 		readinessCache := map[string]outboundReadinessView{}
 		for i := range numbers {
+			if transportByPhone[numbers[i].PhoneNumber].Transport == inboundTransportSIPDirect {
+				continue
+			}
 			phone := compactPhoneNumber(numbers[i].PhoneNumber)
 			applicationID := telnyxRouteApplicationID(routesByPhone[phone], ownedConnectionsByPhone[phone])
 			if profileErr != nil {
@@ -487,6 +513,20 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 		}
 	}
 
+	for i := range numbers {
+		v, ok := transportByPhone[numbers[i].PhoneNumber]
+		if !ok {
+			v, _, _, err = a.outboundTransport(projectID, provider.ConnID, numbers[i].PhoneNumber)
+			if err != nil {
+				return nil, err
+			}
+		}
+		numbers[i].OutboundTransport = v
+		if v.Transport == inboundTransportSIPDirect {
+			numbers[i].Outbound = carrierOutboundReady()
+			numbers[i].Outbound.Message = "Verified SIP trunk; call admission rechecks carrier readiness"
+		}
+	}
 	sort.SliceStable(numbers, func(i, j int) bool {
 		leftRouted := numbers[i].Route != nil && numbers[i].Route.Enabled
 		rightRouted := numbers[j].Route != nil && numbers[j].Route.Enabled
@@ -527,6 +567,12 @@ func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvi
 			directSIP["endpoint"] = cfg.endpointURI()
 			directSIP["transport"] = cfg.Transport
 			directSIP["srtp"] = cfg.SRTPMode
+		}
+	}
+	for i := range numbers {
+		if numbers[i].OutboundTransport.Transport == inboundTransportSIPDirect && (directSIP["available"] == false || directSIP["ready"] == false && directSIP["enabled"] == true) {
+			numbers[i].Outbound.Status = outboundConfigError
+			numbers[i].Outbound.Message = "SIP gateway unavailable: " + stringValue(directSIP["reason"])
 		}
 	}
 	for i := range numbers {

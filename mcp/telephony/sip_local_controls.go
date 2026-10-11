@@ -35,9 +35,9 @@ func (c *localSIPController) media(row *callRow) (*sipRTPMedia, error) {
 		return nil, errors.New("SIP gateway unavailable")
 	}
 	s := g.sessionByCall(row.ID)
-	if s == nil && row.Direction == "outbound" && row.CarrierSlug == "didww" {
+	if s == nil && rowUsesOutboundSIP(row) {
 		outbound := g.outboundSessionByCall(row.ID)
-		if outbound == nil || outbound.ended.Load() {
+		if outbound == nil || outbound.ended.Load() || !outbound.mediaReady.Load() {
 			return nil, errCallNoLongerActive
 		}
 		m := outbound.media
