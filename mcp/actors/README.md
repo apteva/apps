@@ -208,3 +208,35 @@ Ordinary `actors_run_retry` retains the original definition and inputs. `actors_
 Recovery accepts only a failed run with durable no-commit execution evidence, or a complete legacy read-only trace prefix ending in a pre-dispatch locator failure. Successful, cancelled, active, uncertain and incomplete outcomes fail closed. The original operation, inputs, preset, context and consequential once keys are retained; a new linked run records the original execution key. Reserved, uncertain or completed consequence guards are never cleared. The supplied read must use the reviewed immutable revision, match the original creator/context, finish within the previous 15 minutes and prove complete coverage of every required view. Read all dataset records to check configured exact duplicate fields. The worker repeats the inspection as a separate immutable child run before the repaired attempt, blocking if a duplicate appeared or coverage became unavailable.
 
 The editable [Patreon publishing example](examples/patreon-publishing.md) includes guarded native composer navigation and format-specific preflights that reload and verify drafts before Publish. Preflights autosave drafts; use your test account for content checks.
+
+## Native navigation and Clips4Sale example
+
+Read views may use `navigation` with one to five exact SOM-only native tab/button
+locators, mutually exclusive with `link_selector` and `use_entry_page`. Each hop
+requires a fresh control whose effect is `navigation_only`. `read_navigation`
+provides the same check for non-optional read-only steps.
+
+`assert_no_record` rejects an exact field/value duplicate only after complete
+collection coverage with no remaining results. `assert_inputs` checks execution
+variables before writes while preserving the previous extraction evidence.
+For searchable or controlled dropdowns, use the observed native control and
+an exact SOM option, then verify the saved label. `select_option` uses internal
+`value`/`values`.
+
+The [Clips4Sale Creator example](examples/clips4sale-control.md) covers account,
+current-month statistics, catalog coverage, draft preparation, read-only preflight
+and guarded submission for review. It is caller-configured and currently gates
+publication to explicitly declared no-real-person footage.
+
+A `navigation_only` opener can reserve a `once_key` without
+`confirm_consequence`. Navigation is not an irreversible acknowledgement class;
+consequential clicks continue to require a matching acknowledgement.
+
+`goto_record` follows an absolute HTTP URL selected from a complete verified
+collection. It requires a unique collected record, read-only non-optional
+navigation and the usual host checks. This supports reopening a persisted draft
+whose ID was assigned by the site during upload.
+
+Record selection and duplicate assertions use only the latest verified
+collection. Prior composer extractions and older catalog snapshots remain in
+the audit dataset but cannot satisfy those checks.

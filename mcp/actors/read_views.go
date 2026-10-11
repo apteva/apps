@@ -15,8 +15,8 @@ import (
 	"golang.org/x/net/html"
 )
 
-// View traversal is site-neutral. It only follows observed anchors, scrolls,
-// and optionally clicks pagination controls whose fresh SOM effect is navigation_only.
+// View traversal is site-neutral. It follows observed anchors, native tabs,
+// and pagination controls whose fresh SOM effect is navigation_only.
 var errReadCollectionBound = errors.New("read collection bound reached")
 var errReadPaginationStalled = errors.New("pagination did not advance after verified wait")
 
@@ -30,6 +30,9 @@ type actorReadViews struct {
 	TimeoutMS    int               `json:"timeout_ms,omitempty"`
 }
 type actorReadView struct {
+	// Navigation supports native tabs which expose no anchor href. Each hop
+	// must resolve to a fresh, unique navigation-only SOM target.
+	Navigation       []actorLocator              `json:"navigation,omitempty"`
 	UseEntryPage     bool                        `json:"use_entry_page,omitempty"`
 	Total            *actorField                 `json:"total,omitempty"`
 	Name             string                      `json:"name"`
@@ -96,7 +99,7 @@ type actorViewCoverage struct {
 
 func readOnlyActorAction(action string) bool {
 	switch action {
-	case "goto", "wait", "wait_for", "extract", "assert_element", "assert_url", "assert_values", "screenshot", "inspect_views", "observe_page", "select_record":
+	case "goto", "wait", "wait_for", "extract", "assert_element", "assert_url", "assert_values", "assert_inputs", "screenshot", "inspect_views", "read_navigation", "goto_record", "observe_page", "select_record", "assert_no_record":
 		return true
 	}
 	return false
@@ -135,7 +138,15 @@ func validateReadViews(c *actorReadViews) error {
 			return errors.New("read view key field must be required")
 		}
 		requiredSelectors := []string{c.Identity.Selector, v.ReadySelector, v.EmptySelector, v.LoadingSelector, v.Items}
-		if !v.UseEntryPage {
+		if len(v.Navigation) > 5 || (len(v.Navigation) > 0 && (v.UseEntryPage || v.LinkSelector != "")) {
+			return errors.New("read view navigation requires 1-5 hops and excludes link_selector/use_entry_page")
+		}
+		for _, hop := range v.Navigation {
+			if !hop.Exact || !hop.SOMOnly || hop.Text == "" || hop.Selector != "" {
+				return errors.New("read view navigation requires exact som_only names without selectors")
+			}
+		}
+		if !v.UseEntryPage && len(v.Navigation) == 0 {
 			requiredSelectors = append(requiredSelectors, v.LinkSelector)
 		}
 		for _, sel := range requiredSelectors {
@@ -362,6 +373,9 @@ func (e *actorExecution) inspectViews(c actorReadViews) error {
 	}
 	cov := &actorReadCoverage{ReadOnly: true, MoreRemaining: true, Views: []*actorViewCoverage{}, CheckedViews: []string{}, RequiredViews: []string{}, ContextID: e.definition.Browser.ContextID, IdentityURL: c.IdentityURL}
 	e.coverage = cov
+	collectionStart := len(e.items)
+	e.collectionItems = nil
+	defer func() { e.collectionItems = e.items[collectionStart:] }()
 	for _, v := range c.Views {
 		cov.Views = append(cov.Views, &actorViewCoverage{Name: v.Name, Covers: v.Covers, MoreRemaining: true})
 		cov.RequiredViews = append(cov.RequiredViews, v.Covers...)
@@ -401,7 +415,19 @@ func (e *actorExecution) inspectViews(c actorReadViews) error {
 }
 func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, result *actorViewCoverage, seen map[string]map[string]any) error {
 	if err := e.gotoURL(c.EntryURL); err != nil {
-		return err
+		// A provider can refuse an HTTP/2 stream before the read-only page
+		// loads. Retry this navigation once, never a click or form action.
+		// The normal URL, identity and completeness checks still apply.
+		if !strings.Contains(err.Error(), "net::ERR_HTTP2_SERVER_REFUSED_STREAM") {
+			return err
+		}
+		e.addTrace("inspect_views.navigation", "retry", "HTTP/2 stream refused; retrying read-only entry navigation once", nil)
+		if err := e.checkpoint(); err != nil {
+			return err
+		}
+		if err := e.gotoURL(c.EntryURL); err != nil {
+			return err
+		}
 	}
 	var root *html.Node
 	var err error
@@ -413,22 +439,30 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 		if err != nil {
 			return err
 		}
-		sel, _ := cascadia.Compile(v.LinkSelector)
-		links := cascadia.QueryAll(root, sel)
-		if len(links) != 1 || links[0].Data != "a" {
-			return fmt.Errorf("verified navigation link matched %d anchors", len(links))
-		}
-		href, _ := htmlAttribute(links[0], "href")
-		if href == "" {
-			return errors.New("view navigation href missing")
-		}
-		targetAny, err := coerceActorValue(href, "url", e.currentURL)
-		if err != nil {
-			return err
-		}
-		target := stringFromAny(targetAny)
-		if err := e.gotoURL(target); err != nil {
-			return err
+		if len(v.Navigation) > 0 {
+			for _, hop := range v.Navigation {
+				if err := e.clickReadNavigation(hop); err != nil {
+					return err
+				}
+			}
+		} else {
+			sel, _ := cascadia.Compile(v.LinkSelector)
+			links := cascadia.QueryAll(root, sel)
+			if len(links) != 1 || links[0].Data != "a" {
+				return fmt.Errorf("verified navigation link matched %d anchors", len(links))
+			}
+			href, _ := htmlAttribute(links[0], "href")
+			if href == "" {
+				return errors.New("view navigation href missing")
+			}
+			targetAny, err := coerceActorValue(href, "url", e.currentURL)
+			if err != nil {
+				return err
+			}
+			target := stringFromAny(targetAny)
+			if err := e.gotoURL(target); err != nil {
+				return err
+			}
 		}
 	}
 	result.URL = e.currentURL
@@ -757,7 +791,14 @@ func (e *actorExecution) clickReadNavigation(locator actorLocator, revealFrom ..
 	// Computer revalidates the live target and expected navigation effect before clicking,
 	// including clickable non-button elements whose SOM omits an effect.
 	var out map[string]any
-	err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, map[string]any{"session_id": e.session.SessionID, "action": "click", "target_id": matches[0].ID, "som_revision": shot.Revision, "expected_text": locator.Text, "expected_effect": "navigation_only"}), &out)
+	args := map[string]any{"session_id": e.session.SessionID, "action": "click", "target_id": target.ID, "som_revision": shot.Revision, "expected_effect": "navigation_only"}
+	if locator.TextSuffixPattern == "" {
+		args["expected_text"] = locator.Text
+	}
+	if target.Role != "" {
+		args["expected_role"] = target.Role
+	}
+	err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, args), &out)
 	if err != nil {
 		return err
 	}
@@ -895,7 +936,7 @@ func (e *actorExecution) selectRecord(step actorStep) error {
 		return errors.New("select_record requires complete verified read coverage")
 	}
 	var matches []map[string]any
-	for _, item := range e.items {
+	for _, item := range e.collectionItems {
 		if stringFromAny(item[step.VerifiedField]) == step.Value {
 			matches = append(matches, item)
 		}
@@ -907,4 +948,39 @@ func (e *actorExecution) selectRecord(step actorStep) error {
 		e.lastValues[k] = v
 	}
 	return nil
+}
+
+func (e *actorExecution) assertNoRecord(step actorStep) error {
+	if e.coverage == nil || !e.coverage.Complete || !e.coverage.ReadOnly || e.coverage.MoreRemaining {
+		return errors.New("assert_no_record requires complete verified read coverage")
+	}
+	if step.VerifiedField == "" || step.Value == "" {
+		return errors.New("assert_no_record requires verified_field and value")
+	}
+	for _, item := range e.collectionItems {
+		if stringFromAny(item[step.VerifiedField]) == step.Value {
+			return errors.New("duplicate record exists; inspect the saved record instead of creating another")
+		}
+	}
+	return nil
+}
+
+// Navigate only to a URL selected from a complete verified collection.
+func (e *actorExecution) gotoRecord(step actorStep) error {
+	if e.coverage == nil || !e.coverage.Complete || !e.coverage.ReadOnly || e.coverage.MoreRemaining {
+		return errors.New("goto_record requires complete verified read coverage")
+	}
+	raw, ok := e.lastValues[step.VerifiedField]
+	if !ok || strings.TrimSpace(stringFromAny(raw)) == "" {
+		return errors.New("goto_record verified URL was not selected")
+	}
+	target := stringFromAny(raw)
+	u, err := url.Parse(target)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return errors.New("goto_record requires an absolute HTTP URL")
+	}
+	if err := e.selectRecord(actorStep{VerifiedField: step.VerifiedField, Value: target}); err != nil {
+		return err
+	}
+	return e.gotoURL(target)
 }

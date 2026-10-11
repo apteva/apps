@@ -420,7 +420,18 @@ func validateActorDefinition(def actorDefinition) error {
 				return fmt.Errorf("steps[%d].locator.text_suffix_pattern: %w", i, err)
 			}
 		}
+		if step.ConfirmConsequence == "navigation_only" {
+			return errors.New("navigation_only is not an irreversible consequence acknowledgement")
+		}
 		switch step.Action {
+		case "goto_record":
+			if (!def.ReadOnly && !step.ReadOnly) || step.Optional || step.VerifiedField == "" {
+				return errors.New("goto_record requires a read-only non-optional step and verified_field")
+			}
+		case "read_navigation":
+			if (!def.ReadOnly && !step.ReadOnly) || step.Optional || !step.Locator.Exact || !step.Locator.SOMOnly || step.Locator.Text == "" || step.Locator.Selector != "" {
+				return errors.New("read_navigation requires a read-only, non-optional exact som_only name")
+			}
 		case "inspect_views":
 			if (!def.ReadOnly && !step.ReadOnly) || step.Optional {
 				return errors.New("inspect_views requires a read_only operation or step and cannot be optional")
@@ -506,7 +517,7 @@ func validateActorDefinition(def actorDefinition) error {
 			if step.Locator.Text == "" && step.Locator.Role == "" && step.Locator.Selector == "" {
 				return fmt.Errorf("steps[%d].locator is required", i)
 			}
-			if step.OnceKey != "" && (step.Action != "click" || step.ExpectedEffect == "" || step.ConfirmConsequence != step.ExpectedEffect) {
+			if step.OnceKey != "" && (step.Action != "click" || step.ExpectedEffect == "" || (step.ConfirmConsequence != step.ExpectedEffect && !(step.ExpectedEffect == "navigation_only" && step.ConfirmConsequence == ""))) {
 				return fmt.Errorf("steps[%d].once_key requires a click with an acknowledged expected_effect", i)
 			}
 		case "observe_page", "extract":
@@ -519,11 +530,11 @@ func validateActorDefinition(def actorDefinition) error {
 			if step.MinItems < 0 || step.MaxItems < 0 || (step.MaxItems > 0 && step.MinItems > step.MaxItems) {
 				return fmt.Errorf("steps[%d] has invalid min_items/max_items", i)
 			}
-		case "select_record":
+		case "select_record", "assert_no_record":
 			if step.VerifiedField == "" || step.Value == "" {
-				return errors.New("select_record requires verified_field and value")
+				return errors.New("record checks require verified_field and value")
 			}
-		case "assert_values":
+		case "assert_values", "assert_inputs":
 			if len(step.Assertions) == 0 {
 				return fmt.Errorf("steps[%d].assertions is required", i)
 			}
