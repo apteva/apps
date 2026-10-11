@@ -21,6 +21,11 @@ func (e *actorExecution) clickOnce(step actorStep) error {
 	if input.Operation == "" {
 		input.Operation = "run"
 	}
+	// Editable definitions may share a logical effect across named entry points.
+	// The default remains the original operation namespace for compatibility.
+	if step.OnceScope != "" {
+		input.Operation = step.OnceScope
+	}
 	result, err := e.ctx.AppDB().Exec(`INSERT INTO actors_effect_guards(project_id,actor_id,operation,once_key,run_id,expected_effect,state) VALUES(?,?,?,?,?,?,'reserved') ON CONFLICT DO NOTHING`, projectID(e.ctx), e.run.ActorID, input.Operation, step.OnceKey, e.run.ID, step.ExpectedEffect)
 	if err != nil {
 		return fmt.Errorf("reserve once_key: %w", err)

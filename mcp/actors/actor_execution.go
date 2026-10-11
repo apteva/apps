@@ -736,6 +736,19 @@ func (e *actorExecution) assertValues(step actorStep) error {
 				return fmt.Errorf("assertion %q must be greater than %q", field, assertion.GreaterThanField)
 			}
 		}
+		for _, bound := range []struct {
+			value   any
+			minimum bool
+		}{{assertion.GreaterThanOrEqual, true}, {assertion.LessThanOrEqual, false}} {
+			if bound.value == nil {
+				continue
+			}
+			a, aok := actorNumber(actual)
+			b, bok := actorNumber(bound.value)
+			if !aok || !bok || math.IsNaN(a) || math.IsNaN(b) || math.IsInf(a, 0) || math.IsInf(b, 0) || (bound.minimum && a < b) || (!bound.minimum && a > b) {
+				return fmt.Errorf("numeric bound assertion failed for %q", field)
+			}
+		}
 		if assertion.EqualsURL != nil {
 			if err := assertion.EqualsURL.compare(stringFromAny(actual)); err != nil {
 				return fmt.Errorf("assertion failed for %q: %w", field, err)
@@ -1011,6 +1024,9 @@ func (e *actorExecution) waitAfterInteraction() error {
 }
 
 func (e *actorExecution) finishInteraction(out map[string]any) error {
+	if success, explicit := out["success"].(bool); explicit && !success {
+		return errors.New("Computer interaction reported an unsuccessful outcome; inspect saved state before retrying")
+	}
 	e.currentURL = firstNonEmpty(stringFromAny(out["current_url"]), e.currentURL)
 	if err := e.waitAfterInteraction(); err != nil {
 		return err

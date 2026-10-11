@@ -111,6 +111,7 @@ type actorStep struct {
 	Values      []string             `json:"values,omitempty"`
 	Readability *bool                `json:"readability,omitempty"`
 	OnceKey     string               `json:"once_key,omitempty"`
+	OnceScope   string               `json:"once_scope,omitempty"`
 	// MinItems/MaxItems turn an extraction into a cardinality gate. They are
 	// especially useful before a consequential click: a missing or ambiguous
 	// target must fail closed instead of producing an empty successful extract.
@@ -124,18 +125,20 @@ type actorStep struct {
 // validation declarative and site-neutral: values may be compared directly,
 // checked for containment, or reconciled arithmetically before a click.
 type actorAssertion struct {
-	EqualsExact      any                `json:"equals_exact,omitempty"`
-	GreaterThan      any                `json:"greater_than,omitempty"`
-	GreaterThanField string             `json:"greater_than_field,omitempty"`
-	EqualsURL        *actorURLAssertion `json:"equals_url,omitempty"`
-	Matches          string             `json:"matches,omitempty"`
-	Equals           any                `json:"equals,omitempty"`
-	EqualsField      string             `json:"equals_field,omitempty"`
-	EqualsSet        any                `json:"equals_set,omitempty"`
-	Contains         string             `json:"contains,omitempty"`
-	SumOf            []string           `json:"sum_of,omitempty"`
-	DifferenceOf     []string           `json:"difference_of,omitempty"`
-	Tolerance        float64            `json:"tolerance,omitempty"`
+	EqualsExact        any                `json:"equals_exact,omitempty"`
+	GreaterThan        any                `json:"greater_than,omitempty"`
+	GreaterThanOrEqual any                `json:"greater_than_or_equal,omitempty"`
+	LessThanOrEqual    any                `json:"less_than_or_equal,omitempty"`
+	GreaterThanField   string             `json:"greater_than_field,omitempty"`
+	EqualsURL          *actorURLAssertion `json:"equals_url,omitempty"`
+	Matches            string             `json:"matches,omitempty"`
+	Equals             any                `json:"equals,omitempty"`
+	EqualsField        string             `json:"equals_field,omitempty"`
+	EqualsSet          any                `json:"equals_set,omitempty"`
+	Contains           string             `json:"contains,omitempty"`
+	SumOf              []string           `json:"sum_of,omitempty"`
+	DifferenceOf       []string           `json:"difference_of,omitempty"`
+	Tolerance          float64            `json:"tolerance,omitempty"`
 }
 
 type actorWaitCondition struct {
@@ -403,6 +406,9 @@ func validateActorDefinition(def actorDefinition) error {
 		return fmt.Errorf("definition.browser.environment: %w", err)
 	}
 	for i, step := range def.Steps {
+		if step.OnceScope != "" && (step.OnceKey == "" || (step.Action != "click" && step.Action != "click_verified") || strings.TrimSpace(step.OnceScope) != step.OnceScope || len(step.OnceScope) > 100) {
+			return fmt.Errorf("steps[%d].once_scope requires a guarded click and a nonempty scope of at most 100 bytes", i)
+		}
 		if (def.ReadOnly || step.ReadOnly) && !readOnlyActorAction(step.Action) {
 			return fmt.Errorf("steps[%d]: %s is not allowed in a read_only operation", i, step.Action)
 		}
@@ -522,7 +528,7 @@ func validateActorDefinition(def actorDefinition) error {
 				return fmt.Errorf("steps[%d].assertions is required", i)
 			}
 			for field, assertion := range step.Assertions {
-				if strings.TrimSpace(field) == "" || (assertion.GreaterThan == nil && assertion.EqualsExact == nil && assertion.GreaterThanField == "" && assertion.EqualsURL == nil && assertion.Equals == nil && assertion.EqualsSet == nil && assertion.EqualsField == "" && assertion.Contains == "" && assertion.Matches == "" && len(assertion.SumOf) == 0 && len(assertion.DifferenceOf) == 0) {
+				if strings.TrimSpace(field) == "" || (assertion.GreaterThan == nil && assertion.GreaterThanOrEqual == nil && assertion.LessThanOrEqual == nil && assertion.EqualsExact == nil && assertion.GreaterThanField == "" && assertion.EqualsURL == nil && assertion.Equals == nil && assertion.EqualsSet == nil && assertion.EqualsField == "" && assertion.Contains == "" && assertion.Matches == "" && len(assertion.SumOf) == 0 && len(assertion.DifferenceOf) == 0) {
 					return fmt.Errorf("steps[%d].assertions[%q] has no comparison", i, field)
 				}
 				if assertion.EqualsURL != nil {

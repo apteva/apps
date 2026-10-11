@@ -48,6 +48,8 @@ Collection reads can use `read_views.entry_query` for safely encoded URL paramet
 
 Fields with `many:true` and a selector return ordered arrays, including attributes and resolved URLs. `assert_values.equals_exact` preserves case and whitespace; `greater_than` and `greater_than_field` can establish that a saved server record is newer than a pre-action baseline. See `examples/adultfolio-control.json` for an editable messaging workflow with identity, recipient, idempotency and saved-message checks.
 
+`greater_than_or_equal` and `less_than_or_equal` enforce inclusive numeric bounds against literal or runtime values; missing, nonnumeric and nonfinite values fail. A consequential click may set `once_scope` to share its durable `once_key` namespace with another operation in the same actor. Without it the namespace remains the operation name. Keep both the scope and logical request key stable across revisions and retries. A failed/uncertain send must be reconciled with a read-only saved-record verifier; an unsuccessful Computer result is never proof that no action occurred.
+
 Read-only operations may opt into `read_views.allow_partial:true` for a bounded page preview. Only a verified page/pagination bound can return a successful partial result; inaccessible views, identity mismatches, stalled pagination and truncation still fail. The output remains explicitly incomplete and cannot authorize a write or `select_record`. Pagination max_pages accepts a template, allowing caller-controlled page windows.
 
 Inspect a pinned actor with `actors_get(id, revision)`; use its returned `retrieved_revision` and operation names, not the latest actor description, when assessing support. A missing revision is a failure.

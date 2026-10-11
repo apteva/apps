@@ -10,8 +10,9 @@ import (
 )
 
 func TestEditableUnmessagedCountrySearch(t *testing.T) {
-	for _, mode := range []string{"success", "default_gender", "other_country", "blank_location", "wrong_account", "radius_mode", "wrong_country", "wrong_gender", "wrong_messages", "wrong_profile", "restricted_region", "restricted_town", "encoded_input"} {
+	for _, mode := range []string{"success", "default_gender", "other_country", "blank_location", "wrong_account", "radius_mode", "wrong_country", "wrong_gender", "wrong_messages", "wrong_profile", "restricted_region", "restricted_town", "encoded_input", "age_filter", "wrong_min_age", "wrong_max_age", "wrong_age_input", "wrong_age_order"} {
 		t.Run(mode, func(t *testing.T) {
+			aged := mode == "age_filter" || mode == "wrong_min_age" || mode == "wrong_max_age" || mode == "wrong_age_input" || mode == "wrong_age_order"
 			plat := newFakePlatform()
 			current := ""
 			country, gender := "ES", "F"
@@ -72,6 +73,20 @@ func TestEditableUnmessagedCountrySearch(t *testing.T) {
 					for _, f := range [][2]string{{"country", actualCountry}, {"gender", actualGender}, {"messages", messages}, {"profile", profile}, {"location", region}, {"town", town}} {
 						h += fmt.Sprintf(`<select name="%s"><option selected value="%s">%s</option></select>`, f[0], f[1], f[1])
 					}
+					if aged {
+						lower, upper := "18", "39"
+						if mode == "wrong_min_age" || mode == "wrong_age_input" {
+							lower = "17"
+						}
+						if mode == "wrong_max_age" {
+							upper = "40"
+						}
+						if mode == "wrong_age_order" {
+							lower = "39"
+							upper = "18"
+						}
+						h += fmt.Sprintf(`<select name="lage"><option selected value="%s">%s</option></select><select name="hage"><option selected value="%s">%s</option></select>`, lower, lower, upper, upper)
+					}
 					h += `<div id="member_search_results"><div id="42_member_card"><a class="thumbnailPic" href="/sample-model"></a><a class="a4" href="/sample-model">Sample Model</a><a href="/sample-model/references">3</a><a href="/message.php?user=42">Message</a><div class="text-left smallSidePadding">Female Model<br>3 Positive References<br>` + location + `<br>1264 km away</div></div></div></body>`
 					return map[string]any{"html": h, "current_url": current, "rendered": true}
 				}
@@ -92,7 +107,18 @@ func TestEditableUnmessagedCountrySearch(t *testing.T) {
 			if mode == "default_gender" {
 				delete(input, "gender_code")
 			}
-			queued, err := app.toolActorRun(ctx, map[string]any{"actor_id": rec.ID, "operation": "search_unmessaged_models_by_country", "input": input})
+			operation := "search_unmessaged_models_by_country"
+			if aged {
+				operation = "search_unmessaged_models_by_country_and_age"
+			}
+			if mode == "wrong_age_input" {
+				input["min_age"] = "17"
+			}
+			if mode == "wrong_age_order" {
+				input["min_age"] = "39"
+				input["max_age"] = "18"
+			}
+			queued, err := app.toolActorRun(ctx, map[string]any{"actor_id": rec.ID, "operation": operation, "input": input})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -100,13 +126,20 @@ func TestEditableUnmessagedCountrySearch(t *testing.T) {
 			app.executeActorRun(context.Background(), ctx, run)
 			id := queued.(map[string]any)["run_id"].(int64)
 			r, _ := getActorRun(ctx, id)
-			good := mode == "success" || mode == "default_gender" || mode == "other_country" || mode == "blank_location"
+			good := mode == "success" || mode == "default_gender" || mode == "other_country" || mode == "blank_location" || mode == "age_filter"
 			if (r["status"] == "completed") != good {
 				t.Fatalf("%s: %v", mode, r["error"])
 			}
 			u, _ := url.Parse(current)
 			q := u.Query()
-			if q.Get("country") != country || q.Get("gender") != gender || q.Get("do_postcode_search") != "0" || q.Get("messages") != "exclude" || q.Get("profile") != "model" || q.Get("location") != "" || q.Get("town") != "" || len(q) != 9 {
+			wantKeys := 9
+			if aged {
+				wantKeys = 11
+				if q.Get("lage") == "" || q.Get("hage") == "" {
+					t.Fatal("missing age query")
+				}
+			}
+			if q.Get("country") != country || q.Get("gender") != gender || q.Get("do_postcode_search") != "0" || q.Get("messages") != "exclude" || q.Get("profile") != "model" || q.Get("location") != "" || q.Get("town") != "" || len(q) != wantKeys {
 				t.Fatal("native query not safely encoded", q)
 			}
 			if good {
