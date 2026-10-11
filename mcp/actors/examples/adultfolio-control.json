@@ -43,7 +43,7 @@
         {
           "action": "extract",
           "locator": {},
-          "items": "#search_members select[name=\"profile\"],#search_members select[name=\"distance\"],#search_members select[name=\"order\"],#search_members select[name=\"gender\"],#search_members select[name=\"country\"]",
+          "items": "#search_members select[name=\"profile\"],#search_members select[name=\"distance\"],#search_members select[name=\"order\"],#search_members select[name=\"gender\"],#search_members select[name=\"country\"],#search_members select[name=\"messages\"],#search_members select[name=\"location\"],#search_members select[name=\"town\"],#do_postcode_search",
           "fields": {
             "filter_id": {
               "type": "text",
@@ -68,11 +68,15 @@
               "selector": "option[selected]",
               "type": "text",
               "attribute": "value"
+            },
+            "value": {
+              "attribute": "value",
+              "type": "text"
             }
           },
           "readability": false,
           "min_items": 1,
-          "max_items": 10
+          "max_items": 20
         }
       ],
       "output_schema": null
@@ -1712,6 +1716,228 @@
           }
         }
       ]
+    },
+    "search_unmessaged_models_by_country": {
+      "read_only": true,
+      "steps": [
+        {
+          "read_views": {
+            "allow_partial": true,
+            "entry_url": "https://www.adultfolio.com/search",
+            "identity_url": "{{account_url}}",
+            "identity": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "views": [
+              {
+                "use_entry_page": true,
+                "name": "unmessaged_models_by_country",
+                "covers": [
+                  "unmessaged_models_by_country"
+                ],
+                "link_selector": "",
+                "url_pattern": "^https://www\\.adultfolio\\.com/search(?:[?#]|$)",
+                "ready_selector": "#member_search_results:has([id$=\"_member_card\"]),#member_search_results_intro:contains(\"No results\"),#member_search_results_intro:contains(\"No members\")",
+                "empty_text_pattern": "(?i)no (members|results)|0 results",
+                "empty_selector": "#member_search_results_intro",
+                "loading_selector": ".loading-overlay[aria-busy=\"true\"],#messaging_btf[aria-busy=\"true\"],#MessageResult[aria-busy=\"true\"]",
+                "items": "#member_search_results [id$=\"_member_card\"]:has(.text-left.smallSidePadding:contains(\" Model\"))",
+                "fields": {
+                  "model_id": {
+                    "type": "text",
+                    "attribute": "id",
+                    "required": true,
+                    "pattern": "^([0-9]+)_member_card$"
+                  },
+                  "model_name": {
+                    "selector": "a.a4:not(.periodResponseRate):not([href$=\"/references\"])",
+                    "type": "text",
+                    "required": true
+                  },
+                  "profile_url": {
+                    "selector": "a.thumbnailPic",
+                    "type": "url",
+                    "attribute": "href",
+                    "required": true
+                  },
+                  "references": {
+                    "selector": "a[href$=\"/references\"]",
+                    "type": "number",
+                    "pattern": "([0-9]+)"
+                  },
+                  "response_rate": {
+                    "selector": ".periodResponseRate",
+                    "type": "number",
+                    "pattern": "([0-9]+)%"
+                  },
+                  "role": {
+                    "selector": ".text-left.smallSidePadding",
+                    "type": "text",
+                    "required": true,
+                    "pattern": "\\b((?:Female|Male|Transgender|Non-binary|Non Binary|Other) Model)\\b"
+                  },
+                  "thread_url": {
+                    "selector": "a[href^=\"/message.php?user=\"]",
+                    "type": "url",
+                    "attribute": "href",
+                    "required": true
+                  },
+                  "location": {
+                    "selector": ".text-left.smallSidePadding",
+                    "type": "text",
+                    "preserve_line_breaks": true,
+                    "pattern": "Positive References[ \\t]*\\r?\\n[ \\t]*([^\\r\\n]*[^\\s\\x{00A0}])"
+                  }
+                },
+                "key_field": "model_id",
+                "pagination": {
+                  "on_stall": "partial",
+                  "advance_timeout_ms": 20000,
+                  "reveal_from": "end",
+                  "mode": "scroll",
+                  "next": {},
+                  "scroll_target_name": "Document",
+                  "amount": 600,
+                  "max_pages": "{{read_pages}}",
+                  "stable_rounds": 3,
+                  "settle_ms": 1500
+                },
+                "field_defaults": {
+                  "record_type": "model",
+                  "location": "unavailable",
+                  "location_status": "reported",
+                  "requested_country_code": "{{country_code}}",
+                  "messages_filter": "exclude"
+                },
+                "field_rewrites": {
+                  "location_status": {
+                    "from": "location",
+                    "when_field": "location",
+                    "equals": "unavailable",
+                    "pattern": "^unavailable$",
+                    "replacement": "unverified"
+                  }
+                }
+              }
+            ],
+            "timeout_ms": 10000,
+            "entry_query": {
+              "profile": "model",
+              "country": "{{country_code}}",
+              "gender": "{{gender_code}}",
+              "do_postcode_search": "0",
+              "location": "",
+              "town": "",
+              "messages": "exclude",
+              "searchType": "members",
+              "order": "lastonline"
+            }
+          },
+          "action": "inspect_views",
+          "locator": {}
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "attribute": "href",
+              "type": "url",
+              "required": true
+            },
+            "location_mode": {
+              "selector": "#do_postcode_search",
+              "attribute": "value",
+              "type": "text",
+              "required": true
+            },
+            "country_code": {
+              "selector": "select[name=\"country\"] option[selected]",
+              "attribute": "value",
+              "type": "text",
+              "required": true
+            },
+            "gender_code": {
+              "selector": "select[name=\"gender\"] option[selected]",
+              "attribute": "value",
+              "type": "text",
+              "required": false
+            },
+            "messages_filter": {
+              "selector": "select[name=\"messages\"] option[selected]",
+              "attribute": "value",
+              "type": "text",
+              "required": true
+            },
+            "profile": {
+              "selector": "select[name=\"profile\"] option[selected]",
+              "attribute": "value",
+              "type": "text",
+              "required": true
+            },
+            "region": {
+              "selector": "select[name=\"location\"] option[selected]:not([value=\"\"])",
+              "attribute": "value",
+              "type": "text",
+              "required": false,
+              "many": true
+            },
+            "town": {
+              "selector": "select[name=\"town\"] option[selected]:not([value=\"\"])",
+              "attribute": "value",
+              "type": "text",
+              "required": false,
+              "many": true
+            },
+            "country_label": {
+              "selector": "select[name=\"country\"] option[selected]",
+              "type": "text",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "location_mode": {
+              "equals_exact": "0"
+            },
+            "country_code": {
+              "equals_exact": "{{country_code}}",
+              "matches": "^[A-Z]{2}$"
+            },
+            "gender_code": {
+              "equals_exact": "{{gender_code}}",
+              "matches": "^(F|M)$"
+            },
+            "messages_filter": {
+              "equals_exact": "exclude"
+            },
+            "profile": {
+              "equals_exact": "model"
+            },
+            "region": {
+              "equals_set": []
+            },
+            "town": {
+              "equals_set": []
+            }
+          }
+        }
+      ],
+      "output_schema": null
     }
   },
   "schema_version": 1,
@@ -1723,7 +1949,8 @@
     "max_pages": 250,
     "page_url": "https://www.adultfolio.com/messaging.php",
     "read_pages": 5,
-    "account_profile_path": "/YOUR_ACCOUNT_PROFILE"
+    "account_profile_path": "/YOUR_ACCOUNT_PROFILE",
+    "gender_code": "F"
   },
   "browser": {
     "context_id": "{{context_id}}",

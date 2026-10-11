@@ -5,7 +5,8 @@ Import `adultfolio-control.json`, then set `defaults.context_id` to the saved Co
 Operations:
 
 - `inspect_page` / `inspect_controls`: verified account, current URL and visible semantic controls/navigation. Optional `page_url`.
-- `get_search_options`: current profile/distance/order/gender/country filter options, with ordered value and label arrays.
+- `get_search_options`: native profile, distance, ordering, gender, country, message-history, region and town options, with ordered value/label arrays; also returns the hidden location-mode value.
+- `search_unmessaged_models_by_country`: required `country_code` from `get_search_options`; optional `gender_code` (`F` female, the default; `M` male), and `read_pages`. Searches new prospects outside this account's message history using verified country mode. No custom URL is needed.
 - `search_models`: `model_query`. Searches the authenticated AdultFolio site and returns genuine model cards with numeric model ID, canonical profile URL, message URL, role, references and response rate.
 - `search_exact_model`: `model_query` containing the complete, case-exact profile name. Uses native autocomplete, requires one unique model suggestion, verifies its numeric ID, then opens and verifies the actual profile URL, exact heading name and independent message ID/URL. It changes search-field state and follows navigation only; it never sends a message. Missing, ambiguous or non-model suggestions fail instead of implying absence.
 - `list_conversations` / `list_threads`: inbox conversations, deduplicated by numeric model ID. AdultFolio has one conversation per correspondent.
@@ -18,7 +19,20 @@ Read coverage is explicit. `inspection_complete=false` or `more_results_remainin
 
 This example intentionally has no sample recipient or message. Live sends require an explicitly selected recipient and approved message. Reply confirmation checks are independent of the effect guard: a click alone is never reported as a saved reply.
 
-`search_filtered_models` accepts an explicitly constructed `search_results_url`, using values returned by `get_search_options` (the profile value for models is `model`, not `models`). The default bounded reads are suitable for recent conversations/messages; a complete historical crawl may reach provider or HTML limits and must never be described as complete.
+For female models in Spain this is the complete search request (the country is caller input, never a configured account default):
+
+```json
+{
+  "operation": "search_unmessaged_models_by_country",
+  "input": {"country_code": "ES", "gender_code": "F", "read_pages": 2}
+}
+```
+
+The assigned login context and account are inherited. `country_code` is required and case-sensitive; discover supported codes/labels with `get_search_options`. The gender defaults to `F` (female); pass `M` for male models. Message exclusion is built into this named operation; no additional flag is necessary. Results contain `record_type:"model"`, `model_id`, `model_name`, `profile_url`, `thread_url`, `role`, `location`, `location_status`, `requested_country_code` and `messages_filter:"exclude"`. A missing/blank card location becomes `location:"unavailable"`, `location_status:"unverified"`; do not treat that candidate as individually location-verified. `location_status:"reported"` means the text was read from that card, not that its country was independently verified. Keep the full location text: some countries show city/country, while UK cards show city/county. Use the verified filter evidence and readable card locations when presenting geographical results.
+
+A separate filter-evidence row (without `model_id`) records the authenticated `account_url`, `country_code`, `country_label`, `gender_code`, `location_mode`, `messages_filter`, `profile`, and nonempty selected `region`/`town` code arrays. A completed run asserts the requested country/gender, `location_mode:"0"`, `messages_filter:"exclude"`, models only, and unrestricted region/town. AdultFolio can leave stale London postcode values in the inactive radius fields; mode 0 is what activates the country filter. A failed guard means its dataset is diagnostic, not a verified search result. `read_pages:2` is a preview; check `output.coverage.inspection_complete` and `more_results_remaining` before claiming the whole search was checked. The provider's exclude filter means this account has not messaged those members; it is not evidence about other accounts or whether a member has contacted you.
+
+`search_filtered_models` accepts an explicitly constructed `search_results_url`, using values returned by `get_search_options` (the profile value for models is `model`, not `models`). This is an advanced operation: country searches must explicitly set `do_postcode_search=0`, `location=` and `town=`; `country` alone can leave radius mode active. Prefer the named country-search operation above for new prospects. The default bounded reads are suitable for recent conversations/messages; a complete historical crawl may reach provider or HTML limits and must never be described as complete.
 
 Keyword and filtered search readiness waits for result cards or explicit empty-state text, rather than the initially empty AJAX container. Message pagination waits five seconds after navigation and checks loading text. Some site histories leave their older-message control present after returning no new records; stalled reads wait for AJAX advancement without clicking again, then return the verified dataset with incomplete coverage. Consumers must not interpret that incomplete result as a complete conversation.
 
