@@ -418,25 +418,13 @@ func (b *carrierBridgeLease) trackWriter(leg mediaCloseLeg, writer *websocketWri
 }
 func (b *carrierBridgeLease) watch(writer *websocketWriterPump) {
 	b.trackWriter(mediaCloseLegCarrier, writer)
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-b.ctx.Done():
-				return
-			case <-ticker.C:
-				if !b.protocolHealthy(time.Now()) {
-					b.fail(carrierBridgeEvidence{Kind: "protocol_timeout", Leg: "carrier", Detail: "carrier WebSocket stopped responding to protocol liveness"})
-					return
-				}
-				if !writer.queueControlFrame(ws.OpPing, []byte("telephony-media")) {
-					b.fail(carrierBridgeEvidence{Kind: "socket_write", Leg: "carrier", Detail: "carrier liveness write unavailable"})
-					return
-				}
-			}
+	go watchCarrierProtocol(b.ctx.Done(), writer, b.protocolHealthy, func(kind string) {
+		detail := "carrier WebSocket stopped responding to protocol liveness"
+		if kind == "socket_write" {
+			detail = "carrier liveness write unavailable"
 		}
-	}()
+		b.fail(carrierBridgeEvidence{Kind: kind, Leg: "carrier", Detail: detail})
+	})
 }
 func (b *carrierBridgeLease) finish() {
 	b.cancel()
@@ -817,4 +805,34 @@ func (a *App) stopCarrierBridges() {
 		b.cancel()
 		b.closeSockets()
 	}
+}
+
+// Shared by real carrier streams and the diagnostic echo: incoming data or
+// control frames keep the protocol alive; no per-frame read deadline is used.
+const carrierProtocolPollInterval = 5 * time.Second
+
+func watchCarrierProtocol(done <-chan struct{}, writer *websocketWriterPump, healthy func(time.Time) bool, fail func(string)) {
+	ticker := time.NewTicker(carrierProtocolPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			if !carrierProtocolTick(writer, healthy(time.Now()), fail) {
+				return
+			}
+		}
+	}
+}
+func carrierProtocolTick(writer *websocketWriterPump, healthy bool, fail func(string)) bool {
+	if !healthy {
+		fail("protocol_timeout")
+		return false
+	}
+	if !writer.queueControlFrame(ws.OpPing, []byte("telephony-media")) {
+		fail("socket_write")
+		return false
+	}
+	return true
 }

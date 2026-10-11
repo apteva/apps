@@ -287,6 +287,12 @@ func (p *websocketWriterPump) run() {
 		}
 		if err == nil {
 			p.activity.write.Store(time.Now().UnixNano())
+			if request.op == ws.OpPing {
+				p.activity.pingSent.Store(p.activity.write.Load())
+			}
+			if request.op == ws.OpPong {
+				p.activity.pongSent.Store(p.activity.write.Load())
+			}
 			if request.op == ws.OpBinary {
 				p.activity.audioWrite.Store(p.activity.write.Load())
 			}

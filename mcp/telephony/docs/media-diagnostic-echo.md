@@ -1,6 +1,6 @@
 # Telephony media transport echo
 
-An operator can create a short-lived probe through this Telephony process. It
+An operator can create a long-running probe through this Telephony process. It
 uses the same `upgradeBuffered`, `readWebSocketData`, writer pump and bounded
 close implementation as the carrier bridge. It exchanges unchanged Telnyx-
 shaped JSON frames, including source sequence and timestamp fields. It creates
@@ -13,13 +13,17 @@ These paths are relative to the installed Telephony app base, for example
 `https://<server>/api/apps/telephony/_install/<installation>`.
 
 1. Authenticated operator `POST /media-diagnostics` with JSON
-   `{"duration_seconds":60}`. Add the usual authenticated project scope for a
-   global installation. Delegated application users cannot create/read probes.
+   `{}` (indefinite), or `{"duration_seconds":3600}` for an explicit one-hour run.
+   Optional `"media_kind":"ai"` selects the real five-second AI write budget;
+   omitted/`"human"` uses the real 250 ms human write budget. Add the usual
+   authenticated project scope for a global installation. Delegated application users cannot create/read probes.
 2. The response contains `diagnostic_id`, `echo_url`, `token`, `token_header`,
    `connect_before` and `report_path`. Connect within 60 seconds; the token is
    single use. Supply it as the `X-Telephony-Diagnostic-Token` handshake header,
    **never in a URL**. Ordinary browser WebSocket constructors cannot set this
    header; use the Bun probe or another authorised diagnostic client.
+   The 60-second limit is only the admission window. An established socket
+   remains connected indefinitely unless an explicit duration was requested.
 3. Echo URL: `wss://<server>/api/apps/telephony/_install/<installation>/media/diagnostic/echo`.
    Send `connected`, `start`, and continuous 20 ms `media` frames. `stop` ends
    the probe cleanly. Text frames must contain valid JSON, and media payloads
@@ -27,6 +31,9 @@ These paths are relative to the installed Telephony app base, for example
 4. Authenticated operator `GET /media-diagnostics/<diagnostic_id>` returns the
    report, restricted to the creating project. Fetch while running for counters
    and sampled exchanges; fetch after completion for final closure evidence.
+
+5. Authenticated operator `DELETE /media-diagnostics/<diagnostic_id>` stops
+   an active probe gracefully and invalidates any unused admission token.
 
 This endpoint must never replace a live carrier media URL. It is diagnostic
 transport traffic, not call handling.
@@ -40,10 +47,14 @@ From the Telephony source directory, put the temporary token into the
 bun benchmarks/media-diagnostic/probe.ts \
   --url wss://<server>/api/apps/telephony/_install/<installation>/media/diagnostic/echo \
   --control-url wss://<server>/<existing-echo-path> \
-  --seconds 60 \
+  --seconds 0 \
   --codec l16-16 \
   --output /private/tmp/telephony-media-diagnostic.json
 ```
+
+Zero/omitted `--seconds` runs until Ctrl-C/SIGTERM; positive durations have no
+five-minute ceiling. The runner saves a bounded JSON checkpoint every ten
+seconds and a final report after clean shutdown. It does not reconnect silently.
 
 Both sockets run concurrently. The control must echo text unchanged and should
 use the same ingress/proxy but bypass Telephony, like the existing independent
@@ -67,7 +78,12 @@ that all network variability is an application failure.
 
 Server reports contain nanosecond-formatted UTC receive/send observations,
 monotonic media receive/send gap maxima, write duration, source timing, writer
-queue/error measurements, and canonical read/write error classes. Actual peer
+queue/error measurements, and canonical read/write error classes. Reports
+include effective transport settings, socket peer, last read/write/ping/pong times and an explicit
+`close_trigger`: `client_stop`, `operator_stop`, `duration_reached`,
+`process_shutdown`, `protocol_timeout`, `socket_write`, `peer_close`,
+`read_error`, or `write_error`/`frame_policy`. Live readback includes writer
+counters while the socket is still connected. Actual peer
 close codes are separate from the local closing code. EOF, reset, protocol
 failure, timeout and local shutdown remain distinguishable. No token, complete
 URL, arbitrary error string or audio payload is retained in a report. Periodic
@@ -75,19 +91,27 @@ exchanges are sampled once a second; gaps above 40 ms and writes above 20 ms are
 recorded too. Eviction counters disclose truncated evidence.
 
 Bounds: two simultaneous streams per Telephony process, sixteen retained
-sessions, 128 exchange events per server report, 256 client events, 1–300 second
-probe duration, 16 KiB diagnostic message size, 1000 messages/second per stream,
-20 second protocol idle budget, five-second pings, and the existing 250 ms human
-carrier write budget/500 ms forced close ceiling. Ping/pong counts as protocol
-activity; silence samples remain transport traffic. AI carrier writes currently
-have a different five-second budget; this probe represents the human-media
-socket budget. Endpoint counters and reports use dedicated in-memory locks;
+sessions, 128 exchange events per server report, 256 client events, no default
+duration limit (optional explicit duration), 16 KiB diagnostic message size,
+1000 messages/second per stream,
+20 second protocol idle budget, five-second polling/pings, and the shared
+carrier write budget/500 ms forced close ceiling. The echo and real carrier
+bridge use the same liveness watcher, including control-frame activity; there
+is no rolling per-frame read deadline. Failure detection can take 20–25 seconds.
+Ping/pong counts as protocol activity; silence samples remain transport traffic.
+Use `media_kind: "ai"` to match the five-second AI write budget; human is the
+default. Both use the same writer/control/close implementation. Endpoint counters
+and reports use dedicated in-memory locks;
 live call locks, workers and database paths are never involved.
 
-Reports are process-local, expire ten minutes after the maximum session window,
-and disappear after a process restart. Copy reports before expiry. No raw media
-is stored. Tokens are scoped to their creating installation/process by in-memory
-ownership; reconnects need another token. Stop/unmount closes diagnostic sockets.
+Reports are process-local, remain readable for the entire active session, and
+expire ten minutes after completion (unused admissions expire after eleven
+minutes). They disappear after a process restart. Copy reports before expiry. No raw media
+is stored. Diagnostic JSON/rate limits remain tighter than the carrier message
+ceiling and are disclosed in settings. This echo returns the inbound JSON
+unchanged; real carrier output has provider-specific framing. TLS/proxy/network
+idle timeouts outside Telephony are not controlled or inferred by this probe.
+Tokens are scoped to their creating installation/process by in-memory ownership; reconnects need another token. Stop/unmount closes diagnostic sockets.
 
 If only Telephony stalls, inspect Telephony and its specific proxy/connection
 path. If both stall together, inspect shared ingress/network and the probe
@@ -108,7 +132,8 @@ bunx --no-install tsc -p benchmarks/media-diagnostic/tsconfig.json --noEmit
 The integration test runs the actual endpoint and Bun client beside a separate
 bare echo on localhost, for L16/16 kHz and PCMU. It asserts unchanged frame
 counts/payloads and normal closures. Additional tests cover receive stalls,
-expiry/replay, project isolation, bounded concurrent upgrades/report retention,
+expiry/replay, project isolation, bounded concurrent upgrades/report retention, indefinite admission, live
+readback, operator stop, shared carrier liveness/settings,
 EOF, malformed frames, duration timeout and process shutdown.
 
 Before operational use, validate the installation-specific URL and header
@@ -136,3 +161,41 @@ scheduler timing is measured separately and this is not a claim that every
 20 ms source slot ran on time. Both PCMU sockets observed a roughly 43 ms
 receipt gap. These are local transport measurements, not live audio quality or
 remote Telnyx latency guarantees. Staging and production were untouched.
+
+### Long-lived local soak
+
+To run the actual Bun client and Telephony route beyond the removed five-minute
+limit without slowing normal unit tests:
+
+```sh
+env GOWORK=off TELEPHONY_DIAGNOSTIC_SOAK_SECONDS=315 \
+  TELEPHONY_DIAGNOSTIC_TEST_OUTPUT=/private/tmp/telephony-echo-soak \
+  go test -tags integration -run '^TestMediaDiagnosticBunProbe$' \
+  -count=1 -timeout=7m -v .
+```
+
+The session itself is indefinite; the client chooses when to finish. This
+checks continuous 50 fps L16/16 kHz echo, periodic pings, bounded report eviction
+and client checkpoints on one socket alongside an independent control socket.
+It does not certify any particular proxy or Telnyx remote path.
+
+### Verification for 0.11.9
+
+A real local paired run lasted **315 seconds**, crossing the removed limit on
+one continuous socket per path. The indefinite Telephony session echoed
+**15,293/15,293** transmitted L16/16 kHz frames; the independent control echoed
+**15,297/15,297**. Both ended normally with code 1000, no altered/missing/duplicate
+payloads, bounded event eviction and periodic client checkpoints.
+
+Maximum RTT was 573.191 ms on Telephony and 423.406 ms on the control; maximum
+receipt gaps were 565.502/555.491 ms. Sender scheduling delays and source slots
+are reported separately. These timing excursions occurred in a local run and
+are not proof of remote transport latency or zero jitter. The result proves
+that the tested sockets stayed open beyond five minutes without losing any
+transmitted echo frames. It is not a live-call quality benchmark.
+
+Evidence: `/private/tmp/telephony-0119-soak.log` and
+`/private/tmp/telephony-0119-soak/l16-16.json` with the corresponding server report.
+The final-source integration checks additionally exercise L16/PCMU, the actual
+ping interval, and default indefinite execution, ten-second checkpointing and
+Ctrl-C cancellation. Staging and production remain unchanged.

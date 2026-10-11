@@ -28,6 +28,8 @@ type audioDisconnectInfo struct {
 	LastReadAt             string  `json:"last_read_at,omitempty"`
 	LastWriteAt            string  `json:"last_write_at,omitempty"`
 	LastPingAt             string  `json:"last_ping_at,omitempty"`
+	LastPingSentAt         string  `json:"last_ping_sent_at,omitempty"`
+	LastPongSentAt         string  `json:"last_pong_sent_at,omitempty"`
 	LastPongAt             string  `json:"last_pong_at,omitempty"`
 	LastBrowserSampleAt    string  `json:"last_browser_sample_at,omitempty"`
 	RTTMS                  *int    `json:"rtt_ms,omitempty"`
@@ -76,7 +78,7 @@ func audioSocketError(err error) (string, string) {
 	return "transport_error", "unclassified_transport_error"
 }
 
-type audioSocketActivity struct{ read, write, ping, pong, audioRead, audioWrite atomic.Int64 }
+type audioSocketActivity struct{ read, write, ping, pong, pingSent, pongSent, audioRead, audioWrite atomic.Int64 }
 
 func (s *audioSocketActivity) observe(op ws.OpCode, _ []byte) {
 	now := time.Now().UnixNano()
@@ -102,6 +104,7 @@ func (p *websocketWriterPump) disconnectInfo(err error) audioDisconnectInfo {
 	d := audioDisconnectInfo{ErrorClass: class, ErrorDetail: detail, Transport: "websocket",
 		LastReadAt: audioActivityTime(p.activity.read.Load()), LastWriteAt: audioActivityTime(p.activity.write.Load()),
 		LastPingAt: audioActivityTime(p.activity.ping.Load()), LastPongAt: audioActivityTime(p.activity.pong.Load()),
+		LastPingSentAt: audioActivityTime(p.activity.pingSent.Load()), LastPongSentAt: audioActivityTime(p.activity.pongSent.Load()),
 		LastAudioReadAt: audioActivityTime(p.activity.audioRead.Load()), LastAudioWriteAt: audioActivityTime(p.activity.audioWrite.Load())}
 	p.audioMu.Lock()
 	d.ServerQueuedMS = p.audioBytes * 1000 / 48000
