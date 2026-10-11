@@ -1,0 +1,44 @@
+name: Telephony validation
+on:
+  pull_request:
+    paths: ['mcp/telephony/**', '.github/workflows/telephony.yml']
+  push:
+    branches: [main]
+    tags: ['telephony/v*']
+    paths: ['mcp/telephony/**', '.github/workflows/telephony.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  telephony:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/telephony/go.mod
+          cache-dependency-path: mcp/telephony/go.sum
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.13'
+      - run: bun install --frozen-lockfile
+        working-directory: mcp/telephony
+      - run: go vet ./...
+        working-directory: mcp/telephony
+      - run: go test -json ./... > /tmp/telephony-go.jsonl
+        working-directory: mcp/telephony
+      - run: go test -race -run 'Test(LocalSIP|LocalMediaSettings|SIPRuntimeTransport|SIPResourceCleanup|SIPNativeHold|SIPOutboundDTMF|SIPTransportSave|SIPRetirement|SIPTwilioDetach|SIPAIActivation|SIPRouteAccount|SIPExternalOffer|SelectingDirectSIP|LocalCloseTimeout)' -count=1 .
+        working-directory: mcp/telephony
+      - run: bun test --timeout 15000 frontend/tests/*.test.ts ui/*.test.ts
+        working-directory: mcp/telephony
+      - run: bun run scripts/build-panels.ts --app telephony
+      - run: go build -o /tmp/telephony .
+        working-directory: mcp/telephony
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: telephony-go-results
+          path: /tmp/telephony-go.jsonl
