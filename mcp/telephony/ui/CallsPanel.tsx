@@ -13,6 +13,7 @@ import {
 } from "./audio-settings";
 
 import AudioHealthView from "./AudioHealthView";
+import SIPMediaDialog from "./SIPMediaDialog";
 import { usePanelSoftphone } from "./use-panel-softphone";
 import { callTerminationLabel, isIncomingBrowserCall, type Call as TelephonyCall } from "../frontend/src/client";
 
@@ -2002,6 +2003,7 @@ function healthClass(value: string): string {
 }
 
 function NumbersView({ projectId }: NativePanelProps) {
+ const [sipSettings,setSipSettings]=useState<{route:string;label:string}|null>(null);
   const connectedRequestRef = useRef(0);
   const [connectedNumbers, setConnectedNumbers] = useState<ConnectedNumber[]>([]);
   const [connectedProvider, setConnectedProvider] = useState("");
@@ -2038,6 +2040,8 @@ function NumbersView({ projectId }: NativePanelProps) {
     const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
     return `${API}${path}${query}`;
   }, [projectId]);
+
+ const mediaRequest=useCallback((body:Record<string,unknown>)=>postJSON<{config?:any}>(endpoint("/numbers/local-media"),body),[endpoint]);
 
   const loadConnected = useCallback(async (fresh = false) => {
     const requestId = ++connectedRequestRef.current;
@@ -2183,7 +2187,7 @@ function NumbersView({ projectId }: NativePanelProps) {
         inbound_transport: transport,
         configure: true,
       });
-      setTransportStatus(`${number.phone_number} routing updated`);
+      setTransportStatus(`${number.phone_number} routing updated for new calls · active calls retained`);
     } catch (e) {
       setTransportStatus((e as Error).message || "Could not update inbound transport");
     } finally {
@@ -2237,6 +2241,8 @@ function NumbersView({ projectId }: NativePanelProps) {
     try {
       const result = await postJSON<{ warning?: string }>(endpoint("/numbers/routes/create"), {
         phone_number: number.phone_number,
+        carrier_connection_id: number.carrier_connection_id,
+        inbound_transport: number.provider === "didww" ? "sip_direct" : "programmable_websocket",
         phone_number_id: number.provider_number_id || "",
         agent_id: agentId,
         answer_mode: draft.answer_mode,
@@ -2315,6 +2321,7 @@ function NumbersView({ projectId }: NativePanelProps) {
           </header>
 
           <div className="px-4 py-2 flex flex-wrap gap-2">
+            <button type="button" onClick={() => setSipSettings({route:"",label:"Project defaults"})} className="rounded border border-border px-2 py-1 text-xs">SIP media defaults</button>
             {providerStatuses.filter((p,i,list) => list.findIndex(item => item.provider === p.provider) === i).map(p => <button key={p.provider} type="button"
               disabled={connectedLoading || outboundSaving !== ""}
               onClick={() => void setOutboundEnabled("provider",p.provider,!p.provider_outbound_enabled)}
@@ -2469,8 +2476,8 @@ function NumbersView({ projectId }: NativePanelProps) {
                             disabled={transportSaving === number.route.id}
                             className="h-8 min-w-0 flex-1 rounded border border-border bg-bg px-2 text-xs"
                           >
-                            <option value="programmable_websocket">Voice API</option>
-                            {(number.provider === "twilio" || number.provider === "telnyx") ? (
+                            <option value="programmable_websocket" disabled={number.provider === "didww"}>Voice API</option>
+                            {(number.provider === "twilio" || number.provider === "telnyx" || number.provider === "didww") ? (
                               <option value="sip_direct" disabled={!directSIP?.available && !directSIP?.ready}>Direct SIP</option>
                             ) : null}
                           </select>
@@ -2484,6 +2491,7 @@ function NumbersView({ projectId }: NativePanelProps) {
                           >
                             Apply
                           </button>
+                          {(number.provider === "twilio" || number.provider === "telnyx" || number.provider === "didww") ? <button type="button" aria-label={`SIP media settings for ${number.phone_number}`} onClick={() => setSipSettings({route:number.route!.id,label:number.phone_number})} className="h-8 rounded border border-border px-2 text-xs">Media</button> : null}
                         </div>
                       ) : <span className="text-xs text-text-muted">-</span>}
                     </div>
@@ -2701,6 +2709,7 @@ function NumbersView({ projectId }: NativePanelProps) {
           </button>
         </section>
       ) : null}
+      {sipSettings ? <SIPMediaDialog routeId={sipSettings.route} label={sipSettings.label} request={mediaRequest} onClose={() => setSipSettings(null)}/> : null}
     </div>
   );
 }

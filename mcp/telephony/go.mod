@@ -7,6 +7,8 @@ require (
 	github.com/ebitengine/purego v0.11.1
 	github.com/emiago/sipgo v1.4.3
 	github.com/gobwas/ws v1.4.0
+	github.com/gotranspile/g722 v0.0.0-20240123003956-384a1bb16a19
+	github.com/hajimehoshi/go-mp3 v0.3.4
 	github.com/osgochina/webrtcvad-go v0.0.2
 	github.com/pion/ice/v4 v4.4.4
 	github.com/pion/interceptor v0.1.49

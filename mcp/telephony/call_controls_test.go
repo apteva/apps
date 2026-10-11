@@ -46,8 +46,8 @@ func TestCarrierControlCapabilitiesAreAdapterDriven(t *testing.T) {
 	}
 	row.CarrierSlug = "telnyx"
 	row.IngressPath = "sip_direct"
-	if got := callControlCapabilities(row); got["hold_music"] || got["recording_pause"] {
-		t.Fatalf("direct SIP controls were advertised: %#v", got)
+	if got := callControlCapabilities(row); !got["hold_music"] || !got["recording_pause"] {
+		t.Fatalf("direct SIP controls were not advertised: %#v", got)
 	}
 }
 

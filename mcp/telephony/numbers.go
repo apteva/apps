@@ -1236,13 +1236,39 @@ func (a *App) handleNumbers(w http.ResponseWriter, r *http.Request) {
 		result, err = a.configureNumberOutboundProfile(ctx,
 			strings.TrimSpace(strArg(body, "phone_number", "")),
 			strings.TrimSpace(strArg(body, "profile_id", "")))
+	case "/numbers/local-media":
+		routeID := strArg(body, "route_id", "")
+		if routeID != "" {
+			if _, err = a.routeForCaller(ctx, routeID, 0); err != nil {
+				break
+			}
+		}
+		if boolArg(body, "inherit", false) && routeID != "" {
+			_, err = a.db().db.Exec(`DELETE FROM local_media_settings WHERE project_id=? AND route_id=?`, ctx.CurrentProject(), routeID)
+			a.inventoryReads.invalidate()
+			result = map[string]any{"ok": err == nil}
+			break
+		}
+		if body["config"] == nil {
+			var cfg localMediaSettings
+			cfg, err = a.localMediaSettings(ctx.CurrentProject(), routeID)
+			result = map[string]any{"config": cfg}
+		} else {
+			var cfg localMediaSettings
+			raw, _ := json.Marshal(body["config"])
+			decoder := json.NewDecoder(strings.NewReader(string(raw)))
+			decoder.DisallowUnknownFields()
+			if err = decoder.Decode(&cfg); err == nil {
+				err = a.saveLocalMediaSettings(ctx, routeID, cfg)
+			}
+			result = map[string]any{"ok": err == nil, "config": cfg}
+		}
 	case "/numbers/transport":
 		var route *routeRow
-		route, err = a.setRouteTransport(ctx,
-			strings.TrimSpace(strArg(body, "route_id", "")),
-			strings.TrimSpace(strArg(body, "inbound_transport", "")), 0)
-		if err == nil && boolArg(body, "configure", true) {
-			err = a.configureRouteCarrier(ctx, route)
+		if boolArg(body, "configure", true) {
+			route, err = a.applyRouteTransport(ctx, strArg(body, "route_id", ""), strArg(body, "inbound_transport", ""), 0)
+		} else {
+			route, err = a.setRouteTransport(ctx, strArg(body, "route_id", ""), strArg(body, "inbound_transport", ""), 0)
 		}
 		if err == nil {
 			result = map[string]any{

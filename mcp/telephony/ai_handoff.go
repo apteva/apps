@@ -330,7 +330,7 @@ func (a *App) driveAIHandoff(ctx *sdk.AppCtx, id string) error {
 	}
 	// Pull transports resume on their authenticated wait callbacks. Push
 	// transports need a worker after a transient failure even without a decision.
-	if row.CarrierSlug == "twilio" || row.CarrierSlug == "plivo" {
+	if !a.callUsesDirectSIP(row) && (row.CarrierSlug == "twilio" || row.CarrierSlug == "plivo") {
 		return nil
 	}
 	defer lockRoutingCall(id)()
@@ -352,6 +352,10 @@ func (a *App) driveAIHandoff(ctx *sdk.AppCtx, id string) error {
 	}
 	_, plan, err := a.routingPlanForCall(row, nil)
 	if err != nil {
+		return err
+	}
+	if a.callUsesDirectSIP(row) {
+		_, err = a.answerCall(ctx, row, h.Directive, h.Voice, h.Greeting, false)
 		return err
 	}
 	if row.CarrierSlug == "telnyx" && plan != nil {
@@ -505,4 +509,28 @@ func (a *App) applyAIHandoffFallback(ctx *sdk.AppCtx, row *callRow, h *aiHandoff
 		})
 	}
 	return nil
+}
+
+// Local SIP failures have a defined terminal routing fallback. A missing dialog
+// or failed answer cannot be repaired by spawning another Core session.
+func (a *App) failSIPAIActivation(call, thread string) error {
+	tx, err := a.db().db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`UPDATE ai_handoffs SET status='failed',error_code='sip_activation_failed' WHERE call_id=? AND status='ready' AND EXISTS(SELECT 1 FROM calls WHERE id=? AND thread_id=? AND media_connected_at='' AND status NOT IN ('completed','failed','canceled','no-answer','busy'))`, call, call, thread)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		if _, err = tx.Exec(`UPDATE ai_handoff_attempts SET outcome='failed',error_code='sip_activation_failed',completed_at=? WHERE call_id=? AND thread_id=?`, ringTime(time.Now()), call, thread); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }

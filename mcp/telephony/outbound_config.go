@@ -255,6 +255,12 @@ func (a *App) ensureOutboundReady(ctx *sdk.AppCtx, provider string, connectionID
 
 func telnyxRouteApplicationID(route *routeRow, fallback string) string {
 	if route != nil {
+		if route.InboundTransport == inboundTransportSIPDirect {
+			var sipConfig directSIPProviderConfig
+			if json.Unmarshal([]byte(route.TransportConfig), &sipConfig) == nil && validProviderResourceID(sipConfig.PreviousConnectionID) {
+				return sipConfig.PreviousConnectionID
+			}
+		}
 		var config telnyxRouteConfig
 		if json.Unmarshal([]byte(route.PreviousVoiceURL), &config) == nil && validProviderResourceID(config.ApplicationID) {
 			return config.ApplicationID

@@ -16,14 +16,16 @@ import (
 const sipSDESCryptoSuite = "AES_CM_128_HMAC_SHA1_80"
 
 type sipMediaOffer struct {
-	RemoteAddress netip.Addr
-	RemotePort    int
-	PayloadType   uint8
-	Codec         string
-	PacketSamples int
-	Secure        bool
-	RemoteKey     []byte
-	CryptoTag     string
+	RemoteAddress   netip.Addr
+	RemotePort      int
+	PayloadType     uint8
+	Codec           string
+	Direction       string
+	PacketSamples   int
+	Secure          bool
+	RemoteKey       []byte
+	DTMFPayloadType int
+	CryptoTag       string
 }
 
 type sipMediaSecurity struct {
@@ -33,6 +35,12 @@ type sipMediaSecurity struct {
 }
 
 func parseSIPMediaOffer(body []byte, cfg sipGatewayConfig) (sipMediaOffer, error) {
+	return parseSIPMediaOfferCodecs(body, cfg, nil)
+}
+func parseSIPMediaOfferCodecs(body []byte, cfg sipGatewayConfig, codecs []string) (sipMediaOffer, error) {
+	return parseSIPMediaOfferOptions(body, cfg, codecs, false)
+}
+func parseSIPMediaOfferOptions(body []byte, cfg sipGatewayConfig, codecs []string, allowHold bool) (sipMediaOffer, error) {
 	if len(body) == 0 || len(body) > 64<<10 {
 		return sipMediaOffer{}, errors.New("SIP INVITE must contain an SDP offer smaller than 64 KB")
 	}
@@ -67,7 +75,7 @@ func parseSIPMediaOffer(body []byte, cfg sipGatewayConfig) (sipMediaOffer, error
 				}
 			}
 		}
-		if direction != "sendrecv" {
+		if direction != "sendrecv" && !allowHold {
 			return sipMediaOffer{}, errors.New("SDP offer does not allow bidirectional audio")
 		}
 
@@ -79,7 +87,7 @@ func parseSIPMediaOffer(body []byte, cfg sipGatewayConfig) (sipMediaOffer, error
 		if !cfg.sourceAllowed(remoteIP.String()) {
 			return sipMediaOffer{}, errors.New("SDP media address is outside TELEPHONY_SIP_ALLOWED_CIDRS")
 		}
-		payloadType, codec, err := negotiatedG711Codec(media)
+		payloadType, codec, err := negotiateSIPCodec(media, codecs)
 		if err != nil {
 			return sipMediaOffer{}, err
 		}
@@ -88,12 +96,14 @@ func parseSIPMediaOffer(body []byte, cfg sipGatewayConfig) (sipMediaOffer, error
 			return sipMediaOffer{}, err
 		}
 		offer := sipMediaOffer{
-			RemoteAddress: remoteIP,
-			RemotePort:    media.MediaName.Port.Value,
-			PayloadType:   payloadType,
-			Codec:         codec,
-			PacketSamples: packetTimeMS * 8,
-			Secure:        secure,
+			RemoteAddress:   remoteIP,
+			RemotePort:      media.MediaName.Port.Value,
+			PayloadType:     payloadType,
+			Codec:           codec,
+			Direction:       direction,
+			PacketSamples:   packetTimeMS * 8,
+			DTMFPayloadType: negotiatedSIPTelephoneEvent(media),
+			Secure:          secure,
 		}
 		if secure {
 			offer.CryptoTag, offer.RemoteKey, err = parseSDESCrypto(media.Attributes)
@@ -133,6 +143,9 @@ func mediaConnectionAddress(media *sdp.MediaDescription, description *sdp.Sessio
 }
 
 func negotiatedG711Codec(media *sdp.MediaDescription) (uint8, string, error) {
+	return negotiateSIPCodec(media, nil)
+}
+func negotiateSIPCodec(media *sdp.MediaDescription, codecs []string) (uint8, string, error) {
 	rtpmap := make(map[string]string)
 	for _, attribute := range media.Attributes {
 		if !strings.EqualFold(attribute.Key, "rtpmap") {
@@ -143,16 +156,15 @@ func negotiatedG711Codec(media *sdp.MediaDescription) (uint8, string, error) {
 			rtpmap[parts[0]] = strings.ToUpper(parts[1])
 		}
 	}
-	for _, preferred := range []struct {
-		static string
-		name   string
-	}{
-		{static: "0", name: "PCMU"},
-		{static: "8", name: "PCMA"},
-	} {
+	if len(codecs) == 0 {
+		codecs = []string{"G722", "PCMU", "PCMA"}
+	}
+	staticTypes := map[string]string{"G722": "9", "PCMU": "0", "PCMA": "8"}
+	for _, name := range codecs {
+		preferred := struct{ static, name string }{staticTypes[name], name}
 		for _, format := range media.MediaName.Formats {
 			codec := rtpmap[format]
-			if (format == preferred.static && (codec == "" || codec == preferred.name+"/8000" || codec == preferred.name+"/8000/1")) || ((codec == preferred.name+"/8000" || codec == preferred.name+"/8000/1") && format != "0" && format != "8") {
+			if (format == preferred.static && (codec == "" || codec == preferred.name+"/8000" || codec == preferred.name+"/8000/1")) || ((codec == preferred.name+"/8000" || codec == preferred.name+"/8000/1") && format != "0" && format != "8" && format != "9") {
 				value, err := strconv.ParseUint(format, 10, 8)
 				if err != nil || value > 127 {
 					continue
@@ -161,7 +173,7 @@ func negotiatedG711Codec(media *sdp.MediaDescription) (uint8, string, error) {
 			}
 		}
 	}
-	return 0, "", errors.New("carrier must offer G.711 PCMU or PCMA at 8 kHz")
+	return 0, "", errors.New("carrier must offer G722 or G.711 PCMU/PCMA (8 kHz RTP clock)")
 }
 
 func parseSDESCrypto(attributes []sdp.Attribute) (string, []byte, error) {
@@ -228,8 +240,11 @@ func buildSIPMediaAnswer(cfg sipGatewayConfig, offer sipMediaOffer, localPort in
 	protocol := []string{"RTP", "AVP"}
 	attributes := []sdp.Attribute{
 		sdp.NewAttribute("rtpmap", fmt.Sprintf("%d %s/8000", offer.PayloadType, offer.Codec)),
-		sdp.NewPropertyAttribute("sendrecv"),
+		sdp.NewPropertyAttribute(sipAnswerDirection(offer.Direction)),
 		sdp.NewAttribute("ptime", "20"),
+	}
+	if offer.DTMFPayloadType > 0 {
+		attributes = append(attributes, sdp.NewAttribute("rtpmap", fmt.Sprintf("%d telephone-event/8000", offer.DTMFPayloadType)), sdp.NewAttribute("fmtp", fmt.Sprintf("%d 0-16", offer.DTMFPayloadType)))
 	}
 	if offer.Secure {
 		if security == nil || len(security.LocalKey) != 30 {
@@ -262,10 +277,62 @@ func buildSIPMediaAnswer(cfg sipGatewayConfig, offer sipMediaOffer, localPort in
 		MediaDescriptions: []*sdp.MediaDescription{{
 			MediaName: sdp.MediaName{
 				Media: "audio", Port: sdp.RangedPort{Value: localPort},
-				Protos: protocol, Formats: []string{strconv.Itoa(int(offer.PayloadType))},
+				Protos: protocol, Formats: sipAnswerFormats(offer),
 			},
 			Attributes: attributes,
 		}},
 	}
 	return description.Marshal()
+}
+
+// RFC 4733 telephone events are negotiated independently of the speech codec.
+func negotiatedSIPTelephoneEvent(media *sdp.MediaDescription) int {
+	for _, attr := range media.Attributes {
+		fields := strings.Fields(attr.Value)
+		if attr.Key != "rtpmap" || len(fields) != 2 || !strings.EqualFold(fields[1], "telephone-event/8000") {
+			continue
+		}
+		pt, err := strconv.Atoi(fields[0])
+		if err != nil || pt < 96 || pt > 127 {
+			continue
+		}
+		for _, f := range media.MediaName.Formats {
+			if f == fields[0] {
+				return pt
+			}
+		}
+	}
+	return -1
+}
+func sipAnswerFormats(offer sipMediaOffer) []string {
+	formats := []string{strconv.Itoa(int(offer.PayloadType))}
+	if offer.DTMFPayloadType > 0 {
+		formats = append(formats, strconv.Itoa(offer.DTMFPayloadType))
+	}
+	return formats
+}
+
+func sipAnswerDirection(direction string) string {
+	switch direction {
+	case "sendonly":
+		return "recvonly"
+	case "recvonly":
+		return "sendonly"
+	case "inactive":
+		return "inactive"
+	default:
+		return "sendrecv"
+	}
+}
+func sipRemoteMediaMode(direction string) int32 {
+	switch direction {
+	case "sendonly":
+		return 1
+	case "recvonly":
+		return 2
+	case "inactive":
+		return 3
+	default:
+		return 0
+	}
 }

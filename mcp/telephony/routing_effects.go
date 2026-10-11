@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -161,12 +160,17 @@ func (a *App) driveRoutingEffect(ctx *sdk.AppCtx, callID, nodeID string) error {
 			route = *stored
 		}
 	}
+	if a.callUsesDirectSIP(row) && a.localSIPPlanRunning(row.ID, e.Node) {
+		// An executing local prompt is not a new carrier command attempt.
+		_, err = a.db().db.Exec(`UPDATE routing_effects SET next_attempt_at=? WHERE id=?`, ringTime(time.Now().Add(15*time.Second)), e.ID)
+		return err
+	}
 	prompt := terminalAnnouncementText(&e.Plan)
 	stage := "end"
 	if e.Plan.TerminalType == "dtmf_menu" {
 		stage = "gather"
 	}
-	if row.CarrierSlug == "telnyx" && (prompt != "" || stage == "gather") {
+	if !a.callUsesDirectSIP(row) && row.CarrierSlug == "telnyx" && (prompt != "" || stage == "gather") {
 		if prompt != "" {
 			if row.AnnouncementState == "finished" {
 				return a.completeRoutingEffect(e.ID)
@@ -218,6 +222,8 @@ func (a *App) driveRoutingEffect(ctx *sdk.AppCtx, callID, nodeID string) error {
 		return err
 	}
 	switch {
+	case a.callUsesDirectSIP(row):
+		err = a.executeSIPRoutingPlan(ctx, row, &e.Plan)
 	case isSuppressedHandlingReason(row.HandlingReason):
 		err = a.rejectInboundCarrierCall(ctx, row)
 		if err == nil {
@@ -253,7 +259,7 @@ func (a *App) driveRoutingEffect(ctx *sdk.AppCtx, callID, nodeID string) error {
 		}
 		return err
 	}
-	if stage == "answer" || stage == "speak" {
+	if a.callUsesDirectSIP(row) || stage == "answer" || stage == "speak" {
 		_, err = a.db().db.Exec(`UPDATE routing_effects SET last_error='' WHERE id=?`, e.ID)
 		return err
 	}
@@ -288,8 +294,8 @@ func (a *App) finishTerminalRoutingPlan(ctx *sdk.AppCtx, row *callRow, route *ro
 	if row == nil || plan == nil {
 		return errors.New("terminal routing plan unavailable")
 	}
-	if a.callUsesDirectSIP(row) && terminalAnnouncementText(plan) != "" {
-		return fmt.Errorf("direct SIP cannot play a terminal routing announcement")
+	if a.callUsesDirectSIP(row) {
+		return a.executeSIPRoutingPlan(ctx, row, plan)
 	}
 	if err := a.ensureRoutingEffect(row, plan); err != nil {
 		return err

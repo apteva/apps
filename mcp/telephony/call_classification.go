@@ -10,6 +10,9 @@ func callbackOpportunityID(call callRow) string {
 }
 
 func callbackEligible(call callRow) bool {
+	if call.HandlingReason == "voicemail" {
+		return false
+	}
 	if call.Direction != "inbound" || !isTerminalStatus(call.Status) || call.HandlingReason != "" {
 		return false
 	}
@@ -20,6 +23,9 @@ func callbackEligible(call callRow) bool {
 }
 
 func callClassification(call callRow) string {
+	if call.HandlingReason == "voicemail" {
+		return "voicemail"
+	}
 	if call.HandlingReason != "" {
 		return call.HandlingReason
 	}

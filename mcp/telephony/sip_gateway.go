@@ -57,6 +57,8 @@ type sipSession struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 
+	local         sipLocalRuntime
+	recorder      atomic.Pointer[localCallRecorder]
 	answerMu      sync.Mutex
 	ended         atomic.Bool
 	mediaOnce     sync.Once
@@ -319,13 +321,14 @@ func (g *sipGateway) registerHandlers() {
 		}
 		_ = transaction.Respond(sip.NewResponseFromRequest(request, status, "No Matching Transaction", nil))
 	}))
+	g.server.OnInfo(g.trackHandler(g.handleInfo))
 	g.server.OnOptions(g.trackHandler(func(request *sip.Request, transaction sip.ServerTransaction) {
 		if !g.cfg.sourceAllowed(request.Source()) {
 			_ = transaction.Respond(sip.NewResponseFromRequest(request, sip.StatusForbidden, "Forbidden", nil))
 			return
 		}
 		response := sip.NewResponseFromRequest(request, sip.StatusOK, "OK", nil)
-		response.AppendHeader(sip.NewHeader("Allow", "INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE"))
+		response.AppendHeader(sip.NewHeader("Allow", "INVITE, ACK, CANCEL, BYE, OPTIONS, UPDATE, INFO"))
 		_ = transaction.Respond(response)
 	}))
 }
@@ -361,12 +364,6 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 		_ = transaction.Respond(res)
 		return
 	}
-	offer, err := parseSIPMediaOffer(request.Body(), g.cfg)
-	if err != nil {
-		g.appCtx.Logger().Warn("direct SIP offer rejected", "source", request.Source(), "err", err)
-		respond(sip.StatusNotAcceptableHere, "Unsupported Media")
-		return
-	}
 	route, calledNumber, err := g.findRouteForInvite(request)
 	if err != nil {
 		g.appCtx.Logger().Warn("direct SIP route lookup failed", "source", request.Source(), "err", err)
@@ -375,6 +372,16 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 	}
 	if route == nil {
 		respond(sip.StatusNotFound, "No Route")
+		return
+	}
+	settings, err := g.app.localMediaSettings(route.ProjectID, route.ID)
+	if err != nil {
+		respond(500, "Media Settings Unavailable")
+		return
+	}
+	offer, err := parseSIPMediaOfferCodecs(request.Body(), g.cfg, settings.Codecs)
+	if err != nil {
+		respond(488, "Unsupported Media")
 		return
 	}
 	if err := g.app.validatePublishedFlowForInboundRoute(route); err != nil {
@@ -389,9 +396,7 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 	}
 	caller := sipCallerNumber(request)
 	routeForCall := *route
-	// Direct SIP bypasses provider call control, so provider-cloud recording
-	// cannot be requested even when the project default is enabled.
-	routeForCall.RecordingMode = recordingModeOff
+	// Local recording preserves the same project/route policy on SIP.
 	call, created, err := g.app.recordInboundCall(&routeForCall, providerCallID, caller, calledNumber, inboundCallMetadata{
 		IngressPath: "sip_direct",
 	})
@@ -421,6 +426,7 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 		gateway: g, dialog: dialog, route: &routeForCall, call: call, offer: offer,
 		ctx: sessionCtx, cancel: cancel, inviteTx: transaction, initialACK: make(chan struct{}), remoteTarget: request.Contact().Address, timer: timer,
 	}
+	session.local.config = settings
 	session.remoteSeq.Store(request.CSeq().SeqNo)
 	dialog.OnState(func(state sip.DialogState) {
 		if state == sip.DialogStateEnded {
@@ -446,9 +452,9 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 	if err := g.app.deliverOutboxCall(projectCtx, call.ID); err != nil {
 		projectCtx.Logger().Warn("deliver direct SIP incoming call event", "call", call.ID, "err", err)
 	}
-	if routeForCall.RoutingTerminalType == "hangup" || routeForCall.RoutingTerminalType == "reject" {
-		if err := g.app.expireCall(projectCtx, call); err != nil {
-			projectCtx.Logger().Warn("finish direct SIP terminal route", "call", call.ID, "err", err)
+	if plan, err := g.app.resolveInboundRoutingPlan(&routeForCall, caller, nil); err == nil && plan != nil {
+		if err = g.app.executeSIPRoutingPlan(projectCtx, call, plan); err != nil {
+			session.finish("local_error", err)
 		}
 	} else {
 		g.app.enqueueImmediateAnswer(&routeForCall, call.ID)
@@ -519,6 +525,10 @@ func (g *sipGateway) Reject(row *callRow) error {
 }
 
 func (g *sipGateway) Hangup(row *callRow) error {
+	if !g.startWork() {
+		return errors.New("SIP gateway stopping")
+	}
+	defer g.work.Done()
 	session := g.sessionByCall(row.ID)
 	if session == nil {
 		return errors.New("direct SIP dialog is no longer active")
@@ -565,11 +575,21 @@ func (s *sipSession) answer() error {
 }
 
 func (s *sipSession) startMedia() error {
+	if err := s.stopLocalMedia(); err != nil {
+		return err
+	}
 	s.answerMu.Lock()
 	answered := s.media != nil && !s.ended.Load()
 	s.answerMu.Unlock()
 	if !answered {
 		return errors.New("direct SIP call has not been answered")
+	}
+	if s.initialACK != nil {
+		select {
+		case <-s.initialACK:
+		case <-s.ctx.Done():
+			return errAnswerCallEnded
+		}
 	}
 	var launchErr error
 	s.mediaOnce.Do(func() {
@@ -592,6 +612,10 @@ func (s *sipSession) finishWithSignaling(leg string, cause error) error {
 	s.answerMu.Unlock()
 	if refreshCancel != nil {
 		refreshCancel()
+	}
+	s.cancel()
+	if leg == "carrier" {
+		_ = s.stopLocalMedia()
 	}
 	var signalingErr error
 	if leg != "carrier" && s.dialog != nil {
