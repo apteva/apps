@@ -166,11 +166,30 @@ func TestLocalCloseTimeoutHasSeparateDiagnostics(t *testing.T) {
 	newGracefulWebSocket(server, p).Close(ws.StatusNormalClosure, "call completed")
 	<-p.done
 	s := p.audioSnapshot().Transport
-	if s.CleanupWriteErrors != 1 || s.CleanupWriteTimeouts != 1 || s.WriteErrors != 0 || s.WriteTimeouts != 0 || len(s.Events) != 1 || s.Events[0].Reason != "local_close_write_timeout" {
+	if s.CleanupWriteErrors != 1 || s.CleanupWriteTimeouts != 1 || s.WriteErrors != 0 || s.WriteTimeouts != 0 {
 		t.Fatalf("cleanup timeout classified as live error: %+v", s)
 	}
+	// Under scheduler pressure the independent bounded cleanup timer can also
+	// fire. That is legitimate cleanup evidence, not a live media failure.
+	timeouts, forced := 0, 0
+	for _, event := range s.Events {
+		if !event.LocalShutdown || event.Opcode != int(ws.OpClose) || event.At == "" {
+			t.Fatalf("cleanup event lost shutdown attribution: %+v", event)
+		}
+		switch event.Reason {
+		case "local_close_write_timeout":
+			timeouts++
+		case "forced_close":
+			forced++
+		default:
+			t.Fatalf("unexpected cleanup event: %+v", event)
+		}
+	}
+	if timeouts != 1 || forced > 1 || int64(forced) != s.ForcedCloses {
+		t.Fatalf("cleanup evidence missing or duplicated: %+v", s)
+	}
 	merged := mergeWebsocketTransport(s, s)
-	if merged.CleanupWriteErrors != 2 || merged.CleanupWriteTimeouts != 2 || len(merged.Events) != 2 {
+	if merged.CleanupWriteErrors != 2 || merged.CleanupWriteTimeouts != 2 || len(merged.Events) != 2*len(s.Events) || merged.ForcedCloses != 2*s.ForcedCloses {
 		t.Fatalf("cleanup evidence lost on merge: %+v", merged)
 	}
 }
