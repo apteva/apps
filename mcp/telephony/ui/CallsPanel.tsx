@@ -618,6 +618,15 @@ function LevelMeter({ label, value }: { label: string; value: number }) {
   );
 }
 
+function ListenerTransportSettings({transport,fec,stereo,onTransport,onFec,onStereo}:{transport:"inherit"|"websocket"|"webrtc"|"auto";fec:"inherit"|"enabled"|"disabled";stereo:boolean;onTransport:(v:"inherit"|"websocket"|"webrtc"|"auto")=>void;onFec:(v:"inherit"|"enabled"|"disabled")=>void;onStereo:(v:boolean)=>void}) {
+ return <div className="rounded border border-border/70 p-3 text-xs mb-2"><div className="font-medium">Listening and private coaching</div><div className="grid gap-2 mt-2">
+ <label>Audio transport <select value={transport} onChange={e=>onTransport(e.target.value as typeof transport)} className="border border-border bg-bg rounded p-2"><option value="inherit">Same as softphone (default)</option><option value="websocket">WebSocket / PCM</option><option value="webrtc">WebRTC / Opus</option><option value="auto">Automatic (WebRTC, then WebSocket)</option></select></label>
+ <label>WebRTC packet recovery <select value={fec} onChange={e=>onFec(e.target.value as typeof fec)} className="border border-border bg-bg rounded p-2"><option value="inherit">Same as softphone (default)</option><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></label>
+ <label className="flex items-center gap-2"><input type="checkbox" checked={stereo} onChange={e=>onStereo(e.target.checked)}/>Caller left, adviser right</label>
+ <p className="text-text-muted">Uses the softphone’s devices, volume and microphone processing. Changes apply when you next join listening or coaching. The microphone opens only while you hold to talk.</p>
+ </div></div>;
+}
+
 function AudioProcessingSettings({
   value,
   disabled,
@@ -1042,15 +1051,22 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     onDiagnostics: setDiagnostics,
     onNotice: setStatus,
   });
+  const [listenerTransport,setListenerTransport]=useState<"inherit"|"websocket"|"webrtc"|"auto">(()=>{try{const saved=localStorage.getItem("apteva.telephony.listener.transport.v1");return saved==="websocket"||saved==="webrtc"||saved==="auto"?saved:"inherit";}catch{return "inherit";}});
+  const [listenerFec,setListenerFec]=useState<"inherit"|"enabled"|"disabled">(()=>{try{const saved=localStorage.getItem("apteva.telephony.listener.fec.v1");return saved==="enabled"||saved==="disabled"?saved:"inherit";}catch{return "inherit";}});
+  const [listenerStereo,setListenerStereo]=useState(()=>{try{return localStorage.getItem("apteva.telephony.listener.stereo.v1")==="true";}catch{return false;}});
   const [callListener, setCallListener] = useState<HeadlessCallListener>();
   const [listenerState, setListenerState] = useState<ListenerSnapshot>({ state: "idle" });
   useEffect(() => {
-    const listener = telephony.createCallListener({inputDeviceId:audioOptions.inputDeviceId});
+    const listener = telephony.createCallListener();
     setCallListener(listener);
     setListenerState(listener.getSnapshot());
     const unsubscribe = listener.subscribe(setListenerState);
     return () => { unsubscribe(); void listener.dispose(); };
-  }, [telephony,audioOptions.inputDeviceId]);
+  }, [telephony]);
+  useEffect(()=>{
+    callListener?.setAudioOptions({...audioOptions,stereo:listenerStereo,...(listenerTransport==="inherit"?{}:{mediaTransport:listenerTransport}),...(listenerFec==="inherit"?{}:{webrtcFec:listenerFec==="enabled"})});
+    try{localStorage.setItem("apteva.telephony.listener.transport.v1",listenerTransport);localStorage.setItem("apteva.telephony.listener.fec.v1",listenerFec);localStorage.setItem("apteva.telephony.listener.stereo.v1",String(listenerStereo));}catch{/* Preferences are optional. */}
+  },[callListener,audioOptions,listenerTransport,listenerFec,listenerStereo]);
   useEffect(() => { if (!visible) callListener?.stopTalking(); },[visible,callListener]);
   useEffect(() => { callListener?.stopTalking(); },[selectedId,callListener]);
   const softphoneCallId = phoneState.callId ?? "";
@@ -1551,6 +1567,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                 status={softphoneCallId ? "" : "Calls from your browser using the bound carrier number."}
               />
               <div className="border-t border-border p-4 space-y-4">
+                <ListenerTransportSettings transport={listenerTransport} fec={listenerFec} stereo={listenerStereo} onTransport={setListenerTransport} onFec={setListenerFec} onStereo={setListenerStereo} />
                 <AudioProcessingSettings
                   value={audioOptions}
                   disabled={softphoneBusy || Boolean(softphoneCallId && hasAudio)}
@@ -1590,7 +1607,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                   </div>
                 ) : null}
                 {listenerState.callId ? (
-                  <div className="text-xs"><span>{listenerState.state.replaceAll("_", " ")}</span><button type="button" onClick={() => void callListener?.stop()} className="ml-2 h-8 px-3 rounded border border-border">Stop listening</button><label className="ml-2">Volume <input aria-label="Listener volume" type="range" min="0" max="1" step="0.05" defaultValue="1" onChange={e => callListener?.setOutputVolume(Number(e.target.value))} /></label></div>
+                  <div className="text-xs"><span>{listenerState.state.replaceAll("_", " ")}{listenerState.mediaTransport ? ` · ${listenerState.mediaTransport === "webrtc" ? "WebRTC / Opus" : "WebSocket / PCM"}` : ""}</span><button type="button" onClick={() => void callListener?.stop()} className="ml-2 h-8 px-3 rounded border border-border">Stop listening</button><label className="ml-2">Volume <input aria-label="Listener volume" type="range" min="0" max="1" step="0.05" defaultValue={audioOptions.outputVolume ?? 1} onChange={e => callListener?.setOutputVolume(Number(e.target.value))} /></label></div>
                 ) : null}
                 {selected.peerKind === "human"
                   && !selected.routingWaiting
@@ -1679,7 +1696,8 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                 </div>
               ) : null}
 
-              <AudioProcessingSettings
+              <ListenerTransportSettings transport={listenerTransport} fec={listenerFec} stereo={listenerStereo} onTransport={setListenerTransport} onFec={setListenerFec} onStereo={setListenerStereo} />
+                <AudioProcessingSettings
                 value={audioOptions}
                 disabled={softphoneBusy || Boolean(softphoneCallId && hasAudio)}
                 onChange={setAudioOptions}

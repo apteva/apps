@@ -19,8 +19,13 @@ import (
 	"sync/atomic"
 )
 
-func listenerFixture(t *testing.T) (*App, callRow, *callAudioTap, phonePolicy) {
-	softphoneTestCtx(t)
+func listenerFixture(t *testing.T, rtc ...bool) (*App, callRow, *callAudioTap, phonePolicy) {
+	t.Helper()
+	if len(rtc) > 0 && rtc[0] {
+		rtcTestCtx(t)
+	} else {
+		softphoneTestCtx(t)
+	}
 	app := &App{installID: 42}
 	policy := phoneTestPolicy(t, app)
 	policy.Users[3].Listen = true

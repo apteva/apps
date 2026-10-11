@@ -1,6 +1,8 @@
 import { type MediaAttachmentDiagnostics, safeMediaDiagnosticID, leaseClock } from "./media-lease";
 import { defineAppExtension, type AppHandle } from "@apteva/web-sdk";
 import { createMicrophonePreview, listMicrophones } from "./audio";
+import { listenerAudioOptions } from "./listener-audio";
+import type { SoftphoneAudioOptions } from "../../ui/softphone-audio";
 import { HeadlessCallListener, type CallListenerOptions } from "./listener";
 import { HeadlessSoftphone, type SoftphoneOptions } from "./softphone";
 
@@ -138,6 +140,8 @@ function callID(id: string): string {
 }
 
 export interface TelephonyClientOptions {
+  /** Shared defaults for new softphones, listeners and coaching sessions. */
+  audio?: Partial<SoftphoneAudioOptions>;
   /** Online provider configured by the installation administrator. */
   authProvider?: string;
 }
@@ -293,7 +297,7 @@ export class TelephonyClient {
     return this.session(await this.app.post(this.path(`/softphone/takeover/${callID(id)}`), diagnostics ? {media_diagnostics:diagnostics} : {}), id, "media", started);
   }
 
-  createCallListener(options: CallListenerOptions = {}): HeadlessCallListener { return new HeadlessCallListener(this, options); }
+  createCallListener(options: CallListenerOptions = {}): HeadlessCallListener { return new HeadlessCallListener(this, {...options,...listenerAudioOptions({...this.options.audio,...options.audio},options)}); }
 
   async listenSession(id: string): Promise<CallSession> { const started = leaseClock(); return this.session(await this.app.post(this.path(`/softphone/listen/${callID(id)}`), {}), id, "listen-media", started); }
   async coachSession(id: string): Promise<CallSession> { const started = leaseClock(); const s=this.session(await this.app.post(this.path(`/softphone/coach/${callID(id)}`), {}),id,"listen-media",started); if(s.coaching!==true) throw new Error("Invalid coaching session");return s; }
@@ -341,7 +345,7 @@ export class TelephonyClient {
   }
 
   createSoftphone(options: SoftphoneOptions = {}): HeadlessSoftphone {
-    return new HeadlessSoftphone(this, options);
+    return new HeadlessSoftphone(this, {...options,audio:{...this.options.audio,...options.audio}});
   }
 
   /** Resolve only the selected installation's media path on the SDK gateway. */
