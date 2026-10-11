@@ -228,7 +228,7 @@ func TestVoiceCallValidityRejectsUnrecognizedCallerTurn(t *testing.T) {
 	if validity.Status != "invalid" {
 		t.Fatalf("validity=%#v", validity)
 	}
-	if joined := strings.Join(validity.Reasons, "\n"); !strings.Contains(joined, "generated but not recognized") {
+	if joined := strings.Join(validity.Reasons, "\n"); !strings.Contains(joined, "no matching target transcript; audio loss is not proven") {
 		t.Fatalf("missing caller turn diagnostic in %q", joined)
 	}
 }
@@ -477,7 +477,7 @@ func TestVoiceBridgeEndReasonUsesEndpointAndCompletionEvidence(t *testing.T) {
 				Endpoint: voiceBridgeCaller, Operation: "read",
 				CloseCode: websocket.CloseNormalClosure,
 			},
-			want: "caller_done",
+			want: "caller_closed",
 		},
 		{
 			name: "caller abnormal close before completion",
@@ -495,15 +495,15 @@ func TestVoiceBridgeEndReasonUsesEndpointAndCompletionEvidence(t *testing.T) {
 				Endpoint: voiceBridgeCarrier, Operation: "read",
 				CloseCode: websocket.CloseNormalClosure,
 			},
-			want: "caller_done",
+			want: "carrier_closed",
 		},
 		{
-			name: "structured caller completion wins over abnormal socket close",
+			name: "structured caller completion requests finishing after socket close",
 			exit: voiceBridgeExit{
 				Endpoint: voiceBridgeCaller, Operation: "read", Err: abnormal,
 				TerminalReason: sdk.RealtimeTerminalCallerDone,
 			},
-			want: "caller_done",
+			want: "caller_closed",
 		},
 	}
 	for _, test := range tests {
@@ -721,8 +721,8 @@ func TestVoiceMetricsPersistsPendingTurnCounters(t *testing.T) {
 	if metrics.CallerSourceTurns != 2 || metrics.ReceptionistReceivedTurns != 1 || metrics.PendingCallerTurns != 1 {
 		t.Fatalf("caller delivery metrics=%#v", metrics)
 	}
-	if !metrics.CallerResponseUndelivered {
-		t.Fatalf("undelivered caller response was not exposed: %#v", metrics)
+	if metrics.CallerResponseUndelivered {
+		t.Fatalf("transcript mismatch was incorrectly reported as audio delivery failure: %#v", metrics)
 	}
 	if metrics.ReceptionistSourceTurns != 1 || metrics.CallerReceivedTurns != 1 || metrics.PendingReceptionistTurns != 0 {
 		t.Fatalf("receptionist delivery metrics=%#v", metrics)
