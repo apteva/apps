@@ -61,7 +61,7 @@ func stubSIPVerification(t *testing.T, provider string, fail *bool) {
 func outboundSIPFixture(t *testing.T, provider string) (*App, *sdk.AppCtx, *answerPlatform, outboundSIPConfig) {
 	t.Helper()
 	t.Setenv("APTEVA_DATA_DIR", t.TempDir())
-	p := &answerPlatform{bindings: map[string]any{"carrier": int64(10)}, credentials: &sdk.ConnectionCredentials{Slug: provider, Fields: map[string]string{"phone_number": "+33123456780", "api_key": "api-secret", "account_sid": "ACtest", "auth_token": "api-secret"}}}
+	p := &answerPlatform{bindings: map[string]any{"carrier": int64(10)}, credentials: &sdk.ConnectionCredentials{Slug: provider, Fields: map[string]string{"phone_number": "+33123456780", "token": "api-secret", "account_sid": "ACtest", "auth_token": "api-secret"}}}
 	a, ctx := withTelephonyTestContext(t, p)
 	cfg := outboundSIPConfig{Host: "sip.telnyx.com", ResourceID: "sip-1", AuthMode: "digest", MediaEncryption: "srtp_sdes"}
 	if provider == "twilio" {
