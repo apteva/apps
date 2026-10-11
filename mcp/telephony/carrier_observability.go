@@ -311,13 +311,18 @@ func (c *carrierTelemetryCollector) unregisterBridge(b *carrierBridgeLease) {
 
 type carrierArrivalTiming struct{ last, frames, maxGap, decodeErrors atomic.Int64 }
 type carrierLiveSnapshot struct {
-	At             string  `json:"at"`
-	State          string  `json:"state"`
-	LastMediaAt    string  `json:"last_media_arrival_at,omitempty"`
-	LastMediaAgeMS float64 `json:"last_media_age_ms"`
-	MaxGapMS       float64 `json:"max_gap_across_generations_ms"`
-	Frames         int64   `json:"media_frames"`
-	DecodeErrors   int64   `json:"decode_errors"`
+	At                    string  `json:"at"`
+	SocketState           string  `json:"socket_state"`
+	ReceiveExpectation    string  `json:"receive_expectation"`
+	RecoveryActive        bool    `json:"recovery_active"`
+	SourceClockConfidence string  `json:"source_clock_confidence,omitempty"`
+	MaxBatchMS            float64 `json:"max_delivery_batch_ms"`
+	State                 string  `json:"state"`
+	LastMediaAt           string  `json:"last_media_arrival_at,omitempty"`
+	LastMediaAgeMS        float64 `json:"last_media_age_ms"`
+	MaxGapMS              float64 `json:"max_gap_across_generations_ms"`
+	Frames                int64   `json:"media_frames"`
+	DecodeErrors          int64   `json:"decode_errors"`
 }
 
 func (b *carrierBridgeLease) sample(now time.Time) carrierTelemetryRecord {
@@ -326,15 +331,38 @@ func (b *carrierBridgeLease) sample(now time.Time) carrierTelemetryRecord {
 		v.LastMediaAt = ringTime(time.Unix(0, n))
 		v.LastMediaAgeMS = max(0, float64(now.UnixNano()-n)/1e6)
 	}
+	v.SocketState = "connected"
+	v.ReceiveExpectation = "discontinuous_or_unobserved"
 	if b.flowing.Load() {
 		v.State = "healthy"
 	}
+	if b.continuousInput.Load() {
+		v.ReceiveExpectation = "continuous"
+		if b.expectsContinuousMedia() {
+			if v.LastMediaAt != "" && v.LastMediaAgeMS >= carrierDeliveryStallMS {
+				v.State = "audio_degraded"
+			}
+		} else {
+			v.ReceiveExpectation = "paused_or_unavailable"
+			v.State = "inactive"
+		}
+	}
+	if reception := b.reception.Load(); reception != nil && reception.mu.TryLock() {
+		v.SourceClockConfidence = reception.s.SourceClockConfidence
+		v.MaxBatchMS = reception.s.MaxBatchMS
+		reception.mu.Unlock()
+	}
 	if b.ctx.Err() != nil {
 		v.State = "disconnected"
+		v.SocketState = "disconnected"
 	}
 	rec := carrierTelemetryRecord{InstallID: b.app.installID, ProjectID: b.row.ProjectID, CallID: b.row.ID, Kind: "sample", At: ringTime(now), BridgeGeneration: b.generation, ProxyConnectionID: b.proxyID, Carrier: &v}
 	if b.mu.TryLock() {
 		rec.StreamID = b.stream
+		rec.Carrier.RecoveryActive = b.deadline != "" && !b.replaced.Load()
+		if rec.Carrier.RecoveryActive {
+			rec.Carrier.State = "recovering"
+		}
 		rec.RecoveryEpisodeID = b.episodeID
 		b.mu.Unlock()
 	}

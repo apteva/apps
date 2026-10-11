@@ -40,6 +40,16 @@ func addCarrierAudioSummary(s *audioDashboardSummary, r *carrierTelemetryRecord)
 		m["carrier_max_gap_ms"] = max(m["carrier_max_gap_ms"], v.MaxGapMS)
 		m["carrier_last_media_age_ms"] = v.LastMediaAgeMS
 		m["carrier_decode_errors"] = float64(v.DecodeErrors)
+		m["carrier_max_delivery_batch_ms"] = v.MaxBatchMS
+		if v.State == "audio_degraded" {
+			carrier.Reason = "reception_stalled"
+		}
+		if v.RecoveryActive {
+			carrier.State = "audio_degraded"
+			carrier.Reason = "media_recovering"
+		}
+		add("carrier_stall", "carrier_to_telephony", v.State == "audio_degraded")
+		add("carrier_recovery", "carrier_to_telephony", v.RecoveryActive)
 		add("carrier_error", "carrier_to_telephony", v.DecodeErrors > 0)
 	}
 	if v := r.SIP; v != nil {

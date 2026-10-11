@@ -394,7 +394,7 @@ func TestCarrierRecoveryEstablishedFramesDoNotWaitForReporting(t *testing.T) {
 }
 
 func BenchmarkCarrierRecoveryEstablishedFrame(b *testing.B) {
-	bridge := &carrierBridgeLease{ctx: context.Background()}
+	bridge := &carrierBridgeLease{ctx: context.Background(), arrival: &carrierArrivalTiming{}}
 	bridge.flowing.Store(true)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {

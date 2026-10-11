@@ -27,24 +27,26 @@ type carrierSource struct {
 }
 
 type carrierReceptionSnapshot struct {
-	GapsOverBudget     int64                  `json:"gaps_over_budget"`
-	Stream             string                 `json:"stream,omitempty"`
-	Epoch              uint32                 `json:"epoch"`
-	Frames             int64                  `json:"frames"`
-	ReceivedMS         float64                `json:"received_ms"`
-	LastReceiptMS      float64                `json:"last_receipt_ms"`
-	SourceTimestampMS  float64                `json:"source_timestamp_ms"`
-	SourceSequence     uint64                 `json:"source_sequence"`
-	MaxGapMS           float64                `json:"max_gap_ms"`
-	MaxExcessAgeMS     float64                `json:"max_excess_age_ms"`
-	StaleDroppedMS     float64                `json:"stale_dropped_ms"`
-	DuplicateDroppedMS float64                `json:"duplicate_dropped_ms"`
-	MaxBatchMS         float64                `json:"max_batch_ms"`
-	Stalls             int64                  `json:"stalls"`
-	Recoveries         int64                  `json:"recoveries"`
-	Stalled            bool                   `json:"stalled"`
-	ContinuousExpected bool                   `json:"continuous_expected"`
-	Events             []carrierDeliveryEvent `json:"events,omitempty"`
+	GapsOverBudget        int64                  `json:"gaps_over_budget"`
+	Stream                string                 `json:"stream,omitempty"`
+	Epoch                 uint32                 `json:"epoch"`
+	Frames                int64                  `json:"frames"`
+	ReceivedMS            float64                `json:"received_ms"`
+	LastReceiptMS         float64                `json:"last_receipt_ms"`
+	SourceTimestampMS     float64                `json:"source_timestamp_ms"`
+	SourceSequence        uint64                 `json:"source_sequence"`
+	MaxGapMS              float64                `json:"max_gap_ms"`
+	MaxExcessAgeMS        float64                `json:"max_excess_age_ms"`
+	StaleDroppedMS        float64                `json:"stale_dropped_ms"`
+	DuplicateDroppedMS    float64                `json:"duplicate_dropped_ms"`
+	MaxBatchMS            float64                `json:"max_batch_ms"`
+	Stalls                int64                  `json:"stalls"`
+	Recoveries            int64                  `json:"recoveries"`
+	Stalled               bool                   `json:"stalled"`
+	SourceClockConfidence string                 `json:"source_clock_confidence"`
+	UncalibratedBursts    int64                  `json:"uncalibrated_bursts"`
+	ContinuousExpected    bool                   `json:"continuous_expected"`
+	Events                []carrierDeliveryEvent `json:"events,omitempty"`
 }
 
 type carrierDeliveryEvent struct {
@@ -58,14 +60,16 @@ type carrierDeliveryEvent struct {
 }
 
 type carrierReception struct {
-	mu            sync.Mutex
-	s             carrierReceptionSnapshot
-	set           bool
-	base          float64
-	lastTimestamp float64
-	lastSequence  uint64
-	batchMS       float64
-	paused        bool
+	mu             sync.Mutex
+	s              carrierReceptionSnapshot
+	set            bool
+	base           float64
+	lastTimestamp  float64
+	lastSequence   uint64
+	batchMS        float64
+	paused         bool
+	epochReceiptMS float64
+	burstReported  bool
 }
 
 func (r *carrierReception) event(reason string, now, gap, age float64, src carrierSource) {
@@ -112,6 +116,9 @@ func (r *carrierReception) begin(continuous bool) {
 	r.set = false
 	r.lastSequence = 0
 	r.batchMS = 0
+	r.epochReceiptMS = 0
+	r.burstReported = false
+	r.s.SourceClockConfidence = "uncalibrated"
 }
 
 // observe counts valid media including zero-valued PCM. It never uses speech
@@ -124,6 +131,9 @@ func (r *carrierReception) observe(src carrierSource, duration, now float64) (ma
 		r.s.Epoch++
 		r.set = false
 		r.lastSequence = 0
+		r.epochReceiptMS = 0
+		r.burstReported = false
+		r.s.SourceClockConfidence = "uncalibrated"
 	}
 	gap := 0.0
 	if r.s.LastReceiptMS > 0 {
@@ -150,6 +160,22 @@ func (r *carrierReception) observe(src carrierSource, duration, now float64) (ma
 		r.batchMS = duration
 	}
 	r.s.MaxBatchMS = max(r.s.MaxBatchMS, r.batchMS)
+	if r.epochReceiptMS == 0 {
+		r.epochReceiptMS = now
+	}
+	// A new stream supplies relative time, not the original UTC capture time.
+	// Never inherit the previous stream's baseline or pretend a first batch is
+	// proven fresh. Existing downstream queues keep the newest bounded PCM.
+	if !src.Timed {
+		r.s.SourceClockConfidence = "receipt_only"
+	} else if now-r.epochReceiptMS >= liveSourceBudgetMS {
+		r.s.SourceClockConfidence = "relative_baseline"
+	}
+	if src.Timed && r.s.SourceClockConfidence == "uncalibrated" && r.batchMS > liveSourceBudgetMS && !r.burstReported {
+		r.burstReported = true
+		r.s.UncalibratedBursts++
+		r.event("uncalibrated_delivery_burst", now, gap, 0, src)
+	}
 	mapped = now
 	if src.Timed {
 		if r.set && src.Sequence > 0 && src.Sequence <= r.lastSequence {
@@ -162,6 +188,9 @@ func (r *carrierReception) observe(src carrierSource, duration, now float64) (ma
 		if r.set && src.TimestampMS < r.lastTimestamp {
 			r.set = false
 			r.s.Epoch++
+			r.epochReceiptMS = now
+			r.s.SourceClockConfidence = "uncalibrated"
+			r.burstReported = false
 		}
 		offset := now - src.TimestampMS
 		if !r.set {

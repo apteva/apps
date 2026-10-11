@@ -32,10 +32,10 @@ type jsonMediaBridgeConfig struct {
 }
 
 type carrierMediaFrame struct {
-	Event     string `json:"event"`
-	EventType string `json:"eventType,omitempty"`
-	Track     string `json:"track,omitempty"`
-	Payload   string `json:"payload,omitempty"`
+	Event     string          `json:"event"`
+	EventType string          `json:"eventType,omitempty"`
+	Track     string          `json:"track,omitempty"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
 	Metadata  *struct {
 		CallID   string `json:"callId"`
 		StreamID string `json:"streamId"`
@@ -133,7 +133,10 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		http.Error(w, "no audio bridge for this call", http.StatusGone)
 		return
 	}
-	bridge, err := a.claimCarrierBridge(row, r.Context(), proxyID)
+	bridge, carrier, carrierReadConn, err := a.claimJSONCarrierStream(w, r, row, cfg, proxyID)
+	if carrier != nil && bridge == nil {
+		return
+	} // Candidate was upgraded and rejected safely.
 	claimed := bridge != nil
 	if err != nil && !errors.Is(err, errCarrierBridgeBusy) {
 		a.recordCarrierHandshakeRejection(row, proxyID, 500, "claim_database_error")
@@ -153,7 +156,9 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		return
 	}
 
-	carrier, carrierReadConn, err := upgradeBuffered(w, r)
+	if carrier == nil {
+		carrier, carrierReadConn, err = upgradeBuffered(w, r)
+	}
 	if err != nil {
 		bridge.fail(carrierBridgeEvidence{Kind: "bridge_setup_error", Leg: string(mediaCloseLegCarrier), Detail: transportEvidenceError(err)})
 		globalCtx.Logger().Warn("carrier ws upgrade", "provider", cfg.Provider, "err", err, "call", callID)
@@ -162,6 +167,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 	if !bridge.bind(carrier) {
 		return
 	}
+	bridge.continuousInput.Store(cfg.ContinuousInput)
 	closeState := bridge.closeState
 	carrierWriter := newWebSocketWriterPump(carrier, ws.StateServerSide)
 	bridge.watch(carrierWriter)
@@ -232,10 +238,14 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		humanHub = a.softphones.hubFor(callID)
 		humanHub.setCarrierForward(coreWriter)
 		humanHub.reception.begin(cfg.ContinuousInput)
+		bridge.reception.Store(&humanHub.reception)
 		defer humanHub.finishCarrierForward(coreWriter)
 	}
 
+	readerDone := make(chan struct{})
+	defer func() { cancel(); <-readerDone }()
 	go func() {
+		defer close(readerDone)
 		defer cancel()
 		bandwidthStarted := false
 		for {
@@ -263,7 +273,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			}
 			var f carrierMediaFrame
 			if err := json.Unmarshal(data, &f); err != nil {
-				bridge.arrival.decodeErrors.Add(1)
+				bridge.recordDecodeError(err)
 				continue
 			}
 			if humanHub != nil {
@@ -272,14 +282,15 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			if cfg.Provider == "bandwidth" {
 				f.Event = f.EventType
 				if f.Event == "media" {
-					if f.Track != "inbound" || f.Payload == "" {
+					var payload string
+					if f.Track != "inbound" || json.Unmarshal(f.Payload, &payload) != nil || payload == "" {
 						continue
 					}
 					f.Media = &struct {
 						Payload   string `json:"payload"`
 						Timestamp any    `json:"timestamp,omitempty"`
 						Chunk     any    `json:"chunk,omitempty"`
-					}{Payload: f.Payload}
+					}{Payload: payload}
 				}
 			}
 			if sequence, ok := frameSequenceNumber(f); ok {
@@ -332,6 +343,9 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 				}
 				if len(pcm) == 0 {
 					continue
+				}
+				if ctx.Err() != nil {
+					return
 				}
 				bridge.media()
 				src := carrierSource{}
@@ -403,12 +417,8 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 				closeState.SetLeg(mediaCloseLegCarrier, ws.StatusNormalClosure, cfg.Provider+" call media ended normally")
 				return
 			case "error":
-				detail := cfg.Provider + " reported a media stream error"
-				if encoded, err := json.Marshal(f.Error); err == nil && string(encoded) != "null" {
-					detail += ": " + string(encoded)
-				}
-				bridge.recordLocalCancellation("provider_stream_error", mediaCloseLegCarrier, 1011, detail, "")
-				closeState.SetLeg(mediaCloseLegCarrier, ws.StatusInternalServerError, detail)
+				e := carrierFrameError(cfg.Provider, f)
+				bridge.fail(e)
 				return
 			}
 		}
