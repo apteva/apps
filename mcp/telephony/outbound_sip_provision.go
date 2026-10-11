@@ -522,7 +522,7 @@ func (a *App) provisionOutboundSIP(request context.Context, ctx *sdk.AppCtx, cre
 			}
 			if s.ResourceID == "" {
 				codecs, _ := telnyxProvisioningCodecs([]string{"G722", "PCMU", "PCMA"})
-				result, err := create("connection", "", "/credential_connections", map[string]any{"connection_name": s.Name, "user_name": secret.Username, "password": secret.Password, "active": true, "transport_protocol": "TLS", "dtmf_type": "RFC 2833", "inbound": map[string]any{"codecs": codecs}, "outbound": map[string]any{"outbound_voice_profile_id": s.ProfileID}, "noise_suppression": "disabled", "jitter_buffer": map[string]any{"enable_jitter_buffer": false}})
+				result, err := create("connection", "", "/credential_connections", map[string]any{"connection_name": s.Name, "user_name": secret.Username, "password": secret.Password, "active": true, "dtmf_type": "RFC 2833", "inbound": map[string]any{"codecs": codecs}, "outbound": map[string]any{"outbound_voice_profile_id": s.ProfileID}, "noise_suppression": "disabled", "jitter_buffer": map[string]any{"enable_jitter_buffer": false}})
 				if err != nil {
 					return empty, nil, err
 				}
@@ -542,7 +542,10 @@ func (a *App) provisionOutboundSIP(request context.Context, ctx *sdk.AppCtx, cre
 		}
 		m := telnyxDataMap(result)
 		outbound, _ := m["outbound"].(map[string]any)
-		if stringValue(m["connection_name"]) != s.Name || stringValue(m["user_name"]) != secret.Username || !strings.EqualFold(stringValue(m["transport_protocol"]), "TLS") || stringValue(outbound["outbound_voice_profile_id"]) != s.ProfileID {
+		// Credential connections do not expose transport_protocol. Outbound TLS
+		// is enforced by our SIP client (transport=tls, port 5061), independently
+		// of inbound transport settings. Verify the documented identity/profile.
+		if stringValue(m["connection_name"]) != s.Name || stringValue(m["user_name"]) != secret.Username || stringValue(outbound["outbound_voice_profile_id"]) != s.ProfileID {
 			return empty, nil, errors.New("managed Telnyx SIP connection settings changed; resolve them before enabling SIP")
 		}
 		if e = verifyOutboundSIPProvider(request, creds, cfg); e != nil {

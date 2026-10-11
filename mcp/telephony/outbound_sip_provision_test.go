@@ -83,8 +83,11 @@ func (s *sipSetupProvider) roundTrip(t *testing.T, r *http.Request) (*http.Respo
 			if e := json.NewDecoder(r.Body).Decode(&m); e != nil {
 				t.Fatal(e)
 			}
-			if m["user_name"] == "" || m["password"] == "" || m["transport_protocol"] != "TLS" {
-				t.Error("missing secure connection setup")
+			if m["user_name"] == "" || m["password"] == "" {
+				t.Error("missing connection credentials")
+			}
+			if _, ok := m["transport_protocol"]; ok {
+				t.Error("credential-connection API does not define transport_protocol; outbound TLS is selected by the SIP client")
 			}
 			if _, ok := m["encrypted_media"]; ok {
 				t.Error("incompatible TLS encrypted_media provisioning field")
@@ -95,6 +98,9 @@ func (s *sipSetupProvider) roundTrip(t *testing.T, r *http.Request) (*http.Respo
 				t.Errorf("wrong carrier codec names: %s", codecs)
 			}
 			m["id"] = "sip-managed"
+			// Telnyx's credential-connection response does not echo a transport
+			// field. Do not model it as a copy of every submitted request field.
+			delete(m, "transport_protocol")
 			s.connections = append(s.connections, m)
 			response["data"] = m
 		case "/Trunks":
@@ -260,6 +266,86 @@ func TestOutboundSIPTelnyxMissingCredentials(t *testing.T) {
 	v, _, _, err := a.outboundTransport("project-a", 10, "")
 	if err != nil || v.Transport != inboundTransportProgrammable {
 		t.Fatal("failed setup changed outbound transport")
+	}
+}
+
+func TestAutomaticOutboundSIPTelnyxOmittedTransportResumes(t *testing.T) {
+	a, ctx, p, _ := outboundSIPFixture(t, "telnyx")
+	outboundSetupGatewayFixture(t)
+	s := newSIPSetupProvider(t, "telnyx")
+	// The carrier created the connection and the journal saved it, but final
+	// verification failed. Retrying must reuse that exact resource.
+	s.failPath = "/credential_connections/sip-managed"
+	if _, err := a.configureOutboundTransport(ctx, automaticOutboundArgs()); err == nil {
+		t.Fatal("failed verification enabled outbound SIP")
+	}
+	var saved outboundSIPSetup
+	var raw string
+	if err := a.db().db.QueryRow(`SELECT state_json FROM outbound_sip_setup WHERE project_id='project-a' AND connection_id=10`).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(raw), &saved); err != nil || saved.ResourceID != "sip-managed" {
+		t.Fatal("created connection was not retained for retry")
+	}
+	if _, present := s.connections[0]["transport_protocol"]; present {
+		t.Fatal("fixture must match Telnyx's documented response")
+	}
+	s.failPath = ""
+	if _, err := a.configureOutboundTransport(ctx, automaticOutboundArgs()); err != nil {
+		t.Fatal(err)
+	}
+	resolved, selected, err := a.resolveOutboundSIPCredentials(ctx, "project-a", ctx.IntegrationFor("carrier"), p.credentials, "+33123456780")
+	if err != nil || !selected {
+		t.Fatalf("SIP admission failed after resumed setup: %v", err)
+	}
+	settings, err := genericOutboundSIPSettings("telnyx", resolved.Fields)
+	if err != nil || settings.host != "sip.telnyx.com" || settings.port != 5061 || !settings.secure {
+		t.Fatalf("resumed setup lost outbound TLS/SRTP settings: %v", err)
+	}
+	if s.writes["/credential_connections"] != 1 || len(s.connections) != 1 {
+		t.Fatal("resuming verification created another carrier connection")
+	}
+}
+
+func TestAutomaticOutboundSIPTelnyxConnectionVerification(t *testing.T) {
+	for _, mismatch := range []string{"connection_name", "user_name", "profile", "inactive", "disabled_profile", "missing_connection_name", "missing_user_name", "missing_outbound"} {
+		t.Run(mismatch, func(t *testing.T) {
+			a, ctx, _, _ := outboundSIPFixture(t, "telnyx")
+			outboundSetupGatewayFixture(t)
+			s := newSIPSetupProvider(t, "telnyx")
+			s.failPath = "/credential_connections/sip-managed"
+			if _, err := a.configureOutboundTransport(ctx, automaticOutboundArgs()); err == nil {
+				t.Fatal("failed carrier lookup enabled SIP")
+			}
+			s.failPath = ""
+			m := s.connections[0]
+			switch mismatch {
+			case "connection_name", "user_name":
+				m[mismatch] = "different"
+			case "profile":
+				m["outbound"] = map[string]any{"outbound_voice_profile_id": "different-profile"}
+			case "inactive":
+				m["active"] = false
+			case "disabled_profile":
+				s.profiles[0]["enabled"] = false
+			case "missing_connection_name":
+				delete(m, "connection_name")
+			case "missing_user_name":
+				delete(m, "user_name")
+			case "missing_outbound":
+				delete(m, "outbound")
+			}
+			if _, err := a.configureOutboundTransport(ctx, automaticOutboundArgs()); err == nil {
+				t.Fatal("mismatched or inactive carrier resource enabled SIP")
+			}
+			view, _, _, err := a.outboundTransport("project-a", 10, "")
+			if err != nil || view.Transport != inboundTransportProgrammable {
+				t.Fatal("failed verification changed the active outbound selection")
+			}
+			if s.writes["/credential_connections"] != 1 {
+				t.Fatal("failed verification recreated the connection")
+			}
+		})
 	}
 }
 
