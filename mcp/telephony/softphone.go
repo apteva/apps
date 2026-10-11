@@ -929,7 +929,11 @@ func (c hijackedConn) Read(p []byte) (int, error) { return c.reader.Read(p) }
 // upgradeBuffered performs the WebSocket upgrade and returns a connection whose
 // reads start from the buffered data rather than from the socket.
 func upgradeBuffered(w http.ResponseWriter, r *http.Request) (net.Conn, net.Conn, error) {
-	conn, brw, _, err := ws.UpgradeHTTP(r, w)
+	upgrader := ws.DefaultHTTPUpgrader
+	if id := boundedTransportID(w.Header().Get("X-Apteva-Call-ID")); id != "" {
+		upgrader.Header = http.Header{"X-Apteva-Call-ID": []string{id}}
+	}
+	conn, brw, _, err := upgrader.Upgrade(r, w)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -48,14 +48,15 @@ type sipGateway struct {
 }
 
 type sipSession struct {
-	gateway *sipGateway
-	dialog  *sipgo.DialogServerSession
-	route   *routeRow
-	call    *callRow
-	offer   sipMediaOffer
-	media   *sipRTPMedia
-	ctx     context.Context
-	cancel  context.CancelFunc
+	diagnostics *sipLiveDiagnostics
+	gateway     *sipGateway
+	dialog      *sipgo.DialogServerSession
+	route       *routeRow
+	call        *callRow
+	offer       sipMediaOffer
+	media       *sipRTPMedia
+	ctx         context.Context
+	cancel      context.CancelFunc
 
 	local         sipLocalRuntime
 	recorder      atomic.Pointer[localCallRecorder]
@@ -243,6 +244,14 @@ func (g *sipGateway) Stop() {
 	g.stopping = true
 	g.stopDeadline = time.Now().Add(5 * time.Second)
 	g.mu.Unlock()
+	g.mu.RLock()
+	for _, session := range g.byCall {
+		session.diagnostics.event("sip_shutdown", "local", "application_shutdown", 0)
+	}
+	for _, session := range g.outboundByCall {
+		session.diagnostics.event("sip_shutdown", "local", "application_shutdown", 0)
+	}
+	g.mu.RUnlock()
 	g.cancel()
 	g.mu.RLock()
 	sessions := make([]*sipSession, 0, len(g.byCall))
@@ -296,6 +305,7 @@ func (g *sipGateway) registerHandlers() {
 				_ = transaction.Respond(sip.NewResponseFromRequest(request, sip.StatusCallTransactionDoesNotExists, "Call Does Not Exist", nil))
 				return
 			}
+			outbound.diagnostics.event("sip_bye_received", "carrier", safeSIPReason(request), 0)
 			outbound.finish("carrier", nil)
 			return
 		}
@@ -309,6 +319,7 @@ func (g *sipGateway) registerHandlers() {
 			return
 		}
 		if session := g.sessionByProviderCall(providerCallID); session != nil {
+			session.diagnostics.event("sip_bye_received", "carrier", safeSIPReason(request), 0)
 			session.finish("carrier", nil)
 		}
 	}))
@@ -426,9 +437,15 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 		gateway: g, dialog: dialog, route: &routeForCall, call: call, offer: offer,
 		ctx: sessionCtx, cancel: cancel, inviteTx: transaction, initialACK: make(chan struct{}), remoteTarget: request.Contact().Address, timer: timer,
 	}
+	session.diagnostics = g.app.newSIPDiagnostics(call, dialog.ID)
 	session.local.config = settings
 	session.remoteSeq.Store(request.CSeq().SeqNo)
 	dialog.OnState(func(state sip.DialogState) {
+		session.diagnostics.mu.Lock()
+		if !session.diagnostics.ended.Load() {
+			session.diagnostics.signal.State = state.String()
+		}
+		session.diagnostics.mu.Unlock()
 		if state == sip.DialogStateEnded {
 			g.runTask(func() { session.finish("carrier", nil) })
 		}
@@ -558,15 +575,18 @@ func (s *sipSession) answer() error {
 		return err
 	}
 	s.media = media
+	s.diagnostics.attach(media, s.dialog.ID)
 	s.localSDP = answer
 	s.answerMu.Unlock()
 	// Dialog state callbacks may synchronously finish the session.
 	response := sip.NewSDPResponseFromRequest(s.dialog.InviteRequest, answer)
 	addSIPTimerHeaders(response, s.timer)
+	s.diagnostics.event("sip_answer_attempt", "signaling", "", 200)
 	if err := s.dialog.WriteResponse(response); err != nil {
 		s.finish("local_error", err)
 		return err
 	}
+	s.diagnostics.event("sip_answer", "signaling", "", 200)
 	s.answerMu.Lock()
 	s.timerUpdated = time.Now()
 	s.answerMu.Unlock()
@@ -607,6 +627,7 @@ func (s *sipSession) finishWithSignaling(leg string, cause error) error {
 	if !s.ended.CompareAndSwap(false, true) {
 		return nil
 	}
+	s.diagnostics.end(leg, cause)
 	s.answerMu.Lock()
 	refreshCancel := s.refreshCancel
 	s.answerMu.Unlock()
@@ -632,7 +653,13 @@ func (s *sipSession) finishWithSignaling(leg string, cause error) error {
 			s.answerMu.Lock()
 			target := s.remoteTarget
 			s.answerMu.Unlock()
+			s.diagnostics.event("sip_bye_requested", "local", "call_ended", 0)
 			signalingErr = s.dialog.WriteBye(ctx, sip.NewRequest(sip.BYE, target))
+			if signalingErr != nil {
+				s.diagnostics.event("sip_bye_result", "local", transportEvidenceError(signalingErr), 0)
+			} else {
+				s.diagnostics.event("sip_bye_result", "local", "", 200)
+			}
 			cancel()
 			s.signalMu.Unlock()
 		} else if s.inviteTx != nil && s.dialog.LoadState() != sip.DialogStateEnded {

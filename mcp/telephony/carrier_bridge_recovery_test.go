@@ -612,7 +612,22 @@ func TestTelnyxInboundSignedFailureUsesSharedRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	data, _ := json.Marshal(history)
-	if strings.Count(string(data), `"provider_event_id":"streaming.failed:`) != 2 { // first immutable cause plus one journal entry
+	var count int
+	for _, item := range history {
+		var events []carrierBridgeEvidence
+		if err = json.Unmarshal(item["events"].(json.RawMessage), &events); err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range events {
+			if e.Kind == "provider_error" && e.EventID != "" {
+				count++
+				if e.ProviderEvent != "streaming.failed" || e.SignatureValidation != "verified" || e.ReceivedAt == "" {
+					t.Fatal("missing validated provider context", e)
+				}
+			}
+		}
+	}
+	if count != 1 {
 		t.Fatal("provider duplicate not coalesced", string(data))
 	}
 }
@@ -711,6 +726,22 @@ func TestCarrierRecoveryNetworkAttemptDoesNotBlockReplacementOrHangup(t *testing
 			case <-p.finished:
 			default:
 				t.Fatal("carrier request not canceled")
+			}
+			b.mu.Lock()
+			var commandResult *carrierBridgeEvidence
+			for i := range b.events {
+				if b.events[i].Kind == "recovery_command_result" {
+					copy := b.events[i]
+					commandResult = &copy
+				}
+			}
+			b.mu.Unlock()
+			if commandResult == nil || commandResult.CommandID == "" || commandResult.AttemptID == "" || commandResult.ResultAt == "" {
+				t.Fatal("missing command correlation", commandResult)
+			}
+			expectedReason := map[string]string{"replace": "replacement_connected", "hangup": "call_ended", "shutdown": "application_shutdown"}[action]
+			if commandResult.CancellationReason != expectedReason {
+				t.Fatal("lost cancellation source", commandResult)
 			}
 			if action == "replace" && bridgeState(t, b) != "replaced" {
 				t.Fatal("late API result revived old generation")

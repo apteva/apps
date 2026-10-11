@@ -202,17 +202,21 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		a.rejectTwilioHandshake(w, callID, "invalid_callback_auth", "forbidden", http.StatusForbidden)
 		return
 	}
+	proxyID := authenticatedCarrierHeaders(w, r, row)
 	if row.CarrierSlug != "twilio" || row.AudioBridgeURL == "" || row.AudioBridgeURL == "pending" || isTerminalStatus(row.Status) {
+		a.recordCarrierHandshakeRejection(row, proxyID, http.StatusGone, "bridge_unavailable")
 		a.rejectTwilioHandshake(w, callID, "bridge_unavailable_or_call_terminal", "no audio bridge for this call", http.StatusGone)
 		return
 	}
-	bridge, err := a.claimCarrierBridge(row, r.Context())
+	bridge, err := a.claimCarrierBridge(row, r.Context(), proxyID)
 	claimed := bridge != nil
 	if err != nil && !errors.Is(err, errCarrierBridgeBusy) {
+		a.recordCarrierHandshakeRejection(row, proxyID, 500, "claim_database_error")
 		a.rejectTwilioHandshake(w, callID, "claim_database_error", "claim media", http.StatusInternalServerError)
 		return
 	}
 	if !claimed {
+		a.recordCarrierHandshakeRejection(row, proxyID, http.StatusConflict, "duplicate_connection")
 		a.rejectTwilioHandshake(w, callID, "socket_claim_unavailable", "media bridge already active", http.StatusConflict)
 		return
 	}
@@ -280,7 +284,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			closeState.SetLeg(mediaCloseLegRequest, ws.StatusGoingAway, "media request context canceled")
-			cancel()
+			bridge.cancelWithCause("request_context_canceled", mediaCloseLegRequest, 1001, "media request context canceled", "")
 		case <-ctx.Done():
 		}
 	}()
@@ -333,6 +337,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if len(data) > maxCarrierFrameBytes {
+				bridge.recordLocalCancellation("protocol_rejection", mediaCloseLegCarrier, 1009, "media frame too large", "")
 				closeState.SetLeg(mediaCloseLegCarrier, ws.StatusMessageTooBig, "Twilio media frame too large")
 				return
 			}
@@ -345,6 +350,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 			}
 			var f twilioFrame
 			if err := json.Unmarshal(data, &f); err != nil {
+				bridge.arrival.decodeErrors.Add(1)
 				continue
 			}
 			if humanHub != nil {
@@ -361,6 +367,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if row.CarrierSID != "" && row.CarrierSID != f.Start.CallSID {
+					bridge.recordLocalCancellation("protocol_rejection", mediaCloseLegCarrier, 1008, "call ID mismatch", "")
 					closeState.SetLeg(mediaCloseLegCarrier, ws.StatusPolicyViolation, "Twilio call SID mismatch")
 					return
 				}
@@ -377,6 +384,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 				format := f.Start.MediaFormat
 				if (format.Encoding != "" || format.SampleRate != 0 || format.Channels != 0) &&
 					(format.Encoding != "audio/x-mulaw" || format.SampleRate != twilioMediaSampleRate || format.Channels != 1) {
+					bridge.recordLocalCancellation("format_rejection", mediaCloseLegCarrier, 1003, err.Error(), "")
 					closeState.SetLeg(mediaCloseLegCarrier, ws.StatusUnsupportedData, "Twilio negotiated unsupported media format")
 					return
 				}
@@ -541,7 +549,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 			return
 		default:
 		}
-		data, op, err := readWebSocketData(core, ws.StateClientSide, coreWriter)
+		data, op, err := readWebSocketData(core, ws.StateClientSide, coreWriter, bridge.receivedFor(mediaCloseLegCore))
 		if err != nil {
 			bridge.socketError(mediaCloseLegCore, "read", err)
 			code, reason := websocketCloseDetails(err)

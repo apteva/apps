@@ -1,3 +1,4 @@
+import {audioBoundaryIndicators} from "./audio-dashboard";
 import { subscribeAudioDashboardEvents, type AudioUpdatesMode } from "./audio-dashboard-events";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -123,41 +124,49 @@ const displayMS = (n: number | undefined) =>
 function AudioDetails({
   host,
   callId,
+  observedAt,
 }: {
   host: AudioDashboardHost;
   callId: string;
+  observedAt?:string;
 }) {
   const [value, setValue] = useState<Record<string, unknown> | null>(null),
     [error, setError] = useState("");
+  const refresh = useRef<() => void>(() => {});
   useEffect(() => {
     const ctrl = new AbortController();
-    const q = new URLSearchParams({
-      call_id: callId,
-      project_id: host.projectId || "",
-      install_id: String(host.installId || ""),
-    });
-    const timer = window.setTimeout(() => ctrl.abort(), 12000);
-    void (async () => {
+    let busy = false;
+    let lastFetch = 0;
+    const q = new URLSearchParams({ call_id: callId, project_id: host.projectId || "", install_id: String(host.installId || "") });
+    const load = async () => {
+      // Coalesce SSE changes: an expanded detail never overlaps requests or
+      // cancels a slow response whenever a new one-second sample arrives.
+      if (busy || Date.now() - lastFetch < 3000 || ctrl.signal.aborted) return;
+      busy = true;
+      lastFetch = Date.now();
+      const request = new AbortController();
+      const abort = () => request.abort("unmount");
+      ctrl.signal.addEventListener("abort", abort, { once: true });
+      const timer = window.setTimeout(() => request.abort("timeout"), 12000);
       try {
-        const r = await fetch(
-          `/api/apps/${encodeURIComponent(host.appName || "telephony")}/audio-health?${q}`,
-          { credentials: "same-origin", signal: ctrl.signal },
-        );
+        const r = await fetch(`/api/apps/${encodeURIComponent(host.appName || "telephony")}/audio-health?${q}`, { credentials: "same-origin", signal: request.signal });
         if (!r.ok) throw new Error(`Diagnostics failed (HTTP ${r.status})`);
-        setValue(await r.json());
+        const next = await r.json();
+        if (!ctrl.signal.aborted) { setValue(next); setError(""); }
       } catch (e) {
-        if (!ctrl.signal.aborted) setError((e as Error).message);
-        else if (ctrl.signal.reason?.name === "AbortError")
-          setError("Diagnostics request timed out.");
+        if (!ctrl.signal.aborted) setError(request.signal.aborted ? "Diagnostics request timed out." : (e as Error).message);
       } finally {
         window.clearTimeout(timer);
+        ctrl.signal.removeEventListener("abort", abort);
+        busy = false;
       }
-    })();
-    return () => {
-      window.clearTimeout(timer);
-      ctrl.abort("unmount");
     };
+    refresh.current = () => { void load(); };
+    setValue(null); setError("");
+    refresh.current();
+    return () => { ctrl.abort("unmount"); refresh.current = () => {}; };
   }, [host.appName, host.projectId, host.installId, callId]);
+  useEffect(() => { refresh.current(); }, [observedAt]);
   if (error)
     return (
       <p role="alert" className="text-error">
@@ -167,7 +176,7 @@ function AudioDetails({
   return (
     <details className="mt-3">
       <summary className="cursor-pointer text-text-muted">
-        Full recorded diagnostics: browser networks, peer hash, session events,
+        Live and recorded diagnostics: carrier SIP/RTP, connection history, browser networks, peer hash, session events,
         closes, timings and drops
       </summary>
       <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-all rounded bg-bg-muted p-3 text-xs">
@@ -232,6 +241,7 @@ export function AudioHealthRow({
           <p className="break-all text-xs text-text-muted">
             Call {report.call_id} · {report.status}
           </p>
+<div className="my-3 grid gap-2 md:grid-cols-3">{audioBoundaryIndicators(report).map((item)=><div key={item.key} className="rounded bg-bg-muted p-2 text-xs"><strong>{item.label}</strong><div className={item.state==="audio_degraded"?"text-error":"text-text-muted"}>{item.state}{item.reason?` · ${item.reason}`:""}</div></div>)}</div>
           <div className="my-3 grid gap-2 md:grid-cols-3">
             {Object.entries(report.health.stages || {}).map(([stage, h]) => (
               <div key={stage} className="rounded bg-bg-muted p-2 text-xs">
@@ -262,7 +272,7 @@ export function AudioHealthRow({
               </div>
             ))}
           </dl>
-          <AudioDetails host={host} callId={report.call_id} />
+          <AudioDetails host={host} callId={report.call_id} observedAt={report.observed_at} />
         </div>
       ) : null}
     </article>

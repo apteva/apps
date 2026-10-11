@@ -48,7 +48,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.12.0
+version: 0.12.1
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -342,7 +342,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.12.0
+    ref: telephony/v0.12.1
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -409,6 +409,7 @@ type App struct {
 	audioPeerHasher  audioPeerHasher
 	audioNetworks    audioNetworkCollector
 	audioTransports  audioTransportCollector
+	carrierTelemetry carrierTelemetryCollector
 	audioAlerts      audioAlertCorrelator
 	decisionWG       sync.WaitGroup
 	decisionStopping bool
@@ -515,6 +516,7 @@ func (a *App) Workers() []sdk.Worker {
 		{Name: "ai-call-policies", Schedule: "@every 1s", Run: a.runAICallPolicies},
 		{Name: "carrier-media-recovery", Schedule: "@every 1s", Run: a.runCarrierMediaRecovery},
 		{Name: "audio-telemetry", Schedule: "@every 5s", Run: a.runAudioTelemetryTick},
+		{Name: "carrier-telemetry", Schedule: "@every 1s", Run: a.runCarrierTelemetryTick},
 		{Name: "carrier-activations", Schedule: "@every 1s", Run: a.runCarrierActivations},
 		{Name: "ai-handoffs", Schedule: "@every 1s", Run: a.runAIHandoffs},
 		{Name: "routing-decisions", Schedule: "@every 1s", Run: a.runDecisionTick},
@@ -2527,6 +2529,7 @@ func (a *App) mediaBridgeURL(row *callRow) (string, error) {
 // ─── webhook + panel handlers ──────────────────────────────────────
 
 func (a *App) handleStatusCallback(w http.ResponseWriter, r *http.Request) {
+	receivedAt := ringTime(time.Now())
 	callID := strings.TrimPrefix(r.URL.Path, "/webhook/status/")
 	callID = strings.TrimSuffix(callID, "/")
 	if callID == "" {
@@ -2580,6 +2583,10 @@ func (a *App) handleStatusCallback(w http.ResponseWriter, r *http.Request) {
 		r.Body = io.NopCloser(strings.NewReader(string(body)))
 	}
 	update := callbackUpdateFor(row.CarrierSlug, r)
+	if row.CarrierSlug == "telnyx" {
+		update.SignatureValidation = "verified"
+		update.ReceivedAt = receivedAt
+	}
 	if row.CarrierSlug == "sinch" && (update.Status == "" || update.CarrierSID == "") {
 		http.Error(w, "invalid Sinch callback", http.StatusBadRequest)
 		return
@@ -3088,6 +3095,7 @@ func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, me
 }
 
 func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
+	receivedAt := ringTime(time.Now())
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -3178,6 +3186,8 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 				// Inbound routes and outbound status callbacks use the same parser
 				// and generation checks, including failure_reason and stream_id.
 				u := telnyxCallbackUpdate(&http.Request{Body: io.NopCloser(strings.NewReader(string(body)))})
+				u.SignatureValidation = "verified"
+				u.ReceivedAt = receivedAt
 				if !a.carrierStreamEvent(row, u) {
 					if err := a.db().updateMediaStatusWithLeg(row.ID, media, u.MediaError, 0, u.MediaError, "provider_event"); err != nil {
 						http.Error(w, "persist carrier media", 500)
@@ -4765,7 +4775,7 @@ func (c *callsDB) reconcileTerminalCarrierMediaStop(id, occurredAt string, termi
 			return false, nil
 		}
 		normal := cause.ActualCloseCode == 1000 || cause.ActualCloseCode == 1001 || (cause.Kind == "bridge_ended" && cause.LocalCloseCode == 1000)
-		eof := cause.Kind == "socket_read" && (strings.HasSuffix(cause.Detail, ": EOF") || strings.HasSuffix(cause.Detail, ": unexpected EOF"))
+		eof := (cause.Kind == "socket_read" || cause.Kind == "transport_read_error") && (strings.HasSuffix(cause.Detail, ": EOF") || strings.HasSuffix(cause.Detail, ": unexpected EOF"))
 		if !normal && !eof {
 			return false, nil
 		}

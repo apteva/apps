@@ -127,17 +127,21 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	proxyID := authenticatedCarrierHeaders(w, r, row)
 	if row.CarrierSlug != cfg.Provider || row.AudioBridgeURL == "" || row.AudioBridgeURL == "pending" || isTerminalStatus(row.Status) {
+		a.recordCarrierHandshakeRejection(row, proxyID, http.StatusGone, "bridge_unavailable")
 		http.Error(w, "no audio bridge for this call", http.StatusGone)
 		return
 	}
-	bridge, err := a.claimCarrierBridge(row, r.Context())
+	bridge, err := a.claimCarrierBridge(row, r.Context(), proxyID)
 	claimed := bridge != nil
 	if err != nil && !errors.Is(err, errCarrierBridgeBusy) {
+		a.recordCarrierHandshakeRejection(row, proxyID, 500, "claim_database_error")
 		http.Error(w, "claim media", http.StatusInternalServerError)
 		return
 	}
 	if !claimed {
+		a.recordCarrierHandshakeRejection(row, proxyID, http.StatusConflict, "duplicate_connection")
 		http.Error(w, "media bridge already active", http.StatusConflict)
 		return
 	}
@@ -204,7 +208,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		select {
 		case <-r.Context().Done():
 			closeState.SetLeg(mediaCloseLegRequest, ws.StatusGoingAway, "media request context canceled")
-			cancel()
+			bridge.cancelWithCause("request_context_canceled", mediaCloseLegRequest, 1001, "media request context canceled", "")
 		case <-ctx.Done():
 		}
 	}()
@@ -246,6 +250,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 				return
 			}
 			if len(data) > maxCarrierFrameBytes {
+				bridge.recordLocalCancellation("protocol_rejection", mediaCloseLegCarrier, 1009, "media frame too large", "")
 				closeState.SetLeg(mediaCloseLegCarrier, ws.StatusMessageTooBig, cfg.Provider+" media frame too large")
 				return
 			}
@@ -258,6 +263,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			}
 			var f carrierMediaFrame
 			if err := json.Unmarshal(data, &f); err != nil {
+				bridge.arrival.decodeErrors.Add(1)
 				continue
 			}
 			if humanHub != nil {
@@ -282,11 +288,13 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			switch f.Event {
 			case "start":
 				if err := validateCarrierStartFormat(cfg, f); err != nil {
+					bridge.recordLocalCancellation("format_rejection", mediaCloseLegCarrier, 1003, err.Error(), "")
 					closeState.SetLeg(mediaCloseLegCarrier, ws.StatusUnsupportedData, err.Error())
 					return
 				}
 				if providerCallID := frameCallID(f); providerCallID != "" {
 					if row.CarrierSID != "" && row.CarrierSID != providerCallID {
+						bridge.recordLocalCancellation("protocol_rejection", mediaCloseLegCarrier, 1008, "call ID mismatch", "")
 						closeState.SetLeg(mediaCloseLegCarrier, ws.StatusPolicyViolation, cfg.Provider+" call ID mismatch")
 						return
 					}
@@ -310,6 +318,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 					humanHub.timeline.observe("carrier_media_read", len(data), time.Time{}, "", "", bridge.generation)
 				}
 				if cfg.Provider == "bandwidth" && !bandwidthStarted {
+					bridge.recordLocalCancellation("protocol_rejection", mediaCloseLegCarrier, 1008, "media_before_verified_start", "")
 					closeState.SetLeg(mediaCloseLegCarrier, ws.StatusPolicyViolation, "Bandwidth media arrived before a verified start frame")
 					return
 				}
@@ -318,6 +327,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 				}
 				pcm, err := decodeCarrierPCM(f.Media.Payload, cfg.InputCodec)
 				if err != nil {
+					bridge.arrival.decodeErrors.Add(1)
 					continue
 				}
 				if len(pcm) == 0 {
@@ -389,6 +399,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 					return
 				}
 			case "stop":
+				bridge.recordLocalCancellation("provider_stop", mediaCloseLegCarrier, 1000, "provider media stopped", "")
 				closeState.SetLeg(mediaCloseLegCarrier, ws.StatusNormalClosure, cfg.Provider+" call media ended normally")
 				return
 			case "error":
@@ -396,6 +407,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 				if encoded, err := json.Marshal(f.Error); err == nil && string(encoded) != "null" {
 					detail += ": " + string(encoded)
 				}
+				bridge.recordLocalCancellation("provider_stream_error", mediaCloseLegCarrier, 1011, detail, "")
 				closeState.SetLeg(mediaCloseLegCarrier, ws.StatusInternalServerError, detail)
 				return
 			}
@@ -488,7 +500,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			return
 		default:
 		}
-		data, op, err := readWebSocketData(core, ws.StateClientSide, coreWriter)
+		data, op, err := readWebSocketData(core, ws.StateClientSide, coreWriter, bridge.receivedFor(mediaCloseLegCore))
 		if err != nil {
 			bridge.socketError(mediaCloseLegCore, "read", err)
 			code, reason := websocketCloseDetails(err)
@@ -652,17 +664,21 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	proxyID := authenticatedCarrierHeaders(w, r, row)
 	if row.CarrierSlug != provider || row.AudioBridgeURL == "" || row.AudioBridgeURL == "pending" || isTerminalStatus(row.Status) {
+		a.recordCarrierHandshakeRejection(row, proxyID, http.StatusGone, "bridge_unavailable")
 		http.Error(w, "no audio bridge for this call", http.StatusGone)
 		return
 	}
-	bridge, err := a.claimCarrierBridge(row, r.Context())
+	bridge, err := a.claimCarrierBridge(row, r.Context(), proxyID)
 	claimed := bridge != nil
 	if err != nil && !errors.Is(err, errCarrierBridgeBusy) {
+		a.recordCarrierHandshakeRejection(row, proxyID, 500, "claim_database_error")
 		http.Error(w, "claim media", http.StatusInternalServerError)
 		return
 	}
 	if !claimed {
+		a.recordCarrierHandshakeRejection(row, proxyID, http.StatusConflict, "duplicate_connection")
 		http.Error(w, "media bridge already active", http.StatusConflict)
 		return
 	}
@@ -729,6 +745,7 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 		}
 		data, op, err := readWebSocketData(vonageReadConn, ws.StateServerSide, vonageWriter, bridge.received)
 		if err != nil || op != ws.OpText || len(data) > maxCarrierFrameBytes || validateSinchConnect(data, creds.Fields["service_id"]) != nil {
+			bridge.recordLocalCancellation("protocol_rejection", mediaCloseLegCarrier, 1008, "invalid_connect_request", "")
 			closeState.SetLeg(mediaCloseLegCarrier, ws.StatusPolicyViolation, "invalid Sinch stream connect request")
 			return
 		}
@@ -747,7 +764,7 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 		select {
 		case <-r.Context().Done():
 			closeState.SetLeg(mediaCloseLegRequest, ws.StatusGoingAway, "media request context canceled")
-			cancel()
+			bridge.cancelWithCause("request_context_canceled", mediaCloseLegRequest, 1001, "media request context canceled", "")
 		case <-ctx.Done():
 		}
 	}()
@@ -767,6 +784,7 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 					return
 				case <-ticker.C:
 					if err := vonageWriter.Write(ws.OpText, []byte(`{"command":"heartbeat"}`)); err != nil {
+						bridge.socketError(mediaCloseLegCarrier, "write", err)
 						closeState.SetLeg(mediaCloseLegCarrier, ws.StatusInternalServerError, "send Sinch heartbeat")
 						cancel()
 						return
@@ -809,6 +827,7 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 				return
 			}
 			if len(data) > maxCarrierFrameBytes {
+				bridge.recordLocalCancellation("protocol_rejection", mediaCloseLegCarrier, 1009, "media frame too large", "")
 				closeState.SetLeg(mediaCloseLegCarrier, ws.StatusMessageTooBig, provider+" media frame too large")
 				return
 			}
@@ -841,7 +860,7 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 			return
 		default:
 		}
-		data, op, err := readWebSocketData(core, ws.StateClientSide, coreWriter)
+		data, op, err := readWebSocketData(core, ws.StateClientSide, coreWriter, bridge.receivedFor(mediaCloseLegCore))
 		if err != nil {
 			bridge.socketError(mediaCloseLegCore, "read", err)
 			code, reason := websocketCloseDetails(err)

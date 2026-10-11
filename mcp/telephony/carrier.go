@@ -218,6 +218,12 @@ func executeCarrierTool(ctx *sdk.AppCtx, connID int64, tool string, input map[st
 	} else {
 		res, err = ctx.PlatformAPI().ExecuteIntegrationTool(connID, tool, input)
 	}
+	if res != nil && len(requests) > 0 && requests[0] != nil {
+		if obs, ok := requests[0].Value(carrierCommandObservationKey{}).(*carrierCommandObservation); ok {
+			obs.Status = res.Status
+			obs.RequestID = boundedTransportID(firstNonEmpty(res.Headers["Request-Id"], res.Headers["X-Request-Id"], res.Headers["request-id"], res.Headers["x-request-id"]))
+		}
+	}
 	if res != nil {
 		recordCarrierCommand(ctx, connID, tool, input, res.Status, err == nil && res.Success)
 	} else {

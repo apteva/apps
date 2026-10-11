@@ -121,6 +121,7 @@ func didwwOutboundSettings(fields map[string]string) (didwwSIPSettings, error) {
 }
 
 type outboundSIPSession struct {
+	diagnostics    *sipLiveDiagnostics
 	gateway        *sipGateway
 	callID         string
 	providerCallID string
@@ -232,9 +233,12 @@ func (g *sipGateway) startDIDWWOutbound(row *callRow, settings didwwSIPSettings,
 		dialTimeout: time.Duration(max(5, min(timeoutSec, 120))) * time.Second,
 		maxDuration: time.Duration(max(60, min(maxDurationSec, maximumConnectedDurationSec))) * time.Second,
 		inviteDone:  make(chan struct{})}
+	s.diagnostics = g.app.newSIPDiagnostics(row, dialog.ID)
+	s.diagnostics.attach(media, dialog.ID)
 	g.mu.Lock()
 	if g.outboundByCall[row.ID] != nil {
 		g.mu.Unlock()
+		s.diagnostics.end("local", errors.New("duplicate_outbound_call"))
 		cancel()
 		media.Close()
 		_ = dialog.Close()
@@ -266,7 +270,13 @@ func (s *outboundSIPSession) waitAnswer() {
 		// goroutine would race the ACK and could send it twice.
 		if s.ended.Load() && s.dialog.LoadState() == sip.DialogStateConfirmed {
 			byeCtx, stopBye := context.WithTimeout(context.Background(), 3*time.Second)
-			_ = s.dialog.Bye(byeCtx)
+			s.diagnostics.event("sip_bye_requested", "local", "call_ended", 0)
+			err := s.dialog.Bye(byeCtx)
+			if err != nil {
+				s.diagnostics.event("sip_bye_result", "local", transportEvidenceError(err), 0)
+			} else {
+				s.diagnostics.event("sip_bye_result", "local", "", 200)
+			}
 			stopBye()
 		}
 		close(s.inviteDone)
@@ -279,6 +289,9 @@ func (s *outboundSIPSession) waitAnswer() {
 	err := s.dialog.WaitAnswer(dialCtx, sipgo.AnswerOptions{
 		Username: s.settings.username, Password: s.settings.password,
 		OnResponse: func(response *sip.Response) error {
+			if response != nil {
+				s.diagnostics.event("sip_invite_response", "carrier", "", response.StatusCode)
+			}
 			if response != nil && response.IsProvisional() && response.StatusCode >= 180 {
 				_ = s.gateway.app.db().updateStatus(s.callID, "ringing", "")
 			}
@@ -317,6 +330,8 @@ func (s *outboundSIPSession) waitAnswer() {
 	}
 	s.media.offer = answer
 	s.media.remote = net.UDPAddrFromAddrPort(netip.AddrPortFrom(answer.RemoteAddress, uint16(answer.RemotePort)))
+	s.diagnostics.attach(s.media, s.dialog.ID)
+	s.diagnostics.event("sip_answer", "carrier", "", 200)
 	ackCtx, stopAck := context.WithTimeout(context.Background(), 3*time.Second)
 	err = s.dialog.Ack(ackCtx)
 	stopAck()
@@ -324,6 +339,7 @@ func (s *outboundSIPSession) waitAnswer() {
 		s.finishWithStatus("local_error", "failed", err)
 		return
 	}
+	s.diagnostics.event("sip_ack", "local", "", 0)
 	if s.ended.Load() {
 		return
 	}
@@ -359,6 +375,7 @@ func (s *outboundSIPSession) finishWithStatus(leg, status string, cause error) {
 	if !s.ended.CompareAndSwap(false, true) {
 		return
 	}
+	s.diagnostics.end(leg, cause)
 	s.cancel()
 	go func() {
 		<-s.inviteDone

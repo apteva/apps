@@ -629,6 +629,7 @@ func (s *sipSession) readLocalRTP(ctx context.Context, m *sipRTPMedia, digits ch
 	for ctx.Err() == nil {
 		_ = m.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		n, source, err := m.conn.ReadFromUDP(buffer)
+		m.observedReadError(err)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -640,6 +641,7 @@ func (s *sipSession) readLocalRTP(ctx context.Context, m *sipRTPMedia, digits ch
 			continue
 		}
 		if source.IP.String() != m.remote.IP.String() || source.Port != m.remote.Port {
+			m.observations.rejectedSource.Add(1)
 			continue
 		}
 		packet, err := m.decodePacket(buffer[:n])
