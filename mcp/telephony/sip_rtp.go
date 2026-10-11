@@ -33,22 +33,26 @@ var sipRTPPorts = struct {
 }{next: make(map[string]int)}
 
 type sipRTPMedia struct {
-	remoteMode      atomic.Int32
-	pacer           atomic.Pointer[sipRTPPacer]
-	recorder        atomic.Pointer[localCallRecorder]
-	hold            atomic.Pointer[localSIPHold]
-	liveTimeline    atomic.Pointer[liveAudioTimeline]
-	conn            *net.UDPConn
-	offer           sipMediaOffer
-	security        *sipMediaSecurity
-	remote          *net.UDPAddr
-	localPort       int
-	closeOnce       sync.Once
-	codecOnce       sync.Once
-	g722Encoder     *g722.Encoder
-	g722Decoder     *g722.Decoder
-	g722SentDecoder *g722.Decoder
-	lastPacket      atomic.Int64
+	observations         sipRTPObservations
+	diagnostics          atomic.Pointer[sipLiveDiagnostics]
+	jitterTelemetry      atomic.Pointer[rtpJitterBuffer]
+	coreForwardTelemetry atomic.Pointer[websocketWriterPump]
+	remoteMode           atomic.Int32
+	pacer                atomic.Pointer[sipRTPPacer]
+	recorder             atomic.Pointer[localCallRecorder]
+	hold                 atomic.Pointer[localSIPHold]
+	liveTimeline         atomic.Pointer[liveAudioTimeline]
+	conn                 *net.UDPConn
+	offer                sipMediaOffer
+	security             *sipMediaSecurity
+	remote               *net.UDPAddr
+	localPort            int
+	closeOnce            sync.Once
+	codecOnce            sync.Once
+	g722Encoder          *g722.Encoder
+	g722Decoder          *g722.Decoder
+	g722SentDecoder      *g722.Decoder
+	lastPacket           atomic.Int64
 }
 
 func openSIPRTPMedia(cfg sipGatewayConfig, offer sipMediaOffer) (*sipRTPMedia, error) {
@@ -98,24 +102,42 @@ func (m *sipRTPMedia) decodePacket(raw []byte) (*rtp.Packet, error) {
 	if m.security != nil {
 		decrypted, err := m.security.RemoteContext.DecryptRTP(nil, raw, nil)
 		if err != nil {
+			m.observedDecodeError(err, true)
 			return nil, err
 		}
 		raw = decrypted
 	}
 	var packet rtp.Packet
 	if err := packet.Unmarshal(raw); err != nil {
+		m.observedDecodeError(err, false)
 		return nil, err
 	}
 	if packet.PayloadType != m.offer.PayloadType && (m.offer.DTMFPayloadType <= 0 || int(packet.PayloadType) != m.offer.DTMFPayloadType) {
+		m.observations.decodeErrors.Add(1)
 		return nil, fmt.Errorf("unexpected RTP payload type %d", packet.PayloadType)
 	}
 	if len(packet.Payload) == 0 || len(packet.Payload) > 2048 {
+		m.observations.decodeErrors.Add(1)
 		return nil, errors.New("invalid RTP payload size")
 	}
+	m.observations.received(&packet, len(raw), time.Now(), packet.PayloadType == m.offer.PayloadType)
 	return &packet, nil
 }
 
-func (m *sipRTPMedia) writePacket(packet *rtp.Packet) error {
+func (m *sipRTPMedia) writePacket(packet *rtp.Packet) (result error) {
+	startedAt := time.Now()
+	defer func() {
+		atomicMax(&m.observations.maxSend, int64(time.Since(startedAt)))
+		if result != nil {
+			if !errors.Is(result, net.ErrClosed) && (m.diagnostics.Load() == nil || !m.diagnostics.Load().ended.Load()) {
+				m.observations.sendErrors.Add(1)
+				m.observations.lastError.Store(time.Now().UnixNano())
+			}
+			if d := m.diagnostics.Load(); d != nil {
+				d.event("transport_write_error", "carrier", transportEvidenceError(result), 0)
+			}
+		}
+	}()
 	raw, err := packet.Marshal()
 	if err != nil {
 		return err
@@ -131,6 +153,9 @@ func (m *sipRTPMedia) writePacket(packet *rtp.Packet) error {
 	}
 	started := time.Now()
 	_, err = m.conn.WriteToUDP(raw, m.remote)
+	if err == nil {
+		m.observations.sentPacket(len(raw), time.Now())
+	}
 	if timeline := m.liveTimeline.Load(); timeline != nil {
 		stage := "carrier_send"
 		if err != nil {
@@ -142,21 +167,23 @@ func (m *sipRTPMedia) writePacket(packet *rtp.Packet) error {
 }
 
 type rtpJitterBuffer struct {
-	mu             sync.Mutex
-	packets        map[uint16][]byte
-	expected       uint16
-	started        bool
-	primed         bool
-	buffered       int
-	missing        int
-	primeTicks     int
-	arrivals       map[uint16]time.Time
-	lost           int
-	droppedSamples int
-	maxAgeMS       int
-	jitterMS       float64
-	lastArrival    time.Time
-	lastTimestamp  uint32
+	mu                   sync.Mutex
+	packets              map[uint16][]byte
+	expected             uint16
+	started              bool
+	primed               bool
+	buffered             int
+	missing              int
+	primeTicks           int
+	arrivals             map[uint16]time.Time
+	lost                 int
+	droppedSamples       int
+	lateDroppedSamples   int
+	missingFilledSamples atomic.Int64
+	maxAgeMS             int
+	jitterMS             float64
+	lastArrival          time.Time
+	lastTimestamp        uint32
 }
 
 func newRTPJitterBuffer() *rtpJitterBuffer {
@@ -176,6 +203,7 @@ func (b *rtpJitterBuffer) pushRTP(sequence uint16, payload []byte, timestamp uin
 	}
 	if b.primed && rtpSequenceBefore(sequence, b.expected) {
 		if len(b.packets) != 0 || timestamp == 0 || int32(timestamp-b.lastTimestamp) <= 0 || now.Sub(b.lastArrival) < 60*time.Millisecond {
+			b.lateDroppedSamples += len(payload)
 			return
 		}
 		b.expected = sequence
@@ -315,6 +343,7 @@ func (f *rtpAudioFramer) popPCM(media *sipRTPMedia) ([]int16, bool) {
 		}
 		var pcm []int16
 		if payload == nil {
+			f.jitter.missingFilledSamples.Add(int64(f.missingSamples))
 			pcm = make([]int16, f.missingSamples*media.sampleRate()/8000)
 		} else {
 			pcm = media.decodeAudio(payload)
@@ -333,6 +362,7 @@ func (f *rtpAudioFramer) pop() ([]byte, bool) {
 			return nil, false
 		}
 		if payload == nil {
+			f.jitter.missingFilledSamples.Add(int64(f.missingSamples))
 			payload = sipEncodedSilence(f.codec, f.missingSamples)
 		}
 		f.pending = append(f.pending, payload...)
@@ -706,6 +736,8 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		core = hijackedConn{Conn: core, reader: buffered}
 	}
 	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
+	media.coreForwardTelemetry.Store(coreWriter)
+	defer media.coreForwardTelemetry.CompareAndSwap(coreWriter, nil)
 	coreCloser := newGracefulWebSocket(core, coreWriter)
 	defer coreCloser.Close(ws.StatusNormalClosure, "direct SIP media ended")
 
@@ -773,6 +805,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		<-pacer.done
 	}()
 	jitter := newRTPJitterBuffer()
+	media.jitterTelemetry.Store(jitter)
 	framer := newRTPAudioFramer(jitter, media.offer)
 	maxQueuedMS := 0
 	workers.Add(1)
@@ -800,6 +833,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		for {
 			_ = media.conn.SetReadDeadline(time.Now().Add(time.Second))
 			n, source, err := media.conn.ReadFromUDP(buffer)
+			media.observedReadError(err)
 			if err != nil {
 				if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
 					return
@@ -809,6 +843,9 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 						continue
 					}
 					if time.Since(time.Unix(0, media.lastPacket.Load())) > sipRTPInactivity {
+						if d := media.diagnostics.Load(); d != nil {
+							d.event("sip_media_timeout", "carrier", "direct SIP RTP timed out", 0)
+						}
 						closeState.SetLeg(mediaCloseLegCarrier, ws.StatusGoingAway, "direct SIP RTP timed out")
 						return
 					}
@@ -818,6 +855,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 				return
 			}
 			if source.IP.String() != media.remote.IP.String() || source.Port != media.remote.Port {
+				media.observations.rejectedSource.Add(1)
 				continue
 			}
 			packet, err := media.decodePacket(buffer[:n])

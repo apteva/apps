@@ -121,6 +121,7 @@ func (g *sipGateway) handleACK(req *sip.Request, tx sip.ServerTransaction) {
 	}
 	s.answerMu.Lock()
 	if s.refreshACK != nil && req.CSeq().SeqNo == s.refreshCSeq {
+		s.diagnostics.event("sip_refresh_ack", "carrier", "", 0)
 		ack := s.refreshACK
 		if len(req.Body()) > 0 {
 			offer, err := parseSIPMediaOfferOptions(req.Body(), g.cfg, []string{s.offer.Codec}, true)
@@ -140,6 +141,7 @@ func (g *sipGateway) handleACK(req *sip.Request, tx sip.ServerTransaction) {
 	initial := req.CSeq().SeqNo == s.dialog.InviteRequest.CSeq().SeqNo
 	s.answerMu.Unlock()
 	if initial && dialog.ReadAck(req, tx) == nil {
+		s.diagnostics.event("sip_ack", "carrier", "", 0)
 		s.ackOnce.Do(func() {
 			if !s.ended.Load() {
 				_, _ = g.app.db().db.Exec(`UPDATE calls SET carrier_answered_at=CASE WHEN carrier_answered_at='' THEN ? ELSE carrier_answered_at END WHERE id=? AND status NOT IN ('completed','failed','canceled','no-answer','busy')`, ringTime(time.Now()), s.call.ID)
@@ -152,7 +154,13 @@ func sameSIPMedia(a, b sipMediaOffer) bool {
 	return a.RemoteAddress == b.RemoteAddress && a.RemotePort == b.RemotePort && a.PayloadType == b.PayloadType && a.Codec == b.Codec && a.PacketSamples == b.PacketSamples && a.DTMFPayloadType == b.DTMFPayloadType && a.Secure == b.Secure && bytes.Equal(a.RemoteKey, b.RemoteKey)
 }
 func (g *sipGateway) handleRefresh(req *sip.Request, tx sip.ServerTransaction) {
-	reply := func(status int, reason string) { _ = tx.Respond(sip.NewResponseFromRequest(req, status, reason, nil)) }
+	var observed *sipLiveDiagnostics
+	reply := func(status int, reason string) {
+		if observed != nil {
+			observed.event("sip_refresh_result", "carrier", reason, status)
+		}
+		_ = tx.Respond(sip.NewResponseFromRequest(req, status, reason, nil))
+	}
 	if !g.cfg.sourceAllowed(req.Source()) {
 		reply(403, "Forbidden")
 		return
@@ -163,11 +171,13 @@ func (g *sipGateway) handleRefresh(req *sip.Request, tx sip.ServerTransaction) {
 		reply(481, "Call Does Not Exist")
 		return
 	}
+	observed = s.diagnostics
 	if dialog.LoadState() != sip.DialogStateConfirmed || !s.refreshMu.TryLock() {
 		reply(491, "Request Pending")
 		return
 	}
 	defer s.refreshMu.Unlock()
+	s.diagnostics.event("sip_refresh_attempt", "carrier", string(req.Method), 0)
 	if req.CSeq() == nil || req.CSeq().SeqNo <= s.remoteSeq.Load() {
 		reply(500, "Invalid CSeq")
 		return
@@ -188,6 +198,7 @@ func (g *sipGateway) handleRefresh(req *sip.Request, tx sip.ServerTransaction) {
 		if status == 422 {
 			res.AppendHeader(sip.NewHeader("Min-SE", "90"))
 		}
+		s.diagnostics.event("sip_refresh_result", "carrier", transportEvidenceError(err), status)
 		_ = tx.Respond(res)
 		return
 	}
@@ -221,12 +232,15 @@ func (g *sipGateway) handleRefresh(req *sip.Request, tx sip.ServerTransaction) {
 		s.answerMu.Unlock()
 		defer func() { s.answerMu.Lock(); s.refreshACK = nil; s.answerMu.Unlock() }()
 		if err = s.respondRefresh(tx, response, ack); err != nil {
+			s.diagnostics.event("sip_refresh_result", "carrier", transportEvidenceError(err), 0)
 			s.finish("local_error", err)
 			return
 		}
 	} else if err = tx.Respond(response); err != nil {
+		s.diagnostics.event("sip_refresh_result", "carrier", transportEvidenceError(err), 0)
 		return
 	}
+	s.diagnostics.event("sip_refresh_result", "carrier", "", 200)
 	s.answerMu.Lock()
 	if s.media != nil {
 		s.media.remoteMode.Store(sipRemoteMediaMode(direction))
@@ -315,7 +329,16 @@ func (s *sipSession) runSessionTimer() {
 
 var errSIPRefreshPending = errors.New("SIP refresh collision")
 
-func (s *sipSession) sendSessionRefresh(timer sipSessionTimer) error {
+func (s *sipSession) sendSessionRefresh(timer sipSessionTimer) (result error) {
+	status := 0
+	s.diagnostics.event("sip_refresh_attempt", "local", "INVITE", 0)
+	defer func() {
+		detail := ""
+		if result != nil {
+			detail = transportEvidenceError(result)
+		}
+		s.diagnostics.event("sip_refresh_result", "local", detail, status)
+	}()
 	s.signalMu.Lock()
 	defer s.signalMu.Unlock()
 	if s.ended.Load() {
@@ -344,6 +367,7 @@ func (s *sipSession) sendSessionRefresh(timer sipSessionTimer) error {
 	if err != nil {
 		return err
 	}
+	status = response.StatusCode
 	if response.StatusCode == 491 {
 		return errSIPRefreshPending
 	}

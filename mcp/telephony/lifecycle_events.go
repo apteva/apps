@@ -809,13 +809,15 @@ func decodeLifecycleCursor(raw string) (lifecycleCursor, error) {
 }
 
 type callbackUpdate struct {
-	StreamID      string
-	Status        string
-	ProviderEvent string
-	Error         string
-	MediaStatus   string
-	MediaError    string
-	CarrierSID    string
+	SignatureValidation string
+	ReceivedAt          string
+	StreamID            string
+	Status              string
+	ProviderEvent       string
+	Error               string
+	MediaStatus         string
+	MediaError          string
+	CarrierSID          string
 	// AnsweredBy is a normalized answering machine detection result, empty
 	// when the callback carries none.
 	AnsweredBy string

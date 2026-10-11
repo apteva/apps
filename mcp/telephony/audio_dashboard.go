@@ -15,18 +15,20 @@ import (
 )
 
 // Values describe observation boundaries, not a diagnosis of the network or carrier.
-var audioDashboardIssues = map[string]bool{"concealed_audio": true, "playback_underrun": true, "dropped_audio": true, "sequence_gaps": true, "carrier_stall": true, "browser_error": true, "reconnect": true, "context_suspended": true, "scheduling_pause": true, "write_delay": true, "high_rtt": true, "audio_degraded": true}
-var audioDashboardStages = map[string]bool{"carrier_to_telephony": true, "telephony_to_browser": true, "browser_to_telephony": true}
+var audioDashboardIssues = map[string]bool{"concealed_audio": true, "playback_underrun": true, "dropped_audio": true, "sequence_gaps": true, "carrier_stall": true, "browser_error": true, "reconnect": true, "context_suspended": true, "scheduling_pause": true, "write_delay": true, "high_rtt": true, "audio_degraded": true, "carrier_error": true, "processing_error": true}
+var audioDashboardStages = map[string]bool{"carrier_to_telephony": true, "telephony_to_browser": true, "browser_to_telephony": true, "internal_processing": true}
 
 type audioDashboardSummary struct {
-	BrowserState string              `json:"browser_state,omitempty"`
-	ContextState string              `json:"context_state,omitempty"`
-	ObservedAt   string              `json:"observed_at"`
-	Telemetry    bool                `json:"telemetry"`
-	Issues       []string            `json:"issues"`
-	Stages       []string            `json:"stages"`
-	Health       audioHealthSnapshot `json:"health"`
-	Metrics      map[string]float64  `json:"metrics"`
+	CarrierTransport string                      `json:"carrier_transport,omitempty"`
+	Boundaries       map[string]audioHealthStage `json:"boundaries,omitempty"`
+	BrowserState     string                      `json:"browser_state,omitempty"`
+	ContextState     string                      `json:"context_state,omitempty"`
+	ObservedAt       string                      `json:"observed_at"`
+	Telemetry        bool                        `json:"telemetry"`
+	Issues           []string                    `json:"issues"`
+	Stages           []string                    `json:"stages"`
+	Health           audioHealthSnapshot         `json:"health"`
+	Metrics          map[string]float64          `json:"metrics"`
 }
 type audioDashboardCall struct {
 	ID           string `json:"call_id"`
@@ -56,6 +58,7 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 	_ = json.Unmarshal([]byte(row.CarrierAudioDiagnostics), &c)
 	s := audioDashboardSummary{Issues: []string{}, Stages: []string{}, Metrics: map[string]float64{}, Health: audioHealthSnapshot{Stages: map[string]audioHealthStage{}}}
 	observed := max(audioDashboardTime(b.ReceivedAt), audioDashboardTime(c.UpdatedAt))
+	s.Boundaries = audioBoundarySummary(b)
 	s.BrowserState = b.ConnectionState
 	s.ContextState = b.AudioContextState
 	s.Telemetry = b.ReceivedAt != "" || c.UpdatedAt != "" || b.Server != nil
@@ -207,7 +210,13 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 	for _, e := range b.SessionEvents {
 		add("browser_error", "", e.Outcome == "audio_error" || e.Outcome == "error" || e.Outcome == "transport_error" || e.Status >= 400 || e.Outcome == "failed" || e.Outcome == "revoked" || e.Outcome == "expired")
 	}
-	add("browser_error", "", row.MediaErrorMessage != "" || audioBrowserCloseError(row, row.MediaCloseCode, row.MediaDisconnectedAt, ""))
+	if row.MediaErrorMessage != "" || audioBrowserCloseError(row, row.MediaCloseCode, row.MediaDisconnectedAt, "") {
+		if row.MediaCloseLeg == "carrier" || row.MediaCloseLeg == "provider_event" {
+			add("carrier_error", "carrier_to_telephony", true)
+		} else {
+			add("processing_error", "internal_processing", true)
+		}
+	}
 	add("dropped_audio", "telephony_to_browser", m["playback_dropped_ms"]+m["browser_transport_dropped_ms"]+m["browser_source_dropped_ms"] > 0)
 	add("dropped_audio", "browser_to_telephony", m["capture_dropped_ms"] > 0)
 	add("sequence_gaps", "telephony_to_browser", m["playback_sequence_gaps"]+m["browser_transport_sequence_gaps"] > 0)
@@ -267,14 +276,30 @@ func (c *callsDB) refreshAudioDashboardAndNotify(ctx context.Context, notify fun
 	changed := map[string][]string{}
 	for _, id := range ids {
 		var r callRow
-		err = tx.QueryRowContext(ctx, `SELECT id,project_id,carrier_slug,placed_at,COALESCE(browser_audio_diagnostics,'{}'),COALESCE(carrier_audio_diagnostics,'{}'),COALESCE(media_error_message,''),COALESCE(media_close_code,0),COALESCE(peer_kind,'') FROM calls WHERE id=?`, id).Scan(&r.ID, &r.ProjectID, &r.CarrierSlug, &r.PlacedAt, &r.BrowserAudioDiagnostics, &r.CarrierAudioDiagnostics, &r.MediaErrorMessage, &r.MediaCloseCode, &r.PeerKind)
+		err = tx.QueryRowContext(ctx, `SELECT id,project_id,carrier_slug,placed_at,COALESCE(browser_audio_diagnostics,'{}'),COALESCE(carrier_audio_diagnostics,'{}'),COALESCE(media_error_message,''),COALESCE(media_close_code,0),COALESCE(peer_kind,''),COALESCE(media_close_leg,'') FROM calls WHERE id=?`, id).Scan(&r.ID, &r.ProjectID, &r.CarrierSlug, &r.PlacedAt, &r.BrowserAudioDiagnostics, &r.CarrierAudioDiagnostics, &r.MediaErrorMessage, &r.MediaCloseCode, &r.PeerKind, &r.MediaCloseLeg)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		if errors.Is(err, sql.ErrNoRows) || r.PeerKind != peerKindHuman {
+		var carrierRecord *carrierTelemetryRecord
+		if err == nil {
+			var raw string
+			e := tx.QueryRowContext(ctx, `SELECT sample_json FROM telephony_carrier_transport_latest WHERE project_id=? AND call_id=?`, r.ProjectID, id).Scan(&raw)
+			if e != nil && !errors.Is(e, sql.ErrNoRows) {
+				return e
+			}
+			if e == nil {
+				var value carrierTelemetryRecord
+				if e = json.Unmarshal([]byte(raw), &value); e != nil {
+					return e
+				}
+				carrierRecord = &value
+			}
+		}
+		if errors.Is(err, sql.ErrNoRows) || r.PeerKind != peerKindHuman && carrierRecord == nil {
 			_, err = tx.ExecContext(ctx, `DELETE FROM telephony_audio_reports WHERE call_id=?`, id)
 		} else {
 			s := summarizeAudioDashboard(&r)
+			addCarrierAudioSummary(&s, carrierRecord)
 			raw, e := json.Marshal(s)
 			if e != nil {
 				return e
@@ -464,7 +489,17 @@ func (a *App) handleAudioDashboard(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "load AI policy diagnostics", 500)
 			return
 		}
-		writeJSON(w, map[string]any{"ai_call_policy": policy, "carrier_bridges": bridges, "transport_samples": samples, "browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "network_events": network})
+		history, live, err := a.db().carrierTransportEvidence(r.Context(), project, id)
+		if err != nil {
+			http.Error(w, "load carrier transport evidence", 500)
+			return
+		}
+		commands, err := a.carrierCommandHistory(project, id)
+		if err != nil {
+			http.Error(w, "load carrier commands", 500)
+			return
+		}
+		writeJSON(w, map[string]any{"carrier_transport_history": history, "carrier_live": live, "carrier_commands": commands, "recovery_episodes": carrierRecoveryEpisodes(bridges), "ai_call_policy": policy, "carrier_bridges": bridges, "transport_samples": samples, "browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "network_events": network})
 		return
 	}
 	now := time.Now()

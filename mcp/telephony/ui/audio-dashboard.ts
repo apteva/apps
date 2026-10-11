@@ -9,9 +9,12 @@ export const audioStages = {
   carrier_to_telephony: "Carrier → Telephony",
   telephony_to_browser: "Telephony → browser",
   browser_to_telephony: "Browser → Telephony",
+ internal_processing:"Internal audio processing",
 };
 export const audioIssues = {
   audio_degraded: "Audio degradation",
+ carrier_error:"Carrier transport errors",
+ processing_error:"Internal processing errors",
   dropped_audio: "Dropped audio",
   playback_underrun: "Playback buffer gaps",
   concealed_audio: "WebRTC replacement audio",
@@ -49,6 +52,8 @@ export const defaultAudioFilters: AudioFilters = {
   search: "",
 };
 export interface AudioReport {
+ carrier_transport?: "sip" | "websocket";
+ boundaries?: Record<string, {state: string; reason?:string; signal?:string; last_bad_at?:string}>;
   call_id: string;
   provider: string;
   status: string;
@@ -232,8 +237,14 @@ export function audioStateLabel(state: string) {
         stale: "Telemetry stale",
         unobserved: "No telemetry",
         unavailable: "Health unavailable",
-        inactive: "Browser audio inactive",
+        inactive: "Audio inactive",
+        disconnected: "Transport disconnected",
       } as Record<string, string>
     )[state] || state
   );
+}
+
+export function audioBoundaryIndicators(report: AudioReport) {
+ const labels:Record<string,string>={carrier:report.carrier_transport==="sip"?"Carrier SIP / RTP":"Carrier stream",browser:"Browser WebRTC / WebSocket",internal:"Internal audio processing"};
+ return Object.entries(labels).map(([key,label])=>({key,label,state:report.boundaries?.[key]?.state||"unobserved",reason:report.boundaries?.[key]?.reason||""}));
 }

@@ -1,0 +1,63 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/apteva/apps/mcp/telephony
+cpu: Apple M1 Pro
+BenchmarkSIPTelemetryPacketPipeline/RTP/1_calls/observe_false-10         	 1189020	       309.3 ns/op	         0.001546 CPU-percent	     640 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/RTP/1_calls/observe_false-10         	 1235844	       293.3 ns/op	         0.001467 CPU-percent	     640 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/RTP/1_calls/observe_false-10         	 1225064	       294.3 ns/op	         0.001471 CPU-percent	     640 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/RTP/1_calls/observe_true-10          	  862998	       385.9 ns/op	         0.001930 CPU-percent	     640 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/RTP/1_calls/observe_true-10          	  888888	       382.8 ns/op	         0.001914 CPU-percent	     640 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/RTP/1_calls/observe_true-10          	  981751	       368.2 ns/op	         0.001841 CPU-percent	     640 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/RTP/10_calls/observe_false-10        	 1210100	       300.1 ns/op	         0.01501 CPU-percent	     640 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/RTP/10_calls/observe_false-10        	 1241976	       292.0 ns/op	         0.01460 CPU-percent	     640 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/RTP/10_calls/observe_false-10        	 1000000	       313.9 ns/op	         0.01570 CPU-percent	     640 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/RTP/10_calls/observe_true-10         	  928692	       395.1 ns/op	         0.01975 CPU-percent	     640 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/RTP/10_calls/observe_true-10         	  901558	       385.9 ns/op	         0.01930 CPU-percent	     640 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/RTP/10_calls/observe_true-10         	  931606	       383.7 ns/op	         0.01918 CPU-percent	     640 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/RTP/50_calls/observe_false-10        	 1000000	       304.1 ns/op	         0.07602 CPU-percent	     640 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/RTP/50_calls/observe_false-10        	 1000000	       314.4 ns/op	         0.07859 CPU-percent	     640 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/RTP/50_calls/observe_false-10        	 1000000	       300.6 ns/op	         0.07514 CPU-percent	     640 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/RTP/50_calls/observe_true-10         	  888925	       375.9 ns/op	         0.09396 CPU-percent	     640 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/RTP/50_calls/observe_true-10         	  965728	       375.9 ns/op	         0.09398 CPU-percent	     640 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/RTP/50_calls/observe_true-10         	  913192	       396.9 ns/op	         0.09923 CPU-percent	     640 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/RTP/100_calls/observe_false-10       	 1000000	       310.0 ns/op	         0.1550 CPU-percent	     640 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/RTP/100_calls/observe_false-10       	 1000000	       306.4 ns/op	         0.1532 CPU-percent	     640 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/RTP/100_calls/observe_false-10       	 1000000	       306.5 ns/op	         0.1533 CPU-percent	     640 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/RTP/100_calls/observe_true-10        	  939231	       396.4 ns/op	         0.1982 CPU-percent	     641 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/RTP/100_calls/observe_true-10        	  943015	       400.3 ns/op	         0.2001 CPU-percent	     641 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/RTP/100_calls/observe_true-10        	  903481	       391.5 ns/op	         0.1957 CPU-percent	     641 B/op	       3 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/1_calls/observe_false-10        	  286082	      1219 ns/op	         0.006096 CPU-percent	    1200 B/op	       7 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/1_calls/observe_false-10        	  295626	      1200 ns/op	         0.006001 CPU-percent	    1200 B/op	       7 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/1_calls/observe_false-10        	  292962	      1202 ns/op	         0.006010 CPU-percent	    1200 B/op	       7 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/1_calls/observe_true-10         	  270402	      1390 ns/op	         0.006952 CPU-percent	    1200 B/op	       7 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/1_calls/observe_true-10         	  263703	      1312 ns/op	         0.006559 CPU-percent	    1200 B/op	       7 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/1_calls/observe_true-10         	  284635	      1347 ns/op	         0.006736 CPU-percent	    1200 B/op	       7 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/10_calls/observe_false-10       	  280665	      1234 ns/op	         0.06170 CPU-percent	    1200 B/op	       7 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/10_calls/observe_false-10       	  299158	      1264 ns/op	         0.06319 CPU-percent	    1200 B/op	       7 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/10_calls/observe_false-10       	  279105	      1285 ns/op	         0.06424 CPU-percent	    1200 B/op	       7 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/10_calls/observe_true-10        	  258331	      1361 ns/op	         0.06806 CPU-percent	    1201 B/op	       7 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/10_calls/observe_true-10        	  263688	      1338 ns/op	         0.06692 CPU-percent	    1201 B/op	       7 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/10_calls/observe_true-10        	  265574	      1322 ns/op	         0.06612 CPU-percent	    1201 B/op	       7 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/50_calls/observe_false-10       	  285930	      1241 ns/op	         0.3103 CPU-percent	    1200 B/op	       7 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/50_calls/observe_false-10       	  266378	      1264 ns/op	         0.3160 CPU-percent	    1200 B/op	       7 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/50_calls/observe_false-10       	  287682	      1401 ns/op	         0.3502 CPU-percent	    1200 B/op	       7 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/50_calls/observe_true-10        	  211600	      1431 ns/op	         0.3577 CPU-percent	    1203 B/op	       7 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/50_calls/observe_true-10        	  248799	      1321 ns/op	         0.3302 CPU-percent	    1202 B/op	       7 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/50_calls/observe_true-10        	  278037	      1336 ns/op	         0.3339 CPU-percent	    1202 B/op	       7 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/100_calls/observe_false-10      	  295627	      1245 ns/op	         0.6223 CPU-percent	    1200 B/op	       7 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/100_calls/observe_false-10      	  275518	      1271 ns/op	         0.6357 CPU-percent	    1200 B/op	       7 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/100_calls/observe_false-10      	  288624	      1225 ns/op	         0.6124 CPU-percent	    1200 B/op	       7 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/100_calls/observe_true-10       	  266768	      1321 ns/op	         0.6605 CPU-percent	    1205 B/op	       7 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/100_calls/observe_true-10       	  264811	      1352 ns/op	         0.6759 CPU-percent	    1205 B/op	       7 allocs/op
+BenchmarkSIPTelemetryPacketPipeline/SRTP/100_calls/observe_true-10       	  257055	      1348 ns/op	         0.6738 CPU-percent	    1205 B/op	       7 allocs/op
+BenchmarkSIPTelemetryBusySampler-10                                      	 6562346	        54.26 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSIPTelemetryBusySampler-10                                      	 6565538	        56.72 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSIPTelemetryBusySampler-10                                      	 6491784	        54.05 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCarrierTelemetryFullQueue-10                                    	28647687	        12.76 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCarrierTelemetryFullQueue-10                                    	27914911	        12.83 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCarrierTelemetryFullQueue-10                                    	28389673	        12.76 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSIPTelemetrySendBookkeeping-10                                  	 3173904	       112.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSIPTelemetrySendBookkeeping-10                                  	 3130712	       112.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSIPTelemetrySendBookkeeping-10                                  	 3179140	       112.3 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/apteva/apps/mcp/telephony	23.080s

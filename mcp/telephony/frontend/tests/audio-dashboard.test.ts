@@ -83,3 +83,11 @@ test("widget settings bounded and no-telemetry labels do not claim healthy audio
   expect(audioStateLabel("unobserved")).toBe("No telemetry");
   expect(audioStateLabel("stale")).toBe("Telemetry stale");
 });
+
+test("audio health identifies carrier, browser and internal boundaries separately", async () => {
+  const {audioBoundaryIndicators} = await import("../../ui/audio-dashboard");
+  const values = audioBoundaryIndicators({carrier_transport:"sip",boundaries:{carrier:{state:"audio_degraded"},browser:{state:"healthy"},internal:{state:"healthy"}}} as any);
+  expect(values.map(v=>v.label)).toEqual(["Carrier SIP / RTP","Browser WebRTC / WebSocket","Internal audio processing"]);
+  expect(values.map(v=>v.state)).toEqual(["audio_degraded","healthy","healthy"]);
+  expect(audioBoundaryIndicators({} as any).every(v=>v.state==="unobserved")).toBe(true);
+});

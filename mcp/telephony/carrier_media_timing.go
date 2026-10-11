@@ -109,8 +109,6 @@ func (r *carrierReception) begin(continuous bool) {
 	r.s.Epoch++
 	r.s.Stream = ""
 	r.s.ContinuousExpected = continuous
-	r.s.Stalled = false
-	r.s.LastReceiptMS = 0
 	r.set = false
 	r.lastSequence = 0
 	r.batchMS = 0

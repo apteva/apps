@@ -94,22 +94,56 @@ func (b *carrierBridgeLease) scheduleRecovery() {
 }
 
 type carrierBridgeEvidence struct {
-	Transport         *websocketTransportSnapshot `json:"transport,omitempty"`
-	At                string                      `json:"at"`
-	OccurredAt        string                      `json:"occurred_at,omitempty"`
-	Kind              string                      `json:"kind"`
-	Leg               string                      `json:"leg,omitempty"`
-	Detail            string                      `json:"detail,omitempty"`
-	EventID           string                      `json:"provider_event_id,omitempty"`
-	StreamID          string                      `json:"stream_id,omitempty"`
-	ActualCloseCode   int                         `json:"actual_close_code,omitempty"`
-	ActualCloseReason string                      `json:"actual_close_reason,omitempty"`
-	LocalCloseCode    int                         `json:"local_close_code,omitempty"`
+	ReceivedAt          string                      `json:"received_at,omitempty"`
+	ID                  string                      `json:"id,omitempty"`
+	InstallID           int64                       `json:"install_id,omitempty"`
+	ProjectID           string                      `json:"project_id,omitempty"`
+	CallID              string                      `json:"call_id,omitempty"`
+	BridgeGeneration    string                      `json:"bridge_generation,omitempty"`
+	ProxyConnectionID   string                      `json:"proxy_connection_id,omitempty"`
+	RecoveryEpisodeID   string                      `json:"recovery_episode_id,omitempty"`
+	ProviderEvent       string                      `json:"provider_event_type,omitempty"`
+	SignatureValidation string                      `json:"signature_validation,omitempty"`
+	AfterLocalCancel    bool                        `json:"after_local_cancel,omitempty"`
+	PeerCloseReceived   bool                        `json:"peer_close_received,omitempty"`
+	Trigger             string                      `json:"trigger,omitempty"`
+	ErrorClass          string                      `json:"error_class,omitempty"`
+	CommandID           string                      `json:"command_id,omitempty"`
+	AttemptID           string                      `json:"attempt_id,omitempty"`
+	DispatchAt          string                      `json:"dispatch_at,omitempty"`
+	ResultAt            string                      `json:"result_at,omitempty"`
+	HTTPStatus          int                         `json:"http_status,omitempty"`
+	ProviderRequestID   string                      `json:"provider_request_id,omitempty"`
+	CancellationReason  string                      `json:"cancellation_reason,omitempty"`
+	LocalCloseReason    string                      `json:"local_close_reason,omitempty"`
+	LastReadAt          string                      `json:"last_read_at,omitempty"`
+	LastWriteAt         string                      `json:"last_write_at,omitempty"`
+	LastPingAt          string                      `json:"last_ping_at,omitempty"`
+	LastPongAt          string                      `json:"last_pong_at,omitempty"`
+	Transport           *websocketTransportSnapshot `json:"transport,omitempty"`
+	At                  string                      `json:"at"`
+	OccurredAt          string                      `json:"occurred_at,omitempty"`
+	Kind                string                      `json:"kind"`
+	Leg                 string                      `json:"leg,omitempty"`
+	Detail              string                      `json:"detail,omitempty"`
+	EventID             string                      `json:"provider_event_id,omitempty"`
+	StreamID            string                      `json:"stream_id,omitempty"`
+	ActualCloseCode     int                         `json:"actual_close_code,omitempty"`
+	ActualCloseReason   string                      `json:"actual_close_reason,omitempty"`
+	LocalCloseCode      int                         `json:"local_close_code,omitempty"`
 }
 type carrierBridgeLease struct {
+	arrival       *carrierArrivalTiming
 	app           *App
 	row           callRow
 	generation    string
+	proxyID       string
+	episodeID     string
+	rawCancel     context.CancelFunc
+	localCancel   sync.Once
+	commandReason string
+	commandID     string
+	attemptID     string
 	started       time.Time
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -152,13 +186,24 @@ func carrierEvidenceDetail(row *callRow, value string) string {
 	return value
 }
 func normalizeCarrierEvidence(row *callRow, e carrierBridgeEvidence) carrierBridgeEvidence {
-	e.At = ringTime(time.Now())
-	e.Detail = carrierEvidenceDetail(row, e.Detail)
-	e.ActualCloseReason = carrierEvidenceDetail(row, e.ActualCloseReason)
+	if e.At == "" {
+		e.At = ringTime(time.Now())
+	}
+	if e.ID == "" {
+		e.ID = newCallID()
+	}
+	e.Detail = sanitizeCarrierDetail(row, e.Detail)
+	e.ActualCloseReason = sanitizeCarrierDetail(row, e.ActualCloseReason)
 	e.EventID = limitDiagnosticText(e.EventID, 256)
 	e.StreamID = limitDiagnosticText(e.StreamID, 256)
 	e.OccurredAt = limitDiagnosticText(e.OccurredAt, 40)
 	e.Kind = limitDiagnosticText(e.Kind, 40)
+	e.Trigger = boundedTransportID(e.Trigger)
+	e.ProviderEvent = boundedTransportID(e.ProviderEvent)
+	e.ProxyConnectionID = boundedTransportID(e.ProxyConnectionID)
+	e.ProviderRequestID = boundedTransportID(e.ProviderRequestID)
+	e.CancellationReason = boundedTransportID(e.CancellationReason)
+	e.LocalCloseReason = sanitizeCarrierDetail(row, e.LocalCloseReason)
 	e.Leg = limitDiagnosticText(e.Leg, 40)
 	return e
 }
@@ -172,7 +217,7 @@ func transportEvidenceError(err error) string {
 	}
 	return fmt.Sprintf("%T: %v", err, err)
 }
-func (a *App) claimCarrierBridge(row *callRow, parent context.Context) (*carrierBridgeLease, error) {
+func (a *App) claimCarrierBridge(row *callRow, parent context.Context, proxyIDs ...string) (*carrierBridgeLease, error) {
 	unlock := a.softphones.lockClaim(row.ID)
 	defer unlock()
 	r := &a.mediaBridges
@@ -191,14 +236,24 @@ func (a *App) claimCarrierBridge(row *callRow, parent context.Context) (*carrier
 	}
 	ctx, cancel := context.WithCancel(parent)
 	b := &carrierBridgeLease{app: a, row: *row, generation: newCallID(), started: time.Now().UTC(), ctx: ctx, cancel: cancel, closeState: &websocketCloseState{}}
+	b.rawCancel = cancel
+	b.arrival = &carrierArrivalTiming{}
+	if old != nil {
+		b.arrival = old.arrival
+	}
+	if len(proxyIDs) > 0 {
+		b.proxyID = boundedTransportID(proxyIDs[0])
+	}
 	b.lastRead.Store(time.Now().UnixNano())
 	if old != nil {
 		old.closeSockets()
 		old.mu.Lock()
 		if old.commandCancel != nil {
+			old.commandReason = "replacement_connected"
+			old.appendLocked(carrierBridgeEvidence{Kind: "recovery_command_canceled", Trigger: "replacement_connected", CommandID: old.commandID, AttemptID: old.attemptID, CancellationReason: "replacement_connected", AfterLocalCancel: old.ctx.Err() != nil})
 			old.commandCancel()
 		}
-		b.deadline, b.attempts = old.deadline, old.attempts
+		b.deadline, b.attempts, b.episodeID = old.deadline, old.attempts, old.episodeID
 		old.mu.Unlock()
 	}
 	tx, err := a.db().db.Begin()
@@ -221,9 +276,9 @@ func (a *App) claimCarrierBridge(row *callRow, parent context.Context) (*carrier
 	}
 	// Rehydrate a bounded recovery budget after worker/process interruptions.
 	if old == nil {
-		_ = tx.QueryRow(`SELECT deadline_at,attempts FROM carrier_media_bridges WHERE call_id=? AND project_id=? AND state IN ('recovering','connecting') AND deadline_at<>'' ORDER BY started_at DESC LIMIT 1`, row.ID, row.ProjectID).Scan(&b.deadline, &b.attempts)
+		_ = tx.QueryRow(`SELECT deadline_at,attempts,recovery_episode_id FROM carrier_media_bridges WHERE call_id=? AND project_id=? AND state IN ('recovering','connecting') AND deadline_at<>'' ORDER BY started_at DESC LIMIT 1`, row.ID, row.ProjectID).Scan(&b.deadline, &b.attempts, &b.episodeID)
 	}
-	_, err = tx.Exec(`INSERT INTO carrier_media_bridges(generation,call_id,project_id,provider,started_at,deadline_at,attempts) VALUES(?,?,?,?,?,?,?)`, b.generation, row.ID, row.ProjectID, row.CarrierSlug, ringTime(b.started), b.deadline, b.attempts)
+	_, err = tx.Exec(`INSERT INTO carrier_media_bridges(generation,call_id,project_id,provider,started_at,deadline_at,attempts,proxy_connection_id,recovery_episode_id) VALUES(?,?,?,?,?,?,?,?,?)`, b.generation, row.ID, row.ProjectID, row.CarrierSlug, ringTime(b.started), b.deadline, b.attempts, b.proxyID, b.episodeID)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -243,10 +298,22 @@ func (a *App) claimCarrierBridge(row *callRow, parent context.Context) (*carrier
 		cancel()
 		return nil, err
 	}
+	b.cancel = func() {
+		leg, code, reason := b.closeState.Cause()
+		b.cancelWithCause("bridge_handler_exit", leg, int(code), reason, "")
+	}
 	r.current[row.ID] = b
+	b.app.carrierTelemetry.registerBridge(b)
+	if old != nil {
+		b.app.carrierTelemetry.unregisterBridge(old)
+	}
+	b.mu.Lock()
+	b.appendLocked(carrierBridgeEvidence{Kind: "bridge_claimed"})
+	b.mu.Unlock()
 	// Socket closure must interrupt blocked reads/writes, including during dial.
 	go func() {
 		<-ctx.Done()
+		b.recordLocalCancellation("parent_context_canceled", mediaCloseLegRequest, 1001, "media request context canceled", "")
 		timer := time.NewTimer(500 * time.Millisecond)
 		defer timer.Stop()
 		<-timer.C
@@ -275,14 +342,24 @@ func (b *carrierBridgeLease) closeSockets() {
 }
 func (b *carrierBridgeLease) appendLocked(e carrierBridgeEvidence) {
 	e = normalizeCarrierEvidence(&b.row, e)
+	e.InstallID = b.app.installID
+	e.ProjectID = b.row.ProjectID
+	e.CallID = b.row.ID
+	e.BridgeGeneration = b.generation
+	e.ProxyConnectionID = b.proxyID
+	e.RecoveryEpisodeID = b.episodeID
+	if e.StreamID == "" {
+		e.StreamID = b.stream
+	}
 	if e.EventID != "" {
 		for _, old := range b.events {
-			if old.EventID == e.EventID {
+			if old.EventID == e.EventID && old.Kind == e.Kind {
 				return
 			}
 		}
 	}
 	b.events = append(b.events, e)
+	b.app.carrierTelemetry.enqueue(carrierTelemetryRecord{ID: e.ID, InstallID: e.InstallID, ProjectID: e.ProjectID, CallID: e.CallID, Kind: "event", At: e.At, BridgeGeneration: b.generation, ProxyConnectionID: b.proxyID, StreamID: e.StreamID, RecoveryEpisodeID: e.RecoveryEpisodeID, Event: &e})
 	if len(b.events) > 48 {
 		b.events = append([]carrierBridgeEvidence(nil), b.events[len(b.events)-48:]...)
 	}
@@ -295,11 +372,14 @@ func (b *carrierBridgeLease) persistLocked(state string) error {
 		first, _ = json.Marshal(b.first)
 		at = b.first.At
 	}
-	_, err := b.app.db().db.Exec(`UPDATE carrier_media_bridges SET state=CASE WHEN state IN ('ended','failed','replaced') THEN state ELSE ? END,stream_id=?,events_json=?,first_failed_at=CASE WHEN first_failed_at='' THEN ? ELSE first_failed_at END,first_failure_json=CASE WHEN first_failed_at='' THEN ? ELSE first_failure_json END,deadline_at=?,attempts=? WHERE generation=?`, state, b.stream, string(events), at, string(first), b.deadline, b.attempts, b.generation)
+	_, err := b.app.db().db.Exec(`UPDATE carrier_media_bridges SET state=CASE WHEN state IN ('ended','failed','replaced') THEN state ELSE ? END,stream_id=?,events_json=?,first_failed_at=CASE WHEN first_failed_at='' THEN ? ELSE first_failed_at END,first_failure_json=CASE WHEN first_failed_at='' THEN ? ELSE first_failure_json END,deadline_at=?,attempts=?,recovery_episode_id=? WHERE generation=?`, state, b.stream, string(events), at, string(first), b.deadline, b.attempts, b.episodeID, b.generation)
 	return err
 }
 func (b *carrierBridgeLease) fail(e carrierBridgeEvidence) {
 	b.mu.Lock()
+	if b.ctx.Err() == nil && (b.episodeID == "" || b.flowing.Load() && b.deadline == "") {
+		b.episodeID = newCallID()
+	}
 	b.appendLocked(e)
 	// Later cleanup/callbacks add evidence but cannot change the first cause,
 	// extend the recovery budget, or revive a canceled generation.
@@ -316,12 +396,29 @@ func (b *carrierBridgeLease) fail(e carrierBridgeEvidence) {
 	}
 	if b.deadline == "" {
 		b.deadline = ringTime(time.Now().Add(time.Duration(mediaRecoveryOrDefault(b.row.MediaRecoveryTimeoutSec)) * time.Second))
+		if b.episodeID == "" {
+			b.episodeID = newCallID()
+		}
 	}
 	first := *b.first
 	b.flowing.Store(false)
 	b.mu.Unlock()
 	b.closeState.SetLeg(mediaCloseLegLocalError, ws.StatusGoingAway, "carrier media recovering")
-	b.cancel()
+	trigger := e.Trigger
+	if trigger == "" {
+		switch e.Kind {
+		case "transport_read_error":
+			trigger = e.Leg + "_read_error"
+		case "transport_write_error":
+			trigger = e.Leg + "_write_error"
+		default:
+			trigger = "bridge_failure"
+		}
+		if e.ProviderEvent != "" {
+			trigger = "provider_failure_webhook"
+		}
+	}
+	b.cancelWithCause(trigger, mediaCloseLegLocalError, 1001, "carrier media recovering", e.EventID)
 	if e.ActualCloseCode != 1000 && e.ActualCloseCode != 1001 {
 		b.closeSockets()
 	}
@@ -337,19 +434,52 @@ func (b *carrierBridgeLease) fail(e carrierBridgeEvidence) {
 	b.scheduleRecovery()
 }
 func (b *carrierBridgeLease) socketError(leg mediaCloseLeg, operation string, err error) {
-	if b.ctx.Err() != nil {
-		return
+	class, _ := audioSocketError(err)
+	e := carrierBridgeEvidence{Kind: "transport_" + operation + "_error", Leg: string(leg), Detail: transportEvidenceError(err), ErrorClass: class, AfterLocalCancel: b.ctx.Err() != nil}
+	b.mu.Lock()
+	w := b.writers[leg]
+	b.mu.Unlock()
+	if w != nil {
+		activity := &w.activity
+		e.LastReadAt = audioActivityTime(activity.read.Load())
+		e.LastWriteAt = audioActivityTime(activity.write.Load())
+		e.LastPingAt = audioActivityTime(activity.ping.Load())
+		e.LastPongAt = audioActivityTime(activity.pong.Load())
 	}
-	e := carrierBridgeEvidence{Kind: "socket_" + operation, Leg: string(leg), Detail: transportEvidenceError(err)}
 	var closed wsutil.ClosedError
-	if errors.As(err, &closed) {
+	if errors.As(err, &closed) && closed.Code != 1006 {
 		e.ActualCloseCode = int(closed.Code)
 		e.ActualCloseReason = carrierEvidenceDetail(&b.row, closed.Reason)
 		if closed.Code == 1000 || closed.Code == 1001 {
 			b.closeState.SetLeg(leg, closed.Code, closed.Reason)
 		}
 	}
+	if e.AfterLocalCancel {
+		b.mu.Lock()
+		b.appendLocked(e)
+		b.mu.Unlock()
+		return
+	}
 	b.fail(e)
+}
+func (b *carrierBridgeLease) recordLocalCancellation(trigger string, leg mediaCloseLeg, code int, reason, eventID string) {
+	b.localCancel.Do(func() {
+		e := carrierBridgeEvidence{Kind: "local_close_requested", Trigger: trigger, Leg: string(leg), LocalCloseCode: code, LocalCloseReason: reason, EventID: eventID, AfterLocalCancel: b.ctx.Err() != nil}
+		if b.mu.TryLock() {
+			b.appendLocked(e)
+			b.mu.Unlock()
+		} else {
+			e = normalizeCarrierEvidence(&b.row, e)
+			b.app.carrierTelemetry.enqueue(carrierTelemetryRecord{ID: e.ID, InstallID: b.app.installID, ProjectID: b.row.ProjectID, CallID: b.row.ID, Kind: "event", At: e.At, BridgeGeneration: b.generation, ProxyConnectionID: b.proxyID, Event: &e})
+		}
+	})
+}
+func (b *carrierBridgeLease) cancelWithCause(trigger string, leg mediaCloseLeg, code int, reason, eventID string) {
+	b.recordLocalCancellation(trigger, leg, code, reason, eventID)
+	b.rawCancel()
+}
+func (b *carrierBridgeLease) receivedFor(leg mediaCloseLeg) func(ws.OpCode, []byte) {
+	return func(op ws.OpCode, data []byte) { b.receivedLeg(leg, op, data) }
 }
 func (b *carrierBridgeLease) setStream(id string) {
 	b.mu.Lock()
@@ -368,6 +498,12 @@ func (b *carrierBridgeLease) setStream(id string) {
 
 // Zero-valued PCM is valid media: recovery confirmation never depends on speech.
 func (b *carrierBridgeLease) media() {
+	now := time.Now().UnixNano()
+	previous := b.arrival.last.Swap(now)
+	b.arrival.frames.Add(1)
+	if previous > 0 {
+		atomicMax(&b.arrival.maxGap, now-previous)
+	}
 	// Established media never waits for lifecycle reporting locks/SQL.
 	if b.flowing.Load() || b.ctx.Err() != nil {
 		return
@@ -389,7 +525,12 @@ func (b *carrierBridgeLease) media() {
 	b.attempts = 0
 }
 func (b *carrierBridgeLease) received(op ws.OpCode, data []byte) {
-	b.lastRead.Store(time.Now().UnixNano())
+	b.receivedLeg(mediaCloseLegCarrier, op, data)
+}
+func (b *carrierBridgeLease) receivedLeg(leg mediaCloseLeg, op ws.OpCode, data []byte) {
+	if leg == mediaCloseLegCarrier {
+		b.lastRead.Store(time.Now().UnixNano())
+	}
 	// Keep the received close frame even if writing the close reply fails.
 	if op == ws.OpClose && len(data) != 1 {
 		code, reason := ws.StatusNoStatusRcvd, ""
@@ -400,7 +541,7 @@ func (b *carrierBridgeLease) received(op ws.OpCode, data []byte) {
 			}
 		}
 		b.mu.Lock()
-		b.appendLocked(carrierBridgeEvidence{Kind: "peer_close_frame", Leg: "carrier", ActualCloseCode: int(code), ActualCloseReason: carrierEvidenceDetail(&b.row, reason)})
+		b.appendLocked(carrierBridgeEvidence{Kind: "peer_close_received", PeerCloseReceived: true, Leg: string(leg), ActualCloseCode: int(code), ActualCloseReason: carrierEvidenceDetail(&b.row, reason)})
 		b.mu.Unlock()
 	}
 }
@@ -423,11 +564,12 @@ func (b *carrierBridgeLease) watch(writer *websocketWriterPump) {
 		if kind == "socket_write" {
 			detail = "carrier liveness write unavailable"
 		}
-		b.fail(carrierBridgeEvidence{Kind: kind, Leg: "carrier", Detail: detail})
+		b.fail(carrierBridgeEvidence{Kind: kind, Leg: "carrier", Detail: detail, Trigger: "protocol_liveness_timeout"})
 	})
 }
 func (b *carrierBridgeLease) finish() {
-	b.cancel()
+	leg0, code0, reason0 := b.closeState.Cause()
+	b.cancelWithCause("bridge_handler_exit", leg0, int(code0), reason0, "")
 	b.closeSockets()
 	b.mu.Lock()
 	if b.finished {
@@ -435,12 +577,16 @@ func (b *carrierBridgeLease) finish() {
 		return
 	}
 	b.finished = true
+	b.app.carrierTelemetry.unregisterBridge(b)
 	leg, code, reason := b.closeState.Cause()
 	state := "disconnected"
 	newFailure := false
 	if b.first == nil {
 		current, err := b.app.db().findCall(b.row.ID)
 		if err == nil && current != nil && !isTerminalStatus(current.Status) {
+			if b.deadline == "" {
+				b.episodeID = newCallID()
+			}
 			e := carrierBridgeEvidence{Kind: "bridge_ended", Leg: string(leg), Detail: reason, LocalCloseCode: int(code)}
 			b.appendLocked(e)
 			copy := b.events[len(b.events)-1]
@@ -483,12 +629,15 @@ func (a *App) cancelCarrierBridge(id string) {
 	if b != nil {
 		b.mu.Lock()
 		if b.commandCancel != nil {
+			b.commandReason = "call_ended"
+			b.appendLocked(carrierBridgeEvidence{Kind: "recovery_command_canceled", CommandID: b.commandID, AttemptID: b.attemptID, CancellationReason: "call_ended", Trigger: "call_ended"})
 			b.commandCancel()
 		}
 		b.mu.Unlock()
 		b.closeState.SetLeg(mediaCloseLegLocalError, ws.StatusNormalClosure, "call ended")
-		b.cancel()
+		b.cancelWithCause("call_ended", mediaCloseLegLocalError, 1000, "call ended", "")
 		b.closeSockets()
+		b.app.carrierTelemetry.unregisterBridge(b)
 		_ = a.db().updateMediaStatusWithLeg(id, "disconnected", "", 1000, "call ended", string(mediaCloseLegLocalError), b.generation)
 	}
 	_, _ = a.db().db.Exec(`UPDATE carrier_media_bridges SET state='ended',next_attempt_at='' WHERE call_id=? AND state IN ('connecting','connected','recovering','failed')`, id)
@@ -498,11 +647,11 @@ func (a *App) carrierStreamEvent(row *callRow, update callbackUpdate) bool {
 	b := a.mediaBridges.current[row.ID]
 	a.mediaBridges.mu.Unlock()
 	if b == nil {
-		managed := a.recordCarrierBridgeObservation(row, carrierBridgeEvidence{Kind: "provider_" + update.MediaStatus, Leg: "provider", Detail: update.MediaError, EventID: update.Facts.ProviderEventID, OccurredAt: update.Facts.OccurredAt, StreamID: update.StreamID})
+		managed := a.recordCarrierBridgeObservation(row, carrierBridgeEvidence{Kind: "provider_" + update.MediaStatus, Leg: "provider", Detail: update.MediaError, EventID: update.Facts.ProviderEventID, OccurredAt: update.Facts.OccurredAt, StreamID: update.StreamID, ProviderEvent: update.ProviderEvent, SignatureValidation: update.SignatureValidation, ReceivedAt: update.ReceivedAt})
 		return managed || (row.CarrierSlug == "telnyx" && update.MediaStatus == "connected")
 	}
 	b.mu.Lock()
-	e := carrierBridgeEvidence{Kind: "provider_" + update.MediaStatus, Leg: "provider", Detail: update.MediaError, EventID: update.Facts.ProviderEventID, OccurredAt: update.Facts.OccurredAt, StreamID: update.StreamID}
+	e := carrierBridgeEvidence{Kind: "provider_" + update.MediaStatus, Leg: "provider", Detail: update.MediaError, EventID: update.Facts.ProviderEventID, OccurredAt: update.Facts.OccurredAt, StreamID: update.StreamID, ProviderEvent: update.ProviderEvent, SignatureValidation: update.SignatureValidation, ReceivedAt: update.ReceivedAt}
 	stale := update.StreamID != "" && b.stream != "" && update.StreamID != b.stream
 	if at, err := time.Parse(time.RFC3339Nano, update.Facts.OccurredAt); err == nil && at.Before(b.started) {
 		stale = true
@@ -711,7 +860,10 @@ func (a *App) restartCarrierMedia(ctx *sdk.AppCtx, id, generation string) error 
 	if b != nil {
 		b.mu.Lock()
 		b.attempts = attempts
-		b.appendLocked(carrierBridgeEvidence{Kind: "recovery_attempt", Detail: fmt.Sprint(attempts)})
+		b.commandID = telnyxCommandID(id, "media-recovery-"+generation+fmt.Sprint(attempts))
+		b.attemptID = b.commandID
+		b.commandReason = ""
+		b.appendLocked(carrierBridgeEvidence{Kind: "recovery_attempt", Detail: fmt.Sprint(attempts), CommandID: b.commandID, AttemptID: b.attemptID, DispatchAt: ringTime(time.Now())})
 		_ = b.persistLocked("recovering")
 		b.mu.Unlock()
 	}
@@ -740,14 +892,21 @@ func (a *App) restartCarrierMedia(ctx *sdk.AppCtx, id, generation string) error 
 	}
 	unlock()
 	locked = false
-	err = restarter.RestartMedia(request, ctx, row, telnyxCommandID(id, "media-recovery-"+generation+fmt.Sprint(attempts)))
+	commandID := telnyxCommandID(id, "media-recovery-"+generation+fmt.Sprint(attempts))
+	commandEvidence := &carrierCommandObservation{}
+	request = context.WithValue(request, carrierCommandObservationKey{}, commandEvidence)
+	err = restarter.RestartMedia(request, ctx, row, commandID)
 	if b != nil {
 		b.mu.Lock()
 		detail := "accepted; awaiting replacement media"
 		if err != nil {
 			detail = transportEvidenceError(err)
 		}
-		b.appendLocked(carrierBridgeEvidence{Kind: "recovery_command_result", Detail: detail})
+		cancellation := b.commandReason
+		if cancellation == "" && request.Err() != nil {
+			cancellation = "command_deadline"
+		}
+		b.appendLocked(carrierBridgeEvidence{Kind: "recovery_command_result", Detail: detail, CommandID: commandID, AttemptID: commandID, ResultAt: ringTime(time.Now()), HTTPStatus: commandEvidence.Status, ProviderRequestID: commandEvidence.RequestID, CancellationReason: cancellation, AfterLocalCancel: b.ctx.Err() != nil})
 		_ = b.persistLocked("recovering")
 		b.mu.Unlock()
 	}
@@ -762,7 +921,7 @@ func (a *App) failCarrierRecovery(id, generation string, b *carrierBridgeLease, 
 		b.appendLocked(carrierBridgeEvidence{Kind: "recovery_failed", Detail: reason})
 		_ = b.persistLocked("failed")
 		b.mu.Unlock()
-		b.cancel()
+		b.cancelWithCause("recovery_budget_exhausted", mediaCloseLegLocalError, 1001, reason, "")
 		b.closeSockets()
 	}
 	_, err := a.db().db.Exec(`UPDATE carrier_media_bridges SET state='failed',next_attempt_at='' WHERE generation=? AND state IN ('connecting','recovering')`, generation)
@@ -773,7 +932,7 @@ func (a *App) failCarrierRecovery(id, generation string, b *carrierBridgeLease, 
 	return err
 }
 func (c *callsDB) carrierBridgeHistory(project, call string) ([]map[string]any, error) {
-	rows, err := c.db.Query(`SELECT generation,provider,stream_id,state,started_at,connected_at,first_failed_at,first_failure_json,cleanup_at,deadline_at,attempts,events_json FROM carrier_media_bridges WHERE project_id=? AND call_id=? ORDER BY started_at DESC LIMIT 32`, project, call)
+	rows, err := c.db.Query(`SELECT generation,provider,stream_id,state,started_at,connected_at,first_failed_at,first_failure_json,cleanup_at,deadline_at,attempts,events_json,proxy_connection_id,recovery_episode_id FROM carrier_media_bridges WHERE project_id=? AND call_id=? ORDER BY started_at DESC LIMIT 32`, project, call)
 	if err != nil {
 		return nil, err
 	}
@@ -782,10 +941,11 @@ func (c *callsDB) carrierBridgeHistory(project, call string) ([]map[string]any, 
 	for rows.Next() {
 		var gen, provider, stream, state, start, connected, failed, first, cleanup, deadline, events string
 		var attempts int
-		if err := rows.Scan(&gen, &provider, &stream, &state, &start, &connected, &failed, &first, &cleanup, &deadline, &attempts, &events); err != nil {
+		var proxy, episode string
+		if err := rows.Scan(&gen, &provider, &stream, &state, &start, &connected, &failed, &first, &cleanup, &deadline, &attempts, &events, &proxy, &episode); err != nil {
 			return nil, err
 		}
-		out = append(out, map[string]any{"generation": gen, "provider": provider, "stream_id": stream, "state": state, "started_at": start, "connected_at": connected, "first_failed_at": failed, "first_failure": json.RawMessage(first), "cleanup_at": cleanup, "deadline_at": deadline, "recovery_attempts": attempts, "events": json.RawMessage(events)})
+		out = append(out, map[string]any{"generation": gen, "bridge_generation": gen, "proxy_connection_id": proxy, "recovery_episode_id": episode, "project_id": project, "call_id": call, "provider": provider, "stream_id": stream, "state": state, "started_at": start, "connected_at": connected, "first_failed_at": failed, "first_failure": json.RawMessage(first), "cleanup_at": cleanup, "deadline_at": deadline, "recovery_attempts": attempts, "events": json.RawMessage(events)})
 	}
 	return out, rows.Err()
 }
@@ -799,11 +959,14 @@ func (a *App) stopCarrierBridges() {
 	for _, b := range all {
 		b.mu.Lock()
 		if b.commandCancel != nil {
+			b.commandReason = "application_shutdown"
+			b.appendLocked(carrierBridgeEvidence{Kind: "recovery_command_canceled", CommandID: b.commandID, AttemptID: b.attemptID, CancellationReason: "application_shutdown", Trigger: "application_shutdown"})
 			b.commandCancel()
 		}
 		b.mu.Unlock()
-		b.cancel()
+		b.cancelWithCause("application_shutdown", mediaCloseLegLocalError, 1001, "application shutting down", "")
 		b.closeSockets()
+		b.app.carrierTelemetry.unregisterBridge(b)
 	}
 }
 
