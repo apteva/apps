@@ -560,10 +560,10 @@ func TestSIPJitterQueueKeepsRecentSpeech(t *testing.T) {
 		b.push(uint16(i), bytes.Repeat([]byte{byte(i)}, 160))
 	}
 	frame, ok := b.pop()
-	if !ok || len(frame) == 0 || frame[0] < 34 {
+	if !ok || len(frame) == 0 || frame[0] < 32 {
 		t.Fatalf("kept stale speech: %v %v", frame, ok)
 	}
-	if b.buffered > 960 || b.droppedSamples == 0 {
+	if b.buffered > b.policy.CapacityMS*8 || b.droppedSamples == 0 {
 		t.Fatal("unbounded backlog or missing diagnostics")
 	}
 }

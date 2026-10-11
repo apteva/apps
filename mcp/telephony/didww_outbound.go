@@ -109,6 +109,7 @@ func didwwOutboundSettings(fields map[string]string) (didwwSIPSettings, error) {
 }
 
 type outboundSIPSession struct {
+	playbackPolicy sipPlaybackPolicy
 	diagnostics    *sipLiveDiagnostics
 	gateway        *sipGateway
 	callID         string
@@ -171,6 +172,17 @@ func (g *sipGateway) startSIPOutbound(row *callRow, settings didwwSIPSettings, t
 	if g.cfg.Transport != "tls" || (g.cfg.SRTPMode == sipSRTPRequired && !settings.secure) ||
 		(g.cfg.SRTPMode == sipSRTPDisabled && settings.secure) {
 		return errors.New("Outbound SIP TLS/SRTP settings conflict with the SIP gateway policy")
+	}
+	mediaSettings, err := g.app.localMediaSettings(row.ProjectID, row.RouteID)
+	if err != nil {
+		return fmt.Errorf("load outbound SIP media settings: %w", err)
+	}
+	if err := validateLocalMediaSettings(mediaSettings); err != nil {
+		return err
+	}
+	playbackPolicy := sipPlaybackPolicy{}
+	if mediaSettings.RTPPlayback != nil {
+		playbackPolicy = *mediaSettings.RTPPlayback
 	}
 	g.mu.Lock()
 	if g.stopping || g.outboundByCall[row.ID] != nil || g.outboundReserved[row.ID] {
@@ -253,7 +265,7 @@ func (g *sipGateway) startSIPOutbound(row *callRow, settings didwwSIPSettings, t
 		_ = dialog.Close()
 		return errors.New("Outbound SIP INVITE has no Call-ID")
 	}
-	s := &outboundSIPSession{gateway: g, callID: row.ID, providerCallID: providerCallID,
+	s := &outboundSIPSession{playbackPolicy: playbackPolicy, gateway: g, callID: row.ID, providerCallID: providerCallID,
 		dialog: dialog, media: media, localKey: localKey, settings: settings, ctx: ctx, cancel: cancel,
 		dialDeadline: dialDeadline,
 		maxDuration:  time.Duration(max(60, min(maxDurationSec, maximumConnectedDurationSec))) * time.Second,
@@ -392,7 +404,7 @@ func (s *outboundSIPSession) waitAnswer() {
 	_, _ = s.gateway.app.db().updateStatusWithFacts(s.callID, "in-progress", "", lifecycleFacts{Source: "provider", OccurredAt: time.Now().UTC().Format(time.RFC3339Nano)})
 	if !s.gateway.runTask(func() {
 		s.gateway.app.bridgeSIPMedia(sipBridgeSession{
-			callID: s.callID, ctx: s.ctx, media: s.media, finish: s.finish, hangup: s.hangup,
+			playbackPolicy: s.playbackPolicy, callID: s.callID, ctx: s.ctx, media: s.media, finish: s.finish, hangup: s.hangup,
 		})
 	}) {
 		s.finishWithStatus("local_error", "failed", errors.New("SIP gateway stopping"))

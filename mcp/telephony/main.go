@@ -48,7 +48,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.12.4
+version: 0.12.5
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -343,7 +343,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.12.4
+    ref: telephony/v0.12.5
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -688,7 +688,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "telephony_local_media_settings",
-			Description: "Read or save carrier-independent SIP media settings for future calls. Optional route_id overrides project defaults. config contains codecs, speech_tool, speech_input, sample_rate, prompts (text to private Storage file ID), gather_timeout_seconds and voicemail_max_seconds. inherit=true removes a route override.",
+			Description: "Read or save carrier-independent SIP media settings for future calls. Optional route_id overrides project defaults. config contains codecs, speech_tool, speech_input, sample_rate, prompts (text to private Storage file ID), gather_timeout_seconds, voicemail_max_seconds and bounded rtp_playback (target_ms, max_target_ms, capacity_ms, max_age_ms, concealment, clock_drift). inherit=true removes a route override.",
 			InputSchema: schemaObject(map[string]any{"route_id": map[string]any{"type": "string"}, "config": map[string]any{"type": "object"}, "inherit": map[string]any{"type": "boolean"}}, nil),
 			HandlerCtx:  a.toolLocalMediaSettings,
 		},

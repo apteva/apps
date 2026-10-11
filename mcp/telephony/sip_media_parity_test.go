@@ -373,7 +373,7 @@ func TestLocalSIPRecordingTracksPauseAndClose(t *testing.T) {
 		})
 	}
 }
-func TestLocalSIPCodecPreferencesAndG722LossSilence(t *testing.T) {
+func TestLocalSIPCodecPreferencesAndG722Concealment(t *testing.T) {
 	cfg := directSIPTestConfig()
 	body := []byte("v=0\r\no=- 1 1 IN IP4 203.0.113.5\r\ns=test\r\nc=IN IP4 203.0.113.5\r\nt=0 0\r\nm=audio 30000 RTP/AVP 9 0 8 101\r\na=rtpmap:9 G722/8000\r\na=rtpmap:101 telephone-event/8000\r\n")
 	offer, err := parseSIPMediaOfferCodecs(body, cfg, []string{"PCMA", "PCMU"})
@@ -397,19 +397,24 @@ func TestLocalSIPCodecPreferencesAndG722LossSilence(t *testing.T) {
 	if len(decoded) != 320 {
 		t.Fatal("G.722 duration mismatch")
 	}
-	jitter := newRTPJitterBuffer()
+	media = &sipRTPMedia{offer: offer} // Start a new decoder for this independent replay.
+	jitter := newRTPJitterBufferWithPolicy(sipPlaybackPolicy{MaxTargetMS: 60})
 	framer := newRTPAudioFramer(jitter, offer)
 	jitter.pushRTP(1, encoded, 0, time.Now())
 	jitter.pushRTP(3, encoded, 320, time.Now())
 	jitter.pushRTP(4, encoded, 480, time.Now())
-	_, _ = framer.popPCM(media)
+	first, _ := framer.popPCM(media)
+	peak := 0.0
+	for _, v := range first {
+		peak = math.Max(peak, math.Abs(float64(v)))
+	}
 	lost, ready := framer.popPCM(media)
 	if !ready {
 		t.Fatal("missing packet did not conceal")
 	}
 	for _, v := range lost {
-		if v != 0 {
-			t.Fatal("missing G.722 packet emitted decoder noise")
+		if math.Abs(float64(v)) > peak {
+			t.Fatal("missing G.722 packet emitted unbounded decoder noise")
 		}
 	}
 }
