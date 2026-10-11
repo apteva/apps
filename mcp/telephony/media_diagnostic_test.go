@@ -102,7 +102,7 @@ func TestMediaDiagnosticTransportEchoAndNoCalls(t *testing.T) {
 		t.Fatal("probe created call state", calls, claims)
 	}
 	raw, _ := json.Marshal(r)
-	if bytes.Contains(raw, []byte(token)) || bytes.Contains(raw, []byte("payload")) {
+	if bytes.Contains(raw, []byte(token)) || bytes.Contains(raw, []byte(`"payload":`)) {
 		t.Fatal("secret/audio retained")
 	}
 }
@@ -154,7 +154,7 @@ func TestMediaDiagnosticOperatorProjectIsolation(t *testing.T) {
 	if w := phoneTestRequest(a, &identity, "POST", "/media-diagnostics", map[string]any{}); w.Code != 403 {
 		t.Fatal("delegated user could create probe", w.Code)
 	}
-	if w := phoneTestRequest(a, nil, "POST", "/media-diagnostics", map[string]any{"duration_seconds": 301}); w.Code != 400 {
+	if w := phoneTestRequest(a, nil, "POST", "/media-diagnostics", map[string]any{"duration_seconds": -1}); w.Code != 400 {
 		t.Fatal(w.Code)
 	}
 	w := phoneTestRequest(a, nil, "POST", "/media-diagnostics", map[string]any{"duration_seconds": 3})
@@ -180,7 +180,7 @@ func TestMediaDiagnosticOperatorProjectIsolation(t *testing.T) {
 	}
 }
 func TestMediaDiagnosticPeerErrorsDurationAndShutdown(t *testing.T) {
-	for _, mode := range []string{"close", "eof", "invalid", "duration", "shutdown"} {
+	for _, mode := range []string{"close", "empty_close", "eof", "invalid", "duration", "shutdown"} {
 		t.Run(mode, func(t *testing.T) {
 			a := &App{}
 			duration := time.Minute
@@ -196,6 +196,9 @@ func TestMediaDiagnosticPeerErrorsDurationAndShutdown(t *testing.T) {
 			case "close":
 				_ = wsutil.WriteClientMessage(c, ws.OpClose, ws.NewCloseFrameBody(ws.StatusGoingAway, "peer left"))
 				_, _, _ = wsutil.ReadServerData(c)
+			case "empty_close":
+				_ = wsutil.WriteClientMessage(c, ws.OpClose, nil)
+				_, _, _ = wsutil.ReadServerData(c)
 			case "eof":
 				_ = c.Close()
 			case "invalid":
@@ -210,6 +213,10 @@ func TestMediaDiagnosticPeerErrorsDurationAndShutdown(t *testing.T) {
 			switch mode {
 			case "close":
 				if r.PeerCloseCode != 1001 || r.CloseReason != "peer left" || r.LocalShutdown || r.Disconnect.ErrorClass != "peer_close" {
+					t.Fatal(r)
+				}
+			case "empty_close":
+				if r.PeerCloseCode != 1005 || r.CloseCode != 1000 || r.CloseTrigger != "peer_close" || r.Disconnect.ErrorClass != "peer_close" {
 					t.Fatal(r)
 				}
 			case "eof":
@@ -384,5 +391,145 @@ func TestMediaDiagnosticRemountInvalidatesOldAdmission(t *testing.T) {
 	_, fresh, _ := d.create("new-project", time.Minute, now)
 	if _, status := d.claim(fresh, now); status != 0 {
 		t.Fatal("new mount cannot probe", status)
+	}
+}
+
+func TestMediaDiagnosticUnlimitedSettingsAndOperatorStop(t *testing.T) {
+	a, _ := withTelephonyTestContext(t, &answerPlatform{})
+	for _, body := range []map[string]any{{}, {"duration_seconds": 0}, {"duration_seconds": 3600, "media_kind": "ai"}} {
+		w := phoneTestRequest(a, nil, "POST", "/media-diagnostics", body)
+		if w.Code != 200 {
+			t.Fatalf("%d %s", w.Code, w.Body)
+		}
+		var result struct {
+			ID       string                  `json:"diagnostic_id"`
+			Token    string                  `json:"token"`
+			Settings mediaDiagnosticSettings `json:"settings"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		settings := result.Settings
+		if settings.ReadDeadlineMS != 0 || settings.ProtocolTimeoutMS != carrierProtocolTimeout.Milliseconds() || settings.PingIntervalMS != carrierProtocolPollInterval.Milliseconds() || settings.ForcedCloseMS != websocketForcedCloseTimeout.Milliseconds() {
+			t.Fatal(settings)
+		}
+		if body["media_kind"] == "ai" {
+			if settings.WriteDeadlineMS != 5000 {
+				t.Fatal(settings)
+			}
+		} else if settings.WriteDeadlineMS != 250 || settings.DurationSeconds != 0 {
+			t.Fatal(settings)
+		}
+		a.mediaDiagnostics.mu.Lock()
+		s := a.mediaDiagnostics.sessions[result.ID]
+		a.mediaDiagnostics.mu.Unlock()
+		server := httptest.NewServer(http.HandlerFunc(a.handleDiagnosticEcho))
+		c := diagnosticDial(t, server, result.Token)
+		diagnosticEcho(t, c, diagnosticMedia(1))
+		// Once attached the report lifetime is independent of token admission and duration.
+		a.mediaDiagnostics.mu.Lock()
+		s.connectUntil = time.Now().Add(-time.Hour)
+		if !s.retainUntil.IsZero() {
+			t.Fatal("active retention expires", s.retainUntil)
+		}
+		a.mediaDiagnostics.mu.Unlock()
+		w = phoneTestRequest(a, nil, "GET", "/media-diagnostics/"+result.ID, nil)
+		if w.Code != 200 {
+			t.Fatal(w.Code)
+		}
+		live := s.snapshot()
+		if live.Transport.Writes == 0 || live.Disconnect.LastReadAt == "" || live.Disconnect.LastAudioReadAt == "" {
+			t.Fatal(live)
+		}
+		w = phoneTestRequest(a, nil, "DELETE", "/media-diagnostics/"+result.ID, nil)
+		if w.Code != 200 {
+			t.Fatal(w.Code)
+		}
+		_, _, _ = wsutil.ReadServerData(c)
+		r := diagnosticFinished(t, s)
+		if r.CloseTrigger != "operator_stop" || r.CloseCode != 1000 || !r.LocalShutdown || r.Disconnect.ErrorClass != "local_closure" {
+			t.Fatal(r)
+		}
+		_ = c.Close()
+		server.Close()
+		a.mediaDiagnostics.mu.Lock()
+		if time.Until(s.retainUntil) < 9*time.Minute {
+			t.Fatal("retention not started at completion")
+		}
+		a.mediaDiagnostics.mu.Unlock()
+	}
+	for _, body := range []map[string]any{{"duration_seconds": -1}, {"duration_seconds": int64(9223372037)}, {"duration_seconds": 1.5}, {"media_kind": "bad"}} {
+		if w := phoneTestRequest(a, nil, "POST", "/media-diagnostics", body); w.Code != 400 {
+			t.Fatal(w.Code, w.Body)
+		}
+	}
+}
+func TestMediaDiagnosticStopInvalidatesPendingToken(t *testing.T) {
+	a, _ := withTelephonyTestContext(t, &answerPlatform{})
+	w := phoneTestRequest(a, nil, "POST", "/media-diagnostics", map[string]any{})
+	var result map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &result)
+	id := result["diagnostic_id"].(string)
+	if w := phoneTestRequest(a, nil, "DELETE", "/media-diagnostics/"+id, nil); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	if _, status := a.mediaDiagnostics.claim(result["token"].(string), time.Now()); status != 401 {
+		t.Fatal("stopped token accepted", status)
+	}
+}
+func TestMediaDiagnosticSharesCarrierLiveness(t *testing.T) {
+	left, right := net.Pipe()
+	defer right.Close()
+	writer := newWebSocketWriterPump(left, ws.StateServerSide)
+	defer writer.Stop()
+	defer left.Close()
+	failure := ""
+	if carrierProtocolTick(writer, false, func(s string) { failure = s }) || failure != "protocol_timeout" {
+		t.Fatal(failure)
+	}
+	if !carrierProtocolTick(writer, true, func(s string) { failure = s }) {
+		t.Fatal("healthy socket failed")
+	}
+	_ = right.SetReadDeadline(time.Now().Add(time.Second))
+	frame, err := ws.ReadFrame(right)
+	if err != nil || frame.Header.OpCode != ws.OpPing || string(frame.Payload) != "telephony-media" {
+		t.Fatal(frame, err)
+	}
+	b := &carrierBridgeLease{}
+	b.lastRead.Store(time.Now().UnixNano())
+	if !b.protocolHealthy(time.Now().Add(19*time.Second)) || b.protocolHealthy(time.Now().Add(21*time.Second)) {
+		t.Fatal("carrier health window changed")
+	}
+}
+
+// Actual same-socket liveness failure; the client intentionally does not pong.
+// ws.ReadFrame observes server pings without automatically acknowledging them.
+func TestMediaDiagnosticProtocolIdleReason(t *testing.T) {
+	a := &App{}
+	s, token, _ := a.mediaDiagnostics.create("local", 0, time.Now())
+	server := httptest.NewServer(http.HandlerFunc(a.handleDiagnosticEcho))
+	defer server.Close()
+	c := diagnosticDial(t, server, token)
+	diagnosticEcho(t, c, diagnosticMedia(1))
+	started := time.Now()
+	_ = c.SetDeadline(time.Now().Add(28 * time.Second))
+	pings := 0
+	for {
+		frame, err := ws.ReadFrame(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if frame.Header.OpCode == ws.OpPing {
+			pings++
+			continue
+		}
+		if frame.Header.OpCode != ws.OpClose {
+			t.Fatal(frame.Header)
+		}
+		break
+	}
+	r := diagnosticFinished(t, s)
+	if time.Since(started) < 19*time.Second || pings < 3 || r.CloseTrigger != "protocol_timeout" || r.Disconnect.ErrorClass != "timeout" || r.Disconnect.ErrorDetail != "carrier_protocol_liveness" || !r.LocalShutdown || r.Disconnect.LastReadAt == "" || r.Disconnect.LastPingSentAt == "" {
+		t.Fatal(pings, r)
 	}
 }
