@@ -66,6 +66,8 @@ changed or contacted.
   Both sockets closed normally; reports retained bounded events/checkpoints.
   Measured RTT/scheduler excursions remain documented in the echo guide and
   are not described as zero jitter or remote quality guarantees.
+- Client/benchmark/probe typechecks, Telephony-only headless/panel builds,
+  Go vet, native build and Linux amd64/arm64 builds (`CGO_ENABLED=0`) passed.
 - SDK dependency remains the topology-verified published **v0.99.0**; all Go
   gates use `GOWORK=off` rather than the unrelated local SDK working tree.
 
