@@ -300,7 +300,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.12.8
+    ref: telephony/v0.12.9
     entry: mcp/telephony
   port: 8080
   health_check: /health
