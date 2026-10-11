@@ -501,12 +501,15 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error {
+func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
 	a.mediaDiagnostics.stop()
 	a.stopAIPolicies()
 	a.stopCarrierBridges()
 	a.stopRoutingDispatcher()
 	a.stopSIPGateway()
+	if err := a.flushCarrierTelemetryOnShutdown(); err != nil && ctx != nil {
+		ctx.Logger().Warn("carrier telemetry shutdown flush incomplete", "error", err)
+	}
 	return nil
 }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }

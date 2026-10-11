@@ -40,11 +40,13 @@ live carrier-error counter.
 
 No SQL, JSON encoding, log writes or channel waits were added to successful RTP
 packet processing. Packet counters use atomics; sequence timing skips calculation
-under contention and reports the skipped observations. The jitter snapshot uses a
+under contention and reports the skipped observations. A skipped timing window
+restarts sequence estimation so reporting contention cannot fabricate packet loss. The jitter snapshot uses a
 best-effort bounded read of at most 12 buffered packets. Pacer and forwarding
  snapshots also skip busy locks, retain cumulative counters and expose availability. The background collector
 has a 2,048-record channel, 2,048 pending records, at most 1,024 registered sources,
-and 200-record SQL batches with a one-second context. Overflow discards diagnostic
+and 200-record SQL batches with a one-second context. Graceful unmount drains queued evidence best-effort after transport teardown,
+with a one-second budget and no wait for a busy collector. Overflow discards diagnostic
 records and logs the count; it does not pause or terminate audio.
 
 Live state updates every second. Healthy history is retained every five seconds;

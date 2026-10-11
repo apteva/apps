@@ -263,3 +263,31 @@ func TestSIPTelemetryDelayedDeliveryDistinctFromSilence(t *testing.T) {
 	}
 	d.end("local", nil)
 }
+
+func TestSIPTelemetrySkippedObservationIsNotPacketLoss(t *testing.T) {
+	var o sipRTPObservations
+	now := time.Now()
+	packet := func(sequence uint16) *rtp.Packet {
+		return &rtp.Packet{Header: rtp.Header{SequenceNumber: sequence, Timestamp: uint32(sequence) * 160, SSRC: 1}}
+	}
+	o.received(packet(1), 172, now, true)
+	o.timingMu.Lock()
+	for i := uint16(2); i <= 10; i++ {
+		o.received(packet(i), 172, now.Add(time.Duration(i)*20*time.Millisecond), true)
+	}
+	o.timingMu.Unlock()
+	o.received(packet(11), 172, now.Add(220*time.Millisecond), true)
+	s := o.snapshot(now.Add(time.Second))
+	if s.Packets != 11 || s.Skipped != 9 || s.SequenceLoss != 0 || s.SequenceGaps != 0 {
+		t.Fatal("reporting contention fabricated carrier loss", s)
+	}
+}
+
+func TestCarrierTelemetryFreshSampleDoesNotRefreshBrowserEvidence(t *testing.T) {
+	b := browserAudioDiagnostics{ReceivedAt: ringTime(time.Now().Add(-time.Hour)), ConnectionState: "connected", AudioContextState: "running"}
+	s := audioDashboardSummary{Metrics: map[string]float64{}, Health: audioHealthSnapshot{State: "audio_degraded"}, Boundaries: audioBoundarySummary(b)}
+	addCarrierAudioSummary(&s, &carrierTelemetryRecord{At: ringTime(time.Now()), SIP: &sipLiveSnapshot{State: "healthy"}})
+	if s.Boundaries["browser"].State != "stale" || s.Boundaries["carrier"].State != "healthy" || s.Health.State == "audio_degraded" {
+		t.Fatal("carrier sample laundered old browser evidence", s)
+	}
+}

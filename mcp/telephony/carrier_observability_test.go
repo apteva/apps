@@ -288,3 +288,35 @@ func TestCarrierEvidenceCommandSafeResultMetadata(t *testing.T) {
 		t.Fatal(evidence, err)
 	}
 }
+
+func TestCarrierEvidenceGracefulShutdownRetainsTrigger(t *testing.T) {
+	a, ctx := withTelephonyTestContext(t, &answerPlatform{})
+	row := recoveryCall(t, a, "shutdown-evidence", "telnyx")
+	_, err := a.claimCarrierBridge(row, t.Context(), "shutdown-proxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = a.OnUnmount(ctx); err != nil {
+		t.Fatal(err)
+	}
+	history, _, err := a.db().carrierTransportEvidence(t.Context(), row.ProjectID, row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, r := range history {
+		if r.Event != nil && r.Event.Kind == "local_close_requested" && r.Event.Trigger == "application_shutdown" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("graceful shutdown lost queued evidence", history)
+	}
+	a.carrierTelemetry.flushMu.Lock()
+	started := time.Now()
+	err = a.flushCarrierTelemetryOnShutdown()
+	a.carrierTelemetry.flushMu.Unlock()
+	if !errors.Is(err, errCarrierTelemetryBusy) || time.Since(started) > 100*time.Millisecond {
+		t.Fatal("shutdown blocked on collector", err)
+	}
+}

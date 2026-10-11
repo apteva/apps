@@ -627,7 +627,6 @@ func (a *App) cancelCarrierBridge(id string) {
 	delete(a.mediaBridges.current, id)
 	a.mediaBridges.mu.Unlock()
 	if b != nil {
-		b.app.carrierTelemetry.unregisterBridge(b)
 		b.mu.Lock()
 		if b.commandCancel != nil {
 			b.commandReason = "call_ended"
@@ -638,6 +637,7 @@ func (a *App) cancelCarrierBridge(id string) {
 		b.closeState.SetLeg(mediaCloseLegLocalError, ws.StatusNormalClosure, "call ended")
 		b.cancelWithCause("call_ended", mediaCloseLegLocalError, 1000, "call ended", "")
 		b.closeSockets()
+		b.app.carrierTelemetry.unregisterBridge(b)
 		_ = a.db().updateMediaStatusWithLeg(id, "disconnected", "", 1000, "call ended", string(mediaCloseLegLocalError), b.generation)
 	}
 	_, _ = a.db().db.Exec(`UPDATE carrier_media_bridges SET state='ended',next_attempt_at='' WHERE call_id=? AND state IN ('connecting','connected','recovering','failed')`, id)
@@ -957,7 +957,6 @@ func (a *App) stopCarrierBridges() {
 	a.mediaBridges.current = nil
 	a.mediaBridges.mu.Unlock()
 	for _, b := range all {
-		b.app.carrierTelemetry.unregisterBridge(b)
 		b.mu.Lock()
 		if b.commandCancel != nil {
 			b.commandReason = "application_shutdown"
@@ -967,6 +966,7 @@ func (a *App) stopCarrierBridges() {
 		b.mu.Unlock()
 		b.cancelWithCause("application_shutdown", mediaCloseLegLocalError, 1001, "application shutting down", "")
 		b.closeSockets()
+		b.app.carrierTelemetry.unregisterBridge(b)
 	}
 }
 

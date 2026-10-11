@@ -11,21 +11,21 @@ second). Audio codecs, packet validation/security and queue limits are retained.
 
 | Transport | Simulated calls | Baseline ns/frame | Telemetry ns/frame | Added ns/frame |
 | --- | ---: | ---: | ---: | ---: |
-| RTP | 1 | 321.5 | 372.0 | 50.5 |
-| RTP | 10 | 318.6 | 397.3 | 78.7 |
-| RTP | 50 | 312.6 | 400.6 | 88.0 |
-| RTP | 100 | 301.6 | 395.2 | 93.6 |
-| SRTP | 1 | 1800.0 | 1285.0 | -515.0 |
-| SRTP | 10 | 1206.0 | 1365.0 | 159.0 |
-| SRTP | 50 | 1324.0 | 1378.0 | 54.0 |
-| SRTP | 100 | 1334.0 | 1380.0 | 46.0 |
+| RTP | 1 | 294.3 | 382.8 | 88.5 |
+| RTP | 10 | 300.1 | 385.9 | 85.8 |
+| RTP | 50 | 304.1 | 375.9 | 71.8 |
+| RTP | 100 | 306.5 | 396.4 | 89.9 |
+| SRTP | 1 | 1202.0 | 1347.0 | 145.0 |
+| SRTP | 10 | 1264.0 | 1338.0 | 74.0 |
+| SRTP | 50 | 1264.0 | 1336.0 | 72.0 |
+| SRTP | 100 | 1245.0 | 1348.0 | 103.0 |
 
 Negative differences reflect local benchmark variability, not a telemetry
 speedup. The raw repetitions are retained for inspection.
 
 The packet pipeline retains **3 allocations for RTP / 7 for SRTP** in both
 variants: telemetry adds no per-packet allocation. The standalone send-counter
-and duration bookkeeping takes about **113 ns/frame**, with zero allocations.
+and duration bookkeeping takes about **112 ns/frame**, with zero allocations.
 With the sequence sampler's mutex deliberately held, receiving counters take
 about 57 ns/frame and never wait; skipped timing observations are counted. A
 completely full diagnostic channel returns in about 13 ns, with zero allocations.
@@ -43,10 +43,10 @@ five seconds. Fixture SQLite and elapsed wall-time budget, one run per size:
 
 | Active calls | Full batch per one-second tick | Fraction of one-second wall-time budget |
 | ---: | ---: | ---: |
-| 1 | 0.194 ms | 0.019% |
-| 10 | 1.323 ms | 0.132% |
-| 50 | 4.515 ms | 0.451% |
-| 100 | 9.262 ms | 0.926% |
+| 1 | 0.186 ms | 0.019% |
+| 10 | 1.422 ms | 0.142% |
+| 50 | 4.495 ms | 0.450% |
+| 100 | 9.362 ms | 0.936% |
 
 The background work is measurable and includes allocations for serialized
 observations (about 1.87 MB per 100-call batch). These wall-time ratios are **not a

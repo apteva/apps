@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	sdk "github.com/apteva/app-sdk"
 	"net/http"
 	"regexp"
@@ -12,6 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 )
+
+var errCarrierTelemetryBusy = errors.New("carrier telemetry flush already in progress")
 
 const carrierEvidenceLimit = 2048
 const proxyConnectionHeader = "X-Apteva-Proxy-Connection-ID"
@@ -117,7 +120,9 @@ func (c *carrierTelemetryCollector) sample(now time.Time) {
 }
 func (c *carrierTelemetryCollector) flush(ctx context.Context, db *callsDB, now time.Time) (map[string][]string, error) {
 	c.init()
-	c.flushMu.Lock()
+	if !c.flushMu.TryLock() {
+		return nil, errCarrierTelemetryBusy
+	}
 	defer c.flushMu.Unlock()
 	for len(c.pending) < carrierEvidenceLimit {
 		select {
@@ -354,4 +359,24 @@ func carrierRecoveryEpisodes(history []map[string]any) []map[string]any {
 		out = append(out, map[string]any{"episode_id": id, "attempts": episodes[id]})
 	}
 	return out
+}
+
+// Called only after transport teardown. SDK workers have been canceled; drain
+// their remaining evidence best-effort without delaying shutdown on a busy DB.
+func (a *App) flushCarrierTelemetryOnShutdown() error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	for i := 0; i < 22; i++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		changed, err := a.carrierTelemetry.flush(ctx, a.db(), time.Now())
+		if err != nil {
+			return err
+		}
+		if len(changed) == 0 {
+			return nil
+		}
+	}
+	return nil
 }

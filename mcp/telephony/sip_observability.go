@@ -43,6 +43,7 @@ type sipRTPObservations struct {
 	jitterNS            atomic.Int64
 	deliveryExcessNS    atomic.Int64
 	timingMu            sync.Mutex
+	observedSkipped     int64
 	stream              uint32
 	highest             int64
 	first               int64
@@ -73,6 +74,12 @@ func (o *sipRTPObservations) received(packet *rtp.Packet, size int, now time.Tim
 		return
 	}
 	defer o.timingMu.Unlock()
+	// Packets observed during contention are not carrier loss. Restart this
+	// best-effort timing window and retain explicit skipped-count confidence.
+	if skipped := o.skipped.Load(); skipped != o.observedSkipped {
+		o.have = false
+		o.observedSkipped = skipped
+	}
 	if !o.have || o.stream != packet.SSRC {
 		o.have = true
 		o.stream = packet.SSRC

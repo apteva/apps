@@ -95,7 +95,10 @@ func addCarrierAudioSummary(s *audioDashboardSummary, r *carrierTelemetryRecord)
 	if s.Health.State == "" {
 		s.Health.State = "healthy"
 	}
-	if carrier.State == "audio_degraded" || internal.State == "audio_degraded" {
+	if s.Boundaries["browser"].State == "stale" && s.Health.State == "audio_degraded" {
+		s.Health.State = "stale"
+	}
+	if carrier.State == "audio_degraded" || internal.State == "audio_degraded" || s.Boundaries["browser"].State == "audio_degraded" {
 		s.Health.State = "audio_degraded"
 	}
 
@@ -121,6 +124,13 @@ func audioBoundarySummary(b browserAudioDiagnostics) map[string]audioHealthStage
 		for _, stage := range b.Server.Stages {
 			if stage.MaxWorkMS > 320 {
 				out["internal"] = audioHealthStage{State: "audio_degraded", Reason: "processing_delay"}
+			}
+		}
+	}
+	if at, e := time.Parse(time.RFC3339Nano, b.ReceivedAt); e == nil && time.Since(at) > 20*time.Second {
+		for key, value := range out {
+			if value.State != "unobserved" {
+				out[key] = audioHealthStage{State: "stale"}
 			}
 		}
 	}
