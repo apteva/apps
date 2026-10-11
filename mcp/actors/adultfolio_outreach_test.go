@@ -25,7 +25,7 @@ func (p *lostSendTransport) CallAppResultContext(ctx context.Context, app, tool 
 var _ sdk.PlatformClient = (*lostSendTransport)(nil)
 
 func TestAdultFolioInitialSendAndAmbiguousReconciliation(t *testing.T) {
-	for _, mode := range []string{"success", "fast_incoming", "age18", "age39", "age17", "age40", "missing_age", "duplicate_age", "wrong_profile_id", "wrong_profile_url", "wrong_country", "wrong_role", "previous_history", "nonempty", "loading", "wrong_account", "wrong_recipient", "wrong_composer", "race_message", "wrong_saved_body", "wrong_sender", "missing_timestamp", "lost_accepted_response", "lost_unaccepted_response", "transport_accepted", "transport_unaccepted", "prepare"} {
+	for _, mode := range []string{"success", "fast_incoming", "age18", "age39", "age17", "age40", "missing_age", "duplicate_age", "wrong_profile_id", "wrong_profile_url", "wrong_country", "wrong_role", "previous_history", "nonempty", "loading", "missing_composer", "wrong_account", "wrong_recipient", "wrong_composer", "race_message", "wrong_saved_body", "wrong_sender", "missing_timestamp", "lost_accepted_response", "lost_unaccepted_response", "transport_accepted", "transport_unaccepted", "prepare"} {
 		t.Run(mode, func(t *testing.T) {
 			plat := newFakePlatform()
 			plat.waitOutput = map[string]any{"matched": true, "timed_out": false}
@@ -37,6 +37,16 @@ func TestAdultFolioInitialSendAndAmbiguousReconciliation(t *testing.T) {
 					current = stringFromAny(in["url"])
 				case "computer.computer_use":
 					switch in["action"] {
+					case "wait_for":
+						raw, _ := json.Marshal(in["conditions"])
+						var conditions []map[string]any
+						json.Unmarshal(raw, &conditions)
+						for _, condition := range conditions {
+							if condition["type"] == "selector_present" && condition["selector"] == "#MessageResult" {
+								t.Fatal("empty zero-height history must not be a visibility readiness predicate")
+							}
+						}
+						return map[string]any{"matched": mode != "missing_composer", "timed_out": mode == "missing_composer"}
 					case "navigate":
 						current = stringFromAny(in["url"])
 						return map[string]any{"current_url": current}
