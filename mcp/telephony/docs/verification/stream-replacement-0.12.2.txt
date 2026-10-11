@@ -1,0 +1,32 @@
+Local macOS/arm64 verification, 2026-10-11. No installed instance or live carrier used.
+Complete local Go suite: 1112 passing tests/subtests, 6 optional skips, 0 failed.
+Subsequent media-before-start regression is included in dedicated final race/three-repeat checks and final release CI.
+Frontend: 242 tests passed, 0 failed. Typecheck, vet, native and Linux/amd64 CGO-disabled builds passed.
+
+Broad carrier recovery/timing/evidence/SIP race checks
+ok  	github.com/apteva/apps/mcp/telephony	120.370s
+
+Final replacement race checks
+ok  	github.com/apteva/apps/mcp/telephony	34.310s
+
+Three repeats of replacement checks
+ok  	github.com/apteva/apps/mcp/telephony	19.465s
+
+Fresh established-media and JSON parsing performance
+goos: darwin
+goarch: arm64
+pkg: github.com/apteva/apps/mcp/telephony
+cpu: Apple M1 Pro
+BenchmarkCarrierRecoveryEstablishedFrame-10    	11215323	        54.32 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCarrierRecoveryEstablishedFrame-10    	11273056	        54.33 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCarrierRecoveryEstablishedFrame-10    	11055321	        54.00 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCarrierStreamPriorDecode-10           	  416485	      1413 ns/op	     576 B/op	      15 allocs/op
+BenchmarkCarrierStreamPriorDecode-10           	  397888	      1447 ns/op	     576 B/op	      15 allocs/op
+BenchmarkCarrierStreamPriorDecode-10           	  421233	      1455 ns/op	     576 B/op	      15 allocs/op
+BenchmarkCarrierStreamTelnyxDecode-10          	  416853	      1527 ns/op	     576 B/op	      15 allocs/op
+BenchmarkCarrierStreamTelnyxDecode-10          	  403120	      1571 ns/op	     576 B/op	      15 allocs/op
+BenchmarkCarrierStreamTelnyxDecode-10          	  416869	      1526 ns/op	     576 B/op	      15 allocs/op
+PASS
+ok  	github.com/apteva/apps/mcp/telephony	6.646s
+
+Parsing before/after uses the same frame schema; the baseline differs only in the former string payload type. Small elapsed differences are local benchmark variability; allocation counts are unchanged. Established bookkeeping excludes audio decoding, forwarding, codecs and persistence.
