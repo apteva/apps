@@ -102,6 +102,9 @@ type carrierBridgeEvidence struct {
 	BridgeGeneration    string                      `json:"bridge_generation,omitempty"`
 	ProxyConnectionID   string                      `json:"proxy_connection_id,omitempty"`
 	RecoveryEpisodeID   string                      `json:"recovery_episode_id,omitempty"`
+	ProviderErrorCode   int                         `json:"provider_error_code,omitempty"`
+	ProviderErrorTitle  string                      `json:"provider_error_title,omitempty"`
+	ProviderErrorDetail string                      `json:"provider_error_detail,omitempty"`
 	ProviderEvent       string                      `json:"provider_event_type,omitempty"`
 	SignatureValidation string                      `json:"signature_validation,omitempty"`
 	AfterLocalCancel    bool                        `json:"after_local_cancel,omitempty"`
@@ -133,35 +136,40 @@ type carrierBridgeEvidence struct {
 	LocalCloseCode      int                         `json:"local_close_code,omitempty"`
 }
 type carrierBridgeLease struct {
-	arrival       *carrierArrivalTiming
-	app           *App
-	row           callRow
-	generation    string
-	proxyID       string
-	episodeID     string
-	rawCancel     context.CancelFunc
-	localCancel   sync.Once
-	commandReason string
-	commandID     string
-	attemptID     string
-	started       time.Time
-	ctx           context.Context
-	cancel        context.CancelFunc
-	closeState    *websocketCloseState
-	mu            sync.Mutex
-	sockets       []net.Conn
-	writers       map[mediaCloseLeg]*websocketWriterPump
-	stream        string
-	connected     bool
-	recovered     bool
-	events        []carrierBridgeEvidence
-	first         *carrierBridgeEvidence
-	deadline      string
-	attempts      int
-	lastRead      atomic.Int64
-	flowing       atomic.Bool
-	finished      bool
-	commandCancel context.CancelFunc
+	arrival            *carrierArrivalTiming
+	app                *App
+	row                callRow
+	generation         string
+	proxyID            string
+	episodeID          string
+	rawCancel          context.CancelFunc
+	localCancel        sync.Once
+	commandReason      string
+	commandID          string
+	attemptID          string
+	started            time.Time
+	ctx                context.Context
+	cancel             context.CancelFunc
+	closeState         *websocketCloseState
+	mu                 sync.Mutex
+	sockets            []net.Conn
+	writers            map[mediaCloseLeg]*websocketWriterPump
+	stream             string
+	connected          bool
+	recovered          bool
+	events             []carrierBridgeEvidence
+	first              *carrierBridgeEvidence
+	deadline           string
+	attempts           int
+	lastRead           atomic.Int64
+	flowing            atomic.Bool
+	continuousInput    atomic.Bool
+	reception          atomic.Pointer[carrierReception]
+	replacementPending atomic.Bool
+	replaced           atomic.Bool
+	decodeEvidenceAt   atomic.Int64
+	finished           bool
+	commandCancel      context.CancelFunc
 }
 
 func carrierEvidenceDetail(row *callRow, value string) string {
@@ -193,6 +201,8 @@ func normalizeCarrierEvidence(row *callRow, e carrierBridgeEvidence) carrierBrid
 		e.ID = newCallID()
 	}
 	e.Detail = sanitizeCarrierDetail(row, e.Detail)
+	e.ProviderErrorTitle = sanitizeCarrierDetail(row, e.ProviderErrorTitle)
+	e.ProviderErrorDetail = sanitizeCarrierDetail(row, e.ProviderErrorDetail)
 	e.ActualCloseReason = sanitizeCarrierDetail(row, e.ActualCloseReason)
 	e.EventID = limitDiagnosticText(e.EventID, 256)
 	e.StreamID = limitDiagnosticText(e.StreamID, 256)
@@ -217,7 +227,19 @@ func transportEvidenceError(err error) string {
 	}
 	return fmt.Sprintf("%T: %v", err, err)
 }
+
+type carrierReplacementProof struct {
+	Generation string
+	StreamID   string
+}
+
 func (a *App) claimCarrierBridge(row *callRow, parent context.Context, proxyIDs ...string) (*carrierBridgeLease, error) {
+	return a.claimCarrierBridgeVerified(row, parent, nil, proxyIDs...)
+}
+func (a *App) claimCarrierBridgeVerified(row *callRow, parent context.Context, proof *carrierReplacementProof, proxyIDs ...string) (*carrierBridgeLease, error) {
+	if err := parent.Err(); err != nil {
+		return nil, err
+	}
 	unlock := a.softphones.lockClaim(row.ID)
 	defer unlock()
 	r := &a.mediaBridges
@@ -227,7 +249,10 @@ func (a *App) claimCarrierBridge(row *callRow, parent context.Context, proxyIDs 
 		r.current = map[string]*carrierBridgeLease{}
 	}
 	old := r.current[row.ID]
-	if old != nil && old.ctx.Err() == nil {
+	if proof != nil && (old == nil || old.generation != proof.Generation || proof.StreamID == "") {
+		return nil, errCarrierBridgeBusy
+	}
+	if old != nil && old.ctx.Err() == nil && (proof == nil || !old.replaceable(time.Now())) {
 		return nil, errCarrierBridgeBusy
 	}
 	closedGeneration := ""
@@ -246,14 +271,12 @@ func (a *App) claimCarrierBridge(row *callRow, parent context.Context, proxyIDs 
 	}
 	b.lastRead.Store(time.Now().UnixNano())
 	if old != nil {
-		old.closeSockets()
 		old.mu.Lock()
-		if old.commandCancel != nil {
-			old.commandReason = "replacement_connected"
-			old.appendLocked(carrierBridgeEvidence{Kind: "recovery_command_canceled", Trigger: "replacement_connected", CommandID: old.commandID, AttemptID: old.attemptID, CancellationReason: "replacement_connected", AfterLocalCancel: old.ctx.Err() != nil})
-			old.commandCancel()
-		}
 		b.deadline, b.attempts, b.episodeID = old.deadline, old.attempts, old.episodeID
+		if proof != nil && b.deadline == "" {
+			b.deadline = ringTime(time.Now().Add(time.Duration(mediaRecoveryOrDefault(row.MediaRecoveryTimeoutSec)) * time.Second))
+			b.episodeID = newCallID()
+		}
 		old.mu.Unlock()
 	}
 	tx, err := a.db().db.Begin()
@@ -294,6 +317,14 @@ func (a *App) claimCarrierBridge(row *callRow, parent context.Context, proxyIDs 
 			return nil, err
 		}
 	}
+	if err = parent.Err(); err != nil {
+		cancel()
+		return nil, err
+	}
+	if proof != nil && old.ctx.Err() == nil && !old.replaceable(time.Now()) {
+		cancel()
+		return nil, errCarrierBridgeBusy
+	}
 	if err = tx.Commit(); err != nil {
 		cancel()
 		return nil, err
@@ -301,6 +332,18 @@ func (a *App) claimCarrierBridge(row *callRow, parent context.Context, proxyIDs 
 	b.cancel = func() {
 		leg, code, reason := b.closeState.Cause()
 		b.cancelWithCause("bridge_handler_exit", leg, int(code), reason, "")
+	}
+	if old != nil {
+		old.replaced.Store(true)
+		old.cancelWithCause("replacement_connected", mediaCloseLegCarrier, 1001, "verified carrier replacement connected", "")
+		old.mu.Lock()
+		if old.commandCancel != nil {
+			old.commandReason = "replacement_connected"
+			old.appendLocked(carrierBridgeEvidence{Kind: "recovery_command_canceled", Trigger: "replacement_connected", CommandID: old.commandID, AttemptID: old.attemptID, CancellationReason: "replacement_connected", AfterLocalCancel: true})
+			old.commandCancel()
+		}
+		old.mu.Unlock()
+		old.closeSockets()
 	}
 	r.current[row.ID] = b
 	b.app.carrierTelemetry.registerBridge(b)
@@ -327,6 +370,11 @@ func (b *carrierBridgeLease) bind(conn net.Conn) bool {
 	if b.ctx.Err() != nil {
 		_ = conn.Close()
 		return false
+	}
+	for _, existing := range b.sockets {
+		if existing == conn {
+			return true
+		}
 	}
 	b.sockets = append(b.sockets, conn)
 	return true
@@ -498,6 +546,9 @@ func (b *carrierBridgeLease) setStream(id string) {
 
 // Zero-valued PCM is valid media: recovery confirmation never depends on speech.
 func (b *carrierBridgeLease) media() {
+	if b.ctx.Err() != nil || b.replaced.Load() {
+		return
+	}
 	now := time.Now().UnixNano()
 	previous := b.arrival.last.Swap(now)
 	b.arrival.frames.Add(1)
@@ -581,7 +632,7 @@ func (b *carrierBridgeLease) finish() {
 	leg, code, reason := b.closeState.Cause()
 	state := "disconnected"
 	newFailure := false
-	if b.first == nil {
+	if b.first == nil && !b.replaced.Load() {
 		current, err := b.app.db().findCall(b.row.ID)
 		if err == nil && current != nil && !isTerminalStatus(current.Status) {
 			if b.deadline == "" {

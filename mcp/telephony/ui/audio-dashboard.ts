@@ -14,6 +14,7 @@ export const audioStages = {
 export const audioIssues = {
   audio_degraded: "Audio degradation",
  carrier_error:"Carrier transport errors",
+ carrier_recovery:"Carrier media recovery",
  processing_error:"Internal processing errors",
   dropped_audio: "Dropped audio",
   playback_underrun: "Playback buffer gaps",
@@ -205,6 +206,8 @@ export const metricLabel: Record<string, string> = {
   context_suspended_ms: "AudioContext suspended (ms)",
   carrier_max_gap_ms: "Max carrier reception gap (ms)",
   carrier_stalls: "Carrier stalls",
+  carrier_last_media_age_ms: "Last carrier audio age (ms)",
+  carrier_max_delivery_batch_ms: "Largest carrier delivery batch (ms)",
   carrier_max_batch_ms: "Max carrier batch (ms)",
   carrier_max_age_ms: "Max carrier source age (ms)",
   carrier_source_dropped_ms: "Carrier source dropped (ms)",
