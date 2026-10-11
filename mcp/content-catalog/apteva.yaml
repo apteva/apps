@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: content-catalog
 display_name: Content Catalog
-version: 0.6.7
+version: 0.6.8
 description: |
   Coordinate brands, production sessions, Storage assets, Media derivatives,
   optional Gigs, cloud hosting, and shared platform posts.
@@ -73,7 +73,8 @@ provides:
     - { name: content_catalog_import_preview, description: "List reviewable Storage candidates under a brand root without changing any app data." }
     - { name: content_catalog_assets_list, description: "List session assets with current Media metadata and recorded source links, including parent names and session IDs." }
     - { name: content_catalog_assets_get, description: "Get an asset with source lineage, hosting, and publication records." }
-    - { name: content_catalog_assets_link_source, description: "Record a derivative's source asset. Supports multiple source assets." }
+    - { name: content_catalog_assets_link_source, description: "Add one immediate source link with inserted, unchanged or conflict outcome; existing values require guarded replacement." }
+    - { name: content_catalog_assets_sources_replace, description: "Atomic revision-checked replacement of immediate source links, with expected sources, retry key and before/after audit. Catalog metadata only." }
     - { name: content_catalog_assets_review, description: "Set editorial review state on a Catalog asset." }
     - { name: content_catalog_assets_labels_update, description: "Set purpose role, generic output category, asset tags, Favorite, and Patreon intent (unset/free/paid) on up to 100 Catalog assets. Does not modify Media or publish externally." }
     - { name: content_catalog_asset_publications_list, description: "List the platform publication records on one asset." }
@@ -111,7 +112,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: content-catalog/v0.6.7
+    ref: content-catalog/v0.6.8
     entry: mcp/content-catalog
   port: 8080
   health_check: /health
