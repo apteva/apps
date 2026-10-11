@@ -24,11 +24,7 @@ func (b *carrierBridgeLease) expectsContinuousMedia() bool {
 		return false
 	}
 	if r := b.reception.Load(); r != nil {
-		if !r.mu.TryLock() {
-			return false
-		}
-		defer r.mu.Unlock()
-		return r.s.ContinuousExpected && !r.paused
+		return r.liveExpected.Load()
 	}
 	return true
 }

@@ -7,6 +7,7 @@ import (
 	"math"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -60,6 +61,7 @@ type carrierDeliveryEvent struct {
 }
 
 type carrierReception struct {
+	liveExpected   atomic.Bool
 	mu             sync.Mutex
 	s              carrierReceptionSnapshot
 	set            bool
@@ -87,6 +89,7 @@ func (r *carrierReception) pause(value bool) {
 		r.s.Stalled = false
 	}
 	r.paused = value
+	r.liveExpected.Store(r.s.ContinuousExpected && !value)
 }
 
 func mediaNumber(value any) (float64, bool) {
@@ -113,6 +116,7 @@ func (r *carrierReception) begin(continuous bool) {
 	r.s.Epoch++
 	r.s.Stream = ""
 	r.s.ContinuousExpected = continuous
+	r.liveExpected.Store(continuous && !r.paused)
 	r.set = false
 	r.lastSequence = 0
 	r.batchMS = 0

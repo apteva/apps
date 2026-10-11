@@ -384,3 +384,22 @@ func BenchmarkCarrierStreamTelnyxDecode(b *testing.B) {
 		}
 	}
 }
+
+func TestCarrierStreamAdmissionDoesNotWaitForReceptionReporting(t *testing.T) {
+	f := newCarrierStreamFixture(t)
+	f.old.arrival.last.Store(time.Now().Add(-5 * time.Second).UnixNano())
+	r := f.old.reception.Load()
+	r.mu.Lock()
+	done := make(chan bool, 1)
+	go func() { done <- f.old.replaceable(time.Now()) }()
+	select {
+	case allowed := <-done:
+		r.mu.Unlock()
+		if !allowed {
+			t.Fatal("reporting falsely rejected a stalled replacement")
+		}
+	case <-time.After(time.Second):
+		r.mu.Unlock()
+		t.Fatal("reporting blocked admission")
+	}
+}
