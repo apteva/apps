@@ -209,6 +209,29 @@ func (a *App) configureTwilioDirectSIP(ctx *sdk.AppCtx, route *routeRow, cfg sip
 	return nil
 }
 
+// Telnyx provisioning uses G711U/G711A; SIP SDP and our shared settings use
+// PCMU/PCMA. Translate only at this provider boundary, preserving preference.
+func telnyxProvisioningCodecs(codecs []string) ([]string, error) {
+	if err := validateLocalMediaSettings(localMediaSettings{Codecs: codecs}); err != nil {
+		return nil, err
+	}
+	if len(codecs) == 0 {
+		codecs = []string{"G722", "PCMU", "PCMA"}
+	}
+	result := make([]string, len(codecs))
+	for i, codec := range codecs {
+		switch codec {
+		case "PCMU":
+			result[i] = "G711U"
+		case "PCMA":
+			result[i] = "G711A"
+		default:
+			result[i] = codec
+		}
+	}
+	return result, nil
+}
+
 func (a *App) configureTelnyxDirectSIP(ctx *sdk.AppCtx, route *routeRow, cfg sipGatewayConfig) error {
 	phoneID, previousConnectionID, err := a.findTelnyxPhoneNumber(ctx, route)
 	if err != nil {
@@ -224,9 +247,9 @@ func (a *App) configureTelnyxDirectSIP(ctx *sdk.AppCtx, route *routeRow, cfg sip
 	if err != nil {
 		return err
 	}
-	codecs := settings.Codecs
-	if len(codecs) == 0 {
-		codecs = []string{"G722", "PCMU", "PCMA"}
+	codecs, err := telnyxProvisioningCodecs(settings.Codecs)
+	if err != nil {
+		return fmt.Errorf("Telnyx SIP codecs: %w", err)
 	}
 	connectionInput := map[string]any{
 		"connection_name":    "Apteva " + route.PhoneNumber,
