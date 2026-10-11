@@ -305,7 +305,7 @@ func TestVoiceConversationIdleRequiresSettledTwoSidedExchange(t *testing.T) {
 	}
 }
 
-func TestVoiceConversationIdleWaitsForFinalCallerAudioDelivery(t *testing.T) {
+func TestVoiceConversationIdleWaitsForFinalCallerRecognition(t *testing.T) {
 	now := time.Date(2026, time.July, 23, 17, 8, 0, 0, time.UTC)
 	quietAt := now.Add(-voiceConversationIdle - time.Second)
 	activity := &voiceMediaActivity{
@@ -318,17 +318,17 @@ func TestVoiceConversationIdleWaitsForFinalCallerAudioDelivery(t *testing.T) {
 		{Speaker: "receptionist", Text: "Your callback is booked."},
 	}
 	targetEvents := []sdk.RuntimeTelemetryEvent{
-		{ThreadID: "target", Type: "realtime.assistant", Time: quietAt.Add(-4 * time.Second)},
+		{ThreadID: "target", Type: "realtime.assistant", Time: quietAt.Add(-4 * time.Second), Data: json.RawMessage(`{"text": "When should we call?"}`)},
 		// This is a late transcription of the previous caller turn. Its timestamp
 		// is newer than the caller's next output, but it only matches one turn.
-		{ThreadID: "target", Type: "realtime.user", Time: quietAt.Add(-500 * time.Millisecond)},
-		{ThreadID: "target", Type: "realtime.assistant", Time: quietAt.Add(-2 * time.Second)},
+		{ThreadID: "target", Type: "realtime.user", Time: quietAt.Add(-500 * time.Millisecond), Data: json.RawMessage(`{"text": "Monday at four."}`)},
+		{ThreadID: "target", Type: "realtime.assistant", Time: quietAt.Add(-2 * time.Second), Data: json.RawMessage(`{"text": "Your callback is booked."}`)},
 		{ThreadID: "target", Type: "realtime.state", Time: quietAt, Data: json.RawMessage(`{"state":"listening"}`)},
 	}
 	callerEvents := []sdk.RuntimeTelemetryEvent{
-		{ThreadID: "caller", Type: "realtime.user", Time: quietAt.Add(-1500 * time.Millisecond)},
-		{ThreadID: "caller", Type: "realtime.assistant", Time: quietAt.Add(-3500 * time.Millisecond)},
-		{ThreadID: "caller", Type: "realtime.assistant", Time: quietAt.Add(-time.Second)},
+		{ThreadID: "caller", Type: "realtime.user", Time: quietAt.Add(-1500 * time.Millisecond), Data: json.RawMessage(`{"text": "When should we call?"}`)},
+		{ThreadID: "caller", Type: "realtime.assistant", Time: quietAt.Add(-3500 * time.Millisecond), Data: json.RawMessage(`{"text": "Monday at four."}`)},
+		{ThreadID: "caller", Type: "realtime.assistant", Time: quietAt.Add(-time.Second), Data: json.RawMessage(`{"text": "Thanks, goodbye."}`)},
 		{ThreadID: "caller", Type: "realtime.state", Time: quietAt, Data: json.RawMessage(`{"state":"listening"}`)},
 	}
 
@@ -340,7 +340,7 @@ func TestVoiceConversationIdleWaitsForFinalCallerAudioDelivery(t *testing.T) {
 	}
 
 	targetEvents = append(targetEvents, sdk.RuntimeTelemetryEvent{
-		ThreadID: "target", Type: "realtime.user", Time: quietAt.Add(-250 * time.Millisecond),
+		ThreadID: "target", Type: "realtime.user", Time: quietAt.Add(-250 * time.Millisecond), Data: json.RawMessage(`{"text": "Thanks, goodbye."}`),
 	})
 	if !voiceConversationIsIdle(
 		now, activity, append(transcript, VoiceTranscriptTurn{Speaker: "receptionist", Text: "Goodbye."}),
@@ -363,14 +363,14 @@ func TestVoiceConversationIdleAcceptsFinalGoodbyeWithoutCallerTelemetryAck(t *te
 		{Speaker: "receptionist", Text: "It is reserved. Goodbye."},
 	}
 	targetEvents := []sdk.RuntimeTelemetryEvent{
-		{ThreadID: "target", Type: "realtime.user", Time: quietAt.Add(-4 * time.Second)},
-		{ThreadID: "target", Type: "realtime.assistant", Time: quietAt.Add(-7 * time.Second)},
-		{ThreadID: "target", Type: "realtime.assistant", Time: quietAt.Add(-2 * time.Second)},
+		{ThreadID: "target", Type: "realtime.user", Time: quietAt.Add(-4 * time.Second), Data: json.RawMessage(`{"text": "Please reserve tomorrow at three."}`)},
+		{ThreadID: "target", Type: "realtime.assistant", Time: quietAt.Add(-7 * time.Second), Data: json.RawMessage(`{"text": "How can I help?"}`)},
+		{ThreadID: "target", Type: "realtime.assistant", Time: quietAt.Add(-2 * time.Second), Data: json.RawMessage(`{"text": "It is reserved. Goodbye."}`)},
 		{ThreadID: "target", Type: "realtime.state", Time: quietAt, Data: json.RawMessage(`{"state":"listening"}`)},
 	}
 	callerEvents := []sdk.RuntimeTelemetryEvent{
-		{ThreadID: "caller", Type: "realtime.assistant", Time: quietAt.Add(-5 * time.Second)},
-		{ThreadID: "caller", Type: "realtime.user", Time: quietAt.Add(-6 * time.Second)},
+		{ThreadID: "caller", Type: "realtime.assistant", Time: quietAt.Add(-5 * time.Second), Data: json.RawMessage(`{"text": "Please reserve tomorrow at three."}`)},
+		{ThreadID: "caller", Type: "realtime.user", Time: quietAt.Add(-6 * time.Second), Data: json.RawMessage(`{"text": "How can I help?"}`)},
 		{ThreadID: "caller", Type: "realtime.state", Time: quietAt, Data: json.RawMessage(`{"state":"listening"}`)},
 	}
 
@@ -385,7 +385,7 @@ func TestVoiceConversationIdleAcceptsFinalGoodbyeWithoutCallerTelemetryAck(t *te
 	}
 
 	callerEvents = append(callerEvents, sdk.RuntimeTelemetryEvent{
-		ThreadID: "caller", Type: "realtime.assistant", Time: quietAt.Add(-time.Second),
+		ThreadID: "caller", Type: "realtime.assistant", Time: quietAt.Add(-time.Second), Data: json.RawMessage(`{"text": "Thanks."}`),
 	})
 	if voiceConversationIsIdle(
 		now, activity, transcript,
@@ -402,12 +402,12 @@ func TestVoiceRelayDeliverySettledWaitsForMediaAndBothDestinations(t *testing.T)
 		last:   base,
 	}
 	targetEvents := []sdk.RuntimeTelemetryEvent{
-		{ThreadID: "target", Type: "realtime.assistant", Time: base},
-		{ThreadID: "target", Type: "realtime.user", Time: base.Add(3 * time.Second)},
+		{ThreadID: "target", Type: "realtime.assistant", Time: base, Data: json.RawMessage(`{"text": "Hello."}`)},
+		{ThreadID: "target", Type: "realtime.user", Time: base.Add(3 * time.Second), Data: json.RawMessage(`{"text": "Please book it."}`)},
 	}
 	callerEvents := []sdk.RuntimeTelemetryEvent{
-		{ThreadID: "caller", Type: "realtime.user", Time: base.Add(time.Second)},
-		{ThreadID: "caller", Type: "realtime.assistant", Time: base.Add(2 * time.Second)},
+		{ThreadID: "caller", Type: "realtime.user", Time: base.Add(time.Second), Data: json.RawMessage(`{"text": "Hello."}`)},
+		{ThreadID: "caller", Type: "realtime.assistant", Time: base.Add(2 * time.Second), Data: json.RawMessage(`{"text": "Please book it."}`)},
 	}
 	if !voiceRelayDeliverySettled(activity, targetEvents, "target", callerEvents, "caller") {
 		t.Fatal("fully delivered relay was not settled")
@@ -420,7 +420,7 @@ func TestVoiceRelayDeliverySettledWaitsForMediaAndBothDestinations(t *testing.T)
 	activity.active["caller"] = false
 
 	callerEvents = append(callerEvents, sdk.RuntimeTelemetryEvent{
-		ThreadID: "caller", Type: "realtime.assistant", Time: base.Add(4 * time.Second),
+		ThreadID: "caller", Type: "realtime.assistant", Time: base.Add(4 * time.Second), Data: json.RawMessage(`{"text": "Goodbye."}`),
 	})
 	if voiceRelayDeliverySettled(activity, targetEvents, "target", callerEvents, "caller") {
 		t.Fatal("unacknowledged caller output was considered settled")
@@ -702,19 +702,19 @@ func TestVoiceMetricsSortsTelemetryChronologically(t *testing.T) {
 	}
 }
 
-func TestVoiceMetricsPersistsPendingTurnCounters(t *testing.T) {
+func TestVoiceMetricsPersistsUnmatchedTranscriptCounters(t *testing.T) {
 	started := time.Date(2026, time.July, 29, 8, 0, 0, 0, time.UTC)
 	targetEvents := []sdk.RuntimeTelemetryEvent{
 		{ThreadID: "target", Type: "realtime.state", Time: started.Add(time.Second), Data: json.RawMessage(`{"state":"speaking"}`)},
-		{ThreadID: "target", Type: "realtime.assistant", Time: started.Add(2 * time.Second)},
-		{ThreadID: "target", Type: "realtime.user", Time: started.Add(4 * time.Second)},
+		{ThreadID: "target", Type: "realtime.assistant", Time: started.Add(2 * time.Second), Data: json.RawMessage(`{"text": "Hello."}`)},
+		{ThreadID: "target", Type: "realtime.user", Time: started.Add(4 * time.Second), Data: json.RawMessage(`{"text": "Oui."}`)},
 	}
 	callerEvents := []sdk.RuntimeTelemetryEvent{
-		{ThreadID: "caller", Type: "realtime.user", Time: started.Add(3 * time.Second)},
+		{ThreadID: "caller", Type: "realtime.user", Time: started.Add(3 * time.Second), Data: json.RawMessage(`{"text": "Hello."}`)},
 		{ThreadID: "caller", Type: "realtime.state", Time: started.Add(3500 * time.Millisecond), Data: json.RawMessage(`{"state":"speaking"}`)},
-		{ThreadID: "caller", Type: "realtime.assistant", Time: started.Add(4 * time.Second)},
+		{ThreadID: "caller", Type: "realtime.assistant", Time: started.Add(4 * time.Second), Data: json.RawMessage(`{"text": "Oui."}`)},
 		{ThreadID: "caller", Type: "realtime.state", Time: started.Add(5 * time.Second), Data: json.RawMessage(`{"state":"speaking"}`)},
-		{ThreadID: "caller", Type: "realtime.assistant", Time: started.Add(6 * time.Second)},
+		{ThreadID: "caller", Type: "realtime.assistant", Time: started.Add(6 * time.Second), Data: json.RawMessage(`{"text": "À demain."}`)},
 	}
 
 	metrics := voiceMetrics(targetEvents, callerEvents, "target", "caller", started, nil, nil, "timeout")
