@@ -8,14 +8,10 @@ package main
 // actually needs via HTTP range requests, and the Apteva machine
 // sees zero bytes.
 //
-// Single SSH round-trip per indexed file: one bash script does
-// probe → conditional thumbnail/waveform → uploads back to storage
-// → echoes an APTEVA_INDEX:{...} marker that media parses to get
-// the probe metadata + derivation file_ids.
-//
-// Auto-fallback: any error from the remote path is logged and the
-// caller falls back to the local indexer. So a flaky Hetzner network
-// degrades to local indexing instead of blocking the worker.
+// Probe and individual derivation stages use separate short host leases.
+// Verified source-current artifacts are reused; missing stages run through
+// the shared FIFO, so indexing releases capacity between storyboard frames.
+// Configured remote failures remain explicit; resource failures stop work.
 
 import (
 	"context"
@@ -35,13 +31,21 @@ import (
 // Mirrors what the local processOne reads from indexerConfig, plus
 // the host_id + naming context.
 type remoteIndexParams struct {
-	HostID     int64
-	SignedURL  string // source file, with HTTP range support
-	ThumbSeek  float64
-	ThumbWidth int
-	WaveW      int
-	WaveH      int
-	FileID     string // source file_id (string), used to name derivations
+	ReuseProbe     *Probe
+	ReuseThumbnail int64
+	ReuseWaveform  int64
+	ReuseKeyframes []remoteKeyframe
+	Stage          string
+	ProbeBase64    string
+	Summary        *Probe
+	PositionMs     int64
+	HostID         int64
+	SignedURL      string // source file, with HTTP range support
+	ThumbSeek      float64
+	ThumbWidth     int
+	WaveW          int
+	WaveH          int
+	FileID         string // source file_id (string), used to name derivations
 	// Keyframe config for the remote shell. Empty/zero values mean
 	// "use the script's defaults" — interval 30s, cap 60, enabled.
 	// The local indexer pre-resolves these from app.Config() before
@@ -78,7 +82,7 @@ type remoteKeyframe struct {
 // remote host and returns the parsed probe + derivation file_ids
 // that storage already has. Caller writes the media row + derivation
 // rows using these values (no further upload from media's side).
-func runRemoteIndexing(
+func runRemoteIndexStage(
 	ctx context.Context, app *sdk.AppCtx, projectID string,
 	params remoteIndexParams,
 ) (*Probe, int64, int64, []remoteKeyframe, error) {
@@ -102,6 +106,7 @@ func runRemoteIndexing(
 	}
 
 	script := buildRemoteIndexScript(remoteIndexScriptInputs{
+		Stage: params.Stage, ProbeBase64: params.ProbeBase64, PositionMs: params.PositionMs, Summary: params.Summary,
 		FFmpeg:               paths.FFmpeg,
 		FFprobe:              paths.FFprobe,
 		SignedURL:            params.SignedURL,
@@ -118,6 +123,11 @@ func runRemoteIndexing(
 		ProjectID:            projectID,
 	})
 
+	ctx, release, err := acquireMediaWork(ctx, app, 1)
+	if err != nil {
+		return nil, 0, 0, nil, err
+	}
+	defer release()
 	out, exit, err := runRemote(ctx, app, params.HostID, script, 600)
 	if err != nil {
 		// runRemote returns err non-nil when the SSH session itself
@@ -147,12 +157,17 @@ func runRemoteIndexing(
 	if err != nil {
 		return nil, 0, 0, nil, fmt.Errorf("parse probe json: %w", err)
 	}
+	probe.remoteProbeBase64 = res.ProbeBase64
 	return probe, res.ThumbnailFileID, res.WaveformFileID, res.Keyframes, nil
 }
 
 // ─── script construction ──────────────────────────────────────────
 
 type remoteIndexScriptInputs struct {
+	Stage           string
+	ProbeBase64     string
+	Summary         *Probe
+	PositionMs      int64
 	FFmpeg, FFprobe string
 	SignedURL       string
 	FileID          string
@@ -210,10 +225,26 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 	fmt.Fprintf(&b, "export THUMB_WIDTH=%d\n", in.ThumbWidth)
 
 	// Probe — same flags as the local runProbe, against the signed URL.
-	b.WriteString(`"$FFPROBE" -v quiet -print_format json -show_format -show_streams "$SIGNED_URL" > probe.json` + "\n")
-	b.WriteString(`HAS_VIDEO=$("$FFPROBE" -v error -select_streams V -show_entries stream=index -of csv=p=0 "$SIGNED_URL" | awk 'NF{n++} END{print n+0}')` + "\n")
-	b.WriteString(`HAS_AUDIO=$(grep -c '"codec_type": *"audio"' probe.json || true)` + "\n")
+	if in.ProbeBase64 != "" {
+		fmt.Fprintf(&b, "printf %%s %s | base64 -d > probe.json\n", shellQuote(in.ProbeBase64))
+		b.WriteString(`HAS_VIDEO=$(grep -c '"codec_type": *"video"' probe.json || true)` + "\n")
+		b.WriteString(`HAS_AUDIO=$(grep -c '"codec_type": *"audio"' probe.json || true)` + "\n")
+	} else {
+		b.WriteString(`"$FFPROBE" -v quiet -print_format json -show_format -show_streams "$SIGNED_URL" > probe.json` + "\n")
+		b.WriteString(`HAS_VIDEO=$("$FFPROBE" -v error -select_streams V -show_entries stream=index -of csv=p=0 "$SIGNED_URL" | awk 'NF{n++} END{print n+0}')` + "\n")
+		b.WriteString(`HAS_AUDIO=$(grep -c '"codec_type": *"audio"' probe.json || true)` + "\n")
 
+	}
+	if in.Summary != nil {
+		video, audio := 0, 0
+		if in.Summary.HasVideo {
+			video = 1
+		}
+		if in.Summary.HasAudio {
+			audio = 1
+		}
+		fmt.Fprintf(&b, "HAS_VIDEO=%d\nHAS_AUDIO=%d\n", video, audio)
+	}
 	// Initialise output ids — empty until we successfully upload.
 	b.WriteString(`THUMB_FILE_ID=""` + "\n")
 	b.WriteString(`WAVE_FILE_ID=""` + "\n")
@@ -232,6 +263,13 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 	b.WriteString(`if ! grep -q '"duration":' probe.json && grep -qE '"codec_name": *"(mjpeg|png|gif|webp|bmp|tiff)"' probe.json; then IS_IMAGE=1; fi` + "\n")
 	b.WriteString(`if ! grep -q '"duration":' probe.json; then IS_IMAGE=1; fi` + "\n")
 
+	if in.Summary != nil {
+		image := 0
+		if in.Summary.IsImage {
+			image = 1
+		}
+		fmt.Fprintf(&b, "IS_IMAGE=%d\n", image)
+	}
 	// Smart video thumbnailing — ports the local extractVideoThumbnail
 	// strategy (mcp/media/derive.go) to the remote shell:
 	//
@@ -254,52 +292,53 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 	// frame happened to land at THUMB_SEEK — typically a studio logo,
 	// title card, or black opening. This restores parity with what
 	// the local sidecar produces.
-	fmt.Fprintf(&b, `if [ "$HAS_VIDEO" -gt 0 ]; then`+"\n")
-	fmt.Fprintf(&b, `  if [ "$IS_IMAGE" = "1" ]; then`+"\n")
-	fmt.Fprintf(&b, `    media_ffmpeg -y -loglevel error -i "$SIGNED_URL" -threads 1 -frames:v 1 -vf "scale=$THUMB_WIDTH:-2" -q:v 2 thumb.jpg`+"\n")
-	fmt.Fprintf(&b, `  else`+"\n")
-	// Parse duration from probe.json — first numeric "duration":"…" we
-	// find (the format-level one). Empty → DUR_SEC=0 → only the
-	// configured fallback seek is tried.
-	b.WriteString(`    DUR_SEC=$(sed -n 's/.*"duration"[[:space:]]*:[[:space:]]*"\([0-9.]*\)".*/\1/p' probe.json | head -1)` + "\n")
-	b.WriteString(`    : "${DUR_SEC:=0}"` + "\n")
-	// luma_of: mean-Y of a JPEG, via ffmpeg's signalstats. Empty
-	// output (parse fail / corrupt JPEG) becomes 0, which is treated
-	// as "too dark" and triggers the next attempt.
-	b.WriteString(`    luma_of() {` + "\n")
-	b.WriteString(`      media_ffmpeg -hide_banner -nostats -i "$1" -vf "signalstats,metadata=print:file=-" -f null /dev/null 2>&1 \` + "\n")
-	b.WriteString(`        | sed -n 's/.*signalstats\.YAVG=\([0-9.]*\).*/\1/p' | head -1` + "\n")
-	b.WriteString(`    }` + "\n")
-	// Build seek list: configured THUMB_SEEK first, then 5/15/30/50/
-	// 75% of duration if duration is known. awk handles float math
-	// since busybox sh doesn't.
-	b.WriteString(`    SEEKS=$(awk -v d="$DUR_SEC" -v s="$THUMB_SEEK" 'BEGIN{if(d>0 && s>=d)print 0;else print s}')` + "\n")
-	b.WriteString(`    if awk -v d="$DUR_SEC" 'BEGIN{exit !(d > 0)}'; then` + "\n")
-	b.WriteString(`      for PCT in 0.05 0.15 0.30 0.50 0.75; do` + "\n")
-	b.WriteString(`        CAND=$(awk -v d="$DUR_SEC" -v p="$PCT" 'BEGIN{printf "%.3f", d*p}')` + "\n")
-	b.WriteString(`        if awk -v c="$CAND" -v d="$DUR_SEC" 'BEGIN{exit !(c >= 0.5 && c < d - 0.1)}'; then` + "\n")
-	b.WriteString(`          SEEKS="$SEEKS $CAND"` + "\n")
-	b.WriteString(`        fi` + "\n")
-	b.WriteString(`      done` + "\n")
-	b.WriteString(`    fi` + "\n")
-	// Try each seek; first acceptable luma wins, last attempt's
-	// output is kept as fallback. set -e is in effect, so wrap the
-	// ffmpeg call with "|| continue" — codec/seek failure on one
-	// attempt mustn't abort the whole script.
-	b.WriteString(`    for S in $SEEKS; do` + "\n")
-	b.WriteString(`      media_ffmpeg -y -loglevel error -ss "$S" -i "$SIGNED_URL" -vf "scale=$THUMB_WIDTH:-2,thumbnail=30" -threads 1 -frames:v 1 -q:v 3 thumb.jpg || continue` + "\n")
-	b.WriteString(`      [ ! -s thumb.jpg ] && continue` + "\n")
-	b.WriteString(`      L=$(luma_of thumb.jpg)` + "\n")
-	b.WriteString(`      [ -z "$L" ] && continue` + "\n")
-	b.WriteString(`      if awk -v l="$L" 'BEGIN{exit !(l >= 25)}'; then break; fi` + "\n")
-	b.WriteString(`    done` + "\n")
-	fmt.Fprintf(&b, `  fi`+"\n")
-	// Belt + suspenders: if ffmpeg silently produced nothing (some
-	// codec edge cases exit 0 without writing the output), don't
-	// hand curl an empty path — fail loudly here so the surfaced
-	// error names the actual problem.
-	b.WriteString(`  if [ ! -s thumb.jpg ]; then echo "ffmpeg produced no thumbnail output" >&2; exit 1; fi` + "\n")
-	b.WriteString(`  RESP=$(curl -sS --fail -X POST \
+	if in.Stage == "" || in.Stage == "derive" {
+		fmt.Fprintf(&b, `if [ "$HAS_VIDEO" -gt 0 ]; then`+"\n")
+		fmt.Fprintf(&b, `  if [ "$IS_IMAGE" = "1" ]; then`+"\n")
+		fmt.Fprintf(&b, `    media_ffmpeg -y -loglevel error -i "$SIGNED_URL" -threads 1 -frames:v 1 -vf "scale=$THUMB_WIDTH:-2" -q:v 2 thumb.jpg`+"\n")
+		fmt.Fprintf(&b, `  else`+"\n")
+		// Parse duration from probe.json — first numeric "duration":"…" we
+		// find (the format-level one). Empty → DUR_SEC=0 → only the
+		// configured fallback seek is tried.
+		b.WriteString(`    DUR_SEC=$(sed -n 's/.*"duration"[[:space:]]*:[[:space:]]*"\([0-9.]*\)".*/\1/p' probe.json | head -1)` + "\n")
+		b.WriteString(`    : "${DUR_SEC:=0}"` + "\n")
+		// luma_of: mean-Y of a JPEG, via ffmpeg's signalstats. Empty
+		// output (parse fail / corrupt JPEG) becomes 0, which is treated
+		// as "too dark" and triggers the next attempt.
+		b.WriteString(`    luma_of() {` + "\n")
+		b.WriteString(`      media_ffmpeg -hide_banner -nostats -i "$1" -vf "signalstats,metadata=print:file=-" -f null /dev/null 2>&1 \` + "\n")
+		b.WriteString(`        | sed -n 's/.*signalstats\.YAVG=\([0-9.]*\).*/\1/p' | head -1` + "\n")
+		b.WriteString(`    }` + "\n")
+		// Build seek list: configured THUMB_SEEK first, then 5/15/30/50/
+		// 75% of duration if duration is known. awk handles float math
+		// since busybox sh doesn't.
+		b.WriteString(`    SEEKS=$(awk -v d="$DUR_SEC" -v s="$THUMB_SEEK" 'BEGIN{if(d>0 && s>=d)print 0;else print s}')` + "\n")
+		b.WriteString(`    if awk -v d="$DUR_SEC" 'BEGIN{exit !(d > 0)}'; then` + "\n")
+		b.WriteString(`      for PCT in 0.05 0.15 0.30 0.50 0.75; do` + "\n")
+		b.WriteString(`        CAND=$(awk -v d="$DUR_SEC" -v p="$PCT" 'BEGIN{printf "%.3f", d*p}')` + "\n")
+		b.WriteString(`        if awk -v c="$CAND" -v d="$DUR_SEC" 'BEGIN{exit !(c >= 0.5 && c < d - 0.1)}'; then` + "\n")
+		b.WriteString(`          SEEKS="$SEEKS $CAND"` + "\n")
+		b.WriteString(`        fi` + "\n")
+		b.WriteString(`      done` + "\n")
+		b.WriteString(`    fi` + "\n")
+		// Try each seek; first acceptable luma wins, last attempt's
+		// output is kept as fallback. set -e is in effect, so wrap the
+		// ffmpeg call with "|| continue" — codec/seek failure on one
+		// attempt mustn't abort the whole script.
+		b.WriteString(`    for S in $SEEKS; do` + "\n")
+		b.WriteString(`      media_ffmpeg -y -loglevel error -ss "$S" -i "$SIGNED_URL" -vf "scale=$THUMB_WIDTH:-2,thumbnail=30" -threads 1 -frames:v 1 -q:v 3 thumb.jpg || continue` + "\n")
+		b.WriteString(`      [ ! -s thumb.jpg ] && continue` + "\n")
+		b.WriteString(`      L=$(luma_of thumb.jpg)` + "\n")
+		b.WriteString(`      [ -z "$L" ] && continue` + "\n")
+		b.WriteString(`      if awk -v l="$L" 'BEGIN{exit !(l >= 25)}'; then break; fi` + "\n")
+		b.WriteString(`    done` + "\n")
+		fmt.Fprintf(&b, `  fi`+"\n")
+		// Belt + suspenders: if ffmpeg silently produced nothing (some
+		// codec edge cases exit 0 without writing the output), don't
+		// hand curl an empty path — fail loudly here so the surfaced
+		// error names the actual problem.
+		b.WriteString(`  if [ ! -s thumb.jpg ]; then echo "ffmpeg produced no thumbnail output" >&2; exit 1; fi` + "\n")
+		b.WriteString(`  RESP=$(curl -sS --fail -X POST \
     -H "Authorization: Bearer $STORAGE_TOKEN" \
     -F "folder=/.media/thumbnail/" \
     -F "visibility=private" \
@@ -307,18 +346,18 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
     -F "tags=derivation" \
     -F "file=@thumb.jpg;type=image/jpeg;filename=$SRC_ID.jpg" \
     "$STORAGE_BASE/files?project_id=$PROJECT_ID")` + "\n")
-	b.WriteString(`  THUMB_FILE_ID=$(echo "$RESP" | sed -n 's/.*"id":[[:space:]]*\([0-9]*\).*/\1/p' | head -1)` + "\n")
-	b.WriteString(`fi` + "\n")
+		b.WriteString(`  THUMB_FILE_ID=$(echo "$RESP" | sed -n 's/.*"id":[[:space:]]*\([0-9]*\).*/\1/p' | head -1)` + "\n")
+		b.WriteString(`fi` + "\n")
 
-	// Waveform for audio-only sources (skip if there's a video stream
-	// — that gets the thumbnail above).
-	fmt.Fprintf(&b, `if [ "$HAS_AUDIO" -gt 0 ] && [ "$HAS_VIDEO" -eq 0 ]; then`+"\n")
-	fmt.Fprintf(&b, `  media_ffmpeg -y -loglevel error -i "$SIGNED_URL" -filter_complex "showwavespic=s=%dx%d:colors=#7f7f7f" -threads 1 -frames:v 1 waveform.png`+"\n",
-		in.WaveW, in.WaveH)
-	// Same guard as the thumbnail branch — empty output would crash
-	// curl's -F upload with the unhelpful exit 26 "read error".
-	b.WriteString(`  if [ ! -s waveform.png ]; then echo "ffmpeg produced no waveform output" >&2; exit 1; fi` + "\n")
-	b.WriteString(`  RESP=$(curl -sS --fail -X POST \
+		// Waveform for audio-only sources (skip if there's a video stream
+		// — that gets the thumbnail above).
+		fmt.Fprintf(&b, `if [ "$HAS_AUDIO" -gt 0 ] && [ "$HAS_VIDEO" -eq 0 ]; then`+"\n")
+		fmt.Fprintf(&b, `  media_ffmpeg -y -loglevel error -i "$SIGNED_URL" -filter_complex "showwavespic=s=%dx%d:colors=#7f7f7f" -threads 1 -frames:v 1 waveform.png`+"\n",
+			in.WaveW, in.WaveH)
+		// Same guard as the thumbnail branch — empty output would crash
+		// curl's -F upload with the unhelpful exit 26 "read error".
+		b.WriteString(`  if [ ! -s waveform.png ]; then echo "ffmpeg produced no waveform output" >&2; exit 1; fi` + "\n")
+		b.WriteString(`  RESP=$(curl -sS --fail -X POST \
     -H "Authorization: Bearer $STORAGE_TOKEN" \
     -F "folder=/.media/waveform/" \
     -F "visibility=private" \
@@ -326,9 +365,13 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
     -F "tags=derivation" \
     -F "file=@waveform.png;type=image/png;filename=$SRC_ID.png" \
     "$STORAGE_BASE/files?project_id=$PROJECT_ID")` + "\n")
-	b.WriteString(`  WAVE_FILE_ID=$(echo "$RESP" | sed -n 's/.*"id":[[:space:]]*\([0-9]*\).*/\1/p' | head -1)` + "\n")
-	b.WriteString(`fi` + "\n")
+		b.WriteString(`  WAVE_FILE_ID=$(echo "$RESP" | sed -n 's/.*"id":[[:space:]]*\([0-9]*\).*/\1/p' | head -1)` + "\n")
+		b.WriteString(`fi` + "\n")
 
+	}
+
+	b.WriteString(`DUR_SEC=$(sed -n 's/.*"duration"[[:space:]]*:[[:space:]]*"\([0-9.]*\)".*/\1/p' probe.json | head -1)` + "\n")
+	b.WriteString(`: "${DUR_SEC:=0}"` + "\n")
 	// Keyframes — storyboard frames at regular intervals. Only for
 	// video sources (audio-only has no frames; images are single-
 	// frame). Each iteration: extract one frame via the same
@@ -341,7 +384,7 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 	// requiring python on the remote. First keyframe sits at 1s in
 	// (skips splash / black opens, same convention as the canonical
 	// thumbnail's default seek).
-	if in.KeyframesEnabled {
+	if in.KeyframesEnabled && (in.Stage == "" || in.Stage == "keyframe") {
 		interval := in.KeyframeIntervalSecs
 		if interval <= 0 {
 			interval = defaultKeyframeIntervalSeconds
@@ -366,6 +409,9 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
   }')` + "\n")
 		b.WriteString(`  KF_INDEX=0` + "\n")
 		b.WriteString(`  POS_SEC=$(awk -v d="$DUR_SEC" 'BEGIN{if(d<=1)printf "%.3f",d/2;else print 1}')` + "\n")
+		if in.Stage == "keyframe" {
+			fmt.Fprintf(&b, "  POS_SEC=%.3f\n  DUR_SEC=%.3f\n  KEYFRAME_MAX_COUNT=1\n", float64(in.PositionMs)/1000, float64(in.PositionMs)/1000+0.001)
+		}
 		// Loop until pos >= dur OR we hit the cap.
 		b.WriteString(`  while awk -v p="$POS_SEC" -v d="$DUR_SEC" -v c="$KF_INDEX" -v mx="$KEYFRAME_MAX_COUNT" 'BEGIN{exit !(p < d && c < mx)}'; do` + "\n")
 		// Position in milliseconds (integer, for filename + JSON).
@@ -446,4 +492,63 @@ func parseAptevaIndex(stdout string) (*remoteIndexResult, error) {
 		return nil, errors.New("marker missing probe_b64")
 	}
 	return &r, nil
+}
+
+// Release host admission between indexing stages; renders join the same FIFO.
+func runRemoteIndexing(ctx context.Context, app *sdk.AppCtx, project string, params remoteIndexParams) (*Probe, int64, int64, []remoteKeyframe, error) {
+	params.Stage = "probe"
+	params.KeyframesEnabled = false
+	probe := params.ReuseProbe
+	if probe == nil {
+		var err error
+		probe, _, _, _, err = runRemoteIndexStage(ctx, app, project, params)
+		if err != nil {
+			return nil, 0, 0, nil, err
+		}
+	}
+	params.ProbeBase64 = probe.remoteProbeBase64
+	params.Summary = probe
+	thumb, wave := params.ReuseThumbnail, params.ReuseWaveform
+	if ((probe.HasVideo || probe.IsImage) && thumb <= 0) || (probe.HasAudio && !probe.HasVideo && wave <= 0) {
+		params.Stage = "derive"
+		_, t, w, _, err := runRemoteIndexStage(ctx, app, project, params)
+		if err != nil {
+			if resourceFailure(err, "", 0) != nil || ctx.Err() != nil {
+				return nil, 0, 0, nil, err
+			}
+			app.Logger().Warn("remote index derivation stage failed", "file_id", params.FileID, "err", err)
+		}
+		if t > 0 {
+			thumb = t
+		}
+		if w > 0 {
+			wave = w
+		}
+	}
+	frames := append([]remoteKeyframe(nil), params.ReuseKeyframes...)
+	params.KeyframesEnabled = true
+	params.Stage = "keyframe"
+	for _, pos := range requiredIndexPositions(app, probe) {
+		found := false
+		for _, k := range frames {
+			if k.PositionMs == pos && k.StorageFileID > 0 {
+				found = true
+				break
+			}
+		}
+		if found {
+			continue
+		}
+		params.PositionMs = pos
+		_, _, _, ks, e := runRemoteIndexStage(ctx, app, project, params)
+		if e != nil {
+			if resourceFailure(e, "", 0) != nil || ctx.Err() != nil {
+				return nil, 0, 0, nil, e
+			}
+			app.Logger().Warn("remote index keyframe failed", "file_id", params.FileID, "position_ms", pos, "err", e)
+			continue
+		}
+		frames = append(frames, ks...)
+	}
+	return probe, thumb, wave, frames, nil
 }

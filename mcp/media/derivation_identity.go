@@ -182,6 +182,9 @@ func deleteObsoleteDerivationFiles(
 ) {
 	obsolete := make([]DerivationRow, 0, len(previous))
 	for _, d := range previous {
+		if !indexDerivationKind(d.Kind) {
+			continue
+		}
 		if _, ok := keep[d.StorageFileID]; ok {
 			continue
 		}

@@ -95,7 +95,9 @@ func keyframePositions(durationMs int64, app *sdk.AppCtx) []int64 {
 	}
 
 	out := make([]int64, 0, maxCount)
-	for pos := int64(firstKeyframeOffsetMs); pos < durationMs && len(out) < maxCount; pos += intervalMs {
+	// Container duration can include a longer audio tail. Avoid an EOF seek
+	// with no picture; maximum count is a cap, not a required end frame.
+	for pos := int64(firstKeyframeOffsetMs); pos < durationMs-250 && len(out) < maxCount; pos += intervalMs {
 		out = append(out, pos)
 	}
 	return out

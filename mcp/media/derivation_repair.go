@@ -10,8 +10,9 @@ import (
 
 type derivationStageKey struct{}
 type derivationStage struct {
-	rows   []DerivationRow
-	failed bool
+	rows      []DerivationRow
+	failed    bool
+	sourceSHA string
 }
 
 func stageDerivationFailure(ctx context.Context, app *sdk.AppCtx, project, file, kind string, pos int64, cause error) error {
@@ -28,8 +29,17 @@ func commitDerivationStage(ctx context.Context, app *sdk.AppCtx, sc *storageClie
 		return err
 	}
 	defer tx.Rollback()
+	if stage.sourceSHA != "" {
+		var current string
+		if err := tx.QueryRow(`SELECT source_sha256 FROM media WHERE project_id=? AND file_id=?`, project, file).Scan(&current); err != nil {
+			return err
+		}
+		if current != stage.sourceSHA {
+			return fmt.Errorf("derivation_source_changed")
+		}
+	}
 	if !stage.failed {
-		if err := clearDerivations(tx, project, file); err != nil {
+		if err := clearIndexDerivations(tx, project, file); err != nil {
 			return err
 		}
 	}
@@ -37,6 +47,9 @@ func commitDerivationStage(ctx context.Context, app *sdk.AppCtx, sc *storageClie
 		if d.Status == "ok" {
 			id, _ := strconv.ParseInt(d.StorageFileID, 10, 64)
 			err = upsertDerivation(tx, project, file, d.Kind, id, d.Width, d.Height, d.PositionMs)
+			if err == nil && stage.sourceSHA != "" {
+				_, err = tx.Exec(`UPDATE derivations SET source_sha256=? WHERE project_id=? AND file_id=? AND kind=? AND position_ms=?`, stage.sourceSHA, project, file, d.Kind, d.PositionMs)
+			}
 		} else {
 			// Failed replacement keeps the last working pointer available.
 			keep := false
@@ -55,9 +68,9 @@ func commitDerivationStage(ctx context.Context, app *sdk.AppCtx, sc *storageClie
 		}
 	}
 	if stage.failed {
-		_, err = tx.Exec(`UPDATE media SET derivation_retry_at=datetime('now','+10 minutes') WHERE project_id=? AND file_id=?`, project, file)
+		_, err = tx.Exec(`UPDATE media SET derivation_retry_at=datetime('now','+10 minutes'), derivation_retry_reason=? WHERE project_id=? AND file_id=?`, indexGenerationRetryReason(stage), project, file)
 	} else {
-		_, err = tx.Exec(`UPDATE media SET derivation_retry_at=NULL WHERE project_id=? AND file_id=?`, project, file)
+		_, err = tx.Exec(`UPDATE media SET derivation_retry_at=NULL, derivation_retry_reason=NULL, derivation_source_sha256=source_sha256 WHERE project_id=? AND file_id=?`, project, file)
 	}
 	if err != nil {
 		return err
@@ -103,7 +116,7 @@ func enqueueDerivationCleanup(app *sdk.AppCtx, project string, derivs []Derivati
 		return
 	}
 	for _, d := range derivs {
-		if d.StorageFileID == "" {
+		if !indexDerivationKind(d.Kind) || d.StorageFileID == "" {
 			continue
 		}
 		raw, _ := json.Marshal(d)
@@ -127,4 +140,93 @@ func retryDerivationCleanup(ctx context.Context, app *sdk.AppCtx, sc *storageCli
 	}
 	rows.Close()
 	deleteOwnedDerivationFiles(ctx, app, sc, project, ds)
+}
+
+func indexDerivationKind(kind string) bool {
+	return kind == "thumbnail" || kind == "waveform" || kind == "keyframe"
+}
+func clearIndexDerivations(db sqlExecer, project, file string) error {
+	_, err := db.Exec(`DELETE FROM derivations WHERE project_id=? AND file_id=? AND kind IN ('thumbnail','waveform','keyframe')`, project, file)
+	return err
+}
+
+// Repair only legacy unclassified retries whose entire current generation is
+// source-current, post-probe and still resolves to owned Storage artifacts.
+func repairLegacyDerivationRetry(ctx context.Context, app *sdk.AppCtx, sc *storageClient, row *MediaRow, source StorageFile) bool {
+	if source.SHA256 == "" || source.SHA256 != row.SourceSHA256 || row.ProbeStatus != "ok" {
+		return false
+	}
+	var eligible bool
+	err := app.AppDB().QueryRow(`SELECT derivation_retry_at IS NOT NULL AND derivation_retry_reason IS NULL AND NOT EXISTS(SELECT 1 FROM derivations d WHERE d.project_id=media.project_id AND d.file_id=media.file_id AND d.kind IN ('thumbnail','waveform','keyframe') AND (d.status<>'ok' OR (d.source_sha256 IS NOT NULL AND d.source_sha256<>media.source_sha256) OR julianday(d.generated_at)<julianday(media.probe_at))) FROM media WHERE project_id=? AND file_id=?`, row.ProjectID, row.FileID).Scan(&eligible)
+	if err != nil || !eligible {
+		return false
+	}
+	ds := []DerivationRow{}
+	for _, d := range row.Derivations {
+		if indexDerivationKind(d.Kind) {
+			ds = append(ds, d)
+		}
+	}
+	valid, err := resolveValidDerivations(ctx, sc, row.ProjectID, ds)
+	if err != nil || len(valid) != len(ds) {
+		return false
+	}
+	has := map[string]bool{}
+	positions := map[int64]bool{}
+	for _, d := range valid {
+		if d.Status == "ok" {
+			has[d.Kind] = true
+			if d.Kind == "keyframe" {
+				positions[d.PositionMs] = true
+			}
+		}
+	}
+	if (row.HasVideo || row.IsImage) && !has["thumbnail"] {
+		return false
+	}
+	if row.HasAudio && !row.HasVideo && !has["waveform"] {
+		return false
+	}
+	if row.HasVideo && !row.IsImage && keyframesEnabled(app) {
+		for _, pos := range keyframePositions(row.DurationMs, app) {
+			if !positions[pos] {
+				return false
+			}
+		}
+	}
+	tx, err := app.AppDB().Begin()
+	if err != nil {
+		return false
+	}
+	defer tx.Rollback()
+	var count int
+	if tx.QueryRow(`SELECT count(*) FROM derivations WHERE project_id=? AND file_id=? AND kind IN ('thumbnail','waveform','keyframe')`, row.ProjectID, row.FileID).Scan(&count) != nil || count != len(ds) {
+		return false
+	}
+	for _, d := range ds {
+		var n int
+		if tx.QueryRow(`SELECT count(*) FROM derivations WHERE project_id=? AND file_id=? AND kind=? AND position_ms=? AND storage_file_id=? AND status='ok' AND julianday(generated_at)>=julianday(?)`, row.ProjectID, row.FileID, d.Kind, d.PositionMs, d.StorageFileID, row.ProbeAt).Scan(&n) != nil || n != 1 {
+			return false
+		}
+	}
+	result, err := tx.Exec(`UPDATE media SET derivation_retry_at=NULL,derivation_retry_reason=NULL,derivation_source_sha256=source_sha256 WHERE project_id=? AND file_id=? AND source_sha256=? AND julianday(probe_at)=julianday(?) AND derivation_retry_at IS NOT NULL AND derivation_retry_reason IS NULL`, row.ProjectID, row.FileID, source.SHA256, row.ProbeAt)
+	if err != nil {
+		return false
+	}
+	n, _ := result.RowsAffected()
+	if n != 1 {
+		return false
+	}
+	return tx.Commit() == nil
+}
+
+func indexGenerationRetryReason(stage *derivationStage) string {
+	failures := []map[string]any{}
+	for _, d := range stage.rows {
+		if d.Status != "ok" {
+			failures = append(failures, map[string]any{"kind": d.Kind, "position_ms": d.PositionMs, "reason": truncate(d.Error, 512)})
+		}
+	}
+	raw, _ := json.Marshal(map[string]any{"code": "partial_index_generation", "failed_derivations": failures, "retry_cooldown_seconds": 600})
+	return string(raw)
 }

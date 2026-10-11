@@ -166,7 +166,7 @@ func preprocessSmartCrop(ctx context.Context, app *sdk.AppCtx, sc *storageClient
 		return cached
 	}
 	start := time.Now()
-	ctx, releaseAdmission, err := acquireMediaWork(ctx, app, 1)
+	ctx, releaseAdmission, err := acquireMediaWork(ctx, app, smartCropWorkWeight(op))
 	if err != nil {
 		return cropWorkError(params, err)
 	}

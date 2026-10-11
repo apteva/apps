@@ -429,7 +429,7 @@ func runPose(ctx context.Context, app *sdk.AppCtx, host int64, req poseRequest) 
 }
 
 func computeSmartCropPose(ctx context.Context, app *sdk.AppCtx, sc *storageClient, project, fid string, rw, rh int, target smartCropTarget, framing string) (*cropWindow, []cropPathPoint, error) {
-	ctx, release, err := acquireMediaWork(ctx, app, 1)
+	ctx, release, err := acquireMediaWork(ctx, app, poseWorkWeight(target))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -940,4 +940,17 @@ func poseFailureReason(err error) string {
 		return err.Error()
 	}
 	return "pose_analysis_unavailable"
+}
+
+func smartCropWorkWeight(op string) int {
+	if op == "extract_reel" || op == "trim" {
+		return 2
+	}
+	return 1
+}
+func poseWorkWeight(target smartCropTarget) int {
+	if target.EndMs > target.StartMs {
+		return 2
+	}
+	return 1
 }

@@ -23,8 +23,15 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.34
+version: 0.14.35
 description: |
+  v0.14.35 atomically commits source-bound index generations and retry state,
+  preserving transcription audio and usable partial outputs. Legacy stale retries
+  require verified source/artifact identity and complete post-probe evidence.
+  FIFO weighted host admission gives image crops one unit and multi-frame pose
+  or video encodes two. Indexing releases admission between probe/derivation
+  stages. Render admission has a separate bounded deadline and terminal events;
+  cached retrieval skips heavy admission. Existing thread/OOM safeguards remain.
   v0.14.34 returns compact crop preview receipts by default. Complete native
   pose, recovery and failure evidence is retained in immutable project-scoped
   references, with bounded explicit retrieval and authenticated JSON downloads.
@@ -677,7 +684,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.34
+    ref: media/v0.14.35
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -774,7 +781,7 @@ config_schema:
     type: text
     default: "2"
     label: Media processing capacity
-    description: Shared per-host budget for previews, sampling, indexing, audio preparation and renders. Default 2 permits two one-unit operations or one two-unit video render. Sampling is serial within each operation. Increase only with sufficient host RAM.
+    description: Shared per-host budget for previews, sampling, indexing, audio preparation and renders. FIFO default 2 permits two light operations or one heavy video/pose operation; capacity 4 permits four light or two heavy operations. Sampling is serial within each operation. Increase only with sufficient host RAM.
   - name: render_encoder_threads
     type: text
     default: "1"
@@ -784,12 +791,17 @@ config_schema:
     type: text
     default: "2"
     label: Render pool size
-    description: Concurrent ffmpeg renders. Each render can use multiple CPU cores; size for available CPUs.
+    description: Number of render workers. Waiting and active jobs share the weighted media_work_capacity host budget.
+  - name: render_admission_timeout_seconds
+    type: text
+    default: "600"
+    label: Render admission timeout (seconds)
+    description: Maximum wait for fair host admission, separate from execution time.
   - name: render_timeout_seconds
     type: text
     default: "1800"
     label: Render timeout (seconds)
-    description: Default wall-clock budget. HEVC trims can automatically increase it to the estimate, up to render_max_timeout_seconds. Explicit timeout_seconds is honored within that maximum.
+    description: Execution budget starting after admission. HEVC trims can automatically increase it to the estimate, up to render_max_timeout_seconds. Explicit timeout_seconds is honored within that maximum.
   - name: render_max_timeout_seconds
     type: text
     default: "14400"
@@ -3379,12 +3391,7 @@ func (a *App) handleSmartCropPreview(w http.ResponseWriter, r *http.Request) {
 	budgetParams, _ := json.Marshal(map[string]any{"start_ms": body.StartMs, "end_ms": body.EndMs, "at_ms": body.AtMs, "smart_crop_engine": body.SmartCropEngine})
 	parent, timeoutCancel := context.WithTimeout(parent, smartCropTimeout(globalCtx, pid, op, body.FileID, budgetParams))
 	defer timeoutCancel()
-	cctx, release, budgetErr := acquireMediaWork(parent, globalCtx, 1)
-	if budgetErr != nil {
-		http.Error(w, budgetErr.Error(), http.StatusRequestTimeout)
-		return
-	}
-	defer release()
+	cctx := parent
 	if mode == "smart" && (op == "extract_reel" || op == "extract_frame" || op == "crop") {
 		params, _ := json.Marshal(map[string]any{"start_ms": body.StartMs, "end_ms": body.EndMs, "at_ms": body.AtMs, "target_ratio": ratio, "crop_mode": mode, "smart_crop_engine": body.SmartCropEngine, "smart_crop_framing": body.SmartCropFraming})
 		resolved := preprocessSmartCrop(cctx, globalCtx, newStorageClient(), pid, op, []string{body.FileID}, params)

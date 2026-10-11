@@ -517,13 +517,6 @@ func TestSidecar_RenderPipeline_FullFlow(t *testing.T) {
 	}
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // ─── Description (v0.3) — full cross-app round-trip ────────────────
 //
 // Spawns media + real storage, uploads a fixture, waits for the
@@ -692,7 +685,7 @@ func TestSidecar_RenderPipeline_SmartCropProvenance(t *testing.T) {
 	waitForIndexed(t, sc, "test-proj", fid, 15*time.Second)
 	var original json.RawMessage
 	for i := 0; i < 2; i++ {
-		sub := sc.MCP("media_crop", map[string]any{"_project_id": "test-proj", "file_id": fid, "target_ratio": "9:16", "output_width": 54, "output_name": "audited-portrait"})
+		sub := sc.MCP("media_crop", map[string]any{"_project_id": "test-proj", "file_id": fid, "smart_crop_engine": "legacy", "target_ratio": "9:16", "output_width": 54, "output_name": "audited-portrait"})
 		rid := int64(sub["render_id"].(float64))
 		final := pollUntilOk(t, sc, "test-proj", rid, 25*time.Second)
 		resolved, ok := final["resolved_params"].(map[string]any)
@@ -700,7 +693,7 @@ func TestSidecar_RenderPipeline_SmartCropProvenance(t *testing.T) {
 			t.Fatalf("missing saved params: %v", final)
 		}
 		diag, ok := resolved["crop_diagnostics"].(map[string]any)
-		if !ok || diag["algorithm_version"] != smartCropAlgorithmVersion || diag["app_version"] != (&App{}).Manifest().Version || diag["effective_crop"] == nil || diag["evidence"] == nil {
+		if !ok || diag["algorithm_version"] != legacySmartCropAlgorithmVersion || diag["app_version"] != (&App{}).Manifest().Version || diag["effective_crop"] == nil || diag["evidence"] == nil {
 			t.Fatalf("incomplete saved crop provenance: %v", resolved)
 		}
 		raw, _ := json.Marshal(resolved)

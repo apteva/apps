@@ -173,26 +173,11 @@ func runOneRender(app *sdk.AppCtx, row *RenderRow, local *localExecutor, remote 
 	// either timeout OR explicit cancel terminates work promptly.
 	parent, stop := mediaContext(context.Background(), app)
 	defer stop()
-	ctx, cancel := context.WithTimeout(parent, time.Duration(timeoutSec)*time.Second)
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	registerCancel(row.ID, cancel)
 	defer deregisterCancel(row.ID)
-
-	waitDone := renderStage(app, row, "admission")
-	weight := 2
-	if row.Operation == "extract_frame" {
-		weight = 1
-	}
-	ctx, release, budgetErr := acquireMediaWork(ctx, app, weight)
-	waitDone()
-	if budgetErr != nil {
-		_ = renderMarkFailed(db, row.ID, budgetErr.Error())
-		return
-	}
-	defer release()
-	if created, err := time.Parse(time.RFC3339, row.CreatedAt); err == nil {
-		recordRenderMetric(app, row, "queue_wait_ms", time.Since(created).Milliseconds())
-	}
+	recordRenderMetric(app, row, "execution_timeout_seconds", timeoutSec)
 	executor := selectExecutor(app, local, remote, row)
 	log.Info("render claimed", "id", row.ID, "op", row.Operation, "executor", executor.Name())
 	emitRenderStarted(app, row, executor.Name())
@@ -222,6 +207,35 @@ func runOneRender(app *sdk.AppCtx, row *RenderRow, local *localExecutor, remote 
 		}
 	}
 	if err == nil && outputFileID == 0 {
+		weight := renderWorkWeight(app, row)
+		admissionSec := parseConfigIntFallback(app.Config().Get("render_admission_timeout_seconds"), 600)
+		recordRenderMetric(app, row, "work_units", weight)
+		recordRenderMetric(app, row, "admission_timeout_seconds", admissionSec)
+		waitDone := renderStage(app, row, "admission")
+		waitCtx, stopWait := context.WithTimeout(ctx, time.Duration(admissionSec)*time.Second)
+		started := time.Now()
+		leaseCtx, release, admissionErr := acquireMediaWorkWithLeaseContext(waitCtx, ctx, app, weight)
+		stopWait()
+		waitDone()
+		recordRenderMetric(app, row, "admission_wait_ms", time.Since(started).Milliseconds())
+		if admissionErr != nil {
+			if ctx.Err() == context.Canceled {
+				_ = renderMarkCancelled(db, row.ID)
+				emitRenderCancelled(app, row.ID, row.ProjectID, row.Operation)
+			} else {
+				msg := "render_admission_timeout: " + admissionErr.Error()
+				_ = renderMarkFailed(db, row.ID, msg)
+				emitRenderFailed(app, row.ID, row.ProjectID, row.Operation, msg)
+			}
+			return
+		}
+		defer release()
+		var stopExecution context.CancelFunc
+		ctx, stopExecution = context.WithTimeout(leaseCtx, time.Duration(timeoutSec)*time.Second)
+		defer stopExecution()
+		if created, e := time.Parse(time.RFC3339, row.CreatedAt); e == nil {
+			recordRenderMetric(app, row, "queue_wait_ms", time.Since(created).Milliseconds())
+		}
 		outputFileID, err = executor.Execute(ctx, app, row)
 		if err == nil {
 			// Do not associate new bytes with an old source/config identity if
@@ -361,4 +375,17 @@ func signalRenderQueue() {
 	case renderQueueWake <- struct{}{}:
 	default:
 	}
+}
+
+func renderWorkWeight(app *sdk.AppCtx, row *RenderRow) int {
+	if row.Operation == "extract_frame" {
+		return 1
+	}
+	if row.Operation == "crop" && len(row.SourceFileIDs) > 0 {
+		media, err := getMedia(app.AppDB(), row.ProjectID, row.SourceFileIDs[0])
+		if err == nil && media.IsImage {
+			return 1
+		}
+	}
+	return 2
 }

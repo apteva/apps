@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -225,6 +226,7 @@ func resolvePendingIndexerFiles(
 // Wraps processOne with the same config setup runIndexer uses so
 // the two entry points produce identical results.
 func indexOneFile(ctx context.Context, app *sdk.AppCtx, projectID string, f StorageFile) {
+	sc := newStorageClient()
 	if isExcludedFromCatalog(f.Folder) {
 		return
 	}
@@ -235,12 +237,11 @@ func indexOneFile(ctx context.Context, app *sdk.AppCtx, projectID string, f Stor
 	// the platform's ring buffer, and the sweep may have raced us.
 	fid := strconv.FormatInt(f.ID, 10)
 	if existing, err := getMedia(app.AppDB(), projectID, fid); err == nil &&
-		existing.SourceSHA256 == f.SHA256 && existing.ProbeStatus == "ok" && !mediaNeedsDerivationRepair(app, existing) {
+		existing.SourceSHA256 == f.SHA256 && existing.ProbeStatus == "ok" && (!mediaNeedsDerivationRepair(app, existing) || repairLegacyDerivationRetry(ctx, app, sc, existing, f)) {
 		return
 	}
 
 	c := readIndexerConfig(app)
-	sc := newStorageClient()
 	processOne(ctx, app, sc, projectID, f, c.ffmpegPath, c.ffprobePath,
 		c.maxSizeMB, c.thumbSeek, c.thumbWidth, c.waveW, c.waveH)
 }
@@ -296,11 +297,7 @@ func processOne(
 ) {
 	ctx, stop := mediaContext(ctx, app)
 	defer stop()
-	ctx, release, budgetErr := acquireMediaWork(ctx, app, 1)
-	if budgetErr != nil {
-		return
-	}
-	defer release()
+	ctx = context.WithValue(ctx, indexStopKey{}, context.CancelFunc(stop))
 
 	fid := strconv.FormatInt(f.ID, 10)
 	// Race guard. Concurrent attempts for the same file (periodic
@@ -354,7 +351,7 @@ func processOne(
 	// without touching the remote or local pipeline.
 	if forceProbe == 0 {
 		if existing, err := getMedia(app.AppDB(), projectID, fid); err == nil &&
-			existing.SourceSHA256 == f.SHA256 && existing.ProbeStatus == "ok" && !mediaNeedsDerivationRepair(app, existing) {
+			existing.SourceSHA256 == f.SHA256 && existing.ProbeStatus == "ok" && (!mediaNeedsDerivationRepair(app, existing) || repairLegacyDerivationRetry(ctx, app, sc, existing, f)) {
 			clearIndexerClaim(app.AppDB(), projectID, fid)
 			return
 		}
@@ -411,7 +408,8 @@ func processOne(
 	}
 	srcFile.Close()
 
-	probe, err := runProbe(ctx, ffprobePath, srcPath)
+	var probe *Probe
+	err = runIndexStage(ctx, app, func(c context.Context) error { var e error; probe, e = runProbe(c, ffprobePath, srcPath); return e })
 	if err != nil {
 		_ = markFailed(app.AppDB(), projectID, fid, f.SHA256, "failed", err.Error())
 		logger.Warn("probe failed", "err", err)
@@ -426,7 +424,7 @@ func processOne(
 		return
 	}
 	previous, _ := listDerivations(app.AppDB(), projectID, fid)
-	stage := &derivationStage{}
+	stage := &derivationStage{sourceSHA: f.SHA256}
 	ctx = context.WithValue(ctx, derivationStageKey{}, stage)
 	logger.Info("indexed",
 		"duration_ms", probe.DurationMs,
@@ -450,7 +448,9 @@ func processOne(
 	var keyframeCount int
 	if probe.HasVideo || probe.IsImage {
 		thumbPath := filepath.Join(tmpDir, "thumb.jpg")
-		if err := makeThumbnail(ctx, ffmpegPath, srcPath, thumbPath, toFloat(thumbSeek), toInt(thumbWidth), probe.IsImage, probe.DurationMs); err != nil {
+		if err := runIndexStage(ctx, app, func(c context.Context) error {
+			return makeThumbnail(c, ffmpegPath, srcPath, thumbPath, toFloat(thumbSeek), toInt(thumbWidth), probe.IsImage, probe.DurationMs)
+		}); err != nil {
 			logger.Warn("thumbnail failed", "err", err)
 			_ = stageDerivationFailure(ctx, app, projectID, fid, "thumbnail", 0, err)
 		} else if err := uploadAndRecord(ctx, app, sc, projectID, fid, "thumbnail", thumbPath, "image/jpeg", toInt(thumbWidth), 0, 0); err != nil {
@@ -460,13 +460,15 @@ func processOne(
 			hasThumb = true
 		}
 	}
-	if mediaWorkFailure(ctx) != nil {
-		_ = markFailed(app.AppDB(), projectID, fid, f.SHA256, "failed", mediaWorkFailure(ctx).Error())
+	if mediaWorkFailure(ctx) != nil || ctx.Err() != nil {
+		_ = markFailed(app.AppDB(), projectID, fid, f.SHA256, "failed", fmt.Sprint(mediaWorkFailure(ctx), ctx.Err()))
 		return
 	}
 	if probe.HasAudio && !probe.HasVideo {
 		wavePath := filepath.Join(tmpDir, "waveform.png")
-		if err := makeWaveform(ctx, ffmpegPath, srcPath, wavePath, toInt(waveW), toInt(waveH)); err != nil {
+		if err := runIndexStage(ctx, app, func(c context.Context) error {
+			return makeWaveform(c, ffmpegPath, srcPath, wavePath, toInt(waveW), toInt(waveH))
+		}); err != nil {
 			logger.Warn("waveform failed", "err", err)
 			_ = stageDerivationFailure(ctx, app, projectID, fid, "waveform", 0, err)
 		} else if err := uploadAndRecord(ctx, app, sc, projectID, fid, "waveform", wavePath, "image/png", toInt(waveW), toInt(waveH), 0); err != nil {
@@ -487,7 +489,9 @@ func processOne(
 				break
 			}
 			framePath := filepath.Join(tmpDir, fmt.Sprintf("kf-%d.jpg", posMs))
-			if err := extractKeyframe(ctx, ffmpegPath, srcPath, framePath, float64(posMs)/1000.0, toInt(thumbWidth)); err != nil {
+			if err := runIndexStage(ctx, app, func(c context.Context) error {
+				return extractKeyframe(c, ffmpegPath, srcPath, framePath, float64(posMs)/1000.0, toInt(thumbWidth))
+			}); err != nil {
 				logger.Warn("keyframe failed", "position_ms", posMs, "err", err)
 				_ = stageDerivationFailure(ctx, app, projectID, fid, "keyframe", posMs, err)
 				continue
@@ -503,6 +507,9 @@ func processOne(
 
 	if failure := mediaWorkFailure(ctx); failure != nil {
 		_ = markFailed(app.AppDB(), projectID, fid, f.SHA256, "failed", failure.Error())
+		return
+	}
+	if ctx.Err() != nil {
 		return
 	}
 	if err := commitDerivationStage(ctx, app, sc, projectID, fid, stage, previous); err != nil {
@@ -580,7 +587,7 @@ func tryRemoteIndex(
 		logger.Warn("remote index: sign source url", "file_id", fid, "err", err)
 		return false
 	}
-	probe, thumbID, waveID, keyframes, err := runRemoteIndexing(ctx, app, projectID, remoteIndexParams{
+	params := remoteIndexParams{
 		HostID:               hostID,
 		SignedURL:            signedURL,
 		ThumbSeek:            toFloat(thumbSeek),
@@ -591,7 +598,9 @@ func tryRemoteIndex(
 		KeyframeIntervalSecs: parseConfigIntFallback(app.Config().Get("keyframe_interval_seconds"), defaultKeyframeIntervalSeconds),
 		KeyframeMaxCount:     parseConfigIntFallback(app.Config().Get("keyframe_max_count"), defaultKeyframeMaxCount),
 		KeyframesEnabled:     keyframesEnabled(app),
-	})
+	}
+	reuseRemoteIndexGeneration(ctx, app, sc, projectID, f, &params)
+	probe, thumbID, waveID, keyframes, err := runRemoteIndexing(ctx, app, projectID, params)
 	if err != nil {
 		logger.Warn("remote index: pipeline", "file_id", fid, "err", err)
 		return false
@@ -611,12 +620,16 @@ func tryRemoteIndex(
 		return false
 	}
 	if err := replaceRemoteDerivations(app.AppDB(), projectID, fid, probe,
-		thumbID, waveID, keyframes, toInt(thumbWidth), toInt(waveW), toInt(waveH)); err != nil {
+		thumbID, waveID, keyframes, toInt(thumbWidth), toInt(waveW), toInt(waveH), remoteGenerationPolicy{sourceSHA: f.SHA256, expected: requiredIndexPositions(app, probe)}); err != nil {
 		logger.Warn("remote index: replace derivations", "file_id", fid, "err", err)
 		return false
 	}
-	deleteObsoleteDerivationFiles(ctx, app, sc, projectID, previousDerivations,
-		remoteDerivationStorageIDs(thumbID, waveID, keyframes))
+	current, _ := listDerivations(app.AppDB(), projectID, fid)
+	keep := map[string]struct{}{}
+	for _, d := range current {
+		keep[d.StorageFileID] = struct{}{}
+	}
+	deleteObsoleteDerivationFiles(ctx, app, sc, projectID, previousDerivations, keep)
 	logger.Info("indexed (remote)",
 		"file_id", fid, "host_id", hostID,
 		"duration_ms", probe.DurationMs,
@@ -686,37 +699,93 @@ func replaceRemoteDerivations(
 	thumbID, waveID int64,
 	keyframes []remoteKeyframe,
 	thumbWidth, waveW, waveH int,
+	policy ...remoteGenerationPolicy,
 ) error {
+	previous, err := listDerivations(db, projectID, fileID)
+	if err != nil {
+		return err
+	}
+	stage := &derivationStage{}
+	add := func(kind string, id int64, w, h int, pos int64) {
+		d := DerivationRow{Kind: kind, PositionMs: pos, Width: w, Height: h, StorageFileID: strconv.FormatInt(id, 10), Status: "ok"}
+		if id <= 0 {
+			stage.failed = true
+			d.Status = "failed"
+			d.Error = "remote index missing " + kind
+		}
+		stage.rows = append(stage.rows, d)
+	}
+	if probe.HasVideo || probe.IsImage {
+		add("thumbnail", thumbID, thumbWidth, 0, 0)
+	}
+	if probe.HasAudio && !probe.HasVideo {
+		add("waveform", waveID, waveW, waveH, 0)
+	}
+	for _, k := range keyframes {
+		add("keyframe", k.StorageFileID, thumbWidth, 0, k.PositionMs)
+	}
+	if len(policy) > 0 {
+		stage.sourceSHA = policy[0].sourceSHA
+		for _, pos := range policy[0].expected {
+			found := false
+			for _, k := range keyframes {
+				if k.PositionMs == pos && k.StorageFileID > 0 {
+					found = true
+				}
+			}
+			if !found {
+				add("keyframe", 0, thumbWidth, 0, pos)
+			}
+		}
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if err := clearDerivations(tx, projectID, fileID); err != nil {
+	if stage.sourceSHA != "" {
+		var sha string
+		if err = tx.QueryRow(`SELECT source_sha256 FROM media WHERE project_id=? AND file_id=?`, projectID, fileID).Scan(&sha); err != nil {
+			return err
+		}
+		if sha != stage.sourceSHA {
+			return errors.New("derivation_source_changed")
+		}
+	}
+	if !stage.failed {
+		if err = clearIndexDerivations(tx, projectID, fileID); err != nil {
+			return err
+		}
+	}
+	for _, d := range stage.rows {
+		if d.Status == "ok" {
+			id, _ := strconv.ParseInt(d.StorageFileID, 10, 64)
+			err = upsertDerivation(tx, projectID, fileID, d.Kind, id, d.Width, d.Height, d.PositionMs)
+			if err == nil && stage.sourceSHA != "" {
+				_, err = tx.Exec(`UPDATE derivations SET source_sha256=? WHERE project_id=? AND file_id=? AND kind=? AND position_ms=?`, stage.sourceSHA, projectID, fileID, d.Kind, d.PositionMs)
+			}
+		} else {
+			keep := false
+			for _, old := range previous {
+				if old.Kind == d.Kind && old.PositionMs == d.PositionMs && old.Status == "ok" {
+					keep = true
+				}
+			}
+			if !keep {
+				err = upsertDerivationFailed(tx, projectID, fileID, d.Kind, d.PositionMs, errors.New(d.Error))
+			}
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if stage.failed {
+		_, err = tx.Exec(`UPDATE media SET derivation_retry_at=datetime('now','+10 minutes'),derivation_retry_reason=? WHERE project_id=? AND file_id=?`, indexGenerationRetryReason(stage), projectID, fileID)
+	} else {
+		_, err = tx.Exec(`UPDATE media SET derivation_retry_at=NULL,derivation_retry_reason=NULL,derivation_source_sha256=source_sha256 WHERE project_id=? AND file_id=?`, projectID, fileID)
+	}
+	if err != nil {
 		return err
-	}
-	if thumbID > 0 {
-		if err := upsertDerivation(tx, projectID, fileID, "thumbnail", thumbID, thumbWidth, 0, 0); err != nil {
-			return err
-		}
-	} else if probe.HasVideo || probe.IsImage {
-		if err := upsertDerivationFailed(tx, projectID, fileID, "thumbnail", 0, errors.New("remote index produced no thumbnail")); err != nil {
-			return err
-		}
-	}
-	if waveID > 0 {
-		if err := upsertDerivation(tx, projectID, fileID, "waveform", waveID, waveW, waveH, 0); err != nil {
-			return err
-		}
-	} else if probe.HasAudio && !probe.HasVideo {
-		if err := upsertDerivationFailed(tx, projectID, fileID, "waveform", 0, errors.New("remote index produced no waveform")); err != nil {
-			return err
-		}
-	}
-	for _, keyframe := range keyframes {
-		if err := upsertDerivation(tx, projectID, fileID, "keyframe", keyframe.StorageFileID, thumbWidth, 0, keyframe.PositionMs); err != nil {
-			return err
-		}
 	}
 	return tx.Commit()
 }
@@ -900,4 +969,87 @@ func toFloat(v any) float64 {
 		return x
 	}
 	return 0
+}
+
+type remoteGenerationPolicy struct {
+	sourceSHA string
+	expected  []int64
+}
+
+func requiredIndexPositions(app *sdk.AppCtx, probe *Probe) []int64 {
+	if probe.HasVideo && !probe.IsImage && keyframesEnabled(app) {
+		return keyframePositions(probe.DurationMs, app)
+	}
+	return nil
+}
+
+func runIndexStage(ctx context.Context, app *sdk.AppCtx, work func(context.Context) error) error {
+	c, release, err := acquireMediaWork(ctx, app, 1)
+	if err != nil {
+		return err
+	}
+	defer release()
+	err = work(c)
+	if failure := mediaWorkFailure(c); failure != nil {
+		if stop, ok := ctx.Value(indexStopKey{}).(context.CancelFunc); ok {
+			stop()
+		}
+		return failure
+	}
+	return err
+}
+
+type indexStopKey struct{}
+
+// Legacy outputs need post-probe lineage; newly committed artifacts carry an
+// explicit source hash. Storage identity is checked before either is reused.
+func reuseRemoteIndexGeneration(ctx context.Context, app *sdk.AppCtx, sc *storageClient, project string, source StorageFile, params *remoteIndexParams) {
+	fid := strconv.FormatInt(source.ID, 10)
+	var force int
+	_ = app.AppDB().QueryRow(`SELECT force_probe FROM media WHERE project_id=? AND file_id=?`, project, fid).Scan(&force)
+	if force != 0 || source.SHA256 == "" {
+		return
+	}
+	row, err := getMedia(app.AppDB(), project, fid)
+	if err != nil || row.ProbeStatus != "ok" || row.SourceSHA256 != source.SHA256 {
+		return
+	}
+	probe, err := parseProbeBytes(row.RawProbe)
+	if err != nil {
+		return
+	}
+	probe.remoteProbeBase64 = base64.StdEncoding.EncodeToString(row.RawProbe)
+	params.ReuseProbe = probe
+	var eligible []DerivationRow
+	for _, d := range row.Derivations {
+		if !indexDerivationKind(d.Kind) || d.Status != "ok" {
+			continue
+		}
+		var current bool
+		if app.AppDB().QueryRow(`SELECT source_sha256=? OR (source_sha256 IS NULL AND julianday(generated_at)>=julianday(?)) FROM derivations WHERE project_id=? AND file_id=? AND kind=? AND position_ms=?`, source.SHA256, row.ProbeAt, project, fid, d.Kind, d.PositionMs).Scan(&current) == nil && current {
+			eligible = append(eligible, d)
+		}
+	}
+	valid, err := resolveValidDerivations(ctx, sc, project, eligible)
+	if err != nil {
+		return
+	}
+	expected := map[int64]bool{}
+	for _, pos := range requiredIndexPositions(app, probe) {
+		expected[pos] = true
+	}
+	for _, d := range valid {
+		id, _ := strconv.ParseInt(d.StorageFileID, 10, 64)
+		switch d.Kind {
+		case "thumbnail":
+			params.ReuseThumbnail = id
+		case "waveform":
+			params.ReuseWaveform = id
+		case "keyframe":
+			if expected[d.PositionMs] {
+				params.ReuseKeyframes = append(params.ReuseKeyframes, remoteKeyframe{d.PositionMs, id})
+			}
+		}
+	}
+	app.Logger().Info("index generation reuse", "file_id", fid, "thumbnail_reused", params.ReuseThumbnail > 0, "keyframes_reused", len(params.ReuseKeyframes), "keyframes_required", len(expected))
 }

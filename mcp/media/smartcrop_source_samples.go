@@ -117,7 +117,11 @@ func analyzeSmartCropV2Source(
 	positions []int64,
 	srcW, srcH, targetW, targetH int,
 ) (result []smartCropV2Sample, resultErr error) {
-	ctx, release, err := acquireMediaWork(ctx, app, 1)
+	weight := 1
+	if len(positions) > 1 {
+		weight = 2
+	}
+	ctx, release, err := acquireMediaWork(ctx, app, weight)
 	if err != nil {
 		return nil, err
 	}

@@ -1278,7 +1278,7 @@ func preprocessSmartCropUncached(
 		return params
 	}
 	admissionStarted := time.Now()
-	ctx, release, admissionErr := acquireMediaWork(ctx, app, 1)
+	ctx, release, admissionErr := acquireMediaWork(ctx, app, smartCropWorkWeight(op))
 	if admissionErr != nil {
 		return cropWorkError(params, admissionErr)
 	}

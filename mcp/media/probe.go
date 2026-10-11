@@ -15,12 +15,13 @@ import (
 )
 
 type Probe struct {
-	FormatName string
-	DurationMs int64
-	Bitrate    int64
-	HasVideo   bool
-	HasAudio   bool
-	IsImage    bool
+	remoteProbeBase64 string
+	FormatName        string
+	DurationMs        int64
+	Bitrate           int64
+	HasVideo          bool
+	HasAudio          bool
+	IsImage           bool
 	// Width/Height are reported in DISPLAY-space — what users
 	// actually see in a player. For sources with a rotation tag
 	// (e.g. iPhone landscape recordings tagged rotation=90 to

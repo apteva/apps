@@ -108,9 +108,11 @@ type MediaRow struct {
 	UpdatedAt string `json:"updated_at,omitempty"`
 
 	// Durable indexer diagnostics exposed for queue troubleshooting.
-	IndexAttempts  int64  `json:"index_attempts,omitempty"`
-	IndexClaimedAt string `json:"index_claimed_at,omitempty"`
-	IndexLastError string `json:"index_last_error,omitempty"`
+	IndexAttempts         int64  `json:"index_attempts,omitempty"`
+	IndexClaimedAt        string `json:"index_claimed_at,omitempty"`
+	IndexLastError        string `json:"index_last_error,omitempty"`
+	DerivationRetryAt     string `json:"derivation_retry_at,omitempty"`
+	DerivationRetryReason string `json:"derivation_retry_reason,omitempty"`
 
 	Derivations []DerivationRow `json:"derivations,omitempty"`
 }
@@ -728,7 +730,7 @@ func getMedia(db *sql.DB, projectID, fileID string) (*MediaRow, error) {
 			m.audience_rating, m.audience_reasoning, COALESCE(m.audience_updated_at, ''),
 			m.metadata, m.metadata_version,
 			m.created_at, m.updated_at,
-			m.index_attempts, COALESCE(m.index_claimed_at, ''), COALESCE(m.index_last_error, '')
+			m.index_attempts, COALESCE(m.index_claimed_at, ''), COALESCE(m.index_last_error, ''), COALESCE(m.derivation_retry_at,''),COALESCE(m.derivation_retry_reason,'')
 		FROM media m
 		LEFT JOIN transcripts t
 		  ON t.file_id = m.file_id AND t.project_id = m.project_id
@@ -776,7 +778,7 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaRow, error) {
 		&m.AudienceRating, &m.AudienceReasoning, &m.AudienceUpdatedAt,
 		&metadata, &m.MetadataVersion,
 		&createdAt, &updatedAt,
-		&indexAttempts, &indexClaimedAt, &indexLastError,
+		&indexAttempts, &indexClaimedAt, &indexLastError, &m.DerivationRetryAt, &m.DerivationRetryReason,
 	)
 	if err != nil {
 		return nil, err
@@ -1173,7 +1175,7 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 		m.audience_rating, ` + audienceReasoningExpr + `, COALESCE(m.audience_updated_at, ''),
 		` + metadataExpr + `, m.metadata_version,
 		m.created_at, m.updated_at,
-		m.index_attempts, COALESCE(m.index_claimed_at, ''), COALESCE(m.index_last_error, '')
+		m.index_attempts, COALESCE(m.index_claimed_at, ''), COALESCE(m.index_last_error, ''), COALESCE(m.derivation_retry_at,''),COALESCE(m.derivation_retry_reason,'')
 	FROM media m
 		LEFT JOIN transcripts t
 		  ON t.file_id = m.file_id AND t.project_id = m.project_id
