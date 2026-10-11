@@ -1,5 +1,53 @@
 # Content Catalog
 
+## Version 0.6.8: guarded source corrections
+
+`content_catalog_assets_link_source` now returns `status=inserted`, `unchanged`
+(identical saved edge), or `conflict` with `linked=false`. A conflict is not a
+successful link or correction. The response includes the actual saved source
+list and child revision. Inserted links advance the child revision and retain
+before/after evidence; identical links and conflicts do not change it.
+
+Use `content_catalog_assets_sources_replace` for explicit corrections or removal:
+
+```json
+{
+  "child_asset_id": "<child Catalog ID>",
+  "expected_revision": 3,
+  "expected_sources": [
+    {"asset_id": "<parent ID>", "relation": "derived_from", "source_order": 0, "media_render_id": 123}
+  ],
+  "sources": [
+    {"asset_id": "<parent ID>", "relation": "cropped", "source_order": 0, "media_render_id": 123}
+  ],
+  "idempotency_key": "<stable key for this exact correction>",
+  "reason": "Correct the recorded immediate crop parent"
+}
+```
+
+Read the child's revision and complete immediate source list first. Supply all
+four edge fields explicitly; extra readback display fields are ignored. Edge
+comparison is independent of array order. `sources=[]` removes all immediate
+links. The operation validates child/parent ownership, prevents self-links and
+cycles, checks both concurrency guards, replaces the entire list, increments the
+revision only when changed, and saves the before/after evidence in one SQLite
+transaction. Lineage writers acquire the database writer lock before inspecting
+the graph, so concurrent edits cannot jointly create a cycle.
+
+Reuse the identical arguments and key after an uncertain response: successful
+retries do not increment revisions or duplicate audit events. Reusing a key for
+another request fails. If lineage changed after a saved operation, a replay
+fails explicitly instead of pretending the saved state is current. A new key
+with an old revision or stale source list also fails. The result reports the
+actual saved `sources`, `revision`, `status`, `audit_event_id`, and `replayed`.
+Asset detail exposes project-scoped `source_history`, including before/after
+edges, revisions, reason, operation key and time (latest 100 events).
+
+Only Catalog relationships change. Storage files, render IDs, Media metadata,
+lifecycle, review, hosting and publication records remain intact. Source assets
+may be archived or intermediate: their provenance remains readable. This tool
+does not authorize processing those sources or bypass eligibility safeguards.
+
 ## Version 0.6.7: content purpose and hidden provenance
 
 Assets have an explicit `role`: `unspecified`, `main`, `derivative`, or

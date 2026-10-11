@@ -293,7 +293,11 @@ func (a *App) assetGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]any{"asset": asset, "purpose_history": history, "sources": asset.Sources, "hostings": hostingsAny.(map[string]any)["hostings"], "hosting_intents": hostingsAny.(map[string]any)["hosting_intents"], "publications": asset.Publications}
+	sourceHistory, err := sourceHistory(ctx.AppDB(), pid, asset.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{"asset": asset, "source_history": sourceHistory, "purpose_history": history, "sources": asset.Sources, "hostings": hostingsAny.(map[string]any)["hostings"], "hosting_intents": hostingsAny.(map[string]any)["hosting_intents"], "publications": asset.Publications}
 	asset.MediaStatus, asset.MediaRating = "unavailable", ""
 	if ctx.IntegrationFor("media") != nil {
 		var media struct {
@@ -315,47 +319,6 @@ func (a *App) assetGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 	}
 	return out, nil
-}
-func (a *App) assetLinkSource(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := project(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if err = required(args, "child_asset_id", "source_asset_id"); err != nil {
-		return nil, err
-	}
-	child, err := assetByID(ctx.AppDB(), pid, str(args, "child_asset_id"))
-	if err != nil {
-		return nil, err
-	}
-	source, err := assetByID(ctx.AppDB(), pid, str(args, "source_asset_id"))
-	if err != nil {
-		return nil, err
-	}
-	if child.ID == source.ID {
-		return nil, errors.New("asset cannot be its own source")
-	}
-	// A source can itself be derived, but the lineage graph must remain acyclic.
-	var cycle int
-	err = ctx.AppDB().QueryRow(`WITH RECURSIVE ancestors(id) AS (
-	  SELECT source_asset_id FROM asset_sources WHERE project_id=? AND child_asset_id=?
-	  UNION SELECT s.source_asset_id FROM asset_sources s JOIN ancestors a ON s.child_asset_id=a.id WHERE s.project_id=?
-	) SELECT COUNT(*) FROM ancestors WHERE id=?`, pid, source.ID, pid, child.ID).Scan(&cycle)
-	if err != nil {
-		return nil, err
-	}
-	if cycle > 0 {
-		return nil, errors.New("asset lineage cycle")
-	}
-	relation := str(args, "relation")
-	if relation == "" {
-		relation = "derived"
-	}
-	_, err = ctx.AppDB().Exec(`INSERT OR IGNORE INTO asset_sources(project_id,child_asset_id,source_asset_id,relation,source_order,media_render_id) VALUES(?,?,?,?,?,?)`, pid, child.ID, source.ID, relation, number(args, "source_order"), number(args, "media_render_id"))
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"linked": true, "child_asset_id": child.ID, "source_asset_id": source.ID}, nil
 }
 func (a *App) assetReview(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := project(ctx)
