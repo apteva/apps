@@ -223,7 +223,15 @@ func compactCropAudit(raw []byte) map[string]any {
 	return out
 }
 
-func cropDiagnosticPage(raw []byte, ref, section string, offset, limit int) (map[string]any, error) {
+func cropDiagnosticPage(raw []byte, ref, section string, offset, limit int) (result map[string]any, err error) {
+	defer func() {
+		if err == nil {
+			b, _ := json.Marshal(result)
+			if renderWireBytes(result) > maxCropDetailBytes || len(b) > maxCropDetailBytes {
+				result = map[string]any{"diagnostics_ref": ref, "section": section, "download_required": true, "limitation": "Section exceeds the bounded tool response. Download the complete evidence."}
+			}
+		}
+	}()
 	if offset < 0 || limit < 1 || limit > 4 {
 		return nil, fmt.Errorf("offset must be nonnegative; limit must be 1–4")
 	}
@@ -231,17 +239,33 @@ func cropDiagnosticPage(raw []byte, ref, section string, offset, limit int) (map
 	_ = json.Unmarshal(raw, &p)
 	var d map[string]json.RawMessage
 	_ = json.Unmarshal(p["crop_diagnostics"], &d)
-	result := map[string]any{"diagnostics_ref": ref, "section": section, "offset": offset}
+	if v, ok := p["resolved_params"]; ok {
+		var resolved map[string]json.RawMessage
+		_ = json.Unmarshal(v, &resolved)
+		_ = json.Unmarshal(resolved["crop_diagnostics"], &d)
+		if section == "summary" {
+			return map[string]any{"diagnostics_ref": ref, "section": "summary", "render_id": boundedCropValue(p["id"]), "params": compactRenderParams(p["params"]), "resolved_params": compactRenderParams(v), "metrics": compactRenderMetrics(p["metrics"])}, nil
+		}
+		for _, k := range []string{"crop_path", "trim_validation", "trim_diagnostics", "audio_normalization"} {
+			if v, ok := resolved[k]; ok {
+				p[k] = v
+			}
+		}
+	}
+	result = map[string]any{"diagnostics_ref": ref, "section": section, "offset": offset}
 	if section == "summary" {
 		result["resolved_params"] = compactCropParams(raw)
 		return result, nil
 	}
 	switch section {
-	case "pose_samples", "subject_extents", "evidence", "effective_path", "pose_position_gaps", "pose_failure_summary", "pose_attempt", "pose_failure":
+	case "pose_samples", "subject_extents", "evidence", "effective_path", "pose_position_gaps", "pose_failure_summary", "pose_attempt", "pose_failure", "crop_path", "trim_validation", "trim_diagnostics", "audio_normalization", "params", "metrics", "error":
 	default:
 		return nil, fmt.Errorf("unsupported diagnostics section")
 	}
 	item, ok := d[section]
+	if !ok {
+		item, ok = p[section]
+	}
 	if !ok {
 		item = json.RawMessage("null")
 	}
@@ -255,8 +279,7 @@ func cropDiagnosticPage(raw []byte, ref, section string, offset, limit int) (map
 		page := []json.RawMessage{}
 		for i := offset; i < len(items) && len(page) < limit; i++ {
 			candidate := append(page, items[i])
-			b, _ := json.Marshal(candidate)
-			if len(b) > maxCropDetailBytes-1024 {
+			if renderWireBytes(map[string]any{"items": candidate}) > maxCropDetailBytes-2048 {
 				break
 			}
 			page = candidate

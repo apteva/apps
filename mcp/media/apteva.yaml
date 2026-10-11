@@ -2,8 +2,12 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.36
+version: 0.14.37
 description: |
+  v0.14.37 bounds render status/list tools with explicit summary receipts, stable
+  cursor pagination and immutable checksum-verified references for stored plans,
+  metrics and errors. Existing renders archive on read without reanalysis or
+  rerendering; full HTTP/UI records and executable crop plans remain unchanged.
   v0.14.36 retains exact integer storyboard timestamps rather than truncating
   floating-point seconds. Missing-frame stages retry within three attempts;
   cancellation, OOM and permanent quota/auth failures stop immediate retry.
@@ -426,9 +430,9 @@ provides:
 
     # Renders — manage
     - name: media_get_render
-      description: Status of one render, including original params and executor-resolved params (effective Smart Crop rectangle/path) once execution starts.
+      description: Compact render status (16 KiB) preserving geometry, coverage warnings, validation and timings. Complete plans, errors and metrics use immutable diagnostics_ref/render_evidence_ref with bounded detail pages and authenticated downloads.
     - name: media_list_renders
-      description: Filter renders by status, operation, or limit.
+      description: Compact render summaries (25 rows maximum, 64 KiB). Follow next_cursor with unchanged filters; complete evidence uses immutable references.
     - name: media_cancel_render
       description: Request cancellation of a pending or running render. Active jobs return cancellation_requested=true and remain running until worker cleanup is confirmed; poll media_get_render. Remote stop failures are reported as remote_cancellation_failed. Already-terminal rows are idempotent no-ops.
 
@@ -668,7 +672,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.36
+    ref: media/v0.14.37
     entry: mcp/media
   port: 8080
   health_check: /health

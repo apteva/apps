@@ -210,7 +210,7 @@ func TestSidecar_ListRenders_FiltersByOperation(t *testing.T) {
 	})
 	sc.MCP("media_resize", map[string]any{
 		"_project_id": "test-proj", "file_id": "1",
-		"width": 320, "height": 240,
+		"width": 320, "height": 240, "output_name": "resized.mp4",
 	})
 
 	out := sc.MCP("media_list_renders", map[string]any{

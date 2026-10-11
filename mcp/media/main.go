@@ -23,8 +23,12 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.36
+version: 0.14.37
 description: |
+  v0.14.37 bounds render status/list tools with explicit summary receipts, stable
+  cursor pagination and immutable checksum-verified references for stored plans,
+  metrics and errors. Existing renders archive on read without reanalysis or
+  rerendering; full HTTP/UI records and executable crop plans remain unchanged.
   v0.14.36 retains exact integer storyboard timestamps rather than truncating
   floating-point seconds. Missing-frame stages retry within three attempts;
   cancellation, OOM and permanent quota/auth failures stop immediate retry.
@@ -447,9 +451,9 @@ provides:
 
     # Renders — manage
     - name: media_get_render
-      description: Status of one render, including original params and executor-resolved params (effective Smart Crop rectangle/path) once execution starts.
+      description: Compact render status (16 KiB) preserving geometry, coverage warnings, validation and timings. Complete plans, errors and metrics use immutable diagnostics_ref/render_evidence_ref with bounded detail pages and authenticated downloads.
     - name: media_list_renders
-      description: Filter renders by status, operation, or limit.
+      description: Compact render summaries (25 rows maximum, 64 KiB). Follow next_cursor with unchanged filters; complete evidence uses immutable references.
     - name: media_cancel_render
       description: Request cancellation of a pending or running render. Active jobs return cancellation_requested=true and remain running until worker cleanup is confirmed; poll media_get_render. Remote stop failures are reported as remote_cancellation_failed. Already-terminal rows are idempotent no-ops.
 
@@ -689,7 +693,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.36
+    ref: media/v0.14.37
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -1159,7 +1163,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Retrieve preserved crop preview evidence in the current project without rerunning analysis. Defaults to a compact summary. Select a section for explicit bounded detail (limit 1–4 samples, at most 24 KiB per response), following next_offset. download_required means use the receipt's authenticated download_path for complete evidence. References also retain failed/partial analyses; they do not authorize a render or imply visual approval.",
 			InputSchema: schemaObject(map[string]any{
 				"diagnostics_ref": map[string]any{"type": "string"},
-				"section":         map[string]any{"type": "string", "enum": []string{"summary", "pose_samples", "subject_extents", "evidence", "effective_path", "pose_position_gaps", "pose_failure_summary", "pose_attempt", "pose_failure"}, "default": "summary"},
+				"section":         map[string]any{"type": "string", "enum": []string{"summary", "pose_samples", "subject_extents", "evidence", "effective_path", "pose_position_gaps", "pose_failure_summary", "pose_attempt", "pose_failure", "crop_path", "trim_validation", "trim_diagnostics", "audio_normalization", "params", "metrics", "error"}, "default": "summary"},
 				"offset":          map[string]any{"type": "integer", "minimum": 0, "default": 0},
 				"limit":           map[string]any{"type": "integer", "minimum": 1, "maximum": 4, "default": 1},
 			}, []string{"diagnostics_ref"}),
@@ -1496,17 +1500,18 @@ func (a *App) MCPTools() []sdk.Tool {
 		// ─── Render manage tools ────────────────────────────────────
 		{
 			Name:        "media_get_render",
-			Description: "Status of one render. Returns the original params and, once execution starts, resolved_params with effective executor values, trim_diagnostics/trim_validation (algorithm/version, accurate interval, every-frame opening/ending checks and limitations), and crop_diagnostics (app/algorithm versions, crop rectangle/path, evidence timestamps, fallback reasons, and sampled action_coverage). If action_coverage is exceeds_crop_width, fit_mode=contain preserves the full source frame. Args: render_id.",
+			Description: "Compact status of one render (16 KiB maximum). Selected params, effective crop geometry/path summary, coverage warnings, trim-validation results and execution timings are included. Full immutable resolved plans use diagnostics_ref; complete original params, errors and metrics use render_evidence_ref. Use bounded media_get_crop_diagnostics pages or authenticated download_path for complete evidence, without rerendering. Stored plans and HTTP/UI records remain complete. Args: render_id.",
 			InputSchema: schemaObject(map[string]any{"render_id": map[string]any{"type": "integer"}}, []string{"render_id"}),
 			Handler:     a.toolGetRender,
 		},
 		{
 			Name:        "media_list_renders",
-			Description: "List renders filtered by status (pending|running|ok|failed|cancelled), operation, or limit.",
+			Description: "List compact render summaries, at most 25 rows and 64 KiB per response. Follow next_cursor with the same status/operation filters; a byte-limited page may return fewer rows. Geometry, warnings, validation and timings are retained; full immutable evidence uses diagnostics_ref/render_evidence_ref and media_get_crop_diagnostics or authenticated download.",
 			InputSchema: schemaObject(map[string]any{
 				"status":    map[string]any{"type": "string"},
 				"operation": map[string]any{"type": "string"},
-				"limit":     map[string]any{"type": "integer"},
+				"limit":     map[string]any{"type": "integer", "minimum": 1, "maximum": 25, "default": 25},
+				"cursor":    map[string]any{"type": "string", "description": "Opaque next_cursor from the previous page; keep status/operation unchanged."},
 			}, nil),
 			Handler: a.toolListRenders,
 		},
@@ -3133,9 +3138,12 @@ func (a *App) toolGetRender(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// chaining a storage call.
 	files, ferr := newStorageClient().ResolveFiles(
 		context.Background(), pid, []string{r.OutputFileID})
-	out := map[string]any{"found": true, "render": enrichRender(*r, files)}
+	out := map[string]any{"found": true, "render": renderReceipt(ctx.AppDB(), *r, files)}
 	if ferr != nil && r.OutputFileID != "" {
 		out["storage_unavailable"] = true
+	}
+	if renderWireBytes(out) > maxRenderStatusBytes {
+		return nil, errors.New("render_summary_budget_exceeded: stored evidence remains available through the authenticated render HTTP endpoint")
 	}
 	return out, nil
 }
@@ -3148,7 +3156,19 @@ func (a *App) toolListRenders(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	f := RenderFilters{}
 	f.Status, _ = args["status"].(string)
 	f.Operation, _ = args["operation"].(string)
-	f.Limit = int(int64Arg(args["limit"]))
+	limit := int(int64Arg(args["limit"]))
+	if limit <= 0 {
+		limit = 25
+	}
+	if limit > 25 {
+		return nil, errors.New("limit must be 1–25; follow next_cursor")
+	}
+	if cursor, _ := args["cursor"].(string); cursor != "" {
+		if err := applyRenderCursor(cursor, pid, &f); err != nil {
+			return nil, err
+		}
+	}
+	f.Limit = limit + 1
 	rows, err := listRenders(ctx.AppDB(), pid, f)
 	if err != nil {
 		return nil, err
@@ -3161,13 +3181,12 @@ func (a *App) toolListRenders(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		}
 	}
 	files, ferr := newStorageClient().ResolveFiles(context.Background(), pid, ids)
-	enriched := make([]EnrichedRender, len(rows))
-	for i, r := range rows {
-		enriched[i] = enrichRender(r, files)
-	}
-	out := map[string]any{"renders": enriched}
+	out := renderListReceipt(ctx.AppDB(), rows, files, f, limit)
 	if ferr != nil {
 		out["storage_unavailable"] = true
+	}
+	if renderWireBytes(out) > maxRenderListBytes {
+		return nil, errors.New("render_summary_budget_exceeded: request a smaller page")
 	}
 	return out, nil
 }

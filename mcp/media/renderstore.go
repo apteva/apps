@@ -221,9 +221,11 @@ func getRender(db *sql.DB, projectID string, id int64) (*RenderRow, error) {
 
 // RenderFilters mirrors the search args exposed by media_list_renders.
 type RenderFilters struct {
-	Status    string
-	Operation string
-	Limit     int
+	Status          string
+	Operation       string
+	Limit           int
+	BeforeCreatedAt string
+	BeforeID        int64
 }
 
 // RenderQueueSummary is what the panel asks for on initial load (and
@@ -377,9 +379,13 @@ func listRenders(db *sql.DB, projectID string, f RenderFilters) ([]RenderRow, er
 		q.WriteString(" AND operation = ?")
 		args = append(args, f.Operation)
 	}
+	if f.BeforeID > 0 {
+		q.WriteString(" AND (julianday(created_at) < julianday(?) OR (julianday(created_at) = julianday(?) AND id < ?))")
+		args = append(args, f.BeforeCreatedAt, f.BeforeCreatedAt, f.BeforeID)
+	}
 	// id is monotonic in sqlite so it's a stable tiebreaker when
 	// multiple rows land in the same second (tests + bursts).
-	q.WriteString(" ORDER BY created_at DESC, id DESC")
+	q.WriteString(" ORDER BY julianday(created_at) DESC, id DESC")
 	limit := f.Limit
 	if limit <= 0 || limit > 200 {
 		limit = 50
