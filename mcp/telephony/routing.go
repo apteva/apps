@@ -489,10 +489,8 @@ func validateRoutingVariablesForRoute(value any, route *routeRow) error {
 	if err != nil {
 		return err
 	}
-	if mode == recordingModeAlways && route.InboundTransport == inboundTransportSIPDirect {
-		return errors.New("provider-cloud recording is unavailable on direct SIP routes")
-	}
-	if mode == recordingModeAlways && !providerSupportsRecording(route.CarrierSlug) {
+
+	if mode == recordingModeAlways && route.InboundTransport != inboundTransportSIPDirect && !providerSupportsRecording(route.CarrierSlug) {
 		return fmt.Errorf("call recording is not implemented for provider %s", route.CarrierSlug)
 	}
 	return nil
@@ -710,7 +708,32 @@ func (a *App) validateFlowForRoute(project string, def routingDefinition, route 
 	}
 	errs := []string{}
 	capabilities := inboundCapabilities(route)
+	var mediaSettings localMediaSettings
+	if route.InboundTransport == inboundTransportSIPDirect {
+		var err error
+		mediaSettings, err = a.localMediaSettings(project, route.ID)
+		if err != nil {
+			errs = append(errs, "local media settings unavailable")
+		}
+	}
 	for _, node := range def.Nodes {
+		if route.InboundTransport == inboundTransportSIPDirect && (node.Type == "announcement" || node.Type == "dtmf_menu" || node.Type == "voicemail") {
+			field := "prompt"
+			if node.Type == "announcement" {
+				field = "text"
+			}
+			config := node.Config
+			if expanded, ok := expandRoutingValue(config, routingTemplateVariables(route)).(map[string]any); ok {
+				config = expanded
+			}
+			text := routingConfigString(config, field)
+			if node.Type == "voicemail" && text == "" {
+				text = "Please leave a message after the tone."
+			}
+			if text != "" && mediaSettings.Prompts[text] == 0 && (mediaSettings.SpeechTool == "" || globalCtx == nil || globalCtx.WithProject(project).IntegrationFor("speech") == nil) {
+				errs = append(errs, "direct SIP announcements require a speech integration or a prerecorded prompt")
+			}
+		}
 		if node.Type == "decision" && !capabilities.Decisions {
 			errs = append(errs, fmt.Sprintf("%s %s routes do not support routing decisions", route.CarrierSlug, route.InboundTransport))
 		}
@@ -757,6 +780,14 @@ func (a *App) validateFlowForRoute(project string, def routingDefinition, route 
 			if destination.Kind == "pstn" || destination.Kind == "sip" {
 				if !capabilities.ExternalDestinations {
 					errs = append(errs, "external ring destinations are not supported on this carrier route")
+				}
+			}
+			if destination.Kind == "voicemail" && route.InboundTransport == inboundTransportSIPDirect {
+				var config map[string]any
+				_ = json.Unmarshal([]byte(destination.ConfigJSON), &config)
+				text := firstNonEmpty(routingConfigString(config, "prompt"), "Please leave a message after the tone.")
+				if mediaSettings.Prompts[text] == 0 && (mediaSettings.SpeechTool == "" || globalCtx == nil || globalCtx.WithProject(project).IntegrationFor("speech") == nil) {
+					errs = append(errs, "direct SIP voicemail requires a speech integration or a prerecorded prompt")
 				}
 			}
 			if destination.Kind == "voicemail" && !capabilities.Voicemail {
@@ -1319,6 +1350,14 @@ func (a *App) resolveRoutingDefinition(route *routeRow, caller string, digits ma
 			break
 		}
 	}
+	if simulation.TerminalType == "voicemail" {
+		for _, node := range def.Nodes {
+			if node.ID == simulation.TerminalNodeID {
+				plan.Prompt = routingConfigString(node.Config, "prompt")
+				break
+			}
+		}
+	}
 	if simulation.RingGroupID != "" {
 		group, ok := def.Groups[simulation.RingGroupID]
 		if !ok {
@@ -1422,10 +1461,9 @@ func (a *App) resolveRoutingDefinition(route *routeRow, caller string, digits ma
 			plan.AnswerMode = answerModeAgent
 		case "voicemail":
 			plan.TerminalType = "voicemail"
+			plan.Prompt = routingConfigString(config, "prompt")
 		case "pstn", "sip":
-			if route.InboundTransport == inboundTransportSIPDirect {
-				return nil, errors.New("external destinations require a provider webhook route")
-			}
+
 			timeout := plan.TimeoutSec
 			if timeout < 5 {
 				timeout = 20

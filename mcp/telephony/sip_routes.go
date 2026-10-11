@@ -32,15 +32,22 @@ func (a *App) toolRoutesSetTransport(callerCtx context.Context, ctx *sdk.AppCtx,
 	agentID := callerAgentID(callerCtx)
 	routeID := strings.TrimSpace(strArg(args, "route_id", ""))
 	transport := strings.TrimSpace(strArg(args, "inbound_transport", ""))
-	route, err := a.setRouteTransport(ctx, routeID, transport, agentID)
+	var route *routeRow
+	var err error
+	if boolArg(args, "configure", true) {
+		route, err = a.applyRouteTransport(ctx, routeID, transport, agentID)
+	} else {
+		route, err = a.setRouteTransport(ctx, routeID, transport, agentID)
+	}
 	if err != nil {
 		return mcpError(err.Error()), nil
 	}
 	return map[string]any{
 		"ok":                             true,
 		"route":                          routePublic(a, *route),
-		"carrier_configuration_required": true,
-		"next":                           "Call telephony_routes_configure_carrier with this route_id before testing inbound calls.",
+		"carrier_configuration_required": !boolArg(args, "configure", true),
+		"applies_to":                     "new calls",
+		"active_calls_retained":          true,
 	}, nil
 }
 
@@ -66,12 +73,15 @@ func (a *App) setRouteTransport(ctx *sdk.AppCtx, routeID, transport string, agen
 		return nil, fmt.Errorf("%s inbound routing is not implemented for provider %s", normalized, route.CarrierSlug)
 	}
 	if normalized == inboundTransportSIPDirect {
+		candidate := *route
+		candidate.InboundTransport = normalized
+		if err := a.validatePublishedFlowForInboundRoute(&candidate); err != nil {
+			return nil, err
+		}
 		if err := a.ensureSIPGateway(ctx); err != nil {
 			return nil, fmt.Errorf("prepare direct SIP: %w", err)
 		}
-		if route.RecordingMode == recordingModeAlways {
-			return nil, errors.New("provider-cloud recording is unavailable on direct SIP routes")
-		}
+
 	}
 	active, err := a.db().countActiveCallsForRoute(route.ID)
 	if err != nil {
@@ -96,6 +106,12 @@ func (a *App) callUsesDirectSIP(row *callRow) bool {
 	}
 	if gateway := a.directSIPGateway(); gateway != nil && gateway.sessionByCall(row.ID) != nil {
 		return true
+	}
+	if row.IngressPath == inboundTransportSIPDirect {
+		return true
+	}
+	if row.IngressPath != "" && row.IngressPath != "direct_or_unreported" {
+		return false
 	}
 	if row.RouteID == "" {
 		return false
@@ -194,9 +210,6 @@ func (a *App) configureTwilioDirectSIP(ctx *sdk.AppCtx, route *routeRow, cfg sip
 }
 
 func (a *App) configureTelnyxDirectSIP(ctx *sdk.AppCtx, route *routeRow, cfg sipGatewayConfig) error {
-	if cfg.Transport == "tls" && cfg.SRTPMode == sipSRTPRequired {
-		return errors.New("Telnyx FQDN connections do not allow SRTP and TLS together; use SRTP preferred for TLS signaling or UDP signaling with required SRTP")
-	}
 	phoneID, previousConnectionID, err := a.findTelnyxPhoneNumber(ctx, route)
 	if err != nil {
 		return fmt.Errorf("find Telnyx phone number: %w", err)
@@ -207,6 +220,14 @@ func (a *App) configureTelnyxDirectSIP(ctx *sdk.AppCtx, route *routeRow, cfg sip
 	if previousConnectionID == "" {
 		return errors.New("Telnyx number has no previous connection to restore; assign it to the bound connection before enabling direct SIP")
 	}
+	settings, err := a.localMediaSettings(route.ProjectID, route.ID)
+	if err != nil {
+		return err
+	}
+	codecs := settings.Codecs
+	if len(codecs) == 0 {
+		codecs = []string{"G722", "PCMU", "PCMA"}
+	}
 	connectionInput := map[string]any{
 		"connection_name":    "Apteva " + route.PhoneNumber,
 		"active":             true,
@@ -214,12 +235,14 @@ func (a *App) configureTelnyxDirectSIP(ctx *sdk.AppCtx, route *routeRow, cfg sip
 		"dtmf_type":          "RFC 2833",
 		"inbound": map[string]any{
 			"ani_number_format": "+E.164", "dnis_number_format": "+e164",
-			"codecs": []string{"PCMU", "PCMA"}, "generate_ringback_tone": true,
+			"codecs": codecs, "generate_ringback_tone": true,
 		},
 		"noise_suppression": "disabled",
 		"jitter_buffer":     map[string]any{"enable_jitter_buffer": false},
 	}
-	if cfg.Transport != "tls" && cfg.SRTPMode != sipSRTPDisabled {
+	// The FQDN API forbids encrypted_media with TLS. TLS carrier policy must
+	// offer SRTP; required mode still rejects plaintext SDP, never downgrades.
+	if cfg.SRTPMode != sipSRTPDisabled && cfg.Transport != "tls" {
 		connectionInput["encrypted_media"] = "SRTP"
 	}
 	raw, err := executeCarrierTool(ctx, route.CarrierConnectionID, "create_fqdn_connection", connectionInput)
@@ -289,44 +312,49 @@ func (a *App) deconfigureDirectSIPCarrierRoute(ctx *sdk.AppCtx, route *routeRow)
 	if err := json.Unmarshal([]byte(route.TransportConfig), &state); err != nil || state.Provider != route.CarrierSlug {
 		return errors.New("route contains invalid direct SIP carrier configuration")
 	}
+	active, err := a.db().countActiveCallsForRoute(route.ID)
+	if err != nil {
+		return err
+	}
+	if gateway := a.directSIPGateway(); gateway != nil && gateway.hasRouteDialogs(route.ID) {
+		active = max(active, 1)
+	}
+	if active > 0 {
+		if err := a.retireSIPResources(ctx, route, state); err != nil {
+			return err
+		}
+	}
+	// Restore number assignment now, retain dialog resources until drain.
 	switch state.Provider {
 	case "twilio":
 		if state.TrunkID == "" {
 			return errors.New("saved Twilio SIP trunk ID is missing")
 		}
-		if _, err := executeCarrierTool(ctx, route.CarrierConnectionID, "delete_elastic_sip_trunk", map[string]any{
-			"TrunkSid": state.TrunkID,
-		}); err != nil {
-			return fmt.Errorf("delete Twilio SIP trunk: %w", err)
+		if active > 0 {
+			if err := detachTwilioSIPNumber(ctx, route.CarrierConnectionID, state.TrunkID, route.PhoneNumberSID); err != nil {
+				return err
+			}
 		}
 	case "telnyx":
 		if route.PhoneNumberSID == "" || state.PreviousConnectionID == "" {
-			return errors.New("saved Telnyx direct SIP routing state is incomplete")
+			return errors.New("saved Telnyx routing state incomplete")
 		}
-		if _, err := executeCarrierTool(ctx, route.CarrierConnectionID, "update_phone_number", map[string]any{
-			"id": route.PhoneNumberSID, "connection_id": state.PreviousConnectionID,
-		}); err != nil {
-			return fmt.Errorf("restore Telnyx phone number connection: %w", err)
-		}
-		if state.FQDNID != "" {
-			_, _ = executeCarrierTool(ctx, route.CarrierConnectionID, "delete_fqdn", map[string]any{"id": state.FQDNID})
-		}
-		if state.FQDNConnectionID != "" {
-			_, _ = executeCarrierTool(ctx, route.CarrierConnectionID, "delete_fqdn_connection", map[string]any{"id": state.FQDNConnectionID})
+		if _, err := executeCarrierTool(ctx, route.CarrierConnectionID, "update_phone_number", map[string]any{"id": route.PhoneNumberSID, "connection_id": state.PreviousConnectionID}); err != nil {
+			return err
 		}
 	case "didww":
-		if route.PhoneNumberSID == "" || state.TrunkID == "" {
-			return errors.New("saved DIDWW direct SIP routing state is incomplete")
-		}
 		if err := restoreDIDWWDIDTrunk(ctx, route.CarrierConnectionID, route.PhoneNumberSID, state); err != nil {
-			return fmt.Errorf("restore DIDWW DID trunk: %w", err)
-		}
-		if _, err := executeCarrierTool(ctx, route.CarrierConnectionID, "delete_inbound_trunk", map[string]any{"id": state.TrunkID}); err != nil {
-			return fmt.Errorf("delete DIDWW inbound trunk: %w", err)
+			return err
 		}
 	default:
-		return fmt.Errorf("unsupported direct SIP provider %s", state.Provider)
+		return errors.New("unsupported SIP provider")
 	}
+	if active == 0 {
+		if err := cleanupSIPResources(ctx, route.CarrierConnectionID, state); err != nil {
+			return err
+		}
+	}
+
 	if err := a.db().updateRouteTransport(route.ID, route.InboundTransport, ""); err != nil {
 		return err
 	}

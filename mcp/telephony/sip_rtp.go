@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gobwas/ws"
+	"github.com/gotranspile/g722"
 	"github.com/pion/rtp"
 )
 
@@ -32,14 +33,22 @@ var sipRTPPorts = struct {
 }{next: make(map[string]int)}
 
 type sipRTPMedia struct {
-	liveTimeline atomic.Pointer[liveAudioTimeline]
-	conn         *net.UDPConn
-	offer        sipMediaOffer
-	security     *sipMediaSecurity
-	remote       *net.UDPAddr
-	localPort    int
-	closeOnce    sync.Once
-	lastPacket   atomic.Int64
+	remoteMode      atomic.Int32
+	pacer           atomic.Pointer[sipRTPPacer]
+	recorder        atomic.Pointer[localCallRecorder]
+	hold            atomic.Pointer[localSIPHold]
+	liveTimeline    atomic.Pointer[liveAudioTimeline]
+	conn            *net.UDPConn
+	offer           sipMediaOffer
+	security        *sipMediaSecurity
+	remote          *net.UDPAddr
+	localPort       int
+	closeOnce       sync.Once
+	codecOnce       sync.Once
+	g722Encoder     *g722.Encoder
+	g722Decoder     *g722.Decoder
+	g722SentDecoder *g722.Decoder
+	lastPacket      atomic.Int64
 }
 
 func openSIPRTPMedia(cfg sipGatewayConfig, offer sipMediaOffer) (*sipRTPMedia, error) {
@@ -97,7 +106,7 @@ func (m *sipRTPMedia) decodePacket(raw []byte) (*rtp.Packet, error) {
 	if err := packet.Unmarshal(raw); err != nil {
 		return nil, err
 	}
-	if packet.PayloadType != m.offer.PayloadType {
+	if packet.PayloadType != m.offer.PayloadType && (m.offer.DTMFPayloadType <= 0 || int(packet.PayloadType) != m.offer.DTMFPayloadType) {
 		return nil, fmt.Errorf("unexpected RTP payload type %d", packet.PayloadType)
 	}
 	if len(packet.Payload) == 0 || len(packet.Payload) > 2048 {
@@ -284,6 +293,7 @@ type rtpAudioFramer struct {
 	codec          string
 	missingSamples int
 	pending        []byte
+	pendingPCM     []int16
 }
 
 func newRTPAudioFramer(jitter *rtpJitterBuffer, offer sipMediaOffer) *rtpAudioFramer {
@@ -292,6 +302,28 @@ func newRTPAudioFramer(jitter *rtpJitterBuffer, offer sipMediaOffer) *rtpAudioFr
 		missingSamples = sipRTPPacketSamples
 	}
 	return &rtpAudioFramer{jitter: jitter, codec: offer.Codec, missingSamples: missingSamples}
+}
+
+// Decode actual packets before framing. Missing G.722 packets become PCM
+// silence, never G.711 bytes accidentally interpreted by a stateful decoder.
+func (f *rtpAudioFramer) popPCM(media *sipRTPMedia) ([]int16, bool) {
+	samples := media.sampleRate() / 50
+	for len(f.pendingPCM) < samples {
+		payload, ready := f.jitter.pop()
+		if !ready {
+			return nil, false
+		}
+		var pcm []int16
+		if payload == nil {
+			pcm = make([]int16, f.missingSamples*media.sampleRate()/8000)
+		} else {
+			pcm = media.decodeAudio(payload)
+		}
+		f.pendingPCM = append(f.pendingPCM, pcm...)
+	}
+	out := append([]int16(nil), f.pendingPCM[:samples]...)
+	f.pendingPCM = f.pendingPCM[samples:]
+	return out, true
 }
 
 func (f *rtpAudioFramer) pop() ([]byte, bool) {
@@ -321,11 +353,14 @@ func (s *sipPlaybackState) hasPending() bool {
 type sipRTPOutboundPacket struct {
 	enqueuedAt time.Time
 	payload    []byte
+	pcm        []int16
 	itemID     string
 	audioEndMS int
 }
 
 type sipRTPPacer struct {
+	dtmfCh         chan string
+	dtmf           sipDTMFState
 	observeSent    func([]byte)
 	diagnostics    livePacerStats
 	ctx            context.Context
@@ -374,7 +409,7 @@ func newSIPRTPPacerWithPolicy(
 		panic("SIP RTP random source unavailable: " + err.Error())
 	}
 	pacer := &sipRTPPacer{
-		ctx: ctx, media: media, playback: playback, onProgress: onProgress,
+		ctx: ctx, media: media, playback: playback, onProgress: onProgress, dtmfCh: make(chan string, 4),
 		queue:   make(chan sipRTPOutboundPacket, queuePackets),
 		clearCh: make(chan chan int), errCh: make(chan error, 1), done: make(chan struct{}),
 		sequence: binary.BigEndian.Uint16(seed[:2]), timestamp: binary.BigEndian.Uint32(seed[2:6]),
@@ -401,6 +436,10 @@ func (p *sipRTPPacer) run() {
 		select {
 		case <-p.ctx.Done():
 			return
+		case digits := <-p.dtmfCh:
+			if len(p.dtmf.digits)+len(digits) <= 128 {
+				p.dtmf.digits += digits
+			}
 		case reply := <-p.clearCh:
 			cleared := p.drain()
 			reply <- cleared * int(sipRTPPacketTime/time.Millisecond)
@@ -410,9 +449,30 @@ func (p *sipRTPPacer) run() {
 			if !lastSent.IsZero() && frame <= lastFrame {
 				continue
 			}
+			if sent, err := p.dtmfTick(now, baseTimestamp+uint32(frame)*sipRTPPacketSamples); sent {
+				if err != nil {
+					select {
+					case p.errCh <- err:
+					default:
+					}
+					return
+				}
+				lastSent = now
+				lastFrame = frame
+				continue
+			}
 			select {
 			case packet := <-p.queue:
 				p.playback.pending.Add(-1)
+				if mode := p.media.remoteMode.Load(); mode == 1 || mode == 3 {
+					continue
+				}
+				if hold := p.media.hold.Load(); hold != nil {
+					packet.pcm = hold.frame(p.media.sampleRate() / 50)
+					packet.payload = nil
+					packet.itemID = ""
+					packet.enqueuedAt = now // Newly generated hold audio has no microphone queue age.
+				}
 				if p.dropStale && !packet.enqueuedAt.IsZero() && time.Since(packet.enqueuedAt) >= liveAudioMaxAge {
 					p.droppedPackets.Add(1)
 					p.diagnostics.dropped("live_audio_age_limit", 20)
@@ -425,12 +485,20 @@ func (p *sipRTPPacer) run() {
 					p.dropMu.Unlock()
 					continue
 				}
-				if p.needsCrossfade.Swap(false) && len(p.lastSentPCM) > 0 {
+				if len(packet.pcm) > 0 {
+					if p.needsCrossfade.Swap(false) && len(p.lastSentPCM) > 0 {
+						applyPCMOverlapCrossfade(p.lastSentPCM, packet.pcm, p.media.sampleRate()/200)
+					}
+					packet.payload = p.media.encodeAudio(packet.pcm)
+					p.lastSentPCM = append(p.lastSentPCM[:0], packet.pcm...)
+				} else if p.media.offer.Codec != "G722" {
 					pcm := decodeSIPG711(packet.payload, p.media.offer.Codec)
-					applyPCMOverlapCrossfade(p.lastSentPCM, pcm, twilioMediaSampleRate/200)
-					packet.payload = encodeSIPG711(pcm, p.media.offer.Codec)
+					if p.needsCrossfade.Swap(false) && len(p.lastSentPCM) > 0 {
+						applyPCMOverlapCrossfade(p.lastSentPCM, pcm, twilioMediaSampleRate/200)
+						packet.payload = encodeSIPG711(pcm, p.media.offer.Codec)
+					}
+					p.lastSentPCM = pcm
 				}
-				p.lastSentPCM = decodeSIPG711(packet.payload, p.media.offer.Codec)
 				p.timestamp = baseTimestamp + uint32(frame)*sipRTPPacketSamples
 				wire := &rtp.Packet{Header: rtp.Header{
 					Version: 2, PayloadType: p.media.offer.PayloadType, Marker: lastSent.IsZero() || now.Sub(lastSent) > 30*time.Millisecond,
@@ -463,6 +531,25 @@ func (p *sipRTPPacer) run() {
 					}
 				}
 			default:
+				if hold := p.media.hold.Load(); hold != nil && p.media.remoteMode.Load() != 1 && p.media.remoteMode.Load() != 3 {
+					pcm := hold.frame(p.media.sampleRate() / 50)
+					wire := &rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: p.media.offer.PayloadType, SequenceNumber: p.sequence, Timestamp: baseTimestamp + uint32(frame)*sipRTPPacketSamples, SSRC: p.ssrc}, Payload: p.media.encodeAudio(pcm)}
+					p.sequence++
+					lastSent = now
+					lastFrame = frame
+					writeStarted := time.Now()
+					if err := p.media.writePacket(wire); err != nil {
+						select {
+						case p.errCh <- err:
+						default:
+						}
+						return
+					}
+					if p.observeSent != nil {
+						p.observeSent(wire.Payload)
+					}
+					p.diagnostics.sent(20, writeStarted)
+				}
 			}
 		}
 	}
@@ -629,8 +716,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 	closeState := &websocketCloseState{}
 	tap := a.listeners.openBridge(row.ID)
 	defer a.listeners.closeBridge(row.ID, tap)
-	listenResampler := newPCMResampler(8000, 24000)
-	audioFrontend := newCarrierAudioFrontend(8000)
+	audioFrontend := newCarrierAudioFrontend(media.sampleRate())
 	var humanHub *softphoneHub
 	if row.PeerKind == peerKindHuman {
 		humanHub = a.softphones.hubFor(row.ID)
@@ -638,8 +724,8 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		humanHub.setCarrierForward(coreWriter)
 		defer humanHub.finishCarrierForward(coreWriter)
 	}
-	inputResampler := newPCMResampler(8000, 24000)
-	outputResampler := newPCMResampler(24000, 8000)
+	inputResampler := newPCMResampler(media.sampleRate(), 24000)
+	outputResampler := newPCMResampler(24000, media.sampleRate())
 	playback := &sipPlaybackState{}
 	pacerPolicy := bufferedCarrierPacerPolicy()
 	pacerMode := "buffered"
@@ -647,6 +733,13 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		pacerPolicy = liveHumanCarrierPacerPolicy()
 		pacerMode = "live_human"
 	}
+	recorder, recordErr := a.newLocalRecording(row, false)
+	if recordErr != nil {
+		globalCtx.Logger().Warn("local SIP recording unavailable", "call", row.ID, "err", recordErr)
+	}
+	media.recorder.Store(recorder)
+	defer func() { media.recorder.CompareAndSwap(recorder, nil); recorder.Close() }()
+	recordOutput := newPCMResampler(media.sampleRate(), 24000)
 	policyGeneration := newSecret()
 	pacer := newSIPRTPPacerWithPolicy(ctx, media, playback, pacerPolicy, func(progress twilioPlaybackProgress) error {
 		control, _ := json.Marshal(realtimeBridgeControl{
@@ -654,11 +747,19 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		})
 		return coreWriter.Write(ws.OpText, control)
 	}, func(payload []byte) {
+		var sentPCM []int16
+		listeners := tap.hasListeners()
+		if recorder != nil || listeners || media.offer.Codec == "G722" {
+			sentPCM = recordOutput.Process(media.decodeSentAudio(payload))
+			recorder.Record(1, sentPCM)
+		}
 		a.observeAIOutput(row, time.Now().UTC(), policyGeneration)
-		if tap.hasListeners() {
-			tap.publish(1, pcm16ToBytes(listenResampler.Process(decodeSIPG711(payload, media.offer.Codec))))
+		if listeners {
+			tap.publish(1, pcm16ToBytes(sentPCM))
 		}
 	})
+	media.pacer.Store(pacer)
+	defer media.pacer.CompareAndSwap(pacer, nil)
 	a.bindAIPlayback(row, policyGeneration, playback.hasPending)
 	if humanHub != nil {
 		humanHub.setPacerStats(&pacer.diagnostics)
@@ -704,6 +805,9 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 					return
 				}
 				if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+					if mode := media.remoteMode.Load(); mode == 2 || mode == 3 {
+						continue
+					}
 					if time.Since(time.Unix(0, media.lastPacket.Load())) > sipRTPInactivity {
 						closeState.SetLeg(mediaCloseLegCarrier, ws.StatusGoingAway, "direct SIP RTP timed out")
 						return
@@ -724,6 +828,13 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 			if humanHub != nil {
 				humanHub.timeline.observe("carrier_media_read", n, time.Time{}, fmt.Sprint(packet.Timestamp), fmt.Sprint(packet.SequenceNumber))
 			}
+			if int(packet.PayloadType) == media.offer.DTMFPayloadType {
+				a.observeAICaller(row, true, time.Now().UTC(), policyGeneration)
+				continue
+			}
+			if mode := media.remoteMode.Load(); mode == 2 || mode == 3 {
+				continue
+			}
 			jitter.pushRTP(packet.SequenceNumber, packet.Payload, packet.Timestamp, time.Now())
 		}
 	}()
@@ -739,11 +850,10 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				payload, ready := framer.pop()
+				pcm, ready := framer.popPCM(media)
 				if !ready {
 					continue
 				}
-				pcm := decodeSIPG711(payload, media.offer.Codec)
 				processed := processCarrierInput(row, audioFrontend, pcm)
 				a.observeAICaller(row, processed.SpeechActive, time.Now().UTC(), policyGeneration)
 				localSpeechStarted := processed.SpeechStarted && playback.hasPending()
@@ -757,6 +867,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 				if humanHub != nil {
 					humanHub.timeline.observe("carrier_decoded", len(pcm24)*2, time.Time{}, "", "")
 				}
+				recorder.Record(0, pcm24)
 				tap.publishPCM(0, pcm24)
 				coreWriter.QueueAudio(pcm16ToBytes(pcm24))
 				if localSpeechStarted {
@@ -786,7 +897,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		_ = a.db().updateCarrierAudioDiagnostics(row.ID, carrierAudioDiagnostics{
 			OperatorInterrupts: audioFrontend.snapshot().OperatorInterrupts, LocalInterrupts: audioFrontend.snapshot().LocalInterrupts, ProviderCoreInterrupts: audioFrontend.snapshot().ProviderCoreInterrupts,
 			InputAudio: audioFrontend.transportSnapshot(),
-			Provider:   "sip_direct", Codec: carrierCodecPCMU8, SampleRate: 8000,
+			Provider:   "sip_direct", Codec: media.offer.Codec, SampleRate: media.sampleRate(),
 			SendAheadMS: pacerPolicy.bufferMS, PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: droppedStaleMS,
 			PreAnswerMicrophoneDroppedMS: preAnswerDroppedMS,
 			DropEvents:                   pacer.dropEvents(),
@@ -833,22 +944,25 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		if op != ws.OpBinary || len(data) == 0 {
 			continue
 		}
+		if media.hold.Load() != nil {
+			continue
+		}
 		pcm8 := outputResampler.Process(bytesToPCM16(data))
 		if len(pcm8) == 0 {
 			continue
 		}
-		chunks := twilioAudioPackets(pcm8, len(data)/2, nextFrame)
+		chunks := sipPCMFrames(pcm8, media.sampleRate(), nextFrame)
 		packets := make([]sipRTPOutboundPacket, 0, len(chunks))
 		for _, chunk := range chunks {
 			pcm := chunk.PCM
-			if len(pcm) < sipRTPPacketSamples {
-				padded := make([]int16, sipRTPPacketSamples)
+			if len(pcm) < media.sampleRate()/50 {
+				padded := make([]int16, media.sampleRate()/50)
 				copy(padded, pcm)
 				pcm = padded
 			}
 			packets = append(packets, sipRTPOutboundPacket{
-				payload: encodeSIPG711(pcm, media.offer.Codec),
-				itemID:  nextFrame.ItemID, audioEndMS: chunk.AudioEndMS,
+				pcm:    pcm,
+				itemID: nextFrame.ItemID, audioEndMS: chunk.AudioEndMS,
 			})
 		}
 		nextFrame = realtimeBridgeControl{}
@@ -935,4 +1049,58 @@ func pcm16ToAlaw(pcm []int16) []byte {
 		out[i] = (encoded | sign) ^ 0x55
 	}
 	return out
+}
+
+func (m *sipRTPMedia) sampleRate() int {
+	if m.offer.Codec == "G722" {
+		return 16000
+	}
+	return 8000
+}
+func (m *sipRTPMedia) initCodec() {
+	m.codecOnce.Do(func() {
+		if m.offer.Codec == "G722" {
+			m.g722Encoder = g722.NewEncoder(g722.Rate64000, 0)
+			m.g722Decoder = g722.NewDecoder(g722.Rate64000, 0)
+			m.g722SentDecoder = g722.NewDecoder(g722.Rate64000, 0)
+		}
+	})
+}
+func (m *sipRTPMedia) encodeAudio(pcm []int16) []byte {
+	m.initCodec()
+	if m.offer.Codec != "G722" {
+		return encodeSIPG711(pcm, m.offer.Codec)
+	}
+	out := make([]byte, (len(pcm)+1)/2)
+	n := m.g722Encoder.Encode(out, pcm)
+	return out[:n]
+}
+func (m *sipRTPMedia) decodeAudio(p []byte) []int16 {
+	m.initCodec()
+	if m.offer.Codec != "G722" {
+		return decodeSIPG711(p, m.offer.Codec)
+	}
+	out := make([]int16, len(p)*2)
+	n := m.g722Decoder.Decode(out, p)
+	return out[:n]
+}
+func (m *sipRTPMedia) decodeSentAudio(p []byte) []int16 {
+	m.initCodec()
+	if m.offer.Codec != "G722" {
+		return decodeSIPG711(p, m.offer.Codec)
+	}
+	out := make([]int16, len(p)*2)
+	n := m.g722SentDecoder.Decode(out, p)
+	return out[:n]
+}
+func sipPCMFrames(pcm []int16, rate int, control realtimeBridgeControl) []twilioAudioPacket {
+	frames := []twilioAudioPacket{}
+	samples := rate / 50
+	for offset := 0; offset < len(pcm); offset += samples {
+		end := min(len(pcm), offset+samples)
+		frame := make([]int16, samples)
+		copy(frame, pcm[offset:end])
+		frames = append(frames, twilioAudioPacket{PCM: frame, AudioEndMS: control.AudioEndMS - (len(pcm)-end)*1000/rate})
+	}
+	return frames
 }

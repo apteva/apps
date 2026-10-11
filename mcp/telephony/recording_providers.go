@@ -230,6 +230,9 @@ func parseProviderRecordingMetadata(provider string, item map[string]any, call *
 }
 
 func (a *App) downloadProviderRecording(downloadCtx context.Context, ctx *sdk.AppCtx, recording *recordingRow, creds map[string]string) (string, int64, error) {
+	if recording.Provider == localRecordingProvider {
+		return a.downloadLocalRecording(downloadCtx, recording)
+	}
 	if recording.Provider == "twilio" {
 		return downloadTwilioRecordingChannels(downloadCtx, creds, recording.ProviderRecordingID, recording.Format, recording.Channels)
 	}

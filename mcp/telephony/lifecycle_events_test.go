@@ -101,8 +101,11 @@ func TestLifecycleManifestDeclarationsMatchDisk(t *testing.T) {
 	if !reflect.DeepEqual(disk.ConfigSchema, embedded.ConfigSchema) {
 		t.Fatalf("config schema declaration drift:\ndisk: %#v\nembedded: %#v", disk.ConfigSchema, embedded.ConfigSchema)
 	}
-	if len(disk.Requires.Integrations) != 1 || len(embedded.Requires.Integrations) != 1 {
+	if len(disk.Requires.Integrations) != 2 || len(embedded.Requires.Integrations) != 2 {
 		t.Fatalf("carrier dependency missing: disk=%#v embedded=%#v", disk.Requires.Integrations, embedded.Requires.Integrations)
+	}
+	if disk.Requires.Integrations[1].Role != "speech" || disk.Requires.Integrations[1].Required || !reflect.DeepEqual(disk.Requires.Integrations, embedded.Requires.Integrations) {
+		t.Fatal("optional speech/required carrier manifest drift")
 	}
 	if len(disk.Requires.Integrations[0].Tools) != 0 || len(embedded.Requires.Integrations[0].Tools) != 0 {
 		t.Fatalf("carrier dependency declares a provider-specific tool as generic: disk=%#v embedded=%#v",

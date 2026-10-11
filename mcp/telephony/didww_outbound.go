@@ -38,9 +38,6 @@ func (c *didwwCarrier) Place(_ *sdk.AppCtx, req carrierPlaceRequest) (*carrierPl
 	if !validE164(req.To) || !validE164(req.From) || req.CallID == "" {
 		return nil, errors.New("DIDWW outbound call requires E.164 destination, caller ID, and call ID")
 	}
-	if req.RecordingMode == recordingModeAlways {
-		return nil, errors.New("DIDWW direct SIP has no provider-cloud recording")
-	}
 	if req.MachineDetection != "" && req.MachineDetection != machineDetectionOff {
 		return nil, errors.New("DIDWW direct SIP does not support answering machine detection")
 	}

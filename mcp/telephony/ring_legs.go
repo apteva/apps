@@ -36,8 +36,30 @@ func (a *App) startRingLeg(ctx *sdk.AppCtx, parent *callRow, offer ringOffer) er
 	// Use the inbound number's provider and owned caller ID. A team member cannot
 	// substitute another project's integration or an arbitrary caller ID.
 	fields := map[string]string{}
+	if parent.CarrierSlug == "didww" {
+		credentials, err := ctx.PlatformAPI().GetConnectionCredentials(parent.CarrierConnectionID)
+		if err != nil || credentials == nil || credentials.Slug != parent.CarrierSlug {
+			return firstError(err, errors.New("outbound SIP credentials unavailable"))
+		}
+		fields = credentials.Fields
+	}
 	if parent.CarrierSlug == "telnyx" {
 		route, err := a.db().findRoute(parent.RouteID)
+		if a.callUsesDirectSIP(parent) {
+			var raw string
+			e := a.db().db.QueryRow(`SELECT context_json FROM call_route_executions WHERE call_id=? AND project_id=?`, parent.ID, parent.ProjectID).Scan(&raw)
+			if e != nil && !errors.Is(e, sql.ErrNoRows) {
+				return e
+			}
+			if raw != "" {
+				var snapshot routingExecutionContext
+				if json.Unmarshal([]byte(raw), &snapshot) != nil || snapshot.Route.ID != parent.RouteID || snapshot.Route.CarrierConnectionID != parent.CarrierConnectionID || snapshot.Route.CarrierSlug != parent.CarrierSlug {
+					return errors.New("ring route snapshot unavailable")
+				}
+				route = &snapshot.Route
+				err = nil
+			}
+		}
 		if err != nil || route == nil {
 			return firstError(err, errors.New("ring route unavailable"))
 		}
@@ -46,6 +68,13 @@ func (a *App) startRingLeg(ctx *sdk.AppCtx, parent *callRow, offer ringOffer) er
 			return err
 		}
 		fields["connection_id"] = saved.ApplicationID
+		if a.callUsesDirectSIP(parent) && fields["connection_id"] == "" {
+			var sipConfig directSIPProviderConfig
+			if json.Unmarshal([]byte(route.TransportConfig), &sipConfig) != nil || sipConfig.PreviousConnectionID == "" {
+				return errors.New("SIP route needs a programmable outbound application for external destinations")
+			}
+			fields["connection_id"] = sipConfig.PreviousConnectionID
+		}
 	}
 	carrier, err := a.carrierForSlug(parent.CarrierSlug, parent.CarrierConnectionID, fields)
 	if err != nil {

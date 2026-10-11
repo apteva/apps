@@ -246,6 +246,18 @@ func (a *App) sendCarrierDTMF(ctx *sdk.AppCtx, row *callRow, digits string) erro
 	if !validDTMFDigits(digits) {
 		return errors.New("digits must contain 1-32 DTMF characters (0-9, A-D, *, #, w or W)")
 	}
+	if a.callUsesDirectSIP(row) || row.Direction == "outbound" && row.CarrierSlug == "didww" {
+		controller := &localSIPController{app: a}
+		media, err := controller.media(row)
+		if err != nil {
+			return err
+		}
+		pacer := media.pacer.Load()
+		if pacer == nil {
+			return errors.New("SIP media not connected")
+		}
+		return pacer.queueDTMF(digits)
+	}
 	input := map[string]any{"digits": digits}
 	tool := ""
 	switch strings.ToLower(strings.TrimSpace(row.CarrierSlug)) {

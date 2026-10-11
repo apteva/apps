@@ -565,6 +565,10 @@ func (a *App) finishRingRun(ctx *sdk.AppCtx, runID, callID, overflow string) err
 	if err != nil || row == nil || row.Status != "pending" {
 		return err
 	}
+	// SIP executes the same pinned plan locally.
+	if a.callUsesDirectSIP(row) {
+		return a.executeSIPRoutingPlan(ctx, row, plan)
+	}
 	// XML providers pick up the new pinned node on their next wait callback.
 	if plan.TerminalType == "hangup" || plan.TerminalType == "reject" {
 		return a.finishTerminalRoutingPlan(ctx, row, &execution.Route, plan)

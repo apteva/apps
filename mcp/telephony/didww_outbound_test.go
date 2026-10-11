@@ -61,8 +61,8 @@ func TestDIDWWOutboundPlaceDoesNotPretendRESTPlacesCalls(t *testing.T) {
 		t.Fatalf("DIDWW placement preparation: %+v, %v", placed, err)
 	}
 	request.RecordingMode = recordingModeAlways
-	if _, err := carrier.Place(nil, request); err == nil || !strings.Contains(err.Error(), "recording") {
-		t.Fatalf("provider-cloud recording should fail: %v", err)
+	if _, err := carrier.Place(nil, request); err != nil {
+		t.Fatalf("local SIP recording should be supported: %v", err)
 	}
 	request.RecordingMode = recordingModeOff
 	request.MachineDetection = "detect"

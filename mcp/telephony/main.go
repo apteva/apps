@@ -45,25 +45,36 @@ import (
 )
 
 const manifestYAML = `schema: apteva-app/v1
+
 name: telephony
 display_name: Telephony
 version: 0.11.9
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
-  sub-threads in core; carrier audio is bridged through this sidecar.
+  sub-threads that the agent controls via send/done — the same
+  shape as text workers, with carrier audio bridged through a provider
+  media stream. Audio I/O stays in this sidecar; conversation state
+  lives in the realtime thread; tool decisions stay with the parent
+  agent.
+
 author: Apteva
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/telephony/icon.svg
+homepage: https://github.com/apteva/apps/tree/main/mcp/telephony
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [voice, telephony, communication]
+
 scopes: [project, global]
 min_apteva_version: "0.25.12"
+
 requires:
   permissions:
     - db.write.app
     - platform.apps.call
-    - platform.connections.execute
-    - platform.connections.read_credentials
-    - platform.instances.read
-    - platform.realtime.spawn
-    - platform.telemetry.read
+    - platform.connections.execute        # invoke carrier API
+    - platform.connections.read_credentials  # read carrier phone_number to fill From=
+    - platform.instances.read             # resolve assigned agent names in the routing panel
+    - platform.realtime.spawn             # open realtime threads in core
+    - platform.telemetry.read             # observe scoped AI conversation phases
   apps:
     - name: functions
       optional: true
@@ -78,8 +89,20 @@ requires:
       mode: multiple
       compatible_slugs: [twilio, telnyx, plivo, signalwire, vonage, bandwidth, sinch, didww]
       capabilities: [voice.place, voice.update]
+      # Carrier tool names are provider-specific (for example, Twilio uses
+      # make_call while Telnyx uses dial_call). The generic carrier adapter
+      # resolves those contracts at runtime instead of declaring a false
+      # one-size-fits-all mapping here.
       required: true
       label: "Voice carrier"
+      hint: "Provide a supported voice connection with a voice-capable phone number. DIDWW outbound calls require its SIP trunk host and credentials plus a configured TLS/SRTP gateway; its REST API key alone cannot place calls. Provider-specific recording and call controls appear only where implemented."
+
+    - role: speech
+      kind: integration
+      compatible_slugs: [elevenlabs, fish-audio, minimax-audio, venice-ai]
+      required: false
+      label: "Local SIP prompt speech"
+
 provides:
   http_routes:
     - { prefix: /media-diagnostics }
@@ -107,27 +130,28 @@ provides:
     - { prefix: /softphone/listen-media/, no_auth: true }
     - { prefix: /peer/, no_auth: true }
   mcp_tools:
-    - { name: telephony_place_call,   description: "Place an outbound voice call." }
-    - { name: telephony_answer_call,  description: "Answer an inbound call by spawning a realtime thread." }
-    - { name: telephony_reject_call,  description: "Reject a pending inbound call." }
-    - { name: telephony_routes_create, description: "Create an inbound phone-number route to an agent." }
+    - { name: telephony_place_call,   description: "Place an outbound voice call. Args: to (E.164), directive, voice?, recording?, timeout_sec?, max_duration_sec?, idempotency_key?, machine_detection? (off|detect|premium), machine_detection_action? (notify|hangup). Telephony spawns the realtime thread and bridges carrier audio into it." }
+    - { name: telephony_answer_call,  description: "Answer a pending inbound call by spawning a realtime thread. Args: call_id, directive, voice?." }
+    - { name: telephony_reject_call,  description: "Reject a pending inbound call. Args: call_id." }
+    - { name: telephony_routes_create, description: "Create an inbound phone-number route to an agent. Agents own what they create; API keys and panel sessions pass agent_id. Args: phone_number?, phone_number_id?, agent_id?, hold_prompt?, timeout_sec?, answer_mode?, directive?, voice?, greeting?, inbound_transport?." }
     - { name: telephony_routes_set_answer_mode, description: "Configure agent-decided or immediate realtime answering for an inbound route." }
     - { name: telephony_routes_set_recording_policy, description: "Set recording behavior for future calls on an inbound route." }
+    - { name: telephony_local_media_settings, description: "Configure carrier-independent SIP media per route or project." }
     - { name: telephony_routes_set_transport, description: "Select programmable WebSocket or direct SIP transport for an inbound route." }
-    - { name: telephony_routes_configure_carrier, description: "Configure carrier routing for an inbound route." }
+    - { name: telephony_routes_configure_carrier, description: "Configure carrier routing for an inbound route. Args: route_id." }
     - { name: telephony_routes_set_enabled, description: "Enable or disable new inbound admission without changing active calls or carrier resources. Args: route_id, enabled." }
     - { name: telephony_outbound_policy, description: "Read or change project outbound admission controls for a number, provider or connection; platform principals only." }
-    - { name: telephony_routes_disable, description: "Disable new inbound admission; retain carrier resources and existing calls." }
+    - { name: telephony_routes_disable, description: "Disable new inbound admission on a route without changing carrier resources or active calls. Args: route_id." }
     - { name: telephony_routes_list,  description: "List inbound call routes. Agents see their own; platform callers see the whole project." }
     - { name: telephony_flows_create, description: "Create a draft carrier-neutral IVR/routing flow." }
     - { name: telephony_flows_list, description: "List routing flows." }
-    - { name: telephony_flows_get, description: "Get one routing flow." }
+    - { name: telephony_flows_get, description: "Get one routing flow and its draft." }
     - { name: telephony_flows_update, description: "Update a routing-flow draft." }
     - { name: telephony_flows_validate, description: "Validate a routing-flow draft." }
-    - { name: telephony_flows_publish, description: "Publish a routing flow." }
-    - { name: telephony_flows_simulate, description: "Simulate a routing flow." }
-    - { name: telephony_destinations_create, description: "Create a routing destination." }
-    - { name: telephony_destinations_list, description: "List routing destinations." }
+    - { name: telephony_flows_publish, description: "Publish an immutable routing-flow version." }
+    - { name: telephony_flows_simulate, description: "Simulate a routing flow without placing a call." }
+    - { name: telephony_destinations_create, description: "Create a reusable routing destination." }
+    - { name: telephony_destinations_list, description: "List reusable routing destinations." }
     - { name: telephony_ring_groups_create, description: "Create a ring group." }
     - { name: telephony_ring_groups_list, description: "List ring groups." }
     - { name: telephony_routes_set_flow, description: "Assign a published flow to an inbound route." }
@@ -135,42 +159,42 @@ provides:
     - { name: telephony_flows_assign_numbers, description: "Atomically assign a published flow to several inbound numbers." }
     - { name: telephony_flows_unassign_numbers, description: "Atomically remove a flow from several inbound numbers." }
     - { name: telephony_flows_list_numbers, description: "List inbound numbers assigned to a flow." }
-    - { name: telephony_pending_calls, description: "List pending inbound calls." }
-    - { name: telephony_hangup,       description: "End an active call." }
-    - { name: telephony_active_calls, description: "List ongoing calls." }
+    - { name: telephony_pending_calls, description: "List pending inbound calls for the calling agent." }
+    - { name: telephony_hangup,       description: "End an active call. Args: call_id." }
+    - { name: telephony_active_calls, description: "List ongoing calls with thread IDs and durations." }
     - { name: telephony_calls_list, description: "List calls updated since a cursor or timestamp for event reconciliation." }
     - { name: telephony_call_get, description: "Get one project call, including its current verified softphone owner when present." }
     - { name: telephony_decisions_list, description: "Reconcile routing decisions and fallback reasons for a call." }
     - { name: telephony_call_events_list, description: "List durable lifecycle events for one call." }
-    - { name: telephony_recording_settings_get, description: "Get the project's call recording policy." }
-    - { name: telephony_recording_settings_set, description: "Set recording policy for future calls." }
-    - { name: telephony_outbound_settings_get, description: "Get outbound call defaults (answering machine detection)." }
-    - { name: telephony_outbound_settings_set, description: "Set outbound call defaults for future calls." }
-    - { name: telephony_recordings_list, description: "List call recordings." }
-    - { name: telephony_recording_get, description: "Get one recording and its private Storage or carrier playback URL." }
-    - { name: telephony_recording_retry_import, description: "Retry durable Storage import." }
-    - { name: telephony_recording_delete, description: "Delete a recording from Storage and the carrier." }
-    - { name: telephony_numbers_connected, description: "List all numbers owned by the bound carrier with their Telephony routing and outbound status." }
-    - { name: telephony_numbers_search, description: "Search and compare carrier phone-number inventory and pricing." }
-    - { name: telephony_numbers_purchase, description: "Purchase a quoted phone number after explicit confirmation, with address and bundle when required." }
-    - { name: telephony_addresses_list, description: "List provider addresses." }
-    - { name: telephony_address_create, description: "Create and validate a provider address." }
-    - { name: telephony_identities_list, description: "List provider regulatory identities." }
-    - { name: telephony_identity_create, description: "Create a provider regulatory identity." }
-    - { name: telephony_identity_get, description: "Get a provider regulatory identity." }
-    - { name: telephony_regulatory_requirements, description: "Discover current provider regulatory requirements." }
-    - { name: telephony_regulatory_bundles_list, description: "List provider regulatory bundles." }
-    - { name: telephony_regulatory_bundle_create, description: "Create a draft regulatory bundle." }
-    - { name: telephony_regulatory_bundle_get, description: "Get a regulatory bundle, requirements, and items." }
-    - { name: telephony_regulatory_bundle_item_create, description: "Create and assign an end user or document to a bundle." }
-    - { name: telephony_regulatory_bundle_evaluate, description: "Evaluate bundle compliance." }
-    - { name: telephony_regulatory_bundle_submit, description: "Submit a compliant bundle for review." }
-    - { name: telephony_compliance_profiles_list, description: "List provider compliance profiles." }
-    - { name: telephony_compliance_profile_create, description: "Create a provider compliance profile." }
-    - { name: telephony_compliance_profile_get, description: "Get a provider compliance profile and its requirements." }
-    - { name: telephony_compliance_requirement_set, description: "Set a compliance requirement value or document." }
-    - { name: telephony_compliance_profile_evaluate, description: "Evaluate compliance-profile completeness." }
-    - { name: telephony_compliance_profile_submit, description: "Submit a complete compliance profile for review." }
+    - { name: telephony_recording_settings_get, description: "Get the project's recording and durable-storage policy." }
+    - { name: telephony_recording_settings_set, description: "Set recording policy for future calls. Args: default_mode?, channels?, storage_mode?, retention_days?." }
+    - { name: telephony_outbound_settings_get, description: "Get outbound call defaults: answering machine detection mode and action." }
+    - { name: telephony_outbound_settings_set, description: "Set outbound call defaults for future calls. Args: machine_detection? (off|detect|premium), machine_detection_action? (notify|hangup), default_timeout_sec? (0 keeps built-in defaults)." }
+    - { name: telephony_recordings_list, description: "List call recordings. Args: call_id?, limit?." }
+    - { name: telephony_recording_get, description: "Get recording metadata and a private playback URL backed by Storage or the carrier. Args: recording_id." }
+    - { name: telephony_recording_retry_import, description: "Retry copying a provider recording into Storage. Args: recording_id." }
+    - { name: telephony_recording_delete, description: "Delete a recording from Storage and the carrier. Args: recording_id." }
+    - { name: telephony_numbers_connected, description: "List all numbers owned by the bound carrier, including purchased numbers without a route, with Telephony routing and outbound status." }
+    - { name: telephony_numbers_search, description: "Search and compare carrier phone-number inventory and pricing. Args: country? or countries?, number_type?, features?, area_code?, pattern?, limit?. Returns short-lived confirmation tokens for purchase-ready offers." }
+    - { name: telephony_numbers_purchase, description: "Purchase a quoted phone number after explicit user confirmation. This spends real money. Args: confirmation_token, address_id?, compliance_id?." }
+    - { name: telephony_addresses_list, description: "List provider addresses. Args: country?, customer_name?, limit?." }
+    - { name: telephony_address_create, description: "Create and validate a provider address. Args: customer_name, street, city, region, postal_code, country, street_secondary?, friendly_name?, auto_correct?." }
+    - { name: telephony_identities_list, description: "List provider regulatory identities. Args: identity_type?, limit?." }
+    - { name: telephony_identity_create, description: "Create a provider regulatory identity. DIDWW supports personal and business identities." }
+    - { name: telephony_identity_get, description: "Get one provider regulatory identity. Args: identity_id." }
+    - { name: telephony_regulatory_requirements, description: "Discover current provider requirements. Args: country, number_type, end_user_type." }
+    - { name: telephony_regulatory_bundles_list, description: "List regulatory bundles. Args: country?, number_type?, end_user_type?, status?, friendly_name?, limit?." }
+    - { name: telephony_regulatory_bundle_create, description: "Create a draft regulatory bundle. Args: friendly_name, email, regulation_sid? or country+number_type+end_user_type." }
+    - { name: telephony_regulatory_bundle_get, description: "Get a bundle with its regulation and assigned items. Args: bundle_sid." }
+    - { name: telephony_regulatory_bundle_item_create, description: "Create and assign an end user or document. Args: bundle_sid, kind, friendly_name, type, attributes, file?, file_name?." }
+    - { name: telephony_regulatory_bundle_evaluate, description: "Evaluate bundle compliance. Args: bundle_sid." }
+    - { name: telephony_regulatory_bundle_submit, description: "Evaluate and submit a compliant bundle for review. Args: bundle_sid." }
+    - { name: telephony_compliance_profiles_list, description: "List provider compliance profiles. Args: country?, number_type?, status?, friendly_name?, limit?." }
+    - { name: telephony_compliance_profile_create, description: "Create a provider compliance profile. Args depend on the bound provider." }
+    - { name: telephony_compliance_profile_get, description: "Get a compliance profile and its requirements. Args: compliance_id." }
+    - { name: telephony_compliance_requirement_set, description: "Set a compliance requirement value or document. Args: compliance_id plus provider requirement fields." }
+    - { name: telephony_compliance_profile_evaluate, description: "Evaluate compliance-profile completeness. Args: compliance_id." }
+    - { name: telephony_compliance_profile_submit, description: "Submit a complete compliance profile for review. Args: compliance_id." }
   publishes:
     - { name: telephony.routing.requested, description: "Durable correlated routing outcome: requested.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
     - { name: telephony.routing.accepted, description: "Durable correlated routing outcome: accepted.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
@@ -195,9 +219,9 @@ provides:
     - { name: telephony.routing.call.busy, description: "Durable correlated routing outcome: call.busy.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
     - { name: telephony.routing.call.no-answer, description: "Durable correlated routing outcome: call.no-answer.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
     - { name: telephony.routing.call.canceled, description: "Durable correlated routing outcome: call.canceled.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
-    - { name: call.routing.started, description: "A call began a published routing flow.", payload: { call_id: string, flow_id: string, flow_version_id: string, occurred_at: string } }
-    - { name: call.routing.node_entered, description: "A call entered a routing node.", payload: { call_id: string, node_id: string, node_type: string, outcome: string } }
-    - { name: call.offered, description: "A ring group offered a call.", payload: { call_id: string, ring_group_id: string } }
+    - { name: call.routing.started, description: "A call pinned and began executing a published routing flow.", payload: { call_id: string, flow_id: string, flow_version_id: string, destination_id: string, ring_group_id: string, occurred_at: string } }
+    - { name: call.routing.node_entered, description: "A call entered a routing-flow node.", payload: { call_id: string, flow_id: string, flow_version_id: string, node_id: string, node_type: string, outcome: string, occurred_at: string } }
+    - { name: call.offered, description: "A ring group offered a call to eligible destinations.", payload: { call_id: string, flow_id: string, flow_version_id: string, ring_group_id: string, occurred_at: string } }
     - { name: telephony.burst.suppressed, description: "A new carrier call ID was suppressed before adviser delivery by the configured inbound burst guard.", payload: { provider_call_id: string, to_number: string, from_number: string, reason: string, occurred_at: string } }
     - { name: telephony.audio.degraded, description: "Recoverable audio delivery impairment; call status is unchanged.", payload: { call_id: string, provider: string, stage: string, reason: string, occurred_at: string } }
     - { name: telephony.audio.recovered, description: "An audio delivery stage recovered or became inactive.", payload: { call_id: string, provider: string, stage: string, state: string, occurred_at: string } }
@@ -243,6 +267,8 @@ provides:
         routing_resolution: string
         callback_opportunity_id: string
         termination: object
+        answered_by: string
+        synthesized: boolean
     - { name: call.initiated, description: "A carrier accepted an outbound call request.", payload: *call_event_payload }
     - { name: call.ringing, description: "The destination is ringing.", payload: *call_event_payload }
     - { name: call.answered, description: "The call was answered.", payload: *call_event_payload }
@@ -311,6 +337,7 @@ provides:
             default: 6
             minimum: 3
             maximum: 12
+
 runtime:
   kind: source
   source:
@@ -319,10 +346,12 @@ runtime:
     entry: mcp/telephony
   port: 8080
   health_check: /health
+
 db:
   driver: sqlite
   path: /data/telephony.db
   migrations: migrations/
+
 config_schema:
   - { name: audio_alert_min_calls, type: text, default: "3", label: "Audio alert minimum distinct calls", description: "2–256 affected calls per project/provider/stage within 30 seconds. 0 disables alerts; invalid values use 3." }
   - { name: audio_alert_cooldown_seconds, type: text, default: "120", label: "Audio alert cooldown (seconds)", description: "30–3600 seconds between correlated alerts for the same project/provider/stage." }
@@ -363,6 +392,7 @@ config_schema:
   - { name: max_call_listeners, type: text, default: "4", label: "Maximum listeners per call", description: "Independent listening/coaching sessions, limited to 1–16. Requires explicit listening/coaching access." }
   - { name: sip_max_sessions, type: text, default: "100", label: "Maximum SIP sessions" }
   - { name: sip_allow_insecure_signaling, type: toggle, default: "false", label: "Allow UDP or TCP signaling" }
+
 upgrade_policy: auto-patch
 `
 
@@ -457,6 +487,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	_, _ = ctx.AppDB().Exec(`UPDATE recordings SET storage_status = 'failed',
         last_error = 'recording import interrupted by app restart', import_started_at = '',
         next_attempt_at = ? WHERE storage_status = 'importing'`, time.Now().UTC().Format(time.RFC3339))
+	_, _ = ctx.AppDB().Exec(`UPDATE recordings SET provider_status='failed',storage_status='failed',last_error='local recording interrupted by app restart' WHERE provider='telephony' AND provider_status='in-progress'`)
 	if err := a.restoreAIPolicyRuntimes(); err != nil {
 		return fmt.Errorf("restore AI call policies: %w", err)
 	}
@@ -480,6 +511,7 @@ func (a *App) OnUnmount(*sdk.AppCtx) error {
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{
+		{Name: "sip-resource-retirement", Schedule: "@every 30s", Run: a.runRetiredSIPResources},
 		{Name: "ai-call-policies", Schedule: "@every 1s", Run: a.runAICallPolicies},
 		{Name: "carrier-media-recovery", Schedule: "@every 1s", Run: a.runCarrierMediaRecovery},
 		{Name: "audio-telemetry", Schedule: "@every 5s", Run: a.runAudioTelemetryTick},
@@ -601,18 +633,19 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "telephony_routes_create",
 			Description: "Create an inbound route from a carrier phone number to an agent. Agents own the routes they create. Platform callers (API key, panel session) must pass agent_id naming the owning agent in this project. After creating it, call telephony_routes_configure_carrier(route_id) to set provider routing. Args: phone_number? (defaults to bound connection phone_number), phone_number_id?, agent_id? (required for non-agent callers), hold_prompt?, timeout_sec?, answer_mode? (agent|realtime_immediate|human_browser), directive?, voice?, greeting?.",
 			InputSchema: schemaObject(map[string]any{
-				"phone_number":      map[string]any{"type": "string", "description": "Inbound number in E.164. Defaults to bound carrier connection phone_number."},
-				"agent_id":          map[string]any{"type": "integer", "description": "Owning agent id. Required when the caller is not an agent (API key or panel session); agents own the routes they create and may omit it."},
-				"phone_number_id":   map[string]any{"type": "string", "description": "Optional provider phone-number resource ID; auto-discovered when omitted."},
-				"phone_number_sid":  map[string]any{"type": "string", "description": "Legacy alias for phone_number_id."},
-				"hold_prompt":       map[string]any{"type": "string", "description": "Short prompt supported carriers play while the agent decides whether to answer."},
-				"timeout_sec":       map[string]any{"type": "integer", "description": "How long to wait before ending if no answer.", "default": 60, "minimum": 10, "maximum": 300},
-				"answer_mode":       map[string]any{"type": "string", "enum": []string{"agent", "realtime_immediate", "human_browser"}, "default": "agent", "description": "Agent emits an answer decision, or Telephony immediately starts the configured realtime thread."},
-				"directive":         map[string]any{"type": "string", "description": "Required system directive when answer_mode is realtime_immediate."},
-				"voice":             map[string]any{"type": "string", "description": "Optional realtime voice for immediate answering."},
-				"greeting":          map[string]any{"type": "string", "description": "Opening instruction spoken after the media bridge connects."},
-				"recording_mode":    map[string]any{"type": "string", "enum": []string{"inherit", "off", "always"}, "default": "inherit"},
-				"inbound_transport": map[string]any{"type": "string", "enum": []string{inboundTransportProgrammable, inboundTransportSIPDirect}, "default": inboundTransportProgrammable},
+				"phone_number":          map[string]any{"type": "string", "description": "Inbound number in E.164. Defaults to bound carrier connection phone_number."},
+				"agent_id":              map[string]any{"type": "integer", "description": "Owning agent id. Required when the caller is not an agent (API key or panel session); agents own the routes they create and may omit it."},
+				"phone_number_id":       map[string]any{"type": "string", "description": "Optional provider phone-number resource ID; auto-discovered when omitted."},
+				"phone_number_sid":      map[string]any{"type": "string", "description": "Legacy alias for phone_number_id."},
+				"hold_prompt":           map[string]any{"type": "string", "description": "Short prompt supported carriers play while the agent decides whether to answer."},
+				"timeout_sec":           map[string]any{"type": "integer", "description": "How long to wait before ending if no answer.", "default": 60, "minimum": 10, "maximum": 300},
+				"answer_mode":           map[string]any{"type": "string", "enum": []string{"agent", "realtime_immediate", "human_browser"}, "default": "agent", "description": "Agent emits an answer decision, or Telephony immediately starts the configured realtime thread."},
+				"directive":             map[string]any{"type": "string", "description": "Required system directive when answer_mode is realtime_immediate."},
+				"voice":                 map[string]any{"type": "string", "description": "Optional realtime voice for immediate answering."},
+				"greeting":              map[string]any{"type": "string", "description": "Opening instruction spoken after the media bridge connects."},
+				"recording_mode":        map[string]any{"type": "string", "enum": []string{"inherit", "off", "always"}, "default": "inherit"},
+				"carrier_connection_id": map[string]any{"type": "integer", "description": "Optional authorized carrier account for this number."},
+				"inbound_transport":     map[string]any{"type": "string", "enum": []string{inboundTransportProgrammable, inboundTransportSIPDirect}, "default": inboundTransportProgrammable},
 			}, nil),
 			HandlerCtx: a.toolRoutesCreate,
 		},
@@ -639,12 +672,19 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "telephony_routes_set_transport",
-			Description: "Select the inbound carrier transport for a route. programmable_websocket uses provider webhooks/media streaming; sip_direct sends SIP/RTP directly to this Telephony installation. Carrier configuration must be applied afterward with telephony_routes_configure_carrier.",
+			Description: "Select the inbound carrier transport for a route. programmable_websocket uses provider webhooks/media streaming; sip_direct sends SIP/RTP directly to this Telephony installation. The default configure=true applies carrier setup now; changes affect new calls and preserve existing dialogs.",
 			InputSchema: schemaObject(map[string]any{
 				"route_id":          map[string]any{"type": "string"},
 				"inbound_transport": map[string]any{"type": "string", "enum": []string{inboundTransportProgrammable, inboundTransportSIPDirect}},
+				"configure":         map[string]any{"type": "boolean", "default": true},
 			}, []string{"route_id", "inbound_transport"}),
 			HandlerCtx: a.toolRoutesSetTransport,
+		},
+		{
+			Name:        "telephony_local_media_settings",
+			Description: "Read or save carrier-independent SIP media settings for future calls. Optional route_id overrides project defaults. config contains codecs, speech_tool, speech_input, sample_rate, prompts (text to private Storage file ID), gather_timeout_seconds and voicemail_max_seconds. inherit=true removes a route override.",
+			InputSchema: schemaObject(map[string]any{"route_id": map[string]any{"type": "string"}, "config": map[string]any{"type": "object"}, "inherit": map[string]any{"type": "boolean"}}, nil),
+			HandlerCtx:  a.toolLocalMediaSettings,
 		},
 		{
 			Name:        "telephony_routes_configure_carrier",
@@ -1147,7 +1187,7 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 		}
 	}
 	carrierSlug := strings.ToLower(firstNonEmpty(creds.Slug, bound.AppSlug))
-	if recordingMode == recordingModeAlways && !providerSupportsRecording(carrierSlug) {
+	if recordingMode == recordingModeAlways && carrierSlug != "didww" && !providerSupportsRecording(carrierSlug) {
 		return mcpError("call recording is not implemented for the bound carrier " + carrierSlug), nil
 	}
 	machineDetection, machineDetectionAction, err := a.resolveMachineDetection(ctx, projectID, carrierSlug,
@@ -1646,6 +1686,18 @@ func (a *App) createInboundRoute(ctx *sdk.AppCtx, agentID int64, args map[string
 		return nil, "", errors.New("agent_id required")
 	}
 	bound := ctx.IntegrationFor("carrier")
+	if selected := int64(intArg(args, "carrier_connection_id", 0)); selected > 0 {
+		bound = nil
+		for _, candidate := range ctx.IntegrationsFor("carrier") {
+			if candidate != nil && candidate.ConnectionID == selected {
+				bound = candidate
+				break
+			}
+		}
+		if bound == nil {
+			return nil, "", errors.New("carrier connection is not bound to this installation")
+		}
+	}
 	if bound == nil {
 		return nil, "", errors.New("no carrier bound")
 	}
@@ -1710,10 +1762,8 @@ func (a *App) createInboundRoute(ctx *sdk.AppCtx, agentID int64, args map[string
 	if err != nil {
 		return nil, "", err
 	}
-	if recordingMode == recordingModeAlways && transport == inboundTransportSIPDirect {
-		return nil, "", errors.New("provider-cloud recording is unavailable on direct SIP routes; set recording_mode to off or inherit")
-	}
-	if recordingMode == recordingModeAlways && !providerSupportsRecording(slug) {
+
+	if recordingMode == recordingModeAlways && transport != inboundTransportSIPDirect && !providerSupportsRecording(slug) {
 		return nil, "", errors.New("call recording is not implemented for provider " + slug)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -1944,7 +1994,7 @@ func (a *App) toolAnswerCall(callerCtx context.Context, ctx *sdk.AppCtx, args ma
 	if row.ProjectID != currentProject(ctx) || (row.AgentID != agentID && !a.db().hasAgentRingOffer(row.ID, row.ProjectID, agentID)) {
 		return mcpError("this call is routed to another agent"), nil
 	}
-	if row.CarrierSlug != "twilio" && row.CarrierSlug != "telnyx" && row.CarrierSlug != "plivo" {
+	if !a.callUsesDirectSIP(row) && row.CarrierSlug != "twilio" && row.CarrierSlug != "telnyx" && row.CarrierSlug != "plivo" {
 		return mcpError("answer is not implemented for inbound provider " + row.CarrierSlug), nil
 	}
 	if a.db().hasAgentRingOffer(row.ID, row.ProjectID, agentID) {
@@ -2017,7 +2067,12 @@ func (a *App) answerCallOwned(ctx *sdk.AppCtx, row *callRow, directive, voice, g
 	}
 	if err := a.answerInboundCarrierCall(ctx, row); err != nil {
 		_ = ctx.PlatformAPI().KillThread(row.AgentID, threadID)
-		if terminalOnCarrierError {
+		if a.callUsesDirectSIP(row) {
+			// Core readiness is not carrier activation. Retire this ready attempt
+			// rather than leaving a pending call with an unretryable ready journal.
+			_ = a.failSIPAIActivation(row.ID, threadID)
+			_ = a.db().releaseRealtimePreparation(row.ID, threadID)
+		} else if terminalOnCarrierError {
 			_, _ = a.db().updateStatusWithFacts(row.ID, "failed", "carrier answer failed: "+err.Error(), lifecycleFacts{Source: "telephony", ExpectedThreadID: threadID})
 		} else {
 			_ = a.db().releaseRealtimePreparation(row.ID, threadID)
@@ -2924,13 +2979,16 @@ func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, me
 	if route.RecordingMode != "" && route.RecordingMode != recordingModeInherit {
 		recordingMode = route.RecordingMode
 	}
-	if !providerSupportsRecording(route.CarrierSlug) {
+	if route.InboundTransport != inboundTransportSIPDirect && !providerSupportsRecording(route.CarrierSlug) {
 		recordingMode = recordingModeOff
 	}
-	meta := inboundCallMetadata{IngressPath: "direct_or_unreported"}
+	meta := inboundCallMetadata{IngressPath: inboundTransportProgrammable}
 	if len(metadata) > 0 {
 		meta = metadata[0]
-		meta.IngressPath = firstNonEmpty(meta.IngressPath, "direct_or_unreported")
+		meta.IngressPath = firstNonEmpty(meta.IngressPath, inboundTransportProgrammable)
+		if meta.IngressPath == "direct_or_unreported" {
+			meta.IngressPath = inboundTransportProgrammable
+		}
 	}
 	call := callRow{
 		ID:                  callID,

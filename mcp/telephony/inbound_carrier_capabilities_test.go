@@ -29,7 +29,7 @@ func TestDirectSIPDecisionUsesSharedOfferLoop(t *testing.T) {
 	}
 }
 
-func TestDirectSIPRejectsMediaNodesItCannotExecute(t *testing.T) {
+func TestDirectSIPMediaRequiresRendererForText(t *testing.T) {
 	a, _, plan := decisionFixture(t)
 	var execution routingExecutionContext
 	if err := json.Unmarshal([]byte(plan.ContextJSON), &execution); err != nil {
@@ -39,8 +39,8 @@ func TestDirectSIPRejectsMediaNodesItCannotExecute(t *testing.T) {
 	execution.Route.InboundTransport = inboundTransportSIPDirect
 	for _, node := range []routingNode{
 		{ID: "notice", Type: "announcement", Config: map[string]any{"text": "Closed"}},
-		{ID: "menu", Type: "dtmf_menu"},
-		{ID: "message", Type: "voicemail"},
+		{ID: "menu", Type: "dtmf_menu", Config: map[string]any{"prompt": "Menu"}},
+		{ID: "message", Type: "voicemail", Config: map[string]any{"prompt": "Message"}},
 	} {
 		definition := execution.Definition
 		definition.Nodes = append(append([]routingNode{}, definition.Nodes...), node)

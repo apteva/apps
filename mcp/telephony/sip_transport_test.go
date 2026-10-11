@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	tk "github.com/apteva/app-sdk/testkit"
 	"math/big"
 	"net"
 	"net/http"
@@ -707,7 +708,8 @@ func TestTwilioDirectSIPCarrierConfigurationAndRestore(t *testing.T) {
 		t.Fatalf("unexpected saved Twilio SIP state: %+v", state)
 	}
 	platform.integrationCalls = nil
-	if err := app.deconfigureDirectSIPCarrierRoute(ctx, stored); err != nil {
+	cleanupCtx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(&contextAnswerPlatform{platform}))
+	if err := app.deconfigureDirectSIPCarrierRoute(cleanupCtx, stored); err != nil {
 		t.Fatal(err)
 	}
 	if len(platform.integrationCalls) != 1 || platform.integrationCalls[0].Tool != "delete_elastic_sip_trunk" {
@@ -744,7 +746,8 @@ func TestTelnyxDirectSIPCarrierConfigurationAndRestore(t *testing.T) {
 	}
 	stored, _ = app.db().findRoute(route.ID)
 	platform.integrationCalls = nil
-	if err := app.deconfigureDirectSIPCarrierRoute(ctx, stored); err != nil {
+	cleanupCtx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(&contextAnswerPlatform{platform}))
+	if err := app.deconfigureDirectSIPCarrierRoute(cleanupCtx, stored); err != nil {
 		t.Fatal(err)
 	}
 	if len(platform.integrationCalls) != 3 ||
@@ -813,7 +816,7 @@ func TestDirectSIPCarrierSetupRollsBackPartialResources(t *testing.T) {
 	})
 }
 
-func TestDirectSIPRecordingPolicyRejectsProviderCloudRecording(t *testing.T) {
+func TestDirectSIPRecordingPolicyUsesLocalRecording(t *testing.T) {
 	app, ctx := withTelephonyTestContext(t, &answerPlatform{})
 	app.sip.gateway = &sipGateway{cfg: directSIPTestConfig()}
 	route := routeRow{
@@ -824,7 +827,7 @@ func TestDirectSIPRecordingPolicyRejectsProviderCloudRecording(t *testing.T) {
 	if err := app.db().insertRoute(route); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.setRouteTransport(ctx, route.ID, inboundTransportSIPDirect, 0); err == nil || !strings.Contains(err.Error(), "recording") {
+	if _, err := app.setRouteTransport(ctx, route.ID, inboundTransportSIPDirect, 0); err != nil {
 		t.Fatalf("direct SIP recording-policy error=%v", err)
 	}
 }

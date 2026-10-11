@@ -41,7 +41,11 @@ func effectiveRecordingControlState(row callRow) string {
 
 func callControlCapabilities(row callRow) map[string]bool {
 	features := carrierControlFeaturesForSlug(row.CarrierSlug)
-	carrier := row.CarrierSID != "" && row.IngressPath != "sip_direct"
+	carrier := row.CarrierSID != ""
+	if row.IngressPath == inboundTransportSIPDirect || row.CarrierSlug == "didww" && row.Direction == "outbound" {
+		features.HoldMusic = true
+		features.RecordingPause = true
+	}
 	human := row.PeerKind == peerKindHuman
 	return map[string]bool{
 		"hold_music":      features.HoldMusic && carrier && human && (row.HoldMusicURL != "" || row.HoldMusicStorageFileID > 0),
@@ -234,15 +238,21 @@ func (a *App) handleCallControl(w http.ResponseWriter, r *http.Request, callID, 
 		http.Error(w, "recording pause is unavailable for this call", http.StatusNotImplemented)
 		return
 	}
-	adapter, err := a.carrierForRow(globalCtx.WithProject(project), nil, row)
-	if err != nil {
-		http.Error(w, "carrier unavailable", http.StatusNotImplemented)
-		return
-	}
-	controller, ok := adapter.(carrierCallController)
-	if !ok {
-		http.Error(w, "carrier does not support call controls", http.StatusNotImplemented)
-		return
+	var controller carrierCallController
+	if a.callUsesDirectSIP(row) || row.Direction == "outbound" && row.CarrierSlug == "didww" {
+		controller = &localSIPController{app: a}
+	} else {
+		adapter, err := a.carrierForRow(globalCtx.WithProject(project), nil, row)
+		if err != nil {
+			http.Error(w, "carrier unavailable", http.StatusNotImplemented)
+			return
+		}
+		var ok bool
+		controller, ok = adapter.(carrierCallController)
+		if !ok {
+			http.Error(w, "carrier does not support call controls", http.StatusNotImplemented)
+			return
+		}
 	}
 	currentRecording := effectiveRecordingControlState(*row)
 	if action == "hold" && (row.HoldState == "held" || row.HoldState == "starting" && !controlRequestExpired(*row)) ||
@@ -341,6 +351,17 @@ func (a *App) handleCallControl(w http.ResponseWriter, r *http.Request, callID, 
 	// Hold/resume are confirmed by playback webhooks. Telnyx documents no
 	// recording pause/resume webhook; its successful result=ok response is the
 	// confirmation boundary chosen for those two actions.
+	if a.callUsesDirectSIP(row) && (action == "hold" || action == "resume") {
+		state := "held"
+		if action == "resume" {
+			state = "active"
+		}
+		if err := a.db().setCallControl(row.ID, action, state, revision, ""); err != nil {
+			http.Error(w, "persist hold state", 500)
+			return
+		}
+		a.softphones.hubFor(row.ID).setHeld(state == "held")
+	}
 	if action == "pause-recording" || action == "resume-recording" {
 		confirmed := "paused"
 		if action == "resume-recording" {

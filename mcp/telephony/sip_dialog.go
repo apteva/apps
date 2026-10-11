@@ -123,7 +123,7 @@ func (g *sipGateway) handleACK(req *sip.Request, tx sip.ServerTransaction) {
 	if s.refreshACK != nil && req.CSeq().SeqNo == s.refreshCSeq {
 		ack := s.refreshACK
 		if len(req.Body()) > 0 {
-			offer, err := parseSIPMediaOffer(req.Body(), g.cfg)
+			offer, err := parseSIPMediaOfferOptions(req.Body(), g.cfg, []string{s.offer.Codec}, true)
 			if err != nil || !sameSIPMedia(offer, s.offer) {
 				s.answerMu.Unlock()
 				g.runTask(func() { s.finish("local_error", errors.New("unsupported refresh ACK media")) })
@@ -140,11 +140,16 @@ func (g *sipGateway) handleACK(req *sip.Request, tx sip.ServerTransaction) {
 	initial := req.CSeq().SeqNo == s.dialog.InviteRequest.CSeq().SeqNo
 	s.answerMu.Unlock()
 	if initial && dialog.ReadAck(req, tx) == nil {
-		s.ackOnce.Do(func() { close(s.initialACK) })
+		s.ackOnce.Do(func() {
+			if !s.ended.Load() {
+				_, _ = g.app.db().db.Exec(`UPDATE calls SET carrier_answered_at=CASE WHEN carrier_answered_at='' THEN ? ELSE carrier_answered_at END WHERE id=? AND status NOT IN ('completed','failed','canceled','no-answer','busy')`, ringTime(time.Now()), s.call.ID)
+			}
+			close(s.initialACK)
+		})
 	}
 }
 func sameSIPMedia(a, b sipMediaOffer) bool {
-	return a.RemoteAddress == b.RemoteAddress && a.RemotePort == b.RemotePort && a.PayloadType == b.PayloadType && a.Codec == b.Codec && a.PacketSamples == b.PacketSamples && a.Secure == b.Secure && bytes.Equal(a.RemoteKey, b.RemoteKey)
+	return a.RemoteAddress == b.RemoteAddress && a.RemotePort == b.RemotePort && a.PayloadType == b.PayloadType && a.Codec == b.Codec && a.PacketSamples == b.PacketSamples && a.DTMFPayloadType == b.DTMFPayloadType && a.Secure == b.Secure && bytes.Equal(a.RemoteKey, b.RemoteKey)
 }
 func (g *sipGateway) handleRefresh(req *sip.Request, tx sip.ServerTransaction) {
 	reply := func(status int, reason string) { _ = tx.Respond(sip.NewResponseFromRequest(req, status, reason, nil)) }
@@ -186,12 +191,15 @@ func (g *sipGateway) handleRefresh(req *sip.Request, tx sip.ServerTransaction) {
 		_ = tx.Respond(res)
 		return
 	}
+	direction := "sendrecv"
 	if len(req.Body()) > 0 {
-		offer, err := parseSIPMediaOffer(req.Body(), g.cfg)
+		offer, err := parseSIPMediaOfferOptions(req.Body(), g.cfg, []string{s.offer.Codec}, true)
 		if err != nil || !sameSIPMedia(offer, s.offer) {
 			reply(488, "Media Change Not Supported")
 			return
 		}
+		direction = offer.Direction
+		answer = bytes.Replace(answer, []byte("a=sendrecv"), []byte("a="+sipAnswerDirection(direction)), 1)
 		// Echo the current offer's crypto tag even when keys/media are unchanged.
 		if offer.Secure {
 			answer = bytes.Replace(answer, []byte("a=crypto:"+s.offer.CryptoTag+" "), []byte("a=crypto:"+offer.CryptoTag+" "), 1)
@@ -220,6 +228,9 @@ func (g *sipGateway) handleRefresh(req *sip.Request, tx sip.ServerTransaction) {
 		return
 	}
 	s.answerMu.Lock()
+	if s.media != nil {
+		s.media.remoteMode.Store(sipRemoteMediaMode(direction))
+	}
 	s.timer = timer
 	s.timerUpdated = time.Now()
 	if contact := req.Contact(); contact != nil {
@@ -344,7 +355,7 @@ func (s *sipSession) sendSessionRefresh(timer sipSessionTimer) error {
 	if err = s.dialog.WriteRequest(ack); err != nil {
 		return err
 	}
-	offer, err := parseSIPMediaOffer(response.Body(), s.gateway.cfg)
+	offer, err := parseSIPMediaOfferOptions(response.Body(), s.gateway.cfg, []string{s.offer.Codec}, true)
 	if err != nil || !sameSIPMedia(offer, s.offer) {
 		return errors.New("SIP refresh response changed unsupported media")
 	}

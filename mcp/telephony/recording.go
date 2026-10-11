@@ -92,7 +92,7 @@ func (a *App) toolRouteRecordingPolicy(callerCtx context.Context, ctx *sdk.AppCt
 	if err != nil {
 		return mcpError(err.Error()), nil
 	}
-	if mode == recordingModeAlways && !providerSupportsRecording(route.CarrierSlug) {
+	if mode == recordingModeAlways && route.InboundTransport != inboundTransportSIPDirect && !providerSupportsRecording(route.CarrierSlug) {
 		return mcpError("call recording is not implemented for provider " + route.CarrierSlug), nil
 	}
 	if _, err := ctx.AppDB().Exec(`UPDATE inbound_routes SET recording_mode = ?, updated_at = ? WHERE id = ?`,
@@ -154,12 +154,12 @@ func recordingCarrierSupport(ctx *sdk.AppCtx) (string, bool) {
 	if creds, err := ctx.PlatformAPI().GetConnectionCredentials(bound.ConnectionID); err == nil && creds != nil {
 		slug = strings.ToLower(firstNonEmpty(creds.Slug, slug))
 	}
-	return slug, providerSupportsRecording(slug)
+	return slug, providerSupportsRecording(slug) || slug == "didww"
 }
 
 func providerSupportsRecording(slug string) bool {
 	switch strings.ToLower(strings.TrimSpace(slug)) {
-	case "twilio", "telnyx", "plivo", "bandwidth":
+	case "twilio", "telnyx", "plivo", "bandwidth", localRecordingProvider:
 		return true
 	default:
 		return false
@@ -472,9 +472,13 @@ func (a *App) importRecording(workerCtx context.Context, ctx *sdk.AppCtx, record
 	if err != nil || call == nil {
 		return errors.New("recording call metadata is unavailable")
 	}
-	creds, err := ctx.PlatformAPI().GetConnectionCredentials(recording.CarrierConnectionID)
-	if err != nil {
-		return fmt.Errorf("load carrier credentials: %w", err)
+	fields := map[string]string{}
+	if recording.Provider != localRecordingProvider {
+		creds, err := ctx.PlatformAPI().GetConnectionCredentials(recording.CarrierConnectionID)
+		if err != nil || creds == nil {
+			return errors.New("load carrier credentials failed")
+		}
+		fields = creds.Fields
 	}
 	importCtx, cancel := context.WithTimeout(workerCtx, 12*time.Minute)
 	defer cancel()
@@ -488,7 +492,7 @@ func (a *App) importRecording(workerCtx context.Context, ctx *sdk.AppCtx, record
 	if !storageBound {
 		return errRecordingStorageUnbound
 	}
-	path, size, err := a.downloadProviderRecording(importCtx, ctx, recording, creds.Fields)
+	path, size, err := a.downloadProviderRecording(importCtx, ctx, recording, fields)
 	if err != nil {
 		return err
 	}
@@ -583,6 +587,9 @@ func (a *App) expireRecordings(ctx *sdk.AppCtx) error {
 func (a *App) deleteProviderRecording(ctx *sdk.AppCtx, recording *recordingRow) error {
 	if recording.ProviderDeletedAt != "" || recording.ProviderRecordingID == "" {
 		return nil
+	}
+	if recording.Provider == localRecordingProvider {
+		return a.deleteLocalRecording(recording)
 	}
 	input := map[string]any{"recording_id": recording.ProviderRecordingID}
 	if recording.Provider == "twilio" {
@@ -878,6 +885,9 @@ func (a *App) serveRecordingContent(w http.ResponseWriter, r *http.Request, ctx 
 		} else {
 			if recording.ProviderStatus != "completed" || recording.ProviderDeletedAt != "" {
 				return "", errors.New("recording unavailable")
+			}
+			if recording.Provider == localRecordingProvider {
+				return a.downloadLocalRecordingVariant(r.Context(), recording, variant)
 			}
 			creds, e := ctx.PlatformAPI().GetConnectionCredentials(recording.CarrierConnectionID)
 			if e != nil || creds == nil {
