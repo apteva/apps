@@ -228,27 +228,31 @@ type VoiceFinalExchangeResult struct {
 }
 
 type VoiceCallMetrics struct {
-	DurationMS                 int64                       `json:"duration_ms"`
-	FirstResponseMS            int64                       `json:"first_response_ms,omitempty"`
-	AverageResponseMS          int64                       `json:"average_response_ms,omitempty"`
-	ReceptionistAudioS         float64                     `json:"receptionist_audio_seconds"`
-	CallerAudioS               float64                     `json:"caller_audio_seconds"`
-	DeliveredCallerAudioS      float64                     `json:"delivered_caller_audio_seconds,omitempty"`
-	Interruptions              int                         `json:"interruptions"`
-	ToolCalls                  int                         `json:"tool_calls"`
-	RealtimeErrors             int                         `json:"realtime_errors"`
-	ReceptionistRealtimeErrors int                         `json:"receptionist_realtime_errors"`
-	CallerRealtimeErrors       int                         `json:"caller_realtime_errors"`
-	DroppedAudioEvents         int                         `json:"dropped_audio_events"`
-	EndedBy                    string                      `json:"ended_by"`
-	ReceptionistSourceTurns    int                         `json:"receptionist_source_turns"`
-	CallerReceivedTurns        int                         `json:"caller_received_turns"`
-	PendingReceptionistTurns   int                         `json:"pending_receptionist_turns"`
-	CallerSourceTurns          int                         `json:"caller_source_turns"`
-	ReceptionistReceivedTurns  int                         `json:"receptionist_received_turns"`
-	PendingCallerTurns         int                         `json:"pending_caller_turns"`
-	CallerResponseUndelivered  bool                        `json:"caller_response_generated_not_delivered"`
-	AudioConditions            *VoiceAudioConditionMetrics `json:"audio_conditions,omitempty"`
+	DurationMS                 int64   `json:"duration_ms"`
+	FirstResponseMS            int64   `json:"first_response_ms,omitempty"`
+	AverageResponseMS          int64   `json:"average_response_ms,omitempty"`
+	ReceptionistAudioS         float64 `json:"receptionist_audio_seconds"`
+	CallerAudioS               float64 `json:"caller_audio_seconds"`
+	DeliveredCallerAudioS      float64 `json:"delivered_caller_audio_seconds,omitempty"`
+	Interruptions              int     `json:"interruptions"`
+	ToolCalls                  int     `json:"tool_calls"`
+	RealtimeErrors             int     `json:"realtime_errors"`
+	ReceptionistRealtimeErrors int     `json:"receptionist_realtime_errors"`
+	CallerRealtimeErrors       int     `json:"caller_realtime_errors"`
+	DroppedAudioEvents         int     `json:"dropped_audio_events"`
+	EndedBy                    string  `json:"ended_by"`
+	// Source/received counts describe provider segmentation. Pending turns count
+	// unmatched finalized transcript content, never undelivered audio.
+	ReceptionistSourceTurns       int                         `json:"receptionist_source_turns"`
+	CallerReceivedTurns           int                         `json:"caller_received_turns"`
+	PendingReceptionistTurns      int                         `json:"pending_receptionist_turns"`
+	CallerSourceTurns             int                         `json:"caller_source_turns"`
+	ReceptionistReceivedTurns     int                         `json:"receptionist_received_turns"`
+	PendingCallerTurns            int                         `json:"pending_caller_turns"`
+	ReceptionistRecognitionStatus string                      `json:"receptionist_recognition_status,omitempty"`
+	CallerRecognitionStatus       string                      `json:"caller_recognition_status,omitempty"`
+	CallerResponseUndelivered     bool                        `json:"caller_response_generated_not_delivered"`
+	AudioConditions               *VoiceAudioConditionMetrics `json:"audio_conditions,omitempty"`
 }
 
 type VoiceBridgeExitResult struct {

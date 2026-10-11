@@ -73,7 +73,14 @@ Results include `final_exchange` with generated, forwarded, and acknowledged
 audio byte counts, response completion, transcript completeness, and the closing
 reason. Transcript turns carry `final` or `partial` status; delayed revisions
 replace the same transcript ID rather than adding a second turn. Source/target
-transcript count differences do not prove audio loss. The legacy
+transcript counts describe provider segmentation only. Recognition matches
+finalized content in order across merged or split receiver turns, ignoring case
+and punctuation. `pending_caller_turns` and `pending_receptionist_turns` count
+source utterances whose finalized content has no match, rather than subtracting
+turn counts. Separate `caller_recognition_status` and
+`receptionist_recognition_status` report complete, partial, missing, or unknown
+recognition evidence. Different wording remains an explicit recognition gap;
+it does not prove audio loss. The legacy
 `caller_response_generated_not_delivered` flag now requires measured unforwarded
 caller audio, rather than a speech-recognition count mismatch.
 

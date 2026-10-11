@@ -731,12 +731,14 @@ type voiceTelemetryState struct {
 }
 
 type voiceTurnDeliveryState struct {
-	receptionistSource   int
-	callerReceived       int
-	pendingReceptionist  int
-	callerSource         int
-	receptionistReceived int
-	pendingCaller        int
+	receptionistSource      int
+	callerReceived          int
+	pendingReceptionist     int
+	callerSource            int
+	receptionistReceived    int
+	pendingCaller           int
+	receptionistRecognition string
+	callerRecognition       string
 }
 
 func voiceTurnDelivery(
@@ -747,13 +749,19 @@ func voiceTurnDelivery(
 ) voiceTurnDeliveryState {
 	targetAssistant, targetUser := voiceRealtimeTurnCounts(targetEvents, targetThreadID)
 	callerAssistant, callerUser := voiceRealtimeTurnCounts(callerEvents, callerThreadID)
+	targetSpoken, targetRecognized := voiceRecognitionTurns(targetEvents, targetThreadID)
+	callerSpoken, callerRecognized := voiceRecognitionTurns(callerEvents, callerThreadID)
+	pendingReceptionist, receptionistRecognition := matchVoiceRecognition(targetSpoken, callerRecognized)
+	pendingCaller, callerRecognition := matchVoiceRecognition(callerSpoken, targetRecognized)
 	return voiceTurnDeliveryState{
-		receptionistSource:   targetAssistant,
-		callerReceived:       callerUser,
-		pendingReceptionist:  max(0, targetAssistant-callerUser),
-		callerSource:         callerAssistant,
-		receptionistReceived: targetUser,
-		pendingCaller:        max(0, callerAssistant-targetUser),
+		receptionistSource:      targetAssistant,
+		callerReceived:          callerUser,
+		pendingReceptionist:     pendingReceptionist,
+		callerSource:            callerAssistant,
+		receptionistReceived:    targetUser,
+		pendingCaller:           pendingCaller,
+		receptionistRecognition: receptionistRecognition,
+		callerRecognition:       callerRecognition,
 	}
 }
 
@@ -827,6 +835,8 @@ func applyVoiceTurnDeliveryMetrics(metrics *VoiceCallMetrics, delivery voiceTurn
 	metrics.CallerSourceTurns = delivery.callerSource
 	metrics.ReceptionistReceivedTurns = delivery.receptionistReceived
 	metrics.PendingCallerTurns = delivery.pendingCaller
+	metrics.ReceptionistRecognitionStatus = delivery.receptionistRecognition
+	metrics.CallerRecognitionStatus = delivery.callerRecognition
 	// Recognition counts are transcript evidence, not a frame-delivery measurement.
 	metrics.CallerResponseUndelivered = false
 }
@@ -1412,6 +1422,23 @@ func assessVoiceCall(call *VoiceCall) VoiceCallValidity {
 			"%d caller source transcript turn(s) have no matching target transcript; audio loss is not proven",
 			call.Metrics.PendingCallerTurns,
 		))
+	}
+	if call.Metrics.PendingReceptionistTurns > 0 {
+		reasons = append(reasons, fmt.Sprintf(
+			"%d receptionist source transcript turn(s) have no matching caller transcript; audio loss is not proven",
+			call.Metrics.PendingReceptionistTurns,
+		))
+	}
+	for _, recognition := range []struct {
+		speaker, status string
+		pending         int
+	}{
+		{"caller", call.Metrics.CallerRecognitionStatus, call.Metrics.PendingCallerTurns},
+		{"receptionist", call.Metrics.ReceptionistRecognitionStatus, call.Metrics.PendingReceptionistTurns},
+	} {
+		if recognition.pending == 0 && recognition.status != "" && recognition.status != "complete" {
+			reasons = append(reasons, recognition.speaker+" recognition evidence: "+recognition.status+"; audio loss is not proven")
+		}
 	}
 	if final := call.FinalExchange; final != nil {
 		if final.CallerClosedPrematurely {
