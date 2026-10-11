@@ -34,6 +34,7 @@ func completedVoiceEvidence() (*VoiceCall, *voiceMediaActivity, []sdk.RuntimeTel
 	caller := []sdk.RuntimeTelemetryEvent{
 		{ThreadID: "caller", Type: "realtime.assistant", Time: now.Add(-3 * time.Second), Data: json.RawMessage(`{"text":"Thanks, goodbye"}`)},
 		{ThreadID: "caller", Type: "tool.call", Time: now.Add(-2 * time.Second), Data: json.RawMessage(`{"name":"done"}`)},
+		{ThreadID: "caller", Type: "realtime.user", Time: now, Data: json.RawMessage(`{"text":"Your booking is confirmed. See you soon!","transcript":{"id":"received-1","status":"provider_final"}}`)},
 	}
 	return call, media, target, caller
 }

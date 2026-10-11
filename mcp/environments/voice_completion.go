@@ -258,7 +258,7 @@ func voiceTranscriptCompleteness(call *VoiceCall, targetEvents, callerEvents []s
 		}
 	}
 	delivery := voiceTurnDelivery(targetEvents, call.TargetThreadID, callerEvents, call.CallerThreadID)
-	if delivery.pendingCaller > 0 {
+	if delivery.callerRecognition != "complete" || delivery.receptionistRecognition != "complete" {
 		return "partial"
 	}
 	r, c, _ := voiceTurnCounts(transcript)
