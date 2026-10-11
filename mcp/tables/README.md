@@ -1,4 +1,4 @@
-# Tables (v0.2.16)
+# Tables (v0.2.17)
 
 Typed-row database for Apteva agents and human teams. The row-shaped
 sibling to the `storage` app.
@@ -19,11 +19,12 @@ projection versions, readiness, freshness watermarks, coverage, pending scopes,
 pause/resume state, and forced refreshes. It complements the projection MCP tools
 and keeps operational refresh work separate from ordinary row editing.
 
-- **28 MCP tools** — `tables_create`, `tables_list`, `tables_describe`,
+- **31 MCP tools** — `tables_create`, `tables_list`, `tables_describe`,
   `tables_alter`, `tables_drop`, `indexes_create`, `indexes_list`,
   `indexes_drop`, `rows_insert`, `rows_get`,
   `rows_upsert`, `rows_update`, `rows_delete`, `rows_search`,
-  `rows_count`, `rows_aggregate`, `tables_query`, `tables_batch`
+  `rows_count`, `rows_aggregate`, `tables_query`, `tables_batch`, `tables_capabilities`,
+  `diagnostics_list`, `diagnostics_get`, and `projections_worker_status`
 - **Persistent SQL projections** — `projections_create`, `projections_list`,
   `projections_describe`, `projections_refresh`, `projections_status`,
   `projections_pause`, `projections_activate`, `projections_update`, and `projections_delete`. Projection SQL is validated
@@ -41,6 +42,8 @@ and keeps operational refresh work separate from ordinary row editing.
 - **Read-only SQL escape hatch** — `tables_query` runs on a SQLite
   read pool, requires `{table_name}` placeholders for
   user tables, blocks internal tables, and enforces time/row/byte caps
+  with bounded compiled-statement reuse. Snapshot batches retain their existing
+  transaction; permission and schema checks still run for each request.
 - **Concurrent reads** — reads use a four-connection read-only pool while
   writes remain serialized; schema metadata is cached per project and table
 - **Projection query access** — projection result tables are addressed through

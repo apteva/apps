@@ -1,3 +1,11 @@
+# Tables v0.2.17 — compiled query reuse in snapshots
+
+- Reuse compiled `tables_query` statements through a separate 64-entry/1 MiB SQL-text LRU cache, with cancellable coalescing of concurrent misses, leased lifetimes, project/database-generation/SQL-epoch keys and existing schema/index/projection invalidation.
+- Prepare static batch SQL before reserving the snapshot connection, then bind database-level handles to the existing transaction. Reuse transaction bindings; dynamically referenced SQL uses a warm base plan or a transaction-local cold fallback, preserving one-connection operation without leaving the snapshot.
+- Keep authorization on every execution, add the SQLite schema version to successful program-verification keys, discard rejected plans, preserve read-only/result limits and check cancellation after compilation and binding. The pinned driver's compilation remains cooperative rather than forcibly interruptible.
+- Add migration 020 for precise statement preparation, binding, first-step execution and scanning timings plus cache status in diagnostics list/detail. Record batch preparation separately so prewarming time remains visible; legacy timing fields and retention remain intact.
+- Add native-driver compilation counters, parameter/batch/snapshot/permission/invalidation/concurrency/cancellation/eviction regressions, a mixed read/write workload, a 33-source compilation benchmark and a real MCP restart-migration rehearsal. Keep SDK v0.99.0 and SQLite v1.50.0.
+
 # Tables v0.2.16 — array positions in batch references
 
 - Extend `$ref` result paths with zero-based array positions, including `facts.rows.0.payload`, nested JSON arrays, typed query/search rows and inserted ID lists. Resolve directly without copying/serializing result collections or adding database calls.

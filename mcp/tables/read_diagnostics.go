@@ -39,6 +39,7 @@ type readObservation struct {
 	expiredDeadline                                  time.Time
 	executionBudget                                  time.Duration
 	partialRows                                      int
+	statementCache                                   string
 }
 
 func startReadObservation(ctx *sdk.AppCtx, args map[string]any, operation string) (map[string]any, *readObservation) {
@@ -156,7 +157,7 @@ func (d *readObservation) finish(result any, err error) {
 		overrun = max(time.Duration(0), time.Since(d.expiredDeadline))
 	}
 	fields := []any{"operation", d.operation, "call_id", d.callID, "request_id", d.requestID, "project_id", d.projectID, "query_id", d.queryID,
-		"sql_ms", durationMS(d.phases["count"] + d.phases["select"] + d.phases["scan"]), "execution_budget_ms", durationMS(d.executionBudget), "deadline_overrun_ms", durationMS(overrun), "outcome", outcome, "stage", stage, "deadline_source", d.deadlineSource, "total_ms", durationMS(elapsed),
+		"sql_ms", durationMS(d.phases["statement_prepare"] + d.phases["statement_bind"] + d.phases["count"] + d.phases["select"] + d.phases["scan"]), "statement_cache", d.statementCache, "execution_budget_ms", durationMS(d.executionBudget), "deadline_overrun_ms", durationMS(overrun), "outcome", outcome, "stage", stage, "deadline_source", d.deadlineSource, "total_ms", durationMS(elapsed),
 		"rows_returned", returnedRows, "rows_materialized", max(returnedRows, d.partialRows), "truncated", truncated,
 		"pool_max_open", end.MaxOpenConnections, "pool_in_use_start", d.poolStart.InUse, "pool_in_use_end", end.InUse, "pool_idle_end", end.Idle,
 		"pool_wait_count_total", end.WaitCount, "pool_wait_ms_total", durationMS(end.WaitDuration), "connection_acquired", d.acquired,
@@ -164,7 +165,7 @@ func (d *readObservation) finish(result any, err error) {
 	if d.acquired {
 		fields = append(fields, "pool_in_use_acquired", d.poolAcquired.InUse)
 	}
-	for _, phase := range []string{"prepare", "schema_queue", "metadata", "read_queue", "connection_setup", "authorization", "count", "select", "scan", "cleanup", "hydrate"} {
+	for _, phase := range []string{"prepare", "schema_queue", "metadata", "read_queue", "connection_setup", "authorization", "statement_prepare", "statement_bind", "count", "select", "scan", "cleanup", "hydrate"} {
 		fields = append(fields, phase+"_ms", durationMS(d.phases[phase]))
 	}
 	if sqliteErr != nil {
@@ -191,12 +192,13 @@ func recordReadDiagnostic(d *readObservation, err error, outcome, stage string, 
 	result, insertErr := d.app.AppDB().ExecContext(ctx, `INSERT INTO read_diagnostics(
 		project_id,recorded_at_ms,operation,call_id,request_id,query_id,outcome,stage,
 		deadline_source,total_ms,sql_ms,read_queue_ms,select_ms,scan_ms,rows_returned,
-		rows_materialized,truncated,error_type,sqlite_error_code
-	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		rows_materialized,truncated,error_type,sqlite_error_code,
+		statement_prepare_ms,statement_bind_ms,statement_execute_ms,statement_scan_ms,statement_cache
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		d.projectID, time.Now().UnixMilli(), d.operation, d.callID, requestID, d.queryID,
 		outcome, stage, d.deadlineSource,
 		time.Since(d.started).Milliseconds(),
-		(d.phases["count"] + d.phases["select"] + d.phases["scan"]).Milliseconds(),
+		(d.phases["statement_prepare"] + d.phases["statement_bind"] + d.phases["count"] + d.phases["select"] + d.phases["scan"]).Milliseconds(),
 		d.phases["read_queue"].Milliseconds(), d.phases["select"].Milliseconds(),
 		d.phases["scan"].Milliseconds(), rows, max(rows, d.partialRows), truncated,
 		func() string {
@@ -206,6 +208,8 @@ func recordReadDiagnostic(d *readObservation, err error, outcome, stage string, 
 			return fmt.Sprintf("%T", err)
 		}(),
 		sqliteCode,
+		durationMS(d.phases["statement_prepare"]), durationMS(d.phases["statement_bind"]),
+		durationMS(d.phases["select"]), durationMS(d.phases["scan"]), d.statementCache,
 	)
 	if insertErr == nil {
 		// Invalidate only after the record is readable, using the resolved project

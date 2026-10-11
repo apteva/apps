@@ -193,7 +193,25 @@ with tempfile.TemporaryDirectory(prefix="tables-smoke-") as temp:
         assert mcp("diagnostics_get", {"id":item["id"]})["diagnostic"]==item
         with sqlite3.connect(env["DB_PATH"]) as db:
             assert db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='read_diagnostics_project_request_time'").fetchone()[0]==1
-        print("PASS: real HTTP/MCP authentication, exact numbers, cursors, batch array references before/after restart, optimistic updates, automatic restart migration and watched projection recovery, filter-leading indexes, worker metrics, diagnostics cursor/detail/summary APIs and additive history migration")
+        # Rehearse 020 on retained diagnostics, then inspect statement reuse
+        # through the public history API after the real SDK restart upgrader.
+        stop()
+        with sqlite3.connect(env["DB_PATH"]) as db:
+            db.execute("DELETE FROM _migrations WHERE filename='020_query_statement_timings.sql'")
+            for column in ("statement_prepare_ms", "statement_bind_ms", "statement_execute_ms", "statement_scan_ms", "statement_cache"):
+                db.execute(f'ALTER TABLE read_diagnostics DROP COLUMN {column}')
+        env["APTEVA_APP_CONFIG"] = json.dumps({"log_all_reads":"true"})
+        start()
+        retained=request("GET", "/diagnostics?outcome=error&limit=10")
+        assert len(retained["diagnostics"])==3, retained
+        assert all(d["statement_prepare_ms"]==0 and d["statement_cache"]=="" for d in retained["diagnostics"])
+        for value in (1,2):
+            result=mcp("tables_query", {"sql":"SELECT ? + 0 AS statement_probe", "params":[value], "request_id":"statement-probe"})
+            assert result["rows"][0]["statement_probe"]==value, result
+        records=request("GET", "/diagnostics?request_id=statement-probe&limit=10")["diagnostics"]
+        assert len(records)==2 and records[0]["statement_cache"]=="hit" and records[1]["statement_cache"]=="miss", records
+        assert records[1]["statement_prepare_ms"]>0 and records[0]["statement_execute_ms"]>0, records
+        print("PASS: real HTTP/MCP authentication, exact numbers, cursors, batch array references before/after restart, optimistic updates, automatic restart migration and watched projection recovery, filter-leading indexes, worker metrics, diagnostics cursor/detail/summary APIs, additive history/statement timing migrations and compiled statement miss/hit phases")
     finally:
         stop()
         log.close()

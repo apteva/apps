@@ -237,8 +237,9 @@ type readQueryConn struct {
 type batchReadStateKey struct{}
 
 type batchReadState struct {
-	conn *sql.Conn
-	tx   *sql.Tx
+	conn       *sql.Conn
+	tx         *sql.Tx
+	statements map[string]snapshotSQLStatement
 }
 
 // metadataReaderFor returns the request's shared read transaction when a

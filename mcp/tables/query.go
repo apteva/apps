@@ -45,7 +45,7 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (resultValue
 	if err != nil {
 		return nil, err
 	}
-	resolved, err := a.substitutePlaceholders(ctx, pid, rawSQL)
+	resolved, err := a.substitutePreparedQuery(ctx, pid, rawSQL)
 	if err != nil {
 		return nil, err
 	}
@@ -68,23 +68,48 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (resultValue
 			projectionIDs = append(projectionIDs, table.ProjectionID)
 		}
 	}
+	planKey := a.sqlStatementKey(ctx, pid, resolved)
+	state, _ := requestContext(ctx).Value(batchReadStateKey{}).(*batchReadState)
+	var lease *sqlStatementLease
+	if state == nil {
+		lease = a.queryStatements.lookup(ctx.AppReadDB(), planKey)
+		if lease == nil {
+			// Check bounded pool admission before database-level preparation.
+			// Release the temporary reservation before PrepareContext (pool=1).
+			_, err := acquirePreparedReadConn(ctx, "<sql>")
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	qctx, cancel := queryTimeoutContext(ctx)
+	defer cancel()
+	if state == nil {
+		readPhase(ctx, "statement_prepare")
+		if lease == nil {
+			lease, err = a.queryStatements.prepare(qctx, ctx.AppReadDB(), planKey, resolved, time.Duration(maxReadQueueMs(ctx))*time.Millisecond)
+		}
+		if err != nil {
+			return nil, statementPrepareError(err)
+		}
+		defer lease.release()
+	}
 	read, err := acquireReadConn(ctx, "<sql>")
 	if err != nil {
 		return nil, err
 	}
 	conn := read.conn
 	defer read.close()
-	qctx, cancel := queryTimeoutContext(ctx)
-	defer cancel()
-	if len(projectionIDs) > 0 && read.tx == nil {
+	if read.tx == nil {
 		tx, err := conn.BeginTx(qctx, &sql.TxOptions{ReadOnly: true})
 		if err != nil {
 			return nil, err
 		}
 		read.tx = tx
-		defer tx.Rollback()
+		state = &batchReadState{conn: conn, tx: tx}
+		defer func() { state.closeStatements(); _ = tx.Rollback() }()
 		parent := requestContext(ctx)
-		activeContexts.Store(ctx, context.WithValue(parent, batchReadStateKey{}, &batchReadState{conn: conn, tx: tx}))
+		activeContexts.Store(ctx, context.WithValue(parent, batchReadStateKey{}, state))
 		defer activeContexts.Store(ctx, parent)
 	}
 	sharedWriterConnection := ctx.AppReadDB() == ctx.AppDB()
@@ -94,29 +119,82 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (resultValue
 		}
 	}
 	previousLengthLimit := -1
+	lengthLimit := a.queryLimit
+	if lengthLimit == nil {
+		lengthLimit = sqlite.Limit
+	}
 	defer func() {
 		readPhase(ctx, "cleanup")
 		resetCtx, resetCancel := context.WithTimeout(context.Background(), time.Second)
 		defer resetCancel()
 		if previousLengthLimit >= 0 {
-			_, _ = sqlite.Limit(conn, 0, previousLengthLimit)
+			_, _ = lengthLimit(conn, 0, previousLengthLimit)
 		}
 		if sharedWriterConnection {
 			_, _ = conn.ExecContext(resetCtx, "PRAGMA query_only = OFF")
 		}
 	}()
-	previousLengthLimit, err = sqlite.Limit(conn, 0, int(maxQueryBytes(ctx))) // SQLITE_LIMIT_LENGTH
+	previousLengthLimit, err = lengthLimit(conn, 0, int(maxQueryBytes(ctx))) // SQLITE_LIMIT_LENGTH
 	if err != nil {
 		return nil, errf("set sqlite result length limit: %v", err)
 	}
 
 	readPhase(ctx, "authorization")
 	if err := authorizeQuery(qctx, conn, ctx, a, pid, rawSQL, resolved, bound); err != nil {
+		if lease == nil {
+			rejected := a.queryStatements.lookup(ctx.AppReadDB(), planKey)
+			a.queryStatements.discard(rejected)
+			rejected.release()
+		}
+		a.queryStatements.discard(lease)
 		return nil, err
 	}
+	readPhase(ctx, "statement_bind")
+	prepared, ok := state.statements[planKey]
+	if !ok {
+		if lease == nil {
+			lease = a.queryStatements.lookup(ctx.AppReadDB(), planKey)
+		}
+		var stmt *sql.Stmt
+		if lease != nil {
+			stmt = read.tx.StmtContext(qctx, lease.entry.stmt)
+			observation.statementCache = map[bool]string{true: "hit", false: "miss"}[lease.hit]
+		} else {
+			readPhase(ctx, "statement_prepare")
+			stmt, err = read.tx.PrepareContext(qctx, resolved)
+			observation.statementCache = "transaction_local"
+			if err == nil {
+				err = qctx.Err()
+			}
+			if err != nil {
+				if stmt != nil {
+					_ = stmt.Close()
+				}
+				return nil, queryStageErr("statement_prepare", "<sql>", err)
+			}
+		}
+		prepared = snapshotSQLStatement{stmt: stmt}
+		// Batch bindings retain their base plan until the snapshot finishes.
+		if read.shared {
+			prepared.lease = lease
+		}
+		if state.statements == nil {
+			state.statements = map[string]snapshotSQLStatement{}
+		}
+		state.statements[planKey] = prepared
+	} else {
+		observation.statementCache = "snapshot_hit"
+	}
+	if err := qctx.Err(); err != nil {
+		if lease != nil {
+			a.queryStatements.discard(lease)
+		} else {
+			a.queryStatements.discard(prepared.lease)
+		}
+		return nil, queryStageErr("statement_bind", "<sql>", err)
+	}
 	readPhase(ctx, "select")
-	queryer := read.queryer()
-	rows, err := queryer.QueryContext(qctx, resolved, bound...)
+	rows, err := prepared.stmt.QueryContext(qctx, bound...)
 	if err != nil {
 		return nil, queryStageErr("select", "<sql>", err)
 	}
@@ -245,6 +323,24 @@ func (a *App) substitutePlaceholders(ctx *sdk.AppCtx, projectID, query string) (
 	if err != nil {
 		return "", err
 	}
+	return a.substituteSQLTokens(ctx, projectID, query, tokens)
+}
+func (a *App) substitutePreparedQuery(ctx *sdk.AppCtx, projectID, query string) (string, error) {
+	tokens, err := a.cachedProjectionSQL(ctx, query)
+	if err != nil {
+		return "", err
+	}
+	// A trailing terminator/comment makes the driver treat SQL as a script,
+	// forfeiting its compiled handle. Token offsets preserve quoted contents.
+	end := 0
+	for _, t := range tokens {
+		if t.kind != "symbol" || t.value != ";" {
+			end = t.end
+		}
+	}
+	return a.substituteSQLTokens(ctx, projectID, query[:end], tokens)
+}
+func (a *App) substituteSQLTokens(ctx *sdk.AppCtx, projectID, query string, tokens []sqlToken) (string, error) {
 	var out strings.Builder
 	last := 0
 	for _, token := range tokens {

@@ -192,3 +192,47 @@ cancellation of a full read pool, and subsequent connection reuse.
 The standalone cancellation reproducer intentionally exits nonzero when it
 observes delayed interruption. That known finding remains separate from the
 passing application diagnostics tests.
+# Tables 0.2.17 statement phases
+
+`tables_query` reuses compiled statements without caching row results. Every
+execution still checks current permissions and SQL program authorization.
+Schema/index/projection changes invalidate plans; database generation and
+project identity partition keys. SQLite schema versions also partition program
+verification so externally changed indexes cannot reuse an old verification.
+
+The separate statement cache retains at most 64 SQL shapes and 1 MiB of SQL text;
+compiled handles are prepared lazily per physical read connection. Active leases
+can outlive eviction until their operation/snapshot finishes. These bounds do
+not measure SQLite's compiled-program memory. Pool/concurrency settings remain
+unchanged. A cold compiler remains subject to the pinned driver's cooperative
+cancellation limitation: Tables checks cancellation after prepare/bind and
+never executes or caches a newly compiled statement after its deadline expires.
+
+Diagnostics list/detail adds floating-point millisecond fields:
+
+- `statement_prepare_ms`: cache lookup/base preparation, including pool admission
+  inside cold preparation; for `tables_batch`, all static SQL prewarming.
+- `statement_bind_ms`: binding to the existing transaction, including native
+  preparation when a physical connection has not used that SQL shape before.
+- `statement_execute_ms`: driver query setup and first SQLite step.
+- `statement_scan_ms`: subsequent iteration and result materialization.
+- `statement_cache`: `miss`, `hit`, `snapshot_hit`, or `transaction_local`.
+
+A base-cache hit does not promise zero compilation on a newly opened physical
+connection or after SQLite automatically recompiles a plan. Static SQL in a
+snapshot batch is prewarmed before reserving its connection; nested queries can
+therefore report a base hit while the enclosing batch records preparation time.
+SQL supplied by a result reference is unknown before the snapshot starts. On a
+cold miss it is prepared and reused within that transaction, avoiding another
+pool connection; subsequent snapshots use a shared base if it has been warmed.
+These timings are wall time, not CPU or disk I/O, and are not a claim of pure
+engine execution time. Legacy fields, pagination and default sampling are
+unchanged. Migration 020 preserves existing observations with zero/empty new
+fields until another invocation is recorded.
+
+Local benchmark (Apple M1 Pro, 100 iterations, synthetic 33-source CTE, not the
+Flexylead query): cold compiled-query calls averaged 0.724 ms versus 0.425 ms
+warm. Native-driver counters separately prove one preparation across repeated
+standalone calls and snapshot batches on one connection. The reported 550–650 ms
+Flexylead compilation and mixed/historical requests must still be measured in
+that application; year-wide aggregate execution needs its own optimization.

@@ -438,7 +438,18 @@ func TestProjectionJoinedAggregateInnerRestrictionAndDependencyBurst(t *testing.
 	mustCall(t, a, ctx, "rows_update", map[string]any{"table": "offers", "id": int64(2), "fields": map[string]any{"discount": 0.3}})
 	mustCall(t, a, ctx, "projections_refresh", map[string]any{"name": "joined_stats", "scope": map[string]any{"prospect_id": 1, "centre_id": "a"}, "force": true})
 	started := time.Now()
-	runProjectionWorker(t, a, ctx)
+	// A bounded worker tick can spend its budget on another affected scope.
+	// Assert publication readiness before comparing the requested aggregate.
+	scope := map[string]any{"prospect_id": 1, "centre_id": "a"}
+	for i := 0; i < 8; i++ {
+		runProjectionWorker(t, a, ctx)
+		if projectionStatusFor(t, a, ctx, map[string]any{"name": "joined_stats", "scope": scope})["ready"] == true {
+			break
+		}
+	}
+	if status := projectionStatusFor(t, a, ctx, map[string]any{"name": "joined_stats", "scope": scope}); status["ready"] != true {
+		t.Fatal("requested aggregate was not published", status)
+	}
 	t.Logf("indexed one-prospect refresh with 100k historical calls: %s", time.Since(started))
 	out := mustCall(t, a, ctx, "tables_query", map[string]any{"sql": "SELECT * FROM {joined_stats} WHERE prospect_id=1"})["rows"].([]map[string]any)
 	row := out[0]
@@ -453,7 +464,15 @@ func TestProjectionJoinedAggregateInnerRestrictionAndDependencyBurst(t *testing.
 	}
 	mustCall(t, a, ctx, "rows_delete", map[string]any{"table": "sales", "id": int64(1)})
 	mustCall(t, a, ctx, "projections_refresh", map[string]any{"name": "joined_stats", "scope": map[string]any{"prospect_id": 1, "centre_id": "a"}, "force": true})
-	runProjectionWorker(t, a, ctx)
+	for i := 0; i < 8; i++ {
+		runProjectionWorker(t, a, ctx)
+		if projectionStatusFor(t, a, ctx, map[string]any{"name": "joined_stats", "scope": scope})["ready"] == true {
+			break
+		}
+	}
+	if status := projectionStatusFor(t, a, ctx, map[string]any{"name": "joined_stats", "scope": scope}); status["ready"] != true {
+		t.Fatal("sale deletion was not published", status)
+	}
 	out = mustCall(t, a, ctx, "tables_query", map[string]any{"sql": "SELECT revenue FROM {joined_stats} WHERE prospect_id=1"})["rows"].([]map[string]any)
 	if out[0]["revenue"] != float64(0) {
 		t.Fatal("sale deletion did not invalidate dependent calls")

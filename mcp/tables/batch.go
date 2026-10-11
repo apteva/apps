@@ -53,7 +53,12 @@ type batchResult struct {
 	err    error
 }
 
-func (a *App) toolTablesBatch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolTablesBatch(ctx *sdk.AppCtx, args map[string]any) (resultValue any, resultErr error) {
+	var observation *readObservation
+	if strArg(args, "mode") == "read_snapshot" {
+		args, observation = startReadObservation(ctx, args, "tables_batch")
+		defer func() { observation.finish(resultValue, resultErr) }()
+	}
 	parent, ok := args["_request_context"].(context.Context)
 	if !ok || parent == nil {
 		parent = context.Background()
@@ -117,6 +122,12 @@ func (a *App) toolTablesBatch(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	var readState *batchReadState
 	if mode == "read_snapshot" {
+		// Warm known SQL before holding a snapshot connection. This also works
+		// with a one-connection pool and never executes SQL outside the snapshot.
+		observation.setPhase("statement_prepare")
+		releasePlans := a.warmBatchSQL(ctx, batchCtx, projectID, ops)
+		defer releasePlans()
+		observation.setPhase("read_queue")
 		conn, err := ctx.AppReadDB().Conn(batchCtx)
 		if err != nil {
 			return nil, queryStageErr("read_queue", "tables_batch", err)
@@ -129,9 +140,13 @@ func (a *App) toolTablesBatch(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		readState = &batchReadState{conn: conn, tx: tx}
 		batchCtx = context.WithValue(batchCtx, batchReadStateKey{}, readState)
 		defer func() {
+			readState.closeStatements()
 			_ = readState.tx.Rollback()
 			_ = readState.conn.Close()
 		}()
+	}
+	if observation != nil {
+		observation.setPhase("batch_execute")
 	}
 	results := make(map[string]batchResult, len(ops))
 	resultJSONBytes := int64(0)

@@ -141,7 +141,7 @@ func TestReadDiagnosticsCompletionAndRedaction(t *testing.T) {
 		wantErr    bool
 	}{
 		{"SELECT 'private-value' AS title", "", false},
-		{"SELECT missing_function('private-value')", "authorization", true},
+		{"SELECT missing_function('private-value')", "statement_prepare", true},
 		{"SELECT 'private-value' AS repeated, 1 AS repeated", "scan", true},
 	}
 	for i, tc := range cases {

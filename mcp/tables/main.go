@@ -47,15 +47,18 @@ type App struct {
 	tableLocks                 map[schemaCacheKey]*tableLockRef
 	cache                      schemaCache
 	plans                      queryPlanCache
-	projectionMu               sync.RWMutex
-	projectionCache            map[schemaCacheKey]*Table
-	projectionSQLMu            sync.RWMutex
-	projectionSQLCache         map[string]projectionSQLValidation
-	projectionSQLEpoch         uint64
-	projectionMetricsMu        sync.RWMutex
-	projectionMetrics          map[int64]projectionPhaseMetrics
-	authorizationMu            sync.RWMutex
-	authorizationCache         map[string]struct{}
+	queryStatements            sqlStatementCache
+	// Optional adapter for instrumented SQLite drivers; nil uses sqlite.Limit.
+	queryLimit          func(*sql.Conn, int, int) (int, error)
+	projectionMu        sync.RWMutex
+	projectionCache     map[schemaCacheKey]*Table
+	projectionSQLMu     sync.RWMutex
+	projectionSQLCache  map[string]projectionSQLValidation
+	projectionSQLEpoch  uint64
+	projectionMetricsMu sync.RWMutex
+	projectionMetrics   map[int64]projectionPhaseMetrics
+	authorizationMu     sync.RWMutex
+	authorizationCache  map[string]struct{}
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -104,7 +107,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error    { a.closeProjectionReader(); return a.plans.close() }
+func (a *App) OnUnmount(*sdk.AppCtx) error {
+	a.closeProjectionReader()
+	a.queryStatements.invalidateAll()
+	return a.plans.close()
+}
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{
@@ -411,7 +418,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	tools = append(tools, a.diagnosticTools()...)
 	for i := range tools {
 		switch tools[i].Name {
-		case "tables_query", "rows_get", "rows_search", "rows_count", "rows_aggregate", "tables_list", "tables_describe", "indexes_list":
+		case "tables_query", "tables_batch", "rows_get", "rows_search", "rows_count", "rows_aggregate", "tables_list", "tables_describe", "indexes_list":
 			tools[i].InputSchema["properties"].(map[string]any)["request_id"] = map[string]any{"type": "string", "maxLength": 128, "description": "Optional originating request ID for diagnostics; pass the Function request ID to correlate read logs."}
 		}
 		handler := tools[i].Handler

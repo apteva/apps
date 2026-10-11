@@ -14,25 +14,30 @@ import (
 )
 
 type readDiagnostic struct {
-	ID               int64  `json:"id"`
-	RecordedAt       string `json:"recorded_at"`
-	Operation        string `json:"operation"`
-	CallID           string `json:"call_id"`
-	RequestID        string `json:"request_id,omitempty"`
-	QueryID          string `json:"query_id"`
-	Outcome          string `json:"outcome"`
-	Stage            string `json:"stage,omitempty"`
-	DeadlineSource   string `json:"deadline_source,omitempty"`
-	TotalMS          int64  `json:"total_ms"`
-	SQLMS            int64  `json:"sql_ms"`
-	ReadQueueMS      int64  `json:"read_queue_ms"`
-	SelectMS         int64  `json:"select_ms"`
-	ScanMS           int64  `json:"scan_ms"`
-	RowsReturned     int64  `json:"rows_returned"`
-	RowsMaterialized int64  `json:"rows_materialized"`
-	Truncated        bool   `json:"truncated"`
-	ErrorType        string `json:"error_type,omitempty"`
-	SQLiteErrorCode  *int64 `json:"sqlite_error_code,omitempty"`
+	ID                 int64   `json:"id"`
+	RecordedAt         string  `json:"recorded_at"`
+	Operation          string  `json:"operation"`
+	CallID             string  `json:"call_id"`
+	RequestID          string  `json:"request_id,omitempty"`
+	QueryID            string  `json:"query_id"`
+	Outcome            string  `json:"outcome"`
+	Stage              string  `json:"stage,omitempty"`
+	DeadlineSource     string  `json:"deadline_source,omitempty"`
+	TotalMS            int64   `json:"total_ms"`
+	SQLMS              int64   `json:"sql_ms"`
+	ReadQueueMS        int64   `json:"read_queue_ms"`
+	SelectMS           int64   `json:"select_ms"`
+	ScanMS             int64   `json:"scan_ms"`
+	StatementPrepareMS float64 `json:"statement_prepare_ms"`
+	StatementBindMS    float64 `json:"statement_bind_ms"`
+	StatementExecuteMS float64 `json:"statement_execute_ms"`
+	StatementScanMS    float64 `json:"statement_scan_ms"`
+	StatementCache     string  `json:"statement_cache"`
+	RowsReturned       int64   `json:"rows_returned"`
+	RowsMaterialized   int64   `json:"rows_materialized"`
+	Truncated          bool    `json:"truncated"`
+	ErrorType          string  `json:"error_type,omitempty"`
+	SQLiteErrorCode    *int64  `json:"sqlite_error_code,omitempty"`
 }
 
 // History pages are live views of retained observations, not database snapshots.
@@ -185,7 +190,7 @@ func (q diagnosticHistoryQuery) pageSQL() (string, []any) {
 		where += " AND (recorded_at_ms,id)<(?,?)"
 		params = append(params, q.Boundary.Recorded, q.Boundary.ID)
 	}
-	query := `SELECT id,recorded_at_ms,operation,call_id,request_id,query_id,outcome,stage,deadline_source,total_ms,sql_ms,read_queue_ms,select_ms,scan_ms,rows_returned,rows_materialized,truncated,error_type,sqlite_error_code FROM read_diagnostics` + where + ` ORDER BY recorded_at_ms DESC,id DESC LIMIT ?`
+	query := `SELECT id,recorded_at_ms,operation,call_id,request_id,query_id,outcome,stage,deadline_source,total_ms,sql_ms,read_queue_ms,select_ms,scan_ms,rows_returned,rows_materialized,truncated,error_type,sqlite_error_code,statement_prepare_ms,statement_bind_ms,statement_execute_ms,statement_scan_ms,statement_cache FROM read_diagnostics` + where + ` ORDER BY recorded_at_ms DESC,id DESC LIMIT ?`
 	params = append(params, q.Limit+1)
 	if q.Offset > 0 {
 		query += " OFFSET ?"
@@ -248,7 +253,7 @@ func (a *App) readDiagnosticHistory(app *sdk.AppCtx, pid string, q diagnosticHis
 		var recorded int64
 		var truncated int
 		var code sql.NullInt64
-		if err := rows.Scan(&item.ID, &recorded, &item.Operation, &item.CallID, &item.RequestID, &item.QueryID, &item.Outcome, &item.Stage, &item.DeadlineSource, &item.TotalMS, &item.SQLMS, &item.ReadQueueMS, &item.SelectMS, &item.ScanMS, &item.RowsReturned, &item.RowsMaterialized, &truncated, &item.ErrorType, &code); err != nil {
+		if err := rows.Scan(&item.ID, &recorded, &item.Operation, &item.CallID, &item.RequestID, &item.QueryID, &item.Outcome, &item.Stage, &item.DeadlineSource, &item.TotalMS, &item.SQLMS, &item.ReadQueueMS, &item.SelectMS, &item.ScanMS, &item.RowsReturned, &item.RowsMaterialized, &truncated, &item.ErrorType, &code, &item.StatementPrepareMS, &item.StatementBindMS, &item.StatementExecuteMS, &item.StatementScanMS, &item.StatementCache); err != nil {
 			return nil, err
 		}
 		item.RecordedAt = projectionTimestamp(recorded)

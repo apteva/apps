@@ -60,6 +60,7 @@ func (a *App) invalidateProjectionSQL() {
 
 func (a *App) invalidateSQLCaches() {
 	a.invalidateProjectionSQL()
+	a.queryStatements.invalidateAll()
 	a.authorizationMu.Lock()
 	a.authorizationCache = nil
 	a.authorizationMu.Unlock()

@@ -133,7 +133,11 @@ func placeholderNames(s string) ([]string, error) {
 func authorizeQuery(qctx context.Context, conn *sql.Conn, ctx *sdk.AppCtx, a *App, pid, raw, resolved string, args []any) error {
 	// Keep verification tied to the generation/epoch observed before compilation.
 	// Invalidation during verification must not populate the newer epoch.
-	key := a.authorizationKey(ctx, resolved)
+	var schemaVersion int64
+	if err := conn.QueryRowContext(qctx, "PRAGMA schema_version").Scan(&schemaVersion); err != nil {
+		return err
+	}
+	key := fmt.Sprintf("%s:schema:%d", a.authorizationKey(ctx, resolved), schemaVersion)
 	tokens, err := a.cachedProjectionSQL(ctx, raw)
 	if err != nil {
 		return err
