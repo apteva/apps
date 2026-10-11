@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.2.28
+version: 0.2.29
 description: |
   Reusable browser actors with named operations, crawl queues, URL fan-out,
   revisioned definitions, structured datasets, durable run history, Jobs schedules,
@@ -35,7 +35,7 @@ provides:
     - name: actors_save
       description: Create or update a reusable actor definition and immutable revision.
     - name: actors_get
-      description: Get an actor by ID or name.
+      description: Get an actor by ID or name, optionally at an exact immutable revision.
     - name: actors_list
       description: List actor definitions in the current project.
     - name: actors_delete
@@ -48,6 +48,8 @@ provides:
       description: Cancel queued work or request cancellation of an active run.
     - name: actors_run_retry
       description: Explicitly repeat a run using its original definition and input snapshot.
+    - name: actors_run_recover
+      description: Recover a provably uncommitted failed run with a reviewed revision and fresh complete duplicate inspection, preserving publish-once guards.
     - name: actors_schedule
       description: Create a Jobs-owned schedule pinned to an actor revision and operation.
     - name: actors_schedules
@@ -93,7 +95,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.2.28
+    ref: actors/v0.2.29
     entry: mcp/actors
   port: 8080
   health_check: /health

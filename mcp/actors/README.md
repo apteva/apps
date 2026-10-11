@@ -58,10 +58,12 @@ Routes are relative to the server's authenticated app mount, normally `/api/apps
 | Method | Path | Behavior |
 |---|---|---|
 | GET / POST | `/actors` | List / save definitions |
+| GET | `/actors/{id}?revision=N` | Retrieve an exact immutable definition and operation names |
 | DELETE | `/actors/{id}` | Delete an actor after removing tasks and schedules |
 | POST | `/actors/run` | Queue a run; same input as `actors_run` |
 | GET | `/runs`, `/runs/{id}` | History and run detail |
 | POST | `/runs/{id}/cancel`, `/runs/{id}/retry` | Cancel / explicitly repeat the snapshot |
+| POST | `/runs/{id}/recover` | Recover with a reviewed revision and fresh duplicate inspection |
 | GET | `/runs/{id}/dataset?after=0&limit=50` | Committed items |
 | GET / POST | `/tasks` | List / save tasks |
 | POST | `/tasks/{id}/run` | Execute a pinned task |
@@ -94,7 +96,7 @@ bun run scripts/build-panels.ts --app actors
 bun test mcp/actors/ui/ActorsPanel.test.ts
 ```
 
-The app-sdk pin is `v0.97.0`, derived from fetched tag ancestry (including v0.96.0 and v0.82.0). `GOWORK=off` verifies the app against its published dependency rather than the workspace overlay.
+The app-sdk pin is `v0.99.0`, derived from fetched tag ancestry (`v0.98.0` is its ancestor). `GOWORK=off` verifies the app against its published dependency rather than the workspace overlay.
 
 The release manifest pins source to the matching immutable Actors tag. The registry references the same tag for the manifest and icon. Publishing a release makes Actors available for installation; it does not install the app into existing projects.
 
@@ -196,3 +198,13 @@ hosts are definition policy, never built into the engine. See the optional
 Read collection pagination supports `advance_timeout_ms` (500–60000; default 10000) to wait for a verified AJAX response without another click. `reveal_from:"start"|"end"` chooses the document boundary used to reveal controls through verified scroll regions and overlapping viewports. `on_stall:"partial"` requires `allow_partial:true` and a read-only operation; only an unchanged, identity-verified collection after the wait may return partial success. It retains incomplete coverage and a stall reason; unsafe targets, inaccessible views, changed records and truncation remain errors. Page/item bounds preserve the verified dataset prefix.
 
 Fields may set `own_text:true` to extract only a node’s direct text, excluding nested badges or controls. It also works with `all` and `many`; attributes and `preserve_line_breaks` cannot be combined with it. The generic `type` action sends 1–256 bytes as literal keyboard input when a control requires native typing events. Prefer `set_text` for full fields, verify focus and field contents, and keep literal typing out of read-only operations.
+
+## Historical reads and repaired recovery
+
+`actors_get` accepts `revision` with either `id` or `name`. It returns the immutable definition at that exact revision, `retrieved_revision`, the current `latest_revision`, and sorted operation names. Unknown revisions fail instead of substituting the latest definition. HTTP: `GET /actors/{id}?revision=N`.
+
+Ordinary `actors_run_retry` retains the original definition and inputs. `actors_run_recover` (HTTP `POST /runs/{id}/recover`) accepts `revision`, `reviewed:true`, and `duplicate_check_run_id` to use an explicitly reviewed repair. A publishing operation opts in with generic `recovery: {inspection_operation, required_views, match_fields}`; match_fields maps dataset fields to original input variable names. The engine contains no provider-specific post, audience or duplicate rules.
+
+Recovery accepts only a failed run with durable no-commit execution evidence, or a complete legacy read-only trace prefix ending in a pre-dispatch locator failure. Successful, cancelled, active, uncertain and incomplete outcomes fail closed. The original operation, inputs, preset, context and consequential once keys are retained; a new linked run records the original execution key. Reserved, uncertain or completed consequence guards are never cleared. The supplied read must use the reviewed immutable revision, match the original creator/context, finish within the previous 15 minutes and prove complete coverage of every required view. Read all dataset records to check configured exact duplicate fields. The worker repeats the inspection as a separate immutable child run before the repaired attempt, blocking if a duplicate appeared or coverage became unavailable.
+
+The editable [Patreon publishing example](examples/patreon-publishing.md) includes guarded native composer navigation and format-specific preflights that reload and verify drafts before Publish. Preflights autosave drafts; use your test account for content checks.

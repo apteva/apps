@@ -28,10 +28,11 @@ func (e *actorExecution) lockContext() error {
 }
 
 type actorOperation struct {
-	Limits       *actorLimits      `json:"limits,omitempty"`
-	ReadOnly     bool              `json:"read_only,omitempty"`
-	Steps        []actorStep       `json:"steps"`
-	OutputSchema map[string]string `json:"output_schema"`
+	Recovery     *actorRecoveryPolicy `json:"recovery,omitempty"`
+	Limits       *actorLimits         `json:"limits,omitempty"`
+	ReadOnly     bool                 `json:"read_only,omitempty"`
+	Steps        []actorStep          `json:"steps"`
+	OutputSchema map[string]string    `json:"output_schema"`
 }
 
 func selectOperation(def actorDefinition, name string) (actorDefinition, error) {
@@ -50,6 +51,7 @@ func selectOperation(def actorDefinition, name string) (actorDefinition, error) 
 	if op.Limits != nil {
 		def.Limits = *op.Limits
 	}
+	def.Recovery = op.Recovery
 	def.Steps = op.Steps
 	def.OutputSchema = op.OutputSchema
 	return def, nil

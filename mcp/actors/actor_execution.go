@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -27,35 +28,39 @@ import (
 var actorNumberPattern = regexp.MustCompile(`[-+]?\d[\d\s.,]*`)
 
 type actorExecution struct {
-	coverage       *actorReadCoverage
-	app            *App
-	ctx            *sdk.AppCtx
-	run            *actorQueuedRun
-	definition     actorDefinition
-	variables      map[string]any
-	deadline       time.Time
-	maxPages       int
-	maxItems       int
-	retries        int
-	session        *browserSession
-	items          []map[string]any
-	pageCount      int
-	trace          []map[string]any
-	media          []map[string]any
-	effects        []map[string]any
-	lastExtract    *actorStep
-	lastValues     map[string]any
-	currentURL     string
-	startedAt      time.Time
-	workerCtx      context.Context
-	screenshot     *artifactSummary
-	datasetJSONL   *artifactSummary
-	datasetCSV     *artifactSummary
-	traceArtifact  *artifactSummary
-	datasetBytes   int
-	datasetFull    bool
-	selectedPreset string
-	crawl          *crawlDefinition
+	lastStartedStep int
+	completedSteps  int
+	commitAttempted bool
+	recoveryCheck   map[string]any
+	coverage        *actorReadCoverage
+	app             *App
+	ctx             *sdk.AppCtx
+	run             *actorQueuedRun
+	definition      actorDefinition
+	variables       map[string]any
+	deadline        time.Time
+	maxPages        int
+	maxItems        int
+	retries         int
+	session         *browserSession
+	items           []map[string]any
+	pageCount       int
+	trace           []map[string]any
+	media           []map[string]any
+	effects         []map[string]any
+	lastExtract     *actorStep
+	lastValues      map[string]any
+	currentURL      string
+	startedAt       time.Time
+	workerCtx       context.Context
+	screenshot      *artifactSummary
+	datasetJSONL    *artifactSummary
+	datasetCSV      *artifactSummary
+	traceArtifact   *artifactSummary
+	datasetBytes    int
+	datasetFull     bool
+	selectedPreset  string
+	crawl           *crawlDefinition
 }
 
 func (a *App) toolActorRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -70,15 +75,8 @@ func (a *App) toolActorRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if !rec.Enabled {
 		return nil, errors.New("actor is disabled")
 	}
-	if revision := intArg(args, "revision"); revision > 0 && revision != rec.Revision {
-		var definition string
-		if err := ctx.AppDB().QueryRow(`SELECT definition_json FROM actors_versions WHERE project_id=? AND actor_id=? AND revision=?`, projectID(ctx), rec.ID, revision).Scan(&definition); err != nil {
-			return nil, fmt.Errorf("actor revision not found: %w", err)
-		}
-		if err := json.Unmarshal([]byte(definition), &rec.Definition); err != nil {
-			return nil, err
-		}
-		rec.Revision = revision
+	if err := loadActorRevision(ctx, rec, intArg(args, "revision")); err != nil {
+		return nil, err
 	}
 	operation := firstNonEmpty(stringArg(args, "operation"), "run")
 	selected, err := selectOperation(rec.Definition, operation)
@@ -377,7 +375,11 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 		}
 		_, _ = ctx.AppDB().Exec(`DELETE FROM actors_context_locks WHERE project_id=? AND run_id=?`, projectID(ctx), queued.ID)
 	}()
-	out, runErr := exec.runSteps()
+	var out map[string]any
+	runErr := exec.recoveryPrecheck()
+	if runErr == nil {
+		out, runErr = exec.runSteps()
+	}
 	var requested sql.NullTime
 	if err := ctx.AppDB().QueryRow(`SELECT cancel_requested_at FROM actors_runs WHERE id=? AND project_id=?`, queued.ID, projectID(ctx)).Scan(&requested); err == nil && requested.Valid {
 		runErr = errActorCancelled
@@ -414,6 +416,10 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 	out["page_count"] = exec.pageCount
 	out["items"] = previewActorItems(exec.items)
 	out["trace_preview"] = previewActorTrace(exec.trace)
+	out["execution_progress"] = map[string]any{"last_started_step": exec.lastStartedStep, "completed_steps": exec.completedSteps, "commit_attempted": exec.commitAttempted}
+	if exec.recoveryCheck != nil {
+		out["recovery_precheck"] = exec.recoveryCheck
+	}
 	out["current_url"] = exec.currentURL
 	if exec.coverage != nil {
 		out["coverage"] = exec.coverage
@@ -516,7 +522,7 @@ func newActorExecution(workerCtx context.Context, app *App, ctx *sdk.AppCtx, run
 		retries = clampInt(templateInt(rendered.Limits.StepRetries), 0, 10)
 	}
 	now := time.Now().UTC()
-	return &actorExecution{app: app, ctx: ctx, run: run, definition: rendered, deadline: now.Add(time.Duration(maxSeconds) * time.Second), maxPages: maxPages, maxItems: maxItems, retries: retries, startedAt: now, workerCtx: workerCtx, items: []map[string]any{}, trace: []map[string]any{}, lastValues: map[string]any{}, selectedPreset: runInput.Preset, crawl: rendered.Crawl}, nil
+	return &actorExecution{app: app, ctx: ctx, run: run, definition: rendered, variables: vars, deadline: now.Add(time.Duration(maxSeconds) * time.Second), maxPages: maxPages, maxItems: maxItems, retries: retries, startedAt: now, lastStartedStep: -1, workerCtx: workerCtx, items: []map[string]any{}, trace: []map[string]any{}, lastValues: map[string]any{}, selectedPreset: runInput.Preset, crawl: rendered.Crawl}, nil
 }
 
 func actorBrowserAudit(browser actorBrowser) map[string]any {
@@ -542,6 +548,15 @@ func (e *actorExecution) runSteps() (map[string]any, error) {
 			return nil, err
 		}
 		step := e.definition.Steps[index]
+		e.lastStartedStep = index
+		if step.OnceKey != "" || step.ConfirmConsequence != "" || consequentialActorStep(step) {
+			e.commitAttempted = true
+		}
+		// Persist before dispatch so a worker crash cannot leave stale evidence
+		// claiming that the next consequential control was never reached.
+		if err := e.persistProgress(fmt.Sprintf("starting step %d/%d: %s", index+1, len(e.definition.Steps), step.Action)); err != nil {
+			return nil, err
+		}
 		started := time.Now()
 		var err error
 		for attempt := 0; attempt <= e.retries; attempt++ {
@@ -562,6 +577,7 @@ func (e *actorExecution) runSteps() (map[string]any, error) {
 			return nil, err
 		}
 		e.addTrace(step.Action, "completed", "", map[string]any{"step": index, "duration_ms": time.Since(started).Milliseconds(), "item_count": len(e.items), "page_count": e.pageCount})
+		e.completedSteps = index + 1
 		e.persistProgress(fmt.Sprintf("step %d/%d: %s", index+1, len(e.definition.Steps), step.Action))
 		e.ctx.Emit("actor.run.progress", map[string]any{"run_id": e.run.ID, "step": index + 1, "step_count": len(e.definition.Steps), "action": step.Action, "item_count": len(e.items), "page_count": e.pageCount})
 	}
@@ -703,7 +719,7 @@ func (e *actorExecution) assertValues(step actorStep) error {
 		if !ok {
 			return fmt.Errorf("assertion field %q was not extracted", field)
 		}
-		if assertion.EqualsExact != nil && stringFromAny(actual) != stringFromAny(assertion.EqualsExact) {
+		if assertion.EqualsExact != nil && !reflect.DeepEqual(actual, assertion.EqualsExact) {
 			return fmt.Errorf("exact assertion failed for %q", field)
 		}
 		if assertion.GreaterThan != nil {
@@ -1250,17 +1266,26 @@ func (e *actorExecution) addTrace(action, status, message string, data map[strin
 	e.trace = append(e.trace, event)
 }
 
-func (e *actorExecution) persistProgress(message string) {
+func (e *actorExecution) persistProgress(message string) error {
 	progress := map[string]any{
 		"item_count": len(e.items), "page_count": e.pageCount, "current_url": e.currentURL,
 		"message": message, "updated_at": time.Now().UTC().Format(time.RFC3339),
+		"execution_progress": map[string]any{"last_started_step": e.lastStartedStep, "completed_steps": e.completedSteps, "commit_attempted": e.commitAttempted},
 	}
 	if e.session != nil {
 		progress["session_id"] = e.session.SessionID
 		progress["backend"] = e.session.Backend
 	}
 	b, _ := json.Marshal(progress)
-	_, _ = e.ctx.AppDB().Exec(`UPDATE actors_runs SET output_json=?,summary=? WHERE id=? AND project_id=? AND status='running'`, string(b), nullIfEmpty(message), e.run.ID, projectID(e.ctx))
+	result, err := e.ctx.AppDB().Exec(`UPDATE actors_runs SET output_json=?,summary=? WHERE id=? AND project_id=? AND status='running'`, string(b), nullIfEmpty(message), e.run.ID, projectID(e.ctx))
+	if err != nil {
+		return fmt.Errorf("persist execution progress before dispatch: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil || n != 1 {
+		return errors.New("execution progress was not persisted for the running request")
+	}
+	return nil
 }
 
 func (e *actorExecution) storeCurrentScreenshot(title string) (*artifactSummary, error) {

@@ -39,6 +39,7 @@ const (
 
 type actorDefinition struct {
 	ReadOnly      bool                      `json:"read_only,omitempty"`
+	Recovery      *actorRecoveryPolicy      `json:"recovery,omitempty"`
 	Operations    map[string]actorOperation `json:"operations,omitempty"`
 	SchemaVersion int                       `json:"schema_version"`
 	Crawl         *crawlDefinition          `json:"crawl,omitempty"`
@@ -201,8 +202,8 @@ func (a *App) actorTools() []sdk.Tool {
 			}, []string{"name", "definition"}), Handler: a.toolActorSave,
 		},
 		{
-			Name: "actors_get", Description: "Get one actor by id or name.",
-			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}}, nil), Handler: a.toolActorGet,
+			Name: "actors_get", Description: "Get an actor by id or name, optionally at an exact immutable revision. Returns the actual retrieved revision and operation names.",
+			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "revision": map[string]any{"type": "integer", "minimum": 1}}, nil), Handler: a.toolActorGet,
 		},
 		{
 			Name: "actors_list", Description: "List actor definitions for the current project.",
@@ -234,6 +235,10 @@ func (a *App) actorTools() []sdk.Tool {
 		{
 			Name: "actors_run_retry", Description: "Queue a retry using the original run's immutable definition snapshot and input.",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolActorRunRetry,
+		},
+		{
+			Name: "actors_run_recover", Description: "Recover a provably uncommitted failed run with an explicitly reviewed replacement revision. Preserves original inputs and once keys; requires fresh complete read-only duplicate inspection and repeats it before execution. Unknown/successful outcomes block.",
+			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "revision": map[string]any{"type": "integer", "minimum": 1}, "reviewed": map[string]any{"type": "boolean"}, "duplicate_check_run_id": map[string]any{"type": "integer"}}, []string{"id", "revision", "reviewed", "duplicate_check_run_id"}), Handler: a.toolActorRunRecover,
 		},
 		{
 			Name: "actors_schedule", Description: "Create a Jobs-owned schedule that queues this actor. Supports once, every, cron, deterministic random daily schedules, and deterministic rotation across a preset_pool.",
@@ -277,6 +282,11 @@ func decodeActorDefinition(raw any) (actorDefinition, string, error) {
 }
 
 func validateActorDefinition(def actorDefinition) error {
+	if def.Recovery != nil {
+		if err := recoveryPolicyValid(def.Recovery); err != nil {
+			return err
+		}
+	}
 	if def.SchemaVersion == 2 {
 		if len(def.Operations) > 0 || len(def.Steps) > 0 {
 			return errors.New("schema version 2 uses crawl and does not support steps or operations")
@@ -317,6 +327,7 @@ func validateActorDefinition(def actorDefinition) error {
 			if operation.Limits != nil {
 				selected.Limits = *operation.Limits
 			}
+			selected.Recovery = operation.Recovery
 			selected.Steps = operation.Steps
 			selected.OutputSchema = operation.OutputSchema
 			if err := validateActorDefinition(selected); err != nil {
@@ -731,7 +742,45 @@ func (a *App) toolActorGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"actor": rec, "found": rec != nil}, nil
+	if rec == nil {
+		return map[string]any{"actor": nil, "found": false}, nil
+	}
+	latest := rec.Revision
+	if _, supplied := args["revision"]; supplied && intArg(args, "revision") <= 0 {
+		return nil, errors.New("revision must be positive")
+	}
+	if err := loadActorRevision(ctx, rec, intArg(args, "revision")); err != nil {
+		return nil, err
+	}
+	operations := make([]string, 0, len(rec.Definition.Operations))
+	for name := range rec.Definition.Operations {
+		operations = append(operations, name)
+	}
+	if len(operations) == 0 {
+		operations = append(operations, "run")
+	}
+	sort.Strings(operations)
+	return map[string]any{"actor": rec, "found": true, "retrieved_revision": rec.Revision, "latest_revision": latest, "operations": operations}, nil
+}
+
+func loadActorRevision(ctx *sdk.AppCtx, rec *actorRecord, revision int) error {
+	if revision <= 0 || revision == rec.Revision {
+		return nil
+	}
+	var raw string
+	if err := ctx.AppDB().QueryRow(`SELECT definition_json FROM actors_versions WHERE project_id=? AND actor_id=? AND revision=?`, projectID(ctx), rec.ID, revision).Scan(&raw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return errors.New("actor revision not found")
+		}
+		return err
+	}
+	var historical actorDefinition
+	if err := json.Unmarshal([]byte(raw), &historical); err != nil {
+		return err
+	}
+	rec.Definition = historical
+	rec.Revision = revision
+	return nil
 }
 
 func (a *App) toolActorList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -963,7 +1012,7 @@ func actorHTTPID(r *http.Request) int64 {
 	if raw == "" {
 		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 		for i := len(parts) - 1; i >= 0; i-- {
-			if parts[i] == "cancel" || parts[i] == "retry" {
+			if parts[i] == "cancel" || parts[i] == "retry" || parts[i] == "recover" {
 				continue
 			}
 			if id, err := strconv.ParseInt(parts[i], 10, 64); err == nil {
@@ -1130,15 +1179,8 @@ func (a *App) toolActorSchedule(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if !rec.Enabled {
 		return nil, errors.New("actor is disabled")
 	}
-	if revision := intArg(args, "revision"); revision > 0 && revision != rec.Revision {
-		var raw string
-		if err := ctx.AppDB().QueryRow(`SELECT definition_json FROM actors_versions WHERE project_id=? AND actor_id=? AND revision=?`, projectID(ctx), rec.ID, revision).Scan(&raw); err != nil {
-			return nil, errors.New("actor revision not found")
-		}
-		if err := json.Unmarshal([]byte(raw), &rec.Definition); err != nil {
-			return nil, err
-		}
-		rec.Revision = revision
+	if err := loadActorRevision(ctx, rec, intArg(args, "revision")); err != nil {
+		return nil, err
 	}
 	if _, err := selectOperation(rec.Definition, firstNonEmpty(stringArg(args, "operation"), "run")); err != nil {
 		return nil, err
@@ -1334,4 +1376,38 @@ func claimActorRun(ctx *sdk.AppCtx) (*actorQueuedRun, error) {
 	}
 	ctx.EmitWithProject("actor.run.started", run.ProjectID, map[string]any{"run_id": run.ID, "actor_id": run.ActorID})
 	return &run, nil
+}
+
+func (a *App) handleActorGet(w http.ResponseWriter, r *http.Request) {
+	ctx, err := actorHTTPContext(r)
+	if err != nil {
+		httpErr(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	args := map[string]any{"id": actorHTTPID(r)}
+	if raw := r.URL.Query().Get("revision"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			httpErr(w, http.StatusBadRequest, "revision must be positive")
+			return
+		}
+		args["revision"] = n
+	}
+	out, err := a.toolActorGet(ctx, args)
+	writeJSON(w, out, err)
+}
+
+func (a *App) handleRunRecover(w http.ResponseWriter, r *http.Request) {
+	ctx, err := actorHTTPContext(r)
+	if err != nil {
+		httpErr(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	args, ok := decodeActorHTTPArgs(w, r)
+	if !ok {
+		return
+	}
+	args["id"] = actorHTTPID(r)
+	out, err := a.toolActorRunRecover(ctx, args)
+	writeJSON(w, out, err)
 }
