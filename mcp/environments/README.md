@@ -60,6 +60,31 @@ Carrier callback events without a `.failed` suffix represent successful HTTP
 acceptance. Rejected or undelivered callbacks include status/error details in a
 `.failed` event and fail the simulated call.
 
+Voice completion is a request to finish both sides: the last caller audio must
+be forwarded, the receptionist must complete its reply, and paced playback must
+be acknowledged before the simulation is complete. `final_reply_contains` can
+optionally require case-insensitive phrases in that final reply. There is no
+fixed goodbye phrase. A caller disconnect stops additional caller speech while
+the target/carrier leg keeps capturing its final reply for up to ten seconds.
+An unheard final reply is reported as `caller_closed_prematurely`, with separate
+reply completion and playback evidence.
+
+Results include `final_exchange` with generated, forwarded, and acknowledged
+audio byte counts, response completion, transcript completeness, and the closing
+reason. Transcript turns carry `final` or `partial` status; delayed revisions
+replace the same transcript ID rather than adding a second turn. Source/target
+transcript count differences do not prove audio loss. The legacy
+`caller_response_generated_not_delivered` flag now requires measured unforwarded
+caller audio, rather than a speech-recognition count mismatch.
+
+After closing, telemetry is polled for persisted thread finalization, with a
+separate ten-second deadline and an explicit `finalization_timeout` if the
+evidence never arrives. Newer Core provides per-item utterance completion and
+transcript metadata. Older Core uses provider-final transcript events, listening
+state, playback receipts, and persisted `thread.done` events. A partial simulation
+does not erase successful booking or ownership evidence in tool results; these
+outcomes should be evaluated separately from simulation completeness.
+
 ## Performance and retention
 
 The catalog is cached for one minute per install; concurrent refreshes are
