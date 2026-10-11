@@ -79,6 +79,16 @@ func addCarrierAudioSummary(s *audioDashboardSummary, r *carrierTelemetryRecord)
 		m["sip_jitter_oldest_age_ms"] = v.Jitter.OldestAgeMS
 		m["sip_jitter_discarded_ms"] = v.Jitter.DroppedMS + v.Jitter.LateDroppedMS
 		m["sip_missing_audio_filled_ms"] = v.Jitter.MissingFilledMS
+		m["sip_overflow_discarded_ms"] = v.Jitter.OverflowDroppedMS
+		m["sip_expired_discarded_ms"] = v.Jitter.ExpiredDroppedMS
+		m["sip_source_reset_discarded_ms"] = v.Jitter.SourceResetDroppedMS
+		m["sip_late_discarded_ms"] = v.Jitter.LateDroppedMS
+		m["sip_concealed_ms"] = v.Jitter.ConcealedMS
+		m["sip_silence_filled_ms"] = v.Jitter.SilenceFilledMS
+		m["sip_playback_target_ms"] = float64(v.Jitter.TargetMS)
+		m["sip_playback_capacity_ms"] = float64(v.Jitter.CapacityMS)
+		m["sip_clock_drift_ppm"] = v.Jitter.ClockDriftPPM
+		m["sip_max_relative_delivery_age_ms"] = v.Jitter.MaxDeliveryAgeMS
 		m["sip_refresh_attempts"] = float64(v.Signal.RefreshAttempts)
 		m["sip_refresh_failures"] = float64(v.Signal.RefreshFailures)
 		m["carrier_send_dropped_ms"] = max(m["carrier_send_dropped_ms"], float64(v.Pacer.DroppedMS))
@@ -90,7 +100,11 @@ func addCarrierAudioSummary(s *audioDashboardSummary, r *carrierTelemetryRecord)
 		// Filled audio describes local playback substitution, not WebRTC packet loss.
 		add("concealed_audio", "internal_processing", v.Jitter.MissingFilledMS > 0)
 		internal.State = "healthy"
-		if v.ForwardAvailable && v.Forward.QueuedMS > 320 || v.Jitter.Available && v.Jitter.OldestAgeMS > 120 {
+		ageLimit := v.Jitter.AgeLimitMS
+		if ageLimit == 0 {
+			ageLimit = 120
+		} // Older retained reports.
+		if v.ForwardAvailable && v.Forward.QueuedMS > 320 || v.Jitter.Available && v.Jitter.OldestAgeMS > float64(ageLimit) {
 			internal.State = "audio_degraded"
 			internal.Reason = "queue_delay"
 		}

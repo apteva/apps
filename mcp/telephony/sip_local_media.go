@@ -23,16 +23,22 @@ import (
 // Synthesis is independent of the carrier. A bound speech integration can
 // return PCM or WAV; prerecorded project Storage files need no synthesizer.
 type localMediaSettings struct {
-	Codecs               []string         `json:"codecs,omitempty"`
-	SpeechTool           string           `json:"speech_tool,omitempty"`
-	SpeechInput          map[string]any   `json:"speech_input,omitempty"`
-	SampleRate           int              `json:"sample_rate,omitempty"`
-	Prompts              map[string]int64 `json:"prompts,omitempty"`
-	GatherTimeoutSeconds int              `json:"gather_timeout_seconds,omitempty"`
-	VoicemailMaxSeconds  int              `json:"voicemail_max_seconds,omitempty"`
+	RTPPlayback          *sipPlaybackPolicy `json:"rtp_playback,omitempty"`
+	Codecs               []string           `json:"codecs,omitempty"`
+	SpeechTool           string             `json:"speech_tool,omitempty"`
+	SpeechInput          map[string]any     `json:"speech_input,omitempty"`
+	SampleRate           int                `json:"sample_rate,omitempty"`
+	Prompts              map[string]int64   `json:"prompts,omitempty"`
+	GatherTimeoutSeconds int                `json:"gather_timeout_seconds,omitempty"`
+	VoicemailMaxSeconds  int                `json:"voicemail_max_seconds,omitempty"`
 }
 
 func validateLocalMediaSettings(c localMediaSettings) error {
+	if c.RTPPlayback != nil {
+		if err := c.RTPPlayback.validate(); err != nil {
+			return err
+		}
+	}
 	seen := map[string]bool{}
 	for _, codec := range c.Codecs {
 		if seen[codec] {

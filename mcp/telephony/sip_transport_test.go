@@ -325,7 +325,7 @@ func TestSIPSDESSRTPRoundTripAndAnswer(t *testing.T) {
 }
 
 func TestRTPJitterBufferReordersAndConcealsLoss(t *testing.T) {
-	buffer := newRTPJitterBuffer()
+	buffer := newRTPJitterBufferWithPolicy(sipPlaybackPolicy{MaxTargetMS: 60})
 	buffer.push(12, append([]byte{12}, make([]byte, 159)...))
 	buffer.push(10, append([]byte{10}, make([]byte, 159)...))
 	buffer.push(11, append([]byte{11}, make([]byte, 159)...))
@@ -336,7 +336,7 @@ func TestRTPJitterBufferReordersAndConcealsLoss(t *testing.T) {
 		}
 	}
 
-	loss := newRTPJitterBuffer()
+	loss := newRTPJitterBufferWithPolicy(sipPlaybackPolicy{MaxTargetMS: 60})
 	loss.push(20, append([]byte{20}, make([]byte, 159)...))
 	loss.push(22, append([]byte{22}, make([]byte, 159)...))
 	loss.push(23, append([]byte{23}, make([]byte, 159)...))

@@ -181,13 +181,29 @@ func (o *sipRTPObservations) snapshot(now time.Time) sipRTPSnapshot {
 }
 
 type sipJitterSnapshot struct {
-	Available       bool    `json:"available"`
-	QueueMS         float64 `json:"queue_ms"`
-	OldestAgeMS     float64 `json:"oldest_age_ms"`
-	MaxAgeMS        int     `json:"max_age_ms"`
-	DroppedMS       float64 `json:"discarded_ms"`
-	LateDroppedMS   float64 `json:"late_discarded_ms"`
-	MissingFilledMS float64 `json:"missing_audio_filled_ms"`
+	SourceResetDroppedMS  float64          `json:"source_reset_discarded_ms"`
+	HoldSkippedMS         float64          `json:"intentional_hold_skipped_ms"`
+	MaxDeliveryAgeMS      float64          `json:"max_relative_delivery_age_ms"`
+	SourceClockConfidence string           `json:"source_clock_confidence"`
+	TargetMS              int              `json:"target_ms"`
+	CapacityMS            int              `json:"capacity_ms"`
+	AgeLimitMS            int              `json:"age_limit_ms"`
+	OverflowDroppedMS     float64          `json:"overflow_discarded_ms"`
+	ExpiredDroppedMS      float64          `json:"expired_discarded_ms"`
+	ConcealedMS           float64          `json:"concealed_ms"`
+	SilenceFilledMS       float64          `json:"silence_filled_ms"`
+	ClockDriftPPM         float64          `json:"clock_drift_ppm"`
+	AdjustedSamples       int64            `json:"reserve_clock_adjusted_samples"`
+	ClockResets           int              `json:"clock_resets"`
+	DTXResumes            int              `json:"dtx_resumes"`
+	Events                []sipJitterEvent `json:"events,omitempty"`
+	Available             bool             `json:"available"`
+	QueueMS               float64          `json:"queue_ms"`
+	OldestAgeMS           float64          `json:"oldest_age_ms"`
+	MaxAgeMS              int              `json:"max_age_ms"`
+	DroppedMS             float64          `json:"discarded_ms"`
+	LateDroppedMS         float64          `json:"late_discarded_ms"`
+	MissingFilledMS       float64          `json:"missing_audio_filled_ms"`
 }
 type sipSignalSnapshot struct {
 	DialogID         string `json:"dialog_id"`
@@ -340,11 +356,31 @@ func (d *sipLiveDiagnostics) snapshot(now time.Time) sipLiveSnapshot {
 	// Arrival age alone cannot establish an RTP transport failure: DTX may be
 	// silent indefinitely. Confirmed read/write/security failures remain distinct.
 	if j := m.jitterTelemetry.Load(); j != nil && j.mu.TryLock() {
-		s.Jitter = sipJitterSnapshot{Available: true, QueueMS: float64(j.buffered) / 8, MaxAgeMS: j.maxAgeMS, DroppedMS: float64(j.droppedSamples) / 8, LateDroppedMS: float64(j.lateDroppedSamples) / 8, MissingFilledMS: float64(j.missingFilledSamples.Load()) / 8}
-		for _, at := range j.arrivals {
-			s.Jitter.OldestAgeMS = max(s.Jitter.OldestAgeMS, float64(now.Sub(at))/float64(time.Millisecond))
+		s.Jitter = sipJitterSnapshot{Available: true, QueueMS: float64(int64(j.buffered)+j.pendingPCMSamples.Load()) / 8, MaxAgeMS: j.maxAgeMS, DroppedMS: float64(j.droppedSamples) / 8, LateDroppedMS: float64(j.lateDroppedSamples) / 8, MissingFilledMS: float64(j.missingFilledSamples.Load()) / 8}
+		s.Jitter.SourceResetDroppedMS = float64(j.resetDroppedSamples) / 8
+		s.Jitter.HoldSkippedMS = float64(j.holdSkippedSamples) / 8
+		s.Jitter.MaxDeliveryAgeMS = j.maxDeliveryAgeMS
+		s.Jitter.SourceClockConfidence = "relative_rtp_baseline"
+		s.Jitter.TargetMS, s.Jitter.CapacityMS, s.Jitter.AgeLimitMS = j.targetMS, j.policy.CapacityMS, j.policy.MaxAgeMS
+		s.Jitter.OverflowDroppedMS, s.Jitter.ExpiredDroppedMS = float64(j.overflowSamples)/8, float64(j.expiredSamples)/8
+		s.Jitter.ConcealedMS, s.Jitter.SilenceFilledMS = float64(j.concealedSamples.Load())/8, float64(j.silenceSamples.Load())/8
+		s.Jitter.ClockDriftPPM, s.Jitter.AdjustedSamples = j.driftPPM, j.driftAdjustedSamples.Load()
+		s.Jitter.ClockResets, s.Jitter.DTXResumes = j.clockResets, j.dtxResumes
+		events := j.events
+		eventHead, eventCount := j.eventHead, j.eventCount
+
+		for seq, at := range j.arrivals {
+			s.Jitter.OldestAgeMS = max(s.Jitter.OldestAgeMS, float64(max(now.Sub(at), now.Sub(j.sourceTime(j.timestamps[seq]))))/float64(time.Millisecond))
 		}
 		j.mu.Unlock()
+		// Allocate/format the diagnostic history only after releasing the reader's lock.
+		if eventCount > 0 {
+			s.Jitter.Events = make([]sipJitterEvent, 0, eventCount)
+		}
+		for i := 0; i < eventCount; i++ {
+			s.Jitter.Events = append(s.Jitter.Events, events[(eventHead-eventCount+i+64)%64])
+		}
+
 	}
 	if p := m.pacer.Load(); p != nil && p.diagnostics.mu.TryLock() {
 		s.PacerAvailable = true
@@ -393,7 +429,7 @@ func (d *sipLiveDiagnostics) sample(now time.Time) carrierTelemetryRecord {
 	if s.RTP.MaxDeliveryExcessMS > 320 {
 		delayBucket = int64(s.RTP.MaxDeliveryExcessMS) / 100
 	}
-	signature := signatureSIPIncident{s.RTP.SequenceGaps, s.RTP.AuthErrors + s.RTP.DecryptErrors + s.RTP.ReplayErrors + s.RTP.DecodeErrors + s.RTP.RejectedSource + s.RTP.ReadErrors + s.RTP.SendErrors, int64(s.Jitter.DroppedMS+s.Jitter.LateDroppedMS) + s.Pacer.DroppedMS, delayBucket}
+	signature := signatureSIPIncident{s.RTP.SequenceGaps, s.RTP.AuthErrors + s.RTP.DecryptErrors + s.RTP.ReplayErrors + s.RTP.DecodeErrors + s.RTP.RejectedSource + s.RTP.ReadErrors + s.RTP.SendErrors, int64(s.Jitter.DroppedMS+s.Jitter.LateDroppedMS+s.Jitter.MissingFilledMS) + s.Pacer.DroppedMS, delayBucket}
 	d.mu.Lock()
 	incident := signature != d.lastIncident
 	d.lastIncident = signature
