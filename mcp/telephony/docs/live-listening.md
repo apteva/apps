@@ -58,10 +58,41 @@ existing media access expires within its remaining lease, as for softphone audio
 A listener token cannot answer a call, attach operator media, or renew another
 principal's grant. One simultaneous socket per credential prevents replay.
 
+## Transport and shared settings
+
+The Calls panel defaults listening and coaching to **Same as softphone**. It
+inherits transport, optional Opus FEC, input/output devices, output volume,
+microphone processing and initial playback reserve. Listening has its own transport/FEC
+selector and optional caller-left/adviser-right stereo mode. Saved changes apply
+to the next listening/coaching attachment without interrupting established audio.
+
+The headless API supports shared `TelephonyClient({ audio })` defaults or
+`phone.createCallListener(options)`, which snapshots that softphone's current
+profile. An explicit listener option overrides its inherited value.
+`listener.setAudioOptions(options)` replaces the profile for the next attachment;
+`getAudioOptions()` returns a read-only snapshot. `getSnapshot().mediaTransport`
+reports the actual transport, including automatic fallback.
+
+- `websocket`: the existing directional PCM protocol and bounded renderer.
+- `webrtc`: two receive-only Opus RTP tracks over the installation's existing
+  WebRTC ICE/network configuration. Explicit WebRTC reports setup failure.
+- `auto`: tries WebRTC, then PCM only if initial setup fails. A ready session,
+  authorization denial or microphone/device denial never silently downgrades.
+
+WebRTC listening creates no microphone track, requests no microphone permission,
+and loads no capture worklet until an explicit coaching press. Both directions
+remain independent. Native WebRTC loss/concealment stats are reported as such,
+not as PCM worklet underruns. Browser playback targets are hints supported by
+some browsers, not a guarantee against arbitrary network delay. WebRTC listeners
+use the same sampled adaptive target policy as the softphone. The PCM listener
+retains its directional renderer; its initial reserve is configurable, while
+its scheduling and stale-frame limits remain bounded independently of the main
+softphone’s waveform adaptation.
+
 ## Frontend SDK
 
 ```ts
-const listener = telephony.createCallListener({
+const listener = phone.createCallListener({
   stereo: false, // default: mixed playback; true: caller left, adviser/AI right
   onDiagnostics: diagnostics => console.log(diagnostics),
 });
@@ -102,11 +133,13 @@ are pruned when issuing new ones; disconnected grants are removed.
 
 Each listener has an independent combined queue of twelve 20 ms directional
 frames. Frames older than 200 ms are discarded; socket writes have a 200 ms
-deadline. A slow listener cannot backpressure the original conversation.
-The browser uses a single render clock for both directions, an initial 60 ms
+deadline; optional WebRTC framing uses the same 200 ms freshness budget. A slow listener cannot backpressure the original conversation.
+The PCM browser receiver uses a single render clock for both directions, an initial 60 ms
 cushion, queues bounded to 160 ms per direction, and rejects stale/far-future
 scheduling. It never accumulates delayed speech to repair a poor network.
-The original softphone capture, playback and carrier pacing policies are unchanged.
+The default PCM timing remains unchanged. WebRTC listeners reuse the shared
+Opus encoder, sample-segment expiration, RTP pacing and bounded jitter logic;
+encoding runs in listener-owned goroutines. Carrier pacing remains unchanged.
 
 Server diagnostics record sent, overflow, source-trimmed and stale frames by direction plus
 maximum write duration. Browser diagnostics expose directional played/dropped
@@ -114,5 +147,5 @@ milliseconds, sequence gaps, maximum queue/lateness, network drops and network t
 relative to the best observed transit time (not absolute one-way latency).
 The authenticated audit API returns the latest 100 listener joins/leaves,
 principal, reason and final diagnostics; it never exposes listener credentials.
-Whisper/coaching, barge-in, recording permissions and native carrier conferences
-are outside this passive listening feature.
+Private coaching is documented separately in [private-coaching.md](private-coaching.md).
+Barge-in and native carrier conferences are outside this feature.

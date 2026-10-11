@@ -1,3 +1,4 @@
+import type { CallListenerOptions } from "./listener";
 import { MediaLease, mediaRecoveryContext, safeMediaSessionEvent, type MediaInitiatingAction, type MediaRecoveryContext, type MediaSessionEvent } from "./media-lease";
 import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, playbackBufferOptions, type SoftphoneAudioHealth, type SoftphoneAudioOptions, type SoftphoneCallStatus, type SoftphoneDiagnostics, type SoftphoneState } from "../../ui/softphone-audio";
 import { createBrowserAudio, type AudioConnection, type AudioRuntime } from "./audio";
@@ -79,6 +80,9 @@ export class HeadlessSoftphone {
     this.interval = options.pollIntervalMs ?? 2000;
     if (!Number.isFinite(this.interval) || (this.interval !== 0 && this.interval < 100)) throw new Error("Call poll interval must be 0 or at least 100 ms");
   }
+
+  /** New listener/coach sessions inherit this softphone's current audio profile. */
+  createCallListener(options:CallListenerOptions = {}) { this.assertOpen(); return this.client.createCallListener({...this.audioOptions,...options.audio,...options}); }
 
   getSnapshot = (): SoftphoneSnapshot => this.snapshot;
   subscribe = (listener: (state: SoftphoneSnapshot) => void): (() => void) => {

@@ -405,3 +405,36 @@ Automatic setup can reuse a saved verified selection, including an inherited
 account selection, without creating or rotating credentials. To change the
 profile on an already managed connection, configure that resource explicitly
 through advanced settings; automatic setup does not rewrite existing policy.
+
+
+### Listening and private coaching transport
+
+The Calls panel defaults these sessions to the softphone's audio settings, with
+separate WebSocket/WebRTC/automatic, FEC and stereo overrides. Headless hosts can
+share a profile across instances or derive a listener from the current phone:
+
+```ts
+const client = new TelephonyClient(app, {
+  audio: { mediaTransport: "webrtc", webrtcFec: true, outputVolume: 0.8 },
+});
+const phone = client.createSoftphone();
+const listener = phone.createCallListener({ stereo: true });
+// Optional override: phone.createCallListener({ mediaTransport: "websocket" })
+await listener.coach(callId); // receive-only; no microphone permission
+await listener.startTalking(); // explicit push-to-talk
+listener.stopTalking();
+console.log(listener.getSnapshot().mediaTransport); // actual chosen transport
+listener.setAudioOptions({ mediaTransport: "auto" }); // next attachment only
+```
+
+`client.createCallListener()` inherits client-level `audio` defaults. Per-phone
+`audio`/`mediaTransport` overrides are inherited by `phone.createCallListener()`.
+`createCallListener({ audio: {...} })` also accepts the same nested profile as
+`createSoftphone`; explicit top-level listener options take precedence.
+Explicit WebRTC fails when unavailable; automatic mode may fall back only before
+ready. Listening never opens a microphone. WebRTC coaching uses a new uplink PC
+per press, retaining the existing adviser pin, authorization, short PTT lease,
+and no-auto-retarget behavior. The adviser's selected media transport determines
+private delivery, without adding a carrier stream or including coaching in
+recordings/listener taps. See [listening](../docs/live-listening.md) and
+[coaching](../docs/private-coaching.md) for limits and diagnostic differences.

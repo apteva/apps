@@ -33,12 +33,22 @@ import (
 // Chromium executes the actual app-served SDK bundle, AudioWorklet and Worker.
 // Only the platform gateway and carrier are fixtures; HTTP/WS and Telephony are real.
 func TestTier2HeadlessBrowser(t *testing.T) {
-	for _, surface := range []string{"headless", "headless-coaching-512k", "headless-coaching-jitter", "panel", "application-user"} {
+	for _, surface := range []string{"headless", "headless-listener-webrtc", "headless-listener-auto", "headless-coaching-512k", "headless-coaching-jitter", "panel", "application-user"} {
 		t.Run(surface, func(t *testing.T) { runHeadlessBrowser(t, surface) })
 	}
 }
 
 func runHeadlessBrowser(t *testing.T, surface string) {
+	listenerTransport := "websocket"
+	if surface == "headless-listener-webrtc" {
+		listenerTransport = "webrtc"
+		surface = "headless"
+	}
+	if surface == "headless-listener-auto" {
+		listenerTransport = "auto"
+		surface = "headless"
+	}
+	t.Setenv("TELEPHONY_TEST_LISTENER_TRANSPORT", listenerTransport)
 	var coachingLink *bench.Link
 	if surface == "headless-coaching-512k" {
 		coachingLink = &bench.Link{Kbps: 512, LatencyMS: 30, JitterMS: 10}
@@ -49,7 +59,11 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 		surface = "headless"
 	}
 	platform := newTier2PlatformGateway(t)
-	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID(tier2Project), tk.WithEnv("APTEVA_GATEWAY_URL", platform.server.URL))
+	config := map[string]string{}
+	if listenerTransport == "webrtc" {
+		config["softphone_webrtc_enabled"] = "true"
+	}
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID(tier2Project), tk.WithConfig(config), tk.WithEnv("APTEVA_GATEWAY_URL", platform.server.URL))
 	created := tier2MCPAs(t, sc, "telephony_routes_create", map[string]any{"phone_number": tier2Number, "answer_mode": "human_browser"})
 	route := created["route"].(map[string]any)
 	tier2MCPAs(t, sc, "telephony_routes_configure_carrier", map[string]any{"route_id": route["id"]})

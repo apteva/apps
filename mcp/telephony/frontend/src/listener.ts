@@ -1,10 +1,13 @@
+import type { SoftphoneAudioOptions } from "../../ui/softphone-audio";
 import { MediaLease, type MediaSessionEvent } from "./media-lease";
 import type { CallSession, TelephonyClient } from "./client";
-import { createListenerAudio, type ListenerAudioConnection, type ListenerAudioRuntime, type ListenerDiagnostics, type ListenerPlaybackOptions } from "./listener-audio";
+import { createListenerAudio, listenerAudioOptions, type ListenerAudioConnection, type ListenerAudioRuntime, type ListenerDiagnostics, type ListenerPlaybackOptions } from "./listener-audio";
 
 export type ListenerState = "idle" | "connecting" | "listening" | "reconnecting" | "disconnected" | "access_revoked" | "call_ended";
-export interface ListenerSnapshot { readonly state: ListenerState; readonly callId?: string; readonly detail?: string; readonly coaching?: boolean; readonly talking?: boolean }
+export interface ListenerSnapshot { readonly state: ListenerState; readonly callId?: string; readonly detail?: string; readonly coaching?: boolean; readonly talking?: boolean; readonly mediaTransport?: "websocket" | "webrtc" }
 export interface CallListenerOptions extends ListenerPlaybackOptions {
+  /** Same audio profile shape as createSoftphone; top-level overrides win. */
+  audio?: Partial<SoftphoneAudioOptions>;
   runtime?: ListenerAudioRuntime;
   onDiagnostics?: (value: ListenerDiagnostics) => void;
   onSessionEvent?: (event: MediaSessionEvent) => void;
@@ -26,10 +29,19 @@ export class HeadlessCallListener {
   private retryDelay = 500;
   private disposed = false;
   private coaching = false;
-  private readonly runtime: ListenerAudioRuntime;
+  private runtime: ListenerAudioRuntime;
+  private audioOptions: ListenerPlaybackOptions;
   constructor(private readonly client: TelephonyClient, private readonly options: CallListenerOptions = {}) {
-    this.runtime = options.runtime ?? createListenerAudio(client.app, options);
+    this.audioOptions=listenerAudioOptions(options.audio,options);
+    this.runtime = options.runtime ?? createListenerAudio(client.app, this.audioOptions);
   }
+  /** Applied to the next listen/coach session; active media is never recreated. */
+  setAudioOptions(options:ListenerPlaybackOptions):void {
+    const resolved=listenerAudioOptions({},options);
+    this.audioOptions=resolved;
+    this.runtime=this.options.runtime ?? createListenerAudio(this.client.app,resolved);
+  }
+  getAudioOptions = ():Readonly<ListenerPlaybackOptions> => Object.freeze({...this.audioOptions});
   getSnapshot = () => this.snapshot;
   subscribe = (observer: (snapshot: ListenerSnapshot) => void) => { this.observers.add(observer); return () => { this.observers.delete(observer); }; };
   private update(patch: Partial<ListenerSnapshot>) { this.snapshot = Object.freeze({ ...this.snapshot, ...patch }); for (const observer of this.observers) { try { observer(this.snapshot); } catch { /* host isolation */ } } }
@@ -41,7 +53,7 @@ export class HeadlessCallListener {
     this.coaching=coaching;
     this.retryUntil = 0; this.retryDelay = 500;
     const generation = ++this.generation;
-    this.update({ state: "connecting", callId, detail: undefined, coaching, talking:false });
+    this.update({ state: "connecting", callId, detail: undefined, coaching, talking:false,mediaTransport:undefined });
     return this.connect(callId, generation);
   }
   private async connect(callId: string, generation: number): Promise<void> {
@@ -53,7 +65,7 @@ export class HeadlessCallListener {
       if (!current()) { await this.client.stopListening(session).catch(() => {}); return; }
       this.session = session;
       const audio = this.runtime.create({
-        onReady: () => { if (current()) { this.retryUntil = 0; this.retryDelay = 500; this.update({ state: "listening", detail: undefined }); } },
+        onReady: mediaTransport => { if (current()) { this.retryUntil = 0; this.retryDelay = 500; this.update({ state: "listening", detail: undefined, mediaTransport }); } },
         onClose: reason => { if (current()) this.disconnected(reason, callId, generation); },
         onTalking: (talking,detail) => { if(current()) this.update({talking,detail}); },
         onDiagnostics: value => { if (current()) { try { this.options.onDiagnostics?.(value); } catch { /* host isolation */ } } },
@@ -107,7 +119,7 @@ export class HeadlessCallListener {
     ++this.generation;
     if (this.retry) clearTimeout(this.retry); this.retry = undefined;
     const cleanup = this.cleanup();
-    this.update({ state: "idle", callId: undefined, detail: undefined, coaching:false, talking:false });
+    this.update({ state: "idle", callId: undefined, detail: undefined, coaching:false, talking:false,mediaTransport:undefined });
     await cleanup;
   }
   async dispose(): Promise<void> { await this.stop(); this.disposed = true; this.observers.clear(); }

@@ -1,9 +1,14 @@
+import { createListenerRTC } from "./listener-webrtc";
+import { mediaTransport, permanentRTCFailure } from "./webrtc-audio";
+import type { MediaTransport } from "./webrtc-audio";
 import type { AppHandle } from "@apteva/web-sdk";
 import source from "../../ui/listener-worklet.js" with { type: "text" };
 import captureSource from "../../ui/softphone-worklet.js" with {type:"text"};
-import { PreviewResampler } from "../../ui/softphone-audio";
+import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, microphoneConstraints, playbackBufferOptions, type SoftphoneAudioOptions, PreviewResampler } from "../../ui/softphone-audio";
 
 export interface ListenerDiagnostics {
+  media_transport?: "websocket" | "webrtc";
+  webrtc?: ReturnType<typeof import("./webrtc-audio").rtcStatistics>["webrtc"];
   dropped_ms: number[];
   played_ms: number[];
   max_queue_ms: number;
@@ -13,7 +18,7 @@ export interface ListenerDiagnostics {
   network_dropped_ms: number[];
 }
 export interface ListenerAudioCallbacks {
-  onReady(): void;
+  onReady(transport?: "websocket" | "webrtc"): void;
   onClose(reason: string): void;
   onTalking?(talking:boolean,detail?:string):void;
   onDiagnostics?(value: ListenerDiagnostics): void;
@@ -26,7 +31,45 @@ export interface ListenerAudioConnection {
   setOutputVolume(value: number): void;
 }
 export interface ListenerAudioRuntime { create(callbacks: ListenerAudioCallbacks): ListenerAudioConnection }
-export interface ListenerPlaybackOptions { stereo?: boolean; outputVolume?: number; outputDeviceId?: string; inputDeviceId?: string }
+export interface ListenerPlaybackOptions extends Partial<SoftphoneAudioOptions> { stereo?: boolean }
+
+/** A snapshot of the shared softphone profile, optionally overridden per listener. */
+export function listenerAudioOptions(defaults:Partial<SoftphoneAudioOptions> = {}, override:ListenerPlaybackOptions = {}): ListenerPlaybackOptions {
+ const keys:[keyof ListenerPlaybackOptions,...Array<keyof ListenerPlaybackOptions>]=["mediaTransport","webrtcFec","inputDeviceId","outputDeviceId","outputVolume","echoCancellation","noiseSuppression","autoGainControl","inputGainDB","highpassFilter","playbackTargetMs","playbackMinMs","playbackMaxMs","playbackAdaptive","stereo"];
+ const result:ListenerPlaybackOptions={...DEFAULT_SOFTPHONE_AUDIO_OPTIONS};
+ for(const source of [defaults,override])for(const key of keys){const value=(source as ListenerPlaybackOptions)[key];if(value!==undefined)(result as Record<string,unknown>)[key]=value;}
+ playbackBufferOptions(result);result.mediaTransport=mediaTransport(result.mediaTransport);
+ result.webrtcFec??=true;
+ if(result.outputVolume!==undefined&&(!Number.isFinite(result.outputVolume)||result.outputVolume<0||result.outputVolume>1))throw new RangeError("Listener volume must be 0–1");
+ return result;
+}
+
+/** Only auto may fall back, only before ready. Access/device denials do not downgrade. */
+export function selectableListenerAudio(callbacks:ListenerAudioCallbacks, choice:MediaTransport, websocket:(callbacks:ListenerAudioCallbacks)=>ListenerAudioConnection, rtc:(callbacks:ListenerAudioCallbacks)=>ListenerAudioConnection):ListenerAudioConnection {
+ let active:ListenerAudioConnection|undefined, stopped=false, activated=false, volume:number|undefined;
+ const observed={...callbacks,onReady(transport?:"websocket"|"webrtc"){activated=true;callbacks.onReady(transport);}};
+ return {
+  async start(url,options){
+   if(stopped)throw new Error("Listening cancelled");
+   active=choice==="websocket"?websocket(observed):rtc(observed);
+   try{await active.start(url,options);}catch(error){
+    active.stop();
+    if(stopped||activated||choice!=="auto"||permanentRTCFailure(error))throw error;
+    active=websocket(observed);await active.start(url,options);
+   }
+   if(stopped)active.stop();else if(volume!==undefined)active.setOutputVolume(volume);
+  },
+  async startTalking(){if(stopped||!active?.startTalking)throw new Error("Coaching session not ready");await active.startTalking();},
+  stopTalking(){active?.stopTalking?.();},stop(){stopped=true;active?.stop();},
+  setOutputVolume(value){if(!Number.isFinite(value)||value<0||value>1)throw new RangeError("Listener volume must be 0–1");volume=value;active?.setOutputVolume(value);}
+ };
+}
+
+export function createListenerAudio(app:AppHandle,options:ListenerPlaybackOptions = {}):ListenerAudioRuntime {
+ const resolved=listenerAudioOptions({},options), choice=mediaTransport(resolved.mediaTransport);
+ const websocket=createListenerWebSocketAudio(app,resolved), rtc=createListenerRTC(app,resolved);
+ return {create(callbacks){return selectableListenerAudio(callbacks,choice,observed=>websocket.create(observed),observed=>rtc.create(observed));}};
+}
 
 /** Validate the directional protocol before passing any samples to the renderer. */
 export function decodeListenerFrame(buffer: ArrayBuffer) {
@@ -51,7 +94,7 @@ export function encodeCoachingFrame(frame:Float32Array,generation:number,sequenc
   return buffer;
 }
 
-export function createListenerAudio(app: AppHandle, options: ListenerPlaybackOptions = {}): ListenerAudioRuntime {
+export function createListenerWebSocketAudio(app: AppHandle, options: ListenerPlaybackOptions = {}): ListenerAudioRuntime {
   return { create(callbacks) {
     let context: AudioContext | undefined, node: AudioWorkletNode | undefined, gain: GainNode | undefined;
     let socket: WebSocket | undefined, closed = false;
@@ -84,7 +127,7 @@ export function createListenerAudio(app: AppHandle, options: ListenerPlaybackOpt
       if (closed) return;
       stopTalking();closed = true; cancelStart?.();
       window.removeEventListener("blur",onBlur);document.removeEventListener("visibilitychange",onVisibility);
-      if (socket) { socket.onmessage = socket.onclose = socket.onerror = null; socket.close(); }
+      if (socket) { socket.onmessage = socket.onclose = socket.onerror = null; socket.close(1000,"listener_shutdown"); }
       node?.disconnect(); gain?.disconnect();
       if (context) { context.onstatechange = null; void context.close().catch(() => {}); }
       for(const url of blobURLs) URL.revokeObjectURL(url);
@@ -114,11 +157,11 @@ export function createListenerAudio(app: AppHandle, options: ListenerPlaybackOpt
             workletURL = asset.href;
           } else { const blobURL = URL.createObjectURL(new Blob([source], { type: "text/javascript" })); blobURLs.push(blobURL);workletURL = blobURL; }
           await context.audioWorklet.addModule(workletURL); ensureOpen();
-          node = new AudioWorkletNode(context, "telephony-listener", { numberOfInputs: 0, outputChannelCount: [options.stereo ? 2 : 1], processorOptions: { stereo: options.stereo } });
+          node = new AudioWorkletNode(context, "telephony-listener", { numberOfInputs: 0, outputChannelCount: [options.stereo ? 2 : 1], processorOptions: { stereo: options.stereo, ...playbackBufferOptions(options) } });
           gain = context.createGain(); gain.gain.value = volume;
           node.connect(gain).connect(context.destination);
           node.onprocessorerror = () => fail("listener_audio_error");
-          node.port.onmessage = ({ data }) => { if (data?.type === "listener.diagnostics" && !closed) { try { callbacks.onDiagnostics?.({ ...data, sequence_gaps: [...sequenceGaps], network_excess_ms: networkExcess, network_dropped_ms: [...networkDroppedMS] }); } catch { /* host isolation */ } } };
+          node.port.onmessage = ({ data }) => { if (data?.type === "listener.diagnostics" && !closed) { try { callbacks.onDiagnostics?.({ ...data, media_transport:"websocket", sequence_gaps: [...sequenceGaps], network_excess_ms: networkExcess, network_dropped_ms: [...networkDroppedMS] }); } catch { /* host isolation */ } } };
           context.onstatechange = () => { if (context?.state === "suspended" || (context?.state as string) === "interrupted") fail("listener_audio_paused"); };
           await new Promise<void>((resolve, reject) => {
             let settled = false;
@@ -129,7 +172,7 @@ export function createListenerAudio(app: AppHandle, options: ListenerPlaybackOpt
             socket.onmessage = ({ data }) => {
               if (closed || !context || !node) return;
               try {
-                if (typeof data === "string") { const event=JSON.parse(data); if(event.type==="listener.ready") { if(coaching && event.coaching!==true)throw new Error("Coaching not authorized");ready=true;finish();callbacks.onReady(); } else if(event.type==="coach.started") { talkAck?.(event.generation); } else if(event.type==="coach.rejected") { talkAck?.(talkGeneration,new Error(event.detail||"Coaching unavailable")); } else if(event.type==="coach.stopped" && (event.generation===undefined || event.generation===talkGeneration)) { stopTalking(); } return; }
+                if (typeof data === "string") { const event=JSON.parse(data); if(event.type==="listener.ready") { if(coaching && event.coaching!==true)throw new Error("Coaching not authorized");ready=true;finish();callbacks.onReady("websocket"); } else if(event.type==="coach.started") { talkAck?.(event.generation); } else if(event.type==="coach.rejected") { talkAck?.(talkGeneration,new Error(event.detail||"Coaching unavailable")); } else if(event.type==="coach.stopped" && (event.generation===undefined || event.generation===talkGeneration)) { stopTalking(); } return; }
                 if (!ready || !(data instanceof ArrayBuffer)) return;
                 const decoded = decodeListenerFrame(data);
                 const d = decoded.direction;
@@ -140,7 +183,7 @@ export function createListenerAudio(app: AppHandle, options: ListenerPlaybackOpt
                 transitBase = Math.min(transitBase ?? transit, transit);
                 networkExcess = Math.max(0, transit - transitBase);
                 if (networkExcess > 200) { networkDroppedMS[d] += decoded.frame.length * 1000 / 24_000; return; } // Never play accumulated network backlog.
-                audioOffset ??= context.currentTime * 1000 + 60 - decoded.timestampMS;
+                audioOffset ??= context.currentTime * 1000 + (options.playbackTargetMs ?? 60) - decoded.timestampMS;
                 const frame = resamplers[d].process(decoded.frame, 24_000, context.sampleRate);
                 node.port.postMessage({ direction: d, frame, playAtMS: decoded.timestampMS + audioOffset }, [frame.buffer]);
               } catch { finish(new Error("Invalid listener media")); fail("listener_protocol_error"); }
@@ -159,7 +202,7 @@ export function createListenerAudio(app: AppHandle, options: ListenerPlaybackOpt
         talkWanted=true;const generation=++talkGeneration;
         const current=()=>!closed && talkWanted && generation===talkGeneration;
         try {
-          const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:false,autoGainControl:false,...(options.inputDeviceId?{deviceId:{exact:options.inputDeviceId}}:{})}});
+          const stream=await navigator.mediaDevices.getUserMedia({audio:microphoneConstraints({...DEFAULT_SOFTPHONE_AUDIO_OPTIONS,...options})});
           if(!current()){stream.getTracks().forEach(t=>t.stop());return;}
           mic=stream;mic.getAudioTracks().forEach(t=>{t.onended=()=>stopTalking();});
           if(!captureLoaded) {
@@ -175,7 +218,7 @@ export function createListenerAudio(app: AppHandle, options: ListenerPlaybackOpt
             socket!.send(JSON.stringify({type:"coach.start",generation}));
           });
           if(!current())return;
-          capture=new AudioWorkletNode(context,"softphone-capture",{numberOfInputs:1,outputChannelCount:[1],processorOptions:{inputGainDB:0,highpassFilter:true}});
+          capture=new AudioWorkletNode(context,"softphone-capture",{numberOfInputs:1,outputChannelCount:[1],processorOptions:{inputGainDB:options.inputGainDB??0,highpassFilter:options.highpassFilter!==false}});
           micSource=context.createMediaStreamSource(stream);silent=context.createGain();silent.gain.value=0;micSource.connect(capture).connect(silent).connect(context.destination);
           captureChannel=new MessageChannel();let sequence=0;const resampler=new PreviewResampler();
           captureChannel.port1.onmessage=({data})=>{

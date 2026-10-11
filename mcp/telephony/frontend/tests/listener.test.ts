@@ -114,3 +114,26 @@ for(const coaching of [false,true]) test(`${coaching?'coaching':'listening'} kee
   expect(events.some(e=>e.outcome==='retrying'&&e.status===503)).toBe(true);expect(events.at(-1).outcome).toBe('renewed');
  } finally {await listener.dispose();}
 });
+
+describe("listening/coaching audio settings",()=>{
+ test("shared client and softphone profiles are inherited with explicit listener overrides",async()=>{
+  const f=fixture();
+  const client=new TelephonyClient(f.client.app,{audio:{mediaTransport:"webrtc",webrtcFec:false,inputDeviceId:"desk",outputDeviceId:"speaker",outputVolume:.4,noiseSuppression:true,inputGainDB:3,playbackTargetMs:100}});
+  const listener=client.createCallListener({runtime:f.runtime});
+  expect(listener.getAudioOptions()).toMatchObject({mediaTransport:"webrtc",webrtcFec:false,inputDeviceId:"desk",outputVolume:.4,noiseSuppression:true,inputGainDB:3,playbackTargetMs:100,echoCancellation:true});
+  const overridden=client.createCallListener({audio:{mediaTransport:"auto",inputGainDB:2},mediaTransport:"websocket",webrtcFec:true,runtime:f.runtime});
+  expect(overridden.getAudioOptions()).toMatchObject({mediaTransport:"websocket",webrtcFec:true,inputDeviceId:"desk",inputGainDB:2});
+  const phone=client.createSoftphone({audio:{mediaTransport:"auto",inputGainDB:5}});
+  const inherited=phone.createCallListener({runtime:f.runtime});
+  expect(inherited.getAudioOptions()).toMatchObject({mediaTransport:"auto",inputGainDB:5,outputVolume:.4,webrtcFec:false});
+  await listener.listen("call");listener.setAudioOptions({mediaTransport:"websocket"});
+  expect(f.stopped).toBe(0);expect(listener.getSnapshot().state).toBe("listening");
+  expect(listener.getAudioOptions().mediaTransport).toBe("websocket");
+  await Promise.all([listener.dispose(),overridden.dispose(),inherited.dispose(),phone.dispose()]);
+ });
+ test("invalid settings are rejected without interrupting active audio",async()=>{
+  const f=fixture(),listener=f.client.createCallListener({runtime:f.runtime});await listener.listen("call");
+  for(const options of [{mediaTransport:"invalid"},{webrtcFec:"false"},{playbackTargetMs:1000},{outputVolume:NaN}])expect(()=>listener.setAudioOptions(options as any)).toThrow();
+  expect(listener.getSnapshot().state).toBe("listening");expect(f.stopped).toBe(0);await listener.dispose();
+ });
+});

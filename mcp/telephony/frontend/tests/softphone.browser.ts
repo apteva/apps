@@ -97,10 +97,11 @@ test("installed headless client talks through real Telephony with host-owned UI"
   expect(renewalSnapshot.audioState,JSON.stringify(renewalSnapshot)).toBe('live');
   expect(await (await page.request.get(gateway+'/fixture/media-connections')).json()).toEqual(mediaBeforeRenewal); // No audio teardown on the renewal failure.
   if (process.env.TELEPHONY_TEST_SURFACE === "headless") {
+    const listenerTransport=process.env.TELEPHONY_TEST_LISTENER_TRANSPORT??"websocket";
     const observer = await context.newPage();
     const observerErrors: string[] = [];
     observer.on("pageerror", error => observerErrors.push(error.message));
-    await observer.goto("/listener?strict");
+    await observer.goto(`/listener?strict&transport=${listenerTransport}`);
     await observer.waitForFunction(() => typeof (window as any).loadListener === "function");
     await observer.evaluate(async () => {
       const w = window as any;
@@ -110,14 +111,20 @@ test("installed headless client talks through real Telephony with host-owned UI"
     await observer.click("#listen");
     await observer.evaluate(() => (window as any).listenPromise);
     await expect.poll(() => observer.evaluate(() => (window as any).callListener.getSnapshot().state)).toBe("listening");
-    await expect.poll(() => observer.evaluate(() => (window as any).listenerDiagnostics?.played_ms?.every((value: number) => value > 100))).toBe(true);
-    expect(await observer.evaluate(() => (window as any).listenerDiagnostics.max_queue_ms)).toBeLessThanOrEqual(160);
+    if(listenerTransport==="webrtc") {
+      expect(await observer.evaluate(()=>(window as any).callListener.getSnapshot().mediaTransport)).toBe("webrtc");
+      await expect.poll(()=>observer.evaluate(()=>(window as any).listenerDiagnostics?.webrtc?.receiveBitrateBps)).toBeGreaterThan(1000);
+    } else {
+      expect(await observer.evaluate(()=>(window as any).callListener.getSnapshot().mediaTransport)).toBe("websocket");
+      await expect.poll(() => observer.evaluate(() => (window as any).listenerDiagnostics?.played_ms?.every((value: number) => value > 100))).toBe(true);
+      expect(await observer.evaluate(() => (window as any).listenerDiagnostics.max_queue_ms)).toBeLessThanOrEqual(160);
+    }
     await observer.evaluate(() => (window as any).callListener.stop());
     expect(await observer.evaluate(() => (window as any).callListener.getSnapshot().state)).toBe("idle");
     expect(observerErrors).toEqual([]);
     // The general SDK module loader requires script-src blob:, as documented
     // by the SDK. The strict page above tests bundled host integration separately.
-    await observer.goto('/listener');
+    await observer.goto(`/listener?transport=${listenerTransport}`);
     await observer.waitForFunction(()=>typeof(window as any).loadListener==='function');
     await observer.evaluate(async()=>{navigator.mediaDevices.getUserMedia=async()=>{throw new Error('Join requested a microphone');};await (window as any).loadListener();});
     expect(await observer.evaluate(()=>typeof(window as any).client.createCallListener)).toBe('function');

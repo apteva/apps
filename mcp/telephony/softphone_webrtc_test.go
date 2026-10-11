@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"math"
 	"net"
@@ -424,7 +423,7 @@ func TestRTCCallerCancellationCannotReviveCall(t *testing.T) {
 	}
 }
 
-func TestRTCPrivateCoachingUsesAdviserControlOnly(t *testing.T) {
+func TestRTCPrivateCoachingUsesAdviserRTPOnly(t *testing.T) {
 	rtcTestCtx(t)
 	app := &App{installID: 42}
 	insertSoftphoneCall(t, app, "in-progress")
@@ -456,9 +455,39 @@ func TestRTCPrivateCoachingUsesAdviserControlOnly(t *testing.T) {
 	if !h.startCoach(l, 1) || !h.forwardCoach(l, 1, make([]byte, 160), mediaClockMS()) {
 		t.Fatal("RTC coach rejected")
 	}
-	got := readBinaryWithin(t, b.socket, 2*time.Second)
-	if len(got) != 176 || binary.LittleEndian.Uint32(got) != coachPlaybackMagic {
-		t.Fatal("whisper wire", len(got))
+	decoder, err := newRTCOpusDecoderWithFEC(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer decoder.Close()
+	pcm := make([]int16, 2880)
+	deadline = time.Now().Add(2 * time.Second)
+	heard := false
+	for !heard && time.Now().Before(deadline) {
+		if !h.forwardCoach(l, 1, make([]byte, 160), mediaClockMS()) {
+			t.Fatal("private overlay rejected")
+		}
+		select {
+		case packet := <-b.caller:
+			n, e := decoder.decode(packet, pcm)
+			if e == nil && rmsPCM(pcm[:n]) > 500 {
+				heard = true
+			}
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if !heard {
+		t.Fatal("coaching was not heard on adviser RTP")
+	}
+	b.socket.SetReadDeadline(time.Now().Add(80 * time.Millisecond))
+	for {
+		data, op, e := wsutil.ReadServerData(b.socket)
+		if e != nil {
+			break
+		}
+		if op == ws.OpBinary {
+			t.Fatalf("PCM coaching on RTC signaling: %d", len(data))
+		}
 	}
 	peer.SetReadDeadline(time.Now().Add(80 * time.Millisecond))
 	if data, op, e := wsutil.ReadServerData(peer); e == nil && op == ws.OpBinary && len(data) > 0 {

@@ -2,6 +2,9 @@
 class TelephonyListenerProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
+    this.targetMS = options.processorOptions?.initialTargetMs ?? 60;
+    this.capacityMS = Math.min(320, Math.max(220,this.targetMS+80));
+    this.futureMS = Math.min(320, Math.max(200,this.targetMS+60));
     this.stereo = options.processorOptions?.stereo === true;
     this.queues = [[], []];
     this.dropped = [0, 0];
@@ -15,7 +18,7 @@ class TelephonyListenerProcessor extends AudioWorkletProcessor {
       const now = currentTime * 1000;
       const duration = data.frame.length * 1000 / sampleRate;
       // Bound future scheduling and stale audio independently of queue length.
-      if (data.playAtMS + duration < now || data.playAtMS > now + 200) {
+      if (data.playAtMS + duration < now || data.playAtMS > now + this.futureMS) {
         this.dropped[d] += data.frame.length; return;
       }
       const queue = this.queues[d];
@@ -26,14 +29,14 @@ class TelephonyListenerProcessor extends AudioWorkletProcessor {
       if (previous) start = Math.max(start, previous.start + previous.frame.length);
       queue.push({ frame: data.frame, start });
       let trimmed = false;
-      while (queue.length > 8) {
+      while (queue.length > Math.ceil((this.capacityMS - 60) / 20)) {
         const old = queue.shift(); this.dropped[d] += old.frame.length - (old.played || 0); trimmed = true;
       }
       const last = queue[queue.length - 1];
-      if (trimmed || (last.start + last.frame.length) * 1000 / sampleRate > now + 220) {
+      if (trimmed || (last.start + last.frame.length) * 1000 / sampleRate > now + this.capacityMS) {
         // Rebase only this listener's backlog. Keep a small cushion and a hard
         // upper bound instead of letting repeated catch-up bursts build delay.
-        let next = Math.round((now + 40) * sampleRate / 1000);
+        let next = Math.round((now + Math.max(40, this.targetMS - 20)) * sampleRate / 1000);
         for (const item of queue) {
           if (item.played) { item.frame = item.frame.subarray(item.played); item.played = 0; }
           item.start = next; next += item.frame.length;
