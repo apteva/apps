@@ -78,7 +78,7 @@ containers without system libopus, for both GNU and musl. Musl tests use an
 executable with the musl ELF interpreter; an ordinary GNU executable is not
 an Alpine release artifact. All four release targets cross-build with CGO
 disabled. Darwin amd64 cannot execute on this Mac without Rosetta; its runtime
-check is in the added CI matrix, which has not been run remotely yet.
+check is in the added CI matrix, which had not been run remotely at the time of this local verification.
 
 The full Go suite passed 1,228 tests/subtests (seven optional skips), and the
 frontend suites passed 251 tests. Focused RTC/listening/coaching race tests,

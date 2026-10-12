@@ -1,7 +1,7 @@
 # Long-recording import and playback
 
-Implemented locally in Telephony. No carrier calls, staging/production changes,
-package installs or release were performed. The earlier bundled Opus work is
+Local implementation and verification evidence for Telephony 0.12.10.
+No carrier calls, staging/production changes or package installs were performed. The earlier bundled Opus work is
 retained in this checkout.
 
 ## Limits and playback
@@ -102,4 +102,4 @@ bunx --no-install playwright test -c frontend/recording-playback.playwright.conf
 
 Raw local evidence: `/Users/marcoschwartz/.codex/artifacts/telephony-long-recordings-20261012/`.
 CI now includes this matrix and the browser recording checks; the new workflow
-has not been run remotely yet.
+had not been run remotely at the time of this local verification.
