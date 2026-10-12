@@ -44,9 +44,9 @@ import (
 )
 
 // softphoneHub joins one carrier-facing peer socket to one operator browser
-// socket. Both sides are optional at any instant; audio arriving for an
-// unattached side is dropped rather than buffered, because late audio on a
-// phone call is worse than no audio.
+// socket. Both sides are optional at any instant. After answer, a bounded fresh
+// microphone reserve covers carrier attachment; other unattached audio is
+// dropped to avoid replaying stale speech.
 type softphoneHub struct {
 	readinessBrowser                                         *websocketWriterPump
 	readinessReason                                          string

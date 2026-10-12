@@ -2,6 +2,8 @@
 
 ## Startup audio
 
+- Repeated unmute/readiness notifications preserve partial microphone frames
+  and DSP history. Actual mute transitions still flush capture immediately.
 - Warm authorized browser WebRTC capture before carrier attachment. The server
   still gates ringing, hold, ownership and terminal calls; intentional microphone
   mute remains effective. This removes a browser notification round trip from
