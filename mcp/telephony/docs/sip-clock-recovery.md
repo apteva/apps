@@ -132,7 +132,7 @@ with the subsequent passing run, rather than counted as a clean first run.
 ```sh
 GOWORK=off go test -count=1 ./...
 GOWORK=off go test -race -run 'TestSIPPlayback' \
-  -skip 'TestSIPPlayback(LongClockMatrix|ClockConcurrentLongCalls|ClockMultiCallComparison)$' .
+  -skip 'TestSIPPlayback(LongClockAndJitter|LongClockMatrix|ClockConcurrentLongCalls|ClockMultiCallComparison|ReleasedClockRegression|ClockSlowChangingJitter|ClockReportedReproduction)$' .
 GOWORK=off GOMAXPROCS=4 \
   TELEPHONY_SIP_LOAD_RESULTS=/absolute/path/paced-load.json \
   go test -run '^TestSIPPlaybackClockPacedLoad$' -count=1 -v .
@@ -142,7 +142,7 @@ GOWORK=off go test -run '^$' -bench '^BenchmarkSIPPlaybackClockIngress$' -benchm
 ```
 
 The long deterministic replays always run in the full suite. CI avoids repeating
-those serial/large replay matrices under race instrumentation; the focused
+the long serial/large replay matrices under race instrumentation; the focused
 concurrent diagnostic/ingress/consumer test exercises the shared clock and
 reserve under the race detector.
 
