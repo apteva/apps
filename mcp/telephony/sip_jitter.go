@@ -99,8 +99,7 @@ type rtpJitterBuffer struct {
 	stableAt                                                            time.Time
 	events                                                              [64]sipJitterEvent
 	eventHead, eventCount                                               int
-	clockAt                                                             time.Time
-	clockTimestamp                                                      uint32
+	clock                                                               sipSourceClock
 	driftPPM                                                            float64
 	clockResets, dtxResumes                                             int
 }
@@ -160,6 +159,7 @@ func (b *rtpJitterBuffer) pushSourceRTP(ssrc uint32, seq uint16, payload []byte,
 		b.haveTimestamp = false
 		b.haveSourceAnchor = false
 		b.driftPPM = 0
+		b.clock = sipSourceClock{}
 		b.clockResets++
 		b.generation.Add(1)
 		b.sourceSSRC.Store(ssrc)
@@ -194,6 +194,7 @@ func (b *rtpJitterBuffer) setPaused(paused bool, now time.Time) {
 	b.haveArrival = false
 	b.haveSourceAnchor = false
 	b.driftPPM = 0
+	b.clock = sipSourceClock{}
 	reason := "hold_resumed"
 	if paused {
 		reason = "intentional_hold"
@@ -297,18 +298,51 @@ func (b *rtpJitterBuffer) pushRTP(seq uint16, payload []byte, ts uint32, now tim
 		return
 	}
 	if !b.haveSourceAnchor || b.haveArrival && int16(seq-b.lastSequence) > 0 && int32(ts-b.lastTimestamp) <= 0 {
+		if b.haveSourceAnchor {
+			b.clockResets++
+			b.event(now, "source_clock_restarted", seq, ts, 0, 0)
+		}
 		b.sourceAnchorAt = now
 		b.sourceAnchorTS = ts
 		b.haveSourceAnchor = true
+		b.driftPPM = 0
+		b.clock = sipSourceClock{}
+	}
+	previousArrival, previousTimestamp, previousSequence, hadArrival := b.lastArrival, b.lastTimestamp, b.lastSequence, b.haveArrival
+	if b.haveArrival && int16(seq-b.lastSequence) > 0 {
+		source := time.Duration(int64(int32(ts-b.lastTimestamp))) * time.Second / 8000
+		gap := now.Sub(b.lastArrival)
+		// Timestamp discontinuities or intentional DTX are not clock drift.
+		if source > 0 && source <= time.Second && gap <= time.Second {
+			variation := math.Abs(float64(gap-source) / float64(time.Millisecond))
+			b.jitterMS += (variation - b.jitterMS) / 16
+
+			if desired := min(b.policy.MaxTargetMS, b.policy.TargetMS+int(math.Ceil(max(0, b.jitterMS-2)/10))*10); desired > b.targetMS {
+				b.targetMS = desired
+				b.stableAt = now
+				b.event(now, "target_increased", seq, ts, 0, 0)
+			} else if b.jitterMS < 2 && b.targetMS > b.policy.TargetMS && now.Sub(b.stableAt) > 10*time.Second {
+				b.targetMS = max(b.policy.TargetMS, b.targetMS-10)
+				b.stableAt = now
+				b.event(now, "target_decreased", seq, ts, 0, 0)
+			}
+		}
+	}
+	if !b.haveArrival || int16(seq-b.lastSequence) > 0 {
+		// Observe even rejected packets: an age decision must not freeze the clock.
+		b.clock.observe(b, ts, now)
+		b.lastArrival, b.lastTimestamp, b.lastSequence = now, ts, seq
+		b.haveArrival = true
 	}
 	sourceAt := b.sourceTime(ts)
 	if now.Before(sourceAt) {
 		b.sourceAnchorAt = b.sourceAnchorAt.Add(now.Sub(sourceAt))
 		sourceAt = now
 	}
-	if age := now.Sub(sourceAt); age > time.Duration(b.policy.MaxAgeMS)*time.Millisecond {
+	age := now.Sub(sourceAt)
+	b.maxDeliveryAgeMS = max(b.maxDeliveryAgeMS, float64(age)/float64(time.Millisecond))
+	if age > time.Duration(b.policy.MaxAgeMS)*time.Millisecond {
 		b.lateDroppedSamples += len(payload)
-		b.maxDeliveryAgeMS = max(b.maxDeliveryAgeMS, float64(age)/float64(time.Millisecond))
 		b.event(now, "source_delivery_age", seq, ts, len(payload), age)
 		return
 	}
@@ -317,15 +351,13 @@ func (b *rtpJitterBuffer) pushRTP(seq uint16, payload []byte, ts uint32, now tim
 		b.started = true
 		b.expected = seq
 		b.haveTimestamp = false
-		b.clockAt = now
-		b.clockTimestamp = ts
 		clear(b.controls)
 	}
 
 	// Sequence numbers do not count silent time. Resume contiguous speech after
 	// DTX even when prior empty playback ticks advanced the expected sequence.
 	if b.primed && rtpSequenceBefore(seq, b.expected) {
-		if len(b.packets) == 0 && b.haveArrival && int16(seq-b.lastSequence) > 0 && int32(ts-b.lastTimestamp) > int32(len(payload)) && now.Sub(b.lastArrival) >= 60*time.Millisecond {
+		if len(b.packets) == 0 && hadArrival && int16(seq-previousSequence) > 0 && int32(ts-previousTimestamp) > int32(len(payload)) && now.Sub(previousArrival) >= 60*time.Millisecond {
 			b.expected = seq
 			b.primed = false
 			b.primeTicks = 0
@@ -342,51 +374,7 @@ func (b *rtpJitterBuffer) pushRTP(seq uint16, payload []byte, ts uint32, now tim
 	if !b.primed && rtpSequenceBefore(seq, b.expected) {
 		b.expected = seq
 	}
-	if b.haveArrival && int16(seq-b.lastSequence) > 0 {
-		source := time.Duration(int64(int32(ts-b.lastTimestamp))) * time.Second / 8000
-		gap := now.Sub(b.lastArrival)
-		// Timestamp discontinuities or intentional DTX are not clock drift.
-		if source <= 0 || source > time.Second || gap > time.Second {
-			b.clockAt = now
-			b.clockTimestamp = ts
-			b.driftPPM = 0
-			b.clockResets++
-		} else {
-			variation := math.Abs(float64(gap-source) / float64(time.Millisecond))
-			b.jitterMS += (variation - b.jitterMS) / 16
-			if b.jitterMS > 8 {
-				b.clockAt = now
-				b.clockTimestamp = ts
-			}
-			if elapsed := now.Sub(b.clockAt); elapsed >= 10*time.Second && b.jitterMS <= 8 {
-				sourceElapsed := float64(int32(ts-b.clockTimestamp)) / 8000
-				ppm := (sourceElapsed/elapsed.Seconds() - 1) * 1e6
-				if math.Abs(ppm) <= 1000 {
-					at := b.sourceTime(ts)
-					b.driftPPM += max(-200, min(200, ppm-b.driftPPM)) / 2
-					b.sourceAnchorAt = at
-					b.sourceAnchorTS = ts
-				}
-				b.clockAt = now
-				b.clockTimestamp = ts
-			}
-			if desired := min(b.policy.MaxTargetMS, b.policy.TargetMS+int(math.Ceil(max(0, b.jitterMS-2)/10))*10); desired > b.targetMS {
-				b.targetMS = desired
-				b.stableAt = now
-				b.event(now, "target_increased", seq, ts, 0, 0)
-			} else if b.jitterMS < 2 && b.targetMS > b.policy.TargetMS && now.Sub(b.stableAt) > 10*time.Second {
-				b.targetMS = max(b.policy.TargetMS, b.targetMS-10)
-				b.stableAt = now
-				b.event(now, "target_decreased", seq, ts, 0, 0)
-			}
-		}
-	}
-	if !b.haveArrival || int16(seq-b.lastSequence) > 0 {
-		b.lastArrival = now
-		b.lastTimestamp = ts
-		b.lastSequence = seq
-		b.haveArrival = true
-	}
+
 	for len(b.packets) > 0 && (b.buffered+int(b.pendingPCMSamples.Load())+len(payload) > b.policy.CapacityMS*8 || len(b.packets) >= 20) {
 		b.remove(b.oldest(), now, "queue_overflow")
 	}
@@ -508,6 +496,18 @@ type sipPCMSegment struct {
 	at      time.Time
 }
 
+// A failed frame assembly may retain samples that were tentatively counted as
+// consumed while popping. Reconcile that reserve with concurrent ingress under
+// the same lock as admission, rather than publishing an over-capacity queue.
+func (b *rtpJitterBuffer) storeDecodedReserve(samples int, now time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.pendingPCMSamples.Store(int64(samples))
+	for len(b.packets) > 0 && b.buffered+samples > b.policy.CapacityMS*8 {
+		b.remove(b.oldest(), now, "queue_overflow")
+	}
+}
+
 type rtpAudioFramer struct {
 	generation     uint64
 	segments       []sipPCMSegment
@@ -563,7 +563,7 @@ func (f *rtpAudioFramer) popPCMAt(m *sipRTPMedia, now time.Time) ([]int16, bool)
 	if !f.lastRealAt.IsZero() && now.Sub(f.lastRealAt) > time.Duration(f.jitter.policy.MaxAgeMS)*time.Millisecond {
 		f.plc = sipPCMConcealer{}
 	}
-	f.jitter.pendingPCMSamples.Store(int64(len(f.pendingPCM) * 8000 / m.sampleRate()))
+	f.jitter.storeDecodedReserve(len(f.pendingPCM)*8000/m.sampleRate(), now)
 	f.jitter.mu.Lock()
 	ppm := 0.0
 	if policyEnabled(f.jitter.policy.ClockDrift) {
@@ -623,7 +623,7 @@ func (f *rtpAudioFramer) popPCMAt(m *sipRTPMedia, now time.Time) ([]int16, bool)
 	}
 	if len(f.pendingPCM) < take {
 		if len(f.pendingPCM) < samples {
-			f.jitter.pendingPCMSamples.Store(int64(len(f.pendingPCM) * 8000 / m.sampleRate()))
+			f.jitter.storeDecodedReserve(len(f.pendingPCM)*8000/m.sampleRate(), now)
 			return nil, false
 		}
 		take = samples
@@ -633,7 +633,7 @@ func (f *rtpAudioFramer) popPCMAt(m *sipRTPMedia, now time.Time) ([]int16, bool)
 	out := sipAdjustPCM(f.pendingPCM[:take], samples)
 	copy(f.pendingPCM, f.pendingPCM[take:])
 	f.pendingPCM = f.pendingPCM[:len(f.pendingPCM)-take]
-	f.jitter.pendingPCMSamples.Store(int64(len(f.pendingPCM) * 8000 / m.sampleRate()))
+	f.jitter.storeDecodedReserve(len(f.pendingPCM)*8000/m.sampleRate(), now)
 
 	remaining := take
 	for remaining > 0 && len(f.segments) > 0 {

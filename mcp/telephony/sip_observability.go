@@ -193,6 +193,10 @@ type sipJitterSnapshot struct {
 	ConcealedMS           float64          `json:"concealed_ms"`
 	SilenceFilledMS       float64          `json:"silence_filled_ms"`
 	ClockDriftPPM         float64          `json:"clock_drift_ppm"`
+	ClockEstimatorUpdates int              `json:"clock_estimator_updates"`
+	ClockRejectedFits     int              `json:"clock_rejected_fits"`
+	ClockObservationCount int              `json:"clock_observation_windows"`
+	ClockPhaseAdjustedMS  float64          `json:"clock_phase_adjusted_ms"`
 	AdjustedSamples       int64            `json:"reserve_clock_adjusted_samples"`
 	ClockResets           int              `json:"clock_resets"`
 	DTXResumes            int              `json:"dtx_resumes"`
@@ -365,6 +369,8 @@ func (d *sipLiveDiagnostics) snapshot(now time.Time) sipLiveSnapshot {
 		s.Jitter.OverflowDroppedMS, s.Jitter.ExpiredDroppedMS = float64(j.overflowSamples)/8, float64(j.expiredSamples)/8
 		s.Jitter.ConcealedMS, s.Jitter.SilenceFilledMS = float64(j.concealedSamples.Load())/8, float64(j.silenceSamples.Load())/8
 		s.Jitter.ClockDriftPPM, s.Jitter.AdjustedSamples = j.driftPPM, j.driftAdjustedSamples.Load()
+		s.Jitter.ClockEstimatorUpdates, s.Jitter.ClockRejectedFits = j.clock.updates, j.clock.rejected
+		s.Jitter.ClockObservationCount, s.Jitter.ClockPhaseAdjustedMS = j.clock.count, j.clock.phaseAdjustedMS
 		s.Jitter.ClockResets, s.Jitter.DTXResumes = j.clockResets, j.dtxResumes
 		events := j.events
 		eventHead, eventCount := j.eventHead, j.eventCount

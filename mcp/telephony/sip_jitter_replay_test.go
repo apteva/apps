@@ -397,10 +397,14 @@ func replaySIP(t *testing.T, profile, codec string, target, capacity int, second
 	old := newLegacySIPJitterBuffer()
 	packets := []sipReplayPacket{}
 	seq := uint16(1)
-	for frame := 0; frame < seconds*50; frame++ {
+	for frame := 0; frame < int(math.Ceil(float64(seconds*50)*(1+drift/1e6)))+2; frame++ {
 		source := time.Duration(float64(frame) * float64(20*time.Millisecond) / (1 + drift/1e6))
 		delay := time.Duration(0)
 		switch profile {
+		case "slow_jitter":
+			delay = time.Duration((1 + math.Sin(float64(frame)/500)) * 17.5 * float64(time.Millisecond))
+		case "clock_jitter":
+			delay = time.Duration(frame%2) * 12 * time.Millisecond
 		case "ordinary_jitter":
 			delay = time.Duration((frame*17)%41) * time.Millisecond
 		case "80ms_batches":
