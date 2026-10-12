@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.9.23
+version: 0.9.24
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -81,7 +81,7 @@ provides:
     - name: contacts_create
       description: Create a contact with channels, tags, and attributes.
     - name: contacts_update
-      description: Partial-patch a contact, including channel replacement.
+      description: "Partial-patch a contact with patch.attributes as an array of {key,value,source?}; native JSON types, not a key/value dictionary. Attributes merge by key; explicit value:null clears optional values and missing value is rejected. channels replaces the list. Discover definitions first and verify readback."
     - name: contacts_upsert_by_channel
       description: Find-or-create by email or phone. Returns was_created.
     - name: contacts_verify_email
@@ -96,6 +96,8 @@ provides:
       description: Preview or confirm a project-scoped exact email unsubscribe; outbound only, with confirmed readback and audit, retaining inbound replies and existing stronger blocks. No send or automatic text parsing.
     - name: contacts_define_attribute
       description: Create or update an attribute definition.
+    - name: contacts_attribute_definitions_list
+      description: Read-only project attribute definitions with keys, types, required flags and allowed enum_values, including built-in defaults without writes. Use before updating or promoting researched contacts.
     # Messaging-coupled tools — gate on the messaging dep being bound.
     - name: contacts_send_message
       description: "REAL EXTERNAL SEND. Supports body/template content plus up to 20 attachments / 25 MB from Storage IDs, HTTPS URLs, or base64. Never use for sender/config testing; use messaging_senders_list. New standalone emails require a subject. Identical sends are automatically deduplicated for five minutes."
@@ -507,7 +509,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: crm/v0.9.23
+    ref: crm/v0.9.24
     entry: mcp/crm
   port: 8080
   health_check: /health

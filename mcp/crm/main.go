@@ -363,10 +363,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_update",
-			Description: "Partial-patch a contact. Args: id, patch (any subset of contact fields; channels [{kind,value,label,is_primary}] replaces the channel list), source.",
+			Description: "Partial-patch a contact with id, patch and optional source. Custom attributes MUST be patch.attributes:[{key,value,source?}], NOT a key/value object and not top-level attributes. Discover keys, types, required flags and enum_values with contacts_attribute_definitions_list. Preserve native JSON types: number=88, bool=false, multi_select=[allowed strings]; unlike contacts_set_attribute, patches never convert numeric/boolean strings. Attributes merge by key; omitted keys and [] remain unchanged. Explicit value:null clears an optional attribute; missing value is an error. channels replaces the entire channel list; primary_email/primary_phone are read-only. Optional patch.expected_updated_at guards stale edits. Example: {\"id\":123,\"patch\":{\"attributes\":[{\"key\":\"lead_score\",\"value\":88}]},\"source\":\"agent:Research\"}. Validation failures do not partially update the contact. Read back with contacts_get before promoting workflow readiness.",
 			InputSchema: schemaObject(map[string]any{
 				"id":     map[string]any{"type": "integer"},
-				"patch":  map[string]any{"type": "object"},
+				"patch":  contactPatchInputSchema(),
 				"source": map[string]any{"type": "string"},
 			}, []string{"id", "patch"}),
 			Handler: a.toolUpdate,
@@ -439,6 +439,13 @@ func (a *App) MCPTools() []sdk.Tool {
 				"source":     map[string]any{"type": "string"},
 			}, []string{"contact_id", "key", "value"}),
 			Handler: a.toolSetAttribute,
+		},
+		{
+			Name:        "contacts_attribute_definitions_list",
+			Description: "READ ONLY. List all custom attribute definitions for the current project: attribute_defs:[{key,label,type,enum_values,required,sort_order,is_system}], count. Includes built-in defaults even before the project's first contact; persisted project definitions take precedence. enum_values is an array of allowed strings for select/multi_select and [] for unrestricted types. Types: text/number/date/bool/select/multi_select/url. Use before research-to-CRM promotion, contacts_update or contacts_set_attribute; do not guess keys or allowed values. No arguments required (project scope supplied by the platform). Never creates definitions, modifies contacts, emits events or sends messages. Example call: {}.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "openWorldHint": false},
+			HandlerCtx:  a.toolAttributeDefinitionsList,
 		},
 		{
 			Name:        "contacts_define_attribute",
@@ -1371,6 +1378,9 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	patch, _ := args["patch"].(map[string]any)
 	if id == 0 || patch == nil {
 		return nil, errors.New("id and patch required")
+	}
+	if _, present := args["attributes"]; present {
+		return nil, errors.New("attributes must be inside patch.attributes as an array of {key,value,source?}; use contacts_attribute_definitions_list to discover keys and types")
 	}
 	source, _ := args["source"].(string)
 	c, verifications, err := updateContactWithEmailVerification(ctx, pid, id, patch, source)
@@ -2865,6 +2875,9 @@ func parseAttributeWrites(raw any, patchSource string) ([]attributeWrite, error)
 		}
 		if seen[key] {
 			return nil, fmt.Errorf("attributes[%d]: duplicate key %q", i, key)
+		}
+		if _, present := m["value"]; !present {
+			return nil, fmt.Errorf("attributes[%d]: 'value' required; use explicit null to clear an optional attribute", i)
 		}
 		seen[key] = true
 		src := strings.TrimSpace(anyString(m["source"]))

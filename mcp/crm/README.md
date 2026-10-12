@@ -1,4 +1,13 @@
-# CRM v0.9.23
+# CRM v0.9.24
+
+Release `crm/v0.9.24`: adds the explicitly read-only MCP tool
+`contacts_attribute_definitions_list` to discover project attribute keys, types,
+required flags and allowed values before research-to-CRM promotion. Discovery
+uses SELECT only, the read pool and request cancellation; built-in defaults are
+returned without lazy database writes. `contacts_update` now documents and
+schemas its nested attribute array, native types, merge/clear semantics and
+provenance. Missing attribute values are rejected rather than clearing data.
+CRM pins app-sdk v0.100.0. No migrations, Messaging changes or production repair.
 
 Release `crm/v0.9.23`: save first-outreach drafts for existing contacts and
 outbound follow-ups without requiring an inbound conversation. New messages
@@ -173,6 +182,31 @@ blocks sends and messageable audiences. Custom values and segment operands retai
 their declared number, boolean, date, string or multi-select types. Missing and
 unset attributes match `is_null`. Multi-select equality compares sets;
 `contains` tests membership.
+
+Agents can discover definitions with `contacts_attribute_definitions_list({})`.
+This explicitly read-only tool returns `attribute_defs` and `count`; each
+definition includes `key`, `label`, `type`, `enum_values` (always an array),
+`required`, `sort_order`, and `is_system`. Project definitions override built-in
+defaults. Discover definitions before promoting researched contacts; do not
+create definitions merely to inspect them.
+
+`contacts_update` attributes are an array inside `patch`, not a dictionary:
+
+```json
+{"id":123,"patch":{"attributes":[{"key":"lead_score","value":88},{"key":"do_not_contact","value":false,"source":"human"}]},"source":"agent:Research"}
+```
+
+Each entry requires `key` and `value`; per-entry `source` overrides the outer
+provenance. Values must match existing definitions: finite JSON numbers, JSON
+booleans, strings for text/url/date/select, arrays of allowed strings for
+multi_select. Update patches do **not** support the legacy scalar-string
+conversion available through `contacts_set_attribute`.
+Attributes merge by key: omitted keys and an empty array leave values unchanged;
+explicit `value:null` clears an optional attribute. Missing values are rejected,
+not treated as clears. Invalid batches do not partially apply scalar, channel
+or attribute updates. `channels` replaces the channel list; primary email/phone
+are read-only mirrors. Include `patch.expected_updated_at` for optimistic
+concurrency, then read back with `contacts_get` before advancing readiness.
 
 Static segments populate a snapshot on creation, conversion to static, and
 explicit definition updates. Materialization replaces the snapshot atomically.
