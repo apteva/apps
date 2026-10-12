@@ -23,6 +23,9 @@ func flushCarrierTest(t *testing.T, a *App) {
 	t.Helper()
 	for i := 0; i < 30; i++ {
 		if _, err := a.carrierTelemetry.flush(t.Context(), a.db(), time.Now()); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				continue
+			} // bounded background retry
 			t.Fatal(err)
 		}
 		if len(a.carrierTelemetry.queue) == 0 && len(a.carrierTelemetry.pending) == 0 {
@@ -318,5 +321,32 @@ func TestCarrierEvidenceGracefulShutdownRetainsTrigger(t *testing.T) {
 	a.carrierTelemetry.flushMu.Unlock()
 	if !errors.Is(err, errCarrierTelemetryBusy) || time.Since(started) > 100*time.Millisecond {
 		t.Fatal("shutdown blocked on collector", err)
+	}
+}
+
+func TestCarrierEvidenceTimedOutBatchRetainsAndRetries(t *testing.T) {
+	a, _ := withTelephonyTestContext(t, &answerPlatform{})
+	row := recoveryCall(t, a, "batch-retry", "telnyx")
+	for i := 0; i < 20; i++ {
+		a.carrierTelemetry.enqueue(carrierTelemetryRecord{ProjectID: row.ProjectID, CallID: row.ID, Kind: "event", At: ringTime(time.Now())})
+	}
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	if _, err := a.carrierTelemetry.flush(ctx, a.db(), time.Now()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
+	}
+	if len(a.carrierTelemetry.pending) != 20 || a.carrierTelemetry.nextBatch != 10 {
+		t.Fatalf("lost batch or no backoff: pending=%d next=%d", len(a.carrierTelemetry.pending), a.carrierTelemetry.nextBatch)
+	}
+	if _, err := a.carrierTelemetry.flush(t.Context(), a.db(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if len(a.carrierTelemetry.pending) != 10 || a.carrierTelemetry.nextBatch != 18 {
+		t.Fatal("retry did not commit the reduced batch")
+	}
+	flushCarrierTest(t, a)
+	var count int
+	if err := a.db().db.QueryRow(`SELECT count(*) FROM telephony_carrier_transport_history WHERE call_id=?`, row.ID).Scan(&count); err != nil || count != 20 {
+		t.Fatalf("lost/duplicated evidence: %d %v", count, err)
 	}
 }

@@ -169,3 +169,13 @@ test("RTC retries retain one recovery chain with distinct attempts and terminal 
   expect(audio.recovering).toBe(false);
  }finally{audio.stop();timer.mockRestore();}
 });
+
+test("audio processing delay uses decoded samples and omits unavailable/reset counters",()=>{
+ const sample=(seconds:number,changes:Record<string,unknown>={})=>new Map([["in",{id:"in",type:"inbound-rtp",kind:"audio",timestamp:seconds*1000,ssrc:1,packetsReceived:seconds*50,totalProcessingDelay:seconds*48000*.012,totalSamplesDecoded:seconds*48000,...changes}]]) as unknown as RTCStatsReport;
+ const a=rtcStatistics(sample(1));const b=rtcStatistics(sample(2),a.previous);
+ expect(b.metrics.receiver_processing_interval_ms).toBeCloseTo(12,6);
+ expect(b.states.receiver_processing).toBe("per_decoded_sample");
+ expect(rtcStatistics(sample(2,{packetsReceived:150}),a.previous).metrics.receiver_processing_interval_ms).toBeCloseTo(12,6);
+ for(const changes of [{totalSamplesDecoded:undefined},{totalSamplesDecoded:48000},{totalProcessingDelay:0},{ssrc:2}])expect(rtcStatistics(sample(2,changes),a.previous).metrics.receiver_processing_interval_ms).toBeUndefined();
+ expect(rtcStatistics(sample(1,{totalSamplesDecoded:undefined})).states.receiver_processing).toBe("unavailable");
+});

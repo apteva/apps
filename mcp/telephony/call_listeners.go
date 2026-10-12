@@ -502,6 +502,7 @@ func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, status, map[string]any{"code": reason})
 		return
 	}
+	authenticatedCarrierHeaders(w, r, row)
 	tap := a.listeners.lookup(id)
 	if tap == nil {
 		http.Error(w, "media disconnected", 409)

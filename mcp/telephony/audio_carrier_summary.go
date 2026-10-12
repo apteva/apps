@@ -58,6 +58,14 @@ func addCarrierAudioSummary(s *audioDashboardSummary, r *carrierTelemetryRecord)
 		if v.ReceiveExpectation == "intentional_hold" {
 			carrier.Reason = "intentional_hold"
 		}
+		m["sip_activation_dropped_packets"] = float64(v.RTP.ActivationDropped)
+		m["sip_pre_bridge_drained_packets"] = float64(v.RTP.EarlyPackets)
+		m["sip_bye_failures"] = float64(v.Signal.BYEFailures)
+		if v.RTP.KernelDropsAvailable {
+			m["sip_socket_receive_drops"] = float64(v.RTP.KernelDrops)
+			m["sip_live_socket_receive_drops"] = float64(max(0, v.RTP.KernelDrops-v.RTP.PreBridgeSocketDrops))
+			add("processing_error", "internal_processing", v.RTP.KernelDrops > v.RTP.PreBridgeSocketDrops)
+		}
 		m["sip_packets_received"] = float64(v.RTP.Packets)
 		m["sip_bytes_received"] = float64(v.RTP.Bytes)
 		m["sip_last_packet_age_ms"] = v.RTP.LastPacketAgeMS
@@ -98,7 +106,7 @@ func addCarrierAudioSummary(s *audioDashboardSummary, r *carrierTelemetryRecord)
 		m["carrier_send_dropped_ms"] = max(m["carrier_send_dropped_ms"], float64(v.Pacer.DroppedMS))
 		m["carrier_send_max_queue_ms"] = max(m["carrier_send_max_queue_ms"], float64(v.Pacer.MaxQueueMS))
 		add("sequence_gaps", "carrier_to_telephony", v.RTP.SequenceLoss > 0)
-		add("carrier_error", "carrier_to_telephony", v.RTP.AuthErrors+v.RTP.DecryptErrors+v.RTP.ReadErrors+v.RTP.ReplayErrors+v.RTP.SendErrors+v.Signal.RefreshFailures > 0)
+		add("carrier_error", "carrier_to_telephony", v.RTP.AuthErrors+v.RTP.DecryptErrors+v.RTP.ReadErrors+v.RTP.ReplayErrors+v.RTP.SendErrors+v.Signal.RefreshFailures+v.Signal.BYEFailures > 0)
 		add("processing_error", "internal_processing", v.RTP.DecodeErrors > 0)
 		add("dropped_audio", "internal_processing", v.Jitter.DroppedMS+v.Jitter.LateDroppedMS > 0 || v.Pacer.DroppedMS > 0)
 		// Filled audio describes local playback substitution, not WebRTC packet loss.

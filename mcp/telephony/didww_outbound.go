@@ -134,6 +134,7 @@ type outboundSIPSession struct {
 	refreshCSeq    uint32
 	inviteDone     chan struct{}
 	cleanupOnce    sync.Once
+	terminationErr error // published by closing inviteDone
 }
 
 func (g *sipGateway) outboundSessionByCall(callID string) *outboundSIPSession {
@@ -233,6 +234,7 @@ func (g *sipGateway) startSIPOutbound(row *callRow, settings didwwSIPSettings, t
 	if err != nil {
 		return err
 	}
+	media.startEarlyReceiver()
 	body, err := buildOutboundSIPOffer(g.cfg, settings, media.localPort, localKey)
 	if err != nil {
 		media.Close()
@@ -315,6 +317,7 @@ func (s *outboundSIPSession) waitAnswer() {
 			s.diagnostics.event("sip_bye_requested", "local", "call_ended", 0)
 			s.signalMu.Lock()
 			err := s.dialog.Bye(byeCtx)
+			s.terminationErr = err
 			s.signalMu.Unlock()
 			if err != nil {
 				s.diagnostics.event("sip_bye_result", "local", transportEvidenceError(err), 0)
@@ -335,6 +338,16 @@ func (s *outboundSIPSession) waitAnswer() {
 		OnResponse: func(response *sip.Response) error {
 			if response != nil {
 				s.diagnostics.event("sip_invite_response", "carrier", "", response.StatusCode)
+			}
+			if response != nil && response.IsProvisional() && len(response.Body()) > 0 {
+				// Validate for diagnostics only. The final answer independently
+				// negotiates codec/source/keys; early audio is intentionally drained.
+				_, e := parseSIPMediaOfferCodecs(response.Body(), s.gateway.cfg, s.settings.codecs)
+				detail := "local_ringback_early_media_drained"
+				if e != nil {
+					detail = "unsupported_provisional_media_drained"
+				}
+				s.diagnostics.event("sip_early_media", "carrier", detail, response.StatusCode)
 			}
 			if response != nil && response.IsProvisional() && response.StatusCode >= 180 {
 				_ = s.gateway.app.db().updateStatus(s.callID, "ringing", "")
@@ -374,6 +387,9 @@ func (s *outboundSIPSession) waitAnswer() {
 	}
 	s.media.offer = answer
 	s.media.remote = net.UDPAddrFromAddrPort(netip.AddrPortFrom(answer.RemoteAddress, uint16(answer.RemotePort)))
+	if s.media.early != nil {
+		s.media.early.answered.Store(true)
+	}
 	s.diagnostics.attach(s.media, s.dialog.ID)
 	s.diagnostics.event("sip_answer", "carrier", "", 200)
 	ackCtx, stopAck := context.WithTimeout(context.Background(), 3*time.Second)
@@ -422,7 +438,14 @@ func (s *outboundSIPSession) waitAnswer() {
 
 func (s *outboundSIPSession) hangup() error {
 	s.finish("local", nil)
-	return nil
+	timer := time.NewTimer(4 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-s.inviteDone:
+		return s.terminationErr
+	case <-timer.C:
+		return errors.New("outbound SIP termination not confirmed within deadline")
+	}
 }
 
 func (s *outboundSIPSession) finish(leg string, cause error) {

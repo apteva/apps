@@ -676,7 +676,7 @@ func (a *App) sampleAudioHealth(row *callRow, h *softphoneHub, w *websocketWrite
 		if e.State == "audio_degraded" {
 			topic = "telephony.audio.degraded"
 		}
-		ctx.Emit(topic, map[string]any{"call_id": row.ID, "provider": row.CarrierSlug, "stage": e.Stage, "state": e.State, "reason": e.Reason, "signal": e.Signal, "occurred_at": e.At})
+		a.observeCallNotification(row.ProjectID, row.ID, topic, map[string]any{"call_id": row.ID, "provider": row.CarrierSlug, "stage": e.Stage, "state": e.State, "reason": e.Reason, "signal": e.Signal, "occurred_at": e.At})
 	}
 	config := ctx.Config()
 	minimum := durationSetting(config, "audio_alert_min_calls", 3, 0, 256)
@@ -729,6 +729,12 @@ func (a *audioAlertCorrelator) expire(now time.Time) []audioAlert {
 	return out
 }
 func (a *App) runAudioTelemetryTick(c context.Context, ctx *sdk.AppCtx) error {
+	if err := a.flushCallNotifications(c); err != nil {
+		ctx.Logger().Warn("notification outbox persistence", "err", err)
+	}
+	if dropped := a.notifications.dropped.Swap(0); dropped > 0 {
+		ctx.Logger().Warn("notification collection overflow", "events_dropped", dropped)
+	}
 	if err := a.audioTransports.flush(c, a.db(), time.Now()); err != nil {
 		ctx.Logger().Warn("browser transport telemetry write failed", "error", err)
 	}

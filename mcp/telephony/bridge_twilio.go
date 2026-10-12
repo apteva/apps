@@ -254,7 +254,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		globalCtx.Logger().Warn("parse audio bridge url", "err", err, "url", redactURL(row.AudioBridgeURL))
 		return
 	}
-	dialer := ws.Dialer{}
+	dialer := a.correlatedBridgeDialer(row)
 	core, buffered, _, err := dialer.Dial(bridge.ctx, coreURL.String())
 	if err != nil {
 		closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "realtime bridge rejected")
