@@ -74,6 +74,19 @@ customer conversations, lists, segments, opportunities, and pipelines.
 
 ## Typed attributes and dossier readiness
 
+- Call the read-only `contacts_attribute_definitions_list` with `{}` before
+  research-to-CRM promotion or attribute writes. It returns `attribute_defs`
+  (keys, types, required flags, allowed `enum_values`, labels and system flags)
+  and `count`, including built-in defaults without database writes. Do not guess
+  keys/options or use `contacts_define_attribute` just to inspect definitions.
+- Batch updates use **an array inside patch.attributes**, not a dictionary:
+  `{"id":123,"patch":{"attributes":[{"key":"lead_score","value":88},{"key":"do_not_contact","value":false}]},"source":"agent:Research"}`.
+  Each item requires key/value and may override source. Update patches require
+  native JSON types; they do not perform legacy number/bool string conversion.
+  Omitted attributes and `[]` leave existing values unchanged; explicit
+  `value:null` clears only optional values. Missing values fail without clearing.
+  Invalid batches do not partially update the contact. Use
+  `patch.expected_updated_at` for stale-edit protection and verify readback.
 - `contacts_set_attribute` writes a value according to its project-owned
   definition. Use native JSON numbers for numeric scores and booleans for flags:
   `{"contact_id":123,"key":"opportunity_score","value":88}` and
