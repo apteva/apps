@@ -36,6 +36,7 @@ type mediaStageSnapshot struct {
 	ConnectionID    string          `json:"connection_id,omitempty"`
 	Frames          int64           `json:"frames"`
 	Bytes           int64           `json:"bytes"`
+	FirstAt         string          `json:"first_at,omitempty"`
 	LastAt          string          `json:"last_at,omitempty"`
 	LastClockMS     float64         `json:"last_clock_ms"`
 	MaxGapMS        float64         `json:"max_gap_ms"`
@@ -74,6 +75,9 @@ func (d *liveAudioTimeline) observe(stage string, bytes int, started time.Time, 
 			}
 		}
 	}
+	if s.FirstAt == "" {
+		s.FirstAt = now.UTC().Format(time.RFC3339Nano)
+	}
 	s.ConnectionID = connectionID
 	s.Frames++
 	s.Bytes += int64(bytes)
@@ -102,6 +106,7 @@ func (d *liveAudioTimeline) snapshot() (string, map[string]mediaStageSnapshot) {
 }
 
 type serverAudioDiagnostics struct {
+	Startup                microphoneStartup             `json:"startup"`
 	WebRTC                 rtcMediaSnapshot              `json:"webrtc"`
 	Socket                 audioSocketSnapshot           `json:"browser_socket"`
 	Health                 audioHealthSnapshot           `json:"audio_health"`
@@ -136,7 +141,10 @@ func (h *softphoneHub) serverAudioSnapshot() serverAudioDiagnostics {
 			rtc = mergeRTCSnapshots(rtc, c.stats.snapshot())
 		}
 	}
-	return serverAudioDiagnostics{Socket: socket, Health: health, Reception: h.reception.snapshot(mediaClockMS(), h.carrierForward != nil && !h.held && (h.status == "answered" || h.status == "in-progress")), CarrierPacer: h.pacerStats.snapshot(), Process: sampleMediaProcess(), CaptureStaleBytes: h.captureStaleBytes, Epoch: epoch, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Stages: stages,
+	startup := h.startup
+	startup.Readiness = append([]mediaReadinessEvent(nil), startup.Readiness...)
+	startup.Events = append([]startupDrop(nil), startup.Events...)
+	return serverAudioDiagnostics{Startup: startup, Socket: socket, Health: health, Reception: h.reception.snapshot(mediaClockMS(), h.carrierForward != nil && !h.held && (h.status == "answered" || h.status == "in-progress")), CarrierPacer: h.pacerStats.snapshot(), Process: sampleMediaProcess(), CaptureStaleBytes: h.captureStaleBytes, Epoch: epoch, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Stages: stages,
 		WebRTC:         rtc,
 		CarrierForward: mergeLiveAudioSnapshots(h.completedCarrierForward, h.carrierForward.audioSnapshot()),
 		ToBrowser:      mergeLiveAudioSnapshots(h.completedBrowser, h.browser.audioSnapshot()), ToCarrierBridge: mergeLiveAudioSnapshots(h.completedPeer, h.peer.audioSnapshot()),

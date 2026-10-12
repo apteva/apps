@@ -86,7 +86,18 @@ export interface SoftphoneAudioHealth {
   reason?: "audio_degraded";
   stages: Record<string, {state: "healthy" | "audio_degraded" | "inactive"; reason?: string; signal?: string; last_bad_at?: string}>;
 }
+export interface SoftphoneMediaReadiness {
+  type: "media.ready" | "media.not_ready";
+  call_id: string;
+  connection_id: string;
+  revision: number;
+  bridge_generation: number;
+  occurred_at: string;
+  reason: string;
+}
 export interface SoftphoneCallbacks {
+  /** Server path readiness; onState/live also requires local browser readiness. */
+  onMediaReadiness?: (event: SoftphoneMediaReadiness) => void;
   onAudioHealth?: (health: SoftphoneAudioHealth) => void;
   refreshMediaURL?: (recovery?: MediaRecoveryContext) => Promise<string>;
   onSessionEvent?: (event: MediaSessionEvent) => void;
@@ -462,6 +473,10 @@ export class SoftphoneSession {
   private opened = false;
   private cancelWorkerStart?: () => void;
   private microphoneTransportReady = false;
+  private sessionReady = false;
+  private mediaPathReady?: boolean;
+  private mediaRevision = 0;
+  private callAnswered = false;
   private playbackHeld = false;
   private mediaSocketConnected = false;
   private ringback: (() => void) | null = null;
@@ -550,7 +565,7 @@ export class SoftphoneSession {
         this.worker?.postMessage({type:"clock.reset",paused:this.ctx?.state !== "running"});
         this.setPlaybackObservation(this.ctx?.state === "running" && this.microphoneTransportReady && !this.playbackHeld, "audio_context_paused");
         if (this.ctx?.state === "suspended" || (this.ctx?.state as string) === "interrupted") this.callbacks.onState?.("reconnecting", "Browser paused audio. Reconnect audio to continue.");
-        else if (this.ctx?.state === "running" && this.microphoneTransportReady) this.callbacks.onState?.("live");
+        else if (this.ctx?.state === "running") this.updateLiveState();
       };
       this.levelTimer = setInterval(() => {
         this.callbacks.onLevels?.(this.micLevel, this.speakerLevel);
@@ -566,7 +581,7 @@ export class SoftphoneSession {
 
   private ensureOpen(): void { if (this.closed) { this.teardown(); throw new Error("Audio session was cancelled."); } }
 
-  async resumeAudio(): Promise<void> { await this.ctx?.resume(); if (this.microphoneTransportReady) this.callbacks.onState?.("live"); }
+  async resumeAudio(): Promise<void> { await this.ctx?.resume(); this.updateLiveState(); }
   setOutputVolume(value:number): void { if (this.output) this.output.gain.value=Math.max(0,Math.min(1,value)); }
   sendDTMF(digits: string): void { if (/^[0-9*#]+$/.test(digits)) this.sendText(JSON.stringify({type:"dtmf",digits})); }
 
@@ -642,6 +657,7 @@ export class SoftphoneSession {
           this.reportedPlaybackIDs.clear();this.reportedCaptureQueueIDs.clear();
           this.opened = true;
           this.mediaSocketConnected = true;
+          this.mediaPathReady=undefined;this.mediaRevision=0;this.sessionReady=false;
           this.startRTTProbe();
           finish();
         } else if (message?.type === "runtime.event") {
@@ -710,7 +726,18 @@ export class SoftphoneSession {
     if (this.closed) return;
     try {
       const parsed = JSON.parse(data) as { type?: string; detail?: string; nonce?: number; capture_sequence_gaps?:number; call_id?: string; status?: string };
-      if (parsed.type === "dtmf.error" || parsed.type === "dtmf.sent") { this.callbacks.onNotice?.(parsed.type === "dtmf.sent" ? "Keypad tone sent" : parsed.detail || "Keypad tone failed");
+      if(parsed.type === "media.ready" || parsed.type === "media.not_ready") {
+        const event=parsed as unknown as SoftphoneMediaReadiness;
+        if(!Number.isSafeInteger(event.revision)||event.revision<=this.mediaRevision)return;
+        this.mediaRevision=event.revision;this.mediaPathReady=event.type==="media.ready";
+        try { this.callbacks.onMediaReadiness?.(event); } catch { /* Observers cannot gate audio. */ }
+        if(!this.mediaPathReady&&this.callAnswered)this.callbacks.onState?.("reconnecting","Connecting carrier audio…");
+        this.updateLiveState();
+      } else if (parsed.type === "ready") {
+        this.sessionReady=true;
+        this.worker?.postMessage({type:"microphone.ready",value:true});
+        this.updateLiveState();
+      } else if (parsed.type === "dtmf.error" || parsed.type === "dtmf.sent") { this.callbacks.onNotice?.(parsed.type === "dtmf.sent" ? "Keypad tone sent" : parsed.detail || "Keypad tone failed");
       } else if (parsed.type === "pong") {
         this.diagnostics.captureSequenceGaps = parsed.capture_sequence_gaps ?? this.diagnostics.captureSequenceGaps;
         if (typeof parsed.nonce === "number" && parsed.nonce >= 0) this.diagnostics.rttMs = Math.max(0, Math.round(performance.now() - parsed.nonce));
@@ -729,6 +756,8 @@ export class SoftphoneSession {
         if ((parsed as SoftphoneCallStatus).hold_state && (parsed as SoftphoneCallStatus).hold_state !== "active") {
           this.worker?.postMessage({ type: "flush" });
         }
+        this.callAnswered=["answered","in-progress"].includes(parsed.status);
+        this.updateLiveState();
         this.callbacks.onCallStatus?.(parsed as unknown as SoftphoneCallStatus);
       } else if (parsed.type === "call.error") {
         this.recordSessionEvent({timestamp:new Date().toISOString(),action:"carrier",outcome:"audio_error",detail:parsed.detail?.slice(0,160)});
@@ -756,16 +785,20 @@ export class SoftphoneSession {
       } else if (parsed.type === "peer.disconnected") {
         this.microphoneTransportReady = false;
         this.setPlaybackObservation(false, "carrier_disconnected");
-        this.worker?.postMessage({ type: "microphone.ready", value: false });
+        // Keep fresh capture flowing to the bounded server attachment reserve.
         this.worker?.postMessage({ type: "flush" });
         this.callbacks.onState?.("reconnecting", "Carrier audio interrupted; reconnecting…");
       } else if (parsed.type === "peer.connected") {
         this.microphoneTransportReady = true;
         this.setPlaybackObservation(this.ctx?.state === "running" && !this.playbackHeld, "carrier_connected");
         this.worker?.postMessage({ type: "microphone.ready", value: true });
-        this.callbacks.onState?.("live", this.opened ? undefined : "Audio reconnected");
+        this.updateLiveState();
       }
     } catch { /* Status frames are advisory. */ }
+  }
+
+  private updateLiveState(): void {
+    if(this.sessionReady&&this.callAnswered&&this.microphoneTransportReady&&this.mediaPathReady!==false&&this.ctx?.state==="running") this.callbacks.onState?.("live");
   }
 
   private startRTTProbe(): void {
@@ -876,6 +909,7 @@ export class SoftphoneSession {
     this.setPlaybackObservation(false, "observation_ended");
     this.stopRingback();
     this.microphoneTransportReady = false;
+    this.sessionReady=this.callAnswered=false;this.mediaPathReady=undefined;this.mediaRevision=0;
     this.cancelWorkerStart?.();
     this.cancelWorkerStart = undefined;
     try { this.sendDiagnostics(); } catch { /* diagnostics cannot prevent device cleanup */ }

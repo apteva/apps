@@ -392,6 +392,11 @@ func (p *websocketWriterPump) audioSnapshot() liveAudioQueueSnapshot {
 func (p *websocketWriterPump) QueueAudio(data []byte) { p.queueAudio(data, 0) }
 
 func (p *websocketWriterPump) queueAudio(data []byte, headerBytes int) {
+	p.queueAudioAt(data, headerBytes, time.Now())
+}
+
+// Preserve the original receipt time through a short attachment handoff.
+func (p *websocketWriterPump) queueAudioAt(data []byte, headerBytes int, received time.Time) {
 	pcmBytes := (len(data) - headerBytes) &^ 1
 	if pcmBytes <= 0 {
 		return
@@ -439,7 +444,7 @@ func (p *websocketWriterPump) queueAudio(data []byte, headerBytes int) {
 			return
 		}
 	}
-	p.audio <- websocketWriteRequest{op: ws.OpBinary, payload: append([]byte(nil), data...), timeout: liveAudioWriteTimeout, enqueued: time.Now(), pcmBytes: pcmBytes}
+	p.audio <- websocketWriteRequest{op: ws.OpBinary, payload: append([]byte(nil), data...), timeout: liveAudioWriteTimeout, enqueued: received, pcmBytes: pcmBytes}
 	p.audioBytes += pcmBytes
 	p.audioStats.MaxQueuedMS = max(p.audioStats.MaxQueuedMS, p.audioBytes*1000/48000)
 }

@@ -48,26 +48,29 @@ import (
 // unattached side is dropped rather than buffered, because late audio on a
 // phone call is worse than no audio.
 type softphoneHub struct {
-	telemetry               audioCallTelemetry
-	pacerStats              *livePacerStats
-	captureStaleBytes       int64
-	carrierForward          *websocketWriterPump
-	completedCarrierForward liveAudioQueueSnapshot
-	captureTransitBase      float64
-	captureTransitSet       bool
-	captureTransitExcessMS  float64
-	callID                  string
-	timeline                liveAudioTimeline
-	playbackSequence        uint32
-	framedVersion           int
-	reception               carrierReception
-	deliveryNotice          string
-	framedBrowser           *websocketWriterPump
-	captureTimestampMS      float64
-	captureWorkerAgeMS      float64
-	completedBrowser        liveAudioQueueSnapshot
-	completedPeer           liveAudioQueueSnapshot
-	completedRTC            rtcMediaSnapshot
+	readinessBrowser                                         *websocketWriterPump
+	readinessReason                                          string
+	readinessRevision, readinessGeneration, bridgeGeneration uint64
+	telemetry                                                audioCallTelemetry
+	pacerStats                                               *livePacerStats
+	captureStaleBytes                                        int64
+	carrierForward                                           *websocketWriterPump
+	completedCarrierForward                                  liveAudioQueueSnapshot
+	captureTransitBase                                       float64
+	captureTransitSet                                        bool
+	captureTransitExcessMS                                   float64
+	callID                                                   string
+	timeline                                                 liveAudioTimeline
+	playbackSequence                                         uint32
+	framedVersion                                            int
+	reception                                                carrierReception
+	deliveryNotice                                           string
+	framedBrowser                                            *websocketWriterPump
+	captureTimestampMS                                       float64
+	captureWorkerAgeMS                                       float64
+	completedBrowser                                         liveAudioQueueSnapshot
+	completedPeer                                            liveAudioQueueSnapshot
+	completedRTC                                             rtcMediaSnapshot
 
 	mu      sync.Mutex
 	peer    *websocketWriterPump
@@ -78,6 +81,8 @@ type softphoneHub struct {
 	direction           string
 	status              string
 	preAnswerMicSamples int64
+	startup             microphoneStartup
+	pendingMicrophone   []startupPCM
 	captureSequenceSet  bool
 	captureExpected     uint32
 	captureSequenceGaps int
@@ -149,6 +154,15 @@ func (h *softphoneHub) setCallState(direction, status string) {
 	if h.status != "answered" && h.status != "in-progress" {
 		h.stopCoachLocked(nil, "call_state_changed")
 	}
+	if h.status == "answered" || h.status == "in-progress" {
+		if h.startup.AnsweredAt == "" {
+			h.startup.AnsweredAt = ringTime(time.Now())
+		}
+		h.flushStartupMicrophoneLocked(time.Now())
+	} else {
+		h.clearStartupMicrophoneLocked("call_not_answered", time.Now())
+	}
+	h.publishReadinessLocked()
 	h.reception.pause(h.held || (h.status != "answered" && h.status != "in-progress"))
 }
 
@@ -156,8 +170,12 @@ func (h *softphoneHub) setHeld(held bool) {
 	h.mu.Lock()
 	h.held = held
 	if held {
+		h.clearStartupMicrophoneLocked("hold", time.Now())
+	}
+	if held {
 		h.stopCoachLocked(nil, "call_held")
 	}
+	h.publishReadinessLocked()
 	h.reception.pause(held || (h.status != "answered" && h.status != "in-progress"))
 	if held && h.browser != nil {
 		h.browser.FlushAudio()
@@ -196,6 +214,16 @@ func (h *softphoneHub) setPeer(w *websocketWriterPump) (replaced *websocketWrite
 		h.stopCoachLocked(nil, "carrier_reconnected")
 	}
 	replaced, h.peer = h.peer, w
+	if w != nil && replaced != w {
+		h.bridgeGeneration++
+	}
+	if w != nil {
+		if h.startup.PeerAttachedAt == "" {
+			h.startup.PeerAttachedAt = ringTime(time.Now())
+		}
+		h.flushStartupMicrophoneLocked(time.Now())
+	}
+	h.publishReadinessLocked()
 	return replaced
 }
 
@@ -203,6 +231,7 @@ func (h *softphoneHub) setBrowser(w *websocketWriterPump) (replaced *websocketWr
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.stopCoachLocked(nil, "adviser_reconnected")
+	h.clearStartupMicrophoneLocked("browser_replaced", time.Now())
 	replaced, h.browser = h.browser, w
 	h.browserEpoch = newSecret()
 	h.whisperBrowser = nil
@@ -225,6 +254,7 @@ func (h *softphoneHub) clearPeer(w *websocketWriterPump) bool {
 	if h.peer == w {
 		h.stopCoachLocked(nil, "carrier_disconnected")
 		h.peer = nil
+		h.publishReadinessLocked()
 		return true
 	}
 	return false
@@ -240,6 +270,7 @@ func (h *softphoneHub) clearBrowser(w *websocketWriterPump) {
 	if h.browser == w {
 		h.stopCoachLocked(nil, "adviser_disconnected")
 		h.browserEpoch = newSecret()
+		h.clearStartupMicrophoneLocked("browser_disconnected", time.Now())
 		h.browser = nil
 	}
 }
@@ -260,6 +291,7 @@ func (h *softphoneHub) markReady(w *websocketWriterPump) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.readyBrowser = w
+	h.publishReadinessLocked()
 }
 
 // readyBrowserWriter returns the browser writer only after it has been sent
@@ -323,13 +355,27 @@ func (h *softphoneHub) forwardMicrophone(source *websocketWriterPump, data []byt
 	if h.closed || h.browser != source || h.held {
 		return
 	}
+	now := time.Now()
+	if h.startup.FirstCaptureAt == "" {
+		h.startup.FirstCaptureAt = ringTime(now)
+	}
 	if h.status != "answered" && h.status != "in-progress" {
 		h.preAnswerMicSamples += int64(len(data) / 2)
+		if h.startup.FirstPreAnswerAt == "" {
+			h.startup.FirstPreAnswerAt = ringTime(now)
+		}
+		h.startup.LastPreAnswerAt = ringTime(now)
 		return
 	}
-	if h.peer != nil {
-		h.peer.QueueAudio(data)
+	h.flushStartupMicrophoneLocked(now)
+	if h.peer == nil {
+		h.bufferStartupMicrophoneLocked(data, now)
+		return
 	}
+	if h.startup.FirstForwardedAt == "" {
+		h.startup.FirstForwardedAt = ringTime(now)
+	}
+	h.peer.QueueAudio(data)
 }
 
 type softphoneRegistry struct {
@@ -751,6 +797,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 				return
 			case <-ticker.C:
 				ticks++
+				hub.publishReadiness()
 				hub.carrierDeliveryNotice()
 				a.sampleAudioHealth(row, hub, writer, time.Now())
 				if (ticks%5 == 0 || hub.telemetry.pending()) && hub.readyBrowserWriter() == writer {

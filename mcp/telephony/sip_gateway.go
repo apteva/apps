@@ -484,6 +484,7 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 		ctx: sessionCtx, cancel: cancel, inviteTx: transaction, initialACK: make(chan struct{}), remoteTarget: request.Contact().Address, timer: timer,
 	}
 	session.diagnostics = g.app.newSIPDiagnostics(call, dialog.ID)
+	session.diagnostics.codecs(request.Body(), settings.Codecs, offer.Codec, "inbound_offer")
 	session.local.config = settings
 	session.remoteSeq.Store(request.CSeq().SeqNo)
 	dialog.OnState(func(state sip.DialogState) {

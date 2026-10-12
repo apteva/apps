@@ -24,9 +24,10 @@ type rtcIngressEvent struct {
 	ConcealedMS       int       `json:"concealed_ms"`
 }
 type rtcIngressSnapshot struct {
-	Packets uint64 `json:"packets"`
-	Padding uint64 `json:"padding_packets"`
-	Skipped uint64 `json:"observations_skipped"`
+	FirstPacketAt string `json:"first_packet_at,omitempty"`
+	Packets       uint64 `json:"packets"`
+	Padding       uint64 `json:"padding_packets"`
+	Skipped       uint64 `json:"observations_skipped"`
 	// Pion owns the ICE sockets; absence of kernel counters is explicit.
 	SocketDropsAvailable bool              `json:"socket_drops_available"`
 	MaxArrivalGapMS      float64           `json:"max_arrival_gap_ms"`
@@ -34,6 +35,7 @@ type rtcIngressSnapshot struct {
 	Events               []rtcIngressEvent `json:"events,omitempty"`
 }
 type rtcIngressTelemetry struct {
+	firstPacket               atomic.Int64
 	packets, padding, skipped atomic.Uint64
 	maxGap, maxWait           atomic.Int64
 	mu                        sync.Mutex
@@ -44,6 +46,7 @@ type rtcIngressTelemetry struct {
 
 func (d *rtcIngressTelemetry) observe(p *rtp.Packet, at, processed time.Time, queue int, connection string, path uint64, kind string, concealed int) {
 	if kind == "received" {
+		d.firstPacket.CompareAndSwap(0, at.UnixNano())
 		d.packets.Add(1)
 	}
 	if kind == "padding" {
@@ -89,6 +92,9 @@ func (d *rtcIngressTelemetry) observe(p *rtp.Packet, at, processed time.Time, qu
 }
 func (d *rtcIngressTelemetry) snapshot() rtcIngressSnapshot {
 	s := rtcIngressSnapshot{Packets: d.packets.Load(), Padding: d.padding.Load(), Skipped: d.skipped.Load(), MaxArrivalGapMS: float64(d.maxGap.Load()) / 1e6, MaxQueueWaitMS: float64(d.maxWait.Load()) / 1e6}
+	if n := d.firstPacket.Load(); n > 0 {
+		s.FirstPacketAt = ringTime(time.Unix(0, n))
+	}
 	if d.mu.TryLock() {
 		s.Events = chronologicalRing(d.events[:], d.count)
 		d.mu.Unlock()
@@ -98,6 +104,9 @@ func (d *rtcIngressTelemetry) snapshot() rtcIngressSnapshot {
 	return s
 }
 func mergeRTCIngress(a, b rtcIngressSnapshot) rtcIngressSnapshot {
+	if a.FirstPacketAt == "" {
+		a.FirstPacketAt = b.FirstPacketAt
+	}
 	a.Packets += b.Packets
 	a.Padding += b.Padding
 	a.Skipped += b.Skipped

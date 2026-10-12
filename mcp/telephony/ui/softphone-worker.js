@@ -457,8 +457,8 @@ self.onmessage = (event) => {
       break;
     case "microphone.ready":
       if (!message.value) resamplers.clear();
+      if(microphoneReady!==Boolean(message.value)) captureGateOpenedAt=monotonicEpochMS();
       microphoneReady = Boolean(message.value);
-      captureGateOpenedAt=monotonicEpochMS();
       break;
     case "send.telemetry":
       // Monitoring parts may be lost under pressure; microphone audio is

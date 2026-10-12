@@ -385,6 +385,7 @@ func (s *outboundSIPSession) waitAnswer() {
 		s.finishWithStatus("local_error", "failed", err)
 		return
 	}
+	s.diagnostics.codecs(s.dialog.InviteResponse.Body(), s.settings.codecs, answer.Codec, "outbound_final_answer")
 	s.media.offer = answer
 	s.media.remote = net.UDPAddrFromAddrPort(netip.AddrPortFrom(answer.RemoteAddress, uint16(answer.RemotePort)))
 	if s.media.early != nil {
