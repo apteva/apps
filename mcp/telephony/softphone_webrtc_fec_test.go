@@ -3,6 +3,7 @@ package main
 import (
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -54,7 +55,7 @@ func TestRTCFECSDPOptOutOnlyChangesOpusFEC(t *testing.T) {
 	}
 }
 
-func TestRTCFECOffUsesPortableCodecAndKeepsAudio(t *testing.T) {
+func TestRTCFECOffKeepsNativeQualityAndAudio(t *testing.T) {
 	encoder, err := newRTCOpusEncoderWithFEC(32000, false)
 	if err != nil {
 		t.Fatal(err)
@@ -65,11 +66,11 @@ func TestRTCFECOffUsesPortableCodecAndKeepsAudio(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer decoder.Close()
-	if _, ok := encoder.(*rtcGoOpusEncoder); !ok {
-		t.Fatal("opt-out retained native encoder cost")
+	if encoder.capability() == "libopus_fec" {
+		t.Fatal("FEC enabled despite opt-out")
 	}
-	if _, ok := decoder.(*rtcGoOpusDecoder); !ok {
-		t.Fatal("opt-out retained native decoder")
+	if (runtime.GOOS == "linux" || runtime.GOOS == "darwin") && (runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64") && encoder.capability() != "libopus_plc" {
+		t.Fatal("supported bundle did not load", encoder.capability())
 	}
 	packet, samples := make([]byte, 1275), make([]int16, 2880)
 	for i := 0; i < 5; i++ {

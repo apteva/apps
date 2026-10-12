@@ -38,6 +38,16 @@ jobs:
         working-directory: mcp/telephony
       - run: bunx --no-install playwright test -c frontend/outbound-setup.playwright.config.ts
         working-directory: mcp/telephony
+      - run: bunx --no-install playwright test -c frontend/recording-playback.playwright.config.ts
+        working-directory: mcp/telephony
+      - name: Long SIP recording import and playback
+        run: go test -run '^TestLongSIPRecordingImportAndPlaybackMatrix$' -count=1 -timeout 10m -v . > /tmp/telephony-long-recordings.log
+        working-directory: mcp/telephony
+        env:
+          CGO_ENABLED: '0'
+          GOMAXPROCS: '2'
+          TELEPHONY_LONG_RECORDING_TEST: '1'
+          TELEPHONY_LONG_RECORDING_OUTPUT: /tmp/telephony-long-recordings.json
       - run: bun run scripts/build-panels.ts --app telephony
       - run: go build -o /tmp/telephony .
         working-directory: mcp/telephony
@@ -45,4 +55,48 @@ jobs:
         if: always()
         with:
           name: telephony-go-results
-          path: /tmp/telephony-go.jsonl
+          path: |
+            /tmp/telephony-go.jsonl
+            /tmp/telephony-long-recordings.log
+            /tmp/telephony-long-recordings.json
+  native-opus:
+    name: Bundled Opus (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+            musl_arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            musl_arch: aarch64
+          - runner: macos-15-intel
+            arch: amd64
+          - runner: macos-15
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: mcp/telephony
+    env:
+      GOWORK: 'off'
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/telephony/go.mod
+          cache-dependency-path: mcp/telephony/go.sum
+      - name: Verify native runtime and bundled codec (no system Opus required)
+        run: |
+          test "$(go env GOARCH)" = '${{ matrix.arch }}'
+          go test -count=1 -run 'TestRTCOpusBundle|TestRTCNative|TestRTCFECOff|TestRTCOpusCodecCompatibility' -v .
+      - name: Verify musl library with a musl-loader binary
+        if: runner.os == 'Linux'
+        run: |
+          go test -c -ldflags '-I /lib/ld-musl-${{ matrix.musl_arch }}.so.1' -o /tmp/telephony-opus-musl .
+          docker run --rm --network none --user 10001:10001 -e HOME=/tmp \
+            -v /tmp/telephony-opus-musl:/test:ro alpine:3.22 /test \
+            -test.run 'TestRTCOpusBundle|TestRTCNative|TestRTCFECOff|TestRTCOpusCodecCompatibility' -test.v

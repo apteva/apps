@@ -16,12 +16,15 @@ type rtcVoiceControl struct {
 	configurationErrors atomic.Uint64
 }
 type rtcEncoderState struct {
-	FECRequested bool   `json:"fec_requested"`
-	Capability   string `json:"capability"`
-	Bitrate      int    `json:"bitrate_bps"`
-	ExpectedLoss int    `json:"expected_loss_percent"`
-	FEC          bool   `json:"fec_enabled"`
-	UpdatedAt    string `json:"updated_at"`
+	Source         string `json:"source"`
+	LibraryVersion string `json:"library_version,omitempty"`
+	FallbackReason string `json:"fallback_reason,omitempty"`
+	FECRequested   bool   `json:"fec_requested"`
+	Capability     string `json:"capability"`
+	Bitrate        int    `json:"bitrate_bps"`
+	ExpectedLoss   int    `json:"expected_loss_percent"`
+	FEC            bool   `json:"fec_enabled"`
+	UpdatedAt      string `json:"updated_at"`
 }
 
 func (c *rtcVoiceControl) observe(highest uint32, fraction uint8, now time.Time) {

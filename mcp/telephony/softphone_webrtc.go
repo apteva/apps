@@ -581,7 +581,7 @@ func sendRTCAudio(bridge net.Conn, input, signal *websocketWriterPump, track *we
 	}
 	defer encoder.Close()
 	policy := newRTCVoicePolicy(bitrate)
-	stats.voice.codec.Store(&rtcEncoderState{FECRequested: fec, Capability: encoder.capability(), Bitrate: bitrate, ExpectedLoss: 10, FEC: encoder.capability() == "libopus_fec", UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
+	stats.voice.codec.Store(rtcOpusEncoderState(encoder, fec, bitrate, 10, time.Now()))
 	// Keep 20ms frame boundaries and a bounded 120ms outgoing queue. Encoding
 	// and RTP writes are paced outside the hub's carrier receive loop.
 	frames := make(chan rtcPCMFrame, 6)
@@ -664,7 +664,7 @@ func sendRTCAudio(bridge net.Conn, input, signal *websocketWriterPump, track *we
 				if err := encoder.configure(rate, loss); err != nil {
 					stats.voice.configurationErrors.Add(1)
 				} else {
-					stats.voice.codec.Store(&rtcEncoderState{FECRequested: fec, Capability: encoder.capability(), Bitrate: rate, ExpectedLoss: loss, FEC: encoder.capability() == "libopus_fec", UpdatedAt: now.UTC().Format(time.RFC3339Nano)})
+					stats.voice.codec.Store(rtcOpusEncoderState(encoder, fec, rate, loss, now))
 				}
 			}
 			if clock.sent && clock.slot(now) <= clock.lastSlot {

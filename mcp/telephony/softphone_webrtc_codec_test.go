@@ -5,6 +5,7 @@ import (
 	"github.com/pion/opus"
 	"math"
 	"testing"
+	"time"
 )
 
 func TestRTCNativeFailureRetainsPortableCodec(t *testing.T) {
@@ -15,6 +16,10 @@ func TestRTCNativeFailureRetainsPortableCodec(t *testing.T) {
 	defer e.Close()
 	if e.capability() != "go_opus_plc" {
 		t.Fatal("claimed FEC on the portable fallback")
+	}
+	state := rtcOpusEncoderState(e, true, 32000, 10, time.Now())
+	if state.Source != "portable" || state.FallbackReason != "native_initialization_failed" || state.FEC {
+		t.Fatal(state)
 	}
 	pcm, out := make([]float32, 960), make([]byte, 1275)
 	if n, err := e.EncodeFloat32(pcm, out); err != nil || n < 1 {

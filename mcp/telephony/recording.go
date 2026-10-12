@@ -25,21 +25,22 @@ type recordingSettings struct {
 	Channels      string `json:"channels"`
 	StorageMode   string `json:"storage_mode"`
 	RetentionDays int    `json:"retention_days"`
+	MaxFileBytes  int64  `json:"max_file_bytes"`
 	UpdatedAt     string `json:"updated_at"`
 }
 
 func defaultRecordingSettings(projectID string) recordingSettings {
 	return recordingSettings{
 		ProjectID: projectID, DefaultMode: recordingModeOff, Channels: "dual",
-		StorageMode: recordingStorageCopy, RetentionDays: 0,
+		StorageMode: recordingStorageCopy, RetentionDays: 0, MaxFileBytes: maxRecordingFileBytes,
 	}
 }
 
 func (c *callsDB) recordingSettings(projectID string) (recordingSettings, error) {
 	settings := defaultRecordingSettings(projectID)
-	err := c.db.QueryRow(`SELECT default_mode, channels, storage_mode, retention_days, updated_at
+	err := c.db.QueryRow(`SELECT default_mode, channels, storage_mode, retention_days, updated_at, max_file_bytes
         FROM recording_settings WHERE project_id = ?`, projectID).
-		Scan(&settings.DefaultMode, &settings.Channels, &settings.StorageMode, &settings.RetentionDays, &settings.UpdatedAt)
+		Scan(&settings.DefaultMode, &settings.Channels, &settings.StorageMode, &settings.RetentionDays, &settings.UpdatedAt, &settings.MaxFileBytes)
 	if errors.Is(err, sql.ErrNoRows) {
 		return settings, nil
 	}
@@ -47,15 +48,18 @@ func (c *callsDB) recordingSettings(projectID string) (recordingSettings, error)
 }
 
 func (c *callsDB) saveRecordingSettings(settings recordingSettings) error {
+	if settings.MaxFileBytes == 0 {
+		settings.MaxFileBytes = maxRecordingFileBytes
+	}
 	settings.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	_, err := c.db.Exec(`INSERT INTO recording_settings
-        (project_id, default_mode, channels, storage_mode, retention_days, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        (project_id, default_mode, channels, storage_mode, retention_days, updated_at, max_file_bytes)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(project_id) DO UPDATE SET default_mode = excluded.default_mode,
           channels = excluded.channels, storage_mode = excluded.storage_mode,
-          retention_days = excluded.retention_days, updated_at = excluded.updated_at`,
+          retention_days = excluded.retention_days, updated_at = excluded.updated_at, max_file_bytes = excluded.max_file_bytes`,
 		settings.ProjectID, settings.DefaultMode, settings.Channels, settings.StorageMode,
-		settings.RetentionDays, settings.UpdatedAt)
+		settings.RetentionDays, settings.UpdatedAt, settings.MaxFileBytes)
 	return err
 }
 
@@ -76,6 +80,9 @@ func validateRecordingSettings(settings recordingSettings) error {
 	}
 	if settings.StorageMode != recordingStorageCopy && settings.StorageMode != recordingStorageMove {
 		return errors.New("storage_mode must be copy_to_storage or copy_then_delete_provider")
+	}
+	if settings.MaxFileBytes != 0 && (settings.MaxFileBytes < 1<<20 || settings.MaxFileBytes > maxRecordingFileBytes) {
+		return errors.New("max_file_bytes must be between 1 MiB and 1 GiB; applies to import/playback, not capture")
 	}
 	if settings.RetentionDays < 0 || settings.RetentionDays > 3650 {
 		return errors.New("retention_days must be between 0 and 3650")
@@ -140,6 +147,9 @@ func applyRecordingSettingsArgs(settings *recordingSettings, args map[string]any
 	if value, ok := args["storage_mode"].(string); ok {
 		settings.StorageMode = strings.ToLower(strings.TrimSpace(value))
 	}
+	if _, ok := args["max_file_bytes"]; ok {
+		settings.MaxFileBytes = recordingMaxFileArg(args["max_file_bytes"])
+	}
 	if _, ok := args["retention_days"]; ok {
 		settings.RetentionDays = intArg(args, "retention_days", settings.RetentionDays)
 	}
@@ -171,7 +181,7 @@ func (a *App) recordingSettingsPublic(ctx *sdk.AppCtx, settings recordingSetting
 	return map[string]any{
 		"project_id": settings.ProjectID, "default_mode": settings.DefaultMode,
 		"channels": settings.Channels, "storage_mode": settings.StorageMode,
-		"retention_days": settings.RetentionDays, "updated_at": settings.UpdatedAt,
+		"retention_days": settings.RetentionDays, "updated_at": settings.UpdatedAt, "max_file_bytes": settings.MaxFileBytes,
 		"carrier": carrier, "recording_supported": supported,
 	}
 }
@@ -195,6 +205,8 @@ type recordingRow struct {
 	ImportStartedAt     string
 	NextAttemptAt       string
 	LastError           string
+	ImportBlockedReason string
+	ImportLimitBytes    int64
 	ProviderDeletedAt   string
 	RetentionExpiresAt  string
 	CreatedAt           string
@@ -207,7 +219,7 @@ const recordingSelectColumns = `id, call_id, project_id, provider, carrier_conne
     provider_recording_id, provider_status, channels, track, format, duration_ms,
     size_bytes, storage_file_id, storage_status, import_attempts, import_started_at,
     next_attempt_at, last_error, provider_deleted_at, retention_expires_at,
-    created_at, completed_at, stored_at, deleted_at`
+    created_at, completed_at, stored_at, deleted_at, import_blocked_reason, import_limit_bytes`
 
 func scanRecording(row rowScanner) (*recordingRow, error) {
 	var recording recordingRow
@@ -217,7 +229,7 @@ func scanRecording(row rowScanner) (*recordingRow, error) {
 		&recording.SizeBytes, &recording.StorageFileID, &recording.StorageStatus,
 		&recording.ImportAttempts, &recording.ImportStartedAt, &recording.NextAttemptAt,
 		&recording.LastError, &recording.ProviderDeletedAt, &recording.RetentionExpiresAt,
-		&recording.CreatedAt, &recording.CompletedAt, &recording.StoredAt, &recording.DeletedAt)
+		&recording.CreatedAt, &recording.CompletedAt, &recording.StoredAt, &recording.DeletedAt, &recording.ImportBlockedReason, &recording.ImportLimitBytes)
 	return &recording, err
 }
 
@@ -337,9 +349,9 @@ func (c *callsDB) upsertProviderRecording(call *callRow, provider, recordingID, 
         ON CONFLICT(provider, carrier_connection_id, provider_recording_id) DO UPDATE SET
           provider_status = excluded.provider_status, channels = excluded.channels,
           duration_ms = excluded.duration_ms, completed_at = excluded.completed_at,
-		  storage_status = CASE WHEN recordings.storage_status IN ('stored','deleted','provider_only','importing')
+		  storage_status = CASE WHEN recordings.storage_status IN ('stored','deleted','provider_only','importing') OR recordings.import_blocked_reason<>''
 								THEN recordings.storage_status ELSE excluded.storage_status END,
-		  next_attempt_at = CASE WHEN recordings.storage_status IN ('stored','deleted','provider_only','importing')
+		  next_attempt_at = CASE WHEN recordings.storage_status IN ('stored','deleted','provider_only','importing') OR recordings.import_blocked_reason<>''
                                  THEN recordings.next_attempt_at ELSE excluded.next_attempt_at END`,
 		rowID, call.ID, call.ProjectID, provider, call.CarrierConnectionID, recordingID, status, channels, track, format,
 		durationMS, storageStatus, now.Format(time.RFC3339), retentionExpiry,
@@ -441,7 +453,8 @@ func (c *callsDB) claimRecordingImport(projectID string) (*recordingRow, error) 
 	var id string
 	err = tx.QueryRow(`SELECT id FROM recordings WHERE project_id = ? AND deleted_at = ''
 		AND provider_status = 'completed' AND storage_status IN ('pending','failed','provider_only')
-        AND (next_attempt_at = '' OR next_attempt_at <= ?) ORDER BY created_at LIMIT 1`, projectID, now).Scan(&id)
+        AND (import_blocked_reason='' OR import_limit_bytes <> COALESCE((SELECT max_file_bytes FROM recording_settings WHERE project_id=recordings.project_id),1073741824))
+ AND (next_attempt_at = '' OR next_attempt_at <= ? OR (import_blocked_reason<>'' AND import_limit_bytes <> COALESCE((SELECT max_file_bytes FROM recording_settings WHERE project_id=recordings.project_id),1073741824))) ORDER BY created_at LIMIT 1`, projectID, now).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -449,7 +462,7 @@ func (c *callsDB) claimRecordingImport(projectID string) (*recordingRow, error) 
 		return nil, err
 	}
 	result, err := tx.Exec(`UPDATE recordings SET storage_status = 'importing', import_started_at = ?,
-		last_error = '' WHERE id = ? AND storage_status IN ('pending','failed','provider_only')`, now, id)
+		last_error = '', import_blocked_reason='', import_limit_bytes=COALESCE((SELECT max_file_bytes FROM recording_settings WHERE project_id=recordings.project_id),1073741824) WHERE id = ? AND storage_status IN ('pending','failed','provider_only')`, now, id)
 	if err != nil {
 		return nil, err
 	}
@@ -482,6 +495,21 @@ func (a *App) importRecording(workerCtx context.Context, ctx *sdk.AppCtx, record
 	}
 	importCtx, cancel := context.WithTimeout(workerCtx, 12*time.Minute)
 	defer cancel()
+	limit := recording.ImportLimitBytes
+	if limit <= 0 {
+		settings, err := a.db().recordingSettings(recording.ProjectID)
+		if err != nil {
+			return err
+		}
+		limit = settings.MaxFileBytes
+	}
+	importCtx = context.WithValue(importCtx, playbackDownloadContextKey{}, limit)
+	select {
+	case playbackCache.slots <- struct{}{}:
+	case <-importCtx.Done():
+		return importCtx.Err()
+	}
+	defer func() { <-playbackCache.slots }()
 	storageClient := newRecordingStorageClient()
 	probeCtx, probeCancel := context.WithTimeout(importCtx, 10*time.Second)
 	storageBound, err := storageClient.bindingAvailable(probeCtx, recording.ProjectID)
@@ -508,7 +536,7 @@ func (a *App) importRecording(workerCtx context.Context, ctx *sdk.AppCtx, record
 	now := time.Now().UTC().Format(time.RFC3339)
 	result, err := ctx.AppDB().Exec(`UPDATE recordings SET storage_file_id = ?, size_bytes = ?,
         storage_status = 'stored', stored_at = ?, import_started_at = '', next_attempt_at = '',
-        last_error = '' WHERE id = ? AND deleted_at='' AND storage_status='importing' AND import_started_at=?`, file.ID, file.SizeBytes, now, recording.ID, recording.ImportStartedAt)
+        last_error = '', import_blocked_reason='' WHERE id = ? AND deleted_at='' AND storage_status='importing' AND import_started_at=?`, file.ID, file.SizeBytes, now, recording.ID, recording.ImportStartedAt)
 	if err != nil {
 		a.queueOrphanRecordingFile(ctx, file.ID)
 		return err
@@ -549,10 +577,11 @@ func (c *callsDB) failRecordingImport(id string, importErr error, leases ...stri
 	}
 	var attempts int
 	_ = c.db.QueryRow(`SELECT import_attempts FROM recordings WHERE id = ?`, id).Scan(&attempts)
+	blocked := recordingImportBlockReason(importErr)
 	delay := time.Duration(math.Min(3600, math.Pow(2, float64(min(attempts+1, 11))))) * time.Second
 	_, _ = c.db.Exec(`UPDATE recordings SET storage_status = 'failed', import_attempts = import_attempts + 1,
-        import_started_at = '', next_attempt_at = ?, last_error = ? WHERE id = ? AND deleted_at='' AND storage_status='importing' AND (?='' OR import_started_at=?)`,
-		time.Now().UTC().Add(delay).Format(time.RFC3339), importErr.Error(), id, lease, lease)
+        import_started_at = '', next_attempt_at = ?, last_error = ?, import_blocked_reason=? WHERE id = ? AND deleted_at='' AND storage_status='importing' AND (?='' OR import_started_at=?)`,
+		time.Now().UTC().Add(delay).Format(time.RFC3339), importErr.Error(), blocked, id, lease, lease)
 }
 
 func (a *App) reconcileProviderRecording(ctx *sdk.AppCtx) error {
@@ -643,7 +672,7 @@ func recordingPublic(recording recordingRow) map[string]any {
 		"channels": recording.Channels, "track": recording.Track, "format": recording.Format,
 		"duration_ms": recording.DurationMS, "size_bytes": recording.SizeBytes,
 		"storage_file_id": recording.StorageFileID, "storage_status": recording.StorageStatus,
-		"import_attempts": recording.ImportAttempts, "last_error": recording.LastError,
+		"import_attempts": recording.ImportAttempts, "last_error": recording.LastError, "retry_blocked": recording.ImportBlockedReason != "", "import_blocked_reason": recording.ImportBlockedReason, "storage_state_label": recordingStorageLabel(recording), "recorded_locally": recording.Provider == localRecordingProvider && recording.ProviderStatus == "completed" && recording.ProviderDeletedAt == "",
 		"provider_deleted": recording.ProviderDeletedAt != "", "retention_expires_at": recording.RetentionExpiresAt,
 		"created_at": recording.CreatedAt, "completed_at": recording.CompletedAt, "stored_at": recording.StoredAt,
 	}
@@ -653,6 +682,9 @@ func recordingPublic(recording recordingRow) map[string]any {
 	} else if recording.ProviderStatus == "completed" && recording.ProviderDeletedAt == "" {
 		out["playback_url"] = providerPlaybackURL(recording.ProjectID, recording.ID)
 		out["playback_source"] = "provider"
+		if recording.Provider == localRecordingProvider {
+			out["playback_source"] = "local"
+		}
 	}
 	if out["playback_url"] != nil && strings.EqualFold(recording.Format, "mp3") {
 		original := recordingVariantPlaybackURL(recording.ProjectID, recording.ID, recordingVariantOriginal)
@@ -722,7 +754,7 @@ func (a *App) toolRecordingRetry(callerCtx context.Context, ctx *sdk.AppCtx, arg
 }
 
 func (c *callsDB) retryRecordingImport(id string) error {
-	result, err := c.db.Exec(`UPDATE recordings SET storage_status='pending', next_attempt_at=?, last_error=''
+	result, err := c.db.Exec(`UPDATE recordings SET storage_status='pending', next_attempt_at=?, last_error='', import_blocked_reason=''
 		WHERE id=? AND deleted_at='' AND provider_status='completed' AND storage_status IN ('failed','pending','provider_only')`, time.Now().UTC().Format(time.RFC3339), id)
 	if err != nil {
 		return err
@@ -875,8 +907,15 @@ func (a *App) serveRecordingContent(w http.ResponseWriter, r *http.Request, ctx 
 		http.Redirect(w, r, storagePlaybackURL(recording.ProjectID, recording.StorageFileID), http.StatusTemporaryRedirect)
 		return
 	}
-	r = r.WithContext(context.WithValue(r.Context(), playbackDownloadContextKey{}, int64(128<<20)))
-	key := fmt.Sprintf("%s:%s:%d:%s:%s", recording.ProjectID, recording.ID, recording.StorageFileID, recording.CompletedAt, variant)
+	settings, err := a.db().recordingSettings(recording.ProjectID)
+	if err != nil {
+		http.Error(w, "recording settings unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	playbackCtx, cancel := context.WithTimeout(r.Context(), 12*time.Minute)
+	defer cancel()
+	r = r.WithContext(context.WithValue(playbackCtx, playbackDownloadContextKey{}, settings.MaxFileBytes))
+	key := fmt.Sprintf("%s:%s:%d:%s:%s:%d", recording.ProjectID, recording.ID, recording.StorageFileID, recording.CompletedAt, variant, settings.MaxFileBytes)
 	file, err := cachedRecording(r.Context(), key, func() (string, error) {
 		var path string
 		var err error
@@ -887,13 +926,14 @@ func (a *App) serveRecordingContent(w http.ResponseWriter, r *http.Request, ctx 
 				return "", errors.New("recording unavailable")
 			}
 			if recording.Provider == localRecordingProvider {
-				return a.downloadLocalRecordingVariant(r.Context(), recording, variant)
+				path, _, err = a.downloadLocalRecording(r.Context(), recording)
+			} else {
+				creds, e := ctx.PlatformAPI().GetConnectionCredentials(recording.CarrierConnectionID)
+				if e != nil || creds == nil {
+					return "", errors.New("provider credentials unavailable")
+				}
+				path, _, err = a.downloadProviderRecording(r.Context(), ctx, recording, creds.Fields)
 			}
-			creds, e := ctx.PlatformAPI().GetConnectionCredentials(recording.CarrierConnectionID)
-			if e != nil || creds == nil {
-				return "", errors.New("provider credentials unavailable")
-			}
-			path, _, err = a.downloadProviderRecording(r.Context(), ctx, recording, creds.Fields)
 		}
 		if err != nil {
 			return "", err
@@ -906,7 +946,18 @@ func (a *App) serveRecordingContent(w http.ResponseWriter, r *http.Request, ctx 
 	})
 	if err != nil {
 		ctx.Logger().Warn("recording playback", "recording", recording.ID, "err", err)
-		http.Error(w, "recording unavailable; try the stored original", http.StatusBadGateway)
+		if variant == recordingVariantMix && r.Context().Err() == nil {
+			w.Header().Set("Cache-Control", "private, no-store")
+			w.Header().Set("X-Telephony-Playback-Variant", recordingVariantOriginal)
+			w.Header().Set("X-Telephony-Playback-Fallback", "mix_unavailable")
+			http.Redirect(w, r, recordingVariantPlaybackURL(recording.ProjectID, recording.ID, recordingVariantOriginal), http.StatusTemporaryRedirect)
+			return
+		}
+		if variant == recordingVariantCaller || variant == recordingVariantAgent {
+			http.Error(w, variant+"-only playback unavailable; the original recording remains available separately", http.StatusUnprocessableEntity)
+		} else {
+			http.Error(w, "recording unavailable", http.StatusBadGateway)
+		}
 		return
 	}
 	defer file.Close()
@@ -924,5 +975,6 @@ func (a *App) serveRecordingContent(w http.ResponseWriter, r *http.Request, ctx 
 	w.Header().Set("Content-Type", recordingContentType(format))
 	w.Header().Set("Content-Disposition", `inline; filename="`+filename+`"`)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Telephony-Playback-Variant", variant)
 	http.ServeContent(w, r, filename, info.ModTime(), file)
 }

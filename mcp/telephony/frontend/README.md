@@ -321,8 +321,8 @@ await phone.reconnect({ webrtcFec: false });
 ```
 
 The preference is retained through automatic audio recovery and is scoped to
-each media attachment. Opting out restores Telephony's original portable Opus
-encoder/decoder, disables SDP requests for redundant audio in both directions,
+each media attachment. Opting out disables redundancy while retaining native
+Opus encoding/decoding when available, disables SDP requests for redundant audio in both directions,
 and retains bounded buffering, ordinary packet-loss concealment, bitrate
 adaptation and diagnostics. It does not change PCM/WebSocket audio or another
 softphone's codec. The Telephony audio settings also expose this preference

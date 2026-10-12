@@ -48,7 +48,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.12.9
+version: 0.12.10
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -167,7 +167,7 @@ provides:
     - { name: telephony_decisions_list, description: "Reconcile routing decisions and fallback reasons for a call." }
     - { name: telephony_call_events_list, description: "List durable lifecycle events for one call." }
     - { name: telephony_recording_settings_get, description: "Get the project's recording and durable-storage policy." }
-    - { name: telephony_recording_settings_set, description: "Set recording policy for future calls. Args: default_mode?, channels?, storage_mode?, retention_days?." }
+    - { name: telephony_recording_settings_set, description: "Set recording policy for future calls. Args: default_mode?, channels?, storage_mode?, retention_days?, max_file_bytes?." }
     - { name: telephony_outbound_transport, description: "Read or configure outbound account/number transport for new calls, including automatic SIP setup. Platform principal only; SIP credentials are write-only." }
     - { name: telephony_outbound_settings_get, description: "Get outbound call defaults: answering machine detection mode and action." }
     - { name: telephony_outbound_settings_set, description: "Set outbound call defaults for future calls. Args: machine_detection? (off|detect|premium), machine_detection_action? (notify|hangup), default_timeout_sec? (0 keeps built-in defaults)." }
@@ -346,7 +346,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.12.9
+    ref: telephony/v0.12.10
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -463,6 +463,16 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("telephony requires a db block")
 	}
 	globalCtx = ctx
+	if err := initializeRecordingTemporaryFiles(ctx.DataDir()); err != nil {
+		ctx.Logger().Warn("recording temporary directory unavailable", "err", err)
+	}
+	initRTCOpusBundle(ctx.DataDir())
+	opusSource, opusVersion, opusErr := rtcNativeAvailability()
+	if opusErr != nil {
+		ctx.Logger().Warn("WebRTC native Opus unavailable; portable fallback active", "reason", "native_initialization_failed")
+	} else {
+		ctx.Logger().Info("WebRTC Opus ready", "source", opusSource, "library_version", opusVersion)
+	}
 	identity, err := ctx.PlatformAPI().WhoAmI()
 	if err != nil {
 		return fmt.Errorf("resolve telephony installation identity: %w", err)
@@ -824,12 +834,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "telephony_recording_settings_set",
-			Description: "Set recording defaults for future calls. Recording is opt-in. Args: default_mode (off|always), channels (mono|dual), storage_mode (copy_to_storage|copy_then_delete_provider), retention_days (0 keeps indefinitely).",
+			Description: "Set recording defaults for future calls. Recording is opt-in. Args: default_mode (off|always), channels (mono|dual), storage_mode (copy_to_storage|copy_then_delete_provider), retention_days (0 keeps indefinitely), max_file_bytes (1 MiB–1 GiB import/playback ceiling; capture is unchanged).",
 			InputSchema: schemaObject(map[string]any{
 				"default_mode":   map[string]any{"type": "string", "enum": []string{"off", "always"}},
 				"channels":       map[string]any{"type": "string", "enum": []string{"mono", "dual"}},
 				"storage_mode":   map[string]any{"type": "string", "enum": []string{"copy_to_storage", "copy_then_delete_provider"}},
 				"retention_days": map[string]any{"type": "integer", "minimum": 0, "maximum": 3650},
+				"max_file_bytes": map[string]any{"type": "integer", "minimum": 1 << 20, "maximum": maxRecordingFileBytes, "description": "Import and playback file-size ceiling, default 1 GiB. Does not stop or truncate recording capture."},
 			}, nil),
 			HandlerCtx: a.toolRecordingSettingsSet,
 		},

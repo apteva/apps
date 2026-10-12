@@ -1,0 +1,44 @@
+{
+  "schema": "telephony-opus/v1",
+  "version": "1.5.2",
+  "source_url": "https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz",
+  "source_sha256": "65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1",
+  "libraries": {
+    "linux-amd64-gnu": {
+      "asset": "linux-amd64-gnu.gz",
+      "sha256": "3b7ec880146bf9662e8d6f061c31fb01cf7d39f04a82613e4e42e776b7bc005c",
+      "compressed_sha256": "826ff81cbc18fa2f440837aafcd7c98336a8cb940529cb4afe95afdfe7125579",
+      "bytes": 529568
+    },
+    "linux-arm64-gnu": {
+      "asset": "linux-arm64-gnu.gz",
+      "sha256": "733d952316131ac651b81eef467b8c6d0e0923fd3a145a239454cf7acac25520",
+      "compressed_sha256": "553b436799bf5af5d00fe638407cb1885ad9e1dd5645ef157925a288bbb3f0ae",
+      "bytes": 449488
+    },
+    "linux-amd64-musl": {
+      "asset": "linux-amd64-musl.gz",
+      "sha256": "3b6a87a5a76c3e1040b22333a9fe33da9f2c133602548361078e14d8152d3d67",
+      "compressed_sha256": "18bc28ec17483175bbae0efd752aeeba709534d68b68fbe9f3c9fef481d57b42",
+      "bytes": 526384
+    },
+    "linux-arm64-musl": {
+      "asset": "linux-arm64-musl.gz",
+      "sha256": "254918d4ed169463ccaf45a36b3d07a09dbda12fbc4307d3b12b985959c1db57",
+      "compressed_sha256": "9de734eb2aa76a43427565ce95b9481f983c884ac6f071012769b750a3c1e0cb",
+      "bytes": 449976
+    },
+    "darwin-amd64": {
+      "asset": "darwin-amd64.gz",
+      "sha256": "3ddadf886274af1ac181ca36d9765de1963b5c3db79db63c4f21c900f4745b8f",
+      "compressed_sha256": "a0e9c79f957cfae22a9fdbd59de1447b8ba4d86952fd2106f1b4628b3d131925",
+      "bytes": 500832
+    },
+    "darwin-arm64": {
+      "asset": "darwin-arm64.gz",
+      "sha256": "06af4179653ee64bbd8452b03b3276357533b643c29bd4b8d519201e7ddd7621",
+      "compressed_sha256": "b9d21eeb9901482a48cfd7f33e42ed8c8f86ca342d75e480e1aa782a71736323",
+      "bytes": 487616
+    }
+  }
+}

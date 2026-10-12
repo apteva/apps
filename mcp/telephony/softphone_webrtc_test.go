@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"math"
 	"net"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -576,8 +577,12 @@ func testRTCExistingHubMediaHoldAndReplacement(t *testing.T, query string) {
 	old := hub.browserWriter()
 	if query != "" {
 		state := old.conn.(*rtcHubConn).stats.snapshot().Encoder
-		if state == nil || state.FEC || state.FECRequested || state.Capability != "go_opus_plc" {
-			t.Fatal("FEC opt-out did not retain the portable encoder", state)
+		expected := "go_opus_plc"
+		if (runtime.GOOS == "linux" || runtime.GOOS == "darwin") && (runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64") {
+			expected = "libopus_plc"
+		}
+		if state == nil || state.FEC || state.FECRequested || state.Capability != expected {
+			t.Fatal("FEC opt-out selected the wrong codec", state)
 		}
 	}
 	hub.setHeld(true)
