@@ -88,6 +88,10 @@ func addCarrierAudioSummary(s *audioDashboardSummary, r *carrierTelemetryRecord)
 		m["sip_playback_target_ms"] = float64(v.Jitter.TargetMS)
 		m["sip_playback_capacity_ms"] = float64(v.Jitter.CapacityMS)
 		m["sip_clock_drift_ppm"] = v.Jitter.ClockDriftPPM
+		m["sip_clock_estimator_updates"] = float64(v.Jitter.ClockEstimatorUpdates)
+		m["sip_clock_rejected_fits"] = float64(v.Jitter.ClockRejectedFits)
+		m["sip_clock_observation_windows"] = float64(v.Jitter.ClockObservationCount)
+		m["sip_clock_phase_adjusted_ms"] = v.Jitter.ClockPhaseAdjustedMS
 		m["sip_max_relative_delivery_age_ms"] = v.Jitter.MaxDeliveryAgeMS
 		m["sip_refresh_attempts"] = float64(v.Signal.RefreshAttempts)
 		m["sip_refresh_failures"] = float64(v.Signal.RefreshFailures)
