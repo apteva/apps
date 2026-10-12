@@ -1,0 +1,411 @@
+{
+  "schema_version": 1,
+  "allowed_hosts": [
+    "example.com"
+  ],
+  "browser": {
+    "context_id": "fixture-context",
+    "backend": "browserbase"
+  },
+  "defaults": {
+    "settings_url": "https://example.com/settings",
+    "payouts_url": "https://example.com/payouts"
+  },
+  "limits": {
+    "step_retries": 0
+  },
+  "steps": [
+    {
+      "action": "goto",
+      "url": "{{settings_url}}",
+      "locator": {}
+    },
+    {
+      "action": "wait",
+      "locator": {},
+      "duration_ms": 1
+    },
+    {
+      "action": "wait_for",
+      "locator": {},
+      "conditions": [
+        {
+          "type": "text_present",
+          "value": "Your currency"
+        }
+      ],
+      "match": "all",
+      "timeout_ms": 15000
+    },
+    {
+      "action": "extract",
+      "locator": {},
+      "items": "body",
+      "fields": {
+        "settings_currency_code": {
+          "type": "text",
+          "required": true,
+          "pattern": "(?i)\\b(USD|EUR|GBP)\\b"
+        },
+        "settings_currency_label": {
+          "type": "text",
+          "required": true,
+          "pattern": "(?i)(US Dollar|Euro|British Pound)"
+        },
+        "settings_currency_symbol": {
+          "type": "text",
+          "required": true,
+          "pattern": "([$\u20ac\u00a3])"
+        },
+        "settings_destination_token": {
+          "type": "text",
+          "required": true,
+          "pattern": "(?i)(?:PayPal|Hyperwallet|Revolut|Local bank transfer|Bank transfer)\\s+(?:account[\\s(]+)?(?:[xX*]{2,}[\\s-]*)?([A-Za-z0-9._%+\\-*]+@[A-Za-z0-9.\\-*]+\\.[A-Za-z]{2,}|\\d{4,})"
+        },
+        "settings_page": {
+          "type": "text",
+          "required": true
+        },
+        "settings_provider": {
+          "type": "text",
+          "required": true,
+          "pattern": "(?i)(PayPal|Hyperwallet|Revolut|Local bank transfer|Bank transfer)(?:\\s|$)"
+        }
+      },
+      "readability": false
+    },
+    {
+      "action": "goto",
+      "url": "{{payouts_url}}",
+      "locator": {}
+    },
+    {
+      "action": "wait",
+      "locator": {},
+      "duration_ms": 1
+    },
+    {
+      "action": "wait_for",
+      "locator": {},
+      "conditions": [
+        {
+          "type": "text_present",
+          "value": "Available to withdraw"
+        },
+        {
+          "type": "text_present",
+          "value": "Withdraw"
+        }
+      ],
+      "match": "all",
+      "timeout_ms": 15000
+    },
+    {
+      "action": "extract",
+      "locator": {},
+      "items": "body",
+      "fields": {
+        "available_to_withdraw": {
+          "type": "number",
+          "required": true,
+          "pattern": "(?i)Available to withdraw[^0-9]*([0-9][0-9,.]*)"
+        },
+        "currency": {
+          "type": "text",
+          "required": true,
+          "pattern": "([$\u20ac\u00a3])"
+        },
+        "gross_amount": {
+          "type": "number",
+          "required": true,
+          "pattern": "(?i)Available to withdraw[^0-9]*([0-9][0-9,.]*)"
+        },
+        "payout_destination": {
+          "type": "text",
+          "required": true,
+          "pattern": "(?i)(Bank transfer|PayPal|Revolut|Hyperwallet)"
+        },
+        "payout_page": {
+          "type": "text",
+          "required": true
+        },
+        "reviewed_amount": {
+          "type": "number",
+          "required": true,
+          "pattern": "(?i)Available to withdraw[^0-9]*\\Q{{expected_amount}}\\E"
+        }
+      },
+      "readability": false
+    },
+    {
+      "action": "assert_values",
+      "locator": {},
+      "assertions": {
+        "currency": {
+          "equals_field": "settings_currency_symbol"
+        },
+        "settings_currency_code": {
+          "equals": "{{expected_currency}}"
+        },
+        "settings_destination_token": {
+          "equals": "{{expected_destination_token}}"
+        },
+        "settings_provider": {
+          "equals": "{{expected_destination_provider}}",
+          "canonical_map": {
+            "Local bank transfer": "bank_transfer",
+            "Bank transfer": "bank_transfer",
+            "PayPal": "paypal",
+            "Hyperwallet": "hyperwallet",
+            "Revolut": "revolut"
+          }
+        }
+      }
+    },
+    {
+      "action": "click",
+      "locator": {
+        "text": "Withdraw",
+        "role": "button",
+        "exact": true,
+        "som_only": true
+      },
+      "expected_text": "Withdraw",
+      "expected_effect": "open_configuration",
+      "confirm_consequence": "open_configuration",
+      "once_key": "{{request_id}}:open",
+      "effect_phase": "prepare"
+    },
+    {
+      "action": "wait",
+      "locator": {},
+      "duration_ms": 1
+    },
+    {
+      "action": "wait_for",
+      "locator": {},
+      "conditions": [
+        {
+          "type": "text_present",
+          "value": "Withdraw earnings"
+        },
+        {
+          "type": "text_present",
+          "value": "Confirm withdrawal"
+        },
+        {
+          "type": "text_present",
+          "value": "Withdraw funds"
+        }
+      ],
+      "match": "any",
+      "timeout_ms": 15000
+    },
+    {
+      "action": "extract",
+      "locator": {},
+      "items": "[role=\"dialog\"], [aria-modal=\"true\"]",
+      "fields": {
+        "confirmation_prompt": {
+          "type": "text",
+          "required": true,
+          "pattern": "(?i)(withdraw|payout)"
+        },
+        "confirmed_amount": {
+          "type": "number",
+          "required": true,
+          "pattern": "(?i)(?:available|earnings)[^0-9]*([0-9][0-9,.]*)"
+        },
+        "confirmed_currency": {
+          "type": "text",
+          "required": true,
+          "pattern": "([$\u20ac\u00a3])"
+        },
+        "confirmed_destination": {
+          "type": "text",
+          "required": true,
+          "pattern": "(?i)(PayPal|Hyperwallet|Revolut|Local bank transfer|Bank transfer)"
+        },
+        "confirmed_destination_method": {
+          "type": "text",
+          "required": true,
+          "pattern": "(?i)(PayPal|Hyperwallet|Revolut|Local bank transfer|Bank transfer)"
+        },
+        "confirmed_destination_token": {
+          "type": "text",
+          "required": true,
+          "pattern": "(?i)(?:PayPal|Hyperwallet|Revolut|Local bank transfer|Bank transfer)\\s+(?:account[\\s(]+)?(?:[xX*]{2,}[\\s-]*)?([A-Za-z0-9._%+\\-*]+@[A-Za-z0-9.\\-*]+\\.[A-Za-z]{2,}|\\d{4,})"
+        },
+        "currency": {
+          "type": "text",
+          "required": true,
+          "pattern": "([$\u20ac\u00a3])"
+        },
+        "fee_amount": {
+          "type": "number",
+          "required": true,
+          "pattern": "(?is)(?:currency conversion|PayPal payout fee|Hyperwallet payout fee|payout fee|transfer fee|processing fee)[\\s\\S]*?[-\u2212]\\s*[$\u20ac\u00a3]\\s*([0-9][0-9,.]*)"
+        },
+        "gross_amount": {
+          "type": "number",
+          "required": true,
+          "pattern": "(?i)(?:available|earnings)[^0-9]*([0-9][0-9,.]*)"
+        },
+        "net_amount": {
+          "type": "number",
+          "required": true,
+          "pattern": "(?i)(?:You'll receive|Deposited in your local currency)[^0-9]*[$\u20ac\u00a3]?([0-9][0-9,.]*)"
+        },
+        "payout_amount": {
+          "type": "number",
+          "required": true,
+          "pattern": "(?i)(?:available|earnings)[^0-9]*([0-9][0-9,.]*)"
+        },
+        "payout_destination": {
+          "type": "text",
+          "required": true,
+          "pattern": "(?i)(PayPal|Hyperwallet|Revolut|Local bank transfer|Bank transfer)"
+        },
+        "payout_destination_method": {
+          "type": "text",
+          "required": true,
+          "pattern": "(?i)(PayPal|Hyperwallet|Revolut|Local bank transfer|Bank transfer)"
+        },
+        "payout_destination_token": {
+          "type": "text",
+          "required": true,
+          "pattern": "(?i)(?:PayPal|Hyperwallet|Revolut|Local bank transfer|Bank transfer)\\s+(?:account[\\s(]+)?(?:[xX*]{2,}[\\s-]*)?([A-Za-z0-9._%+\\-*]+@[A-Za-z0-9.\\-*]+\\.[A-Za-z]{2,}|\\d{4,})"
+        }
+      },
+      "readability": false,
+      "min_items": 1,
+      "max_items": 1
+    },
+    {
+      "action": "assert_values",
+      "locator": {},
+      "assertions": {
+        "confirmed_amount": {
+          "equals": "{{expected_amount}}"
+        },
+        "confirmed_currency": {
+          "equals_field": "settings_currency_symbol"
+        },
+        "currency": {
+          "equals_field": "settings_currency_symbol"
+        },
+        "gross_amount": {
+          "equals": "{{expected_amount}}"
+        },
+        "net_amount": {
+          "difference_of": [
+            "gross_amount",
+            "fee_amount"
+          ],
+          "greater_than": 0
+        },
+        "settings_currency_code": {
+          "equals": "{{expected_currency}}"
+        },
+        "settings_destination_token": {
+          "equals_field": "confirmed_destination_token"
+        },
+        "settings_provider": {
+          "equals_field": "confirmed_destination_method",
+          "canonical_map": {
+            "Local bank transfer": "bank_transfer",
+            "Bank transfer": "bank_transfer",
+            "PayPal": "paypal",
+            "Hyperwallet": "hyperwallet",
+            "Revolut": "revolut"
+          }
+        },
+        "fee_amount": {
+          "greater_than_or_equal": 0,
+          "less_than_or_equal": "{{expected_amount}}"
+        }
+      }
+    },
+    {
+      "action": "extract",
+      "locator": {},
+      "items": "[role=\"dialog\"] button:not([aria-label*=\"Close\"]), [aria-modal=\"true\"] button:not([aria-label*=\"Close\"])",
+      "fields": {
+        "amount_bearing_amount": {
+          "type": "number",
+          "required": true,
+          "pattern": "(?i)(?:[$\u20ac\u00a3]|USD|EUR|GBP)\\s*([0-9][0-9,.]*)"
+        },
+        "amount_bearing_control": {
+          "type": "text",
+          "required": true,
+          "pattern": "(?i)^(?:Withdraw|Payout)\\s+[$\u20ac\u00a3]\\s*[0-9][0-9,.]*$"
+        },
+        "amount_bearing_currency": {
+          "type": "text",
+          "required": true,
+          "pattern": "([$\u20ac\u00a3])"
+        }
+      },
+      "readability": false,
+      "min_items": 1,
+      "max_items": 1
+    },
+    {
+      "action": "assert_values",
+      "locator": {},
+      "assertions": {
+        "amount_bearing_amount": {
+          "equals_field": "net_amount"
+        },
+        "amount_bearing_currency": {
+          "equals_field": "settings_currency_symbol"
+        }
+      }
+    },
+    {
+      "action": "goto",
+      "url": "{{payouts_url}}"
+    }
+  ],
+  "output_schema": {
+    "amount_bearing_amount": "string",
+    "amount_bearing_control": "string",
+    "amount_bearing_currency": "string",
+    "arrival": "string",
+    "available_after": "number",
+    "available_to_withdraw": "number",
+    "confirmation_prompt": "string",
+    "confirmed_amount": "number",
+    "confirmed_currency": "string",
+    "confirmed_destination": "string",
+    "confirmed_destination_method": "string",
+    "confirmed_destination_token": "string",
+    "currency": "string",
+    "fee_amount": "number",
+    "gross_amount": "number",
+    "history_amount": "number",
+    "history_currency": "string",
+    "history_destination": "string",
+    "history_page": "string",
+    "history_status": "string",
+    "net_amount": "number",
+    "page_text": "string",
+    "payout_amount": "number",
+    "payout_destination": "string",
+    "payout_destination_method": "string",
+    "payout_destination_token": "string",
+    "payout_page": "string",
+    "reviewed_amount": "number",
+    "reviewed_destination": "string",
+    "sent_amount": "number",
+    "sent_currency": "string",
+    "settings_currency_code": "string",
+    "settings_currency_label": "string",
+    "settings_currency_symbol": "string",
+    "settings_destination_token": "string",
+    "settings_page": "string",
+    "settings_provider": "string",
+    "withdrawal_confirmation": "string"
+  }
+}

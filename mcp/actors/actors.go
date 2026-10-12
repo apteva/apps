@@ -83,6 +83,7 @@ type actorStep struct {
 	URL                string                `json:"url,omitempty"`
 	Locator            actorLocator          `json:"locator,omitempty"`
 	ExpectedText       string                `json:"expected_text,omitempty"`
+	EffectPhase        string                `json:"effect_phase,omitempty"`
 	ExpectedEffect     string                `json:"expected_effect,omitempty"`
 	ConfirmConsequence string                `json:"confirm_consequence,omitempty"`
 	Optional           bool                  `json:"optional,omitempty"`
@@ -125,6 +126,7 @@ type actorStep struct {
 // validation declarative and site-neutral: values may be compared directly,
 // checked for containment, or reconciled arithmetically before a click.
 type actorAssertion struct {
+	CanonicalMap       map[string]string  `json:"canonical_map,omitempty"`
 	EqualsExact        any                `json:"equals_exact,omitempty"`
 	GreaterThan        any                `json:"greater_than,omitempty"`
 	GreaterThanOrEqual any                `json:"greater_than_or_equal,omitempty"`
@@ -205,8 +207,8 @@ func (a *App) actorTools() []sdk.Tool {
 			}, []string{"name", "definition"}), Handler: a.toolActorSave,
 		},
 		{
-			Name: "actors_get", Description: "Get an actor by id or name, optionally at an exact immutable revision. Returns the actual retrieved revision and operation names.",
-			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "revision": map[string]any{"type": "integer", "minimum": 1}}, nil), Handler: a.toolActorGet,
+			Name: "actors_get", Description: "Get an actor by id or name, optionally at an exact immutable revision. Supply operation to retrieve one complete operation with execution settings and input requirements.",
+			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "revision": map[string]any{"type": "integer", "minimum": 1}, "operation": map[string]any{"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"}}, nil), Annotations: map[string]any{"readOnlyHint": true}, Handler: a.toolActorGet,
 		},
 		{
 			Name: "actors_list", Description: "List actor definitions for the current project.",
@@ -406,6 +408,9 @@ func validateActorDefinition(def actorDefinition) error {
 		return fmt.Errorf("definition.browser.environment: %w", err)
 	}
 	for i, step := range def.Steps {
+		if err := validateEffectPhase(step); err != nil {
+			return fmt.Errorf("steps[%d]: %w", i, err)
+		}
 		if step.OnceScope != "" && (step.OnceKey == "" || (step.Action != "click" && step.Action != "click_verified") || strings.TrimSpace(step.OnceScope) != step.OnceScope || len(step.OnceScope) > 100) {
 			return fmt.Errorf("steps[%d].once_scope requires a guarded click and a nonempty scope of at most 100 bytes", i)
 		}
@@ -528,6 +533,9 @@ func validateActorDefinition(def actorDefinition) error {
 				return fmt.Errorf("steps[%d].assertions is required", i)
 			}
 			for field, assertion := range step.Assertions {
+				if err := validateCanonicalAssertion(assertion); err != nil {
+					return fmt.Errorf("steps[%d].assertions[%q]: %w", i, field, err)
+				}
 				if strings.TrimSpace(field) == "" || (assertion.GreaterThan == nil && assertion.GreaterThanOrEqual == nil && assertion.LessThanOrEqual == nil && assertion.EqualsExact == nil && assertion.GreaterThanField == "" && assertion.EqualsURL == nil && assertion.Equals == nil && assertion.EqualsSet == nil && assertion.EqualsField == "" && assertion.Contains == "" && assertion.Matches == "" && len(assertion.SumOf) == 0 && len(assertion.DifferenceOf) == 0) {
 					return fmt.Errorf("steps[%d].assertions[%q] has no comparison", i, field)
 				}
@@ -744,6 +752,9 @@ func (a *App) toolActorSave(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolActorGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if _, supplied := args["operation"]; supplied {
+		return a.getActorOperation(ctx, args)
+	}
 	rec, err := getActor(ctx, int64ArgLocal(args, "id"), stringArg(args, "name"))
 	if err != nil {
 		return nil, err

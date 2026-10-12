@@ -55,3 +55,17 @@ Read-only operations may opt into `read_views.allow_partial:true` for a bounded 
 Inspect a pinned actor with `actors_get(id, revision)`; use its returned `retrieved_revision` and operation names, not the latest actor description, when assessing support. A missing revision is a failure.
 
 A repair uses `actors_run_recover`, not a changed request/idempotency key. First inspect the failed run and explicitly review the replacement revision. Obtain a fresh complete read-only duplicate check using the replacement's configured recovery inspection operation in the original context, reading every dataset cursor. Pass `id`, `revision`, `reviewed:true` and `duplicate_check_run_id`. Unknown or successful original outcomes, consequence reservations, wrong contexts, incomplete/stale coverage or matching records block recovery; never bypass these checks. Recovery retains logical inputs and once keys and performs another fresh inspection as a linked child run before continuing.
+
+For a pinned named operation, call `actors_get(id=..., revision=..., operation=...)`.
+Read the complete compact operation and its shared execution settings; verify
+`retrieved_revision`, `complete` and `step_count`. Do not infer that an operation
+is absent from a large full-definition preview. A missing operation/revision or
+`incomplete-response` error must stop execution; never substitute the latest pin.
+
+For approved label aliases, `assert_values` accepts an exact `canonical_map`
+with `equals`/`equals_field`; preserve raw extracted labels, and inspect
+`assertion_evidence`. Unknown labels are errors. Never infer provider equivalence.
+Use `effect_phase:"prepare"` only on a guarded, acknowledged
+`open_configuration` click that opens a reversible dialog. Use `commit` on the
+guarded final consequential click. Inspect both progress flags and effects; a
+preparation guard is still not authorization for automatic retry/recovery.

@@ -42,6 +42,9 @@ func (e *actorExecution) clickOnce(step actorStep) error {
 		return fmt.Errorf("once_key already reserved by run %d; refusing a duplicate consequential click", previousRun)
 	}
 	effect := map[string]any{"once_key": step.OnceKey, "expected_effect": step.ExpectedEffect, "state": "reserved"}
+	if step.EffectPhase != "" {
+		effect["effect_phase"] = step.EffectPhase
+	}
 	e.effects = append(e.effects, effect)
 	err = e.click(step)
 	state := "completed"

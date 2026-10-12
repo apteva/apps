@@ -28,39 +28,41 @@ import (
 var actorNumberPattern = regexp.MustCompile(`[-+]?\d[\d\s.,]*`)
 
 type actorExecution struct {
-	lastStartedStep int
-	completedSteps  int
-	commitAttempted bool
-	recoveryCheck   map[string]any
-	coverage        *actorReadCoverage
-	app             *App
-	ctx             *sdk.AppCtx
-	run             *actorQueuedRun
-	definition      actorDefinition
-	variables       map[string]any
-	deadline        time.Time
-	maxPages        int
-	maxItems        int
-	retries         int
-	session         *browserSession
-	items           []map[string]any
-	pageCount       int
-	trace           []map[string]any
-	media           []map[string]any
-	effects         []map[string]any
-	lastExtract     *actorStep
-	lastValues      map[string]any
-	currentURL      string
-	startedAt       time.Time
-	workerCtx       context.Context
-	screenshot      *artifactSummary
-	datasetJSONL    *artifactSummary
-	datasetCSV      *artifactSummary
-	traceArtifact   *artifactSummary
-	datasetBytes    int
-	datasetFull     bool
-	selectedPreset  string
-	crawl           *crawlDefinition
+	lastStartedStep      int
+	completedSteps       int
+	commitAttempted      bool
+	preparationAttempted bool
+	assertionEvidence    []map[string]any
+	recoveryCheck        map[string]any
+	coverage             *actorReadCoverage
+	app                  *App
+	ctx                  *sdk.AppCtx
+	run                  *actorQueuedRun
+	definition           actorDefinition
+	variables            map[string]any
+	deadline             time.Time
+	maxPages             int
+	maxItems             int
+	retries              int
+	session              *browserSession
+	items                []map[string]any
+	pageCount            int
+	trace                []map[string]any
+	media                []map[string]any
+	effects              []map[string]any
+	lastExtract          *actorStep
+	lastValues           map[string]any
+	currentURL           string
+	startedAt            time.Time
+	workerCtx            context.Context
+	screenshot           *artifactSummary
+	datasetJSONL         *artifactSummary
+	datasetCSV           *artifactSummary
+	traceArtifact        *artifactSummary
+	datasetBytes         int
+	datasetFull          bool
+	selectedPreset       string
+	crawl                *crawlDefinition
 }
 
 func (a *App) toolActorRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -416,9 +418,12 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 	out["page_count"] = exec.pageCount
 	out["items"] = previewActorItems(exec.items)
 	out["trace_preview"] = previewActorTrace(exec.trace)
-	out["execution_progress"] = map[string]any{"last_started_step": exec.lastStartedStep, "completed_steps": exec.completedSteps, "commit_attempted": exec.commitAttempted}
+	out["execution_progress"] = map[string]any{"last_started_step": exec.lastStartedStep, "completed_steps": exec.completedSteps, "commit_attempted": exec.commitAttempted, "preparation_attempted": exec.preparationAttempted}
 	if exec.recoveryCheck != nil {
 		out["recovery_precheck"] = exec.recoveryCheck
+	}
+	if len(exec.assertionEvidence) > 0 {
+		out["assertion_evidence"] = exec.assertionEvidence
 	}
 	out["current_url"] = exec.currentURL
 	if exec.coverage != nil {
@@ -549,7 +554,9 @@ func (e *actorExecution) runSteps() (map[string]any, error) {
 		}
 		step := e.definition.Steps[index]
 		e.lastStartedStep = index
-		if step.OnceKey != "" || step.ConfirmConsequence != "" || consequentialActorStep(step) {
+		if step.EffectPhase == "prepare" {
+			e.preparationAttempted = true
+		} else if step.OnceKey != "" || step.ConfirmConsequence != "" || consequentialActorStep(step) {
 			e.commitAttempted = true
 		}
 		// Persist before dispatch so a worker crash cannot leave stale evidence
@@ -757,8 +764,10 @@ func (e *actorExecution) assertValues(step actorStep) error {
 		if assertion.Matches != "" && !regexp.MustCompile(assertion.Matches).MatchString(stringFromAny(actual)) {
 			return fmt.Errorf("assertion pattern failed for %q", field)
 		}
-		if assertion.Equals != nil && !actorValuesEqual(actual, assertion.Equals, assertion.Tolerance) {
-			return fmt.Errorf("assertion failed for %q: got %v, want %v", field, actual, assertion.Equals)
+		if assertion.Equals != nil {
+			if err := e.compareAssertionValues(field, actual, assertion.Equals, assertion); err != nil {
+				return err
+			}
 		}
 		if assertion.EqualsSet != nil {
 			if err := actorAssertLabelSet(actual, assertion.EqualsSet); err != nil {
@@ -770,8 +779,8 @@ func (e *actorExecution) assertValues(step actorStep) error {
 			if !exists {
 				return fmt.Errorf("assertion reference field %q was not extracted", assertion.EqualsField)
 			}
-			if !actorValuesEqual(actual, reference, assertion.Tolerance) {
-				return fmt.Errorf("assertion failed for %q: got %v, want value of %q (%v)", field, actual, assertion.EqualsField, reference)
+			if err := e.compareAssertionValues(field, actual, reference, assertion); err != nil {
+				return err
 			}
 		}
 		if assertion.Contains != "" && !strings.Contains(strings.ToLower(stringFromAny(actual)), strings.ToLower(assertion.Contains)) {
@@ -1286,7 +1295,7 @@ func (e *actorExecution) persistProgress(message string) error {
 	progress := map[string]any{
 		"item_count": len(e.items), "page_count": e.pageCount, "current_url": e.currentURL,
 		"message": message, "updated_at": time.Now().UTC().Format(time.RFC3339),
-		"execution_progress": map[string]any{"last_started_step": e.lastStartedStep, "completed_steps": e.completedSteps, "commit_attempted": e.commitAttempted},
+		"execution_progress": map[string]any{"last_started_step": e.lastStartedStep, "completed_steps": e.completedSteps, "commit_attempted": e.commitAttempted, "preparation_attempted": e.preparationAttempted},
 	}
 	if e.session != nil {
 		progress["session_id"] = e.session.SessionID

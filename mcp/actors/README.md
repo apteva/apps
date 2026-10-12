@@ -96,7 +96,7 @@ bun run scripts/build-panels.ts --app actors
 bun test mcp/actors/ui/ActorsPanel.test.ts
 ```
 
-The app-sdk pin is `v0.99.0`, derived from fetched tag ancestry (`v0.98.0` is its ancestor). `GOWORK=off` verifies the app against its published dependency rather than the workspace overlay.
+The app-sdk pin is `v0.100.0`, derived from fetched tag ancestry (`v0.99.0` is its ancestor). `GOWORK=off` verifies the app against its published dependency rather than the workspace overlay.
 
 The release manifest pins source to the matching immutable Actors tag. The registry references the same tag for the manifest and icon. Publishing a release makes Actors available for installation; it does not install the app into existing projects.
 
@@ -208,3 +208,36 @@ Ordinary `actors_run_retry` retains the original definition and inputs. `actors_
 Recovery accepts only a failed run with durable no-commit execution evidence, or a complete legacy read-only trace prefix ending in a pre-dispatch locator failure. Successful, cancelled, active, uncertain and incomplete outcomes fail closed. The original operation, inputs, preset, context and consequential once keys are retained; a new linked run records the original execution key. Reserved, uncertain or completed consequence guards are never cleared. The supplied read must use the reviewed immutable revision, match the original creator/context, finish within the previous 15 minutes and prove complete coverage of every required view. Read all dataset records to check configured exact duplicate fields. The worker repeats the inspection as a separate immutable child run before the repaired attempt, blocking if a duplicate appeared or coverage became unavailable.
 
 The editable [Patreon publishing example](examples/patreon-publishing.md) includes guarded native composer navigation and format-specific preflights that reload and verify drafts before Publish. Preflights autosave drafts; use your test account for content checks.
+
+## Compact immutable operation retrieval
+
+Use `actors_get` with `id` (or `name`), `revision` and `operation` to inspect only
+one operation, for example `{"id":1,"revision":55,"operation":"gallery_post"}`.
+The response includes actor ID/name, actual retrieved/latest revisions, the
+complete stored operation JSON, shared execution settings, effective limits and
+input requirements. Shared defaults and presets are retained because execution
+renders that configuration too. `required_inputs` describes missing bindings
+without a preset; `required_inputs_by_preset` describes each configured preset.
+Constraints remain in the original `assert_inputs` steps, identified by zero-based
+`assertion_steps`. Precedence is defaults, preset, schedule overrides, then input.
+
+Operation limits replace the actor limits as a whole, as they do during execution.
+Unresolved templated limits report their expression and engine bounds, rather
+than pretending to be a fixed budget. `step_count`, `operation_sha256` (SHA-256 of
+the compact stored operation JSON) and `complete:true` support completeness checks.
+The complete MCP text response is capped at 32 KiB: exceeding that bound returns
+an explicit `incomplete-response` error, never a partial operation. Missing
+operations/revisions fail; even a latest-revision request reads its immutable
+version row. Omitting `operation` preserves the full existing response.
+Retrieval does not execute steps, reserve publish keys or alter actor definitions.
+
+Exact-label comparisons can opt into `canonical_map` with `equals` or
+`equals_field`. Both operands must be strings present in the explicit map;
+unknown labels fail closed. `assertion_evidence` retains original and canonical
+values. This does not infer relationships between providers.
+
+A guarded acknowledged `open_configuration` click may declare
+`effect_phase: "prepare"`. It sets `preparation_attempted`, while a guarded
+consequential `effect_phase: "commit"` sets `commit_attempted` before dispatch.
+Unannotated steps retain conservative legacy classification. Preparation guards
+still block automatic recovery/replay; financial actions cannot declare prepare.
