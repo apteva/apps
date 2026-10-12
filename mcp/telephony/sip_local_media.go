@@ -634,7 +634,7 @@ func (s *sipSession) readLocalRTP(ctx context.Context, m *sipRTPMedia, digits ch
 	resampler := newPCMResampler(m.sampleRate(), 24000)
 	for ctx.Err() == nil {
 		_ = m.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-		n, source, err := m.conn.ReadFromUDP(buffer)
+		n, source, err := m.readPacket(buffer)
 		m.observedReadError(err)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -650,7 +650,7 @@ func (s *sipSession) readLocalRTP(ctx context.Context, m *sipRTPMedia, digits ch
 			m.observations.rejectedSource.Add(1)
 			continue
 		}
-		packet, err := m.decodePacket(buffer[:n])
+		packet, err := m.decodePacketAt(buffer[:n], m.readAt)
 		if err != nil {
 			continue
 		}

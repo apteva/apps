@@ -19,7 +19,7 @@ test("PCM session collection is paced and bounded; blocked telemetry never sends
  try{
   for(let i=0;i<100;i++)session.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:"attempt_started",attempt_id:`attempt-${i.toString(16)}`});
   expect(sent).toHaveLength(0);expect(session.diagnostics.sessionEvents).toHaveLength(50);
-  expect(session.transportSender.skippedAuxiliary).toBe(68);
+  expect(session.transportSender.skippedAuxiliary).toBe(84);
   session.transportSender.tick();expect(sent).toHaveLength(0);
   session.diagnostics.websocketBufferedBytes=0;session.transportSender.tick();
   expect(sent).toHaveLength(1);expect(sent[0].type).toBe("send.telemetry");

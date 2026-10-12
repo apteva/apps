@@ -38,8 +38,8 @@ export function rtcStatistics(report: RTCStatsReport, previous?: RTCPrevious) {
   const copy=(s:any,prefix:string,keys:string[])=>{for(const k of keys){const n=numeric(s,k);if(n!==undefined)metrics[prefix+k]=n;}};
   const interval=(s:any,id:string,numerator:string,denominator:string,key:string)=>{
     const n=numeric(s,numerator), d=numeric(s,denominator), old=previous?.counters?.[id];
-    if(n!==undefined && d!==undefined){counters[id]??={};counters[id][numerator]=n;counters[id][denominator]=d;
-      if(old && n>=old[numerator] && d>old[denominator]) metrics[key]=(n-old[numerator])/(d-old[denominator])*1000;}
+    if(n!==undefined && d!==undefined){counters[id]??={};counters[id][numerator]=n;counters[id][denominator]=d;if(numeric(s,"ssrc")!==undefined)counters[id].ssrc=s.ssrc;
+      if(old && old.ssrc===numeric(s,"ssrc") && n>=old[numerator] && d>old[denominator]) metrics[key]=(n-old[numerator])/(d-old[denominator])*1000;}
   };
   // Loss is an interval observation, not a list of missing RTP sequences.
   const loss=(s:any,id:string,prefix:string)=>{
@@ -83,7 +83,10 @@ export function rtcStatistics(report: RTCStatsReport, previous?: RTCPrevious) {
         interval(s,id,"jitterBufferDelay","jitterBufferEmittedCount","receiver_jitter_buffer_interval_ms");
         interval(s,id,"jitterBufferTargetDelay","jitterBufferEmittedCount","receiver_jitter_target_interval_ms");
         interval(s,id,"jitterBufferMinimumDelay","jitterBufferEmittedCount","receiver_jitter_minimum_interval_ms");
-        interval(s,id,"totalProcessingDelay","packetsReceived","receiver_processing_interval_ms");
+        // Audio delay accumulates per decoded sample, not RTP packet.
+        copy(s,"receiver_",["totalProcessingDelay","totalSamplesDecoded"]);
+        states.receiver_processing = numeric(s,"totalSamplesDecoded")===undefined ? "unavailable" : "per_decoded_sample";
+        interval(s,id,"totalProcessingDelay","totalSamplesDecoded","receiver_processing_interval_ms");
         if(numeric(s,"lastPacketReceivedTimestamp")!==undefined)metrics.receiver_last_packet_age_ms=Math.max(0,s.timestamp-s.lastPacketReceivedTimestamp);
         if(codec){states.codec=codec.mimeType;metrics.codec_clock_rate=rate;if(numeric(codec,"channels")!==undefined)metrics.codec_channels=codec.channels;}
       }

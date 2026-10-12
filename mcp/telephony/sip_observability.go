@@ -17,41 +17,47 @@ import (
 // Atomic counters and a best-effort bounded timing window. Sampling cannot hold
 // an RTP reader/writer: contention only skips diagnostic sequence calculations.
 type sipRTPObservations struct {
-	lastError           atomic.Int64
-	lastDelayedDelivery atomic.Int64
-	packets             atomic.Int64
-	bytes               atomic.Int64
-	last                atomic.Int64
-	maxGap              atomic.Int64
-	rejectedSource      atomic.Int64
-	decodeErrors        atomic.Int64
-	authErrors          atomic.Int64
-	replayErrors        atomic.Int64
-	decryptErrors       atomic.Int64
-	readErrors          atomic.Int64
-	sent                atomic.Int64
-	sentBytes           atomic.Int64
-	sendErrors          atomic.Int64
-	lastSent            atomic.Int64
-	maxSend             atomic.Int64
-	maxPacingGap        atomic.Int64
-	skipped             atomic.Int64
-	duplicates          atomic.Int64
-	outOfOrder          atomic.Int64
-	loss                atomic.Int64
-	sequenceGaps        atomic.Int64
-	jitterNS            atomic.Int64
-	deliveryExcessNS    atomic.Int64
-	timingMu            sync.Mutex
-	observedSkipped     int64
-	stream              uint32
-	highest             int64
-	first               int64
-	seen                [256]int64
-	have                bool
-	lastArrival         time.Time
-	lastTimestamp       uint32
-	jitter              float64
+	earlyKernelDrops     atomic.Int64
+	activationDropped    atomic.Int64
+	kernelDrops          atomic.Int64
+	kernelDropsAvailable atomic.Bool
+	earlyPackets         atomic.Int64
+	earlyBytes           atomic.Int64
+	lastError            atomic.Int64
+	lastDelayedDelivery  atomic.Int64
+	packets              atomic.Int64
+	bytes                atomic.Int64
+	last                 atomic.Int64
+	maxGap               atomic.Int64
+	rejectedSource       atomic.Int64
+	decodeErrors         atomic.Int64
+	authErrors           atomic.Int64
+	replayErrors         atomic.Int64
+	decryptErrors        atomic.Int64
+	readErrors           atomic.Int64
+	sent                 atomic.Int64
+	sentBytes            atomic.Int64
+	sendErrors           atomic.Int64
+	lastSent             atomic.Int64
+	maxSend              atomic.Int64
+	maxPacingGap         atomic.Int64
+	skipped              atomic.Int64
+	duplicates           atomic.Int64
+	outOfOrder           atomic.Int64
+	loss                 atomic.Int64
+	sequenceGaps         atomic.Int64
+	jitterNS             atomic.Int64
+	deliveryExcessNS     atomic.Int64
+	timingMu             sync.Mutex
+	observedSkipped      int64
+	stream               uint32
+	highest              int64
+	first                int64
+	seen                 [256]int64
+	have                 bool
+	lastArrival          time.Time
+	lastTimestamp        uint32
+	jitter               float64
 }
 
 func atomicMax(dst *atomic.Int64, n int64) {
@@ -142,34 +148,40 @@ func (o *sipRTPObservations) sentPacket(size int, now time.Time) {
 }
 
 type sipRTPSnapshot struct {
-	Packets             int64   `json:"packets_received"`
-	Bytes               int64   `json:"bytes_received"`
-	LastPacketAt        string  `json:"last_packet_at,omitempty"`
-	LastPacketAgeMS     float64 `json:"last_packet_age_ms"`
-	MaxGapMS            float64 `json:"max_gap_ms"`
-	SequenceLoss        int64   `json:"sequence_loss"`
-	SequenceGaps        int64   `json:"sequence_gap_packets"`
-	Duplicates          int64   `json:"duplicates"`
-	OutOfOrder          int64   `json:"out_of_order"`
-	JitterMS            float64 `json:"jitter_ms"`
-	MaxDeliveryExcessMS float64 `json:"max_delivery_excess_ms"`
-	RejectedSource      int64   `json:"rejected_source_packets"`
-	DecodeErrors        int64   `json:"decode_errors"`
-	AuthErrors          int64   `json:"srtp_authentication_failures"`
-	ReplayErrors        int64   `json:"srtp_replay_failures"`
-	DecryptErrors       int64   `json:"srtp_decryption_failures"`
-	ReadErrors          int64   `json:"read_errors"`
-	Sent                int64   `json:"packets_sent"`
-	SentBytes           int64   `json:"bytes_sent"`
-	SendErrors          int64   `json:"send_errors"`
-	LastSentAt          string  `json:"last_sent_at,omitempty"`
-	MaxSendMS           float64 `json:"max_send_duration_ms"`
-	MaxPacingGapMS      float64 `json:"max_send_gap_ms"`
-	Skipped             int64   `json:"timing_observations_skipped"`
+	PreBridgeSocketDrops int64   `json:"pre_bridge_socket_receive_drops"`
+	ActivationDropped    int64   `json:"activation_dropped_packets"`
+	KernelDrops          int64   `json:"socket_receive_drops"`
+	KernelDropsAvailable bool    `json:"socket_receive_drops_available"`
+	EarlyPackets         int64   `json:"pre_bridge_drained_packets"`
+	EarlyBytes           int64   `json:"pre_bridge_drained_bytes"`
+	Packets              int64   `json:"packets_received"`
+	Bytes                int64   `json:"bytes_received"`
+	LastPacketAt         string  `json:"last_packet_at,omitempty"`
+	LastPacketAgeMS      float64 `json:"last_packet_age_ms"`
+	MaxGapMS             float64 `json:"max_gap_ms"`
+	SequenceLoss         int64   `json:"sequence_loss"`
+	SequenceGaps         int64   `json:"sequence_gap_packets"`
+	Duplicates           int64   `json:"duplicates"`
+	OutOfOrder           int64   `json:"out_of_order"`
+	JitterMS             float64 `json:"jitter_ms"`
+	MaxDeliveryExcessMS  float64 `json:"max_delivery_excess_ms"`
+	RejectedSource       int64   `json:"rejected_source_packets"`
+	DecodeErrors         int64   `json:"decode_errors"`
+	AuthErrors           int64   `json:"srtp_authentication_failures"`
+	ReplayErrors         int64   `json:"srtp_replay_failures"`
+	DecryptErrors        int64   `json:"srtp_decryption_failures"`
+	ReadErrors           int64   `json:"read_errors"`
+	Sent                 int64   `json:"packets_sent"`
+	SentBytes            int64   `json:"bytes_sent"`
+	SendErrors           int64   `json:"send_errors"`
+	LastSentAt           string  `json:"last_sent_at,omitempty"`
+	MaxSendMS            float64 `json:"max_send_duration_ms"`
+	MaxPacingGapMS       float64 `json:"max_send_gap_ms"`
+	Skipped              int64   `json:"timing_observations_skipped"`
 }
 
 func (o *sipRTPObservations) snapshot(now time.Time) sipRTPSnapshot {
-	s := sipRTPSnapshot{Packets: o.packets.Load(), Bytes: o.bytes.Load(), MaxGapMS: float64(o.maxGap.Load()) / 1e6, SequenceLoss: o.loss.Load(), SequenceGaps: o.sequenceGaps.Load(), Duplicates: o.duplicates.Load(), OutOfOrder: o.outOfOrder.Load(), JitterMS: float64(o.jitterNS.Load()) / 1e6, MaxDeliveryExcessMS: float64(o.deliveryExcessNS.Load()) / 1e6, RejectedSource: o.rejectedSource.Load(), DecodeErrors: o.decodeErrors.Load(), AuthErrors: o.authErrors.Load(), ReplayErrors: o.replayErrors.Load(), DecryptErrors: o.decryptErrors.Load(), ReadErrors: o.readErrors.Load(), Sent: o.sent.Load(), SentBytes: o.sentBytes.Load(), SendErrors: o.sendErrors.Load(), MaxSendMS: float64(o.maxSend.Load()) / 1e6, MaxPacingGapMS: float64(o.maxPacingGap.Load()) / 1e6, Skipped: o.skipped.Load()}
+	s := sipRTPSnapshot{PreBridgeSocketDrops: o.earlyKernelDrops.Load(), ActivationDropped: o.activationDropped.Load(), KernelDrops: o.kernelDrops.Load(), KernelDropsAvailable: o.kernelDropsAvailable.Load(), EarlyPackets: o.earlyPackets.Load(), EarlyBytes: o.earlyBytes.Load(), Packets: o.packets.Load(), Bytes: o.bytes.Load(), MaxGapMS: float64(o.maxGap.Load()) / 1e6, SequenceLoss: o.loss.Load(), SequenceGaps: o.sequenceGaps.Load(), Duplicates: o.duplicates.Load(), OutOfOrder: o.outOfOrder.Load(), JitterMS: float64(o.jitterNS.Load()) / 1e6, MaxDeliveryExcessMS: float64(o.deliveryExcessNS.Load()) / 1e6, RejectedSource: o.rejectedSource.Load(), DecodeErrors: o.decodeErrors.Load(), AuthErrors: o.authErrors.Load(), ReplayErrors: o.replayErrors.Load(), DecryptErrors: o.decryptErrors.Load(), ReadErrors: o.readErrors.Load(), Sent: o.sent.Load(), SentBytes: o.sentBytes.Load(), SendErrors: o.sendErrors.Load(), MaxSendMS: float64(o.maxSend.Load()) / 1e6, MaxPacingGapMS: float64(o.maxPacingGap.Load()) / 1e6, Skipped: o.skipped.Load()}
 	if n := o.last.Load(); n > 0 {
 		s.LastPacketAt = ringTime(time.Unix(0, n))
 		s.LastPacketAgeMS = max(0, float64(now.UnixNano()-n)/1e6)
@@ -210,6 +222,9 @@ type sipJitterSnapshot struct {
 	MissingFilledMS       float64          `json:"missing_audio_filled_ms"`
 }
 type sipSignalSnapshot struct {
+	BYEStatus        string `json:"bye_status,omitempty"`
+	BYEFailures      int64  `json:"bye_failures"`
+	BYEError         string `json:"bye_error,omitempty"`
 	DialogID         string `json:"dialog_id"`
 	State            string `json:"state"`
 	InviteAt         string `json:"invite_at,omitempty"`
@@ -286,7 +301,17 @@ func (d *sipLiveDiagnostics) event(kind, leg, detail string, status int) {
 		}
 	case "sip_media_timeout":
 		d.signal.TimeoutCause = limitDiagnosticText(detail, 100)
+	case "sip_bye_requested":
+		d.signal.BYEStatus = "pending"
+	case "sip_bye_result":
+		d.signal.BYEStatus = "confirmed"
+		if status < 200 || status >= 300 {
+			d.signal.BYEStatus = "unconfirmed"
+			d.signal.BYEFailures++
+			d.signal.BYEError = sanitizeCarrierDetail(&d.row, detail)
+		}
 	case "sip_bye_received":
+		d.signal.BYEStatus = "peer_ended"
 		d.signal.BYEInitiator = "carrier"
 		d.signal.EndReason = sanitizeCarrierDetail(&d.row, detail)
 	case "sip_end":
@@ -302,6 +327,9 @@ func (d *sipLiveDiagnostics) event(kind, leg, detail string, status int) {
 	d.mu.Unlock()
 	e := carrierBridgeEvidence{AfterLocalCancel: d.ended.Load() && kind != "sip_end", Kind: kind, Leg: leg, Detail: sanitizeCarrierDetail(&d.row, detail), At: now, HTTPStatus: status, BridgeGeneration: d.id}
 	d.app.carrierTelemetry.enqueue(carrierTelemetryRecord{InstallID: d.app.installID, ProjectID: d.row.ProjectID, CallID: d.row.ID, Kind: "event", At: now, BridgeGeneration: d.id, Event: &e})
+	if kind == "sip_bye_result" {
+		d.app.carrierTelemetry.enqueue(d.sample(time.Now()))
+	}
 }
 func (d *sipLiveDiagnostics) attach(media *sipRTPMedia, dialog string) {
 	if d == nil {

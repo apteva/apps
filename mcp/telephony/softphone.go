@@ -560,7 +560,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 	if reason != "" {
 		logSoftphone("softphone browser media session rejected", "call", callID, "reason", reason)
 		if reason == "media_token_replaced" {
-			network := audioNetworkEvent{ID: newAudioConnectionID() + ":rejected", CallID: row.ID, ProjectID: row.ProjectID,
+			network := audioNetworkEvent{ProxyConnectionID: boundedTransportID(r.Header.Get(proxyConnectionHeader)), ID: newAudioConnectionID() + ":rejected", CallID: row.ID, ProjectID: row.ProjectID,
 				Event: "softphone.browser.attachment_rejected", Action: "rejected", Reason: reason, CurrentSessionID: sessionCorrelation.SessionID,
 				Session: audioSessionCorrelation{SessionID: safeAudioDiagnosticID(r.URL.Query().Get("session_generation"))}, Retention: 7 * 24 * time.Hour}
 			network.OccurredAt = time.Now().UTC().Format(time.RFC3339Nano)
@@ -574,6 +574,8 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, status, map[string]any{"code": reason})
 		return
 	}
+	// Only a validated session may identify a call to the proxy.
+	authenticatedCarrierHeaders(w, r, row)
 	if isTerminalStatus(row.Status) {
 		http.Error(w, "call has ended", http.StatusGone)
 		return

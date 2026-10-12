@@ -23,16 +23,17 @@ const sipStatusDecline = 603
 var e164InSIPValue = regexp.MustCompile(`\+[1-9][0-9]{7,14}`)
 
 type sipGateway struct {
-	app             *App
-	appCtx          *sdk.AppCtx
-	cfg             sipGatewayConfig
-	ua              *sipgo.UserAgent
-	client          *sipgo.Client
-	server          *sipgo.Server
-	dialogs         *sipgo.DialogServerCache
-	outboundDialogs *sipgo.DialogClientCache
-	ctx             context.Context
-	cancel          context.CancelFunc
+	dialogTransports sipDialogTransports
+	app              *App
+	appCtx           *sdk.AppCtx
+	cfg              sipGatewayConfig
+	ua               *sipgo.UserAgent
+	client           *sipgo.Client
+	server           *sipgo.Server
+	dialogs          *sipgo.DialogServerCache
+	outboundDialogs  *sipgo.DialogClientCache
+	ctx              context.Context
+	cancel           context.CancelFunc
 
 	mu                     sync.RWMutex
 	byProviderCall         map[string]*sipSession
@@ -207,6 +208,7 @@ func newSIPGateway(app *App, appCtx *sdk.AppCtx, cfg sipGatewayConfig) (*sipGate
 		outboundReserved: make(map[string]bool),
 		reserved:         make(map[string]bool), ackTimeout: 32 * time.Second,
 	}
+	client.TxRequester = sipDialogRequester{gateway: gateway}
 	gateway.registerHandlers()
 	return gateway, nil
 }
@@ -263,7 +265,6 @@ func (g *sipGateway) Stop() {
 		session.diagnostics.event("sip_shutdown", "local", "application_shutdown", 0)
 	}
 	g.mu.RUnlock()
-	g.cancel()
 	g.mu.RLock()
 	sessions := make([]*sipSession, 0, len(g.byCall))
 	for _, session := range g.byCall {
@@ -295,7 +296,24 @@ func (g *sipGateway) Stop() {
 	for _, session := range outbound {
 		session.finish("local_error", errors.New("SIP gateway stopped"))
 	}
+	// Mark dialogs ended before canceling their shared parent. Otherwise an
+	// outbound signaling owner can exit before it knows a BYE is required.
+	g.cancel()
+	// Allow the signaling owners to send their bounded BYEs before releasing
+	// transports. All sessions share the same shutdown deadline.
+	g.mu.RLock()
+	signalDeadline := g.stopDeadline
+	g.mu.RUnlock()
+	for _, session := range outbound {
+		timer := time.NewTimer(max(0, time.Until(signalDeadline)))
+		select {
+		case <-session.inviteDone:
+		case <-timer.C:
+		}
+		timer.Stop()
+	}
 	if g.ua != nil {
+		g.dialogTransports.close()
 		_ = g.ua.Close()
 	}
 	g.work.Wait()
@@ -317,11 +335,12 @@ func (g *sipGateway) Stop() {
 	}
 }
 
-func (g *sipGateway) registerHandlers() {
-	g.server.OnInvite(g.trackHandler(g.handleInvite))
-	g.server.OnAck(g.trackHandler(g.handleACK))
-	g.server.OnUpdate(g.trackHandler(g.handleRefresh))
-	g.server.OnBye(g.trackHandler(func(request *sip.Request, transaction sip.ServerTransaction) {
+func (g *sipGateway) registerHandlers() { g.registerServerHandlers(g.server) }
+func (g *sipGateway) registerServerHandlers(server *sipgo.Server) {
+	server.OnInvite(g.trackHandler(g.handleInvite))
+	server.OnAck(g.trackHandler(g.handleACK))
+	server.OnUpdate(g.trackHandler(g.handleRefresh))
+	server.OnBye(g.trackHandler(func(request *sip.Request, transaction sip.ServerTransaction) {
 		if !g.cfg.sourceAllowed(request.Source()) {
 			_ = transaction.Respond(sip.NewResponseFromRequest(request, 403, "Forbidden", nil))
 			return
@@ -350,7 +369,7 @@ func (g *sipGateway) registerHandlers() {
 			session.finish("carrier", nil)
 		}
 	}))
-	g.server.OnCancel(g.trackHandler(func(request *sip.Request, transaction sip.ServerTransaction) {
+	server.OnCancel(g.trackHandler(func(request *sip.Request, transaction sip.ServerTransaction) {
 		// Matched CANCEL is handled by sipgo's INVITE transaction. An
 		// unmatched CANCEL must never end a dialog using Call-ID alone.
 		status := 481
@@ -359,8 +378,8 @@ func (g *sipGateway) registerHandlers() {
 		}
 		_ = transaction.Respond(sip.NewResponseFromRequest(request, status, "No Matching Transaction", nil))
 	}))
-	g.server.OnInfo(g.trackHandler(g.handleInfo))
-	g.server.OnOptions(g.trackHandler(func(request *sip.Request, transaction sip.ServerTransaction) {
+	server.OnInfo(g.trackHandler(g.handleInfo))
+	server.OnOptions(g.trackHandler(func(request *sip.Request, transaction sip.ServerTransaction) {
 		if !g.cfg.sourceAllowed(request.Source()) {
 			_ = transaction.Respond(sip.NewResponseFromRequest(request, sip.StatusForbidden, "Forbidden", nil))
 			return
@@ -720,6 +739,10 @@ func (s *sipSession) finishWithSignaling(leg string, cause error) error {
 		if !isTerminalStatus(row.Status) {
 			status := "completed"
 			message := ""
+			if signalingErr != nil {
+				status = "failed"
+				message = "SIP termination unconfirmed: " + transportEvidenceError(signalingErr)
+			}
 			if row.Status == "pending" || row.Status == "answering" {
 				status = "canceled"
 			}

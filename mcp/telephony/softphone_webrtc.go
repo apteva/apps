@@ -125,21 +125,23 @@ func (c *rtcHubConn) queueWhisper(data []byte, valid func() bool) bool {
 }
 
 type rtcMediaSnapshot struct {
-	CoachingMixedMS        int64            `json:"coaching_mixed_ms,omitempty"`
-	IngressConcealedMS     int64            `json:"ingress_concealed_ms"`
-	Encoder                *rtcEncoderState `json:"encoder,omitempty"`
-	EncoderControlErrors   uint64           `json:"encoder_control_errors"`
-	RTP                    rtcSendSnapshot  `json:"rtp_send"`
-	IngressRejectedPackets int64            `json:"ingress_rejected_packets"`
-	IngressQueueDrops      int64            `json:"ingress_queue_drops"`
-	IngressPaddingPackets  int64            `json:"ingress_padding_packets"`
-	DecodeErrors           int64            `json:"decode_errors"`
-	OutboundDroppedMS      int64            `json:"outbound_dropped_ms"`
-	PacingSkippedMS        int64            `json:"pacing_skipped_ms"`
-	MaxQueueMS             int              `json:"max_queue_ms"`
-	Events                 []audioDropEvent `json:"events,omitempty"`
+	Ingress                rtcIngressSnapshot `json:"rtp_ingress"`
+	CoachingMixedMS        int64              `json:"coaching_mixed_ms,omitempty"`
+	IngressConcealedMS     int64              `json:"ingress_concealed_ms"`
+	Encoder                *rtcEncoderState   `json:"encoder,omitempty"`
+	EncoderControlErrors   uint64             `json:"encoder_control_errors"`
+	RTP                    rtcSendSnapshot    `json:"rtp_send"`
+	IngressRejectedPackets int64              `json:"ingress_rejected_packets"`
+	IngressQueueDrops      int64              `json:"ingress_queue_drops"`
+	IngressPaddingPackets  int64              `json:"ingress_padding_packets"`
+	DecodeErrors           int64              `json:"decode_errors"`
+	OutboundDroppedMS      int64              `json:"outbound_dropped_ms"`
+	PacingSkippedMS        int64              `json:"pacing_skipped_ms"`
+	MaxQueueMS             int                `json:"max_queue_ms"`
+	Events                 []audioDropEvent   `json:"events,omitempty"`
 }
 type rtcMediaStats struct {
+	ingress   rtcIngressTelemetry
 	direction string
 	voice     rtcVoiceControl
 	rtp       rtcSendTelemetry
@@ -154,6 +156,7 @@ func (s *rtcMediaStats) snapshot() rtcMediaSnapshot {
 	v.Encoder = s.voice.codec.Load()
 	v.EncoderControlErrors = s.voice.configurationErrors.Load()
 	v.RTP = s.rtp.snapshot()
+	v.Ingress = s.ingress.snapshot()
 	v.Events = append([]audioDropEvent(nil), v.Events...)
 	return v
 }
@@ -185,6 +188,7 @@ func mergeRTCSnapshots(a, b rtcMediaSnapshot) rtcMediaSnapshot {
 	}
 	a.EncoderControlErrors += b.EncoderControlErrors
 	a.RTP = mergeRTCSends(a.RTP, b.RTP)
+	a.Ingress = mergeRTCIngress(a.Ingress, b.Ingress)
 	a.IngressRejectedPackets += b.IngressRejectedPackets
 	a.IngressQueueDrops += b.IngressQueueDrops
 	a.IngressPaddingPackets += b.IngressPaddingPackets
@@ -491,7 +495,11 @@ func receiveRTCAudio(remote *webrtc.TrackRemote, stats *rtcMediaStats, done <-ch
 		return
 	}
 	defer decoder.Close()
-	packets := make(chan *rtp.Packet, 16)
+	type receivedPacket struct {
+		packet *rtp.Packet
+		at     time.Time
+	}
+	packets := make(chan receivedPacket, 16)
 	go func() {
 		defer close(packets)
 		for {
@@ -499,11 +507,14 @@ func receiveRTCAudio(remote *webrtc.TrackRemote, stats *rtcMediaStats, done <-ch
 			if err != nil {
 				return
 			}
+			at := time.Now()
 			if ignoreRTCPadding(p, stats) {
+				stats.ingress.observe(p, at, at, len(packets), stats.rtp.connectionID, stats.rtp.pathRevision.Load(), "padding", 0)
 				continue
 			}
+			stats.ingress.observe(p, at, at, len(packets), stats.rtp.connectionID, stats.rtp.pathRevision.Load(), "received", 0)
 			select {
-			case packets <- p:
+			case packets <- receivedPacket{p, at}:
 			case <-done:
 				return
 			default:
@@ -523,22 +534,32 @@ func receiveRTCAudio(remote *webrtc.TrackRemote, stats *rtcMediaStats, done <-ch
 		select {
 		case <-done:
 			return
-		case p, ok := <-packets:
+		case received, ok := <-packets:
 			if !ok {
 				return
 			}
-			if !j.push(p, time.Now()) {
+			p := received.packet
+			stats.ingress.observe(p, received.at, time.Now(), len(packets), stats.rtp.connectionID, stats.rtp.pathRevision.Load(), "processed", 0)
+			if !j.push(p, received.at) {
 				stats.drop("webrtc_rtp_rejected", direction, uint64(p.SequenceNumber), 0)
 			}
 		case now := <-tick.C:
 			for p := j.pop(now); p != nil; p = j.pop(now) {
+				if timeline.ssrc != p.SSRC {
+					timeline.valid = false
+				}
+				repaired := 0
 				for gap := timeline.missing(p.SequenceNumber, p.Timestamp); gap > 0; gap-- {
 					if n, err := decoder.recover(p.Payload, pcm[:480], fec && gap == 1); err == nil && n == 480 {
 						forward(pcm[:n], j.base.Add(time.Duration(int32(p.Timestamp-j.baseTS))*time.Second/48000-60*time.Millisecond))
 						stats.mu.Lock()
 						stats.value.IngressConcealedMS += 20
+						repaired += 20
 						stats.mu.Unlock()
 					}
+				}
+				if repaired > 0 {
+					stats.ingress.observe(p, now, now, len(packets), stats.rtp.connectionID, stats.rtp.pathRevision.Load(), "concealment", repaired)
 				}
 				n, err := decoder.decode(p.Payload, pcm)
 				if err != nil {
@@ -546,7 +567,7 @@ func receiveRTCAudio(remote *webrtc.TrackRemote, stats *rtcMediaStats, done <-ch
 					stats.drop("webrtc_decode_error", direction, uint64(p.SequenceNumber), 0)
 					continue
 				}
-				timeline = rtcDecodeTimeline{valid: true, seq: p.SequenceNumber, ts: p.Timestamp, samples: n}
+				timeline = rtcDecodeTimeline{ssrc: p.SSRC, valid: true, seq: p.SequenceNumber, ts: p.Timestamp, samples: n}
 				forward(pcm[:n], j.base.Add(time.Duration(int32(p.Timestamp-j.baseTS))*time.Second/48000-60*time.Millisecond))
 			}
 		}

@@ -353,6 +353,9 @@ func TestSoftphoneHubDropsRealtimePacingControlFrames(t *testing.T) {
 	peer := dialWS(t, server.URL+"/peer/call-soft-1/cb-secret")
 	browser := dialWS(t, server.URL+"/softphone/media/call-soft-1/peer-secret")
 
+	// HTTP upgrade precedes hub attachment; send the marker only once ready.
+	readSoftphoneEventWithin(t, browser, "ready", 3*time.Second)
+
 	for _, kind := range []string{"input.speech_started", "playback.progress", "playback.overflow"} {
 		payload, _ := json.Marshal(realtimeBridgeControl{Type: kind})
 		if err := wsutil.WriteClientText(peer, payload); err != nil {
@@ -379,7 +382,7 @@ func TestSoftphoneHubDropsRealtimePacingControlFrames(t *testing.T) {
 			return
 		}
 		var event map[string]any
-		if json.Unmarshal(data, &event) == nil && (event["type"] == "ready" || event["type"] == "peer.connected" || event["type"] == "call.status") {
+		if json.Unmarshal(data, &event) == nil && (event["type"] == "ready" || event["type"] == "peer.connected" || event["type"] == "call.status" || event["type"] == "audio.health") {
 			continue // hub-owned connection state, not realtime pacing control
 		}
 		t.Fatalf("realtime pacing control leaked to the browser: %s", data)
@@ -475,11 +478,13 @@ func TestSoftphoneBrowserReconnectResumesAudio(t *testing.T) {
 
 	peer := dialWS(t, server.URL+"/peer/call-soft-1/cb-secret")
 	first := dialWS(t, server.URL+"/softphone/media/call-soft-1/peer-secret")
+	readSoftphoneEventWithin(t, first, "ready", 3*time.Second)
 	_ = first.Close()
 
 	// Give the server a moment to observe the closed socket before rejoining.
 	time.Sleep(150 * time.Millisecond)
 	second := dialWS(t, server.URL+"/softphone/media/call-soft-1/peer-secret")
+	readSoftphoneEventWithin(t, second, "ready", 3*time.Second)
 
 	audio := pcm16ToBytes([]int16{11, 22, 33})
 	if err := wsutil.WriteClientBinary(peer, audio); err != nil {

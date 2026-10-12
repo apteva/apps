@@ -70,6 +70,7 @@ type carrierTelemetryCollector struct {
 	flushMu     sync.Mutex
 	pending     []carrierTelemetryRecord
 	lastCleanup time.Time
+	nextBatch   int
 }
 
 func (c *carrierTelemetryCollector) init() {
@@ -134,12 +135,25 @@ func (c *carrierTelemetryCollector) flush(ctx context.Context, db *callsDB, now 
 	}
 drained:
 	n := min(len(c.pending), 200)
+	if c.nextBatch > 0 {
+		n = min(n, c.nextBatch)
+	}
 	changed := map[string][]string{}
 	if n == 0 && !c.lastCleanup.IsZero() && now.Sub(c.lastCleanup) < time.Minute {
 		return changed, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
+	// A fixed large transaction can time out forever on a busy database.
+	// Retain observations, reduce the next background batch and retry later.
+	committed := false
+	defer func() {
+		if ctx.Err() != nil && n > 0 {
+			c.nextBatch = max(1, n/2)
+		} else if committed && c.nextBatch > 0 {
+			c.nextBatch = min(200, c.nextBatch+8)
+		}
+	}()
 	tx, err := db.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -191,6 +205,7 @@ drained:
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
+	committed = true
 	clear(c.pending[:n])
 	c.pending = append(c.pending[:0], c.pending[n:]...)
 	if cleanup {

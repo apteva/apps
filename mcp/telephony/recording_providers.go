@@ -74,7 +74,7 @@ func (a *App) handlePlivoRecordingStatus(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "persist recording", http.StatusInternalServerError)
 		return
 	}
-	globalCtx.WithProject(call.ProjectID).Emit("recording.ready", recordingPublic(*recording))
+	a.saveCallNotification(call.ProjectID, call.ID, "recording.ready", recordingPublic(*recording))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -131,7 +131,7 @@ func (a *App) handleTelnyxRecordingEvent(call *callRow, body []byte) (bool, erro
 	if err != nil {
 		return true, err
 	}
-	globalCtx.WithProject(call.ProjectID).Emit("recording.ready", recordingPublic(*recording))
+	a.saveCallNotification(call.ProjectID, call.ID, "recording.ready", recordingPublic(*recording))
 	return true, nil
 }
 

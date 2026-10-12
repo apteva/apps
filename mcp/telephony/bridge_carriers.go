@@ -184,7 +184,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		globalCtx.Logger().Warn("parse audio bridge url", "provider", cfg.Provider, "err", err, "url", redactURL(row.AudioBridgeURL))
 		return
 	}
-	dialer := ws.Dialer{}
+	dialer := a.correlatedBridgeDialer(row)
 	core, buffered, _, err := dialer.Dial(bridge.ctx, coreURL.String())
 	if err != nil {
 		closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "realtime bridge rejected")
@@ -725,7 +725,7 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 		globalCtx.Logger().Warn("parse audio bridge url", "provider", provider, "err", err, "url", redactURL(row.AudioBridgeURL))
 		return
 	}
-	dialer := ws.Dialer{}
+	dialer := a.correlatedBridgeDialer(row)
 	core, buffered, _, err := dialer.Dial(bridge.ctx, coreURL.String())
 	if err != nil {
 		closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "realtime bridge rejected")

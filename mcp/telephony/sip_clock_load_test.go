@@ -28,18 +28,22 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 		t.Skip("opt-in paced SIP/SRTP + Opus load measurement")
 	}
 	type result struct {
-		Calls                    int     `json:"calls"`
-		Codec                    string  `json:"browser_codec"`
-		Seconds                  float64 `json:"wall_seconds"`
-		CPUPercent               float64 `json:"cpu_percent_one_core"`
-		WorkP99MS                float64 `json:"playback_work_p99_ms"`
-		WorkMaxMS                float64 `json:"playback_work_max_ms"`
-		ScheduleMaxMS            float64 `json:"playback_schedule_max_ms"`
-		DiscardedMS              float64 `json:"discarded_ms"`
-		ReplacementMS            float64 `json:"replacement_ms"`
-		Received, Sent, Returned int64
-		MaxQueueMS               float64 `json:"max_queue_ms"`
-		AllocBytes               uint64  `json:"allocated_bytes"`
+		ProcessGCPauseMS          float64 `json:"process_gc_pause_ms"`
+		GoHeartbeatMaxGapMS       float64 `json:"go_heartbeat_max_gap_ms"`
+		MixedBackgroundOperations int64   `json:"mixed_background_operations"`
+		RecordingDroppedMS        int64   `json:"recording_dropped_ms"`
+		Calls                     int     `json:"calls"`
+		Codec                     string  `json:"browser_codec"`
+		Seconds                   float64 `json:"wall_seconds"`
+		CPUPercent                float64 `json:"cpu_percent_one_core"`
+		WorkP99MS                 float64 `json:"playback_work_p99_ms"`
+		WorkMaxMS                 float64 `json:"playback_work_max_ms"`
+		ScheduleMaxMS             float64 `json:"playback_schedule_max_ms"`
+		DiscardedMS               float64 `json:"discarded_ms"`
+		ReplacementMS             float64 `json:"replacement_ms"`
+		Received, Sent, Returned  int64
+		MaxQueueMS                float64 `json:"max_queue_ms"`
+		AllocBytes                uint64  `json:"allocated_bytes"`
 	}
 	var results []result
 	for _, count := range []int{32, 64} {
@@ -55,6 +59,7 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 					costs                 []float64
 					scheduleMax, queueMax float64
 				}
+				recorders, stopMixed := startSIPMixedLoad(t, count)
 				workers := make([]worker, count)
 				for i := range workers {
 					w := &workers[i]
@@ -123,7 +128,7 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 							_ = media.conn.SetReadDeadline(start.Add(frames*20*time.Millisecond + 300*time.Millisecond))
 							buf := make([]byte, 2048)
 							for {
-								n, _, err := media.conn.ReadFromUDP(buf)
+								n, _, err := media.readPacket(buf)
 								if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
 									return
 								}
@@ -200,6 +205,8 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 								errors <- err
 								return
 							}
+							recorders[i].Record(0, decoded[:samples])
+							recorders[i].Record(1, decoded[:samples])
 							returnPending = append(returnPending, w.down.Process(decoded[:samples])...)
 							if len(returnPending) < 320 {
 								continue
@@ -223,7 +230,28 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 					t.Fatal(err)
 				}
 				began := time.Now()
+				heartbeatStop := make(chan struct{})
+				heartbeatDone := make(chan time.Duration, 1)
+				go func() {
+					ticker := time.NewTicker(10 * time.Millisecond)
+					defer ticker.Stop()
+					last := time.Now()
+					var gap time.Duration
+					for {
+						select {
+						case <-heartbeatStop:
+							heartbeatDone <- gap
+							return
+						case <-ticker.C:
+							now := time.Now()
+							gap = max(gap, now.Sub(last))
+							last = now
+						}
+					}
+				}()
 				wg.Wait()
+				close(heartbeatStop)
+				heartbeatGap := <-heartbeatDone
 				cpuEnd, err := rtcProcessCPUSeconds()
 				if err != nil {
 					t.Fatal(err)
@@ -234,6 +262,9 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 					t.Error(err)
 				}
 				r := result{Calls: count, Codec: variant, Seconds: time.Since(began).Seconds(), AllocBytes: after.TotalAlloc - before.TotalAlloc}
+				r.ProcessGCPauseMS = float64(after.PauseTotalNs-before.PauseTotalNs) / 1e6
+				r.GoHeartbeatMaxGapMS = float64(heartbeatGap) / float64(time.Millisecond)
+				r.MixedBackgroundOperations, r.RecordingDroppedMS = stopMixed()
 				r.CPUPercent = (cpuEnd - cpuStart) / r.Seconds * 100
 				var costs []float64
 				for _, w := range workers {
@@ -253,13 +284,13 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 				}
 				results = append(results, r)
 				t.Logf("%+v", r)
-				if r.Received != int64(count*frames) || r.Returned != r.Sent || r.DiscardedMS != 0 || r.ReplacementMS != 0 || r.MaxQueueMS > 160 || r.WorkP99MS > 20 {
+				if r.RecordingDroppedMS != 0 || r.Received != int64(count*frames) || r.Returned != r.Sent || r.DiscardedMS != 0 || r.ReplacementMS != 0 || r.MaxQueueMS > 160 || r.WorkP99MS > 20 {
 					t.Errorf("paced-load gate failed: %+v", r)
 				}
 			})
 		}
 	}
-	data, err := json.MarshalIndent(map[string]any{"scope": "local bidirectional UDP/SRTP + SIP framer + resampling + Opus encode/decode; excludes signaling, proxy/browser, recording, database and routing", "gomaxprocs": runtime.GOMAXPROCS(0), "logical_cpus": runtime.NumCPU(), "results": results}, "", "  ")
+	data, err := json.MarshalIndent(map[string]any{"scope": "local bidirectional UDP/SRTP + SIP framer + resampling + Opus encode/decode; optional mixed mode adds recording, database call-list reads and retryable notification persistence; excludes live signaling, external proxy and browser rendering", "mixed_recording_database_notifications": os.Getenv("TELEPHONY_SIP_MIXED_LOAD") == "1", "gomaxprocs": runtime.GOMAXPROCS(0), "logical_cpus": runtime.NumCPU(), "results": results}, "", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}

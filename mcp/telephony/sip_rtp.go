@@ -33,6 +33,9 @@ var sipRTPPorts = struct {
 }{next: make(map[string]int)}
 
 type sipRTPMedia struct {
+	readAt               time.Time // single receive owner only
+	socketOOB            [64]byte
+	early                *sipEarlyReceiver
 	observations         sipRTPObservations
 	diagnostics          atomic.Pointer[sipLiveDiagnostics]
 	jitterTelemetry      atomic.Pointer[rtpJitterBuffer]
@@ -81,6 +84,7 @@ func openSIPRTPMedia(cfg sipGatewayConfig, offer sipMediaOffer) (*sipRTPMedia, e
 		}
 		sipRTPPorts.next[pool] = cfg.RTPPortMin + ((port-cfg.RTPPortMin)/2+1)%count*2
 
+		media.observations.kernelDropsAvailable.Store(enableSIPSocketDropCounter(conn))
 		media.lastPacket.Store(time.Now().UnixNano())
 		return media, nil
 	}
@@ -99,6 +103,9 @@ func (m *sipRTPMedia) Close() {
 }
 
 func (m *sipRTPMedia) decodePacket(raw []byte) (*rtp.Packet, error) {
+	return m.decodePacketAt(raw, time.Now())
+}
+func (m *sipRTPMedia) decodePacketAt(raw []byte, at time.Time) (*rtp.Packet, error) {
 	if m.security != nil {
 		decrypted, err := m.security.RemoteContext.DecryptRTP(nil, raw, nil)
 		if err != nil {
@@ -120,7 +127,7 @@ func (m *sipRTPMedia) decodePacket(raw []byte) (*rtp.Packet, error) {
 		m.observations.decodeErrors.Add(1)
 		return nil, errors.New("invalid RTP payload size")
 	}
-	m.observations.received(&packet, len(raw), time.Now(), packet.PayloadType == m.offer.PayloadType)
+	m.observations.received(&packet, len(raw), at, packet.PayloadType == m.offer.PayloadType)
 	return &packet, nil
 }
 
@@ -528,7 +535,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		session.finish("local_error", err)
 		return
 	}
-	core, buffered, _, err := (ws.Dialer{}).Dial(session.ctx, coreURL.String())
+	core, buffered, _, err := (a.correlatedBridgeDialer(row)).Dial(session.ctx, coreURL.String())
 	if err != nil {
 		_ = a.db().updateMediaStatusWithLeg(row.ID, "error", err.Error(), 1011, "core audio bridge rejected", string(mediaCloseLegCore))
 		session.finish("core", err)
@@ -631,10 +638,11 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 	go func() {
 		defer workers.Done()
 		defer cancel()
+		media.finishEarlyReceiver()
 		buffer := make([]byte, 4096)
 		for {
 			_ = media.conn.SetReadDeadline(time.Now().Add(time.Second))
-			n, source, err := media.conn.ReadFromUDP(buffer)
+			n, source, err := media.readPacket(buffer)
 			media.observedReadError(err)
 			if err != nil {
 				if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
@@ -660,7 +668,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 				media.observations.rejectedSource.Add(1)
 				continue
 			}
-			packet, err := media.decodePacket(buffer[:n])
+			packet, err := media.decodePacketAt(buffer[:n], media.readAt)
 			if err != nil {
 				continue
 			}
@@ -678,7 +686,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 			if mode := media.remoteMode.Load(); mode == 2 || mode == 3 {
 				continue
 			}
-			jitter.pushSourceRTP(packet.SSRC, packet.SequenceNumber, packet.Payload, packet.Timestamp, time.Now())
+			jitter.pushSourceRTP(packet.SSRC, packet.SequenceNumber, packet.Payload, packet.Timestamp, media.readAt)
 		}
 	}()
 

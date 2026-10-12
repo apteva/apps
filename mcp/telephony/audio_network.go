@@ -32,6 +32,7 @@ func audioNetworkTimestamp(at time.Time) string {
 
 // No token, URL, authorization header or carrier control is accepted here.
 type audioNetworkEvent struct {
+	ProxyConnectionID     string         `json:"proxy_connection_id,omitempty"`
 	HTTPStatus            int            `json:"http_status,omitempty"`
 	SessionIssuerIdentity *phoneIdentity `json:"session_issuer_identity,omitempty"`
 	lastBrowser           audioDisconnectInfo
@@ -111,9 +112,10 @@ func newAudioNetworkContext(row *callRow, identity phoneIdentity, r *http.Reques
 }
 
 type audioNetworkAddress struct {
-	Client     netip.Addr
-	SocketPeer netip.Addr
-	Source     string
+	Client            netip.Addr
+	SocketPeer        netip.Addr
+	Source            string
+	ProxyConnectionID string
 }
 
 // Resolve once at the authenticated handshake, before upgrading or rewriting
@@ -121,7 +123,7 @@ type audioNetworkAddress struct {
 // peer; unsigned forwarded headers cannot override a rejected assertion.
 func resolveAudioNetworkAddress(r *http.Request) (audioNetworkAddress, error) {
 	peer, source := audioPeerAddress(r, "")
-	address := audioNetworkAddress{Client: peer, SocketPeer: peer, Source: source}
+	address := audioNetworkAddress{Client: peer, SocketPeer: peer, Source: source, ProxyConnectionID: boundedTransportID(r.Header.Get(proxyConnectionHeader))}
 	ip, err := sdk.ClientIPFromRequest(r)
 	if err == nil && ip != "" {
 		address.Client, _ = netip.ParseAddr(ip)
@@ -142,7 +144,7 @@ func newAudioNetworkContextWithAddress(row *callRow, identity phoneIdentity, add
 	if identity.valid() {
 		identitySource = "validated_media_session"
 	}
-	return audioNetworkEvent{CallID: row.ID, ProjectID: row.ProjectID, AdviserIdentity: identity,
+	return audioNetworkEvent{ProxyConnectionID: address.ProxyConnectionID, CallID: row.ID, ProjectID: row.ProjectID, AdviserIdentity: identity,
 		IdentitySource: identitySource, ClientIP: ip, SocketPeerIP: peer, AddressSource: address.Source,
 		Classification: audioNetworkClassification(address.Client, config["audio_telemetry_known_vpn_exits"]),
 		Retention:      time.Duration(durationSetting(config, "audio_telemetry_network_retention_days", 7, 1, 31)) * 24 * time.Hour}

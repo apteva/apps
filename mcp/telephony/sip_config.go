@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -39,6 +41,8 @@ type sipRuntimeHolder struct {
 }
 
 type sipGatewayConfig struct {
+	clientRoots   *x509.CertPool // nil uses system roots; tests inject a private CA.
+	TLSPeerNames  map[string]string
 	Enabled       bool
 	Transport     string
 	ListenAddress string
@@ -197,6 +201,17 @@ func loadSIPGatewayConfigWithOptions(config sdk.Config, options sipConfigOptions
 	if strings.TrimSpace(allowedCIDRs) == "" {
 		allowedCIDRs = strings.Join(defaultSIPCarrierCIDRs, ",")
 	}
+	cfg.TLSPeerNames = map[string]string{"telnyx": "sip.telnyx.com"}
+	if raw := strings.TrimSpace(config["sip_tls_peer_names"]); raw != "" {
+		if len(raw) > 4096 || json.Unmarshal([]byte(raw), &cfg.TLSPeerNames) != nil {
+			return cfg, errors.New("invalid SIP TLS peer names")
+		}
+	}
+	for provider, name := range cfg.TLSPeerNames {
+		if len(provider) > 64 || len(name) > 253 || !sipHostnamePattern.MatchString(name) || net.ParseIP(name) != nil || !strings.Contains(name, ".") {
+			return cfg, errors.New("SIP TLS peer names must map carriers to certificate hostnames")
+		}
+	}
 	cfg.AllowedCIDRs, err = parseSIPAllowedCIDRs(allowedCIDRs)
 	if err != nil {
 		return cfg, err
@@ -215,7 +230,7 @@ func (c sipGatewayConfig) tlsConfig() (*tls.Config, error) {
 	if _, err := loader.getCertificate(nil); err != nil {
 		return nil, err
 	}
-	return &tls.Config{GetCertificate: loader.getCertificate, MinVersion: tls.VersionTLS12}, nil
+	return &tls.Config{RootCAs: c.clientRoots, GetCertificate: loader.getCertificate, MinVersion: tls.VersionTLS12}, nil
 }
 
 func (c sipGatewayConfig) sourceAllowed(address string) bool {

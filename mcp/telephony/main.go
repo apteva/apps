@@ -48,7 +48,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.12.11
+version: 0.12.12
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -346,7 +346,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.12.11
+    ref: telephony/v0.12.12
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -388,6 +388,7 @@ config_schema:
   - { name: sip_public_ip, type: text, label: "SIP public IPv4 override", description: "Optional. Defaults to the public IPv4 resolved from the SIP hostname." }
   - { name: sip_tls_cert_file, type: text, label: "SIP TLS certificate override", description: "Optional. Telephony discovers standard Apteva and Let's Encrypt certificate paths." }
   - { name: sip_tls_key_file, type: text, label: "SIP TLS key override", description: "Optional. Must be set with the certificate override." }
+  - { name: sip_tls_peer_names, type: text, label: "Carrier TLS certificate names", description: 'Optional JSON carrier-to-hostname mapping for in-dialog TLS connections to IP Contacts. Defaults to {"telnyx":"sip.telnyx.com"}. Certificate trust and hostname verification remain required.' }
   - { name: sip_allowed_cidrs, type: text, label: "Carrier CIDR override", description: "Optional. Defaults to maintained Twilio and Telnyx signaling and media networks." }
   - { name: sip_rtp_bind_ip, type: text, default: "0.0.0.0", label: "RTP bind IPv4 address" }
   - { name: sip_rtp_port_min, type: text, default: "20000", label: "First RTP UDP port" }
@@ -412,6 +413,7 @@ type App struct {
 	admissionMu      sync.RWMutex
 	audioPeerHasher  audioPeerHasher
 	audioNetworks    audioNetworkCollector
+	notifications    callNotificationQueue
 	audioTransports  audioTransportCollector
 	carrierTelemetry carrierTelemetryCollector
 	audioAlerts      audioAlertCorrelator

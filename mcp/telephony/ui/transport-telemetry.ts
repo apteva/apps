@@ -14,13 +14,14 @@ export const TRANSPORT_METRICS = [
   "receiver_bytesReceived", "receiver_packetsReceived", "receiver_packetsLost", "receiver_jitter", "receiver_packetsDiscarded",
   "receiver_concealedSamples", "receiver_silentConcealedSamples", "receiver_concealmentEvents", "receiver_insertedSamplesForDeceleration", "receiver_removedSamplesForAcceleration",
   "receiver_totalSamplesReceived", "receiver_audioLevel", "receiver_totalAudioEnergy", "receiver_totalSamplesDuration", "receiver_nackCount", "receiver_fecPacketsReceived", "receiver_fecPacketsDiscarded",
-  "receiver_jitter_buffer_interval_ms", "receiver_jitter_target_interval_ms", "receiver_jitter_minimum_interval_ms", "receiver_processing_interval_ms", "receiver_last_packet_age_ms",
+  "receiver_jitter_buffer_interval_ms", "receiver_jitter_target_interval_ms", "receiver_jitter_minimum_interval_ms", "receiver_processing_interval_ms", "receiver_totalProcessingDelay", "receiver_totalSamplesDecoded", "telemetry_skipped_samples", "telemetry_skipped_auxiliary", "telemetry_queue_age_ms", "receiver_last_packet_age_ms",
   "sender_bytesSent", "sender_packetsSent", "sender_headerBytesSent", "sender_retransmittedPacketsSent", "sender_retransmittedBytesSent", "sender_nackCount", "sender_targetBitrate", "sender_send_delay_interval_ms",
   "remote_receiver_packetsLost", "remote_receiver_fractionLost", "remote_receiver_jitter", "remote_receiver_roundTripTime", "remote_receiver_totalRoundTripTime", "remote_receiver_roundTripTimeMeasurements",
   "remote_sender_packetsSent", "remote_sender_bytesSent", "pair_availableOutgoingBitrate", "pair_availableIncomingBitrate", "pair_currentRoundTripTime", "pair_totalRoundTripTime",
   "pair_bytesSent", "pair_bytesReceived", "pair_requestsSent", "pair_requestsReceived", "pair_responsesSent", "pair_responsesReceived", "pair_consentRequestsSent", "path_revision", "codec_clock_rate", "codec_channels"
 ] as const;
 export const TRANSPORT_STATES: Record<string, readonly string[]> = {
+  receiver_processing: ["unavailable", "per_decoded_sample"],
   connection: ["connected", "reconnecting", "closed"], context: ["running", "suspended", "interrupted", "closed"],
   muted: ["true", "false"], device_muted: ["true", "false"], track: ["live", "ended"],
   ice: ["new", "checking", "connected", "completed", "disconnected", "failed", "closed"],
@@ -87,41 +88,76 @@ export function transportSampleParts(sample:TransportSample):TransportWireSample
   if(parts.length>16)return []; // Unknown/oversized observations never gate media.
   return parts.map((part,i)=>({...part,part_index:i,part_count:parts.length}));
 }
+// Cumulative counters remain in every compact sample; complete native counters
+// are sent at most every 30s. Incidents take priority over their context copy.
+const compactMetricKeys = ["receiver_loss_delta","remote_receiver_loss_delta","receiver_concealed_delta_ms","receiver_ssrc","remote_receiver_ssrc","rtt_ms","queue_ms","target_ms","receiver_packetsLost","remote_receiver_packetsLost","receiver_concealedSamples","dropped_ms","capture_dropped_ms","playback_transport_dropped_ms","playback_source_dropped_ms","receiver_jitter","buffered_bytes","main_thread_max_pause_ms","worker_max_tick_gap_ms","receiver_processing_interval_ms","path_revision","stats_errors"];
+export function compactTransportSample(sample:TransportSample):TransportSample {
+  const metrics:Record<string,number>={};
+  for(const key of compactMetricKeys)if(sample.metrics[key]!==undefined){
+    metrics[key]=sample.metrics[key];
+    if(transportSampleParts({...sample,metrics}).length>2)delete metrics[key];
+  }
+  return {...sample,metrics};
+}
 export class TransportTelemetrySender {
-
-  private auxiliary:unknown[]=[];
+  private auxiliary:{report:unknown;at:number;runtime:boolean}[]=[];
   skippedAuxiliary=0;
   skippedSamples=0;
   private auxiliaryTurn=false;
   private pending:TransportWireSample[]=[];
+  private queuedAt=new Map<string,number>();
+  private lastFull=-Infinity;
   private timer?:ReturnType<typeof setInterval>;
   private report?:unknown;
-  constructor(private send:(sample:TransportWireSample)=>boolean,private sendReport?:(report:unknown)=>boolean) {}
-  enqueueReport(report:unknown):void {this.report=report;this.start();}
-  enqueueAuxiliary(report:unknown):void {this.auxiliary.push(report);if(this.auxiliary.length>32){this.auxiliary.shift();this.skippedAuxiliary++;}this.start();}
+  private reportAt=0;
+  static readonly maxAgeMS=12000;
+  constructor(private send:(sample:TransportWireSample)=>boolean,private sendReport?:(report:unknown)=>boolean,private now=()=>performance.now()) {}
+  enqueueReport(report:unknown):void {if(this.report!==undefined)this.skippedAuxiliary++;this.report=report;this.reportAt=this.now();this.start();}
+  enqueueAuxiliary(report:unknown):void {
+    const runtime=!!(report as any)?.diagnostics?.timing?.runtime;
+    if(runtime){const old=this.auxiliary.length;this.auxiliary=this.auxiliary.filter(v=>!v.runtime);this.skippedAuxiliary+=old-this.auxiliary.length;}
+    this.auxiliary.push({report,at:this.now(),runtime});
+    if(this.auxiliary.length>16){this.auxiliary.shift();this.skippedAuxiliary++;}this.start();
+  }
   private start():void {if(!this.timer)this.timer=setInterval(()=>this.tick(),250);}
+  private discard(id:string):void {this.pending=this.pending.filter(p=>p.id!==id);this.queuedAt.delete(id);this.skippedSamples++;}
   enqueue(samples:TransportSample[]):void {
-    for(const sample of samples){
+    const now=this.now();
+    // A preceding context is useful locally, but sending both rich records
+    // exceeds the 640B/s budget on every incident. Prefer its current evidence.
+    const selected=[...samples].reverse().find(s=>s.reason==="incident")??samples.at(-1);
+    this.skippedSamples+=Math.max(0,samples.length-(selected?1:0));
+    if(selected){
+      const full=selected.reason==="periodic"&&now-this.lastFull>=30000;
+      if(full)this.lastFull=now;
+      let sample=full?selected:compactTransportSample(selected);
+      sample={...sample,metrics:{...sample.metrics,telemetry_skipped_samples:this.skippedSamples,telemetry_skipped_auxiliary:this.skippedAuxiliary}};
       const parts=transportSampleParts(sample);
-      // Preserve the in-flight sample. Dropping its leading parts on every
-      // refresh otherwise prevents any complete record on a slow connection.
-      while(this.pending.length+parts.length>32){
-        const tail=this.pending.at(-1);if(!tail||tail.id===this.pending[0]?.id)break;
-        this.pending=this.pending.filter(p=>p.id!==tail.id);this.skippedSamples++;
-      }
-      if(this.pending.length+parts.length<=32)this.pending.push(...parts);else this.skippedSamples++;
+      // Finish a young in-flight sample and retain only the newest successor.
+      const active=this.pending[0]?.id;
+      for(const id of this.queuedAt.keys())if(id!==active)this.discard(id);
+      if(this.queuedAt.has(sample.id))this.discard(sample.id);
+      if(parts.length){this.pending.push(...parts);this.queuedAt.set(sample.id,now);}
     }
     if(this.pending.length)this.start();
   }
   tick():void {
+    const now=this.now();
+    for(const [id,at] of this.queuedAt)if(now-at>TransportTelemetrySender.maxAgeMS)this.discard(id);
+    this.auxiliary=this.auxiliary.filter(v=>{if(now-v.at>TransportTelemetrySender.maxAgeMS){this.skippedAuxiliary++;return false;}return true;});
+    if(this.report!==undefined&&now-this.reportAt>TransportTelemetrySender.maxAgeMS){this.report=undefined;this.skippedAuxiliary++;}
     try{
       if(this.report!==undefined && this.sendReport){if(this.sendReport(this.report))this.report=undefined;}
       else if(this.auxiliary.length && this.sendReport && (!this.pending.length||this.auxiliaryTurn)){
-        if(this.sendReport(this.auxiliary[0])){this.auxiliary.shift();this.auxiliaryTurn=false;}
+        if(this.sendReport(this.auxiliary[0].report)){this.auxiliary.shift();this.auxiliaryTurn=false;}
       }
-      else if(this.pending.length && this.send(this.pending[0])){this.pending.shift();this.auxiliaryTurn=true;}
+      else if(this.pending.length){
+        const part=this.pending[0];
+        const metrics={...part.metrics,telemetry_queue_age_ms:Math.max(0,now-(this.queuedAt.get(part.id)??now))};
+        if(this.send({...part,metrics})){this.pending.shift();if(part.part_index===part.part_count-1)this.queuedAt.delete(part.id);this.auxiliaryTurn=true;}
+      }
     }catch{/* observer failure never changes media */}
     if(!this.pending.length&&!this.auxiliary.length&&this.report===undefined){clearInterval(this.timer);this.timer=undefined;}
   }
-  stop():void {clearInterval(this.timer);this.timer=undefined;this.pending=[];this.auxiliary=[];this.report=undefined;}
+  stop():void {clearInterval(this.timer);this.timer=undefined;this.pending=[];this.queuedAt.clear();this.auxiliary=[];this.report=undefined;}
 }

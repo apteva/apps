@@ -1799,10 +1799,9 @@ func (a *App) emitRoutingTrace(project, callID string, plan *inboundRoutingPlan,
 	if globalCtx == nil || plan == nil {
 		return
 	}
-	ctx := globalCtx.WithProject(project)
 	base := map[string]any{"call_id": callID, "flow_id": plan.FlowID, "flow_version_id": plan.VersionID, "destination_id": plan.DestinationID, "ring_group_id": plan.RingGroupID, "occurred_at": time.Now().UTC().Format(time.RFC3339Nano)}
 	if started {
-		ctx.Emit("call.routing.started", base)
+		a.saveCallNotification(project, callID, "call.routing.started", base)
 	}
 	for _, step := range plan.Trace {
 		payload := map[string]any{}
@@ -1810,10 +1809,10 @@ func (a *App) emitRoutingTrace(project, callID string, plan *inboundRoutingPlan,
 			payload[key] = value
 		}
 		payload["node_id"], payload["node_type"], payload["outcome"] = step.NodeID, step.NodeType, step.Outcome
-		ctx.Emit("call.routing.node_entered", payload)
+		a.saveCallNotification(project, callID, "call.routing.node_entered", payload)
 	}
 	if started && plan.RingGroupID != "" {
-		ctx.Emit("call.offered", base)
+		a.saveCallNotification(project, callID, "call.offered", base)
 	}
 }
 
