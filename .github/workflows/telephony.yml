@@ -100,3 +100,29 @@ jobs:
           docker run --rm --network none --user 10001:10001 -e HOME=/tmp \
             -v /tmp/telephony-opus-musl:/test:ro alpine:3.22 /test \
             -test.run 'TestRTCOpusBundle|TestRTCNative|TestRTCFECOff|TestRTCOpusCodecCompatibility' -test.v
+  mixed-media-load:
+    name: Mixed SIP media load
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GOWORK: 'off'
+      CGO_ENABLED: '0'
+      GOMAXPROCS: '4'
+      TELEPHONY_SIP_MIXED_LOAD: '1'
+      TELEPHONY_SIP_LOAD_RESULTS: /tmp/telephony-mixed-load.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/telephony/go.mod
+          cache-dependency-path: mcp/telephony/go.sum
+      - name: Paced media, codecs, recording and database contention
+        run: go test -run '^TestSIPPlaybackClockPacedLoad$' -count=1 -timeout 5m -v . > /tmp/telephony-mixed-load.log 2>&1
+        working-directory: mcp/telephony
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: telephony-mixed-load
+          path: |
+            /tmp/telephony-mixed-load.json
+            /tmp/telephony-mixed-load.log
