@@ -1,3 +1,4 @@
+import RecordingPlayer from "./RecordingPlayer";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   MicrophoneTestSession,
@@ -221,7 +222,10 @@ interface Recording {
   created_at: string;
   stored_at: string;
   playback_url?: string;
-  playback_source?: "storage" | "provider";
+  playback_source?: "storage" | "provider" | "local";
+  storage_state_label?: string;
+  recorded_locally?: boolean;
+  retry_blocked?: boolean;
   playback_urls?: Partial<Record<"mix" | "caller" | "agent" | "original", string>>;
 }
 
@@ -318,11 +322,11 @@ function mediaStatusClass(status: string): string {
 
 function recordingStatusLabel(status: string): string {
   switch (status) {
-    case "stored": return "Ready";
+    case "stored": return "Stored successfully";
     case "provider_only": return "Carrier cloud";
     case "importing": return "Copying to Storage";
     case "pending": return "Processing";
-    case "failed": return "Storage copy failed";
+    case "failed": return "Storage import failed";
     case "absent": return "Unavailable";
     default: return status || "Processing";
   }
@@ -374,38 +378,6 @@ function formatDurationMS(value: number): string {
   const seconds = Math.max(0, Math.round((value || 0) / 1000));
   const minutes = Math.floor(seconds / 60);
   return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
-}
-
-function RecordingPlayer({ recording }: { recording: Recording }) {
-  const variants = recording.playback_urls ?? (recording.playback_url ? { mix: recording.playback_url } : {});
-  const available = (["mix", "caller", "agent", "original"] as const).filter((variant) => Boolean(variants[variant]));
-  const [variant, setVariant] = useState<(typeof available)[number]>(available[0] ?? "mix");
-  const url = variants[variant] ?? recording.playback_url;
-  if (!url) return null;
-  const labels = { mix: "Balanced", caller: "Caller", agent: "Agent", original: "Original" };
-  return (
-    <div className="mt-3 space-y-2">
-      {available.length > 1 ? (
-        <div className="inline-flex max-w-full overflow-x-auto rounded border border-border p-0.5" role="group" aria-label="Recording track">
-          {available.map((item) => (
-            <button
-              key={item}
-              type="button"
-              onClick={() => setVariant(item)}
-              className={`h-7 whitespace-nowrap px-2 text-xs ${variant === item ? "bg-bg-muted font-medium text-text" : "text-text-muted hover:text-text"}`}
-            >
-              {labels[item]}
-            </button>
-          ))}
-        </div>
-      ) : null}
-      <div className="flex items-center gap-3">
-        <audio key={url} src={url} controls preload="metadata" className="min-w-0 flex-1 h-9" />
-        <a href={url} download className="text-xs text-accent hover:underline">Download</a>
-        <span className="text-xs text-text-dim">{recording.playback_source === "storage" ? "Storage" : "Carrier"}</span>
-      </div>
-    </div>
-  );
 }
 
 // Icons inherit color through currentColor from the surrounding text class, so
@@ -1753,7 +1725,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                   <div>
                     <h3 className="text-sm font-semibold">Recordings</h3>
                     <p className="text-xs text-text-muted">
-                      {selected.recordingMode === "always" ? "Captured by the carrier. Storage persistence is optional." : "Recording was not enabled for this call."}
+                      {selected.recordingMode === "always" ? "Captured locally for SIP, or by the carrier for media streams. Storage persistence is optional." : "Recording was not enabled for this call."}
                     </p>
                   </div>
                   <button type="button" onClick={() => void loadRecordings(selected.id)} className="h-8 px-3 rounded border border-border text-xs hover:bg-bg-muted">Refresh</button>
@@ -1773,7 +1745,8 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                     <div className="flex items-start gap-3">
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium">{recordingStatusLabel(recording.storage_status)}</span>
+                          <span className="text-sm font-medium">{recording.storage_state_label || recordingStatusLabel(recording.storage_status)}</span>
+                          {recording.recorded_locally && recording.storage_status === "failed" ? <span className="text-xs text-text-muted">Recorded locally; original retained</span> : null}
                           <span className="text-xs text-text-dim">{formatDurationMS(recording.duration_ms)}{recording.size_bytes > 0 ? ` / ${formatBytes(recording.size_bytes)}` : ""} / {recording.channels} channel{recording.channels === 1 ? "" : "s"}</span>
                         </div>
                         <div className="mt-1 truncate font-mono text-xs text-text-dim">{recording.provider_recording_id}</div>
@@ -1785,6 +1758,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                     </div>
                     <RecordingPlayer recording={recording} />
                     {recording.last_error ? <div className="mt-2 text-xs text-error whitespace-pre-wrap">{recording.last_error}</div> : null}
+                    {recording.retry_blocked ? <p className="mt-1 text-xs text-warn">Automatic retries paused. Change the file limit or use Retry after correcting the Storage limit.</p> : null}
                   </div>
                 ))}
               </section>

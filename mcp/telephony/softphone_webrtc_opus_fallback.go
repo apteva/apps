@@ -10,3 +10,15 @@ func newRTCNativeEncoder(int) (rtcOpusEncoder, error) {
 func newRTCNativeDecoder() (rtcOpusDecoder, error) {
 	return nil, errors.New("native Opus unavailable on this platform")
 }
+
+func newRTCNativeEncoderWithFEC(int, bool) (rtcOpusEncoder, error) {
+	return nil, errors.New("native Opus unavailable on this platform")
+}
+func loadRTCOpusLibrary() (any, error) {
+	return nil, errors.New("native Opus unavailable on this platform")
+}
+
+func rtcNativeAvailability() (string, string, error) {
+	_, err := loadRTCOpusLibrary()
+	return "portable", "", err
+}

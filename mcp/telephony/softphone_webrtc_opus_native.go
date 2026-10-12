@@ -10,18 +10,19 @@ import (
 	"sync"
 )
 
-// Fixed system-library names only: no user paths or per-packet loading. Keep
+// Verified app-owned bundle first, then fixed system-library names. Keep
 // the library open for the process lifetime; each call owns/destroys its state.
 type rtcOpusLibrary struct {
-	hasLBRR        func([]byte, int32) int32
-	create         func(int32, int32, int32, *int32) uintptr
-	destroy        func(uintptr)
-	encode         func(uintptr, []float32, int32, []byte, int32) int32
-	decode         func(uintptr, []byte, int32, []int16, int32, int32) int32
-	decoderCreate  func(int32, int32, *int32) uintptr
-	decoderDestroy func(uintptr)
-	set            func(uintptr, int32, int32) int32
-	get            func(uintptr, int32, *int32) int32
+	source, version string
+	hasLBRR         func([]byte, int32) int32
+	create          func(int32, int32, int32, *int32) uintptr
+	destroy         func(uintptr)
+	encode          func(uintptr, []float32, int32, []byte, int32) int32
+	decode          func(uintptr, []byte, int32, []int16, int32, int32) int32
+	decoderCreate   func(int32, int32, *int32) uintptr
+	decoderDestroy  func(uintptr)
+	set             func(uintptr, int32, int32) int32
+	get             func(uintptr, int32, *int32) int32
 }
 
 var rtcNativeOpus struct {
@@ -36,16 +37,24 @@ func loadRTCOpusLibrary() (*rtcOpusLibrary, error) {
 		if runtime.GOOS == "darwin" {
 			names = []string{"/opt/homebrew/lib/libopus.0.dylib", "/usr/local/lib/libopus.0.dylib", "libopus.0.dylib"}
 		}
+		source, version := "system", ""
+		bundled, bundledVersion, bundleErr := prepareBundledRTCOpus(rtcOpusCacheRoot(), rtcOpusPlatform())
+		if bundleErr == nil {
+			names = append([]string{bundled}, names...)
+		}
 		var handle uintptr
 		for _, name := range names {
 			h, err := purego.Dlopen(name, purego.RTLD_NOW|purego.RTLD_LOCAL)
 			if err == nil {
 				handle = h
+				if name == bundled {
+					source, version = "bundled", bundledVersion
+				}
 				break
 			}
 		}
 		if handle == 0 {
-			rtcNativeOpus.err = errors.New("system libopus unavailable")
+			rtcNativeOpus.err = errors.New("native Opus unavailable")
 			return
 		}
 		defer func() {
@@ -54,7 +63,7 @@ func loadRTCOpusLibrary() (*rtcOpusLibrary, error) {
 				rtcNativeOpus.err = fmt.Errorf("invalid system libopus: %v", v)
 			}
 		}()
-		l := &rtcOpusLibrary{}
+		l := &rtcOpusLibrary{source: source, version: version}
 		purego.RegisterLibFunc(&l.create, handle, "opus_encoder_create")
 		purego.RegisterLibFunc(&l.destroy, handle, "opus_encoder_destroy")
 		purego.RegisterLibFunc(&l.encode, handle, "opus_encode_float")
@@ -85,20 +94,28 @@ func loadRTCOpusLibrary() (*rtcOpusLibrary, error) {
 type rtcNativeEncoder struct {
 	lib   *rtcOpusLibrary
 	state uintptr
+	fec   bool
 }
 
 func newRTCNativeEncoder(bitrate int) (rtcOpusEncoder, error) {
+	return newRTCNativeEncoderWithFEC(bitrate, true)
+}
+func newRTCNativeEncoderWithFEC(bitrate int, fec bool) (rtcOpusEncoder, error) {
 	l, err := loadRTCOpusLibrary()
 	if err != nil {
 		return nil, err
 	}
 	var code int32
-	e := &rtcNativeEncoder{lib: l, state: l.create(48000, 1, 2048, &code)}
+	e := &rtcNativeEncoder{lib: l, state: l.create(48000, 1, 2048, &code), fec: fec}
+	fecValue := int32(0)
+	if fec {
+		fecValue = 1
+	}
 	if e.state == 0 || code != 0 {
 		return nil, fmt.Errorf("Opus create: %d", code)
 	}
 	// Voice tuning and a 24 kHz bandwidth match the existing carrier PCM.
-	for _, ctl := range [][2]int32{{4012, 1}, {4024, 3001}, {4004, 1104}, {4016, 0}} {
+	for _, ctl := range [][2]int32{{4012, fecValue}, {4024, 3001}, {4004, 1104}, {4016, 0}} {
 		if l.set(e.state, ctl[0], ctl[1]) != 0 {
 			e.Close()
 			return nil, errors.New("Opus voice control failed")
@@ -110,7 +127,7 @@ func newRTCNativeEncoder(bitrate int) (rtcOpusEncoder, error) {
 	}
 	// Read back FEC and bitrate so an ABI mismatch cannot silently enable
 	// the wrong parameters. Fall back before exposing this codec to media.
-	for _, ctl := range [][2]int32{{4013, 1}, {4003, int32(bitrate)}} {
+	for _, ctl := range [][2]int32{{4013, fecValue}, {4003, int32(bitrate)}} {
 		var value int32
 		if l.get(e.state, ctl[0], &value) != 0 || value != ctl[1] {
 			e.Close()
@@ -140,7 +157,12 @@ func (e *rtcNativeEncoder) configure(bitrate, loss int) error {
 	}
 	return nil
 }
-func (e *rtcNativeEncoder) capability() string { return "libopus_fec" }
+func (e *rtcNativeEncoder) capability() string {
+	if e.fec {
+		return "libopus_fec"
+	}
+	return "libopus_plc"
+}
 func (e *rtcNativeEncoder) Close() {
 	if e.state != 0 {
 		e.lib.destroy(e.state)
@@ -191,4 +213,16 @@ func (d *rtcNativeDecoder) Close() {
 		d.lib.decoderDestroy(d.state)
 		d.state = 0
 	}
+}
+
+func (e *rtcNativeEncoder) codecInfo() (string, string, string) {
+	return e.lib.source, e.lib.version, ""
+}
+
+func rtcNativeAvailability() (string, string, error) {
+	l, err := loadRTCOpusLibrary()
+	if err != nil {
+		return "portable", "", err
+	}
+	return l.source, l.version, nil
 }

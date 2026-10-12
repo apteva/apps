@@ -102,7 +102,7 @@ export interface SoftphoneCallbacks {
 export interface SoftphoneAudioOptions {
 	/** Optional browser transport; existing PCM WebSocket remains the default. */
 	mediaTransport?: "websocket" | "webrtc" | "auto";
-  /** WebRTC Opus redundancy. Default true when supported; false uses the portable codec. Applied on start/reconnect. */
+  /** WebRTC Opus redundancy. Default true when supported; false disables redundancy while retaining native Opus when available. Applied on start/reconnect. */
   webrtcFec?: boolean;
   inputDeviceId?: string;
   outputDeviceId?: string;

@@ -9,38 +9,99 @@ import (
 )
 
 type recordingCacheEntry struct {
-	path    string
-	size    int64
-	expires time.Time
+	path            string
+	size            int64
+	expires         time.Time
+	readers         int
+	temporary       bool
+	expirationTimer *time.Timer
 }
 
 var playbackCache = struct {
 	sync.Mutex
-	entries map[string]recordingCacheEntry
+	entries map[string]*recordingCacheEntry
 	pending map[string]chan struct{}
 	slots   chan struct{}
-}{entries: map[string]recordingCacheEntry{}, pending: map[string]chan struct{}{}, slots: make(chan struct{}, 2)}
+}{entries: map[string]*recordingCacheEntry{}, pending: map[string]chan struct{}{}, slots: make(chan struct{}, 2)}
 
 const playbackCacheBytes int64 = 256 << 20
+const playbackCacheEntries = 128
+const playbackCacheTTL = 10 * time.Minute
 
-// Open under the cache lock: eviction can unlink an open file safely, while
-// every request still performs the project's authorization and tombstone check.
-func cachedRecording(ctx context.Context, key string, fetch func() (string, error)) (*os.File, error) {
-	for {
+// The two disk-work permits cover imports, downloads and generated playback.
+// Large files hold a permit until the last reader closes. At most two jobs can
+// each retain one bounded source plus one bounded output (4 GiB total), in
+// addition to the 256 MiB reusable cache. Durable originals are never cache files.
+type recordingPlaybackFile struct {
+	*os.File
+	once    sync.Once
+	release func()
+}
+
+func (f *recordingPlaybackFile) Close() error {
+	var err error
+	f.once.Do(func() {
+		err = f.File.Close()
+		if f.release != nil {
+			f.release()
+		}
+	})
+	return err
+}
+func removeRecordingCacheEntry(key string, e *recordingCacheEntry) {
+	if playbackCache.entries[key] != e || e.readers != 0 {
+		return
+	}
+	if e.expirationTimer != nil {
+		e.expirationTimer.Stop()
+	}
+	delete(playbackCache.entries, key)
+	_ = os.Remove(e.path)
+	if e.temporary {
+		<-playbackCache.slots
+	}
+}
+func openRecordingCacheEntry(key string, e *recordingCacheEntry) (*recordingPlaybackFile, error) {
+	file, err := os.Open(e.path)
+	if err != nil {
+		removeRecordingCacheEntry(key, e)
+		return nil, err
+	}
+	e.readers++
+	return &recordingPlaybackFile{File: file, release: func() {
 		playbackCache.Lock()
-		var size int64
-		now := time.Now()
+		defer playbackCache.Unlock()
+		e.readers--
+		if e.readers == 0 && (e.temporary || time.Now().After(e.expires)) {
+			removeRecordingCacheEntry(key, e)
+		}
+	}}, nil
+}
+func expireRecordingCacheEntry(key string, e *recordingCacheEntry) {
+	playbackCache.Lock()
+	defer playbackCache.Unlock()
+	if time.Now().After(e.expires) {
+		removeRecordingCacheEntry(key, e)
+	}
+}
+func cachedRecording(ctx context.Context, key string, fetch func() (string, error)) (*recordingPlaybackFile, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		playbackCache.Lock()
 		for k, e := range playbackCache.entries {
-			if now.After(e.expires) {
-				_ = os.Remove(e.path)
-				delete(playbackCache.entries, k)
-			} else {
-				size += e.size
+			if time.Now().After(e.expires) && !e.temporary {
+				removeRecordingCacheEntry(k, e)
 			}
 		}
 		if e, ok := playbackCache.entries[key]; ok {
-			f, err := os.Open(e.path)
+			f, err := openRecordingCacheEntry(key, e)
+			missing := playbackCache.entries[key] != e && os.IsNotExist(err)
 			playbackCache.Unlock()
+			if missing {
+				continue
+			}
 			return f, err
 		}
 		if wait, ok := playbackCache.pending[key]; ok {
@@ -61,9 +122,17 @@ func cachedRecording(ctx context.Context, key string, fetch func() (string, erro
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
+		held := true
+		defer func() {
+			if held {
+				<-playbackCache.slots
+			}
+		}()
 		path, err := fetch()
-		<-playbackCache.slots
 		if err != nil {
+			if path != "" {
+				_ = os.Remove(path)
+			}
 			return nil, err
 		}
 		file, err := os.Open(path)
@@ -72,45 +141,62 @@ func cachedRecording(ctx context.Context, key string, fetch func() (string, erro
 			return nil, err
 		}
 		info, err := file.Stat()
-		if err != nil {
-			file.Close()
-			os.Remove(path)
+		_ = file.Close()
+		if err != nil || !info.Mode().IsRegular() {
+			_ = os.Remove(path)
+			return nil, errors.New("invalid playback temporary file")
+		}
+		if err := ctx.Err(); err != nil {
+			_ = os.Remove(path)
 			return nil, err
 		}
-		if ctx.Err() != nil {
-			file.Close()
-			os.Remove(path)
-			return nil, ctx.Err()
+		if info.Size() > min(recordingDownloadLimit(ctx), maxRecordingFileBytes) {
+			_ = os.Remove(path)
+			return nil, &recordingSizeLimitError{min(recordingDownloadLimit(ctx), maxRecordingFileBytes)}
 		}
-		if info.Size() > playbackCacheBytes {
-			file.Close()
-			os.Remove(path)
-			return nil, errors.New("recording variant exceeds playback cache capacity; play the stored original")
-		}
+		e := &recordingCacheEntry{path: path, size: info.Size(), expires: time.Now().Add(playbackCacheTTL)}
 		playbackCache.Lock()
-		size = 0
-		for _, e := range playbackCache.entries {
-			size += e.size
+		var size int64
+		count := 0
+		for _, entry := range playbackCache.entries {
+			if !entry.temporary {
+				size += entry.size
+				count++
+			}
 		}
-		for k, e := range playbackCache.entries {
-			if size+info.Size() <= playbackCacheBytes {
+		for k, entry := range playbackCache.entries {
+			if size+e.size <= playbackCacheBytes && count < playbackCacheEntries {
 				break
 			}
-			_ = os.Remove(e.path)
-			delete(playbackCache.entries, k)
-			size -= e.size
+			if entry.temporary || entry.readers > 0 {
+				continue
+			}
+			removeRecordingCacheEntry(k, entry)
+			size -= entry.size
+			count--
 		}
-		playbackCache.entries[key] = recordingCacheEntry{path: path, size: info.Size(), expires: now.Add(10 * time.Minute)}
+		e.temporary = size+e.size > playbackCacheBytes || count >= playbackCacheEntries
+		playbackCache.entries[key] = e
+		result, err := openRecordingCacheEntry(key, e)
+		if e.temporary {
+			held = false
+		} // transferred to the entry, released by last close
+		if !e.temporary && err == nil {
+			e.expirationTimer = time.AfterFunc(playbackCacheTTL, func() { expireRecordingCacheEntry(key, e) })
+		}
 		playbackCache.Unlock()
-		return file, nil
+		return result, err
 	}
 }
 
 type playbackDownloadContextKey struct{}
 
 func recordingDownloadLimit(ctx context.Context) int64 {
-	if value, ok := ctx.Value(playbackDownloadContextKey{}).(int64); ok && value > 0 {
-		return value
+	if value, ok := ctx.Value(playbackDownloadContextKey{}).(int64); ok {
+		if value <= 0 {
+			return maxRecordingFileBytes
+		}
+		return min(value, maxRecordingFileBytes)
 	}
 	return maxProviderRecordingBytes
 }

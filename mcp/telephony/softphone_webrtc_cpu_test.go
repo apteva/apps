@@ -4,7 +4,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"runtime"
 	"slices"
@@ -141,13 +140,7 @@ func measureRTCCodecCPU(variant string, calls int, duration time.Duration, frame
 				}
 			}
 		} else {
-			w.encoder, err = newRTCNativeEncoder(32000)
-			if err == nil && variant == "native_no_fec" {
-				native := w.encoder.(*rtcNativeEncoder)
-				if native.lib.set(native.state, 4012, 0) != 0 {
-					err = fmt.Errorf("cannot disable FEC for control")
-				}
-			}
+			w.encoder, err = newRTCNativeEncoderWithFEC(32000, variant != "native_no_fec")
 			if err == nil {
 				w.decoder, err = newRTCNativeDecoder()
 			}

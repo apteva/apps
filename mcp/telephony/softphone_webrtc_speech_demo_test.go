@@ -96,7 +96,12 @@ func TestRTCVoiceSpeechDemo(t *testing.T) {
 		}
 		return packets
 	}
-	oldPackets, newPackets := encode(before), encode(after)
+	noFEC, err := newRTCOpusEncoderWithFEC(32000, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer noFEC.Close()
+	oldPackets, newPackets, noFECPackets := encode(before), encode(after), encode(noFEC)
 	l, err := loadRTCOpusLibrary()
 	if err != nil || l.hasLBRR == nil {
 		t.Fatal("demo requires redundancy verification", err)
@@ -171,6 +176,14 @@ func TestRTCVoiceSpeechDemo(t *testing.T) {
 	}
 	clean := decode(newPackets, 0, false)
 	write("clean.wav", clean)
+	var original []int16
+	for _, frame := range frames {
+		original = append(original, frame...)
+	}
+	write("input.wav", original)
+	write("portable-clean.wav", decode(oldPackets, 0, false))
+	write("native-no-fec-clean.wav", decode(noFECPackets, 0, false))
+	write("native-fec-clean.wav", clean)
 	results := map[string]any{"source": "local synthesized French speech", "codec_capability": after.capability(), "frame_ms": 20, "bitrate_bps": 32000, "outage_seconds": float64(lossFrame) * .02, "packets": len(newPackets), "packets_with_redundancy": redundancy, "scope": "production codec factory and PCM resampler; offline loss replay, not a full browser call", "selection": "same voiced loss position in every clip, selected where next packet contains FEC"}
 	for _, count := range []int{1, 6, 30} {
 		write("before-"+demoInt(count*20)+"ms.wav", decode(oldPackets, count, false))

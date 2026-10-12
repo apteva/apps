@@ -3,15 +3,15 @@
 package main
 
 import (
-	"errors"
 	"math"
 	"testing"
+	"time"
 )
 
 func TestRTCNativeFECControlsAndRecovery(t *testing.T) {
 	e, err := newRTCNativeEncoder(32000)
 	if err != nil {
-		t.Skip(err)
+		t.Fatal(err)
 	}
 	defer e.Close()
 	native := e.(*rtcNativeEncoder)
@@ -68,18 +68,7 @@ func BenchmarkRTCVoiceEncoding(b *testing.B) {
 	for _, factory := range []struct {
 		name string
 		make func(int) (rtcOpusEncoder, error)
-	}{{"portable", newRTCGoEncoder}, {"native_no_fec", func(bitrate int) (rtcOpusEncoder, error) {
-		e, err := newRTCNativeEncoder(bitrate)
-		if err != nil {
-			return nil, err
-		}
-		native := e.(*rtcNativeEncoder)
-		if native.lib.set(native.state, 4012, 0) != 0 {
-			e.Close()
-			return nil, errors.New("cannot disable FEC for benchmark control")
-		}
-		return e, nil
-	}}, {"native_fec", newRTCNativeEncoder}} {
+	}{{"portable", newRTCGoEncoder}, {"native_no_fec", func(bitrate int) (rtcOpusEncoder, error) { return newRTCNativeEncoderWithFEC(bitrate, false) }}, {"native_fec", newRTCNativeEncoder}} {
 		b.Run(factory.name, func(b *testing.B) {
 			e, err := factory.make(32000)
 			if err != nil {
@@ -99,5 +88,50 @@ func BenchmarkRTCVoiceEncoding(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+func TestRTCNativeFECOffControlsAndDiagnostics(t *testing.T) {
+	e, err := newRTCOpusEncoderWithFEC(32000, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	native, ok := e.(*rtcNativeEncoder)
+	if !ok {
+		t.Fatal("bundle unavailable", e.capability())
+	}
+	if native.lib.source != "bundled" || native.lib.version != "1.5.2" {
+		t.Fatal("using host dependency", native.lib.source, native.lib.version)
+	}
+	var enabled int32
+	if native.lib.get(native.state, 4013, &enabled) != 0 || enabled != 0 {
+		t.Fatal("FEC not disabled", enabled)
+	}
+	pcm, out := make([]float32, 960), make([]byte, 1275)
+	for k := 0; k < 80; k++ {
+		for i := range pcm {
+			at := float64(k*960+i) / 48000
+			pcm[i] = float32(.25*math.Sin(2*math.Pi*180*at) + .08*math.Sin(2*math.Pi*540*at))
+		}
+		n, err := e.EncodeFloat32(pcm, out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if native.lib.hasLBRR == nil || native.lib.hasLBRR(out[:n], int32(n)) != 0 {
+			t.Fatal("unexpected redundancy")
+		}
+	}
+	d, err := newRTCOpusDecoderWithFEC(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if _, ok := d.(*rtcNativeDecoder); !ok {
+		t.Fatal("disabled FEC changed decoder quality")
+	}
+	state := rtcOpusEncoderState(e, false, 32000, 10, time.Now())
+	if state.FEC || state.FECRequested || state.Capability != "libopus_plc" || state.Source != "bundled" || state.LibraryVersion != "1.5.2" || state.FallbackReason != "" {
+		t.Fatal(state)
 	}
 }

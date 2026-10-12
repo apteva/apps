@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"github.com/pion/opus"
+	"time"
 )
 
 // The codec is owned by one sender goroutine. Optional native support never
@@ -14,7 +15,10 @@ type rtcOpusEncoder interface {
 	Close()
 }
 
-type rtcGoOpusEncoder struct{ *opus.Encoder }
+type rtcGoOpusEncoder struct {
+	*opus.Encoder
+	fallbackReason string
+}
 
 func (e *rtcGoOpusEncoder) configure(bitrate, loss int) error {
 	if err := e.SetBitrate(bitrate); err != nil {
@@ -32,17 +36,15 @@ func newRTCGoEncoder(bitrate int) (rtcOpusEncoder, error) {
 	if err := e.SetLossRate(10); err != nil {
 		return nil, err
 	}
-	return &rtcGoOpusEncoder{e}, nil
+	return &rtcGoOpusEncoder{Encoder: e}, nil
 }
 func newRTCOpusEncoder(bitrate int) (rtcOpusEncoder, error) {
 	return newRTCOpusEncoderWithFEC(bitrate, true)
 }
 func newRTCOpusEncoderWithFEC(bitrate int, fec bool) (rtcOpusEncoder, error) {
-	if !fec {
-		// Opt-out restores the original encoder and avoids native FEC codec cost.
-		return selectRTCOpusEncoder(bitrate, newRTCGoEncoder)
-	}
-	return selectRTCOpusEncoder(bitrate, newRTCNativeEncoder)
+	return selectRTCOpusEncoder(bitrate, func(rate int) (rtcOpusEncoder, error) {
+		return newRTCNativeEncoderWithFEC(rate, fec)
+	})
 }
 func selectRTCOpusEncoder(bitrate int, native func(int) (rtcOpusEncoder, error)) (rtcOpusEncoder, error) {
 	if bitrate < 16000 || bitrate > 32000 {
@@ -51,7 +53,11 @@ func selectRTCOpusEncoder(bitrate int, native func(int) (rtcOpusEncoder, error))
 	if e, err := native(bitrate); err == nil {
 		return e, nil
 	}
-	return newRTCGoEncoder(bitrate)
+	e, err := newRTCGoEncoder(bitrate)
+	if e != nil {
+		e.(*rtcGoOpusEncoder).fallbackReason = "native_initialization_failed"
+	}
+	return e, err
 }
 
 type rtcOpusDecoder interface {
@@ -71,10 +77,8 @@ func newRTCOpusDecoder() (rtcOpusDecoder, error) {
 	return newRTCOpusDecoderWithFEC(true)
 }
 func newRTCOpusDecoderWithFEC(fec bool) (rtcOpusDecoder, error) {
-	if fec {
-		if d, err := newRTCNativeDecoder(); err == nil {
-			return d, nil
-		}
+	if d, err := newRTCNativeDecoder(); err == nil {
+		return d, nil
 	}
 	d, err := opus.NewDecoderWithOutput(24000, 1)
 	if err != nil {
@@ -98,4 +102,17 @@ func (d *rtcDecodeTimeline) missing(seq uint16, ts uint32) int {
 		return 0
 	}
 	return gap
+}
+
+func (e *rtcGoOpusEncoder) codecInfo() (string, string, string) {
+	return "portable", "", e.fallbackReason
+}
+func rtcOpusEncoderState(e rtcOpusEncoder, fec bool, bitrate, loss int, now time.Time) *rtcEncoderState {
+	s := &rtcEncoderState{FECRequested: fec, Capability: e.capability(), Bitrate: bitrate, ExpectedLoss: loss, FEC: e.capability() == "libopus_fec", UpdatedAt: now.UTC().Format(time.RFC3339Nano)}
+	if c, ok := e.(interface {
+		codecInfo() (string, string, string)
+	}); ok {
+		s.Source, s.LibraryVersion, s.FallbackReason = c.codecInfo()
+	}
+	return s
 }

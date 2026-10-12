@@ -1,7 +1,7 @@
 # WebRTC voice quality and concealment
 
-These changes are local Telephony work. They do not install anything, call a
-carrier, or modify a staging/production instance. The browser transport remains
+These changes are local Telephony work. No carrier calls or
+staging/production modifications were made. The browser transport remains
 optional; PCM/WebSocket remains the default.
 
 ## Recovery and codec capabilities
@@ -11,34 +11,36 @@ omitting the option preserves the existing enabled preference. The Telephony
 audio settings offer the same switch for WebRTC/automatic transport. The
 preference is applied on a new call or explicit audio reconnect and retained
 through automatic recovery; it does not affect another call or restart the
-application. Opt-out selects the original portable encoder/decoder and asks
+application. Opt-out retains native encoding/decoding and asks
 the browser not to send Opus redundancy, while keeping ordinary PLC and the
 existing queue bounds. Server codec diagnostics separate `fec_requested` from
 actual `fec_enabled`; requesting FEC cannot make an unsupported codec provide
 it. PCM/WebSocket audio remains unchanged.
 
-Opt-out verification: the full Go suite passed 1,002 tests/subtests, with five
+Historical opt-out verification before bundling: the full Go suite passed 1,002 tests/subtests, with five
 optional tests skipped; 236 frontend tests passed. Focused race checks covered
 FEC selection, two-way WebRTC audio, hold, replacement, caller cancellation,
 native fallback and rejection of malformed options while another socket stays
 attached. Typechecking, `go vet`, the headless client build and Telephony-only
 panel builds passed. No staging/production installation or call was made.
 
-On Linux/macOS amd64/arm64, Telephony tries the system libopus once. An available
-library is used for voice encoding with in-band FEC, 20 ms frames, mono,
-32 kbit/s initial bitrate, a 24 kHz maximum audio bandwidth matching the input
-PCM, and DTX disabled. Readback verifies critical encoder controls before use.
-Each call owns its encoder/decoder state. Dynamic loading does not require CGO
-or a library at build time. Missing libraries/symbols/failed initialization
-retain the existing Go codec. No loading occurs inside a packet callback.
+On Linux/macOS amd64/arm64, Telephony provides pinned libopus 1.5.2 inside its
+binary. At mount, it verifies and extracts the library into the installation's
+private data directory and loads it once. No runtime download, package manager,
+root access, SDK/server change or per-packet library loading is required.
+Linux provides separate glibc (>=2.17) and musl builds. A fixed system-library
+fallback is retained if the bundle cannot load, followed by the portable Go
+codec if native initialization fails. Each call owns its encoder/decoder state.
+FEC is independently optional; opting out retains native Opus quality/PLC.
 
-**FEC requires libopus on the runtime host.** Linux package name is usually
-`libopus0` (Debian/Ubuntu) or `opus` (Alpine); macOS uses libopus from the system
-library search or standard Homebrew paths. This change does not install these
-packages. Do not advertise verified FEC on an installation until server
-diagnostics show `encoder.capability: libopus_fec`, `fec_enabled: true`.
-Fallback reports `go_opus_plc` and `fec_enabled: false`. Negotiated
-`useinbandfec=1` alone is not proof of redundant audio packets.
+Native encoding uses 20 ms mono frames, 32 kbit/s initial bitrate, a 24 kHz
+maximum audio bandwidth matching the input PCM, and DTX disabled. Readback
+verifies critical encoder controls before use. Diagnostics expose `source`
+(`bundled`, `system`, `portable`), `library_version` for the bundle, and a bounded
+`fallback_reason`. `libopus_fec` means enabled redundancy; `libopus_plc` means
+native encoding with FEC disabled. `go_opus_plc` identifies portable fallback.
+Negotiated `useinbandfec=1` alone does not prove redundant packets. The shipped
+license/provenance and verification procedure are in [bundled Opus](bundled-opus.md).
 
 FEC can recover the previous missing packet using redundancy in the next
 packet, if it arrives before playback. Native browser playback manages this

@@ -328,9 +328,9 @@ func downloadProviderMedia(ctx context.Context, rawURL, format, username, passwo
 		return "", 0, fmt.Errorf("provider recording download returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	if resp.ContentLength > limit {
-		return "", 0, errors.New("provider recording exceeds the download size limit")
+		return "", 0, &recordingSizeLimitError{limit}
 	}
-	tmp, err := os.CreateTemp("", "apteva-telephony-provider-recording-*."+recordingExtension(format))
+	tmp, err := newRecordingTemporaryFile("apteva-telephony-provider-recording-*." + recordingExtension(format))
 	if err != nil {
 		return "", 0, err
 	}
@@ -346,8 +346,11 @@ func downloadProviderMedia(ctx context.Context, rawURL, format, username, passwo
 	if err != nil {
 		return "", 0, err
 	}
-	if written <= 0 || written > limit {
-		return "", 0, errors.New("provider recording is empty or exceeds the download size limit")
+	if written > limit {
+		return "", 0, &recordingSizeLimitError{limit}
+	}
+	if written <= 0 {
+		return "", 0, errors.New("provider recording is empty")
 	}
 	if err := tmp.Close(); err != nil {
 		return "", 0, err

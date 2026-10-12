@@ -242,7 +242,15 @@ func (a *App) downloadLocalRecording(ctx context.Context, row *recordingRow) (st
 		return "", 0, err
 	}
 	defer source.Close()
-	out, err := os.CreateTemp("", "telephony-local-playback-*.wav")
+	limit := recordingDownloadLimit(ctx)
+	info, err := source.Stat()
+	if err != nil {
+		return "", 0, err
+	}
+	if info.Size() > limit {
+		return "", 0, &recordingSizeLimitError{limit}
+	}
+	out, err := newRecordingTemporaryFile("telephony-local-playback-*.wav")
 	if err != nil {
 		return "", 0, err
 	}
@@ -253,9 +261,12 @@ func (a *App) downloadLocalRecording(ctx context.Context, row *recordingRow) (st
 			os.Remove(out.Name())
 		}
 	}()
-	size, err := io.Copy(out, &localRecordingContextReader{ctx, source})
+	size, err := io.Copy(out, io.LimitReader(&localRecordingContextReader{ctx, source}, limit+1))
 	if err != nil {
 		return "", 0, err
+	}
+	if size > limit {
+		return "", 0, &recordingSizeLimitError{limit}
 	}
 	if err = out.Close(); err != nil {
 		return "", 0, err

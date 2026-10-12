@@ -75,10 +75,12 @@ Only WebRTC uses these Opus codecs. The default PCM/WebSocket audio engine
 has not acquired this encoding cost. No quality setting was reduced to make
 the benchmarks look faster.
 
-The per-softphone `audio.webrtcFec: false` option restores the **portable**
-encoder/decoder. Its expected cost corresponds to the portable control above,
-not the native-without-FEC control, which was measured only to isolate FEC's
-share of the native codec cost. Actual capacity still needs target-host tests.
+The results above describe the previous system-library/portable selection.
+With bundled Opus, `audio.webrtcFec: false` retains native encoding/decoding
+and disables redundancy. Its cost must be compared with the `native_no_fec`
+control, rather than the portable control. Native encoding is more expensive
+than the Go encoder; disabling FEC is not an equivalent CPU reduction.
+Fresh bundle measurements are documented in [bundled Opus](bundled-opus.md).
 
 ## Reproduce
 
