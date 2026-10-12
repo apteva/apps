@@ -17,6 +17,8 @@ import (
 // Atomic counters and a best-effort bounded timing window. Sampling cannot hold
 // an RTP reader/writer: contention only skips diagnostic sequence calculations.
 type sipRTPObservations struct {
+	firstReceived        atomic.Int64
+	firstSent            atomic.Int64
 	earlyKernelDrops     atomic.Int64
 	activationDropped    atomic.Int64
 	kernelDrops          atomic.Int64
@@ -69,6 +71,7 @@ func atomicMax(dst *atomic.Int64, n int64) {
 	}
 }
 func (o *sipRTPObservations) received(packet *rtp.Packet, size int, now time.Time, audio bool) {
+	o.firstReceived.CompareAndSwap(0, now.UnixNano())
 	o.packets.Add(1)
 	o.bytes.Add(int64(size))
 	previous := o.last.Swap(now.UnixNano())
@@ -139,6 +142,7 @@ func (o *sipRTPObservations) received(packet *rtp.Packet, size int, now time.Tim
 }
 
 func (o *sipRTPObservations) sentPacket(size int, now time.Time) {
+	o.firstSent.CompareAndSwap(0, now.UnixNano())
 	o.sent.Add(1)
 	o.sentBytes.Add(int64(size))
 	previous := o.lastSent.Swap(now.UnixNano())
@@ -148,6 +152,8 @@ func (o *sipRTPObservations) sentPacket(size int, now time.Time) {
 }
 
 type sipRTPSnapshot struct {
+	FirstPacketAt        string  `json:"first_packet_at,omitempty"`
+	FirstSentAt          string  `json:"first_sent_at,omitempty"`
 	PreBridgeSocketDrops int64   `json:"pre_bridge_socket_receive_drops"`
 	ActivationDropped    int64   `json:"activation_dropped_packets"`
 	KernelDrops          int64   `json:"socket_receive_drops"`
@@ -182,6 +188,12 @@ type sipRTPSnapshot struct {
 
 func (o *sipRTPObservations) snapshot(now time.Time) sipRTPSnapshot {
 	s := sipRTPSnapshot{PreBridgeSocketDrops: o.earlyKernelDrops.Load(), ActivationDropped: o.activationDropped.Load(), KernelDrops: o.kernelDrops.Load(), KernelDropsAvailable: o.kernelDropsAvailable.Load(), EarlyPackets: o.earlyPackets.Load(), EarlyBytes: o.earlyBytes.Load(), Packets: o.packets.Load(), Bytes: o.bytes.Load(), MaxGapMS: float64(o.maxGap.Load()) / 1e6, SequenceLoss: o.loss.Load(), SequenceGaps: o.sequenceGaps.Load(), Duplicates: o.duplicates.Load(), OutOfOrder: o.outOfOrder.Load(), JitterMS: float64(o.jitterNS.Load()) / 1e6, MaxDeliveryExcessMS: float64(o.deliveryExcessNS.Load()) / 1e6, RejectedSource: o.rejectedSource.Load(), DecodeErrors: o.decodeErrors.Load(), AuthErrors: o.authErrors.Load(), ReplayErrors: o.replayErrors.Load(), DecryptErrors: o.decryptErrors.Load(), ReadErrors: o.readErrors.Load(), Sent: o.sent.Load(), SentBytes: o.sentBytes.Load(), SendErrors: o.sendErrors.Load(), MaxSendMS: float64(o.maxSend.Load()) / 1e6, MaxPacingGapMS: float64(o.maxPacingGap.Load()) / 1e6, Skipped: o.skipped.Load()}
+	if n := o.firstReceived.Load(); n > 0 {
+		s.FirstPacketAt = ringTime(time.Unix(0, n))
+	}
+	if n := o.firstSent.Load(); n > 0 {
+		s.FirstSentAt = ringTime(time.Unix(0, n))
+	}
 	if n := o.last.Load(); n > 0 {
 		s.LastPacketAt = ringTime(time.Unix(0, n))
 		s.LastPacketAgeMS = max(0, float64(now.UnixNano()-n)/1e6)
@@ -222,23 +234,24 @@ type sipJitterSnapshot struct {
 	MissingFilledMS       float64          `json:"missing_audio_filled_ms"`
 }
 type sipSignalSnapshot struct {
-	BYEStatus        string `json:"bye_status,omitempty"`
-	BYEFailures      int64  `json:"bye_failures"`
-	BYEError         string `json:"bye_error,omitempty"`
-	DialogID         string `json:"dialog_id"`
-	State            string `json:"state"`
-	InviteAt         string `json:"invite_at,omitempty"`
-	AnswerAt         string `json:"answer_at,omitempty"`
-	ACKAt            string `json:"ack_at,omitempty"`
-	RefreshAttempts  int64  `json:"refresh_attempts"`
-	RefreshSuccesses int64  `json:"refresh_successes"`
-	RefreshFailures  int64  `json:"refresh_failures"`
-	LastRefreshAt    string `json:"last_refresh_at,omitempty"`
-	BYEInitiator     string `json:"bye_initiator,omitempty"`
-	EndReason        string `json:"end_reason,omitempty"`
-	TimeoutCause     string `json:"timeout_cause,omitempty"`
-	Codec            string `json:"codec,omitempty"`
-	Encryption       string `json:"encryption,omitempty"`
+	Negotiation      *sipCodecEvidence `json:"codec_negotiation,omitempty"`
+	BYEStatus        string            `json:"bye_status,omitempty"`
+	BYEFailures      int64             `json:"bye_failures"`
+	BYEError         string            `json:"bye_error,omitempty"`
+	DialogID         string            `json:"dialog_id"`
+	State            string            `json:"state"`
+	InviteAt         string            `json:"invite_at,omitempty"`
+	AnswerAt         string            `json:"answer_at,omitempty"`
+	ACKAt            string            `json:"ack_at,omitempty"`
+	RefreshAttempts  int64             `json:"refresh_attempts"`
+	RefreshSuccesses int64             `json:"refresh_successes"`
+	RefreshFailures  int64             `json:"refresh_failures"`
+	LastRefreshAt    string            `json:"last_refresh_at,omitempty"`
+	BYEInitiator     string            `json:"bye_initiator,omitempty"`
+	EndReason        string            `json:"end_reason,omitempty"`
+	TimeoutCause     string            `json:"timeout_cause,omitempty"`
+	Codec            string            `json:"codec,omitempty"`
+	Encryption       string            `json:"encryption,omitempty"`
 }
 type sipLiveSnapshot struct {
 	At                 string                 `json:"at"`

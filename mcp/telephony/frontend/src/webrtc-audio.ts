@@ -145,6 +145,10 @@ export class WebRTCAudioConnection implements AudioConnection {
   private carrierStalled=false;
   private deliveryDegraded=false;
   private ready=false;
+  private answered=false;
+  private mediaPathReady?:boolean;
+  private mediaRevision=0;
+  private reportedLive=false;
   private peer=false;
   private muted=false;
   private whisperEpoch: number | null=null;
@@ -200,7 +204,7 @@ export class WebRTCAudioConnection implements AudioConnection {
     const generation=++this.generation,options=this.options!;
     for(const event of this.events.slice(-8))this.enqueueRTCEvents({session_events:[event]});
     for(const event of this.diagnostics.dropEvents.slice(-8))this.enqueueRTCEvents({drop_events:[event]});
-    this.ready=this.peer=false;this.previous=undefined;this.quality=new RTCQualityPolicy(options);this.appliedBitrate=undefined;
+    this.ready=this.peer=this.answered=this.reportedLive=false;this.mediaPathReady=undefined;this.mediaRevision=0;this.previous=undefined;this.quality=new RTCQualityPolicy(options);this.appliedBitrate=undefined;
     const stream=await navigator.mediaDevices.getUserMedia({audio:microphoneConstraints(options)});
     if(!this.current(generation)){stream.getTracks().forEach(t=>t.stop());throw new Error("Audio session cancelled");}
     this.stream=stream;
@@ -212,7 +216,7 @@ export class WebRTCAudioConnection implements AudioConnection {
     mic.onunmute=()=>this.recordSessionEvent({timestamp:new Date().toISOString(),action:"microphone",outcome:"device_unmuted"});
     mic.onended=()=>{if(this.current(generation))this.disconnected(generation,"microphone_ended");};
     this.context=new AudioContext({latencyHint:"interactive"});const context=this.context;
-    context.onstatechange=()=>this.runtime.context(context.state);
+    context.onstatechange=()=>{this.runtime.context(context.state);this.updateLiveState();};
     this.runtime.context(context.state);await context.resume();this.guard(generation);
     if(options.outputDeviceId && "setSinkId" in context) await (context as AudioContext & {setSinkId(id:string):Promise<void>}).setSinkId(options.outputDeviceId);
     await context.audioWorklet.addModule(this.workletURL!);this.guard(generation);
@@ -242,7 +246,9 @@ export class WebRTCAudioConnection implements AudioConnection {
       const finish=(err?:Error)=>{if(finished)return;finished=true;clearTimeout(timeout);this.cancelSetup=undefined;err?reject(err):resolve();};
       const timeout=setTimeout(()=>finish(new Error("WebRTC audio connection timed out")),18000);
       this.cancelSetup=()=>finish(new Error("Audio session cancelled"));
-      const maybeReady=()=>{if(this.current(generation)&&this.ready&&connected){this.gate();finish();safe(()=>this.callbacks.onState?.("live"));}};
+      const maybeReady=()=>{if(this.current(generation)&&this.ready&&connected){
+        this.gate();finish();this.updateLiveState();
+      }};
       socket.onmessage=event=>{
         if(!this.current(generation))return;
         if(event.data instanceof ArrayBuffer){this.playWhisper(event.data);return;}
@@ -285,10 +291,15 @@ export class WebRTCAudioConnection implements AudioConnection {
           return;
         }
         if(value.type==="webrtc.answer") {void this.pc?.setRemoteDescription({type:"answer",sdp:value.sdp}).catch(()=>finish(new Error("Invalid WebRTC answer")));return;}
+        if(value.type==="media.ready"||value.type==="media.not_ready"){
+          if(!Number.isSafeInteger(value.revision)||value.revision<=this.mediaRevision)return;
+          this.mediaRevision=value.revision;this.mediaPathReady=value.type==="media.ready";
+          safe(()=>this.callbacks.onMediaReadiness?.(value));this.updateLiveState();
+        }
         if(value.type==="ready"){this.ready=true;this.send({type:"media.capabilities",version:2,versions:[3],whisper:true});maybeReady();}
-        if(value.type==="peer.connected"){this.peer=true;this.gate();}
-        if(value.type==="peer.disconnected"){this.peer=false;this.gate();safe(()=>this.callbacks.onNotice?.("Carrier audio interrupted; the call remains connected."));}
-        if(value.type==="call.status")safe(()=>this.callbacks.onCallStatus?.(value));
+        if(value.type==="peer.connected"){this.peer=true;this.gate();maybeReady();}
+        if(value.type==="peer.disconnected"){this.peer=false;this.gate();this.updateLiveState();safe(()=>this.callbacks.onNotice?.("Carrier audio interrupted; the call remains connected."));}
+        if(value.type==="call.status"){this.answered=["answered","in-progress"].includes(value.status);maybeReady();safe(()=>this.callbacks.onCallStatus?.(value));}
         if(value.type==="call.error"){if(!finished)finish(new Error(value.detail??"Carrier activation failed"));else {this.stop();safe(()=>this.callbacks.onState?.("error",value.detail));}}
         if(value.type==="call.ended" || value.type==="session.replaced"){
           if(!finished)finish(new Error(value.type));else {this.stop();safe(()=>this.callbacks.onState?.("ended",value.type));}
@@ -321,7 +332,17 @@ export class WebRTCAudioConnection implements AudioConnection {
     await this.statistics(generation);
   }
   private send(value:unknown){if(this.socket?.readyState===WebSocket.OPEN && this.socket.bufferedAmount<65536)try{this.socket.send(JSON.stringify(value));}catch{/* reconnect handles failure */}}
-  private gate(){const open=this.ready&&this.peer&&!this.muted;this.capture?.port.postMessage({type:"muted",value:!open});this.destination?.stream.getAudioTracks().forEach(t=>t.enabled=open);}
+  private updateLiveState(){
+    const live=this.ready&&this.peer&&this.answered&&this.mediaPathReady!==false&&this.pc?.connectionState==="connected"&&this.context?.state==="running";
+    if(live===this.reportedLive)return;
+    this.reportedLive=live;
+    this.recordSessionEvent({timestamp:new Date().toISOString(),action:"media_path",outcome:live?"ready":"waiting"});
+    safe(()=>this.callbacks.onState?.(live?"live":"reconnecting",live?undefined:"Connecting carrier audio…"));
+  }
+  // Warm the authorized RTP capture path before answer. The server owns the
+  // answer/hold gate, so opening the microphone does not wait another RTT for
+  // peer.connected. Intentional mute still disables both capture and track.
+  private gate(){const open=!this.stopped&&!this.muted;this.capture?.port.postMessage({type:"muted",value:!open});this.destination?.stream.getAudioTracks().forEach(t=>t.enabled=open);}
   private async statistics(generation:number){
     if(!this.current(generation)||!this.pc||this.sampling.has(this.pc))return;
     const pc=this.pc,started=performance.now();this.sampling.add(pc);

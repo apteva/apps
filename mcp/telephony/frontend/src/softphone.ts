@@ -1,10 +1,10 @@
 import type { CallListenerOptions } from "./listener";
 import { MediaLease, mediaRecoveryContext, safeMediaSessionEvent, type MediaInitiatingAction, type MediaRecoveryContext, type MediaSessionEvent } from "./media-lease";
-import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, playbackBufferOptions, type SoftphoneAudioHealth, type SoftphoneAudioOptions, type SoftphoneCallStatus, type SoftphoneDiagnostics, type SoftphoneState } from "../../ui/softphone-audio";
+import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, playbackBufferOptions, type SoftphoneMediaReadiness, type SoftphoneAudioHealth, type SoftphoneAudioOptions, type SoftphoneCallStatus, type SoftphoneDiagnostics, type SoftphoneState } from "../../ui/softphone-audio";
 import { createBrowserAudio, type AudioConnection, type AudioRuntime } from "./audio";
 import { isTerminalCall, type AnswerRequest, type Call, type CallControlResult, type CallSession, type CallTermination, type DialRequest, type TelephonyClient } from "./client";
 
-/** Coarse call progress derived from carrier status: idle, placing, ringing, connected, ended. */
+/** Carrier progress; connected is exposed only after browser media is live. */
 export type SoftphonePhase = "idle" | "placing" | "ringing" | "connected" | "ended";
 export interface RingbackOptions { country?: string }
 
@@ -34,6 +34,7 @@ export interface SoftphoneSnapshot {
   readonly capabilities?: Call["capabilities"];
 }
 export interface SoftphoneOptions {
+  onMediaReadiness?: (event: SoftphoneMediaReadiness) => void;
 	/** Applied to the shared browser runtime; defaults to websocket. */
 	mediaTransport?: "websocket" | "webrtc" | "auto";
   audio?: Partial<SoftphoneAudioOptions>;
@@ -92,7 +93,9 @@ export class HeadlessSoftphone {
   };
 
   private update(patch: Partial<SoftphoneSnapshot>) {
-    this.snapshot = Object.freeze({ ...this.snapshot, ...patch });
+    const next={...this.snapshot,...patch};
+    if(next.callId && phaseForStatus(next.carrierStatus)==="connected") next.phase=next.audioState==="live"?"connected":"placing";
+    this.snapshot = Object.freeze(next);
     for (const listener of this.listeners) {
       // Host rendering must not interrupt call cleanup or start another dial.
       try { listener(this.snapshot); } catch { /* isolate observer failures */ }
@@ -416,6 +419,7 @@ export class HeadlessSoftphone {
             if (audioState === "error") void this.reconcileFailedAudio(session, this.generation);
           }
         },
+        onMediaReadiness: event => notify(() => this.options.onMediaReadiness?.(event)),
         onLevels: (mic, speaker) => notify(() => this.options.onLevels?.(mic, speaker)),
         onAudioHealth: health => notify(() => this.options.onAudioHealth?.(health)),
         onDiagnostics: diagnostics => notify(() => this.options.onDiagnostics?.(diagnostics)),

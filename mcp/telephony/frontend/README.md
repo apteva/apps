@@ -438,3 +438,30 @@ and no-auto-retarget behavior. The adviser's selected media transport determines
 private delivery, without adding a carrier stream or including coaching in
 recordings/listener taps. See [listening](../docs/live-listening.md) and
 [coaching](../docs/private-coaching.md) for limits and diagnostic differences.
+
+### Media readiness (0.12.13)
+
+`call.status: answered` is a signaling fact. `media.ready` means Telephony has an
+answered call, the current browser session and an attached carrier bridge, with
+hold inactive. `media.not_ready` revokes that state during a bridge interruption,
+hold or call ending. Both arrive on the existing media control socket and are
+retained in `browser_audio_diagnostics.server.startup.readiness_events`.
+
+```ts
+const phone = telephony.createSoftphone({
+  onMediaReadiness(event) {
+    // type, call_id, connection_id, revision, bridge_generation, occurred_at, reason
+    console.log(event.type, event.reason);
+  },
+});
+phone.subscribe(snapshot => {
+  // Display connected only here: carrier answer AND browser media readiness.
+  const connected = snapshot.phase === "connected";
+});
+```
+
+The revision is ordered within the active socket; discard older revisions and
+reset on a new socket. The headless client handles this automatically. Local
+`audioState: live` also checks the browser transport/audio readiness. Neither
+event proves that the remote person heard speech. `carrierStatus` retains the
+actual signaling status while `phase` remains `placing` until audio is ready.

@@ -182,6 +182,11 @@ func TestSoftphoneReconnectKeepsPersistedHoldGate(t *testing.T) {
 	browser := dialWS(t, server.URL+"/softphone/media/call-soft-1/peer-secret")
 	readSoftphoneEventWithin(t, browser, "ready", 3*time.Second)
 	_ = browser.SetReadDeadline(time.Now().Add(3 * time.Second))
+	readinessData, readinessOp, readinessErr := wsutil.ReadServerData(browser)
+	var readiness mediaReadinessEvent
+	if readinessErr != nil || readinessOp != ws.OpText || json.Unmarshal(readinessData, &readiness) != nil || readiness.Type != "media.not_ready" || readiness.Reason != "hold" {
+		t.Fatalf("initial held media readiness: %s %v", readinessData, readinessErr)
+	}
 	statusData, statusOp, statusErr := wsutil.ReadServerData(browser)
 	if statusErr != nil || statusOp != ws.OpText || !strings.Contains(string(statusData), `"hold_state":"held"`) {
 		t.Fatalf("initial hold status: %s %v", statusData, statusErr)
@@ -382,7 +387,7 @@ func TestSoftphoneHubDropsRealtimePacingControlFrames(t *testing.T) {
 			return
 		}
 		var event map[string]any
-		if json.Unmarshal(data, &event) == nil && (event["type"] == "ready" || event["type"] == "peer.connected" || event["type"] == "call.status" || event["type"] == "audio.health") {
+		if json.Unmarshal(data, &event) == nil && (event["type"] == "ready" || event["type"] == "peer.connected" || event["type"] == "call.status" || event["type"] == "audio.health" || event["type"] == "media.ready" || event["type"] == "media.not_ready") {
 			continue // hub-owned connection state, not realtime pacing control
 		}
 		t.Fatalf("realtime pacing control leaked to the browser: %s", data)

@@ -40,7 +40,11 @@ class SoftphoneCaptureProcessor extends AudioWorkletProcessor {
         };
         this.transport.start?.();
       } else if (event.data?.type === "muted") {
-        this.muted = Boolean(event.data.value);
+        const muted = Boolean(event.data.value);
+        // Readiness can repeat the current gate. Preserve partial speech and
+        // DSP history unless the user actually changes mute state.
+        if (muted === this.muted) return;
+        this.muted = muted;
         this.buffer.fill(0); this.filled = 0;
         this.delay.fill(0); this.delayOffset = 0; this.peakHead = this.peakTail = this.sampleIndex = 0;
         this.hpX = this.hpY = 0; this.limiterGain = 1;
