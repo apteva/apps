@@ -1,0 +1,3633 @@
+{
+  "operations": {
+    "get_search_options": {
+      "read_only": true,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "https://www.adultfolio.com/search",
+          "locator": {}
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 2000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            }
+          }
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "#search_members select[name=\"profile\"],#search_members select[name=\"distance\"],#search_members select[name=\"order\"],#search_members select[name=\"gender\"],#search_members select[name=\"country\"],#search_members select[name=\"messages\"],#search_members select[name=\"location\"],#search_members select[name=\"town\"],#do_postcode_search,#search_members select[name=\"lage\"],#search_members select[name=\"hage\"]",
+          "fields": {
+            "filter_id": {
+              "type": "text",
+              "attribute": "id"
+            },
+            "filter_name": {
+              "type": "text",
+              "attribute": "name"
+            },
+            "option_labels": {
+              "many": true,
+              "selector": "option",
+              "type": "text"
+            },
+            "option_values": {
+              "many": true,
+              "selector": "option",
+              "type": "text",
+              "attribute": "value"
+            },
+            "selected_value": {
+              "selector": "option[selected]",
+              "type": "text",
+              "attribute": "value"
+            },
+            "value": {
+              "attribute": "value",
+              "type": "text"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 20
+        }
+      ],
+      "output_schema": null
+    },
+    "get_thread": {
+      "read_only": true,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "https://www.adultfolio.com/message.php?user={{model_id}}",
+          "locator": {}
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 2000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "recipient_url": {
+              "selector": ".MainTitle a.a4",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "thread_class": {
+              "selector": "#MessageResult",
+              "type": "text",
+              "attribute": "class",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "recipient_url": {
+              "equals_url": {
+                "url": "{{model_url}}"
+              }
+            },
+            "thread_class": {
+              "equals_exact": "conversation-{{model_id}}"
+            }
+          }
+        },
+        {
+          "read_views": {
+            "entry_url": "https://www.adultfolio.com/message.php?user={{model_id}}",
+            "identity_url": "{{account_url}}",
+            "identity": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "views": [
+              {
+                "use_entry_page": true,
+                "name": "messages",
+                "covers": [
+                  "messages"
+                ],
+                "link_selector": "",
+                "url_pattern": "^https://www\\.adultfolio\\.com/message\\.php\\?user={{model_id}}(?:&|$)",
+                "ready_selector": "#MessageResult[class=\"conversation-{{model_id}}\"]",
+                "empty_text_pattern": "(?i)no messages",
+                "empty_selector": "#MessageResult",
+                "loading_selector": ".loading-overlay[aria-busy=\"true\"],#messaging_btf[aria-busy=\"true\"],#MessageResult[aria-busy=\"true\"],#oldMessage:contains(\"Loading\"),#oldMessage:contains(\"loading\")",
+                "items": "#MessageResult .messageContainer.message-modern-wrap",
+                "fields": {
+                  "attachment_url": {
+                    "selector": ".message-modern-body a[href]",
+                    "type": "url",
+                    "attribute": "href"
+                  },
+                  "attachment_urls": {
+                    "many": true,
+                    "selector": ".message-modern-body a[href]",
+                    "type": "url",
+                    "attribute": "href"
+                  },
+                  "body": {
+                    "selector": ".message-modern-body",
+                    "type": "text",
+                    "preserve_line_breaks": true,
+                    "pattern": "(?s)^\\s*(.*?)\\s*$"
+                  },
+                  "image_url": {
+                    "selector": ".message-modern-body img[src]",
+                    "type": "url",
+                    "attribute": "src"
+                  },
+                  "image_urls": {
+                    "many": true,
+                    "selector": ".message-modern-body img[src]",
+                    "type": "url",
+                    "attribute": "src"
+                  },
+                  "message_id": {
+                    "type": "text",
+                    "attribute": "id",
+                    "required": true,
+                    "pattern": "^([0-9]+)$"
+                  },
+                  "read_at": {
+                    "selector": ".message-modern-meta .timeago:nth-of-type(2)",
+                    "type": "text",
+                    "attribute": "title"
+                  },
+                  "sender_url": {
+                    "selector": "a.thumbnailPic",
+                    "type": "url",
+                    "attribute": "href",
+                    "required": true
+                  },
+                  "sent_at": {
+                    "selector": ".message-modern-meta .timeago",
+                    "type": "text",
+                    "attribute": "title",
+                    "required": true
+                  }
+                },
+                "field_defaults": {
+                  "direction": "incoming",
+                  "record_type": "message",
+                  "model_id": "{{model_id}}",
+                  "model_url": "{{model_url}}"
+                },
+                "field_rewrites": {
+                  "direction": {
+                    "from": "sender_url",
+                    "pattern": ".*",
+                    "replacement": "outgoing",
+                    "when_field": "sender_url",
+                    "equals": "{{account_url}}"
+                  }
+                },
+                "key_field": "message_id",
+                "pagination": {
+                  "end_when_next_absent": true,
+                  "mode": "next",
+                  "next": {
+                    "text": "Load Older Messages",
+                    "selector": "#oldMessage:not([style*=\"display: none\"]):not([style*=\"display:none\"])",
+                    "exact": true,
+                    "som_only": true
+                  },
+                  "max_pages": "{{read_pages}}",
+                  "stable_rounds": 2,
+                  "settle_ms": 5000,
+                  "on_stall": "partial",
+                  "advance_timeout_ms": 20000,
+                  "reveal_from": "start"
+                }
+              }
+            ],
+            "timeout_ms": 10000,
+            "allow_partial": true
+          },
+          "action": "inspect_views",
+          "locator": {}
+        }
+      ],
+      "output_schema": null
+    },
+    "inspect_controls": {
+      "read_only": true,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{page_url}}",
+          "locator": {}
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 2000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            }
+          }
+        },
+        {
+          "action": "observe_page",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            }
+          },
+          "readability": false
+        }
+      ],
+      "output_schema": null
+    },
+    "inspect_page": {
+      "read_only": true,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{page_url}}",
+          "locator": {}
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 2000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            }
+          }
+        },
+        {
+          "action": "observe_page",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            }
+          },
+          "readability": false
+        }
+      ],
+      "output_schema": null
+    },
+    "list_conversations": {
+      "read_only": true,
+      "steps": [
+        {
+          "read_views": {
+            "entry_url": "https://www.adultfolio.com/messaging.php",
+            "identity_url": "{{account_url}}",
+            "identity": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "views": [
+              {
+                "use_entry_page": true,
+                "name": "conversations",
+                "covers": [
+                  "conversations"
+                ],
+                "link_selector": "",
+                "url_pattern": "^https://www\\.adultfolio\\.com/messaging\\.php(?:[?#]|$)",
+                "ready_selector": "#messaging_btf",
+                "empty_text_pattern": "(?i)no (messages|conversations)",
+                "empty_selector": "#messaging_btf",
+                "loading_selector": ".loading-overlay[aria-busy=\"true\"],#messaging_btf[aria-busy=\"true\"],#MessageResult[aria-busy=\"true\"]",
+                "items": "[class^=\"conversation-\"].message-list-template",
+                "fields": {
+                  "conversation_id": {
+                    "type": "text",
+                    "attribute": "id",
+                    "required": true,
+                    "pattern": "^([0-9]+-[0-9]+)$"
+                  },
+                  "last_message_at": {
+                    "selector": ".timeago",
+                    "type": "text",
+                    "attribute": "title"
+                  },
+                  "model_id": {
+                    "type": "text",
+                    "attribute": "class",
+                    "required": true,
+                    "pattern": "^conversation-([0-9]+)\\b"
+                  },
+                  "model_name": {
+                    "selector": "a.a4[href^=\"/message.php?user=\"]",
+                    "type": "text",
+                    "required": true
+                  },
+                  "preview": {
+                    "selector": ".hidden-md.hidden-sm",
+                    "type": "text"
+                  },
+                  "profile_url": {
+                    "selector": "a.thumbnailPic",
+                    "type": "url",
+                    "attribute": "href",
+                    "required": true
+                  },
+                  "thread_url": {
+                    "selector": "a[href^=\"/message.php?user=\"]",
+                    "type": "url",
+                    "attribute": "href",
+                    "required": true
+                  }
+                },
+                "key_field": "model_id",
+                "pagination": {
+                  "end_when_next_absent": true,
+                  "mode": "next",
+                  "next": {
+                    "text": "Next",
+                    "selector": ".pagination a:containsown(\"Next\")",
+                    "exact": true,
+                    "som_only": true
+                  },
+                  "max_pages": "{{read_pages}}",
+                  "stable_rounds": 2,
+                  "settle_ms": 1000,
+                  "on_stall": "partial",
+                  "advance_timeout_ms": 20000,
+                  "reveal_from": "end"
+                },
+                "field_defaults": {
+                  "record_type": "conversation"
+                }
+              }
+            ],
+            "timeout_ms": 10000,
+            "allow_partial": true
+          },
+          "action": "inspect_views",
+          "locator": {}
+        }
+      ],
+      "output_schema": null
+    },
+    "list_messages": {
+      "read_only": true,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "https://www.adultfolio.com/message.php?user={{model_id}}",
+          "locator": {}
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 2000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "recipient_url": {
+              "selector": ".MainTitle a.a4",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "thread_class": {
+              "selector": "#MessageResult",
+              "type": "text",
+              "attribute": "class",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "recipient_url": {
+              "equals_url": {
+                "url": "{{model_url}}"
+              }
+            },
+            "thread_class": {
+              "equals_exact": "conversation-{{model_id}}"
+            }
+          }
+        },
+        {
+          "read_views": {
+            "entry_url": "https://www.adultfolio.com/message.php?user={{model_id}}",
+            "identity_url": "{{account_url}}",
+            "identity": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "views": [
+              {
+                "use_entry_page": true,
+                "name": "messages",
+                "covers": [
+                  "messages"
+                ],
+                "link_selector": "",
+                "url_pattern": "^https://www\\.adultfolio\\.com/message\\.php\\?user={{model_id}}(?:&|$)",
+                "ready_selector": "#MessageResult[class=\"conversation-{{model_id}}\"]",
+                "empty_text_pattern": "(?i)no messages",
+                "empty_selector": "#MessageResult",
+                "loading_selector": ".loading-overlay[aria-busy=\"true\"],#messaging_btf[aria-busy=\"true\"],#MessageResult[aria-busy=\"true\"],#oldMessage:contains(\"Loading\"),#oldMessage:contains(\"loading\")",
+                "items": "#MessageResult .messageContainer.message-modern-wrap",
+                "fields": {
+                  "attachment_url": {
+                    "selector": ".message-modern-body a[href]",
+                    "type": "url",
+                    "attribute": "href"
+                  },
+                  "attachment_urls": {
+                    "many": true,
+                    "selector": ".message-modern-body a[href]",
+                    "type": "url",
+                    "attribute": "href"
+                  },
+                  "body": {
+                    "selector": ".message-modern-body",
+                    "type": "text",
+                    "preserve_line_breaks": true,
+                    "pattern": "(?s)^\\s*(.*?)\\s*$"
+                  },
+                  "image_url": {
+                    "selector": ".message-modern-body img[src]",
+                    "type": "url",
+                    "attribute": "src"
+                  },
+                  "image_urls": {
+                    "many": true,
+                    "selector": ".message-modern-body img[src]",
+                    "type": "url",
+                    "attribute": "src"
+                  },
+                  "message_id": {
+                    "type": "text",
+                    "attribute": "id",
+                    "required": true,
+                    "pattern": "^([0-9]+)$"
+                  },
+                  "read_at": {
+                    "selector": ".message-modern-meta .timeago:nth-of-type(2)",
+                    "type": "text",
+                    "attribute": "title"
+                  },
+                  "sender_url": {
+                    "selector": "a.thumbnailPic",
+                    "type": "url",
+                    "attribute": "href",
+                    "required": true
+                  },
+                  "sent_at": {
+                    "selector": ".message-modern-meta .timeago",
+                    "type": "text",
+                    "attribute": "title",
+                    "required": true
+                  }
+                },
+                "field_defaults": {
+                  "direction": "incoming",
+                  "record_type": "message",
+                  "model_id": "{{model_id}}",
+                  "model_url": "{{model_url}}"
+                },
+                "field_rewrites": {
+                  "direction": {
+                    "from": "sender_url",
+                    "pattern": ".*",
+                    "replacement": "outgoing",
+                    "when_field": "sender_url",
+                    "equals": "{{account_url}}"
+                  }
+                },
+                "key_field": "message_id",
+                "pagination": {
+                  "end_when_next_absent": true,
+                  "mode": "next",
+                  "next": {
+                    "text": "Load Older Messages",
+                    "selector": "#oldMessage:not([style*=\"display: none\"]):not([style*=\"display:none\"])",
+                    "exact": true,
+                    "som_only": true
+                  },
+                  "max_pages": "{{read_pages}}",
+                  "stable_rounds": 2,
+                  "settle_ms": 5000,
+                  "on_stall": "partial",
+                  "advance_timeout_ms": 20000,
+                  "reveal_from": "start"
+                }
+              }
+            ],
+            "timeout_ms": 10000,
+            "allow_partial": true
+          },
+          "action": "inspect_views",
+          "locator": {}
+        }
+      ],
+      "output_schema": null
+    },
+    "list_threads": {
+      "read_only": true,
+      "steps": [
+        {
+          "read_views": {
+            "entry_url": "https://www.adultfolio.com/messaging.php",
+            "identity_url": "{{account_url}}",
+            "identity": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "views": [
+              {
+                "use_entry_page": true,
+                "name": "conversations",
+                "covers": [
+                  "conversations"
+                ],
+                "link_selector": "",
+                "url_pattern": "^https://www\\.adultfolio\\.com/messaging\\.php(?:[?#]|$)",
+                "ready_selector": "#messaging_btf",
+                "empty_text_pattern": "(?i)no (messages|conversations)",
+                "empty_selector": "#messaging_btf",
+                "loading_selector": ".loading-overlay[aria-busy=\"true\"],#messaging_btf[aria-busy=\"true\"],#MessageResult[aria-busy=\"true\"]",
+                "items": "[class^=\"conversation-\"].message-list-template",
+                "fields": {
+                  "conversation_id": {
+                    "type": "text",
+                    "attribute": "id",
+                    "required": true,
+                    "pattern": "^([0-9]+-[0-9]+)$"
+                  },
+                  "last_message_at": {
+                    "selector": ".timeago",
+                    "type": "text",
+                    "attribute": "title"
+                  },
+                  "model_id": {
+                    "type": "text",
+                    "attribute": "class",
+                    "required": true,
+                    "pattern": "^conversation-([0-9]+)\\b"
+                  },
+                  "model_name": {
+                    "selector": "a.a4[href^=\"/message.php?user=\"]",
+                    "type": "text",
+                    "required": true
+                  },
+                  "preview": {
+                    "selector": ".hidden-md.hidden-sm",
+                    "type": "text"
+                  },
+                  "profile_url": {
+                    "selector": "a.thumbnailPic",
+                    "type": "url",
+                    "attribute": "href",
+                    "required": true
+                  },
+                  "thread_url": {
+                    "selector": "a[href^=\"/message.php?user=\"]",
+                    "type": "url",
+                    "attribute": "href",
+                    "required": true
+                  }
+                },
+                "key_field": "model_id",
+                "pagination": {
+                  "end_when_next_absent": true,
+                  "mode": "next",
+                  "next": {
+                    "text": "Next",
+                    "selector": ".pagination a:containsown(\"Next\")",
+                    "exact": true,
+                    "som_only": true
+                  },
+                  "max_pages": "{{read_pages}}",
+                  "stable_rounds": 2,
+                  "settle_ms": 1000,
+                  "on_stall": "partial",
+                  "advance_timeout_ms": 20000,
+                  "reveal_from": "end"
+                },
+                "field_defaults": {
+                  "record_type": "conversation"
+                }
+              }
+            ],
+            "timeout_ms": 10000,
+            "allow_partial": true
+          },
+          "action": "inspect_views",
+          "locator": {}
+        }
+      ],
+      "output_schema": null
+    },
+    "prepare_reply": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "https://www.adultfolio.com/message.php?user={{model_id}}",
+          "locator": {}
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 2000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "recipient_url": {
+              "selector": ".MainTitle a.a4",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "thread_class": {
+              "selector": "#MessageResult",
+              "type": "text",
+              "attribute": "class",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "recipient_url": {
+              "equals_url": {
+                "url": "{{model_url}}"
+              }
+            },
+            "thread_class": {
+              "equals_exact": "conversation-{{model_id}}"
+            }
+          }
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "#MessageResult .messageContainer.message-modern-wrap",
+          "fields": {
+            "baseline_message_id": {
+              "type": "number",
+              "attribute": "id",
+              "required": true,
+              "pattern": "^([0-9]+)$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 100
+        },
+        {
+          "text": "{{message}}",
+          "action": "set_text",
+          "locator": {
+            "selector": ".note-editable.panel-body[contenteditable=\"true\"]"
+          },
+          "mode": "replace",
+          "newline_mode": "preserve"
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "composer_text": {
+              "selector": ".note-editable.panel-body[contenteditable=\"true\"]",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "pattern": "(?s)^\\s*(.*?)\\s*$"
+            },
+            "recipient_url": {
+              "selector": ".MainTitle a.a4",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "thread_class": {
+              "selector": "#MessageResult",
+              "type": "text",
+              "attribute": "class",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "composer_text": {
+              "equals_exact": "{{message}}"
+            },
+            "recipient_url": {
+              "equals_url": {
+                "url": "{{model_url}}"
+              }
+            },
+            "thread_class": {
+              "equals_exact": "conversation-{{model_id}}"
+            }
+          }
+        }
+      ],
+      "output_schema": null
+    },
+    "reply": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "https://www.adultfolio.com/message.php?user={{model_id}}",
+          "locator": {}
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 2000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "recipient_url": {
+              "selector": ".MainTitle a.a4",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "thread_class": {
+              "selector": "#MessageResult",
+              "type": "text",
+              "attribute": "class",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "recipient_url": {
+              "equals_url": {
+                "url": "{{model_url}}"
+              }
+            },
+            "thread_class": {
+              "equals_exact": "conversation-{{model_id}}"
+            }
+          }
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "#MessageResult .messageContainer.message-modern-wrap",
+          "fields": {
+            "baseline_message_id": {
+              "type": "number",
+              "attribute": "id",
+              "required": true,
+              "pattern": "^([0-9]+)$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 100
+        },
+        {
+          "text": "{{message}}",
+          "action": "set_text",
+          "locator": {
+            "selector": ".note-editable.panel-body[contenteditable=\"true\"]"
+          },
+          "mode": "replace",
+          "newline_mode": "preserve"
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "composer_text": {
+              "selector": ".note-editable.panel-body[contenteditable=\"true\"]",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "pattern": "(?s)^\\s*(.*?)\\s*$"
+            },
+            "recipient_url": {
+              "selector": ".MainTitle a.a4",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "thread_class": {
+              "selector": "#MessageResult",
+              "type": "text",
+              "attribute": "class",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "composer_text": {
+              "equals_exact": "{{message}}"
+            },
+            "recipient_url": {
+              "equals_url": {
+                "url": "{{model_url}}"
+              }
+            },
+            "thread_class": {
+              "equals_exact": "conversation-{{model_id}}"
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Send!",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Send!",
+          "expected_effect": "message_send",
+          "confirm_consequence": "message_send",
+          "once_key": "reply:{{account_url}}:{{model_id}}:{{request_id}}",
+          "once_scope": "reply"
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 2000
+        },
+        {
+          "action": "goto",
+          "url": "https://www.adultfolio.com/message.php?user={{model_id}}",
+          "locator": {}
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 2000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "recipient_url": {
+              "selector": ".MainTitle a.a4",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "thread_class": {
+              "selector": "#MessageResult",
+              "type": "text",
+              "attribute": "class",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "recipient_url": {
+              "equals_url": {
+                "url": "{{model_url}}"
+              }
+            },
+            "thread_class": {
+              "equals_exact": "conversation-{{model_id}}"
+            }
+          }
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "#MessageResult .messageContainer.message-modern-wrap:has(a.thumbnailPic[href$=\"{{account_profile_path}}\"])",
+          "fields": {
+            "saved_body": {
+              "selector": ".message-modern-body",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "pattern": "(?s)^\\s*(.*?)\\s*$"
+            },
+            "saved_message_id": {
+              "type": "number",
+              "attribute": "id",
+              "required": true,
+              "pattern": "^([0-9]+)$"
+            },
+            "saved_sender_url": {
+              "selector": "a.thumbnailPic",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "saved_sent_at": {
+              "selector": ".message-modern-meta .timeago",
+              "type": "text",
+              "attribute": "title",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 100
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "saved_body": {
+              "equals_exact": "{{message}}"
+            },
+            "saved_message_id": {
+              "greater_than_field": "baseline_message_id"
+            },
+            "saved_sender_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            }
+          }
+        }
+      ],
+      "output_schema": null
+    },
+    "search_filtered_models": {
+      "read_only": true,
+      "steps": [
+        {
+          "read_views": {
+            "entry_url": "{{search_results_url}}",
+            "identity_url": "{{account_url}}",
+            "identity": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "views": [
+              {
+                "use_entry_page": true,
+                "name": "filtered_models",
+                "covers": [
+                  "filtered_models"
+                ],
+                "link_selector": "",
+                "url_pattern": "^https://www\\.adultfolio\\.com/search(?:[?#]|$)",
+                "ready_selector": "#member_search_results:has([id$=\"_member_card\"]),#member_search_results_intro:contains(\"No results\"),#member_search_results_intro:contains(\"No members\")",
+                "empty_text_pattern": "(?i)no (members|results)|0 results",
+                "empty_selector": "#member_search_results_intro",
+                "loading_selector": ".loading-overlay[aria-busy=\"true\"],#messaging_btf[aria-busy=\"true\"],#MessageResult[aria-busy=\"true\"]",
+                "items": "#member_search_results [id$=\"_member_card\"]:has(.text-left.smallSidePadding:contains(\" Model\"))",
+                "fields": {
+                  "model_id": {
+                    "type": "text",
+                    "attribute": "id",
+                    "required": true,
+                    "pattern": "^([0-9]+)_member_card$"
+                  },
+                  "model_name": {
+                    "selector": "a.a4:not(.periodResponseRate):not([href$=\"/references\"])",
+                    "type": "text",
+                    "required": true
+                  },
+                  "profile_url": {
+                    "selector": "a.thumbnailPic",
+                    "type": "url",
+                    "attribute": "href",
+                    "required": true
+                  },
+                  "references": {
+                    "selector": "a[href$=\"/references\"]",
+                    "type": "number",
+                    "pattern": "([0-9]+)"
+                  },
+                  "response_rate": {
+                    "selector": ".periodResponseRate",
+                    "type": "number",
+                    "pattern": "([0-9]+)%"
+                  },
+                  "role": {
+                    "selector": ".text-left.smallSidePadding",
+                    "type": "text",
+                    "required": true,
+                    "pattern": "\\b((?:Female|Male|Transgender|Non-binary|Non Binary|Other) Model)\\b"
+                  },
+                  "thread_url": {
+                    "selector": "a[href^=\"/message.php?user=\"]",
+                    "type": "url",
+                    "attribute": "href",
+                    "required": true
+                  }
+                },
+                "key_field": "model_id",
+                "pagination": {
+                  "mode": "scroll",
+                  "next": {},
+                  "scroll_target_name": "Document",
+                  "amount": 600,
+                  "max_pages": "{{read_pages}}",
+                  "stable_rounds": 3,
+                  "settle_ms": 1500,
+                  "on_stall": "partial",
+                  "advance_timeout_ms": 20000,
+                  "reveal_from": "end"
+                }
+              }
+            ],
+            "timeout_ms": 10000,
+            "allow_partial": true
+          },
+          "action": "inspect_views",
+          "locator": {}
+        }
+      ],
+      "output_schema": null
+    },
+    "search_models": {
+      "read_only": true,
+      "steps": [
+        {
+          "read_views": {
+            "entry_query": {
+              "profile": "model",
+              "q": "{{model_query}}",
+              "searchType": "members"
+            },
+            "entry_url": "https://www.adultfolio.com/search",
+            "identity_url": "{{account_url}}",
+            "identity": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "views": [
+              {
+                "use_entry_page": true,
+                "name": "model_search",
+                "covers": [
+                  "model_search"
+                ],
+                "link_selector": "",
+                "url_pattern": "^https://www\\.adultfolio\\.com/search(?:[?#]|$)",
+                "ready_selector": ".website_search_results:has([id$=\"_member_card\"]),.website_search_results:contains(\"There are no results for your query\")",
+                "empty_text_pattern": "There are no results for your query",
+                "empty_selector": ".website_search_results",
+                "loading_selector": ".loading-overlay[aria-busy=\"true\"],#messaging_btf[aria-busy=\"true\"],#MessageResult[aria-busy=\"true\"]",
+                "items": ".website_search_results [id$=\"_member_card\"]:has(.text-left.smallSidePadding:contains(\" Model\"))",
+                "fields": {
+                  "model_id": {
+                    "type": "text",
+                    "attribute": "id",
+                    "required": true,
+                    "pattern": "^([0-9]+)_member_card$"
+                  },
+                  "model_name": {
+                    "selector": "a.a4:not(.periodResponseRate):not([href$=\"/references\"])",
+                    "type": "text",
+                    "required": true
+                  },
+                  "profile_url": {
+                    "selector": "a.thumbnailPic",
+                    "type": "url",
+                    "attribute": "href",
+                    "required": true
+                  },
+                  "references": {
+                    "selector": "a[href$=\"/references\"]",
+                    "type": "number",
+                    "pattern": "([0-9]+)"
+                  },
+                  "response_rate": {
+                    "selector": ".periodResponseRate",
+                    "type": "number",
+                    "pattern": "([0-9]+)%"
+                  },
+                  "role": {
+                    "selector": ".text-left.smallSidePadding",
+                    "type": "text",
+                    "required": true,
+                    "pattern": "\\b((?:Female|Male|Transgender|Non-binary|Non Binary|Other) Model)\\b"
+                  },
+                  "thread_url": {
+                    "selector": "a[href^=\"/message.php?user=\"]",
+                    "type": "url",
+                    "attribute": "href",
+                    "required": true
+                  }
+                },
+                "key_field": "model_id",
+                "pagination": {
+                  "end_when_next_absent": true,
+                  "mode": "next",
+                  "next": {
+                    "text": "Next",
+                    "selector": ".website_search_results .pagination a:containsown(\"Next\")",
+                    "exact": true,
+                    "som_only": true
+                  },
+                  "max_pages": 100,
+                  "stable_rounds": 2,
+                  "settle_ms": 1000
+                }
+              }
+            ],
+            "timeout_ms": 10000
+          },
+          "action": "inspect_views",
+          "locator": {}
+        }
+      ],
+      "output_schema": null
+    },
+    "verify_reply": {
+      "read_only": true,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "https://www.adultfolio.com/message.php?user={{model_id}}",
+          "locator": {}
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 2000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "recipient_url": {
+              "selector": ".MainTitle a.a4",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "thread_class": {
+              "selector": "#MessageResult",
+              "type": "text",
+              "attribute": "class",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "recipient_url": {
+              "equals_url": {
+                "url": "{{model_url}}"
+              }
+            },
+            "thread_class": {
+              "equals_exact": "conversation-{{model_id}}"
+            }
+          }
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "#MessageResult .messageContainer.message-modern-wrap:has(a.thumbnailPic[href$=\"{{account_profile_path}}\"])",
+          "fields": {
+            "saved_body": {
+              "selector": ".message-modern-body",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "pattern": "(?s)^\\s*(.*?)\\s*$"
+            },
+            "saved_message_id": {
+              "type": "number",
+              "attribute": "id",
+              "required": true,
+              "pattern": "^([0-9]+)$"
+            },
+            "saved_sender_url": {
+              "selector": "a.thumbnailPic",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "saved_sent_at": {
+              "selector": ".message-modern-meta .timeago",
+              "type": "text",
+              "attribute": "title",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 100
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "saved_body": {
+              "equals_exact": "{{message}}"
+            },
+            "saved_message_id": {
+              "greater_than": "{{baseline_message_id}}"
+            },
+            "saved_sender_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            }
+          }
+        }
+      ],
+      "output_schema": null
+    },
+    "search_exact_model": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "https://www.adultfolio.com/search"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "required": true,
+              "attribute": "href"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            }
+          }
+        },
+        {
+          "action": "set_text",
+          "locator": {
+            "selector": "#basic-url"
+          },
+          "text": "{{model_query}}",
+          "mode": "replace"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{model_query}}",
+            "role": "input",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "{{model_query}}"
+        },
+        {
+          "action": "key",
+          "key": "End"
+        },
+        {
+          "action": "type",
+          "text": " "
+        },
+        {
+          "action": "key",
+          "key": "Backspace"
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "#eac-container-basic-url li .eac-item"
+            }
+          ],
+          "timeout_ms": 20000
+        },
+        {
+          "action": "extract",
+          "items": "#eac-container-basic-url li",
+          "fields": {
+            "suggestion_name": {
+              "selector": ".eac-item",
+              "type": "text",
+              "required": true,
+              "pattern": "^(.+?)\\s+-\\s+model$"
+            },
+            "suggestion_id": {
+              "selector": ".eac-item img",
+              "type": "text",
+              "required": true,
+              "attribute": "src",
+              "pattern": "/images/thumbs/([0-9]+)\\.jpg(?:[?]|$)"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "required": true,
+              "attribute": "href"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{model_query}}",
+            "role": "input",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "{{model_query}}"
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "suggestion_name": {
+              "equals_exact": "{{model_query}}"
+            },
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            }
+          }
+        },
+        {
+          "action": "key",
+          "key": "ArrowDown"
+        },
+        {
+          "action": "extract",
+          "items": "#eac-container-basic-url li.selected",
+          "fields": {
+            "selected_name": {
+              "selector": ".eac-item",
+              "type": "text",
+              "required": true,
+              "pattern": "^(.+?)\\s+-\\s+model$"
+            },
+            "selected_id": {
+              "selector": ".eac-item img",
+              "type": "text",
+              "required": true,
+              "attribute": "src",
+              "pattern": "/images/thumbs/([0-9]+)\\.jpg(?:[?]|$)"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "selected_name": {
+              "equals_field": "suggestion_name"
+            },
+            "selected_id": {
+              "equals_field": "suggestion_id"
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "selector": "#eac-container-basic-url li.selected .eac-item > span"
+          },
+          "expected_text": "- model",
+          "expected_effect": "navigation_only"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 2000
+        },
+        {
+          "action": "assert_url",
+          "host": "www.adultfolio.com"
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "readability": false,
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "required": true,
+              "attribute": "href"
+            },
+            "model_name": {
+              "selector": "h1.MainTitle",
+              "type": "text",
+              "required": true,
+              "own_text": true
+            },
+            "model_id": {
+              "selector": "button:containsown(\"Message\")",
+              "type": "text",
+              "required": true,
+              "attribute": "onclick",
+              "pattern": "/message\\.php\\?user=([0-9]+)(?:&|[\\'\\\"])"
+            },
+            "role": {
+              "selector": "h1.MainTitle + p",
+              "type": "text",
+              "required": true,
+              "pattern": "\\b((?:Female|Male|Trans Female|Trans Male|Transgender|Non-binary|Non Binary|Other)\\s+Model)\\b"
+            },
+            "thread_url": {
+              "selector": "button:containsown(\"Message\")",
+              "type": "url",
+              "required": true,
+              "attribute": "onclick",
+              "pattern": "[\\'\\\"](/message\\.php\\?user=[0-9]+[^\\'\\\"]*)[\\'\\\"]"
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "model_name": {
+              "equals_exact": "{{model_query}}"
+            },
+            "model_id": {
+              "equals_field": "suggestion_id"
+            },
+            "current_url": {
+              "matches": "^https://www\\.adultfolio\\.com/[A-Za-z0-9_-]+/?$"
+            }
+          }
+        }
+      ]
+    },
+    "search_unmessaged_models_by_country": {
+      "read_only": true,
+      "steps": [
+        {
+          "read_views": {
+            "allow_partial": true,
+            "entry_url": "https://www.adultfolio.com/search",
+            "identity_url": "{{account_url}}",
+            "identity": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "views": [
+              {
+                "use_entry_page": true,
+                "name": "unmessaged_models_by_country",
+                "covers": [
+                  "unmessaged_models_by_country"
+                ],
+                "link_selector": "",
+                "url_pattern": "^https://www\\.adultfolio\\.com/search(?:[?#]|$)",
+                "ready_selector": "#member_search_results:has([id$=\"_member_card\"]),#member_search_results_intro:contains(\"No results\"),#member_search_results_intro:contains(\"No members\")",
+                "empty_text_pattern": "(?i)no (members|results)|0 results",
+                "empty_selector": "#member_search_results_intro",
+                "loading_selector": ".loading-overlay[aria-busy=\"true\"],#messaging_btf[aria-busy=\"true\"],#MessageResult[aria-busy=\"true\"]",
+                "items": "#member_search_results [id$=\"_member_card\"]:has(.text-left.smallSidePadding:contains(\" Model\"))",
+                "fields": {
+                  "model_id": {
+                    "type": "text",
+                    "attribute": "id",
+                    "required": true,
+                    "pattern": "^([0-9]+)_member_card$"
+                  },
+                  "model_name": {
+                    "selector": "a.a4:not(.periodResponseRate):not([href$=\"/references\"])",
+                    "type": "text",
+                    "required": true
+                  },
+                  "profile_url": {
+                    "selector": "a.thumbnailPic",
+                    "type": "url",
+                    "attribute": "href",
+                    "required": true
+                  },
+                  "references": {
+                    "selector": "a[href$=\"/references\"]",
+                    "type": "number",
+                    "pattern": "([0-9]+)"
+                  },
+                  "response_rate": {
+                    "selector": ".periodResponseRate",
+                    "type": "number",
+                    "pattern": "([0-9]+)%"
+                  },
+                  "role": {
+                    "selector": ".text-left.smallSidePadding",
+                    "type": "text",
+                    "required": true,
+                    "pattern": "\\b((?:Female|Male|Transgender|Non-binary|Non Binary|Other) Model)\\b"
+                  },
+                  "thread_url": {
+                    "selector": "a[href^=\"/message.php?user=\"]",
+                    "type": "url",
+                    "attribute": "href",
+                    "required": true
+                  },
+                  "location": {
+                    "selector": ".text-left.smallSidePadding",
+                    "type": "text",
+                    "preserve_line_breaks": true,
+                    "pattern": "Positive References[ \\t]*\\r?\\n[ \\t]*([^\\r\\n]*[^\\s\\x{00A0}])"
+                  }
+                },
+                "key_field": "model_id",
+                "pagination": {
+                  "on_stall": "partial",
+                  "advance_timeout_ms": 20000,
+                  "reveal_from": "end",
+                  "mode": "scroll",
+                  "next": {},
+                  "scroll_target_name": "Document",
+                  "amount": 600,
+                  "max_pages": "{{read_pages}}",
+                  "stable_rounds": 3,
+                  "settle_ms": 1500
+                },
+                "field_defaults": {
+                  "record_type": "model",
+                  "location": "unavailable",
+                  "location_status": "reported",
+                  "requested_country_code": "{{country_code}}",
+                  "messages_filter": "exclude",
+                  "age_screened": false
+                },
+                "field_rewrites": {
+                  "location_status": {
+                    "from": "location",
+                    "when_field": "location",
+                    "equals": "unavailable",
+                    "pattern": "^unavailable$",
+                    "replacement": "unverified"
+                  }
+                }
+              }
+            ],
+            "timeout_ms": 10000,
+            "entry_query": {
+              "profile": "model",
+              "country": "{{country_code}}",
+              "gender": "{{gender_code}}",
+              "do_postcode_search": "0",
+              "location": "",
+              "town": "",
+              "messages": "exclude",
+              "searchType": "members",
+              "order": "lastonline"
+            }
+          },
+          "action": "inspect_views",
+          "locator": {}
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "attribute": "href",
+              "type": "url",
+              "required": true
+            },
+            "location_mode": {
+              "selector": "#do_postcode_search",
+              "attribute": "value",
+              "type": "text",
+              "required": true
+            },
+            "country_code": {
+              "selector": "select[name=\"country\"] option[selected]",
+              "attribute": "value",
+              "type": "text",
+              "required": true
+            },
+            "gender_code": {
+              "selector": "select[name=\"gender\"] option[selected]",
+              "attribute": "value",
+              "type": "text",
+              "required": false
+            },
+            "messages_filter": {
+              "selector": "select[name=\"messages\"] option[selected]",
+              "attribute": "value",
+              "type": "text",
+              "required": true
+            },
+            "profile": {
+              "selector": "select[name=\"profile\"] option[selected]",
+              "attribute": "value",
+              "type": "text",
+              "required": true
+            },
+            "region": {
+              "selector": "select[name=\"location\"] option[selected]:not([value=\"\"])",
+              "attribute": "value",
+              "type": "text",
+              "required": false,
+              "many": true
+            },
+            "town": {
+              "selector": "select[name=\"town\"] option[selected]:not([value=\"\"])",
+              "attribute": "value",
+              "type": "text",
+              "required": false,
+              "many": true
+            },
+            "country_label": {
+              "selector": "select[name=\"country\"] option[selected]",
+              "type": "text",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "location_mode": {
+              "equals_exact": "0"
+            },
+            "country_code": {
+              "equals_exact": "{{country_code}}",
+              "matches": "^[A-Z]{2}$"
+            },
+            "gender_code": {
+              "equals_exact": "{{gender_code}}",
+              "matches": "^(F|M)$"
+            },
+            "messages_filter": {
+              "equals_exact": "exclude"
+            },
+            "profile": {
+              "equals_exact": "model"
+            },
+            "region": {
+              "equals_set": []
+            },
+            "town": {
+              "equals_set": []
+            }
+          }
+        }
+      ],
+      "output_schema": null
+    },
+    "get_model_profile_age": {
+      "read_only": true,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{model_url}}"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 3000
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "readability": false,
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "model_id": {
+              "selector": "button:containsown(\"Message\")",
+              "type": "text",
+              "attribute": "onclick",
+              "pattern": "/message\\.php\\?user=([0-9]+)(?:&|[\\'\\\"])",
+              "required": true
+            },
+            "info_url": {
+              "selector": "a.sub-menu-link:containsown(\"Info\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "current_url": {
+              "equals_url": {
+                "url": "{{model_url}}"
+              }
+            },
+            "model_id": {
+              "equals_exact": "{{model_id}}",
+              "matches": "^[0-9]+$"
+            },
+            "info_url": {
+              "equals_url": {
+                "url": "{{model_url}}/info"
+              }
+            }
+          }
+        },
+        {
+          "action": "goto",
+          "url": "{{model_url}}/info"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 3000
+        },
+        {
+          "action": "extract",
+          "items": "div.col-lg-6:matchesOwn(^\\s*Age\\s*$) + div.col-lg-6",
+          "fields": {
+            "age": {
+              "selector": "",
+              "type": "integer",
+              "pattern": "^([0-9]{1,3})$",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "readability": false,
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "model_id": {
+              "selector": "button:containsown(\"Message\")",
+              "type": "text",
+              "attribute": "onclick",
+              "pattern": "/message\\.php\\?user=([0-9]+)(?:&|[\\'\\\"])",
+              "required": true
+            },
+            "model_name": {
+              "selector": "h1.MainTitle",
+              "type": "text",
+              "required": true
+            },
+            "model_role": {
+              "selector": "h1.MainTitle + p",
+              "type": "text",
+              "pattern": "\\b((?:Female|Male|Trans Female|Trans Male|Transgender|Non-binary|Non Binary|Other)\\s+Model)\\b",
+              "required": true
+            },
+            "profile_country_code": {
+              "selector": "h1.MainTitle + p a[href*=\"/search?\"]",
+              "type": "text",
+              "attribute": "href",
+              "pattern": "(?:[?&])country=([A-Z]{2})(?:&|$)",
+              "required": true
+            },
+            "message_history_label": {
+              "selector": "div.col-lg-6:matchesOwn(^\\s*Message History\\s*$) + div.col-lg-6 a",
+              "type": "text",
+              "required": true
+            },
+            "history_thread_url": {
+              "selector": "div.col-lg-6:matchesOwn(^\\s*Message History\\s*$) + div.col-lg-6 a",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "model_id": {
+              "equals_exact": "{{model_id}}"
+            },
+            "current_url": {
+              "equals_url": {
+                "url": "{{model_url}}/info"
+              }
+            },
+            "history_thread_url": {
+              "equals_url": {
+                "url": "https://www.adultfolio.com/message.php?user={{model_id}}"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "screen_model_for_outreach": {
+      "read_only": true,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{model_url}}"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 3000
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "readability": false,
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "model_id": {
+              "selector": "button:containsown(\"Message\")",
+              "type": "text",
+              "attribute": "onclick",
+              "pattern": "/message\\.php\\?user=([0-9]+)(?:&|[\\'\\\"])",
+              "required": true
+            },
+            "info_url": {
+              "selector": "a.sub-menu-link:containsown(\"Info\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "current_url": {
+              "equals_url": {
+                "url": "{{model_url}}"
+              }
+            },
+            "model_id": {
+              "equals_exact": "{{model_id}}",
+              "matches": "^[0-9]+$"
+            },
+            "info_url": {
+              "equals_url": {
+                "url": "{{model_url}}/info"
+              }
+            }
+          }
+        },
+        {
+          "action": "goto",
+          "url": "{{model_url}}/info"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 3000
+        },
+        {
+          "action": "extract",
+          "items": "div.col-lg-6:matchesOwn(^\\s*Age\\s*$) + div.col-lg-6",
+          "fields": {
+            "age": {
+              "selector": "",
+              "type": "integer",
+              "pattern": "^([0-9]{1,3})$",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "readability": false,
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "model_id": {
+              "selector": "button:containsown(\"Message\")",
+              "type": "text",
+              "attribute": "onclick",
+              "pattern": "/message\\.php\\?user=([0-9]+)(?:&|[\\'\\\"])",
+              "required": true
+            },
+            "model_name": {
+              "selector": "h1.MainTitle",
+              "type": "text",
+              "required": true
+            },
+            "model_role": {
+              "selector": "h1.MainTitle + p",
+              "type": "text",
+              "pattern": "\\b((?:Female|Male|Trans Female|Trans Male|Transgender|Non-binary|Non Binary|Other)\\s+Model)\\b",
+              "required": true
+            },
+            "profile_country_code": {
+              "selector": "h1.MainTitle + p a[href*=\"/search?\"]",
+              "type": "text",
+              "attribute": "href",
+              "pattern": "(?:[?&])country=([A-Z]{2})(?:&|$)",
+              "required": true
+            },
+            "message_history_label": {
+              "selector": "div.col-lg-6:matchesOwn(^\\s*Message History\\s*$) + div.col-lg-6 a",
+              "type": "text",
+              "required": true
+            },
+            "history_thread_url": {
+              "selector": "div.col-lg-6:matchesOwn(^\\s*Message History\\s*$) + div.col-lg-6 a",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "model_id": {
+              "equals_exact": "{{model_id}}"
+            },
+            "current_url": {
+              "equals_url": {
+                "url": "{{model_url}}/info"
+              }
+            },
+            "history_thread_url": {
+              "equals_url": {
+                "url": "https://www.adultfolio.com/message.php?user={{model_id}}"
+              }
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "age": {
+              "greater_than_or_equal": "{{min_age}}",
+              "less_than_or_equal": "{{max_age}}"
+            },
+            "model_role": {
+              "equals_exact": "{{expected_model_role}}"
+            },
+            "profile_country_code": {
+              "equals_exact": "{{country_code}}",
+              "matches": "^[A-Z]{2}$"
+            },
+            "message_history_label": {
+              "equals_exact": "No message history"
+            }
+          }
+        }
+      ]
+    },
+    "search_unmessaged_models_by_country_and_age": {
+      "read_only": true,
+      "steps": [
+        {
+          "read_views": {
+            "allow_partial": true,
+            "entry_url": "https://www.adultfolio.com/search",
+            "identity_url": "{{account_url}}",
+            "identity": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "views": [
+              {
+                "use_entry_page": true,
+                "name": "unmessaged_models_by_country_and_age",
+                "covers": [
+                  "unmessaged_models_by_country_and_age"
+                ],
+                "link_selector": "",
+                "url_pattern": "^https://www\\.adultfolio\\.com/search(?:[?#]|$)",
+                "ready_selector": "#member_search_results:has([id$=\"_member_card\"]),#member_search_results_intro:contains(\"No results\"),#member_search_results_intro:contains(\"No members\")",
+                "empty_text_pattern": "(?i)no (members|results)|0 results",
+                "empty_selector": "#member_search_results_intro",
+                "loading_selector": ".loading-overlay[aria-busy=\"true\"],#messaging_btf[aria-busy=\"true\"],#MessageResult[aria-busy=\"true\"]",
+                "items": "#member_search_results [id$=\"_member_card\"]:has(.text-left.smallSidePadding:contains(\" Model\"))",
+                "fields": {
+                  "model_id": {
+                    "type": "text",
+                    "attribute": "id",
+                    "required": true,
+                    "pattern": "^([0-9]+)_member_card$"
+                  },
+                  "model_name": {
+                    "selector": "a.a4:not(.periodResponseRate):not([href$=\"/references\"])",
+                    "type": "text",
+                    "required": true
+                  },
+                  "profile_url": {
+                    "selector": "a.thumbnailPic",
+                    "type": "url",
+                    "attribute": "href",
+                    "required": true
+                  },
+                  "references": {
+                    "selector": "a[href$=\"/references\"]",
+                    "type": "number",
+                    "pattern": "([0-9]+)"
+                  },
+                  "response_rate": {
+                    "selector": ".periodResponseRate",
+                    "type": "number",
+                    "pattern": "([0-9]+)%"
+                  },
+                  "role": {
+                    "selector": ".text-left.smallSidePadding",
+                    "type": "text",
+                    "required": true,
+                    "pattern": "\\b((?:Female|Male|Transgender|Non-binary|Non Binary|Other) Model)\\b"
+                  },
+                  "thread_url": {
+                    "selector": "a[href^=\"/message.php?user=\"]",
+                    "type": "url",
+                    "attribute": "href",
+                    "required": true
+                  },
+                  "location": {
+                    "selector": ".text-left.smallSidePadding",
+                    "type": "text",
+                    "preserve_line_breaks": true,
+                    "pattern": "Positive References[ \\t]*\\r?\\n[ \\t]*([^\\r\\n]*[^\\s\\x{00A0}])"
+                  }
+                },
+                "key_field": "model_id",
+                "pagination": {
+                  "on_stall": "partial",
+                  "advance_timeout_ms": 20000,
+                  "reveal_from": "end",
+                  "mode": "scroll",
+                  "next": {},
+                  "scroll_target_name": "Document",
+                  "amount": 600,
+                  "max_pages": "{{read_pages}}",
+                  "stable_rounds": 3,
+                  "settle_ms": 1500
+                },
+                "field_defaults": {
+                  "record_type": "model",
+                  "location": "unavailable",
+                  "location_status": "reported",
+                  "requested_country_code": "{{country_code}}",
+                  "messages_filter": "exclude",
+                  "age_screened": true,
+                  "age_screening_source": "verified_native_filter",
+                  "requested_min_age": "{{min_age}}",
+                  "requested_max_age": "{{max_age}}"
+                },
+                "field_rewrites": {
+                  "location_status": {
+                    "from": "location",
+                    "when_field": "location",
+                    "equals": "unavailable",
+                    "pattern": "^unavailable$",
+                    "replacement": "unverified"
+                  }
+                }
+              }
+            ],
+            "timeout_ms": 10000,
+            "entry_query": {
+              "profile": "model",
+              "country": "{{country_code}}",
+              "gender": "{{gender_code}}",
+              "do_postcode_search": "0",
+              "location": "",
+              "town": "",
+              "messages": "exclude",
+              "searchType": "members",
+              "order": "lastonline",
+              "lage": "{{min_age}}",
+              "hage": "{{max_age}}"
+            }
+          },
+          "action": "inspect_views",
+          "locator": {}
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "attribute": "href",
+              "type": "url",
+              "required": true
+            },
+            "location_mode": {
+              "selector": "#do_postcode_search",
+              "attribute": "value",
+              "type": "text",
+              "required": true
+            },
+            "country_code": {
+              "selector": "select[name=\"country\"] option[selected]",
+              "attribute": "value",
+              "type": "text",
+              "required": true
+            },
+            "gender_code": {
+              "selector": "select[name=\"gender\"] option[selected]",
+              "attribute": "value",
+              "type": "text",
+              "required": false
+            },
+            "messages_filter": {
+              "selector": "select[name=\"messages\"] option[selected]",
+              "attribute": "value",
+              "type": "text",
+              "required": true
+            },
+            "profile": {
+              "selector": "select[name=\"profile\"] option[selected]",
+              "attribute": "value",
+              "type": "text",
+              "required": true
+            },
+            "region": {
+              "selector": "select[name=\"location\"] option[selected]:not([value=\"\"])",
+              "attribute": "value",
+              "type": "text",
+              "required": false,
+              "many": true
+            },
+            "town": {
+              "selector": "select[name=\"town\"] option[selected]:not([value=\"\"])",
+              "attribute": "value",
+              "type": "text",
+              "required": false,
+              "many": true
+            },
+            "country_label": {
+              "selector": "select[name=\"country\"] option[selected]",
+              "type": "text",
+              "required": true
+            },
+            "min_age": {
+              "selector": "select[name=\"lage\"] option[selected]",
+              "type": "integer",
+              "attribute": "value",
+              "required": true
+            },
+            "max_age": {
+              "selector": "select[name=\"hage\"] option[selected]",
+              "type": "integer",
+              "attribute": "value",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "location_mode": {
+              "equals_exact": "0"
+            },
+            "country_code": {
+              "equals_exact": "{{country_code}}",
+              "matches": "^[A-Z]{2}$"
+            },
+            "gender_code": {
+              "equals_exact": "{{gender_code}}",
+              "matches": "^(F|M)$"
+            },
+            "messages_filter": {
+              "equals_exact": "exclude"
+            },
+            "profile": {
+              "equals_exact": "model"
+            },
+            "region": {
+              "equals_set": []
+            },
+            "town": {
+              "equals_set": []
+            },
+            "min_age": {
+              "equals": "{{min_age}}",
+              "greater_than_or_equal": 18,
+              "less_than_or_equal": "{{max_age}}"
+            },
+            "max_age": {
+              "equals": "{{max_age}}",
+              "greater_than_or_equal": 18,
+              "less_than_or_equal": 98
+            }
+          }
+        }
+      ],
+      "output_schema": null
+    },
+    "prepare_initial_send": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{model_url}}"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 3000
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "readability": false,
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "model_id": {
+              "selector": "button:containsown(\"Message\")",
+              "type": "text",
+              "attribute": "onclick",
+              "pattern": "/message\\.php\\?user=([0-9]+)(?:&|[\\'\\\"])",
+              "required": true
+            },
+            "info_url": {
+              "selector": "a.sub-menu-link:containsown(\"Info\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "current_url": {
+              "equals_url": {
+                "url": "{{model_url}}"
+              }
+            },
+            "model_id": {
+              "equals_exact": "{{model_id}}",
+              "matches": "^[0-9]+$"
+            },
+            "info_url": {
+              "equals_url": {
+                "url": "{{model_url}}/info"
+              }
+            }
+          }
+        },
+        {
+          "action": "goto",
+          "url": "{{model_url}}/info"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 3000
+        },
+        {
+          "action": "extract",
+          "items": "div.col-lg-6:matchesOwn(^\\s*Age\\s*$) + div.col-lg-6",
+          "fields": {
+            "age": {
+              "selector": "",
+              "type": "integer",
+              "pattern": "^([0-9]{1,3})$",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "readability": false,
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "model_id": {
+              "selector": "button:containsown(\"Message\")",
+              "type": "text",
+              "attribute": "onclick",
+              "pattern": "/message\\.php\\?user=([0-9]+)(?:&|[\\'\\\"])",
+              "required": true
+            },
+            "model_name": {
+              "selector": "h1.MainTitle",
+              "type": "text",
+              "required": true
+            },
+            "model_role": {
+              "selector": "h1.MainTitle + p",
+              "type": "text",
+              "pattern": "\\b((?:Female|Male|Trans Female|Trans Male|Transgender|Non-binary|Non Binary|Other)\\s+Model)\\b",
+              "required": true
+            },
+            "profile_country_code": {
+              "selector": "h1.MainTitle + p a[href*=\"/search?\"]",
+              "type": "text",
+              "attribute": "href",
+              "pattern": "(?:[?&])country=([A-Z]{2})(?:&|$)",
+              "required": true
+            },
+            "message_history_label": {
+              "selector": "div.col-lg-6:matchesOwn(^\\s*Message History\\s*$) + div.col-lg-6 a",
+              "type": "text",
+              "required": true
+            },
+            "history_thread_url": {
+              "selector": "div.col-lg-6:matchesOwn(^\\s*Message History\\s*$) + div.col-lg-6 a",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "model_id": {
+              "equals_exact": "{{model_id}}"
+            },
+            "current_url": {
+              "equals_url": {
+                "url": "{{model_url}}/info"
+              }
+            },
+            "history_thread_url": {
+              "equals_url": {
+                "url": "https://www.adultfolio.com/message.php?user={{model_id}}"
+              }
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "age": {
+              "greater_than_or_equal": "{{min_age}}",
+              "less_than_or_equal": "{{max_age}}"
+            },
+            "model_role": {
+              "equals_exact": "{{expected_model_role}}"
+            },
+            "profile_country_code": {
+              "equals_exact": "{{country_code}}",
+              "matches": "^[A-Z]{2}$"
+            },
+            "message_history_label": {
+              "equals_exact": "No message history"
+            }
+          }
+        },
+        {
+          "action": "goto",
+          "url": "https://www.adultfolio.com/message.php?user={{model_id}}",
+          "locator": {}
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 2000
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": ".MainTitle a.a4"
+            },
+            {
+              "type": "selector_present",
+              "selector": ".note-editable.panel-body[contenteditable=\"true\"]"
+            },
+            {
+              "type": "selector_absent",
+              "selector": "#MessageResult[aria-busy=\"true\"],#messaging_btf[aria-busy=\"true\"],.loading-overlay[aria-busy=\"true\"]"
+            }
+          ],
+          "match": "all",
+          "timeout_ms": 20000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "recipient_url": {
+              "selector": ".MainTitle a.a4",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "thread_class": {
+              "selector": "#MessageResult",
+              "type": "text",
+              "attribute": "class",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "recipient_url": {
+              "equals_url": {
+                "url": "{{model_url}}"
+              }
+            },
+            "thread_class": {
+              "equals_exact": "conversation-{{model_id}}"
+            }
+          }
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "prior_message_ids": {
+              "selector": "#MessageResult .messageContainer",
+              "type": "text",
+              "attribute": "id",
+              "many": true
+            },
+            "thread_text": {
+              "selector": "#MessageResult",
+              "type": "text"
+            },
+            "older_controls": {
+              "selector": "[onclick*=\"LoadOlderMessages\"],#MessageResult button,#MessageResult a",
+              "type": "text",
+              "many": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "prior_message_ids": {
+              "equals_set": []
+            },
+            "thread_text": {
+              "equals_exact": ""
+            },
+            "older_controls": {
+              "equals_set": []
+            }
+          }
+        },
+        {
+          "text": "{{message}}",
+          "action": "set_text",
+          "locator": {
+            "selector": ".note-editable.panel-body[contenteditable=\"true\"]"
+          },
+          "mode": "replace",
+          "newline_mode": "preserve"
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "composer_text": {
+              "selector": ".note-editable.panel-body[contenteditable=\"true\"]",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "pattern": "(?s)^\\s*(.*?)\\s*$"
+            },
+            "recipient_url": {
+              "selector": ".MainTitle a.a4",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "thread_class": {
+              "selector": "#MessageResult",
+              "type": "text",
+              "attribute": "class",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "composer_text": {
+              "equals_exact": "{{message}}"
+            },
+            "recipient_url": {
+              "equals_url": {
+                "url": "{{model_url}}"
+              }
+            },
+            "thread_class": {
+              "equals_exact": "conversation-{{model_id}}"
+            }
+          }
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "fields": {
+            "prior_message_ids": {
+              "selector": "#MessageResult .messageContainer",
+              "type": "text",
+              "attribute": "id",
+              "many": true
+            },
+            "thread_text": {
+              "selector": "#MessageResult",
+              "type": "text"
+            },
+            "older_controls": {
+              "selector": "[onclick*=\"LoadOlderMessages\"],#MessageResult button,#MessageResult a",
+              "type": "text",
+              "many": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "prior_message_ids": {
+              "equals_set": []
+            },
+            "thread_text": {
+              "equals_exact": ""
+            },
+            "older_controls": {
+              "equals_set": []
+            }
+          }
+        }
+      ]
+    },
+    "initial_send": {
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{model_url}}"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 3000
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "readability": false,
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "model_id": {
+              "selector": "button:containsown(\"Message\")",
+              "type": "text",
+              "attribute": "onclick",
+              "pattern": "/message\\.php\\?user=([0-9]+)(?:&|[\\'\\\"])",
+              "required": true
+            },
+            "info_url": {
+              "selector": "a.sub-menu-link:containsown(\"Info\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "current_url": {
+              "equals_url": {
+                "url": "{{model_url}}"
+              }
+            },
+            "model_id": {
+              "equals_exact": "{{model_id}}",
+              "matches": "^[0-9]+$"
+            },
+            "info_url": {
+              "equals_url": {
+                "url": "{{model_url}}/info"
+              }
+            }
+          }
+        },
+        {
+          "action": "goto",
+          "url": "{{model_url}}/info"
+        },
+        {
+          "action": "wait",
+          "duration_ms": 3000
+        },
+        {
+          "action": "extract",
+          "items": "div.col-lg-6:matchesOwn(^\\s*Age\\s*$) + div.col-lg-6",
+          "fields": {
+            "age": {
+              "selector": "",
+              "type": "integer",
+              "pattern": "^([0-9]{1,3})$",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "readability": false,
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "model_id": {
+              "selector": "button:containsown(\"Message\")",
+              "type": "text",
+              "attribute": "onclick",
+              "pattern": "/message\\.php\\?user=([0-9]+)(?:&|[\\'\\\"])",
+              "required": true
+            },
+            "model_name": {
+              "selector": "h1.MainTitle",
+              "type": "text",
+              "required": true
+            },
+            "model_role": {
+              "selector": "h1.MainTitle + p",
+              "type": "text",
+              "pattern": "\\b((?:Female|Male|Trans Female|Trans Male|Transgender|Non-binary|Non Binary|Other)\\s+Model)\\b",
+              "required": true
+            },
+            "profile_country_code": {
+              "selector": "h1.MainTitle + p a[href*=\"/search?\"]",
+              "type": "text",
+              "attribute": "href",
+              "pattern": "(?:[?&])country=([A-Z]{2})(?:&|$)",
+              "required": true
+            },
+            "message_history_label": {
+              "selector": "div.col-lg-6:matchesOwn(^\\s*Message History\\s*$) + div.col-lg-6 a",
+              "type": "text",
+              "required": true
+            },
+            "history_thread_url": {
+              "selector": "div.col-lg-6:matchesOwn(^\\s*Message History\\s*$) + div.col-lg-6 a",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "model_id": {
+              "equals_exact": "{{model_id}}"
+            },
+            "current_url": {
+              "equals_url": {
+                "url": "{{model_url}}/info"
+              }
+            },
+            "history_thread_url": {
+              "equals_url": {
+                "url": "https://www.adultfolio.com/message.php?user={{model_id}}"
+              }
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "age": {
+              "greater_than_or_equal": "{{min_age}}",
+              "less_than_or_equal": "{{max_age}}"
+            },
+            "model_role": {
+              "equals_exact": "{{expected_model_role}}"
+            },
+            "profile_country_code": {
+              "equals_exact": "{{country_code}}",
+              "matches": "^[A-Z]{2}$"
+            },
+            "message_history_label": {
+              "equals_exact": "No message history"
+            }
+          }
+        },
+        {
+          "action": "goto",
+          "url": "https://www.adultfolio.com/message.php?user={{model_id}}",
+          "locator": {}
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 2000
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": ".MainTitle a.a4"
+            },
+            {
+              "type": "selector_present",
+              "selector": ".note-editable.panel-body[contenteditable=\"true\"]"
+            },
+            {
+              "type": "selector_absent",
+              "selector": "#MessageResult[aria-busy=\"true\"],#messaging_btf[aria-busy=\"true\"],.loading-overlay[aria-busy=\"true\"]"
+            }
+          ],
+          "match": "all",
+          "timeout_ms": 20000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "recipient_url": {
+              "selector": ".MainTitle a.a4",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "thread_class": {
+              "selector": "#MessageResult",
+              "type": "text",
+              "attribute": "class",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "recipient_url": {
+              "equals_url": {
+                "url": "{{model_url}}"
+              }
+            },
+            "thread_class": {
+              "equals_exact": "conversation-{{model_id}}"
+            }
+          }
+        },
+        {
+          "action": "extract",
+          "items": "body",
+          "fields": {
+            "prior_message_ids": {
+              "selector": "#MessageResult .messageContainer",
+              "type": "text",
+              "attribute": "id",
+              "many": true
+            },
+            "thread_text": {
+              "selector": "#MessageResult",
+              "type": "text"
+            },
+            "older_controls": {
+              "selector": "[onclick*=\"LoadOlderMessages\"],#MessageResult button,#MessageResult a",
+              "type": "text",
+              "many": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "prior_message_ids": {
+              "equals_set": []
+            },
+            "thread_text": {
+              "equals_exact": ""
+            },
+            "older_controls": {
+              "equals_set": []
+            }
+          }
+        },
+        {
+          "text": "{{message}}",
+          "action": "set_text",
+          "locator": {
+            "selector": ".note-editable.panel-body[contenteditable=\"true\"]"
+          },
+          "mode": "replace",
+          "newline_mode": "preserve"
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "composer_text": {
+              "selector": ".note-editable.panel-body[contenteditable=\"true\"]",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "pattern": "(?s)^\\s*(.*?)\\s*$"
+            },
+            "recipient_url": {
+              "selector": ".MainTitle a.a4",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "thread_class": {
+              "selector": "#MessageResult",
+              "type": "text",
+              "attribute": "class",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "composer_text": {
+              "equals_exact": "{{message}}"
+            },
+            "recipient_url": {
+              "equals_url": {
+                "url": "{{model_url}}"
+              }
+            },
+            "thread_class": {
+              "equals_exact": "conversation-{{model_id}}"
+            }
+          }
+        },
+        {
+          "action": "observe_page",
+          "items": "body",
+          "fields": {
+            "prior_message_ids": {
+              "selector": "#MessageResult .messageContainer",
+              "type": "text",
+              "attribute": "id",
+              "many": true
+            },
+            "thread_text": {
+              "selector": "#MessageResult",
+              "type": "text"
+            },
+            "older_controls": {
+              "selector": "[onclick*=\"LoadOlderMessages\"],#MessageResult button,#MessageResult a",
+              "type": "text",
+              "many": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "assertions": {
+            "prior_message_ids": {
+              "equals_set": []
+            },
+            "thread_text": {
+              "equals_exact": ""
+            },
+            "older_controls": {
+              "equals_set": []
+            }
+          }
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "Send!",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "Send!",
+          "expected_effect": "message_send",
+          "confirm_consequence": "message_send",
+          "once_key": "reply:{{account_url}}:{{model_id}}:{{request_id}}",
+          "once_scope": "reply"
+        },
+        {
+          "action": "goto",
+          "url": "https://www.adultfolio.com/message.php?user={{model_id}}",
+          "locator": {}
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 2000
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": ".MainTitle a.a4"
+            },
+            {
+              "type": "selector_present",
+              "selector": ".note-editable.panel-body[contenteditable=\"true\"]"
+            },
+            {
+              "type": "selector_absent",
+              "selector": "#MessageResult[aria-busy=\"true\"],#messaging_btf[aria-busy=\"true\"],.loading-overlay[aria-busy=\"true\"]"
+            }
+          ],
+          "match": "all",
+          "timeout_ms": 20000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "recipient_url": {
+              "selector": ".MainTitle a.a4",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "thread_class": {
+              "selector": "#MessageResult",
+              "type": "text",
+              "attribute": "class",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "recipient_url": {
+              "equals_url": {
+                "url": "{{model_url}}"
+              }
+            },
+            "thread_class": {
+              "equals_exact": "conversation-{{model_id}}"
+            }
+          }
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "#MessageResult .messageContainer.message-modern-wrap:has(a.thumbnailPic[href$=\"{{account_profile_path}}\"])",
+          "fields": {
+            "saved_body": {
+              "selector": ".message-modern-body",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "pattern": "(?s)^\\s*(.*?)\\s*$"
+            },
+            "saved_message_id": {
+              "type": "number",
+              "attribute": "id",
+              "required": true,
+              "pattern": "^([0-9]+)$"
+            },
+            "saved_sender_url": {
+              "selector": "a.thumbnailPic",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "saved_sent_at": {
+              "selector": ".message-modern-meta .timeago",
+              "type": "text",
+              "attribute": "title",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "saved_body": {
+              "equals_exact": "{{message}}"
+            },
+            "saved_message_id": {
+              "greater_than": 0
+            },
+            "saved_sender_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "saved_sent_at": {
+              "matches": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}"
+            }
+          }
+        }
+      ]
+    },
+    "verify_initial_send": {
+      "read_only": true,
+      "steps": [
+        {
+          "action": "goto",
+          "url": "https://www.adultfolio.com/message.php?user={{model_id}}",
+          "locator": {}
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 2000
+        },
+        {
+          "action": "wait_for",
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": ".MainTitle a.a4"
+            },
+            {
+              "type": "selector_present",
+              "selector": ".note-editable.panel-body[contenteditable=\"true\"]"
+            },
+            {
+              "type": "selector_absent",
+              "selector": "#MessageResult[aria-busy=\"true\"],#messaging_btf[aria-busy=\"true\"],.loading-overlay[aria-busy=\"true\"]"
+            }
+          ],
+          "match": "all",
+          "timeout_ms": 20000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "recipient_url": {
+              "selector": ".MainTitle a.a4",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "thread_class": {
+              "selector": "#MessageResult",
+              "type": "text",
+              "attribute": "class",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "recipient_url": {
+              "equals_url": {
+                "url": "{{model_url}}"
+              }
+            },
+            "thread_class": {
+              "equals_exact": "conversation-{{model_id}}"
+            }
+          }
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "#MessageResult .messageContainer.message-modern-wrap:has(a.thumbnailPic[href$=\"{{account_profile_path}}\"])",
+          "fields": {
+            "saved_body": {
+              "selector": ".message-modern-body",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "pattern": "(?s)^\\s*(.*?)\\s*$"
+            },
+            "saved_message_id": {
+              "type": "number",
+              "attribute": "id",
+              "required": true,
+              "pattern": "^([0-9]+)$"
+            },
+            "saved_sender_url": {
+              "selector": "a.thumbnailPic",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "saved_sent_at": {
+              "selector": ".message-modern-meta .timeago",
+              "type": "text",
+              "attribute": "title",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "saved_body": {
+              "equals_exact": "{{message}}"
+            },
+            "saved_message_id": {
+              "greater_than": 0
+            },
+            "saved_sender_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            },
+            "saved_sent_at": {
+              "matches": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "schema_version": 1,
+  "defaults": {
+    "account_url": "https://www.adultfolio.com/YOUR_ACCOUNT_PROFILE",
+    "context_id": "YOUR_SAVED_COMPUTER_CONTEXT",
+    "max_duration_seconds": 600,
+    "max_items": 5000,
+    "max_pages": 250,
+    "page_url": "https://www.adultfolio.com/messaging.php",
+    "read_pages": 5,
+    "account_profile_path": "/YOUR_ACCOUNT_PROFILE",
+    "gender_code": "F",
+    "min_age": "18",
+    "max_age": "39",
+    "expected_model_role": "Female Model"
+  },
+  "browser": {
+    "context_id": "{{context_id}}",
+    "backend": "browserbase",
+    "persist": true,
+    "viewport": {
+      "height": 400,
+      "width": 1600
+    }
+  },
+  "allowed_hosts": [
+    "www.adultfolio.com"
+  ],
+  "limits": {
+    "max_pages": "{{max_pages}}",
+    "max_items": "{{max_items}}",
+    "max_duration_seconds": "{{max_duration_seconds}}",
+    "step_retries": 0
+  },
+  "steps": null,
+  "output_schema": null
+}

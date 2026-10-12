@@ -28,8 +28,11 @@ func (e *actorExecution) lockContext() error {
 }
 
 type actorOperation struct {
-	Steps        []actorStep       `json:"steps"`
-	OutputSchema map[string]string `json:"output_schema"`
+	Recovery     *actorRecoveryPolicy `json:"recovery,omitempty"`
+	Limits       *actorLimits         `json:"limits,omitempty"`
+	ReadOnly     bool                 `json:"read_only,omitempty"`
+	Steps        []actorStep          `json:"steps"`
+	OutputSchema map[string]string    `json:"output_schema"`
 }
 
 func selectOperation(def actorDefinition, name string) (actorDefinition, error) {
@@ -44,6 +47,11 @@ func selectOperation(def actorDefinition, name string) (actorDefinition, error) 
 		return def, fmt.Errorf("operation %q not found", name)
 	}
 	def.Operations = nil
+	def.ReadOnly = def.ReadOnly || op.ReadOnly
+	if op.Limits != nil {
+		def.Limits = *op.Limits
+	}
+	def.Recovery = op.Recovery
 	def.Steps = op.Steps
 	def.OutputSchema = op.OutputSchema
 	return def, nil
@@ -86,6 +94,25 @@ func (e *actorExecution) interact(step actorStep) error {
 				return errors.New("set_checked requires a boolean checked value")
 			}
 			args["checked"] = checked
+			if step.Labels != nil {
+				labels, err := actorLabelList(step.Labels)
+				if err != nil {
+					return err
+				}
+				for _, label := range labels {
+					if err := e.checkpoint(); err != nil {
+						return err
+					}
+					one := step
+					one.Labels = nil
+					one.Locator.Text = label
+					oneArgs := map[string]any{"session_id": e.session.SessionID, "action": step.Action, "checked": checked}
+					if err := e.dispatchSemantic(one, oneArgs); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
 		} else if len(step.Values) > 0 && step.Action == "select_option" {
 			args["values"] = step.Values
 		} else {
@@ -95,6 +122,8 @@ func (e *actorExecution) interact(step actorStep) error {
 	}
 	args := map[string]any{"session_id": e.session.SessionID, "action": step.Action}
 	switch step.Action {
+	case "type":
+		args["text"] = step.Text
 	case "key":
 		args["key"] = step.Key
 	case "scroll":
@@ -149,6 +178,15 @@ func (e *actorExecution) dispatchSemantic(step actorStep, args map[string]any) e
 	}
 	if shot.SOMRevision != nil {
 		args["som_revision"] = shot.SOMRevision
+	}
+	// Metadata names may differ in whitespace between SOM and the native
+	// accessible-name implementation. Keep the fresh target/revision and role
+	// guards; the actor must verify the saved selection independently.
+	if name := firstNonEmpty(match.AccessibleName, match.Text); name != "" && locator.TextSuffixPattern == "" {
+		args["expected_name"] = name
+	}
+	if match.Role != "" {
+		args["expected_role"] = match.Role
 	}
 	var out map[string]any
 	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, args), &out); err != nil {

@@ -25,3 +25,47 @@ All site-specific behavior belongs in user definitions. Examples are optional an
 For hosted video posts, enter `{{video_url}}` using semantic `fill` in the site's embed URL control. Use `wait_for` with `conditions: [{"type":"media_present"}]`, optional `match: "all"` and additional URL/text/selector/target conditions, and `timeout_ms` between 500 and 30000. Unmatched or timed-out waits fail the run before publishing. A successful media wait returns embed provider, iframe URL and thumbnail URL under `media`. See `examples/video-url-publisher.json`; video providers and site controls remain user inputs. For Bunny Stream, construct the player URL from `videoLibraryId` and `guid` returned by the Bunny integration: `https://iframe.mediadelivery.net/embed/{videoLibraryId}/{guid}`. No provider-specific defaults are installed.
 
 Form operations support semantic `set_checked` (`checked` boolean), `select_option` (`value` or `values`), and `set_temporal` (`value` ISO date or displayed time). Extraction accepts `readability: false` to include navigation/dialogs and an optional field `pattern` (Go regexp; first capture becomes the extracted value before numeric conversion). A consequential `click` may include `once_key: "{{request_id}}"`. The key is reserved durably for that actor and operation before the attempt. Completed or uncertain attempts block later attempts using the same key, including explicit run retries; inspect the original run before intentionally issuing a different key. Keys do not guarantee the external site committed a click; use outcome waits.
+
+For library/account duplicate inspection, prefer named `read_only:true`
+operations using `observe_page` and `inspect_views` (Actors 0.2.16+). The engine
+rejects write actions in read-only operations. Sites and account/tier rules
+remain in definitions and caller input. `observe_page` returns current URL,
+configured account fields, visible navigation with observed URLs and semantic
+control labels. Raw extraction retries a larger HTML budget and refuses
+remaining truncation.
+
+An `inspect_views` run must be completed AND return
+`coverage.inspection_complete=true`, `more_results_remaining=false`, all
+required checked views, matching context/account and complete per-view end
+(and configured total-count) evidence before claiming absence. Read the full
+dataset with cursors; the run preview is bounded. A failed, inaccessible,
+truncated, stalled or budget-limited scan preserves partial rows and incomplete
+coverage. An empty partial list never authorizes a new write. Reconcile any
+existing exact record URLs and prior accepted write runs independently. Never
+switch contexts or use a generic run to bypass a failed inspection.
+
+Collection reads can use `read_views.entry_query` for safely encoded URL parameters and `views[].use_entry_page:true` for a URL that is already the desired collection. `empty_text_pattern` verifies an empty-state message. Next-control pagination can use `end_when_next_absent:true` with an exact SOM name and DOM `next.selector`; absence must remain stable after the verified view is ready. Read pagination reveals controls through verified document scroll targets and revalidates `navigation_only` in Computer before clicking.
+
+Fields with `many:true` and a selector return ordered arrays, including attributes and resolved URLs. `assert_values.equals_exact` preserves case and whitespace; `greater_than` and `greater_than_field` can establish that a saved server record is newer than a pre-action baseline. See `examples/adultfolio-control.json` for an editable messaging workflow with identity, recipient, idempotency and saved-message checks.
+
+`greater_than_or_equal` and `less_than_or_equal` enforce inclusive numeric bounds against literal or runtime values; missing, nonnumeric and nonfinite values fail. A consequential click may set `once_scope` to share its durable `once_key` namespace with another operation in the same actor. Without it the namespace remains the operation name. Keep both the scope and logical request key stable across revisions and retries. A failed/uncertain send must be reconciled with a read-only saved-record verifier; an unsuccessful Computer result is never proof that no action occurred.
+
+Read-only operations may opt into `read_views.allow_partial:true` for a bounded page preview. Only a verified page/pagination bound can return a successful partial result; inaccessible views, identity mismatches, stalled pagination and truncation still fail. The output remains explicitly incomplete and cannot authorize a write or `select_record`. Pagination max_pages accepts a template, allowing caller-controlled page windows.
+
+Inspect a pinned actor with `actors_get(id, revision)`; use its returned `retrieved_revision` and operation names, not the latest actor description, when assessing support. A missing revision is a failure.
+
+A repair uses `actors_run_recover`, not a changed request/idempotency key. First inspect the failed run and explicitly review the replacement revision. Obtain a fresh complete read-only duplicate check using the replacement's configured recovery inspection operation in the original context, reading every dataset cursor. Pass `id`, `revision`, `reviewed:true` and `duplicate_check_run_id`. Unknown or successful original outcomes, consequence reservations, wrong contexts, incomplete/stale coverage or matching records block recovery; never bypass these checks. Recovery retains logical inputs and once keys and performs another fresh inspection as a linked child run before continuing.
+
+For a pinned named operation, call `actors_get(id=..., revision=..., operation=...)`.
+Read the complete compact operation and its shared execution settings; verify
+`retrieved_revision`, `complete` and `step_count`. Do not infer that an operation
+is absent from a large full-definition preview. A missing operation/revision or
+`incomplete-response` error must stop execution; never substitute the latest pin.
+
+For approved label aliases, `assert_values` accepts an exact `canonical_map`
+with `equals`/`equals_field`; preserve raw extracted labels, and inspect
+`assertion_evidence`. Unknown labels are errors. Never infer provider equivalence.
+Use `effect_phase:"prepare"` only on a guarded, acknowledged
+`open_configuration` click that opens a reversible dialog. Use `commit` on the
+guarded final consequential click. Inspect both progress flags and effects; a
+preparation guard is still not authorization for automatic retry/recovery.

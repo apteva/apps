@@ -139,6 +139,9 @@ type computerSOMScreenshot struct {
 }
 
 type setOfMarkTarget struct {
+	Effect         string `json:"effect"`
+	Dangerous      bool   `json:"dangerous"`
+	Loading        bool   `json:"loading"`
 	ID             string `json:"id"`
 	AccessibleName string `json:"accessible_name"`
 	Disabled       bool   `json:"disabled"`
@@ -828,8 +831,10 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: "GET", Pattern: "/runs/{id}", Handler: a.handleRunItem},
 		{Method: "POST", Pattern: "/runs/{id}/cancel", Handler: a.handleRunCancel},
 		{Method: "POST", Pattern: "/runs/{id}/retry", Handler: a.handleRunRetry},
+		{Method: "POST", Pattern: "/runs/{id}/recover", Handler: a.handleRunRecover},
 		{Method: "GET", Pattern: "/actors", Handler: a.handleActors},
 		{Method: "POST", Pattern: "/actors", Handler: a.handleActorSave},
+		{Method: "GET", Pattern: "/actors/{id}", Handler: a.handleActorGet},
 		{Method: "DELETE", Pattern: "/actors/{id}", Handler: a.handleActorDelete},
 		{Method: "POST", Pattern: "/actors/run", Handler: a.handleActorRun},
 		{Method: "GET", Pattern: "/schedules", Handler: a.handleActorSchedules},

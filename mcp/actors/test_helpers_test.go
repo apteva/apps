@@ -24,6 +24,7 @@ type fakeCall struct {
 }
 
 type fakePlatform struct {
+	readViewsResponse        func(string, map[string]any) map[string]any
 	crawlHTMLMinimumLimit    int
 	crawlHTMLAlwaysTruncated bool
 	tk.BasePlatformClient
@@ -103,6 +104,11 @@ func (p *fakePlatform) CallAppResult(app, tool string, in map[string]any, out an
 }
 
 func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]any {
+	if p.readViewsResponse != nil {
+		if r := p.readViewsResponse(app+"."+tool, in); r != nil {
+			return r
+		}
+	}
 	switch app + "." + tool {
 	case "computer.browser_open":
 		if u, ok := in["url"].(string); ok {

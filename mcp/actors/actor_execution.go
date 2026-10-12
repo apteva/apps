@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -27,33 +28,41 @@ import (
 var actorNumberPattern = regexp.MustCompile(`[-+]?\d[\d\s.,]*`)
 
 type actorExecution struct {
-	app            *App
-	ctx            *sdk.AppCtx
-	run            *actorQueuedRun
-	definition     actorDefinition
-	variables      map[string]any
-	deadline       time.Time
-	maxPages       int
-	maxItems       int
-	retries        int
-	session        *browserSession
-	items          []map[string]any
-	pageCount      int
-	trace          []map[string]any
-	media          []map[string]any
-	effects        []map[string]any
-	lastExtract    *actorStep
-	currentURL     string
-	startedAt      time.Time
-	workerCtx      context.Context
-	screenshot     *artifactSummary
-	datasetJSONL   *artifactSummary
-	datasetCSV     *artifactSummary
-	traceArtifact  *artifactSummary
-	datasetBytes   int
-	datasetFull    bool
-	selectedPreset string
-	crawl          *crawlDefinition
+	lastStartedStep      int
+	completedSteps       int
+	commitAttempted      bool
+	preparationAttempted bool
+	assertionEvidence    []map[string]any
+	recoveryCheck        map[string]any
+	coverage             *actorReadCoverage
+	app                  *App
+	ctx                  *sdk.AppCtx
+	run                  *actorQueuedRun
+	definition           actorDefinition
+	variables            map[string]any
+	deadline             time.Time
+	maxPages             int
+	maxItems             int
+	retries              int
+	session              *browserSession
+	items                []map[string]any
+	pageCount            int
+	trace                []map[string]any
+	media                []map[string]any
+	effects              []map[string]any
+	lastExtract          *actorStep
+	lastValues           map[string]any
+	currentURL           string
+	startedAt            time.Time
+	workerCtx            context.Context
+	screenshot           *artifactSummary
+	datasetJSONL         *artifactSummary
+	datasetCSV           *artifactSummary
+	traceArtifact        *artifactSummary
+	datasetBytes         int
+	datasetFull          bool
+	selectedPreset       string
+	crawl                *crawlDefinition
 }
 
 func (a *App) toolActorRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -68,15 +77,8 @@ func (a *App) toolActorRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if !rec.Enabled {
 		return nil, errors.New("actor is disabled")
 	}
-	if revision := intArg(args, "revision"); revision > 0 && revision != rec.Revision {
-		var definition string
-		if err := ctx.AppDB().QueryRow(`SELECT definition_json FROM actors_versions WHERE project_id=? AND actor_id=? AND revision=?`, projectID(ctx), rec.ID, revision).Scan(&definition); err != nil {
-			return nil, fmt.Errorf("actor revision not found: %w", err)
-		}
-		if err := json.Unmarshal([]byte(definition), &rec.Definition); err != nil {
-			return nil, err
-		}
-		rec.Revision = revision
+	if err := loadActorRevision(ctx, rec, intArg(args, "revision")); err != nil {
+		return nil, err
 	}
 	operation := firstNonEmpty(stringArg(args, "operation"), "run")
 	selected, err := selectOperation(rec.Definition, operation)
@@ -375,7 +377,11 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 		}
 		_, _ = ctx.AppDB().Exec(`DELETE FROM actors_context_locks WHERE project_id=? AND run_id=?`, projectID(ctx), queued.ID)
 	}()
-	out, runErr := exec.runSteps()
+	var out map[string]any
+	runErr := exec.recoveryPrecheck()
+	if runErr == nil {
+		out, runErr = exec.runSteps()
+	}
 	var requested sql.NullTime
 	if err := ctx.AppDB().QueryRow(`SELECT cancel_requested_at FROM actors_runs WHERE id=? AND project_id=?`, queued.ID, projectID(ctx)).Scan(&requested); err == nil && requested.Valid {
 		runErr = errActorCancelled
@@ -412,7 +418,18 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 	out["page_count"] = exec.pageCount
 	out["items"] = previewActorItems(exec.items)
 	out["trace_preview"] = previewActorTrace(exec.trace)
+	out["execution_progress"] = map[string]any{"last_started_step": exec.lastStartedStep, "completed_steps": exec.completedSteps, "commit_attempted": exec.commitAttempted, "preparation_attempted": exec.preparationAttempted}
+	if exec.recoveryCheck != nil {
+		out["recovery_precheck"] = exec.recoveryCheck
+	}
+	if len(exec.assertionEvidence) > 0 {
+		out["assertion_evidence"] = exec.assertionEvidence
+	}
 	out["current_url"] = exec.currentURL
+	if exec.coverage != nil {
+		out["coverage"] = exec.coverage
+		out["inspection_complete"] = exec.coverage.Complete
+	}
 	if len(exec.media) > 0 {
 		out["media"] = exec.media
 	}
@@ -510,7 +527,7 @@ func newActorExecution(workerCtx context.Context, app *App, ctx *sdk.AppCtx, run
 		retries = clampInt(templateInt(rendered.Limits.StepRetries), 0, 10)
 	}
 	now := time.Now().UTC()
-	return &actorExecution{app: app, ctx: ctx, run: run, definition: rendered, deadline: now.Add(time.Duration(maxSeconds) * time.Second), maxPages: maxPages, maxItems: maxItems, retries: retries, startedAt: now, workerCtx: workerCtx, items: []map[string]any{}, trace: []map[string]any{}, selectedPreset: runInput.Preset, crawl: rendered.Crawl}, nil
+	return &actorExecution{app: app, ctx: ctx, run: run, definition: rendered, variables: vars, deadline: now.Add(time.Duration(maxSeconds) * time.Second), maxPages: maxPages, maxItems: maxItems, retries: retries, startedAt: now, lastStartedStep: -1, workerCtx: workerCtx, items: []map[string]any{}, trace: []map[string]any{}, lastValues: map[string]any{}, selectedPreset: runInput.Preset, crawl: rendered.Crawl}, nil
 }
 
 func actorBrowserAudit(browser actorBrowser) map[string]any {
@@ -536,11 +553,22 @@ func (e *actorExecution) runSteps() (map[string]any, error) {
 			return nil, err
 		}
 		step := e.definition.Steps[index]
+		e.lastStartedStep = index
+		if step.EffectPhase == "prepare" {
+			e.preparationAttempted = true
+		} else if step.OnceKey != "" || step.ConfirmConsequence != "" || consequentialActorStep(step) {
+			e.commitAttempted = true
+		}
+		// Persist before dispatch so a worker crash cannot leave stale evidence
+		// claiming that the next consequential control was never reached.
+		if err := e.persistProgress(fmt.Sprintf("starting step %d/%d: %s", index+1, len(e.definition.Steps), step.Action)); err != nil {
+			return nil, err
+		}
 		started := time.Now()
 		var err error
 		for attempt := 0; attempt <= e.retries; attempt++ {
 			err = e.runStep(step)
-			if err == nil || errors.Is(err, errActorCancelled) || !retryableActorError(err) || step.Action == "click" || step.Action == "key" || step.Action == "paginate" {
+			if err == nil || errors.Is(err, errActorCancelled) || !retryableActorError(err) || step.Action == "click" || step.Action == "key" || step.Action == "paginate" || step.Action == "inspect_views" {
 				break
 			}
 			if attempt < e.retries {
@@ -556,6 +584,7 @@ func (e *actorExecution) runSteps() (map[string]any, error) {
 			return nil, err
 		}
 		e.addTrace(step.Action, "completed", "", map[string]any{"step": index, "duration_ms": time.Since(started).Milliseconds(), "item_count": len(e.items), "page_count": e.pageCount})
+		e.completedSteps = index + 1
 		e.persistProgress(fmt.Sprintf("step %d/%d: %s", index+1, len(e.definition.Steps), step.Action))
 		e.ctx.Emit("actor.run.progress", map[string]any{"run_id": e.run.ID, "step": index + 1, "step_count": len(e.definition.Steps), "action": step.Action, "item_count": len(e.items), "page_count": e.pageCount})
 	}
@@ -596,12 +625,34 @@ func retryableActorError(err error) bool {
 }
 
 func (e *actorExecution) runStep(step actorStep) error {
+	if (e.definition.ReadOnly || step.ReadOnly) && !readOnlyActorAction(step.Action) {
+		return errors.New("write action rejected in read_only operation")
+	}
 	switch step.Action {
+	case "inspect_views":
+		return e.inspectViews(*step.ReadViews)
+	case "observe_page":
+		return e.observePage(step)
 	case "goto":
-		return e.gotoURL(step.URL)
+		target := step.URL
+		if len(step.URLQuery) > 0 {
+			u, err := url.Parse(target)
+			if err != nil {
+				return err
+			}
+			q := u.Query()
+			for k, v := range step.URLQuery {
+				q.Set(k, v)
+			}
+			u.RawQuery = q.Encode()
+			target = u.String()
+		}
+		return e.gotoURL(target)
 	case "click":
 		return e.clickOnce(step)
-	case "fill", "set_text", "set_checked", "select_option", "set_temporal", "key", "scroll":
+	case "click_verified":
+		return e.clickVerified(step)
+	case "fill", "set_text", "set_checked", "select_option", "set_temporal", "type", "key", "scroll":
 		return e.interact(step)
 	case "upload_file":
 		return e.upload(step)
@@ -636,6 +687,10 @@ func (e *actorExecution) runStep(step actorStep) error {
 	case "extract":
 		e.lastExtract = &step
 		return e.extractPage(step)
+	case "select_record":
+		return e.selectRecord(step)
+	case "assert_values":
+		return e.assertValues(step)
 	case "paginate":
 		return e.paginate(step)
 	case "screenshot":
@@ -644,6 +699,170 @@ func (e *actorExecution) runStep(step actorStep) error {
 	default:
 		return fmt.Errorf("unsupported action %q", step.Action)
 	}
+}
+
+// clickVerified binds a semantic click to a value extracted immediately
+// before it. This prevents a broad CSS selector from silently selecting a
+// different control after the confirmation UI changes. The value is matched
+// exactly through Computer's SOM target resolver; coordinates are never used.
+func (e *actorExecution) clickVerified(step actorStep) error {
+	if e.lastValues == nil {
+		return errors.New("click_verified requires a preceding extract")
+	}
+	raw, ok := e.lastValues[step.VerifiedField]
+	if !ok || strings.TrimSpace(stringFromAny(raw)) == "" {
+		return fmt.Errorf("verified field %q was not extracted", step.VerifiedField)
+	}
+	step.Locator = actorLocator{Text: stringFromAny(raw), Exact: true, SOMOnly: true}
+	return e.clickOnce(step)
+}
+
+func (e *actorExecution) assertValues(step actorStep) error {
+	if e.lastValues == nil {
+		return errors.New("assert_values requires a preceding extract")
+	}
+	for field, assertion := range step.Assertions {
+		actual, ok := e.lastValues[field]
+		if !ok {
+			return fmt.Errorf("assertion field %q was not extracted", field)
+		}
+		if assertion.EqualsExact != nil && !reflect.DeepEqual(actual, assertion.EqualsExact) {
+			return fmt.Errorf("exact assertion failed for %q", field)
+		}
+		if assertion.GreaterThan != nil {
+			a, aok := actorNumber(actual)
+			b, bok := actorNumber(assertion.GreaterThan)
+			if !aok || !bok || a <= b {
+				return fmt.Errorf("assertion %q must exceed the supplied baseline", field)
+			}
+		}
+		if assertion.GreaterThanField != "" {
+			a, aok := actorNumber(actual)
+			b, bok := actorNumber(e.lastValues[assertion.GreaterThanField])
+			if !aok || !bok || a <= b {
+				return fmt.Errorf("assertion %q must be greater than %q", field, assertion.GreaterThanField)
+			}
+		}
+		for _, bound := range []struct {
+			value   any
+			minimum bool
+		}{{assertion.GreaterThanOrEqual, true}, {assertion.LessThanOrEqual, false}} {
+			if bound.value == nil {
+				continue
+			}
+			a, aok := actorNumber(actual)
+			b, bok := actorNumber(bound.value)
+			if !aok || !bok || math.IsNaN(a) || math.IsNaN(b) || math.IsInf(a, 0) || math.IsInf(b, 0) || (bound.minimum && a < b) || (!bound.minimum && a > b) {
+				return fmt.Errorf("numeric bound assertion failed for %q", field)
+			}
+		}
+		if assertion.EqualsURL != nil {
+			if err := assertion.EqualsURL.compare(stringFromAny(actual)); err != nil {
+				return fmt.Errorf("assertion failed for %q: %w", field, err)
+			}
+		}
+		if assertion.Matches != "" && !regexp.MustCompile(assertion.Matches).MatchString(stringFromAny(actual)) {
+			return fmt.Errorf("assertion pattern failed for %q", field)
+		}
+		if assertion.Equals != nil {
+			if err := e.compareAssertionValues(field, actual, assertion.Equals, assertion); err != nil {
+				return err
+			}
+		}
+		if assertion.EqualsSet != nil {
+			if err := actorAssertLabelSet(actual, assertion.EqualsSet); err != nil {
+				return fmt.Errorf("assertion failed for %q: %w", field, err)
+			}
+		}
+		if assertion.EqualsField != "" {
+			reference, exists := e.lastValues[assertion.EqualsField]
+			if !exists {
+				return fmt.Errorf("assertion reference field %q was not extracted", assertion.EqualsField)
+			}
+			if err := e.compareAssertionValues(field, actual, reference, assertion); err != nil {
+				return err
+			}
+		}
+		if assertion.Contains != "" && !strings.Contains(strings.ToLower(stringFromAny(actual)), strings.ToLower(assertion.Contains)) {
+			return fmt.Errorf("assertion failed for %q: %v does not contain %q", field, actual, assertion.Contains)
+		}
+		if len(assertion.SumOf) > 0 || len(assertion.DifferenceOf) > 0 {
+			want, ok := actorNumber(actual)
+			if !ok {
+				return fmt.Errorf("assertion field %q is not numeric", field)
+			}
+			var total float64
+			if len(assertion.SumOf) > 0 {
+				for _, name := range assertion.SumOf {
+					value, exists := e.lastValues[name]
+					if !exists {
+						return fmt.Errorf("assertion operand %q was not extracted", name)
+					}
+					n, numeric := actorNumber(value)
+					if !numeric {
+						return fmt.Errorf("assertion operand %q is not numeric", name)
+					}
+					total += n
+				}
+			} else {
+				if len(assertion.DifferenceOf) != 2 {
+					return fmt.Errorf("assertion %q difference_of requires exactly two fields", field)
+				}
+				left, ok := actorNumber(e.lastValues[assertion.DifferenceOf[0]])
+				if !ok {
+					return fmt.Errorf("assertion operand %q is not numeric", assertion.DifferenceOf[0])
+				}
+				right, ok := actorNumber(e.lastValues[assertion.DifferenceOf[1]])
+				if !ok {
+					return fmt.Errorf("assertion operand %q is not numeric", assertion.DifferenceOf[1])
+				}
+				total = left - right
+			}
+			tolerance := assertion.Tolerance
+			if tolerance <= 0 {
+				tolerance = 0.005
+			}
+			if math.Abs(want-total) > tolerance {
+				return fmt.Errorf("assertion failed for %q: got %v, calculated %v", field, want, total)
+			}
+		}
+	}
+	return nil
+}
+
+func actorNumber(value any) (float64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case json.Number:
+		n, err := v.Float64()
+		return n, err == nil
+	default:
+		s := strings.TrimSpace(stringFromAny(value))
+		if s == "" {
+			return 0, false
+		}
+		n, err := strconv.ParseFloat(strings.ReplaceAll(strings.ReplaceAll(s, ",", ""), " ", ""), 64)
+		return n, err == nil
+	}
+}
+
+func actorValuesEqual(left, right any, tolerance float64) bool {
+	if a, ok := actorNumber(left); ok {
+		if b, ok := actorNumber(right); ok {
+			if tolerance <= 0 {
+				tolerance = 0.005
+			}
+			return math.Abs(a-b) <= tolerance
+		}
+	}
+	return strings.EqualFold(strings.TrimSpace(stringFromAny(left)), strings.TrimSpace(stringFromAny(right)))
 }
 
 func (e *actorExecution) gotoURL(target string) error {
@@ -814,6 +1033,9 @@ func (e *actorExecution) waitAfterInteraction() error {
 }
 
 func (e *actorExecution) finishInteraction(out map[string]any) error {
+	if success, explicit := out["success"].(bool); explicit && !success {
+		return errors.New("Computer interaction reported an unsuccessful outcome; inspect saved state before retrying")
+	}
 	e.currentURL = firstNonEmpty(stringFromAny(out["current_url"]), e.currentURL)
 	if err := e.waitAfterInteraction(); err != nil {
 		return err
@@ -860,8 +1082,15 @@ func (e *actorExecution) validateResolvedProxy(proxy browserProxyState) error {
 }
 
 func locatorMatches(locator actorLocator, text, role, selector string) bool {
-	if locator.Exact && locator.Text != "" && !strings.EqualFold(strings.TrimSpace(text), strings.TrimSpace(locator.Text)) {
-		return false
+	if locator.Exact && locator.Text != "" {
+		if locator.TextSuffixPattern != "" {
+			matcher, err := regexp.Compile("(?i)^" + regexp.QuoteMeta(strings.TrimSpace(locator.Text)) + "(?:" + locator.TextSuffixPattern + ")$")
+			if err != nil || !matcher.MatchString(strings.TrimSpace(text)) {
+				return false
+			}
+		} else if !strings.EqualFold(strings.TrimSpace(text), strings.TrimSpace(locator.Text)) {
+			return false
+		}
 	}
 	if locator.Text != "" && !strings.Contains(strings.ToLower(strings.TrimSpace(text)), strings.ToLower(strings.TrimSpace(locator.Text))) {
 		return false
@@ -901,6 +1130,9 @@ func (e *actorExecution) extractDOM() (*browserExtractResult, error) {
 }
 
 func (e *actorExecution) extractStepDOM(step actorStep) (*browserExtractResult, error) {
+	if step.Readability != nil && !*step.Readability {
+		return e.completeRawDOM()
+	}
 	options := map[string]any{"formats": []string{"html", "regions", "metadata"}, "max_chars": 200000, "wait_ms": 250}
 	if step.Readability != nil {
 		options["readability"] = *step.Readability
@@ -946,6 +1178,9 @@ func (e *actorExecution) extractPage(step actorStep) error {
 	if err != nil {
 		return err
 	}
+	if doc.Truncated {
+		return errors.New("rendered HTML extraction was truncated; inspection is incomplete")
+	}
 	root, err := html.Parse(strings.NewReader(doc.HTML))
 	if err != nil {
 		return fmt.Errorf("parse rendered HTML: %w", err)
@@ -955,6 +1190,12 @@ func (e *actorExecution) extractPage(step actorStep) error {
 		return fmt.Errorf("invalid items selector %q: %w", step.Items, err)
 	}
 	nodes := cascadia.QueryAll(root, matcher)
+	if step.MinItems > 0 && len(nodes) < step.MinItems {
+		return fmt.Errorf("extract selector %q matched %d items; minimum is %d", step.Items, len(nodes), step.MinItems)
+	}
+	if step.MaxItems > 0 && len(nodes) > step.MaxItems {
+		return fmt.Errorf("extract selector %q matched %d items; maximum is %d", step.Items, len(nodes), step.MaxItems)
+	}
 	pageItems := make([]map[string]any, 0, minInt(len(nodes), e.maxItems-len(e.items)))
 	for _, node := range nodes {
 		if len(e.items)+len(pageItems) >= e.maxItems {
@@ -979,6 +1220,11 @@ func (e *actorExecution) extractPage(step actorStep) error {
 		}
 		e.datasetBytes += len(encoded) + 1
 		pageItems = append(pageItems, item)
+	}
+	if len(pageItems) > 0 {
+		for key, value := range pageItems[len(pageItems)-1] {
+			e.lastValues[key] = value
+		}
 	}
 	if err := persistDatasetPage(e.ctx, e.run.ID, pageItems); err != nil {
 		return err
@@ -1045,17 +1291,26 @@ func (e *actorExecution) addTrace(action, status, message string, data map[strin
 	e.trace = append(e.trace, event)
 }
 
-func (e *actorExecution) persistProgress(message string) {
+func (e *actorExecution) persistProgress(message string) error {
 	progress := map[string]any{
 		"item_count": len(e.items), "page_count": e.pageCount, "current_url": e.currentURL,
 		"message": message, "updated_at": time.Now().UTC().Format(time.RFC3339),
+		"execution_progress": map[string]any{"last_started_step": e.lastStartedStep, "completed_steps": e.completedSteps, "commit_attempted": e.commitAttempted, "preparation_attempted": e.preparationAttempted},
 	}
 	if e.session != nil {
 		progress["session_id"] = e.session.SessionID
 		progress["backend"] = e.session.Backend
 	}
 	b, _ := json.Marshal(progress)
-	_, _ = e.ctx.AppDB().Exec(`UPDATE actors_runs SET output_json=?,summary=? WHERE id=? AND project_id=? AND status='running'`, string(b), nullIfEmpty(message), e.run.ID, projectID(e.ctx))
+	result, err := e.ctx.AppDB().Exec(`UPDATE actors_runs SET output_json=?,summary=? WHERE id=? AND project_id=? AND status='running'`, string(b), nullIfEmpty(message), e.run.ID, projectID(e.ctx))
+	if err != nil {
+		return fmt.Errorf("persist execution progress before dispatch: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil || n != 1 {
+		return errors.New("execution progress was not persisted for the running request")
+	}
+	return nil
 }
 
 func (e *actorExecution) storeCurrentScreenshot(title string) (*artifactSummary, error) {
@@ -1076,6 +1331,42 @@ func (e *actorExecution) storeCurrentScreenshot(title string) (*artifactSummary,
 func extractNodeItem(node *html.Node, fields map[string]actorField, baseURL string) (map[string]any, error) {
 	item := make(map[string]any, len(fields))
 	for name, field := range fields {
+		if field.OwnText && (field.Attribute != "" || strings.HasPrefix(field.Type, "attr:") || field.PreserveLineBreaks) {
+			return nil, fmt.Errorf("field %s: own_text cannot be combined with attributes or preserve_line_breaks", name)
+		}
+		if field.Many {
+			if field.Selector == "" {
+				return nil, fmt.Errorf("field %s many requires a selector", name)
+			}
+			matcher, err := cascadia.Compile(field.Selector)
+			if err != nil {
+				return nil, err
+			}
+			nodes := cascadia.QueryAll(node, matcher)
+			if len(nodes) == 0 && field.Required {
+				return nil, fmt.Errorf("required field %s was not found", name)
+			}
+			values := []any{}
+			inner := field
+			inner.Many = false
+			inner.All = false
+			inner.Selector = ""
+			inner.Required = false
+			for _, selected := range nodes {
+				one, err := extractNodeItem(selected, map[string]actorField{name: inner}, baseURL)
+				if err != nil {
+					return nil, err
+				}
+				if v, ok := one[name]; ok {
+					values = append(values, v)
+				}
+			}
+			if field.Required && len(values) == 0 {
+				return nil, fmt.Errorf("required field %s has no matching values", name)
+			}
+			item[name] = values
+			continue
+		}
 		target := node
 		if field.Selector != "" {
 			matcher, err := cascadia.Compile(field.Selector)
@@ -1095,10 +1386,33 @@ func extractNodeItem(node *html.Node, fields map[string]actorField, baseURL stri
 			raw, _ = htmlAttribute(target, field.Attribute)
 		} else if strings.HasPrefix(field.Type, "attr:") {
 			raw, _ = htmlAttribute(target, strings.TrimPrefix(field.Type, "attr:"))
+		} else if field.All && field.Selector != "" {
+			matcher, _ := cascadia.Compile(field.Selector) // already checked above
+			var parts []string
+			for _, selected := range cascadia.QueryAll(node, matcher) {
+				if field.OwnText {
+					parts = append(parts, htmlNodeOwnText(selected))
+				} else if field.PreserveLineBreaks {
+					parts = append(parts, htmlNodeTextLines(selected))
+				} else {
+					parts = append(parts, htmlNodeText(selected))
+				}
+			}
+			separator := field.Separator
+			if separator == "" {
+				separator = "\n"
+			}
+			raw = strings.Join(parts, separator)
+		} else if field.OwnText {
+			raw = htmlNodeOwnText(target)
+		} else if field.PreserveLineBreaks {
+			raw = htmlNodeTextLines(target)
 		} else {
 			raw = htmlNodeText(target)
 		}
-		raw = strings.TrimSpace(raw)
+		if !field.PreserveLineBreaks {
+			raw = strings.TrimSpace(raw)
+		}
 		if field.Pattern != "" {
 			pattern, err := regexp.Compile(field.Pattern)
 			if err != nil {
@@ -1128,6 +1442,17 @@ func extractNodeItem(node *html.Node, fields map[string]actorField, baseURL stri
 	return item, nil
 }
 
+// Own text excludes nested badges/controls without assuming their labels.
+func htmlNodeOwnText(node *html.Node) string {
+	var parts []string
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		if child.Type == html.TextNode {
+			parts = append(parts, strings.ReplaceAll(child.Data, "\ufeff", ""))
+		}
+	}
+	return strings.Join(strings.Fields(strings.Join(parts, " ")), " ")
+}
+
 func htmlNodeText(node *html.Node) string {
 	var b strings.Builder
 	var walk func(*html.Node)
@@ -1150,6 +1475,59 @@ func htmlNodeText(node *html.Node) string {
 	}
 	walk(node)
 	return strings.Join(strings.Fields(b.String()), " ")
+}
+
+// Preserve the text of editor blocks, including empty paragraphs and inline
+// formatting boundaries. The final block delimiter is structural, not copy.
+// Existing extraction keeps its whitespace-normalizing behavior by default.
+func htmlNodeTextLines(node *html.Node) string {
+	var b strings.Builder
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.TextNode {
+			b.WriteString(strings.ReplaceAll(n.Data, "\ufeff", ""))
+			return
+		}
+		if n.Type == html.ElementNode {
+			if n.Data == "script" || n.Data == "style" || n.Data == "noscript" {
+				return
+			}
+			if _, editorPlaceholder := htmlAttribute(n, "data-slate-zero-width"); editorPlaceholder {
+				return
+			}
+			if n.Data == "br" {
+				// A lone br is an empty editor block's placeholder. Its block
+				// boundary already contributes the appropriate newline.
+				block := n.Parent
+				for block != nil && block.Data != "p" && block.Data != "div" && block.Data != "li" {
+					block = block.Parent
+				}
+				if block == nil || strings.TrimSpace(htmlNodeText(block)) != "" {
+					b.WriteByte('\n')
+				}
+				return
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+		if n == node || n.Type != html.ElementNode {
+			return
+		}
+		switch n.Data {
+		case "p", "h1", "h2", "h3", "h4", "h5", "h6":
+			b.WriteByte('\n')
+		case "div", "li", "blockquote", "ul", "ol":
+			if b.Len() > 0 && !strings.HasSuffix(b.String(), "\n") {
+				b.WriteByte('\n')
+			}
+		}
+	}
+	walk(node)
+	if node.Data == "p" || node.Data == "li" || strings.HasPrefix(node.Data, "h") && len(node.Data) == 2 {
+		return b.String()
+	}
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 func htmlAttribute(node *html.Node, name string) (string, bool) {
@@ -1308,10 +1686,11 @@ func renderActorDefinition(def actorDefinition, vars map[string]any) (actorDefin
 		return def, err
 	}
 	b, _ = json.Marshal(rendered)
-	if err := json.Unmarshal(b, &def); err != nil {
+	var resolved actorDefinition
+	if err := json.Unmarshal(b, &resolved); err != nil {
 		return def, err
 	}
-	return def, validateActorDefinition(def)
+	return resolved, validateActorDefinition(resolved)
 }
 
 func renderActorValue(value any, vars map[string]any) (any, error) {

@@ -1,11 +1,15 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.2.8
+version: 0.2.32
 description: |
   Reusable browser actors with named operations, crawl queues, URL fan-out,
   revisioned definitions, structured datasets, durable run history, Jobs schedules,
-  semantic media, form controls, verified waits, and guarded consequential actions.
+  read-only multi-view coverage, visible navigation observations, semantic media,
+  form controls, verified waits, cardinality and arithmetic
+  assertions, exact approved label aliases, verified semantic clicks,
+  preparation/commit evidence, and guarded consequential actions.
+  Exact revision reads can return one complete operation with execution settings.
   Uses Computer directly for browser sessions and saved contexts.
   Web is independent and is not required. Site workflows are user definitions.
 icon: /ui/icon.svg
@@ -19,8 +23,8 @@ requires:
   permissions: [db.write.app, net.egress, platform.apps.call]
   apps:
     - name: computer
-      version: ">=0.7.92"
-      reason: Browser control, saved contexts, rendered extraction and screenshots.
+      version: ">=0.7.94"
+      reason: Browser control, saved contexts, raw extraction with navigation preserved and screenshots.
     - name: storage
       reason: Private dataset exports, screenshots and run traces.
     - name: jobs
@@ -33,7 +37,7 @@ provides:
     - name: actors_save
       description: Create or update a reusable actor definition and immutable revision.
     - name: actors_get
-      description: Get an actor by ID or name.
+      description: Get an actor by ID or name, optionally at an exact immutable revision.
     - name: actors_list
       description: List actor definitions in the current project.
     - name: actors_delete
@@ -46,6 +50,8 @@ provides:
       description: Cancel queued work or request cancellation of an active run.
     - name: actors_run_retry
       description: Explicitly repeat a run using its original definition and input snapshot.
+    - name: actors_run_recover
+      description: Recover a provably uncommitted failed run with a reviewed revision and fresh complete duplicate inspection, preserving publish-once guards.
     - name: actors_schedule
       description: Create a Jobs-owned schedule pinned to an actor revision and operation.
     - name: actors_schedules
@@ -91,7 +97,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.2.8
+    ref: actors/v0.2.32
     entry: mcp/actors
   port: 8080
   health_check: /health
