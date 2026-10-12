@@ -52,8 +52,11 @@ func validateEffectPhase(s actorStep) error {
 	case "": // Preserve conservative legacy commit classification.
 		return nil
 	case "prepare":
-		if (s.Action != "click" && s.Action != "click_verified") || s.ExpectedEffect != "open_configuration" || s.ConfirmConsequence != s.ExpectedEffect || s.OnceKey == "" {
-			return errors.New("prepare phase requires a guarded, acknowledged open_configuration click")
+		// Some native modal openers are classified as financial by Computer.
+		// Keep its acknowledgement and once guard; only evidence is staged.
+		validEffect := (s.ExpectedEffect == "open_configuration" && s.ConfirmConsequence == "") || (s.ExpectedEffect == "financial_action" && s.ConfirmConsequence == "financial_action")
+		if s.Action != "click" || !validEffect || s.OnceKey == "" {
+			return errors.New("prepare phase requires a guarded opener click with the platform's effect acknowledgement; click_verified cannot be preparation")
 		}
 	case "commit":
 		if (s.Action != "click" && s.Action != "click_verified") || !consequentialActorStep(s) || s.ExpectedEffect == "" || s.ConfirmConsequence != s.ExpectedEffect || s.OnceKey == "" {

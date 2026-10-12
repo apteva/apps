@@ -511,7 +511,7 @@ func validateActorDefinition(def actorDefinition) error {
 			if step.Locator.Text == "" && step.Locator.Role == "" && step.Locator.Selector == "" {
 				return fmt.Errorf("steps[%d].locator is required", i)
 			}
-			if step.OnceKey != "" && (step.Action != "click" || step.ExpectedEffect == "" || step.ConfirmConsequence != step.ExpectedEffect) {
+			if step.OnceKey != "" && (step.Action != "click" || step.ExpectedEffect == "" || (!(step.EffectPhase == "prepare" && step.ExpectedEffect == "open_configuration") && step.ConfirmConsequence != step.ExpectedEffect)) {
 				return fmt.Errorf("steps[%d].once_key requires a click with an acknowledged expected_effect", i)
 			}
 		case "observe_page", "extract":
@@ -562,7 +562,7 @@ func validateActorDefinition(def actorDefinition) error {
 			if strings.TrimSpace(step.VerifiedField) == "" {
 				return fmt.Errorf("steps[%d].verified_field is required for click_verified", i)
 			}
-			if step.OnceKey != "" && (step.ExpectedEffect == "" || step.ConfirmConsequence != step.ExpectedEffect) {
+			if step.OnceKey != "" && (step.ExpectedEffect == "" || (!(step.EffectPhase == "prepare" && step.ExpectedEffect == "open_configuration") && step.ConfirmConsequence != step.ExpectedEffect)) {
 				return fmt.Errorf("steps[%d].once_key requires an acknowledged expected_effect", i)
 			}
 		case "assert_url":

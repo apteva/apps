@@ -65,7 +65,9 @@ is absent from a large full-definition preview. A missing operation/revision or
 For approved label aliases, `assert_values` accepts an exact `canonical_map`
 with `equals`/`equals_field`; preserve raw extracted labels, and inspect
 `assertion_evidence`. Unknown labels are errors. Never infer provider equivalence.
-Use `effect_phase:"prepare"` only on a guarded, acknowledged
-`open_configuration` click that opens a reversible dialog. Use `commit` on the
+Use `effect_phase:"prepare"` only on a guarded opener click that opens a
+reversible dialog. Preserve Computer's effect classification: a financial
+opener still requires financial acknowledgement; an open_configuration click
+omits irreversible acknowledgement. `click_verified` cannot be preparation. Use `commit` on the
 guarded final consequential click. Inspect both progress flags and effects; a
 preparation guard is still not authorization for automatic retry/recovery.

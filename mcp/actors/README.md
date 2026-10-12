@@ -236,8 +236,11 @@ Exact-label comparisons can opt into `canonical_map` with `equals` or
 unknown labels fail closed. `assertion_evidence` retains original and canonical
 values. This does not infer relationships between providers.
 
-A guarded acknowledged `open_configuration` click may declare
+A guarded opener click may declare
 `effect_phase: "prepare"`. It sets `preparation_attempted`, while a guarded
 consequential `effect_phase: "commit"` sets `commit_attempted` before dispatch.
 Unannotated steps retain conservative legacy classification. Preparation guards
-still block automatic recovery/replay; financial actions cannot declare prepare.
+still block automatic recovery/replay. A financial modal opener retains its
+`financial_action` effect and identical acknowledgement; a normal
+`open_configuration` opener omits irreversible acknowledgement.
+`click_verified` cannot declare preparation.

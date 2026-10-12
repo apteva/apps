@@ -93,7 +93,7 @@ func TestPayoutCanonicalNoCommitPreflight(t *testing.T) {
 			for _, call := range plat.callsSnapshot() {
 				if call.tool == "computer_use" && call.args["action"] == "click" {
 					clicks++
-					if call.args["expected_effect"] != "open_configuration" {
+					if call.args["expected_effect"] != "financial_action" || call.args["confirm_consequence"] != "financial_action" {
 						t.Fatal("dispatched a final commit", call.args)
 					}
 				}
@@ -130,7 +130,7 @@ func TestCanonicalMapFailsClosed(t *testing.T) {
 	}
 }
 
-func TestPreparePhaseCannotHideFinancialCommit(t *testing.T) {
+func TestPreparePhaseRequiresAcknowledgedGuardedOpener(t *testing.T) {
 	for _, s := range []actorStep{{Action: "click_verified", EffectPhase: "prepare", ExpectedEffect: "financial_action", ConfirmConsequence: "financial_action", OnceKey: "commit"}, {Action: "click", EffectPhase: "prepare", ExpectedEffect: "open_configuration"}, {Action: "wait", EffectPhase: "prepare"}, {Action: "click", EffectPhase: "unknown"}} {
 		if validateEffectPhase(s) == nil {
 			t.Fatal("unsafe phase accepted", s)
@@ -145,9 +145,6 @@ func TestCommitPhaseProgressAndGuardRemainConservative(t *testing.T) {
 			plat.failAction = "click"
 			ctx, app := newTestCtx(t, plat)
 			effect := "financial_action"
-			if phase == "prepare" {
-				effect = "open_configuration"
-			}
 			rec := saveFixtureActor(t, ctx, app, map[string]any{"schema_version": 1, "allowed_hosts": []string{"example.com"}, "limits": map[string]any{"step_retries": 0}, "steps": []any{map[string]any{"action": "goto", "url": "https://example.com"}, map[string]any{"action": "click", "locator": map[string]any{"selector": "button"}, "effect_phase": phase, "expected_effect": effect, "confirm_consequence": effect, "once_key": "logical:effect"}}})
 			_, err := app.toolActorRun(ctx, map[string]any{"actor_id": rec.ID})
 			if err != nil {

@@ -171,8 +171,8 @@
         "som_only": true
       },
       "expected_text": "Withdraw",
-      "expected_effect": "open_configuration",
-      "confirm_consequence": "open_configuration",
+      "expected_effect": "financial_action",
+      "confirm_consequence": "financial_action",
       "once_key": "{{request_id}}:open",
       "effect_phase": "prepare"
     },
