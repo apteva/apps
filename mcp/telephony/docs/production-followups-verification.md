@@ -89,3 +89,32 @@ second, plus call-list queries and outbox flushing every 100 ms. It records
 process GC pause totals and a Go scheduling heartbeat. It is a different workload,
 not a like-for-like improvement claim. Media remains bounded when host scheduling
 fails; no finite queue can make several-second starvation inaudible.
+
+## Dedicated Linux mixed-load result
+
+[Machine-readable results](verification-0.12.12-load.json) from CI run
+[38241894072](https://github.com/apteva/apps/actions/runs/38241894072).
+Four Linux CPUs, GOMAXPROCS=4, 16 seconds per case, representative mixed workload.
+
+| Streams | Codec | CPU cores | Playback p99 | Audio/recording drops |
+|---|---|---:|---:|---:|
+| 32 | Portable | 1.02 | 0.70 ms | 0 |
+| 32 | Native/FEC | 1.14 | 0.80 ms | 0 |
+| 64 | Portable | 2.00 | 0.66 ms | 0 |
+| 64 | Native/FEC | 2.20 | 1.84 ms | 0 |
+
+All incoming packets arrived; all transmitted return packets were received.
+No replacement audio was generated. This does not measure an external browser,
+carrier signaling or Apteva/Core proxy workload and is not a capacity guarantee.
+
+Revised-workload macOS native/FEC trials still failed: 2,596.5 ms aggregate discard
+at 32 streams and 20,520.25 ms at 64. A profiled 32-stream repeat also failed.
+Its CPU samples concentrated in UDP system calls and thread scheduling, not
+browser diagnostic arithmetic or database work. That does not prove which
+component caused each scheduling delay. Both the failures and Linux passes are
+retained; the release does not claim interruption-free audio on every host.
+
+CI race selection is split into independent media/lifecycle jobs with the same
+combined test selection and long-replay exclusions. Each has a 20-minute test
+timeout: the preceding release's combined race job took 9m42s, close to Go's
+implicit 10-minute limit before adding these regressions.

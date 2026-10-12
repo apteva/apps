@@ -30,8 +30,6 @@ jobs:
         working-directory: mcp/telephony
       - run: go test -json ./... > /tmp/telephony-go.jsonl
         working-directory: mcp/telephony
-      - run: go test -race -run 'Test(SIPDialogTLS|SIPOutboundEarly|SIPOutboundFresh|SIPBYEFailure|NotificationOutbox|RTCIngressEvidence|ProxyCallIdentity|ProxyIdentityRetained|AutomaticOutboundSIP|TelephonyExclusiveActivation|SIPExclusiveActivation|SIPPlayback|GenericOutboundSIP|OutboundSIP|DIDWWOutbound|Telnyx.*SIP|TelnyxProvisioning|DirectSIPCarrierSetup|CarrierStream|CarrierEvidence|CarrierRecovery|SIPTelemetry|SIPAnsweredDialog|SIPMissingInitialACK|LocalSIP|LocalMediaSettings|SIPRuntimeTransport|SIPResourceCleanup|SIPNativeHold|SIPOutboundDTMF|SIPTransportSave|SIPRetirement|SIPTwilioDetach|SIPAIActivation|SIPRouteAccount|SIPExternalOffer|SelectingDirectSIP|LocalCloseTimeout)' -skip 'TestSIPPlayback(LongClockAndJitter|LongClockMatrix|ClockConcurrentLongCalls|ClockMultiCallComparison|ReleasedClockRegression|ClockSlowChangingJitter|ClockReportedReproduction)$' -count=1 .
-        working-directory: mcp/telephony
       - run: bun test --timeout 15000 frontend/tests/*.test.ts ui/*.test.ts
         working-directory: mcp/telephony
       - run: bunx --no-install playwright install --with-deps chromium
@@ -126,3 +124,31 @@ jobs:
           path: |
             /tmp/telephony-mixed-load.json
             /tmp/telephony-mixed-load.log
+  race:
+    name: Race checks (${{ matrix.group }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: media
+            pattern: 'Test(SIPPlayback|CarrierStream|CarrierEvidence|CarrierRecovery|SIPTelemetry)'
+          - group: lifecycle
+            pattern: 'Test(SIPDialogTLS|SIPOutboundEarly|SIPOutboundFresh|SIPBYEFailure|NotificationOutbox|RTCIngressEvidence|ProxyCallIdentity|ProxyIdentityRetained|AutomaticOutboundSIP|TelephonyExclusiveActivation|SIPExclusiveActivation|GenericOutboundSIP|OutboundSIP|DIDWWOutbound|Telnyx.*SIP|TelnyxProvisioning|DirectSIPCarrierSetup|SIPAnsweredDialog|SIPMissingInitialACK|LocalSIP|LocalMediaSettings|SIPRuntimeTransport|SIPResourceCleanup|SIPNativeHold|SIPOutboundDTMF|SIPTransportSave|SIPRetirement|SIPTwilioDetach|SIPAIActivation|SIPRouteAccount|SIPExternalOffer|SelectingDirectSIP|LocalCloseTimeout)'
+    env:
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/telephony/go.mod
+          cache-dependency-path: mcp/telephony/go.sum
+      - name: Focused race regressions
+        run: go test -race -timeout 20m -run '${{ matrix.pattern }}' -skip 'TestSIPPlayback(LongClockAndJitter|LongClockMatrix|ClockConcurrentLongCalls|ClockMultiCallComparison|ReleasedClockRegression|ClockSlowChangingJitter|ClockReportedReproduction)$' -count=1 -v . > /tmp/telephony-race.log 2>&1
+        working-directory: mcp/telephony
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: telephony-race-${{ matrix.group }}
+          path: /tmp/telephony-race.log
