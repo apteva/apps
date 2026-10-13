@@ -364,6 +364,14 @@ result.
 
 ## Continuous monitoring (v0.6.0)
 
+v0.7.6 runs routine database retention once per minute across all hosts, with
+bounded indexed deletion batches. Covering incident indexes keep cleanup and
+detail-budget checks away from recording payload pages. Incident count/detail
+limits still apply when incidents are imported, and SQLite enforces the same
+hard storage cap between maintenance passes. Sampling, peak aggregation and
+collector 0.6.5 are unchanged. Existing databases gain the indexes automatically.
+
+
 v0.6.5 adds plot-wide hover tooltips to the CPU/memory and I/O wait charts,
 including detailed spike recordings. Tooltips show the bucket timestamp,
 observed averages, and recorded peaks with their original timestamps. Arrow
