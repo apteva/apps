@@ -664,7 +664,8 @@ func (b *nativeBackend) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if !lock.TryLock() {
 		if tail == "inspect" {
-			if d, e := b.record(req.DeploymentID); e == nil && d.InstallID == req.InstallID && d.Generation == req.Generation && d.InstanceID == int64Arg(map[string]any{"id": req.Target.ID}, "id") && req.Target.InstallID == b.installID {
+			targetID, parseErr := strconv.ParseInt(req.Target.ID, 10, 64)
+			if d, e := b.record(req.DeploymentID); e == nil && parseErr == nil && d.InstallID == req.InstallID && d.Generation == req.Generation && d.InstanceID == targetID && req.Target.InstallID == b.installID {
 				writeNative(w, d.Execution)
 				return
 			}

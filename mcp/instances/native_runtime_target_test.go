@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNativeInspectTargetWithoutArtifact(t *testing.T) {
@@ -121,5 +122,38 @@ func TestNativeVerifiedArchiveHandoffPreservesChecksum(t *testing.T) {
 	req.Package.ArchiveSHA256 = strings.Repeat("b", 64)
 	if _, _, _, _, err := b.validate(req); err == nil {
 		t.Fatal("accepted changed archive checksum")
+	}
+}
+
+func TestNativeInspectPendingPreparationUsesNamespacedStringID(t *testing.T) {
+	b, f, req := newNativeTest(t)
+	gate := make(chan struct{})
+	f.prepareGate = gate
+	defer close(gate)
+	_, w := nativeCall(t, b, "prepare", req)
+	if w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	deadline := time.Now().Add(time.Second)
+	held := false
+	for time.Now().Before(deadline) {
+		if !b.lock(req.DeploymentID).TryLock() {
+			held = true
+			break
+		}
+		b.lock(req.DeploymentID).Unlock()
+		time.Sleep(time.Millisecond)
+	}
+	if !held {
+		t.Fatal("preparation did not acquire deployment lock")
+	}
+	out, w := nativeCall(t, b, "inspect", req)
+	if w.Code != 200 || out.State != "preparing" || out.Handle != req.DeploymentID {
+		t.Fatalf("%d %+v %s", w.Code, out, w.Body.String())
+	}
+	req.Target.ID = "not-a-number"
+	_, w = nativeCall(t, b, "inspect", req)
+	if w.Code == 200 {
+		t.Fatal("accepted invalid target")
 	}
 }
