@@ -237,6 +237,7 @@ export class TelephonyClient {
           try { options.onTiming?.({ trigger, fetchMs: performance.now() - started }); } catch {}
         }
       } catch (error) {
+        lastPush=-Infinity;
         if (!controller.signal.aborted) {
           const status = (error as { status?: unknown })?.status;
           try { options.onFailure?.({ trigger, fetchMs: performance.now() - started, status: typeof status === "number" ? status : undefined, error }); } catch {}

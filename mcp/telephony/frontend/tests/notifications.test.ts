@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect, spyOn } from "bun:test";
 import { AptevaClient } from "@apteva/web-sdk";
 import { TelephonyClient } from "../src/client";
 
@@ -88,4 +88,21 @@ test("healthy push and heartbeat suppress fast polls; stream failure restores fa
   await until(()=>f.listCount>=3);
   expect(f.peak).toBe(1);
  }finally{watch.close();}
+});
+
+
+test("failed overdue reconciliation retains bounded fallback instead of spinning",async()=>{
+ const f=fixture();const watch=f.client.watchCalls(()=>{}, {intervalMs:100});
+ let clock:ReturnType<typeof spyOn> | undefined;
+ try{
+  await until(()=>f.listCount===1&&f.controllers.length===1);
+  f.emit();await until(()=>f.listCount===2);
+  f.setListStatus(503);
+  const originalNow=performance.now.bind(performance);
+  clock=spyOn(performance,"now").mockImplementation(()=>originalNow()+31000);
+  const before=f.listCount;f.emit("heartbeat");
+  await Bun.sleep(60);expect(f.listCount).toBe(before+1);
+  await until(()=>f.listCount>=before+2);
+  expect(f.peak).toBe(1);
+ }finally{clock?.mockRestore();watch.close();}
 });

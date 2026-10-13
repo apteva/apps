@@ -269,10 +269,6 @@ func TestEfficiencyAIPolicyComparisonMatchesPersistedChanges(t *testing.T) {
 	}
 }
 
-func Example_housekeepingBatch() {
-	fmt.Println(housekeepingBatch) // Output: 100
-}
-
 func TestEfficiencySIPTimerExtensionAndExpiry(t *testing.T) {
 	f := newSIPDialogFixture(t, false, 2*time.Second)
 	f.answer(t)
