@@ -55,6 +55,7 @@ author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [global]
+min_apteva_version: "0.87.4"
 requires:
   permissions:
     - db.write.app
@@ -85,6 +86,7 @@ requires:
 provides:
   http_routes:
     - prefix: /
+    - prefix: /_apteva/runtime/backends/native
   mcp_tools:
     - { name: instance_list_providers, description: "List bound VPS provider connections and identify the configured default provider." }
     - { name: instance_create,       description: "Provision a new instance via a bound VPS provider. Args: name, provider? (configured default when omitted), region?, size?, image?, tags?." }
@@ -271,10 +273,16 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		}
 	})
 
+	if os.Getenv("APTEVA_INSTALL_ID") != "" {
+		if err := startNativeRuntime(ctx); err != nil {
+			return err
+		}
+	}
 	return startMonitoring(ctx)
 }
 
 func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
+	stopNativeRuntime(ctx)
 	stopMonitoring(ctx)
 	stopInstanceWorkers(ctx)
 	globalTunnelRegistry.closeAll()
@@ -291,6 +299,7 @@ func main() { sdk.Run(&App{}) }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
+		{Pattern: nativePrefix + "/", Handler: a.handleNativeRuntime},
 		{Pattern: "/api/instances-register", Handler: a.httpRegister},
 		{Pattern: "/api/instances", Handler: a.handleInstancesCollection},
 		{Pattern: "/api/instances/", Handler: a.handleInstanceItem},

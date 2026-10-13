@@ -520,3 +520,9 @@ go test ./...
 
 Real provider provisioning is opt-in and requires separately scoped test
 credentials; unit tests never create billable resources.
+
+## Native deployment backend
+
+Instances can implement Server-managed native Linux app deployments through
+`apteva.runtime-backend/v1`. See [the native backend contract and trial guide](runtime/README.md)
+for artifact staging, placement, ownership, private connectivity and supported scope.

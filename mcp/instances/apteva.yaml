@@ -33,7 +33,7 @@ icon_style: monochrome
 tags: [instances, hosts, vps, compute, infrastructure, object-storage, s3]
 
 scopes: [global]
-min_apteva_version: "0.10.0"
+min_apteva_version: "0.87.4"
 
 requires:
   permissions:
@@ -67,6 +67,7 @@ requires:
 provides:
   http_routes:
     - prefix: /
+    - prefix: /_apteva/runtime/backends/native
   mcp_tools:
     - name: instance_list_providers
       description: List the VPS provider connections bound to this Instances install and identify the default provider.
