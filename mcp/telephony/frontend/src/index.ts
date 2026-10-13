@@ -17,3 +17,5 @@ export type { ListenerDiagnostics, ListenerPlaybackOptions, ListenerAudioRuntime
 export type { MediaSessionEvent, MediaRecoveryContext, MediaAttachmentDiagnostics, MediaInitiatingAction } from "./media-lease";
 
 export type { OutboundSIPConfig, OutboundTransport, OutboundTransportRequest, OutboundTransportResult, OutboundSIPSetupOptions, OutboundNumberChoice, OutboundNumbersResult } from "./client";
+
+export type { TelephonyRuntimeMode } from "./runtime-transport";

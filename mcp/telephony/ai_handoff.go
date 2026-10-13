@@ -27,9 +27,14 @@ func (a *App) launchAIRecovery(key string, run func()) bool {
 	if a.decisionStopping || a.aiRecovering[key] {
 		return false
 	}
+	runtimeDone, err := a.runtimeBegin(false)
+	if err != nil {
+		return false
+	}
 	select {
 	case aiRecoverySlots <- struct{}{}:
 	default:
+		runtimeDone()
 		return false
 	}
 	if a.aiRecovering == nil {
@@ -38,6 +43,7 @@ func (a *App) launchAIRecovery(key string, run func()) bool {
 	a.aiRecovering[key] = true
 	a.decisionWG.Add(1)
 	go func() {
+		defer runtimeDone()
 		defer a.decisionWG.Done()
 		defer func() { a.dispatchMu.Lock(); delete(a.aiRecovering, key); a.dispatchMu.Unlock(); <-aiRecoverySlots }()
 		run()

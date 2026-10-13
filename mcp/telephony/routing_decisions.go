@@ -542,8 +542,14 @@ func (a *App) dispatchDecision(ctx *sdk.AppCtx, d decisionRecord) error {
 		<-decisionSlots
 		return nil
 	}
+	runtimeDone, runtimeErr := a.runtimeBegin(false)
+	if runtimeErr != nil {
+		<-decisionSlots
+		return runtimeErr
+	}
 	a.decisionWG.Add(1)
 	go func(d decisionRecord) {
+		defer runtimeDone()
 		defer a.decisionWG.Done()
 		defer func() { <-decisionSlots; a.wakeRouting(d.ProjectID); a.routingCapacityReleased() }()
 		response, reason := a.invokeDecision(ctx, d)

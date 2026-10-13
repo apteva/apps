@@ -131,7 +131,12 @@ func (a *App) enqueueImmediateAnswer(route *routeRow, callID string) {
 	}
 	routeCopy := *route
 	ctx := globalCtx.WithProject(route.ProjectID)
+	runtimeDone, err := a.runtimeBegin(false)
+	if err != nil {
+		return
+	}
 	go func() {
+		defer runtimeDone()
 		if err := a.answerImmediateCall(ctx, &routeCopy, callID); err != nil {
 			ctx.Logger().Warn("immediate inbound answer", "call", callID, "route", routeCopy.ID, "err", err)
 		}

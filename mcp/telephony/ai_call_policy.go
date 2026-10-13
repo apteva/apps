@@ -457,7 +457,13 @@ func (a *App) dispatchAIReminder(ctx *sdk.AppCtx, r *aiPolicyRuntime, token stri
 	default:
 		return
 	} // No unbounded goroutine queue.
+	runtimeDone, runtimeErr := a.runtimeBegin(false)
+	if runtimeErr != nil {
+		<-commands
+		return
+	}
 	go func() {
+		defer runtimeDone()
 		defer func() { <-commands }()
 		unlock := a.softphones.lockClaim(r.id)
 		row, err := a.db().findCall(r.id)

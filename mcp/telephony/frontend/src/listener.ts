@@ -74,7 +74,7 @@ export class HeadlessCallListener {
       this.lease = new MediaLease(session.lease_seconds!, () => this.client.renewListening(session!), (reason) => {
         if (current()) this.disconnected(reason === "revoked" ? "access_revoked" : "media_disconnected", callId, generation, reason === "expired" ? "Listener session expired" : "Listener access revoked");
       }, this.options.onSessionEvent, session.lease_started_ms);
-      await audio.start(this.client.listenerMediaURL(session),{coaching:session.coaching===true});
+      await audio.start(this.client.listenerMediaURL(session, this.audioOptions.mediaTransport),{coaching:session.coaching===true});
       if (!current()) audio.stop();
     } catch (error) {
       if (!current() || (session && this.session !== session)) return;

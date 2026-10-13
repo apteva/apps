@@ -73,9 +73,15 @@ func (a *App) sharedRealtimeWork(row *callRow, phase string, bounded bool, run f
 	}
 	flight := p.active[key]
 	if flight == nil {
+		runtimeDone, err := a.runtimeBegin(false)
+		if err != nil {
+			p.mu.Unlock()
+			return "", err
+		}
 		flight = &realtimePreparation{done: make(chan struct{}), row: *row}
 		p.active[key] = flight
 		go func() {
+			defer runtimeDone()
 			flight.err = run(&flight.row)
 			p.mu.Lock()
 			delete(p.active, key)

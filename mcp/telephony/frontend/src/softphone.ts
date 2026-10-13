@@ -398,7 +398,7 @@ export class HeadlessSoftphone {
             if (!current()) throw new Error("Audio connection no longer active");
             session = fresh; this.session = fresh; this.startLease(fresh);
             this.reportSessionEvent({timestamp:new Date().toISOString(),action:"media_session",outcome:"replaced",...recovery,previous_session_id,session_id:fresh.session_generation});
-            return this.client.mediaURL(fresh);
+            return this.client.mediaURL(fresh, this.audioOptions.mediaTransport);
           })();
           refreshing = pending; refreshingContext=recovery;
           const reset = () => { if (refreshing === pending) {refreshing = undefined;refreshingContext=undefined;} };
@@ -435,7 +435,7 @@ export class HeadlessSoftphone {
       this.startPolling();
       this.startLease(session);
       audio.setMuted(this.snapshot.muted);
-      await this.cancellable(audio.start(this.client.mediaURL(session), this.audioOptions), generation);
+      await this.cancellable(audio.start(this.client.mediaURL(session, this.audioOptions.mediaTransport), this.audioOptions), generation);
       this.assertCurrent(generation);
       if (!current()) throw new Error(this.snapshot.detail || "Audio connection ended during setup");
       audio.setMuted(this.snapshot.muted);

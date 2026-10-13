@@ -82,7 +82,9 @@ const server = Bun.serve<{ call: DemoCall; timer?: ReturnType<typeof setInterval
       const group = sockets.get(call.id) ?? new Set(); group.add(socket); sockets.set(call.id, group);
       call.status = "answered";
       socket.send(JSON.stringify({ type: "ready" }));
+      socket.send(JSON.stringify({ type: "call.status", call_id: call.id, status: call.status, direction: call.direction, hold_state: "active" }));
       socket.send(JSON.stringify({ type: "peer.connected" }));
+      socket.send(JSON.stringify({ type: "media.ready", call_id: call.id, connection_id: "demo-" + crypto.randomUUID(), bridge_generation: 1, revision: 1, occurred_at: new Date().toISOString(), reason: "carrier_connected" }));
       let tick = 0;
       socket.data.timer = setInterval(() => {
         // A quiet periodic tone tests speaker playback; microphone frames stay local and are discarded.

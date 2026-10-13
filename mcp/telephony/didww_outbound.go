@@ -218,7 +218,7 @@ func (g *sipGateway) startSIPOutbound(row *callRow, settings didwwSIPSettings, t
 	defer func() {
 		if workOwned {
 			cancel()
-			g.work.Done()
+			g.finishWork()
 		}
 	}()
 	localKey := []byte(nil)
@@ -289,7 +289,7 @@ func (g *sipGateway) startSIPOutbound(row *callRow, settings didwwSIPSettings, t
 	g.mu.Unlock()
 	current, findErr := g.app.db().findCall(row.ID)
 	identityErr := g.app.db().updateCarrierIdentity(row.ID, providerCallID, "")
-	go func() { defer g.work.Done(); s.waitAnswer() }()
+	go func() { defer g.finishWork(); s.waitAnswer() }()
 	workOwned = false
 	if findErr != nil || current == nil || isTerminalStatus(current.Status) || ctx.Err() != nil {
 		s.finish("local", nil)
