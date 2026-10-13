@@ -113,12 +113,13 @@ func (a *App) handlePublishingWidget(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	where, args := scope.postWhere()
-	var failed, approval, overdue int
+	var failed, approval, overdue, membership int
 	err = globalCtx.AppDB().QueryRow(`SELECT
 		COALESCE(SUM(CASE WHEN p.status IN ('failed','partial') THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN p.status='awaiting_audience_setup' THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN p.approval_status='pending' THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN p.status='scheduled' AND datetime(p.schedule_at)<datetime(?) THEN 1 ELSE 0 END),0)
-		FROM posts p WHERE `+where, append([]any{time.Now().UTC().Format(time.RFC3339)}, args...)...).Scan(&failed, &approval, &overdue)
+		FROM posts p WHERE `+where, append([]any{time.Now().UTC().Format(time.RFC3339)}, args...)...).Scan(&failed, &membership, &approval, &overdue)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -165,7 +166,7 @@ func (a *App) handlePublishingWidget(w http.ResponseWriter, r *http.Request) {
 		}
 		posts = append(posts, post)
 	}
-	writeJSON(w, map[string]any{"posts": posts, "total": total, "attention": map[string]int{"failed": failed, "approval": approval, "overdue": overdue}})
+	writeJSON(w, map[string]any{"posts": posts, "total": total, "attention": map[string]int{"failed": failed, "approval": approval, "overdue": overdue, "membership": membership}})
 }
 
 type widgetMetric struct {

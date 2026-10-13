@@ -157,7 +157,10 @@ func (a *App) recoverDeliveries(ctx *sdk.AppCtx) {
 			a.rollupPostStatus(ctx, p.post)
 		}()
 	}
-	rows, err = ctx.AppDB().Query(`SELECT DISTINCT t.post_id FROM post_targets t JOIN posts p ON p.id=t.post_id WHERE p.project_id=? AND t.status='publishing' AND COALESCE(t.provider_post_id,'')='' AND COALESCE(t.publish_operation_id,'')='' AND datetime(t.last_attempt_at)<datetime('now','-1 hour')`, projectScope(ctx))
+	// Interrupted membership uploads retain their session and can safely be
+	// probed on retry. Ordinary deliveries retain the existing unknown-outcome rule.
+	_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET status='failed',failure_code='upload_incomplete',retryable=1,last_error='Upload interrupted; retry will check the stored YouTube session.' WHERE status='publishing' AND COALESCE(youtube_upload_session,'')!='' AND datetime(last_attempt_at)<datetime('now','-1 hour') AND EXISTS(SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.project_id=?)`, projectScope(ctx))
+	rows, err = ctx.AppDB().Query(`SELECT DISTINCT t.post_id FROM post_targets t JOIN posts p ON p.id=t.post_id WHERE p.project_id=? AND ((t.status='publishing' AND COALESCE(t.provider_post_id,'')='' AND COALESCE(t.publish_operation_id,'')='' AND datetime(t.last_attempt_at)<datetime('now','-1 hour')) OR (t.status='failed' AND t.failure_code='upload_incomplete'))`, projectScope(ctx))
 	if err != nil {
 		return
 	}
