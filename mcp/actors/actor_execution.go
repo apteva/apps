@@ -28,6 +28,12 @@ import (
 var actorNumberPattern = regexp.MustCompile(`[-+]?\d[\d\s.,]*`)
 
 type actorExecution struct {
+	activeReadDiagnostic *actorReadDiagnostic
+	readConfig           *actorReadViews
+	readCheckpoint       *actorReadCheckpoint
+	readResume           *actorReadCheckpoint
+	retainedReadSession  bool
+	pendingReadRef       string
 	lastStartedStep      int
 	completedSteps       int
 	commitAttempted      bool
@@ -371,7 +377,10 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 		}
 	}()
 	defer func() {
-		if exec.session != nil {
+		if exec.pendingReadRef != "" && !exec.retainedReadSession {
+			_, _ = ctx.AppDB().Exec(`DELETE FROM actors_read_continuations WHERE ref=? AND project_id=?`, exec.pendingReadRef, projectID(ctx))
+		}
+		if exec.session != nil && !exec.retainedReadSession {
 			a.closeBrowser(ctx, exec.session.SessionID)
 			exec.session = nil
 		}
@@ -464,9 +473,19 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 		out["screenshot_artifact_id"] = exec.screenshot.ID
 		out["screenshot_url"] = exec.screenshot.URL
 	}
+	if status == "completed" {
+		cont, err := exec.saveReadContinuation()
+		if err != nil {
+			runErr = err
+			status = "failed"
+		} else if cont != nil {
+			out["continuation"] = cont
+		}
+	}
 	if err := finishActorRun(ctx, queued.ID, status, out, runErr); err != nil {
 		return err
 	}
+	exec.retainedReadSession = status == "completed" && exec.pendingReadRef != ""
 	topic := "actor.run." + status
 	payload := map[string]any{"run_id": queued.ID, "actor_id": queued.ActorID, "status": status, "item_count": len(exec.items), "page_count": exec.pageCount}
 	if runErr != nil {
@@ -1296,6 +1315,9 @@ func (e *actorExecution) persistProgress(message string) error {
 		"item_count": len(e.items), "page_count": e.pageCount, "current_url": e.currentURL,
 		"message": message, "updated_at": time.Now().UTC().Format(time.RFC3339),
 		"execution_progress": map[string]any{"last_started_step": e.lastStartedStep, "completed_steps": e.completedSteps, "commit_attempted": e.commitAttempted, "preparation_attempted": e.preparationAttempted},
+	}
+	if e.coverage != nil {
+		progress["coverage"] = e.coverage
 	}
 	if e.session != nil {
 		progress["session_id"] = e.session.SessionID

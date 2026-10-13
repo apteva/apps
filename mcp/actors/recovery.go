@@ -119,7 +119,7 @@ func guardedKeys(def actorDefinition) map[string]string {
 func checkRecoveryCoverage(output map[string]any, policy *actorRecoveryPolicy, contextID, identity string) error {
 	b, _ := json.Marshal(output["coverage"])
 	var cov actorReadCoverage
-	if json.Unmarshal(b, &cov) != nil || !cov.ReadOnly || !cov.Complete || cov.MoreRemaining || cov.ContextID != contextID || cov.IdentityURL != identity {
+	if json.Unmarshal(b, &cov) != nil || cov.ResumedFrom != "" || !cov.ReadOnly || !cov.Complete || cov.MoreRemaining || cov.ContextID != contextID || cov.IdentityURL != identity {
 		return errors.New("duplicate inspection must be complete, read-only and in the original creator context")
 	}
 	seen := map[string]bool{}

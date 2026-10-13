@@ -822,7 +822,7 @@ func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{{Name: "actor-runner", Schedule: "@every 2s", Run: a.runActorWorker}}
+	return []sdk.Worker{{Name: "actor-runner", Schedule: "@every 2s", Run: a.runActorWorker}, {Name: "read-continuation-cleanup", Schedule: "@every 1m", Run: a.cleanupReadContinuations}}
 }
 func (a *App) MCPTools() []sdk.Tool { return append(a.actorTools(), a.platformTools()...) }
 func (a *App) HTTPRoutes() []sdk.Route {

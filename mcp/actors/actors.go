@@ -427,6 +427,9 @@ func validateActorDefinition(def actorDefinition) error {
 		}
 		switch step.Action {
 		case "inspect_views":
+			if step.ReadViews != nil && step.ReadViews.ContinuationEnabled && (!def.ReadOnly || len(def.Steps) != 1) {
+				return errors.New("continuation reads require an entirely read-only operation with one inspect_views step")
+			}
 			if (!def.ReadOnly && !step.ReadOnly) || step.Optional {
 				return errors.New("inspect_views requires a read_only operation or step and cannot be optional")
 			}

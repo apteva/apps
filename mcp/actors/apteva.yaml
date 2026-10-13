@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.2.33
+version: 0.2.34
 description: |
   Reusable browser actors with named operations, crawl queues, URL fan-out,
   revisioned definitions, structured datasets, durable run history, Jobs schedules,
@@ -10,6 +10,7 @@ description: |
   assertions, exact approved label aliases, verified semantic clicks,
   preparation/commit evidence, and guarded consequential actions.
   Exact revision reads can return one complete operation with execution settings.
+  Read-only pagination supports bounded continuations and before/after diagnostics.
   Uses Computer directly for browser sessions and saved contexts.
   Web is independent and is not required. Site workflows are user definitions.
 icon: /ui/icon.svg
@@ -97,7 +98,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.2.33
+    ref: actors/v0.2.34
     entry: mcp/actors
   port: 8080
   health_check: /health

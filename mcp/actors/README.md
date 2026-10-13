@@ -244,3 +244,26 @@ still block automatic recovery/replay. A financial modal opener retains its
 `financial_action` effect and identical acknowledgement; a normal
 `open_configuration` opener omits irreversible acknowledgement.
 `click_verified` cannot declare preparation.
+
+Read-only single-view `inspect_views` operations can opt into
+`continuation_enabled:true`, `continuation_ref:"{{continuation_ref}}"` and
+`continuation_ttl_seconds:600`. They must be entirely read-only, use one
+entry-page next view and allow partial results. A bounded read returns
+`output.continuation.ref` and `expires_at`. Pass the ref in the next run's
+input at the same actor, immutable revision, operation and context. The live
+verified browser resumes at its existing page and emits new records; it does
+not reopen or scan the inbox again. References are single-use, scope-bound and
+expire; unavailable/changed sessions require an explicit fresh read. Read pages
+can change between batches. Close unused references with `actors_read_close`.
+A worker closes expired retained browsers. Provider expiry can happen earlier.
+
+Resumed coverage has `read_scope:incremental` and `resumed_from`; its dataset
+is a delta, not a new full-inbox snapshot. Keep earlier datasets when combining
+batches. Such results are rejected as recovery duplicate evidence.
+
+`coverage.views[].pagination` records exact dispatched targets, before/after
+IDs, new IDs, loading observations, errors and stopping reasons. A native
+`click_mode:selector` pagination option verifies a unique DOM element and its
+exact label, then Computer atomically checks the native target and navigation
+effect. SOM remains the default. No coordinates or scripted click bypasses are
+used. An unchanged page with a present control remains incomplete.

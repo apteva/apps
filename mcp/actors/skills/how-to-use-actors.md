@@ -71,3 +71,12 @@ opener still requires financial acknowledgement; an open_configuration click
 omits irreversible acknowledgement. `click_verified` cannot be preparation. Use `commit` on the
 guarded final consequential click. Inspect both progress flags and effects; a
 preparation guard is still not authorization for automatic retry/recovery.
+
+For incremental inbox reads, use the operation's opt-in continuation support.
+Pass `output.continuation.ref` back as `input.continuation_ref` at the same actor,
+revision, operation and context before expiry. This continues the live read;
+keep prior datasets because resumed rows are a delta. An expired, consumed,
+changed or unavailable cursor is an error; do not silently start again. Close
+unused refs with `actors_read_close`. Inspect `coverage.views[].pagination`
+for target identity, before/after IDs, loading, errors and stop_reason.
+`no_change_control_present` means incomplete history, never end-of-history.
