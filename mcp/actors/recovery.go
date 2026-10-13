@@ -31,6 +31,13 @@ func recoveryPolicyValid(p *actorRecoveryPolicy) error {
 	if len(p.RequiredViews) > 20 || len(p.MatchFields) > 20 {
 		return errors.New("recovery policy too large")
 	}
+	if p.Existing != nil {
+		for _, identity := range p.MatchFields {
+			if _, ok := p.Existing.ReviewedCopyFields[identity]; ok {
+				return errors.New("reviewed copy cannot change duplicate identity")
+			}
+		}
+	}
 	for k, v := range p.MatchFields {
 		if k == "" || v == "" {
 			return errors.New("empty recovery match field")
@@ -211,6 +218,9 @@ func (a *App) toolActorRunRecover(ctx *sdk.AppCtx, args map[string]any) (any, er
 	}
 	if err := recoveryPolicyValid(selected.Recovery); err != nil {
 		return nil, err
+	}
+	if _, supplied := args["reviewed_copy"]; supplied && selected.Recovery.Existing == nil {
+		return nil, errors.New("copy amendments require same-resource recovery")
 	}
 	oldRaw, _ := json.Marshal(original["definition_snapshot"])
 	// Recovery policy is supplied by the reviewed revision. Historical step,

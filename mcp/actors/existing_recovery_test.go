@@ -61,7 +61,7 @@ func TestExistingRecoveryIsBoundAndCannotCreate(t *testing.T) {
 	}
 }
 func TestPrepareExistingRecoveryPreservesOriginalInputs(t *testing.T) {
-	for _, mode := range []string{"good", "wrong_id", "extra", "reordered", "wrong_size", "not_ready", "wrong_copy", "wrong_context", "stale", "commit_attempted", "unknown_click", "unsafe_resume"} {
+	for _, mode := range []string{"good", "wrong_id", "extra", "reordered", "wrong_size", "not_ready", "wrong_copy", "wrong_context", "stale", "commit_attempted", "unknown_click", "unsafe_resume", "reviewed_copy", "unreviewed_copy", "undeclared_copy", "unobserved_copy"} {
 		t.Run(mode, func(t *testing.T) {
 			plat := newFakePlatform()
 			current := ""
@@ -72,18 +72,23 @@ func TestPrepareExistingRecoveryPreservesOriginalInputs(t *testing.T) {
 				case "computer.computer_use":
 					return map[string]any{"current_url": current}
 				case "computer.browser_extract":
-					return map[string]any{"rendered": true, "current_url": current, "html": `<pre>{"id":"42","title":"approved","published":null,"scheduled":null,"images":[{"id":"a","filename":"first.png","size":10,"state":"ready","type":"image"},{"id":"b","filename":"second.png","size":20,"state":"ready","type":"image"}]}</pre>`}
+					return map[string]any{"rendered": true, "current_url": current, "html": `<pre>{"id":"42","title":"approved","published":null,"scheduled":null,"body":"approved amended body","images":[{"id":"a","filename":"first.png","size":10,"state":"ready","type":"image"},{"id":"b","filename":"second.png","size":20,"state":"ready","type":"image"}]}</pre>`}
 				}
 				return nil
 			}
 			ctx, a := newTestCtx(t, plat)
 			p := &actorExistingRecovery{Bindings: fixtureRecoveryBindings(), ResumeOperation: "publish_draft", InspectionOperation: "inspect_draft", URLPattern: `^https://example\.com/c/posts/(?:[^/]+-)?([0-9]+)/edit$`, PreparationLocators: []actorLocator{{Text: "Image", Exact: true, SOMOnly: true}}}
+			p.ReviewedCopyFields = map[string]string{"post_body": "saved_body"}
 			policy := &actorRecoveryPolicy{InspectionOperation: "fetch_posts", RequiredViews: []string{"draft"}, MatchFields: map[string]string{"title": "post_title"}, Existing: p}
-			fields := map[string]actorJSONField{"is_draft": {Path: "/published", IsNull: true, Required: true}, "is_unscheduled": {Path: "/scheduled", IsNull: true, Required: true}, "post_id": {Path: "/id", Required: true}, "published_at": {Path: "/published", Required: true}, "scheduled_for": {Path: "/scheduled", Required: true}}
+			fields := map[string]actorJSONField{"saved_body": {Path: "/body", Required: true}, "is_draft": {Path: "/published", IsNull: true, Required: true}, "is_unscheduled": {Path: "/scheduled", IsNull: true, Required: true}, "post_id": {Path: "/id", Required: true}, "published_at": {Path: "/published", Required: true}, "scheduled_for": {Path: "/scheduled", Required: true}}
 			for _, pair := range []struct{ name, path string }{{"ids", "/id"}, {"filenames", "/filename"}, {"sizes", "/size"}, {"states", "/state"}, {"types", "/type"}} {
 				fields["attachment_"+pair.name] = actorJSONField{Path: "/images", Select: pair.path, Required: true, Unique: pair.name == "ids"}
 			}
+			copyMode := mode == "reviewed_copy" || mode == "unreviewed_copy" || mode == "undeclared_copy" || mode == "unobserved_copy"
 			inspect := actorOperation{ReadOnly: true, Steps: []actorStep{{Action: "goto", URL: "{{post_edit_url}}"}, {Action: "observe_json", JSONDocument: &actorJSONDocument{Selector: "pre", Fields: fields}}}}
+			if copyMode {
+				inspect.Steps = append(inspect.Steps, actorStep{Action: "assert_values", Assertions: map[string]actorAssertion{"saved_body": {EqualsExact: "{{post_body}}"}}})
+			}
 			publish := actorOperation{RecoveryOnly: true, Steps: []actorStep{{Action: "goto", URL: "{{post_edit_url}}"}, {Action: "click", OnceKey: "{{request_id}}", ExpectedEffect: "immediate_external_commit", ConfirmConsequence: "immediate_external_commit", Locator: actorLocator{Text: "Publish", Exact: true, SOMOnly: true}}}}
 			source := actorOperation{Recovery: policy, Steps: []actorStep{{Action: "goto", URL: "{{creator_url}}"}, {Action: "click", Locator: actorLocator{Text: "Image", Exact: true, SOMOnly: true}}, {Action: "wait_for", Conditions: []actorWaitCondition{{Type: "selector_present", Selector: ".old-wrapper"}}}, {Action: "click", OnceKey: "{{request_id}}", ExpectedEffect: "immediate_external_commit", ConfirmConsequence: "immediate_external_commit", Locator: actorLocator{Text: "Publish", Exact: true, SOMOnly: true}}}}
 			def := actorDefinition{SchemaVersion: 1, AllowedHosts: []string{"example.com"}, Browser: actorBrowser{ContextID: "ctx"}, Defaults: map[string]any{"creator_url": "https://example.com/c", "expected_creator_identity": "c", "tier_labels": []any{}}, Operations: map[string]actorOperation{"create": source, "inspect_draft": inspect, "publish_draft": publish}}
@@ -92,6 +97,9 @@ func TestPrepareExistingRecoveryPreservesOriginalInputs(t *testing.T) {
 			json.Unmarshal(b, &fixture)
 			rec := saveFixtureActor(t, ctx, a, fixture)
 			inputs := map[string]any{"request_id": "original-request", "post_title": "approved", "post_body": "exact body", "audience": "public", "tier_labels": []any{}, "post_id": "42", "post_edit_url": "https://example.com/c/posts/saved-42/edit"}
+			if copyMode {
+				inputs["post_body"] = "approved amended body"
+			}
 			q, err := a.toolActorRun(ctx, map[string]any{"actor_id": rec.ID, "operation": "inspect_draft", "input": inputs})
 			if err != nil {
 				t.Fatal(err)
@@ -103,6 +111,7 @@ func TestPrepareExistingRecoveryPreservesOriginalInputs(t *testing.T) {
 			if checked["status"] != "completed" {
 				t.Fatal(checked["error"])
 			}
+			inputs["post_body"] = "exact body"
 			delete(inputs, "post_id")
 			delete(inputs, "post_edit_url")
 			originalInput, _ := json.Marshal(map[string]any{"input": inputs, "operation": "create"})
@@ -145,8 +154,29 @@ func TestPrepareExistingRecoveryPreservesOriginalInputs(t *testing.T) {
 				outRaw, _ := json.Marshal(output)
 				ctx.AppDB().Exec(`UPDATE actors_runs SET output_json=? WHERE id=?`, string(outRaw), checkID)
 			}
-			result, resumed, binding, err := a.prepareExistingRecovery(ctx, map[string]any{"resource_check_run_id": checkID}, rec, original, old, selected, originalInput)
-			if mode != "good" {
+			args := map[string]any{"resource_check_run_id": checkID}
+			if copyMode {
+				args["reviewed"] = true
+				args["reviewed_copy"] = map[string]any{"post_body": "approved amended body"}
+			}
+			if mode == "unreviewed_copy" {
+				args["reviewed"] = false
+			}
+			if mode == "undeclared_copy" {
+				args["reviewed_copy"] = map[string]any{"audience": "paid"}
+			}
+			if mode == "unobserved_copy" {
+				ev["saved_body"] = "wrong"
+				for _, item := range output["items"].([]any) {
+					if _, ok := mapFromAny(item)["saved_body"]; ok {
+						mapFromAny(item)["saved_body"] = "wrong"
+					}
+				}
+				outRaw, _ := json.Marshal(output)
+				ctx.AppDB().Exec(`UPDATE actors_runs SET output_json=? WHERE id=?`, string(outRaw), checkID)
+			}
+			result, resumed, binding, err := a.prepareExistingRecovery(ctx, args, rec, original, old, selected, originalInput)
+			if mode != "good" && mode != "reviewed_copy" {
 				if err == nil {
 					t.Fatal("unsafe recovery accepted", mode)
 				}
@@ -159,6 +189,9 @@ func TestPrepareExistingRecoveryPreservesOriginalInputs(t *testing.T) {
 			json.Unmarshal(result, &recovered)
 			ri := mapFromAny(recovered["input"])
 			for k, v := range inputs {
+				if mode == "reviewed_copy" && k == "post_body" {
+					v = "approved amended body"
+				}
 				if !reflect.DeepEqual(ri[k], v) {
 					t.Fatal("original input changed", k)
 				}
@@ -211,4 +244,22 @@ func TestExistingRecoveryChecksFreshPageBeforeDispatch(t *testing.T) {
 
 func fixtureRecoveryBindings() actorRecoveryBindings {
 	return actorRecoveryBindings{ResourceIDField: "post_id", ResourceIDInput: "post_id", ResourceURLInput: "post_edit_url", CreatorURLInput: "creator_url", ExpectedIDsInput: "expected_attachment_ids", ExpectedNamesInput: "expected_attachment_filenames", ExpectedSizesInput: "expected_attachment_sizes", IDsField: "attachment_ids", NamesField: "attachment_filenames", SizesField: "attachment_sizes", StatesField: "attachment_states", TypesField: "attachment_types", ReadyValue: "ready", TypeValue: "image", DuplicateIDField: "id", DuplicateURLField: "edit_url", DuplicateStatusField: "status", DraftStatus: "draft", StateAssertions: map[string]actorAssertion{"is_draft": {EqualsExact: true}, "is_unscheduled": {EqualsExact: true}}}
+}
+
+func TestReviewedCopyRejectsIdentityAndMissingExactEvidence(t *testing.T) {
+	p := &actorRecoveryPolicy{InspectionOperation: "fetch_posts", RequiredViews: []string{"draft"}, MatchFields: map[string]string{"title": "post_title"}, Existing: &actorExistingRecovery{Bindings: fixtureRecoveryBindings(), ResumeOperation: "publish_draft", InspectionOperation: "inspect_draft", URLPattern: `^https://example\.com/posts/([0-9]+)/edit$`, ReviewedCopyFields: map[string]string{"post_body": "saved_body"}}}
+	args := map[string]any{"reviewed": true, "reviewed_copy": map[string]any{"post_body": "approved new body"}}
+	original := map[string]any{"post_body": "original body"}
+	if _, err := reviewedRecoveryCopy(args, p, original, actorDefinition{}); err == nil {
+		t.Fatal("missing exact assertion accepted")
+	}
+	p.Existing.ReviewedCopyFields["post_title"] = "saved_title"
+	if recoveryPolicyValid(p) == nil {
+		t.Fatal("duplicate identity amendment accepted")
+	}
+	delete(p.Existing.ReviewedCopyFields, "post_title")
+	p.Existing.ReviewedCopyFields["request_id"] = "request"
+	if validateExistingRecovery(p.Existing) == nil {
+		t.Fatal("request identity amendment accepted")
+	}
 }

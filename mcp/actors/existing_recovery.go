@@ -23,6 +23,7 @@ type actorExistingRecovery struct {
 	URLPattern          string                `json:"url_pattern"`
 	InspectionLocators  []actorLocator        `json:"inspection_locators,omitempty"`
 	PreparationLocators []actorLocator        `json:"preparation_locators,omitempty"`
+	ReviewedCopyFields  map[string]string     `json:"reviewed_copy_fields,omitempty"`
 }
 
 type actorRecoveryBindings struct {
@@ -69,6 +70,18 @@ func validateExistingRecovery(p *actorExistingRecovery) error {
 	}
 	if !operationNamePattern.MatchString(p.ResumeOperation) || !operationNamePattern.MatchString(p.InspectionOperation) || len(p.PreparationLocators) > 10 || len(p.InspectionLocators) > 10 {
 		return errors.New("existing recovery requires named resume and inspection operations")
+	}
+	if len(p.ReviewedCopyFields) > 10 {
+		return errors.New("too many reviewed copy fields")
+	}
+	protected := map[string]bool{"request_id": true, "recovery_resource_id": true, "recovery_resource_url": true}
+	for _, k := range []string{p.Bindings.ResourceIDInput, p.Bindings.ResourceURLInput, p.Bindings.CreatorURLInput, p.Bindings.ExpectedIDsInput, p.Bindings.ExpectedNamesInput, p.Bindings.ExpectedSizesInput} {
+		protected[k] = true
+	}
+	for k, v := range p.ReviewedCopyFields {
+		if protected[k] || !operationNamePattern.MatchString(k) || !operationNamePattern.MatchString(v) {
+			return errors.New("reviewed copy fields must be literal unprotected input/evidence names")
+		}
 	}
 	r, err := regexp.Compile(p.URLPattern)
 	if err != nil || r.NumSubexp() != 1 {
@@ -185,12 +198,33 @@ func (a *App) prepareExistingRecovery(ctx *sdk.AppCtx, args map[string]any, rec 
 	if err != nil || ex.definition.Browser.ContextID != old.definition.Browser.ContextID {
 		return fail(errors.New("resource inspection context differs from original"))
 	}
+	copy, err := reviewedRecoveryCopy(args, selected.Recovery, old.variables, inspect)
+	if err != nil {
+		return fail(err)
+	}
 	for key, originalValue := range old.variables {
+		if amended, ok := copy[key]; ok {
+			originalValue = amended
+		}
 		if !reflect.DeepEqual(ex.variables[key], originalValue) {
 			return fail(fmt.Errorf("resource inspection changes original %s", key))
 		}
 	}
-	evidence := mapFromAny(mapFromAny(check["output"])["document_evidence"])
+	output := mapFromAny(check["output"])
+	for key, value := range copy {
+		field := p.ReviewedCopyFields[key]
+		observed := mapFromAny(output["document_evidence"])[field]
+		items, _ := output["items"].([]any)
+		for _, item := range items {
+			if v, ok := mapFromAny(item)[field]; ok {
+				observed = v
+			}
+		}
+		if !reflect.DeepEqual(observed, value) {
+			return fail(errors.New("resource inspection did not observe the exact reviewed copy"))
+		}
+	}
+	evidence := mapFromAny(output["document_evidence"])
 	if stringFromAny(evidence[b.ResourceIDField]) != match[1] || ex.variables[b.ResourceIDInput] != match[1] || !sameRecoveryResourceURL(p, stringFromAny(ex.variables[b.ResourceURLInput]), url) {
 		return fail(errors.New("resource inspection is not the original unscheduled draft"))
 	}
@@ -232,6 +266,9 @@ func (a *App) prepareExistingRecovery(ctx *sdk.AppCtx, args map[string]any, rec 
 	inputs[b.ExpectedSizesInput] = sizes
 	inputs["recovery_resource_id"] = match[1]
 	inputs["recovery_resource_url"] = url
+	for key, value := range copy {
+		inputs[key] = value
+	}
 	ri["input"] = inputs
 	resume, err := selectOperation(rec.Definition, p.ResumeOperation)
 	if err != nil {
@@ -243,6 +280,13 @@ func (a *App) prepareExistingRecovery(ctx *sdk.AppCtx, args map[string]any, rec 
 	}
 	next, _ := json.Marshal(ri)
 	binding := map[string]any{"resource_id": match[1], "resource_url": url, "attachment_ids": ids, "id_field": b.ResourceIDField, "ids_field": b.IDsField, "resource_check_run_id": check["id"], "resume_operation": p.ResumeOperation}
+	if len(copy) > 0 {
+		amendments := map[string]any{}
+		for key, value := range copy {
+			amendments[key] = map[string]any{"from": old.variables[key], "to": value, "observed_field": p.ReviewedCopyFields[key]}
+		}
+		binding["reviewed_copy"] = amendments
+	}
 	return next, resume, binding, nil
 }
 func (e *actorExecution) guardExistingRecovery(step actorStep) error {
@@ -262,4 +306,48 @@ func sameRecoveryResourceURL(p *actorExistingRecovery, a, b string) bool {
 	r := regexp.MustCompile(p.URLPattern)
 	x, y := r.FindStringSubmatch(a), r.FindStringSubmatch(b)
 	return len(x) == 2 && len(y) == 2 && x[0] == a && y[0] == b && x[1] == y[1]
+}
+
+// Only declared copy fields may differ, and the immutable completed inspection
+// must assert their exact approved values. Identity/media/access inputs remain fixed.
+func reviewedRecoveryCopy(args map[string]any, policy *actorRecoveryPolicy, original map[string]any, inspection actorDefinition) (map[string]any, error) {
+	copy := map[string]any{}
+	raw, supplied := args["reviewed_copy"]
+	if !supplied {
+		return copy, nil
+	}
+	values, ok := raw.(map[string]any)
+	if !ok || len(values) == 0 || len(values) > 10 || !boolArgDefault(args, "reviewed", false) || policy == nil || policy.Existing == nil {
+		return nil, errors.New("reviewed copy requires explicit review and a same-resource policy")
+	}
+	for key, value := range values {
+		field, declared := policy.Existing.ReviewedCopyFields[key]
+		if !declared {
+			return nil, errors.New("copy amendment is not declared by the reviewed revision")
+		}
+		for _, identity := range policy.MatchFields {
+			if identity == key {
+				return nil, errors.New("copy amendment changes duplicate identity")
+			}
+		}
+		v, ok := value.(string)
+		_, wasString := original[key].(string)
+		if !ok || !wasString || len(v) == 0 {
+			return nil, errors.New("copy amendment must preserve a nonempty text input")
+		}
+		asserted := false
+		for _, step := range inspection.Steps {
+			if step.Action == "assert_values" {
+				a, found := step.Assertions[field]
+				if found && a.EqualsExact == "{{"+key+"}}" {
+					asserted = true
+				}
+			}
+		}
+		if !asserted {
+			return nil, errors.New("copy amendment lacks an exact inspected-value assertion")
+		}
+		copy[key] = v
+	}
+	return copy, nil
 }

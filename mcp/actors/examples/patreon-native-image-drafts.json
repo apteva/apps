@@ -36,7 +36,7 @@
                 "link_selector": "a[class*=\"subNavLink\"][href=\"https://www.patreon.com/posts/published\"]",
                 "url_pattern": "^https://www\\.patreon\\.com/(?:library/?|posts/published/?)$",
                 "ready_selector": "[class*=\"Table-module\"][class*=\"__headerRow\"]",
-                "empty_selector": "main:contains(\"No posts\"),main:contains(\"You haven\u2019t published\"),main:contains(\"Create your first post\"),[class*=\"EmptyState\"]",
+                "empty_selector": "main:contains(\"No posts\"),main:contains(\"You haven’t published\"),main:contains(\"Create your first post\"),[class*=\"EmptyState\"]",
                 "loading_selector": "[class*=\"Table-module\"][class*=\"__row\"][class*=\"__clickable\"]:not(:has(a[href*=\"/posts/\"])),[class*=\"Skeleton\"],[aria-busy=\"true\"]",
                 "error_selector": "main [role=\"alert\"],[role=\"dialog\"]",
                 "items": "[class*=\"Table-module\"][class*=\"__row\"][class*=\"__clickable\"]:has(a[href*=\"/posts/\"])",
@@ -113,7 +113,7 @@
                 "link_selector": "a[class*=\"subNavLink\"][href=\"https://www.patreon.com/posts/drafts\"]",
                 "url_pattern": "^https://www\\.patreon\\.com/posts/drafts/?$",
                 "ready_selector": "[class*=\"Table-module\"][class*=\"__headerRow\"]",
-                "empty_selector": "main:contains(\"No drafts\"),main:contains(\"You don\u2019t have any drafts\"),[class*=\"EmptyState\"]",
+                "empty_selector": "main:contains(\"No drafts\"),main:contains(\"You don’t have any drafts\"),[class*=\"EmptyState\"]",
                 "loading_selector": "[class*=\"Table-module\"][class*=\"__row\"][class*=\"__clickable\"]:not(:has(a[href*=\"/posts/\"])),[class*=\"Skeleton\"],[aria-busy=\"true\"]",
                 "error_selector": "main [role=\"alert\"],[role=\"dialog\"]",
                 "items": "[class*=\"Table-module\"][class*=\"__row\"][class*=\"__clickable\"]:has(a[href*=\"/posts/\"])",
@@ -2599,6 +2599,9 @@
                 "equals_exact": true
               }
             }
+          },
+          "reviewed_copy_fields": {
+            "post_body": "saved_body"
           }
         }
       },
@@ -4308,6 +4311,9 @@
                 "equals_exact": true
               }
             }
+          },
+          "reviewed_copy_fields": {
+            "post_body": "saved_body"
           }
         }
       },
@@ -8929,6 +8935,912 @@
         }
       ],
       "output_schema": {}
+    },
+    "prepare_image_draft_copy": {
+      "limits": {
+        "max_pages": 100,
+        "max_items": 500,
+        "max_duration_seconds": 600,
+        "step_retries": 0
+      },
+      "steps": [
+        {
+          "action": "goto",
+          "url": "{{creator_url}}",
+          "locator": {}
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "nav[aria-label=\"Creator navigation\"] button[aria-label=\"Create post\"]"
+            }
+          ],
+          "match": "all",
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "creator_identity": {
+              "selector": "a[aria-label=\"Your page\"]",
+              "type": "text",
+              "attribute": "href",
+              "required": true,
+              "pattern": "^https://www\\.patreon\\.com/(?:(?:c|cw)/)?([^/?]+)(?:[/?]|$)"
+            },
+            "creator_url": {
+              "selector": "a[aria-label=\"Your page\"]",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "creator_identity": {
+              "equals_exact": "{{expected_creator_identity}}"
+            }
+          }
+        },
+        {
+          "action": "goto",
+          "url": "{{post_edit_url}}",
+          "locator": {}
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "textarea[aria-label=\"Title\"]"
+            },
+            {
+              "type": "text_present",
+              "value": "Saved"
+            }
+          ],
+          "match": "all",
+          "timeout_ms": 30000
+        },
+        {
+          "action": "observe_page",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "audience": {
+              "selector": "input[type=\"radio\"][aria-checked=\"true\"]",
+              "type": "text",
+              "attribute": "value",
+              "required": true
+            },
+            "draft_publish_control": {
+              "selector": "[data-tag=\"make-a-post-action-publish\"]:not([disabled]):not([aria-disabled=\"true\"])",
+              "required": true,
+              "pattern": "^Publish$"
+            },
+            "sale_off_evidence": {
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "type": "text",
+              "attribute": "aria-checked",
+              "required": true,
+              "pattern": "^(false|true)$"
+            },
+            "saved_body": {
+              "selector": "[aria-label=\"Text input field for post content\"] p",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "all": true,
+              "separator": "\n\n"
+            },
+            "saved_title": {
+              "selector": "textarea[aria-label=\"Title\"]",
+              "type": "text",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "url_from_field": "current_url",
+          "url_match_pattern": "^https://www\\.patreon\\.com/[^/?]+/posts/(?:[^/?]*-)?([0-9]+)/edit(?:\\?[^#]*)?$",
+          "action": "goto",
+          "url": "https://www.patreon.com/api/posts/$1?include=images,access_rules.tier&fields[media]=file_name,state,media_type,size_bytes&fields[post]=title,published_at,scheduled_for,patreon_url,post_type&fields[access-rule]=access_rule_type&fields[reward]=title",
+          "locator": {}
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "pre"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "json_document": {
+            "selector": "pre",
+            "fields": {
+              "access_types": {
+                "path": "/data/relationships/access_rules/data",
+                "required": true,
+                "select": "/attributes/access_rule_type",
+                "resolve": {
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "attachment_filenames": {
+                "path": "/data/relationships/images/data",
+                "required": true,
+                "select": "/attributes/file_name",
+                "resolve": {
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "attachment_ids": {
+                "unique": true,
+                "path": "/data/relationships/images/data",
+                "required": true,
+                "select": "/id"
+              },
+              "attachment_sizes": {
+                "path": "/data/relationships/images/data",
+                "required": true,
+                "select": "/attributes/size_bytes",
+                "resolve": {
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "attachment_states": {
+                "path": "/data/relationships/images/data",
+                "required": true,
+                "select": "/attributes/state",
+                "resolve": {
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "attachment_types": {
+                "path": "/data/relationships/images/data",
+                "required": true,
+                "select": "/attributes/media_type",
+                "resolve": {
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "first_attachment_id": {
+                "path": "/data/relationships/images/data/0/id",
+                "required": true
+              },
+              "is_draft": {
+                "is_null": true,
+                "path": "/data/attributes/published_at",
+                "required": true
+              },
+              "is_unscheduled": {
+                "is_null": true,
+                "path": "/data/attributes/scheduled_for",
+                "required": true
+              },
+              "post_id": {
+                "path": "/data/id",
+                "required": true
+              },
+              "post_path": {
+                "path": "/data/attributes/patreon_url",
+                "required": true
+              },
+              "post_title": {
+                "path": "/data/attributes/title",
+                "required": true
+              },
+              "post_type": {
+                "path": "/data/attributes/post_type",
+                "required": true
+              },
+              "published_at": {
+                "path": "/data/attributes/published_at",
+                "required": true
+              },
+              "saved_tier_labels": {
+                "path": "/data/relationships/access_rules/data",
+                "required": true,
+                "select": "/attributes/title",
+                "resolve": {
+                  "through": [
+                    "/relationships/tier/data"
+                  ],
+                  "drop_null": true,
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "scheduled_for": {
+                "path": "/data/attributes/scheduled_for",
+                "required": true
+              }
+            }
+          },
+          "action": "observe_json",
+          "locator": {}
+        },
+        {
+          "url_from_field": "current_url",
+          "action": "goto",
+          "locator": {}
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "textarea[aria-label=\"Title\"]"
+            },
+            {
+              "type": "text_present",
+              "value": "Saved"
+            }
+          ],
+          "match": "all",
+          "timeout_ms": 30000
+        },
+        {
+          "action": "observe_page",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "audience": {
+              "selector": "input[type=\"radio\"][aria-checked=\"true\"]",
+              "type": "text",
+              "attribute": "value",
+              "required": true
+            },
+            "draft_publish_control": {
+              "selector": "[data-tag=\"make-a-post-action-publish\"]:not([disabled]):not([aria-disabled=\"true\"])",
+              "required": true,
+              "pattern": "^Publish$"
+            },
+            "sale_off_evidence": {
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "type": "text",
+              "attribute": "aria-checked",
+              "required": true,
+              "pattern": "^(false|true)$"
+            },
+            "saved_body": {
+              "selector": "[aria-label=\"Text input field for post content\"] p",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "all": true,
+              "separator": "\n\n"
+            },
+            "saved_title": {
+              "selector": "textarea[aria-label=\"Title\"]",
+              "type": "text",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "audience": {
+              "equals_exact": "{{audience}}",
+              "matches": "^(public|paid)$"
+            },
+            "current_url": {
+              "equals_exact": "{{post_edit_url}}"
+            },
+            "saved_body": {
+              "equals_exact": "{{expected_current_body}}"
+            },
+            "saved_title": {
+              "equals_exact": "{{post_title}}"
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "is_draft": {
+              "equals_exact": true
+            },
+            "is_unscheduled": {
+              "equals_exact": true
+            },
+            "post_id": {
+              "equals_exact": "{{post_id}}"
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "attachment_filenames": {
+              "equals_exact": "{{expected_attachment_filenames}}"
+            },
+            "attachment_states": {
+              "equals_exact": [
+                "ready"
+              ]
+            },
+            "attachment_types": {
+              "equals_exact": [
+                "image"
+              ]
+            },
+            "is_draft": {
+              "equals_exact": true
+            },
+            "is_unscheduled": {
+              "equals_exact": true
+            },
+            "post_type": {
+              "equals_exact": "image_file"
+            },
+            "attachment_ids": {
+              "equals_exact": "{{expected_attachment_ids}}"
+            },
+            "attachment_sizes": {
+              "equals_exact": "{{expected_attachment_sizes}}"
+            }
+          }
+        },
+        {
+          "action": "inspect_control",
+          "locator": {
+            "text": "Select tiers",
+            "exact": true,
+            "som_only": true
+          },
+          "optional": true
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "audience_with_valid_tiers": {
+              "selector": "input[value=\"public\"][aria-checked=\"true\"],body:has([role=\"menuitemcheckbox\"][aria-checked=\"true\"]:not(:contains(\"Select all tiers\"))) input[value=\"paid\"][aria-checked=\"true\"]",
+              "type": "text",
+              "attribute": "value",
+              "required": true,
+              "pattern": "^\\Q{{audience}}\\E$"
+            },
+            "saved_tiers": {
+              "selector": "[role=\"menuitemcheckbox\"][aria-checked=\"true\"]:not(:contains(\"Select all tiers\")),input[value=\"public\"][aria-checked=\"true\"]",
+              "type": "text",
+              "all": true,
+              "separator": "\n"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "saved_tiers": {
+              "equals_set": "{{tier_labels}}"
+            }
+          }
+        },
+        {
+          "action": "dismiss_inspection",
+          "locator": {}
+        },
+        {
+          "text": "{{post_body}}",
+          "action": "set_text",
+          "locator": {
+            "text": "Text input field for post content",
+            "role": "textbox",
+            "exact": true,
+            "som_only": true
+          },
+          "mode": "replace",
+          "newline_mode": "preserve",
+          "expected_effect": "save_draft"
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 1500
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "text_present",
+              "value": "Saved"
+            }
+          ],
+          "match": "all",
+          "timeout_ms": 30000
+        },
+        {
+          "action": "goto",
+          "url": "{{creator_url}}",
+          "locator": {}
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "nav[aria-label=\"Creator navigation\"] button[aria-label=\"Create post\"]"
+            }
+          ],
+          "match": "all",
+          "timeout_ms": 30000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "creator_identity": {
+              "selector": "a[aria-label=\"Your page\"]",
+              "type": "text",
+              "attribute": "href",
+              "required": true,
+              "pattern": "^https://www\\.patreon\\.com/(?:(?:c|cw)/)?([^/?]+)(?:[/?]|$)"
+            },
+            "creator_url": {
+              "selector": "a[aria-label=\"Your page\"]",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "creator_identity": {
+              "equals_exact": "{{expected_creator_identity}}"
+            }
+          }
+        },
+        {
+          "action": "goto",
+          "url": "{{post_edit_url}}",
+          "locator": {}
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "textarea[aria-label=\"Title\"]"
+            },
+            {
+              "type": "text_present",
+              "value": "Saved"
+            }
+          ],
+          "match": "all",
+          "timeout_ms": 30000
+        },
+        {
+          "action": "observe_page",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "audience": {
+              "selector": "input[type=\"radio\"][aria-checked=\"true\"]",
+              "type": "text",
+              "attribute": "value",
+              "required": true
+            },
+            "draft_publish_control": {
+              "selector": "[data-tag=\"make-a-post-action-publish\"]:not([disabled]):not([aria-disabled=\"true\"])",
+              "required": true,
+              "pattern": "^Publish$"
+            },
+            "sale_off_evidence": {
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "type": "text",
+              "attribute": "aria-checked",
+              "required": true,
+              "pattern": "^(false|true)$"
+            },
+            "saved_body": {
+              "selector": "[aria-label=\"Text input field for post content\"] p",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "all": true,
+              "separator": "\n\n"
+            },
+            "saved_title": {
+              "selector": "textarea[aria-label=\"Title\"]",
+              "type": "text",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "url_from_field": "current_url",
+          "url_match_pattern": "^https://www\\.patreon\\.com/[^/?]+/posts/(?:[^/?]*-)?([0-9]+)/edit(?:\\?[^#]*)?$",
+          "action": "goto",
+          "url": "https://www.patreon.com/api/posts/$1?include=images,access_rules.tier&fields[media]=file_name,state,media_type,size_bytes&fields[post]=title,published_at,scheduled_for,patreon_url,post_type&fields[access-rule]=access_rule_type&fields[reward]=title",
+          "locator": {}
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "pre"
+            }
+          ],
+          "timeout_ms": 30000
+        },
+        {
+          "json_document": {
+            "selector": "pre",
+            "fields": {
+              "access_types": {
+                "path": "/data/relationships/access_rules/data",
+                "required": true,
+                "select": "/attributes/access_rule_type",
+                "resolve": {
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "attachment_filenames": {
+                "path": "/data/relationships/images/data",
+                "required": true,
+                "select": "/attributes/file_name",
+                "resolve": {
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "attachment_ids": {
+                "unique": true,
+                "path": "/data/relationships/images/data",
+                "required": true,
+                "select": "/id"
+              },
+              "attachment_sizes": {
+                "path": "/data/relationships/images/data",
+                "required": true,
+                "select": "/attributes/size_bytes",
+                "resolve": {
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "attachment_states": {
+                "path": "/data/relationships/images/data",
+                "required": true,
+                "select": "/attributes/state",
+                "resolve": {
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "attachment_types": {
+                "path": "/data/relationships/images/data",
+                "required": true,
+                "select": "/attributes/media_type",
+                "resolve": {
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "first_attachment_id": {
+                "path": "/data/relationships/images/data/0/id",
+                "required": true
+              },
+              "is_draft": {
+                "is_null": true,
+                "path": "/data/attributes/published_at",
+                "required": true
+              },
+              "is_unscheduled": {
+                "is_null": true,
+                "path": "/data/attributes/scheduled_for",
+                "required": true
+              },
+              "post_id": {
+                "path": "/data/id",
+                "required": true
+              },
+              "post_path": {
+                "path": "/data/attributes/patreon_url",
+                "required": true
+              },
+              "post_title": {
+                "path": "/data/attributes/title",
+                "required": true
+              },
+              "post_type": {
+                "path": "/data/attributes/post_type",
+                "required": true
+              },
+              "published_at": {
+                "path": "/data/attributes/published_at",
+                "required": true
+              },
+              "saved_tier_labels": {
+                "path": "/data/relationships/access_rules/data",
+                "required": true,
+                "select": "/attributes/title",
+                "resolve": {
+                  "through": [
+                    "/relationships/tier/data"
+                  ],
+                  "drop_null": true,
+                  "pool": "/included",
+                  "keys": [
+                    "/id",
+                    "/type"
+                  ]
+                }
+              },
+              "scheduled_for": {
+                "path": "/data/attributes/scheduled_for",
+                "required": true
+              }
+            }
+          },
+          "action": "observe_json",
+          "locator": {}
+        },
+        {
+          "url_from_field": "current_url",
+          "action": "goto",
+          "locator": {}
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "textarea[aria-label=\"Title\"]"
+            },
+            {
+              "type": "text_present",
+              "value": "Saved"
+            }
+          ],
+          "match": "all",
+          "timeout_ms": 30000
+        },
+        {
+          "action": "observe_page",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "audience": {
+              "selector": "input[type=\"radio\"][aria-checked=\"true\"]",
+              "type": "text",
+              "attribute": "value",
+              "required": true
+            },
+            "draft_publish_control": {
+              "selector": "[data-tag=\"make-a-post-action-publish\"]:not([disabled]):not([aria-disabled=\"true\"])",
+              "required": true,
+              "pattern": "^Publish$"
+            },
+            "sale_off_evidence": {
+              "selector": "#sell-post-toggle[aria-checked=\"false\"],body:not(:has(#sell-post-toggle[aria-checked=\"true\"])) input[value=\"public\"][aria-checked=\"true\"]",
+              "type": "text",
+              "attribute": "aria-checked",
+              "required": true,
+              "pattern": "^(false|true)$"
+            },
+            "saved_body": {
+              "selector": "[aria-label=\"Text input field for post content\"] p",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "all": true,
+              "separator": "\n\n"
+            },
+            "saved_title": {
+              "selector": "textarea[aria-label=\"Title\"]",
+              "type": "text",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "audience": {
+              "equals_exact": "{{audience}}",
+              "matches": "^(public|paid)$"
+            },
+            "current_url": {
+              "equals_exact": "{{post_edit_url}}"
+            },
+            "saved_body": {
+              "equals_exact": "{{post_body}}"
+            },
+            "saved_title": {
+              "equals_exact": "{{post_title}}"
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "is_draft": {
+              "equals_exact": true
+            },
+            "is_unscheduled": {
+              "equals_exact": true
+            },
+            "post_id": {
+              "equals_exact": "{{post_id}}"
+            }
+          }
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "attachment_filenames": {
+              "equals_exact": "{{expected_attachment_filenames}}"
+            },
+            "attachment_states": {
+              "equals_exact": [
+                "ready"
+              ]
+            },
+            "attachment_types": {
+              "equals_exact": [
+                "image"
+              ]
+            },
+            "is_draft": {
+              "equals_exact": true
+            },
+            "is_unscheduled": {
+              "equals_exact": true
+            },
+            "post_type": {
+              "equals_exact": "image_file"
+            },
+            "attachment_ids": {
+              "equals_exact": "{{expected_attachment_ids}}"
+            },
+            "attachment_sizes": {
+              "equals_exact": "{{expected_attachment_sizes}}"
+            }
+          }
+        },
+        {
+          "action": "inspect_control",
+          "locator": {
+            "text": "Select tiers",
+            "exact": true,
+            "som_only": true
+          },
+          "optional": true
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "audience_with_valid_tiers": {
+              "selector": "input[value=\"public\"][aria-checked=\"true\"],body:has([role=\"menuitemcheckbox\"][aria-checked=\"true\"]:not(:contains(\"Select all tiers\"))) input[value=\"paid\"][aria-checked=\"true\"]",
+              "type": "text",
+              "attribute": "value",
+              "required": true,
+              "pattern": "^\\Q{{audience}}\\E$"
+            },
+            "saved_tiers": {
+              "selector": "[role=\"menuitemcheckbox\"][aria-checked=\"true\"]:not(:contains(\"Select all tiers\")),input[value=\"public\"][aria-checked=\"true\"]",
+              "type": "text",
+              "all": true,
+              "separator": "\n"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "saved_tiers": {
+              "equals_set": "{{tier_labels}}"
+            }
+          }
+        },
+        {
+          "action": "dismiss_inspection",
+          "locator": {}
+        }
+      ]
     }
   },
   "schema_version": 1,
