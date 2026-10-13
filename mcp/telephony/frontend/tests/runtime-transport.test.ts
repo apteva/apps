@@ -65,3 +65,12 @@ test('direct call conflicts preserve the structured body used by offer handling'
  const f=fixture(),transport=new RuntimeTelephonyTransport(f.app,'direct',(async()=>new Response('{"code":"offer_expired"}',{status:409})) as unknown as typeof fetch);
  await expect(transport.request('POST','/softphone/answer/call-a',{})).rejects.toMatchObject({status:409,body:'{"code":"offer_expired"}'});
 });
+
+test('configured external connection bypasses management discovery and only sends scoped grants',async()=>{
+ const f=fixture();let issues=0;const sent:any[]=[];
+ const transport=new RuntimeTelephonyTransport(f.app,'direct',(async(url:any,init:any)=>{sent.push({url:String(url),init});return Response.json({ok:true})}) as typeof fetch,{baseURL:'https://voice.example/runtime-browser',credentialProvider:async()=>{issues++;return {token:'external-scoped-grant',expires_at:Math.floor(Date.now()/1000)+300,endpoint:'https://voice.example/runtime-browser'}}});
+ await Promise.all([transport.request('GET','/calls'),transport.request('GET','/softphone/numbers')]);
+ expect(f.calls).toHaveLength(0);expect(issues).toBe(1);
+ expect(sent.every(r=>r.url.startsWith('https://voice.example/runtime-browser/'))).toBe(true);
+ expect(new Headers(sent[0].init.headers).get('Authorization')).toBe('Bearer external-scoped-grant');
+});

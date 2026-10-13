@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.12.15
+version: 0.12.16
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -345,6 +345,25 @@ provides:
             maximum: 12
 
 runtime:
+  ingress:
+    browser_path: /runtime-browser
+    endpoints: {browser: "", media: "", signaling: "", callbacks: "", carrier_media: ""}
+    routes:
+      - {path: /runtime-browser/*}
+      - {path: /media/telnyx/*}
+      - {path: /media/twilio/*}
+      - {path: /media/plivo/*}
+      - {path: /media/vonage/*}
+      - {path: /media/sinch/*}
+      - {path: /media/bandwidth/*}
+      - {path: /inbound/telnyx/*}
+      - {path: /inbound/twilio/*}
+      - {path: /inbound/plivo/*}
+      - {path: /inbound/bandwidth/*}
+      - {path: /webhook/*}
+      - {path: /xml/plivo/*}
+      - {path: /xml/bandwidth/*}
+      - {path: /ivr/*}
   package:
     app_capabilities:
       passive_start: true
@@ -358,7 +377,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.12.15
+    ref: telephony/v0.12.16
     entry: mcp/telephony
   port: 8080
   health_check: /health

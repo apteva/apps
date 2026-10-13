@@ -1,4 +1,4 @@
-import {RuntimeTelephonyTransport, type TelephonyRuntimeMode} from "./runtime-transport";
+import {RuntimeTelephonyTransport, type TelephonyRuntimeMode, type DirectTelephonyConnection} from "./runtime-transport";
 import { type MediaAttachmentDiagnostics, safeMediaDiagnosticID, leaseClock } from "./media-lease";
 import { defineAppExtension, type AppHandle } from "@apteva/web-sdk";
 import { createMicrophonePreview, listMicrophones } from "./audio";
@@ -143,6 +143,7 @@ function callID(id: string): string {
 export interface TelephonyClientOptions {
  /** Managed deployments use direct authenticated browser ingress when advertised. */
  runtime?: TelephonyRuntimeMode;
+ direct?: DirectTelephonyConnection;
   /** Shared defaults for new softphones, listeners and coaching sessions. */
   audio?: Partial<SoftphoneAudioOptions>;
   /** Online provider configured by the installation administrator. */
@@ -155,7 +156,7 @@ export class TelephonyClient {
   listMicrophones = listMicrophones;
   createMicrophonePreview = (onLevel?: (level: number) => void) => createMicrophonePreview(onLevel, this.app);
   constructor(readonly app: AppHandle, private readonly options: TelephonyClientOptions = {}) {
-    this.transport=new RuntimeTelephonyTransport(app,options.authProvider ? "proxy" : options.runtime);
+    this.transport=new RuntimeTelephonyTransport(app,options.authProvider ? "proxy" : options.direct ? "direct" : options.runtime,globalThis.fetch,options.direct);
     if (app.name !== "telephony" || !app.projectId || !app.installId) {
       throw new Error("Telephony requires an explicit project and installation");
     }
