@@ -223,6 +223,9 @@ func (b *nativeBackend) validate(r nativeRequest) (*Instance, nativeOptions, nat
 	if e := nativeGateway(o.GatewayURL); e != nil {
 		return nil, o, a, p, e
 	}
+	if e := validateNativeIngress(o.Ingress, r.Manifest); e != nil {
+		return nil, o, a, p, e
+	}
 	if e := nativePublicEndpoints(o); e != nil {
 		return nil, o, a, p, e
 	}
@@ -302,6 +305,7 @@ func (b *nativeBackend) create(r nativeRequest, o nativeOptions, a nativeArtifac
 	}
 	d = nativeRecord{HealthPath: r.Manifest.Runtime.HealthCheck, ID: r.DeploymentID, InstallID: r.InstallID, Generation: r.Generation, InstanceID: inst.ID, Fingerprint: nativeFingerprint(r, o), Options: o, Artifact: a, ReleaseDir: base + "/releases/" + hash, DataDir: base + "/data", Unit: fmt.Sprintf("apteva-native-%d-%s.service", b.installID, hash), ControlPort: port,
 		Execution: nativeExecution{BrowserEndpoint: o.BrowserEndpoint, Endpoints: o.Endpoints, Handle: r.DeploymentID, State: "preparing", HostKey: p.HostKey, ReleaseDigest: nativeArtifactDigest(a), Platform: a.Platform, StateRef: stateRef, AppCapabilities: a.AppCapabilities, Ports: []nativePort{{Protocol: "tcp", Start: port, End: port, Exclusive: true}}}}
+	nativeIngressEndpoints(&d, r)
 	if d.HealthPath == "" {
 		d.HealthPath = "/health"
 	}
@@ -330,6 +334,12 @@ func (b *nativeBackend) create(r nativeRequest, o nativeOptions, a nativeArtifac
 		}
 		seen[k] = true
 		d.Execution.Ports = append(d.Execution.Ports, nativePort{Protocol: proto, Start: v.HostPort, End: v.HostPort, Exclusive: true})
+	}
+	if o.Ingress != nil {
+		var n int
+		if e := b.db.QueryRow(`SELECT COUNT(*) FROM native_deployments WHERE json_extract(record,'$.options.ingress.hostname')=? AND install_id!=? AND json_extract(record,'$.execution.state')!='deleted'`, o.Ingress.Hostname, r.InstallID).Scan(&n); e != nil || n > 0 {
+			return d, errors.New("hostname owned by another installation")
+		}
 	}
 	// Do not share a tunnel or physical listener with another retained execution.
 	for _, port := range d.Execution.Ports {
@@ -380,6 +390,14 @@ func (b *nativeBackend) beginPrepare(d nativeRecord, inst *Instance) {
 		}
 		before := nativeJSON(current)
 		e = b.transport.Prepare(c, inst, current, b.artifactDir(current.Artifact.ID))
+		if e == nil && current.Options.Ingress != nil {
+			ingress, ok := b.transport.(nativeIngressTransport)
+			if !ok {
+				e = errors.New("transport cannot provision ingress")
+			} else {
+				e = ingress.Ingress(c, inst, current, false)
+			}
+		}
 		if e != nil {
 			current.Execution.State = "unknown"
 		} else {
@@ -634,7 +652,7 @@ func (b *nativeBackend) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch tail {
-	case "inspect-target", "validate-target", "prepare", "start", "inspect", "stop", "delete", "logs":
+	case "inspect-target", "validate-target", "prepare", "start", "inspect", "stop", "delete", "logs", "publish-ingress":
 	default:
 		http.NotFound(w, r)
 		return
@@ -645,7 +663,11 @@ func (b *nativeBackend) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, e.Error(), 400)
 			return
 		}
-		writeNative(w, info)
+		inst, _ := b.target(req)
+		writeNative(w, struct {
+			sdk.RuntimeTargetInfo
+			PublicIPv4 string `json:"public_ipv4"`
+		}{info, inst.PublicIPv4})
 		return
 	}
 	if tail == "validate-target" {
@@ -758,6 +780,21 @@ func (b *nativeBackend) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeNative(w, b.inspect(d, inst))
+	case "publish-ingress":
+		if d.Options.Ingress == nil {
+			writeNative(w, d.Execution)
+			return
+		}
+		observed := b.inspect(d, inst)
+		if observed.State != "running" || !observed.Ready {
+			http.Error(w, "ready execution required", 409)
+			return
+		}
+		if e = b.publishIngress(d, inst); e != nil {
+			http.Error(w, "ingress publication failed", 503)
+			return
+		}
+		writeNative(w, observed)
 	case "start":
 		if req.Package != nil {
 			_, _, _, probe, err := b.validate(req)
@@ -847,6 +884,12 @@ func (b *nativeBackend) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			writeNative(w, d.Execution)
 			return
 		}
+		if ingress, ok := b.transport.(nativeIngressTransport); ok && d.Options.Ingress != nil {
+			if e = ingress.RemoveIngress(c, inst, d); e != nil {
+				http.Error(w, "ingress removal unconfirmed", 503)
+				return
+			}
+		}
 		d.Execution.State = "stopped"
 		d.Execution.StoppedConfirmed = true
 		d.Execution.Ready = false
@@ -855,6 +898,16 @@ func (b *nativeBackend) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		b.tunnels.close(d.InstanceID, d.ControlPort)
+		if tail == "delete" && d.Options.Ingress != nil {
+			if cleanup, ok := b.transport.(interface {
+				DeleteIngress(context.Context, *Instance, nativeRecord) error
+			}); ok {
+				if e = cleanup.DeleteIngress(c, inst, d); e != nil {
+					http.Error(w, "ingress cleanup unconfirmed", 503)
+					return
+				}
+			}
+		}
 		if tail == "delete" {
 			if e = b.transport.Delete(c, inst, d); e != nil {
 				http.Error(w, "deployment cleanup outcome unknown; inspect/retry", 503)
