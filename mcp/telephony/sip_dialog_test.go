@@ -579,6 +579,8 @@ func TestSIPRefreshMissingACKAndExpirySendBYE(t *testing.T) {
 			} else {
 				f.session.answerMu.Lock()
 				f.session.timerUpdated = time.Now().Add(-91 * time.Second)
+				// Simulate a timer update using the same wake as renegotiation.
+				signalSIPTimer(f.session.timerWake)
 				f.session.answerMu.Unlock()
 			}
 			bye := readSIPResponseContaining(t, f.signaling, "BYE sip:")
