@@ -50,22 +50,33 @@ type nativeTarget struct {
 	ID        string `json:"resource_id"`
 }
 type nativeRequest struct {
-	Contract         string            `json:"contract"`
-	OperationID      string            `json:"operation_id"`
-	IdempotencyKey   string            `json:"idempotency_key"`
-	DeploymentID     string            `json:"deployment_id"`
-	InstallID        int64             `json:"install_id"`
-	Generation       int64             `json:"generation"`
-	ProjectID        string            `json:"project_id,omitempty"`
-	Target           nativeTarget      `json:"target"`
-	Options          map[string]any    `json:"options,omitempty"`
-	Manifest         sdk.Manifest      `json:"manifest"`
-	Environment      map[string]string `json:"environment,omitempty"`
-	Execution        nativeExecution   `json:"execution,omitempty"`
-	ArtifactPlatform string            `json:"artifact_platform,omitempty"`
-	StateRef         string            `json:"state_ref,omitempty"`
+	TargetInfo       *sdk.RuntimeTargetInfo  `json:"target_info,omitempty"`
+	Package          *nativePackageReference `json:"package,omitempty"`
+	Contract         string                  `json:"contract"`
+	OperationID      string                  `json:"operation_id"`
+	IdempotencyKey   string                  `json:"idempotency_key"`
+	DeploymentID     string                  `json:"deployment_id"`
+	InstallID        int64                   `json:"install_id"`
+	Generation       int64                   `json:"generation"`
+	ProjectID        string                  `json:"project_id,omitempty"`
+	Target           nativeTarget            `json:"target"`
+	Options          map[string]any          `json:"options,omitempty"`
+	Manifest         sdk.Manifest            `json:"manifest"`
+	Environment      map[string]string       `json:"environment,omitempty"`
+	Execution        nativeExecution         `json:"execution,omitempty"`
+	ArtifactPlatform string                  `json:"artifact_platform,omitempty"`
+	StateRef         string                  `json:"state_ref,omitempty"`
 	// Forward compatible with a future explicit Server gateway handoff.
 	GatewayURL string `json:"gateway_url,omitempty"`
+}
+type nativePackageReference struct {
+	ID               string   `json:"id"`
+	Platform         string   `json:"platform"`
+	SHA256           string   `json:"sha256"`
+	ExecutableSHA256 string   `json:"executable_sha256"`
+	ArchiveSHA256    string   `json:"archive_sha256,omitempty"`
+	ABI              string   `json:"abi,omitempty"`
+	SystemLibraries  []string `json:"system_libraries,omitempty"`
 }
 type nativeOptions struct {
 	ArtifactID  string `json:"artifact_id"`
@@ -107,10 +118,12 @@ type nativeRecord struct {
 	Execution   nativeExecution `json:"execution"`
 }
 type nativeProbe struct {
-	Platform string
-	HostKey  string
-	MemoryMB int64
-	DiskMB   int64
+	ABI             string
+	SystemLibraries []string
+	Platform        string
+	HostKey         string
+	MemoryMB        int64
+	DiskMB          int64
 }
 type nativeObservation struct {
 	State    string
@@ -157,7 +170,7 @@ func nativeGateway(v string) error {
 	return nil
 }
 func nativeCapabilities() any {
-	return map[string]any{"contract": nativeContract, "id": "native", "runtime_kinds": []string{"source", "service"}, "platforms": []string{"linux-amd64", "linux-arm64"}, "formats": []string{"binary"}, "protocols": []string{"tcp", "udp"}, "confirmed_stop": true, "snapshots": false, "replicas": false, "fencing": false, "resource_controls": false,
+	return map[string]any{"target_inspection": true, "package_delivery": map[string]any{"protocol": sdk.RuntimePackageProtocol, "formats": []string{"binary"}, "verified_archives": true}, "contract": nativeContract, "id": "native", "runtime_kinds": []string{"source", "service"}, "platforms": []string{"linux-amd64", "linux-arm64"}, "formats": []string{"binary"}, "protocols": []string{"tcp", "udp"}, "confirmed_stop": true, "snapshots": false, "replicas": false, "fencing": false, "resource_controls": false,
 		"target_schema":  map[string]any{"type": "object", "required": []string{"app_install_id", "resource_type", "resource_id"}, "properties": map[string]any{"app_install_id": map[string]any{"type": "integer"}, "resource_type": map[string]any{"const": "instances.instance"}, "resource_id": map[string]any{"type": "string"}}},
 		"options_schema": map[string]any{"type": "object", "required": []string{"artifact_id", "gateway_url"}, "properties": map[string]any{"artifact_id": map[string]any{"type": "string"}, "gateway_url": map[string]any{"type": "string"}, "control_port": map[string]any{"type": "integer", "minimum": 1024, "maximum": 65535}}}}
 }
