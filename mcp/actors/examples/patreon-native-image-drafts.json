@@ -192,6 +192,11 @@
               "role": "button",
               "exact": true,
               "som_only": true
+            },
+            {
+              "text": "Select tiers",
+              "exact": true,
+              "som_only": true
             }
           ],
           "inspection_locators": [
@@ -2563,6 +2568,11 @@
               "role": "button",
               "exact": true,
               "som_only": true
+            },
+            {
+              "text": "Select tiers",
+              "exact": true,
+              "som_only": true
             }
           ],
           "inspection_locators": [
@@ -4273,6 +4283,11 @@
             {
               "text": "Image",
               "role": "button",
+              "exact": true,
+              "som_only": true
+            },
+            {
+              "text": "Select tiers",
               "exact": true,
               "som_only": true
             }
