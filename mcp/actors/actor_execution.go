@@ -1417,6 +1417,9 @@ func (e *actorExecution) storeCurrentScreenshot(title string) (*artifactSummary,
 func extractNodeItem(node *html.Node, fields map[string]actorField, baseURL string) (map[string]any, error) {
 	item := make(map[string]any, len(fields))
 	for name, field := range fields {
+		if err := validateTrimLineEdges(field); err != nil {
+			return nil, fmt.Errorf("field %s: %w", name, err)
+		}
 		if field.OwnText && (field.Attribute != "" || strings.HasPrefix(field.Type, "attr:") || field.PreserveLineBreaks) {
 			return nil, fmt.Errorf("field %s: own_text cannot be combined with attributes or preserve_line_breaks", name)
 		}
@@ -1498,6 +1501,9 @@ func extractNodeItem(node *html.Node, fields map[string]actorField, baseURL stri
 		}
 		if !field.PreserveLineBreaks {
 			raw = strings.TrimSpace(raw)
+		}
+		if field.TrimLineEdges {
+			raw = trimActorLineEdges(raw)
 		}
 		if field.Pattern != "" {
 			pattern, err := regexp.Compile(field.Pattern)

@@ -174,6 +174,7 @@ type actorField struct {
 	Required           bool   `json:"required,omitempty"`
 	Pattern            string `json:"pattern,omitempty"`
 	PreserveLineBreaks bool   `json:"preserve_line_breaks,omitempty"`
+	TrimLineEdges      bool   `json:"trim_line_edges,omitempty"`
 	OwnText            bool   `json:"own_text,omitempty"`
 	All                bool   `json:"all,omitempty"`
 	Separator          string `json:"separator,omitempty"`
@@ -564,6 +565,11 @@ func validateActorDefinition(def actorDefinition) error {
 			}
 			if step.MinItems < 0 || step.MaxItems < 0 || (step.MaxItems > 0 && step.MinItems > step.MaxItems) {
 				return fmt.Errorf("steps[%d] has invalid min_items/max_items", i)
+			}
+			for name, field := range step.Fields {
+				if err := validateTrimLineEdges(field); err != nil {
+					return fmt.Errorf("steps[%d].fields[%q]: %w", i, name, err)
+				}
 			}
 		case "select_record":
 			if step.VerifiedField == "" || step.Value == "" {

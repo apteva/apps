@@ -1153,7 +1153,8 @@
               "type": "text",
               "required": true,
               "preserve_line_breaks": true,
-              "pattern": "(?s)^\\s*(.*?)\\s*$"
+              "pattern": "(?s)^\\s*(.*?)\\s*$",
+              "trim_line_edges": true
             },
             "saved_message_id": {
               "type": "number",
@@ -1172,6 +1173,13 @@
               "type": "text",
               "attribute": "title",
               "required": true
+            },
+            "saved_body_raw": {
+              "selector": ".message-modern-body",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "pattern": "(?s)^\\s*(.*?)\\s*$"
             }
           },
           "readability": false,
@@ -1527,7 +1535,8 @@
               "type": "text",
               "required": true,
               "preserve_line_breaks": true,
-              "pattern": "(?s)^\\s*(.*?)\\s*$"
+              "pattern": "(?s)^\\s*(.*?)\\s*$",
+              "trim_line_edges": true
             },
             "saved_message_id": {
               "type": "number",
@@ -1546,6 +1555,13 @@
               "type": "text",
               "attribute": "title",
               "required": true
+            },
+            "saved_body_raw": {
+              "selector": ".message-modern-body",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "pattern": "(?s)^\\s*(.*?)\\s*$"
             }
           },
           "readability": false,
@@ -3558,7 +3574,8 @@
               "type": "text",
               "required": true,
               "preserve_line_breaks": true,
-              "pattern": "(?s)^\\s*(.*?)\\s*$"
+              "pattern": "(?s)^\\s*(.*?)\\s*$",
+              "trim_line_edges": true
             },
             "saved_message_id": {
               "type": "number",
@@ -3577,6 +3594,13 @@
               "type": "text",
               "attribute": "title",
               "required": true
+            },
+            "saved_body_raw": {
+              "selector": ".message-modern-body",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "pattern": "(?s)^\\s*(.*?)\\s*$"
             }
           },
           "readability": false,
@@ -3694,7 +3718,8 @@
               "type": "text",
               "required": true,
               "preserve_line_breaks": true,
-              "pattern": "(?s)^\\s*(.*?)\\s*$"
+              "pattern": "(?s)^\\s*(.*?)\\s*$",
+              "trim_line_edges": true
             },
             "saved_message_id": {
               "type": "number",
@@ -3713,6 +3738,13 @@
               "type": "text",
               "attribute": "title",
               "required": true
+            },
+            "saved_body_raw": {
+              "selector": ".message-modern-body",
+              "type": "text",
+              "required": true,
+              "preserve_line_breaks": true,
+              "pattern": "(?s)^\\s*(.*?)\\s*$"
             }
           },
           "readability": false,

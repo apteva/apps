@@ -25,7 +25,7 @@ func (p *lostSendTransport) CallAppResultContext(ctx context.Context, app, tool 
 var _ sdk.PlatformClient = (*lostSendTransport)(nil)
 
 func TestAdultFolioInitialSendAndAmbiguousReconciliation(t *testing.T) {
-	for _, mode := range []string{"success", "fast_incoming", "age18", "age39", "age17", "age40", "missing_age", "duplicate_age", "wrong_profile_id", "wrong_profile_url", "wrong_country", "wrong_role", "previous_history", "nonempty", "loading", "missing_composer", "wrong_account", "wrong_recipient", "wrong_composer", "race_message", "wrong_saved_body", "wrong_sender", "missing_timestamp", "lost_accepted_response", "lost_unaccepted_response", "transport_accepted", "transport_unaccepted", "prepare"} {
+	for _, mode := range []string{"success", "server_line_indentation", "fast_incoming", "age18", "age39", "age17", "age40", "missing_age", "duplicate_age", "wrong_profile_id", "wrong_profile_url", "wrong_country", "wrong_role", "previous_history", "nonempty", "loading", "missing_composer", "wrong_account", "wrong_recipient", "wrong_composer", "race_message", "wrong_saved_body", "wrong_sender", "missing_timestamp", "lost_accepted_response", "lost_unaccepted_response", "transport_accepted", "transport_unaccepted", "prepare"} {
 		t.Run(mode, func(t *testing.T) {
 			plat := newFakePlatform()
 			plat.waitOutput = map[string]any{"matched": true, "timed_out": false}
@@ -132,6 +132,9 @@ func TestAdultFolioInitialSendAndAmbiguousReconciliation(t *testing.T) {
 						}
 						if saved {
 							sender, body, ts := "owner", "<p>Hello</p><p>World</p>", "2026-10-11T12:00:00Z"
+							if mode == "server_line_indentation" {
+								body = "\n\t<p> Hello <br> World </p>\n\t"
+							}
 							if mode == "wrong_saved_body" {
 								body = "Other"
 							}
@@ -189,7 +192,7 @@ func TestAdultFolioInitialSendAndAmbiguousReconciliation(t *testing.T) {
 				op = "prepare_initial_send"
 			}
 			r := execute(op)
-			good := mode == "success" || mode == "fast_incoming" || mode == "age18" || mode == "age39" || mode == "prepare"
+			good := mode == "success" || mode == "server_line_indentation" || mode == "fast_incoming" || mode == "age18" || mode == "age39" || mode == "prepare"
 			if (r["status"] == "completed") != good {
 				t.Fatalf("status %v: %v", r["status"], r["error"])
 			}
