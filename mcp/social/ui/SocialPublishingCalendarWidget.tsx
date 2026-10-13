@@ -24,9 +24,10 @@ export default function SocialPublishingCalendarWidget(props: HomeWidgetProps) {
           <p className="mt-1 text-[11px] text-text-dim">{prefs.mode === "calendar" ? `${shortDate(range.start)} – ${shortDate(range.days[6])}` : `Scheduled over the next ${prefs.horizonDays} days`}</p></div>
         <a href={openCalendar} className="shrink-0 text-[11px] text-text-muted hover:text-accent">Open calendar →</a>
       </header>
-      {prefs.showAttention && data && (data.attention.failed + data.attention.approval + data.attention.overdue > 0) && (
+      {prefs.showAttention && data && (data.attention.failed + data.attention.approval + data.attention.overdue + (data.attention.membership || 0) > 0) && (
         <div className="flex flex-wrap gap-x-3 gap-y-1 border-b border-border bg-bg-input/40 px-4 py-2 text-[11px]">
           {data.attention.failed > 0 && <a href={socialPageLink(props, { status: "attention" })} className="text-error hover:underline">{data.attention.failed} failed or partial</a>}
+          {(data.attention.membership || 0) > 0 && <a href={socialPageLink(props, { status: "awaiting_audience_setup" })} className="text-warn hover:underline">{data.attention.membership} awaiting membership setup</a>}
           {data.attention.approval > 0 && <a href={socialPageLink(props, { status: "in_review" })} className="text-warn hover:underline">{data.attention.approval} awaiting approval</a>}
           {data.attention.overdue > 0 && <a href={socialPageLink(props, { status: "scheduled" })} className="text-warn hover:underline">{data.attention.overdue} overdue</a>}
         </div>
