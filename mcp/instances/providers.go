@@ -244,6 +244,9 @@ func destroyManagedInstanceWithOptions(ctx *sdk.AppCtx, inst *Instance, options 
 	if inst == nil {
 		return ErrInstanceNotFound
 	}
+	if err := nativeHostRetained(ctx.AppDB(), inst.ID); err != nil {
+		return err
+	}
 	if !instanceCapabilities(inst).Destroy {
 		return providerAdapterUnavailable(inst.Provider, "destroy")
 	}

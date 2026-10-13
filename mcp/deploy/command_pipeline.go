@@ -137,7 +137,11 @@ func buildWithPipeline(builder Builder, src, dist string, ov BuildOverrides, log
 		return "", e
 	}
 	if p == nil {
-		return builder.Build(src, dist, ov, log)
+		entry, err := builder.Build(src, dist, ov, log)
+		if err == nil {
+			err = prepareStaticDelivery(buildContext(ov), builder.Framework(), dist, ov.StartCmd, log)
+		}
+		return entry, err
 	}
 	src, e = pipelinePath(src, "")
 	if e != nil {
@@ -153,6 +157,9 @@ func buildWithPipeline(builder Builder, src, dist string, ov BuildOverrides, log
 	}
 	entry, e := builder.Build(buildDir, dist, ov, log)
 	if e != nil {
+		return "", e
+	}
+	if e = prepareStaticDelivery(buildContext(ov), builder.Framework(), dist, ov.StartCmd, log); e != nil {
 		return "", e
 	}
 	if e = finalizeCommandPipeline(buildContext(ov), p, src, dist, ov.Env, log); e != nil {
