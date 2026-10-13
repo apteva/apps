@@ -241,7 +241,10 @@ func (b *nativeBackend) validate(r nativeRequest) (*Instance, nativeOptions, nat
 		return nil, o, a, p, errors.New("artifact release/platform mismatch")
 	}
 	if len(r.Manifest.Runtime.Artifacts) > 0 {
-		return nil, o, a, p, errors.New("manifest archive artifacts require a separate verified archive handoff; this backend currently accepts prepared binary packages")
+		archive, ok := r.Manifest.Runtime.Artifacts[a.Platform]
+		if !ok || r.Package == nil || !nativeDigest(r.Package.ArchiveSHA256) || r.Package.ArchiveSHA256 != strings.ToLower(archive.SHA256) {
+			return nil, o, a, p, errors.New("verified archive handoff is missing or differs from release manifest")
+		}
 	}
 	if e = b.verifyArtifact(a); e != nil {
 		return nil, o, a, p, e
@@ -252,8 +255,14 @@ func (b *nativeBackend) validate(r nativeRequest) (*Instance, nativeOptions, nat
 	if e != nil {
 		return nil, o, a, p, errors.New("target SSH/systemd/gateway validation failed")
 	}
+	if r.TargetInfo != nil && (r.TargetInfo.HostKey != p.HostKey || r.TargetInfo.Platform != p.Platform || r.TargetInfo.ABI != p.ABI) {
+		return nil, o, a, p, errors.New("target identity/environment changed after inspection")
+	}
 	if p.Platform != a.Platform || p.HostKey == "" {
 		return nil, o, a, p, errors.New("target architecture/identity mismatch")
+	}
+	if e = b.verifyTargetPackage(r, a, p); e != nil {
+		return nil, o, a, p, e
 	}
 	var size int64
 	for _, f := range a.Files {
@@ -622,9 +631,18 @@ func (b *nativeBackend) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch tail {
-	case "validate-target", "prepare", "start", "inspect", "stop", "delete", "logs":
+	case "inspect-target", "validate-target", "prepare", "start", "inspect", "stop", "delete", "logs":
 	default:
 		http.NotFound(w, r)
+		return
+	}
+	if tail == "inspect-target" {
+		info, e := b.inspectTarget(req)
+		if e != nil {
+			http.Error(w, e.Error(), 400)
+			return
+		}
+		writeNative(w, info)
 		return
 	}
 	if tail == "validate-target" {
@@ -633,7 +651,7 @@ func (b *nativeBackend) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, e.Error(), 400)
 			return
 		}
-		writeNative(w, nativeExecution{HostKey: p.HostKey, Platform: a.Platform})
+		writeNative(w, nativeExecution{HostKey: p.HostKey, Platform: a.Platform, ReleaseDigest: nativeArtifactDigest(a), AppCapabilities: a.AppCapabilities})
 		return
 	}
 	lock := b.lock(req.DeploymentID)
@@ -736,6 +754,13 @@ func (b *nativeBackend) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeNative(w, b.inspect(d, inst))
 	case "start":
+		if req.Package != nil {
+			_, _, _, probe, err := b.validate(req)
+			if err != nil || probe.HostKey != d.Execution.HostKey {
+				http.Error(w, "target/package validation changed before start", 409)
+				return
+			}
+		}
 		env, e := b.environment(d, req)
 		if e != nil {
 			http.Error(w, e.Error(), 409)

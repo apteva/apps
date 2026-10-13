@@ -526,3 +526,16 @@ credentials; unit tests never create billable resources.
 Instances can implement Server-managed native Linux app deployments through
 `apteva.runtime-backend/v1`. See [the native backend contract and trial guide](runtime/README.md)
 for artifact staging, placement, ownership, private connectivity and supported scope.
+
+### Automatic managed package deployment (0.7.1)
+
+The native backend advertises the generic files-v1 package delivery extension
+and artifact-independent target inspection. Server selects the target platform
+and supplies its configured reachable gateway automatically. `inspect-target`
+checks host identity, architecture, ABI, libraries and gateway reachability
+without creating a deployment or requiring a package. Package references are
+verified against sealed metadata and executable hashes. Dynamic requirements
+are verified from the sealed descriptor against the actual host before prepare
+and again before a new start. Existing manually staged artifacts remain supported.
+No cloud host, firewall, DNS or public media configuration is changed by these
+operations. Stop/delete still preserve installation data and unrelated services.

@@ -34,7 +34,7 @@ type nativeFake struct {
 }
 
 func (f *nativeFake) Probe(context.Context, *Instance, string) (nativeProbe, error) {
-	return nativeProbe{Platform: "linux-amd64", HostKey: "physical-host-a", MemoryMB: 2048, DiskMB: 2048}, nil
+	return nativeProbe{ABI: "gnu", SystemLibraries: []string{"libc.so.6", "libdl.so.2", "libpthread.so.0"}, Platform: "linux-amd64", HostKey: "physical-host-a", MemoryMB: 2048, DiskMB: 2048}, nil
 }
 func (f *nativeFake) Prepare(c context.Context, _ *Instance, d nativeRecord, _ string) error {
 	if f.prepareGate != nil {
