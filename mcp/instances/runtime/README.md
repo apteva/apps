@@ -166,5 +166,8 @@ intended first integration trial. It needs a staged exact-release package and a
 reachable gateway to the local trial Server. Test lifecycle, duplicate requests,
 lost responses, restart/tunnel recovery, retained data and unrelated services.
 SIP/RTP/public WebRTC connectivity and existing-installation migration are outside
-this increment. No production deployment, registry release or dashboard change is
-part of this implementation.
+this increment. Instances 0.7.0 releases this backend for the API-first trial;
+the complete Telephony trial remains a separate integration check. No production
+deployment or dashboard change is part of this increment. Monitoring continues
+using the unchanged, checksum-pinned 0.6.5 collectors, so updating Instances does
+not reinstall monitoring software on tracked hosts.

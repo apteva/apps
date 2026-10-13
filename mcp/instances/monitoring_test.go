@@ -105,8 +105,13 @@ func TestRemoteCollectorVersionAvoidsDownload(t *testing.T) {
 
 func TestCollectorReleaseContract(t *testing.T) {
 	manifest := (&App{}).Manifest()
-	if manifest.Version != monitor.CollectorVersion || manifest.Runtime.Source.Ref != "instances/v"+monitor.CollectorVersion {
-		t.Fatal("release/collector/source version drift")
+	if manifest.Runtime.Source.Ref != "instances/v"+manifest.Version {
+		t.Fatal("app release/source version drift")
+	}
+	// Collectors have their own released version and checksums. An app-only
+	// release must not force an unchanged collector reinstall on tracked hosts.
+	if monitor.CollectorVersion == "" {
+		t.Fatal("collector release version is missing")
 	}
 	var sums map[string]string
 	if err := json.Unmarshal(collectorChecksums, &sums); err != nil {
