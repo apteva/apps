@@ -69,6 +69,8 @@ export class HeadlessSoftphone {
   private lease?: MediaLease;
   private timer?: ReturnType<typeof setTimeout>;
   private polling?: AbortController;
+  private hasStatusPush=false;
+  private scheduleStatusPoll?: () => void;
   private outbound = false;
   private ringing = false;
   private readonly runtime: AudioRuntime;
@@ -390,6 +392,7 @@ export class HeadlessSoftphone {
   }
 
   private async attachAudio(session: CallSession, generation: number, setupEvents: MediaSessionEvent[] = []) {
+    this.hasStatusPush=false;
     this.assertCurrent(generation);
     this.stopAudio();
     this.session = session;
@@ -434,6 +437,7 @@ export class HeadlessSoftphone {
             return;
           }
           this.update({ audioState, detail });
+          this.scheduleStatusPoll?.();
           if (current() && (audioState === "error" || audioState === "ended")) {
             this.stopAudio();
             if (audioState === "error") void this.reconcileFailedAudio(session, this.generation);
@@ -444,11 +448,11 @@ export class HeadlessSoftphone {
         onAudioHealth: health => notify(() => this.options.onAudioHealth?.(health)),
         onDiagnostics: diagnostics => notify(() => this.options.onDiagnostics?.(diagnostics)),
         onNotice: detail => notify(() => this.options.onNotice?.(detail)),
-        onCallStatus: status => notify(() => this.observeCall({
+        onCallStatus: status => notify(() => {this.hasStatusPush=true;this.observeCall({
           id: status.call_id, status: status.status, direction: status.direction, answered_at: status.answered_at, ended_at: status.ended_at,
           answered_by: status.answered_by, termination: status.termination, hold_state: status.hold_state,
           recording_state: status.recording_state, control_error: status.control_error,
-        })),
+        });this.scheduleStatusPoll?.();}),
       });
       this.audio = audio;
       this.assertCurrent(generation);
@@ -523,6 +527,7 @@ export class HeadlessSoftphone {
     if (audio) { try { this.options.onLevels?.(0, 0); } catch { /* host meters cannot interrupt cleanup */ } }
   }
   private stopPolling() {
+    this.scheduleStatusPoll=undefined;
     clearTimeout(this.timer);
     this.timer = undefined;
     this.polling?.abort();
@@ -533,21 +538,33 @@ export class HeadlessSoftphone {
     if (!this.interval) return;
     const controller = new AbortController();
     this.polling = controller;
+    let running=false;
+    let lastRead=performance.now();
+    const delay=()=>this.hasStatusPush && this.snapshot.audioState==="live" ? Math.max(1,Math.max(this.interval,30000)-(performance.now()-lastRead)) : this.interval;
     const poll = async () => {
+      if(running) return;
       const id = this.session?.call_id;
       if (!id || controller.signal.aborted) return;
+      running=true;
       try {
         const call = await this.client.getCall(id, controller.signal);
+        lastRead=performance.now();
         if (!controller.signal.aborted && call) this.observeCall(call);
       } catch (error) {
         if (!controller.signal.aborted) this.update({ detail: `Call status unavailable: ${message(error)}` });
       } finally {
-        if (!controller.signal.aborted && this.session && !this.disposed) this.timer = setTimeout(poll, this.interval);
+        running=false;
+        this.scheduleStatusPoll?.();
       }
     };
-    this.timer = setTimeout(poll, this.interval);
+    this.scheduleStatusPoll=()=>{
+      if(running||controller.signal.aborted||!this.session||this.disposed)return;
+      clearTimeout(this.timer);this.timer=setTimeout(poll,delay());
+    };
+    this.scheduleStatusPoll();
   }
   private clearCall(carrierStatus?: string) {
+    this.hasStatusPush=false;
     this.stopAudio();
     this.stopPolling();
     this.session = undefined;

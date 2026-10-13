@@ -164,15 +164,15 @@ func (a *App) answerImmediateCall(ctx *sdk.AppCtx, route *routeRow, callID strin
 	return err
 }
 
-func (a *App) runAutoAnswerTick(_ context.Context, ctx *sdk.AppCtx) error {
+func (a *App) runAutoAnswerTick(workerCtx context.Context, ctx *sdk.AppCtx) error {
 	project := ctx.CurrentProject()
 	if project == "" {
 		return nil
 	}
 	rows, err := ctx.AppDB().Query(`SELECT c.id, r.id
-        FROM calls c JOIN inbound_routes r ON r.id = c.route_id
+        FROM calls c INDEXED BY idx_calls_pending_answer JOIN inbound_routes r ON r.id = c.route_id
         WHERE c.project_id = ? AND c.direction = 'inbound' AND c.status = 'pending'
-	          AND COALESCE(c.handling_reason,'')=''
+	          AND c.handling_reason=''
           AND r.enabled = 1
           AND (c.state_expires_at = '' OR c.state_expires_at > ?)
         ORDER BY c.placed_at LIMIT 20`, project, time.Now().UTC().Format(time.RFC3339))
@@ -217,8 +217,8 @@ func (a *App) runAutoAnswerTick(_ context.Context, ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) runLifecycleTick(_ context.Context, ctx *sdk.AppCtx) error {
-	if err := a.runRoutingEffects(context.Background(), ctx); err != nil {
+func (a *App) runLifecycleTick(workerCtx context.Context, ctx *sdk.AppCtx) error {
+	if err := a.runRoutingEffects(workerCtx, ctx); err != nil {
 		return err
 	}
 	project := ctx.CurrentProject()
@@ -226,7 +226,9 @@ func (a *App) runLifecycleTick(_ context.Context, ctx *sdk.AppCtx) error {
 		return nil
 	}
 	now := time.Now().UTC()
-	_, _ = ctx.AppDB().Exec(`UPDATE call_offers SET status='expired' WHERE project_id=? AND run_id='' AND status='offered' AND expires_at<=?`, project, now.Format(time.RFC3339Nano))
+	if _, err := ctx.AppDB().ExecContext(workerCtx, `UPDATE call_offers SET status='expired' WHERE project_id=? AND run_id='' AND status='offered' AND expires_at<=?`, project, now.Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
 	if err := a.publishLifecycleEvents(ctx, ""); err != nil {
 		ctx.Logger().Warn("publish pending call lifecycle events", "err", err)
 	}
@@ -256,7 +258,7 @@ func (a *App) runLifecycleTick(_ context.Context, ctx *sdk.AppCtx) error {
 		}
 	}
 
-	expired, err := a.db().listWhere(`project_id = ?
+	expired, err := a.db().listWhereOn("idx_calls_live_lifecycle", `project_id = ?
         AND status NOT IN ('completed','failed','no-answer','busy','canceled')
         AND ((state_expires_at <> '' AND state_expires_at <= ?)
           OR (duration_started_at='' AND deadline_at <> '' AND deadline_at <= ?)
@@ -274,18 +276,6 @@ func (a *App) runLifecycleTick(_ context.Context, ctx *sdk.AppCtx) error {
 		}
 	}
 
-	_, _ = ctx.AppDB().Exec(`UPDATE calls SET callback_secret = '', audio_bridge_url = ''
-        WHERE project_id = ? AND ended_at <> '' AND ended_at < ?`,
-		project, now.Add(-24*time.Hour).Format(time.RFC3339))
-	_, _ = ctx.AppDB().Exec(`DELETE FROM inbound_event_outbox WHERE call_id IN (
-        SELECT id FROM calls WHERE project_id = ? AND ended_at <> '' AND ended_at < ?
-    )`, project, now.Add(-30*24*time.Hour).Format(time.RFC3339))
-	_, _ = ctx.AppDB().Exec(`DELETE FROM calls
-		WHERE project_id = ? AND ended_at <> '' AND ended_at < ?
-		  AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.call_id = calls.id AND r.deleted_at = '')`,
-		project, now.Add(-30*24*time.Hour).Format(time.RFC3339))
-	_, _ = ctx.AppDB().Exec(`DELETE FROM inbound_burst_attempts WHERE project_id=? AND received_at<?`, project, now.Add(-24*time.Hour).Unix())
-	_, _ = ctx.AppDB().Exec(`DELETE FROM inbound_burst_cooldowns WHERE project_id=? AND expires_at<?`, project, now.Unix())
 	return nil
 }
 

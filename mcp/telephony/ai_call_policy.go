@@ -352,7 +352,7 @@ func (a *App) runAICallPolicies(_ context.Context, ctx *sdk.AppCtx) error {
 	return a.runAICallPoliciesAt(ctx, time.Now().UTC())
 }
 func (a *App) runAICallPoliciesAt(ctx *sdk.AppCtx, now time.Time) error {
-	rows, err := a.db().db.Query(`SELECT p.call_id,p.thread_id,p.state_json,COALESCE(c.thread_id,''),COALESCE(c.agent_id,0),COALESCE(c.peer_kind,''),COALESCE(c.status,''),COALESCE(c.media_status,''),COALESCE(c.media_connected_at,''),COALESCE(c.hold_state,'') FROM ai_call_policies p LEFT JOIN calls c ON c.id=p.call_id AND c.project_id=p.project_id WHERE p.project_id=? AND p.stage NOT IN ('ended','disarmed')`, ctx.CurrentProject())
+	rows, err := a.db().db.Query(`SELECT p.call_id,p.thread_id,COALESCE(c.thread_id,''),COALESCE(c.agent_id,0),COALESCE(c.peer_kind,''),COALESCE(c.status,''),COALESCE(c.media_status,''),COALESCE(c.media_connected_at,''),COALESCE(c.hold_state,'') FROM ai_call_policies p INDEXED BY ai_call_policies_active LEFT JOIN calls c ON c.id=p.call_id AND c.project_id=p.project_id WHERE p.project_id=? AND p.stage NOT IN ('ended','disarmed')`, ctx.CurrentProject())
 	if err != nil {
 		return err
 	}
@@ -363,7 +363,7 @@ func (a *App) runAICallPoliciesAt(ctx *sdk.AppCtx, now time.Time) error {
 	var savedRows []saved
 	for rows.Next() {
 		var s saved
-		if err = rows.Scan(&s.id, &s.thread, &s.raw, &s.row.ThreadID, &s.row.AgentID, &s.row.PeerKind, &s.row.Status, &s.row.MediaStatus, &s.row.MediaConnectedAt, &s.row.HoldState); err != nil {
+		if err = rows.Scan(&s.id, &s.thread, &s.row.ThreadID, &s.row.AgentID, &s.row.PeerKind, &s.row.Status, &s.row.MediaStatus, &s.row.MediaConnectedAt, &s.row.HoldState); err != nil {
 			rows.Close()
 			return err
 		}
@@ -397,7 +397,12 @@ func (a *App) runAICallPoliciesAt(ctx *sdk.AppCtx, now time.Time) error {
 		r := a.aiPolicies.calls[saved.id]
 		if r == nil {
 			var s aiPolicyState
-			if err = json.Unmarshal([]byte(saved.raw), &s); err != nil {
+			var raw string
+			if err = a.db().db.QueryRow(`SELECT state_json FROM ai_call_policies WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID).Scan(&raw); err != nil {
+				a.aiPolicies.mu.Unlock()
+				return err
+			}
+			if err = json.Unmarshal([]byte(raw), &s); err != nil {
 				a.aiPolicies.mu.Unlock()
 				return err
 			}
@@ -410,18 +415,23 @@ func (a *App) runAICallPoliciesAt(ctx *sdk.AppCtx, now time.Time) error {
 		a.aiPolicies.mu.Unlock()
 		a.ensureAIPhaseFeed(ctx, row.AgentID)
 		r.mu.Lock()
-		before, _ := json.Marshal(r.state)
+		before := aiPolicyScalars(r.state)
 		action := r.advance(row, now)
-		after, _ := json.Marshal(r.state)
-		changed := r.dirty || string(before) != string(after)
+		changed := r.dirty || before != aiPolicyScalars(r.state)
 		if changed {
 			r.state.Revision++
 			r.dirty = false
 		}
 		snapshot := r.state
+		if changed {
+			snapshot.Events = append([]aiPolicyEvent(nil), r.state.Events...)
+		}
 		r.mu.Unlock()
 		if changed {
 			if err = a.persistAIPolicy(r, snapshot); err != nil {
+				r.mu.Lock()
+				r.dirty = true
+				r.mu.Unlock()
 				return err
 			}
 		}
@@ -637,4 +647,29 @@ func (a *App) restoreAIPolicyRuntimes() error {
 		a.aiPolicies.calls[r.id] = r
 	}
 	return nil
+}
+
+type aiPolicyComparable struct {
+	Revision                       int64
+	Policy                         aiCallPolicy
+	CreatedAt, StartedAt, Deadline time.Time
+	Stage                          string
+	IdleSince, ReminderAt          time.Time
+	ReminderToken                  string
+	ReminderSent, ReminderIssued   bool
+	ResponseDeadline               time.Time
+	Reason                         string
+	Attempts                       int
+	NextAttempt                    time.Time
+	LastError                      string
+	EventCount                     int
+	LastEvent                      aiPolicyEvent
+}
+
+func aiPolicyScalars(s aiPolicyState) aiPolicyComparable {
+	v := aiPolicyComparable{s.Revision, s.Policy, s.CreatedAt, s.StartedAt, s.Deadline, s.Stage, s.IdleSince, s.ReminderAt, s.ReminderToken, s.ReminderSent, s.ReminderIssued, s.ResponseDeadline, s.Reason, s.Attempts, s.NextAttempt, s.LastError, len(s.Events), aiPolicyEvent{}}
+	if len(s.Events) > 0 {
+		v.LastEvent = s.Events[len(s.Events)-1]
+	}
+	return v
 }

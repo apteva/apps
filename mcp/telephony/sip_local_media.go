@@ -572,7 +572,9 @@ func playSIPPCM(ctx context.Context, media *sipRTPMedia, pacer *sipRTPPacer, pcm
 	for offset := 0; offset < len(pcm); {
 		if len(pacer.queue) >= 5 {
 			select {
-			case <-time.After(10 * time.Millisecond):
+			case <-pacer.progress:
+			case <-pacer.done:
+				return errors.New("SIP playback pacer stopped")
 			case <-ctx.Done():
 				return ctx.Err()
 			case err := <-pacer.Err():
@@ -591,7 +593,9 @@ func playSIPPCM(ctx context.Context, media *sipRTPMedia, pacer *sipRTPPacer, pcm
 	}
 	for playback := pacer.playback; playback.hasPending(); {
 		select {
-		case <-time.After(10 * time.Millisecond):
+		case <-pacer.progress:
+		case <-pacer.done:
+			return errors.New("SIP playback pacer stopped")
 		case <-ctx.Done():
 			return ctx.Err()
 		case err := <-pacer.Err():

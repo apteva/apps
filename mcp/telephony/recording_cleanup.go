@@ -25,20 +25,24 @@ func (a *App) cleanupRecordingJobs(ctx *sdk.AppCtx) error {
 		return err
 	}
 	if fileID > 0 {
-		_, _ = ctx.AppDB().Exec(`UPDATE recording_orphan_files SET next_attempt_at=? WHERE project_id=? AND file_id=?`, time.Now().UTC().Add(time.Minute).Format(time.RFC3339), ctx.CurrentProject(), fileID)
+		if _, err := ctx.AppDB().Exec(`UPDATE recording_orphan_files SET next_attempt_at=? WHERE project_id=? AND file_id=?`, time.Now().UTC().Add(time.Minute).Format(time.RFC3339), ctx.CurrentProject(), fileID); err != nil {
+			return err
+		}
 		var result map[string]any
 		err := ctx.PlatformAPI().CallAppResult("storage", "files_delete", map[string]any{"id": fileID}, &result)
 		if err == nil || strings.Contains(err.Error(), "404") || strings.Contains(strings.ToLower(err.Error()), "not found") {
 			_, _ = ctx.AppDB().Exec(`DELETE FROM recording_orphan_files WHERE project_id=? AND file_id=?`, ctx.CurrentProject(), fileID)
 		}
 	}
-	row, err := scanRecording(ctx.AppDB().QueryRow(`SELECT `+recordingSelectColumns+` FROM recordings WHERE project_id=? AND deleted_at='' AND storage_status='stored' AND provider_deleted_at='' AND cleanup_next_at<=? AND call_id IN (SELECT id FROM calls WHERE recording_storage_mode='copy_then_delete_provider') ORDER BY cleanup_next_at LIMIT 1`, ctx.CurrentProject(), now))
+	row, err := scanRecording(ctx.AppDB().QueryRow(`SELECT `+recordingSelectColumns+` FROM recordings INDEXED BY idx_recordings_provider_cleanup WHERE project_id=? AND deleted_at='' AND storage_status='stored' AND provider_deleted_at='' AND cleanup_next_at<=? AND EXISTS(SELECT 1 FROM calls c WHERE c.id=recordings.call_id AND c.project_id=recordings.project_id AND c.recording_storage_mode='copy_then_delete_provider') ORDER BY cleanup_next_at LIMIT 1`, ctx.CurrentProject(), now))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	_, _ = ctx.AppDB().Exec(`UPDATE recordings SET cleanup_next_at=? WHERE id=?`, time.Now().UTC().Add(time.Minute).Format(time.RFC3339), row.ID)
+	if _, err := ctx.AppDB().Exec(`UPDATE recordings SET cleanup_next_at=? WHERE id=?`, time.Now().UTC().Add(time.Minute).Format(time.RFC3339), row.ID); err != nil {
+		return err
+	}
 	return a.deleteProviderRecording(ctx, row)
 }

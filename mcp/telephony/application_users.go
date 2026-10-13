@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -93,11 +94,11 @@ func (a *App) phonePolicy(project string) (phonePolicy, error) {
 	return p, err
 }
 func (a *App) phonePrincipal(project string, identity phoneIdentity) (*phonePrincipal, error) {
-	policy, err := a.phonePolicy(project)
+	policy, err := a.cachedPhonePolicy(project)
 	if err != nil {
 		return nil, err
 	}
-	return phonePrincipalFromPolicy(project, identity, policy)
+	return phonePrincipalFromPolicy(project, identity, *policy)
 }
 func phonePrincipalFromPolicy(project string, identity phoneIdentity, policy phonePolicy) (*phonePrincipal, error) {
 	p := &phonePrincipal{Identity: identity, Project: project, Revision: policy.Revision, Destinations: map[string]bool{}, Numbers: map[string]bool{}}
@@ -951,4 +952,39 @@ func writePhoneSessionFailure(w http.ResponseWriter, err error) {
 		return
 	}
 	writeJSONStatus(w, http.StatusServiceUnavailable, map[string]any{"code": "media_session_unavailable"})
+}
+
+type phonePolicyCache struct {
+	mu       sync.Mutex
+	projects map[string]cachedPhonePolicy
+}
+
+type cachedPhonePolicy struct {
+	epoch  int64
+	policy *phonePolicy
+}
+
+func (a *App) cachedPhonePolicy(project string) (*phonePolicy, error) {
+	var revision, epoch int64
+	err := a.db().db.QueryRow(`SELECT p.revision,v.revision FROM telephony_access_policies p JOIN telephony_policy_versions v ON v.project_id=p.project_id WHERE p.project_id=?`, project).Scan(&revision, &epoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return &phonePolicy{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	a.policyReads.mu.Lock()
+	defer a.policyReads.mu.Unlock()
+	if saved := a.policyReads.projects[project]; saved.policy != nil && saved.policy.Revision == revision && saved.epoch == epoch {
+		return saved.policy, nil
+	}
+	fresh, err := a.phonePolicy(project)
+	if err != nil {
+		return nil, err
+	}
+	if a.policyReads.projects == nil || len(a.policyReads.projects) >= 256 {
+		a.policyReads.projects = make(map[string]cachedPhonePolicy)
+	}
+	a.policyReads.projects[project] = cachedPhonePolicy{epoch, &fresh}
+	return &fresh, nil
 }

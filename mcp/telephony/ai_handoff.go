@@ -261,7 +261,7 @@ func (a *App) failAIHandoff(row *callRow, token, code string, retry bool) error 
 // bounded recovery, and an in-flight spawn must not hold the caller indefinitely.
 func (a *App) runAIHandoffs(_ context.Context, ctx *sdk.AppCtx) error {
 	now := ringTime(time.Now())
-	rows, err := a.db().db.Query(`SELECT call_id,status='retry' AND deadline_at>? FROM ai_handoffs WHERE project_id=? AND ((status='running' AND deadline_at<=?) OR (status='retry' AND (next_attempt_at<=? OR deadline_at<=?)) OR (status='failed' AND fallback_applied=0)) ORDER BY status='retry' AND deadline_at>?,next_attempt_at LIMIT 100`, now, ctx.CurrentProject(), now, now, now, now)
+	rows, err := a.db().db.Query(`SELECT call_id,status='retry' AND deadline_at>? FROM ai_handoffs INDEXED BY idx_ai_handoffs_work WHERE project_id=? AND (status IN ('running','retry') OR (status='failed' AND fallback_applied=0)) AND ((status='running' AND deadline_at<=?) OR (status='retry' AND (next_attempt_at<=? OR deadline_at<=?)) OR (status='failed' AND fallback_applied=0)) ORDER BY status='retry' AND deadline_at>?,next_attempt_at LIMIT 100`, now, ctx.CurrentProject(), now, now, now, now)
 	if err != nil {
 		return err
 	}

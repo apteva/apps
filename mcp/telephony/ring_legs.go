@@ -131,7 +131,7 @@ func (a *App) runRingLegTick(_ context.Context, ctx *sdk.AppCtx) error {
 	// its late callback supplies that ID. Exclude it from the bounded work batch
 	// so uncertain requests cannot starve newly answered calls. An in-flight
 	// placement is likewise picked up once its child call record exists.
-	rows, err := ctx.AppDB().Query(`SELECT l.id,l.call_id,l.offer_id FROM call_legs l JOIN calls child ON child.id=l.id JOIN call_offers o ON o.id=l.offer_id WHERE l.project_id=? AND (l.status NOT IN ('finished','canceled') OR o.status='offered') AND (l.status<>'cancel_pending' OR child.carrier_sid<>'' OR o.status='offered') ORDER BY COALESCE(NULLIF(child.answered_at,''),'9999'),l.started_at LIMIT 100`, ctx.CurrentProject())
+	rows, err := ctx.AppDB().Query(`SELECT l.id,l.call_id,l.offer_id FROM (SELECT id FROM call_legs INDEXED BY idx_call_legs_active WHERE project_id=? AND status NOT IN ('finished','canceled') UNION SELECT legs.id FROM call_offers offers INDEXED BY idx_call_offers_call_active CROSS JOIN call_legs legs WHERE offers.project_id=? AND offers.status='offered' AND legs.offer_id=offers.id AND legs.offer_id<>'') candidates JOIN call_legs l ON l.id=candidates.id JOIN calls child ON child.id=l.id JOIN call_offers o ON o.id=l.offer_id WHERE l.project_id=? AND (l.status<>'cancel_pending' OR child.carrier_sid<>'' OR o.status='offered') ORDER BY COALESCE(NULLIF(child.answered_at,''),'9999'),l.started_at LIMIT 100`, ctx.CurrentProject(), ctx.CurrentProject(), ctx.CurrentProject())
 	if err != nil {
 		return err
 	}

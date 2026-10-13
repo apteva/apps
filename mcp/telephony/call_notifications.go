@@ -188,7 +188,7 @@ func (a *App) handleCallNotifications(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		} else if heartbeatDue {
-			if write(": keepalive\n\n") != nil {
+			if send(`{"type":"heartbeat"}`) != nil {
 				return
 			}
 		}

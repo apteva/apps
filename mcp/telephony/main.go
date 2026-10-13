@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.12.19
+version: 0.12.20
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -449,6 +449,7 @@ type App struct {
 	mediaBridges      carrierBridgeRegistry
 	callReads         callReadCache
 	inventoryReads    inventoryReadCache
+	policyReads       phonePolicyCache
 	outboundHints     outboundInventoryHints
 	admissionMu       sync.RWMutex
 	audioPeerHasher   audioPeerHasher
@@ -461,6 +462,7 @@ type App struct {
 	decisionStopping  bool
 	aiRecovering      map[string]bool
 	dispatchMu        sync.Mutex
+	dispatchCancel    context.CancelFunc
 	burstMu           sync.Mutex
 	dispatcher        *routingDispatcher
 	callChanges       callChangeHub
@@ -628,12 +630,11 @@ func (a *App) Workers() []sdk.Worker {
 		{Name: "carrier-telemetry", Schedule: "@every 1s", Run: a.runCarrierTelemetryTick},
 		{Name: "carrier-activations", Schedule: "@every 1s", Run: a.runCarrierActivations},
 		{Name: "ai-handoffs", Schedule: "@every 1s", Run: a.runAIHandoffs},
-		{Name: "routing-decisions", Schedule: "@every 1s", Run: a.runDecisionTick},
-		{Name: "ring-groups", Schedule: "@every 1s", Run: a.runRingGroupTick},
-		{Name: "ring-legs", Schedule: "@every 1s", Run: a.runRingLegTick},
+		{Name: "routing-reconciliation", Schedule: "@every 30s", Run: a.runRoutingReconciliation},
+		{Name: "historical-housekeeping", Schedule: "@every 1m", Run: a.runHousekeeping},
 		{
 			Name:     "call-auto-answer",
-			Schedule: "@every 1s",
+			Schedule: "@every 30s",
 			Run:      a.runAutoAnswerTick,
 		},
 		{
@@ -4840,7 +4841,16 @@ func (c *callsDB) recent(project string, limit int) ([]callRow, error) {
 }
 
 func (c *callsDB) listWhere(where string, argv ...any) ([]callRow, error) {
-	rows, err := c.db.Query(`SELECT `+callSelectColumns+` FROM calls WHERE `+where, argv...)
+	return c.listWhereOn("", where, argv...)
+}
+
+// Index names are compile-time application constants, never request input.
+func (c *callsDB) listWhereOn(index, where string, argv ...any) ([]callRow, error) {
+	source := "calls"
+	if index != "" {
+		source += " INDEXED BY " + index
+	}
+	rows, err := c.db.Query(`SELECT `+callSelectColumns+` FROM `+source+` WHERE `+where, argv...)
 	if err != nil {
 		return nil, err
 	}

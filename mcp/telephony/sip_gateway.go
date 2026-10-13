@@ -78,6 +78,7 @@ type sipSession struct {
 	remoteTarget  sip.Uri
 	timer         sipSessionTimer
 	timerUpdated  time.Time
+	timerWake     chan struct{}
 	refreshCancel context.CancelFunc
 }
 
@@ -493,7 +494,7 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 	sessionCtx, cancel := context.WithCancel(g.ctx)
 	session := &sipSession{
 		gateway: g, dialog: dialog, route: &routeForCall, call: call, offer: offer,
-		ctx: sessionCtx, cancel: cancel, inviteTx: transaction, initialACK: make(chan struct{}), remoteTarget: request.Contact().Address, timer: timer,
+		timerWake: make(chan struct{}, 1), ctx: sessionCtx, cancel: cancel, inviteTx: transaction, initialACK: make(chan struct{}), remoteTarget: request.Contact().Address, timer: timer,
 	}
 	session.diagnostics = g.app.newSIPDiagnostics(call, dialog.ID)
 	session.diagnostics.codecs(request.Body(), settings.Codecs, offer.Codec, "inbound_offer")

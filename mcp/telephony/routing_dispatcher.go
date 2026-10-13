@@ -148,6 +148,8 @@ func (d *routingDispatcher) close() {
 func (a *App) startRoutingDispatcher(ctx *sdk.AppCtx) {
 	a.dispatchMu.Lock()
 	defer a.dispatchMu.Unlock()
+	workCtx, cancel := context.WithCancel(context.Background())
+	a.dispatchCancel = cancel
 	a.eventDispatcher = newRoutingDispatcher(func(project string) time.Time {
 		done, admissionErr := a.runtimeBegin(false)
 		if admissionErr != nil {
@@ -166,21 +168,35 @@ func (a *App) startRoutingDispatcher(ctx *sdk.AppCtx) {
 		}
 		defer done()
 		scoped := ctx.WithProject(project)
+		if workCtx.Err() != nil {
+			return time.Time{}
+		}
+		var before int64
+		_ = scoped.AppDB().QueryRow(`SELECT revision FROM telephony_read_versions WHERE project_id=?`, project).Scan(&before)
 		// These use the same atomic claims as periodic recovery, including when a
 		// periodic worker runs concurrently with an immediate wake.
-		if err := a.runDecisionTick(context.Background(), scoped); err != nil {
+		if err := a.runDecisionTick(workCtx, scoped); err != nil {
 			ctx.Logger().Warn("routing dispatch", "project", project, "err", err)
 		}
-		if err := a.runRingGroupTick(context.Background(), scoped); err != nil {
+		if err := a.runRingGroupTick(workCtx, scoped); err != nil {
 			ctx.Logger().Warn("ring dispatch", "project", project, "err", err)
 		}
-		if err := a.runRoutingEffects(context.Background(), scoped); err != nil {
+		if err := a.runRoutingEffects(workCtx, scoped); err != nil {
 			ctx.Logger().Warn("routing effects", "project", project, "err", err)
 		}
 		if err := a.flushDecisionMarks(project); err != nil {
 			ctx.Logger().Warn("routing outcomes", "project", project, "err", err)
 		}
-		a.callChanges.notify(project)
+		if err := a.runRingLegTick(workCtx, scoped); err != nil {
+			ctx.Logger().Warn("ring leg dispatch", "project", project, "err", err)
+		}
+		if err := a.runAutoAnswerTick(workCtx, scoped); err != nil {
+			ctx.Logger().Warn("answer dispatch", "project", project, "err", err)
+		}
+		var after int64
+		if err := scoped.AppDB().QueryRow(`SELECT revision FROM telephony_read_versions WHERE project_id=?`, project).Scan(&after); err == nil && after != before {
+			a.callChanges.notify(project)
+		}
 		a.dispatchMu.Lock()
 		if a.eventDispatcher != nil {
 			a.eventDispatcher.wake(project)
@@ -191,25 +207,27 @@ func (a *App) startRoutingDispatcher(ctx *sdk.AppCtx) {
 		err := ctx.AppDB().QueryRow(`SELECT COALESCE(MIN(deadline),'') FROM (
    SELECT CASE WHEN status='pending' AND not_before<>'' THEN MIN(not_before,deadline_at) ELSE deadline_at END AS deadline FROM routing_decisions WHERE project_id=? AND status IN ('pending','running')
    UNION ALL SELECT next_attempt_at FROM routing_effects WHERE project_id=? AND status='pending'
+   UNION ALL SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now','+1 seconds') FROM call_ring_runs WHERE project_id=? AND status IN ('ringing','exhausted')
+   UNION ALL SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now','+1 seconds') FROM call_legs INDEXED BY idx_call_legs_active WHERE project_id=? AND status NOT IN ('finished','canceled')
+   UNION ALL SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now','+1 seconds') FROM calls INDEXED BY idx_calls_pending_answer WHERE project_id=? AND direction='inbound' AND status='pending' AND handling_reason=''
    UNION ALL SELECT o.expires_at FROM call_offers o JOIN calls c ON c.id=o.call_id WHERE o.project_id=? AND o.status='offered' AND c.status='pending'
-  )`, project, project, project).Scan(&raw)
-		if err != nil || raw == "" {
-			return time.Time{}
-		}
-		due, err := time.Parse(time.RFC3339Nano, raw)
+  )`, project, project, project, project, project, project).Scan(&raw)
 		if err != nil {
+			return time.Now().Add(time.Second)
+		}
+		if raw == "" {
 			return time.Time{}
 		}
-		// An already-expired record retained by a transient error must not spin.
-		if !due.After(time.Now()) {
-			return time.Now().Add(100 * time.Millisecond)
-		}
-		return due
+		return boundedRoutingDeadline(raw, time.Now())
 	})
 }
 func (a *App) stopRoutingDispatcher() {
 	a.dispatchMu.Lock()
 	a.decisionStopping = true
+	if a.dispatchCancel != nil {
+		a.dispatchCancel()
+		a.dispatchCancel = nil
+	}
 	d := a.dispatcher
 	events := a.eventDispatcher
 	a.dispatcher = nil
@@ -266,4 +284,35 @@ func (a *App) routingCapacityReleased() {
 	}
 	d.mu.Unlock()
 	d.signal()
+}
+
+// Startup/overflow reconciliation is deliberately slower than live timers.
+// Commits and active ring deadlines drive the primary dispatcher.
+func (a *App) runRoutingReconciliation(c context.Context, ctx *sdk.AppCtx) error {
+	a.dispatchMu.Lock()
+	d := a.dispatcher
+	if d != nil {
+		d.wake(ctx.CurrentProject())
+	}
+	a.dispatchMu.Unlock()
+	if d != nil {
+		return nil
+	}
+	if err := a.runDecisionTick(c, ctx); err != nil {
+		return err
+	}
+	if err := a.runRingGroupTick(c, ctx); err != nil {
+		return err
+	}
+	return a.runRingLegTick(c, ctx)
+}
+
+// Retained expired/invalid deadlines are retryable evidence, not a 10Hz loop.
+// A fresh commit still overrides this backoff immediately through wake().
+func boundedRoutingDeadline(raw string, now time.Time) time.Time {
+	due, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil || !due.After(now) {
+		return now.Add(time.Second)
+	}
+	return due
 }

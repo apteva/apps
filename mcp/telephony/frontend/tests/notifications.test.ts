@@ -76,3 +76,16 @@ test("failed refresh reports HTTP status, elapsed time, and trigger without stop
   f.setListStatus(200);await until(()=>f.listCount>=2);
  } finally {watch.close();}
 });
+
+test("healthy push and heartbeat suppress fast polls; stream failure restores fallback",async()=>{
+ const f=fixture();const watch=f.client.watchCalls(()=>{}, {intervalMs:100});
+ try{
+  await until(()=>f.listCount===1&&f.controllers.length===1);
+  f.emit();await until(()=>f.listCount===2);
+  for(let i=0;i<4;i++){f.emit("heartbeat");await Bun.sleep(100);}
+  expect(f.listCount).toBe(2);
+  f.controllers.at(-1)!.error(new Error("lost transport"));
+  await until(()=>f.listCount>=3);
+  expect(f.peak).toBe(1);
+ }finally{watch.close();}
+});

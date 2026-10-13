@@ -1,0 +1,239 @@
+{
+  "control": "telephony/v0.12.19",
+  "candidate": "0.12.20",
+  "fixture": {
+    "historical_calls": 12941,
+    "stored_recordings": 5906,
+    "live_calls": 0,
+    "carrier_network_requests": 0
+  },
+  "before_workers": [
+    {
+      "Name": "sip-resource-retirement",
+      "Schedule": "@every 30s",
+      "WallMS": 0.43052766666666664,
+      "CPU_MS": 0.42799999999999727,
+      "Changes": 0
+    },
+    {
+      "Name": "ai-call-policies",
+      "Schedule": "@every 1s",
+      "WallMS": 0.04030533333333333,
+      "CPU_MS": 0.04033333333334591,
+      "Changes": 0
+    },
+    {
+      "Name": "carrier-media-recovery",
+      "Schedule": "@every 1s",
+      "WallMS": 0.09590266666666666,
+      "CPU_MS": 0.09600000000000364,
+      "Changes": 0
+    },
+    {
+      "Name": "audio-telemetry",
+      "Schedule": "@every 5s",
+      "WallMS": 0.10041666666666667,
+      "CPU_MS": 0.16266666666666652,
+      "Changes": 0
+    },
+    {
+      "Name": "carrier-telemetry",
+      "Schedule": "@every 1s",
+      "WallMS": 0.027083333333333334,
+      "CPU_MS": 0.04800000000000182,
+      "Changes": 0
+    },
+    {
+      "Name": "carrier-activations",
+      "Schedule": "@every 1s",
+      "WallMS": 3.6853333333333333,
+      "CPU_MS": 3.6779999999999973,
+      "Changes": 0
+    },
+    {
+      "Name": "ai-handoffs",
+      "Schedule": "@every 1s",
+      "WallMS": 0.034305666666666665,
+      "CPU_MS": 0.03466666666668061,
+      "Changes": 0
+    },
+    {
+      "Name": "routing-decisions",
+      "Schedule": "@every 1s",
+      "WallMS": 0.12669466666666668,
+      "CPU_MS": 0.16066666666667592,
+      "Changes": 0
+    },
+    {
+      "Name": "ring-groups",
+      "Schedule": "@every 1s",
+      "WallMS": 0.022514,
+      "CPU_MS": 0.02666666666666136,
+      "Changes": 0
+    },
+    {
+      "Name": "ring-legs",
+      "Schedule": "@every 1s",
+      "WallMS": 0.03384733333333333,
+      "CPU_MS": 0.034000000000010765,
+      "Changes": 0
+    },
+    {
+      "Name": "call-auto-answer",
+      "Schedule": "@every 1s",
+      "WallMS": 4.8562916666666665,
+      "CPU_MS": 4.834333333333329,
+      "Changes": 0
+    },
+    {
+      "Name": "call-lifecycle",
+      "Schedule": "@every 5s",
+      "WallMS": 44.123958333333334,
+      "CPU_MS": 43.91400000000001,
+      "Changes": 12941
+    },
+    {
+      "Name": "recording-import",
+      "Schedule": "@every 5s",
+      "WallMS": 7.426153,
+      "CPU_MS": 7.458666666666697,
+      "Changes": 0
+    }
+  ],
+  "after_workers_and_probes": [
+    {
+      "name": "credentials_before",
+      "iterations": 30,
+      "wall_ms_per_operation": 28.622545833333334,
+      "cpu_ms_per_operation": 28.619833333333336,
+      "allocated_bytes_per_operation": 200,
+      "allocations_per_operation": 8
+    },
+    {
+      "name": "housekeeping_after",
+      "iterations": 100,
+      "wall_ms_per_operation": 0.09994167,
+      "cpu_ms_per_operation": 0.11301000000000158,
+      "allocated_bytes_per_operation": 2556,
+      "allocations_per_operation": 65
+    },
+    {
+      "name": "idle_sip-resource-retirement",
+      "iterations": 30,
+      "wall_ms_per_operation": 0.01788333333333333,
+      "cpu_ms_per_operation": 0.018133333333328967,
+      "allocated_bytes_per_operation": 616,
+      "allocations_per_operation": 19
+    },
+    {
+      "name": "idle_ai-call-policies",
+      "iterations": 30,
+      "wall_ms_per_operation": 0.021773599999999997,
+      "cpu_ms_per_operation": 0.02193333333333006,
+      "allocated_bytes_per_operation": 952,
+      "allocations_per_operation": 24
+    },
+    {
+      "name": "idle_carrier-media-recovery",
+      "iterations": 30,
+      "wall_ms_per_operation": 0.0430625,
+      "cpu_ms_per_operation": 0.04329999999999927,
+      "allocated_bytes_per_operation": 1152,
+      "allocations_per_operation": 34
+    },
+    {
+      "name": "idle_audio-telemetry",
+      "iterations": 30,
+      "wall_ms_per_operation": 0.0354764,
+      "cpu_ms_per_operation": 0.05546666666666624,
+      "allocated_bytes_per_operation": 4644,
+      "allocations_per_operation": 81
+    },
+    {
+      "name": "idle_carrier-telemetry",
+      "iterations": 30,
+      "wall_ms_per_operation": 0.0053013999999999995,
+      "cpu_ms_per_operation": 0.006333333333335152,
+      "allocated_bytes_per_operation": 12223,
+      "allocations_per_operation": 5
+    },
+    {
+      "name": "idle_carrier-activations",
+      "iterations": 30,
+      "wall_ms_per_operation": 0.05641943333333333,
+      "cpu_ms_per_operation": 0.05660000000000309,
+      "allocated_bytes_per_operation": 1129,
+      "allocations_per_operation": 35
+    },
+    {
+      "name": "idle_ai-handoffs",
+      "iterations": 30,
+      "wall_ms_per_operation": 0.020131966666666667,
+      "cpu_ms_per_operation": 0.020300000000005033,
+      "allocated_bytes_per_operation": 960,
+      "allocations_per_operation": 26
+    },
+    {
+      "name": "idle_routing-reconciliation",
+      "iterations": 30,
+      "wall_ms_per_operation": 0.15435833333333335,
+      "cpu_ms_per_operation": 0.175933333333334,
+      "allocated_bytes_per_operation": 4200,
+      "allocations_per_operation": 111
+    },
+    {
+      "name": "idle_historical-housekeeping",
+      "iterations": 30,
+      "wall_ms_per_operation": 0.09318053333333334,
+      "cpu_ms_per_operation": 0.10380000000000109,
+      "allocated_bytes_per_operation": 2051,
+      "allocations_per_operation": 65
+    },
+    {
+      "name": "idle_call-auto-answer",
+      "iterations": 30,
+      "wall_ms_per_operation": 0.015518066666666667,
+      "cpu_ms_per_operation": 0.01583333333333788,
+      "allocated_bytes_per_operation": 560,
+      "allocations_per_operation": 18
+    },
+    {
+      "name": "idle_call-lifecycle",
+      "iterations": 30,
+      "wall_ms_per_operation": 0.3442625,
+      "cpu_ms_per_operation": 0.34323333333333417,
+      "allocated_bytes_per_operation": 22472,
+      "allocations_per_operation": 287
+    },
+    {
+      "name": "idle_recording-import",
+      "iterations": 30,
+      "wall_ms_per_operation": 0.23394166666666666,
+      "cpu_ms_per_operation": 0.3338666666666692,
+      "allocated_bytes_per_operation": 8567,
+      "allocations_per_operation": 179
+    },
+    {
+      "name": "principal_before",
+      "iterations": 300,
+      "wall_ms_per_operation": 0.24064194333333333,
+      "cpu_ms_per_operation": 0.31643000000000027,
+      "allocated_bytes_per_operation": 131186,
+      "allocations_per_operation": 886
+    },
+    {
+      "name": "principal_after",
+      "iterations": 300,
+      "wall_ms_per_operation": 0.008751526666666667,
+      "cpu_ms_per_operation": 0.008770000000000285,
+      "allocated_bytes_per_operation": 1652,
+      "allocations_per_operation": 25
+    }
+  ],
+  "limitations": [
+    "Local synthetic SQLite fixture, not a production profile.",
+    "Before worker samples: 3; after worker samples: 30.",
+    "Process CPU measurements include Go/SQLite work; historical row matches are not physical disk writes.",
+    "Archive costs do not establish an unrestricted concurrent-call capacity."
+  ]
+}

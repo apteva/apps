@@ -402,14 +402,26 @@ func (a *App) tickRingRun(ctx *sdk.AppCtx, runID, callID string) error {
 	if err != nil {
 		return err
 	}
+	var before int64
+	if err = tx.QueryRow(`SELECT COALESCE((SELECT revision FROM telephony_read_versions WHERE project_id=?),0)`, ctx.CurrentProject()).Scan(&before); err != nil {
+		tx.Rollback()
+		return err
+	}
 	if err = advanceRingRunTx(tx, runID, time.Now()); err != nil {
+		tx.Rollback()
+		return err
+	}
+	var after int64
+	if err = tx.QueryRow(`SELECT COALESCE((SELECT revision FROM telephony_read_versions WHERE project_id=?),0)`, ctx.CurrentProject()).Scan(&after); err != nil {
 		tx.Rollback()
 		return err
 	}
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	a.callChanges.notify(ctx.CurrentProject())
+	if before != after {
+		a.callChanges.notify(ctx.CurrentProject())
+	}
 	var status, overflow string
 	if err = ctx.AppDB().QueryRow(`SELECT status,overflow_node_id FROM call_ring_runs WHERE id=?`, runID).Scan(&status, &overflow); err != nil {
 		return err
