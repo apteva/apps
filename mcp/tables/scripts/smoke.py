@@ -211,7 +211,50 @@ with tempfile.TemporaryDirectory(prefix="tables-smoke-") as temp:
         records=request("GET", "/diagnostics?request_id=statement-probe&limit=10")["diagnostics"]
         assert len(records)==2 and records[0]["statement_cache"]=="hit" and records[1]["statement_cache"]=="miss", records
         assert records[1]["statement_prepare_ms"]>0 and records[0]["statement_execute_ms"]>0, records
-        print("PASS: real HTTP/MCP authentication, exact numbers, cursors, batch array references before/after restart, optimistic updates, automatic restart migration and watched projection recovery, filter-leading indexes, worker metrics, diagnostics cursor/detail/summary APIs, additive history/statement timing migrations and compiled statement miss/hit phases")
+        # Rehearse additive 021 against existing projections and diagnostics.
+        stop()
+        with sqlite3.connect(env["DB_PATH"]) as db:
+            triggers=[r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'projection_change_%'")]
+            for trigger in triggers:
+                db.execute('DROP TRIGGER "'+trigger+'"')
+            db.execute("DROP INDEX projection_batch_fair_idx")
+            db.execute("DROP TABLE projection_staged_heads")
+            for column in ("next_due_at_ms","next_queued_at_ms","batch_cutoff_id","batch_cutoff_revision"):
+                db.execute(f'ALTER TABLE projection_queue DROP COLUMN {column}')
+            db.execute("ALTER TABLE projection_definitions DROP COLUMN last_batch_started_ms")
+            db.execute("ALTER TABLE projection_changes DROP COLUMN captured_at_ms")
+            db.execute("DELETE FROM _migrations WHERE filename='021_projection_batches.sql'")
+        start()
+        await_projection(7)
+        assert mcp("projections_describe", {"name":"measurement_totals"})["refresh_mode"]=="scope"
+        mcp("indexes_create", {"table":"measurements","name":"by_centre","columns":["centre_id"]})
+        mcp("projections_create", {"name":"measurement_batch","version":1,
+            "sql":"SELECT centre_id,SUM(value) AS total FROM {measurements} GROUP BY centre_id",
+            "batch_scope_sql":"WITH dirty AS MATERIALIZED (SELECT json_extract(value,'$.centre_id') AS centre_id FROM json_each(?)) SELECT m.centre_id,SUM(m.value) AS total FROM dirty d JOIN {measurements} m ON m.centre_id IS d.centre_id GROUP BY m.centre_id",
+            "refresh_mode":"projection_batch","min_refresh_interval_seconds":60,
+            "source_tables":["measurements"],"scope_columns":["centre_id"],
+            "result_columns":[{"name":"centre_id","type":"text"},{"name":"total","type":"number"}]})
+        def await_batch(total):
+            for _ in range(200):
+                status=mcp("projections_status", {"name":"measurement_batch"})
+                if status["ready"]:
+                    rows=mcp("tables_query", {"sql":"SELECT total FROM {measurement_batch}"})["rows"]
+                    if len(rows)==1 and rows[0]["total"]==total:
+                        return status
+                time.sleep(.05)
+            raise AssertionError(f"Batch did not publish {total}: {status}")
+        await_batch(7)
+        mcp("rows_update", {"table":"measurements","id":measurement_id,"fields":{"value":8}})
+        window=mcp("projections_status", {"name":"measurement_batch"})
+        assert not window["ready"] and window["batch_deadline_at"], window
+        assert mcp("tables_query", {"sql":"SELECT total FROM {measurement_batch}"})["rows"][0]["total"]==7
+        stop()
+        start()
+        restored=mcp("projections_status", {"name":"measurement_batch"})
+        assert restored["batch_deadline_at"]==window["batch_deadline_at"] and not restored["ready"], restored
+        mcp("projections_refresh", {"name":"measurement_batch","scope":{"centre_id":"a"},"force":True})
+        await_batch(8)
+        print("PASS: real HTTP/MCP authentication, exact numbers, cursors, batch array references before/after restart, optimistic updates, automatic restart migration and watched projection recovery, filter-leading indexes, worker metrics, diagnostics cursor/detail/summary APIs, additive history/statement timing migrations and compiled statement miss/hit phases, additive batch migration, durable collection windows and grouped forced publication")
     finally:
         stop()
         log.close()

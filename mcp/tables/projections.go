@@ -16,6 +16,8 @@ import (
 
 const (
 	projectionAllScope               = "__all__"
+	projectionBatchScope             = "__batch__"
+	projectionBatchMaxScopes         = 4096
 	projectionChangeBatch            = 512
 	projectionQueueBatch             = 64
 	projectionWorkerEvery            = "@every 1s"
@@ -47,6 +49,7 @@ type projectionPhaseMetrics struct {
 }
 type projectionQueuedRevision struct{ Revision, Pending int64 }
 type projectionQueueItem struct {
+	FullBatch                                             bool
 	CoveredScopes                                         map[string]projectionQueuedRevision
 	ProjectionID                                          int64
 	ProjectID, ScopeKey                                   string
@@ -273,7 +276,7 @@ func (a *App) projectionTools() []sdk.Tool {
 	}
 }
 func projectionOptionSchema() map[string]any {
-	out := map[string]any{"params": map[string]any{"type": "array"}, "scope_sql": map[string]any{"type": "string"}, "scope_params": map[string]any{"type": "array", "items": map[string]any{"oneOf": []any{map[string]any{"type": "string"}, map[string]any{"type": "object", "properties": map[string]any{"scope_column": map[string]any{"type": "string"}, "boundary": map[string]any{"type": "string", "enum": []string{"start", "end"}}, "timezone": map[string]any{"type": "string"}}, "required": []string{"scope_column", "boundary", "timezone"}}}}}, "scope_rules": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}, "coverage_from": map[string]any{"type": "string"}, "coverage_to": map[string]any{"type": "string"}}
+	out := map[string]any{"refresh_mode": map[string]any{"type": "string", "enum": []string{"scope", "projection_batch"}}, "batch_scope_sql": map[string]any{"type": "string", "description": "Multi-scope result SQL. First ? is a bound JSON array of scope objects, followed by params. Restrict source reads inside this SQL."}, "params": map[string]any{"type": "array"}, "scope_sql": map[string]any{"type": "string"}, "scope_params": map[string]any{"type": "array", "items": map[string]any{"oneOf": []any{map[string]any{"type": "string"}, map[string]any{"type": "object", "properties": map[string]any{"scope_column": map[string]any{"type": "string"}, "boundary": map[string]any{"type": "string", "enum": []string{"start", "end"}}, "timezone": map[string]any{"type": "string"}}, "required": []string{"scope_column", "boundary", "timezone"}}}}}, "scope_rules": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}, "coverage_from": map[string]any{"type": "string"}, "coverage_to": map[string]any{"type": "string"}}
 	out["source_dependencies"] = map[string]any{
 		"type": "array", "maxItems": 64,
 		"description": "Optional watched inputs per declared source; omitted sources keep all-column invalidation. Include every calculation, filter, join and scope/mapping input. Changes require a replacement projection version.",
@@ -590,6 +593,9 @@ func (a *App) toolProjectionsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if err != nil || interval < 0 || interval > 86400 {
 		return nil, errf("min_refresh_interval_seconds must be 0..86400")
 	}
+	if p.Options.RefreshMode == "projection_batch" && interval < 1 {
+		return nil, errf("projection_batch interval must be positive")
+	}
 	p.Options.Interval = interval
 	raw, _ := json.Marshal(p.Options)
 	tx, err := beginWrite(ctx)
@@ -600,7 +606,11 @@ func (a *App) toolProjectionsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if _, err := tx.Exec(`UPDATE projection_definitions SET options=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, string(raw), p.ID); err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(`UPDATE projection_queue SET due_at_ms=MAX(?,COALESCE((SELECT computed_at_ms FROM `+quote(projectionHeads(p))+` h WHERE h.scope_key=projection_queue.scope_key),(SELECT published_at_ms FROM projection_definitions WHERE id=?),0)+?) WHERE projection_id=? AND claimed_until IS NULL AND forced=0`, a.projectionTime().UnixMilli(), p.ID, interval*1000, p.ID); err != nil {
+	if p.Options.RefreshMode == "projection_batch" {
+		if _, err := tx.Exec(`UPDATE projection_queue SET due_at_ms=MIN(due_at_ms,queued_at_ms+?),next_due_at_ms=CASE WHEN next_due_at_ms>0 THEN MIN(next_due_at_ms,next_queued_at_ms+?) ELSE 0 END WHERE projection_id=? AND scope_key=? AND forced=0`, interval*1000, interval*1000, p.ID, projectionBatchScope); err != nil {
+			return nil, err
+		}
+	} else if _, err := tx.Exec(`UPDATE projection_queue SET due_at_ms=MAX(?,COALESCE((SELECT computed_at_ms FROM `+quote(projectionHeads(p))+` h WHERE h.scope_key=projection_queue.scope_key),(SELECT published_at_ms FROM projection_definitions WHERE id=?),0)+?) WHERE projection_id=? AND claimed_until IS NULL AND forced=0`, a.projectionTime().UnixMilli(), p.ID, interval*1000, p.ID); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {

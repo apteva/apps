@@ -1,4 +1,4 @@
-# Tables (v0.2.17)
+# Tables (v0.2.18)
 
 Typed-row database for Apteva agents and human teams. The row-shaped
 sibling to the `storage` app.
@@ -247,3 +247,49 @@ See [PROJECTIONS.md](PROJECTIONS.md) for scoped SQL, dependency mappings, interv
 indexes, coverage, replacement activation and upgrade behavior. See
 [PROJECTION_VALIDATION.md](PROJECTION_VALIDATION.md) for correctness, resource and
 file-backed benchmark coverage.
+
+## Projection-wide collection windows (0.2.18)
+
+Existing projections keep their per-scope cooldown. Opt in on a new immutable
+version (and build/activate it normally) with:
+
+```json
+{
+  "refresh_mode": "projection_batch",
+  "min_refresh_interval_seconds": 60,
+  "batch_scope_sql": "WITH dirty AS MATERIALIZED (SELECT json_extract(value, '$.centre_id') AS centre_id FROM json_each(?)) SELECT e.centre_id, SUM(e.amount) AS total FROM dirty d JOIN {events} e ON e.centre_id IS d.centre_id GROUP BY e.centre_id"
+}
+```
+
+Supply the usual full-build `sql`, `source_tables`, `scope_columns` and
+`result_columns`. The first `?` in `batch_scope_sql` receives a bound JSON array
+such as `[{"centre_id":"a"},{"centre_id":"b"}]`; static `params` follow it.
+Composite scopes include every declared scope field, preserving nulls and exact
+numbers. Derived dates/timezones and dependency mappings retain the existing
+`scope_rules` behavior. Multi-scope SQL must return the declared result columns
+and only affected scopes. Scopes returning no rows are cleared on publication.
+
+Create source indexes matching the dirty-set join, and apply restrictions
+inside expensive CTEs. Grouped scheduling alone does not make an unindexed SQL
+plan efficient. The regression query checks indexed source seeks.
+
+The first relevant source mutation opens a durable fixed window. When eligible,
+Tables freezes its change cutoff, finishes mapping that cutoff, and runs one
+multi-scope calculation against a consistent source snapshot. Changes after the
+cutoff open a separate window and remain pending even if they share a scope.
+Rows and head metadata are staged in bounded batches; one atomic switch publishes
+the complete affected set and queues one logical `projection.ready` event.
+Retries retain event IDs; delivery is acknowledged and may be repeated.
+Initial builds still run immediately. More than 4,096 dirty scopes use a full
+rebuild rather than an unbounded parameter set; it keeps the same resource caps.
+
+`projections_status` exposes `batch_window_started_at`, `batch_deadline_at`,
+`batch_cutoff_change_id`, and `next_batch_deadline_at`. The deadline is eligibility,
+not a promise of publication at exactly 60 seconds: mapping, capacity waiting and
+calculation have their own timings. `max_projection_workers` and
+`max_total_concurrency` still bound execution; default projection concurrency is
+one. Waiting projections rotate fairly rather than letting a hot projection
+repeatedly overtake them. Use `projections_refresh` with `force:true` for an
+administrative bypass, or `projections_update` to change the interval (an open
+window cannot be postponed). Changing SQL or refresh mode requires a replacement
+version. Older releases cannot operate the new batching mode.

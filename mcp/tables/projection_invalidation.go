@@ -42,7 +42,7 @@ func (a *App) validateProjection(ctx *sdk.AppCtx, p *projectionDefinition) error
 			return errf("scope timezone requires boundary")
 		}
 	}
-	if p.Options.ScopeSQL != "" && len(p.ScopeCols) == 0 {
+	if (p.Options.ScopeSQL != "" || p.Options.BatchScopeSQL != "") && len(p.ScopeCols) == 0 {
 		return errf("scope_sql requires scope_columns")
 	}
 	sources := map[string]*Table{}
@@ -88,6 +88,13 @@ func (a *App) validateProjection(ctx *sdk.AppCtx, p *projectionDefinition) error
 			bound  []any
 			result bool
 		}{p.Options.ScopeSQL, append(make([]any, len(p.Options.ScopeParams)), p.Options.Params...), true})
+	}
+	if p.Options.BatchScopeSQL != "" {
+		queries = append(queries, struct {
+			text   string
+			bound  []any
+			result bool
+		}{p.Options.BatchScopeSQL, append([]any{"[]"}, p.Options.Params...), true})
 	}
 	mapped := map[string]bool{}
 	for _, rule := range p.Options.ScopeRules {
@@ -288,7 +295,7 @@ func rebuildProjectionTriggersTx(tx *writeTx, tableID int64) error {
 			}
 		}
 		dependencies = append(dependencies, dep)
-		queries := []string{sqlText, options.ScopeSQL}
+		queries := []string{sqlText, options.ScopeSQL, options.BatchScopeSQL}
 		for _, r := range options.ScopeRules {
 			queries = append(queries, r.SQL)
 		}
@@ -381,6 +388,10 @@ func rebuildProjectionTriggersTx(tx *writeTx, tableID int64) error {
 		predicates = append(predicates, predicate)
 		cases = append(cases, fmt.Sprintf("WHEN %d THEN %s", dep.id, predicate))
 	}
+	var hasBatchSchema bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('projection_queue') WHERE name='next_due_at_ms')`).Scan(&hasBatchSchema); err != nil {
+		return err
+	}
 	for _, op := range []string{"insert", "update", "delete"} {
 		old, next, rowID := "NULL", jsonExpr("NEW"), "NEW.id"
 		when := ""
@@ -397,8 +408,15 @@ func rebuildProjectionTriggersTx(tx *writeTx, tableID int64) error {
 		}
 		relevance := fmt.Sprintf(`(SELECT json_group_array(p.id) FROM projection_definitions p JOIN projection_sources s ON s.projection_id=p.id WHERE s.table_id=%d AND p.status IN ('active','paused','building') AND (%s))`, tableID, filter)
 		capture := fmt.Sprintf(`INSERT INTO projection_changes(project_id,table_id,row_id,operation,old_values,new_values,relevant_projection_ids) VALUES('%s',%d,%s,'%s',%s,%s,%s);`, strings.ReplaceAll(pid, "'", "''"), tableID, rowID, op, old, next, relevance)
+		if hasBatchSchema {
+			capture = fmt.Sprintf(`INSERT INTO projection_changes(project_id,table_id,row_id,operation,old_values,new_values,relevant_projection_ids,captured_at_ms) VALUES('%s',%d,%s,'%s',%s,%s,%s,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER));`, strings.ReplaceAll(pid, "'", "''"), tableID, rowID, op, old, next, relevance)
+		}
 		relevant := fmt.Sprintf(`UPDATE projection_definitions SET latest_relevant_change=(SELECT MAX(change_id) FROM projection_changes WHERE table_id=%d) WHERE id IN (SELECT value FROM json_each((SELECT relevant_projection_ids FROM projection_changes WHERE table_id=%d ORDER BY change_id DESC LIMIT 1)));`, tableID, tableID)
-		q := fmt.Sprintf("CREATE TRIGGER %s AFTER %s ON %s%s BEGIN %s %s END", quote(fmt.Sprintf("projection_change_%d_%s", tableID, op)), strings.ToUpper(op), quote(physical), when, capture, relevant)
+		batchCapture := ""
+		if hasBatchSchema {
+			batchCapture = projectionBatchCaptureSQL(tableID)
+		}
+		q := fmt.Sprintf("CREATE TRIGGER %s AFTER %s ON %s%s BEGIN %s %s END", quote(fmt.Sprintf("projection_change_%d_%s", tableID, op)), strings.ToUpper(op), quote(physical), when, capture, relevant+batchCapture)
 		if _, err := tx.Exec(q); err != nil {
 			return err
 		}
@@ -631,7 +649,11 @@ func (a *App) consumeProjectionChanges(ctx context.Context, app *sdk.AppCtx, pid
 			for key := range keys {
 				pending[key] = c.id
 			}
-			if len(pending) > projectionScopeCoalesceThreshold {
+			threshold := projectionScopeCoalesceThreshold
+			if p.Options.RefreshMode == "projection_batch" {
+				threshold = projectionBatchMaxScopes
+			}
+			if len(pending) > threshold {
 				// Once fan-out is broad, one complete snapshot is cheaper and safer
 				// than retaining hundreds of independent generations. The complete
 				// rebuild carries the newest watermark and coalesces later changes.
@@ -692,9 +714,34 @@ func (a *App) consumeProjectionChanges(ctx context.Context, app *sdk.AppCtx, pid
 				return err
 			}
 		}
+		if p.Options.RefreshMode == "projection_batch" {
+			// Bound retained dirty scopes across consumption pages; a full rebuild remains
+			// one calculation/publication and never drops changes arriving during a lease.
+			var count int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM projection_queue WHERE projection_id=? AND scope_key<>?`, p.ID, projectionBatchScope).Scan(&count); err != nil {
+				tx.Rollback()
+				return err
+			}
+			if count > projectionBatchMaxScopes {
+				if _, err := tx.ExecContext(ctx, `DELETE FROM projection_queue WHERE projection_id=? AND scope_key<>? AND (claimed_until IS NULL OR claimed_until<=CURRENT_TIMESTAMP)`, p.ID, projectionBatchScope); err != nil {
+					tx.Rollback()
+					return err
+				}
+				if err := enqueueProjectionTx(ctx, tx, p, projectionAllScope, changes[len(changes)-1].id, a.projectionTime().UnixMilli(), false); err != nil {
+					tx.Rollback()
+					return err
+				}
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `UPDATE projection_cursors SET last_change_id=? WHERE projection_id=?`, changes[len(changes)-1].id, p.ID); err != nil {
 			tx.Rollback()
 			return err
+		}
+		if p.Options.RefreshMode == "projection_batch" {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM projection_queue WHERE projection_id=? AND scope_key=? AND (claimed_until IS NULL OR claimed_until<=CURRENT_TIMESTAMP) AND NOT EXISTS(SELECT 1 FROM projection_queue q WHERE q.projection_id=? AND q.scope_key<>?) AND (SELECT last_change_id FROM projection_cursors WHERE projection_id=?)>=(SELECT latest_relevant_change FROM projection_definitions WHERE id=?)`, p.ID, projectionBatchScope, p.ID, projectionBatchScope, p.ID, p.ID); err != nil {
+				tx.Rollback()
+				return err
+			}
 		}
 		// A relevant source change with no dependent results needs no publication;
 		// mark the complete result current only if no queued scope remains.

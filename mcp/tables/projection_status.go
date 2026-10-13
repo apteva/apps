@@ -18,10 +18,10 @@ func (a *App) projectionStatus(app *sdk.AppCtx, p *projectionDefinition, key str
 	}
 	var pending, running, failed int
 	var due sql.NullInt64
-	query := `SELECT COUNT(*),COALESCE(SUM(CASE WHEN claimed_until>CURRENT_TIMESTAMP THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN last_error IS NOT NULL THEN 1 ELSE 0 END),0),MIN(CASE WHEN claimed_until IS NULL OR claimed_until<=CURRENT_TIMESTAMP THEN due_at_ms END) FROM projection_queue WHERE projection_id=?`
-	args := []any{p.ID}
+	query := `SELECT COALESCE(SUM(scope_key<>'__batch__'),0),COALESCE(SUM(CASE WHEN claimed_until>CURRENT_TIMESTAMP THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN last_error IS NOT NULL THEN 1 ELSE 0 END),0),MIN(CASE WHEN (claimed_until IS NULL OR claimed_until<=CURRENT_TIMESTAMP) AND (?<>'projection_batch' OR scope_key IN ('__batch__','__all__')) THEN due_at_ms END) FROM projection_queue WHERE projection_id=?`
+	args := []any{p.Options.RefreshMode, p.ID}
 	if key != "" {
-		query += ` AND (scope_key=? OR scope_key=?)`
+		query += ` AND (scope_key=? OR scope_key=? OR scope_key='__batch__')`
 		args = append(args, key, projectionAllScope)
 	}
 	if err := reader.QueryRowContext(ctx, query, args...).Scan(&pending, &running, &failed, &due); err != nil {
@@ -29,7 +29,26 @@ func (a *App) projectionStatus(app *sdk.AppCtx, p *projectionDefinition, key str
 	}
 	unconsumed := p.Latest > cursor
 	ready := p.Status != "retired" && p.Built && pending == 0 && p.Latest <= p.Published
-	out := map[string]any{"name": p.Name, "version": p.Version, "status": p.Status, "is_current": p.Current, "built": p.Built, "ready": ready, "stale": p.Built && !ready, "latest_relevant_change": p.Latest, "latest_change_id": p.Latest, "consumed_change_id": cursor, "published_change_id": p.Published, "pending_scopes": pending, "refresh_running": running > 0, "lag": max(int64(0), p.Latest-p.Published), "unconsumed_relevant_changes": unconsumed, "min_refresh_interval_seconds": p.Options.Interval, "last_failure": nil, "last_successful_publication_at": nil, "next_scheduled_refresh": nil, "coverage_from": nil, "coverage_to": nil}
+	out := map[string]any{"name": p.Name, "version": p.Version, "status": p.Status, "is_current": p.Current, "built": p.Built, "ready": ready, "stale": p.Built && !ready, "latest_relevant_change": p.Latest, "latest_change_id": p.Latest, "consumed_change_id": cursor, "published_change_id": p.Published, "pending_scopes": pending, "refresh_running": running > 0, "lag": max(int64(0), p.Latest-p.Published), "unconsumed_relevant_changes": unconsumed, "refresh_mode": p.Options.RefreshMode, "min_refresh_interval_seconds": p.Options.Interval, "last_failure": nil, "last_successful_publication_at": nil, "next_scheduled_refresh": nil, "coverage_from": nil, "coverage_to": nil}
+	if p.Options.RefreshMode == "projection_batch" {
+		var start, deadline, next sql.NullInt64
+		var cutoff int64
+		err := reader.QueryRowContext(ctx, `SELECT queued_at_ms,due_at_ms,next_due_at_ms,batch_cutoff_id FROM projection_queue WHERE projection_id=? AND scope_key='__batch__'`, p.ID).Scan(&start, &deadline, &next, &cutoff)
+		if err != nil && err != sql.ErrNoRows {
+			return nil, err
+		}
+		out["batch_cutoff_change_id"] = cutoff
+		out["batch_window_started_at"] = nil
+		out["batch_deadline_at"] = nil
+		out["next_batch_deadline_at"] = nil
+		if start.Valid {
+			out["batch_window_started_at"] = projectionTimestamp(start.Int64)
+			out["batch_deadline_at"] = projectionTimestamp(deadline.Int64)
+		}
+		if next.Valid && next.Int64 > 0 {
+			out["next_batch_deadline_at"] = projectionTimestamp(next.Int64)
+		}
+	}
 	out["phase_timings_ms"] = map[string]any{"queue": p.QueueMs, "worker_queue": p.WorkerQueueMs, "read_queue": p.ReadQueueMs, "calculation": p.CalculationMs, "write_lock": p.WriteLockMs, "staging": p.StagingMs, "publication": p.PublicationMs, "cleanup": p.CleanupMs}
 	out["queue_ms"] = p.QueueMs
 	out["worker_queue_ms"] = p.WorkerQueueMs
@@ -63,7 +82,7 @@ func (a *App) projectionStatus(app *sdk.AppCtx, p *projectionDefinition, key str
 	if due.Valid && p.Status != "paused" && p.Status != "retired" {
 		out["next_scheduled_refresh"] = projectionTimestamp(due.Int64)
 	}
-	queueSQL := `SELECT scope_key FROM projection_queue WHERE projection_id=?`
+	queueSQL := `SELECT scope_key FROM projection_queue WHERE projection_id=? AND scope_key<>'__batch__'`
 	queueArgs := []any{p.ID}
 	if key != "" {
 		queueSQL += ` AND scope_key IN (?,?)`

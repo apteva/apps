@@ -1,3 +1,12 @@
+# Tables v0.2.18 — projection-wide batching
+
+- Add opt-in `refresh_mode: projection_batch` with a positive `min_refresh_interval_seconds` and validated `batch_scope_sql`. The first bound parameter is a JSON array of scope objects; existing `params` follow. Existing definitions retain per-scope cooldown behavior.
+- Capture the first relevant event's window in its source transaction, deduplicate scopes durably, freeze a cutoff when due, and finish mapping that fixed cutoff without chasing continuous traffic. Events after the cutoff create a separate fixed follow-up deadline, preserved across calculation, publication, retries and restart.
+- Calculate affected scopes together from one source snapshot, preserve empty scopes and old/new invalidation, reject out-of-set results, and emit one logical durable ready event per atomic publication. A queue above 4,096 scopes conservatively coalesces to a bounded full rebuild.
+- Stage rows, scope heads and captured queue revisions in bounded row/byte transactions. Bulk-switch heads and acknowledge only covered revisions in the final transaction; reclaim staging metadata separately with valid lease protection. Existing publication/read/worker limits remain enforced.
+- Fairly rotate eligible batch projections by their last start under the existing configurable concurrency ceiling (one worker by default). Expose window start, deadline, frozen change cutoff and next-window deadline through status. Administrative force bypasses the window while preserving pause and resource limits; interval updates never postpone an open deadline.
+- Add grouped aggregate/index-seek, 1,500-scope continuous-cutoff, 42-projection fairness, concurrent-reader visibility, restart, empty scope, watched metadata, force/pause/retry and failure regressions. Migration 021 is additive; SDK v0.100.0 is pinned after verifying tag ancestry.
+
 # Tables v0.2.17 — compiled query reuse in snapshots
 
 - Reuse compiled `tables_query` statements through a separate 64-entry/1 MiB SQL-text LRU cache, with cancellable coalescing of concurrent misses, leased lifetimes, project/database-generation/SQL-epoch keys and existing schema/index/projection invalidation.

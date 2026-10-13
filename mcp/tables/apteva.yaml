@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.2.17
+version: 0.2.18
 description: |
+  v0.2.18 Adds opt-in projection-wide durable windows, multi-scope SQL,
+  bounded staging with atomic grouped publication and fair batch scheduling.
   v0.2.17 Reuses compiled tables_query statements, including snapshot batches,
   with bounded caches, per-call authorization and precise statement phase diagnostics.
   v0.2.16 Supports zero-based array positions in batch result references,
@@ -268,7 +270,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.2.17
+    ref: tables/v0.2.18
     entry: mcp/tables
   port: 8080
   health_check: /health

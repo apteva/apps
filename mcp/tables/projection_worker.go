@@ -16,6 +16,9 @@ import (
 )
 
 func enqueueProjectionTx(ctx context.Context, tx *sql.Tx, p *projectionDefinition, key string, change, now int64, force bool) error {
+	if p.Options.RefreshMode == "projection_batch" && p.Built {
+		return enqueueProjectionBatchScope(ctx, tx, p, key, change, now, force)
+	}
 	due := now
 	if !force {
 		var last sql.NullInt64
@@ -52,6 +55,9 @@ func claimProjectionQueueAt(ctx context.Context, app *sdk.AppCtx, pid string, no
 	return claimProjectionQueueAtWithLimit(ctx, app, pid, now, 1)
 }
 func claimProjectionQueueAtWithLimit(ctx context.Context, app *sdk.AppCtx, pid string, now int64, workers int) (projectionQueueItem, bool, error) {
+	if item, ok, err := claimProjectionBatch(ctx, app, pid, now); ok || err != nil {
+		return item, ok, err
+	}
 	var item projectionQueueItem
 	if workers < 1 {
 		workers = 1
@@ -62,7 +68,7 @@ func claimProjectionQueueAtWithLimit(ctx context.Context, app *sdk.AppCtx, pid s
 	}
 	// Serialize every scope of a projection, including a whole rebuild. Claims
 	// use SQLite time for lease expiry, independent from scheduling's test clock.
-	err = app.AppDB().QueryRowContext(ctx, `UPDATE projection_queue SET lease_token=?,forced=0,claimed_until=datetime('now',printf('+%d seconds',(SELECT COALESCE(json_extract(options,'$.max_refresh_ms'),?) FROM projection_definitions WHERE id=projection_queue.projection_id)/1000+10)),attempts=attempts+1 WHERE rowid=(SELECT q.rowid FROM projection_queue q JOIN projection_definitions p ON p.id=q.projection_id WHERE q.project_id=? AND p.status IN ('active','building') AND (p.built=1 OR q.scope_key='__all__') AND q.due_at_ms<=? AND (q.claimed_until IS NULL OR q.claimed_until<=CURRENT_TIMESTAMP) AND (SELECT COUNT(*) FROM projection_queue running WHERE running.projection_id=q.projection_id AND running.claimed_until>CURRENT_TIMESTAMP) < ? AND NOT EXISTS(SELECT 1 FROM projection_queue running WHERE running.projection_id=q.projection_id AND running.claimed_until>CURRENT_TIMESTAMP AND (running.scope_key=? OR q.scope_key=?)) AND (p.built=0 OR q.scope_key<>? OR NOT EXISTS(SELECT 1 FROM projection_queue small WHERE small.projection_id=q.projection_id AND small.scope_key<>? AND small.due_at_ms<=? AND (small.claimed_until IS NULL OR small.claimed_until<=CURRENT_TIMESTAMP))) ORDER BY CASE WHEN q.scope_key=? THEN 1 ELSE 0 END,q.due_at_ms,q.queued_at_ms,q.queued_at,q.scope_key LIMIT 1) RETURNING projection_id,project_id,scope_key,pending_change_id,revision,attempts,lease_token,queued_at_ms`, token, maxProjectionMs(app), pid, now, workers, projectionAllScope, projectionAllScope, projectionAllScope, projectionAllScope, now, projectionAllScope).Scan(&item.ProjectionID, &item.ProjectID, &item.ScopeKey, &item.PendingID, &item.Revision, &item.Attempts, &item.LeaseToken, &item.QueuedAtMs)
+	err = app.AppDB().QueryRowContext(ctx, `UPDATE projection_queue SET lease_token=?,forced=0,claimed_until=datetime('now',printf('+%d seconds',(SELECT COALESCE(json_extract(options,'$.max_refresh_ms'),?) FROM projection_definitions WHERE id=projection_queue.projection_id)/1000+10)),attempts=attempts+1 WHERE rowid=(SELECT q.rowid FROM projection_queue q JOIN projection_definitions p ON p.id=q.projection_id WHERE q.project_id=? AND (COALESCE(json_extract(p.options,'$.refresh_mode'),'scope')<>'projection_batch' OR p.built=0) AND p.status IN ('active','building') AND (p.built=1 OR q.scope_key='__all__') AND q.due_at_ms<=? AND (q.claimed_until IS NULL OR q.claimed_until<=CURRENT_TIMESTAMP) AND (SELECT COUNT(*) FROM projection_queue running WHERE running.projection_id=q.projection_id AND running.claimed_until>CURRENT_TIMESTAMP) < ? AND NOT EXISTS(SELECT 1 FROM projection_queue running WHERE running.projection_id=q.projection_id AND running.claimed_until>CURRENT_TIMESTAMP AND (running.scope_key=? OR q.scope_key=?)) AND (p.built=0 OR q.scope_key<>? OR NOT EXISTS(SELECT 1 FROM projection_queue small WHERE small.projection_id=q.projection_id AND small.scope_key<>? AND small.due_at_ms<=? AND (small.claimed_until IS NULL OR small.claimed_until<=CURRENT_TIMESTAMP))) ORDER BY CASE WHEN q.scope_key=? THEN 1 ELSE 0 END,q.due_at_ms,q.queued_at_ms,q.queued_at,q.scope_key LIMIT 1) RETURNING projection_id,project_id,scope_key,pending_change_id,revision,attempts,lease_token,queued_at_ms`, token, maxProjectionMs(app), pid, now, workers, projectionAllScope, projectionAllScope, projectionAllScope, projectionAllScope, now, projectionAllScope).Scan(&item.ProjectionID, &item.ProjectID, &item.ScopeKey, &item.PendingID, &item.Revision, &item.Attempts, &item.LeaseToken, &item.QueuedAtMs)
 	if err == nil && item.QueuedAtMs > 0 && now > item.QueuedAtMs {
 		item.QueueWaitMs = now - item.QueuedAtMs
 	}
@@ -369,7 +375,14 @@ func (a *App) refreshProjectionScope(parent context.Context, app *sdk.AppCtx, it
 	defer finish()
 	raw := strings.TrimSuffix(strings.TrimSpace(p.SQL), ";")
 	bound := append([]any{}, p.Options.Params...)
-	if item.ScopeKey != projectionAllScope {
+	if item.ScopeKey == projectionBatchScope && !item.FullBatch {
+		raw = p.Options.BatchScopeSQL
+		scopes, e := projectionBatchBindings(p, item)
+		if e != nil {
+			return e
+		}
+		bound = append([]any{scopes}, p.Options.Params...)
+	} else if !item.fullRefresh() {
 		scope, err := scopeValues(item.ScopeKey, p.ScopeCols)
 		if err != nil {
 			return err
@@ -390,7 +403,7 @@ func (a *App) refreshProjectionScope(parent context.Context, app *sdk.AppCtx, it
 			bound = append(bound, scope...)
 		}
 	}
-	if item.ScopeKey == projectionAllScope {
+	if item.fullRefresh() && item.ScopeKey != projectionBatchScope {
 		queued, err := app.AppReadDB().QueryContext(ctx, `SELECT scope_key,revision,pending_change_id FROM projection_queue WHERE projection_id=? AND scope_key<>? ORDER BY scope_key LIMIT 4096`, p.ID, projectionAllScope)
 		if err != nil {
 			return err
@@ -423,8 +436,15 @@ func (a *App) refreshProjectionScope(parent context.Context, app *sdk.AppCtx, it
 		calculationElapsed -= readWaitDuring
 	}
 	item.CalculationMs = calculationElapsed.Milliseconds()
+	if item.ScopeKey == projectionBatchScope {
+		watermark = min(watermark, item.PendingID)
+	}
 	grouped := map[string][]map[string]any{}
-	if item.ScopeKey == projectionAllScope {
+	if item.ScopeKey == projectionBatchScope && !item.FullBatch {
+		for key := range item.CoveredScopes {
+			grouped[key] = nil
+		}
+	} else if item.fullRefresh() {
 		grouped[projectionAllScope] = nil
 	} else {
 		grouped[item.ScopeKey] = nil
@@ -434,7 +454,11 @@ func (a *App) refreshProjectionScope(parent context.Context, app *sdk.AppCtx, it
 		if err != nil {
 			return err
 		}
-		if item.ScopeKey != projectionAllScope && key != item.ScopeKey {
+		if !item.fullRefresh() && item.ScopeKey == projectionBatchScope {
+			if _, ok := item.CoveredScopes[key]; !ok {
+				return errf("batch_scope_sql returned a row outside the affected scopes")
+			}
+		} else if !item.fullRefresh() && key != item.ScopeKey {
 			return errf("scope_sql returned a row outside the requested scope")
 		}
 		grouped[key] = append(grouped[key], row)

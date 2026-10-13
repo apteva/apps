@@ -27,6 +27,8 @@ type projectionSourceDependency struct {
 }
 
 type projectionOptions struct {
+	RefreshMode        string                       `json:"refresh_mode,omitempty"`
+	BatchScopeSQL      string                       `json:"batch_scope_sql,omitempty"`
 	SourceDependencies []projectionSourceDependency `json:"source_dependencies,omitempty"`
 	Params             []any                        `json:"params,omitempty"`
 	ScopeSQL           string                       `json:"scope_sql,omitempty"`
@@ -44,7 +46,7 @@ type projectionOptions struct {
 }
 
 func defaultProjectionOptions(ctx *sdk.AppCtx) projectionOptions {
-	return projectionOptions{MaxMs: maxProjectionMs(ctx), MaxRows: maxProjectionTotalRows(ctx), MaxBytes: int64(maxProjectionBytes(ctx)), PublishMs: 500, BatchRows: 128, BatchBytes: 256 << 10}
+	return projectionOptions{RefreshMode: "scope", MaxMs: maxProjectionMs(ctx), MaxRows: maxProjectionTotalRows(ctx), MaxBytes: int64(maxProjectionBytes(ctx)), PublishMs: 500, BatchRows: 128, BatchBytes: 256 << 10}
 }
 func projectionParameterCount(s string) (int, error) {
 	tokens, err := sqlTokens(s)
@@ -102,7 +104,7 @@ func parseProjectionOptions(ctx *sdk.AppCtx, args map[string]any, sqlText string
 	o := defaultProjectionOptions(ctx)
 	// Copy only declared option fields; _request_context is deliberately excluded.
 	picked := map[string]any{}
-	for _, k := range []string{"params", "scope_sql", "scope_params", "scope_rules", "source_dependencies", "min_refresh_interval_seconds", "max_refresh_ms", "max_result_rows", "max_result_bytes", "max_publication_ms", "publication_batch_rows", "publication_batch_bytes", "coverage_from", "coverage_to"} {
+	for _, k := range []string{"refresh_mode", "batch_scope_sql", "params", "scope_sql", "scope_params", "scope_rules", "source_dependencies", "min_refresh_interval_seconds", "max_refresh_ms", "max_result_rows", "max_result_bytes", "max_publication_ms", "publication_batch_rows", "publication_batch_bytes", "coverage_from", "coverage_to"} {
 		if v, ok := args[k]; ok {
 			picked[k] = v
 		}
@@ -113,6 +115,15 @@ func parseProjectionOptions(ctx *sdk.AppCtx, args map[string]any, sqlText string
 	}
 	if err := projectionDecode(string(b), &o); err != nil {
 		return o, errf("invalid projection options: %v", err)
+	}
+	if o.RefreshMode != "" && o.RefreshMode != "scope" && o.RefreshMode != "projection_batch" {
+		return o, errf("refresh_mode must be scope or projection_batch")
+	}
+	if o.RefreshMode == "projection_batch" && (o.Interval < 1 || o.BatchScopeSQL == "") {
+		return o, errf("projection_batch requires a positive interval and batch_scope_sql")
+	}
+	if o.BatchScopeSQL != "" && o.RefreshMode != "projection_batch" {
+		return o, errf("batch_scope_sql requires projection_batch")
 	}
 	if o.Interval < 0 || o.Interval > 86400 {
 		return o, errf("min_refresh_interval_seconds must be 0..86400")
@@ -130,14 +141,14 @@ func parseProjectionOptions(ctx *sdk.AppCtx, args map[string]any, sqlText string
 	if err != nil {
 		return o, err
 	}
+	if o.ScopeSQL == "" && len(o.ScopeParams) > 0 {
+		return o, errf("scope_params requires scope_sql")
+	}
 	for _, query := range []struct {
 		sql   string
 		count int
-	}{{sqlText, len(o.Params)}, {o.ScopeSQL, len(o.Params) + len(o.ScopeParams)}} {
+	}{{sqlText, len(o.Params)}, {o.ScopeSQL, len(o.Params) + len(o.ScopeParams)}, {o.BatchScopeSQL, len(o.Params) + 1}} {
 		if query.sql == "" {
-			if query.count != len(o.Params) {
-				return o, errf("scope_params requires scope_sql")
-			}
 			continue
 		}
 		if len(query.sql) > 64<<10 {

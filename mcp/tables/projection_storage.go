@@ -367,7 +367,7 @@ func publishProjectionGeneration(ctx context.Context, app *sdk.AppCtx, p *projec
 		"published_at":  projectionTimestamp(now),
 		"ready":         true,
 	}
-	if item.ScopeKey == projectionAllScope {
+	if item.fullRefresh() {
 		// A full rebuild can also remove formerly published scopes. Consumers
 		// must refresh the projection even when the new result has no scopes.
 		readyPayload["all_scopes"] = true
@@ -479,40 +479,51 @@ func publishProjectionGeneration(ctx context.Context, app *sdk.AppCtx, p *projec
 	if err := flush(); err != nil {
 		return err
 	}
+	if item.ScopeKey == projectionBatchScope {
+		if err := stageProjectionBatchHeads(ctx, app, p, item, grouped, scopeBytes, gen, watermark, now); err != nil {
+			return err
+		}
+	}
 	// Whole builds can have many scopes. Stage head pointers separately, then
 	// copy them in one bounded publication transaction (bounded by result caps).
 	err = publicationTxPhase(ctx, app, p, "publication", func(c context.Context, tx *sql.Tx) error {
 		if err := fence(c, tx); err != nil {
 			return err
 		}
-		if item.ScopeKey == projectionAllScope {
-			if _, err := tx.ExecContext(c, `DELETE FROM `+quote(projectionHeads(p))); err != nil {
+		if item.ScopeKey == projectionBatchScope {
+			if err := switchProjectionBatchHeads(c, tx, p, item, gen, watermark); err != nil {
 				return err
 			}
-		}
-		var totalRows, totalBytes int64
-		if err := tx.QueryRowContext(c, `SELECT COALESCE(SUM(row_count),0),COALESCE(SUM(result_bytes),0) FROM `+quote(projectionHeads(p))).Scan(&totalRows, &totalBytes); err != nil {
-			return err
-		}
-		for key, rows := range grouped {
-			var oldRows, oldBytes int64
-			if err := tx.QueryRowContext(c, `SELECT COALESCE(SUM(row_count),0),COALESCE(SUM(result_bytes),0) FROM `+quote(projectionHeads(p))+` WHERE scope_key=?`, key).Scan(&oldRows, &oldBytes); err != nil {
-				return err
-			}
-			newScopeBytes := scopeBytes[key]
-			totalRows += int64(len(rows)) - oldRows
-			totalBytes += newScopeBytes - oldBytes
-			if totalRows > int64(p.Options.MaxRows) || totalBytes > p.Options.MaxBytes {
-				return errf("published projection exceeds total row or byte budget")
-			}
-			if _, err := tx.ExecContext(c, `INSERT INTO `+quote(projectionHeads(p))+` VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(scope_key) DO UPDATE SET generation=excluded.generation,watermark=excluded.watermark,computed_at_ms=excluded.computed_at_ms,coverage_from=excluded.coverage_from,coverage_to=excluded.coverage_to,row_count=excluded.row_count,result_bytes=excluded.result_bytes`, key, gen, watermark, now, p.Options.CoverageFrom, p.Options.CoverageTo, len(rows), newScopeBytes); err != nil {
-				return err
-			}
-		}
-		for key, v := range item.CoveredScopes {
-			if v.Pending <= watermark {
-				if _, err := tx.ExecContext(c, `DELETE FROM projection_queue WHERE projection_id=? AND scope_key=? AND revision=? AND pending_change_id<=?`, p.ID, key, v.Revision, watermark); err != nil {
+		} else {
+			if item.fullRefresh() {
+				if _, err := tx.ExecContext(c, `DELETE FROM `+quote(projectionHeads(p))); err != nil {
 					return err
+				}
+			}
+			var totalRows, totalBytes int64
+			if err := tx.QueryRowContext(c, `SELECT COALESCE(SUM(row_count),0),COALESCE(SUM(result_bytes),0) FROM `+quote(projectionHeads(p))).Scan(&totalRows, &totalBytes); err != nil {
+				return err
+			}
+			for key, rows := range grouped {
+				var oldRows, oldBytes int64
+				if err := tx.QueryRowContext(c, `SELECT COALESCE(SUM(row_count),0),COALESCE(SUM(result_bytes),0) FROM `+quote(projectionHeads(p))+` WHERE scope_key=?`, key).Scan(&oldRows, &oldBytes); err != nil {
+					return err
+				}
+				newScopeBytes := scopeBytes[key]
+				totalRows += int64(len(rows)) - oldRows
+				totalBytes += newScopeBytes - oldBytes
+				if totalRows > int64(p.Options.MaxRows) || totalBytes > p.Options.MaxBytes {
+					return errf("published projection exceeds total row or byte budget")
+				}
+				if _, err := tx.ExecContext(c, `INSERT INTO `+quote(projectionHeads(p))+` VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(scope_key) DO UPDATE SET generation=excluded.generation,watermark=excluded.watermark,computed_at_ms=excluded.computed_at_ms,coverage_from=excluded.coverage_from,coverage_to=excluded.coverage_to,row_count=excluded.row_count,result_bytes=excluded.result_bytes`, key, gen, watermark, now, p.Options.CoverageFrom, p.Options.CoverageTo, len(rows), newScopeBytes); err != nil {
+					return err
+				}
+			}
+			for key, v := range item.CoveredScopes {
+				if v.Pending <= watermark {
+					if _, err := tx.ExecContext(c, `DELETE FROM projection_queue WHERE projection_id=? AND scope_key=? AND revision=? AND pending_change_id<=?`, p.ID, key, v.Revision, watermark); err != nil {
+						return err
+					}
 				}
 			}
 		}
@@ -530,7 +541,11 @@ func publishProjectionGeneration(ctx context.Context, app *sdk.AppCtx, p *projec
 		if _, err := tx.ExecContext(c, `UPDATE projection_queue SET lease_token='',claimed_until=NULL,attempts=0,last_error=NULL,due_at_ms=CASE WHEN forced=1 THEN ? ELSE ? END WHERE projection_id=? AND scope_key=? AND lease_token=?`, now, now+current.Interval*1000, p.ID, item.ScopeKey, item.LeaseToken); err != nil {
 			return err
 		}
-		if item.ScopeKey == projectionAllScope {
+		if item.ScopeKey == projectionBatchScope {
+			if _, err := tx.ExecContext(c, `UPDATE projection_queue SET due_at_ms=CASE WHEN next_due_at_ms>0 THEN next_due_at_ms ELSE ? END,queued_at_ms=CASE WHEN next_queued_at_ms>0 THEN next_queued_at_ms ELSE ? END,next_due_at_ms=0,next_queued_at_ms=0,batch_cutoff_id=0,batch_cutoff_revision=0 WHERE projection_id=? AND scope_key=?`, now+current.Interval*1000, now, p.ID, projectionBatchScope); err != nil {
+				return err
+			}
+		} else if item.fullRefresh() {
 			if _, err := tx.ExecContext(c, `UPDATE projection_queue SET due_at_ms=MAX(due_at_ms,?) WHERE projection_id=? AND forced=0 AND claimed_until IS NULL`, now+current.Interval*1000, p.ID); err != nil {
 				return err
 			}
@@ -542,7 +557,7 @@ func publishProjectionGeneration(ctx context.Context, app *sdk.AppCtx, p *projec
 		if publicationMsOut != nil {
 			*publicationMsOut = publicationMs
 		}
-		_, err := tx.ExecContext(c, `UPDATE projection_definitions SET built=1,published_at_ms=?,last_failure=NULL,published_change=CASE WHEN ? THEN MAX(published_change,?) WHEN NOT EXISTS(SELECT 1 FROM projection_queue WHERE projection_id=?) AND latest_relevant_change<=? AND (SELECT last_change_id FROM projection_cursors WHERE projection_id=?)>=latest_relevant_change THEN latest_relevant_change ELSE published_change END,updated_at=CURRENT_TIMESTAMP WHERE id=?`, now, item.ScopeKey == projectionAllScope, watermark, p.ID, watermark, p.ID, p.ID)
+		_, err := tx.ExecContext(c, `UPDATE projection_definitions SET built=1,published_at_ms=?,last_failure=NULL,published_change=CASE WHEN ? THEN MAX(published_change,?) WHEN NOT EXISTS(SELECT 1 FROM projection_queue WHERE projection_id=?) AND latest_relevant_change<=? AND (SELECT last_change_id FROM projection_cursors WHERE projection_id=?)>=latest_relevant_change THEN latest_relevant_change ELSE published_change END,updated_at=CURRENT_TIMESTAMP WHERE id=?`, now, item.fullRefresh(), watermark, p.ID, watermark, p.ID, p.ID)
 		if err != nil {
 			return err
 		}
@@ -579,6 +594,9 @@ func (a *App) cleanupProjectionGenerations(ctx context.Context, app *sdk.AppCtx,
 	db, err := a.backgroundReader(readCtx, app)
 	if err != nil {
 		return false, err
+	}
+	if removed, err := cleanupProjectionBatchHeads(readCtx, app, db, p); removed || err != nil {
+		return removed, err
 	}
 	var gen string
 	err = db.QueryRowContext(readCtx, `SELECT g.generation FROM projection_generations g WHERE g.projection_id=? AND NOT EXISTS(SELECT 1 FROM `+quote(projectionHeads(p))+` h WHERE h.generation=g.generation) AND NOT EXISTS(SELECT 1 FROM projection_queue q WHERE q.projection_id=g.projection_id AND q.lease_token=g.lease_token AND q.claimed_until>CURRENT_TIMESTAMP) AND NOT EXISTS(SELECT 1 FROM projection_retired_leases l WHERE l.projection_id=g.projection_id AND l.lease_token=g.lease_token AND l.claimed_until>CURRENT_TIMESTAMP) ORDER BY g.created_at_ms,g.generation LIMIT 1`, p.ID).Scan(&gen)
