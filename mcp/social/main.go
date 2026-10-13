@@ -53,7 +53,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.16.6
+version: 0.16.7
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -990,7 +990,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "post_list",
-			Description: "List stored posts with per-target status, newest lifecycle date first. Filter by profile_id or profile (slug), status, and from/to before pagination. Args: limit? (default 50, max 200), offset? (default 0). Returns posts, total (matching post records), total_targets (matching per-account delivery entries), returned_targets, limit, offset, has_more, next_offset (null at end). Continue with next_offset and the same filters. Counts include all statuses unless filtered, and only stored history; deleted or never-imported platform history is excluded. Keep the dataset unchanged while paging, or restart if it changes.",
+			Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false},
+			Description: "Read-only: retrieve stored post history without creating, retrying, scheduling or updating posts. List stored posts with per-target status, newest lifecycle date first. Filter by profile_id or profile (slug), status, and from/to before pagination. Args: limit? (default 50, max 200), offset? (default 0). Returns posts, total (matching post records), total_targets (matching per-account delivery entries), returned_targets, limit, offset, has_more, next_offset (null at end). Continue with next_offset and the same filters. Counts include all statuses unless filtered, and only stored history; deleted or never-imported platform history is excluded. Keep the dataset unchanged while paging, or restart if it changes.",
 			InputSchema: schemaObject(map[string]any{
 				"limit":      map[string]any{"type": "integer", "default": 50, "minimum": 1, "maximum": 200},
 				"offset":     map[string]any{"type": "integer", "default": 0, "minimum": 0},
