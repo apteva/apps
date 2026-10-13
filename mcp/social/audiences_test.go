@@ -233,7 +233,7 @@ func TestMembershipPublishStagesUnlistedAndResumesFromRange(t *testing.T) {
 			t.Fatal(call)
 		}
 		if call.Tool == "upload_video_init" {
-			if call.Input["status"].(map[string]any)["privacyStatus"] != "unlisted" || call.Input["upload_content_length"] != int64(6) {
+			if call.Input["status"].(map[string]any)["privacyStatus"] != "unlisted" || call.Input["upload_content_length"] != int64(6) || call.Input["snippet"].(map[string]any)["categoryId"] != "22" {
 				t.Fatal(call)
 			}
 		}
@@ -381,6 +381,13 @@ func TestYouTubeTitleEditPreservesPrivacyAndSyntheticDisclosure(t *testing.T) {
 	status := input["status"].(map[string]any)
 	if status["privacyStatus"] != "private" || status["containsSyntheticMedia"] != true || status["publishAt"] != "2027-01-01T00:00:00Z" {
 		t.Fatal(status)
+	}
+	input, err = (&App{}).youtubeMergedUpdateInput(ctx, 42, "video", map[string]any{"visibility": "unlisted"}, map[string]any{"visibility": "unlisted"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := input["status"].(map[string]any); status["publishAt"] != nil || status["privacyStatus"] != "unlisted" {
+		t.Fatal("explicit visibility change retained incompatible schedule", status)
 	}
 }
 func TestMembershipCacheConnectionChangeInvalidatesTiers(t *testing.T) {
