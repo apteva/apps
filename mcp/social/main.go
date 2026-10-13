@@ -3961,9 +3961,11 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 		"title":       title,
 		"description": j.body,
 	}
-	if cat := strOption(j.options, "category"); cat != "" {
-		snippet["categoryId"] = cat
-	}
+	category := strOption(j.options, "category")
+	if category == "" {
+		category = "22"
+	} // People & Blogs: YouTube insert requires categoryId.
+	snippet["categoryId"] = category
 	if tags, ok := j.options["tags"].([]any); ok && len(tags) > 0 {
 		out := make([]string, 0, len(tags))
 		for _, t := range tags {
@@ -9662,6 +9664,9 @@ func (a *App) youtubeMergedUpdateInput(ctx *sdk.AppCtx, connID int64, videoID st
 	}
 	if _, ok := requested["visibility"]; ok {
 		status["privacyStatus"] = strOption(eff, "visibility")
+		if status["privacyStatus"] != "private" {
+			delete(status, "publishAt")
+		}
 	}
 	input["status"] = status
 	return input, nil

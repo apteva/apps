@@ -159,9 +159,11 @@ func (a *App) publishYouTubeMembership(ctx *sdk.AppCtx, def platformDef, j publi
 		title = "Untitled"
 	}
 	snippet := map[string]any{"title": title, "description": j.body}
-	if cat := strOption(j.options, "category"); cat != "" {
-		snippet["categoryId"] = cat
+	category := strOption(j.options, "category")
+	if category == "" {
+		category = "22"
 	}
+	snippet["categoryId"] = category
 	if tags := anySliceOption(j.options, "tags"); len(tags) > 0 {
 		snippet["tags"] = tags
 	}
