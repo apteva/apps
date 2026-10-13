@@ -3,6 +3,8 @@ import { mkdir, readdir, unlink } from "node:fs/promises";
 const root = import.meta.dir;
 const out = join(root, "../ui/frontend");
 await mkdir(out, { recursive: true });
+const version = (await Bun.file(join(root, "../apteva.yaml")).text()).match(/^version:\s*(\S+)/m)![1];
+await Bun.write(join(root, "../ui/client-version.ts"), `// Generated from apteva.yaml by frontend/build-app.ts.\nexport const SOFTPHONE_CLIENT_VERSION = ${JSON.stringify(version)};\n`);
 for (const kind of ["worklet", "worker"]) {
   const audio = await Bun.file(join(root, `../ui/softphone-${kind}.js`)).text();
   const hash = new Bun.CryptoHasher("sha256").update(audio).digest("hex");
@@ -17,7 +19,6 @@ const source = await result.outputs[0].text();
 const sha256 = new Bun.CryptoHasher("sha256").update(source).digest("hex");
 const filename = `client-${sha256.slice(0, 16)}.mjs`;
 await Bun.write(join(out, filename), source);
-const version = (await Bun.file(join(root, "../apteva.yaml")).text()).match(/^version:\s*(\S+)/m)![1];
 await Bun.write(join(root, "../ui/frontend.json"), JSON.stringify({
   schema: "apteva-app-frontend/v1", app: "telephony", version,
   client: { path: `/ui/frontend/${filename}`, sha256 },

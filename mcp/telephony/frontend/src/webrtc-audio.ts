@@ -1,3 +1,4 @@
+import { SOFTPHONE_CLIENT_VERSION } from "../../ui/client-version";
 import { microphoneConstraints, playbackBufferOptions, PreviewResampler, type AudioDropEvent, type SoftphoneAudioOptions, type SoftphoneCallbacks, type SoftphoneDiagnostics } from "../../ui/softphone-audio";
 import { TransportTelemetry, TransportTelemetrySender, transportMetrics, transportStates } from "../../ui/transport-telemetry";
 import { AudioRuntimeTelemetry } from "../../ui/audio-runtime-telemetry";
@@ -23,6 +24,9 @@ export function rtcMediaURL(url: string, fec?: boolean): string {
 
 const safe = (callback: (() => void) | undefined) => { try { callback?.(); } catch { /* observers never gate media */ } };
 const finite = (value: unknown, limit = 1e12) => typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.min(value, limit)) : 0;
+export function rtcRelayEvidence(value: unknown): string {
+  return value===true ? "relay_configured" : value===false ? "no_relay" : "unreported";
+}
 export function permanentRTCFailure(error: unknown): boolean {
   const failure=mediaFailure(error);
   return failure.denied || failure.expired || ["NotAllowedError","NotFoundError","SecurityError","OverconstrainedError"].includes((error as Error)?.name);
@@ -185,6 +189,7 @@ export class WebRTCAudioConnection implements AudioConnection {
   private statsErrors=0;
   private lastStatsSend=-Infinity;
   private clientEpoch=crypto.randomUUID();
+  private relayConfigured?:boolean;
   private nativeCounts?: {packetsLost:number;packetsDiscarded:number;concealedMs?:number};
   private completedCounts={packetsLost:0,packetsDiscarded:0,concealedMs:0};
   private runtime=new AudioRuntimeTelemetry(e=>this.recordSessionEvent(e));
@@ -201,6 +206,7 @@ export class WebRTCAudioConnection implements AudioConnection {
   private current(generation:number){return !this.stopped && this.generation===generation;}
   private guard(generation:number){if(!this.current(generation)) throw new Error("Audio session cancelled");}
   private async connect(url:string):Promise<void> {
+    this.recordSessionEvent({timestamp:new Date().toISOString(),action:"client_build",outcome:"v"+SOFTPHONE_CLIENT_VERSION.replaceAll(".","_")});
     this.runtime.observeEnvironment();
     const generation=++this.generation,options=this.options!;
     for(const event of this.events.slice(-8))this.enqueueRTCEvents({session_events:[event]});
@@ -256,6 +262,8 @@ export class WebRTCAudioConnection implements AudioConnection {
         if(typeof event.data!=="string")return;
         let value:any;try{value=JSON.parse(event.data);}catch{return;}
         if(value.type==="webrtc.config"){
+          this.relayConfigured=typeof value.relay_configured==="boolean"?value.relay_configured:undefined;
+          this.recordSessionEvent({timestamp:new Date().toISOString(),action:"ice_configuration",outcome:rtcRelayEvidence(value.relay_configured)});
           if(this.pc){finish(new Error("Repeated WebRTC configuration"));return;}
           void (async()=>{
             const pc=new RTCPeerConnection({iceServers:value.ice_servers??[]});this.pc=pc;
@@ -406,7 +414,7 @@ export class WebRTCAudioConnection implements AudioConnection {
   private sendStatistics(){
     const track=this.stream?.getAudioTracks()[0];
       if(performance.now()-this.lastStatsSend>=5000){this.lastStatsSend=performance.now();
-      this.transportSender.enqueueReport({type:"diagnostics",diagnostics:{client_epoch:this.clientEpoch,media_transport:"webrtc",codec:"opus",webrtc:Object.fromEntries(Object.entries(this.diagnostics.webrtc??{}).map(([k,v])=>[k,typeof v==="number"?Math.round(v*10)/10:v])),connection_state:"connected",carrier_peer_connected:this.peer,audio_context_state:this.context?.state,microphone_muted:this.muted,microphone_track_state:track?.readyState,microphone_device_muted:track?.muted,rtt_ms:this.diagnostics.rttMs===null?null:Math.round(this.diagnostics.rttMs),playback_queue_ms:Math.round(this.diagnostics.queueMs),playback_target_ms:this.diagnostics.targetMs,audio_context_rate:this.context?.sampleRate,playback_sequence_gaps:this.diagnostics.webrtc?.packetsLost, }});this.transportSender.enqueue(this.transportTelemetry.drain());this.enqueueRTCEvents({timing:{runtime:this.runtime.counters}});}
+      this.transportSender.enqueueReport({type:"diagnostics",diagnostics:{client_epoch:this.clientEpoch,client_version:SOFTPHONE_CLIENT_VERSION,relay_configured:this.relayConfigured,media_transport:"webrtc",codec:"opus",webrtc:Object.fromEntries(Object.entries(this.diagnostics.webrtc??{}).map(([k,v])=>[k,typeof v==="number"?Math.round(v*10)/10:v])),connection_state:"connected",carrier_peer_connected:this.peer,audio_context_state:this.context?.state,microphone_muted:this.muted,microphone_track_state:track?.readyState,microphone_device_muted:track?.muted,rtt_ms:this.diagnostics.rttMs===null?null:Math.round(this.diagnostics.rttMs),playback_queue_ms:Math.round(this.diagnostics.queueMs),playback_target_ms:this.diagnostics.targetMs,audio_context_rate:this.context?.sampleRate,playback_sequence_gaps:this.diagnostics.webrtc?.packetsLost, }});this.transportSender.enqueue(this.transportTelemetry.drain());this.enqueueRTCEvents({timing:{runtime:this.runtime.counters}});}
   }
   private playWhisper(data:ArrayBuffer){
     if(data.byteLength<17||data.byteLength>176||this.whisperEpoch===null||!this.context)return;

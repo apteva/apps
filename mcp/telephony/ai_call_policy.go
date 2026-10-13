@@ -21,9 +21,11 @@ const (
 )
 
 type aiPolicyEvent struct {
-	At     string `json:"at"`
-	Kind   string `json:"kind"`
-	Detail string `json:"detail,omitempty"`
+	At         string `json:"at"`
+	Kind       string `json:"kind"`
+	Detail     string `json:"detail,omitempty"`
+	ErrorClass string `json:"error_class,omitempty"`
+	HTTPStatus int    `json:"http_status,omitempty"`
 }
 type aiPolicyState struct {
 	Revision         int64           `json:"revision"`
@@ -46,7 +48,7 @@ type aiPolicyState struct {
 }
 
 func (s *aiPolicyState) event(now time.Time, kind, detail string) {
-	s.Events = append(s.Events, aiPolicyEvent{now.UTC().Format(time.RFC3339Nano), kind, detail})
+	s.Events = append(s.Events, aiPolicyEvent{At: now.UTC().Format(time.RFC3339Nano), Kind: kind, Detail: detail})
 	if len(s.Events) > 32 {
 		s.Events = s.Events[len(s.Events)-32:]
 	}
@@ -308,7 +310,9 @@ func (r *aiPolicyRuntime) advance(row *callRow, now time.Time) string {
 			}
 		} else if r.feedLive && (r.phase == "listening" || r.phase == "speaking") && row.HoldState != "held" && row.HoldState != "holding" && row.MediaStatus == "connected" && s.ResponseDeadline.IsZero() && !s.ReminderAt.IsZero() && now.Sub(s.ReminderAt) >= aiReminderDeliveryLimit && (!s.ReminderSent || !r.reminderAudio) {
 			s.Reason = terminationAIPolicyFailure
-			s.LastError = "inactivity reminder could not be delivered"
+			if s.LastError == "" {
+				s.LastError = "inactivity reminder could not be delivered"
+			}
 			return "terminate"
 		}
 		return ""
@@ -509,8 +513,10 @@ func (a *App) dispatchAIReminder(ctx *sdk.AppCtx, r *aiPolicyRuntime, token stri
 			r.dirty = true
 			r.state.ReminderSent = err == nil
 			if err != nil {
-				r.state.LastError = "inactivity reminder event failed"
-				r.state.event(time.Now(), "reminder_delivery_failed", "")
+				r.state.recordControlError(time.Now(), "reminder_delivery_failed", err)
+			} else {
+				r.state.LastError = ""
+				r.state.event(time.Now(), "reminder_accepted", "thread event accepted; playback not yet confirmed")
 			}
 		}
 		r.mu.Unlock()
@@ -555,8 +561,7 @@ func (a *App) terminateAIPolicy(ctx *sdk.AppCtx, r *aiPolicyRuntime, now time.Ti
 	}
 	if err != nil {
 		r.mu.Lock()
-		r.state.LastError = "carrier hangup failed"
-		r.state.event(now, "carrier_termination_failed", "")
+		r.state.recordControlError(now, "carrier_termination_failed", err)
 		r.state.Revision++
 		snapshot = r.state
 		r.mu.Unlock()

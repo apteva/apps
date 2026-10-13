@@ -789,6 +789,15 @@ func (p *websocketWriterPump) recordWriteEventLocked(r websocketWriteRequest, re
 	}
 }
 
+func (p *websocketWriterPump) diagnosticConnectionID() string {
+	if p == nil {
+		return ""
+	}
+	p.audioMu.Lock()
+	defer p.audioMu.Unlock()
+	return p.diagnosticID
+}
+
 func (p *websocketWriterPump) setDiagnosticID(id string) {
 	p.audioMu.Lock()
 	defer p.audioMu.Unlock()

@@ -1,3 +1,4 @@
+import { SOFTPHONE_CLIENT_VERSION } from "./client-version";
 import { TransportTelemetry, TransportTelemetrySender, type TransportSample } from "./transport-telemetry";
 import { AudioRuntimeTelemetry } from "./audio-runtime-telemetry";
 import { measureAudioSetup } from "./audio-setup";
@@ -509,6 +510,7 @@ export class SoftphoneSession {
     const playbackOptions = playbackBufferOptions(options);
     this.diagnostics.targetMs = playbackOptions.initialTargetMs;
     this.callbacks.onState?.("connecting");
+    this.recordSessionEvent({timestamp:new Date().toISOString(),action:"client_build",outcome:"v"+SOFTPHONE_CLIENT_VERSION.replaceAll(".","_")});
     this.runtimeTelemetry.observeEnvironment();
     this.runtimeTelemetry.tick();
     this.telemetryTimer = setInterval(() => this.runtimeTelemetry.tick(), 1000);
@@ -841,7 +843,7 @@ export class SoftphoneSession {
     const playbackEvents=fresh(value.playbackEvents,this.reportedPlaybackIDs);
     const captureQueueEvents=fresh(value.captureQueueEvents,this.reportedCaptureQueueIDs);
     this.sendText(JSON.stringify({ type: "diagnostics", diagnostics: {
-      media_transport: "websocket", codec: "pcm16",
+      media_transport: "websocket", codec: "pcm16", client_version: SOFTPHONE_CLIENT_VERSION,
       client_epoch:this.clientEpoch,
       playback_events:playbackEvents, capture_queue_events:captureQueueEvents,
       timing: {transport:this.transportTiming, playback:this.playbackTiming, runtime:this.runtimeTelemetry.counters},

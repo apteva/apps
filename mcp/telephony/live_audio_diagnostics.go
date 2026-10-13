@@ -142,6 +142,7 @@ func (h *softphoneHub) serverAudioSnapshot() serverAudioDiagnostics {
 		}
 	}
 	startup := h.startup
+	startup.PhaseSchema = 1
 	startup.Readiness = append([]mediaReadinessEvent(nil), startup.Readiness...)
 	startup.Events = append([]startupDrop(nil), startup.Events...)
 	return serverAudioDiagnostics{Startup: startup, Socket: socket, Health: health, Reception: h.reception.snapshot(mediaClockMS(), h.carrierForward != nil && !h.held && (h.status == "answered" || h.status == "in-progress")), CarrierPacer: h.pacerStats.snapshot(), Process: sampleMediaProcess(), CaptureStaleBytes: h.captureStaleBytes, Epoch: epoch, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano), Stages: stages,

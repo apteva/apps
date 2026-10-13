@@ -826,3 +826,19 @@ func TestRTCTransportPaddingIsNotAudioLoss(t *testing.T) {
 		t.Fatal("padding reported as audio fault", v)
 	}
 }
+
+func TestRTCRelayConfigurationEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		json  string
+		relay bool
+	}{
+		{`[]`, false}, {`[{"urls":["stun:example.org:3478"]}]`, false},
+		{`[{"urls":["turn:example.org:3478"],"username":"restricted","credential":"secret"}]`, true},
+		{`[{"urls":["turns:example.org:5349?transport=tcp"],"username":"restricted","credential":"secret"}]`, true},
+	} {
+		config, err := parseSoftphoneRTCConfig(map[string]string{"softphone_webrtc_enabled": "true", "softphone_webrtc_ice_servers": tc.json})
+		if err != nil || config.relayConfigured() != tc.relay {
+			t.Fatalf("relay %v error %v", config.relayConfigured(), err)
+		}
+	}
+}

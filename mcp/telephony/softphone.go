@@ -77,27 +77,28 @@ type softphoneHub struct {
 	browser *websocketWriterPump
 	// readyBrowser is the browser writer that has received the ready frame;
 	// pushed call.status frames only follow that handshake.
-	readyBrowser        *websocketWriterPump
-	direction           string
-	status              string
-	preAnswerMicSamples int64
-	startup             microphoneStartup
-	pendingMicrophone   []startupPCM
-	captureSequenceSet  bool
-	captureExpected     uint32
-	captureSequenceGaps int
-	captureDropEvents   []audioDropEvent
-	captureMutedRanges  []captureMutedRange
-	captureMutedEvents  []captureMutedEvent
-	captureMutedFrames  uint64
-	captureMuteSeen     bool
-	captureMuteLast     uint32
-	whisperBrowser      *websocketWriterPump
-	browserEpoch        string
-	coach               *callListener
-	coachEpoch          uint32
-	closed              bool
-	held                bool
+	readyBrowser          *websocketWriterPump
+	direction             string
+	status                string
+	preAnswerMicSamples   int64
+	startup               microphoneStartup
+	attachmentEstablished bool
+	pendingMicrophone     []startupPCM
+	captureSequenceSet    bool
+	captureExpected       uint32
+	captureSequenceGaps   int
+	captureDropEvents     []audioDropEvent
+	captureMutedRanges    []captureMutedRange
+	captureMutedEvents    []captureMutedEvent
+	captureMutedFrames    uint64
+	captureMuteSeen       bool
+	captureMuteLast       uint32
+	whisperBrowser        *websocketWriterPump
+	browserEpoch          string
+	coach                 *callListener
+	coachEpoch            uint32
+	closed                bool
+	held                  bool
 }
 
 const softphoneAudioFrameMagic uint32 = 0x31545041

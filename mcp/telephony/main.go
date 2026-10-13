@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.12.18
+version: 0.12.19
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -75,6 +75,7 @@ requires:
     - platform.connections.read_credentials  # read carrier phone_number to fill From=
     - platform.instances.read             # resolve assigned agent names in the routing panel
     - platform.realtime.spawn             # open realtime threads in core
+    - platform.threads.write              # deliver AI inactivity reminders to their call thread
     - platform.telemetry.read             # observe scoped AI conversation phases
   apps:
     - name: functions
@@ -377,7 +378,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.12.18
+    ref: telephony/v0.12.19
     entry: mcp/telephony
   port: 8080
   health_check: /health

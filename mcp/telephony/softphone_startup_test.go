@@ -202,3 +202,90 @@ func TestSoftphoneStartupReadinessNeverBlocksAudio(t *testing.T) {
 		t.Fatal("state not retried")
 	}
 }
+
+func TestSoftphoneAttachmentDropPhases(t *testing.T) {
+	for _, direction := range []string{"inbound", "outbound"} {
+		t.Run(direction, func(t *testing.T) {
+			now := time.Now()
+			w := &websocketWriterPump{}
+			w.setDiagnosticID("browser-one")
+			h := &softphoneHub{direction: direction, status: "answered", browser: w}
+			frame := make([]byte, 960)
+			// A late initial frame and a fresh one share an attachment. Consumption
+			// must not relabel the expired frame as a later reconnection.
+			h.bufferStartupMicrophoneLocked(frame, now)
+			h.flushStartupMicrophoneLocked(now.Add(time.Second))
+			h.startup.FirstForwardedAt = ringTime(now.Add(2 * time.Second))
+			h.bufferStartupMicrophoneLocked(frame, now.Add(time.Hour))
+			h.flushStartupMicrophoneLocked(now.Add(time.Hour + time.Second))
+			h.bufferStartupMicrophoneLocked(frame, now.Add(2*time.Hour))
+			h.status = "completed"
+			h.clearStartupMicrophoneLocked("call_not_answered", now.Add(2*time.Hour))
+			h.status = "answered"
+			h.bufferStartupMicrophoneLocked(frame, now.Add(3*time.Hour))
+			h.held = true
+			h.clearStartupMicrophoneLocked("hold", now.Add(3*time.Hour))
+			got := h.serverAudioSnapshot().Startup
+			if got.PhaseSchema != 1 || got.DroppedMS != 80 || got.InitialDroppedMS != 20 || got.ReconnectDroppedMS != 20 || got.EndingDroppedMS != 20 || got.HoldDroppedMS != 20 {
+				t.Fatalf("phases: %+v", got)
+			}
+			for i, phase := range []string{"initial", "reconnect", "ending", "hold"} {
+				if got.Events[i].Phase != phase || got.Events[i].ConnectionID != "browser-one" {
+					t.Fatalf("event: %+v", got.Events[i])
+				}
+			}
+			// API summary exposes only measured phase totals, never infers old rows.
+			raw, _ := json.Marshal(browserAudioDiagnostics{Server: &serverAudioDiagnostics{Startup: got}})
+			summary := summarizeAudioDashboard(&callRow{BrowserAudioDiagnostics: string(raw)})
+			if summary.Metrics["microphone_initial_dropped_ms"] != 20 || summary.Metrics["microphone_ending_dropped_ms"] != 20 {
+				t.Fatal(summary.Metrics)
+			}
+			raw, _ = json.Marshal(browserAudioDiagnostics{Server: &serverAudioDiagnostics{Startup: microphoneStartup{DroppedMS: 80}}})
+			legacy := summarizeAudioDashboard(&callRow{BrowserAudioDiagnostics: string(raw)})
+			if _, fabricated := legacy.Metrics["microphone_initial_dropped_ms"]; fabricated {
+				t.Fatal("fabricated legacy phase")
+			}
+		})
+	}
+}
+
+func TestSoftphoneAttachmentPhasesRemainBounded(t *testing.T) {
+	h := &softphoneHub{status: "answered"}
+	now := time.Now()
+	for i := 0; i < 1000; i++ {
+		h.bufferStartupMicrophoneLocked(make([]byte, 960), now)
+	}
+	if len(h.startup.Events) != 16 || len(h.pendingMicrophone) != 6 {
+		t.Fatal("unbounded phase collection")
+	}
+	h.startup.FirstForwardedAt = ringTime(now)
+	// Buffered samples retain initial attribution after another frame starts.
+	h.flushStartupMicrophoneLocked(now.Add(time.Second))
+	if h.startup.InitialDroppedMS != 20000 || h.startup.ReconnectDroppedMS != 0 {
+		t.Fatal(h.startup)
+	}
+}
+
+func BenchmarkSoftphoneAttachmentDropDiagnostics(b *testing.B) {
+	h := &softphoneHub{status: "answered", browser: &websocketWriterPump{}}
+	now := time.Now()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		h.startupDropLocked("attachment_expired", 960, now)
+	}
+}
+
+func TestSoftphoneAttachmentAfterReadyButMutedIsReconnection(t *testing.T) {
+	w := &websocketWriterPump{requests: make(chan websocketWriteRequest, 4)}
+	h := &softphoneHub{status: "answered", browser: w, readyBrowser: w, peer: &websocketWriterPump{}}
+	h.publishReadiness()
+	h.clearPeer(h.peer)
+	if h.startup.FirstForwardedAt != "" {
+		t.Fatal("fixture must not contain microphone speech")
+	}
+	h.bufferStartupMicrophoneLocked(make([]byte, 960), time.Now())
+	h.flushStartupMicrophoneLocked(time.Now().Add(time.Second))
+	if h.startup.InitialDroppedMS != 0 || h.startup.ReconnectDroppedMS != 20 {
+		t.Fatal("muted established call mislabeled startup", h.startup)
+	}
+}

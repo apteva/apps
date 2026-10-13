@@ -38,6 +38,9 @@ func (h *softphoneHub) publishReadinessLocked() {
 	case h.peer == nil:
 		reason = "carrier_not_attached"
 	}
+	if reason == "ready" {
+		h.attachmentEstablished = true
+	}
 	if h.readinessBrowser == w && h.readinessReason == reason && h.readinessGeneration == h.bridgeGeneration {
 		return
 	}
