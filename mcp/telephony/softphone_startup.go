@@ -72,9 +72,12 @@ func (h *softphoneHub) attachmentDropLocked(reason, phase string, bytes int, now
 	case "hold":
 		h.startup.HoldDroppedMS += ms
 	}
-	h.startup.Events = append(h.startup.Events, startupDrop{At: ringTime(now), Reason: reason, Phase: phase, DurationMS: ms, ConnectionID: h.browser.diagnosticConnectionID()})
-	if len(h.startup.Events) > 16 {
-		h.startup.Events = append([]startupDrop(nil), h.startup.Events[len(h.startup.Events)-16:]...)
+	e := startupDrop{At: ringTime(now), Reason: reason, Phase: phase, DurationMS: ms, ConnectionID: h.browser.diagnosticConnectionID()}
+	if len(h.startup.Events) == 16 {
+		copy(h.startup.Events, h.startup.Events[1:])
+		h.startup.Events[15] = e
+	} else {
+		h.startup.Events = append(h.startup.Events, e)
 	}
 }
 func (h *softphoneHub) clearStartupMicrophoneLocked(reason string, now time.Time) {
