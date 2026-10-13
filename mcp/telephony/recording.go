@@ -590,7 +590,7 @@ func (a *App) reconcileProviderRecording(ctx *sdk.AppCtx) error {
 	now := time.Now().UTC()
 	var id string
 	err := ctx.AppDB().QueryRow(`SELECT id FROM calls INDEXED BY idx_calls_recording_reconcile
- WHERE project_id = ? AND carrier_slug IN ('twilio','telnyx','plivo') AND ingress_path <> 'sip_direct' AND recording_mode = 'always'
+ WHERE project_id = ? AND recording_known=0 AND carrier_slug IN ('twilio','telnyx','plivo') AND ingress_path <> 'sip_direct' AND recording_mode = 'always'
  AND status IN ('completed','failed') AND carrier_sid <> '' AND ended_at <> '' AND ended_at <= ? AND ended_at >= ?
  AND (recording_checked_at = '' OR recording_checked_at <= ?) AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.call_id = calls.id)
  ORDER BY ended_at LIMIT 1`, ctx.CurrentProject(), now.Add(-10*time.Second).Format(time.RFC3339), now.Add(-24*time.Hour).Format(time.RFC3339), now.Add(-5*time.Minute).Format(time.RFC3339)).Scan(&id)

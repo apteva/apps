@@ -156,11 +156,12 @@ func (a *App) startRoutingDispatcher(ctx *sdk.AppCtx) {
 			return time.Time{}
 		}
 		defer done()
-		if err := a.publishLifecycleEvents(ctx.WithProject(project), ""); err != nil {
+		if err := a.publishLifecycleEventsContext(workCtx, ctx.WithProject(project), ""); err != nil {
 			ctx.Logger().Warn("routing event delivery", "project", project, "err", err)
 		}
 		return time.Time{}
 	})
+	deadlines := routingDeadlineTracker{}
 	a.dispatcher = newRoutingDispatcher(func(project string) time.Time {
 		done, admissionErr := a.runtimeBegin(false)
 		if admissionErr != nil {
@@ -215,10 +216,7 @@ func (a *App) startRoutingDispatcher(ctx *sdk.AppCtx) {
 		if err != nil {
 			return time.Now().Add(time.Second)
 		}
-		if raw == "" {
-			return time.Time{}
-		}
-		return boundedRoutingDeadline(raw, time.Now())
+		return deadlines.next(project, raw, after, time.Now())
 	})
 }
 func (a *App) stopRoutingDispatcher() {
@@ -315,4 +313,45 @@ func boundedRoutingDeadline(raw string, now time.Time) time.Time {
 		return now.Add(time.Second)
 	}
 	return due
+}
+
+// The first overdue observation can be ordinary work that expired while this
+// pass was running. Retry it immediately. Back off only a repeated unchanged
+// overdue record; commit wakes still preempt the scheduled retry.
+type routingDeadlineStamp struct {
+	raw      string
+	revision int64
+}
+type routingDeadlineTracker struct {
+	mu   sync.Mutex
+	last map[string]routingDeadlineStamp
+}
+
+func (d *routingDeadlineTracker) next(project, raw string, revision int64, now time.Time) time.Time {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	due, err := time.Parse(time.RFC3339Nano, raw)
+	if raw == "" || (err == nil && due.After(now)) {
+		delete(d.last, project)
+		if raw == "" {
+			return time.Time{}
+		}
+		return due
+	}
+	stamp := routingDeadlineStamp{raw, revision}
+	previous, exists := d.last[project]
+	if d.last == nil {
+		d.last = make(map[string]routingDeadlineStamp)
+	}
+	if !exists && len(d.last) >= routingDispatchProjects {
+		for key := range d.last {
+			delete(d.last, key)
+			break
+		}
+	}
+	d.last[project] = stamp
+	if exists && previous == stamp {
+		return boundedRoutingDeadline(raw, now)
+	}
+	return now.Add(time.Millisecond)
 }

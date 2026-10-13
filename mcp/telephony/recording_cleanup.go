@@ -34,7 +34,7 @@ func (a *App) cleanupRecordingJobs(ctx *sdk.AppCtx) error {
 			_, _ = ctx.AppDB().Exec(`DELETE FROM recording_orphan_files WHERE project_id=? AND file_id=?`, ctx.CurrentProject(), fileID)
 		}
 	}
-	row, err := scanRecording(ctx.AppDB().QueryRow(`SELECT `+recordingSelectColumns+` FROM recordings INDEXED BY idx_recordings_provider_cleanup WHERE project_id=? AND deleted_at='' AND storage_status='stored' AND provider_deleted_at='' AND cleanup_next_at<=? AND EXISTS(SELECT 1 FROM calls c WHERE c.id=recordings.call_id AND c.project_id=recordings.project_id AND c.recording_storage_mode='copy_then_delete_provider') ORDER BY cleanup_next_at LIMIT 1`, ctx.CurrentProject(), now))
+	row, err := scanRecording(ctx.AppDB().QueryRow(`SELECT `+recordingSelectColumns+` FROM recordings INDEXED BY idx_recordings_provider_cleanup WHERE project_id=? AND provider_cleanup_required=1 AND deleted_at='' AND storage_status='stored' AND provider_deleted_at='' AND cleanup_next_at<=? AND EXISTS(SELECT 1 FROM calls c WHERE c.id=recordings.call_id AND c.project_id=recordings.project_id AND c.recording_storage_mode='copy_then_delete_provider') ORDER BY cleanup_next_at LIMIT 1`, ctx.CurrentProject(), now))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}

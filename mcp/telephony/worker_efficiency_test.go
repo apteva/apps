@@ -46,7 +46,7 @@ func TestEfficiencyIdleWorkersDoNotRewriteHistory(t *testing.T) {
 		{`SELECT id FROM calls INDEXED BY idx_calls_pending_answer WHERE project_id=? AND direction='inbound' AND status='pending' AND handling_reason='' ORDER BY placed_at LIMIT 20`, "idx_calls_pending_answer", []any{"project-a"}},
 		{`SELECT id FROM recordings INDEXED BY idx_recordings_import_candidates WHERE project_id=? AND deleted_at='' AND provider_status='completed' AND storage_status IN ('pending','failed','provider_only') ORDER BY created_at LIMIT 1`, "idx_recordings_import_candidates", []any{"project-a"}},
 		{`SELECT id FROM calls INDEXED BY idx_calls_credentials_due WHERE project_id=? AND ended_at<>'' AND ended_at<? AND (callback_secret<>'' OR audio_bridge_url<>'') LIMIT 100`, "idx_calls_credentials_due", []any{"project-a", time.Now().Format(time.RFC3339)}},
-		{`SELECT c.id FROM ai_handoffs h INDEXED BY idx_ai_handoffs_ready CROSS JOIN calls c WHERE h.project_id=? AND h.status='ready' AND c.id=h.call_id`, "idx_ai_handoffs_ready", []any{"project-a"}},
+		{`SELECT c.id FROM calls c INDEXED BY idx_calls_ai_activation_recovery CROSS JOIN ai_handoffs h WHERE c.project_id=? AND c.direction='inbound' AND c.carrier_slug='telnyx' AND c.peer_kind='realtime' AND c.status IN ('answering','answered','pending') AND h.call_id=c.id AND h.status='ready'`, "idx_calls_ai_activation_recovery", []any{"project-a"}},
 	}
 	for _, check := range checks {
 		rows, err := ctx.AppDB().Query("EXPLAIN QUERY PLAN "+check.query, check.args...)
@@ -241,6 +241,61 @@ func TestEfficiencyPerformance(t *testing.T) {
 		return err
 	})
 	measure("principal_after", 300, func() error { _, err := a.phonePrincipal("project-a", identity); return err })
+	// A separate within-window WebSocket archive proves already-discovered
+	// carrier recordings cannot dominate the reconciliation queue either.
+	stamp := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+	if _, err := ctx.AppDB().Exec(`UPDATE calls SET ingress_path='websocket',carrier_slug='twilio',carrier_sid=id,recording_mode='always',ended_at=?`, stamp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`INSERT INTO recordings(id,call_id,project_id,provider,carrier_connection_id,provider_recording_id,provider_status,storage_status,provider_deleted_at,created_at) SELECT 'rec-'||id,id,project_id,'twilio',10,'original-'||id,'completed','stored',ended_at,ended_at FROM calls WHERE recording_known=0`); err != nil {
+		t.Fatal(err)
+	}
+	measure("discovered_websocket_reconcile_before", 30, func() error {
+		now := time.Now()
+		_, err := a.db().listWhere(`project_id=? AND carrier_slug IN ('twilio','telnyx','plivo') AND ingress_path<>'sip_direct' AND recording_mode='always' AND status IN ('completed','failed') AND carrier_sid<>'' AND ended_at<>'' AND ended_at<=? AND ended_at>=? AND (recording_checked_at='' OR recording_checked_at<=?) AND NOT EXISTS(SELECT 1 FROM recordings r WHERE r.call_id=calls.id) ORDER BY ended_at LIMIT 1`, ctx.CurrentProject(), now.Add(-10*time.Second).UTC().Format(time.RFC3339), now.Add(-24*time.Hour).UTC().Format(time.RFC3339), now.Add(-5*time.Minute).UTC().Format(time.RFC3339))
+		return err
+	})
+	measure("discovered_websocket_reconcile_after", 100, func() error { return a.reconcileProviderRecording(ctx) })
+
+	if _, err := ctx.AppDB().Exec(`UPDATE recordings SET provider_deleted_at=''`); err != nil {
+		t.Fatal(err)
+	}
+	measure("retained_provider_cleanup_before", 30, func() error {
+		rows, err := ctx.AppDB().Query(`SELECT id FROM recordings WHERE project_id=? AND deleted_at='' AND storage_status='stored' AND provider_deleted_at='' AND cleanup_next_at<=? AND call_id IN (SELECT id FROM calls WHERE recording_storage_mode='copy_then_delete_provider') ORDER BY cleanup_next_at LIMIT 1`, ctx.CurrentProject(), time.Now().UTC().Format(time.RFC3339))
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+		}
+		return rows.Err()
+	})
+	measure("retained_provider_cleanup_after", 100, func() error { return a.cleanupRecordingJobs(ctx) })
+	if _, err := ctx.AppDB().Exec(`UPDATE calls SET peer_kind='realtime',carrier_slug='telnyx',audio_bridge_url='wss://fixture.test/audio'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`INSERT INTO ai_handoffs(call_id,project_id,status,max_attempts,deadline_at,next_attempt_at,directive,voice,greeting) SELECT id,project_id,'ready',3,placed_at,placed_at,'','','' FROM calls`); err != nil {
+		t.Fatal(err)
+	}
+	measure("historical_ai_activation_before", 30, func() error {
+		_, err := a.db().listWhere(`project_id=? AND direction='inbound' AND carrier_slug='telnyx' AND peer_kind='realtime' AND status IN ('answering','answered','pending') AND thread_id NOT LIKE 'pending-%' AND audio_bridge_url<>'pending' AND audio_bridge_url<>'' AND EXISTS(SELECT 1 FROM ai_handoffs h WHERE h.call_id=calls.id AND h.status='ready') AND NOT EXISTS(SELECT 1 FROM inbound_routes r WHERE r.id=calls.route_id AND r.inbound_transport='sip_direct') AND NOT EXISTS(SELECT 1 FROM carrier_activations x WHERE x.call_id=calls.id) LIMIT 100`, ctx.CurrentProject())
+		return err
+	})
+	measure("historical_ai_activation_after", 100, func() error { return a.runCarrierActivations(context.Background(), ctx) })
+	if _, err := ctx.AppDB().Exec(`INSERT INTO call_events(event_id,call_id,project_id,topic,revision,occurred_at,payload_json,created_at,published_at) SELECT 'event-'||id,id,project_id,'call.completed',1,ended_at,'{}',ended_at,ended_at FROM calls`); err != nil {
+		t.Fatal(err)
+	}
+	measure("published_events_before", 100, func() error {
+		rows, err := ctx.AppDB().Query(`SELECT event_id,call_id,project_id,topic,revision,occurred_at,payload_json FROM call_events WHERE published_at='' AND (?='' OR call_id=?) ORDER BY created_at,event_id LIMIT 100`, "", "")
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+		}
+		return rows.Err()
+	})
+	measure("published_events_after", 100, func() error { return a.publishLifecycleEvents(ctx, "") })
 	raw, err := json.MarshalIndent(results, "", "  ")
 	if err != nil {
 		t.Fatal(err)
@@ -420,5 +475,135 @@ func TestEfficiencyCallRetentionForeignKeysAreIndexed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestEfficiencyDiscoveredWebSocketRecordingsLeaveReconciliationQueue(t *testing.T) {
+	a, ctx := withTelephonyTestContext(t, &answerPlatform{})
+	seedEfficiencyArchive(t, ctx.AppDB(), 12941, time.Now().Add(-2*time.Hour))
+	if _, err := ctx.AppDB().Exec(`UPDATE calls SET ingress_path='websocket',carrier_slug='twilio',carrier_sid=id,recording_mode='always'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`INSERT INTO recordings(id,call_id,project_id,provider,carrier_connection_id,provider_recording_id,provider_status,storage_status,provider_deleted_at,created_at)
+ SELECT 'rec-'||id,id,project_id,'twilio',10,'original-'||id,'completed','stored',ended_at,ended_at FROM calls WHERE recording_known=0`); err != nil {
+		t.Fatal(err)
+	}
+	var candidates int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM calls INDEXED BY idx_calls_recording_reconcile WHERE project_id='project-a' AND recording_known=0 AND carrier_slug IN ('twilio','telnyx','plivo') AND ingress_path<>'sip_direct' AND recording_mode='always' AND status IN ('completed','failed') AND carrier_sid<>'' AND ended_at<>''`).Scan(&candidates); err != nil {
+		t.Fatal(err)
+	}
+	if candidates != 0 {
+		t.Fatalf("discovered recordings revisited: %d", candidates)
+	}
+	before := dbChanges(t, ctx.AppDB())
+	if err := a.reconcileProviderRecording(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if dbChanges(t, ctx.AppDB()) != before {
+		t.Fatal("reconciled an already-discovered recording")
+	}
+	// Retained provider copies must not become a scan of stored history.
+	if _, err := ctx.AppDB().Exec(`UPDATE recordings SET provider_deleted_at=''`); err != nil {
+		t.Fatal(err)
+	}
+	before = dbChanges(t, ctx.AppDB())
+	if err := a.cleanupRecordingJobs(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if dbChanges(t, ctx.AppDB()) != before {
+		t.Fatal("retained provider copy entered cleanup")
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE calls SET recording_storage_mode='copy_then_delete_provider' WHERE id='efficiency-2'`); err != nil {
+		t.Fatal(err)
+	}
+	var cleanup int
+	if err := ctx.AppDB().QueryRow(`SELECT provider_cleanup_required FROM recordings WHERE call_id='efficiency-2'`).Scan(&cleanup); err != nil || cleanup != 1 {
+		t.Fatalf("cleanup policy not tracked: %d %v", cleanup, err)
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE calls SET recording_storage_mode='copy' WHERE id='efficiency-2'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctx.AppDB().QueryRow(`SELECT provider_cleanup_required FROM recordings WHERE call_id='efficiency-2'`).Scan(&cleanup); err != nil || cleanup != 0 {
+		t.Fatalf("retained copy still eligible for deletion: %d %v", cleanup, err)
+	}
+	// Tombstones intentionally prevent redownloading deleted recordings, exactly
+	// like the original NOT EXISTS check. Only removal of the last DB row makes
+	// provider discovery eligible again.
+	if _, err := ctx.AppDB().Exec(`UPDATE recordings SET deleted_at=? WHERE call_id='efficiency-1'`, ringTime(time.Now())); err != nil {
+		t.Fatal(err)
+	}
+	var known int
+	if err := ctx.AppDB().QueryRow(`SELECT recording_known FROM calls WHERE id='efficiency-1'`).Scan(&known); err != nil || known != 1 {
+		t.Fatalf("tombstone lost discovery state: %d %v", known, err)
+	}
+	if _, err := ctx.AppDB().Exec(`DELETE FROM recordings WHERE call_id='efficiency-1'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctx.AppDB().QueryRow(`SELECT recording_known FROM calls WHERE id='efficiency-1'`).Scan(&known); err != nil || known != 0 {
+		t.Fatalf("removed discovery not reconsidered: %d %v", known, err)
+	}
+}
+
+func TestEfficiencyHistoricalAIAndPublishedEventsAreNotCandidates(t *testing.T) {
+	a, ctx := withTelephonyTestContext(t, &answerPlatform{})
+	t.Setenv("APTEVA_GATEWAY_URL", "")
+	t.Setenv("APTEVA_APP_TOKEN", "")
+	seedEfficiencyArchive(t, ctx.AppDB(), 12941, time.Now().Add(-48*time.Hour))
+	if _, err := ctx.AppDB().Exec(`UPDATE calls SET peer_kind='realtime',audio_bridge_url='wss://fixture.test/audio'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`INSERT INTO ai_handoffs(call_id,project_id,status,max_attempts,deadline_at,next_attempt_at,directive,voice,greeting) SELECT id,project_id,'ready',3,placed_at,placed_at,'','','' FROM calls`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`INSERT INTO call_events(event_id,call_id,project_id,topic,revision,occurred_at,payload_json,created_at,published_at) SELECT 'event-'||id,id,project_id,'call.completed',1,ended_at,'{}',ended_at,ended_at FROM calls`); err != nil {
+		t.Fatal(err)
+	}
+	before := dbChanges(t, ctx.AppDB())
+	if err := a.runCarrierActivations(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.publishLifecycleEvents(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+	if dbChanges(t, ctx.AppDB()) != before {
+		t.Fatal("historical AI/event work was revisited")
+	}
+	other := testCall("other-event", "completed")
+	other.ProjectID = "project-b"
+	if err := a.db().insertCall(other); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`INSERT INTO call_events(event_id,call_id,project_id,topic,revision,occurred_at,payload_json,created_at) VALUES('pending-b',?,'project-b','call.completed',1,?,'invalid',?)`, other.ID, other.PlacedAt, other.PlacedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.publishLifecycleEvents(ctx, ""); err != nil {
+		t.Fatalf("project A recovery read project B outbox: %v", err)
+	}
+	if err := a.publishLifecycleEvents(ctx, other.ID); err == nil {
+		t.Fatal("explicit call outbox lookup changed its cross-project callback behavior")
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := a.publishLifecycleEventsContext(canceled, ctx, ""); err == nil {
+		t.Fatal("outbox ignored cancellation")
+	}
+}
+
+func TestEfficiencyFirstExpiredRoutingDeadlineRunsImmediately(t *testing.T) {
+	now := time.Now()
+	raw := ringTime(now.Add(-time.Second))
+	tracker := routingDeadlineTracker{}
+	if due := tracker.next("p", raw, 1, now); due != now.Add(time.Millisecond) {
+		t.Fatalf("newly expired work postponed: %s", due)
+	}
+	if due := tracker.next("p", raw, 1, now); due != now.Add(time.Second) {
+		t.Fatalf("unchanged expired record did not back off: %s", due)
+	}
+	if due := tracker.next("p", raw, 2, now); due != now.Add(time.Millisecond) {
+		t.Fatalf("new revision inherited backoff: %s", due)
+	}
+	tracker.next("p", "", 2, now)
+	if due := tracker.next("p", raw, 2, now); due != now.Add(time.Millisecond) {
+		t.Fatal("completed work retained stale backoff")
 	}
 }

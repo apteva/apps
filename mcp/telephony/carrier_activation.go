@@ -88,8 +88,8 @@ func (a *App) ensureCarrierActivation(row *callRow) error {
 
 func (a *App) runCarrierActivations(_ context.Context, ctx *sdk.AppCtx) error {
 	// Recover the gap if a request stopped waiting just before Core became ready.
-	candidates, err := ctx.AppDB().Query(`SELECT c.id FROM ai_handoffs h INDEXED BY idx_ai_handoffs_ready CROSS JOIN calls c
- WHERE h.project_id=? AND h.status='ready' AND c.id=h.call_id AND c.project_id=h.project_id
+	candidates, err := ctx.AppDB().Query(`SELECT c.id FROM calls c INDEXED BY idx_calls_ai_activation_recovery CROSS JOIN ai_handoffs h
+ WHERE c.project_id=? AND h.status='ready' AND h.call_id=c.id AND h.project_id=c.project_id
  AND c.direction='inbound' AND c.carrier_slug='telnyx' AND c.peer_kind='realtime' AND c.status IN ('answering','answered','pending')
  AND c.thread_id NOT LIKE 'pending-%' AND c.audio_bridge_url<>'pending' AND c.audio_bridge_url<>''
  AND NOT EXISTS(SELECT 1 FROM inbound_routes r WHERE r.id=c.route_id AND r.inbound_transport='sip_direct')

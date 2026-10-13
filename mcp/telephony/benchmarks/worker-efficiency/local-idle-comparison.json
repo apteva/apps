@@ -104,130 +104,194 @@
     {
       "name": "credentials_before",
       "iterations": 30,
-      "wall_ms_per_operation": 28.622545833333334,
-      "cpu_ms_per_operation": 28.619833333333336,
+      "wall_ms_per_operation": 30.33247916666667,
+      "cpu_ms_per_operation": 30.326366666666672,
       "allocated_bytes_per_operation": 200,
       "allocations_per_operation": 8
     },
     {
       "name": "housekeeping_after",
       "iterations": 100,
-      "wall_ms_per_operation": 0.09994167,
-      "cpu_ms_per_operation": 0.11301000000000158,
-      "allocated_bytes_per_operation": 2556,
+      "wall_ms_per_operation": 0.0992825,
+      "cpu_ms_per_operation": 0.11481999999999971,
+      "allocated_bytes_per_operation": 2604,
       "allocations_per_operation": 65
     },
     {
       "name": "idle_sip-resource-retirement",
       "iterations": 30,
-      "wall_ms_per_operation": 0.01788333333333333,
-      "cpu_ms_per_operation": 0.018133333333328967,
+      "wall_ms_per_operation": 0.017394433333333334,
+      "cpu_ms_per_operation": 0.017566666666660544,
       "allocated_bytes_per_operation": 616,
       "allocations_per_operation": 19
     },
     {
       "name": "idle_ai-call-policies",
       "iterations": 30,
-      "wall_ms_per_operation": 0.021773599999999997,
-      "cpu_ms_per_operation": 0.02193333333333006,
+      "wall_ms_per_operation": 0.022808333333333333,
+      "cpu_ms_per_operation": 0.023033333333326786,
       "allocated_bytes_per_operation": 952,
       "allocations_per_operation": 24
     },
     {
       "name": "idle_carrier-media-recovery",
       "iterations": 30,
-      "wall_ms_per_operation": 0.0430625,
-      "cpu_ms_per_operation": 0.04329999999999927,
-      "allocated_bytes_per_operation": 1152,
+      "wall_ms_per_operation": 0.04295416666666666,
+      "cpu_ms_per_operation": 0.04320000000000922,
+      "allocated_bytes_per_operation": 1153,
       "allocations_per_operation": 34
     },
     {
       "name": "idle_audio-telemetry",
       "iterations": 30,
-      "wall_ms_per_operation": 0.0354764,
-      "cpu_ms_per_operation": 0.05546666666666624,
-      "allocated_bytes_per_operation": 4644,
+      "wall_ms_per_operation": 0.0346847,
+      "cpu_ms_per_operation": 0.05433333333332939,
+      "allocated_bytes_per_operation": 4686,
       "allocations_per_operation": 81
     },
     {
       "name": "idle_carrier-telemetry",
       "iterations": 30,
-      "wall_ms_per_operation": 0.0053013999999999995,
-      "cpu_ms_per_operation": 0.006333333333335152,
-      "allocated_bytes_per_operation": 12223,
+      "wall_ms_per_operation": 0.0038208333333333336,
+      "cpu_ms_per_operation": 0.004700000000002547,
+      "allocated_bytes_per_operation": 12183,
       "allocations_per_operation": 5
     },
     {
       "name": "idle_carrier-activations",
       "iterations": 30,
-      "wall_ms_per_operation": 0.05641943333333333,
-      "cpu_ms_per_operation": 0.05660000000000309,
-      "allocated_bytes_per_operation": 1129,
+      "wall_ms_per_operation": 0.054875,
+      "cpu_ms_per_operation": 0.05593333333333703,
+      "allocated_bytes_per_operation": 1128,
       "allocations_per_operation": 35
     },
     {
       "name": "idle_ai-handoffs",
       "iterations": 30,
-      "wall_ms_per_operation": 0.020131966666666667,
-      "cpu_ms_per_operation": 0.020300000000005033,
+      "wall_ms_per_operation": 0.021729166666666667,
+      "cpu_ms_per_operation": 0.022033333333335275,
       "allocated_bytes_per_operation": 960,
       "allocations_per_operation": 26
     },
     {
       "name": "idle_routing-reconciliation",
       "iterations": 30,
-      "wall_ms_per_operation": 0.15435833333333335,
-      "cpu_ms_per_operation": 0.175933333333334,
-      "allocated_bytes_per_operation": 4200,
+      "wall_ms_per_operation": 0.15032363333333335,
+      "cpu_ms_per_operation": 0.17823333333333266,
+      "allocated_bytes_per_operation": 4049,
       "allocations_per_operation": 111
     },
     {
       "name": "idle_historical-housekeeping",
       "iterations": 30,
-      "wall_ms_per_operation": 0.09318053333333334,
-      "cpu_ms_per_operation": 0.10380000000000109,
-      "allocated_bytes_per_operation": 2051,
+      "wall_ms_per_operation": 0.09825416666666667,
+      "cpu_ms_per_operation": 0.1148333333333312,
+      "allocated_bytes_per_operation": 2028,
       "allocations_per_operation": 65
     },
     {
       "name": "idle_call-auto-answer",
       "iterations": 30,
-      "wall_ms_per_operation": 0.015518066666666667,
-      "cpu_ms_per_operation": 0.01583333333333788,
+      "wall_ms_per_operation": 0.0166625,
+      "cpu_ms_per_operation": 0.01683333333332939,
       "allocated_bytes_per_operation": 560,
       "allocations_per_operation": 18
     },
     {
       "name": "idle_call-lifecycle",
       "iterations": 30,
-      "wall_ms_per_operation": 0.3442625,
-      "cpu_ms_per_operation": 0.34323333333333417,
-      "allocated_bytes_per_operation": 22472,
-      "allocations_per_operation": 287
+      "wall_ms_per_operation": 0.38600140000000005,
+      "cpu_ms_per_operation": 0.46549999999999725,
+      "allocated_bytes_per_operation": 22898,
+      "allocations_per_operation": 290
     },
     {
       "name": "idle_recording-import",
       "iterations": 30,
-      "wall_ms_per_operation": 0.23394166666666666,
-      "cpu_ms_per_operation": 0.3338666666666692,
-      "allocated_bytes_per_operation": 8567,
-      "allocations_per_operation": 179
+      "wall_ms_per_operation": 0.2028055666666667,
+      "cpu_ms_per_operation": 0.22173333333333478,
+      "allocated_bytes_per_operation": 8184,
+      "allocations_per_operation": 178
     },
     {
       "name": "principal_before",
       "iterations": 300,
-      "wall_ms_per_operation": 0.24064194333333333,
-      "cpu_ms_per_operation": 0.31643000000000027,
-      "allocated_bytes_per_operation": 131186,
+      "wall_ms_per_operation": 0.24345597,
+      "cpu_ms_per_operation": 0.32800333333333354,
+      "allocated_bytes_per_operation": 131185,
       "allocations_per_operation": 886
     },
     {
       "name": "principal_after",
       "iterations": 300,
-      "wall_ms_per_operation": 0.008751526666666667,
-      "cpu_ms_per_operation": 0.008770000000000285,
+      "wall_ms_per_operation": 0.008479026666666667,
+      "cpu_ms_per_operation": 0.008503333333333103,
       "allocated_bytes_per_operation": 1652,
       "allocations_per_operation": 25
+    },
+    {
+      "name": "discovered_websocket_reconcile_before",
+      "iterations": 30,
+      "wall_ms_per_operation": 12.7038264,
+      "cpu_ms_per_operation": 12.680733333333334,
+      "allocated_bytes_per_operation": 10008,
+      "allocations_per_operation": 111
+    },
+    {
+      "name": "discovered_websocket_reconcile_after",
+      "iterations": 100,
+      "wall_ms_per_operation": 0.01927958,
+      "cpu_ms_per_operation": 0.019290000000000872,
+      "allocated_bytes_per_operation": 744,
+      "allocations_per_operation": 23
+    },
+    {
+      "name": "retained_provider_cleanup_before",
+      "iterations": 30,
+      "wall_ms_per_operation": 5.6426097,
+      "cpu_ms_per_operation": 5.612399999999995,
+      "allocated_bytes_per_operation": 512,
+      "allocations_per_operation": 16
+    },
+    {
+      "name": "retained_provider_cleanup_after",
+      "iterations": 100,
+      "wall_ms_per_operation": 0.05394167,
+      "cpu_ms_per_operation": 0.07657000000000153,
+      "allocated_bytes_per_operation": 3088,
+      "allocations_per_operation": 61
+    },
+    {
+      "name": "historical_ai_activation_before",
+      "iterations": 30,
+      "wall_ms_per_operation": 5.7436555333333335,
+      "cpu_ms_per_operation": 5.733933333333335,
+      "allocated_bytes_per_operation": 9984,
+      "allocations_per_operation": 103
+    },
+    {
+      "name": "historical_ai_activation_after",
+      "iterations": 100,
+      "wall_ms_per_operation": 0.061615,
+      "cpu_ms_per_operation": 0.06135999999999967,
+      "allocated_bytes_per_operation": 1112,
+      "allocations_per_operation": 34
+    },
+    {
+      "name": "published_events_before",
+      "iterations": 100,
+      "wall_ms_per_operation": 0.01229167,
+      "cpu_ms_per_operation": 0.01242999999999938,
+      "allocated_bytes_per_operation": 728,
+      "allocations_per_operation": 19
+    },
+    {
+      "name": "published_events_after",
+      "iterations": 100,
+      "wall_ms_per_operation": 0.01175167,
+      "cpu_ms_per_operation": 0.011809999999995853,
+      "allocated_bytes_per_operation": 968,
+      "allocations_per_operation": 22
     }
   ],
   "limitations": [
@@ -235,5 +299,10 @@
     "Before worker samples: 3; after worker samples: 30.",
     "Process CPU measurements include Go/SQLite work; historical row matches are not physical disk writes.",
     "Archive costs do not establish an unrestricted concurrent-call capacity."
+  ],
+  "additional_fixtures": [
+    "12,941 discovered WebSocket recordings within the reconciliation window",
+    "12,941 completed AI calls with ready handoffs",
+    "12,941 published lifecycle events"
   ]
 }

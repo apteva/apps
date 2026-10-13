@@ -488,13 +488,24 @@ func eventNotAfter(occurredAt, terminalAt string) bool {
 }
 
 func (a *App) publishLifecycleEvents(ctx *sdk.AppCtx, callID string) error {
+	return a.publishLifecycleEventsContext(context.Background(), ctx, callID)
+}
+func (a *App) publishLifecycleEventsContext(workerCtx context.Context, ctx *sdk.AppCtx, callID string) error {
 	if ctx == nil {
 		return errors.New("app context unavailable")
 	}
-	rows, err := ctx.AppDB().Query(`SELECT event_id, call_id, project_id, topic, revision, occurred_at, payload_json
-        FROM call_events
-        WHERE published_at = '' AND (? = '' OR call_id = ?)
-        ORDER BY created_at, event_id LIMIT 100`, callID, callID)
+	where, index := "published_at = ''", "idx_call_events_unpublished"
+	var args []any
+	if callID != "" {
+		where += " AND call_id=?"
+		args = append(args, callID)
+	} else if project := ctx.CurrentProject(); project != "" {
+		where += " AND project_id=?"
+		args = append(args, project)
+		index = "idx_call_events_publish"
+	}
+	rows, err := ctx.AppDB().QueryContext(workerCtx, `SELECT event_id,call_id,project_id,topic,revision,occurred_at,payload_json
+ FROM call_events INDEXED BY `+index+` WHERE `+where+` ORDER BY created_at,event_id LIMIT 100`, args...)
 	if err != nil {
 		return err
 	}
@@ -520,7 +531,7 @@ func (a *App) publishLifecycleEvents(ctx *sdk.AppCtx, callID string) error {
 	if gateway == "" || token == "" {
 		return nil
 	} // Preserve pending events until a gateway is available.
-	batch, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	batch, cancel := context.WithTimeout(workerCtx, 2*time.Second)
 	defer cancel()
 	client := &http.Client{Timeout: 500 * time.Millisecond}
 	for _, event := range events {

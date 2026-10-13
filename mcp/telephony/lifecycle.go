@@ -229,7 +229,7 @@ func (a *App) runLifecycleTick(workerCtx context.Context, ctx *sdk.AppCtx) error
 	if _, err := ctx.AppDB().ExecContext(workerCtx, `UPDATE call_offers SET status='expired' WHERE project_id=? AND run_id='' AND status='offered' AND expires_at<=?`, project, now.Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
-	if err := a.publishLifecycleEvents(ctx, ""); err != nil {
+	if err := a.publishLifecycleEventsContext(workerCtx, ctx, ""); err != nil {
 		ctx.Logger().Warn("publish pending call lifecycle events", "err", err)
 	}
 
