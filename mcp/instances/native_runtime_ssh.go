@@ -39,12 +39,17 @@ func (nativeSSH) Probe(c context.Context, i *Instance, gateway string) (nativePr
  if test -f /etc/ssh/ssh_host_ed25519_key.pub; then cat /etc/ssh/ssh_host_ed25519_key.pub; else cat /etc/ssh/ssh_host_rsa_key.pub; fi
  awk '/MemAvailable:/ {printf "%.0f\n", $2/1024}' /proc/meminfo
  df -Pm /var/lib | awk 'NR==2 {print $4}'
+ if getconf GNU_LIBC_VERSION >/dev/null 2>&1; then printf 'ABI=gnu\n'; elif ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then printf 'ABI=musl\n'; else printf 'ABI=unknown\n'; fi
+ if command -v ldconfig >/dev/null; then ldconfig -p 2>/dev/null | awk '/=>/ {print "LIB=" $1}' | sort -u; fi
 `)
 	if e != nil {
 		return nativeProbe{}, e
 	}
+	return parseNativeTargetProbe(out)
+}
+func parseNativeTargetProbe(out string) (nativeProbe, error) {
 	v := strings.Split(strings.TrimSpace(out), "\n")
-	if len(v) != 5 || len(v[1]) != 32 || v[2] == "" {
+	if len(v) < 6 || len(v) > 2054 || len(v[1]) != 32 || v[2] == "" {
 		return nativeProbe{}, errors.New("invalid host identity probe")
 	}
 	platform := ""
@@ -64,7 +69,22 @@ func (nativeSSH) Probe(c context.Context, i *Instance, gateway string) (nativePr
 	if e != nil {
 		return nativeProbe{}, e
 	}
-	return nativeProbe{Platform: platform, HostKey: "linux-systemd:" + nativeHash(v[1]+"\n"+v[2]), MemoryMB: m, DiskMB: disk}, nil
+	abi := strings.TrimPrefix(v[5], "ABI=")
+	if abi != "gnu" && abi != "musl" {
+		return nativeProbe{}, errors.New("unsupported host ABI")
+	}
+	var libraries []string
+	for _, line := range v[6:] {
+		if !strings.HasPrefix(line, "LIB=") {
+			return nativeProbe{}, errors.New("invalid library inventory")
+		}
+		lib := strings.TrimPrefix(line, "LIB=")
+		if !nativeLibraryName(lib) {
+			return nativeProbe{}, errors.New("invalid library inventory")
+		}
+		libraries = append(libraries, lib)
+	}
+	return nativeProbe{ABI: abi, SystemLibraries: libraries, Platform: platform, HostKey: "linux-systemd:" + nativeHash(v[1]+"\n"+v[2]), MemoryMB: m, DiskMB: disk}, nil
 }
 
 // Remote locking and immutable ownership markers protect lost-response recovery.

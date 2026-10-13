@@ -32,17 +32,19 @@ type nativePort struct {
 	Exclusive bool   `json:"exclusive"`
 }
 type nativeExecution struct {
-	Handle           string        `json:"handle"`
-	State            string        `json:"state"`
-	HostKey          string        `json:"host_key"`
-	ReleaseDigest    string        `json:"release_digest"`
-	Platform         string        `json:"platform"`
-	Endpoint         string        `json:"control_endpoint,omitempty"`
-	StateRef         string        `json:"state_ref,omitempty"`
-	Ports            []nativePort  `json:"ports,omitempty"`
-	Ready            bool          `json:"ready"`
-	StoppedConfirmed bool          `json:"stopped_confirmed"`
-	AppCapabilities  nativeAppCaps `json:"app_capabilities"`
+	BrowserEndpoint  string            `json:"browser_endpoint,omitempty"`
+	Endpoints        map[string]string `json:"endpoints,omitempty"`
+	Handle           string            `json:"handle"`
+	State            string            `json:"state"`
+	HostKey          string            `json:"host_key"`
+	ReleaseDigest    string            `json:"release_digest"`
+	Platform         string            `json:"platform"`
+	Endpoint         string            `json:"control_endpoint,omitempty"`
+	StateRef         string            `json:"state_ref,omitempty"`
+	Ports            []nativePort      `json:"ports,omitempty"`
+	Ready            bool              `json:"ready"`
+	StoppedConfirmed bool              `json:"stopped_confirmed"`
+	AppCapabilities  nativeAppCaps     `json:"app_capabilities"`
 }
 type nativeTarget struct {
 	InstallID int64  `json:"app_install_id"`
@@ -50,29 +52,45 @@ type nativeTarget struct {
 	ID        string `json:"resource_id"`
 }
 type nativeRequest struct {
-	Contract         string            `json:"contract"`
-	OperationID      string            `json:"operation_id"`
-	IdempotencyKey   string            `json:"idempotency_key"`
-	DeploymentID     string            `json:"deployment_id"`
-	InstallID        int64             `json:"install_id"`
-	Generation       int64             `json:"generation"`
-	ProjectID        string            `json:"project_id,omitempty"`
-	Target           nativeTarget      `json:"target"`
-	Options          map[string]any    `json:"options,omitempty"`
-	Manifest         sdk.Manifest      `json:"manifest"`
-	Environment      map[string]string `json:"environment,omitempty"`
-	Execution        nativeExecution   `json:"execution,omitempty"`
-	ArtifactPlatform string            `json:"artifact_platform,omitempty"`
-	StateRef         string            `json:"state_ref,omitempty"`
+	TargetInfo       *sdk.RuntimeTargetInfo  `json:"target_info,omitempty"`
+	Package          *nativePackageReference `json:"package,omitempty"`
+	Contract         string                  `json:"contract"`
+	OperationID      string                  `json:"operation_id"`
+	IdempotencyKey   string                  `json:"idempotency_key"`
+	DeploymentID     string                  `json:"deployment_id"`
+	InstallID        int64                   `json:"install_id"`
+	Generation       int64                   `json:"generation"`
+	ProjectID        string                  `json:"project_id,omitempty"`
+	Target           nativeTarget            `json:"target"`
+	Options          map[string]any          `json:"options,omitempty"`
+	Manifest         sdk.Manifest            `json:"manifest"`
+	Environment      map[string]string       `json:"environment,omitempty"`
+	Execution        nativeExecution         `json:"execution,omitempty"`
+	ArtifactPlatform string                  `json:"artifact_platform,omitempty"`
+	StateRef         string                  `json:"state_ref,omitempty"`
 	// Forward compatible with a future explicit Server gateway handoff.
 	GatewayURL string `json:"gateway_url,omitempty"`
 }
+type nativePackageReference struct {
+	ID               string   `json:"id"`
+	Platform         string   `json:"platform"`
+	SHA256           string   `json:"sha256"`
+	ExecutableSHA256 string   `json:"executable_sha256"`
+	ArchiveSHA256    string   `json:"archive_sha256,omitempty"`
+	ABI              string   `json:"abi,omitempty"`
+	SystemLibraries  []string `json:"system_libraries,omitempty"`
+}
+
+// Public endpoints describe separately provisioned ingress; control stays tunneled.
 type nativeOptions struct {
-	ArtifactID  string `json:"artifact_id"`
-	GatewayURL  string `json:"gateway_url"`
-	ControlPort int    `json:"control_port,omitempty"`
-	MinMemoryMB int64  `json:"min_memory_mb,omitempty"`
-	MinDiskMB   int64  `json:"min_disk_mb,omitempty"`
+	Ingress         *nativeIngress    `json:"ingress,omitempty"`
+	BrowserEndpoint string            `json:"browser_endpoint,omitempty"`
+	Endpoints       map[string]string `json:"endpoints,omitempty"`
+	ArtifactID      string            `json:"artifact_id"`
+	GatewayURL      string            `json:"gateway_url"`
+	ControlPort     int               `json:"control_port,omitempty"`
+	MinMemoryMB     int64             `json:"min_memory_mb,omitempty"`
+	MinDiskMB       int64             `json:"min_disk_mb,omitempty"`
 }
 type nativeArtifactFile struct {
 	Path   string `json:"path"`
@@ -89,28 +107,31 @@ type nativeArtifact struct {
 	AppCapabilities nativeAppCaps        `json:"app_capabilities"`
 }
 type nativeRecord struct {
-	ID          string          `json:"id"`
-	InstallID   int64           `json:"install_id"`
-	Generation  int64           `json:"generation"`
-	InstanceID  int64           `json:"instance_id"`
-	Fingerprint string          `json:"fingerprint"`
-	Options     nativeOptions   `json:"options"`
-	Artifact    nativeArtifact  `json:"artifact"`
-	ReleaseDir  string          `json:"release_dir"`
-	DataDir     string          `json:"data_dir"`
-	Unit        string          `json:"unit"`
-	LocalPort   int             `json:"local_port"`
-	ControlPort int             `json:"control_port"`
-	Started     bool            `json:"started"`
-	EnvDigest   string          `json:"env_digest,omitempty"`
-	HealthPath  string          `json:"health_path"`
-	Execution   nativeExecution `json:"execution"`
+	PublicRoutes []sdk.RuntimeIngressRoute `json:"public_routes,omitempty"`
+	ID           string                    `json:"id"`
+	InstallID    int64                     `json:"install_id"`
+	Generation   int64                     `json:"generation"`
+	InstanceID   int64                     `json:"instance_id"`
+	Fingerprint  string                    `json:"fingerprint"`
+	Options      nativeOptions             `json:"options"`
+	Artifact     nativeArtifact            `json:"artifact"`
+	ReleaseDir   string                    `json:"release_dir"`
+	DataDir      string                    `json:"data_dir"`
+	Unit         string                    `json:"unit"`
+	LocalPort    int                       `json:"local_port"`
+	ControlPort  int                       `json:"control_port"`
+	Started      bool                      `json:"started"`
+	EnvDigest    string                    `json:"env_digest,omitempty"`
+	HealthPath   string                    `json:"health_path"`
+	Execution    nativeExecution           `json:"execution"`
 }
 type nativeProbe struct {
-	Platform string
-	HostKey  string
-	MemoryMB int64
-	DiskMB   int64
+	ABI             string
+	SystemLibraries []string
+	Platform        string
+	HostKey         string
+	MemoryMB        int64
+	DiskMB          int64
 }
 type nativeObservation struct {
 	State    string
@@ -157,7 +178,37 @@ func nativeGateway(v string) error {
 	return nil
 }
 func nativeCapabilities() any {
-	return map[string]any{"contract": nativeContract, "id": "native", "runtime_kinds": []string{"source", "service"}, "platforms": []string{"linux-amd64", "linux-arm64"}, "formats": []string{"binary"}, "protocols": []string{"tcp", "udp"}, "confirmed_stop": true, "snapshots": false, "replicas": false, "fencing": false, "resource_controls": false,
+	return map[string]any{"managed_ingress": true, "target_inspection": true, "package_delivery": map[string]any{"protocol": sdk.RuntimePackageProtocol, "formats": []string{"binary"}, "verified_archives": true}, "contract": nativeContract, "id": "native", "runtime_kinds": []string{"source", "service"}, "platforms": []string{"linux-amd64", "linux-arm64"}, "formats": []string{"binary"}, "protocols": []string{"tcp", "udp"}, "confirmed_stop": true, "snapshots": false, "replicas": false, "fencing": false, "resource_controls": false,
 		"target_schema":  map[string]any{"type": "object", "required": []string{"app_install_id", "resource_type", "resource_id"}, "properties": map[string]any{"app_install_id": map[string]any{"type": "integer"}, "resource_type": map[string]any{"const": "instances.instance"}, "resource_id": map[string]any{"type": "string"}}},
-		"options_schema": map[string]any{"type": "object", "required": []string{"artifact_id", "gateway_url"}, "properties": map[string]any{"artifact_id": map[string]any{"type": "string"}, "gateway_url": map[string]any{"type": "string"}, "control_port": map[string]any{"type": "integer", "minimum": 1024, "maximum": 65535}}}}
+		"options_schema": map[string]any{"type": "object", "required": []string{"artifact_id", "gateway_url"}, "properties": map[string]any{"artifact_id": map[string]any{"type": "string"}, "gateway_url": map[string]any{"type": "string"}, "browser_endpoint": map[string]any{"type": "string"}, "endpoints": map[string]any{"type": "object", "maxProperties": 16, "additionalProperties": map[string]any{"type": "string"}}, "control_port": map[string]any{"type": "integer", "minimum": 1024, "maximum": 65535}}}}
+}
+
+func nativePublicEndpoints(o nativeOptions) error {
+	if len(o.Endpoints) > 16 {
+		return fmt.Errorf("too many public endpoints")
+	}
+	validate := func(raw string) error {
+		u, e := url.Parse(raw)
+		if e != nil || len(raw) > 2048 || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || strings.Contains(u.Path, "..") || strings.ContainsAny(raw, "\\\x00\r\n") || (u.Scheme != "https" && u.Scheme != "wss") {
+			return fmt.Errorf("public endpoints require credential-free HTTPS or WSS URLs")
+		}
+		return nil
+	}
+	if o.BrowserEndpoint != "" {
+		if e := validate(o.BrowserEndpoint); e != nil {
+			return e
+		}
+		if !strings.HasPrefix(o.BrowserEndpoint, "https://") {
+			return fmt.Errorf("browser endpoint requires HTTPS")
+		}
+	}
+	for name, raw := range o.Endpoints {
+		if !nativeID(name) {
+			return fmt.Errorf("invalid endpoint name")
+		}
+		if e := validate(raw); e != nil {
+			return e
+		}
+	}
+	return nil
 }
