@@ -149,12 +149,22 @@ func (a *App) startRoutingDispatcher(ctx *sdk.AppCtx) {
 	a.dispatchMu.Lock()
 	defer a.dispatchMu.Unlock()
 	a.eventDispatcher = newRoutingDispatcher(func(project string) time.Time {
+		done, admissionErr := a.runtimeBegin(false)
+		if admissionErr != nil {
+			return time.Time{}
+		}
+		defer done()
 		if err := a.publishLifecycleEvents(ctx.WithProject(project), ""); err != nil {
 			ctx.Logger().Warn("routing event delivery", "project", project, "err", err)
 		}
 		return time.Time{}
 	})
 	a.dispatcher = newRoutingDispatcher(func(project string) time.Time {
+		done, admissionErr := a.runtimeBegin(false)
+		if admissionErr != nil {
+			return time.Time{}
+		}
+		defer done()
 		scoped := ctx.WithProject(project)
 		// These use the same atomic claims as periodic recovery, including when a
 		// periodic worker runs concurrently with an immediate wake.

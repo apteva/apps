@@ -38,6 +38,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -48,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.12.13
+version: 0.12.14
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -105,6 +106,10 @@ requires:
 
 provides:
   http_routes:
+    - { prefix: /_apteva/runtime/app/ }
+    - { prefix: /runtime-endpoints }
+    - { prefix: /runtime-browser-bootstrap }
+    - { prefix: /runtime-browser/, no_auth: true }
     - { prefix: /media-diagnostics }
     - { prefix: /media/, no_auth: true }
     - { prefix: /webhook/, no_auth: true }
@@ -346,7 +351,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.12.13
+    ref: telephony/v0.12.14
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -388,7 +393,7 @@ config_schema:
   - { name: sip_public_ip, type: text, label: "SIP public IPv4 override", description: "Optional. Defaults to the public IPv4 resolved from the SIP hostname." }
   - { name: sip_tls_cert_file, type: text, label: "SIP TLS certificate override", description: "Optional. Telephony discovers standard Apteva and Let's Encrypt certificate paths." }
   - { name: sip_tls_key_file, type: text, label: "SIP TLS key override", description: "Optional. Must be set with the certificate override." }
-  - { name: sip_tls_peer_names, type: text, label: "Carrier TLS certificate names", description: 'Optional JSON carrier-to-hostname mapping for in-dialog TLS connections to IP Contacts. Defaults to {"telnyx":"sip.telnyx.com"}. Certificate trust and hostname verification remain required.' }
+  - { name: sip_tls_peer_names, type: text, label: "Carrier TLS certificate names", description: 'Optional JSON carrier-to-hostname mapping for in-dialog TLS connections to IP Contacts. Defaults to {"telnyx":"sip.telnyx.com"}, with a bounded retry for the verified sip.telnyx.eu regional identity. Custom identities remain exact. Certificate trust and hostname verification remain required.' }
   - { name: sip_allowed_cidrs, type: text, label: "Carrier CIDR override", description: "Optional. Defaults to maintained Twilio and Telnyx signaling and media networks." }
   - { name: sip_rtp_bind_ip, type: text, default: "0.0.0.0", label: "RTP bind IPv4 address" }
   - { name: sip_rtp_port_min, type: text, default: "20000", label: "First RTP UDP port" }
@@ -404,32 +409,40 @@ upgrade_policy: auto-patch
 var globalCtx *sdk.AppCtx
 
 type App struct {
-	mediaDiagnostics mediaDiagnosticRegistry
-	aiPolicies       aiPolicyRegistry
-	mediaBridges     carrierBridgeRegistry
-	callReads        callReadCache
-	inventoryReads   inventoryReadCache
-	outboundHints    outboundInventoryHints
-	admissionMu      sync.RWMutex
-	audioPeerHasher  audioPeerHasher
-	audioNetworks    audioNetworkCollector
-	notifications    callNotificationQueue
-	audioTransports  audioTransportCollector
-	carrierTelemetry carrierTelemetryCollector
-	audioAlerts      audioAlertCorrelator
-	decisionWG       sync.WaitGroup
-	decisionStopping bool
-	aiRecovering     map[string]bool
-	dispatchMu       sync.Mutex
-	burstMu          sync.Mutex
-	dispatcher       *routingDispatcher
-	callChanges      callChangeHub
-	installID        int64
-	sip              sipRuntimeHolder
-	softphones       softphoneRegistry
-	listeners        callListenerRegistry
-	preparations     realtimePreparations
-	eventDispatcher  *routingDispatcher
+	legacyAdmission   atomic.Uint32
+	legacyWork        atomic.Int64
+	recordingWriters  atomic.Int64
+	legacyLifecycleMu sync.Mutex
+	legacyDeployment  string
+	legacyGeneration  int64
+	runtime           *telephonyRuntime
+	runtimeBrowsers   runtimeBrowserSessions
+	mediaDiagnostics  mediaDiagnosticRegistry
+	aiPolicies        aiPolicyRegistry
+	mediaBridges      carrierBridgeRegistry
+	callReads         callReadCache
+	inventoryReads    inventoryReadCache
+	outboundHints     outboundInventoryHints
+	admissionMu       sync.RWMutex
+	audioPeerHasher   audioPeerHasher
+	audioNetworks     audioNetworkCollector
+	notifications     callNotificationQueue
+	audioTransports   audioTransportCollector
+	carrierTelemetry  carrierTelemetryCollector
+	audioAlerts       audioAlertCorrelator
+	decisionWG        sync.WaitGroup
+	decisionStopping  bool
+	aiRecovering      map[string]bool
+	dispatchMu        sync.Mutex
+	burstMu           sync.Mutex
+	dispatcher        *routingDispatcher
+	callChanges       callChangeHub
+	installID         int64
+	sip               sipRuntimeHolder
+	softphones        softphoneRegistry
+	listeners         callListenerRegistry
+	preparations      realtimePreparations
+	eventDispatcher   *routingDispatcher
 }
 
 const (
@@ -460,14 +473,15 @@ func (a *App) Manifest() sdk.Manifest {
 }
 
 func (a *App) OnMount(ctx *sdk.AppCtx) error {
+	if err := a.prepareRuntime(ctx); err != nil {
+		return err
+	}
 	a.mediaDiagnostics.start()
 	if ctx.AppDB() == nil {
 		return errors.New("telephony requires a db block")
 	}
 	globalCtx = ctx
-	if err := initializeRecordingTemporaryFiles(ctx.DataDir()); err != nil {
-		ctx.Logger().Warn("recording temporary directory unavailable", "err", err)
-	}
+
 	initRTCOpusBundle(ctx.DataDir())
 	opusSource, opusVersion, opusErr := rtcNativeAvailability()
 	if opusErr != nil {
@@ -483,8 +497,46 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("resolve telephony installation identity: platform returned no install id")
 	}
 	a.installID = identity.InstallID
+	if a.runtime == nil {
+		if err := a.initializeActiveRuntime(ctx); err != nil {
+			return err
+		}
+	} else {
+		// Read-only preflight: an invalid restored original must fail readiness,
+		// before Server commits ownership and before references are rewritten.
+		if _, err := a.managedRecordingPathChanges(); err != nil {
+			return fmt.Errorf("validate managed recording state: %w", err)
+		}
+		if err := a.startSIPGateway(ctx); err != nil {
+			return fmt.Errorf("start direct SIP gateway: %w", err)
+		}
+		a.runtime.initialize = func() error { return a.initializeActiveRuntime(ctx) }
+		a.startRuntimeOwnership(ctx)
+	}
+	ctx.Logger().Info("telephony mounted")
+	return nil
+}
+
+// Recovery mutates call state and may invoke carriers. A managed candidate must
+// not run it until Server has committed its execution ownership.
+func (a *App) initializeActiveRuntime(ctx *sdk.AppCtx) error {
+	if !a.runtimeInitializationAllowed() {
+		return errRuntimeAdmission
+	}
+	if err := initializeRecordingTemporaryFiles(ctx.DataDir()); err != nil {
+		ctx.Logger().Warn("recording temporary directory unavailable", "err", err)
+	}
+	if err := a.relocateRecordingPaths(); err != nil {
+		return err
+	}
+	if !a.runtimeInitializationAllowed() {
+		return errRuntimeAdmission
+	}
 	if err := a.ensureLegacyRoutingFlows(ctx); err != nil {
 		return fmt.Errorf("migrate existing inbound routes to routing flows: %w", err)
+	}
+	if !a.runtimeInitializationAllowed() {
+		return errRuntimeAdmission
 	}
 	if _, err := ctx.AppDB().Exec(`UPDATE calls SET media_active = 0,
         media_status = CASE WHEN media_active <> 0 OR media_status IN ('connecting','connected') THEN 'disconnected' ELSE media_status END,
@@ -508,16 +560,27 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := a.restoreAIPolicyRuntimes(); err != nil {
 		return fmt.Errorf("restore AI call policies: %w", err)
 	}
-	if err := a.startSIPGateway(ctx); err != nil {
-		return fmt.Errorf("start direct SIP gateway: %w", err)
+	if a.runtime == nil {
+		if err := a.startSIPGateway(ctx); err != nil {
+			return fmt.Errorf("start direct SIP gateway: %w", err)
+		}
+	}
+	if !a.runtimeInitializationAllowed() {
+		return errRuntimeAdmission
 	}
 	a.startRoutingDispatcher(ctx)
 	a.startCarrierMediaRecovery(ctx)
-	ctx.Logger().Info("telephony mounted")
 	return nil
 }
 
 func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
+	if a.runtime != nil && a.runtime.cancel != nil {
+		a.runtime.cancel()
+		if a.runtime.done != nil {
+			<-a.runtime.done
+		}
+		a.runtime.initWG.Wait()
+	}
 	a.mediaDiagnostics.stop()
 	a.stopAIPolicies()
 	a.stopCarrierBridges()
@@ -530,7 +593,7 @@ func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
 }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{
+	workers := []sdk.Worker{
 		{Name: "sip-resource-retirement", Schedule: "@every 30s", Run: a.runRetiredSIPResources},
 		{Name: "ai-call-policies", Schedule: "@every 1s", Run: a.runAICallPolicies},
 		{Name: "carrier-media-recovery", Schedule: "@every 1s", Run: a.runCarrierMediaRecovery},
@@ -557,6 +620,19 @@ func (a *App) Workers() []sdk.Worker {
 			Run:      a.runRecordingTick,
 		},
 	}
+	for i := range workers {
+		run := workers[i].Run
+		workers[i].Run = func(c context.Context, ctx *sdk.AppCtx) error {
+			done, err := a.runtimeBegin(false)
+			if err != nil {
+				return nil
+			}
+			defer done()
+			return run(c, ctx)
+		}
+	}
+	return workers
+
 }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
@@ -564,6 +640,10 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	routes := []sdk.Route{
+		{Pattern: runtimeAppPrefix, Handler: a.handleRuntimeLifecycle},
+		{Pattern: "/runtime-endpoints", Handler: a.handleRuntimeEndpoints},
+		{Pattern: "/runtime-browser-bootstrap", Handler: a.handleRuntimeBrowserBootstrap},
+		{Pattern: runtimeBrowserPrefix + "/", Handler: a.handleRuntimeBrowser, NoAuth: true},
 		{Pattern: "/media-diagnostics", Handler: a.handleMediaDiagnostics},
 		{Pattern: "/media-diagnostics/", Handler: a.handleMediaDiagnostics},
 		{Pattern: "/media/diagnostic/echo", Handler: a.handleDiagnosticEcho, NoAuth: true},
@@ -615,8 +695,13 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/peer/", Handler: a.handlePeerSocket, NoAuth: true},
 	}
 	for i := range routes {
-		if !routes[i].NoAuth && routes[i].Pattern != runtimeBindingsPath {
+		if !routes[i].NoAuth && routes[i].Pattern != runtimeBindingsPath && routes[i].Pattern != runtimeAppPrefix {
 			routes[i].Handler = a.applicationUserHTTP(routes[i].Handler)
+		}
+	}
+	for i := range routes {
+		if routes[i].Pattern != runtimeAppPrefix {
+			routes[i].Handler = a.runtimeHTTP(routes[i].Handler, runtimeNewHTTP(routes[i].Pattern))
 		}
 	}
 	return routes
@@ -1130,7 +1215,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	}
 	for i := range tools {
 		if tools[i].HandlerCtx != nil {
-			tools[i].HandlerCtx = operatorPhoneTool(tools[i].HandlerCtx)
+			tools[i].HandlerCtx = operatorPhoneTool(a.runtimeTool(tools[i].Name, tools[i].HandlerCtx))
 		}
 	}
 	return tools
@@ -2854,6 +2939,11 @@ func (a *App) handleTwilioInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if errors.Is(err, errRuntimeAdmission) {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "Telephony is draining; retry", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		http.Error(w, "persist call: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -3003,6 +3093,11 @@ func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, me
 		applyRoutingPlanToRoute(route, plan)
 		return existing, false, nil
 	}
+	runtimeDone, err := a.runtimeBegin(true)
+	if err != nil {
+		return nil, false, err
+	}
+	defer runtimeDone()
 	a.admissionMu.RLock()
 	defer a.admissionMu.RUnlock()
 	if err := a.checkInboundAdmission(route); err != nil {
@@ -3387,6 +3482,11 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if errors.Is(err, errRuntimeAdmission) {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "Telephony is draining; retry", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		http.Error(w, "persist call: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -3689,6 +3789,9 @@ func (a *App) publicBase() string {
 // own routes. Apps live under /api/apps/<name>/... per the
 // platform's MCP gateway convention.
 func (a *App) publicAppURL() string {
+	if endpoint := a.runtimeEndpoint("callbacks", ""); endpoint != "" {
+		return runtimeHTTPURL(endpoint)
+	}
 	base := a.publicBase()
 	if base == "" {
 		return ""
@@ -3697,6 +3800,9 @@ func (a *App) publicAppURL() string {
 }
 
 func (a *App) publicInstalledAppURL() string {
+	if endpoint := a.runtimeEndpoint("callbacks", ""); endpoint != "" {
+		return runtimeHTTPURL(endpoint)
+	}
 	base := a.publicBase()
 	if base == "" || a.installID <= 0 {
 		return ""
@@ -3708,6 +3814,9 @@ func (a *App) publicInstalledAppURL() string {
 // Streams. Real carriers require wss (TLS); a public_url over plain
 // http is only useful for local mock testing.
 func (a *App) publicWSStreamURL(provider, callID, secret string) string {
+	if endpoint := a.runtimeEndpoint("carrier_media", "/media/"+url.PathEscape(provider)+"/"+url.PathEscape(callID)+"/"+url.PathEscape(secret)); endpoint != "" {
+		return websocketURL(endpoint)
+	}
 	base := a.publicInstalledAppURL()
 	path := "/media/" + url.PathEscape(provider) + "/" + url.PathEscape(callID) + "/" + url.PathEscape(secret)
 	if strings.HasPrefix(base, "https://") {

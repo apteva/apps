@@ -1,0 +1,432 @@
+{
+  "version": "0.12.14 (prepared locally)",
+  "date": "2026-10-13",
+  "scope": "Telephony shared inbound/outbound SIP receive, clock, framing and diagnostics; carrier independent; human and AI",
+  "production_modified": false,
+  "published": false,
+  "full_go_suite": {
+    "command": "GOWORK=off go test -json -count=1 ./...",
+    "exit_code": 0,
+    "counts_including_subtests": {
+      "pass": 1378,
+      "skip": 9
+    },
+    "skipped_cases": [
+      "TestQueryEfficiencyPerformance",
+      "TestLongSIPRecordingImportAndPlaybackMatrix",
+      "TestSIPPlaybackClockPacedLoad",
+      "TestSIPPlaybackRealSpeechReplay",
+      "TestSIPTelemetryCollectionCost",
+      "TestRTCCodecCPUStress",
+      "TestRTCVoiceSpeechDemo",
+      "TestTwilioLiveAccount",
+      "TestTwilioLiveOutboundCall"
+    ],
+    "log": "/tmp/telephony-sip-recovery-verified.jsonl",
+    "elapsed_seconds": 313.969
+  },
+  "frontend": {
+    "command": "bun run test:frontend",
+    "passed": 269,
+    "failed": 0,
+    "exit_code": 0,
+    "log": "/tmp/telephony-sip-recovery-frontend.log",
+    "earlier_failure": "One unchanged waveform replay timed out during concurrent cold Go compilation; complete isolated repeat passed. No timeout limit or frontend source was changed.",
+    "earlier_log": "/tmp/telephony-sip-recovery-frontend-first.log"
+  },
+  "race": {
+    "exit_code": 0,
+    "scope": "Clock fit diagnostics, concurrent ingress/playout snapshots, fresh rebuffer, startup budget, retained partial deadlines, kernel timestamp conversion, early handoff, and short recovery/age-edge scenarios",
+    "log": "/tmp/telephony-sip-recovery-race-final.log",
+    "elapsed_seconds": 7.755
+  },
+  "vet": {
+    "exit_code": 0,
+    "command": "GOWORK=off go vet ./...",
+    "log": "/tmp/telephony-sip-recovery-vet.log"
+  },
+  "typecheck": {
+    "exit_code": 0,
+    "command": "bun run typecheck",
+    "log": "/tmp/telephony-sip-recovery-typecheck.log"
+  },
+  "linux_amd64_build": {
+    "exit_code": 0,
+    "cgo": false,
+    "log": "/tmp/telephony-sip-recovery-build-amd64.log"
+  },
+  "linux_kernel_runtime": {
+    "status": "pending final native Linux/CI execution; no further Docker use per user instruction",
+    "earlier_attempt": "An isolated socket-residence test hit Linux deferred timestamp activation; the stale socket backlog test passed. Test startup was corrected but final Linux runtime results are not claimed.",
+    "log": "/tmp/telephony-sip-recovery-linux.log"
+  },
+  "bench": {
+    "scope": "Healthy admission/queue path: frozen 0.12.13 ingress/clock versus corrected ingress/clock, shared current pop; three repetitions; not whole-call CPU or production capacity",
+    "before_ns": [
+      456.2,
+      456.9,
+      683.3
+    ],
+    "after_ns": [
+      460.7,
+      538.8,
+      460.1
+    ],
+    "median_before_ns": 456.9,
+    "median_after_ns": 460.7,
+    "median_increase_percent": 0.8316918362880399,
+    "bytes_per_packet": 160,
+    "allocations_per_packet": 1,
+    "log": "/tmp/telephony-sip-recovery-bench.log"
+  },
+  "regressions": {
+    "scope": "Deterministic virtual-time timing scenarios with real PCMU/PCMA/G722 decode; not a packet replay of the production incident",
+    "before_g722_offset_late_ms": 775860,
+    "after_g722_offset_discarded_ms": 0,
+    "fresh_speech_after_concealment": "retained, no source clock reset",
+    "startup_age_budget": "140/190 ms source offsets remain playable without relaxing 200 ms expiry",
+    "partial_deadline": "consumed prefix no longer owns retained samples; genuinely old partials still expire",
+    "sustained_delays": "400 ms and 10 seconds still rejected",
+    "logs": [
+      "/tmp/telephony-sip-recovery-final-regressions.log",
+      "/tmp/telephony-sip-g722-reserve-before.log"
+    ],
+    "short_147s_hypothesis_probe": {
+      "offset_ms": 160,
+      "drift_ppm": 250,
+      "hold_ms": 420,
+      "before_g722_discarded_ms": 34999.75,
+      "after_g722_discarded_ms": 401.25,
+      "after_tail_discarded_ms": 0,
+      "scope": "Synthetic hypothesis probe; actual incident RTP trace unavailable; PCMU/PCMA also pass"
+    },
+    "near_age_limit_probe": {
+      "offset_ms": 180,
+      "jitter_ms": 10,
+      "playout_tick_ms": 20,
+      "clock_updates": 67,
+      "clock_rate_ppm": -249.9375156209682,
+      "after_late_ms": 500,
+      "after_expired_ms": 50045.625,
+      "scope": "Insufficient headroom legitimately expires packets above 200ms; frequency still recovers. Lossless expectation was rejected, not achieved by relaxing expiry.",
+      "earlier_failed_lossless_expectation_log": "/tmp/telephony-sip-recovery-short-debug.log"
+    },
+    "effective_live_target": "Reserve adaptation fits remaining age budget with 20ms output-frame headroom; effective_target_ms retained separately from nominal target"
+  },
+  "paced_mixed_load_first": {
+    "gomaxprocs": 4,
+    "logical_cpus": 10,
+    "mixed_recording_database_notifications": true,
+    "results": [
+      {
+        "process_gc_pause_ms": 6.759793,
+        "go_heartbeat_max_gap_ms": 33.535,
+        "mixed_background_operations": 164,
+        "recording_dropped_ms": 0,
+        "calls": 32,
+        "browser_codec": "portable",
+        "wall_seconds": 16.400267292,
+        "cpu_percent_one_core": 77.49467599347955,
+        "playback_work_p99_ms": 1.313,
+        "playback_work_max_ms": 32.572584,
+        "playback_schedule_max_ms": 67.7615,
+        "discarded_ms": 460,
+        "replacement_ms": 460,
+        "Received": 25600,
+        "Sent": 25440,
+        "Returned": 25440,
+        "max_queue_ms": 118.75,
+        "allocated_bytes": 779092488
+      },
+      {
+        "process_gc_pause_ms": 92.838906,
+        "go_heartbeat_max_gap_ms": 279.37075,
+        "mixed_background_operations": 158,
+        "recording_dropped_ms": 0,
+        "calls": 32,
+        "browser_codec": "native_fec",
+        "wall_seconds": 16.418955167,
+        "cpu_percent_one_core": 87.79895464343343,
+        "playback_work_p99_ms": 29.01925,
+        "playback_work_max_ms": 636.009708,
+        "playback_schedule_max_ms": 795.859666,
+        "discarded_ms": 40760.5,
+        "replacement_ms": 11720,
+        "Received": 25600,
+        "Sent": 24055,
+        "Returned": 24055,
+        "max_queue_ms": 160,
+        "allocated_bytes": 750937864
+      },
+      {
+        "process_gc_pause_ms": 11.639709,
+        "go_heartbeat_max_gap_ms": 1466.35625,
+        "mixed_background_operations": 78,
+        "recording_dropped_ms": 0,
+        "calls": 64,
+        "browser_codec": "portable",
+        "wall_seconds": 16.399973792,
+        "cpu_percent_one_core": 63.37554030159512,
+        "playback_work_p99_ms": 3.184084,
+        "playback_work_max_ms": 7178.46675,
+        "playback_schedule_max_ms": 7849.588041,
+        "discarded_ms": 548867,
+        "replacement_ms": 7020,
+        "Received": 49452,
+        "Sent": 21958,
+        "Returned": 21958,
+        "max_queue_ms": 160,
+        "allocated_bytes": 719207448
+      },
+      {
+        "process_gc_pause_ms": 16.424247,
+        "go_heartbeat_max_gap_ms": 27.158917,
+        "mixed_background_operations": 164,
+        "recording_dropped_ms": 0,
+        "calls": 64,
+        "browser_codec": "native_fec",
+        "wall_seconds": 16.400161125,
+        "cpu_percent_one_core": 173.8306580204406,
+        "playback_work_p99_ms": 0.827542,
+        "playback_work_max_ms": 16.624041,
+        "playback_schedule_max_ms": 32.491584,
+        "discarded_ms": 0,
+        "replacement_ms": 0,
+        "Received": 51200,
+        "Sent": 50880,
+        "Returned": 50880,
+        "max_queue_ms": 79.375,
+        "allocated_bytes": 1552275760
+      }
+    ],
+    "scope": "local bidirectional UDP/SRTP + SIP framer + resampling + Opus encode/decode; optional mixed mode adds recording, database call-list reads and retryable notification persistence; excludes live signaling, external proxy and browser rendering"
+  },
+  "paced_native32_repeat": {
+    "result": [
+      {
+        "process_gc_pause_ms": 572.013585,
+        "go_heartbeat_max_gap_ms": 606.598208,
+        "mixed_background_operations": 126,
+        "recording_dropped_ms": 0,
+        "calls": 32,
+        "browser_codec": "native_fec",
+        "wall_seconds": 16.400115959,
+        "cpu_percent_one_core": 67.08595248658753,
+        "playback_work_p99_ms": 67.247,
+        "playback_work_max_ms": 2245.556542,
+        "playback_schedule_max_ms": 2270.553042,
+        "discarded_ms": 155321,
+        "replacement_ms": 15140,
+        "Received": 25600,
+        "Sent": 18380,
+        "Returned": 18380,
+        "max_queue_ms": 160,
+        "allocated_bytes": 584483304,
+        "clock_rate_updates": 53,
+        "clock_rate_rejected": 11,
+        "clock_phase_withheld": 0,
+        "late_discarded_ms": 121620,
+        "expired_discarded_ms": 15461,
+        "overflow_discarded_ms": 18240,
+        "retained_drop_event_reasons_ms": {
+          "decoded_partial_age": 1611.125,
+          "ingress_processing_age": 100,
+          "late_arrival": 2600,
+          "queue_age": 13840,
+          "queue_overflow": 18160,
+          "source_delivery_age": 118760
+        }
+      }
+    ],
+    "exit_code": 1,
+    "log": "/tmp/telephony-sip-recovery-native32.log",
+    "incident_log": "/tmp/telephony-sip-recovery-native32.json"
+  },
+  "load_limitations": [
+    "First four-case run: native/FEC 64-call case passed with zero audio/recording drops; other cases failed the strict zero-drop gate with scheduling pauses, including >7 seconds.",
+    "Isolated native32 repeat failed with >2-second scheduling pauses and accepted clock fits; this is not a clean capacity verification.",
+    "Mac has 16 GiB RAM; approximately 5.9\u20136.5 GiB swap was observed. This is supporting host evidence, not proof of the cause of pauses or production incidents.",
+    "These paced results preceded the final fresh-sequence/age-budget/partial-deadline changes. They remain retained failures; do not claim a final 32/64-call capacity guarantee.",
+    "The temporary Docker runtime was stopped/already stopped; no more Docker testing is performed.",
+    "Final source mixed-load run: native/FEC 32 passed; portable 32/64 and native 64 failed. Maximum scheduling delay 776.643ms. Aggregate drop totals combine all calls, not one call. Clock updates remained active with no phase withholding in these capacity tests. No clean 64-call capacity guarantee."
+  ],
+  "invariants": [
+    "Default 160 ms capacity and 200 ms age cap preserved",
+    "Frequency correction cannot rebase a sustained stale stream",
+    "Fixed per-call history; no packet-path database/network/logging added",
+    "Diagnostic history allocations happen outside audio mutex",
+    "Duplicates/reordering and carrier/source ownership preserved",
+    "Normal startup retains reserve; degraded starts report actual required_reserve_ms",
+    "Existing local managed runtime and regional TLS fixes preserved"
+  ],
+  "source_sha256": {
+    "sip_source_clock.go": "f32babeb6ef7eeb2a6c614d6053d7389b175ce3d8b1c9785fd2460bfd7332463",
+    "sip_jitter.go": "86263b4cebe603781a66fdda77b71b8c8313d9dca6cf7ded6c8e8f3c473e172f",
+    "sip_rtp.go": "28f5700a50e535e77342cba9abc73066291f4097693dd346619a94caec3e14b5",
+    "sip_early_media.go": "a117146d3689ccd8064f51c97aa1b05cbd2e1dd6d7c46838d87b34ca3462b5eb",
+    "sip_observability.go": "ed41d040bb58601bb8092c3cfd37960b033ba460ec0f2fe7d9d02cd389ab966f",
+    "audio_carrier_summary.go": "618310620f608f8989f09ab9d4a34ea71b2162bf1f797d8d53971426d15ceb98",
+    "sip_socket_linux.go": "d59e010d63dcacf8795ec6323c43ab9188b49c5d50ed95bafac32b7f82acc873",
+    "sip_socket_other.go": "a85cfb145c7e2adc197ad9f5fa4c5245627b1f925eeca93a4661434e7cb82b15",
+    "sip_socket_timing.go": "1fab9fa2f408155f2d2ac76f8eeab267c67fd30d95422383ab7055cd48e023f0"
+  },
+  "linux_arm64_test_compile": {
+    "exit_code": 0,
+    "command": "GOWORK=off GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go test -c -o /tmp/telephony-sip-recovery-linux-final.test .",
+    "log": "/tmp/telephony-sip-recovery-build-arm64.log",
+    "scope": "Compilation only; kernel runtime tests pending"
+  },
+  "paced_mixed_load_final": {
+    "exit_code": 1,
+    "command": "GOWORK=off GOMAXPROCS=4 TELEPHONY_SIP_MIXED_LOAD=1 TELEPHONY_SIP_LOAD_RESULTS=/tmp/telephony-sip-recovery-final-mixed-load.json go test -v -run ^TestSIPPlaybackClockPacedLoad$ -count=1 .",
+    "log": "/tmp/telephony-sip-recovery-final-mixed-load.log",
+    "incident_log": "/tmp/telephony-sip-recovery-final-mixed-load.json",
+    "results": [
+      {
+        "process_gc_pause_ms": 12.284956,
+        "go_heartbeat_max_gap_ms": 57.838208,
+        "mixed_background_operations": 164,
+        "recording_dropped_ms": 0,
+        "calls": 32,
+        "browser_codec": "portable",
+        "wall_seconds": 16.40501075,
+        "cpu_percent_one_core": 64.38377371986789,
+        "playback_work_p99_ms": 2.461917,
+        "playback_work_max_ms": 181.874125,
+        "playback_schedule_max_ms": 173.809917,
+        "discarded_ms": 2410.125,
+        "replacement_ms": 2140,
+        "Received": 25600,
+        "Sent": 25366,
+        "Returned": 25366,
+        "max_queue_ms": 159.875,
+        "allocated_bytes": 779318192,
+        "clock_rate_updates": 64,
+        "clock_rate_rejected": 0,
+        "clock_phase_withheld": 0,
+        "late_discarded_ms": 0,
+        "expired_discarded_ms": 330.125,
+        "overflow_discarded_ms": 2080,
+        "retained_drop_event_reasons_ms": {
+          "decoded_partial_age": 290.125,
+          "queue_age": 40,
+          "queue_overflow": 2080
+        }
+      },
+      {
+        "process_gc_pause_ms": 11.921668,
+        "go_heartbeat_max_gap_ms": 19.473708,
+        "mixed_background_operations": 164,
+        "recording_dropped_ms": 0,
+        "calls": 32,
+        "browser_codec": "native_fec",
+        "wall_seconds": 16.400938625,
+        "cpu_percent_one_core": 72.93057594744826,
+        "playback_work_p99_ms": 0.639334,
+        "playback_work_max_ms": 28.572417,
+        "playback_schedule_max_ms": 17.577417,
+        "discarded_ms": 0,
+        "replacement_ms": 0,
+        "Received": 25600,
+        "Sent": 25440,
+        "Returned": 25440,
+        "max_queue_ms": 79.625,
+        "allocated_bytes": 789711768,
+        "clock_rate_updates": 64,
+        "clock_rate_rejected": 0,
+        "clock_phase_withheld": 0,
+        "late_discarded_ms": 0,
+        "expired_discarded_ms": 0,
+        "overflow_discarded_ms": 0,
+        "retained_drop_event_reasons_ms": {}
+      },
+      {
+        "process_gc_pause_ms": 51.982332,
+        "go_heartbeat_max_gap_ms": 71.465708,
+        "mixed_background_operations": 162,
+        "recording_dropped_ms": 0,
+        "calls": 64,
+        "browser_codec": "portable",
+        "wall_seconds": 16.400913334,
+        "cpu_percent_one_core": 115.45214961136506,
+        "playback_work_p99_ms": 3.429333,
+        "playback_work_max_ms": 359.196417,
+        "playback_schedule_max_ms": 387.032417,
+        "discarded_ms": 21011.875,
+        "replacement_ms": 8320,
+        "Received": 51200,
+        "Sent": 50062,
+        "Returned": 50062,
+        "max_queue_ms": 160,
+        "allocated_bytes": 1527096664,
+        "clock_rate_updates": 128,
+        "clock_rate_rejected": 0,
+        "clock_phase_withheld": 0,
+        "late_discarded_ms": 10740,
+        "expired_discarded_ms": 2331.875,
+        "overflow_discarded_ms": 7940,
+        "retained_drop_event_reasons_ms": {
+          "decoded_partial_age": 1051.875,
+          "ingress_processing_age": 20,
+          "late_arrival": 20,
+          "queue_age": 1280,
+          "queue_overflow": 7940,
+          "source_delivery_age": 10700
+        }
+      },
+      {
+        "process_gc_pause_ms": 65.384135,
+        "go_heartbeat_max_gap_ms": 138.466625,
+        "mixed_background_operations": 162,
+        "recording_dropped_ms": 0,
+        "calls": 64,
+        "browser_codec": "native_fec",
+        "wall_seconds": 16.400032375,
+        "cpu_percent_one_core": 151.0179823654159,
+        "playback_work_p99_ms": 25.899959,
+        "playback_work_max_ms": 720.316917,
+        "playback_schedule_max_ms": 776.642875,
+        "discarded_ms": 70404.5,
+        "replacement_ms": 19700,
+        "Received": 51200,
+        "Sent": 48134,
+        "Returned": 48134,
+        "max_queue_ms": 160,
+        "allocated_bytes": 1486446000,
+        "clock_rate_updates": 128,
+        "clock_rate_rejected": 0,
+        "clock_phase_withheld": 0,
+        "late_discarded_ms": 33080,
+        "expired_discarded_ms": 18444.5,
+        "overflow_discarded_ms": 18880,
+        "retained_drop_event_reasons_ms": {
+          "decoded_partial_age": 2884.5,
+          "ingress_processing_age": 20,
+          "late_arrival": 380,
+          "queue_age": 15560,
+          "queue_overflow": 18880,
+          "source_delivery_age": 32680
+        }
+      }
+    ],
+    "scope": "local bidirectional UDP/SRTP + SIP framer + resampling + Opus encode/decode; optional mixed mode adds recording, database call-list reads and retryable notification persistence; excludes live signaling, external proxy and browser rendering",
+    "strict_zero_drop_gate_preserved": true
+  },
+  "carrier_race": {
+    "exit_code": 0,
+    "elapsed_seconds": 15.335,
+    "scope": "Regional Telnyx TLS, outbound early media/handoff, bounded answer reserve, generic outbound human browser media, graceful shutdown and remote hangup",
+    "log": "/tmp/telephony-sip-recovery-race-carriers.log"
+  },
+  "final_validation": {
+    "full_suite_passed": true,
+    "race_passed": true,
+    "vet_passed": true,
+    "linux_amd64_build_passed": true,
+    "linux_arm64_test_compile_passed": true,
+    "paced_capacity_gate_passed": false,
+    "linux_kernel_runtime_validated": false,
+    "production_or_staging_modified": false,
+    "docker_used_in_continuation": false
+  }
+}

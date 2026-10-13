@@ -426,22 +426,38 @@ func (g *sipGateway) startWork() bool {
 	if g.stopping {
 		return false
 	}
+	if g.app != nil {
+		if _, err := g.app.runtimeBegin(false); err != nil {
+			return false
+		}
+	}
 	g.work.Add(1)
 	return true
+}
+func (g *sipGateway) finishWork() {
+	defer g.work.Done()
+	if g.app != nil {
+		g.app.runtimeEnd()
+	}
 }
 func (g *sipGateway) runTask(fn func()) bool {
 	if !g.startWork() {
 		return false
 	}
-	go func() { defer g.work.Done(); fn() }()
+	go func() { defer g.finishWork(); fn() }()
 	return true
 }
 func (g *sipGateway) trackHandler(fn func(*sip.Request, sip.ServerTransaction)) func(*sip.Request, sip.ServerTransaction) {
 	return func(req *sip.Request, tx sip.ServerTransaction) {
 		if !g.startWork() {
+			// A bound standby listener must reject promptly. Silently ignoring an
+			// INVITE over TCP/TLS can leave the carrier waiting for its SIP timeout.
+			if tx != nil && req.Method != sip.ACK {
+				_ = tx.Respond(sip.NewResponseFromRequest(req, sip.StatusServiceUnavailable, "Telephony Unavailable", nil))
+			}
 			return
 		}
-		defer g.work.Done()
+		defer g.finishWork()
 		fn(req, tx)
 	}
 }

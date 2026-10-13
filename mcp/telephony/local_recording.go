@@ -79,12 +79,17 @@ func (a *App) newLocalRecording(call *callRow, voicemail bool) (*localCallRecord
 		return nil, err
 	}
 	// A non-completed row is never imported or advertised as playable.
-	if _, err = a.db().db.Exec(`INSERT INTO local_recording_files(recording_id,path) VALUES(?,?)`, row.ID, f.Name()); err != nil {
+	persistedPath := f.Name()
+	if a.runtime != nil {
+		persistedPath = filepath.Join("recordings", filepath.Base(f.Name()))
+	}
+	if _, err = a.db().db.Exec(`INSERT INTO local_recording_files(recording_id,path) VALUES(?,?)`, row.ID, persistedPath); err != nil {
 		f.Close()
 		os.Remove(f.Name())
 		return nil, err
 	}
 	r := &localCallRecorder{app: a, appCtx: globalCtx, row: row, file: f, queue: make(chan localRecordingFrame, 128), stop: make(chan struct{}), done: make(chan struct{}), started: time.Now(), mono: call.RecordingChannels == "mono" || voicemail}
+	a.recordingWriters.Add(1)
 	go r.run()
 	return r, nil
 }
@@ -118,6 +123,7 @@ func (r *localCallRecorder) Close() {
 	<-r.done
 }
 func (r *localCallRecorder) run() {
+	defer r.app.recordingWriters.Add(-1)
 	defer close(r.done)
 	defer r.file.Close()
 	var last [2]int64
@@ -237,6 +243,10 @@ func (a *App) downloadLocalRecording(ctx context.Context, row *recordingRow) (st
 	if err := a.db().db.QueryRow(`SELECT path FROM local_recording_files WHERE recording_id=?`, row.ID).Scan(&path); err != nil {
 		return "", 0, err
 	}
+	path, err := a.resolveRecordingPath(path)
+	if err != nil {
+		return "", 0, err
+	}
 	source, err := os.Open(path)
 	if err != nil {
 		return "", 0, err
@@ -291,10 +301,14 @@ func (a *App) deleteLocalRecording(row *recordingRow) error {
 	if err := a.db().db.QueryRow(`SELECT path FROM local_recording_files WHERE recording_id=?`, row.ID).Scan(&path); err != nil {
 		return err
 	}
+	path, err := a.resolveRecordingPath(path)
+	if err != nil {
+		return err
+	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	_, err := a.db().db.Exec(`UPDATE recordings SET provider_deleted_at=? WHERE id=?`, ringTime(time.Now()), row.ID)
+	_, err = a.db().db.Exec(`UPDATE recordings SET provider_deleted_at=? WHERE id=?`, ringTime(time.Now()), row.ID)
 	return err
 }
 func (a *App) downloadLocalRecordingVariant(ctx context.Context, row *recordingRow, variant string) (string, error) {

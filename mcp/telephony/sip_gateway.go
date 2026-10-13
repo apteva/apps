@@ -128,6 +128,12 @@ func (a *App) ensureSIPGateway(ctx *sdk.AppCtx) error {
 }
 
 func (a *App) resolveSIPGatewayConfig(ctx *sdk.AppCtx, forceEnabled bool) (sipGatewayConfig, error) {
+	if a.runtime != nil && (forceEnabled || configValue(ctx.Config(), "sip_enabled", "TELEPHONY_SIP_ENABLED", "false") == "true") {
+		if strings.TrimSpace(configValue(ctx.Config(), "sip_public_host", "TELEPHONY_SIP_PUBLIC_HOST", "")) == "" || strings.TrimSpace(configValue(ctx.Config(), "sip_public_ip", "TELEPHONY_SIP_PUBLIC_IP", "")) == "" {
+			return sipGatewayConfig{}, errors.New("managed SIP requires explicit sip_public_host and sip_public_ip for the execution host")
+		}
+	}
+
 	publicURL := ""
 	if a != nil {
 		publicURL = a.publicBase()
@@ -402,6 +408,12 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 		g.handleRefresh(request, transaction)
 		return
 	}
+	done, admissionErr := g.app.runtimeBegin(true)
+	if admissionErr != nil {
+		respond(sip.StatusServiceUnavailable, "Telephony Draining")
+		return
+	}
+	defer done()
 	providerCallID := sipCallID(request)
 	if providerCallID == "" || request.Contact() == nil {
 		respond(sip.StatusBadRequest, "Missing Dialog Headers")
@@ -550,7 +562,7 @@ func (g *sipGateway) Answer(row *callRow) error {
 	if !g.startWork() {
 		return errors.New("SIP gateway stopping")
 	}
-	defer g.work.Done()
+	defer g.finishWork()
 	if rowUsesOutboundSIP(row) {
 		return errors.New("outbound SIP is answered by the remote party")
 	}
@@ -573,7 +585,7 @@ func (g *sipGateway) Reject(row *callRow) error {
 	if !g.startWork() {
 		return errors.New("SIP gateway stopping")
 	}
-	defer g.work.Done()
+	defer g.finishWork()
 	session := g.sessionByCall(row.ID)
 	if session == nil {
 		return errors.New("direct SIP dialog is no longer active")
@@ -595,7 +607,7 @@ func (g *sipGateway) Hangup(row *callRow) error {
 	if !g.startWork() {
 		return errors.New("SIP gateway stopping")
 	}
-	defer g.work.Done()
+	defer g.finishWork()
 	if rowUsesOutboundSIP(row) {
 		if s := g.outboundSessionByCall(row.ID); s != nil {
 			return s.hangup()

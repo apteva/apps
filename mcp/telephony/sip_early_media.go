@@ -45,7 +45,7 @@ func (m *sipRTPMedia) startEarlyReceiver() {
 				return
 			}
 			if e.answered.Load() {
-				packet := sipEarlyPacket{data: append([]byte(nil), buffer[:n]...), source: source, at: time.Now()}
+				packet := sipEarlyPacket{data: append([]byte(nil), buffer[:n]...), source: source, at: m.readAt}
 				select {
 				case e.pending <- packet:
 				default:
@@ -94,6 +94,7 @@ func (m *sipRTPMedia) readPacket(buffer []byte) (int, *net.UDPAddr, error) {
 					continue
 				}
 				m.readAt = p.at
+				m.readCompletedAt = time.Now()
 				return copy(buffer, p.data), p.source, nil
 			default:
 				goto socket
@@ -101,7 +102,5 @@ func (m *sipRTPMedia) readPacket(buffer []byte) (int, *net.UDPAddr, error) {
 		}
 	}
 socket:
-	n, source, err := m.readSocketPacket(buffer)
-	m.readAt = time.Now()
-	return n, source, err
+	return m.readSocketPacket(buffer)
 }

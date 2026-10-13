@@ -465,3 +465,20 @@ reset on a new socket. The headless client handles this automatically. Local
 `audioState: live` also checks the browser transport/audio readiness. Neither
 event proves that the remote person heard speech. `carrierStatus` retains the
 actual signaling status while `phase` remains `placing` until audio is ready.
+
+## Optional managed execution transport (0.12.14)
+
+`TelephonyClientOptions.runtime` accepts `"auto"` (default), `"proxy"` or
+`"direct"`. The app-owned client discovers deployment endpoints and obtains a
+scoped browser credential through the management proxy. Eligible platform users
+then use the remote execution for call HTTP, SSE, media/control sockets and
+listen/coach sessions. No host credentials are sent to the remote execution.
+Legacy/local installations continue using the existing proxy.
+
+Delegated `authProvider` clients retain the proxy because the current Server
+credential contract supports platform users at its own managed origin only.
+An explicitly bundled client needs rebuilding to use the new transport; dynamic
+`apps.load()` clients receive it from the installed app. The browser must allow
+the advertised origins in its CSP. Raw SIP/RTP and WebRTC UDP networking remain
+backend configuration responsibilities. See
+[the runtime guide](../docs/managed-runtime.md) before opting into placement.

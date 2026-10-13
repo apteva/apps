@@ -114,6 +114,7 @@ type outboundSIPSession struct {
 	gateway        *sipGateway
 	callID         string
 	providerCallID string
+	carrierSlug    string // immutable provider identity for regional dialog TLS
 	dialog         *sipgo.DialogClientSession
 	media          *sipRTPMedia
 	localKey       []byte
@@ -218,7 +219,7 @@ func (g *sipGateway) startSIPOutbound(row *callRow, settings didwwSIPSettings, t
 	defer func() {
 		if workOwned {
 			cancel()
-			g.work.Done()
+			g.finishWork()
 		}
 	}()
 	localKey := []byte(nil)
@@ -267,7 +268,7 @@ func (g *sipGateway) startSIPOutbound(row *callRow, settings didwwSIPSettings, t
 		_ = dialog.Close()
 		return errors.New("Outbound SIP INVITE has no Call-ID")
 	}
-	s := &outboundSIPSession{playbackPolicy: playbackPolicy, gateway: g, callID: row.ID, providerCallID: providerCallID,
+	s := &outboundSIPSession{playbackPolicy: playbackPolicy, gateway: g, callID: row.ID, providerCallID: providerCallID, carrierSlug: row.CarrierSlug,
 		dialog: dialog, media: media, localKey: localKey, settings: settings, ctx: ctx, cancel: cancel,
 		dialDeadline: dialDeadline,
 		maxDuration:  time.Duration(max(60, min(maxDurationSec, maximumConnectedDurationSec))) * time.Second,
@@ -289,7 +290,7 @@ func (g *sipGateway) startSIPOutbound(row *callRow, settings didwwSIPSettings, t
 	g.mu.Unlock()
 	current, findErr := g.app.db().findCall(row.ID)
 	identityErr := g.app.db().updateCarrierIdentity(row.ID, providerCallID, "")
-	go func() { defer g.work.Done(); s.waitAnswer() }()
+	go func() { defer g.finishWork(); s.waitAnswer() }()
 	workOwned = false
 	if findErr != nil || current == nil || isTerminalStatus(current.Status) || ctx.Err() != nil {
 		s.finish("local", nil)

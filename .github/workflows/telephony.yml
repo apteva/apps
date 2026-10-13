@@ -66,9 +66,11 @@ jobs:
           - runner: ubuntu-24.04
             arch: amd64
             musl_arch: x86_64
+            musl_root_sha256: 412454ed98025ad9cd910d13f3d448b184e81502baa83180e89f98d0f13674be
           - runner: ubuntu-24.04-arm
             arch: arm64
             musl_arch: aarch64
+            musl_root_sha256: 6bf491907b705caa5fc65773fbbc1d0954530b6c455d4446f670a4c1fdcea489
           - runner: macos-15-intel
             arch: amd64
           - runner: macos-15
@@ -94,9 +96,21 @@ jobs:
       - name: Verify musl library with a musl-loader binary
         if: runner.os == 'Linux'
         run: |
+          # Native CPU execution in a musl-only filesystem; Ubuntu's GNU libc
+          # must not enter this test process. No container runtime is needed.
+          musl_root=$(mktemp -d)
+          trap 'if mountpoint -q "$musl_root/proc"; then sudo umount "$musl_root/proc"; fi; sudo rm -rf "$musl_root"' EXIT
+          musl_archive=/tmp/telephony-musl-root-${{ matrix.musl_arch }}.tar.gz
+          curl --fail --silent --show-error --max-time 60 \
+            https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/${{ matrix.musl_arch }}/alpine-minirootfs-3.22.2-${{ matrix.musl_arch }}.tar.gz \
+            -o "$musl_archive"
+          printf '%s  %s\n' '${{ matrix.musl_root_sha256 }}' "$musl_archive" | sha256sum -c -
+          sudo tar -xzf "$musl_archive" -C "$musl_root"
+          sudo chmod 0755 "$musl_root"
           go test -c -ldflags '-I /lib/ld-musl-${{ matrix.musl_arch }}.so.1' -o /tmp/telephony-opus-musl .
-          docker run --rm --network none --user 10001:10001 -e HOME=/tmp \
-            -v /tmp/telephony-opus-musl:/test:ro alpine:3.22 /test \
+          sudo install -m 0755 /tmp/telephony-opus-musl "$musl_root/test"
+          sudo mount -t proc proc "$musl_root/proc"
+          sudo chroot --userspec=10001:10001 "$musl_root" /usr/bin/env XDG_CACHE_HOME=/tmp/codec-cache /test \
             -test.run 'TestRTCOpusBundle|TestRTCNative|TestRTCFECOff|TestRTCOpusCodecCompatibility' -test.v
   mixed-media-load:
     name: Mixed SIP media load
@@ -133,7 +147,7 @@ jobs:
       matrix:
         include:
           - group: media
-            pattern: 'Test(SIPPlayback|CarrierStream|CarrierEvidence|CarrierRecovery|SIPTelemetry)'
+            pattern: 'Test(SIPPlayback|SIPClockFitEvidence|SIPClockLowerEnvelope|SIPClockRecoveryShort|SIPClockRecoveryDelivery|SIPIngressAndConsumer|SIPFreshPacketAfter|SIPStartupReserve|SIPDecodedPartial|SIPKernelArrival|SIPEarlyReserve|SIPLinux|CarrierStream|CarrierEvidence|CarrierRecovery|SIPTelemetry)'
           - group: lifecycle
             pattern: 'Test(SoftphoneStartup|SIPStartupCodec|SIPDialogTLS|SIPOutboundEarly|SIPOutboundFresh|SIPBYEFailure|NotificationOutbox|RTCIngressEvidence|ProxyCallIdentity|ProxyIdentityRetained|AutomaticOutboundSIP|TelephonyExclusiveActivation|SIPExclusiveActivation|GenericOutboundSIP|OutboundSIP|DIDWWOutbound|Telnyx.*SIP|TelnyxProvisioning|DirectSIPCarrierSetup|SIPAnsweredDialog|SIPMissingInitialACK|LocalSIP|LocalMediaSettings|SIPRuntimeTransport|SIPResourceCleanup|SIPNativeHold|SIPOutboundDTMF|SIPTransportSave|SIPRetirement|SIPTwilioDetach|SIPAIActivation|SIPRouteAccount|SIPExternalOffer|SelectingDirectSIP|LocalCloseTimeout)'
     env:

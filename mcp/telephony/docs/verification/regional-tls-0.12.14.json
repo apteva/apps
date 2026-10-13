@@ -1,0 +1,46 @@
+{
+  "version": "0.12.14 (prepared locally)",
+  "date": "2026-10-13",
+  "scope": "Telnyx regional TLS identities for SIP in-dialog fallback",
+  "baseline": {
+    "regression": "inbound EU fallback",
+    "exit_code": 1,
+    "error": "x509: certificate is valid for sip.telnyx.eu, not sip.telnyx.com",
+    "log": "/tmp/telephony-regional-tls-before.log"
+  },
+  "full_go_suite": {
+    "command": "GOWORK=off go test -json -count=1 ./...",
+    "exit_code": 0,
+    "passing_cases_including_subtests": 1349,
+    "skipped_cases": 9,
+    "failed_cases": 0,
+    "log": "/tmp/telephony-regional-tls-full.jsonl"
+  },
+  "race": {
+    "command": "GOWORK=off go test -race -run 'TestSIPDialog(TelnyxRegionalTLS|TLSContactAndCertificateIdentity)$|TestGenericOutboundSIP(TelnyxAndTwilio|HangupReportsCarrierFailure|ShutdownSendsBYEBeforeClosingTransport)$|TestSIPRemoteHangupInterruptsPendingLocalRefresh$' -count=1 .",
+    "exit_code": 0,
+    "log": "/tmp/telephony-regional-tls-race.log"
+  },
+  "invariants": [
+    "Standard TLS certificate chain, validity, server usage and hostname verification enabled",
+    "Explicit Telnyx identity allowlist: sip.telnyx.com, sip.telnyx.eu",
+    "At most one retry after matching hostname failure, under existing request context",
+    "Dialog destination and carrier source-network restrictions preserved",
+    "Verified regional sockets reused",
+    "Custom and other-provider identities remain exact",
+    "No audio framing, pacing or stale-audio policy changes"
+  ],
+  "production_modified": false,
+  "published": false,
+  "controlled_carrier_call_performed": false,
+  "vet": {
+    "command": "GOWORK=off go vet ./...",
+    "exit_code": 0,
+    "log": "/tmp/telephony-regional-tls-vet.log"
+  },
+  "linux_build": {
+    "command": "GOWORK=off GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/telephony-regional-tls-linux .",
+    "exit_code": 0,
+    "log": "/tmp/telephony-regional-tls-build.log"
+  }
+}

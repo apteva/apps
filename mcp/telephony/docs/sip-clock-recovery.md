@@ -22,10 +22,13 @@ envelope, even when ordinary jitter continues. In-order timing is observed
 before admission, including rejected packets. Duplicates and reordered packets
 cannot change ownership of the clock observations.
 
-Frequency and phase are corrected separately and gradually. Fits outside
-±1,000 ppm, with more than 40 ms residual spread or phase displacement, are
-rejected. Accepted frequency steps are at most 100 ppm per update; phase steps
-are at most 2 ms. A genuine SSRC or backward timestamp change starts a fresh
+Frequency and phase are corrected separately and gradually. Rate fits outside
+±1,000 ppm or with more than 40 ms residual spread are rejected. A bounded
+lower-envelope/recent fit can recover the rate after a timing step, using at
+least six observation windows. A phase displacement above 40 ms withholds
+phase correction without freezing a valid rate. Accepted frequency steps are
+at most 100 ppm per update and preserve current mapped-time continuity; phase
+steps are at most 2 ms. A genuine SSRC or backward timestamp change starts a fresh
 clock; ordinary DTX and delivery stalls do not erase the rate history. Explicit
 hold/resume retains its existing generation reset.
 
@@ -46,8 +49,51 @@ Per-call `/audio-health` SIP snapshots and summary metrics expose estimator
 updates, rejected fits, observation-window count and signed accumulated phase
 adjustment, alongside the existing rate, ages and drop reasons.
 
-Observations use fixed storage and allocate nothing. Fits touch at most 32
-points twice and run once per window. No database, logging, network request,
+The locally prepared 0.12.14 additionally retains sixteen clock-fit records,
+with UTC timestamp, rejection reason, candidate rate, residual spread, phase,
+fit method and applied corrections. Rate rejection and phase withholding have
+separate counters. A sampling interval can contain both, so these validation
+counters should not be treated as disjoint incident counts.
+
+Drop events distinguish total relative source age, relative delivery age at
+arrival, local queue age and consumer interval. The age fields overlap; do not
+add their maxima together. Decoded partials retain their timing components.
+Linux SO_TIMESTAMPNS supplies kernel-arrival times where supported, and socket
+residence is reported separately. Unsupported/invalid/future timestamps use
+ordinary read time. Converted arrivals retain the local monotonic clock.
+Timestamp activation is optional and never waits during call handling.
+
+G.722 reserve correction now has the same 125 microsecond maximum per frame
+as G.711: two decoded samples at 16 kHz versus one at 8 kHz. G.722's RTP timestamp
+clock remains 8 kHz. Queue capacity and stale-audio limits are unchanged.
+
+Fresh, in-order data received after concealment can trigger a rebuffer when
+the queue is empty and only synthetic playback advanced past its sequence.
+The source clock is retained; duplicate and reordered data are still rejected,
+and age admission always runs first. Retained synthetic partials are cleared
+for this playback epoch; the carrier call and source ownership are unchanged.
+
+Startup uses a reserve that fits the oldest packet's remaining 200 ms budget.
+With ordinary timing it retains the configured reserve and the existing short
+utterance fallback. At the age-budget edge, one fresh 20 ms packet can start
+immediately rather than waiting until it expires. Every start exposes the
+actual `required_reserve_ms`, alongside the adaptive target and queue.
+
+Live reserve adaptation also respects that budget. Its effective target leaves
+one 20 ms output frame of headroom after the latest relative delivery offset,
+instead of building the nominal reserve on top of a nearly exhausted budget.
+`effective_target_ms` exposes that constrained target. Packet/partial expiry is
+unchanged: near-200 ms delivery plus jitter can still legitimately expire before
+the next playout tick, and no lossless guarantee is made for that condition.
+
+After samples are consumed from a decoded segment, its remaining source time
+advances by their audio duration. Physical arrival time stays fixed, and the
+earliest of the two still controls expiry. This prevents a consumed prefix
+from expiring fresh remaining audio without legitimizing old socket backlog.
+
+Observations use fixed storage and allocate nothing. Each fit touches at most
+32 points twice; a bounded set of fallback fits runs at most once per window.
+No database, logging, network request,
 timer or goroutine was added to packet admission. Snapshots retain the existing
 `TryLock` and background persistence. Reserve reconciliation uses the existing
 buffer mutex and bounded queue removal.
@@ -59,6 +105,11 @@ This comparison uses healthy input on both sides, since benchmarking the broken
 implementation while it rejects audio would compare different amounts of work.
 
 ## Deterministic verification
+
+The measurements in this section and the original paced-load section below
+record the earlier clock fix. See **0.12.14 follow-up verification** for the
+current frozen-0.12.13 comparison and final mixed-load results; earlier passing
+runs do not supersede the retained failures in that broader test.
 
 `TestSIPPlaybackClockReportedReproduction` reproduces the report's exact input:
 20 minutes, 20 ms ordered packets, 250 ppm period difference, alternating 10 ms
@@ -164,3 +215,25 @@ No production/staging installation, setting, route, carrier resource or real cal
 was changed or initiated. Local evidence demonstrates the fixed regression and
 bounded recovery, not that every production audio problem or reported noise is
 resolved.
+
+## 0.12.14 follow-up verification
+
+The final frozen-0.12.13 clock/ingress comparison uses the current framer on both
+sides. The twenty-minute G.722 80 ms offset replay changes from 775.86 seconds of
+late rejection to zero total discards. PCMU/PCMA, rate changes and alternating
+delivery windows also recover. A 147-second G.722 hypothesis probe with a 160 ms
+step and one 420 ms hold changes from 34.99975 seconds discarded to 401.25 ms,
+with zero tail drops after recovery. The report does not provide the actual
+packet timing; these are controlled probes, not production attribution.
+
+The final paced mixed recording/database/notification load run passed native
+Opus/FEC at 32 streams, but failed portable 32/64 and native 64. Its strict
+zero-drop gate was retained. The native 64 case had a 777 ms maximum scheduling
+delay; the earlier unmodified-source timing scenarios and earlier capacity
+failures remain recorded. The earlier successful non-mixed test above cannot
+be substituted for this broader final test or establish a production limit.
+
+Kernel-arrival support builds for Linux, but final Linux runtime verification
+is pending on native Linux/CI. No further Docker test or remote change is part
+of this work. [Verification evidence](verification/sip-recovery-0.12.14.json)
+contains the final results and limitations.

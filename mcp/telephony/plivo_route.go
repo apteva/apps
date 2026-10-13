@@ -181,6 +181,11 @@ func (a *App) handlePlivoInbound(w http.ResponseWriter, r *http.Request) {
 		writePlivoHangup(w)
 		return
 	}
+	if errors.Is(err, errRuntimeAdmission) {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "Telephony is draining; retry", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		http.Error(w, "persist call: "+err.Error(), http.StatusInternalServerError)
 		return
