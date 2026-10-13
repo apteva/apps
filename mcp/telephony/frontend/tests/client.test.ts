@@ -54,6 +54,61 @@ function deferred() {
   return { promise, resolve };
 }
 
+test("answer prepares microphone and scripts before claiming a carrier call", async () => {
+  const f = fixture(), gate = deferred();
+  f.setPreflight(() => gate.promise);
+  const pending = f.phone.answer("call-1");
+  await Bun.sleep(1);
+  expect(f.preflighted).toBe(1);
+  expect(f.requests).toHaveLength(0);
+  gate.resolve(); await pending;
+  expect(f.requests[0].url.pathname).toEndWith("/answer/call-1");
+  f.phone.dispose();
+});
+
+test("failed or cancelled inbound preflight never claims the call", async () => {
+  const failed = fixture(); failed.setPreflight(async () => { throw new Error("permission denied"); });
+  await expect(failed.phone.answer("call-1")).rejects.toThrow("permission denied");
+  expect(failed.requests).toHaveLength(0); failed.phone.dispose();
+  const f = fixture(), gate = deferred(); f.setPreflight(() => gate.promise);
+  const pending = f.phone.answer("call-1").catch(error => error);
+  await f.phone.hangup();
+  expect((await pending).message).toContain("cancelled");
+  gate.resolve(); await Bun.sleep(1);
+  expect(f.requests).toHaveLength(0); f.phone.dispose();
+});
+
+test("reconnect preparation keeps live audio and ownership until ready", async () => {
+  const f = fixture(); await f.phone.answer("call-1");
+  const before = f.requests.length, stopped = f.stopped, gate = deferred();
+  f.runtime.prepare = async () => { await gate.promise; };
+  const pending = f.phone.reconnect(); await Bun.sleep(1);
+  expect(f.stopped).toBe(stopped);
+  expect(f.requests).toHaveLength(before);
+  gate.resolve(); await pending;
+  expect(f.requests[before].url.pathname).toEndWith("/attach/call-1");
+  f.phone.dispose();
+});
+
+test("failed reconnect preparation leaves the current audio running", async () => {
+  const f = fixture(); await f.phone.answer("call-1");
+  const before = f.requests.length, stopped = f.stopped;
+  f.runtime.prepare = async () => { throw new Error("asset unavailable"); };
+  await expect(f.phone.reconnect()).rejects.toThrow("asset unavailable");
+  expect(f.stopped).toBe(stopped); expect(f.requests).toHaveLength(before);
+  expect(f.phone.getSnapshot().audioState).toBe("live"); f.phone.dispose();
+});
+
+test("ending during preparation cannot acquire a replacement session later", async () => {
+  const f = fixture(); await f.phone.answer("call-1");
+  const gate = deferred(); f.runtime.prepare = () => gate.promise;
+  const pending = f.phone.reconnect().catch(error => error);
+  await f.phone.hangup(); expect((await pending).message).toContain("cancelled");
+  gate.resolve(); await Bun.sleep(1);
+  expect(f.requests.filter(request => request.url.pathname.includes("/attach/"))).toHaveLength(0);
+  expect(f.phone.getSnapshot().callId).toBeUndefined(); f.phone.dispose();
+});
+
 describe("Telephony extension", () => {
   test("outbound choices use the authorized headless endpoint and preserve provider warnings", async () => {
     const f=fixture();

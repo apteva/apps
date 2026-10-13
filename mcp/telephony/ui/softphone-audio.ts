@@ -1,5 +1,6 @@
 import { TransportTelemetry, TransportTelemetrySender, type TransportSample } from "./transport-telemetry";
 import { AudioRuntimeTelemetry } from "./audio-runtime-telemetry";
+import { measureAudioSetup } from "./audio-setup";
 import { mediaFailure, safeMediaSessionEvent, type MediaRecoveryContext, type MediaSessionEvent } from "../frontend/src/media-lease";
 // Browser audio engine for the Telephony softphone.
 //
@@ -512,7 +513,7 @@ export class SoftphoneSession {
     this.runtimeTelemetry.tick();
     this.telemetryTimer = setInterval(() => this.runtimeTelemetry.tick(), 1000);
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia({ audio: microphoneConstraints(options) });
+      this.stream = await measureAudioSetup("microphone_device", event => this.recordSessionEvent(event), () => navigator.mediaDevices.getUserMedia({ audio: microphoneConstraints(options) }));
       this.ensureOpen();
       const track = this.stream.getAudioTracks()[0];
       if (!track) throw new Error("No microphone audio track was returned.");
@@ -530,11 +531,11 @@ export class SoftphoneSession {
       try { this.ctx = new AudioContext({ sampleRate:SAMPLE_RATE, latencyHint:"interactive" }); }
       catch { this.ctx = new AudioContext({latencyHint:"interactive"}); }
       this.runtimeTelemetry.context(this.ctx.state);
-      if (this.ctx.state === "suspended") await this.ctx.resume();
+      if (this.ctx.state === "suspended") await measureAudioSetup("audio_context", event => this.recordSessionEvent(event), () => this.ctx!.resume());
       this.runtimeTelemetry.context(this.ctx.state);
       this.ensureOpen();
       if (options.outputDeviceId && "setSinkId" in this.ctx) { await (this.ctx as AudioContext & {setSinkId(id:string):Promise<void>}).setSinkId(options.outputDeviceId); this.ensureOpen(); }
-      await loadAudioWorklet(this.ctx, workletURL);
+      await measureAudioSetup("audio_worklet", event => this.recordSessionEvent(event), () => loadAudioWorklet(this.ctx!, workletURL));
       this.ensureOpen();
       this.diagnostics.audioContextRate = this.ctx.sampleRate;
       const source = this.ctx.createMediaStreamSource(this.stream);
@@ -555,7 +556,7 @@ export class SoftphoneSession {
       source.connect(this.capture);
       this.output = this.ctx.createGain(); this.output.gain.value = options.outputVolume ?? 1;
       this.playback.connect(this.output).connect(this.ctx.destination);
-      await this.openWorker(mediaURL, workerURL);
+      await measureAudioSetup("audio_transport", event => this.recordSessionEvent(event), () => this.openWorker(mediaURL, workerURL));
       this.ensureOpen();
       this.capture.onprocessorerror = this.playback.onprocessorerror = () => this.fail("Audio processing stopped. Reconnect audio.");
       this.runtimeTelemetry.context(this.ctx.state);

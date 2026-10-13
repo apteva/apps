@@ -30,6 +30,15 @@ test("default does not create a peer connection; explicit RTC never silently fal
  await expect(explicit.start("ws://test",{...DEFAULT_SOFTPHONE_AUDIO_OPTIONS,mediaTransport:"webrtc"})).rejects.toThrow("failed");
  expect(events).toEqual(["rtc:mute:false","rtc:start","rtc:stop"]);
 });
+
+test("preflight evidence is bounded and reaches the selected transport before startup failure",async()=>{
+ const events:string[]=[],observed:any[]=[];
+ const audio=selectableAudio({},()=>({...connection("ws",events,new Error("socket failed")),recordSessionEvent(event){observed.push(event);}}),()=>connection("rtc",events));
+ for(let i=0;i<40;i++)audio.recordSessionEvent?.({timestamp:new Date().toISOString(),action:"audio_preflight",outcome:"completed",duration_ms:i});
+ await expect(audio.start("ws://test",DEFAULT_SOFTPHONE_AUDIO_OPTIONS)).rejects.toThrow("socket failed");
+ expect(observed).toHaveLength(20);expect(observed[0].duration_ms).toBe(20);expect(observed.at(-1).duration_ms).toBe(39);
+ audio.stop();
+});
 test("auto releases failed RTC before starting fallback and retains mute",async()=>{
  const events:string[]=[],notices:any[]=[];
  const audio=selectableAudio({onSessionEvent:e=>notices.push(e)},()=>connection("ws",events),()=>connection("rtc",events,Error("failed")));
