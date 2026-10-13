@@ -7,7 +7,7 @@ test("browser build marker matches the released manifest and survives safe telem
  const manifest=await Bun.file(new URL("../../apteva.yaml",import.meta.url)).text();
  expect(SOFTPHONE_CLIENT_VERSION).toBe(manifest.match(/^version:\s*(\S+)/m)![1]);
  const event=safeMediaSessionEvent({timestamp:new Date().toISOString(),action:"client_build",outcome:"v"+SOFTPHONE_CLIENT_VERSION.replaceAll(".","_")});
- expect(event.action).toBe("client_build");expect(event.outcome).toBe("v0_12_19");
+ expect(event.action).toBe("client_build");expect(event.outcome).toBe("v"+SOFTPHONE_CLIENT_VERSION.replaceAll(".","_"));
  for(const outcome of ["relay_configured","no_relay"])expect(safeMediaSessionEvent({...event,action:"ice_configuration",outcome}).outcome).toBe(outcome);
 });
 

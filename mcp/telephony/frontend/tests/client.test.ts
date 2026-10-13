@@ -601,3 +601,36 @@ test("automatic SIP setup and profile policy use the same headless account scope
  expect(f.requests[1].url.searchParams.get("project_id")).toBe("p1");
  expect(f.requests[1].url.searchParams.get("install_id")).toBe("42");
 });
+
+test("standalone status push reduces polls while live and retains old-server fallback",async()=>{
+ const f=fixture();const phone=f.client.createSoftphone({audioRuntime:f.runtime,pollIntervalMs:100});
+ try{
+  await phone.answer("call-1");
+  await Bun.sleep(120);
+  const count=()=>f.requests.filter(r=>r.url.pathname.endsWith("/calls")).length;
+  expect(count()).toBeGreaterThan(0);
+  f.callbacks.onCallStatus?.({call_id:"call-1",status:"in-progress"});
+  const before=count();await Bun.sleep(350);expect(count()).toBe(before);
+  f.callbacks.onState?.("connecting");await Bun.sleep(150);expect(count()).toBeGreaterThan(before);
+ }finally{phone.dispose();}
+});
+
+
+test("aborted old status request cannot disable push reconciliation on a reconnected call",async()=>{
+ const f=fixture();let polls=0;
+ let rejectFirst!:(error:Error)=>void;
+ const blocked=new Promise<never>((_,reject)=>{rejectFirst=reject;});
+ f.setResponse(async url=>{
+  if(url.pathname.endsWith("/calls")){polls++;if(polls===1)return blocked;return {calls:[{id:"call-1",status:"in-progress"}]};}
+  return f.session;
+ });
+ const phone=f.client.createSoftphone({audioRuntime:f.runtime,pollIntervalMs:100});
+ try{
+  await phone.answer("call-1");
+  const until=Date.now()+1000;while(!polls&&Date.now()<until)await Bun.sleep(1);expect(polls).toBe(1);
+  await phone.reconnect();
+  f.callbacks.onCallStatus?.({call_id:"call-1",status:"in-progress"});
+  const before=polls;rejectFirst(new Error("old request canceled"));await Bun.sleep(350);
+  expect(polls).toBe(before);
+ }finally{rejectFirst(new Error("cleanup"));phone.dispose();}
+});

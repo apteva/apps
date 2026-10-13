@@ -88,15 +88,41 @@ func (a *App) ensureCarrierActivation(row *callRow) error {
 
 func (a *App) runCarrierActivations(_ context.Context, ctx *sdk.AppCtx) error {
 	// Recover the gap if a request stopped waiting just before Core became ready.
-	rows, err := a.db().listWhere(`project_id=? AND direction='inbound' AND carrier_slug='telnyx' AND peer_kind='realtime' AND status IN ('answering','answered','pending') AND thread_id NOT LIKE 'pending-%' AND audio_bridge_url<>'pending' AND audio_bridge_url<>'' AND EXISTS(SELECT 1 FROM ai_handoffs h WHERE h.call_id=calls.id AND h.status='ready') AND NOT EXISTS(SELECT 1 FROM inbound_routes r WHERE r.id=calls.route_id AND r.inbound_transport='sip_direct') AND NOT EXISTS(SELECT 1 FROM carrier_activations x WHERE x.call_id=calls.id) LIMIT 100`, ctx.CurrentProject())
+	candidates, err := ctx.AppDB().Query(`SELECT c.id FROM calls c INDEXED BY idx_calls_ai_activation_recovery CROSS JOIN ai_handoffs h
+ WHERE c.project_id=? AND h.status='ready' AND h.call_id=c.id AND h.project_id=c.project_id
+ AND c.direction='inbound' AND c.carrier_slug='telnyx' AND c.peer_kind='realtime' AND c.status IN ('answering','answered','pending')
+ AND c.thread_id NOT LIKE 'pending-%' AND c.audio_bridge_url<>'pending' AND c.audio_bridge_url<>''
+ AND NOT EXISTS(SELECT 1 FROM inbound_routes r WHERE r.id=c.route_id AND r.inbound_transport='sip_direct')
+ AND NOT EXISTS(SELECT 1 FROM carrier_activations x WHERE x.call_id=c.id) LIMIT 100`, ctx.CurrentProject())
 	if err != nil {
 		return err
 	}
-	for i := range rows {
-		if err = a.ensureCarrierActivation(&rows[i]); err != nil {
+	var candidateIDs []string
+	for candidates.Next() {
+		var id string
+		if err = candidates.Scan(&id); err != nil {
+			candidates.Close()
 			return err
 		}
+		candidateIDs = append(candidateIDs, id)
 	}
+	err = candidates.Err()
+	candidates.Close()
+	if err != nil {
+		return err
+	}
+	for _, id := range candidateIDs {
+		row, err := a.db().findCall(id)
+		if err != nil {
+			return err
+		}
+		if row != nil {
+			if err = a.ensureCarrierActivation(row); err != nil {
+				return err
+			}
+		}
+	}
+
 	due, err := a.db().db.Query(`SELECT x.call_id FROM carrier_activations x JOIN calls c ON c.id=x.call_id WHERE x.project_id=? AND x.status IN ('pending','waiting','failed') AND (x.next_attempt_at<=? OR x.deadline_at<=? OR c.status IN ('completed','failed','busy','no-answer','canceled') OR (x.status<>'failed' AND (c.media_connected_at<>'' OR (x.phase='answer' AND c.carrier_answered_at<>'')))) ORDER BY x.next_attempt_at LIMIT 100`, ctx.CurrentProject(), ringTime(time.Now()), ringTime(time.Now()))
 	if err != nil {
 		return err

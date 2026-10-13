@@ -30,6 +30,12 @@ jobs:
         working-directory: mcp/telephony
       - run: go test -json ./... > /tmp/telephony-go.jsonl
         working-directory: mcp/telephony
+      - name: Archive and idle worker efficiency comparison
+        run: go test -run '^TestEfficiencyPerformance$' -count=1 -v . > /tmp/telephony-efficiency.log
+        working-directory: mcp/telephony
+        env:
+          TELEPHONY_EFFICIENCY_BENCHMARK: '1'
+          TELEPHONY_EFFICIENCY_RESULTS: /tmp/telephony-efficiency.json
       - run: bun test --timeout 15000 frontend/tests/*.test.ts ui/*.test.ts
         working-directory: mcp/telephony
       - run: bunx --no-install playwright install --with-deps chromium
@@ -55,6 +61,8 @@ jobs:
           name: telephony-go-results
           path: |
             /tmp/telephony-go.jsonl
+            /tmp/telephony-efficiency.log
+            /tmp/telephony-efficiency.json
             /tmp/telephony-long-recordings.log
             /tmp/telephony-long-recordings.json
   native-opus:
@@ -149,7 +157,7 @@ jobs:
           - group: media
             pattern: 'Test(SIPPlayback|SIPClockFitEvidence|SIPClockLowerEnvelope|SIPClockRecoveryShort|SIPClockRecoveryDelivery|SIPIngressAndConsumer|SIPFreshPacketAfter|SIPStartupReserve|SIPDecodedPartial|SIPKernelArrival|SIPEarlyReserve|SIPLinux|CarrierStream|CarrierEvidence|CarrierRecovery|SIPTelemetry)'
           - group: lifecycle
-            pattern: 'Test(AICallPolicy|SoftphoneAttachment|RTCRelay|SoftphoneStartup|SIPStartupCodec|SIPDialogTLS|SIPOutboundEarly|SIPOutboundFresh|SIPBYEFailure|NotificationOutbox|RTCIngressEvidence|ProxyCallIdentity|ProxyIdentityRetained|AutomaticOutboundSIP|TelephonyExclusiveActivation|SIPExclusiveActivation|GenericOutboundSIP|OutboundSIP|DIDWWOutbound|Telnyx.*SIP|TelnyxProvisioning|DirectSIPCarrierSetup|SIPAnsweredDialog|SIPMissingInitialACK|LocalSIP|LocalMediaSettings|SIPRuntimeTransport|SIPResourceCleanup|SIPNativeHold|SIPOutboundDTMF|SIPTransportSave|SIPRetirement|SIPTwilioDetach|SIPAIActivation|SIPRouteAccount|SIPExternalOffer|SelectingDirectSIP|LocalCloseTimeout)'
+            pattern: 'Test(Efficiency|RoutingDispatcher|ImmediateDecision|RingLeg|RingGroup|AICallPolicy|SoftphoneAttachment|RTCRelay|SoftphoneStartup|SIPStartupCodec|SIPDialogTLS|SIPOutboundEarly|SIPOutboundFresh|SIPBYEFailure|NotificationOutbox|RTCIngressEvidence|ProxyCallIdentity|ProxyIdentityRetained|AutomaticOutboundSIP|TelephonyExclusiveActivation|SIPExclusiveActivation|GenericOutboundSIP|OutboundSIP|DIDWWOutbound|Telnyx.*SIP|TelnyxProvisioning|DirectSIPCarrierSetup|SIPAnsweredDialog|SIPMissingInitialACK|SIPRefresh|LocalSIP|LocalMediaSettings|SIPRuntimeTransport|SIPResourceCleanup|SIPNativeHold|SIPOutboundDTMF|SIPTransportSave|SIPRetirement|SIPTwilioDetach|SIPAIActivation|SIPRouteAccount|SIPExternalOffer|SelectingDirectSIP|LocalCloseTimeout)'
     env:
       GOWORK: 'off'
     steps:

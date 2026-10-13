@@ -78,11 +78,14 @@ func routingMayControlCall(row *callRow) bool {
 	return row != nil && (row.Status == "pending" || row.Status == "answered") && row.MediaConnectedAt == "" && row.PeerToken == "" && (row.ThreadID == "" || strings.HasPrefix(row.ThreadID, "pending-"))
 }
 
-func (a *App) runRoutingEffects(_ context.Context, ctx *sdk.AppCtx) error {
+func (a *App) runRoutingEffects(workerCtx context.Context, ctx *sdk.AppCtx) error {
 	if err := a.recoverLegacyAnnouncementEffects(ctx); err != nil {
 		return err
 	}
-	rows, err := a.db().db.Query(`SELECT call_id,node_id FROM routing_effects WHERE project_id=? AND status='pending' AND next_attempt_at<=? ORDER BY next_attempt_at LIMIT 20`, ctx.CurrentProject(), ringTime(time.Now()))
+	if err := workerCtx.Err(); err != nil {
+		return err
+	}
+	rows, err := a.db().db.QueryContext(workerCtx, `SELECT call_id,node_id FROM routing_effects WHERE project_id=? AND status='pending' AND next_attempt_at<=? ORDER BY next_attempt_at LIMIT 20`, ctx.CurrentProject(), ringTime(time.Now()))
 	if err != nil {
 		return err
 	}
@@ -101,6 +104,9 @@ func (a *App) runRoutingEffects(_ context.Context, ctx *sdk.AppCtx) error {
 		return err
 	}
 	for _, item := range items {
+		if err = workerCtx.Err(); err != nil {
+			return err
+		}
 		if err = a.driveRoutingEffect(ctx, item[0], item[1]); err != nil {
 			ctx.Logger().Warn("routing carrier effect pending", "call", item[0], "node", item[1], "err", err)
 		}
@@ -328,7 +334,7 @@ func (a *App) legacyAnnouncementPlan(row *callRow) (*inboundRoutingPlan, error) 
 }
 
 func (a *App) recoverLegacyAnnouncementEffects(ctx *sdk.AppCtx) error {
-	calls, err := a.db().listWhere(`project_id=? AND carrier_slug='telnyx' AND status IN ('pending','answered') AND announcement_state IN ('awaiting_answer','speaking','finishing') AND announcement_text<>'' AND NOT EXISTS(SELECT 1 FROM routing_effects e WHERE e.call_id=calls.id) LIMIT 20`, ctx.CurrentProject())
+	calls, err := a.db().listWhereOn("idx_calls_legacy_announcement", `project_id=? AND carrier_slug='telnyx' AND status IN ('pending','answered') AND announcement_state IN ('awaiting_answer','speaking','finishing') AND announcement_text<>'' AND NOT EXISTS(SELECT 1 FROM routing_effects e WHERE e.call_id=calls.id) LIMIT 20`, ctx.CurrentProject())
 	if err != nil {
 		return err
 	}

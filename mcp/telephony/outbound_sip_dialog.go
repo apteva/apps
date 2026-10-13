@@ -26,24 +26,58 @@ func outboundSIPTimer(response *sip.Response, previous sipSessionTimer) (sipSess
 	return timer, err
 }
 func (s *outboundSIPSession) runSessionTimer() {
-	tick := time.NewTicker(time.Second)
-	defer tick.Stop()
+	timerClock := time.NewTimer(time.Hour)
+	timerClock.Stop()
+	defer timerClock.Stop()
+	retryAt := time.Time{}
 	for {
+		s.timerMu.Lock()
+		timer, updated := s.timer, s.timerUpdated
+		s.timerMu.Unlock()
+		var due <-chan time.Time
+		if timer.interval > 0 {
+			deadline := updated.Add(timer.interval)
+			if timer.local {
+				deadline = updated.Add(timer.interval / 2)
+				if retryAt.After(deadline) {
+					deadline = retryAt
+				}
+				if expiry := updated.Add(timer.interval); expiry.Before(deadline) {
+					deadline = expiry
+				}
+			}
+			if !timerClock.Stop() {
+				select {
+				case <-timerClock.C:
+				default:
+				}
+			}
+			timerClock.Reset(max(time.Until(deadline), time.Microsecond))
+			due = timerClock.C
+		}
 		select {
 		case <-s.ctx.Done():
 			return
-		case <-tick.C:
-			s.timerMu.Lock()
-			timer, updated := s.timer, s.timerUpdated
-			s.timerMu.Unlock()
-			if timer.interval == 0 {
-				continue
-			}
-			if time.Since(updated) >= timer.interval {
-				s.finish("local_error", errors.New("outbound SIP session refresh expired"))
-				return
-			}
-			if timer.local && time.Since(updated) >= timer.interval/2 && s.signalMu.TryLock() {
+		case <-s.timerWake:
+			retryAt = time.Time{}
+			continue
+		case <-due:
+		}
+		// Recheck after waking: a remote refresh may have extended this deadline.
+		s.timerMu.Lock()
+		timer, updated = s.timer, s.timerUpdated
+		s.timerMu.Unlock()
+		if timer.interval == 0 {
+			continue
+		}
+		elapsed := time.Since(updated)
+		if elapsed >= timer.interval {
+			s.finish("local_error", errors.New("outbound SIP session refresh expired"))
+			return
+		}
+		if timer.local && elapsed >= timer.interval/2 {
+			retryAt = time.Now().Add(time.Second)
+			if s.signalMu.TryLock() {
 				err := s.sendSessionRefresh(timer)
 				s.signalMu.Unlock()
 				if err != nil && !errors.Is(err, errSIPRefreshPending) {
@@ -111,6 +145,7 @@ func (s *outboundSIPSession) sendSessionRefresh(timer sipSessionTimer) (result e
 	s.timerMu.Lock()
 	s.timer = updated
 	s.timerUpdated = time.Now()
+	signalSIPTimer(s.timerWake)
 	s.timerMu.Unlock()
 	s.media.remoteMode.Store(sipRemoteMediaMode(offer.Direction))
 	return nil
@@ -191,6 +226,7 @@ func (s *outboundSIPSession) handleRefresh(req *sip.Request, tx sip.ServerTransa
 	s.timerMu.Lock()
 	s.timer = timer
 	s.timerUpdated = time.Now()
+	signalSIPTimer(s.timerWake)
 	s.timerMu.Unlock()
 	s.media.remoteMode.Store(sipRemoteMediaMode(direction))
 	s.diagnostics.event("sip_refresh_result", "carrier", "", 200)

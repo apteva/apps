@@ -129,6 +129,7 @@ type outboundSIPSession struct {
 	timerMu        sync.Mutex
 	timer          sipSessionTimer
 	timerUpdated   time.Time
+	timerWake      chan struct{}
 	localSDP       []byte
 	remoteSeq      atomic.Uint32
 	refreshACK     chan struct{}
@@ -270,9 +271,9 @@ func (g *sipGateway) startSIPOutbound(row *callRow, settings didwwSIPSettings, t
 	}
 	s := &outboundSIPSession{playbackPolicy: playbackPolicy, gateway: g, callID: row.ID, providerCallID: providerCallID, carrierSlug: row.CarrierSlug,
 		dialog: dialog, media: media, localKey: localKey, settings: settings, ctx: ctx, cancel: cancel,
-		dialDeadline: dialDeadline,
-		maxDuration:  time.Duration(max(60, min(maxDurationSec, maximumConnectedDurationSec))) * time.Second,
-		inviteDone:   make(chan struct{}), localSDP: append([]byte(nil), body...)}
+		timerWake: make(chan struct{}, 1), dialDeadline: dialDeadline,
+		maxDuration: time.Duration(max(60, min(maxDurationSec, maximumConnectedDurationSec))) * time.Second,
+		inviteDone:  make(chan struct{}), localSDP: append([]byte(nil), body...)}
 	s.diagnostics = g.app.newSIPDiagnostics(row, dialog.ID)
 	s.diagnostics.event("sip_invite_sent", "local", "", 0)
 	g.mu.Lock()

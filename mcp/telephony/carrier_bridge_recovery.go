@@ -821,8 +821,7 @@ func (a *App) runCarrierMediaRecovery(_ context.Context, ctx *sdk.AppCtx) error 
 			a.cancelCarrierBridge(id)
 		}
 	}
-	// Bounded indexed retention also removes histories whose calls were deleted.
-	_, _ = ctx.AppDB().Exec(`DELETE FROM carrier_media_bridges WHERE generation IN (SELECT generation FROM carrier_media_bridges WHERE project_id=? AND started_at<? AND state IN ('ended','failed','replaced','disconnected') ORDER BY started_at LIMIT 100)`, ctx.CurrentProject(), ringTime(time.Now().Add(-30*24*time.Hour)))
+
 	return nil
 }
 func (a *App) restartCarrierMedia(ctx *sdk.AppCtx, id, generation string) error {

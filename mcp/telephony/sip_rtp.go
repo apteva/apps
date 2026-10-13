@@ -204,6 +204,7 @@ type sipRTPPacer struct {
 	clearCh        chan chan int
 	errCh          chan error
 	done           chan struct{}
+	progress       chan struct{}
 	sequence       uint16
 	timestamp      uint32
 	ssrc           uint32
@@ -244,7 +245,7 @@ func newSIPRTPPacerWithPolicy(
 	pacer := &sipRTPPacer{
 		ctx: ctx, media: media, playback: playback, onProgress: onProgress, dtmfCh: make(chan string, 4),
 		queue:   make(chan sipRTPOutboundPacket, queuePackets),
-		clearCh: make(chan chan int), errCh: make(chan error, 1), done: make(chan struct{}),
+		clearCh: make(chan chan int), errCh: make(chan error, 1), done: make(chan struct{}), progress: make(chan struct{}, 1),
 		sequence: binary.BigEndian.Uint16(seed[:2]), timestamp: binary.BigEndian.Uint32(seed[2:6]),
 		ssrc:          binary.BigEndian.Uint32(seed[6:]),
 		dropStale:     policy.dropStale,
@@ -296,72 +297,78 @@ func (p *sipRTPPacer) run() {
 			}
 			select {
 			case packet := <-p.queue:
-				p.playback.pending.Add(-1)
-				if mode := p.media.remoteMode.Load(); mode == 1 || mode == 3 {
-					continue
-				}
-				if hold := p.media.hold.Load(); hold != nil {
-					packet.pcm = hold.frame(p.media.sampleRate() / 50)
-					packet.payload = nil
-					packet.itemID = ""
-					packet.enqueuedAt = now // Newly generated hold audio has no microphone queue age.
-				}
-				if p.dropStale && !packet.enqueuedAt.IsZero() && time.Since(packet.enqueuedAt) >= liveAudioMaxAge {
-					p.droppedPackets.Add(1)
-					p.diagnostics.dropped("live_audio_age_limit", 20)
-					p.needsCrossfade.Store(true)
-					p.dropMu.Lock()
-					p.drops = append(p.drops, audioDropEvent{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier", Reason: "live_audio_age_limit", DurationMS: 20})
-					if len(p.drops) > 100 {
-						p.drops = p.drops[len(p.drops)-100:]
+				failed := func() bool {
+					defer p.playback.pending.Add(-1)
+					if mode := p.media.remoteMode.Load(); mode == 1 || mode == 3 {
+						return false
 					}
-					p.dropMu.Unlock()
-					continue
-				}
-				if len(packet.pcm) > 0 {
-					if p.needsCrossfade.Swap(false) && len(p.lastSentPCM) > 0 {
-						applyPCMOverlapCrossfade(p.lastSentPCM, packet.pcm, p.media.sampleRate()/200)
+					if hold := p.media.hold.Load(); hold != nil {
+						packet.pcm = hold.frame(p.media.sampleRate() / 50)
+						packet.payload = nil
+						packet.itemID = ""
+						packet.enqueuedAt = now // Newly generated hold audio has no microphone queue age.
 					}
-					packet.payload = p.media.encodeAudio(packet.pcm)
-					p.lastSentPCM = append(p.lastSentPCM[:0], packet.pcm...)
-				} else if p.media.offer.Codec != "G722" {
-					pcm := decodeSIPG711(packet.payload, p.media.offer.Codec)
-					if p.needsCrossfade.Swap(false) && len(p.lastSentPCM) > 0 {
-						applyPCMOverlapCrossfade(p.lastSentPCM, pcm, twilioMediaSampleRate/200)
-						packet.payload = encodeSIPG711(pcm, p.media.offer.Codec)
+					if p.dropStale && !packet.enqueuedAt.IsZero() && time.Since(packet.enqueuedAt) >= liveAudioMaxAge {
+						p.droppedPackets.Add(1)
+						p.diagnostics.dropped("live_audio_age_limit", 20)
+						p.needsCrossfade.Store(true)
+						p.dropMu.Lock()
+						p.drops = append(p.drops, audioDropEvent{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier", Reason: "live_audio_age_limit", DurationMS: 20})
+						if len(p.drops) > 100 {
+							p.drops = p.drops[len(p.drops)-100:]
+						}
+						p.dropMu.Unlock()
+						return false
 					}
-					p.lastSentPCM = pcm
-				}
-				p.timestamp = baseTimestamp + uint32(frame)*sipRTPPacketSamples
-				wire := &rtp.Packet{Header: rtp.Header{
-					Version: 2, PayloadType: p.media.offer.PayloadType, Marker: lastSent.IsZero() || now.Sub(lastSent) > 30*time.Millisecond,
-					SequenceNumber: p.sequence, Timestamp: p.timestamp, SSRC: p.ssrc,
-				}, Payload: packet.payload}
-				p.sequence++
-				lastSent = now
-				lastFrame = frame
-				writeStarted := time.Now()
-				if err := p.media.writePacket(wire); err != nil {
-					select {
-					case p.errCh <- err:
-					default:
+					if len(packet.pcm) > 0 {
+						if p.needsCrossfade.Swap(false) && len(p.lastSentPCM) > 0 {
+							applyPCMOverlapCrossfade(p.lastSentPCM, packet.pcm, p.media.sampleRate()/200)
+						}
+						packet.payload = p.media.encodeAudio(packet.pcm)
+						p.lastSentPCM = append(p.lastSentPCM[:0], packet.pcm...)
+					} else if p.media.offer.Codec != "G722" {
+						pcm := decodeSIPG711(packet.payload, p.media.offer.Codec)
+						if p.needsCrossfade.Swap(false) && len(p.lastSentPCM) > 0 {
+							applyPCMOverlapCrossfade(p.lastSentPCM, pcm, twilioMediaSampleRate/200)
+							packet.payload = encodeSIPG711(pcm, p.media.offer.Codec)
+						}
+						p.lastSentPCM = pcm
 					}
-					return
-				}
-				if p.observeSent != nil {
-					p.observeSent(packet.payload)
-				}
-				p.diagnostics.sent(20, writeStarted)
-				if p.onProgress != nil && packet.itemID != "" && packet.audioEndMS > 0 {
-					if err := p.onProgress(twilioPlaybackProgress{
-						ItemID: packet.itemID, AudioEndMS: packet.audioEndMS,
-					}); err != nil {
+					p.timestamp = baseTimestamp + uint32(frame)*sipRTPPacketSamples
+					wire := &rtp.Packet{Header: rtp.Header{
+						Version: 2, PayloadType: p.media.offer.PayloadType, Marker: lastSent.IsZero() || now.Sub(lastSent) > 30*time.Millisecond,
+						SequenceNumber: p.sequence, Timestamp: p.timestamp, SSRC: p.ssrc,
+					}, Payload: packet.payload}
+					p.sequence++
+					lastSent = now
+					lastFrame = frame
+					writeStarted := time.Now()
+					if err := p.media.writePacket(wire); err != nil {
 						select {
 						case p.errCh <- err:
 						default:
 						}
-						return
+						return true
 					}
+					if p.observeSent != nil {
+						p.observeSent(packet.payload)
+					}
+					p.diagnostics.sent(20, writeStarted)
+					if p.onProgress != nil && packet.itemID != "" && packet.audioEndMS > 0 {
+						if err := p.onProgress(twilioPlaybackProgress{
+							ItemID: packet.itemID, AudioEndMS: packet.audioEndMS,
+						}); err != nil {
+							select {
+							case p.errCh <- err:
+							default:
+							}
+							return true
+						}
+					}
+					return false
+				}()
+				if failed {
+					return
 				}
 			default:
 				if hold := p.media.hold.Load(); hold != nil && p.media.remoteMode.Load() != 1 && p.media.remoteMode.Load() != 3 {
@@ -384,6 +391,10 @@ func (p *sipRTPPacer) run() {
 					p.diagnostics.sent(20, writeStarted)
 				}
 			}
+		}
+		select {
+		case p.progress <- struct{}{}:
+		default:
 		}
 	}
 }
@@ -442,10 +453,13 @@ func (p *sipRTPPacer) enqueue(packets []sipRTPOutboundPacket) (int, error) {
 		if packet.enqueuedAt.IsZero() {
 			packet.enqueuedAt = time.Now()
 		}
+		// Count before publishing so a concurrently scheduled sender cannot
+		// consume a frame before it is counted. Keep it pending through writing.
+		p.playback.pending.Add(1)
 		select {
 		case p.queue <- packet:
-			p.playback.pending.Add(1)
 		default:
+			p.playback.pending.Add(-1)
 			return len(p.queue) * int(sipRTPPacketTime/time.Millisecond), errors.New("direct SIP playback queue changed concurrently")
 		}
 	}

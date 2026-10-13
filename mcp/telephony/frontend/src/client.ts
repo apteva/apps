@@ -199,6 +199,12 @@ export class TelephonyClient {
     let stream: { close(): void } | undefined;
     let running = false;
     let queued = false;
+    let lastPush = -Infinity;
+    let lastRefresh=performance.now();
+    const nextPollDelay = () => {
+      const age=performance.now()-lastPush;
+      return age<15000 ? Math.max(1,Math.min(Math.max(interval,30000)-(performance.now()-lastRefresh),15000-age)) : interval;
+    };
     const acknowledged = new Set<string>();
     const close = () => {
       clearTimeout(timer); controller.abort(); stream?.close();
@@ -214,6 +220,7 @@ export class TelephonyClient {
       const started = performance.now();
       try {
         const calls = await this.listCalls(controller.signal);
+        lastRefresh=performance.now();
         if (!controller.signal.aborted) {
           onCalls(calls);
           for (const call of calls) {
@@ -230,6 +237,7 @@ export class TelephonyClient {
           try { options.onTiming?.({ trigger, fetchMs: performance.now() - started }); } catch {}
         }
       } catch (error) {
+        lastPush=-Infinity;
         if (!controller.signal.aborted) {
           const status = (error as { status?: unknown })?.status;
           try { options.onFailure?.({ trigger, fetchMs: performance.now() - started, status: typeof status === "number" ? status : undefined, error }); } catch {}
@@ -239,7 +247,7 @@ export class TelephonyClient {
         running = false;
         if (!controller.signal.aborted) {
           if (queued) { queued = false; void refresh("push"); }
-          else timer = setTimeout(() => void refresh("poll"), interval);
+          else timer = setTimeout(() => void refresh("poll"), nextPollDelay());
         }
       }
     };
@@ -247,13 +255,19 @@ export class TelephonyClient {
     if (!controller.signal.aborted && options.push !== false && typeof this.app.subscribe === "function") {
       try {
         stream = this.subscribe<{ type?: string }>(this.path("/calls/events"), event => {
-          if (event.type === "calls.changed") void refresh("push");
-          else if (event.type === "access.revoked") { stream?.close(); void refresh("push"); }
+          if (event.type === "heartbeat" || event.type === "calls.changed") {
+            lastPush=performance.now();
+            if(event.type==="calls.changed") void refresh("push");
+            else if(!running) {clearTimeout(timer);timer=setTimeout(()=>void refresh("poll"),nextPollDelay());}
+          }
+          else if (event.type === "access.revoked") { lastPush=-Infinity; stream?.close(); void refresh("push"); }
         }, {
           transport: "fetch", signal: controller.signal, reconnectDelayMs: 250,
           // Every new stream starts with a fresh hint. No cursor can bypass
           // permission filtering or replay another user's events.
           onError: error => {
+            lastPush=-Infinity;
+            if(!running&&!controller.signal.aborted) {clearTimeout(timer);timer=setTimeout(()=>void refresh("poll"),interval);}
             const status = (error as { status?: number })?.status;
             if (status === 404 || status === 405 || status === 501) stream?.close();
             // Streaming is optional; the normal authenticated poll reports

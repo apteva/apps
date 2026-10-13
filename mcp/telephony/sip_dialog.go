@@ -255,6 +255,7 @@ func (g *sipGateway) handleRefresh(req *sip.Request, tx sip.ServerTransaction) {
 	}
 	s.timer = timer
 	s.timerUpdated = time.Now()
+	signalSIPTimer(s.timerWake)
 	if contact := req.Contact(); contact != nil {
 		s.remoteTarget = contact.Address
 	}
@@ -308,31 +309,61 @@ func (s *sipSession) watchInitialACK() {
 	}
 }
 func (s *sipSession) runSessionTimer() {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
+	timerClock := time.NewTimer(time.Hour)
+	timerClock.Stop()
+	defer timerClock.Stop()
+	retryAt := time.Time{}
 	for {
+		s.answerMu.Lock()
+		timer, updated := s.timer, s.timerUpdated
+		s.answerMu.Unlock()
+		var due <-chan time.Time
+		if timer.interval > 0 {
+			deadline := updated.Add(timer.interval)
+			if timer.local {
+				deadline = updated.Add(timer.interval / 2)
+				if retryAt.After(deadline) {
+					deadline = retryAt
+				}
+				if expiry := updated.Add(timer.interval); expiry.Before(deadline) {
+					deadline = expiry
+				}
+			}
+			if !timerClock.Stop() {
+				select {
+				case <-timerClock.C:
+				default:
+				}
+			}
+			timerClock.Reset(max(time.Until(deadline), time.Microsecond))
+			due = timerClock.C
+		}
 		select {
 		case <-s.ctx.Done():
 			return
-		case <-ticker.C:
-			s.answerMu.Lock()
-			timer, updated := s.timer, s.timerUpdated
-			s.answerMu.Unlock()
-			if timer.interval == 0 {
-				continue
-			}
-			elapsed := time.Since(updated)
-			if elapsed >= timer.interval {
-				s.finish("local_error", errors.New("SIP session refresh expired"))
-				return
-			}
-			if timer.local && elapsed >= timer.interval/2 && s.refreshMu.TryLock() {
+		case <-s.timerWake:
+			retryAt = time.Time{}
+			continue
+		case <-due:
+		}
+		// Recheck after waking: a remote refresh may have extended this deadline.
+		s.answerMu.Lock()
+		timer, updated = s.timer, s.timerUpdated
+		s.answerMu.Unlock()
+		if timer.interval == 0 {
+			continue
+		}
+		elapsed := time.Since(updated)
+		if elapsed >= timer.interval {
+			s.finish("local_error", errors.New("SIP session refresh expired"))
+			return
+		}
+		if timer.local && elapsed >= timer.interval/2 {
+			retryAt = time.Now().Add(time.Second)
+			if s.refreshMu.TryLock() {
 				err := s.sendSessionRefresh(timer)
 				s.refreshMu.Unlock()
-				if err != nil {
-					if errors.Is(err, errSIPRefreshPending) {
-						continue
-					}
+				if err != nil && !errors.Is(err, errSIPRefreshPending) {
 					s.finish("local_error", err)
 					return
 				}
@@ -411,6 +442,7 @@ func (s *sipSession) sendSessionRefresh(timer sipSessionTimer) (result error) {
 	s.answerMu.Lock()
 	s.timer = timer
 	s.timerUpdated = time.Now()
+	signalSIPTimer(s.timerWake)
 	if c := response.Contact(); c != nil {
 		s.remoteTarget = c.Address
 	}
@@ -459,5 +491,12 @@ func (g *sipGateway) trackHandler(fn func(*sip.Request, sip.ServerTransaction)) 
 		}
 		defer g.finishWork()
 		fn(req, tx)
+	}
+}
+
+func signalSIPTimer(wake chan struct{}) {
+	select {
+	case wake <- struct{}{}:
+	default:
 	}
 }

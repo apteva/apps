@@ -533,8 +533,10 @@ func receiveRTCAudio(remote *webrtc.TrackRemote, stats *rtcMediaStats, done <-ch
 			}
 		}
 	}()
-	tick := time.NewTicker(5 * time.Millisecond)
-	defer tick.Stop()
+	timer := time.NewTimer(time.Hour)
+	timer.Stop()
+	defer timer.Stop()
+	var due <-chan time.Time
 	j := rtcJitter{discard: func(p *rtp.Packet) {
 		stats.drop("webrtc_rtp_rejected", direction, uint64(p.SequenceNumber), 0)
 	}}
@@ -554,33 +556,45 @@ func receiveRTCAudio(remote *webrtc.TrackRemote, stats *rtcMediaStats, done <-ch
 			if !j.push(p, received.at) {
 				stats.drop("webrtc_rtp_rejected", direction, uint64(p.SequenceNumber), 0)
 			}
-		case now := <-tick.C:
-			for p := j.pop(now); p != nil; p = j.pop(now) {
-				if timeline.ssrc != p.SSRC {
-					timeline.valid = false
-				}
-				repaired := 0
-				for gap := timeline.missing(p.SequenceNumber, p.Timestamp); gap > 0; gap-- {
-					if n, err := decoder.recover(p.Payload, pcm[:480], fec && gap == 1); err == nil && n == 480 {
-						forward(pcm[:n], j.base.Add(time.Duration(int32(p.Timestamp-j.baseTS))*time.Second/48000-60*time.Millisecond))
-						stats.mu.Lock()
-						stats.value.IngressConcealedMS += 20
-						repaired += 20
-						stats.mu.Unlock()
-					}
-				}
-				if repaired > 0 {
-					stats.ingress.observe(p, now, now, len(packets), stats.rtp.connectionID, stats.rtp.pathRevision.Load(), "concealment", repaired)
-				}
-				n, err := decoder.decode(p.Payload, pcm)
-				if err != nil {
-					timeline.valid = false
-					stats.drop("webrtc_decode_error", direction, uint64(p.SequenceNumber), 0)
-					continue
-				}
-				timeline = rtcDecodeTimeline{ssrc: p.SSRC, valid: true, seq: p.SequenceNumber, ts: p.Timestamp, samples: n}
-				forward(pcm[:n], j.base.Add(time.Duration(int32(p.Timestamp-j.baseTS))*time.Second/48000-60*time.Millisecond))
+		case <-due:
+		}
+		now := time.Now()
+		for p := j.pop(now); p != nil; p = j.pop(now) {
+			if timeline.ssrc != p.SSRC {
+				timeline.valid = false
 			}
+			repaired := 0
+			for gap := timeline.missing(p.SequenceNumber, p.Timestamp); gap > 0; gap-- {
+				if n, err := decoder.recover(p.Payload, pcm[:480], fec && gap == 1); err == nil && n == 480 {
+					forward(pcm[:n], j.base.Add(time.Duration(int32(p.Timestamp-j.baseTS))*time.Second/48000-60*time.Millisecond))
+					stats.mu.Lock()
+					stats.value.IngressConcealedMS += 20
+					repaired += 20
+					stats.mu.Unlock()
+				}
+			}
+			if repaired > 0 {
+				stats.ingress.observe(p, now, now, len(packets), stats.rtp.connectionID, stats.rtp.pathRevision.Load(), "concealment", repaired)
+			}
+			n, err := decoder.decode(p.Payload, pcm)
+			if err != nil {
+				timeline.valid = false
+				stats.drop("webrtc_decode_error", direction, uint64(p.SequenceNumber), 0)
+				continue
+			}
+			timeline = rtcDecodeTimeline{ssrc: p.SSRC, valid: true, seq: p.SequenceNumber, ts: p.Timestamp, samples: n}
+			forward(pcm[:n], j.base.Add(time.Duration(int32(p.Timestamp-j.baseTS))*time.Second/48000-60*time.Millisecond))
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		due = nil
+		if len(j.packets) > 0 {
+			timer.Reset(max(time.Until(j.packets[0].due), time.Microsecond))
+			due = timer.C
 		}
 	}
 }

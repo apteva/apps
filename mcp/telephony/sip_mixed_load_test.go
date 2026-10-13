@@ -19,7 +19,8 @@ func startSIPMixedLoad(t *testing.T, count int) ([]*localCallRecorder, func() (i
 	if os.Getenv("TELEPHONY_SIP_MIXED_LOAD") != "1" {
 		return make([]*localCallRecorder, count), func() (int64, int64) { return 0, 0 }
 	}
-	a, _ := withTelephonyTestContext(t, &answerPlatform{})
+	a, ctx := withTelephonyTestContext(t, &answerPlatform{})
+	seedEfficiencyArchive(t, ctx.AppDB(), 12941, time.Now().Add(-48*time.Hour))
 	recorders := make([]*localCallRecorder, count)
 	rows := make([]*callRow, count)
 	for i := range recorders {
@@ -46,6 +47,14 @@ func startSIPMixedLoad(t *testing.T, count int) ([]*localCallRecorder, func() (i
 			case <-stop:
 				return
 			case <-tick.C:
+				if ops.Load()%10 == 0 {
+					for _, worker := range a.Workers() {
+						if err := worker.Run(t.Context(), ctx); err != nil {
+							t.Errorf("mixed worker %s: %v", worker.Name, err)
+							return
+						}
+					}
+				}
 				for _, row := range rows {
 					if ops.Load()%10 != 0 {
 						break

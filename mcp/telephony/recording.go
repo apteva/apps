@@ -416,10 +416,12 @@ func (a *App) runRecordingTick(workerCtx context.Context, ctx *sdk.AppCtx) error
 	if projectID == "" {
 		return nil
 	}
-	_, _ = ctx.AppDB().Exec(`UPDATE recordings SET storage_status = 'failed',
+	if _, err := ctx.AppDB().ExecContext(workerCtx, `UPDATE recordings INDEXED BY idx_recordings_importing SET storage_status = 'failed',
         last_error = 'recording import interrupted', next_attempt_at = ?, import_started_at = ''
         WHERE project_id = ? AND storage_status = 'importing' AND import_started_at < ?`,
-		time.Now().UTC().Format(time.RFC3339), projectID, time.Now().UTC().Add(-15*time.Minute).Format(time.RFC3339))
+		time.Now().UTC().Format(time.RFC3339), projectID, time.Now().UTC().Add(-15*time.Minute).Format(time.RFC3339)); err != nil {
+		return err
+	}
 	recording, err := a.db().claimRecordingImport(projectID)
 	if err != nil {
 		return err
@@ -451,7 +453,7 @@ func (c *callsDB) claimRecordingImport(projectID string) (*recordingRow, error) 
 	defer tx.Rollback()
 	now := time.Now().UTC().Format(time.RFC3339)
 	var id string
-	err = tx.QueryRow(`SELECT id FROM recordings WHERE project_id = ? AND deleted_at = ''
+	err = tx.QueryRow(`SELECT id FROM recordings INDEXED BY idx_recordings_import_candidates WHERE project_id = ? AND deleted_at = ''
 		AND provider_status = 'completed' AND storage_status IN ('pending','failed','provider_only')
         AND (import_blocked_reason='' OR import_limit_bytes <> COALESCE((SELECT max_file_bytes FROM recording_settings WHERE project_id=recordings.project_id),1073741824))
  AND (next_attempt_at = '' OR next_attempt_at <= ? OR (import_blocked_reason<>'' AND import_limit_bytes <> COALESCE((SELECT max_file_bytes FROM recording_settings WHERE project_id=recordings.project_id),1073741824))) ORDER BY created_at LIMIT 1`, projectID, now).Scan(&id)
@@ -586,24 +588,41 @@ func (c *callsDB) failRecordingImport(id string, importErr error, leases ...stri
 
 func (a *App) reconcileProviderRecording(ctx *sdk.AppCtx) error {
 	now := time.Now().UTC()
-	row, err := a.db().listWhere(`project_id = ? AND carrier_slug IN ('twilio','telnyx','plivo') AND ingress_path <> 'sip_direct' AND recording_mode = 'always'
-        AND status IN ('completed','failed') AND carrier_sid <> '' AND ended_at <> '' AND ended_at <= ?
-        AND ended_at >= ? AND (recording_checked_at = '' OR recording_checked_at <= ?)
-        AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.call_id = calls.id)
-        ORDER BY ended_at LIMIT 1`, ctx.CurrentProject(), now.Add(-10*time.Second).Format(time.RFC3339),
-		now.Add(-24*time.Hour).Format(time.RFC3339), now.Add(-5*time.Minute).Format(time.RFC3339))
-	if err != nil || len(row) == 0 {
+	var id string
+	err := ctx.AppDB().QueryRow(`SELECT id FROM calls INDEXED BY idx_calls_recording_reconcile
+ WHERE project_id = ? AND recording_known=0 AND carrier_slug IN ('twilio','telnyx','plivo') AND ingress_path <> 'sip_direct' AND recording_mode = 'always'
+ AND status IN ('completed','failed') AND carrier_sid <> '' AND ended_at <> '' AND ended_at <= ? AND ended_at >= ?
+ AND (recording_checked_at = '' OR recording_checked_at <= ?) AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.call_id = calls.id)
+ ORDER BY ended_at LIMIT 1`, ctx.CurrentProject(), now.Add(-10*time.Second).Format(time.RFC3339), now.Add(-24*time.Hour).Format(time.RFC3339), now.Add(-5*time.Minute).Format(time.RFC3339)).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
 		return err
 	}
-	call := &row[0]
-	_, _ = ctx.AppDB().Exec(`UPDATE calls SET recording_checked_at = ? WHERE id = ?`, now.Format(time.RFC3339), call.ID)
+	call, err := a.db().findCall(id)
+	if err != nil || call == nil {
+		return err
+	}
+
+	if _, err := ctx.AppDB().Exec(`UPDATE calls SET recording_checked_at = ? WHERE id = ?`, now.Format(time.RFC3339), call.ID); err != nil {
+		return err
+	}
 	return a.reconcileCallRecordings(ctx, call)
 }
 
 func (a *App) expireRecordings(ctx *sdk.AppCtx) error {
-	row, err := scanRecording(ctx.AppDB().QueryRow(`SELECT `+recordingSelectColumns+` FROM recordings
-        WHERE project_id = ? AND ((deleted_at = '' AND retention_expires_at <> '' AND retention_expires_at <= ?) OR (deleted_at <> '' AND (storage_file_id>0 OR provider_deleted_at=''))) AND (cleanup_next_at='' OR cleanup_next_at<=?)
-        ORDER BY cleanup_next_at, retention_expires_at LIMIT 1`, ctx.CurrentProject(), time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339)))
+	// Split the queues so neither a stored archive nor completed tombstones
+	// participate in the candidate scan. Merge only the two eligible heads.
+	now := time.Now().UTC().Format(time.RFC3339)
+	row, err := scanRecording(ctx.AppDB().QueryRow(`SELECT `+recordingSelectColumns+` FROM recordings WHERE id=(
+ SELECT id FROM (
+ SELECT * FROM (SELECT id,cleanup_next_at,retention_expires_at FROM recordings INDEXED BY idx_recordings_retention_due
+ WHERE project_id=? AND deleted_at='' AND retention_expires_at<>'' AND retention_expires_at<=? AND (cleanup_next_at='' OR cleanup_next_at<=?) ORDER BY retention_expires_at LIMIT 1)
+ UNION ALL
+ SELECT * FROM (SELECT id,cleanup_next_at,retention_expires_at FROM recordings INDEXED BY idx_recordings_deleted_cleanup
+ WHERE project_id=? AND deleted_at<>'' AND (storage_file_id>0 OR provider_deleted_at='') AND (cleanup_next_at='' OR cleanup_next_at<=?) ORDER BY cleanup_next_at,retention_expires_at LIMIT 1)
+ ) ORDER BY cleanup_next_at,retention_expires_at LIMIT 1)`, ctx.CurrentProject(), now, now, ctx.CurrentProject(), now))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
