@@ -393,7 +393,7 @@ config_schema:
   - { name: sip_public_ip, type: text, label: "SIP public IPv4 override", description: "Optional. Defaults to the public IPv4 resolved from the SIP hostname." }
   - { name: sip_tls_cert_file, type: text, label: "SIP TLS certificate override", description: "Optional. Telephony discovers standard Apteva and Let's Encrypt certificate paths." }
   - { name: sip_tls_key_file, type: text, label: "SIP TLS key override", description: "Optional. Must be set with the certificate override." }
-  - { name: sip_tls_peer_names, type: text, label: "Carrier TLS certificate names", description: 'Optional JSON carrier-to-hostname mapping for in-dialog TLS connections to IP Contacts. Defaults to {"telnyx":"sip.telnyx.com"}. Certificate trust and hostname verification remain required.' }
+  - { name: sip_tls_peer_names, type: text, label: "Carrier TLS certificate names", description: 'Optional JSON carrier-to-hostname mapping for in-dialog TLS connections to IP Contacts. Defaults to {"telnyx":"sip.telnyx.com"}, with a bounded retry for the verified sip.telnyx.eu regional identity. Custom identities remain exact. Certificate trust and hostname verification remain required.' }
   - { name: sip_allowed_cidrs, type: text, label: "Carrier CIDR override", description: "Optional. Defaults to maintained Twilio and Telnyx signaling and media networks." }
   - { name: sip_rtp_bind_ip, type: text, default: "0.0.0.0", label: "RTP bind IPv4 address" }
   - { name: sip_rtp_port_min, type: text, default: "20000", label: "First RTP UDP port" }

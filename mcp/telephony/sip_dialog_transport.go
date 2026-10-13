@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"net"
 	"strings"
@@ -27,11 +28,13 @@ func (r sipDialogRequester) Request(ctx context.Context, req *sip.Request) (sip.
 	g := r.gateway
 	ua := g.ua
 	if strings.EqualFold(req.Transport(), "tls") && req.To() != nil && req.To().Params.Has("tag") {
-		var source, peerName string
+		var source, peerName, provider string
 		if s := g.sessionByProviderCall(sipCallID(req)); s != nil {
 			source = s.dialog.InviteRequest.Source()
-			peerName = g.cfg.TLSPeerNames[s.call.CarrierSlug]
+			provider = s.call.CarrierSlug
+			peerName = g.cfg.TLSPeerNames[provider]
 		} else if s := g.outboundSessionByProviderCall(sipCallID(req)); s != nil {
+			provider = s.carrierSlug
 			peerName = s.settings.host
 		}
 		// A route set is authoritative. Only an unrouted dialog can reuse the
@@ -52,12 +55,58 @@ func (r sipDialogRequester) Request(ctx context.Context, req *sip.Request) (sip.
 			if !g.cfg.sourceAllowed(req.Destination()) {
 				return nil, errors.New("SIP dialog TLS destination outside carrier networks")
 			}
-			ua, err = g.tlsDialogPeer(peerName)
-			if err != nil {
-				return nil, err
+			return g.requestSIPWithPeerIdentity(ctx, req, provider, peerName)
+		}
+	}
+	return requestSIPOnUA(ctx, ua, req)
+}
+
+// Regional names are an explicit provider allowlist, never names accepted from
+// a Contact, redirect, or certificate. Custom operator identities remain exact.
+func sipDialogPeerIdentities(provider, configured string) []string {
+	if provider == "telnyx" {
+		switch configured {
+		case "sip.telnyx.com":
+			return []string{configured, "sip.telnyx.eu"}
+		case "sip.telnyx.eu":
+			return []string{configured, "sip.telnyx.com"}
+		}
+	}
+	return []string{configured}
+}
+
+func (g *sipGateway) requestSIPWithPeerIdentity(ctx context.Context, req *sip.Request, provider, configured string) (sip.ClientTransaction, error) {
+	names := sipDialogPeerIdentities(provider, configured)
+	// Reuse a previously verified regional connection without another handshake.
+	for _, name := range names {
+		g.dialogTransports.mu.Lock()
+		ua := g.dialogTransports.peers[name]
+		g.dialogTransports.mu.Unlock()
+		if ua != nil {
+			if conn, err := ua.TransportLayer().GetConnection("tls", req.Destination()); err == nil {
+				defer conn.TryClose()
+				return requestSIPOnUA(ctx, ua, req)
 			}
 		}
 	}
+	ua, err := g.tlsDialogPeer(names[0])
+	if err != nil {
+		return nil, err
+	}
+	tx, err := requestSIPOnUA(ctx, ua, req)
+	var mismatch x509.HostnameError
+	// Only a failed TLS name check permits the one regional retry. No SIP
+	// request has been sent at that point, so BYE is not dispatched twice.
+	if len(names) < 2 || !errors.As(err, &mismatch) || mismatch.Certificate == nil ||
+		mismatch.Certificate.VerifyHostname(names[1]) != nil || ctx.Err() != nil {
+		return tx, err
+	}
+	ua, err = g.tlsDialogPeer(names[1])
+	if err != nil {
+		return nil, err
+	}
+	// Standard TLS verifies trust, validity, server usage and the selected
+	// regional hostname again. Neither destination nor request is rewritten.
 	return requestSIPOnUA(ctx, ua, req)
 }
 func requestSIPOnUA(ctx context.Context, ua *sipgo.UserAgent, req *sip.Request) (sip.ClientTransaction, error) {

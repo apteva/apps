@@ -18,6 +18,13 @@
   originals before readiness; rewrite recognized old paths only after ownership.
 - Retain SDK v0.100.0, existing SIP/WebRTC/audio quality and startup fixes, and
   normal local execution. Add no infrastructure app dependencies.
+- Fix Telnyx in-dialog TLS fallback when an IP Contact presents the regional
+  `sip.telnyx.eu` certificate instead of `sip.telnyx.com`. Retry once only after
+  a hostname mismatch matches the other explicitly allowed Telnyx identity;
+  standard certificate trust, validity and hostname verification remain enabled.
+  Preserve dialog routing and source-network checks, reuse verified regional
+  sockets, and keep custom and other-provider identities exact. Covers inbound
+  and outbound BYE/refresh requests; no audio framing or pacing changes.
 
 See [managed-runtime.md](managed-runtime.md) for endpoint/configuration and
 Server prerequisites. The current native snapshot limit is 512 MiB. Concrete
@@ -27,7 +34,7 @@ no instance is installed, moved or restarted by this work.
 
 ## Verification
 
-The final full Go run passed **1,337 cases (including subtests)** with nine
+The managed-runtime verification run passed **1,337 cases (including subtests)** with nine
 explicit optional/live-test skips and no failures. All **269 frontend/UI tests**,
 the 20 managed-runtime regression functions under the race detector, broader
 SIP/recording/hub race checks, TypeScript checks, Go vet, the Linux amd64 build
@@ -47,3 +54,18 @@ is an admission microbenchmark, not a whole-call CPU/capacity guarantee.
 [Machine-readable verification](verification/managed-runtime-0.12.14.json)
 records commands, skips, the earlier failure and integration limits. Real remote
 placement and controlled carrier calls remain staging validation work.
+
+### Regional Telnyx TLS correction
+
+The pre-fix implementation reproduces the reported BYE failure against a local
+TLS peer with a `sip.telnyx.eu` certificate. With the correction, the peer
+confirms BYE with SIP `200 OK` and subsequent refreshes reuse the
+verified connection. Eleven regression scenarios cover inbound/outbound,
+global/regional identities, untrusted and unrelated certificates, custom
+identities, other providers and destination network restrictions.
+
+The follow-up full Go suite passed **1,349 cases (including subtests)**, with
+the same nine optional/live skips and zero failures. Focused TLS, outbound
+hangup, shutdown and remote-hangup tests passed under the race detector. Go vet
+and the Linux amd64 build with CGO disabled also passed.
+These are local tests; no carrier call or production modification was made.

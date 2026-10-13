@@ -114,6 +114,7 @@ type outboundSIPSession struct {
 	gateway        *sipGateway
 	callID         string
 	providerCallID string
+	carrierSlug    string // immutable provider identity for regional dialog TLS
 	dialog         *sipgo.DialogClientSession
 	media          *sipRTPMedia
 	localKey       []byte
@@ -267,7 +268,7 @@ func (g *sipGateway) startSIPOutbound(row *callRow, settings didwwSIPSettings, t
 		_ = dialog.Close()
 		return errors.New("Outbound SIP INVITE has no Call-ID")
 	}
-	s := &outboundSIPSession{playbackPolicy: playbackPolicy, gateway: g, callID: row.ID, providerCallID: providerCallID,
+	s := &outboundSIPSession{playbackPolicy: playbackPolicy, gateway: g, callID: row.ID, providerCallID: providerCallID, carrierSlug: row.CarrierSlug,
 		dialog: dialog, media: media, localKey: localKey, settings: settings, ctx: ctx, cancel: cancel,
 		dialDeadline: dialDeadline,
 		maxDuration:  time.Duration(max(60, min(maxDurationSec, maximumConnectedDurationSec))) * time.Second,
