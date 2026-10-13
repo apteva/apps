@@ -670,6 +670,7 @@ func (b *nativeBackend) serveHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		w.Header().Set("Retry-After", "1")
 		http.Error(w, "deployment operation in progress; inspect/retry", 409)
 		return
 	}
