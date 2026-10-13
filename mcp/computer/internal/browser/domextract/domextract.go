@@ -59,6 +59,25 @@ const extractScript = `(() => {
   }
 
   const clone = needContent && document.body ? document.body.cloneNode(true) : document.createElement('body');
+  // Materialize live form properties on the detached snapshot. HTML attributes
+  // retain defaults after browser interaction and are not the applied state.
+  if (needContent && document.body) {
+    const originals = document.body.querySelectorAll('input,select,textarea');
+    const copies = clone.querySelectorAll('input,select,textarea');
+    originals.forEach((source, index) => {
+      const copy = copies[index];
+      if (source.tagName === 'SELECT') {
+        Array.from(copy.options).forEach((option, i) => {
+          option.toggleAttribute('selected', source.options[i].selected);
+        });
+      } else if (source.tagName === 'TEXTAREA') {
+        copy.textContent = source.value;
+      } else {
+        copy.setAttribute('value', source.type === 'password' || source.type === 'file' ? '' : source.value);
+        copy.toggleAttribute('checked', source.checked);
+      }
+    });
+  }
   for (const el of Array.from(clone.querySelectorAll('script,style,noscript,svg,template,iframe,canvas'))) {
     el.remove();
   }
