@@ -2,8 +2,7 @@ import { createListenerRTC } from "./listener-webrtc";
 import { mediaTransport, permanentRTCFailure } from "./webrtc-audio";
 import type { MediaTransport } from "./webrtc-audio";
 import type { AppHandle } from "@apteva/web-sdk";
-import source from "../../ui/listener-worklet.js" with { type: "text" };
-import captureSource from "../../ui/softphone-worklet.js" with {type:"text"};
+import { loadAudioAsset, loadAudioModules, type AudioModules } from "./audio-assets";
 import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, microphoneConstraints, playbackBufferOptions, type SoftphoneAudioOptions, PreviewResampler } from "../../ui/softphone-audio";
 
 export interface ListenerDiagnostics {
@@ -98,7 +97,7 @@ export function createListenerWebSocketAudio(app: AppHandle, options: ListenerPl
   return { create(callbacks) {
     let context: AudioContext | undefined, node: AudioWorkletNode | undefined, gain: GainNode | undefined;
     let socket: WebSocket | undefined, closed = false;
-    const blobURLs:string[]=[];
+    const audioModules: AudioModules[] = [];
     let coaching=false, talkGeneration=0, talkWanted=false, talking=false;
     let mic:MediaStream|undefined, capture:AudioWorkletNode|undefined, micSource:MediaStreamAudioSourceNode|undefined, silent:GainNode|undefined, captureChannel:MessageChannel|undefined;
     let keepalive:ReturnType<typeof setInterval>|undefined;
@@ -130,7 +129,7 @@ export function createListenerWebSocketAudio(app: AppHandle, options: ListenerPl
       if (socket) { socket.onmessage = socket.onclose = socket.onerror = null; socket.close(1000,"listener_shutdown"); }
       node?.disconnect(); gain?.disconnect();
       if (context) { context.onstatechange = null; void context.close().catch(() => {}); }
-      for(const url of blobURLs) URL.revokeObjectURL(url);
+      for(const modules of audioModules.splice(0)) modules.dispose();
     };
     const fail = (reason: string) => { if (!closed) { stop(); callbacks.onClose(reason); } };
     const ensureOpen = () => { if (closed) throw new Error("Listening cancelled"); };
@@ -144,19 +143,10 @@ export function createListenerWebSocketAudio(app: AppHandle, options: ListenerPl
           ensureOpen();
           if (options.outputDeviceId && "setSinkId" in context) await (context as AudioContext & { setSinkId(id: string): Promise<void> }).setSinkId(options.outputDeviceId);
           ensureOpen();
-          let workletURL: string;
-          const gateway = new URL(app.mcpURL(), location.href);
-          if (gateway.origin === location.origin) {
-            const hash = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(source))), b => b.toString(16).padStart(2, "0")).join("");
-            const path = `/ui/frontend/listener-${hash}.js`;
-            const served = await app.get<string>(path, { cache: "no-cache", redirect: "error", headers: { Accept: "text/plain" } });
-            ensureOpen();
-            if (served !== source) throw new Error("Listener audio asset integrity mismatch");
-            const asset = new URL(`/api/apps/telephony/_install/${app.installId}${path}`, gateway);
-            asset.searchParams.set("project_id", app.projectId!); asset.searchParams.set("install_id", String(app.installId));
-            workletURL = asset.href;
-          } else { const blobURL = URL.createObjectURL(new Blob([source], { type: "text/javascript" })); blobURLs.push(blobURL);workletURL = blobURL; }
-          await context.audioWorklet.addModule(workletURL); ensureOpen();
+          const loaded = await loadAudioAsset(app, "listener");
+          if (closed) { loaded.dispose(); ensureOpen(); }
+          audioModules.push(loaded);
+          await context.audioWorklet.addModule(loaded.urls[0]); ensureOpen();
           node = new AudioWorkletNode(context, "telephony-listener", { numberOfInputs: 0, outputChannelCount: [options.stereo ? 2 : 1], processorOptions: { stereo: options.stereo, ...playbackBufferOptions(options) } });
           gain = context.createGain(); gain.gain.value = volume;
           node.connect(gain).connect(context.destination);
@@ -206,10 +196,9 @@ export function createListenerWebSocketAudio(app: AppHandle, options: ListenerPl
           if(!current()){stream.getTracks().forEach(t=>t.stop());return;}
           mic=stream;mic.getAudioTracks().forEach(t=>{t.onended=()=>stopTalking();});
           if(!captureLoaded) {
-            const gateway=new URL(app.mcpURL(),location.href);let url:string;
-            if(gateway.origin===location.origin){ const hash=Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(captureSource))),b=>b.toString(16).padStart(2,"0")).join("");const path=`/ui/frontend/worklet-${hash}.js`;const served=await app.get<string>(path,{cache:"no-cache",redirect:"error",headers:{Accept:"text/plain"}});if(served!==captureSource)throw new Error("Coaching audio asset integrity mismatch");const asset=new URL(`/api/apps/telephony/_install/${app.installId}${path}`,gateway);asset.searchParams.set("project_id",app.projectId!);asset.searchParams.set("install_id",String(app.installId));url=asset.href;
-            } else {url=URL.createObjectURL(new Blob([captureSource],{type:"text/javascript"}));blobURLs.push(url);}
-            if(!current())return;await context.audioWorklet.addModule(url);captureLoaded=true;
+            const loaded = await loadAudioModules(app, true);
+            if(!current()){loaded.dispose();return;}audioModules.push(loaded);
+            await context.audioWorklet.addModule(loaded.urls[0]);captureLoaded=true;
           }
           if(!current())return;
           await new Promise<void>((resolve,reject)=>{

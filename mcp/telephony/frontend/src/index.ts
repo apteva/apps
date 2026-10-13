@@ -19,3 +19,5 @@ export type { MediaSessionEvent, MediaRecoveryContext, MediaAttachmentDiagnostic
 export type { OutboundSIPConfig, OutboundTransport, OutboundTransportRequest, OutboundTransportResult, OutboundSIPSetupOptions, OutboundNumberChoice, OutboundNumbersResult } from "./client";
 
 export type { TelephonyRuntimeMode } from "./runtime-transport";
+
+export type {DirectTelephonyConnection, BrowserCredential} from "./runtime-transport";

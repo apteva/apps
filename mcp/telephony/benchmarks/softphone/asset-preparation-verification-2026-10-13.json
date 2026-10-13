@@ -1,0 +1,86 @@
+{
+  "baseline": "telephony/v0.12.17",
+  "transport": "simulated 25ms HTTP, four concurrent responses",
+  "scope": "integrity verification; native browser loading and call CPU excluded",
+  "results": [
+    {
+      "scenario": "cold_pcm",
+      "before": {
+        "elapsed_ms": 31.53,
+        "verification_requests": 2,
+        "verification_source_bytes": 58372,
+        "max_http_concurrency": 2
+      },
+      "after": {
+        "elapsed_ms": 27.81,
+        "verification_requests": 2,
+        "verification_source_bytes": 58372,
+        "max_http_concurrency": 2
+      }
+    },
+    {
+      "scenario": "warm_pcm",
+      "before": {
+        "elapsed_ms": 25.79,
+        "verification_requests": 2,
+        "verification_source_bytes": 58372,
+        "max_http_concurrency": 2
+      },
+      "after": {
+        "elapsed_ms": 0.45,
+        "verification_requests": 0,
+        "verification_source_bytes": 0,
+        "max_http_concurrency": 0
+      }
+    },
+    {
+      "scenario": "concurrent_64_pcm",
+      "before": {
+        "elapsed_ms": 861.13,
+        "verification_requests": 128,
+        "verification_source_bytes": 3735808,
+        "max_http_concurrency": 4
+      },
+      "after": {
+        "elapsed_ms": 30.5,
+        "verification_requests": 2,
+        "verification_source_bytes": 58372,
+        "max_http_concurrency": 2
+      }
+    },
+    {
+      "scenario": "cold_rtc",
+      "before": {
+        "elapsed_ms": 26.28,
+        "verification_requests": 2,
+        "verification_source_bytes": 58372,
+        "max_http_concurrency": 2
+      },
+      "after": {
+        "elapsed_ms": 26.34,
+        "verification_requests": 1,
+        "verification_source_bytes": 30606,
+        "max_http_concurrency": 1
+      }
+    }
+  ],
+  "client_bundle_bytes": {
+    "before": 184168,
+    "after": 185909,
+    "before_gzip_equivalent": 50902,
+    "after_gzip_equivalent": 51063
+  },
+  "limitations": [
+    "Simulated verification HTTP; not measured production traffic.",
+    "64 preparations share one client handle; not 64 live carrier calls.",
+    "Gzip equivalents are calculated, not observed transfer compression.",
+    "Added timing telemetry slightly increases the client bundle; improvements reduce repeated startup work."
+  ],
+  "validation": {
+    "go_full_suite": "passed; GOWORK=off go test ./...",
+    "frontend_full_suite": "287 passed, zero failures; additional startup regression passed afterwards",
+    "typescript": "frontend and benchmark typechecks passed",
+    "bundles": "client and panel build/import checks passed",
+    "browser_integration": "passed: all seven TestTier2HeadlessBrowser scenarios, integration build tag"
+  }
+}

@@ -8,7 +8,14 @@ interface RuntimeInfo {
   browser_signaling_base?: string;
   generation?: number;
 }
-interface BrowserCredential { token: string; expires_at: number; endpoint: string }
+export interface BrowserCredential { token: string; expires_at: number; endpoint: string }
+
+export interface DirectTelephonyConnection {
+ /** HTTPS base including /runtime-browser. */
+ baseURL: string;
+ /** Issues a short-lived credential for the current user, installation and origin. */
+ credentialProvider: () => Promise<BrowserCredential>;
+}
 
 function browserBase(raw: string): URL {
   const base = new URL(raw);
@@ -44,12 +51,13 @@ export class RuntimeTelephonyTransport {
   private proxyOnly = false;
 
   constructor(private proxy: AppHandle, private mode: TelephonyRuntimeMode = 'auto',
-              private fetchImpl: typeof fetch = globalThis.fetch) {}
+              private fetchImpl: typeof fetch = globalThis.fetch, private direct?: DirectTelephonyConnection) { this.fetchImpl = fetchImpl.bind(globalThis); }
 
   get directBase(): string | undefined { return this.info?.browser_api_base; }
 
   async prepare(): Promise<void> {
     if (this.mode === 'proxy' || this.mode === 'auto' && typeof location === 'undefined') return;
+    if(this.direct){browserBase(this.direct.baseURL);this.info={managed:true,browser_api_base:this.direct.baseURL};return}
     if (this.discovery) return this.discovery;
     this.discovery = (async () => {
       let info: RuntimeInfo;
@@ -80,7 +88,7 @@ export class RuntimeTelephonyTransport {
     if (this.issuing) return this.issuing;
     const origin = typeof location === 'undefined' ? new URL(this.proxy.mcpURL()).origin : location.origin;
     this.issuing = (async () => {
-      const grant = await this.proxy.post<BrowserCredential>('/runtime-browser-bootstrap', { origin });
+      const grant = this.direct ? await this.direct.credentialProvider() : await this.proxy.post<BrowserCredential>('/runtime-browser-bootstrap', { origin });
       if (!grant || typeof grant.token !== 'string' || !grant.token || grant.token.length > 4096 ||
           !Number.isSafeInteger(grant.expires_at) || grant.expires_at * 1000 <= Date.now() ||
           grant.expires_at * 1000 > Date.now() + 360000 || grant.endpoint !== this.directBase) {

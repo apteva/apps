@@ -1,6 +1,7 @@
 import { microphoneConstraints, playbackBufferOptions, PreviewResampler, type AudioDropEvent, type SoftphoneAudioOptions, type SoftphoneCallbacks, type SoftphoneDiagnostics } from "../../ui/softphone-audio";
 import { TransportTelemetry, TransportTelemetrySender, transportMetrics, transportStates } from "../../ui/transport-telemetry";
 import { AudioRuntimeTelemetry } from "../../ui/audio-runtime-telemetry";
+import { measureAudioSetup } from "../../ui/audio-setup";
 import { playRingback, ringbackPattern } from "../../ui/ringback";
 import { mediaFailure, mediaDiagnosticID, mediaRecoveryContext, safeMediaSessionEvent, type MediaRecoveryContext, type MediaSessionEvent } from "./media-lease";
 import type { AudioConnection } from "./audio";
@@ -205,7 +206,7 @@ export class WebRTCAudioConnection implements AudioConnection {
     for(const event of this.events.slice(-8))this.enqueueRTCEvents({session_events:[event]});
     for(const event of this.diagnostics.dropEvents.slice(-8))this.enqueueRTCEvents({drop_events:[event]});
     this.ready=this.peer=this.answered=this.reportedLive=false;this.mediaPathReady=undefined;this.mediaRevision=0;this.previous=undefined;this.quality=new RTCQualityPolicy(options);this.appliedBitrate=undefined;
-    const stream=await navigator.mediaDevices.getUserMedia({audio:microphoneConstraints(options)});
+    const stream=await measureAudioSetup("microphone_device", event=>this.recordSessionEvent(event), ()=>navigator.mediaDevices.getUserMedia({audio:microphoneConstraints(options)}));
     if(!this.current(generation)){stream.getTracks().forEach(t=>t.stop());throw new Error("Audio session cancelled");}
     this.stream=stream;
     const mic=stream.getAudioTracks()[0];if(!mic) throw new Error("No microphone audio track");
@@ -217,9 +218,9 @@ export class WebRTCAudioConnection implements AudioConnection {
     mic.onended=()=>{if(this.current(generation))this.disconnected(generation,"microphone_ended");};
     this.context=new AudioContext({latencyHint:"interactive"});const context=this.context;
     context.onstatechange=()=>{this.runtime.context(context.state);this.updateLiveState();};
-    this.runtime.context(context.state);await context.resume();this.guard(generation);
+    this.runtime.context(context.state);await measureAudioSetup("audio_context", event=>this.recordSessionEvent(event), ()=>context.resume());this.guard(generation);
     if(options.outputDeviceId && "setSinkId" in context) await (context as AudioContext & {setSinkId(id:string):Promise<void>}).setSinkId(options.outputDeviceId);
-    await context.audioWorklet.addModule(this.workletURL!);this.guard(generation);
+    await measureAudioSetup("audio_worklet", event=>this.recordSessionEvent(event), ()=>context.audioWorklet.addModule(this.workletURL!));this.guard(generation);
     this.diagnostics.audioContextRate=context.sampleRate;
     this.capture=new AudioWorkletNode(context,"softphone-capture",{outputChannelCount:[1],processorOptions:{nativeOutput:true,inputGainDB:options.inputGainDB,highpassFilter:options.highpassFilter}});
     this.destination=context.createMediaStreamDestination();
@@ -242,7 +243,7 @@ export class WebRTCAudioConnection implements AudioConnection {
     this.gate();
     const socket=new WebSocket(rtcMediaURL(url,options.webrtcFec));socket.binaryType="arraybuffer";this.socket=socket;
     let connected=false,finished=false;
-    await new Promise<void>((resolve,reject)=>{
+    await measureAudioSetup("audio_transport", event=>this.recordSessionEvent(event), () => new Promise<void>((resolve,reject)=>{
       const finish=(err?:Error)=>{if(finished)return;finished=true;clearTimeout(timeout);this.cancelSetup=undefined;err?reject(err):resolve();};
       const timeout=setTimeout(()=>finish(new Error("WebRTC audio connection timed out")),18000);
       this.cancelSetup=()=>finish(new Error("Audio session cancelled"));
@@ -326,7 +327,7 @@ export class WebRTCAudioConnection implements AudioConnection {
         if(e.code===1008){this.stop();safe(()=>this.callbacks.onState?.("error","Media authorization ended"));return;}
         this.disconnected(generation,"signaling_closed");
       };
-    });
+    }));
     this.guard(generation);
     this.timer=setInterval(()=>{this.runtime.tick();void this.statistics(generation);},1000);
     await this.statistics(generation);
@@ -476,15 +477,16 @@ export class WebRTCAudioConnection implements AudioConnection {
 /** Try one transport at a time; failed setup releases all resources first. */
 export function selectableAudio(callbacks:SoftphoneCallbacks, websocket:()=>AudioConnection, rtc:()=>AudioConnection):AudioConnection {
   let selected:AudioConnection|undefined,stopped=false,muted=false;
+  const setupEvents: MediaSessionEvent[] = [];
   return {
     async start(url,options){
       const choice=mediaTransport(options.mediaTransport);
-      const start=async(factory:()=>AudioConnection)=>{if(stopped)throw new Error("Audio session cancelled");const connection=factory();selected=connection;connection.setMuted(muted);try{await connection.start(url,options);if(stopped)throw new Error("Audio session cancelled");}catch(error){connection.stop();if(selected===connection)selected=undefined;throw error;}};
+      const start=async(factory:()=>AudioConnection)=>{if(stopped)throw new Error("Audio session cancelled");const connection=factory();selected=connection;connection.setMuted(muted);try{for(const event of setupEvents.splice(0)){try{connection.recordSessionEvent?.(event);}catch{/* observational only */}}if(stopped)throw new Error("Audio session cancelled");await connection.start(url,options);if(stopped)throw new Error("Audio session cancelled");}catch(error){connection.stop();if(selected===connection)selected=undefined;throw error;}};
       if(choice==="websocket"){await start(websocket);return;}
       try{await start(rtc);}catch(error){if(choice!=="auto"||stopped||permanentRTCFailure(error))throw error;safe(()=>callbacks.onSessionEvent?.({timestamp:new Date().toISOString(),action:"transport",outcome:"websocket_fallback"}));await start(websocket);}
     },
-    stop(){stopped=true;selected?.stop();selected=undefined;},setMuted(value){muted=value;selected?.setMuted(value);},
+    stop(){stopped=true;setupEvents.splice(0);selected?.stop();selected=undefined;},setMuted(value){muted=value;selected?.setMuted(value);},
     setOutputVolume(value){selected?.setOutputVolume(value);},sendDTMF(digits){selected?.sendDTMF(digits);},
-    recordSessionEvent(event){selected?.recordSessionEvent?.(event);},startRingback(country){selected?.startRingback?.(country);},stopRingback(){selected?.stopRingback?.();},
+    recordSessionEvent(event){if(selected)selected.recordSessionEvent?.(event);else if(!stopped){setupEvents.push(safeMediaSessionEvent(event));if(setupEvents.length>20)setupEvents.shift();}},startRingback(country){selected?.startRingback?.(country);},stopRingback(){selected?.stopRingback?.();},
   };
 }

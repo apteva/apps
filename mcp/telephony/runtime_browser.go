@@ -237,19 +237,24 @@ func (a *App) handleRuntimeBrowser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	origin := r.Header.Get("Origin")
-	expected, _ := url.Parse(os.Getenv("APTEVA_PUBLIC_URL"))
-	allowed := ""
-	if expected != nil && expected.Host != "" {
-		allowed = expected.Scheme + "://" + expected.Host
-	}
-	if origin == "" || origin != allowed {
-		http.Error(w, "browser origin not allowed", 403)
+	if origin == "" {
+		http.Error(w, "browser origin required", 403)
 		return
 	}
-	w.Header().Set("Access-Control-Allow-Origin", origin)
-	w.Header().Set("Vary", "Origin")
-	w.Header().Set("Cache-Control", "no-store")
 	if r.Method == "OPTIONS" {
+		var policy struct {
+			Allowed bool `json:"allowed"`
+		}
+		if err := a.runtime.callback(r.Context(), "POST", "browser-origin", map[string]any{"origin": origin}, &policy); err != nil {
+			writeRuntimeAuthorizationError(w, err)
+			return
+		}
+		if !policy.Allowed {
+			http.Error(w, "browser origin not allowed", 403)
+			return
+		}
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Vary", "Origin")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 		w.WriteHeader(204)
@@ -284,6 +289,9 @@ func (a *App) handleRuntimeBrowser(w http.ResponseWriter, r *http.Request) {
 		writeRuntimeAuthorizationError(w, err)
 		return
 	}
+	w.Header().Set("Access-Control-Allow-Origin", origin)
+	w.Header().Set("Vary", "Origin")
+	w.Header().Set("Cache-Control", "no-store")
 	request.Header.Set("X-Apteva-Project-ID", grant.Project)
 	request.Header.Set("X-Apteva-Operator-ID", strconv.FormatInt(grant.UserID, 10))
 	raw, _ := json.Marshal(grant.Principal)

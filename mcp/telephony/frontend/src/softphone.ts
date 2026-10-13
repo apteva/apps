@@ -2,6 +2,7 @@ import type { CallListenerOptions } from "./listener";
 import { MediaLease, mediaRecoveryContext, safeMediaSessionEvent, type MediaInitiatingAction, type MediaRecoveryContext, type MediaSessionEvent } from "./media-lease";
 import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, playbackBufferOptions, type SoftphoneMediaReadiness, type SoftphoneAudioHealth, type SoftphoneAudioOptions, type SoftphoneCallStatus, type SoftphoneDiagnostics, type SoftphoneState } from "../../ui/softphone-audio";
 import { createBrowserAudio, type AudioConnection, type AudioRuntime } from "./audio";
+import { measureAudioSetup } from "../../ui/audio-setup";
 import { isTerminalCall, type AnswerRequest, type Call, type CallControlResult, type CallSession, type CallTermination, type DialRequest, type TelephonyClient } from "./client";
 
 /** Carrier progress; connected is exposed only after browser media is live. */
@@ -131,6 +132,21 @@ export class HeadlessSoftphone {
     return generation;
   }
 
+  private async prepareAudio(generation: number, microphone: boolean): Promise<MediaSessionEvent[]> {
+    const events: MediaSessionEvent[] = [];
+    const emit = (event: MediaSessionEvent) => { if (this.current(generation) && !this.cancellation.signal.aborted) events.push(safeMediaSessionEvent(event)); };
+    try {
+      await this.cancellable(measureAudioSetup(microphone ? "audio_preflight" : "audio_prepare", emit, () => microphone
+        ? this.runtime.preflight(this.audioOptions, emit)
+        : this.runtime.prepare?.(this.audioOptions, emit) ?? Promise.resolve()), generation);
+      this.assertCurrent(generation);
+      return events;
+    } catch (error) {
+      if (this.current(generation)) for (const event of events) this.reportSessionEvent(event);
+      throw error;
+    }
+  }
+
   async dial(input: Omit<DialRequest, "idempotency_key"> & { idempotency_key?: string }): Promise<string> {
     const generation = this.begin(true);
     let placed: CallSession | undefined;
@@ -142,7 +158,7 @@ export class HeadlessSoftphone {
       if (!this.intent || this.intent.value !== value || (input.idempotency_key && input.idempotency_key !== this.intent.request.idempotency_key)) {
         this.intent = { value, request: { ...normalized, idempotency_key: input.idempotency_key || crypto.randomUUID() } };
       }
-      await this.cancellable(this.runtime.preflight(this.audioOptions), generation);
+      const setupEvents = await this.prepareAudio(generation, true);
       this.assertCurrent(generation);
       // Do not abort a write whose carrier outcome would then be unknown.
       placed = await this.client.place(this.intent.request);
@@ -150,7 +166,7 @@ export class HeadlessSoftphone {
       this.assertCurrent(generation);
       attached = true;
       this.outbound = true;
-      await this.attachAudio(placed, generation);
+      await this.attachAudio(placed, generation, setupEvents);
       return placed.call_id;
     } catch (error) {
       if (placed && (this.current(generation) || !attached || this.disposed)) {
@@ -167,11 +183,12 @@ export class HeadlessSoftphone {
     let attached = false;
     try {
       this.assertCurrent(generation);
+      const setupEvents = await this.prepareAudio(generation, true);
       claimed = await this.client.answer(id, request);
       this.assertCurrent(generation);
       attached = true;
       this.outbound = false;
-      await this.attachAudio(claimed, generation);
+      await this.attachAudio(claimed, generation, setupEvents);
     } catch (error) {
       if (claimed && (this.current(generation) || !attached || this.disposed)) {
         await this.recoverStartup(claimed, generation, () => this.client.release(claimed!));
@@ -206,12 +223,12 @@ export class HeadlessSoftphone {
   private async acquireSession(id: string, takeover: boolean, action: MediaInitiatingAction = "takeover"): Promise<void> {
     const generation = this.begin(true);
     try {
-      await this.cancellable(this.runtime.preflight(this.audioOptions), generation);
+      const setupEvents = await this.prepareAudio(generation, true);
       this.assertCurrent(generation);
       const recovery=mediaRecoveryContext(takeover ? "takeover" : action);
       const session = await (takeover ? this.client.takeover(id,recovery) : this.client.attach(id,recovery));
       this.assertCurrent(generation);
-      await this.attachAudio(session, generation);
+      await this.attachAudio(session, generation, setupEvents);
       // The call was placed elsewhere, so its direction and current status are
       // unknown here. One read settles both instead of waiting for polling.
       await this.reconcileAttachedCall(session, generation);
@@ -232,9 +249,12 @@ export class HeadlessSoftphone {
     const report=(outcome:string,extra:Partial<MediaSessionEvent>={})=>this.reportSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome,...recovery,previous_session_id,...extra});
     report("started");
     try {
+      // Keep the current audio running while scripts prepare. Acquire a new
+      // server generation only after preparation, preserving token ownership.
+      const setupEvents = await this.prepareAudio(generation, false);
       const session = await this.client.attach(id,{...recovery,previous_session_id});
       this.assertCurrent(generation);
-      await this.attachAudio(session, generation);
+      await this.attachAudio(session, generation, setupEvents);
       await this.reconcileAttachedCall(session, generation);
       report("connected",{session_id:session.session_generation});
     }
@@ -369,7 +389,7 @@ export class HeadlessSoftphone {
     }
   }
 
-  private async attachAudio(session: CallSession, generation: number) {
+  private async attachAudio(session: CallSession, generation: number, setupEvents: MediaSessionEvent[] = []) {
     this.assertCurrent(generation);
     this.stopAudio();
     this.session = session;
@@ -431,6 +451,10 @@ export class HeadlessSoftphone {
         })),
       });
       this.audio = audio;
+      this.assertCurrent(generation);
+      // These stages preceded session acquisition. Queue them in the chosen
+      // runtime before startup so startup failures retain their evidence too.
+      for (const event of setupEvents) this.reportSessionEvent(event);
       this.assertCurrent(generation);
       this.startPolling();
       this.startLease(session);
