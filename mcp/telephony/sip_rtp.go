@@ -34,7 +34,8 @@ var sipRTPPorts = struct {
 
 type sipRTPMedia struct {
 	readAt               time.Time // single receive owner only
-	socketOOB            [64]byte
+	readCompletedAt      time.Time // socket dequeue, distinct from kernel arrival
+	socketOOB            [128]byte
 	early                *sipEarlyReceiver
 	observations         sipRTPObservations
 	diagnostics          atomic.Pointer[sipLiveDiagnostics]
@@ -85,6 +86,7 @@ func openSIPRTPMedia(cfg sipGatewayConfig, offer sipMediaOffer) (*sipRTPMedia, e
 		sipRTPPorts.next[pool] = cfg.RTPPortMin + ((port-cfg.RTPPortMin)/2+1)%count*2
 
 		media.observations.kernelDropsAvailable.Store(enableSIPSocketDropCounter(conn))
+		media.observations.kernelTimestampAvailable.Store(enableSIPSocketTimestamps(conn))
 		media.lastPacket.Store(time.Now().UnixNano())
 		return media, nil
 	}
@@ -686,7 +688,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 			if mode := media.remoteMode.Load(); mode == 2 || mode == 3 {
 				continue
 			}
-			jitter.pushSourceRTP(packet.SSRC, packet.SequenceNumber, packet.Payload, packet.Timestamp, media.readAt)
+			jitter.pushSourceRTPAt(packet.SSRC, packet.SequenceNumber, packet.Payload, packet.Timestamp, media.readAt, time.Now())
 		}
 	}()
 

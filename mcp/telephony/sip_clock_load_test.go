@@ -21,7 +21,8 @@ import (
 // Local, paced capacity evidence, not a deployment-wide capacity guarantee.
 // Includes actual bidirectional UDP/SRTP, production SIP decoding/framing,
 // resampling and Opus encode/decode. Excludes SIP signaling, Apteva's proxy,
-// browser rendering, recording, database and routing. No external carrier.
+// browser rendering and routing. TELEPHONY_SIP_MIXED_LOAD=1 adds recording,
+// call-list and notification work. No external carrier.
 func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 	path := os.Getenv("TELEPHONY_SIP_LOAD_RESULTS")
 	if path == "" {
@@ -42,9 +43,23 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 		DiscardedMS               float64 `json:"discarded_ms"`
 		ReplacementMS             float64 `json:"replacement_ms"`
 		Received, Sent, Returned  int64
-		MaxQueueMS                float64 `json:"max_queue_ms"`
-		AllocBytes                uint64  `json:"allocated_bytes"`
+		MaxQueueMS                float64            `json:"max_queue_ms"`
+		AllocBytes                uint64             `json:"allocated_bytes"`
+		ClockUpdates              int                `json:"clock_rate_updates"`
+		ClockRateRejected         int                `json:"clock_rate_rejected"`
+		ClockPhaseWithheld        int                `json:"clock_phase_withheld"`
+		LateDroppedMS             float64            `json:"late_discarded_ms"`
+		ExpiredDroppedMS          float64            `json:"expired_discarded_ms"`
+		OverflowDroppedMS         float64            `json:"overflow_discarded_ms"`
+		ObservedDropReasons       map[string]float64 `json:"retained_drop_event_reasons_ms"`
 	}
+	type incident struct {
+		Codec    string          `json:"codec"`
+		Calls    int             `json:"concurrent_calls"`
+		Stream   int             `json:"stream_index"`
+		Snapshot sipLiveSnapshot `json:"snapshot"`
+	}
+	var incidents []incident
 	var results []result
 	for _, count := range []int{32, 64} {
 		for _, variant := range []string{"portable", "native_fec"} {
@@ -83,6 +98,8 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 						t.Fatal(err)
 					}
 					w.carrier = &sipRTPMedia{conn: right, remote: left.LocalAddr().(*net.UDPAddr), offer: w.server.offer}
+					w.server.observations.kernelTimestampAvailable.Store(enableSIPSocketTimestamps(left))
+					w.carrier.observations.kernelTimestampAvailable.Store(enableSIPSocketTimestamps(right))
 					w.carrier.offer.RemoteKey = w.server.security.LocalKey
 					w.carrier.security, err = newSIPMediaSecurityWithLocalKey(w.carrier.offer, key)
 					if err != nil {
@@ -107,6 +124,7 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 					t.Cleanup(w.encoder.Close)
 					t.Cleanup(w.decoder.Close)
 					w.jitter = newRTPJitterBuffer()
+					w.server.jitterTelemetry.Store(w.jitter)
 					w.framer = newRTPAudioFramer(w.jitter, w.server.offer)
 					w.up, w.down = newPCMResampler(16000, 48000), newPCMResampler(24000, 16000)
 					w.costs = make([]float64, 0, 800)
@@ -136,13 +154,13 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 									errors <- err
 									return
 								}
-								p, err := media.decodePacket(buf[:n])
+								p, err := media.decodePacketAt(buf[:n], media.readAt)
 								if err != nil {
 									errors <- err
 									return
 								}
 								if receive {
-									w.jitter.pushSourceRTP(p.SSRC, p.SequenceNumber, p.Payload, p.Timestamp, time.Now())
+									w.jitter.pushSourceRTPAt(p.SSRC, p.SequenceNumber, p.Payload, p.Timestamp, media.readAt, time.Now())
 								}
 							}
 						}(receive)
@@ -261,19 +279,37 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 				for err := range errors {
 					t.Error(err)
 				}
-				r := result{Calls: count, Codec: variant, Seconds: time.Since(began).Seconds(), AllocBytes: after.TotalAlloc - before.TotalAlloc}
+				r := result{Calls: count, Codec: variant, Seconds: time.Since(began).Seconds(), AllocBytes: after.TotalAlloc - before.TotalAlloc, ObservedDropReasons: make(map[string]float64)}
 				r.ProcessGCPauseMS = float64(after.PauseTotalNs-before.PauseTotalNs) / 1e6
 				r.GoHeartbeatMaxGapMS = float64(heartbeatGap) / float64(time.Millisecond)
 				r.MixedBackgroundOperations, r.RecordingDroppedMS = stopMixed()
 				r.CPUPercent = (cpuEnd - cpuStart) / r.Seconds * 100
 				var costs []float64
-				for _, w := range workers {
+				for index, w := range workers {
 					r.DiscardedMS += float64(w.jitter.droppedSamples+w.jitter.lateDroppedSamples) / 8
 					r.ReplacementMS += float64(w.jitter.missingFilledSamples.Load()) / 8
 					r.Received += w.server.observations.packets.Load()
 					r.Sent += w.server.observations.sent.Load()
 					r.Returned += w.carrier.observations.packets.Load()
 					r.MaxQueueMS = max(r.MaxQueueMS, w.queueMax)
+					r.ClockUpdates += w.jitter.clock.updates
+					r.ClockRateRejected += w.jitter.clock.rateRejected
+					r.ClockPhaseWithheld += w.jitter.clock.phaseRejected
+					r.LateDroppedMS += float64(w.jitter.lateDroppedSamples) / 8
+					r.ExpiredDroppedMS += float64(w.jitter.expiredSamples) / 8
+					r.OverflowDroppedMS += float64(w.jitter.overflowSamples) / 8
+					if w.jitter.droppedSamples+w.jitter.lateDroppedSamples > 0 {
+						d := &sipLiveDiagnostics{}
+						d.media.Store(w.server)
+						snapshot := d.snapshot(time.Now())
+						incidents = append(incidents, incident{Codec: variant, Calls: count, Stream: index, Snapshot: snapshot})
+						for _, event := range snapshot.Jitter.Events {
+							switch event.Reason {
+							case "source_delivery_age", "ingress_processing_age", "queue_age", "decoded_partial_age", "late_arrival", "queue_overflow", "decoded_reserve_overflow", "oversized_packet":
+								r.ObservedDropReasons[event.Reason] += event.DurationMS
+							}
+						}
+					}
 					r.ScheduleMaxMS = max(r.ScheduleMaxMS, w.scheduleMax)
 					costs = append(costs, w.costs...)
 				}
@@ -290,7 +326,7 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 			})
 		}
 	}
-	data, err := json.MarshalIndent(map[string]any{"scope": "local bidirectional UDP/SRTP + SIP framer + resampling + Opus encode/decode; optional mixed mode adds recording, database call-list reads and retryable notification persistence; excludes live signaling, external proxy and browser rendering", "mixed_recording_database_notifications": os.Getenv("TELEPHONY_SIP_MIXED_LOAD") == "1", "gomaxprocs": runtime.GOMAXPROCS(0), "logical_cpus": runtime.NumCPU(), "results": results}, "", "  ")
+	data, err := json.MarshalIndent(map[string]any{"scope": "local bidirectional UDP/SRTP + SIP framer + resampling + Opus encode/decode; optional mixed mode adds recording, database call-list reads and retryable notification persistence; excludes live signaling, external proxy and browser rendering", "mixed_recording_database_notifications": os.Getenv("TELEPHONY_SIP_MIXED_LOAD") == "1", "gomaxprocs": runtime.GOMAXPROCS(0), "logical_cpus": runtime.NumCPU(), "results": results, "incident_history": incidents, "incident_history_scope": "bounded retained events, not a complete packet trace; drop-reason durations can be lower than cumulative counters"}, "", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}

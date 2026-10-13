@@ -83,7 +83,12 @@ func addCarrierAudioSummary(s *audioDashboardSummary, r *carrierTelemetryRecord)
 		m["sip_packets_sent"] = float64(v.RTP.Sent)
 		m["sip_send_errors"] = float64(v.RTP.SendErrors)
 		m["sip_max_send_duration_ms"] = v.RTP.MaxSendMS
+		m["sip_max_socket_read_wait_ms"] = v.RTP.MaxSocketWaitMS
+		m["sip_kernel_timestamped_packets"] = float64(v.RTP.KernelTimestampPackets)
+		m["sip_kernel_timestamp_invalid"] = float64(v.RTP.KernelTimestampInvalid)
+		m["sip_max_consumer_interval_ms"] = v.Jitter.MaxConsumerIntervalMS
 		m["sip_jitter_queue_ms"] = v.Jitter.QueueMS
+		m["sip_jitter_effective_target_ms"] = float64(v.Jitter.EffectiveTargetMS)
 		m["sip_jitter_oldest_age_ms"] = v.Jitter.OldestAgeMS
 		m["sip_jitter_discarded_ms"] = v.Jitter.DroppedMS + v.Jitter.LateDroppedMS
 		m["sip_missing_audio_filled_ms"] = v.Jitter.MissingFilledMS
@@ -98,6 +103,10 @@ func addCarrierAudioSummary(s *audioDashboardSummary, r *carrierTelemetryRecord)
 		m["sip_clock_drift_ppm"] = v.Jitter.ClockDriftPPM
 		m["sip_clock_estimator_updates"] = float64(v.Jitter.ClockEstimatorUpdates)
 		m["sip_clock_rejected_fits"] = float64(v.Jitter.ClockRejectedFits)
+		m["sip_clock_phase_withheld"] = float64(v.Jitter.ClockPhaseRejected)
+		m["sip_clock_rate_rejected"] = float64(v.Jitter.ClockRateRejected)
+		m["sip_clock_recent_rate_recoveries"] = float64(v.Jitter.ClockRecentRecoveries)
+		m["sip_fresh_delivery_rebuffers"] = float64(v.Jitter.FreshDeliveryResumes)
 		m["sip_clock_observation_windows"] = float64(v.Jitter.ClockObservationCount)
 		m["sip_clock_phase_adjusted_ms"] = v.Jitter.ClockPhaseAdjustedMS
 		m["sip_max_relative_delivery_age_ms"] = v.Jitter.MaxDeliveryAgeMS

@@ -60,6 +60,12 @@ type sipRTPObservations struct {
 	lastArrival          time.Time
 	lastTimestamp        uint32
 	jitter               float64
+
+	kernelTimestampAvailable atomic.Bool
+	kernelTimestampPackets   atomic.Int64
+	kernelTimestampInvalid   atomic.Int64
+	lastSocketWait           atomic.Int64
+	maxSocketWait            atomic.Int64
 }
 
 func atomicMax(dst *atomic.Int64, n int64) {
@@ -184,10 +190,19 @@ type sipRTPSnapshot struct {
 	MaxSendMS            float64 `json:"max_send_duration_ms"`
 	MaxPacingGapMS       float64 `json:"max_send_gap_ms"`
 	Skipped              int64   `json:"timing_observations_skipped"`
+
+	KernelTimestampAvailable bool    `json:"kernel_arrival_timestamps_available"`
+	KernelTimestampPackets   int64   `json:"kernel_timestamped_packets"`
+	KernelTimestampInvalid   int64   `json:"kernel_timestamp_invalid"`
+	LastSocketWaitMS         float64 `json:"last_socket_read_wait_ms"`
+	MaxSocketWaitMS          float64 `json:"max_socket_read_wait_ms"`
 }
 
 func (o *sipRTPObservations) snapshot(now time.Time) sipRTPSnapshot {
 	s := sipRTPSnapshot{PreBridgeSocketDrops: o.earlyKernelDrops.Load(), ActivationDropped: o.activationDropped.Load(), KernelDrops: o.kernelDrops.Load(), KernelDropsAvailable: o.kernelDropsAvailable.Load(), EarlyPackets: o.earlyPackets.Load(), EarlyBytes: o.earlyBytes.Load(), Packets: o.packets.Load(), Bytes: o.bytes.Load(), MaxGapMS: float64(o.maxGap.Load()) / 1e6, SequenceLoss: o.loss.Load(), SequenceGaps: o.sequenceGaps.Load(), Duplicates: o.duplicates.Load(), OutOfOrder: o.outOfOrder.Load(), JitterMS: float64(o.jitterNS.Load()) / 1e6, MaxDeliveryExcessMS: float64(o.deliveryExcessNS.Load()) / 1e6, RejectedSource: o.rejectedSource.Load(), DecodeErrors: o.decodeErrors.Load(), AuthErrors: o.authErrors.Load(), ReplayErrors: o.replayErrors.Load(), DecryptErrors: o.decryptErrors.Load(), ReadErrors: o.readErrors.Load(), Sent: o.sent.Load(), SentBytes: o.sentBytes.Load(), SendErrors: o.sendErrors.Load(), MaxSendMS: float64(o.maxSend.Load()) / 1e6, MaxPacingGapMS: float64(o.maxPacingGap.Load()) / 1e6, Skipped: o.skipped.Load()}
+	s.KernelTimestampAvailable = o.kernelTimestampAvailable.Load()
+	s.KernelTimestampPackets, s.KernelTimestampInvalid = o.kernelTimestampPackets.Load(), o.kernelTimestampInvalid.Load()
+	s.LastSocketWaitMS, s.MaxSocketWaitMS = float64(o.lastSocketWait.Load())/1e6, float64(o.maxSocketWait.Load())/1e6
 	if n := o.firstReceived.Load(); n > 0 {
 		s.FirstPacketAt = ringTime(time.Unix(0, n))
 	}
@@ -210,6 +225,7 @@ type sipJitterSnapshot struct {
 	MaxDeliveryAgeMS      float64          `json:"max_relative_delivery_age_ms"`
 	SourceClockConfidence string           `json:"source_clock_confidence"`
 	TargetMS              int              `json:"target_ms"`
+	EffectiveTargetMS     int              `json:"effective_target_ms"`
 	CapacityMS            int              `json:"capacity_ms"`
 	AgeLimitMS            int              `json:"age_limit_ms"`
 	OverflowDroppedMS     float64          `json:"overflow_discarded_ms"`
@@ -221,9 +237,15 @@ type sipJitterSnapshot struct {
 	ClockRejectedFits     int              `json:"clock_rejected_fits"`
 	ClockObservationCount int              `json:"clock_observation_windows"`
 	ClockPhaseAdjustedMS  float64          `json:"clock_phase_adjusted_ms"`
+	ClockPhaseRejected    int              `json:"clock_phase_withheld"`
+	ClockRateRejected     int              `json:"clock_rate_rejected"`
+	ClockRecentRecoveries int              `json:"clock_recent_rate_recoveries"`
+	ClockFits             []sipClockFit    `json:"clock_fits,omitempty"`
+	MaxConsumerIntervalMS float64          `json:"max_consumer_interval_ms"`
 	AdjustedSamples       int64            `json:"reserve_clock_adjusted_samples"`
 	ClockResets           int              `json:"clock_resets"`
 	DTXResumes            int              `json:"dtx_resumes"`
+	FreshDeliveryResumes  int              `json:"fresh_delivery_rebuffers"`
 	Events                []sipJitterEvent `json:"events,omitempty"`
 	Available             bool             `json:"available"`
 	QueueMS               float64          `json:"queue_ms"`
@@ -407,12 +429,18 @@ func (d *sipLiveDiagnostics) snapshot(now time.Time) sipLiveSnapshot {
 		s.Jitter.MaxDeliveryAgeMS = j.maxDeliveryAgeMS
 		s.Jitter.SourceClockConfidence = "relative_rtp_baseline"
 		s.Jitter.TargetMS, s.Jitter.CapacityMS, s.Jitter.AgeLimitMS = j.targetMS, j.policy.CapacityMS, j.policy.MaxAgeMS
+		s.Jitter.EffectiveTargetMS = j.playbackTargetMS()
 		s.Jitter.OverflowDroppedMS, s.Jitter.ExpiredDroppedMS = float64(j.overflowSamples)/8, float64(j.expiredSamples)/8
 		s.Jitter.ConcealedMS, s.Jitter.SilenceFilledMS = float64(j.concealedSamples.Load())/8, float64(j.silenceSamples.Load())/8
 		s.Jitter.ClockDriftPPM, s.Jitter.AdjustedSamples = j.driftPPM, j.driftAdjustedSamples.Load()
 		s.Jitter.ClockEstimatorUpdates, s.Jitter.ClockRejectedFits = j.clock.updates, j.clock.rejected
 		s.Jitter.ClockObservationCount, s.Jitter.ClockPhaseAdjustedMS = j.clock.count, j.clock.phaseAdjustedMS
+		s.Jitter.ClockPhaseRejected, s.Jitter.ClockRateRejected = j.clock.phaseRejected, j.clock.rateRejected
+		s.Jitter.ClockRecentRecoveries = j.clock.recentRecoveries
+		s.Jitter.MaxConsumerIntervalMS = float64(j.maxConsumerIntervalNS.Load()) / 1e6
+		fits, fitHead, fitCount := j.clock.fits, j.clock.fitHead, j.clock.fitCount
 		s.Jitter.ClockResets, s.Jitter.DTXResumes = j.clockResets, j.dtxResumes
+		s.Jitter.FreshDeliveryResumes = j.freshResumes
 		events := j.events
 		eventHead, eventCount := j.eventHead, j.eventCount
 
@@ -421,6 +449,12 @@ func (d *sipLiveDiagnostics) snapshot(now time.Time) sipLiveSnapshot {
 		}
 		j.mu.Unlock()
 		// Allocate/format the diagnostic history only after releasing the reader's lock.
+		if fitCount > 0 {
+			s.Jitter.ClockFits = make([]sipClockFit, fitCount)
+		}
+		for i := 0; i < fitCount; i++ {
+			s.Jitter.ClockFits[i] = fits[(fitHead-fitCount+i+len(fits))%len(fits)]
+		}
 		if eventCount > 0 {
 			s.Jitter.Events = make([]sipJitterEvent, 0, eventCount)
 		}
