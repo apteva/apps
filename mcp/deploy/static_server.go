@@ -24,9 +24,9 @@ package main
 // SIGTERM triggers a graceful Shutdown then process exit. SIGKILL
 // terminates immediately (kernel-enforced; nothing to do here).
 //
-// The 404 / SPA fallback policy is whatever staticHandler does
-// (already exists in runtime.go): 404.html wins if present, else
-// index.html, else real 404. Same as the previous in-process version.
+// The delivery handler negotiates precompressed files, revalidates mutable
+// files, caches hashed assets immutably and searches the optional asset cache.
+// Missing assets return 404; navigation uses 404.html or the SPA index fallback.
 
 import (
 	"context"
@@ -48,6 +48,7 @@ func runStaticServer(args []string) {
 	fs := flag.NewFlagSet("static-server", flag.ExitOnError)
 	port := fs.Int("port", 0, "TCP port to bind (required)")
 	root := fs.String("root", "", "directory to serve (required)")
+	assetCache := fs.String("asset-cache", "", "optional deployment/environment cache of previous hashed assets")
 	logPath := fs.String("log-path", "", "optional log file; otherwise stderr")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "static-server: parse flags: %v\n", err)
@@ -75,7 +76,7 @@ func runStaticServer(args []string) {
 
 	srv := &http.Server{
 		Addr:              fmt.Sprintf("127.0.0.1:%d", *port),
-		Handler:           staticHandler(*root),
+		Handler:           staticHandlerWithCache(*root, *assetCache),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -98,4 +99,3 @@ func runStaticServer(args []string) {
 	}
 	logger.Print("clean exit")
 }
-

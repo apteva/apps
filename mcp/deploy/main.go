@@ -901,15 +901,28 @@ func (a *App) runServiceRelease(d *Deployment, b *Build) (*Release, error) {
 
 	envMap := parseEnvJSON(d.EnvJSON)
 	spec := ReleaseSpec{
-		ReleaseID:    rel.ID,
-		DeploymentID: d.ID,
-		Name:         d.Name,
-		Framework:    b.Framework,
-		ArtifactDir:  b.ArtifactPath,
-		Entrypoint:   entrypoint,
-		StartCmd:     d.StartCmd,
-		Port:         port,
-		Env:          envMap,
+		ReleaseID:     rel.ID,
+		DeploymentID:  d.ID,
+		EnvironmentID: d.EnvironmentID,
+		Name:          d.Name,
+		Framework:     b.Framework,
+		ArtifactDir:   b.ArtifactPath,
+		Entrypoint:    entrypoint,
+		StartCmd:      d.StartCmd,
+		Port:          port,
+		Env:           envMap,
+	}
+	// Seed the currently live release too: it may still be served by an older
+	// Deploy binary that predates the hashed-asset cache.
+	if previousID > 0 {
+		previous, _ := dbGetRelease(globalCtx.AppDB(), previousID)
+		if previous != nil && previous.DeploymentID == d.ID && previous.EnvironmentID == d.EnvironmentID {
+			previousBuild, _ := dbGetBuild(globalCtx.AppDB(), previous.BuildID)
+			if buildArtifactAvailable(previousBuild) {
+				spec.PreviousStaticRoot = staticDeliveryRoot(previousBuild.Framework, previousBuild.ArtifactPath, "")
+				spec.PreviousReleaseID = previous.ID
+			}
+		}
 	}
 
 	activated := make(chan struct{})
