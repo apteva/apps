@@ -106,6 +106,7 @@ jobs:
             -o "$musl_archive"
           printf '%s  %s\n' '${{ matrix.musl_root_sha256 }}' "$musl_archive" | sha256sum -c -
           sudo tar -xzf "$musl_archive" -C "$musl_root"
+          sudo chmod 0755 "$musl_root"
           go test -c -ldflags '-I /lib/ld-musl-${{ matrix.musl_arch }}.so.1' -o /tmp/telephony-opus-musl .
           sudo install -m 0755 /tmp/telephony-opus-musl "$musl_root/test"
           sudo mount -t proc proc "$musl_root/proc"
