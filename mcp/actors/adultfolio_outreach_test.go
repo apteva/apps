@@ -37,6 +37,8 @@ func TestAdultFolioInitialSendAndAmbiguousReconciliation(t *testing.T) {
 					current = stringFromAny(in["url"])
 				case "computer.computer_use":
 					switch in["action"] {
+					case "wait":
+						return map[string]any{"current_url": current}
 					case "wait_for":
 						raw, _ := json.Marshal(in["conditions"])
 						var conditions []map[string]any

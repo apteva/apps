@@ -613,7 +613,7 @@ func (e *actorExecution) runSteps() (map[string]any, error) {
 				e.addTrace(step.Action, "retry", err.Error(), map[string]any{"step": index, "attempt": attempt + 1})
 			}
 		}
-		if errors.Is(err, errActorEffectReserved) || errors.Is(err, errActorRecoveryBinding) {
+		if errors.Is(err, errActorEffectReserved) || errors.Is(err, errActorRecoveryBinding) || errors.Is(err, errActorClickNotDispatched) {
 			// The durable guard proves this run never dispatched this effect.
 			// Earlier effects remain recorded; unknown dispatch failures stay true.
 			e.commitAttempted, e.preparationAttempted = priorCommit, priorPreparation
@@ -672,6 +672,8 @@ func (e *actorExecution) runStep(step actorStep) error {
 		return errors.New("write action rejected in read_only operation")
 	}
 	switch step.Action {
+	case "reveal_control":
+		return e.revealControl(step)
 	case "inspect_views":
 		return e.inspectViews(*step.ReadViews)
 	case "inspect_control":
@@ -1002,7 +1004,13 @@ func (e *actorExecution) gotoURL(target string) error {
 	return nil
 }
 
-func (e *actorExecution) click(step actorStep) error {
+func (e *actorExecution) click(step actorStep) (resultErr error) {
+	dispatched := false
+	defer func() {
+		if resultErr != nil && !dispatched {
+			resultErr = fmt.Errorf("%w: %w", errActorClickNotDispatched, resultErr)
+		}
+	}()
 	if e.session == nil {
 		return errors.New("click requires an open browser")
 	}
@@ -1020,6 +1028,7 @@ func (e *actorExecution) click(step actorStep) error {
 	if selector := strings.TrimSpace(locator.Selector); selector != "" && !locator.SOMOnly {
 		var out map[string]any
 		clickArgs["selector"] = selector
+		dispatched = true
 		if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, clickArgs), &out); err != nil {
 			return err
 		}
@@ -1051,6 +1060,7 @@ func (e *actorExecution) click(step actorStep) error {
 			if shot.SOMRevision != nil {
 				clickArgs["som_revision"] = shot.SOMRevision
 			}
+			dispatched = true
 			if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, clickArgs), &out); err != nil {
 				return err
 			}
@@ -1089,6 +1099,7 @@ func (e *actorExecution) click(step actorStep) error {
 	}
 	coordinate := fmt.Sprintf("%d,%d", int(rect.X+rect.Width/2), int(rect.Y+rect.Height/2))
 	var out map[string]any
+	dispatched = true
 	if err := sdk.CallAppResultContext(e.workerCtx, e.ctx.PlatformAPI(), "computer", "computer_use", withProjectID(e.ctx, map[string]any{"session_id": e.session.SessionID, "action": "click", "coordinate": coordinate}), &out); err != nil {
 		return err
 	}

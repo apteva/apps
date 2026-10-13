@@ -842,6 +842,19 @@
           "newline_mode": "preserve"
         },
         {
+          "action": "reveal_control",
+          "locator": {
+            "text": "Send!",
+            "exact": true,
+            "som_only": true
+          },
+          "reveal": {
+            "scroll_target_name": "Document",
+            "direction": "down",
+            "max_scrolls": 40
+          }
+        },
+        {
           "action": "extract",
           "locator": {},
           "items": "body",
@@ -984,6 +997,19 @@
           },
           "mode": "replace",
           "newline_mode": "preserve"
+        },
+        {
+          "action": "reveal_control",
+          "locator": {
+            "text": "Send!",
+            "exact": true,
+            "som_only": true
+          },
+          "reveal": {
+            "scroll_target_name": "Document",
+            "direction": "down",
+            "max_scrolls": 40
+          }
         },
         {
           "action": "extract",
@@ -2919,6 +2945,19 @@
           "newline_mode": "preserve"
         },
         {
+          "action": "reveal_control",
+          "locator": {
+            "text": "Send!",
+            "exact": true,
+            "som_only": true
+          },
+          "reveal": {
+            "scroll_target_name": "Document",
+            "direction": "down",
+            "max_scrolls": 40
+          }
+        },
+        {
           "action": "extract",
           "locator": {},
           "items": "body",
@@ -3313,6 +3352,19 @@
           "newline_mode": "preserve"
         },
         {
+          "action": "reveal_control",
+          "locator": {
+            "text": "Send!",
+            "exact": true,
+            "som_only": true
+          },
+          "reveal": {
+            "scroll_target_name": "Document",
+            "direction": "down",
+            "max_scrolls": 40
+          }
+        },
+        {
           "action": "extract",
           "locator": {},
           "items": "body",
@@ -3688,6 +3740,292 @@
           }
         }
       ]
+    },
+    "search_unmessaged_models_by_radius_and_age": {
+      "read_only": true,
+      "steps": [
+        {
+          "read_views": {
+            "allow_partial": true,
+            "entry_query": {
+              "acPostcodeAllID": "{{location_id}}",
+              "country": "{{country_code}}",
+              "distance": "{{radius_miles}}",
+              "do_postcode_search": "1",
+              "gender": "{{gender_code}}",
+              "hage": "{{max_age}}",
+              "lage": "{{min_age}}",
+              "location": "",
+              "messages": "exclude",
+              "order": "lastonline",
+              "postcode": "{{location_name}}",
+              "profile": "model",
+              "searchType": "members",
+              "search_form": "new",
+              "town": ""
+            },
+            "entry_url": "https://www.adultfolio.com/search",
+            "identity_url": "{{account_url}}",
+            "identity": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "views": [
+              {
+                "verification": {
+                  "fields": {
+                    "country_code": {
+                      "selector": "#search_members select[name=\"country\"] option[selected]",
+                      "type": "text",
+                      "attribute": "value"
+                    },
+                    "country_label": {
+                      "selector": "#search_members select[name=\"country\"] option[selected]",
+                      "type": "text"
+                    },
+                    "gender_code": {
+                      "selector": "#search_members select[name=\"gender\"] option[selected]",
+                      "type": "text",
+                      "attribute": "value"
+                    },
+                    "gender_label": {
+                      "selector": "#search_members select[name=\"gender\"] option[selected]",
+                      "type": "text"
+                    },
+                    "location_id": {
+                      "selector": "#search_members input[name=\"acPostcodeAllID\"]",
+                      "type": "text",
+                      "attribute": "value",
+                      "required": true
+                    },
+                    "location_mode": {
+                      "selector": "#search_members input[name=\"do_postcode_search\"]",
+                      "type": "text",
+                      "attribute": "value",
+                      "required": true
+                    },
+                    "location_name": {
+                      "selector": "#search_members input[name=\"postcode\"]",
+                      "type": "text",
+                      "attribute": "value",
+                      "required": true
+                    },
+                    "max_age": {
+                      "selector": "#search_members select[name=\"hage\"] option[selected]",
+                      "type": "text",
+                      "attribute": "value"
+                    },
+                    "messages_filter": {
+                      "selector": "#search_members select[name=\"messages\"] option[selected]",
+                      "type": "text",
+                      "attribute": "value"
+                    },
+                    "messages_label": {
+                      "selector": "#search_members select[name=\"messages\"] option[selected]",
+                      "type": "text"
+                    },
+                    "min_age": {
+                      "selector": "#search_members select[name=\"lage\"] option[selected]",
+                      "type": "text",
+                      "attribute": "value"
+                    },
+                    "order": {
+                      "selector": "#search_members select[name=\"order\"] option[selected]",
+                      "type": "text",
+                      "attribute": "value"
+                    },
+                    "profile": {
+                      "selector": "#search_members select[name=\"profile\"] option[selected]",
+                      "type": "text",
+                      "attribute": "value"
+                    },
+                    "radius_label": {
+                      "selector": "#search_members select[name=\"distance\"] option[selected]",
+                      "type": "text"
+                    },
+                    "radius_miles": {
+                      "selector": "#search_members select[name=\"distance\"] option[selected]",
+                      "type": "text",
+                      "attribute": "value"
+                    },
+                    "region": {
+                      "many": true,
+                      "selector": "#search_members select[name=\"location\"] option[selected]:not([value=\"\"])",
+                      "type": "text",
+                      "attribute": "value"
+                    },
+                    "region_label": {
+                      "many": true,
+                      "selector": "#search_members select[name=\"location\"] option[selected]",
+                      "type": "text"
+                    },
+                    "town": {
+                      "many": true,
+                      "selector": "#search_members select[name=\"town\"] option[selected]:not([value=\"\"])",
+                      "type": "text",
+                      "attribute": "value"
+                    },
+                    "town_label": {
+                      "many": true,
+                      "selector": "#search_members select[name=\"town\"] option[selected]",
+                      "type": "text"
+                    }
+                  },
+                  "assertions": {
+                    "country_code": {
+                      "equals_exact": "{{country_code}}",
+                      "matches": "^[A-Z]{2}$"
+                    },
+                    "gender_code": {
+                      "equals_exact": "{{gender_code}}",
+                      "matches": "^(F|M)$"
+                    },
+                    "location_id": {
+                      "equals_exact": "{{location_id}}",
+                      "matches": "^[1-9][0-9]*$"
+                    },
+                    "location_mode": {
+                      "equals_exact": "1"
+                    },
+                    "location_name": {
+                      "equals_exact": "{{location_name}}"
+                    },
+                    "max_age": {
+                      "less_than_or_equal": 98,
+                      "equals": "{{max_age}}"
+                    },
+                    "messages_filter": {
+                      "equals_exact": "exclude"
+                    },
+                    "min_age": {
+                      "greater_than_or_equal": 18,
+                      "less_than_or_equal": "{{max_age}}",
+                      "equals": "{{min_age}}"
+                    },
+                    "order": {
+                      "equals_exact": "lastonline"
+                    },
+                    "profile": {
+                      "equals_exact": "model"
+                    },
+                    "radius_miles": {
+                      "greater_than": 0,
+                      "equals": "{{radius_miles}}",
+                      "matches": "^(?:[1-9][0-9]{0,2}|[1-8][0-9]{3}|9000|9999)$"
+                    },
+                    "region": {
+                      "equals_set": []
+                    },
+                    "town": {
+                      "equals_set": []
+                    }
+                  }
+                },
+                "use_entry_page": true,
+                "name": "unmessaged_models_by_radius_and_age",
+                "covers": [
+                  "unmessaged_models_by_radius_and_age"
+                ],
+                "link_selector": "",
+                "url_pattern": "^https://www\\.adultfolio\\.com/search(?:[?#]|$)",
+                "ready_selector": "#member_search_results:has([id$=\"_member_card\"]),#member_search_results_intro:contains(\"No results\"),#member_search_results_intro:contains(\"No members\")",
+                "empty_text_pattern": "(?i)no (members|results)|0 results",
+                "empty_selector": "#member_search_results_intro",
+                "loading_selector": ".loading-overlay[aria-busy=\"true\"],#messaging_btf[aria-busy=\"true\"],#MessageResult[aria-busy=\"true\"]",
+                "items": "#member_search_results [id$=\"_member_card\"]:has(.text-left.smallSidePadding:contains(\" Model\"))",
+                "fields": {
+                  "location": {
+                    "selector": ".text-left.smallSidePadding",
+                    "type": "text",
+                    "pattern": "Positive References[ \\t]*\\r?\\n[ \\t]*([^\\r\\n]*[^\\s\\x{00A0}])",
+                    "preserve_line_breaks": true
+                  },
+                  "model_id": {
+                    "type": "text",
+                    "attribute": "id",
+                    "required": true,
+                    "pattern": "^([0-9]+)_member_card$"
+                  },
+                  "model_name": {
+                    "selector": "a.a4:not(.periodResponseRate):not([href$=\"/references\"])",
+                    "type": "text",
+                    "required": true
+                  },
+                  "profile_url": {
+                    "selector": "a.thumbnailPic",
+                    "type": "url",
+                    "attribute": "href",
+                    "required": true
+                  },
+                  "references": {
+                    "selector": "a[href$=\"/references\"]",
+                    "type": "number",
+                    "pattern": "([0-9]+)"
+                  },
+                  "response_rate": {
+                    "selector": ".periodResponseRate",
+                    "type": "number",
+                    "pattern": "([0-9]+)%"
+                  },
+                  "role": {
+                    "selector": ".text-left.smallSidePadding",
+                    "type": "text",
+                    "required": true,
+                    "pattern": "\\b((?:Female|Male|Transgender|Non-binary|Non Binary|Other) Model)\\b"
+                  },
+                  "thread_url": {
+                    "selector": "a[href^=\"/message.php?user=\"]",
+                    "type": "url",
+                    "attribute": "href",
+                    "required": true
+                  }
+                },
+                "field_defaults": {
+                  "age_screened": true,
+                  "age_screening_source": "verified_native_filter",
+                  "geographic_mode": "radius",
+                  "location": "unavailable",
+                  "location_status": "reported",
+                  "messages_filter": "exclude",
+                  "radius_applied": true,
+                  "record_type": "model",
+                  "requested_country_code": "{{country_code}}",
+                  "requested_max_age": "{{max_age}}",
+                  "requested_min_age": "{{min_age}}"
+                },
+                "field_rewrites": {
+                  "location_status": {
+                    "from": "location",
+                    "pattern": "^unavailable$",
+                    "replacement": "unverified",
+                    "when_field": "location",
+                    "equals": "unavailable"
+                  }
+                },
+                "key_field": "model_id",
+                "pagination": {
+                  "on_stall": "partial",
+                  "advance_timeout_ms": 20000,
+                  "reveal_from": "end",
+                  "mode": "scroll",
+                  "next": {},
+                  "scroll_target_name": "Document",
+                  "amount": 600,
+                  "max_pages": "{{read_pages}}",
+                  "stable_rounds": 3,
+                  "settle_ms": 1500
+                }
+              }
+            ],
+            "timeout_ms": 10000
+          },
+          "action": "inspect_views",
+          "locator": {}
+        }
+      ],
+      "output_schema": null
     }
   },
   "schema_version": 1,

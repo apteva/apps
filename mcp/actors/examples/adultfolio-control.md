@@ -63,3 +63,8 @@ Live-send acceptance requires a selected test recipient and approved exact copy.
 Empty histories can have zero rendered height. Readiness waits therefore use the visible recipient heading and composer; strict raw-DOM extraction separately requires the correct history container and proves its content is empty. The last preparation observation returns `visible_controls`, including currently visible semantic targets, with the repeated empty-thread evidence. Never use repaired-run recovery for an ambiguous send: it requires proof of no commit. Use the read-only message verifier and reconcile the original logical request without unlocking or replacing its guard.
 
 Native keyword snapshots require Actors 0.2.36+. All operations remain editable examples. Browser/account placeholders must be supplied by the installer.
+# Everywhere and long messages
+
+`search_unmessaged_models_by_radius_and_age` accepts `radius_miles:"9999"` for AdultFolio's Everywhere option, alongside the existing positive radii through 9000. It still asserts the live selected option, location, account, gender, age and exclude-messaged filter and reports bounded coverage.
+
+Both `reply` and `initial_send`, and their preparation operations, reveal the exact **Send!** semantic target with bounded verified scrolling before rechecking the composer and recipient. They work with the 400px viewport and multiline messages without coordinate clicks. Preparation stops before sending. Existing uncertain sends retain their guards; this update never automatically replays an earlier request.

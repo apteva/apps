@@ -73,6 +73,7 @@ type actorLimits struct {
 }
 
 type actorStep struct {
+	Reveal             *actorReveal          `json:"reveal,omitempty"`
 	URLFromField       string                `json:"url_from_field,omitempty"`
 	URLMatchPattern    string                `json:"url_match_pattern,omitempty"`
 	JSONDocument       *actorJSONDocument    `json:"json_document,omitempty"`
@@ -432,6 +433,10 @@ func validateActorDefinition(def actorDefinition) error {
 			}
 		}
 		switch step.Action {
+		case "reveal_control":
+			if err := validateActorReveal(step); err != nil {
+				return fmt.Errorf("steps[%d]: %w", i, err)
+			}
 		case "inspect_control":
 			if !step.Locator.Exact || !step.Locator.SOMOnly || step.Locator.Text == "" || step.Locator.Selector != "" || step.OnceKey != "" || step.ConfirmConsequence != "" || step.ExpectedEffect != "" {
 				return errors.New("inspect_control requires an exact som_only name and no write effect")

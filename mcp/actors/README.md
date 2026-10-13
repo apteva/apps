@@ -348,3 +348,6 @@ media. Old immutable snapshots and failed runs are untouched; deployment never
 replays them. See `examples/patreon-native-image-drafts.md` and its editable
 example for the site-specific contract. Preserve upstream approved-file lineage
 and actual-live predecessor checks.
+# Revealing semantic controls
+
+`reveal_control` scrolls a named region and observes a fresh SOM until one exact enabled control is visible. It never clicks or uses coordinates. Set `locator: {text: "Send!", exact: true, som_only: true}` and `reveal: {scroll_target_name: "Document", direction: "down", max_scrolls: 40}`. Scrolls overlap the viewport and verify the region ID/revision; missing, loading, ambiguous or changed-page results fail explicitly. After revealing, re-extract and assert the intended content/recipient, then use the existing guarded semantic click. A click resolution failure before dispatch records `commit_attempted:false` and effect state `not_dispatched`; its once reservation remains in place. Transport failures after dispatch remain uncertain.

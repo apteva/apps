@@ -7,6 +7,7 @@ import (
 )
 
 var errActorEffectReserved = errors.New("once_key already reserved")
+var errActorClickNotDispatched = errors.New("click was not dispatched")
 
 // Reserve before attempting a consequential click. An uncertain result remains
 // reserved across retries, restarts and revisions; inspect the original run
@@ -63,6 +64,11 @@ func (e *actorExecution) clickOnce(step actorStep) error {
 	state := "completed"
 	if err != nil {
 		state = "uncertain"
+		if errors.Is(err, errActorClickNotDispatched) {
+			// Keep the reservation. Resolution failures prove no click was sent,
+			// but do not authorize an automatic retry with a new identity.
+			state = "not_dispatched"
+		}
 	}
 	effect["state"] = state
 	_, persistErr := e.ctx.AppDB().Exec(`UPDATE actors_effect_guards SET state=? WHERE project_id=? AND actor_id=? AND operation=? AND once_key=?`, state, projectID(e.ctx), e.run.ActorID, input.Operation, step.OnceKey)

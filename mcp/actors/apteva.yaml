@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.2.37
+version: 0.2.38
 description: |
   v0.2.36 adds verified current-page snapshots, correct blocked-replay metadata
   and terminal context-lock cleanup after restart.
@@ -106,7 +106,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.2.37
+    ref: actors/v0.2.38
     entry: mcp/actors
   port: 8080
   health_check: /health
