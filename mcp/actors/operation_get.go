@@ -109,7 +109,7 @@ func (a *App) getActorOperation(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err = json.Unmarshal(storedOp["steps"], &steps); err != nil && len(storedOp["steps"]) > 0 {
 		return nil, err
 	}
-	config := map[string]any{"read_only": selected.ReadOnly, "limits": selected.Limits}
+	config := map[string]any{"read_only": selected.ReadOnly, "recovery_only": selected.RecoveryOnly, "limits": selected.Limits}
 	for _, key := range []string{"schema_version", "defaults", "presets", "browser", "allowed_hosts"} {
 		if value, exists := root[key]; exists {
 			config[key] = value

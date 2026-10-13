@@ -298,3 +298,53 @@ as complete duplicate-inspection evidence. A rejected durable once guard reports
 no new commit attempt, while unknown dispatch failures retain conservative
 commit-attempt metadata. Restart recovery releases terminal context locks without
 replaying version-1 writes.
+
+## Saved structured media and same-resource recovery (0.2.37)
+
+`observe_json` reads exactly one raw rendered DOM node containing a complete JSON
+value. `json_document: {selector, fields}` uses RFC 6901 pointers. A field has
+`path`, `required`, optional `select` (ordered array projection), `unique`
+(identity cardinality), or `is_null`. `resolve: {pool, keys, through?, drop_null?}`
+joins typed references from the same document; duplicate/missing references fail.
+`through` follows at most five additional typed references, and `drop_null` skips
+only an explicit null reference. The engine preserves order, gathers partial
+field evidence, and rejects truncated/invalid/ambiguous documents. Array
+`equals_exact` and `equals_field` comparisons preserve identity and order.
+
+A read-only `goto` may use `url_from_field` from prior verified extraction. An
+optional `url_match_pattern` must match the entire extracted URL before replacing
+it with the declared `url` using Go regexp capture expansion. The resulting URL
+still passes normal host and browser-target checks. This permits reading a saved
+resource through the authenticated browser without exposing cookies or arbitrary
+JavaScript. `document_evidence` records the source page, document URL, observed
+fields and array counts; failures include `failed_condition` and commit metadata.
+
+`inspect_control` can open an exact semantic menu/dialog button only when a fresh
+SOM observation verifies `open_configuration`, an enabled button role and no
+danger/loading flag. It rejects selection controls and unknown/write effects.
+`dismiss_inspection` sends only fixed Escape. These read-only actions permit exact
+selected-label inspection without changing selection or inferring legacy prices.
+
+A creation operation can declare `recovery.existing` with `resume_operation`,
+`inspection_operation`, `url_pattern` (one resource-ID capture), exact
+`preparation_locators` for reviewed historical missing annotations, and exact
+`inspection_locators` allowed in the resume path. Explicit `bindings` map resource
+ID/URL inputs, duplicate ID/URL/status fields, ordered upload evidence, readiness
+and media-type values, expected-media input names and literal uncommitted-state
+assertions. All original variables must match the inspection. These field names
+and status values are user configuration, not provider rules in the engine. `actors_run_recover` then
+requires a fresh `resource_check_run_id` as well as complete duplicate evidence.
+The draft inspection must use the reviewed immutable definition, original
+context/request/copy/access inputs and saved resource. Ordered saved media IDs,
+filenames, sizes and readiness must match the original completed upload evidence.
+The only permitted duplicate is that exact original unscheduled draft; all other
+matches block. Recovery supplies protected resource inputs itself, retains the
+original operation/input/effect scope, and repeats full duplicate coverage.
+
+The resume definition has no uploads, text/access edits, new-composer navigation
+or unapproved controls. `recovery_only:true` blocks ordinary queue/retry/schedule
+entry, and the guarded commit must remain bound to the saved resource and ordered
+media. Old immutable snapshots and failed runs are untouched; deployment never
+replays them. See `examples/patreon-native-image-drafts.md` and its editable
+example for the site-specific contract. Preserve upstream approved-file lineage
+and actual-live predecessor checks.

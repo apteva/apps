@@ -9,10 +9,10 @@ import (
 	"testing"
 )
 
-// Replay the saved-draft verification steps of the shipped definition against
+// Preserve verification semantics of historical immutable publishing definitions against
 // realistic DOM evidence. No fill/upload step can hide incorrect saved data.
-func TestPatreonSavedDraftGuards(t *testing.T) {
-	raw, err := os.ReadFile("examples/patreon-publishing.json")
+func TestPatreonHistoricalSavedDraftGuards(t *testing.T) {
+	raw, err := os.ReadFile("testdata/patreon-publishing-legacy.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestPatreonSavedDraftGuards(t *testing.T) {
 }
 
 func TestPatreonPreflightsStopBeforePublish(t *testing.T) {
-	raw, err := os.ReadFile("examples/patreon-publishing.json")
+	raw, err := os.ReadFile("testdata/patreon-publishing-legacy.json")
 	if err != nil {
 		t.Fatal(err)
 	}

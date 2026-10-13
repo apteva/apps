@@ -80,3 +80,18 @@ changed or unavailable cursor is an error; do not silently start again. Close
 unused refs with `actors_read_close`. Inspect `coverage.views[].pagination`
 for target identity, before/after IDs, loading, errors and stop_reason.
 `no_change_control_present` means incomplete history, never end-of-history.
+
+For native-image verification (0.2.37+), use `observe_json` to read saved typed
+attachment references and ordered IDs in the authenticated browser. Do not infer
+attachment count/order from generated classes, thumbnails or CDN paths. Verify
+exact count, distinct IDs, filenames/readiness and unchanged IDs after reload.
+`document_evidence` and `failed_condition` retain useful native-media diagnostics.
+
+Existing-draft recovery requires the creation operation's `recovery.existing`
+contract, a fresh complete `duplicate_check_run_id`, and a fresh read-only
+`resource_check_run_id`. `actors_run_recover` binds the same draft to the failed
+run's original uploads, copy/access inputs and durable effect scope. Use named
+`inspect_image_draft`/`inspect_gallery_draft` and the corresponding saved-draft
+preflight. Dedicated `publish_*_draft` operations are `recovery_only`; never call
+ordinary retry/new creation to recover media. Keep Catalog originals and process
+actual-live predecessor requirements. See `examples/patreon-native-image-drafts.md`.

@@ -38,6 +38,7 @@ const (
 )
 
 type actorDefinition struct {
+	RecoveryOnly  bool                      `json:"recovery_only,omitempty"`
 	ReadOnly      bool                      `json:"read_only,omitempty"`
 	Recovery      *actorRecoveryPolicy      `json:"recovery,omitempty"`
 	Operations    map[string]actorOperation `json:"operations,omitempty"`
@@ -72,6 +73,9 @@ type actorLimits struct {
 }
 
 type actorStep struct {
+	URLFromField       string                `json:"url_from_field,omitempty"`
+	URLMatchPattern    string                `json:"url_match_pattern,omitempty"`
+	JSONDocument       *actorJSONDocument    `json:"json_document,omitempty"`
 	ReadOnly           bool                  `json:"read_only,omitempty"`
 	ReadViews          *actorReadViews       `json:"read_views,omitempty"`
 	Text               string                `json:"text,omitempty"`
@@ -244,7 +248,7 @@ func (a *App) actorTools() []sdk.Tool {
 		},
 		{
 			Name: "actors_run_recover", Description: "Recover a provably uncommitted failed run with an explicitly reviewed replacement revision. Preserves original inputs and once keys; requires fresh complete read-only duplicate inspection and repeats it before execution. Unknown/successful outcomes block.",
-			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "revision": map[string]any{"type": "integer", "minimum": 1}, "reviewed": map[string]any{"type": "boolean"}, "duplicate_check_run_id": map[string]any{"type": "integer"}}, []string{"id", "revision", "reviewed", "duplicate_check_run_id"}), Handler: a.toolActorRunRecover,
+			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "revision": map[string]any{"type": "integer", "minimum": 1}, "reviewed": map[string]any{"type": "boolean"}, "duplicate_check_run_id": map[string]any{"type": "integer"}, "resource_check_run_id": map[string]any{"type": "integer", "description": "Required for same-draft recovery: reviewed read-only draft inspection run."}}, []string{"id", "revision", "reviewed", "duplicate_check_run_id"}), Handler: a.toolActorRunRecover,
 		},
 		{
 			Name: "actors_schedule", Description: "Create a Jobs-owned schedule that queues this actor. Supports once, every, cron, deterministic random daily schedules, and deterministic rotation across a preset_pool.",
@@ -330,6 +334,7 @@ func validateActorDefinition(def actorDefinition) error {
 			selected := def
 			selected.Operations = nil
 			selected.ReadOnly = selected.ReadOnly || operation.ReadOnly
+			selected.RecoveryOnly = operation.RecoveryOnly
 			if operation.Limits != nil {
 				selected.Limits = *operation.Limits
 			}
@@ -427,6 +432,18 @@ func validateActorDefinition(def actorDefinition) error {
 			}
 		}
 		switch step.Action {
+		case "inspect_control":
+			if !step.Locator.Exact || !step.Locator.SOMOnly || step.Locator.Text == "" || step.Locator.Selector != "" || step.OnceKey != "" || step.ConfirmConsequence != "" || step.ExpectedEffect != "" {
+				return errors.New("inspect_control requires an exact som_only name and no write effect")
+			}
+		case "dismiss_inspection":
+			if step.Key != "" || step.OnceKey != "" || step.ConfirmConsequence != "" || step.ExpectedEffect != "" {
+				return errors.New("dismiss_inspection sends only fixed Escape")
+			}
+		case "observe_json":
+			if err := validateJSONDocument(step.JSONDocument); err != nil {
+				return fmt.Errorf("steps[%d]: %w", i, err)
+			}
 		case "inspect_views":
 			if step.ReadViews != nil && step.ReadViews.ContinuationEnabled && (!def.ReadOnly || len(def.Steps) != 1) {
 				return errors.New("continuation reads require an entirely read-only operation with one inspect_views step")
@@ -515,8 +532,16 @@ func validateActorDefinition(def actorDefinition) error {
 				return fmt.Errorf("steps[%d].locator.selector is required", i)
 			}
 		case "goto":
-			if strings.TrimSpace(step.URL) == "" {
+			if strings.TrimSpace(step.URL) == "" && step.URLFromField == "" {
 				return fmt.Errorf("steps[%d].url is required", i)
+			}
+			if step.URLMatchPattern != "" {
+				if step.URLFromField == "" {
+					return errors.New("url_match_pattern requires url_from_field")
+				}
+				if _, err := regexp.Compile(step.URLMatchPattern); err != nil {
+					return err
+				}
 			}
 		case "click", "paginate":
 			if step.Locator.Text == "" && step.Locator.Role == "" && step.Locator.Selector == "" {

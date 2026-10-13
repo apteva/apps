@@ -12,6 +12,16 @@ var errActorEffectReserved = errors.New("once_key already reserved")
 // reserved across retries, restarts and revisions; inspect the original run
 // before deliberately issuing another request with a different once_key.
 func (e *actorExecution) clickOnce(step actorStep) error {
+	if err := e.guardExistingRecovery(step); err != nil {
+		return err
+	}
+	if e.definition.RecoveryOnly {
+		var trigger map[string]any
+		json.Unmarshal([]byte(e.run.TriggerJSON), &trigger)
+		if trigger["kind"] != "recovery" || len(mapFromAny(trigger["existing_resource"])) == 0 {
+			return errors.New("operation requires verified existing-resource recovery")
+		}
+	}
 	if step.OnceKey == "" {
 		return e.click(step)
 	}

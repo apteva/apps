@@ -13,14 +13,20 @@ import (
 )
 
 type actorRecoveryPolicy struct {
-	InspectionOperation string            `json:"inspection_operation"`
-	RequiredViews       []string          `json:"required_views"`
-	MatchFields         map[string]string `json:"match_fields"`
+	InspectionOperation string                 `json:"inspection_operation"`
+	RequiredViews       []string               `json:"required_views"`
+	MatchFields         map[string]string      `json:"match_fields"`
+	Existing            *actorExistingRecovery `json:"existing,omitempty"`
 }
 
 func recoveryPolicyValid(p *actorRecoveryPolicy) error {
 	if p == nil || !operationNamePattern.MatchString(p.InspectionOperation) || len(p.RequiredViews) == 0 || len(p.MatchFields) == 0 {
 		return errors.New("recovery requires an inspection operation, required views and duplicate match fields")
+	}
+	if p.Existing != nil {
+		if err := validateExistingRecovery(p.Existing); err != nil {
+			return err
+		}
 	}
 	if len(p.RequiredViews) > 20 || len(p.MatchFields) > 20 {
 		return errors.New("recovery policy too large")
@@ -126,6 +132,11 @@ func checkRecoveryCoverage(output map[string]any, policy *actorRecoveryPolicy, c
 	for _, v := range cov.CheckedViews {
 		seen[v] = true
 	}
+	for _, v := range cov.Views {
+		if v.Checked && v.Complete && !v.MoreRemaining && v.Error == "" && v.EndEvidence != "" {
+			seen[v.Name] = true
+		}
+	}
 	for _, v := range policy.RequiredViews {
 		if !seen[v] {
 			return fmt.Errorf("duplicate inspection did not cover %s", v)
@@ -145,7 +156,15 @@ func checkRecoveryDuplicates(items []map[string]any, policy *actorRecoveryPolicy
 			return fmt.Errorf("logical duplicate identity %s is missing", inputField)
 		}
 	}
+	existingMatches := 0
 	for _, item := range items {
+		if policy.Existing != nil && stringFromAny(item[policy.Existing.Bindings.DuplicateIDField]) == stringFromAny(vars["recovery_resource_id"]) {
+			if item[policy.Existing.Bindings.DuplicateStatusField] != policy.Existing.Bindings.DraftStatus || !sameRecoveryResourceURL(policy.Existing, stringFromAny(item[policy.Existing.Bindings.DuplicateURLField]), stringFromAny(vars["recovery_resource_url"])) {
+				return errors.New("saved recovery resource is not the same draft")
+			}
+			existingMatches++
+			continue
+		}
 		matches := true
 		for field, inputField := range policy.MatchFields {
 			actual, ok := item[field]
@@ -159,6 +178,9 @@ func checkRecoveryDuplicates(items []map[string]any, policy *actorRecoveryPolicy
 		if matches {
 			return errors.New("matching existing record found; reconcile it instead of creating another")
 		}
+	}
+	if policy.Existing != nil && existingMatches != 1 {
+		return errors.New("complete inspection must contain exactly one original draft")
 	}
 	return nil
 }
@@ -190,17 +212,29 @@ func (a *App) toolActorRunRecover(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err := recoveryPolicyValid(selected.Recovery); err != nil {
 		return nil, err
 	}
-	rawNew, _ := json.Marshal(selected)
 	oldRaw, _ := json.Marshal(original["definition_snapshot"])
+	// Recovery policy is supplied by the reviewed revision. Historical step,
+	// browser, default and input semantics remain unchanged.
+	var oldSnapshot actorDefinition
+	json.Unmarshal(oldRaw, &oldSnapshot)
+	oldSnapshot.Recovery = nil
+	oldRaw, _ = json.Marshal(oldSnapshot)
 	oldExec, err := newActorExecution(context.Background(), a, ctx, &actorQueuedRun{InputJSON: string(rawInput), DefinitionSnapshot: string(oldRaw)})
 	if err != nil {
 		return nil, err
 	}
-	newExec, err := newActorExecution(context.Background(), a, ctx, &actorQueuedRun{InputJSON: string(rawInput), DefinitionSnapshot: string(rawNew)})
-	if err != nil {
+	var existingBinding map[string]any
+	if selected.Recovery.Existing != nil {
+		rawInput, selected, existingBinding, err = a.prepareExistingRecovery(ctx, args, rec, original, oldExec, selected, rawInput)
+		if err != nil {
+			return nil, err
+		}
+	} else if err := proveUncommitted(original, oldExec.definition); err != nil {
 		return nil, err
 	}
-	if err := proveUncommitted(original, oldExec.definition); err != nil {
+	rawNew, _ := json.Marshal(selected)
+	newExec, err := newActorExecution(context.Background(), a, ctx, &actorQueuedRun{InputJSON: string(rawInput), DefinitionSnapshot: string(rawNew)})
+	if err != nil {
 		return nil, err
 	}
 	if oldExec.definition.Browser.ContextID != newExec.definition.Browser.ContextID {
@@ -212,12 +246,18 @@ func (a *App) toolActorRunRecover(ctx *sdk.AppCtx, args map[string]any) (any, er
 		}
 	}
 	keys := guardedKeys(oldExec.definition)
-	if len(keys) == 0 || !reflect.DeepEqual(keys, guardedKeys(newExec.definition)) {
+	if len(keys) == 0 || !reflect.DeepEqual(keys, guardedKeys(newExec.definition)) || !reflect.DeepEqual(guardedScopes(oldExec.definition), guardedScopes(newExec.definition)) {
 		return nil, errors.New("recovery must preserve the original publish-once keys and effects")
 	}
 	for key := range keys {
+		scope := operation
+		for _, step := range oldExec.definition.Steps {
+			if step.OnceKey == key && step.OnceScope != "" {
+				scope = step.OnceScope
+			}
+		}
 		var count int
-		if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM actors_effect_guards WHERE project_id=? AND actor_id=? AND operation=? AND once_key=?`, projectID(ctx), actorID, operation, key).Scan(&count); err != nil {
+		if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM actors_effect_guards WHERE project_id=? AND actor_id=? AND operation=? AND once_key=?`, projectID(ctx), actorID, scope, key).Scan(&count); err != nil {
 			return nil, err
 		}
 		if count > 0 {
@@ -318,6 +358,9 @@ func (a *App) toolActorRunRecover(ctx *sdk.AppCtx, args map[string]any) (any, er
 		root = id
 	}
 	recovery := map[string]any{"kind": "recovery", "recovery_of": id, "recovery_root": root, "reviewed_revision": revision, "duplicate_check_run_id": checkID, "original_trigger_key": trigger["trigger_key"], "inspection_definition": json.RawMessage(checkRaw), "trigger_key": fmt.Sprintf("recovery:%d", id), "queued_at": time.Now().UTC().Format(time.RFC3339)}
+	if existingBinding != nil {
+		recovery["existing_resource"] = existingBinding
+	}
 	newID, status, duplicate, err := enqueueActorSnapshot(ctx, actorID, revision, string(rawInput), string(rawNew), recovery)
 	if err != nil {
 		return nil, err
@@ -413,4 +456,14 @@ func (e *actorExecution) recoveryPrecheck() error {
 	}
 	e.addTrace("recovery.duplicate_check", "completed", "fresh complete duplicate inspection found no matching record", map[string]any{"inspection_run_id": id})
 	return nil
+}
+
+func guardedScopes(def actorDefinition) map[string]string {
+	out := map[string]string{}
+	for _, s := range def.Steps {
+		if s.OnceKey != "" {
+			out[s.OnceKey] = s.OnceScope
+		}
+	}
+	return out
 }

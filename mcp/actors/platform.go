@@ -28,6 +28,7 @@ func (e *actorExecution) lockContext() error {
 }
 
 type actorOperation struct {
+	RecoveryOnly bool                 `json:"recovery_only,omitempty"`
 	Recovery     *actorRecoveryPolicy `json:"recovery,omitempty"`
 	Limits       *actorLimits         `json:"limits,omitempty"`
 	ReadOnly     bool                 `json:"read_only,omitempty"`
@@ -48,6 +49,7 @@ func selectOperation(def actorDefinition, name string) (actorDefinition, error) 
 	}
 	def.Operations = nil
 	def.ReadOnly = def.ReadOnly || op.ReadOnly
+	def.RecoveryOnly = op.RecoveryOnly
 	if op.Limits != nil {
 		def.Limits = *op.Limits
 	}

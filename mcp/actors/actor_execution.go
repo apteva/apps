@@ -28,6 +28,7 @@ import (
 var actorNumberPattern = regexp.MustCompile(`[-+]?\d[\d\s.,]*`)
 
 type actorExecution struct {
+	jsonEvidence         map[string]any
 	claimedReadRef       string
 	activeReadDiagnostic *actorReadDiagnostic
 	readConfig           *actorReadViews
@@ -176,6 +177,13 @@ func actorTrigger(args map[string]any) map[string]any {
 }
 
 func enqueueActorSnapshot(ctx *sdk.AppCtx, actorID int64, revision int, inputJSON, definitionJSON string, trigger map[string]any) (int64, string, bool, error) {
+	var snapshot actorDefinition
+	if err := json.Unmarshal([]byte(definitionJSON), &snapshot); err != nil {
+		return 0, "", false, err
+	}
+	if snapshot.RecoveryOnly && (trigger["kind"] != "recovery" || len(mapFromAny(trigger["existing_resource"])) == 0) {
+		return 0, "", false, errors.New("operation requires actors_run_recover with original saved-resource evidence")
+	}
 	triggerJSON, _ := json.Marshal(trigger)
 	triggerKey := stringFromAny(trigger["trigger_key"])
 	tx, err := ctx.AppDB().Begin()
@@ -431,6 +439,12 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 	out["page_count"] = exec.pageCount
 	out["items"] = previewActorItems(exec.items)
 	out["trace_preview"] = previewActorTrace(exec.trace)
+	if exec.jsonEvidence != nil {
+		out["document_evidence"] = exec.jsonEvidence
+	}
+	if runErr != nil {
+		out["failed_condition"] = runErr.Error()
+	}
 	out["execution_progress"] = map[string]any{"last_started_step": exec.lastStartedStep, "completed_steps": exec.completedSteps, "commit_attempted": exec.commitAttempted, "preparation_attempted": exec.preparationAttempted}
 	if exec.recoveryCheck != nil {
 		out["recovery_precheck"] = exec.recoveryCheck
@@ -599,7 +613,7 @@ func (e *actorExecution) runSteps() (map[string]any, error) {
 				e.addTrace(step.Action, "retry", err.Error(), map[string]any{"step": index, "attempt": attempt + 1})
 			}
 		}
-		if errors.Is(err, errActorEffectReserved) {
+		if errors.Is(err, errActorEffectReserved) || errors.Is(err, errActorRecoveryBinding) {
 			// The durable guard proves this run never dispatched this effect.
 			// Earlier effects remain recorded; unknown dispatch failures stay true.
 			e.commitAttempted, e.preparationAttempted = priorCommit, priorPreparation
@@ -660,10 +674,31 @@ func (e *actorExecution) runStep(step actorStep) error {
 	switch step.Action {
 	case "inspect_views":
 		return e.inspectViews(*step.ReadViews)
+	case "inspect_control":
+		return e.inspectControl(step)
+	case "dismiss_inspection":
+		return e.interact(actorStep{Action: "key", Key: "ESC"})
+	case "observe_json":
+		return e.observeJSON(step)
 	case "observe_page":
 		return e.observePage(step)
 	case "goto":
 		target := step.URL
+		if step.URLFromField != "" {
+			value, ok := e.lastValues[step.URLFromField].(string)
+			if !ok || value == "" {
+				return errors.New("verified URL field is missing")
+			}
+			target = value
+			if step.URLMatchPattern != "" {
+				r := regexp.MustCompile(step.URLMatchPattern)
+				m := r.FindString(value)
+				if m != value {
+					return errors.New("verified URL field does not match the complete approved pattern")
+				}
+				target = r.ReplaceAllString(value, step.URL)
+			}
+		}
 		if len(step.URLQuery) > 0 {
 			u, err := url.Parse(target)
 			if err != nil {
@@ -883,6 +918,10 @@ func actorNumber(value any) (float64, bool) {
 }
 
 func actorValuesEqual(left, right any, tolerance float64) bool {
+	switch left.(type) {
+	case []any, map[string]any:
+		return reflect.DeepEqual(left, right)
+	}
 	if a, ok := actorNumber(left); ok {
 		if b, ok := actorNumber(right); ok {
 			if tolerance <= 0 {
@@ -999,6 +1038,10 @@ func (e *actorExecution) click(step actorStep) error {
 			return fmt.Errorf("ambiguous SOM locator: %d targets match text=%q role=%q", len(matches), locator.Text, locator.Role)
 		}
 		for _, target := range matches {
+			e.currentURL = firstNonEmpty(shot.CurrentURL, e.currentURL)
+			if err := e.guardExistingRecovery(step); err != nil {
+				return err
+			}
 			var out map[string]any
 			if target.ID != "" {
 				clickArgs["target_id"] = target.ID

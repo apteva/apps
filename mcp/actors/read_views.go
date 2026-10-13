@@ -106,7 +106,7 @@ type actorViewCoverage struct {
 
 func readOnlyActorAction(action string) bool {
 	switch action {
-	case "goto", "wait", "wait_for", "extract", "assert_element", "assert_url", "assert_values", "screenshot", "inspect_views", "observe_page", "select_record":
+	case "goto", "wait", "wait_for", "extract", "assert_element", "assert_url", "assert_values", "screenshot", "inspect_views", "observe_page", "observe_json", "inspect_control", "dismiss_inspection", "select_record":
 		return true
 	}
 	return false
