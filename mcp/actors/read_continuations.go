@@ -81,6 +81,7 @@ func (e *actorExecution) resumeReadContinuation(c actorReadViews) error {
 	if n != 1 {
 		return errors.New("continuation already claimed; concurrent/repeated reuse refused")
 	}
+	e.claimedReadRef = c.ContinuationRef
 	e.session = &checkpoint.Session
 	e.currentURL = checkpoint.URL
 	e.readResume = &checkpoint
@@ -89,7 +90,10 @@ func (e *actorExecution) resumeReadContinuation(c actorReadViews) error {
 	if err != nil {
 		return fmt.Errorf("continuation browser unavailable; restart explicitly: %w", err)
 	}
-	if stringFromAny(status["session_id"]) != e.session.SessionID || stringFromAny(status["backend"]) != e.session.Backend || (e.definition.Browser.ContextID != "" && stringFromAny(status["context_id"]) != e.definition.Browser.ContextID) {
+	if status["closed"] == true || stringFromAny(status["status"]) != "active" {
+		return errors.New("continuation browser is closed; restart explicitly")
+	}
+	if stringFromAny(status["session_id"]) != e.session.SessionID || stringFromAny(status["backend"]) != e.session.Backend || (e.definition.Browser.ContextID != "" && stringFromAny(status["app_context_id"]) != e.definition.Browser.ContextID) {
 		return errors.New("continuation live browser identity mismatch; restart explicitly")
 	}
 	return nil
@@ -107,6 +111,12 @@ func (e *actorExecution) saveReadContinuation() (map[string]any, error) {
 	}
 	ref := "read_" + hex.EncodeToString(refBytes)
 	expiry := time.Now().Add(time.Duration(boundedInt(e.readConfig.ContinuationTTLSeconds, 600, 60, 1800)) * time.Second)
+	if providerExpiry, err := time.Parse(time.RFC3339, e.session.ProviderExpiresAt); err == nil && providerExpiry.Before(expiry) {
+		expiry = providerExpiry
+	}
+	if !expiry.After(time.Now()) {
+		return nil, errors.New("provider session expired; restart explicitly")
+	}
 	payload, _ := json.Marshal(e.readCheckpoint)
 	_, err := e.ctx.AppDB().Exec(`INSERT INTO actors_read_continuations(ref,project_id,actor_id,actor_revision,operation,config_hash,payload_json,expires_at,source_run_id) VALUES(?,?,?,?,?,?,?,?,?)`, ref, projectID(e.ctx), e.run.ActorID, e.run.ActorRevision, e.readOperation(), e.readConfigHash(*e.readConfig), string(payload), expiry.Unix(), e.run.ID)
 	if err != nil {
@@ -128,10 +138,13 @@ func (a *App) toolReadContinuationClose(ctx *sdk.AppCtx, args map[string]any) (a
 	if err != nil {
 		return nil, err
 	}
+	if state == "consumed" {
+		return nil, errors.New("continuation was consumed; close its successor reference instead")
+	}
 	if state == "claimed" {
 		return nil, errors.New("continuation is being resumed; cancel that run instead")
 	}
-	r, err := ctx.AppDB().Exec(`UPDATE actors_read_continuations SET state='closed' WHERE ref=? AND project_id=? AND state='available'`, ref, projectID(ctx))
+	r, err := ctx.AppDB().Exec(`UPDATE actors_read_continuations SET state='closed' WHERE ref=? AND project_id=? AND state IN ('available','close_pending')`, ref, projectID(ctx))
 	if err != nil {
 		return nil, err
 	}

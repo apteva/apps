@@ -198,6 +198,7 @@ type actorQueuedRun struct {
 func (a *App) actorTools() []sdk.Tool {
 	definitionSchema := map[string]any{"type": "object", "description": "Version 1 actor definition uses browser steps. Version 2 uses crawl.seeds, crawl.routes, crawl.datasets, and a durable frontier. Both use browser, allowed_hosts, and limits."}
 	return append([]sdk.Tool{
+		{Name: "actors_read_close", Description: "Close an unused read-only continuation and release its browser session. A consumed reference must be replaced by its successor.", InputSchema: schemaObject(map[string]any{"ref": map[string]any{"type": "string"}}, []string{"ref"}), Handler: a.toolReadContinuationClose},
 		{
 			Name: "actors_save", Description: "Create or update a reusable browser actor. Updating increments its revision; expected_revision prevents lost updates.",
 			InputSchema: schemaObject(map[string]any{

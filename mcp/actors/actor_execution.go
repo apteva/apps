@@ -28,6 +28,7 @@ import (
 var actorNumberPattern = regexp.MustCompile(`[-+]?\d[\d\s.,]*`)
 
 type actorExecution struct {
+	claimedReadRef       string
 	activeReadDiagnostic *actorReadDiagnostic
 	readConfig           *actorReadViews
 	readCheckpoint       *actorReadCheckpoint
@@ -377,6 +378,9 @@ func (a *App) executeActorRun(workerCtx context.Context, ctx *sdk.AppCtx, queued
 		}
 	}()
 	defer func() {
+		if exec.claimedReadRef != "" {
+			_, _ = ctx.AppDB().Exec(`UPDATE actors_read_continuations SET state='consumed' WHERE ref=? AND project_id=? AND state='claimed' AND claimed_by=?`, exec.claimedReadRef, projectID(ctx), queued.ID)
+		}
 		if exec.pendingReadRef != "" && !exec.retainedReadSession {
 			_, _ = ctx.AppDB().Exec(`DELETE FROM actors_read_continuations WHERE ref=? AND project_id=?`, exec.pendingReadRef, projectID(ctx))
 		}

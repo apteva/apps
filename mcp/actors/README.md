@@ -267,3 +267,20 @@ IDs, new IDs, loading observations, errors and stopping reasons. A native
 exact label, then Computer atomically checks the native target and navigation
 effect. SOM remains the default. No coordinates or scripted click bypasses are
 used. An unchanged page with a present control remains incomplete.
+
+Each read view may declare `verification:{fields,assertions}` using the same
+field extraction and `assert_values` rules as ordinary steps. Verification runs
+against untruncated, complete rendered HTML with readability disabled before
+records are emitted, and after each page advance. Scalar fields must resolve to
+at most one element; duplicate selected options fail explicitly. Computer
+0.7.96+ materializes live form values and selections in this snapshot, including
+controls outside the viewport. This allows site definitions to verify actual
+country, location and radius state without scrolling every control into view.
+`coverage.views[].verification` returns `verified`, `applied_values`,
+`result_url`, `source`, `requires_visible_controls:false` and `checked_at`.
+Configure `inactive_fields:["radius", "location"]` to move those observed
+values into `inactive_values`; inactive fields cannot assert applied state.
+A mismatch leaves coverage incomplete and returns an error; requested input or
+URL parameters alone never count as proof of applied filters. If the site uses
+inactive controls, the site definition must distinguish their reported values
+from filters actually applied to the search.

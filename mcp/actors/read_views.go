@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -33,6 +32,7 @@ type actorReadViews struct {
 	TimeoutMS              int               `json:"timeout_ms,omitempty"`
 }
 type actorReadView struct {
+	Verification     *actorReadVerification      `json:"verification,omitempty"`
 	UseEntryPage     bool                        `json:"use_entry_page,omitempty"`
 	Total            *actorField                 `json:"total,omitempty"`
 	Name             string                      `json:"name"`
@@ -87,19 +87,20 @@ type actorReadCoverage struct {
 	ContextID     string               `json:"context_id,omitempty"`
 }
 type actorViewCoverage struct {
-	StopReason    string                 `json:"stop_reason,omitempty"`
-	Pagination    []*actorReadDiagnostic `json:"pagination,omitempty"`
-	ExpectedTotal *int                   `json:"expected_total,omitempty"`
-	Name          string                 `json:"name"`
-	Covers        []string               `json:"covers"`
-	URL           string                 `json:"url,omitempty"`
-	Checked       bool                   `json:"checked"`
-	Complete      bool                   `json:"inspection_complete"`
-	MoreRemaining bool                   `json:"more_results_remaining"`
-	Pages         int                    `json:"pages_checked"`
-	Items         int                    `json:"unique_items"`
-	EndEvidence   string                 `json:"end_evidence,omitempty"`
-	Error         string                 `json:"error,omitempty"`
+	Verification  *actorReadVerificationEvidence `json:"verification,omitempty"`
+	StopReason    string                         `json:"stop_reason,omitempty"`
+	Pagination    []*actorReadDiagnostic         `json:"pagination,omitempty"`
+	ExpectedTotal *int                           `json:"expected_total,omitempty"`
+	Name          string                         `json:"name"`
+	Covers        []string                       `json:"covers"`
+	URL           string                         `json:"url,omitempty"`
+	Checked       bool                           `json:"checked"`
+	Complete      bool                           `json:"inspection_complete"`
+	MoreRemaining bool                           `json:"more_results_remaining"`
+	Pages         int                            `json:"pages_checked"`
+	Items         int                            `json:"unique_items"`
+	EndEvidence   string                         `json:"end_evidence,omitempty"`
+	Error         string                         `json:"error,omitempty"`
 }
 
 func readOnlyActorAction(action string) bool {
@@ -132,6 +133,9 @@ func validateReadViews(c *actorReadViews) error {
 	}
 	names := map[string]bool{}
 	for _, v := range c.Views {
+		if err := validateReadVerification(v.Verification); err != nil {
+			return err
+		}
 		if v.Pagination.ClickMode != "" && v.Pagination.ClickMode != "som" && v.Pagination.ClickMode != "selector" {
 			return errors.New("pagination click_mode must be som or selector")
 		}
@@ -351,6 +355,9 @@ func (e *actorExecution) readViewDOM(c actorReadViews, v actorReadView) (*html.N
 				return nil, err
 			}
 			e.coverage.IdentityToken = token
+			if err := e.verifyReadPage(v, root); err != nil {
+				return nil, err
+			}
 			return root, nil
 		}
 		if time.Now().After(until) {
@@ -594,7 +601,13 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 			seen[key] = item
 			newItems = append(newItems, item)
 		}
-		sort.Strings(keys) // DOM reordering alone is not pagination progress
+		// Canonicalize IDs just like readPageKeys. Sites may render duplicate
+		// cards for responsive layouts; duplicates are not page changes.
+		uniqueKeys := map[string]bool{}
+		for _, key := range keys {
+			uniqueKeys[key] = true
+		}
+		keys = sortedReadIDs(uniqueKeys)
 		e.updateReadAfter(v, keys)
 		if pendingNextSignature != "" {
 			if strings.Join(keys, ",") == pendingNextSignature {

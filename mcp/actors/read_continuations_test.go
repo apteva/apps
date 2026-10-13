@@ -21,9 +21,9 @@ func TestReadContinuationResumesWithoutOpeningOrRescanning(t *testing.T) {
 		case "computer.browser_close":
 			closes++
 		case "computer.browser_session":
-			return map[string]any{"session_id": "sess_1", "context_id": "ctx-read", "backend": "local"}
+			return map[string]any{"session_id": "sess_1", "context_id": "provider-uuid", "app_context_id": "ctx-read", "backend": "local", "status": "active"}
 		case "computer.browser_extract":
-			h := readFixtureHTML(page*2+1, page*2+2)
+			h := readFixtureHTML(page*2+1, page*2+2, page*2+1)
 			if page < 2 {
 				h = strings.Replace(h, "</body>", `<a id="next">Next</a></body>`, 1)
 			}
@@ -301,4 +301,17 @@ func TestPaginationLoadingErrorAndWrongControlDiagnostics(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReadContinuationCloseIsRegistered(t *testing.T) {
+	a := &App{}
+	for _, tool := range a.actorTools() {
+		if tool.Name == "actors_read_close" {
+			if tool.Handler == nil {
+				t.Fatal("missing handler")
+			}
+			return
+		}
+	}
+	t.Fatal("missing continuation close MCP tool")
 }

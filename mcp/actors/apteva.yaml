@@ -1,8 +1,11 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.2.34
+version: 0.2.35
 description: |
+  Read views verify live filter values before returning candidates, independently
+  of viewport. Resumable reads verify saved app context identity and unique
+  page IDs even when the site renders duplicate cards.
   Reusable browser actors with named operations, crawl queues, URL fan-out,
   revisioned definitions, structured datasets, durable run history, Jobs schedules,
   read-only multi-view coverage, visible navigation observations, semantic media,
@@ -24,7 +27,7 @@ requires:
   permissions: [db.write.app, net.egress, platform.apps.call]
   apps:
     - name: computer
-      version: ">=0.7.94"
+      version: ">=0.7.96"
       reason: Browser control, saved contexts, raw extraction with navigation preserved and screenshots.
     - name: storage
       reason: Private dataset exports, screenshots and run traces.
@@ -35,6 +38,8 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - name: actors_read_close
+      description: Close an unused incremental read reference and release its browser.
     - name: actors_save
       description: Create or update a reusable actor definition and immutable revision.
     - name: actors_get
@@ -98,7 +103,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.2.34
+    ref: actors/v0.2.35
     entry: mcp/actors
   port: 8080
   health_check: /health

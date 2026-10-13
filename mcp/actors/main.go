@@ -58,16 +58,18 @@ var manifestYAML []byte
 var globalCtx *sdk.AppCtx
 
 type browserSession struct {
-	SessionID        string            `json:"session_id"`
-	Backend          string            `json:"backend"`
-	RequestedBackend *string           `json:"requested_backend"`
-	EffectiveBackend string            `json:"effective_backend"`
-	CurrentURL       string            `json:"current_url"`
-	DebugURL         string            `json:"debug_url,omitempty"`
-	StreamURL        string            `json:"stream_url,omitempty"`
-	Width            int               `json:"width"`
-	Height           int               `json:"height"`
-	Proxy            browserProxyState `json:"proxy"`
+	AppContextID      string            `json:"app_context_id,omitempty"`
+	ProviderExpiresAt string            `json:"provider_expires_at,omitempty"`
+	SessionID         string            `json:"session_id"`
+	Backend           string            `json:"backend"`
+	RequestedBackend  *string           `json:"requested_backend"`
+	EffectiveBackend  string            `json:"effective_backend"`
+	CurrentURL        string            `json:"current_url"`
+	DebugURL          string            `json:"debug_url,omitempty"`
+	StreamURL         string            `json:"stream_url,omitempty"`
+	Width             int               `json:"width"`
+	Height            int               `json:"height"`
+	Proxy             browserProxyState `json:"proxy"`
 }
 
 type browserProxyState struct {
