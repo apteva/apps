@@ -11,7 +11,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os/exec"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -57,6 +59,7 @@ type visualAnalysis struct {
 }
 
 type audioAnalysis struct {
+	MeasurementScope    string         `json:"measurement_scope,omitempty"`
 	IntegratedLUFS      *float64       `json:"integrated_lufs,omitempty"`
 	LoudnessRangeLU     *float64       `json:"loudness_range_lu,omitempty"`
 	MaxTruePeakDBTP     *float64       `json:"max_true_peak_dbtp,omitempty"`
@@ -75,27 +78,32 @@ type audioAnalysis struct {
 }
 
 type analysisCoverage struct {
-	Depth               string  `json:"depth"`
-	Executor            string  `json:"executor"`
-	HostID              int64   `json:"host_id,omitempty"`
-	StartMs             int64   `json:"start_ms"`
-	EndMs               int64   `json:"end_ms,omitempty"`
-	AnalyzedDurationMs  int64   `json:"analyzed_duration_ms,omitempty"`
-	SourceDurationMs    int64   `json:"source_duration_ms,omitempty"`
-	RequestedDurationMs int64   `json:"requested_duration_ms,omitempty"`
-	Ratio               float64 `json:"ratio"`
-	Complete            bool    `json:"complete"`
-	ArtifactsCreated    bool    `json:"artifacts_created"`
+	Depth               string           `json:"depth"`
+	Executor            string           `json:"executor"`
+	HostID              int64            `json:"host_id,omitempty"`
+	StartMs             int64            `json:"start_ms"`
+	EndMs               int64            `json:"end_ms,omitempty"`
+	AnalyzedDurationMs  int64            `json:"analyzed_duration_ms,omitempty"`
+	SourceDurationMs    int64            `json:"source_duration_ms,omitempty"`
+	RequestedDurationMs int64            `json:"requested_duration_ms,omitempty"`
+	Ratio               float64          `json:"ratio"`
+	Complete            bool             `json:"complete"`
+	ArtifactsCreated    bool             `json:"artifacts_created"`
+	Windows             []analysisWindow `json:"windows,omitempty"`
+	Method              string           `json:"method,omitempty"`
+	Limitations         []string         `json:"limitations,omitempty"`
 }
 
 type mediaAnalysisResult struct {
-	FileID    string           `json:"file_id"`
-	MediaType string           `json:"media_type"`
-	Analysis  analysisCoverage `json:"analysis"`
-	Technical map[string]any   `json:"technical"`
-	Visual    *visualAnalysis  `json:"visual,omitempty"`
-	Audio     *audioAnalysis   `json:"audio,omitempty"`
-	Issues    []analysisIssue  `json:"issues"`
+	FileID       string              `json:"file_id"`
+	MediaType    string              `json:"media_type"`
+	Analysis     analysisCoverage    `json:"analysis"`
+	Technical    map[string]any      `json:"technical"`
+	Visual       *visualAnalysis     `json:"visual,omitempty"`
+	Audio        *audioAnalysis      `json:"audio,omitempty"`
+	Issues       []analysisIssue     `json:"issues"`
+	SampleChecks []analysisSample    `json:"sample_checks,omitempty"`
+	Diagnostics  analysisDiagnostics `json:"diagnostics"`
 }
 
 type analysisOptions struct {
@@ -105,6 +113,10 @@ type analysisOptions struct {
 	SilenceThresholdDB float64
 	SilenceMinMs       int64
 	Timeout            time.Duration
+	Parent             context.Context
+	SourceMeta         *StorageFile
+	DecoderThreads     int
+	WorkDir            string
 }
 
 // mediaAnalysisRunner is replaceable in unit tests so the MCP handler can be
@@ -112,6 +124,10 @@ type analysisOptions struct {
 var mediaAnalysisRunner = analyzeExistingSource
 
 func (a *App) toolAnalyze(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.toolAnalyzeContext(context.Background(), ctx, args)
+}
+func (a *App) toolAnalyzeContext(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	started := time.Now()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -135,12 +151,32 @@ func (a *App) toolAnalyze(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	source, err := signedFetchURLForMedia(ctx, pid, fid, storageDeliveryApteva, storageDispositionInline)
-	if err != nil || source.URL == "" {
-		if err == nil {
-			err = errors.New("empty signed URL")
+	parent, stop := mediaContext(callCtx, ctx)
+	defer stop()
+	opts.Parent = parent
+	// Bound source lookup/signing as well as the actual scan.
+	lookup, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+	sc := newStorageClient()
+	meta, err := sc.GetFile(lookup, pid, int64Arg(fid))
+	if err != nil {
+		return nil, errors.New("analysis_source_unavailable: cannot resolve current source identity")
+	}
+	if row.SourceSHA256 != "" && !strings.EqualFold(meta.SHA256, row.SourceSHA256) {
+		return nil, errors.New("analysis_source_changed: reindex the source before analysis")
+	}
+	opts.SourceMeta = meta
+	cacheKey := analysisCacheKey(pid, row, opts, meta)
+	if cached, ok := loadAnalysisCache(ctx.AppDB(), pid, cacheKey); ok {
+		out, e := analysisToolReceipt(ctx, pid, cached, true)
+		if m, ok := out.(map[string]any); ok {
+			m["request_elapsed_ms"] = time.Since(started).Milliseconds()
 		}
-		return nil, fmt.Errorf("read source for analysis: %w", err)
+		return out, e
+	}
+	sourceURL, err := sc.GetSignedURL(lookup, pid, meta.ID, 3600)
+	if err != nil || sourceURL == "" {
+		return nil, errors.New("analysis_source_unavailable: cannot sign source for analysis")
 	}
 	result := baseAnalysisResult(row, opts)
 	result.Analysis.RequestedDurationMs = opts.EndMs - opts.StartMs
@@ -148,7 +184,7 @@ func (a *App) toolAnalyze(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		result.Analysis.Ratio = 0
 		result.Analysis.AnalyzedDurationMs = 0
 	}
-	quality, err := mediaAnalysisRunner(ctx, source.URL, row, opts)
+	quality, err := mediaAnalysisRunner(ctx, sourceURL, row, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -163,23 +199,32 @@ func (a *App) toolAnalyze(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	result.Analysis.Executor = quality.Executor
 	result.Analysis.HostID = quality.HostID
+	result.SampleChecks = quality.Samples
+	result.Diagnostics = quality.Diagnostics
 	sort.SliceStable(result.Issues, func(i, j int) bool {
 		if result.Issues[i].StartMs == result.Issues[j].StartMs {
 			return result.Issues[i].Code < result.Issues[j].Code
 		}
 		return result.Issues[i].StartMs < result.Issues[j].StartMs
 	})
-	return map[string]any{"found": true, "result": result}, nil
+	if quality.DecodeOK {
+		saveAnalysisCache(ctx.AppDB(), pid, cacheKey, row, result)
+	}
+	out, e := analysisToolReceipt(ctx, pid, result, false)
+	if m, ok := out.(map[string]any); ok {
+		m["request_elapsed_ms"] = time.Since(started).Milliseconds()
+	}
+	return out, e
 }
 
 func parseAnalysisOptions(ctx *sdk.AppCtx, row *MediaRow, args map[string]any) (analysisOptions, error) {
 	depth, _ := args["depth"].(string)
 	depth = strings.ToLower(strings.TrimSpace(depth))
 	if depth == "" {
-		depth = "standard"
+		depth = "quick"
 	}
-	if depth != "standard" && depth != "full" {
-		return analysisOptions{}, errors.New("depth must be standard or full")
+	if depth != "quick" && depth != "standard" && depth != "full" {
+		return analysisOptions{}, errors.New("depth must be quick, standard or full")
 	}
 	start := int64Arg(args["start_ms"])
 	end := int64Arg(args["end_ms"])
@@ -215,11 +260,15 @@ func parseAnalysisOptions(ctx *sdk.AppCtx, row *MediaRow, args map[string]any) (
 	if silenceMin < 100 {
 		return analysisOptions{}, errors.New("silence_min_ms must be at least 100")
 	}
-	timeoutSec := parseConfigIntFallback(ctx.Config().Get("analyze_timeout_seconds"), 300)
+	timeoutSec := min(300, max(1, parseConfigIntFallback(ctx.Config().Get("analyze_timeout_seconds"), 300)))
+	if depth == "quick" {
+		timeoutSec = min(60, max(1, parseConfigIntFallback(ctx.Config().Get("analyze_quick_timeout_seconds"), 45)))
+	}
 	return analysisOptions{
 		Depth: depth, StartMs: start, EndMs: end,
 		SilenceThresholdDB: silenceDB, SilenceMinMs: silenceMin,
-		Timeout: time.Duration(timeoutSec) * time.Second,
+		Timeout:        time.Duration(timeoutSec) * time.Second,
+		DecoderThreads: min(4, max(1, parseConfigIntFallback(ctx.Config().Get("analyze_decoder_threads"), 2))),
 	}, nil
 }
 
@@ -268,6 +317,19 @@ func baseAnalysisResult(row *MediaRow, opts analysisOptions) mediaAnalysisResult
 	if row.DurationMs > 0 {
 		ratio = math.Min(1, math.Max(0, float64(analyzed)/float64(row.DurationMs)))
 	}
+	windows := []analysisWindow(nil)
+	if opts.Depth == "quick" && !row.IsImage {
+		windows = quickWindows(opts, row)
+		analyzed = 0
+		for _, w := range windows {
+			analyzed += w.EndMs - w.StartMs
+		}
+		complete = row.DurationMs > 0 && opts.StartMs == 0 && analyzed >= row.DurationMs
+		ratio = 0
+		if row.DurationMs > 0 {
+			ratio = math.Min(1, float64(analyzed)/float64(row.DurationMs))
+		}
+	}
 	technical := map[string]any{
 		"format_name":    row.FormatName,
 		"duration_ms":    row.DurationMs,
@@ -290,7 +352,12 @@ func baseAnalysisResult(row *MediaRow, opts analysisOptions) mediaAnalysisResult
 	if !complete {
 		issues = append(issues, analysisIssue{
 			Code: "PARTIAL_ANALYSIS", Severity: "info",
-			Message: fmt.Sprintf("Analysis covers %.1f%% of the source; use depth=full or an explicit range for broader coverage.", ratio*100),
+			Message: func() string {
+				if opts.Depth == "quick" {
+					return fmt.Sprintf("Quick checks inspect %.1f%% of the source in the listed windows. Uninspected content remains unknown.", ratio*100)
+				}
+				return fmt.Sprintf("Analysis covers %.1f%% of the source; use depth=full or an explicit range for broader coverage.", ratio*100)
+			}(),
 			StartMs: opts.StartMs, EndMs: opts.EndMs,
 		})
 	}
@@ -299,7 +366,22 @@ func baseAnalysisResult(row *MediaRow, opts analysisOptions) mediaAnalysisResult
 		Analysis: analysisCoverage{
 			Depth: opts.Depth, StartMs: opts.StartMs, EndMs: opts.EndMs,
 			AnalyzedDurationMs: analyzed, SourceDurationMs: row.DurationMs,
-			Ratio: ratio, Complete: complete, ArtifactsCreated: false,
+			Ratio: ratio, Complete: complete, ArtifactsCreated: false, Windows: windows,
+			Method: func() string {
+				if opts.Depth == "quick" {
+					return "short_window_checks"
+				}
+				return "continuous_decode"
+			}(),
+			Limitations: func() []string {
+				if opts.Depth == "quick" {
+					if row.IsImage {
+						return []string{"Visual checks use a 640px-wide proxy; native dimensions come from the probe."}
+					}
+					return []string{"Quick checks inspect only the listed windows and cannot rule out defects elsewhere.", "Black/freeze and visual measurements use a 640px-wide proxy; decoded frame timestamps are retained before scaling.", "Audio loudness is measured per sample window, not across the full programme."}
+				}
+				return nil
+			}(),
 		},
 		Issues: issues,
 	}
@@ -375,12 +457,14 @@ func technicalStreams(raw json.RawMessage) []map[string]any {
 }
 
 type qualityAnalysis struct {
-	Visual   *visualAnalysis
-	Audio    *audioAnalysis
-	Issues   []analysisIssue
-	DecodeOK bool
-	Executor string
-	HostID   int64
+	Samples     []analysisSample
+	Diagnostics analysisDiagnostics
+	Visual      *visualAnalysis
+	Audio       *audioAnalysis
+	Issues      []analysisIssue
+	DecodeOK    bool
+	Executor    string
+	HostID      int64
 }
 
 func analyzeExistingSource(app *sdk.AppCtx, sourceURL string, row *MediaRow, opts analysisOptions) (qualityAnalysis, error) {
@@ -394,57 +478,54 @@ func analyzeExistingSource(app *sdk.AppCtx, sourceURL string, row *MediaRow, opt
 }
 
 func analyzeExistingSourceLocal(app *sdk.AppCtx, sourceURL string, row *MediaRow, opts analysisOptions) (qualityAnalysis, error) {
-	parent, stop := mediaContext(context.Background(), app)
-	defer stop()
-	cctx, cancel := context.WithTimeout(parent, opts.Timeout)
-	cctx, release, budgetErr := acquireMediaWork(cctx, app, 1)
-	if budgetErr != nil {
-		cancel()
-		return qualityAnalysis{}, budgetErr
+	ctx, cancel, release, admission, err := beginAnalysis(app, opts)
+	if err != nil {
+		return qualityAnalysis{}, err
 	}
-	defer release()
 	defer cancel()
-	ffmpegPath := strings.TrimSpace(app.Config().Get("ffmpeg_path"))
-	if ffmpegPath == "" {
-		ffmpegPath = "ffmpeg"
+	defer release()
+	path := strings.TrimSpace(app.Config().Get("ffmpeg_path"))
+	if path == "" {
+		path = "ffmpeg"
 	}
-	result := qualityAnalysis{DecodeOK: true, Issues: make([]analysisIssue, 0)}
-	commandsRun := 0
-	if row.HasVideo || row.IsImage {
-		commandsRun++
-		log, runErr := runAnalysisFFmpeg(cctx, ffmpegPath, visualAnalysisArgs(sourceURL, row, opts))
-		result.Visual = parseVisualAnalysis(log, opts.StartMs, opts.EndMs)
-		if runErr != nil {
-			result.DecodeOK = false
-			result.Issues = append(result.Issues, commandFailureIssue("VISUAL_ANALYSIS_FAILED", runErr, log))
+	windows := []analysisWindow{{opts.StartMs, opts.EndMs}}
+	if opts.Depth == "quick" {
+		windows = quickWindows(opts, row)
+	}
+	results := []qualityAnalysis{}
+	started := time.Now()
+	for _, w := range windows {
+		sample := opts
+		sample.StartMs = w.StartMs
+		sample.EndMs = w.EndMs
+		start := time.Now()
+		log, runErr := runAnalysisFFmpeg(ctx, path, analysisBoundedArgs(analysisFFmpegArgs(sourceURL, row, sample), opts))
+		if ctx.Err() != nil {
+			return qualityAnalysis{}, fmt.Errorf("analysis_interrupted: %w", ctx.Err())
 		}
-		result.Issues = append(result.Issues, visualIssues(result.Visual)...)
-	}
-	if failure := mediaWorkFailure(cctx); failure != nil {
-		return result, failure
-	}
-	if row.HasAudio {
-		commandsRun++
-		log, runErr := runAnalysisFFmpeg(cctx, ffmpegPath, audioAnalysisArgs(sourceURL, opts))
-		result.Audio = parseAudioAnalysis(log, opts)
-		if runErr != nil {
-			result.DecodeOK = false
-			result.Issues = append(result.Issues, commandFailureIssue("AUDIO_ANALYSIS_FAILED", runErr, log))
+		if failure := mediaWorkFailure(ctx); failure != nil {
+			return qualityAnalysis{}, failure
 		}
-		result.Issues = append(result.Issues, audioIssues(result.Audio)...)
+		q := qualityFromLog(log, runErr, row, sample)
+		q.Diagnostics.ElapsedMs = time.Since(start).Milliseconds()
+		results = append(results, q)
 	}
-	if commandsRun == 0 {
-		return result, errors.New("media has no analyzable image, video, or audio stream")
+	d := analysisDiagnostics{Algorithm: analysisRecipe, ElapsedMs: time.Since(started).Milliseconds(), AdmissionMs: admission.Milliseconds(), DecodeThreads: min(max(1, opts.DecoderThreads), runtime.NumCPU()), FilterThreads: 1, InputPasses: len(windows), SourceAccess: "local_source", TimeoutSeconds: int(opts.Timeout.Seconds())}
+	if opts.Depth == "quick" {
+		d.ContinuityWidth = 640
+		q := mergeQuickQuality(results, windows, d)
+		q.Executor = "local"
+		return q, nil
 	}
-	// A corrupt or partially decodable source is still a successful
-	// inspection result: callers need the technical metadata plus the
-	// explicit failure issue to diagnose it. Only a row with no media
-	// streams at all is a hard tool error.
-	return result, nil
+	q := results[0]
+	q.Diagnostics = d
+	return q, nil
 }
 
 func runAnalysisFFmpeg(ctx context.Context, path string, args []string) (string, error) {
-	return runCompactedFFmpeg(ctx, path, args)
+	cmd := exec.CommandContext(ctx, path, args...)
+	configureRuntimeProcess(cmd)
+	return runCompactedCommand(ctx, cmd)
 }
 
 func commonRangeArgs(sourceURL string, opts analysisOptions) []string {
@@ -478,6 +559,16 @@ func visualAnalysisArgs(sourceURL string, row *MediaRow, opts analysisOptions) [
 		}
 		if opts.StartMs > 0 {
 			filter = "showinfo@coverage=checksum=0," + filter
+		}
+	}
+	if opts.Depth == "quick" {
+		filter = "scale=w='min(640,iw)':h=-2,signalstats,blurdetect,blockdetect,metadata=print"
+		if !row.IsImage {
+			filter = "showinfo=checksum=0,scale=w='min(640,iw)':h=-2,blackdetect=d=0:pix_th=0.10,metadata=mode=print:key=lavfi.black_end,freezedetect=n=-60dB:d=2,fps=1," + "signalstats,blurdetect,blockdetect,metadata=print"
+			filter = "trim=start=0:duration=" + formatSeconds(opts.EndMs-opts.StartMs) + "," + filter
+			if opts.StartMs > 0 {
+				filter = "showinfo@coverage=checksum=0," + filter
+			}
 		}
 	}
 	args = append(args, "-map", "0:v:0", "-vf", filter, "-an", "-sn", "-dn")

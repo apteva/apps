@@ -2,8 +2,13 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.37
+version: 0.14.38
 description: |
+  v0.14.38 makes media_analyze a quick technical check by default: short opening,
+  middle and ending windows, one video/audio input pass per window, bounded
+  decoder/filter budgets, verified source-cache reuse and source-bound result
+  caching. Coverage is explicitly sampled; full analysis requires depth=full.
+  Per-call cancellation stops remote workers and the timeout contract is explicit.
   v0.14.37 bounds render status/list tools with explicit summary receipts, stable
   cursor pagination and immutable checksum-verified references for stored plans,
   metrics and errors. Existing renders archive on read without reanalysis or
@@ -269,7 +274,7 @@ provides:
     - name: media_get
       description: Fetch one media record by storage file_id, including arbitrary metadata + metadata_version, probe fields, and derivation pointers. External ingestion URL delivery defaults to apteva/inline; callers can explicitly request delivery=proxy, delivery=direct, or disposition=attachment. Returned delivery, disposition, and expires_at are Storage-confirmed effective values.
     - name: media_analyze
-      description: Analyze an existing image, video, or audio source without modifying it. Returns encoding metadata, decode integrity, visual measurements, every-frame black/frozen checks and opening/ending coverage, plus LUFS/peak/RMS/silence audio measurements where applicable. When render_host_id is configured, analysis runs on that remote host without silent local fallback and reports the effective executor. depth=standard analyzes at most 60 seconds; depth=full analyzes the requested/full duration. Creates no render, derivation, or Storage object. Args — file_id, depth? (standard|full), start_ms?, end_ms?, silence_threshold_db?, silence_min_ms?.
+      description: Quick sampled technical checks by default (depth=quick), using short opening/middle/ending windows and one video/audio input pass per window. Coverage, per-window audio, proxy resolution and limitations are explicit. Successful source-bound results are cached; verified existing sources are reused without full-file downloads on a quick cache miss. Explicit standard/full modes are slower and bounded; caller cancellation terminates remote workers. Creates no output media or derivations.
     - name: media_preview_crop
       description: Inspect crop geometry and sampled coverage before rendering. Compact resolved_params and composition retain geometry, warnings, counts and timings; diagnostics_ref retains full immutable evidence. Use media_get_crop_diagnostics for bounded detail or authenticated download_path for complete JSON. Crop paths are summarized, not executable plans. Creates no media output; sampled coverage still requires visual review.
     - name: media_get_crop_diagnostics
@@ -672,7 +677,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.37
+    ref: media/v0.14.38
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -740,7 +745,18 @@ config_schema:
     type: text
     default: "300"
     label: Media analysis timeout (seconds)
-    description: Hard wall-clock cap for one read-only media_analyze call. Full analysis of long or high-resolution files may need a larger value.
+    description: Execution cap for explicit standard/full analysis, bounded to 300 seconds; the MCP timeout contract includes admission. Quick checks have a separate short budget.
+
+  - name: analyze_quick_timeout_seconds
+    type: text
+    default: "45"
+    label: Quick analysis execution timeout (seconds)
+    description: Quick checks stop within this bounded execution budget (maximum 60), plus at most 10 seconds waiting for admission. No full-file download is started for quick checks.
+  - name: analyze_decoder_threads
+    type: text
+    default: "2"
+    label: Analysis decoder threads
+    description: Decoder thread budget, bounded to 1–4 and the host CPU count. Analysis takes two host work units; filters stay at one thread. Cached results bypass heavy admission.
 
   # Renders (new in v0.2)
   - name: smart_crop_engine

@@ -12,21 +12,34 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
 
 const remoteAnalysisMarker = "APTEVA_ANALYZE:"
 
+type remoteAnalysisSample struct {
+	StartMs   int64  `json:"start_ms"`
+	EndMs     int64  `json:"end_ms"`
+	Exit      int    `json:"exit"`
+	Log       string `json:"log_b64"`
+	ElapsedMs int64  `json:"elapsed_ms"`
+}
 type remoteAnalysisWireResult struct {
-	VisualRan  bool   `json:"visual_ran"`
-	VisualExit int    `json:"visual_exit"`
-	VisualLog  string `json:"visual_log_b64"`
-	AudioRan   bool   `json:"audio_ran"`
-	AudioExit  int    `json:"audio_exit"`
-	AudioLog   string `json:"audio_log_b64"`
+	Samples        []remoteAnalysisSample `json:"samples,omitempty"`
+	SourceCacheHit bool                   `json:"source_cache_hit"`
+	DecodeThreads  int                    `json:"decoder_threads"`
+	VisualRan      bool                   `json:"visual_ran"`
+	VisualExit     int                    `json:"visual_exit"`
+	VisualLog      string                 `json:"visual_log_b64"`
+	AudioRan       bool                   `json:"audio_ran"`
+	AudioExit      int                    `json:"audio_exit"`
+	AudioLog       string                 `json:"audio_log_b64"`
 }
 
 var ensureRemoteAnalysisFFmpeg = func(ctx context.Context, app *sdk.AppCtx, hostID int64) (installedPaths, error) {
@@ -42,16 +55,16 @@ func analyzeExistingSourceRemote(app *sdk.AppCtx, sourceURL string, row *MediaRo
 		Executor: "remote-instance",
 		HostID:   hostID,
 	}
-	parent, stop := mediaContext(context.Background(), app)
-	defer stop()
-	cctx, cancel := context.WithTimeout(parent, opts.Timeout)
-	defer cancel()
-	cctx, release, err := acquireMediaWork(cctx, app, 1)
+	cctx, cancel, release, admission, err := beginAnalysis(app, opts)
 	if err != nil {
 		return result, err
 	}
+	defer cancel()
 	defer release()
-
+	if opts.WorkDir == "" {
+		opts.WorkDir = uniqueRemoteWorkDir(-time.Now().UnixNano())
+	}
+	started := time.Now()
 	paths, err := ensureRemoteAnalysisFFmpeg(cctx, app, hostID)
 	if err != nil {
 		return result, fmt.Errorf("ANALYSIS_EXECUTOR_UNAVAILABLE: ffmpeg unavailable on host_id=%d: %w", hostID, err)
@@ -62,7 +75,11 @@ func analyzeExistingSourceRemote(app *sdk.AppCtx, sourceURL string, row *MediaRo
 	if timeoutS < 1 {
 		timeoutS = 1
 	}
-	out, exit, runErr := runRemoteAnalysisCommand(cctx, app, hostID, script, timeoutS)
+	finish := watchAnalysisRemoteCancellation(cctx, app, hostID, opts.WorkDir)
+	out, exit, runErr := runRemoteAnalysisCommand(cctx, app, hostID, "setsid bash -c "+shellQuote(script), timeoutS)
+	if cancelErr := finish(); cancelErr != nil {
+		return result, cancelErr
+	}
 	if failure := mediaWorkFailure(cctx); failure != nil {
 		return result, failure
 	}
@@ -83,6 +100,48 @@ func analyzeExistingSourceRemote(app *sdk.AppCtx, sourceURL string, row *MediaRo
 		return result, fmt.Errorf("ANALYSIS_EXECUTOR_UNAVAILABLE: parse remote analysis host_id=%d result: %w", hostID, err)
 	}
 
+	d := analysisDiagnostics{Algorithm: analysisRecipe, ElapsedMs: time.Since(started).Milliseconds(), AdmissionMs: admission.Milliseconds(), DecodeThreads: wire.DecodeThreads, FilterThreads: 1, SourceCacheHit: wire.SourceCacheHit, InputPasses: 1, SourceAccess: "http_range_stream", TimeoutSeconds: timeoutS}
+	if opts.Depth != "quick" {
+		d.SourceAccess = "http_stream"
+	}
+	if wire.SourceCacheHit {
+		d.SourceAccess = "verified_local_cache"
+	}
+	if len(wire.Samples) > 0 {
+		results := []qualityAnalysis{}
+		windows := []analysisWindow{}
+		for _, sample := range wire.Samples {
+			log, e := decodeRemoteAnalysisLog(sample.Log)
+			if e != nil {
+				return result, errors.New("analysis_result_unavailable: invalid sample log")
+			}
+			sampleOpts := opts
+			sampleOpts.StartMs = sample.StartMs
+			sampleOpts.EndMs = sample.EndMs
+			var failure error
+			if sample.Exit != 0 {
+				failure = remoteFFmpegExitError("combined", sample.Exit)
+			}
+			q := qualityFromLog(log, failure, row, sampleOpts)
+			q.Diagnostics.ElapsedMs = sample.ElapsedMs
+			results = append(results, q)
+			windows = append(windows, analysisWindow{sample.StartMs, sample.EndMs})
+		}
+		d.InputPasses = len(windows)
+		if opts.Depth == "quick" {
+			d.ContinuityWidth = 640
+			q := mergeQuickQuality(results, windows, d)
+			q.Executor = "remote-instance"
+			q.HostID = hostID
+			return q, nil
+		}
+		q := results[0]
+		q.Diagnostics = d
+		q.Executor = "remote-instance"
+		q.HostID = hostID
+		return q, nil
+	}
+	result.Diagnostics = d
 	if wire.VisualRan {
 		log, decodeErr := decodeRemoteAnalysisLog(wire.VisualLog)
 		if decodeErr != nil {
@@ -118,32 +177,78 @@ func analyzeExistingSourceRemote(app *sdk.AppCtx, sourceURL string, row *MediaRo
 func buildRemoteAnalysisScript(ffmpegPath, sourceURL string, row *MediaRow, opts analysisOptions) string {
 	var b strings.Builder
 	b.WriteString("set -u\n")
-	b.WriteString(`WORK=$(mktemp -d /var/tmp/apteva-media-analyze.XXXXXX)` + "\n")
-	b.WriteString(`trap 'rm -rf "$WORK"' EXIT` + "\n")
-	b.WriteString(`cd "$WORK"` + "\n")
-	b.WriteString("VISUAL_RAN=false\nVISUAL_EXIT=0\nAUDIO_RAN=false\nAUDIO_EXIT=0\n")
-
-	if row.HasVideo || row.IsImage {
-		b.WriteString("VISUAL_RAN=true\n")
-		b.WriteString(shellCommand(ffmpegPath, limitedFFmpegArgs(visualAnalysisArgs(sourceURL, row, opts))))
-		b.WriteString(" > visual.log 2>&1\nVISUAL_EXIT=$?\nif [ \"$VISUAL_EXIT\" -eq 137 ] || grep -qiE 'out of memory|cannot allocate memory' visual.log; then echo media_resource_exhausted; exit 137; fi\n")
+	if opts.WorkDir != "" {
+		fmt.Fprintf(&b, "WORK=%s\nmkdir -p \"$WORK\"\n", shellQuote(opts.WorkDir))
+	} else {
+		b.WriteString("WORK=$(mktemp -d /var/tmp/apteva-media-analyze.XXXXXX)\n")
 	}
-	if row.HasAudio {
-		b.WriteString("AUDIO_RAN=true\n")
-		b.WriteString(shellCommand(ffmpegPath, limitedFFmpegArgs(audioAnalysisArgs(sourceURL, opts))))
-		b.WriteString(" > audio.log 2>&1\nAUDIO_EXIT=$?\n")
+	b.WriteString("trap 'rm -rf \"$WORK\"' EXIT\ncd \"$WORK\"\necho $$ > pid\n[ ! -f cancel.requested ] || exit 1\n")
+	fmt.Fprintf(&b, "SOURCE=%s\nSOURCE_CACHE_HIT=false\n", shellQuote(sourceURL))
+	if meta := opts.SourceMeta; meta != nil && len(meta.SHA256) == 64 {
+		fmt.Fprintf(&b, "SOURCE_CACHE_ROOT=%s\nSOURCE_CACHE_MAX_BYTES=%d\n", shellQuote(remoteSourceCacheRoot), remoteSourceCacheDefaultMaxBytes)
+		b.WriteString(remoteSourceCacheScriptFragment)
+		cache := remoteSourceCacheRoot + "/" + remoteSourceCacheName(fmt.Sprint(meta.ID), meta.Name, meta.SHA256, meta.SizeBytes)
+		fmt.Fprintf(&b, "if cache_valid %s %d %s; then\n link_cached_source %s source-input\n SOURCE=source-input\n SOURCE_CACHE_HIT=true\nfi\n", shellQuote(cache), meta.SizeBytes, shellQuote(meta.SHA256), shellQuote(cache))
 	}
-
-	// Return only lines consumed by the Go parsers. Besides keeping signed URLs
-	// out of the Instances response, this bounds output for depth=full on long
-	// media: ebur128's verbose per-frame log can otherwise exceed command-output
-	// limits before the result marker arrives.
-	b.WriteString("if [ -f visual.log ]; then awk " + shellQuote(compactFrameLogAWK) + " visual.log > visual.safe; else : > visual.safe; fi\n")
-	b.WriteString("if [ -f audio.log ]; then awk " + shellQuote(compactFrameLogAWK) + " audio.log > audio.safe; else : > audio.safe; fi\n")
-	b.WriteString(`VISUAL_B64=$(base64 -w0 visual.safe 2>/dev/null || base64 < visual.safe | tr -d '\n')` + "\n")
-	b.WriteString(`AUDIO_B64=$(base64 -w0 audio.safe 2>/dev/null || base64 < audio.safe | tr -d '\n')` + "\n")
-	b.WriteString(`printf 'APTEVA_ANALYZE:{"visual_ran":%s,"visual_exit":%s,"visual_log_b64":"%s","audio_ran":%s,"audio_exit":%s,"audio_log_b64":"%s"}\n' "$VISUAL_RAN" "$VISUAL_EXIT" "$VISUAL_B64" "$AUDIO_RAN" "$AUDIO_EXIT" "$AUDIO_B64"` + "\n")
+	threads := max(1, min(4, opts.DecoderThreads))
+	fmt.Fprintf(&b, "CPUS=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)\nDECODER_THREADS=%d\nif [ \"$DECODER_THREADS\" -gt \"$CPUS\" ]; then DECODER_THREADS=$CPUS; fi\nSAMPLES=\"\"\n", threads)
+	windows := []analysisWindow{{opts.StartMs, opts.EndMs}}
+	if opts.Depth == "quick" {
+		windows = quickWindows(opts, row)
+	}
+	for _, w := range windows {
+		sample := opts
+		sample.StartMs = w.StartMs
+		sample.EndMs = w.EndMs
+		args := analysisBoundedArgs(analysisFFmpegArgs("{analysis_source}", row, sample), opts)
+		// Shell substitution is limited to controlled placeholders, never raw URLs.
+		command := shellCommand(ffmpegPath, args)
+		command = strings.ReplaceAll(command, shellQuote("{analysis_source}"), "\"$SOURCE\"")
+		command = strings.ReplaceAll(command, "'-threads' '"+fmt.Sprint(min(threads, runtimeCPUCount()))+"'", "'-threads' \"$DECODER_THREADS\"")
+		b.WriteString("START=$(date +%s)\n" + command + " > combined.log 2>&1\nEXIT_CODE=$?\n")
+		b.WriteString("if [ \"$EXIT_CODE\" -eq 137 ] || grep -qiE 'out of memory|cannot allocate memory' combined.log; then echo media_resource_exhausted; exit 137; fi\n")
+		b.WriteString("awk " + shellQuote(compactFrameLogAWK) + " combined.log > combined.safe\nLOG=$(base64 -w0 combined.safe 2>/dev/null || base64 < combined.safe | tr -d '\\n')\nELAPSED=$(( ($(date +%s) - START) * 1000 ))\n")
+		fmt.Fprintf(&b, "ENTRY=$(printf '{\"start_ms\":%d,\"end_ms\":%d,\"exit\":%%s,\"log_b64\":\"%%s\",\"elapsed_ms\":%%s}' \"$EXIT_CODE\" \"$LOG\" \"$ELAPSED\")\n", w.StartMs, w.EndMs)
+		b.WriteString("if [ -n \"$SAMPLES\" ]; then SAMPLES=\"$SAMPLES,$ENTRY\"; else SAMPLES=$ENTRY; fi\n")
+	}
+	b.WriteString("printf 'APTEVA_ANALYZE:{\"samples\":[%s],\"source_cache_hit\":%s,\"decoder_threads\":%s,\"visual_ran\":%s,\"visual_exit\":%s,\"visual_log_b64\":\"%s\",\"audio_ran\":%s,\"audio_exit\":%s,\"audio_log_b64\":\"%s\"}\\n' \"$SAMPLES\" \"$SOURCE_CACHE_HIT\" \"$DECODER_THREADS\" ")
+	fmt.Fprintf(&b, "%t \"$EXIT_CODE\" \"$LOG\" %t \"$EXIT_CODE\" \"$LOG\"\n", row.HasVideo || row.IsImage, row.HasAudio)
 	return b.String()
+}
+
+func runtimeCPUCount() int { return runtime.NumCPU() }
+
+// Join cancellation before returning. HTTP expiry, app shutdown and timeouts
+// terminate only this guarded process group; a failed stop remains an error.
+func watchAnalysisRemoteCancellation(ctx context.Context, app *sdk.AppCtx, hostID int64, work string) func() error {
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	var once sync.Once
+	var result error
+	kill := func() {
+		once.Do(func() {
+			out, exit, err := runRemoteCancellation(context.Background(), app, hostID, remoteCancellationScript(work), 20)
+			if err != nil || exit != 0 || !strings.Contains(out, "REMOTE_CANCEL_CONFIRMED") {
+				result = errors.New("analysis_cancellation_failed: remote worker termination could not be verified")
+			}
+		})
+	}
+	go func() {
+		defer close(finished)
+		select {
+		case <-ctx.Done():
+			kill()
+		case <-done:
+		}
+	}()
+	return func() error {
+		close(done)
+		if ctx.Err() != nil {
+			kill()
+		}
+		<-finished
+		return result
+	}
 }
 
 func shellCommand(path string, args []string) string {

@@ -110,6 +110,10 @@ type analysisLogCollector struct {
 }
 
 func (c *analysisLogCollector) add(line string) {
+	if resourceFailure(nil, line, 0) != nil {
+		c.log.WriteString("media_resource_exhausted\n")
+		return
+	}
 	if strings.HasPrefix(line, "frame=") {
 		if n, err := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(line, "frame=")), 10, 64); err == nil && n > 0 {
 			c.progressFrames = n
@@ -181,6 +185,9 @@ func (c *analysisLogCollector) result() string {
 
 func runCompactedFFmpeg(ctx context.Context, binary string, args []string) (string, error) {
 	cmd := mediaFFmpegCommand(ctx, binary, args)
+	return runCompactedCommand(ctx, cmd)
+}
+func runCompactedCommand(ctx context.Context, cmd *exec.Cmd) (string, error) {
 	reader, writer := io.Pipe()
 	cmd.Stdout = writer
 	cmd.Stderr = writer
