@@ -74,3 +74,9 @@ test('configured external connection bypasses management discovery and only send
  expect(sent.every(r=>r.url.startsWith('https://voice.example/runtime-browser/'))).toBe(true);
  expect(new Headers(sent[0].init.headers).get('Authorization')).toBe('Bearer external-scoped-grant');
 });
+
+test('native fetch is invoked with its global receiver',async()=>{
+ const f=fixture();const branded=function(this:unknown){expect(this).toBe(globalThis);return Promise.resolve(Response.json({ok:true}))} as typeof fetch;
+ const transport=new RuntimeTelephonyTransport(f.app,'direct',branded,{baseURL:'https://voice.example/runtime-browser',credentialProvider:async()=>({token:'scoped',expires_at:Math.floor(Date.now()/1000)+300,endpoint:'https://voice.example/runtime-browser'})});
+ await transport.request('GET','/calls');
+});

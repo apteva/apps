@@ -48,3 +48,19 @@ func TestManagedRuntimeExternalBrowserOriginPreflightAndRead(t *testing.T) {
 		}
 	}
 }
+
+func TestManagedRuntimeFencedZeroWorkCanDrain(t *testing.T) {
+	a, _ := withTelephonyTestContext(t, &answerPlatform{})
+	a.runtime = runtimeTestActive()
+	a.runtime.state = "fenced"
+	a.runtime.fenced = true
+	result, e := a.runtimeDrainStatus()
+	if e != nil || result["drained"] != true {
+		t.Fatal("fenced idle execution cannot drain", result, e)
+	}
+	a.runtime.work = 1
+	result, e = a.runtimeDrainStatus()
+	if e != nil || result["drained"] != false {
+		t.Fatal("unfinished work was ignored", result, e)
+	}
+}

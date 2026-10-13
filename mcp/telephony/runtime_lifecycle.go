@@ -401,7 +401,7 @@ func (a *App) runtimeDrainStatus() (map[string]any, error) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	writers := a.recordingWriters.Load()
-	drained := calls == 0 && imports == 0 && writers == 0 && rt.work == 0 && (rt.state == "draining" || rt.state == "drained" || rt.state == "standby")
+	drained := calls == 0 && imports == 0 && writers == 0 && rt.work == 0 && (rt.state == "draining" || rt.state == "drained" || rt.state == "standby" || rt.state == "fenced" || rt.state == "error")
 	if drained {
 		rt.state = "drained"
 	}

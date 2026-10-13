@@ -51,7 +51,7 @@ export class RuntimeTelephonyTransport {
   private proxyOnly = false;
 
   constructor(private proxy: AppHandle, private mode: TelephonyRuntimeMode = 'auto',
-              private fetchImpl: typeof fetch = globalThis.fetch, private direct?: DirectTelephonyConnection) {}
+              private fetchImpl: typeof fetch = globalThis.fetch, private direct?: DirectTelephonyConnection) { this.fetchImpl = fetchImpl.bind(globalThis); }
 
   get directBase(): string | undefined { return this.info?.browser_api_base; }
 
