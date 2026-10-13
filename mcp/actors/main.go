@@ -291,19 +291,16 @@ func recoverInterruptedRuns(ctx *sdk.AppCtx) error {
 	if _, err := tx.Exec(`UPDATE actors_runs SET status=CASE WHEN cancel_requested_at IS NULL THEN 'queued' ELSE 'cancelled' END WHERE status='running' AND json_extract(definition_snapshot_json,'$.schema_version')=2`); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM actors_context_locks WHERE run_id IN (SELECT id FROM actors_runs WHERE status IN ('queued','cancelled'))`); err != nil {
+	// V1 writes keep their uncertain-outcome failure policy. Finish this in the
+	// same transaction as releasing stale context locks so a restarted worker
+	// cannot mistake an interrupted terminal run for a live context owner.
+	if _, err := tx.Exec(`UPDATE actors_runs SET status='failed', error='interrupted by app restart', completed_at=? WHERE status='running'`, time.Now().UTC()); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	if _, err := tx.Exec(`DELETE FROM actors_context_locks WHERE run_id IN (SELECT id FROM actors_runs WHERE status IN ('queued','cancelled','failed','completed'))`); err != nil {
 		return err
 	}
-	_, err = ctx.AppDB().Exec(
-		`UPDATE actors_runs
-		    SET status='failed', error='interrupted by app restart', completed_at=?
-		  WHERE status='running'`,
-		time.Now().UTC(),
-	)
-	return err
+	return tx.Commit()
 }
 
 func pruneHistory(ctx *sdk.AppCtx) error {

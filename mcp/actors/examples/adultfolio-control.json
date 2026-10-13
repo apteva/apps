@@ -143,6 +143,7 @@
         },
         {
           "read_views": {
+            "allow_partial": true,
             "entry_url": "https://www.adultfolio.com/message.php?user={{model_id}}",
             "identity_url": "{{account_url}}",
             "identity": {
@@ -164,6 +165,7 @@
                 "empty_text_pattern": "(?i)no messages",
                 "empty_selector": "#MessageResult",
                 "loading_selector": ".loading-overlay[aria-busy=\"true\"],#messaging_btf[aria-busy=\"true\"],#MessageResult[aria-busy=\"true\"],#oldMessage:contains(\"Loading\"),#oldMessage:contains(\"loading\")",
+                "error_selector": "#MessageResult .alert-danger, #oldMessage .alert-danger",
                 "items": "#MessageResult .messageContainer.message-modern-wrap",
                 "fields": {
                   "attachment_url": {
@@ -180,8 +182,8 @@
                   "body": {
                     "selector": ".message-modern-body",
                     "type": "text",
-                    "preserve_line_breaks": true,
-                    "pattern": "(?s)^\\s*(.*?)\\s*$"
+                    "pattern": "(?s)^\\s*(.*?)\\s*$",
+                    "preserve_line_breaks": true
                   },
                   "image_url": {
                     "selector": ".message-modern-body img[src]",
@@ -220,9 +222,9 @@
                 },
                 "field_defaults": {
                   "direction": "incoming",
-                  "record_type": "message",
                   "model_id": "{{model_id}}",
-                  "model_url": "{{model_url}}"
+                  "model_url": "{{model_url}}",
+                  "record_type": "message"
                 },
                 "field_rewrites": {
                   "direction": {
@@ -235,6 +237,10 @@
                 },
                 "key_field": "message_id",
                 "pagination": {
+                  "click_mode": "selector",
+                  "on_stall": "partial",
+                  "advance_timeout_ms": 20000,
+                  "reveal_from": "start",
                   "end_when_next_absent": true,
                   "mode": "next",
                   "next": {
@@ -246,14 +252,11 @@
                   "max_pages": "{{read_pages}}",
                   "stable_rounds": 2,
                   "settle_ms": 5000,
-                  "on_stall": "partial",
-                  "advance_timeout_ms": 20000,
-                  "reveal_from": "start"
+                  "end_selector": "#MessageResult > span[id]:matchesOwn(^\\s*$):not(:has(*)) + hr"
                 }
               }
             ],
-            "timeout_ms": 10000,
-            "allow_partial": true
+            "timeout_ms": 10000
           },
           "action": "inspect_views",
           "locator": {}
@@ -535,6 +538,7 @@
         },
         {
           "read_views": {
+            "allow_partial": true,
             "entry_url": "https://www.adultfolio.com/message.php?user={{model_id}}",
             "identity_url": "{{account_url}}",
             "identity": {
@@ -556,6 +560,7 @@
                 "empty_text_pattern": "(?i)no messages",
                 "empty_selector": "#MessageResult",
                 "loading_selector": ".loading-overlay[aria-busy=\"true\"],#messaging_btf[aria-busy=\"true\"],#MessageResult[aria-busy=\"true\"],#oldMessage:contains(\"Loading\"),#oldMessage:contains(\"loading\")",
+                "error_selector": "#MessageResult .alert-danger, #oldMessage .alert-danger",
                 "items": "#MessageResult .messageContainer.message-modern-wrap",
                 "fields": {
                   "attachment_url": {
@@ -572,8 +577,8 @@
                   "body": {
                     "selector": ".message-modern-body",
                     "type": "text",
-                    "preserve_line_breaks": true,
-                    "pattern": "(?s)^\\s*(.*?)\\s*$"
+                    "pattern": "(?s)^\\s*(.*?)\\s*$",
+                    "preserve_line_breaks": true
                   },
                   "image_url": {
                     "selector": ".message-modern-body img[src]",
@@ -612,9 +617,9 @@
                 },
                 "field_defaults": {
                   "direction": "incoming",
-                  "record_type": "message",
                   "model_id": "{{model_id}}",
-                  "model_url": "{{model_url}}"
+                  "model_url": "{{model_url}}",
+                  "record_type": "message"
                 },
                 "field_rewrites": {
                   "direction": {
@@ -627,6 +632,10 @@
                 },
                 "key_field": "message_id",
                 "pagination": {
+                  "click_mode": "selector",
+                  "on_stall": "partial",
+                  "advance_timeout_ms": 20000,
+                  "reveal_from": "start",
                   "end_when_next_absent": true,
                   "mode": "next",
                   "next": {
@@ -638,14 +647,11 @@
                   "max_pages": "{{read_pages}}",
                   "stable_rounds": 2,
                   "settle_ms": 5000,
-                  "on_stall": "partial",
-                  "advance_timeout_ms": 20000,
-                  "reveal_from": "start"
+                  "end_selector": "#MessageResult > span[id]:matchesOwn(^\\s*$):not(:has(*)) + hr"
                 }
               }
             ],
-            "timeout_ms": 10000,
-            "allow_partial": true
+            "timeout_ms": 10000
           },
           "action": "inspect_views",
           "locator": {}
@@ -1259,15 +1265,94 @@
       "output_schema": null
     },
     "search_models": {
-      "read_only": true,
       "steps": [
         {
+          "action": "goto",
+          "url": "https://www.adultfolio.com/search",
+          "locator": {}
+        },
+        {
+          "action": "wait",
+          "locator": {},
+          "duration_ms": 2000
+        },
+        {
+          "action": "extract",
+          "locator": {},
+          "items": "body",
+          "fields": {
+            "account_url": {
+              "selector": ".navbar a:containsown(\"Your Profile\")",
+              "type": "url",
+              "attribute": "href",
+              "required": true
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
+          "action": "assert_values",
+          "locator": {},
+          "assertions": {
+            "account_url": {
+              "equals_url": {
+                "url": "{{account_url}}"
+              }
+            }
+          }
+        },
+        {
+          "text": "{{model_query}}",
+          "action": "set_text",
+          "locator": {
+            "selector": "#basic-url"
+          },
+          "mode": "replace"
+        },
+        {
+          "action": "click",
+          "locator": {
+            "text": "{{model_query}}",
+            "role": "input",
+            "exact": true,
+            "som_only": true
+          },
+          "expected_text": "{{model_query}}"
+        },
+        {
+          "key": "End",
+          "action": "key",
+          "locator": {}
+        },
+        {
+          "text": " ",
+          "action": "type",
+          "locator": {}
+        },
+        {
+          "key": "Backspace",
+          "action": "key",
+          "locator": {}
+        },
+        {
+          "action": "wait_for",
+          "locator": {},
+          "conditions": [
+            {
+              "type": "selector_present",
+              "selector": "#eac-container-basic-url li .eac-item"
+            }
+          ],
+          "timeout_ms": 20000
+        },
+        {
+          "action": "inspect_views",
+          "read_only": true,
           "read_views": {
-            "entry_query": {
-              "profile": "model",
-              "q": "{{model_query}}",
-              "searchType": "members"
-            },
+            "use_current_page": true,
+            "allow_partial": true,
             "entry_url": "https://www.adultfolio.com/search",
             "identity_url": "{{account_url}}",
             "identity": {
@@ -1279,81 +1364,72 @@
             "views": [
               {
                 "use_entry_page": true,
-                "name": "model_search",
+                "name": "model_suggestions",
                 "covers": [
-                  "model_search"
+                  "model_suggestions"
                 ],
                 "link_selector": "",
                 "url_pattern": "^https://www\\.adultfolio\\.com/search(?:[?#]|$)",
-                "ready_selector": ".website_search_results:has([id$=\"_member_card\"]),.website_search_results:contains(\"There are no results for your query\")",
-                "empty_text_pattern": "There are no results for your query",
-                "empty_selector": ".website_search_results",
-                "loading_selector": ".loading-overlay[aria-busy=\"true\"],#messaging_btf[aria-busy=\"true\"],#MessageResult[aria-busy=\"true\"]",
-                "items": ".website_search_results [id$=\"_member_card\"]:has(.text-left.smallSidePadding:contains(\" Model\"))",
+                "ready_selector": "#eac-container-basic-url li .eac-item:contains(\"- model\")",
+                "empty_selector": "#eac-container-basic-url",
+                "empty_text_pattern": "(?i)no (models|results)",
+                "loading_selector": "#eac-container-basic-url[aria-busy=\"true\"]",
+                "items": "#eac-container-basic-url li:has(.eac-item:contains(\"- model\"))",
                 "fields": {
                   "model_id": {
+                    "selector": ".eac-item img[src*=\"/images/thumbs/\"]",
                     "type": "text",
-                    "attribute": "id",
-                    "required": true,
-                    "pattern": "^([0-9]+)_member_card$"
+                    "attribute": "src",
+                    "pattern": "/images/thumbs/([0-9]+)\\.jpg(?:[?]|$)",
+                    "required": true
                   },
                   "model_name": {
-                    "selector": "a.a4:not(.periodResponseRate):not([href$=\"/references\"])",
+                    "selector": ".eac-item",
                     "type": "text",
+                    "pattern": "^(.+?)\\s+-\\s+model$",
                     "required": true
-                  },
-                  "profile_url": {
-                    "selector": "a.thumbnailPic",
-                    "type": "url",
-                    "attribute": "href",
-                    "required": true
-                  },
-                  "references": {
-                    "selector": "a[href$=\"/references\"]",
-                    "type": "number",
-                    "pattern": "([0-9]+)"
-                  },
-                  "response_rate": {
-                    "selector": ".periodResponseRate",
-                    "type": "number",
-                    "pattern": "([0-9]+)%"
-                  },
-                  "role": {
-                    "selector": ".text-left.smallSidePadding",
-                    "type": "text",
-                    "required": true,
-                    "pattern": "\\b((?:Female|Male|Transgender|Non-binary|Non Binary|Other) Model)\\b"
-                  },
+                  }
+                },
+                "field_defaults": {
+                  "record_type": "model_suggestion",
+                  "source": "native_autocomplete",
+                  "profile_lookup_operation": "search_exact_model"
+                },
+                "field_rewrites": {
                   "thread_url": {
-                    "selector": "a[href^=\"/message.php?user=\"]",
-                    "type": "url",
-                    "attribute": "href",
-                    "required": true
+                    "from": "model_id",
+                    "pattern": "^([0-9]+)$",
+                    "replacement": "https://www.adultfolio.com/message.php?user=$1"
                   }
                 },
                 "key_field": "model_id",
                 "pagination": {
-                  "end_when_next_absent": true,
-                  "mode": "next",
-                  "next": {
-                    "text": "Next",
-                    "selector": ".website_search_results .pagination a:containsown(\"Next\")",
-                    "exact": true,
-                    "som_only": true
-                  },
-                  "max_pages": 100,
+                  "mode": "snapshot",
+                  "max_pages": 1,
                   "stable_rounds": 2,
-                  "settle_ms": 1000
+                  "settle_ms": 500
+                },
+                "verification": {
+                  "fields": {
+                    "query": {
+                      "selector": "#basic-url",
+                      "type": "text",
+                      "attribute": "value",
+                      "required": true
+                    }
+                  },
+                  "assertions": {
+                    "query": {
+                      "equals_exact": "{{model_query}}"
+                    }
+                  }
                 }
               }
             ],
             "timeout_ms": 10000
-          },
-          "action": "inspect_views",
-          "locator": {}
+          }
         }
-      ],
-      "output_schema": null
+      ]
     },
     "verify_reply": {
       "read_only": true,
@@ -1474,21 +1550,24 @@
       "steps": [
         {
           "action": "goto",
-          "url": "https://www.adultfolio.com/search"
+          "url": "https://www.adultfolio.com/search",
+          "locator": {}
         },
         {
           "action": "wait",
+          "locator": {},
           "duration_ms": 2000
         },
         {
           "action": "extract",
+          "locator": {},
           "items": "body",
           "fields": {
             "account_url": {
               "selector": ".navbar a:containsown(\"Your Profile\")",
               "type": "url",
-              "required": true,
-              "attribute": "href"
+              "attribute": "href",
+              "required": true
             }
           },
           "readability": false,
@@ -1497,6 +1576,7 @@
         },
         {
           "action": "assert_values",
+          "locator": {},
           "assertions": {
             "account_url": {
               "equals_url": {
@@ -1506,11 +1586,11 @@
           }
         },
         {
+          "text": "{{model_query}}",
           "action": "set_text",
           "locator": {
             "selector": "#basic-url"
           },
-          "text": "{{model_query}}",
           "mode": "replace"
         },
         {
@@ -1524,19 +1604,23 @@
           "expected_text": "{{model_query}}"
         },
         {
+          "key": "End",
           "action": "key",
-          "key": "End"
+          "locator": {}
         },
         {
+          "text": " ",
           "action": "type",
-          "text": " "
+          "locator": {}
         },
         {
+          "key": "Backspace",
           "action": "key",
-          "key": "Backspace"
+          "locator": {}
         },
         {
           "action": "wait_for",
+          "locator": {},
           "conditions": [
             {
               "type": "selector_present",
@@ -1547,20 +1631,21 @@
         },
         {
           "action": "extract",
+          "locator": {},
           "items": "#eac-container-basic-url li",
           "fields": {
+            "suggestion_id": {
+              "selector": ".eac-item img",
+              "type": "text",
+              "attribute": "src",
+              "required": true,
+              "pattern": "/images/thumbs/([0-9]+)\\.jpg(?:[?]|$)"
+            },
             "suggestion_name": {
               "selector": ".eac-item",
               "type": "text",
               "required": true,
               "pattern": "^(.+?)\\s+-\\s+model$"
-            },
-            "suggestion_id": {
-              "selector": ".eac-item img",
-              "type": "text",
-              "required": true,
-              "attribute": "src",
-              "pattern": "/images/thumbs/([0-9]+)\\.jpg(?:[?]|$)"
             }
           },
           "readability": false,
@@ -1569,13 +1654,14 @@
         },
         {
           "action": "extract",
+          "locator": {},
           "items": "body",
           "fields": {
             "account_url": {
               "selector": ".navbar a:containsown(\"Your Profile\")",
               "type": "url",
-              "required": true,
-              "attribute": "href"
+              "attribute": "href",
+              "required": true
             }
           },
           "readability": false,
@@ -1594,37 +1680,40 @@
         },
         {
           "action": "assert_values",
+          "locator": {},
           "assertions": {
-            "suggestion_name": {
-              "equals_exact": "{{model_query}}"
-            },
             "account_url": {
               "equals_url": {
                 "url": "{{account_url}}"
               }
+            },
+            "suggestion_name": {
+              "equals_exact": "{{model_query}}"
             }
           }
         },
         {
+          "key": "ArrowDown",
           "action": "key",
-          "key": "ArrowDown"
+          "locator": {}
         },
         {
           "action": "extract",
+          "locator": {},
           "items": "#eac-container-basic-url li.selected",
           "fields": {
+            "selected_id": {
+              "selector": ".eac-item img",
+              "type": "text",
+              "attribute": "src",
+              "required": true,
+              "pattern": "/images/thumbs/([0-9]+)\\.jpg(?:[?]|$)"
+            },
             "selected_name": {
               "selector": ".eac-item",
               "type": "text",
               "required": true,
               "pattern": "^(.+?)\\s+-\\s+model$"
-            },
-            "selected_id": {
-              "selector": ".eac-item img",
-              "type": "text",
-              "required": true,
-              "attribute": "src",
-              "pattern": "/images/thumbs/([0-9]+)\\.jpg(?:[?]|$)"
             }
           },
           "readability": false,
@@ -1633,12 +1722,13 @@
         },
         {
           "action": "assert_values",
+          "locator": {},
           "assertions": {
-            "selected_name": {
-              "equals_field": "suggestion_name"
-            },
             "selected_id": {
               "equals_field": "suggestion_id"
+            },
+            "selected_name": {
+              "equals_field": "suggestion_name"
             }
           }
         },
@@ -1652,35 +1742,37 @@
         },
         {
           "action": "wait",
+          "locator": {},
           "duration_ms": 2000
         },
         {
           "action": "assert_url",
+          "locator": {},
           "host": "www.adultfolio.com"
         },
         {
           "action": "observe_page",
+          "locator": {},
           "items": "body",
-          "readability": false,
           "fields": {
             "account_url": {
               "selector": ".navbar a:containsown(\"Your Profile\")",
               "type": "url",
+              "attribute": "href",
+              "required": true
+            },
+            "model_id": {
+              "selector": "button:containsown(\"Message\")",
+              "type": "text",
+              "attribute": "onclick",
               "required": true,
-              "attribute": "href"
+              "pattern": "/message\\.php\\?user=([0-9]+)(?:&|[\\'\\\"])"
             },
             "model_name": {
               "selector": "h1.MainTitle",
               "type": "text",
               "required": true,
               "own_text": true
-            },
-            "model_id": {
-              "selector": "button:containsown(\"Message\")",
-              "type": "text",
-              "required": true,
-              "attribute": "onclick",
-              "pattern": "/message\\.php\\?user=([0-9]+)(?:&|[\\'\\\"])"
             },
             "role": {
               "selector": "h1.MainTitle + p",
@@ -1690,33 +1782,36 @@
             },
             "thread_url": {
               "selector": "button:containsown(\"Message\")",
-              "type": "url",
-              "required": true,
               "attribute": "onclick",
-              "pattern": "[\\'\\\"](/message\\.php\\?user=[0-9]+[^\\'\\\"]*)[\\'\\\"]"
+              "type": "url",
+              "pattern": "(/message\\.php\\?user=[0-9]+)(?:&|['\"])",
+              "required": true
             }
-          }
+          },
+          "readability": false
         },
         {
           "action": "assert_values",
+          "locator": {},
           "assertions": {
             "account_url": {
               "equals_url": {
                 "url": "{{account_url}}"
               }
             },
-            "model_name": {
-              "equals_exact": "{{model_query}}"
+            "current_url": {
+              "matches": "^https://www\\.adultfolio\\.com/[A-Za-z0-9_-]+/?$"
             },
             "model_id": {
               "equals_field": "suggestion_id"
             },
-            "current_url": {
-              "matches": "^https://www\\.adultfolio\\.com/[A-Za-z0-9_-]+/?$"
+            "model_name": {
+              "equals_exact": "{{model_query}}"
             }
           }
         }
-      ]
+      ],
+      "output_schema": null
     },
     "search_unmessaged_models_by_country": {
       "read_only": true,

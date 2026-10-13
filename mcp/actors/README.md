@@ -284,3 +284,17 @@ A mismatch leaves coverage incomplete and returns an error; requested input or
 URL parameters alone never count as proof of applied filters. If the site uses
 inactive controls, the site definition must distinguish their reported values
 from filters actually applied to the search.
+
+`read_views.use_current_page:true` inspects a verified widget in an already open
+browser, preserving the native query/composer state instead of navigating again.
+It requires a single entry-page view, no entry query and no continuation. Its
+normal creator, URL, untruncated DOM and filter checks still run before records.
+`pagination.mode:"snapshot"` returns a bounded, explicitly non-exhaustive read
+without scrolling or clicking a pagination control. It requires `allow_partial`;
+a preparation/search operation must also mark that inspection step
+`read_only:true` and may not place any write/input action after partial
+inspection. Snapshot coverage always remains incomplete and cannot be used
+as complete duplicate-inspection evidence. A rejected durable once guard reports
+no new commit attempt, while unknown dispatch failures retain conservative
+commit-attempt metadata. Restart recovery releases terminal context locks without
+replaying version-1 writes.

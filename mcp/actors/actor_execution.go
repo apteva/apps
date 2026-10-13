@@ -577,6 +577,7 @@ func (e *actorExecution) runSteps() (map[string]any, error) {
 		}
 		step := e.definition.Steps[index]
 		e.lastStartedStep = index
+		priorCommit, priorPreparation := e.commitAttempted, e.preparationAttempted
 		if step.EffectPhase == "prepare" {
 			e.preparationAttempted = true
 		} else if step.OnceKey != "" || step.ConfirmConsequence != "" || consequentialActorStep(step) {
@@ -597,6 +598,11 @@ func (e *actorExecution) runSteps() (map[string]any, error) {
 			if attempt < e.retries {
 				e.addTrace(step.Action, "retry", err.Error(), map[string]any{"step": index, "attempt": attempt + 1})
 			}
+		}
+		if errors.Is(err, errActorEffectReserved) {
+			// The durable guard proves this run never dispatched this effect.
+			// Earlier effects remain recorded; unknown dispatch failures stay true.
+			e.commitAttempted, e.preparationAttempted = priorCommit, priorPreparation
 		}
 		if err != nil && step.Optional && !errors.Is(err, errActorCancelled) {
 			e.addTrace(step.Action, "skipped", err.Error(), map[string]any{"step": index, "duration_ms": time.Since(started).Milliseconds()})

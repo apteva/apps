@@ -20,6 +20,7 @@ var errReadCollectionBound = errors.New("read collection bound reached")
 var errReadPaginationStalled = errors.New("pagination did not advance after verified wait")
 
 type actorReadViews struct {
+	UseCurrentPage         bool              `json:"use_current_page,omitempty"`
 	ContinuationEnabled    bool              `json:"continuation_enabled,omitempty"`
 	ContinuationRef        string            `json:"continuation_ref,omitempty"`
 	ContinuationTTLSeconds int               `json:"continuation_ttl_seconds,omitempty"`
@@ -131,6 +132,9 @@ func validateReadViews(c *actorReadViews) error {
 	if c.ContinuationTTLSeconds != 0 && (c.ContinuationTTLSeconds < 60 || c.ContinuationTTLSeconds > 1800) {
 		return errors.New("continuation TTL must be 60-1800 seconds")
 	}
+	if c.UseCurrentPage && (len(c.Views) != 1 || !c.Views[0].UseEntryPage || len(c.EntryQuery) > 0 || c.ContinuationEnabled) {
+		return errors.New("current-page inspection requires one entry view, no entry query and no continuation")
+	}
 	names := map[string]bool{}
 	for _, v := range c.Views {
 		if err := validateReadVerification(v.Verification); err != nil {
@@ -225,6 +229,10 @@ func validateReadViews(c *actorReadViews) error {
 			return errors.New("read view defaults/rewrites exceed field limit")
 		}
 		switch v.Pagination.Mode {
+		case "snapshot":
+			if !c.AllowPartial {
+				return errors.New("snapshot inspection requires explicit partial coverage")
+			}
 		case "scroll":
 			if v.Pagination.Next.Text != "" && (!v.Pagination.Next.SOMOnly || !v.Pagination.Next.Exact) {
 				return errors.New("scroll next requires exact som_only locator")
@@ -237,7 +245,7 @@ func validateReadViews(c *actorReadViews) error {
 				return errors.New("next pagination requires exact som_only next and explicit end evidence")
 			}
 		default:
-			return errors.New("read view pagination mode must be scroll or next")
+			return errors.New("read view pagination mode must be scroll, next or snapshot")
 		}
 		if v.Pagination.EndWhenNextAbsent {
 			if v.Pagination.Mode != "next" || v.Pagination.Next.Selector == "" {
@@ -457,7 +465,10 @@ func (e *actorExecution) inspectViews(c actorReadViews) error {
 	return nil
 }
 func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, result *actorViewCoverage, seen map[string]map[string]any) error {
-	if e.readResume == nil {
+	if c.UseCurrentPage && e.session == nil {
+		return errors.New("current-page inspection requires an existing browser session")
+	}
+	if e.readResume == nil && !c.UseCurrentPage {
 		if err := e.gotoURL(c.EntryURL); err != nil {
 			return err
 		}
@@ -655,6 +666,9 @@ func (e *actorExecution) inspectOneView(c actorReadViews, v actorReadView, resul
 		e.persistProgress("inspecting " + v.Name)
 		if collectionBound {
 			return fmt.Errorf("%w: dataset limit; more results remain", errReadCollectionBound)
+		}
+		if v.Pagination.Mode == "snapshot" {
+			return fmt.Errorf("%w: snapshot is bounded and non-exhaustive", errReadCollectionBound)
 		}
 		if v.Pagination.EndSelector != "" && readHas(root, v.Pagination.EndSelector) {
 			result.StopReason = "verified_end"

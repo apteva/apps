@@ -437,8 +437,15 @@ func validateActorDefinition(def actorDefinition) error {
 			if err := validateReadViews(step.ReadViews); err != nil {
 				return fmt.Errorf("steps[%d]: %w", i, err)
 			}
+			if step.ReadViews.AllowPartial && !def.ReadOnly && !step.ReadOnly {
+				return fmt.Errorf("steps[%d]: allow_partial requires a read_only operation or explicit read_only inspection step", i)
+			}
 			if step.ReadViews.AllowPartial && !def.ReadOnly {
-				return fmt.Errorf("steps[%d]: allow_partial requires a read_only operation", i)
+				for _, later := range def.Steps[i+1:] {
+					if !readOnlyActorAction(later.Action) {
+						return fmt.Errorf("steps[%d]: partial inspection cannot precede write or input actions", i)
+					}
+				}
 			}
 		case "fill":
 			if !locatorHasTarget(step.Locator) {

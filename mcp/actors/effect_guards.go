@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
+
+var errActorEffectReserved = errors.New("once_key already reserved")
 
 // Reserve before attempting a consequential click. An uncertain result remains
 // reserved across retries, restarts and revisions; inspect the original run
@@ -39,7 +42,7 @@ func (e *actorExecution) clickOnce(step actorStep) error {
 		if err := e.ctx.AppDB().QueryRow(`SELECT run_id FROM actors_effect_guards WHERE project_id=? AND actor_id=? AND operation=? AND once_key=?`, projectID(e.ctx), e.run.ActorID, input.Operation, step.OnceKey).Scan(&previousRun); err != nil {
 			return err
 		}
-		return fmt.Errorf("once_key already reserved by run %d; refusing a duplicate consequential click", previousRun)
+		return fmt.Errorf("%w by run %d; refusing a duplicate consequential click", errActorEffectReserved, previousRun)
 	}
 	effect := map[string]any{"once_key": step.OnceKey, "expected_effect": step.ExpectedEffect, "state": "reserved"}
 	if step.EffectPhase != "" {

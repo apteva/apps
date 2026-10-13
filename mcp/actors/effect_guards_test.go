@@ -35,6 +35,9 @@ func TestOnceKeyPreventsCompletedAndUncertainReplay(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				if i == 1 && mapFromAny(mapFromAny(result["output"])["execution_progress"])["commit_attempted"] != false {
+					t.Fatal("blocked duplicate reported a new commit", result)
+				}
 				if i == 1 && (!strings.Contains(result["error"].(string), "once_key already reserved") || result["status"] != "failed") {
 					t.Fatalf("replay=%#v", result)
 				}
