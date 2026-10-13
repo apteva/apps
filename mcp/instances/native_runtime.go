@@ -223,6 +223,9 @@ func (b *nativeBackend) validate(r nativeRequest) (*Instance, nativeOptions, nat
 	if e := nativeGateway(o.GatewayURL); e != nil {
 		return nil, o, a, p, e
 	}
+	if e := nativePublicEndpoints(o); e != nil {
+		return nil, o, a, p, e
+	}
 	if o.ControlPort != 0 && (o.ControlPort < 1024 || o.ControlPort > 65535) || o.MinDiskMB < 0 || o.MinMemoryMB < 0 {
 		return nil, o, a, p, errors.New("invalid target resource requirements")
 	}
@@ -298,7 +301,7 @@ func (b *nativeBackend) create(r nativeRequest, o nativeOptions, a nativeArtifac
 		return d, errors.New("persistent state reference belongs to a different target/installation")
 	}
 	d = nativeRecord{HealthPath: r.Manifest.Runtime.HealthCheck, ID: r.DeploymentID, InstallID: r.InstallID, Generation: r.Generation, InstanceID: inst.ID, Fingerprint: nativeFingerprint(r, o), Options: o, Artifact: a, ReleaseDir: base + "/releases/" + hash, DataDir: base + "/data", Unit: fmt.Sprintf("apteva-native-%d-%s.service", b.installID, hash), ControlPort: port,
-		Execution: nativeExecution{Handle: r.DeploymentID, State: "preparing", HostKey: p.HostKey, ReleaseDigest: nativeArtifactDigest(a), Platform: a.Platform, StateRef: stateRef, AppCapabilities: a.AppCapabilities, Ports: []nativePort{{Protocol: "tcp", Start: port, End: port, Exclusive: true}}}}
+		Execution: nativeExecution{BrowserEndpoint: o.BrowserEndpoint, Endpoints: o.Endpoints, Handle: r.DeploymentID, State: "preparing", HostKey: p.HostKey, ReleaseDigest: nativeArtifactDigest(a), Platform: a.Platform, StateRef: stateRef, AppCapabilities: a.AppCapabilities, Ports: []nativePort{{Protocol: "tcp", Start: port, End: port, Exclusive: true}}}}
 	if d.HealthPath == "" {
 		d.HealthPath = "/health"
 	}
