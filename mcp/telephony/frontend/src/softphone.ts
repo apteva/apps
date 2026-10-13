@@ -551,8 +551,10 @@ export class HeadlessSoftphone {
         lastRead=performance.now();
         if (!controller.signal.aborted && call) this.observeCall(call);
       } catch (error) {
-        this.hasStatusPush=false;
-        if (!controller.signal.aborted) this.update({ detail: `Call status unavailable: ${message(error)}` });
+        if (!controller.signal.aborted) {
+          this.hasStatusPush=false;
+          this.update({ detail: `Call status unavailable: ${message(error)}` });
+        }
       } finally {
         running=false;
         this.scheduleStatusPoll?.();

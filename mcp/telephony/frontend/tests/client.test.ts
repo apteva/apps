@@ -614,3 +614,23 @@ test("standalone status push reduces polls while live and retains old-server fal
   f.callbacks.onState?.("connecting");await Bun.sleep(150);expect(count()).toBeGreaterThan(before);
  }finally{phone.dispose();}
 });
+
+
+test("aborted old status request cannot disable push reconciliation on a reconnected call",async()=>{
+ const f=fixture();let polls=0;
+ let rejectFirst!:(error:Error)=>void;
+ const blocked=new Promise<never>((_,reject)=>{rejectFirst=reject;});
+ f.setResponse(async url=>{
+  if(url.pathname.endsWith("/calls")){polls++;if(polls===1)return blocked;return {calls:[{id:"call-1",status:"in-progress"}]};}
+  return f.session;
+ });
+ const phone=f.client.createSoftphone({audioRuntime:f.runtime,pollIntervalMs:100});
+ try{
+  await phone.answer("call-1");
+  const until=Date.now()+1000;while(!polls&&Date.now()<until)await Bun.sleep(1);expect(polls).toBe(1);
+  await phone.reconnect();
+  f.callbacks.onCallStatus?.({call_id:"call-1",status:"in-progress"});
+  const before=polls;rejectFirst(new Error("old request canceled"));await Bun.sleep(350);
+  expect(polls).toBe(before);
+ }finally{rejectFirst(new Error("cleanup"));phone.dispose();}
+});
