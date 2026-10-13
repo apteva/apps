@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.12.14
+version: 0.12.15
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -345,13 +345,20 @@ provides:
             maximum: 12
 
 runtime:
+  package:
+    app_capabilities:
+      passive_start: true
+      drain: true
+      replica_safe: false
+      worker_coordination: false
+      routing: key
   kind: source
   activation_strategy: exclusive
   startup_timeout_seconds: 60
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.12.14
+    ref: telephony/v0.12.15
     entry: mcp/telephony
   port: 8080
   health_check: /health

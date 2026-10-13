@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/telephony
 go 1.25.1
 
 require (
-	github.com/apteva/app-sdk v0.100.0
+	github.com/apteva/app-sdk v0.101.0
 	github.com/ebitengine/purego v0.11.1
 	github.com/emiago/sipgo v1.4.3
 	github.com/gobwas/ws v1.4.0
@@ -23,6 +23,7 @@ require (
 	github.com/pion/turn/v5 v5.1.2
 	github.com/pion/webrtc/v4 v4.2.22
 	github.com/twilio/twilio-go v1.30.9
+	golang.org/x/sys v0.42.0
 	modernc.org/sqlite v1.50.0
 )
 
@@ -46,7 +47,6 @@ require (
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/net v0.50.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	modernc.org/libc v1.72.0 // indirect
