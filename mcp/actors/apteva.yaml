@@ -1,8 +1,10 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.2.38
+version: 0.2.39
 description: |
+  v0.2.39 permits declared, explicitly reviewed same-draft copy amendments only
+  after fresh exact saved-copy inspection, preserving identity/media/once guards.
   v0.2.36 adds verified current-page snapshots, correct blocked-replay metadata
   and terminal context-lock cleanup after restart.
   Read views verify live filter values before returning candidates, independently
@@ -106,7 +108,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.2.38
+    ref: actors/v0.2.39
     entry: mcp/actors
   port: 8080
   health_check: /health

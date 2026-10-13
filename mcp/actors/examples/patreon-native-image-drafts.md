@@ -63,3 +63,15 @@ URL, post ID, attachment IDs/names/sizes/states in saved order and array counts.
 `failed_condition` records the rejected check, and `execution_progress` reports
 whether the guarded commit was attempted. A partial observation or failed check
 never grants publishing readiness.
+
+
+A specifically approved body amendment can be saved separately with
+`prepare_image_draft_copy`: supply the original `expected_current_body`, approved
+new `post_body`, unchanged title/creator/access and verified attachment IDs, names
+and sizes. It verifies the original unscheduled draft, changes only its body, then
+reopens it and checks saved copy and unchanged media/access. It never publishes.
+Then run the canonical `inspect_image_draft` with the approved new body and pass
+`reviewed_copy: {"post_body": "approved exact new body"}` to guarded recovery.
+Only creation operations explicitly declaring that copy field accept amendments.
+The original failed input remains immutable and recovery provenance records both
+values. Any unexpected body, media, access or persistence change blocks.

@@ -18,9 +18,9 @@ func TestNativeMediaSavedDraftPreflightCurrentLayouts(t *testing.T) {
 	var template map[string]any
 	json.Unmarshal(raw, &template)
 	for _, audience := range []string{"public", "paid"} {
-		for _, kind := range []string{"image", "gallery"} {
-			for _, mode := range []string{"nested_blurred", "wrong", "extra", "reordered", "wrong_creator", "wrong_title", "wrong_body", "wrong_audience", "wrong_tier", "sale_on"} {
-				if kind == "image" && mode == "reordered" {
+		for _, kind := range []string{"image", "gallery", "image_copy"} {
+			for _, mode := range []string{"nested_blurred", "wrong", "extra", "reordered", "wrong_creator", "wrong_title", "wrong_body", "wrong_audience", "wrong_tier", "sale_on", "lost_save"} {
+				if (kind != "gallery" && mode == "reordered") || (kind != "image_copy" && mode == "lost_save") {
 					continue
 				}
 				t.Run(audience+"/"+kind+"/"+mode, func(t *testing.T) {
@@ -103,6 +103,10 @@ func TestNativeMediaSavedDraftPreflightCurrentLayouts(t *testing.T) {
 							current = stringFromAny(in["url"])
 						case "computer.computer_use":
 							switch in["action"] {
+							case "set_text":
+								if kind == "image_copy" && mode != "lost_save" {
+									editor = strings.Replace(editor, "Exact second paragraph.", "Amended second paragraph.", 1)
+								}
 							case "navigate":
 								current = stringFromAny(in["url"])
 							case "click":
@@ -110,7 +114,7 @@ func TestNativeMediaSavedDraftPreflightCurrentLayouts(t *testing.T) {
 									commits++
 								}
 							case "screenshot":
-								return map[string]any{"current_url": current, "som_revision": 1, "draft_save_state": "saved", "som": []any{map[string]any{"id": "tiers", "tag": "button", "text": "Select tiers", "accessible_name": "Select tiers", "effect": "open_configuration"}, map[string]any{"id": "publish", "tag": "button", "text": "Publish", "accessible_name": "Publish", "effect": "immediate_external_commit"}}}
+								return map[string]any{"current_url": current, "som_revision": 1, "draft_save_state": "saved", "som": []any{map[string]any{"id": "body", "tag": "div", "role": "textbox", "accessible_name": "Text input field for post content", "text": "Text input field for post content", "effect": "save_draft", "editable": true}, map[string]any{"id": "tiers", "tag": "button", "text": "Select tiers", "accessible_name": "Select tiers", "effect": "open_configuration"}, map[string]any{"id": "publish", "tag": "button", "text": "Publish", "accessible_name": "Publish", "effect": "immediate_external_commit"}}}
 							}
 							return map[string]any{"current_url": current, "conditions_met": true, "matched": true}
 						case "computer.browser_extract":
@@ -128,7 +132,13 @@ func TestNativeMediaSavedDraftPreflightCurrentLayouts(t *testing.T) {
 					fixture["browser"] = map[string]any{"context_id": "fixture-context"}
 					rec := saveFixtureActor(t, ctx, a, fixture)
 					input := map[string]any{"creator_url": "https://www.patreon.com/c/creator", "expected_creator_identity": "creator", "post_id": "42", "post_edit_url": "https://www.patreon.com/creator/posts/exact-42/edit", "post_title": "Exact Title", "post_body": "Exact first paragraph.\n\nExact second paragraph.", "audience": audience, "tier_labels": tiers, "request_id": "same-request", "expected_attachment_ids": expectedIDs, "expected_attachment_filenames": expectedNames, "expected_attachment_sizes": expectedSizes}
-					q, err := a.toolActorRun(ctx, map[string]any{"actor_id": rec.ID, "operation": "publish_" + kind + "_draft_preflight", "input": input})
+					operation := "publish_" + kind + "_draft_preflight"
+					if kind == "image_copy" {
+						operation = "prepare_image_draft_copy"
+						input["expected_current_body"] = input["post_body"]
+						input["post_body"] = "Exact first paragraph.\n\nAmended second paragraph."
+					}
+					q, err := a.toolActorRun(ctx, map[string]any{"actor_id": rec.ID, "operation": operation, "input": input})
 					if err != nil {
 						t.Fatal(err)
 					}

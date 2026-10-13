@@ -95,3 +95,15 @@ run's original uploads, copy/access inputs and durable effect scope. Use named
 preflight. Dedicated `publish_*_draft` operations are `recovery_only`; never call
 ordinary retry/new creation to recover media. Keep Catalog originals and process
 actual-live predecessor requirements. See `examples/patreon-native-image-drafts.md`.
+
+
+Reviewed same-draft copy amendments (0.2.39): `actors_run_recover` may receive
+`reviewed_copy` only for explicitly approved text fields declared by the selected
+revision's `recovery.existing.reviewed_copy_fields` (input to observed-field map).
+First use a separately reviewed draft-only preparation operation, then run the
+canonical read-only resource inspection with the amended text and original other
+inputs. Its exact observed-value assertion and fresh completed run are required.
+The recovery records original/amended text in provenance; duplicate identity,
+creator, access, ordered media and original publish-once keys remain fixed.
+No copy amendment is allowed in ordinary recovery or in the commit-only resume
+operation. This capability does not itself authorize editing or publishing.
