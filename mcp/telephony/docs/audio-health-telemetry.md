@@ -299,3 +299,8 @@ Browser session history includes `client_build / v0_12_19` and RTC
 selected or healthy relay. These sparse records use the existing paced background
 control budget, so backpressure may skip them. No media contents, credentials,
 URLs, candidate addresses or raw upstream error bodies are added.
+
+Full browser diagnostics also retain safe `client_version` and nullable
+`relay_configured`, so bounded event-history eviction does not erase this context.
+They are browser-reported configuration/version observations, not attestation.
+Legacy browser reports omit them; no value is inferred from the server version.

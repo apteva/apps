@@ -25,7 +25,7 @@ this release.
 - Expose these totals in `/audio-health` summary metrics. Histories remain bounded
   to 16 drop events; counters outlive the history. No socket or database work is
   added to the audio loop, and the audio bounds/expiry rules remain unchanged.
-- Record one safe client build marker during browser connection preparation on
+- Record one safe client build marker during browser connection preparation and retain the safe version in full reports on
   both transports, so future incidents can identify the loaded client version.
 - Record whether RTC setup has a configured TURN relay. This is configuration
   evidence, not proof that the relay is reachable or selected. Existing selected

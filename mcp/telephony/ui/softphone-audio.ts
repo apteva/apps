@@ -843,7 +843,7 @@ export class SoftphoneSession {
     const playbackEvents=fresh(value.playbackEvents,this.reportedPlaybackIDs);
     const captureQueueEvents=fresh(value.captureQueueEvents,this.reportedCaptureQueueIDs);
     this.sendText(JSON.stringify({ type: "diagnostics", diagnostics: {
-      media_transport: "websocket", codec: "pcm16",
+      media_transport: "websocket", codec: "pcm16", client_version: SOFTPHONE_CLIENT_VERSION,
       client_epoch:this.clientEpoch,
       playback_events:playbackEvents, capture_queue_events:captureQueueEvents,
       timing: {transport:this.transportTiming, playback:this.playbackTiming, runtime:this.runtimeTelemetry.counters},

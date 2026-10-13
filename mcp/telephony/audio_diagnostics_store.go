@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"math"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -121,7 +122,11 @@ type mediaSessionEvent struct {
 	WasClean          bool   `json:"was_clean,omitempty"`
 }
 
+var browserClientVersionPattern = regexp.MustCompile(`^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$`)
+
 type browserAudioDiagnostics struct {
+	ClientVersion          string                    `json:"client_version,omitempty"`
+	RelayConfigured        *bool                     `json:"relay_configured,omitempty"`
 	TransportSamples       []browserTransportSample  `json:"transport_samples,omitempty"`
 	PlaybackEvents         []browserAudioObservation `json:"playback_events,omitempty"`
 	CaptureQueueEvents     []browserAudioObservation `json:"capture_queue_events,omitempty"`
@@ -363,6 +368,9 @@ func clampDiagnosticDBFS(value *float64) *float64 {
 }
 
 func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics) browserAudioDiagnostics {
+	if len(value.ClientVersion) > 32 || !browserClientVersionPattern.MatchString(value.ClientVersion) {
+		value.ClientVersion = ""
+	}
 	value.TransportSamples = normalizeTransportSamples(value.TransportSamples, time.Now())
 	value.PlaybackEvents = normalizeAudioObservations(value.PlaybackEvents)
 	value.CaptureQueueEvents = normalizeAudioObservations(value.CaptureQueueEvents)

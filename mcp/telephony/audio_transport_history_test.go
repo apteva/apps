@@ -242,3 +242,19 @@ func TestTransportHistoryPacedPartsMergeIdempotentlyAndReportIncompleteSamples(t
 		t.Fatal("history piece replaced the media summary")
 	}
 }
+
+func TestBrowserBuildEvidenceIsBoundedAndNotInferred(t *testing.T) {
+	for _, version := range []string{"0.12.19", "1.2.3"} {
+		relay := false
+		v := normalizeBrowserAudioDiagnostics(browserAudioDiagnostics{ClientVersion: version, RelayConfigured: &relay})
+		if v.ClientVersion != version || v.RelayConfigured == nil || *v.RelayConfigured {
+			t.Fatal(v)
+		}
+	}
+	for _, version := range []string{"", "https://secret/token", "Bearer token", "0.12.19\nsecret", strings.Repeat("1", 10000)} {
+		v := normalizeBrowserAudioDiagnostics(browserAudioDiagnostics{ClientVersion: version})
+		if v.ClientVersion != "" || v.RelayConfigured != nil {
+			t.Fatal("unsafe/inferred build evidence", v)
+		}
+	}
+}
