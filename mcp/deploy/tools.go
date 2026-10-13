@@ -769,6 +769,7 @@ func (a *App) toolEnvDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	_ = os.RemoveAll(filepath.Join(a.dataDir, "store-assets", strconv.FormatInt(d.ID, 10), strconv.FormatInt(env.ID, 10)))
+	_ = os.RemoveAll(filepath.Join(a.dataDir, "static-assets", strconv.FormatInt(d.ID, 10), strconv.FormatInt(env.ID, 10)))
 	emit("deploy.environment.destroyed", map[string]any{"deployment_id": d.ID, "environment_id": env.ID, "environment": env.Name})
 	return map[string]any{"destroyed": true, "environment": env.Name, "environment_id": env.ID}, nil
 }
@@ -1294,6 +1295,7 @@ func (a *App) toolDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	a.removeBuildDirs(builds)
 	_ = os.RemoveAll(filepath.Join(a.dataDir, "store-assets", strconv.FormatInt(d.ID, 10)))
+	_ = os.RemoveAll(filepath.Join(a.dataDir, "static-assets", strconv.FormatInt(d.ID, 10)))
 	emit("deploy.destroyed", map[string]any{"deployment_id": d.ID, "name": d.Name})
 	return map[string]any{"destroyed": true, "id": d.ID}, nil
 }

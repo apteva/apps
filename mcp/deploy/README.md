@@ -490,6 +490,31 @@ requested releases and recovery artifacts; newly discovered orphan directories
 receive a grace period. ZIP extraction is limited to 100,000 entries and 2 GiB
 expanded data (1 GiB for runner source capsules), rejects duplicate/special files
 and escaping links, and preserves confined relative runtime symlinks.
+
+Static builds and automatically detected Bun/Node static exports generate
+deterministic Brotli and gzip sidecars before pipeline tests and artifact
+sealing. The static server negotiates `Accept-Encoding` quality values, preserves
+the original MIME type, sets `Content-Encoding` and `Vary: Accept-Encoding`, and
+uses a separate strong ETag for each representation. GET, HEAD, conditional
+requests and byte ranges operate on the selected representation.
+
+Common content-hashed JS/CSS/font/image/wasm filenames receive
+`public, max-age=31536000, immutable`; HTML, `version.json` and other mutable
+filenames use `no-cache` so clients revalidate. Missing asset URLs return a real
+404, while navigation still supports directory indexes, custom `404.html` and
+the SPA index fallback. Existing external servers selected by `start_cmd` keep
+their own delivery behavior.
+
+Hashed assets and their compressed sidecars are copied into a separate
+`/data/static-assets/<deployment_id>/<environment_id>/<release_id>/` cache.
+The current snapshot plus five previous snapshots are retained, with snapshots
+older than 30 days pruned when a static release starts. Restarts and rollbacks
+refresh their snapshot. Old tabs can load previous chunks during this retention
+window even after build-artifact pruning. Only hashed assets are eligible for
+fallback; old HTML and mutable files are never served. The first release after
+upgrading also seeds the previously active build's assets. Artifact trees and
+their attestations remain unchanged during serving and retention.
+
 Node, Bun, and blank artifact staging remaps absolute links into the temporary
 source tree to relative links within the staged artifact. Links outside the
 source tree fail with their path; artifact attestation still checks every link.

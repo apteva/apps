@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.29.2
+version: 0.30.0
 description: |
   Build and release services, mobile apps, and arbitrary artifacts from Code
   or local sources using local and external build backends. Generic command
@@ -11,6 +11,8 @@ description: |
 
   Supports source kinds {code, local} and frameworks
   {go, node, bun, static, blank, android, ios, macos, command}.
+  v0.30.0 adds precompressed static delivery, immutable hashed-asset caching,
+  HTML revalidation, previous-chunk retention and delivery regression tests.
   v0.29.2 fixes shared macOS key import with compatible, password-protected
   PKCS#12 archives and installs app-specific profiles in Xcode caches.
   v0.29.1 imports and reuses Apple signing identities across build providers,
@@ -198,7 +200,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: deploy/v0.29.2
+    ref: deploy/v0.30.0
     entry: mcp/deploy
   port: 8080
   health_check: /health
