@@ -9305,6 +9305,12 @@
             "attachment_filenames": {
               "equals_exact": "{{expected_attachment_filenames}}"
             },
+            "attachment_ids": {
+              "equals_exact": "{{expected_attachment_ids}}"
+            },
+            "attachment_sizes": {
+              "equals_exact": "{{expected_attachment_sizes}}"
+            },
             "attachment_states": {
               "equals_exact": [
                 "ready"
@@ -9323,12 +9329,6 @@
             },
             "post_type": {
               "equals_exact": "image_file"
-            },
-            "attachment_ids": {
-              "equals_exact": "{{expected_attachment_ids}}"
-            },
-            "attachment_sizes": {
-              "equals_exact": "{{expected_attachment_sizes}}"
             }
           }
         },
@@ -9378,17 +9378,38 @@
           "locator": {}
         },
         {
+          "action": "extract",
+          "items": "[aria-label=\"Text input field for post content\"][role=\"textbox\"][contenteditable=\"true\"]",
+          "fields": {
+            "copy_editor_role": {
+              "attribute": "role",
+              "required": true,
+              "pattern": "^textbox$"
+            },
+            "copy_editor_editable": {
+              "attribute": "contenteditable",
+              "required": true,
+              "pattern": "^true$"
+            },
+            "copy_editor_label": {
+              "attribute": "aria-label",
+              "required": true,
+              "pattern": "^Text input field for post content$"
+            }
+          },
+          "readability": false,
+          "min_items": 1,
+          "max_items": 1
+        },
+        {
           "text": "{{post_body}}",
           "action": "set_text",
           "locator": {
-            "text": "Text input field for post content",
-            "role": "textbox",
-            "exact": true,
-            "som_only": true
+            "selector": "[aria-label=\"Text input field for post content\"][role=\"textbox\"][contenteditable=\"true\"]"
           },
+          "expected_effect": "save_draft",
           "mode": "replace",
-          "newline_mode": "preserve",
-          "expected_effect": "save_draft"
+          "newline_mode": "preserve"
         },
         {
           "action": "wait",
@@ -9768,6 +9789,12 @@
             "attachment_filenames": {
               "equals_exact": "{{expected_attachment_filenames}}"
             },
+            "attachment_ids": {
+              "equals_exact": "{{expected_attachment_ids}}"
+            },
+            "attachment_sizes": {
+              "equals_exact": "{{expected_attachment_sizes}}"
+            },
             "attachment_states": {
               "equals_exact": [
                 "ready"
@@ -9786,12 +9813,6 @@
             },
             "post_type": {
               "equals_exact": "image_file"
-            },
-            "attachment_ids": {
-              "equals_exact": "{{expected_attachment_ids}}"
-            },
-            "attachment_sizes": {
-              "equals_exact": "{{expected_attachment_sizes}}"
             }
           }
         },
@@ -9840,7 +9861,8 @@
           "action": "dismiss_inspection",
           "locator": {}
         }
-      ]
+      ],
+      "output_schema": null
     }
   },
   "schema_version": 1,
