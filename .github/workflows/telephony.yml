@@ -94,9 +94,11 @@ jobs:
       - name: Verify musl library with a musl-loader binary
         if: runner.os == 'Linux'
         run: |
+          sudo apt-get update
+          sudo apt-get install -y musl
+          test -x /lib/ld-musl-${{ matrix.musl_arch }}.so.1
           go test -c -ldflags '-I /lib/ld-musl-${{ matrix.musl_arch }}.so.1' -o /tmp/telephony-opus-musl .
-          docker run --rm --network none --user 10001:10001 -e HOME=/tmp \
-            -v /tmp/telephony-opus-musl:/test:ro alpine:3.22 /test \
+          HOME=/tmp /tmp/telephony-opus-musl \
             -test.run 'TestRTCOpusBundle|TestRTCNative|TestRTCFECOff|TestRTCOpusCodecCompatibility' -test.v
   mixed-media-load:
     name: Mixed SIP media load
@@ -133,7 +135,7 @@ jobs:
       matrix:
         include:
           - group: media
-            pattern: 'Test(SIPPlayback|CarrierStream|CarrierEvidence|CarrierRecovery|SIPTelemetry)'
+            pattern: 'Test(SIPPlayback|SIPClockFitEvidence|SIPClockLowerEnvelope|SIPClockRecoveryShort|SIPClockRecoveryDelivery|SIPIngressAndConsumer|SIPFreshPacketAfter|SIPStartupReserve|SIPDecodedPartial|SIPKernelArrival|SIPEarlyReserve|SIPLinux|CarrierStream|CarrierEvidence|CarrierRecovery|SIPTelemetry)'
           - group: lifecycle
             pattern: 'Test(SoftphoneStartup|SIPStartupCodec|SIPDialogTLS|SIPOutboundEarly|SIPOutboundFresh|SIPBYEFailure|NotificationOutbox|RTCIngressEvidence|ProxyCallIdentity|ProxyIdentityRetained|AutomaticOutboundSIP|TelephonyExclusiveActivation|SIPExclusiveActivation|GenericOutboundSIP|OutboundSIP|DIDWWOutbound|Telnyx.*SIP|TelnyxProvisioning|DirectSIPCarrierSetup|SIPAnsweredDialog|SIPMissingInitialACK|LocalSIP|LocalMediaSettings|SIPRuntimeTransport|SIPResourceCleanup|SIPNativeHold|SIPOutboundDTMF|SIPTransportSave|SIPRetirement|SIPTwilioDetach|SIPAIActivation|SIPRouteAccount|SIPExternalOffer|SelectingDirectSIP|LocalCloseTimeout)'
     env:

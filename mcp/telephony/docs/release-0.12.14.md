@@ -1,4 +1,4 @@
-# Telephony 0.12.14 — managed runtime and SIP recovery (prepared locally)
+# Telephony 0.12.14 — managed runtime and SIP recovery
 
 - Implement protected describe/drain/activate hooks and passive startup for
   Apteva's managed execution controller, retaining exclusive activation and
@@ -52,8 +52,8 @@
 See [managed-runtime.md](managed-runtime.md) for endpoint/configuration and
 Server prerequisites. The current native snapshot limit is 512 MiB. Concrete
 remote infrastructure and legacy rollback boot authorization still require
-Server/backend work and staging validation. This version is prepared locally;
-no instance is installed, moved or restarted by this work.
+Server/backend work and staging validation. Publishing this version does not
+install, move or restart an instance.
 
 ## Verification
 
