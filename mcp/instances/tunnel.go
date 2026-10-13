@@ -65,6 +65,11 @@ func dialInstanceLoopback(inst *Instance, target string) (net.Conn, error) {
 }
 
 func (r *tunnelRegistry) open(inst *Instance, targetPort int) (*managedTunnel, error) {
+	return r.openAt(inst, targetPort, 0)
+}
+
+// openAt restores a deployment-owned tunnel at its durable Server-facing port.
+func (r *tunnelRegistry) openAt(inst *Instance, targetPort, localPort int) (*managedTunnel, error) {
 	if inst == nil || inst.ID <= 0 || inst.IsLocal() {
 		return nil, errors.New("remote instance required")
 	}
@@ -75,10 +80,18 @@ func (r *tunnelRegistry) open(inst *Instance, targetPort int) (*managedTunnel, e
 
 	r.mu.Lock()
 	if existing := r.tunnels[key]; existing != nil {
+		if localPort != 0 && existing.localPort != localPort {
+			r.mu.Unlock()
+			return nil, errors.New("tunnel allocation conflicts with durable port")
+		}
 		r.mu.Unlock()
 		return existing, nil
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if localPort < 0 || localPort > 65535 {
+		r.mu.Unlock()
+		return nil, errors.New("invalid tunnel port")
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(localPort)))
 	if err != nil {
 		r.mu.Unlock()
 		return nil, err
