@@ -53,7 +53,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.16.6
+version: 0.17.0
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -108,6 +108,8 @@ provides:
     - { name: account_import_provider,    description: "Import provider-backed accounts such as Zernio into Social." }
     - { name: account_list,               description: "List connected social accounts." }
     - { name: account_provider_sync_update, description: "Set provider synchronization to off, managed_only, or explicitly opted-in full_history without changing publishing access." }
+    - { name: account_audience_capabilities, description: "Optional account audience capabilities; no provider calls." }
+    - { name: account_membership_levels, description: "Optional cached tier discovery; refresh=true queries the existing integration connection." }
     - { name: account_check,              description: "Check that connected social accounts still work." }
     - { name: account_disconnect,         description: "Revoke a social account." }
     - { name: post_create,                description: "Create with required explicit mode=draft|schedule|publish. Drafts are optional; direct scheduling and publishing remain first-class. Missing mode never publishes." }
@@ -147,7 +149,7 @@ provides:
       visibility: project
       supported_sizes: [half, full]
       default_size: half
-      refresh_topics: [post.created, post.rescheduled, post.completed, post.deleted, post.draft_created, post.draft_updated, post.draft_submitted, post.draft_approved, post.draft_rejected, post.publish_requested, target.published, target.pending, target.published_warning, target.failed, profile.accounts_moved, account.deleted]
+      refresh_topics: [post.created, post.rescheduled, post.completed, post.deleted, post.draft_created, post.draft_updated, post.draft_submitted, post.draft_approved, post.draft_rejected, post.publish_requested, target.published, target.pending, target.published_warning, target.awaiting_audience_setup, post.audience_confirmed, target.failed, profile.accounts_moved, account.deleted]
       settings_schema:
         type: object
         properties:
@@ -186,7 +188,7 @@ provides:
           profile_id: { type: integer }
           social_account_id: { type: integer }
           view: { type: string, enum: [week, month] }
-          status: { type: string, enum: [all, scheduled, published, failed, partial, draft, in_review, approved, rejected] }
+          status: { type: string, enum: [all, scheduled, published, failed, partial, draft, in_review, approved, rejected, awaiting_audience_setup] }
           anchor_date: { type: string }
       preview_props:
         preview: true
@@ -206,7 +208,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: social/v0.17.0
     entry: mcp/social
   port: 8080
   health_check: /health
@@ -760,6 +762,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		// Account management
 		{Pattern: "/accounts", Handler: a.handleAccountsAPI},
+		{Pattern: "/audiences/accounts/", Handler: a.handleAudienceAccount},
+		{Pattern: "/audiences/confirm", Handler: a.handleAudienceConfirm},
 		{Pattern: "/accounts/start", Handler: a.handleAccountsStart},
 		{Method: http.MethodGet, Pattern: "/accounts/oauth_done", Handler: a.handleOAuthDone, NoAuth: true},
 		{Pattern: "/accounts/finalize", Handler: a.handleAccountsFinalize},
@@ -905,7 +909,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"OR targets[] (when you want per-target overrides). The two are mutually exclusive. " +
 				"Each target object: {social_account_id (required), body? (required when top-level body is omitted; otherwise override text for this target), " +
 				"plus platform-specific keys for the target's platform}. " +
-				"Today: youtube accepts {title, body, visibility (public|unlisted|private), category, tags[], thumbnail_storage_id}. " +
+				"Today: youtube accepts {title, body, visibility (public|unlisted|private), category, tags[], thumbnail_storage_id}. Optional target audience={type:members,level_ids?:[]} requests membership staging; omitted audience preserves ordinary publishing. Membership uploads require the updated YouTube catalog/server and completion in Studio. " +
 				"X accepts {body, allow_longform}; normal posts are validated against X's 280-character weighted limit before media is uploaded. " +
 				"Facebook accepts {body, thumbnail_storage_id} for video posts; Instagram accepts {body, thumbnail_storage_id, thumbnail_frame_ms} for Reels; TikTok accepts videos with {body, thumbnail_frame_ms} or photo posts with {body, title, auto_add_music, photo_cover_index}. " +
 				"Use plain platform text, not Markdown formatting; most social platforms do not render Markdown. " +
@@ -990,7 +994,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "post_list",
-			Description: "List stored posts with per-target status, newest lifecycle date first. Filter by profile_id or profile (slug), status, and from/to before pagination. Args: limit? (default 50, max 200), offset? (default 0). Returns posts, total (matching post records), total_targets (matching per-account delivery entries), returned_targets, limit, offset, has_more, next_offset (null at end). Continue with next_offset and the same filters. Counts include all statuses unless filtered, and only stored history; deleted or never-imported platform history is excluded. Keep the dataset unchanged while paging, or restart if it changes.",
+			Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false},
+			Description: "Read-only: retrieve stored post history without creating, retrying, scheduling or updating posts. List stored posts with per-target status, newest lifecycle date first. Filter by profile_id or profile (slug), status, and from/to before pagination. Args: limit? (default 50, max 200), offset? (default 0). Returns posts, total (matching post records), total_targets (matching per-account delivery entries), returned_targets, limit, offset, has_more, next_offset (null at end). Continue with next_offset and the same filters. Counts include all statuses unless filtered, and only stored history; deleted or never-imported platform history is excluded. Keep the dataset unchanged while paging, or restart if it changes.",
 			InputSchema: schemaObject(map[string]any{
 				"limit":      map[string]any{"type": "integer", "default": 50, "minimum": 1, "maximum": 200},
 				"offset":     map[string]any{"type": "integer", "default": 0, "minimum": 0},
@@ -1212,6 +1217,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 	}
 	tools = append(tools, a.profileTools()...)
+	tools = append(tools, a.audienceTools()...)
 	return tools
 }
 
@@ -1719,24 +1725,25 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			}
 		}
 		out = append(out, map[string]any{
-			"id":                   id,
-			"platform":             platform,
-			"connection_id":        connID,
-			"external_account_id":  externalID,
-			"display_name":         name,
-			"avatar_url":           avatar,
-			"status":               status,
-			"created_at":           createdAt,
-			"profile_id":           profID,
-			"last_check_at":        checkAt,
-			"last_check_status":    checkStatus,
-			"last_check_error":     checkError,
-			"last_check_details":   details,
-			"provider_slug":        providerSlug,
-			"provider_account_id":  providerAccountID,
-			"provider_profile_id":  providerProfileID,
-			"provider_import_mode": providerImportMode,
-			"capabilities":         capabilities,
+			"id":                    id,
+			"platform":              platform,
+			"connection_id":         connID,
+			"external_account_id":   externalID,
+			"display_name":          name,
+			"avatar_url":            avatar,
+			"status":                status,
+			"created_at":            createdAt,
+			"profile_id":            profID,
+			"last_check_at":         checkAt,
+			"last_check_status":     checkStatus,
+			"last_check_error":      checkError,
+			"last_check_details":    details,
+			"provider_slug":         providerSlug,
+			"audience_capabilities": adapterForAudience(platform, providerSlug).Capabilities,
+			"provider_account_id":   providerAccountID,
+			"provider_profile_id":   providerProfileID,
+			"provider_import_mode":  providerImportMode,
+			"capabilities":          capabilities,
 		})
 	}
 	return map[string]any{"accounts": out}, nil
@@ -2055,6 +2062,9 @@ func (a *App) hardDeleteAccount(ctx *sdk.AppCtx, pid string, id, connID int64, p
 	if err != nil {
 		return nil, fmt.Errorf("delete metric history: %w", err)
 	}
+	if _, err := tx.Exec(`DELETE FROM social_membership_cache WHERE social_account_id=?`, id); err != nil {
+		return nil, err
+	}
 	targetRes, err := tx.Exec(`DELETE FROM post_targets WHERE social_account_id=?`, id)
 	if err != nil {
 		return nil, fmt.Errorf("delete post targets: %w", err)
@@ -2198,7 +2208,7 @@ func (a *App) validateTargetOptions(ctx *sdk.AppCtx, pid string, targets []targe
 		def := platforms[platform]
 		// Build the set of accepted keys: every platform implicitly
 		// accepts `body` as an override; OptionFields adds the rest.
-		ok := map[string]bool{"body": true}
+		ok := map[string]bool{"body": true, "audience": true}
 		for _, f := range def.OptionFields {
 			ok[f.Name] = true
 		}
@@ -2248,6 +2258,9 @@ func validatePostTargets(ctx *sdk.AppCtx, pid string, targets []targetSpec) (map
 		}
 		if status != "active" {
 			return nil, fmt.Errorf("social account %d is %s; reconnect it before posting", target.SocialAccountID, status)
+		}
+		if err := validateAudienceTarget(ctx, pid, target); err != nil {
+			return nil, fmt.Errorf("account %d: %w", target.SocialAccountID, err)
 		}
 		profiles[target.SocialAccountID] = profileID
 	}
@@ -2515,7 +2528,7 @@ func (a *App) findDuplicateScheduledPost(ctx *sdk.AppCtx, pid string, profileID 
 		    AND COALESCE(p.media_storage_ids,'[]')=?
 		    AND COALESCE(p.media_project_id,'')=?
 		    AND COALESCE(p.schedule_at,'')=?
-		    AND p.status IN ('scheduled','publishing','published','partial','failed')
+		    AND p.status IN ('scheduled','publishing','published','partial','failed','awaiting_audience_setup')
 		  GROUP BY p.id, p.status, p.job_id
 		  ORDER BY p.id ASC`,
 		pid, profileID, body, mediaJSON, mediaProjectID, scheduleAt,
@@ -2849,6 +2862,12 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 		}
 		platformPostID, platformURL, err := a.runStrategy(ctx, def, j)
 		if err != nil {
+			var awaiting *awaitingAudienceError
+			if errors.As(err, &awaiting) && platformPostID != "" {
+				_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET status='awaiting_audience_setup',audience_status='awaiting_setup',platform_post_id=?,platform_url=?,published_at=NULL,last_error=?,retryable=0 WHERE id=?`, platformPostID, platformURL, awaiting.Error(), j.targetID)
+				ctx.Emit("target.awaiting_audience_setup", map[string]any{"target_id": j.targetID, "platform": j.platform, "platform_post_id": platformPostID})
+				continue
+			}
 			var warning *publishedWarningError
 			if errors.As(err, &warning) && (platformPostID != "" || warning.operationID != "") {
 				if warning.pending {
@@ -2917,7 +2936,7 @@ func claimPostTarget(ctx *sdk.AppCtx, targetID int64) (bool, error) {
 	res, err := ctx.AppDB().Exec(
 		`UPDATE post_targets
 		    SET status='publishing', delivery_revision=(SELECT revision FROM posts WHERE id=post_id), attempts=attempts+1, last_attempt_at=CURRENT_TIMESTAMP
-		  WHERE id=? AND status='pending' AND EXISTS (SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.status IN ('publishing','scheduled','failed','partial') AND (p.approval_required=0 OR p.approved_revision=p.revision))`,
+		  WHERE id=? AND status='pending' AND EXISTS (SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.status IN ('publishing','scheduled','failed','partial','awaiting_audience_setup') AND (p.approval_required=0 OR p.approved_revision=p.revision))`,
 		targetID,
 	)
 	if err != nil {
@@ -2934,7 +2953,7 @@ func (a *App) rollupPostStatus(ctx *sdk.AppCtx, postID int64) string {
 		return ""
 	}
 	defer rows.Close()
-	total, published, failed, active, scheduled, drafts, unknown := 0, 0, 0, 0, 0, 0, 0
+	total, published, failed, active, scheduled, drafts, unknown, awaiting := 0, 0, 0, 0, 0, 0, 0, 0
 	for rows.Next() {
 		var status string
 		if err := rows.Scan(&status); err != nil {
@@ -2944,6 +2963,8 @@ func (a *App) rollupPostStatus(ctx *sdk.AppCtx, postID int64) string {
 		switch status {
 		case "published":
 			published++
+		case "awaiting_audience_setup":
+			awaiting++
 		case "failed":
 			failed++
 		case "pending", "publishing":
@@ -2973,6 +2994,10 @@ func (a *App) rollupPostStatus(ctx *sdk.AppCtx, postID int64) string {
 	if drafts > 0 {
 		_, _ = ctx.AppDB().Exec(`UPDATE posts SET status='draft', published_at=NULL WHERE id=?`, postID)
 		return "draft"
+	}
+	if awaiting > 0 {
+		_, _ = ctx.AppDB().Exec(`UPDATE posts SET status='awaiting_audience_setup',published_at=NULL WHERE id=?`, postID)
+		return "awaiting_audience_setup"
 	}
 	if unknown > 0 || published+failed != total {
 		ctx.Logger().Warn("rollup post status: non-terminal target status", "post", postID, "unknown", unknown)
@@ -3004,6 +3029,17 @@ func (a *App) rollupPostStatus(ctx *sdk.AppCtx, postID int64) string {
 func (a *App) runStrategy(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
 	unlock := lockSocialResource(ctx, j.connID, "delivery-connection")
 	defer unlock()
+	audience, err := parseAudience(j.options)
+	if err != nil {
+		return "", "", err
+	}
+	if audience.Type == "members" {
+		adapter := adapterForAudience(j.platform, j.providerSlug)
+		if adapter.Publish == nil {
+			return "", "", errors.New("membership publishing is unsupported by this destination")
+		}
+		return adapter.Publish(a, ctx, def, j, audience)
+	}
 	switch def.Strategy {
 	case "twitter":
 		return a.publishTwitter(ctx, def, j)
@@ -3925,9 +3961,11 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 		"title":       title,
 		"description": j.body,
 	}
-	if cat := strOption(j.options, "category"); cat != "" {
-		snippet["categoryId"] = cat
-	}
+	category := strOption(j.options, "category")
+	if category == "" {
+		category = "22"
+	} // People & Blogs: YouTube insert requires categoryId.
+	snippet["categoryId"] = category
 	if tags, ok := j.options["tags"].([]any); ok && len(tags) > 0 {
 		out := make([]string, 0, len(tags))
 		for _, t := range tags {
@@ -5428,7 +5466,8 @@ func loadTargetsFrom(db interface {
 		        t.status, COALESCE(t.platform_post_id,''), COALESCE(t.platform_url,''),
 		        t.attempts, COALESCE(t.last_error,''), COALESCE(t.published_at,''), COALESCE(t.options,''),
 		        COALESCE(t.failure_code,''), t.retryable, t.upstream_status, COALESCE(t.existing_post_id,''),
-		        COALESCE(t.provider_sync_status,''), COALESCE(t.provider_updated_at,'')
+		        COALESCE(t.provider_sync_status,''), COALESCE(t.provider_updated_at,''),
+		 t.audience_status,COALESCE(t.audience_confirmed_at,''),COALESCE(t.audience_confirmation_actor,''),COALESCE(a.provider_slug,'native')
 		 FROM post_targets t JOIN social_accounts a ON a.id=t.social_account_id
 		 WHERE t.post_id=? ORDER BY t.id`,
 		postID,
@@ -5443,12 +5482,13 @@ func loadTargetsFrom(db interface {
 			tid, acctID                                                            int64
 			platform, name, avatar, status, ppid, purl, lastErr, pubAt, optionsRaw string
 			failureCode, existingPostID, providerSyncStatus, providerUpdatedAt     string
+			audienceStatus, audienceConfirmedAt, audienceActor, targetProvider     string
 			attempts                                                               int
 			retryable                                                              int64
 			upstreamStatus                                                         int64
 		)
 		if err := rows.Scan(&tid, &acctID, &platform, &name, &avatar, &status, &ppid, &purl, &attempts, &lastErr, &pubAt,
-			&optionsRaw, &failureCode, &retryable, &upstreamStatus, &existingPostID, &providerSyncStatus, &providerUpdatedAt); err != nil {
+			&optionsRaw, &failureCode, &retryable, &upstreamStatus, &existingPostID, &providerSyncStatus, &providerUpdatedAt, &audienceStatus, &audienceConfirmedAt, &audienceActor, &targetProvider); err != nil {
 			return nil, err
 		}
 		options := map[string]any{}
@@ -5456,24 +5496,29 @@ func loadTargetsFrom(db interface {
 			_ = json.Unmarshal([]byte(optionsRaw), &options)
 		}
 		out = append(out, map[string]any{
-			"id":                   tid,
-			"social_account_id":    acctID,
-			"platform":             platform,
-			"display_name":         name,
-			"avatar_url":           avatar,
-			"status":               status,
-			"platform_post_id":     ppid,
-			"platform_url":         purl,
-			"attempts":             attempts,
-			"last_error":           lastErr,
-			"published_at":         pubAt,
-			"options":              options,
-			"failure_code":         failureCode,
-			"retryable":            retryable != 0,
-			"upstream_status":      upstreamStatus,
-			"existing_post_id":     existingPostID,
-			"provider_sync_status": providerSyncStatus,
-			"provider_updated_at":  providerUpdatedAt,
+			"id":                          tid,
+			"social_account_id":           acctID,
+			"platform":                    platform,
+			"display_name":                name,
+			"avatar_url":                  avatar,
+			"status":                      status,
+			"platform_post_id":            ppid,
+			"platform_url":                purl,
+			"attempts":                    attempts,
+			"last_error":                  lastErr,
+			"published_at":                pubAt,
+			"options":                     options,
+			"failure_code":                failureCode,
+			"retryable":                   retryable != 0,
+			"upstream_status":             upstreamStatus,
+			"existing_post_id":            existingPostID,
+			"provider_sync_status":        providerSyncStatus,
+			"provider_updated_at":         providerUpdatedAt,
+			"audience_capabilities":       adapterForAudience(platform, targetProvider).Capabilities,
+			"audience_status":             audienceStatus,
+			"audience_confirmed_at":       audienceConfirmedAt,
+			"audience_confirmation_actor": audienceActor,
+			"audience_setup_url":          audienceSetupURL(platform, targetProvider, ppid),
 		})
 	}
 	return out, rows.Err()
@@ -9498,6 +9543,20 @@ func (a *App) editFacebookPost(ctx *sdk.AppCtx, out targetEditOutcome, connID in
 // title comes from eff.title (or first line of body if missing — since
 // title is required by the upstream resource).
 func (a *App) editYoutubePost(ctx *sdk.AppCtx, out targetEditOutcome, connID int64, eff, requested map[string]any, mediaProjectID string) targetEditOutcome {
+	if _, present := requested["audience"]; present {
+		out.Status = "failed"
+		out.Error = "Audience choices can only be changed on drafts."
+		return out
+	}
+	if audience, err := parseAudience(eff); err == nil && audience.Type == "members" {
+		for _, key := range []string{"body", "title", "visibility", "category", "tags"} {
+			if _, present := requested[key]; present {
+				out.Status = "failed"
+				out.Error = "Edit membership video metadata and access in YouTube Studio; Social cannot verify these settings."
+				return out
+			}
+		}
+	}
 	def := platforms["youtube"]
 	thumbnail, err := a.resolveThumbnailOption(ctx, eff, mediaProjectID)
 	if err != nil {
@@ -9593,16 +9652,23 @@ func (a *App) youtubeMergedUpdateInput(ctx *sdk.AppCtx, connID int64, videoID st
 		return nil, errors.New("YouTube metadata update requires a non-empty title")
 	}
 	input := map[string]any{"id": videoID, "snippet": snippet}
-	if _, ok := requested["visibility"]; ok {
-		status := map[string]any{}
-		for _, key := range []string{"privacyStatus", "publishAt", "license", "embeddable", "publicStatsViewable", "selfDeclaredMadeForKids"} {
-			if v, exists := current.Items[0].Status[key]; exists {
-				status[key] = v
-			}
-		}
-		status["privacyStatus"] = strOption(eff, "visibility")
-		input["status"] = status
+	privacy := toString(current.Items[0].Status["privacyStatus"])
+	if privacy != "public" && privacy != "private" && privacy != "unlisted" {
+		return nil, errors.New("current YouTube privacy could not be read; metadata was not changed")
 	}
+	status := map[string]any{}
+	for _, key := range []string{"privacyStatus", "publishAt", "license", "embeddable", "publicStatsViewable", "selfDeclaredMadeForKids", "containsSyntheticMedia"} {
+		if v, exists := current.Items[0].Status[key]; exists {
+			status[key] = v
+		}
+	}
+	if _, ok := requested["visibility"]; ok {
+		status["privacyStatus"] = strOption(eff, "visibility")
+		if status["privacyStatus"] != "private" {
+			delete(status, "publishAt")
+		}
+	}
+	input["status"] = status
 	return input, nil
 }
 
@@ -10551,7 +10617,7 @@ func (a *App) publishScheduledPost(ctx *sdk.AppCtx, pid string, postID int64, ex
 	if postStatus == "published" {
 		return map[string]any{"status": "published", "post_id": postID, "idempotent": true}
 	}
-	if postStatus != "scheduled" && postStatus != "publishing" && postStatus != "failed" {
+	if postStatus != "scheduled" && postStatus != "publishing" && postStatus != "failed" && postStatus != "awaiting_audience_setup" {
 		return map[string]any{"status": "failed", "error": "post is not publishable from its current status: " + postStatus}
 	}
 
@@ -10609,6 +10675,11 @@ func (a *App) publishScheduledPost(ctx *sdk.AppCtx, pid string, postID int64, ex
 			}
 		}
 		return map[string]any{"status": "failed", "error": lastError, "post_id": postID, "failed_targets": failed, "retryable": true}
+	}
+	var awaiting int
+	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM post_targets WHERE post_id=? AND status='awaiting_audience_setup'`, postID).Scan(&awaiting)
+	if awaiting > 0 {
+		return map[string]any{"status": "terminal", "outcome": "awaiting_audience_setup", "post_id": postID, "awaiting_targets": awaiting, "retryable": false}
 	}
 	if published == 0 {
 		return map[string]any{"status": "failed", "error": "post has no published targets", "post_id": postID}

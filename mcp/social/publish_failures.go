@@ -30,6 +30,13 @@ type publishFailure struct {
 
 func classifyPublishFailure(err error) publishFailure {
 	failure := publishFailure{Code: "upstream_error", Retryable: true}
+	var resumable *youtubeUploadRetryError
+	if errors.As(err, &resumable) {
+		return publishFailure{Code: "upload_incomplete", Retryable: true}
+	}
+	if strings.Contains(err.Error(), "verify the remote") {
+		return publishFailure{Code: "outcome_unknown", Retryable: false}
+	}
 	var upstream *upstreamCallError
 	if errors.As(err, &upstream) {
 		failure.UpstreamStatus = upstream.Status

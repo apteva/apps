@@ -14,7 +14,7 @@ export interface HomeWidgetProps {
 export interface PublishingSummary {
   posts: SocialPost[];
   total: number;
-  attention: { failed: number; approval: number; overdue: number };
+  attention: { failed: number; approval: number; overdue: number; membership?: number };
 }
 export interface MetricPoint { date: string; value: number | null; accounts: number }
 export interface WidgetMetric {

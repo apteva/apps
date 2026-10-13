@@ -3498,6 +3498,9 @@ func TestPublishYouTube_InitCallShape(t *testing.T) {
 		if c.Tool == "upload_video_init" {
 			sawInit = true
 			snippet, _ := c.Input["snippet"].(map[string]any)
+			if snippet["categoryId"] != "22" {
+				t.Errorf("missing default category: %+v", snippet)
+			}
 			if snippet["title"] != "My video title" {
 				t.Errorf("snippet.title = %v, want body", snippet["title"])
 			}

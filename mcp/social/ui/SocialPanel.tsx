@@ -14,6 +14,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { createRequestGate } from "./requestIdentity";
+import { MembershipAudience, MembershipConfirmation, type AudienceCapabilities } from "./audiences";
 import { scheduleInstant, localScheduleInput } from "./scheduleTime";
 import { File, FileAudio, Paperclip, X } from "lucide-react";
 import { uploadResumable } from "./uploadResumable";
@@ -103,6 +104,7 @@ interface SocialAccount {
   provider_profile_id?: string;
   provider_import_mode?: ProviderImportMode;
   capabilities?: Record<string, unknown> | null;
+  audience_capabilities?: AudienceCapabilities;
   display_name: string;
   avatar_url: string;
   status: string;
@@ -132,6 +134,10 @@ interface PostTarget {
   upstream_status?: number;
   existing_post_id?: string;
   provider_sync_status?: string;
+  audience_capabilities?: AudienceCapabilities;
+  audience_status?: string;
+  audience_confirmed_at?: string;
+  audience_setup_url?: string;
 }
 
 interface PostReview {
@@ -3225,7 +3231,7 @@ function ComposeDialog({
       const next = { ...prev, [accountId]: { ...(prev[accountId] || {}), [key]: value } };
       // If the field is being cleared, remove the key entirely so the
       // submit-shape decision doesn't see a phantom empty string.
-      if (typeof value === "string" && value.trim() === "") {
+      if (value == null || (typeof value === "string" && value.trim() === "")) {
         const acct = { ...next[accountId] };
         delete acct[key];
         if (Object.keys(acct).length === 0) {
@@ -3485,7 +3491,7 @@ function ComposeDialog({
             {accounts.map((a) => {
               const isSelected = selected.has(a.id);
               const fields = (fieldsByPlatform[a.platform] || []).map(field => field.name === "privacy_level" ? {...field, options:creatorInfo[a.id]?.privacy_level_options || []} : field);
-              const hasCustomization = fields.length > 0;
+              const hasCustomization = fields.length > 0 || (a.audience_capabilities?.publishing !== "unsupported" && !!a.audience_capabilities);
               const isExpanded = expanded === a.id || (isSelected && a.platform === "tiktok" && (!a.provider_slug || a.provider_slug === "native"));
               const customized = isCustomized(a.id);
               return (
@@ -3535,7 +3541,8 @@ function ComposeDialog({
                   </div>
                   {isSelected && hasCustomization && isExpanded && (
                     <div className="border-t border-border px-3 py-3 flex flex-col gap-3 bg-bg/40">
-                      {fields.map((f) => (
+                      <MembershipAudience accountId={a.id} projectId={projectId} capabilities={a.audience_capabilities} value={accountOptions[a.id]?.audience} onChange={value => {setAccountOption(a.id,"audience",value.type === "standard" ? undefined : value);if(value.type==="members")setAccountOption(a.id,"visibility",undefined);}} />
+                      {fields.filter(field => field.name !== "visibility" || accountOptions[a.id]?.audience?.type !== "members").map((f) => (
                         <OptionFieldInput
                           key={f.name}
                           field={f}
@@ -4306,7 +4313,7 @@ function PostsView({
     if (view !== "list" || statusFilter === "all") return;
     let alive = true;
     // Attention can include older posts outside the panel's recent list.
-    const statuses = statusFilter === "attention" ? ["failed", "partial"] : [statusFilter];
+    const statuses = statusFilter === "attention" ? ["failed", "partial", "awaiting_audience_setup"] : [statusFilter];
     Promise.all(statuses.map(async status => {
       const params = new URLSearchParams({ status, limit: "1000" });
       if (activeProfileId) params.set("profile_id", String(activeProfileId));
@@ -4331,7 +4338,7 @@ function PostsView({
 
   const sourcePosts = view === "calendar" ? calendarPosts : statusFilter !== "all" ? (filteredList?.key === listFilterKey ? filteredList.posts : []) : posts;
   const filteredPosts = filterCalendarPosts(sourcePosts, statusFilter === "attention" ? "all" : statusFilter, accountFilter)
-    .filter(post => statusFilter !== "attention" || post.status === "failed" || post.status === "partial")
+    .filter(post => statusFilter !== "attention" || post.status === "failed" || post.status === "partial" || post.status === "awaiting_audience_setup")
     .filter(post => accountFilter !== "selected" || post.targets.some(target => navigation.accountIDs.includes(target.social_account_id)));
   const sortedListPosts = sortPostList(filteredPosts);
 
@@ -4452,7 +4459,8 @@ function PostsView({
           aria-label="Filter posts by status"
         >
           <option value="all">All statuses</option>
-          <option value="attention">Failed or partial</option>
+          <option value="attention">Needs attention</option>
+          <option value="awaiting_audience_setup">Awaiting membership setup</option>
           <option value="scheduled">Scheduled</option>
           <option value="published">Published</option>
           <option value="failed">Failed</option>
@@ -4532,6 +4540,7 @@ function PostsView({
           }}
           onPublish={() => workflow(selectedPost, "publish", { mode: "publish" })}
           onSchedule={() => setRescheduleFor(selectedPost)}
+          onAudienceConfirmed={refreshAll}
         />
       )}
       {dayDialog && (
@@ -4999,7 +5008,7 @@ function PostLeadMedia({ post, projectId, variant }: {
 
 function PostDetailPanel({
   post, projectId, onClose, onRetry, onReschedule, onEdit, onDelete,
-  onSubmit, onApprove, onReject, onPublish, onSchedule,
+  onSubmit, onApprove, onReject, onPublish, onSchedule, onAudienceConfirmed,
 }: {
   post: Post;
   projectId?: string | null;
@@ -5013,6 +5022,7 @@ function PostDetailPanel({
   onReject: () => void;
   onPublish: () => void;
   onSchedule: () => void;
+  onAudienceConfirmed: () => void | Promise<void>;
 }) {
   const editable = (post.status === "published" || post.status === "partial") &&
     post.targets.some((target) => isEditablePlatform(target.platform));
@@ -5086,13 +5096,15 @@ function PostDetailPanel({
                   </div>
                   {target.last_error && <div className="text-error text-xs mt-1 whitespace-pre-wrap">{target.last_error}</div>}
                   {target.platform_url && <a href={target.platform_url} target="_blank" rel="noreferrer" className="text-accent text-xs hover:underline mt-1 inline-block">Open platform post ↗</a>}
+                  {target.status === "awaiting_audience_setup" && <MembershipConfirmation postId={post.id} targetId={target.id} revision={post.revision || 1} setupURL={target.audience_setup_url || ""} levelIds={target.options?.audience?.level_ids} projectId={projectId} onConfirmed={onAudienceConfirmed} />}
+                  {target.audience_status === "human_confirmed" && <p className="text-xs text-text-dim mt-1">Membership access: human-confirmed {target.audience_confirmed_at}</p>}
                 </div>
               ))}
             </div>
           </section>
         </div>
         <div className="flex flex-wrap justify-end gap-2 px-4 py-3 border-t border-border bg-bg-card/30">
-          {(post.status === "failed" || post.status === "partial") && <button type="button" onClick={onRetry} className="px-3 py-1.5 text-sm border border-accent text-accent rounded">Retry</button>}
+          {(post.status === "failed" || post.status === "partial" || post.targets.some(target => target.status==="failed" && target.retryable)) && <button type="button" onClick={onRetry} className="px-3 py-1.5 text-sm border border-accent text-accent rounded">Retry</button>}
           {post.status === "scheduled" && <button type="button" onClick={onReschedule} className="px-3 py-1.5 text-sm border border-border text-text rounded">Reschedule</button>}
           {(post.status === "draft" || post.status === "rejected" || post.status === "approved") && <button type="button" onClick={onEdit} className="px-3 py-1.5 text-sm border border-border text-text rounded">Edit draft</button>}
           {(post.status === "draft" || post.status === "rejected") && <button type="button" onClick={onSubmit} className="px-3 py-1.5 text-sm border border-border text-text rounded">Submit for review</button>}
@@ -5126,7 +5138,7 @@ function DeleteConfirmDialog({
 }) {
   const [busy, setBusy] = useState(false);
   const isScheduled = post.status === "scheduled";
-  const willTouchUpstream = post.status === "published" || post.status === "partial";
+  const willTouchUpstream = post.status === "published" || post.status === "partial" || post.status === "awaiting_audience_setup";
 
   const title =
     isScheduled ? "Cancel scheduled post?" :
@@ -5436,7 +5448,8 @@ function EditPostDialog({
               </div>
             </div>
             <div className="flex flex-col gap-2">
-              <label className="text-xs uppercase tracking-wide text-text-dim">Targets</label>
+
+                      <label className="text-xs uppercase tracking-wide text-text-dim">Targets</label>
               {post.targets.map((t) => {
                 const editable = isEditablePlatform(t.platform);
                 return (
@@ -5457,6 +5470,7 @@ function EditPostDialog({
                         </span>
                       )}
                     </div>
+                    {draftLike && <MembershipAudience accountId={t.social_account_id} projectId={projectId} capabilities={t.audience_capabilities} value={targetOptions[t.social_account_id]?.audience || t.options?.audience} onChange={value => {setOpt(t.social_account_id,"audience",value);if(value.type==="members")setOpt(t.social_account_id,"visibility","unlisted");}} />}
                     {editable && t.platform === "facebook" && (
                       <FieldText
                         label="Override message"
@@ -6544,13 +6558,13 @@ function StatusPill({ status }: { status: string }) {
   const tone =
     status === "published" ? "text-success" :
     status === "failed" ? "text-error" :
-    status === "partial" ? "text-warn" :
+    status === "partial" || status === "awaiting_audience_setup" ? "text-warn" :
     status === "scheduled" ? "text-info" :
     status === "approved" ? "text-success" :
     status === "in_review" ? "text-info" :
     status === "rejected" ? "text-error" :
     "text-text-dim";
-  return <span className={"text-xs uppercase " + tone}>{status}</span>;
+  return <span className={"text-xs uppercase " + tone}>{status === "awaiting_audience_setup" ? "Awaiting membership setup" : status}</span>;
 }
 
 function ProviderImportPill({ compact = false }: { compact?: boolean }) {
