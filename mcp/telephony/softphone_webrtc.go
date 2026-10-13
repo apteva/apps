@@ -37,6 +37,17 @@ type softphoneRTCConfig struct {
 	FEC              *bool // nil retains the existing enabled preference.
 }
 
+func (c softphoneRTCConfig) relayConfigured() bool {
+	for _, server := range c.ICEServers {
+		for _, endpoint := range server.URLs {
+			if strings.HasPrefix(endpoint, "turn:") || strings.HasPrefix(endpoint, "turns:") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (c softphoneRTCConfig) fecEnabled() bool { return c.FEC == nil || *c.FEC }
 
 func parseSoftphoneRTCConfig(values map[string]string) (softphoneRTCConfig, error) {
@@ -396,7 +407,7 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 		}
 		trackOnce.Do(func() { go receiveSoftphoneRTP(remote, input, stats, done, stop, c.fecEnabled()) })
 	})
-	config, _ := json.Marshal(map[string]any{"type": "webrtc.config", "ice_servers": c.ICEServers, "bitrate": c.Bitrate, "fec_requested": c.fecEnabled()})
+	config, _ := json.Marshal(map[string]any{"type": "webrtc.config", "ice_servers": c.ICEServers, "relay_configured": c.relayConfigured(), "bitrate": c.Bitrate, "fec_requested": c.fecEnabled()})
 	if err := signalWriter.Write(ws.OpText, config); err != nil {
 		return fail(err)
 	}

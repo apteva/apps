@@ -1,3 +1,4 @@
+import { SOFTPHONE_CLIENT_VERSION } from "../../ui/client-version";
 import { microphoneConstraints, playbackBufferOptions, PreviewResampler, type AudioDropEvent, type SoftphoneAudioOptions, type SoftphoneCallbacks, type SoftphoneDiagnostics } from "../../ui/softphone-audio";
 import { TransportTelemetry, TransportTelemetrySender, transportMetrics, transportStates } from "../../ui/transport-telemetry";
 import { AudioRuntimeTelemetry } from "../../ui/audio-runtime-telemetry";
@@ -23,6 +24,9 @@ export function rtcMediaURL(url: string, fec?: boolean): string {
 
 const safe = (callback: (() => void) | undefined) => { try { callback?.(); } catch { /* observers never gate media */ } };
 const finite = (value: unknown, limit = 1e12) => typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.min(value, limit)) : 0;
+export function rtcRelayEvidence(value: unknown): string {
+  return value===true ? "relay_configured" : value===false ? "no_relay" : "unreported";
+}
 export function permanentRTCFailure(error: unknown): boolean {
   const failure=mediaFailure(error);
   return failure.denied || failure.expired || ["NotAllowedError","NotFoundError","SecurityError","OverconstrainedError"].includes((error as Error)?.name);
@@ -201,6 +205,7 @@ export class WebRTCAudioConnection implements AudioConnection {
   private current(generation:number){return !this.stopped && this.generation===generation;}
   private guard(generation:number){if(!this.current(generation)) throw new Error("Audio session cancelled");}
   private async connect(url:string):Promise<void> {
+    this.recordSessionEvent({timestamp:new Date().toISOString(),action:"client_build",outcome:"v"+SOFTPHONE_CLIENT_VERSION.replaceAll(".","_")});
     this.runtime.observeEnvironment();
     const generation=++this.generation,options=this.options!;
     for(const event of this.events.slice(-8))this.enqueueRTCEvents({session_events:[event]});
@@ -256,6 +261,7 @@ export class WebRTCAudioConnection implements AudioConnection {
         if(typeof event.data!=="string")return;
         let value:any;try{value=JSON.parse(event.data);}catch{return;}
         if(value.type==="webrtc.config"){
+          this.recordSessionEvent({timestamp:new Date().toISOString(),action:"ice_configuration",outcome:rtcRelayEvidence(value.relay_configured)});
           if(this.pc){finish(new Error("Repeated WebRTC configuration"));return;}
           void (async()=>{
             const pc=new RTCPeerConnection({iceServers:value.ice_servers??[]});this.pc=pc;

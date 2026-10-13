@@ -283,3 +283,19 @@ adjustment is a separate part of this change; stale-frame protection and carrier
 lifecycle remain unchanged.
 Native WebRTC/Opus uses browser jitter/concealment metrics; exact native underrun
 start/end times are unavailable and are not fabricated by this PCM observer.
+
+### Attachment phases (0.12.19)
+
+`server.startup.phase_schema = 1` identifies measured per-phase totals:
+`initial_dropped_ms`, `reconnect_dropped_ms`, `ending_dropped_ms`, and
+`hold_dropped_ms`. `dropped_ms` remains their combined compatibility total, not
+an opening-speech-loss measurement. Each retained drop includes `phase` and the
+browser connection ID when known. Audio collected before first forwarding retains
+its initial phase after forwarding starts; terminal/hold cleanup is separate.
+Older reports omit the schema and do not have a known phase partition.
+
+Browser session history includes `client_build / v0_12_19` and RTC
+`ice_configuration / relay_configured|no_relay`. Configured relay does not imply
+selected or healthy relay. These sparse records use the existing paced background
+control budget, so backpressure may skip them. No media contents, credentials,
+URLs, candidate addresses or raw upstream error bodies are added.

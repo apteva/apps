@@ -134,6 +134,12 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 		m["browser_ingress_max_processing_wait_ms"] = b.Server.WebRTC.Ingress.MaxQueueWaitMS
 		m["browser_ingress_observations_skipped"] = float64(b.Server.WebRTC.Ingress.Skipped)
 		v := b.Server
+		if v.Startup.PhaseSchema == 1 {
+			m["microphone_initial_dropped_ms"] = v.Startup.InitialDroppedMS
+			m["microphone_reconnect_dropped_ms"] = v.Startup.ReconnectDroppedMS
+			m["microphone_ending_dropped_ms"] = v.Startup.EndingDroppedMS
+			m["microphone_hold_dropped_ms"] = v.Startup.HoldDroppedMS
+		}
 		m["server_webrtc_outbound_dropped_ms"] = float64(v.WebRTC.OutboundDroppedMS)
 		m["server_webrtc_pacing_skipped_ms"] = float64(v.WebRTC.PacingSkippedMS)
 		add("audio_degraded", "telephony_to_browser", v.WebRTC.PacingSkippedMS > 0)
