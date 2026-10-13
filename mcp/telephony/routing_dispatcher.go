@@ -289,11 +289,9 @@ func (a *App) routingCapacityReleased() {
 func (a *App) runRoutingReconciliation(c context.Context, ctx *sdk.AppCtx) error {
 	a.dispatchMu.Lock()
 	d := a.dispatcher
-	if d != nil {
-		d.wake(ctx.CurrentProject())
-	}
+	queued := d != nil && d.wake(ctx.CurrentProject())
 	a.dispatchMu.Unlock()
-	if d != nil {
+	if queued {
 		return nil
 	}
 	if err := a.runDecisionTick(c, ctx); err != nil {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	sdk "github.com/apteva/app-sdk"
 	"net"
 	"os"
 	"runtime"
@@ -606,4 +607,22 @@ func TestEfficiencyFirstExpiredRoutingDeadlineRunsImmediately(t *testing.T) {
 	if due := tracker.next("p", raw, 2, now); due != now.Add(time.Millisecond) {
 		t.Fatal("completed work retained stale backoff")
 	}
+}
+
+func TestEfficiencyRoutingQueueRejectionKeepsPeriodicRecovery(t *testing.T) {
+	a, db, plan := decisionFixture(t)
+	platform := &decisionPlatform{started: make(chan struct{}, 8)}
+	ctx := sdk.NewAppCtxForTest(&sdk.Manifest{}, db.db, sdk.Config{}, platform, nil).WithProject("p1")
+	previous := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previous })
+	// wake() returns false for a closed/full dispatcher. The periodic recovery
+	// must actually run, rather than treating the mere pointer as acceptance.
+	a.dispatcher = &routingDispatcher{closed: true}
+	t.Cleanup(func() { a.decisionWG.Wait() })
+	insertRingCall(t, db, plan, "overflow-recovery")
+	if err := a.runRoutingReconciliation(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	receiveSoon(t, platform.started)
 }
