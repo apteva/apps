@@ -77,7 +77,7 @@ func TestPrepareExistingRecoveryPreservesOriginalInputs(t *testing.T) {
 				return nil
 			}
 			ctx, a := newTestCtx(t, plat)
-			p := &actorExistingRecovery{Bindings: fixtureRecoveryBindings(), ResumeOperation: "publish_draft", InspectionOperation: "inspect_draft", URLPattern: `^https://example\.com/c/posts/(?:[^/]+-)?([0-9]+)/edit$`, PreparationLocators: []actorLocator{{Text: "Image", Exact: true, SOMOnly: true}}}
+			p := &actorExistingRecovery{Bindings: fixtureRecoveryBindings(), ResumeOperation: "publish_draft", InspectionOperation: "inspect_draft", URLPattern: `^https://example\.com/c/posts/(?:[^/]+-)?([0-9]+)/edit$`, PreparationLocators: []actorLocator{{Text: "Image", Exact: true, SOMOnly: true}, {Text: "Select tiers", Exact: true, SOMOnly: true}}}
 			p.ReviewedCopyFields = map[string]string{"post_body": "saved_body"}
 			policy := &actorRecoveryPolicy{InspectionOperation: "fetch_posts", RequiredViews: []string{"draft"}, MatchFields: map[string]string{"title": "post_title"}, Existing: p}
 			fields := map[string]actorJSONField{"saved_body": {Path: "/body", Required: true}, "is_draft": {Path: "/published", IsNull: true, Required: true}, "is_unscheduled": {Path: "/scheduled", IsNull: true, Required: true}, "post_id": {Path: "/id", Required: true}, "published_at": {Path: "/published", Required: true}, "scheduled_for": {Path: "/scheduled", Required: true}}
@@ -90,7 +90,7 @@ func TestPrepareExistingRecoveryPreservesOriginalInputs(t *testing.T) {
 				inspect.Steps = append(inspect.Steps, actorStep{Action: "assert_values", Assertions: map[string]actorAssertion{"saved_body": {EqualsExact: "{{post_body}}"}}})
 			}
 			publish := actorOperation{RecoveryOnly: true, Steps: []actorStep{{Action: "goto", URL: "{{post_edit_url}}"}, {Action: "click", OnceKey: "{{request_id}}", ExpectedEffect: "immediate_external_commit", ConfirmConsequence: "immediate_external_commit", Locator: actorLocator{Text: "Publish", Exact: true, SOMOnly: true}}}}
-			source := actorOperation{Recovery: policy, Steps: []actorStep{{Action: "goto", URL: "{{creator_url}}"}, {Action: "click", Locator: actorLocator{Text: "Image", Exact: true, SOMOnly: true}}, {Action: "wait_for", Conditions: []actorWaitCondition{{Type: "selector_present", Selector: ".old-wrapper"}}}, {Action: "click", OnceKey: "{{request_id}}", ExpectedEffect: "immediate_external_commit", ConfirmConsequence: "immediate_external_commit", Locator: actorLocator{Text: "Publish", Exact: true, SOMOnly: true}}}}
+			source := actorOperation{Recovery: policy, Steps: []actorStep{{Action: "goto", URL: "{{creator_url}}"}, {Action: "click", Locator: actorLocator{Text: "Select tiers", Exact: true, SOMOnly: true}}, {Action: "click", Locator: actorLocator{Text: "Image", Exact: true, SOMOnly: true}}, {Action: "wait_for", Conditions: []actorWaitCondition{{Type: "selector_present", Selector: ".old-wrapper"}}}, {Action: "click", OnceKey: "{{request_id}}", ExpectedEffect: "immediate_external_commit", ConfirmConsequence: "immediate_external_commit", Locator: actorLocator{Text: "Publish", Exact: true, SOMOnly: true}}}}
 			def := actorDefinition{SchemaVersion: 1, AllowedHosts: []string{"example.com"}, Browser: actorBrowser{ContextID: "ctx"}, Defaults: map[string]any{"creator_url": "https://example.com/c", "expected_creator_identity": "c", "tier_labels": []any{}}, Operations: map[string]actorOperation{"create": source, "inspect_draft": inspect, "publish_draft": publish}}
 			b, _ := json.Marshal(def)
 			var fixture map[string]any
@@ -121,7 +121,7 @@ func TestPrepareExistingRecoveryPreservesOriginalInputs(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			original := map[string]any{"status": "failed", "completed_at": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339), "output": map[string]any{"current_url": "https://example.com/c/posts/42/edit", "execution_progress": map[string]any{"last_started_step": 2, "commit_attempted": false}, "media": []any{map[string]any{"uploaded": true, "filename": "first.png", "size_bytes": float64(10)}, map[string]any{"uploaded": true, "filename": "second.png", "size_bytes": float64(20)}}}}
+			original := map[string]any{"status": "failed", "completed_at": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339), "output": map[string]any{"current_url": "https://example.com/c/posts/42/edit", "execution_progress": map[string]any{"last_started_step": 3, "commit_attempted": false}, "media": []any{map[string]any{"uploaded": true, "filename": "first.png", "size_bytes": float64(10)}, map[string]any{"uploaded": true, "filename": "second.png", "size_bytes": float64(20)}}}}
 			output := mapFromAny(checked["output"])
 			ev := mapFromAny(output["document_evidence"])
 			switch mode {
