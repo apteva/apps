@@ -1,3 +1,13 @@
+# Domains v1.1.0 release notes
+
+- Adds Spaceship purchases with explicit account-rate confirmation, saved contact IDs/attributes, 1–10 year terms, privacy and auto-renewal options in the UI and MCP tools.
+- Records approved purchase payloads and accepted async operation IDs in migration 006. Pending purchases poll saved operations across restarts and are never automatically resubmitted. Completion requires success and account ownership; unknown outcomes block conflicting purchases.
+- Corrects availability parsing for Spaceship's documented `result` and `premiumPricing` fields. Premium purchases remain disabled because the API exposes no maximum charge.
+- Pins app-sdk v0.102.0, verified to descend from v0.101.0.
+- Requires the paired integration catalog/executor header-mapping update. Deploy both components together. No live registrations were submitted.
+
+Validation: Go suite with race detection, go vet, TypeScript checking, bundled panel build, six browser tests, and paired HTTP integration tests including empty-202 header preservation, exact JSON options, and disabled purchase retries.
+
 # Domains v0.6.0 release notes
 
 Based on `domains/v0.5.2` (`78c844b486eb32c7d56f01d0e05838b511d0ee5d`). This release includes the audit fixes and the matching Porkbun integration catalog contract. Refresh the integrations catalog before using paid registration.

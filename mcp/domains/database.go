@@ -116,14 +116,14 @@ func dbRegistrationIntentInsert(db *sql.DB, in *RegistrationIntent) error {
 func dbRegistrationIntentGet(db *sql.DB, pid, token string) (*RegistrationIntent, error) {
 	in := &RegistrationIntent{}
 	var autoRenew, privacy int
-	var raw, expires, result string
+	var raw, expires, result, request string
 	err := db.QueryRow(`SELECT token, project_id, domain, years, auto_renew, whois_privacy,
 		coupon, notes, provider_slug, connection_id, price, currency, status,
-		response_json, error_message, expires_at, cost_cents, result_json, attempted_at, CAST(updated_at AS TEXT)
+		response_json, error_message, expires_at, cost_cents, result_json, attempted_at, CAST(updated_at AS TEXT), request_json, billing_mode, operation_id
 		FROM registration_intents WHERE project_id=? AND token=?`, pid, token).Scan(
 		&in.Token, &in.ProjectID, &in.Domain, &in.Years, &autoRenew, &privacy,
 		&in.Coupon, &in.Notes, &in.Provider, &in.ConnectionID, &in.Price, &in.Currency,
-		&in.Status, &raw, &in.Error, &expires, &in.CostCents, &result, &in.AttemptedAt, &in.UpdatedAt)
+		&in.Status, &raw, &in.Error, &expires, &in.CostCents, &result, &in.AttemptedAt, &in.UpdatedAt, &request, &in.BillingMode, &in.OperationID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -133,6 +133,7 @@ func dbRegistrationIntentGet(db *sql.DB, pid, token string) (*RegistrationIntent
 	in.AutoRenew = autoRenew != 0
 	in.WhoisPrivacy = privacy != 0
 	in.Raw = json.RawMessage(raw)
+	in.RequestJSON = json.RawMessage(request)
 	in.Result = json.RawMessage(result)
 	in.ExpiresAt, err = time.Parse(time.RFC3339, expires)
 	if err != nil {

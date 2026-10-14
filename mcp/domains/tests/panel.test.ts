@@ -14,6 +14,8 @@ const calls: any[] = [];
 const waiting = new Map<string, () => void>();
 let delayAlpha = false;
 let needsMailMode = false;
+let spaceshipMode = false;
+let spaceshipSubmitted = false;
 const caps = {
   write_types: ["A", "TXT", "MX", "SRV"],
   delete_types: ["A", "TXT", "MX", "SRV"],
@@ -58,7 +60,7 @@ beforeAll(async () => {
           connections: [
             {
               id: 1,
-              app_slug: "porkbun",
+              app_slug: spaceshipMode ? "spaceship" : "porkbun",
               name: "Account one",
               status: "active",
               dns_default: true,
@@ -112,6 +114,13 @@ beforeAll(async () => {
               },
             ],
           });
+        }
+        if (spaceshipMode) {
+          const purchase = {confirmation_token: "spaceship-token", status: spaceshipSubmitted ? "processing" : "prepared", domain: "fresh.example", provider:"spaceship", connection_id:1, years:2, auto_renew:true, whois_privacy:true, billing_mode:"account_rate", options:{contacts:{registrant:"1ZdMXpapqp9sle5dl8BlppTJXAzf5"}}, expires_at:"2030-01-01T00:00:00Z"};
+          if (body.tool === "domain_availability_check") return Response.json({availability:{domain:body.args.domain,available:true,known:true,provider:"spaceship",min_duration:1}});
+          if (body.tool === "domain_registration_prepare") return Response.json(purchase);
+          if (body.tool === "domain_register") {spaceshipSubmitted=true; return Response.json({registered:false,status:"processing",operation_id:"operation123"})}
+          if (body.tool === "domain_registration_status") return Response.json(body.args.confirmation_token ? {...purchase,operation_id:"operation123"} : {intents:[]});
         }
         if (body.tool === "domain_registration_status")
           return Response.json({ intents: [] });
@@ -361,4 +370,27 @@ test("Namecheap requires an explicit mail mode when provider metadata is absent"
     needsMailMode = false;
     await page.close();
   }
+});
+
+test("Spaceship purchase shows account-rate consent and keeps accepted operations pending", async () => {
+  spaceshipMode=true;spaceshipSubmitted=false;calls.length=0;
+  const page=await loadPage();
+  try {
+    await page.getByRole("button",{name:"Register",exact:true}).click();
+    await page.getByLabel("Domain",{exact:true}).fill("fresh.example");
+    await page.getByRole("button",{name:"Check availability",exact:true}).click();
+    const review=page.getByRole("button",{name:"Review purchase",exact:true});
+    expect(await review.isDisabled()).toBe(true);
+    await page.getByLabel("Spaceship contact ID",{exact:true}).fill("1ZdMXpapqp9sle5dl8BlppTJXAzf5");
+    await page.getByLabel("Registration years",{exact:true}).fill("2");
+    await page.getByText("I reviewed Spaceship pricing",{exact:false}).click();
+    await review.click();
+    const dialog=page.getByRole("dialog");await dialog.waitFor();
+    expect(await dialog.textContent()).toContain("No guaranteed quote");
+    const preparation=calls.find(c=>c.tool==="domain_registration_prepare");expect(preparation.args.accept_account_rate).toBe(true);expect(preparation.args.years).toBe(2);
+    await dialog.getByRole("button",{name:"Register and pay",exact:true}).click();
+    await dialog.getByRole("button",{name:"Check purchase status",exact:true}).waitFor();
+    expect(await dialog.textContent()).toContain("processing");
+    expect(await dialog.textContent()).toContain("Checking status does not submit another purchase.");
+  } finally {spaceshipMode=false;await page.close()}
 });

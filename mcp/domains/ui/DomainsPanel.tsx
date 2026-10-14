@@ -80,6 +80,9 @@ interface DomainAvailability {
 }
 
 interface RegistrationIntent {
+  billing_mode?: string;
+  operation_id?: string;
+  options?: { contacts?: Record<string, unknown> };
   status?: string;
   error?: string;
   confirmation_token: string;
@@ -502,7 +505,11 @@ function RegisterDomainPane({
   const [name, setName] = useState("");
   const [pick, setPick] = useState<ConnectionChoice>("default");
 
-  const autoRenew = true;
+  const [autoRenew, setAutoRenew] = useState(true);
+  const [years, setYears] = useState(1);
+  const [contactID, setContactID] = useState("");
+  const [attributeIDs, setAttributeIDs] = useState("");
+  const [acceptRate, setAcceptRate] = useState(false);
   const [whoisPrivacy, setWhoisPrivacy] = useState(true);
 
   const [notes, setNotes] = useState("");
@@ -560,7 +567,7 @@ function RegisterDomainPane({
     availability?.available &&
     availability.known === true &&
     !availability.premium &&
-    availability.provider === "porkbun";
+    ["porkbun", "spaceship"].includes(availability.provider);
 
   const argsForProvider = (): Record<string, unknown> => {
     const args: Record<string, unknown> = { domain: name.trim() };
@@ -596,8 +603,13 @@ function RegisterDomainPane({
     try {
       const result = await callTool("domain_registration_prepare", {
         ...argsForProvider(),
-        years: availability.min_duration,
-        auto_renew: true,
+        years: availability.provider === "spaceship" ? years : availability.min_duration,
+        auto_renew: availability.provider === "spaceship" ? autoRenew : true,
+        ...(availability.provider === "spaceship" ? {
+          accept_account_rate: acceptRate,
+          contacts: { registrant: contactID.trim(), admin: contactID.trim(), tech: contactID.trim(), billing: contactID.trim(),
+            ...(attributeIDs.trim() ? {attributes: attributeIDs.split(",").map(id => id.trim())} : {}) },
+        } : {}),
         whois_privacy: whoisPrivacy,
         notes: notes.trim(),
       });
@@ -614,10 +626,22 @@ function RegisterDomainPane({
     setBusy(true);
     setErr("");
     try {
+      if (intent.provider === "spaceship" && intent.status === "unknown") {
+        await callTool("domain_registration_status", {confirmation_token: intent.confirmation_token, inspect_ownership: true});
+        setErr("Submission outcome is unknown. Check your Spaceship account or contact support; this purchase will not be resubmitted.");
+        return;
+      }
       const result = await callTool("domain_register", {
         confirmation_token: intent.confirmation_token,
         resume: intent.status === "unknown" || intent.status === "processing",
       });
+      if (result.registered === false) {
+        const status = await callTool("domain_registration_status", {confirmation_token: intent.confirmation_token});
+        setIntent(status as unknown as RegistrationIntent);
+        if (status.status === "failed") setErr("Spaceship reported registration failure. Close this dialog and inspect your account before preparing another purchase.");
+        await loadPending();
+        return;
+      }
       setName("");
 
       setNotes("");
@@ -776,17 +800,22 @@ function RegisterDomainPane({
             {availability.available && !providerCanRegister && (
               <div className="text-xs text-yellow-300 border border-yellow-500/30 bg-yellow-500/10 rounded p-2">
                 {providerLabel(availability.provider)} confirmed availability,
-                but this app only performs paid domain registration through
-                Porkbun.
+                but this provider cannot perform this purchase through the app.
               </div>
             )}
 
             {providerCanRegister && (
               <div className="flex gap-3 items-end flex-wrap">
                 <div className="text-xs text-text-dim">
-                  Registry term: {availability.min_duration || "unconfirmed"}{" "}
+                  Registry term: {availability.provider === "spaceship" ? years : availability.min_duration || "unconfirmed"}{" "}
                   year(s)
                 </div>
+                {availability.provider === "spaceship" && <>
+                  <Field label="Years"><input aria-label="Registration years" className={inputCls + " w-20"} type="number" min={1} max={10} value={years} onChange={e => setYears(Number(e.target.value))} /></Field>
+                  <Field label="Spaceship contact ID (all roles)"><input aria-label="Spaceship contact ID" className={inputCls + " w-72"} value={contactID} onChange={e => setContactID(e.target.value)} placeholder="Existing contact ID from Spaceship" /></Field>
+                  <Field label="TLD contact attribute IDs (optional)"><input className={inputCls + " w-72"} value={attributeIDs} onChange={e => setAttributeIDs(e.target.value)} placeholder="Comma-separated IDs for restricted TLDs" /></Field>
+                  <label className="text-xs text-yellow-300 w-full"><input type="checkbox" checked={acceptRate} onChange={e => setAcceptRate(e.target.checked)} /> I reviewed Spaceship pricing and accept account-rate billing. The API has no price cap or dry run.</label>
+                </>}
                 <Field label="Notes">
                   <input
                     className={inputCls + " w-56"}
@@ -796,8 +825,8 @@ function RegisterDomainPane({
                   />
                 </Field>
                 <label className="flex items-center gap-2 text-xs text-text-dim py-2">
-                  <input type="checkbox" checked={autoRenew} disabled />
-                  auto-renew (registrar default)
+                  <input type="checkbox" checked={availability.provider === "spaceship" ? autoRenew : true} disabled={availability.provider !== "spaceship"} onChange={e => setAutoRenew(e.target.checked)} />
+                  auto-renew
                 </label>
                 <label className="flex items-center gap-2 text-xs text-text-dim py-2">
                   <input
@@ -809,7 +838,7 @@ function RegisterDomainPane({
                 </label>
                 <button
                   type="button"
-                  disabled={busy}
+                  disabled={busy || (availability.provider === "spaceship" && (!acceptRate || !contactID.trim()))}
                   onClick={prepareRegistration}
                   className="px-3 py-1.5 bg-accent text-white rounded disabled:opacity-50"
                 >
@@ -826,13 +855,17 @@ function RegisterDomainPane({
           confirmLabel={
             busy
               ? "Registering..."
-              : intent.status === "unknown" || intent.status === "processing"
+              : intent.status === "failed"
+                ? "Close"
+                : intent.provider === "spaceship" && intent.status !== "prepared"
+                ? "Check purchase status"
+                : intent.status === "unknown" || intent.status === "processing"
                 ? "Resume same purchase"
                 : "Register and pay"
           }
           busy={busy}
           onCancel={cancelIntent}
-          onConfirm={register}
+          onConfirm={intent.status === "failed" ? cancelIntent : register}
         >
           <div className="space-y-2 text-sm">
             <div>
@@ -857,10 +890,13 @@ function RegisterDomainPane({
             </div>
             {intent.status !== "prepared" && (
               <p>
-                Purchase status: {intent.status}. Resuming uses the original
-                payment request and idempotency key.
+                Purchase status: {intent.status}. {intent.provider === "spaceship" ? "Checking status does not submit another purchase." : "Resuming uses the original payment request and idempotency key."}
               </p>
             )}
+            {intent.billing_mode === "account_rate" && <div className="text-yellow-300">Spaceship will charge its account rate for this term. No guaranteed quote or maximum charge is available through the API.
+              <div className="text-xs break-all">Contacts: {JSON.stringify(intent.options?.contacts || {})}</div>
+              {intent.operation_id && <div>Operation: {intent.operation_id}</div>}
+            </div>}
             {intent.price && (
               <div>
                 <span className="text-text-dim">Quoted price </span>
