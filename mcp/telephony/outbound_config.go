@@ -34,6 +34,7 @@ type outboundProfileOption struct {
 }
 
 type outboundReadinessView struct {
+	profilesVerified     bool
 	Required             bool                    `json:"required"`
 	Status               string                  `json:"status"`
 	ApplicationID        string                  `json:"application_id,omitempty"`
@@ -55,7 +56,9 @@ func (a *App) outboundReadiness(ctx *sdk.AppCtx, provider string, connectionID i
 	if err != nil {
 		return outboundReadinessView{Required: true, Status: outboundConfigError, ApplicationID: applicationID, Profiles: []outboundProfileOption{}}, err
 	}
-	return a.telnyxOutboundReadiness(ctx, connectionID, applicationID, profiles)
+	view, err := a.telnyxOutboundReadiness(ctx, connectionID, applicationID, profiles)
+	view.profilesVerified = true
+	return view, err
 }
 
 func (a *App) telnyxOutboundReadiness(ctx *sdk.AppCtx, connectionID int64, applicationID string, profiles []outboundProfileOption, requests ...context.Context) (outboundReadinessView, error) {
@@ -63,7 +66,8 @@ func (a *App) telnyxOutboundReadiness(ctx *sdk.AppCtx, connectionID int64, appli
 }
 func (a *App) telnyxOutboundReadinessWithLoader(ctx *sdk.AppCtx, connectionID int64, applicationID string, profiles []outboundProfileOption, loader *inventoryReadSession, requests ...context.Context) (outboundReadinessView, error) {
 	view := outboundReadinessView{
-		Required: true, ApplicationID: strings.TrimSpace(applicationID), Profiles: profiles,
+		profilesVerified: true,
+		Required:         true, ApplicationID: strings.TrimSpace(applicationID), Profiles: profiles,
 	}
 	if !validProviderResourceID(view.ApplicationID) {
 		view.Status = outboundSetupRequired

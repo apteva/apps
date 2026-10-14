@@ -47,6 +47,8 @@ func (p *accountFaultPlatform) ExecuteIntegrationToolContext(request context.Con
 	p.requests[id]++
 	p.mu.Unlock()
 	switch fault {
+	case "503":
+		return &sdk.ExecuteResult{Success: false, Status: 503, Data: json.RawMessage(`{"errors":[{"code":"10007","title":"Unexpected error"}]}`)}, nil
 	case "stall":
 		<-request.Done()
 		return nil, request.Err()

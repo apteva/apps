@@ -148,6 +148,21 @@ func (p *answerPlatform) ExecuteIntegrationTool(connID int64, tool string, input
 	}
 	if response := p.integrationResponse[tool]; response != nil {
 		data = response
+	} else if tool == "list_phone_numbers" {
+		// Default fixture inventory matches the configured account. Explicit
+		// empty/negative responses above remain authoritative in safety tests.
+		creds, _ := p.GetConnectionCredentials(connID)
+		if creds != nil && validE164(creds.Fields["phone_number"]) {
+			number := map[string]any{"phone_number": creds.Fields["phone_number"], "status": "active"}
+			if creds.Slug == "telnyx" {
+				number["features"] = []string{"voice"}
+				number["connection_id"] = creds.Fields["connection_id"]
+				data, _ = json.Marshal(map[string]any{"data": []any{number}})
+			} else {
+				number["capabilities"] = map[string]any{"voice": true}
+				data, _ = json.Marshal(map[string]any{"incoming_phone_numbers": []any{number}})
+			}
+		}
 	}
 	return &sdk.ExecuteResult{Success: true, Status: 200, Data: data}, nil
 }

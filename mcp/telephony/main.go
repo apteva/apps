@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.12.24
+version: 0.12.25
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -378,7 +378,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.12.24
+    ref: telephony/v0.12.25
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -1602,9 +1602,6 @@ func (a *App) selectCarrierBinding(ctx *sdk.AppCtx, projectID, requestedFrom str
 			if err != nil {
 				continue // An inaccessible binding cannot authorize this caller ID.
 			}
-			if !a.outboundNumberBelongsToBinding(ctx, projectID, candidate, creds, requestedFrom) {
-				continue
-			}
 			from, err := a.resolveOutboundFrom(ctx, projectID, candidate, creds, requestedFrom)
 			if err != nil {
 				continue
@@ -1629,49 +1626,17 @@ func (a *App) selectCarrierBinding(ctx *sdk.AppCtx, projectID, requestedFrom str
 	return bound, creds, from, nil
 }
 
-// outboundNumberBelongsToBinding performs the cross-carrier ownership check
-// used before selecting an explicit caller ID. Routes and the legacy
-// phone_number credential are accepted as local durable evidence; when the
-// provider inventory is available it is authoritative and must report voice.
+// outboundNumberBelongsToBinding uses the same ownership checks as placement.
+// Configuration alone never authorizes a previously unverified caller ID.
 func (a *App) outboundNumberBelongsToBinding(ctx *sdk.AppCtx, projectID string, bound *sdk.BoundIntegration, creds *sdk.ConnectionCredentials, requested string, requests ...context.Context) bool {
 	if bound == nil || creds == nil || !validE164(requested) {
 		return false
 	}
-	requestedKey := compactPhoneNumber(requested)
-	slug := strings.ToLower(firstNonEmpty(creds.Slug, bound.AppSlug))
-	provider := &numberProvider{Slug: slug, ConnID: bound.ConnectionID, Fields: creds.Fields}
-	if len(requests) > 0 {
-		provider.inventoryContext = requests[0]
-	}
-	owned, err := listOwnedCarrierNumbers(ctx, provider)
-	if err == nil {
-		for _, number := range owned {
-			if compactPhoneNumber(number.PhoneNumber) == requestedKey {
-				return len(number.Capabilities) == 0 || containsString(number.Capabilities, "voice")
-			}
-		}
-		// Older connections expose only their configured default number in
-		// credentials. Keep that durable provider assertion usable when the
-		// inventory endpoint omits legacy metadata.
-		if legacy := strings.TrimSpace(creds.Fields["phone_number"]); validE164(legacy) && compactPhoneNumber(legacy) == requestedKey {
-			return true
-		}
-		// A successful inventory response that omits a number is authoritative.
+	if len(requests) > 0 && requests[0] != nil && requests[0].Err() != nil {
 		return false
 	}
-	// Preserve legacy connections that cannot enumerate inventory while still
-	// requiring durable project or credential evidence for the selected number.
-	if legacy := strings.TrimSpace(creds.Fields["phone_number"]); validE164(legacy) && compactPhoneNumber(legacy) == requestedKey {
-		return true
-	}
-	if routes, routeErr := a.db().listRoutesForProjectConnection(projectID, bound.ConnectionID); routeErr == nil {
-		for _, route := range currentRoutesByNumber(routes) {
-			if route.Enabled && compactPhoneNumber(route.PhoneNumber) == requestedKey {
-				return true
-			}
-		}
-	}
-	return false
+	_, err := a.resolveOutboundFrom(ctx, projectID, bound, creds, requested)
+	return err == nil
 }
 
 func callToolResult(callID, threadID, to string) map[string]any {

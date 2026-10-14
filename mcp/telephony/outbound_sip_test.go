@@ -144,8 +144,14 @@ func TestOutboundSIPSettingsScopeSecretsAndAdmission(t *testing.T) {
 				t.Fatal(err)
 			}
 			fail = true
+			if _, _, err = a.resolveOutboundSIPCredentials(ctx, "project-a", bound, p.credentials, "+33123456780"); err != nil {
+				t.Fatal("temporary REST failure blocked recently verified SIP setup", err)
+			}
+			if _, err = a.db().db.Exec(`UPDATE carrier_verification_evidence SET verified_at_ms=? WHERE kind='ready'`, time.Now().Add(-25*time.Hour).UnixMilli()); err != nil {
+				t.Fatal(err)
+			}
 			if _, _, err = a.resolveOutboundSIPCredentials(ctx, "project-a", bound, p.credentials, "+33123456780"); err == nil || strings.Contains(err.Error(), "do-not-log-me") {
-				t.Fatal("provider failure must block only new SIP admission with sanitized evidence")
+				t.Fatal("expired evidence must block new SIP admission with sanitized evidence")
 			}
 			// Established calls retain their transport regardless of subsequent settings.
 			row := &callRow{ID: "existing", Direction: "outbound", CarrierSlug: provider, CarrierConnectionID: 10, IngressPath: inboundTransportSIPDirect}
