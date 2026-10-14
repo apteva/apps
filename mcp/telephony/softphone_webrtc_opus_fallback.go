@@ -22,3 +22,7 @@ func rtcNativeAvailability() (string, string, error) {
 	_, err := loadRTCOpusLibrary()
 	return "portable", "", err
 }
+
+func newRTCNativeEncoderAtRate(int, bool, int) (rtcOpusEncoder, error) {
+	return nil, errors.New("native Opus unavailable")
+}

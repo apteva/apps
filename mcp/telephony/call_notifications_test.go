@@ -80,7 +80,8 @@ func TestCallNotificationsFilterOtherUsersAndRevoke(t *testing.T) {
 	phoneTestCall(t, a, "own-call", "pending")
 	a.callChanges.notify("project-a")
 	event := receiveSoon(t, events)
-	if event != `{"type":"calls.changed"}` || strings.Contains(event, "own-call") {
+	var changed map[string]string
+	if json.Unmarshal([]byte(event), &changed) != nil || changed["type"] != "calls.changed" || len(changed["state"]) != 64 || len(changed) != 2 || strings.Contains(event, "own-call") {
 		t.Fatal(event)
 	}
 	for i := range policy.Users {

@@ -66,10 +66,13 @@ func (h *callChangeHub) notify(project string) {
 // Fingerprint only the visible call/offer state. Unrelated users' changes never
 // produce events, and hints carry no call data or global sequence counters.
 func (a *App) callNotificationSnapshot(r *http.Request, project string) ([32]byte, error) {
-	model, checked, err := a.phoneCallRead(r, project, 100, true)
+	model, _, err := a.phoneCallRead(r, project, 100, true)
 	if err != nil {
 		return [32]byte{}, err
 	}
+	return model.fingerprint, nil
+}
+func (a *App) callReadFingerprint(checked *http.Request, model callReadModel) ([32]byte, error) {
 	type offer struct{ ID, Destination, Kind, Expires string }
 	type entry struct {
 		ID, Status, Peer, Destination, Media, Hold, Recording string
@@ -81,7 +84,7 @@ func (a *App) callNotificationSnapshot(r *http.Request, project string) ([32]byt
 		offers := model.permissions.offers[row.ID]
 		p := phoneUserFrom(checked)
 		for _, o := range offers {
-			if p != nil && (!p.Destinations[o.DestinationID] || !a.phoneReadDestination(p, project, o.DestinationID)) {
+			if p != nil && (!p.Destinations[o.DestinationID] || !a.phoneReadDestination(p, row.ProjectID, o.DestinationID)) {
 				continue
 			}
 			e.Offers = append(e.Offers, offer{o.ID, o.DestinationID, o.Kind, o.ExpiresAt})
@@ -126,7 +129,7 @@ func (a *App) handleCallNotifications(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
-	if send(`{"type":"calls.changed"}`) != nil {
+	if send(fmt.Sprintf(`{"type":"calls.changed","state":"%x"}`, current)) != nil {
 		return
 	}
 	heartbeat := time.NewTicker(callStreamHeartbeat)
@@ -184,7 +187,7 @@ func (a *App) handleCallNotifications(w http.ResponseWriter, r *http.Request) {
 		}
 		if snapshot != current {
 			current = snapshot
-			if send(`{"type":"calls.changed"}`) != nil {
+			if send(fmt.Sprintf(`{"type":"calls.changed","state":"%x"}`, current)) != nil {
 				return
 			}
 		} else if heartbeatDue {

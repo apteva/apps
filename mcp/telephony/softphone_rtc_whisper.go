@@ -65,7 +65,11 @@ func mixRTCWhisper(main []float32, pcm8k []int16, resampler *pcmResampler) []flo
 	// Resample in the encoder goroutine, never while holding a hub lock. A short
 	// frame is padded rather than repeating private speech after its lease ends.
 	overlay := resampler.Process(pcm8k)
-	out := append([]float32(nil), main...)
+	return mixRTCWhisperInto(main, overlay, make([]float32, len(main)))
+}
+func mixRTCWhisperInto(main []float32, overlay []int16, dst []float32) []float32 {
+	out := dst[:len(main)]
+	copy(out, main)
 	for i := 0; i < len(out) && i < len(overlay); i++ {
 		headroom := max(float32(0), 1-float32(math.Abs(float64(out[i]))))
 		out[i] += max(-headroom, min(headroom, float32(overlay[i])/32768*.5))

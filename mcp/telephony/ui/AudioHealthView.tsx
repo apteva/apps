@@ -137,6 +137,8 @@ function AudioDetails({
     const ctrl = new AbortController();
     let busy = false;
     let lastFetch = 0;
+    let historyCursor = "";
+    let history: Array<Record<string, unknown>> = [];
     const q = new URLSearchParams({ call_id: callId, project_id: host.projectId || "", install_id: String(host.installId || "") });
     const load = async () => {
       // Coalesce SSE changes: an expanded detail never overlaps requests or
@@ -149,10 +151,24 @@ function AudioDetails({
       ctrl.signal.addEventListener("abort", abort, { once: true });
       const timer = window.setTimeout(() => request.abort("timeout"), 12000);
       try {
+        q.set("history", "incremental");
+        if (historyCursor) q.set("history_cursor",historyCursor);
         const r = await fetch(`/api/apps/${encodeURIComponent(host.appName || "telephony")}/audio-health?${q}`, { credentials: "same-origin", signal: request.signal });
         if (!r.ok) throw new Error(`Diagnostics failed (HTTP ${r.status})`);
         const next = await r.json();
-        if (!ctrl.signal.aborted) { setValue(next); setError(""); }
+        const page = next.carrier_history;
+        if (page) {
+          if (page.reset_required) history=[];
+          const records = Array.isArray(page.records) ? page.records : [];
+          const byId=new Map([...history,...records].map(record=>[String(record.id),record]));
+          history=[...byId.values()].slice(-256);
+          historyCursor=typeof page.next_cursor==="string" ? page.next_cursor : "";
+          next.carrier_transport_history=history;
+        }
+        if (!ctrl.signal.aborted) {
+          setValue(next); setError("");
+          if (page?.has_more) { lastFetch=0; window.setTimeout(()=>void load(),50); }
+        }
       } catch (e) {
         if (!ctrl.signal.aborted) setError(request.signal.aborted ? "Diagnostics request timed out." : (e as Error).message);
       } finally {

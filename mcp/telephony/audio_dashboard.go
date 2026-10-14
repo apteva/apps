@@ -354,6 +354,7 @@ func (c *callsDB) saveAudioDashboardAlert(alert audioAlert) error {
 }
 
 type audioDashboardFilter struct {
+	OmitTotals, OmitFacets                                      bool
 	From, Until                                                 int64
 	Provider, Adviser, Destination, Stage, Issue, State, Search string
 	Limit                                                       int
@@ -363,6 +364,15 @@ type audioDashboardFilter struct {
 func parseAudioDashboardFilter(r *http.Request, now time.Time) (audioDashboardFilter, error) {
 	q := r.URL.Query()
 	f := audioDashboardFilter{From: now.Add(-24 * time.Hour).UnixMilli(), Until: now.UnixMilli(), Provider: q.Get("provider"), Adviser: q.Get("adviser"), Destination: q.Get("destination"), Stage: q.Get("stage"), Issue: q.Get("issue"), State: q.Get("state"), Search: strings.TrimSpace(q.Get("search")), Limit: 50, Cursor: q.Get("cursor")}
+	for key, flag := range map[string]*bool{"include_totals": &f.OmitTotals, "include_facets": &f.OmitFacets} {
+		if v := q.Get(key); v != "" {
+			b, err := strconv.ParseBool(v)
+			if err != nil {
+				return f, fmt.Errorf("invalid %s", key)
+			}
+			*flag = !b
+		}
+	}
 	for k, p := range map[string]*int64{"from": &f.From, "until": &f.Until} {
 		if q.Get(k) != "" {
 			t, e := time.Parse(time.RFC3339Nano, q.Get(k))
@@ -488,6 +498,20 @@ func (a *App) handleAudioDashboard(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
+		historyMode := r.URL.Query().Get("history")
+		if historyMode != "" && historyMode != "none" && historyMode != "incremental" {
+			http.Error(w, "invalid history mode", 400)
+			return
+		}
+		if historyMode == "none" {
+			_, live, err := a.db().carrierTransportCurrent(r.Context(), project, id)
+			if err != nil {
+				http.Error(w, "load live diagnostics", 500)
+				return
+			}
+			writeJSON(w, map[string]any{"browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "carrier_live": live})
+			return
+		}
 		network, err := a.db().browserNetworkEvents(r.Context(), project, id, time.Now())
 		if err != nil {
 			http.Error(w, "load network diagnostics", 500)
@@ -508,7 +532,25 @@ func (a *App) handleAudioDashboard(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "load AI policy diagnostics", 500)
 			return
 		}
-		history, live, err := a.db().carrierTransportEvidence(r.Context(), project, id)
+		var history []carrierTelemetryRecord
+		var live *carrierTelemetryRecord
+		var page *carrierHistoryPage
+		if historyMode == "incremental" {
+			got, e := a.db().carrierHistoryPage(r.Context(), project, id, r.URL.Query().Get("history_cursor"))
+			if e != nil {
+				status := 500
+				if errors.Is(e, errHistoryCursor) {
+					status = 400
+				}
+				http.Error(w, "load carrier history", status)
+				return
+			}
+			page = &got
+			history = got.Records
+			_, live, err = a.db().carrierTransportCurrent(r.Context(), project, id)
+		} else {
+			history, live, err = a.db().carrierTransportEvidence(r.Context(), project, id)
+		}
 		if err != nil {
 			http.Error(w, "load carrier transport evidence", 500)
 			return
@@ -518,7 +560,11 @@ func (a *App) handleAudioDashboard(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "load carrier commands", 500)
 			return
 		}
-		writeJSON(w, map[string]any{"carrier_transport_history": history, "carrier_live": live, "carrier_commands": commands, "recovery_episodes": carrierRecoveryEpisodes(bridges), "ai_call_policy": policy, "carrier_bridges": bridges, "transport_samples": samples, "browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "network_events": network})
+		result := map[string]any{"carrier_transport_history": history, "carrier_live": live, "carrier_commands": commands, "recovery_episodes": carrierRecoveryEpisodes(bridges), "ai_call_policy": policy, "carrier_bridges": bridges, "transport_samples": samples, "browser": audioDiagnosticsPublic(row.BrowserAudioDiagnostics), "carrier": audioDiagnosticsPublic(row.CarrierAudioDiagnostics), "network_events": network}
+		if page != nil {
+			result["carrier_history"] = page
+		}
+		writeJSON(w, result)
 		return
 	}
 	now := time.Now()
@@ -527,7 +573,7 @@ func (a *App) handleAudioDashboard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
-	result, err := a.db().audioDashboard(r.Context(), project, f, now)
+	result, err := a.db().audioDashboard(r.Context(), project, f, now, &a.dashboardExtras)
 	if err != nil {
 		http.Error(w, "load audio health", 500)
 		return
@@ -535,19 +581,29 @@ func (a *App) handleAudioDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, result)
 }
-func (c *callsDB) audioDashboard(ctx context.Context, project string, f audioDashboardFilter, now time.Time) (map[string]any, error) {
+func (c *callsDB) audioDashboard(ctx context.Context, project string, f audioDashboardFilter, now time.Time, caches ...*dashboardExtrasCache) (map[string]any, error) {
 	where, args := f.where(project, now)
 	totals := map[string]int64{}
-	var total, affected, active, degraded, unobserved int64
-	err := c.db.QueryRowContext(ctx, `SELECT count(*),COALESCE(sum(a.has_issues),0),COALESCE(sum(CASE WHEN `+audioDashboardActive+` THEN 1 ELSE 0 END),0),COALESCE(sum(CASE WHEN `+audioDashboardDegraded+` THEN 1 ELSE 0 END),0),COALESCE(sum(CASE WHEN json_extract(a.summary_json,'$.telemetry')=0 THEN 1 ELSE 0 END),0)`+audioDashboardJoin+`WHERE `+where, append([]any{now.Add(-20 * time.Second).UnixMilli()}, args...)...).Scan(&total, &affected, &active, &degraded, &unobserved)
-	if err != nil {
-		return nil, err
+	facets := map[string]any{}
+	var err error
+	var cache *dashboardExtrasCache
+	if len(caches) > 0 {
+		cache = caches[0]
 	}
-	totals["calls"] = total
-	totals["affected"] = affected
-	totals["active"] = active
-	totals["degraded"] = degraded
-	totals["unobserved"] = unobserved
+	if !f.OmitTotals {
+		v, e := c.dashboardExtra(ctx, project, f, now, "totals", cache, func() (any, error) { return c.audioDashboardTotals(ctx, project, f, now) })
+		if e != nil {
+			return nil, e
+		}
+		totals = v.(map[string]int64)
+	}
+	if !f.OmitFacets {
+		v, e := c.dashboardExtra(ctx, project, f, now, "facets", cache, func() (any, error) { return c.audioDashboardFacets(ctx, project, f) })
+		if e != nil {
+			return nil, e
+		}
+		facets = v.(map[string]any)
+	}
 	listWhere := where
 	listArgs := append([]any{}, args...)
 	if f.Cursor != "" {
@@ -614,7 +670,61 @@ func (c *callsDB) audioDashboard(ctx context.Context, project string, f audioDas
 		}{ats[f.Limit-1], calls[f.Limit-1].ID})
 		cursor = base64.RawURLEncoding.EncodeToString(raw)
 	}
-	// Facets use the full time window, independent of the current row filters.
+	alerts := []audioAlert{}
+	aw := `project_id=? AND occurred_ms BETWEEN ? AND ?`
+	aa := []any{project, f.From, f.Until}
+	if f.Provider != "" {
+		aw += " AND provider=?"
+		aa = append(aa, f.Provider)
+	}
+	if f.Stage != "" {
+		aw += " AND stage=?"
+		aa = append(aa, f.Stage)
+	}
+	ar, err := c.db.QueryContext(ctx, `SELECT payload_json FROM telephony_audio_alert_history WHERE `+aw+` ORDER BY occurred_ms DESC,id DESC LIMIT 20`, aa...)
+	if err != nil {
+		return nil, err
+	}
+	for ar.Next() {
+		var raw string
+		if err = ar.Scan(&raw); err != nil {
+			ar.Close()
+			return nil, err
+		}
+		var v audioAlert
+		if json.Unmarshal([]byte(raw), &v) == nil {
+			alerts = append(alerts, v)
+		}
+	}
+	err = ar.Err()
+	ar.Close()
+	if err != nil {
+		return nil, err
+	}
+	var pending int
+	err = c.db.QueryRowContext(ctx, `SELECT count(*) FROM telephony_audio_pending p JOIN calls c ON c.id=p.call_id WHERE c.project_id=?`, project).Scan(&pending)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"calls": calls, "totals": totals, "facets": facets, "alerts": alerts, "next_cursor": cursor, "pending_reports": pending, "generated_at": now.UTC().Format(time.RFC3339Nano), "from": time.UnixMilli(f.From).UTC().Format(time.RFC3339Nano), "until": time.UnixMilli(f.Until).UTC().Format(time.RFC3339Nano)}, nil
+}
+
+func (c *callsDB) audioDashboardTotals(ctx context.Context, project string, f audioDashboardFilter, now time.Time) (map[string]int64, error) {
+	where, args := f.where(project, now)
+	totals := map[string]int64{}
+	var total, affected, active, degraded, unobserved int64
+	err := c.db.QueryRowContext(ctx, `SELECT count(*),COALESCE(sum(a.has_issues),0),COALESCE(sum(CASE WHEN `+audioDashboardActive+` THEN 1 ELSE 0 END),0),COALESCE(sum(CASE WHEN `+audioDashboardDegraded+` THEN 1 ELSE 0 END),0),COALESCE(sum(CASE WHEN json_extract(a.summary_json,'$.telemetry')=0 THEN 1 ELSE 0 END),0)`+audioDashboardJoin+`WHERE `+where, append([]any{now.Add(-20 * time.Second).UnixMilli()}, args...)...).Scan(&total, &affected, &active, &degraded, &unobserved)
+	if err != nil {
+		return nil, err
+	}
+	totals["calls"] = total
+	totals["affected"] = affected
+	totals["active"] = active
+	totals["degraded"] = degraded
+	totals["unobserved"] = unobserved
+	return totals, nil
+}
+func (c *callsDB) audioDashboardFacets(ctx context.Context, project string, f audioDashboardFilter) (map[string]any, error) {
 	facets := map[string]any{}
 	for _, field := range []string{"provider", "adviser", "destination"} {
 		expr := "a.provider"
@@ -655,41 +765,5 @@ func (c *callsDB) audioDashboard(ctx context.Context, project string, f audioDas
 		}
 		facets[field] = options
 	}
-	alerts := []audioAlert{}
-	aw := `project_id=? AND occurred_ms BETWEEN ? AND ?`
-	aa := []any{project, f.From, f.Until}
-	if f.Provider != "" {
-		aw += " AND provider=?"
-		aa = append(aa, f.Provider)
-	}
-	if f.Stage != "" {
-		aw += " AND stage=?"
-		aa = append(aa, f.Stage)
-	}
-	ar, err := c.db.QueryContext(ctx, `SELECT payload_json FROM telephony_audio_alert_history WHERE `+aw+` ORDER BY occurred_ms DESC,id DESC LIMIT 20`, aa...)
-	if err != nil {
-		return nil, err
-	}
-	for ar.Next() {
-		var raw string
-		if err = ar.Scan(&raw); err != nil {
-			ar.Close()
-			return nil, err
-		}
-		var v audioAlert
-		if json.Unmarshal([]byte(raw), &v) == nil {
-			alerts = append(alerts, v)
-		}
-	}
-	err = ar.Err()
-	ar.Close()
-	if err != nil {
-		return nil, err
-	}
-	var pending int
-	err = c.db.QueryRowContext(ctx, `SELECT count(*) FROM telephony_audio_pending p JOIN calls c ON c.id=p.call_id WHERE c.project_id=?`, project).Scan(&pending)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"calls": calls, "totals": totals, "facets": facets, "alerts": alerts, "next_cursor": cursor, "pending_reports": pending, "generated_at": now.UTC().Format(time.RFC3339Nano), "from": time.UnixMilli(f.From).UTC().Format(time.RFC3339Nano), "until": time.UnixMilli(f.Until).UTC().Format(time.RFC3339Nano)}, nil
+	return facets, nil
 }

@@ -225,7 +225,7 @@ func connectListenerRTC(signal, signalRead net.Conn, c softphoneRTCConfig, l *ca
 	}
 	signal.SetReadDeadline(time.Time{})
 	for d := range tracks {
-		go sendRTCAudio(sourceReaders[d], sourceWriters[d], writer, tracks[d], c.Bitrate, result.stats[d], done, stop, c.fecEnabled(), listenerMaxAge, 200, nil)
+		go sendRTCAudio(sourceReaders[d], sourceWriters[d], writer, tracks[d], c.Bitrate, result.stats[d], done, stop, c.fecEnabled(), listenerMaxAge, 200, nil, c.InputRate)
 	}
 	// Carry all existing controls through the original lease/PTT authority. Only
 	// negotiated SDP is intercepted; coaching RTP is converted into generation-

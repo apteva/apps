@@ -16,6 +16,8 @@ type rtcVoiceControl struct {
 	configurationErrors atomic.Uint64
 }
 type rtcEncoderState struct {
+	InputRate      int    `json:"input_sample_rate"`
+	RTPClockRate   int    `json:"rtp_clock_rate"`
 	Source         string `json:"source"`
 	LibraryVersion string `json:"library_version,omitempty"`
 	FallbackReason string `json:"fallback_reason,omitempty"`

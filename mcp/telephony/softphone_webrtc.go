@@ -36,6 +36,7 @@ type softphoneRTCConfig struct {
 	PublicIPs        []string
 	PortMin, PortMax uint16
 	Bitrate          int
+	InputRate        int
 	FEC              *bool // nil retains the existing enabled preference.
 }
 
@@ -53,7 +54,14 @@ func (c softphoneRTCConfig) relayConfigured() bool {
 func (c softphoneRTCConfig) fecEnabled() bool { return c.FEC == nil || *c.FEC }
 
 func parseSoftphoneRTCConfig(values map[string]string) (softphoneRTCConfig, error) {
-	c := softphoneRTCConfig{Enabled: values["softphone_webrtc_enabled"] == "true", Bitrate: 32000}
+	c := softphoneRTCConfig{Enabled: values["softphone_webrtc_enabled"] == "true", Bitrate: 32000, InputRate: 48000}
+	if v := values["softphone_webrtc_encoder_input_rate"]; v != "" {
+		rate, err := strconv.Atoi(v)
+		if err != nil || (rate != 24000 && rate != 48000) {
+			return c, errors.New("invalid WebRTC encoder input rate")
+		}
+		c.InputRate = rate
+	}
 	if !c.Enabled {
 		return c, nil
 	}
@@ -508,7 +516,7 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 	queueWhisper := func(data []byte, valid func() bool) bool {
 		return queueRTCWhisper(whispers, data, valid, done)
 	}
-	go sendRTCAudio(bridge, input, signalWriter, track, c.Bitrate, stats, done, stop, c.fecEnabled(), liveAudioMaxAge, 320, whispers)
+	go sendRTCAudio(bridge, input, signalWriter, track, c.Bitrate, stats, done, stop, c.fecEnabled(), liveAudioMaxAge, 320, whispers, c.InputRate)
 	return &rtcHubConn{Conn: hub, stop: stop, stats: stats, whisper: queueWhisper, disconnect: disconnect}, stop, nil
 }
 
@@ -657,12 +665,16 @@ func sendSoftphoneRTP(bridge net.Conn, input, signal *websocketWriterPump, track
 	sendRTCAudio(bridge, input, signal, track, bitrate, stats, done, stop, fec, liveAudioMaxAge, 320, nil)
 }
 
-func sendRTCAudio(bridge net.Conn, input, signal *websocketWriterPump, track *webrtc.TrackLocalStaticRTP, bitrate int, stats *rtcMediaStats, done <-chan struct{}, stop func(), fec bool, maxAge time.Duration, sourceMaxMS float64, whispers <-chan rtcWhisperFrame) {
+func sendRTCAudio(bridge net.Conn, input, signal *websocketWriterPump, track *webrtc.TrackLocalStaticRTP, bitrate int, stats *rtcMediaStats, done <-chan struct{}, stop func(), fec bool, maxAge time.Duration, sourceMaxMS float64, whispers <-chan rtcWhisperFrame, inputRates ...int) {
 	direction := stats.direction
 	if direction == "" {
 		direction = "carrier_to_operator"
 	}
-	encoder, err := newRTCOpusEncoderWithFEC(bitrate, fec)
+	requestedRate := 48000
+	if len(inputRates) > 0 && inputRates[0] != 0 {
+		requestedRate = inputRates[0]
+	}
+	encoder, err := newRTCOpusEncoderAtRate(bitrate, fec, requestedRate)
 	if err != nil {
 		stop()
 		return
@@ -735,10 +747,16 @@ func sendRTCAudio(bridge net.Conn, input, signal *websocketWriterPump, track *we
 			}
 		}
 	}()
-	resampler := newPCMResampler(24000, 48000)
-	whisperResampler := newPCMResampler(8000, 48000)
+	inputRate := rtcEncoderInputRate(encoder)
+	frameSamples := inputRate / 50
+	resampler := newPCMResampler(24000, inputRate)
+	whisperResampler := newPCMResampler(8000, inputRate)
+	converted := make([]int16, 0, frameSamples+2)
+	overlay := make([]int16, 0, frameSamples+2)
+	mixedSamples := make([]float32, frameSamples)
+	silence := make([]int16, 480)
 	var whisperEpoch uint32
-	samples := make([]float32, 0, 960)
+	samples := make([]float32, 0, frameSamples*2)
 	out := make([]byte, 1275)
 	clock := rtcRTPClock{base: time.Now(), baseTS: rand.Uint32()}
 	sequence := rtp.NewRandomSequencer()
@@ -797,31 +815,37 @@ func sendRTCAudio(bridge net.Conn, input, signal *websocketWriterPump, track *we
 				}
 			}
 			if frame.pcm == nil {
-				frame = rtcPCMFrame{pcm: make([]int16, 480), expires: now.Add(maxAge)}
+				frame = rtcPCMFrame{pcm: silence, expires: now.Add(maxAge)}
 			}
-			for _, v := range resampler.Process(frame.pcm) {
+			if inputRate == 24000 {
+				converted = append(converted[:0], frame.pcm...)
+			} else {
+				converted = resampler.ProcessInto(frame.pcm, converted)
+			}
+			for _, v := range converted {
 				samples = append(samples, float32(v)/32768)
 			}
-			if len(samples) < 960 {
+			if len(samples) < frameSamples {
 				continue
 			}
 			voice := nextRTCWhisper(whispers, now)
 			mixed := voice != nil
-			encodeSamples := samples[:960]
+			encodeSamples := samples[:frameSamples]
 			if voice != nil {
 				if voice.epoch != whisperEpoch {
-					whisperResampler = newPCMResampler(8000, 48000)
+					whisperResampler = newPCMResampler(8000, inputRate)
 					whisperEpoch = voice.epoch
 				}
-				encodeSamples = mixRTCWhisper(encodeSamples, voice.pcm, whisperResampler)
+				overlay = whisperResampler.ProcessInto(voice.pcm, overlay)
+				encodeSamples = mixRTCWhisperInto(encodeSamples, overlay, mixedSamples)
 			}
 			n, err := encoder.EncodeFloat32(encodeSamples, out)
 			// A stop/replacement during encoding invalidates the private overlay.
 			if voice != nil && (!voice.valid() || time.Since(voice.at) > coachAudioMaxAge) {
 				mixed = false
-				n, err = encoder.EncodeFloat32(samples[:960], out)
+				n, err = encoder.EncodeFloat32(samples[:frameSamples], out)
 			}
-			samples = samples[960:]
+			samples = samples[:copy(samples, samples[frameSamples:])]
 			if err != nil {
 				stop()
 				return

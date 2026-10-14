@@ -35,6 +35,13 @@ jobs:
       - name: Bounded audio timing and telemetry overhead
         run: go test -run '^$' -bench '^Benchmark(SIPClockObservation|RTCSocketEvidence|RTCCaptureRelease)$' -benchmem -benchtime=1s -count=3 . > /tmp/telephony-audio-overhead.log
         working-directory: mcp/telephony
+      - name: Runtime optimization benchmarks
+        run: |
+          go test -run '^TestRuntimeOptimizationPerformance$' -count=1 -v . > /tmp/telephony-runtime-reads.log
+          go test -run '^$' -bench '^BenchmarkRTCOptimizedPipeline$' -benchmem -benchtime=1s -count=3 . > /tmp/telephony-runtime-audio.log
+        working-directory: mcp/telephony
+        env:
+          TELEPHONY_RUNTIME_OPT_RESULTS: /tmp/telephony-runtime-reads.json
       - name: Archive and idle worker efficiency comparison
         run: go test -run '^TestEfficiencyPerformance$' -count=1 -v . > /tmp/telephony-efficiency.log
         working-directory: mcp/telephony
@@ -68,6 +75,9 @@ jobs:
             /tmp/telephony-go.jsonl
             /tmp/telephony-variable-delivery.json
             /tmp/telephony-audio-overhead.log
+            /tmp/telephony-runtime-reads.log
+            /tmp/telephony-runtime-reads.json
+            /tmp/telephony-runtime-audio.log
             /tmp/telephony-efficiency.log
             /tmp/telephony-efficiency.json
             /tmp/telephony-long-recordings.log
