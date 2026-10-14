@@ -254,3 +254,30 @@ func BenchmarkRTCCaptureRelease(b *testing.B) {
 		q.pop(at.Add(60*time.Millisecond), stats, "operator_to_carrier")
 	}
 }
+
+func TestRTCCaptureCadenceDoesNotAccumulateTimerLateness(t *testing.T) {
+	stats := &rtcMediaStats{}
+	var q rtcAudioRelease
+	start := time.Now()
+	pcm := make([]int16, 480)
+	for i := 0; i < 30000; i++ {
+		source := start.Add(time.Duration(i) * 20 * time.Millisecond)
+		q.push(pcm, source, stats, "operator_to_carrier")
+		// A timer may wake 1ms late every time. This must not compound into
+		// seconds of source age over a ten-minute healthy call.
+		now := source.Add(60 * time.Millisecond)
+		if q.next.After(now) {
+			now = q.next
+		}
+		now = now.Add(time.Millisecond)
+		if _, ok := q.pop(now, stats, "operator_to_carrier"); !ok {
+			t.Fatal("healthy frame not released", i)
+		}
+		if now.Sub(source) > 63*time.Millisecond {
+			t.Fatal("timer lateness accumulated", i, now.Sub(source))
+		}
+	}
+	if stats.snapshot().IngressDiscardedMS != 0 {
+		t.Fatal("healthy audio discarded")
+	}
+}

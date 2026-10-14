@@ -48,8 +48,15 @@ func (q *rtcAudioRelease) pop(now time.Time, stats *rtcMediaStats, direction str
 			stats.drop("webrtc_capture_source_age", direction, 0, len(f.pcm)*1000/24000)
 			continue
 		}
-		// A delayed scheduler tick never initiates unbounded catch-up writes.
-		q.next = now.Add(time.Duration(len(f.pcm)) * time.Second / 24000)
+		// Keep absolute media cadence under ordinary timer lateness. Reset only
+		// after a full missed interval; a scheduler pause cannot trigger a
+		// catch-up burst, and sub-frame lateness cannot accumulate clock drift.
+		step := time.Duration(len(f.pcm)) * time.Second / 24000
+		if q.next.IsZero() || now.Sub(q.next) >= step {
+			q.next = now.Add(step)
+		} else {
+			q.next = q.next.Add(step)
+		}
 		return f, true
 	}
 	return rtcReleaseFrame{}, false
