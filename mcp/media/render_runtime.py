@@ -456,8 +456,6 @@ def normalized_audio(req, info, diagnostics):
     extent = float(audio.get("duration", 0))
     extent_filter = "atrim=duration=" + seconds(extent) + "," if extent > 0 else ""
     prefix = extent_filter + filter_prefix(mode)
-    runtime_event(req, "audio_measurement")
-    measured = measurement(req, req["source"], prefix)
     target = p.get("target_lufs", -16) or -16
     peak = p.get("target_peak_dbtp", -1.5)
     rate = next((int(s["sample_rate"]) for s in info["streams"] if s.get("codec_type") == "audio"), None)
@@ -488,16 +486,24 @@ def normalized_audio(req, info, diagnostics):
                     durations = None
     attempts = []
     max_attempts = 3
+    effective_target = target
     for attempt in range(1, max_attempts + 1):
+        # target_offset depends on BOTH loudness and peak settings. Measure the
+        # original with this attempt's settings, never an already encoded retry.
+        measurement_req = dict(req, params=dict(p, target_lufs=effective_target, target_peak_dbtp=internal_peak))
+        runtime_event(req, "audio_measurement")
+        measured = measurement(measurement_req, req["source"], prefix)
         loudnorm = ("loudnorm=I=%s:TP=%s:LRA=11:measured_I=%s:measured_TP=%s:measured_LRA=%s:measured_thresh=%s:offset=%s:linear=true" %
-                    (target, internal_peak, measured["input_i"], measured["input_tp"], measured["input_lra"], measured["input_thresh"], measured["target_offset"]))
+                    (effective_target, internal_peak, measured["input_i"], measured["input_tp"], measured["input_lra"], measured["input_thresh"], measured["target_offset"]))
         chain = prefix + loudnorm + ",aresample=" + str(rate)
         if extent > 0:
             chain += ",atrim=duration=" + seconds(extent)
         for flag, value in (("-af", chain), ("-ar", str(rate))):
             args[args.index(flag) + 1] = value
-        diagnostics["audio_normalization"] = {"algorithm_version": "media-two-pass-loudnorm-4", "passes": 2,
+        diagnostics["audio_normalization"] = {"algorithm_version": "media-two-pass-loudnorm-5", "passes": 2,
             "target_lufs": target, "target_peak_dbtp": peak, "internal_peak_dbtp": internal_peak,
+            "effective_target_lufs": effective_target, "measurement_target_lufs": effective_target,
+            "measurement_peak_dbtp": internal_peak,
             "source_measurements": measured, "attempt": attempt, "max_attempts": max_attempts,
             "attempts": attempts, "loudness_tolerance_lu": .5, "peak_tolerance_db": .1,
             "sample_rate": rate, "effective_filter": chain, "validated": False,
@@ -510,17 +516,24 @@ def normalized_audio(req, info, diagnostics):
         actual = measurement(req, req["output"])
         actual_i, actual_tp = float(actual["input_i"]), float(actual["input_tp"])
         attempts.append({"attempt": attempt, "internal_peak_dbtp": internal_peak,
+            "effective_target_lufs": effective_target, "source_measurements": measured,
             "encoded_lufs": actual_i, "encoded_peak_dbtp": actual_tp})
         diagnostics["audio_normalization"].update({"encoded_lufs": actual_i, "encoded_peak_dbtp": actual_tp,
             "retry_count": attempt - 1})
         peak_ok = actual_tp <= peak + .1
         if abs(actual_i - target) <= .5 and peak_ok:
             break
-        next_peak = max(-9, internal_peak - max(1, actual_tp - peak + .5))
-        if peak_ok or attempt == max_attempts or next_peak >= internal_peak:
+        loudness_ok = abs(actual_i - target) <= .5
+        attempts[-1]["retry_reasons"] = (["loudness_miss"] if not loudness_ok else []) + (["peak_overshoot"] if not peak_ok else [])
+        # Compensate for encoded loudness error without relaxing the public
+        # target/ceiling. Bound cumulative gain and attempts for infeasible audio.
+        next_target = max(-70, min(-5, target + max(-3, min(3, effective_target - actual_i)))) if not loudness_ok else effective_target
+        next_peak = internal_peak if peak_ok else max(-9, internal_peak - max(1, actual_tp - peak + .5))
+        if attempt == max_attempts or (next_peak == internal_peak and next_target == effective_target):
             raise ValueError("audio_normalization_failed: after %d attempt(s), encoded loudness %.2f LUFS / %.2f dBTP differs from requested %.2f LUFS / ceiling %.2f dBTP (internal ceiling %.2f dBTP)" %
                 (attempt, actual_i, actual_tp, target, peak, internal_peak))
         internal_peak = next_peak
+        effective_target = next_target
     # Validate the accepted output once. Video proof reuse and the final
     # every-picture fallback stay authoritative, independent of audio retries.
     runtime_event(req, "validation", {"audio_normalization": diagnostics["audio_normalization"]})

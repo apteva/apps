@@ -2,8 +2,12 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.38
+version: 0.14.39
 description: |
+  v0.14.39 retries encoded loudness misses as well as peak overshoot within three
+  original-source attempts. Each measurement uses the effective loudness and
+  peak settings of its encode, with bounded loudness correction and unchanged
+  final loudness, peak, sample-rate, picture and timeline validation.
   v0.14.38 makes media_analyze a quick technical check by default: short opening,
   middle and ending windows, one video/audio input pass per window, bounded
   decoder/filter budgets, verified source-cache reuse and source-bound result
@@ -170,7 +174,7 @@ description: |
   v0.14.8 prevents stationary Smart Crop tracking from replacing the subject
   with a disconnected background feature. Cropping requests recompute old
   decisions and outputs; unrelated render-result caches remain reusable.
-  Uses app-sdk v0.96.0.
+  Uses app-sdk v0.102.0.
 
   v0.14.7 makes safe catalog discovery the default: compact, planning, and
   bounded full detail levels; field projection; explicit large expansions;
@@ -677,7 +681,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.38
+    ref: media/v0.14.39
     entry: mcp/media
   port: 8080
   health_check: /health

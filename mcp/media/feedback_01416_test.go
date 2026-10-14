@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-func TestAdaptivePeakRetryPolicy(t *testing.T) {
+func TestAdaptiveNormalizationRetryPolicy(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("Python unavailable")
 	}
@@ -27,14 +27,15 @@ func TestAdaptivePeakRetryPolicy(t *testing.T) {
 	}
 	script := `import importlib.util,sys
 s=importlib.util.spec_from_file_location("runtime",sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
-for peaks,loudness,expected,passes in [([-1.32,-2.89],-19.92,True,2),([-1.32]*3,-19.92,False,3),([-3],-17,False,1)]:
- req={"source":"source.wav","output":"out.wav","params":{"target_lufs":-20,"target_peak_dbtp":-1.5},"args":["-i","source.wav","-af","","-ar","48000","-c:a","aac","out.wav"],"ffmpeg":"ffmpeg","ffprobe":"ffprobe"}
+for peaks,loudness,target,expected,passes in [([-1.32,-2.89],[-19.92]*2,-20,True,2),([-1.32]*3,[-19.92]*3,-20,False,3),([-2.83,-2.7],[-16.74,-16.02],-16,True,2),([-3]*3,[-19]*3,-20,False,3),([-3,-3],[-15.2,-16],-16,True,2),([-1.2,-2.5,-2.5],[-16.74,-16.6,-16],-16,True,3)]:
+ req={"source":"source.wav","output":"out.wav","params":{"target_lufs":target,"target_peak_dbtp":-1.5},"args":["-i","source.wav","-af","","-ar","48000","-c:a","aac","out.wav"],"ffmpeg":"ffmpeg","ffprobe":"ffprobe"}
  info={"streams":[{"codec_type":"audio","sample_rate":"48000","duration":"5"}]}
- calls=[];measured=[];d={}
+ calls=[];measured=[];settings=[];d={}
  def measure(req,source,prefix=""):
   peak=-5 if source==req["source"] else peaks[len(measured)]
-  result={"input_i":str(-20 if source==req["source"] else loudness),"input_tp":str(peak),"input_lra":"1","input_thresh":"-30","target_offset":"0"}
+  result={"input_i":str(-20 if source==req["source"] else loudness[len(measured)]),"input_tp":str(peak),"input_lra":"1","input_thresh":"-30","target_offset":"0"}
   if source!=req["source"]:measured.append(result)
+  else:settings.append(dict(req["params"]))
   return result
  m.measurement=measure;m.encode=lambda binary,args:calls.append(list(args));m.runtime_event=lambda *args:None;m.probe=lambda *args:info;m.run=lambda *args:("","")
  try:m.normalized_audio(req,info,d);succeeded=True
@@ -43,8 +44,14 @@ for peaks,loudness,expected,passes in [([-1.32,-2.89],-19.92,True,2),([-1.32]*3,
   succeeded=False
  assert succeeded==expected and len(calls)==passes,(calls,d)
  assert len(d["audio_normalization"]["attempts"])==passes,d
- for a in calls:assert a[a.index("-i")+1]=="source.wav" and "loudnorm=I=-20:" in a[a.index("-af")+1],a
- if passes>1:assert "TP=-4.5:" in calls[1][calls[1].index("-af")+1],calls
+ for a,setting in zip(calls,settings):
+  chain=a[a.index("-af")+1]
+  assert a[a.index("-i")+1]=="source.wav",a
+  assert "loudnorm=I=%s:TP=%s:"%(setting["target_lufs"],setting["target_peak_dbtp"]) in chain,(setting,chain)
+ assert d["audio_normalization"]["target_lufs"]==target,d
+ if peaks[0]>-1.4:assert "TP=-4.5:" in calls[1][calls[1].index("-af")+1],calls
+ if loudness[0]==-16.74:assert settings[1]["target_lufs"]>target,settings
+ if loudness[0]==-15.2:assert settings[1]["target_lufs"]<target,settings
  assert d["audio_normalization"]["validated"]==expected,d
 `
 	out, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
@@ -54,13 +61,21 @@ for peaks,loudness,expected,passes in [([-1.32,-2.89],-19.92,True,2),([-1.32]*3,
 }
 
 func TestAdaptivePeakRetryRetainsVideoAndReusesProof(t *testing.T) {
+	testAdaptiveNormalizationRetry(t, -20, -19.92, -1.32)
+}
+
+func TestLoudnessMissRetryRetainsVideoAndReusesProof(t *testing.T) {
+	testAdaptiveNormalizationRetry(t, -16, -16.74, -2.83)
+}
+
+func testAdaptiveNormalizationRetry(t *testing.T, target, firstLoudness, firstPeak float64) {
 	source := guardedFixture(t, false)
 	realFFmpeg, _ := exec.LookPath("ffmpeg")
 	realProbe, _ := exec.LookPath("ffprobe")
 	dir := t.TempDir()
 	trace := filepath.Join(dir, "trace")
 	forced := filepath.Join(dir, "forced")
-	// Inject the reported first-pass peak; encoding and final verification use real FFmpeg.
+	// Inject the reported encoded measurements; retries and final checks use real FFmpeg.
 	wrapper := fmt.Sprintf(`#!/usr/bin/env python3
 import subprocess,sys,json,re,os
 args=sys.argv[1:]
@@ -68,11 +83,11 @@ with open(%q,"a") as f:f.write(json.dumps(args)+"\n")
 if "-af" in args and "print_format=json" in args[args.index("-af")+1] and args[args.index("-af")+1].startswith("loudnorm=") and os.path.basename(args[args.index("-i")+1])=="out.mov" and not os.path.exists(%q):
  p=subprocess.run([%q]+args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
  with open(%q,"w") as f:f.write("forced first encoded peak")
- err=re.sub(r'"input_tp"\s*:\s*"[^"]+"','"input_tp" : "-1.32"',p.stderr)
- err=re.sub(r'"input_i"\s*:\s*"[^"]+"','"input_i" : "-19.92"',err)
+ err=re.sub(r'"input_tp"\s*:\s*"[^"]+"','"input_tp" : "%.2f"',p.stderr)
+ err=re.sub(r'"input_i"\s*:\s*"[^"]+"','"input_i" : "%.2f"',err)
  sys.stdout.write(p.stdout);sys.stderr.write(err);sys.exit(p.returncode)
 os.execv(%q,[%q]+args)
-`, trace, forced, realFFmpeg, forced, realFFmpeg, realFFmpeg)
+`, trace, forced, realFFmpeg, forced, firstPeak, firstLoudness, realFFmpeg, realFFmpeg)
 	if err := os.WriteFile(filepath.Join(dir, "ffmpeg"), []byte(wrapper), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -87,16 +102,16 @@ os.execv(%q,[%q]+args)
 	for _, remote := range []bool{false, true} {
 		os.Remove(forced)
 		os.WriteFile(trace, nil, 0600)
-		output, normalized, err := runGuardedFixture(t, copy, "audio_filter", map[string]any{"target_lufs": -20, "target_peak_dbtp": -1.5, "_validated_video_evidence": result["video_evidence"]}, remote)
+		output, normalized, err := runGuardedFixture(t, copy, "audio_filter", map[string]any{"target_lufs": target, "target_peak_dbtp": -1.5, "_validated_video_evidence": result["video_evidence"]}, remote)
 		if err != nil {
 			t.Fatalf("remote=%v %v %v", remote, err, normalized)
 		}
 		d := normalized["audio_normalization"].(map[string]any)
-		if d["retry_count"] != float64(1) || d["video_validation_reused"] != true || d["video_frames_checked"] != float64(60) || d["timeline_validated"] != true {
+		if d["retry_count"].(float64) < 1 || d["retry_count"].(float64) > 2 || d["video_validation_reused"] != true || d["video_frames_checked"] != float64(60) || d["timeline_validated"] != true {
 			t.Fatal(d)
 		}
 		loudness, peak := measureLoudness(t, output)
-		if loudness < -20.5 || loudness > -19.5 || peak > -1.4 {
+		if loudness < target-.5 || loudness > target+.5 || peak > -1.4 {
 			t.Fatalf("%.2f %.2f", loudness, peak)
 		}
 		raw, _ := os.ReadFile(trace)
