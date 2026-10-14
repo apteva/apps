@@ -32,8 +32,11 @@ jobs:
         working-directory: mcp/telephony
         env:
           TELEPHONY_VARIABLE_DELIVERY_RESULTS: /tmp/telephony-variable-delivery.json
+          TELEPHONY_PRODUCTION_SCENARIO_RESULTS: /tmp/telephony-production-scenarios.json
+          TELEPHONY_SPEECH_ACCEPTANCE_RESULTS: /tmp/telephony-speech-acceptance.json
+          TELEPHONY_SPEECH_ACCEPTANCE_AUDIO_DIR: /tmp/telephony-speech-audio
       - name: Bounded audio timing and telemetry overhead
-        run: go test -run '^$' -bench '^Benchmark(SIPReceiveEvidence|SIPClockObservation|RTCSocketEvidence|RTCCaptureRelease)$' -benchmem -benchtime=1s -count=3 . > /tmp/telephony-audio-overhead.log
+        run: go test -run '^$' -bench '^Benchmark(SIPReceiveEvidence|SIPRecoveryEligibility|SIPClockObservation|RTCSocketEvidence|RTCCaptureRelease)$' -benchmem -benchtime=1s -count=3 . > /tmp/telephony-audio-overhead.log
         working-directory: mcp/telephony
       - name: Runtime optimization benchmarks
         run: |
@@ -77,6 +80,9 @@ jobs:
           path: |
             /tmp/telephony-go.jsonl
             /tmp/telephony-variable-delivery.json
+            /tmp/telephony-production-scenarios.json
+            /tmp/telephony-speech-acceptance.json
+            /tmp/telephony-speech-audio/
             /tmp/telephony-audio-overhead.log
             /tmp/telephony-runtime-reads.log
             /tmp/telephony-runtime-reads.json
@@ -86,6 +92,33 @@ jobs:
             /tmp/telephony-long-recordings.log
             /tmp/telephony-long-recordings.json
             /tmp/telephony-chromium.log
+  browser-outages:
+    name: Browser long-outage scenarios
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/telephony/go.mod
+          cache-dependency-path: mcp/telephony/go.sum
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.13'
+      - run: bun install --frozen-lockfile
+        working-directory: mcp/telephony
+      - run: bunx --no-install playwright install --with-deps chromium
+        working-directory: mcp/telephony
+      - name: Packaged WebRTC and PCM recover past transport budget and lease expiry
+        run: go test -tags integration -run '^TestTier2HeadlessBrowserLongNetworkOutages$' -count=1 -timeout 8m -v . > /tmp/telephony-browser-outages.log 2>&1
+        working-directory: mcp/telephony
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: telephony-browser-outages
+          path: /tmp/telephony-browser-outages.log
   native-opus:
     name: Bundled Opus (${{ matrix.runner }})
     strategy:
@@ -161,6 +194,12 @@ jobs:
       - name: Paced media, codecs, recording and database contention
         run: go test -run '^TestSIPPlaybackClockPacedLoad$' -count=1 -timeout 5m -v . > /tmp/telephony-mixed-load.log 2>&1
         working-directory: mcp/telephony
+      - name: Production-shaped faults remain isolated under load
+        run: go test -run '^TestSIPPlaybackClockPacedLoad$' -count=1 -timeout 5m -v . > /tmp/telephony-production-load.log 2>&1
+        working-directory: mcp/telephony
+        env:
+          TELEPHONY_SIP_PRODUCTION_LOAD: '1'
+          TELEPHONY_SIP_LOAD_RESULTS: /tmp/telephony-production-load.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -168,6 +207,8 @@ jobs:
           path: |
             /tmp/telephony-mixed-load.json
             /tmp/telephony-mixed-load.log
+            /tmp/telephony-production-load.json
+            /tmp/telephony-production-load.log
   race:
     name: Race checks (${{ matrix.group }})
     runs-on: ubuntu-latest
@@ -177,7 +218,7 @@ jobs:
       matrix:
         include:
           - group: media
-            pattern: 'Test(SIPControlledPlayout|SIPRecoveryHold|SIPLiveAdmission|SIPProcessingDrops|SIPReceiveEvidence|RTCSocket|RTCObservedUDP|RTCLinux|RTCRelease|RTCTail|MicrophoneSource|SIPBridgePreparation|SIPHumanAnswerPrepares|SIPPlayback|SIPClockFitEvidence|SIPClockLowerEnvelope|SIPClockRecoveryShort|SIPClockRecoveryDelivery|SIPIngressAndConsumer|SIPFreshPacketAfter|SIPStartupReserve|SIPDecodedPartial|SIPKernelArrival|SIPEarlyReserve|SIPLinux|CarrierStream|CarrierEvidence|CarrierRecovery|SIPTelemetry)'
+            pattern: 'Test(ProductionAudioScenario|SIPRecoveryWindow|SIPControlledPlayout|SIPRecoveryHold|SIPLiveAdmission|SIPProcessingDrops|SIPReceiveEvidence|RTCSocket|RTCObservedUDP|RTCLinux|RTCRelease|RTCTail|MicrophoneSource|SIPBridgePreparation|SIPHumanAnswerPrepares|SIPPlayback|SIPClockFitEvidence|SIPClockLowerEnvelope|SIPClockRecoveryShort|SIPClockRecoveryDelivery|SIPIngressAndConsumer|SIPFreshPacketAfter|SIPStartupReserve|SIPDecodedPartial|SIPKernelArrival|SIPEarlyReserve|SIPLinux|CarrierStream|CarrierEvidence|CarrierRecovery|SIPTelemetry|SIPNaturalSpeech|SIPSpeechAcceptance)'
           - group: lifecycle
             pattern: 'Test(GuardedAttachment|BrowserCurrentBuffer|Efficiency|RoutingDispatcher|ImmediateDecision|RingLeg|RingGroup|AICallPolicy|SoftphoneAttachment|RTCRelay|SoftphoneStartup|SIPStartupCodec|SIPDialogTLS|SIPOutboundEarly|SIPOutboundFresh|SIPBYEFailure|NotificationOutbox|RTCIngressEvidence|ProxyCallIdentity|ProxyIdentityRetained|AutomaticOutboundSIP|TelephonyExclusiveActivation|SIPExclusiveActivation|GenericOutboundSIP|OutboundSIP|DIDWWOutbound|Telnyx.*SIP|TelnyxProvisioning|DirectSIPCarrierSetup|SIPAnsweredDialog|SIPMissingInitialACK|SIPRefresh|LocalSIP|LocalMediaSettings|SIPRuntimeTransport|SIPResourceCleanup|SIPNativeHold|SIPOutboundDTMF|SIPTransportSave|SIPRetirement|SIPTwilioDetach|SIPAIActivation|SIPRouteAccount|SIPExternalOffer|SelectingDirectSIP|LocalCloseTimeout)'
     env:

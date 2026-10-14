@@ -61,6 +61,7 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 	}
 	var incidents []incident
 	var results []result
+	productionFaults := os.Getenv("TELEPHONY_SIP_PRODUCTION_LOAD") == "1"
 	for _, count := range []int{32, 64} {
 		for _, variant := range []string{"portable", "native_fec", "native_24k_fec"} {
 			t.Run(fmt.Sprintf("%s/%d", variant, count), func(t *testing.T) {
@@ -73,6 +74,7 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 					up, down              *pcmResampler
 					costs                 []float64
 					scheduleMax, queueMax float64
+					tailDrops, tailFrames int
 				}
 				recorders, stopMixed := startSIPMixedLoad(t, count)
 				workers := make([]worker, count)
@@ -150,6 +152,9 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 							}
 							_ = media.conn.SetReadDeadline(start.Add(frames*20*time.Millisecond + 300*time.Millisecond))
 							buf := make([]byte, 2048)
+							if productionFaults && receive && i%16 == 1 {
+								time.Sleep(time.Until(start.Add(440 * time.Millisecond)))
+							}
 							for {
 								n, _, err := media.readPacket(buf)
 								if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
@@ -177,6 +182,16 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 						for frame := 0; frame < frames; frame++ {
 							// In-order 0/12 ms delivery variation, matching the long replay.
 							at := start.Add(time.Duration(frame)*20*time.Millisecond + time.Duration(i%16)*time.Millisecond + time.Duration(frame%2)*12*time.Millisecond)
+							if productionFaults && frame >= 150 && frame < 500 {
+								switch i % 16 {
+								case 0:
+									at = at.Add(240 * time.Millisecond) // stable shifted arrival, recover without replay
+								case 3:
+									if offset := frame % 150; offset < 21 {
+										at = at.Add(time.Duration(21-offset) * 20 * time.Millisecond)
+									}
+								}
+							}
 							if wait := time.Until(at); wait > 0 {
 								time.Sleep(wait)
 							}
@@ -205,8 +220,22 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 								time.Sleep(wait)
 							}
 							w.scheduleMax = max(w.scheduleMax, float64(time.Since(at))/float64(time.Millisecond))
+							if productionFaults && i%16 == 2 && frame >= 220 && frame < 242 {
+								continue
+							}
+							w.jitter.mu.Lock()
+							beforeDrops := w.jitter.droppedSamples + w.jitter.lateDroppedSamples
+							w.jitter.mu.Unlock()
 							began := time.Now()
 							pcm, ready := w.framer.popPCM(w.server)
+							if productionFaults && frame >= 600 && frame < 760 {
+								w.jitter.mu.Lock()
+								w.tailDrops += w.jitter.droppedSamples + w.jitter.lateDroppedSamples - beforeDrops
+								w.jitter.mu.Unlock()
+								if ready {
+									w.tailFrames++
+								}
+							}
 							if !ready {
 								continue
 							}
@@ -294,6 +323,20 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 				r.CPUPercent = (cpuEnd - cpuStart) / r.Seconds * 100
 				var costs []float64
 				for index, w := range workers {
+					if productionFaults {
+						if index%16 > 3 && (w.jitter.droppedSamples+w.jitter.lateDroppedSamples != 0 || w.jitter.missingFilledSamples.Load() != 0) {
+							t.Errorf("fault on another call damaged healthy stream %d", index)
+						}
+						if w.tailDrops != 0 || w.tailFrames < 150 {
+							t.Errorf("stream %d did not recover live speech: drops=%d frames=%d", index, w.tailDrops, w.tailFrames)
+						}
+						if index%16 == 0 && w.jitter.recovery.recoveries != 1 {
+							t.Errorf("stable shifted stream %d failed bounded resync", index)
+						}
+						if index%16 != 0 && w.jitter.recovery.recoveries != 0 {
+							t.Errorf("stream %d incorrectly rebased burst/stall/healthy timing", index)
+						}
+					}
 					r.DiscardedMS += float64(w.jitter.droppedSamples+w.jitter.lateDroppedSamples) / 8
 					r.ReplacementMS += float64(w.jitter.missingFilledSamples.Load()) / 8
 					r.Received += w.server.observations.packets.Load()
@@ -328,13 +371,13 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 				}
 				results = append(results, r)
 				t.Logf("%+v", r)
-				if r.RecordingDroppedMS != 0 || r.Received != int64(count*frames) || r.Returned != r.Sent || r.DiscardedMS != 0 || r.ReplacementMS != 0 || r.MaxQueueMS > 160 || r.WorkP99MS > 20 {
+				if r.RecordingDroppedMS != 0 || r.Received != int64(count*frames) || r.Returned != r.Sent || !productionFaults && (r.DiscardedMS != 0 || r.ReplacementMS != 0) || r.MaxQueueMS > 160 || r.WorkP99MS > 20 {
 					t.Errorf("paced-load gate failed: %+v", r)
 				}
 			})
 		}
 	}
-	data, err := json.MarshalIndent(map[string]any{"scope": "local bidirectional UDP/SRTP + SIP framer + resampling + Opus encode/decode; optional mixed mode adds recording, database call-list reads and retryable notification persistence; excludes live signaling, external proxy and browser rendering", "controlled_playout_recovery_enabled": os.Getenv("TELEPHONY_SIP_RECOVERY_LOAD") == "1", "mixed_recording_database_notifications": os.Getenv("TELEPHONY_SIP_MIXED_LOAD") == "1", "gomaxprocs": runtime.GOMAXPROCS(0), "logical_cpus": runtime.NumCPU(), "results": results, "incident_history": incidents, "incident_history_scope": "bounded retained events, not a complete packet trace; drop-reason durations can be lower than cumulative counters"}, "", "  ")
+	data, err := json.MarshalIndent(map[string]any{"scope": "local bidirectional UDP/SRTP + SIP framer + resampling + Opus encode/decode; optional mixed mode adds recording, database call-list reads and retryable notification persistence; excludes live signaling, external proxy and browser rendering", "production_faults_enabled": productionFaults, "controlled_playout_recovery_enabled": os.Getenv("TELEPHONY_SIP_RECOVERY_LOAD") == "1", "mixed_recording_database_notifications": os.Getenv("TELEPHONY_SIP_MIXED_LOAD") == "1", "gomaxprocs": runtime.GOMAXPROCS(0), "logical_cpus": runtime.NumCPU(), "results": results, "incident_history": incidents, "incident_history_scope": "bounded retained events, not a complete packet trace; drop-reason durations can be lower than cumulative counters"}, "", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}

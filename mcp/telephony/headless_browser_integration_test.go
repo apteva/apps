@@ -39,7 +39,22 @@ func TestTier2HeadlessBrowser(t *testing.T) {
 	}
 }
 
+func TestTier2HeadlessBrowserLongNetworkOutages(t *testing.T) {
+	for _, surface := range []string{"headless-webrtc-turn-recovery-90", "headless-pcm-recovery-120"} {
+		t.Run(surface, func(t *testing.T) { runHeadlessBrowser(t, surface) })
+	}
+}
+
 func runHeadlessBrowser(t *testing.T, surface string) {
+	recoveryMS := 40000
+	if surface == "headless-webrtc-turn-recovery-90" {
+		recoveryMS = 90000
+		surface = "headless-webrtc-turn-recovery"
+	}
+	if surface == "headless-pcm-recovery-120" {
+		recoveryMS = 120000
+	}
+	t.Setenv("TELEPHONY_TEST_RECOVERY_MS", fmt.Sprint(recoveryMS))
 	inputRate := "48000"
 	if surface == "headless-listener-webrtc-24k" {
 		inputRate = "24000"
@@ -363,7 +378,7 @@ waitAnswer:
 			t.Fatalf("headless browser: %v\n%s", err, output.String())
 		}
 		t.Log(output.String())
-	case <-time.After(100 * time.Second):
+	case <-time.After(time.Duration(recoveryMS)*time.Millisecond + 80*time.Second):
 		t.Fatal("headless browser did not finish")
 	}
 }

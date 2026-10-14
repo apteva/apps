@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 test("installed headless client talks through real Telephony with host-owned UI", async ({ page, context }) => {
-  test.skip(process.env.TELEPHONY_TEST_SURFACE==="headless-webrtc-turn-recovery");
+  test.skip(["headless-webrtc-turn-recovery","headless-pcm-recovery-120"].includes(process.env.TELEPHONY_TEST_SURFACE??""));
   const gateway = process.env.TELEPHONY_TEST_GATEWAY;
   if (!gateway) throw new Error("Run via TestTier2HeadlessBrowser; a compiled sidecar gateway is required");
   const errors: string[] = [];
@@ -220,26 +220,31 @@ test("installed headless client talks through real Telephony with host-owned UI"
   expect(await page.evaluate(() => (window as any).answerError)).toBeUndefined();
 });
 
-test("WebRTC over TURN TCP recovers after a long HTTP interruption",async({page,context,request})=>{
- test.skip(process.env.TELEPHONY_TEST_SURFACE!=="headless-webrtc-turn-recovery");test.setTimeout(95000);
+test("packaged softphone recovers after a long HTTP interruption",async({page,context,request})=>{
+ const rtc=process.env.TELEPHONY_TEST_SURFACE==="headless-webrtc-turn-recovery";
+ test.skip(!rtc&&process.env.TELEPHONY_TEST_SURFACE!=="headless-pcm-recovery-120");
+ const outage=Number(process.env.TELEPHONY_TEST_RECOVERY_MS??40000);test.setTimeout(outage+70000);
  const gateway=process.env.TELEPHONY_TEST_GATEWAY!;
  await context.addInitScript(()=>{
   const original=window.RTCPeerConnection,w=window as any;w.recoveryPeers=[];
   window.RTCPeerConnection=class extends original{constructor(config?:RTCConfiguration){super({...config,iceTransportPolicy:"relay"});w.recoveryPeers.push(this);}};
  });
  await page.goto("/");await page.evaluate(({gateway,token})=>(window as any).loadPhone(gateway,token),{gateway,token:process.env.TELEPHONY_TEST_USER_TOKEN});
- await page.evaluate(()=>{const w=window as any;w.phone.configureAudio({mediaTransport:"webrtc"});});await page.click("#answer");
+ await page.evaluate(rtc=>{const w=window as any;w.phone.configureAudio({mediaTransport:rtc?"webrtc":"websocket"});},rtc);await page.click("#answer");
  await expect.poll(()=>page.evaluate(()=>(window as any).phone.getSnapshot().audioState),{timeout:20000}).toBe("live");
  await expect.poll(()=>page.evaluate(()=>(window as any).maxSpeaker),{timeout:10000}).toBeGreaterThan(.001);
- const path=await page.evaluate(async()=>{const pc=(window as any).recoveryPeers.at(-1),stats=await pc.getStats();let candidate:any;stats.forEach((s:any)=>{if(s.type==="transport"){const p=stats.get(s.selectedCandidatePairId);candidate=stats.get(p?.localCandidateId);}});return {type:candidate?.candidateType,relayProtocol:candidate?.relayProtocol};});
- expect(path).toEqual({type:"relay",relayProtocol:"tcp"});
+ if(rtc){const path=await page.evaluate(async()=>{const pc=(window as any).recoveryPeers.at(-1),stats=await pc.getStats();let candidate:any;stats.forEach((s:any)=>{if(s.type==="transport"){const p=stats.get(s.selectedCandidatePairId);candidate=stats.get(p?.localCandidateId);}});return {type:candidate?.candidateType,relayProtocol:candidate?.relayProtocol};});
+ expect(path).toEqual({type:"relay",relayProtocol:"tcp"});}
  const original=await page.evaluate(()=>{const w=window as any;w.phone.setMuted(true);return {id:w.phone.getSnapshot().callId,generation:w.phone.session.session_generation};});
  const blocked='**/api/apps/telephony/**';await page.route(blocked,route=>route.abort("internetdisconnected"));
  expect(await (await request.post(gateway+"/fixture/drop-browser")).json()).toEqual({ok:true});
  await expect.poll(()=>page.evaluate(()=>(window as any).phone.getSnapshot().audioState),{timeout:10000}).toBe("reconnecting");
- await page.waitForTimeout(40000);await page.unroute(blocked);await page.evaluate(()=>window.dispatchEvent(new Event("online")));
+ await page.waitForTimeout(outage);await page.unroute(blocked);await page.evaluate(()=>window.dispatchEvent(new Event("online")));
  await expect.poll(()=>page.evaluate(()=>(window as any).phone.getSnapshot().audioState),{timeout:25000}).toBe("live");
  const resumed=await page.evaluate(()=>{const w=window as any;return {id:w.phone.getSnapshot().callId,muted:w.phone.getSnapshot().muted,generation:w.phone.session.session_generation};});
  expect(resumed.id).toBe(original.id);expect(resumed.muted).toBe(true);expect(resumed.generation).not.toBe(original.generation);
- await page.evaluate(async()=>{const w=window as any;w.phone.setMuted(false);await w.phone.hangup();w.phone.dispose();});
+ await page.evaluate(()=>{const w=window as any;w.phone.setMuted(false);w.maxSpeaker=0;w.maxMic=0;});
+ await expect.poll(()=>page.evaluate(()=>(window as any).maxSpeaker),{timeout:10000}).toBeGreaterThan(.001);
+ await expect.poll(()=>page.evaluate(()=>(window as any).maxMic),{timeout:10000}).toBeGreaterThan(.001);
+ await page.evaluate(async()=>{const w=window as any;await w.phone.hangup();w.phone.dispose();});
 });

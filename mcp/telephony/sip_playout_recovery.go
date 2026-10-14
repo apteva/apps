@@ -8,7 +8,7 @@ import "time"
 type sipPlayoutRecovery struct {
 	since, lastAt, lastRecovery time.Time
 	lastSeq                     uint16
-	lastTS                      uint32
+	lastTS, firstTS             uint32
 	firstAge                    time.Duration
 	count, recoveries           int
 	lastOffsetMS                float64
@@ -22,15 +22,20 @@ func (r *sipPlayoutRecovery) consider(b *rtpJitterBuffer, seq uint16, ts uint32,
 		return false
 	}
 	// A stable phase requires contiguous media and both local and source clocks
-	// advancing together. Bursts, replay, reordering and slow backlog draining
+	// advancing together. Large bursts, replay, reordering and backlog draining
 	// cannot use this path to give expired audio a new lifetime.
 	sourceStep := time.Duration(int32(ts-r.lastTS)) * time.Second / 8000
-	if r.since.IsZero() || int16(seq-r.lastSeq) != 1 || sourceStep <= 0 || sourceStep > 60*time.Millisecond || (at.Sub(r.lastAt)-sourceStep).Abs() > 3*time.Millisecond || (age-r.firstAge).Abs() > 20*time.Millisecond {
-		r.since, r.firstAge, r.count = at, age, 0
+	if r.since.IsZero() || int16(seq-r.lastSeq) != 1 || sourceStep <= 0 || sourceStep > 60*time.Millisecond || (at.Sub(r.lastAt)-sourceStep).Abs() > 20*time.Millisecond || (age-r.firstAge).Abs() > 20*time.Millisecond {
+		r.since, r.firstAge, r.firstTS, r.count = at, age, ts, 0
 	}
 	r.lastAt, r.lastSeq, r.lastTS = at, seq, ts
 	r.count++
-	if at.Sub(r.since) < time.Second || r.count < 40 {
+	// Require source time and physical arrival time to advance together across
+	// the entire window. Individual packets can have ordinary jitter; a draining
+	// backlog or a burst cannot qualify just because its last interval is small.
+	arrivalElapsed := at.Sub(r.since)
+	sourceElapsed := time.Duration(int32(ts-r.firstTS)) * time.Second / 8000
+	if arrivalElapsed < time.Second || r.count < 40 || (arrivalElapsed-sourceElapsed).Abs() > 3*time.Millisecond {
 		return false
 	}
 	// Invalidate every retained raw/decoded/PLC segment before rebasing. The

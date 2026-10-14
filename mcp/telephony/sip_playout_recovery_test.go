@@ -127,3 +127,39 @@ func TestSIPRecoverySettingsAreScopedAndCopied(t *testing.T) {
 		t.Fatal("active or foreign policy changed")
 	}
 }
+
+func TestSIPRecoveryWindowRejectsDrainingBacklog(t *testing.T) {
+	for _, interval := range []time.Duration{15 * time.Millisecond, 19800 * time.Microsecond} {
+		t.Run(interval.String(), func(t *testing.T) {
+			enabled := true
+			b := newRTPJitterBufferWithPolicy(sipPlaybackPolicy{Resynchronize: &enabled})
+			start := time.Unix(100, 0)
+			// A misleading constant age and individually modest interval error cannot
+			// hide physical delivery outrunning source time across the complete window.
+			for i := 0; i < 200; i++ {
+				at := start.Add(time.Duration(i) * interval)
+				if b.recovery.consider(b, uint16(i), uint32(i*160), at, at, 350*time.Millisecond, 160) {
+					t.Fatal("backlog draining triggered a timeline rebase")
+				}
+			}
+			if b.recovery.recoveries != 0 {
+				t.Fatal("backlog was rebased")
+			}
+		})
+	}
+}
+
+func BenchmarkSIPRecoveryEligibility(b *testing.B) {
+	for _, enabled := range []bool{false, true} {
+		b.Run(map[bool]string{false: "disabled", true: "stable_shift_jitter"}[enabled], func(b *testing.B) {
+			j := newRTPJitterBufferWithPolicy(sipPlaybackPolicy{Resynchronize: &enabled})
+			base := time.Unix(100, 0)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				at := base.Add(time.Duration(i)*20*time.Millisecond + time.Duration(i%2)*12*time.Millisecond)
+				j.recovery.consider(j, uint16(i), uint32(i*160), at, at, 240*time.Millisecond, 160)
+			}
+		})
+	}
+}
