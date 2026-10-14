@@ -1,7 +1,7 @@
 name: Telephony Linux listener probe
 on:
   pull_request:
-    paths: ['mcp/telephony/frontend/src/listener-audio.ts', 'mcp/telephony/frontend/tests/softphone.browser.ts', 'mcp/telephony/ui/listener-worklet.js', '.github/workflows/telephony-listener-probe.yml']
+    paths: ['mcp/telephony/headless_browser_integration_test.go', 'mcp/telephony/frontend/src/listener-audio.ts', 'mcp/telephony/frontend/tests/softphone.browser.ts', 'mcp/telephony/ui/listener-worklet.js', '.github/workflows/telephony-listener-probe.yml']
 permissions:
   contents: read
 jobs:

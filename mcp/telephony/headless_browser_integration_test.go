@@ -346,16 +346,17 @@ waitAnswer:
 			t.Fatal("browser microphone did not reach carrier")
 		}
 	}
-	if surface == "headless-webrtc-turn-recovery" {
-		_ = carrier.SetReadDeadline(time.Time{})
-		go func() {
-			for {
-				if _, _, err := wsutil.ReadServerData(carrier); err != nil {
-					return
-				}
+	// A real carrier continuously consumes outgoing media. Keep draining after
+	// verification: otherwise Linux socket buffers fill during lease/listener
+	// checks and the fixture itself stalls the bidirectional connection.
+	_ = carrier.SetReadDeadline(time.Time{})
+	go func() {
+		for {
+			if _, _, err := wsutil.ReadServerData(carrier); err != nil {
+				return
 			}
-		}()
-	}
+		}
+	}()
 	select {
 	case err := <-finished:
 		if err != nil {
