@@ -8,6 +8,7 @@ class TelephonyListenerProcessor extends AudioWorkletProcessor {
     this.stereo = options.processorOptions?.stereo === true;
     this.queues = [[], []];
     this.dropped = [0, 0];
+    this.lastPlayAtMS=[null,null];this.rejectedLate=[0,0];this.rejectedFuture=[0,0];
     this.played = [0, 0];
     this.maxQueueMS = 0;
     this.maxLateMS = 0;
@@ -18,7 +19,9 @@ class TelephonyListenerProcessor extends AudioWorkletProcessor {
       const now = currentTime * 1000;
       const duration = data.frame.length * 1000 / sampleRate;
       // Bound future scheduling and stale audio independently of queue length.
+      this.lastPlayAtMS[d]=data.playAtMS;
       if (data.playAtMS + duration < now || data.playAtMS > now + this.futureMS) {
+        if(data.playAtMS+duration<now)this.rejectedLate[d]+=data.frame.length;else this.rejectedFuture[d]+=data.frame.length;
         this.dropped[d] += data.frame.length; return;
       }
       const queue = this.queues[d];
@@ -74,7 +77,7 @@ class TelephonyListenerProcessor extends AudioWorkletProcessor {
     this.reportSamples += out[0].length;
     if (this.reportSamples >= sampleRate) {
       this.reportSamples = 0;
-      this.port.postMessage({ type: "listener.diagnostics", dropped_ms: this.dropped.map(n => n * 1000 / sampleRate), played_ms: this.played.map(n => n * 1000 / sampleRate), max_queue_ms: this.maxQueueMS, max_late_ms: this.maxLateMS });
+      this.port.postMessage({ type: "listener.diagnostics", render_time_ms:currentTime*1000,last_play_at_ms:this.lastPlayAtMS.slice(),rejected_late_ms:this.rejectedLate.map(n=>n*1000/sampleRate),rejected_future_ms:this.rejectedFuture.map(n=>n*1000/sampleRate), dropped_ms: this.dropped.map(n => n * 1000 / sampleRate), played_ms: this.played.map(n => n * 1000 / sampleRate), max_queue_ms: this.maxQueueMS, max_late_ms: this.maxLateMS });
     }
     return true;
   }

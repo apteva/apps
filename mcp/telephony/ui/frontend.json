@@ -3,7 +3,7 @@
   "app": "telephony",
   "version": "0.12.23",
   "client": {
-    "path": "/ui/frontend/client-511b0d058003ce36.mjs",
-    "sha256": "511b0d058003ce36892ee561428e7bd522965c95e3a6099e5b3a579668a12252"
+    "path": "/ui/frontend/client-71e94039ba23ae77.mjs",
+    "sha256": "71e94039ba23ae77887f3bacfaea3bc74b89a0165d1e6f566a3892e8948ea562"
   }
 }

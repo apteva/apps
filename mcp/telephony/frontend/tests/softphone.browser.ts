@@ -117,7 +117,8 @@ test("installed headless client talks through real Telephony with host-owned UI"
       await expect.poll(()=>observer.evaluate(()=>(window as any).listenerDiagnostics?.webrtc?.receiveBitrateBps)).toBeGreaterThan(1000);
     } else {
       expect(await observer.evaluate(()=>(window as any).callListener.getSnapshot().mediaTransport)).toBe("websocket");
-      await expect.poll(() => observer.evaluate(() => (window as any).listenerDiagnostics?.played_ms?.every((value: number) => value > 100))).toBe(true);
+      try{await expect.poll(() => observer.evaluate(() => (window as any).listenerDiagnostics?.played_ms?.every((value: number) => value > 100))).toBe(true);}
+      catch(error){console.log("PCM listener evidence",await observer.evaluate(()=>({state:(window as any).callListener.getSnapshot(),diagnostics:(window as any).listenerDiagnostics})),"Primary evidence",await page.evaluate(()=>({state:(window as any).phone.getSnapshot(),diagnostics:(window as any).diagnostics})));throw error;}
       expect(await observer.evaluate(() => (window as any).listenerDiagnostics.max_queue_ms)).toBeLessThanOrEqual(160);
     }
     await observer.evaluate(() => (window as any).callListener.stop());
