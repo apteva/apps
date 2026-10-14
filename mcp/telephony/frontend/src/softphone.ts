@@ -1,5 +1,5 @@
 import { AudioRecoveryLoop } from "./audio-recovery";
-import { mediaFailure, boundedMediaRequest } from "./media-lease";
+import { mediaFailure, mediaDiagnosticID, boundedMediaRequest } from "./media-lease";
 import type { CallListenerOptions } from "./listener";
 import { MediaLease, mediaRecoveryContext, safeMediaSessionEvent, type MediaInitiatingAction, type MediaRecoveryContext, type MediaSessionEvent } from "./media-lease";
 import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, playbackBufferOptions, type SoftphoneMediaReadiness, type SoftphoneAudioHealth, type SoftphoneAudioOptions, type SoftphoneCallStatus, type SoftphoneDiagnostics, type SoftphoneState } from "../../ui/softphone-audio";
@@ -500,6 +500,7 @@ export class HeadlessSoftphone {
     const chosen=this.uncertainAttachment??{diagnostics,expected:session.attachment_guard_version===1?(session.session_generation??""):undefined};
     if(signal?.aborted)throw new DOMException("Cancelled","AbortError");
     this.uncertainAttachment=chosen;
+    if(chosen.diagnostics.attempt_id!==diagnostics.attempt_id)this.reportSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:"idempotent_retry",...diagnostics,shared_attempt_id:chosen.diagnostics.attempt_id});
     try{
       const value=await this.client.attach(session.call_id,chosen.diagnostics,{signal},chosen.expected);
       if(signal?.aborted)throw new DOMException("Cancelled","AbortError");
@@ -511,6 +512,8 @@ export class HeadlessSoftphone {
     const id=this.session.call_id,generation=this.generation;
     this.update({audioState:"reconnecting",detail:"Network unavailable; waiting to restore audio."});
     const permanent=(error:unknown)=>{const f=mediaFailure(error);return f.denied||f.code==="media_session_changed"||f.code==="call_ended"||f.code==="call_not_attachable"||["NotAllowedError","NotFoundError"].includes((error as Error)?.name);};
+    const episode=this.uncertainAttachment?.diagnostics??mediaRecoveryContext("automatic_retry");
+    let attempt:MediaRecoveryContext=episode;
     this.automaticRecovery=new AudioRecoveryLoop(async signal=>{
       this.assertCurrent(generation);
       const call=await boundedMediaRequest(s=>this.client.getCall(id,s),signal);
@@ -518,15 +521,15 @@ export class HeadlessSoftphone {
       if(isTerminalCall(call.status)){this.observeCall(call);return;}
       this.assertCurrent(generation);
       const events=await this.prepareAudio(generation,false);if(signal.aborted)throw new DOMException("Cancelled","AbortError");
-      const recovery=mediaRecoveryContext("automatic_retry");
-      const session=await this.acquireRecoverySession(this.session!,recovery,signal);
+      const session=await this.acquireRecoverySession(this.session!,attempt,signal);
       this.assertCurrent(generation);if(signal.aborted)throw new DOMException("Cancelled","AbortError");
       const cancel=()=>{if(this.current(generation)&&this.session===session)this.stopAudio();};
       signal.addEventListener("abort",cancel,{once:true});
       try{await this.attachAudio(session,generation,events);if(signal.aborted)throw new DOMException("Cancelled","AbortError");}
       finally{signal.removeEventListener("abort",cancel);}
+      this.reportSessionEvent({timestamp:new Date().toISOString(),action:"network_recovery",outcome:"connected",...attempt});
       this.automaticRecovery?.stop();this.automaticRecovery=undefined;
-    },permanent,error=>{if(this.current(generation)){this.automaticRecovery=undefined;this.update({audioState:"error",detail:message(error)});}},outcome=>this.reportSessionEvent({timestamp:new Date().toISOString(),action:"network_recovery",outcome}));
+    },permanent,error=>{if(this.current(generation)){this.automaticRecovery=undefined;this.update({audioState:"error",detail:message(error)});}},outcome=>{if(outcome==="attempt_started")attempt={...episode,attempt_id:mediaDiagnosticID("attempt")};this.reportSessionEvent({timestamp:new Date().toISOString(),action:"network_recovery",outcome,...attempt});});
   }
 
   private async reconcileAttachedCall(session: CallSession, generation: number) {
