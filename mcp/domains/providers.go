@@ -59,8 +59,14 @@ func (a *App) providerFor(ctx *sdk.AppCtx, connID int64, projectID string) (dnsP
 			return &ionosProvider{bound: bound}, bound, nil
 		case "spaceship":
 			return &spaceshipProvider{bound: bound}, bound, nil
+		case "dynadot":
+			return &dynadotProvider{bound: bound}, bound, nil
+		case "cloudflare":
+			return &cloudflareProvider{bound: bound}, bound, nil
+		case "hostinger":
+			return &hostingerProvider{bound: bound}, bound, nil
 		}
-		return nil, bound, fmt.Errorf("unsupported provider slug %q on connection %d (compatible: porkbun, namecheap, ionos, spaceship)", conn.AppSlug, connID)
+		return nil, bound, fmt.Errorf("unsupported provider slug %q on connection %d (compatible: porkbun, namecheap, ionos, spaceship, dynadot, cloudflare, hostinger)", conn.AppSlug, connID)
 	}
 	id, err := selectedConnectionID(ctx, "dns_provider")
 	if err != nil {

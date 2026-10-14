@@ -53,15 +53,18 @@ func (a *App) toolDomainRegistrationPrepare(ctx *sdk.AppCtx, args map[string]any
 	if err != nil {
 		return nil, err
 	}
+	reg, bound, err := a.registrarFor(ctx, int64(connID), pid)
+	if err != nil {
+		return nil, err
+	}
+	if bound.AppSlug == "spaceship" {
+		return a.prepareSpaceshipRegistration(ctx, args, pid, domain, bound)
+	}
 	if strArg(args, "coupon") != "" {
 		return nil, errors.New("Porkbun API registration does not support coupons")
 	}
 	if !boolArg(args, "auto_renew", true) {
 		return nil, errors.New("Porkbun registration uses automatic renewal; configure renewal separately after registration")
-	}
-	reg, bound, err := a.registrarFor(ctx, int64(connID), pid)
-	if err != nil {
-		return nil, err
 	}
 	if bound.AppSlug != "porkbun" {
 		return nil, errors.New("provider does not support paid registration")
@@ -128,7 +131,7 @@ func (a *App) toolDomainRegistrationPrepare(ctx *sdk.AppCtx, args map[string]any
 }
 
 func registrationDetails(in *RegistrationIntent) map[string]any {
-	return map[string]any{"confirmation_token": in.Token, "domain": in.Domain, "years": in.Years, "auto_renew": in.AutoRenew, "whois_privacy": in.WhoisPrivacy, "provider": in.Provider, "connection_id": in.ConnectionID, "price": in.Price, "cost_cents": in.CostCents, "currency": in.Currency, "expires_at": in.ExpiresAt.Format(time.RFC3339), "status": in.Status, "error": in.Error, "attempted_at": in.AttemptedAt}
+	return map[string]any{"confirmation_token": in.Token, "domain": in.Domain, "years": in.Years, "auto_renew": in.AutoRenew, "whois_privacy": in.WhoisPrivacy, "provider": in.Provider, "connection_id": in.ConnectionID, "price": in.Price, "cost_cents": in.CostCents, "currency": in.Currency, "expires_at": in.ExpiresAt.Format(time.RFC3339), "status": in.Status, "error": in.Error, "attempted_at": in.AttemptedAt, "billing_mode": in.BillingMode, "operation_id": in.OperationID, "options": in.RequestJSON}
 }
 
 func (a *App) toolDomainRegister(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -146,6 +149,9 @@ func (a *App) toolDomainRegister(ctx *sdk.AppCtx, args map[string]any) (any, err
 	}
 	if in == nil {
 		return nil, apiError(404, "confirmation token not found")
+	}
+	if in.Provider == "spaceship" {
+		return a.registerSpaceshipIntent(ctx, in)
 	}
 	if in.Status == "succeeded" {
 		return a.registrationResult(ctx, in, true), nil
@@ -262,13 +268,27 @@ func (a *App) toolRegistrationStatus(ctx *sdk.AppCtx, args map[string]any) (any,
 			}
 			in.Status = "cancelled"
 		}
+		if in.Provider == "spaceship" && in.OperationID != "" && in.Status == "processing" {
+			if _, err := a.pollSpaceshipRegistration(ctx, in); err != nil {
+				return nil, err
+			}
+			in, err = dbRegistrationIntentGet(ctx.AppDB(), pid, token)
+			if err != nil {
+				return nil, err
+			}
+		}
 		result := registrationDetails(in)
 		if boolArg(args, "inspect_ownership", false) {
 			_, bound, err := a.registrarFor(ctx, in.ConnectionID, pid)
 			if err != nil {
 				return nil, err
 			}
-			row, err := porkbunOwnedDomain(ctx, bound, in.Domain)
+			var row map[string]any
+			if bound.AppSlug == "spaceship" {
+				row, err = spaceshipOwnedDomain(ctx, bound, in.Domain)
+			} else {
+				row, err = porkbunOwnedDomain(ctx, bound, in.Domain)
+			}
 			if err != nil {
 				return nil, err
 			}

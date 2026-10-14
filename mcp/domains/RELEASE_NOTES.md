@@ -1,3 +1,13 @@
+# Domains v1.1.0 release notes
+
+- Adds Spaceship purchases with explicit account-rate confirmation, saved contact IDs/attributes, 1–10 year terms, privacy and auto-renewal options in the UI and MCP tools.
+- Records approved purchase payloads and accepted async operation IDs in migration 006. Pending purchases poll saved operations across restarts and are never automatically resubmitted. Completion requires success and account ownership; unknown outcomes block conflicting purchases.
+- Corrects availability parsing for Spaceship's documented `result` and `premiumPricing` fields. Premium purchases remain disabled because the API exposes no maximum charge.
+- Pins app-sdk v0.102.0, verified to descend from v0.101.0.
+- Requires the paired integration catalog/executor header-mapping update. Deploy both components together. No live registrations were submitted.
+
+Validation: Go suite with race detection, go vet, TypeScript checking, bundled panel build, six browser tests, and paired HTTP integration tests including empty-202 header preservation, exact JSON options, and disabled purchase retries.
+
 # Domains v0.6.0 release notes
 
 Based on `domains/v0.5.2` (`78c844b486eb32c7d56f01d0e05838b511d0ee5d`). This release includes the audit fixes and the matching Porkbun integration catalog contract. Refresh the integrations catalog before using paid registration.
@@ -61,3 +71,7 @@ The browser tests use an installed Chrome by default. `CHROME_CHANNEL`, `PLAYWRI
 Deploy the app and corrected Porkbun integration catalog together. Migration 004 marks legacy null pins unmanaged and expires old unvalidated quotes; operators must explicitly select an account for those inventory rows. Back up the app database before a release migration.
 
 Namecheap does not expose conditional whole-zone writes, so another installation or external operator can still change a zone between the final read and write. Spaceship value replacement also remains non-atomic at the provider. These API limits are mitigated by fresh snapshot checks, serialization, durable recovery, verification, and explicit conflict reporting; they cannot be made globally atomic by this sidecar alone.
+# Domains v0.7.0 release notes
+
+- Added provider-neutral marketplace listing tools for Dynadot and Spaceship: publish, remove, and inspect listings.
+- Added provider binding and catalog compatibility for Dynadot DNS and registrar workflows.

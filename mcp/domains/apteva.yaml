@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: domains
 display_name: Domains
-version: 0.6.0
+version: 1.1.0
 description: |
   DNS + domain inventory and registrar workflows for Apteva projects.
   Other apps that need to write DNS records (messaging for SES
@@ -16,9 +16,8 @@ description: |
   top-level JSON array, carried through the integration runner via
   body_root_param. Namecheap DNS uses XML read-modify-write semantics.
   Spaceship DNS uses batch save/delete tools and supports read-only
-  availability checks. Registrar purchase flows are Porkbun-only in
-  this app; Namecheap and Spaceship registration need safer purchase-flow
-  support before they should be exposed here.
+  availability checks. Registrar purchases support Porkbun quoted registration and Spaceship
+  account-rate registration with saved contact options and asynchronous status.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/domains
@@ -36,10 +35,19 @@ requires:
     - platform.connections.execute
     - platform.connections.read
   integrations:
+    - role: valuation_provider
+      kind: integration
+      compatible_slugs: [replicate]
+      capabilities: [domains.appraise]
+      tools:
+        domains.appraise: appraise_domains
+      required: false
+      label: "Domain valuation provider (Replicate / HumbleWorth)"
+      hint: "Runs paid AI domain estimates and stores the returned valuation history."
     - role: dns_provider
       kind: integration
       mode: multiple
-      compatible_slugs: [porkbun, namecheap, ionos, spaceship]
+      compatible_slugs: [porkbun, namecheap, ionos, spaceship, dynadot, cloudflare, hostinger]
       capabilities:
         - dns.list_records
         - dns.create_record
@@ -51,12 +59,12 @@ requires:
         dns.edit_records_by_type: edit_dns_records_by_type
         dns.delete_records_by_type: delete_dns_records_by_type
       required: true
-      label: "DNS providers (Porkbun, Namecheap, IONOS, Spaceship)"
+      label: "DNS providers (Porkbun, Namecheap, IONOS, Spaceship, Dynadot, Cloudflare, Hostinger)"
       hint: "Connect every DNS account used by this project and choose a default. Each domain is pinned to its selected connection."
     - role: registrar_provider
       kind: integration
       mode: multiple
-      compatible_slugs: [porkbun]
+      compatible_slugs: [porkbun, dynadot, spaceship]
       capabilities:
         - domains.check_availability
         - domains.register
@@ -66,13 +74,18 @@ requires:
         domains.register:            register_domain
         domains.pricing:             get_pricing
       required: false
-      label: "Registrar providers (Porkbun)"
-      hint: "Connect every Porkbun registrar account used by this project and choose a default. If unset, registrar tools fall back to the default DNS provider when it is Porkbun, or to Spaceship for availability checks only."
+      label: "Registrar providers (Porkbun, Dynadot, Spaceship)"
+      hint: "Connect every supported registrar account used by this project and choose a default. If unset, registrar tools fall back to the default DNS provider. Spaceship requires domains:billing, contacts:read, and asyncoperations:read for account-rate purchases."
 
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - { name: domain_sale_publish, description: "Publish a domain marketplace listing through Dynadot or Spaceship." }
+    - { name: domain_sale_remove, description: "Remove a domain marketplace listing through Dynadot or Spaceship." }
+    - { name: domain_sale_get, description: "Read marketplace listing status through Dynadot or Spaceship." }
+    - { name: domain_estimate_start, description: "Start and store a paid domain valuation through Replicate/HumbleWorth." }
+    - { name: domain_estimate_list, description: "List stored domain valuation history." }
     - { name: domain_update, description: "Update metadata or explicitly change/unbind a DNS connection." }
     - { name: domain_sync, description: "Refresh domain registration expiry from Porkbun." }
     - { name: domain_registration_status, description: "Inspect, cancel unsubmitted purchases, and read ownership for recovery." }
@@ -84,7 +97,7 @@ provides:
     - { name: domain_get,            description: "Fetch one domain's local record. Args: name." }
     # registrar operations
     - { name: domain_availability_check, description: "Check if a domain is available for registration through the registrar provider. Safe/read-only. Args: domain, connection_id?." }
-    - { name: domain_registration_prepare, description: "Prepare an expiring registration intent after a provider availability check. Present the returned quote to the user and obtain explicit confirmation before calling domain_register. Args: domain, years? (registry minimum only), auto_renew? (true only), whois_privacy?, connection_id?, notes?." }
+    - { name: domain_registration_prepare, description: "Prepare an expiring registration intent after a provider availability check. Present the returned quote or account-rate billing terms to the user and obtain explicit confirmation before calling domain_register. Args: domain, years?, auto_renew?, whois_privacy?, connection_id?, notes?, contacts?, accept_account_rate?." }
     - { name: domain_pricing_get,    description: "Fetch registrar pricing, optionally for one TLD. Args: tld?, connection_id?." }
     - { name: domain_register,       description: "Register a domain from a prepared intent. This spends real money. Requires confirmation_token from domain_registration_prepare after explicit user confirmation; completed-token retries are idempotent." }
     # DNS record CRUD via the bound provider
