@@ -70,7 +70,7 @@ func TestNoOpUpdatesPreserveReadAndPolicyEpochs(t *testing.T) {
 	if e := a.db().db.QueryRow(`SELECT revision FROM telephony_policy_versions WHERE project_id='project-a'`).Scan(&policyBefore); e != nil {
 		t.Fatal(e)
 	}
-	for _, q := range []string{`UPDATE calls SET status=status,media_status=media_status WHERE id='same'`, `UPDATE call_offers SET status=status,expires_at=expires_at WHERE call_id='same'`, `UPDATE routing_destinations SET config_json=config_json WHERE id='sales'`, `UPDATE telephony_access_policies SET policy_json=policy_json,revision=revision WHERE project_id='project-a'`} {
+	for _, q := range []string{`UPDATE calls SET status=status,media_status=media_status WHERE id='same'`, `UPDATE calls SET voice=voice,directive=directive WHERE id='same'`, `UPDATE call_offers SET status=status,expires_at=expires_at WHERE call_id='same'`, `UPDATE routing_destinations SET config_json=config_json WHERE id='sales'`, `UPDATE telephony_access_policies SET policy_json=policy_json,revision=revision WHERE project_id='project-a'`} {
 		callReadExec(t, a, q)
 	}
 	if callReadVersion(t, a, "project-a") != before {
