@@ -33,6 +33,9 @@ type Collection struct {
 	PrimaryKey []string `json:"primaryKey"`
 	Indexes    []Index  `json:"indexes"`
 	Version    int64    `json:"version"`
+	// StorageVersion is internal SQLite physical-layout metadata. It is not
+	// part of the portable collection schema or cursor hash.
+	StorageVersion int `json:"-"`
 }
 type Filter struct {
 	And   []Filter `json:"and,omitempty"`
@@ -56,23 +59,31 @@ type Query struct {
 	RequireIndex bool     `json:"requireIndex,omitempty"`
 }
 type Request struct {
-	TimeoutMS     int      `json:"timeoutMs,omitempty"`
-	Database      string   `json:"database,omitempty"`
-	Collection    string   `json:"collection,omitempty"`
-	Name          string   `json:"name,omitempty"`
-	Adapter       string   `json:"adapter,omitempty"`
-	Fields        []Field  `json:"fields,omitempty"`
-	PrimaryKey    []string `json:"primaryKey,omitempty"`
-	Index         *Index   `json:"index,omitempty"`
-	Key           Record   `json:"key,omitempty"`
-	Records       []Record `json:"records,omitempty"`
-	Set           Record   `json:"set,omitempty"`
-	Increment     Record   `json:"increment,omitempty"`
-	ConflictIndex string   `json:"conflictIndex,omitempty"`
-	IfVersion     int64    `json:"ifVersion,omitempty"`
-	MaxAffected   int      `json:"maxAffected,omitempty"`
-	All           bool     `json:"all,omitempty"`
-	Confirm       bool     `json:"confirm,omitempty"`
+	Collections      []string   `json:"collections,omitempty"`
+	After            string     `json:"after,omitempty"`
+	Initial          *Operation `json:"initial,omitempty"`
+	Enabled          *bool      `json:"enabled,omitempty"`
+	RetentionBytes   int64      `json:"retentionBytes,omitempty"`
+	RetentionSeconds int        `json:"retentionSeconds,omitempty"`
+	WaitMS           int        `json:"waitMs,omitempty"`
+	WatchCaller      string     `json:"-"`
+	TimeoutMS        int        `json:"timeoutMs,omitempty"`
+	Database         string     `json:"database,omitempty"`
+	Collection       string     `json:"collection,omitempty"`
+	Name             string     `json:"name,omitempty"`
+	Adapter          string     `json:"adapter,omitempty"`
+	Fields           []Field    `json:"fields,omitempty"`
+	PrimaryKey       []string   `json:"primaryKey,omitempty"`
+	Index            *Index     `json:"index,omitempty"`
+	Key              Record     `json:"key,omitempty"`
+	Records          []Record   `json:"records,omitempty"`
+	Set              Record     `json:"set,omitempty"`
+	Increment        Record     `json:"increment,omitempty"`
+	ConflictIndex    string     `json:"conflictIndex,omitempty"`
+	IfVersion        int64      `json:"ifVersion,omitempty"`
+	MaxAffected      int        `json:"maxAffected,omitempty"`
+	All              bool       `json:"all,omitempty"`
+	Confirm          bool       `json:"confirm,omitempty"`
 	Query
 	GroupBy    []string    `json:"groupBy,omitempty"`
 	Metrics    []Metric    `json:"metrics,omitempty"`
@@ -274,7 +285,7 @@ func validateIndex(c Collection, idx *Index) error {
 	return nil
 }
 func normalizeRecord(c Collection, r Record) (Record, error) {
-	out := Record{}
+	out := make(Record, len(c.Fields)+3)
 	for k := range r {
 		if _, e := c.field(k); e != nil {
 			return nil, e
@@ -283,18 +294,60 @@ func normalizeRecord(c Collection, r Record) (Record, error) {
 			return nil, Invalid("metadata is read-only")
 		}
 	}
+	// Avoid marshaling every scalar record just to enforce the 1 MiB limit.
+	// JSON/map values still take the exact path; scalar records use a
+	// conservative escaped-size estimate and only marshal when near the limit.
+	sizeHint := 2
+	exactSize := false
 	for _, f := range c.Fields {
 		v, e := normalize(f, r[f.Name])
 		if e != nil {
 			return nil, e
 		}
 		out[f.Name] = v
+		sizeHint += len(f.Name) + 3 // quotes/colon plus comma slack
+		switch x := v.(type) {
+		case nil:
+			sizeHint += 4
+		case string:
+			sizeHint += jsonStringSize(x)
+		case bool:
+			if x {
+				sizeHint += 4
+			} else {
+				sizeHint += 5
+			}
+		case float64:
+			sizeHint += len(strconv.FormatFloat(x, 'g', -1, 64))
+		default:
+			exactSize = true
+		}
 	}
-	if len(marshal(out)) > 1<<20 {
-		return nil, fail("resource_limit", "record exceeds 1 MiB")
+	if exactSize || sizeHint > 1<<20 {
+		if len(marshal(out)) > 1<<20 {
+			return nil, fail("resource_limit", "record exceeds 1 MiB")
+		}
 	}
 	return out, nil
 }
+
+func jsonStringSize(s string) int {
+	n := 2 // surrounding quotes
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '"', '\\':
+			n += 2
+		case '\b', '\f', '\n', '\r', '\t':
+			n += 2
+		case 0, 1, 2, 3, 4, 5, 6, 7, 11, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31:
+			n += 6 // \\u00XX
+		default:
+			n++
+		}
+	}
+	return n
+}
+
 func primary(c Collection, r Record) (string, error) {
 	vals := []any{}
 	for _, p := range c.PrimaryKey {
@@ -310,6 +363,30 @@ func primary(c Collection, r Record) (string, error) {
 		return "", Invalid("primary key exceeds 2048 bytes")
 	}
 	return string(b), nil
+}
+
+func primaryNormalized(c Collection, r Record) (string, error) {
+	if len(c.PrimaryKey) == 1 {
+		p := c.PrimaryKey[0]
+		f, _ := c.field(p)
+		if (f.Type == "text" || f.Type == "integer" || f.Type == "datetime") && r[p] != nil {
+			s := r[p].(string)
+			simple := true
+			for i := 0; i < len(s); i++ {
+				if s[i] < 0x20 || s[i] == '"' || s[i] == '\\' {
+					simple = false
+					break
+				}
+			}
+			if simple {
+				if len(s)+4 > 2048 {
+					return "", Invalid("primary key exceeds 2048 bytes")
+				}
+				return `["` + s + `"]`, nil
+			}
+		}
+	}
+	return primary(c, r)
 }
 func keyOf(c Collection, r Record) Record {
 	k := Record{}

@@ -1,0 +1,4 @@
+=== RUN   TestSidecar
+--- PASS: TestSidecar (6.96s)
+PASS
+ok  	github.com/apteva/apps/mcp/database	8.501s

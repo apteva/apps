@@ -1,0 +1,680 @@
+{
+  "ordinary": {
+    "durability": {
+      "aptevadb": "Sync=true SyncOS (ordinary fsync)",
+      "pebble": "pebble.Sync (macOS fullfsync)",
+      "sqlite": "WAL synchronous=FULL; fullfsync=OFF"
+    },
+    "adapters": {
+      "sqlite": {
+        "get": {
+          "app_engine": {
+            "median_us": 11.167,
+            "p95_us": 21.083,
+            "min_us": 7,
+            "max_us": 392.042,
+            "samples": 3000,
+            "trial_p50_us": [
+              10.916,
+              10.583,
+              12.25
+            ]
+          },
+          "native_driver": {
+            "median_us": 10.083,
+            "p95_us": 21.875,
+            "min_us": 6.459,
+            "max_us": 360.417,
+            "samples": 3000,
+            "trial_p50_us": [
+              9.625,
+              10.167,
+              10.292
+            ]
+          }
+        },
+        "count": {
+          "app_engine": {
+            "median_us": 8741.75,
+            "p95_us": 10967.291,
+            "min_us": 7853.583,
+            "max_us": 90633.917,
+            "samples": 45,
+            "trial_p50_us": [
+              9018.708,
+              8596.916,
+              8746.166
+            ]
+          },
+          "native_driver": {
+            "median_us": 7147.542,
+            "p95_us": 8159.625,
+            "min_us": 6373.583,
+            "max_us": 27961.959,
+            "samples": 45,
+            "trial_p50_us": [
+              7168.25,
+              7101.667,
+              7245.541
+            ]
+          }
+        },
+        "sum": {
+          "app_engine": {
+            "median_us": 12935.125,
+            "p95_us": 14085.834,
+            "min_us": 11692.292,
+            "max_us": 19930.917,
+            "samples": 45,
+            "trial_p50_us": [
+              12975.084,
+              13080.291,
+              12524.084
+            ]
+          },
+          "native_driver": {
+            "median_us": 13208.459,
+            "p95_us": 17079.791,
+            "min_us": 11198.625,
+            "max_us": 25237.084,
+            "samples": 45,
+            "trial_p50_us": [
+              13782.041,
+              11370.042,
+              14603.167
+            ]
+          }
+        },
+        "insert_1": {
+          "app_engine": {
+            "median_us": 80.104,
+            "p95_us": 233.792,
+            "min_us": 57.417,
+            "max_us": 466.292,
+            "samples": 300,
+            "trial_p50_us": [
+              84.5,
+              79.25,
+              78.209
+            ]
+          },
+          "native_driver": {
+            "median_us": 81.791,
+            "p95_us": 291.166,
+            "min_us": 57.25,
+            "max_us": 744.083,
+            "samples": 300,
+            "trial_p50_us": [
+              109.208,
+              72.25,
+              79.875
+            ]
+          }
+        },
+        "insert_1000": {
+          "app_engine": {
+            "median_us": 4941.0419999999995,
+            "p95_us": 8296.25,
+            "min_us": 4061,
+            "max_us": 11874.75,
+            "samples": 60,
+            "trial_p50_us": [
+              5026.625,
+              4721.75,
+              5571.042
+            ]
+          },
+          "native_driver": {
+            "median_us": 4383.1875,
+            "p95_us": 6828.333,
+            "min_us": 3490.875,
+            "max_us": 7342,
+            "samples": 60,
+            "trial_p50_us": [
+              4112.583,
+              4416.5,
+              4510.625
+            ]
+          }
+        }
+      },
+      "aptevadb": {
+        "get": {
+          "app_engine": {
+            "median_us": 4.916,
+            "p95_us": 8.208,
+            "min_us": 3.708,
+            "max_us": 84.916,
+            "samples": 3000,
+            "trial_p50_us": [
+              4.875,
+              5.208,
+              4.708
+            ]
+          },
+          "native_driver": {
+            "median_us": 4.583,
+            "p95_us": 7.458,
+            "min_us": 2.958,
+            "max_us": 100.625,
+            "samples": 3000,
+            "trial_p50_us": [
+              5.5,
+              4.5,
+              4
+            ]
+          }
+        },
+        "count": {
+          "app_engine": {
+            "median_us": 3665.291,
+            "p95_us": 4035.625,
+            "min_us": 3292.959,
+            "max_us": 4294.459,
+            "samples": 45,
+            "trial_p50_us": [
+              3710.375,
+              3630.542,
+              3582
+            ]
+          },
+          "native_driver": {
+            "median_us": 3234.833,
+            "p95_us": 3721.333,
+            "min_us": 2973.5,
+            "max_us": 5003.208,
+            "samples": 45,
+            "trial_p50_us": [
+              3534.75,
+              3217.625,
+              3180.333
+            ]
+          }
+        },
+        "sum": {
+          "app_engine": {
+            "median_us": 3477.208,
+            "p95_us": 3829.083,
+            "min_us": 2469.875,
+            "max_us": 4110.583,
+            "samples": 45,
+            "trial_p50_us": [
+              3500.667,
+              3582.875,
+              3201.375
+            ]
+          },
+          "native_driver": {
+            "median_us": 3324.291,
+            "p95_us": 3752.833,
+            "min_us": 2490.958,
+            "max_us": 3827.666,
+            "samples": 45,
+            "trial_p50_us": [
+              3467.75,
+              3160.167,
+              3235.125
+            ]
+          }
+        },
+        "insert_1": {
+          "app_engine": {
+            "median_us": 52.479,
+            "p95_us": 115.875,
+            "min_us": 37.375,
+            "max_us": 412.375,
+            "samples": 300,
+            "trial_p50_us": [
+              55,
+              56.625,
+              46.708
+            ]
+          },
+          "native_driver": {
+            "median_us": 43.4585,
+            "p95_us": 84.75,
+            "min_us": 35,
+            "max_us": 257.792,
+            "samples": 300,
+            "trial_p50_us": [
+              41.958,
+              44.583,
+              44
+            ]
+          }
+        },
+        "insert_1000": {
+          "app_engine": {
+            "median_us": 4168.4169999999995,
+            "p95_us": 5595.125,
+            "min_us": 3604.458,
+            "max_us": 5922.833,
+            "samples": 60,
+            "trial_p50_us": [
+              4305.792,
+              4233.167,
+              4074.75
+            ]
+          },
+          "native_driver": {
+            "median_us": 3330.8745,
+            "p95_us": 5002.25,
+            "min_us": 2998.125,
+            "max_us": 5618.584,
+            "samples": 60,
+            "trial_p50_us": [
+              3374.166,
+              3343.792,
+              3323.833
+            ]
+          }
+        }
+      }
+    }
+  },
+  "full": {
+    "durability": {
+      "aptevadb": "Sync=true SyncFull (macOS fullfsync)",
+      "pebble": "pebble.Sync (macOS fullfsync)",
+      "sqlite": "WAL synchronous=FULL; fullfsync=ON (diagnostic, both writer connections)"
+    },
+    "adapters": {
+      "sqlite": {
+        "get": {
+          "app_engine": {
+            "median_us": 10.583,
+            "p95_us": 16.916,
+            "min_us": 7.375,
+            "max_us": 221,
+            "samples": 3000,
+            "trial_p50_us": [
+              10.958,
+              10.333,
+              10.292
+            ]
+          },
+          "native_driver": {
+            "median_us": 9.791,
+            "p95_us": 17.416,
+            "min_us": 6.208,
+            "max_us": 319.167,
+            "samples": 3000,
+            "trial_p50_us": [
+              10.5,
+              9.542,
+              9.333
+            ]
+          }
+        },
+        "count": {
+          "app_engine": {
+            "median_us": 8426.167,
+            "p95_us": 8960.041,
+            "min_us": 7593.916,
+            "max_us": 9544.084,
+            "samples": 45,
+            "trial_p50_us": [
+              8543.75,
+              7872.583,
+              8426.708
+            ]
+          },
+          "native_driver": {
+            "median_us": 7275.334,
+            "p95_us": 11290.208,
+            "min_us": 6352.125,
+            "max_us": 58783.833,
+            "samples": 45,
+            "trial_p50_us": [
+              7952.25,
+              7164.917,
+              6788.292
+            ]
+          }
+        },
+        "sum": {
+          "app_engine": {
+            "median_us": 12830.834,
+            "p95_us": 14057.584,
+            "min_us": 11390.25,
+            "max_us": 16091.875,
+            "samples": 45,
+            "trial_p50_us": [
+              12814.292,
+              12703.708,
+              13315
+            ]
+          },
+          "native_driver": {
+            "median_us": 12862.458,
+            "p95_us": 13772.333,
+            "min_us": 11577.125,
+            "max_us": 15026.875,
+            "samples": 45,
+            "trial_p50_us": [
+              13405.75,
+              12664.084,
+              12389.167
+            ]
+          }
+        },
+        "insert_1": {
+          "app_engine": {
+            "median_us": 4112.6044999999995,
+            "p95_us": 7428.75,
+            "min_us": 1525.958,
+            "max_us": 19943.584,
+            "samples": 300,
+            "trial_p50_us": [
+              4133.583,
+              4058.75,
+              4284.083
+            ]
+          },
+          "native_driver": {
+            "median_us": 4180.396000000001,
+            "p95_us": 6968.833,
+            "min_us": 1551.541,
+            "max_us": 26128.833,
+            "samples": 300,
+            "trial_p50_us": [
+              4062.333,
+              4841.625,
+              4356.167
+            ]
+          }
+        },
+        "insert_1000": {
+          "app_engine": {
+            "median_us": 9948.167000000001,
+            "p95_us": 12047.375,
+            "min_us": 7021.375,
+            "max_us": 20526.042,
+            "samples": 60,
+            "trial_p50_us": [
+              9955.792,
+              9878.167,
+              10866.833
+            ]
+          },
+          "native_driver": {
+            "median_us": 9291.957999999999,
+            "p95_us": 12053.708,
+            "min_us": 7371.958,
+            "max_us": 13757.917,
+            "samples": 60,
+            "trial_p50_us": [
+              9660.625,
+              9230.666,
+              9511.084
+            ]
+          }
+        }
+      },
+      "pebble": {
+        "get": {
+          "app_engine": {
+            "median_us": 14.625,
+            "p95_us": 22.25,
+            "min_us": 5.792,
+            "max_us": 925.834,
+            "samples": 3000,
+            "trial_p50_us": [
+              15.041,
+              14.542,
+              14.25
+            ]
+          },
+          "native_driver": {
+            "median_us": 13.958,
+            "p95_us": 21.375,
+            "min_us": 5.208,
+            "max_us": 304.208,
+            "samples": 3000,
+            "trial_p50_us": [
+              13.667,
+              14.084,
+              13.917
+            ]
+          }
+        },
+        "count": {
+          "app_engine": {
+            "median_us": 20277.334,
+            "p95_us": 22960.583,
+            "min_us": 19411.459,
+            "max_us": 28738.625,
+            "samples": 45,
+            "trial_p50_us": [
+              20218.625,
+              20348.292,
+              20277.334
+            ]
+          },
+          "native_driver": {
+            "median_us": 19911.208,
+            "p95_us": 25583.042,
+            "min_us": 18840.208,
+            "max_us": 29375.542,
+            "samples": 45,
+            "trial_p50_us": [
+              19543.125,
+              19946.125,
+              21403.834
+            ]
+          }
+        },
+        "sum": {
+          "app_engine": {
+            "median_us": 40239.917,
+            "p95_us": 42432.875,
+            "min_us": 39267.416,
+            "max_us": 54501.833,
+            "samples": 45,
+            "trial_p50_us": [
+              40118.708,
+              40043.25,
+              40633.5
+            ]
+          },
+          "native_driver": {
+            "median_us": 45232.542,
+            "p95_us": 61113.625,
+            "min_us": 44047.375,
+            "max_us": 101955.584,
+            "samples": 45,
+            "trial_p50_us": [
+              44951.708,
+              44916.417,
+              46591.25
+            ]
+          }
+        },
+        "insert_1": {
+          "app_engine": {
+            "median_us": 4068.5834999999997,
+            "p95_us": 6935.708,
+            "min_us": 2679.375,
+            "max_us": 16048.625,
+            "samples": 300,
+            "trial_p50_us": [
+              4059.792,
+              4063.541,
+              4078.792
+            ]
+          },
+          "native_driver": {
+            "median_us": 4005.7505,
+            "p95_us": 6042.916,
+            "min_us": 2794.208,
+            "max_us": 16061.625,
+            "samples": 300,
+            "trial_p50_us": [
+              4013.875,
+              4004.416,
+              4011.667
+            ]
+          }
+        },
+        "insert_1000": {
+          "app_engine": {
+            "median_us": 26164.792,
+            "p95_us": 39726.791,
+            "min_us": 18865.334,
+            "max_us": 46131.708,
+            "samples": 60,
+            "trial_p50_us": [
+              27901.125,
+              26231.5,
+              28073.542
+            ]
+          },
+          "native_driver": {
+            "median_us": 29016.4795,
+            "p95_us": 47736.917,
+            "min_us": 18018.75,
+            "max_us": 57820.791,
+            "samples": 60,
+            "trial_p50_us": [
+              28899.25,
+              27074,
+              31877.542
+            ]
+          }
+        }
+      },
+      "aptevadb": {
+        "get": {
+          "app_engine": {
+            "median_us": 5.3335,
+            "p95_us": 9.041,
+            "min_us": 3.833,
+            "max_us": 186.875,
+            "samples": 3000,
+            "trial_p50_us": [
+              5.333,
+              5.083,
+              5.75
+            ]
+          },
+          "native_driver": {
+            "median_us": 4.417,
+            "p95_us": 7.792,
+            "min_us": 3.291,
+            "max_us": 84.042,
+            "samples": 3000,
+            "trial_p50_us": [
+              4.416,
+              4.458,
+              4.417
+            ]
+          }
+        },
+        "count": {
+          "app_engine": {
+            "median_us": 3533.708,
+            "p95_us": 3927.375,
+            "min_us": 3301.125,
+            "max_us": 4094.167,
+            "samples": 45,
+            "trial_p50_us": [
+              3557.375,
+              3522.125,
+              3596.291
+            ]
+          },
+          "native_driver": {
+            "median_us": 3017.792,
+            "p95_us": 3269.083,
+            "min_us": 2792.625,
+            "max_us": 3788.334,
+            "samples": 45,
+            "trial_p50_us": [
+              3175.667,
+              2917.084,
+              2976.833
+            ]
+          }
+        },
+        "sum": {
+          "app_engine": {
+            "median_us": 3066.791,
+            "p95_us": 3661.459,
+            "min_us": 2441.875,
+            "max_us": 4239.5,
+            "samples": 45,
+            "trial_p50_us": [
+              2954.667,
+              2921.666,
+              3531.291
+            ]
+          },
+          "native_driver": {
+            "median_us": 2714.833,
+            "p95_us": 3583.333,
+            "min_us": 2267.458,
+            "max_us": 3914.209,
+            "samples": 45,
+            "trial_p50_us": [
+              3278.042,
+              2606.375,
+              2529
+            ]
+          }
+        },
+        "insert_1": {
+          "app_engine": {
+            "median_us": 4010.1665000000003,
+            "p95_us": 6141.25,
+            "min_us": 1427.208,
+            "max_us": 36222.834,
+            "samples": 300,
+            "trial_p50_us": [
+              4011.584,
+              4075.75,
+              3985.834
+            ]
+          },
+          "native_driver": {
+            "median_us": 3989.188,
+            "p95_us": 6138.208,
+            "min_us": 1707.958,
+            "max_us": 25517.458,
+            "samples": 300,
+            "trial_p50_us": [
+              4018.875,
+              4022.833,
+              3942.917
+            ]
+          }
+        },
+        "insert_1000": {
+          "app_engine": {
+            "median_us": 8328.2915,
+            "p95_us": 10878.459,
+            "min_us": 5510.75,
+            "max_us": 11985.25,
+            "samples": 60,
+            "trial_p50_us": [
+              8053.25,
+              8674.791,
+              8266.958
+            ]
+          },
+          "native_driver": {
+            "median_us": 8032.937,
+            "p95_us": 9918.208,
+            "min_us": 6638.542,
+            "max_us": 11677.25,
+            "samples": 60,
+            "trial_p50_us": [
+              8022.209,
+              7894.208,
+              8321.125
+            ]
+          }
+        }
+      }
+    }
+  }
+}
