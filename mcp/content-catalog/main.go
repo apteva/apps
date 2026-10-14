@@ -82,6 +82,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/assets/", Handler: a.handleAsset},
 		{Pattern: "/publications", Handler: a.handleList("content_catalog_asset_publications_list")},
 		{Pattern: "/posts", Handler: a.handleList("content_catalog_posts_list")},
+		{Pattern: "/posts/", Handler: a.handlePost},
 		{Pattern: "/hostings", Handler: a.handleList("content_catalog_hosting_list")},
 		{Pattern: "/video-hosts", Handler: a.handleVideoHosts},
 		{Pattern: "/action", Handler: a.handleAction},
@@ -92,7 +93,7 @@ func schema(required ...string) map[string]any {
 	return map[string]any{"type": "object", "additionalProperties": true, "required": required}
 }
 
-func searchSchema() map[string]any {
+func baseSearchSchema() map[string]any {
 	field := func(description string) map[string]any {
 		return map[string]any{"type": "string", "description": description}
 	}
@@ -127,10 +128,12 @@ func searchSchema() map[string]any {
 	}
 }
 
+func searchSchema() map[string]any { return publicationAudienceSchema(baseSearchSchema(), true) }
+
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{Name: "content_catalog_overview", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Count brands, sessions, assets, per-asset publication records, and hosting records.", InputSchema: schema(), Handler: a.overview},
-		{Name: "content_catalog_search", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Read-only search of linked sessions and assets. Use brand_id, destination, account_ref, availability=ready_to_publish, entity_type=assets to find approved assets with no active publication for that account. Purpose role is independent of lineage; use role=main with kind=video for main videos. Intermediate assets are excluded by default; include_intermediates=true or role=intermediate is explicit inspection. Use source_asset_id for exact direct derivatives; include_descendants=true includes nested derivatives. Follow assets.next_cursor via cursors.assets until empty before declaring inventory exhausted. Published means verified live. Publication filters do not detect reservations held only in planning apps; check those separately, including related crops of reserved moments. No Storage scan or external write.", InputSchema: searchSchema(), Handler: a.search},
+		{Name: "content_catalog_search", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Read-only search of linked sessions and assets. Use brand_id, destination, account_ref, availability=ready_to_publish, entity_type=assets to find approved assets with no active publication for that account. Purpose role is independent of lineage; use role=main with kind=video for main videos. Intermediate assets are excluded by default; include_intermediates=true or role=intermediate is explicit inspection. Use source_asset_id for exact direct derivatives; include_descendants=true includes nested derivatives. Follow assets.next_cursor via cursors.assets until empty before declaring inventory exhausted. Published means verified live. Publication filters include exact platform/account, audience_type, access_policy and group_scope/group_id. Confirmed all_eligible covers account group IDs; unknown scope never confirms a group and blocks automatic readiness when overlap is uncertain. Historical verified filters match the original audience snapshots. Publication filters do not detect reservations held only in planning apps; check those separately, including related crops of reserved moments. No Storage scan or external write.", InputSchema: searchSchema(), Handler: a.search},
 		{Name: "content_catalog_brands_create", Description: "Create a brand. Args: slug, name, storage_root; optional host_provider, host_connection_id, host_library_id, host_collection_id. Writes only Catalog.", InputSchema: schema("slug", "name", "storage_root"), Handler: a.brandCreate},
 		{Name: "content_catalog_brands_list", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "List brands.", InputSchema: schema(), Handler: a.brandsList},
 		{Name: "content_catalog_brands_update", Description: "Update a brand's name, storage_root, or host settings. Args: id and fields to change. Writes only Catalog.", InputSchema: schema("id"), Handler: a.brandUpdate},
@@ -149,11 +152,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "content_catalog_assets_sources_replace", Annotations: map[string]any{"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true}, Description: "Explicitly replace the entire immediate source list atomically, including removing unwanted links. Requires expected_revision, expected_sources (all four saved edge fields), sources, reason and a stable idempotency_key. Read the child first; reuse identical arguments/key on retry. Ownership, cycle checks, revision and before/after audit are transactional. Empty sources removes all links. Returns actual saved sources and revision. Changes Catalog lineage only; never changes files, renders, review, hosting or publication.", InputSchema: sourceLinkSchema(true), Handler: a.assetSourcesReplace},
 		{Name: "content_catalog_assets_review", Description: "Set a Catalog asset's editorial review_status to pending, approved, or rejected. Args: asset_id, review_status.", InputSchema: schema("asset_id", "review_status"), Handler: a.assetReview},
 		{Name: "content_catalog_assets_labels_update", Description: "Set generic Catalog labels on 1–100 assets. Replace purpose role, generic output_type, tags, favorite, and Patreon intent (unset/free/paid); does not publish or modify Media. Use expected_revisions for safe bulk edits.", InputSchema: assetLabelsSchema(), Handler: a.assetLabelsUpdate},
-		{Name: "content_catalog_asset_publications_list", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "List the platforms and observed post details for one asset. Args: asset_id.", InputSchema: schema("asset_id"), Handler: a.assetPublicationsList},
-		{Name: "content_catalog_asset_publications_record", Description: "Create or update a publication record on one asset. Args: asset_id, destination (new record), status, publication_id? (update), account_ref?, audience?, planned_at?, actual_at?, external_post_id?, external_url?, evidence_source?, failure_details?. Verified live requires evidence and URL or post ID. Writes only Catalog; never publishes externally.", InputSchema: schema("asset_id", "status"), Handler: a.assetPublicationRecord},
-		{Name: "content_catalog_posts_list", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "List shared platform posts; optional session_id, asset_id, brand_id, lifecycle. Defaults to posts with only active assets/sessions; archived/all explicitly includes historical archive references. Each post contains its asset IDs and one observed outcome.", InputSchema: lifecycleListSchema(), Handler: a.postsList},
-		{Name: "content_catalog_posts_get", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Get one shared platform post and its asset IDs. Args: id.", InputSchema: schema("id"), Handler: a.postsGet},
-		{Name: "content_catalog_posts_record", Description: "Create or update a shared platform post. Args: asset_ids (one or more same-brand Catalog assets), destination and status for new posts; post_id for updates. Supports title, account_ref, audience, planned_at, actual_at, external_post_id, external_url, evidence_source, failure_details. Writes Catalog evidence only; does not publish externally.", InputSchema: schema("status"), Handler: a.postsRecord},
+		{Name: "content_catalog_asset_publications_list", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "List the platforms and observed post details for one asset. Args: asset_id.", InputSchema: postListSchema(true), Handler: a.assetPublicationsList},
+		{Name: "content_catalog_asset_publications_record", Annotations: map[string]any{"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false}, Description: "Create or update a publication record on one asset. Args: asset_id, destination (new record), status, publication_id? (update), account_ref?, audience?, planned_at?, actual_at?, external_post_id?, external_url?, evidence_source?, failure_details?. Verified live requires evidence and URL or post ID. Writes only Catalog; never publishes externally.", InputSchema: postRecordSchema(true), Handler: a.assetPublicationRecord},
+		{Name: "content_catalog_posts_list", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "List shared platform posts; optional session_id, asset_id, brand_id, lifecycle. Defaults to posts with only active assets/sessions; archived/all explicitly includes historical archive references. Filters: exact destination/account, audience_type, access_policy, group_scope/group_id, external_post_id, status and cursor/limit (max200); follow next_cursor until empty. Each post includes audience and verification evidence.", InputSchema: postListSchema(false), Handler: a.postsList},
+		{Name: "content_catalog_posts_get", Annotations: map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}, Description: "Get one shared platform post, its asset IDs, revision and audience before/after history. Args: id.", InputSchema: schema("id"), Handler: a.postsGet},
+		{Name: "content_catalog_posts_record", Annotations: map[string]any{"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false}, Description: "Create or update a shared platform post. Args: asset_ids (one or more same-brand Catalog assets), destination and status for new posts; post_id for updates. Supports title, account_ref, audience, planned_at, actual_at, external_post_id, external_url, evidence_source, failure_details. Reconciles by project/platform/account/external_post_id without duplicate imports. Structured audience fields are provider-neutral; unknown scope is never all groups. Audience or identity corrections require expected_revision; verified audience changes need explicit evidence_source. Actual publication time may be unknown; observed_at is separate. Writes Catalog evidence only; does not publish externally.", InputSchema: postRecordSchema(false), Handler: a.postsRecord},
 		{Name: "content_catalog_hosting_request", Description: "REAL EXTERNAL HOSTING: request an approved asset's video upload to the brand's video host. Bunny Stream is supported. Persists explicit hosting intent, waits for Storage checksum verification and automatically resumes after eligibility and destination checks. Optional title overrides the Media title / session-and-filename default. Pending uploads are checked automatically; existing hosted titles are unchanged. If no session or brand collection is configured, creates/reuses a collection named after the session and saves its ID. Does not publish to a channel.", InputSchema: hostingRequestSchema(), Handler: a.hostingRequest},
 		{Name: "content_catalog_hosting_cancel", Annotations: map[string]any{"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true}, Description: "Cancel a checksum-waiting hosting intent before transfer. Cannot cancel an upload already started. Args: intent_id.", InputSchema: schema("intent_id"), Handler: a.hostingCancel},
 		{Name: "content_catalog_hosting_check", Description: "Fetch provider readiness for one hosting id and update Catalog's observation. Args: id.", InputSchema: schema("id"), Handler: a.hostingCheck},
@@ -226,7 +229,7 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	args := map[string]any{}
-	for _, key := range []string{"entity_type", "query", "brand_id", "session_id", "source_asset_id", "include_descendants", "role", "output_type", "include_intermediates", "date_from", "date_to", "kind", "lineage", "sort", "review_status", "destination", "account_ref", "availability", "tag", "favorite", "patreon_intent", "limit", "assets_cursor", "sessions_cursor", "releases_cursor"} {
+	for _, key := range []string{"entity_type", "query", "brand_id", "session_id", "source_asset_id", "include_descendants", "role", "output_type", "include_intermediates", "date_from", "date_to", "kind", "lineage", "sort", "review_status", "destination", "account_ref", "audience_type", "access_policy", "group_scope", "group_id", "availability", "tag", "favorite", "patreon_intent", "limit", "assets_cursor", "sessions_cursor", "releases_cursor"} {
 		if v := r.URL.Query().Get(key); v != "" {
 			if key == "favorite" || key == "include_descendants" || key == "include_intermediates" {
 				parsed, err := strconv.ParseBool(v)
@@ -273,7 +276,7 @@ func (a *App) handleList(name string) http.HandlerFunc {
 			return
 		}
 		args := map[string]any{}
-		for _, key := range []string{"brand_id", "session_id", "asset_id", "lifecycle", "role", "output_type", "include_intermediates", "id", "entity_type"} {
+		for _, key := range []string{"brand_id", "session_id", "asset_id", "lifecycle", "role", "output_type", "include_intermediates", "id", "entity_type", "destination", "account_ref", "audience_type", "access_policy", "group_scope", "group_id", "status", "cursor", "limit", "external_post_id"} {
 			if v := r.URL.Query().Get(key); v != "" {
 				if key == "include_intermediates" {
 					parsed, err := strconv.ParseBool(v)
@@ -283,12 +286,33 @@ func (a *App) handleList(name string) http.HandlerFunc {
 					}
 					args[key] = parsed
 				} else {
-					args[key] = v
+					if key == "limit" {
+						parsed, err := strconv.ParseInt(v, 10, 64)
+						if err != nil {
+							http.Error(w, "invalid limit", 400)
+							return
+						}
+						args[key] = parsed
+					} else {
+						args[key] = v
+					}
 				}
 			}
 		}
 		a.callHTTP(w, r, name, args)
 	}
+}
+func (a *App) handlePost(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", 405)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/posts/")
+	if id == "" || strings.Contains(id, "/") {
+		http.NotFound(w, r)
+		return
+	}
+	a.callHTTP(w, r, "content_catalog_posts_get", map[string]any{"id": id})
 }
 func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {

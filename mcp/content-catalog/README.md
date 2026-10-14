@@ -1,5 +1,71 @@
 # Content Catalog
 
+## Version 0.6.9: provider-neutral publication audiences
+
+Existing shared posts now have `audience_type` (`public`, `restricted`, `private`,
+`unknown`), optional provider `access_policy` (e.g. `membership`), `group_scope`
+(`all_eligible`, `selected`, `unknown`), provider `group_ids` and optional
+`group_labels`. Selected groups require distinct IDs; the other scopes have no
+ID list. Policies and groups require a restricted audience and a stable platform
+account. Group labels are caller-supplied provider names, never business presets.
+Existing free-text `audience` is preserved as a legacy note; migration never
+infers structured access from it or from asset intent, filenames or prices.
+
+Both single-asset and multi-asset record tools accept these fields. An optional
+`publisher_ref` (`app`, `install_id`, `record_id`) preserves the publisher's native
+reference alongside `evidence_source`, external ID and link. Catalog does not
+fetch provider data, scan folders, upload, publish, or automatically reconcile
+historical assets.
+
+Post lists also accept exact `external_post_id` with platform and account, so
+workers can read the canonical record/revision before a correction.
+
+New imports with a nonempty platform, account and external post ID reconcile by
+that exact project-scoped identity. Identical imports return `unchanged=true`
+without duplicate records or audit events. Audience corrections require
+`expected_revision`; verified audience corrections also require explicit new
+`evidence_source`. Historically verified post membership and known external identity
+remain immutable. Missing native/account identity may be filled explicitly with
+a revision guard and new verification evidence; it is never inferred. Legacy duplicate identities stay intact and ambiguous imports
+fail for review rather than silently merging or selecting one. Posts without a
+complete external identity retain the existing explicit create/update behavior.
+
+`actual_at` can be empty even for `verified_published` when the original publication
+time is unknown. Verified state still requires a native ID/link and evidence.
+`observed_at` is separate and defaults to the current verification time for a new
+observed outcome; callers may supply a known RFC3339 observation time. Never use
+an upload date, screenshot capture date or observation time as publication time.
+Editing audience in the UI preserves the exact existing publication date.
+
+`content_catalog_search`, `content_catalog_posts_list` and
+`content_catalog_asset_publications_list` accept exact `destination`,
+`account_ref`, `audience_type`, `access_policy`, `group_scope`, and `group_id`
+filters. Policy/group filters require platform and account; group IDs belong to
+that account. Confirmed `all_eligible` covers any eligible provider group in the
+account; selected coverage matches only explicit IDs; unknown never proves group
+coverage. `never_used`, `not_published` and `ready_to_publish` use the same target.
+Public sharing does not satisfy restricted sharing, and another platform/account
+never satisfies this one. Unknown compatible account/audience/group scope blocks
+**automatic readiness** instead of guessing that an asset is safely unshared.
+
+Verified search/availability checks match historical **audience snapshots**, not
+just a post's current audience. Publication changes therefore cannot reassign old
+Public evidence to Members or erase earlier verified use. The compact `uses`
+summary and `publications` expose audience, publisher reference, observation time
+and recorded/verified scope history (`recorded_audiences` / `verified_audiences`). Membership and history lookups are batched for search
+and publication-list pages. Lists use `limit` (1–200) and `cursor`; follow nonempty
+`next_cursor` with unchanged filters. `/posts/<id>` and MCP `posts_get` return the
+post revision plus latest 100 before/after audit snapshots, observation time and
+recording time. Historical events without audience evidence remain unknown.
+
+Cards show clickable platform/audience/status badges. Details show native IDs,
+external links, account, provider group labels/IDs, publisher reference, evidence,
+unknown publication dates, observation dates and audience history. The session
+filter modal and global search expose audience and account group filters. Post
+forms support the same structured fields and explicitly allow unknown dates.
+Content approval, suitability rating, lifecycle, favorites, tags and Patreon
+intent remain independent.
+
 ## Version 0.6.8: guarded source corrections
 
 `content_catalog_assets_link_source` now returns `status=inserted`, `unchanged`
