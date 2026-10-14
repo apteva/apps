@@ -94,6 +94,20 @@ outcomes should be evaluated separately from simulation completeness.
 
 ## Performance and retention
 
+The reconciliation worker keeps its 15-second interval. It polls lifecycle
+metadata without selecting or decoding `spec_json`, including when it reloads
+state after recovery or records a failure. Stopped, healthy active, backed-off,
+and degraded definitions do not decode specs on idle ticks. An eligible start
+loads only that definition's current specification and rechecks its state;
+updates take effect on the next start or recovery without a decoded-spec cache.
+
+Benchmark the previous idle path against the metadata path with 20 structured
+specifications totaling 4,025,080 bytes:
+
+```sh
+GOWORK=off go test -run '^$' -bench BenchmarkIdleReconcileLargeDefinitions -benchmem -count=3
+```
+
 The catalog is cached for one minute per install; concurrent refreshes are
 coalesced, and independent upstream reads run concurrently. The panel polls live
 state every five seconds and catalogs every minute. Fixture decoration is batched.

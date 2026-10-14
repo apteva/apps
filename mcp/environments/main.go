@@ -15,8 +15,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.7.12
-description: Isolated test environments with apps, managed MCP servers, connections, agents, web and voice fixtures, assertions, and snapshots. v0.7.12 matches finalized voice transcripts across merged or split turns and separates recognition gaps from audio delivery.
+version: 0.7.13
+description: Isolated test environments with apps, managed MCP servers, connections, agents, web and voice fixtures, assertions, and snapshots. v0.7.13 avoids idle specification decoding by reconciling lifecycle metadata and loading current specs only for eligible starts or recovery.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
@@ -75,7 +75,7 @@ provides:
   workers: [{ name: reconcile, schedule: "@every 15s" }]
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: environments/v0.7.12, entry: mcp/environments }
+  source: { repo: github.com/apteva/apps, ref: environments/v0.7.13, entry: mcp/environments }
   port: 8080
   health_check: /health
 db: { driver: sqlite, path: /data/environments.db, migrations: migrations/ }
