@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -175,7 +176,7 @@ func TestSidecar(t *testing.T) {
 	cmd := exec.Command(binary)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.Env = append(os.Environ(), "APTEVA_APP_PORT="+fmt.Sprint(port), "APTEVA_APP_TOKEN=local-database-test", "APTEVA_PROJECT_ID=", "APTEVA_DATA_DIR="+dir, "DB_PATH="+filepath.Join(dir, "sdk.db"), "APTEVA_GATEWAY_URL=http://127.0.0.1:1")
+	cmd.Env = append(os.Environ(), "APTEVA_APP_PORT="+fmt.Sprint(port), "APTEVA_APP_TOKEN=local-database-test", "APTEVA_PROJECT_ID=", "APTEVA_DATA_DIR="+dir, "DB_PATH="+filepath.Join(dir, "sdk.db"), "APTEVA_GATEWAY_URL=http://127.0.0.1:1", "DATABASE_APTEVADB_SYNC_MODE=full", `APTEVA_APP_CONFIG={"aptevadb_sync_mode":"os"}`)
 	if e = cmd.Start(); e != nil {
 		t.Fatal(e)
 	}
@@ -222,7 +223,7 @@ func TestSidecar(t *testing.T) {
 	if code, _ := request("/operations/databases_list", map[string]any{}, false, nil); code != 401 {
 		t.Fatalf("unauthenticated request returned %d", code)
 	}
-	for _, adapter := range []string{"sqlite", "pebble"} {
+	for _, adapter := range []string{"sqlite", "pebble", "aptevadb"} {
 		for _, step := range []struct {
 			op   string
 			args map[string]any
@@ -243,6 +244,65 @@ func TestSidecar(t *testing.T) {
 				}
 			}
 		}
+		if adapter == "aptevadb" {
+			code, value := request("/operations/explain", map[string]any{"database": adapter, "collection": "sales"}, true, nil)
+			if code != 200 || value.(map[string]any)["syncMode"] != "os" || value.(map[string]any)["synchronousWrites"] != true {
+				t.Fatal("mounted app config must override environment and keep writes synchronous", code, value)
+			}
+		}
+	}
+
+	// Exercise SSE through the actual SDK server and token gate, not just a handler.
+	if code, _ := request("/realtime/watch", map[string]any{"database": "aptevadb", "collections": []string{"sales"}}, false, nil); code != 401 {
+		t.Fatal("watch token gate", code)
+	}
+	if code, v := request("/operations/realtime_configure", map[string]any{"database": "aptevadb", "enabled": true}, true, nil); code != 200 {
+		t.Fatal("enable capture", code, v)
+	}
+	streamCtx, stopStream := context.WithTimeout(context.Background(), 5*time.Second)
+	streamReq, _ := http.NewRequestWithContext(streamCtx, "POST", base+"/realtime/watch", strings.NewReader(`{"database":"aptevadb","collections":["sales"],"initial":{"op":"find","args":{"collection":"sales"}}}`))
+	streamReq.Header.Set("Authorization", "Bearer local-database-test")
+	streamReq.Header.Set("X-Apteva-Project-ID", "integration-project")
+	stream, e := http.DefaultClient.Do(streamReq)
+	if e != nil {
+		stopStream()
+		t.Fatal(e)
+	}
+	if stream.StatusCode != 200 || stream.Header.Get("Content-Type") != "text/event-stream" {
+		stream.Body.Close()
+		stopStream()
+		t.Fatal("SDK streaming", stream.Status)
+	}
+	scanner := bufio.NewScanner(stream.Body)
+	readEvent := func(want string) {
+		t.Helper()
+		for scanner.Scan() {
+			if scanner.Text() == "event: "+want {
+				return
+			}
+		}
+		t.Fatal("SDK event missing", want, scanner.Err())
+	}
+	readEvent("snapshot")
+	readEvent("ready")
+	if code, v := request("/operations/insert", map[string]any{"database": "aptevadb", "collection": "sales", "records": []any{map[string]any{"amount": 1}}}, true, nil); code != 200 {
+		t.Fatal(code, v)
+	}
+	readEvent("invalidate")
+	stream.Body.Close()
+	stopStream()
+	for attempt := 0; attempt < 100; attempt++ {
+		code, v := request("/operations/realtime_describe", map[string]any{"database": "aptevadb"}, true, nil)
+		if code != 200 {
+			t.Fatal(code, v)
+		}
+		if v.(map[string]any)["stats"].(map[string]any)["Watchers"] == float64(0) {
+			break
+		}
+		if attempt == 99 {
+			t.Fatal("SDK disconnect leaked watcher", v)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	code, v := request("/mcp", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "db_database_create", "arguments": map[string]any{"database": "private"}}}, true, map[string]string{sdk.HeaderBoundCallerInstallID: "42", sdk.HeaderBoundCallerAppName: "crm"})
 	if code != 200 {
@@ -253,7 +313,7 @@ func TestSidecar(t *testing.T) {
 		t.Fatalf("MCP failed: %s", b)
 	}
 	_, v = request("/operations/databases_list", map[string]any{}, true, nil)
-	if len(v.([]any)) != 2 {
+	if len(v.([]any)) != 3 {
 		t.Fatal("app-private database leaked into project list", v)
 	}
 }

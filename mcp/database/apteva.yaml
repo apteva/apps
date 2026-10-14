@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: database
 display_name: Database
-version: 0.1.0
-description: Independent local databases with collections, typed records, generic indexes and aggregation. SQLite and Pebble adapters share one contract.
+version: 0.5.0
+description: Independent local databases with collections, typed records, generic indexes and aggregation. SQLite, Pebble and embedded AptevaDB adapters share one contract.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/database
 icon: /ui/icon.svg
@@ -19,12 +19,16 @@ provides:
       label: Database
       matcher: glob
   permissions:
+    - {name: database.watch, resource: database, description: Watch collection changes.}
     - {name: database.read, resource: database, description: Read collections and records.}
     - {name: database.write, resource: database, description: Insert and modify records.}
     - {name: database.manage, resource: database, description: "Create and delete databases, collections and indexes."}
   mcp_tools:
+    - {name: db_realtime_configure, description: Enable or disable native realtime capture.}
+    - {name: db_realtime_describe, description: Inspect realtime support and usage.}
+    - {name: db_changes, description: Wait for resumable collection invalidations.}
     - {name: db_databases_list, description: List available databases.}
-    - {name: db_database_create, description: Create a local SQLite or Pebble database.}
+    - {name: db_database_create, description: "Create a local SQLite, Pebble or AptevaDB database."}
     - {name: db_database_describe, description: Describe a database.}
     - {name: db_database_drop, description: Delete a database with explicit confirmation.}
     - {name: db_collections_list, description: List collections in a database.}
@@ -55,11 +59,42 @@ provides:
       body_file: skills/how-to-use-database.md
 runtime:
   kind: source
-  source: {repo: github.com/apteva/apps, ref: database/v0.1.0, entry: mcp/database}
+  source: {repo: github.com/apteva/apps, ref: database/v0.5.0, entry: mcp/database}
   port: 8080
   health_check: /health
 db:
   driver: sqlite
   path: /data/database-app.db
   migrations: migrations/
+config_schema:
+  - name: durability_profile
+    type: select
+    options: [durable, balanced]
+    default: durable
+    label: SQLite durability profile
+    description: Durable uses synchronous FULL. Balanced uses synchronous NORMAL for Tables-like write latency with a wider crash-loss window.
+  - name: aptevadb_sync_mode
+    type: select
+    options: [full, barrier, os]
+    default: full
+    label: AptevaDB write flush mode
+    description: Full flushes the drive cache. OS uses ordinary fsync, like SQLite's default on macOS. Barrier orders writes without forcing the drive cache. OS and barrier give weaker power-loss protection on macOS. Writes remain synchronous.
+  - name: aptevadb_cache_mib
+    type: select
+    options: ["0", "32", "64", "128", "256", "512"]
+    default: "0"
+    label: AptevaDB cache target (MiB)
+    description: Per-database logical cache target. Zero keeps the engine cache uncapped. This is not a process memory cap.
+  - name: aptevadb_aggregate_workers
+    type: select
+    options: ["1", "2", "4", "8"]
+    default: "4"
+    label: AptevaDB aggregate workers
+    description: Workers for broad native aggregates. Uncertain integer sums retain their checked fallback.
+  - name: aptevadb_query_memory_mib
+    type: select
+    options: ["8", "16", "32", "64", "128", "256"]
+    default: "16"
+    label: AptevaDB query memory budget (MiB)
+    description: Per-query retained work budget. Larger group counts may need more memory. Result and deadline limits still apply.
 upgrade_policy: auto-patch

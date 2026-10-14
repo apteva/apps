@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { watchCollection } from "./realtime-client";
 
 type Database = { id: string; name: string; adapter: string };
 type Collection = { name: string; fields: { name: string; type: string; nullable?: boolean }[]; primaryKey: string[]; indexes: unknown[] };
@@ -27,6 +28,10 @@ export default function DatabasePanel({ projectId, installId }: Props) {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [revision, setRevision] = useState(0);
+  const [liveEnabled, setLiveEnabled] = useState(false);
+  const [liveStatus, setLiveStatus] = useState("Off");
+  const lastQuery = useRef<{ database: string; collection: string; op: string; args: Row } | null>(null);
+  const currentView = useRef(view); currentView.current = view;
   const selected = collections.find(c => c.name === collection);
   const generation = useRef(0);
 
@@ -60,19 +65,75 @@ export default function DatabasePanel({ projectId, installId }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    generation.current++; setRows([]); setCursor(""); setResult(null);
+    generation.current++; setCursor("");
     if (database && collection) api<{ records: Row[]; nextCursor: string }>("find", { database, collection, limit: 50 }).then(v => {
       if (!cancelled) { setRows(v.records); setCursor(v.nextCursor); }
     }).catch(e => { if (!cancelled) setError(e.message); });
     return () => { cancelled = true; };
   }, [api, database, collection, revision]);
 
+  useEffect(() => {
+    let cancelled = false;
+    setLiveEnabled(false); setLiveStatus("Off"); lastQuery.current = null;
+    if (database) api<{ enabled: boolean }>("realtime_describe", { database }).then(v => {
+      if (!cancelled) setLiveEnabled(v.enabled);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [api, database]);
+
+  useEffect(() => {
+    if (!liveEnabled || !database || !collection) return;
+    const controller = new AbortController();
+    let debounce: ReturnType<typeof setTimeout> | undefined, maximum: ReturnType<typeof setTimeout> | undefined;
+    let refreshing = false, dirty = false;
+    const refresh = async () => {
+      clearTimeout(debounce); clearTimeout(maximum); debounce = maximum = undefined;
+      dirty = true; if (refreshing) return; refreshing = true;
+      try {
+        while (dirty && !controller.signal.aborted) {
+          dirty = false;
+          const version = ++generation.current;
+          const list = await api<Collection[]>("collections_list", { database });
+          if (controller.signal.aborted) return;
+          setCollections(list);
+          if (!list.some(c => c.name === collection)) { setCollection(list[0]?.name || ""); return; }
+          const query = lastQuery.current;
+          if (query && query.database === database && query.collection === collection && ["query", "aggregate"].includes(currentView.current)) {
+            const value = await api(query.op, { ...query.args, database, collection, cursor: undefined });
+            if (!controller.signal.aborted && version === generation.current && lastQuery.current === query) setResult(value);
+          }
+          const value = await api<{ records: Row[]; nextCursor: string }>("find", { database, collection, limit: 50 });
+          if (!controller.signal.aborted && version === generation.current) { setRows(value.records); setCursor(value.nextCursor); }
+        }
+      } catch (e) {
+        if (!controller.signal.aborted) {
+          setError((e as Error).message); dirty = true;
+          debounce = setTimeout(() => void refresh(), 1000);
+        }
+      } finally { refreshing = false; }
+    };
+    const changed = () => {
+      clearTimeout(debounce); debounce = setTimeout(() => void refresh(), 100);
+      if (!maximum) maximum = setTimeout(() => void refresh(), 500);
+    };
+    const query = new URLSearchParams({ project_id: projectId, install_id: String(installId) });
+    void watchCollection({ url: `/api/apps/database/realtime/watch?${query}`, database, collection, signal: controller.signal,
+      snapshot: value => { if (!controller.signal.aborted) { setRows(value.records); setCursor(value.nextCursor); changed(); } },
+      changed, status: value => { if (!controller.signal.aborted) setLiveStatus(value); },
+    });
+    return () => { controller.abort(); clearTimeout(debounce); clearTimeout(maximum); };
+  }, [api, projectId, installId, database, collection, liveEnabled]);
+
+  useEffect(() => {
+    setRows([]); setResult(null); lastQuery.current = null;
+  }, [database, collection]);
+
   async function action(fn: () => Promise<void>) {
     setBusy(true); setError(""); setNotice("");
     try { await fn(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   }
   function changeView(next: string) {
-    setView(next); setResult(null);
+    generation.current++; lastQuery.current = null; setView(next); setResult(null);
     setEditor(next === "aggregate" ? JSON.stringify({ groupBy: [], metrics: [{ name: "records", op: "count" }] }, null, 2)
       : next === "indexes" ? JSON.stringify({ name: "by_name", fields: [{ field: "name", direction: "asc" }], unique: false }, null, 2)
       : next === "insert" ? JSON.stringify([{}], null, 2) : "{}");
@@ -90,6 +151,12 @@ export default function DatabasePanel({ projectId, installId }: Props) {
           {!databases.length && <option value="">No databases yet</option>}
           {databases.map(d => <option key={d.id} value={d.name}>{d.name} · {d.adapter}</option>)}
         </select>
+        {databases.find(d => d.name === database)?.adapter === "aptevadb" && <>
+          <span role="status" className="text-xs text-muted-foreground">{liveEnabled ? liveStatus : "Live off"}</span>
+          <button className={buttonClass} disabled={busy} onClick={() => void action(async () => {
+            await api("realtime_configure", { database, enabled: !liveEnabled }); setLiveEnabled(!liveEnabled);
+          })}>{liveEnabled ? "Disable realtime" : "Enable realtime"}</button>
+        </>}
         <button className={buttonClass} disabled={busy} onClick={() => setCreateOpen(!createOpen)}>Create</button>
       </div>
     </header>
@@ -102,7 +169,7 @@ export default function DatabasePanel({ projectId, installId }: Props) {
       }); }}>
         <h3 className="font-medium">New database</h3>
         <input required pattern="[a-z][a-z0-9_]{0,63}" aria-label="New database name" placeholder="Database name" className={inputClass} value={newDB} onChange={e => setNewDB(e.target.value)} />
-        <select aria-label="Adapter" className={inputClass} value={adapter} onChange={e => setAdapter(e.target.value)}><option value="sqlite">SQLite</option><option value="pebble">Pebble</option></select>
+        <select aria-label="Adapter" className={inputClass} value={adapter} onChange={e => setAdapter(e.target.value)}><option value="sqlite">SQLite</option><option value="pebble">Pebble</option><option value="aptevadb">AptevaDB (experimental)</option></select>
         <button className={buttonClass} disabled={busy}>Create database</button>
       </form>
       <form className="space-y-3" onSubmit={e => { e.preventDefault(); void action(async () => {
@@ -130,7 +197,7 @@ export default function DatabasePanel({ projectId, installId }: Props) {
           {view === "records" && <>
             <div className="overflow-x-auto rounded-lg border border-border"><table className="w-full text-left text-sm"><thead className="bg-muted/50"><tr>{columns.map(c => <th key={c} className="whitespace-nowrap p-3 font-medium">{c}</th>)}</tr></thead><tbody>{rows.map((r, i) => <tr key={i} className="border-t border-border">{columns.map(c => <td key={c} className="max-w-xs truncate p-3" title={JSON.stringify(r[c])}>{r[c] === null ? <span className="text-muted-foreground">null</span> : typeof r[c] === "object" ? JSON.stringify(r[c]) : String(r[c] ?? "")}</td>)}</tr>)}</tbody></table>{!rows.length && <p className="p-8 text-center text-muted-foreground">No records yet.</p>}</div>
             <div className="mt-3 flex gap-2"><button className={buttonClass} disabled={busy} onClick={() => setRevision(v => v + 1)}>Refresh</button><button className={buttonClass} disabled={busy || !cursor} onClick={() => void action(async () => {
-              const version = generation.current;
+              const version = ++generation.current;
               const v = await api<{ records: Row[]; nextCursor: string }>("find", { database, collection, limit: 50, cursor });
               if (version === generation.current) { setRows(v.records); setCursor(v.nextCursor); }
             })}>Next page</button></div>
@@ -145,9 +212,15 @@ export default function DatabasePanel({ projectId, installId }: Props) {
               const body = JSON.parse(editor);
               const op = view === "query" ? "find" : view === "indexes" ? "index_create" : view;
               const args = view === "insert" ? { records: body } : view === "indexes" ? { index: body } : body;
-              setResult(await api(op, { ...args, database, collection }));
+              const version = ++generation.current;
+              if (view === "query" || view === "aggregate") lastQuery.current = { database, collection, op, args };
+              const value = await api(op, { ...args, database, collection });
+              if (version === generation.current) {
+                setResult(value);
+                if (view === "query" || view === "aggregate") lastQuery.current = { database, collection, op, args };
+              }
               if (view === "indexes") setCollections(await api<Collection[]>("collections_list", { database }));
-              if (view === "insert") setNotice("Records inserted. Open Records and refresh to view them.");
+              if (view === "insert") { setRevision(v => v + 1); setNotice("Records inserted."); }
             })}>{busy ? "Working…" : view === "indexes" ? "Create index" : view === "insert" ? "Insert records" : "Run"}</button>
               {view === "query" && <button className={buttonClass} disabled={busy} onClick={() => void action(async () => { const { where, orderBy } = JSON.parse(editor); setResult(await api("explain", { database, collection, where, orderBy })); })}>Explain</button>}
             </div>

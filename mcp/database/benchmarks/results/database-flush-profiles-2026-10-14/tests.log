@@ -1,0 +1,3 @@
+ok  	github.com/apteva/apps/mcp/database	5.486s
+?   	github.com/apteva/apps/mcp/database/cmd/bench	[no test files]
+ok  	github.com/apteva/apps/mcp/database/engine	6.396s

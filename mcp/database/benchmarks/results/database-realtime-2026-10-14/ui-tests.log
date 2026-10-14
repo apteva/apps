@@ -1,0 +1,12 @@
+bun test v1.3.13 (bf2e2cec)
+
+ui/realtime-client.test.ts:
+(pass) SSE survives every split, CRLF, comments, and unicode [4.14ms]
+(pass) incomplete frames cannot advance the cursor [0.41ms]
+(pass) unbounded frames fail [1.49ms]
+(pass) reconnect uses only complete delivered boundaries; expired history resnapshots [534.98ms]
+
+ 4 pass
+ 0 fail
+ 147 expect() calls
+Ran 4 tests across 1 file. [598.00ms]

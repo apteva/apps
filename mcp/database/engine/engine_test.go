@@ -53,7 +53,7 @@ func fixture(t *testing.T, m *Manager, adapter string) {
 }
 func rows(t *testing.T, v any) []Record { t.Helper(); return v.(map[string]any)["records"].([]Record) }
 func TestAdapters(t *testing.T) {
-	for _, adapter := range []string{"sqlite", "pebble"} {
+	for _, adapter := range []string{"sqlite", "pebble", "aptevadb"} {
 		t.Run(adapter, func(t *testing.T) {
 			m := manager(t)
 			fixture(t, m, adapter)
@@ -195,7 +195,7 @@ func TestDatabaseAndScopeIsolation(t *testing.T) {
 	call(t, m, "q", "collection_describe", Request{Database: "one", Collection: "items"})
 }
 func TestRestart(t *testing.T) {
-	for _, adapter := range []string{"sqlite", "pebble"} {
+	for _, adapter := range []string{"sqlite", "pebble", "aptevadb"} {
 		t.Run(adapter, func(t *testing.T) {
 			root := t.TempDir()
 			m, e := Open(root)
@@ -226,7 +226,7 @@ func TestRestart(t *testing.T) {
 	}
 }
 func TestConcurrentUniqueInsert(t *testing.T) {
-	for _, adapter := range []string{"sqlite", "pebble"} {
+	for _, adapter := range []string{"sqlite", "pebble", "aptevadb"} {
 		t.Run(adapter, func(t *testing.T) {
 			m := manager(t)
 			fixture(t, m, adapter)
@@ -259,7 +259,7 @@ func TestConcurrentUniqueInsert(t *testing.T) {
 	}
 }
 func TestIntegerAndCompositeKeys(t *testing.T) {
-	for _, adapter := range []string{"sqlite", "pebble"} {
+	for _, adapter := range []string{"sqlite", "pebble", "aptevadb"} {
 		t.Run(adapter, func(t *testing.T) {
 			m := manager(t)
 			call(t, m, "p", "database_create", Request{Database: "n", Adapter: adapter})
@@ -279,7 +279,7 @@ func TestIntegerAndCompositeKeys(t *testing.T) {
 }
 func TestDifferentialQueries(t *testing.T) {
 	m := manager(t)
-	for _, a := range []string{"sqlite", "pebble"} {
+	for _, a := range []string{"sqlite", "pebble", "aptevadb"} {
 		call(t, m, "p", "database_create", Request{Database: a, Adapter: a})
 		call(t, m, "p", "collection_create", Request{Database: a, Collection: "data", Fields: []Field{{"n", "number", true}, {"label", "text", true}}})
 		rs := []Record{}
@@ -301,11 +301,13 @@ func TestDifferentialQueries(t *testing.T) {
 			for _, value := range []float64{-9, -1, 0, 1, 9} {
 				q := Query{Where: &Filter{And: []Filter{{Field: "label", Op: "eq", Value: "2"}, {Field: "n", Op: op, Value: value}}}, OrderBy: []Order{{"n", direction}}, Select: []string{"id", "n", "label"}, Limit: 100}
 				a := call(t, m, "p", "find", Request{Database: "sqlite", Collection: "data", Query: q})
-				b := call(t, m, "p", "find", Request{Database: "pebble", Collection: "data", Query: q})
-				aj, _ := json.Marshal(a)
-				bj, _ := json.Marshal(b)
-				if string(aj) != string(bj) {
-					t.Fatalf("%s %v %s\nsqlite %s\npebble %s", op, value, direction, aj, bj)
+				for _, adapter := range []string{"pebble", "aptevadb"} {
+					b := call(t, m, "p", "find", Request{Database: adapter, Collection: "data", Query: q})
+					aj, _ := json.Marshal(a)
+					bj, _ := json.Marshal(b)
+					if string(aj) != string(bj) {
+						t.Fatalf("%s %s %v %s\nsqlite %s\ngot %s", adapter, op, value, direction, aj, bj)
+					}
 				}
 			}
 		}
@@ -313,7 +315,7 @@ func TestDifferentialQueries(t *testing.T) {
 }
 
 func TestAggregateWithIndexAndPrefix(t *testing.T) {
-	for _, adapter := range []string{"sqlite", "pebble"} {
+	for _, adapter := range []string{"sqlite", "pebble", "aptevadb"} {
 		t.Run(adapter, func(t *testing.T) {
 			m := manager(t)
 			fixture(t, m, adapter)

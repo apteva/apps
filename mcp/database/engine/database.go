@@ -28,39 +28,77 @@ type transaction interface {
 	createIndex(Collection, Index) error
 	dropIndex(Collection, string) error
 	get(Collection, string) (Record, error)
+	insert(Collection, string, Record) error
 	put(Collection, string, Record) error
 	remove(Collection, string) error
 	find(Collection, Query, int) ([]Record, error)
 	aggregate(Collection, Request, Collection) ([]Record, error)
 	explain(Collection, Query) (any, error)
 }
+
 type DatabaseInfo struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
 	Adapter string `json:"adapter"`
 }
 type database struct {
-	mu      sync.RWMutex
-	writes  writeQueue
-	backend backend
-	info    DatabaseInfo
-	key     []byte
-	closed  bool
+	watchesMu sync.Mutex
+	watches   map[*Watch]struct{}
+	realtime  *RealtimeOptions
+	mu        sync.RWMutex
+	writes    writeQueue
+	backend   backend
+	info      DatabaseInfo
+	key       []byte
+	closed    bool
+	schemas   schemaCache
 }
 type Manager struct {
-	mu        sync.Mutex
-	registry  *sql.DB
-	root      string
-	databases map[string]*database
-	secret    string
-	closed    bool
+	watchMu      sync.Mutex
+	watchCount   int
+	watchCallers map[string]int
+	mu           sync.Mutex
+	registry     *sql.DB
+	root         string
+	databases    map[string]*database
+	names        map[databaseName]*database
+	secret       string
+	durability   string
+	apteva       AptevaOptions
+	closed       bool
 }
 
 func Open(root string) (*Manager, error) {
+	return OpenWithOptions(root, "durable")
+}
+
+// OpenWithOptions opens the manager with an explicit SQLite durability profile.
+// durable is the default and uses synchronous=FULL; balanced uses NORMAL and
+// is intended only when the operator accepts the weaker crash-commit window.
+func OpenWithOptions(root, durability string) (*Manager, error) {
+	return OpenWithConfig(root, ManagerOptions{SQLiteDurability: durability})
+}
+
+func OpenWithConfig(root string, options ManagerOptions) (*Manager, error) {
+	durability := options.SQLiteDurability
+	if durability == "" {
+		durability = "durable"
+	}
+	if durability != "durable" && durability != "balanced" {
+		return nil, Invalid("durability must be durable or balanced")
+	}
+	apteva := DefaultAptevaOptions()
+	if options.Apteva != nil {
+		apteva = *options.Apteva
+	}
+	apteva, e := apteva.normalized()
+	if e != nil {
+		return nil, e
+	}
 	if e := os.MkdirAll(root, 0700); e != nil {
 		return nil, e
 	}
-	root, e := filepath.Abs(root)
+	root, e = filepath.Abs(root)
 	if e != nil {
 		return nil, e
 	}
@@ -68,7 +106,7 @@ func Open(root string) (*Manager, error) {
 	if e != nil {
 		return nil, e
 	}
-	_, e = db.Exec(`CREATE TABLE IF NOT EXISTS databases (id TEXT PRIMARY KEY, scope TEXT NOT NULL, name TEXT NOT NULL, adapter TEXT NOT NULL, UNIQUE(scope,name)); CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY,value TEXT NOT NULL)`)
+	_, e = db.Exec(`CREATE TABLE IF NOT EXISTS databases (id TEXT PRIMARY KEY, scope TEXT NOT NULL, name TEXT NOT NULL, adapter TEXT NOT NULL, UNIQUE(scope,name)); CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS realtime (id TEXT PRIMARY KEY, policy TEXT NOT NULL)`)
 	if e != nil {
 		db.Close()
 		return nil, e
@@ -78,7 +116,7 @@ func Open(root string) (*Manager, error) {
 		db.Close()
 		return nil, e
 	}
-	m := &Manager{registry: db, root: root, databases: map[string]*database{}}
+	m := &Manager{registry: db, root: root, databases: map[string]*database{}, names: map[databaseName]*database{}, durability: durability, apteva: apteva}
 	if e = db.QueryRow(`SELECT value FROM settings WHERE name='secret'`).Scan(&m.secret); e != nil {
 		db.Close()
 		return nil, e
@@ -95,6 +133,7 @@ func (m *Manager) Close() error {
 	var errs []error
 	for _, d := range m.databases {
 		d.mu.Lock()
+		d.closeWatches()
 		d.closed = true
 		errs = append(errs, d.backend.close())
 		d.mu.Unlock()
@@ -127,6 +166,16 @@ func (m *Manager) resolve(ctx context.Context, scope, name, adapter string, crea
 	if e := nameOK(name); e != nil {
 		return nil, e
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	lookup := databaseName{scope: scope, name: name}
+	if d := m.names[lookup]; d != nil {
+		if create && adapter != "" && adapter != d.info.Adapter {
+			return nil, fail("schema_conflict", "database already uses %s", d.info.Adapter)
+		}
+		return d, nil
+	}
 	var info DatabaseInfo
 	e := m.registry.QueryRowContext(ctx, `SELECT id,name,adapter FROM databases WHERE scope=? AND name=?`, scope, name).Scan(&info.ID, &info.Name, &info.Adapter)
 	fresh := errors.Is(e, sql.ErrNoRows)
@@ -140,8 +189,8 @@ func (m *Manager) resolve(ctx context.Context, scope, name, adapter string, crea
 		if adapter == "" {
 			adapter = "sqlite"
 		}
-		if adapter != "sqlite" && adapter != "pebble" {
-			return nil, Invalid("adapter must be sqlite or pebble")
+		if adapter != "sqlite" && adapter != "pebble" && adapter != "aptevadb" {
+			return nil, Invalid("adapter must be sqlite, pebble or aptevadb")
 		}
 		var n int
 		if e := m.registry.QueryRowContext(ctx, `SELECT count(*) FROM databases WHERE scope=?`, scope).Scan(&n); e != nil {
@@ -165,10 +214,29 @@ func (m *Manager) resolve(ctx context.Context, scope, name, adapter string, crea
 		return nil, e
 	}
 	var b backend
+	var rt *RealtimeOptions
+	var policy string
+	policyErr := m.registry.QueryRowContext(ctx, `SELECT policy FROM realtime WHERE id=?`, info.ID).Scan(&policy)
+	if policyErr == nil {
+		rt = &RealtimeOptions{}
+		if e = decode([]byte(policy), rt); e != nil {
+			return nil, e
+		}
+	} else if !errors.Is(policyErr, sql.ErrNoRows) {
+		return nil, policyErr
+	}
 	if info.Adapter == "sqlite" {
-		b, e = openSQLite(filepath.Join(dir, "data.sqlite"))
-	} else {
+		b, e = openSQLiteWithDurability(filepath.Join(dir, "data.sqlite"), m.durability)
+	} else if info.Adapter == "pebble" {
 		b, e = openPebble(filepath.Join(dir, "pebble"))
+	} else if info.Adapter == "aptevadb" {
+		options := m.apteva
+		if rt != nil {
+			options.Realtime = rt
+		}
+		b, e = openAptevaDBWithOptions(filepath.Join(dir, "aptevadb"), options)
+	} else {
+		return nil, fail("storage_error", "unknown stored database adapter %s", info.Adapter)
 	}
 	if e != nil {
 		return nil, e
@@ -182,11 +250,18 @@ func (m *Manager) resolve(ctx context.Context, scope, name, adapter string, crea
 		}
 	}
 	key := sha256.Sum256([]byte(m.secret + "/" + info.ID))
-	d := &database{backend: b, info: info, key: key[:]}
+	d := &database{backend: b, info: info, key: key[:], realtime: rt, watches: map[*Watch]struct{}{}}
 	m.databases[info.ID] = d
+	m.names[lookup] = d
 	return d, nil
 }
 func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any, error) {
+	if op == "realtime_configure" || op == "realtime_describe" {
+		return m.realtimeOperation(ctx, scope, op, r)
+	}
+	if op == "changes" {
+		return m.pollChanges(ctx, scope, r)
+	}
 	timeout, err := OperationTimeout(op, r.TimeoutMS)
 	if err != nil {
 		return nil, err
@@ -230,7 +305,10 @@ func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any
 			return nil, e
 		}
 		d.closed = true
+		d.closeWatches()
+		_, _ = m.registry.ExecContext(ctx, `DELETE FROM realtime WHERE id=?`, d.info.ID)
 		delete(m.databases, d.info.ID)
+		delete(m.names, databaseName{scope: scope, name: r.Database})
 		if e = d.backend.close(); e != nil {
 			return nil, e
 		}
@@ -241,7 +319,7 @@ func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any
 	if isRecordWrite(op) {
 		if grouped, ok := d.backend.(groupedBackend); ok {
 			return d.enqueueWrite(ctx, grouped, func(tx transaction) (any, error) {
-				return execute(tx, op, r, d.key)
+				return execute(d.cachedTransaction(tx, false), op, r, d.key)
 			})
 		}
 	}
@@ -255,8 +333,23 @@ func (m *Manager) Execute(ctx context.Context, scope, op string, r Request) (any
 	if d.closed {
 		return nil, fail("not_found", "database is closed")
 	}
+	if isSchemaWrite(op) {
+		d.schemas.clear()
+		if b, ok := d.backend.(schemaInvalidator); ok {
+			b.invalidateSchema()
+		}
+	}
+	if op == "get" {
+		if b, ok := d.backend.(pointReader); ok {
+			return d.pointRead(ctx, b, r)
+		}
+	}
 	var out any
-	e = d.backend.transaction(ctx, write, func(tx transaction) error { var err error; out, err = execute(tx, op, r, d.key); return err })
+	e = d.backend.transaction(ctx, write, func(tx transaction) error {
+		var err error
+		out, err = execute(d.cachedTransaction(tx, !write), op, r, d.key)
+		return err
+	})
 	return out, e
 }
 func isRecordWrite(op string) bool {
@@ -337,14 +430,14 @@ func execute(tx transaction, op string, r Request, cursorKey []byte) (any, error
 	}
 	switch op {
 	case "collection_describe":
-		return c, nil
+		return cloneCollection(c), nil
 	case "collection_drop":
 		if !r.Confirm {
 			return nil, Invalid("confirm=true is required")
 		}
 		return map[string]any{"deleted": true}, tx.dropCollection(c)
 	case "indexes_list":
-		return c.Indexes, nil
+		return cloneCollection(c).Indexes, nil
 	case "index_create":
 		if e := validateIndex(c, r.Index); e != nil {
 			return nil, e
@@ -438,17 +531,14 @@ func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
 	if r.IfVersion < 0 {
 		return nil, Invalid("ifVersion must be positive")
 	}
-	keys := []Record{}
+	keys := make([]Record, 0, len(r.Records))
 	now := time.Now().UTC().Truncate(time.Microsecond).Format("2006-01-02T15:04:05.000000Z")
 	if op == "insert" || op == "upsert" {
 		if len(r.Records) == 0 || len(r.Records) > MaxRecords {
 			return nil, Invalid("records requires 1–1000 records")
 		}
 		for _, input := range r.Records {
-			row := Record{}
-			for k, v := range input {
-				row[k] = v
-			}
+			row := input
 			var old Record
 			if op == "upsert" && r.ConflictIndex != "" {
 				var ix *Index
@@ -478,15 +568,14 @@ func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
 				if len(found) > 0 {
 					old = found[0]
 				}
-			} else if _, e := primary(c, row); e == nil {
-				pk, _ := primary(c, row)
-				old, e = tx.get(c, pk)
-				if e != nil {
-					return nil, e
+			} else if op == "upsert" {
+				if _, e := primary(c, row); e == nil {
+					pk, _ := primary(c, row)
+					old, e = tx.get(c, pk)
+					if e != nil {
+						return nil, e
+					}
 				}
-			}
-			if old != nil && op == "insert" {
-				return nil, fail("unique_conflict", "primary key already exists")
 			}
 			if old != nil {
 				merged := Record{}
@@ -503,6 +592,11 @@ func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
 			} else if _, supplied := row["id"]; len(c.PrimaryKey) == 1 && c.PrimaryKey[0] == "id" && !supplied {
 				f, _ := c.field("id")
 				if f.Type == "text" {
+					copy := make(Record, len(row)+1)
+					for k, v := range row {
+						copy[k] = v
+					}
+					row = copy
 					row["id"] = uuid.NewString()
 				}
 			}
@@ -510,11 +604,11 @@ func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
 			if e != nil {
 				return nil, e
 			}
-			pk, e := primary(c, row)
+			pk, e := primaryNormalized(c, row)
 			if e != nil {
 				return nil, e
 			}
-			if old == nil {
+			if op == "upsert" && old == nil {
 				existing, e := tx.get(c, pk)
 				if e != nil {
 					return nil, e
@@ -524,7 +618,12 @@ func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
 				}
 			}
 			stamp(row, old, now)
-			if e = tx.put(c, pk, row); e != nil {
+			if op == "insert" {
+				e = tx.insert(c, pk, row)
+			} else {
+				e = tx.put(c, pk, row)
+			}
+			if e != nil {
 				return nil, e
 			}
 			keys = append(keys, keyOf(c, row))
@@ -648,6 +747,7 @@ func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
 	}
 	return map[string]any{"affected": len(keys), "keys": keys}, nil
 }
+
 func stamp(r, old Record, now string) {
 	r["_created_at"] = now
 	r["_updated_at"] = now
