@@ -91,7 +91,12 @@ func (a *App) callReadFingerprint(checked *http.Request, model callReadModel) ([
 		}
 		entries = append(entries, e)
 	}
-	raw, err := json.Marshal(entries)
+	// Grants affect visible controls even if the call rows did not change.
+	// Include the authenticated scope so permission changes invalidate hints.
+	raw, err := json.Marshal(struct {
+		Scope   string
+		Entries []entry
+	}{callReadScope(checked, model.project, 0, false), entries})
 	return sha256.Sum256(raw), err
 }
 func (a *App) handleCallNotifications(w http.ResponseWriter, r *http.Request) {

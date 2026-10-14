@@ -258,3 +258,21 @@ func TestAudioHistoryModesPreserveOperatorAuthorization(t *testing.T) {
 		t.Fatal(w.Code)
 	}
 }
+
+func TestNotificationFingerprintTracksControlGrantChanges(t *testing.T) {
+	softphoneTestCtx(t)
+	a := &App{installID: 42}
+	phoneTestPolicy(t, a)
+	phoneTestRingOfferCall(t, a, "scope-change")
+	r := callReadTestRequest(t, a, "alice")
+	before, e := a.callNotificationSnapshot(r, "project-a")
+	if e != nil {
+		t.Fatal(e)
+	}
+	changed := *phoneUserFrom(r)
+	changed.CoachScope = !changed.CoachScope
+	after, e := a.callNotificationSnapshot(withPhonePrincipal(r, &changed), "project-a")
+	if e != nil || before == after {
+		t.Fatal("control grant change hidden by equal rows", e)
+	}
+}

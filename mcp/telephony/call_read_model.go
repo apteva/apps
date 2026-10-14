@@ -202,6 +202,7 @@ func selectedReadPermissions(source *phoneReadPermissions, rows []callRow) *phon
 }
 
 type callReadModel struct {
+	project     string
 	hint        bool
 	fingerprint [32]byte
 	rows        []callRow
@@ -327,7 +328,7 @@ func (a *App) phoneCallRead(r *http.Request, project string, limit int, hint boo
 	return model, readRequest(r, model.permissions), err
 }
 func (a *App) loadPhoneCallRead(r *http.Request, project string, limit int, hint bool) (callReadModel, error) {
-	model := callReadModel{hint: hint, rows: []callRow{}, permissions: &phoneReadPermissions{covered: map[string]bool{}, owners: map[string]phoneReadOwner{}, offers: map[string][]ringOffer{}, runs: map[string]bool{}, destinations: map[string]bool{}}}
+	model := callReadModel{project: project, hint: hint, rows: []callRow{}, permissions: &phoneReadPermissions{covered: map[string]bool{}, owners: map[string]phoneReadOwner{}, offers: map[string][]ringOffer{}, runs: map[string]bool{}, destinations: map[string]bool{}}}
 	ttl := callStreamLease
 	if hint {
 		ttl = callStreamLease
