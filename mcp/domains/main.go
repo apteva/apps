@@ -153,7 +153,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "domain_sale_remove", Description: "Remove a domain marketplace listing from Dynadot or Spaceship.", InputSchema: schemaObject(map[string]any{"domain": map[string]any{"type": "string"}, "connection_id": map[string]any{"type": "integer"}}, []string{"domain"}), Handler: a.toolDomainSaleRemove},
 		{Name: "domain_sale_get", Description: "Read marketplace listing status for a domain.", InputSchema: schemaObject(map[string]any{"domain": map[string]any{"type": "string"}, "connection_id": map[string]any{"type": "integer"}}, []string{"domain"}), Handler: a.toolDomainSaleGet},
 		{Name: "domain_estimate_start", Description: "Start a persisted paid domain valuation through Replicate/HumbleWorth.", InputSchema: schemaObject(map[string]any{"domain": map[string]any{"type": "string"}, "domains": map[string]any{"type": "string"}, "connection_id": map[string]any{"type": "integer"}}, nil), Handler: a.toolDomainEstimateStart},
-		{Name: "domain_estimate_list", Description: "List stored domain valuation results for this project.", InputSchema: schemaObject(map[string]any{}, nil), Handler: a.toolDomainEstimateList},
+		{Name: "domain_estimate_list", Description: "List stored domain valuation results. refresh:true polls pending jobs and persists their results; it does not start paid predictions.", InputSchema: schemaObject(map[string]any{"domain": map[string]any{"type": "string"}, "refresh": map[string]any{"type": "boolean"}}, nil), Handler: a.toolDomainEstimateList},
 
 		{
 			Name:        "domain_records_list",
