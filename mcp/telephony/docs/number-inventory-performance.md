@@ -2,7 +2,7 @@
 
 `/numbers/connected`, `telephony_numbers_connected` and the authorized headless
 `/softphone/numbers` endpoint share carrier reads. Call placement retains its
-fresh binding, credentials, ownership, outbound readiness and admission checks.
+current binding, credentials, ownership, outbound readiness and admission checks.
 Inventory is a selection hint; it never authorizes placing a call.
 
 ## Read path
@@ -93,3 +93,41 @@ four application workers, the 32-read global ceiling, cancellation, independent
 shared readers, expiration, late invalidation, scope changes, live permission
 filtering, disabled numbers and concurrent fresh refreshes. Existing account,
 admission, routing, media and audio suites remain release gates.
+
+## Temporary carrier inventory outages
+
+A temporary REST verification failure (408, 429, 500, 502, 503, 504 or timeout)
+may use successful verification evidence from the last 24 hours. This covers
+number selection, programmable outbound readiness and SIP trunk verification;
+SIP signaling itself still has to succeed independently.
+
+Evidence is install-local in SQLite, scoped to project, carrier binding,
+provider, current credential digest and the exact outbound resource/config.
+It contains no API keys or SIP passwords. Ownership must come from a full
+successful inventory and the number must still be configured locally. A route
+or caller ID alone cannot establish proof. A new installation or upgrade must
+complete a healthy verification before this fallback becomes available.
+
+Current bindings, credentials, per-number/provider/account admission, drain
+state, user identity and grants remain mandatory. A successful inventory that
+excludes or disables a number rejects it and replaces prior ownership evidence.
+Permanent/unknown verification errors revoke the affected evidence. Fresh
+profile disablement also overrides older readiness even if a subsequent
+application lookup fails. Failed reads cannot renew evidence; timestamped
+revocations prevent older in-flight successes from restoring it. Expired rows
+are removed in indexed batches of at most 64 when evidence changes, with no
+background poll or media-path work.
+
+During an outage, provider status remains `unavailable` and warnings retain the
+failed live check. The top-level inventory is `partial` when it contains eligible
+configured fallback numbers, and `unavailable` when no verified fallback is
+usable. This keeps existing generic clients working without client-specific
+exceptions. Outbound `ready` describes eligibility to attempt placement, while
+`outbound_verification.status: "previously_verified"`, UTC
+`verified_at`/`expires_at` and `outbound_fallback_allowed` explicitly distinguish
+cached evidence from fresh verification. Webhook health remains `unverified`.
+
+Current permissions and admission are enforced again at placement, independently
+of the inventory response. A failed inventory request with no valid evidence
+stays unavailable. Dial commands themselves are never automatically retried by
+this fallback. No CRM or other consuming application's changes are required.

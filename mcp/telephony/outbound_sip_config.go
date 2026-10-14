@@ -381,6 +381,11 @@ func (a *App) configureOutboundTransport(ctx *sdk.AppCtx, args map[string]any, c
 	if err != nil {
 		return nil, err
 	}
+	if transport == inboundTransportSIPDirect {
+		if err = a.saveCarrierVerification(project, int64(connection), creds, "ready", sipVerificationKey(cfg), carrierOutboundReady(), time.Now()); err != nil {
+			return nil, err
+		}
+	}
 	v, _, _, err := a.outboundTransport(project, int64(connection), number)
 	return map[string]any{"ok": err == nil, "outbound_transport": v, "applies_to": "new_calls"}, err
 }
@@ -421,7 +426,7 @@ func (a *App) resolveOutboundSIPCredentials(ctx *sdk.AppCtx, project string, bou
 	}
 	request, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	if err = verifyOutboundSIPProvider(request, creds, cfg); err != nil {
+	if err = a.verifySIPWithEvidence(request, ctx, project, bound.ConnectionID, creds, cfg); err != nil {
 		return nil, true, err
 	}
 	resolved := *creds
