@@ -35,7 +35,7 @@ func (r *sipPlayoutRecovery) consider(b *rtpJitterBuffer, seq uint16, ts uint32,
 	// backlog or a burst cannot qualify just because its last interval is small.
 	arrivalElapsed := at.Sub(r.since)
 	sourceElapsed := time.Duration(int32(ts-r.firstTS)) * time.Second / 8000
-	if arrivalElapsed < time.Second || r.count < 40 || (arrivalElapsed-sourceElapsed).Abs() > 20*time.Millisecond {
+	if arrivalElapsed < time.Second || r.count < 40 || (arrivalElapsed-sourceElapsed).Abs() > 3*time.Millisecond {
 		return false
 	}
 	// Invalidate every retained raw/decoded/PLC segment before rebasing. The

@@ -129,20 +129,23 @@ func TestSIPRecoverySettingsAreScopedAndCopied(t *testing.T) {
 }
 
 func TestSIPRecoveryWindowRejectsDrainingBacklog(t *testing.T) {
-	enabled := true
-	b := newRTPJitterBufferWithPolicy(sipPlaybackPolicy{Resynchronize: &enabled})
-	start := time.Unix(100, 0)
-	// Even with a falsely constant age estimate and individually modest 5ms
-	// interval error, physical delivery outruns source time across one second.
-	// Recovery must not flush/relabel this old backlog as fresh live audio.
-	for i := 0; i < 200; i++ {
-		at := start.Add(time.Duration(i) * 15 * time.Millisecond)
-		if b.recovery.consider(b, uint16(i), uint32(i*160), at, at, 350*time.Millisecond, 160) {
-			t.Fatal("backlog draining triggered a timeline rebase")
-		}
-	}
-	if b.recovery.recoveries != 0 {
-		t.Fatal("backlog was rebased")
+	for _, interval := range []time.Duration{15 * time.Millisecond, 19800 * time.Microsecond} {
+		t.Run(interval.String(), func(t *testing.T) {
+			enabled := true
+			b := newRTPJitterBufferWithPolicy(sipPlaybackPolicy{Resynchronize: &enabled})
+			start := time.Unix(100, 0)
+			// A misleading constant age and individually modest interval error cannot
+			// hide physical delivery outrunning source time across the complete window.
+			for i := 0; i < 200; i++ {
+				at := start.Add(time.Duration(i) * interval)
+				if b.recovery.consider(b, uint16(i), uint32(i*160), at, at, 350*time.Millisecond, 160) {
+					t.Fatal("backlog draining triggered a timeline rebase")
+				}
+			}
+			if b.recovery.recoveries != 0 {
+				t.Fatal("backlog was rebased")
+			}
+		})
 	}
 }
 

@@ -88,6 +88,33 @@ jobs:
             /tmp/telephony-long-recordings.log
             /tmp/telephony-long-recordings.json
             /tmp/telephony-chromium.log
+  browser-outages:
+    name: Browser long-outage scenarios
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/telephony/go.mod
+          cache-dependency-path: mcp/telephony/go.sum
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.13'
+      - run: bun install --frozen-lockfile
+        working-directory: mcp/telephony
+      - run: bunx --no-install playwright install --with-deps chromium
+        working-directory: mcp/telephony
+      - name: Packaged WebRTC and PCM recover past transport budget and lease expiry
+        run: go test -tags integration -run '^TestTier2HeadlessBrowserLongNetworkOutages$' -count=1 -timeout 8m -v . > /tmp/telephony-browser-outages.log 2>&1
+        working-directory: mcp/telephony
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: telephony-browser-outages
+          path: /tmp/telephony-browser-outages.log
   native-opus:
     name: Bundled Opus (${{ matrix.runner }})
     strategy:
@@ -187,7 +214,7 @@ jobs:
       matrix:
         include:
           - group: media
-            pattern: 'Test(ProductionAudioScenario|SIPControlledPlayout|SIPRecoveryHold|SIPLiveAdmission|SIPProcessingDrops|SIPReceiveEvidence|RTCSocket|RTCObservedUDP|RTCLinux|RTCRelease|RTCTail|MicrophoneSource|SIPBridgePreparation|SIPHumanAnswerPrepares|SIPPlayback|SIPClockFitEvidence|SIPClockLowerEnvelope|SIPClockRecoveryShort|SIPClockRecoveryDelivery|SIPIngressAndConsumer|SIPFreshPacketAfter|SIPStartupReserve|SIPDecodedPartial|SIPKernelArrival|SIPEarlyReserve|SIPLinux|CarrierStream|CarrierEvidence|CarrierRecovery|SIPTelemetry)'
+            pattern: 'Test(ProductionAudioScenario|SIPRecoveryWindow|SIPControlledPlayout|SIPRecoveryHold|SIPLiveAdmission|SIPProcessingDrops|SIPReceiveEvidence|RTCSocket|RTCObservedUDP|RTCLinux|RTCRelease|RTCTail|MicrophoneSource|SIPBridgePreparation|SIPHumanAnswerPrepares|SIPPlayback|SIPClockFitEvidence|SIPClockLowerEnvelope|SIPClockRecoveryShort|SIPClockRecoveryDelivery|SIPIngressAndConsumer|SIPFreshPacketAfter|SIPStartupReserve|SIPDecodedPartial|SIPKernelArrival|SIPEarlyReserve|SIPLinux|CarrierStream|CarrierEvidence|CarrierRecovery|SIPTelemetry)'
           - group: lifecycle
             pattern: 'Test(GuardedAttachment|BrowserCurrentBuffer|Efficiency|RoutingDispatcher|ImmediateDecision|RingLeg|RingGroup|AICallPolicy|SoftphoneAttachment|RTCRelay|SoftphoneStartup|SIPStartupCodec|SIPDialogTLS|SIPOutboundEarly|SIPOutboundFresh|SIPBYEFailure|NotificationOutbox|RTCIngressEvidence|ProxyCallIdentity|ProxyIdentityRetained|AutomaticOutboundSIP|TelephonyExclusiveActivation|SIPExclusiveActivation|GenericOutboundSIP|OutboundSIP|DIDWWOutbound|Telnyx.*SIP|TelnyxProvisioning|DirectSIPCarrierSetup|SIPAnsweredDialog|SIPMissingInitialACK|SIPRefresh|LocalSIP|LocalMediaSettings|SIPRuntimeTransport|SIPResourceCleanup|SIPNativeHold|SIPOutboundDTMF|SIPTransportSave|SIPRetirement|SIPTwilioDetach|SIPAIActivation|SIPRouteAccount|SIPExternalOffer|SelectingDirectSIP|LocalCloseTimeout)'
     env:

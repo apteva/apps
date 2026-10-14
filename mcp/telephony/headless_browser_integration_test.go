@@ -34,7 +34,13 @@ import (
 // Chromium executes the actual app-served SDK bundle, AudioWorklet and Worker.
 // Only the platform gateway and carrier are fixtures; HTTP/WS and Telephony are real.
 func TestTier2HeadlessBrowser(t *testing.T) {
-	for _, surface := range []string{"headless", "headless-webrtc-turn-recovery", "headless-webrtc-turn-recovery-90", "headless-pcm-recovery-120", "headless-listener-webrtc", "headless-listener-webrtc-24k", "headless-listener-auto", "headless-coaching-512k", "headless-coaching-jitter", "panel", "application-user"} {
+	for _, surface := range []string{"headless", "headless-webrtc-turn-recovery", "headless-listener-webrtc", "headless-listener-webrtc-24k", "headless-listener-auto", "headless-coaching-512k", "headless-coaching-jitter", "panel", "application-user"} {
+		t.Run(surface, func(t *testing.T) { runHeadlessBrowser(t, surface) })
+	}
+}
+
+func TestTier2HeadlessBrowserLongNetworkOutages(t *testing.T) {
+	for _, surface := range []string{"headless-webrtc-turn-recovery-90", "headless-pcm-recovery-120"} {
 		t.Run(surface, func(t *testing.T) { runHeadlessBrowser(t, surface) })
 	}
 }
