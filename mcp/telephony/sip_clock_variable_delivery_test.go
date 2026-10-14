@@ -68,6 +68,11 @@ func TestSIPClockVariableDeliveryRegression(t *testing.T) {
 				before.LateMS = float64(old.lateDroppedSamples) / 8
 				before.ExpiredMS = float64(old.expiredSamples) / 8
 				before.OverflowMS = float64(old.overflowSamples) / 8
+				before.MaxAgeMS = old.maxDeliveryAgeMS
+				before.EstimatedPPM = old.driftPPM
+				before.Updates = old.clock.updates
+				before.RateRejected = old.clock.rateRejected
+				before.PhaseWithheld = old.clock.phaseRejected
 				results = append(results, before, r)
 				if condition == "drift_and_jitter" && before.LateMS < 600000 {
 					t.Fatalf("reference no longer reproduces released defect: %+v", before)
