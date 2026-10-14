@@ -650,7 +650,7 @@ func (a *App) sampleAudioHealth(row *callRow, h *softphoneHub, w *websocketWrite
 	}
 	if b.MediaTransport == "webrtc" {
 		observations[1].Counter += float64(s.WebRTC.OutboundDroppedMS + s.WebRTC.PacingSkippedMS)
-		observations[2].Counter += float64(s.WebRTC.IngressRejectedPackets + s.WebRTC.IngressQueueDrops + s.WebRTC.DecodeErrors)
+		observations[2].Counter += float64(s.WebRTC.IngressDiscardedMS + s.WebRTC.IngressRejectedPackets + s.WebRTC.IngressQueueDrops + s.WebRTC.DecodeErrors)
 		if b.WebRTC != nil {
 			observations[1].Bad = b.WebRTC.JitterBufferMS > 320
 			observations[1].Counter += b.WebRTC.PacketsLost + b.WebRTC.PacketsDiscarded

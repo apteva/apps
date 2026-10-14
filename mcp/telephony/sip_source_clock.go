@@ -54,7 +54,8 @@ func (c *sipSourceClock) observe(b *rtpJitterBuffer, ts uint32, now time.Time) {
 	// backlog as clock drift. Keep the original reference and calibrated rate,
 	// and rebuild frequency observations on the new side of the step.
 	step := now.Sub(c.best.at) - time.Duration(int32(ts-c.best.ts))*time.Second/8000
-	if step.Abs() > 160*time.Millisecond {
+	stepLimit := time.Duration(min(160, b.policy.MaxAgeMS*4/5)) * time.Millisecond
+	if step.Abs() > stepLimit {
 		c.record(sipClockFit{At: now.UTC(), Method: "delivery_step", Reason: "reference_retained", AppliedPPM: b.driftPPM, PhaseMS: float64(step) / float64(time.Millisecond)})
 		c.windowAt, c.best = now, q
 		c.head, c.count, c.historyHead, c.historyCount = 0, 0, 0, 0

@@ -144,3 +144,23 @@ func TestSIPClockTwoHourVariableDelivery(t *testing.T) {
 		}
 	}
 }
+
+func TestSIPClockDelayProtectionUsesConfiguredAgeLimit(t *testing.T) {
+	for _, age := range []int{120, 160, 200} {
+		b := newRTPJitterBufferWithPolicy(sipPlaybackPolicy{TargetMS: 60, MaxTargetMS: 60, CapacityMS: age, MaxAgeMS: age})
+		start := time.Unix(100, 0)
+		payload := make([]byte, 160)
+		for i := 0; i < 60000; i++ {
+			delay := time.Duration(0)
+			if i >= 30000 {
+				delay = time.Duration(age+40) * time.Millisecond
+			}
+			at := start.Add(time.Duration(i)*20*time.Millisecond + delay)
+			b.pushRTP(uint16(i), payload, uint32(i*160), at)
+			b.popAt(at)
+		}
+		if b.lateDroppedSamples < 28000*160 {
+			t.Errorf("configured age %dms: genuine backlog became fresh (late %.0fms)", age, float64(b.lateDroppedSamples)/8)
+		}
+	}
+}

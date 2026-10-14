@@ -297,3 +297,39 @@ func TestRTCKernelEvidenceDoesNotMoveArrivalClock(t *testing.T) {
 		t.Fatal("socket incident timing missing", s)
 	}
 }
+
+func TestRTCCaptureDiscardsVisibleToOperatorsInCorrectDirection(t *testing.T) {
+	rtcTestCtx(t)
+	app := &App{installID: 42}
+	insertSoftphoneCall(t, app, "in-progress")
+	b := browserAudioDiagnostics{MediaTransport: "webrtc", Server: &serverAudioDiagnostics{WebRTC: rtcMediaSnapshot{
+		IngressDiscardedMS: 60, CaptureMaxQueueMS: 140,
+		Ingress: rtcIngressSnapshot{KernelTimestampPackets: 10, SocketDropsAvailable: true, SocketDrops: 2, MaxSocketWaitMS: 70, MaxPionWaitMS: 30},
+	}}}
+	if err := app.db().updateBrowserAudioDiagnostics("call-soft-1", b); err != nil {
+		t.Fatal(err)
+	}
+	row, err := app.db().findCall("call-soft-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := summarizeAudioDashboard(row)
+	if s.Metrics["server_webrtc_ingress_discarded_ms"] != 60 || s.Metrics["server_webrtc_capture_max_queue_ms"] != 140 || s.Metrics["browser_ingress_kernel_socket_wait_ms"] != 70 || s.Metrics["browser_ingress_pion_wait_ms"] != 30 || s.Metrics["browser_ingress_socket_drops"] != 2 {
+		t.Fatal("operator evidence missing", s.Metrics)
+	}
+	if !containsString(s.Stages, "browser_to_telephony") || containsString(s.Stages, "telephony_to_browser") {
+		t.Fatal("microphone discard hidden or called playback loss", s.Stages)
+	}
+	b.Server.WebRTC.Ingress = rtcIngressSnapshot{}
+	if err := app.db().updateBrowserAudioDiagnostics("call-soft-1", b); err != nil {
+		t.Fatal(err)
+	}
+	row, err = app.db().findCall("call-soft-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s = summarizeAudioDashboard(row)
+	if _, ok := s.Metrics["browser_ingress_socket_drops"]; ok {
+		t.Fatal("unsupported socket evidence reported zero loss")
+	}
+}
