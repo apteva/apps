@@ -69,7 +69,7 @@ Repeat with `sqlite` and `pebble`, using separate output files. The test refuses
 - SQLite raw samples (local historical artifact: `database-huge-aggregates-2026-10-13/sqlite-1000000.json`)
 - Pebble raw samples (local historical artifact: `database-huge-aggregates-2026-10-13/pebble-1000000.json`)
 - AptevaDB raw samples (local historical artifact: `database-huge-aggregates-2026-10-13/aptevadb-1000000.json`)
-- [Benchmark source](engine/huge_aggregate_benchmark_test.go)
+- [Benchmark source](../engine/huge_aggregate_benchmark_test.go)
 
 ## Engine versus adapter follow-up
 

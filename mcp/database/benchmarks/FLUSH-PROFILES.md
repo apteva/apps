@@ -62,7 +62,7 @@ The single-insert results are comparable when each engine requests a full flush.
 
 Fixtures use fixed-width IDs, a numeric amount, 128-byte note and service metadata, with one primary unique index and no secondary indexes. These driver results are distinct from the earlier million-row grouped schema. Timing processes ran sequentially after compile/test/race work finished. Hardware: Apple M1 Pro, macOS arm64, 10 logical CPUs, 16 GiB RAM, Go 1.25.1, CGO disabled. Background desktop activity was present. This is a local warmed-fixture comparison, not a cold-storage or production capacity guarantee.
 
-[Ordinary raw samples](results/database-flush-profiles-2026-10-14/ordinary.json) · [Full-flush raw samples](results/database-flush-profiles-2026-10-14/full.json) · [All medians/ranges/trial values](results/database-flush-profiles-2026-10-14/summary.json) · [Run order, hardware and binary hash](results/database-flush-profiles-2026-10-14/conditions.json).
+[Ordinary raw samples](https://github.com/apteva/apps/releases/tag/database/v0.5.0) · [Full-flush raw samples](https://github.com/apteva/apps/releases/tag/database/v0.5.0) · [All medians/ranges/trial values](results/database-flush-profiles-2026-10-14/summary.json) · [Run order, hardware and binary hash](results/database-flush-profiles-2026-10-14/conditions.json).
 
 ## Reproduction
 
@@ -76,6 +76,6 @@ GOWORK=off GOTOOLCHAIN=local CGO_ENABLED=0 \
  go test ./engine -run '^TestNativeDriverComparison$' -v -count=1 -timeout=20m
 ```
 
-For full flushes, select `NATIVE_COMPARISON_ADAPTERS=sqlite,pebble,aptevadb`, `NATIVE_COMPARISON_APTEVADB_SYNC_MODE=full` and `NATIVE_COMPARISON_SQLITE_FULLFSYNC=1`, with a different output file. The [saved sequential runner](results/database-flush-profiles-2026-10-14/run.py) uses the precompiled benchmark binary. `DB_HUGE_AGG_SYNC_MODE` provides the same selection for the optional million-row aggregate harness; those read workloads were not rerun because this change selects the write flush primitive and leaves their query implementations unchanged.
+For full flushes, select `NATIVE_COMPARISON_ADAPTERS=sqlite,pebble,aptevadb`, `NATIVE_COMPARISON_APTEVADB_SYNC_MODE=full` and `NATIVE_COMPARISON_SQLITE_FULLFSYNC=1`, with a different output file. The [saved sequential runner](https://github.com/apteva/apps/releases/tag/database/v0.5.0) uses the precompiled benchmark binary. `DB_HUGE_AGG_SYNC_MODE` provides the same selection for the optional million-row aggregate harness; those read workloads were not rerun because this change selects the write flush primitive and leaves their query implementations unchanged.
 
 Source/binary checksums, logs and the standalone sidecar are in [the result directory](results/database-flush-profiles-2026-10-14). Existing installed data was not opened or upgraded.

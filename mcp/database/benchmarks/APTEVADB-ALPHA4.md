@@ -74,7 +74,7 @@ GOWORK=off GOTOOLCHAIN=local CGO_ENABLED=0 \
  go test -tags aggregatebench ./engine -run '^TestHugeAggregateBenchmark$' -v -count=1 -timeout=20m
 ```
 
-Repeat with sqlite/pebble and fresh output files. The [saved runner](results/database-alpha4-2026-10-13/run-aggregates.py) records fixture order and runs precompiled binaries sequentially.
+Repeat with sqlite/pebble and fresh output files. The [saved runner](https://github.com/apteva/apps/releases/tag/database/v0.5.0) records fixture order and runs precompiled binaries sequentially.
 
 ```sh
 GOWORK=off GOTOOLCHAIN=local CGO_ENABLED=0 \
@@ -82,7 +82,7 @@ GOWORK=off GOTOOLCHAIN=local CGO_ENABLED=0 \
  go test ./engine -run '^TestNativeDriverComparison$' -v -count=1 -timeout=20m
 ```
 
-Raw data, logs, checksums, compiled binaries and upgrade probes are in [the result directory](results/database-alpha4-2026-10-13). The exact measured executable is saved as `aggregate-bench-measured.test`; the current `aggregate-bench.test` was rebuilt after removal of two unused local-variable lines in the reference harness. Its measured source file is also preserved. The [direct-driver samples](results/database-alpha4-2026-10-13/direct-drivers-100000.json) preserve every trial.
+Raw data, logs, checksums, compiled binaries and upgrade probes are in [the result directory](results/database-alpha4-2026-10-13). The exact measured executable is saved as `aggregate-bench-measured.test`; the current `aggregate-bench.test` was rebuilt after removal of two unused local-variable lines in the reference harness. Its measured source file is also preserved. The [direct-driver samples](https://github.com/apteva/apps/releases/tag/database/v0.5.0) preserve every trial.
 
 ## Million-row sample ranges
 
