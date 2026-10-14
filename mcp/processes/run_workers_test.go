@@ -59,7 +59,7 @@ func TestRunWorkerClaimsReuseAcrossGenericSteps(t *testing.T) {
 	if len(f.events) != 2 || f.events[1].ThreadID != strings.TrimPrefix(actor, "agent:7:") {
 		t.Fatal("next step returned to coordinator", f.events)
 	}
-	if strings.Contains(f.events[1].Message.(string), "Shared procedure") || len(f.events[1].Message.(string)) > 800 {
+	if strings.Contains(f.events[1].Message.(string), "Shared procedure") || len(f.events[1].Message.(string)) > 1600 {
 		t.Fatal("repeated full context")
 	}
 	// Recreate the app receiver against the same storage, as after a sidecar restart.

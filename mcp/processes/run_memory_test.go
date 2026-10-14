@@ -287,46 +287,34 @@ func TestOversizedWorkerReadRetainsAllRequiredEvidence(t *testing.T) {
 	if len(b) > detailBudget || response["complete"] != false {
 		t.Fatal("worker read not bounded", len(b))
 	}
+	storedSteps, readErr := a.steps(r.ID)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	legacyPayload := responseJSON(t, map[string]any{"instructions": d.Instructions, "dependencies": dependencyEvidence(storedSteps[29], storedSteps)})
+	t.Logf("30-step legacy chain: ancestor/shared context alone %d bytes; compact worker response %d bytes; deeper receipts recover by one named read", len(legacyPayload), len(b))
 	deps := response["dependencies"].(map[string]any)
-	if len(deps) != 29 {
-		t.Fatal("ancestor manifest incomplete")
+	if len(deps) != 1 {
+		t.Fatal("claim copied transitive ancestor manifests")
 	}
-	for _, raw := range deps {
-		dep := raw.(map[string]any)
-		args := dep["evidence"].(map[string]any)["reread"].(map[string]any)["args"].(map[string]any)
-		page := mcpCall(t, a, p, "run_evidence", args)
-		if !strings.Contains(page["data"].(string), "operator") { // first chunk may be occupied by definition; reconstruct all chunks below
-			var joined strings.Builder
-			for {
-				joined.WriteString(page["data"].(string))
-				if page["complete"] == true {
-					break
-				}
-				page = mcpCall(t, a, p, "run_evidence", page["next"].(map[string]any)["args"].(map[string]any))
-			}
-			var s StepRun
-			if e = json.Unmarshal([]byte(joined.String()), &s); e != nil || s.UpdatedBy != "operator" || !strings.Contains(s.Output, "9007199254740993") {
-				t.Fatal("approval/evidence lost")
-			}
-		}
+	dep := deps["step28"].(map[string]any)
+	if dep["deferred"] != true || dep["output"] != "" {
+		t.Fatal("legacy oversized output copied or truncated")
 	}
-	ref := response["context_evidence"].(map[string]any)["reread"].(map[string]any)
-	page := mcpCall(t, a, p, "run_evidence", ref["args"].(map[string]any))
-	var definitionJSON strings.Builder
-	for {
-		definitionJSON.WriteString(page["data"].(string))
-		if page["complete"] == true {
-			break
-		}
-		page = mcpCall(t, a, p, "run_evidence", page["next"].(map[string]any)["args"].(map[string]any))
+	recovered := mcpCall(t, a, p, "step_read", dep["reread"].(map[string]any)["args"].(map[string]any))
+	if !strings.Contains(recovered["dependency"].(map[string]any)["output"].(string), "9007199254740993") {
+		t.Fatal("targeted legacy output lost exact identity")
 	}
-	var frozen struct {
-		Instructions string `json:"instructions"`
-		Steps        []Step `json:"steps"`
+	refs := response["context_refs"].(map[string]any)
+	policy := mcpCall(t, a, p, "step_read", refs["instructions"].(map[string]any)["args"].(map[string]any))
+	if policy["instructions"] != d.Instructions {
+		t.Fatal("targeted complete frozen policy changed")
 	}
-	if e = json.Unmarshal([]byte(definitionJSON.String()), &frozen); e != nil || frozen.Instructions != d.Instructions || len(frozen.Steps) != 0 {
-		t.Fatal("frozen policy reference broken", e)
+	ancestor := mcpCall(t, a, p, "step_read", map[string]any{"run_id": r.ID, "step_id": all[29].ID, "target": "dependency", "dependency_key": "step0"})
+	if ancestor["dependency"].(map[string]any)["output"] != strings.Repeat("exact😀9007199254740993 ", 700) {
+		t.Fatal("named ancestor not recovered")
 	}
+
 }
 
 func TestHistoryExportGroupsAndValidation(t *testing.T) {

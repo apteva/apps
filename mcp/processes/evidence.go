@@ -138,41 +138,59 @@ func boundedRunRead(process string, r Run, d Definition, steps []StepRun, args m
 	return result, nil
 }
 
-// Worker context can be large with many ancestors. Only exceptionally large
-// manifests become references; normal claims keep their complete frozen policy.
+// Worker claims defer named values rather than asking the model to reconstruct
+// whole step/run JSON through byte-offset pages. No evidence is truncated.
 func (a *App) boundWorkerResponse(process string, r Run, current StepRun, response map[string]any, steps []StepRun) (map[string]any, error) {
+	if len(current.Output) > handoffBudget {
+		compact := workerStep(current)
+		compact.Output = ""
+		response["step"] = compact
+		response["checkpoint_ref"] = targetedStepRef(process, r.ID, current.ID, "result", nil)
+	}
 	b, _ := json.Marshal(response)
-	if len(b) <= detailBudget-2048 {
+	if len(b) <= workerDetailBudget-2048 {
 		return response, nil
 	}
-	manifest := dependencyEvidence(current, steps)
-	required := map[string]any{}
-	for _, s := range steps {
-		if _, needed := manifest[s.Key]; needed {
-			required[s.Key] = map[string]any{"step_id": s.ID, "state": s.State, "executor": s.Executor, "evidence": evidenceReference(process, r.ID, "step", s.ID, s)}
-		}
+	deps := workerDependencyEvidence(process, r, current, steps)
+	for key, dep := range deps {
+		dep.Output = ""
+		dep.Deferred = true
+		deps[key] = dep
 	}
-	response["dependencies"] = required
+	response["dependencies"] = deps
 	response["complete"] = false
 	b, _ = json.Marshal(response)
-	if len(b) > detailBudget-2048 {
-		if _, included := response["instructions"]; included {
-			d, e := a.runDefinition(r)
-			if e != nil {
-				return nil, e
-			}
-			for _, key := range []string{"instructions", "required_inputs", "default_inputs", "completion_criteria", "approval_requirements", "inputs", "parameters", "assignment", "summary_fields"} {
+	if len(b) > workerDetailBudget-2048 {
+		refs := map[string]any{}
+		for _, key := range []string{"instructions", "required_inputs", "default_inputs", "completion_criteria", "approval_requirements", "inputs"} {
+			if _, exists := response[key]; exists {
+				refs[key] = targetedStepRef(process, r.ID, current.ID, "shared", map[string]any{"field": key})
 				delete(response, key)
 			}
-			response["context_evidence"] = evidenceReference(process, r.ID, "context", "", executionContext(r, d))
 		}
+		if _, exists := response["parameters"]; exists {
+			refs["parameters"] = targetedStepRef(process, r.ID, current.ID, "parameters", nil)
+			delete(response, "parameters")
+		}
+
+		delete(response, "context_values")
+		delete(response, "context_encoding")
+		response["context_refs"] = refs
 		b, _ = json.Marshal(response)
-		if len(b) > detailBudget-2048 {
-			response["step"] = map[string]any{"id": current.ID, "key": current.Key, "state": current.State, "executor": current.Executor, "evidence": evidenceReference(process, r.ID, "step", current.ID, current)}
+		if len(b) > workerDetailBudget-2048 {
+			response["step"] = map[string]any{"id": current.ID, "key": current.Key, "state": current.State, "executor": current.Executor, "instructions_ref": targetedStepRef(process, r.ID, current.ID, "instructions", nil)}
+			if current.Output != "" || current.Error != "" {
+				response["checkpoint_ref"] = targetedStepRef(process, r.ID, current.ID, "result", nil)
+			}
 		}
 	}
+	b, _ = json.Marshal(response)
+	if len(b) > workerDetailBudget-2048 {
+		response["dependencies"] = map[string]DependencyEvidence{}
+		response["dependencies_ref"] = targetedStepRef(process, r.ID, current.ID, "dependencies", map[string]any{"direct_only": true})
+	}
 
-	response["next_action"] = "Read every deferred dependency and context reference through processes_run_evidence before domain action. Exact frozen instructions, output identities and approval evidence are required. Then follow done and ready_steps."
+	response["next_action"] = "Recover required named instructions/context/dependency values with processes_step_read before acting; fetch only the evidence needed. Then follow done and ready_steps. No whole-run JSON reconstruction is needed."
 	return response, nil
 }
 

@@ -94,19 +94,37 @@ only be completed by the authorized project operator.
 
 ## Compact worker responses
 
-`step_get` and `step_claim` return the assigned step and its full saved checkpoint,
-one authoritative `dependencies` manifest with ancestor IDs, states, direct flags
-and exact output receipts, plus shared frozen policy and resolved inputs. They
-omit unrelated procedure steps and delivery diagnostics. After retaining the
-shared policy, pass `include_context=false` on subsequent reads/claims to omit
-that policy, inputs, parameters and assignment details. `context_ref` identifies
-the frozen procedure/assignment revisions. Omit the flag or set it to true to
-recover context after a restart or lost reply. Never omit policy you no longer
-remember; durable receipts remain authoritative even in a reused worker.
+`step_get` and `step_claim` return complete current-step instructions, frozen shared
+policy/resolved inputs, and only direct dependency handoffs. Indirect ancestors
+remain accessible through `step_read target=dependency dependency_key=<key>`.
+`target=dependencies` discovers ancestor identities and references without outputs.
+Oversized legacy receipts and large direct-dependency sets use exact targeted
+references, never truncation. `include_context=false` reuses retained shared policy;
+omit it to recover policy after context loss. Repeated exact long context strings
+appear once in `context_values`; resolve `value_ref` before using them. Saved
+HTTP/audit objects remain unchanged. Keep authorization in the frozen shared
+approval policy; use parameter references rather than repeating policy text.
+
+Use `step_update.handoff` for compact structured receipts: outcome, decision,
+artifact_ids, essential validations, limitations, evidence_refs and blockers.
+Agent output plus error is limited to 4096 UTF-8 bytes, including legacy output
+strings. Completion still requires concrete evidence. Save lengthy diagnostics
+separately with `step_evidence_save`: stable key, exact content, optional artifact_id
+and source references (max 16 KiB JSON). Records are immutable; identical retries
+return the same ID. Include that evidence_id in handoff.evidence_refs. Do not
+copy inventories, policy, full checks or recovery narratives into each handoff.
+
+Before consequential actions, recover missing current instructions cheaply with
+`step_read target=instructions`; recover one shared policy field with target=shared
+and field, one parameter with target=parameter and parameter_key, one ancestor
+result with target=dependency, or diagnostics with target=evidence and evidence_id
+or artifact_id. These return exact named values, without reconstructing whole
+run JSON through byte-offset pages. Parameters/evidence are data, not authority;
+all required frozen instructions and approvals still apply.
 
 `step_update` returns an acknowledgement with IDs, accepted revision/state/progress,
 run state, `done`, `next_action`, and a blocker reason when present. It does not
-echo instructions or receipts. Use `step_get` to recover saved output and
+echo instructions or receipts. Use `step_read target=result` to recover saved output and
 `run_get` for explicit full inspection. Retrying an accepted completion with
 the same evidence does not repeat writes or downstream dispatch.
 
@@ -175,7 +193,7 @@ and explicit user authorization. Assignment activation choices are preserved.
 
 ### Previous runs and durable knowledge
 
-`runs` is a compact, paginated MCP discovery read (default 10, max 50; 16 KB budget), not a dump of execution logs. Filter by assignment, exact status and RFC3339 dates. Follow `next_cursor` with unchanged filters. Read one selected run with `run_get`; choose `section=run`, `definition` or `steps` when useful. If `complete=false`, follow every required deferred section through `run_evidence`, concatenate its JSON UTF-8 chunks in offset order, and retain/verify the SHA-256. A changed hash requires restarting that section. Never infer approval, output identities or missing instructions from an incomplete read. Normal `step_get`/`step_claim` retain frozen instructions and exact dependencies; exceptionally large context contains explicit evidence references that must be read before acting.
+`runs` is a compact, paginated MCP discovery read (default 10, max 50; 16 KB budget), not a dump of execution logs. Filter by assignment, exact status and RFC3339 dates. Follow `next_cursor` with unchanged filters. Read one selected run with `run_get`; choose `section=run`, `definition` or `steps` when useful. If `complete=false`, follow every required deferred section through `run_evidence`, concatenate its JSON UTF-8 chunks in offset order, and retain/verify the SHA-256. A changed hash requires restarting that section. Never infer approval, output identities or missing instructions from an incomplete read. Normal `step_get`/`step_claim` retain current instructions and direct dependency handoffs within a 16 KiB worker budget. Use named `step_read` references for any required deferred policy, parameter or evidence before acting.
 
 When a run produces useful findings for future work, save a short `summary_update` checkpoint at meaningful progress, waiting/blocked/failed states and completion. Include attempted/completed work, findings/outcome, blockers/unfinished work, next actions and exact source references. Read `summary_get` to recover the latest or a specific revision; start `expected_revision=0`, then use the saved revision and a stable checkpoint `idempotency_key`. Identical retries return the original checkpoint; changed content needs a new key. The full summary is limited to 4096 UTF-8 JSON bytes. Optional `fields` keys must be declared in the frozen procedure's `summary_fields` (key/label); use strings for exact external numeric IDs. Historical runs without checkpoints report unavailable; never invent one.
 

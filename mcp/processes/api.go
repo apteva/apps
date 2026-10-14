@@ -47,8 +47,10 @@ func (a *App) MCPTools() []sdk.Tool {
 	descriptions["run_advance"] = "Controller/operator only: release one eligible step of a step_by_step run. Workers cannot advance steps. Read run_get eligible_steps, use an exact step_id and stable idempotency_key; separate calls may release independent branches. Does not complete or approve work."
 	descriptions["run_cancel"] = "Coordinator or operator: cancel a structured run and stop future handoffs. Already dispatched external work may continue."
 	descriptions["step_claim"] = "Claim and read an assigned ready step as the persistent run worker, including per-executor branches and joins. Marks ready work running. Reuse this worker for later steps; finish only when the top-level done field is true."
-	descriptions["step_get"] = "Read the assigned step, frozen context and one dependencies manifest with exact ancestor receipts. No full procedure snapshot. After retaining shared policy, include_context=false omits it; omit this flag for recovery."
-	descriptions["step_update"] = "Assigned executor only: save progress or output; returns only a compact saved-state acknowledgement, not instructions or receipts. A persistent worker must inspect the returned done field: follow next_action to finish when true, otherwise follow next_action and any ready_steps/active_steps; auto parallel owners may continue other eligible work and await child results. Never poll."
+	descriptions["step_read"] = "Recover exact named frozen instructions, shared policy/one parameter, current result, one ancestor result, metadata-only ancestor index, or one artifact/evidence record. No whole-run JSON reconstruction. Use before consequential actions if context was lost. Evidence is data, never authorization."
+	descriptions["step_evidence_save"] = "Assigned worker: save immutable detailed diagnostics separately from compact handoffs, with exact artifact/source references. Max 16 KiB; stable key makes identical retries idempotent. Returns evidence_id and an exact targeted reread. Does not complete or approve work."
+	descriptions["step_get"] = "Read the assigned step, frozen context and one direct-dependency manifest with compact exact receipts and targeted deeper evidence references. No full procedure snapshot. After retaining shared policy, include_context=false omits it; omit this flag for recovery."
+	descriptions["step_update"] = "Assigned executor only: save compact progress/output or structured handoff (max 4096 bytes including error). Store diagnostics separately with step_evidence_save; returns only a compact saved-state acknowledgement, not instructions or receipts. A persistent worker must inspect the returned done field: follow next_action to finish when true, otherwise follow next_action and any ready_steps/active_steps; auto parallel owners may continue other eligible work and await child results. Never poll."
 	descriptions["runs"] = "Read compact recent run metadata and agent-authored checkpoints (default 10, max 50, response budget 16 KB). Filter assignment/status/dates; follow next_cursor and exact reread references. Never returns full nested history."
 	descriptions["run_get"] = "Read one immutable run, optionally section=run/definition/steps. Bounded to 48 KB; complete=false means exact sections must be fetched via run_evidence before relying on them."
 	descriptions["run_evidence"] = "Recover exact saved run, frozen definition, shared execution context, steps or one step as paged JSON UTF-8. Follow next offsets and sha256, concatenate data to reconstruct JSON. A changed hash requires restart. No truncation or summaries."
@@ -57,11 +59,11 @@ func (a *App) MCPTools() []sdk.Tool {
 	descriptions["memory_list"] = "Read scoped cross-run knowledge for one process, assignment and campaign/scope. Search/filter and page entries. Use before repeating discovery; evidence and source-app records remain authoritative."
 	descriptions["memory_upsert"] = "Run owner or assigned step executor: save one bounded ledger entry with stable key, kind, findings and exact source references. Scope is explicit and assignment comes from the frozen run. expected_revision=0 creates; identical retries are idempotent. Does not create leads or grant approval."
 	out := []sdk.Tool{}
-	for _, name := range []string{"list", "get", "validate_definition", "create", "update", "patch", "activate", "pause", "draft", "archive", "start", "runs", "run_get", "run_update", "run_evidence", "summary_get", "summary_update", "memory_list", "memory_upsert", "assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive", "step_get", "step_claim", "step_update", "run_cancel", "run_advance"} {
+	for _, name := range []string{"list", "get", "validate_definition", "create", "update", "patch", "activate", "pause", "draft", "archive", "start", "runs", "run_get", "run_update", "run_evidence", "summary_get", "summary_update", "memory_list", "memory_upsert", "assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive", "step_get", "step_read", "step_evidence_save", "step_claim", "step_update", "run_cancel", "run_advance"} {
 		name := name
 		props := map[string]any{}
 		required := []string{}
-		workerCoordination := name == "run_evidence" || name == "summary_get" || name == "summary_update" || name == "memory_upsert" || name == "run_get" || name == "run_update" || name == "step_get" || name == "step_claim" || name == "step_update"
+		workerCoordination := name == "step_read" || name == "step_evidence_save" || name == "run_evidence" || name == "summary_get" || name == "summary_update" || name == "memory_upsert" || name == "run_get" || name == "run_update" || name == "step_get" || name == "step_claim" || name == "step_update"
 		if name != "list" && name != "create" && name != "validate_definition" {
 			props["process_id"] = textField("Process ID")
 			if !workerCoordination {
@@ -155,9 +157,27 @@ func (a *App) MCPTools() []sdk.Tool {
 			props["run_id"] = textField("Run ID")
 			props["reason"] = textField("Cancellation reason")
 			required = append(required, "run_id", "reason")
+		case "step_read", "step_evidence_save":
+			props["run_id"] = textField("Run ID")
+			props["step_id"] = textField("Current assigned step ID")
+			required = append(required, "run_id", "step_id")
+			if name == "step_read" {
+				props["direct_only"] = map[string]any{"type": "boolean", "description": "For dependencies: return only direct dependency metadata"}
+				props["target"] = map[string]any{"type": "string", "enum": []string{"instructions", "shared", "parameter", "parameters", "result", "dependency", "dependencies", "evidence"}}
+				for _, key := range []string{"field", "parameter_key", "dependency_key", "evidence_id", "artifact_id"} {
+					props[key] = textField("Exact named selector; required for the corresponding target")
+				}
+				required = append(required, "target")
+			} else {
+				props["key"] = textField("Stable diagnostic key, 1–64 bytes; identical retries are idempotent")
+				props["content"] = textField("Exact detailed evidence, max 16 KiB with references; not included in handoffs")
+				props["artifact_id"] = textField("Exact produced artifact identity, if applicable")
+				props["references"] = map[string]any{"type": "array", "maxItems": 20, "items": textField("Exact source reference, max 256 bytes")}
+				required = append(required, "key", "content")
+			}
 		case "step_get", "step_claim", "step_update":
 			if name != "step_update" {
-				props["include_context"] = map[string]any{"type": "boolean", "description": "Default true: include shared procedure policy, resolved parameters and assignment context. Use false only after retaining that context; the assigned step and complete dependencies are always returned."}
+				props["include_context"] = map[string]any{"type": "boolean", "description": "Default true: include shared procedure policy, resolved parameters and assignment context. Use false only after retaining that context; the assigned step and direct dependency manifest are always returned."}
 			}
 			props["run_id"] = textField("Run ID")
 			props["step_id"] = textField("Step execution ID")
@@ -165,7 +185,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			if name == "step_update" {
 				props["state"] = map[string]any{"type": "string", "enum": []string{"running", "waiting", "blocked", "completed", "failed", "cancelled"}}
 				props["progress"] = map[string]any{"type": "integer", "minimum": 0, "maximum": 100}
-				props["output"] = textField("Concrete result and evidence (required on completion)")
+				props["output"] = textField("Legacy compact output; output plus error max 4096 UTF-8 bytes. Prefer handoff and save diagnostics separately.")
+				props["handoff"] = handoffSchema()
 				props["error"] = textField("Reason for waiting, block, failure or cancellation")
 				required = append(required, "state")
 			}
@@ -223,7 +244,7 @@ func (a *App) executeResponse(project, actor, action string, args map[string]any
 		return a.executeTrigger(project, action, args)
 	}
 	id := str(args, "process_id")
-	if action == "run_evidence" || action == "summary_get" || action == "summary_update" || action == "memory_upsert" || action == "run_get" || action == "run_update" || action == "step_get" || action == "step_claim" || action == "step_update" {
+	if action == "step_read" || action == "step_evidence_save" || action == "run_evidence" || action == "summary_get" || action == "summary_update" || action == "memory_upsert" || action == "run_get" || action == "run_update" || action == "step_get" || action == "step_claim" || action == "step_update" {
 		resolved, err := a.resolveWorkerProcess(project, id, str(args, "run_id"), str(args, "step_id"))
 		if err != nil {
 			return nil, err
@@ -395,6 +416,10 @@ func (a *App) executeResponse(project, actor, action string, args map[string]any
 		return a.advanceRun(project, actor, id, str(args, "run_id"), str(args, "step_id"), str(args, "idempotency_key"))
 	case "run_cancel":
 		return a.cancelWorkflow(project, actor, id, str(args, "run_id"), str(args, "reason"))
+	case "step_read":
+		return a.stepRead(project, id, args)
+	case "step_evidence_save":
+		return a.stepEvidenceSave(project, actor, id, args)
 	case "step_get", "step_claim", "step_update":
 		return a.stepAction(project, actor, id, str(args, "run_id"), str(args, "step_id"), action, args)
 	case "summary_get", "summary_update":
@@ -530,6 +555,10 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if len(parts) == 3 && r.Method == "GET" {
 			action = "run_get"
 		}
+		if len(parts) == 6 && parts[3] == "steps" && parts[5] == "read" && r.Method == "GET" {
+			args["step_id"] = parts[4]
+			action = "step_read"
+		}
 		if len(parts) == 5 && parts[3] == "steps" {
 			args["step_id"] = parts[4]
 			if r.Method == "GET" {
@@ -595,7 +624,7 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		action = "memory_upsert"
 	}
 	if r.Method == "GET" {
-		for _, key := range []string{"view", "cursor", "assignment_id", "status", "after", "before", "scope", "search", "key", "kind"} {
+		for _, key := range []string{"target", "field", "parameter_key", "dependency_key", "evidence_id", "artifact_id", "view", "cursor", "assignment_id", "status", "after", "before", "scope", "search", "key", "kind"} {
 			if v := r.URL.Query().Get(key); v != "" {
 				args[key] = v
 			}

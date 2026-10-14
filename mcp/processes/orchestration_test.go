@@ -9,7 +9,7 @@ func TestProcessMainCoordinatorContract(t *testing.T) {
 	a, _, p, r := workflowSetup(t)
 	s := stepBy(t, a, r, "research")
 	got := a.stepContext(p, r, s, []StepRun{s})
-	for _, want := range []string{"assigned to this existing worker", "step_get", "step_update"} {
+	for _, want := range []string{"assigned step ready", "step_get", "step_update"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("step context missing %q: %s", want, got)
 		}
@@ -40,7 +40,7 @@ func TestJoinWaitsForAllPredecessors(t *testing.T) {
 	}
 }
 
-func TestStepReadIncludesDependencyEvidenceAndAncestors(t *testing.T) {
+func TestStepReadIncludesDirectEvidenceAndTargetsAncestors(t *testing.T) {
 	a, _, p, r := workflowSetup(t)
 	finishStep(t, a, p, r, "research", "agent:8:t", "Research evidence", "")
 	finishStep(t, a, p, r, "write", "agent:7:t", "Draft v1", "")
@@ -53,11 +53,15 @@ func TestStepReadIncludesDependencyEvidenceAndAncestors(t *testing.T) {
 	got := raw.(map[string]any)
 	deps := got["dependencies"].(map[string]DependencyEvidence)
 	review := stepBy(t, a, r, "review")
-	if len(deps) != 3 || deps["review"].ID != review.ID || deps["review"].State != "completed" || !deps["review"].Direct {
+	if len(deps) != 1 || deps["review"].ID != review.ID || deps["review"].State != "completed" || !deps["review"].Direct {
 		t.Fatalf("incomplete review evidence: %#v", deps)
 	}
-	if deps["write"].Direct || deps["write"].Output != "Draft v1" || deps["research"].Output != "Research evidence" {
-		t.Fatalf("missing ancestor evidence: %#v", deps)
+	if _, exists := deps["research"]; exists {
+		t.Fatal("ancestor output copied into claim")
+	}
+	recovered, err := a.stepRead(p.ProjectID, p.ID, map[string]any{"run_id": r.ID, "step_id": publish.ID, "target": "dependency", "dependency_key": "research"})
+	if err != nil || recovered.(map[string]any)["dependency"].(DependencyEvidence).Output != "Research evidence" {
+		t.Fatal("targeted ancestor evidence lost", err)
 	}
 	if _, duplicated := got["dependency_outputs"]; duplicated {
 		t.Fatal("worker received duplicate dependency outputs")

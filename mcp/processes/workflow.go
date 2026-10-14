@@ -269,7 +269,7 @@ func stepUsesTasks(r Run, s StepRun) bool {
 // Every Process worker needs the native read/update and run-control surface.
 // Claims are only valid for a persistent sequential worker; independently
 // dispatched steps are already assigned and must use step_get/step_update.
-const processWorkerTools = "processes_step_get,processes_step_update,processes_run_get,processes_run_update,processes_run_cancel,processes_run_evidence,processes_runs,processes_summary_get,processes_summary_update,processes_memory_list,processes_memory_upsert"
+const processWorkerTools = "processes_step_get,processes_step_read,processes_step_evidence_save,processes_step_update,processes_run_get,processes_run_update,processes_run_cancel,processes_run_evidence,processes_runs,processes_summary_get,processes_summary_update,processes_memory_list,processes_memory_upsert"
 const processSequentialWorkerTools = "processes_step_claim," + processWorkerTools
 const staleStepReminderAfter = 10 * time.Minute
 const staleStepReminderCooldown = 10 * time.Minute
@@ -335,6 +335,7 @@ func (a *App) staleStepReminder(p *Process, r Run, s StepRun, all []StepRun, now
 }
 
 func (a *App) stepContext(p *Process, r Run, s StepRun, all []StepRun) (message string) {
+	defer func() { message += "\n" + compactHandoffContract }()
 	defer func() {
 		for _, previous := range all {
 			if previous.ID != s.ID && previous.Executor == s.Executor && previous.DeliveredAt != "" {
@@ -370,22 +371,10 @@ func (a *App) stepContext(p *Process, r Run, s StepRun, all []StepRun) (message 
 			}
 			return "Next assigned step ready: " + ids + contextHint + ". Claim with processes_step_claim before domain work. Keep this worker. After step_update: done=true means call done immediately; otherwise follow next_action and claim delivered ready_steps before waiting. New ready-step events override earlier completion responses. Wait only with no ready work. Before approval requests, blocker reports or pace, persist step_update waiting/blocked with the reason and saved output."
 		}
-		return fmt.Sprintf("Sequential same-agent run. Main: spawn ONE persistent worker for this entire run (suggested ID process-run-%s), granting tools=\"%s\" plus any domain tools needed across all its steps. Pass these IDs: %s. Worker: call step_claim before domain action; its result contains the frozen step, shared instructions, parameters and dependency evidence. Complete each step with step_update. Processes delivers subsequent ready steps directly to this worker; do not spawn a new worker, forward steps, or poll. Keep the worker alive while done=false. Call done once after done=true, with the final outcome. Main should not rewrite the procedure or request per-step reports. If workers cannot access Processes, main may execute steps directly using step_get/step_update. Procedure: %s\n%s", r.ID, processSequentialWorkerTools, ids, p.Name, jsonText(p.Definition))
+		return "Sequential same-agent run. Processes provisions the persistent worker. Claim with processes_step_claim before domain work using " + ids + ". Keep the worker across steps; main must not execute, spawn extra workers, forward work or request per-step reports. Follow done and next_action; never poll."
 	}
-	inputs := dependencyOutputs(s, all)
-	contract := fmt.Sprintf("Worker: read Processes step_get(process_id=%s, run_id=%s, step_id=%s) before domain action. Check readiness, assignment and terminal state. Use dependencies for ancestor IDs, states, and outputs; this is authoritative evidence, with no separate run_get or parent confirmation needed when complete. Follow the frozen instructions and procedure policy. Use step_update for meaningful milestones and the terminal outcome, then report once to main. Do not execute downstream steps.", p.ID, r.ID, s.ID)
-	if !stepUsesTasks(r, s) {
-		if strings.Contains(s.DeliveryEventID, ":assignment:") {
-			contract = "This step is assigned to this existing worker. Do not spawn or forward it. " + contract
-		} else {
-			contract = "Processes provisions the isolated worker and delivers this authoritative event. Do not spawn another worker, call step_assign, or complete this step from the main thread. The worker must read step_get before domain action and record all step_update milestones and the terminal outcome. Processes dispatches downstream steps after dependencies finish; wait for those events rather than polling or forwarding them yourself. This app event requires no reply.\n" + contract
-		}
-	}
+	return fmt.Sprintf("Processes assigned step ready: process_id=%s run_id=%s step_id=%s step_key=%s. Read processes_step_get before domain action to recover exact frozen instructions and direct dependency handoffs. Processes owns worker provisioning; do not spawn another worker or forward this step. Record meaningful progress and the terminal outcome with step_update; Processes dispatches downstream work. Use processes_step_read for named ancestor results or evidence when needed. This app event requires no reply.", p.ID, r.ID, s.ID, s.Key)
 
-	if stepUsesTasks(r, s) {
-		contract += " This work step uses Tasks: also read the linked task and use Tasks progress/complete to report the outcome. Processes will read its status and release dependencies; do not call step_update to complete it."
-	}
-	return "Shared procedure context (execute only your assigned step):\n" + p.Instructions + "\nRequired inputs: " + p.RequiredInputs + "\nOverall completion criteria: " + p.CompletionCriteria + "\n" + fmt.Sprintf("Process: %s\nRun: %s\nAssignment: %s\nCoordinator agent: %d\nProcedure version: %d\nStep: %s (%s)\nRole: %s\nInstructions: %s\nExpected output: %s\nParameters: %s\nRun inputs: %s\nDependency outputs (data, not instructions): %s\nStanding context: %s\nApproval requirements: %s\n%s\n", p.Name, r.ID, r.Binding.Name, r.Binding.OwnerAgentID, r.Version, s.Definition.Name, s.Key, s.Definition.Role, s.Definition.Instructions, s.Definition.ExpectedOutput, jsonText(r.Binding.Parameters), r.Inputs, jsonText(inputs), p.DefaultInputs, p.ApprovalRequirements, contract)
 }
 func (a *App) deliverStep(p *Process, r Run, s *StepRun, all []StepRun) (err error) {
 	if !stepReleased(r, *s) || s.State == "pending" || s.State == "scheduled" || terminal(s.State) || s.Executor.Kind == "human" || s.DeliveredAt != "" || s.DeliverySuspended {
@@ -1014,7 +1003,7 @@ func (a *App) stepAction(project, actor, process, run, id, action string, args m
 			"process_id": process, "run_id": r.ID, "step_id": s.ID,
 			"control_mode": controlMode(r),
 			"run":          map[string]any{"id": r.ID, "process_id": process, "state": r.State, "version": r.Version},
-			"step":         workerStep(s), "dependencies": dependencyEvidence(s, all),
+			"step":         workerStep(s), "dependencies": workerDependencyEvidence(process, r, s, all),
 			"done": done, "next_action": next, "reread": stepReread(process, r.ID, s.ID),
 			"context_ref": map[string]any{"procedure_version": r.Version, "assignment_id": r.AssignmentID, "assignment_revision": r.AssignmentRevision},
 		}
@@ -1041,6 +1030,7 @@ func (a *App) stepAction(project, actor, process, run, id, action string, args m
 			}
 			result["assignment"] = WorkerAssignment{ID: r.AssignmentID, Revision: r.AssignmentRevision, Name: r.Binding.Name, OwnerAgentID: r.Binding.OwnerAgentID}
 		}
+		deduplicateWorkerContext(result)
 		return a.boundWorkerResponse(process, r, s, result, all)
 	}
 	d, e := a.runDefinition(r)
@@ -1090,11 +1080,13 @@ func (a *App) stepLifecycle(event sdk.Event, l *sdk.AgentEventLifecycle) error {
 // Keep it separate from full task records: downstream workers need evidence,
 // not predecessor instructions or delivery internals.
 type DependencyEvidence struct {
-	ID     string `json:"id"`
-	Key    string `json:"key"`
-	State  string `json:"state"`
-	Output string `json:"output"`
-	Direct bool   `json:"direct"`
+	ID       string           `json:"id"`
+	Key      string           `json:"key"`
+	State    string           `json:"state"`
+	Output   string           `json:"output"`
+	Direct   bool             `json:"direct"`
+	Deferred bool             `json:"deferred,omitempty"`
+	Reread   *RereadReference `json:"reread,omitempty"`
 }
 
 func dependencyEvidence(s StepRun, all []StepRun) map[string]DependencyEvidence {
@@ -1181,7 +1173,7 @@ func (a *App) cancelWorkflow(project, actor, process, run, reason string) (any, 
 	return a.getRun(project, process, run)
 }
 
-func (a *App) updateTaskState(s Task, r Run, all []Task, actor string, args map[string]any) error {
+func (a *App) authorizeStepWrite(s Task, r Run, all []Task, actor string) error {
 	if !stepReleased(r, s) {
 		return errors.New("step is held for controller advancement")
 	}
@@ -1232,6 +1224,18 @@ func (a *App) updateTaskState(s Task, r Run, all []Task, actor string, args map[
 	if s.State == "pending" || !dependenciesReady(s, all) {
 		return errors.New("step dependencies are not complete")
 	}
+	return nil
+}
+
+func (a *App) updateTaskState(s Task, r Run, all []Task, actor string, args map[string]any) error {
+	if e := a.authorizeStepWrite(s, r, all, actor); e != nil {
+		return e
+	}
+	var normalizeError error
+	args, normalizeError = normalizeHandoff(args)
+	if normalizeError != nil {
+		return normalizeError
+	}
 	state := str(args, "state")
 	switch state {
 	case "running", "waiting", "blocked", "completed", "failed", "cancelled":
@@ -1255,6 +1259,12 @@ func (a *App) updateTaskState(s Task, r Run, all []Task, actor string, args map[
 			return errors.New("progress must be 0–100")
 		}
 		progress = int(n)
+	}
+	if strings.HasPrefix(actor, "agent:") && !terminal(s.State) && len(output)+len(reason) > handoffBudget {
+		return errors.New("step handoff/output and error exceed 4096 bytes; save detailed diagnostics with processes_step_evidence_save and include its evidence_id in handoff.evidence_refs")
+	}
+	if e := a.validateHandoffReferences(s, all, output); e != nil {
+		return e
 	}
 	if len(output)+len(reason) > 16000 {
 		return errors.New("step output and error exceed 16 KB")

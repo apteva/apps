@@ -24,7 +24,7 @@ func TestWorkerReadsKeepOneExactManifestAndRecoverSharedContext(t *testing.T) {
 			d.ApprovalRequirements = "Require final validation and approval"
 			d.Steps[3].Instructions = strings.Repeat("unrelated downstream instructions;", 1500)
 			a, _, p, r := executorSetup(t, d, mode, nil)
-			receipt := "exact-artifact:portrait-3.png|digest:abc|" + strings.Repeat("receipt-evidence;", 800)
+			receipt := "exact-artifact:portrait-3.png|digest:abc|" + strings.Repeat("receipt-evidence;", 150)
 			one := stepBy(t, a, r, "research")
 			finishStep(t, a, p, r, one.Key, "agent:7:"+one.ThreadID, receipt, "")
 			two := stepBy(t, a, r, "write")
@@ -52,12 +52,16 @@ func TestWorkerReadsKeepOneExactManifestAndRecoverSharedContext(t *testing.T) {
 				if _, ok := full["dependency_outputs"]; ok {
 					t.Fatal("duplicated dependency manifest")
 				}
-				if strings.Contains(text, "unrelated downstream instructions") || strings.Count(text, receipt) != 1 {
+				if strings.Contains(text, "unrelated downstream instructions") || strings.Count(text, receipt) != 0 {
 					t.Fatal("unrelated instructions or duplicated/lost receipt")
 				}
 				deps := full["dependencies"].(map[string]DependencyEvidence)
-				if len(deps) != 2 || deps["research"].ID != one.ID || deps["research"].State != "completed" || deps["research"].Direct || deps["research"].Output != receipt || !deps["write"].Direct {
-					t.Fatal("ancestor identities lost", deps)
+				if len(deps) != 1 || deps["write"].ID != two.ID || !deps["write"].Direct || deps["write"].Output != "draft-receipt" {
+					t.Fatal("direct dependency identities lost", deps)
+				}
+				recovered, err := a.stepRead(p.ProjectID, p.ID, map[string]any{"run_id": r.ID, "step_id": target.ID, "target": "dependency", "dependency_key": "research"})
+				if err != nil || recovered.(map[string]any)["dependency"].(DependencyEvidence).Output != receipt {
+					t.Fatal("targeted ancestor receipt lost", err)
 				}
 				if full["instructions"] != d.Instructions || full["approval_requirements"] != d.ApprovalRequirements {
 					t.Fatal("missing default policy")
@@ -112,7 +116,7 @@ func TestWorkerAcknowledgementsRemainSmallAndReplayable(t *testing.T) {
 			a, _, p, r := executorSetup(t, d, mode, nil)
 			first := stepBy(t, a, r, "research")
 			actor := "agent:7:" + first.ThreadID
-			output := strings.Repeat("large-exact-output-receipt;", 500)
+			output := strings.Repeat("large-exact-output-receipt;", 100)
 			update := func(state string, progress int, reason string) map[string]any {
 				t.Helper()
 				raw, err := a.stepAction(p.ProjectID, actor, p.ID, r.ID, first.ID, "step_update", map[string]any{"state": state, "progress": float64(progress), "output": output, "error": reason})

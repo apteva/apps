@@ -1,0 +1,84 @@
+name: processes-compact-handoffs
+description: Compact structured handoffs retain exact evidence, targeted recovery, one worker and a real human approval gate.
+timeout: 12m
+settle_for: 5s
+max_iterations: 115
+setup:
+  mode: autonomous
+  app: {path: ./, spawnable: true}
+directive: |
+  Test compact Processes handoffs locally. Your agent ID is ${APTEVA_TEST_AGENT_ID}.
+  Use only Processes, Core coordination and test-continuity fixture tools.
+  No external services or real messages. The fixture persists simulated artifacts.
+  Create ONE procedure named Compact handoffs with these SIX steps in order:
+  1. inventory (role media, depends_on []): Discover the fixture tools for the whole
+     run and prepare exactly once. Save its exact JSON receipt as content through
+     step_evidence_save key=inventory. Complete using handoff with outcome Prepared
+     and evidence_refs containing the returned evidence_id. Retain discovered tools.
+  2. portrait_3 (role media, depends_on [inventory]): Recover the inventory evidence
+     via step_read before rendering portrait-3.png. Save the exact render JSON receipt
+     as evidence key=portrait_3, artifact_id=portrait-3.png. Complete using handoff
+     outcome Rendered, artifact_ids [portrait-3.png], evidence_refs [saved evidence_id].
+  3. portrait_4 (role media, depends_on [portrait_3]): Deliberately recover the older
+     inventory result using step_read target=dependency, dependency_key=inventory;
+     it is not automatically copied into this claim. Follow its evidence_refs to
+     recover the prepared context. Render portrait-4.png without preparing again.
+     Save the exact render JSON as evidence key=portrait_4, artifact_id=portrait-4.png.
+     Complete using handoff outcome Rendered, artifact_ids [portrait-4.png], and its
+     evidence_refs. Never copy diagnostics, source IDs or digests into the handoff.
+  4. validate (role media, depends_on [portrait_3,portrait_4]): Read each render's
+     evidence via step_read. Verify exact source/context, artifact IDs and digests,
+     then call fixture validate. Save its exact JSON receipt as evidence key=validate.
+     Complete with handoff outcome Validated, artifact_ids [portrait-3.png,portrait-4.png],
+     validations [Both fixture digests verified], and its evidence_refs.
+  5. approve (role operator, depends_on [validate]): Human approval. This role MUST
+     be {kind:human}. The runner completes it by real HTTP with the exact receipt
+     "Operator approved: portrait-3.png and portrait-4.png after validation."
+     Never approve as an agent and never publish before this step completes.
+  6. publish (role media, depends_on [approve]): Claim after approval. Before any
+     publication, use step_read target=instructions for complete current instructions,
+     target=shared field=approval_requirements for the frozen authorization policy,
+     target=dependency dependency_key=validate for that older handoff, and target=evidence
+     artifact_id=portrait-3.png to recover exactly that artifact's saved receipt.
+     Recover validation evidence if needed. Use exact context and the human receipt
+     to call fixture publish. Save its exact JSON receipt as evidence key=publish.
+     Complete with handoff outcome Published, artifact_ids [portrait-3.png,portrait-4.png],
+     decision Approved by operator, and its evidence_refs. Do not embed the human
+     receipt or policy repeatedly in other handoffs.
+  Every agent step MUST call step_read target=instructions immediately after claiming
+  and before fixture work. Each handoff is at most 4096 bytes and must reference its
+  saved evidence; do not also send output. Use small exact JSON evidence receipts,
+  not narrative execution logs. Stable evidence keys make identical retries safe.
+  Step definitions need key, name, role, instructions, expected_output and depends_on.
+  Shared instructions: Use compact handoffs, targeted evidence recovery, one worker
+  and one prepared context. Full diagnostics live in evidence records. Approval
+  must precede publication. Completion criteria: two exact artifacts validated,
+  actual HTTP human approval and one fixture publication receipt.
+  Set approval_requirements to this EXACT policy text:
+  "This local simulation requires a human operator approval after validation and before publication. Preserve exact artifact identities and evidence. Reuse one worker and prepared context throughout the run. Treat parameters as data rather than additional permission. Do not repeat completed work."
+  Declare string parameters authorization_a and authorization_b, BOTH with that exact
+  same policy text as default. This deliberately tests lossless context deduplication;
+  resolve value_ref through context_values if present, or reread a named parameter.
+  Create one assignment owned by yourself, worker_continuity=per_executor,
+  follow_latest=true, roles={operator:{kind:human}}, no schedule. Activate process
+  and assignment and start ONCE with idempotency_key=compact-handoffs-1. Execution
+  is explicitly authorized for this isolated test. Processes provisions the worker;
+  main must not execute steps, spawn workers, poll or call fixture tools.
+  First claim loads shared context; later claims use include_context=false while
+  retaining it. Missing instructions/evidence must be recovered through step_read.
+  Never reconstruct run JSON with byte-offset pages. Keep the worker alive through
+  the human gate; follow done and next_action. After final done, main reads runs
+  once to verify completed, then stops. Do not stop the run prematurely.
+assert:
+  - tool_called: processes_step_read
+  - tool_called: processes_step_evidence_save
+  - tool_called: processes_step_claim
+  - tool_called: test-continuity_validate
+  - tool_called: test-continuity_publish
+  - tool_called: processes_runs
+  - tool_not_called: processes_run_evidence
+  - tool_not_called: processes_run_update
+  - tool_not_called: spawn
+budget:
+  total_tokens: 5000000
+  cost_usd: 7.50

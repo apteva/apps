@@ -352,7 +352,15 @@ func TestStepByStepAdvanceIsCompactAndFrozenReadIsExact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ctx["instructions"] != frozen.Instructions || ctx["step"].(WorkerStep).Definition.Instructions != frozen.Steps[0].Instructions || len(frozen.Steps[0].Instructions) != len(policy) {
-		t.Fatal("frozen instructions changed")
+	if ctx["complete"] != false || len(responseJSON(t, ctx)) > workerDetailBudget {
+		t.Fatal("oversized frozen instructions were copied instead of referenced")
+	}
+	instructions, err := a.stepRead(p.ProjectID, p.ID, map[string]any{"run_id": r.ID, "step_id": s.ID, "target": "instructions"})
+	if err != nil || instructions.(map[string]any)["instructions"] != frozen.Steps[0].Instructions {
+		t.Fatal("targeted current instructions changed", err)
+	}
+	shared, err := a.stepRead(p.ProjectID, p.ID, map[string]any{"run_id": r.ID, "step_id": s.ID, "target": "shared", "field": "instructions"})
+	if err != nil || shared.(map[string]any)["instructions"] != frozen.Instructions || len(frozen.Steps[0].Instructions) != len(policy) {
+		t.Fatal("frozen shared policy changed", err)
 	}
 }

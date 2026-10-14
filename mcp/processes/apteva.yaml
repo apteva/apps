@@ -83,6 +83,8 @@ provides:
     - { name: assignment_pause, description: Pause one assignment. }
     - { name: assignment_archive, description: Archive one assignment. }
     - { name: step_claim, description: Claim an assigned step and reuse its persistent run worker. }
+    - { name: step_read, description: "Recover exact current instructions, one dependency result or artifact evidence by name." }
+    - { name: step_evidence_save, description: "Save immutable detailed diagnostics separately from compact step handoffs." }
     - { name: step_get, description: "Read the assigned step, frozen policy and one exact dependency manifest; reuse retained context on later reads." }
     - { name: step_update, description: Save step progress or output; receive a compact acknowledgement and follow done and next_action. }
     - { name: run_advance, description: Release one eligible step in a step-by-step run as operator or coordinator. }

@@ -1,3 +1,4 @@
+import { COMPACT_HANDOFFS, verifyCompactHandoffs } from "./compact-handoffs";
 import { PROCESS_PATCH, verifyProcessPatch } from "./process-patch";
 import { RUN_MEMORY, verifyRunMemory } from "./run-memory";
 import { STEP_BY_STEP, controlStepByStep, verifyControlEvidence } from "./step-by-step";
@@ -7,7 +8,7 @@ import { MCP_RESPONSE_RECOVERY, verifyMCPResponseRecovery } from "./mcp-response
 import { EXECUTOR_CONTINUITY, CONTINUITY_APPROVAL, verifyExecutorContinuity } from "./executor-continuity";
 import { resolve, basename } from "node:path";
 import { mkdir, mkdtemp, readdir, cp } from "node:fs/promises";
-import { Database } from "bun:sqlite";
+import { openPostRunDatabase } from "./evidence-db";
 import YAML from "yaml";
 import { startBrowserFixture, verifyBrowserContinuity } from "./browser-fixture";
 let browserFixture: ReturnType<typeof startBrowserFixture> | undefined;
@@ -75,7 +76,7 @@ for (const file of files) {
     scenario.setup.app.path = processCopy;
   }
 
-  if (scenario.name === EXECUTOR_CONTINUITY) {
+  if (scenario.name === EXECUTOR_CONTINUITY || scenario.name === COMPACT_HANDOFFS) {
     const fixtureRoot = resolve(outputDir, "continuity-fixture");
     const processCopy = resolve(fixtureRoot, "processes");
     const sourceCopy = resolve(fixtureRoot, "test-continuity");
@@ -162,6 +163,8 @@ const controlReport = controlledDb
   ? controlStepByStep(controlledDb, operatorAbort.signal, message => console.log(message))
       .catch((e:Error) => { console.error(`Step-by-step controller failed: ${e.stack}`); return e; })
   : Promise.resolve(null);
+const compactDb = databases.get(COMPACT_HANDOFFS);
+const compactApproval = compactDb ? confirmWhenWaiting(compactDb,{stepKey:"approve",output:CONTINUITY_APPROVAL,signal:operatorAbort.signal,log:message=>console.log(message)}).catch((error:Error)=>error) : Promise.resolve(null);
 const memoryDb=databases.get(RUN_MEMORY);
 const memoryApprovals=memoryDb?(async()=>{const approvals:ConfirmationReport[]=[];for(let i=0;i<2;i++)approvals.push(await confirmWhenWaiting(memoryDb,{stepKey:"approve",output:"MEMORY-APPROVED",signal:operatorAbort.signal,log:message=>console.log(message)}));return approvals;})().catch((error:Error)=>error):Promise.resolve(null);
 const stdout = await new Response(child.stdout).text();
@@ -172,6 +175,10 @@ const continuityConfirmed = await continuityConfirmation;
 const parallelConfirmed = await parallelConfirmation;
 const controlled = await controlReport;
 const memoryConfirmed=await memoryApprovals;
+const compactConfirmed=await compactApproval;
+// Keep actual HTTP/controller observations even if later artifact inspection fails.
+await Bun.write(resolve(outputDir,"operator-evidence.json"),JSON.stringify({continuity:continuityConfirmed,parallel:parallelConfirmed,control:controlled,memory:memoryConfirmed,compact:compactConfirmed},null,2));
+
 await Bun.write(resolve(outputDir, "results.json"), stdout);
 check(exit === 0, `Tier 3 runner failed (${exit}); see ${outputDir}`);
 const report = JSON.parse(stdout);
@@ -181,7 +188,7 @@ const observed: Record<string, unknown> = {};
 for (const scenario of report.results) {
   const path = databases.get(scenario.scenario);
   check(scenario.ok && path, `${scenario.scenario}: missing scenario result`);
-  const db = new Database(path, { readonly: true });
+  const db = openPostRunDatabase(path);
   try {
     // DB_PATH keeps only this app's test state after the runner removes its server.
     // Read it after shutdown: credentials and the server database are not retained.
@@ -218,10 +225,24 @@ for (const scenario of report.results) {
       direct_runs: runs.filter((r) => r.backend === "agent"),
       runs: runs.filter((r) => r.backend === "tasks"),
     };
+    if (scenario.scenario === COMPACT_HANDOFFS) {
+      check(PROVIDER === "openai-codex" && MODEL === "gpt-6.1-sol" && scenario.observed_models?.includes(MODEL), "Compact handoff tier 3 must observe GPT-6.1 Sol");
+      check(compactConfirmed && !(compactConfirmed instanceof Error), `Compact approval failed: ${compactConfirmed}`);
+      const workers = db.query("SELECT * FROM process_run_workers WHERE run_id=?").all(runs[0]?.id) as any[];
+      const evidence = db.query("SELECT * FROM process_step_evidence ORDER BY created_at,id").all() as any[];
+      const fixtureDb = openPostRunDatabase(resolve(outputDir,"continuity-fixture.db"));
+      const fixture = {contexts:fixtureDb.query("SELECT * FROM prepared_contexts").all() as any[],operations:fixtureDb.query("SELECT * FROM operations ORDER BY id").all() as any[]}; fixtureDb.close();
+      const saved={runs,workers,evidence,fixture,approval:compactConfirmed};
+      await Bun.write(resolve(outputDir,"compact-handoffs-evidence.json"),JSON.stringify(saved,null,2));
+      verifyCompactHandoffs(scenario.tool_calls,runs,workers,evidence,fixture,compactConfirmed as ConfirmationReport);
+      observed[scenario.scenario]=saved;
+      console.log(`PASS ${scenario.scenario}: compact handoffs, exact targeted evidence, one worker and HTTP approval (${scenario.iterations} iterations, ${scenario.tokens.total} tokens)`);
+      continue;
+    }
     if (scenario.scenario === EXECUTOR_CONTINUITY) {
       check(continuityConfirmed && !(continuityConfirmed instanceof Error), `Continuity operator confirmation failed: ${continuityConfirmed instanceof Error ? continuityConfirmed.message : "never performed"}`);
       const workers = db.query("SELECT * FROM process_run_workers WHERE run_id=?").all(runs[0]?.id) as any[];
-      const fixtureDb = new Database(resolve(outputDir, "continuity-fixture.db"), { readonly: true });
+      const fixtureDb = openPostRunDatabase(resolve(outputDir, "continuity-fixture.db"));
       const fixture = { contexts: fixtureDb.query("SELECT * FROM prepared_contexts").all() as any[],
         operations: fixtureDb.query("SELECT * FROM operations ORDER BY id").all() as any[] };
       fixtureDb.close();
@@ -238,7 +259,7 @@ for (const scenario of report.results) {
       check(PROVIDER === "openai-codex" && MODEL === "gpt-6.1-sol" && scenario.observed_models?.includes(MODEL), "Parallel tier 3 must observe GPT-6.1 Sol");
       check(confirmation && !(confirmation instanceof Error), `Parallel operator confirmation failed: ${parallelConfirmed instanceof Error ? parallelConfirmed.message : "never performed"}`);
       const workers = db.query("SELECT * FROM process_run_workers WHERE run_id=?").all(runs[0]?.id) as any[];
-      const fixtureDb = new Database(resolve(outputDir, "parallel-fixture.db"), {readonly: true});
+      const fixtureDb = openPostRunDatabase(resolve(outputDir, "parallel-fixture.db"));
       const fixture = {contexts: fixtureDb.query("SELECT * FROM contexts").all() as any[], operations: fixtureDb.query("SELECT * FROM operations ORDER BY id").all() as any[]};
       fixtureDb.close();
       const evidence = {...history, workers, fixture, operator_confirmation: confirmation};

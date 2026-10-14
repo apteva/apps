@@ -626,3 +626,43 @@ follow-latest assignments adopt the new draft version and pinned assignments
 keep their selected version. Use `update` for intentional full replacements.
 The tier 3 `15-process-patch.yaml` scenario verifies real GPT-6.1 Sol partial
 edits, stale rejection, preserved history and compact receipt recovery.
+
+
+### Compact step handoffs and targeted recovery
+
+Workers should use `step_update.handoff` with a short outcome, optional decision,
+exact artifact_ids, essential validations/limitations, evidence_refs and blockers.
+Agent output plus error is limited to 4096 UTF-8 bytes; legacy small output
+strings still work. A helpful error directs oversized writes to
+`step_evidence_save`, which stores immutable detailed content, an optional exact
+artifact_id and source references separately (16 KiB JSON maximum). Stable keys
+make identical retries idempotent. Evidence never completes or approves a step.
+Human/operator receipts and previously stored outputs remain readable unchanged.
+
+`step_claim`/`step_get` default to direct dependency results with an 8 KiB inline
+receipt budget and a 16 KiB overall worker-response budget. Indirect ancestors,
+oversized legacy results, and unusually large context use exact named references,
+not textual summaries or truncation. Dispatch messages contain IDs and recovery
+instructions instead of embedding policy and dependency outputs again.
+
+`step_read` retrieves complete current instructions/expected output, one shared
+policy field, one resolved parameter, the current checkpoint, one ancestor result,
+or one saved artifact/evidence record. `target=dependencies` returns a metadata-only
+ancestor index; `direct_only=true` restricts it to immediate dependencies. Explicit
+`target=parameters` recovers all resolved parameters if needed. These operations
+avoid reconstructing entire step/run JSON with byte-offset pages. Exceptionally
+large individual values can still be large; retrieve only the value required.
+Full run/export inspection retains its existing lossless paging behavior.
+
+Repeated exact long context strings are interned once in a worker response's
+`context_values`; each `value_ref` resolves there. Canonical authorization belongs
+in frozen shared approval policy; parameter text remains data. Stored historical
+and HTTP audit objects retain exact original values, including old duplicates.
+Shared policy is not filtered by model guesses about applicability.
+
+Operator HTTP inspection also supports
+`GET /processes/{process}/runs/{run}/steps/{step}/read?target=...` with the same
+named selectors. Claims/updates keep ownership, dependency, timing, controller,
+worker-continuity and approval gates. Completion and diagnostics survive restart.
+The `16-compact-handoffs.yaml` GPT-6.1 Sol scenario verifies exact local fixture
+artifacts, targeted recovery, separate evidence, one worker and HTTP approval.

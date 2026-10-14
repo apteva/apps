@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const memoryExecutionContract = "When previous work is relevant, use compact processes_runs filtered by assignment and processes_memory_list with the exact campaign/scope; fetch only selected run details. Save useful findings and unfinished work with processes_summary_update at meaningful checkpoints, blockers and completion, and stable-key processes_memory_upsert entries with exact source references. Recover revisions before overwriting; summaries never replace receipts, frozen instructions or approval. If a read is incomplete, follow all required processes_run_evidence references before acting."
+const memoryExecutionContract = "When previous work is relevant, use compact processes_runs filtered by assignment and processes_memory_list with the exact campaign/scope; fetch only selected run details. Save useful findings and unfinished work with processes_summary_update at meaningful checkpoints, blockers and completion, and stable-key processes_memory_upsert entries with exact source references. Recover revisions before overwriting; summaries never replace receipts, frozen instructions or approval. For worker recovery use processes_step_read for required named instructions, dependency results or evidence; explicit full run exports retain run_evidence paging."
 
 // Semantic memory is agent-authored and never substitutes for execution evidence.
 type RunSummary struct {

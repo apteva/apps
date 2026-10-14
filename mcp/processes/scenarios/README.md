@@ -461,3 +461,61 @@ schema regression. Two fresh live runs subsequently passed. A deterministic
 large-definition regression measures 40,940 bytes of full definition versus a
 173-byte single-step patch request and 291-byte receipt; this measures payload
 reduction rather than overall execution speed.
+
+## Compact handoffs and targeted evidence recovery
+
+```sh
+APTEVA_TEST_PROVIDER=openai-codex APTEVA_TEST_MODEL=gpt-6.1-sol bun run scenarios/run.ts scenarios/16-compact-handoffs.yaml
+```
+
+The model defines a six-step local artifact workflow. Each agent step rereads its
+exact current instructions, saves the exact fixture receipt separately, and
+submits a structured compact handoff with evidence references. Later steps
+recover a named ancestor, exact artifact evidence and frozen approval policy.
+One persistent worker retains prepared tools/context; a real HTTP operator
+approval gates publication. No whole-run byte-offset reconstruction is allowed.
+
+The independent verifier checks saved evidence hashes and source/artifact/digest
+identities against actual fixture operations, handoff/claim budgets, direct-only
+claim dependencies, worker/step attribution, real targeted reads, and completion
+ordering. Negative tests reject missing or changed evidence, copied ancestors,
+missing recovery, premature done/publication, bypassed approval and repeated work.
+Go regressions cover the 4 KiB handoff limit, helpful atomic validation errors,
+16 KiB worker/evidence budgets, immutable diagnostic retries, original HTTP audit
+objects, large legacy outputs, many-source joins and recovery after restart.
+
+Post-run database inspection permits SQLite journal bookkeeping but enforces
+`PRAGMA query_only=ON`. This handles Bun/macOS read-only opens of clean WAL
+fixtures without missing uncheckpointed records. Tests verify missing sidecars,
+uncheckpointed WAL contents, SQL-write rejection and missing-file rejection.
+Actual HTTP approval/controller observations are retained before verification.
+
+Verification recorded on 2026-10-14 with `openai-codex` / `gpt-6.1-sol`:
+
+| Scenario | Iterations | Final artifact directory |
+| --- | ---: | --- |
+| Compact handoffs and exact recovery | 44 | `/private/tmp/processes-handoff-compact-verified-tier3/run-vvbXJe` |
+| Existing executor continuity | 27 | `/private/tmp/processes-handoff-continuity-tier3/run-ttJem7` |
+| Actual AI-directed parallel work | 37 | `/private/tmp/processes-handoff-parallel-tier3/run-drx8YT` |
+| Controller step-by-step execution | 45 | `/private/tmp/processes-handoff-control-final-tier3/run-6S8uZp` |
+| Memory across two runs | 42 | `/private/tmp/processes-handoff-memory-tier3/run-fSujsc` |
+
+All final scenarios and independent saved-state/tool-trace checks passed. Final
+compact handoffs were 89–189 bytes; claims were 2267–4292 bytes. The workflow
+retained one prepared worker context, five separate agent execution receipts,
+exact artifact/source/digest evidence, real operator approval and gated publication.
+The 30-step legacy regression measures 601,237 bytes of ancestor/shared context
+alone versus a 3558-byte compact worker read; any named ancestor remains readable
+exactly in one call. A 7020-byte diagnostic record is represented by a 216-byte
+handoff and a 560-byte save acknowledgement in the deterministic regression.
+These are payload/correctness measurements, not an end-to-end speed benchmark.
+
+Go short/integration suites, race checks, 167 UI/scenario unit tests, all 44 browser
+tests and TypeScript checks passed. The Processes consumer pins app-sdk v0.102.0,
+verified by ancestry as the latest tag on origin/main at implementation time.
+Core, Server, SDK sources and existing immutable procedure/run data were unchanged.
+
+Two earlier post-run verification attempts hit Bun/macOS `SQLITE_CANTOPEN` after
+otherwise completed workflows because clean WAL sidecars were absent. The
+journal-capable, SQL-query-only inspection helper fixed this; fresh compact and
+controller runs above passed. It never ignores uncheckpointed WAL evidence.
