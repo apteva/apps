@@ -1,3 +1,5 @@
+import type { ThreadActionOptions } from "./threadActions";
+export type { ThreadAction, ThreadActionOptions } from "./threadActions";
 import type { ComposerOptions } from "./composer";
 export type { ComposerOptions } from "./composer";
 import type { PageContext } from "./pageContext";
@@ -6,7 +8,7 @@ import type { ComposerSuggestion, ConversationComposerHandle } from "./composerH
 export type { ComposerInsertOptions, ComposerInsertResult, ComposerInsertStatus, ComposerSuggestion, ConversationComposerHandle } from "./composerHost";
 export type { AgentAvatarMode } from "./agentAppearance";
 import type { AgentAvatarMode } from "./agentAppearance";
-type ChatConfiguration = ConversationLocalization & {composer?:ComposerOptions;pageContext?:PageContext;onContextCleared?:(context:PageContext)=>void};
+type ChatConfiguration = ConversationLocalization & {threadActions?:ThreadActionOptions|false;composer?:ComposerOptions;pageContext?:PageContext;onContextCleared?:(context:PageContext)=>void};
 import { ConversationLocalizationProvider, ConversationLocaleRegion, type ConversationLocalization } from "./i18n";
 export { ConversationLocalizationProvider } from "./i18n";
 export type { ConversationLocalization, ConversationMessages, ConversationMessage, ConversationMessageKey } from "./i18n";

@@ -13,7 +13,7 @@ test.beforeEach(async ({ page, request }) => {
 
 test("mobile panel shows a list or a conversation, never both", async ({ page, request }) => {
   await page.goto("/?host=dashboard&surface=panel");
-  const first = page.getByRole("button", { name: /Client onboarding/ });
+  const first = page.getByRole("button", { name: /^Client onboarding/ });
   await expect(first).toBeVisible();
   await expect(page.getByText("Load earlier conversations")).toHaveCount(0);
   await expect(page.getByText("Chat, inbox, and optional Telegram delivery in one durable system.")).toBeHidden();
@@ -49,7 +49,7 @@ test("a reply to a chat left on mobile becomes unread immediately from the list 
 
 test("the agent widget marks an unselected chat unread from the same SSE", async ({ page, request }) => {
   await page.goto("/?host=dashboard&surface=widget-browser");
-  const row = page.getByRole("button", { name: /Weather via Pushover/ });
+  const row = page.getByRole("button", { name: /^Weather via Pushover/ });
   await expect(row).toBeVisible();
   await request.post("/seed-unread", { data: { chat_id: "mobile-two", count: 1 } });
   await expect(row.getByRole("img", { name: "Unread messages", exact: true })).toBeVisible({ timeout: 3_000 });
@@ -79,11 +79,11 @@ test("mobile back preserves the list position and narrow screens do not overflow
   await page.setViewportSize({ width: 320, height: 650 });
   await page.goto("/?host=dashboard&surface=panel");
   const scroller = page.locator("aside .overflow-auto");
-  await expect(page.getByRole("button", { name: /Conversation 30/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Conversation 30/ })).toBeVisible();
   await scroller.evaluate(element => { element.scrollTop = 360; });
   const position = await scroller.evaluate(element => element.scrollTop);
   expect(position).toBeGreaterThan(0);
-  await page.getByRole("button", { name: /Conversation 9/ }).click();
+  await page.getByRole("button", { name: /^Conversation 9/ }).click();
   await page.getByRole("button", { name: "Back to conversations" }).click();
   expect(await scroller.evaluate(element => element.scrollTop)).toBe(position);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
@@ -96,14 +96,14 @@ test("the mobile list offers older conversations only while another page exists"
   const more = page.getByRole("button", { name: "Load earlier conversations" });
   await expect(more).toBeVisible();
   await more.click();
-  await expect(page.getByRole("button", { name: /Older conversation/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Older conversation/ })).toBeVisible();
   await expect(more).toHaveCount(0);
 });
 
 test("desktop retains the list and selected chat together", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 800 });
   await page.goto("/?host=dashboard&surface=panel");
-  await expect(page.getByRole("button", { name: /Client onboarding/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Client onboarding/ })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Client onboarding" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Back to conversations" })).toHaveCount(0);
 });
@@ -133,13 +133,13 @@ test("mobile overflow keeps Telegram and archived chats off the primary tabs", a
   await page.getByRole("button", { name: "Telegram" }).click();
   await expect(page.getByRole("button", { name: "Back to conversations" })).toBeVisible();
   await page.getByRole("button", { name: "Back to conversations" }).click();
-  await expect(page.getByRole("button", { name: /Client onboarding/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Client onboarding/ })).toBeVisible();
   await page.getByRole("button", { name: "More options" }).click();
   await page.getByRole("button", { name: "Archived conversations" }).click();
   await expect(page.getByText("No archived conversations")).toBeVisible();
   await page.getByRole("button", { name: "More options" }).click();
   await page.getByRole("button", { name: "Back to active conversations" }).click();
-  await expect(page.getByRole("button", { name: /Client onboarding/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Client onboarding/ })).toBeVisible();
 });
 
 test("the exported chat widget does not acquire panel navigation", async ({ page }) => {

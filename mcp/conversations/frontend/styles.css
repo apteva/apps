@@ -348,3 +348,10 @@
 .apteva-conversations .chat-message-photo img {display:block;width:auto;height:auto;max-width:180px;max-height:180px;object-fit:contain}
 .apteva-conversations .chat-image-caption {font-size:13px;overflow-wrap:anywhere;margin:10px 0 0}
 .apteva-conversations .chat-image-caption small {display:block;color:var(--color-text-muted,#aaa);font-size:11px}
+
+.thread-action-row > button:first-child { padding-right: 3rem; }
+.thread-actions-trigger { opacity: 0; }
+.thread-action-row:hover > .thread-actions-trigger,
+.thread-action-row:focus-within > .thread-actions-trigger { opacity: 1; }
+.thread-action-dialog::backdrop { background: rgb(0 0 0 / .55); }
+@media (max-width: 767px), (pointer: coarse) { .thread-actions-trigger { opacity: 1; } }

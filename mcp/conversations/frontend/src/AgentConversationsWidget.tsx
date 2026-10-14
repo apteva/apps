@@ -1,3 +1,5 @@
+import { ThreadActionRow } from "./threadActions";
+import { DetailsDialog } from "./ConversationsPanel";
 import { agentAvatarMode, showsAgentAvatar, ConversationIdentity } from "./agentAppearance";
 import type { AgentInfo } from "./types";
 import type { ComposerOptions } from "./composer";
@@ -251,6 +253,7 @@ function ConversationBrowser({
                 const unreadCount = unread.get(conversation.id)?.unread ?? 0;
                 return (
                   <li key={conversation.id}>
+                    <ThreadActionRow conversation={conversation} unread={unreadCount>0} latestId={unread.get(conversation.id)?.latest_id} enabled={widgetSettings?.thread_context_menu!==false} onChanged={()=>void load()} renderDetails={close=><DetailsDialog open conversation={conversation} agents={appearanceAgents} onClose={close} onChanged={()=>void load()} onRemoved={()=>{close();void load()}}/>}>
                     <button
                       type="button"
                       onClick={() => setSelectedId(conversation.id)}
@@ -267,6 +270,7 @@ function ConversationBrowser({
                         <span className="ml-auto">{relativeTime(conversation.updated_at)}</span>
                       </div>
                     </button>
+                    </ThreadActionRow>
                   </li>
                 );
               })}
@@ -331,6 +335,7 @@ function SingleConversation({
   const activeHistory = useConversationActivity(projectId, instanceId, historyOpen && validAgent);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [history, setHistory] = useState<Conversation[]>([]);
+  const [historyUnread,setHistoryUnread]=useState<Map<string,UnreadEntry>>(new Map());
   const [error, setError] = useState("");
 
   const loadLatest = useCallback(async (quiet = false) => {
@@ -434,14 +439,29 @@ function SingleConversation({
     }
   };
 
+  const historyChanged = async (conversation:Conversation,updated?:Conversation,removed=false,read=false) => {
+    try {
+    if(read||removed)setHistoryUnread(current=>{const next=new Map(current);next.delete(conversation.id);return next});
+    if(removed||updated?.archived_at){
+      setHistory(current=>current.filter(row=>row.id!==conversation.id));
+      if(selected?.id===conversation.id)await loadLatest();
+      return;
+    }
+    const next=updated??await apiGet<Conversation>(`/chats?id=${encodeURIComponent(conversation.id)}`,projectId);
+    if(next.archived_at){setHistory(current=>current.filter(row=>row.id!==next.id));if(selected?.id===next.id)await loadLatest();return;}
+    setHistory(current=>current.map(row=>row.id===next.id?next:row));
+    setSelected(current=>current?.id===next.id?next:current);
+    } catch(error) {setError(error instanceof Error?error.message:String(error));}
+  };
+
   const openHistory = async () => {
     const generation = ++historyGeneration.current;
     setHistoryOpen(true);
     setHistoryLoading(true);
     setError("");
     try {
-      const rows = await apiGet<Conversation[]>(singleConversationListPath(instanceId, 50), projectId);
-      if (generation === historyGeneration.current) setHistory(rows);
+      const [rows,unreadRows] = await Promise.all([apiGet<Conversation[]>(singleConversationListPath(instanceId, 50), projectId),apiGet<UnreadEntry[]>(appendAgentScope("/unread-summary",instanceId),projectId)]);
+      if (generation === historyGeneration.current) {setHistory(rows);setHistoryUnread(new Map(unreadRows.map(row=>[row.conversation_id,row])))};
     } catch (historyError) {
       if (generation === historyGeneration.current) {
         setError(historyError instanceof Error ? historyError.message : String(historyError));
@@ -571,6 +591,7 @@ function SingleConversation({
                   <li><MoreConversations path={singleConversationListPath(instanceId,50)} projectId={projectId} rows={history} onRows={setHistory}/></li>
                   {history.map((conversation) => (
                     <li key={conversation.id}>
+                      <ThreadActionRow conversation={conversation} unread={(historyUnread.get(conversation.id)?.unread??0)>0} latestId={historyUnread.get(conversation.id)?.latest_id} enabled={widgetSettings?.thread_context_menu!==false} onChanged={(updated,removed,read)=>void historyChanged(conversation,updated,removed,read)} renderDetails={close=><DetailsDialog open conversation={conversation} agents={appearanceAgents} onClose={close} onChanged={()=>void historyChanged(conversation)} onRemoved={()=>{close();void historyChanged(conversation,undefined,true)}}/>}>
                       <button
                         type="button"
                         onClick={() => {
@@ -587,6 +608,7 @@ function SingleConversation({
                         </span>
                         <span className="mt-1 block text-xs text-text-dim">{relativeTime(conversation.updated_at)}</span>
                       </button>
+                      </ThreadActionRow>
                     </li>
                   ))}
                 </ul>

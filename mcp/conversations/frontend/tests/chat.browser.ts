@@ -192,7 +192,7 @@ for (const surface of ["dashboard", "external", "panel"] as const) {
   for (const width of [390, 1280]) {
    await page.setViewportSize({width, height:800});
    await page.goto(surface==="external"?"/?host=external":surface==="panel"?"/?host=dashboard&surface=panel":"/?host=dashboard");
-   if (surface==="panel" && width===390) await page.getByRole("button", {name:/Support chat/}).click();
+   if (surface==="panel" && width===390) await page.getByRole("button", {name:/^Support chat/}).click();
    const geometry = await page.locator(".chat-composer-safe:visible").first().evaluate(footer => {
     const box = footer.querySelector(".chat-composer-box")!.getBoundingClientRect();
     const edge = footer.getBoundingClientRect();

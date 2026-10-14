@@ -1,3 +1,4 @@
+import { ThreadActionRow } from "./threadActions";
 import { MessageComponents } from "./messageComponents";
 export { ApprovalCard, ReportCard, AlertCard } from "./legacyCards";
 import { useComposerAttachments, type ComposerOptions } from "./composer";
@@ -544,7 +545,7 @@ function NewConversationDialog({
 // DetailsDialog ports the dashboard's ConversationDetails: rename,
 // participant roster (lead fixed), archive, and delete behind an
 // explicit confirm step.
-function DetailsDialog({
+export function DetailsDialog({
   open,
   conversation,
   agents,
@@ -2371,6 +2372,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                   const attentionLabel = t(attentionRank === 2 ? "approval.review" : "inbox.unreadAlert");
                   return (
                     <li key={c.id}>
+                      <ThreadActionRow conversation={c} unread={unreadCount>0} latestId={unread.get(c.id)?.latest_id} onChanged={()=>void loadConversations()} renderDetails={close=><DetailsDialog open conversation={c} agents={agents} onClose={close} onChanged={()=>void loadConversations()} onRemoved={()=>{close();void loadConversations()}}/>}>
                       <button
                         type="button"
                         data-conversation-id={c.id}
@@ -2413,6 +2415,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                           <span className="ml-auto shrink-0">{relativeTime(c.updated_at)}</span>
                         </div>
                       </button>
+                      </ThreadActionRow>
                     </li>
                   );
                 })}

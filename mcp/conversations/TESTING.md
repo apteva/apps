@@ -157,3 +157,19 @@ checks. Older browser assertions were aligned with the already-shipped tool-row
 Thinking animation and unread dots. The spacing regression checks caught an
 empty component wrapper; it now renders nothing for ordinary messages without
 components.
+
+## Thread-menu release validation — 2026-10-14
+
+The panel, browser widget and history drawer share the same thread action menu.
+Browser regressions cover right-click without navigation/read acknowledgement,
+rename/read targeting, draft preservation, keyboard focus, mobile/viewport-edge
+positioning, archive/restore, confirmed deletion, permission errors, details,
+host opt-out and custom actions. Existing activity, composer, inbox, attachment,
+unread and transcript-spacing regressions remain covered.
+
+Release v0.24.48 passed 106 Bun tests, all 95 Playwright tests, consumer type
+checks, the full pinned-SDK Go suite, and the full Go race/integration suite.
+A fresh isolated Tier 3 `openai-codex` / `gpt-6.1-sol` run passed in 130.5 seconds
+with 10 iterations and 147,422 total tokens, verifying optional and blocking
+widget flows again using the current local Server/Core binaries. No live user
+agents or production instances were restarted for this validation.

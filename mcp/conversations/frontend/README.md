@@ -338,3 +338,30 @@ Custom renderers reuse the same submission/lifecycle contract; they must handle
 pending/resolved display and submission errors. Unknown interactive names fall
 back to the built-in form renderer. Unsupported component versions are displayed
 read-only. Display-only unknown components remain inspectable as details.
+
+## Thread actions
+
+Thread lists in the panel, browser widget and focused-widget history share a
+right-click menu. The same actions are available from a row's ellipsis button,
+visible on hover/focus and always visible on mobile. Shift+F10 or the Context
+Menu key opens it; arrows, Home/End, Enter and Escape support keyboard use.
+Opening the menu does not select a thread, mark it read or touch its draft.
+
+Actions include Rename, Mark as read when unread, Conversation details,
+Archive/Restore and confirmed Delete. Archive confirmation explains cancellation
+of queued work. API access checks remain authoritative; failures remain visible
+and preserve the pending input. Native popovers keep menus in the top layer
+without losing host theme inheritance. Text inputs, links and content outside
+thread rows retain the browser context menu.
+
+All React chat/panel exports accept `threadActions: false` to disable these menus,
+or `{enabled?: boolean, actions?: ThreadAction[]}` to add host actions. Host
+actions receive the clicked conversation and scoped Conversations client.
+The dashboard browser widget also accepts `widgetSettings.thread_context_menu`
+(default true). No agent tool or Core change is required.
+
+```tsx
+<ConversationChat conversations={conversations} agentId={agentId}
+  threadActions={{actions:[{id:"inspect",label:"Inspect",
+    onSelect: (conversation) => inspectConversation(conversation.id)}]}} />
+```

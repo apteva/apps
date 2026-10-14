@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.24.48 — 2026-10-14
+
+- Add shared thread context menus to the panel, browser widget and history drawer: rename, mark read, details, archive/restore and confirmed delete. Right-click never selects a thread or clears its unread state.
+- Support row ellipsis buttons, mobile layout, keyboard navigation, viewport clamping, host opt-out/custom actions, and existing authorization checks. Preserve composer drafts and active responses.
+- Include durable interactive question/form components through the existing send tool, optional late answers, shared inbox/chat rendering, skip/expiry and extensible renderers. Preserve existing approval semantics.
+- Pin the released SDK v0.102.0. Add browser regressions alongside the interactive lifecycle, race and real Codex Tier 3 coverage.
+
 ## 0.24.47 — 2026-10-08
 
 - Keep model waiting feedback between related tool calls inside the latest tool group without changing completed tool states or durations.

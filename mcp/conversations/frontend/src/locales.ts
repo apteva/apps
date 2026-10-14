@@ -1,6 +1,18 @@
 import { telegramCatalog } from "./telegramLocales";
 /** App-owned UI copy. Tuple order: English, French, Spanish. Never translate message content. */
 export const catalog = {
+  "thread.rename": ["Rename…", "Renommer…", "Renombrar…"],
+  "thread.markRead": ["Mark as read", "Marquer comme lu", "Marcar como leído"],
+  "thread.details": ["Conversation details…", "Détails de la conversation…", "Detalles de la conversación…"],
+  "thread.archive": ["Archive", "Archiver", "Archivar"],
+  "thread.restore": ["Restore", "Restaurer", "Restaurar"],
+  "thread.delete": ["Delete…", "Supprimer…", "Eliminar…"],
+  "thread.confirmDelete": ["Delete conversation", "Supprimer la conversation", "Eliminar conversación"],
+  "thread.options": ["Options for {title}", "Options pour {title}", "Opciones para {title}"],
+  "thread.deleteConfirm": ["Delete “{title}” and its history? This cannot be undone.", "Supprimer « {title} » et son historique ? Cette action est irréversible.", "¿Eliminar «{title}» y su historial? No se puede deshacer."],
+  "thread.archiveConfirm": ["Archive “{title}”? Queued work in this conversation will be cancelled.", "Archiver « {title} » ? Le travail en attente sera annulé.", "¿Archivar «{title}»? Se cancelará el trabajo en cola."],
+  "thread.restoreConfirm": ["Restore “{title}” to active conversations?", "Restaurer « {title} » dans les conversations actives ?", "¿Restaurar «{title}» en las conversaciones activas?"],
+
   "component.question": ["Question", "Question", "Pregunta"],
   "component.waiting": ["Waiting for your answer", "En attente de votre réponse", "Esperando tu respuesta"],
   "component.optional": ["Optional — work can continue", "Facultatif — le travail peut continuer", "Opcional — el trabajo puede continuar"],

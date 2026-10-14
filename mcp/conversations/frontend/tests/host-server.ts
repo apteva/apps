@@ -91,9 +91,16 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  if(path==="/activity-summary")return Response.json({active_conversation_ids:activeConversations});
  if(path==="/agents")return Response.json([{id:41,name:"Assistant",status:"running",attached:true},{id:42,name:"Scheduling assistant",status:"running",attached:true}]);
  if(path==="/unread-summary")return Response.json([...unreadConversations].map(([conversation_id,unread])=>({conversation_id,unread,latest_id:101})));
+ if(path==="/chats"&&(req.method==="PATCH"||req.method==="DELETE")){
+  const id=url.searchParams.get("id");const index=panelRows.findIndex(c=>c.id===id);if(index<0)return new Response("missing",{status:404});
+  if(req.method==="DELETE"){panelRows.splice(index,1);return Response.json({ok:true});}
+  const body=await req.json();calls.at(-1).body=body;panelRows[index]={...panelRows[index],...body,...(body.archived!==undefined?{archived_at:body.archived?new Date().toISOString():null}:{})};return Response.json(panelRows[index]);
+ }
+ if(path==="/participants")return Response.json({agent_ids:[41],user_ids:[],lead_agent_id:41});
  if(path==="/chats"&&req.method==="POST") {const body=await req.json();calls.at(-1).body=body;const created={...conversation(user),id:"new-operator-chat",title:body.title||"New conversation",lead_agent_id:body.lead_agent_id,audience:body.audience};panelRows=[created,...panelRows];return Response.json(created);}
  if(path==="/chats"&&url.searchParams.has("id"))return Response.json(panelRows.find(item=>item.id===url.searchParams.get("id"))??conversation(user));
- if(path==="/chats"&&url.searchParams.has("page"))return Response.json(url.searchParams.get("archived")==="1"?{conversations:[],next_cursor:""}:url.searchParams.get("cursor")==="older"?{conversations:panelOlderRows,next_cursor:""}:{conversations:panelRows,next_cursor:panelOlderRows.length?"older":""});
+ if(path==="/chats"&&url.searchParams.has("page"))return Response.json({conversations:(url.searchParams.get("cursor")==="older"?panelOlderRows:panelRows).filter(c=>Boolean(c.archived_at)===(url.searchParams.get("archived")==="1")),next_cursor:url.searchParams.get("cursor")!=="older"&&panelOlderRows.length?"older":""});
+ if(path==="/chats"&&url.searchParams.has("lead_agent_id")&&panelRows.length)return Response.json(panelRows.filter(c=>!c.archived_at).slice(0,Number(url.searchParams.get("limit")??1)));
  if(path==="/chats")return Response.json([conversation(user)]);
  if(path==="/stream"&&url.searchParams.get("scope")==="user")return new Response(new ReadableStream({start(c){activityStreams.add(c);c.enqueue(new TextEncoder().encode(activitySnapshot()));},cancel(){/* Closed controllers are pruned on the next publish. */}}),{headers:{"Content-Type":"text/event-stream"}});
  if(path==="/stream")return new Response(new ReadableStream({start(c){streams.add(c);c.enqueue(new TextEncoder().encode(`event: stream\ndata: ${JSON.stringify({type:"stream",snapshot:true,done:true,chat_id:url.searchParams.get("chat_id"),frames:[...responseFrames.values()].filter(f=>f.chat_id===url.searchParams.get("chat_id"))})}\n\n`));}}),{headers:{"Content-Type":"text/event-stream"}});
@@ -101,7 +108,7 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
   const body=await req.json();const existing=rows.get(user)??[];const row={id:existing.length+1,conversation_id:conversation(user).id,role:"user",content:body.content,attachments:(body.attachments??[]).map((a:any)=>uploaded.get(`${conversation(user).id}:${a.id}`)?.attachment??a),components:[],created_at:new Date().toISOString(),client_message_id:body.client_message_id};existing.push(row);rows.set(user,existing);return Response.json(row);
  }
  if(path==="/messages"||path==="/changes")return Response.json({messages:rows.get(user)??[],cursor:0,before:0,has_more:false});
- if(path==="/seen")return Response.json({ok:true});
+ if(path==="/seen"){const body=await req.json();calls.at(-1).body=body;unreadConversations.delete(body.chat_id);return Response.json({ok:true});}
  if(path==="/deliveries")return Response.json([{id:1,message_id:1,status:deliveryStatus,target:"agent-inbound:41",last_error:"internal transport detail",attempts:1}]);
  if(path==="/delivery-failures") {deliveryStatus="delivered";return Response.json({ok:true});}
  return new Response("unknown",{status:404});
