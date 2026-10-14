@@ -29,8 +29,6 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	"image/color"
-	"image/draw"
 	"image/jpeg"
 	_ "image/png"
 	"io"
@@ -53,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.17.0
+version: 0.17.1
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -1009,9 +1007,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "post_retry",
-			Description: "Re-attempt a failed post. For failed scheduled posts where no job was created, this retries scheduling the same post. Otherwise it resets failed publish targets and re-publishes. Args: post_id.",
+			Description: "Re-attempt failed delivery. Pass target_id to retry only that destination; published and other targets are preserved. Known TikTok operations are reconciled before retry. Omit target_id for existing post-wide retry or failed-schedule recovery. Args: post_id, target_id?.",
 			InputSchema: schemaObject(map[string]any{
-				"post_id": map[string]any{"type": "integer"},
+				"post_id":   map[string]any{"type": "integer"},
+				"target_id": map[string]any{"type": "integer", "minimum": 1},
 			}, []string{"post_id"}),
 			Handler: a.toolPostRetry,
 		},
@@ -2065,6 +2064,9 @@ func (a *App) hardDeleteAccount(ctx *sdk.AppCtx, pid string, id, connID int64, p
 	if _, err := tx.Exec(`DELETE FROM social_membership_cache WHERE social_account_id=?`, id); err != nil {
 		return nil, err
 	}
+	if _, err := tx.Exec(`DELETE FROM target_delivery_attempts WHERE target_id IN (SELECT id FROM post_targets WHERE social_account_id=?)`, id); err != nil {
+		return nil, err
+	}
 	targetRes, err := tx.Exec(`DELETE FROM post_targets WHERE social_account_id=?`, id)
 	if err != nil {
 		return nil, fmt.Errorf("delete post targets: %w", err)
@@ -2723,6 +2725,9 @@ type publishJob struct {
 // (single, instagram_two_step, tiktok, …). Media URLs are resolved up
 // front via storage.files_get_url so each strategy gets a flat list.
 func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
+	a.publishSelectedPostTargets(ctx, postID, 0)
+}
+func (a *App) publishSelectedPostTargets(ctx *sdk.AppCtx, postID, selectedTargetID int64) {
 	// A queued post must not revive an account the user disconnected
 	// after scheduling. Mark those destinations terminal before loading
 	// publish jobs so Jobs can finish cleanly instead of retrying forever.
@@ -2730,12 +2735,12 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 		`UPDATE post_targets
 		    SET status='failed', last_error='social account is not active',
 		        failure_code='account_inactive', retryable=0
-		  WHERE post_id=? AND status='pending'
+		  WHERE post_id=? AND status='pending' AND (?=0 OR id=?)
 		    AND EXISTS (
 		      SELECT 1 FROM social_accounts a
 		       WHERE a.id=post_targets.social_account_id AND a.status!='active'
 		    )`,
-		postID,
+		postID, selectedTargetID, selectedTargetID,
 	)
 	// Load the post's media ids once — every target gets the same media.
 	mediaIDs, mediaProjectID := a.loadPostMedia(ctx, postID)
@@ -2756,8 +2761,8 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 		 FROM post_targets t
 		 JOIN social_accounts a ON a.id=t.social_account_id
 		 JOIN posts p ON p.id=t.post_id
-		 WHERE t.post_id=? AND t.status='pending'`,
-		postID,
+		 WHERE t.post_id=? AND t.status='pending' AND (?=0 OR t.id=?)`,
+		postID, selectedTargetID, selectedTargetID,
 	)
 	if err != nil {
 		ctx.Logger().Warn("query targets", "err", err)
@@ -4157,17 +4162,33 @@ func (a *App) publishTikTokPhotos(ctx *sdk.AppCtx, j publishJob) (string, string
 			return "", "", fmt.Errorf("tiktok photo posts cannot mix images with %q media at index %d", item.Mime, i)
 		}
 	}
+	if err := persistImageDeliveryDiagnostics(ctx, j.targetID, []imageDeliveryDiagnostics{}); err != nil {
+		return "", "", err
+	}
 	images := make([]string, 0, len(j.media))
+	diagnostics := make([]imageDeliveryDiagnostics, 0, len(j.media))
 	for i, item := range j.media {
-		prepared, err := a.prepareTikTokPhoto(ctx, item, j.mediaProjectID)
+		prepared, diagnostic, err := a.prepareImageDelivery(ctx, item, j.mediaProjectID, tikTokPhotoPolicy)
+		if err == nil {
+			var verified imageDeliveryDiagnostics
+			var proxyURL string
+			proxyURL, verified, err = a.resolveImageDeliveryURL(ctx, prepared, j.mediaProjectID, tikTokPhotoPolicy, diagnostic.DeliverySHA)
+			diagnostic.HTTPStatus = verified.HTTPStatus
+			diagnostic.DeliveryPath = verified.DeliveryPath
+			diagnostic.Validation = verified.Validation
+			if err == nil {
+				images = append(images, proxyURL)
+			}
+		} else {
+			diagnostic.Validation = "failed"
+		}
+		diagnostics = append(diagnostics, diagnostic)
+		if persistErr := persistImageDeliveryDiagnostics(ctx, j.targetID, diagnostics); persistErr != nil {
+			return "", "", persistErr
+		}
 		if err != nil {
 			return "", "", fmt.Errorf("tiktok photo %d: %w", i, err)
 		}
-		proxyURL, err := a.resolveTikTokPhotoURL(ctx, prepared, j.mediaProjectID)
-		if err != nil {
-			return "", "", fmt.Errorf("tiktok photo %d: %w", i, err)
-		}
-		images = append(images, proxyURL)
 	}
 	coverIndex := 0
 	if n, ok := numericOption(j.options, "photo_cover_index"); ok {
@@ -4219,164 +4240,20 @@ func (a *App) publishTikTokPhotos(ctx *sdk.AppCtx, j publishJob) (string, string
 	return a.waitTikTokPublish(ctx, j.connID, pubID)
 }
 
-const (
-	tiktokPhotoURLTTLSeconds = 2 * 60 * 60
-	tiktokPhotoMaxBytes      = 20 << 20
-	tiktokPhotoMaxPixels     = 40_000_000
-	tiktokJPEGFolder         = "/.social/tiktok-jpeg/"
-	tiktokJPEGVariant        = "tiktok-photo-jpeg-v1"
-)
+const tiktokPhotoURLTTLSeconds = 2 * 60 * 60
 
-func isTikTokPhotoMime(mime string) bool {
-	mime = strings.ToLower(strings.TrimSpace(strings.SplitN(mime, ";", 2)[0]))
-	return mime == "image/jpeg" || mime == "image/webp"
-}
-
-// prepareTikTokPhoto preserves formats accepted by TikTok and turns every
-// other decodable image (notably PNG) into a private JPEG derivation. The
-// deterministic folder/name pair lets Storage return the existing row on
-// retries, while the leading-dot folder keeps the derivative out of Media's
-// user-facing catalog.
+// Retained as a small provider adapter; normalization lives in the reusable pipeline.
 func (a *App) prepareTikTokPhoto(ctx *sdk.AppCtx, item mediaItem, projectID string) (mediaItem, error) {
-	if isTikTokPhotoMime(item.Mime) {
-		return item, nil
-	}
-	if item.ID <= 0 {
-		return mediaItem{}, errors.New("storage file id is missing")
-	}
-	args := map[string]any{"id": item.ID}
-	if projectID != "" {
-		args["_project_id"] = projectID
-	}
-	var source struct {
-		ContentBase64 string `json:"content_base64"`
-	}
-	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_content", args, &source); err != nil {
-		return mediaItem{}, fmt.Errorf("read source from storage: %w", err)
-	}
-	body, err := base64.StdEncoding.DecodeString(source.ContentBase64)
-	if err != nil {
-		return mediaItem{}, fmt.Errorf("decode storage content: %w", err)
-	}
-	if len(body) == 0 {
-		return mediaItem{}, errors.New("storage returned empty image content")
-	}
-	config, _, err := image.DecodeConfig(bytes.NewReader(body))
-	if err != nil {
-		return mediaItem{}, fmt.Errorf("decode unsupported TikTok image: %w", err)
-	}
-	if config.Width <= 0 || config.Height <= 0 || int64(config.Width)*int64(config.Height) > tiktokPhotoMaxPixels {
-		return mediaItem{}, fmt.Errorf("image dimensions are too large: %dx%d", config.Width, config.Height)
-	}
-	sourceImage, _, err := image.Decode(bytes.NewReader(body))
-	if err != nil {
-		return mediaItem{}, fmt.Errorf("decode unsupported TikTok image: %w", err)
-	}
-	bounds := sourceImage.Bounds()
-	opaque := image.NewRGBA(image.Rect(0, 0, bounds.Dx(), bounds.Dy()))
-	draw.Draw(opaque, opaque.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
-	draw.Draw(opaque, opaque.Bounds(), sourceImage, bounds.Min, draw.Over)
-	var encoded bytes.Buffer
-	if err := jpeg.Encode(&encoded, opaque, &jpeg.Options{Quality: 92}); err != nil {
-		return mediaItem{}, fmt.Errorf("encode TikTok JPEG: %w", err)
-	}
-	if encoded.Len() > tiktokPhotoMaxBytes {
-		return mediaItem{}, fmt.Errorf("converted JPEG is %d bytes; TikTok limit is %d", encoded.Len(), tiktokPhotoMaxBytes)
-	}
-	name := fmt.Sprintf("%d-%s.jpg", item.ID, tiktokJPEGVariant)
-	uploadArgs := map[string]any{
-		"name":           name,
-		"folder":         tiktokJPEGFolder,
-		"content_type":   "image/jpeg",
-		"content_base64": base64.StdEncoding.EncodeToString(encoded.Bytes()),
-		"source":         "social-tiktok-derivative",
-		"tags":           []string{"internal", "derived", "tiktok"},
-		"visibility":     "private",
-	}
-	if projectID != "" {
-		uploadArgs["_project_id"] = projectID
-	}
-	var uploaded struct {
-		ID        int64  `json:"id"`
-		Name      string `json:"name"`
-		SizeBytes int64  `json:"size_bytes"`
-	}
-	if err := ctx.PlatformAPI().CallAppResult("storage", "files_upload", uploadArgs, &uploaded); err != nil {
-		return mediaItem{}, fmt.Errorf("store TikTok JPEG derivative: %w", err)
-	}
-	if uploaded.ID <= 0 {
-		return mediaItem{}, errors.New("storage returned no id for TikTok JPEG derivative")
-	}
-	if uploaded.Name == "" {
-		uploaded.Name = name
-	}
-	if uploaded.SizeBytes <= 0 {
-		uploaded.SizeBytes = int64(encoded.Len())
-	}
-	return mediaItem{ID: uploaded.ID, Mime: "image/jpeg", Name: uploaded.Name, Bytes: uploaded.SizeBytes}, nil
+	prepared, _, err := a.prepareImageDelivery(ctx, item, projectID, tikTokPhotoPolicy)
+	return prepared, err
 }
-
-// resolveTikTokPhotoURL mints the redirect-free Storage URL required by
-// TikTok's PULL_FROM_URL flow. The generic media resolver deliberately keeps
-// its provider-neutral delivery behavior; only TikTok photos need Storage to
-// proxy the bytes instead of redirecting to its object-storage backend.
 func (a *App) resolveTikTokPhotoURL(ctx *sdk.AppCtx, item mediaItem, projectID string) (string, error) {
-	if item.ID <= 0 {
-		return "", errors.New("storage file id is missing")
-	}
-	args := map[string]any{
-		"id":          item.ID,
-		"ttl_seconds": tiktokPhotoURLTTLSeconds,
-		"delivery":    "proxy",
-		"disposition": "inline",
-	}
-	if projectID != "" {
-		args["_project_id"] = projectID
-	}
-	var signed struct {
-		URL string `json:"url"`
-	}
-	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_url", args, &signed); err != nil {
-		return "", fmt.Errorf("storage files_get_url(%d): %w", item.ID, err)
-	}
-	if strings.TrimSpace(signed.URL) == "" {
-		return "", fmt.Errorf("storage files_get_url(%d) returned no url", item.ID)
-	}
-	fullURL := absoluteStorageURL(signed.URL)
-	if err := preflightTikTokPhotoURL(fullURL); err != nil {
-		return "", err
-	}
-	return fullURL, nil
+	url, _, err := a.resolveImageDeliveryURL(ctx, item, projectID, tikTokPhotoPolicy, "")
+	return url, err
 }
-
-// preflightTikTokPhotoURL performs a real GET because canonical Storage URLs
-// can answer HEAD directly but redirect GET to the backend. TikTok does not
-// follow redirects for PULL_FROM_URL. A one-byte range avoids downloading the
-// whole image during validation; Storage's proxy endpoint supports ranges.
 func preflightTikTokPhotoURL(mediaURL string) error {
-	req, err := http.NewRequest(http.MethodGet, mediaURL, nil)
-	if err != nil {
-		return fmt.Errorf("build proxy URL preflight: %w", err)
-	}
-	req.Header.Set("Range", "bytes=0-0")
-	client := &http.Client{
-		Timeout: 15 * time.Second,
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("preflight proxy URL: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		return fmt.Errorf("proxy URL returned redirect status %d", resp.StatusCode)
-	}
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		return fmt.Errorf("proxy URL returned status %d", resp.StatusCode)
-	}
-	return nil
+	_, err := preflightImageDeliveryURL(mediaURL, tikTokPhotoPolicy, "")
+	return err
 }
 
 // publishTikTokVideo drives TikTok's video publish flow.
@@ -5467,7 +5344,7 @@ func loadTargetsFrom(db interface {
 		        t.attempts, COALESCE(t.last_error,''), COALESCE(t.published_at,''), COALESCE(t.options,''),
 		        COALESCE(t.failure_code,''), t.retryable, t.upstream_status, COALESCE(t.existing_post_id,''),
 		        COALESCE(t.provider_sync_status,''), COALESCE(t.provider_updated_at,''),
-		 t.audience_status,COALESCE(t.audience_confirmed_at,''),COALESCE(t.audience_confirmation_actor,''),COALESCE(a.provider_slug,'native')
+		 t.audience_status,COALESCE(t.audience_confirmed_at,''),COALESCE(t.audience_confirmation_actor,''),COALESCE(a.provider_slug,'native'), t.media_delivery_diagnostics
 		 FROM post_targets t JOIN social_accounts a ON a.id=t.social_account_id
 		 WHERE t.post_id=? ORDER BY t.id`,
 		postID,
@@ -5479,23 +5356,26 @@ func loadTargetsFrom(db interface {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			tid, acctID                                                            int64
-			platform, name, avatar, status, ppid, purl, lastErr, pubAt, optionsRaw string
-			failureCode, existingPostID, providerSyncStatus, providerUpdatedAt     string
-			audienceStatus, audienceConfirmedAt, audienceActor, targetProvider     string
-			attempts                                                               int
-			retryable                                                              int64
-			upstreamStatus                                                         int64
+			tid, acctID                                                                     int64
+			platform, name, avatar, status, ppid, purl, lastErr, pubAt, optionsRaw          string
+			failureCode, existingPostID, providerSyncStatus, providerUpdatedAt              string
+			audienceStatus, audienceConfirmedAt, audienceActor, targetProvider, deliveryRaw string
+			attempts                                                                        int
+			retryable                                                                       int64
+			upstreamStatus                                                                  int64
 		)
 		if err := rows.Scan(&tid, &acctID, &platform, &name, &avatar, &status, &ppid, &purl, &attempts, &lastErr, &pubAt,
-			&optionsRaw, &failureCode, &retryable, &upstreamStatus, &existingPostID, &providerSyncStatus, &providerUpdatedAt, &audienceStatus, &audienceConfirmedAt, &audienceActor, &targetProvider); err != nil {
+			&optionsRaw, &failureCode, &retryable, &upstreamStatus, &existingPostID, &providerSyncStatus, &providerUpdatedAt, &audienceStatus, &audienceConfirmedAt, &audienceActor, &targetProvider, &deliveryRaw); err != nil {
 			return nil, err
 		}
 		options := map[string]any{}
 		if optionsRaw != "" {
 			_ = json.Unmarshal([]byte(optionsRaw), &options)
 		}
+		var mediaDiagnostics []imageDeliveryDiagnostics
+		_ = json.Unmarshal([]byte(deliveryRaw), &mediaDiagnostics)
 		out = append(out, map[string]any{
+			"media_delivery_diagnostics":  mediaDiagnostics,
 			"id":                          tid,
 			"social_account_id":           acctID,
 			"platform":                    platform,
@@ -5532,6 +5412,10 @@ func (a *App) toolPostRetry(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if postID <= 0 {
 		return nil, errors.New("post_id required")
 	}
+	targetID := int64(intArg(args, "target_id", 0))
+	if _, supplied := args["target_id"]; supplied && targetID <= 0 {
+		return mcpError("target_id must be positive"), nil
+	}
 	unlock := lockSocialPost(ctx, postID)
 	defer unlock()
 	pid := projectScope(ctx, args)
@@ -5549,20 +5433,25 @@ func (a *App) toolPostRetry(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if targetID > 0 {
+		if out, done, err := a.reconcileSelectedRetry(ctx, postID, targetID); done {
+			return out, err
+		}
+	}
 	var attempted int
 	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM post_targets WHERE post_id=? AND attempts>0`, postID).Scan(&attempted)
-	if postStatus == "failed" && scheduleAt != "" && jobID == 0 && attempted == 0 {
+	if targetID == 0 && postStatus == "failed" && scheduleAt != "" && jobID == 0 && attempted == 0 {
 		return a.retryFailedSchedule(ctx, pid, postID, scheduleAt)
 	}
 	res, err := ctx.AppDB().Exec(
 		`UPDATE post_targets
 		    SET status='pending', last_error=NULL, failure_code='',
 		        upstream_status=0, existing_post_id=''
-		  WHERE post_id=? AND (
+		  WHERE post_id=? AND (?=0 OR id=?) AND (
 		        (status='failed' AND retryable=1)
 		      )
 		    AND EXISTS (SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.project_id=?)`,
-		postID, pid,
+		postID, targetID, targetID, pid,
 	)
 	if err != nil {
 		return nil, err
@@ -5573,7 +5462,7 @@ func (a *App) toolPostRetry(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		var terminal int
 		_ = ctx.AppDB().QueryRow(
 			`SELECT COUNT(*), COALESCE(MAX(failure_code),''), COALESCE(MAX(existing_post_id),''), COALESCE(MAX(last_error),'')
-			   FROM post_targets WHERE post_id=? AND status='failed' AND retryable=0`, postID,
+			   FROM post_targets WHERE post_id=? AND (?=0 OR id=?) AND status='failed' AND retryable=0`, postID, targetID, targetID,
 		).Scan(&terminal, &code, &existingID, &lastError)
 		if terminal > 0 {
 			return map[string]any{
@@ -5587,8 +5476,8 @@ func (a *App) toolPostRetry(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		return mcpError("no failed targets to retry on this post"), nil
 	}
-	a.publishPostTargets(ctx, postID)
-	return map[string]any{"retried": n}, nil
+	a.publishSelectedPostTargets(ctx, postID, targetID)
+	return map[string]any{"retried": n, "target_id": targetID}, nil
 }
 
 func (a *App) runScheduledPublisher(runCtx context.Context, ctx *sdk.AppCtx) error {
@@ -9746,6 +9635,9 @@ func (a *App) toolPostDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if _, err := tx.Exec(`DELETE FROM social_metric_points WHERE post_id=?`, postID); err != nil {
 		return nil, err
 	}
+	if _, err := tx.Exec(`DELETE FROM target_delivery_attempts WHERE target_id IN (SELECT id FROM post_targets WHERE post_id=?)`, postID); err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(`DELETE FROM post_targets WHERE post_id=?`, postID); err != nil {
 		return nil, fmt.Errorf("delete targets: %w", err)
 	}
@@ -10472,7 +10364,17 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(parts) == 2 && parts[1] == "retry" && r.Method == http.MethodPost {
+		var body struct {
+			TargetID int64 `json:"target_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			http.Error(w, "invalid json", 400)
+			return
+		}
 		args := projectArgsFromRequest(r)
+		if body.TargetID != 0 {
+			args["target_id"] = body.TargetID
+		}
 		args["post_id"] = id
 		out, err := a.toolPostRetry(globalCtx, args)
 		if err != nil {
