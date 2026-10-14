@@ -98,9 +98,14 @@ func dbDomainGetByName(db *sql.DB, pid, name string) (*Domain, error) {
 	))
 }
 
-func dbRegistrationIntentInsert(db *sql.DB, in *RegistrationIntent) error {
+func dbRegistrationIntentInsert(db *sql.DB, in *RegistrationIntent, contexts ...*sdk.AppCtx) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 
-	_, err := db.Exec(`INSERT INTO registration_intents
+	_, err = tx.Exec(`INSERT INTO registration_intents
 		(token, project_id, domain, years, auto_renew, whois_privacy, coupon, notes,
 		 provider_slug, connection_id, price, currency, status, expires_at, cost_cents)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)`,
@@ -109,6 +114,17 @@ func dbRegistrationIntentInsert(db *sql.DB, in *RegistrationIntent) error {
 		in.ExpiresAt.Format(time.RFC3339), in.CostCents)
 	if err != nil {
 		return fmt.Errorf("store registration intent: %w", err)
+	}
+	if len(contexts) > 0 {
+		if err = queueRegistrationPrepared(tx, in); err != nil {
+			return err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	if len(contexts) > 0 {
+		deliverDomainEvents(contexts[0], in.ProjectID)
 	}
 	return nil
 }

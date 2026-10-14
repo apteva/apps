@@ -53,8 +53,19 @@ func (a *App) toolDomainSalePublish(ctx *sdk.AppCtx, args map[string]any) (any, 
 		p["price"] = strArg(args, "price")
 		p["minimum_offer"] = strArg(args, "minimum_offer")
 		p["description"] = strArg(args, "description")
-		raw, e := providerCall(ctx, b, "set_for_sale", p)
-		return map[string]any{"provider": b.AppSlug, "domain": d, "status": "listed", "raw": raw}, e
+		_, e := providerCall(ctx, b, "set_for_sale", p)
+		if e != nil {
+			return nil, e
+		}
+		pid, err := resolveProjectFromArgs(args)
+		if err != nil {
+			return nil, err
+		}
+		snapshot, err := saveListing(ctx, pid, d, b, "on_sale", "listed", map[string]any{"name": d, "isForSale": true, "listing_type": p["listing_type"], "price": p["price"], "minimum_offer": p["minimum_offer"]}, "publish")
+		if err != nil {
+			return nil, err
+		}
+		return snapshotResult(snapshot), nil
 	}
 	mode := strArg(args, "listing_type")
 	if mode == "" {
@@ -104,7 +115,19 @@ func (a *App) toolDomainSalePublish(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if json.Unmarshal(raw, &listing) != nil || strArg(listing, "name") != d || strArg(listing, "status") == "" {
 		return nil, errors.New("Spaceship returned an unconfirmed listing; inspect its status before publishing again")
 	}
-	return map[string]any{"provider": b.AppSlug, "domain": d, "status": listing["status"], "listed": listing["status"] == "onSale", "raw": listing}, nil
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	state, status, clean, err := normalizeListing(b.AppSlug, d, listing)
+	if err != nil {
+		return nil, err
+	}
+	snapshot, err := saveListing(ctx, pid, d, b, state, status, clean, "publish")
+	if err != nil {
+		return nil, err
+	}
+	return snapshotResult(snapshot), nil
 }
 func (a *App) toolDomainSaleRemove(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	b, e := saleConnection(ctx, args)
@@ -119,8 +142,19 @@ func (a *App) toolDomainSaleRemove(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if b.AppSlug == "spaceship" {
 		tool = "delete_sellerhub_domain"
 	}
-	raw, e := providerCall(ctx, b, tool, map[string]any{"domain": d})
-	return map[string]any{"provider": b.AppSlug, "domain": d, "status": "unlisted", "raw": raw}, e
+	_, e = providerCall(ctx, b, tool, map[string]any{"domain": d})
+	if e != nil {
+		return nil, e
+	}
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	snapshot, err := saveListing(ctx, pid, d, b, "unlisted", "unlisted", map[string]any{"name": d, "status": "unlisted"}, "remove")
+	if err != nil {
+		return nil, err
+	}
+	return snapshotResult(snapshot), nil
 }
 func (a *App) toolDomainSaleGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	b, e := saleConnection(ctx, args)
@@ -131,22 +165,24 @@ func (a *App) toolDomainSaleGet(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if e != nil {
 		return nil, e
 	}
-	tool := "get_domain_info"
-	if b.AppSlug == "spaceship" {
-		tool = "get_sellerhub_domain"
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
 	}
-	raw, e := providerCall(ctx, b, tool, map[string]any{"domain": d})
-	if e != nil {
-		return nil, e
+	snapshot, err := listingGet(ctx.AppDB(), pid, d, b.ConnectionID)
+	if err != nil {
+		return nil, err
 	}
-	result := map[string]any{"provider": b.AppSlug, "domain": d, "raw": raw}
-	if b.AppSlug == "spaceship" {
-		var listing map[string]any
-		if json.Unmarshal(raw, &listing) != nil || strArg(listing, "name") != d || strArg(listing, "status") == "" {
-			return nil, errors.New("invalid Spaceship listing response")
+	if snapshot == nil || boolArg(args, "refresh", false) {
+		refreshed, e := refreshListing(ctx, pid, d, b, "manual")
+		if e != nil {
+			snapshot, _ = listingGet(ctx.AppDB(), pid, d, b.ConnectionID)
+			if snapshot == nil {
+				return nil, e
+			}
+		} else {
+			snapshot = refreshed
 		}
-		result["status"] = listing["status"]
-		result["listed"] = listing["status"] == "onSale"
 	}
-	return result, nil
+	return snapshotResult(snapshot), nil
 }

@@ -1,4 +1,4 @@
-// Domains v0.5 — safe DNS, inventory, and registrar workflows for Apteva projects.
+// Domains — DNS, inventory, purchases, valuations, sales, and SDK-managed lifecycle refresh.
 //
 // Apps that need to write DNS records (messaging for SES MX/DKIM,
 // storage for CDN CNAMEs, future certs app for ACME challenges) call
@@ -17,6 +17,7 @@
 package main
 
 import (
+	"context"
 	_ "embed"
 	"errors"
 	"os"
@@ -54,9 +55,27 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{
+		{Name: "domain_lifecycle_refresh", Schedule: "@every 30s", Run: func(c context.Context, ctx *sdk.AppCtx) error {
+			r, e := a.runLifecycleRefresh(c, ctx, false)
+			if e == nil {
+				if warnings, ok := r["warnings"].([]string); ok && len(warnings) > 0 {
+					ctx.Logger().Warn("domain refresh warnings", "warnings", warnings)
+				}
+			}
+			return e
+		}},
+		{Name: "domain_event_delivery", Schedule: "@every 5s", Run: func(c context.Context, ctx *sdk.AppCtx) error {
+			if ctx.CurrentProject() == "" {
+				return nil
+			}
+			return drainDomainEvents(c, ctx, ctx.CurrentProject())
+		}},
+	}
+}
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
@@ -129,7 +148,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "domain_pricing_get",
-			Description: "Fetch registrar pricing via the registrar provider. Args: tld? (e.g. com), connection_id?. Porkbun is supported; Spaceship pricing is not exposed because purchase flows are intentionally disabled.",
+			Description: "Fetch registrar pricing via the registrar provider. Args: tld? (e.g. com), connection_id?. Porkbun is supported; Spaceship does not expose a guaranteed standard-domain price quote or charge cap.",
 			InputSchema: schemaObject(map[string]any{
 				"tld":           map[string]any{"type": "string"},
 				"connection_id": map[string]any{"type": "integer"},
@@ -147,11 +166,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{Name: "domain_update", Description: "Update domain metadata or explicitly select a DNS connection. notes may be empty to clear; connection_id:0 marks the domain unmanaged.", InputSchema: schemaObject(map[string]any{"name": map[string]any{"type": "string"}, "notes": map[string]any{"type": "string"}, "connection_id": map[string]any{"type": "integer"}, "registrar": map[string]any{"type": "string"}}, []string{"name"}), Handler: a.toolDomainUpdate},
 		{Name: "domain_sync", Description: "Refresh registration expiry from the registrar (Porkbun) and return the current inventory entry.", InputSchema: schemaObject(map[string]any{"name": map[string]any{"type": "string"}, "connection_id": map[string]any{"type": "integer"}}, []string{"name"}), Handler: a.toolDomainSync},
-		{Name: "domain_registration_status", Description: "Inspect pending purchases. Pass confirmation_token for one purchase; cancel:true cancels only unsubmitted intents; inspect_ownership:true reads the registrar inventory without submitting a purchase.", InputSchema: schemaObject(map[string]any{"confirmation_token": map[string]any{"type": "string"}, "cancel": map[string]any{"type": "boolean"}, "inspect_ownership": map[string]any{"type": "boolean"}}, nil), Handler: a.toolRegistrationStatus},
+		{Name: "domain_registration_status", Description: "Inspect pending purchases. Pass confirmation_token for one purchase; cancel:true cancels only unsubmitted intents; inspect_ownership:true reads the registrar inventory without submitting a purchase.", InputSchema: schemaObject(map[string]any{"confirmation_token": map[string]any{"type": "string"}, "cancel": map[string]any{"type": "boolean"}, "inspect_ownership": map[string]any{"type": "boolean"}, "refresh": map[string]any{"type": "boolean"}}, nil), Handler: a.toolRegistrationStatus},
 		{Name: "domain_dns_recovery", Description: "List interrupted DNS replacements or reconcile one recovery_id by reading provider state. Does not write DNS.", InputSchema: schemaObject(map[string]any{"recovery_id": map[string]any{"type": "string"}}, nil), Handler: a.toolDNSRecovery},
 		{Name: "domain_sale_publish", Description: "Publish a domain marketplace listing with Dynadot or Spaceship. This changes public commercial state; require explicit user confirmation before calling.", InputSchema: schemaObject(map[string]any{"domain": map[string]any{"type": "string"}, "connection_id": map[string]any{"type": "integer"}, "listing_type": map[string]any{"type": "string"}, "price": map[string]any{"type": "string"}, "minimum_offer": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}}, []string{"domain"}), Handler: a.toolDomainSalePublish},
 		{Name: "domain_sale_remove", Description: "Remove a domain marketplace listing from Dynadot or Spaceship.", InputSchema: schemaObject(map[string]any{"domain": map[string]any{"type": "string"}, "connection_id": map[string]any{"type": "integer"}}, []string{"domain"}), Handler: a.toolDomainSaleRemove},
-		{Name: "domain_sale_get", Description: "Read marketplace listing status for a domain.", InputSchema: schemaObject(map[string]any{"domain": map[string]any{"type": "string"}, "connection_id": map[string]any{"type": "integer"}}, []string{"domain"}), Handler: a.toolDomainSaleGet},
+		{Name: "domain_sale_get", Description: "Read marketplace listing status for a domain.", InputSchema: schemaObject(map[string]any{"domain": map[string]any{"type": "string"}, "connection_id": map[string]any{"type": "integer"}, "refresh": map[string]any{"type": "boolean"}}, []string{"domain"}), Handler: a.toolDomainSaleGet},
+		{Name: "domain_refresh", Description: "Refresh tracked listing states, confirmed sales, and pending purchases/valuations. Read-only at providers; never buys, publishes, removes, or starts a paid estimate.", InputSchema: schemaObject(map[string]any{}, nil), Handler: a.toolDomainRefresh},
+		{Name: "domain_sale_history", Description: "Read persisted listing transitions and provider-confirmed sales for this project.", InputSchema: schemaObject(map[string]any{"domain": map[string]any{"type": "string"}}, nil), Handler: a.toolDomainSaleHistory},
+		{Name: "domain_events_list", Description: "Read durable domain lifecycle events and bus delivery status.", InputSchema: schemaObject(map[string]any{"domain": map[string]any{"type": "string"}}, nil), Handler: a.toolDomainEventsList},
 		{Name: "domain_estimate_start", Description: "Start a persisted paid domain valuation through Replicate/HumbleWorth.", InputSchema: schemaObject(map[string]any{"domain": map[string]any{"type": "string"}, "domains": map[string]any{"type": "string"}, "connection_id": map[string]any{"type": "integer"}}, nil), Handler: a.toolDomainEstimateStart},
 		{Name: "domain_estimate_list", Description: "List stored domain valuation results. refresh:true polls pending jobs and persists their results; it does not start paid predictions.", InputSchema: schemaObject(map[string]any{"domain": map[string]any{"type": "string"}, "refresh": map[string]any{"type": "boolean"}}, nil), Handler: a.toolDomainEstimateList},
 

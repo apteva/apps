@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -127,9 +128,13 @@ func (a *App) storeSpaceshipIntent(ctx *sdk.AppCtx, args map[string]any, pid, do
 	if err != nil {
 		return nil, err
 	}
+	if err = queueRegistrationPrepared(tx, in); err != nil {
+		return nil, err
+	}
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
+	deliverDomainEvents(ctx, pid)
 	return registrationDetails(in), nil
 }
 func (a *App) registerSpaceshipIntent(ctx *sdk.AppCtx, in *RegistrationIntent) (any, error) {
@@ -143,7 +148,7 @@ func (a *App) registerSpaceshipIntent(ctx *sdk.AppCtx, in *RegistrationIntent) (
 		return nil, apiError(409, "Spaceship submission must not be repeated; inspect the saved operation or account and contact Spaceship support")
 	}
 	if time.Now().UTC().After(in.ExpiresAt) {
-		if err := dbRegistrationIntentStatus(ctx.AppDB(), in.Token, "expired", nil, "confirmation expired"); err != nil {
+		if err := registrationTransition(ctx, in, "expired", nil, "confirmation expired"); err != nil {
 			return nil, err
 		}
 		return nil, apiError(409, "confirmation expired; prepare again")
@@ -161,17 +166,10 @@ func (a *App) registerSpaceshipIntent(ctx *sdk.AppCtx, in *RegistrationIntent) (
 	}
 	// No retrying a POST: SQL claims the intent before submitting once.
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := ctx.AppDB().Exec(`UPDATE registration_intents SET status='processing',attempted_at=?,updated_at=? WHERE project_id=? AND token=? AND status='prepared'`, now, now, in.ProjectID, in.Token)
-	if err != nil {
+	if err = claimRegistration(ctx, in, now); err != nil {
 		return nil, err
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return nil, err
-	}
-	if n != 1 {
-		return nil, apiError(409, "purchase already submitted")
-	}
+
 	result, callErr := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "register_domain", payload)
 	var envelope struct {
 		OperationID string `json:"operation_id"`
@@ -181,7 +179,7 @@ func (a *App) registerSpaceshipIntent(ctx *sdk.AppCtx, in *RegistrationIntent) (
 	}
 	if !spaceshipOperationID.MatchString(envelope.OperationID) {
 		message := "Spaceship purchase outcome unknown; do not resubmit. Check account/support (integration must preserve spaceship-async-operationid)."
-		if err = dbRegistrationIntentStatus(ctx.AppDB(), in.Token, "unknown", nil, message); err != nil {
+		if err = registrationTransition(ctx, in, "unknown", nil, message); err != nil {
 			return nil, err
 		}
 		return nil, apiError(502, message)
@@ -194,7 +192,7 @@ func (a *App) registerSpaceshipIntent(ctx *sdk.AppCtx, in *RegistrationIntent) (
 	}
 	return map[string]any{"registered": false, "status": "processing", "operation_id": in.OperationID, "confirmation_token": in.Token}, nil
 }
-func (a *App) pollSpaceshipRegistration(ctx *sdk.AppCtx, in *RegistrationIntent) (any, error) {
+func (a *App) pollSpaceshipRegistration(ctx *sdk.AppCtx, in *RegistrationIntent, parents ...context.Context) (any, error) {
 	_, bound, err := a.registrarFor(ctx, in.ConnectionID, in.ProjectID)
 	if err != nil {
 		return nil, err
@@ -202,7 +200,7 @@ func (a *App) pollSpaceshipRegistration(ctx *sdk.AppCtx, in *RegistrationIntent)
 	if bound.AppSlug != "spaceship" {
 		return nil, apiError(409, "registrar identity changed")
 	}
-	raw, err := providerCall(ctx, bound, "get_async_operation", map[string]any{"operationId": in.OperationID})
+	raw, err := providerCall(ctx, bound, "get_async_operation", map[string]any{"operationId": in.OperationID}, parents...)
 	if err != nil {
 		return nil, err
 	}
@@ -220,7 +218,7 @@ func (a *App) pollSpaceshipRegistration(ctx *sdk.AppCtx, in *RegistrationIntent)
 	case "pending":
 		return map[string]any{"registered": false, "status": "processing", "operation_id": in.OperationID, "confirmation_token": in.Token}, nil
 	case "failed":
-		if err = dbRegistrationIntentStatus(ctx.AppDB(), in.Token, "failed", raw, "Spaceship registration failed; inspect provider operation details"); err != nil {
+		if err = registrationTransition(ctx, in, "failed", raw, "Spaceship registration failed; inspect provider operation details"); err != nil {
 			return nil, err
 		}
 		return map[string]any{"registered": false, "status": "failed", "operation_id": in.OperationID, "raw": raw}, nil
@@ -228,7 +226,7 @@ func (a *App) pollSpaceshipRegistration(ctx *sdk.AppCtx, in *RegistrationIntent)
 		if operation.Details.Name != in.Domain {
 			return nil, errors.New("Spaceship operation completed for a different or missing domain")
 		}
-		if _, err = spaceshipOwnedDomain(ctx, bound, in.Domain); err != nil {
+		if _, err = spaceshipOwnedDomain(ctx, bound, in.Domain, parents...); err != nil {
 			return nil, err
 		}
 		in.Raw = raw
@@ -237,8 +235,8 @@ func (a *App) pollSpaceshipRegistration(ctx *sdk.AppCtx, in *RegistrationIntent)
 		return nil, errors.New("unknown Spaceship operation status")
 	}
 }
-func spaceshipOwnedDomain(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, domain string) (map[string]any, error) {
-	raw, err := providerCall(ctx, bound, "get_domain_info", map[string]any{"domain": domain})
+func spaceshipOwnedDomain(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, domain string, parents ...context.Context) (map[string]any, error) {
+	raw, err := providerCall(ctx, bound, "get_domain_info", map[string]any{"domain": domain}, parents...)
 	if err != nil {
 		return nil, err
 	}
