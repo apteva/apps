@@ -34,12 +34,21 @@ import (
 // Chromium executes the actual app-served SDK bundle, AudioWorklet and Worker.
 // Only the platform gateway and carrier are fixtures; HTTP/WS and Telephony are real.
 func TestTier2HeadlessBrowser(t *testing.T) {
-	for _, surface := range []string{"headless", "headless-webrtc-turn-recovery", "headless-listener-webrtc", "headless-listener-webrtc-24k", "headless-listener-auto", "headless-coaching-512k", "headless-coaching-jitter", "panel", "application-user"} {
+	for _, surface := range []string{"headless", "headless-webrtc-turn-recovery", "headless-webrtc-turn-recovery-90", "headless-pcm-recovery-120", "headless-listener-webrtc", "headless-listener-webrtc-24k", "headless-listener-auto", "headless-coaching-512k", "headless-coaching-jitter", "panel", "application-user"} {
 		t.Run(surface, func(t *testing.T) { runHeadlessBrowser(t, surface) })
 	}
 }
 
 func runHeadlessBrowser(t *testing.T, surface string) {
+	recoveryMS := 40000
+	if surface == "headless-webrtc-turn-recovery-90" {
+		recoveryMS = 90000
+		surface = "headless-webrtc-turn-recovery"
+	}
+	if surface == "headless-pcm-recovery-120" {
+		recoveryMS = 120000
+	}
+	t.Setenv("TELEPHONY_TEST_RECOVERY_MS", fmt.Sprint(recoveryMS))
 	inputRate := "48000"
 	if surface == "headless-listener-webrtc-24k" {
 		inputRate = "24000"
@@ -363,7 +372,7 @@ waitAnswer:
 			t.Fatalf("headless browser: %v\n%s", err, output.String())
 		}
 		t.Log(output.String())
-	case <-time.After(100 * time.Second):
+	case <-time.After(time.Duration(recoveryMS)*time.Millisecond + 80*time.Second):
 		t.Fatal("headless browser did not finish")
 	}
 }
