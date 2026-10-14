@@ -95,7 +95,7 @@ func (p *auditPlatform) ListRuntimeRealtimeProviders(string) ([]sdk.RuntimeRealt
 	p.catalogHit()
 	return []sdk.RuntimeRealtimeProvider{}, nil
 }
-func auditService(t *testing.T) (*service, *auditPlatform) {
+func auditService(t testing.TB) (*service, *auditPlatform) {
 	t.Helper()
 	db := testStore(t)
 	p := &auditPlatform{live: map[string]sdk.RuntimeSummary{}}

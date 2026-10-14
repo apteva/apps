@@ -18,7 +18,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func testStore(t *testing.T) store {
+func testStore(t testing.TB) store {
 	t.Helper()
 	db, err := sql.Open("sqlite", t.TempDir()+"/environments.db")
 	if err != nil {

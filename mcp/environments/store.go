@@ -11,6 +11,56 @@ import (
 
 type store struct{ db *sql.DB }
 
+// Reconciliation needs lifecycle state, not potentially megabytes of fixture
+// JSON. Keep this projection separate from Definition so the worker cannot
+// accidentally depend on an unpopulated specification.
+type definitionLifecycle struct {
+	ID                string
+	DesiredState      string
+	ReconcileStatus   string
+	ReconcileFailures int
+	ReconcileNextAt   *time.Time
+	HasActiveRun      bool
+}
+
+const definitionLifecycleColumns = `d.id,d.desired_state,d.reconcile_status,d.reconcile_failures,d.reconcile_next_at,
+	EXISTS(SELECT 1 FROM environment_runs r WHERE r.environment_id=d.id AND r.status IN ('starting','running','stopping'))`
+
+func scanDefinitionLifecycle(row rowScanner) (*definitionLifecycle, error) {
+	var d definitionLifecycle
+	var next sql.NullString
+	err := row.Scan(&d.ID, &d.DesiredState, &d.ReconcileStatus, &d.ReconcileFailures, &next, &d.HasActiveRun)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	d.ReconcileNextAt = parseOptionalTime(next)
+	return &d, nil
+}
+
+func (s store) listDefinitionLifecycles() ([]definitionLifecycle, error) {
+	rows, err := s.db.Query(`SELECT ` + definitionLifecycleColumns + ` FROM environment_definitions d ORDER BY d.updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []definitionLifecycle
+	for rows.Next() {
+		d, err := scanDefinitionLifecycle(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *d)
+	}
+	return out, rows.Err()
+}
+
+func (s store) getDefinitionLifecycle(id string) (*definitionLifecycle, error) {
+	return scanDefinitionLifecycle(s.db.QueryRow(`SELECT `+definitionLifecycleColumns+` FROM environment_definitions d WHERE d.id=?`, id))
+}
+
 func (s store) listDefinitions() ([]Definition, error) {
 	rows, err := s.db.Query(`SELECT id,name,description,desired_state,spec_version,spec_json,created_at,updated_at,reconcile_status,reconcile_failures,reconcile_error,reconcile_next_at,degraded_at FROM environment_definitions ORDER BY updated_at DESC`)
 	if err != nil {
