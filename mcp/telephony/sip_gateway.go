@@ -66,6 +66,7 @@ type sipSession struct {
 	answerMu       sync.Mutex
 	ended          atomic.Bool
 	mediaOnce      sync.Once
+	bridgeStarted  atomic.Bool
 	preparedMu     sync.Mutex
 	preparedBridge net.Conn
 	inviteTx       sip.ServerTransaction
@@ -584,6 +585,9 @@ func (g *sipGateway) StartMedia(row *callRow) error {
 	if session == nil {
 		return errors.New("direct SIP dialog is no longer active")
 	}
+	if err := session.prepareBridge(row); err != nil {
+		return fmt.Errorf("prepare direct SIP audio before activation: %w", err)
+	}
 	return session.startMedia()
 }
 
@@ -687,6 +691,7 @@ func (s *sipSession) startMedia() error {
 	}
 	var launchErr error
 	s.mediaOnce.Do(func() {
+		s.bridgeStarted.Store(true)
 		// Local IVR reception has stopped and ACK ownership is verified above.
 		// Drain immediately while DB/recording/bridge preparation completes.
 		s.answerMu.Lock()

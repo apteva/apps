@@ -18,12 +18,12 @@ func (s *sipSession) prepareBridge(row *callRow) error {
 	s.preparedMu.Lock()
 	defer s.preparedMu.Unlock()
 	s.answerMu.Lock()
-	answered, ended := s.media != nil, s.ended.Load()
+	bridged, ended := s.bridgeStarted.Load(), s.ended.Load()
 	s.answerMu.Unlock()
 	if ended {
 		return errAnswerCallEnded
 	}
-	if answered {
+	if bridged {
 		return nil
 	} // An idempotent answer must never replace a live peer.
 	if s.preparedBridge != nil {

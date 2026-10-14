@@ -151,3 +151,38 @@ func TestSIPHumanAnswerPreparesBridgeBeforeResponse(t *testing.T) {
 	default:
 	}
 }
+
+// An IVR may already have answered SIP before an adviser is selected. That is
+// different from an already running human bridge and still needs preparation.
+func TestSIPHumanAnswerPreparesBridgeAfterIVR(t *testing.T) {
+	f := newSIPDialogFixture(t, false, 2*time.Second)
+	f.answer(t)
+	accepted := make(chan net.Conn, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, _, err := upgradeBuffered(w, r)
+		if err == nil {
+			accepted <- conn
+		}
+	}))
+	defer server.Close()
+	u, _ := url.Parse(server.URL)
+	_, port, _ := net.SplitHostPort(u.Host)
+	t.Setenv("APTEVA_APP_PORT", port)
+	f.call.PeerKind = peerKindHuman
+	f.call.AudioBridgeURL = "pending"
+	if _, err := f.app.db().db.Exec(`UPDATE calls SET peer_kind='human',audio_bridge_url='pending' WHERE id=?`, f.call.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.gateway.StartMedia(f.call); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case conn := <-accepted:
+		defer conn.Close()
+	case <-time.After(time.Second):
+		t.Fatal("already answered SIP skipped human preparation")
+	}
+	if !f.session.bridgeStarted.Load() {
+		t.Fatal("bridge not activated")
+	}
+}
