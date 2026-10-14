@@ -1,3 +1,9 @@
+## 1.1.1
+
+- Complete and persist pending Replicate appraisals, including per-domain USD prices, errors, and the original connection. Batch requests save one history entry per domain.
+- Show stored estimates before registration and refresh pending results in the panel without starting new paid jobs.
+- Map Spaceship SellerHub listings to its name and USD money fields, with price validation.
+
 # Domains v1.1.0 release notes
 
 - Adds Spaceship purchases with explicit account-rate confirmation, saved contact IDs/attributes, 1–10 year terms, privacy and auto-renewal options in the UI and MCP tools.

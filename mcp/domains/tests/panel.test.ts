@@ -16,6 +16,7 @@ let delayAlpha = false;
 let needsMailMode = false;
 let spaceshipMode = false;
 let spaceshipSubmitted = false;
+let storedValuation = false;
 const caps = {
   write_types: ["A", "TXT", "MX", "SRV"],
   delete_types: ["A", "TXT", "MX", "SRV"],
@@ -115,6 +116,7 @@ beforeAll(async () => {
             ],
           });
         }
+        if (body.tool === "domain_estimate_list") return Response.json({valuations:storedValuation?[{id:1,domain:body.args.domain,status:"succeeded",auction:0,marketplace:145,brokerage:457,created_at:"2026-10-14T09:15:37Z"}]:[]});
         if (spaceshipMode) {
           const purchase = {confirmation_token: "spaceship-token", status: spaceshipSubmitted ? "processing" : "prepared", domain: "fresh.example", provider:"spaceship", connection_id:1, years:2, auto_renew:true, whois_privacy:true, billing_mode:"account_rate", options:{contacts:{registrant:"1ZdMXpapqp9sle5dl8BlppTJXAzf5"}}, expires_at:"2030-01-01T00:00:00Z"};
           if (body.tool === "domain_availability_check") return Response.json({availability:{domain:body.args.domain,available:true,known:true,provider:"spaceship",min_duration:1}});
@@ -394,3 +396,16 @@ test("Spaceship purchase shows account-rate consent and keeps accepted operation
     expect(await dialog.textContent()).toContain("Checking status does not submit another purchase.");
   } finally {spaceshipMode=false;await page.close()}
 });
+
+ test("stored estimates are shown for an available domain before purchase", async()=>{
+  storedValuation=true;calls.length=0;const page=await loadPage();
+  try{
+   await page.getByRole("button",{name:"Register",exact:true}).click();
+   await page.getByLabel("Domain",{exact:true}).fill("vectorlantern.com");
+   await page.getByRole("button",{name:"Check availability",exact:true}).click();
+   await page.getByText(/marketplace \$145/).waitFor();
+   expect(await page.getByText(/auction \$0/).count()).toBe(1);
+   expect(calls.some(c=>c.tool==="domain_estimate_list"&&c.args.domain==="vectorlantern.com"&&c.args.refresh===true)).toBe(true);
+   expect(calls.some(c=>c.tool==="domain_estimate_start"||c.tool==="domain_register")).toBe(false);
+  }finally{storedValuation=false;await page.close()}
+ });
