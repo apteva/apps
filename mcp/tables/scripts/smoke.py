@@ -254,7 +254,30 @@ with tempfile.TemporaryDirectory(prefix="tables-smoke-") as temp:
         assert restored["batch_deadline_at"]==window["batch_deadline_at"] and not restored["ready"], restored
         mcp("projections_refresh", {"name":"measurement_batch","scope":{"centre_id":"a"},"force":True})
         await_batch(8)
-        print("PASS: real HTTP/MCP authentication, exact numbers, cursors, batch array references before/after restart, optimistic updates, automatic restart migration and watched projection recovery, filter-leading indexes, worker metrics, diagnostics cursor/detail/summary APIs, additive history/statement timing migrations and compiled statement miss/hit phases, additive batch migration, durable collection windows and grouped forced publication")
+        # Rehearse the dynamic head-index migration on registered storage,
+        # including the retained retired version, through real SDK startup.
+        await_projection(8)
+        stop()
+        with sqlite3.connect(env["DB_PATH"]) as db:
+            registered=list(db.execute("SELECT id FROM projection_definitions WHERE storage_format>0"))
+            before_heads={pid:list(db.execute(f'SELECT * FROM "ph_{pid}" ORDER BY scope_key')) for (pid,) in registered}
+            assert any(r[0]=="retired" for r in db.execute("SELECT status FROM projection_definitions"))
+            for (pid,) in registered:
+                db.execute(f'DROP INDEX "phg_{pid}"')
+        start()
+        with sqlite3.connect(env["DB_PATH"]) as db:
+            for (pid,) in registered:
+                assert list(db.execute(f'PRAGMA index_info("phg_{pid}")'))[0][2]=="generation"
+                assert list(db.execute(f'SELECT * FROM "ph_{pid}" ORDER BY scope_key'))==before_heads[pid]
+                plan=list(db.execute(f'EXPLAIN QUERY PLAN SELECT generation FROM "ph_{pid}" h WHERE generation=?',("missing",)))
+                assert any(f'USING COVERING INDEX phg_{pid}' in r[3] for r in plan), plan
+        await_projection(8)
+        await_batch(8)
+        stop()
+        start()
+        await_projection(8)
+        await_batch(8)
+        print("PASS: real HTTP/MCP authentication, exact numbers, cursors, batch array references before/after restart, optimistic updates, automatic restart migration and watched projection recovery, filter-leading indexes, worker metrics, diagnostics cursor/detail/summary APIs, additive history/statement timing migrations and compiled statement miss/hit phases, additive batch migration, durable collection windows and grouped forced publication, idempotent published-head index restoration for retained/retired results")
     finally:
         stop()
         log.close()

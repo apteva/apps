@@ -64,6 +64,16 @@ func createProjectionDataTable(tx *writeTx, p *projectionDefinition) error {
 
 func createProjectionHeadsTable(tx *writeTx, p *projectionDefinition) error {
 	_, err := tx.Exec(`CREATE TABLE ` + quote(projectionHeads(p)) + ` (scope_key TEXT PRIMARY KEY,generation TEXT NOT NULL,watermark INTEGER NOT NULL,computed_at_ms INTEGER NOT NULL,coverage_from TEXT,coverage_to TEXT,row_count INTEGER NOT NULL DEFAULT 0,result_bytes INTEGER NOT NULL DEFAULT 0)`)
+	if err != nil {
+		return err
+	}
+	return createProjectionHeadGenerationIndex(tx, p)
+}
+
+// A generation can serve many published scopes. Cleanup probes it by generation,
+// while the scope primary key continues to serve publication and visible reads.
+func createProjectionHeadGenerationIndex(tx *writeTx, p *projectionDefinition) error {
+	_, err := tx.Exec(`CREATE INDEX IF NOT EXISTS ` + quote(fmt.Sprintf("phg_%d", p.ID)) + ` ON ` + quote(projectionHeads(p)) + ` (generation)`)
 	return err
 }
 
@@ -190,6 +200,11 @@ func (a *App) ensureProjectionDataIndexes(app *sdk.AppCtx) error {
 	defer tx.Rollback()
 	for _, id := range ids {
 		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS ` + quote(fmt.Sprintf("pgs_%d", id)) + ` ON ` + quote(fmt.Sprintf("pd_%d", id)) + ` (_projection_scope,_projection_generation,id)`); err != nil {
+			return err
+		}
+		// Idempotent startup migration includes active, building, paused and retired
+		// registered storage. It runs once per mounted database, outside worker ticks.
+		if err := createProjectionHeadGenerationIndex(tx, &projectionDefinition{ID: id}); err != nil {
 			return err
 		}
 	}

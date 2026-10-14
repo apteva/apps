@@ -1,4 +1,4 @@
-# Tables (v0.2.18)
+# Tables (v0.2.19)
 
 Typed-row database for Apteva agents and human teams. The row-shaped
 sibling to the `storage` app.
@@ -293,3 +293,18 @@ repeatedly overtake them. Use `projections_refresh` with `force:true` for an
 administrative bypass, or `projections_update` to change the interval (an open
 window cannot be postponed). Changing SQL or refresh mode requires a replacement
 version. Older releases cannot operate the new batching mode.
+
+## Generation cleanup index (0.2.19)
+
+Published-head tables retain the scope primary key and now also have a nonunique
+`phg_<id>(generation)` index. It serves cleanup discovery and transactional safety
+checks without changing visible rows. Startup automatically adds missing indexes
+for registered projection storage, including retired versions; repeated starts
+are idempotent. This is a Go storage migration because SQL identifiers depend on
+registered projection IDs, and it does not need a fixed-name SQL migration file.
+The mounted-database cache keeps index DDL out of recurring worker ticks.
+
+Cleanup still runs every 45 seconds under its 150 ms maintenance budget, with
+bounded deletion and fair rotation. Shared published generations and valid active
+or retired leases remain protected. Retirement alone never makes data removable.
+A persistent candidate queue is a separate follow-up.

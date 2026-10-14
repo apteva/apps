@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/tables
 go 1.25.12
 
 require (
-	github.com/apteva/app-sdk v0.100.0
+	github.com/apteva/app-sdk v0.102.0
 	modernc.org/sqlite v1.50.0
 )
 

@@ -1,3 +1,10 @@
+# Tables v0.2.19 — indexed generation cleanup
+
+- Create nonunique `phg_<id>` indexes on published-head `generation` for new projections, keeping the scope primary key and visibility join unchanged.
+- Add the same indexes through the idempotent startup storage migration using registered projection IDs, including paused/building/retired definitions. No result rewrite or manual database maintenance is required; the mounted-database storage cache keeps DDL out of recurring worker ticks.
+- Retain published-head, active refresh lease and unexpired retired lease transactional protections. Keep the 45-second cleanup cadence, 150 ms maintenance budget, bounded row deletion batches and fair rotation. Persistent candidate tracking remains a separate follow-up.
+- Add indexed discovery/recheck plans, legacy index restoration/idempotence, shared-generation, retired retention and crash/orphan regressions, plus discovery/publication benchmarks with representative generation/head counts. Pin SDK v0.102.0 after verifying tag ancestry.
+
 # Tables v0.2.18 — projection-wide batching
 
 - Add opt-in `refresh_mode: projection_batch` with a positive `min_refresh_interval_seconds` and validated `batch_scope_sql`. The first bound parameter is a JSON array of scope objects; existing `params` follow. Existing definitions retain per-scope cooldown behavior.
