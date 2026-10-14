@@ -544,8 +544,10 @@ func receiveRTCAudio(remote *webrtc.TrackRemote, stats *rtcMediaStats, done <-ch
 			at := time.Now()
 			processed := at
 			if stats.ingress.socket != nil {
-				if kernel, ok := stats.ingress.socket.take(p.SSRC, p.SequenceNumber, at); ok {
-					at = kernel
+				if socket, ok := stats.ingress.socket.takePacket(p.SSRC, p.SequenceNumber, at); ok {
+					// Kernel timing is evidence only. Collection availability or
+					// contention must never change the media clock/admission.
+					stats.ingress.observeSocket(p, socket, at, stats.rtp.connectionID, stats.rtp.pathRevision.Load())
 				}
 			}
 			if ignoreRTCPadding(p, stats) {

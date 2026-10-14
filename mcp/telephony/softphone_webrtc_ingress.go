@@ -9,6 +9,8 @@ import (
 )
 
 type rtcIngressEvent struct {
+	SocketWaitMS      float64   `json:"socket_wait_ms,omitempty"`
+	PionWaitMS        float64   `json:"pion_wait_ms,omitempty"`
 	At                time.Time `json:"at"`
 	ConnectionID      string    `json:"connection_id"`
 	PathRevision      uint64    `json:"path_revision"`
@@ -138,4 +140,20 @@ func mergeRTCIngress(a, b rtcIngressSnapshot) rtcIngressSnapshot {
 		a.Events = a.Events[len(a.Events)-64:]
 	}
 	return a
+}
+
+// Retain only delayed socket observations, independently of the established
+// RTP arrival sequence/clock. No formatting, database access or blocking lock.
+func (d *rtcIngressTelemetry) observeSocket(p *rtp.Packet, socket rtcSocketPacket, processed time.Time, connection string, path uint64) {
+	if processed.Sub(socket.at) <= 20*time.Millisecond {
+		return
+	}
+	if !d.mu.TryLock() {
+		d.skipped.Add(1)
+		return
+	}
+	defer d.mu.Unlock()
+	e := rtcIngressEvent{At: socket.at.UTC(), ConnectionID: connection, PathRevision: path, SSRC: p.SSRC, Sequence: p.SequenceNumber, Timestamp: p.Timestamp, Kind: "socket_processing_delay", QueueWaitMS: max(0, float64(processed.Sub(socket.at))/1e6), SocketWaitMS: max(0, float64(socket.dequeued.Sub(socket.at))/1e6), PionWaitMS: max(0, float64(processed.Sub(socket.dequeued))/1e6)}
+	d.events[d.count%uint64(len(d.events))] = e
+	d.count++
 }

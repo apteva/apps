@@ -10,6 +10,7 @@ import (
 
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
+	"github.com/pion/rtp"
 )
 
 func TestRTCTailFlushPreservesSamplesAndDeadline(t *testing.T) {
@@ -279,5 +280,20 @@ func TestRTCCaptureCadenceDoesNotAccumulateTimerLateness(t *testing.T) {
 	}
 	if stats.snapshot().IngressDiscardedMS != 0 {
 		t.Fatal("healthy audio discarded")
+	}
+}
+
+func TestRTCKernelEvidenceDoesNotMoveArrivalClock(t *testing.T) {
+	var d rtcIngressTelemetry
+	now := time.Now()
+	packet := &rtp.Packet{Header: rtp.Header{SSRC: 123, SequenceNumber: 1, Timestamp: 960}}
+	d.observe(packet, now, now, 0, "connection", 1, "received", 0)
+	d.observeSocket(packet, rtcSocketPacket{at: now.Add(-100 * time.Millisecond), dequeued: now.Add(-30 * time.Millisecond)}, now, "connection", 1)
+	s := d.snapshot()
+	if !d.previous.At.Equal(now) || s.Packets != 1 {
+		t.Fatal("diagnostic changed arrival/sequence ownership")
+	}
+	if len(s.Events) != 2 || s.Events[1].SocketWaitMS != 70 || s.Events[1].PionWaitMS != 30 {
+		t.Fatal("socket incident timing missing", s)
 	}
 }

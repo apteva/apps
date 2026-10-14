@@ -39,24 +39,30 @@ func (d *rtcSocketTelemetry) record(data []byte, at, dequeued time.Time) {
 	}
 	d.packets[(uint32(sequence)^ssrc)%uint32(len(d.packets))] = rtcSocketPacket{ssrc, sequence, at, dequeued, true}
 	d.mu.Unlock()
-	if !at.Equal(dequeued) {
-		d.timestampPackets.Add(1)
-		atomicMax(&d.maxSocketWait, max(0, dequeued.Sub(at).Nanoseconds()))
-	}
+
 }
 func (d *rtcSocketTelemetry) take(ssrc uint32, sequence uint16, now time.Time) (time.Time, bool) {
+	p, ok := d.takePacket(ssrc, sequence, now)
+	return p.at, ok
+}
+func (d *rtcSocketTelemetry) takePacket(ssrc uint32, sequence uint16, now time.Time) (rtcSocketPacket, bool) {
 	if !d.mu.TryLock() {
 		d.skipped.Add(1)
-		return time.Time{}, false
+		return rtcSocketPacket{}, false
 	}
 	defer d.mu.Unlock()
 	p := &d.packets[(uint32(sequence)^ssrc)%uint32(len(d.packets))]
 	if !p.valid || p.ssrc != ssrc || p.sequence != sequence || now.Sub(p.dequeued) > time.Second {
-		return time.Time{}, false
+		return rtcSocketPacket{}, false
 	}
 	p.valid = false
+	// Only matched, decrypted RTP accepted by Pion contributes media counters.
+	if !p.at.Equal(p.dequeued) {
+		d.timestampPackets.Add(1)
+		atomicMax(&d.maxSocketWait, max(0, p.dequeued.Sub(p.at).Nanoseconds()))
+	}
 	atomicMax(&d.maxPionWait, max(0, now.Sub(p.dequeued).Nanoseconds()))
-	return p.at, true
+	return *p, true
 }
 
 type rtcObservedNet struct {
