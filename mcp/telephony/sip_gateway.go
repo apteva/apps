@@ -61,25 +61,27 @@ type sipSession struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 
-	local         sipLocalRuntime
-	recorder      atomic.Pointer[localCallRecorder]
-	answerMu      sync.Mutex
-	ended         atomic.Bool
-	mediaOnce     sync.Once
-	inviteTx      sip.ServerTransaction
-	initialACK    chan struct{}
-	ackOnce       sync.Once
-	signalMu      sync.Mutex
-	refreshMu     sync.Mutex
-	refreshACK    chan struct{}
-	refreshCSeq   uint32
-	remoteSeq     atomic.Uint32
-	localSDP      []byte
-	remoteTarget  sip.Uri
-	timer         sipSessionTimer
-	timerUpdated  time.Time
-	timerWake     chan struct{}
-	refreshCancel context.CancelFunc
+	local          sipLocalRuntime
+	recorder       atomic.Pointer[localCallRecorder]
+	answerMu       sync.Mutex
+	ended          atomic.Bool
+	mediaOnce      sync.Once
+	preparedMu     sync.Mutex
+	preparedBridge net.Conn
+	inviteTx       sip.ServerTransaction
+	initialACK     chan struct{}
+	ackOnce        sync.Once
+	signalMu       sync.Mutex
+	refreshMu      sync.Mutex
+	refreshACK     chan struct{}
+	refreshCSeq    uint32
+	remoteSeq      atomic.Uint32
+	localSDP       []byte
+	remoteTarget   sip.Uri
+	timer          sipSessionTimer
+	timerUpdated   time.Time
+	timerWake      chan struct{}
+	refreshCancel  context.CancelFunc
 }
 
 func (a *App) startSIPGateway(ctx *sdk.AppCtx) error {
@@ -571,6 +573,9 @@ func (g *sipGateway) Answer(row *callRow) error {
 	if session == nil {
 		return errors.New("direct SIP dialog is no longer active")
 	}
+	if err := session.prepareBridge(row); err != nil {
+		return fmt.Errorf("prepare direct SIP audio before answer: %w", err)
+	}
 	return session.answer()
 }
 
@@ -682,6 +687,15 @@ func (s *sipSession) startMedia() error {
 	}
 	var launchErr error
 	s.mediaOnce.Do(func() {
+		// Local IVR reception has stopped and ACK ownership is verified above.
+		// Drain immediately while DB/recording/bridge preparation completes.
+		s.answerMu.Lock()
+		media := s.media
+		if !s.ended.Load() && media != nil {
+			media.startEarlyReceiver()
+			media.early.answered.Store(true)
+		}
+		s.answerMu.Unlock()
 		if !s.gateway.runTask(func() { s.gateway.app.bridgeDirectSIPMedia(s) }) {
 			launchErr = errors.New("SIP gateway stopping")
 		}
@@ -704,6 +718,7 @@ func (s *sipSession) finishWithSignaling(leg string, cause error) error {
 		refreshCancel()
 	}
 	s.cancel()
+	s.closePreparedBridge()
 	if leg == "carrier" {
 		_ = s.stopLocalMedia()
 	}

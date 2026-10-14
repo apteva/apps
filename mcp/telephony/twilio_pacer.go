@@ -141,7 +141,11 @@ func (p *twilioAudioPacer) enqueueWithDiagnostics(ctx context.Context, packets [
 	}
 	paced := make([]twilioPacedPacket, len(packets))
 	for i, packet := range packets {
-		paced[i] = twilioPacedPacket{EnqueuedAt: time.Now(), PCM: packet.PCM, ItemID: frame.ItemID, AudioEndMS: packet.AudioEndMS}
+		at := packet.SourceAt
+		if at.IsZero() {
+			at = time.Now()
+		}
+		paced[i] = twilioPacedPacket{EnqueuedAt: at, PCM: packet.PCM, ItemID: frame.ItemID, AudioEndMS: packet.AudioEndMS}
 	}
 	result := p.command(ctx, twilioPacerCommand{packets: paced})
 	return result.queuedMS, result.droppedMS, result.err

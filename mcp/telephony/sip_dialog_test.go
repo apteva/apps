@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -232,6 +233,12 @@ func TestDIDWWDirectSIPDecisionOfferKeepsCallerRingingUntilAnswer(t *testing.T) 
 	if err != nil || len(offers) != 1 || offers[0].DestinationID != "sip-adviser" || f.session.media != nil {
 		t.Fatalf("SIP offer did not preserve unanswered leg: %+v %v", offers, err)
 	}
+	// A real human answer now prepares its authenticated loopback before 200.
+	peerServer := softphoneTestServer(t, f.app)
+	u, _ := url.Parse(peerServer.URL)
+	_, port, _ := net.SplitHostPort(u.Host)
+	t.Setenv("APTEVA_APP_PORT", port)
+	t.Cleanup(f.session.closePreparedBridge)
 	f.answer(t)
 	if f.session.media == nil {
 		t.Fatal("selected SIP call did not answer")

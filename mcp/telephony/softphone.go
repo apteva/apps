@@ -351,6 +351,10 @@ func (h *softphoneHub) toPeer(op ws.OpCode, data []byte) {
 // Source ownership, hold and answer state are checked atomically with enqueue.
 // An old browser completing a read after reconnect cannot inject microphone audio.
 func (h *softphoneHub) forwardMicrophone(source *websocketWriterPump, data []byte) {
+	h.forwardMicrophoneAt(source, data, time.Now(), false)
+}
+
+func (h *softphoneHub) forwardMicrophoneAt(source *websocketWriterPump, data []byte, at time.Time, sourced bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed || h.browser != source || h.held {
@@ -370,13 +374,13 @@ func (h *softphoneHub) forwardMicrophone(source *websocketWriterPump, data []byt
 	}
 	h.flushStartupMicrophoneLocked(now)
 	if h.peer == nil {
-		h.bufferStartupMicrophoneLocked(data, now)
+		h.bufferStartupMicrophoneAtLocked(data, at, sourced)
 		return
 	}
 	if h.startup.FirstForwardedAt == "" {
 		h.startup.FirstForwardedAt = ringTime(now)
 	}
-	h.peer.QueueAudio(data)
+	queueMicrophoneSource(h.peer, data, at, sourced)
 }
 
 type softphoneRegistry struct {
@@ -844,6 +848,12 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		case ws.OpBinary:
 			// Operator microphone audio, PCM16LE @ 24 kHz.
 			payload, sequence, framed := decodeSoftphoneAudioFrame(data)
+			sourceAt, sourced := time.Now(), false
+			if _, rtc := writer.conn.(*rtcHubConn); rtc {
+				if pcm, at, ok := decodeMicrophoneSource(data); ok {
+					payload, sourceAt, sourced = pcm, at, true
+				}
+			}
 			sourceSequence := ""
 			if framed {
 				hub.observeCaptureFrame(sequence, connectionID)
@@ -858,7 +868,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			if len(payload) == 0 {
 				continue
 			}
-			hub.forwardMicrophone(writer, payload)
+			hub.forwardMicrophoneAt(writer, payload, sourceAt, sourced)
 		case ws.OpText:
 			var control struct {
 				Type          string                   `json:"type"`

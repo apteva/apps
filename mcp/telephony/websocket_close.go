@@ -422,6 +422,11 @@ func (p *websocketWriterPump) queueAudioAt(data []byte, headerBytes int, receive
 		trimmed := make([]byte, headerBytes+liveAudioMaxBytes)
 		copy(trimmed, data[:headerBytes])
 		copy(trimmed[headerBytes:], data[headerBytes+pcmBytes-liveAudioMaxBytes:headerBytes+pcmBytes])
+		if headerBytes == microphoneSourceHeader && binary.LittleEndian.Uint64(trimmed) == microphoneSourceMagic {
+			advance := time.Duration(pcmBytes-liveAudioMaxBytes) * time.Second / 48000
+			received = received.Add(advance)
+			binary.LittleEndian.PutUint64(trimmed[8:], uint64(received.UnixNano()))
+		}
 		if headerBytes == sourceAudioHeaderBytes {
 			advance := float64(pcmBytes-liveAudioMaxBytes) * 1000 / 48000
 			for _, offset := range []int{32, 48} {

@@ -16,6 +16,33 @@ type rtcPCMSegment struct {
 	expires time.Time
 }
 
+// Called only by the paced owner after a full packet interval without new PCM.
+// Complete a live utterance tail before its deadline. The missing suffix is a
+// short ramp to silence; no received sample is changed or given a new lifetime.
+func (f *rtcPCMFramer) flushPartial(now time.Time) (rtcPCMFrame, int) {
+	if len(f.pending) == 0 || len(f.segments) == 0 {
+		return rtcPCMFrame{}, 0
+	}
+	deadline := f.segments[0].expires
+	for _, s := range f.segments[1:] {
+		if s.expires.Before(deadline) {
+			deadline = s.expires
+		}
+	}
+	if !deadline.After(now) {
+		return rtcPCMFrame{}, 0
+	}
+	pcm := make([]int16, 480)
+	n := copy(pcm, f.pending)
+	padding := len(pcm) - n
+	last := int32(pcm[n-1])
+	for i := n; i < len(pcm); i++ {
+		pcm[i] = int16(last * int32(len(pcm)-1-i) / int32(padding))
+	}
+	f.pending, f.segments = f.pending[:0], f.segments[:0]
+	return rtcPCMFrame{pcm: pcm, expires: deadline}, padding
+}
+
 func (f *rtcPCMFramer) discardExpired(now time.Time) int {
 	dropped, read, kept := 0, 0, 0
 	segments := f.segments[:0]

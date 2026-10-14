@@ -540,6 +540,11 @@ func testRTCExistingHubMediaHoldAndReplacement(t *testing.T, query string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	got := readBinaryWithin(t, peer, 3*time.Second)
+	pcmGot, sourceAt, sourced := decodeMicrophoneSource(got)
+	if !sourced || sourceAt.IsZero() || time.Since(sourceAt) > 2*time.Second {
+		t.Fatal("missing capture provenance", sourceAt)
+	}
+	got = pcmGot
 	if len(got) != 960 {
 		t.Fatal("hub PCM", len(got))
 	}
