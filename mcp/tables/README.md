@@ -1,4 +1,4 @@
-# Tables (v0.2.19)
+# Tables (v0.2.20)
 
 Typed-row database for Apteva agents and human teams. The row-shaped
 sibling to the `storage` app.
@@ -294,7 +294,7 @@ administrative bypass, or `projections_update` to change the interval (an open
 window cannot be postponed). Changing SQL or refresh mode requires a replacement
 version. Older releases cannot operate the new batching mode.
 
-## Generation cleanup index (0.2.19)
+## Generation cleanup index (0.2.20)
 
 Published-head tables retain the scope primary key and now also have a nonunique
 `phg_<id>(generation)` index. It serves cleanup discovery and transactional safety

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	sdk "github.com/apteva/app-sdk"
 	"reflect"
@@ -188,5 +190,30 @@ func TestProjectionHeadIndexSharedGenerationAndCrashCleanup(t *testing.T) {
 	}
 	if !reflect.DeepEqual(before, projectionRows(t, a, ctx)) {
 		t.Fatal("crash recovery changed visible results")
+	}
+}
+
+func TestProjectionHeadIndexKeepsPublicationDeadlineAndRollback(t *testing.T) {
+	a, ctx, p := schedulerFixture(t)
+	if p.Options.PublishMs != 500 {
+		t.Fatal("default publication budget changed", p.Options.PublishMs)
+	}
+	assertHeadGenerationIndex(t, ctx, p)
+	before := projectionRows(t, a, ctx)
+	// Exercise the same transaction deadline path with a short configured cap.
+	// The write must roll back even when the callback consumes its entire budget.
+	p.Options.PublishMs = 10
+	err := publicationTx(context.Background(), ctx, p, func(c context.Context, tx *sql.Tx) error {
+		if _, err := tx.ExecContext(c, `UPDATE `+quote(projectionHeads(p))+` SET generation='should_not_publish'`); err != nil {
+			return err
+		}
+		<-c.Done()
+		return c.Err()
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("publication deadline not enforced", err)
+	}
+	if !reflect.DeepEqual(before, projectionRows(t, a, ctx)) {
+		t.Fatal("expired publication changed visible generation")
 	}
 }

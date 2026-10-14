@@ -2,9 +2,9 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.2.19
+version: 0.2.20
 description: |
-  v0.2.19 Indexes published heads by generation, automatically upgrading existing
+  v0.2.20 Indexes published heads by generation, automatically upgrading existing
   projection storage to avoid correlated head scans during bounded cleanup.
   v0.2.18 Adds opt-in projection-wide durable windows, multi-scope SQL,
   bounded staging with atomic grouped publication and fair batch scheduling.
@@ -272,7 +272,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.2.19
+    ref: tables/v0.2.20
     entry: mcp/tables
   port: 8080
   health_check: /health

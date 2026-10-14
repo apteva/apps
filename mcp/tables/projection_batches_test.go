@@ -397,7 +397,11 @@ func TestProjectionBatchFixedCutoffDoesNotFollowContinuousTraffic(t *testing.T) 
 	defer a.closeProjectionReader()
 	projectionSourceTable(t, a, ctx)
 	mustCall(t, a, ctx, "indexes_create", map[string]any{"table": "events", "name": "by_centre", "columns": []any{"centre_id"}})
-	mustCall(t, a, ctx, "projections_create", batchProjectionArgs("event_totals"))
+	// This test verifies durable cutoff correctness across 1,500 scopes, not
+	// hardware-dependent latency. Race instrumentation magnifies SQLite VM cost.
+	args := batchProjectionArgs("event_totals")
+	args["max_publication_ms"] = 2000
+	mustCall(t, a, ctx, "projections_create", args)
 	runProjectionWorker(t, a, ctx)
 	for j := 0; j < 3; j++ {
 		rows := make([]any, 500)
@@ -433,8 +437,19 @@ func TestProjectionBatchFixedCutoffDoesNotFollowContinuousTraffic(t *testing.T) 
 	if err != nil || !ok || item.PendingID != cutoff {
 		t.Fatal("deadline followed latest traffic", item.PendingID, cutoff, ok, err)
 	}
-	if err := a.refreshProjectionScope(t.Context(), ctx, item); err != nil {
-		t.Fatal(err)
+	timing := &projectionTimingState{}
+	started := time.Now()
+	release, wait, capacityErr := a.acquireCapacity(t.Context(), ctx, projectionCapacityKind)
+	if capacityErr != nil {
+		t.Fatal(capacityErr)
+	}
+	timing.workerQueue = wait
+	measured := context.WithValue(context.WithValue(t.Context(), projectionTimingKey{}, timing), projectionCapacityHeldKey{}, true)
+	refreshErr := a.refreshProjectionScope(measured, ctx, item)
+	release()
+	t.Logf("refresh phases: SQL %s, staging %s, committed publication %s, write wait %s", timing.sqlExecution, timing.staging, timing.publication, timing.writeLock)
+	if err := refreshErr; err != nil {
+		t.Fatalf("refresh after %s (calculation SQL %s, staging %s, committed publication %s, write wait %s; limits refresh=%d ms/publication=%d ms): %v", time.Since(started), timing.sqlExecution, timing.staging, timing.publication, timing.writeLock, p.Options.MaxMs, p.Options.PublishMs, err)
 	}
 	status := projectionStatusFor(t, a, ctx, map[string]any{"name": p.Name})
 	if status["pending_scopes"] != 1 || status["ready"] != false {
