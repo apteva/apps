@@ -15,7 +15,7 @@ func newSpaceshipPurchaseStub() *stubPlatform {
 		"check_single_domain_availability": {Success: true, Status: 200, Data: json.RawMessage(`{"domain":"example.com","result":"available","premiumPricing":[]}`)},
 		"get_contact":                      {Success: true, Status: 200, Data: json.RawMessage(`{"id":"` + contactIDFixture + `"}`)},
 		"register_domain":                  {Success: true, Status: 202, Data: json.RawMessage(`{"operation_id":"operation123"}`)},
-		"get_async_operation":              {Success: true, Status: 200, Data: json.RawMessage(`{"status":"pending","type":"domains_Create"}`)},
+		"get_async_operation":              {Success: true, Status: 200, Data: json.RawMessage(`{"status":"pending","type":"domains_Register"}`)},
 		"get_domain_info":                  {Success: true, Status: 200, Data: json.RawMessage(`{"name":"example.com","lifecycleStatus":"registered"}`)},
 	}}
 }
@@ -64,7 +64,7 @@ func TestSpaceshipPurchasePersistsOptionsAndPollsWithoutResubmission(t *testing.
 			t.Fatal(err)
 		}
 	}
-	plat.replyByTool["get_async_operation"].Data = json.RawMessage(`{"status":"success","type":"domains_Create"}`)
+	plat.replyByTool["get_async_operation"].Data = json.RawMessage(`{"status":"success","type":"domains_Register","details":{"name":"example.com","message":"Registered","orderId":"fixture-order"}}`)
 	if _, err = app.toolRegistrationStatus(ctx, map[string]any{"confirmation_token": token}); err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestSpaceshipAsyncFailureAndScope(t *testing.T) {
 	if _, err = app.toolDomainRegister(ctx, map[string]any{"confirmation_token": token}); err != nil {
 		t.Fatal(err)
 	}
-	plat.replyByTool["get_async_operation"].Data = json.RawMessage(`{"status":"failed","type":"domains_Create"}`)
+	plat.replyByTool["get_async_operation"].Data = json.RawMessage(`{"status":"failed","type":"domains_Register"}`)
 	if _, err = app.toolRegistrationStatus(ctx, map[string]any{"confirmation_token": token}); err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +251,7 @@ func TestSpaceshipExpiryCancellationAndOwnershipMismatch(t *testing.T) {
 				if _, err = app.toolDomainRegister(ctx, map[string]any{"confirmation_token": token}); err != nil {
 					t.Fatal(err)
 				}
-				plat.replyByTool["get_async_operation"].Data = json.RawMessage(`{"status":"success","type":"domains_Create"}`)
+				plat.replyByTool["get_async_operation"].Data = json.RawMessage(`{"status":"success","type":"domains_Register","details":{"name":"example.com","message":"Registered","orderId":"fixture-order"}}`)
 				plat.replyByTool["get_domain_info"].Data = json.RawMessage(`{"name":"another.com","lifecycleStatus":"registered"}`)
 			}
 			if _, err = app.toolDomainRegister(ctx, map[string]any{"confirmation_token": token}); err == nil {
@@ -259,6 +259,42 @@ func TestSpaceshipExpiryCancellationAndOwnershipMismatch(t *testing.T) {
 			}
 			if d, _ := dbDomainGetByName(ctx.AppDB(), "test-proj", "example.com"); d != nil {
 				t.Fatal("inventory updated despite failed validation")
+			}
+		})
+	}
+}
+
+func TestSpaceshipRegistrationRejectsUnrelatedOperation(t *testing.T) {
+	for _, response := range []string{
+		`{"status":"success","type":"domains_Transfer","details":{"name":"example.com"}}`,
+		`{"status":"success","type":"domains_Register","details":{"name":"other.com"}}`,
+		`{"status":"success","type":"domains_Register"}`,
+	} {
+		t.Run(response, func(t *testing.T) {
+			plat := newSpaceshipPurchaseStub()
+			ctx := newTestCtx(t, plat)
+			app := &App{}
+			p, err := app.toolDomainRegistrationPrepare(ctx, spaceshipPrepareArgs())
+			if err != nil {
+				t.Fatal(err)
+			}
+			token := p.(map[string]any)["confirmation_token"].(string)
+			if _, err = app.toolDomainRegister(ctx, map[string]any{"confirmation_token": token}); err != nil {
+				t.Fatal(err)
+			}
+			plat.replyByTool["get_async_operation"].Data = json.RawMessage(response)
+			if _, err = app.toolRegistrationStatus(ctx, map[string]any{"confirmation_token": token}); err == nil {
+				t.Fatal("unrelated operation accepted")
+			}
+			in, _ := dbRegistrationIntentGet(ctx.AppDB(), "test-proj", token)
+			if in.Status != "processing" {
+				t.Fatal(in.Status)
+			}
+			if len(plat.callsFor("register_domain")) != 1 {
+				t.Fatal("purchase repeated")
+			}
+			if d, _ := dbDomainGetByName(ctx.AppDB(), "test-proj", "example.com"); d != nil {
+				t.Fatal("unconfirmed domain added")
 			}
 		})
 	}

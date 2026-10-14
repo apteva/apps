@@ -207,10 +207,13 @@ func (a *App) pollSpaceshipRegistration(ctx *sdk.AppCtx, in *RegistrationIntent)
 		return nil, err
 	}
 	var operation struct {
-		Status string `json:"status"`
-		Type   string `json:"type"`
+		Status  string `json:"status"`
+		Type    string `json:"type"`
+		Details struct {
+			Name string `json:"name"`
+		} `json:"details"`
 	}
-	if json.Unmarshal(raw, &operation) != nil || operation.Type != "domains_Create" {
+	if json.Unmarshal(raw, &operation) != nil || operation.Type != "domains_Register" {
 		return nil, errors.New("Spaceship operation did not confirm a domain registration")
 	}
 	switch operation.Status {
@@ -222,6 +225,9 @@ func (a *App) pollSpaceshipRegistration(ctx *sdk.AppCtx, in *RegistrationIntent)
 		}
 		return map[string]any{"registered": false, "status": "failed", "operation_id": in.OperationID, "raw": raw}, nil
 	case "success":
+		if operation.Details.Name != in.Domain {
+			return nil, errors.New("Spaceship operation completed for a different or missing domain")
+		}
 		if _, err = spaceshipOwnedDomain(ctx, bound, in.Domain); err != nil {
 			return nil, err
 		}

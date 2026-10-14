@@ -1301,10 +1301,22 @@ function RecordsPane({
 }
 
 function SaleControls({domain, callTool}: {domain: Domain; callTool: ToolCaller}) {
-  const [mode,setMode]=useState("buy_now"); const [price,setPrice]=useState(""); const [offer,setOffer]=useState(""); const [status,setStatus]=useState(""); const [busy,setBusy]=useState(false);
-  const publish=async()=>{setBusy(true);setStatus("");try{await callTool("domain_sale_publish",{domain:domain.name,listing_type:mode,price,minimum_offer:offer});setStatus("Listing published.")}catch(e){setStatus((e as Error).message)}finally{setBusy(false)}};
-  const remove=async()=>{setBusy(true);setStatus("");try{await callTool("domain_sale_remove",{domain:domain.name});setStatus("Listing removed.")}catch(e){setStatus((e as Error).message)}finally{setBusy(false)}};
-  return <section className="my-3 rounded border border-border bg-surface-2 p-3"><div className="mb-2 font-medium">Marketplace listing</div><div className="grid grid-cols-2 gap-2"><select className={inputCls} value={mode} onChange={e=>setMode(e.target.value)}><option value="buy_now">Buy now</option><option value="make_offer">Make offer</option><option value="buy_now_and_make_offer">Buy now + offers</option></select><input className={inputCls} placeholder="Price" value={price} onChange={e=>setPrice(e.target.value)}/><input className={inputCls} placeholder="Minimum offer (optional)" value={offer} onChange={e=>setOffer(e.target.value)}/></div><div className="mt-2 flex gap-2"><button className="rounded bg-accent px-3 py-1.5 text-white disabled:opacity-50" disabled={busy||!price&&mode!=="make_offer"} onClick={publish}>Publish listing</button><button className="rounded border border-border px-3 py-1.5 disabled:opacity-50" disabled={busy} onClick={remove}>Remove listing</button></div>{status&&<p className="mt-2 text-xs text-text-dim">{status}</p>}</section>;
+  const [mode,setMode]=useState("buy_now"), [price,setPrice]=useState(""), [offer,setOffer]=useState(""), [status,setStatus]=useState(""), [busy,setBusy]=useState(false);
+  const saleArgs=useMemo(()=>({domain:domain.name,...(["spaceship","dynadot"].includes(domain.dns_provider_slug||"")&&domain.connection_id?{connection_id:domain.connection_id}:{})}),[domain.name,domain.dns_provider_slug,domain.connection_id]);
+  const show=useCallback((r:Record<string,unknown>)=>{
+    const raw=(r.raw||{}) as Record<string,unknown>;
+    const state=String(r.status||raw.status||"unknown");
+    const label=state==="onSale"?"For sale":state==="verifying"?"Verifying ownership":state;
+    const bin=raw.binPrice as {amount?:string;currency?:string}|undefined;
+    const minimum=raw.minPrice as {amount?:string}|undefined;
+    if(raw.binPriceEnabled!==undefined){setMode(raw.binPriceEnabled?(raw.minPriceEnabled?"buy_now_and_make_offer":"buy_now"):"make_offer");setPrice(String(bin?.amount||""));setOffer(String(minimum?.amount||""))}
+    setStatus(`Listing status: ${label}${raw.binPriceEnabled&&bin?.amount?` · Buy now $${bin.amount} ${bin.currency||"USD"}`:""}`);
+  },[]);
+  const load=useCallback(async()=>{try{show(await callTool("domain_sale_get",saleArgs))}catch(e){setStatus((e as Error).message)}},[callTool,saleArgs,show]);
+  useEffect(()=>{let active=true;callTool("domain_sale_get",saleArgs).then(r=>{if(active)show(r)}).catch(e=>{if(active)setStatus((e as Error).message)});return()=>{active=false}},[callTool,saleArgs,show]);
+  const publish=async()=>{setBusy(true);setStatus("");try{show(await callTool("domain_sale_publish",{...saleArgs,listing_type:mode,price,minimum_offer:offer}));await load()}catch(e){setStatus((e as Error).message)}finally{setBusy(false)}};
+  const remove=async()=>{setBusy(true);setStatus("");try{await callTool("domain_sale_remove",saleArgs);setStatus("Listing removed.")}catch(e){setStatus((e as Error).message)}finally{setBusy(false)}};
+  return <section className="my-3 rounded border border-border bg-surface-2 p-3"><div className="mb-2 flex items-center justify-between"><span className="font-medium">Marketplace listing</span><button disabled={busy} onClick={load}>Refresh listing</button></div><div className="grid grid-cols-2 gap-2"><select aria-label="Listing type" className={inputCls} value={mode} onChange={e=>setMode(e.target.value)}><option value="buy_now">Buy now</option><option value="make_offer">Make offer</option><option value="buy_now_and_make_offer">Buy now + offers</option></select><input aria-label="Listing price" className={inputCls} placeholder="Price" value={price} onChange={e=>setPrice(e.target.value)}/><input aria-label="Minimum offer" className={inputCls} placeholder="Minimum offer (optional)" value={offer} onChange={e=>setOffer(e.target.value)}/></div><div className="mt-2 flex gap-2"><button className="rounded bg-accent px-3 py-1.5 text-white disabled:opacity-50" disabled={busy||!price&&mode!=="make_offer"} onClick={publish}>Publish listing</button><button className="rounded border border-border px-3 py-1.5 disabled:opacity-50" disabled={busy} onClick={remove}>Remove listing</button></div>{status&&<p className="mt-2 text-xs text-text-dim">{status}</p>}</section>;
 }
 
 function ValuationControls({domain, callTool}: {domain: {name: string}; callTool: ToolCaller}) {

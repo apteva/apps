@@ -6,11 +6,14 @@ import (
 )
 
 func TestSpaceshipListingMoneyContract(t *testing.T) {
-	plat := newSpaceshipStub(map[string]*sdk.ExecuteResult{"create_sellerhub_domain": successJSON(map[string]any{"name": "vectorlantern.com"})})
+	plat := newSpaceshipStub(map[string]*sdk.ExecuteResult{"create_sellerhub_domain": successJSON(map[string]any{"name": "vectorlantern.com", "status": "verifying"})})
 	ctx := newTestCtx(t, plat)
-	_, err := (&App{}).toolDomainSalePublish(ctx, map[string]any{"domain": "vectorlantern.com", "listing_type": "buy_now_and_make_offer", "price": "145", "minimum_offer": "100.50"})
+	result, err := (&App{}).toolDomainSalePublish(ctx, map[string]any{"domain": "vectorlantern.com", "listing_type": "buy_now_and_make_offer", "price": "145", "minimum_offer": "100.50"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if result.(map[string]any)["status"] != "verifying" || result.(map[string]any)["listed"] != false {
+		t.Fatal(result)
 	}
 	p := plat.callsFor("create_sellerhub_domain")[0].Input
 	if p["name"] != "vectorlantern.com" || p["domain"] != nil || p["binPriceEnabled"] != true || p["minPriceEnabled"] != true {
@@ -35,5 +38,20 @@ func TestSpaceshipRejectsBadListingPrices(t *testing.T) {
 	}
 	if len(plat.calls) != 0 {
 		t.Fatal("invalid listing submitted")
+	}
+}
+
+func TestSpaceshipListingGetReportsRealState(t *testing.T) {
+	for _, status := range []string{"verifying", "onSale"} {
+		plat := newSpaceshipStub(map[string]*sdk.ExecuteResult{"get_sellerhub_domain": successJSON(map[string]any{"name": "vectorlantern.com", "status": status, "binPriceEnabled": true, "binPrice": map[string]any{"amount": "145", "currency": "USD"}})})
+		ctx := newTestCtx(t, plat)
+		result, err := (&App{}).toolDomainSaleGet(ctx, map[string]any{"domain": "vectorlantern.com"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := result.(map[string]any)
+		if r["status"] != status || r["listed"] != (status == "onSale") {
+			t.Fatal(r)
+		}
 	}
 }
