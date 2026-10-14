@@ -18,6 +18,8 @@ import {
   useId,
 } from "react";
 
+import { useDomainEvents } from "./useDomainEvents";
+
 import { DomainSettings, DNSRecoveryNotice } from "./DomainOperations";
 
 interface NativePanelProps {
@@ -144,6 +146,9 @@ export default function DomainsPanel(props: NativePanelProps) {
 }
 
 function ScopedDomainsPanel({ projectId, installId }: NativePanelProps) {
+  const [eventRevision,setEventRevision]=useState(0);
+  const seenEvents=useRef(new Set<string>());
+  useDomainEvents(projectId,installId,event=>{const id=String(event.data?.event_id||"");if(id&&seenEvents.current.has(id))return;if(id){seenEvents.current.add(id);if(seenEvents.current.size>256)seenEvents.current.delete(seenEvents.current.values().next().value!)}setEventRevision(v=>v+1)});
   const [domains, setDomains] = useState<Domain[]>([]);
   const [connections, setConnections] = useState<Connection[]>([]);
   const [busy, setBusy] = useState(false);
@@ -227,7 +232,7 @@ function ScopedDomainsPanel({ projectId, installId }: NativePanelProps) {
 
   useEffect(() => {
     reload();
-  }, [reload]);
+  }, [reload,eventRevision]);
 
   // Fetch the project's compatible DNS connections so the Add form
   // can offer per-domain pinning. Soft-fail: if the platform doesn't
@@ -327,6 +332,7 @@ function ScopedDomainsPanel({ projectId, installId }: NativePanelProps) {
                 <RecordsPane
                   key={`${installId}:${projectId}:${selected.id}:${selected.connection_id}`}
                   domain={selected}
+                  eventRevision={eventRevision}
                   onClose={() => setSelected(null)}
                   api={api}
                   callTool={callTool}
@@ -346,6 +352,7 @@ function ScopedDomainsPanel({ projectId, installId }: NativePanelProps) {
         </>
       ) : (
         <RegisterDomainPane
+          revision={eventRevision}
           connections={activeConnections.filter(
             (c) => c.app_slug === "porkbun" || c.app_slug === "spaceship",
           )}
@@ -495,7 +502,9 @@ function RegisterDomainPane({
   connections,
   callTool,
   onRegistered,
+  revision=0,
 }: {
+  revision?:number;
   connections: Connection[];
   callTool: (
     tool: string,
@@ -540,7 +549,15 @@ function RegisterDomainPane({
   );
   useEffect(() => {
     loadPending();
-  }, [loadPending]);
+  }, [loadPending,revision]);
+  useEffect(()=>{
+    if(!intent||!["prepared","processing","unknown"].includes(intent.status ?? ""))return;let active=true;
+    callTool("domain_registration_status",{confirmation_token:intent.confirmation_token,refresh:false}).then(async r=>{
+      if(!active)return;
+      if(r.status==="succeeded"){const d=await callTool("domain_get",{name:intent.domain});if(active){setIntent(null);onRegistered(d.domain as Domain)}}else if(r.status!==intent.status){setIntent(r as unknown as RegistrationIntent)}
+    }).catch(e=>{if(active)setErr((e as Error).message)});
+    return()=>{active=false};
+  },[revision,intent?.confirmation_token,intent?.status,callTool]);
   const cancelIntent = async () => {
     if (!intent) return;
     if (intent.status === "prepared") {
@@ -1057,7 +1074,9 @@ function RecordsPane({
   callTool,
   onUpdated,
   connections,
+  eventRevision,
 }: {
+  eventRevision: number;
   domain: Domain;
   onClose: () => void;
   onUpdated: (d: Domain) => void;
@@ -1163,8 +1182,8 @@ function RecordsPane({
           callTool={callTool}
           onUpdated={onUpdated}
         />
-        <SaleControls domain={domain} callTool={callTool} />
-        <ValuationControls domain={domain} callTool={callTool} />
+        <SaleControls domain={domain} callTool={callTool} revision={eventRevision} />
+        <ValuationControls domain={domain} callTool={callTool} revision={eventRevision} />
         <div className="text-xs mb-2">
           {domain.connection_mode === "unmanaged"
             ? "Unmanaged — select a DNS connection to edit records"
@@ -1300,31 +1319,40 @@ function RecordsPane({
   );
 }
 
-function SaleControls({domain, callTool}: {domain: Domain; callTool: ToolCaller}) {
+function SaleControls({domain, callTool, revision=0}: {domain: Domain; callTool: ToolCaller;revision?:number}) {
   const [mode,setMode]=useState("buy_now"), [price,setPrice]=useState(""), [offer,setOffer]=useState(""), [status,setStatus]=useState(""), [busy,setBusy]=useState(false);
+  const [history,setHistory]=useState<Record<string,unknown>[]>([]),[sales,setSales]=useState<Record<string,unknown>[]>([]),[snapshot,setSnapshot]=useState<Record<string,unknown>>({}),[syncState,setSyncState]=useState<Record<string,unknown>[]>([]);
   const saleArgs=useMemo(()=>({domain:domain.name,...(["spaceship","dynadot"].includes(domain.dns_provider_slug||"")&&domain.connection_id?{connection_id:domain.connection_id}:{})}),[domain.name,domain.dns_provider_slug,domain.connection_id]);
   const show=useCallback((r:Record<string,unknown>)=>{
-    const raw=(r.raw||{}) as Record<string,unknown>;
-    const state=String(r.status||raw.status||"unknown");
-    const label=state==="onSale"?"For sale":state==="verifying"?"Verifying ownership":state;
+    const raw=(r.raw||{}) as Record<string,unknown>;setSnapshot((r.snapshot||{}) as Record<string,unknown>);
+    const state=String(r.state||r.status||raw.status||"unknown");
+    const label=({on_sale:"For sale",onSale:"For sale",sold:"Sold — provider confirmed",verifying:"Verifying ownership",processing:"Sale processing",lease_active:"Lease active",unlisted:"Not listed",missing:"Listing missing — sale not confirmed"} as Record<string,string>)[state]||state;
     const bin=raw.binPrice as {amount?:string;currency?:string}|undefined;
     const minimum=raw.minPrice as {amount?:string}|undefined;
     if(raw.binPriceEnabled!==undefined){setMode(raw.binPriceEnabled?(raw.minPriceEnabled?"buy_now_and_make_offer":"buy_now"):"make_offer");setPrice(String(bin?.amount||""));setOffer(String(minimum?.amount||""))}
-    setStatus(`Listing status: ${label}${raw.binPriceEnabled&&bin?.amount?` · Buy now $${bin.amount} ${bin.currency||"USD"}`:""}`);
+    setStatus(`Listing status: ${label}${raw.binPriceEnabled&&bin?.amount?` · ${state==="sold"?"Last asking price":"Buy now"} $${bin.amount} ${bin.currency||"USD"}`:""}`);
   },[]);
-  const load=useCallback(async()=>{try{show(await callTool("domain_sale_get",saleArgs))}catch(e){setStatus((e as Error).message)}},[callTool,saleArgs,show]);
-  useEffect(()=>{let active=true;callTool("domain_sale_get",saleArgs).then(r=>{if(active)show(r)}).catch(e=>{if(active)setStatus((e as Error).message)});return()=>{active=false}},[callTool,saleArgs,show]);
+  const load=useCallback(async(refresh=false)=>{try{show(await callTool("domain_sale_get",{...saleArgs,refresh}));const r=await callTool("domain_sale_history",{domain:domain.name});setHistory((r.history as Record<string,unknown>[])||[]);setSales((r.sales as Record<string,unknown>[])||[]);setSyncState((r.sync as Record<string,unknown>[])||[])}catch(e){setStatus((e as Error).message)}},[callTool,saleArgs,show,domain.name]);
+  useEffect(()=>{void load()},[load,revision]);
+  useEffect(()=>{const timer=setInterval(()=>void load(),60000);return()=>clearInterval(timer)},[load]);
   const publish=async()=>{setBusy(true);setStatus("");try{show(await callTool("domain_sale_publish",{...saleArgs,listing_type:mode,price,minimum_offer:offer}));await load()}catch(e){setStatus((e as Error).message)}finally{setBusy(false)}};
-  const remove=async()=>{setBusy(true);setStatus("");try{await callTool("domain_sale_remove",saleArgs);setStatus("Listing removed.")}catch(e){setStatus((e as Error).message)}finally{setBusy(false)}};
-  return <section className="my-3 rounded border border-border bg-surface-2 p-3"><div className="mb-2 flex items-center justify-between"><span className="font-medium">Marketplace listing</span><button disabled={busy} onClick={load}>Refresh listing</button></div><div className="grid grid-cols-2 gap-2"><select aria-label="Listing type" className={inputCls} value={mode} onChange={e=>setMode(e.target.value)}><option value="buy_now">Buy now</option><option value="make_offer">Make offer</option><option value="buy_now_and_make_offer">Buy now + offers</option></select><input aria-label="Listing price" className={inputCls} placeholder="Price" value={price} onChange={e=>setPrice(e.target.value)}/><input aria-label="Minimum offer" className={inputCls} placeholder="Minimum offer (optional)" value={offer} onChange={e=>setOffer(e.target.value)}/></div><div className="mt-2 flex gap-2"><button className="rounded bg-accent px-3 py-1.5 text-white disabled:opacity-50" disabled={busy||!price&&mode!=="make_offer"} onClick={publish}>Publish listing</button><button className="rounded border border-border px-3 py-1.5 disabled:opacity-50" disabled={busy} onClick={remove}>Remove listing</button></div>{status&&<p className="mt-2 text-xs text-text-dim">{status}</p>}</section>;
+  const remove=async()=>{setBusy(true);setStatus("");try{await callTool("domain_sale_remove",saleArgs);await load()}catch(e){setStatus((e as Error).message)}finally{setBusy(false)}};
+  return <section className="my-3 rounded border border-border bg-surface-2 p-3"><div className="mb-2 flex items-center justify-between"><span className="font-medium">Marketplace listing</span><button disabled={busy} onClick={()=>void load(true)}>Refresh listing</button></div><div className="grid grid-cols-2 gap-2"><select aria-label="Listing type" className={inputCls} value={mode} onChange={e=>setMode(e.target.value)}><option value="buy_now">Buy now</option><option value="make_offer">Make offer</option><option value="buy_now_and_make_offer">Buy now + offers</option></select><input aria-label="Listing price" className={inputCls} placeholder="Price" value={price} onChange={e=>setPrice(e.target.value)}/><input aria-label="Minimum offer" className={inputCls} placeholder="Minimum offer (optional)" value={offer} onChange={e=>setOffer(e.target.value)}/></div><div className="mt-2 flex gap-2"><button className="rounded bg-accent px-3 py-1.5 text-white disabled:opacity-50" disabled={busy||snapshot.state==="sold"||!price&&mode!=="make_offer"} onClick={publish}>Publish listing</button><button className="rounded border border-border px-3 py-1.5 disabled:opacity-50" disabled={busy||snapshot.state==="sold"} onClick={remove}>Remove listing</button></div>{status&&<p className="mt-2 text-xs text-text-dim">{status}</p>}
+    <p className="mt-1 text-xs text-text-dim">Background provider refresh: every 5 minutes.{snapshot.checked_at?` Last checked: ${String(snapshot.checked_at)}`:""}</p>
+    {snapshot.error ? <p className="text-xs text-yellow-300">Refresh failed; showing the last saved state. {String(snapshot.error)}</p>:null}
+    {domain.registrar_slug==="dynadot"&&<p className="text-xs text-text-dim">This provider exposes listing status but cannot confirm completed sales through the connected API.</p>}
+    {syncState.filter(s=>s.error).map(s=><p key={String(s.connection_id)} className="text-xs text-yellow-300">Sale report refresh unavailable: {String(s.error)}</p>)}
+    {sales.map(s=><p key={String(s.id)} className="mt-2 text-xs">Confirmed sale {String(s.sold_at||s.confirmed_at)}{s.sale_price?` · ${String(s.sale_price)} ${String(s.currency)}`:" · Price not reported"}{s.payout?` · payout ${String(s.payout)} ${String(s.currency)}`:""}</p>)}
+    <details className="mt-2 text-xs"><summary>Stored listing history ({history.length})</summary>{history.map(h=><div key={String(h.id)}>{String(h.observed_at)} · {String(h.state)} · {String(h.source)}</div>)}</details>
+  </section>;
 }
 
-function ValuationControls({domain, callTool}: {domain: {name: string}; callTool: ToolCaller}) {
+function ValuationControls({domain, callTool,revision=0}: {domain: {name: string}; callTool: ToolCaller;revision?:number}) {
   const [rows,setRows]=useState<Record<string,unknown>[]>([]); const [busy,setBusy]=useState(false); const [msg,setMsg]=useState("");
-  const load=useCallback(async()=>{try{const r=await callTool("domain_estimate_list",{domain:domain.name,refresh:true});setRows((r.valuations as Record<string,unknown>[])||[]);setMsg(((r.warnings as string[])||[]).join("; "))}catch(e){setMsg((e as Error).message)}},[callTool,domain.name]);
-  useEffect(()=>{void load()},[load]);
+  const load=useCallback(async()=>{try{const r=await callTool("domain_estimate_list",{domain:domain.name,refresh:false});setRows((r.valuations as Record<string,unknown>[])||[]);setMsg(((r.warnings as string[])||[]).join("; "))}catch(e){setMsg((e as Error).message)}},[callTool,domain.name]);
+  useEffect(()=>{void load()},[load,revision]);
   const pending=rows.some(r=>r.status==="starting"||r.status==="processing");
-  useEffect(()=>{if(!pending)return;const timer=setTimeout(()=>void load(),5000);return()=>clearTimeout(timer)},[pending,rows,load]);
+  useEffect(()=>{const timer=setInterval(()=>void load(),60000);return()=>clearInterval(timer)},[load]);
   const start=async()=>{setBusy(true);setMsg("");try{await callTool("domain_estimate_start",{domain:domain.name});setMsg("Estimate submitted and stored.");await load()}catch(e){setMsg((e as Error).message)}finally{setBusy(false)}};
   const own=rows.filter(r=>r.domain===domain.name);
   return <section className="my-3 rounded border border-border bg-surface-2 p-3"><div className="mb-2 flex items-center justify-between"><span className="font-medium">Stored value estimates</span><button className="rounded bg-accent px-3 py-1.5 text-white disabled:opacity-50" disabled={busy||pending} onClick={start}>Estimate with HumbleWorth</button></div>{own.length===0?<p className="text-xs text-text-dim">No stored estimate yet. Replicate billing applies.</p>:own.slice(0,3).map((r,i)=><div key={String(r.id||i)} className="text-xs text-text-dim">{String(r.status)} · auction ${String(r.auction??"—")} · marketplace ${String(r.marketplace??"—")} · brokerage ${String(r.brokerage??"—")} · {String(r.created_at||"")}{r.error ? ` · ${String(r.error)}` : ""}</div>)}{msg&&<p className="mt-2 text-xs text-text-dim">{msg}</p>}</section>;

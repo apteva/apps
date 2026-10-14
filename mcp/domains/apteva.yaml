@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: domains
 display_name: Domains
-version: 1.1.2
+version: 1.2.0
 description: |
   DNS + domain inventory and registrar workflows for Apteva projects.
   Other apps that need to write DNS records (messaging for SES
@@ -18,6 +18,9 @@ description: |
   Spaceship DNS uses batch save/delete tools and supports read-only
   availability checks. Registrar purchases support Porkbun quoted registration and Spaceship
   account-rate registration with saved contact options and asynchronous status.
+  SDK workers monitor pending operations and estimates, track listing history, and
+  confirm Spaceship sales from provider status or sold reports. Lifecycle events
+  use a durable outbox with stable IDs.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/domains
@@ -78,9 +81,33 @@ requires:
       hint: "Connect every supported registrar account used by this project and choose a default. If unset, registrar tools fall back to the default DNS provider. Spaceship requires domains:billing, contacts:read, and asyncoperations:read for account-rate purchases."
 
 provides:
+  workers:
+    - { name: domain_lifecycle_refresh, schedule: "@every 30s" }
+    - { name: domain_event_delivery, schedule: "@every 5s" }
+  publishes:
+    - { name: domain.registered, description: "Provider-confirmed registration saved to inventory." }
+    - { name: domain.registration.prepared, description: "Purchase review prepared; no charge submitted." }
+    - { name: domain.registration.submitted, description: "An approved registration submission was attempted." }
+    - { name: domain.registration.failed, description: "Provider confirmed registration failure." }
+    - { name: domain.registration.unknown, description: "Purchase outcome needs inspection; do not resubmit." }
+    - { name: domain.registration.expired, description: "An unsubmitted purchase review expired." }
+    - { name: domain.registration.cancelled, description: "An unsubmitted purchase intent was cancelled." }
+    - { name: domain.valuation.started, description: "A paid valuation was started and stored." }
+    - { name: domain.valuation.updated, description: "A stored prediction changed status." }
+    - { name: domain.valuation.completed, description: "Completed prices were saved." }
+    - { name: domain.valuation.failed, description: "A prediction or domain appraisal failed." }
+    - { name: domain.valuation.cancelled, description: "A prediction was cancelled." }
+    - { name: domain.listing.updated, description: "A stored listing state or price changed." }
+    - { name: domain.listing.published, description: "Listing publication was accepted by the provider." }
+    - { name: domain.listing.removed, description: "Listing withdrawal was accepted by the provider." }
+    - { name: domain.sold, description: "Provider confirmed a completed sale; disappearance is insufficient." }
+    - { name: domain.sync.failed, description: "Refresh failed; last confirmed state is retained." }
   http_routes:
     - prefix: /
   mcp_tools:
+    - { name: domain_refresh, description: "Read-only refresh of tracked lifecycle state." }
+    - { name: domain_sale_history, description: "Read saved listing history and confirmed sales." }
+    - { name: domain_events_list, description: "Read saved lifecycle events and bus delivery status." }
     - { name: domain_sale_publish, description: "Publish a domain marketplace listing through Dynadot or Spaceship." }
     - { name: domain_sale_remove, description: "Remove a domain marketplace listing through Dynadot or Spaceship." }
     - { name: domain_sale_get, description: "Read marketplace listing status through Dynadot or Spaceship." }

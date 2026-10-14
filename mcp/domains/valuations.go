@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -100,13 +101,19 @@ func (a *App) toolDomainEstimateStart(ctx *sdk.AppCtx, args map[string]any) (any
 	}
 	defer tx.Rollback()
 	for _, domain := range domains {
-		if _, err = tx.Exec(`INSERT INTO domain_valuations(project_id,domain,provider_slug,status,prediction_id,raw_json,connection_id) VALUES(?,?,?,?,?,?,?)`, pid, domain, b.AppSlug, strArg(env, "status"), pred, string(raw), b.ConnectionID); err != nil {
+		if _, err = tx.Exec(`INSERT INTO domain_valuations(project_id,domain,provider_slug,status,prediction_id,raw_json,connection_id) VALUES(?,?,?,?,?,?,?)`, pid, domain, b.AppSlug, "starting", pred, string(raw), b.ConnectionID); err != nil {
+			return nil, err
+		}
+	}
+	for _, domain := range domains {
+		if err = queueDomainEvent(tx, pid, domain, "domain.valuation.started", "valuation-start:"+pred+":"+domain, map[string]any{"provider": b.AppSlug, "connection_id": b.ConnectionID, "prediction_id": pred, "status": "starting"}); err != nil {
 			return nil, err
 		}
 	}
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
+	deliverDomainEvents(ctx, pid)
 	if err = storeValuationPrediction(ctx, pid, pred, raw, env); err != nil {
 		return nil, err
 	}
@@ -153,18 +160,20 @@ func valuationPrices(env map[string]any, domain string) (any, any, any, string) 
 }
 
 func storeValuationPrediction(ctx *sdk.AppCtx, pid, pred string, raw json.RawMessage, env map[string]any) error {
-	rows, err := ctx.AppDB().Query(`SELECT id,domain FROM domain_valuations WHERE project_id=? AND prediction_id=?`, pid, pred)
+	rows, err := ctx.AppDB().Query(`SELECT id,domain,status,error_message FROM domain_valuations WHERE project_id=? AND prediction_id=?`, pid, pred)
 	if err != nil {
 		return err
 	}
 	type item struct {
-		id     int64
-		domain string
+		id            int64
+		domain        string
+		status        string
+		previousError string
 	}
 	items := []item{}
 	for rows.Next() {
 		var v item
-		if err = rows.Scan(&v.id, &v.domain); err != nil {
+		if err = rows.Scan(&v.id, &v.domain, &v.status, &v.previousError); err != nil {
 			rows.Close()
 			return err
 		}
@@ -189,12 +198,31 @@ func storeValuationPrediction(ctx *sdk.AppCtx, pid, pred string, raw json.RawMes
 		if _, err = tx.Exec(`UPDATE domain_valuations SET status=?,auction=?,marketplace=?,brokerage=?,raw_json=?,error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, status, auction, marketplace, brokerage, string(raw), e, v.id, pid); err != nil {
 			return err
 		}
+		if v.status != status || v.previousError != e {
+			topic := "domain.valuation.updated"
+			switch status {
+			case "succeeded":
+				topic = "domain.valuation.completed"
+			case "failed":
+				topic = "domain.valuation.failed"
+			case "canceled":
+				topic = "domain.valuation.cancelled"
+			}
+			if err = queueDomainEvent(tx, pid, v.domain, topic, fmt.Sprintf("valuation:%d:%s", v.id, status), map[string]any{"valuation_id": v.id, "prediction_id": pred, "provider": "replicate", "status": status, "auction": auction, "marketplace": marketplace, "brokerage": brokerage, "error": e}); err != nil {
+				return err
+			}
+		}
+
 	}
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	deliverDomainEvents(ctx, pid)
+	return nil
 }
 
-func (a *App) refreshValuations(ctx *sdk.AppCtx, pid, domain string) []string {
-	rows, err := ctx.AppDB().Query(`SELECT DISTINCT prediction_id,connection_id FROM domain_valuations WHERE project_id=? AND status IN ('starting','processing') AND (?='' OR domain=?) ORDER BY prediction_id LIMIT 20`, pid, domain, domain)
+func (a *App) refreshValuations(ctx *sdk.AppCtx, pid, domain string, parents ...context.Context) []string {
+	rows, err := ctx.AppDB().Query(`SELECT prediction_id,connection_id FROM domain_valuations WHERE project_id=? AND status IN ('starting','processing') AND (?='' OR domain=?) GROUP BY prediction_id,connection_id ORDER BY MIN(updated_at),prediction_id LIMIT 20`, pid, domain, domain)
 	if err != nil {
 		return []string{err.Error()}
 	}
@@ -219,10 +247,13 @@ func (a *App) refreshValuations(ctx *sdk.AppCtx, pid, domain string) []string {
 	}
 	warnings := []string{}
 	for _, job := range jobs {
+		if len(parents) > 0 && parents[0].Err() != nil {
+			break
+		}
 		b, e := valuationConnection(ctx, map[string]any{"connection_id": job.conn, "_project_id": pid})
 		if e == nil {
 			var raw json.RawMessage
-			raw, e = providerCall(ctx, b, "get_prediction", map[string]any{"prediction_id": job.pred})
+			raw, e = providerCall(ctx, b, "get_prediction", map[string]any{"prediction_id": job.pred}, parents...)
 			if e == nil {
 				var env map[string]any
 				env, e = valuationEnvelope(raw)
@@ -236,6 +267,7 @@ func (a *App) refreshValuations(ctx *sdk.AppCtx, pid, domain string) []string {
 		}
 		if e != nil {
 			warnings = append(warnings, e.Error())
+			recordValuationRefreshError(ctx, pid, job.pred, e)
 		}
 	}
 	return warnings
@@ -274,4 +306,50 @@ func (a *App) toolDomainEstimateList(ctx *sdk.AppCtx, args map[string]any) (any,
 		out = append(out, map[string]any{"id": id, "domain": d, "provider": p, "status": s, "auction": auction, "marketplace": marketplace, "brokerage": brokerage, "prediction_id": pred, "raw": raw, "error": er, "created_at": at})
 	}
 	return map[string]any{"valuations": out, "warnings": warnings}, rows.Err()
+}
+
+func recordValuationRefreshError(ctx *sdk.AppCtx, pid, pred string, cause error) {
+	rows, err := ctx.AppDB().Query(`SELECT id,domain,error_message FROM domain_valuations WHERE project_id=? AND prediction_id=? AND status IN ('starting','processing')`, pid, pred)
+	if err != nil {
+		return
+	}
+	type item struct {
+		id            int64
+		domain, error string
+	}
+	items := []item{}
+	for rows.Next() {
+		var v item
+		if err = rows.Scan(&v.id, &v.domain, &v.error); err != nil {
+			break
+		}
+		items = append(items, v)
+	}
+	if err == nil {
+		err = rows.Err()
+	}
+	rows.Close()
+	if err != nil {
+		return
+	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	message := truncate(cause.Error(), 400)
+	for _, v := range items {
+		if _, err = tx.Exec(`UPDATE domain_valuations SET error_message=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, message, v.id); err != nil {
+			return
+		}
+		if v.error != message {
+			key, _ := randomToken(16)
+			if err = queueDomainEvent(tx, pid, v.domain, "domain.sync.failed", "valuation-error:"+key, map[string]any{"provider": "replicate", "kind": "valuation", "prediction_id": pred, "valuation_id": v.id}); err != nil {
+				return
+			}
+		}
+	}
+	if tx.Commit() == nil {
+		deliverDomainEvents(ctx, pid)
+	}
 }

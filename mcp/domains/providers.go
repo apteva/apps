@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -88,8 +89,14 @@ func (a *App) provider(ctx *sdk.AppCtx) (dnsProviderImpl, *sdk.BoundIntegration,
 	return a.providerFor(ctx, 0, "")
 }
 
-func providerCall(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, tool string, payload map[string]any) (json.RawMessage, error) {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, tool, payload)
+func providerCall(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, tool string, payload map[string]any, parents ...context.Context) (json.RawMessage, error) {
+	var res *sdk.ExecuteResult
+	var err error
+	if len(parents) > 0 {
+		res, err = sdk.ExecuteIntegrationToolContext(parents[0], ctx.PlatformAPI(), bound.ConnectionID, tool, payload)
+	} else {
+		res, err = ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, tool, payload)
+	}
 	diag := providerCallDiagnostic(bound, tool, payload)
 	if err != nil {
 		return nil, apiError(502, fmt.Sprintf("%s: %v", diag, err))

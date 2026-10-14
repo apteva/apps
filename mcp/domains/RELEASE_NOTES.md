@@ -1,3 +1,11 @@
+## 1.2.0
+
+- SDK workers refresh saved purchase operations and pending valuations every 30 seconds, and tracked listings plus confirmed-sale reports every five minutes. Workers never submit purchases, create listings, remove listings, change DNS, or start paid estimates.
+- Persist listing snapshots, transition history, checked timestamps, transient errors, and confirmed sales including sale price, payout, and provider evidence. Missing listings are explicitly unconfirmed, not sold.
+- Spaceship sold reports use bounded cursor pagination and overlap on completed windows. Historical sales before the current acquisition and unrelated account domains are excluded. Dynadot exposes listing status but cannot confirm completed sales with the current integration.
+- Declare and emit registration, valuation, listing, sold, and refresh-failure lifecycle topics. Transactional event outbox retries acknowledged delivery with stable event IDs; subscribers must deduplicate event IDs.
+- The UI reads saved state, shows sale history and payouts, and subscribes to the project/install app bus. Read-only UI fallback refreshes do not start paid estimates.
+
 ## 1.1.2
 
 - Recognize Spaceship's actual domains_Register asynchronous operation type, verified against a real purchase. Validate the completed operation's domain before confirming ownership and inventory.
