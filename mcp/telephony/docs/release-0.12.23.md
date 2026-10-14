@@ -60,7 +60,9 @@ Opus on Linux/macOS amd64/arm64 and Linux musl, compiled-sidecar Chromium,
 30/60/120-minute recording playback/import, and 32/64-stream mixed UDP/SRTP load.
 A local TURN/TCP Chromium test forces relay candidates, carries two-way audio,
 blocks HTTP for forty seconds, then recovers the same call with mute preserved.
-No production TURN service is configured by this release.
+No production TURN service is configured by this release. The Chromium carrier
+fixture continuously consumes outgoing media, matching the live transport; the
+Linux regression gate verifies PCM listening and coaching as well as WebRTC.
 
 Both manifests and the bundled frontend identify 0.12.23; the source reference
 is `telephony/v0.12.23`. Publishing does not install or restart an environment.
