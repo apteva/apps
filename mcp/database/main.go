@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -34,11 +35,16 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if root == "" {
 		return errors.New("APTEVA_DATA_DIR is required")
 	}
-	m, e := engine.Open(filepath.Join(root, "database"))
+	options, e := managerOptions(ctx.Config(), os.Getenv)
+	if e != nil {
+		return e
+	}
+	m, e := engine.OpenWithConfig(filepath.Join(root, "database"), options)
 	if e != nil {
 		return e
 	}
 	a.manager = m
+	ctx.Logger().Info("database mounted", "durability_profile", options.SQLiteDurability, "aptevadb_sync_mode", options.Apteva.SyncMode, "aptevadb_cache_bytes", options.Apteva.CacheBytes, "aptevadb_aggregate_workers", options.Apteva.AggregateWorkers, "aptevadb_query_memory_bytes", options.Apteva.QueryWorkBytes)
 	return nil
 }
 func (a *App) OnUnmount(*sdk.AppCtx) error {
@@ -51,7 +57,7 @@ func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 func (a *App) HTTPRoutes() []sdk.Route {
-	return []sdk.Route{{Pattern: "/operations/", Handler: a.handleHTTP}}
+	return []sdk.Route{{Pattern: "/operations/", Handler: a.handleHTTP}, {Method: "POST", Pattern: "/realtime/watch", Handler: a.handleWatch}}
 }
 
 type toolSpec struct {
@@ -60,8 +66,11 @@ type toolSpec struct {
 }
 
 var specs = []toolSpec{
+	{"realtime_configure", "Enable or disable persistent native AptevaDB change capture for one database. Disabling ends resume history.", []string{"enabled", "retentionBytes", "retentionSeconds"}, []string{"database", "enabled"}},
+	{"realtime_describe", "Inspect realtime support, capture policy and watcher usage.", nil, nil},
+	{"changes", "Watch explicit collections for complete commit invalidations. Wait up to 20 seconds; repeat with the returned cursor. Optional initial snapshot reads find/count/aggregate atomically with the subscription boundary.", []string{"collections", "after", "initial", "waitMs"}, []string{"collections"}},
 	{"databases_list", "List databases in the authenticated project or calling app's private scope.", nil, nil},
-	{"database_create", "Create a named local database using sqlite (default) or pebble. Repeating the same definition is safe.", []string{"adapter"}, []string{"database"}},
+	{"database_create", "Create a named local database using sqlite (default), pebble or aptevadb. Repeating the same definition is safe.", []string{"adapter"}, []string{"database"}},
 	{"database_describe", "Describe a named database.", nil, nil},
 	{"database_drop", "Permanently delete one database and all collections; confirm=true is required.", []string{"confirm"}, []string{"database", "confirm"}},
 	{"collections_list", "List collections in a database.", nil, nil},
@@ -85,6 +94,10 @@ var specs = []toolSpec{
 
 func permission(op string) string {
 	switch op {
+	case "changes":
+		return "database.watch"
+	case "realtime_describe":
+		return "database.read"
 	case "databases_list", "database_describe", "collections_list", "collection_describe", "indexes_list", "get", "find", "count", "aggregate", "explain":
 		return "database.read"
 	case "insert", "update", "delete", "upsert", "batch":
@@ -133,6 +146,10 @@ func (a *App) MCPTools() []sdk.Tool {
 			if s.op != "databases_list" && !caller.Allows(permission(s.op), "database/"+db) {
 				return nil, &engine.Error{Code: "permission_denied", Message: "database operation is not granted"}
 			}
+			if s.op == "changes" && !caller.Allows("database.read", "database/"+db) {
+				return nil, &engine.Error{Code: "permission_denied", Message: "watch also requires database.read"}
+			}
+			r.WatchCaller = fmt.Sprintf("agent:%d/app:%d", caller.AgentID, caller.AppInstallID)
 			result, e := a.run(ctx, scope(caller.ProjectID, caller), s.op, r)
 			if e == nil && s.op == "databases_list" {
 				filtered := []engine.DatabaseInfo{}
@@ -264,8 +281,12 @@ func httpResult(w http.ResponseWriter, v any, e error) {
 				status = 403
 			case "not_found":
 				status = 404
-			case "unique_conflict", "version_conflict", "schema_conflict":
+			case "unique_conflict", "version_conflict", "schema_conflict", "resume_invalid":
 				status = 409
+			case "history_expired":
+				status = 410
+			case "resource_limit":
+				status = 429
 			case "storage_error":
 				status = 500
 			}
@@ -282,8 +303,15 @@ func inputSchema(s toolSpec) map[string]any {
 	obj := func() map[string]any { return map[string]any{"type": "object"} }
 	arr := func(items any) map[string]any { return map[string]any{"type": "array", "items": items} }
 	order := map[string]any{"type": "object", "properties": map[string]any{"field": str(), "direction": map[string]any{"type": "string", "enum": []string{"asc", "desc"}}}, "required": []string{"field"}}
-	all := map[string]any{"database": str(), "collection": str(), "adapter": map[string]any{"type": "string", "enum": []string{"sqlite", "pebble"}}, "name": str(), "confirm": map[string]any{"type": "boolean"}, "all": map[string]any{"type": "boolean"}, "requireIndex": map[string]any{"type": "boolean"}, "key": obj(), "set": obj(), "increment": obj(), "records": arr(obj()), "where": obj(), "select": arr(str()), "primaryKey": arr(str()), "groupBy": arr(str()), "orderBy": arr(order), "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}, "cursor": str(), "conflictIndex": str(), "ifVersion": map[string]any{"type": "integer", "minimum": 1}, "maxAffected": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}, "fields": arr(map[string]any{"type": "object", "properties": map[string]any{"name": str(), "type": map[string]any{"type": "string", "enum": []string{"text", "integer", "number", "boolean", "datetime", "json"}}, "nullable": map[string]any{"type": "boolean"}}, "required": []string{"name", "type"}}), "index": map[string]any{"type": "object", "properties": map[string]any{"name": str(), "fields": arr(order), "unique": map[string]any{"type": "boolean"}}, "required": []string{"name", "fields"}}, "metrics": arr(map[string]any{"type": "object", "properties": map[string]any{"name": str(), "op": map[string]any{"type": "string", "enum": []string{"count", "sum", "avg", "min", "max"}}, "field": str()}, "required": []string{"name", "op"}}), "operations": arr(map[string]any{"type": "object", "properties": map[string]any{"op": map[string]any{"type": "string", "enum": []string{"insert", "update", "delete", "upsert"}}, "args": obj()}, "required": []string{"op", "args"}})}
+	all := map[string]any{"database": str(), "collection": str(), "adapter": map[string]any{"type": "string", "enum": []string{"sqlite", "pebble", "aptevadb"}}, "name": str(), "confirm": map[string]any{"type": "boolean"}, "all": map[string]any{"type": "boolean"}, "requireIndex": map[string]any{"type": "boolean"}, "key": obj(), "set": obj(), "increment": obj(), "records": arr(obj()), "where": obj(), "select": arr(str()), "primaryKey": arr(str()), "groupBy": arr(str()), "orderBy": arr(order), "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}, "cursor": str(), "conflictIndex": str(), "ifVersion": map[string]any{"type": "integer", "minimum": 1}, "maxAffected": map[string]any{"type": "integer", "minimum": 1, "maximum": 1000}, "fields": arr(map[string]any{"type": "object", "properties": map[string]any{"name": str(), "type": map[string]any{"type": "string", "enum": []string{"text", "integer", "number", "boolean", "datetime", "json"}}, "nullable": map[string]any{"type": "boolean"}}, "required": []string{"name", "type"}}), "index": map[string]any{"type": "object", "properties": map[string]any{"name": str(), "fields": arr(order), "unique": map[string]any{"type": "boolean"}}, "required": []string{"name", "fields"}}, "metrics": arr(map[string]any{"type": "object", "properties": map[string]any{"name": str(), "op": map[string]any{"type": "string", "enum": []string{"count", "sum", "avg", "min", "max"}}, "field": str()}, "required": []string{"name", "op"}}), "operations": arr(map[string]any{"type": "object", "properties": map[string]any{"op": map[string]any{"type": "string", "enum": []string{"insert", "update", "delete", "upsert"}}, "args": obj()}, "required": []string{"op", "args"}})}
 	all["timeoutMs"] = map[string]any{"type": "integer", "minimum": 0, "maximum": 60000, "description": "Query deadline in milliseconds; omitted or 0 defaults to 30000. An earlier caller deadline takes precedence."}
+	all["collections"] = map[string]any{"type": "array", "items": str(), "minItems": 1, "maxItems": 16}
+	all["after"] = str()
+	all["initial"] = map[string]any{"type": "object", "properties": map[string]any{"op": map[string]any{"type": "string", "enum": []string{"find", "count", "aggregate"}}, "args": obj()}, "required": []string{"op", "args"}, "additionalProperties": false}
+	all["enabled"] = map[string]any{"type": "boolean"}
+	all["retentionBytes"] = map[string]any{"type": "integer", "minimum": 1048576, "maximum": 268435456}
+	all["retentionSeconds"] = map[string]any{"type": "integer", "minimum": 1, "maximum": 86400}
+	all["waitMs"] = map[string]any{"type": "integer", "minimum": 0, "maximum": 20000}
 	props := map[string]any{"database": all["database"]}
 	if s.op != "batch" && !strings.HasPrefix(s.op, "database") {
 		props["collection"] = all["collection"]

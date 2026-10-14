@@ -32,7 +32,7 @@ func TestQueryTimeouts(t *testing.T) {
 }
 
 func TestStreamingQueryCancellation(t *testing.T) {
-	for _, adapter := range []string{"sqlite", "pebble"} {
+	for _, adapter := range []string{"sqlite", "pebble", "aptevadb"} {
 		t.Run(adapter, func(t *testing.T) {
 			m := manager(t)
 			fixture(t, m, adapter)

@@ -1,0 +1,33 @@
+{
+  "profile_order": [
+    "ordinary",
+    "full"
+  ],
+  "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+  "benchmark_binary_sha256": "4bd3182263f6c26b450018a939a328f1b291ac5444ef5a9721090afb68ba4e97",
+  "rows": 100000,
+  "repetitions_per_mode_backend": 3,
+  "sqlite_synchronous": 2,
+  "started_unix": 1791955346.937547,
+  "profiles": [
+    [
+      "ordinary",
+      [
+        "sqlite",
+        "aptevadb"
+      ],
+      "os",
+      "0"
+    ],
+    [
+      "full",
+      [
+        "sqlite",
+        "pebble",
+        "aptevadb"
+      ],
+      "full",
+      "1"
+    ]
+  ]
+}

@@ -336,6 +336,21 @@ func (t *pebbleTx) put(c Collection, pk string, r Record) error {
 	}
 	return t.batch.Set([]byte("r/"+c.Name+"/"+pk), marshal(r), nil)
 }
+func (t *pebbleTx) insert(c Collection, pk string, r Record) error {
+	old, e := t.get(c, pk)
+	if e != nil {
+		return e
+	}
+	if old != nil {
+		return fail("unique_conflict", "primary key already exists")
+	}
+	for _, i := range indexes(c) {
+		if e := t.entry(c, i, pk, r, false); e != nil {
+			return e
+		}
+	}
+	return t.batch.Set([]byte("r/"+c.Name+"/"+pk), marshal(r), nil)
+}
 func (t *pebbleTx) remove(c Collection, pk string) error {
 	old, e := t.get(c, pk)
 	if e != nil || old == nil {
@@ -736,169 +751,32 @@ func (t *pebbleTx) aggregate(c Collection, r Request, outSchema Collection) ([]R
 		}
 		return []Record{{r.Metrics[0].Name: strconv.FormatInt(count, 10)}}, nil
 	}
-	// Keep typed accumulators while scanning; format portable decimal strings
-	// once per output group, instead of allocating them for every input row.
-	type metricState struct {
-		count   int64
-		sum     float64
-		integer int64
-		value   any
-	}
-	type groupState struct {
-		row     Record
-		metrics []metricState
-	}
-	groups := map[any]*groupState{}
-	metricFields := make([]Field, len(r.Metrics))
-	for i, m := range r.Metrics {
-		if m.Field != "" {
-			metricFields[i], _ = c.field(m.Field)
-		}
-	}
-	groupFields := make([]Field, len(r.GroupBy))
-	for i, g := range r.GroupBy {
-		groupFields[i], _ = c.field(g)
-	}
-	workBytes := 0
-	init := func(key any, row Record) error {
-		out := Record{}
-		for _, g := range r.GroupBy {
-			out[g] = row[g]
-		}
-		for _, m := range r.Metrics {
-			out[m.Name] = nil
-		}
-		// Include maps, keys, typed accumulator storage and final scalar growth.
-		n := 256 + retainedBytes(key) + retainedBytes(out) + len(r.Metrics)*96
-		if workBytes+n > MaxQueryWorkBytes {
-			return fail("resource_limit", "aggregate group state exceeds 16 MiB")
-		}
-		workBytes += n
-		groups[key] = &groupState{row: out, metrics: make([]metricState, len(r.Metrics))}
-		return nil
-	}
-	if len(r.GroupBy) == 0 {
-		if e := init(nil, nil); e != nil {
-			return nil, e
-		}
-	}
-	var aggErr error
-	input := r.Query
-	input.OrderBy = nil
-	fields := append([]string{}, r.GroupBy...)
-	for _, m := range r.Metrics {
-		if m.Field != "" {
-			fields = append(fields, m.Field)
-		}
-	}
-	vals := make([]any, len(r.GroupBy))
-	e := t.scanFields(c, input, true, fields, func(row Record, _ []byte) bool {
-		var key any
-		if len(r.GroupBy) > 0 {
-			for i, g := range r.GroupBy {
-				vals[i] = row[g]
-				if vals[i] != nil && groupFields[i].Type == "number" {
-					vals[i] = number(vals[i])
-				}
-			}
-			// Scalar keys are already comparable and unambiguous within a query.
-			// Only compound groups need a serialized tuple.
-			if len(vals) == 1 {
-				key = vals[0]
-			} else {
-				key = string(marshal(vals))
-			}
-		}
-		group := groups[key]
-		if group == nil {
-			if aggErr = init(key, row); aggErr != nil {
-				return false
-			}
-			group = groups[key]
-		}
-		for i, m := range r.Metrics {
-			v := row[m.Field]
-			state := &group.metrics[i]
-			if v == nil && !(m.Op == "count" && m.Field == "") {
-				continue
-			}
-			state.count++
-			if m.Op == "count" {
-				continue
-			}
-			f := metricFields[i]
-			switch m.Op {
-			case "min", "max":
-				if state.value == nil || (m.Op == "min" && compare(f, v, state.value) < 0) || (m.Op == "max" && compare(f, v, state.value) > 0) {
-					workBytes += retainedBytes(v) - retainedBytes(state.value)
-					if workBytes > MaxQueryWorkBytes {
-						aggErr = fail("resource_limit", "aggregate group state exceeds 16 MiB")
-						return false
-					}
-					state.value = v
-				}
-			case "sum", "avg":
-				if f.Type == "integer" && m.Op == "sum" {
-					b, _ := strconv.ParseInt(v.(string), 10, 64)
-					a := state.integer
-					if (b > 0 && a > math.MaxInt64-b) || (b < 0 && a < math.MinInt64-b) {
-						aggErr = fail("resource_limit", "aggregate integer overflow")
-						return false
-					}
-					state.integer = a + b
-				} else {
-					b := number(v)
-					if f.Type == "integer" {
-						b, _ = strconv.ParseFloat(v.(string), 64)
-					}
-					sum := state.sum + b
-					if math.IsInf(sum, 0) || math.IsNaN(sum) {
-						aggErr = fail("resource_limit", "aggregate numeric overflow")
-						return false
-					}
-					state.sum = sum
-				}
-			}
-		}
-		return true
+	return aggregateRecords(t.ctx, c, r, outSchema, func(q Query, fields []string, consume func(Record, []byte) bool) error {
+		return t.scanFields(c, q, true, fields, consume)
 	})
+}
+
+func (b *pebbleBackend) pointGet(ctx context.Context, c Collection, key Record, pk string) (Record, error) {
+	if b.writeErr != nil {
+		return nil, b.writeErr
+	}
+	if e := ctx.Err(); e != nil {
+		return nil, e
+	}
+	value, closer, e := b.db.Get([]byte("r/" + c.Name + "/" + pk))
+	if errors.Is(e, pebble.ErrNotFound) {
+		return nil, nil
+	}
 	if e != nil {
 		return nil, e
 	}
-	if aggErr != nil {
-		return nil, aggErr
+	defer closer.Close()
+	var row Record
+	if e = decode(value, &row); e != nil {
+		return nil, e
 	}
-	out := []Record{}
-	for _, group := range groups {
-		if e := t.ctx.Err(); e != nil {
-			return nil, e
-		}
-		for i, m := range r.Metrics {
-			state := group.metrics[i]
-			var v any
-			if m.Op == "count" {
-				v = strconv.FormatInt(state.count, 10)
-			} else if state.count > 0 {
-				switch m.Op {
-				case "sum":
-					if metricFields[i].Type == "integer" {
-						v = strconv.FormatInt(state.integer, 10)
-					} else {
-						v = state.sum
-					}
-				case "avg":
-					v = state.sum / float64(state.count)
-				case "min", "max":
-					v = state.value
-				}
-			}
-			group.row[m.Name] = v
-		}
-		out = append(out, group.row)
+	if e = ctx.Err(); e != nil {
+		return nil, e
 	}
-	sorted(outSchema, out, r.OrderBy)
-	if len(out) > r.Limit+1 {
-		out = out[:r.Limit+1]
-	}
-	return out, t.ctx.Err()
+	return row, nil
 }

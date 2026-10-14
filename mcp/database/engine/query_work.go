@@ -10,6 +10,12 @@ import (
 // OperationTimeout keeps interactive writes bounded while allowing broad read
 // queries to stream large collections. A caller's earlier deadline still wins.
 func OperationTimeout(op string, timeoutMS int) (time.Duration, error) {
+	if op == "changes" && timeoutMS == 0 {
+		return 60 * time.Second, nil
+	}
+	if op == "realtime_configure" && timeoutMS == 0 {
+		return 30 * time.Second, nil
+	}
 	query := op == "find" || op == "count" || op == "aggregate"
 	if timeoutMS != 0 {
 		if !query || timeoutMS < 1 || timeoutMS > 60000 {
@@ -60,6 +66,7 @@ type topRecords struct {
 	collection   Collection
 	query        Query
 	limit, bytes int
+	workLimit    int // zero keeps the shared default
 	rows         []retainedRow
 }
 
@@ -99,8 +106,12 @@ func (h *topRecords) offer(r Record) error {
 	if len(h.rows) == h.limit {
 		next -= h.rows[0].size
 	}
-	if next > MaxQueryWorkBytes {
-		return fail("resource_limit", "retained query results exceed 16 MiB")
+	workLimit := h.workLimit
+	if workLimit == 0 {
+		workLimit = MaxQueryWorkBytes
+	}
+	if next > workLimit {
+		return fail("resource_limit", "retained query results exceed %d MiB", workLimit>>20)
 	}
 	h.bytes = next
 	if len(h.rows) < h.limit {

@@ -6,8 +6,10 @@ github.com/RaduBerinde/btreemap v0.0.0-20250419174037-3d62b7205d54 h1:bsU8Tzxr/P
 github.com/RaduBerinde/btreemap v0.0.0-20250419174037-3d62b7205d54/go.mod h1:0tr7FllbE9gJkHq7CVeeDDFAFKQVy5RnCSSNBOvdqbc=
 github.com/aclements/go-perfevent v0.0.0-20240301234650-f7843625020f h1:JjxwchlOepwsUWcQwD2mLUAGE9aCp0/ehy6yCHFBOvo=
 github.com/aclements/go-perfevent v0.0.0-20240301234650-f7843625020f/go.mod h1:tMDTce/yLLN/SK8gMOxQfnyeMeCg8KGzp0D1cbECEeo=
-github.com/apteva/app-sdk v0.81.0 h1:da9+Fq8AbKDZa+N3MVQl3cq8WKT2jX4g/U3pnVNWj/g=
-github.com/apteva/app-sdk v0.81.0/go.mod h1:9+UMOOLTkKFf88SZHD/fxYHtByoJa/t2/EHi5gTtWKc=
+github.com/apteva/app-sdk v0.102.0 h1:4D7nGOvaxtNPumtiZruX+2Ar32NnbCpiXH0rDiURArA=
+github.com/apteva/app-sdk v0.102.0/go.mod h1:9+UMOOLTkKFf88SZHD/fxYHtByoJa/t2/EHi5gTtWKc=
+github.com/apteva/db v0.2.0-alpha.5 h1:srqnpPwygVrSBtbvEBD/7ErRNvwFjxaOEZEl48f+F0M=
+github.com/apteva/db v0.2.0-alpha.5/go.mod h1:g1aROFEShHWYjiQW1itoDxRf1X5dSw4Cl6jsxyKNluc=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
 github.com/cespare/xxhash/v2 v2.2.0 h1:DC2CZ1Ep5Y4k3ZQ899DldepgrayRUGE6BBZ/cd9Cj44=
