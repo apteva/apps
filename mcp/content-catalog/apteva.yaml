@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: content-catalog
 display_name: Content Catalog
-version: 0.6.8
+version: 0.6.9
 description: |
   Coordinate brands, production sessions, Storage assets, Media derivatives,
   optional Gigs, cloud hosting, and shared platform posts.
@@ -79,9 +79,9 @@ provides:
     - { name: content_catalog_assets_labels_update, description: "Set purpose role, generic output category, asset tags, Favorite, and Patreon intent (unset/free/paid) on up to 100 Catalog assets. Does not modify Media or publish externally." }
     - { name: content_catalog_asset_publications_list, description: "List the platform publication records on one asset." }
     - { name: content_catalog_asset_publications_record, description: "Create or update one asset's platform status with explicit evidence. Does not publish externally." }
-    - { name: content_catalog_posts_list, description: "List posts shared by one or more assets, optionally filtered by session, asset, or brand." }
+    - { name: content_catalog_posts_list, description: "List shared posts with platform/account/audience/group filters and pagination." }
     - { name: content_catalog_posts_get, description: "Get a post and its member asset IDs." }
-    - { name: content_catalog_posts_record, description: "Create or update a shared post and its asset membership with explicit publication evidence. Does not publish externally." }
+    - { name: content_catalog_posts_record, description: "Record shared publication outcomes with provider-neutral audiences, account/native-ID reconciliation, optional unknown publication dates and audit. Does not publish externally." }
     - { name: content_catalog_hosting_request, description: "REAL EXTERNAL HOSTING: persist an explicit upload request, wait for a verified checksum and resume after eligibility and destination checks. Supports an optional video title; otherwise uses Media title or session and filename. Creates/reuses a session collection if needed. Never publishes to Social or Patreon." }
     - { name: content_catalog_hosting_cancel, description: "Cancel a checksum-waiting hosting intent before upload. Cannot cancel a transfer already started." }
     - { name: content_catalog_hosting_check, description: "Read the video host's readiness for a hosting operation and update Catalog's observation." }
@@ -112,7 +112,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: content-catalog/v0.6.8
+    ref: content-catalog/v0.6.9
     entry: mcp/content-catalog
   port: 8080
   health_check: /health

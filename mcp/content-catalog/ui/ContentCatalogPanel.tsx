@@ -1,13 +1,15 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { createContext, useContext, useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { buildAssetFamilies, assetInScope, lineageBadge, type AssetFamily } from "./lineage";
 import { hostingNotice, hostingPending, hostingStageLabel, transcodingMessages } from "./hosting";
 import { uploadResumable } from "../../storage/ui/uploadResumable";
 
+import { publicationDateInput,publicationDateSubmit,audienceLabel, matchesPublicationState, type Audience, type PublicationScope } from "./publication";
+const PublicationOpenContext = createContext<(id:string)=>void>(()=>{});
 const API = "/api/apps/content-catalog";
 type Brand = { id: string; slug: string; name: string; storage_root: string; host_provider: string; host_connection_id: number; host_library_id: string; host_collection_id: string };
 type Lifecycle = { lifecycle?: "active" | "archived"; revision?: number; archive_reason?: string; archived_at?: string };
 type Session = Lifecycle & { id: string; brand_id: string; title: string; session_date: string; status: string; notes: string };
-type Publication = { id: string; asset_id: string; asset_ids: string[]; title: string; destination: string; account_ref: string; audience: string; status: string; planned_at: string; actual_at: string; external_post_id: string; external_url: string; evidence_source: string; failure_details: string; legacy_target_id: string };
+type Publication = Audience & { revision: number; observed_at: string; historically_verified?: boolean; recorded_audiences?: Audience[]; verified_audiences?: Audience[]; id: string; asset_id: string; asset_ids: string[]; title: string; destination: string; account_ref: string; audience: string; status: string; planned_at: string; actual_at: string; external_post_id: string; external_url: string; evidence_source: string; failure_details: string; legacy_target_id: string };
 type HostingSummary = { id: string; provider: string; connection_id: number; status: string; remote_id: string; last_checked_at: string; encode_progress?: number | null; provider_stage?: string };
 type Asset = Lifecycle & { role?: string; output_type?: string; ancestors?: Asset[]; original_session_id?: string; session_lifecycle?: string; session_revision?: number; eligible?: boolean; id: string; session_id: string; storage_install_id: number; storage_file_id: string; name: string; kind: string; content_type: string; size_bytes: number; review_status: string; media_status: string; media_rating: string; favorite?: boolean; patreon_intent?: "unset" | "free" | "paid"; tags?: string[]; description?: string; description_source?: string; description_updated_at?: string; duration_ms?: number; media_error?: string; publications: Publication[]; hostings?: HostingSummary[]; hosting_intents?: HostingIntent[]; sources?: AssetSource[] };
 type Hosting = HostingSummary & { asset_id: string; embed_url: string; error: string; provider_status?: number | null; transcoding_messages?: unknown; check_error?: string; next_check_at?: string };
@@ -18,7 +20,7 @@ type GigLink = { gigs_install_id: number; gig_id: number; role: string };
 type MediaDetails = { title?: string; description?: string; duration_ms?: number; width?: number; height?: number; audience_rating?: string; transcript_status?: string; probe_status?: string };
 type Host = { connection_id: number; provider: string; default: boolean };
 type ImportCandidate = { storage_file_id: string; storage_install_id: number; name: string; folder: string; content_type: string; linked_session_ids: string[]; needs_review: boolean };
-type SearchUse = { publication_id: string; destination: string; account_ref: string; status: string; external_url: string; external_post_id: string; actual_at: string };
+type SearchUse = Audience & { observed_at?: string; evidence_source?: string; historically_verified?: boolean; recorded_audiences?: Audience[]; verified_audiences?: Audience[]; publication_id: string; destination: string; account_ref: string; status: string; external_url: string; external_post_id: string; actual_at: string };
 type AssetHit = Asset & { brand_id: string; session_title: string; session_date: string; is_derivative: boolean; uses: SearchUse[]; match_reason: string };
 type SessionHit = Session & { brand_name: string; asset_count: number };
 type SearchPage<T> = { items: T[]; next_cursor?: string };
@@ -76,15 +78,7 @@ input.catalog-duration-slider[type="range"]:disabled::-moz-range-thumb { cursor:
     <p className="text-xs text-text-muted">{loading ? "Loading lengths from Media…" : "Drag either handle or enter exact seconds. Range includes both endpoints; files with unknown length are excluded."}</p>
   </div>;
 }
-function matchesSharing(posts: Publication[], state: string): boolean {
-  if (state === "any") return true;
-  if (state === "none") return posts.length === 0;
-  if (state === "not_verified") return !posts.some(post => post.status === "verified_published");
-  if (state === "verified") return posts.some(post => post.status === "verified_published");
-  if (state === "reported") return posts.some(post => post.status === "provider_reported_published");
-  if (state === "scheduled") return posts.some(post => ["scheduled", "submitted"].includes(post.status));
-  return posts.some(post => post.status === "failed");
-}
+
 function publicationLabel(status: string): string {
   return ({ verified_published: "Verified live", provider_reported_published: "Reported live", scheduled: "Scheduled", submitted: "Submitted", failed: "Failed", removed: "Removed", unknown: "Unverified", planned: "Planned" } as Record<string, string>)[status] || status.replaceAll("_", " ");
 }
@@ -100,6 +94,7 @@ function platformGlyph(destination: string): string {
   const platform = destination.trim().toLowerCase().split(/[\s·:]/)[0];
   return ({ instagram: "◎", youtube: "▶", patreon: "P", tiktok: "♫", facebook: "f", x: "𝕏", twitter: "𝕏", linkedin: "in", threads: "@", pinterest: "P", reddit: "●" } as Record<string, string>)[platform] || destination.slice(0, 2).toUpperCase();
 }
+function platformLabel(destination:string):string{return ({youtube:"YouTube",patreon:"Patreon",instagram:"Instagram",tiktok:"TikTok",facebook:"Facebook",linkedin:"LinkedIn",x:"X",threads:"Threads"} as Record<string,string>)[destination.toLowerCase()] || destination;}
 function statusGlyph(status: string): string {
   return ({ verified_published: "✓", provider_reported_published: "◌", scheduled: "◷", submitted: "↗", failed: "!", removed: "×", planned: "·", unknown: "?" } as Record<string, string>)[status] || "?";
 }
@@ -113,9 +108,13 @@ function AssetLabels({ asset, compact = false }: { asset: Asset; compact?: boole
     {(asset.tags || []).length > max && <span className="text-xs text-text-muted">+{asset.tags!.length - max}</span>}
   </div>;
 }
-function PublicationIcons({ items }: { items: Array<{ destination: string; status: string; account_ref?: string }> }) {
-  if (!items.length) return <span className="text-xs text-text-muted">No platforms recorded</span>;
-  return <div className="flex flex-wrap gap-1.5" aria-label="Platform publication status">{items.map((item, i) => <span key={`${item.destination}:${item.account_ref || ""}:${i}`} className="inline-flex items-center gap-1 rounded-md border border-border px-1.5 py-0.5 text-xs" style={{ color: publicationColor(item.status) }} title={`${item.destination}${item.account_ref ? ` · ${item.account_ref}` : ""}: ${publicationLabel(item.status)}`} aria-label={`${item.destination}: ${publicationLabel(item.status)}`}><span aria-hidden="true" className="font-bold">{platformGlyph(item.destination)}</span><span aria-hidden="true">{statusGlyph(item.status)}</span></span>)}</div>;
+function PublicationIcons({ items }: { items: Array<Audience & {id?:string; destination:string; status:string; account_ref?:string}> }) {
+ const open=useContext(PublicationOpenContext);
+ if(!items.length) return <span className="text-xs text-text-muted">No platforms recorded</span>;
+ return <div className="flex flex-wrap gap-1.5" aria-label="Platform publication status">{items.map((item,i)=>{
+  const title=`${platformLabel(item.destination)} · ${audienceLabel(item)} · ${item.status === "verified_published" ? "Shared" : publicationLabel(item.status)}`;
+  return <button type="button" key={item.id || `${item.destination}:${i}`} disabled={!item.id} className="inline-flex items-center gap-1 rounded-md border border-border px-1.5 py-0.5 text-xs text-left hover:border-accent" style={{color:publicationColor(item.status)}} title={title} aria-label={`Publication details: ${title}`} onClick={e=>{e.stopPropagation();if(item.id)open(item.id);}}><span aria-hidden="true" className="font-bold">{platformGlyph(item.destination)}</span><span>{title}</span><span aria-hidden="true">{statusGlyph(item.status)}</span></button>;
+ })}</div>;
 }
 
 function Modal({ title, onClose, children, wide = false }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
@@ -252,6 +251,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const [searchTag, setSearchTag] = useState("");
   const [searchDestination, setSearchDestination] = useState("");
   const [searchAccount, setSearchAccount] = useState("");
+ const [searchAudience,setSearchAudience]=useState("");const [searchPolicy,setSearchPolicy]=useState("");const [searchGroupScope,setSearchGroupScope]=useState("");const [searchGroup,setSearchGroup]=useState("");
   const [searchAvailability, setSearchAvailability] = useState("any");
   const [searchResults, setSearchResults] = useState<SearchResults>(emptySearch);
   const [searchLoading, setSearchLoading] = useState(false);
@@ -278,6 +278,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const [assetLengthMax, setAssetLengthMax] = useState<number | null>(null);
   const [assetSharing, setAssetSharing] = useState("any");
   const [assetDestination, setAssetDestination] = useState("");
+ const [assetAccount,setAssetAccount]=useState("");const [assetAudience,setAssetAudience]=useState("");const [assetPolicy,setAssetPolicy]=useState("");const [assetGroupScope,setAssetGroupScope]=useState("");const [assetGroup,setAssetGroup]=useState("");
   const [assetSort, setAssetSort] = useState("newest");
   const [assetLineage, setAssetLineage] = useState("any");
   const [assetRole,setAssetRole]=useState("");
@@ -308,7 +309,8 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const [candidates, setCandidates] = useState<ImportCandidate[]>([]);
   const [importLimitReached, setImportLimitReached] = useState(false);
   const [editingPublication, setEditingPublication] = useState<Publication | null>(null);
-  const [modal, setModal] = useState<"new-session" | "edit-session" | "add-file" | "link-gig" | "publication" | "filters" | "lifecycle" | "labels" | null>(null);
+  const [publicationDetails,setPublicationDetails]=useState<{post:Publication;history:Array<{id:string;observed_at:string;recorded_at:string;before:Partial<Publication>;after:Partial<Publication>}>}|null>(null);
+  const [modal, setModal] = useState<"new-session" | "edit-session" | "add-file" | "link-gig" | "publication" | "publication-details" | "filters" | "lifecycle" | "labels" | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -382,7 +384,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     window.history.pushState(null, "", url);
     setReturnTab(origin); setTab("sessions");
     setModal(null);
-    setAssetQuery(""); setAssetKind("any"); setAssetLength("any"); setAssetLengthMin(0); setAssetLengthMax(null); setAssetSharing("any"); setAssetDestination(""); setAssetSort("newest"); setAssetLineage("any"); setAssetRole(""); setShowIntermediates(false); setAssetFavorite("any"); setAssetPatreon("any"); setAssetTag("");
+    setAssetQuery(""); setAssetKind("any"); setAssetLength("any"); setAssetLengthMin(0); setAssetLengthMax(null); setAssetSharing("any"); setAssetDestination("");setAssetAccount("");setAssetAudience("");setAssetPolicy("");setAssetGroupScope("");setAssetGroup(""); setAssetSort("newest"); setAssetLineage("any"); setAssetRole(""); setShowIntermediates(false); setAssetFavorite("any"); setAssetPatreon("any"); setAssetTag("");
     await openSession(s);
   }, [openSession]);
   const backToSessions = useCallback(() => {
@@ -462,7 +464,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   }, [action, openSession, openAsset, selectedSession, selectedAsset]);
   const filteredSessions = (sessionBrand && brandSessions !== null ? brandSessions : sessions).filter(session => !sessionBrand || session.brand_id === sessionBrand);
   const brandName = (id: string) => brands.find(b => b.id === id)?.name || short(id);
-  const searchParams = useCallback(() => ({ entity_type: searchType, query: searchText, brand_id: searchBrand, date_from: searchDateFrom, date_to: searchDateTo, kind: searchKind, lineage: searchLineage, role: searchRole, include_intermediates: String(searchIntermediates || searchRole === "intermediate"), sort: searchSort, review_status: searchReview, tag: searchTag, favorite: searchFavorite, patreon_intent: searchPatreon, destination: searchDestination, account_ref: searchAccount, availability: searchAvailability, limit: "24" }), [searchType, searchText, searchBrand, searchDateFrom, searchDateTo, searchKind, searchLineage, searchRole, searchIntermediates, searchSort, searchReview, searchTag, searchFavorite, searchPatreon, searchDestination, searchAccount, searchAvailability]);
+  const searchParams = useCallback(() => ({ entity_type: searchType, query: searchText, brand_id: searchBrand, date_from: searchDateFrom, date_to: searchDateTo, kind: searchKind, lineage: searchLineage, role: searchRole, include_intermediates: String(searchIntermediates || searchRole === "intermediate"), sort: searchSort, review_status: searchReview, tag: searchTag, favorite: searchFavorite, patreon_intent: searchPatreon, destination: searchDestination, account_ref: searchAccount, audience_type: searchAudience, access_policy: searchPolicy, group_scope: searchGroupScope, group_id: searchGroup, availability: searchAvailability, limit: "24" }), [searchType, searchText, searchBrand, searchDateFrom, searchDateTo, searchKind, searchLineage, searchRole, searchIntermediates, searchSort, searchReview, searchTag, searchFavorite, searchPatreon, searchDestination, searchAccount, searchAudience, searchPolicy, searchGroupScope, searchGroup, searchAvailability]);
   useEffect(() => {
     if (tab !== "search") return;
     let active = true;
@@ -484,12 +486,14 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     await showSession(result.session, "search");
     await openAsset(hit);
   }, [get, showSession, openAsset]);
-  const assetSearchOnly = !!searchRole || searchIntermediates || !!searchKind || !!searchLineage || !!searchReview || !!searchTag || !!searchFavorite || !!searchPatreon || searchAvailability !== "any";
+  const assetSearchOnly = !!searchAudience || !!searchPolicy || !!searchGroupScope || !!searchGroup || !!searchRole || searchIntermediates || !!searchKind || !!searchLineage || !!searchReview || !!searchTag || !!searchFavorite || !!searchPatreon || searchAvailability !== "any";
+  const openPublication=useCallback((id:string)=>{setError("");get<{post:Publication;history:any[]}>(`/posts/${encodeURIComponent(id)}`).then(result=>{setPublicationDetails(result);setModal("publication-details");}).catch(e=>setError(errorText(e)));},[get]);
+  const publicationScope:PublicationScope={destination:assetDestination,account_ref:assetAccount,audience_type:assetAudience,access_policy:assetPolicy,group_scope:assetGroupScope,group_id:assetGroup};
   const assetDestinations = Array.from(new Set(assets.flatMap(asset => (asset.publications || []).map(post => post.destination.trim())).filter(Boolean))).sort((a, b) => a.localeCompare(b));
   const longestDurationSeconds = Math.max(1, ...Object.values(assetDurations).map(ms => Math.ceil(ms / 1000)));
   const lengthMaximum = assetLengthMax ?? longestDurationSeconds;
   const lengthSliderLimit = Math.max(longestDurationSeconds, assetLengthMin, lengthMaximum);
-  const activeAssetFilterCount = [!!assetRole,showIntermediates,assetKind !== "any", assetLength !== "any", assetSharing !== "any", !!assetDestination, assetSort !== "newest", assetLineage !== "any", assetFavorite !== "any", assetPatreon !== "any", !!assetTag].filter(Boolean).length;
+  const activeAssetFilterCount = [!!assetRole,showIntermediates,assetKind !== "any", assetLength !== "any", assetSharing !== "any", !!assetDestination,!!assetAccount,!!assetAudience,!!assetPolicy,!!assetGroupScope,!!assetGroup, assetSort !== "newest", assetLineage !== "any", assetFavorite !== "any", assetPatreon !== "any", !!assetTag].filter(Boolean).length;
   const assetFiltersActive = !!assetQuery || activeAssetFilterCount > 0;
   const assetFilterSummary = [
     assetRole ? `Purpose: ${assetRole}` : "", showIntermediates ? "Including intermediates" : "",
@@ -497,7 +501,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     assetKind !== "any" ? ({ video: "Videos", image: "Images", audio: "Audio", other: "Other files" } as Record<string, string>)[assetKind] : "",
     assetLength === "range" ? `${durationLabel(assetLengthMin * 1000)}–${durationLabel(lengthMaximum * 1000)}` : assetLength === "unknown" ? "Length unknown" : "",
     assetSharing !== "any" ? ({ none: "No post recorded", not_verified: "No verified live post", verified: "Verified live", reported: "Reported live", scheduled: "Scheduled or submitted", failed: "Failed" } as Record<string, string>)[assetSharing] : "",
-    assetDestination,
+    assetDestination,assetAccount,assetAudience,assetPolicy,assetGroupScope,assetGroup,
     assetFavorite !== "any" ? (assetFavorite === "favorite" ? "Favorites" : "Not favorite") : "",
     assetPatreon !== "any" ? `Patreon ${assetPatreon}` : "",
     assetTag ? `#${assetTag}` : "",
@@ -505,8 +509,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   ].filter(Boolean).join(" · ");
   const resetAssetFilters = (clearSearch = false) => { if (clearSearch) setAssetQuery(""); setAssetKind("any"); setAssetLength("any"); setAssetLengthMin(0); setAssetLengthMax(null); setAssetSharing("any"); setAssetDestination(""); setAssetSort("newest"); setAssetLineage("any"); setAssetRole(""); setShowIntermediates(false); setAssetFavorite("any"); setAssetPatreon("any"); setAssetTag(""); };
   const sharingCount = (state: string) => assets.filter(asset => assetInScope(asset,{lifecycle:lifecycleScope,includeIntermediates:showIntermediates})).filter(asset => {
-    const posts = (asset.publications || []).filter(post => !assetDestination || post.destination.toLowerCase() === assetDestination.toLowerCase());
-    return (!assetDestination || state !== "any" || posts.length > 0) && matchesSharing(posts, state);
+    return matchesPublicationState(asset.publications || [],state,publicationScope) && (state!=="ready" || asset.review_status==="approved");
   }).length;
   const scopedAssets = assets.filter(asset => assetInScope(asset,{ lifecycle:lifecycleScope, includeIntermediates:showIntermediates }));
   const filteredAssets = scopedAssets.filter(asset => {
@@ -521,8 +524,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     if (assetKind !== "any" && assetMediaKind(asset) !== assetKind) return false;
     if (assetLength !== "any" && !["video", "audio"].includes(assetMediaKind(asset))) return false;
     if (assetLength !== "any" && (durationsLoading || !matchesDuration(assetDurations[asset.id], assetLength, assetLengthMin, lengthMaximum))) return false;
-    const posts = (asset.publications || []).filter(post => !assetDestination || post.destination.toLowerCase() === assetDestination.toLowerCase());
-    return (!assetDestination || assetSharing !== "any" || posts.length > 0) && matchesSharing(posts, assetSharing);
+    return matchesPublicationState(asset.publications || [],assetSharing,publicationScope) && (assetSharing!=="ready" || asset.review_status==="approved");
   }).sort((a, b) => {
     if (assetSort === "name") return a.name.localeCompare(b.name);
     if (assetSort === "shortest" || assetSort === "longest") {
@@ -544,7 +546,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     try { const result = await get<{ asset: Asset }>(`/assets/${encodeURIComponent(id)}`); if (selectedSession?.id !== result.asset.session_id) { const parentSession = await get<{ session: Session }>(`/sessions/${result.asset.session_id}`); await showSession(parentSession.session, tab === "search" ? "search" : returnTab); } await openAsset(result.asset); } catch (err) { setError(errorText(err)); }
   };
 
-  return <div className="h-full overflow-y-auto bg-bg text-text p-5 space-y-5">
+  return <PublicationOpenContext.Provider value={openPublication}><div className="h-full overflow-y-auto bg-bg text-text p-5 space-y-5">
     <header className="flex flex-wrap justify-between gap-3 items-center">
       <div><h1 className="text-xl font-semibold">Content Catalog</h1><p className="text-sm text-text-muted">Production relationships and verified publication evidence</p></div>
       <button className="border border-border rounded px-3 py-1.5 text-sm hover:bg-bg-hover" onClick={() => (async () => { await refresh(); if (selectedSession) { const asset = selectedAsset; await openSession(selectedSession); if (asset) await openAsset(asset); } })().catch(e => setError(errorText(e)))}>Refresh</button>
@@ -571,11 +573,12 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
         <select className={inputClass} value={searchSort} disabled={searchType === "sessions"} onChange={e => setSearchSort(e.target.value)} aria-label="Sort files"><option value="session_newest">Newest session first</option><option value="asset_newest">Recently linked first</option></select>
         <label className="text-xs text-text-muted">From session date<input className={inputClass} type="date" value={searchDateFrom} onChange={e => setSearchDateFrom(e.target.value)} /></label>
         <label className="text-xs text-text-muted">Through session date<input className={inputClass} type="date" value={searchDateTo} onChange={e => setSearchDateTo(e.target.value)} /></label>
-        <input className={inputClass} value={searchDestination} onChange={e => { setSearchDestination(e.target.value); if (!e.target.value) { setSearchAccount(""); if (searchAvailability !== "never_used") setSearchAvailability("any"); } }} placeholder="Destination, e.g. instagram" aria-label="Destination" />
-        <input className={inputClass} value={searchAccount} disabled={!searchDestination} onChange={e => setSearchAccount(e.target.value)} placeholder="Account reference (optional)" aria-label="Account reference" />
+        <input className={inputClass} value={searchDestination} onChange={e => { setSearchDestination(e.target.value); if (!e.target.value) { setSearchAccount("");setSearchPolicy("");setSearchGroupScope("");setSearchGroup(""); if (searchAvailability !== "never_used") setSearchAvailability("any"); } }} placeholder="Destination, e.g. instagram" aria-label="Destination" />
+        <input className={inputClass} value={searchAccount} disabled={!searchDestination} onChange={e => {setSearchAccount(e.target.value);if(!e.target.value){setSearchPolicy("");setSearchGroupScope("");setSearchGroup("");}}} placeholder="Account reference (optional)" aria-label="Account reference" />
+        <AudienceFilters audience={searchAudience} policy={searchPolicy} scope={searchGroupScope} group={searchGroup} accountReady={!!searchDestination && !!searchAccount} onAudience={setSearchAudience} onPolicy={setSearchPolicy} onScope={setSearchGroupScope} onGroup={setSearchGroup}/>
         <select className={inputClass} value={searchAvailability} disabled={searchType === "sessions"} onChange={e => setSearchAvailability(e.target.value)} aria-label="Availability"><option value="any">Any use state</option><option value="never_used">Never used</option><option value="not_published" disabled={!searchDestination}>Not published here</option><option value="ready_to_publish" disabled={!searchDestination}>Ready to publish here</option><option value="scheduled" disabled={!searchDestination}>Scheduled here</option><option value="published" disabled={!searchDestination}>Published here</option><option value="failed" disabled={!searchDestination}>Failed here</option></select>
       </div>
-      <p className="text-xs text-text-muted">Ready to publish means approved and no active plan or observed post for the selected destination{searchAccount ? " and account" : ""}. Results reflect evidence recorded in Catalog.</p>
+      <p className="text-xs text-text-muted">Ready to publish means approved and no active plan or observed post for the selected destination{searchAccount ? " and account" : ""}. Unknown audience/group overlap blocks automatic readiness. Group IDs belong to the selected account; all-eligible coverage must be explicit. Results reflect evidence recorded in Catalog.</p>
       {searchError && <p className="rounded border border-red-500/50 bg-red-500/10 p-3 text-sm text-red-400">{searchError}</p>}
       {searchLoading && <p className="text-sm text-text-muted">Searching…</p>}
       {(searchType === "all" || searchType === "assets") && <div className="space-y-2"><h3 className="font-semibold">Files <span className="text-text-muted font-normal">{scopedSearchAssets.length}</span></h3>{scopedSearchAssets.length === 0 && !searchLoading && <p className="text-sm text-text-muted">No matching linked files.</p>}<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 12, alignItems: "stretch" }}>{scopedSearchAssets.map(hit => <div key={hit.id} className="min-w-0 space-y-2"><SessionAssetCard asset={hit} projectId={projectId} duration={hit.duration_ms} onToggleFavorite={toggleFavorite} onOpen={id => { const found = searchResults.assets.items.find(item => item.id === id); (found ? openSearchAsset(found) : openLinkedAsset(id)).catch(e => setSearchError(errorText(e))); }} /><div className="text-xs text-text-muted px-1"><p className="truncate">{hit.session_title} · {recordingDate(hit.session_date)} · {brandName(hit.brand_id)}</p><p className="line-clamp-2">{hit.match_reason}</p></div></div>)}</div>{searchResults.assets.next_cursor && <button disabled={searchLoading} className="text-sm text-accent underline" onClick={() => loadMore("assets", searchResults.assets.next_cursor!)}>More files</button>}</div>}
@@ -637,15 +640,17 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
           <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={showIntermediates} onChange={e=>{setShowIntermediates(e.target.checked);if(!e.target.checked && assetRole==="intermediate")setAssetRole("");}} />Inspect intermediate assets</label>
           <label className="block text-xs space-y-1"><span>Source links</span><select className={inputClass} value={assetLineage} onChange={e => setAssetLineage(e.target.value)} aria-label="Source links"><option value="any">All assets</option><option value="source">Sources / no parent linked</option><option value="derivative">Derivatives only</option></select></label>
           <label className="block text-xs space-y-1"><span>Content type</span><select className={inputClass} value={assetKind} onChange={e => setAssetKind(e.target.value)} aria-label="Content type"><option value="any">All content types</option><option value="video">Videos</option><option value="image">Images</option><option value="audio">Audio</option><option value="other">Other files</option></select></label>
-          <label className="block text-xs space-y-1"><span>Publication status</span><select className={inputClass} value={assetSharing} onChange={e => setAssetSharing(e.target.value)} aria-label="Publication status"><option value="any">Any sharing status</option><option value="none">No post recorded</option><option value="not_verified">No verified live post</option><option value="verified">Verified live</option><option value="reported">Reported live, unverified</option><option value="scheduled">Scheduled or submitted</option><option value="failed">Failed</option></select></label>
-          <label className="block text-xs space-y-1"><span>Platform</span><select className={inputClass} value={assetDestination} onChange={e => setAssetDestination(e.target.value)} aria-label="Platform"><option value="">All platforms</option>{assetDestinations.map(destination => <option key={destination} value={destination}>{destination}</option>)}</select></label>
+          <label className="block text-xs space-y-1"><span>Publication status</span><select className={inputClass} value={assetSharing} onChange={e => setAssetSharing(e.target.value)} aria-label="Publication status"><option value="any">Any sharing status</option><option value="none">No post recorded</option><option value="not_verified">No verified live post</option><option value="verified">Verified live</option><option value="reported">Reported live, unverified</option><option value="scheduled">Scheduled or submitted</option><option value="failed">Failed</option><option value="ready">Available to share here</option></select></label>
+          <label className="block text-xs space-y-1"><span>Platform</span><input className={inputClass} value={assetDestination} list="catalog-filter-platforms" onChange={e=>{setAssetDestination(e.target.value);setAssetAccount("");setAssetPolicy("");setAssetGroupScope("");setAssetGroup("");}} placeholder="All platforms" aria-label="Platform"/><datalist id="catalog-filter-platforms">{assetDestinations.map(destination=><option key={destination} value={destination}/>)}</datalist></label>
+          <label className="block text-xs space-y-1"><span>Account</span><input className={inputClass} value={assetAccount} disabled={!assetDestination} onChange={e=>{setAssetAccount(e.target.value);setAssetPolicy("");setAssetGroupScope("");setAssetGroup("");}} placeholder="All accounts" aria-label="Publication account"/></label>
+          <AudienceFilters audience={assetAudience} policy={assetPolicy} scope={assetGroupScope} group={assetGroup} accountReady={!!assetDestination && !!assetAccount} onAudience={setAssetAudience} onPolicy={setAssetPolicy} onScope={setAssetGroupScope} onGroup={setAssetGroup}/>
           <label className="block text-xs space-y-1"><span>Favorite</span><select className={inputClass} value={assetFavorite} onChange={e => setAssetFavorite(e.target.value)} aria-label="Favorite filter"><option value="any">Any</option><option value="favorite">⭐ Favorites</option><option value="not_favorite">Not favorite</option></select></label>
           <label className="block text-xs space-y-1"><span>Patreon intent</span><select className={inputClass} value={assetPatreon} onChange={e => setAssetPatreon(e.target.value)} aria-label="Patreon intent filter"><option value="any">Any</option><option value="unset">Unset</option><option value="free">Free</option><option value="paid">Paid</option></select></label>
           <label className="block text-xs space-y-1"><span>Exact tag</span><input className={inputClass} value={assetTag} onChange={e => setAssetTag(e.target.value)} placeholder="share-next" aria-label="Exact tag filter" /></label>
           <label className="block text-xs space-y-1"><span>Sort files</span><select className={inputClass} value={assetSort} onChange={e => setAssetSort(e.target.value)} aria-label="Sort files"><option value="newest">Recently added</option><option value="name">Name A–Z</option><option value="shortest">Shortest first</option><option value="longest">Longest first</option></select></label>
         </div>
         <DurationFilter mode={assetLength} minimum={assetLengthMin} maximum={lengthMaximum} limit={lengthSliderLimit} loading={durationsLoading} onMode={mode => { setAssetLength(mode); if (mode === "any") { setAssetLengthMin(0); setAssetLengthMax(null); } }} onRange={(minimum, maximum) => { setAssetLengthMin(minimum); setAssetLengthMax(maximum); setAssetLength("range"); }} />
-        <p className="text-xs text-text-muted">Sharing filters use recorded posts; only “Verified live” confirms publication.{durationsUnavailable > 0 ? ` ${durationsUnavailable} file length${durationsUnavailable === 1 ? " is" : "s are"} unknown.` : ""}</p>
+        <p className="text-xs text-text-muted">Sharing filters match platform, account and audience. Unknown group scope never means all groups; uncertain overlap excludes automatic availability. Only “Verified live” confirms publication.{durationsUnavailable > 0 ? ` ${durationsUnavailable} file length${durationsUnavailable === 1 ? " is" : "s are"} unknown.` : ""}</p>
         {(durationsError || durationsFailed > 0) && <div className="flex flex-wrap items-center gap-2 text-xs text-yellow-400">Could not read {durationsFailed || "some"} file length{durationsFailed === 1 ? "" : "s"} from Media. <button type="button" className="underline" onClick={() => loadDurations(selectedSession)}>Retry</button></div>}
         <div className="flex items-center justify-between gap-3 border-t border-border pt-3"><button type="button" className="text-sm text-accent underline" onClick={() => resetAssetFilters()}>Reset filters</button><button type="button" className={buttonClass} onClick={() => setModal(null)}>Show {filteredAssets.length} file{filteredAssets.length === 1 ? "" : "s"}</button></div>
       </div>
@@ -714,12 +719,13 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
       {error && <p className="mt-3 text-sm text-red-400">{error}</p>}
     </Modal>}
 
+    {modal === "publication-details" && publicationDetails && <Modal title="Publication details" onClose={()=>setModal(null)}><PublicationDetails data={publicationDetails}/></Modal>}
     {modal === "new-session" && <Modal title="New session" onClose={() => setModal(null)}><CreateSession busy={busy} brands={brands} onSubmit={input => run(async () => { const result = await action<{ session: Session }>("content_catalog_sessions_create", input); setModal(null); await showSession(result.session); }, "Session created")} />{error && <p className="mt-2 text-sm text-red-400">{error}</p>}</Modal>}
     {modal === "edit-session" && selectedSession && <Modal title="Edit session" onClose={() => setModal(null)}><EditSession key={selectedSession.id} session={selectedSession} busy={busy} onSubmit={input => run(async () => { const result = await action<{ session: Session }>("content_catalog_sessions_update", { id: selectedSession.id, ...input }); setModal(null); await openSession(result.session); }, "Session updated")} />{error && <p className="mt-2 text-sm text-red-400">{error}</p>}</Modal>}
     {modal === "add-file" && selectedSession && <Modal title="Add file to session" onClose={() => setModal(null)}><div className="space-y-4"><UploadFiles projectId={projectId} session={selectedSession} action={action} onUploaded={() => openSession(selectedSession)} /><AttachAsset busy={busy} onSubmit={input => run(async () => { await action("content_catalog_assets_attach", { session_id: selectedSession.id, ...input }); setModal(null); await openSession(selectedSession); }, "File linked to session")} /><div className="rounded border border-border p-3 text-sm"><button type="button" className="text-accent underline" onClick={() => previewImport(selectedSession)}>Browse Storage candidates</button><p className="mt-1 text-xs text-text-muted">Lists files only when clicked. Check each file before linking it.</p>{importLimitReached && <p className="mt-1 text-xs text-yellow-400">Showing the first 200 files.</p>}{candidates.map(candidate => <div key={candidate.storage_file_id} className="flex flex-wrap items-center gap-2 border-t border-border py-2"><span className="min-w-0 flex-1 break-all">{candidate.folder}{candidate.name}</span><button type="button" disabled={busy || candidate.linked_session_ids.includes(selectedSession.id)} className="text-accent underline disabled:opacity-40" onClick={() => run(async () => { await action("content_catalog_assets_attach", { session_id: selectedSession.id, storage_file_id: candidate.storage_file_id }); setModal(null); await openSession(selectedSession); }, "File linked to session")}>Link</button></div>)}</div>{error && <p className="text-sm text-red-400">{error}</p>}</div></Modal>}
     {modal === "link-gig" && selectedSession && <Modal title="Link Gig to session" onClose={() => setModal(null)}><LinkGig busy={busy} onSubmit={input => run(async () => { await action("content_catalog_sessions_link_gig", { session_id: selectedSession.id, ...input }); setModal(null); await openSession(selectedSession); }, "Gig linked to session")} />{error && <p className="mt-2 text-sm text-red-400">{error}</p>}</Modal>}
     {modal === "publication" && selectedSession && <Modal title={editingPublication ? "Edit post" : "Record post"} onClose={() => setModal(null)}><PublicationForm key={editingPublication?.id || selectedAsset?.id || "session"} busy={busy} initial={editingPublication} assets={assets} initialAssetId={selectedAsset?.id} onSubmit={input => run(async () => { const asset = selectedAsset; await action("content_catalog_posts_record", input); setModal(null); await openSession(selectedSession); if (asset) await openAsset(asset); }, "Post saved")} />{error && <p className="mt-2 text-sm text-red-400">{error}</p>}</Modal>}
-  </div>;
+  </div></PublicationOpenContext.Provider>;
 }
 
 const inputClass = "w-full rounded border border-border bg-bg-input px-2 py-1.5 text-sm";
@@ -783,24 +789,26 @@ function PublicationForm({ busy, initial, assets, initialAssetId, onSubmit }: { 
   const [destination, setDestination] = useState(initial?.destination || "");
   const [account, setAccount] = useState(initial?.account_ref || "");
   const [audience, setAudience] = useState(initial?.audience || "");
+ const [audienceType,setAudienceType]=useState(initial?.audience_type || "unknown");const [policy,setPolicy]=useState(initial?.access_policy || "");const [scope,setScope]=useState(initial?.group_scope || "unknown");const [groups,setGroups]=useState((initial?.group_ids || []).join(", "));
   const [status, setStatus] = useState(initial?.status || "planned");
-  const [planned, setPlanned] = useState(initial?.planned_at?.slice(0, 16) || "");
-  const [actual, setActual] = useState(initial?.actual_at?.slice(0, 16) || "");
+  const [planned, setPlanned] = useState(publicationDateInput(initial?.planned_at));
+  const [actual, setActual] = useState(publicationDateInput(initial?.actual_at));
   const [url, setURL] = useState(initial?.external_url || "");
   const [postID, setPostID] = useState(initial?.external_post_id || "");
   const [source, setSource] = useState(initial?.evidence_source || "");
   const [failure, setFailure] = useState(initial?.failure_details || "");
   const published = status === "verified_published" || status === "provider_reported_published";
-  return <form className="space-y-3" onSubmit={e => { e.preventDefault(); if (!selected.length) return; onSubmit({ ...(initial ? { post_id: initial.id } : { destination: destination.trim().toLowerCase() }), asset_ids: selected, title: title.trim(), account_ref: account.trim(), audience: audience.trim(), planned_at: planned ? new Date(planned).toISOString() : "", status, actual_at: actual ? new Date(actual).toISOString() : "", external_url: url.trim(), external_post_id: postID.trim(), evidence_source: source.trim(), failure_details: failure.trim() }); }}>
+  return <form className="space-y-3" onSubmit={e => { e.preventDefault(); if (!selected.length) return; onSubmit({ ...(initial ? { post_id: initial.id, expected_revision:initial.revision } : { destination: destination.trim().toLowerCase() }), asset_ids: selected, title: title.trim(), account_ref: account.trim(), audience: audience.trim(), audience_type:audienceType, access_policy:audienceType==="restricted"?policy.trim():"", group_scope:audienceType==="restricted"?scope:"unknown", group_ids:audienceType==="restricted" && scope==="selected"?groups.split(/[,\n]/).map(x=>x.trim()).filter(Boolean):[], group_labels:Object.fromEntries(Object.entries(initial?.group_labels || {}).filter(([id])=>audienceType==="restricted" && scope==="selected" && groups.split(/[,\n]/).map(x=>x.trim()).includes(id))), planned_at: publicationDateSubmit(planned,initial?.planned_at), status, actual_at: publicationDateSubmit(actual,initial?.actual_at), external_url: url.trim(), external_post_id: postID.trim(), evidence_source: source.trim(), failure_details: failure.trim() }); }}>
     <h3 className="font-semibold">{initial ? `Edit ${initial.destination} post` : "Record a platform post"}</h3>
     <p className="text-xs text-text-muted">One post can include several files. This records Catalog evidence only; it does not publish externally.</p>
     <label className="block text-xs">Post title (optional)<input className={inputClass} value={title} onChange={e => setTitle(e.target.value)} /></label>
     <fieldset className="space-y-1"><legend className="text-xs font-medium">Files in this post</legend>{assets.map(a => <label key={a.id} className="flex items-center gap-2 rounded border border-border px-2 py-1 text-xs"><input type="checkbox" checked={selected.includes(a.id)} onChange={e => setSelected(prev => e.target.checked ? [...prev, a.id] : prev.filter(x => x !== a.id))} /><span className="min-w-0 truncate" title={a.name}>{a.name}</span></label>)}{!selected.length && <p className="text-red-400 text-xs">Choose at least one file.</p>}</fieldset>
     <label className="block text-xs">Platform<input className={inputClass} list="catalog-platforms" required disabled={!!initial} value={destination} onChange={e => setDestination(e.target.value)} placeholder="Instagram, YouTube, Patreon…" /></label>
     <datalist id="catalog-platforms">{["instagram", "youtube", "patreon", "tiktok", "facebook", "x", "linkedin", "threads", "pinterest", "reddit"].map(x => <option key={x} value={x} />)}</datalist>
-    <label className="block text-xs">Account or channel (optional)<input className={inputClass} value={account} onChange={e => setAccount(e.target.value)} /></label><label className="block text-xs">Audience or tier (optional)<input className={inputClass} value={audience} onChange={e => setAudience(e.target.value)} /></label><label className="block text-xs">Planned time (optional)<input className={inputClass} type="datetime-local" value={planned} onChange={e => setPlanned(e.target.value)} /></label>
-    <label className="block text-xs">Status<select className={inputClass} value={status} onChange={e => setStatus(e.target.value)}>{["planned", "scheduled", "submitted", "provider_reported_published", "verified_published", "failed", "removed", "unknown"].map(x => <option key={x} value={x}>{publicationLabel(x)}</option>)}</select></label>
-    {published && <label className="block text-xs">Actual publication time<input className={inputClass} type="datetime-local" required value={actual} onChange={e => setActual(e.target.value)} /></label>}
+    <label className="block text-xs">Account or channel (optional)<input className={inputClass} value={account} onChange={e => setAccount(e.target.value)} /></label><label className="block text-xs">Legacy audience note (optional)<input className={inputClass} value={audience} onChange={e => setAudience(e.target.value)} /></label>
+    <fieldset className="space-y-3 rounded border border-border p-3"><legend className="text-xs font-medium">Publication audience</legend><label className="block text-xs">Audience type<select className={inputClass} value={audienceType} onChange={e=>setAudienceType(e.target.value as Audience["audience_type"] || "unknown")} aria-label="Post audience type">{["unknown","public","restricted","private"].map(v=><option key={v} value={v}>{v==="unknown"?"Unknown":v.charAt(0).toUpperCase()+v.slice(1)}</option>)}</select></label>{audienceType==="restricted" && <><label className="block text-xs">Access policy<input className={inputClass} value={policy} onChange={e=>setPolicy(e.target.value)} placeholder="Provider policy, e.g. membership" aria-label="Post access policy"/></label><label className="block text-xs">Group scope<select className={inputClass} value={scope} onChange={e=>setScope(e.target.value as Audience["group_scope"] || "unknown")} aria-label="Post group scope"><option value="unknown">Unknown</option><option value="all_eligible">All eligible groups</option><option value="selected">Selected groups</option></select></label>{scope==="selected" && <label className="block text-xs">Provider group / tier IDs<input className={inputClass} value={groups} required onChange={e=>setGroups(e.target.value)} placeholder="Comma-separated account group IDs" aria-label="Post group IDs"/></label>}<p className="text-xs text-text-muted">Group IDs belong to this platform account. Unknown scope does not mean all members.</p></>}</fieldset><label className="block text-xs">Planned time (optional)<input className={inputClass} type="datetime-local" value={planned} onChange={e => setPlanned(e.target.value)} /></label>
+    <label className="block text-xs">Status<select className={inputClass} value={status} aria-label="Post status" onChange={e => setStatus(e.target.value)}>{["planned", "scheduled", "submitted", "provider_reported_published", "verified_published", "failed", "removed", "unknown"].map(x => <option key={x} value={x}>{publicationLabel(x)}</option>)}</select></label>
+    {published && <label className="block text-xs">Actual publication time (optional; leave empty if unknown)<input className={inputClass} type="datetime-local" value={actual} onChange={e => setActual(e.target.value)} /></label>}
     <label className="block text-xs">Post URL<input className={inputClass} type="url" required={status === "verified_published" && !postID} value={url} onChange={e => setURL(e.target.value)} placeholder="https://…" /></label>
     <label className="block text-xs">External post ID (optional)<input className={inputClass} value={postID} onChange={e => setPostID(e.target.value)} /></label>
     {status !== "planned" && <label className="block text-xs">How was this confirmed?<input className={inputClass} required value={source} onChange={e => setSource(e.target.value)} placeholder="Manual creator-page check or Social post result" /></label>}
@@ -857,4 +865,12 @@ function LifecycleHistory({entity,id,get}:{entity:string;id:string;get:<T>(path:
  const [events,setEvents]=useState<Array<{action:string;reason:string;created_at:string}>>([]);const [error,setError]=useState("");
  useEffect(()=>{let active=true;setEvents([]);setError("");get<{events:typeof events}>("/lifecycle-history",{entity_type:entity,id}).then(result=>{if(active)setEvents(result.events||[]);}).catch(err=>{if(active)setError(errorText(err));});return()=>{active=false;};},[get,entity,id]);
  return <details className="rounded border border-border p-2 text-xs"><summary>Lifecycle history ({events.length})</summary>{error&&<p className="text-yellow-400">{error}</p>}{events.map((event,index)=><p key={index} className="mt-2">{event.action} · {event.created_at} · {event.reason}</p>)}{!events.length&&!error&&<p className="mt-2 text-text-muted">No archive or move history recorded.</p>}</details>;
+}
+
+function AudienceFilters({audience,policy,scope,group,accountReady,onAudience,onPolicy,onScope,onGroup}:{audience:string;policy:string;scope:string;group:string;accountReady:boolean;onAudience:(s:string)=>void;onPolicy:(s:string)=>void;onScope:(s:string)=>void;onGroup:(s:string)=>void}) {
+ return <><label className="block text-xs space-y-1"><span>Publication audience</span><select className={inputClass} value={audience} onChange={e=>{onAudience(e.target.value);if(e.target.value && e.target.value!=="restricted"){onPolicy("");onScope("");onGroup("");}}} aria-label="Publication audience"><option value="">Any audience</option><option value="public">Public</option><option value="restricted">Restricted</option><option value="private">Private</option><option value="unknown">Unknown</option></select></label><label className="block text-xs space-y-1"><span>Access policy</span><input className={inputClass} value={policy} disabled={!accountReady} onChange={e=>onPolicy(e.target.value)} placeholder="Any policy, e.g. membership" aria-label="Publication access policy"/></label><label className="block text-xs space-y-1"><span>Group scope</span><select className={inputClass} value={scope} disabled={!accountReady} onChange={e=>onScope(e.target.value)} aria-label="Publication group scope"><option value="">Any scope</option><option value="unknown">Unknown</option><option value="all_eligible">All eligible groups</option><option value="selected">Selected groups</option></select></label><label className="block text-xs space-y-1"><span>Group / tier ID</span><input className={inputClass} value={group} disabled={!accountReady} onChange={e=>onGroup(e.target.value)} placeholder="Exact account group ID" aria-label="Publication group ID"/></label></>;
+}
+function PublicationDetails({data}:{data:{post:Publication;history:Array<{id:string;observed_at:string;recorded_at:string;before:Partial<Publication>;after:Partial<Publication>}>}}) {
+ const p=data.post;
+ return <div className="space-y-4 text-sm"><div><h3 className="font-semibold">{p.title || p.destination}</h3><p className="text-text-muted">{platformLabel(p.destination)} · {audienceLabel(p)} · {publicationLabel(p.status)}</p></div><dl className="grid grid-cols-2 gap-2"><dt className="text-text-muted">Account</dt><dd className="break-all">{p.account_ref || "Unknown"}</dd><dt className="text-text-muted">Access policy</dt><dd>{p.access_policy || "Not recorded"}</dd><dt className="text-text-muted">Group scope</dt><dd>{p.group_scope==="all_eligible"?"All eligible groups":p.group_scope==="selected"?"Selected groups":"Unknown"}</dd><dt className="text-text-muted">Groups / tiers</dt><dd>{p.group_scope==="all_eligible"?"Applies to all eligible groups":p.group_ids?.length?p.group_ids.map(id=><div key={id}>{p.group_labels?.[id] || id}{p.group_labels?.[id] && <span className="text-xs text-text-muted"> · {id}</span>}</div>):"Not established"}</dd><dt className="text-text-muted">Publication date</dt><dd>{p.actual_at || "Unknown"}</dd><dt className="text-text-muted">Observed at</dt><dd>{p.observed_at || "Not recorded"}</dd><dt className="text-text-muted">External ID</dt><dd className="break-all">{p.external_post_id || "Not recorded"}</dd></dl>{p.external_url && <a className="text-accent underline" href={p.external_url} target="_blank" rel="noreferrer">Open published post ↗</a>}<div><h4 className="font-medium">Verification evidence</h4><p className="break-words text-text-muted">{p.evidence_source || "Not recorded"}</p>{p.publisher_ref && <p className="text-xs text-text-muted">Publisher: {p.publisher_ref.app} · record {p.publisher_ref.record_id}{p.publisher_ref.install_id?` · app install ${p.publisher_ref.install_id}`:""}</p>}</div>{p.audience && <p className="text-xs text-text-muted">Legacy audience note: {p.audience}</p>}{p.failure_details && <p className="text-red-400">{p.failure_details}</p>}<details><summary className="cursor-pointer font-medium">Publication and audience history ({data.history.length})</summary><div className="mt-2 space-y-2">{data.history.map(e=><div key={e.id} className="rounded border border-border p-2 text-xs"><div>{e.recorded_at || e.observed_at}</div><div>{e.after?.audience_type?`${audienceLabel(e.before)} → ${audienceLabel(e.after)}`:"Historical audience not recorded"}</div>{!!e.after?.group_ids?.length && <div>Groups: {e.after.group_ids.join(", ")}</div>}<div className="text-text-muted">{e.after?.evidence_source || "Legacy observation"}</div></div>)}</div></details></div>;
 }

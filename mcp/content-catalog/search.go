@@ -24,13 +24,20 @@ type searchPage[T any] struct {
 }
 
 type searchUse struct {
-	PublicationID  string `json:"publication_id"`
-	Destination    string `json:"destination"`
-	AccountRef     string `json:"account_ref"`
-	Status         string `json:"status"`
-	ExternalPostID string `json:"external_post_id"`
-	ExternalURL    string `json:"external_url"`
-	ActualAt       string `json:"actual_at"`
+	PublicationAudience
+	RecordedAudiences    []PublicationAudience `json:"recorded_audiences"`
+	HistoricallyVerified bool                  `json:"historically_verified"`
+	VerifiedAudiences    []PublicationAudience `json:"verified_audiences"`
+	ObservedAt           string                `json:"observed_at"`
+	EvidenceSource       string                `json:"evidence_source"`
+	Title                string                `json:"title"`
+	PublicationID        string                `json:"publication_id"`
+	Destination          string                `json:"destination"`
+	AccountRef           string                `json:"account_ref"`
+	Status               string                `json:"status"`
+	ExternalPostID       string                `json:"external_post_id"`
+	ExternalURL          string                `json:"external_url"`
+	ActualAt             string                `json:"actual_at"`
 }
 
 type assetSearchHit struct {
@@ -59,6 +66,7 @@ type releaseSearchHit struct {
 }
 
 type searchOptions struct {
+	PublicationFilter                                                        publicationFilter
 	ProjectID, EntityType, Query, BrandID, SessionID, DateFrom, DateTo       string
 	Kind, Lineage, Sort, ReviewStatus, Destination, AccountRef, Availability string
 	Purpose                                                                  purposeOptions
@@ -84,6 +92,11 @@ func parseSearchOptions(pid string, args map[string]any) (searchOptions, error) 
 		return o, errors.New("include_descendants requires source_asset_id")
 	}
 	var err error
+	o.PublicationFilter, err = parsePublicationFilter(args)
+	if err != nil {
+		return o, err
+	}
+	o.PublicationFilter.Status = ""
 	o.Purpose, err = parsePurposeOptions(args)
 	if err != nil {
 		return o, err
@@ -249,7 +262,7 @@ func (a *App) search(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		out["assets"] = page
 	}
 	// Asset-only filters do not silently change the meaning of a session or release result.
-	assetOnly := o.Purpose.Role != "" || o.Purpose.OutputType != "" || o.Purpose.IncludeIntermediates || o.SourceAssetID != "" || o.Kind != "" || o.Lineage != "" || o.ReviewStatus != "" || o.Availability != "any" || o.SessionID != "" || o.Tag != "" || o.Favorite != nil || o.PatreonIntent != ""
+	assetOnly := o.PublicationFilter.AudienceType != "" || o.PublicationFilter.AccessPolicy != "" || o.PublicationFilter.GroupScope != "" || o.PublicationFilter.GroupID != "" || o.Purpose.Role != "" || o.Purpose.OutputType != "" || o.Purpose.IncludeIntermediates || o.SourceAssetID != "" || o.Kind != "" || o.Lineage != "" || o.ReviewStatus != "" || o.Availability != "any" || o.SessionID != "" || o.Tag != "" || o.Favorite != nil || o.PatreonIntent != ""
 	if assetOnly && (o.EntityType == "sessions" || o.EntityType == "releases") {
 		return nil, errors.New("file filters require entity_type assets or all")
 	}
@@ -368,38 +381,62 @@ func (a *App) searchAssets(db *sql.DB, o searchOptions, cursor searchCursor) (se
 		values = append(values, cursor.Date, cursor.Date, cursor.CreatedAt, cursor.CreatedAt, cursor.ID)
 	}
 	target := `SELECT 1 FROM post_assets pa JOIN posts p ON p.id=pa.post_id AND p.project_id=pa.project_id WHERE pa.project_id=a.project_id AND pa.asset_id=a.id`
-	matchingTarget := target
-	matchingValues := []any{}
+	identity, identityValues := "", []any{}
 	if o.Destination != "" {
-		matchingTarget += ` AND LOWER(p.destination) LIKE LOWER(?)`
-		matchingValues = append(matchingValues, o.Destination+"%")
+		identity += ` AND LOWER(p.destination)=?`
+		identityValues = append(identityValues, strings.ToLower(o.Destination))
 	}
 	if o.AccountRef != "" {
-		matchingTarget += ` AND p.account_ref=?`
-		matchingValues = append(matchingValues, o.AccountRef)
+		identity += ` AND p.account_ref=?`
+		identityValues = append(identityValues, o.AccountRef)
 	}
-	wasPublished := `p.status='verified_published' OR EXISTS (SELECT 1 FROM post_events pe WHERE pe.project_id=p.project_id AND pe.post_id=p.id AND pe.status='verified_published')`
+	audience, audienceValues := o.PublicationFilter.audiencePredicate("p", false)
+	eventAudience, eventValues := o.PublicationFilter.audiencePredicate("pe", false)
+	verified := `((p.status='verified_published'` + audience + `) OR EXISTS(SELECT 1 FROM post_events pe WHERE pe.project_id=p.project_id AND pe.post_id=p.id AND pe.status='verified_published'` + eventAudience + `))`
+	verifiedValues := append(append([]any{}, audienceValues...), eventValues...)
 	switch o.Availability {
 	case "never_used":
-		q += ` AND NOT EXISTS (` + target + `)`
-	case "not_published":
-		q += ` AND NOT EXISTS (` + matchingTarget + ` AND (` + wasPublished + `))`
-		values = append(values, matchingValues...)
+		if o.PublicationFilter.scoped() {
+			q += ` AND NOT EXISTS (` + target + identity + ` AND ((1=1` + audience + `) OR EXISTS(SELECT 1 FROM post_events pe WHERE pe.project_id=p.project_id AND pe.post_id=p.id` + eventAudience + `)))`
+			values = append(values, identityValues...)
+			values = append(values, audienceValues...)
+			values = append(values, eventValues...)
+		} else {
+			q += ` AND NOT EXISTS (` + target + `)`
+		}
+	case "not_published", "published":
+		if o.Availability == "not_published" {
+			q += ` AND NOT EXISTS (`
+		} else {
+			q += ` AND EXISTS (`
+		}
+		q += target + identity + ` AND ` + verified + `)`
+		values = append(values, identityValues...)
+		values = append(values, verifiedValues...)
 	case "ready_to_publish":
-		q += ` AND a.review_status='approved' AND NOT EXISTS (` + matchingTarget + ` AND (p.status NOT IN ('failed','removed') OR (` + wasPublished + `)))`
-		values = append(values, matchingValues...)
+		if o.AccountRef != "" {
+			identity = strings.Replace(identity, `p.account_ref=?`, `(p.account_ref=? OR p.account_ref='')`, 1)
+		}
+		blocker, blockValues := o.PublicationFilter.audiencePredicate("p", true)
+		oldBlocker, oldBlockValues := o.PublicationFilter.audiencePredicate("pe", true)
+		q += ` AND a.review_status='approved' AND NOT EXISTS (` + target + identity + ` AND ((p.status NOT IN ('failed','removed')` + blocker + `) OR (p.status='verified_published'` + blocker + `) OR EXISTS(SELECT 1 FROM post_events pe WHERE pe.project_id=p.project_id AND pe.post_id=p.id AND pe.status='verified_published'` + oldBlocker + `)))`
+		values = append(values, identityValues...)
+		values = append(values, blockValues...)
+		values = append(values, blockValues...)
+		values = append(values, oldBlockValues...)
 	case "scheduled", "failed":
-		q += ` AND EXISTS (` + matchingTarget + ` AND p.status=?)`
-		values = append(values, append(matchingValues, o.Availability)...)
-	case "published":
-		q += ` AND EXISTS (` + matchingTarget + ` AND (` + wasPublished + `))`
-		values = append(values, matchingValues...)
+		q += ` AND EXISTS (` + target + identity + audience + ` AND p.status=?)`
+		values = append(values, identityValues...)
+		values = append(values, audienceValues...)
+		values = append(values, o.Availability)
 	case "any":
-		if o.Destination != "" {
-			q += ` AND EXISTS (` + matchingTarget + `)`
-			values = append(values, matchingValues...)
+		if o.PublicationFilter.scoped() {
+			q += ` AND EXISTS (` + target + identity + audience + `)`
+			values = append(values, identityValues...)
+			values = append(values, audienceValues...)
 		}
 	}
+
 	q += ` ORDER BY ` + sortDate + ` DESC,a.created_at DESC,a.id DESC LIMIT ?`
 	values = append(values, o.Limit+1)
 	rows, err := db.Query(q, values...)
@@ -466,31 +503,57 @@ func loadSearchUses(db *sql.DB, pid string, hits []assetSearchHit) error {
 	if len(hits) == 0 {
 		return nil
 	}
-	placeholders := make([]string, len(hits))
+	marks := []string{}
 	values := []any{pid}
 	byID := map[string]int{}
 	for i := range hits {
-		placeholders[i] = "?"
+		marks = append(marks, "?")
 		values = append(values, hits[i].ID)
 		byID[hits[i].ID] = i
+		hits[i].Publications = []Publication{}
 	}
-	q := `SELECT pa.asset_id,p.id,p.destination,p.account_ref,p.status,p.external_post_id,p.external_url,p.actual_at
-		FROM post_assets pa JOIN posts p ON p.project_id=pa.project_id AND p.id=pa.post_id
-		WHERE pa.project_id=? AND pa.asset_id IN (` + strings.Join(placeholders, ",") + `) ORDER BY p.created_at DESC,p.id DESC`
-	rows, err := db.Query(q, values...)
+	// Qualify columns because the asset membership table also has project/id fields.
+	columns := strings.Split(postColumns, ",")
+	for i := range columns {
+		columns[i] = "p." + columns[i]
+	}
+	rows, err := db.Query(`SELECT pa.asset_id,`+strings.Join(columns, ",")+` FROM post_assets pa JOIN posts p ON p.project_id=pa.project_id AND p.id=pa.post_id WHERE pa.project_id=? AND pa.asset_id IN (`+strings.Join(marks, ",")+`) ORDER BY p.created_at DESC,p.id DESC`, values...)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	for rows.Next() {
-		var assetID string
-		var use searchUse
-		if err := rows.Scan(&assetID, &use.PublicationID, &use.Destination, &use.AccountRef, &use.Status, &use.ExternalPostID, &use.ExternalURL, &use.ActualAt); err != nil {
-			return err
+		var id string
+		p, e := scanPost(rows, &id)
+		if e != nil {
+			rows.Close()
+			return e
 		}
-		hits[byID[assetID]].Uses = append(hits[byID[assetID]].Uses, use)
+		p.AssetID = id
+		hits[byID[id]].Publications = append(hits[byID[id]].Publications, p)
 	}
-	return rows.Err()
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	refs := []*Publication{}
+	for i := range hits {
+		for j := range hits[i].Publications {
+			refs = append(refs, &hits[i].Publications[j])
+		}
+	}
+	if err = loadPostMemberships(db, pid, refs); err != nil {
+		return err
+	}
+	if err = loadVerifiedAudiences(db, pid, refs); err != nil {
+		return err
+	}
+	for i := range hits {
+		for _, p := range hits[i].Publications {
+			hits[i].Uses = append(hits[i].Uses, searchUse{PublicationAudience: p.PublicationAudience, HistoricallyVerified: p.HistoricallyVerified, VerifiedAudiences: p.VerifiedAudiences, RecordedAudiences: p.RecordedAudiences, ObservedAt: p.ObservedAt, EvidenceSource: p.EvidenceSource, Title: p.Title, PublicationID: p.ID, Destination: p.Destination, AccountRef: p.AccountRef, Status: p.Status, ExternalPostID: p.ExternalPostID, ExternalURL: p.ExternalURL, ActualAt: p.ActualAt})
+		}
+	}
+	return nil
 }
 
 func (a *App) searchSessions(db *sql.DB, o searchOptions, cursor searchCursor) (searchPage[sessionSearchHit], error) {
