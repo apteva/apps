@@ -49,7 +49,7 @@ const manifestYAML = `schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.12.21
+version: 0.12.22
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -378,7 +378,7 @@ runtime:
   database_upgrade: backward_compatible
   source:
     repo: github.com/apteva/apps
-    ref: telephony/v0.12.21
+    ref: telephony/v0.12.22
     entry: mcp/telephony
   port: 8080
   health_check: /health
@@ -392,6 +392,7 @@ config_schema:
   - { name: audio_alert_min_calls, type: text, default: "3", label: "Audio alert minimum distinct calls", description: "2–256 affected calls per project/provider/stage within 30 seconds. 0 disables alerts; invalid values use 3." }
   - { name: audio_alert_cooldown_seconds, type: text, default: "120", label: "Audio alert cooldown (seconds)", description: "30–3600 seconds between correlated alerts for the same project/provider/stage." }
   - { name: softphone_webrtc_enabled, type: boolean, default: false, label: "Enable optional WebRTC softphone", description: "Enable browser Opus/RTP media. WebSocket remains the client default. Requires reachable ICE/UDP or configured TURN." }
+  - { name: softphone_webrtc_encoder_input_rate, type: select, options: ["48000", "24000"], default: "48000", label: "WebRTC Opus encoder input rate", description: "48000 preserves existing conversion. Optional 24000 encodes native Opus directly from PCM. Portable fallback retains 48000. Applies to new call, listening and coaching media connections; RTP clock stays 48000." }
   - { name: softphone_webrtc_ice_servers, type: text, label: "WebRTC ICE servers (JSON)", description: "Optional ICE server array with urls, username and credential. Sent only to authenticated media sessions; use restricted TURN credentials. Empty uses host candidates." }
   - { name: softphone_webrtc_public_ips, type: text, label: "WebRTC public addresses", description: "Optional comma-separated public IPv4/IPv6 addresses for host candidates behind NAT." }
   - { name: softphone_webrtc_udp_port_min, type: text, label: "WebRTC UDP range start", description: "Optional range 1024–65535. Configure both bounds and forward the range to the sidecar. Empty uses ephemeral ports." }
@@ -448,6 +449,8 @@ type App struct {
 	aiPolicies        aiPolicyRegistry
 	mediaBridges      carrierBridgeRegistry
 	callReads         callReadCache
+	idleWorkers       idleWorkerGate
+	dashboardExtras   dashboardExtrasCache
 	inventoryReads    inventoryReadCache
 	policyReads       phonePolicyCache
 	outboundHints     outboundInventoryHints
@@ -650,13 +653,14 @@ func (a *App) Workers() []sdk.Worker {
 	}
 	for i := range workers {
 		run := workers[i].Run
+		name := workers[i].Name
 		workers[i].Run = func(c context.Context, ctx *sdk.AppCtx) error {
 			done, err := a.runtimeBegin(false)
 			if err != nil {
 				return nil
 			}
 			defer done()
-			return run(c, ctx)
+			return a.runIdleGated(name, run, c, ctx)
 		}
 	}
 	return workers

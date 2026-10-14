@@ -42,8 +42,14 @@ func newRTCOpusEncoder(bitrate int) (rtcOpusEncoder, error) {
 	return newRTCOpusEncoderWithFEC(bitrate, true)
 }
 func newRTCOpusEncoderWithFEC(bitrate int, fec bool) (rtcOpusEncoder, error) {
+	return newRTCOpusEncoderAtRate(bitrate, fec, 48000)
+}
+func newRTCOpusEncoderAtRate(bitrate int, fec bool, inputRate int) (rtcOpusEncoder, error) {
+	if inputRate != 24000 && inputRate != 48000 {
+		return nil, errors.New("invalid Opus input rate")
+	}
 	return selectRTCOpusEncoder(bitrate, func(rate int) (rtcOpusEncoder, error) {
-		return newRTCNativeEncoderWithFEC(rate, fec)
+		return newRTCNativeEncoderAtRate(rate, fec, inputRate)
 	})
 }
 func selectRTCOpusEncoder(bitrate int, native func(int) (rtcOpusEncoder, error)) (rtcOpusEncoder, error) {
@@ -109,11 +115,18 @@ func (e *rtcGoOpusEncoder) codecInfo() (string, string, string) {
 	return "portable", "", e.fallbackReason
 }
 func rtcOpusEncoderState(e rtcOpusEncoder, fec bool, bitrate, loss int, now time.Time) *rtcEncoderState {
-	s := &rtcEncoderState{FECRequested: fec, Capability: e.capability(), Bitrate: bitrate, ExpectedLoss: loss, FEC: e.capability() == "libopus_fec", UpdatedAt: now.UTC().Format(time.RFC3339Nano)}
+	s := &rtcEncoderState{InputRate: rtcEncoderInputRate(e), RTPClockRate: 48000, FECRequested: fec, Capability: e.capability(), Bitrate: bitrate, ExpectedLoss: loss, FEC: e.capability() == "libopus_fec", UpdatedAt: now.UTC().Format(time.RFC3339Nano)}
 	if c, ok := e.(interface {
 		codecInfo() (string, string, string)
 	}); ok {
 		s.Source, s.LibraryVersion, s.FallbackReason = c.codecInfo()
 	}
 	return s
+}
+
+func rtcEncoderInputRate(e rtcOpusEncoder) int {
+	if c, ok := e.(interface{ inputRate() int }); ok {
+		return c.inputRate()
+	}
+	return 48000 // Portable encoder keeps its supported input format.
 }

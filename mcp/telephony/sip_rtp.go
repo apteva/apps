@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -505,6 +504,7 @@ type sipBridgeSession struct {
 	media          *sipRTPMedia
 	finish         func(string, error)
 	hangup         func() error
+	takePrepared   func() net.Conn
 }
 
 func (a *App) bridgeDirectSIPMedia(session *sipSession) {
@@ -519,6 +519,7 @@ func (a *App) bridgeDirectSIPMedia(session *sipSession) {
 	session.local.mu.Unlock()
 	a.bridgeSIPMedia(sipBridgeSession{
 		playbackPolicy: policy,
+		takePrepared:   session.takePreparedBridge,
 		callID:         session.call.ID, ctx: session.ctx, media: media,
 		finish: session.finish, hangup: session.hangup,
 	})
@@ -540,25 +541,17 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		return
 	}
 	defer a.db().releaseMedia(row.ID)
-	bridgeURL, err := a.mediaBridgeURL(row)
-	if err != nil {
-		_ = a.db().updateMediaStatusWithLeg(row.ID, "error", err.Error(), 1011, "audio bridge unavailable", string(mediaCloseLegLocalError))
-		session.finish("local_error", err)
-		return
+	var core net.Conn
+	if session.takePrepared != nil {
+		core = session.takePrepared()
 	}
-	coreURL, err := url.Parse(bridgeURL)
-	if err != nil {
-		session.finish("local_error", err)
-		return
-	}
-	core, buffered, _, err := (a.correlatedBridgeDialer(row)).Dial(session.ctx, coreURL.String())
-	if err != nil {
-		_ = a.db().updateMediaStatusWithLeg(row.ID, "error", err.Error(), 1011, "core audio bridge rejected", string(mediaCloseLegCore))
-		session.finish("core", err)
-		return
-	}
-	if buffered != nil {
-		core = hijackedConn{Conn: core, reader: buffered}
+	if core == nil {
+		core, err = a.dialSIPBridge(session.ctx, row)
+		if err != nil {
+			_ = a.db().updateMediaStatusWithLeg(row.ID, "error", err.Error(), 1011, "audio bridge rejected", string(mediaCloseLegCore))
+			session.finish("core", err)
+			return
+		}
 	}
 	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
 	media.coreForwardTelemetry.Store(coreWriter)
@@ -816,13 +809,17 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 		if media.hold.Load() != nil {
 			continue
 		}
+		data, sourceAt := carrierMicrophoneSource(row, data)
 		pcm8 := outputResampler.Process(bytesToPCM16(data))
 		if len(pcm8) == 0 {
 			continue
 		}
 		chunks := sipPCMFrames(pcm8, media.sampleRate(), nextFrame)
 		packets := make([]sipRTPOutboundPacket, 0, len(chunks))
-		for _, chunk := range chunks {
+		for i, chunk := range chunks {
+			if !sourceAt.IsZero() && i > 0 {
+				sourceAt = sourceAt.Add(20 * time.Millisecond)
+			}
 			pcm := chunk.PCM
 			if len(pcm) < media.sampleRate()/50 {
 				padded := make([]int16, media.sampleRate()/50)
@@ -830,7 +827,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 				pcm = padded
 			}
 			packets = append(packets, sipRTPOutboundPacket{
-				pcm:    pcm,
+				enqueuedAt: sourceAt, pcm: pcm,
 				itemID: nextFrame.ItemID, audioEndMS: chunk.AudioEndMS,
 			})
 		}

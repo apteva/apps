@@ -8,12 +8,14 @@ import (
 	"github.com/ebitengine/purego"
 	"runtime"
 	"sync"
+	"unsafe"
 )
 
 // Verified app-owned bundle first, then fixed system-library names. Keep
 // the library open for the process lifetime; each call owns/destroys its state.
 type rtcOpusLibrary struct {
 	source, version string
+	encodeAddress   uintptr
 	hasLBRR         func([]byte, int32) int32
 	create          func(int32, int32, int32, *int32) uintptr
 	destroy         func(uintptr)
@@ -67,6 +69,7 @@ func loadRTCOpusLibrary() (*rtcOpusLibrary, error) {
 		purego.RegisterLibFunc(&l.create, handle, "opus_encoder_create")
 		purego.RegisterLibFunc(&l.destroy, handle, "opus_encoder_destroy")
 		purego.RegisterLibFunc(&l.encode, handle, "opus_encode_float")
+		l.encodeAddress, _ = purego.Dlsym(handle, "opus_encode_float")
 		purego.RegisterLibFunc(&l.decode, handle, "opus_decode")
 		purego.RegisterLibFunc(&l.decoderCreate, handle, "opus_decoder_create")
 		purego.RegisterLibFunc(&l.decoderDestroy, handle, "opus_decoder_destroy")
@@ -95,18 +98,25 @@ type rtcNativeEncoder struct {
 	lib   *rtcOpusLibrary
 	state uintptr
 	fec   bool
+	rate  int
 }
 
 func newRTCNativeEncoder(bitrate int) (rtcOpusEncoder, error) {
 	return newRTCNativeEncoderWithFEC(bitrate, true)
 }
 func newRTCNativeEncoderWithFEC(bitrate int, fec bool) (rtcOpusEncoder, error) {
+	return newRTCNativeEncoderAtRate(bitrate, fec, 48000)
+}
+func newRTCNativeEncoderAtRate(bitrate int, fec bool, rate int) (rtcOpusEncoder, error) {
+	if rate != 24000 && rate != 48000 {
+		return nil, errors.New("invalid Opus input rate")
+	}
 	l, err := loadRTCOpusLibrary()
 	if err != nil {
 		return nil, err
 	}
 	var code int32
-	e := &rtcNativeEncoder{lib: l, state: l.create(48000, 1, 2048, &code), fec: fec}
+	e := &rtcNativeEncoder{lib: l, state: l.create(int32(rate), 1, 2048, &code), fec: fec, rate: rate}
 	fecValue := int32(0)
 	if fec {
 		fecValue = 1
@@ -137,10 +147,17 @@ func newRTCNativeEncoderWithFEC(bitrate int, fec bool) (rtcOpusEncoder, error) {
 	return e, nil
 }
 func (e *rtcNativeEncoder) EncodeFloat32(pcm []float32, out []byte) (int, error) {
-	if e.state == 0 || len(pcm) != 960 || len(out) == 0 {
+	if e.state == 0 || len(pcm) != e.rate/50 || len(out) == 0 {
 		return 0, errors.New("invalid Opus frame")
 	}
-	n := e.lib.encode(e.state, pcm, 960, out, int32(len(out)))
+	// libopus takes integer/pointer arguments only. Avoid reflection on this
+	// fixed ABI; keep Go buffers live through the synchronous C call.
+	result, _, _ := purego.SyscallN(e.lib.encodeAddress, e.state,
+		uintptr(unsafe.Pointer(unsafe.SliceData(pcm))), uintptr(len(pcm)),
+		uintptr(unsafe.Pointer(unsafe.SliceData(out))), uintptr(len(out)))
+	runtime.KeepAlive(pcm)
+	runtime.KeepAlive(out)
+	n := int32(result)
 	if n < 0 {
 		return 0, fmt.Errorf("Opus encode: %d", n)
 	}
@@ -226,3 +243,5 @@ func rtcNativeAvailability() (string, string, error) {
 	}
 	return l.source, l.version, nil
 }
+
+func (e *rtcNativeEncoder) inputRate() int { return e.rate }

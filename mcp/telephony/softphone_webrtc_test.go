@@ -425,7 +425,12 @@ func TestRTCCallerCancellationCannotReviveCall(t *testing.T) {
 }
 
 func TestRTCPrivateCoachingUsesAdviserRTPOnly(t *testing.T) {
-	rtcTestCtx(t)
+	for _, rate := range []string{"48000", "24000"} {
+		t.Run(rate, func(t *testing.T) { testRTCPrivateCoachingAtRate(t, rate) })
+	}
+}
+func testRTCPrivateCoachingAtRate(t *testing.T, rate string) {
+	rtcTestCtxAtRate(t, rate)
 	app := &App{installID: 42}
 	insertSoftphoneCall(t, app, "in-progress")
 	server := softphoneTestServer(t, app)
@@ -500,10 +505,11 @@ func TestRTCPrivateCoachingUsesAdviserRTPOnly(t *testing.T) {
 	}
 }
 
-func rtcTestCtx(t *testing.T) {
+func rtcTestCtx(t *testing.T) { rtcTestCtxAtRate(t, "48000") }
+func rtcTestCtxAtRate(t *testing.T, rate string) {
 	t.Helper()
 	previous := globalCtx
-	globalCtx = tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithConfig(map[string]string{"softphone_webrtc_enabled": "true"}))
+	globalCtx = tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithConfig(map[string]string{"softphone_webrtc_enabled": "true", "softphone_webrtc_encoder_input_rate": rate}))
 	t.Cleanup(func() { globalCtx = previous })
 }
 
@@ -540,6 +546,11 @@ func testRTCExistingHubMediaHoldAndReplacement(t *testing.T, query string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	got := readBinaryWithin(t, peer, 3*time.Second)
+	pcmGot, sourceAt, sourced := decodeMicrophoneSource(got)
+	if !sourced || sourceAt.IsZero() || time.Since(sourceAt) > 2*time.Second {
+		t.Fatal("missing capture provenance", sourceAt)
+	}
+	got = pcmGot
 	if len(got) != 960 {
 		t.Fatal("hub PCM", len(got))
 	}

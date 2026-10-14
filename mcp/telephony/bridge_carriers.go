@@ -542,6 +542,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		if op != ws.OpBinary || len(data) == 0 || len(data)%2 != 0 {
 			continue
 		}
+		data, sourceAt := carrierMicrophoneSource(row, data)
 		pcm24 := bytesToPCM16(data)
 		pcmCarrier := pcm24
 		if outputResampler != nil {
@@ -550,7 +551,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		if len(pcmCarrier) == 0 {
 			continue
 		}
-		packets := packetizer.add(pcmCarrier, len(pcm24), nextFrame)
+		packets := packetizer.addAt(pcmCarrier, len(pcm24), nextFrame, sourceAt)
 		frame := nextFrame
 		nextFrame = realtimeBridgeControl{}
 		queuedMS, droppedMS, err := pacer.enqueue(ctx, packets)
@@ -892,6 +893,10 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 			continue
 		}
 		if op != ws.OpBinary || len(data) == 0 || len(data)%2 != 0 {
+			continue
+		}
+		data, sourceAt := carrierMicrophoneSource(row, data)
+		if !sourceAt.IsZero() && time.Since(sourceAt) >= liveAudioMaxAge {
 			continue
 		}
 		pcm16 := outputResampler.Process(bytesToPCM16(data))

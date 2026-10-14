@@ -33,13 +33,15 @@ import (
 // Chromium executes the actual app-served SDK bundle, AudioWorklet and Worker.
 // Only the platform gateway and carrier are fixtures; HTTP/WS and Telephony are real.
 func TestTier2HeadlessBrowser(t *testing.T) {
-	for _, surface := range []string{"headless", "headless-listener-webrtc", "headless-listener-auto", "headless-coaching-512k", "headless-coaching-jitter", "panel", "application-user"} {
+	for _, surface := range []string{"headless", "headless-listener-webrtc", "headless-listener-webrtc-24k", "headless-listener-auto", "headless-coaching-512k", "headless-coaching-jitter", "panel", "application-user"} {
 		t.Run(surface, func(t *testing.T) { runHeadlessBrowser(t, surface) })
 	}
 }
 
 func runHeadlessBrowser(t *testing.T, surface string) {
-	listenerTransport := "websocket"
+	inputRate:="48000"
+ if surface=="headless-listener-webrtc-24k" {inputRate="24000";surface="headless-listener-webrtc"}
+ listenerTransport := "websocket"
 	if surface == "headless-listener-webrtc" {
 		listenerTransport = "webrtc"
 		surface = "headless"
@@ -59,7 +61,7 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 		surface = "headless"
 	}
 	platform := newTier2PlatformGateway(t)
-	config := map[string]string{}
+	config := map[string]string{"softphone_webrtc_encoder_input_rate":inputRate}
 	if listenerTransport == "webrtc" {
 		config["softphone_webrtc_enabled"] = "true"
 	}

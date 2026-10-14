@@ -24,12 +24,12 @@ const callListColumns = `id,thread_id,COALESCE(direction,'outbound'),COALESCE(ca
 
 const callHintColumns = `id,project_id,COALESCE(direction,'outbound'),from_number,status,COALESCE(peer_kind,'realtime'),
  COALESCE(routing_destination_id,''),COALESCE(media_status,'idle'),COALESCE(hold_state,'active'),
- COALESCE(recording_mode,'off'),COALESCE(recording_control_state,'default'),COALESCE(recording_requested_at,''),COALESCE(handling_reason,'')`
+ COALESCE(recording_mode,'off'),COALESCE(recording_control_state,'default'),COALESCE(recording_requested_at,''),COALESCE(handling_reason,''),placed_at`
 
 func scanCallList(s rowScanner, hint bool) (callRow, error) {
 	var r callRow
 	if hint {
-		err := s.Scan(&r.ID, &r.ProjectID, &r.Direction, &r.FromNumber, &r.Status, &r.PeerKind, &r.RoutingDestinationID, &r.MediaStatus, &r.HoldState, &r.RecordingMode, &r.RecordingControlState, &r.RecordingRequestedAt, &r.HandlingReason)
+		err := s.Scan(&r.ID, &r.ProjectID, &r.Direction, &r.FromNumber, &r.Status, &r.PeerKind, &r.RoutingDestinationID, &r.MediaStatus, &r.HoldState, &r.RecordingMode, &r.RecordingControlState, &r.RecordingRequestedAt, &r.HandlingReason, &r.PlacedAt)
 		return r, err
 	}
 	err := s.Scan(&r.ID, &r.ThreadID, &r.Direction, &r.CarrierSlug, &r.CarrierSID, &r.CarrierLegID, &r.CarrierSessionID, &r.IngressPath,
@@ -202,6 +202,9 @@ func selectedReadPermissions(source *phoneReadPermissions, rows []callRow) *phon
 }
 
 type callReadModel struct {
+	project     string
+	hint        bool
+	fingerprint [32]byte
 	rows        []callRow
 	permissions *phoneReadPermissions
 	until       time.Time
@@ -261,8 +264,9 @@ func (a *App) phoneCallRead(r *http.Request, project string, limit int, hint boo
 	if err := db.QueryRow(`SELECT COALESCE((SELECT revision FROM telephony_read_versions WHERE project_id=?),0)`, project).Scan(&revision); err != nil {
 		return callReadModel{}, r, err
 	}
-	key := callReadScope(r, project, limit, hint)
+	key := callReadScope(r, project, limit, false)
 	cache := &a.callReads
+	var base *callReadModel
 	cache.mu.Lock()
 	if cache.entries == nil {
 		cache.entries = map[string]*callReadEntry{}
@@ -280,15 +284,18 @@ func (a *App) phoneCallRead(r *http.Request, project string, limit int, hint boo
 			if entry.err != nil {
 				return callReadModel{}, r, entry.err
 			}
-			if time.Now().Before(entry.model.until) {
+			if time.Now().Before(entry.model.until) && (hint || !entry.model.hint) {
 				return entry.model, readRequest(r, entry.model.permissions), nil
 			}
 			return a.phoneCallRead(r, project, limit, hint)
 		}
 		if time.Now().Before(entry.model.until) {
 			model := entry.model
-			cache.mu.Unlock()
-			return model, readRequest(r, model.permissions), nil
+			if hint || !model.hint {
+				cache.mu.Unlock()
+				return model, readRequest(r, model.permissions), nil
+			}
+			base = &model
 		}
 	}
 	// Bounded storage; clearing only read results is safe. In-flight callers keep
@@ -299,8 +306,17 @@ func (a *App) phoneCallRead(r *http.Request, project string, limit int, hint boo
 	entry := &callReadEntry{revision: revision, ready: make(chan struct{})}
 	cache.entries[key] = entry
 	cache.mu.Unlock()
-	model, err := a.loadPhoneCallRead(r, project, limit, hint)
+	var model callReadModel
+	var err error
+	if base != nil {
+		model, err = a.upgradePhoneCallRead(r, project, *base)
+	} else {
+		model, err = a.loadPhoneCallRead(r, project, limit, hint)
+	}
 	cache.mu.Lock()
+	if err == nil {
+		model.fingerprint, err = a.callReadFingerprint(readRequest(r, model.permissions), model)
+	}
 	entry.model = model
 	entry.err = err
 	close(entry.ready)
@@ -312,8 +328,8 @@ func (a *App) phoneCallRead(r *http.Request, project string, limit int, hint boo
 	return model, readRequest(r, model.permissions), err
 }
 func (a *App) loadPhoneCallRead(r *http.Request, project string, limit int, hint bool) (callReadModel, error) {
-	model := callReadModel{rows: []callRow{}, permissions: &phoneReadPermissions{covered: map[string]bool{}, owners: map[string]phoneReadOwner{}, offers: map[string][]ringOffer{}, runs: map[string]bool{}, destinations: map[string]bool{}}}
-	ttl := 250 * time.Millisecond
+	model := callReadModel{project: project, hint: hint, rows: []callRow{}, permissions: &phoneReadPermissions{covered: map[string]bool{}, owners: map[string]phoneReadOwner{}, offers: map[string][]ringOffer{}, runs: map[string]bool{}, destinations: map[string]bool{}}}
+	ttl := callStreamLease
 	if hint {
 		ttl = callStreamLease
 	}
@@ -323,7 +339,8 @@ func (a *App) loadPhoneCallRead(r *http.Request, project string, limit int, hint
 	if hint {
 		columns = callHintColumns
 	}
-	for offset := 0; len(model.rows) < limit; offset += 200 {
+	var beforeAt, beforeID string
+	for len(model.rows) < limit {
 		where := `project_id=? AND ingress_path<>'ring_group'`
 		args := []any{project}
 		if p != nil {
@@ -331,7 +348,11 @@ func (a *App) loadPhoneCallRead(r *http.Request, project string, limit int, hint
 			where = `id IN (` + candidates + `) AND ` + where
 			args = append(candidateArgs, project)
 		}
-		rows, err := a.db().db.Query(`SELECT `+columns+` FROM calls WHERE `+where+` ORDER BY placed_at DESC,id DESC LIMIT 200 OFFSET ?`, append(args, offset)...)
+		if beforeID != "" {
+			where += ` AND (placed_at,id)<(?,?)`
+			args = append(args, beforeAt, beforeID)
+		}
+		rows, err := a.db().db.Query(`SELECT `+columns+` FROM calls WHERE `+where+` ORDER BY placed_at DESC,id DESC LIMIT 200`, args...)
 		if err != nil {
 			return model, err
 		}
@@ -348,6 +369,9 @@ func (a *App) loadPhoneCallRead(r *http.Request, project string, limit int, hint
 		rows.Close()
 		if err != nil {
 			return model, err
+		}
+		if len(batch) > 0 {
+			beforeAt, beforeID = batch[len(batch)-1].PlacedAt, batch[len(batch)-1].ID
 		}
 		metadata, err := a.loadPhoneReadPermissions(project, batch, p)
 		if err != nil {
@@ -393,21 +417,61 @@ func (a *App) loadPhoneCallRead(r *http.Request, project string, limit int, hint
 		model.rows = model.rows[:limit]
 	}
 	model.permissions = selectedReadPermissions(model.permissions, model.rows)
-	if !hint && len(model.rows) > 0 {
+	if !hint {
+		if err := a.decoratePhoneCallRead(project, &model); err != nil {
+			return model, err
+		}
+	}
+
+	return model, nil
+}
+
+func (a *App) decoratePhoneCallRead(project string, model *callReadModel) error {
+	if len(model.rows) > 0 {
 		// Project settings are fetched once, rather than twice for every call row.
 		var music string
 		var file int64
 		err := a.db().db.QueryRow(`SELECT hold_music_url,hold_music_storage_file_id FROM call_control_settings WHERE project_id=?`, project).Scan(&music, &file)
 		if err != nil && err != sql.ErrNoRows {
-			return model, err
+			return err
 		}
 		for i := range model.rows {
 			model.rows[i].HoldMusicURL = music
 			model.rows[i].HoldMusicStorageFileID = file
 		}
 		if err = a.db().attachRecordingSummaries(project, model.rows); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func (a *App) upgradePhoneCallRead(r *http.Request, project string, base callReadModel) (callReadModel, error) {
+	model := base
+	model.hint = false
+	model.rows = []callRow{}
+	ids, args := callReadIDs(project, base.rows)
+	if len(ids) > 0 {
+		rows, err := a.db().db.Query(`SELECT `+callListColumns+` FROM calls WHERE project_id=? AND id IN (`+phonePlaceholders(len(ids))+`) ORDER BY placed_at DESC,id DESC`, args...)
+		if err != nil {
 			return model, err
 		}
+		for rows.Next() {
+			row, err := scanCallList(rows, false)
+			if err != nil {
+				rows.Close()
+				return model, err
+			}
+			row.RingOffers = base.permissions.offers[row.ID]
+			model.rows = append(model.rows, row)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return model, err
+		}
+	}
+	if err := a.decoratePhoneCallRead(project, &model); err != nil {
+		return model, err
 	}
 	return model, nil
 }

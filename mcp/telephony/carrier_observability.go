@@ -275,9 +275,14 @@ func (c *callsDB) carrierTransportEvidence(ctx context.Context, project, call st
 	if err != nil {
 		return nil, nil, err
 	}
+	_, live, err := c.carrierTransportCurrent(ctx, project, call)
+	return out, live, err
+}
+func (c *callsDB) carrierTransportCurrent(ctx context.Context, project, call string) ([]carrierTelemetryRecord, *carrierTelemetryRecord, error) {
+	out := []carrierTelemetryRecord{}
 	var raw string
 	var latest carrierTelemetryRecord
-	err = c.db.QueryRowContext(ctx, `SELECT sample_json FROM telephony_carrier_transport_latest WHERE project_id=? AND call_id=? AND occurred_at>?`, project, call, ringTime(time.Now().Add(-7*24*time.Hour))).Scan(&raw)
+	err := c.db.QueryRowContext(ctx, `SELECT sample_json FROM telephony_carrier_transport_latest WHERE project_id=? AND call_id=? AND occurred_at>?`, project, call, ringTime(time.Now().Add(-7*24*time.Hour))).Scan(&raw)
 	if err == sql.ErrNoRows {
 		return out, nil, nil
 	}

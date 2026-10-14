@@ -190,7 +190,7 @@ func TestCallReadEpochExcludesMediaDiagnosticsAndTracksDependencies(t *testing.T
 	if callReadVersion(t, a, "project-a") != v {
 		t.Fatal("diagnostic hot path invalidated read cache")
 	}
-	for _, q := range []string{`UPDATE calls SET media_status='connected' WHERE id='epoch'`, `UPDATE call_ring_runs SET status='exhausted' WHERE call_id='epoch'`, `UPDATE routing_destinations SET config_json='{}' WHERE id='sales'`, `INSERT INTO telephony_call_owners VALUES('epoch','project-a','owner','sales')`, `UPDATE telephony_call_owners SET destination_id='support' WHERE call_id='epoch'`, `DELETE FROM telephony_call_owners WHERE call_id='epoch'`} {
+	for _, q := range []string{`UPDATE calls SET media_status='connected' WHERE id='epoch'`, `UPDATE call_ring_runs SET status='exhausted' WHERE call_id='epoch'`, `UPDATE routing_destinations SET config_json='{"capacity":1}' WHERE id='sales'`, `INSERT INTO telephony_call_owners VALUES('epoch','project-a','owner','sales')`, `UPDATE telephony_call_owners SET destination_id='support' WHERE call_id='epoch'`, `DELETE FROM telephony_call_owners WHERE call_id='epoch'`} {
 		callReadExec(t, a, q)
 		next := callReadVersion(t, a, "project-a")
 		if next <= v {

@@ -76,11 +76,12 @@ type estimatedPlaybackAck struct {
 }
 
 type carrierAudioSegment struct {
-	pcm     []int16
-	offset  int
-	itemID  string
-	startMS int
-	endMS   int
+	sourceAt time.Time
+	pcm      []int16
+	offset   int
+	itemID   string
+	startMS  int
+	endMS    int
 }
 
 type carrierAudioPacketizer struct {
@@ -94,6 +95,9 @@ func newCarrierAudioPacketizer(sampleRate int) *carrierAudioPacketizer {
 }
 
 func (p *carrierAudioPacketizer) add(pcm []int16, pcm24Samples int, frame realtimeBridgeControl) []carrierPacedPacket {
+	return p.addAt(pcm, pcm24Samples, frame, time.Time{})
+}
+func (p *carrierAudioPacketizer) addAt(pcm []int16, pcm24Samples int, frame realtimeBridgeControl, at time.Time) []carrierPacedPacket {
 	if len(pcm) == 0 || p.packetSamples <= 0 {
 		return nil
 	}
@@ -104,7 +108,7 @@ func (p *carrierAudioPacketizer) add(pcm []int16, pcm24Samples int, frame realti
 		startMS = max(0, frame.AudioEndMS-durationMS)
 	}
 	p.segments = append(p.segments, carrierAudioSegment{
-		pcm: append([]int16(nil), pcm...), itemID: frame.ItemID, startMS: startMS, endMS: frame.AudioEndMS,
+		sourceAt: at, pcm: append([]int16(nil), pcm...), itemID: frame.ItemID, startMS: startMS, endMS: frame.AudioEndMS,
 	})
 	p.queuedSamples += len(pcm)
 	packets := make([]carrierPacedPacket, 0, p.queuedSamples/p.packetSamples)
@@ -113,6 +117,13 @@ func (p *carrierAudioPacketizer) add(pcm []int16, pcm24Samples int, frame realti
 		remaining := p.packetSamples
 		for remaining > 0 && len(p.segments) > 0 {
 			segment := &p.segments[0]
+			source := segment.sourceAt
+			if !source.IsZero() {
+				source = source.Add(time.Duration(segment.offset) * 20 * time.Millisecond / time.Duration(p.packetSamples))
+				if packet.EnqueuedAt.IsZero() || source.Before(packet.EnqueuedAt) {
+					packet.EnqueuedAt = source
+				}
+			}
 			available := len(segment.pcm) - segment.offset
 			take := min(remaining, available)
 			packet.PCM = append(packet.PCM, segment.pcm[segment.offset:segment.offset+take]...)

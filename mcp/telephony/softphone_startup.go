@@ -8,9 +8,10 @@ const startupAudioLimit = 120 * time.Millisecond
 const startupAudioBytes = 24000 * 2 * 120 / 1000
 
 type startupPCM struct {
-	pcm   []byte
-	at    time.Time
-	phase string
+	pcm     []byte
+	at      time.Time
+	phase   string
+	sourced bool
 }
 type startupDrop struct {
 	At           string  `json:"at"`
@@ -113,13 +114,16 @@ func (h *softphoneHub) flushStartupMicrophoneLocked(now time.Time) {
 		}
 		h.startup.MaxWaitMS = max(h.startup.MaxWaitMS, float64(now.Sub(f.at))/1e6)
 		h.startup.ForwardedMS += float64(len(f.pcm)) / 48
-		h.peer.queueAudioAt(f.pcm, 0, f.at)
+		queueMicrophoneSource(h.peer, f.pcm, f.at, f.sourced)
 	}
 	// Drop references to consumed audio, including when the reserve is reused.
 	clear(h.pendingMicrophone[len(remaining):])
 	h.pendingMicrophone = remaining
 }
 func (h *softphoneHub) bufferStartupMicrophoneLocked(data []byte, now time.Time) {
+	h.bufferStartupMicrophoneAtLocked(data, now, false)
+}
+func (h *softphoneHub) bufferStartupMicrophoneAtLocked(data []byte, now time.Time, sourced bool) {
 	if len(data) == 0 {
 		return
 	}
@@ -138,6 +142,6 @@ func (h *softphoneHub) bufferStartupMicrophoneLocked(data []byte, now time.Time)
 		bytes -= len(f.pcm)
 		h.attachmentDropLocked("attachment_overflow", firstNonEmpty(f.phase, h.attachmentPhaseLocked()), len(f.pcm), now)
 	}
-	h.pendingMicrophone = append(h.pendingMicrophone, startupPCM{pcm: append([]byte(nil), data...), at: now, phase: h.attachmentPhaseLocked()})
+	h.pendingMicrophone = append(h.pendingMicrophone, startupPCM{pcm: append([]byte(nil), data...), at: now, phase: h.attachmentPhaseLocked(), sourced: sourced})
 	h.startup.BufferedMS += float64(len(data)) / 48
 }

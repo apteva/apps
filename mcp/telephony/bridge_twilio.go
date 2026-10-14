@@ -92,6 +92,7 @@ type twilioPlaybackProgress struct {
 const twilioMediaPacketSamples = 160 // 20ms at Twilio's 8kHz media rate.
 
 type twilioAudioPacket struct {
+	SourceAt   time.Time
 	PCM        []int16
 	AudioEndMS int
 }
@@ -580,12 +581,18 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		if op != ws.OpBinary || len(data) == 0 {
 			continue
 		}
+		data, sourceAt := carrierMicrophoneSource(row, data)
 		pcm24 := bytesToPCM16(data)
 		pcm8 := outputResampler.Process(pcm24)
 		if len(pcm8) == 0 {
 			continue
 		}
 		packets := twilioAudioPackets(pcm8, len(pcm24), nextFrame)
+		for i := range packets {
+			if !sourceAt.IsZero() {
+				packets[i].SourceAt = sourceAt.Add(time.Duration(i) * 20 * time.Millisecond)
+			}
+		}
 		frame := nextFrame
 		nextFrame = realtimeBridgeControl{}
 		queuedMS, droppedMS, err := pacer.enqueueWithDiagnostics(ctx, packets, frame)

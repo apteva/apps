@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gobwas/ws"
@@ -26,6 +27,7 @@ import (
 const rtcSetupTimeout = 18 * time.Second
 
 type softphoneRTCConfig struct {
+	socketTelemetry  *rtcSocketTelemetry
 	NetworkContext   audioNetworkEvent
 	KnownVPNExits    string
 	CollectNetwork   func(audioNetworkEvent)
@@ -34,6 +36,7 @@ type softphoneRTCConfig struct {
 	PublicIPs        []string
 	PortMin, PortMax uint16
 	Bitrate          int
+	InputRate        int
 	FEC              *bool // nil retains the existing enabled preference.
 }
 
@@ -51,7 +54,14 @@ func (c softphoneRTCConfig) relayConfigured() bool {
 func (c softphoneRTCConfig) fecEnabled() bool { return c.FEC == nil || *c.FEC }
 
 func parseSoftphoneRTCConfig(values map[string]string) (softphoneRTCConfig, error) {
-	c := softphoneRTCConfig{Enabled: values["softphone_webrtc_enabled"] == "true", Bitrate: 32000}
+	c := softphoneRTCConfig{Enabled: values["softphone_webrtc_enabled"] == "true", Bitrate: 32000, InputRate: 48000}
+	if v := values["softphone_webrtc_encoder_input_rate"]; v != "" {
+		rate, err := strconv.Atoi(v)
+		if err != nil || (rate != 24000 && rate != 48000) {
+			return c, errors.New("invalid WebRTC encoder input rate")
+		}
+		c.InputRate = rate
+	}
 	if !c.Enabled {
 		return c, nil
 	}
@@ -106,6 +116,13 @@ func softphoneRTCAPI(c softphoneRTCConfig, settings ...func(*webrtc.SettingEngin
 		return nil, err
 	}
 	s := webrtc.SettingEngine{}
+	if c.socketTelemetry != nil {
+		network, err := newRTCObservedNet(c.socketTelemetry)
+		if err != nil {
+			return nil, err
+		}
+		s.SetNet(network)
+	}
 	s.SetIncludeLoopbackCandidate(true)
 	s.SetICETimeouts(5*time.Second, 10*time.Second, 2*time.Second)
 	if c.PortMin != 0 {
@@ -142,28 +159,34 @@ type rtcMediaSnapshot struct {
 	Encoder                *rtcEncoderState   `json:"encoder,omitempty"`
 	EncoderControlErrors   uint64             `json:"encoder_control_errors"`
 	RTP                    rtcSendSnapshot    `json:"rtp_send"`
+	IngressDiscardedMS     int64              `json:"ingress_discarded_ms"`
+	CaptureMaxQueueMS      int64              `json:"capture_max_queue_ms"`
 	IngressRejectedPackets int64              `json:"ingress_rejected_packets"`
 	IngressQueueDrops      int64              `json:"ingress_queue_drops"`
 	IngressPaddingPackets  int64              `json:"ingress_padding_packets"`
 	DecodeErrors           int64              `json:"decode_errors"`
 	OutboundDroppedMS      int64              `json:"outbound_dropped_ms"`
 	PacingSkippedMS        int64              `json:"pacing_skipped_ms"`
+	PartialFlushedFrames   uint64             `json:"partial_flushed_frames"`
+	PartialPaddedMS        float64            `json:"partial_padded_ms"`
 	MaxQueueMS             int                `json:"max_queue_ms"`
 	Events                 []audioDropEvent   `json:"events,omitempty"`
 }
 type rtcMediaStats struct {
-	ingress   rtcIngressTelemetry
-	direction string
-	voice     rtcVoiceControl
-	rtp       rtcSendTelemetry
-	mu        sync.Mutex
-	value     rtcMediaSnapshot
+	captureMaxQueue atomic.Int64
+	ingress         rtcIngressTelemetry
+	direction       string
+	voice           rtcVoiceControl
+	rtp             rtcSendTelemetry
+	mu              sync.Mutex
+	value           rtcMediaSnapshot
 }
 
 func (s *rtcMediaStats) snapshot() rtcMediaSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v := s.value
+	v.CaptureMaxQueueMS = s.captureMaxQueue.Load()
 	v.Encoder = s.voice.codec.Load()
 	v.EncoderControlErrors = s.voice.configurationErrors.Load()
 	v.RTP = s.rtp.snapshot()
@@ -175,6 +198,8 @@ func (s *rtcMediaStats) drop(reason, direction string, sequence uint64, duration
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch reason {
+	case "webrtc_capture_source_age", "webrtc_capture_release_overflow":
+		s.value.IngressDiscardedMS += int64(duration)
 	case "webrtc_rtp_rejected":
 		s.value.IngressRejectedPackets++
 	case "webrtc_ingress_overflow":
@@ -200,12 +225,16 @@ func mergeRTCSnapshots(a, b rtcMediaSnapshot) rtcMediaSnapshot {
 	a.EncoderControlErrors += b.EncoderControlErrors
 	a.RTP = mergeRTCSends(a.RTP, b.RTP)
 	a.Ingress = mergeRTCIngress(a.Ingress, b.Ingress)
+	a.IngressDiscardedMS += b.IngressDiscardedMS
+	a.CaptureMaxQueueMS = max(a.CaptureMaxQueueMS, b.CaptureMaxQueueMS)
 	a.IngressRejectedPackets += b.IngressRejectedPackets
 	a.IngressQueueDrops += b.IngressQueueDrops
 	a.IngressPaddingPackets += b.IngressPaddingPackets
 	a.DecodeErrors += b.DecodeErrors
 	a.OutboundDroppedMS += b.OutboundDroppedMS
 	a.PacingSkippedMS += b.PacingSkippedMS
+	a.PartialFlushedFrames += b.PartialFlushedFrames
+	a.PartialPaddedMS += b.PartialPaddedMS
 	a.MaxQueueMS = max(a.MaxQueueMS, b.MaxQueueMS)
 	a.Events = append(a.Events, b.Events...)
 	if len(a.Events) > 32 {
@@ -300,6 +329,9 @@ func (j *rtcJitter) pop(now time.Time) *rtp.Packet {
 // crosses that socket. Private coaching is mixed only at this browser boundary,
 // after carrier/recording/listener taps, retaining the pinned-adviser validator.
 func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net.Conn, func(), error) {
+	stats := &rtcMediaStats{}
+	stats.ingress.socket = &rtcSocketTelemetry{}
+	c.socketTelemetry = stats.ingress.socket
 	api, err := softphoneRTCAPI(c)
 	if err != nil {
 		signal.Close()
@@ -314,7 +346,6 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 	hub, bridge := net.Pipe()
 	input := newWebSocketWriterPump(bridge, ws.StateClientSide)
 	done := make(chan struct{})
-	stats := &rtcMediaStats{}
 	stats.rtp.connectionID = c.NetworkContext.ConnectionID
 	disconnect := &rtcDisconnectTracker{writer: signalWriter, pc: pc}
 	var once sync.Once
@@ -485,12 +516,12 @@ func connectSoftphoneRTC(signal, signalRead net.Conn, c softphoneRTCConfig) (net
 	queueWhisper := func(data []byte, valid func() bool) bool {
 		return queueRTCWhisper(whispers, data, valid, done)
 	}
-	go sendRTCAudio(bridge, input, signalWriter, track, c.Bitrate, stats, done, stop, c.fecEnabled(), liveAudioMaxAge, 320, whispers)
+	go sendRTCAudio(bridge, input, signalWriter, track, c.Bitrate, stats, done, stop, c.fecEnabled(), liveAudioMaxAge, 320, whispers, c.InputRate)
 	return &rtcHubConn{Conn: hub, stop: stop, stats: stats, whisper: queueWhisper, disconnect: disconnect}, stop, nil
 }
 
 func receiveSoftphoneRTP(remote *webrtc.TrackRemote, input *websocketWriterPump, stats *rtcMediaStats, done <-chan struct{}, stop func(), fec bool) {
-	receiveRTCAudio(remote, stats, done, stop, fec, func(samples []int16, _ time.Time) { input.QueueAudio(pcm16ToBytes(samples)) })
+	receiveRTCAudio(remote, stats, done, stop, fec, func(samples []int16, at time.Time) { queueMicrophoneSource(input, pcm16ToBytes(samples), at, true) })
 }
 
 // The source instant follows the RTP timeline, including the bounded jitter
@@ -519,11 +550,19 @@ func receiveRTCAudio(remote *webrtc.TrackRemote, stats *rtcMediaStats, done <-ch
 				return
 			}
 			at := time.Now()
+			processed := at
+			if stats.ingress.socket != nil {
+				if socket, ok := stats.ingress.socket.takePacket(p.SSRC, p.SequenceNumber, at); ok {
+					// Kernel timing is evidence only. Collection availability or
+					// contention must never change the media clock/admission.
+					stats.ingress.observeSocket(p, socket, at, stats.rtp.connectionID, stats.rtp.pathRevision.Load())
+				}
+			}
 			if ignoreRTCPadding(p, stats) {
-				stats.ingress.observe(p, at, at, len(packets), stats.rtp.connectionID, stats.rtp.pathRevision.Load(), "padding", 0)
+				stats.ingress.observe(p, at, processed, len(packets), stats.rtp.connectionID, stats.rtp.pathRevision.Load(), "padding", 0)
 				continue
 			}
-			stats.ingress.observe(p, at, at, len(packets), stats.rtp.connectionID, stats.rtp.pathRevision.Load(), "received", 0)
+			stats.ingress.observe(p, at, processed, len(packets), stats.rtp.connectionID, stats.rtp.pathRevision.Load(), "received", 0)
 			select {
 			case packets <- receivedPacket{p, at}:
 			case <-done:
@@ -542,6 +581,7 @@ func receiveRTCAudio(remote *webrtc.TrackRemote, stats *rtcMediaStats, done <-ch
 	}}
 	pcm := make([]int16, 24000*120/1000)
 	var timeline rtcDecodeTimeline
+	var release rtcAudioRelease
 
 	for {
 		select {
@@ -566,7 +606,7 @@ func receiveRTCAudio(remote *webrtc.TrackRemote, stats *rtcMediaStats, done <-ch
 			repaired := 0
 			for gap := timeline.missing(p.SequenceNumber, p.Timestamp); gap > 0; gap-- {
 				if n, err := decoder.recover(p.Payload, pcm[:480], fec && gap == 1); err == nil && n == 480 {
-					forward(pcm[:n], j.base.Add(time.Duration(int32(p.Timestamp-j.baseTS))*time.Second/48000-60*time.Millisecond))
+					release.push(pcm[:n], j.base.Add(time.Duration(int32(p.Timestamp-j.baseTS))*time.Second/48000-60*time.Millisecond-time.Duration(gap)*20*time.Millisecond), stats, direction)
 					stats.mu.Lock()
 					stats.value.IngressConcealedMS += 20
 					repaired += 20
@@ -583,7 +623,10 @@ func receiveRTCAudio(remote *webrtc.TrackRemote, stats *rtcMediaStats, done <-ch
 				continue
 			}
 			timeline = rtcDecodeTimeline{ssrc: p.SSRC, valid: true, seq: p.SequenceNumber, ts: p.Timestamp, samples: n}
-			forward(pcm[:n], j.base.Add(time.Duration(int32(p.Timestamp-j.baseTS))*time.Second/48000-60*time.Millisecond))
+			release.push(pcm[:n], j.base.Add(time.Duration(int32(p.Timestamp-j.baseTS))*time.Second/48000-60*time.Millisecond), stats, direction)
+		}
+		if f, ok := release.pop(now, stats, direction); ok {
+			forward(f.pcm, f.source)
 		}
 		if !timer.Stop() {
 			select {
@@ -592,8 +635,15 @@ func receiveRTCAudio(remote *webrtc.TrackRemote, stats *rtcMediaStats, done <-ch
 			}
 		}
 		due = nil
+		var wake time.Time
 		if len(j.packets) > 0 {
-			timer.Reset(max(time.Until(j.packets[0].due), time.Microsecond))
+			wake = j.packets[0].due
+		}
+		if release.count > 0 && (wake.IsZero() || release.next.Before(wake)) {
+			wake = release.next
+		}
+		if !wake.IsZero() {
+			timer.Reset(max(time.Until(wake), time.Microsecond))
 			due = timer.C
 		}
 	}
@@ -615,12 +665,16 @@ func sendSoftphoneRTP(bridge net.Conn, input, signal *websocketWriterPump, track
 	sendRTCAudio(bridge, input, signal, track, bitrate, stats, done, stop, fec, liveAudioMaxAge, 320, nil)
 }
 
-func sendRTCAudio(bridge net.Conn, input, signal *websocketWriterPump, track *webrtc.TrackLocalStaticRTP, bitrate int, stats *rtcMediaStats, done <-chan struct{}, stop func(), fec bool, maxAge time.Duration, sourceMaxMS float64, whispers <-chan rtcWhisperFrame) {
+func sendRTCAudio(bridge net.Conn, input, signal *websocketWriterPump, track *webrtc.TrackLocalStaticRTP, bitrate int, stats *rtcMediaStats, done <-chan struct{}, stop func(), fec bool, maxAge time.Duration, sourceMaxMS float64, whispers <-chan rtcWhisperFrame, inputRates ...int) {
 	direction := stats.direction
 	if direction == "" {
 		direction = "carrier_to_operator"
 	}
-	encoder, err := newRTCOpusEncoderWithFEC(bitrate, fec)
+	requestedRate := 48000
+	if len(inputRates) > 0 && inputRates[0] != 0 {
+		requestedRate = inputRates[0]
+	}
+	encoder, err := newRTCOpusEncoderAtRate(bitrate, fec, requestedRate)
 	if err != nil {
 		stop()
 		return
@@ -631,9 +685,14 @@ func sendRTCAudio(bridge net.Conn, input, signal *websocketWriterPump, track *we
 	// Keep 20ms frame boundaries and a bounded 120ms outgoing queue. Encoding
 	// and RTP writes are paced outside the hub's carrier receive loop.
 	frames := make(chan rtcPCMFrame, 6)
+	type pcmChunk struct {
+		data    []byte
+		expires time.Time
+	}
+	// No second PCM queue: the paced owner owns framing/partial deadlines.
+	chunks := make(chan pcmChunk)
 	go func() {
-		defer close(frames)
-		var pending rtcPCMFramer
+		defer close(chunks)
 		for {
 			data, op, err := readWebSocketData(bridge, ws.StateClientSide, input)
 			if err != nil {
@@ -681,29 +740,48 @@ func sendRTCAudio(bridge net.Conn, input, signal *websocketWriterPump, track *we
 			if len(data) < header || (len(data)-header)%2 != 0 || len(data) > 24000*2 {
 				continue
 			}
-			if dropped := pending.discardExpired(now); dropped > 0 {
-				stats.drop("webrtc_playback_partial_age", direction, 0, dropped*1000/24000)
-			}
-			if !pending.push(data[header:], expires, func(frame rtcPCMFrame) bool {
-				return queueRTCFrame(frames, frame, done, stats)
-			}) {
+			select {
+			case chunks <- pcmChunk{data[header:], expires}:
+			case <-done:
 				return
 			}
 		}
 	}()
-	resampler := newPCMResampler(24000, 48000)
-	whisperResampler := newPCMResampler(8000, 48000)
+	inputRate := rtcEncoderInputRate(encoder)
+	frameSamples := inputRate / 50
+	resampler := newPCMResampler(24000, inputRate)
+	whisperResampler := newPCMResampler(8000, inputRate)
+	converted := make([]int16, 0, frameSamples+2)
+	overlay := make([]int16, 0, frameSamples+2)
+	mixedSamples := make([]float32, frameSamples)
+	silence := make([]int16, 480)
 	var whisperEpoch uint32
-	samples := make([]float32, 0, 960)
+	samples := make([]float32, 0, frameSamples*2)
 	out := make([]byte, 1275)
 	clock := rtcRTPClock{base: time.Now(), baseTS: rand.Uint32()}
 	sequence := rtp.NewRandomSequencer()
 	tick := time.NewTicker(20 * time.Millisecond)
 	defer tick.Stop()
+	var pending rtcPCMFramer
+	var lastChunkAt time.Time
 	for {
 		select {
 		case <-done:
 			return
+		case chunk, open := <-chunks:
+			if !open {
+				return
+			}
+			now := time.Now()
+			if dropped := pending.discardExpired(now); dropped > 0 {
+				stats.drop("webrtc_playback_partial_age", direction, 0, dropped*1000/24000)
+			}
+			lastChunkAt = now
+			if !pending.push(chunk.data, chunk.expires, func(frame rtcPCMFrame) bool {
+				return queueRTCFrame(frames, frame, done, stats)
+			}) {
+				return
+			}
 		case <-tick.C:
 			now := time.Now()
 			if rate, loss, changed := policy.next(now, stats.voice.feedback.Load()); changed {
@@ -720,32 +798,54 @@ func sendRTCAudio(bridge net.Conn, input, signal *websocketWriterPump, track *we
 			if !open {
 				return
 			}
-			if frame.pcm == nil {
-				frame = rtcPCMFrame{pcm: make([]int16, 480), expires: now.Add(maxAge)}
+			if !lastChunkAt.IsZero() && now.Sub(lastChunkAt) >= 20*time.Millisecond {
+				if dropped := pending.discardExpired(now); dropped > 0 {
+					stats.drop("webrtc_playback_partial_age", direction, 0, dropped*1000/24000)
+				}
+				if tail, padding := pending.flushPartial(now); tail.pcm != nil {
+					stats.mu.Lock()
+					stats.value.PartialFlushedFrames++
+					stats.value.PartialPaddedMS += float64(padding) / 24
+					stats.mu.Unlock()
+					if frame.pcm == nil {
+						frame = tail
+					} else {
+						queueRTCFrame(frames, tail, done, stats)
+					}
+				}
 			}
-			for _, v := range resampler.Process(frame.pcm) {
+			if frame.pcm == nil {
+				frame = rtcPCMFrame{pcm: silence, expires: now.Add(maxAge)}
+			}
+			if inputRate == 24000 {
+				converted = append(converted[:0], frame.pcm...)
+			} else {
+				converted = resampler.ProcessInto(frame.pcm, converted)
+			}
+			for _, v := range converted {
 				samples = append(samples, float32(v)/32768)
 			}
-			if len(samples) < 960 {
+			if len(samples) < frameSamples {
 				continue
 			}
 			voice := nextRTCWhisper(whispers, now)
 			mixed := voice != nil
-			encodeSamples := samples[:960]
+			encodeSamples := samples[:frameSamples]
 			if voice != nil {
 				if voice.epoch != whisperEpoch {
-					whisperResampler = newPCMResampler(8000, 48000)
+					whisperResampler = newPCMResampler(8000, inputRate)
 					whisperEpoch = voice.epoch
 				}
-				encodeSamples = mixRTCWhisper(encodeSamples, voice.pcm, whisperResampler)
+				overlay = whisperResampler.ProcessInto(voice.pcm, overlay)
+				encodeSamples = mixRTCWhisperInto(encodeSamples, overlay, mixedSamples)
 			}
 			n, err := encoder.EncodeFloat32(encodeSamples, out)
 			// A stop/replacement during encoding invalidates the private overlay.
 			if voice != nil && (!voice.valid() || time.Since(voice.at) > coachAudioMaxAge) {
 				mixed = false
-				n, err = encoder.EncodeFloat32(samples[:960], out)
+				n, err = encoder.EncodeFloat32(samples[:frameSamples], out)
 			}
-			samples = samples[960:]
+			samples = samples[:copy(samples, samples[frameSamples:])]
 			if err != nil {
 				stop()
 				return

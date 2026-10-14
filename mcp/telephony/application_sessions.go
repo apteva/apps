@@ -78,7 +78,7 @@ func (a *App) authenticateApplicationSession(r *http.Request) (*http.Request, in
 	if e != nil {
 		return nil, 403, errors.New("project not allowed")
 	}
-	policy, e := a.phonePolicy(project)
+	policy, e := a.cachedPhonePolicy(project)
 	if e != nil {
 		return nil, 503, errors.New("access unavailable")
 	}
@@ -158,14 +158,14 @@ func (a *App) authenticateApplicationSession(r *http.Request) (*http.Request, in
 	// Authentication may take seconds. A policy write during that interval
 	// must not revoke this request unless it changes this provider/action or
 	// the caller's own access. Derive both decisions from one fresh snapshot.
-	freshPolicy, e := a.phonePolicy(project)
+	freshPolicy, e := a.cachedPhonePolicy(project)
 	if e != nil {
 		return nil, 503, errors.New("access unavailable")
 	}
-	if !phoneProviderStillAllows(freshPolicy, *provider, action) {
+	if !phoneProviderStillAllows(*freshPolicy, *provider, action) {
 		return nil, 403, errors.New("authentication provider access changed")
 	}
-	p, e := phonePrincipalFromPolicy(project, identity, freshPolicy)
+	p, e := phonePrincipalFromPolicy(project, identity, *freshPolicy)
 	if e != nil {
 		return nil, 403, errors.New("Telephony access denied")
 	}

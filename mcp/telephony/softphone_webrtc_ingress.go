@@ -9,6 +9,8 @@ import (
 )
 
 type rtcIngressEvent struct {
+	SocketWaitMS      float64   `json:"socket_wait_ms,omitempty"`
+	PionWaitMS        float64   `json:"pion_wait_ms,omitempty"`
 	At                time.Time `json:"at"`
 	ConnectionID      string    `json:"connection_id"`
 	PathRevision      uint64    `json:"path_revision"`
@@ -28,13 +30,19 @@ type rtcIngressSnapshot struct {
 	Packets       uint64 `json:"packets"`
 	Padding       uint64 `json:"padding_packets"`
 	Skipped       uint64 `json:"observations_skipped"`
-	// Pion owns the ICE sockets; absence of kernel counters is explicit.
-	SocketDropsAvailable bool              `json:"socket_drops_available"`
-	MaxArrivalGapMS      float64           `json:"max_arrival_gap_ms"`
-	MaxQueueWaitMS       float64           `json:"max_queue_wait_ms"`
-	Events               []rtcIngressEvent `json:"events,omitempty"`
+	// Kernel counters are available only on supported direct UDP sockets.
+	KernelTimestampsAvailable bool              `json:"kernel_timestamps_available"`
+	KernelTimestampPackets    uint64            `json:"kernel_timestamp_packets"`
+	SocketDrops               uint64            `json:"socket_drops"`
+	MaxSocketWaitMS           float64           `json:"max_socket_wait_ms"`
+	MaxPionWaitMS             float64           `json:"max_pion_wait_ms"`
+	SocketDropsAvailable      bool              `json:"socket_drops_available"`
+	MaxArrivalGapMS           float64           `json:"max_arrival_gap_ms"`
+	MaxQueueWaitMS            float64           `json:"max_queue_wait_ms"`
+	Events                    []rtcIngressEvent `json:"events,omitempty"`
 }
 type rtcIngressTelemetry struct {
+	socket                    *rtcSocketTelemetry
 	firstPacket               atomic.Int64
 	packets, padding, skipped atomic.Uint64
 	maxGap, maxWait           atomic.Int64
@@ -92,6 +100,15 @@ func (d *rtcIngressTelemetry) observe(p *rtp.Packet, at, processed time.Time, qu
 }
 func (d *rtcIngressTelemetry) snapshot() rtcIngressSnapshot {
 	s := rtcIngressSnapshot{Packets: d.packets.Load(), Padding: d.padding.Load(), Skipped: d.skipped.Load(), MaxArrivalGapMS: float64(d.maxGap.Load()) / 1e6, MaxQueueWaitMS: float64(d.maxWait.Load()) / 1e6}
+	if k := d.socket; k != nil {
+		s.KernelTimestampsAvailable = k.available.Load()
+		s.SocketDropsAvailable = k.dropsAvailable.Load()
+		s.KernelTimestampPackets = k.timestampPackets.Load()
+		s.SocketDrops = k.drops.Load()
+		s.Skipped += k.skipped.Load()
+		s.MaxSocketWaitMS = float64(k.maxSocketWait.Load()) / 1e6
+		s.MaxPionWaitMS = float64(k.maxPionWait.Load()) / 1e6
+	}
 	if n := d.firstPacket.Load(); n > 0 {
 		s.FirstPacketAt = ringTime(time.Unix(0, n))
 	}
@@ -107,6 +124,12 @@ func mergeRTCIngress(a, b rtcIngressSnapshot) rtcIngressSnapshot {
 	if a.FirstPacketAt == "" {
 		a.FirstPacketAt = b.FirstPacketAt
 	}
+	a.KernelTimestampsAvailable = a.KernelTimestampsAvailable || b.KernelTimestampsAvailable
+	a.SocketDropsAvailable = a.SocketDropsAvailable || b.SocketDropsAvailable
+	a.KernelTimestampPackets += b.KernelTimestampPackets
+	a.SocketDrops += b.SocketDrops
+	a.MaxSocketWaitMS = max(a.MaxSocketWaitMS, b.MaxSocketWaitMS)
+	a.MaxPionWaitMS = max(a.MaxPionWaitMS, b.MaxPionWaitMS)
 	a.Packets += b.Packets
 	a.Padding += b.Padding
 	a.Skipped += b.Skipped
@@ -117,4 +140,20 @@ func mergeRTCIngress(a, b rtcIngressSnapshot) rtcIngressSnapshot {
 		a.Events = a.Events[len(a.Events)-64:]
 	}
 	return a
+}
+
+// Retain only delayed socket observations, independently of the established
+// RTP arrival sequence/clock. No formatting, database access or blocking lock.
+func (d *rtcIngressTelemetry) observeSocket(p *rtp.Packet, socket rtcSocketPacket, processed time.Time, connection string, path uint64) {
+	if processed.Sub(socket.at) <= 20*time.Millisecond {
+		return
+	}
+	if !d.mu.TryLock() {
+		d.skipped.Add(1)
+		return
+	}
+	defer d.mu.Unlock()
+	e := rtcIngressEvent{At: socket.at.UTC(), ConnectionID: connection, PathRevision: path, SSRC: p.SSRC, Sequence: p.SequenceNumber, Timestamp: p.Timestamp, Kind: "socket_processing_delay", QueueWaitMS: max(0, float64(processed.Sub(socket.at))/1e6), SocketWaitMS: max(0, float64(socket.dequeued.Sub(socket.at))/1e6), PionWaitMS: max(0, float64(processed.Sub(socket.dequeued))/1e6)}
+	d.events[d.count%uint64(len(d.events))] = e
+	d.count++
 }

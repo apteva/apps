@@ -62,7 +62,7 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 	var incidents []incident
 	var results []result
 	for _, count := range []int{32, 64} {
-		for _, variant := range []string{"portable", "native_fec"} {
+		for _, variant := range []string{"portable", "native_fec", "native_24k_fec"} {
 			t.Run(fmt.Sprintf("%s/%d", variant, count), func(t *testing.T) {
 				type worker struct {
 					carrier, server       *sipRTPMedia
@@ -113,7 +113,11 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 						}
 						w.decoder = &rtcGoOpusDecoder{&d}
 					} else {
-						w.encoder, err = newRTCNativeEncoder(32000)
+						rate := 48000
+						if variant == "native_24k_fec" {
+							rate = 24000
+						}
+						w.encoder, err = newRTCNativeEncoderAtRate(32000, true, rate)
 						if err == nil {
 							w.decoder, err = newRTCNativeDecoder()
 						}
@@ -126,7 +130,7 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 					w.jitter = newRTPJitterBuffer()
 					w.server.jitterTelemetry.Store(w.jitter)
 					w.framer = newRTPAudioFramer(w.jitter, w.server.offer)
-					w.up, w.down = newPCMResampler(16000, 48000), newPCMResampler(24000, 16000)
+					w.up, w.down = newPCMResampler(16000, rtcEncoderInputRate(w.encoder)), newPCMResampler(24000, 16000)
 					w.costs = make([]float64, 0, 800)
 				}
 				var wg sync.WaitGroup
@@ -189,7 +193,9 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 						defer wg.Done()
 						encoded := make([]byte, 1275)
 						decoded := make([]int16, 2880)
-						pending := make([]float32, 0, 1920)
+						frameSamples := rtcEncoderInputRate(w.encoder) / 50
+						converted := make([]int16, 0, frameSamples+2)
+						pending := make([]float32, 0, frameSamples*2)
 						seq := uint16(0)
 						var returnPending []int16
 						for frame := 0; frame < frames; frame++ {
@@ -206,14 +212,15 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 							w.jitter.mu.Lock()
 							w.queueMax = max(w.queueMax, float64(w.jitter.buffered+int(w.jitter.pendingPCMSamples.Load()))/8)
 							w.jitter.mu.Unlock()
-							for _, v := range w.up.Process(pcm) {
+							converted = w.up.ProcessInto(pcm, converted)
+							for _, v := range converted {
 								pending = append(pending, float32(v)/32768)
 							}
-							if len(pending) < 960 {
+							if len(pending) < frameSamples {
 								continue
 							}
-							n, err := w.encoder.EncodeFloat32(pending[:960], encoded)
-							pending = pending[960:]
+							n, err := w.encoder.EncodeFloat32(pending[:frameSamples], encoded)
+							pending = pending[:copy(pending, pending[frameSamples:])]
 							if err != nil {
 								errors <- err
 								return

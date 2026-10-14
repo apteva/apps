@@ -21,7 +21,7 @@ function fixture(authProvider?: string) {
   }) as typeof fetch});
   const client=new TelephonyClient(sdk.app("telephony",{projectId:"p1",installId:42}),{authProvider});
   return {sdk,client,requests,controllers,setState(value:string){state=value;},setBeforeList(value:()=>Promise<void>){beforeList=value;},setStreamStatus(value:number){streamStatus=value;},setListStatus(value:number){listStatus=value;},
-    emit(type="calls.changed"){controllers.at(-1)!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({type})}\n\n`));},
+    emit(type="calls.changed",state?:string){controllers.at(-1)!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({type,state})}\n\n`));},
     get listCount(){return listCount;},get peak(){return peak;},get cancelCount(){return cancelCount;}};
 }
 async function until(predicate:()=>boolean,timeout=600){const end=performance.now()+timeout;while(!predicate()&&performance.now()<end)await Bun.sleep(1);expect(predicate()).toBe(true);}
@@ -105,4 +105,28 @@ test("failed overdue reconciliation retains bounded fallback instead of spinning
   await until(()=>f.listCount>=before+2);
   expect(f.peak).toBe(1);
  }finally{clock?.mockRestore();watch.close();}
+});
+
+
+test("unchanged scoped fingerprints avoid reconnect refreshes and failed reads remain retryable",async()=>{
+ const f=fixture();const seen:string[]=[];const watch=f.client.watchCalls(c=>seen.push(c[0].status),{intervalMs:10000});
+ try {
+  await until(()=>seen.length===1&&f.controllers.length===1);
+  const state="a".repeat(64);f.emit("calls.changed",state);await until(()=>seen.length===2);
+  for(let i=0;i<10;i++)f.emit("calls.changed",state);await Bun.sleep(20);expect(f.listCount).toBe(2);
+  f.controllers[0].close();await until(()=>f.controllers.length===2,1000);f.emit("calls.changed",state);await Bun.sleep(20);expect(f.listCount).toBe(2);
+  f.setListStatus(503);f.emit("calls.changed","b".repeat(64));await until(()=>f.listCount===3);
+  f.setListStatus(200);f.setState("answered");f.emit("calls.changed","b".repeat(64));await until(()=>seen.at(-1)==="answered");
+ } finally {watch.close();}
+});
+
+test("returning to an older fingerprint during a read still reconciles",async()=>{
+ const f=fixture();let seen=0;const watch=f.client.watchCalls(()=>seen++,{intervalMs:10000});
+ try {
+  await until(()=>seen===1&&f.controllers.length===1);
+  const a="a".repeat(64),b="b".repeat(64);f.emit("calls.changed",a);await until(()=>seen===2);
+  let release!:()=>void;const wait=new Promise<void>(r=>release=r);f.setBeforeList(()=>wait);
+  f.emit("calls.changed",b);await until(()=>f.listCount===3);f.emit("calls.changed",a);
+  release();await until(()=>seen===4);expect(f.peak).toBe(1);
+ }finally{watch.close();}
 });
