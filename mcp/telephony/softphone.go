@@ -36,6 +36,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -48,6 +49,7 @@ import (
 // microphone reserve covers carrier attachment; other unattached audio is
 // dropped to avoid replaying stale speech.
 type softphoneHub struct {
+	sipMedia                                                 atomic.Pointer[sipRTPMedia]
 	readinessBrowser                                         *websocketWriterPump
 	readinessReason                                          string
 	readinessRevision, readinessGeneration, bridgeGeneration uint64
@@ -1104,13 +1106,14 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 }
 
 type softphoneSession struct {
-	SessionGeneration string `json:"session_generation,omitempty"`
-	CallID            string `json:"call_id"`
-	MediaURL          string `json:"media_url"`
-	SessionToken      string `json:"session_token,omitempty"`
-	LeaseSeconds      int    `json:"lease_seconds,omitempty"`
-	To                string `json:"to,omitempty"`
-	From              string `json:"from,omitempty"`
+	AttachmentGuardVersion int    `json:"attachment_guard_version,omitempty"`
+	SessionGeneration      string `json:"session_generation,omitempty"`
+	CallID                 string `json:"call_id"`
+	MediaURL               string `json:"media_url"`
+	SessionToken           string `json:"session_token,omitempty"`
+	LeaseSeconds           int    `json:"lease_seconds,omitempty"`
+	To                     string `json:"to,omitempty"`
+	From                   string `json:"from,omitempty"`
 }
 
 // softphoneMediaURL is the install-scoped path the operator's browser dials.
@@ -1195,6 +1198,9 @@ func (a *App) softphonePlace(w http.ResponseWriter, r *http.Request, project str
 			writePhoneSessionFailure(w, e)
 			return
 		}
+	}
+	if p == nil {
+		session.AttachmentGuardVersion = 1
 	}
 	writeJSON(w, session)
 }
@@ -1294,11 +1300,12 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 			return
 		}
 		writeJSON(w, softphoneSession{
-			CallID:       row.ID,
-			MediaURL:     a.softphoneMediaURL(row.ID, row.PeerToken),
-			SessionToken: row.PeerToken,
-			To:           row.ToNumber,
-			From:         row.FromNumber,
+			AttachmentGuardVersion: 1,
+			CallID:                 row.ID,
+			MediaURL:               a.softphoneMediaURL(row.ID, row.PeerToken),
+			SessionToken:           row.PeerToken,
+			To:                     row.ToNumber,
+			From:                   row.FromNumber,
 		})
 		return
 	}
@@ -1362,11 +1369,12 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		return
 	}
 	writeJSON(w, softphoneSession{
-		CallID:       callID,
-		MediaURL:     a.softphoneMediaURL(callID, peerToken),
-		SessionToken: peerToken,
-		To:           row.ToNumber,
-		From:         row.FromNumber,
+		AttachmentGuardVersion: 1,
+		CallID:                 callID,
+		MediaURL:               a.softphoneMediaURL(callID, peerToken),
+		SessionToken:           peerToken,
+		To:                     row.ToNumber,
+		From:                   row.FromNumber,
 	})
 }
 

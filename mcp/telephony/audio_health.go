@@ -652,8 +652,14 @@ func (a *App) sampleAudioHealth(row *callRow, h *softphoneHub, w *websocketWrite
 		observations[1].Counter += float64(s.WebRTC.OutboundDroppedMS + s.WebRTC.PacingSkippedMS)
 		observations[2].Counter += float64(s.WebRTC.IngressDiscardedMS + s.WebRTC.IngressRejectedPackets + s.WebRTC.IngressQueueDrops + s.WebRTC.DecodeErrors)
 		if b.WebRTC != nil {
-			observations[1].Bad = b.WebRTC.JitterBufferMS > 320
+			observations[1].Bad = b.WebRTC.JitterBufferIntervalMS != nil && *b.WebRTC.JitterBufferIntervalMS > 320 && browserReportFresh(b.WebRTC.JitterBufferObservedAt, now)
 			observations[1].Counter += b.WebRTC.PacketsLost + b.WebRTC.PacketsDiscarded
+		}
+	}
+	if media := h.sipMedia.Load(); media != nil {
+		if j := media.jitterTelemetry.Load(); j != nil {
+			bad := j.lastDiscardNS.Load() > 0 && now.Sub(time.Unix(0, j.lastDiscardNS.Load())) < 5*time.Second
+			observations = append(observations, audioHealthObservation{"internal_processing", "sip_buffer_discard", bad, active, 0})
 		}
 	}
 	changes := h.telemetry.observeHealth(now, observations)
@@ -817,4 +823,9 @@ func (t *audioCallTelemetry) leaseCheckEvent(w *websocketWriterPump, action, rea
 	if len(t.socket.LeaseEvents) > 64 {
 		t.socket.LeaseEvents = t.socket.LeaseEvents[len(t.socket.LeaseEvents)-64:]
 	}
+}
+
+func browserReportFresh(at string, now time.Time) bool {
+	t, err := time.Parse(time.RFC3339Nano, at)
+	return err == nil && !t.After(now.Add(time.Second)) && now.Sub(t) < 10*time.Second
 }

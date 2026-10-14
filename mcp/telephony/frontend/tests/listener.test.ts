@@ -22,7 +22,7 @@ describe("passive Telephony listener", () => {
     expect(f.requests[0].url.pathname).toEndWith("/user/softphone/listen/call");
     expect(f.requests[0].url.searchParams.get("auth_provider")).toBe("auth");
     await listener.stop();
-    expect(f.requests.filter(r => r.url.pathname.endsWith("/listen-stop/call"))).toHaveLength(1);
+    await Bun.sleep(5);expect(f.requests.filter(r => r.url.pathname.endsWith("/listen-stop/call"))).toHaveLength(1);
     expect(f.stopped).toBe(1);
     expect(f.requests.some(r => /\/answer\/|\/attach\/|\/takeover\/|\/hangup/.test(r.url.pathname))).toBe(false);
     await listener.dispose();
@@ -64,7 +64,7 @@ describe("passive Telephony listener", () => {
     resolve({ call_id: "call", media_url: "/api/apps/telephony/_install/42/softphone/listen-media/call/secret", session_token: "secret", lease_seconds: 60 });
     await pending;
     expect(listener.getSnapshot().state).toBe("idle");
-    expect(f.requests.filter(r => r.url.pathname.endsWith("/listen-stop/call"))).toHaveLength(1);
+    await Bun.sleep(5);expect(f.requests.filter(r => r.url.pathname.endsWith("/listen-stop/call"))).toHaveLength(1);
     expect(f.stopped).toBe(0);
     await listener.dispose();
   });

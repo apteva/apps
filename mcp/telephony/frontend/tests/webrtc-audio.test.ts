@@ -74,7 +74,7 @@ test("RTP statistics retain transport and separate concealment from dropped PCM"
  ]) as unknown as RTCStatsReport;
  const value=rtcStatistics(report,{at:epoch+1000,sent:1000,received:2000});
  expect(value.rtt).toBe(40);expect(value.webrtc.sendBitrateBps).toBe(32000);expect(value.webrtc.receiveBitrateBps).toBe(40000);
- expect(value.webrtc.concealedMs).toBe(20);expect(value.webrtc.jitterMs).toBe(20);expect(value.queueMs).toBe(20);
+ expect(value.webrtc.concealedMs).toBe(20);expect(value.webrtc.jitterMs).toBe(20);expect(value.queueMs).toBe(0);expect(value.webrtc.jitterBufferMs).toBe(20);expect(value.webrtc.jitterBufferIntervalMs).toBeUndefined();
  expect(value.webrtc.protocol).toBe("udp");expect(JSON.stringify(value)).not.toContain("sensitive-ip");
 });
 test("a hung fresh-authorization request is bounded and late completion cannot revive audio",async()=>{
@@ -187,4 +187,13 @@ test("audio processing delay uses decoded samples and omits unavailable/reset co
  expect(rtcStatistics(sample(2,{packetsReceived:150}),a.previous).metrics.receiver_processing_interval_ms).toBeCloseTo(12,6);
  for(const changes of [{totalSamplesDecoded:undefined},{totalSamplesDecoded:48000},{totalProcessingDelay:0},{ssrc:2}])expect(rtcStatistics(sample(2,changes),a.previous).metrics.receiver_processing_interval_ms).toBeUndefined();
  expect(rtcStatistics(sample(1,{totalSamplesDecoded:undefined})).states.receiver_processing).toBe("unavailable");
+});
+
+test("recent buffering recovers independently of lifetime mean and resets explicitly",()=>{
+ const report=(at:number,delay:number,emitted:number,ssrc=42)=>new Map([["in",{type:"inbound-rtp",kind:"audio",timestamp:at,ssrc,jitterBufferDelay:delay,jitterBufferEmittedCount:emitted}]]) as any;
+ const first=rtcStatistics(report(1000,1000,1000));expect(first.webrtc.jitterBufferIntervalMs).toBeUndefined();
+ const next=rtcStatistics(report(2000,1006,1100),first.previous);
+ expect(next.webrtc.jitterBufferMs).toBeGreaterThan(900);expect(next.queueMs).toBe(60);expect(next.webrtc.jitterBufferIntervalMs).toBe(60);
+ const reset=rtcStatistics(report(3000,1,10),next.previous);expect(reset.webrtc.jitterBufferIntervalMs).toBeUndefined();expect(reset.queueMs).toBe(0);
+ const replaced=rtcStatistics(report(4000,1012,1200,43),next.previous);expect(replaced.webrtc.jitterBufferIntervalMs).toBeUndefined();
 });

@@ -91,7 +91,10 @@ func summarizeAudioDashboard(row *callRow) audioDashboardSummary {
 		}
 		m["webrtc_jitter_buffer_ms"] = b.WebRTC.JitterBufferMS
 		add("dropped_audio", "telephony_to_browser", b.WebRTC.PacketsDiscarded > 0)
-		add("audio_degraded", "telephony_to_browser", b.WebRTC.JitterBufferMS > 320)
+		if b.WebRTC.JitterBufferIntervalMS != nil {
+			m["webrtc_jitter_buffer_interval_ms"] = *b.WebRTC.JitterBufferIntervalMS
+			add("audio_degraded", "telephony_to_browser", *b.WebRTC.JitterBufferIntervalMS > 320 && browserReportFresh(b.WebRTC.JitterBufferObservedAt, time.Now()))
+		}
 	}
 	add("playback_underrun", "telephony_to_browser", b.PlaybackUnderrunMS > 0)
 	if b.RTTMS != nil {

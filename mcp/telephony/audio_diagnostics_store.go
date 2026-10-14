@@ -268,15 +268,18 @@ func mergePlaybackUnderruns(previous, incoming []playbackUnderrunEvent) []playba
 }
 
 type browserWebRTCStats struct {
-	Protocol          string   `json:"protocol,omitempty"`
-	CandidateType     string   `json:"candidateType,omitempty"`
-	SendBitrateBPS    float64  `json:"sendBitrateBps"`
-	ReceiveBitrateBPS float64  `json:"receiveBitrateBps"`
-	PacketsLost       float64  `json:"packetsLost"`
-	JitterMS          float64  `json:"jitterMs"`
-	ConcealedMS       *float64 `json:"concealedMs,omitempty"`
-	PacketsDiscarded  float64  `json:"packetsDiscarded"`
-	JitterBufferMS    float64  `json:"jitterBufferMs"`
+	Protocol                string   `json:"protocol,omitempty"`
+	CandidateType           string   `json:"candidateType,omitempty"`
+	SendBitrateBPS          float64  `json:"sendBitrateBps"`
+	ReceiveBitrateBPS       float64  `json:"receiveBitrateBps"`
+	PacketsLost             float64  `json:"packetsLost"`
+	JitterMS                float64  `json:"jitterMs"`
+	ConcealedMS             *float64 `json:"concealedMs,omitempty"`
+	PacketsDiscarded        float64  `json:"packetsDiscarded"`
+	JitterBufferMS          float64  `json:"jitterBufferMs"`
+	JitterBufferIntervalMS  *float64 `json:"jitterBufferIntervalMs,omitempty"`
+	JitterBufferSampleAgeMS *float64 `json:"jitterBufferSampleAgeMs,omitempty"`
+	JitterBufferObservedAt  string   `json:"jitterBufferObservedAt,omitempty"`
 }
 
 type audioDropEvent struct {
@@ -367,7 +370,7 @@ func clampDiagnosticDBFS(value *float64) *float64 {
 	return &normalized
 }
 
-func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics) browserAudioDiagnostics {
+func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics, trustedPersistence ...bool) browserAudioDiagnostics {
 	if len(value.ClientVersion) > 32 || !browserClientVersionPattern.MatchString(value.ClientVersion) {
 		value.ClientVersion = ""
 	}
@@ -434,7 +437,24 @@ func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics) browserAudi
 	value.MediaTransport = enum(value.MediaTransport, "websocket", "webrtc")
 	value.Codec = enum(value.Codec, "pcm16", "opus")
 	if value.WebRTC != nil {
+		copy := *value.WebRTC
+		value.WebRTC = &copy
 		r := value.WebRTC
+		if len(trustedPersistence) == 0 || !trustedPersistence[0] {
+			r.JitterBufferObservedAt = ""
+			if r.JitterBufferIntervalMS != nil {
+				age := 0.0
+				if r.JitterBufferSampleAgeMS != nil {
+					age = *r.JitterBufferSampleAgeMS
+				}
+				if math.IsNaN(age) || math.IsInf(age, 0) || age < 0 || age > 60000 {
+					r.JitterBufferIntervalMS = nil
+					r.JitterBufferSampleAgeMS = nil
+				} else {
+					r.JitterBufferObservedAt = time.Now().Add(-time.Duration(age * float64(time.Millisecond))).UTC().Format(time.RFC3339Nano)
+				}
+			}
+		}
 		r.Protocol = enum(r.Protocol, "udp", "tcp")
 		r.CandidateType = enum(r.CandidateType, "host", "srflx", "prflx", "relay")
 		if r.ConcealedMS != nil {
@@ -443,6 +463,14 @@ func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics) browserAudi
 			} else {
 				v := math.Max(0, math.Min(*r.ConcealedMS, 1e9))
 				r.ConcealedMS = &v
+			}
+		}
+		if r.JitterBufferIntervalMS != nil {
+			if math.IsNaN(*r.JitterBufferIntervalMS) || math.IsInf(*r.JitterBufferIntervalMS, 0) || *r.JitterBufferIntervalMS < 0 {
+				r.JitterBufferIntervalMS = nil
+			} else {
+				v := min(*r.JitterBufferIntervalMS, 60000)
+				r.JitterBufferIntervalMS = &v
 			}
 		}
 		for _, field := range []*float64{&r.SendBitrateBPS, &r.ReceiveBitrateBPS, &r.PacketsLost, &r.JitterMS, &r.PacketsDiscarded, &r.JitterBufferMS} {
@@ -547,7 +575,7 @@ func normalizeAudioDropEvents(events []audioDropEvent) []audioDropEvent {
 }
 
 func (c *callsDB) updateBrowserAudioDiagnostics(id string, value browserAudioDiagnostics) error {
-	value = normalizeBrowserAudioDiagnostics(value)
+	value = normalizeBrowserAudioDiagnostics(value, true)
 	encoded, err := json.Marshal(value)
 	if err != nil {
 		return err

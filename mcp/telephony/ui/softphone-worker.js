@@ -402,7 +402,7 @@ function scheduleReconnect() {
   if (reconnectStartedAt === 0) reconnectStartedAt = now;
   if (now - reconnectStartedAt >= MAX_RECONNECT_MS) {
     runtimeEvent("reconnect","timed_out");
-    postMessage({ type: "socket.failed", detail: "audio connection lost after repeated retries" });
+    postMessage({ type: "socket.failed", recoverable: true, detail: "audio connection lost after repeated retries" });
     return;
   }
   const delay = Math.min(250 * (2 ** reconnectAttempt), MAX_RECONNECT_DELAY_MS);

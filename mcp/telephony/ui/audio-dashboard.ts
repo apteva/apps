@@ -183,6 +183,7 @@ export const metricLabel: Record<string, string> = {
   webrtc_concealed_ms: "WebRTC replacement audio (ms)",
   webrtc_packets_lost: "WebRTC packets lost",
   webrtc_packets_discarded: "WebRTC packets discarded",
+  webrtc_jitter_buffer_interval_ms: "Recent browser buffering (ms)",
   webrtc_jitter_buffer_ms: "WebRTC average playback buffer (ms)",
   playback_dropped_ms: "Browser playback dropped (ms)",
   playback_underruns: "Playback underruns",

@@ -111,7 +111,7 @@ export class TransportTelemetrySender {
   private report?:unknown;
   private reportAt=0;
   static readonly maxAgeMS=12000;
-  constructor(private send:(sample:TransportWireSample)=>boolean,private sendReport?:(report:unknown)=>boolean,private now=()=>performance.now()) {}
+  constructor(private send:(sample:TransportWireSample)=>boolean,private sendReport?:(report:unknown,queueAgeMS?:number)=>boolean,private now=()=>performance.now()) {}
   enqueueReport(report:unknown):void {if(this.report!==undefined)this.skippedAuxiliary++;this.report=report;this.reportAt=this.now();this.start();}
   enqueueAuxiliary(report:unknown):void {
     const runtime=!!(report as any)?.diagnostics?.timing?.runtime;
@@ -147,9 +147,9 @@ export class TransportTelemetrySender {
     this.auxiliary=this.auxiliary.filter(v=>{if(now-v.at>TransportTelemetrySender.maxAgeMS){this.skippedAuxiliary++;return false;}return true;});
     if(this.report!==undefined&&now-this.reportAt>TransportTelemetrySender.maxAgeMS){this.report=undefined;this.skippedAuxiliary++;}
     try{
-      if(this.report!==undefined && this.sendReport){if(this.sendReport(this.report))this.report=undefined;}
+      if(this.report!==undefined && this.sendReport){if(this.sendReport(this.report,Math.max(0,now-this.reportAt)))this.report=undefined;}
       else if(this.auxiliary.length && this.sendReport && (!this.pending.length||this.auxiliaryTurn)){
-        if(this.sendReport(this.auxiliary[0].report)){this.auxiliary.shift();this.auxiliaryTurn=false;}
+        if(this.sendReport(this.auxiliary[0].report,Math.max(0,now-this.auxiliary[0].at))){this.auxiliary.shift();this.auxiliaryTurn=false;}
       }
       else if(this.pending.length){
         const part=this.pending[0];

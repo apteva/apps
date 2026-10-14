@@ -1,3 +1,5 @@
+import { AudioRecoveryLoop } from "./audio-recovery";
+import { mediaFailure, boundedMediaRequest } from "./media-lease";
 import type { CallListenerOptions } from "./listener";
 import { MediaLease, mediaRecoveryContext, safeMediaSessionEvent, type MediaInitiatingAction, type MediaRecoveryContext, type MediaSessionEvent } from "./media-lease";
 import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, playbackBufferOptions, type SoftphoneMediaReadiness, type SoftphoneAudioHealth, type SoftphoneAudioOptions, type SoftphoneCallStatus, type SoftphoneDiagnostics, type SoftphoneState } from "../../ui/softphone-audio";
@@ -70,6 +72,9 @@ export class HeadlessSoftphone {
   private timer?: ReturnType<typeof setTimeout>;
   private polling?: AbortController;
   private hasStatusPush=false;
+  private automaticRecovery?:AudioRecoveryLoop;
+  private hasLiveAudio=false;
+  private uncertainAttachment?:{diagnostics:MediaRecoveryContext&{previous_session_id?:string};expected?:string};
   private scheduleStatusPoll?: () => void;
   private outbound = false;
   private ringing = false;
@@ -109,6 +114,7 @@ export class HeadlessSoftphone {
     if (this.disposed || generation !== this.generation || this.cancellation.signal.aborted) throw new Error("Softphone operation cancelled");
   }
   private invalidate(): number {
+    this.automaticRecovery?.stop();this.automaticRecovery=undefined;this.uncertainAttachment=undefined;
     this.cancellation.abort();
     this.cancellation = new AbortController();
     return ++this.generation;
@@ -254,7 +260,17 @@ export class HeadlessSoftphone {
       // Keep the current audio running while scripts prepare. Acquire a new
       // server generation only after preparation, preserving token ownership.
       const setupEvents = await this.prepareAudio(generation, false);
-      const session = await this.client.attach(id,{...recovery,previous_session_id});
+      let session:CallSession;
+      try{session=await this.acquireRecoverySession(this.session!,{...recovery,previous_session_id},this.cancellation.signal);}
+      catch(error){
+        const f=mediaFailure(error);let current:string|undefined;
+        try{current=JSON.parse((error as {body?:string}).body??"{}").current_generation;}catch{}
+        if(action==="automatic_retry" || f.code!=="media_session_changed" || !current || !/^session-[a-f0-9-]{1,64}$/.test(current))throw error;
+        // An explicit user action may conditionally replace the observed current
+        // generation. Automatic retry never displaces a newer attachment.
+        this.assertCurrent(generation);
+        session=await this.client.attach(id,{...mediaRecoveryContext(action),previous_session_id:current},{signal:this.cancellation.signal},current);
+      }
       this.assertCurrent(generation);
       await this.attachAudio(session, generation, setupEvents);
       await this.reconcileAttachedCall(session, generation);
@@ -406,7 +422,7 @@ export class HeadlessSoftphone {
     try {
       this.assertCurrent(generation);
       audio = this.runtime.create({
-        refreshMediaURL: (requested) => {
+        refreshMediaURL: (requested,signal) => {
           const recovery=requested ?? mediaRecoveryContext("automatic_retry");
           if (refreshing) {
             this.reportSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:"coalesced",...recovery,shared_attempt_id:refreshingContext?.attempt_id});
@@ -416,7 +432,7 @@ export class HeadlessSoftphone {
           const refreshGeneration = this.generation;
           const pending = (async () => {
             const previous_session_id=session.session_generation;
-            const fresh = await this.client.attach(session.call_id,{...recovery,previous_session_id});
+            const fresh = await this.acquireRecoverySession(session,{...recovery,previous_session_id},signal);
             this.assertCurrent(refreshGeneration);
             if (!current()) throw new Error("Audio connection no longer active");
             session = fresh; this.session = fresh; this.startLease(fresh);
@@ -430,17 +446,18 @@ export class HeadlessSoftphone {
         },
         sessionDiagnostics: () => ({session_id:session.session_generation}),
         onSessionEvent: event => notify(() => this.options.onSessionEvent?.(safeMediaSessionEvent({...event,session_id:event.session_id??session.session_generation}))),
-        onState: (audioState, detail) => {
+        onState: (audioState, detail,failure) => {
           if (!current()) return;
           if (audioState === "ended" && detail === "call.ended") {
             this.observeCall({ id: session.call_id, status: "completed" });
             return;
           }
+          if(audioState==="live")this.hasLiveAudio=true;
           this.update({ audioState, detail });
           this.scheduleStatusPoll?.();
           if (current() && (audioState === "error" || audioState === "ended")) {
             this.stopAudio();
-            if (audioState === "error") void this.reconcileFailedAudio(session, this.generation);
+            if (audioState === "error") {void this.reconcileFailedAudio(session, this.generation);if(failure?.recoverable)this.scheduleAudioRecovery();}
           }
         },
         onMediaReadiness: event => notify(() => this.options.onMediaReadiness?.(event)),
@@ -476,6 +493,42 @@ export class HeadlessSoftphone {
     }
   }
 
+  private async acquireRecoverySession(session:CallSession,diagnostics:MediaRecoveryContext&{previous_session_id?:string},signal?:AbortSignal):Promise<CallSession>{
+    // An unknown POST outcome retries the same guarded mutation. A manual action
+    // invalidates the loop and still uses a generation precondition, so a late
+    // response cannot rotate a newer session behind it.
+    const chosen=this.uncertainAttachment??{diagnostics,expected:session.attachment_guard_version===1?(session.session_generation??""):undefined};
+    if(signal?.aborted)throw new DOMException("Cancelled","AbortError");
+    this.uncertainAttachment=chosen;
+    try{
+      const value=await this.client.attach(session.call_id,chosen.diagnostics,{signal},chosen.expected);
+      if(signal?.aborted)throw new DOMException("Cancelled","AbortError");
+      this.uncertainAttachment=undefined;return value;
+    }catch(error){const status=mediaFailure(error).status;if(status!==undefined&&status>=400&&status<500)this.uncertainAttachment=undefined;throw error;}
+  }
+  private scheduleAudioRecovery(){
+    if(this.disposed||!this.session||!this.hasLiveAudio||this.automaticRecovery)return;
+    const id=this.session.call_id,generation=this.generation;
+    this.update({audioState:"reconnecting",detail:"Network unavailable; waiting to restore audio."});
+    const permanent=(error:unknown)=>{const f=mediaFailure(error);return f.denied||f.code==="media_session_changed"||f.code==="call_ended"||f.code==="call_not_attachable"||["NotAllowedError","NotFoundError"].includes((error as Error)?.name);};
+    this.automaticRecovery=new AudioRecoveryLoop(async signal=>{
+      this.assertCurrent(generation);
+      const call=await boundedMediaRequest(s=>this.client.getCall(id,s),signal);
+      if(!call)throw Object.assign(new Error("Call unavailable"),{status:404});
+      if(isTerminalCall(call.status)){this.observeCall(call);return;}
+      this.assertCurrent(generation);
+      const events=await this.prepareAudio(generation,false);if(signal.aborted)throw new DOMException("Cancelled","AbortError");
+      const recovery=mediaRecoveryContext("automatic_retry");
+      const session=await this.acquireRecoverySession(this.session!,recovery,signal);
+      this.assertCurrent(generation);if(signal.aborted)throw new DOMException("Cancelled","AbortError");
+      const cancel=()=>{if(this.current(generation)&&this.session===session)this.stopAudio();};
+      signal.addEventListener("abort",cancel,{once:true});
+      try{await this.attachAudio(session,generation,events);if(signal.aborted)throw new DOMException("Cancelled","AbortError");}
+      finally{signal.removeEventListener("abort",cancel);}
+      this.automaticRecovery?.stop();this.automaticRecovery=undefined;
+    },permanent,error=>{if(this.current(generation)){this.automaticRecovery=undefined;this.update({audioState:"error",detail:message(error)});}},outcome=>this.reportSessionEvent({timestamp:new Date().toISOString(),action:"network_recovery",outcome}));
+  }
+
   private async reconcileAttachedCall(session: CallSession, generation: number) {
     try {
       const call = await this.client.getCall(session.call_id);
@@ -503,7 +556,8 @@ export class HeadlessSoftphone {
     this.lease = new MediaLease(session.lease_seconds, () => this.client.renew(session), (reason, error) => {
       if (this.disposed || this.session !== session) return;
       this.stopAudio();
-      this.update({ audioState: "error", detail: reason === "expired" ? "Audio session expired. Reconnect audio." : `Audio authorization ended: ${message(error ?? reason)}` });
+      this.update({ audioState: "error", detail: reason === "expired" ? "Audio session expired. Reconnecting audio." : `Audio authorization ended: ${message(error ?? reason)}` });
+      if(reason==="expired")this.scheduleAudioRecovery();else{this.automaticRecovery?.stop();this.automaticRecovery=undefined;}
     }, event => {
       if (this.audio?.recordSessionEvent) this.audio.recordSessionEvent(event);
       else { try { this.options.onSessionEvent?.(event); } catch { /* host isolation */ } }
@@ -570,7 +624,7 @@ export class HeadlessSoftphone {
     this.hasStatusPush=false;
     this.stopAudio();
     this.stopPolling();
-    this.session = undefined;
+    this.session = undefined;this.hasLiveAudio=false;
     this.outbound = false;
     this.update({ callId: undefined, carrierStatus, audioState: "idle", muted: false, detail: undefined, phase: carrierStatus ? "ended" : "idle",
       holdState: undefined, recordingState: undefined, controlError: undefined, capabilities: undefined });

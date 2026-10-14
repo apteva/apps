@@ -28,20 +28,24 @@ import (
 	tk "github.com/apteva/app-sdk/testkit"
 	bench "github.com/apteva/apps/mcp/telephony/benchmarks/softphone"
 	"github.com/gobwas/ws/wsutil"
+	"github.com/pion/turn/v5"
 )
 
 // Chromium executes the actual app-served SDK bundle, AudioWorklet and Worker.
 // Only the platform gateway and carrier are fixtures; HTTP/WS and Telephony are real.
 func TestTier2HeadlessBrowser(t *testing.T) {
-	for _, surface := range []string{"headless", "headless-listener-webrtc", "headless-listener-webrtc-24k", "headless-listener-auto", "headless-coaching-512k", "headless-coaching-jitter", "panel", "application-user"} {
+	for _, surface := range []string{"headless", "headless-webrtc-turn-recovery", "headless-listener-webrtc", "headless-listener-webrtc-24k", "headless-listener-auto", "headless-coaching-512k", "headless-coaching-jitter", "panel", "application-user"} {
 		t.Run(surface, func(t *testing.T) { runHeadlessBrowser(t, surface) })
 	}
 }
 
 func runHeadlessBrowser(t *testing.T, surface string) {
-	inputRate:="48000"
- if surface=="headless-listener-webrtc-24k" {inputRate="24000";surface="headless-listener-webrtc"}
- listenerTransport := "websocket"
+	inputRate := "48000"
+	if surface == "headless-listener-webrtc-24k" {
+		inputRate = "24000"
+		surface = "headless-listener-webrtc"
+	}
+	listenerTransport := "websocket"
 	if surface == "headless-listener-webrtc" {
 		listenerTransport = "webrtc"
 		surface = "headless"
@@ -61,7 +65,28 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 		surface = "headless"
 	}
 	platform := newTier2PlatformGateway(t)
-	config := map[string]string{"softphone_webrtc_encoder_input_rate":inputRate}
+	config := map[string]string{"softphone_webrtc_encoder_input_rate": inputRate}
+	if surface == "headless-webrtc-turn-recovery" {
+		config["softphone_webrtc_enabled"] = "true"
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		server, err := turn.NewServer(turn.ServerConfig{Realm: "local-test", ListenerConfigs: []turn.ListenerConfig{{Listener: listener, RelayAddressGenerator: &turn.RelayAddressGeneratorStatic{RelayAddress: net.ParseIP("127.0.0.1"), Address: "127.0.0.1"}}}, AuthHandler: func(attrs *turn.RequestAttributes) (string, []byte, bool) {
+			username, realm := attrs.Username, attrs.Realm
+			if username != "fixture-user" {
+				return "", nil, false
+			}
+			return username, turn.GenerateAuthKey(username, realm, "fixture-password"), true
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer server.Close()
+		raw, _ := json.Marshal([]map[string]any{{"urls": []string{"turn:" + listener.Addr().String() + "?transport=tcp"}, "username": "fixture-user", "credential": "fixture-password"}})
+		config["softphone_webrtc_ice_servers"] = string(raw)
+	}
+
 	if listenerTransport == "webrtc" {
 		config["softphone_webrtc_enabled"] = "true"
 	}
@@ -321,13 +346,23 @@ waitAnswer:
 			t.Fatal("browser microphone did not reach carrier")
 		}
 	}
+	if surface == "headless-webrtc-turn-recovery" {
+		_ = carrier.SetReadDeadline(time.Time{})
+		go func() {
+			for {
+				if _, _, err := wsutil.ReadServerData(carrier); err != nil {
+					return
+				}
+			}
+		}()
+	}
 	select {
 	case err := <-finished:
 		if err != nil {
 			t.Fatalf("headless browser: %v\n%s", err, output.String())
 		}
 		t.Log(output.String())
-	case <-time.After(45 * time.Second):
+	case <-time.After(100 * time.Second):
 		t.Fatal("headless browser did not finish")
 	}
 }

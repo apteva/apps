@@ -1,5 +1,5 @@
 import {test,expect} from "bun:test";
-import {TransportTelemetry,TRANSPORT_METRICS,transportMetrics,transportStates} from "./transport-telemetry";
+import {TransportTelemetrySender,TransportTelemetry,TRANSPORT_METRICS,transportMetrics,transportStates} from "./transport-telemetry";
 const epoch=Date.UTC(2026,9,9);
 const timestamp=(ms:number)=>new Date(epoch+ms).toISOString();
 test("bounded history, pending reports and bandwidth; absent metrics stay absent and secrets are excluded",()=>{
@@ -65,4 +65,11 @@ test("congested refreshes preserve one complete sample and auxiliary events cann
   expect(retained.map(p=>p.part_index)).toEqual(parts.map(p=>p.part_index));
   expect(sender.skippedSamples).toBeGreaterThan(0);expect(sender.skippedAuxiliary).toBeGreaterThan(0);
  }finally{sender.stop();}
+});
+
+test("report queue residence is passed without mutating or accumulating sample age",()=>{
+ let now=0;const ages:number[]=[],reports:any[]=[];let allowed=false;
+ const sender=new TransportTelemetrySender(()=>true,(report,age)=>{ages.push(age??0);reports.push(report);return allowed;},()=>now);
+ const report={diagnostics:{webrtc:{jitterBufferSampleAgeMs:100}}};sender.enqueueReport(report);now=2000;sender.tick();now=3000;allowed=true;sender.tick();sender.stop();
+ expect(ages).toEqual([2000,3000]);expect(reports[0]).toBe(report);expect(report.diagnostics.webrtc.jitterBufferSampleAgeMs).toBe(100);
 });

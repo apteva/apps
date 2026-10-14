@@ -44,18 +44,28 @@ func normalizeAudioSessionCorrelation(s audioSessionCorrelation) audioSessionCor
 	return s
 }
 func audioSessionRequest(r *http.Request, action string) audioSessionCorrelation {
+	d, _, _ := audioAttachmentRequest(r, action)
+	return d
+}
+func audioAttachmentRequest(r *http.Request, action string) (audioSessionCorrelation, *phoneAttachmentGuard, error) {
 	var body struct {
 		Diagnostics audioSessionCorrelation `json:"media_diagnostics"`
+		Guard       *phoneAttachmentGuard   `json:"attachment_guard"`
 	}
-	// Invalid observational metadata is ignored; it cannot reject attachment.
+	var err error
 	if r.Body != nil {
-		_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body)
+		err = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body)
 	}
-	s := normalizeAudioSessionCorrelation(body.Diagnostics)
+	d := normalizeAudioSessionCorrelation(body.Diagnostics)
 	if action == "takeover" {
-		s.InitiatingAction = action
+		d.InitiatingAction = action
 	}
-	return s
+	if body.Guard != nil {
+		if err != nil || !body.Guard.valid() {
+			return d, nil, errPhoneSessionChanged
+		}
+	}
+	return d, body.Guard, nil
 }
 func (t *audioCallTelemetry) sessionIssued(row *callRow, s audioSessionCorrelation, identity phoneIdentity, collect func(audioNetworkEvent)) {
 	// No database and no waiting on the collector. Snapshot only the active
