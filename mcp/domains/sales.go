@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	sdk "github.com/apteva/app-sdk"
@@ -96,7 +97,14 @@ func (a *App) toolDomainSalePublish(ctx *sdk.AppCtx, args map[string]any) (any, 
 		p["description"] = desc
 	}
 	raw, e := providerCall(ctx, b, "create_sellerhub_domain", p)
-	return map[string]any{"provider": b.AppSlug, "domain": d, "status": "listed", "raw": raw}, e
+	if e != nil {
+		return nil, e
+	}
+	var listing map[string]any
+	if json.Unmarshal(raw, &listing) != nil || strArg(listing, "name") != d || strArg(listing, "status") == "" {
+		return nil, errors.New("Spaceship returned an unconfirmed listing; inspect its status before publishing again")
+	}
+	return map[string]any{"provider": b.AppSlug, "domain": d, "status": listing["status"], "listed": listing["status"] == "onSale", "raw": listing}, nil
 }
 func (a *App) toolDomainSaleRemove(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	b, e := saleConnection(ctx, args)
@@ -128,5 +136,17 @@ func (a *App) toolDomainSaleGet(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		tool = "get_sellerhub_domain"
 	}
 	raw, e := providerCall(ctx, b, tool, map[string]any{"domain": d})
-	return map[string]any{"provider": b.AppSlug, "domain": d, "raw": raw}, e
+	if e != nil {
+		return nil, e
+	}
+	result := map[string]any{"provider": b.AppSlug, "domain": d, "raw": raw}
+	if b.AppSlug == "spaceship" {
+		var listing map[string]any
+		if json.Unmarshal(raw, &listing) != nil || strArg(listing, "name") != d || strArg(listing, "status") == "" {
+			return nil, errors.New("invalid Spaceship listing response")
+		}
+		result["status"] = listing["status"]
+		result["listed"] = listing["status"] == "onSale"
+	}
+	return result, nil
 }

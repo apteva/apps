@@ -1,3 +1,9 @@
+## 1.1.2
+
+- Recognize Spaceship's actual domains_Register asynchronous operation type, verified against a real purchase. Validate the completed operation's domain before confirming ownership and inventory.
+- Display live SellerHub listing status and saved listing prices in the Domains panel. Verification-pending listings are not reported as on sale.
+- Recover purchases already accepted by Spaceship by polling the saved operation, without another registration submission.
+
 ## 1.1.1
 
 - Complete and persist pending Replicate appraisals, including per-domain USD prices, errors, and the original connection. Batch requests save one history entry per domain.

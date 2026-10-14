@@ -17,6 +17,7 @@ let needsMailMode = false;
 let spaceshipMode = false;
 let spaceshipSubmitted = false;
 let storedValuation = false;
+let activeListing = false;
 const caps = {
   write_types: ["A", "TXT", "MX", "SRV"],
   delete_types: ["A", "TXT", "MX", "SRV"],
@@ -116,6 +117,7 @@ beforeAll(async () => {
             ],
           });
         }
+        if(body.tool==="domain_sale_get") return Response.json(activeListing?{provider:"spaceship",status:"onSale",listed:true,raw:{name:body.args.domain,status:"onSale",binPriceEnabled:true,binPrice:{amount:"145",currency:"USD"}}}:{});
         if (body.tool === "domain_estimate_list") return Response.json({valuations:storedValuation?[{id:1,domain:body.args.domain,status:"succeeded",auction:0,marketplace:145,brokerage:457,created_at:"2026-10-14T09:15:37Z"}]:[]});
         if (spaceshipMode) {
           const purchase = {confirmation_token: "spaceship-token", status: spaceshipSubmitted ? "processing" : "prepared", domain: "fresh.example", provider:"spaceship", connection_id:1, years:2, auto_renew:true, whois_privacy:true, billing_mode:"account_rate", options:{contacts:{registrant:"1ZdMXpapqp9sle5dl8BlppTJXAzf5"}}, expires_at:"2030-01-01T00:00:00Z"};
@@ -409,3 +411,15 @@ test("Spaceship purchase shows account-rate consent and keeps accepted operation
    expect(calls.some(c=>c.tool==="domain_estimate_start"||c.tool==="domain_register")).toBe(false);
   }finally{storedValuation=false;await page.close()}
  });
+
+test("listing status and price survive a panel reload without publishing",async()=>{
+ activeListing=true;calls.length=0;const page=await loadPage();
+ try{
+  await page.getByText("alpha.example",{exact:true}).click();
+  await page.getByText("Listing status: For sale · Buy now $145 USD",{exact:true}).waitFor();
+  expect(await page.getByLabel("Listing price",{exact:true}).inputValue()).toBe("145");
+  await page.reload();await page.getByText("alpha.example",{exact:true}).click();
+  await page.getByText("Listing status: For sale · Buy now $145 USD",{exact:true}).waitFor();
+  expect(calls.some(c=>c.tool==="domain_sale_publish")).toBe(false);
+ }finally{activeListing=false;await page.close()}
+});
