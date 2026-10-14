@@ -17,6 +17,7 @@ import (
 // Atomic counters and a best-effort bounded timing window. Sampling cannot hold
 // an RTP reader/writer: contention only skips diagnostic sequence calculations.
 type sipRTPObservations struct {
+	receiveEvidence      sipReceiveWindow
 	firstReceived        atomic.Int64
 	firstSent            atomic.Int64
 	earlyKernelDrops     atomic.Int64
@@ -158,38 +159,39 @@ func (o *sipRTPObservations) sentPacket(size int, now time.Time) {
 }
 
 type sipRTPSnapshot struct {
-	FirstPacketAt        string  `json:"first_packet_at,omitempty"`
-	FirstSentAt          string  `json:"first_sent_at,omitempty"`
-	PreBridgeSocketDrops int64   `json:"pre_bridge_socket_receive_drops"`
-	ActivationDropped    int64   `json:"activation_dropped_packets"`
-	KernelDrops          int64   `json:"socket_receive_drops"`
-	KernelDropsAvailable bool    `json:"socket_receive_drops_available"`
-	EarlyPackets         int64   `json:"pre_bridge_drained_packets"`
-	EarlyBytes           int64   `json:"pre_bridge_drained_bytes"`
-	Packets              int64   `json:"packets_received"`
-	Bytes                int64   `json:"bytes_received"`
-	LastPacketAt         string  `json:"last_packet_at,omitempty"`
-	LastPacketAgeMS      float64 `json:"last_packet_age_ms"`
-	MaxGapMS             float64 `json:"max_gap_ms"`
-	SequenceLoss         int64   `json:"sequence_loss"`
-	SequenceGaps         int64   `json:"sequence_gap_packets"`
-	Duplicates           int64   `json:"duplicates"`
-	OutOfOrder           int64   `json:"out_of_order"`
-	JitterMS             float64 `json:"jitter_ms"`
-	MaxDeliveryExcessMS  float64 `json:"max_delivery_excess_ms"`
-	RejectedSource       int64   `json:"rejected_source_packets"`
-	DecodeErrors         int64   `json:"decode_errors"`
-	AuthErrors           int64   `json:"srtp_authentication_failures"`
-	ReplayErrors         int64   `json:"srtp_replay_failures"`
-	DecryptErrors        int64   `json:"srtp_decryption_failures"`
-	ReadErrors           int64   `json:"read_errors"`
-	Sent                 int64   `json:"packets_sent"`
-	SentBytes            int64   `json:"bytes_sent"`
-	SendErrors           int64   `json:"send_errors"`
-	LastSentAt           string  `json:"last_sent_at,omitempty"`
-	MaxSendMS            float64 `json:"max_send_duration_ms"`
-	MaxPacingGapMS       float64 `json:"max_send_gap_ms"`
-	Skipped              int64   `json:"timing_observations_skipped"`
+	ReceiveEvidence      []sipReceiveEvidence `json:"receive_evidence,omitempty"`
+	FirstPacketAt        string               `json:"first_packet_at,omitempty"`
+	FirstSentAt          string               `json:"first_sent_at,omitempty"`
+	PreBridgeSocketDrops int64                `json:"pre_bridge_socket_receive_drops"`
+	ActivationDropped    int64                `json:"activation_dropped_packets"`
+	KernelDrops          int64                `json:"socket_receive_drops"`
+	KernelDropsAvailable bool                 `json:"socket_receive_drops_available"`
+	EarlyPackets         int64                `json:"pre_bridge_drained_packets"`
+	EarlyBytes           int64                `json:"pre_bridge_drained_bytes"`
+	Packets              int64                `json:"packets_received"`
+	Bytes                int64                `json:"bytes_received"`
+	LastPacketAt         string               `json:"last_packet_at,omitempty"`
+	LastPacketAgeMS      float64              `json:"last_packet_age_ms"`
+	MaxGapMS             float64              `json:"max_gap_ms"`
+	SequenceLoss         int64                `json:"sequence_loss"`
+	SequenceGaps         int64                `json:"sequence_gap_packets"`
+	Duplicates           int64                `json:"duplicates"`
+	OutOfOrder           int64                `json:"out_of_order"`
+	JitterMS             float64              `json:"jitter_ms"`
+	MaxDeliveryExcessMS  float64              `json:"max_delivery_excess_ms"`
+	RejectedSource       int64                `json:"rejected_source_packets"`
+	DecodeErrors         int64                `json:"decode_errors"`
+	AuthErrors           int64                `json:"srtp_authentication_failures"`
+	ReplayErrors         int64                `json:"srtp_replay_failures"`
+	DecryptErrors        int64                `json:"srtp_decryption_failures"`
+	ReadErrors           int64                `json:"read_errors"`
+	Sent                 int64                `json:"packets_sent"`
+	SentBytes            int64                `json:"bytes_sent"`
+	SendErrors           int64                `json:"send_errors"`
+	LastSentAt           string               `json:"last_sent_at,omitempty"`
+	MaxSendMS            float64              `json:"max_send_duration_ms"`
+	MaxPacingGapMS       float64              `json:"max_send_gap_ms"`
+	Skipped              int64                `json:"timing_observations_skipped"`
 
 	KernelTimestampAvailable bool    `json:"kernel_arrival_timestamps_available"`
 	KernelTimestampPackets   int64   `json:"kernel_timestamped_packets"`
@@ -200,6 +202,7 @@ type sipRTPSnapshot struct {
 
 func (o *sipRTPObservations) snapshot(now time.Time) sipRTPSnapshot {
 	s := sipRTPSnapshot{PreBridgeSocketDrops: o.earlyKernelDrops.Load(), ActivationDropped: o.activationDropped.Load(), KernelDrops: o.kernelDrops.Load(), KernelDropsAvailable: o.kernelDropsAvailable.Load(), EarlyPackets: o.earlyPackets.Load(), EarlyBytes: o.earlyBytes.Load(), Packets: o.packets.Load(), Bytes: o.bytes.Load(), MaxGapMS: float64(o.maxGap.Load()) / 1e6, SequenceLoss: o.loss.Load(), SequenceGaps: o.sequenceGaps.Load(), Duplicates: o.duplicates.Load(), OutOfOrder: o.outOfOrder.Load(), JitterMS: float64(o.jitterNS.Load()) / 1e6, MaxDeliveryExcessMS: float64(o.deliveryExcessNS.Load()) / 1e6, RejectedSource: o.rejectedSource.Load(), DecodeErrors: o.decodeErrors.Load(), AuthErrors: o.authErrors.Load(), ReplayErrors: o.replayErrors.Load(), DecryptErrors: o.decryptErrors.Load(), ReadErrors: o.readErrors.Load(), Sent: o.sent.Load(), SentBytes: o.sentBytes.Load(), SendErrors: o.sendErrors.Load(), MaxSendMS: float64(o.maxSend.Load()) / 1e6, MaxPacingGapMS: float64(o.maxPacingGap.Load()) / 1e6, Skipped: o.skipped.Load()}
+	s.ReceiveEvidence = o.receiveEvidence.snapshot()
 	s.KernelTimestampAvailable = o.kernelTimestampAvailable.Load()
 	s.KernelTimestampPackets, s.KernelTimestampInvalid = o.kernelTimestampPackets.Load(), o.kernelTimestampInvalid.Load()
 	s.LastSocketWaitMS, s.MaxSocketWaitMS = float64(o.lastSocketWait.Load())/1e6, float64(o.maxSocketWait.Load())/1e6
@@ -220,40 +223,45 @@ func (o *sipRTPObservations) snapshot(now time.Time) sipRTPSnapshot {
 }
 
 type sipJitterSnapshot struct {
-	SourceResetDroppedMS  float64          `json:"source_reset_discarded_ms"`
-	HoldSkippedMS         float64          `json:"intentional_hold_skipped_ms"`
-	MaxDeliveryAgeMS      float64          `json:"max_relative_delivery_age_ms"`
-	SourceClockConfidence string           `json:"source_clock_confidence"`
-	TargetMS              int              `json:"target_ms"`
-	EffectiveTargetMS     int              `json:"effective_target_ms"`
-	CapacityMS            int              `json:"capacity_ms"`
-	AgeLimitMS            int              `json:"age_limit_ms"`
-	OverflowDroppedMS     float64          `json:"overflow_discarded_ms"`
-	ExpiredDroppedMS      float64          `json:"expired_discarded_ms"`
-	ConcealedMS           float64          `json:"concealed_ms"`
-	SilenceFilledMS       float64          `json:"silence_filled_ms"`
-	ClockDriftPPM         float64          `json:"clock_drift_ppm"`
-	ClockEstimatorUpdates int              `json:"clock_estimator_updates"`
-	ClockRejectedFits     int              `json:"clock_rejected_fits"`
-	ClockObservationCount int              `json:"clock_observation_windows"`
-	ClockPhaseAdjustedMS  float64          `json:"clock_phase_adjusted_ms"`
-	ClockPhaseRejected    int              `json:"clock_phase_withheld"`
-	ClockRateRejected     int              `json:"clock_rate_rejected"`
-	ClockRecentRecoveries int              `json:"clock_recent_rate_recoveries"`
-	ClockFits             []sipClockFit    `json:"clock_fits,omitempty"`
-	MaxConsumerIntervalMS float64          `json:"max_consumer_interval_ms"`
-	AdjustedSamples       int64            `json:"reserve_clock_adjusted_samples"`
-	ClockResets           int              `json:"clock_resets"`
-	DTXResumes            int              `json:"dtx_resumes"`
-	FreshDeliveryResumes  int              `json:"fresh_delivery_rebuffers"`
-	Events                []sipJitterEvent `json:"events,omitempty"`
-	Available             bool             `json:"available"`
-	QueueMS               float64          `json:"queue_ms"`
-	OldestAgeMS           float64          `json:"oldest_age_ms"`
-	MaxAgeMS              int              `json:"max_age_ms"`
-	DroppedMS             float64          `json:"discarded_ms"`
-	LateDroppedMS         float64          `json:"late_discarded_ms"`
-	MissingFilledMS       float64          `json:"missing_audio_filled_ms"`
+	Resynchronizations     int              `json:"playout_resynchronizations"`
+	RecoveryDiscardedMS    float64          `json:"recovery_discarded_ms"`
+	LastRecoveryOffsetMS   float64          `json:"last_recovery_offset_ms"`
+	MaxIngressProcessingMS float64          `json:"max_ingress_processing_ms"`
+	MaxIngressLockMS       float64          `json:"max_ingress_lock_wait_ms"`
+	SourceResetDroppedMS   float64          `json:"source_reset_discarded_ms"`
+	HoldSkippedMS          float64          `json:"intentional_hold_skipped_ms"`
+	MaxDeliveryAgeMS       float64          `json:"max_relative_delivery_age_ms"`
+	SourceClockConfidence  string           `json:"source_clock_confidence"`
+	TargetMS               int              `json:"target_ms"`
+	EffectiveTargetMS      int              `json:"effective_target_ms"`
+	CapacityMS             int              `json:"capacity_ms"`
+	AgeLimitMS             int              `json:"age_limit_ms"`
+	OverflowDroppedMS      float64          `json:"overflow_discarded_ms"`
+	ExpiredDroppedMS       float64          `json:"expired_discarded_ms"`
+	ConcealedMS            float64          `json:"concealed_ms"`
+	SilenceFilledMS        float64          `json:"silence_filled_ms"`
+	ClockDriftPPM          float64          `json:"clock_drift_ppm"`
+	ClockEstimatorUpdates  int              `json:"clock_estimator_updates"`
+	ClockRejectedFits      int              `json:"clock_rejected_fits"`
+	ClockObservationCount  int              `json:"clock_observation_windows"`
+	ClockPhaseAdjustedMS   float64          `json:"clock_phase_adjusted_ms"`
+	ClockPhaseRejected     int              `json:"clock_phase_withheld"`
+	ClockRateRejected      int              `json:"clock_rate_rejected"`
+	ClockRecentRecoveries  int              `json:"clock_recent_rate_recoveries"`
+	ClockFits              []sipClockFit    `json:"clock_fits,omitempty"`
+	MaxConsumerIntervalMS  float64          `json:"max_consumer_interval_ms"`
+	AdjustedSamples        int64            `json:"reserve_clock_adjusted_samples"`
+	ClockResets            int              `json:"clock_resets"`
+	DTXResumes             int              `json:"dtx_resumes"`
+	FreshDeliveryResumes   int              `json:"fresh_delivery_rebuffers"`
+	Events                 []sipJitterEvent `json:"events,omitempty"`
+	Available              bool             `json:"available"`
+	QueueMS                float64          `json:"queue_ms"`
+	OldestAgeMS            float64          `json:"oldest_age_ms"`
+	MaxAgeMS               int              `json:"max_age_ms"`
+	DroppedMS              float64          `json:"discarded_ms"`
+	LateDroppedMS          float64          `json:"late_discarded_ms"`
+	MissingFilledMS        float64          `json:"missing_audio_filled_ms"`
 }
 type sipSignalSnapshot struct {
 	Negotiation      *sipCodecEvidence `json:"codec_negotiation,omitempty"`
@@ -276,6 +284,8 @@ type sipSignalSnapshot struct {
 	Encryption       string            `json:"encryption,omitempty"`
 }
 type sipLiveSnapshot struct {
+	TransportState     string                 `json:"transport_state"`
+	ProcessingState    string                 `json:"processing_state"`
 	At                 string                 `json:"at"`
 	State              string                 `json:"state"`
 	ReceiveExpectation string                 `json:"receive_expectation"`
@@ -420,10 +430,23 @@ func (d *sipLiveDiagnostics) snapshot(now time.Time) sipLiveSnapshot {
 	if !d.ended.Load() && s.ReceiveExpectation != "intentional_hold" && lastProblem > 0 && now.Sub(time.Unix(0, lastProblem)) < 5*time.Second {
 		s.State = "audio_degraded"
 	}
+	s.TransportState = s.State
+	s.ProcessingState = "healthy"
+	if j := m.jitterTelemetry.Load(); j != nil && !d.ended.Load() && s.ReceiveExpectation != "intentional_hold" {
+		if at := j.lastDiscardNS.Load(); at > 0 && now.Sub(time.Unix(0, at)) < 5*time.Second {
+			s.ProcessingState = "audio_degraded"
+			s.State = "audio_degraded"
+		}
+	}
 	// Arrival age alone cannot establish an RTP transport failure: DTX may be
 	// silent indefinitely. Confirmed read/write/security failures remain distinct.
 	if j := m.jitterTelemetry.Load(); j != nil && j.mu.TryLock() {
 		s.Jitter = sipJitterSnapshot{Available: true, QueueMS: float64(int64(j.buffered)+j.pendingPCMSamples.Load()) / 8, MaxAgeMS: j.maxAgeMS, DroppedMS: float64(j.droppedSamples) / 8, LateDroppedMS: float64(j.lateDroppedSamples) / 8, MissingFilledMS: float64(j.missingFilledSamples.Load()) / 8}
+		s.Jitter.Resynchronizations = j.recovery.recoveries
+		s.Jitter.RecoveryDiscardedMS = float64(j.recoveryDiscardedSamples) / 8
+		s.Jitter.LastRecoveryOffsetMS = j.recovery.lastOffsetMS
+		s.Jitter.MaxIngressProcessingMS = j.maxIngressProcessingMS
+		s.Jitter.MaxIngressLockMS = j.maxIngressLockMS
 		s.Jitter.SourceResetDroppedMS = float64(j.resetDroppedSamples) / 8
 		s.Jitter.HoldSkippedMS = float64(j.holdSkippedSamples) / 8
 		s.Jitter.MaxDeliveryAgeMS = j.maxDeliveryAgeMS
@@ -515,6 +538,18 @@ func (d *sipLiveDiagnostics) sample(now time.Time) carrierTelemetryRecord {
 	incident := signature != d.lastIncident
 	d.lastIncident = signature
 	d.mu.Unlock()
+	// Persist at most eight recent observations, avoiding repeated whole-ring
+	// snapshots. The in-memory ring and archived incident history stay bounded.
+	recent := s.RTP.ReceiveEvidence[:0]
+	for _, e := range s.RTP.ReceiveEvidence {
+		if now.Sub(e.Handler) <= 2*time.Second {
+			recent = append(recent, e)
+		}
+	}
+	if len(recent) > 8 {
+		recent = recent[len(recent)-8:]
+	}
+	s.RTP.ReceiveEvidence = recent
 	r := carrierTelemetryRecord{InstallID: d.app.installID, ProjectID: d.row.ProjectID, CallID: d.row.ID, Kind: "sample", At: ringTime(now), BridgeGeneration: d.id, SIP: &s}
 	if incident {
 		r.Kind = "incident"

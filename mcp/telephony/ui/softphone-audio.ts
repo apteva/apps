@@ -101,10 +101,10 @@ export interface SoftphoneCallbacks {
   /** Server path readiness; onState/live also requires local browser readiness. */
   onMediaReadiness?: (event: SoftphoneMediaReadiness) => void;
   onAudioHealth?: (health: SoftphoneAudioHealth) => void;
-  refreshMediaURL?: (recovery?: MediaRecoveryContext) => Promise<string>;
+  refreshMediaURL?: (recovery?: MediaRecoveryContext, signal?:AbortSignal) => Promise<string>;
   onSessionEvent?: (event: MediaSessionEvent) => void;
   sessionDiagnostics?: () => {session_id?: string; previous_session_id?: string};
-  onState?: (state: SoftphoneState, detail?: string) => void;
+  onState?: (state: SoftphoneState, detail?: string, failure?:{recoverable:boolean}) => void;
   onNotice?: (detail:string) => void;
   onLevels?: (mic: number, speaker: number) => void;
   onDiagnostics?: (diagnostics: SoftphoneDiagnostics) => void;
@@ -198,7 +198,7 @@ export interface SoftphoneDiagnostics {
   underrunEvents?: PlaybackUnderrunEvent[];
 	mediaTransport?: "websocket" | "webrtc";
 	codec?: "pcm16" | "opus";
-	webrtc?: { protocol?: string; candidateType?: string; sendBitrateBps?: number; receiveBitrateBps?: number; packetsLost?: number; jitterMs?: number; concealedMs?: number; packetsDiscarded?: number; jitterBufferMs?: number };
+	webrtc?: { protocol?: string; candidateType?: string; sendBitrateBps?: number; receiveBitrateBps?: number; packetsLost?: number; jitterMs?: number; concealedMs?: number; packetsDiscarded?: number; jitterBufferMs?: number; jitterBufferIntervalMs?:number };
   audioHealth?: SoftphoneAudioHealth;
   sessionEvents?: MediaSessionEvent[];
   coachingPlayedMs?: number;
@@ -689,7 +689,7 @@ export class SoftphoneSession {
         } else if (message?.type === "socket.failed") {
           this.mediaSocketConnected = false;
           finish(new Error(message.detail || "audio connection lost"));
-          this.fail(message.detail || "audio connection lost");
+          this.fail(message.detail || "audio connection lost",message.recoverable===true);
         } else if (message?.type === "transport.drop" && message.event) {
           this.diagnostics.dropEvents = this.mergeDropEvents(message.event);
         } else if (message?.type === "transport.stats") {
@@ -898,11 +898,11 @@ export class SoftphoneSession {
     finally { this.teardown(); }
   }
 
-  private fail(detail: string): void {
+  private fail(detail: string, recoverable=false): void {
     this.shutdownIntent="audio_error";
     if (!this.closed) this.recordSessionEvent({timestamp:new Date().toISOString(),action:"audio",outcome:"error",detail:detail.slice(0,160)});
     this.closed = true;
-    try { this.callbacks.onState?.("error", detail); }
+    try { this.callbacks.onState?.("error", detail,{recoverable}); }
     finally { this.teardown(); }
   }
 

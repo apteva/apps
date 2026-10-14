@@ -106,6 +106,7 @@ export function createListenerWebSocketAudio(app: AppHandle, options: ListenerPl
     let audioOffset: number | undefined, transitBase: number | undefined, networkExcess = 0;
     let ready = false;
     const networkDroppedMS = [0, 0];
+    const receivedMS=[0,0],scheduledMS=[0,0];
     const sequenceGaps = [0, 0], expected: Array<number | undefined> = [undefined, undefined];
     const resamplers = [new PreviewResampler(), new PreviewResampler()];
     let volume = options.outputVolume ?? 1;
@@ -151,7 +152,7 @@ export function createListenerWebSocketAudio(app: AppHandle, options: ListenerPl
           gain = context.createGain(); gain.gain.value = volume;
           node.connect(gain).connect(context.destination);
           node.onprocessorerror = () => fail("listener_audio_error");
-          node.port.onmessage = ({ data }) => { if (data?.type === "listener.diagnostics" && !closed) { try { callbacks.onDiagnostics?.({ ...data, media_transport:"websocket", sequence_gaps: [...sequenceGaps], network_excess_ms: networkExcess, network_dropped_ms: [...networkDroppedMS] }); } catch { /* host isolation */ } } };
+          node.port.onmessage = ({ data }) => { if (data?.type === "listener.diagnostics" && !closed) { try { callbacks.onDiagnostics?.({ ...data, media_transport:"websocket", context_state:context?.state, context_rate:context?.sampleRate, context_time_ms:(context?.currentTime??0)*1000, received_ms:[...receivedMS],scheduled_ms:[...scheduledMS], sequence_gaps: [...sequenceGaps], network_excess_ms: networkExcess, network_dropped_ms: [...networkDroppedMS] }); } catch { /* host isolation */ } } };
           context.onstatechange = () => { if (context?.state === "suspended" || (context?.state as string) === "interrupted") fail("listener_audio_paused"); };
           await new Promise<void>((resolve, reject) => {
             let settled = false;
@@ -165,7 +166,7 @@ export function createListenerWebSocketAudio(app: AppHandle, options: ListenerPl
                 if (typeof data === "string") { const event=JSON.parse(data); if(event.type==="listener.ready") { if(coaching && event.coaching!==true)throw new Error("Coaching not authorized");ready=true;finish();callbacks.onReady("websocket"); } else if(event.type==="coach.started") { talkAck?.(event.generation); } else if(event.type==="coach.rejected") { talkAck?.(talkGeneration,new Error(event.detail||"Coaching unavailable")); } else if(event.type==="coach.stopped" && (event.generation===undefined || event.generation===talkGeneration)) { stopTalking(); } return; }
                 if (!ready || !(data instanceof ArrayBuffer)) return;
                 const decoded = decodeListenerFrame(data);
-                const d = decoded.direction;
+                const d = decoded.direction;receivedMS[d]+=decoded.frame.length*1000/24000;
                 if (expected[d] !== undefined && decoded.sequence < expected[d]!) return;
                 if (expected[d] !== undefined && decoded.sequence > expected[d]!) sequenceGaps[d] += decoded.sequence - expected[d]!;
                 expected[d] = decoded.sequence + 1;
@@ -175,6 +176,7 @@ export function createListenerWebSocketAudio(app: AppHandle, options: ListenerPl
                 if (networkExcess > 200) { networkDroppedMS[d] += decoded.frame.length * 1000 / 24_000; return; } // Never play accumulated network backlog.
                 audioOffset ??= context.currentTime * 1000 + (options.playbackTargetMs ?? 60) - decoded.timestampMS;
                 const frame = resamplers[d].process(decoded.frame, 24_000, context.sampleRate);
+                scheduledMS[d]+=decoded.frame.length*1000/24000;
                 node.port.postMessage({ direction: d, frame, playAtMS: decoded.timestampMS + audioOffset }, [frame.buffer]);
               } catch { finish(new Error("Invalid listener media")); fail("listener_protocol_error"); }
             };

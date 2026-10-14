@@ -29,7 +29,7 @@ export function rtcRelayEvidence(value: unknown): string {
 }
 export function permanentRTCFailure(error: unknown): boolean {
   const failure=mediaFailure(error);
-  return failure.denied || failure.expired || ["NotAllowedError","NotFoundError","SecurityError","OverconstrainedError"].includes((error as Error)?.name);
+  return failure.denied || failure.code==="media_session_changed" || failure.code==="call_ended" || failure.code==="call_not_attachable" || failure.expired || ["NotAllowedError","NotFoundError","SecurityError","OverconstrainedError"].includes((error as Error)?.name);
 }
 
 type RTCPrevious = { at:number;sent:number;received:number; counters?:Record<string,Record<string,number>>; pairID?:string;pathRevision?:number };
@@ -118,9 +118,9 @@ export function rtcStatistics(report: RTCStatsReport, previous?: RTCPrevious) {
   const pathRevision=(previous?.pathRevision??0)+(pairID && pairID!==previous?.pairID?1:0);
   metrics.path_revision=pathRevision;
   const sendBitrateBps=bitrate("bytesSent",sent),receiveBitrateBps=bitrate("bytesReceived",received);
-  return {previous:{at,sent,received,counters,pairID,pathRevision},rtt:rtt as number|null,queueMs:emitted>0?delay/emitted*1000:0,
+  return {previous:{at,sent,received,counters,pairID,pathRevision},rtt:rtt as number|null,queueMs:metrics.receiver_jitter_buffer_interval_ms??0,
     metrics:transportMetrics({...metrics,send_bitrate_bps:sendBitrateBps,receive_bitrate_bps:receiveBitrateBps}),states:transportStates(states),
-    webrtc:{protocol,candidateType,sendBitrateBps,receiveBitrateBps,packetsLost:lost,jitterMs:jitter,concealedMs:concealmentSupported?concealed:undefined,packetsDiscarded:discarded,jitterBufferMs:emitted>0?delay/emitted*1000:0}};
+    webrtc:{protocol,candidateType,sendBitrateBps,receiveBitrateBps,packetsLost:lost,jitterMs:jitter,concealedMs:concealmentSupported?concealed:undefined,packetsDiscarded:discarded,jitterBufferMs:emitted>0?delay/emitted*1000:0,jitterBufferIntervalMs:metrics.receiver_jitter_buffer_interval_ms}};
 }
 
 export function rtcLossEvents(metrics:Record<string,number>,timestamp=new Date().toISOString()):AudioDropEvent[] {
@@ -166,6 +166,7 @@ export class WebRTCAudioConnection implements AudioConnection {
   private recoveryGeneration=0;
   private recoveryContext?:MediaRecoveryContext;
   private recoveryExpiry?: ReturnType<typeof setTimeout>;
+  private recoveryRequest?:AbortController;
   private ringback?: () => void;
   private options?: SoftphoneAudioOptions;
   private workletURL?: string;
@@ -176,8 +177,10 @@ export class WebRTCAudioConnection implements AudioConnection {
   private transportSender=new TransportTelemetrySender(sample=>{
     if(this.socket?.readyState!==WebSocket.OPEN||this.socket.bufferedAmount>1024)return false;
     return this.sendTelemetry({type:"transport.samples",diagnostics:{client_epoch:this.clientEpoch,transport_samples:[sample]}});
-  },report=>{
+  },(report,queueAge=0)=>{
     if(this.socket?.readyState!==WebSocket.OPEN||this.socket.bufferedAmount>1024)return false;
+    const value=report as any;
+    if(value?.diagnostics?.webrtc) {const rtc=value.diagnostics.webrtc;return this.sendTelemetry({...value,diagnostics:{...value.diagnostics,webrtc:{...rtc,jitterBufferSampleAgeMs:(rtc.jitterBufferSampleAgeMs??0)+queueAge}}});}
     return this.sendTelemetry(report);
   });
   private controlBudget=new RTCControlBudget();
@@ -188,6 +191,7 @@ export class WebRTCAudioConnection implements AudioConnection {
   private appliedBitrate?:number;
   private statsErrors=0;
   private lastStatsSend=-Infinity;
+  private lastValidStatsAt=-Infinity;
   private clientEpoch=crypto.randomUUID();
   private relayConfigured?:boolean;
   private nativeCounts?: {packetsLost:number;packetsDiscarded:number;concealedMs?:number};
@@ -357,7 +361,7 @@ export class WebRTCAudioConnection implements AudioConnection {
     const pc=this.pc,started=performance.now();this.sampling.add(pc);
     try{
       const result=rtcStatistics(await pc.getStats(),this.previous);if(!this.current(generation)||this.pc!==pc)return;
-      this.previous=result.previous;
+      this.previous=result.previous;this.lastValidStatsAt=performance.now();
       this.nativeCounts={packetsLost:result.webrtc.packetsLost,packetsDiscarded:result.webrtc.packetsDiscarded,concealedMs:result.webrtc.concealedMs};
       result.webrtc.packetsLost+=this.completedCounts.packetsLost;
       result.webrtc.packetsDiscarded+=this.completedCounts.packetsDiscarded;
@@ -414,7 +418,7 @@ export class WebRTCAudioConnection implements AudioConnection {
   private sendStatistics(){
     const track=this.stream?.getAudioTracks()[0];
       if(performance.now()-this.lastStatsSend>=5000){this.lastStatsSend=performance.now();
-      this.transportSender.enqueueReport({type:"diagnostics",diagnostics:{client_epoch:this.clientEpoch,client_version:SOFTPHONE_CLIENT_VERSION,relay_configured:this.relayConfigured,media_transport:"webrtc",codec:"opus",webrtc:Object.fromEntries(Object.entries(this.diagnostics.webrtc??{}).map(([k,v])=>[k,typeof v==="number"?Math.round(v*10)/10:v])),connection_state:"connected",carrier_peer_connected:this.peer,audio_context_state:this.context?.state,microphone_muted:this.muted,microphone_track_state:track?.readyState,microphone_device_muted:track?.muted,rtt_ms:this.diagnostics.rttMs===null?null:Math.round(this.diagnostics.rttMs),playback_queue_ms:Math.round(this.diagnostics.queueMs),playback_target_ms:this.diagnostics.targetMs,audio_context_rate:this.context?.sampleRate,playback_sequence_gaps:this.diagnostics.webrtc?.packetsLost, }});this.transportSender.enqueue(this.transportTelemetry.drain());this.enqueueRTCEvents({timing:{runtime:this.runtime.counters}});}
+      this.transportSender.enqueueReport({type:"diagnostics",diagnostics:{client_epoch:this.clientEpoch,client_version:SOFTPHONE_CLIENT_VERSION,relay_configured:this.relayConfigured,media_transport:"webrtc",codec:"opus",webrtc:{...Object.fromEntries(Object.entries(this.diagnostics.webrtc??{}).map(([k,v])=>[k,typeof v==="number"?Math.round(v*10)/10:v])),jitterBufferSampleAgeMs:Number.isFinite(this.lastValidStatsAt)?Math.max(0,performance.now()-this.lastValidStatsAt):undefined},connection_state:"connected",carrier_peer_connected:this.peer,audio_context_state:this.context?.state,microphone_muted:this.muted,microphone_track_state:track?.readyState,microphone_device_muted:track?.muted,rtt_ms:this.diagnostics.rttMs===null?null:Math.round(this.diagnostics.rttMs),playback_queue_ms:Math.round(this.diagnostics.queueMs),playback_target_ms:this.diagnostics.targetMs,audio_context_rate:this.context?.sampleRate,playback_sequence_gaps:this.diagnostics.webrtc?.packetsLost, }});this.transportSender.enqueue(this.transportTelemetry.drain());this.enqueueRTCEvents({timing:{runtime:this.runtime.counters}});}
   }
   private playWhisper(data:ArrayBuffer){
     if(data.byteLength<17||data.byteLength>176||this.whisperEpoch===null||!this.context)return;
@@ -436,8 +440,8 @@ export class WebRTCAudioConnection implements AudioConnection {
     this.recoveryExpiry=setTimeout(()=>{
       if(!recovering())return;
       this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:"timed_out",...this.recoveryContext});
-      ++this.recoveryGeneration;this.recovering=false;clearTimeout(this.retry);this.cancelSetup?.();this.cleanup();
-      safe(()=>this.callbacks.onState?.("error","WebRTC audio recovery timed out; reconnect audio to the existing call."));
+      ++this.recoveryGeneration;this.recovering=false;clearTimeout(this.retry);this.cancelSetup?.();this.recoveryRequest?.abort();this.cleanup();
+      safe(()=>this.callbacks.onState?.("error","Network unavailable; waiting to restore audio to the existing call.",{recoverable:true}));
     },30000);
     const attempt=async()=>{
       if(!recovering())return;
@@ -445,7 +449,8 @@ export class WebRTCAudioConnection implements AudioConnection {
       this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:"attempt_started",code:cause,...context});
       try{
         if(!this.callbacks.refreshMediaURL)throw new Error("Fresh media authorization is required");
-        const url=await this.callbacks.refreshMediaURL(context);if(!recovering())return;await this.connect(url);if(!recovering())return;
+        this.recoveryRequest=new AbortController();
+        const url=await this.callbacks.refreshMediaURL(context,this.recoveryRequest.signal);if(!recovering())return;await this.connect(url);if(!recovering())return;
         if(this.pc?.connectionState!=="connected")throw new Error("WebRTC disconnected during recovery");
         clearTimeout(this.recoveryExpiry);
         this.recovering=false;this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:"connected",...context});
@@ -479,7 +484,7 @@ export class WebRTCAudioConnection implements AudioConnection {
     this.capture?.disconnect();this.capture=undefined;this.whisper?.disconnect();this.whisper=undefined;this.whisperEpoch=null;this.whisperBase=null;this.whisperResampler=new PreviewResampler();
     const context=this.context;this.context=undefined;if(context){context.onstatechange=null;void context.close().catch(()=>{});}this.speaker=undefined;this.speakerMeter=undefined;
   }
-  stop(){if(this.stopped)return;if(this.recovering)this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:"cancelled",...this.recoveryContext});this.stopped=true;++this.recoveryGeneration;clearTimeout(this.recoveryExpiry);clearTimeout(this.retry);this.cancelSetup?.();this.cleanup();}
+  stop(){if(this.stopped)return;if(this.recovering)this.recordSessionEvent({timestamp:new Date().toISOString(),action:"reconnect",outcome:"cancelled",...this.recoveryContext});this.stopped=true;this.recoveryRequest?.abort();++this.recoveryGeneration;clearTimeout(this.recoveryExpiry);clearTimeout(this.retry);this.cancelSetup?.();this.cleanup();}
 }
 
 /** Try one transport at a time; failed setup releases all resources first. */

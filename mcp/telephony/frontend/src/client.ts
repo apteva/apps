@@ -1,3 +1,4 @@
+import { boundedMediaRequest } from "./media-lease";
 import {RuntimeTelephonyTransport, type TelephonyRuntimeMode, type DirectTelephonyConnection} from "./runtime-transport";
 import { type MediaAttachmentDiagnostics, safeMediaDiagnosticID, leaseClock } from "./media-lease";
 import { defineAppExtension, type AppHandle } from "@apteva/web-sdk";
@@ -57,6 +58,7 @@ export interface CallControlResult {
   capabilities: NonNullable<Call["capabilities"]>;
 }
 export interface CallSession {
+  attachment_guard_version?: number;
   call_id: string;
   media_url: string;
   session_generation?: string;
@@ -318,9 +320,9 @@ export class TelephonyClient {
   }
 
   /** Attach an assigned human call; never dials or takes another user's call. */
-  async attach(id: string, diagnostics?: MediaAttachmentDiagnostics): Promise<CallSession> {
+  async attach(id: string, diagnostics?: MediaAttachmentDiagnostics, init?:RequestInit, expectedGeneration?:string): Promise<CallSession> {
     const started = leaseClock();
-    return this.session(await this.post(this.path(`/softphone/attach/${callID(id)}`), diagnostics ? {media_diagnostics:diagnostics} : {}), id, "media", started);
+    return this.session(await boundedMediaRequest(signal=>this.post(this.path(`/softphone/attach/${callID(id)}`), {...(diagnostics ? {media_diagnostics:diagnostics} : {}),...(expectedGeneration!==undefined && diagnostics?.attempt_id ? {attachment_guard:{id:diagnostics.attempt_id,expected_generation:expectedGeneration}} : {})},{...init,signal}),init?.signal??undefined), id, "media", started);
   }
 
   async takeover(id: string, diagnostics?: MediaAttachmentDiagnostics): Promise<CallSession> {
@@ -330,7 +332,7 @@ export class TelephonyClient {
 
   createCallListener(options: CallListenerOptions = {}): HeadlessCallListener { return new HeadlessCallListener(this, {...options,...listenerAudioOptions({...this.options.audio,...options.audio},options)}); }
 
-  async listenSession(id: string): Promise<CallSession> { const started = leaseClock(); return this.session(await this.post(this.path(`/softphone/listen/${callID(id)}`), {}), id, "listen-media", started); }
+  async listenSession(id: string, signal?:AbortSignal): Promise<CallSession> { const started = leaseClock(); return this.session(await boundedMediaRequest(s=>this.post(this.path(`/softphone/listen/${callID(id)}`), {},{signal:s}),signal,5000,value=>{try{void this.stopListening(this.session(value,id,"listen-media",started)).catch(()=>{});}catch{/* invalid late credentials cannot be used */}}), id, "listen-media", started); }
   async coachSession(id: string): Promise<CallSession> { const started = leaseClock(); const s=this.session(await this.post(this.path(`/softphone/coach/${callID(id)}`), {}),id,"listen-media",started); if(s.coaching!==true) throw new Error("Invalid coaching session");return s; }
   async renewListening(session: CallSession): Promise<{lease_seconds?: number}> { return this.post(this.path(`/softphone/${session.coaching ? "coach-renew" : "listen-renew"}/${callID(session.call_id)}`), { session_token: session.session_token }); }
   async stopListening(session: CallSession): Promise<void> { await this.post(this.path(`/softphone/${session.coaching ? "coach-stop" : "listen-stop"}/${callID(session.call_id)}`), { session_token: session.session_token }); }

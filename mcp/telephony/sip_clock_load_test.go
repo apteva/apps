@@ -127,7 +127,8 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 					}
 					t.Cleanup(w.encoder.Close)
 					t.Cleanup(w.decoder.Close)
-					w.jitter = newRTPJitterBuffer()
+					recoveryEnabled := os.Getenv("TELEPHONY_SIP_RECOVERY_LOAD") == "1"
+					w.jitter = newRTPJitterBufferWithPolicy(sipPlaybackPolicy{Resynchronize: &recoveryEnabled})
 					w.server.jitterTelemetry.Store(w.jitter)
 					w.framer = newRTPAudioFramer(w.jitter, w.server.offer)
 					w.up, w.down = newPCMResampler(16000, rtcEncoderInputRate(w.encoder)), newPCMResampler(24000, 16000)
@@ -333,7 +334,7 @@ func TestSIPPlaybackClockPacedLoad(t *testing.T) {
 			})
 		}
 	}
-	data, err := json.MarshalIndent(map[string]any{"scope": "local bidirectional UDP/SRTP + SIP framer + resampling + Opus encode/decode; optional mixed mode adds recording, database call-list reads and retryable notification persistence; excludes live signaling, external proxy and browser rendering", "mixed_recording_database_notifications": os.Getenv("TELEPHONY_SIP_MIXED_LOAD") == "1", "gomaxprocs": runtime.GOMAXPROCS(0), "logical_cpus": runtime.NumCPU(), "results": results, "incident_history": incidents, "incident_history_scope": "bounded retained events, not a complete packet trace; drop-reason durations can be lower than cumulative counters"}, "", "  ")
+	data, err := json.MarshalIndent(map[string]any{"scope": "local bidirectional UDP/SRTP + SIP framer + resampling + Opus encode/decode; optional mixed mode adds recording, database call-list reads and retryable notification persistence; excludes live signaling, external proxy and browser rendering", "controlled_playout_recovery_enabled": os.Getenv("TELEPHONY_SIP_RECOVERY_LOAD") == "1", "mixed_recording_database_notifications": os.Getenv("TELEPHONY_SIP_MIXED_LOAD") == "1", "gomaxprocs": runtime.GOMAXPROCS(0), "logical_cpus": runtime.NumCPU(), "results": results, "incident_history": incidents, "incident_history_scope": "bounded retained events, not a complete packet trace; drop-reason durations can be lower than cumulative counters"}, "", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}

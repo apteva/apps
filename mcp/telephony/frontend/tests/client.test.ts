@@ -634,3 +634,24 @@ test("aborted old status request cannot disable push reconciliation on a reconne
   expect(polls).toBe(before);
  }finally{rejectFirst(new Error("cleanup"));phone.dispose();}
 });
+
+test("network recovery rejoins the existing call with a guarded session and preserves mute",async()=>{
+ const f=fixture();let generation=0;f.setResponse(async(url)=>url.pathname.endsWith("/calls")?{calls:[{id:"call-1",status:"answered"}]}:{...f.session,session_generation:`session-${(++generation).toString(16)}`,attachment_guard_version:1});
+ await f.phone.dial({to:"+12025550100"});f.phone.setMuted(true);
+ f.callbacks.onState?.("error","temporary outage",{recoverable:true});expect(f.phone.getSnapshot().audioState).toBe("reconnecting");
+ const recorded:any[]=[];const phone=f.phone as any;phone.options.onSessionEvent=(e:any)=>recorded.push(e);
+ const loop=phone.automaticRecovery;await loop.tick();
+ const complete=recorded.find(e=>e.action==="network_recovery"&&e.outcome==="connected");expect(complete?.recovery_id).toStartWith("recovery-");expect(complete?.attempt_id).toStartWith("attempt-");
+ expect(f.phone.getSnapshot().audioState).toBe("live");expect(f.phone.getSnapshot().muted).toBe(true);
+ const attach=f.requests.find(r=>r.url.pathname.includes("/attach/"));expect(attach?.body.attachment_guard.expected_generation).toBe("session-1");
+ expect(f.requests.filter(r=>r.url.pathname.includes("/place"))).toHaveLength(1);expect(f.requests.filter(r=>r.url.pathname.endsWith("/hangup"))).toHaveLength(0);f.phone.dispose();
+});
+test("unknown attachment outcome retries the same mutation; hangup stops the loop",async()=>{
+ const f=fixture();let stage=0;f.setResponse(async(url)=>{if(url.pathname.endsWith("/calls"))return {calls:[{id:"call-1",status:"answered"}]};if(url.pathname.includes("/attach/")){if(stage++===0)throw Error("response lost");return {...f.session,session_generation:"session-2",attachment_guard_version:1};}return {...f.session,session_generation:"session-1",attachment_guard_version:1};});
+ await f.phone.dial({to:"+12025550100"});f.callbacks.onState?.("error","network",{recoverable:true});const loop=(f.phone as any).automaticRecovery;await loop.tick();await loop.tick();
+ const calls=f.requests.filter(r=>r.url.pathname.includes("/attach/"));expect(calls).toHaveLength(2);expect(calls[0].body.attachment_guard).toEqual(calls[1].body.attachment_guard);
+ f.callbacks.onState?.("error","network",{recoverable:true});const stopped=(f.phone as any).automaticRecovery;await f.phone.hangup();await stopped.tick();expect(f.requests.filter(r=>r.url.pathname.includes("/attach/"))).toHaveLength(2);f.phone.dispose();
+});
+test("permanent media and microphone failures do not restart audio",async()=>{
+ const f=fixture();await f.phone.dial({to:"+12025550100"});f.callbacks.onState?.("error","denied");expect((f.phone as any).automaticRecovery).toBeUndefined();f.phone.dispose();
+});

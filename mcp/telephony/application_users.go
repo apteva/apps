@@ -458,6 +458,9 @@ func (a *App) filterPhoneCalls(r *http.Request, rows []callRow) []callRow {
 const phoneLeaseSeconds = 60
 
 func (a *App) issuePhoneSession(row *callRow, p *phonePrincipal, diagnostic ...audioSessionCorrelation) (*softphoneSession, error) {
+	return a.issuePhoneSessionConditional(row, p, nil, diagnostic...)
+}
+func (a *App) issuePhoneSessionConditional(row *callRow, p *phonePrincipal, guard *phoneAttachmentGuard, diagnostic ...audioSessionCorrelation) (*softphoneSession, error) {
 	principal := ""
 	revision := int64(0)
 	if p != nil {
@@ -485,7 +488,19 @@ func (a *App) issuePhoneSession(row *callRow, p *phonePrincipal, diagnostic ...a
 	raw, _ := json.Marshal(s)
 	token := newSecret()
 	var saved string
-	err := a.db().db.QueryRow(`INSERT INTO telephony_media_sessions(call_id,project_id,token_hash,principal,policy_revision,expires_at,diagnostic_json) VALUES(?,?,?,?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET token_hash=excluded.token_hash,principal=excluded.principal,policy_revision=excluded.policy_revision,expires_at=excluded.expires_at,diagnostic_json=json_set(excluded.diagnostic_json,'$.previous_session_id',json_extract(CASE WHEN json_valid(telephony_media_sessions.diagnostic_json) THEN telephony_media_sessions.diagnostic_json ELSE '{}' END,'$.session_id')) RETURNING diagnostic_json`, row.ID, row.ProjectID, phoneHash(token), principal, revision, time.Now().Unix()+phoneLeaseSeconds, string(raw)).Scan(&saved)
+	query := `INSERT INTO telephony_media_sessions(call_id,project_id,token_hash,principal,policy_revision,expires_at,diagnostic_json) VALUES(?,?,?,?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET token_hash=excluded.token_hash,principal=excluded.principal,policy_revision=excluded.policy_revision,expires_at=excluded.expires_at,diagnostic_json=json_set(excluded.diagnostic_json,'$.previous_session_id',json_extract(CASE WHEN json_valid(telephony_media_sessions.diagnostic_json) THEN telephony_media_sessions.diagnostic_json ELSE '{}' END,'$.session_id')) `
+	args := []any{row.ID, row.ProjectID, phoneHash(token), principal, revision, time.Now().Unix() + phoneLeaseSeconds, string(raw)}
+	if guard != nil {
+		query = strings.Replace(query, `VALUES(?,?,?,?,?,?,?)`, `SELECT ?,?,?,?,?,?,? WHERE ?='' OR EXISTS(SELECT 1 FROM telephony_media_sessions WHERE call_id=? AND project_id=?)`, 1)
+		args = append(args, guard.Expected, row.ID, row.ProjectID)
+		query += ` WHERE COALESCE(json_extract(CASE WHEN json_valid(telephony_media_sessions.diagnostic_json) THEN telephony_media_sessions.diagnostic_json ELSE '{}' END,'$.session_id'),'')=?`
+		args = append(args, guard.Expected)
+	}
+	query += ` RETURNING diagnostic_json`
+	err := a.db().db.QueryRow(query, args...).Scan(&saved)
+	if guard != nil && errors.Is(err, sql.ErrNoRows) {
+		return nil, errPhoneSessionChanged
+	}
 	_ = json.Unmarshal([]byte(saved), &s)
 	if err != nil {
 		return nil, err
@@ -506,7 +521,7 @@ func (a *App) issuePhoneSession(row *callRow, p *phonePrincipal, diagnostic ...a
 		}
 		enqueueAudioSessionIssued(network, s, a.audioNetworks.enqueue)
 	}
-	return &softphoneSession{CallID: row.ID, MediaURL: a.softphoneMediaURL(row.ID, token), SessionToken: token, SessionGeneration: s.SessionID, To: row.ToNumber, From: row.FromNumber, LeaseSeconds: phoneLeaseSeconds}, nil
+	return &softphoneSession{CallID: row.ID, MediaURL: a.softphoneMediaURL(row.ID, token), SessionToken: token, SessionGeneration: s.SessionID, To: row.ToNumber, From: row.FromNumber, LeaseSeconds: phoneLeaseSeconds, AttachmentGuardVersion: 1}, nil
 }
 func (a *App) validPhoneMedia(row *callRow, token string) bool {
 	return a.phoneMediaDenialReason(row, token) == ""
@@ -602,8 +617,18 @@ func (a *App) handlePhoneSession(w http.ResponseWriter, r *http.Request, project
 	// Optional HTTP metadata may await request bytes. Never hold the media claim
 	// while reading it; authorization and issuance remain authoritative below.
 	var diagnostic audioSessionCorrelation
+	var guard *phoneAttachmentGuard
 	if action != "renew" {
-		diagnostic = audioSessionRequest(r, action)
+		var err error
+		diagnostic, guard, err = audioAttachmentRequest(r, action)
+		if err != nil {
+			writeJSONStatus(w, 400, map[string]any{"code": "invalid_attachment_guard"})
+			return
+		}
+		if action != "attach" && guard != nil {
+			writeJSONStatus(w, 400, map[string]any{"code": "invalid_attachment_guard"})
+			return
+		}
 	}
 	unlock := a.softphones.lockClaim(id)
 	defer unlock()
@@ -617,7 +642,11 @@ func (a *App) handlePhoneSession(w http.ResponseWriter, r *http.Request, project
 		return
 	}
 	if isTerminalStatus(row.Status) || row.PeerKind != peerKindHuman || row.PeerToken == "" || row.Status == "pending" {
-		http.Error(w, "call has no attachable human session", 409)
+		code := "call_not_attachable"
+		if isTerminalStatus(row.Status) {
+			code = "call_ended"
+		}
+		writeJSONStatus(w, 409, map[string]any{"code": code})
 		return
 	}
 	p := phoneUserFrom(r)
@@ -684,8 +713,20 @@ func (a *App) handlePhoneSession(w http.ResponseWriter, r *http.Request, project
 		writeJSON(w, map[string]any{"lease_seconds": phoneLeaseSeconds})
 		return
 	}
-	session, err := a.issuePhoneSession(row, p, diagnostic)
+	session, err := a.issueGuardedPhoneSession(r.Context(), row, p, diagnostic, guard)
 	if err != nil {
+		if errors.Is(err, errPhoneSessionChanged) {
+			result := map[string]any{"code": "media_session_changed"}
+			var raw string
+			if a.db().db.QueryRow(`SELECT diagnostic_json FROM telephony_media_sessions WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID).Scan(&raw) == nil {
+				var state audioSessionCorrelation
+				if json.Unmarshal([]byte(raw), &state) == nil {
+					result["current_generation"] = safeAudioDiagnosticID(state.SessionID)
+				}
+			}
+			writeJSONStatus(w, 409, result)
+			return
+		}
 		status := http.StatusServiceUnavailable
 		if errors.Is(err, errPhoneAccessDenied) {
 			status = http.StatusForbidden

@@ -11,7 +11,7 @@ export interface CallListenerOptions extends ListenerPlaybackOptions {
   runtime?: ListenerAudioRuntime;
   onDiagnostics?: (value: ListenerDiagnostics) => void;
   onSessionEvent?: (event: MediaSessionEvent) => void;
-  /** Automatically retry transient disconnections for at most 30 seconds. Default true. */
+  /** Retry passive listening quickly for 30 seconds, then at a low rate until stopped or denied. Default true; coaching retains explicit recovery. */
   reconnect?: boolean;
 }
 
@@ -24,6 +24,7 @@ export class HeadlessCallListener {
   private session?: CallSession;
   private audio?: ListenerAudioConnection;
   private lease?: MediaLease;
+  private requestAbort?:AbortController;
   private retry?: ReturnType<typeof setTimeout>;
   private retryUntil = 0;
   private retryDelay = 500;
@@ -57,11 +58,12 @@ export class HeadlessCallListener {
     return this.connect(callId, generation);
   }
   private async connect(callId: string, generation: number): Promise<void> {
+    this.requestAbort?.abort();this.requestAbort=new AbortController();
     let session: CallSession | undefined;
     const attempt = ++this.attempt;
     const current = () => generation === this.generation && attempt === this.attempt && !this.disposed;
     try {
-      session = this.coaching ? await this.client.coachSession(callId) : await this.client.listenSession(callId);
+      session = this.coaching ? await this.client.coachSession(callId) : await this.client.listenSession(callId,this.requestAbort?.signal);
       if (!current()) { await this.client.stopListening(session).catch(() => {}); return; }
       this.session = session;
       const audio = this.runtime.create({
@@ -88,6 +90,7 @@ export class HeadlessCallListener {
     }
   }
   private cleanup(): Promise<void> {
+    this.requestAbort?.abort();this.requestAbort=undefined;
     this.lease?.stop(); this.lease = undefined;
     const audio = this.audio; this.audio = undefined; audio?.stop();
     const session = this.session; this.session = undefined;
@@ -101,9 +104,9 @@ export class HeadlessCallListener {
     const transient = ["listener_disconnected", "listener_network_error", "media_disconnected", "media_replaced"].includes(reason);
     if (!this.coaching && !ended && !revoked && transient && this.options.reconnect !== false) {
       this.retryUntil ||= Date.now() + 30_000;
-      if (Date.now() < this.retryUntil) {
+      {
         this.update({ state: "reconnecting", detail, talking:false });
-        this.retry = setTimeout(() => { this.retry = undefined; if (generation === this.generation && !this.disposed) void this.connect(callId, generation).catch(() => {}); }, this.retryDelay);
+        this.retry = setTimeout(() => { this.retry = undefined; if (generation === this.generation && !this.disposed) void this.connect(callId, generation).catch(() => {}); }, Date.now()<this.retryUntil?this.retryDelay:15000);
         this.retryDelay = Math.min(4_000, this.retryDelay * 2); return;
       }
     }

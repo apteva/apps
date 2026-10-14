@@ -129,6 +129,9 @@ func (m *sipRTPMedia) decodePacketAt(raw []byte, at time.Time) (*rtp.Packet, err
 		return nil, errors.New("invalid RTP payload size")
 	}
 	m.observations.received(&packet, len(raw), at, packet.PayloadType == m.offer.PayloadType)
+	if !m.readCompletedAt.IsZero() {
+		m.observations.receiveEvidence.observe(packet.SequenceNumber, packet.Timestamp, packet.SSRC, at, m.readCompletedAt, time.Now())
+	}
 	return &packet, nil
 }
 
@@ -570,6 +573,8 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 	var humanHub *softphoneHub
 	if row.PeerKind == peerKindHuman {
 		humanHub = a.softphones.hubFor(row.ID)
+		humanHub.sipMedia.Store(media)
+		defer humanHub.sipMedia.CompareAndSwap(media, nil)
 		media.liveTimeline.Store(&humanHub.timeline)
 		humanHub.setCarrierForward(coreWriter)
 		defer humanHub.finishCarrierForward(coreWriter)
@@ -695,7 +700,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 			if mode := media.remoteMode.Load(); mode == 2 || mode == 3 {
 				continue
 			}
-			jitter.pushSourceRTPAt(packet.SSRC, packet.SequenceNumber, packet.Payload, packet.Timestamp, media.readAt, time.Now())
+			jitter.pushSourceRTPAt(packet.SSRC, packet.SequenceNumber, packet.Payload, packet.Timestamp, media.readAt, time.Now(), time.Now)
 		}
 	}()
 

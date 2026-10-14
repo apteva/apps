@@ -33,7 +33,7 @@ jobs:
         env:
           TELEPHONY_VARIABLE_DELIVERY_RESULTS: /tmp/telephony-variable-delivery.json
       - name: Bounded audio timing and telemetry overhead
-        run: go test -run '^$' -bench '^Benchmark(SIPClockObservation|RTCSocketEvidence|RTCCaptureRelease)$' -benchmem -benchtime=1s -count=3 . > /tmp/telephony-audio-overhead.log
+        run: go test -run '^$' -bench '^Benchmark(SIPReceiveEvidence|SIPClockObservation|RTCSocketEvidence|RTCCaptureRelease)$' -benchmem -benchtime=1s -count=3 . > /tmp/telephony-audio-overhead.log
         working-directory: mcp/telephony
       - name: Runtime optimization benchmarks
         run: |
@@ -55,6 +55,9 @@ jobs:
       - run: bunx --no-install playwright test -c frontend/outbound-setup.playwright.config.ts
         working-directory: mcp/telephony
       - run: bunx --no-install playwright test -c frontend/recording-playback.playwright.config.ts
+        working-directory: mcp/telephony
+      - name: Compiled sidecar Chromium and TURN TCP recovery
+        run: go test -tags integration -run '^TestTier2HeadlessBrowser$' -count=1 -timeout 12m -v . > /tmp/telephony-chromium.log 2>&1
         working-directory: mcp/telephony
       - name: Long SIP recording import and playback
         run: go test -run '^TestLongSIPRecordingImportAndPlaybackMatrix$' -count=1 -timeout 10m -v . > /tmp/telephony-long-recordings.log
@@ -82,6 +85,7 @@ jobs:
             /tmp/telephony-efficiency.json
             /tmp/telephony-long-recordings.log
             /tmp/telephony-long-recordings.json
+            /tmp/telephony-chromium.log
   native-opus:
     name: Bundled Opus (${{ matrix.runner }})
     strategy:
@@ -145,6 +149,7 @@ jobs:
       GOWORK: 'off'
       CGO_ENABLED: '0'
       GOMAXPROCS: '4'
+      TELEPHONY_SIP_RECOVERY_LOAD: '1'
       TELEPHONY_SIP_MIXED_LOAD: '1'
       TELEPHONY_SIP_LOAD_RESULTS: /tmp/telephony-mixed-load.json
     steps:
@@ -172,9 +177,9 @@ jobs:
       matrix:
         include:
           - group: media
-            pattern: 'Test(RTCSocket|RTCObservedUDP|RTCLinux|RTCRelease|RTCTail|MicrophoneSource|SIPBridgePreparation|SIPHumanAnswerPrepares|SIPPlayback|SIPClockFitEvidence|SIPClockLowerEnvelope|SIPClockRecoveryShort|SIPClockRecoveryDelivery|SIPIngressAndConsumer|SIPFreshPacketAfter|SIPStartupReserve|SIPDecodedPartial|SIPKernelArrival|SIPEarlyReserve|SIPLinux|CarrierStream|CarrierEvidence|CarrierRecovery|SIPTelemetry)'
+            pattern: 'Test(SIPControlledPlayout|SIPRecoveryHold|SIPLiveAdmission|SIPProcessingDrops|SIPReceiveEvidence|RTCSocket|RTCObservedUDP|RTCLinux|RTCRelease|RTCTail|MicrophoneSource|SIPBridgePreparation|SIPHumanAnswerPrepares|SIPPlayback|SIPClockFitEvidence|SIPClockLowerEnvelope|SIPClockRecoveryShort|SIPClockRecoveryDelivery|SIPIngressAndConsumer|SIPFreshPacketAfter|SIPStartupReserve|SIPDecodedPartial|SIPKernelArrival|SIPEarlyReserve|SIPLinux|CarrierStream|CarrierEvidence|CarrierRecovery|SIPTelemetry)'
           - group: lifecycle
-            pattern: 'Test(Efficiency|RoutingDispatcher|ImmediateDecision|RingLeg|RingGroup|AICallPolicy|SoftphoneAttachment|RTCRelay|SoftphoneStartup|SIPStartupCodec|SIPDialogTLS|SIPOutboundEarly|SIPOutboundFresh|SIPBYEFailure|NotificationOutbox|RTCIngressEvidence|ProxyCallIdentity|ProxyIdentityRetained|AutomaticOutboundSIP|TelephonyExclusiveActivation|SIPExclusiveActivation|GenericOutboundSIP|OutboundSIP|DIDWWOutbound|Telnyx.*SIP|TelnyxProvisioning|DirectSIPCarrierSetup|SIPAnsweredDialog|SIPMissingInitialACK|SIPRefresh|LocalSIP|LocalMediaSettings|SIPRuntimeTransport|SIPResourceCleanup|SIPNativeHold|SIPOutboundDTMF|SIPTransportSave|SIPRetirement|SIPTwilioDetach|SIPAIActivation|SIPRouteAccount|SIPExternalOffer|SelectingDirectSIP|LocalCloseTimeout)'
+            pattern: 'Test(GuardedAttachment|BrowserCurrentBuffer|Efficiency|RoutingDispatcher|ImmediateDecision|RingLeg|RingGroup|AICallPolicy|SoftphoneAttachment|RTCRelay|SoftphoneStartup|SIPStartupCodec|SIPDialogTLS|SIPOutboundEarly|SIPOutboundFresh|SIPBYEFailure|NotificationOutbox|RTCIngressEvidence|ProxyCallIdentity|ProxyIdentityRetained|AutomaticOutboundSIP|TelephonyExclusiveActivation|SIPExclusiveActivation|GenericOutboundSIP|OutboundSIP|DIDWWOutbound|Telnyx.*SIP|TelnyxProvisioning|DirectSIPCarrierSetup|SIPAnsweredDialog|SIPMissingInitialACK|SIPRefresh|LocalSIP|LocalMediaSettings|SIPRuntimeTransport|SIPResourceCleanup|SIPNativeHold|SIPOutboundDTMF|SIPTransportSave|SIPRetirement|SIPTwilioDetach|SIPAIActivation|SIPRouteAccount|SIPExternalOffer|SelectingDirectSIP|LocalCloseTimeout)'
     env:
       GOWORK: 'off'
     steps:

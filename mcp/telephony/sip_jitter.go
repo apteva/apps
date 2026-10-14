@@ -18,6 +18,8 @@ type sipPlaybackPolicy struct {
 	MaxAgeMS    int   `json:"max_age_ms,omitempty"`
 	Concealment *bool `json:"concealment,omitempty"`
 	ClockDrift  *bool `json:"clock_drift,omitempty"`
+	// Opt-in: resume a stable shifted live timeline without replaying retained audio.
+	Resynchronize *bool `json:"resynchronize,omitempty"`
 }
 
 func (p sipPlaybackPolicy) resolved() sipPlaybackPolicy {
@@ -112,11 +114,19 @@ type rtpJitterBuffer struct {
 	clock                                                               sipSourceClock
 	driftPPM                                                            float64
 	clockResets, dtxResumes, freshResumes                               int
+	recovery                                                            sipPlayoutRecovery
+	recoveryDiscardedSamples                                            int
+	lastDiscardNS                                                       atomic.Int64
+	maxIngressProcessingMS, maxIngressLockMS                            float64
 }
 
 func newRTPJitterBuffer() *rtpJitterBuffer { return newRTPJitterBufferWithPolicy(sipPlaybackPolicy{}) }
 func newRTPJitterBufferWithPolicy(p sipPlaybackPolicy) *rtpJitterBuffer {
 	p = p.resolved()
+	if p.Resynchronize != nil {
+		v := *p.Resynchronize
+		p.Resynchronize = &v
+	}
 	return &rtpJitterBuffer{packets: make(map[uint16][]byte), arrivals: make(map[uint16]time.Time), timestamps: make(map[uint16]uint32), controls: make(map[uint16]bool), policy: p, targetMS: p.TargetMS, packetSamples: 160}
 }
 func (b *rtpJitterBuffer) push(sequence uint16, payload []byte) {
@@ -146,7 +156,7 @@ func (b *rtpJitterBuffer) control(sequence uint16) {
 func (b *rtpJitterBuffer) pushSourceRTP(ssrc uint32, seq uint16, payload []byte, ts uint32, now time.Time) {
 	b.pushSourceRTPAt(ssrc, seq, payload, ts, now, now)
 }
-func (b *rtpJitterBuffer) pushSourceRTPAt(ssrc uint32, seq uint16, payload []byte, ts uint32, now, processed time.Time) {
+func (b *rtpJitterBuffer) pushSourceRTPAt(ssrc uint32, seq uint16, payload []byte, ts uint32, now, processed time.Time, liveClock ...func() time.Time) {
 	if !b.sourceKnown.Load() {
 		b.sourceSSRC.Store(ssrc)
 		b.sourceKnown.Store(true)
@@ -171,6 +181,7 @@ func (b *rtpJitterBuffer) pushSourceRTPAt(ssrc uint32, seq uint16, payload []byt
 		b.haveArrival = false
 		b.haveTimestamp = false
 		b.haveSourceAnchor = false
+		b.recovery.resetCandidate()
 		b.driftPPM = 0
 		b.clock = sipSourceClock{}
 		b.clockResets++
@@ -178,7 +189,11 @@ func (b *rtpJitterBuffer) pushSourceRTPAt(ssrc uint32, seq uint16, payload []byt
 		b.sourceSSRC.Store(ssrc)
 		b.mu.Unlock()
 	}
-	b.pushRTPAt(seq, payload, ts, now, processed)
+	var clock func() time.Time
+	if len(liveClock) > 0 {
+		clock = liveClock[0]
+	}
+	b.pushRTPAtClock(seq, payload, ts, now, processed, clock)
 }
 
 func (b *rtpJitterBuffer) setPaused(paused bool, now time.Time) {
@@ -191,6 +206,7 @@ func (b *rtpJitterBuffer) setPaused(paused bool, now time.Time) {
 		return
 	}
 	b.paused.Store(paused)
+	b.lastDiscardNS.Store(0)
 	b.generation.Add(1)
 	b.holdSkippedSamples += b.buffered + int(b.pendingPCMSamples.Load())
 	clear(b.packets)
@@ -206,6 +222,7 @@ func (b *rtpJitterBuffer) setPaused(paused bool, now time.Time) {
 	b.haveTimestamp = false
 	b.haveArrival = false
 	b.haveSourceAnchor = false
+	b.recovery.resetCandidate()
 	b.driftPPM = 0
 	b.clock = sipSourceClock{}
 	reason := "hold_resumed"
@@ -227,6 +244,12 @@ func (b *rtpJitterBuffer) pruneControls() {
 }
 
 func (b *rtpJitterBuffer) event(now time.Time, reason string, seq uint16, ts uint32, samples int, age time.Duration) {
+	if samples > 0 {
+		switch reason {
+		case "source_delivery_age", "ingress_processing_age", "queue_age", "queue_overflow", "decoded_partial_age", "decoded_reserve_overflow", "oversized_packet", "playout_epoch_resynchronized":
+			b.lastDiscardNS.Store(now.UnixNano())
+		}
+	}
 	e := sipJitterEvent{At: now.UTC(), LastAt: now.UTC(), Reason: reason, Sequence: seq, SourceTimestamp: ts, DurationMS: float64(samples) / 8, QueueMS: float64(b.buffered) / 8, TargetMS: b.targetMS, AgeMS: max(0, float64(age)/float64(time.Millisecond)), Frames: 1}
 	e.ConsumerGapMS = float64(b.consumerIntervalNS.Load()) / 1e6
 	if at, present := b.arrivals[seq]; present {
@@ -309,8 +332,18 @@ func (b *rtpJitterBuffer) pushRTP(seq uint16, payload []byte, ts uint32, now tim
 	b.pushRTPAt(seq, payload, ts, now, now)
 }
 func (b *rtpJitterBuffer) pushRTPAt(seq uint16, payload []byte, ts uint32, now, processed time.Time) {
+	b.pushRTPAtClock(seq, payload, ts, now, processed, nil)
+}
+func (b *rtpJitterBuffer) pushRTPAtClock(seq uint16, payload []byte, ts uint32, now, processed time.Time, liveClock func() time.Time) {
+	beforeLock := processed
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if liveClock != nil {
+		processed = liveClock()
+		b.maxIngressLockMS = max(b.maxIngressLockMS, float64(processed.Sub(beforeLock))/float64(time.Millisecond))
+	}
+	b.maxIngressProcessingMS = max(b.maxIngressProcessingMS, float64(processed.Sub(now))/float64(time.Millisecond))
+
 	if b.paused.Load() {
 		b.holdSkippedSamples += len(payload)
 		return
@@ -377,6 +410,11 @@ func (b *rtpJitterBuffer) pushRTPAt(seq uint16, payload []byte, ts uint32, now, 
 	}
 	deliveryAge := now.Sub(sourceAt)
 	age := max(deliveryAge, processed.Sub(sourceAt))
+	if b.recovery.consider(b, seq, ts, now, processed, deliveryAge, len(payload)) {
+		sourceAt = b.sourceTime(ts)
+		deliveryAge = now.Sub(sourceAt)
+		age = max(deliveryAge, processed.Sub(sourceAt))
+	}
 	b.maxDeliveryAgeMS = max(b.maxDeliveryAgeMS, float64(deliveryAge)/float64(time.Millisecond))
 	if age > time.Duration(b.policy.MaxAgeMS)*time.Millisecond {
 		b.lateDroppedSamples += len(payload)
@@ -761,6 +799,9 @@ func (f *rtpAudioFramer) popPCMAt(m *sipRTPMedia, now time.Time) ([]int16, bool)
 	}
 	if adjust != 0 {
 		f.jitter.driftAdjustedSamples.Add(int64(adjust))
+	}
+	if f.jitter.generation.Load() != f.generation {
+		return nil, false
 	}
 	return out, true
 }

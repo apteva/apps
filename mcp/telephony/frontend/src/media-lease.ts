@@ -47,6 +47,18 @@ export interface MediaSessionEvent {
   duration_ms?: number;
 }
 export const leaseClock = () => performance.now();
+
+/** Bounds auth-provider waits as well as fetch. A late result is discarded;
+ * guarded attachment handles an unknown server-side mutation outcome. */
+export async function boundedMediaRequest<T>(run:(signal:AbortSignal)=>Promise<T>,outer?:AbortSignal,ms=5000,onLate?:(value:T)=>void):Promise<T>{
+ const controller=new AbortController();let rejectAbort!:(e:Error)=>void;
+ const aborted=new Promise<never>((_,reject)=>{rejectAbort=reject;});
+ const cancel=()=>{controller.abort();rejectAbort(new DOMException("Media request cancelled","AbortError"));};
+ outer?.addEventListener("abort",cancel,{once:true});
+ const timer=setTimeout(cancel,ms);
+ try{if(outer?.aborted){cancel();return await aborted;}return await Promise.race([run(controller.signal).then(value=>{if(controller.signal.aborted)onLate?.(value);return value;}),aborted]);}
+ finally{clearTimeout(timer);outer?.removeEventListener("abort",cancel);}
+}
 export function mediaFailure(error: unknown): { status?: number; code?: string; denied: boolean; expired: boolean } {
   const value = error as {status?: number; body?: string};
   const status = value?.status;
