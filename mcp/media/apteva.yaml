@@ -2,8 +2,13 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.39
+version: 0.14.40
 description: |
+  v0.14.40 jointly corrects encoded loudness and peaks with a fixed measured
+  normalization curve, bounded pre-limiter gain and native-rate limiting with
+  compensated latency. AAC perceptual noise substitution is disabled to prevent
+  reconstructed noise peaks. Up to five original-source attempts retain strict
+  final delivery, decoding, sample-rate, video-picture and timeline checks.
   v0.14.39 retries encoded loudness misses as well as peak overshoot within three
   original-source attempts. Each measurement uses the effective loudness and
   peak settings of its encode, with bounded loudness correction and unchanged
@@ -681,7 +686,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.39
+    ref: media/v0.14.40
     entry: mcp/media
   port: 8080
   health_check: /health

@@ -139,7 +139,7 @@ func compactRenderParams(raw []byte) map[string]any {
 	sections := map[string]string{
 		"trim_diagnostics":    "algorithm_version app_version mode requested_mode requested_start_ms requested_end_ms actual_start_ms actual_end_ms start_drift_ms end_drift_ms max_start_drift_ms max_end_drift_ms reencoded fallback_reason source_frames_expected copy_frames_checked source_endpoint_hashes_match audio_origin presentation_cutoff timeline_origin",
 		"render_budget":       "effective_timeout_seconds estimated_seconds estimated_encode_seconds estimate_basis estimated_encode_speed warning",
-		"audio_normalization": "algorithm_version passes target_lufs target_peak_dbtp internal_peak_dbtp effective_target_lufs measurement_target_lufs measurement_peak_dbtp attempt max_attempts encoded_lufs encoded_peak_dbtp retry_count loudness_tolerance_lu peak_tolerance_db sample_rate validated timeline_validated decode_ok video_frames_expected video_frames_checked video_pictures_match video_validation_reused presentation_boundary_mode",
+		"audio_normalization": "algorithm_version passes target_lufs target_peak_dbtp internal_peak_dbtp effective_target_lufs measurement_target_lufs measurement_peak_dbtp loudnorm_peak_dbtp correction_gain_db max_correction_gain_db limiter_peak_dbtp limiter_latency_compensated audio_codec aac_perceptual_noise_substitution attempt max_attempts encoded_lufs encoded_peak_dbtp retry_count loudness_tolerance_lu peak_tolerance_db sample_rate validated timeline_validated decode_ok video_frames_expected video_frames_checked video_pictures_match video_validation_reused presentation_boundary_mode",
 		"video_evidence":      "algorithm_version decode_ok frames_checked",
 	}
 	for k, keys := range sections {

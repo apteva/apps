@@ -466,9 +466,16 @@ def normalized_audio(req, info, diagnostics):
     if codec == "libopus" and rate not in (8000, 12000, 16000, 24000, 48000):
         raise ValueError("audio_normalization_failed: Opus does not support the source sample rate; choose WAV/FLAC/AAC to preserve it")
     headroom = 2 if codec in ("aac", "libmp3lame", "libopus") else 0
-    internal_peak = max(-9, peak - headroom)
+    loudnorm_peak = max(-9, peak - headroom)
+    internal_peak = loudnorm_peak
     # Retry from the original source; never normalize an already encoded retry.
     args = list(req["args"])
+    if codec == "aac":
+        # PNS synthesizes replacement noise at decode time. Its reconstructed
+        # peaks can exceed PCM peaks by several dB and change non-monotonically
+        # with the normalization envelope. Keep the waveform for peak-limited
+        # delivery; the final decoded AAC measurement is still authoritative.
+        args[-1:-1] = ["-aac_pns", "0"]
     source_video = next((s for s in info["streams"] if s.get("codec_type") == "video"), {})
     durations = None
     if source_video and "-vn" not in args:
@@ -484,26 +491,32 @@ def normalized_audio(req, info, diagnostics):
                 # the full picture comparison below remains authoritative.
                 if "vide" not in durations:
                     durations = None
+    # Keep the measured loudnorm curve fixed. Changing its TP/offset on each
+    # peak retry can produce a different dynamic envelope, including larger
+    # excursions after resampling. Correct gain BEFORE a separate native-rate
+    # limiter, and judge both constraints on the encoded result.
+    measurement_req = dict(req, params=dict(p, target_lufs=target, target_peak_dbtp=loudnorm_peak))
+    runtime_event(req, "audio_measurement")
+    measured = measurement(measurement_req, req["source"], prefix)
+    loudnorm = ("loudnorm=I=%s:TP=%s:LRA=11:measured_I=%s:measured_TP=%s:measured_LRA=%s:measured_thresh=%s:offset=%s:linear=true" %
+                (target, loudnorm_peak, measured["input_i"], measured["input_tp"], measured["input_lra"], measured["input_thresh"], measured["target_offset"]))
     attempts = []
-    max_attempts = 3
-    effective_target = target
+    max_attempts = 5
+    correction_gain = 0
     for attempt in range(1, max_attempts + 1):
-        # target_offset depends on BOTH loudness and peak settings. Measure the
-        # original with this attempt's settings, never an already encoded retry.
-        measurement_req = dict(req, params=dict(p, target_lufs=effective_target, target_peak_dbtp=internal_peak))
-        runtime_event(req, "audio_measurement")
-        measured = measurement(measurement_req, req["source"], prefix)
-        loudnorm = ("loudnorm=I=%s:TP=%s:LRA=11:measured_I=%s:measured_TP=%s:measured_LRA=%s:measured_thresh=%s:offset=%s:linear=true" %
-                    (effective_target, internal_peak, measured["input_i"], measured["input_tp"], measured["input_lra"], measured["input_thresh"], measured["target_offset"]))
-        chain = prefix + loudnorm + ",aresample=" + str(rate)
+        limiter = "alimiter=limit=%s:attack=5:release=50:level=false:latency=true" % (10 ** (internal_peak / 20))
+        chain = prefix + loudnorm + ",aresample=" + str(rate) + ",volume=%sdB," % correction_gain + limiter
         if extent > 0:
             chain += ",atrim=duration=" + seconds(extent)
         for flag, value in (("-af", chain), ("-ar", str(rate))):
             args[args.index(flag) + 1] = value
-        diagnostics["audio_normalization"] = {"algorithm_version": "media-two-pass-loudnorm-5", "passes": 2,
+        diagnostics["audio_normalization"] = {"algorithm_version": "media-two-pass-loudnorm-6", "passes": 2,
             "target_lufs": target, "target_peak_dbtp": peak, "internal_peak_dbtp": internal_peak,
-            "effective_target_lufs": effective_target, "measurement_target_lufs": effective_target,
-            "measurement_peak_dbtp": internal_peak,
+            "effective_target_lufs": target + correction_gain, "measurement_target_lufs": target,
+            "measurement_peak_dbtp": loudnorm_peak, "loudnorm_peak_dbtp": loudnorm_peak,
+            "correction_gain_db": correction_gain, "max_correction_gain_db": 3,
+            "limiter_peak_dbtp": internal_peak, "limiter_latency_compensated": True,
+            "audio_codec": codec, "aac_perceptual_noise_substitution": False if codec == "aac" else None,
             "source_measurements": measured, "attempt": attempt, "max_attempts": max_attempts,
             "attempts": attempts, "loudness_tolerance_lu": .5, "peak_tolerance_db": .1,
             "sample_rate": rate, "effective_filter": chain, "validated": False,
@@ -516,7 +529,8 @@ def normalized_audio(req, info, diagnostics):
         actual = measurement(req, req["output"])
         actual_i, actual_tp = float(actual["input_i"]), float(actual["input_tp"])
         attempts.append({"attempt": attempt, "internal_peak_dbtp": internal_peak,
-            "effective_target_lufs": effective_target, "source_measurements": measured,
+            "effective_target_lufs": target + correction_gain, "correction_gain_db": correction_gain,
+            "limiter_peak_dbtp": internal_peak, "source_measurements": measured,
             "encoded_lufs": actual_i, "encoded_peak_dbtp": actual_tp})
         diagnostics["audio_normalization"].update({"encoded_lufs": actual_i, "encoded_peak_dbtp": actual_tp,
             "retry_count": attempt - 1})
@@ -527,13 +541,16 @@ def normalized_audio(req, info, diagnostics):
         attempts[-1]["retry_reasons"] = (["loudness_miss"] if not loudness_ok else []) + (["peak_overshoot"] if not peak_ok else [])
         # Compensate for encoded loudness error without relaxing the public
         # target/ceiling. Bound cumulative gain and attempts for infeasible audio.
-        next_target = max(-70, min(-5, target + max(-3, min(3, effective_target - actual_i)))) if not loudness_ok else effective_target
+        # Even when loudness is just inside tolerance, aim at its centre while
+        # correcting an unsafe peak. A later peak correction gets its own
+        # loudness recovery within the same bounded five-attempt budget.
+        next_gain = max(-3, min(3, correction_gain + target - actual_i))
         next_peak = internal_peak if peak_ok else max(-9, internal_peak - max(1, actual_tp - peak + .5))
-        if attempt == max_attempts or (next_peak == internal_peak and next_target == effective_target):
+        if attempt == max_attempts or (next_peak == internal_peak and abs(next_gain - correction_gain) < .01):
             raise ValueError("audio_normalization_failed: after %d attempt(s), encoded loudness %.2f LUFS / %.2f dBTP differs from requested %.2f LUFS / ceiling %.2f dBTP (internal ceiling %.2f dBTP)" %
                 (attempt, actual_i, actual_tp, target, peak, internal_peak))
         internal_peak = next_peak
-        effective_target = next_target
+        correction_gain = next_gain
     # Validate the accepted output once. Video proof reuse and the final
     # every-picture fallback stay authoritative, independent of audio retries.
     runtime_event(req, "validation", {"audio_normalization": diagnostics["audio_normalization"]})

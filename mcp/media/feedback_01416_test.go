@@ -27,7 +27,7 @@ func TestAdaptiveNormalizationRetryPolicy(t *testing.T) {
 	}
 	script := `import importlib.util,sys
 s=importlib.util.spec_from_file_location("runtime",sys.argv[1]);m=importlib.util.module_from_spec(s);s.loader.exec_module(m)
-for peaks,loudness,target,expected,passes in [([-1.32,-2.89],[-19.92]*2,-20,True,2),([-1.32]*3,[-19.92]*3,-20,False,3),([-2.83,-2.7],[-16.74,-16.02],-16,True,2),([-3]*3,[-19]*3,-20,False,3),([-3,-3],[-15.2,-16],-16,True,2),([-1.2,-2.5,-2.5],[-16.74,-16.6,-16],-16,True,3)]:
+for peaks,loudness,target,expected,passes in [([-1.32,-2.89],[-19.92]*2,-20,True,2),([-1.32]*5,[-19.92]*5,-20,False,5),([-2.83,-2.7],[-16.74,-16.02],-16,True,2),([-3]*5,[-19]*5,-20,False,4),([-3,-3],[-15.2,-16],-16,True,2),([-1.2,-2.5,-2.5],[-16.74,-16.6,-16],-16,True,3),([-1.09,.8,-4.6,-2],[-16.31,-16.45,-17.90,-16.02],-16,True,4)]:
  req={"source":"source.wav","output":"out.wav","params":{"target_lufs":target,"target_peak_dbtp":-1.5},"args":["-i","source.wav","-af","","-ar","48000","-c:a","aac","out.wav"],"ffmpeg":"ffmpeg","ffprobe":"ffprobe"}
  info={"streams":[{"codec_type":"audio","sample_rate":"48000","duration":"5"}]}
  calls=[];measured=[];settings=[];d={}
@@ -44,14 +44,23 @@ for peaks,loudness,target,expected,passes in [([-1.32,-2.89],[-19.92]*2,-20,True
   succeeded=False
  assert succeeded==expected and len(calls)==passes,(calls,d)
  assert len(d["audio_normalization"]["attempts"])==passes,d
- for a,setting in zip(calls,settings):
+ assert len(settings)==1,settings
+ setting=settings[0]
+ for a in calls:
   chain=a[a.index("-af")+1]
   assert a[a.index("-i")+1]=="source.wav",a
+  assert a[a.index("-aac_pns")+1]=="0",a
   assert "loudnorm=I=%s:TP=%s:"%(setting["target_lufs"],setting["target_peak_dbtp"]) in chain,(setting,chain)
+  assert "alimiter=" in chain and "latency=true" in chain,chain
+  assert chain.index("volume=")<chain.index("alimiter="),chain
  assert d["audio_normalization"]["target_lufs"]==target,d
- if peaks[0]>-1.4:assert "TP=-4.5:" in calls[1][calls[1].index("-af")+1],calls
- if loudness[0]==-16.74:assert settings[1]["target_lufs"]>target,settings
- if loudness[0]==-15.2:assert settings[1]["target_lufs"]<target,settings
+ if peaks[0]>-1.4:assert d["audio_normalization"]["attempts"][1]["limiter_peak_dbtp"]==-4.5,d
+ if loudness[0]==-16.74:assert d["audio_normalization"]["attempts"][1]["correction_gain_db"]>0,d
+ if loudness[0]==-15.2:assert d["audio_normalization"]["attempts"][1]["correction_gain_db"]<0,d
+ if loudness[0]==-16.31:
+  assert d["audio_normalization"]["attempts"][3]["correction_gain_db"]>2,d
+  assert d["audio_normalization"]["attempts"][2]["retry_reasons"]==["loudness_miss"],d
+ assert all(abs(x["correction_gain_db"])<=3 for x in d["audio_normalization"]["attempts"]),d
  assert d["audio_normalization"]["validated"]==expected,d
 `
 	out, err := exec.Command("python3", "-c", script, helper).CombinedOutput()
