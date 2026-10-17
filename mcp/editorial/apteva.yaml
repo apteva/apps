@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: editorial
 display_name: Editorial
-version: 0.4.3
+version: 0.4.4
 description: Standalone editorial calendar and content operations. Plan ideas, briefs, articles, videos, podcasts, campaigns and refreshes with owners, approvals and channel-specific releases. No other apps required.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/editorial
@@ -34,6 +34,8 @@ provides:
     - { name: editorial_items_create, description: "Create a planning item. Only title is required; omit status and format for project defaults. Approved items require a reviewer. Does not publish or schedule external delivery." }
     - { name: editorial_items_update, description: "Patch an item using id, revision and patch. Content changes reset an existing approval to pending; approved requires a reviewer." }
     - { name: editorial_releases_create, description: "Plan a channel-specific release for an item. Release status is separate from content workflow status and defaults to planned. No external sending or scheduling." }
+    - { name: editorial_releases_get, description: "Read one release with optional projected results and no history." }
+    - { name: editorial_releases_merge_results, description: "Revision-guarded atomic recursive results merge; compact receipt, unrelated history preserved." }
     - { name: editorial_releases_update, description: "Patch a release using id, revision and patch; release status is separate from content workflow status. Optionally link an existing Social/Campaigns record." }
     - { name: editorial_releases_refresh, description: "Read results from an optionally bound Social or Campaigns app into a linked release. Never sends or schedules." }
     - { name: editorial_calendar, description: "List dated content and channel releases between two dates as one flat, sorted stream. Read-only planning view; never publishes or schedules." }

@@ -169,11 +169,13 @@ type toolSpec struct {
 func toolSpecs() []toolSpec {
 	specs := []toolSpec{
 		{"items_list", "List planning items and releases with pagination. archived: false, true or all. brand_id: a brand ID, unassigned, or omit for all brands.", object(itemProperties([]string{"q", "brand_id", "status", "format", "owner", "campaign", "approval", "limit", "offset"}))},
-		{"items_get", "Read an item, releases and latest 100 history entries.", object(properties([]string{"id"}), "id")},
+		{"items_get", "Read an item and releases. Set include_history=false and include_results=false for bounded execution reads; field_keys optionally projects custom fields. Omitted options preserve legacy full detail.", object(detailProperties(), "id")},
 		{"items_create", "Create a planning item. Only title is required. Omit status and format to use the project's first configured values; call editorial_settings_get before supplying either. The approved value requires a reviewer. Finish reviewable content before approving because later content changes reset approval to pending. Dates: YYYY-MM-DD or RFC3339. No external action.", object(itemProperties(itemFields), "title")},
 		{"items_update", "Patch with current revision. Content changes invalidate an existing approval. Setting approval to approved requires an existing reviewer or one in the patch.", object(map[string]any{"id": properties([]string{"id"})["id"], "revision": properties([]string{"revision"})["revision"], "patch": object(itemProperties(itemFields))}, "id", "revision", "patch")},
 		{"releases_create", "Plan a release; never schedules delivery. Release status is separate from content workflow status and defaults to planned. Optional app/external_id links an existing record.", object(releaseProperties(append(append([]string{}, releaseFields...), "item_id")), "item_id", "channel")},
 		{"releases_update", "Update using current revision. Release status is separate from content workflow status. Does not change the linked publisher record.", object(map[string]any{"id": properties([]string{"id"})["id"], "revision": properties([]string{"revision"})["revision"], "patch": object(releaseProperties(releaseFields))}, "id", "revision", "patch")},
+		{"releases_get", "Read one release without history. Results are omitted by default; results_keys selects exact top-level result keys. include_results=true explicitly reads all results.", object(releaseReadProperties(), "id")},
+		{"releases_merge_results", "Atomically recursively merge only supplied result keys with a current revision. Unspecified keys/history remain untouched; arrays replace, null is a literal value. Returns compact receipt; never changes the publisher binding or external delivery.", object(map[string]any{"id": properties([]string{"id"})["id"], "revision": properties([]string{"revision"})["revision"], "merge": map[string]any{"type": "object"}}, "id", "revision", "merge")},
 		{"releases_refresh", "Refresh linked results. Social exposes latest 200 posts; missing posts preserve prior results.", object(properties([]string{"id"}), "id")},
 		{"calendar", "List dated items and channel releases between from and to (YYYY-MM-DD) as one flat, sorted stream. Defaults to the next 30 days. date_field planned_at or deadline; releases appear on planned_at only.", object(properties([]string{"from", "to", "date_field", "brand_id", "include_releases", "limit"}))},
 		{"settings_get", "Read project brands, content workflow statuses, formats, channel suggestions and the due-date timezone and time. The first status and format are the defaults used when an item omits them.", object(nil)},
@@ -340,7 +342,19 @@ func (a *App) dispatch(ctx *sdk.AppCtx, op string, args map[string]any) (any, er
 	case "items_list":
 		return listItems(db, pid, args)
 	case "items_get":
-		return itemDetail(db, pid, number(args, "id"))
+		if e := validateReadOptions(args); e != nil {
+			return nil, e
+		}
+		return itemDetail(db, pid, number(args, "id"), args)
+	case "releases_get":
+		if e := validateReadOptions(args); e != nil {
+			return nil, e
+		}
+		r, e := readRelease(db, pid, number(args, "id"))
+		if e != nil {
+			return nil, e
+		}
+		return releaseView(r, args), nil
 	case "calendar":
 		return calendarEvents(db, pid, args)
 	case "settings_get":
@@ -357,6 +371,18 @@ func (a *App) dispatch(ctx *sdk.AppCtx, op string, args map[string]any) (any, er
 	a.writes.Lock()
 	defer a.writes.Unlock()
 	switch op {
+	case "releases_merge_results":
+		id, rev := number(args, "id"), number(args, "revision")
+		patch, ok := args["merge"].(map[string]any)
+		if id <= 0 || rev <= 0 || !ok {
+			return nil, invalid("positive id, revision and merge object required")
+		}
+		r, e := mergeReleaseResults(db, pid, id, rev, patch)
+		if e != nil {
+			return nil, e
+		}
+		a.emitRelease(ctx, "release.updated", r)
+		return mergeReceipt(r, patch), nil
 	case "items_create":
 		i, e := saveItem(db, pid, 0, 0, args)
 		if e == nil {
@@ -460,6 +486,12 @@ func (a *App) http(w http.ResponseWriter, r *http.Request) {
 		args["id"] = path[1]
 	case len(path) == 1 && path[0] == "releases" && r.Method == "POST":
 		op = "releases_create"
+	case len(path) == 2 && path[0] == "releases" && r.Method == "GET":
+		op = "releases_get"
+		args["id"] = path[1]
+	case len(path) == 3 && path[0] == "releases" && path[2] == "results" && r.Method == "POST":
+		op = "releases_merge_results"
+		args["id"] = path[1]
 	case len(path) == 2 && path[0] == "releases" && r.Method == "PATCH":
 		op = "releases_update"
 		args["id"] = path[1]
