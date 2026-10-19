@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	sdk "github.com/apteva/app-sdk"
 	"testing"
 	"time"
@@ -73,5 +74,43 @@ func TestLateWorkerErrorPreservesCompletedBusinessStep(t *testing.T) {
 	got := stepBy(t, a, r, "research")
 	if got.State != "completed" || got.Output != "verified success" || got.DeliverySuspended {
 		t.Fatalf("late error changed success: %+v", got)
+	}
+}
+
+func TestCurrentReminderExecutionErrorHoldsButOldOrOtherWorkerDoesNot(t *testing.T) {
+	a, _, p, r := workflowSetup(t)
+	s := stepBy(t, a, r, "research")
+	delivered := time.Now().Add(-time.Hour).UTC()
+	_, err := a.db.Exec(`UPDATE process_step_runs SET state='running',target_thread_id='worker-8',delivery_event_id=?,delivered_at=? WHERE id=?`, "process-step:"+s.ID+":current-assignment", delivered.Format(time.RFC3339Nano), s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s = stepBy(t, a, r, "research")
+	event := sdk.Event{ProjectID: p.ProjectID, SourceApp: "apteva-server", InstanceID: 8}
+	l := &sdk.AgentEventLifecycle{SourceEventID: fmt.Sprintf("process-step:%s:reminder:%d", s.ID, delivered.Add(-time.Minute).UnixNano()), Sequence: 1, Type: "event.error", ExecutionID: "reminder", ThreadID: "worker-8", Reason: "context deadline exceeded"}
+	if err = a.stepLifecycle(event, l); err != nil {
+		t.Fatal(err)
+	}
+	if stepBy(t, a, r, "research").State != "running" {
+		t.Fatal("old delivery reminder changed current step")
+	}
+	l.SourceEventID = fmt.Sprintf("process-step:%s:reminder:%d", s.ID, time.Now().UnixNano())
+	l.ThreadID = "old-worker"
+	if err = a.stepLifecycle(event, l); err != nil {
+		t.Fatal(err)
+	}
+	if stepBy(t, a, r, "research").State != "running" {
+		t.Fatal("other worker changed current step")
+	}
+	l.ThreadID = "worker-8"
+	if err = a.stepLifecycle(event, l); err != nil {
+		t.Fatal(err)
+	}
+	got := stepBy(t, a, r, "research")
+	if got.State != "blocked" || !got.DeliverySuspended {
+		t.Fatalf("reminder failure not held: %+v", got)
+	}
+	if got.DeliveryEventID != s.DeliveryEventID || got.LifecycleSequence != s.LifecycleSequence {
+		t.Fatal("reminder overwrote original delivery identity")
 	}
 }
