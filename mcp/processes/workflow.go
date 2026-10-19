@@ -7,6 +7,7 @@ import (
 	"fmt"
 	sdk "github.com/apteva/app-sdk"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -1064,6 +1065,13 @@ func (a *App) stepLifecycle(event sdk.Event, l *sdk.AgentEventLifecycle) error {
 	// Validate the event source first, then ignore only a valid but stale
 	// lifecycle so it cannot overwrite the worker delivery's execution state.
 	if s.DeliveryEventID != "" && s.DeliveryEventID != l.SourceEventID {
+		// Reminders are separate tracked events. Their exhausted request can
+		// fail after the original assignment already settled. Bind an error
+		// to the same live worker and delivery epoch, without overwriting the
+		// original delivery lifecycle sequence/identity.
+		if currentWorkerReminderError(s, l) {
+			return a.holdWorkerExecutionError(s, l.Reason)
+		}
 		return nil
 	}
 	if s.ThreadID != "" && l.ThreadID != "" && s.ThreadID != l.ThreadID {
@@ -1073,25 +1081,46 @@ func (a *App) stepLifecycle(event sdk.Event, l *sdk.AgentEventLifecycle) error {
 		return nil
 	}
 	_, e = a.db.Exec(`UPDATE process_step_runs SET lifecycle_sequence=?,execution_state=?,execution_id=?,delivered_at=CASE WHEN delivered_at='' THEN ? ELSE delivered_at END,delivery_warning=CASE WHEN claim_attempts>0 AND state='ready' THEN delivery_warning ELSE '' END,next_attempt_at='',delivery_suspended=CASE WHEN state='blocked' AND updated_by='runtime' THEN delivery_suspended WHEN claim_attempts>0 AND state='ready' THEN delivery_suspended ELSE 0 END WHERE id=?`, l.Sequence, l.Type, l.ExecutionID, timestamp(), id)
-	if e != nil || l.Type != "event.error" || terminal(s.State) {
+	if e != nil || l.Type != "event.error" {
 		return e
 	}
-	// A tracked execution error is emitted after the runtime has exhausted
-	// its logical request retries. Reminding the same poisoned context does
-	// not recover it and can repeat forever. Preserve business evidence and
-	// hold for explicit reconciliation; an error does not prove that an
-	// external effect failed or authorize replay.
-	reason := strings.TrimSpace(l.Reason)
+	return a.holdWorkerExecutionError(s, l.Reason)
+
+}
+
+// currentWorkerReminderError rejects old reminders after explicit delivery
+// repair and callbacks from another worker, even when they name the same step.
+func currentWorkerReminderError(s StepRun, l *sdk.AgentEventLifecycle) bool {
+	if l.Type != "event.error" || s.ThreadID == "" || l.ThreadID != s.ThreadID {
+		return false
+	}
+	prefix := "process-step:" + s.ID + ":reminder:"
+	if !strings.HasPrefix(l.SourceEventID, prefix) {
+		return false
+	}
+	created, err := strconv.ParseInt(strings.TrimPrefix(l.SourceEventID, prefix), 10, 64)
+	if err != nil {
+		return false
+	}
+	delivered, err := time.Parse(time.RFC3339Nano, s.DeliveredAt)
+	return err == nil && created >= delivered.UnixNano()
+}
+
+func (a *App) holdWorkerExecutionError(s StepRun, reason string) error {
+	if terminal(s.State) {
+		return nil
+	}
+	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		reason = "agent execution failed after runtime retries"
 	}
-	if e = a.writeStep(s, "blocked", s.Progress, s.Output,
-		"Runtime execution error: "+reason+"; reconcile accepted external operations before explicit recovery", "runtime"); e != nil {
-		return e
+	// Preserve accepted-operation evidence: a runtime error never proves the
+	// disposition of an external effect or authorizes another publishing run.
+	if err := a.writeStep(s, "blocked", s.Progress, s.Output, "Runtime execution error: "+reason+"; reconcile accepted external operations before explicit recovery", "runtime"); err != nil {
+		return err
 	}
-	_, e = a.db.Exec(`UPDATE process_step_runs SET delivery_suspended=1,next_attempt_at='' WHERE id=?`, s.ID)
-
-	return e
+	_, err := a.db.Exec(`UPDATE process_step_runs SET delivery_suspended=1,next_attempt_at='' WHERE id=?`, s.ID)
+	return err
 }
 
 // DependencyEvidence is the frozen ancestor context needed to execute one step.
