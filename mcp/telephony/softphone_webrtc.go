@@ -198,7 +198,7 @@ func (s *rtcMediaStats) drop(reason, direction string, sequence uint64, duration
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch reason {
-	case "webrtc_capture_source_age", "webrtc_capture_release_overflow":
+	case "webrtc_capture_source_age", "webrtc_capture_release_overflow", "webrtc_capture_release_recovery":
 		s.value.IngressDiscardedMS += int64(duration)
 	case "webrtc_rtp_rejected":
 		s.value.IngressRejectedPackets++

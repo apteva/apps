@@ -9,7 +9,8 @@
     "test:example": "bunx --no-install playwright test -c frontend/example/playwright.config.ts",
     "benchmark:softphone": "bun benchmarks/softphone/run.ts",
     "benchmark:internal-audio": "bun benchmarks/internal-audio/run.ts",
-    "typecheck:benchmark": "tsc -p benchmarks/softphone/tsconfig.json --noEmit"
+    "typecheck:benchmark": "tsc -p benchmarks/softphone/tsconfig.json --noEmit && tsc -p benchmarks/outbound-sip/tsconfig.json --noEmit",
+    "benchmark:outbound-sip": "bun benchmarks/outbound-sip/run.ts"
   },
   "devDependencies": {
     "@apteva/web-sdk": "0.7.0",

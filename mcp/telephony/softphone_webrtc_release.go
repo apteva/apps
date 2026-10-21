@@ -14,6 +14,9 @@ type rtcAudioRelease struct {
 	storage     [16][480]int16
 	head, count int
 	next        time.Time
+	tail        [120]int16
+	tailN       int
+	crossfade   bool
 }
 
 func (q *rtcAudioRelease) push(pcm []int16, at time.Time, stats *rtcMediaStats, direction string) {
@@ -39,6 +42,23 @@ func (q *rtcAudioRelease) pop(now time.Time, stats *rtcMediaStats, direction str
 	if now.Before(q.next) {
 		return rtcReleaseFrame{}, false
 	}
+	// After a pause, a paced backlog can remain at the edge of the shared
+	// 250ms source budget forever. Leave room for the loopback and carrier pacer
+	// by catching up to the fresh end of a backlog. Never change source times;
+	// a single genuinely delayed frame still uses the normal expiry rule.
+	recoverBacklog := q.count > 1 && now.Sub(q.frames[q.head].source) >= 180*time.Millisecond
+	for recoverBacklog && q.count > 1 && now.Sub(q.frames[q.head].source) > 80*time.Millisecond {
+		old := q.frames[q.head]
+		q.frames[q.head] = rtcReleaseFrame{}
+		q.head = (q.head + 1) % len(q.frames)
+		q.count--
+		reason := "webrtc_capture_release_recovery"
+		if now.Sub(old.source) >= liveAudioMaxAge {
+			reason = "webrtc_capture_source_age"
+		}
+		stats.drop(reason, direction, 0, len(old.pcm)*1000/24000)
+		q.crossfade = true
+	}
 	for q.count > 0 {
 		f := q.frames[q.head]
 		q.frames[q.head] = rtcReleaseFrame{}
@@ -46,6 +66,7 @@ func (q *rtcAudioRelease) pop(now time.Time, stats *rtcMediaStats, direction str
 		q.count--
 		if now.Sub(f.source) >= liveAudioMaxAge {
 			stats.drop("webrtc_capture_source_age", direction, 0, len(f.pcm)*1000/24000)
+			q.crossfade = true
 			continue
 		}
 		// Keep absolute media cadence under ordinary timer lateness. Reset only
@@ -57,6 +78,12 @@ func (q *rtcAudioRelease) pop(now time.Time, stats *rtcMediaStats, direction str
 		} else {
 			q.next = q.next.Add(step)
 		}
+		if q.crossfade && q.tailN > 0 {
+			applyPCMOverlapCrossfade(q.tail[:q.tailN], f.pcm, min(q.tailN, len(f.pcm)))
+		}
+		q.crossfade = false
+		q.tailN = min(len(q.tail), len(f.pcm))
+		copy(q.tail[:q.tailN], f.pcm[len(f.pcm)-q.tailN:])
 		return f, true
 	}
 	return rtcReleaseFrame{}, false
