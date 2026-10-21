@@ -569,3 +569,18 @@ retries and crash recovery remain supported. An explicit Ubuntu setup option,
 `suppress_dynamic_motd`, adds PAM's `noupdate` option without disabling authentication.
 It defaults to false and affects SSH login-message generation across that host.
 See [staging measurements and limits](runtime/inspection-performance.md).
+
+## Full Vultr compute catalog (0.9.0)
+
+Vultr discovery now includes all virtual/GPU plan families and the separate
+bare-metal catalog, with shared metadata for hardware, stock, regional pricing
+and boot requirements. Bare metal uses the appropriate lifecycle API. Diskless
+VX1 boot blocks are explicitly sized, verified, inventoried and cleaned up or
+retained according to policy. Unavailable and preemptible-only plans remain
+visible with a reason. The UI uses the generic catalog fields for physical
+labels, accelerators, availability and required boot choices.
+
+Existing servers must refresh their Vultr integration catalog before upgrading;
+no Server binary rebuild is required. See [setup, scope and validation](runtime/vultr-catalog.md).
+Monitoring and the collector remain unchanged. No production update is performed
+by publishing this release.

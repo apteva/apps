@@ -1556,6 +1556,7 @@ function VolumesDialog({ inst, withParams, onClose, setError }: {
 }
 
 interface ServerTypeWire {
+ available?: boolean; unavailable_reason?: string; provider_family?: string; configurable_boot?: boolean; requires_boot_storage?: boolean; price_known?: boolean;
   name: string;
   description?: string;
   cores: number;
@@ -1572,7 +1573,7 @@ interface ServerTypeWire {
   monthly_price_usd?: number;
   hourly_price_usd?: number;
   available_in?: string[];
-  boot_storage?: Array<{ storage_class: "local" | "block" | "network" | "ephemeral"; provider_type?: string; min_size_gb?: number; max_size_gb?: number }>;
+  boot_storage?: Array<{ allowed_tiers?: string[]; billing?: string; storage_class: "local" | "block" | "network" | "ephemeral"; provider_type?: string; min_size_gb?: number; max_size_gb?: number }>;
 	incompatible_images?: string[];
 }
 
@@ -1611,6 +1612,7 @@ function formatCatalogMonthlyPrice(t?: ServerTypeWire): string {
   if (!t) return "";
   if (t.monthly_price_eur) return `€${t.monthly_price_eur.toFixed(2)}/mo`;
   if (t.monthly_price_usd) return `$${t.monthly_price_usd.toFixed(2)}/mo`;
+  if (t.price_known === true) return "$0.00/mo";
   return "";
 }
 
@@ -1653,12 +1655,12 @@ export function CreateDialog({
 
   const selectedType = serverTypes.find((candidate) => candidate.name === size);
 
-  const bootStorageOptions: Array<{storage_class: string; min_size_gb?: number; max_size_gb?: number}> = selectedType?.boot_storage?.length
+  const bootStorageOptions: Array<{storage_class: string; min_size_gb?: number; max_size_gb?: number; allowed_tiers?: string[]; billing?: string}> = selectedType?.boot_storage?.length
     ? selectedType.boot_storage
     : (storageCapabilities?.storage_classes || []).map((storageClass) => ({ storage_class: storageClass }));
   const selectedBootConstraint = bootStorageOptions.find((candidate) => candidate.storage_class === bootStorageClass);
   const compatibleBootTiers = (storageCapabilities?.tiers || []).filter((candidate) =>
-    !candidate.storage_class || candidate.storage_class === bootStorageClass
+    (!candidate.storage_class || candidate.storage_class === bootStorageClass) && (!selectedBootConstraint?.allowed_tiers?.length || selectedBootConstraint.allowed_tiers.includes(candidate.name))
   );
   const compatibleLocations = locations.filter((candidate) =>
     !selectedType?.available_in?.length || selectedType.available_in.includes(candidate.name)
@@ -1689,9 +1691,14 @@ export function CreateDialog({
     const constraint = bootStorageOptions.find((candidate) => candidate.storage_class === nextClass);
     if (constraint?.max_size_gb && bootSizeGB > constraint.max_size_gb) setBootSizeGB(constraint.max_size_gb);
     if (constraint?.min_size_gb && bootSizeGB < constraint.min_size_gb) setBootSizeGB(constraint.min_size_gb);
-    const tiers = (storageCapabilities?.tiers || []).filter((candidate) => !candidate.storage_class || candidate.storage_class === nextClass);
+    const tiers = (storageCapabilities?.tiers || []).filter((candidate) => (!candidate.storage_class || candidate.storage_class === nextClass) && (!constraint?.allowed_tiers?.length || constraint.allowed_tiers.includes(candidate.name)));
     if (tiers.length && !tiers.some((candidate) => candidate.name === bootTier)) setBootTier(tiers[0].name);
   }, [customBootStorage, size, bootStorageClass, bootSizeGB, bootTier, storageCapabilities]);
+
+  useEffect(() => {
+    if (selectedType?.configurable_boot === false) setCustomBootStorage(false);
+    else if (selectedType?.requires_boot_storage) { setCustomBootStorage(true); setBootStorageClass("block"); }
+  }, [size, selectedType?.configurable_boot, selectedType?.requires_boot_storage, customBootStorage]);
 
   useEffect(() => {
     if (!selectedType) return;
@@ -1800,7 +1807,7 @@ export function CreateDialog({
         setImages(imgs);
         // Sensible defaults: cheapest size, first location
         // alphabetically, ubuntu LTS if present otherwise first image.
-        if (types.length) setSize((current) => types.some((t) => t.name === current) ? current : types[0].name);
+        if (types.length) setSize((current) => types.some((t) => t.name === current && t.available !== false) ? current : types.find(t => t.available !== false)?.name || "");
         if (locs.length) setRegion((current) => locs.some((l) => l.name === current) ? current : locs[0].name);
       } catch (e) {
         if (!controller.signal.aborted) setCatalogError((e as Error).message);
@@ -1814,7 +1821,7 @@ export function CreateDialog({
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim() || busy) return;
+    if (!name.trim() || busy || selectedType?.available === false) return;
     if (!catalogError && (catalogLoading || loadedCatalog !== `${provider}:${providerConnectionID}:${region}`)) return;
     setLocalError("");
     setBusy(true);
@@ -1843,7 +1850,8 @@ export function CreateDialog({
   // the dropdown. Falls through to whatever fields are present.
   const sizeLabel = (t: ServerTypeWire): string => {
     const parts: string[] = [];
-    if (t.cores) parts.push(`${t.cores} ${t.cpu_type === "dedicated" ? "vCPU dedicated" : "vCPU"}`);
+    if (t.cores) parts.push(`${t.cores} ${t.resource_class === "bare_metal" ? "physical cores" : t.cpu_type === "dedicated" ? "vCPU dedicated" : "vCPU"}`);
+    for (const accelerator of t.accelerators || []) parts.push(`${accelerator.count ? `${accelerator.count}× ` : ""}${accelerator.model || accelerator.kind}${accelerator.memory_gb ? ` ${accelerator.memory_gb} GB each` : ""}`);
     if (t.memory_gb) parts.push(`${t.memory_gb} GB`);
     if (t.disk_gb) parts.push(`${t.disk_gb} GB disk`);
     if (t.architecture && t.architecture !== "x86") parts.push(t.architecture.toUpperCase());
@@ -1858,7 +1866,7 @@ export function CreateDialog({
 	  ? "on-demand dedicated server"
 	  : t.name.startsWith("dedibox/")
       ? "dedicated physical server"
-      : t.resource_class === "bare_metal" ? "Mac mini bare metal" : "";
+      : t.resource_class === "bare_metal" ? t.platform === "macos" ? "Mac mini bare metal" : "bare metal" : t.provider_family || "";
     return [displayName, hostKind && `· ${hostKind}`, price && `(${price}`, specs && (price ? `, ${specs})` : `(${specs})`)]
       .filter(Boolean)
       .join(" ");
@@ -1958,7 +1966,7 @@ export function CreateDialog({
               >
                 {serverTypes.length === 0 && <option value="">—</option>}
                 {serverTypes.map((t) => (
-                  <option key={t.name} value={t.name}>{sizeLabel(t)}</option>
+                  <option key={t.name} value={t.name} disabled={t.available === false}>{sizeLabel(t)}{t.available === false ? ` — ${t.unavailable_reason || "Unavailable"}` : ""}</option>
                 ))}
               </select>
             )}
@@ -2014,12 +2022,12 @@ export function CreateDialog({
             </div>
           </div>
         </div>
-        {storageCapabilities?.boot_size_configurable && !size.startsWith("elastic-metal/") && (
+        {storageCapabilities?.boot_size_configurable && selectedType?.configurable_boot !== false && !size.startsWith("elastic-metal/") && (
           <div className="rounded p-3 space-y-2" style={{ border: `1px solid ${SUBTLE_BORDER}` }}>
             <label className="flex items-center gap-2 text-xs text-text-muted">
-              <input type="checkbox" checked={customBootStorage} onChange={(event) => setCustomBootStorage(event.target.checked)} />
+              <input type="checkbox" checked={customBootStorage} disabled={!!selectedType?.requires_boot_storage} onChange={(event) => setCustomBootStorage(event.target.checked)} />
               <span className="text-text">Custom boot volume</span>
-              <span>— otherwise the provider/image default is used</span>
+              <span>{selectedType?.requires_boot_storage ? "— required for this diskless plan; billed separately" : "— otherwise the provider/image default is used"}</span>
             </label>
             {customBootStorage && (
               <div className="grid grid-cols-2 gap-2">
@@ -2058,7 +2066,7 @@ export function CreateDialog({
           >Cancel</button>
           <button
             type="submit"
-            disabled={busy || !name.trim() || !provider || catalogLoading || !size || !region || !image}
+            disabled={busy || !name.trim() || !provider || catalogLoading || !size || !region || !image || selectedType?.available === false}
             className="px-3 py-1.5 text-sm rounded bg-blue text-white hover:bg-blue/90 disabled:opacity-50"
           >{busy ? "Provisioning…" : "Provision"}</button>
         </div>

@@ -18,6 +18,12 @@ import (
 const vx1Plan = `{"id":"vx1-g-2c-8g-120s","type":"vx1","vcpu_count":2,"ram":8192,"disk":120,"monthly_cost":55.48,"hourly_cost":0.076,"locations":["cdg"],"deploy_ondemand":true,"storage_type":"local_and_block_storage"}`
 
 func vultrCatalogFixture(tool string, args map[string]any) json.RawMessage {
+	if tool == "list_metal_plans" {
+		return json.RawMessage(`{"plans_metal":[]}`)
+	}
+	if tool == "list_region_availability" {
+		return json.RawMessage(`{"available_plans":["vc2-1c-1gb","vx1-g-2c-8g-120s","vx1-diskless"]}`)
+	}
 	if tool == "list_os" {
 		return json.RawMessage(`{"os":[{"id":2284,"name":"Ubuntu 24.04 LTS x64","family":"ubuntu","arch":"x64"}]}`)
 	}
@@ -27,7 +33,7 @@ func vultrCatalogFixture(tool string, args map[string]any) json.RawMessage {
 	if args["cursor"] == "next-vx1" {
 		return json.RawMessage(`{"plans":[` + vx1Plan + `],"meta":{"links":{"next":""}}}`)
 	}
-	return json.RawMessage(`{"plans":[{"id":"vx1-diskless","type":"vx1","disk":0,"monthly_cost":40,"locations":["cdg"]},{"id":"vx1-disabled","type":"vx1","disk":120,"locations":["cdg"],"deploy_ondemand":false},{"id":"vx1-unavailable","type":"vx1","disk":120,"locations":[]}],"meta":{"links":{"next":"https://api.vultr.com/v2/plans?cursor=next-vx1"}}}`)
+	return json.RawMessage(`{"plans":[{"id":"vc2-1c-1gb","type":"vc2","disk":25,"monthly_cost":5,"locations":["cdg"]},{"id":"vx1-diskless","type":"vx1","disk":0,"monthly_cost":40,"locations":["cdg"]},{"id":"vx1-disabled","type":"vx1","disk":120,"locations":["cdg"],"deploy_ondemand":false},{"id":"vx1-unavailable","type":"vx1","disk":120,"locations":[]}],"meta":{"links":{"next":"https://api.vultr.com/v2/plans?cursor=next-vx1"}}}`)
 }
 
 func TestVultrCatalogIncludesPagedVX1AndProviderPrice(t *testing.T) {
@@ -43,11 +49,11 @@ func TestVultrCatalogIncludesPagedVX1AndProviderPrice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(types) != 2 {
+	if len(types) != 5 {
 		t.Fatalf("catalog=%+v", types)
 	}
-	plan := types[1]
-	if plan.Name != "vx1-g-2c-8g-120s" || plan.CPUType != "dedicated" || plan.MonthlyPriceUSD != 55.48 || plan.HourlyPriceUSD != 0.076 || len(plan.BootStorage) != 1 || plan.BootStorage[0].StorageClass != "local" {
+	plan := types[4]
+	if plan.Name != "vx1-g-2c-8g-120s" || plan.CPUType != "dedicated" || plan.MonthlyPriceUSD != 55.48 || plan.HourlyPriceUSD != 0.076 || len(plan.BootStorage) != 2 || plan.BootStorage[0].StorageClass != "local" {
 		t.Fatalf("incorrect VX1 contract: %+v", plan)
 	}
 	in := CreateInstanceInput{Size: plan.Name, Region: "cdg", Image: "2284", ProviderConnectionID: 8, MonthlyCostCents: 1}
@@ -74,7 +80,7 @@ func TestVultrRejectsUnpricedUnknownAndDisklessBeforePurchase(t *testing.T) {
 					return nil, fmt.Errorf("catalog unavailable")
 				}
 				data := vultrCatalogFixture(tool, args)
-				if name == "vx1-no-price" {
+				if name == "vx1-no-price" && tool == "list_plans" {
 					data = json.RawMessage(`{"plans":[{"id":"vx1-no-price","type":"vx1","disk":120,"locations":["cdg"]}]}`)
 				}
 				return &sdk.ExecuteResult{Success: true, Status: 200, Data: data}, nil
@@ -149,5 +155,58 @@ func TestVultrReadinessRefreshesPlaceholderBeforeSSH(t *testing.T) {
 				t.Fatalf("cost=%d", ready.MonthlyCostCents)
 			}
 		})
+	}
+}
+
+func TestVultrBareMetalCreateAndReadinessUseMetalEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	if e := os.WriteFile(filepath.Join(dir, "cloud-init"), []byte("#!/bin/sh\necho 'status: done'\n"), 0700); e != nil {
+		t.Fatal(e)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	oldDial, oldProbe := dialAdministrativeSSH, probeSSHReadyFn
+	dialAdministrativeSSH = func(*Instance, time.Duration) (*ssh.Client, error) { return auditSSHClient(t, dir), nil }
+	probeSSHReadyFn = func(*Instance, time.Duration) error { return nil }
+	defer func() { dialAdministrativeSSH = oldDial; probeSSHReadyFn = oldProbe }()
+	var gets atomic.Int32
+	p := &auditPlatform{slugs: map[int64]string{7: "vultr"}, hook: func(_ int64, tool string, args map[string]any) (*sdk.ExecuteResult, error) {
+		data := `{}`
+		switch tool {
+		case "list_plans":
+			data = `{"plans":[]}`
+		case "list_metal_plans":
+			data = `{"plans_metal":[{"id":"physical-new","cpu_cores":8,"disk":240,"disk_count":2,"ram":32768,"monthly_cost":100,"locations":["cdg"]}]}`
+		case "list_os":
+			data = string(vultrCatalogFixture(tool, args))
+		case "list_region_availability":
+			data = `{"available_plans":["physical-new"]}`
+		case "create_bare_metal":
+			if args["plan"] != "physical-new" || args["user_scheme"] != "root" {
+				t.Fatal(args)
+			}
+			data = `{"bare_metal":{"id":"metal-123","plan":"physical-new","main_ip":"0.0.0.0"}}`
+		case "get_bare_metal":
+			gets.Add(1)
+			data = `{"bare_metal":{"id":"metal-123","plan":"physical-new","status":"active","main_ip":"203.0.113.5"}}`
+		default:
+			t.Fatal("wrong endpoint", tool)
+		}
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(data)}, nil
+	}}
+	ctx := auditCtx(t, p)
+	defer stopInstanceWorkers(ctx)
+	inst, e := provisionInstance(ctx, CreateInstanceInput{Name: "bare-metal", Provider: "vultr", ProviderConnectionID: 7, Size: "physical-new", Region: "cdg", Image: "2284"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	ready, e := waitInstanceReady(context.Background(), ctx, inst.ID, 10*time.Second)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if ready.ResourceClass != "bare_metal" || ready.ProviderID != "metal-123" || ready.MonthlyCostCents != 10000 || ready.PublicIPv4 != "203.0.113.5" || gets.Load() != 1 {
+		t.Fatal("incorrect persisted metal identity", ready.ResourceClass, ready.ProviderID, ready.PublicIPv4, gets.Load())
+	}
+	if vultrMeta(ready.ProviderMetadataJSON).Kind != "bare_metal" || !strings.Contains(ready.ResourcesJSON, `"cores":8`) {
+		t.Fatal("metal metadata missing")
 	}
 }

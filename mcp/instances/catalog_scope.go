@@ -75,7 +75,7 @@ var catalogCache = map[catalogCacheKey]*catalogCacheEntry{}
 
 func isCatalogTool(tool string) bool {
 	switch tool {
-	case "locations_list", "images_list", "list_sizes", "server_type_list", "location_list", "list_plans", "list_instance_types", "server_types_list", "list_flavors", "list_types", "list_regions", "list_availability_zones", "image_list", "list_images", "list_os", "elastic_metal_offers_list", "elastic_metal_os_list", "dedibox_offers_list", "apple_products_list", "apple_os_list":
+	case "locations_list", "images_list", "list_sizes", "server_type_list", "location_list", "list_plans", "list_metal_plans", "list_instance_types", "server_types_list", "list_flavors", "list_types", "list_regions", "list_availability_zones", "image_list", "list_images", "list_os", "elastic_metal_offers_list", "elastic_metal_os_list", "dedibox_offers_list", "apple_products_list", "apple_os_list":
 		return true
 	}
 	return false
