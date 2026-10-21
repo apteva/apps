@@ -1436,14 +1436,35 @@ func hasOutboundAttachments(args map[string]any) bool {
 	return false
 }
 
-func validateStandaloneEmailArgs(args map[string]any, channel string, templateID int64) error {
-	if channel != channelEmail || int64Arg(args, "conversation_id") > 0 || templateID > 0 {
+// Resolve the effective subject in the shared send path, before validation,
+// provider dispatch and automatic idempotency fingerprinting. Caller-supplied
+// nonblank subjects stay byte-for-byte unchanged.
+func inheritEmailConversationSubject(args map[string]any, channel string, convo *Conversation) {
+	if channel != channelEmail || convo == nil || strings.TrimSpace(strArg(args, "subject")) != "" {
+		return
+	}
+	subject := strings.TrimSpace(convo.Subject)
+	if subject == "" {
+		return
+	}
+	if len(subject) < 3 || !strings.EqualFold(subject[:3], "Re:") {
+		subject = "Re: " + subject
+	}
+	args["subject"] = subject
+}
+
+func validateOutboundEmailSubject(args map[string]any, channel string, templateID int64) error {
+	if channel != channelEmail || strings.TrimSpace(strArg(args, "subject")) != "" {
 		return nil
 	}
-	if strings.TrimSpace(strArg(args, "subject")) == "" {
-		return errors.New("subject required for a new email conversation; use contacts_reply or pass conversation_id when replying")
+	if int64Arg(args, "conversation_id") > 0 {
+		return errors.New("subject required for this email conversation: its original subject is blank; pass an explicit nonblank subject")
 	}
-	return nil
+	// A standalone email template still supplies its own subject in Messaging.
+	if templateID > 0 {
+		return nil
+	}
+	return errors.New("subject required for a new email conversation; use contacts_reply or pass conversation_id when replying")
 }
 
 func outboundContentFingerprint(
@@ -1591,6 +1612,7 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 		if err := validateReplyTransport(convo.Channel, preferChannel); err != nil {
 			return nil, err
 		}
+		inheritEmailConversationSubject(args, preferChannel, convo)
 		if addr == nil {
 			route, sender, err := replyRoute(ctx.AppDB(), pid, cid, convoID, preferChannel, int64Arg(args, "reply_to_activity_id"))
 			if err != nil {
@@ -1625,7 +1647,7 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 		return nil, errors.New("draft reply recipient changed; refusing to send")
 	}
 
-	if err := validateStandaloneEmailArgs(args, addr.Channel, templateID); err != nil {
+	if err := validateOutboundEmailSubject(args, addr.Channel, templateID); err != nil {
 		return nil, err
 	}
 	if messagingBound(ctx) == nil {
@@ -1655,7 +1677,7 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 			addr = next
 		}
 	}
-	if err := validateStandaloneEmailArgs(args, addr.Channel, templateID); err != nil {
+	if err := validateOutboundEmailSubject(args, addr.Channel, templateID); err != nil {
 		return nil, err
 	}
 
@@ -2157,8 +2179,6 @@ func (a *App) toolReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	if subj := strArg(args, "subject"); subj != "" {
 		sendArgs["subject"] = subj
-	} else if convo.Channel == channelEmail && convo.Subject != "" {
-		sendArgs["subject"] = "Re: " + strings.TrimPrefix(convo.Subject, "Re: ")
 	}
 	if idem := strArg(args, "idempotency_key"); idem != "" {
 		sendArgs["idempotency_key"] = idem
